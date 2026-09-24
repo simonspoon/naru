@@ -75,6 +75,20 @@ cannot be read is **502 `unavailable`**.
   quoting what the daemon reported. Every **change** of state is logged to
   the server's stderr, e.g. `warn audio state ready -> daemon_down
   url=http://127.0.0.1:7870` (`info` when the new state is `ready`).
+  Opening a Live session on this engine also sends `POST {audio.url}/api/load
+  {"model":"default","kind":"stt"}` (mesa task 1392) so the first utterance
+  does not pay the cold load. `POST /api/live` fires it detached, never
+  holding its answer; a load that fails there is stored as the server's
+  probe state for 2 s **counted from when the load returned** (`model_not_found`/`model_not_pulled`
+  → `model_missing`, a refused connection → `daemon_down`, a load still
+  unfinished after 60 s → `error` saying it timed out, anything else `error`
+  quoting the daemon), so the next GET reports it rather than a cached
+  `ready`. A success writes nothing. The probe cache lives in the `serve`
+  process, so `naru live start` (its own short-lived process) cannot feed
+  it: there the load runs synchronously **after** the command's output —
+  the command waits for it, up to 60 s — and a failure is only a stderr
+  line, never the exit code. `naru live handoff` keeps its session and
+  loads nothing.
 
 The GET is registered on the **same** route entry as the POST below — both
 folded into the main route chain in `router()`, with no route-specific

@@ -871,8 +871,13 @@ through and where the `naru-audio` daemon listens (mesa task 1388):
 
 - **`engine`**: `"legacy"` (the external `auris`/`kokoro-rs` binaries — the
   built-in) or `"naru-audio"` (the daemon). Neither is a fallback for the
-  other. Today it changes only what `GET /api/live/transcribe` reports
-  (`docs/listen.md`); transcription and speech still run the binaries.
+  other. Today it changes what `GET /api/live/transcribe` reports
+  (`docs/listen.md`) and, on `naru-audio`, makes opening a Live session
+  (`POST /api/live`, `naru live start`) ask the daemon to load its
+  speech-to-text model (`POST {url}/api/load`, mesa task 1392) — a failure
+  from `POST /api/live` feeds the server's probe, while `naru live start`
+  waits for the load (up to 60 s) after its output and reports a failure
+  only on stderr; transcription and speech still run the binaries.
 - **`url`**: a plain `http://host[:port]` (no TLS, path or query), default
   `http://127.0.0.1:7870`. **`NARU_AUDIO_URL`** (or `MESA_AUDIO_URL`), when
   set and non-empty, overrides the file.

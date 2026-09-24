@@ -16,6 +16,13 @@
 //! `warn audio state ready -> daemon_down url=…` shape, so a background
 //! service's log shows the moment speech broke.
 //!
+//! When Live opens on this engine Naru also asks the daemon to **load** its
+//! speech-to-text model ([`load_stt`], mesa task 1392), so the first
+//! utterance does not pay the cold load. A load that fails is news about the
+//! daemon, so it is written into the probe cache ([`Prober::record`]) rather
+//! than waiting out a ten-second-old `ready`; a load that succeeds writes
+//! nothing.
+//!
 //! The HTTP client is `ureq` with no default features: plain HTTP to a
 //! loopback daemon, no TLS, no proxy, no redirects. It is blocking, so every
 //! caller on an async worker goes through `spawn_blocking`.
@@ -34,6 +41,15 @@ pub const DEFAULT_URL: &str = "http://127.0.0.1:7870";
 /// answers from an in-memory snapshot within milliseconds even mid-decode,
 /// so anything slower is a daemon that is not really there.
 const PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// How long `POST /api/load` may take. The daemon answers only once the
+/// model is resident — about 4 s cold for the default model — so this is
+/// sized for a slow disk and a large model, not for a health check. Nothing
+/// waits on it but a detached warm-up (or a short-lived `naru live start`).
+const LOAD_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// `POST /api/load`'s body: the daemon's default speech-to-text model.
+const LOAD_BODY: &str = r#"{"model":"default","kind":"stt"}"#;
 
 /// How long a `ready` answer is trusted before the daemon is asked again.
 pub const READY_TTL: Duration = Duration::from_secs(10);
@@ -167,6 +183,18 @@ impl<T: Clone> TtlCache<T> {
         (value, taken_at)
     }
 
+    /// Stores `value` for `key` as if [`TtlCache::get`] had just fetched it
+    /// at `now` — for news that arrived by another request.
+    pub fn put(&self, key: &str, value: T, now: Instant, ttl: Duration) {
+        *self.slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(Slot {
+            key: key.to_string(),
+            value,
+            at: now,
+            taken_at: SystemTime::now(),
+            ttl,
+        });
+    }
+
     /// Forgets the cached value, so the next [`TtlCache::get`] fetches.
     pub fn invalidate(&self) {
         *self.slot.lock().unwrap_or_else(|e| e.into_inner()) = None;
@@ -219,11 +247,47 @@ impl Prober {
             },
             || fetch_health(url),
         );
+        let line = self.saw(&probe);
+        (probe, line)
+    }
+
+    /// Stores a failure some other request found as the probe for its URL,
+    /// for [`FAILURE_TTL`], so the next probe reports it rather than a cached
+    /// `ready`. Returns the log line, as [`Prober::probe_at`] does.
+    fn record(&self, probe: &Probe, now: Instant) -> Option<String> {
+        self.cache.put(&probe.url, probe.clone(), now, FAILURE_TTL);
+        self.saw(probe)
+    }
+
+    /// The state-change line for `probe`, if its state differs from the last
+    /// one seen, and remembers it.
+    fn saw(&self, probe: &Probe) -> Option<String> {
         let mut last = self.last.lock().unwrap_or_else(|e| e.into_inner());
         let line =
             (*last != Some(probe.state)).then(|| state_change_line(*last, probe.state, &probe.url));
         *last = Some(probe.state);
-        (probe, line)
+        line
+    }
+
+    /// `POST {url}/api/load` for the default speech-to-text model. `None`
+    /// when it loaded; else the failure, already recorded, and its log line.
+    /// `now` is read **after** the request returns, so a load that took
+    /// longer than [`FAILURE_TTL`] to fail is not recorded already expired.
+    fn load_at(&self, url: &str, now: impl FnOnce() -> Instant) -> Option<(Probe, Option<String>)> {
+        let (state, message) = match request_load(url) {
+            Ok((status, _)) if (200..300).contains(&status) => return None,
+            Ok((status, body)) => classify_load(status, &body),
+            Err(e) => classify_load_transport(url, &e),
+        };
+        let now = now();
+        let probe = Probe {
+            state,
+            message,
+            url: url.to_string(),
+            checked_at: crate::core::cc::fmt_ts(unix_now()),
+        };
+        let line = self.record(&probe, now);
+        Some((probe, line))
     }
 }
 
@@ -245,6 +309,31 @@ pub fn probe(url: &str) -> Probe {
 /// ten-second-old `ready`.
 pub fn invalidate() {
     PROBER.cache.invalidate();
+}
+
+/// The daemon URL to warm when Live opens: `Some` only when `audio.engine`
+/// is `naru-audio`. Any config read error is `None` — the warm-up is
+/// best-effort and never fails a start.
+pub fn warm_url() -> Option<String> {
+    match crate::core::config::audio_engine() {
+        Ok(AudioEngine::NaruAudio) => crate::core::config::audio_url().ok(),
+        _ => None,
+    }
+}
+
+/// Asks the daemon at `url` to load its default speech-to-text model and
+/// waits for it (up to [`LOAD_TIMEOUT`]). Blocking. A failure is recorded
+/// as the probe's state (logged if it changed) and returned.
+pub fn load_stt(url: &str) -> Result<(), Probe> {
+    match PROBER.load_at(url, Instant::now) {
+        None => Ok(()),
+        Some((probe, line)) => {
+            if let Some(line) = line {
+                eprintln!("{line}");
+            }
+            Err(probe)
+        }
+    }
 }
 
 /// `warn audio state ready -> daemon_down url=…` — `info` when the new state
@@ -322,6 +411,64 @@ fn request_health(url: &str) -> Result<(u16, String), ureq::Error> {
         .limit(HEALTH_BODY_CAP)
         .read_to_string()?;
     Ok((status, body))
+}
+
+fn request_load(url: &str) -> Result<(u16, String), ureq::Error> {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(LOAD_TIMEOUT))
+        .http_status_as_error(false)
+        .proxy(None)
+        .max_redirects(0)
+        .build()
+        .into();
+    let mut response = agent
+        .post(format!("{}/api/load", url.trim_end_matches('/')))
+        .header("Content-Type", "application/json")
+        .send(LOAD_BODY)?;
+    let status = response.status().as_u16();
+    let body = response
+        .body_mut()
+        .with_config()
+        .limit(HEALTH_BODY_CAP)
+        .read_to_string()?;
+    Ok((status, body))
+}
+
+/// A load that got no HTTP answer: [`classify_transport`], except that a
+/// timeout is a daemon that is there but slow, not one that is down.
+fn classify_load_transport(url: &str, e: &ureq::Error) -> (AudioState, Option<String>) {
+    match e {
+        ureq::Error::Timeout(_) => (
+            AudioState::Error,
+            Some(error_message(&format!(
+                "loading the speech-to-text model timed out after {} s",
+                LOAD_TIMEOUT.as_secs()
+            ))),
+        ),
+        other => classify_transport(url, other),
+    }
+}
+
+/// A non-2xx `/api/load` answer, read from the daemon's error envelope
+/// (design §2.6): a model that is not pulled or not known is
+/// `model_missing`, anything else an `error`, each quoting the daemon.
+fn classify_load(status: u16, body: &str) -> (AudioState, Option<String>) {
+    let error = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .map(|mut v| v["error"].take());
+    let code = error.as_ref().and_then(|e| e["code"].as_str());
+    let reported = error
+        .as_ref()
+        .and_then(|e| e["message"].as_str())
+        .map_or_else(
+            || format!("POST /api/load answered HTTP {status}"),
+            str::to_string,
+        );
+    let state = match code {
+        Some("model_not_pulled" | "model_not_found") => AudioState::ModelMissing,
+        _ => AudioState::Error,
+    };
+    (state, Some(error_message(&reported)))
 }
 
 fn down_message(url: &str) -> String {
@@ -422,32 +569,40 @@ fn unix_now() -> i64 {
         .unwrap_or(0)
 }
 
+/// A stand-in `naru-audio` daemon for tests here and in `api.rs`.
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod stub {
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::thread::JoinHandle;
 
-    const READY: &str = r#"{"status":"ok","version":"0.1.0","api":1,"pid":1,"uptime_s":4,
-        "stt":{"default":"parakeet-tdt-0.6b-v2-int8","ready":true,"problem":null}}"#;
+    /// `POST /api/load`'s success answer.
+    pub(crate) const LOADED: &str = r#"{"model":"parakeet-tdt-0.6b-v2-int8","loaded":true}"#;
 
-    /// A one-route HTTP stub: every request gets `body` with a 200. Stopped
-    /// by dropping it, which closes the listening socket.
-    struct Stub {
-        port: u16,
+    /// An HTTP stub: `POST /api/load` gets `load` (status, body), every other
+    /// request `body` with a 200. Each request is recorded as
+    /// `"<METHOD> <path> <body>"`. Stopped by dropping it, which closes the
+    /// listening socket.
+    pub(crate) struct Stub {
+        pub(crate) port: u16,
+        pub(crate) requests: Arc<Mutex<Vec<String>>>,
         stop: Arc<AtomicBool>,
         thread: Option<JoinHandle<()>>,
     }
 
     impl Stub {
-        fn start(port: u16, body: &'static str) -> Stub {
+        pub(crate) fn start(port: u16, body: &'static str) -> Stub {
+            Stub::with_load(port, body, (200, LOADED))
+        }
+
+        pub(crate) fn with_load(port: u16, body: &'static str, load: (u16, &'static str)) -> Stub {
             let listener = TcpListener::bind(("127.0.0.1", port)).expect("bind stub");
             let port = listener.local_addr().unwrap().port();
             let stop = Arc::new(AtomicBool::new(false));
-            let flag = stop.clone();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let (flag, log) = (stop.clone(), requests.clone());
             let thread = std::thread::spawn(move || {
                 for conn in listener.incoming() {
                     if flag.load(Ordering::SeqCst) {
@@ -456,29 +611,63 @@ mod tests {
                     let Ok(mut conn) = conn else { continue };
                     let mut buf = [0u8; 4096];
                     let mut got = Vec::new();
-                    while !got.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let head_end = loop {
+                        if let Some(i) = got.windows(4).position(|w| w == b"\r\n\r\n") {
+                            break Some(i + 4);
+                        }
+                        match conn.read(&mut buf) {
+                            Ok(0) | Err(_) => break None,
+                            Ok(n) => got.extend_from_slice(&buf[..n]),
+                        }
+                    };
+                    let Some(head_end) = head_end else { continue };
+                    let head = String::from_utf8_lossy(&got[..head_end]).to_string();
+                    let length = head
+                        .lines()
+                        .filter_map(|l| l.split_once(':'))
+                        .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+                        .and_then(|(_, v)| v.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    while got.len() < head_end + length {
                         match conn.read(&mut buf) {
                             Ok(0) | Err(_) => break,
                             Ok(n) => got.extend_from_slice(&buf[..n]),
                         }
                     }
+                    let line = head.lines().next().unwrap_or_default();
+                    let mut words = line.split(' ');
+                    let (method, path) = (words.next().unwrap_or(""), words.next().unwrap_or(""));
+                    let sent = String::from_utf8_lossy(&got[head_end..]).to_string();
+                    log.lock().unwrap().push(format!("{method} {path} {sent}"));
+                    let (status, answer) = if method == "POST" && path == "/api/load" {
+                        load
+                    } else {
+                        (200, body)
+                    };
                     let _ = write!(
                         conn,
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
-                         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                        body.len()
+                        "HTTP/1.1 {status} Stub\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                        answer.len()
                     );
                 }
             });
             Stub {
                 port,
+                requests,
                 stop,
                 thread: Some(thread),
             }
         }
 
-        fn url(&self) -> String {
+        pub(crate) fn url(&self) -> String {
             format!("http://127.0.0.1:{}", self.port)
+        }
+
+        /// The recorded requests starting `prefix`, e.g. `"POST /api/load"`.
+        pub(crate) fn count(&self, prefix: &str) -> usize {
+            let requests = self.requests.lock().unwrap();
+            requests.iter().filter(|r| r.starts_with(prefix)).count()
         }
     }
 
@@ -493,6 +682,16 @@ mod tests {
             }
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stub::Stub;
+    use super::*;
+    use std::net::TcpListener;
+
+    const READY: &str = r#"{"status":"ok","version":"0.1.0","api":1,"pid":1,"uptime_s":4,
+        "stt":{"default":"parakeet-tdt-0.6b-v2-int8","ready":true,"problem":null}}"#;
 
     fn state_of(body: &str) -> (AudioState, Option<String>) {
         classify(200, body)
@@ -720,6 +919,137 @@ mod tests {
         );
         assert!(get(t0 + FAILURE_TTL + READY_TTL, vec![]).is_empty());
         assert_eq!(calls, 3);
+    }
+
+    /// A load sends the design's exact body once, and a success writes
+    /// nothing into the probe state.
+    #[test]
+    fn load_posts_the_default_stt_body_and_a_success_records_nothing() {
+        let prober = Prober::new();
+        let stub = Stub::start(0, READY);
+        let url = stub.url();
+        assert!(prober.load_at(&url, Instant::now).is_none());
+        assert_eq!(
+            *stub.requests.lock().unwrap(),
+            vec![format!("POST /api/load {LOAD_BODY}")]
+        );
+        assert_eq!(LOAD_BODY, r#"{"model":"default","kind":"stt"}"#);
+        assert_eq!(*prober.last.lock().unwrap(), None, "nothing recorded");
+    }
+
+    /// A load the daemon refuses replaces a cached `ready` with its failure
+    /// for the failure TTL, quoting the daemon — then the probe asks again.
+    #[test]
+    fn a_failed_load_replaces_a_cached_ready_with_its_failure() {
+        let prober = Prober::new();
+        let stub = Stub::with_load(
+            0,
+            READY,
+            (
+                503,
+                r#"{"error":{"message":"backend exploded","type":"server_error",
+                    "code":"model_load_failed","param":null}}"#,
+            ),
+        );
+        let url = stub.url();
+        let t0 = Instant::now();
+        assert_eq!(prober.probe_at(&url, t0).0.state, AudioState::Ready);
+
+        let (p, line) = prober.load_at(&url, || t0).expect("the load failed");
+        assert_eq!(p.state, AudioState::Error);
+        assert_eq!(
+            line.as_deref(),
+            Some(format!("warn audio state ready -> error url={url}").as_str())
+        );
+        let (p, line) = prober.probe_at(&url, t0 + Duration::from_secs(1));
+        assert_eq!(p.state, AudioState::Error, "not the cached ready");
+        assert_eq!(
+            p.message.as_deref(),
+            Some("Speech isn't available: naru-audio reported: backend exploded")
+        );
+        assert_eq!(line, None, "the change was logged once, by the load");
+        assert_eq!(stub.count("GET /health"), 1);
+
+        let (p, _) = prober.probe_at(&url, t0 + FAILURE_TTL + Duration::from_millis(1));
+        assert_eq!(p.state, AudioState::Ready);
+        assert_eq!(stub.count("GET /health"), 2);
+    }
+
+    /// A load that cannot connect is `daemon_down`, seen by the next probe
+    /// even inside the ready TTL.
+    #[test]
+    fn a_refused_load_is_daemon_down_for_the_next_probe() {
+        let prober = Prober::new();
+        let stub = Stub::start(0, READY);
+        let url = stub.url();
+        let t0 = Instant::now();
+        assert_eq!(prober.probe_at(&url, t0).0.state, AudioState::Ready);
+        drop(stub);
+        let (p, _) = prober.load_at(&url, || t0).expect("nothing is listening");
+        assert_eq!(p.state, AudioState::DaemonDown);
+        let (p, _) = prober.probe_at(&url, t0 + Duration::from_secs(1));
+        assert_eq!(p.state, AudioState::DaemonDown);
+        assert_eq!(p.message, Some(down_message(&url)));
+    }
+
+    /// A load that takes longer than the failure TTL to fail (a real 503
+    /// arrives after a ~4 s load) is stamped when it returns, so the next
+    /// probe still sees it rather than an expired entry and a fresh `ready`.
+    #[test]
+    fn a_slow_failed_load_is_still_seen_by_the_next_probe() {
+        let prober = Prober::new();
+        let stub = Stub::with_load(
+            0,
+            READY,
+            (503, r#"{"error":{"message":"backend exploded"}}"#),
+        );
+        let url = stub.url();
+        let t0 = Instant::now();
+        assert_eq!(prober.probe_at(&url, t0).0.state, AudioState::Ready);
+        // The load returns FAILURE_TTL + 2 s after it started.
+        let done = t0 + FAILURE_TTL + Duration::from_secs(2);
+        let (p, _) = prober.load_at(&url, || done).expect("the load failed");
+        assert_eq!(p.state, AudioState::Error);
+        let (p, _) = prober.probe_at(&url, done + Duration::from_secs(1));
+        assert_eq!(p.state, AudioState::Error, "not an expired entry");
+        assert_eq!(stub.count("GET /health"), 1);
+    }
+
+    /// A load timeout is a slow daemon, not a stopped one.
+    #[test]
+    fn a_load_timeout_is_an_error_not_daemon_down() {
+        let url = "http://127.0.0.1:7870";
+        let (state, message) =
+            classify_load_transport(url, &ureq::Error::Timeout(ureq::Timeout::Global));
+        assert_eq!(state, AudioState::Error);
+        assert_eq!(
+            message.as_deref(),
+            Some(
+                "Speech isn't available: naru-audio reported: loading the speech-to-text \
+                 model timed out after 60 s"
+            )
+        );
+        assert_eq!(
+            classify_load_transport(url, &ureq::Error::ConnectionFailed).0,
+            AudioState::DaemonDown
+        );
+    }
+
+    #[test]
+    fn a_model_the_daemon_cannot_load_is_model_missing() {
+        for code in ["model_not_pulled", "model_not_found"] {
+            let body = format!(r#"{{"error":{{"message":"no {code}","code":"{code}"}}}}"#);
+            let (state, message) = classify_load(409, &body);
+            assert_eq!(state, AudioState::ModelMissing, "{code}");
+            assert_eq!(
+                message.as_deref(),
+                Some(format!("Speech isn't available: naru-audio reported: no {code}").as_str())
+            );
+        }
+        assert_eq!(
+            classify_load(502, "<html>").1.as_deref(),
+            Some("Speech isn't available: naru-audio reported: POST /api/load answered HTTP 502")
+        );
     }
 
     #[test]

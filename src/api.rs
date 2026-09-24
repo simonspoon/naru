@@ -48,8 +48,8 @@ use crate::core::{
     ModelRates, NaruVersion, NextResult, Priority, ProjectAgents, ProjectFileTree, ProjectGitLog,
     ProjectGitStatus, ProjectGitView, ProjectPatch, ProjectVersion, ReceiptPatch,
     STALE_CLAIM_MINUTES, Script, ScriptArg, ScriptPatch, ScriptRunEvent, Status, Store, SystemInfo,
-    Task, TaskPatch, TaskSummary, Waypoint, agents, attachments, board, config, files, git, guard,
-    hooks, inbox_triage, library, listen, live, project_memory, receipt, retro, script_runs,
+    Task, TaskPatch, TaskSummary, Waypoint, agents, attachments, audio, board, config, files, git,
+    guard, hooks, inbox_triage, library, listen, live, project_memory, receipt, retro, script_runs,
     scripts, speech, supervisor, system, validate_live_client, version,
 };
 
@@ -4060,6 +4060,13 @@ async fn start_live(
         .lock()
         .unwrap()
         .bind_live_agent(session_id, job.as_deref())?;
+    // On the `naru-audio` engine the daemon loads its speech-to-text model
+    // now, so the first utterance does not pay the cold load (mesa task
+    // 1392). Detached: the 201 never waits on it, and a failure only feeds
+    // the probe state. On `legacy` nothing is spawned at all.
+    if let Some(url) = audio::warm_url() {
+        tokio::task::spawn_blocking(move || audio::load_stt(&url));
+    }
     Ok((StatusCode::CREATED, Json(session)).into_response())
 }
 
@@ -16027,6 +16034,79 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                     .is_none(),
                 "a failed spawn must leave no live session behind"
             );
+        });
+    }
+
+    /// mesa task 1392: on the `naru-audio` engine one start sends the daemon
+    /// exactly one `POST /api/load` for the default speech-to-text model; on
+    /// `legacy`, or with no `audio` section at all, none.
+    #[test]
+    fn start_live_warms_the_naru_audio_model_once_and_only_on_that_engine() {
+        // SAFETY: ENV_LOCK gives this test exclusive access to
+        // MESA_CLAUDE_BIN/MESA_CONFIG_FILE/*_AUDIO_URL for its duration.
+        let _env = attachments::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // As above: the seed writes under `$HOME`.
+        crate::core::library::test_home::with_home_dir(|_| {
+            let stub_dir = tempfile::tempdir().unwrap();
+            let log_path = stub_dir.path().join("bg.log");
+            let bin = stub_claude_bg(stub_dir.path(), &log_path);
+            let unconfigured = std::env::var_os("MESA_CONFIG_FILE").unwrap();
+            let daemon = audio::stub::Stub::start(0, "{}");
+            let config = stub_dir.path().join("config.json");
+            unsafe {
+                std::env::set_var("MESA_CLAUDE_BIN", &bin);
+                std::env::remove_var("NARU_AUDIO_URL");
+                std::env::remove_var("MESA_AUDIO_URL");
+                std::env::set_var("MESA_CONFIG_FILE", &config);
+            }
+            // One start on a fresh db. With one blocking thread the pool runs
+            // its queue in order, so the no-op after the handler returns only
+            // once any warm-up it queued has finished — no sleep, no poll.
+            let start = |audio: &str| {
+                std::fs::write(&config, format!("{{{audio}}}")).unwrap();
+                let (_dir, state) = test_state();
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .max_blocking_threads(1)
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let status = rt.block_on(async {
+                    let resp = start_live(
+                        State(state.clone()),
+                        ConnectInfo(loopback()),
+                        loopback_agent_headers(),
+                        Ok(Json(LiveStart { project_id: None })),
+                    )
+                    .await
+                    .unwrap();
+                    tokio::task::spawn_blocking(|| ()).await.unwrap();
+                    resp.status()
+                });
+                assert_eq!(status, StatusCode::CREATED);
+            };
+
+            start("");
+            start(&format!(
+                r#""audio": {{"engine": "legacy", "url": "{}"}}"#,
+                daemon.url()
+            ));
+            assert_eq!(
+                daemon.requests.lock().unwrap().len(),
+                0,
+                "legacy asks nothing"
+            );
+
+            start(&format!(
+                r#""audio": {{"engine": "naru-audio", "url": "{}"}}"#,
+                daemon.url()
+            ));
+            assert_eq!(
+                *daemon.requests.lock().unwrap(),
+                vec![r#"POST /api/load {"model":"default","kind":"stt"}"#.to_string()]
+            );
+            unsafe { std::env::set_var("MESA_CONFIG_FILE", unconfigured) };
         });
     }
 

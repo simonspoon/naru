@@ -32,8 +32,8 @@ use crate::core::{
     LiveAction, LiveBoard, LiveBoardKind, LiveNotebookEntry, LiveNotice, LiveResult, LiveRole,
     LiveSession, LiveStatus, LiveSummary, LiveTurn, NextResult, Priority, Project, ProjectPatch,
     ReceiptPatch, Result, Script, ScriptArg, ScriptArgKind, ScriptPatch, Status, Store, Task,
-    TaskPatch, TaskReceipt, agents, board, cc, config, files, git, library, live, look, migrate,
-    project_memory, receipt, retro, system,
+    TaskPatch, TaskReceipt, agents, audio, board, cc, config, files, git, library, live, look,
+    migrate, project_memory, receipt, retro, system,
 };
 
 const TOP_AFTER_HELP: &str = "\
@@ -5379,6 +5379,13 @@ fn run_live(cmd: LiveCmd) -> Result<()> {
                 bind_live_agent_or_end(&mut store, session, spawned)?
             };
             print_live_session(&session, quiet);
+            // On the `naru-audio` engine, warm the daemon's speech-to-text
+            // model (mesa task 1392). Synchronous, since this process exits
+            // next; after the output, and a failure only feeds the probe
+            // state — never the exit code. On `legacy` this does nothing.
+            if let Some(url) = audio::warm_url() {
+                let _ = audio::load_stt(&url);
+            }
         }
         LiveCmd::Stop { quiet } => {
             let session = current_live_session(&store)?;
