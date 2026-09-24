@@ -816,6 +816,7 @@ dependencies = [
  "base64 0.22.1",
  "clap",
  "directories",
+ "futures-util",
  "portable-pty",
  "rusqlite",
  "rust-embed",
@@ -825,6 +826,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-stream",
+ "tokio-tungstenite",
  "ts-rs",
  "ureq",
 ]

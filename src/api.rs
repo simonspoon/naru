@@ -2190,6 +2190,10 @@ fn router(state: AppState) -> Router {
                 .get(transcribe_available)
                 .layer(DefaultBodyLimit::max(TRANSCRIBE_BODY_LIMIT)),
         )
+        // Streaming dictation (mesa task 1394): a WebSocket proxied to the
+        // naru-audio daemon, behind the transcribe pair of gates, and 503
+        // before any upgrade unless `audio.engine` selects the daemon.
+        .route("/api/live/listen", get(live_listen))
         // Scripts: user-authored shell run from a generated form. A script
         // body is a program mesa executes, so all six routes — authoring,
         // reading and *running* alike — share the agents' code-execution gate
@@ -4945,6 +4949,141 @@ async fn transcribe_available(
             message,
         })?;
     Ok(Json(status).into_response())
+}
+
+/// `GET /api/live/listen` — streaming dictation (mesa task 1394,
+/// `docs/listen.md`): a WebSocket proxied to the naru-audio daemon's
+/// `/v1/audio/transcriptions/stream` (design §2.4), frames and close codes
+/// passed through untouched.
+///
+/// Gated before the upgrade by the pair [`transcribe_live`] carries, in both
+/// serve modes. **Inert by default**: unless `audio.engine` is `naru-audio`
+/// it is 503 `unavailable` and no daemon is contacted — the page's own
+/// `listen.engine` is not consulted, since that picks what the *page* uses
+/// and this route only ever reaches the server's engine. The daemon is
+/// opened without the browser's `Origin` (it refuses any, §2.1); a failed
+/// open reaches the page as an `error` event carrying the §4.4 sentence,
+/// then close 1011.
+async fn live_listen(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    require_same_site_fetch(&headers)?;
+    let unavailable = |message| ApiError {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        code: "unavailable",
+        message,
+    };
+    let url = blocking(|| match config::audio_engine()? {
+        audio::AudioEngine::NaruAudio => config::audio_url(),
+        audio::AudioEngine::Legacy => {
+            Err("streaming dictation needs audio.engine = \"naru-audio\"; \
+             this server runs the legacy engine"
+                .to_string())
+        }
+    })
+    .await?
+    .map_err(unavailable)?;
+    Ok(ws.on_upgrade(move |socket| proxy_listen(socket, url)))
+}
+
+/// Pumps one [`live_listen`] session until either side closes. Text and
+/// binary frames go through verbatim, a close frame with its code and
+/// reason; pings are each library's own business. A side that vanishes
+/// without a close closes the other — the page with `error` + 1011, since an
+/// error always precedes a non-1000 close (§2.4). Nothing is spawned: the
+/// session is this one future, so it ends with the upgrade task.
+async fn proxy_listen(mut browser: WebSocket, url: String) {
+    use axum::extract::ws::CloseFrame;
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::{self, protocol::frame::coding::CloseCode};
+
+    async fn fail(browser: &mut WebSocket, state: audio::AudioState, message: String) {
+        let event = json!({"type": "error", "code": state, "message": message});
+        let _ = browser.send(Message::Text(event.to_string().into())).await;
+        let close = CloseFrame {
+            code: 1011,
+            reason: "".into(),
+        };
+        let _ = browser.send(Message::Close(Some(close))).await;
+    }
+
+    let mut daemon = match audio::open_stream(&url).await {
+        Ok(daemon) => daemon,
+        Err((state, message)) => {
+            fail(&mut browser, state, message).await;
+            // As at the end below: read until the page's close reply, so
+            // audio it already sent can't reset the socket under the error.
+            let drain = async { while let Some(Ok(_)) = browser.recv().await {} };
+            let _ = tokio::time::timeout(Duration::from_secs(1), drain).await;
+            return;
+        }
+    };
+    loop {
+        tokio::select! {
+            from_browser = browser.recv() => {
+                let out = match from_browser {
+                    Some(Ok(Message::Text(t))) => tungstenite::Message::Text(t.as_str().into()),
+                    Some(Ok(Message::Binary(b))) => tungstenite::Message::Binary(b),
+                    Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
+                    Some(Ok(Message::Close(frame))) => {
+                        let frame = frame.map(|f| tungstenite::protocol::CloseFrame {
+                            code: CloseCode::from(f.code),
+                            reason: f.reason.as_str().into(),
+                        });
+                        let _ = daemon.close(frame).await;
+                        break;
+                    }
+                    None | Some(Err(_)) => {
+                        let _ = daemon.close(None).await;
+                        break;
+                    }
+                };
+                if daemon.send(out).await.is_err() {
+                    audio::invalidate();
+                    fail(&mut browser, audio::AudioState::Error, audio::stream_dropped_message()).await;
+                    break;
+                }
+            }
+            from_daemon = daemon.next() => {
+                let out = match from_daemon {
+                    Some(Ok(tungstenite::Message::Text(t))) => Message::Text(t.as_str().into()),
+                    Some(Ok(tungstenite::Message::Binary(b))) => Message::Binary(b),
+                    Some(Ok(tungstenite::Message::Close(frame))) => {
+                        let frame = frame.map(|f| CloseFrame {
+                            code: f.code.into(),
+                            reason: f.reason.as_str().into(),
+                        });
+                        let _ = browser.send(Message::Close(frame)).await;
+                        break;
+                    }
+                    Some(Ok(_)) => continue,
+                    None | Some(Err(_)) => {
+                        audio::invalidate();
+                        fail(&mut browser, audio::AudioState::Error, audio::stream_dropped_message()).await;
+                        break;
+                    }
+                };
+                if browser.send(out).await.is_err() {
+                    let _ = daemon.close(None).await;
+                    break;
+                }
+            }
+        }
+    }
+    // Finish both closing handshakes, briefly: the reply to a close one side
+    // sent is only flushed by a later read, and the other side's reply to
+    // ours arrives on one.
+    let drain_browser = async { while let Some(Ok(_)) = browser.recv().await {} };
+    let drain_daemon = async { while let Some(Ok(_)) = daemon.next().await {} };
+    let _ = tokio::time::timeout(
+        Duration::from_secs(1),
+        futures_util::future::join(drain_browser, drain_daemon),
+    )
+    .await;
 }
 
 // ---- scripts (user-authored shell) ----
@@ -16558,5 +16697,373 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         assert!(info.ram_total_bytes > 0);
         assert!(info.cpu_logical >= 1);
         assert_eq!(info.cpu_per_core_pct.len(), info.cpu_logical as usize);
+    }
+
+    // ---- /api/live/listen (mesa task 1394) ----
+
+    /// A stand-in daemon's streaming route, and what it saw.
+    struct StreamStub {
+        url: String,
+        /// One entry per handshake: the `Origin` it carried, if any.
+        origins: Arc<Mutex<Vec<Option<String>>>>,
+    }
+
+    /// Serves a stub `/v1/audio/transcriptions/stream`: `ready` to `start`,
+    /// then either (`backlog == false`) counts binary bytes and answers
+    /// `stop` with one `final` naming the count, `done` and close 1000
+    /// "done", or (`backlog == true`) an `error` and close 1013 at once.
+    async fn stream_stub(backlog: bool) -> StreamStub {
+        let origins: Arc<Mutex<Vec<Option<String>>>> = Arc::default();
+        let seen = origins.clone();
+        let app = Router::new().route(
+            "/v1/audio/transcriptions/stream",
+            get(move |headers: HeaderMap, ws: WebSocketUpgrade| {
+                let origin = headers
+                    .get(header::ORIGIN)
+                    .map(|v| v.to_str().unwrap().to_string());
+                seen.lock().unwrap().push(origin);
+                async move {
+                    ws.on_upgrade(move |mut socket| async move {
+                        use axum::extract::ws::CloseFrame;
+                        let text = |v: serde_json::Value| Message::Text(v.to_string().into());
+                        let close = |code, reason: &'static str| {
+                            Message::Close(Some(CloseFrame {
+                                code,
+                                reason: reason.into(),
+                            }))
+                        };
+                        let mut bytes = 0usize;
+                        while let Some(Ok(msg)) = socket.recv().await {
+                            match msg {
+                                Message::Binary(b) => bytes += b.len(),
+                                Message::Text(t) => {
+                                    let event: serde_json::Value =
+                                        serde_json::from_str(t.as_str()).unwrap();
+                                    match event["type"].as_str() {
+                                        Some("start") => {
+                                            let ready = json!({"type": "ready", "session": "s1"});
+                                            socket.send(text(ready)).await.unwrap();
+                                            if backlog {
+                                                let err = json!({"type": "error", "code": "backlog", "message": "too far behind"});
+                                                socket.send(text(err)).await.unwrap();
+                                                let _ = socket.send(close(1013, "backlog")).await;
+                                                return;
+                                            }
+                                        }
+                                        Some("stop") => {
+                                            let fin = json!({"type": "final", "segment": 0, "text": format!("{bytes} bytes")});
+                                            socket.send(text(fin)).await.unwrap();
+                                            socket.send(text(json!({"type": "done"}))).await.unwrap();
+                                            let _ = socket.send(close(1000, "done")).await;
+                                            while let Some(Ok(_)) = socket.recv().await {}
+                                            return;
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    })
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        StreamStub { url, origins }
+    }
+
+    /// Clears `MESA_CONFIG_FILE` when dropped, a panicking test included.
+    struct ListenConfig;
+    impl Drop for ListenConfig {
+        fn drop(&mut self) {
+            // SAFETY: dropped before the ENV_LOCK guard taken ahead of it.
+        }
+    }
+
+    /// Points `MESA_CONFIG_FILE` at a file holding `audio` (or at nothing
+    /// when `None`, the default legacy engine) until the guard drops. Call
+    /// with `ENV_LOCK` held, and bind the guard after it.
+    #[must_use]
+    fn listen_config(dir: &std::path::Path, audio: Option<serde_json::Value>) -> ListenConfig {
+        let path = dir.join("config.json");
+        if let Some(audio) = audio {
+            std::fs::write(&path, json!({ "audio": audio }).to_string()).unwrap();
+        }
+        // SAFETY: the caller holds ENV_LOCK.
+        unsafe {
+            std::env::remove_var("NARU_AUDIO_URL");
+            std::env::remove_var("MESA_AUDIO_URL");
+            std::env::set_var("MESA_CONFIG_FILE", &path);
+        }
+        ListenConfig
+    }
+
+    type ListenClient = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+
+    /// Serves Naru in default mode on an ephemeral port and opens
+    /// `/api/live/listen` on it with `origin`, as a browser page would.
+    async fn open_listen(
+        origin: &str,
+    ) -> (
+        tempfile::TempDir,
+        Result<ListenClient, tokio_tungstenite::tungstenite::Error>,
+    ) {
+        open_listen_as(origin, false, None).await
+    }
+
+    /// [`open_listen`], optionally under `--lan` and with a `Sec-Fetch-Site`.
+    async fn open_listen_as(
+        origin: &str,
+        lan: bool,
+        fetch_site: Option<&str>,
+    ) -> (
+        tempfile::TempDir,
+        Result<ListenClient, tokio_tungstenite::tungstenite::Error>,
+    ) {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let (dir, mut state) = test_state();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        state.port = port;
+        state.lan = lan;
+        tokio::spawn(async move {
+            let _ = axum::serve(
+                listener,
+                router(state).into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await;
+        });
+        let mut request = format!("ws://127.0.0.1:{port}/api/live/listen")
+            .into_client_request()
+            .unwrap();
+        let origin = origin.replace("{port}", &port.to_string());
+        request
+            .headers_mut()
+            .insert(header::ORIGIN, origin.parse().unwrap());
+        if let Some(site) = fetch_site {
+            request
+                .headers_mut()
+                .insert("sec-fetch-site", site.parse().unwrap());
+        }
+        let opened = tokio_tungstenite::connect_async(request)
+            .await
+            .map(|(ws, _)| ws);
+        (dir, opened)
+    }
+
+    /// Every text event until the close, and the close code.
+    async fn listen_until_close(ws: &mut ListenClient) -> (Vec<serde_json::Value>, Option<u16>) {
+        use futures_util::StreamExt;
+        use tokio_tungstenite::tungstenite::Message as Tm;
+        let read = async {
+            let mut events = Vec::new();
+            while let Some(msg) = ws.next().await {
+                match msg.expect("socket error") {
+                    Tm::Text(t) => events.push(serde_json::from_str(t.as_str()).unwrap()),
+                    Tm::Close(frame) => return (events, frame.map(|f| u16::from(f.code))),
+                    _ => {}
+                }
+            }
+            (events, None)
+        };
+        tokio::time::timeout(Duration::from_secs(10), read)
+            .await
+            .expect("no close within 10 s")
+    }
+
+    /// The s16le sample bytes of a PCM WAV: the `data` chunk's body.
+    fn wav_samples(wav: &[u8]) -> &[u8] {
+        let mut at = 12;
+        while at + 8 <= wav.len() {
+            let len = u32::from_le_bytes(wav[at + 4..at + 8].try_into().unwrap()) as usize;
+            if &wav[at..at + 4] == b"data" {
+                return &wav[at + 8..(at + 8 + len).min(wav.len())];
+            }
+            at += 8 + len + (len & 1);
+        }
+        panic!("no data chunk");
+    }
+
+    const LISTEN_ORIGIN: &str = "http://127.0.0.1:{port}";
+
+    /// The acceptance test: a page's stream through Naru reaches the daemon
+    /// without its `Origin`, every byte arrives, and the daemon's final,
+    /// `done` and close 1000 "done" come back unchanged.
+    // `ENV_LOCK` is held across the awaits on purpose — see
+    // `lan_page_may_edit_the_config_but_not_from_a_rebound_page`.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn live_listen_streams_a_wav_through_to_the_daemon_and_back() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message as Tm;
+        let _env = attachments::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let stub = stream_stub(false).await;
+        let cfg = tempfile::tempdir().unwrap();
+        let _config = listen_config(
+            cfg.path(),
+            Some(json!({"engine": "naru-audio", "url": stub.url})),
+        );
+        let (_dir, opened) = open_listen(LISTEN_ORIGIN).await;
+        let mut ws = opened.expect("the upgrade");
+
+        let start =
+            json!({"type": "start", "model": "default", "format": "s16le", "sample_rate": 16000});
+        ws.send(Tm::Text(start.to_string().into())).await.unwrap();
+        let ready = ws.next().await.unwrap().unwrap();
+        assert!(ready.to_text().unwrap().contains("\"ready\""), "{ready:?}");
+        let samples = wav_samples(include_bytes!("testdata/plain.wav"));
+        for chunk in samples.chunks(3200) {
+            ws.send(Tm::Binary(chunk.to_vec().into())).await.unwrap();
+        }
+        ws.send(Tm::Text(json!({"type": "stop"}).to_string().into()))
+            .await
+            .unwrap();
+        let (events, code) = listen_until_close(&mut ws).await;
+
+        let finals: Vec<_> = events.iter().filter(|e| e["type"] == "final").collect();
+        assert_eq!(finals.len(), 1, "{events:?}");
+        assert_eq!(finals[0]["text"], format!("{} bytes", samples.len()));
+        assert_eq!(events.last().unwrap()["type"], "done", "{events:?}");
+        assert_eq!(code, Some(1000));
+        assert_eq!(
+            *stub.origins.lock().unwrap(),
+            vec![None],
+            "no Origin reaches the daemon"
+        );
+    }
+
+    /// A non-1000 close is passed through with the error before it.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn live_listen_passes_the_daemons_close_code_through() {
+        use futures_util::SinkExt;
+        use tokio_tungstenite::tungstenite::Message as Tm;
+        let _env = attachments::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let stub = stream_stub(true).await;
+        let cfg = tempfile::tempdir().unwrap();
+        let _config = listen_config(
+            cfg.path(),
+            Some(json!({"engine": "naru-audio", "url": stub.url})),
+        );
+        let (_dir, opened) = open_listen(LISTEN_ORIGIN).await;
+        let mut ws = opened.expect("the upgrade");
+        let start = json!({"type": "start", "format": "s16le", "sample_rate": 16000});
+        ws.send(Tm::Text(start.to_string().into())).await.unwrap();
+        let (events, code) = listen_until_close(&mut ws).await;
+
+        assert_eq!(events.last().unwrap()["code"], "backlog", "{events:?}");
+        assert_eq!(code, Some(1013));
+    }
+
+    /// Nothing listening at `audio.url`: the page hears the §4.4 sentence as
+    /// an `error` event, then a non-1000 close.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn live_listen_reports_a_daemon_that_is_down() {
+        let _env = attachments::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dead = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://127.0.0.1:{}", dead.local_addr().unwrap().port());
+        drop(dead);
+        let cfg = tempfile::tempdir().unwrap();
+        let _config = listen_config(
+            cfg.path(),
+            Some(json!({"engine": "naru-audio", "url": url})),
+        );
+        let (_dir, opened) = open_listen(LISTEN_ORIGIN).await;
+        let mut ws = opened.expect("the upgrade");
+        let (events, code) = listen_until_close(&mut ws).await;
+
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0]["type"], "error");
+        assert_eq!(events[0]["code"], "daemon_down");
+        assert_eq!(events[0]["message"], audio::down_message(&url));
+        assert!(code.is_some_and(|c| c != 1000), "{code:?}");
+    }
+
+    /// Inert by default: on the legacy engine the handshake is refused 503
+    /// and the daemon — configured, and up — is never contacted.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn live_listen_is_refused_on_the_legacy_engine() {
+        let _env = attachments::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let stub = stream_stub(false).await;
+        let cfg = tempfile::tempdir().unwrap();
+        let _config = listen_config(cfg.path(), Some(json!({"url": stub.url})));
+        let (_dir, opened) = open_listen(LISTEN_ORIGIN).await;
+
+        match opened {
+            Err(tokio_tungstenite::tungstenite::Error::Http(resp)) => {
+                assert_eq!(resp.status().as_u16(), 503);
+            }
+            other => panic!("expected a 503 refusal, got {other:?}"),
+        }
+        assert!(stub.origins.lock().unwrap().is_empty());
+    }
+
+    /// A foreign page is refused before the upgrade; the daemon never hears.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn live_listen_refuses_a_foreign_origin_before_the_upgrade() {
+        let _env = attachments::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let stub = stream_stub(false).await;
+        let cfg = tempfile::tempdir().unwrap();
+        let _config = listen_config(
+            cfg.path(),
+            Some(json!({"engine": "naru-audio", "url": stub.url})),
+        );
+        let (_dir, opened) = open_listen("http://evil.example").await;
+
+        match opened {
+            Err(tokio_tungstenite::tungstenite::Error::Http(resp)) => {
+                assert_eq!(resp.status().as_u16(), 403);
+            }
+            other => panic!("expected a 403 refusal, got {other:?}"),
+        }
+        assert!(stub.origins.lock().unwrap().is_empty());
+    }
+
+    /// The same refusals under `--lan`: a foreign page and a cross-site
+    /// fetch are each 403 before the upgrade, and the daemon never hears.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn live_listen_refuses_foreign_pages_under_lan() {
+        let _env = attachments::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let stub = stream_stub(false).await;
+        let cfg = tempfile::tempdir().unwrap();
+        let _config = listen_config(
+            cfg.path(),
+            Some(json!({"engine": "naru-audio", "url": stub.url})),
+        );
+        for (label, origin, site) in [
+            ("foreign Origin", "http://evil.example", None),
+            ("cross-site fetch", LISTEN_ORIGIN, Some("cross-site")),
+        ] {
+            let (_dir, opened) = open_listen_as(origin, true, site).await;
+            match opened {
+                Err(tokio_tungstenite::tungstenite::Error::Http(resp)) => {
+                    assert_eq!(resp.status().as_u16(), 403, "{label}");
+                }
+                other => panic!("{label}: expected a 403 refusal, got {other:?}"),
+            }
+        }
+        assert!(stub.origins.lock().unwrap().is_empty());
     }
 }

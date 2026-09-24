@@ -210,6 +210,42 @@ caller, which is the existing held-recording path (`docs/live.md`, "Person →
 Naru"), the same "transcribed and dropped" shape the speak routes already
 have on the way out, with the arrow reversed.
 
+## Streaming: `GET /api/live/listen` (WebSocket)
+
+Mesa task 1394, naru-audio design §2.4 / §6.2: a WebSocket the page opens
+on Naru, proxied to the daemon's `/v1/audio/transcriptions/stream`
+(`live_listen` + `proxy_listen` in `src/api.rs`, `audio::open_stream` in
+`src/core/audio.rs`). Nothing on the page uses it yet (design task 23).
+
+- **Gates, before the upgrade**: the transcribe pair,
+  `require_agent_access` + `require_same_site_fetch`, in both serve modes.
+  A foreign page is 403 and no daemon is contacted.
+- **Inert by default**: only `audio.engine = "naru-audio"` opens it. On
+  `legacy` (the default) the handshake is refused **503 `unavailable`**
+  before any upgrade and the daemon is never contacted, so a legacy install
+  with no daemon changes nothing. `listen.engine` is **not** consulted: it
+  picks what the *page* listens with, and this route only ever reaches the
+  server's engine — a page on `browser` simply never opens it.
+- **No `Origin` reaches the daemon.** The daemon refuses any `Origin` (§2.1)
+  and keeps no gates of its own for Naru to borrow, so the upstream request
+  is built from `audio.url` alone (`http://` → `ws://`): the handshake
+  headers and nothing else, none of the browser's forwarded.
+- **Frames pass through untouched**: text and binary verbatim in both
+  directions, and a close frame with its code and reason — the daemon's
+  `1000 "done"`, `1008`, `1011`, `1013` reach the page as sent, and a page's
+  close reaches the daemon. Pings are answered by each side's own library,
+  never forwarded. A side that vanishes without a close closes the other:
+  the daemon with a close, the page with an `error` event and `1011`
+  (§2.4: an error always precedes a non-1000 close). The session is one
+  future — nothing is spawned, so nothing outlives it.
+- **A failed open** (nothing listening, or no handshake within 5 s) sends
+  the page `{"type":"error","code":"daemon_down","message":…}` with §4.4's
+  daemon_down sentence for that URL, then closes `1011`; a handshake the
+  daemon refuses with an HTTP status is `"code":"error"` with the §4.4
+  `error` sentence naming the status. Either failure, and a mid-session
+  drop, drops the cached probe (`audio::invalidate`), so the page's next
+  `GET /api/live/transcribe` asks the daemon afresh.
+
 ## Gate
 
 `scripts/auris-check.sh` — the API-side counterpart to `scripts/api-check.sh`

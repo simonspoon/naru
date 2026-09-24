@@ -471,7 +471,7 @@ fn classify_load(status: u16, body: &str) -> (AudioState, Option<String>) {
     (state, Some(error_message(&reported)))
 }
 
-fn down_message(url: &str) -> String {
+pub(crate) fn down_message(url: &str) -> String {
     format!(
         "Speech isn't available: naru-audio isn't running at {url}. \
          Start it with `brew services start naru-audio`."
@@ -493,6 +493,56 @@ fn classify_transport(url: &str, e: &ureq::Error) -> (AudioState, Option<String>
         | ureq::Error::HostNotFound => (AudioState::DaemonDown, Some(down_message(url))),
         other => (AudioState::Error, Some(error_message(&other.to_string()))),
     }
+}
+
+/// The daemon's streaming speech-to-text route (design §2.4).
+const STREAM_PATH: &str = "/v1/audio/transcriptions/stream";
+
+/// How long opening [`STREAM_PATH`] may take before the daemon counts as
+/// down. A refused port fails at once; this bounds one that accepts and
+/// never answers the handshake.
+const STREAM_OPEN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// An open stream to the daemon.
+pub(crate) type DaemonStream =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// Opens the daemon's streaming route at `url` for `GET /api/live/listen`
+/// (mesa task 1394). The request is built from the URL alone, so it carries
+/// the handshake headers and nothing else — no `Origin`, which the daemon
+/// refuses (design §2.1), and nothing of the browser's. A failure drops the
+/// cached probe (§4.4: a failed WS open is fresher news) and comes back as
+/// the state and sentence the page shows: nothing answering is
+/// `daemon_down`, an HTTP refusal or anything else is `error`.
+pub(crate) async fn open_stream(url: &str) -> Result<DaemonStream, (AudioState, String)> {
+    let authority = url.strip_prefix("http://").unwrap_or(url);
+    let target = format!("ws://{}{STREAM_PATH}", authority.trim_end_matches('/'));
+    let opened = tokio::time::timeout(
+        STREAM_OPEN_TIMEOUT,
+        tokio_tungstenite::connect_async(target),
+    )
+    .await;
+    let failure = match opened {
+        Ok(Ok((stream, _))) => return Ok(stream),
+        Ok(Err(tokio_tungstenite::tungstenite::Error::Io(_))) | Err(_) => {
+            (AudioState::DaemonDown, down_message(url))
+        }
+        Ok(Err(tokio_tungstenite::tungstenite::Error::Http(response))) => (
+            AudioState::Error,
+            error_message(&format!(
+                "opening {STREAM_PATH} answered HTTP {}",
+                response.status().as_u16()
+            )),
+        ),
+        Ok(Err(other)) => (AudioState::Error, error_message(&other.to_string())),
+    };
+    invalidate();
+    Err(failure)
+}
+
+/// The sentence for a stream the daemon dropped without a close frame.
+pub(crate) fn stream_dropped_message() -> String {
+    error_message("the stream ended without a close frame")
 }
 
 /// A `/health` answer, read against design §4.4's table.
