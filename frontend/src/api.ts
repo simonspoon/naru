@@ -1024,40 +1024,13 @@ export function transcribeAudio(audioBase64: string): Promise<LiveTranscript> {
 }
 
 /**
- * Whether `auris` is a way in at all (mesa task 957) — `GET` on the same
- * route as `transcribeAudio`, asked once per conversation joined so the hub
- * can decide between the auris path and the browser's own recognizer before
- * either engine opens a microphone.
- *
- * `false` on anything short of a literal `available: true`. Under `--lan`
- * this GET is unregistered — and an unregistered GET does not 404, it falls
- * through to the embedded SPA fallback and comes back 200 with `index.html`
- * (the POST's 405 is different: the fallback only serves GET/HEAD). That is
- * the correct answer arriving in an odd shape, not an error: the route that
- * would decode this page's audio is absent, so the page must fall back to
- * its own recognizer, and `res.json()` throwing on the HTML body is what
- * routes that case into the catch below. A non-200, a network failure, a
- * JSON body with no `available` key and `available: false` all land the same
- * way — "mesa could not ask" is the one answer every one of them means, and
- * `available === true` (not a bare `available`, which `res.json()`'s cast
- * would happily hand back as `undefined`) is the only way this returns `true`.
- */
-export async function transcribeAvailable(): Promise<boolean> {
-  try {
-    const { available } = await request<{ available: boolean }>('/api/live/transcribe')
-    return available === true
-  } catch {
-    return false
-  }
-}
-
-/**
  * The whole answer of `GET /api/live/transcribe` (mesa task 1388): the
  * engine `audio.engine` names, its probe `state`, the sentence to show when
  * it is not ready and when the (cached) answer was taken. For the Settings
- * page's read-only probe line (mesa task 1391); errors propagate, unlike
- * `transcribeAvailable`, because a page showing the state must say it could
- * not ask rather than read that as "not ready".
+ * page's read-only probe line (mesa task 1391) and the live panel's engine
+ * choice (mesa task 1390, which reads a failure as `legacy`). Errors
+ * propagate, because a page showing the state must say it could not ask
+ * rather than read that as "not ready".
  */
 export function transcribeStatus(): Promise<TranscribeStatus> {
   return request('/api/live/transcribe')

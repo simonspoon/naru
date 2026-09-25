@@ -177,6 +177,15 @@ describe('liveStatusLine', () => {
     expect(liveStatusLine(resting, false, null, true)).toMatch(/^Paused/)
   })
 
+  it('does not claim to be listening while speech is unavailable (mesa task 1390)', () => {
+    const line = liveStatusLine(session(), false, null, false, true)
+    expect(line).not.toMatch(/Listening/)
+    expect(line).toMatch(/speech is not available/)
+    // Everything above the last arm still outranks it.
+    expect(liveStatusLine(session(), true, null, false, true)).toBe('Speaking…')
+    expect(liveStatusLine(session(), false, null, true, true)).toMatch(/^Paused/)
+  })
+
   it('otherwise says it is listening', () => {
     expect(liveStatusLine(session(), false, null, false)).toMatch(/^Listening\./)
   })

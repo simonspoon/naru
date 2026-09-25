@@ -157,12 +157,17 @@ export function liveControls(
  * that outlives the handoff is still sounding — and before the no-agent
  * warning, since a resting session has a successor bound and the reason
  * nothing answers is the rest, not a missing agent.
+ *
+ * `unavailable` (the page's `ListenPath` is `'unavailable'`, mesa task 1390)
+ * replaces only the last arm: the banner says the speech server is not
+ * ready, so this line must not claim to be listening.
  */
 export function liveStatusLine(
   session: LiveSession | null,
   speaking: boolean,
   error: string | null,
   paused: boolean,
+  unavailable = false,
 ): string {
   if (error !== null) return error
   if (session === null) return 'Not live. Press Go live to start a conversation.'
@@ -179,5 +184,6 @@ export function liveStatusLine(
   if (session.agent_id === null) {
     return 'Live, but no agent is attached — nothing will answer.'
   }
+  if (unavailable) return 'Live, but speech is not available — type into the box below.'
   return 'Listening. Dictate into the box below — a settled line sends itself.'
 }

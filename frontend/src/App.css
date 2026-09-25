@@ -10088,6 +10088,39 @@ button:focus-visible,
   font-size: 0.75rem;
 }
 
+/* The server's speech engine is not ready (mesa task 1390): the sentence, the
+   command that fixes it and a Retry, where the meter would otherwise promise
+   a microphone. Red-bordered like any other failure the panel reports. */
+.live-unavailable {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.5rem;
+  border: 1px solid var(--red);
+  font-size: 0.75rem;
+}
+
+.live-unavailable-text {
+  color: var(--red);
+}
+
+.live-unavailable-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.live-unavailable-command {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+  padding: 2px 6px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+}
+
 /* The conversation itself: the one scrolling part, so a long exchange never
    pushes the composer off the bottom of the panel. */
 .live-transcript {

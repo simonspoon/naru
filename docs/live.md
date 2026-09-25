@@ -51,7 +51,12 @@ handed — and "Speech, reused rather than rebuilt" (below) for audio-out's:
   begin with. Where `auris` cannot be reached but this browser
   has its own recognizer (`SpeechRecognition`/`webkitSpeechRecognition`, task
   873), listening falls back to that unchanged — the same engine, in the same
-  page, that ran before task 956 ever existed. **Firefox has no recognizer of
+  page, that ran before task 956 ever existed. That fallback is the
+  `legacy` engine's alone (mesa task 1390): on `audio.engine = "naru-audio"`
+  a daemon that is not ready is `'unavailable'` — the microphone stays shut
+  and a banner shows the server's message, the command that fixes it and a
+  Retry — and the browser recognizer is used only when `listen.engine =
+  "browser"` asks for it (`docs/listen.md`). **Firefox has no recognizer of
   its own at all**, so `auris` is also the only way a Firefox user gets a
   microphone here at all: `getUserMedia` is everywhere `SpeechRecognition` is
   not, which makes that case a genuinely new capability rather than a better
@@ -2701,7 +2706,9 @@ conversation") working with no backend change.
     per segment — so a machine with no `auris` installed never routes here in
     the first place: it hears through its own browser recognizer instead
     where one exists, or through the typed box where none does, and the
-    status line names which.
+    status line names which. On `naru-audio` there is no such fallback: a
+    daemon that is not ready is `'unavailable'`, and the panel says so with
+    a Retry (mesa task 1390, `docs/listen.md`).
   - **The capture stream opens and closes around each turn, not once for the
     whole conversation.** It is held for as long as the microphone is wanted,
     reused across VAD segments the way the old recognizer reused it across
@@ -3050,7 +3057,9 @@ conversation") working with no backend change.
   the composer's hint, and — mesa task 922 — the phonetic fold that keys
   Naru's vocabulary, the vocabulary table built from it and the correction
   that rewrites transcribed text against it, and — mesa task 957 —
-  `listenPath`, which of the two engines a conversation actually uses;
+  `listenPath`, which of the two engines a conversation actually uses —
+  or, on `naru-audio` since mesa task 1390, that it has none
+  (`'unavailable'`, `unavailableBanner`);
   `recognitionCtor`, `readResults`, `isBlockingError` and
   `SpeechRecognitionLike` were unused by `LiveHub` from mesa task 956 until
   957 wired them back in as the browser-recognizer fallback, and are in use

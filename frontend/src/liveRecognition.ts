@@ -120,8 +120,11 @@ export function recognitionCtor(
  * (page-side capture posted to `POST /api/live/transcribe`, mesa task 956),
  * `'browser'` (this module's original `SpeechRecognition` path, mesa task
  * 873), or `'none'` (the typed box and the person's own system dictation).
+ * `'unavailable'` (mesa task 1390) is the server's engine being
+ * `naru-audio` and not ready: the microphone stays shut, the typed box is the
+ * way in, and the page says so loudly rather than falling back.
  */
-export type ListenPath = 'auris' | 'browser' | 'none'
+export type ListenPath = 'auris' | 'browser' | 'none' | 'unavailable'
 
 /**
  * Which way in this page actually has, decided once per conversation and
@@ -154,10 +157,52 @@ export function listenPath(input: {
   captures: boolean
   /** This browser has a recognizer of its own (`recognitionCtor(...) !== null`). */
   recognizes: boolean
+  /**
+   * The server's `audio.engine` (`TranscribeStatus.engine`), or `null` when
+   * the probe has not answered or failed — read as `legacy`.
+   */
+  audioEngine: string | null
+  /**
+   * The config's `listen.engine` (`ConfigListen.engine`), or `null` when it
+   * says nothing or could not be read — read as `server`.
+   */
+  listenEngine: string | null
 }): ListenPath {
+  // A deliberate opt-in to the browser's own recognizer (mesa task 1390):
+  // the person asked for it, so the server is not consulted at all.
+  if (input.listenEngine === 'browser') return input.recognizes ? 'browser' : 'none'
+  // On naru-audio the browser recognizer is never a fallback (design §6.1):
+  // a daemon that is not ready is said out loud, not papered over. A ready
+  // daemon this browser cannot capture audio for is not the server's fault.
+  if (input.audioEngine === 'naru-audio') {
+    if (!input.transcribes) return 'unavailable'
+    return input.captures ? 'auris' : 'none'
+  }
   if (input.transcribes && input.captures) return 'auris'
   if (input.recognizes) return 'browser'
   return 'none'
+}
+
+/** What the unavailable banner says when the server gave no sentence. */
+export const UNAVAILABLE_FALLBACK =
+  "Speech isn't available: the speech server did not say why."
+
+/**
+ * The unavailable banner's two parts (mesa task 1390): the server's own
+ * sentence (`TranscribeStatus.message`, design §4.4), and the command in it
+ * the person can run to fix things — the last `` `…` `` span, which is how
+ * every §4.4 sentence that names one writes it (`brew services start
+ * naru-audio`, `naru-audio pull <model>`, `brew upgrade naru-audio`).
+ * `command` is `null` for a sentence that names none (the `error` state).
+ */
+export function unavailableBanner(message: string | null): {
+  text: string
+  command: string | null
+} {
+  const text = message !== null && message.trim() !== '' ? message : UNAVAILABLE_FALLBACK
+  const spans = [...text.matchAll(/`([^`]+)`/g)]
+  const command = spans.length > 0 ? spans[spans.length - 1][1] : null
+  return { text, command }
 }
 
 /**
@@ -420,29 +465,6 @@ export function statusPill(input: {
  */
 export function isBlockingError(code: string): boolean {
   return code === 'not-allowed' || code === 'service-not-allowed'
-}
-
-/**
- * Whether a failed transcription means auris heard nothing, rather than that
- * auris broke.
- *
- * A segment the VAD ended on a breath, a door or a stretch of room noise
- * reaches auris as audio with no speech in it, and auris reports that as a
- * failure — mesa's `/api/live/transcribe` has no transcript to answer with, so
- * it is a 503 like any other (`docs/listen.md`). That is a normal outcome of
- * listening, not something to tell the person about, so the caller says
- * nothing for it.
- *
- * The match is on the shape of auris's own wording, case-insensitively,
- * because the sentence comes from that binary's stderr rather than from mesa
- * and may be reworded. Erring toward "this is a real error" is deliberate: a
- * missed silence shows a banner that now clears itself on the next successful
- * segment, while a false positive would hide a genuinely broken binary for the
- * whole conversation.
- */
-export function isSilentTranscribe(message: string): boolean {
-  const said = message.toLowerCase()
-  return said.includes('no speech') || said.includes('nothing transcribed')
 }
 
 /**
@@ -935,6 +957,9 @@ export function captureHint(input: {
   }
   if (input.path === 'none') {
     return 'Neither auris nor this browser can listen here. Type here, or use your system dictation.'
+  }
+  if (input.path === 'unavailable') {
+    return "Speech isn't available on the server, so Naru is not listening. Type here — the banner above says how to fix it."
   }
   if (input.blocked) {
     return 'The microphone was refused, so Naru is not listening. Type here, or use your system dictation.'

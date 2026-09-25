@@ -10,7 +10,6 @@ import {
   heldFlush,
   heldWith,
   isBlockingError,
-  isSilentTranscribe,
   listenPath,
   MESA_VOCABULARY,
   readResults,
@@ -23,6 +22,8 @@ import {
   showsHearing,
   statusPill,
   soundKey,
+  unavailableBanner,
+  UNAVAILABLE_FALLBACK,
   utteranceFrom,
   type RecognitionResult,
 } from './liveRecognition'
@@ -63,37 +64,119 @@ describe('recognitionCtor', () => {
 })
 
 describe('listenPath', () => {
+  // Today's ladder, unchanged: the default `audio.engine` and `listen.engine`.
+  const legacy = { audioEngine: 'legacy', listenEngine: null }
+  const naruAudio = { audioEngine: 'naru-audio', listenEngine: null }
+
   it('picks auris when the server can transcribe and this browser can capture audio', () => {
-    expect(listenPath({ transcribes: true, captures: true, recognizes: false })).toBe('auris')
+    expect(listenPath({ ...legacy, transcribes: true, captures: true, recognizes: false })).toBe('auris')
   })
 
   it('prefers auris even where the browser also has its own recognizer', () => {
     // The ordering is the whole point of mesa task 957: auris hears mesa's
     // own vocabulary correctly and punctuates like a person, where
     // SpeechRecognition does neither.
-    expect(listenPath({ transcribes: true, captures: true, recognizes: true })).toBe('auris')
+    expect(listenPath({ ...legacy, transcribes: true, captures: true, recognizes: true })).toBe('auris')
   })
 
   it('falls back to the browser recognizer where auris cannot be reached', () => {
-    expect(listenPath({ transcribes: false, captures: true, recognizes: true })).toBe('browser')
-    expect(listenPath({ transcribes: true, captures: false, recognizes: true })).toBe('browser')
-    expect(listenPath({ transcribes: false, captures: false, recognizes: true })).toBe('browser')
+    expect(listenPath({ ...legacy, transcribes: false, captures: true, recognizes: true })).toBe('browser')
+    expect(listenPath({ ...legacy, transcribes: true, captures: false, recognizes: true })).toBe('browser')
+    expect(listenPath({ ...legacy, transcribes: false, captures: false, recognizes: true })).toBe('browser')
   })
 
   it('is none where neither way in is available', () => {
-    expect(listenPath({ transcribes: false, captures: false, recognizes: false })).toBe('none')
-    expect(listenPath({ transcribes: false, captures: true, recognizes: false })).toBe('none')
-    expect(listenPath({ transcribes: true, captures: false, recognizes: false })).toBe('none')
+    expect(listenPath({ ...legacy, transcribes: false, captures: false, recognizes: false })).toBe('none')
+    expect(listenPath({ ...legacy, transcribes: false, captures: true, recognizes: false })).toBe('none')
+    expect(listenPath({ ...legacy, transcribes: true, captures: false, recognizes: false })).toBe('none')
   })
 
   it('gives Firefox a microphone through auris even though it has no recognizer of its own', () => {
     // Firefox has no SpeechRecognition at all — this is the genuinely new
     // case the task exists for.
-    expect(listenPath({ transcribes: true, captures: true, recognizes: false })).toBe('auris')
+    expect(listenPath({ ...legacy, transcribes: true, captures: true, recognizes: false })).toBe('auris')
   })
 
   it('leaves Firefox with no way in when auris cannot be reached either', () => {
-    expect(listenPath({ transcribes: false, captures: true, recognizes: false })).toBe('none')
+    expect(listenPath({ ...legacy, transcribes: false, captures: true, recognizes: false })).toBe('none')
+  })
+  it('reads an unanswered or failed probe and an unset listen engine as legacy', () => {
+    const unknown = { audioEngine: null, listenEngine: null }
+    expect(listenPath({ ...unknown, transcribes: true, captures: true, recognizes: true })).toBe('auris')
+    expect(listenPath({ ...unknown, transcribes: false, captures: true, recognizes: true })).toBe('browser')
+    expect(listenPath({ ...unknown, transcribes: false, captures: true, recognizes: false })).toBe('none')
+  })
+
+  it('on naru-audio, is unavailable rather than falling back to the browser recognizer', () => {
+    expect(listenPath({ ...naruAudio, transcribes: false, captures: true, recognizes: true })).toBe('unavailable')
+    expect(listenPath({ ...naruAudio, transcribes: false, captures: true, recognizes: false })).toBe('unavailable')
+  })
+
+  it('on naru-audio, picks the server path once the daemon is ready', () => {
+    expect(listenPath({ ...naruAudio, transcribes: true, captures: true, recognizes: true })).toBe('auris')
+  })
+
+  it('on naru-audio, a ready server this browser cannot capture for is none, not unavailable', () => {
+    // The server is fine; blaming it would put up a banner with nothing to fix.
+    expect(listenPath({ ...naruAudio, transcribes: true, captures: false, recognizes: true })).toBe('none')
+    expect(listenPath({ ...naruAudio, transcribes: true, captures: false, recognizes: false })).toBe('none')
+    expect(listenPath({ ...naruAudio, transcribes: false, captures: false, recognizes: true })).toBe('unavailable')
+  })
+
+  it('on legacy, the same unreachable server still falls back to the browser recognizer', () => {
+    expect(listenPath({ ...legacy, transcribes: false, captures: true, recognizes: true })).toBe('browser')
+  })
+
+  it('an explicit listen engine of browser picks the browser recognizer, whatever the server says', () => {
+    for (const audioEngine of ['legacy', 'naru-audio', null]) {
+      const opted = { audioEngine, listenEngine: 'browser' }
+      expect(listenPath({ ...opted, transcribes: true, captures: true, recognizes: true })).toBe('browser')
+      expect(listenPath({ ...opted, transcribes: false, captures: true, recognizes: true })).toBe('browser')
+      expect(listenPath({ ...opted, transcribes: true, captures: true, recognizes: false })).toBe('none')
+    }
+  })
+
+  it('an explicit listen engine of server is the default', () => {
+    const server = { audioEngine: 'naru-audio', listenEngine: 'server' }
+    expect(listenPath({ ...server, transcribes: false, captures: true, recognizes: true })).toBe('unavailable')
+  })
+})
+
+describe('unavailableBanner', () => {
+  it('shows the server sentence and lifts its command out', () => {
+    expect(
+      unavailableBanner(
+        "Speech isn't available: naru-audio isn't running at http://127.0.0.1:7870. Start it with `brew services start naru-audio`.",
+      ),
+    ).toEqual({
+      text: "Speech isn't available: naru-audio isn't running at http://127.0.0.1:7870. Start it with `brew services start naru-audio`.",
+      command: 'brew services start naru-audio',
+    })
+  })
+
+  it('names the model a missing model needs pulled', () => {
+    expect(
+      unavailableBanner(
+        "Speech isn't available: the model parakeet-tdt-0.6b-v2-int8 isn't downloaded. Run `naru-audio pull parakeet-tdt-0.6b-v2-int8`.",
+      ).command,
+    ).toBe('naru-audio pull parakeet-tdt-0.6b-v2-int8')
+  })
+
+  it('offers the upgrade for an incompatible daemon', () => {
+    expect(
+      unavailableBanner(
+        "Speech isn't available: naru-audio 2.3.0 speaks API 2; this Naru needs API 1. Upgrade with `brew upgrade naru-audio`.",
+      ).command,
+    ).toBe('brew upgrade naru-audio')
+  })
+
+  it('has no command for a sentence that names none', () => {
+    expect(unavailableBanner("Speech isn't available: naru-audio reported: backend exploded").command).toBe(null)
+  })
+
+  it('falls back to its own sentence when the server gave none', () => {
+    expect(unavailableBanner(null)).toEqual({ text: UNAVAILABLE_FALLBACK, command: null })
+    expect(unavailableBanner('  ')).toEqual({ text: UNAVAILABLE_FALLBACK, command: null })
   })
 })
 
@@ -295,26 +378,6 @@ describe('isBlockingError', () => {
     for (const code of ['no-speech', 'aborted', 'network', 'audio-capture', 'unknown']) {
       expect(isBlockingError(code)).toBe(false)
     }
-  })
-})
-
-describe('isSilentTranscribe', () => {
-  it('auris hearing nothing is not a failure worth reporting', () => {
-    expect(
-      isSilentTranscribe(
-        'auris produced no transcript: auris: nothing transcribed; no speech in the audio',
-      ),
-    ).toBe(true)
-  })
-
-  it('the wording is matched however it is cased', () => {
-    expect(isSilentTranscribe('AURIS: No Speech In The Audio')).toBe(true)
-  })
-
-  it('a broken binary is a real error', () => {
-    expect(isSilentTranscribe('failed to spawn auris: No such file or directory')).toBe(false)
-    expect(isSilentTranscribe('auris exited with exit status: 2')).toBe(false)
-    expect(isSilentTranscribe('')).toBe(false)
   })
 })
 
@@ -659,6 +722,18 @@ describe('captureHint', () => {
 
   it('says so where neither way in is available', () => {
     expect(captureHint({ ...base, path: 'none' })).toMatch(/Neither auris nor this browser/)
+  })
+
+  it('gives an unavailable server its own line, never the browser one', () => {
+    for (const listening of [false, true]) {
+      const hint = captureHint({ ...base, path: 'unavailable', listening })
+      expect(hint).toMatch(/isn't available on the server/)
+      expect(hint).not.toMatch(/Listening through this browser/)
+    }
+  })
+
+  it('still says paused over an unavailable server', () => {
+    expect(captureHint({ ...base, path: 'unavailable', paused: true })).toMatch(/Resume/)
   })
 
   it('says so once the microphone was refused', () => {

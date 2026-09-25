@@ -5,6 +5,7 @@ import { LiveBoardPanel, type InkFlatten } from './LiveBoardPanel'
 import { LiveMeter } from './LiveMeter'
 import {
   claimLiveSpeaker,
+  getListen,
   getLive,
   getLiveConfig,
   listProjects,
@@ -16,7 +17,7 @@ import {
   startLive,
   stopLive,
   transcribeAudio,
-  transcribeAvailable,
+  transcribeStatus,
 } from '../api'
 import {
   capturesAudio,
@@ -81,7 +82,6 @@ import {
   captureHint,
   correctVocabulary,
   isBlockingError,
-  isSilentTranscribe,
   HEARING_HOLD_MS,
   LISTEN_CHORD,
   enterHoldsForRecording,
@@ -98,6 +98,7 @@ import {
   shouldListen,
   showsHearing,
   statusPill,
+  unavailableBanner,
   utteranceFrom,
   type ListenPath,
   type SpeechRecognitionLike,
@@ -146,6 +147,7 @@ import type { LiveNotice } from '../types/LiveNotice'
 import type { LiveState } from '../types/LiveState'
 import type { LiveTurn } from '../types/LiveTurn'
 import type { LiveWindow } from '../types/LiveWindow'
+import type { TranscribeStatus } from '../types/TranscribeStatus'
 import { useFetch } from '../useFetch'
 
 /**
@@ -161,7 +163,7 @@ import { useFetch } from '../useFetch'
  * WAV to `POST /api/live/transcribe`, which hands it to the external `auris`
  * binary and answers with text — **where a machine has it installed**. Task
  * 957 makes that an upgrade rather than a dependency: a probe on mount
- * (`transcribeAvailable`) decides between auris and the browser's own
+ * (`transcribeStatus`, beside the config's `listen.engine`) decides between auris and the browser's own
  * `SpeechRecognition` (task 873's original path, restored rather than
  * replaced) as this page's `ListenPath` (`liveRecognition.ts::listenPath`),
  * and only one of the two capture effects below ever runs at a time. That
@@ -697,15 +699,44 @@ export function LiveHub({
     () => recognitionCtor(window as unknown as Record<string, unknown>) !== null,
   )
   const [transcribes, setTranscribes] = useState<boolean | null>(null)
+  // The rest of the probe's answer (mesa task 1390): which engine the server
+  // runs and, when it is not ready, the sentence to show — plus the config's
+  // `listen.engine`, the person's deliberate opt-in to the browser recognizer.
+  // Either request failing reads as `legacy`/`server`, today's behaviour.
+  const [audio, setAudio] = useState<TranscribeStatus | null>(null)
+  const [listenEngine, setListenEngine] = useState<string | null>(null)
+  const applyProbe = useCallback((status: TranscribeStatus | null) => {
+    setAudio(status)
+    setTranscribes(status?.available === true)
+  }, [])
   useEffect(() => {
     let dropped = false
-    transcribeAvailable().then((available) => {
-      if (!dropped) setTranscribes(available)
+    // Both answers land together, so `transcribes` leaves `null` — the gate
+    // both capture effects wait on — only once `path` is final.
+    Promise.all([
+      transcribeStatus().catch(() => null),
+      getListen().catch(() => null),
+    ]).then(([status, listen]) => {
+      if (dropped) return
+      setListenEngine(listen?.engine ?? null)
+      applyProbe(status)
     })
     return () => {
       dropped = true
     }
-  }, [])
+  }, [applyProbe])
+  // The banner's Retry: ask the server again and let `path` follow the answer
+  // — a daemon started since flips this page onto the server path.
+  const [retrying, setRetrying] = useState(false)
+  const retryProbe = useCallback(() => {
+    setRetrying(true)
+    // A failed Retry keeps the previous answer: only the first load reads a
+    // failure as legacy, and a naru-audio page must never fall back to the
+    // browser recognizer because one retry could not reach the server.
+    transcribeStatus()
+      .then(applyProbe, () => {})
+      .finally(() => setRetrying(false))
+  }, [applyProbe])
   // Whether this browser can be the way in at all, and through which engine.
   // `recognizesSpeech`, `captureHint` and `offersInputChoice` all still read
   // `supported` for exactly the question it has always answered — "is the
@@ -743,8 +774,13 @@ export function LiveHub({
     transcribes: transcribes === true,
     captures,
     recognizes: hasRecognizer,
+    audioEngine: audio?.engine ?? null,
+    listenEngine,
   })
-  const supported = path !== 'none'
+  // `'unavailable'` keeps the microphone shut exactly as `'none'` does; the
+  // banner below is what tells the two apart.
+  const supported = path !== 'none' && path !== 'unavailable'
+  const banner = path === 'unavailable' ? unavailableBanner(audio?.message ?? null) : null
   // Whether this browser's `SpeechRecognition` accepts a `MediaStreamTrack`
   // argument to `start()` — discoverable only by trying it (Safari, and
   // Chromium before 135, throw a `TypeError`). Irrelevant to the auris path,
@@ -1764,13 +1800,11 @@ export function LiveHub({
         // and try the next utterance rather than ending listening outright or
         // switching paths mid-conversation over one bad segment.
         //
-        // Except when auris merely heard nothing (mesa task 1072): a breath or
-        // a quiet room is a normal outcome of listening, and auris plainly
-        // ran, so the error is cleared and nothing is said — a banner for it
-        // latched the panel into `Reconnecting` for the rest of the
-        // conversation while turns kept flowing.
+        // Hearing nothing is not a failure (mesa task 1389): the server
+        // answers silence as 200 `{"text":""}` on both engines, which
+        // `utteranceFrom` above drops without a word.
         const message = err instanceof Error ? err.message : String(err)
-        setActionError(isSilentTranscribe(message) ? null : message)
+        setActionError(message)
       }
     }
 
@@ -3247,6 +3281,44 @@ export function LiveHub({
                   </span>
                 </div>
 
+                {/* The server's speech engine is not ready (mesa task 1390,
+                    design §4.4): said loudly, with the way to fix it and a
+                    Retry, rather than quietly falling back to the browser's
+                    recognizer. */}
+                {banner !== null && (
+                  <div className="live-unavailable" role="alert">
+                    <span className="live-unavailable-text">{banner.text}</span>
+                    <div className="live-unavailable-actions">
+                      {banner.command !== null && (
+                        <>
+                          <code className="live-unavailable-command">{banner.command}</code>
+                          <button
+                            type="button"
+                            className="live-unavailable-copy"
+                            tabIndex={open ? undefined : -1}
+                            onClick={() => {
+                              void navigator.clipboard
+                                ?.writeText(banner.command ?? '')
+                                .catch(() => undefined)
+                            }}
+                          >
+                            Copy
+                          </button>
+                        </>
+                      )}
+                      <button
+                        type="button"
+                        className="live-unavailable-retry"
+                        tabIndex={open ? undefined : -1}
+                        disabled={retrying}
+                        onClick={retryProbe}
+                      >
+                        {retrying ? 'Retrying…' : 'Retry'}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
                 {/* The sentence under the instruments: what the conversation
                     is doing in the words a person would use, and the one place
                     a failed press is reported. The title above says the state
@@ -3255,7 +3327,7 @@ export function LiveHub({
                 <span
                   className={`live-head-status ${actionError !== null ? 'error' : 'muted'}`}
                 >
-                  {liveStatusLine(session, speaking, actionError, paused)}
+                  {liveStatusLine(session, speaking, actionError, paused, path === 'unavailable')}
                 </span>
               </div>
 

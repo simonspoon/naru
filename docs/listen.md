@@ -11,9 +11,20 @@ it.
 
 ## Which engine a page has (`listenPath`)
 
-A page decides once per conversation which of three ways it has in, and
-names it rather than leaving the person to guess from transcript quality
-(`listenPath`, `frontend/src/liveRecognition.ts`, mesa task 957):
+A page decides once per conversation which way it has in, and names it
+rather than leaving the person to guess from transcript quality
+(`listenPath`, `frontend/src/liveRecognition.ts`, mesa task 957). Its inputs
+are the probe below (`available` and `engine`), the config's `listen.engine`
+(`GET /api/config/listen`) and what this browser can do; either request
+failing reads as `legacy`/`server`. The ladder (mesa task 1390):
+
+1. `listen.engine = "browser"` — the person's deliberate opt-in: `'browser'`
+   where this browser has a recognizer, else `'none'`. The server is not
+   consulted.
+2. `audio.engine = "naru-audio"` — `'auris'` (the server path) when the probe
+   is `ready` and this browser can capture audio, else **`'unavailable'`**.
+   The browser recognizer is **never** a fallback here.
+3. Otherwise (`legacy`, the default) — unchanged since mesa task 957:
 
 - **`'auris'`** — this browser can capture audio (`capturesAudio`,
   `liveAudio.ts`) **and** the server answered the availability probe below
@@ -23,7 +34,17 @@ names it rather than leaving the person to guess from transcript quality
 - **`'none'`** — neither. The conversation panel's plain `<textarea>` is the
   way in: the person's own system dictation, or their fingers.
 
-`auris` wins whenever it can be reached, **even on a browser that also has a
+**`'unavailable'`** keeps the microphone shut as `'none'` does (no capture,
+no recognizer, no listen switch) and the typed box is the way in, but the
+panel says why loudly: a `.live-unavailable` banner under its head shows the
+probe's `message` (a fallback sentence if it is `null`), the command in it —
+the last `` `…` `` span, e.g. `brew services start naru-audio` — in a
+`<code>` with a **Copy** button, and a **Retry** button that asks the probe
+again and switches to the server path once it answers `ready`. The
+composer's hint gives it its own line, never "Listening through this
+browser" (`unavailableBanner`, `captureHint`).
+
+On `legacy`, `auris` wins whenever it can be reached, **even on a browser that also has a
 recognizer of its own** — the ordering is the whole point of mesa task 957.
 It hears Naru's own vocabulary correctly and punctuates like a person, where
 a browser's `SpeechRecognition` does neither (the correction pass mesa task
@@ -49,7 +70,8 @@ The page's one ask, at the moment it joins a conversation, of whether
 `available` keeps its meaning — "`POST /api/live/transcribe` can decode" —
 which is `state == "ready"` on both engines: `!listen::models().is_empty()`
 on `legacy`, the daemon's probe on `naru-audio`, since the POST goes to the
-daemon there (mesa task 1389). It is still all the page reads. `state` is `ready | daemon_down | model_missing | incompatible |
+daemon there (mesa task 1389). The page reads it with `engine` and
+`message` (mesa task 1390, `listenPath` above). `state` is `ready | daemon_down | model_missing | incompatible |
 error`; `message` is the sentence to show (`null` when ready); `checked_at`
 is when the cached answer was taken (RFC 3339 UTC). A config file that
 cannot be read is **502 `unavailable`**.
