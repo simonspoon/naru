@@ -2486,6 +2486,14 @@ fn router(state: AppState) -> Router {
         // the voice named on the query string rather than the one on disk.
         // A read that changes nothing, gated like the speak route it copies.
         .route("/api/config/speech/preview", get(preview_speech))
+        // Adding a cloned voice to naru-audio (mesa task 1418): the clip as
+        // base64 in JSON, forwarded to the daemon's multipart
+        // `POST /v1/audio/voices`. The transcribe route's gates and body
+        // limit, for the same reasons (a recording in, base64 on the wire).
+        .route(
+            "/api/config/speech/voices",
+            post(add_speech_voice).layer(DefaultBodyLimit::max(TRANSCRIBE_BODY_LIMIT)),
+        )
         // The same file's `live` section — the instruction block a live
         // conversation's agent is spawned with (mesa task 867). A fifth route
         // for the same reason as the other three.
@@ -8534,6 +8542,78 @@ async fn update_config_speech(
         Query(SpeechQuery::default()),
     )
     .await
+}
+
+#[derive(Deserialize)]
+struct AddVoiceBody {
+    /// The voice's id, [`speech::is_voice_name`]-shaped.
+    name: String,
+    /// Exactly what the clip says.
+    text: String,
+    /// The clip (WAV, MP3 — anything the daemon's `afconvert` reads),
+    /// base64-encoded: JSON rather than multipart for the reason
+    /// [`TranscribeBody`] gives.
+    clip_base64: String,
+}
+
+/// `POST /api/config/speech/voices` — adds a cloned voice to the naru-audio
+/// daemon (mesa task 1418, [`speech::add_voice`], `docs/config.md`) and
+/// answers `AddedVoice`: the id, the clip's length and the text-to-speech
+/// models that now list it.
+///
+/// Gated by [`transcribe_live`]'s pair — a recording posted to the machine's
+/// audio engine — with its base64 rules: invalid or empty is 422, over
+/// [`LIVE_AUDIO_MAX`] 413. On the legacy engine it is 409 `conflict` and no
+/// daemon is contacted. The daemon's answers map to Naru's codes, carrying
+/// its own `error.message`: a taken name is 409 `conflict`, a name, clip or
+/// transcript it refuses is 422 `validation`, and no answer or a 5xx is 502
+/// `unavailable`. Nothing is kept here: the clip is the daemon's once added.
+async fn add_speech_voice(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Result<Json<AddVoiceBody>, JsonRejection>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    require_same_site_fetch(&headers)?;
+    let Json(body) = body?;
+    let validation = |message: String| ApiError {
+        status: StatusCode::UNPROCESSABLE_ENTITY,
+        code: "validation",
+        message,
+    };
+    let clip = base64::engine::general_purpose::STANDARD
+        .decode(body.clip_base64.as_bytes())
+        .map_err(|e| validation(format!("invalid base64 clip: {e}")))?;
+    if clip.is_empty() {
+        return Err(validation("the clip must not be empty".to_string()));
+    }
+    if clip.len() > LIVE_AUDIO_MAX {
+        return Err(ApiError {
+            status: StatusCode::PAYLOAD_TOO_LARGE,
+            code: "validation",
+            message: format!(
+                "the clip must be at most {LIVE_AUDIO_MAX} bytes, got {}",
+                clip.len()
+            ),
+        });
+    }
+    let added = blocking(move || speech::add_voice(&body.name, &body.text, &clip))
+        .await?
+        .map_err(|e| match e {
+            speech::AddVoiceError::Conflict(message) => ApiError {
+                status: StatusCode::CONFLICT,
+                code: "conflict",
+                message,
+            },
+            speech::AddVoiceError::Validation(message) => validation(message),
+            speech::AddVoiceError::Unavailable(message) => ApiError {
+                status: StatusCode::BAD_GATEWAY,
+                code: "unavailable",
+                message,
+            },
+        })?;
+    Ok((StatusCode::CREATED, Json(added)).into_response())
 }
 
 /// `GET /api/config/live` — the instruction block a live conversation's agent
@@ -17171,6 +17251,118 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             })),
         )
         .await
+    }
+
+    async fn post_voice(
+        state: &AppState,
+        addr: SocketAddr,
+        headers: HeaderMap,
+        name: &str,
+    ) -> ApiResult<Response> {
+        add_speech_voice(
+            State(state.clone()),
+            ConnectInfo(addr),
+            headers,
+            Ok(Json(AddVoiceBody {
+                name: name.to_string(),
+                text: "Hello there.".to_string(),
+                clip_base64: base64::engine::general_purpose::STANDARD.encode(b"ID3 mp3"),
+            })),
+        )
+        .await
+    }
+
+    /// mesa task 1418: `POST /api/config/speech/voices` is gated by
+    /// `require_agent_access`, is 409 `conflict` on the legacy engine without
+    /// contacting anything, and on naru-audio forwards to the daemon —
+    /// its 201 answered with the models that list the voice, its 409 a
+    /// `conflict` carrying the daemon's own message.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn add_speech_voice_is_gated_refused_on_legacy_and_forwarded_on_naru_audio() {
+        let _env = attachments::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (_dir, state) = test_state();
+        let cfg = tempfile::tempdir().unwrap();
+        let daemon = audio::stub::Stub::serve(0, |method, path| {
+            let body = match (method, path) {
+                ("POST", "/v1/audio/voices") => {
+                    return audio::stub::Reply::Json(
+                        201,
+                        r#"{"id":"amy","accent":null,"gender":null,"default":false,"duration":6.2}"#
+                            .to_string(),
+                    );
+                }
+                ("GET", "/v1/models") => {
+                    r#"{"data":[{"id":"clones","x_kind":"tts"},{"id":"plain","x_kind":"tts"},{"id":"ears","x_kind":"stt"}]}"#
+                }
+                ("GET", "/v1/audio/voices?model=clones") => r#"{"voices":[{"id":"amy"}]}"#,
+                _ => r#"{"voices":[{"id":"af_heart"}]}"#,
+            };
+            audio::stub::Reply::Json(200, body.to_string())
+        });
+
+        // Legacy: refused before any daemon is asked.
+        let _config = listen_config(cfg.path(), None);
+        let err = post_voice(&state, loopback(), loopback_agent_headers(), "amy")
+            .await
+            .unwrap_err();
+        assert_eq!((err.status, err.code), (StatusCode::CONFLICT, "conflict"));
+        assert!(err.message.contains("naru-audio engine"), "{}", err.message);
+
+        let _config = listen_config(
+            cfg.path(),
+            Some(json!({"engine": "naru-audio", "url": daemon.url()})),
+        );
+        // The agent gate: a foreign Origin, and a non-loopback peer in
+        // default mode, are both refused before the daemon is contacted.
+        let foreign = hdrs(Some("localhost:0"), Some("https://evil.example"));
+        let err = post_voice(&state, loopback(), foreign, "amy")
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, StatusCode::FORBIDDEN);
+        let err = post_voice(&state, lan_peer(), loopback_agent_headers(), "amy")
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, StatusCode::FORBIDDEN);
+        // A name `speech::voices` would never offer is Naru's own 422.
+        let err = post_voice(&state, loopback(), loopback_agent_headers(), "Amy Smith")
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "validation");
+        assert_eq!(daemon.count("POST /v1/audio/voices"), 0);
+
+        let resp = post_voice(&state, loopback(), loopback_agent_headers(), "amy")
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert_eq!(
+            json_body(resp).await,
+            json!({"voice": "amy", "duration": 6.2, "models": ["clones"]})
+        );
+        assert_eq!(daemon.count("POST /v1/audio/voices"), 1);
+
+        let taken = audio::stub::Stub::serve(0, |_, _| {
+            audio::stub::Reply::Json(
+                409,
+                r#"{"error":{"message":"a voice named \"amy\" already exists","type":"invalid_request_error","code":"voice_exists","param":"name"}}"#
+                    .to_string(),
+            )
+        });
+        let _config = listen_config(
+            cfg.path(),
+            Some(json!({"engine": "naru-audio", "url": taken.url()})),
+        );
+        let err = post_voice(&state, loopback(), loopback_agent_headers(), "amy")
+            .await
+            .unwrap_err();
+        assert_eq!((err.status, err.code), (StatusCode::CONFLICT, "conflict"));
+        assert_eq!(
+            err.message,
+            "naru-audio refused the voice: a voice named \"amy\" already exists"
+        );
+        unsafe { std::env::remove_var("MESA_CONFIG_FILE") };
     }
 
     /// mesa task 1389, the acceptance run on `audio.engine = "naru-audio"`:

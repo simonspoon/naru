@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   addLiveMemory,
+  addVoice,
   deleteLiveMemory,
   getConfig,
   getKeymap,
@@ -133,6 +134,13 @@ import {
   savedEngine as savedAudioEngine,
   type AudioDraft,
 } from '../audioDraft'
+import { toBase64 } from '../liveAudio'
+import {
+  CLIP_ACCEPT,
+  addedNote,
+  cloneReady,
+  nameError as cloneNameError,
+} from '../voiceClone'
 import {
   changedLive,
   draftFrom as liveDraftFrom,
@@ -1123,6 +1131,17 @@ function SpeechSection() {
   // Inbox page's play button.
   const [playing, setPlaying] = useState(false)
   const [sampleError, setSampleError] = useState(false)
+  // Adding a cloned voice (mesa task 1418) — offered only when the saved
+  // audio engine is naru-audio; the legacy synthesiser clones nothing.
+  const audio = useFetch(() => getAudio(), 'speech-audio')
+  const [cloneName, setCloneName] = useState('')
+  const [cloneText, setCloneText] = useState('')
+  const [clip, setClip] = useState<File | null>(null)
+  // Remounts the file input to clear it after a success.
+  const [clipKey, setClipKey] = useState(0)
+  const [cloning, setCloning] = useState(false)
+  const [cloneError, setCloneError] = useState<string | null>(null)
+  const [cloneNote, setCloneNote] = useState<string | null>(null)
 
   const seeded: SpeechDraft =
     draft ?? (speech ? speechDraftFrom(speech) : { voice: '', model: '' })
@@ -1174,6 +1193,34 @@ function SpeechSection() {
         ? null
         : { voice: seeded.voice, model: seeded.model, nonce: Date.now() },
     )
+  }
+
+  // Sends the clip, then refetches the drafted model's voices so the new one
+  // shows — the draft and the saved voice and model are left alone.
+  async function addClone() {
+    if (!clip) return
+    setCloning(true)
+    setCloneError(null)
+    setCloneNote(null)
+    try {
+      const bytes = new Uint8Array(await clip.arrayBuffer())
+      const added = await addVoice(cloneName.trim(), cloneText.trim(), toBase64(bytes))
+      const asked = seeded.model.trim()
+      const fresh = await getSpeech(asked).then(
+        (s) => s.voices,
+        () => [] as string[],
+      )
+      setVoicesFor({ model: asked, voices: fresh })
+      setCloneNote(addedNote(added, fresh))
+      setCloneName('')
+      setCloneText('')
+      setClip(null)
+      setClipKey((k) => k + 1)
+    } catch (e: unknown) {
+      setCloneError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setCloning(false)
+    }
   }
 
   function save() {
@@ -1315,6 +1362,67 @@ function SpeechSection() {
           <p className="error">could not play a sample in this voice</p>
         )}
       </section>
+
+      {audio.data && savedAudioEngine(audio.data) === 'naru-audio' && (
+        <section className="settings-command">
+          <label htmlFor="clone-name">
+            <span className="settings-command-title">Add a cloned voice</span>
+          </label>
+          <p className="muted settings-command-blurb">
+            A short clip of one person speaking — WAV or MP3, about 5–15
+            seconds — and exactly what they say in it. <code>naru-audio</code>{' '}
+            copies the voice; a cloning model then speaks in it. Only clone a
+            voice you have permission to use.
+          </p>
+          <div className="settings-voice-row">
+            <input
+              id="clone-name"
+              type="text"
+              className="settings-voice-input"
+              spellCheck={false}
+              placeholder="name, e.g. amy"
+              value={cloneName}
+              onChange={(e) => setCloneName(e.target.value)}
+            />
+            <input
+              key={clipKey}
+              type="file"
+              accept={CLIP_ACCEPT}
+              aria-label="voice clip"
+              onChange={(e) => setClip(e.target.files?.[0] ?? null)}
+            />
+          </div>
+          <textarea
+            className="settings-voice-input"
+            aria-label="what the clip says"
+            placeholder="Exactly what the clip says"
+            rows={3}
+            value={cloneText}
+            onChange={(e) => setCloneText(e.target.value)}
+          />
+          {cloneName.trim() !== '' && cloneNameError(cloneName) && (
+            <p className="error">{cloneNameError(cloneName)}</p>
+          )}
+          <div className="settings-actions">
+            <button
+              type="button"
+              disabled={
+                cloning ||
+                !cloneReady({
+                  name: cloneName,
+                  text: cloneText,
+                  hasClip: clip !== null,
+                })
+              }
+              onClick={() => void addClone()}
+            >
+              {cloning ? 'adding…' : 'add voice'}
+            </button>
+            {cloneNote && <span className="settings-saved">{cloneNote}</span>}
+          </div>
+          {cloneError && <p className="error">{cloneError}</p>}
+        </section>
+      )}
 
       {/* One player, unmounted to stop — the same shape (and the same
           `AbortError` caveat) as the Inbox page's, so a browser that refuses

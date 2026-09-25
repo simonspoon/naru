@@ -43,6 +43,7 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 
 use crate::core::audio::{self, TtlCache};
+use crate::core::types::AddedVoice;
 
 /// Bytes read from the synthesiser per chunk. Chunks are the unit the response
 /// body is written in, so this trades syscalls against how promptly the first
@@ -208,7 +209,6 @@ const MAX_VOICES: usize = 500;
 /// (`list_names` → `spawn_and_drain`), so a `--list-voices` that answers with
 /// megabytes of noise costs one capped buffer, never an unbounded one.
 pub fn voices(model: Option<&str>) -> Vec<String> {
-    static VOICES: TtlCache<Vec<String>> = TtlCache::new();
     let daemon = audio::daemon_url();
     let key = match &daemon {
         Some(url) => format!("{url} {}", model.unwrap_or_default()),
@@ -234,6 +234,67 @@ pub fn voices(model: Option<&str>) -> Vec<String> {
             },
         )
         .0
+}
+
+/// [`voices`]' cache, module-level so [`add_voice`] can drop it.
+static VOICES: TtlCache<Vec<String>> = TtlCache::new();
+
+/// Why a cloned voice was not added (mesa task 1418), each with the sentence
+/// to show.
+#[derive(Debug, PartialEq)]
+pub enum AddVoiceError {
+    /// The engine is not naru-audio, or the name is taken.
+    Conflict(String),
+    /// A name, clip or transcript Naru or the daemon will not take.
+    Validation(String),
+    /// The daemon did not answer usably.
+    Unavailable(String),
+}
+
+/// Adds the cloned voice `name` to the naru-audio daemon from `clip` and its
+/// transcript `text` (mesa task 1418, [`audio::add_voice`]). Only on
+/// `audio.engine = "naru-audio"`: the legacy synthesiser clones nothing.
+/// `name` must pass [`is_voice_name`] — the daemon would take more, but
+/// [`voices`] filters on that rule, so a looser name would be added and never
+/// offered. On success the voice cache is dropped, so the next list asks the
+/// daemon, and the answer names the text-to-speech models that now list the
+/// voice — only a cloning model does, so the page can say which to pick.
+/// Blocking.
+pub fn add_voice(name: &str, text: &str, clip: &[u8]) -> Result<AddedVoice, AddVoiceError> {
+    let Some(url) = audio::daemon_url() else {
+        return Err(AddVoiceError::Conflict(
+            "adding a cloned voice needs the naru-audio engine; \
+             the legacy synthesiser has no cloned voices"
+                .to_string(),
+        ));
+    };
+    if !is_voice_name(name) {
+        return Err(AddVoiceError::Validation(format!(
+            "voice name {name:?} must be 1-64 letters, digits, '_' or '-', starting with a letter or digit"
+        )));
+    }
+    if text.trim().is_empty() {
+        return Err(AddVoiceError::Validation(
+            "the transcript must not be empty".to_string(),
+        ));
+    }
+    let duration = audio::add_voice(&url, name, text.trim(), clip).map_err(|e| match e {
+        audio::AddVoiceError::Exists(m) => AddVoiceError::Conflict(m),
+        audio::AddVoiceError::Rejected(m) => AddVoiceError::Validation(m),
+        audio::AddVoiceError::Unavailable(m) => AddVoiceError::Unavailable(m),
+    })?;
+    VOICES.invalidate();
+    let models = audio::tts_models(&url)
+        .into_iter()
+        .filter(|m| crate::core::listen::is_model_name(m))
+        .take(MAX_MODELS)
+        .filter(|m| audio::voices(&url, Some(m)).iter().any(|v| v == name))
+        .collect();
+    Ok(AddedVoice {
+        voice: name.to_string(),
+        duration,
+        models,
+    })
 }
 
 /// The most text-to-speech models [`models`] will report — the bound

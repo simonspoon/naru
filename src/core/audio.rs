@@ -679,28 +679,44 @@ fn quoted(message: &str) -> Option<&str> {
 }
 
 /// A `multipart/form-data` body for `POST /v1/audio/transcriptions`: the
-/// recording as `file`, then `model` and `response_format=json` (§2.2). Built
-/// by hand — Naru's `ureq` has no multipart feature, and three fields do not
-/// need one. The boundary is lengthened until the recording does not contain
-/// it; `model` is a checked model name or `default`, so it cannot.
+/// recording as `file`, then `model` and `response_format=json` (§2.2).
 fn multipart(wav: &[u8], model: &str) -> (String, Vec<u8>) {
+    form_data(
+        ("audio.wav", "audio/wav", wav),
+        &[("model", model), ("response_format", "json")],
+    )
+}
+
+/// A `multipart/form-data` body: `file` as the part named `file` (its
+/// filename, content type and bytes), then each of `fields` as a text part.
+/// Built by hand — Naru's `ureq` has no multipart feature, and a few fields
+/// do not need one. The boundary is lengthened until neither the file nor
+/// any field value contains it.
+fn form_data(file: (&str, &str, &[u8]), fields: &[(&str, &str)]) -> (String, Vec<u8>) {
+    let (filename, content_type, bytes) = file;
     let mut boundary = format!("naru-audio-{:x}", unix_nanos());
-    while wav
-        .windows(boundary.len())
-        .any(|w| w == boundary.as_bytes())
+    let contains = |haystack: &[u8], boundary: &str| {
+        haystack
+            .windows(boundary.len())
+            .any(|w| w == boundary.as_bytes())
+    };
+    while contains(bytes, &boundary)
+        || fields
+            .iter()
+            .any(|(_, v)| contains(v.as_bytes(), &boundary))
     {
         boundary.push('x');
     }
-    let mut body = Vec::with_capacity(wav.len() + 512);
+    let mut body = Vec::with_capacity(bytes.len() + 512);
     body.extend_from_slice(
         format!(
             "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; \
-             filename=\"audio.wav\"\r\nContent-Type: audio/wav\r\n\r\n"
+             filename=\"{filename}\"\r\nContent-Type: {content_type}\r\n\r\n"
         )
         .as_bytes(),
     );
-    body.extend_from_slice(wav);
-    for (name, value) in [("model", model), ("response_format", "json")] {
+    body.extend_from_slice(bytes);
+    for (name, value) in fields {
         body.extend_from_slice(
             format!(
                 "\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}"
@@ -878,6 +894,102 @@ pub fn voices(url: &str, model: Option<&str>) -> Vec<String> {
         .and_then(|body| serde_json::from_str::<List>(&body).ok())
         .map(|l| l.voices.into_iter().map(|v| v.id).collect())
         .unwrap_or_default()
+}
+
+/// How long `POST /v1/audio/voices` may take, connect to answer. The daemon
+/// writes the upload, converts it with `afconvert` and checks its length
+/// before it answers (§2.5) — seconds for a clip of at most 30 s.
+const ADD_VOICE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Why the daemon did not add a cloned voice (mesa task 1418), each with the
+/// sentence to show — on a refusal, the daemon's own `error.message`.
+#[derive(Debug, PartialEq)]
+pub enum AddVoiceError {
+    /// 409 `voice_exists`: the name is taken, and nothing was replaced.
+    Exists(String),
+    /// 400, 413 or 415: a name, clip or transcript the daemon will not take.
+    Rejected(String),
+    /// No answer, a timeout, a 5xx, or an answer that is not the daemon's.
+    Unavailable(String),
+}
+
+/// Adds the cloned voice `name` to the daemon at `url` from `clip` (audio
+/// `afconvert` reads — WAV, MP3 — of 3–30 s) and `text`, what the clip says
+/// (`POST /v1/audio/voices`, multipart, design §2.5). `Ok` is the clip's
+/// length in seconds when the daemon reports it. Blocking.
+pub fn add_voice(
+    url: &str,
+    name: &str,
+    text: &str,
+    clip: &[u8],
+) -> Result<Option<f64>, AddVoiceError> {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(ADD_VOICE_TIMEOUT))
+        .http_status_as_error(false)
+        .proxy(None)
+        .max_redirects(0)
+        .build()
+        .into();
+    let (content_type, body) = form_data(
+        ("clip", "application/octet-stream", clip),
+        &[("name", name), ("text", text)],
+    );
+    let answer = agent
+        .post(format!("{}{VOICES_PATH}", url.trim_end_matches('/')))
+        .header("Content-Type", content_type)
+        .send(&body[..])
+        .and_then(|mut response| {
+            let status = response.status().as_u16();
+            let body = response
+                .body_mut()
+                .with_config()
+                .limit(ANSWER_CAP)
+                .read_to_string()?;
+            Ok((status, body))
+        });
+    let (status, body) = answer.map_err(|e| {
+        AddVoiceError::Unavailable(match e {
+            ureq::Error::Timeout(_) => format!(
+                "naru-audio did not answer {VOICES_PATH} within {} s",
+                ADD_VOICE_TIMEOUT.as_secs()
+            ),
+            ureq::Error::Io(_) | ureq::Error::ConnectionFailed | ureq::Error::HostNotFound => {
+                invalidate();
+                format!(
+                    "naru-audio isn't running at {url}. \
+                     Start it with `brew services start naru-audio`."
+                )
+            }
+            other => format!("naru-audio could not add the voice: {other}"),
+        })
+    })?;
+    if (200..300).contains(&status) {
+        #[derive(Deserialize)]
+        struct Added {
+            #[serde(rename = "id")]
+            _id: String,
+            #[serde(default)]
+            duration: Option<f64>,
+        }
+        return serde_json::from_str::<Added>(&body)
+            .map(|a| a.duration)
+            .map_err(|_| {
+                AddVoiceError::Unavailable(format!(
+                    "{VOICES_PATH} answered HTTP {status} with a body that is not its JSON"
+                ))
+            });
+    }
+    let message = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v["error"]["message"].as_str().map(str::to_string))
+        .unwrap_or_else(|| format!("{VOICES_PATH} answered HTTP {status}"));
+    Err(match status {
+        409 => AddVoiceError::Exists(format!("naru-audio refused the voice: {message}")),
+        400 | 413 | 415 => {
+            AddVoiceError::Rejected(format!("naru-audio refused the voice: {message}"))
+        }
+        _ => AddVoiceError::Unavailable(format!("naru-audio could not add the voice: {message}")),
+    })
 }
 
 /// `GET {url}{path}`'s body when it answered 2xx within [`LIST_TIMEOUT`].
@@ -1561,6 +1673,82 @@ mod tests {
             .unwrap();
         assert!(!wav.contains(used), "{used} is inside the recording");
         assert!(body.starts_with(format!("--{used}\r\n").as_bytes()));
+    }
+
+    /// Adding a cloned voice (mesa task 1418, design §2.5): one multipart
+    /// body carrying the clip byte-identical as `file` beside `name` and
+    /// `text`, and the daemon's 201 read back as the clip's length.
+    #[test]
+    fn add_voice_posts_name_clip_and_text_as_multipart() {
+        let stub = Stub::serve(0, |method, path| {
+            assert_eq!((method, path), ("POST", VOICES_PATH));
+            stub::Reply::Json(
+                201,
+                r#"{"id":"amy","accent":null,"gender":null,"default":false,"duration":6.2}"#
+                    .to_string(),
+            )
+        });
+        let clip = b"ID3\x04\x00mp3-bytes\r\n--not-a-boundary";
+        assert_eq!(
+            add_voice(&stub.url(), "amy", "Hello there, this is Amy.", clip),
+            Ok(Some(6.2))
+        );
+        let requests = stub.requests.lock().unwrap();
+        let sent = &requests[0];
+        assert!(
+            sent.starts_with("POST /v1/audio/voices --naru-audio-"),
+            "{sent}"
+        );
+        for part in [
+            "name=\"file\"; filename=\"clip\"\r\nContent-Type: application/octet-stream\r\n\r\n\
+             ID3\u{4}\u{0}mp3-bytes\r\n--not-a-boundary\r\n--naru-audio-",
+            "name=\"name\"\r\n\r\namy\r\n",
+            "name=\"text\"\r\n\r\nHello there, this is Amy.\r\n",
+        ] {
+            assert!(sent.contains(part), "{part:?} missing from {sent:?}");
+        }
+    }
+
+    /// The daemon's refusals keep its own message: a taken name is
+    /// `Exists`, a clip it cannot read `Rejected`, a 5xx `Unavailable`.
+    #[test]
+    fn add_voice_passes_the_daemons_refusals_through() {
+        for (status, code, message, want) in [
+            (
+                409,
+                "voice_exists",
+                "the voice \\\"amy\\\" already exists",
+                0,
+            ),
+            (
+                415,
+                "unsupported_media_type",
+                "the clip is not audio afconvert can read",
+                1,
+            ),
+            (
+                400,
+                "invalid_request",
+                "the clip is 1.2 s long; it must be 3-30 s",
+                1,
+            ),
+            (500, "internal", "disk full", 2),
+        ] {
+            let body = format!(
+                r#"{{"error":{{"message":"{message}","type":"x","code":"{code}","param":null}}}}"#
+            );
+            let stub = Stub::serve(0, move |_, _| stub::Reply::Json(status, body.clone()));
+            let got = add_voice(&stub.url(), "amy", "hi", b"RIFF");
+            let shown = message.replace("\\\"", "\"");
+            let expected = match want {
+                0 => AddVoiceError::Exists(format!("naru-audio refused the voice: {shown}")),
+                1 => AddVoiceError::Rejected(format!("naru-audio refused the voice: {shown}")),
+                _ => AddVoiceError::Unavailable(format!(
+                    "naru-audio could not add the voice: {shown}"
+                )),
+            };
+            assert_eq!(got, Err(expected), "HTTP {status}");
+        }
     }
 
     /// Silence is the daemon's 200 `{"text":""}`, and a success.

@@ -403,6 +403,21 @@ pub struct ConfigSpeech {
     pub models: Vec<String>,
 }
 
+/// A cloned voice just added to naru-audio (mesa task 1418,
+/// `POST /api/config/speech/voices`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct AddedVoice {
+    /// The voice's id — the name it was added under.
+    pub voice: String,
+    /// The clip's length in seconds, as the daemon measured it.
+    pub duration: Option<f64>,
+    /// The text-to-speech models whose voice list now has it. Only a model
+    /// that clones lists cloned voices, so this is where it can be picked;
+    /// empty when Naru could not ask.
+    pub models: Vec<String>,
+}
+
 /// The listen settings as the Settings page sees them (`core::config`,
 /// `docs/config.md`, mesa task 955) — the input-side mirror of
 /// [`ConfigSpeech`]: the model the external `auris` speech-to-text binary is

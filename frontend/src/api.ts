@@ -28,6 +28,7 @@ import type { ConfigCommand } from './types/ConfigCommand'
 import type { ConfigKeymap } from './types/ConfigKeymap'
 import type { ConfigPrice } from './types/ConfigPrice'
 import type { ConfigSpeech } from './types/ConfigSpeech'
+import type { AddedVoice } from './types/AddedVoice'
 import type { ConfigListen } from './types/ConfigListen'
 import type { ConfigAudio } from './types/ConfigAudio'
 import type { TranscribeStatus } from './types/TranscribeStatus'
@@ -1343,6 +1344,25 @@ export function updateSpeech(
   speech: Record<string, string | null>,
 ): Promise<ConfigSpeech> {
   return request('/api/config/speech', jsonInit('PUT', speech))
+}
+
+/**
+ * Adds a cloned voice to naru-audio (mesa task 1418): `name`, the clip as
+ * base64 (WAV or MP3, ~5–15 s of one speaker) and `text`, exactly what the
+ * clip says. Base64 in JSON, like `transcribeAudio`, so the route stays inside
+ * the Content-Type gate. 409 `conflict` is the legacy engine or a taken name,
+ * 422 `validation` a name, clip or transcript refused, 502 `unavailable` a
+ * daemon that did not answer — each carrying the daemon's own message.
+ */
+export function addVoice(
+  name: string,
+  text: string,
+  clipBase64: string,
+): Promise<AddedVoice> {
+  return request(
+    '/api/config/speech/voices',
+    jsonInit('POST', { name, text, clip_base64: clipBase64 }),
+  )
 }
 
 /**

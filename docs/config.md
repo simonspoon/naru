@@ -734,6 +734,26 @@ in, and is modelled exactly on `voice` below; see "The model" after the list.
   same synthesis. `model` is the drafted text-to-speech model under the same
   rules (shape-checked, blank/absent = naru-audio's default, ignored by the
   legacy engine).
+- `POST /api/config/speech/voices`, body `{"name", "text", "clip_base64"}` →
+  **201** `AddedVoice` `{voice, duration, models}` (mesa task 1418): adds a
+  cloned voice to naru-audio by forwarding the clip (WAV or MP3 — anything the
+  daemon's `afconvert` reads, 3–30 s, 5–15 s best) and its transcript to the
+  daemon's multipart `POST /v1/audio/voices`. Base64 in JSON rather than
+  multipart so the route stays inside the Content-Type gate; gated and
+  body-limited exactly like `POST /api/live/transcribe` (`require_agent_access`
+  + `require_same_site_fetch`, invalid/empty base64 **422**, a clip over
+  `LIVE_AUDIO_MAX` **413**). On the **legacy** engine it is **409 `conflict`**
+  and nothing is contacted. `name` must pass the voice shape rule (**422**
+  otherwise — the daemon takes looser names, but the voice list filters on
+  this rule, so such a voice could never be picked) and `text` must be
+  non-blank. The daemon's answers keep its own `error.message`: a taken name
+  is **409 `conflict`** (an existing voice is never replaced), a bad name,
+  clip or transcript (400/413/415) **422 `validation`**, and no answer, a
+  timeout (60 s) or a 5xx **502 `unavailable`**. On success the cached voice
+  list is dropped, and `models` names the text-to-speech models whose voice
+  list now has the voice — only a **cloning** model lists cloned voices
+  (e.g. `qwen3-tts-0.6b-base-mlx`), so a non-cloning model never offers it.
+  Nothing else is written: the default engine, voice and model are untouched.
 
 The Settings page's **Voice** tab shows a **Model** picker above the voice
 only when `models` is non-empty — i.e. on naru-audio — and hides it on the
@@ -741,6 +761,12 @@ legacy engine. Changing the model refetches `GET /api/config/speech?model=`
 for that model's voices and keeps the drafted voice only when the new list
 has it (blank — the model's default voice — otherwise); the pure rules live in
 `frontend/src/speechDraft.ts`.
+On naru-audio (the **saved** `audio.engine`) the tab also offers **Add a
+cloned voice** — name, clip, transcript and a note to clone only a voice you
+have permission to use. After a success it refetches the drafted model's
+voices, leaving the draft and the saved settings alone, and says either to
+pick the new voice or which cloning model to pick first; a failure shows the
+message verbatim. The rules live in `frontend/src/voiceClone.ts`.
 
 ## Live
 
