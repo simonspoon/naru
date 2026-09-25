@@ -191,7 +191,9 @@ const MAX_VOICES: usize = 500;
 /// On `audio.engine = "naru-audio"` (mesa task 1389) the list is the
 /// daemon's voices instead ([`audio::voices`], read from the model's
 /// manifest) and `kokoro-rs` is never run; the shape rule and the bound
-/// below still apply.
+/// below still apply. There the list is `model`'s (mesa task 1425) — the
+/// daemon's default text-to-speech model when `None`; `kokoro-rs` has one
+/// model, so the legacy engine ignores it.
 ///
 /// Cached with a TTL ([`audio::TtlCache`], mesa task 1388): 10 s for a
 /// non-empty answer, 2 s for an empty one, keyed on the binary path (or the
@@ -205,17 +207,20 @@ const MAX_VOICES: usize = 500;
 /// `audio`'s 2 s list timeout instead). Both of the child's pipes are bounded
 /// (`list_names` → `spawn_and_drain`), so a `--list-voices` that answers with
 /// megabytes of noise costs one capped buffer, never an unbounded one.
-pub fn voices() -> Vec<String> {
+pub fn voices(model: Option<&str>) -> Vec<String> {
     static VOICES: TtlCache<Vec<String>> = TtlCache::new();
     let daemon = audio::daemon_url();
-    let key = daemon.clone().unwrap_or_else(kokoro_bin);
+    let key = match &daemon {
+        Some(url) => format!("{url} {}", model.unwrap_or_default()),
+        None => kokoro_bin(),
+    };
     VOICES
         .get(
             &key,
             Instant::now(),
             |v| audio::list_ttl(v),
             || match &daemon {
-                Some(url) => audio::voices(url)
+                Some(url) => audio::voices(url, model)
                     .into_iter()
                     .filter(|v| is_voice_name(v))
                     .take(MAX_VOICES)
@@ -226,6 +231,36 @@ pub fn voices() -> Vec<String> {
                     is_voice_name,
                     MAX_VOICES,
                 ),
+            },
+        )
+        .0
+}
+
+/// The most text-to-speech models [`models`] will report — the bound
+/// `listen::MAX_MODELS` sets for the recognizer, for the same reason.
+const MAX_MODELS: usize = 50;
+
+/// The text-to-speech models the naru-audio daemon offers (`GET /v1/models`,
+/// `x_kind == "tts"`, mesa task 1425), so the Settings page can pick one
+/// beside the voice. Always empty on the legacy engine: `kokoro-rs` has one
+/// model and no way to name another. Empty on naru-audio means "Naru could
+/// not ask", as for [`voices`]; cached the same way, keyed on the daemon URL.
+pub fn models() -> Vec<String> {
+    static MODELS: TtlCache<Vec<String>> = TtlCache::new();
+    let Some(url) = audio::daemon_url() else {
+        return Vec::new();
+    };
+    MODELS
+        .get(
+            &url,
+            Instant::now(),
+            |m| audio::list_ttl(m),
+            || {
+                audio::tts_models(&url)
+                    .into_iter()
+                    .filter(|m| crate::core::listen::is_model_name(m))
+                    .take(MAX_MODELS)
+                    .collect()
             },
         )
         .0
@@ -280,7 +315,8 @@ impl Speech {
 }
 
 /// Starts synthesising `text` in `voice` with the engine `audio.engine`
-/// names, read on every call: the naru-audio daemon (mesa task 1389,
+/// names, read on every call — in `model` on naru-audio (mesa task 1425;
+/// `None` is the daemon's default, and `kokoro-rs` never sees it): the naru-audio daemon (mesa task 1389,
 /// [`audio::speak`] — `kokoro-rs` never run) or `kokoro-rs`
 /// ([`start_kokoro`]). Blocks only until the audio has started, and streams
 /// it from there. `Err` is a synthesiser that produced no usable audio — the
@@ -297,10 +333,10 @@ impl Speech {
 /// did before the engine existed.
 ///
 /// Blocking: call it from `spawn_blocking`, not an async worker.
-pub fn start(text: &str, voice: Option<&str>) -> Result<Speech, String> {
+pub fn start(text: &str, voice: Option<&str>, model: Option<&str>) -> Result<Speech, String> {
     match audio::daemon_url() {
         Some(url) => {
-            let body = audio::speak(&url, text, voice)?;
+            let body = audio::speak(&url, text, voice, model)?;
             Ok(Speech {
                 chunks: relay(body),
             })
@@ -746,7 +782,9 @@ mod tests {
         let _guard = legacy();
         // A binary that cannot exist: the spawn error path, no stub needed.
         unsafe { std::env::set_var("MESA_KOKORO_BIN", "mesa-no-such-tts-binary") };
-        let err = start("hello", None).err().expect("no binary, no speech");
+        let err = start("hello", None, None)
+            .err()
+            .expect("no binary, no speech");
         unsafe { std::env::remove_var("MESA_KOKORO_BIN") };
         assert!(err.contains("mesa-no-such-tts-binary"), "{err}");
     }
@@ -775,7 +813,7 @@ mod tests {
         );
 
         unsafe { std::env::set_var("MESA_KOKORO_BIN", &stub) };
-        let err = start("hello", None)
+        let err = start("hello", None, None)
             .err()
             .expect("failing binary, no speech");
         unsafe { std::env::remove_var("MESA_KOKORO_BIN") };
@@ -804,7 +842,7 @@ mod tests {
         );
 
         unsafe { std::env::set_var("MESA_KOKORO_BIN", &stub) };
-        let err = start("hello", None)
+        let err = start("hello", None, None)
             .err()
             .expect("oversized non-WAV stdout, no speech");
         unsafe { std::env::remove_var("MESA_KOKORO_BIN") };
@@ -885,6 +923,17 @@ mod tests {
                     {"id":"bm_george"},{"id":"-not-a-name"}]}"#
                     .to_string(),
             ),
+            "/v1/audio/voices?model=pocket-tts-int8" => audio::stub::Reply::Json(
+                200,
+                r#"{"model":"pocket-tts-int8","voices":[{"id":"alba"}]}"#.to_string(),
+            ),
+            "/v1/models" => audio::stub::Reply::Json(
+                200,
+                r#"{"object":"list","data":[{"id":"kokoro-v1.0","x_kind":"tts"},
+                    {"id":"parakeet-tdt-0.6b-v2-int8","x_kind":"stt"},
+                    {"id":"pocket-tts-int8","x_kind":"tts"}]}"#
+                    .to_string(),
+            ),
             _ => audio::stub::Reply::Aborted(sent.clone()),
         });
         let refusing = audio::stub::Stub::serve(0, |_, _| {
@@ -911,7 +960,7 @@ mod tests {
             std::env::set_var("MESA_KOKORO_BIN", &stub);
         }
         engine(&daemon.url());
-        let mut speech = start("hello there", None).expect("the daemon answered 200");
+        let mut speech = start("hello there", None, None).expect("the daemon answered 200");
         let mut got = Vec::new();
         let ending = loop {
             match speech.chunks.blocking_recv() {
@@ -919,9 +968,14 @@ mod tests {
                 other => break other,
             }
         };
-        let offered = voices();
+        let offered = voices(None);
+        let offered_for_model = voices(Some("pocket-tts-int8"));
+        let tts = models();
+        // A chosen model rides on the request (mesa task 1425); the stub
+        // aborts it, which is all this needs.
+        let modelled = start("hello there", Some("alba"), Some("pocket-tts-int8")).map(|_| ());
         engine(&refusing.url());
-        let refused = start("hello there", Some("af_heart")).err();
+        let refused = start("hello there", Some("af_heart"), None).err();
         unsafe { std::env::remove_var("MESA_KOKORO_BIN") };
 
         assert_eq!(got, audio_bytes, "the audio before the abort, untouched");
@@ -932,6 +986,28 @@ mod tests {
             r#"POST /v1/audio/speech {"input":"hello there","model":"default","response_format":"wav"}"#
         );
         assert_eq!(offered, vec!["af_heart", "bm_george"]);
+        assert_eq!(
+            offered_for_model,
+            vec!["alba"],
+            "the voices follow the model"
+        );
+        assert_eq!(
+            tts,
+            vec!["kokoro-v1.0", "pocket-tts-int8"],
+            "tts models only"
+        );
+        modelled.expect("the daemon answered 200");
+        assert!(
+            daemon
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|r| r.starts_with("POST /v1/audio/speech")
+                    && r.contains(r#""model":"pocket-tts-int8""#)
+                    && r.contains(r#""voice":"alba""#)),
+            "a chosen model is sent"
+        );
         assert_eq!(
             refused.as_deref(),
             Some(

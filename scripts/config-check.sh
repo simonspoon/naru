@@ -1022,6 +1022,56 @@ CODE=$(curl -s -o "$TMP/body" -w '%{http_code}' -X PUT -H 'Host: evil.example' \
 [ "$(cat "$CONFIG")" = "$BEFORE" ] || fail "a refused speech PUT must not touch the file"
 ok "both speech verbs sit behind the config routes' gate — a request that isn't from this machine's own page is refused, writing nothing"
 
+# The text-to-speech model (mesa task 1425), modelled on the voice: a second
+# key in the same section. Only naru-audio sends it, so on this legacy engine
+# it is offered no list (`models: []`), is stored like any well-shaped name,
+# and must leave the synthesiser's argv byte-identical.
+api GET /api/config/speech
+[ "$(jq -c '[.model, .models]' <<<"$STDOUT")" = '[null,[]]' ] ||
+  fail "an unconfigured model on the legacy engine must report null and no list: $STDOUT"
+api PUT /api/config/speech '{"voice": "bm_george", "model": "kokoro-v1.0"}'
+[ "$CODE" = "200" ] || fail "PUT speech model: expected 200, got $CODE: $STDOUT"
+[ "$(jq -c '[.voice, .model]' <<<"$STDOUT")" = '["bm_george","kokoro-v1.0"]' ] ||
+  fail "PUT must echo the stored voice and model: $STDOUT"
+[ "$(jq -c '.speech | [.voice, .model, length]' < "$CONFIG")" = '["bm_george","kokoro-v1.0",2]' ] ||
+  fail "PUT speech did not write the model beside the voice: $(cat "$CONFIG")"
+[ "$(jq -r '.other.x' < "$CONFIG")" = "1" ] ||
+  fail "a speech model write dropped a section it doesn't own: $(cat "$CONFIG")"
+speak "$ITEM_1"
+[ "$CODE" = "200" ] || fail "speak with a model on legacy: expected 200, got $CODE: $(cat "$TMP/audio")"
+[ "$(cat "$KOKORO_ARGV")" = "-q -o - -v bm_george" ] ||
+  fail "a speech model must never reach kokoro-rs's argv, got $(cat "$KOKORO_ARGV")"
+preview "?voice=af_bella&model=kokoro-v1.0"
+[ "$CODE" = "200" ] || fail "preview with a model on legacy: expected 200, got $CODE: $(cat "$TMP/audio")"
+[ "$(cat "$KOKORO_ARGV")" = "-q -o - -v af_bella" ] ||
+  fail "a preview model must never reach kokoro-rs's argv, got $(cat "$KOKORO_ARGV")"
+ok "PUT /api/config/speech stores a model beside the voice; the legacy engine's argv is byte-identical with one set"
+
+for RESET in 'null' '""'; do
+  api PUT /api/config/speech '{"model": "kokoro-v1.0"}'
+  [ "$CODE" = "200" ] || fail "PUT speech model before reset $RESET: got $CODE: $STDOUT"
+  api PUT /api/config/speech "{\"model\": $RESET}"
+  [ "$CODE" = "200" ] || fail "PUT speech model $RESET: expected 200, got $CODE: $STDOUT"
+  [ "$(jq -r '.model' <<<"$STDOUT")" = "null" ] ||
+    fail "PUT speech model $RESET must report no model, got $STDOUT"
+  [ "$(jq -c '.speech' < "$CONFIG")" = '{"voice":"bm_george"}' ] ||
+    fail "PUT speech model $RESET must remove only the model key: $(cat "$CONFIG")"
+done
+ok "PUT model null and model \"\" both remove the key, leaving the voice beside it"
+
+MBEFORE=$(cat "$CONFIG")
+for BAD in '-o' 'a b' 'kokoro; rm -rf /'; do
+  api PUT /api/config/speech "$(jq -n --arg v "$BAD" '{model: $v}')"
+  [ "$CODE" = "422" ] || fail "speech model $BAD: expected 422, got $CODE: $STDOUT"
+  [ "$(jq -r .error.code <<<"$STDOUT")" = "validation" ] ||
+    fail "speech model $BAD: expected code validation, got $STDOUT"
+done
+api GET "/api/config/speech?model=-o"
+[ "$CODE" = "422" ] || fail "GET speech ?model=-o: expected 422, got $CODE: $STDOUT"
+[ "$(cat "$CONFIG")" = "$MBEFORE" ] ||
+  fail "a rejected speech model PUT must not touch the file: $(cat "$CONFIG")"
+ok "a speech model that isn't a model name is 422 validation on PUT and on GET ?model=, writing nothing"
+
 # ---- the live section: GET/PUT /api/config/live (mesa task 867, 886, 919) ----
 #
 # The fifth section of the file. It used to hold two keys — the instruction

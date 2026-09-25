@@ -762,7 +762,9 @@ pub fn transcribe(url: &str, wav: &[u8], model: &str) -> Result<String, String> 
 }
 
 /// Starts speaking `text` with the daemon at `url`, in `voice` (omitted when
-/// `None`, so the daemon's default voice speaks) as a streamed WAV (§2.3).
+/// `None`, so the daemon's default voice speaks) and `model` (`default` when
+/// `None`, the daemon's own text-to-speech model, mesa task 1425) as a
+/// streamed WAV (§2.3).
 /// Returns once the headers are in — the daemon sends them after the first
 /// sentence is synthesised, so this is the last moment a failure can still
 /// be a status code — with the body still arriving. A failure before then
@@ -774,8 +776,10 @@ pub fn speak(
     url: &str,
     text: &str,
     voice: Option<&str>,
+    model: Option<&str>,
 ) -> Result<ureq::BodyReader<'static>, String> {
-    let fail = |failure| failed(Side::Speak, url, SPEECH_PATH, "default", failure);
+    let model = model.unwrap_or("default");
+    let fail = |failure| failed(Side::Speak, url, SPEECH_PATH, model, failure);
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_connect(Some(SPEAK_CONNECT_TIMEOUT))
         .timeout_recv_response(Some(SPEAK_START_TIMEOUT))
@@ -785,7 +789,7 @@ pub fn speak(
         .build()
         .into();
     let mut request = serde_json::json!({
-        "model": "default",
+        "model": model,
         "input": text,
         "response_format": "wav",
     });
@@ -816,6 +820,19 @@ pub fn speak(
 /// the `naru-audio pull` command, not one to hide. Empty on any failure:
 /// "Naru could not ask". Cached by the caller. Blocking.
 pub fn stt_models(url: &str) -> Vec<String> {
+    models_of_kind(url, "stt")
+}
+
+/// The ids of every text-to-speech model the daemon at `url` lists
+/// (`GET /v1/models`, `x_kind == "tts"`, mesa task 1425) — pulled or not,
+/// for the reason [`stt_models`] gives. Empty on any failure. Cached by the
+/// caller. Blocking.
+pub fn tts_models(url: &str) -> Vec<String> {
+    models_of_kind(url, "tts")
+}
+
+/// `GET /v1/models`' ids whose `x_kind` is `kind`.
+fn models_of_kind(url: &str, kind: &str) -> Vec<String> {
     #[derive(Deserialize)]
     struct List {
         data: Vec<Model>,
@@ -831,18 +848,20 @@ pub fn stt_models(url: &str) -> Vec<String> {
         .map(|l| {
             l.data
                 .into_iter()
-                .filter(|m| m.x_kind.as_deref() == Some("stt"))
+                .filter(|m| m.x_kind.as_deref() == Some(kind))
                 .map(|m| m.id)
                 .collect()
         })
         .unwrap_or_default()
 }
 
-/// The voice ids of the daemon's default speech model (`GET
-/// /v1/audio/voices`, read from its manifest without loading it, §2.5).
-/// Empty on any failure: "Naru could not ask". Cached by the caller.
-/// Blocking.
-pub fn voices(url: &str) -> Vec<String> {
+/// The voice ids of the daemon's text-to-speech `model` — its default one
+/// when `None` — (`GET /v1/audio/voices[?model=]`, read from the model's
+/// manifest without loading it, §2.5; the query mesa task 1425). `model` is
+/// a checked model name ([`crate::core::listen::is_model_name`]), so it
+/// needs no escaping. Empty on any failure: "Naru could not ask". Cached by
+/// the caller. Blocking.
+pub fn voices(url: &str, model: Option<&str>) -> Vec<String> {
     #[derive(Deserialize)]
     struct List {
         voices: Vec<Voice>,
@@ -851,7 +870,11 @@ pub fn voices(url: &str) -> Vec<String> {
     struct Voice {
         id: String,
     }
-    list(url, VOICES_PATH)
+    let path = match model {
+        Some(model) => format!("{VOICES_PATH}?model={model}"),
+        None => VOICES_PATH.to_string(),
+    };
+    list(url, &path)
         .and_then(|body| serde_json::from_str::<List>(&body).ok())
         .map(|l| l.voices.into_iter().map(|v| v.id).collect())
         .unwrap_or_default()
@@ -1562,7 +1585,7 @@ mod tests {
             Err(down_message(&url))
         );
         assert_eq!(
-            speak(&url, "hi", None).err(),
+            speak(&url, "hi", None, None).err(),
             Some(format!(
                 "Naru's voice isn't available: naru-audio isn't running at {url}. \
                  Start it with `brew services start naru-audio`."
@@ -1632,7 +1655,7 @@ mod tests {
             )
         });
         assert_eq!(
-            speak(&stub.url(), "long", None).err().as_deref(),
+            speak(&stub.url(), "long", None, None).err().as_deref(),
             Some(
                 "Naru's voice isn't available: naru-audio reported: input is 16385 \
                  characters; the cap is 16384"
@@ -1710,9 +1733,11 @@ mod tests {
             stt_models(&stub.url()),
             vec!["parakeet-tdt-0.6b-v2-int8", "whisper-small"]
         );
-        assert_eq!(voices(&stub.url()), vec!["af_heart", "bm_george"]);
+        assert_eq!(tts_models(&stub.url()), vec!["kokoro-v1.0"]);
+        assert_eq!(voices(&stub.url(), None), vec!["af_heart", "bm_george"]);
         let junk = Stub::start(0, "<html>");
         assert!(stt_models(&junk.url()).is_empty());
-        assert!(voices(&junk.url()).is_empty());
+        assert!(tts_models(&junk.url()).is_empty());
+        assert!(voices(&junk.url(), None).is_empty());
     }
 }

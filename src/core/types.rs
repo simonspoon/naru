@@ -389,8 +389,18 @@ pub struct ConfigSpeech {
     /// Every voice the installed `kokoro-rs` reports (`--list-voices`), so the
     /// editor can offer a list. **Empty means mesa could not ask** — a missing
     /// or uncooperative binary — never "there are no voices", so an empty list
-    /// is a reason to accept a typed name, not to refuse one.
+    /// is a reason to accept a typed name, not to refuse one. On naru-audio
+    /// these are the voices of the configured `model` — or of the one
+    /// `GET /api/config/speech?model=` named (mesa task 1425).
     pub voices: Vec<String>,
+    /// The configured text-to-speech model (mesa task 1425), or `null` when the
+    /// config says nothing — then naru-audio speaks in its own default model.
+    /// Only the naru-audio engine sends it.
+    pub model: Option<String>,
+    /// Every text-to-speech model naru-audio lists (`GET /v1/models`,
+    /// `x_kind == "tts"`). Always empty on the legacy engine — `kokoro-rs`
+    /// has one model — and empty on naru-audio when Naru could not ask.
+    pub models: Vec<String>,
 }
 
 /// The listen settings as the Settings page sees them (`core::config`,

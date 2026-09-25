@@ -1323,8 +1323,14 @@ export function updateKeymap(
  * not that there are none. 502 `unavailable` means the config file itself is
  * unreadable, exactly as for `getConfig`.
  */
-export function getSpeech(): Promise<ConfigSpeech> {
-  return request('/api/config/speech')
+export function getSpeech(model?: string): Promise<ConfigSpeech> {
+  // `model` (mesa task 1425) asks for that text-to-speech model's voices
+  // instead of the configured one's; blank is naru-audio's default model.
+  return request(
+    model === undefined
+      ? '/api/config/speech'
+      : `/api/config/speech?model=${encodeURIComponent(model)}`,
+  )
 }
 
 /**
@@ -1394,8 +1400,11 @@ export function updateAudio(
  * the synthesiser's own default. Synthesis runs on every request, so this is a
  * play action, not a cheap read.
  */
-export function speechPreviewUrl(voice: string): string {
-  return `/api/config/speech/preview?voice=${encodeURIComponent(voice)}`
+export function speechPreviewUrl(voice: string, model = ''): string {
+  // `model` is the drafted text-to-speech model (mesa task 1425); blank is
+  // naru-audio's default, and the legacy engine ignores it.
+  const query = `voice=${encodeURIComponent(voice)}&model=${encodeURIComponent(model)}`
+  return `/api/config/speech/preview?${query}`
 }
 
 /**

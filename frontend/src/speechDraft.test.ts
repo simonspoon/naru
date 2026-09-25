@@ -1,49 +1,126 @@
 import { describe, expect, it } from 'vitest'
 import {
   canPick,
+  canPickModel,
   changedSpeech,
   draftFrom,
   isDirty,
   isSavable,
+  modelError,
+  modelOptions,
   options,
   sampleButton,
   valueError,
+  voiceForModel,
 } from './speechDraft'
 import type { ConfigSpeech } from './types/ConfigSpeech'
 
 const VOICES = ['af_heart', 'bm_george', 'zf_xiaoni']
-const DEFAULTED: ConfigSpeech = { voice: null, voices: VOICES }
-const SET: ConfigSpeech = { voice: 'bm_george', voices: VOICES }
+const MODELS = ['kokoro-v1.0', 'pocket-tts-int8']
+const DEFAULTED: ConfigSpeech = {
+  voice: null,
+  voices: VOICES,
+  model: null,
+  models: [],
+}
+const SET: ConfigSpeech = {
+  voice: 'bm_george',
+  voices: VOICES,
+  model: null,
+  models: [],
+}
 /** What a machine with no synthesiser installed reports. */
-const NO_BINARY: ConfigSpeech = { voice: 'bm_george', voices: [] }
+const NO_BINARY: ConfigSpeech = {
+  voice: 'bm_george',
+  voices: [],
+  model: null,
+  models: [],
+}
+/** naru-audio, with a model chosen (mesa task 1425). */
+const DAEMON: ConfigSpeech = {
+  voice: 'bm_george',
+  voices: VOICES,
+  model: 'kokoro-v1.0',
+  models: MODELS,
+}
 
 describe('draftFrom', () => {
   it('renders an unconfigured voice blank and a configured one as text', () => {
-    expect(draftFrom(DEFAULTED)).toEqual({ voice: '' })
-    expect(draftFrom(SET)).toEqual({ voice: 'bm_george' })
+    expect(draftFrom(DEFAULTED)).toEqual({ voice: '', model: '' })
+    expect(draftFrom(SET)).toEqual({ voice: 'bm_george', model: '' })
+    expect(draftFrom(DAEMON)).toEqual({
+      voice: 'bm_george',
+      model: 'kokoro-v1.0',
+    })
   })
 
   it('reports a freshly loaded section as pristine', () => {
     expect(isDirty(DEFAULTED, draftFrom(DEFAULTED))).toBe(false)
     expect(isDirty(SET, draftFrom(SET))).toBe(false)
+    expect(isDirty(DAEMON, draftFrom(DAEMON))).toBe(false)
   })
 })
 
 describe('options', () => {
   it('offers a list only when the binary answered', () => {
-    expect(canPick(DEFAULTED)).toBe(true)
-    expect(canPick(NO_BINARY)).toBe(false)
+    expect(canPick(DEFAULTED.voices)).toBe(true)
+    expect(canPick(NO_BINARY.voices)).toBe(false)
   })
 
   it('keeps the binary order and adds nothing when the voice is listed', () => {
-    expect(options(SET)).toEqual(VOICES)
-    expect(options(DEFAULTED)).toEqual(VOICES)
+    expect(options(VOICES, 'bm_george')).toEqual(VOICES)
+    expect(options(VOICES, '')).toEqual(VOICES)
   })
 
   it('keeps a configured voice the binary no longer lists', () => {
     // Otherwise opening the list would silently rewrite a value nobody touched.
-    const retired: ConfigSpeech = { voice: 'am_gone', voices: VOICES }
-    expect(options(retired)).toEqual([...VOICES, 'am_gone'])
+    expect(options(VOICES, 'am_gone')).toEqual([...VOICES, 'am_gone'])
+  })
+})
+
+describe('models (mesa task 1425)', () => {
+  it('offers a model picker only when naru-audio listed models', () => {
+    expect(canPickModel(DAEMON)).toBe(true)
+    expect(canPickModel(SET)).toBe(false)
+  })
+
+  it('keeps the daemon order and a drafted model it does not list', () => {
+    expect(modelOptions(DAEMON, 'kokoro-v1.0')).toEqual(MODELS)
+    expect(modelOptions(DAEMON, '')).toEqual(MODELS)
+    expect(modelOptions(DAEMON, 'gone-1.0')).toEqual([...MODELS, 'gone-1.0'])
+  })
+
+  it('keeps the voice when the new model has it, else its default', () => {
+    expect(voiceForModel('bm_george', ['af_heart', 'bm_george'])).toBe(
+      'bm_george',
+    )
+    expect(voiceForModel('bm_george', ['alba'])).toBe('')
+    expect(voiceForModel('', ['alba'])).toBe('')
+  })
+
+  it('keeps the voice when the new list is empty — Naru could not ask', () => {
+    expect(voiceForModel('bm_george', [])).toBe('bm_george')
+  })
+
+  it('checks the model name shape, dots allowed, blank is the default', () => {
+    expect(modelError('')).toBeNull()
+    expect(modelError('kokoro-v1.0')).toBeNull()
+    expect(modelError('-o')).not.toBeNull()
+    expect(modelError('a b')).not.toBeNull()
+    expect(modelError('a'.repeat(65))).not.toBeNull()
+    expect(isSavable({ voice: '', model: '-o' })).toBe(false)
+  })
+
+  it('sends only the keys that changed, null for a cleared model', () => {
+    expect(
+      changedSpeech(DAEMON, { voice: 'bm_george', model: 'pocket-tts-int8' }),
+    ).toEqual({ model: 'pocket-tts-int8' })
+    expect(
+      changedSpeech(DAEMON, { voice: '', model: 'pocket-tts-int8' }),
+    ).toEqual({ voice: null, model: 'pocket-tts-int8' })
+    expect(changedSpeech(DAEMON, { voice: 'bm_george', model: '' })).toEqual({
+      model: null,
+    })
   })
 })
 
@@ -51,7 +128,7 @@ describe('valueError', () => {
   it('accepts blank — that is the default, not a mistake', () => {
     expect(valueError('')).toBeNull()
     expect(valueError('   ')).toBeNull()
-    expect(isSavable({ voice: '' })).toBe(true)
+    expect(isSavable({ voice: '', model: '' })).toBe(true)
   })
 
   it('accepts a voice name, trimmed', () => {
@@ -66,7 +143,7 @@ describe('valueError', () => {
     expect(valueError('af heart')).not.toBeNull()
     expect(valueError('af_heart; rm -rf /')).not.toBeNull()
     expect(valueError('a'.repeat(65))).not.toBeNull()
-    expect(isSavable({ voice: '-o' })).toBe(false)
+    expect(isSavable({ voice: '-o', model: '' })).toBe(false)
   })
 })
 
@@ -76,17 +153,17 @@ describe('changedSpeech', () => {
   })
 
   it('sends the new voice, trimmed', () => {
-    expect(changedSpeech(SET, { voice: ' af_heart ' })).toEqual({
+    expect(changedSpeech(SET, { voice: ' af_heart ', model: '' })).toEqual({
       voice: 'af_heart',
     })
   })
 
   it('sends null when the box is cleared — the reset', () => {
-    expect(changedSpeech(SET, { voice: '' })).toEqual({ voice: null })
+    expect(changedSpeech(SET, { voice: '', model: '' })).toEqual({ voice: null })
   })
 
   it('sends nothing the server would reject', () => {
-    expect(changedSpeech(SET, { voice: '-o' })).toEqual({})
+    expect(changedSpeech(SET, { voice: '-o', model: '' })).toEqual({})
   })
 })
 

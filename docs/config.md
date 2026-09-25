@@ -625,10 +625,14 @@ reads an item in (mesa task 822, `docs/inbox.md`).
 ```json
 {
   "speech": {
-    "voice": "bm_george"
+    "voice": "bm_george",
+    "model": "kokoro-v1.0"
   }
 }
 ```
+
+`model` (mesa task 1425) is the **text-to-speech model** naru-audio speaks
+in, and is modelled exactly on `voice` below; see "The model" after the list.
 
 - **Absent or blank ⇒ no `-v` at all.** Naru names no default
   voice of its own: with nothing configured the argv is byte-for-byte the one
@@ -668,25 +672,52 @@ reads an item in (mesa task 822, `docs/inbox.md`).
   and the next play uses it, no restart. A malformed config file is
   `unavailable` on the speak route too (503) rather than a guessed default.
 
+### The model (mesa task 1425)
+
+- **Absent or blank ⇒ no model is named**: the request carries naru-audio's
+  own `"model": "default"`, the daemon's `NARU_AUDIO_TTS_MODEL` — exactly
+  what every speak request sent before this key existed.
+- **Only naru-audio sends it.** Every speak path — the inbox play button,
+  a live turn, the Settings preview — passes it as the `model` field of
+  `POST {audio.url}/v1/audio/speech`. On the legacy engine it is stored but
+  never read: `kokoro-rs`'s argv is byte-identical with or without it.
+- **The list of models comes from the daemon**: `GET {audio.url}/v1/models`,
+  the entries with `x_kind == "tts"` (pulled or not, like the listen
+  section's speech-to-text list), filtered to model names and cached with the
+  same TTL (`core::speech::models`). Always `[]` on the legacy engine, and
+  `[]` on naru-audio means Naru could not ask — the membership check is then
+  skipped, exactly as for a voice.
+- **The voices follow the model.** On naru-audio the voice list is
+  `GET {audio.url}/v1/audio/voices?model=<model>` — the configured model's,
+  or the daemon default's when none is — so a voice saved alongside a model
+  is checked against *that* model's voices (the model in the same save, else
+  the stored one).
+- **A model is a model name** (`core::listen::is_model_name`: up to 64 ASCII
+  letters/digits/`_`/`-`/`.`, starting with a letter or digit), refused
+  otherwise at save time (`422`) and dropped on the read path, the voice's
+  split exactly: the editor sees the raw stored value, the daemon never does.
+
 ### Routes
 
-- `GET /api/config/speech` → `ConfigSpeech`: `{voice, voices}`, `voice` being
-  the override (`null` when unset) and `voices` what the installed binary
-  offers (`[]` when Naru couldn't ask — **not** an error, since the setting
-  must stay visible on a machine where the synthesiser isn't installed yet).
+- `GET /api/config/speech[?model=<name>]` → `ConfigSpeech`:
+  `{voice, voices, model, models}`, `voice`/`model` being the overrides
+  (`null` when unset), `voices` what the installed binary offers (`[]` when
+  Naru couldn't ask — **not** an error, since the setting must stay visible on
+  a machine where the synthesiser isn't installed yet) and `models` naru-audio's
+  text-to-speech models (`[]` on legacy). `?model=` picks whose voices
+  `voices` lists — absent is the configured model's, blank the daemon
+  default's, a name that model's (a non-name is **422 `validation`**) — which
+  is how the editor shows a drafted model's voices before saving it.
   Gated like the other config getters (`require_agent_access`); a malformed
   config is **502 `unavailable`**.
-- `PUT /api/config/speech`, body `{"voice": "<name>" | null}` → echoes the
-  getter. `null` **and** blank both remove the key, restoring the binary's own
-  voice. A name that isn't a voice — or, when Naru has a list, isn't on it —
+- `PUT /api/config/speech`, body `{"voice": "<name>" | null, "model":
+  "<name>" | null}` (each optional; an absent key is left alone) → echoes the
+  getter. `null` **and** blank both remove a key, restoring the default. A
+  name that isn't a voice (or model) — or, when Naru has a list, isn't on it —
   is **422 `validation`**, writing nothing. Gated with
   `require_agent_access`, the same posture as every other config write (mesa
   task 1021).
-
-There is deliberately **no Settings page UI** for this section — there never
-was one, and task 1054 did not add one. The routes exist so a future editor
-has something to talk to, and so the gate can drive the validation.
-- `GET /api/config/speech/preview?voice=<name>` → `audio/wav`, streamed, no
+- `GET /api/config/speech/preview?voice=<name>&model=<name>` → `audio/wav`, streamed, no
   `Content-Length`: the **test** button beside the picker (mesa task 824),
   which is how a voice is heard *before* it is saved. Two things make it a
   preview rather than a second way to play the stored setting: the voice comes
@@ -700,7 +731,16 @@ has something to talk to, and so the gate can drive the validation.
   that failure (**503 `unavailable`**) is a legitimate result of pressing test.
   Gated exactly like `/api/inbox/{id}/speak` — `require_agent_access` plus the
   `Origin`-independent half a no-cors `<audio src>` needs — since it is the
-  same synthesis.
+  same synthesis. `model` is the drafted text-to-speech model under the same
+  rules (shape-checked, blank/absent = naru-audio's default, ignored by the
+  legacy engine).
+
+The Settings page's **Voice** tab shows a **Model** picker above the voice
+only when `models` is non-empty — i.e. on naru-audio — and hides it on the
+legacy engine. Changing the model refetches `GET /api/config/speech?model=`
+for that model's voices and keeps the drafted voice only when the new list
+has it (blank — the model's default voice — otherwise); the pure rules live in
+`frontend/src/speechDraft.ts`.
 
 ## Live
 
@@ -1112,7 +1152,13 @@ reaching the synthesiser's argv as `-v <voice>` on the very next press, `null`
 `-v` at all, a voice that isn't a bounded identifier and a well-shaped one the
 binary never offered both 422 writing nothing, 502 on a malformed file, each
 of the other four savers preserving `speech` and vice versa, and both verbs
-refused to a request that isn't from this machine's own page. The **preview**
+refused to a request that isn't from this machine's own page. The `model` key
+(mesa task 1425) is covered on the legacy engine: `null`/`[]` when unset, a
+round trip beside the voice, `null` and `""` removing only the model, a
+non-name 422 on `PUT` and on `GET ?model=`, and the synthesiser's argv (speak
+and preview) byte-identical with a model set; the naru-audio half (the model
+on the request, the voices following it) is `core::speech`'s and
+`core::config`'s Rust tests against a stub daemon. The **preview**
 route is `scripts/api-check.sh`'s, beside the speak route whose contract and
 gate it shares (5c): Naru's own sentence on stdin, the query's voice as one
 argv after `-v`, no `-v` for a blank one, and an option-shaped name refused

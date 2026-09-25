@@ -2051,7 +2051,9 @@ fn validate_limit(key: &str, value: &serde_json::Value, max: u32) -> Result<(), 
 pub const VOICE: &str = "voice";
 
 /// Every key the `speech` section understands, for the unknown-key error.
-const SPEECH_KEYS: &[&str] = &[VOICE];
+/// [`MODEL`] is the text-to-speech model naru-audio speaks in (mesa task
+/// 1425) — the listen section's key name, in this section.
+const SPEECH_KEYS: &[&str] = &[VOICE, MODEL];
 
 /// The `speech` map, deserialized on its own for the reason every other
 /// section is: four independent features share one file, and a broken value in
@@ -2067,6 +2069,8 @@ struct SpeechConfig {
 struct SpeechSection {
     #[serde(default)]
     voice: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
 }
 
 fn read_speech(path: &Path) -> Result<SpeechSection, String> {
@@ -2099,26 +2103,59 @@ fn speech_voice_in(path: &Path) -> Result<Option<String>, String> {
         .filter(|v| speech::is_voice_name(v)))
 }
 
-/// The speech settings for the Settings page (`GET /api/config/speech`): the
-/// configured voice (`null` when the file says nothing) plus the voices the
-/// installed synthesiser offers, so the editor can be a list rather than a
-/// magic string. An empty `voices` is "mesa could not ask the binary" — the
-/// editor still has to accept a typed name then.
-pub fn speech() -> Result<ConfigSpeech, String> {
-    speech_in(&config_file())
+/// The configured text-to-speech model, or `None` for "naru-audio's own
+/// default" (mesa task 1425). The [`speech_voice`] rule exactly — read on
+/// every press, blank or misshapen is `None`, an unreadable file `Err` — with
+/// the model-name shape rule ([`listen::is_model_name`]). Only the naru-audio
+/// engine sends it; `kokoro-rs` never sees it.
+pub fn speech_model() -> Result<Option<String>, String> {
+    speech_model_in(&config_file())
 }
 
-fn speech_in(path: &Path) -> Result<ConfigSpeech, String> {
+fn speech_model_in(path: &Path) -> Result<Option<String>, String> {
+    Ok(read_speech(path)?
+        .model
+        .map(|v| v.trim().to_string())
+        .filter(|v| listen::is_model_name(v)))
+}
+
+/// The speech settings for the Settings page (`GET /api/config/speech`): the
+/// configured voice and model (`null` when the file says nothing) plus the
+/// voices and models the engine offers, so the editor can be a list rather
+/// than a magic string. An empty `voices` is "mesa could not ask the binary" —
+/// the editor still has to accept a typed name then; `models` is always empty
+/// on the legacy engine.
+///
+/// `voices_for` picks whose voices are listed (mesa task 1425): `None` is the
+/// configured model's, `Some("")` the daemon's default model's, `Some(name)`
+/// that model's — so the editor can show the voices of a model it has only
+/// drafted.
+pub fn speech(voices_for: Option<&str>) -> Result<ConfigSpeech, String> {
+    speech_in(&config_file(), voices_for)
+}
+
+fn speech_in(path: &Path, voices_for: Option<&str>) -> Result<ConfigSpeech, String> {
+    let list_model = match voices_for.map(str::trim) {
+        None => speech_model_in(path)?,
+        Some("") => None,
+        Some(name) => Some(name.to_string()),
+    };
+    let section = read_speech(path)?;
     Ok(ConfigSpeech {
         // The **raw** stored value, not the filtered one [`speech_voice_in`]
         // hands the synthesiser: a hand-edited nonsense voice must reach the
         // editor that can fix it, exactly as an out-of-range watcher limit
         // does. Blank is still absence — the file's own spelling of "default".
-        voice: read_speech(path)?
+        voice: section
             .voice
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty()),
-        voices: speech::voices(),
+        voices: speech::voices(list_model.as_deref()),
+        model: section
+            .model
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty()),
+        models: speech::models(),
     })
 }
 
@@ -2132,16 +2169,34 @@ fn speech_in(path: &Path) -> Result<ConfigSpeech, String> {
 ///   read-modify-write over the whole document, so all four sections (and any
 ///   mesa doesn't know) survive each other's edits.
 pub fn save_speech(updates: &HashMap<String, Option<String>>) -> Result<(), SaveError> {
-    save_speech_in(&config_file(), updates, &speech::voices())
+    let path = config_file();
+    // A voice is checked against the voices of the model it will be spoken
+    // in (mesa task 1425): the one this save writes, else the stored one.
+    let model = match updates.get(MODEL) {
+        Some(value) => value
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| listen::is_model_name(v))
+            .map(str::to_string),
+        None => speech_model_in(&path).map_err(SaveError::Unavailable)?,
+    };
+    save_speech_in(
+        &path,
+        updates,
+        &speech::voices(model.as_deref()),
+        &speech::models(),
+    )
 }
 
-/// `offered` is the list membership is checked against — a parameter rather
-/// than a [`speech::voices`] call, so a test names the list it is asserting
-/// about instead of inheriting whatever synthesiser the machine has installed.
+/// `offered` and `offered_models` are the lists membership is checked
+/// against — parameters rather than [`speech::voices`]/[`speech::models`]
+/// calls, so a test names the lists it is asserting about instead of
+/// inheriting whatever synthesiser the machine has installed.
 fn save_speech_in(
     path: &Path,
     updates: &HashMap<String, Option<String>>,
     offered: &[String],
+    offered_models: &[String],
 ) -> Result<(), SaveError> {
     if updates.is_empty() {
         // Nothing named, nothing to do — and no empty `"speech": {}` written
@@ -2161,7 +2216,11 @@ fn save_speech_in(
         if let Some(value) = updates[*key].as_deref().map(str::trim)
             && !value.is_empty()
         {
-            validate_voice(value, offered).map_err(SaveError::Validation)?;
+            if key.as_str() == MODEL {
+                validate_model(value, offered_models).map_err(SaveError::Validation)?;
+            } else {
+                validate_voice(value, offered).map_err(SaveError::Validation)?;
+            }
         }
     }
 
@@ -5430,7 +5489,13 @@ mod tests {
         assert_eq!(todo_concurrency_in(&path).unwrap(), 7);
         // The speech saver is the fourth of the same shape: it rewrites its own
         // key and nothing else (`survives` re-asserts the voice it just wrote).
-        save_speech_in(&path, &voice(&[(VOICE, Some("bm_george"))]), &offered()).unwrap();
+        save_speech_in(
+            &path,
+            &voice(&[(VOICE, Some("bm_george"))]),
+            &offered(),
+            &[],
+        )
+        .unwrap();
         assert_eq!(survives("speech")["watchers"][TODO_CONCURRENCY], 7);
         assert_eq!(
             survives("speech")["commands"]["todo-watcher"],
@@ -5578,25 +5643,93 @@ mod tests {
         // No file at all: no voice, so no `-v` — the pre-822 argv.
         assert_eq!(speech_voice_in(&path).unwrap(), None);
 
-        save_speech_in(&path, &voice(&[(VOICE, Some("  bm_george  "))]), &offered()).unwrap();
+        save_speech_in(
+            &path,
+            &voice(&[(VOICE, Some("  bm_george  "))]),
+            &offered(),
+            &[],
+        )
+        .unwrap();
         // Stored trimmed, and visible to the read path immediately.
         assert_eq!(
             speech_voice_in(&path).unwrap().as_deref(),
             Some("bm_george")
         );
-        let view = speech_in(&path).unwrap();
+        let view = speech_in(&path, None).unwrap();
         assert_eq!(view.voice.as_deref(), Some("bm_george"));
 
         // `null` and blank both remove the key — the reset, expressed by
         // absence rather than by a stored empty string.
         for reset in [None, Some("")] {
-            save_speech_in(&path, &voice(&[(VOICE, Some("af_bella"))]), &offered()).unwrap();
-            save_speech_in(&path, &voice(&[(VOICE, reset)]), &offered()).unwrap();
+            save_speech_in(&path, &voice(&[(VOICE, Some("af_bella"))]), &offered(), &[]).unwrap();
+            save_speech_in(&path, &voice(&[(VOICE, reset)]), &offered(), &[]).unwrap();
             let written: serde_json::Value =
                 serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
             assert!(written["speech"].get(VOICE).is_none(), "{reset:?}");
             assert_eq!(speech_voice_in(&path).unwrap(), None);
         }
+    }
+
+    /// The text-to-speech model (mesa task 1425) is modelled on the voice:
+    /// round trip, blank/`null` removes the key, the voice beside it survives,
+    /// a misshapen or unoffered name is refused without writing, and a
+    /// hand-edited misshapen one is shown but never sent.
+    #[test]
+    fn speech_round_trips_a_model_beside_the_voice() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let models = vec!["kokoro-v1.0".to_string(), "pocket-tts-int8".to_string()];
+        assert_eq!(speech_model_in(&path).unwrap(), None);
+
+        save_speech_in(
+            &path,
+            &voice(&[(VOICE, Some("bm_george")), (MODEL, Some(" kokoro-v1.0 "))]),
+            &offered(),
+            &models,
+        )
+        .unwrap();
+        assert_eq!(
+            speech_model_in(&path).unwrap().as_deref(),
+            Some("kokoro-v1.0")
+        );
+        assert_eq!(
+            speech_in(&path, None).unwrap().model.as_deref(),
+            Some("kokoro-v1.0")
+        );
+
+        for reset in [None, Some("")] {
+            save_speech_in(
+                &path,
+                &voice(&[(MODEL, Some("pocket-tts-int8"))]),
+                &[],
+                &models,
+            )
+            .unwrap();
+            save_speech_in(&path, &voice(&[(MODEL, reset)]), &[], &models).unwrap();
+            let written: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert!(written["speech"].get(MODEL).is_none(), "{reset:?}");
+            assert_eq!(written["speech"][VOICE], "bm_george", "the voice survives");
+            assert_eq!(speech_model_in(&path).unwrap(), None);
+        }
+
+        let before = std::fs::read_to_string(&path).unwrap();
+        for bad in ["-o", "a b", "zz-nobody"] {
+            let err =
+                save_speech_in(&path, &voice(&[(MODEL, Some(bad))]), &[], &models).unwrap_err();
+            assert!(
+                matches!(&err, SaveError::Validation(m) if m.contains("model")),
+                "{bad:?}: {err:?}"
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "{bad:?}");
+        }
+
+        let path = write_config(dir.path(), r#"{"speech": {"model": "--output /tmp/x"}}"#);
+        assert_eq!(speech_model_in(&path).unwrap(), None);
+        assert_eq!(
+            speech_in(&path, None).unwrap().model.as_deref(),
+            Some("--output /tmp/x")
+        );
     }
 
     #[test]
@@ -5607,7 +5740,8 @@ mod tests {
         // A name that could be read as an option, or carry a shell metacharacter
         // into an argv — refused in the editor, not at the next press.
         for bad in ["-o", "af heart", "af_heart; rm -rf /", &"a".repeat(65)] {
-            let err = save_speech_in(&path, &voice(&[(VOICE, Some(bad))]), &offered()).unwrap_err();
+            let err =
+                save_speech_in(&path, &voice(&[(VOICE, Some(bad))]), &offered(), &[]).unwrap_err();
             assert!(
                 matches!(&err, SaveError::Validation(m) if m.contains("voice")),
                 "{bad:?}: {err:?}"
@@ -5615,7 +5749,8 @@ mod tests {
             assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "{bad:?}");
         }
         // An unknown key in the section is a validation error too.
-        let err = save_speech_in(&path, &voice(&[("speed", Some("1.2"))]), &offered()).unwrap_err();
+        let err =
+            save_speech_in(&path, &voice(&[("speed", Some("1.2"))]), &offered(), &[]).unwrap_err();
         assert!(
             matches!(&err, SaveError::Validation(m) if m.contains("unknown speech setting")),
             "{err:?}"
@@ -5623,7 +5758,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
         // Nothing named writes nothing — no empty `"speech": {}` appears.
         let path = dir.path().join("untouched.json");
-        save_speech_in(&path, &HashMap::new(), &offered()).unwrap();
+        save_speech_in(&path, &HashMap::new(), &offered(), &[]).unwrap();
         assert!(!path.exists());
     }
 
@@ -5635,15 +5770,20 @@ mod tests {
     fn save_speech_refuses_an_unoffered_voice_only_when_it_has_a_list() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
-        let err =
-            save_speech_in(&path, &voice(&[(VOICE, Some("zz_nobody"))]), &offered()).unwrap_err();
+        let err = save_speech_in(
+            &path,
+            &voice(&[(VOICE, Some("zz_nobody"))]),
+            &offered(),
+            &[],
+        )
+        .unwrap_err();
         assert!(
             matches!(&err, SaveError::Validation(m) if m.contains("zz_nobody")),
             "{err:?}"
         );
         assert!(!path.exists(), "a rejected save writes nothing");
         // No list: the same name is stored, because nothing here can disprove it.
-        save_speech_in(&path, &voice(&[(VOICE, Some("zz_nobody"))]), &[]).unwrap();
+        save_speech_in(&path, &voice(&[(VOICE, Some("zz_nobody"))]), &[], &[]).unwrap();
         assert_eq!(
             speech_voice_in(&path).unwrap().as_deref(),
             Some("zz_nobody")
@@ -5659,7 +5799,7 @@ mod tests {
         let path = write_config(dir.path(), r#"{"speech": {"voice": "--output /tmp/x"}}"#);
         assert_eq!(speech_voice_in(&path).unwrap(), None);
         assert_eq!(
-            speech_in(&path).unwrap().voice.as_deref(),
+            speech_in(&path, None).unwrap().voice.as_deref(),
             Some("--output /tmp/x")
         );
     }
@@ -5670,9 +5810,9 @@ mod tests {
         let path = write_config(dir.path(), "not json");
         let err = speech_voice_in(&path).unwrap_err();
         assert!(err.contains("malformed mesa config"), "{err}");
-        assert!(speech_in(&path).is_err());
-        let err =
-            save_speech_in(&path, &voice(&[(VOICE, Some("af_heart"))]), &offered()).unwrap_err();
+        assert!(speech_in(&path, None).is_err());
+        let err = save_speech_in(&path, &voice(&[(VOICE, Some("af_heart"))]), &offered(), &[])
+            .unwrap_err();
         assert!(
             matches!(&err, SaveError::Unavailable(m) if m.contains("malformed mesa config")),
             "{err:?}"
@@ -6721,11 +6861,20 @@ mod tests {
             std::env::set_var("MESA_KOKORO_BIN", "no-such-kokoro-1389");
         }
         engine(&daemon.url());
-        let shown = (speech().unwrap().voices, listen().unwrap().models);
+        let shown = (speech(None).unwrap().voices, listen().unwrap().models);
         let voice_ok = save_speech(&voice(&[(VOICE, Some("bm_george"))]));
         let voice_bad = save_speech(&voice(&[(VOICE, Some("alloy"))]));
         let model_ok = save_listen(&model_update(&[(MODEL, Some("parakeet-tdt-0.6b-v2-int8"))]));
         let model_bad = save_listen(&model_update(&[(MODEL, Some("kokoro-v1.0"))]));
+        // The speech model (mesa task 1425) is checked against the daemon's
+        // text-to-speech models, and a voice saved beside it against that
+        // model's voices.
+        let tts_ok = save_speech(&voice(&[
+            (MODEL, Some("kokoro-v1.0")),
+            (VOICE, Some("af_heart")),
+        ]));
+        let tts_bad = save_speech(&voice(&[(MODEL, Some("parakeet-tdt-0.6b-v2-int8"))]));
+        let tts_shown = speech(None).unwrap().models;
         engine(&down);
         let unchecked = save_speech(&voice(&[(VOICE, Some("zz_nobody"))]));
         let misshapen = save_listen(&model_update(&[(MODEL, Some("-o"))]));
@@ -6739,7 +6888,17 @@ mod tests {
         assert_eq!(shown.1, vec!["parakeet-tdt-0.6b-v2-int8"]);
         voice_ok.unwrap();
         model_ok.unwrap();
+        tts_ok.unwrap();
+        assert_eq!(tts_shown, vec!["kokoro-v1.0"]);
+        assert!(
+            daemon.count("GET /v1/audio/voices?model=kokoro-v1.0") > 0,
+            "the voice was checked against the chosen model's voices"
+        );
         for (err, want) in [
+            (
+                tts_bad,
+                "unknown model \"parakeet-tdt-0.6b-v2-int8\"; naru-audio offers kokoro-v1.0",
+            ),
             (
                 voice_bad,
                 "unknown voice \"alloy\"; naru-audio offers af_heart, bm_george",

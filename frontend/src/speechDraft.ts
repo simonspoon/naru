@@ -13,14 +13,18 @@ import type { ConfigSpeech } from './types/ConfigSpeech'
  * - **The voice is edited as text**, even when the box is a `<select>`: an
  *   installed binary mesa could not ask has no list to pick from, and the value
  *   already in the file has to survive that.
+ * - **The model** (mesa task 1425) is naru-audio's text-to-speech model, the
+ *   same blank-is-default rule; the voices on offer are that model's, so a
+ *   model change refetches them and keeps the drafted voice only when the new
+ *   model has it ([`voiceForModel`]).
  */
 
-/** The section's boxes as typed — today, exactly one. */
-export type SpeechDraft = { voice: string }
+/** The section's boxes as typed: the voice and the text-to-speech model. */
+export type SpeechDraft = { voice: string; model: string }
 
-/** The editable text as loaded: an unconfigured voice is blank. */
+/** The editable text as loaded: an unconfigured voice or model is blank. */
 export function draftFrom(speech: ConfigSpeech): SpeechDraft {
-  return { voice: speech.voice ?? '' }
+  return { voice: speech.voice ?? '', model: speech.model ?? '' }
 }
 
 /**
@@ -28,19 +32,66 @@ export function draftFrom(speech: ConfigSpeech): SpeechDraft {
  * `--list-voices` with something. Empty means mesa could not ask, and the box
  * has to accept a typed name instead — never that there are no voices.
  */
-export function canPick(speech: ConfigSpeech): boolean {
-  return speech.voices.length > 0
+export function canPick(voices: string[]): boolean {
+  return voices.length > 0
 }
 
 /**
- * The options to offer, in the binary's own order, with the configured voice
- * included even when the binary no longer lists it — otherwise selecting the
- * list would silently rewrite a value the user never touched.
+ * The options to offer, in the binary's own order, with the drafted voice
+ * included even when the list does not have it — otherwise selecting the list
+ * would silently rewrite a value the user never touched. `voices` is the list
+ * for the drafted model, which may be a refetch rather than the loaded one.
  */
-export function options(speech: ConfigSpeech): string[] {
-  const configured = (speech.voice ?? '').trim()
-  if (configured === '' || speech.voices.includes(configured)) return speech.voices
-  return [...speech.voices, configured]
+export function options(voices: string[], current: string): string[] {
+  const drafted = (current ?? '').trim()
+  if (drafted === '' || voices.includes(drafted)) return voices
+  return [...voices, drafted]
+}
+
+/**
+ * Whether there is a model to pick: only naru-audio lists any, so the legacy
+ * engine (and a daemon Naru could not ask) shows no model picker at all.
+ */
+export function canPickModel(speech: ConfigSpeech): boolean {
+  return speech.models.length > 0
+}
+
+/**
+ * The models to offer, in the daemon's order, with the drafted model included
+ * when it is not listed — the same no-silent-rewrite rule as [`options`].
+ */
+export function modelOptions(speech: ConfigSpeech, current: string): string[] {
+  const drafted = (current ?? '').trim()
+  if (drafted === '' || speech.models.includes(drafted)) return speech.models
+  return [...speech.models, drafted]
+}
+
+/**
+ * The voice to keep once `voices` — the new model's list — has arrived: the
+ * drafted one if that model has it, blank (its default voice) if not. An
+ * empty list is "Naru could not ask", which proves nothing, so the draft
+ * stands.
+ */
+export function voiceForModel(voice: string, voices: string[]): string {
+  const drafted = (voice ?? '').trim()
+  if (drafted === '' || voices.length === 0 || voices.includes(drafted)) {
+    return voice
+  }
+  return ''
+}
+
+/**
+ * The complaint about the model box, or `null` if it is fine. Blank is the
+ * daemon's default. Mirrors `core::listen::is_model_name`.
+ */
+export function modelError(text: string): string | null {
+  const trimmed = (text ?? '').trim()
+  if (trimmed === '') return null
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(trimmed)) {
+    return 'letters, digits, underscores, dashes and dots only'
+  }
+  if (trimmed.length > 64) return 'longer than 64 characters'
+  return null
 }
 
 /**
@@ -84,32 +135,45 @@ export function sampleButton(
     : { label: 'synthesising…', title: 'stop synthesising this sample' }
 }
 
-/** What the box means: a voice, or `null` for "the binary's default". */
-function valueOf(draft: SpeechDraft): string | null {
-  const trimmed = (draft.voice ?? '').trim()
+/** What a box means: a name, or `null` for "the default". */
+function valueOf(text: string): string | null {
+  const trimmed = (text ?? '').trim()
   return trimmed === '' ? null : trimmed
 }
 
-/** True when the box differs from what the server last reported. */
+/** True when a box differs from what the server last reported. */
 export function isDirty(speech: ConfigSpeech, draft: SpeechDraft): boolean {
-  return valueOf(draft) !== (speech.voice ?? null)
+  return (
+    valueOf(draft.voice) !== (speech.voice ?? null) ||
+    valueOf(draft.model) !== (speech.model ?? null)
+  )
 }
 
 /** True when nothing drafted would be rejected by the server. */
 export function isSavable(draft: SpeechDraft): boolean {
-  return valueError(draft.voice ?? '') === null
+  return (
+    valueError(draft.voice ?? '') === null &&
+    modelError(draft.model ?? '') === null
+  )
 }
 
 /**
- * The subset to PUT: the key only when it actually changed, so the API's "only
- * the keys present are touched" rule keeps two editors from clobbering each
- * other. A box cleared to blank sends `null` — the server's "remove this key",
- * which is the reset to the binary's own voice.
+ * The subset to PUT: each key only when it actually changed, so the API's
+ * "only the keys present are touched" rule keeps two editors from clobbering
+ * each other. A box cleared to blank sends `null` — the server's "remove this
+ * key", which is the reset to the default.
  */
 export function changedSpeech(
   speech: ConfigSpeech,
   draft: SpeechDraft,
 ): Record<string, string | null> {
   if (!isDirty(speech, draft) || !isSavable(draft)) return {}
-  return { voice: valueOf(draft) }
+  const changed: Record<string, string | null> = {}
+  if (valueOf(draft.voice) !== (speech.voice ?? null)) {
+    changed.voice = valueOf(draft.voice)
+  }
+  if (valueOf(draft.model) !== (speech.model ?? null)) {
+    changed.model = valueOf(draft.model)
+  }
+  return changed
 }

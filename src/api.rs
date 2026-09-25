@@ -3766,31 +3766,37 @@ async fn speak_inbox(
         store.get_inbox_item(id)?.body
     };
     // The configured voice, read fresh on every press (mesa task 822) — `None`
-    // is "the synthesiser's own default", the pre-822 argv. An unreadable
+    // is "the synthesiser's own default", the pre-822 argv — and the
+    // configured text-to-speech model beside it (mesa task 1425), which only
+    // the naru-audio engine sends. An unreadable
     // config file is `unavailable` here too: the speak path must not guess at
     // settings it couldn't read, and the Settings page says the same thing.
-    let voice = config::speech_voice().map_err(|message| ApiError {
-        status: StatusCode::SERVICE_UNAVAILABLE,
-        code: "unavailable",
-        message,
-    })?;
+    let (voice, model) = config::speech_voice()
+        .and_then(|voice| Ok((voice, config::speech_model()?)))
+        .map_err(|message| ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "unavailable",
+            message,
+        })?;
     // Starting synthesis blocks until the header arrives (seconds of CPU); keep
     // it off the async workers, like every other blocking read in this file.
     // Everything after that point is already on the wire, so a synthesiser that
     // dies later can no longer be a status code — this is the last moment
     // `unavailable` is available.
-    let speech = tokio::task::spawn_blocking(move || speech::start(&body, voice.as_deref()))
-        .await
-        .map_err(|e| ApiError {
-            status: StatusCode::SERVICE_UNAVAILABLE,
-            code: "unavailable",
-            message: format!("speech synthesis failed: {e}"),
-        })?
-        .map_err(|e| ApiError {
-            status: StatusCode::SERVICE_UNAVAILABLE,
-            code: "unavailable",
-            message: e,
-        })?;
+    let speech = tokio::task::spawn_blocking(move || {
+        speech::start(&body, voice.as_deref(), model.as_deref())
+    })
+    .await
+    .map_err(|e| ApiError {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        code: "unavailable",
+        message: format!("speech synthesis failed: {e}"),
+    })?
+    .map_err(|e| ApiError {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        code: "unavailable",
+        message: e,
+    })?;
     Ok((
         StatusCode::OK,
         [
@@ -4626,23 +4632,27 @@ async fn speak_live_turn(
             message: format!("live turn {id} has no text to speak"),
         });
     }
-    let voice = config::speech_voice().map_err(|message| ApiError {
+    let (voice, model) = config::speech_voice()
+        .and_then(|voice| Ok((voice, config::speech_model()?)))
+        .map_err(|message| ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "unavailable",
+            message,
+        })?;
+    let speech = tokio::task::spawn_blocking(move || {
+        speech::start(&body, voice.as_deref(), model.as_deref())
+    })
+    .await
+    .map_err(|e| ApiError {
         status: StatusCode::SERVICE_UNAVAILABLE,
         code: "unavailable",
-        message,
+        message: format!("speech synthesis failed: {e}"),
+    })?
+    .map_err(|e| ApiError {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        code: "unavailable",
+        message: e,
     })?;
-    let speech = tokio::task::spawn_blocking(move || speech::start(&body, voice.as_deref()))
-        .await
-        .map_err(|e| ApiError {
-            status: StatusCode::SERVICE_UNAVAILABLE,
-            code: "unavailable",
-            message: format!("speech synthesis failed: {e}"),
-        })?
-        .map_err(|e| ApiError {
-            status: StatusCode::SERVICE_UNAVAILABLE,
-            code: "unavailable",
-            message: e,
-        })?;
     Ok((
         StatusCode::OK,
         [
@@ -8416,12 +8426,25 @@ async fn get_config_speech(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
+    Query(query): Query<SpeechQuery>,
 ) -> ApiResult<Response> {
     require_agent_access(&state, &addr, &headers)?;
+    // `?model=` names whose voices to list (mesa task 1425), shape-checked
+    // like a saved model so it can never be anything but a name in the
+    // daemon's query string; blank is the daemon's default model.
+    if let Some(name) = query.model.as_deref().map(str::trim)
+        && !name.is_empty()
+    {
+        config::validate_model(name, &[]).map_err(|message| ApiError {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            code: "validation",
+            message,
+        })?;
+    }
     // On the first call of the process this asks the synthesiser for its voice
     // list — a subprocess, so it goes off the async workers like every other
     // shell-out in this file. Later calls are the cached list plus a file read.
-    match blocking(config::speech).await? {
+    match blocking(move || config::speech(query.model.as_deref())).await? {
         Ok(speech) => Ok(Json(speech).into_response()),
         Err(message) => Err(ApiError {
             status: StatusCode::BAD_GATEWAY,
@@ -8448,12 +8471,25 @@ where
     })
 }
 
+/// `GET /api/config/speech`'s query (mesa task 1425).
+#[derive(Deserialize, Default)]
+struct SpeechQuery {
+    /// Whose voices `voices` lists: absent is the configured model's, blank
+    /// the daemon's default model's, a name that model's.
+    #[serde(default)]
+    model: Option<String>,
+}
+
 #[derive(Deserialize)]
 struct SpeechUpdate {
     /// Absent leaves the voice alone; `null` (or blank) removes it, restoring
     /// the synthesiser's own default.
     #[serde(default, deserialize_with = "deserialize_some")]
     voice: Option<Option<String>>,
+    /// The text-to-speech model (mesa task 1425), the same three-way shape:
+    /// absent leaves it, `null`/blank restores naru-audio's default.
+    #[serde(default, deserialize_with = "deserialize_some")]
+    model: Option<Option<String>>,
 }
 
 /// `PUT /api/config/speech` — writes the voice and echoes the settings.
@@ -8472,6 +8508,9 @@ async fn update_config_speech(
     if let Some(value) = body.voice {
         updates.insert(config::VOICE.to_string(), value);
     }
+    if let Some(value) = body.model {
+        updates.insert(config::MODEL.to_string(), value);
+    }
     // Validating a voice consults the same (possibly uncached) voice list the
     // getter does, so the save is a blocking call too.
     blocking(move || config::save_speech(&updates))
@@ -8488,7 +8527,13 @@ async fn update_config_speech(
                 message,
             },
         })?;
-    get_config_speech(State(state), ConnectInfo(addr), headers).await
+    get_config_speech(
+        State(state),
+        ConnectInfo(addr),
+        headers,
+        Query(SpeechQuery::default()),
+    )
+    .await
 }
 
 /// `GET /api/config/live` — the instruction block a live conversation's agent
@@ -8700,9 +8745,13 @@ struct PreviewQuery {
     /// entry in the dropdown is auditionable too.
     #[serde(default)]
     voice: Option<String>,
+    /// The text-to-speech model to sample it in (mesa task 1425) — absent or
+    /// blank is naru-audio's default; the legacy engine ignores it.
+    #[serde(default)]
+    model: Option<String>,
 }
 
-/// `GET /api/config/speech/preview?voice=<name>` — speaks [`speech::SAMPLE`] in
+/// `GET /api/config/speech/preview?voice=<name>&model=<name>` — speaks [`speech::SAMPLE`] in
 /// the voice named, so the Settings page's **test** button can play a voice
 /// *before* it is saved (mesa task 824). Nothing is read from the config file
 /// and nothing is written to it: the drafted name comes off the query string,
@@ -8745,19 +8794,31 @@ async fn preview_speech(
             Some(name.to_string())
         }
     };
-    let speech =
-        tokio::task::spawn_blocking(move || speech::start(speech::SAMPLE, voice.as_deref()))
-            .await
-            .map_err(|e| ApiError {
-                status: StatusCode::SERVICE_UNAVAILABLE,
-                code: "unavailable",
-                message: format!("speech synthesis failed: {e}"),
-            })?
-            .map_err(|e| ApiError {
-                status: StatusCode::SERVICE_UNAVAILABLE,
-                code: "unavailable",
-                message: e,
+    let model = match query.model.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(name) => {
+            config::validate_model(name, &[]).map_err(|message| ApiError {
+                status: StatusCode::UNPROCESSABLE_ENTITY,
+                code: "validation",
+                message,
             })?;
+            Some(name.to_string())
+        }
+    };
+    let speech = tokio::task::spawn_blocking(move || {
+        speech::start(speech::SAMPLE, voice.as_deref(), model.as_deref())
+    })
+    .await
+    .map_err(|e| ApiError {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        code: "unavailable",
+        message: format!("speech synthesis failed: {e}"),
+    })?
+    .map_err(|e| ApiError {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        code: "unavailable",
+        message: e,
+    })?;
     Ok((
         StatusCode::OK,
         [
@@ -11456,7 +11517,10 @@ mod tests {
                         State($state.clone()),
                         ConnectInfo($peer),
                         $headers.clone(),
-                        Json(SpeechUpdate { voice: None }),
+                        Json(SpeechUpdate {
+                            voice: None,
+                            model: None,
+                        }),
                     )
                     .await
                     .is_ok(),

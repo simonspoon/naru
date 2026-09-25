@@ -101,13 +101,16 @@ import {
 } from '../settingsDraft'
 import {
   canPick,
+  canPickModel as canPickSpeechModel,
   changedSpeech,
   draftFrom as speechDraftFrom,
   isDirty as isSpeechDirty,
   isSavable as isSpeechSavable,
+  modelOptions as speechModelOptions,
   options as voiceOptions,
   sampleButton,
   valueError as voiceError,
+  voiceForModel,
   type SpeechDraft,
 } from '../speechDraft'
 import {
@@ -1103,9 +1106,18 @@ function SpeechSection() {
   // that makes pressing test twice on the same voice a second play rather than
   // a no-op (the <audio> is keyed by it). Null is "nothing playing" — the
   // element is unmounted then, which is what stops the sound.
-  const [sample, setSample] = useState<{ voice: string; nonce: number } | null>(
-    null,
-  )
+  const [sample, setSample] = useState<{
+    voice: string
+    model: string
+    nonce: number
+  } | null>(null)
+  // The voices of a drafted model (mesa task 1425), fetched when the model
+  // picker changes; `null` until then, when `speech.voices` — the saved
+  // model's — is the list.
+  const [voicesFor, setVoicesFor] = useState<{
+    model: string
+    voices: string[]
+  } | null>(null)
   // Whether the sample's audio has actually started: synthesis takes seconds,
   // so "asked for it" and "hearing it" are different states, exactly as on the
   // Inbox page's play button.
@@ -1113,10 +1125,14 @@ function SpeechSection() {
   const [sampleError, setSampleError] = useState(false)
 
   const seeded: SpeechDraft =
-    draft ?? (speech ? speechDraftFrom(speech) : { voice: '' })
+    draft ?? (speech ? speechDraftFrom(speech) : { voice: '', model: '' })
+  const voices =
+    voicesFor && voicesFor.model === seeded.model.trim()
+      ? voicesFor.voices
+      : (speech?.voices ?? [])
 
   function edit(value: string) {
-    setDraft({ voice: value })
+    setDraft({ ...seeded, voice: value })
     setSaved(false)
     // A different voice is a different sample; stop the old one rather than
     // leave the previous voice playing under a changed selection.
@@ -1125,13 +1141,38 @@ function SpeechSection() {
     setSampleError(false)
   }
 
+  // A different model has different voices: ask for that model's list, and
+  // keep the drafted voice only if the new list has it (mesa task 1425).
+  function editModel(value: string) {
+    setDraft({ ...seeded, model: value })
+    setSaved(false)
+    setSample(null)
+    setPlaying(false)
+    setSampleError(false)
+    const asked = value.trim()
+    getSpeech(asked).then(
+      (fresh) => {
+        setVoicesFor({ model: asked, voices: fresh.voices })
+        setDraft((d) =>
+          d && d.model.trim() === asked
+            ? { ...d, voice: voiceForModel(d.voice, fresh.voices) }
+            : d,
+        )
+      },
+      // No list is "Naru could not ask": the voice box turns into a plain one.
+      () => setVoicesFor({ model: asked, voices: [] }),
+    )
+  }
+
   // Stops the sample if one is playing, starts one for the drafted voice
   // otherwise — the drafted one, not the saved one, which is the whole point.
   function toggleSample() {
     setSampleError(false)
     setPlaying(false)
     setSample((current) =>
-      current ? null : { voice: seeded.voice, nonce: Date.now() },
+      current
+        ? null
+        : { voice: seeded.voice, model: seeded.model, nonce: Date.now() },
     )
   }
 
@@ -1143,6 +1184,7 @@ function SpeechSection() {
       (fresh) => {
         // Re-seed from what the server read back, so the box shows what landed.
         setDraft(speechDraftFrom(fresh))
+        setVoicesFor(null)
         setSaving(false)
         setSaved(true)
         refetch()
@@ -1178,6 +1220,36 @@ function SpeechSection() {
   return (
     <>
       <h2>Speech</h2>
+      {/* Only naru-audio lists models; on the legacy engine (or a daemon Naru
+          could not ask) there is nothing to pick and no picker. */}
+      {canPickSpeechModel(speech) && (
+        <section className="settings-command">
+          <label htmlFor="speech-model">
+            <span className="settings-command-title">Model</span>
+            <code className="settings-command-key">model</code>
+          </label>
+          <p className="muted settings-command-blurb">
+            The text-to-speech model <code>naru-audio</code> speaks in. Blank =
+            naru-audio's own default. Each model has its own voices, so the
+            voice list below follows this choice.
+          </p>
+          <div className="settings-voice-row">
+            <select
+              id="speech-model"
+              className="settings-voice-input"
+              value={seeded.model}
+              onChange={(e) => editModel(e.target.value)}
+            >
+              <option value="">default (naru-audio's own)</option>
+              {speechModelOptions(speech, seeded.model).map((m) => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
+            </select>
+          </div>
+        </section>
+      )}
       <section className="settings-command">
         <label htmlFor="speech-voice">
           <span className="settings-command-title">
@@ -1192,7 +1264,7 @@ function SpeechSection() {
           restart.
         </p>
         <div className="settings-voice-row">
-          {canPick(speech) ? (
+          {canPick(voices) ? (
             <select
               id="speech-voice"
               className="settings-voice-input"
@@ -1203,7 +1275,7 @@ function SpeechSection() {
                   binary no longer lists, so any number here would be wrong in
                   exactly the case that matters. */}
               <option value="">default (the synthesiser's own)</option>
-              {voiceOptions(speech).map((v) => (
+              {voiceOptions(voices, seeded.voice).map((v) => (
                 <option key={v} value={v}>
                   {v}
                 </option>
@@ -1232,7 +1304,7 @@ function SpeechSection() {
             {sampleButton(!!sample, playing).label}
           </button>
         </div>
-        {!canPick(speech) && (
+        {!canPick(voices) && (
           <p className="muted settings-command-blurb">
             Naru could not ask <code>kokoro-rs</code> which voices it has — type
             a name, or run <code>kokoro-rs --list-voices</code> to see them.
@@ -1251,8 +1323,8 @@ function SpeechSection() {
           finishes and its bytes are discarded. */}
       {sample && (
         <audio
-          key={`${sample.voice}:${sample.nonce}`}
-          src={speechPreviewUrl(sample.voice)}
+          key={`${sample.model}:${sample.voice}:${sample.nonce}`}
+          src={speechPreviewUrl(sample.voice, sample.model)}
           ref={(el) => {
             // A refusal that lands after this element is gone belongs to a
             // sample the user has already replaced or stopped, so it must not
