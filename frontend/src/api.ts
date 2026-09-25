@@ -89,6 +89,7 @@ import type { SystemInfo } from './types/SystemInfo'
 import type { Task } from './types/Task'
 import type { TaskReceipt } from './types/TaskReceipt'
 import type { TaskSummary } from './types/TaskSummary'
+import type { VoiceDesign } from './types/VoiceDesign'
 import type { Waypoint } from './types/Waypoint'
 
 /** Error body shape shared by the API and CLI: {"error": {"code", "message"}}. */
@@ -1363,6 +1364,34 @@ export function addVoice(
     '/api/config/speech/voices',
     jsonInit('POST', { name, text, clip_base64: clipBase64 }),
   )
+}
+
+/**
+ * What the Settings page's **design a voice** panel needs (mesa task 1426):
+ * whether naru-audio has the voice-design model pulled (always `false` on the
+ * legacy engine) and the two Naru texts it reads.
+ */
+export function getSpeechDesign(): Promise<VoiceDesign> {
+  return request('/api/config/speech/design')
+}
+
+/**
+ * One take of a designed voice (mesa task 1426): the voice-design model reads
+ * Naru's short `sample` line or its longer `reference` script — never caller
+ * text — in the voice `instructions` describes, answered as one whole WAV.
+ * 409 `conflict` on the legacy engine, 422 `validation` for a blank or
+ * over-long description, 502 `unavailable` when naru-audio refuses.
+ */
+export async function designVoice(
+  instructions: string,
+  script: 'sample' | 'reference',
+): Promise<Blob> {
+  const res = await fetch(
+    '/api/config/speech/design',
+    jsonInit('POST', { instructions, script }),
+  )
+  if (!res.ok) throw await apiErrorFrom(res)
+  return res.blob()
 }
 
 /**

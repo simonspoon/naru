@@ -3,6 +3,7 @@ import {
   addLiveMemory,
   addVoice,
   deleteLiveMemory,
+  designVoice,
   getConfig,
   getKeymap,
   getAudio,
@@ -10,6 +11,7 @@ import {
   getLiveConfig,
   getPricing,
   getSpeech,
+  getSpeechDesign,
   getSystemInfo,
   getWatchers,
   listLibrary,
@@ -141,6 +143,15 @@ import {
   cloneReady,
   nameError as cloneNameError,
 } from '../voiceClone'
+import {
+  auditionLabel,
+  canAudition,
+  canKeep,
+  canReroll,
+  canSave,
+  descriptionError,
+  type DesignState,
+} from '../voiceDesign'
 import {
   changedLive,
   draftFrom as liveDraftFrom,
@@ -1195,6 +1206,19 @@ function SpeechSection() {
     )
   }
 
+  // Refetches the drafted model's voices so a just-added voice shows — the
+  // draft and the saved voice and model are left alone. Shared by the clone
+  // form and the design panel (mesa task 1426).
+  async function refreshVoices(): Promise<string[]> {
+    const asked = seeded.model.trim()
+    const fresh = await getSpeech(asked).then(
+      (s) => s.voices,
+      () => [] as string[],
+    )
+    setVoicesFor({ model: asked, voices: fresh })
+    return fresh
+  }
+
   // Sends the clip, then refetches the drafted model's voices so the new one
   // shows — the draft and the saved voice and model are left alone.
   async function addClone() {
@@ -1205,12 +1229,7 @@ function SpeechSection() {
     try {
       const bytes = new Uint8Array(await clip.arrayBuffer())
       const added = await addVoice(cloneName.trim(), cloneText.trim(), toBase64(bytes))
-      const asked = seeded.model.trim()
-      const fresh = await getSpeech(asked).then(
-        (s) => s.voices,
-        () => [] as string[],
-      )
-      setVoicesFor({ model: asked, voices: fresh })
+      const fresh = await refreshVoices()
       setCloneNote(addedNote(added, fresh))
       setCloneName('')
       setCloneText('')
@@ -1424,6 +1443,10 @@ function SpeechSection() {
         </section>
       )}
 
+      {audio.data && savedAudioEngine(audio.data) === 'naru-audio' && (
+        <VoiceDesignPanel refreshVoices={refreshVoices} />
+      )}
+
       {/* One player, unmounted to stop — the same shape (and the same
           `AbortError` caveat) as the Inbox page's, so a browser that refuses
           autoplay reports a failure instead of leaving the button reading
@@ -1478,6 +1501,206 @@ function SpeechSection() {
       </div>
       {saveError && <p className="error">{saveError}</p>}
     </>
+  )
+}
+
+/**
+ * **Design a voice** (mesa task 1426), naru-audio only: describe a voice,
+ * audition it on a short Naru line (the voice-design model reads it with the
+ * description as `instructions`, as many takes as wanted), keep it — the same
+ * model reads the longer reference script, which can be re-rolled — and save
+ * that clip under a name through the ordinary add-voice route, the reference
+ * script as its exact transcript. From then on it is a cloned voice like any
+ * other. Every take is a whole WAV fetched once and played from a blob URL;
+ * the step rules live in `voiceDesign.ts`.
+ */
+function VoiceDesignPanel({
+  refreshVoices,
+}: {
+  refreshVoices: () => Promise<string[]>
+}) {
+  const info = useFetch(() => getSpeechDesign(), 'speech-design')
+  const [state, setState] = useState<DesignState>({
+    description: '',
+    auditioned: null,
+    kept: null,
+    busy: null,
+  })
+  const [name, setName] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const [note, setNote] = useState<string | null>(null)
+  // The two takes on hand, as blob URLs, and the reference clip's bytes for
+  // the save. A replaced URL is revoked, and both are on unmount.
+  const [sampleUrl, setSampleUrl] = useState<string | null>(null)
+  const [referenceUrl, setReferenceUrl] = useState<string | null>(null)
+  const [referenceBase64, setReferenceBase64] = useState<string | null>(null)
+  const urls = useRef<{ sample: string | null; reference: string | null }>({
+    sample: null,
+    reference: null,
+  })
+  // Whether the panel is still mounted: a take that lands after unmount is
+  // dropped rather than given a blob URL nothing would revoke.
+  const mounted = useRef(false)
+  useEffect(() => {
+    mounted.current = true
+    // One object for the panel's life, mutated in place: its fields at
+    // cleanup are the takes still on hand.
+    const taken = urls.current
+    return () => {
+      mounted.current = false
+      if (taken.sample) URL.revokeObjectURL(taken.sample)
+      if (taken.reference) URL.revokeObjectURL(taken.reference)
+    }
+  }, [])
+
+  function setTake(which: 'sample' | 'reference', blob: Blob) {
+    const old = urls.current[which]
+    if (old) URL.revokeObjectURL(old)
+    const url = URL.createObjectURL(blob)
+    urls.current[which] = url
+    if (which === 'sample') setSampleUrl(url)
+    else setReferenceUrl(url)
+  }
+
+  async function take(which: 'sample' | 'reference', description: string) {
+    setState((s) => ({ ...s, busy: which }))
+    setError(null)
+    setNote(null)
+    try {
+      const blob = await designVoice(description, which)
+      if (!mounted.current) return
+      if (which === 'reference') {
+        const bytes = new Uint8Array(await blob.arrayBuffer())
+        if (!mounted.current) return
+        setReferenceBase64(toBase64(bytes))
+      }
+      setTake(which, blob)
+      setState((s) =>
+        which === 'sample'
+          ? { ...s, auditioned: description, busy: null }
+          : { ...s, kept: description, busy: null },
+      )
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e))
+      setState((s) => ({ ...s, busy: null }))
+    }
+  }
+
+  async function save() {
+    if (!info.data || !referenceBase64) return
+    setState((s) => ({ ...s, busy: 'save' }))
+    setError(null)
+    setNote(null)
+    try {
+      const added = await addVoice(name.trim(), info.data.reference, referenceBase64)
+      const fresh = await refreshVoices()
+      setNote(addedNote(added, fresh))
+      setName('')
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setState((s) => ({ ...s, busy: null }))
+    }
+  }
+
+  if (!info.data) return null
+  const described = descriptionError(state.description)
+
+  return (
+    <section className="settings-command">
+      <label htmlFor="design-description">
+        <span className="settings-command-title">Design a voice</span>
+      </label>
+      <p className="muted settings-command-blurb">
+        Describe a voice and <code>naru-audio</code>'s voice-design model makes
+        it up. Audition it on a short line until it sounds right, keep it to
+        record a longer reference clip in that voice, then save it under a name
+        — it becomes a cloned voice a cloning model speaks in.
+      </p>
+      {!info.data.available && (
+        <p className="muted settings-command-blurb">
+          <code>naru-audio</code> doesn't have the voice-design model — pull it
+          with <code>naru-audio pull {info.data.model}</code>, or check the
+          daemon is running.
+        </p>
+      )}
+      <textarea
+        id="design-description"
+        className="settings-voice-input"
+        placeholder="e.g. A calm, warm female voice with a slight British accent, speaking slowly"
+        rows={3}
+        value={state.description}
+        onChange={(e) => {
+          const description = e.target.value
+          setState((s) => ({ ...s, description }))
+        }}
+      />
+      {described && <p className="error">{described}</p>}
+      <div className="settings-actions">
+        <button
+          type="button"
+          disabled={!info.data.available || !canAudition(state)}
+          onClick={() => void take('sample', state.description.trim())}
+        >
+          {state.busy === 'sample' ? 'synthesising…' : auditionLabel(state)}
+        </button>
+        <button
+          type="button"
+          disabled={!info.data.available || !canKeep(state)}
+          title="read the longer reference script in this voice"
+          onClick={() => void take('reference', state.description.trim())}
+        >
+          {state.busy === 'reference' ? 'recording…' : 'keep'}
+        </button>
+      </div>
+      {sampleUrl && (
+        <audio key={sampleUrl} src={sampleUrl} controls autoPlay />
+      )}
+      {state.kept !== null && referenceUrl && (
+        <>
+          <p className="muted settings-command-blurb">
+            {/* The kept description, not the one in the box: after an edit
+                and a new audition, this is still the voice save keeps. */}
+            Reference clip — “{state.kept}” — reading: “{info.data.reference}”
+          </p>
+          <div className="settings-voice-row">
+            <audio key={referenceUrl} src={referenceUrl} controls />
+            <button
+              type="button"
+              disabled={!canReroll(state)}
+              onClick={() => {
+                if (state.kept !== null) void take('reference', state.kept)
+              }}
+            >
+              re-roll
+            </button>
+          </div>
+          <div className="settings-voice-row">
+            <input
+              type="text"
+              className="settings-voice-input"
+              aria-label="designed voice name"
+              spellCheck={false}
+              placeholder="name, e.g. calm_narrator"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+            />
+            <button
+              type="button"
+              disabled={!canSave(state, name)}
+              onClick={() => void save()}
+            >
+              {state.busy === 'save' ? 'saving…' : 'save voice'}
+            </button>
+          </div>
+          {name.trim() !== '' && cloneNameError(name) && (
+            <p className="error">{cloneNameError(name)}</p>
+          )}
+        </>
+      )}
+      {note && <span className="settings-saved">{note}</span>}
+      {error && <p className="error">{error}</p>}
+    </section>
   )
 }
 

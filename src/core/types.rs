@@ -418,6 +418,23 @@ pub struct AddedVoice {
     pub models: Vec<String>,
 }
 
+/// What the Settings page's **design a voice** panel needs (mesa task 1426,
+/// `GET /api/config/speech/design`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct VoiceDesign {
+    /// Whether naru-audio has the voice-design model pulled. Always `false`
+    /// on the legacy engine, and when Naru could not ask the daemon.
+    pub available: bool,
+    /// The voice-design model's id, for the `naru-audio pull` hint.
+    pub model: String,
+    /// The short line an audition reads.
+    pub sample: String,
+    /// The reference script a kept design reads — the saved clone's
+    /// transcript.
+    pub reference: String,
+}
+
 /// The listen settings as the Settings page sees them (`core::config`,
 /// `docs/config.md`, mesa task 955) — the input-side mirror of
 /// [`ConfigSpeech`]: the model the external `auris` speech-to-text binary is

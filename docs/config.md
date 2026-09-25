@@ -697,6 +697,64 @@ in, and is modelled exactly on `voice` below; see "The model" after the list.
   otherwise at save time (`422`) and dropped on the read path, the voice's
   split exactly: the editor sees the raw stored value, the daemon never does.
 
+### Designing a voice (mesa task 1426)
+
+On naru-audio a voice can also be **made up from a description** rather than
+cloned from a recording, with the voice-design model
+`qwen3-tts-1.7b-voicedesign-mlx` (`core::speech::DESIGN_MODEL`), which has no
+voices of its own and speaks in whatever voice its `instructions` describe.
+Designing is only ever a way to **produce a clone's reference clip**: the
+result is saved through the add-voice route below and is from then on an
+ordinary cloned voice, spoken by a cloning (Base) model.
+
+- **Three steps, two texts.** An **audition** reads a short Naru line
+  (`core::speech::DESIGN_SAMPLE`) in the described voice — as many takes as
+  wanted, the description edited between them. **Keep** reads the longer
+  reference script (`core::speech::DESIGN_REFERENCE`) in the description the
+  last audition used, and can be re-rolled. **Save** posts that clip with the
+  reference script, verbatim, as its transcript to
+  `POST /api/config/speech/voices`.
+- **The text is never the caller's** — the preview route's posture: the
+  request names `"sample"` or `"reference"` and the server picks the
+  constant, so the description is the only caller-supplied value, and it
+  reaches the daemon as one JSON string (`instructions`). It must be
+  non-blank and at most 500 characters (`DESIGN_INSTRUCTIONS_MAX`).
+- **One whole WAV per take.** The daemon is asked with `"stream": false`, so
+  it buffers the render and answers exact sizes; the page plays it from a
+  blob URL and keeps the reference take's bytes for the save.
+  `audio::speak` — every other speak path — never sends `instructions`, and
+  its request is byte-identical to before.
+- **Available only when pulled**: the panel checks
+  `GET {audio.url}/v1/models?pulled=true` for the design model and, when it
+  is missing (or the daemon cannot be asked), says to run
+  `naru-audio pull qwen3-tts-1.7b-voicedesign-mlx`.
+
+**Why this reference script.** `DESIGN_REFERENCE` reads: "Good morning! I
+checked the schedule, and your first meeting starts at nine, right after
+coffee. Would you like me to move the budget review to Thursday instead?
+Honestly, that sounds much better to me. Just let me know, and I will sort out
+the details quickly." It was picked from three candidates. Each was read by the
+design model in two voices (a warm low male and a bright young female), two
+takes each, and every take was cloned onto `qwen3-tts-1.7b-base-mlx`. All 12
+clones scored 0 WER on two test sentences, and speaker similarity (the Base
+model's own encoder, 0.982–0.993) did not separate the candidates, so the
+choice rests on the rest:
+
+- **Length.** Its reads ran 13.8–15.3 s, inside naru-audio's 5–15 s sweet
+  spot (the daemon accepts 3–30 s); the two pangram-style candidates ran
+  15.6–17.5 s.
+- **Fewest slips.** The design model departed from its transcript least on
+  this script, which matters because cloning aligns the clip to the exact
+  text.
+- **Register.** It is written in the conversational, assistant register Naru
+  speaks in (a greeting, a statement, a question, an exclamation), and a clone
+  inherits its reference's style.
+- **Coverage bought nothing.** The pangram candidates' extra phonetic coverage
+  made no measurable difference.
+
+"nine" is spelled out and the script has no digits or bracket tags, so the
+saved transcript matches what is spoken.
+
 ### Routes
 
 - `GET /api/config/speech[?model=<name>]` → `ConfigSpeech`:
@@ -754,6 +812,21 @@ in, and is modelled exactly on `voice` below; see "The model" after the list.
   list now has the voice — only a **cloning** model lists cloned voices
   (e.g. `qwen3-tts-0.6b-base-mlx`), so a non-cloning model never offers it.
   Nothing else is written: the default engine, voice and model are untouched.
+- `GET /api/config/speech/design` → `VoiceDesign` `{available, model, sample,
+  reference}` (mesa task 1426): whether naru-audio has the voice-design model
+  **pulled** (always `false` on the legacy engine, and when the daemon cannot
+  be asked — never an error), its id, and the two texts the POST reads.
+- `POST /api/config/speech/design`, body `{"instructions", "script":
+  "sample" | "reference"}` → **200** `audio/wav`, one exact-size body with a
+  `Content-Length`: the chosen Naru text read by the voice-design model in the
+  voice `instructions` describes. On the **legacy** engine **409
+  `conflict`** and nothing is contacted; a blank or over-long description or
+  any other `script` **422 `validation`**, also before the daemon is asked; a
+  refusal or no answer from the daemon **502 `unavailable`** with the "Naru's
+  voice isn't available" sentence (a model that is not pulled names the
+  `naru-audio pull` command). Nothing is written.
+  Both verbs are gated like the add-voice route (`require_agent_access` +
+  `require_same_site_fetch`).
 
 The Settings page's **Voice** tab shows a **Model** picker above the voice
 only when `models` is non-empty — i.e. on naru-audio — and hides it on the
@@ -767,6 +840,10 @@ have permission to use. After a success it refetches the drafted model's
 voices, leaving the draft and the saved settings alone, and says either to
 pick the new voice or which cloning model to pick first; a failure shows the
 message verbatim. The rules live in `frontend/src/voiceClone.ts`.
+Below it, also on naru-audio only, **Design a voice** (mesa task 1426) walks
+the three steps above — describe, audition/regenerate, keep/re-roll, then save
+under a name (the clone form's name rule and success note) — with the step
+rules in `frontend/src/voiceDesign.ts`.
 
 ## Live
 

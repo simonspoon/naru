@@ -830,13 +830,70 @@ pub fn speak(
     Ok(response.into_body().into_reader())
 }
 
+/// How long a buffered voice-design synthesis may take, connect to answer
+/// (mesa task 1426). The daemon answers only once the whole clip is rendered
+/// (`stream: false`, §2.3), after a cold load of a 1.7B model at worst.
+const DESIGN_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// The most of a designed clip Naru reads. A reference script is seconds of
+/// 24 kHz mono audio — well under a megabyte — so this only bounds a wrong
+/// service on the port.
+const DESIGN_AUDIO_CAP: u64 = 16 * 1024 * 1024;
+
+/// Speaks `text` with the daemon at `url` in `model`, the voice made up
+/// from `instructions` — a voice-design model's description of the voice
+/// (mesa task 1426, §2.3) — and answers the whole WAV at once: the request
+/// carries `"stream": false`, so the daemon buffers the render and writes
+/// exact sizes. [`speak`] is untouched by this and never sends
+/// `instructions`. A failure is §4.4's "Naru's voice" sentence and drops
+/// the cached probe, as for [`speak`]. Blocking.
+pub fn design(url: &str, model: &str, text: &str, instructions: &str) -> Result<Vec<u8>, String> {
+    let fail = |failure| failed(Side::Speak, url, SPEECH_PATH, model, failure);
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_connect(Some(SPEAK_CONNECT_TIMEOUT))
+        .timeout_global(Some(DESIGN_TIMEOUT))
+        .http_status_as_error(false)
+        .proxy(None)
+        .max_redirects(0)
+        .build()
+        .into();
+    let request = serde_json::json!({
+        "model": model,
+        "input": text,
+        "instructions": instructions,
+        "response_format": "wav",
+        "stream": false,
+    });
+    let mut response = agent
+        .post(format!("{}{SPEECH_PATH}", url.trim_end_matches('/')))
+        .header("Content-Type", "application/json")
+        .send(request.to_string())
+        .map_err(|e| fail(Failure::Transport(e)))?;
+    let status = response.status().as_u16();
+    if !(200..300).contains(&status) {
+        let body = response
+            .body_mut()
+            .with_config()
+            .limit(ANSWER_CAP)
+            .read_to_string()
+            .unwrap_or_default();
+        return Err(fail(Failure::Status(status, body)));
+    }
+    response
+        .body_mut()
+        .with_config()
+        .limit(DESIGN_AUDIO_CAP)
+        .read_to_vec()
+        .map_err(|e| fail(Failure::Transport(e)))
+}
+
 /// The ids of every speech-to-text model the daemon at `url` lists
 /// (`GET /v1/models`, `x_kind == "stt"`) — pulled or not, since a model
 /// that is known but not pulled is a choice the transcribe path answers with
 /// the `naru-audio pull` command, not one to hide. Empty on any failure:
 /// "Naru could not ask". Cached by the caller. Blocking.
 pub fn stt_models(url: &str) -> Vec<String> {
-    models_of_kind(url, "stt")
+    models_of_kind(url, MODELS_PATH, "stt")
 }
 
 /// The ids of every text-to-speech model the daemon at `url` lists
@@ -844,11 +901,19 @@ pub fn stt_models(url: &str) -> Vec<String> {
 /// for the reason [`stt_models`] gives. Empty on any failure. Cached by the
 /// caller. Blocking.
 pub fn tts_models(url: &str) -> Vec<String> {
-    models_of_kind(url, "tts")
+    models_of_kind(url, MODELS_PATH, "tts")
 }
 
-/// `GET /v1/models`' ids whose `x_kind` is `kind`.
-fn models_of_kind(url: &str, kind: &str) -> Vec<String> {
+/// The ids of the text-to-speech models the daemon at `url` has **pulled**
+/// (`GET /v1/models?pulled=true`, mesa task 1426) — whether the voice-design
+/// model can actually speak. Empty on any failure. Blocking.
+pub fn pulled_tts_models(url: &str) -> Vec<String> {
+    models_of_kind(url, &format!("{MODELS_PATH}?pulled=true"), "tts")
+}
+
+/// `GET {path}`' ids whose `x_kind` is `kind` — `path` being
+/// `/v1/models`, with or without a query.
+fn models_of_kind(url: &str, path: &str, kind: &str) -> Vec<String> {
     #[derive(Deserialize)]
     struct List {
         data: Vec<Model>,
@@ -859,7 +924,7 @@ fn models_of_kind(url: &str, kind: &str) -> Vec<String> {
         #[serde(default)]
         x_kind: Option<String>,
     }
-    list(url, MODELS_PATH)
+    list(url, path)
         .and_then(|body| serde_json::from_str::<List>(&body).ok())
         .map(|l| {
             l.data
@@ -1749,6 +1814,55 @@ mod tests {
             };
             assert_eq!(got, Err(expected), "HTTP {status}");
         }
+    }
+
+    /// Designing a voice (mesa task 1426): one JSON request carrying the
+    /// description as `instructions` and `"stream": false`, the buffered WAV
+    /// answered back byte-identical, and a refusal the "Naru's voice"
+    /// sentence naming the pull command.
+    #[test]
+    fn design_sends_instructions_unstreamed_and_returns_the_whole_wav() {
+        let _prober = prober_lock();
+        let stub = Stub::serve(0, |method, path| {
+            assert_eq!((method, path), ("POST", SPEECH_PATH));
+            stub::Reply::Json(200, "RIFF-designed".to_string())
+        });
+        let got = design(&stub.url(), "vd", "Hello.", "A warm, low voice.");
+        assert_eq!(got.as_deref(), Ok(&b"RIFF-designed"[..]));
+        assert_eq!(
+            stub.requests.lock().unwrap()[0],
+            r#"POST /v1/audio/speech {"input":"Hello.","instructions":"A warm, low voice.","model":"vd","response_format":"wav","stream":false}"#
+        );
+
+        let missing = Stub::serve(0, |_, _| {
+            stub::Reply::Json(
+                409,
+                r#"{"error":{"message":"the model \"vd\" is not pulled","type":"x","code":"model_not_pulled","param":"model"}}"#
+                    .to_string(),
+            )
+        });
+        assert_eq!(
+            design(&missing.url(), "vd", "Hello.", "A warm, low voice."),
+            Err(
+                "Naru's voice isn't available: the model vd isn't downloaded. \
+                 Run `naru-audio pull vd`."
+                    .to_string()
+            )
+        );
+    }
+
+    /// Only a **pulled** text-to-speech model is reported by
+    /// `pulled_tts_models`, asked with `?pulled=true`.
+    #[test]
+    fn pulled_tts_models_asks_for_pulled_models_only() {
+        let stub = Stub::serve(0, |_, path| {
+            assert_eq!(path, "/v1/models?pulled=true");
+            stub::Reply::Json(
+                200,
+                r#"{"data":[{"id":"vd","x_kind":"tts"},{"id":"ears","x_kind":"stt"}]}"#.to_string(),
+            )
+        });
+        assert_eq!(pulled_tts_models(&stub.url()), vec!["vd"]);
     }
 
     /// Silence is the daemon's 200 `{"text":""}`, and a success.

@@ -43,7 +43,7 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 
 use crate::core::audio::{self, TtlCache};
-use crate::core::types::AddedVoice;
+use crate::core::types::{AddedVoice, VoiceDesign};
 
 /// Bytes read from the synthesiser per chunk. Chunks are the unit the response
 /// body is written in, so this trades syscalls against how promptly the first
@@ -295,6 +295,84 @@ pub fn add_voice(name: &str, text: &str, clip: &[u8]) -> Result<AddedVoice, AddV
         duration,
         models,
     })
+}
+
+/// The naru-audio model a voice is **designed** with (mesa task 1426): it has
+/// no voices of its own and makes one up from a description sent as
+/// `instructions`.
+pub const DESIGN_MODEL: &str = "qwen3-tts-1.7b-voicedesign-mlx";
+
+/// The short line a described voice is auditioned on. Naru's own words, for
+/// the reason [`SAMPLE`] gives: the design route takes no caller text.
+pub const DESIGN_SAMPLE: &str = "Hello, this is how this voice will read your inbox items aloud.";
+
+/// The script a kept design reads for the clone's reference clip — saved,
+/// with the clip, as its exact transcript. Why it reads what it does is in
+/// `docs/config.md`, "Designing a voice": a conversational read of about 14–15 s, and
+/// no digits or tags, so the transcript is exactly what is spoken.
+pub const DESIGN_REFERENCE: &str = "Good morning! I checked the schedule, and your first meeting \
+     starts at nine, right after coffee. Would you like me to move the budget review to \
+     Thursday instead? Honestly, that sounds much better to me. Just let me know, and I \
+     will sort out the details quickly.";
+
+/// The longest voice description the design route takes, in characters.
+pub const DESIGN_INSTRUCTIONS_MAX: usize = 500;
+
+/// What the Settings page needs to offer voice design (mesa task 1426):
+/// whether naru-audio has [`DESIGN_MODEL`] pulled — always `false` on the
+/// legacy engine, and when Naru could not ask — and the two texts it reads.
+/// Blocking.
+pub fn design_info() -> VoiceDesign {
+    let available = audio::daemon_url().is_some_and(|url| {
+        audio::pulled_tts_models(&url)
+            .iter()
+            .any(|m| m == DESIGN_MODEL)
+    });
+    VoiceDesign {
+        available,
+        model: DESIGN_MODEL.to_string(),
+        sample: DESIGN_SAMPLE.to_string(),
+        reference: DESIGN_REFERENCE.to_string(),
+    }
+}
+
+/// Reads one of Naru's two design texts — `script` is `"sample"`
+/// ([`DESIGN_SAMPLE`]) or `"reference"` ([`DESIGN_REFERENCE`]), never the
+/// text itself — in a voice [`DESIGN_MODEL`] makes up from `instructions`,
+/// and answers the whole WAV (mesa task 1426, [`audio::design`]). The errors
+/// are [`add_voice`]'s: the legacy engine is `Conflict`, a blank or
+/// over-long description or an unknown script `Validation`, and a daemon
+/// that refuses or does not answer `Unavailable`. Blocking.
+pub fn design(instructions: &str, script: &str) -> Result<Vec<u8>, AddVoiceError> {
+    let Some(url) = audio::daemon_url() else {
+        return Err(AddVoiceError::Conflict(
+            "designing a voice needs the naru-audio engine; \
+             the legacy synthesiser has no voice-design model"
+                .to_string(),
+        ));
+    };
+    let text = match script {
+        "sample" => DESIGN_SAMPLE,
+        "reference" => DESIGN_REFERENCE,
+        other => {
+            return Err(AddVoiceError::Validation(format!(
+                "script {other:?} must be \"sample\" or \"reference\""
+            )));
+        }
+    };
+    let instructions = instructions.trim();
+    if instructions.is_empty() {
+        return Err(AddVoiceError::Validation(
+            "the voice description must not be empty".to_string(),
+        ));
+    }
+    let chars = instructions.chars().count();
+    if chars > DESIGN_INSTRUCTIONS_MAX {
+        return Err(AddVoiceError::Validation(format!(
+            "the voice description must be at most {DESIGN_INSTRUCTIONS_MAX} characters, got {chars}"
+        )));
+    }
+    audio::design(&url, DESIGN_MODEL, text, instructions).map_err(AddVoiceError::Unavailable)
 }
 
 /// The most text-to-speech models [`models`] will report — the bound
