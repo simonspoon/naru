@@ -315,6 +315,14 @@ pub fn invalidate() {
 /// is `naru-audio`. Any config read error is `None` — the warm-up is
 /// best-effort and never fails a start.
 pub fn warm_url() -> Option<String> {
+    daemon_url()
+}
+
+/// The daemon's URL when `audio.engine` is `naru-audio`, else `None` — the
+/// switch `listen::models()` and `speech::voices()` read (mesa task 1389).
+/// Any config read error is `None`, the legacy engine: those lists are
+/// advisory and cannot report an error.
+pub fn daemon_url() -> Option<String> {
     match crate::core::config::audio_engine() {
         Ok(AudioEngine::NaruAudio) => crate::core::config::audio_url().ok(),
         _ => None,
@@ -472,14 +480,11 @@ fn classify_load(status: u16, body: &str) -> (AudioState, Option<String>) {
 }
 
 pub(crate) fn down_message(url: &str) -> String {
-    format!(
-        "Speech isn't available: naru-audio isn't running at {url}. \
-         Start it with `brew services start naru-audio`."
-    )
+    Side::Listen.down(url)
 }
 
 fn error_message(reported: &str) -> String {
-    format!("Speech isn't available: naru-audio reported: {reported}")
+    Side::Listen.reported(reported)
 }
 
 /// A request that never got an HTTP answer. Refused, timed out, or with no
@@ -543,6 +548,344 @@ pub(crate) async fn open_stream(url: &str) -> Result<DaemonStream, (AudioState, 
 /// The sentence for a stream the daemon dropped without a close frame.
 pub(crate) fn stream_dropped_message() -> String {
     error_message("the stream ended without a close frame")
+}
+
+// ---------------------------------------------------------------------------
+// Transcription, speech and the two lists (mesa task 1389)
+// ---------------------------------------------------------------------------
+//
+// What `listen::transcribe`, `speech::start`, `listen::models` and
+// `speech::voices` call instead of `auris`/`kokoro-rs` when `audio.engine`
+// is `naru-audio` (design §6.2). Each failed transcribe or speak request
+// drops the cached probe (§4.4: a failed real request is fresher news), and
+// its sentence is §4.4's — "Speech isn't available: …" for the recognizer,
+// "Naru's voice isn't available: …" for the synthesiser.
+
+/// How long one transcription may take, connect to answer. The daemon holds
+/// the answer until a cold model load (~4 s) and the whole decode are done,
+/// and it accepts up to ten minutes of audio (§2.2), so this is generous;
+/// `auris` had no limit at all.
+const TRANSCRIBE_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// How long `POST /v1/audio/speech` may take to send its headers. The
+/// daemon sends them once the first sentence is synthesised (§2.3), after a
+/// cold load at worst — the [`LOAD_TIMEOUT`] budget. The body that follows
+/// has no limit: a long render streams for as long as it takes, as
+/// `kokoro-rs`'s did.
+const SPEAK_START_TIMEOUT: Duration = LOAD_TIMEOUT;
+
+/// How long connecting to the daemon for speech may take. A refused port
+/// fails at once; this bounds one that never answers the SYN.
+const SPEAK_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long `GET /v1/models` or `GET /v1/audio/voices` may take. Both are
+/// registry reads that never load a model (§2.5).
+const LIST_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The most of a transcript, an error envelope or a list Naru reads. A
+/// transcript of ten minutes of speech is tens of kilobytes.
+const ANSWER_CAP: u64 = 1024 * 1024;
+
+/// The daemon's routes this section speaks to (design §2.2, §2.3, §2.5).
+const TRANSCRIPTIONS_PATH: &str = "/v1/audio/transcriptions";
+const SPEECH_PATH: &str = "/v1/audio/speech";
+const MODELS_PATH: &str = "/v1/models";
+const VOICES_PATH: &str = "/v1/audio/voices";
+
+/// Which half of speech a failure belongs to: §4.4's sentences open with
+/// "Speech isn't available" for the recognizer and "Naru's voice isn't
+/// available" for the synthesiser, and are otherwise the same.
+#[derive(Clone, Copy)]
+enum Side {
+    Listen,
+    Speak,
+}
+
+impl Side {
+    fn prefix(self) -> &'static str {
+        match self {
+            Side::Listen => "Speech isn't available",
+            Side::Speak => "Naru's voice isn't available",
+        }
+    }
+
+    fn down(self, url: &str) -> String {
+        format!(
+            "{}: naru-audio isn't running at {url}. \
+             Start it with `brew services start naru-audio`.",
+            self.prefix()
+        )
+    }
+
+    fn missing(self, model: &str) -> String {
+        format!(
+            "{}: the model {model} isn't downloaded. Run `naru-audio pull {model}`.",
+            self.prefix()
+        )
+    }
+
+    fn reported(self, reported: &str) -> String {
+        format!("{}: naru-audio reported: {reported}", self.prefix())
+    }
+}
+
+/// A request that did not succeed: no HTTP answer at all, or a non-2xx one
+/// with its (capped) body.
+enum Failure {
+    Transport(ureq::Error),
+    Status(u16, String),
+}
+
+/// The §4.4 sentence for `failure`, and the cached probe dropped. `model` is
+/// the name that was sent, used when the daemon's message quotes none.
+///
+/// No HTTP answer is `daemon_down` — except a timeout, which is a daemon
+/// that is there but slow, as for [`classify_load_transport`]. A 409
+/// `model_not_pulled` is `model_missing`, naming the model the daemon quotes
+/// (it resolves `default` to a real name). Anything else — a 404
+/// `model_not_found` included, since no `pull` can fetch a model the catalog
+/// does not know — quotes the daemon's own message (§2.6).
+fn failed(side: Side, url: &str, path: &str, model: &str, failure: Failure) -> String {
+    invalidate();
+    match failure {
+        Failure::Transport(ureq::Error::Timeout(_)) => side.reported(&format!("{path} timed out")),
+        Failure::Transport(
+            ureq::Error::Io(_) | ureq::Error::ConnectionFailed | ureq::Error::HostNotFound,
+        ) => side.down(url),
+        Failure::Transport(other) => side.reported(&other.to_string()),
+        Failure::Status(status, body) => {
+            let error = serde_json::from_str::<serde_json::Value>(&body)
+                .ok()
+                .map(|mut v| v["error"].take());
+            let code = error.as_ref().and_then(|e| e["code"].as_str());
+            let message = error.as_ref().and_then(|e| e["message"].as_str());
+            match code {
+                Some("model_not_pulled") => side.missing(message.and_then(quoted).unwrap_or(model)),
+                _ => side.reported(
+                    &message
+                        .map_or_else(|| format!("{path} answered HTTP {status}"), str::to_string),
+                ),
+            }
+        }
+    }
+}
+
+/// The first `"…"`-quoted run in `message` — the model name every daemon
+/// registry error quotes (`the model "x" is not pulled; …`).
+fn quoted(message: &str) -> Option<&str> {
+    let (_, rest) = message.split_once('"')?;
+    let (name, _) = rest.split_once('"')?;
+    (!name.is_empty()).then_some(name)
+}
+
+/// A `multipart/form-data` body for `POST /v1/audio/transcriptions`: the
+/// recording as `file`, then `model` and `response_format=json` (§2.2). Built
+/// by hand — Naru's `ureq` has no multipart feature, and three fields do not
+/// need one. The boundary is lengthened until the recording does not contain
+/// it; `model` is a checked model name or `default`, so it cannot.
+fn multipart(wav: &[u8], model: &str) -> (String, Vec<u8>) {
+    let mut boundary = format!("naru-audio-{:x}", unix_nanos());
+    while wav
+        .windows(boundary.len())
+        .any(|w| w == boundary.as_bytes())
+    {
+        boundary.push('x');
+    }
+    let mut body = Vec::with_capacity(wav.len() + 512);
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; \
+             filename=\"audio.wav\"\r\nContent-Type: audio/wav\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(wav);
+    for (name, value) in [("model", model), ("response_format", "json")] {
+        body.extend_from_slice(
+            format!(
+                "\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}"
+            )
+            .as_bytes(),
+        );
+    }
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    (format!("multipart/form-data; boundary={boundary}"), body)
+}
+
+/// Transcribes `wav` with the daemon at `url`, in `model` (a registry name,
+/// or `default`). Nothing transcribed — silence — is the daemon's 200
+/// `{"text":""}` (§2.2), so `Ok("")`: an empty transcript is a success. Every
+/// failure is `Err` with the §4.4 sentence, and drops the cached probe.
+/// Blocking.
+pub fn transcribe(url: &str, wav: &[u8], model: &str) -> Result<String, String> {
+    let fail = |failure| failed(Side::Listen, url, TRANSCRIPTIONS_PATH, model, failure);
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(TRANSCRIBE_TIMEOUT))
+        .http_status_as_error(false)
+        .proxy(None)
+        .max_redirects(0)
+        .build()
+        .into();
+    let (content_type, body) = multipart(wav, model);
+    let answer = agent
+        .post(format!(
+            "{}{TRANSCRIPTIONS_PATH}",
+            url.trim_end_matches('/')
+        ))
+        .header("Content-Type", content_type)
+        .send(&body[..])
+        .and_then(|mut response| {
+            let status = response.status().as_u16();
+            let body = response
+                .body_mut()
+                .with_config()
+                .limit(ANSWER_CAP)
+                .read_to_string()?;
+            Ok((status, body))
+        });
+    let (status, body) = answer.map_err(|e| fail(Failure::Transport(e)))?;
+    if !(200..300).contains(&status) {
+        return Err(fail(Failure::Status(status, body)));
+    }
+    #[derive(Deserialize)]
+    struct Transcript {
+        text: String,
+    }
+    serde_json::from_str::<Transcript>(&body)
+        .map(|t| t.text)
+        .map_err(|_| {
+            invalidate();
+            Side::Listen.reported(&format!(
+                "{TRANSCRIPTIONS_PATH} answered HTTP {status} with a body that is not its JSON"
+            ))
+        })
+}
+
+/// Starts speaking `text` with the daemon at `url`, in `voice` (omitted when
+/// `None`, so the daemon's default voice speaks) as a streamed WAV (§2.3).
+/// Returns once the headers are in — the daemon sends them after the first
+/// sentence is synthesised, so this is the last moment a failure can still
+/// be a status code — with the body still arriving. A failure before then
+/// is `Err` with the §4.4 sentence, and drops the cached probe. An error
+/// after it reaches the reader as a read error: the daemon aborts the
+/// chunked body without its terminating chunk, which `ureq` reports as
+/// `UnexpectedEof` rather than a clean end. Blocking.
+pub fn speak(
+    url: &str,
+    text: &str,
+    voice: Option<&str>,
+) -> Result<ureq::BodyReader<'static>, String> {
+    let fail = |failure| failed(Side::Speak, url, SPEECH_PATH, "default", failure);
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_connect(Some(SPEAK_CONNECT_TIMEOUT))
+        .timeout_recv_response(Some(SPEAK_START_TIMEOUT))
+        .http_status_as_error(false)
+        .proxy(None)
+        .max_redirects(0)
+        .build()
+        .into();
+    let mut request = serde_json::json!({
+        "model": "default",
+        "input": text,
+        "response_format": "wav",
+    });
+    if let Some(voice) = voice {
+        request["voice"] = serde_json::Value::String(voice.to_string());
+    }
+    let mut response = agent
+        .post(format!("{}{SPEECH_PATH}", url.trim_end_matches('/')))
+        .header("Content-Type", "application/json")
+        .send(request.to_string())
+        .map_err(|e| fail(Failure::Transport(e)))?;
+    let status = response.status().as_u16();
+    if !(200..300).contains(&status) {
+        let body = response
+            .body_mut()
+            .with_config()
+            .limit(ANSWER_CAP)
+            .read_to_string()
+            .unwrap_or_default();
+        return Err(fail(Failure::Status(status, body)));
+    }
+    Ok(response.into_body().into_reader())
+}
+
+/// The ids of every speech-to-text model the daemon at `url` lists
+/// (`GET /v1/models`, `x_kind == "stt"`) — pulled or not, since a model
+/// that is known but not pulled is a choice the transcribe path answers with
+/// the `naru-audio pull` command, not one to hide. Empty on any failure:
+/// "Naru could not ask". Cached by the caller. Blocking.
+pub fn stt_models(url: &str) -> Vec<String> {
+    #[derive(Deserialize)]
+    struct List {
+        data: Vec<Model>,
+    }
+    #[derive(Deserialize)]
+    struct Model {
+        id: String,
+        #[serde(default)]
+        x_kind: Option<String>,
+    }
+    list(url, MODELS_PATH)
+        .and_then(|body| serde_json::from_str::<List>(&body).ok())
+        .map(|l| {
+            l.data
+                .into_iter()
+                .filter(|m| m.x_kind.as_deref() == Some("stt"))
+                .map(|m| m.id)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The voice ids of the daemon's default speech model (`GET
+/// /v1/audio/voices`, read from its manifest without loading it, §2.5).
+/// Empty on any failure: "Naru could not ask". Cached by the caller.
+/// Blocking.
+pub fn voices(url: &str) -> Vec<String> {
+    #[derive(Deserialize)]
+    struct List {
+        voices: Vec<Voice>,
+    }
+    #[derive(Deserialize)]
+    struct Voice {
+        id: String,
+    }
+    list(url, VOICES_PATH)
+        .and_then(|body| serde_json::from_str::<List>(&body).ok())
+        .map(|l| l.voices.into_iter().map(|v| v.id).collect())
+        .unwrap_or_default()
+}
+
+/// `GET {url}{path}`'s body when it answered 2xx within [`LIST_TIMEOUT`].
+fn list(url: &str, path: &str) -> Option<String> {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(LIST_TIMEOUT))
+        .http_status_as_error(false)
+        .proxy(None)
+        .max_redirects(0)
+        .build()
+        .into();
+    let mut response = agent
+        .get(format!("{}{path}", url.trim_end_matches('/')))
+        .call()
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    response
+        .body_mut()
+        .with_config()
+        .limit(ANSWER_CAP)
+        .read_to_string()
+        .ok()
+}
+
+fn unix_nanos() -> u128 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
 }
 
 /// A `/health` answer, read against design §4.4's table.
@@ -631,8 +974,20 @@ pub(crate) mod stub {
     /// `POST /api/load`'s success answer.
     pub(crate) const LOADED: &str = r#"{"model":"parakeet-tdt-0.6b-v2-int8","loaded":true}"#;
 
+    /// What the stub answers one request with.
+    pub(crate) enum Reply {
+        /// A whole JSON body with this status.
+        Json(u16, String),
+        /// A 200 `audio/wav` chunked body that sends these bytes as one chunk
+        /// and then closes the connection **without** the terminating
+        /// zero-length chunk — how the daemon aborts a speech stream that
+        /// failed after its first byte (design §2.3).
+        Aborted(Vec<u8>),
+    }
+
     /// An HTTP stub: `POST /api/load` gets `load` (status, body), every other
-    /// request `body` with a 200. Each request is recorded as
+    /// request `body` with a 200 — or, from [`Stub::serve`], whatever its
+    /// function answers for the method and path. Each request is recorded as
     /// `"<METHOD> <path> <body>"`. Stopped by dropping it, which closes the
     /// listening socket.
     pub(crate) struct Stub {
@@ -648,6 +1003,21 @@ pub(crate) mod stub {
         }
 
         pub(crate) fn with_load(port: u16, body: &'static str, load: (u16, &'static str)) -> Stub {
+            Stub::serve(port, move |method, path| {
+                let (status, answer) = if method == "POST" && path == "/api/load" {
+                    load
+                } else {
+                    (200, body)
+                };
+                Reply::Json(status, answer.to_string())
+            })
+        }
+
+        /// A stub answering each request with `route(method, path)`.
+        pub(crate) fn serve(
+            port: u16,
+            route: impl Fn(&str, &str) -> Reply + Send + 'static,
+        ) -> Stub {
             let listener = TcpListener::bind(("127.0.0.1", port)).expect("bind stub");
             let port = listener.local_addr().unwrap().port();
             let stop = Arc::new(AtomicBool::new(false));
@@ -689,17 +1059,27 @@ pub(crate) mod stub {
                     let (method, path) = (words.next().unwrap_or(""), words.next().unwrap_or(""));
                     let sent = String::from_utf8_lossy(&got[head_end..]).to_string();
                     log.lock().unwrap().push(format!("{method} {path} {sent}"));
-                    let (status, answer) = if method == "POST" && path == "/api/load" {
-                        load
-                    } else {
-                        (200, body)
-                    };
-                    let _ = write!(
-                        conn,
-                        "HTTP/1.1 {status} Stub\r\nContent-Type: application/json\r\n\
-                         Content-Length: {}\r\nConnection: close\r\n\r\n{answer}",
-                        answer.len()
-                    );
+                    match route(method, path) {
+                        Reply::Json(status, answer) => {
+                            let _ = write!(
+                                conn,
+                                "HTTP/1.1 {status} Stub\r\nContent-Type: application/json\r\n\
+                                 Content-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                                answer.len()
+                            );
+                        }
+                        Reply::Aborted(bytes) => {
+                            let _ = write!(
+                                conn,
+                                "HTTP/1.1 200 Stub\r\nContent-Type: audio/wav\r\n\
+                                 Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:x}\r\n",
+                                bytes.len()
+                            );
+                            let _ = conn.write_all(&bytes);
+                            let _ = conn.write_all(b"\r\n");
+                            // No `0\r\n\r\n`: the connection closes here.
+                        }
+                    }
                 }
             });
             Stub {
@@ -1108,5 +1488,231 @@ mod tests {
             assert_eq!(AudioEngine::parse(e.as_str()), Some(e));
         }
         assert_eq!(AudioEngine::parse("auris"), None);
+    }
+
+    /// A stub daemon answering `POST /v1/audio/transcriptions` with `status`
+    /// and `body`.
+    fn transcriber(status: u16, body: &'static str) -> Stub {
+        Stub::serve(0, move |_, path| {
+            assert_eq!(path, TRANSCRIPTIONS_PATH);
+            stub::Reply::Json(status, body.to_string())
+        })
+    }
+
+    /// The design's transcribe contract (§2.2), mesa task 1389: a multipart
+    /// body carrying the recording byte-identical as `file`, the model and
+    /// `response_format=json`, and the daemon's `text` back.
+    #[test]
+    fn transcribe_posts_the_recording_as_multipart_and_returns_the_text() {
+        let _prober = prober_lock();
+        let stub = transcriber(200, r#"{"text":"Add a task to the naru board."}"#);
+        let wav = b"RIFF\x00\x01binary\r\n--not-a-boundary";
+        let text = transcribe(&stub.url(), wav, "parakeet-tdt-0.6b-v2-int8");
+        assert_eq!(text, Ok("Add a task to the naru board.".to_string()));
+        let requests = stub.requests.lock().unwrap();
+        let sent = &requests[0];
+        assert!(
+            sent.starts_with("POST /v1/audio/transcriptions --naru-audio-"),
+            "{sent}"
+        );
+        for part in [
+            "name=\"file\"; filename=\"audio.wav\"\r\nContent-Type: audio/wav\r\n\r\n\
+             RIFF\u{0}\u{1}binary\r\n--not-a-boundary\r\n--naru-audio-",
+            "name=\"model\"\r\n\r\nparakeet-tdt-0.6b-v2-int8\r\n",
+            "name=\"response_format\"\r\n\r\njson\r\n",
+        ] {
+            assert!(sent.contains(part), "{part:?} missing from {sent:?}");
+        }
+    }
+
+    /// The boundary never occurs in the recording it frames.
+    #[test]
+    fn the_multipart_boundary_is_lengthened_past_the_recording() {
+        let (_, probe) = multipart(b"", "default");
+        let head = String::from_utf8(probe).unwrap();
+        let boundary = head[2..head.find('\r').unwrap()].to_string();
+        let wav = format!("xx{boundary}xx{boundary}x");
+        let (content_type, body) = multipart(wav.as_bytes(), "default");
+        let used = content_type
+            .strip_prefix("multipart/form-data; boundary=")
+            .unwrap();
+        assert!(!wav.contains(used), "{used} is inside the recording");
+        assert!(body.starts_with(format!("--{used}\r\n").as_bytes()));
+    }
+
+    /// Silence is the daemon's 200 `{"text":""}`, and a success.
+    #[test]
+    fn a_silent_recording_is_an_empty_transcript() {
+        let _prober = prober_lock();
+        let stub = transcriber(200, r#"{"text":"","segments":[]}"#);
+        assert_eq!(
+            transcribe(&stub.url(), b"RIFF", "default"),
+            Ok(String::new())
+        );
+    }
+
+    #[test]
+    fn a_stopped_daemon_is_daemon_down() {
+        let _prober = prober_lock();
+        let other = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://127.0.0.1:{}", other.local_addr().unwrap().port());
+        drop(other);
+        assert_eq!(
+            transcribe(&url, b"RIFF", "default"),
+            Err(down_message(&url))
+        );
+        assert_eq!(
+            speak(&url, "hi", None).err(),
+            Some(format!(
+                "Naru's voice isn't available: naru-audio isn't running at {url}. \
+                 Start it with `brew services start naru-audio`."
+            ))
+        );
+    }
+
+    /// A 409 `model_not_pulled` is §4.4's `model_missing` sentence, naming
+    /// the model the daemon quotes — the real name `default` resolved to. A
+    /// 404 `model_not_found` is not: no `pull` fetches a model the catalog
+    /// does not know, so it quotes the daemon's own catalog message.
+    #[test]
+    fn a_model_the_daemon_lacks_is_the_model_missing_sentence() {
+        let _prober = prober_lock();
+        let stub = transcriber(
+            409,
+            r#"{"error":{"message":"the model \"parakeet-tdt-0.6b-v2-int8\" is not pulled; run `naru-audio pull parakeet-tdt-0.6b-v2-int8`",
+                "type":"invalid_request_error","code":"model_not_pulled","param":"model"}}"#,
+        );
+        assert_eq!(
+            transcribe(&stub.url(), b"RIFF", "default"),
+            Err(
+                "Speech isn't available: the model parakeet-tdt-0.6b-v2-int8 isn't \
+                 downloaded. Run `naru-audio pull parakeet-tdt-0.6b-v2-int8`."
+                    .to_string()
+            )
+        );
+        let stub = transcriber(
+            404,
+            r#"{"error":{"message":"the model \"zz-nobody\" is not in the catalog; see GET /v1/models","code":"model_not_found"}}"#,
+        );
+        assert_eq!(
+            transcribe(&stub.url(), b"RIFF", "zz-nobody"),
+            Err(
+                "Speech isn't available: naru-audio reported: the model \"zz-nobody\" \
+                 is not in the catalog; see GET /v1/models"
+                    .to_string()
+            )
+        );
+    }
+
+    /// Anything else quotes the daemon, or names the status when there is no
+    /// envelope to quote.
+    #[test]
+    fn other_failures_quote_the_daemon() {
+        let _prober = prober_lock();
+        let stub = transcriber(
+            415,
+            r#"{"error":{"message":"the audio is not WAV","code":"unsupported_media_type"}}"#,
+        );
+        assert_eq!(
+            transcribe(&stub.url(), b"OggS", "default"),
+            Err("Speech isn't available: naru-audio reported: the audio is not WAV".to_string())
+        );
+        let stub = transcriber(502, "<html>bad gateway</html>");
+        assert_eq!(
+            transcribe(&stub.url(), b"RIFF", "default"),
+            Err("Speech isn't available: naru-audio reported: \
+                 /v1/audio/transcriptions answered HTTP 502"
+                .to_string())
+        );
+        let stub = Stub::serve(0, |_, _| {
+            stub::Reply::Json(
+                413,
+                r#"{"error":{"message":"input is 16385 characters; the cap is 16384","code":"payload_too_large"}}"#
+                    .to_string(),
+            )
+        });
+        assert_eq!(
+            speak(&stub.url(), "long", None).err().as_deref(),
+            Some(
+                "Naru's voice isn't available: naru-audio reported: input is 16385 \
+                 characters; the cap is 16384"
+            )
+        );
+    }
+
+    /// Serializes the tests that touch the process-wide [`PROBER`] — every
+    /// failed `transcribe`/`speak` drops it — with each other and with the
+    /// `listen`/`api` tests that probe through it, so
+    /// [`a_failed_request_drops_the_cached_probe`] cannot pass on someone
+    /// else's invalidation.
+    fn prober_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::core::attachments::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A failed request drops a cached `ready`, so the next probe asks.
+    #[test]
+    fn a_failed_request_drops_the_cached_probe() {
+        let _prober = prober_lock();
+        let stub = transcriber(500, "{}");
+        let cached = |fresh: AudioState| {
+            PROBER
+                .cache
+                .get(
+                    &stub.url(),
+                    Instant::now(),
+                    |_| READY_TTL,
+                    || Probe {
+                        state: fresh,
+                        message: None,
+                        url: stub.url(),
+                        checked_at: String::new(),
+                    },
+                )
+                .0
+                .state
+        };
+        assert_eq!(cached(AudioState::Ready), AudioState::Ready);
+        // Control: inside its TTL the entry stands, nothing refetched.
+        assert_eq!(cached(AudioState::Error), AudioState::Ready);
+        let _ = transcribe(&stub.url(), b"RIFF", "default");
+        assert_eq!(
+            cached(AudioState::Error),
+            AudioState::Error,
+            "the cached ready was dropped, so this get fetched"
+        );
+    }
+
+    /// The model list is the daemon's speech-to-text entries; a daemon that
+    /// is down, or answers something else, is an empty list.
+    #[test]
+    fn the_lists_are_the_daemons_and_empty_when_it_cannot_be_asked() {
+        let stub = Stub::serve(0, |_, path| {
+            stub::Reply::Json(
+                200,
+                match path {
+                    MODELS_PATH => {
+                        r#"{"object":"list","data":[
+                        {"id":"parakeet-tdt-0.6b-v2-int8","x_kind":"stt","x_pulled":true},
+                        {"id":"whisper-small","x_kind":"stt","x_pulled":false},
+                        {"id":"kokoro-v1.0","x_kind":"tts"}]}"#
+                    }
+                    VOICES_PATH => {
+                        r#"{"model":"kokoro-v1.0","voices":[{"id":"af_heart"},{"id":"bm_george"}]}"#
+                    }
+                    _ => "{}",
+                }
+                .to_string(),
+            )
+        });
+        assert_eq!(
+            stt_models(&stub.url()),
+            vec!["parakeet-tdt-0.6b-v2-int8", "whisper-small"]
+        );
+        assert_eq!(voices(&stub.url()), vec!["af_heart", "bm_george"]);
+        let junk = Stub::start(0, "<html>");
+        assert!(stt_models(&junk.url()).is_empty());
+        assert!(voices(&junk.url()).is_empty());
     }
 }

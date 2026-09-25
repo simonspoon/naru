@@ -647,7 +647,12 @@ reads an item in (mesa task 822, `docs/inbox.md`).
   `naru serve` is running is seen within seconds, no restart. `--list-voices`
   runs with `--no-download`: listing names must never turn into a model
   fetch, because the call holds the cache lock and one hang would wedge every
-  concurrent reader.
+  concurrent reader. On `audio.engine = "naru-audio"` (mesa task 1389) the
+  list is the daemon's instead — `GET {audio.url}/v1/audio/voices`, the
+  default speech model's voice ids — with the same filter, cache and
+  empty-means-could-not-ask rule (a daemon that is down skips the membership
+  check), and `kokoro-rs` is never run; a refused name reads "unknown voice
+  …; naru-audio offers …".
 - **A voice is a bounded identifier** (`core::speech::is_voice_name`: up to 64
   ASCII letters/digits/`_`/`-`, starting with a letter or digit) — one
   `Command::arg` after `-v`, so a value can never be read as an option or
@@ -817,6 +822,12 @@ mirror of Speech, above.
   membership check is skipped. Installing `auris` (or a model) while `naru
   serve` is running is seen within seconds, no restart. `--list-models` runs
   with `--no-download`: listing names must never turn into a model fetch.
+  On `audio.engine = "naru-audio"` (mesa task 1389) the list is the daemon's
+  instead — `GET {audio.url}/v1/models`, every entry whose `x_kind` is
+  `stt`, pulled or not (an unpulled one is a valid choice the transcribe
+  path answers with the `naru-audio pull` command) — with the same filter,
+  cache and empty-means-could-not-ask rule, and `auris` is never run. There
+  an unset model is sent as `default`.
 - **A model is a bounded identifier** (`core::listen::is_model_name`: up to
   64 ASCII letters/digits/`_`/`-`/`.`, starting with a letter or digit — the
   one deliberate difference from a voice's shape rule, since `auris`'s only
@@ -877,7 +888,17 @@ through and where the `naru-audio` daemon listens (mesa task 1388):
   speech-to-text model (`POST {url}/api/load`, mesa task 1392) — a failure
   from `POST /api/live` feeds the server's probe, while `naru live start`
   waits for the load (up to 60 s) after its output and reports a failure
-  only on stderr; transcription and speech still run the binaries.
+  only on stderr. Since mesa task 1389 `naru-audio` also routes
+  transcription (`POST /api/live/transcribe` → `/v1/audio/transcriptions`)
+  and the three speak routes (→ `/v1/audio/speech`, `wav`, streamed) through
+  the daemon, and the `speech`/`listen` sections' offered lists and save-time
+  checks come from it; `auris` and `kokoro-rs` are never run on that engine
+  (`docs/listen.md`). A daemon refusal before the first byte of speech is
+  503 `unavailable` with §4.4's "Naru's voice isn't available: …" sentence;
+  one after it aborts the response body. The daemon caps speech input at
+  16384 characters and Naru does not truncate, so a longer inbox item or
+  turn answers 503 "…naru-audio reported: input is N characters; the cap is
+  16384" on that engine.
 - **`url`**: a plain `http://host[:port]` (no TLS, path or query), default
   `http://127.0.0.1:7870`. **`NARU_AUDIO_URL`** (or `MESA_AUDIO_URL`), when
   set and non-empty, overrides the file.

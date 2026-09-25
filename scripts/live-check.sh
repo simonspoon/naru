@@ -94,9 +94,10 @@
 #      (MESA_AURIS_BIN): a real round-trip whose decoded audio reaches the
 #      stub on stdin byte-identical to what was sent (never as an argument),
 #      keeping the LAST `transcript` line among several and ignoring an
-#      unrecognised `type` (auris's own extension mechanism), `unavailable`
-#      for a nonzero exit, a run with no `transcript` line at all, and a
-#      missing binary; a body one byte over the 25 MiB cap answered 413
+#      unrecognised `type` (auris's own extension mechanism), 200
+#      `{"text":""}` for auris's exit 1 — silence (mesa task 1389) —
+#      `unavailable` for any other nonzero exit, a run with no `transcript`
+#      line at all, and a missing binary; a body one byte over the 25 MiB cap answered 413
 #      validation naming the limit, still as JSON, distinct from 422 for
 #      invalid/empty/missing base64; both halves of the boundary in default
 #      mode (Content-Type, agent gate); and under `--lan` **both verbs are
@@ -384,8 +385,9 @@ export MESA_LOKI_BIN="$STUB_DIR/loki"
 # `--format json` shape — a `segment` line, then a `transcript` line — on
 # stdout. `$STUB_DIR/auris-lines` lets a case override what it emits (to
 # prove mesa keeps the LAST `transcript` line and ignores anything else); an
-# `auris-fail` marker is the exit-1 "no transcript" failure mode, printing to
-# stderr and writing nothing to stdout.
+# `auris-fail` marker is the exit-1 "nothing transcribed" mode (silence, a
+# 200 `{"text":""}` since mesa task 1389) and `auris-usage` the exit-2
+# failure mode, each printing to stderr and writing nothing to stdout.
 cat > "$STUB_DIR/auris" <<EOF
 #!/usr/bin/env bash
 # The model probe (\`auris --no-download --list-models\`) is how mesa answers
@@ -398,7 +400,8 @@ if [ "\$1" = "--no-download" ] && [ "\$2" = "--list-models" ]; then
 fi
 printf '%s\n' "\$*" > "$STUB_DIR/last-argv"
 cat > "$STUB_DIR/last-stdin"
-[ -e "$STUB_DIR/auris-fail" ] && { echo "stub auris is down" >&2; exit 1; }
+[ -e "$STUB_DIR/auris-fail" ] && { echo "stub auris heard nothing" >&2; exit 1; }
+[ -e "$STUB_DIR/auris-usage" ] && { echo "stub auris: bad flag" >&2; exit 2; }
 if [ -e "$STUB_DIR/auris-lines" ]; then
   cat "$STUB_DIR/auris-lines"
 else
@@ -2075,11 +2078,18 @@ api 200 POST "/api/live/transcribe" "$TRANSCRIBE_BODY"
 rm -f "$STUB_DIR/auris-lines"
 ok "transcribe: the last \`transcript\` line wins over an earlier one, and an unrecognised \`type\` is ignored rather than aborting the read — auris's own extension mechanism"
 
-# ---- unavailable: a nonzero exit, and a run with no transcript line ----
+# ---- silence is 200 {"text":""}; a failure, and no transcript line, are 503 ----
 touch "$STUB_DIR/auris-fail"
-api 503 POST "/api/live/transcribe" "$TRANSCRIBE_BODY"
+api 200 POST "/api/live/transcribe" "$TRANSCRIBE_BODY"
 rm -f "$STUB_DIR/auris-fail"
-[ "$(jqb .error.code)" = "unavailable" ] || fail "transcribe: a failing auris must be 503 unavailable"
+[ "$(jq -c . <<<"$BODY")" = '{"text":""}' ] ||
+  fail "transcribe: auris exit 1 (nothing transcribed) must be 200 {\"text\":\"\"}, got $BODY"
+ok "transcribe: auris exit 1 — nothing transcribed — is 200 {\"text\":\"\"}, the silence contract"
+
+touch "$STUB_DIR/auris-usage"
+api 503 POST "/api/live/transcribe" "$TRANSCRIBE_BODY"
+rm -f "$STUB_DIR/auris-usage"
+[ "$(jqb .error.code)" = "unavailable" ] || fail "transcribe: a failing auris (exit 2) must be 503 unavailable"
 
 cat >"$STUB_DIR/auris-lines" <<'JSONL'
 {"type":"segment","index":0,"text":"only a segment, nothing final"}
@@ -2089,7 +2099,7 @@ api 503 POST "/api/live/transcribe" "$TRANSCRIBE_BODY"
 [ "$(jqb .error.code)" = "unavailable" ] ||
   fail "transcribe: a run with no transcript line must be 503 unavailable, never a 200 with empty text"
 rm -f "$STUB_DIR/auris-lines"
-ok "transcribe: unavailable for a failing auris and for a run that never emits a transcript line — never a silent empty success"
+ok "transcribe: unavailable for a failing auris (exit 2) and for a run that never emits a transcript line — never a silent empty success"
 
 # ---- over-cap body: 413, JSON, naming the limit ----
 #

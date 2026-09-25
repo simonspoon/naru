@@ -3746,8 +3746,10 @@ async fn archive_inbox(
 /// apply (the `/api/fs/dirs` split).
 ///
 /// The synthesiser is the outside-mesa dependency here, so a failing or
-/// missing `kokoro-rs` is `unavailable` — the code already scoped to exactly
-/// that (`cc usage`, the agents routes, `cc text`) — not a 500.
+/// missing `kokoro-rs` — or, on `audio.engine = "naru-audio"`, a daemon that
+/// refuses before the first byte (mesa task 1389, [`speech::start`]) — is
+/// `unavailable` — the code already scoped to exactly that (`cc usage`, the
+/// agents routes, `cc text`) — not a 500.
 async fn speak_inbox(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -4792,10 +4794,16 @@ struct TranscribeBody {
     audio_base64: String,
 }
 
-/// Transcribes one recording with the external `auris` binary
-/// ([`listen::transcribe`]) and hands back the text. mesa's mirror of
-/// [`speak_inbox`]/[`speak_live_turn`] on the input side: audio in, text out,
-/// nothing kept either direction.
+/// Transcribes one recording with the server's engine ([`listen::transcribe`]:
+/// the external `auris` binary, or on `audio.engine = "naru-audio"` the
+/// daemon's `/v1/audio/transcriptions`, mesa task 1389) and hands back the
+/// text. mesa's mirror of [`speak_inbox`]/[`speak_live_turn`] on the input
+/// side: audio in, text out, nothing kept either direction.
+///
+/// **Silence is 200 `{"text":""}`** on both engines (design §2.2), never a
+/// 503: an empty transcript is a success, and the page drops it. Every
+/// other failure is 503 `unavailable`, on `naru-audio` carrying the §4.4
+/// sentence the page shows (`docs/listen.md`).
 ///
 /// **Retention:** the decoded bytes live only in this function's local
 /// `bytes` buffer, are handed to the child's stdin inside
@@ -4883,11 +4891,11 @@ async fn transcribe_live(
         });
     }
     // Off the async executor for the same reason every other blocking read in
-    // this file is: `listen::transcribe` blocks on a subprocess. Read the
-    // configured model on the same blocking call, on every request — the
-    // `speech_voice()` rule `speak_live_turn` already applies — so a config
-    // read that fails maps to the same `unavailable` shape a bad file gives
-    // the speak path, rather than a distinct error. Same double `map_err`
+    // this file is: `listen::transcribe` blocks on a subprocess or the
+    // daemon. Read the configured model on the same blocking call, on every
+    // request — the `speech_voice()` rule `speak_live_turn` already applies
+    // — so a config read that fails maps to the same `unavailable` shape a
+    // bad file gives the speak path, rather than a distinct error. Same double `map_err`
     // shape as `speak_live_turn`'s `speech::start` call — the outer one is
     // the `JoinError` (the blocking task itself panicked), the inner one is
     // this closure's own `Result<_, String>`.
@@ -8706,12 +8714,14 @@ struct PreviewQuery {
 /// and the same two gates: `require_agent_access` plus the `Origin`-independent
 /// half a no-cors `<audio src>` needs. The text is a mesa constant, so the only
 /// caller-supplied value on this path is the voice — which reaches the child as
-/// one `Command::arg` after `-v`, and only after passing the shape rule that
-/// keeps a name from ever being read as an option.
+/// one `Command::arg` after `-v` (on `audio.engine = "naru-audio"`, the
+/// `voice` field of the daemon's JSON request, mesa task 1389), and only after
+/// passing the shape rule that keeps a name from ever being read as an option.
 ///
 /// The shape rule is the *whole* check: unlike a save, a preview does not
 /// require the name to be one this binary lists. A voice the binary rejects is
-/// the synthesiser's answer to give, and hearing that failure is a legitimate
+/// the synthesiser's answer to give — on `naru-audio`, a 503 `unavailable`
+/// quoting the daemon's refusal — and hearing that failure is a legitimate
 /// outcome of pressing test.
 async fn preview_speech(
     State(state): State<AppState>,
@@ -17065,5 +17075,201 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             }
         }
         assert!(stub.origins.lock().unwrap().is_empty());
+    }
+
+    /// A stub binary that records being run by touching `ran` — pointed at
+    /// by `MESA_AURIS_BIN`/`MESA_KOKORO_BIN` to prove the naru-audio engine
+    /// never reaches them (mesa task 1389).
+    fn recording_bin(
+        dir: &std::path::Path,
+        name: &str,
+        ran: &std::path::Path,
+    ) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(
+            &path,
+            format!("#!/bin/sh\ntouch '{}'\nexit 1\n", ran.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    /// `POST /api/live/transcribe` once, as the page sends it.
+    async fn post_transcribe(state: &AppState) -> ApiResult<Response> {
+        transcribe_live(
+            State(state.clone()),
+            ConnectInfo(loopback()),
+            loopback_agent_headers(),
+            Ok(Json(TranscribeBody {
+                audio_base64: base64::engine::general_purpose::STANDARD.encode(b"RIFF....WAVE"),
+            })),
+        )
+        .await
+    }
+
+    /// mesa task 1389, the acceptance run on `audio.engine = "naru-audio"`:
+    /// `POST /api/live/transcribe` is the daemon's answer — its text, silence
+    /// as 200 `{"text":""}`, a stopped daemon and a missing model as 503
+    /// `unavailable` with §4.4's sentence — and `auris` is never run.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn transcribe_live_on_naru_audio_is_the_daemons_answer_and_never_runs_auris() {
+        let _env = attachments::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let bins = tempfile::tempdir().unwrap();
+        let ran = bins.path().join("auris-ran");
+        let auris = recording_bin(bins.path(), "auris", &ran);
+        // SAFETY: ENV_LOCK is held.
+        unsafe { std::env::set_var("MESA_AURIS_BIN", &auris) };
+        let (_dir, state) = test_state();
+        let cfg = tempfile::tempdir().unwrap();
+        let answer = |status: u16, body: &'static str| {
+            audio::stub::Stub::serve(0, move |_, _| {
+                audio::stub::Reply::Json(status, body.to_string())
+            })
+        };
+
+        let spoken = answer(200, r#"{"text":"Add a task."}"#);
+        let _config = listen_config(
+            cfg.path(),
+            Some(json!({"engine": "naru-audio", "url": spoken.url()})),
+        );
+        let resp = post_transcribe(&state).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(json_body(resp).await, json!({"text": "Add a task."}));
+        assert_eq!(spoken.count("POST /v1/audio/transcriptions"), 1);
+
+        let silent = answer(200, r#"{"text":"","segments":[]}"#);
+        let _config = listen_config(
+            cfg.path(),
+            Some(json!({"engine": "naru-audio", "url": silent.url()})),
+        );
+        let resp = post_transcribe(&state).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(json_body(resp).await, json!({"text": ""}));
+
+        let missing = answer(
+            409,
+            r#"{"error":{"message":"the model \"parakeet-tdt-0.6b-v2-int8\" is not pulled; run `naru-audio pull parakeet-tdt-0.6b-v2-int8`","type":"invalid_request_error","code":"model_not_pulled","param":"model"}}"#,
+        );
+        let _config = listen_config(
+            cfg.path(),
+            Some(json!({"engine": "naru-audio", "url": missing.url()})),
+        );
+        let err = post_transcribe(&state).await.unwrap_err();
+        assert_eq!(err.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(err.code, "unavailable");
+        assert_eq!(
+            err.message,
+            "Speech isn't available: the model parakeet-tdt-0.6b-v2-int8 isn't downloaded. \
+             Run `naru-audio pull parakeet-tdt-0.6b-v2-int8`."
+        );
+
+        let url = missing.url();
+        drop(missing);
+        let _config = listen_config(
+            cfg.path(),
+            Some(json!({"engine": "naru-audio", "url": url})),
+        );
+        let err = post_transcribe(&state).await.unwrap_err();
+        assert_eq!(err.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(err.code, "unavailable");
+        assert_eq!(err.message, audio::down_message(&url));
+
+        unsafe {
+            std::env::remove_var("MESA_AURIS_BIN");
+            std::env::remove_var("MESA_CONFIG_FILE");
+        }
+        assert!(!ran.exists(), "auris was run on the naru-audio engine");
+    }
+
+    /// The silence contract on the legacy engine: `auris` exiting 1 with no
+    /// transcript — "nothing transcribed" — is 200 `{"text":""}`, not a 503.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn transcribe_live_on_legacy_answers_silence_as_empty_text() {
+        let _env = attachments::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let bins = tempfile::tempdir().unwrap();
+        let ran = bins.path().join("auris-ran");
+        let auris = recording_bin(bins.path(), "auris", &ran);
+        let cfg = tempfile::tempdir().unwrap();
+        let _config = listen_config(cfg.path(), None);
+        // SAFETY: ENV_LOCK is held.
+        unsafe { std::env::set_var("MESA_AURIS_BIN", &auris) };
+        let (_dir, state) = test_state();
+        let resp = post_transcribe(&state).await;
+        unsafe {
+            std::env::remove_var("MESA_AURIS_BIN");
+            std::env::remove_var("MESA_CONFIG_FILE");
+        }
+        let resp = resp.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(json_body(resp).await, json!({"text": ""}));
+        assert!(ran.exists(), "the legacy engine runs auris");
+    }
+
+    /// mesa task 1389: a speak route on `naru-audio` streams the daemon's
+    /// WAV, and when the daemon aborts its chunked body after the first
+    /// bytes, Naru's response body fails too rather than ending cleanly —
+    /// a truncated reply is never passed off as a whole one. `kokoro-rs` is
+    /// never run.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn speak_live_turn_on_naru_audio_aborts_when_the_daemon_aborts() {
+        let _env = attachments::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let bins = tempfile::tempdir().unwrap();
+        let ran = bins.path().join("kokoro-ran");
+        let kokoro = recording_bin(bins.path(), "kokoro-rs", &ran);
+        // SAFETY: ENV_LOCK is held.
+        unsafe { std::env::set_var("MESA_KOKORO_BIN", &kokoro) };
+        let head = b"RIFF\x24\x00\xff\x7fWAVEfmt ".to_vec();
+        let sent = head.clone();
+        let daemon =
+            audio::stub::Stub::serve(0, move |_, _| audio::stub::Reply::Aborted(sent.clone()));
+        let cfg = tempfile::tempdir().unwrap();
+        let _config = listen_config(
+            cfg.path(),
+            Some(json!({"engine": "naru-audio", "url": daemon.url()})),
+        );
+        let (_dir, state) = test_state();
+        let turn = {
+            let mut store = state.store.lock().unwrap();
+            let session = store.start_live_session(None).unwrap();
+            store
+                .add_live_turn(session.id, LiveRole::Naru, "Hello there.", None, None)
+                .unwrap()
+        };
+        let resp = speak_live_turn(
+            State(state),
+            ConnectInfo(loopback()),
+            loopback_agent_headers(),
+            Path(turn.id),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers()[header::CONTENT_TYPE], "audio/wav");
+        let mut body = resp.into_body().into_data_stream();
+        use futures_util::StreamExt;
+        let first = body.next().await.expect("a first chunk").expect("audio");
+        assert_eq!(&first[..], &head[..], "the daemon's bytes, untouched");
+        let ending = body.next().await.expect("an error, not a clean end");
+        assert!(ending.is_err(), "{ending:?}");
+        unsafe {
+            std::env::remove_var("MESA_KOKORO_BIN");
+            std::env::remove_var("MESA_CONFIG_FILE");
+        }
+        assert!(
+            daemon.requests.lock().unwrap()[0].contains(r#""input":"Hello there.""#),
+            "the turn's text reaches the daemon"
+        );
+        assert!(!ran.exists(), "kokoro-rs was run on the naru-audio engine");
     }
 }

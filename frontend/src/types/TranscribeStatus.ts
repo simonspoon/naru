@@ -4,9 +4,8 @@ import type { AudioState } from "./AudioState";
 /**
  * What `GET /api/live/transcribe` answers (mesa task 1388): whether the
  * server's speech-to-text engine is ready, and if not, the sentence the
- * page shows the person. `available` is whether the POST can decode
- * (`!models().is_empty()`, on both engines until design task 17), kept for
- * clients that only read it.
+ * page shows the person. `available` is `state == "ready"` — whether the
+ * POST can decode — kept for clients that only read it.
  */
 export type TranscribeStatus = { available: boolean, state: AudioState, 
 /**

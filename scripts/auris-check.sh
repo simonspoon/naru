@@ -24,9 +24,10 @@
 #   3c. stdout carries only the transcript: a successful run that also fills
 #      well over a pipe buffer's worth of stderr must still answer 200 with
 #      exactly the transcript text, none of that noise leaking in;
-#   4. the "nonzero exit means no transcript" rule: a failing auris and a run
-#      that never emits a `transcript` line are both 503 unavailable, never a
-#      silent 200 with empty text;
+#   4. the silence contract (mesa task 1389, naru-audio design §2.2): auris
+#      exiting 1 — "nothing transcribed" — is 200 `{"text":""}`, while a
+#      failing auris (exit 2) and a run that exits 0 without ever emitting a
+#      `transcript` line are both 503 unavailable, never a silent 200;
 #   5. the body-size contract: one byte over `LIVE_AUDIO_MAX` is 413
 #      validation naming the limit, still JSON; invalid/empty/missing base64
 #      is 422 validation; valid base64 that isn't actually a WAV is not
@@ -95,7 +96,8 @@ LIVE_AUDIO_MAX=$((LIVE_AUDIO_MAX_EXPR))
 # (so the byte-identical/injection-proof assertions can read them back) and
 # answers auris's real JSON-Lines `--format json` shape — a `segment` line,
 # then a `transcript` line. `$STUB_DIR/auris-lines` lets a case override what
-# it emits; `auris-fail` is the exit-1 "no transcript" failure mode. A
+# it emits; `auris-fail` is the exit-1 "nothing transcribed" mode (silence),
+# `auris-usage` the exit-2 failure mode. A
 # `auris-noisy` marker makes a SUCCESSFUL run also write well over a pipe
 # buffer's worth of stderr first — mesa must drain stderr without letting any
 # of it leak into, prefix, or truncate the stdout transcript it reads back.
@@ -114,7 +116,8 @@ if [ "\$*" = "--no-download --list-models" ]; then
   printf 'parakeet-tdt-0.6b-v2-int8\n'
   exit 0
 fi
-[ -e "$STUB_DIR/auris-fail" ] && { echo "stub auris is down" >&2; exit 1; }
+[ -e "$STUB_DIR/auris-fail" ] && { echo "stub auris heard nothing" >&2; exit 1; }
+[ -e "$STUB_DIR/auris-usage" ] && { echo "stub auris: bad flag" >&2; exit 2; }
 [ -e "$STUB_DIR/auris-noisy" ] && { head -c 200000 /dev/zero | tr '\0' 'x' >&2; }
 if [ -e "$STUB_DIR/auris-lines" ]; then
   cat "$STUB_DIR/auris-lines"
@@ -280,11 +283,18 @@ rm -f "$STUB_DIR/auris-noisy"
   fail "transcribe: stderr noise on a successful run must not leak into the transcript, got $(jqb .text)"
 ok "transcribe: stdout carries only the transcript — a noisy stderr on a successful run neither hangs the request nor leaks into the text"
 
-# ---- 4. unavailable: a nonzero exit, and a run with no transcript line ----
+# ---- 4. silence is 200 {"text":""}; a failure, and no transcript line, are 503 ----
 touch "$STUB_DIR/auris-fail"
-api 503 POST "/api/live/transcribe" "$TRANSCRIBE_BODY"
+api 200 POST "/api/live/transcribe" "$TRANSCRIBE_BODY"
 rm -f "$STUB_DIR/auris-fail"
-[ "$(jqb .error.code)" = "unavailable" ] || fail "transcribe: a failing auris must be 503 unavailable"
+[ "$(jq -c . <<<"$BODY")" = '{"text":""}' ] ||
+  fail "transcribe: auris exit 1 (nothing transcribed) must be 200 {\"text\":\"\"}, got $BODY"
+ok "transcribe: auris exit 1 — nothing transcribed — is 200 {\"text\":\"\"}, the silence contract"
+
+touch "$STUB_DIR/auris-usage"
+api 503 POST "/api/live/transcribe" "$TRANSCRIBE_BODY"
+rm -f "$STUB_DIR/auris-usage"
+[ "$(jqb .error.code)" = "unavailable" ] || fail "transcribe: a failing auris (exit 2) must be 503 unavailable"
 
 cat >"$STUB_DIR/auris-lines" <<'JSONL'
 {"type":"segment","index":0,"text":"only a segment, nothing final"}
@@ -294,7 +304,7 @@ api 503 POST "/api/live/transcribe" "$TRANSCRIBE_BODY"
 [ "$(jqb .error.code)" = "unavailable" ] ||
   fail "transcribe: a run with no transcript line must be 503 unavailable, never a 200 with empty text"
 rm -f "$STUB_DIR/auris-lines"
-ok "transcribe: unavailable for a failing auris and for a run that never emits a transcript line — never a silent empty success"
+ok "transcribe: unavailable for a failing auris (exit 2) and for a run that never emits a transcript line — never a silent empty success"
 
 # ---- 5a. over-cap body: 413, JSON, naming the limit ----
 OVER_RAW=$((LIVE_AUDIO_MAX + 1))
@@ -326,12 +336,13 @@ ok "transcribe: invalid base64, an empty recording, and a missing field are all 
 # Valid base64 that is not actually a WAV: mesa never inspects the bytes
 # itself (`listen::transcribe` hands them to auris verbatim), so with the
 # stub this is indistinguishable from the round-trip above. With a real
-# auris this is exit-1 "no transcript" — the `unavailable` path just proven.
+# auris this is exit-1 "nothing transcribed" — the 200 {"text":""} path just
+# proven.
 NOT_WAV_B64=$(printf 'this is not a wav file' | base64 | tr -d '\n')
 api 200 POST "/api/live/transcribe" "$(jq -n --arg a "$NOT_WAV_B64" '{audio_base64: $a}')"
 [ "$(jqb .text)" = "hello there" ] ||
   fail "transcribe with non-WAV (but valid) base64: mesa must still just hand it to auris"
-ok "transcribe: valid base64 that is not a WAV is not mesa's to reject — it reaches auris unexamined (a real auris would answer unavailable here)"
+ok "transcribe: valid base64 that is not a WAV is not mesa's to reject — it reaches auris unexamined (a real auris would answer 200 {\"text\":\"\"} here)"
 
 # ---- 6. both halves of the boundary, default mode ----
 raw POST "/api/live/transcribe"

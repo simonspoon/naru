@@ -2202,12 +2202,14 @@ fn save_speech_in(
 
 /// A voice has to be a name the synthesiser could accept: a bounded identifier
 /// ([`speech::is_voice_name`] — so it can never be read as an option), and,
-/// when mesa managed to ask the binary what it `offers`, one of those.
+/// when mesa managed to ask the binary what it `offers`, one of those — or,
+/// on `audio.engine = "naru-audio"`, the daemon (mesa task 1389).
 ///
 /// The membership half is skipped when `offered` is empty, which is what a
-/// missing or uncooperative binary looks like: mesa cannot prove the name is
-/// wrong there, and refusing a value it merely can't check would be the worse
-/// answer (the same call [`bash_syntax_check`] makes).
+/// missing or uncooperative binary (or a daemon that is down) looks like:
+/// mesa cannot prove the name is wrong there, and refusing a value it merely
+/// can't check would be the worse answer (the same call
+/// [`bash_syntax_check`] makes).
 pub fn validate_voice(voice: &str, offered: &[String]) -> Result<(), String> {
     if !speech::is_voice_name(voice) {
         return Err(format!(
@@ -2218,7 +2220,7 @@ pub fn validate_voice(voice: &str, offered: &[String]) -> Result<(), String> {
     if !offered.is_empty() && !offered.iter().any(|v| v == voice) {
         return Err(format!(
             "unknown voice {voice:?}; {} offers {}",
-            speech::kokoro_bin(),
+            speech::voices_offered_by(),
             offered.join(", ")
         ));
     }
@@ -2408,12 +2410,14 @@ fn save_listen_in(
 /// A model has to be a name the recognizer could accept: a bounded
 /// identifier ([`listen::is_model_name`] — so it can never be read as an
 /// option), and, when mesa managed to ask the binary what it `offers`, one
-/// of those.
+/// of those — or, on `audio.engine = "naru-audio"`, the daemon (mesa task
+/// 1389).
 ///
 /// The membership half is skipped when `offered` is empty, which is what a
-/// missing or uncooperative binary looks like: mesa cannot prove the name is
-/// wrong there, and refusing a value it merely can't check would be the
-/// worse answer (the same call [`validate_voice`] makes).
+/// missing or uncooperative binary (or a daemon that is down) looks like:
+/// mesa cannot prove the name is wrong there, and refusing a value it merely
+/// can't check would be the worse answer (the same call [`validate_voice`]
+/// makes).
 pub fn validate_model(model: &str, offered: &[String]) -> Result<(), String> {
     if !listen::is_model_name(model) {
         return Err(format!(
@@ -2424,7 +2428,7 @@ pub fn validate_model(model: &str, offered: &[String]) -> Result<(), String> {
     if !offered.is_empty() && !offered.iter().any(|m| m == model) {
         return Err(format!(
             "unknown model {model:?}; {} offers {}",
-            listen::auris_bin(),
+            listen::models_offered_by(),
             offered.join(", ")
         ));
     }
@@ -6667,5 +6671,93 @@ mod tests {
         let script = resolved("true\necho '{prompt: see below}' ${prompt:-x}", &vars);
         assert!(script.contains("{prompt: see below}"), "{script}");
         assert!(script.contains("${prompt:-x}"), "{script}");
+    }
+
+    /// mesa task 1389: on `audio.engine = "naru-audio"` a saved voice and a
+    /// saved model are checked against the daemon's lists — accepted when
+    /// listed, refused naming `naru-audio` when not — and with the daemon
+    /// down (an empty list) only the shape rule applies. Neither binary is
+    /// consulted: both env seams point at a path that does not exist, and
+    /// no refusal names it.
+    #[test]
+    fn naru_audio_validates_the_voice_and_model_against_the_daemons_lists() {
+        let _env = crate::core::attachments::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let daemon = crate::core::audio::stub::Stub::serve(0, |_, path| {
+            crate::core::audio::stub::Reply::Json(
+                200,
+                match path {
+                    "/v1/models" => {
+                        r#"{"object":"list","data":[
+                        {"id":"parakeet-tdt-0.6b-v2-int8","x_kind":"stt"},
+                        {"id":"kokoro-v1.0","x_kind":"tts"}]}"#
+                    }
+                    _ => {
+                        r#"{"model":"kokoro-v1.0","voices":[{"id":"af_heart"},{"id":"bm_george"}]}"#
+                    }
+                }
+                .to_string(),
+            )
+        });
+        let dead = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let down = format!("http://127.0.0.1:{}", dead.local_addr().unwrap().port());
+        drop(dead);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let engine = |url: &str| {
+            std::fs::write(
+                &path,
+                format!(r#"{{"audio": {{"engine": "naru-audio", "url": "{url}"}}}}"#),
+            )
+            .unwrap();
+        };
+        // SAFETY: ENV_LOCK serializes every test touching the environment.
+        unsafe {
+            std::env::remove_var("NARU_AUDIO_URL");
+            std::env::remove_var("MESA_AUDIO_URL");
+            std::env::set_var("MESA_CONFIG_FILE", &path);
+            std::env::set_var("MESA_AURIS_BIN", "no-such-auris-1389");
+            std::env::set_var("MESA_KOKORO_BIN", "no-such-kokoro-1389");
+        }
+        engine(&daemon.url());
+        let shown = (speech().unwrap().voices, listen().unwrap().models);
+        let voice_ok = save_speech(&voice(&[(VOICE, Some("bm_george"))]));
+        let voice_bad = save_speech(&voice(&[(VOICE, Some("alloy"))]));
+        let model_ok = save_listen(&model_update(&[(MODEL, Some("parakeet-tdt-0.6b-v2-int8"))]));
+        let model_bad = save_listen(&model_update(&[(MODEL, Some("kokoro-v1.0"))]));
+        engine(&down);
+        let unchecked = save_speech(&voice(&[(VOICE, Some("zz_nobody"))]));
+        let misshapen = save_listen(&model_update(&[(MODEL, Some("-o"))]));
+        unsafe {
+            std::env::remove_var("MESA_CONFIG_FILE");
+            std::env::remove_var("MESA_AURIS_BIN");
+            std::env::remove_var("MESA_KOKORO_BIN");
+        }
+
+        assert_eq!(shown.0, vec!["af_heart", "bm_george"]);
+        assert_eq!(shown.1, vec!["parakeet-tdt-0.6b-v2-int8"]);
+        voice_ok.unwrap();
+        model_ok.unwrap();
+        for (err, want) in [
+            (
+                voice_bad,
+                "unknown voice \"alloy\"; naru-audio offers af_heart, bm_george",
+            ),
+            (
+                model_bad,
+                "unknown model \"kokoro-v1.0\"; naru-audio offers parakeet-tdt-0.6b-v2-int8",
+            ),
+        ] {
+            assert!(
+                matches!(&err, Err(SaveError::Validation(m)) if m == want),
+                "{err:?}"
+            );
+        }
+        unchecked.unwrap();
+        assert!(
+            matches!(misshapen, Err(SaveError::Validation(_))),
+            "{misshapen:?}"
+        );
     }
 }

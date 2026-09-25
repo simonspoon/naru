@@ -18,7 +18,9 @@
 //! stdout, the child is never timed out and never killed except when mesa can
 //! no longer read its output at all (matching hooks/agents/scripts), and unlike
 //! a script run a nonzero exit is **not** data — there is no audio to return,
-//! so it is an `Err` the API answers `unavailable` with.
+//! so it is an `Err` the API answers `unavailable` with. On `audio.engine =
+//! "naru-audio"` (mesa task 1389) no subprocess runs: [`start`] streams the
+//! daemon's `/v1/audio/speech` WAV and [`voices`] reads its list.
 //!
 //! The audio is **streamed, not collected** (task 816): `kokoro-rs` synthesises
 //! sentence by sentence and writes each one as it lands, so a minute-long item
@@ -186,34 +188,56 @@ const MAX_VOICES: usize = 500;
 /// here", never "there are no voices". Callers must treat it as advisory —
 /// [`start`] passes whatever voice it is given.
 ///
+/// On `audio.engine = "naru-audio"` (mesa task 1389) the list is the
+/// daemon's voices instead ([`audio::voices`], read from the model's
+/// manifest) and `kokoro-rs` is never run; the shape rule and the bound
+/// below still apply.
+///
 /// Cached with a TTL ([`audio::TtlCache`], mesa task 1388): 10 s for a
-/// non-empty answer, 2 s for an empty one, keyed on the binary path — the
-/// call costs ~1s and is read on every Settings page load, but a synthesiser
-/// installed while `serve` runs is now noticed without a restart.
+/// non-empty answer, 2 s for an empty one, keyed on the binary path (or the
+/// daemon's URL) — the call costs ~1s and is read on every Settings page
+/// load, but a synthesiser installed while `serve` runs is now noticed
+/// without a restart.
 /// `--no-download`: listing names must never become a model fetch. The cache
 /// lock is held across the call, so a call that blocks blocks every
-/// concurrent caller — there is no cheap timeout here, so the fix is not to
-/// start anything that can hang. Both of the child's pipes are bounded
+/// concurrent caller — there is no cheap timeout on the binary, so the fix is
+/// not to start anything that can hang (the daemon's list is bounded by
+/// `audio`'s 2 s list timeout instead). Both of the child's pipes are bounded
 /// (`list_names` → `spawn_and_drain`), so a `--list-voices` that answers with
 /// megabytes of noise costs one capped buffer, never an unbounded one.
 pub fn voices() -> Vec<String> {
     static VOICES: TtlCache<Vec<String>> = TtlCache::new();
-    let bin = kokoro_bin();
+    let daemon = audio::daemon_url();
+    let key = daemon.clone().unwrap_or_else(kokoro_bin);
     VOICES
         .get(
-            &bin,
+            &key,
             Instant::now(),
             |v| audio::list_ttl(v),
-            || {
-                list_names(
-                    &bin,
+            || match &daemon {
+                Some(url) => audio::voices(url)
+                    .into_iter()
+                    .filter(|v| is_voice_name(v))
+                    .take(MAX_VOICES)
+                    .collect(),
+                None => list_names(
+                    &key,
                     &["--no-download", "--list-voices"],
                     is_voice_name,
                     MAX_VOICES,
-                )
+                ),
             },
         )
         .0
+}
+
+/// Who offers the names [`voices`] lists, for a sentence naming it: the
+/// daemon on `naru-audio`, else the synthesiser binary.
+pub fn voices_offered_by() -> String {
+    match audio::daemon_url() {
+        Some(_) => "naru-audio".to_string(),
+        None => kokoro_bin(),
+    }
 }
 
 /// Whether `name` is shaped like a voice: a bounded identifier that cannot be
@@ -255,10 +279,68 @@ impl Speech {
     }
 }
 
-/// Starts synthesising `text` in `voice`, blocking only until the WAV header is
-/// readable, and streams the audio from there. `Err` is a synthesiser that
-/// produced no usable audio — the one failure the caller can still turn into a
-/// status code.
+/// Starts synthesising `text` in `voice` with the engine `audio.engine`
+/// names, read on every call: the naru-audio daemon (mesa task 1389,
+/// [`audio::speak`] — `kokoro-rs` never run) or `kokoro-rs`
+/// ([`start_kokoro`]). Blocks only until the audio has started, and streams
+/// it from there. `Err` is a synthesiser that produced no usable audio — the
+/// one failure the caller can still turn into a status code.
+///
+/// The daemon already writes the streamed-WAV sizes [`fix_wav_sizes`] would
+/// (`0x7fff0000`, design §2.3), so its bytes are relayed untouched; a stream
+/// it aborts after the first byte arrives here as a read error, which ends
+/// the channel with an `Err` exactly as a failed `kokoro-rs` read does.
+///
+/// The switch is [`audio::daemon_url`], as for [`voices`]: a config file
+/// that cannot be read is the legacy engine, so the one caller that reads no
+/// setting first (the Settings page's voice preview) speaks exactly as it
+/// did before the engine existed.
+///
+/// Blocking: call it from `spawn_blocking`, not an async worker.
+pub fn start(text: &str, voice: Option<&str>) -> Result<Speech, String> {
+    match audio::daemon_url() {
+        Some(url) => {
+            let body = audio::speak(&url, text, voice)?;
+            Ok(Speech {
+                chunks: relay(body),
+            })
+        }
+        None => start_kokoro(text, voice),
+    }
+}
+
+/// Relays the daemon's streamed WAV into a channel, chunk by chunk. A read
+/// error — the daemon aborting the body (design §2.3) — is sent as the last
+/// item, so the response ends abnormally instead of passing a truncated WAV
+/// off as complete, and drops the cached probe (design §4.4). A listener
+/// that goes away ends the relay: dropping the body closes the connection,
+/// which is how the daemon learns to stop synthesising (no pipe here can
+/// fill and wedge a child, unlike [`stream`]).
+fn relay(mut body: impl Read + Send + 'static) -> mpsc::Receiver<Result<Vec<u8>, std::io::Error>> {
+    let (tx, rx) = mpsc::channel(BACKLOG);
+    std::thread::spawn(move || {
+        let mut buf = vec![0u8; CHUNK];
+        loop {
+            match body.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if tx.blocking_send(Ok(buf[..n].to_vec())).is_err() {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    audio::invalidate();
+                    let _ = tx.blocking_send(Err(e));
+                    break;
+                }
+            }
+        }
+    });
+    rx
+}
+
+/// Starts synthesising `text` in `voice` with `kokoro-rs`, blocking only
+/// until the WAV header is readable, and streams the audio from there.
 ///
 /// `voice` is the user's configured voice (`core::config::speech_voice`, mesa
 /// task 822) or `None` for "whatever the binary's own default is" — mesa does
@@ -267,7 +349,7 @@ impl Speech {
 /// after `-v`, never text spliced into anything.
 ///
 /// Blocking: call it from `spawn_blocking`, not an async worker.
-pub fn start(text: &str, voice: Option<&str>) -> Result<Speech, String> {
+fn start_kokoro(text: &str, voice: Option<&str>) -> Result<Speech, String> {
     let bin = kokoro_bin();
     let mut child = Command::new(&bin)
         // `-q`: progress output on stderr is noise we'd only ever quote back in
@@ -504,6 +586,38 @@ mod tests {
     /// `listen::tests::ENV`.
     static ENV: Mutex<()> = Mutex::new(());
 
+    /// The locks every test running a stub binary holds, plus
+    /// `MESA_CONFIG_FILE` pinned at a file that does not exist — the legacy
+    /// engine — so which engine runs never depends on this machine's own
+    /// config (mesa task 1389). Unpinned again when dropped.
+    struct Legacy {
+        _dir: tempfile::TempDir,
+        _config: std::sync::MutexGuard<'static, ()>,
+        _env: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Drop for Legacy {
+        fn drop(&mut self) {
+            // SAFETY: both locks are still held; fields drop after this.
+            unsafe { std::env::remove_var("MESA_CONFIG_FILE") };
+        }
+    }
+
+    fn legacy() -> Legacy {
+        let config = crate::core::attachments::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let env = ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        // SAFETY: both locks above serialize every test touching these vars.
+        unsafe { std::env::set_var("MESA_CONFIG_FILE", dir.path().join("no-such-config.json")) };
+        Legacy {
+            _dir: dir,
+            _config: config,
+            _env: env,
+        }
+    }
+
     /// A streaming header exactly as `kokoro-rs -o -` writes it, plus `n`
     /// bytes of audio.
     fn streaming_wav(n: usize) -> Vec<u8> {
@@ -629,7 +743,7 @@ mod tests {
 
     #[test]
     fn start_reports_a_failing_binary() {
-        let _guard = ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = legacy();
         // A binary that cannot exist: the spawn error path, no stub needed.
         unsafe { std::env::set_var("MESA_KOKORO_BIN", "mesa-no-such-tts-binary") };
         let err = start("hello", None).err().expect("no binary, no speech");
@@ -649,7 +763,7 @@ mod tests {
     /// bounded rather than carrying the whole complaint.
     #[test]
     fn a_noisy_failing_binary_produces_a_bounded_error() {
-        let _guard = ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = legacy();
         let dir = tempfile::tempdir().expect("tempdir");
         let stub = write_stub(
             dir.path(),
@@ -678,7 +792,7 @@ mod tests {
     /// than balloon memory, and `start` must still terminate with an `Err`.
     #[test]
     fn an_oversized_non_wav_stdout_is_rejected_rather_than_collected() {
-        let _guard = ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = legacy();
         let dir = tempfile::tempdir().expect("tempdir");
         let stub = write_stub(
             dir.path(),
@@ -742,5 +856,93 @@ mod tests {
         ] {
             assert!(!is_voice_name(bad), "{bad:?} is not a voice name");
         }
+    }
+
+    /// On `naru-audio` (mesa task 1389) `start` speaks through the daemon and
+    /// never runs `kokoro-rs` (the stub `MESA_KOKORO_BIN` names records every
+    /// run, and records none): the request carries the text, `default` and
+    /// `wav` and no voice when none is configured; audio the daemon sends
+    /// before aborting its chunked body arrives first, byte-identical, and
+    /// the abort ends the channel with an `Err` rather than a clean end; a
+    /// refusal before the first byte is §4.4's "Naru's voice" sentence; and
+    /// `voices` is the daemon's list.
+    #[test]
+    fn naru_audio_streams_the_daemon_and_an_abort_ends_in_an_error() {
+        let _guard = legacy();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ran = dir.path().join("kokoro-ran");
+        let stub = write_stub(
+            dir.path(),
+            "kokoro-records-a-run.sh",
+            &format!("#!/bin/sh\ntouch '{}'\necho af_heart\n", ran.display()),
+        );
+        let audio_bytes = streaming_wav(64);
+        let sent = audio_bytes.clone();
+        let daemon = audio::stub::Stub::serve(0, move |_, path| match path {
+            "/v1/audio/voices" => audio::stub::Reply::Json(
+                200,
+                r#"{"model":"kokoro-v1.0","voices":[{"id":"af_heart","default":true},
+                    {"id":"bm_george"},{"id":"-not-a-name"}]}"#
+                    .to_string(),
+            ),
+            _ => audio::stub::Reply::Aborted(sent.clone()),
+        });
+        let refusing = audio::stub::Stub::serve(0, |_, _| {
+            audio::stub::Reply::Json(
+                409,
+                r#"{"error":{"message":"the model \"kokoro-v1.0\" is not pulled; run `naru-audio pull kokoro-v1.0`",
+                    "type":"invalid_request_error","code":"model_not_pulled","param":"model"}}"#
+                    .to_string(),
+            )
+        });
+        let config = dir.path().join("config.json");
+        let engine = |url: &str| {
+            std::fs::write(
+                &config,
+                format!(r#"{{"audio": {{"engine": "naru-audio", "url": "{url}"}}}}"#),
+            )
+            .unwrap();
+        };
+        // SAFETY: `legacy()` holds both locks serializing these vars.
+        unsafe {
+            std::env::remove_var("NARU_AUDIO_URL");
+            std::env::remove_var("MESA_AUDIO_URL");
+            std::env::set_var("MESA_CONFIG_FILE", &config);
+            std::env::set_var("MESA_KOKORO_BIN", &stub);
+        }
+        engine(&daemon.url());
+        let mut speech = start("hello there", None).expect("the daemon answered 200");
+        let mut got = Vec::new();
+        let ending = loop {
+            match speech.chunks.blocking_recv() {
+                Some(Ok(chunk)) => got.extend_from_slice(&chunk),
+                other => break other,
+            }
+        };
+        let offered = voices();
+        engine(&refusing.url());
+        let refused = start("hello there", Some("af_heart")).err();
+        unsafe { std::env::remove_var("MESA_KOKORO_BIN") };
+
+        assert_eq!(got, audio_bytes, "the audio before the abort, untouched");
+        let err = ending.expect("an error item, not a clean end").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof, "{err}");
+        assert_eq!(
+            daemon.requests.lock().unwrap()[0],
+            r#"POST /v1/audio/speech {"input":"hello there","model":"default","response_format":"wav"}"#
+        );
+        assert_eq!(offered, vec!["af_heart", "bm_george"]);
+        assert_eq!(
+            refused.as_deref(),
+            Some(
+                "Naru's voice isn't available: the model kokoro-v1.0 isn't downloaded. \
+                 Run `naru-audio pull kokoro-v1.0`."
+            )
+        );
+        assert!(
+            refusing.requests.lock().unwrap()[0].contains(r#""voice":"af_heart""#),
+            "a configured voice is sent"
+        );
+        assert!(!ran.exists(), "kokoro-rs was run on the naru-audio engine");
     }
 }

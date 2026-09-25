@@ -46,11 +46,10 @@ The page's one ask, at the moment it joins a conversation, of whether
  "checked_at":"2026-09-24T12:00:03Z"}
 ```
 
-`available` keeps its meaning — "`POST /api/live/transcribe` can decode",
-i.e. `!listen::models().is_empty()` — on **both** engines, because the POST
-still runs `auris` until task 17 of the naru-audio design (§6.3) routes it
-through the daemon; only then does `available` follow the probe. It is still
-all the page reads. `state` is `ready | daemon_down | model_missing | incompatible |
+`available` keeps its meaning — "`POST /api/live/transcribe` can decode" —
+which is `state == "ready"` on both engines: `!listen::models().is_empty()`
+on `legacy`, the daemon's probe on `naru-audio`, since the POST goes to the
+daemon there (mesa task 1389). It is still all the page reads. `state` is `ready | daemon_down | model_missing | incompatible |
 error`; `message` is the sentence to show (`null` when ready); `checked_at`
 is when the cached answer was taken (RFC 3339 UTC). A config file that
 cannot be read is **502 `unavailable`**.
@@ -185,10 +184,39 @@ bounded against a misbehaving or hostile binary: `LINE_CAP` (1 MiB) caps any
 single line before it is parsed, and `STDERR_EXCERPT` (400 chars) caps how
 much of stderr rides back in an error message.
 
-A nonzero exit is **not** data here, unlike `scripts::run`: there is no
-transcript to hand back on failure, so any run that lands nothing usable on
-stdout is an `Err`, mapped by `transcribe_live` to 503 `unavailable` — the
-same rule `speech::start`'s failure takes on the way out.
+**Silence is a success** (mesa task 1389, the naru-audio design's silence
+contract, §2.2): `auris` exiting **1** with no `transcript` line — its
+"nothing transcribed" code — is `Ok("")`, so `transcribe_live` answers 200
+`{"text":""}` and the page drops the empty text. `auris` also exits 1 for a
+model missing under `--no-download` or an unreachable auris daemon; those now
+read as silence too, since nothing matches on stderr text any more. Any
+other nonzero exit (2 for a usage error, a signal) and an exit 0 with no
+`transcript` line are **not** data here, unlike `scripts::run`: there is no
+transcript to hand back, so the run is an `Err`, mapped by `transcribe_live`
+to 503 `unavailable` — the same rule `speech::start`'s failure takes on the
+way out.
+
+## On `audio.engine = "naru-audio"`: the daemon instead of `auris`
+
+With the daemon engine (mesa task 1389, `docs/config.md` "Audio"),
+`listen::transcribe` never runs `auris` — `auris_bin()` is not even read.
+`core::audio::transcribe` posts the recording to
+`{audio.url}/v1/audio/transcriptions` as `multipart/form-data` (built by
+hand: `file` = the WAV byte-identical, `model` = `config::listen_model()` or
+`default`, `response_format=json`), waits up to 300 s, and returns the
+daemon's `text`. Silence is the daemon's 200 `{"text":""}`, so the route's
+answer is the same 200 `{"text":""}` as on `legacy`. Every failure is 503
+`unavailable` carrying §4.4's sentence: no answer at all is the
+`daemon_down` sentence for that URL; a 409 `model_not_pulled` is "Speech
+isn't available: the model {m} isn't downloaded. Run `naru-audio pull {m}`."
+(`{m}` the name the daemon quotes, so `default` reads as the real model);
+anything else — a 404 `model_not_found` included, since no `pull` fetches a
+model the catalog does not know — is "Speech isn't available: naru-audio
+reported: {message}", quoting the daemon. Each failed request drops the
+cached probe, so the page's next `GET` asks the daemon afresh.
+`listen::models()` on this engine is the daemon's speech-to-text models
+(`GET /v1/models`, `x_kind == "stt"`, pulled or not) — the list the
+Settings page offers and a saved model is checked against.
 
 ## Ordering: segments are transcribed in order
 
@@ -258,8 +286,9 @@ what was sent, argv exactly `-q --format json`); the JSON Lines contract
 handling (a transcript containing `$()`, backticks, quotes, a literal `\n`
 escape and JSON-shaped text comes back byte-identical, never expanded,
 executed, or re-parsed); stdout carrying only the transcript even when
-stderr floods a pipe buffer; the "nonzero exit or no transcript line means
-no transcript" rule; the body-size contract (413 naming the limit, 422 on
+stderr floods a pipe buffer; the silence contract (exit 1 is 200
+`{"text":""}`) beside the "any other nonzero exit, or no transcript line,
+means no transcript" rule; the body-size contract (413 naming the limit, 422 on
 bad/empty/missing base64, an unreadable-but-valid-base64 body reaching
 `auris` unexamined); the security boundary in default mode (415 on a bad
 Content-Type, 403/200 on the agent gate); the route's presence and gating
