@@ -905,10 +905,20 @@ through and where the `naru-audio` daemon listens (mesa task 1388):
 - Read on every request. A hand-edited unusable value falls back to the
   built-in where it is used and is shown verbatim by the getter.
 - Edited from the Settings page's **Audio** section (mesa task 1391): an
-  engine `<select>` (the URL is file-only) beside the live probe line from
-  `GET /api/live/transcribe`. A successful save drops the cached daemon
-  probe (`audio::invalidate`), so the next probe asks the engine and URL
-  just saved.
+  engine `<select>` (the URL is file-only) beside a status block (mesa task
+  1411, `audioDraft.ts::engineStatus`) naming the engine **in effect** — the
+  saved one, never the unsaved draft, read as the server reads it (a value
+  it does not parse is the built-in `legacy`) — and what it runs speech and
+  transcription through, then what `GET /api/live/transcribe` found: on
+  `legacy` whether `auris` is ready, on `naru-audio` whether the daemon is
+  reachable and its speech-to-text state (an `error` state claims no
+  reachability, since a transport failure or a bad `/health` answer is one
+  too), with the probe's `message`
+  verbatim. That probe reads only `/health`'s `stt` block, so nothing is
+  shown about speech-output readiness. A successful save drops the cached
+  daemon probe (`audio::invalidate`) and the page refetches it, so the
+  status shows the engine and URL just saved; a probe answered for the other
+  engine reads as still probing.
 
 ### Routes
 

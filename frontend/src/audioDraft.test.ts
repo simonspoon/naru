@@ -4,11 +4,13 @@ import {
   draftFrom,
   engineChange,
   engineChoices,
+  engineStatus,
   isDirty,
   options,
-  probeLine,
+  savedEngine,
 } from './audioDraft'
 import type { ConfigAudio } from './types/ConfigAudio'
+import type { TranscribeStatus } from './types/TranscribeStatus'
 
 const base = { url: null, url_default: 'http://127.0.0.1:7870', engine_default: 'legacy' }
 const UNSET: ConfigAudio = { ...base, engine: null }
@@ -74,30 +76,68 @@ describe('engineChange', () => {
   })
 })
 
-describe('probeLine', () => {
-  it('names the engine, the state in words and when it was checked', () => {
-    expect(
-      probeLine({
-        available: true,
-        state: 'ready',
-        engine: 'legacy',
-        url: null,
-        message: null,
-        checked_at: '2026-09-24T12:00:03Z',
-      }),
-    ).toBe('legacy: ready (checked 2026-09-24T12:00:03Z)')
+describe('engineStatus', () => {
+  const at = '2026-09-24T12:00:03Z'
+  const url = 'http://127.0.0.1:7870'
+  const probe = (engine: string, state: TranscribeStatus['state']): TranscribeStatus => ({
+    available: state === 'ready',
+    state,
+    engine,
+    url: engine === 'naru-audio' ? url : null,
+    message: state === 'ready' ? null : "Speech isn't available",
+    checked_at: at,
   })
 
-  it('names the daemon URL on naru-audio', () => {
-    expect(
-      probeLine({
-        available: false,
-        state: 'daemon_down',
-        engine: 'naru-audio',
-        url: 'http://127.0.0.1:7870',
-        message: "Speech isn't available",
-        checked_at: '2026-09-24T12:00:03Z',
-      }),
-    ).toBe('naru-audio at http://127.0.0.1:7870: daemon down (checked 2026-09-24T12:00:03Z)')
+  it('names what legacy runs and whether auris is ready', () => {
+    expect(engineStatus('legacy', probe('legacy', 'ready'))).toEqual({
+      headline: 'In effect: legacy — speech through kokoro-rs, transcription through auris',
+      details: [`Transcription (auris): ready (checked ${at})`],
+    })
+    expect(engineStatus('legacy', probe('legacy', 'error')).details).toEqual([
+      `Transcription (auris): not available (checked ${at})`,
+    ])
+  })
+
+  it('names the daemon URL, its reachability and STT readiness on naru-audio', () => {
+    expect(engineStatus('naru-audio', probe('naru-audio', 'ready'))).toEqual({
+      headline: `In effect: naru-audio — speech and transcription through the daemon at ${url}`,
+      details: [`Daemon: reachable (checked ${at})`, 'Transcription (STT): ready'],
+    })
+    expect(engineStatus('naru-audio', probe('naru-audio', 'model_missing')).details).toEqual([
+      `Daemon: reachable (checked ${at})`,
+      'Transcription (STT): model missing',
+    ])
+    expect(engineStatus('naru-audio', probe('naru-audio', 'incompatible')).details[1]).toBe(
+      'Transcription (STT): unknown (incompatible API)',
+    )
+    expect(engineStatus('naru-audio', probe('naru-audio', 'daemon_down')).details).toEqual([
+      `Daemon: not reachable (checked ${at})`,
+    ])
+    // `error` may be a transport failure or a bad /health: no reachability claim.
+    expect(engineStatus('naru-audio', probe('naru-audio', 'error')).details).toEqual([
+      `Daemon: error (checked ${at})`,
+    ])
+  })
+
+  it('reads a hand-edited engine the server does not parse as the built-in', () => {
+    for (const engine of ['Legacy', 'kokoro', 'naru_audio']) {
+      const saved = savedEngine({ ...base, engine })
+      expect(saved).toBe('legacy')
+      // The probe answers for legacy, so the status resolves rather than probing forever.
+      expect(engineStatus(saved, probe('legacy', 'ready')).details).toEqual([
+        `Transcription (auris): ready (checked ${at})`,
+      ])
+    }
+    expect(savedEngine({ ...base, engine: ' naru-audio ' })).toBe('naru-audio')
+    expect(savedEngine(UNSET)).toBe('legacy')
+  })
+
+  it('is still probing with no answer, or an answer about the other engine', () => {
+    expect(engineStatus('naru-audio', null).details).toEqual(['Probing…'])
+    // The save landed but the refetched probe has not: never report the old engine's state.
+    expect(engineStatus('naru-audio', probe('legacy', 'ready'))).toEqual({
+      headline: 'In effect: naru-audio — speech and transcription through the daemon',
+      details: ['Probing…'],
+    })
   })
 })

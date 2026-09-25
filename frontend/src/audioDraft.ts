@@ -76,12 +76,53 @@ export function changedAudio(
 }
 
 /**
- * The read-only probe line beside the selectors: the engine, its state in
- * words and, on `naru-audio`, the URL asked — then when the (cached) answer
- * was taken. The server's `message` is shown on its own line, verbatim.
+ * The engine the server is running now: the saved one, never the draft,
+ * normalised the way the server reads it (`config::audio_engine`) — a known
+ * engine is kept, and anything else a hand edit left behind (`Legacy`, an
+ * unknown word) is the built-in, since that is what the server falls back to.
  */
-export function probeLine(status: TranscribeStatus): string {
-  const where = status.url ? ` at ${status.url}` : ''
-  const state = status.state.replace(/_/g, ' ')
-  return `${status.engine}${where}: ${state} (checked ${status.checked_at})`
+export function savedEngine(audio: ConfigAudio): string {
+  const engine = effective(audio.engine, audio.engine_default)
+  return AUDIO_ENGINES.includes(engine) ? engine : audio.engine_default
+}
+
+/**
+ * The read-only status beside the selector (mesa task 1411): which engine is
+ * **in effect** — [`savedEngine`], never the draft — what it runs speech and
+ * transcription through, and what `GET /api/live/transcribe`'s probe found.
+ * `null` status, or one taken against another engine (the refetch after a
+ * save has not landed yet), is still probing. The probe reports only
+ * speech-to-text readiness, so nothing is claimed about speech output beyond
+ * where it goes. The server's `message` is shown on its own line, verbatim.
+ */
+export function engineStatus(
+  saved: string,
+  status: TranscribeStatus | null,
+): { headline: string; details: string[] } {
+  const daemon = saved === 'naru-audio'
+  const headline = daemon
+    ? `In effect: naru-audio — speech and transcription through the daemon${
+        status?.url ? ` at ${status.url}` : ''
+      }`
+    : 'In effect: legacy — speech through kokoro-rs, transcription through auris'
+  if (!status || status.engine !== saved) return { headline, details: ['Probing…'] }
+  const checked = `checked ${status.checked_at}`
+  if (!daemon) {
+    const stt = status.state === 'ready' ? 'ready' : 'not available'
+    return { headline, details: [`Transcription (auris): ${stt} (${checked})`] }
+  }
+  if (status.state === 'daemon_down') {
+    return { headline, details: [`Daemon: not reachable (${checked})`] }
+  }
+  // `error` is also a transport failure or a /health that answered badly, so
+  // it claims nothing about reachability; the verbatim message says which.
+  if (status.state === 'error') {
+    return { headline, details: [`Daemon: error (${checked})`] }
+  }
+  const stt =
+    status.state === 'incompatible' ? 'unknown (incompatible API)' : status.state.replace(/_/g, ' ')
+  return {
+    headline,
+    details: [`Daemon: reachable (${checked})`, `Transcription (STT): ${stt}`],
+  }
 }

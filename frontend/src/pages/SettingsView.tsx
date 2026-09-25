@@ -126,7 +126,8 @@ import {
   draftFrom as audioDraftFrom,
   isDirty as isAudioDirty,
   options as audioEngineOptions,
-  probeLine,
+  engineStatus,
+  savedEngine as savedAudioEngine,
   type AudioDraft,
 } from '../audioDraft'
 import {
@@ -1303,10 +1304,11 @@ function SpeechSection() {
 /**
  * Audio: which engine the **server** runs speech through (`audio.engine`,
  * mesa task 1391) — `legacy` (the `auris`/`kokoro-rs` binaries) or
- * `naru-audio` (the daemon) — with the live probe of that engine beside it,
- * from `GET /api/live/transcribe`. The save drops the server's cached probe,
- * and the line is refetched after it, so the new engine's state shows with no
- * reload. The daemon URL is not edited here.
+ * `naru-audio` (the daemon) — with the engine in effect (the saved one) and
+ * its live probe beside it, from `GET /api/live/transcribe` (`engineStatus`,
+ * mesa task 1411). The save drops the server's cached probe, and the probe is
+ * refetched after it, so the new engine's state shows with no reload. The
+ * daemon URL is not edited here.
  */
 function AudioSection() {
   const { data: audio, error, refetch } = useFetch(() => getAudio(), 'audio')
@@ -1356,6 +1358,9 @@ function AudioSection() {
   }
 
   const dirty = isAudioDirty(audio, seeded)
+  // The engine the server is running now — the saved one, not the draft.
+  const savedEngine = savedAudioEngine(audio)
+  const status = engineStatus(savedEngine, probe.data ?? null)
 
   return (
     <>
@@ -1366,10 +1371,11 @@ function AudioSection() {
           <code className="settings-command-key">engine</code>
         </label>
         <p className="muted settings-command-blurb">
-          <code>legacy</code> runs the <code>auris</code>/
-          <code>kokoro-rs</code> binaries; <code>naru-audio</code> probes the
-          naru-audio daemon instead (transcription still runs{' '}
-          <code>auris</code> for now). A change applies on the next probe,
+          <code>legacy</code> speaks through the <code>kokoro-rs</code>{' '}
+          binary and transcribes through the <code>auris</code> binary;{' '}
+          <code>naru-audio</code> sends both speech and transcription (live
+          dictation included) to the naru-audio daemon at the configured URL,
+          and runs neither binary. A saved change applies to the next request,
           with no restart.
         </p>
         <div className="settings-voice-row">
@@ -1389,21 +1395,27 @@ function AudioSection() {
             ))}
           </select>
         </div>
+        <p className="settings-command-blurb">{status.headline}</p>
+        {dirty && (
+          <p className="muted settings-command-blurb">
+            Unsaved: {savedEngine} stays in effect until you save.
+          </p>
+        )}
         {probe.error ? (
           <p className="error">{probe.error}</p>
-        ) : probe.data ? (
+        ) : (
           <>
-            <p className="muted settings-command-blurb">
-              {probeLine(probe.data)}
-            </p>
-            {probe.data.message && (
+            {status.details.map((line) => (
+              <p key={line} className="muted settings-command-blurb">
+                {line}
+              </p>
+            ))}
+            {probe.data?.engine === savedEngine && probe.data.message && (
               <p className="muted settings-command-blurb">
                 {probe.data.message}
               </p>
             )}
           </>
-        ) : (
-          <p className="muted settings-command-blurb">Probing…</p>
         )}
       </section>
 
