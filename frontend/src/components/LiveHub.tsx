@@ -138,6 +138,16 @@ import {
   type Watchdog,
 } from '../liveWatchdog'
 import { sameBox, windowBox } from '../liveWindow'
+import {
+  closeVerdict,
+  FinalWaits,
+  FrameBatcher,
+  listenUrl,
+  parseStreamEvent,
+  startMessage,
+  STOP_MESSAGE,
+  STOP_WAIT_MS,
+} from '../liveStream'
 import { playFailure } from '../speechPlayback'
 import { playSpeechStream, type SpeechStream } from '../speechStream'
 import { parseTimestamp } from '../time'
@@ -437,6 +447,78 @@ function enqueuePost(step: () => Promise<void>): Promise<void> {
   return next
 }
 
+/**
+ * What one server capture run has open. Filled in step by step by
+ * `openPcmCapture`, so a cleanup that runs while it is still opening closes
+ * exactly what exists.
+ */
+interface PcmCapture {
+  stream: MediaStream | null
+  ctx: AudioContext | null
+  node: AudioWorkletNode | null
+  source: MediaStreamAudioSourceNode | null
+  blobUrl: string | null
+}
+
+function emptyCapture(): PcmCapture {
+  return { stream: null, ctx: null, node: null, source: null, blobUrl: null }
+}
+
+/**
+ * Opens the stream, the context and the worklet, in that order — each
+ * awaited step bails if the conversation stopped wanting the microphone
+ * while it was opening, closing whatever this call already has. `true` once
+ * `onFrame` is wired; shared by both server capture paths (the POST path and
+ * the streaming path, mesa task 1395).
+ */
+async function openPcmCapture(
+  cap: PcmCapture,
+  constraint: MediaTrackConstraints | boolean,
+  running: () => boolean,
+  onFrame: (samples: Float32Array) => void,
+): Promise<boolean> {
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: constraint })
+  cap.stream = stream
+  if (!running()) {
+    stream.getTracks().forEach((t) => t.stop())
+    cap.stream = null
+    return false
+  }
+  let ctx: AudioContext
+  try {
+    ctx = new AudioContext({ sampleRate: TARGET_SAMPLE_RATE })
+  } catch {
+    // A browser that refuses the rate still works: each path is handed
+    // `ctx.sampleRate` and downsamples in the page instead.
+    ctx = new AudioContext()
+  }
+  cap.ctx = ctx
+  // The press that joined the conversation is the gesture that permits
+  // this — the same one `act()` already spends on the player and the
+  // clock.
+  await ctx.resume()
+  if (!running()) {
+    void ctx.close()
+    cap.ctx = null
+    stream.getTracks().forEach((t) => t.stop())
+    cap.stream = null
+    return false
+  }
+  const blobUrl = URL.createObjectURL(new Blob([PCM_WORKLET_SOURCE], { type: 'text/javascript' }))
+  cap.blobUrl = blobUrl
+  await ctx.audioWorklet.addModule(blobUrl)
+  if (!running()) return false
+  const node = new AudioWorkletNode(ctx, 'mesa-pcm')
+  cap.node = node
+  const source = ctx.createMediaStreamSource(stream)
+  cap.source = source
+  // Deliberately not connected onward to `ctx.destination` — that would
+  // play the person's own microphone back at them.
+  source.connect(node)
+  node.port.onmessage = (e) => onFrame(e.data as Float32Array)
+  return true
+}
+
 export function LiveHub({
   onSidebars,
   slot,
@@ -705,6 +787,9 @@ export function LiveHub({
   // Either request failing reads as `legacy`/`server`, today's behaviour.
   const [audio, setAudio] = useState<TranscribeStatus | null>(null)
   const [listenEngine, setListenEngine] = useState<string | null>(null)
+  // `listen.model`, named in the streaming path's `start` (mesa task 1395)
+  // exactly as the one-shot route names it to the daemon.
+  const [listenModel, setListenModel] = useState<string | null>(null)
   const applyProbe = useCallback((status: TranscribeStatus | null) => {
     setAudio(status)
     setTranscribes(status?.available === true)
@@ -719,6 +804,7 @@ export function LiveHub({
     ]).then(([status, listen]) => {
       if (dropped) return
       setListenEngine(listen?.engine ?? null)
+      setListenModel(listen?.model ?? null)
       applyProbe(status)
     })
     return () => {
@@ -1648,6 +1734,121 @@ export function LiveHub({
     return () => window.removeEventListener('keydown', onKey)
   }, [toggleListening, keymap, live, unlocked, supported, blocked])
 
+  /**
+   * One settled transcript into the held recording — the tail both server
+   * capture paths share: the POST path's `send` below once a segment comes
+   * back from `/api/live/transcribe`, and the streaming path's `final` event
+   * (mesa task 1395). Everything the two differ in — when the silence clock
+   * moves, what "still running" means — stays with each caller.
+   */
+  const holdSettled = useCallback(
+    (raw: string) => {
+      const text = utteranceFrom(correctVocabulary(raw, vocabRef.current))
+      if (text === null) return
+      // The preview is cleared here rather than waiting for the next
+      // segment: the words it showed have just been recorded, and leaving
+      // them under the box would read as a second sentence still coming.
+      setInterimNow('')
+      // A spoken "hold on" is the Pause button, not a sentence for the
+      // agent (mesa task 1160): it is never held and never sent. Judged
+      // before `mayHold`, so a phrase is a no-op rather than a recording
+      // while already paused — and gated on the conversation still being
+      // live *at delivery*, the same refs `mayHold` reads, because this
+      // transcript may resolve after End (an `outlives` cut, most likely)
+      // and a pause written then would outlive the falling edge that
+      // clears it and start the next Go live silently paused.
+      if (isPausePhrase(text)) {
+        if (armed.current.live && !pausedRef.current) pauseNowRef.current()
+        return
+      }
+      if (
+        mayHold({
+          live: armed.current.live,
+          paused: pausedRef.current,
+          muted: mutedRef.current,
+          draining: chainRef.current!.draining,
+        })
+      ) {
+        // Held, not posted (task 889): the recording is one turn, and the
+        // person's own switch is what ends it. `flush` is only the cap.
+        const grown = heldWith(recordingRef.current, text)
+        setRecordingNow(grown.held)
+        if (grown.flush !== null) void postRef.current(grown.flush, false)
+      }
+    },
+    [setInterimNow, setRecordingNow],
+  )
+
+  /**
+   * Opens the chosen microphone for a capture run, falling back to the
+   * default once — the device ladder both server capture paths share (the
+   * POST path below and the streaming path after it, mesa task 1395), so a
+   * refusal, a fallback and the lines that report them cannot drift apart.
+   * `open` is the run's own opener; `running` its run guard.
+   */
+  const openInput = useCallback(
+    async (
+      chosen: string,
+      open: (constraint: MediaTrackConstraints | boolean) => Promise<void>,
+      running: () => boolean,
+    ) => {
+      try {
+        // `DEFAULT_INPUT` no longer means "no stream of mesa's own" the way it
+        // did under `SpeechRecognition.start()` — capture always opens a
+        // stream now. What the default choice means is "whatever device the
+        // browser would pick": mesa needs its own microphone permission on
+        // every path, not only the chosen-device one.
+        await open(chosen === DEFAULT_INPUT ? true : { deviceId: { exact: chosen } })
+      } catch (err: unknown) {
+        if (!running()) return
+        const name = err instanceof DOMException ? err.name : ''
+        if (isMicRefusal(name)) {
+          // Not an error the conversation recovers from: say so once, in the
+          // status line, and leave the typed box as the way in.
+          setBlocked(true)
+          setActionError(`the microphone is unavailable (${name})`)
+          // And send what it did hear (task 889). A refusal withdraws the
+          // listen button — `blocked` is one of its four conditions — so the
+          // recording would otherwise sit on screen with no control left to
+          // deliver it.
+          flushRef.current()
+          return
+        }
+        if (chosen !== DEFAULT_INPUT) {
+          // The named device is gone, or the permission behind it was
+          // refused. Listen through the default rather than not at all — a
+          // conversation that hears nothing is worse than one that hears the
+          // wrong microphone — and say which it is, because the chooser above
+          // will still be showing the device that is not being used.
+          setActionError(
+            `that microphone is unavailable (${
+              err instanceof Error ? err.message : String(err)
+            }) — listening through the default`,
+          )
+          // Asked once. A device that is gone drops out of `inputs` on its own
+          // and needs nothing; one that is still listed and still refuses —
+          // another application has it — would otherwise be asked again at
+          // every reply, for ever, with the same failure and the same line.
+          setRefusedInput(chosen)
+          try {
+            await open(true)
+          } catch (err2: unknown) {
+            if (running()) setActionError(err2 instanceof Error ? err2.message : String(err2))
+          }
+          return
+        }
+        setActionError(err instanceof Error ? err.message : String(err))
+      }
+    },
+    [],
+  )
+
+  // Which way the server hears the person (mesa task 1395): on
+  // `audio.engine = "naru-audio"` the microphone streams to the daemon over
+  // `/api/live/listen` rather than posting VAD-cut segments, so exactly one
+  // of the two server capture effects below runs.
+  const streams = audio?.engine === 'naru-audio'
+
   // Capture opens a stream and a worklet rather than a recognizer (mesa task
   // 956) — this is the auris half of the pair task 957 added, guarded on
   // `path === 'auris'` so it and the recognizer effect below are mutually
@@ -1670,17 +1871,13 @@ export function LiveHub({
   // guess *would* otherwise open a real microphone a beat before tearing it
   // down once the probe corrected it.
   useEffect(() => {
-    if (!wantsMic || transcribes === null || path !== 'auris') return
+    if (!wantsMic || transcribes === null || path !== 'auris' || streams) return
     let running = true
     // The stretch this run hears in (mesa task 1354): once the discard key
     // ends it, nothing this run heard is the person's to send.
     const stretch = discardsRef.current!.current
     const discarded = () => discardsRef.current!.isDiscarded(stretch)
-    let stream: MediaStream | null = null
-    let ctx: AudioContext | null = null
-    let node: AudioWorkletNode | null = null
-    let source: MediaStreamAudioSourceNode | null = null
-    let blobUrl: string | null = null
+    const cap = emptyCapture()
     // The rolling buffer of recent audio: bounded by `dropBefore` below to the
     // current utterance's pre-roll, since a page listening for an hour must
     // not hold an hour of it.
@@ -1758,38 +1955,7 @@ export function LiveHub({
         // A segment auris heard nothing in leaves the clock where it was.
         const heard = speechHeardAt(raw, lastLoudAt)
         if (heard !== null) markHeard(heard)
-        const text = utteranceFrom(correctVocabulary(raw, vocabRef.current))
-        if (text === null) return
-        // The preview is cleared here rather than waiting for the next
-        // segment: the words it showed have just been recorded, and leaving
-        // them under the box would read as a second sentence still coming.
-        setInterimNow('')
-        // A spoken "hold on" is the Pause button, not a sentence for the
-        // agent (mesa task 1160): it is never held and never sent. Judged
-        // before `mayHold`, so a phrase is a no-op rather than a recording
-        // while already paused — and gated on the conversation still being
-        // live *at delivery*, the same refs `mayHold` reads, because this
-        // transcript may resolve after End (an `outlives` cut, most likely)
-        // and a pause written then would outlive the falling edge that
-        // clears it and start the next Go live silently paused.
-        if (isPausePhrase(text)) {
-          if (armed.current.live && !pausedRef.current) pauseNowRef.current()
-          return
-        }
-        if (
-          mayHold({
-            live: armed.current.live,
-            paused: pausedRef.current,
-            muted: mutedRef.current,
-            draining: chain.draining,
-          })
-        ) {
-          // Held, not posted (task 889): the recording is one turn, and the
-          // person's own switch is what ends it. `flush` is only the cap.
-          const grown = heldWith(recordingRef.current, text)
-          setRecordingNow(grown.held)
-          if (grown.flush !== null) void postRef.current(grown.flush, false)
-        }
+        holdSettled(raw)
       } catch (err: unknown) {
         if ((!running && !outlives) || discarded()) return
         // This effect only runs at all once the mount probe found auris
@@ -1819,8 +1985,8 @@ export function LiveHub({
       const cut = vadCut(vad)
       // A discarded utterance is not even posted: the person asked for it to
       // be dropped, not transcribed and then ignored.
-      if (cut !== null && ctx !== null && !discarded()) {
-        const wav = wavFromFrames(frames, cut.startedAt - PRE_ROLL_MS, cut.endedAt, ctx.sampleRate)
+      if (cut !== null && cap.ctx !== null && !discarded()) {
+        const wav = wavFromFrames(frames, cut.startedAt - PRE_ROLL_MS, cut.endedAt, cap.ctx.sampleRate)
         if (wav.length > 44) chain.enqueue(() => send(wav, cut.endedAt, true))
       }
       vad = initialVad()
@@ -1869,9 +2035,9 @@ export function LiveHub({
       // sentence was made of, and the recording posted to auris would be the
       // trailing pre-roll instead of what the person said. Encoding here is
       // the one place the frames the segment names are all still in hand.
-      if (step.ended !== null && ctx !== null) {
+      if (step.ended !== null && cap.ctx !== null) {
         const { startedAt, endedAt } = step.ended
-        const wav = wavFromFrames(frames, startedAt - PRE_ROLL_MS, endedAt, ctx.sampleRate)
+        const wav = wavFromFrames(frames, startedAt - PRE_ROLL_MS, endedAt, cap.ctx.sampleRate)
         // A header-only WAV is a window with nothing in it — nothing anybody
         // said, so nothing worth waking a decoder for.
         if (wav.length > 44 && !discarded()) chain.enqueue(() => send(wav, endedAt))
@@ -1879,43 +2045,8 @@ export function LiveHub({
       frames = dropBefore(frames, (vad.startedAt ?? at) - PRE_ROLL_MS)
     }
 
-    /** Opens the stream, the context and the worklet, in that order — each
-     *  awaited step bails if the conversation stopped wanting the microphone
-     *  while it was opening, closing whatever this call already has. */
     const open = async (constraint: MediaTrackConstraints | boolean) => {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: constraint })
-      if (!running) {
-        stream.getTracks().forEach((t) => t.stop())
-        stream = null
-        return
-      }
-      try {
-        ctx = new AudioContext({ sampleRate: TARGET_SAMPLE_RATE })
-      } catch {
-        // A browser that refuses the rate still works: `wavFromFrames` is
-        // handed `ctx.sampleRate` and downsamples in the page instead.
-        ctx = new AudioContext()
-      }
-      // The press that joined the conversation is the gesture that permits
-      // this — the same one `act()` already spends on the player and the
-      // clock.
-      await ctx.resume()
-      if (!running) {
-        void ctx.close()
-        ctx = null
-        stream.getTracks().forEach((t) => t.stop())
-        stream = null
-        return
-      }
-      blobUrl = URL.createObjectURL(new Blob([PCM_WORKLET_SOURCE], { type: 'text/javascript' }))
-      await ctx.audioWorklet.addModule(blobUrl)
-      if (!running) return
-      node = new AudioWorkletNode(ctx, 'mesa-pcm')
-      source = ctx.createMediaStreamSource(stream)
-      // Deliberately not connected onward to `ctx.destination` — that would
-      // play the person's own microphone back at them.
-      source.connect(node)
-      node.port.onmessage = (e) => onFrame(e.data as Float32Array)
+      if (!(await openPcmCapture(cap, constraint, () => running, onFrame))) return
       // Real names for the devices: a browser redacts every device *label*
       // until microphone permission has been granted, and opening the stream
       // above is what grants it — this is the capture-era version of what
@@ -1923,55 +2054,7 @@ export function LiveHub({
       listInputs()
     }
 
-    void (async () => {
-      try {
-        // `DEFAULT_INPUT` no longer means "no stream of mesa's own" the way it
-        // did under `SpeechRecognition.start()` — capture always opens a
-        // stream now. What the default choice means is "whatever device the
-        // browser would pick": mesa needs its own microphone permission on
-        // every path, not only the chosen-device one.
-        await open(chosen === DEFAULT_INPUT ? true : { deviceId: { exact: chosen } })
-      } catch (err: unknown) {
-        if (!running) return
-        const name = err instanceof DOMException ? err.name : ''
-        if (isMicRefusal(name)) {
-          // Not an error the conversation recovers from: say so once, in the
-          // status line, and leave the typed box as the way in.
-          setBlocked(true)
-          setActionError(`the microphone is unavailable (${name})`)
-          // And send what it did hear (task 889). A refusal withdraws the
-          // listen button — `blocked` is one of its four conditions — so the
-          // recording would otherwise sit on screen with no control left to
-          // deliver it.
-          flushRef.current()
-          return
-        }
-        if (chosen !== DEFAULT_INPUT) {
-          // The named device is gone, or the permission behind it was
-          // refused. Listen through the default rather than not at all — a
-          // conversation that hears nothing is worse than one that hears the
-          // wrong microphone — and say which it is, because the chooser above
-          // will still be showing the device that is not being used.
-          setActionError(
-            `that microphone is unavailable (${
-              err instanceof Error ? err.message : String(err)
-            }) — listening through the default`,
-          )
-          // Asked once. A device that is gone drops out of `inputs` on its own
-          // and needs nothing; one that is still listed and still refuses —
-          // another application has it — would otherwise be asked again at
-          // every reply, for ever, with the same failure and the same line.
-          setRefusedInput(chosen)
-          try {
-            await open(true)
-          } catch (err2: unknown) {
-            if (running) setActionError(err2 instanceof Error ? err2.message : String(err2))
-          }
-          return
-        }
-        setActionError(err instanceof Error ? err.message : String(err))
-      }
-    })()
+    void openInput(chosen, open, () => running)
 
     return () => {
       running = false
@@ -1989,9 +2072,9 @@ export function LiveHub({
       // it is the microphone closing, and the pill goes with it immediately
       // rather than a second later.
       setVoicedAt(null)
-      node?.port.close?.()
-      node?.disconnect()
-      source?.disconnect()
+      cap.node?.port.close?.()
+      cap.node?.disconnect()
+      cap.source?.disconnect()
       // mesa task 961: `wantsMic` can go false with an utterance still open —
       // most often because mesa started speaking, which shuts the microphone
       // for the length of her reply. `vadStep` never gets to report that
@@ -2016,20 +2099,264 @@ export function LiveHub({
       // run, but leaving `vad` as it was would say otherwise to anything
       // reading it afterwards.
       cutOpen()
-      void ctx?.close()
-      stream?.getTracks().forEach((t) => t.stop())
-      if (blobUrl) URL.revokeObjectURL(blobUrl)
+      void cap.ctx?.close()
+      cap.stream?.getTracks().forEach((t) => t.stop())
+      if (cap.blobUrl) URL.revokeObjectURL(cap.blobUrl)
     }
   }, [
     wantsMic,
     transcribes,
     path,
+    streams,
     chosen,
     listInputs,
     markHeard,
     setInterimNow,
     setRecordingNow,
     setSegmentOpenNow,
+    holdSettled,
+    openInput,
+  ])
+
+  // Streaming capture (mesa task 1395): the sibling of the effect above for
+  // `audio.engine = "naru-audio"`, where the microphone streams to the daemon
+  // over the `/api/live/listen` WebSocket (`liveStream.ts`, `docs/listen.md`
+  // "Streaming") instead of posting segments the page's own VAD cut. The
+  // daemon's VAD is authoritative, so the page runs none: it sends every
+  // frame and reads the daemon's `speech` edges and `final`s. Everything
+  // downstream is the same as the POST path's — the microphone ladder
+  // (`openInput`), the held recording (`holdSettled`), the ordered chain
+  // (`chainRef`) and the silence send — so the two differ only here:
+  //
+  // - `speech` `active: true` opens `segmentOpen` and is a heartbeat
+  //   (`markHeard`); `active: false` closes it, stamps the clock at that
+  //   moment and puts a wait for its `final` on the chain (`FinalWaits`), so
+  //   `hearing` — "transcribing…" and the silence send's withholding — counts
+  //   segments the daemon has ended and not yet answered.
+  // - A `final` is the settled text, run through `holdSettled` exactly as a
+  //   posted segment's transcript is.
+  // - Teardown and the listen switch send `stop` rather than cutting a
+  //   segment, and put one more wait on the chain — for `done` — so the
+  //   switch's flush waits behind the finals the daemon still owes, exactly
+  //   as `liveDrain.ts` makes it wait behind a segment in flight. Those
+  //   finals are delivered whenever they land and judged by `mayHold`, so a
+  //   pause and an end drop them as they drop a cut segment today.
+  // - A socket that closes any other way (the daemon dying is `error` +
+  //   1011 from the proxy) stops capture and asks `GET /api/live/transcribe`
+  //   again, which the proxy has already invalidated, so the unavailable
+  //   banner appears; the banner's Retry, not a reconnect loop, is the way
+  //   back. A daemon still ready (a 1013 backlog, a 1011 decode error) moves
+  //   no dependency, so the person's listen switch is: off and on re-runs
+  //   this effect and reconnects.
+  useEffect(() => {
+    if (!wantsMic || transcribes === null || path !== 'auris' || !streams) return
+    let running = true
+    const stretch = discardsRef.current!.current
+    const discarded = () => discardsRef.current!.isDiscarded(stretch)
+    const cap = emptyCapture()
+    const chain = chainRef.current!
+    const waits = new FinalWaits()
+    // A run that starts while the last switch-off is still draining (mute,
+    // unmute, speak before the previous stretch's `done` has landed) must not
+    // hold its finals into that stretch's recording: they go on the chain,
+    // behind its flush, as `liveDrain.ts` orders a posted segment.
+    const behindDrain = chain.draining
+    // An abnormal close with the daemon still ready (a `1013` backlog, a
+    // `1011` decode error, a `1008`) changes nothing this effect depends on,
+    // so it would never re-run: capture is stopped instead, and the listen
+    // switch (or anything else that re-runs the effect) reconnects.
+    let lost = false
+    const capturing = () => running && !lost
+    let batcher: FrameBatcher | null = null
+    let lastLevelAt = 0
+    let lastLevelValue = 0
+    let segmentWasOpen = false
+    const trackSegment = (open: boolean) => {
+      if (open !== segmentWasOpen) {
+        segmentWasOpen = open
+        setSegmentOpenNow(open)
+      }
+    }
+
+    const dropCapture = () => {
+      if (cap.node) cap.node.port.onmessage = null
+      cap.node?.disconnect()
+      cap.source?.disconnect()
+      void cap.ctx?.close()
+      cap.stream?.getTracks().forEach((t) => t.stop())
+      cap.node = null
+      cap.source = null
+      cap.ctx = null
+      cap.stream = null
+      setLevel(0)
+      setVoicedAt(null)
+    }
+
+    const ws = new WebSocket(listenUrl(window.location))
+    ws.binaryType = 'arraybuffer'
+    // Frames captured before the handshake finishes, sent behind `start`.
+    let early: ArrayBuffer[] = []
+    let stopping = false
+    let closedByUs = false
+    let sawDone = false
+    let failure: string | null = null
+    let stopTimer: number | undefined
+    let endStream: () => void = () => {}
+    const ended = new Promise<void>((resolve) => {
+      endStream = resolve
+    })
+
+    ws.onopen = () => {
+      ws.send(startMessage(listenModel))
+      for (const frame of early) ws.send(frame)
+      early = []
+      if (stopping) ws.send(STOP_MESSAGE)
+    }
+    ws.onmessage = (e: MessageEvent) => {
+      const event = parseStreamEvent(e.data)
+      if (event === null) return
+      switch (event.type) {
+        case 'speech':
+          // After teardown the wait for `done` already covers what is owed.
+          if (!running) return
+          trackSegment(event.active)
+          markHeard()
+          if (!event.active && !discarded()) {
+            const answered = waits.expect(event.at)
+            chain.enqueue(() => answered)
+          }
+          return
+        case 'final': {
+          const hold = () => {
+            if (!discarded()) {
+              setActionError(null)
+              holdSettled(event.text)
+            }
+          }
+          if (behindDrain) chain.enqueue(async () => hold())
+          else hold()
+          waits.final(event.end)
+          return
+        }
+        case 'error':
+          failure = event.message || event.code
+          return
+        case 'done':
+          sawDone = true
+          return
+        default:
+          return
+      }
+    }
+    ws.onclose = (e: CloseEvent) => {
+      window.clearTimeout(stopTimer)
+      waits.settleAll()
+      endStream()
+      if (running) trackSegment(false)
+      if (closeVerdict({ code: e.code, sawDone, closedByUs }) === 'reprobe') {
+        const reason = failure ?? `the dictation stream closed (${e.code})`
+        if (running) {
+          lost = true
+          dropCapture()
+          setActionError(`${reason} — turn listening off and on to reconnect`)
+        } else {
+          setActionError(reason)
+        }
+        transcribeStatus().then(applyProbe, () => {})
+      }
+    }
+
+    const send = (frame: ArrayBuffer) => {
+      if (stopping) return
+      if (ws.readyState === WebSocket.OPEN) ws.send(frame)
+      else if (ws.readyState === WebSocket.CONNECTING) early.push(frame)
+    }
+
+    /**
+     * The end of this run's stream: what is batched goes out, then `stop`,
+     * and the chain waits for the socket to close behind the last final.
+     * Called by the listen switch through `cutRef` (before it closes the
+     * chain) and by the cleanup; the second call finds it done.
+     */
+    const finish = () => {
+      if (stopping) return
+      const tail = batcher?.drain() ?? null
+      if (tail !== null) send(tail)
+      stopping = true
+      if (ws.readyState === WebSocket.CLOSING || ws.readyState === WebSocket.CLOSED) return
+      if (discarded()) {
+        // Nothing heard in a discarded stretch is the person's to send, so
+        // there is nothing to wait for.
+        closedByUs = true
+        ws.close(1000)
+        return
+      }
+      if (ws.readyState === WebSocket.OPEN) ws.send(STOP_MESSAGE)
+      // (Still connecting: `onopen` sends `stop` behind `start`.)
+      stopTimer = window.setTimeout(() => {
+        closedByUs = true
+        ws.close(1000)
+      }, STOP_WAIT_MS)
+      chain.enqueue(() => ended)
+    }
+    cutRef.current = finish
+
+    const onFrame = (samples: Float32Array) => {
+      const at = Date.now()
+      const rms = frameRms(samples)
+      // The POST path's meter and hearing hold, unchanged: see its `onFrame`.
+      if (Math.abs(rms - lastLevelValue) > 0.03 || at - lastLevelAt > 100) {
+        lastLevelValue = rms
+        lastLevelAt = at
+        setLevel(rms)
+        if (rms >= DEFAULT_VAD.onsetRms) setVoicedAt(at)
+      }
+      if (cap.ctx === null) return
+      batcher ??= new FrameBatcher(cap.ctx.sampleRate)
+      for (const frame of batcher.push(samples)) send(frame)
+    }
+
+    const open = async (constraint: MediaTrackConstraints | boolean) => {
+      if (!(await openPcmCapture(cap, constraint, capturing, onFrame))) {
+        // The socket went while the microphone was still opening: close
+        // whatever `openPcmCapture` left behind its last guard.
+        if (running && lost) dropCapture()
+        return
+      }
+      listInputs()
+    }
+
+    void openInput(chosen, open, capturing)
+
+    return () => {
+      running = false
+      cutRef.current = null
+      setInterimNow('')
+      setLevel(0)
+      setVoicedAt(null)
+      cap.node?.port.close?.()
+      cap.node?.disconnect()
+      cap.source?.disconnect()
+      finish()
+      trackSegment(false)
+      void cap.ctx?.close()
+      cap.stream?.getTracks().forEach((t) => t.stop())
+      if (cap.blobUrl) URL.revokeObjectURL(cap.blobUrl)
+    }
+  }, [
+    wantsMic,
+    transcribes,
+    path,
+    streams,
+    chosen,
+    listInputs,
+    markHeard,
+    setInterimNow,
+    setSegmentOpenNow,
+    holdSettled,
+    openInput,
+    applyProbe,
+    listenModel,
   ])
 
   // Barge-in (mesa task 1160): the microphone while mesa is speaking. The

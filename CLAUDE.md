@@ -124,7 +124,7 @@ The code is the source of truth. These are the invariants you must not break:
   `keyboardScope`, `keymap`, `keymapDraft`,
   `lastView`, `layout`, `libraryBuiltinUpdate`, `libraryBundle`, `libraryDraft`, `libraryHistory`, `libraryImport`, `libraryOverride`, `librarySync`, `listenDraft`, `liveAudio`, `liveBand`, `liveBoard`, `liveBoardWidth`, `liveCancel`, `liveCapture`, `liveContext`, `liveDevices`, `liveDrain`, `liveHead`, `liveInk`, `liveIndicator`, `livePausePhrase`, `livePromptDraft`,
   `liveRecognition`,
-  `liveSession`, `liveSidebarWidth`, `liveSpeaker`,
+  `liveSession`, `liveSidebarWidth`, `liveSpeaker`, `liveStream`,
   `liveTurns`,
   `liveVad`,
   `liveWatchdog`,

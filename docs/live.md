@@ -41,6 +41,27 @@ handed — and "Speech, reused rather than rebuilt" (below) for audio-out's:
   landing exactly where a speech recognizer's *final result* would — turns
   it into a 16 kHz mono WAV (`liveAudio.ts`), and posts it to
   `POST /api/live/transcribe`, which hands it to `auris` and returns text.
+  On `audio.engine = "naru-audio"` (mesa task 1395) the same microphone
+  **streams** instead: the page opens the `/api/live/listen` WebSocket
+  (`docs/listen.md` "Streaming"), sends 16 kHz s16le PCM in ~50 ms frames
+  (`liveStream.ts`), runs no VAD of its own — the daemon's is authoritative —
+  and holds each `final` it answers through the same tail a posted segment's
+  transcript takes. The daemon's `speech` edges stand in for the page's VAD:
+  `active: true` opens `segmentOpen` and is a heartbeat, `active: false`
+  stamps the silence clock and puts a wait for that segment's `final` on the
+  segment chain, so "transcribing…" and the silence send read the same
+  signals on both paths (a segment the daemon gates never gets a final; its
+  wait gives up after `FINAL_WAIT_MS`, 10 s — as long as a stop's drain,
+  since the daemon's decode backlog can hold a real final that long — or at
+  the next final). The listen switch and every teardown send `stop` and wait
+  for `done` on the chain, so what was heard before the press is still sent
+  as one turn, and a run started while that drain is still pending puts its
+  own finals on the chain behind the flush, so they cannot land in the
+  previous turn; a socket that closes any other way stops the microphone
+  and asks `GET /api/live/transcribe` again, which paints the unavailable
+  banner when the daemon has gone — and when it has not (a `1013` backlog, a
+  `1011` decode error), turning listening off and on reconnects. The barge-in capture stays
+  on the POST route, which reaches the daemon on this engine too.
   auris wins whenever it can be reached, even on a browser that also has a
   recognizer of its own: it hears Naru's own vocabulary correctly and
   punctuates like a person, where a browser's own recognizer does neither —
@@ -3069,6 +3090,11 @@ conversation") working with no backend change.
   16-bit quantization, the RIFF header, chunked base64, whether this browser
   can capture audio at all, and whether a `getUserMedia` rejection is a
   refusal or one of the ordinary failures capture recovers from) and
+  `frontend/src/liveStream.ts` (mesa task 1395 — the streaming path's pure
+  half: the listen URL, the `start`/`stop` messages, the frame batcher that
+  turns worklet blocks into 16 kHz s16le frames, the event parser, the close
+  verdict that decides whether to re-probe, and `FinalWaits`, a closed
+  segment's wait for its final) and
   `frontend/src/liveVad.ts` (mesa task 956 — the voice-activity state machine:
   onset/release hysteresis, the hangover that ends an utterance on a breath,
   the minimum length that discards a cough or a door, and the maximum segment

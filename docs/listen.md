@@ -265,7 +265,17 @@ have on the way out, with the arrow reversed.
 Mesa task 1394, naru-audio design §2.4 / §6.2: a WebSocket the page opens
 on Naru, proxied to the daemon's `/v1/audio/transcriptions/stream`
 (`live_listen` + `proxy_listen` in `src/api.rs`, `audio::open_stream` in
-`src/core/audio.rs`). Nothing on the page uses it yet (design task 23).
+`src/core/audio.rs`). The page's main dictation capture uses it on
+`naru-audio` (mesa task 1395, `frontend/src/liveStream.ts`,
+`docs/live.md` "Person → Naru"): a `start` of 16 kHz `s16le` with no
+partials, naming `listen.model` as `model` when the config names one (the
+name the one-shot route sends the daemon, `config::listen_model()`; absent
+otherwise, so the daemon's default applies), ~50 ms binary frames, `stop` on
+the listen switch and every teardown, each `final` held like a posted
+segment's transcript, and a re-probe of `GET /api/live/transcribe` on any
+close that is not `1000`/`done` or the page's own — which also stops the
+microphone, since a daemon that is still ready (a `1013` backlog, a `1011`
+decode error) re-runs nothing; turning listening off and on reconnects. The barge-in capture still posts to the one-shot route.
 
 - **Gates, before the upgrade**: the transcribe pair,
   `require_agent_access` + `require_same_site_fetch`, in both serve modes.
