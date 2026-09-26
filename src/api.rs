@@ -2494,6 +2494,10 @@ fn router(state: AppState) -> Router {
             "/api/config/speech/voices",
             post(add_speech_voice).layer(DefaultBodyLimit::max(TRANSCRIBE_BODY_LIMIT)),
         )
+        // Exporting a cloned voice from naru-audio (mesa task 1430): the
+        // daemon's clip and transcript as one versioned `naru-voice` file,
+        // which the add route above imports again. The add route's gates.
+        .route("/api/config/speech/voices/{name}", get(export_speech_voice))
         // Designing a voice on naru-audio (mesa task 1426): the GET says
         // whether the voice-design model is pulled and what it reads; the
         // POST reads one of those two Naru texts in a described voice. The
@@ -8634,6 +8638,50 @@ async fn add_speech_voice(
             },
         })?;
     Ok((StatusCode::CREATED, Json(added)).into_response())
+}
+
+/// `GET /api/config/speech/voices/{name}` — the cloned voice `name` as one
+/// `VoiceExport` file (mesa task 1430, [`speech::export_voice`],
+/// `docs/config.md`): `{"format":"naru-voice","version":1,"name","text",
+/// "wav_base64"}`, the daemon's `ref.wav` byte for byte. Importing it is
+/// [`add_speech_voice`]. Gated like that route — the clip is a recording of
+/// someone's voice. On the legacy engine it is 409 `conflict` and nothing is
+/// contacted; a name that is not a voice name is 422 `validation`; no cloned
+/// voice of that name (a built-in voice is not one) is 404 `not_found`; a
+/// daemon that does not answer usably is 502 `unavailable`.
+async fn export_speech_voice(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    require_same_site_fetch(&headers)?;
+    let export = blocking(move || speech::export_voice(&name))
+        .await?
+        .map_err(|e| match e {
+            speech::ExportVoiceError::Conflict(message) => ApiError {
+                status: StatusCode::CONFLICT,
+                code: "conflict",
+                message,
+            },
+            speech::ExportVoiceError::Validation(message) => ApiError {
+                status: StatusCode::UNPROCESSABLE_ENTITY,
+                code: "validation",
+                message,
+            },
+            speech::ExportVoiceError::NotFound(message) => ApiError {
+                status: StatusCode::NOT_FOUND,
+                code: "not_found",
+                message,
+            },
+            speech::ExportVoiceError::Unavailable(message) => ApiError {
+                status: StatusCode::BAD_GATEWAY,
+                code: "unavailable",
+                message,
+            },
+        })?;
+    Ok(Json(export).into_response())
 }
 
 /// `GET /api/config/speech/design` — `VoiceDesign`: whether naru-audio has
@@ -17485,6 +17533,111 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             err.message,
             "naru-audio refused the voice: a voice named \"amy\" already exists"
         );
+        unsafe { std::env::remove_var("MESA_CONFIG_FILE") };
+    }
+
+    async fn get_voice_export(
+        state: &AppState,
+        addr: SocketAddr,
+        headers: HeaderMap,
+        name: &str,
+    ) -> ApiResult<Response> {
+        export_speech_voice(
+            State(state.clone()),
+            ConnectInfo(addr),
+            headers,
+            Path(name.to_string()),
+        )
+        .await
+    }
+
+    /// mesa task 1430: `GET /api/config/speech/voices/{name}` is gated by
+    /// `require_agent_access`, is 409 `conflict` on the legacy engine and
+    /// 422 for a name that is not a voice name, both without contacting
+    /// anything, and on naru-audio answers the daemon's export wrapped as a
+    /// `naru-voice` version-1 file — its 404 a `not_found`. The speech
+    /// settings mark which listed voices are cloned.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn export_speech_voice_is_gated_refused_on_legacy_and_wraps_the_daemons_export() {
+        let _env = attachments::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (_dir, state) = test_state();
+        let cfg = tempfile::tempdir().unwrap();
+        let daemon = audio::stub::Stub::serve(0, |method, path| {
+            match (method, path) {
+            ("GET", "/v1/audio/voices/amy") => audio::stub::Reply::Json(
+                200,
+                r#"{"name":"amy","text":"Hello there.","wav_base64":"UklGRgABAgM="}"#.to_string(),
+            ),
+            ("GET", "/v1/audio/voices/af_heart") => audio::stub::Reply::Json(
+                404,
+                r#"{"error":{"message":"no cloned voice named \"af_heart\"","type":"invalid_request_error","code":"voice_not_found","param":"name"}}"#
+                    .to_string(),
+            ),
+            ("GET", "/v1/audio/voices?model=clones") => audio::stub::Reply::Json(
+                200,
+                r#"{"voices":[{"id":"af_heart","cloned":false},{"id":"amy","cloned":true}]}"#
+                    .to_string(),
+            ),
+            _ => audio::stub::Reply::Json(200, r#"{"voices":[],"data":[]}"#.to_string()),
+        }
+        });
+
+        // Legacy: refused before any daemon is asked.
+        let _config = listen_config(cfg.path(), None);
+        let err = get_voice_export(&state, loopback(), loopback_agent_headers(), "amy")
+            .await
+            .unwrap_err();
+        assert_eq!((err.status, err.code), (StatusCode::CONFLICT, "conflict"));
+        assert!(err.message.contains("naru-audio engine"), "{}", err.message);
+
+        let _config = listen_config(
+            cfg.path(),
+            Some(json!({"engine": "naru-audio", "url": daemon.url()})),
+        );
+        let foreign = hdrs(Some("localhost:0"), Some("https://evil.example"));
+        let err = get_voice_export(&state, loopback(), foreign, "amy")
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, StatusCode::FORBIDDEN);
+        let err = get_voice_export(&state, lan_peer(), loopback_agent_headers(), "amy")
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, StatusCode::FORBIDDEN);
+        let err = get_voice_export(&state, loopback(), loopback_agent_headers(), "../amy")
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "validation");
+        assert_eq!(daemon.count("GET /v1/audio/voices/"), 0);
+
+        let resp = get_voice_export(&state, loopback(), loopback_agent_headers(), "amy")
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            json_body(resp).await,
+            json!({
+                "format": "naru-voice",
+                "version": 1,
+                "name": "amy",
+                "text": "Hello there.",
+                "wav_base64": "UklGRgABAgM=",
+            })
+        );
+        let err = get_voice_export(&state, loopback(), loopback_agent_headers(), "af_heart")
+            .await
+            .unwrap_err();
+        assert_eq!((err.status, err.code), (StatusCode::NOT_FOUND, "not_found"));
+        assert_eq!(
+            err.message,
+            "naru-audio has no such voice: no cloned voice named \"af_heart\""
+        );
+
+        let speech = config::speech(Some("clones")).unwrap();
+        assert_eq!(speech.voices, vec!["af_heart", "amy"]);
+        assert_eq!(speech.cloned, vec!["amy"]);
         unsafe { std::env::remove_var("MESA_CONFIG_FILE") };
     }
 

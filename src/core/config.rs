@@ -2141,6 +2141,8 @@ fn speech_in(path: &Path, voices_for: Option<&str>) -> Result<ConfigSpeech, Stri
         Some(name) => Some(name.to_string()),
     };
     let section = read_speech(path)?;
+    // One read of the voice list, so `cloned` is always a subset of `voices`.
+    let listed = speech::voice_list(list_model.as_deref());
     Ok(ConfigSpeech {
         // The **raw** stored value, not the filtered one [`speech_voice_in`]
         // hands the synthesiser: a hand-edited nonsense voice must reach the
@@ -2150,7 +2152,12 @@ fn speech_in(path: &Path, voices_for: Option<&str>) -> Result<ConfigSpeech, Stri
             .voice
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty()),
-        voices: speech::voices(list_model.as_deref()),
+        cloned: listed
+            .iter()
+            .filter(|v| v.cloned)
+            .map(|v| v.id.clone())
+            .collect(),
+        voices: listed.into_iter().map(|v| v.id).collect(),
         model: section
             .model
             .map(|v| v.trim().to_string())

@@ -755,14 +755,53 @@ choice rests on the rest:
 "nine" is spelled out and the script has no digits or bracket tags, so the
 saved transcript matches what is spoken.
 
+### Exporting and importing a cloned voice (mesa task 1430)
+
+A cloned voice lives in the naru-audio daemon on one machine. To move it —
+or keep a copy — Settings exports it as **one file** and imports that file
+again, here or on another machine. Machines may run different Naru versions,
+so the format is small, versioned and fixed:
+
+```json
+{
+  "format": "naru-voice",
+  "version": 1,
+  "name": "amy",
+  "text": "Exactly what the clip says.",
+  "wav_base64": "UklGR…"
+}
+```
+
+- `format` — always the string `"naru-voice"`.
+- `version` — the integer `1`. A reader refuses any other version (a newer
+  one is named as coming from a newer Naru) rather than guess at it; a change
+  that an older reader would misread must bump it.
+- `name` — the voice's name where it was exported; import offers it as the
+  default name and lets the person change it, so a voice can come back under
+  a new name beside the original.
+- `text` — the voice's transcript (naru-audio's `ref.txt`).
+- `wav_base64` — the clip (naru-audio's `ref.wav`, 24 kHz mono) byte for byte,
+  standard padded base64.
+
+Keys a reader does not know are ignored, so a version-1 writer may add one.
+The suggested filename is `<name>.naru-voice.json`. Import sends `text` and
+`wav_base64` through the ordinary add-voice route (`POST
+/api/config/speech/voices`, `clip_base64` = `wav_base64`), so a taken name is
+that route's **409 `conflict`**, shown as an error — an existing voice is
+never overwritten. The parse and check rules live in
+`frontend/src/voiceExport.ts`.
+
 ### Routes
 
 - `GET /api/config/speech[?model=<name>]` → `ConfigSpeech`:
-  `{voice, voices, model, models}`, `voice`/`model` being the overrides
+  `{voice, voices, cloned, model, models}`, `voice`/`model` being the overrides
   (`null` when unset), `voices` what the installed binary offers (`[]` when
   Naru couldn't ask — **not** an error, since the setting must stay visible on
   a machine where the synthesiser isn't installed yet) and `models` naru-audio's
-  text-to-speech models (`[]` on legacy). `?model=` picks whose voices
+  text-to-speech models (`[]` on legacy). `cloned` is the subset of `voices`
+  the daemon marks `"cloned": true` — the ones it can export (mesa task 1430);
+  always `[]` on legacy, and on a daemon too old to send the flag, which reads
+  as not cloned rather than failing the list. `?model=` picks whose voices
   `voices` lists — absent is the configured model's, blank the daemon
   default's, a name that model's (a non-name is **422 `validation`**) — which
   is how the editor shows a drafted model's voices before saving it.
@@ -812,6 +851,18 @@ saved transcript matches what is spoken.
   list now has the voice — only a **cloning** model lists cloned voices
   (e.g. `qwen3-tts-0.6b-base-mlx`), so a non-cloning model never offers it.
   Nothing else is written: the default engine, voice and model are untouched.
+- `GET /api/config/speech/voices/{name}` → **200** `VoiceExport`, the
+  `naru-voice` version-1 file above (mesa task 1430): the daemon's
+  `GET /v1/audio/voices/{name}` export (`{name, text, wav_base64}`, `ref.wav`
+  byte for byte) wrapped with `format` and `version`. Gated like the
+  add-voice route (`require_agent_access` + `require_same_site_fetch`) — the
+  clip is a recording of someone's voice. On the **legacy** engine **409
+  `conflict`** and nothing is contacted; a `name` that fails the voice shape
+  rule **422 `validation`**, also before the daemon is asked (the rule is
+  also what keeps it one path segment); no cloned voice of that name — a
+  built-in voice is not one — **404 `not_found`** with the daemon's message;
+  a daemon 400 **422 `validation`**; no answer, a timeout (2 s) or a 5xx
+  **502 `unavailable`**. Nothing is written.
 - `GET /api/config/speech/design` → `VoiceDesign` `{available, model, sample,
   reference}` (mesa task 1426): whether naru-audio has the voice-design model
   **pulled** (always `false` on the legacy engine, and when the daemon cannot
@@ -840,6 +891,11 @@ have permission to use. After a success it refetches the drafted model's
 voices, leaving the draft and the saved settings alone, and says either to
 pick the new voice or which cloning model to pick first; a failure shows the
 message verbatim. The rules live in `frontend/src/voiceClone.ts`.
+Below it, **Export or import a cloned voice** (mesa task 1430) offers an
+**export** button for each voice in the drafted model's `cloned` list, which
+downloads `<name>.naru-voice.json`, and an import control — a file picker and
+a name box seeded from the file's `name` — that adds the voice through the
+add-voice route and then refetches, with the clone form's success note.
 Below it, also on naru-audio only, **Design a voice** (mesa task 1426) walks
 the three steps above — describe, audition/regenerate, keep/re-roll, then save
 under a name (the clone form's name rule and success note) — with the step

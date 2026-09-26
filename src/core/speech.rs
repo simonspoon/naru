@@ -43,7 +43,7 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 
 use crate::core::audio::{self, TtlCache};
-use crate::core::types::{AddedVoice, VoiceDesign};
+use crate::core::types::{AddedVoice, VoiceDesign, VoiceExport};
 
 /// Bytes read from the synthesiser per chunk. Chunks are the unit the response
 /// body is written in, so this trades syscalls against how promptly the first
@@ -209,6 +209,13 @@ const MAX_VOICES: usize = 500;
 /// (`list_names` → `spawn_and_drain`), so a `--list-voices` that answers with
 /// megabytes of noise costs one capped buffer, never an unbounded one.
 pub fn voices(model: Option<&str>) -> Vec<String> {
+    voice_list(model).into_iter().map(|v| v.id).collect()
+}
+
+/// [`voices`]' list with each voice's `cloned` flag (mesa task 1430) —
+/// whether naru-audio can export it — cached as described there. The legacy
+/// engine's names are never cloned, nor are a daemon's too old to say.
+pub fn voice_list(model: Option<&str>) -> Vec<audio::DaemonVoice> {
     let daemon = audio::daemon_url();
     let key = match &daemon {
         Some(url) => format!("{url} {}", model.unwrap_or_default()),
@@ -222,7 +229,7 @@ pub fn voices(model: Option<&str>) -> Vec<String> {
             || match &daemon {
                 Some(url) => audio::voices(url, model)
                     .into_iter()
-                    .filter(|v| is_voice_name(v))
+                    .filter(|v| is_voice_name(&v.id))
                     .take(MAX_VOICES)
                     .collect(),
                 None => list_names(
@@ -230,14 +237,17 @@ pub fn voices(model: Option<&str>) -> Vec<String> {
                     &["--no-download", "--list-voices"],
                     is_voice_name,
                     MAX_VOICES,
-                ),
+                )
+                .into_iter()
+                .map(|id| audio::DaemonVoice { id, cloned: false })
+                .collect(),
             },
         )
         .0
 }
 
 /// [`voices`]' cache, module-level so [`add_voice`] can drop it.
-static VOICES: TtlCache<Vec<String>> = TtlCache::new();
+static VOICES: TtlCache<Vec<audio::DaemonVoice>> = TtlCache::new();
 
 /// Why a cloned voice was not added (mesa task 1418), each with the sentence
 /// to show.
@@ -288,12 +298,67 @@ pub fn add_voice(name: &str, text: &str, clip: &[u8]) -> Result<AddedVoice, AddV
         .into_iter()
         .filter(|m| crate::core::listen::is_model_name(m))
         .take(MAX_MODELS)
-        .filter(|m| audio::voices(&url, Some(m)).iter().any(|v| v == name))
+        .filter(|m| audio::voices(&url, Some(m)).iter().any(|v| v.id == name))
         .collect();
     Ok(AddedVoice {
         voice: name.to_string(),
         duration,
         models,
+    })
+}
+
+/// The file format a cloned voice is exported in (mesa task 1430,
+/// `docs/config.md`): the `format` tag and the `version` this Naru writes
+/// and reads.
+pub const VOICE_EXPORT_FORMAT: &str = "naru-voice";
+pub const VOICE_EXPORT_VERSION: u32 = 1;
+
+/// Why a cloned voice was not exported (mesa task 1430), each with the
+/// sentence to show.
+#[derive(Debug, PartialEq)]
+pub enum ExportVoiceError {
+    /// The engine is not naru-audio.
+    Conflict(String),
+    /// A name that is not a voice name.
+    Validation(String),
+    /// No cloned voice of that name.
+    NotFound(String),
+    /// The daemon did not answer usably.
+    Unavailable(String),
+}
+
+/// Exports the cloned voice `name` from the naru-audio daemon as a
+/// [`VoiceExport`] file (mesa task 1430, [`audio::export_voice`]): the clip
+/// byte for byte as base64 and its transcript, tagged with
+/// [`VOICE_EXPORT_FORMAT`] and [`VOICE_EXPORT_VERSION`] so another Naru —
+/// perhaps another version — can tell what it holds. Importing it is the
+/// ordinary [`add_voice`]. Only on `audio.engine = "naru-audio"`; `name`
+/// must pass [`is_voice_name`], which is also what keeps it a single path
+/// segment in the daemon's URL. Blocking.
+pub fn export_voice(name: &str) -> Result<VoiceExport, ExportVoiceError> {
+    let Some(url) = audio::daemon_url() else {
+        return Err(ExportVoiceError::Conflict(
+            "exporting a cloned voice needs the naru-audio engine; \
+             the legacy synthesiser has no cloned voices"
+                .to_string(),
+        ));
+    };
+    if !is_voice_name(name) {
+        return Err(ExportVoiceError::Validation(format!(
+            "voice name {name:?} must be 1-64 letters, digits, '_' or '-', starting with a letter or digit"
+        )));
+    }
+    let voice = audio::export_voice(&url, name).map_err(|e| match e {
+        audio::ExportVoiceError::NotFound(m) => ExportVoiceError::NotFound(m),
+        audio::ExportVoiceError::Rejected(m) => ExportVoiceError::Validation(m),
+        audio::ExportVoiceError::Unavailable(m) => ExportVoiceError::Unavailable(m),
+    })?;
+    Ok(VoiceExport {
+        format: VOICE_EXPORT_FORMAT.to_string(),
+        version: VOICE_EXPORT_VERSION,
+        name: voice.name,
+        text: voice.text,
+        wav_base64: voice.wav_base64,
     })
 }
 

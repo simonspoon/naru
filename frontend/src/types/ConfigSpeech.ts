@@ -22,6 +22,12 @@ voice: string | null,
  */
 voices: Array<string>, 
 /**
+ * The names in `voices` that are **cloned** voices (mesa task 1430) —
+ * the ones naru-audio can export. Always empty on the legacy engine, and
+ * on a daemon too old to mark them.
+ */
+cloned: Array<string>, 
+/**
  * The configured text-to-speech model (mesa task 1425), or `null` when the
  * config says nothing — then naru-audio speaks in its own default model.
  * Only the naru-audio engine sends it.

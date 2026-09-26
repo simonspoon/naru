@@ -90,6 +90,7 @@ import type { Task } from './types/Task'
 import type { TaskReceipt } from './types/TaskReceipt'
 import type { TaskSummary } from './types/TaskSummary'
 import type { VoiceDesign } from './types/VoiceDesign'
+import type { VoiceExport } from './types/VoiceExport'
 import type { Waypoint } from './types/Waypoint'
 
 /** Error body shape shared by the API and CLI: {"error": {"code", "message"}}. */
@@ -1366,6 +1367,17 @@ export function addVoice(
     '/api/config/speech/voices',
     jsonInit('POST', { name, text, clip_base64: clipBase64 }),
   )
+}
+
+/**
+ * Exports the cloned voice `name` from naru-audio as one `naru-voice` file
+ * (mesa task 1430): its clip byte for byte as base64 and its transcript.
+ * Importing the file is `addVoice`. 409 `conflict` on the legacy engine, 404
+ * `not_found` for no cloned voice of that name, 502 `unavailable` when
+ * naru-audio does not answer.
+ */
+export function exportVoice(name: string): Promise<VoiceExport> {
+  return request(`/api/config/speech/voices/${encodeURIComponent(name)}`)
 }
 
 /**

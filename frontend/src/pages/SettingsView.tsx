@@ -4,6 +4,7 @@ import {
   addVoice,
   deleteLiveMemory,
   designVoice,
+  exportVoice,
   getConfig,
   getKeymap,
   getAudio,
@@ -152,6 +153,14 @@ import {
   descriptionError,
   type DesignState,
 } from '../voiceDesign'
+import {
+  VOICE_FILE_ACCEPT,
+  exportFilename,
+  exportText,
+  importReady,
+  parseVoiceFile,
+} from '../voiceExport'
+import type { VoiceExport } from '../types/VoiceExport'
 import {
   changedLive,
   draftFrom as liveDraftFrom,
@@ -1136,6 +1145,7 @@ function SpeechSection() {
   const [voicesFor, setVoicesFor] = useState<{
     model: string
     voices: string[]
+    cloned: string[]
   } | null>(null)
   // Whether the sample's audio has actually started: synthesis takes seconds,
   // so "asked for it" and "hearing it" are different states, exactly as on the
@@ -1153,13 +1163,27 @@ function SpeechSection() {
   const [cloning, setCloning] = useState(false)
   const [cloneError, setCloneError] = useState<string | null>(null)
   const [cloneNote, setCloneNote] = useState<string | null>(null)
+  // Exporting and importing a cloned voice as one `naru-voice` file (mesa
+  // task 1430), naru-audio only like the clone form.
+  const [exporting, setExporting] = useState<string | null>(null)
+  const [exportError, setExportError] = useState<string | null>(null)
+  const [imported, setImported] = useState<VoiceExport | null>(null)
+  const [importName, setImportName] = useState('')
+  // Remounts the file input to clear it after a success.
+  const [importKey, setImportKey] = useState(0)
+  const [importing, setImporting] = useState(false)
+  const [importError, setImportError] = useState<string | null>(null)
+  const [importNote, setImportNote] = useState<string | null>(null)
+  // The latest picked file, so a slower read of an earlier pick is dropped.
+  const pickedFile = useRef<File | null>(null)
 
   const seeded: SpeechDraft =
     draft ?? (speech ? speechDraftFrom(speech) : { voice: '', model: '' })
-  const voices =
-    voicesFor && voicesFor.model === seeded.model.trim()
-      ? voicesFor.voices
-      : (speech?.voices ?? [])
+  const listed =
+    voicesFor && voicesFor.model === seeded.model.trim() ? voicesFor : null
+  const voices = listed ? listed.voices : (speech?.voices ?? [])
+  // The listed voices naru-audio can export: only a cloning model lists them.
+  const cloned = listed ? listed.cloned : (speech?.cloned ?? [])
 
   function edit(value: string) {
     setDraft({ ...seeded, voice: value })
@@ -1182,7 +1206,7 @@ function SpeechSection() {
     const asked = value.trim()
     getSpeech(asked).then(
       (fresh) => {
-        setVoicesFor({ model: asked, voices: fresh.voices })
+        setVoicesFor({ model: asked, voices: fresh.voices, cloned: fresh.cloned })
         setDraft((d) =>
           d && d.model.trim() === asked
             ? { ...d, voice: voiceForModel(d.voice, fresh.voices) }
@@ -1190,7 +1214,7 @@ function SpeechSection() {
         )
       },
       // No list is "Naru could not ask": the voice box turns into a plain one.
-      () => setVoicesFor({ model: asked, voices: [] }),
+      () => setVoicesFor({ model: asked, voices: [], cloned: [] }),
     )
   }
 
@@ -1212,11 +1236,82 @@ function SpeechSection() {
   async function refreshVoices(): Promise<string[]> {
     const asked = seeded.model.trim()
     const fresh = await getSpeech(asked).then(
-      (s) => s.voices,
-      () => [] as string[],
+      (s) => ({ voices: s.voices, cloned: s.cloned }),
+      () => ({ voices: [] as string[], cloned: [] as string[] }),
     )
-    setVoicesFor({ model: asked, voices: fresh })
-    return fresh
+    setVoicesFor({ model: asked, ...fresh })
+    return fresh.voices
+  }
+
+  // Downloads the cloned voice `name` as one `naru-voice` file.
+  async function downloadVoice(name: string) {
+    setExporting(name)
+    setExportError(null)
+    try {
+      const file = await exportVoice(name)
+      const blob = new Blob([exportText(file)], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = exportFilename(name)
+      a.click()
+      URL.revokeObjectURL(url)
+    } catch (e: unknown) {
+      setExportError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setExporting(null)
+    }
+  }
+
+  // Reads a picked voice file; the name box takes the file's own name,
+  // which the person may change before importing.
+  function pickVoiceFile(file: File | null) {
+    setImported(null)
+    setImportError(null)
+    setImportNote(null)
+    pickedFile.current = file
+    if (file === null) return
+    file.text().then(
+      (text) => {
+        if (pickedFile.current !== file) return
+        const parsed = parseVoiceFile(text)
+        if ('error' in parsed) {
+          setImportError(parsed.error)
+          return
+        }
+        setImported(parsed.voice)
+        setImportName(parsed.voice.name)
+      },
+      (e: unknown) => {
+        if (pickedFile.current !== file) return
+        setImportError(e instanceof Error ? e.message : String(e))
+      },
+    )
+  }
+
+  // Adds the read voice through the add-voice route. A taken name is the
+  // daemon's 409, shown as an error: nothing is ever overwritten.
+  async function importVoice() {
+    if (!imported) return
+    setImporting(true)
+    setImportError(null)
+    setImportNote(null)
+    try {
+      const added = await addVoice(
+        importName.trim(),
+        imported.text.trim(),
+        imported.wav_base64,
+      )
+      const fresh = await refreshVoices()
+      setImportNote(addedNote(added, fresh))
+      setImported(null)
+      setImportName('')
+      setImportKey((k) => k + 1)
+    } catch (e: unknown) {
+      setImportError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setImporting(false)
+    }
   }
 
   // Sends the clip, then refetches the drafted model's voices so the new one
@@ -1446,6 +1541,81 @@ function SpeechSection() {
             {cloneNote && <span className="settings-saved">{cloneNote}</span>}
           </div>
           {cloneError && <p className="error">{cloneError}</p>}
+        </section>
+      )}
+
+      {audio.data && savedAudioEngine(audio.data) === 'naru-audio' && (
+        <section className="settings-command">
+          <label htmlFor="voice-import">
+            <span className="settings-command-title">
+              Export or import a cloned voice
+            </span>
+          </label>
+          <p className="muted settings-command-blurb">
+            Export saves a cloned voice — its clip and transcript — as one{' '}
+            <code>.naru-voice.json</code> file; import adds a voice from such a
+            file, on this machine or another. A name already taken is refused,
+            never overwritten.
+          </p>
+          {cloned.length > 0 ? (
+            <div className="settings-voice-row">
+              {cloned.map((name) => (
+                <button
+                  key={name}
+                  type="button"
+                  disabled={exporting !== null}
+                  title={`download ${exportFilename(name)}`}
+                  onClick={() => void downloadVoice(name)}
+                >
+                  {exporting === name ? 'exporting…' : `export ${name}`}
+                </button>
+              ))}
+            </div>
+          ) : (
+            <p className="muted settings-command-blurb">
+              The model above lists no cloned voices to export — only a cloning
+              model lists them.
+            </p>
+          )}
+          {exportError && <p className="error">{exportError}</p>}
+          <div className="settings-voice-row">
+            <input
+              id="voice-import"
+              key={importKey}
+              type="file"
+              accept={VOICE_FILE_ACCEPT}
+              aria-label="voice file"
+              onChange={(e) => pickVoiceFile(e.target.files?.[0] ?? null)}
+            />
+            <input
+              type="text"
+              className="settings-voice-input"
+              aria-label="imported voice name"
+              spellCheck={false}
+              placeholder="name to add it as"
+              value={importName}
+              onChange={(e) => setImportName(e.target.value)}
+            />
+          </div>
+          {imported && (
+            <p className="muted settings-command-blurb">
+              “{imported.text}”
+            </p>
+          )}
+          {importName.trim() !== '' && cloneNameError(importName) && (
+            <p className="error">{cloneNameError(importName)}</p>
+          )}
+          <div className="settings-actions">
+            <button
+              type="button"
+              disabled={importing || !importReady(imported, importName)}
+              onClick={() => void importVoice()}
+            >
+              {importing ? 'importing…' : 'import voice'}
+            </button>
+            {importNote && <span className="settings-saved">{importNote}</span>}
+          </div>
+          {importError && <p className="error">{importError}</p>}
         </section>
       )}
 

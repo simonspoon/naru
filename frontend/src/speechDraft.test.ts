@@ -21,12 +21,14 @@ const DEFAULTED: ConfigSpeech = {
   voice: null,
   voices: VOICES,
   model: null,
+  cloned: [],
   models: [],
 }
 const SET: ConfigSpeech = {
   voice: 'bm_george',
   voices: VOICES,
   model: null,
+  cloned: [],
   models: [],
 }
 /** What a machine with no synthesiser installed reports. */
@@ -34,6 +36,7 @@ const NO_BINARY: ConfigSpeech = {
   voice: 'bm_george',
   voices: [],
   model: null,
+  cloned: [],
   models: [],
 }
 /** naru-audio, with a model chosen (mesa task 1425). */
@@ -41,6 +44,7 @@ const DAEMON: ConfigSpeech = {
   voice: 'bm_george',
   voices: VOICES,
   model: 'kokoro-v1.0',
+  cloned: [],
   models: MODELS,
 }
 

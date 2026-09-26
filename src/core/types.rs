@@ -393,6 +393,10 @@ pub struct ConfigSpeech {
     /// these are the voices of the configured `model` — or of the one
     /// `GET /api/config/speech?model=` named (mesa task 1425).
     pub voices: Vec<String>,
+    /// The names in `voices` that are **cloned** voices (mesa task 1430) —
+    /// the ones naru-audio can export. Always empty on the legacy engine, and
+    /// on a daemon too old to mark them.
+    pub cloned: Vec<String>,
     /// The configured text-to-speech model (mesa task 1425), or `null` when the
     /// config says nothing — then naru-audio speaks in its own default model.
     /// Only the naru-audio engine sends it.
@@ -416,6 +420,26 @@ pub struct AddedVoice {
     /// that clones lists cloned voices, so this is where it can be picked;
     /// empty when Naru could not ask.
     pub models: Vec<String>,
+}
+
+/// A cloned voice as one file (mesa task 1430,
+/// `GET /api/config/speech/voices/{name}`, `docs/config.md`): what Settings'
+/// **export** downloads and **import** reads back, on this machine or
+/// another. `format` is always `"naru-voice"` and `version` `1`; a reader
+/// refuses anything else rather than guess at it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct VoiceExport {
+    /// Always `"naru-voice"`.
+    pub format: String,
+    /// The format's version, `1`.
+    pub version: u32,
+    /// The voice's name where it was exported — the default name on import.
+    pub name: String,
+    /// Exactly what the clip says: the voice's transcript.
+    pub text: String,
+    /// The clip (naru-audio's `ref.wav`), byte for byte, as standard base64.
+    pub wav_base64: String,
 }
 
 /// What the Settings page's **design a voice** panel needs (mesa task 1426,

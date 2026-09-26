@@ -942,14 +942,10 @@ fn models_of_kind(url: &str, path: &str, kind: &str) -> Vec<String> {
 /// a checked model name ([`crate::core::listen::is_model_name`]), so it
 /// needs no escaping. Empty on any failure: "Naru could not ask". Cached by
 /// the caller. Blocking.
-pub fn voices(url: &str, model: Option<&str>) -> Vec<String> {
+pub fn voices(url: &str, model: Option<&str>) -> Vec<DaemonVoice> {
     #[derive(Deserialize)]
     struct List {
-        voices: Vec<Voice>,
-    }
-    #[derive(Deserialize)]
-    struct Voice {
-        id: String,
+        voices: Vec<DaemonVoice>,
     }
     let path = match model {
         Some(model) => format!("{VOICES_PATH}?model={model}"),
@@ -957,8 +953,108 @@ pub fn voices(url: &str, model: Option<&str>) -> Vec<String> {
     };
     list(url, &path)
         .and_then(|body| serde_json::from_str::<List>(&body).ok())
-        .map(|l| l.voices.into_iter().map(|v| v.id).collect())
+        .map(|l| l.voices)
         .unwrap_or_default()
+}
+
+/// One entry of `GET /v1/audio/voices`: the voice's id, and whether it is a
+/// cloned voice — one the daemon can export (mesa task 1430). `cloned` is
+/// additive in the daemon's listing, so an older daemon that does not send
+/// it reads as `false`: nothing offered for export, never a failed list.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct DaemonVoice {
+    pub id: String,
+    #[serde(default)]
+    pub cloned: bool,
+}
+
+/// The most of an exported voice Naru reads. `ref.wav` is at most 30 s of
+/// 24 kHz mono 16-bit audio (§5.3) — about 1.4 MB, under 2 MB as base64 —
+/// so this leaves room for a daemon that keeps a longer clip.
+const EXPORT_CAP: u64 = 16 * 1024 * 1024;
+
+/// A cloned voice as the daemon exports it (`GET /v1/audio/voices/{name}`,
+/// §2.5): its name, what the clip says, and `ref.wav` byte for byte as
+/// standard base64.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct ExportedVoice {
+    pub name: String,
+    pub text: String,
+    pub wav_base64: String,
+}
+
+/// Why the daemon did not export a voice (mesa task 1430), each with the
+/// sentence to show — on a refusal, the daemon's own `error.message`.
+#[derive(Debug, PartialEq)]
+pub enum ExportVoiceError {
+    /// 404 `voice_not_found`: no cloned voice of that name (a built-in voice
+    /// is not one).
+    NotFound(String),
+    /// 400: a name the daemon will not take.
+    Rejected(String),
+    /// No answer, a timeout, a 5xx, or an answer that is not the daemon's.
+    Unavailable(String),
+}
+
+/// Exports the cloned voice `name` from the daemon at `url`
+/// (`GET /v1/audio/voices/{name}`, design §2.5). `name` is a checked voice
+/// name ([`crate::core::speech::is_voice_name`]: letters, digits, `_`, `-`),
+/// so it needs no path escaping. Blocking.
+pub fn export_voice(url: &str, name: &str) -> Result<ExportedVoice, ExportVoiceError> {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(LIST_TIMEOUT))
+        .http_status_as_error(false)
+        .proxy(None)
+        .max_redirects(0)
+        .build()
+        .into();
+    let path = format!("{VOICES_PATH}/{name}");
+    let answer = agent
+        .get(format!("{}{path}", url.trim_end_matches('/')))
+        .call()
+        .and_then(|mut response| {
+            let status = response.status().as_u16();
+            let body = response
+                .body_mut()
+                .with_config()
+                .limit(EXPORT_CAP)
+                .read_to_string()?;
+            Ok((status, body))
+        });
+    let (status, body) = answer.map_err(|e| {
+        ExportVoiceError::Unavailable(match e {
+            ureq::Error::Timeout(_) => format!(
+                "naru-audio did not answer {path} within {} s",
+                LIST_TIMEOUT.as_secs()
+            ),
+            ureq::Error::Io(_) | ureq::Error::ConnectionFailed | ureq::Error::HostNotFound => {
+                invalidate();
+                format!(
+                    "naru-audio isn't running at {url}. \
+                     Start it with `brew services start naru-audio`."
+                )
+            }
+            other => format!("naru-audio could not export the voice: {other}"),
+        })
+    })?;
+    if (200..300).contains(&status) {
+        return serde_json::from_str::<ExportedVoice>(&body).map_err(|_| {
+            ExportVoiceError::Unavailable(format!(
+                "{path} answered HTTP {status} with a body that is not its JSON"
+            ))
+        });
+    }
+    let message = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v["error"]["message"].as_str().map(str::to_string))
+        .unwrap_or_else(|| format!("{path} answered HTTP {status}"));
+    Err(match status {
+        404 => ExportVoiceError::NotFound(format!("naru-audio has no such voice: {message}")),
+        400 => ExportVoiceError::Rejected(format!("naru-audio refused the voice: {message}")),
+        _ => ExportVoiceError::Unavailable(format!(
+            "naru-audio could not export the voice: {message}"
+        )),
+    })
 }
 
 /// How long `POST /v1/audio/voices` may take, connect to answer. The daemon
@@ -1816,6 +1912,59 @@ mod tests {
         }
     }
 
+    /// Exporting a cloned voice (mesa task 1430, design §2.5): one GET of
+    /// `/v1/audio/voices/{name}`, the daemon's `{name, text, wav_base64}`
+    /// read back untouched.
+    #[test]
+    fn export_voice_reads_the_daemons_export() {
+        let stub = Stub::serve(0, |method, path| {
+            assert_eq!((method, path), ("GET", "/v1/audio/voices/amy"));
+            stub::Reply::Json(
+                200,
+                r#"{"name":"amy","text":"Hello there.","wav_base64":"UklGRgABAgM="}"#.to_string(),
+            )
+        });
+        assert_eq!(
+            export_voice(&stub.url(), "amy"),
+            Ok(ExportedVoice {
+                name: "amy".to_string(),
+                text: "Hello there.".to_string(),
+                wav_base64: "UklGRgABAgM=".to_string(),
+            })
+        );
+    }
+
+    /// The daemon's refusals map to their own variants, carrying its message;
+    /// a daemon that is not there is `Unavailable`.
+    #[test]
+    fn export_voice_passes_the_daemons_refusals_through() {
+        let cases = [
+            (404, "voice_not_found", "no cloned voice \\\"af_heart\\\""),
+            (400, "invalid_request", "bad name"),
+            (500, "internal", "boom"),
+        ];
+        for (status, code, message) in cases {
+            let body = format!(r#"{{"error":{{"message":"{message}","code":"{code}"}}}}"#);
+            let stub = Stub::serve(0, move |_, _| stub::Reply::Json(status, body.clone()));
+            let shown = message.replace("\\\"", "\"");
+            let want = match status {
+                404 => ExportVoiceError::NotFound(format!("naru-audio has no such voice: {shown}")),
+                400 => ExportVoiceError::Rejected(format!("naru-audio refused the voice: {shown}")),
+                _ => ExportVoiceError::Unavailable(format!(
+                    "naru-audio could not export the voice: {shown}"
+                )),
+            };
+            assert_eq!(export_voice(&stub.url(), "af_heart"), Err(want), "{status}");
+        }
+        let gone = Stub::start(0, "{}");
+        let url = gone.url();
+        drop(gone);
+        assert!(matches!(
+            export_voice(&url, "amy"),
+            Err(ExportVoiceError::Unavailable(m)) if m.contains("isn't running")
+        ));
+    }
+
     /// Designing a voice (mesa task 1426): one JSON request carrying the
     /// description as `instructions` and `"stream": false`, the buffered WAV
     /// answered back byte-identical, and a refusal the "Naru's voice"
@@ -2026,6 +2175,9 @@ mod tests {
                     VOICES_PATH => {
                         r#"{"model":"kokoro-v1.0","voices":[{"id":"af_heart"},{"id":"bm_george"}]}"#
                     }
+                    "/v1/audio/voices?model=pocket-tts-int8" => {
+                        r#"{"model":"pocket-tts-int8","voices":[{"id":"alba","cloned":false},{"id":"amy","cloned":true}]}"#
+                    }
                     _ => "{}",
                 }
                 .to_string(),
@@ -2036,7 +2188,19 @@ mod tests {
             vec!["parakeet-tdt-0.6b-v2-int8", "whisper-small"]
         );
         assert_eq!(tts_models(&stub.url()), vec!["kokoro-v1.0"]);
-        assert_eq!(voices(&stub.url(), None), vec!["af_heart", "bm_george"]);
+        let voice = |id: &str, cloned| DaemonVoice {
+            id: id.to_string(),
+            cloned,
+        };
+        assert_eq!(
+            voices(&stub.url(), None),
+            vec![voice("af_heart", false), voice("bm_george", false)],
+            "an older daemon's entries, with no `cloned`, read as not cloned"
+        );
+        assert_eq!(
+            voices(&stub.url(), Some("pocket-tts-int8")),
+            vec![voice("alba", false), voice("amy", true)]
+        );
         let junk = Stub::start(0, "<html>");
         assert!(stt_models(&junk.url()).is_empty());
         assert!(tts_models(&junk.url()).is_empty());
