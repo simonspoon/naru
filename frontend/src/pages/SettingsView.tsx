@@ -1324,7 +1324,13 @@ function SpeechSection() {
           <code className="settings-command-key">voice</code>
         </label>
         <p className="muted settings-command-blurb">
-          The voice <code>kokoro-rs</code> speaks in — a live conversation, or
+          The voice{' '}
+          <code>
+            {audio.data && savedAudioEngine(audio.data) === 'naru-audio'
+              ? 'naru-audio'
+              : 'kokoro-rs'}
+          </code>{' '}
+          speaks in — a live conversation, or
           an inbox item you press play on. Blank = the voice the synthesiser
           picks itself; a change applies on the next thing spoken, with no
           restart.
