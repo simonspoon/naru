@@ -38,17 +38,55 @@ rename still imports.
 | `.claude/plugins/installed_plugins.json`, `known_marketplaces.json` | the lists only — plugin caches are re-downloaded |
 | `.claude/projects/*/memory/` | per-project memories only |
 | `.claude/projects/` (all) + `.claude/history.jsonl` | only with `--with-sessions` — session transcripts are most of the size |
+| `data/attachments/`, `data/live-ink/` | the data dirs beside the db (mesa task 1387) — task attachments' bytes and the person's annotated boards; see below |
 
 A missing item is skipped and listed under `skipped` in export's output,
-never an error. Binaries (`mesa`, `qorvex`, `khora`, `loki`) and project
+never an error.
+
+### The data dirs (mesa task 1387)
+
+Two dirs hold bytes the db's rows name but do not contain: `attachments/`
+(`attachments::attachments_dir`, `NARU_ATTACHMENTS_DIR`/`MESA_ATTACHMENTS_DIR`,
+else beside the db) and `live-ink/` (`board::live_ink_dir`,
+`NARU_LIVE_INK_DIR`/`MESA_LIVE_INK_DIR`, else beside the db). Both are
+resolved by those same functions (`migrate::data_dirs`), never re-derived, on
+each side: export reads this machine's, import restores into **this**
+machine's — beside the db it just imported, or wherever the env var points.
+Each travels as its own archive tree, `data/attachments/…` and
+`data/live-ink/…`, staged into the scratch dir (hard links, else copies)
+because `tar` cannot portably archive a dir under another name. A missing dir
+(or one that is not a dir) is skipped and listed in `skipped` as
+`data/attachments`/`data/live-ink`. Their files are restored byte-identical
+and under the same conflict rules as every other file below; nothing in them
+is rewritten, because no row stores an absolute path into them: an
+attachment's path is derived from its row on every read
+(`attachments::attachment_path`), and an ink turn's `image_path` is stored
+relative to the ink dir since mesa task 1355 (`board::live_ink_relative`,
+joined on read by `board::resolve_live_ink`). An empty sub-dir inside a data
+dir is not recreated. A `data/<name>` this version does not know is ignored.
+
+Unlike the `.claude` trees, **no symlink travels in a data dir**: the store
+never writes one there, and a restored link (`4/9-x.bin -> ~/.ssh/id_ed25519`)
+would be served by the attachments route as whatever it points at. Export
+leaves a symlink inside a data dir out, and import skips one an archive
+carries anyway. An archive whose `data/` or `data/<name>` is itself anything
+but a real directory — a symlink to somewhere else, say — is refused
+(`validation`, even under `--force`) before anything is written, rather than
+restored as a link in place of this machine's dir. Binaries (`mesa`, `qorvex`, `khora`, `loki`) and project
 repos are **not** bundled: they are built and cloned on the new machine.
 
 The archive is a tar.gz written and read by the system `tar` (argv, never a
 shell string; no new crate): `manifest.json`, `naru.db`, and every file at its
-path relative to `$HOME`. The manifest records `format_version` (1),
-`created_at`, `mesa_version`, `source_home`, `username`, `repo_root`,
-`projects` (`id`, `name`, `local_path`), `files` and `with_sessions`. An
-archive naming any other `format_version` is refused (`validation`). Export
+path relative to `$HOME`, plus the data dirs under `data/`. The manifest
+records `format_version` (1), `created_at`, `mesa_version`, `source_home`,
+`username`, `repo_root`, `projects` (`id`, `name`, `local_path`), `files`,
+`data` (each present data dir's member, `data/attachments`, mapped to its
+files relative to the dir) and `with_sessions`. An archive naming any other
+`format_version` is refused (`validation`). Adding the data dirs did **not**
+bump the version: it only adds members and a manifest key, both optional on
+read — an archive written before them has no `data/` to restore and imports
+as it always did, and one written after them imports on an older Naru, which
+never looks under `data/`. Export
 refuses an archive path that already exists (`conflict`); a failing `tar` is
 `unavailable`.
 
@@ -121,7 +159,8 @@ The mappings are applied to:
    rename it did not need is visible in import's `renamed` list.
 
 File mode bits are preserved (hooks stay executable); a symlink's target is
-rewritten like any other path.
+rewritten like any other path. (The data dirs carry no symlinks at all — see
+above.)
 
 ## Refusal
 
@@ -148,13 +187,16 @@ differing files are rewritten.
 
 - `check`: `{home, db, items[{path, present, bytes, files}], hardcoded[{file,
   line, match}], projects, repo_root}` — `hardcoded` is every absolute path
-  under `$HOME` in the files import would rewrite. Read-only: it opens the db
+  under `$HOME` in the files import would rewrite. `items` includes the
+  data dirs as `data/attachments` and `data/live-ink`. Read-only: it opens the db
   only when one exists.
-- `export`: `{archive, bytes, files, file_bytes, projects, repo_root,
-  with_sessions, skipped}`.
+- `export`: `{archive, bytes, files, file_bytes, data[{path, files, bytes}],
+  projects, repo_root, with_sessions, skipped}` — `data` is each present data
+  dir; `files`/`file_bytes` still count only the home items.
 - `import`: `{archive, source_home, home, db, mappings, restored, unchanged,
   overwritten, projects[{id, name, from, to}], rewritten, renamed[{from, to}],
-  repo_root, unresolved, todo}` — `todo` is the hand checklist: clone each
+  repo_root, unresolved, todo}` — `restored`, `unchanged` and `overwritten`
+  count the data dirs' files with the rest. `todo` is the hand checklist: clone each
   project to its mapped `local_path`, install the mesa/qorvex/khora/loki
   binaries, re-authenticate Claude Code, re-enable plugins. `repo_root` is how
   the repo root was moved — `{from, to, source}` with `source` `"flag"` or

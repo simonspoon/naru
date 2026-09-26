@@ -4,10 +4,12 @@
 //! An archive is a tar.gz, written and read by the system `tar` (argv, never
 //! a shell string), holding `manifest.json`, a `VACUUM INTO` snapshot of the
 //! db as `naru.db` (`mesa.db` in an archive from before the rename, still
-//! accepted), and every bundled file at its path relative to `$HOME`
-//! (`.naru/config.json` or `.mesa/config.json`, `.claude/...`). Import
+//! accepted), every bundled file at its path relative to `$HOME`
+//! (`.naru/config.json` or `.mesa/config.json`, `.claude/...`), and the
+//! data dirs that live beside the db rather than in it under `data/`
+//! (`data/attachments/...`, `data/live-ink/...`, mesa task 1387). Import
 //! restores all of it under the
-//! current `$HOME`, rewriting absolute paths through a list of prefix
+//! current `$HOME` (the data dirs into this machine's own, [`data_dirs`]), rewriting absolute paths through a list of prefix
 //! mappings (the old home onto the new one, and optionally the manifest's
 //! `repo_root` onto a new repo root) — in the text files that hold
 //! hand-written paths, in every project's `local_path` (through
@@ -69,6 +71,34 @@ const HOME_ITEMS: &[&str] = &[
     ".claude/plugins/installed_plugins.json",
     ".claude/plugins/known_marketplaces.json",
 ];
+
+/// The archive directory every data dir sits under, as `data/<name>/...`.
+const DATA_PREFIX: &str = "data";
+
+/// One data dir that lives beside the db rather than in it (mesa task
+/// 1387): the rows name its files, so without it every attachment and
+/// annotated board would point at nothing after a move. `name` is its
+/// member under [`DATA_PREFIX`]; `path` is where it is on this machine.
+pub struct DataDir {
+    pub name: &'static str,
+    pub path: PathBuf,
+}
+
+/// This machine's data dirs, resolved exactly as the store resolves them —
+/// by the store's own resolvers, never re-derived here — so export reads,
+/// and import restores into, the dirs the db beside them uses.
+pub fn data_dirs() -> Vec<DataDir> {
+    vec![
+        DataDir {
+            name: "attachments",
+            path: super::attachments::attachments_dir(),
+        },
+        DataDir {
+            name: "live-ink",
+            path: super::board::live_ink_dir(),
+        },
+    ]
+}
 
 /// The user's home directory, the same resolution `config` uses — `$HOME`
 /// first, so a throwaway `HOME` isolates every path this module touches.
@@ -492,6 +522,42 @@ fn collect(home: &Path, with_sessions: bool) -> Result<(Vec<Item>, Vec<String>)>
     Ok((present, missing))
 }
 
+/// A present data dir: the dir its files were read from, and its item.
+type DataItem = (PathBuf, Item);
+
+/// The data dirs `export` bundles, as items named `data/<name>` whose files
+/// are relative to the dir itself, each with the dir it was read from; and
+/// the names of the missing ones (a dir that is not there, or not a dir).
+/// A symlink inside one is left out: the store never writes one there, and
+/// a link restored on another machine would be served by the attachments
+/// route as whatever file it points at.
+fn collect_data(data: &[DataDir]) -> Result<(Vec<DataItem>, Vec<String>)> {
+    let mut present = Vec::new();
+    let mut missing = Vec::new();
+    for d in data {
+        let rel = format!("{DATA_PREFIX}/{}", d.name);
+        if !d.path.is_dir() {
+            missing.push(rel);
+            continue;
+        }
+        // Canonical, so a data dir that is itself a symlink is walked as the
+        // dir it names rather than listed as one link.
+        let root = fs::canonicalize(&d.path)?;
+        let mut files = Vec::new();
+        walk(&root, &root, &mut files)?;
+        files.retain(|f| {
+            !fs::symlink_metadata(root.join(f)).is_ok_and(|m| m.file_type().is_symlink())
+        });
+        let bytes = files
+            .iter()
+            .filter_map(|f| fs::symlink_metadata(root.join(f)).ok())
+            .map(|m| m.len())
+            .sum();
+        present.push((root, Item { rel, files, bytes }));
+    }
+    Ok((present, missing))
+}
+
 // ---- temp dirs and tar ----
 
 /// A scratch directory removed on drop, so every exit path cleans up.
@@ -499,11 +565,17 @@ struct Scratch(PathBuf);
 
 impl Scratch {
     fn new() -> Result<Scratch> {
+        // A per-process sequence number as well as the clock: macOS's clock
+        // ticks in microseconds, so two scratch dirs made at once in one
+        // process (parallel tests) could otherwise share — and delete — one.
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        let dir = std::env::temp_dir().join(format!("mesa-migrate-{}-{nanos}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("mesa-migrate-{}-{nanos}-{seq}", std::process::id()));
         fs::create_dir_all(&dir)?;
         Ok(Scratch(dir))
     }
@@ -563,9 +635,16 @@ fn path_token(s: &str) -> &str {
 
 /// The dry run: every item `export` would bundle (present or missing, with
 /// its size) and every hard-coded path under `home` in the files `import`
-/// would rewrite. Reads only; `store` is `None` when no db exists yet.
-pub fn check(home: &Path, db_path: &Path, store: Option<&Store>) -> Result<Value> {
+/// would rewrite, then the data dirs the same way. Reads only; `store` is
+/// `None` when no db exists yet.
+pub fn check(
+    home: &Path,
+    db_path: &Path,
+    data: &[DataDir],
+    store: Option<&Store>,
+) -> Result<Value> {
     let (present, missing) = collect(home, false)?;
+    let (data_present, data_missing) = collect_data(data)?;
     let home_s = trim_path(&home.to_string_lossy());
     let mut hardcoded = Vec::new();
     for item in &present {
@@ -598,10 +677,12 @@ pub fn check(home: &Path, db_path: &Path, store: Option<&Store>) -> Result<Value
     }
     let items: Vec<Value> = present
         .iter()
+        .chain(data_present.iter().map(|(_, i)| i))
         .map(|i| json!({"path": i.rel, "present": true, "bytes": i.bytes, "files": i.files.len()}))
         .chain(
             missing
                 .iter()
+                .chain(&data_missing)
                 .map(|m| json!({"path": m, "present": false, "bytes": 0, "files": 0})),
         )
         .collect();
@@ -623,18 +704,47 @@ pub fn check(home: &Path, db_path: &Path, store: Option<&Store>) -> Result<Value
 // ---- export ----
 
 /// Writes the archive: a db snapshot (`Store::backup`, safe while `serve`
-/// runs), the manifest and every present item. A missing item is skipped and
-/// listed, never an error; an existing `archive` is `conflict`.
-pub fn export(store: &Store, home: &Path, archive: &Path, with_sessions: bool) -> Result<Value> {
+/// runs), the manifest, every present item and every present data dir. A
+/// missing item or data dir is skipped and listed, never an error; an
+/// existing `archive` is `conflict`.
+pub fn export(
+    store: &Store,
+    home: &Path,
+    data: &[DataDir],
+    archive: &Path,
+    with_sessions: bool,
+) -> Result<Value> {
     if fs::symlink_metadata(archive).is_ok() {
         return Err(Error::Conflict(format!(
             "{} already exists; pick a new archive path",
             archive.display()
         )));
     }
-    let (present, missing) = collect(home, with_sessions)?;
+    let (present, mut missing) = collect(home, with_sessions)?;
+    let (data_present, data_missing) = collect_data(data)?;
+    missing.extend(data_missing);
     let scratch = Scratch::new()?;
     store.backup(&scratch.0.join(DB_MEMBER))?;
+    // The data dirs are staged under the scratch dir's `data/` (hard links
+    // where the filesystem allows, else copies), since `tar` has no portable
+    // way to archive a dir under a name other than its own.
+    for (root, item) in &data_present {
+        let staged = scratch.0.join(&item.rel);
+        fs::create_dir_all(&staged)?;
+        for f in &item.files {
+            let (src, dst) = (root.join(f), staged.join(f));
+            if let Some(dir) = dst.parent() {
+                fs::create_dir_all(dir)?;
+            }
+            if fs::hard_link(&src, &dst).is_err() {
+                fs::copy(&src, &dst)?;
+            }
+        }
+    }
+    let data_files: serde_json::Map<String, Value> = data_present
+        .iter()
+        .map(|(_, i)| (i.rel.clone(), json!(i.files)))
+        .collect();
     let (projects, root) = project_rows(store)?;
     let home_s = trim_path(&home.to_string_lossy());
     let username = std::env::var("USER")
@@ -651,6 +761,7 @@ pub fn export(store: &Store, home: &Path, archive: &Path, with_sessions: bool) -
         "repo_root": root,
         "projects": projects,
         "files": files,
+        "data": data_files,
         "with_sessions": with_sessions,
     });
     fs::write(
@@ -665,6 +776,9 @@ pub fn export(store: &Store, home: &Path, archive: &Path, with_sessions: bool) -
         "manifest.json".as_ref(),
         DB_MEMBER.as_ref(),
     ];
+    if !data_present.is_empty() {
+        args.push(DATA_PREFIX.as_ref());
+    }
     if !present.is_empty() {
         args.push("-C".as_ref());
         args.push(home.as_os_str());
@@ -682,6 +796,10 @@ pub fn export(store: &Store, home: &Path, archive: &Path, with_sessions: bool) -
         "bytes": bytes,
         "files": files.len(),
         "file_bytes": present.iter().map(|i| i.bytes).sum::<u64>(),
+        "data": data_present
+            .iter()
+            .map(|(_, i)| json!({"path": i.rel, "files": i.files.len(), "bytes": i.bytes}))
+            .collect::<Vec<_>>(),
         "projects": projects.len(),
         "repo_root": root,
         "with_sessions": with_sessions,
@@ -860,10 +978,17 @@ fn prepare_snapshot(
     Ok((remapped, unresolved))
 }
 
-/// Restores an archive under `home` and the db at `db_path`. Refuses with
-/// `conflict`, writing nothing, when the db exists or any file it would
-/// write already exists with different content — unless `opts.force`.
-pub fn import(archive: &Path, home: &Path, db_path: &Path, opts: &ImportOptions) -> Result<Value> {
+/// Restores an archive under `home`, the db at `db_path` and each data dir
+/// into its `data` counterpart. Refuses with `conflict`, writing nothing,
+/// when the db exists or any file it would write already exists with
+/// different content — unless `opts.force`.
+pub fn import(
+    archive: &Path,
+    home: &Path,
+    db_path: &Path,
+    data: &[DataDir],
+    opts: &ImportOptions,
+) -> Result<Value> {
     if !archive.is_file() {
         return Err(Error::Validation(format!(
             "{} is not an archive file",
@@ -996,6 +1121,62 @@ pub fn import(archive: &Path, home: &Path, db_path: &Path, opts: &ImportOptions)
             content,
             rewritten,
         });
+    }
+    // The data dirs, byte-identical: nothing in them names a path (an
+    // attachment's is derived from its row, an ink turn's is stored relative
+    // to the ink dir), so nothing is rewritten. An archive without them — any
+    // written before mesa task 1387 — has nothing here to restore, and a
+    // `data/<name>` this version does not know is ignored. `data/` or a
+    // `data/<name>` that is anything but a real directory (a symlink to
+    // somewhere else, say) is refused here, before anything is written,
+    // rather than restored as a link in place of this machine's dir; a
+    // symlink inside one is skipped, since the store never writes one.
+    let data_root = scratch.0.join(DATA_PREFIX);
+    let not_a_dir = |rel: &str| {
+        Error::Validation(format!(
+            "the archive's {rel} is not a directory — not an archive mesa wrote"
+        ))
+    };
+    if fs::symlink_metadata(&data_root).is_ok_and(|m| !m.is_dir()) {
+        return Err(not_a_dir(DATA_PREFIX));
+    }
+    for d in data {
+        let root = data_root.join(d.name);
+        match fs::symlink_metadata(&root) {
+            Err(_) => continue,
+            Ok(m) if !m.is_dir() => return Err(not_a_dir(&format!("{DATA_PREFIX}/{}", d.name))),
+            Ok(_) => {}
+        }
+        let mut files = Vec::new();
+        walk(&root, &root, &mut files)?;
+        for f in files {
+            if f.is_empty() {
+                return Err(not_a_dir(&format!("{DATA_PREFIX}/{}", d.name)));
+            }
+            let src = root.join(&f);
+            let meta = fs::symlink_metadata(&src)?;
+            if meta.file_type().is_symlink() {
+                continue;
+            }
+            let content = Content::File {
+                bytes: fs::read(&src)?,
+                mode: meta.permissions().mode() & 0o7777,
+            };
+            let rel = format!("{DATA_PREFIX}/{}/{f}", d.name);
+            let target = d.path.join(&f);
+            if let Some(first) = claimed.insert(target.clone(), rel.clone()) {
+                collisions.push(format!(
+                    "{first} and {rel} both restore to {}",
+                    target.display()
+                ));
+            }
+            plan.push(Planned {
+                target,
+                rel,
+                content,
+                rewritten: false,
+            });
+        }
     }
     if !collisions.is_empty() {
         return Err(Error::Conflict(format!(
@@ -1398,7 +1579,7 @@ mod tests {
             .create_project("p", None, None, Some(&repo), None)
             .unwrap();
         let archive = root.join("a.tar.gz");
-        export(&store, &home, &archive, false).unwrap();
+        export(&store, &home, &[], &archive, false).unwrap();
         archive
     }
 
@@ -1409,7 +1590,7 @@ mod tests {
         let home = tmp.path().join("Users/new");
         let db = tmp.path().join("new.db");
         let opts = ImportOptions::default();
-        let out = import(&archive, &home, &db, &opts).unwrap();
+        let out = import(&archive, &home, &db, &[], &opts).unwrap();
         assert_eq!(out["projects"][0]["to"], format!("{}/repo", home.display()));
         let memo = home
             .join(".claude/projects")
@@ -1423,7 +1604,7 @@ mod tests {
         // and that file, and leave both exactly as they are.
         fs::write(home.join(".claude/settings.json"), "mine").unwrap();
         let before = fs::read(&db).unwrap();
-        let err = import(&archive, &home, &db, &opts).unwrap_err();
+        let err = import(&archive, &home, &db, &[], &opts).unwrap_err();
         let Error::Conflict(msg) = err else {
             panic!("expected conflict, got {err:?}")
         };
@@ -1442,7 +1623,7 @@ mod tests {
             force: true,
             ..Default::default()
         };
-        import(&archive, &home, &db, &forced).unwrap();
+        import(&archive, &home, &db, &[], &forced).unwrap();
         assert_ne!(
             fs::read_to_string(home.join(".claude/settings.json")).unwrap(),
             "mine"
@@ -1466,13 +1647,13 @@ mod tests {
         }
         let store = Store::open(&tmp.path().join("src.db")).unwrap();
         let archive = tmp.path().join("a.tar.gz");
-        export(&store, &old, &archive, false).unwrap();
+        export(&store, &old, &[], &archive, false).unwrap();
         let db = tmp.path().join("new.db");
         let forced = ImportOptions {
             force: true,
             ..Default::default()
         };
-        let err = import(&archive, &new, &db, &forced).unwrap_err();
+        let err = import(&archive, &new, &db, &[], &forced).unwrap_err();
         let Error::Conflict(msg) = err else {
             panic!("expected conflict, got {err:?}")
         };
@@ -1524,7 +1705,7 @@ mod tests {
 
         let home = tmp.path().join("Users/new");
         let db = tmp.path().join("new.db");
-        let out = import(&legacy, &home, &db, &ImportOptions::default()).unwrap();
+        let out = import(&legacy, &home, &db, &[], &ImportOptions::default()).unwrap();
         assert_eq!(out["projects"][0]["to"], format!("{}/repo", home.display()));
         let store = Store::open(&db).unwrap();
         assert_eq!(store.list_projects_all().unwrap().len(), 1);
@@ -1542,6 +1723,7 @@ mod tests {
             &legacy,
             &kept,
             &tmp.path().join("kept.db"),
+            &[],
             &ImportOptions::default(),
         )
         .unwrap();
@@ -1568,6 +1750,7 @@ mod tests {
             &archive,
             &tmp.path().join("h"),
             &tmp.path().join("d.db"),
+            &[],
             &ImportOptions::default(),
         )
         .unwrap_err();
@@ -1596,6 +1779,7 @@ mod tests {
             &archive,
             &tmp.path().join("h"),
             &tmp.path().join("d.db"),
+            &[],
             &ImportOptions::default(),
         )
         .unwrap_err();
@@ -1603,5 +1787,398 @@ mod tests {
             matches!(err, Error::Validation(ref m) if m.contains("format_version")),
             "{err:?}"
         );
+    }
+
+    /// Both data dirs under `base`, as a machine with its data there would
+    /// resolve them.
+    fn dirs_at(base: &Path) -> Vec<DataDir> {
+        vec![
+            DataDir {
+                name: "attachments",
+                path: base.join("attachments"),
+            },
+            DataDir {
+                name: "live-ink",
+                path: base.join("live-ink"),
+            },
+        ]
+    }
+
+    /// The `NARU_*` spellings of both data-dir env vars — read before the
+    /// `MESA_*` ones, so a developer's shell cannot outrank the test's.
+    const DATA_ENV: [&str; 2] = ["NARU_ATTACHMENTS_DIR", "NARU_LIVE_INK_DIR"];
+
+    /// Removes [`DATA_ENV`] on drop, so a panicking test cannot leak them.
+    /// Declared after the `ENV_LOCK` guard, so it drops first.
+    struct DataEnv;
+
+    impl Drop for DataEnv {
+        fn drop(&mut self) {
+            // SAFETY: still under the ENV_LOCK guard, which drops after this.
+            DATA_ENV
+                .iter()
+                .for_each(|k| unsafe { std::env::remove_var(k) });
+        }
+    }
+
+    /// Points both data-dir env vars under `base` and returns what
+    /// [`data_dirs`] — the store's own resolvers — then answers. The caller
+    /// must hold `attachments::ENV_LOCK` and a [`DataEnv`] for its whole body.
+    fn point_data_dirs(base: &Path) -> Vec<DataDir> {
+        // SAFETY: the caller's ENV_LOCK guard gives it exclusive access.
+        unsafe {
+            std::env::set_var(DATA_ENV[0], base.join("attachments"));
+            std::env::set_var(DATA_ENV[1], base.join("live-ink"));
+        }
+        data_dirs()
+    }
+
+    /// The archive's entries unpacked into `stage`.
+    fn unpack(archive: &Path, stage: &Path) {
+        fs::create_dir_all(stage).unwrap();
+        tar(&[
+            "-xzf".as_ref(),
+            archive.as_os_str(),
+            "-C".as_ref(),
+            stage.as_os_str(),
+        ])
+        .unwrap();
+    }
+
+    /// The data dirs travel (mesa task 1387): an attachment and an ink turn
+    /// written through the Store on one machine are, after export → import,
+    /// files the imported rows resolve to on the other — through the rows as
+    /// they are, no path rewritten.
+    #[test]
+    fn data_dirs_round_trip_into_this_machines_dirs() {
+        use crate::core::types::{LiveBoardKind, Priority};
+        let _lock = crate::core::attachments::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _env = DataEnv;
+        let tmp = tempfile::tempdir().unwrap();
+        let src = point_data_dirs(&tmp.path().join("src"));
+        let mut store = Store::open(&tmp.path().join("src.db")).unwrap();
+        let p = store.create_project("p", None, None, None, None).unwrap();
+        let task = store
+            .create_task(p.id, "t", Priority::Medium, &[], None, None, None, None)
+            .unwrap();
+        let bytes = b"\x00attachment\xff".to_vec();
+        let att = store
+            .create_attachment(task.id, "notes.bin", &bytes, None)
+            .unwrap();
+        let session = store.start_live_session(None).unwrap();
+        let board = store
+            .add_live_board(session.id, LiveBoardKind::Markdown, None, "body", None)
+            .unwrap();
+        let png = b"\x89PNG\r\n\x1a\nink".to_vec();
+        let turn = store
+            .add_live_ink_turn(session.id, "look", board.id, &png)
+            .unwrap();
+        let home = tmp.path().join("Users/old");
+        fs::create_dir_all(&home).unwrap();
+
+        let checked = check(&home, &tmp.path().join("src.db"), &src, Some(&store)).unwrap();
+        for path in ["data/attachments", "data/live-ink"] {
+            let item = checked["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|i| i["path"] == path)
+                .unwrap_or_else(|| panic!("check lists {path}: {checked}"));
+            assert_eq!(item["present"], true, "{item}");
+            assert_eq!(item["files"], 1, "{item}");
+        }
+
+        let archive = tmp.path().join("a.tar.gz");
+        let out = export(&store, &home, &src, &archive, false).unwrap();
+        assert_eq!(out["data"][0]["path"], "data/attachments", "{out}");
+        assert_eq!(out["data"][0]["bytes"], bytes.len(), "{out}");
+        assert_eq!(out["data"][1]["path"], "data/live-ink", "{out}");
+        assert!(
+            !out["skipped"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s.as_str().unwrap().starts_with("data/")),
+            "{out}"
+        );
+        let stage = tmp.path().join("stage");
+        unpack(&archive, &stage);
+        let rel = format!("{}/{}-notes.bin", task.id, att.id);
+        assert_eq!(
+            fs::read(stage.join("data/attachments").join(&rel)).unwrap(),
+            bytes
+        );
+        let manifest: Value =
+            serde_json::from_slice(&fs::read(stage.join("manifest.json")).unwrap()).unwrap();
+        assert_eq!(manifest["data"]["data/attachments"], json!([rel]));
+        assert_eq!(
+            manifest["data"]["data/live-ink"],
+            json!([format!("{}/{}.png", session.id, turn.id)])
+        );
+        drop(store);
+
+        // The new machine resolves its dirs elsewhere; import fills those.
+        let dst = point_data_dirs(&tmp.path().join("dst"));
+        let db = tmp.path().join("new.db");
+        let new_home = tmp.path().join("Users/new");
+        let out = import(&archive, &new_home, &db, &dst, &ImportOptions::default()).unwrap();
+        assert_eq!(out["restored"], 2, "{out}");
+        let store = Store::open(&db).unwrap();
+        assert_eq!(store.attachment_bytes(att.id).unwrap().1, bytes);
+        let ink = store.get_live_turn(turn.id).unwrap().image_path.unwrap();
+        assert!(
+            Path::new(&ink).starts_with(tmp.path().join("dst/live-ink")),
+            "{ink}"
+        );
+        assert_eq!(fs::read(&ink).unwrap(), png);
+    }
+
+    /// A data dir that is not there — or is not a dir — is skipped and
+    /// listed, never an error, on export and on check.
+    #[test]
+    fn missing_data_dirs_are_skipped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = dirs_at(&tmp.path().join("nowhere"));
+        fs::create_dir_all(tmp.path().join("nowhere")).unwrap();
+        fs::write(tmp.path().join("nowhere/live-ink"), "a file, not a dir").unwrap();
+        let home = tmp.path().join("h");
+        fs::create_dir_all(&home).unwrap();
+        let store = Store::open(&tmp.path().join("src.db")).unwrap();
+        let archive = tmp.path().join("a.tar.gz");
+        let out = export(&store, &home, &data, &archive, false).unwrap();
+        let skipped: Vec<&str> = out["skipped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s.as_str().unwrap())
+            .collect();
+        assert!(skipped.contains(&"data/attachments"), "{out}");
+        assert!(skipped.contains(&"data/live-ink"), "{out}");
+        assert_eq!(out["data"], json!([]));
+        let stage = tmp.path().join("stage");
+        unpack(&archive, &stage);
+        assert!(
+            !stage.join("data").exists(),
+            "no data member for a missing dir"
+        );
+
+        let checked = check(&home, &tmp.path().join("src.db"), &data, Some(&store)).unwrap();
+        for path in ["data/attachments", "data/live-ink"] {
+            let item = checked["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|i| i["path"] == path)
+                .unwrap_or_else(|| panic!("check lists {path}: {checked}"));
+            assert_eq!(item["present"], false, "{item}");
+        }
+    }
+
+    /// An archive written before mesa task 1387 — no `data/` members, no
+    /// `data` key in its manifest — still imports, restoring no data and
+    /// creating no data dir.
+    #[test]
+    fn an_archive_without_data_members_still_imports() {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = exported(tmp.path());
+        let stage = tmp.path().join("stage");
+        unpack(&archive, &stage);
+        let mut manifest: Value =
+            serde_json::from_slice(&fs::read(stage.join("manifest.json")).unwrap()).unwrap();
+        manifest.as_object_mut().unwrap().remove("data");
+        fs::write(stage.join("manifest.json"), manifest.to_string()).unwrap();
+        let old = tmp.path().join("old.tar.gz");
+        tar(&[
+            "-czf".as_ref(),
+            old.as_os_str(),
+            "-C".as_ref(),
+            stage.as_os_str(),
+            "manifest.json".as_ref(),
+            "naru.db".as_ref(),
+            ".claude".as_ref(),
+        ])
+        .unwrap();
+        let dst = tmp.path().join("dst");
+        let db = tmp.path().join("new.db");
+        import(
+            &old,
+            &tmp.path().join("Users/new"),
+            &db,
+            &dirs_at(&dst),
+            &ImportOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            Store::open(&db).unwrap().list_projects_all().unwrap().len(),
+            1
+        );
+        assert!(!dst.exists(), "nothing to restore, so no data dir");
+    }
+
+    /// A data file obeys the rules every other member does: identical is
+    /// `unchanged`, different is `conflict` writing nothing unless `--force`,
+    /// and two data dirs resolving to one path with the same file is a
+    /// collision no `--force` settles.
+    #[test]
+    fn data_files_conflict_like_any_other_member() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = dirs_at(&tmp.path().join("src"));
+        fs::create_dir_all(src[0].path.join("4")).unwrap();
+        fs::write(src[0].path.join("4/9-a.txt"), "archived").unwrap();
+        fs::create_dir_all(src[1].path.join("4")).unwrap();
+        fs::write(src[1].path.join("4/9-a.txt"), "ink").unwrap();
+        let home = tmp.path().join("h");
+        fs::create_dir_all(&home).unwrap();
+        let store = Store::open(&tmp.path().join("src.db")).unwrap();
+        let archive = tmp.path().join("a.tar.gz");
+        export(&store, &home, &src, &archive, false).unwrap();
+
+        let dst = dirs_at(&tmp.path().join("dst"));
+        let mine = dst[0].path.join("4/9-a.txt");
+        fs::create_dir_all(mine.parent().unwrap()).unwrap();
+        fs::write(&mine, "mine").unwrap();
+        let db = tmp.path().join("new.db");
+        let err = import(&archive, &home, &db, &dst, &ImportOptions::default()).unwrap_err();
+        let Error::Conflict(msg) = err else {
+            panic!("expected conflict, got {err:?}")
+        };
+        assert!(msg.contains("9-a.txt"), "{msg}");
+        assert_eq!(fs::read_to_string(&mine).unwrap(), "mine");
+        assert!(!db.exists(), "a refused import must not write the db");
+        assert!(!dst[1].path.exists(), "nor any data file");
+
+        let forced = ImportOptions {
+            force: true,
+            ..Default::default()
+        };
+        let out = import(&archive, &home, &db, &dst, &forced).unwrap();
+        assert_eq!(fs::read_to_string(&mine).unwrap(), "archived");
+        assert!(
+            out["overwritten"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p.as_str().unwrap().ends_with("attachments/4/9-a.txt")),
+            "{out}"
+        );
+        let out = import(&archive, &home, &db, &dst, &forced).unwrap();
+        assert_eq!(out["unchanged"], 2, "{out}");
+
+        // Both dirs resolving to one path: the same file twice.
+        let same = tmp.path().join("same");
+        let both = vec![
+            DataDir {
+                name: "attachments",
+                path: same.clone(),
+            },
+            DataDir {
+                name: "live-ink",
+                path: same.clone(),
+            },
+        ];
+        let err = import(&archive, &home, &tmp.path().join("x.db"), &both, &forced).unwrap_err();
+        assert!(
+            matches!(err, Error::Conflict(ref m) if m.contains("both restore to")),
+            "{err:?}"
+        );
+        assert!(!same.exists());
+    }
+
+    /// An archive whose `data/attachments` is a symlink (to anywhere) is
+    /// refused before anything is written — not restored as a link in place
+    /// of this machine's dir, even under `--force` with the dir already
+    /// there — and a symlink *inside* a data dir is neither exported nor
+    /// restored.
+    #[test]
+    fn symlinks_in_the_data_dirs_are_never_restored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = exported(tmp.path());
+        let stage = tmp.path().join("stage");
+        unpack(&archive, &stage);
+        let outside = tmp.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("secret"), "secret").unwrap();
+        fs::create_dir_all(stage.join("data")).unwrap();
+        std::os::unix::fs::symlink(&outside, stage.join("data/attachments")).unwrap();
+        let evil = tmp.path().join("evil.tar.gz");
+        tar(&[
+            "-czf".as_ref(),
+            evil.as_os_str(),
+            "-C".as_ref(),
+            stage.as_os_str(),
+            "manifest.json".as_ref(),
+            "naru.db".as_ref(),
+            "data".as_ref(),
+        ])
+        .unwrap();
+        let dst = tmp.path().join("dst");
+        fs::create_dir_all(dst.join("attachments")).unwrap();
+        let db = tmp.path().join("new.db");
+        let forced = ImportOptions {
+            force: true,
+            ..Default::default()
+        };
+        let err = import(
+            &evil,
+            &tmp.path().join("Users/new"),
+            &db,
+            &dirs_at(&dst),
+            &forced,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, Error::Validation(ref m) if m.contains("data/attachments")),
+            "{err:?}"
+        );
+        assert!(!db.exists(), "a refused import must not write the db");
+        assert!(
+            fs::symlink_metadata(dst.join("attachments"))
+                .unwrap()
+                .is_dir()
+        );
+        assert_eq!(fs::read_dir(dst.join("attachments")).unwrap().count(), 0);
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 1);
+
+        // A link inside a data dir: left out of the export, and skipped by an
+        // import of an archive that carries one anyway.
+        let src = dirs_at(&tmp.path().join("src"));
+        fs::create_dir_all(src[0].path.join("4")).unwrap();
+        fs::write(src[0].path.join("4/9-a.txt"), "real").unwrap();
+        std::os::unix::fs::symlink(outside.join("secret"), src[0].path.join("4/9-x.bin")).unwrap();
+        let home = tmp.path().join("h");
+        fs::create_dir_all(&home).unwrap();
+        let store = Store::open(&tmp.path().join("src.db")).unwrap();
+        let linked = tmp.path().join("linked.tar.gz");
+        let out = export(&store, &home, &src, &linked, false).unwrap();
+        assert_eq!(out["data"][0]["files"], 1, "{out}");
+        let stage = tmp.path().join("stage2");
+        unpack(&linked, &stage);
+        assert!(!stage.join("data/attachments/4/9-x.bin").exists());
+        std::os::unix::fs::symlink(
+            outside.join("secret"),
+            stage.join("data/attachments/4/9-x.bin"),
+        )
+        .unwrap();
+        let carried = tmp.path().join("carried.tar.gz");
+        tar(&[
+            "-czf".as_ref(),
+            carried.as_os_str(),
+            "-C".as_ref(),
+            stage.as_os_str(),
+            "manifest.json".as_ref(),
+            "naru.db".as_ref(),
+            "data".as_ref(),
+        ])
+        .unwrap();
+        let dst = dirs_at(&tmp.path().join("dst2"));
+        let out = import(&carried, &home, &tmp.path().join("d2.db"), &dst, &forced).unwrap();
+        assert_eq!(out["restored"], 1, "{out}");
+        assert_eq!(
+            fs::read_to_string(dst[0].path.join("4/9-a.txt")).unwrap(),
+            "real"
+        );
+        assert!(fs::symlink_metadata(dst[0].path.join("4/9-x.bin")).is_err());
     }
 }

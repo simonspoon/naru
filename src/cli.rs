@@ -5756,14 +5756,25 @@ fn run_migrate(cmd: MigrateCmd) -> Result<()> {
             } else {
                 None
             };
-            print_json(&migrate::check(&home, &db, store.as_ref())?);
+            print_json(&migrate::check(
+                &home,
+                &db,
+                &migrate::data_dirs(),
+                store.as_ref(),
+            )?);
         }
         MigrateCmd::Export {
             archive,
             with_sessions,
         } => {
             let store = Store::open(&db)?;
-            print_json(&migrate::export(&store, &home, &archive, with_sessions)?);
+            print_json(&migrate::export(
+                &store,
+                &home,
+                &migrate::data_dirs(),
+                &archive,
+                with_sessions,
+            )?);
         }
         MigrateCmd::Import {
             archive,
@@ -5779,7 +5790,13 @@ fn run_migrate(cmd: MigrateCmd) -> Result<()> {
                 repo_root,
                 force,
             };
-            print_json(&migrate::import(&archive, &home, &db, &opts)?);
+            print_json(&migrate::import(
+                &archive,
+                &home,
+                &db,
+                &migrate::data_dirs(),
+                &opts,
+            )?);
         }
     }
     Ok(())
