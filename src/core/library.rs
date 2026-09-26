@@ -1072,6 +1072,11 @@ fn apply_naru(store: &mut Store, project: Option<i64>, row: &LibrarySyncRow) -> 
         fs::create_dir_all(parent)?;
     }
     fs::write(&full, body)?;
+    // A hook is registered as its bare path, so the file Claude Code runs
+    // must be executable — `fs::write` leaves a new file at the umask's 0644.
+    if row.kind == LibraryKind::Hook {
+        make_executable(&full)?;
+    }
     if let Some(id) = row.item_id {
         store.set_library_synced(id, body)?;
     }
@@ -1762,6 +1767,7 @@ fn status_of(item: &LibraryItem, target: &HookTarget, settings: &Settings) -> Li
         settings_path: target.settings.to_string_lossy().into_owned(),
         command: target.command.clone(),
         registered: !registrations.is_empty(),
+        executable: (!registrations.is_empty()).then(|| is_executable(Path::new(&target.absolute))),
         registrations,
         events: HOOK_EVENTS.iter().map(|e| e.to_string()).collect(),
     }
@@ -1825,7 +1831,10 @@ fn validate_matcher(matcher: Option<&str>) -> StoreResult<String> {
 fn seed_hook_file(target: &HookTarget, body: &str) -> StoreResult<()> {
     let path = Path::new(&target.absolute);
     if path.exists() {
-        return Ok(());
+        // Never rewritten — but a file that reached disk some other way (an
+        // older sync, a hand copy) may be 0644, and the command registered is
+        // its bare path, so it is made runnable in place (mesa task 1400).
+        return make_executable(path);
     }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -1837,6 +1846,39 @@ fn seed_hook_file(target: &HookTarget, body: &str) -> StoreResult<()> {
         fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
     }
     Ok(())
+}
+
+/// Adds the execute bits to a hook file, leaving its contents and every
+/// other mode bit alone (`chmod +x`), so a fresh 0644 write ends 0755.
+fn make_executable(path: &Path) -> StoreResult<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(path)?.permissions().mode();
+        if mode & 0o111 != 0o111 {
+            fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o111))?;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+/// Whether a hook file exists and its owner may execute it — what a
+/// bare-path registration needs to run at all. Off unix, existence alone.
+fn is_executable(path: &Path) -> bool {
+    let Ok(meta) = fs::metadata(path) else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.is_file() && meta.permissions().mode() & 0o100 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        meta.is_file()
+    }
 }
 
 /// Registers a hook under one event, and answers its status afterwards.
@@ -5610,6 +5652,86 @@ mod tests {
                 .iter()
                 .map(|e| e.to_string())
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[cfg(unix)]
+    fn mode_of(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    /// mesa task 1400: a hook reaching disk through sync is registered as its
+    /// bare path, so the mesa-wins write must leave it runnable.
+    #[cfg(unix)]
+    #[test]
+    fn sync_apply_mesa_writes_a_hook_file_executable() {
+        let (mut store, dir) = temp_store();
+        let base = dir.path().to_path_buf();
+        let pid = project_at(&mut store, &base);
+        hook_item(&mut store, pid, "stop-notify.sh");
+
+        let results = sync_apply(
+            &mut store,
+            Some(pid),
+            &[(
+                ".claude/hooks/stop-notify.sh".to_string(),
+                "mesa".to_string(),
+            )],
+        )
+        .unwrap();
+        assert!(results[0].applied, "{:?}", results[0].error);
+        assert_eq!(mode_of(&base.join(".claude/hooks/stop-notify.sh")), 0o755);
+    }
+
+    /// mesa task 1400: enabling a hook whose file is already on disk at 0644
+    /// makes it runnable without rewriting it, and status reports the bit.
+    #[cfg(unix)]
+    #[test]
+    fn enabling_makes_an_existing_0644_hook_file_executable() {
+        use std::os::unix::fs::PermissionsExt;
+        let (mut store, dir) = temp_store();
+        let base = dir.path().to_path_buf();
+        let pid = project_at(&mut store, &base);
+        let item = hook_item(&mut store, pid, "stop-notify.sh");
+        let script = base.join(".claude/hooks/stop-notify.sh");
+        fs::create_dir_all(script.parent().unwrap()).unwrap();
+        fs::write(&script, "#!/bin/sh\n# hand copy\n").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o644)).unwrap();
+
+        assert_eq!(hook_registrations(&store, &item).unwrap().executable, None);
+        let status = register_hook(&store, &item, "Stop", None).unwrap();
+        assert_eq!(mode_of(&script), 0o755);
+        assert_eq!(
+            fs::read_to_string(&script).unwrap(),
+            "#!/bin/sh\n# hand copy\n"
+        );
+        assert_eq!(status.executable, Some(true));
+    }
+
+    /// mesa task 1400: a registered hook whose file lost its execute bit is
+    /// reported, not silently shown as healthy.
+    #[cfg(unix)]
+    #[test]
+    fn status_reports_a_registered_hook_file_that_is_not_executable() {
+        use std::os::unix::fs::PermissionsExt;
+        let (mut store, dir) = temp_store();
+        let base = dir.path().to_path_buf();
+        let pid = project_at(&mut store, &base);
+        let item = hook_item(&mut store, pid, "stop-notify.sh");
+        register_hook(&store, &item, "Stop", None).unwrap();
+        let script = base.join(".claude/hooks/stop-notify.sh");
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let status = hook_registrations(&store, &item).unwrap();
+        assert!(status.registered);
+        assert_eq!(status.executable, Some(false));
+
+        fs::remove_file(&script).unwrap();
+        assert_eq!(
+            hook_registrations(&store, &item).unwrap().executable,
+            Some(false),
+            "a registered hook whose file is gone cannot run either"
         );
     }
 

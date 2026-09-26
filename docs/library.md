@@ -407,7 +407,7 @@ group carrying a matcher and a list of commands:
 mesa task 1115 makes that wiring a first-class part of the library:
 `core::library::hook_registrations` (read), `register_hook` and
 `unregister_hook`, each answering the same `LibraryHookStatus`
-(`item_id`, `name`, `settings_path`, `command`, `registered`,
+(`item_id`, `name`, `settings_path`, `command`, `registered`, `executable`,
 `registrations[]`, `events[]`) so a caller reads the file's resulting state
 rather than assuming its request landed. `events` is
 `core::library::HOOK_EVENTS` carried on the wire, so an editor's event list
@@ -472,6 +472,17 @@ posture, for the same reason — a spawn there and a registration here may not
 depend on something the user has to run first, but after the first seed the
 file belongs to the sync flow, where a difference between disk and Naru is a
 row the user resolves.
+
+**A hook file must be executable** (mesa task 1400), because the command Naru
+registers is the file's bare path — a 0644 script fails every event with exit
+126, which Claude Code treats as non-blocking, so the hook silently never
+runs. Every write of a `hook` item's file therefore leaves it executable: the
+seed above, a sync's `mesa`-wins write (`apply_naru`), and an enable finding
+the file already on disk, which adds the execute bits in place (`chmod +x`)
+without touching its contents. `LibraryHookStatus.executable` reports it:
+`true`/`false` for whether the hook's own file exists and is executable
+while the hook is registered, `null` when it is not registered at all. An
+adoption keeps copying the original script's mode bits unchanged.
 
 **Disabling** removes every command matching this hook, then cleans up
 upward: a group whose command list empties is dropped, an event whose group

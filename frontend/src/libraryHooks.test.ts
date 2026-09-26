@@ -74,6 +74,7 @@ function status(registrations: LibraryHookRegistration[] = []): LibraryHookStatu
     settings_path: '/Users/me/.claude/settings.json',
     command: 'bash ~/.claude/hooks/stop-notify.sh',
     registered: registrations.length > 0,
+    executable: registrations.length > 0 ? true : null,
     registrations,
     events: EVENTS,
   }

@@ -2310,6 +2310,10 @@ pub struct LibraryHookStatus {
     pub command: String,
     /// Derived: true iff `registrations` is non-empty.
     pub registered: bool,
+    /// Derived (mesa task 1400): whether this hook's own file exists and is
+    /// executable — a bare-path registration of a 0644 file fails with exit
+    /// 126 on every event. Null when the hook is not registered.
+    pub executable: Option<bool>,
     pub registrations: Vec<LibraryHookRegistration>,
     /// `core::library::HOOK_EVENTS`, carried so the editor's event list is
     /// the same list the server validates against and cannot drift from it.

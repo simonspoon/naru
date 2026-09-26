@@ -24,7 +24,13 @@ command: string,
 /**
  * Derived: true iff `registrations` is non-empty.
  */
-registered: boolean, registrations: Array<LibraryHookRegistration>, 
+registered: boolean, 
+/**
+ * Derived (mesa task 1400): whether this hook's own file exists and is
+ * executable — a bare-path registration of a 0644 file fails with exit
+ * 126 on every event. Null when the hook is not registered.
+ */
+executable: boolean | null, registrations: Array<LibraryHookRegistration>, 
 /**
  * `core::library::HOOK_EVENTS`, carried so the editor's event list is
  * the same list the server validates against and cannot drift from it.

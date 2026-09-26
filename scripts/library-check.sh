@@ -1562,6 +1562,7 @@ run 0 "$MESA" library hook status gate-hook.sh
 [ "$(jqs .name)" = "gate-hook.sh" ] || fail "hook status: name"
 [ "$(jqs .registered)" = "false" ] || fail "hook status: a fresh hook is not registered"
 [ "$(jqs '.registrations | length')" = "0" ] || fail "hook status: no registrations yet"
+[ "$(jqs .executable)" = "null" ] || fail "hook status: executable is null while nothing is registered"
 [ "$(jqs .settings_path)" = "$HOME_REAL/.claude/settings.json" ] ||
   fail "hook status: settings_path follows the item's scope, got $(jqs .settings_path)"
 [ "$(jqs .command)" = "$HOME_REAL/.claude/hooks/gate-hook.sh" ] ||
@@ -1593,6 +1594,7 @@ run 0 "$MESA" library hook enable gate-hook.sh --event Stop
 [ -f "$HOOK_SCRIPT" ] || fail "hook enable: the hook's own script must be seeded to disk"
 [ "$(cat "$HOOK_SCRIPT")" = "echo hooked" ] || fail "hook enable: the seeded script is the item's body"
 [ -x "$HOOK_SCRIPT" ] || fail "hook enable: a hook is a script Claude Code runs; it must be executable"
+[ "$(jqs .executable)" = "true" ] || fail "hook enable: status reports the seeded script as executable"
 ok "CLI library hook enable: registers under one event AND seeds the hook's own executable script to disk"
 
 # Somebody else's settings and somebody else's hook are still there, and the
