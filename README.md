@@ -2,43 +2,177 @@
 
 # Naru
 
-**Local-first project & task management for humans and agents.**
+**A local-first workspace where you and your Claude Code agents plan the work, run it, and talk it through.**
 
-> Naru was formerly called mesa. Since mesa task 1301 the binary is `naru`,
-> with `mesa` still installed beside it as the same program; every
-> `MESA_<NAME>` variable is also read as `NARU_<NAME>` (the new spelling
-> first, the old one still honoured); and a fresh install keeps its data in
-> `naru` paths while an existing one keeps using its `mesa` paths. The crate,
-> the `mesa task N` references and most docs still say `mesa` until the later
-> rename phases.
+Naru is one binary and one SQLite file. Your agents drive it through a
+JSON-only CLI. You use a web UI, or just talk to it. Both work on the same
+store: projects, tasks and dependencies, diagrams, an inbox, memory, and your
+whole Claude Code setup. Naru can hand work to background agents, watch what
+they spend, and review how it went. It has no cloud service and no account,
+and Naru itself collects no telemetry. The Claude Code agents it starts talk
+to Anthropic as they always do.
 
-Naru is a single-binary task manager backed by one SQLite database, exposing two
-surfaces over the same store:
+> Naru was formerly called **mesa**. The binary is `naru`, and `mesa` is
+> still installed beside it as the same program. Every `NARU_*` environment
+> variable is also read under its old `MESA_*` name. An existing install
+> keeps its `mesa` data paths, and nothing is moved.
 
-- a **machine-first JSON CLI** — the primary surface for AI agents and scripts;
-  every command reads and writes structured JSON with load-bearing exit codes,
-- an **HTTP API + embedded React web UI** — for humans, served on `127.0.0.1`.
+## What it does
 
-There is no cloud, no account, and no daemon required for the CLI: each command
-opens the database directly. Your data is a file on your disk.
+### Plan and track work, for people and agents alike
 
-## Why Naru
+- **Projects and tasks** with statuses, priorities, tags, subtasks, a
+  definition of done and a final result. Projects nest into a tree and can
+  be archived. Statuses are
+  `backlog | todo | in_progress | done | cancelled`; priorities are
+  `low | medium | high`.
+- **Dependencies that can't lie.** `blocked` is computed on every read, never
+  stored. `naru task next` always returns the next actionable, unblocked task.
+- **Repo-aware.** A project binds to a git repo by its root commit, so an
+  agent in any clone or worktree runs `naru project resolve` and gets the
+  right project instead of creating a duplicate.
+- **Claims.** An agent claims a task with its session id, so a task that is
+  being worked can be told apart from one that was abandoned
+  ([`docs/claims.md`](docs/claims.md)).
+- **Bulk import.** Load a whole task graph in one atomic call.
+- **Archiving** hides a finished subtree without deleting it
+  ([`docs/archiving.md`](docs/archiving.md)).
 
-- **Agent-native.** The CLI emits JSON only (no human tables), with stable error
-  codes and exit codes, so an agent can drive it without parsing prose.
-- **One store, two surfaces.** The CLI and HTTP API share the same core logic
-  and the same database; they can never drift apart, and neither needs the other
-  to be running.
-- **Dependency-aware.** Tasks can block other tasks. The `blocked` flag is
-  *derived* on every read (never stored), and `mesa task next` deterministically
-  picks the next actionable, unblocked task.
-- **Recoverable by design.** Deletes cascade without a prompt (agents run
-  non-interactively), but every delete echoes the full removed records, and
-  `mesa backup` takes a safe snapshot under WAL.
-- **Repo-aware.** A project can bind a git repo by its root commit, so an agent
-  can map its working directory to the right project (`mesa project resolve`)
-  instead of spawning a duplicate — and the web UI shows the repo's live git
-  status, working-tree diffs, and running Claude Code sessions.
+### Let agents run the work
+
+Each of these is off by default. You turn them on with a `naru serve` flag.
+
+- **Todo watcher** (`--watch-todo`) starts a background Claude Code agent on
+  each project's next actionable task, with a per-project concurrency limit.
+  A reaper stops each session once its task is closed
+  ([`docs/todo-watcher.md`](docs/todo-watcher.md)).
+- **Inbox**: one global queue for the things that need a decision, either
+  change requests or alerts addressed to you. With `--watch-inbox`, an
+  `inbox-triage` agent turns each change request into a backlog task or
+  archives it with a reason. Items can also be read aloud
+  ([`docs/inbox.md`](docs/inbox.md),
+  [`docs/inbox-watcher.md`](docs/inbox-watcher.md)).
+- **Work receipts.** When a claimed task closes, Naru records a receipt: the
+  commits made during the claim, a diff summary, and a link to the session
+  transcript ([`docs/receipts.md`](docs/receipts.md)).
+- **Cost guard** (`--watch-cost`) catches a runaway session: one over its
+  dollar or token limit, stuck re-reading its cache, or repeating the same
+  command. By default it stops that session (you can resume it) and files an
+  inbox alert ([`docs/cost-guard.md`](docs/cost-guard.md)).
+- **Retrospective** (`--watch-retro`, or `naru retro run`) looks back over
+  finished sessions for friction such as denials, retry loops or a missing
+  skill. It files each new finding as a change request. It only proposes
+  changes and never makes them ([`docs/retro.md`](docs/retro.md)).
+- **Configurable spawns.** Every place Naru starts an agent reads a command
+  template from `~/.naru/config.json`, which you can edit on the Settings
+  page. Values are shell-quoted into the template, so a task name is never
+  run as code ([`docs/config.md`](docs/config.md)).
+- **Hooks** run your own shell command on `task-execute`, with the task JSON
+  on stdin ([`docs/hooks.md`](docs/hooks.md)).
+
+### Talk to it
+
+- **Naru live** is a spoken conversation with a dedicated Claude Code agent,
+  started from the web UI's header or with `naru live start`. You speak or
+  type, and the agent works with the ordinary Naru CLI and answers out loud.
+  It can move your browser to the page it is talking about and put a
+  **whiteboard** in front of you: markdown, HTML, an image, or a snapshot of
+  a diagram. You can draw on the whiteboard, and your drawing reaches the
+  agent. Long jobs go to delegate agents, so the agent keeps listening while
+  they run, and a long call can be handed to a fresh agent midway. On macOS,
+  `naru live look` lets the agent see your browser window
+  ([`docs/live.md`](docs/live.md)).
+- **Speech runs on your machine**, after a one-time model download. You can
+  use the **naru-audio** daemon, a separate companion project that downloads
+  its models once and then serves local speech-to-text and text-to-speech
+  over HTTP. Or you can use the older
+  engine, the `auris` and `kokoro-rs` binaries. If neither is installed, the
+  browser's own speech recognition or the typed box still works
+  ([`docs/listen.md`](docs/listen.md)).
+- **Voices.** With naru-audio you can pick a voice, clone one from a short
+  recording, or design one from a written description. A cloned voice
+  exports to a single `naru-voice` file that you can import on another
+  machine ([`docs/config.md`](docs/config.md)).
+
+### Think visually
+
+- **Diagrams** are freeform canvases of frames and edges, of four types:
+  **flowcharts**, **storyboards**, **ERDs** and **brainstorms**, each with its
+  own shapes. They include auto-layout and a change history showing who
+  edited what. Agents build them as JSON, and you drag them around in the
+  browser ([`docs/diagrams.md`](docs/diagrams.md)).
+
+### Remember
+
+- **Project notebooks.** Each project keeps its own memory: build quirks,
+  conventions, and the reasons behind decisions. A SessionStart hook prints
+  it into every new Claude Code session in that project. A "dream" pass
+  keeps it within its budget, and it can import Claude Code's own memory
+  folder ([`docs/project-memory.md`](docs/project-memory.md)).
+- **Live memory.** Conversations leave a summary and a notebook of what you
+  said outright. They also leave a searchable, append-only archive of every
+  turn ([`docs/live.md`](docs/live.md)).
+
+### Keep your Claude Code setup in one place
+
+- **Library**: agent definitions, skills, hooks, prompts and `CLAUDE.md`
+  files, kept as versioned records and synced file by file with `.claude/`.
+  You pick the winner of any conflict, and nothing is merged behind your
+  back. Hooks can be registered in `settings.json` from here, and the whole
+  library exports to a bundle ([`docs/library.md`](docs/library.md)).
+- **Scripts**: your own shell snippets with declared, typed arguments. The
+  web form is generated from those arguments, and a run can be detached and
+  replayed later. Argument values are never spliced into the script text
+  ([`docs/scripts.md`](docs/scripts.md)).
+- **Artifacts**: HTML mockups, SVGs and markdown reports written by agents,
+  rendered in a sandbox ([`docs/artifacts.md`](docs/artifacts.md)).
+  **Attachments**: files and screenshots on a task
+  ([`docs/attachments.md`](docs/attachments.md)).
+
+### See what your agents are doing
+
+- **Claude Code telemetry.** `naru cc` and the CC Dashboard read Claude
+  Code's own transcripts. They show tokens, estimated cost, models, skills,
+  agents, tools and errors, and each session drills down into its full call
+  tree. The history is kept in Naru's database, so it outlives Claude Code's
+  own cleanup. The dashboard also shows your live plan-limit usage
+  ([`docs/cc-dashboard.md`](docs/cc-dashboard.md)).
+- **Agents sidebar**: every live Claude Code session across your projects,
+  with terminals attached to them. Each session's subagents and shell calls
+  are shown too. You can start a new background agent in any project
+  ([`docs/agents.md`](docs/agents.md)).
+- **System monitor**: RAM, CPU, disk, GPU and uptime for the host
+  ([`docs/system.md`](docs/system.md)).
+
+### A web UI that fits the work
+
+Each project has a kanban **Board** and these tabs:
+
+- **Files**: a browser, an editor and project-wide search
+  ([`docs/files-tab.md`](docs/files-tab.md)).
+- **Git**: the working tree, diffs and history, read-only
+  ([`docs/git-tab.md`](docs/git-tab.md)).
+- **Terminal**: real shells in the project folder
+  ([`docs/terminal.md`](docs/terminal.md)).
+- **Custom**: your own split-pane layout of the other tabs
+  ([`docs/project-panes.md`](docs/project-panes.md)).
+
+Each project name also shows the app version read from that project's
+manifest ([`docs/project-version.md`](docs/project-version.md)).
+
+Global keyboard shortcuts can be rebound, and you can move around with
+`hjkl` ([`docs/keyboard.md`](docs/keyboard.md)). The layout adapts to phone
+widths ([`docs/mobile.md`](docs/mobile.md)). A separate native iPhone
+companion app, **naru-ios**, connects to a `naru serve --lan` server. It
+covers the task board, inbox, live conversations, files, git, artifacts and
+memory.
+
+### Move to a new machine
+
+`naru migrate` packs the database, the config and your hand-built `~/.claude`
+into one archive. On the new machine it restores them and rewrites absolute
+paths for a new username or a new repo location
+([`docs/migrate.md`](docs/migrate.md)).
 
 ## Install
 
@@ -48,8 +182,8 @@ brew install simonspoon/tap/naru
 
 ### Build from source
 
-Naru is a Rust binary with an embedded frontend. Building a release binary
-requires Rust (edition 2024), Node.js, and npm.
+Naru is a Rust binary with an embedded React frontend. You need Rust
+(edition 2024), Node.js and npm.
 
 ```bash
 git clone https://github.com/simonspoon/naru.git
@@ -58,489 +192,229 @@ scripts/build.sh          # tests, builds the frontend, embeds it, compiles
 ./target/release/naru --help
 ```
 
-`scripts/build.sh` is the only supported release build: it runs `cargo test`
-(which re-exports the TypeScript types), fails if `frontend/src/types/` is dirty,
-runs the frontend unit tests, builds the frontend into `frontend/dist`, then
-compiles the binary with the frontend embedded. Output: `target/release/naru`
-(and `target/release/mesa`, the same program under its old name).
+`scripts/build.sh` is the only supported release build. It runs these steps
+in order:
 
-`scripts/install.sh` runs the same build and copies `naru` onto your PATH, with
-`mesa` as a symlink to it (default `~/.local/bin`; override with
-`PREFIX=/usr/local`).
+1. `cargo test`, which also re-exports the TypeScript types.
+2. A check that fails the build if `frontend/src/types/` has uncommitted
+   changes.
+3. The frontend unit tests.
+4. The frontend build.
+5. The compile, with the frontend embedded.
 
-## Data location
+It produces `target/release/naru` and `target/release/mesa`, which is the
+same program. `scripts/install.sh` runs the same build, copies `naru` onto
+your PATH and adds `mesa` as a symlink to it. The default location is
+`~/.local/bin`; override it with `PREFIX=/usr/local`.
 
-The database defaults to:
-
-```
-~/Library/Application Support/naru/naru.db
-```
-
-An install from before the rename keeps using
-`~/Library/Application Support/mesa/mesa.db` for as long as no `naru.db`
-exists — nothing is moved or copied. The config directory follows the same
-rule: `~/.naru` if it exists, else `~/.mesa` if it exists, else `~/.naru`.
-
-Override the path with the `NARU_DB` environment variable (`MESA_DB` is still
-honoured; every `MESA_*` variable is read as `NARU_*` first) — used throughout
-the tests and checks for isolation, and useful for pointing at a throwaway
-database:
+## Quick start
 
 ```bash
-MESA_DB=/tmp/test.db mesa task list
+# A project and a task in it (a project is named by id or by name)
+naru project create "Website redesign" --description "Q3 marketing site"
+naru task create "Website redesign" "Draft homepage copy" --tags writing,web
+
+# Open, unblocked tasks
+naru task list "Website redesign" --status todo --unblocked
+
+# Task 2 is blocked by task 1, and "why is it blocked?"
+naru task block 2 --by 1
+naru task deps 2
+
+# The next actionable task (todo + unblocked, in a fixed order)
+naru task next "Website redesign"
+
+# Claim it before working it. --owner is opaque; an agent passes its session id.
+naru task claim 1 --owner 5b043350
+naru task release 1
+
+# Leave a note for the next agent that works in this project
+naru memory add --project "Website redesign" Run the linter before pushing.
+
+# Snapshot the database (safe while the server runs)
+naru backup /tmp/naru-snap.db
+
+# The web UI and HTTP API on http://127.0.0.1:7770
+naru serve
 ```
-
-## Moving to a new computer
-
-`mesa migrate` moves the database, `~/.mesa/config.json` and your Claude Code
-setup (`~/.claude` agents, hooks, skills, commands, settings, `CLAUDE.md` and
-per-project memories) in one archive, rewriting absolute paths for a new
-username or repo location:
-
-```bash
-# old machine
-mesa migrate check                     # what would move, and every hard-coded path
-mesa migrate export ~/move.tar.gz      # add --with-sessions for transcripts too
-
-# new machine (copy the archive over first)
-mesa migrate import ~/move.tar.gz      # old home → this $HOME
-mesa migrate import ~/move.tar.gz --repo-root ~/code   # repos live elsewhere now
-```
-
-Import refuses (`conflict`, nothing written) if a database or differing file
-is already there, unless `--force`, and ends with a `todo` list: clone each
-project's repo to its mapped path, install the mesa/qorvex/khora/loki
-binaries, log in to Claude Code, re-enable plugins. Details in
-[`docs/migrate.md`](docs/migrate.md).
-
-## CLI quick start
-
-Every command prints JSON to stdout. By default mutations and `show` print the
-full object; `list` prints a bare JSON array; `delete` prints the full deleted
-record(s). Pass `--quiet` to get the compact projection instead — the record
-minus its unbounded free-text fields, the same bounded shape `list` already
-emits — when you are driving Naru in a loop and only need the ids and status
-back.
-
-```bash
-# Create a project and a task in it (project by id or name; positional or --project/--description)
-mesa project create "Website redesign" --description "Q3 marketing site"
-mesa task create "Website redesign" "Draft homepage copy" --tags writing,web
-
-# Query: open, unblocked tasks in project 1
-mesa task list --project 1 --status todo --unblocked
-
-# List the child stories of an umbrella task (same filters as GET /api/tasks?parent=42)
-mesa task list --parent 42
-
-# Claim a task before working it, so other agents can tell live from abandoned
-# (--owner is opaque; an agent passes its own session id). Re-claiming with the
-# same owner renews the lease; another owner is rejected unless --force.
-mesa task claim 3 --owner 5b043350
-mesa task release 3          # drop a claim without changing status
-
-# Express a dependency: task 3 is blocked by task 1
-mesa task block 3 --by 1
-
-# Ask why task 3 is blocked: its blockers, and the tasks it blocks
-mesa task deps 3
-
-# Ask for the next actionable task (todo + unblocked, deterministic order)
-mesa task next --project 1
-
-# Snapshot the database (safe while the server is running)
-mesa backup /tmp/mesa-snap.db
-```
-
-### Output & error contract
-
-- **stdout is JSON only.** No human/table mode. `list` omits `description`
-  (its first 50 chars survive as the derived `name`);
-  mutations and `show` print the full object **by default**, always including
-  the derived `blocked` boolean. `get` is an alias for every `show`.
-- **`--quiet` prints the compact projection instead.** Opt-in, long form only
-  (no `-q`, no env var, no config key, never on by default), and accepted on
-  every mutation and `show`/`get`/`status` in `project`, `task`, `diagram`
-  (plus `frame` and `edge`), `inbox` and `live`. The quiet shape is the record minus its
-  unbounded free-text fields — for a task that is exactly the `task list`
-  shape (it drops `description`, `result` and `created_at`, and keeps
-  `artifact`, so a `--quiet` close-out echoes the SHA you just stored); for a
-  project or diagram it drops `description`, for a frame or
-  inbox item `body`, for a live turn its spoken `text`; an edge and a live
-  session have no such field, so their output is unchanged.
-  Composite payloads (`project delete`, `task delete`/`import`, `diagram
-  show`/`delete`, `frame delete`, `inbox assign`) keep their key structure and
-  compact their members. Any quiet payload that actually drops a key is rebuilt
-  as a JSON object, so its keys come out alphabetical rather than in declaration
-  order — single records as much as composites; an edge, having nothing to drop,
-  passes through unchanged. The key set and the values are the same either way;
-  compare quiet output with `jq`, not byte-for-byte. The flag changes stdout
-  only — exit codes, the JSON
-  error payloads on stderr, and every stored side effect are identical with
-  and without it, and default output is byte-identical to before the flag
-  existed. `mesa task update <id> --quiet` with no field flag is still a usage
-  error, exit 2, with empty stdout: `--quiet` sits outside the required field
-  group, so a loop caller fails loudly instead of silently no-opping.
-- **`--quiet` on a `delete` is an explicit opt-out of the safety floor.**
-  Deletes cascade with no confirmation and no `--force`; the full-record echo
-  *is* Naru's recovery transcript, standing in for the prompt that isn't
-  there. `--quiet` waives it for that call — allowed because the caller asked
-  for it, never a default. Want a net → `mesa backup <path>` first.
-- **Errors are JSON on stderr:**
-  ```json
-  {"error": {"code": "not_found|validation|cycle|conflict|usage|unavailable", "message": "..."}}
-  ```
-  (`unavailable` is scoped to the surfaces that depend on something outside
-  Naru: live subscription usage, the agents endpoints, and `cc text` — the
-  transcript file a node's body lives in may have been deleted.)
-- **Exit codes are load-bearing:** `0` success, `1` domain/runtime error,
-  `2` usage error.
-- **Projects by name.** Every `--project` argument (and `inbox assign`) accepts
-  a project id or a case-insensitive project name.
-- **Long text from a file.** On `task create`/`update`, `--description-file
-  <path>` and `--acceptance-file <path>` (and, `update`-only, `--result-file
-  <path>`) read the field from a file (`-` =
-  stdin) instead of an inline arg, so multi-line text with shell metacharacters (backticks, `$()`,
-  `<>`) round-trips verbatim. Each conflicts with its inline flag; only one
-  field may read `-` per call.
-- **Append instead of replace.** `task update --append` flips the three
-  free-text bodies (`description`, `acceptance`, `result`) from replacing to
-  appending, separated from the stored text by a blank line — so a batch of
-  tasks can be annotated without reading each body back first. It composes
-  with the `--*-file` forms, applies to no other field, and rejects both an
-  empty value and a call passing no body (usage, exit 2). `PATCH
-  /api/tasks/{id}` is deliberately replace-only.
-
-Run `mesa <command> --help` for the full, self-documenting reference.
 
 ### Bulk import
 
-Create a whole task graph atomically from a JSON document on stdin. Tasks
-reference each other by a client-supplied `ref` that is resolved to real ids
-during import, so dependencies need not know ids in advance:
+This creates a whole task graph in one transaction. Tasks refer to each other
+by a `ref` you choose, so dependencies don't need ids in advance:
 
 ```bash
 echo '{"project":1,"tasks":[
   {"ref":"a","description":"design"},
   {"ref":"b","description":"build","blocked_by":["a"]}
-]}' | mesa task import
+]}' | naru task import
 ```
 
-On any error nothing is created. An empty or whitespace-only `description` is
-rejected just as it is by `task create` — a description is the task's identity.
+If anything fails, nothing is created.
 
-## Web UI & HTTP API
+### A diagram from the CLI
 
 ```bash
-mesa serve --port 7770     # HTTP API + web UI on http://127.0.0.1:7770
-mesa serve --lan           # opt-in: bind 0.0.0.0 and serve other LAN devices
-mesa serve --watch-todo    # opt-in: auto-dispatch agents onto actionable todos
-mesa serve --watch-inbox   # opt-in: auto-triage the global inbox
-mesa serve --watch-retro   # opt-in: a session retrospective every three days, filed into the inbox
+D=$(naru diagram create 1 "Onboarding flow" --author agent-7 | jq .id)
+A=$(naru diagram frame create "$D" "Land on home" --x 40 --y 40 --author agent-7 | jq .id)
+B=$(naru diagram frame create "$D" "Sign up" --x 360 --y 40 --author agent-7 | jq .id)
+naru diagram edge create "$D" "$A" "$B" --label "then" --author agent-7
+naru diagram show "$D"      # {diagram, frames, edges}
+naru diagram events "$D"    # who changed what, when
+naru diagram types          # the shapes each diagram type accepts
 ```
 
-The server exposes a REST API under `/api` (`/api/projects`, `/api/tasks`, plus
-`block`/`unblock`/`dependencies`/`dependents` actions, `/api/diagrams` with its
-`frames`/`edges`/`events`, `/api/inbox`, `/api/scripts`, `/api/cc`,
-`/api/config`, `/api/live`, and per-project `git`/`files`/`agents` endpoints),
-with the React
-web UI served at `/`. Beside a project's board sit its **Files**, **Git** and
-**Terminal** tabs; **Scripts**, the **Agents** sidebar, the **CC Dashboard**,
-a global **Terminal**, **Live** and **Settings** live above projects. The web
-UI does not live-sync; it refetches on window focus.
-
-**Security boundary** (there is no auth — it is a local tool):
-
-- A **Host-header allowlist** rejects requests whose `Host` is not
-  `localhost:<port>` / `127.0.0.1:<port>` (defends against DNS rebinding).
-  Skipped under `--lan` — an explicit "trust every device on the LAN" posture.
-- A **Content-Type gate** requires `application/json` on mutating methods
-  (defends against cross-site form posts). Enforced in both modes.
-- The **agents/hooks routes** (terminal access and hook execution — code
-  execution, not just data) carry stricter peer/Host/Origin checks in both
-  modes.
-
-## Data model
-
-- **Project** — a named container. A task's project is fixed at creation. May
-  bind a git repo by its **root commit** (stable identity across clones and
-  worktrees, unique per project) and record a **local path** (the last-known
-  working folder on this machine, which anchors the git and agents views).
-- **Task** — belongs to exactly one project; has a status
-  (`backlog | todo | in_progress | done | cancelled`), a priority (`low | medium | high`),
-  tags, an optional `acceptance` (definition-of-done), `artifact` (work
-  receipt), and `result` (free-text final summary written when the work is
-  done), and may be a subtask of another task in the same project. The three
-  free-text fields are writable from every surface — `task update`, `PATCH
-  /api/tasks/<id>`, and the web UI's task detail, which renders `description`,
-  `acceptance` and `result` as markdown.
-- **Claim** — an optional `owner` + `claimed_at` pair on a task, taken with
-  `mesa task claim <id> --owner <who>` and dropped with `mesa task release
-  <id>`. It answers the question `updated_at` cannot: is this `in_progress`
-  task actually held, or was it abandoned mid-run? `updated_at` moves on any
-  field write, so a stale row reads identically to a live one; `claimed_at`
-  moves *only* on claim/renew, and `owner` is an identifier the reader can
-  check liveness of out-of-band (an agent passes its Claude Code session id,
-  so `ps aux | grep "claude attach <owner>"` settles it). Claiming a task
-  another owner holds `in_progress` is a `conflict` — the guard against two
-  agents in one repo — which `--force` breaks. The claim is dropped
-  automatically when the task leaves `in_progress`. The web UI surfaces it as
-  well: the task detail panel shows a `claimed by <owner>` line with the
-  claim's age (hover for the absolute time), and a claimed card on the Board
-  carries a `held <owner>` marker.
-- **Dependency** — a "blocked-by" edge between tasks. Self-edges and cycles are
-  rejected. `blocked` is true while any blocker is not `done`/`cancelled`, and is
-  derived on every read.
-- **Task event** — an append-only log of status changes (`mesa task events`).
-- **Diagram** — a freeform visual canvas belonging to a project: **frames**
-  (cards at an `x/y` position, optionally linking a task in the same project)
-  joined by directed **edges** (arrows, with optional labels). Cycles between
-  frames are allowed (it is a picture, not a dependency graph). Every change is
-  recorded in a **change history** that attributes who did what, when — so
-  agents and people building the same board over time can see each other's
-  edits. The web renders the graph as a draggable canvas; agents read and write
-  it as JSON.
-- **Inbox item** — the queue of things that need a *decision* and have no home
-  yet: a `change-request` (an agent, a retrospective or a supervisor asking for
-  work in some project) or an alert addressed to a person (`task-summary`, the
-  cost guard's kind — never a task's close-out summary, whose record is the
-  task's own `result`). One shared, global inbox that lives *above* projects.
-  Every item names the task it came from (`mesa inbox add --task <id> --kind
-  change-request …`), and the reader's first line is that task's project and
-  name, derived on every read. A person triages it: `mesa inbox assign <id>
-  <project>` converts the item into a `backlog` task in that project (one
-  transaction — the item never vanishes without a task to show for it), or
-  `mesa inbox archive <id> --reason "<why>"` sets it aside with the verdict
-  kept beside it. `mesa inbox {add,list,show,assign,read,archive,delete}`.
-  `mesa serve --watch-inbox` triages the change requests for you, spawning the
-  `inbox-triage` agent per pending item; off by default.
-- **Attachment** — an arbitrary file (screenshot, PDF, notes) hung off one
-  task. The bytes live *outside* the database, in Naru's own data directory,
-  with a 25 MiB per-file cap; deleting the task (or an ancestor of it) removes
-  the rows and unlinks the files. `mesa attachment {add,list,show,fetch,delete}`;
-  in the web UI a task's detail panel uploads and previews them, and the
-  new-task form also takes a pasted clipboard image. See `docs/attachments.md`.
-- **Script** — a piece of shell *you* write and keep in Naru, together with an
-  explicitly declared argument list (`text | number | bool | choice`) that the
-  web form is generated from. Arguments are declared, never parsed out of the
-  body: `bash -c` receives the body verbatim and the values positionally *and*
-  as `NARU_ARG_<NAME>` (and `MESA_ARG_<NAME>`, the same value under its old
-  name), so no value is ever interpolated into a string a shell
-  parses. A nonzero exit is data, not a failure; runs are never persisted; the
-  working directory comes from the script's optional project binding (deleting
-  that project un-binds the script rather than destroying it).
-  `mesa script {create,list,show,update,delete,run}`, plus a global **Scripts**
-  page. See `docs/scripts.md`.
-
-## Diagrams
+### Nested projects and repos
 
 ```bash
-# Create a board, add two frames, connect them — all stamped with an author
-SB=$(mesa diagram create 1 "Onboarding flow" --author agent-7 | jq .id)
-A=$(mesa diagram frame create "$SB" "Land on home" --x 40 --y 40 --author agent-7 | jq .id)
-B=$(mesa diagram frame create "$SB" "Sign up" --x 360 --y 40 --task 3 --author agent-7 | jq .id)
-mesa diagram edge create "$SB" "$A" "$B" --label "then" --author agent-7
-
-# Read the whole board in one call: {diagram, frames, edges}
-mesa diagram show "$SB"
-
-# See who changed what, when (the collaboration log)
-mesa diagram events "$SB"
+naru project create "Platform" --no-git
+naru project create "API v2" --parent "Platform" --no-git
+naru project resolve        # inside a repo: the project bound to it
 ```
 
-Frames carry free-text bodies (markdown by convention) and a colour; edges may
-form cycles. `mesa diagram delete` cascades the board's frames, edges, and
-history, echoing the full destroyed contents. The web UI (under a project's
-**diagrams →** link) lets a person add and drag frames, draw and delete
-connections, edit a frame, and view the history — building the same board an
-agent drives from the CLI.
+`project create` binds the current directory's repo, or the repo at
+`--path <dir>`, unless you pass `--no-git`. A project also remembers its
+`local_path`, the folder that the Git, Files, Terminal and Agents views open.
+Nesting only groups projects. A child keeps its own tasks and board. Deleting
+a project deletes its whole subtree, and archiving one hides the subtree too.
 
-## Projects & git repos
+## The CLI contract
 
-Projects nest: a project may name another as its **parent**, and the web UI's
-left nav renders the result as a collapsible tree.
+The CLI is built to be driven by agents. It talks to SQLite directly and
+never needs the server to be running.
 
-```bash
-mesa project create "API v2" --parent "Platform"   # id or name
-mesa project update "API v2" --parent ""           # back to top level
-```
-
-Nesting is grouping only — a child keeps its own tasks, diagrams, repo
-binding and board; nothing rolls up onto the parent. What it *does* change is
-two whole-tree behaviours: archiving a project hides its descendants from
-unscoped reads too (their own `archived` flag is untouched), and deleting one
-destroys its whole subtree, echoing every destroyed project and task.
-
-`project create` auto-binds the current directory's repo (or `--path <dir>`'s)
-to the new project via its root-commit hash; a commit binds to at most one
-project. Later, from any clone or worktree of that source:
-
-```bash
-mesa project resolve          # -> the project bound to this repo
-```
-
-so an agent dropped into a working directory finds the right project instead of
-creating a duplicate. (`--no-git` skips binding; `project update --root-commit
-""` clears it.) The project also remembers its `local_path` — the last-known
-working folder — which powers the web UI's git status, the per-project **Git**
-tab (working-tree file list + per-file diff plus history, read-only), the
-per-project **Files** tab (a file browser and an editor with a line-number
-gutter, find-in-file, project-wide search, IDE editing keys and dirty-tab
-guards), the per-project
-**Terminal** tab (real shells opened in that folder), and project labels and
-start locations in the global Agents sidebar.
-
-## Agents, hooks & the CC Dashboard
-
-- **Agents sidebar** (web UI): lists Claude Code sessions across projects,
-  starts new background ones in a selected project's `local_path`, and embeds
-  terminals attached to running sessions (a WebSocket bridge onto `claude
-  attach`, so it works from remote machines under `--lan`). There is
-  deliberately no `mesa agent` CLI — an agent in a terminal uses `claude`
-  directly.
-- **Todo watcher** (`mesa serve --watch-todo`, off by default): periodically
-  asks every unarchived project with a live `local_path` for its next
-  actionable task and starts a background agent on it, flipping the task to
-  `in_progress` before spawning. How many may run at once per project is
-  configurable (`watchers.todo-concurrency`, default 1) and re-read every tick;
-  a project counts as busy by its `in_progress` *leaves* and its sessions doing
-  live work, so an umbrella task parks nothing — it narrows the tick to its own
-  descendants. See `docs/todo-watcher.md`.
-- **Retrospective** (`mesa serve --watch-retro`, off by default; `mesa retro
-  run` on demand): every `watchers.retro-interval-hours` (default 72) starts
-  the `naru-retro` agent, which reviews the task sessions finished since the
-  last run for friction — denials, retry loops, a missing skill, a tool that
-  keeps failing — and files each *new* finding into the inbox as a change
-  request for the inbox-watcher to triage. It proposes and never edits; a
-  finding log in the db (`mesa retro finding …`) keyed by fingerprint means a
-  repeat bumps a count and adds evidence instead of filing twice. See
-  `docs/retro.md`.
-- **Naru live** (`mesa live`, the **Live** page in the web UI): a spoken
-  conversation with an agent. The microphone opens on its own once you join,
-  a dedicated Claude Code session does the work with the ordinary Naru CLI,
-  and every reply is read back to you by `kokoro-rs` — the same synthesis the
-  Inbox's play button uses. The agent runs the loop itself (`mesa live
-  listen` → work → `mesa live say`, plus `mesa live navigate` to move your
-  browser), pulling turns out of the database rather than being pushed at,
-  because the CLI never talks to the server. One conversation at a time. What
-  the agent is told to do is the config file's `live.prompt`, editable on the
-  **Settings** page: blank is the block Naru ships, and anything you write
-  there replaces it. Listening prefers `auris`, an optional external
-  speech-to-text binary — install it and Naru hears your own vocabulary and
-  real punctuation; without it, listening falls back to the browser's own
-  recognizer where one exists, and to your own system dictation typed into
-  the box where neither does. Either way the decode stays local: Naru runs
-  no speech-to-text of its own, and nothing you say is kept once it becomes
-  text. See `docs/live.md`, and `docs/listen.md` for the `auris` route's own
-  contract.
-- **Configurable spawn commands**: the four places Naru starts an agent — the
-  todo-watcher's dispatch, the inbox-watcher's triage, the sidebar's *add
-  agent*, and a live conversation — each read a command template from
-  `~/.mesa/config.json`
-  (`commands.todo-watcher`, `.inbox-watcher`, `.agent-spawn`, `.live-agent`),
-  so you can
-  change the binary, its flags, the persona or the slash command without
-  rebuilding. Placeholders `{id}`, `{name}`, `{prompt}`; the program and the
-  agent are spelled out literally. Templates are argv, not shell: no config file means the built-in
-  `claude --bg --agent supervisor …` command, unchanged (the live conversation's own
-  default names its agent `naru-live`, the definition it runs as). A multi-line value opts that
-  one command into a `bash -c` script instead, whose values arrive as `MESA_*`
-  environment variables rather than being substituted into the body — either
-  way, no Naru data is ever spliced into a string a shell parses. The same file
-  holds two other independent sections: `pricing` (per-model-family rates for
-  the CC Dashboard's cost estimates, longest prefix wins) and `watchers`
-  (the todo watcher's per-project concurrency and the retrospective's
-  cadence). All three are editable from the
-  web UI's **Settings** page (pinned to the bottom of the left nav) or by hand,
-  and each section's save preserves the other two. See `docs/config.md`.
-- **Hooks**: bind shell commands to named hook points in a `hooks.json` beside
-  the database. One point so far — `task-execute`, fired by `mesa task execute
-  <id>` or `POST /api/tasks/{id}/execute`, with the full task JSON on stdin and
-  the project's `local_path` as cwd. The hook's exit code and output come back
-  as data.
-- **Claude Code plugins**: Naru hosts plugins of its own under `plugins/`,
-  listed by relative path in the marketplace manifest at
-  `.claude-plugin/marketplace.json`. Add the repo as a marketplace once, then
-  install from it:
-
-  ```bash
-  claude plugin marketplace add /path/to/mesa
-  claude plugin install codesearch@mesa
+- **stdout is JSON only.** There is no table mode.
+  - Mutations and `show` print the full object. `get` is an alias for every
+    `show`.
+  - `list` prints a bare array of compact objects.
+  - `delete` echoes every record it destroyed.
+  - Every task carries the derived `blocked` boolean and `name`, which is
+    the first line of its description, cut to 50 characters.
+- **`--quiet`** prints the compact projection instead: the record without
+  its unbounded free-text fields. It is long form only and never on by
+  default. Composite payloads keep their key structure and compact their
+  members. The flag changes stdout only; exit codes, stderr and stored data
+  are identical with and without it. Its keys may come out in a different
+  order, so compare output with `jq`, not byte for byte. `naru --help` lists
+  where it is accepted.
+- **Deletes cascade with no prompt and no `--force`**, because agents run
+  non-interactively. The full echo is the recovery transcript, and
+  `naru backup` is the safety net. `--quiet` on a `delete` explicitly waives
+  the echo.
+- **Errors are JSON on stderr:**
+  ```json
+  {"error": {"code": "not_found|validation|cycle|conflict|usage|unavailable", "message": "..."}}
   ```
+  `unavailable` only comes from surfaces that depend on something outside
+  Naru, such as `claude`, the speech engines, `loki`, or a transcript that has
+  since been deleted.
+- **Exit codes:** `0` success, `1` domain or runtime error, `2` usage error.
+- **Projects by id or name** in every project argument. Names match
+  case-insensitively.
+- **Long text from a file.** On `task create` and `task update`, the
+  `--description-file`, `--acceptance-file` and `--result-file` flags (the
+  last on `update` only) read the text from a file, or from stdin with `-`.
+  Multi-line text with backticks or `$()` arrives verbatim.
+  `task update --append` appends to a text field instead of replacing it.
 
-  There is one so far — `codesearch`, which registers a `codesearch`
-  tool that drives the external `helios` index (symbols, deps, flow) instead of
-  grepping. Installing copies the plugin into `~/.claude/plugins/cache` keyed by
-  its version, so an edit here reaches a session only after a `version` bump in
-  its `.claude-plugin/plugin.json` and a `claude plugin update`; to develop
-  against the working tree instead, run `claude --plugin-dir
-  plugins/codesearch`, which reads the folder live. Symlinking the
-  plugin folder into `~/.claude/skills/` does the same thing always-on —
-  Claude Code loads it as `codesearch@skills-dir` from the working
-  tree, so an edit needs no version bump — but an installed plugin of the same
-  name takes precedence, and disabling it does not free the name, so uninstall
-  it first.
-- **CC Dashboard** (`mesa cc`, sidebar entry in the web UI): analytics over
-  Claude Code's own session transcripts — tokens, estimated cost, and
-  model/skill/agent/project/tool breakdowns — plus live subscription-limit
-  usage (`mesa cc usage`, the one outbound network call in Naru). Transcripts
-  are ingested into the Naru database (`mesa cc sync`, also run automatically
-  before every dashboard read), so your usage history survives Claude Code
-  cleaning up old transcripts.
+Run `naru <command> --help` for the full reference. Each command documents
+itself, with examples.
+
+## Data location
+
+The database defaults to `~/Library/Application Support/naru/naru.db`. An
+install from before the rename keeps using
+`~/Library/Application Support/mesa/mesa.db` for as long as no `naru.db`
+exists. The config directory follows the same rule: `~/.naru` if it exists,
+else `~/.mesa` if it exists, else `~/.naru`.
+
+Set `NARU_DB` to point Naru at another database. `MESA_DB` is still
+honoured, but `NARU_DB` is read first.
+
+```bash
+NARU_DB=/tmp/test.db naru task list
+```
+
+## Web UI, HTTP API and security
+
+```bash
+naru serve --port 7770     # API + web UI on http://127.0.0.1:7770 (default port)
+naru serve --lan           # bind 0.0.0.0 so other devices on your network can connect
+naru serve --lan --allow-host naru.local   # also accept that hostname
+naru serve --watch-todo --watch-inbox --watch-cost --watch-retro   # the watchers, each opt-in
+```
+
+The REST API lives under `/api`, and the web UI is served at `/`. The web UI
+does not live-sync; it refetches when the window regains focus. There is no
+authentication, because this is a local tool. These are the protections:
+
+- **Host-header allowlist** (against DNS rebinding). By default Naru only
+  accepts `localhost:<port>` and `127.0.0.1:<port>`. `--lan` skips this check,
+  which means you have chosen to trust every device on your network.
+- **Content-Type gate** (against cross-site form posts). Mutating requests
+  must send `application/json`. This applies in both modes.
+- **Code-execution routes** (terminals, agents, scripts, the library,
+  settings) have stricter peer, Host and Origin checks. Under `--lan` they
+  still refuse DNS-rebound and cross-site requests.
+
+**`--lan` gives every device on your network full access to your data and a
+shell on your machine.** Only use it on networks you trust.
+
+## Claude Code plugins
+
+This repo is also a Claude Code plugin marketplace
+(`.claude-plugin/marketplace.json`). Its one plugin, `codesearch`, adds a tool
+that queries the external `helios` code index instead of grepping:
+
+```bash
+claude plugin marketplace add /path/to/naru
+claude plugin install codesearch@mesa
+```
+
+The marketplace is still named `mesa`, from before the rename, so the plugin
+installs as `codesearch@mesa`.
+
+Installed plugins are cached by version. After editing the plugin, bump
+`version` in its `.claude-plugin/plugin.json` and run `claude plugin update`.
+To develop against the working tree instead, use
+`claude --plugin-dir plugins/codesearch`.
 
 ## Development
 
 ```bash
-cargo test                  # Rust tests; store logic lives in src/core/store.rs
-cargo test <name>           # single test by name substring
+cargo test                                  # Rust tests
 cargo clippy --all-targets -- -D warnings   # CI-gated
 cargo fmt --check                           # CI-gated
 
-scripts/cli-check.sh        # CLI JSON-contract end-to-end gate
-scripts/api-check.sh        # HTTP task-route contract + the security boundary, over a live server
-scripts/diagram-check.sh    # diagram/frame/edge CLI contract gate
-scripts/concurrent-check.sh # 20 interleaved CLI + API writes against one db
-scripts/attachments-check.sh    # attachment contract over CLI + API, including cascade-delete
-scripts/files-check.sh      # Files-tab reads, the image allowlist, search, both write gates
-scripts/agents-check.sh     # agents-surface contract against a stub `claude`
-scripts/hooks-check.sh      # task-execute hook contract over CLI + API
-scripts/todo-watcher-check.sh   # `serve --watch-todo` dispatch loop against a stub `claude`
-scripts/inbox-watcher-check.sh  # `serve --watch-inbox` triage loop against a stub `claude`
-scripts/retro-check.sh      # `mesa retro` + `serve --watch-retro` retrospective against a stub `claude`
-scripts/config-check.sh     # the configurable spawn commands in ~/.mesa/config.json
-scripts/live-check.sh       # `mesa live` conversation loop over CLI + API
-scripts/cc-check.sh         # `mesa cc` ingest + dashboard contract against synthetic transcripts
-scripts/scripts-check.sh    # user-authored script contract over CLI + API, incl. the injection + gate proofs
-
-# Frontend (Vite dev server proxies /api -> 127.0.0.1:7770; needs `mesa serve`)
-npm --prefix frontend run dev
-npm --prefix frontend run build
+npm --prefix frontend run dev    # Vite; proxies /api to 127.0.0.1:7770 (needs `naru serve`)
 npm --prefix frontend run lint
-npm --prefix frontend run test  # vitest over the pure logic modules
+npm --prefix frontend run test   # vitest over the pure logic modules
 ```
 
-### Architecture
+The end-to-end gates are `scripts/*-check.sh`. Each one runs against a
+throwaway database. Examples are `cli-check`, `api-check`, `live-check` and
+`library-check`. [`CLAUDE.md`](CLAUDE.md) lists every gate and what it
+covers.
 
-- **One crate, three modules:** `core` (domain + storage), `cli`, `api`.
-  Deliberately not a workspace — this is a single-user tool.
-- **All DB writes go through `Store`** (`src/core/store.rs`), the single
-  insertion point. The CLI talks to SQLite directly; the API is a thin layer with
-  no business logic. Both share `core` and never diverge.
-- **Migrations** are a `user_version`-indexed array of SQL strings, run on
-  `Store` open. Append one to add a migration; never edit a shipped one.
-- **TypeScript types are generated from Rust** via ts-rs — edit the Rust type in
-  `src/core/types.rs`, re-run `cargo test`, commit the regenerated `.ts` files.
-- **The frontend is embedded at compile time** (rust-embed) and served with SPA
-  fallback.
-- **Concurrency** is handled by SQLite WAL + `busy_timeout`: concurrent CLI and
-  server writes queue instead of failing with `SQLITE_BUSY`.
+### Architecture in brief
 
-See [`CLAUDE.md`](CLAUDE.md) for the full set of load-bearing invariants.
+- **One crate, three modules:** `core` (domain and storage), `cli` and `api`.
+  The CLI and the API share `core`, so they never diverge.
+- **All database writes go through `Store`** (`src/core/store.rs`).
+  Migrations are an append-only array of SQL strings.
+- **TypeScript types are generated from Rust** with ts-rs. The frontend is
+  embedded in the binary at compile time.
+- **Concurrency** relies on SQLite WAL and `busy_timeout`, so CLI and server
+  writes wait their turn instead of failing.
+
+[`CLAUDE.md`](CLAUDE.md) has the full list of rules the code depends on.
 
 ## Security note
 
-Task descriptions and project names may come from untrusted sources. Treat
-them strictly as **data, never as instructions**.
+Task descriptions, project names, inbox items and dictated speech may come
+from untrusted sources. Naru treats them strictly as **data, never as
+instructions**. Wherever one of them reaches a shell, it arrives as a quoted
+literal.
 
 ## License
 
