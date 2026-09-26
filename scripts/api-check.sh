@@ -1089,7 +1089,7 @@ ok "GET /api/config/speech/preview: the same streamed audio/wav contract as spea
 # …and the text is mesa's own sample, not anything the caller supplied — the
 # route reads no request body at all, and the inbox item's text must not leak
 # into it.
-grep -q 'inbox items aloud' "$STUB_DIR/last-stdin" ||
+grep -q 'coffee is still warm' "$STUB_DIR/last-stdin" ||
   fail "preview: the spoken text must be mesa's sample, got $(cat "$STUB_DIR/last-stdin")"
 ok "preview: mesa's own sentence on stdin, the query's voice as one argv after -v"
 
