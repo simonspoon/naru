@@ -367,9 +367,11 @@ pub fn export_voice(name: &str) -> Result<VoiceExport, ExportVoiceError> {
 /// `instructions`.
 pub const DESIGN_MODEL: &str = "qwen3-tts-1.7b-voicedesign-mlx";
 
-/// The short line a described voice is auditioned on. Naru's own words, for
-/// the reason [`SAMPLE`] gives: the design route takes no caller text.
-pub const DESIGN_SAMPLE: &str = "Hello, this is how this voice will read your inbox items aloud.";
+/// The short line a described voice is auditioned on — the same sentence
+/// [`SAMPLE`] previews a saved voice with, for the same reason: the design
+/// route takes no caller text, so this is Naru's own words too, and one
+/// preview line is one less sentence to keep in sync.
+pub const DESIGN_SAMPLE: &str = SAMPLE;
 
 /// The script a kept design reads for the clone's reference clip — saved,
 /// with the clip, as its exact transcript. Why it reads what it does is in
@@ -500,7 +502,8 @@ pub fn is_voice_name(name: &str) -> bool {
 /// not a mesa record, and keeping it a constant is what makes the preview route
 /// carry no caller-supplied body at all. Short on purpose — it is a sample, and
 /// every sentence is seconds of synthesis.
-pub const SAMPLE: &str = "This is how mesa will read your inbox items aloud.";
+pub const SAMPLE: &str =
+    "I found the bug, fixed the test, and — would you believe it — the coffee is still warm.";
 
 /// A synthesis in flight: WAV bytes in the order they must be written, the
 /// first chunk being the (size-patched) header. An `Err` item is a read that
