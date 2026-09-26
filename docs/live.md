@@ -2496,18 +2496,19 @@ conversation") working with no backend change.
     the person's own switch above it, and the microphone reopens when she
     stops.
 
-  Everything *about the person's input method* reads the first — the capture
-  box's focus rule, the composer's hint — and only the capture stream's own
+  Everything *about the person's input method* reads the first — the
+  composer's hint and placeholder — and only the capture stream's own
   lifecycle reads the second. Keying the former on the latter is the bug that
   looks like a shortcut: Naru speaks for most of the conversation's wall time,
-  so a focus fight that re-arms itself while she talks is decided by playback
+  so a hint that flickers while she talks is decided by playback
   timing rather than by any rule — the recording's own silence clock avoids
   exactly this by being measured on `shouldListen` rather than
   `recognizesSpeech`.
   - **Listening is the person's own switch, and joining opens it** (tasks 887,
     917). `muted` is an input to `recognizesSpeech` for the same reason
     `paused` is: a muted page is one where the microphone is not the way in,
-    so the capture box takes the keyboard back and the hint says to type.
+    so the hint says to type (the box is clicked into, never focused for the
+    person — mesa task 1439).
     Before task 917 it started muted until an explicit press, on the theory
     that a page that opens the microphone the moment a conversation starts is
     listening to the room for the whole of it — but that made every hands-free
@@ -2529,8 +2530,8 @@ conversation") working with no backend change.
     : -1}`: the shut panel is a zero-width clip, and `pointer-events: none`
     stops the mouse but not a Tab, so an invisible control that toggles the
     microphone on Enter is worse than one nobody can reach. A **chord**, not a
-    key, for the reason `keyboardScope.ts` gives: the capture box holds the
-    keyboard for most of a conversation, so a single-key shortcut would be
+    key, for the reason `keyboardScope.ts` gives: the person may be typing in
+    the capture box, so a single-key shortcut would be
     typed into the box instead of pressed — which is also why it cannot consult
     `shouldIgnoreShortcut` (whose first rule is that a modifier chord belongs
     to its existing owner) and why it is the hub's own window listener, in the
@@ -2544,16 +2545,9 @@ conversation") working with no backend change.
     889 the same press is also what **sends** the recording (below), so it is
     the one control that both ends listening and delivers what was heard.
 
-    **Muting hands the keyboard back**, so both presses go through one
-    `toggleListening(next)` in the hub. It writes `listeningRef.current` for
-    the page the press *makes* before calling `reclaim('hub-press')` — the
-    effect that keeps that ref current only runs a render later, so read from
-    the handler it still holds the answer from before the press, and a mute
-    would leave the capture box unfocused at the exact moment typing became
-    the only way in. Identical, and for the identical reason, to
-    `togglePause`. Unmuting calls the same `reclaim`, which declines, as it
-    should: a recognized sentence reaches the conversation with the keyboard
-    anywhere.
+    Both presses go through one `toggleListening(next)` in the hub. Neither
+    moves focus: since mesa task 1439 the capture box never takes the keyboard
+    on its own, muted or not.
 
     **Escape discards and mutes** (mesa task 1354, the `live-cancel` keymap
     action, rebindable from Settings). For the person interrupted
@@ -2827,30 +2821,21 @@ conversation") working with no backend change.
     that has not started, under a placeholder telling them to go live. The
     offer to start is the older, truer line, and it stays the one a cold page
     shows.
-- **While joined *and not listening*, the capture box holds the keyboard**
-  (`liveCapture.ts`, the tested module for all of this). With the microphone
-  open, none of the rule below applies: the fight was always about *where the
-  words land*, and a recognized sentence lands in the conversation with the
-  keyboard anywhere. So `shouldReclaimFocus` answers `false` outright while
-  `listening`, and the box becomes a plain fallback the person may click into
-  and type. The rest holds unchanged wherever recognition is not running.
-  The person does not aim their dictation;
-  Naru does: while a session is live *and* this browser has had its press,
-  the box takes focus — so when a `navigate` turn opens a page with a text
-  field, the words that follow still land in the conversation, not in the
-  field, and the person can ask Naru to create something there without their
-  speech typing into it. The referee (`userTookFocus`, `shouldReclaimFocus`):
-  a focus loss to an element a person types into (`isEditableTarget`), on
-  the heels of a pointer/key gesture, is the person deliberately clicking
-  into a form — capture **stands down** and the form wins; every other loss
-  (a page's autofocus after a navigate, a press on a button, a click on
-  nothing) is taken back, because none of it means "stop listening". While
-  stood down, only Naru acting again — going live, a `navigate` turn, a press
-  on the hub's own controls (`hub-press`) — re-arms capture, and Naru acting
-  also spends the gesture on the clock, so a keystroke that happened to
-  precede a navigate cannot make its autofocus read as deliberate.
-  Nothing grabs the keyboard before the press: an un-joined browser has no
-  business stealing focus.
+- **The capture box never takes the keyboard on its own** (mesa task 1439).
+  It has focus only when the person clicks or Tabs into it. It used to *hold*
+  the keyboard (`liveCapture.ts`'s old focus referee): taking focus on going
+  live, after a `navigate`, after a press on the hub's controls, and back
+  from any gestureless blur — so that system dictation typed into the
+  conversation wherever Naru had navigated. That fight also pulled focus back
+  off the live whiteboard, so board text could be selected but ⌘C copied the
+  empty box instead. Dictation through the page never needed it: a
+  transcribed (`auris`) or recognized (browser `SpeechRecognition`) sentence
+  reaches the conversation with the keyboard anywhere. The whiteboard's
+  content box is `tabIndex={-1}`, so a click on it takes focus natively
+  (selection untouched) and ⌘C copies the board's text; a framed `html` board
+  takes focus itself. One consequence: while focus is inside a framed board,
+  its keystrokes go to that frame's own window, so the hub's window-level
+  chords (listen, discard) do not see them until the person clicks back out.
 - **The typed box is sent by Enter alone** (mesa task 977). It used to be
   sent on Naru's clock after `live.auto-send-ms` of idle, on the reasoning
   that dictation never presses Enter — but the box is the surface a person
@@ -3102,8 +3087,7 @@ conversation") working with no backend change.
   control and where it is *not* offered, the panel toggle's `panel` flag,
   and the status line, where paused ranks under the two not-live states and
   above everything the running conversation would otherwise say) and
-  `frontend/src/liveCapture.ts` (the focus referee, when it stands aside, and
-  the shared idle wait) and
+  `frontend/src/liveCapture.ts` (the shared idle wait) and
   `frontend/src/liveRecognition.ts` (the two listening questions and why they
   are two — and why a pause and a mute belong to the first and a reply to the
   second —

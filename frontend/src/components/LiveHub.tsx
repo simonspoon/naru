@@ -37,13 +37,7 @@ import {
   showsBoardReopen,
   type BoardPanel,
 } from '../liveBoard'
-import {
-  autoSendIdleMs,
-  isEditableTarget,
-  shouldReclaimFocus,
-  userTookFocus,
-  type ReclaimCause,
-} from '../liveCapture'
+import { autoSendIdleMs } from '../liveCapture'
 import { currentContext, sameContext, subscribeContext } from '../liveContext'
 import { agentsLabel, openAgents, sectionFor, viewLine } from '../liveView'
 import { mayHold, SegmentChain } from '../liveDrain'
@@ -188,7 +182,7 @@ import { useFetch } from '../useFetch'
  * microphone and keeps it muted for the rest of that session. The capture box
  * in the conversation panel stays as the fallback — a browser with no way to
  * capture audio, or a refused microphone, is the surface as it was: system
- * dictation types into the box, mesa holds the keyboard for it, and a line is
+ * dictation types into the box once the person has clicked into it, and a line is
  * sent by Enter alone (mesa task 977). Either way this is now the **only**
  * place audio leaves the page: each segment travels once, as one bounded WAV, to that one
  * route, decoded locally by `auris` and never retained (`docs/live.md`). An
@@ -227,15 +221,13 @@ import { useFetch } from '../useFetch'
  *   task 1161).
  *   No route, no session state: pausing a conversation is not the same event
  *   as ending one, and only one of the two is recoverable.
- * - **While joined and not recognizing, the capture box holds the keyboard**
- *   (`liveCapture.ts`): a `navigate` turn is mesa's doing, and the words after
- *   it are still meant for mesa, not for whatever field the opened page
- *   focused. A deliberate click into another field wins the fight and stands
- *   capture down; mesa's next action re-arms it. The typed box itself is sent
- *   by Enter alone (mesa task 977) — only a *transcribed* recording is sent
- *   on mesa's own clock. With the microphone open the focus fight does not
- *   apply — a recognized sentence reaches the conversation with the keyboard
- *   anywhere — so that rule stands down and the box is a plain fallback.
+ * - **The capture box never takes the keyboard on its own** (mesa task 1439,
+ *   `liveCapture.ts`): it has focus only when the person clicks or Tabs into
+ *   it, so the whiteboard's text can be selected and copied. Dictation does
+ *   not need it focused — a transcribed or recognized sentence reaches the
+ *   conversation with the keyboard anywhere. The typed box is sent by Enter
+ *   alone (mesa task 977) — only a *transcribed* recording is sent on mesa's
+ *   own clock.
  *
  * The two page verbs — `navigate` and the sidebar pair (task 859) — are both
  * performed here, in transcript order, when the run *reaches* the turn: the
@@ -1228,7 +1220,7 @@ export function LiveHub({
         },
       )
     },
-    [],
+    [setSpeaking],
   )
 
   // Speaks one turn, whatever was sounding before. Called from the run rather
@@ -1261,7 +1253,7 @@ export function LiveHub({
   const silence = useCallback(() => {
     releasePlayer()
     setSpeaking(false)
-  }, [releasePlayer])
+  }, [releasePlayer, setSpeaking])
 
   /**
    * The pause branch of `togglePause` (task 882), factored out because a
@@ -1285,23 +1277,11 @@ export function LiveHub({
     pauseNowRef.current = pauseNow
   }, [pauseNow])
 
-  // ---- the keyboard (liveCapture.ts) ----
-
-  // The one capture box, alive whether or not the panel shows: the closed
-  // state hides by clipping, never `display: none`, so the box keeps focus —
-  // and keeps receiving dictation — with the panel shut.
-  const capture = useRef<HTMLTextAreaElement | null>(null)
-  // When the last pointer/key gesture landed — the arbiter's only evidence.
-  const gestureAt = useRef<number | null>(null)
-  // Whether the person deliberately took focus elsewhere. A ref: it is read
-  // and written from focus events and never rendered.
-  const standingDown = useRef(false)
   // The steady question — is the person talking to mesa through the microphone
-  // — which is what the capture box's two rules and the composer's hint read.
-  // Deliberately not `wantsMic` below: that one goes false for the length of
-  // every reply, and a focus fight or an auto-send deadline that re-arms
-  // itself while mesa speaks is decided by playback timing rather than by any
-  // rule.
+  // — which is what the composer's hint and placeholder read. Deliberately not
+  // `wantsMic` below: that one goes false for the length of every reply, and
+  // a hint that flickers with playback is decided by playback timing rather
+  // than by any rule.
   const recognizes = recognizesSpeech({
     live,
     joined: unlocked,
@@ -1310,56 +1290,6 @@ export function LiveHub({
     paused,
     muted,
   })
-  // The same answer for the two that read it outside a render: the focus
-  // arbiter runs from blur handlers and the auto-send deadline from a timer.
-  const listeningRef = useRef(false)
-  useEffect(() => {
-    listeningRef.current = recognizes
-  }, [recognizes])
-
-  useEffect(() => {
-    // Capture phase, so the stamp lands before any focus change the gesture
-    // causes is observed by the box's own blur handler.
-    const stamp = () => {
-      gestureAt.current = Date.now()
-    }
-    window.addEventListener('pointerdown', stamp, true)
-    window.addEventListener('keydown', stamp, true)
-    return () => {
-      window.removeEventListener('pointerdown', stamp, true)
-      window.removeEventListener('keydown', stamp, true)
-    }
-  }, [])
-
-  const reclaim = useCallback(
-    (cause: ReclaimCause, armed: { live: boolean; unlocked: boolean }) => {
-      if (
-        !shouldReclaimFocus({
-          live: armed.live,
-          unlocked: armed.unlocked,
-          standingDown: standingDown.current,
-          listening: listeningRef.current,
-          cause,
-        })
-      ) {
-        return
-      }
-      // mesa acting is what re-arms a stood-down capture — and it also spends
-      // whatever gesture is on the clock: a navigate's autofocus-then-blur
-      // lands *between* this call and the deferred focus below, and a
-      // keystroke that happened to precede the navigate must not let that
-      // blur read as the person deliberately leaving.
-      standingDown.current = false
-      gestureAt.current = null
-      // The focus itself is deferred a tick: called mid-blur or
-      // mid-navigation, a synchronous focus() can be overridden by the very
-      // move it is answering.
-      window.setTimeout(() => {
-        if (!standingDown.current) capture.current?.focus({ preventScroll: true })
-      }, 0)
-    },
-    [],
-  )
   // The handlers below run from media events and the run itself, long after
   // the render whose `live`/`unlocked` they must judge by — so the current
   // pair rides in a ref, the same pattern as `pump`.
@@ -1383,27 +1313,7 @@ export function LiveHub({
     if (id === null || !unlocked || micOpenedFor.current === id) return
     micOpenedFor.current = id
     setMutedNow(false)
-    // Mirrors the reasoning already written on `togglePause`/`toggleListening`:
-    // the went-live reclaim effect just below reads `listeningRef` to decide
-    // whether the capture box may grab the keyboard, and that effect runs in
-    // the same commit as this one — a render behind, if this only set state.
-    // Writing the ref here, synchronously, is what keeps that effect from
-    // reclaiming focus for a microphone that is, by the time it checks, opening.
-    listeningRef.current = recognizesSpeech({
-      live,
-      joined: unlocked,
-      supported,
-      blocked,
-      paused,
-      muted: false,
-    })
-  }, [session?.id, unlocked, setMutedNow, live, supported, blocked, paused])
-
-  // Joining is when capture starts: the same press that unlocks audio hands
-  // mesa the keyboard. Edge-triggered on the pair going true together.
-  useEffect(() => {
-    if (live && unlocked) reclaim('went-live', { live, unlocked })
-  }, [live, unlocked, reclaim])
+  }, [session?.id, unlocked, setMutedNow])
 
   // The recognizer's handlers are set once per start and post sentences long
   // after the render that installed them, so they read through a ref rather
@@ -1507,19 +1417,6 @@ export function LiveHub({
   }, [wantsMic])
 
   /**
-   * The person's switch on the microphone (mesa task 887) — one write path,
-   * because muting is never only a mute: it changes *how the person talks to
-   * mesa*, and the keyboard has to follow.
-   *
-   * `reclaim` decides on `listeningRef`, which the render's effect only
-   * rewrites on the *next* pass — so read from here it still holds the answer
-   * from before the press, and a mute would leave the box unfocused at the
-   * exact moment typing became the only way in. Answer the question for the
-   * page this press makes and write it first; the effect re-affirms the same
-   * value a render later. Identical, for the identical reason, to
-   * `togglePause`.
-   */
-  /**
    * Send the recording and let go of it (mesa task 889) — the held sentences
    * plus the one the engine has not settled yet, which is what the person had
    * just finished saying when they reached for the switch.
@@ -1569,6 +1466,7 @@ export function LiveHub({
   // the previous run heard. `hearing` is the chain's count, told to it here.
   const chainRef = useRef<SegmentChain | null>(null)
   if (chainRef.current === null) {
+    // eslint-disable-next-line react-hooks/refs -- one-time lazy init; `flushRef` is read only when the chain flushes, never during render
     chainRef.current = new SegmentChain({
       flush: () => flushRef.current(),
       onOutstanding: setHearing,
@@ -1642,8 +1540,7 @@ export function LiveHub({
     (next: boolean, discard = false) => {
       // The ref first, before the cut and the close below: a segment that
       // settles from here on must read this press, and `setMutedNow` a few
-      // lines down would only be re-affirming it. The same reason
-      // `listeningRef` is written here rather than left to its effect.
+      // lines down would only be re-affirming it.
       mutedRef.current = next
       mutedByCancelRef.current = next && discard
       // Opening the microphone is a press that says "talk to me here", so it
@@ -1687,36 +1584,13 @@ export function LiveHub({
         setInterimNow('')
       }
       setMutedNow(next)
-      listeningRef.current = recognizesSpeech({
-        live,
-        joined: unlocked,
-        supported,
-        blocked,
-        paused,
-        muted: next,
-      })
-      // Muted, the typed box is the way in again and takes the keyboard back;
-      // unmuted, `reclaim` declines, as it should — a recognized sentence
-      // reaches the conversation with the keyboard anywhere.
-      reclaim('hub-press', armed.current)
     },
-    [
-      blocked,
-      claimVoice,
-      live,
-      paused,
-      reclaim,
-      setRecordingNow,
-      setInterimNow,
-      setMutedNow,
-      supported,
-      unlocked,
-    ],
+    [claimVoice, setRecordingNow, setInterimNow, setMutedNow],
   )
 
   // The chord that opens and shuts the microphone (mesa task 887). A window
   // listener of the hub's own, in the shape of the command palette's, because
-  // the capture box holds the keyboard for most of a conversation: the switch
+  // the person may be typing in the capture box (or any field): the switch
   // has to be reachable from inside a focused text field, which is the whole
   // reason it is a chord rather than a key — the `live-listen` action in
   // `keymap.ts`, rebindable from Settings since mesa task 1079.
@@ -2822,10 +2696,6 @@ export function LiveHub({
         const target = navigateTarget(turn)
         if (target !== null && window.location.hash !== target) {
           window.location.hash = target
-          // mesa moved the browser, so the words that follow are still mesa's
-          // to take — even if the person had deliberately clicked elsewhere
-          // before.
-          reclaim('navigated', armed.current)
         }
         const sidebars = sidebarsIntent(turn)
         // Idempotent by construction: App holds the flags, so asking twice for
@@ -3109,9 +2979,7 @@ export function LiveHub({
       // Joining used to call nothing at all: the press *was* the whole point,
       // and the run can start on whatever the conversation has already said.
       // As of mesa task 1267 it makes exactly one call — the claim on the
-      // voice, since "listen here" is precisely what this press means. It is
-      // also the moment capture takes the keyboard (the went-live effect
-      // above fires on `unlocked` landing).
+      // voice, since "listen here" is precisely what this press means.
       claimVoice()
       pump.current()
       setOpen(true)
@@ -3166,24 +3034,6 @@ export function LiveHub({
     // letting it go stale, which is what frees a browser that never comes
     // back.
     claimVoice()
-    // `reclaim` decides on `listeningRef`, which the render's effect only
-    // rewrites on the *next* pass — so read from here it still holds the
-    // paused answer (`false`), and capture would grab the keyboard even where
-    // the microphone is the way in. Answer the question for the resumed page
-    // and write it first; the effect re-affirms the same value a render later.
-    listeningRef.current = recognizesSpeech({
-      live,
-      joined: unlocked,
-      supported,
-      blocked,
-      paused: false,
-      muted: mutedRef.current,
-    })
-    // A press on mesa's own controls hands the keyboard back — which is what
-    // this does wherever the typed box is the way in. With the microphone
-    // open `reclaim` now declines, as it should: a recognized sentence reaches
-    // the conversation with the keyboard anywhere.
-    reclaim('hub-press', armed.current)
     pump.current()
   }
 
@@ -3318,6 +3168,7 @@ export function LiveHub({
     interim: '',
     hearing,
     voicedAt,
+    // eslint-disable-next-line react-hooks/purity -- the hold is judged against the render's own clock; the `voicedAt` effect re-renders when it runs out
     now: Date.now(),
     holdMs: HEARING_HOLD_MS,
   })
@@ -3380,7 +3231,8 @@ export function LiveHub({
   // element's own `playing` and cleared everywhere the ref is, so a render
   // that sees `speaking` sees a ref that has already been written.
   const speakingTurn = speaking
-    ? (turns.find((turn) => turn.id === sounding.current) ?? null)
+    ? // eslint-disable-next-line react-hooks/refs -- read on purpose: `speaking` state guarantees the ref is already written (see above)
+      (turns.find((turn) => turn.id === sounding.current) ?? null)
     : null
   const speakingText = speakingTurn === null ? null : spokenText(speakingTurn)
   // The one line above the composer (mesa task 1153, replacing task 1069's
@@ -3404,6 +3256,7 @@ export function LiveHub({
       interim,
       hearing,
       voicedAt,
+      // eslint-disable-next-line react-hooks/purity -- as for `voiced` above: the render's own clock, re-rendered by the `voicedAt` effect
       now: Date.now(),
       holdMs: HEARING_HOLD_MS,
     }),
@@ -3424,8 +3277,6 @@ export function LiveHub({
           aria-expanded={open}
           onClick={() => {
             setOpen((o) => !o)
-            // A press on mesa's own controls hands the keyboard back to mesa.
-            reclaim('hub-press', armed.current)
           }}
         >
           <LiveMark />
@@ -3442,8 +3293,6 @@ export function LiveHub({
           aria-label="show the whiteboard"
           onClick={() => {
             setBoardPanel(openBoardPanel)
-            // A press on mesa's own controls hands the keyboard back to mesa.
-            reclaim('hub-press', armed.current)
           }}
         >
           <BoardMark />
@@ -3619,7 +3468,6 @@ export function LiveHub({
                       tabIndex={open ? undefined : -1}
                       onClick={() => {
                         setOpen(false)
-                        reclaim('hub-press', armed.current)
                       }}
                     >
                       <CloseMark />
@@ -3780,7 +3628,6 @@ export function LiveHub({
                     the person is deciding whether to talk or to type. */}
                 <div className="live-input-row">
                   <textarea
-                    ref={capture}
                     className="live-input"
                     rows={2}
                     value={draft}
@@ -3804,23 +3651,6 @@ export function LiveHub({
                       // adding to the recording (mesa task 1351), so the silence
                       // wait restarts rather than sending the speech without it.
                       if (recognizes) markHeard()
-                    }}
-                    onBlur={(e) => {
-                      // The arbiter: focus lost to somewhere a person types, on the
-                      // heels of a gesture, is them deliberately going elsewhere —
-                      // concede. Everything else — a page's autofocus after a
-                      // `navigate`, a click on a button or on nothing — is taken
-                      // back: none of it means "stop listening".
-                      const to = e.relatedTarget as HTMLElement | null
-                      if (
-                        to !== null &&
-                        isEditableTarget(to.tagName, to.isContentEditable) &&
-                        userTookFocus(gestureAt.current, Date.now())
-                      ) {
-                        standingDown.current = true
-                        return
-                      }
-                      reclaim('focus-lost-no-gesture', armed.current)
                     }}
                     onKeyDown={(e) => {
                       if (e.key !== 'Enter' || e.shiftKey) return
@@ -3892,7 +3722,6 @@ export function LiveHub({
                         // before may be free now, and the person picking it is
                         // who decides to retry.
                         setRefusedInput(null)
-                        reclaim('hub-press', armed.current)
                       }}
                     >
                       <option value={DEFAULT_INPUT}>Default mic</option>

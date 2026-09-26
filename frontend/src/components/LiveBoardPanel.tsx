@@ -898,6 +898,11 @@ export function LiveBoardPanel({
           <div
             ref={contentRef}
             className={`live-board-content${frozen ? ' inked' : ''}`}
+            // Focusable by click, never by Tab (mesa task 1439): a mousedown
+            // on the board moves focus here natively — selection untouched —
+            // so ⌘C copies the board's selected text rather than whatever
+            // field held the keyboard. A framed html board takes focus itself.
+            tabIndex={-1}
             onScroll={redraw}
             style={
               frame === null

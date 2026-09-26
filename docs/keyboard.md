@@ -146,8 +146,8 @@ Returns `true` (suppress) for, in order:
    there exactly as before. The other exemption is `claimedFrom` (task 1354): a
    caller may name the **one** text control its shortcut is still claimed
    from — `keymap.ts`'s `CLAIMED_FROM`, today only `live-cancel`'s Escape in
-   the live capture box (`.live-input`), which holds the keyboard while the
-   person dictates and into which Escape types nothing. `matchesShortcut`
+   the live capture box (`.live-input`), so it still fires when the person is
+   typing in the capture box, into which Escape types nothing. `matchesShortcut`
    passes it only for a key that types nothing (`e.key` longer than one
    character), so a printable rebind is stood down in the box like anywhere
    else. Rules 3–5 still apply there.

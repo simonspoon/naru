@@ -222,8 +222,7 @@ export function unavailableBanner(message: string | null): {
  *
  * `muted` is the person's own switch on the microphone (mesa task 887), and it
  * belongs here for the same reason again: a muted page is one where the
- * microphone is not the way in, so the capture box takes the keyboard back and
- * the hint says to type. A conversation this browser **joins** opens
+ * microphone is not the way in, so the hint says to type. A conversation this browser **joins** opens
  * listening on its own (mesa task 917) — a hands-free surface that needs a
  * press before it can hear is not hands-free, and the press that joined the
  * conversation is already the consent, the same one an autoplay policy
@@ -233,11 +232,9 @@ export function unavailableBanner(message: string | null): {
  * `paused`: muting stops mesa hearing this room while she keeps talking and
  * the typed box keeps working, where pausing stops the whole run.
  *
- * This, and not `shouldListen`, is what the capture box's two rules stand down
- * for (`liveCapture.ts`) and what the composer's hint reports. Those are
- * questions about *how the person is talking to mesa*, and the answer must not
- * flicker every time mesa speaks — a focus fight that re-arms itself for the
- * length of each reply is the same fight, fought at random.
+ * This, and not `shouldListen`, is what the composer's hint and placeholder
+ * report. Those are questions about *how the person is talking to mesa*, and
+ * the answer must not flicker every time mesa speaks.
  */
 export function recognizesSpeech(input: {
   live: boolean
@@ -622,9 +619,9 @@ export function enterHoldsForRecording(input: {
 // `live-listen` action in `keymap.ts`, matched with `matchesShortcut` like
 // every other global shortcut. It is still a **chord** by default, and still
 // the hub's own window listener rather than a `shouldIgnoreShortcut` caller,
-// for the reason `keyboardScope.ts` sets out: the capture box holds the
-// keyboard for most of a conversation, so a single-key shortcut would be typed
-// into the box rather than pressed.
+// for the reason `keyboardScope.ts` sets out: when the person is typing in the
+// capture box, a single-key shortcut would be typed into the box rather than
+// pressed.
 
 /**
  * A rough phonetic fold, used to catch the browser mishearing a name mesa

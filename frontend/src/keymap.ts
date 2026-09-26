@@ -110,9 +110,9 @@ export const ACTIONS: KeymapActionSpec[] = [
  * The one text control an action is still claimed *from*, when its chord is
  * bare (mesa task 1354) — `shouldIgnoreShortcut`'s `claimedFrom`, the idea
  * `CHORD_FIELDS` in `keyboardScope.ts` already has for the Files tab's chords.
- * `live-cancel` keeps the live capture box: it holds the keyboard for most of
- * a conversation, so an Escape pressed while dictating usually lands there,
- * and Escape types nothing into it. Every other field still stands it down.
+ * `live-cancel` keeps the live capture box: when the person is typing in the
+ * capture box, an Escape pressed there should still discard, and Escape types
+ * nothing into it. Every other field still stands it down.
  * Honoured only for a key that types nothing (`e.key` longer than one
  * character): the action is rebindable, and a printable key bound to it would
  * otherwise fire on every keystroke typed into the box.

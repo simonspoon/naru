@@ -9596,9 +9596,9 @@ button:focus-visible,
 }
 
 /* Closed is a zero-width clip, never `display: none` or `visibility: hidden`:
-   the capture box inside must keep its focus — and the dictation flowing into
-   it — while the panel is shut (`liveCapture.ts`). Both of those would take
-   the focus away; clipping the aside leaves the box rendered and focusable,
+   the capture box inside must keep any focus the person gave it — and the
+   dictation flowing into it — while the panel is shut. Both of those would
+   take the focus away; clipping the aside leaves the box rendered and focusable,
    exactly as the popup's `clip-path` did. */
 .live-sidebar.collapsed {
   width: 0;
