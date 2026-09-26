@@ -201,8 +201,13 @@ enum Command {
         /// file an inbox alert for any that crosses a cost-guard threshold —
         /// dollars, tokens, or the cache-read share that marks a spin loop
         /// (thresholds in ~/.mesa/config.json's `guard` section;
-        /// `mesa cc guard` shows the same verdict on demand). mesa reports;
-        /// it never stops a session. Off by default: it reads Claude Code's
+        /// `mesa cc guard` shows the same verdict on demand). A background
+        /// session that crosses a threshold is stopped (`claude stop`, which
+        /// ends the process but does not delete it — the conversation can be
+        /// resumed) and an inbox alert is filed; a foreground/terminal
+        /// session cannot be stopped and is only reported. Setting
+        /// `guard.action = "report"` in ~/.mesa/config.json restores
+        /// alert-only. Off by default: it reads Claude Code's
         /// transcripts and writes inbox items with no user request behind it.
         /// Independent of --watch-todo and --watch-inbox. Preserved across the
         /// web UI's Restart Server action.
