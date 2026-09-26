@@ -1471,12 +1471,18 @@ function SpeechSection() {
             {sampleButton(!!sample, playing).label}
           </button>
         </div>
-        {!canPick(voices) && (
-          <p className="muted settings-command-blurb">
-            Naru could not ask <code>kokoro-rs</code> which voices it has — type
-            a name, or run <code>kokoro-rs --list-voices</code> to see them.
-          </p>
-        )}
+        {!canPick(voices) &&
+          (audio.data && savedAudioEngine(audio.data) === 'naru-audio' ? (
+            <p className="muted settings-command-blurb">
+              Naru could not ask the <code>naru-audio</code> daemon which voices
+              it has — type a name.
+            </p>
+          ) : (
+            <p className="muted settings-command-blurb">
+              Naru could not ask <code>kokoro-rs</code> which voices it has — type
+              a name, or run <code>kokoro-rs --list-voices</code> to see them.
+            </p>
+          ))}
         {fieldError && <p className="error">{fieldError}</p>}
         {sampleError && (
           <p className="error">could not play a sample in this voice</p>
