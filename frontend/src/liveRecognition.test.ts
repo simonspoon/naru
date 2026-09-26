@@ -754,6 +754,26 @@ describe('captureHint', () => {
     )
   })
 
+  it('names naru-audio as the way in when the server runs it', () => {
+    expect(
+      captureHint({ ...base, listening: true, path: 'auris', audioEngine: 'naru-audio' }),
+    ).toMatch(/Listening through naru-audio/)
+  })
+
+  it('still names auris on the legacy engine or with no engine known', () => {
+    for (const audioEngine of [undefined, null, 'legacy']) {
+      expect(captureHint({ ...base, listening: true, path: 'auris', audioEngine })).toMatch(
+        /Listening through auris/,
+      )
+    }
+  })
+
+  it('names this browser on its own recognizer whatever the server engine', () => {
+    expect(
+      captureHint({ ...base, listening: true, path: 'browser', audioEngine: 'naru-audio' }),
+    ).toMatch(/Listening through this browser/)
+  })
+
   it('names this browser as the way in while listening through its own recognizer', () => {
     expect(captureHint({ ...base, listening: true, path: 'browser' })).toMatch(
       /Listening through this browser/,

@@ -951,6 +951,9 @@ export function captureHint(input: {
    *  Optional because only the muted line names it, and the shipped chord is
    *  the right thing to say when nobody has said otherwise. */
   chord?: string
+  /** The server's speech engine, the probe's `audio.engine` (mesa task 1409).
+   *  The server path is `'auris'` on both engines, so this is what names it. */
+  audioEngine?: string | null
 }): string {
   if (input.paused) {
     return 'Paused. Press Resume to talk to Naru again — the conversation is still running.'
@@ -980,7 +983,12 @@ export function captureHint(input: {
     // Named (mesa task 957): the person can act on the difference — auris is
     // an install away, the browser recognizer is not — so the ladder saying
     // only "listening" would hide something worth knowing.
-    const via = input.path === 'auris' ? 'auris' : 'this browser'
+    const via =
+      input.path === 'auris'
+        ? input.audioEngine === 'naru-audio'
+          ? 'naru-audio'
+          : 'auris'
+        : 'this browser'
     return `Listening through ${via} — everything you say is held here and sent to Naru once you go quiet, or right away if you press the switch. She stops listening while she is speaking. Anything you type while she is holding what you said waits and is sent on the end of it.`
   }
   // Joined, unmuted, and still not the way in — nothing left that is worth a

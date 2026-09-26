@@ -3872,6 +3872,7 @@ export function LiveHub({
                       paused,
                       muted,
                       chord: listenChordLabel,
+                      audioEngine: audio?.engine ?? null,
                     })}{' '}
                     {!paused && 'Enter sends.'}
                   </span>
