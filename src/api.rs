@@ -4943,6 +4943,13 @@ async fn transcribe_live(
     Ok(Json(LiveTranscript { text }).into_response())
 }
 
+#[derive(Deserialize, Default)]
+struct TranscribeStatusQuery {
+    /// `1` asks for a fresh probe rather than the cached one.
+    #[serde(default)]
+    fresh: u8,
+}
+
 /// `GET /api/live/transcribe` — whether the server's speech-to-text engine
 /// is the way in, for the live page to ask once per load before it decides
 /// whether to fall back to the browser's own `SpeechRecognition` (mesa task
@@ -4967,15 +4974,20 @@ async fn transcribe_live(
 ///
 /// Gated by `require_agent_access` alone — this is a read, not a mutation, so
 /// unlike `transcribe_live` it carries no `require_same_site_fetch`.
+///
+/// `?fresh=1` (the live banner's Retry, mesa task 1408) re-asks the daemon
+/// instead of serving its cached probe; inert on `legacy`.
 async fn transcribe_available(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Query(q): Query<TranscribeStatusQuery>,
     headers: HeaderMap,
 ) -> ApiResult<Response> {
     require_agent_access(&state, &addr, &headers)?;
     // A subprocess (legacy) or a blocking HTTP probe (naru-audio): off the
     // async workers either way.
-    let status = blocking(listen::status)
+    let fresh = q.fresh != 0;
+    let status = blocking(move || listen::status(fresh))
         .await?
         .map_err(|message| ApiError {
             status: StatusCode::BAD_GATEWAY,
@@ -16194,9 +16206,14 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         let peer = lan_peer();
 
         let phone_headers = hdrs(Some("192.168.1.50:7770"), Some("http://192.168.1.50:7770"));
-        let resp = transcribe_available(State(state.clone()), ConnectInfo(peer), phone_headers)
-            .await
-            .unwrap();
+        let resp = transcribe_available(
+            State(state.clone()),
+            ConnectInfo(peer),
+            Query(TranscribeStatusQuery::default()),
+            phone_headers,
+        )
+        .await
+        .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = json_body(resp).await;
         for key in [
@@ -16211,9 +16228,28 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         }
 
         let forged_origin_headers = hdrs(Some("192.168.1.50:7770"), Some("https://evil.example"));
-        let rejected =
-            transcribe_available(State(state), ConnectInfo(peer), forged_origin_headers).await;
+        let rejected = transcribe_available(
+            State(state),
+            ConnectInfo(peer),
+            Query(TranscribeStatusQuery::default()),
+            forged_origin_headers,
+        )
+        .await;
         assert!(rejected.unwrap_err().status.is_client_error());
+    }
+
+    /// The banner's Retry sends `?fresh=1`; an ordinary probe sends nothing
+    /// and keeps the cache (mesa task 1408).
+    #[test]
+    fn transcribe_status_query_reads_fresh() {
+        let parse = |uri: &str| {
+            Query::<TranscribeStatusQuery>::try_from_uri(&uri.parse().unwrap())
+                .unwrap()
+                .0
+                .fresh
+        };
+        assert_eq!(parse("/api/live/transcribe?fresh=1"), 1);
+        assert_eq!(parse("/api/live/transcribe"), 0);
     }
 
     // --- live (mesa task 855) --------------------------------------------

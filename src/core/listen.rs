@@ -138,11 +138,17 @@ pub struct TranscribeStatus {
 /// `naru-audio` that is [`audio::probe`] (and `available` is its `ready`,
 /// since the POST goes to the daemon — mesa task 1389); on `legacy` it is
 /// ready iff [`models`] is non-empty — the pre-1388 `available` signal, unchanged.
+/// `fresh` (the live banner's Retry, mesa task 1408) drops the cached probe
+/// first, so a daemon started within [`audio::FAILURE_TTL`] of a down answer
+/// is seen at once; it is inert on `legacy`.
 /// Blocking. `Err` only for a config file that cannot be read.
-pub fn status() -> Result<TranscribeStatus, String> {
+pub fn status(fresh: bool) -> Result<TranscribeStatus, String> {
     let engine = config::audio_engine()?;
     Ok(match engine {
         AudioEngine::NaruAudio => {
+            if fresh {
+                audio::invalidate();
+            }
             let probe = audio::probe(&config::audio_url()?);
             TranscribeStatus {
                 available: probe.state == AudioState::Ready,
@@ -787,9 +793,9 @@ mod tests {
             std::env::set_var("MESA_AURIS_BIN", &stub);
         }
         engine(&down);
-        let stopped = status().unwrap();
+        let stopped = status(false).unwrap();
         engine(&daemon.url());
-        let ready = status().unwrap();
+        let ready = status(false).unwrap();
         let listed = models();
         let heard = transcribe(b"RIFF", None);
         unsafe { std::env::remove_var("MESA_AURIS_BIN") };
@@ -804,5 +810,50 @@ mod tests {
         assert_eq!(listed, vec!["parakeet-tdt-0.6b-v2-int8"], "stt models only");
         assert_eq!(heard, Ok("from the daemon".to_string()));
         assert!(!ran.exists(), "auris was run on the naru-audio engine");
+    }
+
+    /// The live banner's Retry (mesa task 1408): an ordinary `status` serves
+    /// a `daemon_down` answer from the cache for [`audio::FAILURE_TTL`] even
+    /// though the daemon has since started, while `status(true)` asks it
+    /// again and sees `ready`. On `legacy` the flag changes nothing.
+    #[test]
+    fn a_fresh_status_re_probes_a_daemon_the_cache_still_calls_down() {
+        let _guard = legacy();
+        let legacy_cached = serde_json::to_value(status(false).unwrap()).unwrap();
+        let legacy_fresh = serde_json::to_value(status(true).unwrap()).unwrap();
+        assert_eq!(legacy_fresh, legacy_cached, "fresh is inert on legacy");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dead = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = dead.local_addr().unwrap().port();
+        drop(dead);
+        let url = format!("http://127.0.0.1:{port}");
+        let config = dir.path().join("config.json");
+        std::fs::write(
+            &config,
+            format!(r#"{{"audio": {{"engine": "naru-audio", "url": "{url}"}}}}"#),
+        )
+        .unwrap();
+        // SAFETY: `legacy()` holds both locks serializing these vars.
+        unsafe {
+            std::env::remove_var("NARU_AUDIO_URL");
+            std::env::remove_var("MESA_AUDIO_URL");
+            std::env::set_var("MESA_CONFIG_FILE", &config);
+        }
+        audio::invalidate();
+        assert_eq!(status(false).unwrap().state, AudioState::DaemonDown);
+
+        let daemon = audio::stub::Stub::start(
+            port,
+            r#"{"status":"ok","version":"0.1.0","api":1,
+            "stt":{"default":"parakeet-tdt-0.6b-v2-int8","ready":true}}"#,
+        );
+        let cached = status(false).unwrap();
+        let fresh = status(true).unwrap();
+        drop(daemon);
+
+        assert_eq!(cached.state, AudioState::DaemonDown, "served from cache");
+        assert_eq!(fresh.state, AudioState::Ready, "asked the daemon again");
+        assert!(fresh.available);
     }
 }

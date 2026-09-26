@@ -1032,10 +1032,12 @@ export function transcribeAudio(audioBase64: string): Promise<LiveTranscript> {
  * page's read-only probe line (mesa task 1391) and the live panel's engine
  * choice (mesa task 1390, which reads a failure as `legacy`). Errors
  * propagate, because a page showing the state must say it could not ask
- * rather than read that as "not ready".
+ * rather than read that as "not ready". `fresh` (the live banner's Retry,
+ * mesa task 1408) asks the server to re-probe instead of serving its cached
+ * answer; everything else leaves it off.
  */
-export function transcribeStatus(): Promise<TranscribeStatus> {
-  return request('/api/live/transcribe')
+export function transcribeStatus(fresh = false): Promise<TranscribeStatus> {
+  return request(fresh ? '/api/live/transcribe?fresh=1' : '/api/live/transcribe')
 }
 
 /**

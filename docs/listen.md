@@ -40,7 +40,11 @@ panel says why loudly: a `.live-unavailable` banner under its head shows the
 probe's `message` (a fallback sentence if it is `null`), the command in it —
 the last `` `…` `` span, e.g. `brew services start naru-audio` — in a
 `<code>` with a **Copy** button, and a **Retry** button that asks the probe
-again and switches to the server path once it answers `ready`. The
+again and switches to the server path once it answers `ready`. Retry sends
+`GET /api/live/transcribe?fresh=1`, which drops the cached probe first
+(`audio::invalidate`, mesa task 1408), so a daemon started within the 2 s
+failure TTL is seen on the first press; every other `GET` keeps the cache,
+and on `legacy` the flag changes nothing. The
 composer's hint gives it its own line, never "Listening through this
 browser" (`unavailableBanner`, `captureHint`).
 

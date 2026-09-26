@@ -811,15 +811,16 @@ export function LiveHub({
       dropped = true
     }
   }, [applyProbe])
-  // The banner's Retry: ask the server again and let `path` follow the answer
-  // — a daemon started since flips this page onto the server path.
+  // The banner's Retry: ask the server for a fresh probe rather than its
+  // cached answer (mesa task 1408) and let `path` follow the answer — a
+  // daemon started since flips this page onto the server path.
   const [retrying, setRetrying] = useState(false)
   const retryProbe = useCallback(() => {
     setRetrying(true)
     // A failed Retry keeps the previous answer: only the first load reads a
     // failure as legacy, and a naru-audio page must never fall back to the
     // browser recognizer because one retry could not reach the server.
-    transcribeStatus()
+    transcribeStatus(true)
       .then(applyProbe, () => {})
       .finally(() => setRetrying(false))
   }, [applyProbe])
