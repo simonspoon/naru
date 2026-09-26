@@ -126,7 +126,7 @@ The code is the source of truth. These are the invariants you must not break:
   `liveRecognition`,
   `liveSession`, `liveSidebarWidth`, `liveSpeaker`, `liveStream`,
   `liveTurns`,
-  `liveVad`,
+  `liveVad`, `liveView`,
   `liveWatchdog`,
   `liveWindow`,
   `markdownAssets`, `memoryDraft`, `modalDrag`, `navCollapse`, `navOrder`,

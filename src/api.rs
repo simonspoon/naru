@@ -44,8 +44,8 @@ use crate::core::{
     GitCommit, GitCommitFile, GitFileDiff, GitRepoView, GitStatus, GitWorktree, InboxItem,
     InboxKind, LIVE_AUDIO_MAX, LIVE_BOARD_KEEP, LIVE_INK_MAX, LibraryBuiltinAction, LibraryBundle,
     LibraryImportResult, LibraryKind, LibraryPatch, LibraryScope, LiveBoardKind, LiveContext,
-    LiveNotebookEntry, LiveNotice, LiveRole, LiveState, LiveStatus, LiveTranscript, LiveWindow,
-    ModelRates, NaruVersion, NextResult, Priority, ProjectAgents, ProjectFileTree, ProjectGitLog,
+    LiveNotebookEntry, LiveNotice, LiveState, LiveStatus, LiveTranscript, LiveWindow, ModelRates,
+    NaruVersion, NextResult, Priority, ProjectAgents, ProjectFileTree, ProjectGitLog,
     ProjectGitStatus, ProjectGitView, ProjectPatch, ProjectVersion, ReceiptPatch,
     STALE_CLAIM_MINUTES, Script, ScriptArg, ScriptPatch, ScriptRunEvent, Status, Store, SystemInfo,
     Task, TaskPatch, TaskSummary, Waypoint, agents, attachments, audio, board, config, files, git,
@@ -3868,6 +3868,11 @@ struct LiveUtterance {
     /// drew on it since the last turn they sent. Absent is an ordinary turn.
     #[serde(default)]
     ink: Option<LiveInkBody>,
+    /// The page's one-line view of the browser at the moment the turn was
+    /// submitted (mesa task 1424) — route, open item, which panels are open.
+    /// Absent or empty stores none; over `LIVE_VIEW_MAX` is 422.
+    #[serde(default)]
+    view: Option<String>,
 }
 
 /// A whiteboard flattened with the person's ink over it: the PNG, base64 in
@@ -3910,6 +3915,12 @@ struct LiveRouteBody {
     /// on. An explicit `null` is still how a page says the box is gone.
     #[serde(default, deserialize_with = "double_option")]
     window: Option<Option<LiveWindow>>,
+    /// The page's one-line view of the browser (mesa task 1424), the same
+    /// three-way key as `context`: omitted leaves the session's stored view
+    /// alone, `null` clears it, a value replaces it — so a panel toggled
+    /// between turns reaches `mesa live status` on the next report.
+    #[serde(default, deserialize_with = "double_option")]
+    view: Option<Option<String>>,
     /// Which browser is reporting (mesa task 1267). Optional — every other
     /// client of this route, mesa's own CLI included, says nothing — and it
     /// is only ever a **refresh**: it keeps the speaker claim alive when this
@@ -4485,8 +4496,10 @@ async fn live_utterance(
         return Err(no_live_session());
     };
     let turn = match ink {
-        Some((board_id, png)) => store.add_live_ink_turn(session.id, &body.text, board_id, &png)?,
-        None => store.add_live_turn(session.id, LiveRole::User, &body.text, None, None)?,
+        Some((board_id, png)) => {
+            store.add_live_ink_turn(session.id, &body.text, board_id, &png, body.view.as_deref())?
+        }
+        None => store.add_live_user_turn(session.id, &body.text, body.view.as_deref())?,
     };
     Ok((StatusCode::CREATED, Json(turn)).into_response())
 }
@@ -4563,6 +4576,7 @@ async fn live_route(
         &body.route,
         body.context.as_ref().map(Option::as_ref),
         body.window.as_ref().map(Option::as_ref),
+        body.view.as_ref().map(|v| v.as_deref()),
     )?;
     let Some(client) = client else {
         return Ok(Json(session).into_response());
@@ -10016,6 +10030,7 @@ mod tests {
     //! here. Plus the request-body shapes whose absent/null/value distinction
     //! no shell check can see.
     use super::*;
+    use crate::core::LiveRole;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     fn hdrs(host: Option<&str>, origin: Option<&str>) -> HeaderMap {
@@ -16623,6 +16638,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             Ok(Json(LiveUtterance {
                 text: "hello".into(),
                 ink: None,
+                view: None,
             })),
         )
         .await
@@ -16633,6 +16649,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                 route: "#/live".into(),
                 context: None,
                 window: None,
+                view: None,
                 client: None,
             })),
         )
@@ -16679,6 +16696,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                     width: 1600,
                     height: 1000,
                 })),
+                view: None,
                 client: None,
             })),
         )
@@ -16705,6 +16723,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                 route: "#/inbox".into(),
                 context: None,
                 window: None,
+                view: None,
                 client: None,
             })),
         )
@@ -16729,6 +16748,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                 route: "#/inbox".into(),
                 context: Some(None),
                 window: Some(None),
+                view: None,
                 client: None,
             })),
         )

@@ -1138,6 +1138,52 @@ run 0 "$MESA" live listen --wait 1
 [ "$CODE" = "0" ] || fail "live listen on timeout must exit 0 — a quiet minute is data"
 ok "live listen on timeout: null, exit 0"
 
+# ---- the view line (mesa task 1424) ----
+#
+# A user turn carries the page's one-line view of the browser at the moment it
+# was submitted, and that line becomes the session's latest view. The route
+# report carries it too, three-way like `context`, so a panel toggled between
+# turns reaches `live status`. Bounded at LIVE_VIEW_MAX (300) chars.
+VIEW='p7 claude-config · files · SKILL.md · chat open · agents closed · board 12 · nav collapsed'
+api 201 POST "/api/live/utterance" "$(jq -n --arg v "$VIEW" '{text:"what is this file", view:$v}')"
+UV=$(jqb .id)
+[ "$(jqb .view)" = "$VIEW" ] || fail "utterance with view: must carry it (got $(jqb .view))"
+run 0 "$MESA" live listen --wait 5
+[ "$(jqs .id)" = "$UV" ] || fail "live listen: the view turn"
+[ "$(jqs .view)" = "$VIEW" ] || fail "live listen: the turn must carry its view"
+run 0 "$MESA" live status
+[ "$(jqs .view)" = "$VIEW" ] || fail "live status: the latest view (got $(jqs .view))"
+run 0 "$MESA" live status --quiet
+[ "$(jqs .view)" = "$VIEW" ] || fail "live status --quiet keeps the bounded view"
+api 201 POST "/api/live/utterance" '{"text":"no view here"}'
+[ "$(jqb .view)" = "null" ] || fail "an utterance with no view carries null"
+run 0 "$MESA" live listen --quiet --wait 5
+jq -e 'has("view") and (has("text") | not)' <<<"$STDOUT" >/dev/null ||
+  fail "live listen --quiet must keep view and drop text: $STDOUT"
+run 0 "$MESA" live status
+[ "$(jqs .view)" = "$VIEW" ] || fail "a turn without a view must leave the session's alone"
+ok "a user turn carries its view to live listen (kept by --quiet), and live status shows the latest"
+
+api 200 POST "/api/live/route" '{"route":"#/inbox","view":"inbox · chat closed"}'
+[ "$(jqb .view)" = "inbox · chat closed" ] || fail "route report: a view replaces"
+run 0 "$MESA" live status
+[ "$(jqs .view)" = "inbox · chat closed" ] || fail "live status: the reported view"
+api 200 POST "/api/live/route" '{"route":"#/inbox"}'
+[ "$(jqb .view)" = "inbox · chat closed" ] || fail "route report: an omitted view leaves it"
+LONGVIEW=$(printf 'x%.0s' $(seq 301))
+api 422 POST "/api/live/route" "$(jq -n --arg v "$LONGVIEW" '{route:"#/live", view:$v}')"
+[ "$(jqb .error.code)" = "validation" ] || fail "an over-long view on the route: error.code"
+api 422 POST "/api/live/utterance" "$(jq -n --arg v "$LONGVIEW" '{text:"too much", view:$v}')"
+[ "$(jqb .error.code)" = "validation" ] || fail "an over-long view on an utterance: error.code"
+run 0 "$MESA" live listen --wait 1
+[ "$STDOUT" = "null" ] || fail "a refused view must write no turn"
+api 200 GET "/api/live"
+[ "$(jqb .session.route)" = "#/inbox" ] || fail "a refused view must leave the route alone"
+[ "$(jqb .session.view)" = "inbox · chat closed" ] || fail "a refused view must leave the view alone"
+api 200 POST "/api/live/route" '{"route":"#/inbox","view":null}'
+[ "$(jqb .view)" = "null" ] || fail "route report: an explicit null clears the view"
+ok "the route report's view is three-way (omitted keeps, null clears, a value replaces), and one over 300 chars is 422 writing nothing"
+
 # Two listeners, one utterance: exactly one of them may hear it.
 "$MESA" live listen --wait 6 >"$TMP/listen-a.json" 2>/dev/null &
 LA=$!
@@ -3854,7 +3900,7 @@ NP=$(jqs .id)
 ok "live notice permission: a mesa turn with the fixed sentence, no action, notice=permission"
 
 run 0 "$MESA" live notice --quiet permission
-[ "$(jq -c 'keys' <<<"$STDOUT")" = '["action","agent_id","board_id","created_at","delivered_at","id","image_path","notice","played_at","role","session_id","target"]' ] ||
+[ "$(jq -c 'keys' <<<"$STDOUT")" = '["action","agent_id","board_id","created_at","delivered_at","id","image_path","notice","played_at","role","session_id","target","view"]' ] ||
   fail "notice --quiet: key set (got $(jq -c keys <<<"$STDOUT"))"
 [ "$(jqs .notice)" = "permission" ] || fail "notice --quiet keeps notice"
 [ "$(jqs .id)" = "$NP" ] || fail "dedupe: a second permission notice in one span must answer the existing id"

@@ -57,6 +57,13 @@ image_path: string | null,
  */
 board_id: number | null, 
 /**
+ * The compact one-line view of the person's browser captured the moment
+ * this user turn was submitted (mesa task 1424) — see
+ * [`LiveSession::view`]. Null on a Naru turn and whenever the page sent
+ * none. Bounded, so `--quiet` keeps it.
+ */
+view: string | null, 
+/**
  * When the turn was recorded (SQLite `datetime` text, UTC).
  */
 created_at: string, 

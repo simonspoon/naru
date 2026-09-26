@@ -995,11 +995,14 @@ export function stopLive(): Promise<LiveSession> {
 export function sendLiveUtterance(
   text: string,
   ink?: { board_id: number; png_base64: string },
+  view?: string | null,
 ): Promise<LiveTurn> {
-  return request(
-    '/api/live/utterance',
-    jsonInit('POST', ink === undefined ? { text } : { text, ink }),
-  )
+  // `view` is the page's one-line view of the browser at submit (mesa task
+  // 1424, `liveView.ts`); an absent or empty one stores none.
+  const body: Record<string, unknown> = { text }
+  if (ink !== undefined) body.ink = ink
+  if (view) body.view = view
+  return request('/api/live/utterance', jsonInit('POST', body))
 }
 
 /**
@@ -1058,8 +1061,9 @@ export function reportLiveRoute(
   context: LiveContext | null,
   window: LiveWindow | null,
   client: string,
+  view: string | null,
 ): Promise<LiveSession> {
-  return request('/api/live/route', jsonInit('POST', { route, context, window, client }))
+  return request('/api/live/route', jsonInit('POST', { route, context, window, client, view }))
 }
 
 /**

@@ -1243,6 +1243,12 @@ const MIGRATIONS: &[&str] = &[
         delivered_at TEXT
     );
     CREATE INDEX idx_live_results_session ON live_results(session_id);",
+    // Task 1424: the compact one-line `view` of the person's browser — route,
+    // open item, which panels are open — captured on a user turn at the
+    // moment it was submitted, and the latest one on the session (written by
+    // that turn and by the page's route report). NULL when no page said.
+    "ALTER TABLE live_turns ADD COLUMN view TEXT;
+     ALTER TABLE live_sessions ADD COLUMN view TEXT;",
 ];
 
 /// Selects full task rows including the derived `blocked` flag.
@@ -1475,7 +1481,7 @@ fn row_to_inbox_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<InboxItem> {
 /// decide it is still the one speaking.
 const LIVE_SESSION_COLUMNS: &str = "id, project_id, agent_id, status, route, started_at, \
      updated_at, ended_at, context, working_since, window_box, lease, resting_since, \
-     CASE WHEN speaker_seen_at >= datetime('now', '-10 seconds') THEN speaker END";
+     CASE WHEN speaker_seen_at >= datetime('now', '-10 seconds') THEN speaker END, view";
 
 /// What [`Store::live_rest`] answers for a resting session (mesa task 1155).
 #[derive(Debug, Clone, PartialEq)]
@@ -1487,7 +1493,7 @@ pub struct LiveRest {
 }
 
 const LIVE_TURN_COLUMNS: &str = "id, session_id, role, text, action, target, \
-     created_at, delivered_at, played_at, notice, agent_id, image_path, board_id";
+     created_at, delivered_at, played_at, notice, agent_id, image_path, board_id, view";
 
 /// Longest route mesa will store or navigate to. A route is a hash path the
 /// page already knows how to render, not free text, so the bound is generous
@@ -1611,6 +1617,7 @@ fn row_to_live_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<LiveSession>
         lease: row.get(11)?,
         resting_since: row.get(12)?,
         speaker: row.get(13)?,
+        view: row.get(14)?,
     })
 }
 
@@ -1631,6 +1638,7 @@ fn row_to_live_turn(row: &rusqlite::Row<'_>) -> rusqlite::Result<LiveTurn> {
             .get::<_, Option<String>>(11)?
             .map(|stored| board::resolve_live_ink(&stored)),
         board_id: row.get(12)?,
+        view: row.get(13)?,
         created_at: row.get(6)?,
         delivered_at: row.get(7)?,
         played_at: row.get(8)?,
@@ -1844,6 +1852,25 @@ fn validate_live_route(route: &str) -> Result<String> {
         )));
     }
     Ok(route.to_string())
+}
+
+/// Longest a live **view** line may be (mesa task 1424), in characters. The
+/// line is a compact one-line snapshot of the person's browser the page
+/// builds (`frontend/src/liveView.ts`, which caps at the same number) and it
+/// rides on every user turn and in every quiet projection, so the bound keeps
+/// it a line rather than a page.
+pub const LIVE_VIEW_MAX: usize = 300;
+
+/// The one view rule, shared by a user turn and the route report: trimmed,
+/// bounded, and empty (or all whitespace) meaning "no view" — stored NULL.
+fn validate_live_view(view: &str) -> Result<Option<String>> {
+    let view = view.trim();
+    if view.chars().count() > LIVE_VIEW_MAX {
+        return Err(Error::Validation(format!(
+            "view must be at most {LIVE_VIEW_MAX} characters"
+        )));
+    }
+    Ok((!view.is_empty()).then(|| view.to_string()))
 }
 
 /// Longest a client id may be. It is a browser's own opaque id
@@ -5695,8 +5722,12 @@ impl Store {
         route: &str,
         context: Option<Option<&LiveContext>>,
         window: Option<Option<&LiveWindow>>,
+        view: Option<Option<&str>>,
     ) -> Result<LiveSession> {
         let route = validate_live_route(route)?;
+        let view = view
+            .map(|v| v.map(validate_live_view).transpose().map(Option::flatten))
+            .transpose()?;
         let context = context
             .map(|c| c.map(validate_live_context).transpose())
             .transpose()?;
@@ -5714,6 +5745,8 @@ impl Store {
         let window = window
             .flatten()
             .map(|w| serde_json::to_string(&w).expect("a validated window always serializes"));
+        let view_given = view.is_some();
+        let view = view.flatten();
         self.get_live_session(id)?;
         self.conn.execute(
             // One statement, so "keep what is there" is decided inside the
@@ -5722,8 +5755,18 @@ impl Store {
             "UPDATE live_sessions SET route = ?2, \
              context = CASE WHEN ?3 THEN ?4 ELSE context END, \
              window_box = CASE WHEN ?5 THEN ?6 ELSE window_box END, \
+             view = CASE WHEN ?7 THEN ?8 ELSE view END, \
              updated_at = datetime('now') WHERE id = ?1",
-            (id, &route, context_given, &context, window_given, &window),
+            (
+                id,
+                &route,
+                context_given,
+                &context,
+                window_given,
+                &window,
+                view_given,
+                &view,
+            ),
         )?;
         self.get_live_session(id)
     }
@@ -5900,6 +5943,59 @@ impl Store {
             })
     }
 
+    /// Records a plain **user** turn — [`Store::add_live_turn`]'s user case —
+    /// with the page's one-line **view** of the browser at the moment it was
+    /// submitted (mesa task 1424). A view (non-empty after trimming) is
+    /// stored on the turn and becomes the session's latest `view` in the same
+    /// savepoint; an absent or empty one stores NULL and leaves the session's
+    /// alone. Validated before anything is written.
+    pub fn add_live_user_turn(
+        &mut self,
+        session_id: i64,
+        text: &str,
+        view: Option<&str>,
+    ) -> Result<LiveTurn> {
+        let view = view.map(validate_live_view).transpose()?.flatten();
+        self.conn.execute_batch("SAVEPOINT live_view")?;
+        let written = self
+            .add_live_turn(session_id, LiveRole::User, text, None, None)
+            .and_then(|turn| {
+                self.write_live_turn_view(session_id, turn.id, view.as_deref())?;
+                self.conn.execute_batch("RELEASE live_view")?;
+                Ok(turn.id)
+            });
+        match written {
+            Ok(id) => self.get_live_turn(id),
+            Err(e) => {
+                let _ = self
+                    .conn
+                    .execute_batch("ROLLBACK TO live_view; RELEASE live_view");
+                Err(e)
+            }
+        }
+    }
+
+    /// Stamps a validated view on a just-inserted turn and on its session —
+    /// nothing at all for `None`. Always called inside a caller's savepoint.
+    fn write_live_turn_view(
+        &mut self,
+        session_id: i64,
+        turn_id: i64,
+        view: Option<&str>,
+    ) -> Result<()> {
+        if let Some(view) = view {
+            self.conn.execute(
+                "UPDATE live_turns SET view = ?1 WHERE id = ?2",
+                (view, turn_id),
+            )?;
+            self.conn.execute(
+                "UPDATE live_sessions SET view = ?1 WHERE id = ?2",
+                (view, session_id),
+            )?;
+        }
+        Ok(())
+    }
+
     /// Records a **user** turn that carries the person's annotated board
     /// (mesa task 1353): the text, as [`Store::add_live_turn`] records any
     /// user turn, plus a PNG of the whiteboard with their ink over it, written
@@ -5922,7 +6018,9 @@ impl Store {
         text: &str,
         board_id: i64,
         png: &[u8],
+        view: Option<&str>,
     ) -> Result<LiveTurn> {
+        let view = view.map(validate_live_view).transpose()?.flatten();
         if !png.starts_with(PNG_MAGIC) {
             return Err(Error::Validation("board ink must be a PNG image".into()));
         }
@@ -5946,7 +6044,7 @@ impl Store {
         }
         self.conn.execute_batch("SAVEPOINT live_ink")?;
         let written = self
-            .write_live_ink_turn(session_id, text, board_id, png)
+            .write_live_ink_turn(session_id, text, board_id, png, view.as_deref())
             .and_then(|id| {
                 // A RELEASE that fails has committed nothing, so it takes the
                 // same way out as any other failure below: the turn rolled
@@ -5973,15 +6071,17 @@ impl Store {
         }
     }
 
-    /// The three steps [`Store::add_live_ink_turn`] runs inside its savepoint.
+    /// The steps [`Store::add_live_ink_turn`] runs inside its savepoint.
     fn write_live_ink_turn(
         &mut self,
         session_id: i64,
         text: &str,
         board_id: i64,
         png: &[u8],
+        view: Option<&str>,
     ) -> Result<i64> {
         let turn = self.add_live_turn(session_id, LiveRole::User, text, None, None)?;
+        self.write_live_turn_view(session_id, turn.id, view)?;
         let path = board::live_ink_path(session_id, turn.id);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -13592,7 +13692,7 @@ mod tests {
         let (mut store, _dir) = temp_store();
         let session = store.start_live_session(None).unwrap();
         let routed = store
-            .set_live_route(session.id, "  #/projects/3/files  ", None, None)
+            .set_live_route(session.id, "  #/projects/3/files  ", None, None, None)
             .unwrap();
         assert_eq!(routed.route.as_deref(), Some("#/projects/3/files"));
         assert_ne!(routed.updated_at, "");
@@ -13605,7 +13705,7 @@ mod tests {
             &format!("#/{}", "x".repeat(LIVE_ROUTE_MAX)),
         ] {
             let err = store
-                .set_live_route(session.id, bad, None, None)
+                .set_live_route(session.id, bad, None, None, None)
                 .unwrap_err();
             assert!(matches!(err, Error::Validation(_)), "{bad:?}: {err:?}");
         }
@@ -13634,6 +13734,7 @@ mod tests {
                     detail: Some("line 42".into()),
                 })),
                 None,
+                None,
             )
             .unwrap();
         let ctx = reported.context.clone().unwrap();
@@ -13660,6 +13761,7 @@ mod tests {
                     detail: None,
                 })),
                 None,
+                None,
             )
             .unwrap();
         let ctx = bare.context.unwrap();
@@ -13669,7 +13771,7 @@ mod tests {
         // An explicit `null` is how a page says nothing is selected, and it
         // clears the stored context (mesa task 1016).
         let cleared = store
-            .set_live_route(session.id, "#/inbox", Some(None), None)
+            .set_live_route(session.id, "#/inbox", Some(None), None, None)
             .unwrap();
         assert_eq!(cleared.context, None);
     }
@@ -13688,7 +13790,7 @@ mod tests {
             height: 1000,
         };
         let reported = store
-            .set_live_route(session.id, "#/live", None, Some(Some(&box_)))
+            .set_live_route(session.id, "#/live", None, Some(Some(&box_)), None)
             .unwrap();
         assert_eq!(reported.window, Some(box_));
         assert_eq!(
@@ -13696,7 +13798,7 @@ mod tests {
             Some(box_)
         );
         let cleared = store
-            .set_live_route(session.id, "#/live", None, Some(None))
+            .set_live_route(session.id, "#/live", None, Some(None), None)
             .unwrap();
         assert_eq!(cleared.window, None);
     }
@@ -13732,12 +13834,13 @@ mod tests {
                 "#/projects/3/files",
                 Some(Some(&ctx)),
                 Some(Some(&box_)),
+                None,
             )
             .unwrap();
 
         // The phone: a route and nothing it has any authority to say.
         let after = store
-            .set_live_route(session.id, "#/inbox", None, None)
+            .set_live_route(session.id, "#/inbox", None, None, None)
             .unwrap();
         assert_eq!(after.route.as_deref(), Some("#/inbox"));
         assert_eq!(after.context, Some(ctx.clone()));
@@ -13750,13 +13853,13 @@ mod tests {
         // An explicit null is the other half of the three-way key: the page
         // saying nothing is selected, which still clears.
         let cleared = store
-            .set_live_route(session.id, "#/inbox", Some(None), None)
+            .set_live_route(session.id, "#/inbox", Some(None), None, None)
             .unwrap();
         assert_eq!(cleared.context, None);
         // …and clearing one says nothing about the other.
         assert_eq!(cleared.window, Some(box_));
         let cleared = store
-            .set_live_route(session.id, "#/inbox", None, Some(None))
+            .set_live_route(session.id, "#/inbox", None, Some(None), None)
             .unwrap();
         assert_eq!(cleared.window, None);
     }
@@ -13776,7 +13879,7 @@ mod tests {
             height: 600,
         };
         store
-            .set_live_route(session.id, "#/live", None, Some(Some(&good)))
+            .set_live_route(session.id, "#/live", None, Some(Some(&good)), None)
             .unwrap();
         for bad in [
             LiveWindow {
@@ -13805,7 +13908,7 @@ mod tests {
             },
         ] {
             let err = store
-                .set_live_route(session.id, "#/inbox", None, Some(Some(&bad)))
+                .set_live_route(session.id, "#/inbox", None, Some(Some(&bad)), None)
                 .unwrap_err();
             assert!(matches!(err, Error::Validation(_)), "{bad:?}: {err:?}");
         }
@@ -13828,7 +13931,13 @@ mod tests {
             detail: None,
         };
         store
-            .set_live_route(session.id, "#/projects/3/diagrams", Some(Some(&good)), None)
+            .set_live_route(
+                session.id,
+                "#/projects/3/diagrams",
+                Some(Some(&good)),
+                None,
+                None,
+            )
             .unwrap();
 
         let long = "x".repeat(LIVE_CONTEXT_FIELD_MAX + 1);
@@ -13856,7 +13965,7 @@ mod tests {
             ),
         ] {
             let err = store
-                .set_live_route(session.id, "#/inbox", Some(Some(&bad)), None)
+                .set_live_route(session.id, "#/inbox", Some(Some(&bad)), None, None)
                 .unwrap_err();
             match err {
                 Error::Validation(m) => assert!(m.contains(field), "{field}: {m}"),
@@ -13876,7 +13985,7 @@ mod tests {
         let (mut store, _dir) = temp_store();
         let session = store.start_live_session(None).unwrap();
         store
-            .set_live_route(session.id, "#/inbox", None, None)
+            .set_live_route(session.id, "#/inbox", None, None, None)
             .unwrap();
         for garbage in ["not json at all", r#"{"kind":"holodeck"}"#, "{}"] {
             store
@@ -14627,15 +14736,15 @@ mod tests {
         );
         assert_eq!(
             MIGRATIONS.len(),
-            78,
-            "a fresh db should report user_version 78"
+            79,
+            "a fresh db should report user_version 79"
         );
         let (store, _dir) = temp_store();
         let version: i64 = store
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 78);
+        assert_eq!(version, 79);
     }
 
     /// Pins the project-notebook columns (mesa task 1333) at index 72
@@ -16050,6 +16159,109 @@ mod tests {
         png
     }
 
+    /// A user turn may carry the page's one-line view (mesa task 1424): it is
+    /// stored on the turn and becomes the session's view in the same write;
+    /// an empty one stores NULL and leaves the session's alone; one over the
+    /// bound is `validation` and writes nothing. The ink path carries it too.
+    #[test]
+    fn a_user_turn_carries_the_view_and_moves_the_sessions() {
+        let (mut store, _dir, _lock) = ink_test_store();
+        let session = store.start_live_session(None).unwrap();
+        let turn = store
+            .add_live_user_turn(session.id, "this page", Some("  p3 · files · a.rs  "))
+            .unwrap();
+        assert_eq!(turn.view.as_deref(), Some("p3 · files · a.rs"));
+        assert_eq!(
+            store.get_live_session(session.id).unwrap().view.as_deref(),
+            Some("p3 · files · a.rs")
+        );
+
+        let bare = store
+            .add_live_user_turn(session.id, "no view", Some("   "))
+            .unwrap();
+        assert_eq!(bare.view, None);
+        assert_eq!(
+            store.get_live_session(session.id).unwrap().view.as_deref(),
+            Some("p3 · files · a.rs"),
+            "an empty view must leave the session's alone"
+        );
+
+        let before = store.list_live_turns(session.id, None, 500).unwrap().len();
+        let long = "x".repeat(LIVE_VIEW_MAX + 1);
+        assert!(matches!(
+            store.add_live_user_turn(session.id, "too much", Some(&long)),
+            Err(Error::Validation(_))
+        ));
+        assert_eq!(
+            store.list_live_turns(session.id, None, 500).unwrap().len(),
+            before
+        );
+        // Exactly at the bound is fine.
+        let at = "y".repeat(LIVE_VIEW_MAX);
+        assert_eq!(
+            store
+                .add_live_user_turn(session.id, "at the bound", Some(&at))
+                .unwrap()
+                .view
+                .as_deref(),
+            Some(at.as_str())
+        );
+
+        let board = store
+            .add_live_board(session.id, LiveBoardKind::Markdown, None, "body", None)
+            .unwrap();
+        let ink = store
+            .add_live_ink_turn(session.id, "look", board.id, &tiny_png(), Some("board 1"))
+            .unwrap();
+        assert_eq!(ink.view.as_deref(), Some("board 1"));
+        assert_eq!(
+            store.get_live_session(session.id).unwrap().view.as_deref(),
+            Some("board 1")
+        );
+        assert!(matches!(
+            store.add_live_ink_turn(session.id, "look", board.id, &tiny_png(), Some(&long)),
+            Err(Error::Validation(_))
+        ));
+    }
+
+    /// The route report's `view` is three-way (mesa task 1424), like
+    /// `context`: omitted leaves it, `null` clears it, a value replaces it.
+    #[test]
+    fn set_live_route_reports_the_view_three_ways() {
+        let (mut store, _dir) = temp_store();
+        let session = store.start_live_session(None).unwrap();
+        let s = store
+            .set_live_route(
+                session.id,
+                "#/inbox",
+                None,
+                None,
+                Some(Some("inbox · chat open")),
+            )
+            .unwrap();
+        assert_eq!(s.view.as_deref(), Some("inbox · chat open"));
+        let s = store
+            .set_live_route(session.id, "#/inbox", None, None, None)
+            .unwrap();
+        assert_eq!(s.view.as_deref(), Some("inbox · chat open"));
+        let long = "x".repeat(LIVE_VIEW_MAX + 1);
+        assert!(matches!(
+            store.set_live_route(session.id, "#/live", None, None, Some(Some(&long))),
+            Err(Error::Validation(_))
+        ));
+        let s = store.get_live_session(session.id).unwrap();
+        assert_eq!(
+            s.route.as_deref(),
+            Some("#/inbox"),
+            "a refused view writes nothing"
+        );
+        assert_eq!(s.view.as_deref(), Some("inbox · chat open"));
+        let s = store
+            .set_live_route(session.id, "#/inbox", None, None, Some(None))
+            .unwrap();
+        assert_eq!(s.view, None);
+    }
+
     /// A user turn carrying ink (mesa task 1353) writes the PNG byte-identical
     /// beside the db and points the turn at it and at its board; a plain turn
     /// carries neither, and the newest ink per board is what `keep` finds.
@@ -16069,7 +16281,7 @@ mod tests {
 
         let png = tiny_png();
         let turn = store
-            .add_live_ink_turn(session.id, "  this one  ", board.id, &png)
+            .add_live_ink_turn(session.id, "  this one  ", board.id, &png, None)
             .unwrap();
         assert_eq!(turn.role, LiveRole::User);
         assert_eq!(turn.text, "this one");
@@ -16085,7 +16297,7 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), png);
 
         let second = store
-            .add_live_ink_turn(session.id, "again", board.id, &png)
+            .add_live_ink_turn(session.id, "again", board.id, &png, None)
             .unwrap();
         assert_eq!(
             store.latest_live_ink(board.id).unwrap().unwrap().id,
@@ -16121,7 +16333,7 @@ mod tests {
             .add_live_board(session.id, LiveBoardKind::Markdown, None, "body", None)
             .unwrap();
         let turn = store
-            .add_live_ink_turn(session.id, "look", board.id, &tiny_png())
+            .add_live_ink_turn(session.id, "look", board.id, &tiny_png(), None)
             .unwrap();
         assert_eq!(
             raw_image_path(&store, turn.id),
@@ -16146,10 +16358,10 @@ mod tests {
             .unwrap();
         let png = tiny_png();
         let relative = store
-            .add_live_ink_turn(session.id, "new", board.id, &png)
+            .add_live_ink_turn(session.id, "new", board.id, &png, None)
             .unwrap();
         let legacy = store
-            .add_live_ink_turn(session.id, "old", board.id, &png)
+            .add_live_ink_turn(session.id, "old", board.id, &png, None)
             .unwrap();
         let old_abs = legacy.image_path.clone().unwrap();
         store
@@ -16195,7 +16407,7 @@ mod tests {
                 .add_live_board(session.id, LiveBoardKind::Markdown, None, "body", None)
                 .unwrap();
             let turn = store
-                .add_live_ink_turn(session.id, "ink", board.id, &png)
+                .add_live_ink_turn(session.id, "ink", board.id, &png, None)
                 .unwrap();
             store.end_live_session(session.id).unwrap();
             (session.id, board.id, turn)
@@ -16268,7 +16480,7 @@ mod tests {
             "../escape.png".into(),
         ] {
             let turn = store
-                .add_live_ink_turn(session.id, "ink", board.id, &tiny_png())
+                .add_live_ink_turn(session.id, "ink", board.id, &tiny_png(), None)
                 .unwrap();
             store
                 .conn
@@ -16303,7 +16515,7 @@ mod tests {
             .unwrap();
         let png = tiny_png();
         store
-            .add_live_ink_turn(session.id, "keep this", board.id, &png)
+            .add_live_ink_turn(session.id, "keep this", board.id, &png, None)
             .unwrap();
         // What `keep --task` does with the ink it finds.
         let ink = store.latest_live_ink(board.id).unwrap().unwrap();
@@ -16349,7 +16561,7 @@ mod tests {
             (mine.id, tiny_png(), "   "),
         ] {
             let err = store
-                .add_live_ink_turn(other.id, text, board_id, &png)
+                .add_live_ink_turn(other.id, text, board_id, &png, None)
                 .unwrap_err();
             assert!(matches!(err, Error::Validation(_)), "{err}");
         }
@@ -16389,6 +16601,20 @@ mod tests {
         assert!(
             MIGRATIONS[RESULTS].contains("CREATE TABLE live_results"),
             "migration {RESULTS} is no longer the live results migration — a \
+             shipped migration was edited or reordered, which is never allowed"
+        );
+    }
+
+    /// Pins the view-line columns (mesa task 1424) at index 78
+    /// (`user_version` 79), for the reason
+    /// [`the_live_summaries_table_arrives_at_migration_49`] gives.
+    #[test]
+    fn the_live_view_columns_arrive_at_migration_78() {
+        const VIEW: usize = 78;
+        assert!(
+            MIGRATIONS[VIEW].contains("ALTER TABLE live_turns ADD COLUMN view")
+                && MIGRATIONS[VIEW].contains("ALTER TABLE live_sessions ADD COLUMN view"),
+            "migration {VIEW} is no longer the live view migration — a \
              shipped migration was edited or reordered, which is never allowed"
         );
     }

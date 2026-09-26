@@ -1873,7 +1873,7 @@ mod tests {
             .unwrap();
         let png = b"\x89PNG\r\n\x1a\nink".to_vec();
         let turn = store
-            .add_live_ink_turn(session.id, "look", board.id, &png)
+            .add_live_ink_turn(session.id, "look", board.id, &png, None)
             .unwrap();
         let home = tmp.path().join("Users/old");
         fs::create_dir_all(&home).unwrap();

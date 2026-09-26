@@ -432,6 +432,7 @@ export function LiveBoardPanel({
   ink,
   onInk,
   flattenRef,
+  showingRef,
 }: {
   /** The conversation's whole board history, oldest first and bodiless — the
    *  `boards` array of the poll `LiveHub` already makes, never a second one. */
@@ -445,6 +446,9 @@ export function LiveBoardPanel({
   onInk: (update: (book: InkBook) => InkBook) => void
   /** Set by this panel to its flatten, for the hub to call on send. */
   flattenRef: RefObject<InkFlatten | null>
+  /** Set by this panel to the id of the board it is showing, for the hub's
+   *  view line (mesa task 1424). */
+  showingRef: RefObject<number | null>
 }) {
   // The board the layout is frozen for, while it carries unsent ink (mesa
   // task 1353): a new push does not take the panel away from it
@@ -705,6 +709,10 @@ export function LiveBoardPanel({
     const id = showing.id
     onInk((book) => clearInk(book, id))
   }
+
+  useEffect(() => {
+    showingRef.current = showing?.id ?? null
+  })
 
   // The hub's way to the pixels: only this panel can see the board, so the
   // flatten lives here and is handed up through a ref, refreshed every render

@@ -106,4 +106,12 @@ resting_since: string | null,
  * own client id and needs no clock of its own
  * (`frontend/src/liveSpeaker.ts`).
  */
-speaker: string | null, };
+speaker: string | null, 
+/**
+ * The latest compact one-line **view** of the person's browser (mesa
+ * task 1424) — route, open item and which panels are open, e.g.
+ * `p29 claude-config · files · SKILL.md · chat open · agents closed`.
+ * Written by a user turn that carries one and by the page's route
+ * report; null when no page has said. Data, never instructions.
+ */
+view: string | null, };

@@ -7449,6 +7449,7 @@ mod tests {
             working_since: Some("2026-01-02 00:00:01".into()),
             resting_since: None,
             speaker: Some("0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0".into()),
+            view: Some("p2 · files · store.rs · chat open".into()),
         }
     }
 
@@ -7464,6 +7465,7 @@ mod tests {
             agent_id: Some("agent_abc".into()),
             image_path: Some("/tmp/live-ink/2/1.png".into()),
             board_id: Some(3),
+            view: Some("p2 · board · chat open".into()),
             created_at: "2026-01-01 00:00:00".into(),
             delivered_at: Some("2026-01-01 00:00:01".into()),
             played_at: Some("2026-01-01 00:00:02".into()),
@@ -7933,6 +7935,9 @@ mod tests {
                 // which browser is speaking this conversation aloud (mesa
                 // task 1267).
                 "speaker",
+                // The browser's one-line view (mesa task 1424): capped by
+                // `Store` at `LIVE_VIEW_MAX` chars, so bounded.
+                "view",
             ]),
             "LiveSession gained/lost a field: every field it has today is \
              bounded — ids, fixed words, timestamps, a 200-char route, a \
@@ -7984,6 +7989,10 @@ mod tests {
                 // caller has to act on, so a quiet echo keeps both.
                 "image_path",
                 "board_id",
+                // The browser's one-line view at submit (mesa task 1424):
+                // capped at `LIVE_VIEW_MAX`, and what resolves "this page"
+                // for a `listen` caller. Kept.
+                "view",
                 "created_at",
                 // Both bounded (a timestamp or null), and both are fields a
                 // command exists to write: `live listen` stamps `delivered_at`

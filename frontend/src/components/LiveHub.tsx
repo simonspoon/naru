@@ -45,6 +45,7 @@ import {
   type ReclaimCause,
 } from '../liveCapture'
 import { currentContext, sameContext, subscribeContext } from '../liveContext'
+import { agentsLabel, openAgents, sectionFor, viewLine } from '../liveView'
 import { mayHold, SegmentChain } from '../liveDrain'
 import { DiscardLedger, liveCancelVerdict } from '../liveCancel'
 import {
@@ -523,6 +524,9 @@ export function LiveHub({
   onSidebars,
   slot,
   boardSlot,
+  navCollapsed,
+  agentsCollapsed,
+  activeProjectId,
 }: {
   /** Fold both sidebars away (`true`) or bring them back. App owns that state
    *  — the hub only relays what the conversation asked for. */
@@ -536,6 +540,11 @@ export function LiveHub({
    *  because the two panels open and close independently — a board arrives
    *  while the conversation is shut as often as not. */
   boardSlot: HTMLElement | null
+  /** App's two sidebar flags and the project the route is on, read only
+   *  into the view line each turn carries (mesa task 1424, `liveView.ts`). */
+  navCollapsed: boolean
+  agentsCollapsed: boolean
+  activeProjectId: number | null
 }) {
   // What the listen switch is bound to (mesa task 1079). The keymap is the
   // page-wide one; the label is what the button's title and the capture hint
@@ -593,6 +602,9 @@ export function LiveHub({
   // lost, not a conversation broken — the ref just keeps the built-in set.
   const vocabRef = useRef<Vocabulary>(buildVocabulary(MESA_VOCABULARY))
   const vocabBuiltFor = useRef<number | null>(null)
+  // Every project's name by id, off the same fetch, for the view line's
+  // project part (mesa task 1424) — the route's project, not the session's.
+  const projectNames = useRef<Map<number, string>>(new Map())
   // What the conversation is *about*, for the head's chip (mesa task 1069) —
   // the name behind the session's `project_id`, off the fetch above rather
   // than a second one. Null while it is unknown, and the chip simply does not
@@ -611,6 +623,7 @@ export function LiveHub({
           ...projects.map((p) => p.name),
         ])
         setProjectName(projects.find((p) => p.id === scope)?.name ?? null)
+        projectNames.current = new Map(projects.map((p) => [p.id, p.name]))
       })
       .catch(() => {
         vocabRef.current = buildVocabulary(MESA_VOCABULARY)
@@ -1081,6 +1094,30 @@ export function LiveHub({
   }, [])
   // The panel's flatten, which only it can perform — it sees the pixels.
   const flattenInk = useRef<InkFlatten | null>(null)
+  // Which board the panel is showing, set by the panel for the view line.
+  const boardShowing = useRef<number | null>(null)
+
+  // The view line (mesa task 1424, `liveView.ts`): built when it is sent — a
+  // turn at submit, a route report when it fires — from refs refreshed every
+  // render, so neither `reportRoute` nor a queued post closes over a stale
+  // panel state and nothing is rebuilt when a panel moves.
+  const viewNow = useRef<() => string>(() => '')
+  useEffect(() => {
+    viewNow.current = () =>
+      viewLine({
+        projectId: activeProjectId,
+        projectName:
+          activeProjectId === null ? null : (projectNames.current.get(activeProjectId) ?? null),
+        section: sectionFor(window.location.hash),
+        item: currentContext()?.label ?? null,
+        chatOpen: open,
+        agentsOpen: !agentsCollapsed,
+        agentDetail: agentsLabel(openAgents()),
+        boardOpen: nextBoardPanel.open,
+        boardId: boardShowing.current,
+        navCollapsed,
+      })
+  })
 
   // The transcript follows the conversation: a spoken reply the reader cannot
   // see is the one thing the panel must never do. The clip-hidden closed state
@@ -2914,6 +2951,7 @@ export function LiveHub({
     route: string
     context: LiveContext | null
     window: LiveWindow | null
+    view: string
     at: number
   } | null>(null)
   // The claim as the last poll read it, for the dedupe below to consult
@@ -2937,12 +2975,14 @@ export function LiveHub({
       // settled value, not the one that started the flurry.
       const context = currentContext()
       const box = windowBox(window)
+      const view = viewNow.current()
       const last = reported.current
       if (
         last !== null &&
         last.route === route &&
         sameContext(last.context, context) &&
         sameBox(last.window, box) &&
+        last.view === view &&
         // …unless this page holds the voice: the report is the only thing
         // that refreshes the claim, and a still page must not let it lapse.
         !needsSpeakerRefresh(speakerRef.current, client, last.at, Date.now())
@@ -2951,9 +2991,9 @@ export function LiveHub({
       }
       // Remembered only once it landed, so a failed report is retried by the
       // next trigger rather than being treated as already told.
-      reportLiveRoute(route, context, box, client)
+      reportLiveRoute(route, context, box, client, view === '' ? null : view)
         .then(() => {
-          reported.current = { route, context, window: box, at: Date.now() }
+          reported.current = { route, context, window: box, view, at: Date.now() }
         })
         .catch(() => {})
     }, REPORT_DEBOUNCE_MS)
@@ -3224,6 +3264,7 @@ export function LiveHub({
         return sendLiveUtterance(
           text,
           carried === null ? undefined : { board_id: carried.boardId, png_base64: carried.png },
+          viewNow.current(),
         ).then(() => ({ carried, dropped: pending !== null && png === null }))
       })
       .then(
@@ -3899,6 +3940,7 @@ export function LiveHub({
             ink={ink}
             onInk={updateInk}
             flattenRef={flattenInk}
+            showingRef={boardShowing}
           />,
           boardSlot,
         )}

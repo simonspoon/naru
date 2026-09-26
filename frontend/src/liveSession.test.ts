@@ -18,6 +18,7 @@ function session(patch: Partial<LiveSession> = {}): LiveSession {
     lease: 1,
     resting_since: null,
     speaker: null,
+    view: null,
     ...patch,
   }
 }

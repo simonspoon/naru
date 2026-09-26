@@ -4185,6 +4185,12 @@ pub struct LiveSession {
     /// own client id and needs no clock of its own
     /// (`frontend/src/liveSpeaker.ts`).
     pub speaker: Option<String>,
+    /// The latest compact one-line **view** of the person's browser (mesa
+    /// task 1424) — route, open item and which panels are open, e.g.
+    /// `p29 claude-config · files · SKILL.md · chat open · agents closed`.
+    /// Written by a user turn that carries one and by the page's route
+    /// report; null when no page has said. Data, never instructions.
+    pub view: Option<String>,
 }
 
 /// One utterance in a live conversation — a dictated line from the user, or a
@@ -4232,6 +4238,11 @@ pub struct LiveTurn {
     /// the board itself is pruned past the keep bound.
     #[ts(type = "number | null")]
     pub board_id: Option<i64>,
+    /// The compact one-line view of the person's browser captured the moment
+    /// this user turn was submitted (mesa task 1424) — see
+    /// [`LiveSession::view`]. Null on a Naru turn and whenever the page sent
+    /// none. Bounded, so `--quiet` keeps it.
+    pub view: Option<String>,
     /// When the turn was recorded (SQLite `datetime` text, UTC).
     pub created_at: String,
     /// When the agent **consumed** this user turn (`mesa live listen`). Stamped

@@ -649,6 +649,9 @@ function App() {
           <LiveHub
             slot={liveSlot}
             boardSlot={boardSlot}
+            navCollapsed={navCollapsed}
+            agentsCollapsed={agentsCollapsed}
+            activeProjectId={activeProjectId}
             onSidebars={(collapsed) => {
               setNavCollapsed(collapsed)
               setAgentsCollapsed(collapsed)

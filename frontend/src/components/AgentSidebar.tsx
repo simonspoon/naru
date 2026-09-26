@@ -30,6 +30,7 @@ import {
   parseChildPaneId,
 } from '../agentChild'
 import { formatContextTokens, responsePreview } from '../agentRow'
+import { publishOpenAgents } from '../liveView'
 import {
   clampAgentSidebarWidth,
   DEFAULT_AGENT_SIDEBAR_WIDTH,
@@ -1487,6 +1488,12 @@ export function AgentSidebar({
 
   const agents = [...(sessions ?? [])].sort((a, b) => b.startedAt - a.startedAt)
   const openIds = collectLeafIds(root)
+  // The open agent panes, for the live conversation's view line (mesa task
+  // 1424, `liveView.ts`) — agent panes only, not their child panes.
+  const openAgentKey = openIds.filter((id) => !isChildPaneId(id)).join(' ')
+  useEffect(() => {
+    publishOpenAgents(openAgentKey === '' ? [] : openAgentKey.split(' '))
+  }, [openAgentKey])
   // Phone tier (mesa task 560): this drawer is `min(24rem, 90vw)` — 351px at
   // 390 — and the list rail already claims 240 of that, so a split tree here
   // is not merely awkward, it is two ~11-column terminals. One pane, the

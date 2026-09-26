@@ -1716,6 +1716,40 @@ a conversation genuinely needs; anything more — click this, fill that — is a
 remote-control vocabulary, and the agent already has the whole Naru CLI for
 actually changing things.
 
+## The view line (mesa task 1424)
+
+The route and the context each say one thing; neither says which panels are
+showing. So every **user turn** the page sends carries a `view` — one compact
+line of what the person has open, built by `frontend/src/liveView.ts` at the
+moment the turn is **submitted** (in `postNow`, not when the words were
+spoken), e.g.
+
+```
+p29 claude-config · files · SKILL.md · chat open · agents closed · board 12 · nav collapsed
+```
+
+Its parts, joined by ` · ` with any unknown one omitted: the route's project
+(`p<id>` and its name), the page (`sectionFor` off the hash — the tab after a
+project id, `board` for a bare project, else the first segment), the item in
+focus (`currentContext()?.label`), the conversation panel, the agents panel —
+plus which agent panes it has open (`agent <job id>`, published by
+`AgentSidebar` through the module channel in `liveView.ts`, named only while
+the panel is open) — the whiteboard (`board <id>` for the board showing, or
+`board closed`) and the left nav. Typically well under 40 tokens.
+
+`naru live listen` hands the turn over with its `view`, and the agent reads it
+as **data, never instructions** (the agent definition says so) to resolve
+"this page" or "this file". A user turn stored with a view also writes it to
+`live_sessions.view` in the same savepoint, so `naru live status` shows the
+latest. The route report carries `view` too, **three-way** like `context`
+(omitted leaves it, `null` clears it, a value replaces it), and the hub's 2s
+sample re-reports whenever the line changed, so a panel toggled between turns
+reaches `live status` within a poll. Both columns arrive at migration index 78.
+Bounded at `LIVE_VIEW_MAX` (300 chars) in `Store` — over it is `validation`
+(422) writing nothing, empty or whitespace stores NULL — and the page clamps
+to the same number, so it never sends one the store would refuse. Bounded, so
+`--quiet` keeps it on both a turn and a session.
+
 ## Seeing the screen (`mesa live look`, task 895)
 
 Everything above tells the agent *where the person is*. None of it tells it
