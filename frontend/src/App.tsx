@@ -164,11 +164,6 @@ function App() {
   // rendered in this same commit, so it does not exist while the hub above is
   // rendering, and the ref landing is what says it does now.
   const [liveSlot, setLiveSlot] = useState<HTMLDivElement | null>(null)
-  // And the one it portals the whiteboard into (mesa task 1071), written the
-  // same way and for the same reason. Two slots rather than one: the board
-  // and the conversation open and close independently, so each is its own
-  // flex item on this row.
-  const [boardSlot, setBoardSlot] = useState<HTMLDivElement | null>(null)
   // What the keyboard is bound to right now — the shipped chords until the
   // one `GET /api/config/keymap` this page makes resolves (mesa task 1079).
   const keymap = useKeymap()
@@ -648,7 +643,6 @@ function App() {
               two — so the hub relays the request rather than owning it. */}
           <LiveHub
             slot={liveSlot}
-            boardSlot={boardSlot}
             navCollapsed={navCollapsed}
             agentsCollapsed={agentsCollapsed}
             activeProjectId={activeProjectId}
@@ -690,14 +684,6 @@ function App() {
           <div className="main-slot-pane" style={{ visibility: terminalActive ? 'visible' : 'hidden' }}>
             <TerminalPage active={terminalActive} />
           </div>
-          {/* Where LiveHub portals the whiteboard (mesa task 1071). Inside
-              `.main-slot`, not on `.shell-body`'s row: a board is an overlay
-              mesa throws up mid-sentence and the person dismisses, so it may
-              not take width from the page the way the conversation does — and
-              hung inside this box it covers exactly the page, never the nav
-              beside it. Same `display: contents` slot and ref-callback reason
-              as the conversation's below. */}
-          <div className="board-slot" ref={setBoardSlot} />
         </div>
         {/* Where LiveHub portals its conversation panel (mesa task 887). The
             hub itself stays in the header — everything that makes it work is

@@ -3728,10 +3728,16 @@ main {
 body.agent-sidebar-resizing,
 body.nav-resizing,
 body.files-tree-resizing,
-body.live-board-resizing,
 body.live-sidebar-resizing {
   user-select: none;
   cursor: col-resize;
+}
+
+/* The divider between the panel's two sections (mesa task 1447): `col-resize`
+   stacked, `row-resize` side by side — the divider's own drag sets whichever
+   cursor its axis wants, since `.live-panel-side` runs it the other way. */
+body.live-panel-ratio-resizing {
+  user-select: none;
 }
 
 .agent-sidebar {
@@ -9548,9 +9554,10 @@ button:focus-visible,
    they are two of a kind, down to the drag handle on the left edge (mesa
    task 1144: a transcript read beside a wide page, or a whiteboard, does have
    a width worth choosing). `LiveHub` sets `--live-sidebar-width` inline only
-   once a width has been dragged (`liveSidebarWidth.ts`, remembered per
-   browser); otherwise the `min()` below stands. The width is declared once
-   here and inherited by the body below, which has to repeat it (see there). */
+   once a width has been dragged (`liveSidebarWidth.ts`/`liveBoardWidth.ts`,
+   remembered per browser); otherwise the `min()` below, or `.board-open`'s
+   own, stands. The width is declared once here and inherited by the body
+   below, which has to repeat it (see there). */
 .live-sidebar {
   /* `min`, not a flat 26rem: between the phone tier and a wide window there
      is a band where 26rem is most of the row, and `main`'s floor is only
@@ -9569,6 +9576,18 @@ button:focus-visible,
   display: flex;
   flex-direction: column;
   transition: width 0.15s;
+}
+
+/* Wider once the panel is also holding a board (mesa task 1447): a
+   conversation is a column of short sentences, but an HTML mockup, a diagram
+   or a screenshot is a document, and the panel now has to hold both at once.
+   `min(56rem, 60vw)`, the same `min` shape the old floating board panel used,
+   capped at the page's own width so a narrow window is covered rather than
+   overrun. Only the *default* — `LiveHub` overrides this with the dragged
+   `panelWidth` (`liveBoardWidth.ts`, repurposed from the floating board's own
+   width) exactly as it overrides the plain default below. */
+.live-sidebar.board-open {
+  --live-sidebar-width: min(56rem, 60vw);
 }
 
 /* No width animation under the pointer: the transition above is for open
@@ -9635,86 +9654,132 @@ button:focus-visible,
    person dismisses, so it must never fight the page underneath. As a flex
    item it did: with the nav, the conversation and the agents panel also open,
    a board claiming 40rem left `main` exactly zero pixels at 1280 and 1440. */
-.board-slot {
-  display: contents;
+/* The panel's two sections (mesa task 1447, replacing the whiteboard's own
+   floating overlay and its `.board-slot` portal target): a flex row or
+   column, stacked by default, holding the board section, the divider between
+   them, and the chat section — in that order, which is also the order the
+   arrangement's two axes lay them out in. Fills the space `.live-sidebar-body`
+   used to hand straight to the transcript. */
+.live-panel-sections {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
 }
 
-/* The whiteboard itself: `.live-sidebar`'s rules, hung off `.main-slot`'s
-   right edge — which is where the conversation's own left edge is, so it
-   still reads as a panel beside it — and at a width a picture can actually be
-   read at. A conversation is a column of short sentences; an HTML mockup, a
-   diagram or a screenshot is a document, so this panel is wider —
-   `min(40rem, 50vw)`, the same `min` shape, capped at the page's own width so
-   a narrow window is covered rather than overrun.
+.live-panel-stacked {
+  flex-direction: column;
+}
 
-   That is the *default* only (mesa task 1078): the drag handle on the left
-   edge overrides `--live-board-width` inline, and the stored width is a
-   number, so this expression is what a browser that has never dragged paints.
-   Both must move together — see `liveBoardWidth.ts`, which is also why an
-   unset width sets no inline property rather than a px twin of this rule: it
-   answers 640px on a laptop and on a 3440px monitor alike, and no single
-   number is that on both. */
-.live-board {
-  --live-board-width: min(40rem, 50vw);
-  position: absolute;
-  top: 0;
-  right: 0;
-  width: var(--live-board-width);
-  max-width: 100%;
-  height: 100%;
-  /* Above both `.main-slot-pane`s, which are positioned too. */
-  z-index: 5;
-  border-left: 1px solid var(--border);
-  /* Opaque, unlike the conversation's translucent panel: this one is over the
-     page rather than beside it, and a mockup read through the dashboard
-     behind it is not a mockup. */
-  background: #060a10;
-  box-shadow: -4px 0 24px rgba(0, 0, 0, 0.6);
+.live-panel-side {
+  flex-direction: row;
+}
+
+/* Each section is a flex item along whichever axis the arrangement picked;
+   `LiveHub` sets `flexBasis` inline to the divider's ratio while both are
+   showing, and CSS alone decides the rest: a folded section shrinks to its
+   own header strip and its sibling is free to fill what it gave up. */
+.live-panel-section {
   display: flex;
   flex-direction: column;
-  transition: clip-path 0.15s;
+  min-height: 0;
+  min-width: 0;
 }
 
-/* Closed is a clip, never `display: none` and never unmounted: an `<iframe>`
-   that is torn down reloads its document — and re-runs whatever script it
-   holds — on every open, and a board is a snapshot that should look the same
-   each time it is looked at. Clipped away to its own right edge rather than
-   animated to `width: 0` as the conversation is, because this panel is
-   already out of flow (it costs the row nothing either way) and a width that
-   moves is a framed document re-laying itself out on every frame of the
-   transition — the reflow `.live-sidebar-body`'s held width exists to dodge,
-   dodged here by never changing the width at all. */
-.live-board.collapsed {
-  clip-path: inset(0 0 0 100%);
-  pointer-events: none;
+.live-panel-section:not(.folded) {
+  flex: 1 1 0%;
 }
 
-/* Maximised: the whole main area, which is exactly `.main-slot` — the panel's
-   own containing block. So the board covers the page behind it and reaches
-   neither the conversation sidebar nor the left nav, by construction rather
-   than by subtracting their widths from something. */
-.live-board.maximized {
-  width: 100%;
+.live-panel-section.folded {
+  flex: none;
 }
 
-/* The splitter, `.agent-sidebar-resize-handle`'s twin: a 6px strip straddling
-   the panel's left edge. Deliberately no `transition` anywhere on this panel's
-   width — see `.live-board.collapsed` above: a width that animates is a framed
-   document re-laying itself out on every frame, and a drag is a width that
-   moves once per pointer event already. */
-.live-board-resize-handle {
-  position: absolute;
-  left: -3px;
-  top: 0;
-  bottom: 0;
+/* The divider between the two sections, when both are showing — the
+   panel-level twin of `.live-sidebar-resize-handle`, laid across the axis the
+   arrangement is *not* stacking along. Double-click resets the ratio to an
+   even split (`LiveHub`'s handler), the same "forget the drag" gesture every
+   other splitter in this app answers to. */
+.live-panel-divider {
+  flex: none;
+  background: transparent;
+}
+
+.live-panel-stacked > .live-panel-divider {
+  height: 6px;
+  margin: -3px 0;
+  cursor: row-resize;
+  z-index: 1;
+}
+
+.live-panel-side > .live-panel-divider {
   width: 6px;
+  margin: 0 -3px;
   cursor: col-resize;
   z-index: 1;
 }
 
-.live-board-resize-handle:hover,
-.live-board.resizing .live-board-resize-handle {
+.live-panel-divider:hover,
+body.live-panel-ratio-resizing .live-panel-divider {
   background: var(--cyan-dim, rgba(0, 229, 255, 0.3));
+}
+
+/* A section's own fold header (the chat section's — the board section draws
+   its equivalent controls into `.live-board-head` instead, since it already
+   has one). One line: a name, and the same fold glyph the board's button
+   wears. */
+.live-panel-section-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 0.35rem;
+}
+
+.live-panel-section-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1.4px;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* The whiteboard section itself — what used to be `.live-board`'s own
+   floating overlay (mesa task 1071), folded into the panel by mesa task
+   1447. No more absolute position, no more own width: this is now sized by
+   its flex item above, and a border below is what still separates it from
+   the chat section beside or under it. */
+.live-board-section {
+  border-bottom: 1px solid var(--border);
+  /* Opaque, unlike the conversation's translucent panel: a mockup read
+     through the shell behind it is not a mockup. */
+  background: #060a10;
+}
+
+.live-panel-side > .live-board-section {
+  border-bottom: none;
+  border-right: 1px solid var(--border);
+}
+
+/* Folded: the section shrinks to its own head row and the stage under it is
+   clipped away — never unmounted, so a framed board's `<iframe>` keeps its
+   document rather than reloading it on every unfold (`LiveBoardPanel`'s own
+   module note). */
+.live-board-section.folded .live-board-stage {
+  display: none;
+}
+
+/* Maximised: the section escapes the panel's own layout and fills the
+   viewport (mesa task 1447 — it used to be `100%` of `.main-slot`, the
+   floating overlay's own containing block, which this section no longer
+   sits inside). Above the panel itself, which is why `z-index` here beats
+   `.live-sidebar`'s implicit stacking context. */
+.live-board-section.maximized {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  border: none;
+  display: flex;
+  flex-direction: column;
 }
 
 .live-board-body {
@@ -10359,40 +10424,27 @@ button:focus-visible,
     display: none;
   }
 
-  /* The whiteboard takes the same drawer treatment as the two panels beside
-     it — and sits *under* the conversation. All three are the same rectangle
-     on a 390px screen, so the order has to be decided, and the documented
-     rule is that the drawer receiving keyboard input wins: the conversation
-     (z-index 1201) is holding the keyboard and sending what is typed into it,
-     so it stays on top, and the whiteboard sits one below it at 1199 — above
-     the page it is a picture of, below the panel a person is talking into. */
-  /* Off `.main-slot` and onto the viewport, full height, and brighter-edged:
-     on this tier it is a drawer over the whole app rather than an overlay
-     over the page. Everything else — the background, the shadow, the clipped
-     closed state — it already has. */
-  .live-board:not(.collapsed) {
-    position: fixed;
-    top: 0;
-    right: 0;
-    width: min(24rem, 95vw);
-    max-width: none;
-    height: calc(var(--phone-shell-height) - var(--phone-tabbar-reserve));
-    z-index: 1199;
-    border-left: 1px solid var(--border-bright);
+  /* One drawer, not a second one behind it (mesa task 1447 removed the
+     whiteboard's own floating overlay, and with it the stacking-order
+     question the comment above used to answer): the board is a section of
+     this same drawer now, so forcing the arrangement to stacked is all this
+     tier needs — there is no room on a 390px screen for a divider to run
+     sideways, and a folded section still gives its space to the other one
+     exactly as the desktop tiers do. */
+  .live-panel-side {
+    flex-direction: column;
   }
 
-  /* Maximised is the whole screen here rather than the desktop rule's
-     `100%`: the drawer is `position: fixed`, so its containing block is the
-     viewport and not `.main-slot`, and a percentage would be measured against
-     an ancestor this panel no longer sits inside. The narrower default above
-     also has to be beaten on its own terms — it is declared later in the
-     sheet than `.live-board.maximized`, so the tie has to be broken here. */
-  .live-board.maximized:not(.collapsed) {
-    width: 100vw;
+  .live-panel-side > .live-board-section {
+    border-bottom: 1px solid var(--border);
+    border-right: none;
   }
 
-  .live-board:not(.collapsed) .live-board-body {
-    padding: 0.5rem 0.5rem 0.75rem;
+  .live-panel-side > .live-panel-divider {
+    height: 6px;
+    width: auto;
+    margin: -3px 0;
+    cursor: row-resize;
   }
 
   /* The head's meter is the first thing to give at 390px, and the only one:

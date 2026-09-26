@@ -4,7 +4,6 @@ import {
   useLayoutEffect,
   useRef,
   useState,
-  type CSSProperties,
   type PointerEvent as ReactPointerEvent,
   type RefObject,
 } from 'react'
@@ -37,35 +36,35 @@ import {
   type InkPoint,
   type InkStroke,
 } from '../liveInk'
-import {
-  clampLiveBoardWidth,
-  clearLiveBoardWidth,
-  loadLiveBoardWidth,
-  saveLiveBoardWidth,
-} from '../liveBoardWidth'
 import type { LiveBoardSummary } from '../types/LiveBoardSummary'
 import { useFetch } from '../useFetch'
 import { Markdown } from './Markdown'
 
 /**
- * The live conversation's whiteboard (mesa task 1071) — a right-hand sidebar
- * beside the conversation itself, showing the one board the agent pushed
- * last, with the history behind it a step away.
+ * The live conversation's whiteboard (mesa task 1071) — a **section** of the
+ * conversation panel (mesa task 1447, folded in from a floating overlay of
+ * its own) showing the one board the agent pushed last, with the history
+ * behind it a step away. `LiveHub` renders this component in one fixed place
+ * in the panel's tree whether or not the section is folded — see `expanded`
+ * below for why it is never conditionally rendered.
  *
  * The panel is a **reader**. There is no board write route at all: boards are
- * pushed by the CLI, which is the agent running as the person, and the close
- * button here closes exactly like the conversation panel's — a picture put
- * away is not a write. The one request it makes is the render route, and only
- * for the board being looked at: `LiveState.boards` is bodiless, so the poll
- * carries the history as pointers and a megabyte-scale body is fetched once.
+ * pushed by the CLI, which is the agent running as the person, and the fold
+ * button here folds exactly like the conversation panel's own close — a
+ * picture put away is not a write. The one request it makes is the render
+ * route, and only for the board being looked at: `LiveState.boards` is
+ * bodiless, so the poll carries the history as pointers and a megabyte-scale
+ * body is fetched once.
  *
  * It also holds a **pen** (mesa task 1353): with the pen on, a drag draws on a
  * canvas laid over the board. The ink is this browser's own, held by the hub
  * per board id (`liveInk.ts`), and reaches the agent only as a PNG on the
  * next turn the person sends — which the hub asks this panel to flatten
  * through `flattenRef`, since only the panel can see the board's pixels. The
- * first unsent stroke freezes the layout — no resize, maximise, restore,
- * stepping, closing or scrolling — until that turn is sent or the ink cleared.
+ * first unsent stroke freezes the section — no maximise, restore, stepping,
+ * folding or arrangement change — until that turn is sent or the ink cleared;
+ * `LiveHub` pins the section's own size for the same reason, since it now
+ * owns the layout this panel sits inside.
  */
 
 /**
@@ -137,9 +136,11 @@ function BoardMarkdown({ id }: { id: number }) {
   )
 }
 
-/** The close button's glyph — `LiveHub`'s own `CloseMark`, in the shape every
- *  `.live-icon` wears. */
-function CloseMark() {
+/** The fold button's glyph (mesa task 1447) — a chevron pointing the
+ *  direction the press collapses towards, `LiveHub`'s `ArrangeMark`'s own
+ *  vocabulary for this button rather than the close cross this replaced,
+ *  since the section is never destroyed, only put away. */
+function FoldMark({ expanded }: { expanded: boolean }) {
   return (
     <svg
       className="live-icon-mark"
@@ -149,7 +150,7 @@ function CloseMark() {
       aria-hidden="true"
       focusable="false"
     >
-      <path d="M6 6l12 12M18 6L6 18" />
+      <path d={expanded ? 'M6 9l6 6 6-6' : 'M6 15l6-6 6 6'} />
     </svg>
   )
 }
@@ -427,8 +428,8 @@ async function flattenAt(
 
 export function LiveBoardPanel({
   boards,
-  open,
-  onClose,
+  expanded,
+  onToggleFold,
   ink,
   onInk,
   flattenRef,
@@ -437,9 +438,14 @@ export function LiveBoardPanel({
   /** The conversation's whole board history, oldest first and bodiless — the
    *  `boards` array of the poll `LiveHub` already makes, never a second one. */
   boards: LiveBoardSummary[]
-  open: boolean
-  /** Closes the panel and nothing else: there is no route behind this. */
-  onClose: () => void
+  /** Whether the section is folded open — CSS-driven, never a reason to skip
+   *  mounting this component: an `<iframe>` that is torn down reloads its
+   *  document on every unfold, and a board is a snapshot that should look the
+   *  same each time it is looked at. */
+  expanded: boolean
+  /** Toggles the section's own fold and nothing else: there is no route
+   *  behind this. */
+  onToggleFold: () => void
   /** Every board's ink, held by the hub so a turn it sends can carry it. */
   ink: InkBook
   /** The one write path for `ink`. */
@@ -492,74 +498,35 @@ export function LiveBoardPanel({
     setView((held) => ({ ...held, index: stepBoard(held.index, delta, boards.length) }))
   }
 
-  // How wide the picture is, and this browser's own business exactly as which
-  // board is showing is. `null` is "no opinion", and the panel then sets no
-  // inline custom property at all so App.css's `min(40rem, 50vw)` stands —
-  // see `liveBoardWidth.ts` for why the default cannot be a number.
-  const [width, setWidth] = useState<number | null>(() => loadLiveBoardWidth())
-  const [resizing, setResizing] = useState(false)
-  // Maximised: the board covers the whole main area — the page behind it, and
-  // nothing else. It is `width: 100%` of `.main-slot`, which is what the panel
-  // is positioned inside, so the conversation sidebar and the left nav are out
-  // of reach by construction rather than by arithmetic.
+  // Maximised: the board fills the viewport (mesa task 1447; it used to be
+  // `width: 100%` of `.main-slot`, back when the panel was a floating overlay
+  // positioned inside that slot — now that it is a section of the
+  // conversation panel, `position: fixed; inset: 0` in App.css is what takes
+  // it there, since `.main-slot` is no longer this component's containing
+  // block).
   const [maximized, setMaximized] = useState(false)
-  const asideRef = useRef<HTMLElement | null>(null)
-  // The width the drag has reached, so `mouseup` can store it without the
-  // effect having to re-subscribe on every frame of the drag.
-  const widthRef = useRef(width)
+  const asideRef = useRef<HTMLDivElement | null>(null)
 
-  // Drag-resize: the handle is on the panel's left edge and the panel is
-  // pinned to `.main-slot`'s right edge, so the new width is the distance from
-  // the pointer to that edge — measured off the offset parent rather than the
-  // viewport, since the slot is what the panel is 100% of. Listeners live on
-  // `document`, not the handle, so the drag keeps tracking when the pointer
-  // outruns it (`AgentSidebar`'s own splitter, and its reason).
-  useEffect(() => {
-    if (!resizing) return
-    const onMove = (e: MouseEvent) => {
-      const slot = asideRef.current?.offsetParent
-      if (!(slot instanceof HTMLElement)) return
-      const box = slot.getBoundingClientRect()
-      const next = clampLiveBoardWidth(box.right - e.clientX, box.width)
-      widthRef.current = next
-      setWidth(next)
-    }
-    const onUp = () => {
-      setResizing(false)
-      // Stored on release rather than per frame: a drag is one decision, and
-      // localStorage is synchronous.
-      if (widthRef.current !== null) saveLiveBoardWidth(widthRef.current)
-    }
-    document.addEventListener('mousemove', onMove)
-    document.addEventListener('mouseup', onUp)
-    document.body.classList.add('live-board-resizing')
-    return () => {
-      document.removeEventListener('mousemove', onMove)
-      document.removeEventListener('mouseup', onUp)
-      document.body.classList.remove('live-board-resizing')
-    }
-  }, [resizing])
-
-  // Escape is the way out of whatever the panel is currently doing: it
-  // restores a maximised board first, and only closes the panel once the board
-  // is back at its own width — one press should never both un-maximise and
-  // dismiss. Bound only while open, so it never swallows an Escape the rest of
-  // the app wants while there is no board on screen.
+  // Escape is the way out of whatever the section is currently doing: it
+  // restores a maximised board first, and only folds the section once the
+  // board is back at its normal size — one press should never do both. Bound
+  // only while expanded, so it never swallows an Escape the rest of the app
+  // wants while there is nothing to see.
   // Frozen for ink, it does neither: both would move the content out from
   // under the strokes.
   useEffect(() => {
-    if (!open || frozen) return
+    if (!expanded || frozen) return
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
       // Marked, so the conversation's own Escape (discard and mute, mesa task
       // 1354) stands down while it is closing the board.
       e.preventDefault()
       if (maximized) setMaximized(false)
-      else onClose()
+      else onToggleFold()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [open, frozen, maximized, onClose])
+  }, [expanded, frozen, maximized, onToggleFold])
 
   // ---- the pen (mesa task 1353) ----
 
@@ -569,15 +536,8 @@ export function LiveBoardPanel({
   const contentRef = useRef<HTMLDivElement | null>(null)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   // The stroke being drawn, before the pen lifts and it joins the book — and
-  // the frame the content box stood in, and the panel's own width, when it
-  // went down.
-  const drawing = useRef<{ points: InkPoint[]; frame: InkFrame; panel: number } | null>(
-    null,
-  )
-  // The panel's width when the layout froze. Kept as its minimum while frozen:
-  // the content box is pinned in px, and a window narrowed under it would
-  // otherwise shrink the panel and leave the pinned box poking past its edge.
-  const [frozenPanel, setFrozenPanel] = useState<number | null>(null)
+  // the frame the content box stood in when it went down.
+  const drawing = useRef<{ points: InkPoint[]; frame: InkFrame } | null>(null)
   // The content box's size, which the overlay canvas is kept exactly over.
   const [box, setBox] = useState<{ width: number; height: number }>({ width: 0, height: 0 })
   const showingInk = showing === null ? null : boardInk(ink, showing.id)
@@ -672,11 +632,7 @@ export function LiveBoardPanel({
     if (point === null || at === null) return
     e.preventDefault()
     e.currentTarget.setPointerCapture(e.pointerId)
-    drawing.current = {
-      points: [point],
-      frame: at,
-      panel: asideRef.current?.getBoundingClientRect().width ?? 0,
-    }
+    drawing.current = { points: [point], frame: at }
     redraw()
   }
 
@@ -693,8 +649,6 @@ export function LiveBoardPanel({
     drawing.current = null
     if (stroke === null || showing === null) return
     const id = showing.id
-    // The stroke that freezes the layout records the panel width it froze at.
-    if (!frozen) setFrozenPanel(stroke.panel)
     onInk((book) => addStroke(book, id, stroke.points, stroke.frame))
   }
 
@@ -740,40 +694,13 @@ export function LiveBoardPanel({
   })
 
   return (
-    <aside
+    <div
       ref={asideRef}
-      className={`live-board${open ? '' : ' collapsed'}${maximized ? ' maximized' : ''}${
-        resizing ? ' resizing' : ''
+      className={`live-board-section${expanded ? '' : ' folded'}${
+        maximized ? ' maximized' : ''
       }`}
-      // Nothing stored and nothing dragged means no inline property at all —
-      // the stylesheet's `min(40rem, 50vw)` is the default, not a number.
-      // While frozen for ink, the width it froze at is its floor too.
-      style={
-        width === null && !(frozen && frozenPanel !== null)
-          ? undefined
-          : ({
-              ...(width === null ? {} : { '--live-board-width': `${width}px` }),
-              ...(frozen && frozenPanel !== null ? { minWidth: `${frozenPanel}px` } : {}),
-            } as CSSProperties)
-      }
       aria-label="the live whiteboard"
     >
-      {/* Not rendered while maximised (there is no width to drag) nor while
-          clipped away, where the pointer cannot reach it anyway. */}
-      {open && !maximized && !frozen && (
-        <div
-          className="live-board-resize-handle"
-          onMouseDown={(e) => {
-            e.preventDefault()
-            setResizing(true)
-          }}
-          onDoubleClick={() => {
-            widthRef.current = null
-            clearLiveBoardWidth()
-            setWidth(null)
-          }}
-        />
-      )}
       <div className="live-board-body">
         <div className="live-sidebar-head live-board-head">
           <div className="live-head-row">
@@ -781,110 +708,108 @@ export function LiveBoardPanel({
               <div className="live-head-title">
                 {showing === null ? 'Whiteboard' : boardTitle(showing)}
               </div>
-              {showing !== null && (
+              {showing !== null && expanded && (
                 <span className="live-chip live-board-kind">{showing.kind}</span>
               )}
             </div>
             <div className="live-head-actions">
-              {/* The history, and the only control here that is not the close
-                  button. Shown once there is more than one board: a single
-                  board has nothing to step through, and `‹ 1/1 ›` reads as
-                  two buttons that are broken. */}
-              {boards.length > 1 && (
-                <div className="live-board-steps">
-                  <button
-                    type="button"
-                    className="live-board-step"
-                    aria-label="the previous board"
-                    tabIndex={open ? undefined : -1}
-                    disabled={first || frozen}
-                    onClick={() => step(-1)}
-                  >
-                    ‹
-                  </button>
-                  <span className="live-board-count">
-                    {at}/{boards.length}
-                  </span>
-                  <button
-                    type="button"
-                    className="live-board-step"
-                    aria-label="the next board"
-                    tabIndex={open ? undefined : -1}
-                    disabled={last || frozen}
-                    onClick={() => step(1)}
-                  >
-                    ›
-                  </button>
-                </div>
-              )}
-              {/* The pen, and while it is on, its undo and clear. */}
-              {showing !== null && (
-                <button
-                  type="button"
-                  className="live-icon live-board-pen"
-                  aria-label={pen ? 'put the pen down' : 'draw on the whiteboard'}
-                  aria-pressed={pen}
-                  title={pen ? 'Stop drawing' : 'Draw on the board'}
-                  tabIndex={open ? undefined : -1}
-                  onClick={() => setPen((on) => !on)}
-                >
-                  <PenMark />
-                </button>
-              )}
-              {pen && showing !== null && (
+              {/* The history, and the pen/maximize controls beside it: none of
+                  them mean anything on a folded strip with no stage under it. */}
+              {expanded && (
                 <>
+                  {/* Shown once there is more than one board: a single board
+                      has nothing to step through, and `‹ 1/1 ›` reads as two
+                      buttons that are broken. */}
+                  {boards.length > 1 && (
+                    <div className="live-board-steps">
+                      <button
+                        type="button"
+                        className="live-board-step"
+                        aria-label="the previous board"
+                        disabled={first || frozen}
+                        onClick={() => step(-1)}
+                      >
+                        ‹
+                      </button>
+                      <span className="live-board-count">
+                        {at}/{boards.length}
+                      </span>
+                      <button
+                        type="button"
+                        className="live-board-step"
+                        aria-label="the next board"
+                        disabled={last || frozen}
+                        onClick={() => step(1)}
+                      >
+                        ›
+                      </button>
+                    </div>
+                  )}
+                  {/* The pen, and while it is on, its undo and clear. */}
+                  {showing !== null && (
+                    <button
+                      type="button"
+                      className="live-icon live-board-pen"
+                      aria-label={pen ? 'put the pen down' : 'draw on the whiteboard'}
+                      aria-pressed={pen}
+                      title={pen ? 'Stop drawing' : 'Draw on the board'}
+                      onClick={() => setPen((on) => !on)}
+                    >
+                      <PenMark />
+                    </button>
+                  )}
+                  {pen && showing !== null && (
+                    <>
+                      <button
+                        type="button"
+                        className="live-icon live-board-undo"
+                        aria-label="undo the last stroke"
+                        title="Undo"
+                        disabled={(showingInk?.strokes.length ?? 0) === 0}
+                        onClick={undo}
+                      >
+                        <UndoMark />
+                      </button>
+                      <button
+                        type="button"
+                        className="live-icon live-board-clear"
+                        aria-label="clear the ink"
+                        title="Clear the ink"
+                        disabled={(showingInk?.strokes.length ?? 0) === 0}
+                        onClick={clear}
+                      >
+                        <ClearMark />
+                      </button>
+                    </>
+                  )}
                   <button
                     type="button"
-                    className="live-icon live-board-undo"
-                    aria-label="undo the last stroke"
-                    title="Undo"
-                    tabIndex={open ? undefined : -1}
-                    disabled={(showingInk?.strokes.length ?? 0) === 0}
-                    onClick={undo}
+                    className="live-icon live-board-maximize"
+                    aria-label={
+                      maximized
+                        ? 'restore the whiteboard'
+                        : 'fill the page with the whiteboard'
+                    }
+                    title={maximized ? 'Restore (Esc)' : 'Fill the page'}
+                    disabled={frozen}
+                    onClick={() => setMaximized((m) => !m)}
                   >
-                    <UndoMark />
-                  </button>
-                  <button
-                    type="button"
-                    className="live-icon live-board-clear"
-                    aria-label="clear the ink"
-                    title="Clear the ink"
-                    tabIndex={open ? undefined : -1}
-                    disabled={(showingInk?.strokes.length ?? 0) === 0}
-                    onClick={clear}
-                  >
-                    <ClearMark />
+                    <MaximizeMark restore={maximized} />
                   </button>
                 </>
               )}
-              <button
-                type="button"
-                className="live-icon live-board-maximize"
-                aria-label={
-                  maximized
-                    ? 'restore the whiteboard width'
-                    : 'fill the page with the whiteboard'
-                }
-                title={maximized ? 'Restore width (Esc)' : 'Fill the page'}
-                tabIndex={open ? undefined : -1}
-                disabled={frozen}
-                onClick={() => setMaximized((m) => !m)}
-              >
-                <MaximizeMark restore={maximized} />
-              </button>
+              {/* Folds the section (mesa task 1447 — this used to close the
+                  whole floating panel). Always shown, even folded: it is the
+                  section's own way back open, beside the panel head's reopen
+                  button. */}
               <button
                 type="button"
                 className="live-icon live-board-close"
-                aria-label="hide the whiteboard"
-                // Out of the tab order while the panel is clipped, for the
-                // conversation panel's reason: `pointer-events` stops the
-                // mouse, not a Tab, and an invisible button a Tab can land on
-                // is a trap.
-                tabIndex={open ? undefined : -1}
+                aria-label={expanded ? 'fold the whiteboard' : 'show the whiteboard'}
                 disabled={frozen}
-                onClick={onClose}
+                onClick={onToggleFold}
               >
-                <CloseMark />
+                <FoldMark expanded={expanded} />
               </button>
             </div>
           </div>
@@ -939,6 +864,6 @@ export function LiveBoardPanel({
           />
         </div>
       </div>
-    </aside>
+    </div>
   )
 }

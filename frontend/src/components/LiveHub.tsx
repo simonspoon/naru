@@ -30,13 +30,7 @@ import {
   wavFromFrames,
   type CapturedFrame,
 } from '../liveAudio'
-import {
-  boardPanelFor,
-  closedBoardPanel,
-  openBoardPanel,
-  showsBoardReopen,
-  type BoardPanel,
-} from '../liveBoard'
+import { boardSeenFor } from '../liveBoard'
 import { autoSendIdleMs } from '../liveCapture'
 import { currentContext, sameContext, subscribeContext } from '../liveContext'
 import { agentsLabel, openAgents, sectionFor, viewLine } from '../liveView'
@@ -44,6 +38,7 @@ import { mayHold, SegmentChain } from '../liveDrain'
 import { DiscardLedger, liveCancelVerdict } from '../liveCancel'
 import {
   emptyInkBook,
+  frozenBoard,
   inkCarrier,
   markInkSent,
   pendingInk,
@@ -124,6 +119,22 @@ import {
   loadLiveSidebarWidth,
   saveLiveSidebarWidth,
 } from '../liveSidebarWidth'
+import {
+  clampLiveBoardWidth,
+  clearLiveBoardWidth,
+  loadLiveBoardWidth,
+  saveLiveBoardWidth,
+} from '../liveBoardWidth'
+import {
+  clampLiveLayoutRatio,
+  DEFAULT_LIVE_LAYOUT_RATIO,
+  loadLiveLayout,
+  saveBoardCollapsed,
+  saveChatCollapsed,
+  saveLiveArrangement,
+  saveLiveLayoutRatio,
+  type LiveArrangement,
+} from '../liveLayout'
 import { BARGE_IN_VAD, DEFAULT_VAD, initialVad, PRE_ROLL_MS, vadCut, vadStep } from '../liveVad'
 import {
   initialWatchdog,
@@ -146,6 +157,7 @@ import {
 import { playFailure } from '../speechPlayback'
 import { playSpeechStream, type SpeechStream } from '../speechStream'
 import { parseTimestamp } from '../time'
+import { usePhoneTier } from '../phoneTier'
 import type { ConfigLive } from '../types/ConfigLive'
 import type { LiveContext } from '../types/LiveContext'
 import type { LiveNotice } from '../types/LiveNotice'
@@ -393,6 +405,51 @@ function MicMark() {
   )
 }
 
+/** The chat section's own fold glyph (mesa task 1447) — `LiveBoardPanel`'s own
+ *  `FoldMark`, redrawn here rather than exported: each panel already draws
+ *  its own icons rather than importing the other's. */
+function FoldChevron({ expanded }: { expanded: boolean }) {
+  return (
+    <svg
+      className="live-icon-mark"
+      viewBox="0 0 24 24"
+      width="14"
+      height="14"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path d={expanded ? 'M6 9l6 6 6-6' : 'M6 15l6-6 6 6'} />
+    </svg>
+  )
+}
+
+/** The arrangement toggle's glyph (mesa task 1447): two rectangles, stacked or
+ *  side by side depending which way the button is about to switch to. */
+function ArrangeMark({ side }: { side: boolean }) {
+  return (
+    <svg
+      className="live-icon-mark"
+      viewBox="0 0 24 24"
+      width="15"
+      height="15"
+      aria-hidden="true"
+      focusable="false"
+    >
+      {side ? (
+        <>
+          <rect x="3" y="4" width="8" height="16" rx="1" />
+          <rect x="13" y="4" width="8" height="16" rx="1" />
+        </>
+      ) : (
+        <>
+          <rect x="4" y="3" width="16" height="8" rx="1" />
+          <rect x="4" y="13" width="16" height="8" rx="1" />
+        </>
+      )}
+    </svg>
+  )
+}
+
 /**
  * How long this conversation has been going, ticking once a second.
  *
@@ -515,7 +572,6 @@ async function openPcmCapture(
 export function LiveHub({
   onSidebars,
   slot,
-  boardSlot,
   navCollapsed,
   agentsCollapsed,
   activeProjectId,
@@ -526,12 +582,6 @@ export function LiveHub({
   /** Where the conversation panel is rendered (mesa task 887): the shell's
    *  right-hand sidebar slot, `null` until App's own ref has landed. */
   slot: HTMLElement | null
-  /** Where the whiteboard is rendered (mesa task 1071): its own slot, just
-   *  before the conversation's, so a pushed picture sits beside the page it
-   *  is about rather than over it. Its own slot rather than the one above
-   *  because the two panels open and close independently — a board arrives
-   *  while the conversation is shut as often as not. */
-  boardSlot: HTMLElement | null
   /** App's two sidebar flags and the project the route is on, read only
    *  into the view line each turn carries (mesa task 1424, `liveView.ts`). */
   navCollapsed: boolean
@@ -659,17 +709,53 @@ export function LiveHub({
   // The conversation panel. Purely visual: closing it calls no route and stops
   // nothing — the session, the audio and the capture box all carry on.
   const [open, setOpen] = useState(false)
-  // How wide the panel is (mesa task 1144), this browser's own business
-  // exactly as `open` is. `null` is "no opinion": the aside then sets no
-  // inline `--live-sidebar-width` at all and App.css's `min(26rem, 40vw)`
-  // stands — see `liveSidebarWidth.ts` for why the default cannot be a number.
-  // Desktop tiers only: the phone tier's drawer sets its width directly.
-  const [width, setWidth] = useState<number | null>(() => loadLiveSidebarWidth())
+  // The panel's two sections (mesa task 1447, `liveLayout.ts`): stacked or
+  // side by side, the divider's own position, and each section's fold — read
+  // once at mount and written straight through to storage on every change, the
+  // same discipline `width` below already keeps.
+  const [layout, setLayout] = useState(() => loadLiveLayout())
+  const setArrangement = useCallback((arrangement: LiveArrangement) => {
+    saveLiveArrangement(arrangement)
+    setLayout((l) => ({ ...l, arrangement }))
+  }, [])
+  const foldBoard = useCallback((collapsed: boolean) => {
+    saveBoardCollapsed(collapsed)
+    setLayout((l) => ({ ...l, boardCollapsed: collapsed }))
+  }, [])
+  const foldChat = useCallback((collapsed: boolean) => {
+    saveChatCollapsed(collapsed)
+    setLayout((l) => ({ ...l, chatCollapsed: collapsed }))
+  }, [])
+  // The arrangement actually on screen right now, as opposed to the one
+  // stored (mesa task 1447 fix round, finding 3): the phone tier's own
+  // `@media (max-width: 600px)` rule in App.css forces `.live-panel-side`
+  // into a column regardless of what `layout.arrangement` says, so any JS
+  // that has to agree with the *rendered* axis — the divider drag's math, the
+  // frozen-ink floor below — reads this instead of the stored preference
+  // directly. `usePhoneTier()` is `phoneTier.ts`'s one `MediaQueryList` for
+  // this breakpoint, reused rather than a second query: the rule this must
+  // stay in step with is CSS's own, not a new one of its own.
+  const phone = usePhoneTier()
+  const effectiveArrangement: LiveArrangement = phone ? 'stacked' : layout.arrangement
+  // How wide the panel is (mesa task 1144) — two stored widths rather than
+  // one, because the panel needs more room once it is also holding a board
+  // than while it holds only the conversation. `chatWidth` is
+  // `liveSidebarWidth.ts`'s own key, unchanged; `panelWidth` repurposes
+  // `liveBoardWidth.ts` — the board's own floating width before this task —
+  // to the same panel while its board section is showing. `null` is "no
+  // opinion" for either: the aside then sets no inline `--live-sidebar-width`
+  // at all and App.css's per-state `min()` stands. Desktop tiers only: the
+  // phone tier's drawer sets its width directly.
+  const [chatWidth, setChatWidth] = useState<number | null>(() => loadLiveSidebarWidth())
+  const [panelWidth, setPanelWidth] = useState<number | null>(() => loadLiveBoardWidth())
   const [resizing, setResizing] = useState(false)
   const asideRef = useRef<HTMLElement | null>(null)
   // The width the drag has reached, so `mouseup` can store it without the
-  // effect having to re-subscribe on every frame of the drag.
-  const widthRef = useRef(width)
+  // effect having to re-subscribe on every frame of the drag. One ref per
+  // stored width, since a drag started while the board section is showing
+  // must never overwrite the chat-only width and vice versa.
+  const chatWidthRef = useRef(chatWidth)
+  const panelWidthRef = useRef(panelWidth)
   // The person stepped out of the conversation without ending it (mesa task
   // 882): this browser speaks nothing, hears nothing and is driven nowhere
   // until Resume. Deliberately *this browser's* state and nothing more — no
@@ -1045,22 +1131,51 @@ export function LiveHub({
   // Memoised so the panel's own view is not recomputed on every render of
   // this component — only when a poll actually changed the history.
   const boards = useMemo(() => data?.boards ?? [], [data])
-  // Whether the panel is showing, and the newest board this component has
-  // taken in hand — `handled`'s claim-once discipline in the shape a picture
-  // needs (`liveBoard.ts::boardPanelFor`): a board the person has not been
-  // shown opens the panel, because the agent pushed it *instead of* saying
-  // something and a board nobody sees is the same as no board, while every
-  // later poll carrying that same board must not re-open one they have since
-  // put away. Closing is this browser's own act, no route, exactly like the
-  // conversation panel's own close.
-  //
-  // Applied during render rather than in an effect, `useFetch.ts`'s pattern:
-  // the answer is a pure function of the poll, and `boardPanelFor` hands back
-  // the state it was given — by identity — on every tick where nothing moved,
-  // so this settles in one pass.
-  const [boardPanel, setBoardPanel] = useState<BoardPanel>(closedBoardPanel)
-  const nextBoardPanel = boardPanelFor(boardPanel, boards)
-  if (nextBoardPanel !== boardPanel) setBoardPanel(nextBoardPanel)
+  // The newest board this component has already accounted for
+  // (`liveBoard.ts::boardSeenFor`) — `null` until the first poll that carries
+  // any boards at all. Applied during render rather than in an effect,
+  // `useFetch.ts`'s pattern: the answer is a pure function of the poll, and
+  // `boardSeenFor` hands back the value unchanged on every tick where nothing
+  // moved, so this settles in one pass with no side effect of its own — the
+  // decision of what a *newer* id should *do* (below) is kept out of this
+  // block on purpose (mesa task 1447 fix round, finding 5).
+  const [boardSeen, setBoardSeen] = useState<number | null>(null)
+  const nextBoardSeen = boardSeenFor(boardSeen, boards)
+  if (nextBoardSeen !== boardSeen) setBoardSeen(nextBoardSeen)
+  // Whether this component has ever synced `boardSeen` against a real poll —
+  // set the first time the effect below runs, whatever `boardSeen` reads at
+  // that point. That first run is a *baseline*, not a push: a page reloaded
+  // mid-conversation must show whatever fold state the person left it in
+  // (`mesa-live-board-collapsed`), not force every board open again just
+  // because this mount has never seen it before (mesa task 1447 fix round,
+  // finding 1). Only a `boardSeen` that changes *after* the baseline is a
+  // board the agent pushed *instead of* saying something, so only that one
+  // expands the section and opens the panel — the reopen button's own effect,
+  // performed automatically.
+  const boardSeenBaseline = useRef(false)
+  useEffect(() => {
+    // The decision lives inside its own function, the `frozenSize` effect's
+    // own shape, rather than at the effect's top level.
+    const settle = () => {
+      if (!boardSeenBaseline.current) {
+        boardSeenBaseline.current = true
+        return
+      }
+      // The conversation ended or its boards were cleared: nothing to expand
+      // or open for a board that no longer exists.
+      if (boardSeen === null) return
+      foldBoard(false)
+      setOpen(true)
+    }
+    settle()
+  }, [boardSeen, foldBoard])
+  const hasBoards = boards.length > 0
+  // Whether each section is actually showing right now. Folding either one,
+  // or closing the panel altogether, takes it off screen without touching the
+  // other's own state — `boardExpanded` is `false` with no boards at all
+  // (there is nothing to fold) as much as it is once folded.
+  const boardExpanded = hasBoards && !layout.boardCollapsed
+  const chatExpanded = !layout.chatCollapsed
 
   // The person's ink on the boards (mesa task 1353), by board id — held here
   // rather than in the panel because a turn this component sends is what
@@ -1089,6 +1204,54 @@ export function LiveHub({
   // Which board the panel is showing, set by the panel for the view line.
   const boardShowing = useRef<number | null>(null)
 
+  // Whether the board holds unsent ink (mesa task 1353) — the same book
+  // `LiveBoardPanel` reads to decide the same thing for its own controls.
+  // While it does, the board section's own size is pinned (below) so a panel
+  // resize or an arrangement switch cannot shrink it out from under the
+  // strokes.
+  const frozen = frozenBoard(ink) !== null
+  const boardSectionRef = useRef<HTMLDivElement | null>(null)
+  const [frozenSize, setFrozenSize] = useState<{ width: number; height: number } | null>(
+    null,
+  )
+  useEffect(() => {
+    // Measured once, at the first stroke: a later render while still frozen
+    // must not re-measure a section the freeze itself is holding still. The
+    // measurement lives inside its own function, `LiveBoardPanel`'s own box-
+    // measuring effect's shape, rather than at the effect's top level.
+    const settle = () => {
+      if (!frozen) {
+        setFrozenSize(null)
+        return
+      }
+      setFrozenSize((prev) => {
+        if (prev !== null) return prev
+        const rect = boardSectionRef.current?.getBoundingClientRect()
+        return rect === undefined ? prev : { width: rect.width, height: rect.height }
+      })
+    }
+    settle()
+  }, [frozen])
+
+  // Which stored width the resize handle edits right now, read from inside
+  // `mousemove`/`mouseup` handlers set up long after the render that changed
+  // this — the `armed` ref's own pattern.
+  const boardExpandedRef = useRef(boardExpanded)
+  useEffect(() => {
+    boardExpandedRef.current = boardExpanded
+  }, [boardExpanded])
+
+  // The divider between the two sections (mesa task 1447): its own drag,
+  // independent of the panel's own width drag below. `sectionsRef` is the
+  // flex row/column both sections sit in, so the drag can read its own extent
+  // whichever way it is laid out.
+  const [ratioResizing, setRatioResizing] = useState(false)
+  const sectionsRef = useRef<HTMLDivElement | null>(null)
+  const ratioRef = useRef(layout.ratio)
+  useEffect(() => {
+    ratioRef.current = layout.ratio
+  }, [layout.ratio])
+
   // The view line (mesa task 1424, `liveView.ts`): built when it is sent — a
   // turn at submit, a route report when it fires — from refs refreshed every
   // render, so neither `reportRoute` nor a queued post closes over a stale
@@ -1105,7 +1268,7 @@ export function LiveHub({
         chatOpen: open,
         agentsOpen: !agentsCollapsed,
         agentDetail: agentsLabel(openAgents()),
-        boardOpen: nextBoardPanel.open,
+        boardOpen: open && boardExpanded,
         boardId: boardShowing.current,
         navCollapsed,
       })
@@ -2937,6 +3100,12 @@ export function LiveHub({
   // agents panel's width for free. Listeners live on `document`, not the
   // handle, so the drag keeps tracking when the pointer outruns it
   // (`AgentSidebar`'s own splitter, and its reason).
+  //
+  // One handle, two stored widths (mesa task 1447): which one a drag edits is
+  // read off `boardExpandedRef` at every move rather than decided once at
+  // `mousedown`, so a fold that happens to land mid-drag (it cannot from the
+  // mouse alone, but a keyboard fold could) still ends up saved against the
+  // section that is actually showing when the mouse comes up.
   useEffect(() => {
     if (!resizing) return
     const onMove = (e: MouseEvent) => {
@@ -2944,15 +3113,26 @@ export function LiveHub({
       if (aside === null) return
       const right = aside.getBoundingClientRect().right
       const mainLeft = document.querySelector('main')?.getBoundingClientRect().left ?? 0
-      const next = clampLiveSidebarWidth(right - e.clientX, right - mainLeft - MIN_MAIN_WIDTH)
-      widthRef.current = next
-      setWidth(next)
+      const ceiling = right - mainLeft - MIN_MAIN_WIDTH
+      if (boardExpandedRef.current) {
+        const next = clampLiveBoardWidth(right - e.clientX, ceiling)
+        panelWidthRef.current = next
+        setPanelWidth(next)
+      } else {
+        const next = clampLiveSidebarWidth(right - e.clientX, ceiling)
+        chatWidthRef.current = next
+        setChatWidth(next)
+      }
     }
     const onUp = () => {
       setResizing(false)
       // Stored on release rather than per frame: a drag is one decision, and
       // localStorage is synchronous.
-      if (widthRef.current !== null) saveLiveSidebarWidth(widthRef.current)
+      if (boardExpandedRef.current) {
+        if (panelWidthRef.current !== null) saveLiveBoardWidth(panelWidthRef.current)
+      } else if (chatWidthRef.current !== null) {
+        saveLiveSidebarWidth(chatWidthRef.current)
+      }
     }
     document.addEventListener('mousemove', onMove)
     document.addEventListener('mouseup', onUp)
@@ -2963,6 +3143,42 @@ export function LiveHub({
       document.body.classList.remove('live-sidebar-resizing')
     }
   }, [resizing])
+
+  // The divider between the two sections, when both are showing — a second,
+  // independent drag on the same `document` pattern, along whichever axis the
+  // arrangement *actually renders* on (`effectiveArrangement`, not the stored
+  // `layout.arrangement`: the phone tier's CSS forces a column regardless of
+  // what is stored, and dragging by the stored axis there read the pointer
+  // sideways against a divider that was drawn running the other way). Frozen
+  // ink locks it, exactly as it locks the board section's own controls: a
+  // ratio change while it is held is a resize the strokes must not see.
+  useEffect(() => {
+    if (!ratioResizing) return
+    const onMove = (e: MouseEvent) => {
+      const el = sectionsRef.current
+      if (el === null) return
+      const box = el.getBoundingClientRect()
+      const fraction =
+        effectiveArrangement === 'side'
+          ? (e.clientX - box.left) / box.width
+          : (e.clientY - box.top) / box.height
+      const next = clampLiveLayoutRatio(fraction)
+      ratioRef.current = next
+      setLayout((l) => ({ ...l, ratio: next }))
+    }
+    const onUp = () => {
+      setRatioResizing(false)
+      saveLiveLayoutRatio(ratioRef.current)
+    }
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
+    document.body.classList.add('live-panel-ratio-resizing')
+    return () => {
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+      document.body.classList.remove('live-panel-ratio-resizing')
+    }
+  }, [ratioResizing, effectiveArrangement])
 
   function act(button: LiveButton) {
     if (button.disabled) return
@@ -3282,17 +3498,19 @@ export function LiveHub({
           <LiveMark />
         </button>
       )}
-      {/* Bringing the whiteboard back (mesa task 1113). `boardPanelFor` only
-          ever *opens* on a board newer than `seen`, so hiding the panel used
-          to be one-way: short of the agent re-pushing identical content there
-          was nothing that showed it again (session 83). */}
-      {showsBoardReopen(nextBoardPanel, boards) && (
+      {/* Bringing the whiteboard back (mesa task 1113, folded into the panel
+          by 1447): shown once there is history to show and the board section
+          is not currently showing it — folded, or the whole panel closed.
+          Expands the section *and* opens the panel, since a folded section
+          inside a closed panel is still nothing on screen. */}
+      {hasBoards && !(open && boardExpanded) && (
         <button
           type="button"
           className="live-toggle live-panel-toggle"
           aria-label="show the whiteboard"
           onClick={() => {
-            setBoardPanel(openBoardPanel)
+            foldBoard(false)
+            setOpen(true)
           }}
         >
           <BoardMark />
@@ -3351,21 +3569,31 @@ export function LiveHub({
         createPortal(
           <aside
             ref={asideRef}
-            className={`live-sidebar${open ? '' : ' collapsed'}${resizing ? ' resizing' : ''}`}
+            className={`live-sidebar${open ? '' : ' collapsed'}${
+              resizing ? ' resizing' : ''
+            }${boardExpanded ? ' board-open' : ''}`}
             // Nothing stored and nothing dragged means no inline property at
-            // all — the stylesheet's `min(26rem, 40vw)` is the default, not a
-            // number. The phone tier's drawer sets `width` directly, so this
-            // property does not reach it.
+            // all — the `.board-open` class's own default, or the plain
+            // panel's, decides (mesa task 1447; both replace the single
+            // `min(26rem, 40vw)` this used to be unconditionally). The phone
+            // tier's drawer sets `width` directly, so this property does not
+            // reach it.
             style={
-              width === null
+              (boardExpanded ? panelWidth : chatWidth) === null
                 ? undefined
-                : ({ '--live-sidebar-width': `${width}px` } as CSSProperties)
+                : ({
+                    '--live-sidebar-width': `${
+                      (boardExpanded ? panelWidth : chatWidth) ?? 0
+                    }px`,
+                  } as CSSProperties)
             }
             aria-label="the live conversation"
           >
             {/* Only while open: the pointer cannot reach a clipped edge, and
                 a handle on a zero-width aside would straddle the page's own
-                right margin. Hidden on the phone tier by App.css. */}
+                right margin. Hidden on the phone tier by App.css. One handle
+                for both stored widths (mesa task 1447) — see the drag effect
+                above for which one it edits. */}
             {open && (
               <div
                 className="live-sidebar-resize-handle"
@@ -3374,9 +3602,15 @@ export function LiveHub({
                   setResizing(true)
                 }}
                 onDoubleClick={() => {
-                  widthRef.current = null
-                  clearLiveSidebarWidth()
-                  setWidth(null)
+                  if (boardExpanded) {
+                    panelWidthRef.current = null
+                    clearLiveBoardWidth()
+                    setPanelWidth(null)
+                  } else {
+                    chatWidthRef.current = null
+                    clearLiveSidebarWidth()
+                    setChatWidth(null)
+                  }
                 }}
               />
             )}
@@ -3456,6 +3690,35 @@ export function LiveHub({
                         onClick={() => act(endButton)}
                       >
                         <EndMark />
+                      </button>
+                    )}
+                    {/* Stacked vs. side by side (mesa task 1447) — offered
+                        only once there is a board section to arrange against
+                        the chat, since a single section has nothing to lay
+                        out. Frozen ink locks it: switching axes while a
+                        stroke is unsent would move the section it is pinned
+                        to. */}
+                    {hasBoards && (
+                      <button
+                        type="button"
+                        className="live-icon live-panel-arrange"
+                        aria-label={
+                          layout.arrangement === 'stacked'
+                            ? 'put the whiteboard beside the conversation'
+                            : 'put the whiteboard above the conversation'
+                        }
+                        title={
+                          layout.arrangement === 'stacked'
+                            ? 'Side by side'
+                            : 'Stacked'
+                        }
+                        tabIndex={open ? undefined : -1}
+                        disabled={frozen}
+                        onClick={() =>
+                          setArrangement(layout.arrangement === 'stacked' ? 'side' : 'stacked')
+                        }
+                      >
+                        <ArrangeMark side={layout.arrangement === 'side'} />
                       </button>
                     )}
                     <button
@@ -3550,228 +3813,316 @@ export function LiveHub({
 
               {error && <p className="error">{error}</p>}
 
-              <div className="live-transcript" ref={scroller}>
-                {groups.length === 0 ? (
-                  <p className="muted">
-                    Nothing said yet. Press {controls.primary.label} to begin.
-                  </p>
-                ) : (
-                  groups.map((group) => (
-                    <div
-                      key={group.turns[0].id}
-                      className={`live-group live-${group.role}`}
-                    >
-                      <div className="live-who">{turnLabel(group.role, group.notice)}</div>
-                      {group.turns.map((turn) => (
-                        <div key={turn.id} className="live-turn">
-                          {/* Plain text, never markdown: a mesa turn is prose meant
-                              to be *spoken*, and a user turn is untrusted
-                              dictation. */}
-                          {turn.text !== '' && (
-                            <div className="live-text">{turn.text}</div>
-                          )}
-                          {navigateTarget(turn) !== null && (
-                            <div className="live-navigated">
-                              went to {navigateTarget(turn)}
-                            </div>
-                          )}
-                          {sidebarsIntent(turn) !== null && (
-                            <div className="live-navigated">
-                              {sidebarsIntent(turn) === 'collapse'
-                                ? 'collapsed the sidebars'
-                                : 'opened the sidebars'}
-                            </div>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  ))
-                )}
-              </div>
-
-              {/* What is happening right now, in one word or two (mesa task
-                  1153) — one pill between the settled transcript and the box,
-                  since at any moment there is at most one thing in flight.
-                  `statusPill` ranks mesa's own line above the person being
-                  heard for `liveIndicator.ts`'s reason: while she speaks the
-                  microphone is shut. The row is always rendered, at a fixed
-                  height, with the text hidden rather than the element gone:
-                  the composer must not jump as the pill comes and goes, and a
-                  live region that is *mounted* when its text changes is
-                  announced where a freshly mounted one often is not. */}
+              {/* The two sections (mesa task 1447, replacing the whiteboard's
+                  own floating overlay): the board — absent entirely with no
+                  history to show — the divider between them while both are
+                  showing, and the chat. `LiveBoardPanel` is rendered
+                  unconditionally whenever there is a board history, never
+                  gated on `boardExpanded`: folding is CSS, not unmounting —
+                  the reason lives with the component. */}
               <div
-                className={`live-status-pill${
-                  pill === 'Naru speaking'
-                    ? ' live-status-mesa'
-                    : pill !== null
-                      ? ' live-status-hearing'
-                      : ''
-                }`}
-                aria-live="polite"
+                ref={sectionsRef}
+                className={`live-panel-sections live-panel-${layout.arrangement}`}
               >
-                {pill ?? ''}
-              </div>
-
-              <form
-                className="live-composer"
-                onSubmit={(e) => {
-                  e.preventDefault()
-                  send()
-                }}
-              >
-                {/* The box and the switch, on one line (mesa task 1069):
-                    the microphone is a square beside the field rather than a
-                    word above it, since it is the other way of saying the
-                    same thing the box is for. Both stay in the panel rather
-                    than the header cluster (mesa task 887) — they are
-                    settings on the conversation's input, read at the moment
-                    the person is deciding whether to talk or to type. */}
-                <div className="live-input-row">
-                  <textarea
-                    className="live-input"
-                    rows={2}
-                    value={draft}
-                    // Paused is the same answer as not-live for the box: nothing typed
-                    // here would be heard until Resume, and a field that accepts words
-                    // nobody will read is worse than one that says it is shut.
-                    disabled={!live || paused}
-                    placeholder={
-                      !live
-                        ? 'go live to start the conversation'
-                        : paused
-                          ? 'paused — press Resume to talk to Naru'
-                          : recognizes
-                            ? 'listening — or type here'
-                            : 'dictate or type here…'
-                    }
-                    aria-label="say something to Naru"
-                    onChange={(e) => {
-                      updateDraft(e.target.value)
-                      // Typing or pasting while listening is the person still
-                      // adding to the recording (mesa task 1351), so the silence
-                      // wait restarts rather than sending the speech without it.
-                      if (recognizes) markHeard()
+                {hasBoards && (
+                  <div
+                    ref={boardSectionRef}
+                    className={`live-panel-section live-panel-board live-board-section${
+                      boardExpanded ? '' : ' folded'
+                    }`}
+                    // The ratio sets the section's *share*; the frozen
+                    // min-size is a floor under it, not an alternative to it
+                    // — a flex item never shrinks below its own min-width/
+                    // min-height, so this is what stops the outer panel's own
+                    // resize handle (never disabled by the freeze) from
+                    // shrinking the ratio's share out from under the strokes.
+                    style={{
+                      ...(boardExpanded && chatExpanded
+                        ? { flexBasis: `${layout.ratio * 100}%` }
+                        : {}),
+                      ...(frozen && frozenSize !== null
+                        ? effectiveArrangement === 'side'
+                          ? { minWidth: `${frozenSize.width}px` }
+                          : { minHeight: `${frozenSize.height}px` }
+                        : {}),
                     }}
-                    onKeyDown={(e) => {
-                      if (e.key !== 'Enter' || e.shiftKey) return
-                      // The Enter that commits an IME candidate is not a send: it
-                      // arrives as a plain `Enter` keydown with `isComposing` set, and
-                      // acting on it would ship half-converted text. The same guard,
-                      // for the same reason, as the agent chat composer's.
-                      if (e.nativeEvent.isComposing) return
+                  >
+                    <LiveBoardPanel
+                      boards={boards}
+                      expanded={boardExpanded}
+                      onToggleFold={() => foldBoard(boardExpanded)}
+                      ink={ink}
+                      onInk={updateInk}
+                      flattenRef={flattenInk}
+                      showingRef={boardShowing}
+                    />
+                  </div>
+                )}
+
+                {hasBoards && boardExpanded && chatExpanded && (
+                  <div
+                    className="live-panel-divider"
+                    onMouseDown={(e) => {
+                      if (frozen) return
                       e.preventDefault()
-                      send()
+                      setRatioResizing(true)
+                    }}
+                    onDoubleClick={() => {
+                      if (frozen) return
+                      ratioRef.current = DEFAULT_LIVE_LAYOUT_RATIO
+                      setLayout((l) => ({ ...l, ratio: DEFAULT_LIVE_LAYOUT_RATIO }))
+                      saveLiveLayoutRatio(DEFAULT_LIVE_LAYOUT_RATIO)
                     }}
                   />
-                  {/* Offered on the same terms as Pause: there is a live
-                    conversation, this browser is in it, and the microphone
-                    could actually open — a browser with no recognizer, or one
-                    whose microphone was refused, has nothing for this switch
-                    to do, and the caption below says which of the two it is.
-                    A switch reading "listening" before the conversation has
-                    started would claim something that is not happening.
+                )}
 
-                    A press, not a hold (mesa task 1069 kept this deliberately):
-                    it is the same toggle the ⌘/Ctrl+Shift+L chord drives, and
-                    the two must not mean different things. */}
-                  {live && unlocked && supported && !blocked && (
-                    <button
-                      type="button"
-                      className={`live-icon live-mic${muted ? '' : ' live-on'}`}
-                      aria-pressed={!muted}
-                      aria-label={
-                        muted ? 'listen through this browser' : 'stop listening'
-                      }
-                      // Out of the tab order while the panel is clipped, for
-                      // the same reason the close button is: `pointer-events`
-                      // stops the mouse, not a Tab, and an invisible control
-                      // that toggles the microphone on Enter is worse than a
-                      // button nobody can reach.
-                      tabIndex={open ? undefined : -1}
-                      title={`${
-                        muted ? 'Listen through this browser' : 'Stop listening'
-                      } (${listenChordLabel})`}
-                      onClick={() => toggleListening(!muted)}
-                    >
-                      <MicMark />
-                    </button>
+                <div
+                  className={`live-panel-section live-panel-chat${
+                    chatExpanded ? '' : ' folded'
+                  }`}
+                  style={
+                    hasBoards && boardExpanded && chatExpanded
+                      ? { flexBasis: `${(1 - layout.ratio) * 100}%` }
+                      : undefined
+                  }
+                >
+                  {/* The chat's own fold header — offered only once there is a
+                      board to fold it against, exactly as the arrangement
+                      toggle above is: a single section has nothing to give its
+                      space to. */}
+                  {hasBoards && (
+                    <div className="live-panel-section-head">
+                      <span className="live-panel-section-title">Conversation</span>
+                      <button
+                        type="button"
+                        className="live-icon live-panel-fold"
+                        aria-label={
+                          chatExpanded ? 'fold the conversation' : 'show the conversation'
+                        }
+                        // Frozen ink pins the board section's size against the
+                        // ratio (`frozenSize` below); folding chat out from
+                        // under it would still hand the board 100% of the
+                        // panel via `.live-panel-section:not(.folded)`'s own
+                        // `flex: 1`, resizing it anyway. Locked in step with
+                        // the arrangement toggle and the divider drag.
+                        disabled={frozen}
+                        onClick={() => foldChat(chatExpanded)}
+                      >
+                        <FoldChevron expanded={chatExpanded} />
+                      </button>
+                    </div>
+                  )}
+                  {chatExpanded && (
+                    <>
+                      <div className="live-transcript" ref={scroller}>
+                        {groups.length === 0 ? (
+                          <p className="muted">
+                            Nothing said yet. Press {controls.primary.label} to begin.
+                          </p>
+                        ) : (
+                          groups.map((group) => (
+                            <div
+                              key={group.turns[0].id}
+                              className={`live-group live-${group.role}`}
+                            >
+                              <div className="live-who">
+                                {turnLabel(group.role, group.notice)}
+                              </div>
+                              {group.turns.map((turn) => (
+                                <div key={turn.id} className="live-turn">
+                                  {/* Plain text, never markdown: a mesa turn is
+                                      prose meant to be *spoken*, and a user turn
+                                      is untrusted dictation. */}
+                                  {turn.text !== '' && (
+                                    <div className="live-text">{turn.text}</div>
+                                  )}
+                                  {navigateTarget(turn) !== null && (
+                                    <div className="live-navigated">
+                                      went to {navigateTarget(turn)}
+                                    </div>
+                                  )}
+                                  {sidebarsIntent(turn) !== null && (
+                                    <div className="live-navigated">
+                                      {sidebarsIntent(turn) === 'collapse'
+                                        ? 'collapsed the sidebars'
+                                        : 'opened the sidebars'}
+                                    </div>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          ))
+                        )}
+                      </div>
+
+                      {/* What is happening right now, in one word or two
+                          (mesa task 1153) — one pill between the settled
+                          transcript and the box, since at any moment there is
+                          at most one thing in flight. `statusPill` ranks
+                          mesa's own line above the person being heard for
+                          `liveIndicator.ts`'s reason: while she speaks the
+                          microphone is shut. The row is always rendered, at a
+                          fixed height, with the text hidden rather than the
+                          element gone: the composer must not jump as the
+                          pill comes and goes, and a live region that is
+                          *mounted* when its text changes is announced where a
+                          freshly mounted one often is not. */}
+                      <div
+                        className={`live-status-pill${
+                          pill === 'Naru speaking'
+                            ? ' live-status-mesa'
+                            : pill !== null
+                              ? ' live-status-hearing'
+                              : ''
+                        }`}
+                        aria-live="polite"
+                      >
+                        {pill ?? ''}
+                      </div>
+
+                      <form
+                        className="live-composer"
+                        onSubmit={(e) => {
+                          e.preventDefault()
+                          send()
+                        }}
+                      >
+                        {/* The box and the switch, on one line (mesa task 1069):
+                            the microphone is a square beside the field rather than a
+                            word above it, since it is the other way of saying the
+                            same thing the box is for. Both stay in the panel rather
+                            than the header cluster (mesa task 887) — they are
+                            settings on the conversation's input, read at the moment
+                            the person is deciding whether to talk or to type. */}
+                        <div className="live-input-row">
+                          <textarea
+                            className="live-input"
+                            rows={2}
+                            value={draft}
+                            // Paused is the same answer as not-live for the box: nothing typed
+                            // here would be heard until Resume, and a field that accepts words
+                            // nobody will read is worse than one that says it is shut.
+                            disabled={!live || paused}
+                            placeholder={
+                              !live
+                                ? 'go live to start the conversation'
+                                : paused
+                                  ? 'paused — press Resume to talk to Naru'
+                                  : recognizes
+                                    ? 'listening — or type here'
+                                    : 'dictate or type here…'
+                            }
+                            aria-label="say something to Naru"
+                            onChange={(e) => {
+                              updateDraft(e.target.value)
+                              // Typing or pasting while listening is the person still
+                              // adding to the recording (mesa task 1351), so the silence
+                              // wait restarts rather than sending the speech without it.
+                              if (recognizes) markHeard()
+                            }}
+                            onKeyDown={(e) => {
+                              if (e.key !== 'Enter' || e.shiftKey) return
+                              // The Enter that commits an IME candidate is not a send: it
+                              // arrives as a plain `Enter` keydown with `isComposing` set, and
+                              // acting on it would ship half-converted text. The same guard,
+                              // for the same reason, as the agent chat composer's.
+                              if (e.nativeEvent.isComposing) return
+                              e.preventDefault()
+                              send()
+                            }}
+                          />
+                          {/* Offered on the same terms as Pause: there is a live
+                            conversation, this browser is in it, and the microphone
+                            could actually open — a browser with no recognizer, or one
+                            whose microphone was refused, has nothing for this switch
+                            to do, and the caption below says which of the two it is.
+                            A switch reading "listening" before the conversation has
+                            started would claim something that is not happening.
+
+                            A press, not a hold (mesa task 1069 kept this deliberately):
+                            it is the same toggle the ⌘/Ctrl+Shift+L chord drives, and
+                            the two must not mean different things. */}
+                          {live && unlocked && supported && !blocked && (
+                            <button
+                              type="button"
+                              className={`live-icon live-mic${muted ? '' : ' live-on'}`}
+                              aria-pressed={!muted}
+                              aria-label={
+                                muted ? 'listen through this browser' : 'stop listening'
+                              }
+                              // Out of the tab order while the panel is clipped, for
+                              // the same reason the close button is: `pointer-events`
+                              // stops the mouse, not a Tab, and an invisible control
+                              // that toggles the microphone on Enter is worse than a
+                              // button nobody can reach.
+                              tabIndex={open ? undefined : -1}
+                              title={`${
+                                muted ? 'Listen through this browser' : 'Stop listening'
+                              } (${listenChordLabel})`}
+                              onClick={() => toggleListening(!muted)}
+                            >
+                              <MicMark />
+                            </button>
+                          )}
+                        </div>
+                        {/* The caption under the box: which microphone, and what the
+                            page is doing with it. The chooser moved down here from
+                            the row above (mesa task 1069) — it is a machine-local
+                            setting read once, not a control the person reaches for
+                            mid-sentence, and the box and the switch own that line
+                            now. */}
+                        <div className="live-caption">
+                          {/* Offered only where there is more than one microphone and
+                              the browser takes a track (`liveDevices.ts`) — a control
+                              that cannot change what mesa hears is worse than no
+                              control. */}
+                          {choosesInput && (
+                            <select
+                              className="live-input-choice"
+                              aria-label="microphone"
+                              tabIndex={open ? undefined : -1}
+                              value={chosen}
+                              onChange={(event) => {
+                                const next = event.target.value
+                                writeInputChoice(next)
+                                setStoredInput(next)
+                                // Choosing is asking again: a device that refused
+                                // before may be free now, and the person picking it is
+                                // who decides to retry.
+                                setRefusedInput(null)
+                              }}
+                            >
+                              <option value={DEFAULT_INPUT}>Default mic</option>
+                              {inputs.map((input, index) => (
+                                <option key={input.deviceId} value={input.deviceId}>
+                                  {inputLabel(input, index)}
+                                </option>
+                              ))}
+                            </select>
+                          )}
+                          <span className="live-hint muted">
+                            {captureHint({
+                              live,
+                              joined: unlocked,
+                              path,
+                              blocked,
+                              listening: recognizes,
+                              paused,
+                              muted,
+                              chord: listenChordLabel,
+                              audioEngine: audio?.engine ?? null,
+                            })}{' '}
+                            {!paused && 'Enter sends.'}
+                          </span>
+                        </div>
+                      </form>
+                    </>
                   )}
                 </div>
-                {/* The caption under the box: which microphone, and what the
-                    page is doing with it. The chooser moved down here from
-                    the row above (mesa task 1069) — it is a machine-local
-                    setting read once, not a control the person reaches for
-                    mid-sentence, and the box and the switch own that line
-                    now. */}
-                <div className="live-caption">
-                  {/* Offered only where there is more than one microphone and
-                      the browser takes a track (`liveDevices.ts`) — a control
-                      that cannot change what mesa hears is worse than no
-                      control. */}
-                  {choosesInput && (
-                    <select
-                      className="live-input-choice"
-                      aria-label="microphone"
-                      tabIndex={open ? undefined : -1}
-                      value={chosen}
-                      onChange={(event) => {
-                        const next = event.target.value
-                        writeInputChoice(next)
-                        setStoredInput(next)
-                        // Choosing is asking again: a device that refused
-                        // before may be free now, and the person picking it is
-                        // who decides to retry.
-                        setRefusedInput(null)
-                      }}
-                    >
-                      <option value={DEFAULT_INPUT}>Default mic</option>
-                      {inputs.map((input, index) => (
-                        <option key={input.deviceId} value={input.deviceId}>
-                          {inputLabel(input, index)}
-                        </option>
-                      ))}
-                    </select>
-                  )}
-                  <span className="live-hint muted">
-                    {captureHint({
-                      live,
-                      joined: unlocked,
-                      path,
-                      blocked,
-                      listening: recognizes,
-                      paused,
-                      muted,
-                      chord: listenChordLabel,
-                      audioEngine: audio?.engine ?? null,
-                    })}{' '}
-                    {!paused && 'Enter sends.'}
-                  </span>
-                </div>
-              </form>
+              </div>
             </div>
           </aside>,
           slot,
-        )}
-
-      {/* The whiteboard (mesa task 1071), portalled into its own slot beside
-          the conversation's. A second portal rather than a second component
-          higher up: the hub already holds the one poll this reads, and the
-          panel opens on a board arriving — which only the code watching that
-          poll can know. It renders nothing but the render route's URL; there
-          is no board write route at all, and the close button below only
-          closes. */}
-      {boardSlot !== null &&
-        createPortal(
-          <LiveBoardPanel
-            boards={boards}
-            open={nextBoardPanel.open}
-            onClose={() => setBoardPanel((panel) => ({ ...panel, open: false }))}
-            ink={ink}
-            onInk={updateInk}
-            flattenRef={flattenInk}
-            showingRef={boardShowing}
-          />,
-          boardSlot,
         )}
 
       {/* One player for the whole app, mounted for its whole life: a press

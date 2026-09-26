@@ -61,8 +61,8 @@ describe('width load/save/clear', () => {
   })
 
   it('keeps an over-wide stored value for the render to cap', () => {
-    // The live ceiling depends on the current window, which this module can't
-    // see — `.live-board`'s `max-width: 100%` holds it until the next drag.
+    // The live ceiling depends on the current window, which this module
+    // can't see — `LiveHub`'s own resize effect clamps it on the next drag.
     saveLiveBoardWidth(4000)
     expect(loadLiveBoardWidth()).toBe(4000)
     expect(clampLiveBoardWidth(4000, 1200)).toBe(1200)

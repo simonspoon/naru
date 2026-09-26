@@ -176,69 +176,31 @@ export function boardViewFor(
   return index === view.index ? view : { index, seen: view.seen }
 }
 
-/** Whether the whiteboard panel is showing, and the newest board id the page
- *  has already accounted for. */
-export interface BoardPanel {
-  seen: number | null
-  open: boolean
-}
-
-/** A page that has been shown no board yet. */
-export function closedBoardPanel(): BoardPanel {
-  return { seen: null, open: false }
-}
-
 /**
- * Whether a poll's boards open the panel — `nextUnplayed`'s claim-once
- * discipline, in the one shape that fits a picture.
+ * The newest board id this component has already accounted for, advanced as
+ * new boards arrive — `nextUnplayed`'s claim-once discipline, in the one
+ * shape that fits a picture: a board id the page has not seen means the
+ * agent has just pushed something (mesa task 1447's `LiveHub` decides what
+ * "accounted for" *does* — expanding the board section and opening the
+ * panel — this module only tracks which id that decision was last made for).
+ * An empty list — the conversation ended, or its boards were cleared —
+ * forgets what was seen, so the next conversation's first board counts as
+ * new again.
  *
- * A board id the page has not seen means the agent has just pushed something
- * it decided to *show* rather than say, so the panel opens; every later poll
- * carries that same board for as long as the conversation lasts, and without
- * the `seen` half each of them would re-open a panel the person had put away.
- * An empty list — the conversation ended, or its boards were cleared — closes
- * the panel and forgets what was seen, so the next conversation's first board
- * is a push again.
+ * A plain `number | null` rather than a record: whether the panel/section is
+ * showing is the caller's own state (fold flags, panel open/closed), not a
+ * fact this module can derive — the whiteboard used to answer that here too,
+ * back when a board arriving was the *only* thing that opened it (mesa task
+ * 1113 already needed a separate reopen; mesa task 1447 removed the last
+ * remaining reader of that field).
  *
- * Returns the state it was handed, unchanged and by identity, when nothing
- * moved: the caller applies this during render, so "nothing happened" has to
- * be tellable without a comparison of its own.
+ * Returns `seen` unchanged on every poll where nothing moved, so the caller
+ * (applying this during render) can skip a state write with a plain `!==`.
  */
-export function boardPanelFor(
-  panel: BoardPanel,
-  boards: readonly LiveBoardSummary[],
-): BoardPanel {
+export function boardSeenFor(seen: number | null, boards: readonly LiveBoardSummary[]): number | null {
   const newest = newestBoardId(boards)
-  if (newest === null) {
-    return panel.seen === null && !panel.open ? panel : closedBoardPanel()
-  }
-  if (panel.seen === null || newest > panel.seen) return { seen: newest, open: true }
-  return panel
+  if (newest === null) return seen === null ? seen : null
+  if (seen === null || newest > seen) return newest
+  return seen
 }
 
-/**
- * Bringing back a panel the person put away (mesa task 1113).
- *
- * `boardPanelFor` only ever *opens* on a board newer than `seen`, which is
- * what keeps a hidden panel hidden for the rest of the conversation — so
- * reopening cannot go through it, and it must leave `seen` exactly as it was
- * or the next poll would re-open the panel all over again. Returns the state
- * it was handed, by identity, when the panel is already open: the caller
- * holds this in `useState` and a fresh object for a press that changed
- * nothing is a render for nothing, `boardPanelFor`'s own discipline.
- */
-export function openBoardPanel(panel: BoardPanel): BoardPanel {
-  return panel.open ? panel : { seen: panel.seen, open: true }
-}
-
-/**
- * Whether the header offers that press. A conversation that has pushed
- * nothing has no whiteboard to show, so the control is absent rather than
- * dead — and while the panel is up there is nothing to reopen.
- */
-export function showsBoardReopen(
-  panel: BoardPanel,
-  boards: readonly LiveBoardSummary[],
-): boolean {
-  return boards.length > 0 && !panel.open
-}

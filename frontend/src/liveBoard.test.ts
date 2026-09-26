@@ -1,16 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import {
   boardAt,
-  boardPanelFor,
   boardRender,
+  boardSeenFor,
   boardTitle,
   boardViewFor,
   clampBoardIndex,
-  closedBoardPanel,
   emptyBoardView,
   newestBoardId,
-  openBoardPanel,
-  showsBoardReopen,
   stepBoard,
 } from './liveBoard'
 import type { LiveBoardSummary } from './types/LiveBoardSummary'
@@ -188,77 +185,30 @@ describe('boardViewFor', () => {
   })
 })
 
-describe('boardPanelFor', () => {
-  it('opens on a board the page has not been shown', () => {
-    expect(boardPanelFor(closedBoardPanel(), [board(4)])).toEqual({
-      seen: 4,
-      open: true,
-    })
+describe('boardSeenFor', () => {
+  it('advances on a board the page has not been shown', () => {
+    expect(boardSeenFor(null, [board(4)])).toBe(4)
   })
 
-  it('opens again on the next push', () => {
-    expect(boardPanelFor({ seen: 4, open: false }, [board(4), board(7)])).toEqual({
-      seen: 7,
-      open: true,
-    })
+  it('advances again on the next push', () => {
+    expect(boardSeenFor(4, [board(4), board(7)])).toBe(7)
   })
 
-  it('leaves a panel the person closed shut', () => {
+  it('holds still while nothing newer has arrived', () => {
     // The board stays in the poll for the rest of the conversation; without
-    // the `seen` half every two seconds would re-open it.
-    const closed = { seen: 7, open: false }
-    expect(boardPanelFor(closed, [board(4), board(7)])).toBe(closed)
+    // this, every two-second tick would read as a fresh push.
+    expect(boardSeenFor(7, [board(4), board(7)])).toBe(7)
   })
 
-  it('answers by identity when nothing moved', () => {
-    // The caller applies this during render, so a fresh object each tick would
-    // be a render each tick — and, with no comparison of its own, a loop.
-    const open = { seen: 7, open: true }
-    expect(boardPanelFor(open, [board(7)])).toBe(open)
-    const cold = closedBoardPanel()
-    expect(boardPanelFor(cold, [])).toBe(cold)
+  it('answers by value (there is nothing else to compare) when nothing moved', () => {
+    // The caller applies this during render, so a fresh answer each tick with
+    // no comparison of its own would be a render each tick — and a loop.
+    expect(boardSeenFor(7, [board(7)])).toBe(7)
+    expect(boardSeenFor(null, [])).toBe(null)
   })
 
-  it('closes and forgets when the conversation ends or is cleared', () => {
-    expect(boardPanelFor({ seen: 7, open: true }, [])).toEqual({
-      seen: null,
-      open: false,
-    })
+  it('forgets when the conversation ends or is cleared', () => {
+    expect(boardSeenFor(7, [])).toBe(null)
   })
 })
 
-describe('openBoardPanel', () => {
-  it('reopens a panel the person hid, without moving `seen`', () => {
-    // Reopening is not a push: touching `seen` here would make the next poll
-    // treat the same board as new and re-open the panel on its own.
-    expect(openBoardPanel({ seen: 7, open: false })).toEqual({ seen: 7, open: true })
-  })
-
-  it('answers by identity when the panel is already open', () => {
-    const open = { seen: 7, open: true }
-    expect(openBoardPanel(open)).toBe(open)
-  })
-
-  it('leaves the seen-once rule intact for the polls that follow', () => {
-    // The regression this guards: hide, reopen, and the two-second poll still
-    // carries the same newest board — it must go on changing nothing, so a
-    // later hide stays a hide.
-    const reopened = openBoardPanel({ seen: 7, open: false })
-    expect(boardPanelFor(reopened, [board(4), board(7)])).toBe(reopened)
-    const hiddenAgain = { seen: 7, open: false }
-    expect(boardPanelFor(hiddenAgain, [board(4), board(7)])).toBe(hiddenAgain)
-  })
-})
-
-describe('showsBoardReopen', () => {
-  it('is offered only while a hidden panel has something to show', () => {
-    expect(showsBoardReopen({ seen: 7, open: false }, [board(7)])).toBe(true)
-  })
-
-  it('is absent with no boards, and while the panel is up', () => {
-    // A conversation that has pushed nothing has no whiteboard at all, so the
-    // control is missing rather than dead.
-    expect(showsBoardReopen(closedBoardPanel(), [])).toBe(false)
-    expect(showsBoardReopen({ seen: 7, open: true }, [board(7)])).toBe(false)
-  })
-})

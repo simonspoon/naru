@@ -1453,28 +1453,55 @@ render route. There is deliberately **no second poll route**.
 
 ### The panel is the person's, not the agent's
 
-The width is a drag handle on the panel's left edge, stored per browser in
-`localStorage` (`frontend/src/liveBoardWidth.ts`, mesa task 1078) and floored
-at 384px, and a maximise button in the head fills the whole main area with the
-board. Both are browser-side and route-free, exactly as the close button is: a
-picture put away, or looked at closer, is not a write. Escape restores a
-maximised board and, once it is back at its own width, closes the panel — one
-press should never do both.
-A panel put away is brought back by a `show the whiteboard` press beside the
-conversation toggle in the header, offered only while the conversation has a
-board and the panel is hidden (mesa task 1113): it opens the panel without
-touching `seen`, so the rule that only a *newer* board opens it on its own is
-unchanged.
+As of mesa task 1447 the whiteboard is no longer its own floating overlay: it
+is a **section** of the conversation panel itself (`frontend/src/liveLayout.ts`),
+stacked above the chat by default or dragged to sit beside it, each section
+foldable on its own header strip and the panel widening to make room — so an
+open board pushes the page over rather than covering it, and closing either
+section hands its space straight to the other. `LiveBoardPanel` still renders
+in one fixed place in the tree regardless (never conditionally, so a framed
+board's `<iframe>` survives a fold), and every control below — the drag, the
+maximise, Escape, the reopen — carries over unchanged, now scoped to the
+section rather than to a panel of its own.
 
-The unset default is the stylesheet's own `min(40rem, 50vw)` and stays that
-way: nothing is written to the inline custom property until the person drags,
-because that expression answers differently per window and any number stored in
-its place would stop it doing so. What a drag must never do is change the
-panel's width with a *transition*: the `<iframe>` this panel exists to hold is
-never unmounted (a torn-down frame reloads its document), so an animated width
-would be a framed document re-laying itself out on every frame. Only
-`clip-path` animates here, which is the same rule the open/close already
-follows.
+The width is still a drag handle, but it is now the **panel's** — one handle
+on the aside's left edge, editing one of **two** stored widths
+(`frontend/src/liveSidebarWidth.ts` for the plain panel, and
+`frontend/src/liveBoardWidth.ts`, repurposed by mesa task 1447 from the
+board's own former width to the panel's width *while its board section is
+showing*), both floored and both `null` — "no opinion" — until the person
+actually drags: the aside then sets no inline `--live-sidebar-width` at all
+and App.css's `min()` decides, `min(26rem, 40vw)` for the plain panel or
+`min(56rem, 60vw)` (`.live-sidebar.board-open`) once a board section is
+expanded. Which of the two a drag edits, and which default applies, follows
+from whether the board section is expanded, read live rather than stored — a
+folded section or an empty history means the plain default, however the board
+was last sized. A maximise button in the board section's own head still fills
+the whole viewport with it (`position: fixed; inset: 0`, no longer `100%` of
+`.main-slot`, since the section no longer sits inside that box), and Escape
+still restores a maximised board first and, once it is back at its normal
+size, **folds the section** rather than closing a panel of its own — one press
+should never do both.
+A folded section is brought back by its own fold button (a chevron on its
+header strip) or, if the whole panel is closed too, by the `show the
+whiteboard` press beside the conversation toggle in the header (mesa task
+1113), offered only while the conversation has a board and it is not both
+open and expanded already: it expands the section and opens the panel without
+touching `seen`, so the rule that only a *newer* board does that on its own is
+unchanged — and, since a mesa task 1447 fix, that rule now also spares a page
+that merely *reloaded*: the first poll after mount seeds what this component
+has seen without expanding or opening anything, so a section the person folded
+before reloading stays folded, and only a board pushed *after* that baseline
+poll counts as new.
+
+Folding either section is **`display: none`** on its stage, not a width or a
+clip-path: a folded section shrinks to its own header strip on a plain flex
+`flex: none`, and its sibling's `flex: 1 1 0%` claims the room this gives up.
+That is deliberately not the open/close transition the panel itself still
+uses — a *board* section's stage holds the `<iframe>` this whole design exists
+to keep alive (a torn-down frame reloads its document), and `display: none`,
+unlike a width or clip-path animated across several frames, hides it in the
+one frame the fold happens in with nothing to re-lay-out along the way.
 
 ### Ink: the person's pen on a board (mesa task 1353)
 
