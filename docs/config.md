@@ -731,18 +731,20 @@ ordinary cloned voice, spoken by a cloning (Base) model.
 
 **Why this reference script.** `DESIGN_REFERENCE` reads: "Good morning! I
 checked the schedule, and your first meeting starts at nine, right after
-coffee. Would you like me to move the budget review to Thursday instead?
-Honestly, that sounds much better to me. Just let me know, and I will sort out
-the details quickly." It was picked from three candidates. Each was read by the
-design model in two voices (a warm low male and a bright young female), two
-takes each, and every take was cloned onto `qwen3-tts-1.7b-base-mlx`. All 12
-clones scored 0 WER on two test sentences, and speaker similarity (the Base
-model's own encoder, 0.982–0.993) did not separate the candidates, so the
-choice rests on the rest:
+coffee. Would you like me to move the budget review to Thursday instead?" It
+began (mesa task 1426) as a four-sentence script, those two sentences
+followed by "Honestly, that sounds much better to me. Just let me know, and I
+will sort out the details quickly.", which was picked from three candidates.
+Each was read by the design model in two voices (a warm low male and a bright
+young female), two takes each, and every take was cloned onto
+`qwen3-tts-1.7b-base-mlx`. All 12 clones scored 0 WER on two test sentences,
+and speaker similarity (the Base model's own encoder, 0.982–0.993) did not
+separate the candidates, so the choice rested on the rest:
 
-- **Length.** Its reads ran 13.8–15.3 s, inside naru-audio's 5–15 s sweet
-  spot (the daemon accepts 3–30 s); the two pangram-style candidates ran
-  15.6–17.5 s.
+- **Length.** The four-sentence reads ran 13.8–15.3 s, inside naru-audio's
+  5–15 s sweet spot (the daemon accepts 3–30 s); the two pangram-style
+  candidates ran 15.6–17.5 s. The current two-sentence script reads in about
+  9–11 s (see below).
 - **Fewest slips.** The design model departed from its transcript least on
   this script, which matters because cloning aligns the clip to the exact
   text.
@@ -751,6 +753,41 @@ choice rests on the rest:
   inherits its reference's style.
 - **Coverage bought nothing.** The pangram candidates' extra phonetic coverage
   made no measurable difference.
+
+**Shortened in mesa task 1429.** Kept reference takes drifted in pitch over
+the read, so the script was cut to its first two sentences. The measurements
+behind that:
+
+- **Pitch tracking.** librosa pyin on the MLX venv, fmin 60 Hz, fmax 700 Hz.
+  The metric, "win3", is the semitone span of median F0 over 3 s windows
+  stepped every 0.5 s. Per-second max:min was rejected as the metric: it is
+  dominated by ordinary intonation and single stray seconds, and kokoro,
+  which does not drift, scores 6–7.5 st on it for the long script. The
+  tracker reproduces the reported drift on the saved "Airhead" take:
+  239–411 Hz per second.
+- **Scripts compared.** 3 descriptions × 3 takes each (bubbly young woman,
+  deep calm man, neutral woman), measured with naru-audio's decoder-priming
+  fix (task 1428) in place:
+
+  | script | take length | win3 mean (range) | takes ≤ 4.0 st |
+  |---|---|---|---|
+  | the old 4-sentence script | 13.8–20.2 s | 5.6 st (4.0–7.9) | 0/9 |
+  | the new 2-sentence script | 8.8–11.1 s | 3.95 st (2.4–8.25) | 6/9 |
+  | a 1-sentence ~5 s script | 3.9–6.6 s | 1.75 st | 9/9 (rejected: at or under the bottom of naru-audio's 5–15 s sweet spot, near the daemon's 3 s floor) |
+
+  Kokoro reading the old script scores 2.2 st, as a floor. The drift builds
+  over the read: the first 5 s of the old takes scored a mean of 2.0 st.
+- **Clones.** One take per script and voice, each speaking 6 lines on
+  `qwen3-tts-1.7b-base-mlx`. WER was 0–1/65 words for every script, so a
+  shorter reference costs no intelligibility. The spread in pitch between
+  lines is 2.4–7 st whatever the reference, against 1.3–1.7 st for kokoro, so
+  the line-to-line pitch variation a listener hears comes from the Base
+  model's cloning, not the reference take. The shorter script fixes the take,
+  not that.
+- **No drift check.** No drift check or re-roll prompt was added. A third of
+  the new script's takes still exceed 4.0 st, but on this data that did not
+  change what the clone sounds like. The user can still re-roll the reference
+  take by ear, as before.
 
 "nine" is spelled out and the script has no digits or bracket tags, so the
 saved transcript matches what is spoken.

@@ -373,12 +373,13 @@ pub const DESIGN_SAMPLE: &str = "Hello, this is how this voice will read your in
 
 /// The script a kept design reads for the clone's reference clip — saved,
 /// with the clip, as its exact transcript. Why it reads what it does is in
-/// `docs/config.md`, "Designing a voice": a conversational read of about 14–15 s, and
-/// no digits or tags, so the transcript is exactly what is spoken.
+/// `docs/config.md`, "Designing a voice": a conversational read of about
+/// 9–11 s, kept that short because the voice-design model drifts in pitch
+/// over a longer read (mesa task 1429), and no digits or tags, so the
+/// transcript is exactly what is spoken.
 pub const DESIGN_REFERENCE: &str = "Good morning! I checked the schedule, and your first meeting \
      starts at nine, right after coffee. Would you like me to move the budget review to \
-     Thursday instead? Honestly, that sounds much better to me. Just let me know, and I \
-     will sort out the details quickly.";
+     Thursday instead?";
 
 /// The longest voice description the design route takes, in characters.
 pub const DESIGN_INSTRUCTIONS_MAX: usize = 500;
