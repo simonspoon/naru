@@ -1658,11 +1658,40 @@ const LIVE_BOARD_SUMMARY_COLUMNS: &str = "id, session_id, kind, title, created_a
 /// database, not the attachments' arbitrary-binary case.
 pub const LIVE_BOARD_BODY_MAX: usize = 2 * 1024 * 1024;
 
-/// How many of a session's boards survive a push, newest kept. That bound
-/// **is** the history the panel steps through, and it is also what keeps the
-/// 2s poll bounded — a conversation that pushed a hundred pictures still
-/// answers with twenty pointers.
+/// How many of a session's boards the live poll's own reads hand back, newest
+/// kept — [`Store::list_live_boards`] and `GET /api/live`'s bandwidth bound,
+/// not the boards' lifetime (mesa task 1448 stopped pruning to this on push:
+/// a conversation that pushed a hundred pictures still keeps all hundred,
+/// [`Store::list_live_boards_all`] answers with all of them, and the poll
+/// still answers with the newest twenty pointers).
 pub const LIVE_BOARD_KEEP: i64 = 20;
+
+/// The exact line every live driver — and a handoff successor, on the same
+/// template — is spawned with (`live::agent_prompt`/`live::prompt_with`),
+/// minus the trailing session id and `(lease n).`: the prefix
+/// [`parse_live_session_prompt`] matches to link a `cc_sessions` row back to
+/// the live session it drove. `mesa` is the pre-rename spelling a session
+/// spawned before the mesa→naru rename still opens with.
+const LIVE_SESSION_PROMPT_PREFIXES: [&str; 2] =
+    ["Drive naru live session ", "Drive mesa live session "];
+
+/// Parses the live session id out of a cc session's first prompt, or `None`
+/// when it does not open with one of [`LIVE_SESSION_PROMPT_PREFIXES`] — an
+/// **exact prefix match on the digits right after it**, nothing else about
+/// the text is read, so this never fires on timing or on a person's own
+/// message that happens to mention a live session mid-conversation (that text
+/// is never the *first* prompt a driver's own spawn writes).
+fn parse_live_session_prompt(text: &str) -> Option<i64> {
+    for prefix in LIVE_SESSION_PROMPT_PREFIXES {
+        if let Some(rest) = text.strip_prefix(prefix) {
+            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let Ok(id) = digits.parse::<i64>() {
+                return Some(id);
+            }
+        }
+    }
+    None
+}
 
 /// How many days a turn's ink stays on disk (mesa task 1355). Older ink is
 /// purged by [`Store::purge_live_ink`] each time a conversation starts; a
@@ -7414,10 +7443,15 @@ impl Store {
     ///   nothing else on the row could answer that at render time; every other
     ///   kind stores none, its `kind` being what decides the type.
     ///
-    /// After the write, prunes the session's boards down to the newest
-    /// [`LIVE_BOARD_KEEP`] by id. That bound *is* the history the panel steps
-    /// through, and it is what keeps `GET /api/live`'s two-second poll
-    /// bounded.
+    /// **Boards are never pruned** (mesa task 1448): a push used to delete the
+    /// session's boards down to the newest [`LIVE_BOARD_KEEP`] by id, which
+    /// meant a past conversation's early pictures were gone for good the
+    /// moment it grew past the bound. They now live until the session row
+    /// itself is deleted (cascade) or `live board clear` removes them by
+    /// hand. [`Store::list_live_boards`] (the poll's own read) still caps what
+    /// it hands back at [`LIVE_BOARD_KEEP`], newest first — that bound is the
+    /// poll's bandwidth limit now, not the history's lifetime; the whole
+    /// history is [`Store::list_live_boards_all`].
     pub fn add_live_board(
         &mut self,
         session_id: i64,
@@ -7496,11 +7530,6 @@ impl Store {
             (session_id, kind.as_str(), title, body, content_type),
         )?;
         let id = self.conn.last_insert_rowid();
-        self.conn.execute(
-            "DELETE FROM live_boards WHERE session_id = ?1 AND id NOT IN \
-             (SELECT id FROM live_boards WHERE session_id = ?1 ORDER BY id DESC LIMIT ?2)",
-            (session_id, LIVE_BOARD_KEEP),
-        )?;
         self.get_live_board(id)
     }
 
@@ -7536,32 +7565,140 @@ impl Store {
             .optional()?)
     }
 
-    /// A session's boards **oldest first and bodiless** — the history in the
-    /// order the panel steps through it. `limit` is clamped into
-    /// `1..=`[`LIVE_BOARD_KEEP`], the reasoning [`Store::list_live_turns`]
-    /// gives for its own clamp; the retention bound is the ceiling here
-    /// because it is already all there is.
+    /// The **newest** `limit` of a session's boards, still returned oldest
+    /// first — the poll's own bandwidth bound (mesa task 1448: boards are no
+    /// longer pruned to this, so it is a read-side cap rather than the whole
+    /// history). `limit` is clamped into `1..=`[`LIVE_BOARD_KEEP`], the
+    /// reasoning [`Store::list_live_turns`] gives for its own clamp. For the
+    /// whole, unbounded history see [`Store::list_live_boards_all`].
     pub fn list_live_boards(&self, session_id: i64, limit: i64) -> Result<Vec<LiveBoardSummary>> {
         let limit = limit.clamp(1, LIVE_BOARD_KEEP);
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT {LIVE_BOARD_SUMMARY_COLUMNS} FROM live_boards \
-             WHERE session_id = ?1 ORDER BY id LIMIT ?2"
+            "SELECT {LIVE_BOARD_SUMMARY_COLUMNS} FROM live_boards WHERE session_id = ?1 \
+             AND id IN (SELECT id FROM live_boards WHERE session_id = ?1 ORDER BY id DESC LIMIT ?2) \
+             ORDER BY id"
         ))?;
         let rows = stmt.query_map((session_id, limit), row_to_live_board_summary)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// A session's **whole** board history, oldest first and bodiless — every
+    /// board it ever held, unbounded, since retention stopped pruning them
+    /// (mesa task 1448, `docs/live.md` "Retention is the history"). What a
+    /// caller looking up a past session's whiteboards reads (`GET
+    /// /api/live/sessions/{id}/boards`), and what the delete echo below
+    /// reports as destroyed.
+    pub fn list_live_boards_all(&self, session_id: i64) -> Result<Vec<LiveBoardSummary>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {LIVE_BOARD_SUMMARY_COLUMNS} FROM live_boards \
+             WHERE session_id = ?1 ORDER BY id"
+        ))?;
+        let rows = stmt.query_map([session_id], row_to_live_board_summary)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Wipes a session's boards, echoing what it destroyed — the delete-echo
     /// safety floor mesa has instead of a confirmation prompt. Bodiless like
     /// the listing: the echo is a recovery *transcript*, and a megabyte of
-    /// markup printed to a terminal is not one.
+    /// markup printed to a terminal is not one. Echoes the **whole** history,
+    /// not just the newest [`LIVE_BOARD_KEEP`] — since boards are no longer
+    /// pruned, this delete is the only way any of them stop existing, and a
+    /// destructive echo that silently dropped older ones would defeat the
+    /// safety floor it exists to be.
     pub fn clear_live_boards(&mut self, session_id: i64) -> Result<Vec<LiveBoardSummary>> {
-        let destroyed = self.list_live_boards(session_id, LIVE_BOARD_KEEP)?;
+        let destroyed = self.list_live_boards_all(session_id)?;
         self.conn.execute(
             "DELETE FROM live_boards WHERE session_id = ?1",
             [session_id],
         )?;
         Ok(destroyed)
+    }
+
+    /// One board's ink, oldest first: every `live_turns` row that carried an
+    /// annotated snapshot of it (`board_id = id`), with whether the PNG is
+    /// still on disk (mesa task 1448 — ink purges after
+    /// [`board::LIVE_INK_KEEP_DAYS`], independently of the board it was drawn
+    /// on, so a board can outlive its own ink). Returns `(turn_id,
+    /// created_at, resolved absolute path)`; the caller checks the path.
+    pub fn live_board_ink(&self, board_id: i64) -> Result<Vec<(i64, String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, created_at, image_path FROM live_turns \
+             WHERE board_id = ?1 AND image_path IS NOT NULL ORDER BY id",
+        )?;
+        let rows = stmt.query_map([board_id], |r| {
+            let id: i64 = r.get(0)?;
+            let created_at: String = r.get(1)?;
+            let image_path: String = r.get(2)?;
+            Ok((id, created_at, board::resolve_live_ink(&image_path)))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Boards pushed, keyed by `live_sessions.id` — one query for however
+    /// many live sessions actually pushed a board, so a caller deriving
+    /// `live_board_count` on a whole page of cc sessions (mesa task 1448)
+    /// never runs one query per row.
+    pub fn live_board_counts(&self) -> Result<HashMap<i64, i64>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT session_id, COUNT(*) FROM live_boards GROUP BY session_id")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
+    }
+
+    /// One session's board count — [`Store::live_board_counts`]'s single-id
+    /// twin, for a caller that already knows which live session it wants
+    /// (`core::cc::session_detail`) rather than the whole map.
+    pub fn count_live_boards(&self, session_id: i64) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM live_boards WHERE session_id = ?1",
+            [session_id],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Maps each `cc_sessions.session_id` whose very first prompt
+    /// (`cc_prompts`, earliest `ts`) is the exact line a live driver — or a
+    /// handoff successor, on the same template — is spawned with
+    /// (`live::agent_prompt`/`live::prompt_with`: `"Drive naru live session
+    /// <id> (lease <n>)."`, or the pre-rename `"Drive mesa live session
+    /// <id>…"`) to the live session id it drove (mesa task 1448,
+    /// `docs/live.md` "Linking a CC session to a live session"). Derived on
+    /// every read from that spawn-time text — the one thing every live
+    /// session's driver transcript is guaranteed to open with — never
+    /// stored and never inferred from timing: only the session's *first*
+    /// prompt is read, so a session that merely mentions a live session
+    /// mid-conversation never matches.
+    pub fn cc_live_session_links(&self) -> Result<HashMap<String, i64>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT p.session_id, p.preview FROM cc_prompts p \
+             WHERE p.ts = (SELECT MIN(ts) FROM cc_prompts WHERE session_id = p.session_id) \
+               AND (p.preview LIKE 'Drive naru live session %' \
+                    OR p.preview LIKE 'Drive mesa live session %')",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        let mut map = HashMap::new();
+        for row in rows {
+            let (session_id, preview) = row?;
+            if let Some(id) = parse_live_session_prompt(&preview) {
+                map.insert(session_id, id);
+            }
+        }
+        Ok(map)
+    }
+
+    /// [`Store::cc_live_session_links`]'s single-session twin, for
+    /// `core::cc::session_detail`'s one-row read.
+    pub fn cc_live_session_link(&self, session_id: &str) -> Result<Option<i64>> {
+        let preview: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT preview FROM cc_prompts WHERE session_id = ?1 ORDER BY ts, uuid LIMIT 1",
+                [session_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(preview.and_then(|p| parse_live_session_prompt(&p)))
     }
 
     // ---- scripts (user-authored shell) ----
@@ -16064,14 +16201,17 @@ mod tests {
         }
     }
 
-    /// The retention bound IS the history: a push prunes to the newest
-    /// `LIVE_BOARD_KEEP`, the listing is oldest-first and bodiless, and the
-    /// current board is the newest.
+    /// Boards are never pruned (mesa task 1448): every board pushed survives,
+    /// `list_live_boards_all` holds every one of them oldest first, and the
+    /// poll's own `list_live_boards` still caps at `LIVE_BOARD_KEEP`, newest
+    /// kept — a read-side bandwidth bound, not the boards' lifetime. The
+    /// current board is always the newest either way.
     #[test]
-    fn live_boards_are_pruned_to_the_keep_bound_and_listed_oldest_first() {
+    fn live_boards_are_never_pruned_but_the_poll_still_caps_at_the_keep_bound() {
         let (mut store, _dir) = temp_store();
         let session = store.start_live_session(None).unwrap();
-        for i in 0..(LIVE_BOARD_KEEP + 5) {
+        let total = LIVE_BOARD_KEEP + 5;
+        for i in 0..total {
             store
                 .add_live_board(
                     session.id,
@@ -16082,19 +16222,38 @@ mod tests {
                 )
                 .unwrap();
         }
-        let boards = store.list_live_boards(session.id, i64::MAX).unwrap();
-        assert_eq!(boards.len(), LIVE_BOARD_KEEP as usize);
-        assert_eq!(boards[0].title.as_deref(), Some("board 5"), "oldest first");
-        assert_eq!(
-            boards.last().unwrap().title,
-            Some(format!("board {}", LIVE_BOARD_KEEP + 4)),
-        );
-        let current = store.current_live_board(session.id).unwrap().unwrap();
-        assert_eq!(current.id, boards.last().unwrap().id, "newest is current");
-        assert_eq!(current.body, format!("body {}", LIVE_BOARD_KEEP + 4));
 
-        // The pruned ones are gone, not merely unlisted.
-        assert!(matches!(store.get_live_board(1), Err(Error::NotFound(_))));
+        // Nothing pruned: every board still resolves, and the whole-history
+        // read holds all of them, oldest first.
+        let all = store.list_live_boards_all(session.id).unwrap();
+        assert_eq!(all.len(), total as usize);
+        assert_eq!(all[0].title.as_deref(), Some("board 0"), "oldest first");
+        assert_eq!(
+            all.last().unwrap().title,
+            Some(format!("board {}", total - 1)),
+        );
+        assert!(
+            store.get_live_board(1).is_ok(),
+            "the first board is still there"
+        );
+
+        // The poll's own listing still caps at the keep bound, newest kept,
+        // still returned oldest first.
+        let polled = store.list_live_boards(session.id, i64::MAX).unwrap();
+        assert_eq!(polled.len(), LIVE_BOARD_KEEP as usize);
+        assert_eq!(
+            polled[0].title.as_deref(),
+            Some(format!("board {}", total - LIVE_BOARD_KEEP)).as_deref(),
+            "oldest of the newest-kept window"
+        );
+        assert_eq!(
+            polled.last().unwrap().title,
+            Some(format!("board {}", total - 1)),
+        );
+
+        let current = store.current_live_board(session.id).unwrap().unwrap();
+        assert_eq!(current.id, all.last().unwrap().id, "newest is current");
+        assert_eq!(current.body, format!("body {}", total - 1));
     }
 
     /// `clear` echoes what it destroyed — the delete-echo safety floor — and a
@@ -16122,6 +16281,75 @@ mod tests {
         assert!(store.current_live_board(session.id).unwrap().is_none());
         // Clearing an empty whiteboard is an empty echo, not an error.
         assert!(store.clear_live_boards(session.id).unwrap().is_empty());
+    }
+
+    /// The cc↔live join (mesa task 1448): a cc session whose first prompt is
+    /// the exact line a driver is spawned with links back to the live
+    /// session it drove, both in the batch reader and the single-session
+    /// one; the pre-rename "mesa" spelling matches too; a session whose
+    /// first prompt merely *mentions* a live session never matches; and the
+    /// board count rides along only for a session that matched.
+    #[test]
+    fn cc_live_session_links_matches_only_the_exact_first_prompt() {
+        let (mut store, _dir) = temp_store();
+        let session = store.start_live_session(None).unwrap();
+        store
+            .add_live_board(session.id, LiveBoardKind::Markdown, None, "body", None)
+            .unwrap();
+        store
+            .add_live_board(session.id, LiveBoardKind::Markdown, None, "body 2", None)
+            .unwrap();
+
+        let insert_prompt = |uuid: &str, sid: &str, ts: i64, preview: &str| {
+            store
+                .conn
+                .execute(
+                    "INSERT INTO cc_prompts (uuid, session_id, ts, preview) VALUES (?1, ?2, ?3, ?4)",
+                    (uuid, sid, ts, preview),
+                )
+                .unwrap();
+        };
+        // A real driver: first prompt is the exact spawn line.
+        insert_prompt(
+            "u1",
+            "cc-driver",
+            100,
+            &format!("Drive naru live session {} (lease 1).", session.id),
+        );
+        insert_prompt("u2", "cc-driver", 200, "a later, unrelated turn");
+        // The pre-rename spelling still matches.
+        insert_prompt("u3", "cc-old-driver", 100, "Drive mesa live session 999.");
+        // A session that only *mentions* one mid-conversation never matches
+        // — its first prompt is something else entirely.
+        insert_prompt(
+            "u4",
+            "cc-mentioner",
+            50,
+            "hey, what's live session 5 about?",
+        );
+        insert_prompt(
+            "u5",
+            "cc-mentioner",
+            60,
+            &format!("Drive naru live session {} (lease 1).", session.id),
+        );
+
+        let links = store.cc_live_session_links().unwrap();
+        assert_eq!(links.get("cc-driver"), Some(&session.id));
+        assert_eq!(links.get("cc-old-driver"), Some(&999));
+        assert_eq!(links.get("cc-mentioner"), None, "not the first prompt");
+
+        assert_eq!(
+            store.cc_live_session_link("cc-driver").unwrap(),
+            Some(session.id)
+        );
+        assert_eq!(store.cc_live_session_link("cc-mentioner").unwrap(), None);
+        assert_eq!(store.cc_live_session_link("unknown-session").unwrap(), None);
+
+        let counts = store.live_board_counts().unwrap();
+        assert_eq!(counts.get(&session.id), Some(&2));
+        assert_eq!(store.count_live_boards(session.id).unwrap(), 2);
+        assert_eq!(store.count_live_boards(999).unwrap(), 0);
     }
 
     /// A board is ephemeral: it belongs to its conversation and cascades away

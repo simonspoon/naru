@@ -63,6 +63,7 @@ import type { LibraryScope } from './types/LibraryScope'
 import type { LibrarySyncResult } from './types/LibrarySyncResult'
 import type { LibrarySyncRow } from './types/LibrarySyncRow'
 import type { LibraryVersion } from './types/LibraryVersion'
+import type { LiveBoardHistoryEntry } from './types/LiveBoardHistoryEntry'
 import type { LiveContext } from './types/LiveContext'
 import type { LiveNotice } from './types/LiveNotice'
 import type { LiveSession } from './types/LiveSession'
@@ -1774,6 +1775,23 @@ export function artifactRenderUrl(projectId: number, artifactId: number): string
  * agent-written document safe to look at. */
 export function liveBoardRenderUrl(id: number): string {
   return `/api/live/boards/${id}/render`
+}
+
+/**
+ * A past live session's whole whiteboard history (mesa task 1448) — every
+ * board it ever pushed, oldest first, each with the ink drawn on it. 404s
+ * for an unknown session id; a session that never pushed a board answers
+ * with an empty array.
+ */
+export function getLiveSessionBoardHistory(sessionId: number): Promise<LiveBoardHistoryEntry[]> {
+  return request(`/api/live/sessions/${sessionId}/boards`)
+}
+
+/** Where one turn's annotated whiteboard PNG is served from (mesa task
+ * 1448) — an `<img src>`, never `request()`, since it is not JSON. 404s for
+ * a turn with no ink or ink the 30-day purge has already removed. */
+export function liveTurnInkUrl(turnId: number): string {
+  return `/api/live/turns/${turnId}/ink`
 }
 
 // ---- Library (mesa task 919) ----

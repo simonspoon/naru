@@ -23,4 +23,17 @@ agent_runs: number, cwd: string | null, project: string | null, git_branch: stri
  * Subagent transcripts reuse the parent's `sessionId`, so this is "the
  * session used a subagent", not "the session *is* a sidechain".
  */
-used_subagent: boolean, };
+used_subagent: boolean, 
+/**
+ * The live conversation this cc session drove, if any (mesa task 1448) —
+ * derived on every read from the exact "Drive naru live session <id>"
+ * line the session's driver was spawned with
+ * (`Store::cc_live_session_links`), never stored and never guessed by
+ * timing. `None` for every other session.
+ */
+live_session_id: number | null, 
+/**
+ * Whiteboards pushed during that live session (`live_boards`), present
+ * iff `live_session_id` is. Derived, never stored.
+ */
+live_board_count: number | null, };

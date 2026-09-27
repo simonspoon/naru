@@ -395,6 +395,21 @@ comments — several entries are the bare `DELETE FROM cc_files;` cursor clear.
   with every derived `cc_*` column, the extraction ships with its **own cursor
   clear** (`DELETE FROM cc_files;`, migration 32) in the same binary, so the
   next ordinary `cc sync` re-walks every transcript once and fills the table.
+- **A session's very first `cc_prompts` row is also how mesa knows whether a
+  Claude Code session *is* a `naru live` conversation's driver** (mesa task
+  1448, `docs/live.md` "Linking a CC session to a live session"). Every live
+  driver — and a handoff successor — is spawned with
+  `"Drive naru live session <id> (lease <n>)."` as its very first prompt; that
+  line clears the human-prompt predicate above (no `origin: human`, no
+  matching non-human prefix) and lands in `cc_prompts` like any other. On
+  every read, `Store::cc_live_session_links`/`cc_live_session_link` matches a
+  session's **first** `cc_prompts` row against that exact prefix (and the
+  pre-rename `"Drive mesa live session <id>…"`) and parses the digits after
+  it — an exact match, never a guess by timing. `CcSessionRow.live_session_id`
+  and `CcSessionDetail.live_session_id` carry the result, with
+  `live_board_count` beside it off `live_boards` when it is set; both are
+  `null` for every session that is not a live driver, derived on every read
+  and never stored.
 - A call to the built-in **`advisor`** tool doesn't get its own transcript
   line/file the way a Task-tool subagent does (no `subagents/*.jsonl`, no
   `isSidechain`): it's a `server_tool_use` content block (read like

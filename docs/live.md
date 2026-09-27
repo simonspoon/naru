@@ -1378,13 +1378,14 @@ A board is **ephemeral**, which is the other half of the design — and the word
 means *scoped to its conversation*, not *deleted when it ends*. Ending a
 conversation stamps `ended_at`; it does not delete the session row, so nothing
 cascades (this is `live_turns`' behaviour exactly, and it is why a transcript
-is still readable afterwards). What ending does is close every read: the board
-drops out of `GET /api/live`, `mesa live board list`/`show` answer `not_found`,
-and the render route answers `not_found` too — that last one is load-bearing,
-because it is the only way a browser ever reaches a board's bytes, and a route
-that kept serving would make "nothing outlives the conversation unless it is
-promoted" true everywhere except where it counts. `live_boards.session_id` is
-`ON DELETE CASCADE` for the case that *is* a delete: a session row destroyed
+is still readable afterwards). What ending closes is the **live** surface: the
+board drops out of `GET /api/live`, and `mesa live board list`/`show` — which
+operate on THE current session, and there is none — answer `not_found`. As of
+mesa task 1448 the render route does **not** join that list: it answers a
+board's bytes the same way whether its session is live or has ended, because a
+caller looking up a past session's whiteboards (below) needs the one route
+that hands out bytes at all to still answer. `live_boards.session_id` is `ON
+DELETE CASCADE` for the case that *is* a delete: a session row destroyed
 takes its pictures with it, as it takes its turns.
 
 Nothing reaches a project unless someone asks — which is what `keep` is for —
@@ -1443,13 +1444,65 @@ insertion point, and the stored type is what the render route hands the browser.
 
 ### Retention is the history
 
-Each push prunes the session's boards to the newest `LIVE_BOARD_KEEP` (**20**)
-by id. That bound *is* the history the panel steps back through, and it is also
-what keeps `GET /api/live` bounded: `LiveState` grows a `boards` array of
-**bodiless** `LiveBoardSummary` rows, so the two-second poll carries the whole
-history as pointers and never a body. The board that is showing is the last
-element; a body is fetched once, for the one board being looked at, through the
-render route. There is deliberately **no second poll route**.
+`GET /api/live` bounds the live poll to the newest `LIVE_BOARD_KEEP` (**20**)
+boards: `LiveState` grows a `boards` array of **bodiless** `LiveBoardSummary`
+rows (`Store::list_live_boards`), so the two-second poll carries the running
+conversation's own history as pointers and never a body. The board that is
+showing is the last element; a body is fetched once, for the one board being
+looked at, through the render route. There is deliberately **no second poll
+route**.
+
+As of mesa task 1448 that bound is the *poll's* bandwidth limit, not the
+boards' lifetime — a push used to prune the session's boards down to it, so a
+conversation's earliest pictures were gone for good the moment it grew past
+twenty. They no longer are: a board lives until the session row is deleted
+(cascade) or `mesa live board clear` removes it by hand
+(`Store::list_live_boards_all`, unbounded, oldest first — what
+`clear`'s delete echo reports as destroyed, and what backs the whole-history
+route below).
+
+### Looking up a past session's whiteboards
+
+The live panel only ever shows one running conversation; a **past** one's
+boards are reached the other way, from wherever a live session can be looked
+up after the fact. `GET /api/live/sessions/{id}/boards` answers that
+session's whole board history — `LiveBoardHistoryEntry` rows, oldest first,
+bodiless like the poll's own summaries, each carrying its `ink`: every
+`live_turns` row that annotated it (`LiveBoardInkEntry`, oldest first),
+naming whether the PNG is still on disk (ink purges after
+`LIVE_INK_KEEP_DAYS` independently of the board it was drawn on, so a board
+can survive its ink). An unknown session id is `not_found`; a session that
+never pushed a board answers with an empty array. A board's own bytes still
+come from the ordinary `GET /api/live/boards/{id}/render` (unchanged by this
+route, and answering identically whether the session is live or ended, per
+above); one turn's ink comes from the new `GET /api/live/turns/{id}/ink`
+(`image/png`, `nosniff`, `inline`, `not_found` for a turn with none or ink the
+purge has already removed). Both routes carry the render route's own plain
+guard — no per-route gate, identical in both serve modes — because reading a
+picture mesa already validated and wrote to disk is no more sensitive than
+rendering one.
+
+**Linking a CC session to a live session.** Nothing on `cc_sessions` points at
+`live_sessions` — the two are ingested from entirely different sources (a
+Claude Code transcript vs. Naru's own tables) and were never meant to know
+about each other. The link is derived, on every read, from a fact the
+transcript already carries: every live driver — and a handoff successor, on
+the same template — is spawned with the exact line
+`live::agent_prompt`/`live::prompt_with` writes as the very first thing the
+agent is told, `"Drive naru live session <id> (lease <n>)."` (the pre-rename
+spelling is `"Drive mesa live session <id>…"`). Claude Code's own transcript
+ingest already keeps a bounded, sanitized preview of every human-authored
+line in `cc_prompts` (`core::cc::human_prompt`) — this line qualifies, since
+it carries no `origin: human` marker and does not start with any of the
+non-human prefixes ingest filters out — so `Store::cc_live_session_links`
+reads each session's **first** `cc_prompts` row, matches it against that
+exact prefix, and parses the digits after it. Only the first prompt is read,
+so a session that merely *mentions* a live session mid-conversation never
+matches, and nothing about the match is inferred from timing. The CC session
+list (`CcSessionRow`) and the session detail (`CcSessionDetail`) both carry
+the result as `live_session_id` (and, when set, `live_board_count` off
+`Store::live_board_counts`/`count_live_boards`) — derived on every read,
+never stored, `null` for every session that was not a live driver.
 
 ### The panel is the person's, not the agent's
 

@@ -92,8 +92,16 @@ import { Markdown } from './Markdown'
  * `<Markdown>` renders text rather than loading a URL — and the one kind that
  * is safe in mesa's own DOM, because that component passes no raw HTML
  * through.
+ *
+ * **Exported** (mesa task 1448) so the CC session detail page's whiteboard
+ * history section can render a past session's boards through the exact same
+ * branch — the render route answers identically whether the session is live
+ * or has ended, so there is nothing here that needs to differ. Typed on the
+ * three fields it actually reads rather than `LiveBoardSummary` itself,
+ * since a `LiveBoardHistoryEntry` (that history's own row shape) has them
+ * too but no `session_id`.
  */
-function BoardBody({ board }: { board: LiveBoardSummary }) {
+export function BoardBody({ board }: { board: Pick<LiveBoardSummary, 'id' | 'kind' | 'title'> }) {
   const url = liveBoardRenderUrl(board.id)
   const render = boardRender(board.kind)
   if (render === 'markdown') return <BoardMarkdown id={board.id} />

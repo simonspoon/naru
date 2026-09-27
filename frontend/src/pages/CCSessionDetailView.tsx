@@ -1,7 +1,10 @@
-import { getCcSessionDetail } from '../api'
+import { useState } from 'react'
+import { getCcSessionDetail, getLiveSessionBoardHistory, liveTurnInkUrl } from '../api'
 import { ccBackLink, ccTimelineHref, type CcOrigin } from '../ccOrigin'
 import { Donut, Sparkbars } from '../components/charts'
 import { DataTable, Kpi } from '../components/ccTable'
+import { BoardBody } from '../components/LiveBoardPanel'
+import { boardTitle, clampBoardIndex, stepBoard } from '../liveBoard'
 import { shortModel } from '../sessionGraph'
 import {
   TIMELINE,
@@ -34,6 +37,7 @@ import {
 } from '../sessionDetail'
 import type { CcSessionDetail } from '../types/CcSessionDetail'
 import type { CcSessionThreadStat } from '../types/CcSessionThreadStat'
+import type { LiveBoardHistoryEntry } from '../types/LiveBoardHistoryEntry'
 import { useLiveContext } from '../liveContext'
 import { useFetch } from '../useFetch'
 
@@ -196,6 +200,8 @@ function Body({ d, origin }: { d: CcSessionDetail; origin: CcOrigin }) {
       </div>
 
       <TimelineByAgent d={d} />
+
+      {d.live_session_id !== null && <Whiteboards liveSessionId={d.live_session_id} />}
 
       <section className="cc-panel">
         <h2>Top tools</h2>
@@ -467,6 +473,109 @@ function TimelineByAgent({ d }: { d: CcSessionDetail }) {
         </>
       )}
     </section>
+  )
+}
+
+/**
+ * The whiteboards a `naru live` conversation this session drove pushed
+ * (mesa task 1448, `docs/live.md` "Looking up a past session's
+ * whiteboards") — browsed exactly as the live panel browses a running
+ * conversation's, through the same `BoardBody`, since the render route
+ * answers identically whether the session is live or has ended. Only
+ * rendered by the caller when `live_session_id` names one at all.
+ */
+function Whiteboards({ liveSessionId }: { liveSessionId: number }) {
+  const { data, error } = useFetch(
+    () => getLiveSessionBoardHistory(liveSessionId),
+    `cc-live-boards:${liveSessionId}`,
+  )
+  const [index, setIndex] = useState<number | null>(null)
+
+  return (
+    <section className="cc-panel">
+      <h2>Whiteboards</h2>
+      {error && <p className="error">{error}</p>}
+      {!data && !error && <p className="muted">Loading…</p>}
+      {data && data.length === 0 && (
+        <p className="muted">
+          Live session #{liveSessionId} pushed no whiteboards.
+        </p>
+      )}
+      {data && data.length > 0 && (
+        <WhiteboardHistory liveSessionId={liveSessionId} boards={data} index={index} onStep={setIndex} />
+      )}
+    </section>
+  )
+}
+
+function WhiteboardHistory({
+  liveSessionId,
+  boards,
+  index,
+  onStep,
+}: {
+  liveSessionId: number
+  boards: LiveBoardHistoryEntry[]
+  index: number | null
+  onStep: (index: number) => void
+}) {
+  const at = clampBoardIndex(index, boards.length) ?? boards.length - 1
+  const board = boards[at]
+
+  return (
+    <>
+      <div className="cc-hint">
+        <p className="muted">
+          Live session #{liveSessionId} — {boards.length === 1 ? '1 whiteboard' : `${boards.length} whiteboards`}
+        </p>
+        <div className="cc-board-nav">
+          <button
+            type="button"
+            disabled={stepBoard(at, -1, boards.length) === at}
+            onClick={() => onStep(stepBoard(at, -1, boards.length) ?? at)}
+          >
+            ← Older
+          </button>
+          <span className="muted">
+            {at + 1} of {boards.length} — {boardTitle(board)} — {board.created_at.replace('T', ' ').slice(0, 16)}
+          </span>
+          <button
+            type="button"
+            disabled={stepBoard(at, 1, boards.length) === at}
+            onClick={() => onStep(stepBoard(at, 1, boards.length) ?? at)}
+          >
+            Newer →
+          </button>
+        </div>
+      </div>
+      <div className="live-board-stage cc-board-stage">
+        <BoardBody board={board} />
+      </div>
+      {board.ink.length > 0 && (
+        <div className="cc-board-ink">
+          <p className="muted cc-hint">
+            The person's ink on this board, in order:
+          </p>
+          <div className="cc-board-ink-row">
+            {board.ink.map((ink) =>
+              ink.available ? (
+                <img
+                  key={ink.turn_id}
+                  className="cc-board-ink-thumb"
+                  src={liveTurnInkUrl(ink.turn_id)}
+                  alt={`ink from turn ${ink.turn_id}`}
+                />
+              ) : (
+                <span key={ink.turn_id} className="muted cc-board-ink-gone">
+                  ink from {ink.created_at.replace('T', ' ').slice(0, 16)} is no longer kept
+                  (older than 30 days)
+                </span>
+              ),
+            )}
+          </div>
+        </div>
+      )}
+    </>
   )
 }
 

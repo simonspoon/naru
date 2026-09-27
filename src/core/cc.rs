@@ -1548,7 +1548,27 @@ fn collect_inner(
     }
     agg.agent_runs = store.cc_agent_run_counts()?;
 
-    Ok(agg.finish(window, cutoff, now))
+    let mut dashboard = agg.finish(window, cutoff, now);
+    apply_live_links(store, &mut dashboard.sessions)?;
+    Ok(dashboard)
+}
+
+/// Fills in [`CcSessionRow::live_session_id`]/`live_board_count` on every row
+/// that has one (mesa task 1448) — two small queries regardless of how many
+/// sessions are in `sessions`, never one query per row.
+fn apply_live_links(store: &Store, sessions: &mut [CcSessionRow]) -> Result<()> {
+    let links = store.cc_live_session_links()?;
+    if links.is_empty() {
+        return Ok(());
+    }
+    let counts = store.live_board_counts()?;
+    for row in sessions.iter_mut() {
+        if let Some(&live_id) = links.get(&row.session_id) {
+            row.live_session_id = Some(live_id);
+            row.live_board_count = Some(*counts.get(&live_id).unwrap_or(&0));
+        }
+    }
+    Ok(())
 }
 
 // ---- incremental ingest (transcripts → cc_* tables via Store) ----
@@ -2510,6 +2530,11 @@ impl Agg {
                     start: s.start_str,
                     end: s.end_str,
                     session_id,
+                    // Filled in by `apply_live_links` below, once every row
+                    // exists — deriving it per row here would mean re-running
+                    // `Store::cc_live_session_links`'s query once per session.
+                    live_session_id: None,
+                    live_board_count: None,
                 }
             })
             .collect();
@@ -2997,6 +3022,11 @@ pub fn session_detail(store: &Store, session_id: &str) -> Result<Option<CcSessio
         .collect();
     let tool_calls = store.cc_session_tool_calls(session_id)?;
     let runs = store.cc_session_agent_runs(session_id)?;
+    let live_session_id = store.cc_live_session_link(session_id)?;
+    let live_board_count = match live_session_id {
+        Some(id) => Some(store.count_live_boards(id)?),
+        None => None,
+    };
 
     // ---- per-thread rollups, keyed by agent_id (None = the main thread), the
     // same keying `session_graph` uses ----
@@ -3173,6 +3203,8 @@ pub fn session_detail(store: &Store, session_id: &str) -> Result<Option<CcSessio
         cwd: sess.cwd,
         git_branch: sess.git_branch,
         entrypoint: sess.entrypoint,
+        live_session_id,
+        live_board_count,
         start: sess.start_ts.map(fmt_ts),
         end: sess.end_ts.map(fmt_ts),
         duration_minutes: round2(dur),

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   boardAt,
+  boardCountBadge,
   boardRender,
   boardSeenFor,
   boardTitle,
@@ -212,3 +213,22 @@ describe('boardSeenFor', () => {
   })
 })
 
+
+describe('boardCountBadge', () => {
+  it('is null for a session that never drove a live conversation', () => {
+    expect(boardCountBadge(null)).toBe(null)
+  })
+
+  it('is null for a live driver that pushed nothing', () => {
+    expect(boardCountBadge(0)).toBe(null)
+  })
+
+  it('singularizes exactly one', () => {
+    expect(boardCountBadge(1)).toBe('1 board')
+  })
+
+  it('pluralizes more than one', () => {
+    expect(boardCountBadge(2)).toBe('2 boards')
+    expect(boardCountBadge(22)).toBe('22 boards')
+  })
+})

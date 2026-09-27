@@ -26,6 +26,16 @@ project: string | null, git_branch: string | null, entrypoint: string | null,
  */
 start: string | null, end: string | null, duration_minutes: number, used_subagent: boolean, 
 /**
+ * The live conversation this session drove, if any — see
+ * [`CcSessionRow::live_session_id`]. `None` for every other session.
+ */
+live_session_id: number | null, 
+/**
+ * Whiteboards pushed during that live session, present iff
+ * `live_session_id` is. Derived, never stored.
+ */
+live_board_count: number | null, 
+/**
  * Whole-session rollup: main thread + every subagent.
  */
 tokens: CcTokens, total_tokens: number, est_cost_usd: number, messages: number, tool_calls: number, 

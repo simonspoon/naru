@@ -53,7 +53,9 @@ agent_id: string | null,
 image_path: string | null, 
 /**
  * The board that ink was drawn on — present iff `image_path` is, until
- * the board itself is pruned past the keep bound.
+ * the board itself is cleared (`live board clear`, or the session row
+ * is deleted). Boards are no longer pruned by the keep bound (mesa task
+ * 1448), so this stays set for the life of the board.
  */
 board_id: number | null, 
 /**

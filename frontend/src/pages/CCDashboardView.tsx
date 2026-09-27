@@ -4,6 +4,7 @@ import { Donut, DivergingBars, Sparkbars, type Slice } from '../components/chart
 import { DataTable, Kpi } from '../components/ccTable'
 import { ccSessionHref, type CcOrigin } from '../ccOrigin'
 import { CC_TABS, ccTabHref, ccTabLabel, type CcTab } from '../ccTab'
+import { boardCountBadge } from '../liveBoard'
 import { shortModel } from '../sessionGraph'
 // Formatters and the token palette live in the unit-tested module and are
 // shared with the session detail page — two copies of `fmtTok` is exactly the
@@ -562,6 +563,19 @@ function SessionsPanel({ data, origin }: { data: CcDashboard; origin: CcOrigin }
           { key: 'msgs', label: 'Msgs', numeric: true, render: (s) => fmtInt(s.messages), sort: (s) => s.messages },
           { key: 'tokens', label: 'Tokens', numeric: true, render: (s) => fmtTok(s.total_tokens), sort: (s) => s.total_tokens },
           { key: 'cost', label: 'Est. cost', numeric: true, render: (s) => fmtUsd(s.est_cost_usd), sort: (s) => s.est_cost_usd },
+          {
+            // Whether this session drove a `naru live` conversation that
+            // pushed whiteboards (mesa task 1448) — a badge, not a column of
+            // its own for every row, since most sessions are not live
+            // drivers at all.
+            key: 'boards',
+            label: 'Boards',
+            render: (s) => {
+              const badge = boardCountBadge(s.live_board_count)
+              return badge ? <span className="cc-badge">{badge}</span> : '—'
+            },
+            sort: (s) => s.live_board_count ?? 0,
+          },
         ]}
       />
     </section>

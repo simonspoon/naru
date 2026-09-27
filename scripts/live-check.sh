@@ -2449,23 +2449,37 @@ run 1 "$MESA" live board show 999999
 [ "$(jqe .error.code)" = "not_found" ] || fail "live board show <unknown>: error.code"
 ok "live board show on a board this conversation does not own: not_found"
 
-# ---- the poll payload: bodiless, and capped at the retention bound ----
+# ---- the poll payload: bodiless, and capped at the poll's own bandwidth
+# bound — but boards are no longer pruned (mesa task 1448): 22 pushed, all 22
+# kept, and only the poll's own `list` windows to the newest 20. ----
 
+FIRST_BULK_ID=""
 for i in $(seq 1 22); do
-  "$MESA" live board push --quiet --title "bulk $i" "body $i" >/dev/null
+  ID=$("$MESA" live board push --quiet --title "bulk $i" "body $i" | jq -r .id)
+  [ "$i" = "1" ] && FIRST_BULK_ID="$ID"
 done
 run 0 "$MESA" live board list --limit 100
 [ "$(jqs 'length')" = "20" ] ||
-  fail "live board list: the newest 20 survive a push, got $(jqs 'length')"
+  fail "live board list: the poll windows to the newest 20, got $(jqs 'length')"
+[ "$(jqs '.[0].title')" = "bulk 3" ] || fail "live board list: oldest of the newest-20 window"
 [ "$(jqs '.[-1].title')" = "bulk 22" ] || fail "live board list: the newest push is last"
 run 0 "$MESA" live board show
 [ "$(jqs .title)" = "bulk 22" ] || fail "each push replaces what is showing"
-ok "live board push prunes to the newest 20 — that bound IS the history, and it keeps the 2s poll bounded"
+# Nothing was pruned to get that window: the very first of the 22 still
+# resolves by id, even though the poll's own list no longer carries it.
+run 0 "$MESA" live board show "$FIRST_BULK_ID"
+[ "$(jqs .title)" = "bulk 1" ] ||
+  fail "live board push no longer prunes — board 1 of 22 should still resolve, got $(jqs .title)"
+ok "live board push keeps every board pushed (22 pushed, 22 kept); only the poll's own list windows to the newest 20"
 
 # ---- clear: the delete echo ----
 
+# 29 boards survive to this point — the six ordinary pushes above, the CAP
+# board, and the 22-board bulk loop — since nothing was ever pruned
+# (mesa task 1448): `clear`'s echo must carry every one of them, not just
+# the newest twenty the poll would have shown.
 run 0 "$MESA" live board clear
-[ "$(jqs 'length')" = "20" ] || fail "live board clear: the echo must carry every destroyed board"
+[ "$(jqs 'length')" = "29" ] || fail "live board clear: the echo must carry every destroyed board, got $(jqs 'length')"
 jq -e 'map(has("body")) | any | not' <<<"$STDOUT" >/dev/null ||
   fail "live board clear: the echo is bodiless, like every other board listing"
 run 0 "$MESA" live board list
@@ -2695,15 +2709,17 @@ kill "$LAN_PID" 2>/dev/null || true
 wait "$LAN_PID" 2>/dev/null || true
 LAN_PID=
 
-# ---- ending the conversation closes the render route ----
+# ---- ending the conversation: the render route keeps answering (mesa task
+# 1448), the live surface does not ----
 #
-# A board is scoped to its conversation, and this route is the only way a
-# browser reaches one, so it has to stop answering when the conversation is
-# over — otherwise "nothing outlives the conversation unless `keep` promotes
-# it" would hold for every read except the one that hands out the bytes. The
-# row itself survives an `ended` exactly as a turn's does; this is a status
-# check, not a cascade. `not_found`, the same answer an unknown id gets, so a
-# caller walking ids is not told the picture is real but simply over.
+# A board is scoped to its conversation for the LIVE surface — `GET
+# /api/live`'s poll and the CLI's `live board` group, both of which operate
+# on THE current session and answer accordingly once there is none. The
+# render route is different: as of mesa task 1448 it answers a board's bytes
+# identically whether the session is live or has ended, because a caller
+# looking up a past session's whiteboards needs the one route that hands out
+# bytes at all to keep working. The row itself survives an `ended` exactly as
+# a turn's does; this was already true, and the render route now says so too.
 "$MESA" serve --port "$PORT" >"$TMP/serve13b.log" 2>&1 &
 SERVER_PID=$!
 for _ in $(seq 1 50); do
@@ -2715,23 +2731,55 @@ curl -sf "$BASE/api/live" >/dev/null ||
 
 board_headers "$BASE" "$R_HTML"
 [ "$STATUS" = "200" ] || fail "the board must still render while the conversation is live, got $STATUS"
+BEFORE_STOP_BODY=$(cat "$TMP/bbody")
 
 run 0 "$MESA" live stop
 [ "$(jqs .status)" = "ended" ] || fail "live stop: status must be ended"
 
 for id in "$R_MD" "$R_HTML" "$R_SVG" "$R_IMG"; do
   board_headers "$BASE" "$id"
-  [ "$STATUS" = "404" ] ||
-    fail "after live stop: board $id must be 404, got $STATUS"
-  [ "$(jq -r .error.code <"$TMP/bbody")" = "not_found" ] ||
-    fail "after live stop: board $id error.code must be not_found"
+  [ "$STATUS" = "200" ] ||
+    fail "after live stop: board $id must still render, got $STATUS"
 done
+board_headers "$BASE" "$R_HTML"
+[ "$(cat "$TMP/bbody")" = "$BEFORE_STOP_BODY" ] ||
+  fail "after live stop: the render route's body must be byte-identical to before"
 api 200 GET "/api/live"
 [ "$(jqb .session)" = "null" ] || fail "after live stop: the page is idle again"
 [ "$(jqb '.boards | length')" = "0" ] || fail "after live stop: no boards ride in the poll"
 run 1 "$MESA" live board list
 [ "$(jqe .error.code)" = "not_found" ] || fail "after live stop: live board list is not_found"
-ok "ending the conversation closes the whiteboard on every surface: the render route answers 404 not_found, the poll carries no boards, and the CLI is not_found — a board outlives it only through \`keep\`"
+ok "ending the conversation closes the LIVE whiteboard surface — the poll carries no boards, the CLI is not_found — but the render route answers every board byte-identically to before: nothing outlives the conversation unless \`keep\` promotes it EXCEPT the render route and the whole-history route, mesa task 1448"
+
+# ---- looking up a past session's whiteboards (mesa task 1448) ----
+#
+# `clear` (above) wiped everything this session had pushed before this point,
+# so exactly the four boards pushed for the render-route section survive:
+# R_MD, R_HTML, R_SVG, R_IMG, in that order, each bodiless, R_MD carrying the
+# two ink turns drawn on it (INK_TURN and the later "and this" one).
+HIST=$(curl -s "$BASE/api/live/sessions/$BS/boards")
+[ "$(jq 'length' <<<"$HIST")" = "4" ] ||
+  fail "GET /api/live/sessions/{id}/boards: expected 4 boards, got $(jq 'length' <<<"$HIST")"
+[ "$(jq -r '.[0].id' <<<"$HIST")" = "$R_MD" ] || fail "boards history: oldest first"
+[ "$(jq -r '.[-1].id' <<<"$HIST")" = "$R_IMG" ] || fail "boards history: newest last"
+jq -e 'map(has("body")) | any | not' <<<"$HIST" >/dev/null || fail "boards history: bodiless"
+[ "$(jq -r '.[0].ink | length' <<<"$HIST")" = "2" ] ||
+  fail "boards history: R_MD's board must carry its two ink turns"
+[ "$(jq -r '.[0].ink[0].available' <<<"$HIST")" = "true" ] || fail "boards history: ink available"
+[ "$(jq -r '.[1].ink | length' <<<"$HIST")" = "0" ] || fail "boards history: R_HTML has no ink"
+STATUS=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/live/sessions/999999/boards")
+[ "$STATUS" = "404" ] || fail "boards history: an unknown session must be 404, got $STATUS"
+ok "GET /api/live/sessions/{id}/boards: a past session's whole history, oldest first, bodiless, each with its ink; 404 for an unknown session"
+
+INK_TURN_ID=$(jq -r '.[0].ink[0].turn_id' <<<"$HIST")
+curl -s -o "$TMP/ink-fetched.png" "$BASE/api/live/turns/$INK_TURN_ID/ink"
+cmp -s "$TMP/ink-fetched.png" "$TMP/ink.png" ||
+  fail "GET /api/live/turns/{id}/ink: bytes must be byte-identical to the ink pushed"
+STATUS=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/live/turns/$PLAIN_TURN/ink")
+[ "$STATUS" = "404" ] || fail "GET /api/live/turns/{id}/ink: a turn with no ink must be 404, got $STATUS"
+STATUS=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/live/turns/999999/ink")
+[ "$STATUS" = "404" ] || fail "GET /api/live/turns/{id}/ink: an unknown turn must be 404, got $STATUS"
+ok "GET /api/live/turns/{id}/ink: the ink PNG byte-identical to what was pushed; 404 for a turn with no ink or an unknown one"
 
 kill "$SERVER_PID" 2>/dev/null || true
 wait "$SERVER_PID" 2>/dev/null || true

@@ -2888,6 +2888,17 @@ pub struct CcSessionRow {
     /// Subagent transcripts reuse the parent's `sessionId`, so this is "the
     /// session used a subagent", not "the session *is* a sidechain".
     pub used_subagent: bool,
+    /// The live conversation this cc session drove, if any (mesa task 1448) —
+    /// derived on every read from the exact "Drive naru live session <id>"
+    /// line the session's driver was spawned with
+    /// (`Store::cc_live_session_links`), never stored and never guessed by
+    /// timing. `None` for every other session.
+    #[ts(type = "number | null")]
+    pub live_session_id: Option<i64>,
+    /// Whiteboards pushed during that live session (`live_boards`), present
+    /// iff `live_session_id` is. Derived, never stored.
+    #[ts(type = "number | null")]
+    pub live_board_count: Option<i64>,
 }
 
 /// What one [`CcGraphNode`] stands for.
@@ -3209,6 +3220,14 @@ pub struct CcSessionDetail {
     pub end: Option<String>,
     pub duration_minutes: f64,
     pub used_subagent: bool,
+    /// The live conversation this session drove, if any — see
+    /// [`CcSessionRow::live_session_id`]. `None` for every other session.
+    #[ts(type = "number | null")]
+    pub live_session_id: Option<i64>,
+    /// Whiteboards pushed during that live session, present iff
+    /// `live_session_id` is. Derived, never stored.
+    #[ts(type = "number | null")]
+    pub live_board_count: Option<i64>,
     /// Whole-session rollup: main thread + every subagent.
     pub tokens: CcTokens,
     #[ts(type = "number")]
@@ -4235,7 +4254,9 @@ pub struct LiveTurn {
     /// — null otherwise. A bounded pointer, so `--quiet` keeps it.
     pub image_path: Option<String>,
     /// The board that ink was drawn on — present iff `image_path` is, until
-    /// the board itself is pruned past the keep bound.
+    /// the board itself is cleared (`live board clear`, or the session row
+    /// is deleted). Boards are no longer pruned by the keep bound (mesa task
+    /// 1448), so this stays set for the life of the board.
     #[ts(type = "number | null")]
     pub board_id: Option<i64>,
     /// The compact one-line view of the person's browser captured the moment
@@ -4606,6 +4627,41 @@ pub struct LiveBoardSummary {
     pub kind: LiveBoardKind,
     pub title: Option<String>,
     pub created_at: String,
+}
+
+/// One entry of a live session's **whole** whiteboard history (`GET
+/// /api/live/sessions/{id}/boards`, mesa task 1448) — every board that
+/// session ever pushed, oldest first, since retention stopped pruning them
+/// (`docs/live.md` "Retention is the history"). Bodiless like
+/// [`LiveBoardSummary`]; a caller renders `id` through the ordinary
+/// `GET /api/live/boards/{id}/render` route, unchanged, and each of its
+/// `ink` entries through `GET /api/live/turns/{turn_id}/ink`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct LiveBoardHistoryEntry {
+    #[ts(type = "number")]
+    pub id: i64,
+    pub kind: LiveBoardKind,
+    pub title: Option<String>,
+    pub created_at: String,
+    /// The person's annotated snapshots of this board, oldest first — every
+    /// `live_turns` row that carried one (mesa task 1353).
+    pub ink: Vec<LiveBoardInkEntry>,
+}
+
+/// One annotated snapshot of a [`LiveBoardHistoryEntry`] — a user turn's
+/// ink, which `GET /api/live/turns/{turn_id}/ink` serves the bytes of.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct LiveBoardInkEntry {
+    #[ts(type = "number")]
+    pub turn_id: i64,
+    pub created_at: String,
+    /// Whether the PNG is still on disk. Ink purges after
+    /// [`crate::core::store::LIVE_INK_KEEP_DAYS`] independently of the board
+    /// it was drawn on, so a board can outlive its own ink — `false` here
+    /// means exactly that, not that the ink never existed.
+    pub available: bool,
 }
 
 /// The Live page's whole read (`GET /api/live`): the conversation that is

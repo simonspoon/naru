@@ -8345,6 +8345,43 @@ button:focus-visible,
   white-space: nowrap;
 }
 
+/* The CC session detail page's "Whiteboards" section (mesa task 1448) — a
+   past live session's boards, browsed through the same `BoardBody` the live
+   panel renders one with; `.live-board-stage` has no height of its own
+   outside the panel's flex column, so this fixes one here. */
+.cc-board-nav {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0.3rem 0 0.6rem;
+}
+
+.cc-board-stage {
+  height: 60vh;
+  border: 1px solid var(--border);
+}
+
+.cc-board-ink {
+  margin-top: 0.6rem;
+}
+
+.cc-board-ink-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-top: 0.3rem;
+}
+
+.cc-board-ink-thumb {
+  max-width: 12rem;
+  max-height: 8rem;
+  border: 1px solid var(--border);
+}
+
+.cc-board-ink-gone {
+  font-size: 0.78rem;
+}
+
 /* Key/value details block: label column + value column. */
 .cc-details {
   display: grid;

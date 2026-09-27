@@ -58,8 +58,12 @@ export function boardRender(kind: LiveBoardKind): BoardRender {
  * and is routinely absent — a board pushed mid-sentence has nothing to name
  * it — so the fall-back names the row itself rather than leaving the head
  * blank, and a title that is only whitespace counts as absent.
+ *
+ * Typed on `id`/`title` alone (mesa task 1448) rather than the whole of
+ * `LiveBoardSummary`, so the whiteboard-history section's `LiveBoardHistoryEntry`
+ * rows — which have both but no `session_id` — can call it too.
  */
-export function boardTitle(board: LiveBoardSummary): string {
+export function boardTitle(board: Pick<LiveBoardSummary, 'id' | 'title'>): string {
   const title = board.title?.trim() ?? ''
   return title === '' ? `Board ${board.id}` : title
 }
@@ -87,9 +91,10 @@ export function newestBoardId(boards: readonly LiveBoardSummary[]): number | nul
  *
  * Having no index yet means the newest board, not the first: "nothing chosen"
  * and "what is showing" are the same state, and what is showing is always the
- * last thing pushed. The store prunes a session's boards to the newest twenty,
- * so a held index can outlive the row it pointed at — clamping here is what
- * keeps that a shifted picture rather than a blank panel.
+ * last thing pushed. The poll's own list is windowed to the newest twenty
+ * (the store itself no longer prunes, mesa task 1448), so a held index can
+ * still outlive the row it pointed at as the window slides — clamping here
+ * is what keeps that a shifted picture rather than a blank panel.
  */
 export function clampBoardIndex(index: number | null, count: number): number | null {
   if (count <= 0) return null
@@ -147,7 +152,7 @@ export function emptyBoardView(): BoardView {
  * they had stepped back through the history, because the board the
  * conversation is *about* is the one that was just pushed. A poll that
  * carries nothing new leaves the step they chose exactly where it was
- * (clamped, since the store's twenty-board retention can prune underneath
+ * (clamped, since the poll's own newest-twenty window can slide underneath
  * it), which is what makes stepping back usable at all on a two-second poll.
  *
  * Two states need no case of their own. A conversation that **ended or was
@@ -202,5 +207,17 @@ export function boardSeenFor(seen: number | null, boards: readonly LiveBoardSumm
   if (newest === null) return seen === null ? seen : null
   if (seen === null || newest > seen) return newest
   return seen
+}
+
+/**
+ * The "N boards" badge a session row wears when a `CcSessionRow`/
+ * `CcSessionDetail`'s `live_board_count` names one (mesa task 1448) —
+ * `null` for a session that never drove a live conversation (`null`) or one
+ * that drove one but pushed nothing (`0`), since a badge with nothing to say
+ * is not a badge.
+ */
+export function boardCountBadge(count: number | null): string | null {
+  if (count === null || count <= 0) return null
+  return count === 1 ? '1 board' : `${count} boards`
 }
 

@@ -43,14 +43,15 @@ use crate::core::{
     EdgeNew, EdgePatch, EdgeStyle, Error, FileTreeEntry, FrameNew, FramePatch, FrameShape,
     GitCommit, GitCommitFile, GitFileDiff, GitRepoView, GitStatus, GitWorktree, InboxItem,
     InboxKind, LIVE_AUDIO_MAX, LIVE_BOARD_KEEP, LIVE_INK_MAX, LibraryBuiltinAction, LibraryBundle,
-    LibraryImportResult, LibraryKind, LibraryPatch, LibraryScope, LiveBoardKind, LiveContext,
-    LiveNotebookEntry, LiveNotice, LiveState, LiveStatus, LiveTranscript, LiveWindow, ModelRates,
-    NaruVersion, NextResult, Priority, ProjectAgents, ProjectFileTree, ProjectGitLog,
-    ProjectGitStatus, ProjectGitView, ProjectPatch, ProjectVersion, ReceiptPatch,
-    STALE_CLAIM_MINUTES, Script, ScriptArg, ScriptPatch, ScriptRunEvent, Status, Store, SystemInfo,
-    Task, TaskPatch, TaskSummary, Waypoint, agents, attachments, audio, board, config, files, git,
-    guard, hooks, inbox_triage, library, listen, live, project_memory, receipt, retro, script_runs,
-    scripts, speech, supervisor, system, validate_live_client, version,
+    LibraryImportResult, LibraryKind, LibraryPatch, LibraryScope, LiveBoardHistoryEntry,
+    LiveBoardInkEntry, LiveBoardKind, LiveContext, LiveNotebookEntry, LiveNotice, LiveState,
+    LiveStatus, LiveTranscript, LiveWindow, ModelRates, NaruVersion, NextResult, Priority,
+    ProjectAgents, ProjectFileTree, ProjectGitLog, ProjectGitStatus, ProjectGitView, ProjectPatch,
+    ProjectVersion, ReceiptPatch, STALE_CLAIM_MINUTES, Script, ScriptArg, ScriptPatch,
+    ScriptRunEvent, Status, Store, SystemInfo, Task, TaskPatch, TaskSummary, Waypoint, agents,
+    attachments, audio, board, config, files, git, guard, hooks, inbox_triage, library, listen,
+    live, project_memory, receipt, retro, script_runs, scripts, speech, supervisor, system,
+    validate_live_client, version,
 };
 
 /// The Vite build output, embedded into the binary at compile time.
@@ -2171,6 +2172,22 @@ fn router(state: AppState) -> Router {
         // and the panel's close button is browser-side, exactly like the live
         // panel's own.
         .route("/api/live/boards/{id}/render", get(render_live_board))
+        // Looking up a past live session's whole whiteboard history (mesa
+        // task 1448) — the CC session detail page's "Whiteboards" section
+        // reads this to browse every board a conversation ever pushed, since
+        // boards are no longer pruned. Plain guard, same posture as the
+        // render route right above: reading pointers to agent-written
+        // documents mesa already validated is no more sensitive than
+        // rendering one.
+        .route(
+            "/api/live/sessions/{id}/boards",
+            get(live_session_board_history),
+        )
+        // One turn's annotated ink (mesa task 1353's PNG, mesa task 1448's
+        // route): the same plain-guard posture as the board render route
+        // right above it, for the same reason — a picture mesa already
+        // wrote to disk, named by an id, not a path a caller supplies.
+        .route("/api/live/turns/{id}/ink", get(live_turn_ink))
         // Transcribing one recording with `auris` (mesa task 954, revisited
         // task 972). Registered in **both** serve modes now: gated by the
         // same `require_agent_access` + `require_same_site_fetch` pair
@@ -4725,9 +4742,12 @@ const RENDER_CSP: &str = "default-src 'none'; script-src 'unsafe-inline'; style-
 /// under exactly the same terms: this is a record mesa itself validated, and
 /// [`RENDER_CSP`] is what strips the document of mesa's origin.
 ///
-/// A board whose conversation has **ended** is `not_found` here, exactly as an
-/// unknown id is: the ephemeral half of the design is only honest if the one
-/// route that hands out bytes stops handing them out too.
+/// **A board renders the same whether its conversation is live or has ended**
+/// (mesa task 1448) — boards are no longer pruned on push, and a caller
+/// looking up a past session's whiteboards (`GET
+/// /api/live/sessions/{id}/boards`) needs this route to still hand out the
+/// bytes, exactly as `GET /api/live/turns/{id}/ink` does for the ink drawn on
+/// one. An unknown id is still `not_found`.
 ///
 /// An `image` board is the one kind whose type is not decided by its `kind`:
 /// its bytes are stored base64 and its `content_type` is the allowlisted mime the pushed
@@ -4737,27 +4757,9 @@ async fn render_live_board(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> ApiResult<Response> {
-    // A board is scoped to its conversation, and this is the one surface a
-    // browser can reach a board through — so it has to stop answering when the
-    // conversation is over, or "nothing outlives the conversation unless
-    // `keep` promotes it" would be true of every read except the one that
-    // hands out the bytes. The session row survives an `ended` (the turns'
-    // rule, unchanged), so this is a status check rather than a cascade.
-    //
-    // This is not the artifacts posture drifting: an artifact *is* a kept
-    // document, so serving it is the whole point of its route.
-    //
-    // A board whose session has ended is `not_found`, the same answer an
-    // unknown id gets — the route does not confirm to a caller walking ids
-    // that the picture is real but simply over.
     let board = {
         let store = state.store.lock().unwrap();
-        let board = store.get_live_board(id)?;
-        let session = store.get_live_session(board.session_id)?;
-        if session.status != LiveStatus::Live {
-            return Err(Error::NotFound(format!("live board {id} not found")).into());
-        }
-        board
+        store.get_live_board(id)?
     };
     let filename = board::filename(&board);
     let mut csp = None;
@@ -4804,6 +4806,70 @@ async fn render_live_board(
     if let Some(csp) = csp {
         headers.insert(header::CONTENT_SECURITY_POLICY, header_value(csp)?);
     }
+    Ok((StatusCode::OK, headers, bytes).into_response())
+}
+
+/// A live session's whole whiteboard history, oldest first (mesa task 1448,
+/// `docs/live.md` "Retention is the history") — every board it ever pushed,
+/// each with the ink drawn on it, for the CC session detail page's
+/// "Whiteboards" section to browse a past conversation's pictures the same
+/// way the live panel browses a running one's. `404 not_found` for an
+/// unknown session id, live or ended alike; a session that never pushed a
+/// board answers with an empty array, not an error.
+async fn live_session_board_history(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<Vec<LiveBoardHistoryEntry>>> {
+    let store = state.store.lock().unwrap();
+    // Confirms the session exists at all — `not_found` for an id nothing
+    // ever created, exactly as every other by-id live read answers.
+    store.get_live_session(id)?;
+    let boards = store.list_live_boards_all(id)?;
+    let entries = boards
+        .into_iter()
+        .map(|b| {
+            let ink = store
+                .live_board_ink(b.id)?
+                .into_iter()
+                .map(|(turn_id, created_at, path)| LiveBoardInkEntry {
+                    turn_id,
+                    created_at,
+                    available: std::path::Path::new(&path).exists(),
+                })
+                .collect();
+            Ok(LiveBoardHistoryEntry {
+                id: b.id,
+                kind: b.kind,
+                title: b.title,
+                created_at: b.created_at,
+                ink,
+            })
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    Ok(Json(entries))
+}
+
+/// One turn's annotated whiteboard PNG (mesa task 1353's ink, mesa task
+/// 1448's route) — the bytes [`LiveBoardHistoryEntry::ink`] points at. `404
+/// not_found` for an unknown turn, a turn with no ink, or ink the 30-day
+/// purge (`Store::purge_live_ink`) has already removed from disk — the same
+/// answer in all three cases, since none of them has bytes to hand back.
+async fn live_turn_ink(State(state): State<AppState>, Path(id): Path<i64>) -> ApiResult<Response> {
+    let path = {
+        let store = state.store.lock().unwrap();
+        let turn = store.get_live_turn(id)?;
+        turn.image_path
+            .ok_or_else(|| Error::NotFound(format!("live turn {id} has no ink")))?
+    };
+    let bytes =
+        std::fs::read(&path).map_err(|_| Error::NotFound(format!("live turn {id} has no ink")))?;
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, header_value("image/png")?);
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        header_value(&disposition("inline", &format!("ink-{id}.png")))?,
+    );
+    headers.insert(header::X_CONTENT_TYPE_OPTIONS, header_value("nosniff")?);
     Ok((StatusCode::OK, headers, bytes).into_response())
 }
 
