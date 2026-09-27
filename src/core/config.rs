@@ -2163,6 +2163,7 @@ fn speech_in(path: &Path, voices_for: Option<&str>) -> Result<ConfigSpeech, Stri
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty()),
         models: speech::models(),
+        capabilities: speech::model_caps(),
     })
 }
 

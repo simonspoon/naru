@@ -1357,20 +1357,24 @@ export function updateSpeech(
 
 /**
  * Adds a cloned voice to naru-audio (mesa task 1418): `name`, the clip as
- * base64 (WAV or MP3, ~5–15 s of one speaker) and `text`, exactly what the
- * clip says. Base64 in JSON, like `transcribeAudio`, so the route stays inside
- * the Content-Type gate. 409 `conflict` is the legacy engine or a taken name,
- * 422 `validation` a name, clip or transcript refused, 502 `unavailable` a
- * daemon that did not answer — each carrying the daemon's own message.
+ * base64 (WAV or MP3, ~5–15 s of one speaker), `text`, exactly what the clip
+ * says, and `model` (mesa task 1455) — the text-to-speech model it is cloned
+ * for, so a clone made while a model is drafted lands on that model rather
+ * than naru-audio's own default. Base64 in JSON, like `transcribeAudio`, so
+ * the route stays inside the Content-Type gate. 409 `conflict` is the legacy
+ * engine or a taken name, 422 `validation` a name, model, clip or transcript
+ * refused, 502 `unavailable` a daemon that did not answer — each carrying
+ * the daemon's own message.
  */
 export function addVoice(
   name: string,
   text: string,
   clipBase64: string,
+  model?: string,
 ): Promise<AddedVoice> {
   return request(
     '/api/config/speech/voices',
-    jsonInit('POST', { name, text, clip_base64: clipBase64 }),
+    jsonInit('POST', { name, text, clip_base64: clipBase64, model: model || null }),
   )
 }
 
@@ -1386,28 +1390,31 @@ export function exportVoice(name: string): Promise<VoiceExport> {
 }
 
 /**
- * What the Settings page's **design a voice** panel needs (mesa task 1426):
- * whether naru-audio has the voice-design model pulled (always `false` on the
- * legacy engine) and the two Naru texts it reads.
+ * What the Settings page's **design a voice** panel needs for `model` (mesa
+ * task 1426; `model` mesa task 1455, the drafted model, replacing a
+ * hard-coded one): whether naru-audio has it pulled (always `false` on the
+ * legacy engine, or when `model` is blank) and the two Naru texts it reads.
  */
-export function getSpeechDesign(): Promise<VoiceDesign> {
-  return request('/api/config/speech/design')
+export function getSpeechDesign(model: string): Promise<VoiceDesign> {
+  return request(`/api/config/speech/design?model=${encodeURIComponent(model)}`)
 }
 
 /**
- * One take of a designed voice (mesa task 1426): the voice-design model reads
- * Naru's short `sample` line or its longer `reference` script — never caller
- * text — in the voice `instructions` describes, answered as one whole WAV.
- * 409 `conflict` on the legacy engine, 422 `validation` for a blank or
- * over-long description, 502 `unavailable` when naru-audio refuses.
+ * One take of a designed voice on `model` (mesa task 1426; `model` mesa task
+ * 1455): the voice-design model reads Naru's short `sample` line or its
+ * longer `reference` script — never caller text — in the voice
+ * `instructions` describes, answered as one whole WAV. 409 `conflict` on the
+ * legacy engine, 422 `validation` for a blank or over-long description or an
+ * unfit model, 502 `unavailable` when naru-audio refuses.
  */
 export async function designVoice(
   instructions: string,
   script: 'sample' | 'reference',
+  model: string,
 ): Promise<Blob> {
   const res = await fetch(
     '/api/config/speech/design',
-    jsonInit('POST', { instructions, script }),
+    jsonInit('POST', { instructions, script, model }),
   )
   if (!res.ok) throw await apiErrorFrom(res)
   return res.blob()

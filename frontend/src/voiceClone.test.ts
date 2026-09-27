@@ -16,12 +16,19 @@ describe('nameError', () => {
 
 describe('cloneReady', () => {
   const ok = { name: 'amy', text: 'Hello there.', hasClip: true }
-  it('needs a good name, a transcript and a clip', () => {
-    expect(cloneReady(ok)).toBe(true)
-    expect(cloneReady({ ...ok, name: '  ' })).toBe(false)
-    expect(cloneReady({ ...ok, name: 'Amy Smith' })).toBe(false)
-    expect(cloneReady({ ...ok, text: ' \n ' })).toBe(false)
-    expect(cloneReady({ ...ok, hasClip: false })).toBe(false)
+  it('needs a good name, a transcript and a clip when one is required', () => {
+    expect(cloneReady(ok, true)).toBe(true)
+    expect(cloneReady({ ...ok, name: '  ' }, true)).toBe(false)
+    expect(cloneReady({ ...ok, name: 'Amy Smith' }, true)).toBe(false)
+    expect(cloneReady({ ...ok, text: ' \n ' }, true)).toBe(false)
+    expect(cloneReady({ ...ok, hasClip: false }, true)).toBe(false)
+  })
+
+  it('does not need a transcript for a model whose manifest has no use for one', () => {
+    // mesa task 1455: cloning from a clip alone.
+    expect(cloneReady({ ...ok, text: '' }, false)).toBe(true)
+    expect(cloneReady({ ...ok, text: '' }, true)).toBe(false)
+    expect(cloneReady({ ...ok, hasClip: false }, false)).toBe(false)
   })
 })
 

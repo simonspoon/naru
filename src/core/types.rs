@@ -405,6 +405,29 @@ pub struct ConfigSpeech {
     /// `x_kind == "tts"`). Always empty on the legacy engine — `kokoro-rs`
     /// has one model — and empty on naru-audio when Naru could not ask.
     pub models: Vec<String>,
+    /// Each of `models`' capabilities (mesa task 1455) — which of the voice
+    /// dropdown, the clone form and the design panel a model on `models`
+    /// supports, so the editor can follow whichever model is drafted rather
+    /// than always the daemon's own default. Always empty on the legacy
+    /// engine and whenever `models` is.
+    pub capabilities: Vec<SpeechModelCaps>,
+}
+
+/// One text-to-speech model's advertised capabilities (`GET /v1/models`,
+/// mesa task 1455, `docs/config.md`): whether it clones a reference
+/// recording, whether that clone needs a transcript alongside it, whether it
+/// can design a voice from a description (the daemon's `x_instruct`), and
+/// whether it is naru-audio's own default model — the one a blank `model`
+/// setting actually speaks in, which is what a blank drafted model resolves
+/// to when the editor needs to know a specific model's capabilities.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct SpeechModelCaps {
+    pub model: String,
+    pub default: bool,
+    pub clone: bool,
+    pub clone_requires_transcript: bool,
+    pub design: bool,
 }
 
 /// A cloned voice just added to naru-audio (mesa task 1418,
@@ -436,10 +459,18 @@ pub struct VoiceExport {
     pub version: u32,
     /// The voice's name where it was exported — the default name on import.
     pub name: String,
-    /// Exactly what the clip says: the voice's transcript.
+    /// Exactly what the clip says: the voice's transcript. May be empty for
+    /// a voice cloned onto a model that never needed one.
     pub text: String,
     /// The clip (naru-audio's `ref.wav`), byte for byte, as standard base64.
     pub wav_base64: String,
+    /// The model the voice was cloned for (mesa task 1455), `null` for a
+    /// file exported before this field existed — a version-1-compatible
+    /// addition, `docs/config.md` says a reader ignores keys it doesn't
+    /// know, so an older reader is unaffected. Importing such a file to a
+    /// different model is refused; one with no `model` is always allowed,
+    /// landing on whichever model the import names.
+    pub model: Option<String>,
 }
 
 /// What the Settings page's **design a voice** panel needs (mesa task 1426,
@@ -447,10 +478,12 @@ pub struct VoiceExport {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../frontend/src/types/")]
 pub struct VoiceDesign {
-    /// Whether naru-audio has the voice-design model pulled. Always `false`
-    /// on the legacy engine, and when Naru could not ask the daemon.
+    /// Whether naru-audio has `model` (below) pulled. Always `false` on the
+    /// legacy engine, and when Naru could not ask the daemon.
     pub available: bool,
-    /// The voice-design model's id, for the `naru-audio pull` hint.
+    /// The voice-design model this reflects (mesa task 1455) — the one the
+    /// editor's `?model=` named, echoed back for the `naru-audio pull` hint;
+    /// blank when none was named.
     pub model: String,
     /// The short line an audition reads.
     pub sample: String,

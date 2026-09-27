@@ -1,4 +1,5 @@
 import { nameError } from './voiceClone'
+import type { SpeechModelCaps } from './types/SpeechModelCaps'
 
 /**
  * Pure logic for the Settings page's **design a voice** panel (mesa task
@@ -13,6 +14,17 @@ import { nameError } from './voiceClone'
 
 /** The longest description the server takes (`speech::DESIGN_INSTRUCTIONS_MAX`). */
 export const DESCRIPTION_MAX = 500
+
+/**
+ * Whether the design panel is offered at all (mesa task 1455): only a model
+ * that can both design a voice from a description *and* clone one — the
+ * kept take is saved by cloning it onto this same model — qualifies. `null`
+ * (the current model's capabilities are not known, e.g. Naru could not ask)
+ * offers nothing rather than guess.
+ */
+export function canDesignVoice(caps: SpeechModelCaps | null): boolean {
+  return caps !== null && caps.design && caps.clone
+}
 
 /**
  * Where the panel is. `auditioned` is the description the take on hand was

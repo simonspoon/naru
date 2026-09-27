@@ -255,22 +255,33 @@ static VOICES: TtlCache<Vec<audio::DaemonVoice>> = TtlCache::new();
 pub enum AddVoiceError {
     /// The engine is not naru-audio, or the name is taken.
     Conflict(String),
-    /// A name, clip or transcript Naru or the daemon will not take.
+    /// A name, model, clip or transcript Naru or the daemon will not take.
     Validation(String),
     /// The daemon did not answer usably.
     Unavailable(String),
 }
 
 /// Adds the cloned voice `name` to the naru-audio daemon from `clip` and its
-/// transcript `text` (mesa task 1418, [`audio::add_voice`]). Only on
-/// `audio.engine = "naru-audio"`: the legacy synthesiser clones nothing.
-/// `name` must pass [`is_voice_name`] — the daemon would take more, but
-/// [`voices`] filters on that rule, so a looser name would be added and never
-/// offered. On success the voice cache is dropped, so the next list asks the
-/// daemon, and the answer names the text-to-speech models that now list the
-/// voice — only a cloning model does, so the page can say which to pick.
-/// Blocking.
-pub fn add_voice(name: &str, text: &str, clip: &[u8]) -> Result<AddedVoice, AddVoiceError> {
+/// transcript `text`, for `model` (mesa task 1418, [`audio::add_voice`];
+/// `model` mesa task 1455 — `None` lets the daemon fall back to its own
+/// default, `CLONE_MODEL`). Only on `audio.engine = "naru-audio"`: the
+/// legacy synthesiser clones nothing. `name` must pass [`is_voice_name`] —
+/// the daemon would take more, but [`voices`] filters on that rule, so a
+/// looser name would be added and never offered; `model`, when given, must
+/// pass [`crate::core::listen::is_model_name`]. `text` is required only when
+/// `model`'s manifest actually needs a transcript
+/// ([`crate::core::config::model_caps`]'s `clone_requires_transcript`, mesa
+/// task 1455) — a model with no `model` named is checked against
+/// naru-audio's default, since that is what the daemon will use. On success
+/// the voice cache is dropped, so the next list asks the daemon, and the
+/// answer names the text-to-speech models that now list the voice — only a
+/// cloning model does, so the page can say which to pick. Blocking.
+pub fn add_voice(
+    name: &str,
+    text: &str,
+    clip: &[u8],
+    model: Option<&str>,
+) -> Result<AddedVoice, AddVoiceError> {
     let Some(url) = audio::daemon_url() else {
         return Err(AddVoiceError::Conflict(
             "adding a cloned voice needs the naru-audio engine; \
@@ -283,12 +294,24 @@ pub fn add_voice(name: &str, text: &str, clip: &[u8]) -> Result<AddedVoice, AddV
             "voice name {name:?} must be 1-64 letters, digits, '_' or '-', starting with a letter or digit"
         )));
     }
-    if text.trim().is_empty() {
+    if let Some(model) = model
+        && !crate::core::listen::is_model_name(model)
+    {
+        return Err(AddVoiceError::Validation(format!(
+            "model {model:?} is not a model name: up to 64 letters, digits, \
+             underscores, dashes and dots, starting with a letter or digit"
+        )));
+    }
+    let requires_transcript = caps_at(&url)
+        .iter()
+        .find(|m| Some(m.model.as_str()) == model || (model.is_none() && m.default))
+        .is_none_or(|m| m.clone_requires_transcript);
+    if requires_transcript && text.trim().is_empty() {
         return Err(AddVoiceError::Validation(
             "the transcript must not be empty".to_string(),
         ));
     }
-    let duration = audio::add_voice(&url, name, text.trim(), clip).map_err(|e| match e {
+    let duration = audio::add_voice(&url, name, text.trim(), clip, model).map_err(|e| match e {
         audio::AddVoiceError::Exists(m) => AddVoiceError::Conflict(m),
         audio::AddVoiceError::Rejected(m) => AddVoiceError::Validation(m),
         audio::AddVoiceError::Unavailable(m) => AddVoiceError::Unavailable(m),
@@ -359,13 +382,9 @@ pub fn export_voice(name: &str) -> Result<VoiceExport, ExportVoiceError> {
         name: voice.name,
         text: voice.text,
         wav_base64: voice.wav_base64,
+        model: (!voice.model.is_empty()).then_some(voice.model),
     })
 }
-
-/// The naru-audio model a voice is **designed** with (mesa task 1426): it has
-/// no voices of its own and makes one up from a description sent as
-/// `instructions`.
-pub const DESIGN_MODEL: &str = "qwen3-tts-1.7b-voicedesign-mlx";
 
 /// The short line a described voice is auditioned on — the same sentence
 /// [`SAMPLE`] previews a saved voice with, for the same reason: the design
@@ -386,19 +405,21 @@ pub const DESIGN_REFERENCE: &str = "Good morning! I checked the schedule, and yo
 /// The longest voice description the design route takes, in characters.
 pub const DESIGN_INSTRUCTIONS_MAX: usize = 500;
 
-/// What the Settings page needs to offer voice design (mesa task 1426):
-/// whether naru-audio has [`DESIGN_MODEL`] pulled — always `false` on the
-/// legacy engine, and when Naru could not ask — and the two texts it reads.
-/// Blocking.
-pub fn design_info() -> VoiceDesign {
-    let available = audio::daemon_url().is_some_and(|url| {
-        audio::pulled_tts_models(&url)
-            .iter()
-            .any(|m| m == DESIGN_MODEL)
-    });
+/// What the Settings page needs to offer voice design for `model` (mesa
+/// task 1426; `model` mesa task 1455, replacing the hard-coded
+/// `DESIGN_MODEL` — the editor now runs design on whichever model is
+/// drafted, since only a model with both `design` and `clone` capabilities
+/// is offered one): whether naru-audio has it pulled — always `false` on the
+/// legacy engine, when Naru could not ask, or when `model` is blank — and
+/// the two texts it reads. `model` is echoed back verbatim (blank if none
+/// was named), for the `naru-audio pull` hint. Blocking.
+pub fn design_info(model: &str) -> VoiceDesign {
+    let available = !model.is_empty()
+        && audio::daemon_url()
+            .is_some_and(|url| audio::pulled_tts_models(&url).iter().any(|m| m == model));
     VoiceDesign {
         available,
-        model: DESIGN_MODEL.to_string(),
+        model: model.to_string(),
         sample: DESIGN_SAMPLE.to_string(),
         reference: DESIGN_REFERENCE.to_string(),
     }
@@ -406,12 +427,13 @@ pub fn design_info() -> VoiceDesign {
 
 /// Reads one of Naru's two design texts — `script` is `"sample"`
 /// ([`DESIGN_SAMPLE`]) or `"reference"` ([`DESIGN_REFERENCE`]), never the
-/// text itself — in a voice [`DESIGN_MODEL`] makes up from `instructions`,
-/// and answers the whole WAV (mesa task 1426, [`audio::design`]). The errors
-/// are [`add_voice`]'s: the legacy engine is `Conflict`, a blank or
-/// over-long description or an unknown script `Validation`, and a daemon
-/// that refuses or does not answer `Unavailable`. Blocking.
-pub fn design(instructions: &str, script: &str) -> Result<Vec<u8>, AddVoiceError> {
+/// text itself — in a voice `model` makes up from `instructions`, and
+/// answers the whole WAV (mesa task 1426, [`audio::design`]; `model` mesa
+/// task 1455). The errors are [`add_voice`]'s: the legacy engine is
+/// `Conflict`, a blank or over-long description, an unknown script or a
+/// `model` that isn't a model name is `Validation`, and a daemon that
+/// refuses or does not answer `Unavailable`. Blocking.
+pub fn design(instructions: &str, script: &str, model: &str) -> Result<Vec<u8>, AddVoiceError> {
     let Some(url) = audio::daemon_url() else {
         return Err(AddVoiceError::Conflict(
             "designing a voice needs the naru-audio engine; \
@@ -419,6 +441,12 @@ pub fn design(instructions: &str, script: &str) -> Result<Vec<u8>, AddVoiceError
                 .to_string(),
         ));
     };
+    if !crate::core::listen::is_model_name(model) {
+        return Err(AddVoiceError::Validation(format!(
+            "model {model:?} is not a model name: up to 64 letters, digits, \
+             underscores, dashes and dots, starting with a letter or digit"
+        )));
+    }
     let text = match script {
         "sample" => DESIGN_SAMPLE,
         "reference" => DESIGN_REFERENCE,
@@ -440,7 +468,7 @@ pub fn design(instructions: &str, script: &str) -> Result<Vec<u8>, AddVoiceError
             "the voice description must be at most {DESIGN_INSTRUCTIONS_MAX} characters, got {chars}"
         )));
     }
-    audio::design(&url, DESIGN_MODEL, text, instructions).map_err(AddVoiceError::Unavailable)
+    audio::design(&url, model, text, instructions).map_err(AddVoiceError::Unavailable)
 }
 
 /// The most text-to-speech models [`models`] will report — the bound
@@ -471,6 +499,42 @@ pub fn models() -> Vec<String> {
             },
         )
         .0
+}
+
+/// [`models`]' capabilities (mesa task 1455) — which of the voice dropdown,
+/// the clone form and the design panel each of [`models`]' models supports,
+/// plus which one is naru-audio's own default (`x_default`), so the editor
+/// can resolve a blank drafted model to a concrete one. Empty wherever
+/// [`models`] is. Cached the same way, keyed on the daemon URL.
+pub fn model_caps() -> Vec<crate::core::types::SpeechModelCaps> {
+    match audio::daemon_url() {
+        Some(url) => caps_at(&url),
+        None => Vec::new(),
+    }
+}
+
+fn caps_at(url: &str) -> Vec<crate::core::types::SpeechModelCaps> {
+    static CAPS: TtlCache<Vec<crate::core::types::SpeechModelCaps>> = TtlCache::new();
+    CAPS.get(
+        url,
+        Instant::now(),
+        |m| audio::list_ttl(m),
+        || {
+            audio::tts_model_caps(url)
+                .into_iter()
+                .filter(|m| crate::core::listen::is_model_name(&m.id))
+                .take(MAX_MODELS)
+                .map(|m| crate::core::types::SpeechModelCaps {
+                    model: m.id,
+                    default: m.default,
+                    clone: m.clone,
+                    clone_requires_transcript: m.clone_requires_transcript,
+                    design: m.design,
+                })
+                .collect()
+        },
+    )
+    .0
 }
 
 /// Who offers the names [`voices`] lists, for a sentence naming it: the

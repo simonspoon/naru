@@ -21,10 +21,20 @@ version: number,
  */
 name: string, 
 /**
- * Exactly what the clip says: the voice's transcript.
+ * Exactly what the clip says: the voice's transcript. May be empty for
+ * a voice cloned onto a model that never needed one.
  */
 text: string, 
 /**
  * The clip (naru-audio's `ref.wav`), byte for byte, as standard base64.
  */
-wav_base64: string, };
+wav_base64: string, 
+/**
+ * The model the voice was cloned for (mesa task 1455), `null` for a
+ * file exported before this field existed — a version-1-compatible
+ * addition, `docs/config.md` says a reader ignores keys it doesn't
+ * know, so an older reader is unaffected. Importing such a file to a
+ * different model is refused; one with no `model` is always allowed,
+ * landing on whichever model the import names.
+ */
+model: string | null, };

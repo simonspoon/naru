@@ -697,11 +697,90 @@ in, and is modelled exactly on `voice` below; see "The model" after the list.
   otherwise at save time (`422`) and dropped on the read path, the voice's
   split exactly: the editor sees the raw stored value, the daemon never does.
 
+### Per-model capabilities (mesa task 1455)
+
+Different text-to-speech models on naru-audio clone differently — some need
+no reference transcript, some can't clone at all, and only some can design a
+voice from a description — so the voice dropdown, the clone form, the design
+panel and export/import must each follow whichever model is drafted rather
+than assume every model behaves like the one Naru happened to default to.
+Before this, no layer sent a `model` on add-voice at all, so cloning while
+Breeze was drafted silently added the voice to naru-audio's own default
+(`qwen3-tts-0.6b-base-mlx`) instead — the voice showed up in the wrong
+model's list, or in none the person expected.
+
+- **`GET /api/config/speech` carries a `capabilities` array** alongside
+  `models` — one entry per model, `{model, default, clone,
+  clone_requires_transcript, design}` (`SpeechModelCaps`), read from the
+  same `GET {audio.url}/v1/models` call as `models`: `default` is the
+  daemon's own `x_default` (which model a blank `model` setting actually
+  speaks in), `clone` and `clone_requires_transcript` are its `x_clone`/
+  `x_clone_requires_transcript`, and `design` is its `x_instruct` — whether
+  it can make up a voice from a description (mesa task 1426, below). Always
+  `[]` on the legacy engine and wherever `models` is (an older daemon absent
+  a flag reads it as `false`, `x_default`'s absence included).
+- **The current model is resolved the same way everywhere**
+  (`frontend/src/speechDraft.ts::effectiveModel`): the drafted `model` box,
+  trimmed, when it names one; otherwise whichever of `capabilities` is
+  `default`. This is the same model a blank draft's voice list already
+  follows (`?model=` blank asks the daemon's default) — the editor now asks
+  the same question, "which model is this really", of the clone form, the
+  design panel and export/import too, instead of leaving them to the
+  daemon's own fallback.
+- **The voice dropdown follows the current model, silently.**
+  `speechDraft.ts::options()` no longer appends a drafted voice a
+  *non-empty* voice list doesn't have — the Breeze-shows-Qwen-voices half of
+  the bug, where a voice left over from the previous model's list rendered
+  as if it were an option on this one. An *empty* list ("Naru could not
+  ask") still keeps the drafted value, since nothing has proven it wrong.
+  `voiceForModel` mirrors this on a model switch: the drafted voice is kept
+  only when the new model's list actually contains it, **including** when
+  that list is empty — a model switch is a genuinely different voice set,
+  so nothing carries over on the strength of "the list happened to be
+  empty" alone.
+- **The clone form is offered only when the current model's `clone` is
+  true**, and its transcript box is shown and required only when
+  `clone_requires_transcript` is — otherwise the form is clip-and-name only
+  (`frontend/src/voiceClone.ts::cloneReady` takes the flag as a parameter).
+  Every add-voice call — the clone form, import and the design panel's save
+  — now sends the resolved current model explicitly as `model` in the
+  route body, through every layer (`AddVoiceBody.model` in `src/api.rs` →
+  `speech::add_voice`'s `model: Option<&str>` → `audio::add_voice`'s
+  multipart `model` part); a caller that names none lets naru-audio fall
+  back to its own default, unchanged from before this existed.
+  `speech::add_voice`'s blank-transcript refusal is conditioned on that
+  same model's `clone_requires_transcript` (resolved through
+  `core::speech::model_caps`, falling to naru-audio's own `default` model
+  when no `model` is named) — a model with no use for a transcript can be
+  cloned from the clip alone. The daemon's own `POST /v1/audio/voices` was
+  changed to match (`naru-audio` repo, `src/server/speech.rs`): the `text`
+  multipart field is required only when the named model's manifest actually
+  needs one, checked against the manifest **before** the field-presence
+  check fires, so a present-but-blank transcript on a model that does need
+  one still gets the daemon's own "the transcript is empty" refusal rather
+  than a generic "field is required".
+- **The design panel is offered only when the current model has both
+  `design` and `clone`** (`frontend/src/voiceDesign.ts::canDesignVoice`) —
+  the kept take is saved by cloning it onto that same model, so a model
+  that can't clone has nowhere to save one even if it can design. See
+  "Designing a voice" below for what changed there.
+- **Export lists only the current model's clones** — unchanged, since
+  `cloned` in `GET /api/config/speech` was already the listed model's
+  voices filtered to `cloned: true`; naming the current model consistently
+  everywhere else is what makes that already-correct behavior line up with
+  the rest of the tab. **Import** is refused when the file names a
+  *different* model than the current one, and a file with no recorded model
+  (an export from before mesa task 1455) is always importable, landing on
+  the current model — see "Exporting and importing a cloned voice" below.
+
 ### Designing a voice (mesa task 1426)
 
 On naru-audio a voice can also be **made up from a description** rather than
-cloned from a recording, with the voice-design model
-`qwen3-tts-1.7b-voicedesign-mlx` (`core::speech::DESIGN_MODEL`), which has no
+cloned from a recording, with a voice-design model — one whose `design`
+capability is set (mesa task 1455; the hard-coded
+`qwen3-tts-1.7b-voicedesign-mlx` constant this used to always run on is
+gone, and design runs on the current model per "Per-model capabilities"
+above) — which has no
 voices of its own and speaks in whatever voice its `instructions` describe.
 Designing is only ever a way to **produce a clone's reference clip**: the
 result is saved through the add-voice route below and is from then on an
@@ -724,10 +803,11 @@ ordinary cloned voice, spoken by a cloning (Base) model.
   blob URL and keeps the reference take's bytes for the save.
   `audio::speak` — every other speak path — never sends `instructions`, and
   its request is byte-identical to before.
-- **Available only when pulled**: the panel checks
-  `GET {audio.url}/v1/models?pulled=true` for the design model and, when it
-  is missing (or the daemon cannot be asked), says to run
-  `naru-audio pull qwen3-tts-1.7b-voicedesign-mlx`.
+- **Available only when pulled**: `GET /api/config/speech/design?model=<name>`
+  (mesa task 1455 — `model` names the current model, no longer always the
+  same hard-coded one) checks `GET {audio.url}/v1/models?pulled=true` for it
+  and, when it is missing (or the daemon cannot be asked, or no `model` was
+  named), says to run `naru-audio pull <name>`.
 
 **Why this reference script.** `DESIGN_REFERENCE` reads: "Good morning! I
 checked the schedule, and your first meeting starts at nine, right after
@@ -805,6 +885,7 @@ so the format is small, versioned and fixed:
   "version": 1,
   "name": "amy",
   "text": "Exactly what the clip says.",
+  "model": "qwen3-tts-0.6b-base-mlx",
   "wav_base64": "UklGR…"
 }
 ```
@@ -816,32 +897,50 @@ so the format is small, versioned and fixed:
 - `name` — the voice's name where it was exported; import offers it as the
   default name and lets the person change it, so a voice can come back under
   a new name beside the original.
-- `text` — the voice's transcript (naru-audio's `ref.txt`).
+- `text` — the voice's transcript (naru-audio's `ref.txt`). May be empty for
+  a voice cloned onto a model that never needed one (mesa task 1455).
+- `model` — the text-to-speech model the voice was cloned for (mesa task
+  1455), `null`/absent for a file exported before this key existed. A
+  version-1-**compatible** addition, not a version bump — the rule right
+  above is what lets a version-1 writer add a key like this one.
 - `wav_base64` — the clip (naru-audio's `ref.wav`, 24 kHz mono) byte for byte,
   standard padded base64.
 
 Keys a reader does not know are ignored, so a version-1 writer may add one.
-The suggested filename is `<name>.naru-voice.json`. Import sends `text` and
-`wav_base64` through the ordinary add-voice route (`POST
-/api/config/speech/voices`, `clip_base64` = `wav_base64`), so a taken name is
-that route's **409 `conflict`**, shown as an error — an existing voice is
-never overwritten. The parse and check rules live in
-`frontend/src/voiceExport.ts`.
+The suggested filename is `<name>.naru-voice.json`. Import sends `text`,
+`wav_base64` and the **current** model (`frontend/src/speechDraft.ts::
+effectiveModel`, "Per-model capabilities" above) through the ordinary
+add-voice route (`POST /api/config/speech/voices`, `clip_base64` =
+`wav_base64`), so a taken name is that route's **409 `conflict`**, shown as
+an error — an existing voice is never overwritten. A file whose `model`
+names a *different* model than the current one is refused client-side
+before the request is sent, naming both (`voiceExport.ts::
+importModelError`) — the whole point of a per-model export is that a clip
+recorded for one model is not simply usable by another, so silently
+recloning it onto whatever happens to be drafted would be the same
+"wrong model" bug this feature exists to prevent; a file with **no**
+recorded `model` (an export from before mesa task 1455) has nothing to
+conflict with and always imports, landing on the current model. The parse
+and check rules live in `frontend/src/voiceExport.ts`.
 
 ### Routes
 
 - `GET /api/config/speech[?model=<name>]` → `ConfigSpeech`:
-  `{voice, voices, cloned, model, models}`, `voice`/`model` being the overrides
-  (`null` when unset), `voices` what the installed binary offers (`[]` when
-  Naru couldn't ask — **not** an error, since the setting must stay visible on
-  a machine where the synthesiser isn't installed yet) and `models` naru-audio's
-  text-to-speech models (`[]` on legacy). `cloned` is the subset of `voices`
-  the daemon marks `"cloned": true` — the ones it can export (mesa task 1430);
-  always `[]` on legacy, and on a daemon too old to send the flag, which reads
-  as not cloned rather than failing the list. `?model=` picks whose voices
-  `voices` lists — absent is the configured model's, blank the daemon
-  default's, a name that model's (a non-name is **422 `validation`**) — which
-  is how the editor shows a drafted model's voices before saving it.
+  `{voice, voices, cloned, model, models, capabilities}`, `voice`/`model`
+  being the overrides (`null` when unset), `voices` what the installed
+  binary offers (`[]` when Naru couldn't ask — **not** an error, since the
+  setting must stay visible on a machine where the synthesiser isn't
+  installed yet) and `models` naru-audio's text-to-speech models (`[]` on
+  legacy). `cloned` is the subset of `voices` the daemon marks `"cloned":
+  true` — the ones it can export (mesa task 1430); always `[]` on legacy,
+  and on a daemon too old to send the flag, which reads as not cloned
+  rather than failing the list. `capabilities` is each of `models`' `{model,
+  default, clone, clone_requires_transcript, design}` (mesa task 1455, "Per-
+  model capabilities" above), `[]` wherever `models` is. `?model=` picks
+  whose voices `voices` lists — absent is the configured model's, blank the
+  daemon default's, a name that model's (a non-name is **422 `validation`**)
+  — which is how the editor shows a drafted model's voices before saving
+  it; `capabilities` is unaffected by `?model=`, always every model's.
   Gated like the other config getters (`require_agent_access`); a malformed
   config is **502 `unavailable`**.
 - `PUT /api/config/speech`, body `{"voice": "<name>" | null, "model":
@@ -868,10 +967,14 @@ never overwritten. The parse and check rules live in
   same synthesis. `model` is the drafted text-to-speech model under the same
   rules (shape-checked, blank/absent = naru-audio's default, ignored by the
   legacy engine).
-- `POST /api/config/speech/voices`, body `{"name", "text", "clip_base64"}` →
+- `POST /api/config/speech/voices`, body `{"name", "text", "clip_base64",
+  "model"}` (mesa task 1455 adds `model`, optional) →
   **201** `AddedVoice` `{voice, duration, models}` (mesa task 1418): adds a
   cloned voice to naru-audio by forwarding the clip (WAV or MP3 — anything the
-  daemon's `afconvert` reads, 3–30 s, 5–15 s best) and its transcript to the
+  daemon's `afconvert` reads, 3–30 s, 5–15 s best), its transcript and `model`
+  — the text-to-speech model it is cloned for, resolved client-side to the
+  current one ("Per-model capabilities" above); an absent `model` lets the
+  daemon fall back to its own default, `CLONE_MODEL` — to the
   daemon's multipart `POST /v1/audio/voices`. Base64 in JSON rather than
   multipart so the route stays inside the Content-Type gate; gated and
   body-limited exactly like `POST /api/live/transcribe` (`require_agent_access`
@@ -879,40 +982,57 @@ never overwritten. The parse and check rules live in
   `LIVE_AUDIO_MAX` **413**). On the **legacy** engine it is **409 `conflict`**
   and nothing is contacted. `name` must pass the voice shape rule (**422**
   otherwise — the daemon takes looser names, but the voice list filters on
-  this rule, so such a voice could never be picked) and `text` must be
-  non-blank. The daemon's answers keep its own `error.message`: a taken name
+  this rule, so such a voice could never be picked) and `model`, when given,
+  must pass the model-name shape rule. `text` must be non-blank **only when**
+  the named model (or, absent one, naru-audio's own default) actually needs a
+  transcript — `clone_requires_transcript` in that model's capabilities (mesa
+  task 1455): a model with no use for one can be cloned from the clip alone,
+  which the daemon's own multipart route now honors too (`naru-audio` repo:
+  the `text` field is required only when the model's manifest needs a
+  transcript, checked once the model — from the field or `CLONE_MODEL` — is
+  in hand). The daemon's answers keep its own `error.message`: a taken name
   is **409 `conflict`** (an existing voice is never replaced), a bad name,
-  clip or transcript (400/413/415) **422 `validation`**, and no answer, a
-  timeout (60 s) or a 5xx **502 `unavailable`**. On success the cached voice
-  list is dropped, and `models` names the text-to-speech models whose voice
-  list now has the voice — only a **cloning** model lists cloned voices
-  (e.g. `qwen3-tts-0.6b-base-mlx`), so a non-cloning model never offers it.
-  Nothing else is written: the default engine, voice and model are untouched.
+  model, clip or transcript (400/413/415) **422 `validation`**, and no
+  answer, a timeout (60 s) or a 5xx **502 `unavailable`**. On success the
+  cached voice list is dropped, and `models` names the text-to-speech models
+  whose voice list now has the voice — only a **cloning** model lists cloned
+  voices (e.g. `qwen3-tts-0.6b-base-mlx`), so a non-cloning model never
+  offers it. Nothing else is written: the default engine, voice and model
+  are untouched.
 - `GET /api/config/speech/voices/{name}` → **200** `VoiceExport`, the
-  `naru-voice` version-1 file above (mesa task 1430): the daemon's
-  `GET /v1/audio/voices/{name}` export (`{name, text, wav_base64}`, `ref.wav`
-  byte for byte) wrapped with `format` and `version`. Gated like the
-  add-voice route (`require_agent_access` + `require_same_site_fetch`) — the
-  clip is a recording of someone's voice. On the **legacy** engine **409
-  `conflict`** and nothing is contacted; a `name` that fails the voice shape
-  rule **422 `validation`**, also before the daemon is asked (the rule is
-  also what keeps it one path segment); no cloned voice of that name — a
-  built-in voice is not one — **404 `not_found`** with the daemon's message;
-  a daemon 400 **422 `validation`**; no answer, a timeout (2 s) or a 5xx
-  **502 `unavailable`**. Nothing is written.
-- `GET /api/config/speech/design` → `VoiceDesign` `{available, model, sample,
-  reference}` (mesa task 1426): whether naru-audio has the voice-design model
-  **pulled** (always `false` on the legacy engine, and when the daemon cannot
-  be asked — never an error), its id, and the two texts the POST reads.
+  `naru-voice` version-1 file above (mesa task 1430; `model` mesa task 1455):
+  the daemon's `GET /v1/audio/voices/{name}` export (`{name, text, model,
+  wav_base64}`, `ref.wav` byte for byte, `model` empty-string on a daemon too
+  old to send it, read back as `null`) wrapped with `format` and `version`.
+  Gated like the add-voice route (`require_agent_access` +
+  `require_same_site_fetch`) — the clip is a recording of someone's voice. On
+  the **legacy** engine **409 `conflict`** and nothing is contacted; a `name`
+  that fails the voice shape rule **422 `validation`**, also before the
+  daemon is asked (the rule is also what keeps it one path segment); no
+  cloned voice of that name — a built-in voice is not one — **404
+  `not_found`** with the daemon's message; a daemon 400 **422 `validation`**;
+  no answer, a timeout (2 s) or a 5xx **502 `unavailable`**. Nothing is
+  written.
+- `GET /api/config/speech/design[?model=<name>]` → `VoiceDesign` `{available,
+  model, sample, reference}` (mesa task 1426; `model` mesa task 1455,
+  replacing the always-the-same hard-coded design model — the editor names
+  the current one, offered only when its capabilities show both `design` and
+  `clone`): whether naru-audio has the named model **pulled** (always
+  `false` on the legacy engine, when `model` is absent/blank, or when the
+  daemon cannot be asked — never an error), `model` echoed back, and the two
+  texts the POST reads. A `model` that fails the shape rule is **422
+  `validation`**.
 - `POST /api/config/speech/design`, body `{"instructions", "script":
-  "sample" | "reference"}` → **200** `audio/wav`, one exact-size body with a
-  `Content-Length`: the chosen Naru text read by the voice-design model in the
-  voice `instructions` describes. On the **legacy** engine **409
-  `conflict`** and nothing is contacted; a blank or over-long description or
-  any other `script` **422 `validation`**, also before the daemon is asked; a
-  refusal or no answer from the daemon **502 `unavailable`** with the "Naru's
-  voice isn't available" sentence (a model that is not pulled names the
-  `naru-audio pull` command). Nothing is written.
+  "sample" | "reference", "model"}` (mesa task 1455 adds `model`, required) →
+  **200** `audio/wav`, one exact-size body with a
+  `Content-Length`: the chosen Naru text read by `model`'s voice-design model
+  makes up in the voice `instructions` describes. On the **legacy** engine
+  **409 `conflict`** and nothing is contacted; a blank or over-long
+  description, any other `script`, or a `model` that fails the shape rule is
+  **422 `validation`**, also before the daemon is asked; a refusal or no
+  answer from the daemon **502 `unavailable`** with the "Naru's voice isn't
+  available" sentence (a model that is not pulled names the `naru-audio
+  pull` command). Nothing is written.
   Both verbs are gated like the add-voice route (`require_agent_access` +
   `require_same_site_fetch`).
 
@@ -920,23 +1040,41 @@ The Settings page's **Voice** tab shows a **Model** picker above the voice
 only when `models` is non-empty — i.e. on naru-audio — and hides it on the
 legacy engine. Changing the model refetches `GET /api/config/speech?model=`
 for that model's voices and keeps the drafted voice only when the new list
-has it (blank — the model's default voice — otherwise); the pure rules live in
-`frontend/src/speechDraft.ts`.
-On naru-audio (the **saved** `audio.engine`) the tab also offers **Add a
-cloned voice** — name, clip, transcript and a note to clone only a voice you
-have permission to use. After a success it refetches the drafted model's
-voices, leaving the draft and the saved settings alone, and says either to
-pick the new voice or which cloning model to pick first; a failure shows the
-message verbatim. The rules live in `frontend/src/voiceClone.ts`.
+has it — **including** when that list is empty (mesa task 1455: a model
+switch is a different voice set, so nothing carries over on an empty list's
+strength alone) — else blank, the model's default voice; the pure rules live
+in `frontend/src/speechDraft.ts`, whose `effectiveModel`/`capsFor` resolve
+which model the rest of the tab is really talking about (drafted, else
+naru-audio's own `default`) and look up its capabilities, respectively.
+On naru-audio (the **saved** `audio.engine`), and only when the **current**
+model's capabilities say `clone` (mesa task 1455 — the tab used to offer
+this on every naru-audio model, which is what let a clone silently land on
+the wrong one), the tab also offers **Add a cloned voice** — name, clip, a
+transcript box shown and required only when that model's
+`clone_requires_transcript` says so, and a note to clone only a voice you
+have permission to use. The clip and transcript are sent with the current
+model named explicitly, so a clone made while a model is drafted lands on
+that model rather than naru-audio's own default. After a success it
+refetches the drafted model's voices, leaving the draft and the saved
+settings alone, and says either to pick the new voice or which cloning
+model to pick first; a failure shows the message verbatim. The rules live
+in `frontend/src/voiceClone.ts`.
 Below it, **Export or import a cloned voice** (mesa task 1430) offers an
 **export** button for each voice in the drafted model's `cloned` list, which
 downloads `<name>.naru-voice.json`, and an import control — a file picker and
-a name box seeded from the file's `name` — that adds the voice through the
-add-voice route and then refetches, with the clone form's success note.
-Below it, also on naru-audio only, **Design a voice** (mesa task 1426) walks
-the three steps above — describe, audition/regenerate, keep/re-roll, then save
-under a name (the clone form's name rule and success note) — with the step
-rules in `frontend/src/voiceDesign.ts`.
+a name box seeded from the file's `name`. A file recorded for a different
+model than the current one is refused with an error naming both (mesa task
+1455, `voiceExport.ts::importModelError`); otherwise import adds the voice
+through the add-voice route, naming the current model, and then refetches,
+with the clone form's success note.
+Below it, **Design a voice** (mesa task 1426) is offered only when the
+current model's capabilities say **both** `design` and `clone` (mesa task
+1455 — the kept take is saved by cloning it onto that same model, replacing
+the old always-on-naru-audio, always-the-same-model offer) and walks the
+three steps above — describe, audition/regenerate, keep/re-roll, then save
+under a name (the clone form's name rule and success note) — running on
+that model throughout, with the step rules in `frontend/src/voiceDesign.ts`
+(`canDesignVoice` decides whether the panel renders at all).
 
 ## Live
 

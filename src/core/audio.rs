@@ -936,6 +936,67 @@ fn models_of_kind(url: &str, path: &str, kind: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// One text-to-speech model's advertised capabilities (`GET /v1/models`,
+/// mesa task 1455): whether it clones a reference recording
+/// (`x_clone`), whether that clone needs a transcript alongside it
+/// (`x_clone_requires_transcript`), whether it can design a voice from a
+/// description (`x_instruct`), and whether it is the daemon's own default
+/// text-to-speech model (`x_default`). Absent on an older daemon reads as
+/// `false` for every flag, the same posture `x_kind` already takes.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct TtsCaps {
+    pub id: String,
+    #[serde(default)]
+    pub default: bool,
+    #[serde(default)]
+    pub clone: bool,
+    #[serde(default)]
+    pub clone_requires_transcript: bool,
+    #[serde(default)]
+    pub design: bool,
+}
+
+/// The text-to-speech models the daemon at `url` lists, with their
+/// capabilities (`GET /v1/models`, `x_kind == "tts"`, mesa task 1455) — pulled
+/// or not, for the reason [`stt_models`] gives. Empty on any failure. Cached
+/// by the caller. Blocking.
+pub fn tts_model_caps(url: &str) -> Vec<TtsCaps> {
+    #[derive(Deserialize)]
+    struct List {
+        data: Vec<Model>,
+    }
+    #[derive(Deserialize)]
+    struct Model {
+        id: String,
+        #[serde(default)]
+        x_kind: Option<String>,
+        #[serde(default)]
+        x_default: bool,
+        #[serde(default)]
+        x_clone: bool,
+        #[serde(default)]
+        x_clone_requires_transcript: bool,
+        #[serde(default)]
+        x_instruct: bool,
+    }
+    list(url, MODELS_PATH)
+        .and_then(|body| serde_json::from_str::<List>(&body).ok())
+        .map(|l| {
+            l.data
+                .into_iter()
+                .filter(|m| m.x_kind.as_deref() == Some("tts"))
+                .map(|m| TtsCaps {
+                    id: m.id,
+                    default: m.x_default,
+                    clone: m.x_clone,
+                    clone_requires_transcript: m.x_clone_requires_transcript,
+                    design: m.x_instruct,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The voice ids of the daemon's text-to-speech `model` — its default one
 /// when `None` — (`GET /v1/audio/voices[?model=]`, read from the model's
 /// manifest without loading it, §2.5; the query mesa task 1425). `model` is
@@ -974,12 +1035,15 @@ pub struct DaemonVoice {
 const EXPORT_CAP: u64 = 16 * 1024 * 1024;
 
 /// A cloned voice as the daemon exports it (`GET /v1/audio/voices/{name}`,
-/// §2.5): its name, what the clip says, and `ref.wav` byte for byte as
-/// standard base64.
+/// §2.5): its name, what the clip says, the model it was cloned for (mesa
+/// task 1455) and `ref.wav` byte for byte as standard base64. `model`
+/// defaults to the empty string on a daemon too old to send it.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct ExportedVoice {
     pub name: String,
     pub text: String,
+    #[serde(default)]
+    pub model: String,
     pub wav_base64: String,
 }
 
@@ -1075,14 +1139,18 @@ pub enum AddVoiceError {
 }
 
 /// Adds the cloned voice `name` to the daemon at `url` from `clip` (audio
-/// `afconvert` reads — WAV, MP3 — of 3–30 s) and `text`, what the clip says
-/// (`POST /v1/audio/voices`, multipart, design §2.5). `Ok` is the clip's
-/// length in seconds when the daemon reports it. Blocking.
+/// `afconvert` reads — WAV, MP3 — of 3–30 s), `text`, what the clip says, and
+/// `model` — which text-to-speech model it is cloned for (mesa task 1455;
+/// `None` lets the daemon fall back to its own `CLONE_MODEL`, the behavior
+/// before this parameter existed) (`POST /v1/audio/voices`, multipart, design
+/// §2.5). `Ok` is the clip's length in seconds when the daemon reports it.
+/// Blocking.
 pub fn add_voice(
     url: &str,
     name: &str,
     text: &str,
     clip: &[u8],
+    model: Option<&str>,
 ) -> Result<Option<f64>, AddVoiceError> {
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(ADD_VOICE_TIMEOUT))
@@ -1091,10 +1159,11 @@ pub fn add_voice(
         .max_redirects(0)
         .build()
         .into();
-    let (content_type, body) = form_data(
-        ("clip", "application/octet-stream", clip),
-        &[("name", name), ("text", text)],
-    );
+    let mut fields = vec![("name", name), ("text", text)];
+    if let Some(model) = model {
+        fields.push(("model", model));
+    }
+    let (content_type, body) = form_data(("clip", "application/octet-stream", clip), &fields);
     let answer = agent
         .post(format!("{}{VOICES_PATH}", url.trim_end_matches('/')))
         .header("Content-Type", content_type)
@@ -1851,7 +1920,13 @@ mod tests {
         });
         let clip = b"ID3\x04\x00mp3-bytes\r\n--not-a-boundary";
         assert_eq!(
-            add_voice(&stub.url(), "amy", "Hello there, this is Amy.", clip),
+            add_voice(
+                &stub.url(),
+                "amy",
+                "Hello there, this is Amy.",
+                clip,
+                Some("breeze-tts-2-mlx"),
+            ),
             Ok(Some(6.2))
         );
         let requests = stub.requests.lock().unwrap();
@@ -1865,9 +1940,31 @@ mod tests {
              ID3\u{4}\u{0}mp3-bytes\r\n--not-a-boundary\r\n--naru-audio-",
             "name=\"name\"\r\n\r\namy\r\n",
             "name=\"text\"\r\n\r\nHello there, this is Amy.\r\n",
+            "name=\"model\"\r\n\r\nbreeze-tts-2-mlx\r\n",
         ] {
             assert!(sent.contains(part), "{part:?} missing from {sent:?}");
         }
+    }
+
+    /// A caller that names no model (mesa task 1455) sends none — the daemon
+    /// falls back to its own `CLONE_MODEL`, the behavior before this
+    /// parameter existed.
+    #[test]
+    fn add_voice_sends_no_model_part_when_none_is_named() {
+        let stub = Stub::serve(0, |method, path| {
+            assert_eq!((method, path), ("POST", VOICES_PATH));
+            stub::Reply::Json(
+                201,
+                r#"{"id":"amy","accent":null,"gender":null,"default":false,"duration":6.2}"#
+                    .to_string(),
+            )
+        });
+        assert_eq!(
+            add_voice(&stub.url(), "amy", "hi", b"RIFF", None),
+            Ok(Some(6.2))
+        );
+        let requests = stub.requests.lock().unwrap();
+        assert!(!requests[0].contains("name=\"model\""), "{}", requests[0]);
     }
 
     /// The daemon's refusals keep its own message: a taken name is
@@ -1899,7 +1996,7 @@ mod tests {
                 r#"{{"error":{{"message":"{message}","type":"x","code":"{code}","param":null}}}}"#
             );
             let stub = Stub::serve(0, move |_, _| stub::Reply::Json(status, body.clone()));
-            let got = add_voice(&stub.url(), "amy", "hi", b"RIFF");
+            let got = add_voice(&stub.url(), "amy", "hi", b"RIFF", None);
             let shown = message.replace("\\\"", "\"");
             let expected = match want {
                 0 => AddVoiceError::Exists(format!("naru-audio refused the voice: {shown}")),
@@ -1913,15 +2010,16 @@ mod tests {
     }
 
     /// Exporting a cloned voice (mesa task 1430, design §2.5): one GET of
-    /// `/v1/audio/voices/{name}`, the daemon's `{name, text, wav_base64}`
-    /// read back untouched.
+    /// `/v1/audio/voices/{name}`, the daemon's `{name, text, model,
+    /// wav_base64}` read back untouched — `model` defaults to the empty
+    /// string on a daemon too old to send it (mesa task 1455).
     #[test]
     fn export_voice_reads_the_daemons_export() {
         let stub = Stub::serve(0, |method, path| {
             assert_eq!((method, path), ("GET", "/v1/audio/voices/amy"));
             stub::Reply::Json(
                 200,
-                r#"{"name":"amy","text":"Hello there.","wav_base64":"UklGRgABAgM="}"#.to_string(),
+                r#"{"name":"amy","text":"Hello there.","model":"breeze-tts-2-mlx","wav_base64":"UklGRgABAgM="}"#.to_string(),
             )
         });
         assert_eq!(
@@ -1929,8 +2027,26 @@ mod tests {
             Ok(ExportedVoice {
                 name: "amy".to_string(),
                 text: "Hello there.".to_string(),
+                model: "breeze-tts-2-mlx".to_string(),
                 wav_base64: "UklGRgABAgM=".to_string(),
             })
+        );
+    }
+
+    /// A daemon that predates per-model voices sends no `model` at all —
+    /// [`ExportedVoice::model`] reads as the empty string, not an error
+    /// (mesa task 1455).
+    #[test]
+    fn export_voice_defaults_a_missing_model_to_empty() {
+        let stub = Stub::serve(0, |_, _| {
+            stub::Reply::Json(
+                200,
+                r#"{"name":"amy","text":"Hello there.","wav_base64":"UklGRgABAgM="}"#.to_string(),
+            )
+        });
+        assert_eq!(
+            export_voice(&stub.url(), "amy").unwrap().model,
+            String::new()
         );
     }
 

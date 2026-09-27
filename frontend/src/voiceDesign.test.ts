@@ -3,12 +3,14 @@ import {
   DESCRIPTION_MAX,
   auditionLabel,
   canAudition,
+  canDesignVoice,
   canKeep,
   canReroll,
   canSave,
   descriptionError,
   type DesignState,
 } from './voiceDesign'
+import type { SpeechModelCaps } from './types/SpeechModelCaps'
 
 const FRESH: DesignState = {
   description: 'A warm, low voice.',
@@ -83,5 +85,23 @@ describe('canSave', () => {
     expect(canSave({ ...kept, description: 'Something else.' }, 'warm')).toBe(
       true,
     )
+  })
+})
+
+describe('canDesignVoice (mesa task 1455)', () => {
+  const caps: SpeechModelCaps = {
+    model: 'design-1',
+    default: false,
+    clone: true,
+    clone_requires_transcript: false,
+    design: true,
+  }
+  it('needs both design and clone on the same model', () => {
+    expect(canDesignVoice(caps)).toBe(true)
+    expect(canDesignVoice({ ...caps, clone: false })).toBe(false)
+    expect(canDesignVoice({ ...caps, design: false })).toBe(false)
+  })
+  it('offers nothing when the current models capabilities are not known', () => {
+    expect(canDesignVoice(null)).toBe(false)
   })
 })

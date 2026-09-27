@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest'
 import {
   canPick,
   canPickModel,
+  capsFor,
   changedSpeech,
   draftFrom,
+  effectiveModel,
   isDirty,
   isSavable,
   modelError,
@@ -14,15 +16,33 @@ import {
   voiceForModel,
 } from './speechDraft'
 import type { ConfigSpeech } from './types/ConfigSpeech'
+import type { SpeechModelCaps } from './types/SpeechModelCaps'
 
 const VOICES = ['af_heart', 'bm_george', 'zf_xiaoni']
 const MODELS = ['kokoro-v1.0', 'pocket-tts-int8']
+const CAPS: SpeechModelCaps[] = [
+  {
+    model: 'kokoro-v1.0',
+    default: true,
+    clone: false,
+    clone_requires_transcript: false,
+    design: false,
+  },
+  {
+    model: 'pocket-tts-int8',
+    default: false,
+    clone: true,
+    clone_requires_transcript: true,
+    design: true,
+  },
+]
 const DEFAULTED: ConfigSpeech = {
   voice: null,
   voices: VOICES,
   model: null,
   cloned: [],
   models: [],
+  capabilities: [],
 }
 const SET: ConfigSpeech = {
   voice: 'bm_george',
@@ -30,6 +50,7 @@ const SET: ConfigSpeech = {
   model: null,
   cloned: [],
   models: [],
+  capabilities: [],
 }
 /** What a machine with no synthesiser installed reports. */
 const NO_BINARY: ConfigSpeech = {
@@ -38,6 +59,7 @@ const NO_BINARY: ConfigSpeech = {
   model: null,
   cloned: [],
   models: [],
+  capabilities: [],
 }
 /** naru-audio, with a model chosen (mesa task 1425). */
 const DAEMON: ConfigSpeech = {
@@ -46,6 +68,7 @@ const DAEMON: ConfigSpeech = {
   model: 'kokoro-v1.0',
   cloned: [],
   models: MODELS,
+  capabilities: CAPS,
 }
 
 describe('draftFrom', () => {
@@ -76,9 +99,17 @@ describe('options', () => {
     expect(options(VOICES, '')).toEqual(VOICES)
   })
 
-  it('keeps a configured voice the binary no longer lists', () => {
-    // Otherwise opening the list would silently rewrite a value nobody touched.
-    expect(options(VOICES, 'am_gone')).toEqual([...VOICES, 'am_gone'])
+  it('keeps a configured voice when Naru could not ask at all', () => {
+    // An empty list proves nothing, so the box must still hold what is
+    // configured rather than silently rewrite it.
+    expect(options([], 'am_gone')).toEqual(['am_gone'])
+  })
+
+  it('drops a drafted voice a non-empty list does not have', () => {
+    // mesa task 1455: the Breeze-shows-Qwen-voices bug. Once a model's own
+    // list actually answers, a voice from a different model must not
+    // silently ride along as if this model offered it.
+    expect(options(VOICES, 'am_gone')).toEqual(VOICES)
   })
 })
 
@@ -102,8 +133,12 @@ describe('models (mesa task 1425)', () => {
     expect(voiceForModel('', ['alba'])).toBe('')
   })
 
-  it('keeps the voice when the new list is empty — Naru could not ask', () => {
-    expect(voiceForModel('bm_george', [])).toBe('bm_george')
+  it('clears the voice on a model switch even when the new list is empty', () => {
+    // mesa task 1455: a model switch is a genuinely different voice set, so
+    // a voice left over from the previous model must not silently ride
+    // along onto one that was never asked whether it has it.
+    expect(voiceForModel('bm_george', [])).toBe('')
+    expect(voiceForModel('', [])).toBe('')
   })
 
   it('checks the model name shape, dots allowed, blank is the default', () => {
@@ -125,6 +160,26 @@ describe('models (mesa task 1425)', () => {
     expect(changedSpeech(DAEMON, { voice: 'bm_george', model: '' })).toEqual({
       model: null,
     })
+  })
+})
+
+describe('effectiveModel and capsFor (mesa task 1455)', () => {
+  it('resolves a blank draft to naru-audios own default model', () => {
+    expect(effectiveModel('', CAPS)).toBe('kokoro-v1.0')
+  })
+
+  it('resolves a typed draft to itself, trimmed, whether or not it is known', () => {
+    expect(effectiveModel(' pocket-tts-int8 ', CAPS)).toBe('pocket-tts-int8')
+    expect(effectiveModel('gone-1.0', CAPS)).toBe('gone-1.0')
+  })
+
+  it('resolves to nothing when neither the draft nor a default is known', () => {
+    expect(effectiveModel('', [])).toBe('')
+  })
+
+  it('finds a models capabilities, or null when it is not on the list', () => {
+    expect(capsFor('pocket-tts-int8', CAPS)).toEqual(CAPS[1])
+    expect(capsFor('gone-1.0', CAPS)).toBeNull()
   })
 })
 

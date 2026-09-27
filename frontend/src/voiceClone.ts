@@ -27,12 +27,17 @@ export function nameError(name: string): string | null {
   return valueError(name)
 }
 
-/** Whether the form can be sent: a good name, a transcript and a clip. */
-export function cloneReady(draft: CloneDraft): boolean {
+/**
+ * Whether the form can be sent: a good name, a clip and — only when the
+ * drafted model's manifest actually needs one (mesa task 1455,
+ * `speechDraft.ts::capsFor`'s `clone_requires_transcript`) — a transcript. A
+ * model with no use for a transcript can be cloned from the clip alone.
+ */
+export function cloneReady(draft: CloneDraft, requiresTranscript: boolean): boolean {
   return (
     draft.name.trim() !== '' &&
     nameError(draft.name) === null &&
-    draft.text.trim() !== '' &&
+    (!requiresTranscript || draft.text.trim() !== '') &&
     draft.hasClip
   )
 }

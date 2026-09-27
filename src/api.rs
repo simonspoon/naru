@@ -8652,12 +8652,19 @@ async fn update_config_speech(
 struct AddVoiceBody {
     /// The voice's id, [`speech::is_voice_name`]-shaped.
     name: String,
-    /// Exactly what the clip says.
+    /// Exactly what the clip says. Required only when `model` (or, absent
+    /// one, naru-audio's own default) actually needs a transcript
+    /// ([`speech::add_voice`], mesa task 1455).
     text: String,
     /// The clip (WAV, MP3 — anything the daemon's `afconvert` reads),
     /// base64-encoded: JSON rather than multipart for the reason
     /// [`TranscribeBody`] gives.
     clip_base64: String,
+    /// The text-to-speech model the voice is cloned for (mesa task 1455) —
+    /// the drafted model in the Settings editor, not necessarily the saved
+    /// one. `None` lets the daemon fall back to its own default.
+    #[serde(default)]
+    model: Option<String>,
 }
 
 /// `POST /api/config/speech/voices` — adds a cloned voice to the naru-audio
@@ -8702,21 +8709,22 @@ async fn add_speech_voice(
             ),
         });
     }
-    let added = blocking(move || speech::add_voice(&body.name, &body.text, &clip))
-        .await?
-        .map_err(|e| match e {
-            speech::AddVoiceError::Conflict(message) => ApiError {
-                status: StatusCode::CONFLICT,
-                code: "conflict",
-                message,
-            },
-            speech::AddVoiceError::Validation(message) => validation(message),
-            speech::AddVoiceError::Unavailable(message) => ApiError {
-                status: StatusCode::BAD_GATEWAY,
-                code: "unavailable",
-                message,
-            },
-        })?;
+    let added =
+        blocking(move || speech::add_voice(&body.name, &body.text, &clip, body.model.as_deref()))
+            .await?
+            .map_err(|e| match e {
+                speech::AddVoiceError::Conflict(message) => ApiError {
+                    status: StatusCode::CONFLICT,
+                    code: "conflict",
+                    message,
+                },
+                speech::AddVoiceError::Validation(message) => validation(message),
+                speech::AddVoiceError::Unavailable(message) => ApiError {
+                    status: StatusCode::BAD_GATEWAY,
+                    code: "unavailable",
+                    message,
+                },
+            })?;
     Ok((StatusCode::CREATED, Json(added)).into_response())
 }
 
@@ -8764,18 +8772,32 @@ async fn export_speech_voice(
     Ok(Json(export).into_response())
 }
 
-/// `GET /api/config/speech/design` — `VoiceDesign`: whether naru-audio has
-/// the voice-design model pulled (always `false` on the legacy engine) and
-/// the two texts the design route reads (mesa task 1426,
-/// [`speech::design_info`]). Gated like [`design_speech_voice`].
+/// `GET /api/config/speech/design[?model=<name>]` — `VoiceDesign`: whether
+/// naru-audio has `model` pulled (always `false` on the legacy engine, or
+/// when `model` is absent/blank) and the two texts the design route reads
+/// (mesa task 1426, [`speech::design_info`]; `model` mesa task 1455 — the
+/// editor's drafted model, which the panel is only offered for when it has
+/// both `design` and `clone` capabilities). Gated like
+/// [`design_speech_voice`].
 async fn get_speech_design(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
+    Query(query): Query<SpeechQuery>,
 ) -> ApiResult<Response> {
     require_agent_access(&state, &addr, &headers)?;
     require_same_site_fetch(&headers)?;
-    let info = tokio::task::spawn_blocking(speech::design_info)
+    if let Some(name) = query.model.as_deref().map(str::trim)
+        && !name.is_empty()
+    {
+        config::validate_model(name, &[]).map_err(|message| ApiError {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            code: "validation",
+            message,
+        })?;
+    }
+    let model = query.model.unwrap_or_default();
+    let info = tokio::task::spawn_blocking(move || speech::design_info(model.trim()))
         .await
         .map_err(|e| ApiError {
             status: StatusCode::BAD_GATEWAY,
@@ -8792,16 +8814,20 @@ struct DesignBody {
     /// Which Naru text to read: `"sample"` or `"reference"`. Never the text
     /// itself.
     script: String,
+    /// The voice-design model to run on (mesa task 1455) — the editor's
+    /// drafted model.
+    model: String,
 }
 
 /// `POST /api/config/speech/design` — reads [`speech::DESIGN_SAMPLE`] or
-/// [`speech::DESIGN_REFERENCE`] in a voice the naru-audio voice-design model
-/// makes up from `instructions`, answered as one exact-size `audio/wav` body
-/// (mesa task 1426, [`speech::design`]). The text is chosen here from Naru's
-/// constants, so the description is the only caller-supplied value, and it
-/// reaches the daemon as one JSON string. Gated like [`add_speech_voice`]:
-/// on the legacy engine it is 409 `conflict` and nothing is contacted; a
-/// blank or over-long description or an unknown script is 422 `validation`;
+/// [`speech::DESIGN_REFERENCE`] in a voice `model`'s voice-design model makes
+/// up from `instructions`, answered as one exact-size `audio/wav` body
+/// (mesa task 1426, [`speech::design`]; `model` mesa task 1455). The text is
+/// chosen here from Naru's constants, so the description is the only
+/// caller-supplied value, and it reaches the daemon as one JSON string.
+/// Gated like [`add_speech_voice`]: on the legacy engine it is 409
+/// `conflict` and nothing is contacted; a blank or over-long description, an
+/// unknown script or a `model` that isn't a model name is 422 `validation`;
 /// a daemon that refuses or does not answer is 502 `unavailable`. Nothing
 /// is kept: saving the clip is a separate `POST /api/config/speech/voices`.
 async fn design_speech_voice(
@@ -8813,7 +8839,7 @@ async fn design_speech_voice(
     require_agent_access(&state, &addr, &headers)?;
     require_same_site_fetch(&headers)?;
     let Json(body) = body?;
-    let wav = blocking(move || speech::design(&body.instructions, &body.script))
+    let wav = blocking(move || speech::design(&body.instructions, &body.script, &body.model))
         .await?
         .map_err(|e| match e {
             speech::AddVoiceError::Conflict(message) => ApiError {
@@ -17516,6 +17542,16 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         headers: HeaderMap,
         name: &str,
     ) -> ApiResult<Response> {
+        post_voice_for(state, addr, headers, name, None).await
+    }
+
+    async fn post_voice_for(
+        state: &AppState,
+        addr: SocketAddr,
+        headers: HeaderMap,
+        name: &str,
+        model: Option<&str>,
+    ) -> ApiResult<Response> {
         add_speech_voice(
             State(state.clone()),
             ConnectInfo(addr),
@@ -17524,6 +17560,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                 name: name.to_string(),
                 text: "Hello there.".to_string(),
                 clip_base64: base64::engine::general_purpose::STANDARD.encode(b"ID3 mp3"),
+                model: model.map(str::to_string),
             })),
         )
         .await
@@ -17600,6 +17637,30 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         );
         assert_eq!(daemon.count("POST /v1/audio/voices"), 1);
 
+        // mesa task 1455: a named model reaches the daemon as the
+        // multipart `model` field — the fix for cloning on the drafted
+        // model rather than always the daemon's own default.
+        let resp = post_voice_for(
+            &state,
+            loopback(),
+            loopback_agent_headers(),
+            "amy2",
+            Some("clones"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let sent = daemon
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|r| r.starts_with("POST /v1/audio/voices "))
+            .cloned()
+            .unwrap();
+        assert!(sent.contains("name=\"model\"\r\n\r\nclones"), "{sent}");
+
         let taken = audio::stub::Stub::serve(0, |_, _| {
             audio::stub::Reply::Json(
                 409,
@@ -17655,7 +17716,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             match (method, path) {
             ("GET", "/v1/audio/voices/amy") => audio::stub::Reply::Json(
                 200,
-                r#"{"name":"amy","text":"Hello there.","wav_base64":"UklGRgABAgM="}"#.to_string(),
+                r#"{"name":"amy","text":"Hello there.","model":"clones","wav_base64":"UklGRgABAgM="}"#.to_string(),
             ),
             ("GET", "/v1/audio/voices/af_heart") => audio::stub::Reply::Json(
                 404,
@@ -17709,6 +17770,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                 "version": 1,
                 "name": "amy",
                 "text": "Hello there.",
+                "model": "clones",
                 "wav_base64": "UklGRgABAgM=",
             })
         );
@@ -17727,12 +17789,19 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         unsafe { std::env::remove_var("MESA_CONFIG_FILE") };
     }
 
+    /// A model name good enough to stand in for the real
+    /// `qwen3-tts-1.7b-voicedesign-mlx` in these tests (mesa task 1455: the
+    /// design route now runs on whatever model the caller names, not a
+    /// hard-coded constant).
+    const DESIGN_TEST_MODEL: &str = "design-voice-model";
+
     async fn post_design(
         state: &AppState,
         addr: SocketAddr,
         headers: HeaderMap,
         instructions: &str,
         script: &str,
+        model: &str,
     ) -> ApiResult<Response> {
         design_speech_voice(
             State(state.clone()),
@@ -17741,6 +17810,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             Ok(Json(DesignBody {
                 instructions: instructions.to_string(),
                 script: script.to_string(),
+                model: model.to_string(),
             })),
         )
         .await
@@ -17748,10 +17818,12 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
 
     /// mesa task 1426: `GET`/`POST /api/config/speech/design` are gated by
     /// `require_agent_access`; the POST is 409 `conflict` on the legacy
-    /// engine and 422 for a blank description or an unknown script, all
-    /// without contacting the daemon, and on naru-audio reads Naru's own
-    /// text in the described voice, answered as an exact-size WAV. The GET
-    /// reports the design model available only when it is pulled.
+    /// engine and 422 for a blank description, an unknown script or a bad
+    /// model, all without contacting the daemon, and on naru-audio reads
+    /// Naru's own text in the described voice, answered as an exact-size
+    /// WAV. The GET reports the queried model available only when it is
+    /// pulled (mesa task 1455: `model` is now a `?model=` query, not always
+    /// the same hard-coded constant).
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn speech_design_is_gated_refused_on_legacy_and_reads_naru_text_on_naru_audio() {
@@ -17766,17 +17838,17 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             }
             _ => audio::stub::Reply::Json(
                 200,
-                format!(
-                    r#"{{"data":[{{"id":"{}","x_kind":"tts"}}]}}"#,
-                    speech::DESIGN_MODEL
-                ),
+                format!(r#"{{"data":[{{"id":"{DESIGN_TEST_MODEL}","x_kind":"tts"}}]}}"#),
             ),
         });
-        let info = || async {
+        let info = |model: &'static str| async {
             let resp = get_speech_design(
                 State(state.clone()),
                 ConnectInfo(loopback()),
                 loopback_agent_headers(),
+                Query(SpeechQuery {
+                    model: Some(model.to_string()),
+                }),
             )
             .await
             .unwrap();
@@ -17791,22 +17863,23 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             loopback_agent_headers(),
             "warm",
             "sample",
+            DESIGN_TEST_MODEL,
         )
         .await
         .unwrap_err();
         assert_eq!((err.status, err.code), (StatusCode::CONFLICT, "conflict"));
         assert!(err.message.contains("naru-audio engine"), "{}", err.message);
-        assert_eq!(info().await["available"], json!(false));
+        assert_eq!(info(DESIGN_TEST_MODEL).await["available"], json!(false));
 
         let _config = listen_config(
             cfg.path(),
             Some(json!({"engine": "naru-audio", "url": daemon.url()})),
         );
         assert_eq!(
-            info().await,
+            info(DESIGN_TEST_MODEL).await,
             json!({
                 "available": true,
-                "model": speech::DESIGN_MODEL,
+                "model": DESIGN_TEST_MODEL,
                 "sample": speech::DESIGN_SAMPLE,
                 "reference": speech::DESIGN_REFERENCE,
             })
@@ -17814,9 +17887,16 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         assert_eq!(daemon.count("GET /v1/models?pulled=true"), 1);
         // The agent gate, on both verbs.
         let foreign = hdrs(Some("localhost:0"), Some("https://evil.example"));
-        let err = post_design(&state, loopback(), foreign.clone(), "warm", "sample")
-            .await
-            .unwrap_err();
+        let err = post_design(
+            &state,
+            loopback(),
+            foreign.clone(),
+            "warm",
+            "sample",
+            DESIGN_TEST_MODEL,
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err.status, StatusCode::FORBIDDEN);
         let err = post_design(
             &state,
@@ -17824,22 +17904,32 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             loopback_agent_headers(),
             "warm",
             "sample",
+            DESIGN_TEST_MODEL,
         )
         .await
         .unwrap_err();
         assert_eq!(err.status, StatusCode::FORBIDDEN);
-        let err = get_speech_design(State(state.clone()), ConnectInfo(loopback()), foreign)
-            .await
-            .unwrap_err();
+        let err = get_speech_design(
+            State(state.clone()),
+            ConnectInfo(loopback()),
+            foreign,
+            Query(SpeechQuery {
+                model: Some(DESIGN_TEST_MODEL.to_string()),
+            }),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err.status, StatusCode::FORBIDDEN);
         // Naru's own 422s.
-        for (instructions, script) in [
-            ("   ", "sample"),
-            ("warm", "Say something rude."),
+        for (instructions, script, model) in [
+            ("   ", "sample", DESIGN_TEST_MODEL),
+            ("warm", "Say something rude.", DESIGN_TEST_MODEL),
             (
                 &"x".repeat(speech::DESIGN_INSTRUCTIONS_MAX + 1)[..],
                 "sample",
+                DESIGN_TEST_MODEL,
             ),
+            ("warm", "sample", "not a model name"),
         ] {
             let err = post_design(
                 &state,
@@ -17847,13 +17937,14 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                 loopback_agent_headers(),
                 instructions,
                 script,
+                model,
             )
             .await
             .unwrap_err();
             assert_eq!(
                 (err.status, err.code),
                 (StatusCode::UNPROCESSABLE_ENTITY, "validation"),
-                "{instructions:?} {script:?}"
+                "{instructions:?} {script:?} {model:?}"
             );
         }
         assert_eq!(daemon.count("POST /v1/audio/speech"), 0);
@@ -17864,6 +17955,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             loopback_agent_headers(),
             " A warm, low voice. ",
             "reference",
+            DESIGN_TEST_MODEL,
         )
         .await
         .unwrap();
@@ -17884,7 +17976,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         assert_eq!(
             sent,
             json!({
-                "model": speech::DESIGN_MODEL,
+                "model": DESIGN_TEST_MODEL,
                 "input": speech::DESIGN_REFERENCE,
                 "instructions": "A warm, low voice.",
                 "response_format": "wav",

@@ -1,4 +1,5 @@
 import type { ConfigSpeech } from './types/ConfigSpeech'
+import type { SpeechModelCaps } from './types/SpeechModelCaps'
 
 /**
  * Pure draft logic for the Settings page's speech editor (mesa task 822),
@@ -37,15 +38,20 @@ export function canPick(voices: string[]): boolean {
 }
 
 /**
- * The options to offer, in the binary's own order, with the drafted voice
- * included even when the list does not have it — otherwise selecting the list
- * would silently rewrite a value the user never touched. `voices` is the list
- * for the drafted model, which may be a refetch rather than the loaded one.
+ * The options to offer, in the binary's own order. `voices` is the list for
+ * the drafted model, which may be a refetch rather than the loaded one. A
+ * drafted voice the list doesn't have is appended only when `voices` is
+ * itself empty — "Naru could not ask", so the list proves nothing and the
+ * box must still hold whatever is typed. Once `voices` actually answers for
+ * a model (mesa task 1455: each model's own list, never another's), a voice
+ * that isn't on it is silently dropped rather than shown as if it were —
+ * the Breeze-shows-Qwen-voices bug this guards against.
  */
 export function options(voices: string[], current: string): string[] {
   const drafted = (current ?? '').trim()
   if (drafted === '' || voices.includes(drafted)) return voices
-  return [...voices, drafted]
+  if (voices.length === 0) return [...voices, drafted]
+  return voices
 }
 
 /**
@@ -68,13 +74,15 @@ export function modelOptions(speech: ConfigSpeech, current: string): string[] {
 
 /**
  * The voice to keep once `voices` — the new model's list — has arrived: the
- * drafted one if that model has it, blank (its default voice) if not. An
- * empty list is "Naru could not ask", which proves nothing, so the draft
- * stands.
+ * drafted one if that model has it, blank (its default voice) otherwise —
+ * including when `voices` is empty (mesa task 1455): a model switch means a
+ * genuinely different voice set, so a voice left over from the previous
+ * model must not silently ride along onto one that was never asked whether
+ * it has it, which was the cloning-on-the-wrong-model bug's other half.
  */
 export function voiceForModel(voice: string, voices: string[]): string {
   const drafted = (voice ?? '').trim()
-  if (drafted === '' || voices.length === 0 || voices.includes(drafted)) {
+  if (drafted === '' || voices.includes(drafted)) {
     return voice
   }
   return ''
@@ -176,4 +184,25 @@ export function changedSpeech(
     changed.model = valueOf(draft.model)
   }
   return changed
+}
+
+/**
+ * The model the clone form, the design panel and export/import actually
+ * work with right now (mesa task 1455): the drafted model, trimmed, when one
+ * is typed; otherwise whichever of `capabilities` naru-audio marks as its
+ * own default — the same model a blank draft's voice list already follows.
+ * `''` when neither is known — a blank draft on a daemon Naru could not ask.
+ */
+export function effectiveModel(draftModel: string, capabilities: SpeechModelCaps[]): string {
+  const drafted = (draftModel ?? '').trim()
+  if (drafted !== '') return drafted
+  return capabilities.find((m) => m.default)?.model ?? ''
+}
+
+/** `capabilities`' entry for `model`, or `null` when it isn't (yet) known. */
+export function capsFor(
+  model: string,
+  capabilities: SpeechModelCaps[],
+): SpeechModelCaps | null {
+  return capabilities.find((m) => m.model === model) ?? null
 }

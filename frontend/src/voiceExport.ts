@@ -73,7 +73,11 @@ export function parseVoiceFile(text: string): ParsedVoice {
   if (typeof d.name !== 'string') {
     return { error: 'That voice file has no "name".' }
   }
-  if (typeof d.text !== 'string' || d.text.trim() === '') {
+  // A blank transcript is not a structural error here: whether one is
+  // required depends on the model it would be imported to (mesa task 1455,
+  // `importReady`), not on the file. Only "not a string at all" is a
+  // malformed file.
+  if (typeof d.text !== 'string') {
     return { error: 'That voice file has no transcript ("text").' }
   }
   if (
@@ -83,6 +87,11 @@ export function parseVoiceFile(text: string): ParsedVoice {
   ) {
     return { error: 'That voice file has no clip ("wav_base64" is not base64).' }
   }
+  // `model` is optional (mesa task 1455): absent on a file exported before
+  // it existed, which is always importable, landing on whichever model the
+  // import names.
+  const model =
+    typeof d.model === 'string' && d.model.trim() !== '' ? d.model.trim() : null
   return {
     voice: {
       format: VOICE_FORMAT,
@@ -90,16 +99,49 @@ export function parseVoiceFile(text: string): ParsedVoice {
       name: d.name.trim(),
       text: d.text,
       wav_base64: d.wav_base64,
+      model,
     },
   }
 }
 
 /**
- * Whether a read file can be imported as `name`: a parsed file on hand and
- * a name that passes the cloned-voice rule (`voiceClone.ts::nameError`). The
- * name defaults to the file's own and may be changed, so a voice can come
- * back under a new name beside the original.
+ * The complaint about importing `voice` onto `currentModel`, or `null` if
+ * there is none (mesa task 1455). A file with no recorded model (older
+ * export) is always compatible — it lands on `currentModel`. A file
+ * recorded for a *different* model is refused with a message naming both,
+ * rather than silently cloning a clip for one model onto another; an
+ * unresolved `currentModel` (Naru could not ask which model is current)
+ * cannot be checked against, so nothing is refused.
  */
-export function importReady(voice: VoiceExport | null, name: string): boolean {
-  return voice !== null && name.trim() !== '' && nameError(name) === null
+export function importModelError(voice: VoiceExport, currentModel: string): string | null {
+  const fileModel = voice.model
+  const current = currentModel.trim()
+  if (fileModel === null || current === '' || fileModel === current) return null
+  return (
+    `This voice was cloned for "${fileModel}", not the drafted model "${current}". ` +
+    `Pick "${fileModel}" as the model above, or export it again from there.`
+  )
+}
+
+/**
+ * Whether a read file can be imported as `name`: a parsed file on hand, a
+ * name that passes the cloned-voice rule (`voiceClone.ts::nameError`), no
+ * [`importModelError`], and — only when the current model actually needs
+ * one (mesa task 1455) — a non-blank transcript. The name defaults to the
+ * file's own and may be changed, so a voice can come back under a new name
+ * beside the original.
+ */
+export function importReady(
+  voice: VoiceExport | null,
+  name: string,
+  currentModel: string,
+  requiresTranscript: boolean,
+): boolean {
+  return (
+    voice !== null &&
+    name.trim() !== '' &&
+    nameError(name) === null &&
+    importModelError(voice, currentModel) === null &&
+    (!requiresTranscript || voice.text.trim() !== '')
+  )
 }

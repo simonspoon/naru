@@ -106,8 +106,10 @@ import {
 import {
   canPick,
   canPickModel as canPickSpeechModel,
+  capsFor,
   changedSpeech,
   draftFrom as speechDraftFrom,
+  effectiveModel,
   isDirty as isSpeechDirty,
   isSavable as isSpeechSavable,
   modelOptions as speechModelOptions,
@@ -147,6 +149,7 @@ import {
 import {
   auditionLabel,
   canAudition,
+  canDesignVoice,
   canKeep,
   canReroll,
   canSave,
@@ -157,6 +160,7 @@ import {
   VOICE_FILE_ACCEPT,
   exportFilename,
   exportText,
+  importModelError,
   importReady,
   parseVoiceFile,
 } from '../voiceExport'
@@ -1289,8 +1293,9 @@ function SpeechSection() {
     )
   }
 
-  // Adds the read voice through the add-voice route. A taken name is the
-  // daemon's 409, shown as an error: nothing is ever overwritten.
+  // Adds the read voice through the add-voice route, onto the drafted model.
+  // A taken name is the daemon's 409, shown as an error: nothing is ever
+  // overwritten.
   async function importVoice() {
     if (!imported) return
     setImporting(true)
@@ -1301,6 +1306,7 @@ function SpeechSection() {
         importName.trim(),
         imported.text.trim(),
         imported.wav_base64,
+        currentModel,
       )
       const fresh = await refreshVoices()
       setImportNote(addedNote(added, fresh))
@@ -1323,7 +1329,12 @@ function SpeechSection() {
     setCloneNote(null)
     try {
       const bytes = new Uint8Array(await clip.arrayBuffer())
-      const added = await addVoice(cloneName.trim(), cloneText.trim(), toBase64(bytes))
+      const added = await addVoice(
+        cloneName.trim(),
+        cloneText.trim(),
+        toBase64(bytes),
+        currentModel,
+      )
       const fresh = await refreshVoices()
       setCloneNote(addedNote(added, fresh))
       setCloneName('')
@@ -1377,6 +1388,13 @@ function SpeechSection() {
   const dirty = isSpeechDirty(speech, seeded)
   const savable = isSpeechSavable(seeded)
   const fieldError = voiceError(seeded.voice)
+  // The model the clone form, the design panel and export/import actually
+  // work with right now (mesa task 1455): the drafted model, or naru-audio's
+  // own default when the box is blank — never the daemon's, whatever that
+  // happens to be, which is the Breeze-clones-onto-Qwen bug this resolves.
+  const currentModel = effectiveModel(seeded.model, speech.capabilities)
+  const currentCaps = capsFor(currentModel, speech.capabilities)
+  const naruAudio = !!(audio.data && savedAudioEngine(audio.data) === 'naru-audio')
 
   return (
     <>
@@ -1489,16 +1507,19 @@ function SpeechSection() {
         )}
       </section>
 
-      {audio.data && savedAudioEngine(audio.data) === 'naru-audio' && (
+      {naruAudio && currentCaps?.clone === true && (
         <section className="settings-command">
           <label htmlFor="clone-name">
             <span className="settings-command-title">Add a cloned voice</span>
           </label>
           <p className="muted settings-command-blurb">
             A short clip of one person speaking — WAV or MP3, about 5–15
-            seconds — and exactly what they say in it. <code>naru-audio</code>{' '}
-            copies the voice; a cloning model then speaks in it. Only clone a
-            voice you have permission to use.
+            seconds{currentCaps.clone_requires_transcript
+              ? ' — and exactly what they say in it'
+              : ''}
+            . <code>naru-audio</code> copies the voice for{' '}
+            <code>{currentModel}</code>; only clone a voice you have
+            permission to use.
           </p>
           <div className="settings-voice-row">
             <input
@@ -1518,14 +1539,16 @@ function SpeechSection() {
               onChange={(e) => setClip(e.target.files?.[0] ?? null)}
             />
           </div>
-          <textarea
-            className="settings-voice-input"
-            aria-label="what the clip says"
-            placeholder="Exactly what the clip says"
-            rows={3}
-            value={cloneText}
-            onChange={(e) => setCloneText(e.target.value)}
-          />
+          {currentCaps.clone_requires_transcript && (
+            <textarea
+              className="settings-voice-input"
+              aria-label="what the clip says"
+              placeholder="Exactly what the clip says"
+              rows={3}
+              value={cloneText}
+              onChange={(e) => setCloneText(e.target.value)}
+            />
+          )}
           {cloneName.trim() !== '' && cloneNameError(cloneName) && (
             <p className="error">{cloneNameError(cloneName)}</p>
           )}
@@ -1534,11 +1557,14 @@ function SpeechSection() {
               type="button"
               disabled={
                 cloning ||
-                !cloneReady({
-                  name: cloneName,
-                  text: cloneText,
-                  hasClip: clip !== null,
-                })
+                !cloneReady(
+                  {
+                    name: cloneName,
+                    text: cloneText,
+                    hasClip: clip !== null,
+                  },
+                  currentCaps.clone_requires_transcript,
+                )
               }
               onClick={() => void addClone()}
             >
@@ -1611,10 +1637,21 @@ function SpeechSection() {
           {importName.trim() !== '' && cloneNameError(importName) && (
             <p className="error">{cloneNameError(importName)}</p>
           )}
+          {imported && importModelError(imported, currentModel) && (
+            <p className="error">{importModelError(imported, currentModel)}</p>
+          )}
           <div className="settings-actions">
             <button
               type="button"
-              disabled={importing || !importReady(imported, importName)}
+              disabled={
+                importing ||
+                !importReady(
+                  imported,
+                  importName,
+                  currentModel,
+                  currentCaps?.clone_requires_transcript ?? true,
+                )
+              }
               onClick={() => void importVoice()}
             >
               {importing ? 'importing…' : 'import voice'}
@@ -1625,8 +1662,8 @@ function SpeechSection() {
         </section>
       )}
 
-      {audio.data && savedAudioEngine(audio.data) === 'naru-audio' && (
-        <VoiceDesignPanel refreshVoices={refreshVoices} />
+      {naruAudio && canDesignVoice(currentCaps) && (
+        <VoiceDesignPanel model={currentModel} refreshVoices={refreshVoices} />
       )}
 
       {/* One player, unmounted to stop — the same shape (and the same
@@ -1697,11 +1734,16 @@ function SpeechSection() {
  * the step rules live in `voiceDesign.ts`.
  */
 function VoiceDesignPanel({
+  model,
   refreshVoices,
 }: {
+  model: string
   refreshVoices: () => Promise<string[]>
 }) {
-  const info = useFetch(() => getSpeechDesign(), 'speech-design')
+  const info = useFetch(
+    () => getSpeechDesign(model),
+    `speech-design:${model}`,
+  )
   const [state, setState] = useState<DesignState>({
     description: '',
     auditioned: null,
@@ -1749,7 +1791,7 @@ function VoiceDesignPanel({
     setError(null)
     setNote(null)
     try {
-      const blob = await designVoice(description, which)
+      const blob = await designVoice(description, which, model)
       if (!mounted.current) return
       if (which === 'reference') {
         const bytes = new Uint8Array(await blob.arrayBuffer())
@@ -1774,7 +1816,12 @@ function VoiceDesignPanel({
     setError(null)
     setNote(null)
     try {
-      const added = await addVoice(name.trim(), info.data.reference, referenceBase64)
+      const added = await addVoice(
+        name.trim(),
+        info.data.reference,
+        referenceBase64,
+        model,
+      )
       const fresh = await refreshVoices()
       setNote(addedNote(added, fresh))
       setName('')

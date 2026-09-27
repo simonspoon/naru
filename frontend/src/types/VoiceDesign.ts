@@ -6,12 +6,14 @@
  */
 export type VoiceDesign = { 
 /**
- * Whether naru-audio has the voice-design model pulled. Always `false`
- * on the legacy engine, and when Naru could not ask the daemon.
+ * Whether naru-audio has `model` (below) pulled. Always `false` on the
+ * legacy engine, and when Naru could not ask the daemon.
  */
 available: boolean, 
 /**
- * The voice-design model's id, for the `naru-audio pull` hint.
+ * The voice-design model this reflects (mesa task 1455) — the one the
+ * editor's `?model=` named, echoed back for the `naru-audio pull` hint;
+ * blank when none was named.
  */
 model: string, 
 /**
