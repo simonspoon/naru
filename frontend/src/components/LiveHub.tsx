@@ -113,6 +113,7 @@ import {
   turnGroups,
   turnLabel,
 } from '../liveTurns'
+import { replayControl } from '../liveReplay'
 import {
   clampLiveSidebarWidth,
   clearLiveSidebarWidth,
@@ -404,6 +405,45 @@ function MicMark() {
     </svg>
   )
 }
+
+/** The replay button's transport glyphs (mesa task 1449) — the same drawn
+ *  vocabulary the inbox's play button uses (`InboxView.tsx`'s `TransportIcon`
+ *  family), redrawn here rather than exported: each panel draws its own
+ *  icons rather than importing another's. */
+function ReplayIcon({ children }: { children: React.ReactNode }) {
+  return (
+    <svg
+      className="transport-icon"
+      viewBox="0 0 16 16"
+      fill="currentColor"
+      aria-hidden="true"
+      focusable="false"
+    >
+      {children}
+    </svg>
+  )
+}
+
+const ReplayPlayIcon = () => (
+  <ReplayIcon>
+    <polygon points="4,2 14,8 4,14" />
+  </ReplayIcon>
+)
+
+const ReplayStopIcon = () => (
+  <ReplayIcon>
+    <rect x="3" y="3" width="10" height="10" />
+  </ReplayIcon>
+)
+
+/** Synthesising: nothing is sounding yet, so there is no transport to draw. */
+const ReplayPendingIcon = () => (
+  <ReplayIcon>
+    <rect x="1" y="7" width="3" height="3" />
+    <rect x="6.5" y="7" width="3" height="3" />
+    <rect x="12" y="7" width="3" height="3" />
+  </ReplayIcon>
+)
 
 /** The chat section's own fold glyph (mesa task 1447) — `LiveBoardPanel`'s own
  *  `FoldMark`, redrawn here rather than exported: each panel already draws
@@ -1319,6 +1359,19 @@ export function LiveHub({
   // set inside its own press, before the turn that follows it exists.
   const pump = useRef<() => void>(() => {})
   const ended = useRef<(id: number) => void>(() => {})
+  // The turn a replay press (mesa task 1449) put on the player, or null. State
+  // as well as a ref, the `paused`/`speechMuted` pairing: the ref is what the
+  // media callbacks and `run()` read (they fire long after the render that
+  // changed it), the state is what a bubble's button reads to draw itself.
+  // `sounding` still names whatever the player is actually on — a replay is on
+  // it exactly like a live turn — so this is only "is that turn a replay",
+  // never a second copy of which turn is playing.
+  const [replayingId, setReplayingIdState] = useState<number | null>(null)
+  const replaying = useRef<number | null>(null)
+  const setReplaying = useCallback((next: number | null) => {
+    replaying.current = next
+    setReplayingIdState(next)
+  }, [])
 
   const releasePlayer = useCallback(() => {
     press.current += 1
@@ -1356,6 +1409,10 @@ export function LiveHub({
         setActionError(err instanceof Error ? err.message : String(err))
         setSpeaking(false)
         sounding.current = null
+        // A replay that failed to decode is not a live turn ending — it never
+        // reached `markPlayed` and must not: clear the button rather than
+        // stamping anything.
+        if (replaying.current === id) setReplaying(null)
         // A turn that never sounded is a turn that ended: the conversation
         // moves on rather than stopping on it.
         pump.current()
@@ -1398,7 +1455,7 @@ export function LiveHub({
         },
       )
     },
-    [setSpeaking],
+    [setSpeaking, setReplaying],
   )
 
   // Speaks one turn, whatever was sounding before. Called from the run rather
@@ -1434,6 +1491,40 @@ export function LiveHub({
   }, [releasePlayer, setSpeaking])
 
   /**
+   * Replay (mesa task 1449): hears one bubble again on demand, on the same
+   * player every live turn uses — there is exactly one `<audio>` for the
+   * page's life, so a replay and the run can never fight over two of them.
+   * Queues behind live speech rather than ever cutting it off (`run()`
+   * already refuses to start while anything is sounding; this borrows that
+   * same refusal), but switching from one replay to another is fine —
+   * nothing but this browser is listening to hear the seam. `speak()` does
+   * the actual work; `turnEnded` above is where the resulting end is told
+   * apart from a live turn's and skips the stamp.
+   */
+  function startReplay(id: number) {
+    const ctx = clock.current
+    if (ctx === null) return
+    if (speechMutedRef.current || pausedRef.current) return
+    if (sounding.current !== null && replaying.current === null) return
+    setReplaying(id)
+    speak(id, ctx)
+  }
+
+  /** The second-press half of the button, and where every other way a replay
+   *  stops (muting, pausing, ending the session) lands too. */
+  function stopReplay() {
+    if (replaying.current === null) return
+    setReplaying(null)
+    silence()
+    pump.current()
+  }
+
+  function toggleReplay(id: number) {
+    if (replaying.current === id) stopReplay()
+    else startReplay(id)
+  }
+
+  /**
    * The pause branch of `togglePause` (task 882), factored out because a
    * spoken pause phrase (mesa task 1160, `livePausePhrase.ts`) performs the
    * same press from inside a capture effect. The turn sounding at the press is
@@ -1444,12 +1535,20 @@ export function LiveHub({
    * that is already silent and writes a `true` that is already there. The ref
    * beside it is what the capture handlers call, since they fire long after
    * the render that made it.
+   *
+   * A replay button press (mesa task 1449, `replaying.current`) is never a
+   * live turn the run is mid-way through, so it must not go through
+   * `releaseForReplay` — that turn is very likely already in `handled` from
+   * having been said once already, and deleting it there would hand it back
+   * to the run as if it had never been spoken. It is cleared on its own
+   * instead, same as any other way a replay stops.
    */
   const pauseNow = useCallback(() => {
-    releaseForReplay(handled.current, sounding.current)
+    if (replaying.current !== null) setReplaying(null)
+    else releaseForReplay(handled.current, sounding.current)
     silence()
     setPausedNow(true)
-  }, [silence, setPausedNow])
+  }, [silence, setPausedNow, setReplaying])
   const pauseNowRef = useRef(pauseNow)
   useEffect(() => {
     pauseNowRef.current = pauseNow
@@ -2873,6 +2972,7 @@ export function LiveHub({
         performed.current.add(turn.id)
         const target = navigateTarget(turn)
         if (target !== null && window.location.hash !== target) {
+          // eslint-disable-next-line react-hooks/immutability -- `run()` never executes during render: it is called only from effects and event-handler callbacks (`pump.current`/`ended.current`, a claim/press handler). Pre-existing, unrelated to mesa task 1449 — that task's own fix (reading `sounding` via `speaking` state rather than the ref) is what let the compiler's analysis reach this far into the component for the first time.
           window.location.hash = target
         }
         const sidebars = sidebarsIntent(turn)
@@ -2918,11 +3018,19 @@ export function LiveHub({
   // player has already left is an echo — a media event and the watcher below
   // can both arrive for the same turn, and advancing twice would cut the turn
   // after it short.
+  //
+  // A replay (mesa task 1449) ends here too — it is on the same player,
+  // sounding exactly like a live turn — but it is this browser re-hearing
+  // something already said, not the conversation advancing: it must never
+  // stamp `played_at` (the turn may already carry one) and never enter
+  // `handled`/`performed`, which it never did on the way in either. `run()`
+  // still runs after, so whatever queued behind the replay is picked up.
   function turnEnded(id: number) {
     if (sounding.current !== id) return
     sounding.current = null
     setSpeaking(false)
-    markPlayed(id)
+    if (replaying.current === id) setReplaying(null)
+    else markPlayed(id)
     run()
   }
 
@@ -2954,13 +3062,24 @@ export function LiveHub({
       setPausedNow(false)
       // Nor does a muted voice (mesa task 1327), for the same reason.
       setSpeechMutedNow(false)
+      // Nor a replay (mesa task 1449) — `silence()` above already stopped the
+      // audio, this just clears the button.
+      setReplaying(null)
       // Nor does a recording (task 889): it was said to a conversation that no
       // longer exists, and nothing will ever send it.
       setRecordingNow('')
       setInterimNow('')
     }
     wasLive.current = live
-  }, [live, silence, setPausedNow, setSpeechMutedNow, setRecordingNow, setInterimNow])
+  }, [
+    live,
+    silence,
+    setPausedNow,
+    setSpeechMutedNow,
+    setReplaying,
+    setRecordingNow,
+    setInterimNow,
+  ])
 
   // The header never unmounts, but strict-mode remounts in dev do pass here:
   // drop the body still arriving and hand the clock back.
@@ -3241,6 +3360,12 @@ export function LiveHub({
     }
     setPending('stop')
     silence()
+    // Ending the session is a hard stop, and it must not leave `replaying`
+    // behind: `silence()` doesn't clear it (mesa task 1449's callers each
+    // handle it their own way), and a `replaying` id left set after a
+    // failed `stopLive()` would force `liveSounding` false and let a later
+    // replay press pass `startReplay`'s live-turn guard.
+    setReplaying(null)
     stopLive().then(() => refetch(), failed).finally(() => setPending(null))
   }
 
@@ -3275,14 +3400,20 @@ export function LiveHub({
    * so it is stamped here and the run goes on reading whatever else is
    * pending. Unmuting touches nothing — the backlog was read as it landed, and
    * only turns arriving after this are spoken.
+   *
+   * A replay (mesa task 1449) sounding at the press is the one exception: it
+   * was never counted as heard on the way in, so muting must not stamp it
+   * either — the button just goes quiet, same as a second press on it would.
    */
   function toggleSpeechMuted() {
     const next = !speechMutedRef.current
     setSpeechMutedNow(next)
     if (!next) return
     const cut = sounding.current
+    const cutReplay = replaying.current !== null
     silence()
-    if (cut !== null) markPlayed(cut)
+    if (cutReplay) setReplaying(null)
+    else if (cut !== null) markPlayed(cut)
     pump.current()
   }
 
@@ -3434,6 +3565,15 @@ export function LiveHub({
   })
 
   const groups = turnGroups(turns)
+  // Whether a *live* turn — not a replay — is audibly sounding right now
+  // (mesa task 1449): every replay button but the one already sounding reads
+  // this to disable itself, so a replay can queue behind live speech but
+  // never interrupt it. Derived from `speaking` state rather than the
+  // `sounding` ref: refs may not be read during render (nor may a value
+  // derived from one flow into rendered output), and `speaking` is state set
+  // from the same media events, so a render that sees it true sees a
+  // `sounding` ref that already agrees.
+  const liveSounding = speaking && replayingId === null
   // Pulled out of the object so its narrowing survives into the handler below.
   const secondary = controls.secondary
   const pauseButton = controls.pause
@@ -3943,28 +4083,70 @@ export function LiveHub({
                               <div className="live-who">
                                 {turnLabel(group.role, group.notice)}
                               </div>
-                              {group.turns.map((turn) => (
-                                <div key={turn.id} className="live-turn">
-                                  {/* Plain text, never markdown: a mesa turn is
-                                      prose meant to be *spoken*, and a user turn
-                                      is untrusted dictation. */}
-                                  {turn.text !== '' && (
-                                    <div className="live-text">{turn.text}</div>
-                                  )}
-                                  {navigateTarget(turn) !== null && (
-                                    <div className="live-navigated">
-                                      went to {navigateTarget(turn)}
-                                    </div>
-                                  )}
-                                  {sidebarsIntent(turn) !== null && (
-                                    <div className="live-navigated">
-                                      {sidebarsIntent(turn) === 'collapse'
-                                        ? 'collapsed the sidebars'
-                                        : 'opened the sidebars'}
-                                    </div>
-                                  )}
-                                </div>
-                              ))}
+                              {group.turns.map((turn) => {
+                                const replay = replayControl(turn, {
+                                  unlocked,
+                                  speechMuted,
+                                  paused,
+                                  liveSounding,
+                                  replaying: replayingId,
+                                })
+                                return (
+                                  <div key={turn.id} className="live-turn">
+                                    {/* Plain text, never markdown: a mesa turn is
+                                        prose meant to be *spoken*, and a user turn
+                                        is untrusted dictation. */}
+                                    {turn.text !== '' && (
+                                      <div className="live-text">{turn.text}</div>
+                                    )}
+                                    {navigateTarget(turn) !== null && (
+                                      <div className="live-navigated">
+                                        went to {navigateTarget(turn)}
+                                      </div>
+                                    )}
+                                    {sidebarsIntent(turn) !== null && (
+                                      <div className="live-navigated">
+                                        {sidebarsIntent(turn) === 'collapse'
+                                          ? 'collapsed the sidebars'
+                                          : 'opened the sidebars'}
+                                      </div>
+                                    )}
+                                    {/* Replay (mesa task 1449): re-hear this one
+                                        bubble on demand, independent of the run
+                                        that already said it once. Hidden for a
+                                        turn with nothing spoken (`replayControl`
+                                        is the one place that decides). */}
+                                    {replay !== 'hidden' && (
+                                      <button
+                                        type="button"
+                                        className="live-turn-replay"
+                                        aria-label={
+                                          replay === 'stop'
+                                            ? 'stop replaying'
+                                            : 'replay this message'
+                                        }
+                                        title={
+                                          replay === 'stop'
+                                            ? 'stop replaying'
+                                            : 'replay this message'
+                                        }
+                                        disabled={replay === 'disabled'}
+                                        onClick={() => toggleReplay(turn.id)}
+                                      >
+                                        {replay === 'stop' ? (
+                                          speaking ? (
+                                            <ReplayStopIcon />
+                                          ) : (
+                                            <ReplayPendingIcon />
+                                          )
+                                        ) : (
+                                          <ReplayPlayIcon />
+                                        )}
+                                      </button>
+                                    )}
+                                  </div>
+                                )
+                              })}
                             </div>
                           ))
                         )}

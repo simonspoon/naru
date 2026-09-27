@@ -2409,7 +2409,43 @@ nothing sounds, `speaking` never goes true — the aperture never shows
 speaking, `shouldListen` keeps the microphone open, and barge-in is never
 engaged.
 
-## The header hub (`LiveHub`, task 857)
+### Replay: hearing a bubble again (mesa task 1449)
+
+Every Naru bubble with spoken text carries a small play/stop button
+(`liveReplay.ts::replayControl`, one Naru bubble button among the transcript's
+turns) — including turns from earlier in the session, since the transcript is
+accumulated rather than replaced. A press synthesises the same route the run
+itself uses, `GET /api/live/turns/{id}/speak`, on the **same** player and
+clock every live turn plays through — there is one `<audio>` for the page's
+whole life, so a replay is never a second stream fighting the run for it. A
+second press, muting speech, pausing, or ending the session all stop it the
+same way: the audio is released and the button goes quiet.
+
+The one rule that matters is that a replay is not the conversation advancing —
+it is this browser re-hearing something already said — so it must be
+invisible to everything that *is* the conversation advancing: it never stamps
+`played_at` (the turn most likely carries one already, from having been said
+once for real) and it never enters `handled` or `performed`, the two sets
+`run()` uses to decide what it has and has not said or performed
+(`liveTurns.ts`). `turnEnded` is the one place a sounding turn's end is told
+from a live turn's, by checking whether the ending id is the one this browser
+is replaying (`replaying.current`) rather than the one the run put there —
+every path that can end a turn (the `<audio>` element's own `onEnded`, the
+decode-it-yourself fallback's `onEnded`, and the "this browser refused to
+start playback" catch) funnels through it, so there is exactly one place a
+replay's end is decided. The two paths that end a turn *without* going
+through `turnEnded` — a decode failure, and the housekeeping that stops the
+audio for a muted, paused or ended conversation — clear the same replay flag
+directly instead, for the same reason.
+
+Replay never interrupts live speech: while a live turn (not a replay) is
+sounding, every replay button is disabled, and starting one is refused even if
+the press somehow reaches the handler. A turn that would have spoken while a
+replay is sounding is not lost or skipped — `run()` already refuses to start
+while anything is on the player, live or replayed, so it simply waits on the
+pending list and is picked up the moment the replay ends. Switching from one
+replay to another, though, is fine: nothing but this browser is listening for
+the seam.
 
 The conversation lives in the **header**, not on a page: a control cluster on
 the right, beside the plan-limit chips, on every route. There is no left-nav

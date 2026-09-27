@@ -123,7 +123,7 @@ The code is the source of truth. These are the invariants you must not break:
   `fileSearch`, `fileTabs`, `filesTreeWidth`, `inboxArchive`, `inboxFilter`, `inboxKind`, `inboxOrigin`, `inboxQueue`, `inboxRead`,
   `keyboardScope`, `keymap`, `keymapDraft`,
   `lastView`, `layout`, `libraryBuiltinUpdate`, `libraryBundle`, `libraryDraft`, `libraryHistory`, `libraryImport`, `libraryOverride`, `librarySync`, `listenDraft`, `liveAudio`, `liveBand`, `liveBoard`, `liveBoardWidth`, `liveCancel`, `liveCapture`, `liveContext`, `liveDevices`, `liveDrain`, `liveHead`, `liveInk`, `liveIndicator`, `liveLayout`, `livePausePhrase`, `livePromptDraft`,
-  `liveRecognition`,
+  `liveRecognition`, `liveReplay`,
   `liveSession`, `liveSidebarWidth`, `liveSpeaker`, `liveStream`,
   `liveTurns`,
   `liveVad`, `liveView`,

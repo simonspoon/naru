@@ -10301,6 +10301,27 @@ body.live-panel-ratio-resizing .live-panel-divider {
   font-family: var(--font-mono);
 }
 
+/* Replay (mesa task 1449): a small transport button on every mesa turn with
+   spoken text, so a reply can be heard again without waiting for the
+   conversation to reach it. Sits inside the bubble it replays rather than
+   beside it, so it scrolls with the turn. */
+.live-turn-replay {
+  margin-top: 0.35rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.75rem;
+  padding: 0.15rem 0.4rem;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  clip-path: var(--cut-sm);
+}
+
+.live-turn-replay:disabled {
+  opacity: 0.4;
+}
+
 .live-composer {
   display: flex;
   flex-direction: column;
