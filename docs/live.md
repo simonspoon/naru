@@ -1389,9 +1389,9 @@ DELETE CASCADE` for the case that *is* a delete: a session row destroyed
 takes its pictures with it, as it takes its turns.
 
 Nothing reaches a project unless someone asks — which is what `keep` is for —
-and each push prunes to the newest twenty, so a conversation can be as free
-with pictures as it is with sentences: a board costs nobody a row in their
-artifacts list.
+and a conversation can be as free with pictures as it is with sentences: a
+board costs nobody a row in their artifacts list (see "Retention is the
+history" below for what does and does not get pruned).
 
 ### The four kinds, and what `body` holds
 
@@ -1616,8 +1616,8 @@ board, and seen by the agent only when the person next sends a turn.
   as one savepoint, so a failed file write leaves no turn behind. The ink dir
   is `live-ink/` beside the db, or `NARU_LIVE_INK_DIR`/`MESA_LIVE_INK_DIR`
   (the gates' seam). `live_turns.image_path`/`board_id` arrive at migration
-  index **76**; `board_id` is `ON DELETE SET NULL`, so a board pruned past the
-  keep bound leaves the image and loses only the link.
+  index **76**; `board_id` is `ON DELETE SET NULL`, so a board removed by
+  `mesa live board clear` leaves the image and loses only the link.
 - **The column is relative, the turn is absolute** (mesa task 1355):
   `image_path` is stored as `<session>/<turn>.png` (`board::live_ink_relative`)
   and resolved against the ink dir on every read by one helper,
@@ -3430,7 +3430,7 @@ required-source and required-destination `ArgGroup`s and the rest of the exit-2
 usage errors, the bodiless oldest-first listing, `--quiet` dropping exactly
 `body`, `keep` into an artifact and onto a task (decoded bytes, authored
 `naru-live`) with an image board refused the artifact and pointed at `--task`,
-the newest-20 prune, `clear`'s echo, and the render route's exact header set —
+the poll's newest-20 bound with the full unbounded history still reachable past it, `clear`'s echo, and the render route's exact header set —
 a type per kind, `nosniff`, `inline`, byte-identical bodies and the artifact
 CSP verbatim — asserted **identically in default mode and under `--lan`**,
 alongside the absence of any board write route.

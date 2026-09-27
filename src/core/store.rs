@@ -7671,10 +7671,15 @@ impl Store {
     /// mid-conversation never matches.
     pub fn cc_live_session_links(&self) -> Result<HashMap<String, i64>> {
         let mut stmt = self.conn.prepare(
-            "SELECT p.session_id, p.preview FROM cc_prompts p \
-             WHERE p.ts = (SELECT MIN(ts) FROM cc_prompts WHERE session_id = p.session_id) \
-               AND (p.preview LIKE 'Drive naru live session %' \
-                    OR p.preview LIKE 'Drive mesa live session %')",
+            "SELECT session_id, preview FROM ( \
+               SELECT session_id, preview, \
+                      ROW_NUMBER() OVER ( \
+                        PARTITION BY session_id ORDER BY ts, uuid \
+                      ) AS rn \
+               FROM cc_prompts \
+             ) WHERE rn = 1 \
+               AND (preview LIKE 'Drive naru live session %' \
+                    OR preview LIKE 'Drive mesa live session %')",
         )?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
         let mut map = HashMap::new();
@@ -16333,11 +16338,41 @@ mod tests {
             60,
             &format!("Drive naru live session {} (lease 1).", session.id),
         );
+        // Two prompts tied on ts: the batch reader used to pick whichever
+        // tied row matched the spawn-line pattern, while the single-session
+        // reader always breaks the tie on `uuid`. Prove both now agree on
+        // whichever row `ORDER BY ts, uuid` actually puts first.
+        //
+        // `cc-tied-match`: the uuid-first row (`a-first`) is the spawn line,
+        // so both readers must link it.
+        insert_prompt(
+            "m-a-first",
+            "cc-tied-match",
+            100,
+            &format!("Drive naru live session {} (lease 1).", session.id),
+        );
+        insert_prompt("m-z-second", "cc-tied-match", 100, "an unrelated tied turn");
+        // `cc-tied-miss`: the uuid-first row (`a-first`) is unrelated, and
+        // the spawn line only sits on the tied row that loses the tiebreak
+        // — neither reader may link this session.
+        insert_prompt("x-a-first", "cc-tied-miss", 100, "an unrelated tied turn");
+        insert_prompt(
+            "x-z-second",
+            "cc-tied-miss",
+            100,
+            &format!("Drive naru live session {} (lease 1).", session.id),
+        );
 
         let links = store.cc_live_session_links().unwrap();
         assert_eq!(links.get("cc-driver"), Some(&session.id));
         assert_eq!(links.get("cc-old-driver"), Some(&999));
         assert_eq!(links.get("cc-mentioner"), None, "not the first prompt");
+        assert_eq!(links.get("cc-tied-match"), Some(&session.id));
+        assert_eq!(
+            links.get("cc-tied-miss"),
+            None,
+            "tiebreak loser doesn't count"
+        );
 
         assert_eq!(
             store.cc_live_session_link("cc-driver").unwrap(),
@@ -16345,6 +16380,16 @@ mod tests {
         );
         assert_eq!(store.cc_live_session_link("cc-mentioner").unwrap(), None);
         assert_eq!(store.cc_live_session_link("unknown-session").unwrap(), None);
+        // The single- and batch-row readers must agree on both tied
+        // sessions, exactly as they do on every other session above.
+        assert_eq!(
+            store.cc_live_session_link("cc-tied-match").unwrap(),
+            links.get("cc-tied-match").copied()
+        );
+        assert_eq!(
+            store.cc_live_session_link("cc-tied-miss").unwrap(),
+            links.get("cc-tied-miss").copied()
+        );
 
         let counts = store.live_board_counts().unwrap();
         assert_eq!(counts.get(&session.id), Some(&2));
