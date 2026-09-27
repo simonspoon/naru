@@ -9797,6 +9797,21 @@ body.live-panel-ratio-resizing .live-panel-divider {
   border-right: 1px solid var(--border);
 }
 
+/* `LiveBoardPanel`'s own root carries this same class name a second time,
+   nested one level inside the flex item above (`LiveHub`'s wrapper div) —
+   this selector's `>` is what tells the two apart. Only the inner one needs
+   to be a flex column filling its slot: the outer wrapper already gets its
+   size from `.live-panel-section`'s own flex rules above, and a `folded`
+   outer wrapper is `flex: none` sized to its header — giving it `height:
+   100%` too would hand a folded section the whole panel's height instead
+   (the regression this comment now guards against). */
+.live-panel-section > .live-board-section {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
 /* Folded: the section shrinks to its own head row and the stage under it is
    clipped away — never unmounted, so a framed board's `<iframe>` keeps its
    document rather than reloading it on every unfold (`LiveBoardPanel`'s own
@@ -9927,6 +9942,7 @@ body.live-panel-ratio-resizing .live-panel-divider {
    task 1353. */
 .live-board-frame {
   flex: 1;
+  min-height: 0;
   width: 100%;
   border: none;
   background: #fff;
