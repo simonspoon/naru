@@ -1142,25 +1142,40 @@ export function LiveHub({
   const [boardSeen, setBoardSeen] = useState<number | null>(null)
   const nextBoardSeen = boardSeenFor(boardSeen, boards)
   if (nextBoardSeen !== boardSeen) setBoardSeen(nextBoardSeen)
-  // Whether this component has ever synced `boardSeen` against a real poll —
-  // set the first time the effect below runs, whatever `boardSeen` reads at
-  // that point. That first run is a *baseline*, not a push: a page reloaded
-  // mid-conversation must show whatever fold state the person left it in
-  // (`mesa-live-board-collapsed`), not force every board open again just
-  // because this mount has never seen it before (mesa task 1447 fix round,
-  // finding 1). Only a `boardSeen` that changes *after* the baseline is a
-  // board the agent pushed *instead of* saying something, so only that one
-  // expands the section and opens the panel — the reopen button's own effect,
-  // performed automatically.
-  const boardSeenBaseline = useRef(false)
+  // What `boardSeen` read the moment the very first `GET /api/live` response
+  // actually arrived (mesa task 1447 fix round 2) — `undefined` until then,
+  // distinct from `null` (a real answer that simply carried no boards yet).
+  // Captured from `data` rather than from the expand effect's own mount
+  // timing: an effect fires once on mount before any poll has answered, so
+  // consuming a baseline there raced the first poll's boards in — a reload
+  // with a board already pushed read as a brand new push before the poll
+  // that would have told this component otherwise ever landed (the bug this
+  // baseline exists to fix). `data` and `boardSeen` are already in step by
+  // the time either effect below runs, `boardSeen`'s own render-time sync
+  // above having settled in the same commit — so the value captured here is
+  // exactly what that first response said, boards included.
+  const boardSeenBaseline = useRef<number | null | undefined>(undefined)
+  useEffect(() => {
+    if (data === null || boardSeenBaseline.current !== undefined) return
+    // Seeds silently: whatever this first response's boards already are is
+    // the baseline, not a push — a page reloaded mid-conversation must show
+    // whatever fold state the person left it in (`mesa-live-board-collapsed`),
+    // not force every board open again just because this mount has never
+    // seen it before (mesa task 1447 fix round 1).
+    boardSeenBaseline.current = boardSeen
+  }, [data, boardSeen])
+  // Only a `boardSeen` that changes *after* the baseline above was captured
+  // is a board the agent pushed *instead of* saying something, so only that
+  // one expands the section and opens the panel — the reopen button's own
+  // effect, performed automatically. A conversation with no boards at load
+  // (`boardSeenBaseline.current === null`) whose first board is pushed later
+  // still expands, since that later value is not the baseline.
   useEffect(() => {
     // The decision lives inside its own function, the `frozenSize` effect's
     // own shape, rather than at the effect's top level.
     const settle = () => {
-      if (!boardSeenBaseline.current) {
-        boardSeenBaseline.current = true
-        return
-      }
+      if (boardSeenBaseline.current === undefined) return
+      if (boardSeen === boardSeenBaseline.current) return
       // The conversation ended or its boards were cleared: nothing to expand
       // or open for a board that no longer exists.
       if (boardSeen === null) return
