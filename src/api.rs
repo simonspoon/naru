@@ -235,10 +235,13 @@ struct AppState {
     /// Task id → the todo-watcher's last failed spawn for it (mesa task 1338):
     /// the task's `updated_at` as the watcher's own revert left it, and the
     /// error texts already filed as inbox alerts. The watcher skips a task
-    /// while its `updated_at` still reads that value ([`spawn_backed_off`]),
-    /// so a spawn that fails every time is tried once rather than claimed and
-    /// reverted on every tick; any later write to the task makes it eligible
-    /// again, and a successful spawn drops the entry. In memory, like
+    /// while its `updated_at` still reads that value and the backoff window
+    /// since the failure has not run out ([`spawn_backed_off`]), so a spawn
+    /// that fails every time is not claimed and reverted on every tick; the
+    /// window doubles per consecutive failure and is capped (mesa task 1477),
+    /// so a fixed cause is retried without anyone touching the task. Any
+    /// later write to the task makes it eligible at once, and a successful
+    /// spawn drops the entry. In memory, like
     /// `inbox_dispatched`, and deliberately not persisted: a restart retries
     /// every such task once, which is the recoverable direction. Not pruned —
     /// it holds one small entry per task whose spawn has failed.
@@ -258,6 +261,21 @@ struct AppState {
 /// overrides it for tests (mirrors `MESA_CLAUDE_BIN`'s test-seam precedent),
 /// so a gate script isn't stuck waiting a full 60s per check.
 const WATCH_TODO_TICK: Duration = Duration::from_secs(60);
+
+/// The first backoff window after a failed todo spawn (mesa task 1477);
+/// each further consecutive failure doubles it up to [`SPAWN_BACKOFF_CAP`].
+/// `MESA_WATCH_TODO_SPAWN_BACKOFF_MS` overrides it for tests.
+const WATCH_TODO_SPAWN_BACKOFF: Duration = Duration::from_secs(2 * 60);
+
+/// The longest a failed todo spawn is backed off for.
+const SPAWN_BACKOFF_CAP: Duration = Duration::from_secs(30 * 60);
+
+fn watch_todo_spawn_backoff() -> Duration {
+    crate::core::env::var("WATCH_TODO_SPAWN_BACKOFF_MS")
+        .and_then(|s| s.parse().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(WATCH_TODO_SPAWN_BACKOFF)
+}
 
 fn watch_todo_tick() -> Duration {
     crate::core::env::var("WATCH_TODO_TICK_MS")
@@ -850,8 +868,9 @@ fn deepest_actionable(store: &Store, mut task: Task, exclude: &[i64]) -> Result<
 /// double-dispatch the same task while the agent is still starting up. A
 /// spawn failure reverts the task back to `todo` so the project isn't
 /// wedged, files one inbox alert per (task, error text) and backs the task
-/// off until something else writes to it ([`spawn_backed_off`], mesa task
-/// 1338) — the picks exclude it, so the project's other tasks still move; a
+/// off — for a window that starts at two minutes and doubles per consecutive
+/// failure up to thirty, or until something else writes to it
+/// ([`spawn_backed_off`], mesa tasks 1338 and 1477) — the picks exclude it, so the project's other tasks still move; a
 /// dispatched agent that later crashes without finishing is not
 /// detected here (task-status, not live-session, is the "in process" signal)
 /// — the reaper is what notices it (mesa task 1191): [`todo_reaper_tick`]
@@ -970,15 +989,20 @@ fn todo_watcher_tick(state: &AppState) {
         // in_progress task occupies one of the project's dispatch slots.
         let parents: std::collections::HashSet<i64> =
             tasks.iter().filter_map(|t| t.parent_id).collect();
-        // Tasks whose last spawn failed and that nobody has touched since
-        // (mesa task 1338): never picked, so the pick moves past them.
+        // Tasks whose last spawn failed, that nobody has touched since and
+        // whose backoff window is still open (mesa tasks 1338, 1477): never
+        // picked, so the pick moves past them.
         let mut backed_off: HashMap<i64, Vec<i64>> = HashMap::new();
+        let backoff_base = watch_todo_spawn_backoff();
         {
             let failed = match state.todo_spawn_failed.lock() {
                 Ok(f) => f,
                 Err(e) => e.into_inner(),
             };
-            for t in tasks.iter().filter(|t| spawn_backed_off(&failed, t)) {
+            for t in tasks
+                .iter()
+                .filter(|t| spawn_backed_off(&failed, t, Instant::now(), backoff_base))
+            {
                 backed_off.entry(t.project_id).or_default().push(t.id);
             }
         }
@@ -1208,11 +1232,14 @@ fn todo_watcher_tick(state: &AppState) {
                 };
                 let failure = failed.entry(task_id).or_default();
                 failure.updated_at = reverted.updated_at;
+                failure.failed_at = Some(Instant::now());
+                failure.failures += 1;
                 // One alert per (task, error text): a repeat of the same
                 // failure after a touch files nothing new. Remembered only
                 // once filed, so a failed filing is tried again next failure.
                 if !failure.alerted.contains(&e) {
-                    let body = spawn_failed_body(task_id, &local_path, &e);
+                    let body =
+                        spawn_failed_body(task_id, &local_path, &e, watch_todo_spawn_backoff());
                     match store.create_inbox_item(
                         Some(TODO_WATCHER_AUTHOR),
                         &body,
@@ -1245,17 +1272,40 @@ struct SpawnFailure {
     updated_at: String,
     /// Spawn error texts already filed as an inbox alert for this task.
     alerted: std::collections::HashSet<String>,
+    /// When the latest failure happened (mesa task 1477); the backoff window
+    /// runs from here.
+    failed_at: Option<Instant>,
+    /// Consecutive failures since the last successful spawn; the window
+    /// doubles with each.
+    failures: u32,
 }
 
-/// Whether the todo-watcher should pass `task` over: its last spawn failed
-/// and nothing has written to it since — its `updated_at` is still the one
-/// the watcher's own revert stamped. Any other write moves `updated_at` and
-/// makes the task eligible again. (`updated_at` has one-second resolution, so
-/// a write in the same second as the revert goes unnoticed.)
-fn spawn_backed_off(failed: &HashMap<i64, SpawnFailure>, task: &Task) -> bool {
-    failed
-        .get(&task.id)
-        .is_some_and(|f| f.updated_at == task.updated_at)
+/// The backoff window after `failures` consecutive failed spawns: `base`
+/// doubled per failure past the first, capped at [`SPAWN_BACKOFF_CAP`].
+fn spawn_backoff_window(base: Duration, failures: u32) -> Duration {
+    let doublings = failures.saturating_sub(1).min(20);
+    base.saturating_mul(1u32 << doublings)
+        .min(SPAWN_BACKOFF_CAP)
+}
+
+/// Whether the todo-watcher should pass `task` over: its last spawn failed,
+/// nothing has written to it since — its `updated_at` is still the one the
+/// watcher's own revert stamped — and `now` is still inside the backoff
+/// window ([`spawn_backoff_window`]) that began at the failure. Any other
+/// write moves `updated_at` and makes the task eligible at once; the window
+/// running out does the same with no write. (`updated_at` has one-second
+/// resolution, so a write in the same second as the revert goes unnoticed.)
+fn spawn_backed_off(
+    failed: &HashMap<i64, SpawnFailure>,
+    task: &Task,
+    now: Instant,
+    base: Duration,
+) -> bool {
+    failed.get(&task.id).is_some_and(|f| {
+        f.updated_at == task.updated_at
+            && f.failed_at
+                .is_some_and(|at| now < at + spawn_backoff_window(base, f.failures))
+    })
 }
 
 /// Longest spawn error text an alert carries, in bytes.
@@ -1277,12 +1327,14 @@ fn spawn_error_text(error: &str) -> String {
 }
 
 /// The alert for a task the todo-watcher could not start an agent on.
-fn spawn_failed_body(task_id: i64, local_path: &str, error: &str) -> String {
+fn spawn_failed_body(task_id: i64, local_path: &str, error: &str, base: Duration) -> String {
+    let minutes = spawn_backoff_window(base, 1).as_secs().div_ceil(60).max(1);
     format!(
         "The todo watcher could not start an agent for task {task_id} in {local_path}. \
          The spawn failed with: {error}. The task is back in todo, and the watcher will \
-         not try it again until the task changes. Once the cause is fixed, touch the task \
-         — for example `mesa task update {task_id} --status todo` — and the next tick \
+         try it again automatically in about {minutes} minutes, waiting longer after each \
+         further failure. Once the cause is fixed you can also touch the task — for \
+         example `mesa task update {task_id} --status todo` — and the next tick \
          dispatches it."
     )
 }
@@ -12730,25 +12782,61 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             ..base.clone()
         };
         let mut failed = HashMap::new();
+        let now = Instant::now();
+        let base = Duration::from_secs(120);
         assert!(
-            !spawn_backed_off(&failed, &task(1, "2026-01-01 00:00:00")),
+            !spawn_backed_off(&failed, &task(1, "2026-01-01 00:00:00"), now, base),
             "a task that never failed is not backed off"
         );
         failed.insert(
             1,
             SpawnFailure {
                 updated_at: "2026-01-01 00:00:00".into(),
+                failed_at: Some(now),
+                failures: 1,
                 ..Default::default()
             },
         );
-        assert!(spawn_backed_off(&failed, &task(1, "2026-01-01 00:00:00")));
+        let at = |secs| now + Duration::from_secs(secs);
+        assert!(spawn_backed_off(
+            &failed,
+            &task(1, "2026-01-01 00:00:00"),
+            now,
+            base
+        ));
         assert!(
-            !spawn_backed_off(&failed, &task(1, "2026-01-01 00:00:05")),
+            !spawn_backed_off(&failed, &task(1, "2026-01-01 00:00:05"), now, base),
             "any later write makes it eligible again"
         );
         assert!(
-            !spawn_backed_off(&failed, &task(2, "2026-01-01 00:00:00")),
+            !spawn_backed_off(&failed, &task(2, "2026-01-01 00:00:00"), now, base),
             "the entry is per task"
+        );
+        let same = task(1, "2026-01-01 00:00:00");
+        assert!(spawn_backed_off(&failed, &same, at(119), base));
+        assert!(
+            !spawn_backed_off(&failed, &same, at(120), base),
+            "the window running out makes it eligible with no write"
+        );
+        failed.get_mut(&1).unwrap().failures = 2;
+        assert!(spawn_backed_off(&failed, &same, at(239), base));
+        assert!(
+            !spawn_backed_off(&failed, &same, at(240), base),
+            "the window doubles with the failure count"
+        );
+    }
+
+    #[test]
+    fn spawn_backoff_window_doubles_and_is_capped() {
+        let base = Duration::from_secs(120);
+        assert_eq!(spawn_backoff_window(base, 1), Duration::from_secs(120));
+        assert_eq!(spawn_backoff_window(base, 2), Duration::from_secs(240));
+        assert_eq!(spawn_backoff_window(base, 4), Duration::from_secs(960));
+        assert_eq!(spawn_backoff_window(base, 5), SPAWN_BACKOFF_CAP);
+        assert_eq!(spawn_backoff_window(base, 1000), SPAWN_BACKOFF_CAP);
+        assert_eq!(
+            spawn_backoff_window(Duration::from_millis(600), 3),
+            Duration::from_millis(2400)
         );
     }
 
@@ -12824,6 +12912,26 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             assert_eq!(events(first), first_events);
             assert_eq!(events(second), second_events);
             assert_eq!(inbox().len(), 2);
+
+            // The window running out makes `first` eligible with no write:
+            // shrink the base to 1ms (no subtraction from a young monotonic
+            // clock) and the next tick re-claims it (and, failing the same
+            // way, files nothing new).
+            unsafe { std::env::set_var("MESA_WATCH_TODO_SPAWN_BACKOFF_MS", "1") };
+            std::thread::sleep(Duration::from_millis(1100));
+            let expired_events = events(first);
+            todo_watcher_tick(&state);
+            assert!(
+                events(first) > expired_events,
+                "an expired backoff is retried without a write"
+            );
+            unsafe { std::env::remove_var("MESA_WATCH_TODO_SPAWN_BACKOFF_MS") };
+            assert_eq!(inbox().len(), 2, "the same error text is not filed twice");
+            assert_eq!(
+                state.todo_spawn_failed.lock().unwrap()[&first].failures,
+                2,
+                "a repeat failure counts"
+            );
 
             // Touching the task makes it eligible; the same failure again
             // files no second alert. `updated_at` has one-second resolution.

@@ -1013,4 +1013,41 @@ ok "a failed supervisor-definition seed reverts the task and is alerted once, li
 
 kill "$SERVER_PID" 2>/dev/null; wait "$SERVER_PID" 2>/dev/null || true; SERVER_PID=""
 
+# ---- a backed-off spawn is retried after its window, no write needed (mesa task 1477) ----
+# The backoff is time-based: MESA_WATCH_TODO_SPAWN_BACKOFF_MS shrinks the 2
+# minute base so the doubling windows (600ms, 1.2s, 2.4s) fit in a test. Own db
+# and server; the stub is the failing one above. The task is never touched.
+
+export MESA_DB="$TMP/spawnretry.db"
+: > "$SF_FAIL_LOG"
+touch "$STUB_DIR/spawnfail"
+mkdir -p "$TMP/srDir"
+SR_DIR=$(cd "$TMP/srDir" && pwd -P)
+run 0 "$MESA" project create "SR" --no-git
+SR_P=$(jqs .id)
+run 0 "$MESA" project update "$SR_P" --path "$SR_DIR"
+run 0 "$MESA" task create "$SR_P" "task sr one"
+SR_T=$(jqs .id)
+SR_PORT=17793
+MESA_CLAUDE_BIN="$SF_STUB" MESA_WATCH_TODO_TICK_MS=150 MESA_WATCH_TODO_SPAWN_BACKOFF_MS=600 \
+  "$MESA" serve --port "$SR_PORT" --watch-todo >/dev/null 2>&1 &
+SERVER_PID=$!
+wait_for_server "$SR_PORT"
+
+# Untouched, it is retried on its own: at least three attempts, still one alert.
+wait_sf_lines "$SF_FAIL_LOG" 3
+[ "$("$MESA" inbox list | jq 'length')" -eq 1 ] || fail "a retry of the same error files no second alert: $("$MESA" inbox list)"
+grep -q "automatically" <<<"$("$MESA" inbox list | jq -r '.[0].body')" ||
+  fail "the alert must say the watcher retries on its own"
+ok "a failed spawn is retried after its backoff window with no write, and the alert is filed once"
+
+# Fixed: the next retry dispatches it, still untouched.
+rm "$STUB_DIR/spawnfail"
+wait_sf_lines "$SF_LOG" 2 # line 1 is the earlier section's dispatch
+sleep 0.3
+[ "$("$MESA" task show "$SR_T" | jq -r .status)" = "in_progress" ] || fail "the retried task is claimed once the spawn works"
+ok "once the cause is fixed the untouched task dispatches on a later tick"
+
+kill "$SERVER_PID" 2>/dev/null; wait "$SERVER_PID" 2>/dev/null || true; SERVER_PID=""
+
 echo "ALL OK ($CHECKS checks)"

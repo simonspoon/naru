@@ -116,7 +116,8 @@ because someone ran `mesa serve`.
   task is reverted back to `todo` so the project isn't wedged — an
   unrecoverable spawn must not silently stop that project from ever being
   picked up again.
-- **A failed spawn is reported once and backed off** (mesa task 1338). Seen
+- **A failed spawn is reported once and backed off** (mesa task 1338; the
+  backoff became time-based in mesa task 1477). Seen
   live: every spawn for a task failed with "Workspace not trusted", and the
   watcher claimed and reverted it on every tick, forever, with the error only
   on the server's stderr.
@@ -135,12 +136,19 @@ because someone ran `mesa serve`.
   - **Backoff rule:** `AppState::todo_spawn_failed` records the task id with
     its `updated_at` as it stands *after* the watcher's own revert, and the
     tick passes the task over while its `updated_at` still reads that value
-    (`spawn_backed_off`, a pure function). Any later write by anyone — a
-    person or agent touching the task, e.g. `mesa task update <id> --status
-    todo` once the folder is trusted — moves `updated_at` and makes it
-    eligible on the next tick; a successful spawn drops the entry. The
-    comparison is on the text timestamp, which has one-second resolution, so
-    a write in the same second as the revert goes unnoticed.
+    **and** the backoff window since the failure is still open
+    (`spawn_backed_off`, a pure function over an `Instant`). The window is
+    2 minutes for the first failure and doubles per consecutive failure
+    (2, 4, 8, 16), capped at 30 minutes (`spawn_backoff_window`); when it runs
+    out the task is retried by a later tick with no write, and a failure that
+    repeats restamps the instant and bumps the count (the alert dedup is
+    untouched, so the same error files nothing new). The alert says the
+    watcher will retry automatically in about the first window. Any later
+    write by anyone — a person or agent touching the task, e.g. `mesa task
+    update <id> --status todo` once the folder is trusted — moves `updated_at`
+    and makes it eligible at once, on the next tick; a successful spawn drops
+    the entry. The comparison is on the text timestamp, which has one-second
+    resolution, so a write in the same second as the revert goes unnoticed.
   - **A backed-off task never wedges its project.** Both picks take an
     exclusion list (`Store::next_task_excluding` / `next_subtask_excluding`;
     the plain `next_task`/`next_subtask` are the same queries with an empty
@@ -149,14 +157,17 @@ because someone ran `mesa serve`.
     subtasks are backed off is still a batch — it is skipped for that tick
     rather than claimed, so the umbrella rule above holds.
   - In memory, like `inbox_dispatched`, and not persisted: a `serve` restart
-    retries every such task once (and may alert once more). Not pruned — one
+    retries every such task at once (and may alert once more). Not pruned — one
     small entry per task whose spawn has failed.
   - Regressions: `api::tests::spawn_backed_off_holds_only_while_updated_at_is_unchanged`,
+    `api::tests::spawn_backoff_window_doubles_and_is_capped`,
     `api::tests::todo_watcher_tick_alerts_once_and_backs_off_a_failed_spawn`,
     `api::tests::todo_watcher_tick_never_claims_a_batch_whose_subtasks_are_backed_off`,
     `api::tests::todo_watcher_tick_treats_a_failed_definition_seed_as_a_failed_spawn`,
     `api::tests::spawn_error_text_strips_escapes_and_caps_the_length`,
-    and the spawn-failure block at the end of `scripts/todo-watcher-check.sh`.
+    and the spawn-failure blocks at the end of `scripts/todo-watcher-check.sh`
+    (the last one runs with `MESA_WATCH_TODO_SPAWN_BACKOFF_MS=600` and asserts
+    an untouched task is retried, the alert still filed once).
 - **A project's occupied slots are `max(in_progress leaves, live-work
   sessions)`** (mesa task 802). The second signal is the number of `claude`
   sessions whose `cwd` is under this project's `local_path` (the same
@@ -287,7 +298,9 @@ because someone ran `mesa serve`.
 - The tick cadence is a fixed internal constant (`WATCH_TODO_TICK`, 60s), not
   user-configurable. `MESA_WATCH_TODO_TICK_MS` overrides it, a test-only seam
   (mirrors `MESA_CLAUDE_BIN`) so `scripts/todo-watcher-check.sh` isn't stuck
-  waiting a full tick per assertion.
+  waiting a full tick per assertion. `MESA_WATCH_TODO_SPAWN_BACKOFF_MS` is
+  the same kind of seam for the failed-spawn backoff's 2-minute base
+  (`WATCH_TODO_SPAWN_BACKOFF`); the 30-minute cap is fixed.
 - The flag is propagated through the web UI's **Restart Server** action the
   same way `--lan` is: `serve`'s post-shutdown relaunch re-execs the binary
   with `--watch-todo` appended when it was set, so restarting the server
