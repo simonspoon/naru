@@ -68,7 +68,7 @@ import {
 import { MIN_MAIN_WIDTH } from '../agentSidebarWidth'
 import { chordLabel, matchesShortcut } from '../keymap'
 import { useKeymap } from '../keymapStore'
-import { elapsedLabel, endsInHead, liveHeadTitle } from '../liveHead'
+import { contextLabel, elapsedLabel, endsInHead, liveHeadTitle } from '../liveHead'
 import { headerIndicator } from '../liveIndicator'
 import {
   buildVocabulary,
@@ -3982,10 +3982,12 @@ export function LiveHub({
                   <span className="live-head-clock">
                     {session !== null && (
                       <>
-                        <LiveElapsed startedAt={session.started_at} /> ·{' '}
+                        <LiveElapsed startedAt={session.started_at} />
+                        {contextLabel(data?.context_tokens) !== null && (
+                          <> · {contextLabel(data?.context_tokens)}</>
+                        )}
                       </>
                     )}
-                    Naru
                   </span>
                   <span className="live-head-chips">
                     {recognizes && (

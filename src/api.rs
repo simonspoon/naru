@@ -122,6 +122,12 @@ struct AppState {
     /// old "permission prompt" (the page's rising-edge rule is the first line
     /// against that; this is the second), and a stale one is pruned on insert.
     live_blocked_cache: Arc<Mutex<HashMap<String, (Instant, Option<String>)>>>,
+    /// The live agent's occupied context, keyed by its short job id —
+    /// `GET /api/live`'s derived `context_tokens` (mesa task 1478). Same
+    /// shape and TTL as `live_blocked_cache`, but keyed on the job id alone:
+    /// a handoff binds a new job id, so the successor starts a fresh key and
+    /// never inherits the predecessor's number. A `None` is a cached miss.
+    live_context_cache: Arc<Mutex<HashMap<String, (Instant, Option<i64>)>>>,
     /// Working-tree git status per project folder, keyed by `local_path`
     /// (sidebar decoration). `None` is a cached miss — a folder that is not a
     /// repo — so non-repo paths don't respawn git on every poll. Same
@@ -1903,6 +1909,7 @@ pub fn serve(
         usage_refreshing: Arc::new(AtomicBool::new(false)),
         agents_cache: Arc::new(Mutex::new(HashMap::new())),
         live_blocked_cache: Arc::new(Mutex::new(HashMap::new())),
+        live_context_cache: Arc::new(Mutex::new(HashMap::new())),
         agents_gen: Arc::new(AtomicU64::new(0)),
         git_cache: Arc::new(Mutex::new(HashMap::new())),
         git_view_cache: Arc::new(Mutex::new(HashMap::new())),
@@ -4073,6 +4080,7 @@ async fn get_live(
                 turns: vec![],
                 boards: vec![],
                 blocked: None,
+                context_tokens: None,
             })
             .into_response());
         };
@@ -4091,11 +4099,16 @@ async fn get_live(
         Some(job) => live_agent_blocked(&state, job, session.working_since.as_deref()).await,
         None => None,
     };
+    let context_tokens = match session.agent_id.as_deref() {
+        Some(job) => live_agent_context(&state, job).await,
+        None => None,
+    };
     Ok(Json(LiveState {
         session: Some(session),
         turns,
         boards,
         blocked,
+        context_tokens,
     })
     .into_response())
 }
@@ -4135,6 +4148,34 @@ async fn live_agent_blocked(
     cache.retain(|_, (at, _)| at.elapsed() < LIVE_BLOCKED_TTL);
     cache.insert(key, (Instant::now(), blocked.clone()));
     blocked
+}
+
+/// The driving agent's occupied context, or `None` — what `naru live context`
+/// reports (`agents::find_session_for_job` then `cc::session_pulse`, the one
+/// implementation), through `live_context_cache` so the 2s poll costs at most
+/// one lookup per [`LIVE_BLOCKED_TTL`]. Every failure is `None`: the poll must
+/// never fail over a decoration.
+async fn live_agent_context(state: &AppState, job: &str) -> Option<i64> {
+    {
+        let cache = state.live_context_cache.lock().unwrap();
+        if let Some((at, tokens)) = cache.get(job)
+            && at.elapsed() < LIVE_BLOCKED_TTL
+        {
+            return *tokens;
+        }
+    }
+    let job_owned = job.to_string();
+    let tokens = tokio::task::spawn_blocking(move || {
+        let uuid = agents::find_session_for_job(&job_owned).ok().flatten()?;
+        crate::core::cc::session_pulse(&uuid).context_tokens
+    })
+    .await
+    .ok()
+    .flatten();
+    let mut cache = state.live_context_cache.lock().unwrap();
+    cache.retain(|_, (at, _)| at.elapsed() < LIVE_BLOCKED_TTL);
+    cache.insert(job.to_string(), (Instant::now(), tokens));
+    tokens
 }
 
 /// Starts the conversation: opens the session, then spawns the `claude` agent
@@ -10375,6 +10416,7 @@ mod tests {
             usage_refreshing: Arc::new(AtomicBool::new(false)),
             agents_cache: Arc::new(Mutex::new(HashMap::new())),
             live_blocked_cache: Arc::new(Mutex::new(HashMap::new())),
+            live_context_cache: Arc::new(Mutex::new(HashMap::new())),
             agents_gen: Arc::new(AtomicU64::new(0)),
             git_cache: Arc::new(Mutex::new(HashMap::new())),
             git_view_cache: Arc::new(Mutex::new(HashMap::new())),

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  contextLabel,
   elapsedLabel,
   emptyMeterHistory,
   endsInHead,
@@ -131,5 +132,20 @@ describe('endsInHead', () => {
     expect(endsInHead({ label: 'Going live…', action: 'stop', disabled: true })).toBe(
       false,
     )
+  })
+})
+
+describe('contextLabel', () => {
+  it('is null when unknown, never a fake zero', () => {
+    expect(contextLabel(null)).toBeNull()
+    expect(contextLabel(undefined)).toBeNull()
+    expect(contextLabel(-1)).toBeNull()
+  })
+  it('is compact', () => {
+    expect(contextLabel(950)).toBe('950 context')
+    expect(contextLabel(38_500)).toBe('38.5k context')
+    expect(contextLabel(40_000)).toBe('40k context')
+    expect(contextLabel(1_200_000)).toBe('1.2M context')
+    expect(contextLabel(999_960)).toBe('1M context')
   })
 })

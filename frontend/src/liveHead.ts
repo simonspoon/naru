@@ -81,6 +81,24 @@ export function elapsedLabel(startedAtMs: number, nowMs: number): string {
   return `${String(mins).padStart(2, '0')}:${String(secs % 60).padStart(2, '0')}`
 }
 
+/**
+ * The driving agent's context size for the head's meta line, compact:
+ * `950`, `38.5k`, `1.2M`. Null (no agent yet, transcript unreadable) is null
+ * rather than `0` — the head then leaves it out instead of claiming an empty
+ * context. One decimal, dropped when it is `.0`; a value that rounds up to the
+ * next unit (`999_950` → `1M`) is promoted rather than printed as `1000k`.
+ */
+export function contextLabel(raw: number | bigint | null | undefined): string | null {
+  // ts-rs types an i64 as `bigint`; JSON delivers a plain number.
+  const tokens = raw === null || raw === undefined ? NaN : Number(raw)
+  if (!Number.isFinite(tokens) || tokens < 0) return null
+  const trim = (n: number) => n.toFixed(1).replace(/\.0$/, '')
+  if (tokens < 1000) return `${Math.round(tokens)} context`
+  const k = Math.round(tokens / 100) / 10
+  if (k < 1000) return `${trim(k)}k context`
+  return `${trim(Math.round(tokens / 100_000) / 10)}M context`
+}
+
 /** How many bars the head's level meter holds. */
 export const METER_BARS = 12
 

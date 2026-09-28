@@ -551,6 +551,15 @@ it reports a `dream` reason, say aloud first that you need to rest for a
 few minutes and will be right back; then `handoff`, then end the turn — no
 further `listen`. When no dream is due there is no announcement.
 
+The panel head shows the same figure (mesa task 1478): `GET /api/live`
+carries a derived, never-stored `context_tokens` on `LiveState` (not on
+`LiveSession`, so `live status` output is unchanged) — `find_session_for_job`
+then `cc::session_pulse`, cached 5s per job id like `blocked`. A handoff binds
+a new job id, so the successor's number starts fresh. It is `null` for no
+agent, an unlisted job or an unreadable transcript, and the head's meta line
+(`12:04 · 38.5k context`, `liveHead.ts::contextLabel`) then shows only the
+elapsed time.
+
 ### What the person sees
 
 Nothing, for a plain handoff. The session id, the transcript and the page

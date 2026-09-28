@@ -34,4 +34,13 @@ boards: Array<LiveBoardSummary>,
  * list, or a `claude` that is missing or failing — none of which is an
  * error.
  */
-blocked: string | null, };
+blocked: string | null, 
+/**
+ * The driving agent's occupied context window in tokens — the figure
+ * `naru live context` prints (mesa task 1478), shown in the panel head.
+ * **Derived per request, never stored**, through a short-TTL cache keyed
+ * by the agent's job id, so a handoff's successor starts from its own
+ * number. Null for a session with no agent, a job `claude agents` does
+ * not list, or a transcript that cannot be read.
+ */
+context_tokens: bigint | null, };
