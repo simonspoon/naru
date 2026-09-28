@@ -44,18 +44,23 @@ notice: LiveNotice | null,
  */
 agent_id: string | null, 
 /**
- * The person's **annotated board** (mesa task 1353): an absolute path to
- * a PNG of the whiteboard with their ink drawn over it, flattened by the
- * page and written beside the db when this turn was sent. Only a `user`
- * turn carries one, and only when there was new ink since the last turn
- * — null otherwise. A bounded pointer, so `--quiet` keeps it.
+ * The person's **annotated board** (mesa task 1353) or a picture they
+ * **pasted** into the capture box (mesa task 1475): an absolute path to
+ * a PNG, flattened by the page (the board with their ink over it, or the
+ * pasted image converted to PNG) and written beside the db when this
+ * turn was sent. Only a `user` turn carries one — a whiteboard turn when
+ * there was new ink since the last one, a pasted-image turn whenever the
+ * person pasted one — null otherwise. A bounded pointer, so `--quiet`
+ * keeps it.
  */
 image_path: string | null, 
 /**
- * The board that ink was drawn on — present iff `image_path` is, until
- * the board itself is cleared (`live board clear`, or the session row
- * is deleted). Boards are no longer pruned by the keep bound (mesa task
- * 1448), so this stays set for the life of the board.
+ * The board that ink was drawn on — present iff `image_path` is **and**
+ * the image is a whiteboard's, until the board itself is cleared (`live
+ * board clear`, or the session row is deleted). Boards are no longer
+ * pruned by the keep bound (mesa task 1448), so this stays set for the
+ * life of the board. Null with `image_path` set means the picture is one
+ * the person pasted, not a board.
  */
 board_id: number | null, 
 /**

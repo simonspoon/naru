@@ -10336,6 +10336,18 @@ body.live-panel-ratio-resizing .live-panel-divider {
   font-family: var(--font-mono);
 }
 
+/* The person's board ink, or a picture they pasted (mesa task 1475) — a small
+   thumbnail of the PNG the agent was shown, never the full size the composer's
+   own chip uses. */
+.live-turn-image {
+  display: block;
+  max-width: 12rem;
+  max-height: 9rem;
+  margin-top: 0.35rem;
+  border: 1px solid var(--border);
+  clip-path: var(--cut-sm);
+}
+
 /* Replay (mesa task 1449): a small transport button on every mesa turn with
    spoken text, so a reply can be heard again without waiting for the
    conversation to reach it. Sits inside the bubble it replays rather than
@@ -10390,6 +10402,36 @@ body.live-panel-ratio-resizing .live-panel-divider {
 
 .live-status-mesa {
   color: var(--cyan);
+}
+
+/* A picture pasted into the box, staged for the next turn (mesa task 1475):
+   a small chip above the input row with a thumbnail and a way to drop it. */
+.live-pasted-image {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.live-pasted-image-thumb {
+  display: block;
+  max-width: 4rem;
+  max-height: 3rem;
+  border: 1px solid var(--border);
+  clip-path: var(--cut-sm);
+}
+
+.live-pasted-image-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  padding: 0;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  clip-path: var(--cut-sm);
+  line-height: 1;
 }
 
 /* The box and the switch, on one line (mesa task 1069). */

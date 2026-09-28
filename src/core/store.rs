@@ -5870,6 +5870,24 @@ impl Store {
         action: Option<LiveAction>,
         target: Option<&str>,
     ) -> Result<LiveTurn> {
+        self.add_live_turn_inner(session_id, role, text, action, target, false)
+    }
+
+    /// [`Store::add_live_turn`]'s body, plus `allow_empty_user_text` — the one
+    /// exception to "a user turn carries text and nothing else": a turn
+    /// carrying a **pasted image** (mesa task 1475) may say nothing at all,
+    /// the same way a pure `navigate` Naru turn does, because the picture is
+    /// the content. Only [`Store::write_live_media_turn`]'s image case sets
+    /// it; every other caller gets the ordinary rule.
+    fn add_live_turn_inner(
+        &mut self,
+        session_id: i64,
+        role: LiveRole,
+        text: &str,
+        action: Option<LiveAction>,
+        target: Option<&str>,
+        allow_empty_user_text: bool,
+    ) -> Result<LiveTurn> {
         let session = self
             .conn
             .query_row(
@@ -5892,7 +5910,7 @@ impl Store {
         }
         match role {
             LiveRole::User => {
-                if text.is_empty() {
+                if text.is_empty() && !allow_empty_user_text {
                     return Err(Error::Validation("a user turn must have text".into()));
                 }
                 if action.is_some() {
@@ -6029,18 +6047,8 @@ impl Store {
     /// (mesa task 1353): the text, as [`Store::add_live_turn`] records any
     /// user turn, plus a PNG of the whiteboard with their ink over it, written
     /// to [`board::live_ink_path`] and pointed at by `image_path`, and the
-    /// board it was drawn on in `board_id`.
-    ///
-    /// Only a user turn may carry ink — the method writes no other kind. The
-    /// ink is refused as `validation`, before anything is written, unless the
-    /// bytes start with the PNG signature, are at most [`LIVE_INK_MAX`], and
-    /// the board belongs to this session (an unknown board and another
-    /// conversation's are the same answer). The row and the file are one
-    /// write: the turn is inserted inside a savepoint, the file written, the
-    /// row pointed at it, and only then released — a failed file write rolls
-    /// the turn back, so a retry from the page never duplicates it, and a
-    /// listener on another connection can never be handed the turn before its
-    /// image is there.
+    /// board it was drawn on in `board_id`. See [`Store::add_live_media_turn`]
+    /// for the validation and write rules this shares with a pasted image.
     pub fn add_live_ink_turn(
         &mut self,
         session_id: i64,
@@ -6049,31 +6057,73 @@ impl Store {
         png: &[u8],
         view: Option<&str>,
     ) -> Result<LiveTurn> {
+        self.add_live_media_turn(session_id, text, Some(board_id), png, view)
+    }
+
+    /// Records a **user** turn that carries an image the person **pasted**
+    /// into the capture box (mesa task 1475) — [`Store::add_live_ink_turn`]'s
+    /// sibling with no board: same PNG signature and [`LIVE_INK_MAX`] check,
+    /// same file, but `board_id` stays NULL (there is no whiteboard to own
+    /// it) and — the one place this differs from ink — the text may be empty,
+    /// since a person may paste only a picture.
+    pub fn add_live_image_turn(
+        &mut self,
+        session_id: i64,
+        text: &str,
+        png: &[u8],
+        view: Option<&str>,
+    ) -> Result<LiveTurn> {
+        self.add_live_media_turn(session_id, text, None, png, view)
+    }
+
+    /// The shared body of [`Store::add_live_ink_turn`] and
+    /// [`Store::add_live_image_turn`]: a `user` turn carrying a PNG, written
+    /// to [`board::live_ink_path`] and pointed at by `image_path`, with
+    /// `board_id` set only when the picture is a whiteboard's ink. The ink is
+    /// refused as `validation`, before anything is written, unless the bytes
+    /// start with the PNG signature, are at most [`LIVE_INK_MAX`], and — when
+    /// a board is named — it belongs to this session (an unknown board and
+    /// another conversation's are the same answer). The row and the file are
+    /// one write: the turn is inserted inside a savepoint, the file written,
+    /// the row pointed at it, and only then released — a failed file write
+    /// rolls the turn back, so a retry from the page never duplicates it, and
+    /// a listener on another connection can never be handed the turn before
+    /// its image is there.
+    fn add_live_media_turn(
+        &mut self,
+        session_id: i64,
+        text: &str,
+        board_id: Option<i64>,
+        png: &[u8],
+        view: Option<&str>,
+    ) -> Result<LiveTurn> {
         let view = view.map(validate_live_view).transpose()?.flatten();
         if !png.starts_with(PNG_MAGIC) {
-            return Err(Error::Validation("board ink must be a PNG image".into()));
+            return Err(Error::Validation("the image must be a PNG image".into()));
         }
         if png.len() > LIVE_INK_MAX {
             return Err(Error::Validation(format!(
-                "board ink must be at most {LIVE_INK_MAX} bytes"
+                "the image must be at most {LIVE_INK_MAX} bytes"
             )));
         }
-        let owner: Option<i64> = self
-            .conn
-            .query_row(
-                "SELECT session_id FROM live_boards WHERE id = ?1",
-                [board_id],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if owner != Some(session_id) {
-            return Err(Error::Validation(format!(
-                "live board {board_id} is not part of live session {session_id}"
-            )));
+        if let Some(board_id) = board_id {
+            let owner: Option<i64> = self
+                .conn
+                .query_row(
+                    "SELECT session_id FROM live_boards WHERE id = ?1",
+                    [board_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if owner != Some(session_id) {
+                return Err(Error::Validation(format!(
+                    "live board {board_id} is not part of live session {session_id}"
+                )));
+            }
         }
         self.conn.execute_batch("SAVEPOINT live_ink")?;
         let written = self
-            .write_live_ink_turn(session_id, text, board_id, png, view.as_deref())
+            .write_live_media_turn(session_id, text, board_id, png, view.as_deref())
             .and_then(|id| {
                 // A RELEASE that fails has committed nothing, so it takes the
                 // same way out as any other failure below: the turn rolled
@@ -6100,16 +6150,25 @@ impl Store {
         }
     }
 
-    /// The steps [`Store::add_live_ink_turn`] runs inside its savepoint.
-    fn write_live_ink_turn(
+    /// The steps [`Store::add_live_media_turn`] runs inside its savepoint.
+    /// `board_id` of `None` is a pasted image, which is the one case allowed
+    /// empty text.
+    fn write_live_media_turn(
         &mut self,
         session_id: i64,
         text: &str,
-        board_id: i64,
+        board_id: Option<i64>,
         png: &[u8],
         view: Option<&str>,
     ) -> Result<i64> {
-        let turn = self.add_live_turn(session_id, LiveRole::User, text, None, None)?;
+        let turn = self.add_live_turn_inner(
+            session_id,
+            LiveRole::User,
+            text,
+            None,
+            None,
+            board_id.is_none(),
+        )?;
         self.write_live_turn_view(session_id, turn.id, view)?;
         let path = board::live_ink_path(session_id, turn.id);
         if let Some(parent) = path.parent() {
@@ -16581,6 +16640,45 @@ mod tests {
         assert_eq!(heard.id, plain.id);
         let heard = store.next_user_turn(session.id).unwrap().unwrap();
         assert_eq!(heard.image_path.as_deref(), Some(path.as_str()));
+    }
+
+    /// A user turn carrying a **pasted** image (mesa task 1475) writes the
+    /// same PNG the ink path does, but names no board and — unlike ink — may
+    /// have empty text, since a person may paste only a picture. A bad PNG
+    /// signature and an over-cap image are `validation`, exactly like ink.
+    #[test]
+    fn a_user_turn_may_carry_a_pasted_image() {
+        let (mut store, dir, _lock) = ink_test_store();
+        let session = store.start_live_session(None).unwrap();
+        let png = tiny_png();
+
+        let turn = store
+            .add_live_image_turn(session.id, "", &png, None)
+            .unwrap();
+        assert_eq!(turn.role, LiveRole::User);
+        assert_eq!(turn.text, "");
+        assert_eq!(turn.board_id, None);
+        let path = turn.image_path.clone().unwrap();
+        assert_eq!(
+            PathBuf::from(&path),
+            dir.path()
+                .join("live-ink")
+                .join(session.id.to_string())
+                .join(format!("{}.png", turn.id))
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), png);
+
+        assert!(matches!(
+            store.add_live_image_turn(session.id, "not a png", b"nope", None),
+            Err(Error::Validation(_))
+        ));
+        let too_big = vec![0u8; LIVE_INK_MAX + 1];
+        let mut oversized = PNG_MAGIC.to_vec();
+        oversized.extend(too_big);
+        assert!(matches!(
+            store.add_live_image_turn(session.id, "too big", &oversized, None),
+            Err(Error::Validation(_))
+        ));
     }
 
     /// What a turn's `image_path` column actually holds.

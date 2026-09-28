@@ -10,6 +10,7 @@ import {
   getLiveConfig,
   listProjects,
   liveSpeakUrl,
+  liveTurnInkUrl,
   markLiveTurnPlayed,
   reportLiveRoute,
   sendLiveNotice,
@@ -19,6 +20,7 @@ import {
   transcribeAudio,
   transcribeStatus,
 } from '../api'
+import { imageFilesFromClipboard } from '../clipboardFiles'
 import {
   capturesAudio,
   dropBefore,
@@ -46,6 +48,7 @@ import {
   type InkBook,
 } from '../liveInk'
 import { isPausePhrase } from '../livePausePhrase'
+import { mediaForTurn, type StagedImage } from '../livePastedImage'
 import {
   liveClientId,
   needsSpeakerRefresh,
@@ -1259,6 +1262,15 @@ export function LiveHub({
   // Which board the panel is showing, set by the panel for the view line.
   const boardShowing = useRef<number | null>(null)
 
+  // A picture the person pasted into the capture box (mesa task 1475),
+  // staged here until the turn it rides on is sent — one at a time, unlike
+  // the ink book, since a paste replaces whatever was staged before it.
+  const [pastedImage, setPastedImage] = useState<StagedImage | null>(null)
+  const pastedImageRef = useRef(pastedImage)
+  useEffect(() => {
+    pastedImageRef.current = pastedImage
+  }, [pastedImage])
+
   // Whether the board holds unsent ink (mesa task 1353) — the same book
   // `LiveBoardPanel` reads to decide the same thing for its own controls.
   // While it does, the board section's own size is pinned (below) so a panel
@@ -1595,7 +1607,7 @@ export function LiveHub({
   // The recognizer's handlers are set once per start and post sentences long
   // after the render that installed them, so they read through a ref rather
   // than a closure over a stale `post`.
-  const postRef = useRef<(text: string, carriesInk?: boolean) => Promise<void>>(() =>
+  const postRef = useRef<(text: string, carriesMedia?: boolean) => Promise<void>>(() =>
     Promise.resolve(),
   )
   const draftRef = useRef('')
@@ -3417,12 +3429,54 @@ export function LiveHub({
     pump.current()
   }
 
+  /**
+   * A pasted image, converted to a PNG data URL (mesa task 1475) — the
+   * server only ever writes PNGs. `image/png` is read back as-is; anything
+   * else goes through a canvas, mirroring `LiveBoardPanel.tsx`'s own flatten.
+   * Not exported for a vitest spec: jsdom has no canvas, the same reason
+   * `liveInk.ts`'s flatten lives in the panel rather than in a pure module.
+   */
+  async function pngDataUrlFromImageFile(file: File): Promise<string> {
+    if (file.type === 'image/png') {
+      return await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload = () => resolve(reader.result as string)
+        reader.onerror = () => reject(reader.error ?? new Error('could not read the image'))
+        reader.readAsDataURL(file)
+      })
+    }
+    const bitmap = await createImageBitmap(file)
+    const canvas = document.createElement('canvas')
+    canvas.width = bitmap.width
+    canvas.height = bitmap.height
+    const ctx = canvas.getContext('2d')
+    if (!ctx) throw new Error('canvas unavailable')
+    ctx.drawImage(bitmap, 0, 0)
+    return canvas.toDataURL('image/png')
+  }
+
+  /** Stages a pasted image for the next turn (mesa task 1475), replacing
+   *  whatever was staged before it. A failed conversion is reported like any
+   *  other action error rather than silently dropping the paste. */
+  async function stagePastedImage(file: File) {
+    try {
+      const previewUrl = await pngDataUrlFromImageFile(file)
+      const png_base64 = previewUrl.slice(previewUrl.indexOf(',') + 1)
+      setPastedImage({ png_base64, previewUrl })
+    } catch {
+      setActionError('could not read the pasted image')
+      setOpen(true)
+    }
+  }
+
   function send() {
     // `draftRef` is the draft's authoritative value — `updateDraft` writes it
     // alongside the render state — so it is what `post` and this function's
     // own clearing below both read.
     const text = draftRef.current.trim()
-    if (text === '' || !live) return
+    // A turn carrying a pasted image may say nothing at all — the picture is
+    // the content (mesa task 1475).
+    if ((text === '' && pastedImageRef.current === null) || !live) return
     // Speech held or on its way: Enter holds (mesa task 1351). The box stays
     // put to ride on the end of the recording at its own boundary, and the
     // silence wait restarts so a timer about to fire does not leave it behind.
@@ -3448,23 +3502,50 @@ export function LiveHub({
    * post runs through one queue (`enqueuePost`, mesa task 1353): a post awaits
    * the ink's flatten before its request, so two posts fired together could
    * otherwise both carry the same ink, or a post with none overtake one still
-   * flattening.
+   * flattening. `carriesMedia` gates both the whiteboard's ink and a staged
+   * pasted image (mesa task 1475) alike — a piece of a longer recording other
+   * than its carrier turn carries neither.
    */
-  function post(text: string, carriesInk = true) {
-    return enqueuePost(() => postNow(text, carriesInk))
+  function post(text: string, carriesMedia = true) {
+    return enqueuePost(() => postNow(text, carriesMedia))
   }
 
   /**
-   * One queued post. New ink on the whiteboard (mesa task 1353) rides on this
-   * turn as a PNG the panel flattens now — at the frozen size, since the
-   * layout stays frozen until the send succeeds — read here, inside the
-   * queue, so it is exactly what no earlier post has carried. A turn that is a
-   * piece of a longer recording leaves it to the last piece. A flatten that
-   * fails sends the words alone, says so, and leaves the ink new for the next
-   * turn. Never rejects: a failed send is reported and its words put back.
+   * One queued post. A staged pasted image (mesa task 1475) or new ink on the
+   * whiteboard (mesa task 1353) rides on this turn — `mediaForTurn` decides
+   * between them when both are pending at once, since the server takes at
+   * most one picture per turn. The image needs no flatten, so it is sent
+   * directly and cleared on success (kept on failure, like a retried draft).
+   * Ink is flattened now — at the frozen size, since the layout stays frozen
+   * until the send succeeds — read here, inside the queue, so it is exactly
+   * what no earlier post has carried. A turn that is a piece of a longer
+   * recording leaves both to the last piece. A flatten that fails sends the
+   * words alone, says so, and leaves the ink new for the next turn. Never
+   * rejects: a failed send is reported and its words put back.
    */
-  function postNow(text: string, carriesInk: boolean): Promise<void> {
-    const pending = carriesInk ? pendingInk(inkRef.current) : null
+  function postNow(text: string, carriesMedia: boolean): Promise<void> {
+    const pendingInkNow = carriesMedia ? pendingInk(inkRef.current) : null
+    const stagedImage = carriesMedia ? pastedImageRef.current : null
+    const media = mediaForTurn(stagedImage !== null, pendingInkNow !== null)
+
+    if (media === 'image') {
+      return sendLiveUtterance(text, undefined, viewNow.current(), {
+        png_base64: stagedImage!.png_base64,
+      }).then(
+        () => {
+          setPastedImage(null)
+          refetch()
+        },
+        (err: unknown) => {
+          setActionError(err instanceof Error ? err.message : String(err))
+          setOpen(true)
+          if (draftRef.current === '') updateDraft(text)
+          // The staged image is kept on failure, exactly as a retried draft.
+        },
+      )
+    }
+
+    const pending = media === 'ink' ? pendingInkNow : null
     const flatten = flattenInk.current
     const drawn: Promise<string | null> =
       pending !== null && pending.frame !== null && flatten !== null
@@ -4099,6 +4180,16 @@ export function LiveHub({
                                     {turn.text !== '' && (
                                       <div className="live-text">{turn.text}</div>
                                     )}
+                                    {/* The person's board ink or a picture they pasted
+                                        (mesa task 1475) — a small thumbnail of what the
+                                        agent was shown. */}
+                                    {turn.image_path !== null && (
+                                      <img
+                                        src={liveTurnInkUrl(turn.id)}
+                                        alt=""
+                                        className="live-turn-image"
+                                      />
+                                    )}
                                     {navigateTarget(turn) !== null && (
                                       <div className="live-navigated">
                                         went to {navigateTarget(turn)}
@@ -4184,6 +4275,26 @@ export function LiveHub({
                           send()
                         }}
                       >
+                        {/* A picture pasted into the box, staged for the next turn
+                            (mesa task 1475) — a small chip with a thumbnail and a
+                            way to drop it before sending. */}
+                        {pastedImage && (
+                          <div className="live-pasted-image">
+                            <img
+                              src={pastedImage.previewUrl}
+                              alt="pasted"
+                              className="live-pasted-image-thumb"
+                            />
+                            <button
+                              type="button"
+                              className="live-pasted-image-remove"
+                              aria-label="remove the pasted image"
+                              onClick={() => setPastedImage(null)}
+                            >
+                              ×
+                            </button>
+                          </div>
+                        )}
                         {/* The box and the switch, on one line (mesa task 1069):
                             the microphone is a square beside the field rather than a
                             word above it, since it is the other way of saying the
@@ -4216,6 +4327,14 @@ export function LiveHub({
                               // adding to the recording (mesa task 1351), so the silence
                               // wait restarts rather than sending the speech without it.
                               if (recognizes) markHeard()
+                            }}
+                            onPaste={(e) => {
+                              // An image paste (mesa task 1475) is staged rather than
+                              // typed — a plain text paste falls through unchanged.
+                              const files = imageFilesFromClipboard(e.clipboardData, Date.now())
+                              if (files.length === 0) return
+                              e.preventDefault()
+                              void stagePastedImage(files[0])
                             }}
                             onKeyDown={(e) => {
                               if (e.key !== 'Enter' || e.shiftKey) return

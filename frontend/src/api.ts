@@ -991,17 +991,21 @@ export function stopLive(): Promise<LiveSession> {
  * OS — untrusted data, which is why it goes into the store as a turn and
  * reaches the agent as one argument rather than anything a shell parses.
  * `ink` is the whiteboard the person drew on, flattened to a base64 PNG, and
- * the board it was drawn on (mesa task 1353) — sent only with new ink.
+ * the board it was drawn on (mesa task 1353) — sent only with new ink. `image`
+ * is a picture the person **pasted** into the capture box (mesa task 1475),
+ * mutually exclusive with `ink` — the server refuses both on one turn.
  */
 export function sendLiveUtterance(
   text: string,
   ink?: { board_id: number; png_base64: string },
   view?: string | null,
+  image?: { png_base64: string },
 ): Promise<LiveTurn> {
   // `view` is the page's one-line view of the browser at submit (mesa task
   // 1424, `liveView.ts`); an absent or empty one stores none.
   const body: Record<string, unknown> = { text }
   if (ink !== undefined) body.ink = ink
+  if (image !== undefined) body.image = image
   if (view) body.view = view
   return request('/api/live/utterance', jsonInit('POST', body))
 }

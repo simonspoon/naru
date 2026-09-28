@@ -3879,12 +3879,22 @@ struct LiveStart {
 #[derive(Deserialize)]
 struct LiveUtterance {
     /// What the person dictated. Required and non-empty (`Store`'s rule for a
-    /// `user` turn) — there is no such thing as an empty thing said.
+    /// `user` turn) — there is no such thing as an empty thing said. The one
+    /// exception is a turn carrying `image` and no text, since a person may
+    /// paste only a picture (mesa task 1475).
     text: String,
     /// The person's annotated board (mesa task 1353), present only when they
     /// drew on it since the last turn they sent. Absent is an ordinary turn.
+    /// Mutually exclusive with `image` — a turn carries at most one picture,
+    /// and sending both is `validation`.
     #[serde(default)]
     ink: Option<LiveInkBody>,
+    /// A picture the person **pasted** into the capture box (mesa task 1475),
+    /// present only on the turn it was pasted for. Unlike `ink` it names no
+    /// board — it is not drawn on anything — which is also why it may ride on
+    /// a turn with no text. Mutually exclusive with `ink`.
+    #[serde(default)]
+    image: Option<LiveImageBody>,
     /// The page's one-line view of the browser at the moment the turn was
     /// submitted (mesa task 1424) — route, open item, which panels are open.
     /// Absent or empty stores none; over `LIVE_VIEW_MAX` is 422.
@@ -3897,6 +3907,14 @@ struct LiveUtterance {
 #[derive(Deserialize)]
 struct LiveInkBody {
     board_id: i64,
+    png_base64: String,
+}
+
+/// A picture the person pasted into the live capture box (mesa task 1475):
+/// the PNG, base64 in JSON for the reason [`TranscribeBody`] gives. No board —
+/// it was never drawn on one.
+#[derive(Deserialize)]
+struct LiveImageBody {
     png_base64: String,
 }
 
@@ -4486,37 +4504,57 @@ async fn stop_live(
 ///
 /// The turn may carry **ink** (mesa task 1353): the whiteboard flattened with
 /// what the person drew on it, as a base64 PNG and the board it was drawn on.
-/// Invalid base64 is 422 here; every other rule — the PNG signature,
-/// [`LIVE_INK_MAX`], the board belonging to this conversation — and the file
-/// write are `Store::add_live_ink_turn`'s, so the CLI and the API can never
-/// disagree about what a turn's ink is.
+/// Or it may carry a pasted **image** (mesa task 1475): a base64 PNG with no
+/// board. The two are mutually exclusive — both on one turn is 422
+/// `validation` before either is decoded. Invalid base64 is 422 here; every
+/// other rule — the PNG signature, [`LIVE_INK_MAX`], the board belonging to
+/// this conversation — and the file write are `Store`'s
+/// (`add_live_ink_turn`/`add_live_image_turn`), so the CLI and the API can
+/// never disagree about what a turn's picture is.
 async fn live_utterance(
     State(state): State<AppState>,
     body: Result<Json<LiveUtterance>, JsonRejection>,
 ) -> ApiResult<Response> {
     let Json(body) = body?;
-    let ink = match &body.ink {
-        Some(ink) => Some((
-            ink.board_id,
-            base64::engine::general_purpose::STANDARD
-                .decode(ink.png_base64.as_bytes())
-                .map_err(|e| ApiError {
-                    status: StatusCode::UNPROCESSABLE_ENTITY,
-                    code: "validation",
-                    message: format!("invalid base64 ink: {e}"),
-                })?,
-        )),
-        None => None,
+    if body.ink.is_some() && body.image.is_some() {
+        return Err(ApiError {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            code: "validation",
+            message: "a turn may carry ink or a pasted image, not both".into(),
+        });
+    }
+    let decode = |png_base64: &str, what: &str| {
+        base64::engine::general_purpose::STANDARD
+            .decode(png_base64.as_bytes())
+            .map_err(|e| ApiError {
+                status: StatusCode::UNPROCESSABLE_ENTITY,
+                code: "validation",
+                message: format!("invalid base64 {what}: {e}"),
+            })
     };
+    let ink = body
+        .ink
+        .as_ref()
+        .map(|ink| decode(&ink.png_base64, "ink").map(|png| (ink.board_id, png)))
+        .transpose()?;
+    let image = body
+        .image
+        .as_ref()
+        .map(|image| decode(&image.png_base64, "image"))
+        .transpose()?;
     let mut store = state.store.lock().unwrap();
     let Some(session) = store.current_live_session()? else {
         return Err(no_live_session());
     };
-    let turn = match ink {
-        Some((board_id, png)) => {
+    let turn = match (ink, image) {
+        (Some((board_id, png)), None) => {
             store.add_live_ink_turn(session.id, &body.text, board_id, &png, body.view.as_deref())?
         }
-        None => store.add_live_user_turn(session.id, &body.text, body.view.as_deref())?,
+        (None, Some(png)) => {
+            store.add_live_image_turn(session.id, &body.text, &png, body.view.as_deref())?
+        }
+        (None, None) => store.add_live_user_turn(session.id, &body.text, body.view.as_deref())?,
+        (Some(_), Some(_)) => unreachable!("checked above"),
     };
     Ok((StatusCode::CREATED, Json(turn)).into_response())
 }
@@ -16730,6 +16768,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             Ok(Json(LiveUtterance {
                 text: "hello".into(),
                 ink: None,
+                image: None,
                 view: None,
             })),
         )
@@ -16752,6 +16791,83 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             assert_eq!(err.code, "not_found");
             assert!(err.message.contains("POST /api/live"), "{}", err.message);
         }
+    }
+
+    /// A turn may carry a pasted image (mesa task 1475) with no text, and
+    /// sending `ink` and `image` on the same turn is `validation` before
+    /// either is decoded.
+    #[tokio::test]
+    async fn live_utterance_accepts_a_pasted_image_and_refuses_both_at_once() {
+        let (_dir, state) = test_state();
+        {
+            let mut store = state.store.lock().unwrap();
+            store.start_live_session(None).unwrap();
+        }
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.extend_from_slice(b"not really the rest of a png");
+        let png_base64 = base64::engine::general_purpose::STANDARD.encode(&png);
+
+        let turn = live_utterance(
+            State(state.clone()),
+            Ok(Json(LiveUtterance {
+                text: "".into(),
+                ink: None,
+                image: Some(LiveImageBody {
+                    png_base64: png_base64.clone(),
+                }),
+                view: None,
+            })),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(turn.status(), StatusCode::CREATED);
+
+        let board = {
+            let mut store = state.store.lock().unwrap();
+            let session = store.current_live_session().unwrap().unwrap();
+            store
+                .add_live_board(
+                    session.id,
+                    crate::core::LiveBoardKind::Markdown,
+                    None,
+                    "b",
+                    None,
+                )
+                .unwrap()
+        };
+        let err = live_utterance(
+            State(state.clone()),
+            Ok(Json(LiveUtterance {
+                text: "both".into(),
+                ink: Some(LiveInkBody {
+                    board_id: board.id,
+                    png_base64: png_base64.clone(),
+                }),
+                image: Some(LiveImageBody { png_base64 }),
+                view: None,
+            })),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(err.code, "validation");
+
+        let err = live_utterance(
+            State(state),
+            Ok(Json(LiveUtterance {
+                text: "".into(),
+                ink: None,
+                image: Some(LiveImageBody {
+                    png_base64: "not base64!!".into(),
+                }),
+                view: None,
+            })),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(err.code, "validation");
     }
 
     use crate::core::LiveContextKind;

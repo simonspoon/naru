@@ -1652,6 +1652,32 @@ board, and seen by the agent only when the person next sends a turn.
   to open the PNG with its image tool before answering, and that `board_id`
   works with `naru live board show`.
 
+### Pasted images (mesa task 1475)
+
+The person can also paste a picture straight into the typed capture box
+(⌘V), with no board involved at all. `onPaste` on the textarea reads it with
+`clipboardFiles.ts::imageFilesFromClipboard` (the same helper the task
+panel's attachment paste uses); a text paste falls through unchanged. The
+page converts it to a PNG — read back as-is if it already is one, else drawn
+through a canvas, the same posture the ink flatten takes — and stages it as a
+small chip in the composer with a thumbnail and a remove button, replacing
+whatever was staged before it. Enter sends it on `POST /api/live/utterance`
+as `image: {png_base64}`, the sibling of `ink` with **no `board_id`** — the
+picture was never drawn on anything — and, the one place this differs from
+ink, **the turn's text may be empty**: a person may paste only a picture.
+`ink` and `image` are mutually exclusive; sending both is 422 `validation`
+before either is decoded. The server writes it exactly where ink is written
+(`Store::add_live_image_turn`, sharing `add_live_media_turn` with
+`add_live_ink_turn`) — same PNG-signature and `LIVE_INK_MAX` checks, same
+file layout — with `board_id` left NULL, so `LiveTurn.board_id` is what tells
+the two kinds of `image_path` apart. When speech is held, a staged image
+rides the recording's flush on its carrier turn exactly as ink does
+(`inkCarrier`); if ink is *also* pending for that turn, the image wins and the
+ink stays pending for the next one, since the server takes at most one
+picture per turn (`livePastedImage.ts::mediaForTurn`). The agent's rules 1 and
+7 tell it a turn's `image_path` with no `board_id` is a pasted picture, to be
+opened with the image tool before answering, exactly like ink.
+
 ### CLI
 
 `mesa live board` — five verbs, each on THE current session like the rest of

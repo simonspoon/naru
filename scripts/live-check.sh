@@ -2660,6 +2660,46 @@ fi
 [ "$(ink_files)" = "$FILES_BEFORE" ] || fail "a refused ink must write no file"
 ok "ink refusals are 422 validation writing nothing: bad base64, not a PNG, an unknown board, another conversation's board, and one byte over LIVE_INK_MAX (JSON, not a bare 413)"
 
+# ---- pasted images: a picture the person pastes into the capture box, with
+# no board at all (mesa task 1475) ----
+printf '\x89PNG\r\n\x1a\nmesa-live-pasted' > "$TMP/pasted.png"
+PASTED_B64=$(base64 < "$TMP/pasted.png" | tr -d '\n')
+api 201 POST "/api/live/utterance" \
+  "{\"text\":\"look at this\",\"image\":{\"png_base64\":\"$PASTED_B64\"}}"
+IMAGE_TURN=$(jqb .id)
+IMAGE_PATH=$(jqb .image_path)
+[ "$(jqb .role)" = "user" ] || fail "pasted image: role must be user"
+[ "$(jqb .board_id)" = "null" ] || fail "pasted image: board_id must be null"
+[ "$IMAGE_PATH" = "$TMP/live-ink/$BS/$IMAGE_TURN.png" ] ||
+  fail "pasted image: the PNG lands at <ink dir>/<session>/<turn>.png, got $IMAGE_PATH"
+cmp -s "$IMAGE_PATH" "$TMP/pasted.png" || fail "pasted image: the written PNG must be byte-identical"
+ok "POST /api/live/utterance with image: 201, the PNG written byte-identical at <ink dir>/<session>/<turn>.png, image_path set and board_id null"
+
+# A pasted image may ride with no text at all — a person may paste only a
+# picture — unlike every other user turn.
+api 201 POST "/api/live/utterance" "{\"text\":\"\",\"image\":{\"png_base64\":\"$PASTED_B64\"}}"
+[ "$(jqb .text)" = "" ] || fail "an image turn's text may be empty"
+[ "$(jqb .board_id)" = "null" ] || fail "an empty-text image turn must still carry no board_id"
+ok "an image utterance with empty text is accepted — a plain turn's own empty-text rule is untouched"
+
+FILES_BEFORE=$(ink_files)
+TURNS_BEFORE=$("$MESA" live turns | jq 'length')
+# ink and image are mutually exclusive: both on one turn is 422 before either
+# is decoded.
+api 422 POST "/api/live/utterance" \
+  "{\"text\":\"both\",\"ink\":{\"board_id\":$R_MD,\"png_base64\":\"$INK_B64\"},\"image\":{\"png_base64\":\"$PASTED_B64\"}}"
+[ "$(jqb .error.code)" = "validation" ] || fail "ink and image on one turn: error.code"
+api 422 POST "/api/live/utterance" \
+  "{\"text\":\"bad\",\"image\":{\"png_base64\":\"$GIF_B64\"}}"
+[ "$(jqb .error.code)" = "validation" ] || fail "a pasted image that is not a PNG: error.code"
+api 422 POST "/api/live/utterance" \
+  "{\"text\":\"bad\",\"image\":{\"png_base64\":\"!!not base64!!\"}}"
+[ "$(jqb .error.code)" = "validation" ] || fail "a pasted image with bad base64: error.code"
+[ "$("$MESA" live turns | jq 'length')" = "$TURNS_BEFORE" ] ||
+  fail "a refused image must write no turn"
+[ "$(ink_files)" = "$FILES_BEFORE" ] || fail "a refused image must write no file"
+ok "image refusals are 422 validation writing nothing: ink+image together, a non-PNG image, and bad base64"
+
 # keep: --task attaches the newest ink beside the board; --project refuses a
 # board with ink and names --task; a board with no ink keeps as before.
 api 201 POST "/api/live/utterance" \
