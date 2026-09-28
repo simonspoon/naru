@@ -9780,6 +9780,16 @@ body.live-panel-ratio-resizing .live-panel-divider {
   color: var(--muted);
 }
 
+/* Folded: the name is what was keeping the strip as wide (side arrangement)
+   or as tall (stacked, since it forced `justify-content: space-between` to
+   spread the row) as itself — `.live-panel-section.folded` is only
+   `flex: none` above, a content-based size, so a long title kept the strip
+   from ever shrinking to its fold button. Dropping the name leaves just that
+   button and the head's own padding, mesa task 1474. */
+.live-panel-section.folded .live-panel-section-title {
+  display: none;
+}
+
 /* The whiteboard section itself — what used to be `.live-board`'s own
    floating overlay (mesa task 1071), folded into the panel by mesa task
    1447. No more absolute position, no more own width: this is now sized by
@@ -9981,6 +9991,15 @@ body.live-panel-ratio-resizing .live-panel-divider {
    like every other h1/h2 in the app (index.css). */
 .live-board-head .live-head-title {
   text-shadow: 0 0 12px var(--cyan-dim);
+}
+
+/* Folded, the board's own name is what kept the strip as wide/tall as itself
+ * — `.live-head-say` holds the title (and, expanded, the kind chip), and
+ * `.live-board-section.folded` is a content-based `flex: none` size, so a
+ * long board title never let it shrink to just the fold button beside it.
+ * Same fix as `.live-panel-section-title` above, mesa task 1474. */
+.live-board-section.folded .live-head-say {
+  display: none;
 }
 
 /* The head (mesa task 1069): the panel's instrument cluster — three stacked
