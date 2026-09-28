@@ -3228,10 +3228,11 @@ api 200 DELETE "/api/live/memory/$AE2"
 api 200 GET "/api/live/memory"
 [ "$BODY" = "[]" ] || fail "the API budget check must leave the notebook empty (got $BODY)"
 # The 2s poll carries no notebook (`blocked` is the derived agent state of
-# mesa task 1157, a string or null, not a body).
+# mesa task 1157, a string or null, not a body; `context_tokens` is the derived
+# driver context size of mesa task 1478, a number or null, not a body).
 api 200 GET "/api/live"
-[ "$(jqb 'keys | sort | join(",")')" = "blocked,boards,session,turns" ] ||
-  fail "GET /api/live must carry exactly session/turns/boards/blocked — no notebook (got $(jqb 'keys'))"
+[ "$(jqb 'keys | sort | join(",")')" = "blocked,boards,context_tokens,session,turns" ] ||
+  fail "GET /api/live must carry exactly session/turns/boards/blocked/context_tokens — no notebook (got $(jqb 'keys'))"
 ok "/api/live/memory: GET/POST/PATCH/DELETE round trip, 422 validation with the CLI's messages, 404 for unknown and retired ids, POST past the budget retiring nothing, and GET /api/live carries no notebook"
 
 # Both halves of the boundary, default mode: Host allowlist, Content-Type
