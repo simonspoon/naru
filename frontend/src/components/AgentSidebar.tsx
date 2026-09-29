@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useRef, useState } from 'react'
+import { mainFloor, mainIsCollapsed } from '../mainCollapse'
 import type { CSSProperties, ReactNode } from 'react'
 import {
   DndContext,
@@ -1244,7 +1245,7 @@ export function AgentSidebar({
     const onMove = (e: MouseEvent) => {
       const next = window.innerWidth - e.clientX
       const mainLeft = document.querySelector('main')?.getBoundingClientRect().left ?? 0
-      const max = window.innerWidth - mainLeft - MIN_MAIN_WIDTH - liveSidebarWidth()
+      const max = window.innerWidth - mainLeft - mainFloor(mainIsCollapsed(), MIN_MAIN_WIDTH) - liveSidebarWidth()
       setWidth(clampAgentSidebarWidth(next, max))
     }
     const onUp = () => setResizing(false)
@@ -1272,7 +1273,7 @@ export function AgentSidebar({
     if (collapsed) return
     const clampToLayout = () => {
       const mainLeft = document.querySelector('main')?.getBoundingClientRect().left ?? 0
-      const max = window.innerWidth - mainLeft - MIN_MAIN_WIDTH - liveSidebarWidth()
+      const max = window.innerWidth - mainLeft - mainFloor(mainIsCollapsed(), MIN_MAIN_WIDTH) - liveSidebarWidth()
       // `Math.min` on top of the clamp is the only-shrink rule: the clamp
       // alone would also *raise* a sub-floor width, which is not this
       // effect's business.

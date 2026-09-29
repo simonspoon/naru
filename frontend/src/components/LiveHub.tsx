@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import { mainFloor, mainIsCollapsed } from '../mainCollapse'
 import { createPortal } from 'react-dom'
 import { LiveBand } from './LiveBand'
 import { LiveBoardPanel, type InkFlatten } from './LiveBoardPanel'
@@ -3306,7 +3307,7 @@ export function LiveHub({
       if (aside === null) return
       const right = aside.getBoundingClientRect().right
       const mainLeft = document.querySelector('main')?.getBoundingClientRect().left ?? 0
-      const ceiling = right - mainLeft - MIN_MAIN_WIDTH
+      const ceiling = right - mainLeft - mainFloor(mainIsCollapsed(), MIN_MAIN_WIDTH)
       if (boardExpandedRef.current) {
         const next = clampLiveBoardWidth(right - e.clientX, ceiling)
         panelWidthRef.current = next

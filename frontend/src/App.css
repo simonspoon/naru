@@ -11300,3 +11300,61 @@ body.live-panel-ratio-resizing .live-panel-divider {
 .agent-card-meta .agent-row-context {
   margin-left: 0;
 }
+
+/* Main panel folded to a rail (mesa task 1485). Desktop tiers only — on the
+   phone tier main is the whole screen and the toggle is hidden. The rail is
+   a slim button strip; the two page panes stay mounted (Terminal's PTYs must
+   survive) at a fixed width, clipped and invisible, so a fold never refits a
+   terminal. The freed row goes to whichever of the live and agents panels
+   are open: each keeps its own width as the flex basis and both grow, and
+   their bodies, otherwise held at the open width, follow the panel. */
+.main-rail {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  width: 100%;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  clip-path: none;
+  background: rgba(6, 10, 16, 0.6);
+  box-shadow: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 1rem;
+}
+
+.main-rail:hover {
+  color: var(--cyan, #00e5ff);
+}
+
+@media (min-width: 601px) {
+  .shell-body.main-collapsed .main-slot {
+    flex: none;
+    width: 1.75rem;
+    overflow: hidden;
+    border-left: 1px solid var(--border);
+  }
+
+  .shell-body.main-collapsed .main-slot-pane {
+    right: auto;
+    width: max(320px, 50vw);
+    visibility: hidden !important;
+  }
+
+  .shell-body.main-collapsed .live-sidebar:not(.collapsed),
+  .shell-body.main-collapsed .agent-sidebar:not(.collapsed) {
+    flex: 1 1 auto;
+  }
+
+  .shell-body.main-collapsed .live-sidebar:not(.collapsed) .live-sidebar-body,
+  .shell-body.main-collapsed .agent-sidebar:not(.collapsed) .agent-sidebar-body {
+    width: 100%;
+  }
+}
+
+@media (max-width: 600px) {
+  .main-collapse-toggle {
+    display: none;
+  }
+}

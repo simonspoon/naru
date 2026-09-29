@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import './App.css'
 import { getCcUsage, getNaruVersion, getTask, listInbox } from './api'
 import { AgentSidebar } from './components/AgentSidebar'
@@ -24,6 +24,7 @@ import { ScriptsView } from './pages/ScriptsView'
 import { SettingsView } from './pages/SettingsView'
 import { settingsTabFromPath } from './settingsTab'
 import { TerminalPage } from './pages/TerminalPage'
+import { isNavLinkClick, loadMainCollapsed, saveMainCollapsed } from './mainCollapse'
 import { isPhone, onPhoneTierChange } from './phoneTier'
 import { useSpatialNav } from './spatialNav'
 import { useFetch } from './useFetch'
@@ -187,6 +188,25 @@ function App() {
   // there); the agents sidebar defaults to collapsed at every width.
   const [navCollapsed, setNavCollapsed] = useState(isPhone)
   const [agentsCollapsed, setAgentsCollapsed] = useState(true)
+  // The main panel folded to a rail so the live and agents panels take its
+  // width (mesa task 1485). Desktop tiers only: App.css ignores the class on
+  // the phone tier, where main is the whole screen.
+  const [mainCollapsed, setMainCollapsedState] = useState(loadMainCollapsed)
+  const setMainCollapsed = (collapsed: boolean) => {
+    saveMainCollapsed(collapsed)
+    setMainCollapsedState(collapsed)
+  }
+  // Choosing somewhere to go — a nav click (handled on `.shell-body`) or a
+  // route change from anywhere, the live agent's `navigate` included — brings
+  // a folded main back. The first run is the mount, which must keep the
+  // remembered fold.
+  const seenPath = useRef(path)
+  useEffect(() => {
+    if (seenPath.current === path) return
+    seenPath.current = path
+    saveMainCollapsed(false)
+    setMainCollapsedState(false)
+  }, [path])
   // `useState(isPhone)` above decides the nav drawer's state once, at mount,
   // and nothing re-decided it afterwards (mesa task 562; the flaw predates the
   // hoist to App and was filed against Sidebar.tsx, where it used to live).
@@ -637,6 +657,16 @@ function App() {
         {/* The right cluster (mesa task 857): the live conversation's controls
             sit beside the plan-limit chips, on every page. */}
         <div className="header-right">
+          <button
+            type="button"
+            className="sidebar-toggle main-collapse-toggle"
+            aria-label={mainCollapsed ? 'Expand main panel' : 'Collapse main panel'}
+            title={mainCollapsed ? 'Expand main panel' : 'Collapse main panel'}
+            aria-pressed={mainCollapsed}
+            onClick={() => setMainCollapsed(!mainCollapsed)}
+          >
+            {mainCollapsed ? '▣' : '◧'}
+          </button>
           {/* A `collapse-sidebars` turn moves both panels at once (task 859):
               the conversation asked for room, and "the sidebars" is the pair.
               Both flags live here already — the phone tab bar writes the same
@@ -654,7 +684,12 @@ function App() {
           <HeaderUsage />
         </div>
       </header>
-      <div className="shell-body">
+      <div
+        className={`shell-body${mainCollapsed ? ' main-collapsed' : ''}`}
+        onClick={(e) => {
+          if (mainCollapsed && isNavLinkClick(e.target)) setMainCollapsed(false)
+        }}
+      >
         <Sidebar
           activeProjectId={activeProjectId}
           inboxFilter={inboxFilter}
@@ -669,6 +704,17 @@ function App() {
           onCollapsedChange={setNavCollapsed}
         />
         <div className="main-slot">
+          {mainCollapsed && (
+            <button
+              type="button"
+              className="main-rail"
+              aria-label="Expand main panel"
+              title="Expand main panel"
+              onClick={() => setMainCollapsed(false)}
+            >
+              «
+            </button>
+          )}
           {/* Both panes are permanent siblings, never conditionally rendered —
               same invariant AgentSidebar's own collapse relies on. `main`'s
               content (`page`) keeps its existing per-route mount/unmount
