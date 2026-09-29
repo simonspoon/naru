@@ -1403,8 +1403,12 @@ struct DispatchedSession {
     /// task closed; cleared when the work ends. [`REAP_LIVE_WORK_GRACE`] is
     /// measured from here.
     work_since: Option<Instant>,
-    /// The closed-with-live-work alert has been filed for this session.
+    /// The live work has been noted (counts kept below) for this session; it
+    /// is logged, not filed, when it ends ([`log_reaper_event`]).
     work_alerted: bool,
+    /// What that live work was when first seen: shells and running subagents.
+    work_shells: u32,
+    work_subagents: u32,
     /// First pass that found the session idle — not `busy`, no live work —
     /// while its task was still `in_progress`; cleared the moment it is seen
     /// working again, so the stall clock measures *continuous* idleness.
@@ -1421,6 +1425,8 @@ impl DispatchedSession {
             dispatched_at: now,
             work_since: None,
             work_alerted: false,
+            work_shells: 0,
+            work_subagents: 0,
             idle_since: None,
             stalled_alerted: false,
         }
@@ -1428,8 +1434,7 @@ impl DispatchedSession {
 }
 
 /// How long a closed task's session may keep its live work running after the
-/// reaper has said so in the inbox, before it is stopped anyway (mesa task
-/// 1191). A shell the closing agent left running — a dev server, a check
+/// reaper has first seen it, before it is stopped anyway (mesa task 1191). A shell the closing agent left running — a dev server, a check
 /// script — is worth a look, not a worktree held forever.
 const REAP_LIVE_WORK_GRACE: Duration = Duration::from_secs(10 * 60);
 
@@ -1455,9 +1460,9 @@ enum ReapVerdict {
     /// Finished with its task and still running: `claude stop <job id>`.
     Stop,
     /// Finished with its task but still holding a live shell or subagent:
-    /// tell the inbox, then wait for the work to end (or the grace to run
-    /// out) before stopping.
-    AlertLiveWork,
+    /// note it (the reaper log, once it ends), then wait for the work to end
+    /// (or the grace to run out) before stopping.
+    NoteLiveWork,
     /// The task is still `in_progress` but the session is gone: tell the
     /// inbox the project's loop is stalled on it, then forget the dispatch.
     AlertAbandoned,
@@ -1532,7 +1537,7 @@ fn reap_verdict(
     if live_work {
         let since = *memory.work_since.get_or_insert(now);
         if !memory.work_alerted {
-            return ReapVerdict::AlertLiveWork;
+            return ReapVerdict::NoteLiveWork;
         }
         if now.duration_since(since) >= REAP_LIVE_WORK_GRACE {
             return ReapVerdict::Stop;
@@ -1546,12 +1551,14 @@ fn reap_verdict(
     ReapVerdict::Stop
 }
 
-/// The alert for a task that closed — or was re-dispatched, when the
-/// session is `superseded` — while its session still had work running.
-fn reaper_live_work_body(
+/// The alert for a session whose live work outran [`REAP_LIVE_WORK_GRACE`]
+/// and was force-stopped. Work that ends inside the grace is routine and only
+/// goes to the reaper log ([`log_reaper_event`]).
+fn reaper_force_stop_body(
     job_id: &str,
     task_id: i64,
-    session: &AgentSession,
+    shells: u32,
+    subagents: u32,
     superseded: bool,
 ) -> String {
     let why = if superseded {
@@ -1561,13 +1568,70 @@ fn reaper_live_work_body(
     };
     format!(
         "Task {task_id} {why} agent session {job_id} still had work running: \
-         {} live shell(s) and {} live subagent(s). The session is being left alone \
-         for {} minutes so that work can finish, then stopped. Look in with \
-         `claude attach {job_id}`, or end it now with `claude stop {job_id}`.",
-        session.live_shells,
-        session.live_subagents,
+         {shells} live shell(s) and {subagents} live subagent(s). It did not finish \
+         within {} minutes, so the session was stopped and that work cut off. \
+         Resume it with `claude attach {job_id}` if anything was lost.",
         REAP_LIVE_WORK_GRACE.as_secs() / 60
     )
+}
+
+/// Path of the reaper log: `logs/todo-reaper.log` in Naru's home directory
+/// (`~/.naru`, or `~/.mesa` on an install that still has that), beside the
+/// config file and the workspace.
+fn reaper_log_path() -> Option<std::path::PathBuf> {
+    let dirs = directories::BaseDirs::new()?;
+    Some(
+        config::dot_dir_in(dirs.home_dir())
+            .join("logs")
+            .join("todo-reaper.log"),
+    )
+}
+
+/// Appends one line to the reaper log — the routine record of a closed task
+/// whose session still had live work, which used to be an inbox alert. Best
+/// effort: a log that cannot be written is one stderr line, never a failed
+/// pass. `outcome` is how it ended.
+fn log_reaper_event(
+    task_id: i64,
+    job_id: &str,
+    shells: u32,
+    subagents: u32,
+    superseded: bool,
+    outcome: &str,
+) {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let line = format!(
+        "{} task={task_id} session={job_id} reason={} still_running=\"{shells} shell(s), \
+         {subagents} subagent(s)\" outcome={outcome}\n",
+        crate::core::cc::fmt_store_ts(secs),
+        if superseded {
+            "re-dispatched"
+        } else {
+            "closed"
+        },
+    );
+    let Some(path) = reaper_log_path() else {
+        return;
+    };
+    let written = path
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+        })
+        .and_then(|mut f| f.write_all(line.as_bytes()));
+    if let Err(e) = written {
+        eprintln!(
+            "todo-watcher: writing the reaper log {} failed: {e}",
+            path.display()
+        );
+    }
 }
 
 /// The alert for a session that ended without closing its `in_progress` task.
@@ -1714,7 +1778,7 @@ fn todo_reaper_tick(state: &AppState) {
             DispatchTarget::Task(task_id) => (task_id, verdict),
             DispatchTarget::InboxItem(_) => {
                 let verdict = match verdict {
-                    ReapVerdict::AlertLiveWork => {
+                    ReapVerdict::NoteLiveWork => {
                         eprintln!(
                             "{watcher}: {target} was triaged while its session {job_id} still \
                              had work running; stopping it once the work ends"
@@ -1741,9 +1805,61 @@ fn todo_reaper_tick(state: &AppState) {
         };
         match verdict {
             ReapVerdict::Keep => {}
-            ReapVerdict::Forget => forget_dispatch(state, &job_id),
+            ReapVerdict::Forget => {
+                // Its live work ended by the session going away with it.
+                if memory.work_alerted && matches!(target, DispatchTarget::Task(_)) {
+                    log_reaper_event(
+                        task_id,
+                        &job_id,
+                        memory.work_shells,
+                        memory.work_subagents,
+                        dispatch.superseded,
+                        "finished; session ended on its own",
+                    );
+                }
+                forget_dispatch(state, &job_id)
+            }
             ReapVerdict::Stop => match agents::stop(&job_id) {
                 Ok(()) => {
+                    if memory.work_alerted && matches!(target, DispatchTarget::Task(_)) {
+                        // `work_since` is still set only when the grace ran
+                        // out on work that had not ended.
+                        let forced = memory.work_since.is_some();
+                        let (shells, subagents) = listed
+                            .filter(|_| forced)
+                            .map_or((memory.work_shells, memory.work_subagents), |s| {
+                                (s.live_shells, s.live_subagents)
+                            });
+                        log_reaper_event(
+                            task_id,
+                            &job_id,
+                            shells,
+                            subagents,
+                            dispatch.superseded,
+                            if forced {
+                                "still running after the grace; force-stopped"
+                            } else {
+                                "finished within the grace; session stopped"
+                            },
+                        );
+                        if forced {
+                            let body = reaper_force_stop_body(
+                                &job_id,
+                                task_id,
+                                shells,
+                                subagents,
+                                dispatch.superseded,
+                            );
+                            if let Err(e) =
+                                file_reaper_alert(state, task_exists, task_id, &job_id, &body)
+                            {
+                                eprintln!(
+                                    "todo-watcher: filing the force-stop alert for session \
+                                     {job_id} failed: {e}"
+                                );
+                            }
+                        }
+                    }
                     let why = if dispatch.superseded {
                         "was re-dispatched"
                     } else if memory.work_alerted {
@@ -1762,18 +1878,17 @@ fn todo_reaper_tick(state: &AppState) {
                 // running and still holding whatever it holds.
                 Err(e) => eprintln!("{watcher}: stopping session {job_id} failed: {e}"),
             },
-            ReapVerdict::AlertLiveWork => {
+            ReapVerdict::NoteLiveWork => {
                 // The verdict only names this for a listed, live session.
                 let Some(session) = listed else {
                     continue;
                 };
-                let body = reaper_live_work_body(&job_id, task_id, session, dispatch.superseded);
-                match file_reaper_alert(state, task_exists, task_id, &job_id, &body) {
-                    Ok(()) => memory.work_alerted = true,
-                    Err(e) => eprintln!(
-                        "todo-watcher: filing the live-work alert for session {job_id} failed: {e}"
-                    ),
-                }
+                // Routine: nothing is filed now. The reaper log gets its line
+                // when the work ends, and the inbox only if it has to be cut
+                // off ([`log_reaper_event`], [`reaper_force_stop_body`]).
+                memory.work_alerted = true;
+                memory.work_shells = session.live_shells;
+                memory.work_subagents = session.live_subagents;
             }
             ReapVerdict::AlertAbandoned => {
                 let body = reaper_abandoned_body(&job_id, task_id);
@@ -1819,6 +1934,8 @@ fn remember_dispatch(state: &AppState, job_id: &str, memory: DispatchedSession) 
     if let Some(entry) = map.get_mut(job_id) {
         entry.work_since = memory.work_since;
         entry.work_alerted = memory.work_alerted;
+        entry.work_shells = memory.work_shells;
+        entry.work_subagents = memory.work_subagents;
         entry.idle_since = memory.idle_since;
         entry.stalled_alerted = memory.stalled_alerted;
     }
@@ -13483,14 +13600,14 @@ exit 2
         // grace clock.
         assert_eq!(
             reap_verdict(Some(Status::Done), Some(&working), &mut memory, now),
-            ReapVerdict::AlertLiveWork
+            ReapVerdict::NoteLiveWork
         );
         assert_eq!(memory.work_since, Some(now));
         // Filing failed: the next pass files again, off the same clock.
         let later = now + Duration::from_secs(20);
         assert_eq!(
             reap_verdict(Some(Status::Done), Some(&working), &mut memory, later),
-            ReapVerdict::AlertLiveWork
+            ReapVerdict::NoteLiveWork
         );
         assert_eq!(memory.work_since, Some(now));
         // Filed: wait, whatever the session's status says.
@@ -13541,7 +13658,7 @@ exit 2
         let mut memory = fresh_memory(now);
         assert_eq!(
             reap_verdict(None, Some(&working), &mut memory, now),
-            ReapVerdict::AlertLiveWork
+            ReapVerdict::NoteLiveWork
         );
     }
 
@@ -13736,14 +13853,22 @@ exit 2
     }
 
     #[test]
-    fn todo_reaper_tick_reports_a_closed_task_whose_session_still_has_live_work() {
+    fn todo_reaper_tick_logs_live_work_and_alerts_only_when_it_is_force_stopped() {
         // SAFETY: ENV_LOCK gives this test exclusive access to
         // MESA_CLAUDE_BIN / MESA_CONFIG_FILE / MESA_CC_PROJECTS_DIR for its
         // duration.
         let _env = attachments::ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        crate::core::library::test_home::with_home_dir(|_| {
+        crate::core::library::test_home::with_home_dir(|home| {
+            let log_path = home.join(".naru").join("logs").join("todo-reaper.log");
+            let log_lines = || {
+                std::fs::read_to_string(&log_path)
+                    .unwrap_or_default()
+                    .lines()
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            };
             let stub_dir = tempfile::tempdir().unwrap();
             let agents_file = stub_dir.path().join("agents.json");
             let stop_log = stub_dir.path().join("stops.log");
@@ -13773,10 +13898,27 @@ exit 2
             )
             .unwrap();
 
-            // Closed, with a live subagent: one alert, no stop, entry kept.
+            // Closed, with a live subagent: routine, so no alert, no log line
+            // yet (it is written when the work ends), no stop, entry kept.
             todo_reaper_tick(&state);
             assert!(stops(&stop_log).is_empty(), "live work must not be stopped");
             assert_eq!(dispatched_task(&state, "job0001"), Some(task));
+            assert!(inbox_rows(&state).is_empty(), "live work is not an alert");
+            assert!(log_lines().is_empty());
+
+            // Later passes change nothing while the work runs.
+            todo_reaper_tick(&state);
+            assert!(inbox_rows(&state).is_empty());
+            assert!(stops(&stop_log).is_empty());
+
+            // Past the grace it is stopped anyway, forgotten, logged — and
+            // this is the one case that files an alert.
+            backdate(&state, "job0001", REAP_LIVE_WORK_GRACE, |d, then| {
+                d.work_since = Some(then)
+            });
+            todo_reaper_tick(&state);
+            assert_eq!(stops(&stop_log), vec!["job0001".to_string()]);
+            assert_eq!(dispatched_task(&state, "job0001"), None);
             let expected = vec![(
                 Some(TODO_REAPER_AUTHOR.to_string()),
                 InboxKind::TaskSummary,
@@ -13791,30 +13933,24 @@ exit 2
                 body.contains("1 live subagent"),
                 "the alert counts the work: {body}"
             );
-            assert!(body.contains("claude attach job0001") && body.contains("claude stop job0001"));
+            assert!(body.contains("claude attach job0001"), "{body}");
+            let lines = log_lines();
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            for want in [
+                format!("task={task} "),
+                "session=job0001 ".to_string(),
+                "1 subagent(s)".to_string(),
+                "force-stopped".to_string(),
+            ] {
+                assert!(lines[0].contains(&want), "{want}: {}", lines[0]);
+            }
 
-            // Later passes file nothing more while the work runs.
-            todo_reaper_tick(&state);
-            assert_eq!(inbox_rows(&state), expected, "the alert is filed once");
-            assert!(stops(&stop_log).is_empty());
-
-            // Past the grace it is stopped anyway, and forgotten.
-            backdate(&state, "job0001", REAP_LIVE_WORK_GRACE, |d, then| {
-                d.work_since = Some(then)
-            });
-            todo_reaper_tick(&state);
-            assert_eq!(stops(&stop_log), vec!["job0001".to_string()]);
-            assert_eq!(dispatched_task(&state, "job0001"), None);
-            assert_eq!(inbox_rows(&state), expected);
-
-            // Work that ends inside the grace: stopped on the ordinary rule.
+            // Work that ends inside the grace: a log line, no alert, stopped
+            // on the ordinary rule.
             seed_dispatch(&state, "job0001", task);
             todo_reaper_tick(&state);
-            assert_eq!(
-                inbox_rows(&state).len(),
-                2,
-                "a fresh dispatch is a fresh alert"
-            );
+            assert_eq!(inbox_rows(&state), expected, "routine work files nothing");
+            assert_eq!(log_lines().len(), 1, "nothing is logged until it ends");
             std::fs::remove_file(&transcript).unwrap();
             todo_reaper_tick(&state);
             assert_eq!(
@@ -13822,21 +13958,29 @@ exit 2
                 vec!["job0001".to_string(), "job0001".to_string()]
             );
             assert_eq!(dispatched_task(&state, "job0001"), None);
+            assert_eq!(inbox_rows(&state), expected);
+            let lines = log_lines();
+            assert_eq!(lines.len(), 2, "{lines:?}");
+            assert!(
+                lines[1].contains("finished within the grace"),
+                "{}",
+                lines[1]
+            );
 
-            // A deleted task has nothing to file against: nothing is filed,
-            // and the session still waits out its grace.
+            // A deleted task has nothing to file against, and its work is
+            // routine anyway: the session still waits out its grace.
             std::fs::write(&transcript, "{}").unwrap();
             let gone = new_task(&state, project);
             seed_dispatch(&state, "job0001", gone);
             state.store.lock().unwrap().delete_task(gone).unwrap();
             todo_reaper_tick(&state);
-            assert_eq!(inbox_rows(&state).len(), 2, "no task, no alert");
+            assert_eq!(inbox_rows(&state), expected, "no task, no alert");
             assert_eq!(stops(&stop_log).len(), 2);
             assert_eq!(dispatched_task(&state, "job0001"), Some(gone));
 
             // A superseded session with live work: the task is `in_progress`
-            // again under its new session, so the alert says re-dispatched,
-            // not closed.
+            // again under its new session. Force-stopped, the alert says
+            // re-dispatched, not closed.
             set_status(&state, task, Status::InProgress);
             seed_dispatch(&state, "job0001", task);
             state
@@ -13848,12 +13992,14 @@ exit 2
                 .superseded = true;
             todo_reaper_tick(&state);
             assert_eq!(stops(&stop_log).len(), 2, "live work must not be stopped");
+            assert_eq!(inbox_rows(&state), expected);
+            backdate(&state, "job0001", REAP_LIVE_WORK_GRACE, |d, then| {
+                d.work_since = Some(then)
+            });
+            todo_reaper_tick(&state);
+            assert_eq!(stops(&stop_log).len(), 3);
             let rows = state.store.lock().unwrap().list_inbox_items(None).unwrap();
-            assert_eq!(
-                rows.len(),
-                3,
-                "a superseded session with live work is an alert"
-            );
+            assert_eq!(rows.len(), 2);
             let body = &rows.iter().max_by_key(|i| i.id).unwrap().body;
             assert!(
                 body.contains(&format!(
@@ -13863,6 +14009,7 @@ exit 2
                 "the alert must not call a re-dispatched task closed: {body}"
             );
             assert!(!body.contains("closed"), "{body}");
+            assert!(log_lines().last().unwrap().contains("reason=re-dispatched"));
 
             unsafe { std::env::remove_var("MESA_CC_PROJECTS_DIR") };
             unsafe { std::env::remove_var("MESA_CLAUDE_BIN") };

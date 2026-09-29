@@ -229,18 +229,28 @@ because someone ran `mesa serve`.
     that has just closed its task is usually still writing its closing report
     or its inbox summary, and cutting that off would lose the very thing the
     run was for.
-  - **A closed task whose session still has live work is reported, then
-    waited out** (mesa task 1191). A session holding a live shell child or a
-    live subagent after its task closed — a dev server it started, a check
-    script, a delegate still writing — is not stopped on that pass: the
-    reaper files **one** inbox alert (kind `task-summary`, author
-    `todo-reaper`, against the task) naming the job id, the shell/subagent
-    counts, and `claude attach <id>` / `claude stop <id>`, then keeps the
-    entry and stops the session once the work has ended (and it is not
-    `busy`), as above. The wait is capped: `REAP_LIVE_WORK_GRACE` (10 minutes,
-    from the pass that first saw the work) after which it is stopped anyway.
-    A task deleted in the meantime has nothing to file against, so nothing
-    is filed (one stderr line) and the grace still runs.
+  - **A closed task whose session still has live work is logged, then
+    waited out** (mesa task 1191, made routine by 1490). A session holding a
+    live shell child or a live subagent after its task closed — a dev server
+    it started, a check script, a delegate still writing — is not stopped on
+    that pass: the reaper notes the shell/subagent counts, keeps the entry and
+    stops the session once the work has ended (and it is not `busy`), as
+    above. The wait is capped: `REAP_LIVE_WORK_GRACE` (10 minutes, from the
+    pass that first saw the work) after which it is stopped anyway. This is
+    routine and files **nothing** by itself: one line goes to the **reaper
+    log**, `logs/todo-reaper.log` under Naru's home directory (`~/.naru`, or
+    `~/.mesa` on an install that still has it — beside `config.json` and
+    `workspace/`), written when the work ends, one per event:
+    `<UTC time> task=<id> session=<job id> reason=closed|re-dispatched
+    still_running="<n> shell(s), <n> subagent(s)" outcome=<how it ended>`,
+    where the outcome is `finished within the grace; session stopped`,
+    `finished; session ended on its own`, or `still running after the grace;
+    force-stopped`. Only that last outcome files an inbox alert (kind
+    `task-summary`, author `todo-reaper`, against the task) — saying the work
+    was cut off and naming `claude attach <id>`. A task deleted in the
+    meantime has nothing to file against, so nothing is filed (one stderr
+    line) and the grace still runs. A log that cannot be written is one stderr
+    line, never a failed pass.
   - **An `in_progress` task is not left alone blindly** (mesa task 1191).
     The watcher's dispatch reads task status, not the session, as the "in
     process" signal, so a dispatched agent that died or wedged used to leave
@@ -292,7 +302,8 @@ because someone ran `mesa serve`.
     its own — the two loops are one feature.
   - Regressions: `api::tests::todo_reaper_tick_stops_a_dispatched_session_once_its_task_closes`,
     `api::tests::todo_watcher_tick_stops_the_session_a_re_dispatch_supersedes`,
-    the three `todo_reaper_tick_reports_*` tests (one per alert) and the six
+    `api::tests::todo_reaper_tick_logs_live_work_and_alerts_only_when_it_is_force_stopped`,
+    the two other `todo_reaper_tick_reports_*` tests and the six
     `reap_verdict_*` unit tests, plus the reaper block in
     `scripts/todo-watcher-check.sh` end-to-end.
 - The tick cadence is a fixed internal constant (`WATCH_TODO_TICK`, 60s), not
