@@ -3427,18 +3427,16 @@ main {
 }
 
 /* The child cards hanging off an agent row (mesa task 1277): one per live
-   subagent and per running shell. Indented, and tied to the card above by a
-   left rule, so they read as work belonging to that session rather than as
-   rows of their own. Nothing above is restyled — the count badge stays
-   exactly where it was. */
+   subagent and per running shell. Indented, so they read as work belonging
+   to that session rather than as rows of their own. Nothing above is
+   restyled — the count badge stays exactly where it was. */
 .agent-children {
   list-style: none;
   display: flex;
   flex-direction: column;
   gap: 0.25rem;
   margin: 0.4rem 0 0 0.3rem;
-  padding: 0 0 0 0.5rem;
-  border-left: 1px solid var(--border-bright);
+  padding: 0 0 0 calc(0.5rem + 1px);
 }
 
 /* A `<button>`, because the card is clickable (the read-only pane it opens
@@ -3454,12 +3452,8 @@ main {
   font: inherit;
   color: inherit;
   background: none;
-  border: 1px solid var(--border);
+  border: none;
   cursor: pointer;
-}
-
-.agent-child:hover {
-  border-color: var(--border-bright);
 }
 
 /* A finished subagent is on its way out — it is listed only while its
@@ -3523,9 +3517,9 @@ main {
 /* The card whose read-only pane is open (mesa task 1278) — the same cyan the
    session row above it wears when its own pane is, so "this is on screen"
    reads identically at both levels. */
-.agent-child.selected {
+.agent-children li:has(> .agent-child.selected) {
   border-color: var(--cyan);
-  box-shadow: 0 0 8px var(--cyan-dim);
+  box-shadow: 0 0 10px var(--cyan-dim);
 }
 
 /* An interactive session has no pane to hang a child off, so its cards say
