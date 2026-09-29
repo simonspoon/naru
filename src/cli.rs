@@ -64,7 +64,8 @@ OUTPUT
   `cc usage` (missing token or unreachable upstream), `task execute` (the
   hook shell could not be started), `live start` (the `claude` binary that
   drives the conversation could not be started) and `live look` (the `loki`
-  desktop tool, or the browser window it was asked to photograph).
+  desktop tool, or the browser window it was asked to photograph) and
+  `notify` (the `vox` CLI, or its Telegram setup).
 
 DATABASE
   Defaults to ~/Library/Application Support/naru/naru.db; an install from
@@ -251,6 +252,35 @@ EXAMPLES
   mesa system
   mesa system | jq .ram_used_bytes")]
     System,
+    /// Send a message to the person's phone through the external `vox` CLI
+    ///
+    /// `--open <route>` adds a Telegram button that opens Naru's `/open/<route>`
+    /// page, which bounces into the iOS app's `naru://<route>` link; the phone
+    /// reaches it only while `serve --lan` runs. The button's base URL is
+    /// `--base-url`, else `notify.base-url` in ~/.mesa/config.json, else this
+    /// machine's LAN address on port 7770. Prints
+    /// `{sent, message_id, chat_id, open_url}`; takes no `--quiet`.
+    /// See docs/notify.md.
+    #[command(after_help = "\
+EXAMPLES
+  mesa notify \"Deploy finished\"
+  mesa notify \"Result is ready\" --title Naru --open live
+  mesa notify \"Look\" --open live --base-url http://192.168.1.5:7770")]
+    Notify {
+        /// The message to send
+        message: String,
+        /// A bold title line above the message
+        #[arg(long)]
+        title: Option<String>,
+        /// Add an "Open Naru" button that opens this route (letters, digits,
+        /// `/`, `_`, `-`; e.g. `live`)
+        #[arg(long)]
+        open: Option<String>,
+        /// Base URL the button points at (http:// or https://); default is
+        /// `notify.base-url` from the config, else this machine's LAN address
+        #[arg(long)]
+        base_url: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -4191,6 +4221,21 @@ fn execute(command: Command) -> Result<()> {
 
         Command::System => {
             print_json(&system::snapshot());
+            Ok(())
+        }
+        Command::Notify {
+            message,
+            title,
+            open,
+            base_url,
+        } => {
+            let sent = crate::core::notify::send(
+                &message,
+                title.as_deref(),
+                open.as_deref(),
+                base_url.as_deref(),
+            )?;
+            print_json(&sent);
             Ok(())
         }
         Command::Backup { path } => {

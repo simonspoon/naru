@@ -212,7 +212,15 @@ until the next time the person speaks. If a listen is still waiting when a \
 delegate's finish notification arrives, end the turn without starting \
 another: the result comes through that listen. A turn that arrives \
 while a job is running is answered promptly — if it is about the job, say it \
-is still running."
+is still running.
+
+13. You may reach the person's phone with `naru notify \"<one short sentence>\" \
+--open live`, which sends a Telegram message whose button opens this \
+conversation. Use it sparingly, only when they may well be away from the \
+screen and something they would want to know just happened — a long \
+delegate has finished and its result is waiting while nobody is listening \
+on the page. Never for an ordinary reply, and at most once per event; if the \
+command fails, carry on — it is a convenience, not part of the loop."
     };
 }
 
@@ -1078,6 +1086,17 @@ mod tests {
             "conflict",
         ] {
             assert!(AGENT_PROMPT.contains(expected), "missing {expected:?}");
+        }
+    }
+
+    /// Rule 13 (mesa task 1482) lets the agent ping the person's phone with
+    /// `naru notify`, sparingly, appended after rule 12 rather than
+    /// renumbering.
+    #[test]
+    fn rule_thirteen_allows_a_sparing_phone_notification() {
+        let rule = AGENT_PROMPT.split("\n13. ").nth(1).expect("rule 13 exists");
+        for expected in ["naru notify", "--open live", "sparingly", "Never for"] {
+            assert!(rule.contains(expected), "missing {expected:?} in {rule}");
         }
     }
 

@@ -1540,3 +1540,10 @@ one and deleting the other, each section surviving the other's write, a
 negative rate and a whitespace-bearing prefix as 422, both verbs 502 on a
 malformed file, and a request that isn't from this machine's own page refused
 without touching the file.
+
+## Notify
+
+A tenth, read-only section names the base URL `naru notify --open` builds its
+Telegram button from (mesa task 1482): `{ "notify": { "base-url":
+"http://192.168.1.5:7770" } }`. Only the CLI reads it — no API route, no
+Settings UI — and every other section's save preserves it. See `docs/notify.md`.

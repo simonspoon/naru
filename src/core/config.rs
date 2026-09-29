@@ -3621,6 +3621,45 @@ fn check_no_chord_collision(effective: &HashMap<String, Vec<String>>) -> Result<
     Ok(())
 }
 
+/// The config key naming the base URL `naru notify --open` builds its button
+/// from (mesa task 1482): `{ "notify": { "base-url": "http://192.168.1.5:7770" } }`.
+/// Read-only from the CLI — no API route, no Settings UI — and every saver
+/// preserves the section as it does any unknown one.
+pub const NOTIFY_BASE_URL: &str = "base-url";
+
+#[derive(Debug, Default, Deserialize)]
+struct NotifyConfig {
+    #[serde(default)]
+    notify: NotifySection,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct NotifySection {
+    #[serde(default, rename = "base-url")]
+    base_url: Option<String>,
+}
+
+/// The configured button base URL, or `None` (absent or blank). A file that
+/// exists but can't be read or parsed is `Err`, like [`listen_model`].
+pub fn notify_base_url() -> Result<Option<String>, String> {
+    notify_base_url_in(&config_file())
+}
+
+fn notify_base_url_in(path: &Path) -> Result<Option<String>, String> {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
+    };
+    let config: NotifyConfig = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("malformed mesa config {}: {e}", path.display()))?;
+    Ok(config
+        .notify
+        .base_url
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5461,6 +5500,7 @@ mod tests {
                  "speech": {"voice": "bm_george"},
                  "listen": {"model": "parakeet-tdt-0.6b-v2-int8"},
                  "audio": {"engine": "naru-audio"},
+                 "notify": {"base-url": "http://192.168.1.5:7770"},
                  "future": {"x": 1}
                }"#,
         );
@@ -5565,6 +5605,25 @@ mod tests {
             survives("watchers again")["keymap"]["create-task"][0],
             "Mod+Shift+n"
         );
+        // …and none of them touch the read-only notify section (task 1482).
+        assert_eq!(
+            survives("notify")["notify"]["base-url"],
+            "http://192.168.1.5:7770"
+        );
+        assert_eq!(
+            notify_base_url_in(&path).unwrap().as_deref(),
+            Some("http://192.168.1.5:7770")
+        );
+    }
+
+    #[test]
+    fn notify_base_url_reads_absent_blank_and_malformed() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(notify_base_url_in(&dir.path().join("none.json")), Ok(None));
+        let blank = write_config(dir.path(), r#"{"notify": {"base-url": "  "}}"#);
+        assert_eq!(notify_base_url_in(&blank), Ok(None));
+        let bad = write_config(dir.path(), "{nope");
+        assert!(notify_base_url_in(&bad).is_err());
     }
 
     #[test]

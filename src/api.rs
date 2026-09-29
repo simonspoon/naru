@@ -2398,6 +2398,11 @@ fn router(state: AppState) -> Router {
         // no store, no gate (it leaks nothing and the header needs it under
         // `--lan` too).
         .route("/api/version", get(get_naru_version))
+        // `naru notify --open`'s button target (mesa task 1482): a page that
+        // bounces into the iOS app's `naru://<route>` link. Ungated beyond
+        // the global guard, like /api/version; a phone reaches it only under
+        // `serve --lan`.
+        .route("/open/{*route}", get(open_in_app))
         // Settings page: how the host the server runs on is doing. Read-only
         // external state and no store, so the same standard-guard-only
         // posture as /api/version and /api/git-status — it names no project,
@@ -6706,6 +6711,32 @@ async fn get_naru_version() -> Json<NaruVersion> {
     Json(NaruVersion {
         version: env!("CARGO_PKG_VERSION").to_string(),
     })
+}
+
+/// `GET /open/{route}` (mesa task 1482) — the page a `naru notify --open`
+/// Telegram button lands on. Telegram only takes `http`/`https` buttons, so
+/// this answers HTML that redirects to `naru://<route>` (which the iOS app
+/// handles) and, in case an in-app browser ignores the refresh, shows the same
+/// URL as a link. The route passes `notify::validate_route`'s character set,
+/// so nothing here can carry markup or another scheme.
+async fn open_in_app(Path(route): Path<String>) -> std::result::Result<Response, ApiError> {
+    let route = crate::core::notify::validate_route(&route)?;
+    let url = format!("naru://{route}");
+    let page = format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\">\
+<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+<meta http-equiv=\"refresh\" content=\"0;url={url}\"><title>Open Naru</title></head>\
+<body style=\"font-family:-apple-system,sans-serif;text-align:center;padding:4em 1em\">\
+<p><a href=\"{url}\" style=\"font-size:1.5em\">Open Naru</a></p></body></html>"
+    );
+    Ok((
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        page,
+    )
+        .into_response())
 }
 
 /// `GET /api/system` — a live reading of the host (`core::system`), for the

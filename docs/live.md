@@ -640,6 +640,12 @@ The outgoing driver, if a delegate's notification wakes it after the
 handoff, does nothing (rule 11). If a delegate posted nothing, the driver
 falls back to the notification's final message (rule 12).
 
+Rule 13 (mesa task 1482) lets the agent reach the person's phone with
+`naru notify "<sentence>" --open live` — a Telegram message whose button
+opens the conversation (`docs/notify.md`). It is for a moment the person would
+want to know about while away from the screen, such as a long delegate
+finishing with nobody listening on the page; never for an ordinary reply.
+
 What counts as a running delegate (`agents::delegate_running`, over the
 transcript's last record): never one whose last record is an assistant
 message that ended its turn (`end_turn`); one waiting on a tool call — an
