@@ -192,10 +192,32 @@ function App() {
   // width (mesa task 1485). Desktop tiers only: App.css ignores the class on
   // the phone tier, where main is the whole screen.
   const [mainCollapsed, setMainCollapsedState] = useState(loadMainCollapsed)
+  // Whether the agents panel's auto-fold below is what folded main right now.
+  // Any deliberate change (the toggle, the rail, a nav click, a route change)
+  // clears it, so closing the panel never undoes a fold the person made.
+  const autoFolded = useRef(false)
   const setMainCollapsed = (collapsed: boolean) => {
+    autoFolded.current = false
     saveMainCollapsed(collapsed)
     setMainCollapsedState(collapsed)
   }
+  // Opening the agents panel folds main, so it opens as full-width cards
+  // (mesa task 1491); a phone has no fold to make. Edge-triggered, and never
+  // persisted (a reload must not start on it): closing the panel gives the fold
+  // back, but only if this effect made it and nothing has changed it since.
+  const agentsWereCollapsed = useRef(true)
+  useEffect(() => {
+    if (agentsWereCollapsed.current && !agentsCollapsed && !isPhone() && !mainCollapsed) {
+      autoFolded.current = true
+      setMainCollapsedState(true)
+    } else if (!agentsWereCollapsed.current && agentsCollapsed && autoFolded.current) {
+      autoFolded.current = false
+      setMainCollapsedState(false)
+    }
+    agentsWereCollapsed.current = agentsCollapsed
+    // Edge-triggered on the panel alone; `mainCollapsed` is read at the edge.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentsCollapsed])
   // Choosing somewhere to go — a nav click (handled on `.shell-body`) or a
   // route change from anywhere, the live agent's `navigate` included — brings
   // a folded main back. The first run is the mount, which must keep the
@@ -204,6 +226,7 @@ function App() {
   useEffect(() => {
     if (seenPath.current === path) return
     seenPath.current = path
+    autoFolded.current = false
     saveMainCollapsed(false)
     setMainCollapsedState(false)
   }, [path])

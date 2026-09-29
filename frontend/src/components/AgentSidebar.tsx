@@ -18,7 +18,7 @@ import {
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { listAllAgents, listProjects, spawnProjectAgent, stopAgent } from '../api'
+import { getLive, listAllAgents, listProjects, spawnProjectAgent, stopAgent } from '../api'
 import { projectForCwd } from '../agentProject'
 import {
   childElapsed,
@@ -32,6 +32,7 @@ import {
   orderedChildren,
   parseChildPaneId,
 } from '../agentChild'
+import { defaultListMaximized, liveAgentId, liveCardWait, pinLiveAgent } from '../agentLive'
 import { agentHeadline, formatContextTokens, runningBelow } from '../agentRow'
 import { publishOpenAgents } from '../liveView'
 import {
@@ -62,7 +63,7 @@ import {
   type LeafNode as PTLeafNode,
   type SplitNode as PTSplitNode,
 } from '../lib/paneTree'
-import { usePhoneTier } from '../phoneTier'
+import { isPhone, usePhoneTier } from '../phoneTier'
 import type { AgentChild } from '../types/AgentChild'
 import type { AgentSession } from '../types/AgentSession'
 import type { Project } from '../types/Project'
@@ -628,6 +629,9 @@ function MaximizeGlyph({ restore }: { restore: boolean }) {
  * bundled into one object and spread onto `AgentListContent` below. */
 type ListPaneProps = {
   agents: AgentSession[]
+  /** The live conversation's job id (mesa task 1491), pinned above the
+   *  buckets; `null` when nothing is live. */
+  liveAgentId: string | null
   sessionsLoaded: boolean
   error: string | null
   projects: Project[] | null | undefined
@@ -651,7 +655,8 @@ type ListPaneProps = {
  * itself (rendered directly in `AgentSidebar`, not through `SplitNodeView`)
  * supplies its own fixed header/toggle/resize-handle. */
 function AgentListContent({
-  agents,
+  agents: allAgents,
+  liveAgentId,
   sessionsLoaded,
   error,
   projects,
@@ -664,14 +669,217 @@ function AgentListContent({
   stoppingIds,
   stopError,
 }: ListPaneProps) {
+  const { live, rest: agents } = pinLiveAgent(allAgents, liveAgentId)
+  // One card. The live agent's (`pinned`) is drawn apart from the buckets
+  // and shows no state of its own (mesa task 1491).
+  const renderCard = (a: AgentSession, pinned: boolean) => {
+    const proj = projectForCwd(a.cwd, projects ?? [])
+    // Both may be absent (no transcript yet / no usage line
+    // yet), and both then render nothing at all rather than
+    // a placeholder that would read as an empty reply or as
+    // zero tokens — see `agentRow.ts`.
+    const context = formatContextTokens(a.contextTokens)
+    // Absent on a session with no transcript yet, and then
+    // rendered as nothing at all rather than an empty pill.
+    const model = shortModel(a.model)
+    const headline = agentHeadline(a)
+    const label = agentLabel(a)
+    const below = runningBelow(a.children)
+    // The task chip links only when a project claims the
+    // folder — the route needs the project id.
+    const taskHref =
+      a.taskId !== null && proj ? `#/projects/${proj.id}/tasks/${a.taskId}` : null
+    return (
+      <li
+        key={a.sessionId}
+        className={
+          (pinned ? 'agent-card-live ' : '') +
+          (a.id !== null ? 'attachable' : '') +
+          (a.id !== null && openIds.includes(a.id) ? ' selected' : '')
+        }
+        onClick={() => {
+          if (a.id !== null) onTogglePane(a.id)
+        }}
+      >
+        <div className="agent-row-title">
+          {/* The state as a dot, not a pill: the meta line
+              below carries the words (mesa task 1484). */}
+          <span
+            className={`agent-card-dot agent-card-dot-${pinned ? 'live' : (a.state ?? a.status ?? 'unknown')}`}
+            title={
+              pinned
+                ? 'the live conversation agent'
+                : [a.status, a.state].filter(Boolean).join(' · ') || 'unknown'
+            }
+          />
+          {/* The card's one big sentence: what the agent
+              is doing (`agentHeadline`), else its name.
+              Model-authored text — a plain text node,
+              never HTML — and the same string in `title`. */}
+          <span className="agent-card-headline" title={headline ?? label}>
+            {headline ?? label}
+          </span>
+          {/* Only a background session has a short job id,
+              and `claude stop` takes exactly that — an
+              interactive one has nothing to stop, the same
+              reason its row is not attachable. No
+              confirmation: the conversation survives a stop
+              and `claude attach` resumes it, which is the
+              reversibility mesa uses instead of a prompt. */}
+          {a.id !== null && (
+            <button
+              type="button"
+              className="agent-row-stop"
+              title={`Stop this session (claude stop ${a.id}). The conversation is kept — claude attach ${a.id} resumes it.`}
+              // The row underneath toggles the attach pane;
+              // a press on the button is about the button.
+              onClick={(e) => {
+                e.stopPropagation()
+                if (a.id !== null) onStop(a.id)
+              }}
+              disabled={stoppingIds.includes(a.id)}
+            >
+              stop
+            </button>
+          )}
+        </div>
+        {/* One faint line: name · kind · model · task or
+            workspace · uptime · ctx · N running below. */}
+        <div className="muted agent-card-meta">
+          {headline && <span className="agent-card-meta-name">{label}</span>}
+          <span>{a.kind}</span>
+          {model && <span>{model}</span>}
+          {a.taskId !== null ? (
+            taskHref ? (
+              <a
+                className="agent-card-task"
+                href={taskHref}
+                title={a.taskName ?? undefined}
+                onClick={(e) => e.stopPropagation()}
+              >
+                task #{a.taskId}
+              </a>
+            ) : (
+              <span className="agent-card-task" title={a.taskName ?? undefined}>
+                task #{a.taskId}
+              </span>
+            )
+          ) : (
+            <span className="agent-row-meta-where" title={proj ? proj.name : a.cwd}>
+              {proj ? proj.name : a.cwd}
+            </span>
+          )}
+          <span title={`started ${startedAgo(a.startedAt)}`}>{startedAgo(a.startedAt)}</span>
+          {context && (
+            <span
+              className="agent-row-context"
+              title={`${a.contextTokens} tokens in the context window`}
+            >
+              {context} ctx
+            </span>
+          )}
+          {below && <span>{below}</span>}
+          {a.id === null && <span>external terminal — not attachable</span>}
+          {pinned ? (
+            liveCardWait(a) && <span className="badge blocked">{liveCardWait(a)}</span>
+          ) : (
+            a.waitingFor && <span className="badge blocked">{a.waitingFor}</span>
+          )}
+        </div>
+        {/* The work this session holds in flight, nested
+            under it (mesa tasks 1277, 1484): a subagent
+            leads with its type and description, a shell
+            with what its Bash call is for and the real
+            command dim underneath. Order is
+            `agentChild.ts`'s decision, not the server's. */}
+        {a.children.length > 0 && (
+          <ul className="agent-children">
+            {orderedChildren(a.children).map((child, i) => {
+              const childName = childHeadline(child)
+              const sub = childSubline(child)
+              const elapsed = childElapsed(child.startedAt, Date.now())
+              const childContext = formatContextTokens(child.contextTokens)
+              const paneId = a.id !== null ? childPaneId(a.id, child) : null
+              return (
+                <li key={`${child.kind}-${childLabel(child)}-${i}`}>
+                  <button
+                    type="button"
+                    className={
+                      `agent-child agent-child-${child.state} agent-child-of-${child.kind}` +
+                      (paneId !== null && openIds.includes(paneId)
+                        ? ' selected'
+                        : '')
+                    }
+                    // Opens this child as a read-only pane
+                    // beside its parent (mesa task 1278).
+                    // `stopPropagation` stays: the row
+                    // underneath toggles the parent's own
+                    // attach pane, and a tap on a card is
+                    // about the card.
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      if (a.id !== null) onToggleChildPane(a.id, child)
+                    }}
+                    // An interactive session has no pane id
+                    // to hang a child off — the same reason
+                    // its own row is not attachable.
+                    disabled={a.id === null}
+                  >
+                    <div className="agent-child-title">
+                      {/* Untrusted text from outside mesa:
+                          plain text nodes, never HTML or a
+                          URL, with the full string in
+                          `title`. */}
+                      <span className="agent-child-name" title={childName}>
+                        {childName}
+                      </span>
+                      {child.kind === 'subagent' && (
+                        <span className="agent-child-tag">sub-agent</span>
+                      )}
+                      <span className="muted agent-child-meta">
+                        {child.state === 'finished' && <span>finished</span>}
+                        {elapsed && (
+                          <span title={`running for ${elapsed}`}>{elapsed}</span>
+                        )}
+                        {childContext && (
+                          <span
+                            className="agent-child-context"
+                            title={`${child.contextTokens} tokens in the context window`}
+                          >
+                            {childContext}
+                          </span>
+                        )}
+                      </span>
+                    </div>
+                    {sub && (
+                      <div
+                        className={`agent-child-detail${child.kind === 'shell' ? ' agent-child-command' : ''}`}
+                        title={sub}
+                      >
+                        {child.kind === 'shell' ? `$ ${sub}` : sub}
+                      </div>
+                    )}
+                  </button>
+                </li>
+              )
+            })}
+          </ul>
+        )}
+      </li>
+    )
+  }
+
   return (
     <div className="agent-sidebar-list">
       {stopError && <p className="error">{stopError}</p>}
+      {live && (
+        <ul className="card-list agent-list agent-list-live">{renderCard(live, true)}</ul>
+      )}
       {error && !sessionsLoaded ? (
           <p className="error">{error}</p>
         ) : !sessionsLoaded ? (
           <p className="muted">Loading…</p>
-        ) : agents.length === 0 ? (
+        ) : agents.length === 0 && live === null ? (
           <p className="muted">No agents running.</p>
         ) : (
           BUCKETS.map((bucket) => {
@@ -692,193 +900,7 @@ function AgentListContent({
                 </button>
                 {!sectionCollapsed && (
                   <ul className="card-list agent-list">
-                    {bucketAgents.map((a) => {
-                      const proj = projectForCwd(a.cwd, projects ?? [])
-                      // Both may be absent (no transcript yet / no usage line
-                      // yet), and both then render nothing at all rather than
-                      // a placeholder that would read as an empty reply or as
-                      // zero tokens — see `agentRow.ts`.
-                      const context = formatContextTokens(a.contextTokens)
-                      // Absent on a session with no transcript yet, and then
-                      // rendered as nothing at all rather than an empty pill.
-                      const model = shortModel(a.model)
-                      const headline = agentHeadline(a)
-                      const label = agentLabel(a)
-                      const below = runningBelow(a.children)
-                      // The task chip links only when a project claims the
-                      // folder — the route needs the project id.
-                      const taskHref =
-                        a.taskId !== null && proj ? `#/projects/${proj.id}/tasks/${a.taskId}` : null
-                      return (
-                        <li
-                          key={a.sessionId}
-                          className={
-                            (a.id !== null ? 'attachable' : '') +
-                            (a.id !== null && openIds.includes(a.id) ? ' selected' : '')
-                          }
-                          onClick={() => {
-                            if (a.id !== null) onTogglePane(a.id)
-                          }}
-                        >
-                          <div className="agent-row-title">
-                            {/* The state as a dot, not a pill: the meta line
-                                below carries the words (mesa task 1484). */}
-                            <span
-                              className={`agent-card-dot agent-card-dot-${a.state ?? a.status ?? 'unknown'}`}
-                              title={[a.status, a.state].filter(Boolean).join(' · ') || 'unknown'}
-                            />
-                            {/* The card's one big sentence: what the agent
-                                is doing (`agentHeadline`), else its name.
-                                Model-authored text — a plain text node,
-                                never HTML — and the same string in `title`. */}
-                            <span className="agent-card-headline" title={headline ?? label}>
-                              {headline ?? label}
-                            </span>
-                            {/* Only a background session has a short job id,
-                                and `claude stop` takes exactly that — an
-                                interactive one has nothing to stop, the same
-                                reason its row is not attachable. No
-                                confirmation: the conversation survives a stop
-                                and `claude attach` resumes it, which is the
-                                reversibility mesa uses instead of a prompt. */}
-                            {a.id !== null && (
-                              <button
-                                type="button"
-                                className="agent-row-stop"
-                                title={`Stop this session (claude stop ${a.id}). The conversation is kept — claude attach ${a.id} resumes it.`}
-                                // The row underneath toggles the attach pane;
-                                // a press on the button is about the button.
-                                onClick={(e) => {
-                                  e.stopPropagation()
-                                  if (a.id !== null) onStop(a.id)
-                                }}
-                                disabled={stoppingIds.includes(a.id)}
-                              >
-                                stop
-                              </button>
-                            )}
-                          </div>
-                          {/* One faint line: name · kind · model · task or
-                              workspace · uptime · ctx · N running below. */}
-                          <div className="muted agent-card-meta">
-                            {headline && <span className="agent-card-meta-name">{label}</span>}
-                            <span>{a.kind}</span>
-                            {model && <span>{model}</span>}
-                            {a.taskId !== null ? (
-                              taskHref ? (
-                                <a
-                                  className="agent-card-task"
-                                  href={taskHref}
-                                  title={a.taskName ?? undefined}
-                                  onClick={(e) => e.stopPropagation()}
-                                >
-                                  task #{a.taskId}
-                                </a>
-                              ) : (
-                                <span className="agent-card-task" title={a.taskName ?? undefined}>
-                                  task #{a.taskId}
-                                </span>
-                              )
-                            ) : (
-                              <span className="agent-row-meta-where" title={proj ? proj.name : a.cwd}>
-                                {proj ? proj.name : a.cwd}
-                              </span>
-                            )}
-                            <span title={`started ${startedAgo(a.startedAt)}`}>{startedAgo(a.startedAt)}</span>
-                            {context && (
-                              <span
-                                className="agent-row-context"
-                                title={`${a.contextTokens} tokens in the context window`}
-                              >
-                                {context} ctx
-                              </span>
-                            )}
-                            {below && <span>{below}</span>}
-                            {a.id === null && <span>external terminal — not attachable</span>}
-                            {a.waitingFor && <span className="badge blocked">{a.waitingFor}</span>}
-                          </div>
-                          {/* The work this session holds in flight, nested
-                              under it (mesa tasks 1277, 1484): a subagent
-                              leads with its type and description, a shell
-                              with what its Bash call is for and the real
-                              command dim underneath. Order is
-                              `agentChild.ts`'s decision, not the server's. */}
-                          {a.children.length > 0 && (
-                            <ul className="agent-children">
-                              {orderedChildren(a.children).map((child, i) => {
-                                const childName = childHeadline(child)
-                                const sub = childSubline(child)
-                                const elapsed = childElapsed(child.startedAt, Date.now())
-                                const childContext = formatContextTokens(child.contextTokens)
-                                const paneId = a.id !== null ? childPaneId(a.id, child) : null
-                                return (
-                                  <li key={`${child.kind}-${childLabel(child)}-${i}`}>
-                                    <button
-                                      type="button"
-                                      className={
-                                        `agent-child agent-child-${child.state} agent-child-of-${child.kind}` +
-                                        (paneId !== null && openIds.includes(paneId)
-                                          ? ' selected'
-                                          : '')
-                                      }
-                                      // Opens this child as a read-only pane
-                                      // beside its parent (mesa task 1278).
-                                      // `stopPropagation` stays: the row
-                                      // underneath toggles the parent's own
-                                      // attach pane, and a tap on a card is
-                                      // about the card.
-                                      onClick={(e) => {
-                                        e.stopPropagation()
-                                        if (a.id !== null) onToggleChildPane(a.id, child)
-                                      }}
-                                      // An interactive session has no pane id
-                                      // to hang a child off — the same reason
-                                      // its own row is not attachable.
-                                      disabled={a.id === null}
-                                    >
-                                      <div className="agent-child-title">
-                                        {/* Untrusted text from outside mesa:
-                                            plain text nodes, never HTML or a
-                                            URL, with the full string in
-                                            `title`. */}
-                                        <span className="agent-child-name" title={childName}>
-                                          {childName}
-                                        </span>
-                                        {child.kind === 'subagent' && (
-                                          <span className="agent-child-tag">sub-agent</span>
-                                        )}
-                                        <span className="muted agent-child-meta">
-                                          {child.state === 'finished' && <span>finished</span>}
-                                          {elapsed && (
-                                            <span title={`running for ${elapsed}`}>{elapsed}</span>
-                                          )}
-                                          {childContext && (
-                                            <span
-                                              className="agent-child-context"
-                                              title={`${child.contextTokens} tokens in the context window`}
-                                            >
-                                              {childContext}
-                                            </span>
-                                          )}
-                                        </span>
-                                      </div>
-                                      {sub && (
-                                        <div
-                                          className={`agent-child-detail${child.kind === 'shell' ? ' agent-child-command' : ''}`}
-                                          title={sub}
-                                        >
-                                          {child.kind === 'shell' ? `$ ${sub}` : sub}
-                                        </div>
-                                      )}
-                                    </button>
-                                  </li>
-                                )
-                              })}
-                            </ul>
-                          )}
-                        </li>
-                      )
-                    })}
+                    {bucketAgents.map((a) => renderCard(a, false))}
                   </ul>
                 )}
               </div>
@@ -1105,7 +1127,7 @@ export function AgentSidebar({
   // the whole body and the tile area beside it goes to nothing. Distinct
   // from `maximized` below, which is the whole sidebar taking over the main
   // content area; the two are independent and compose.
-  const [listMaximized, setListMaximized] = useState(false)
+  const [listMaximized, setListMaximized] = useState(() => defaultListMaximized(isPhone()))
   const bodyRef = useRef<HTMLDivElement>(null)
   // Live size of the tile area, the box Auto Tile lays its grid out inside
   // (mesa task 466). Measured, not derived from `width`: that box is resized
@@ -1376,6 +1398,11 @@ export function AgentSidebar({
   // expanding it refetches at once (the `pollMs` change re-runs the effect);
   // `useFetch` drops a poll that changed nothing, so an idle list never
   // re-renders.
+  // The live conversation's agent, pinned atop the list (mesa task 1491). A
+  // cursor past every turn keeps the answer to the session row alone.
+  const { data: liveState } = useFetch(() => getLive(Number.MAX_SAFE_INTEGER), 'agents-sidebar-live', {
+    pollMs: collapsed ? undefined : 3000,
+  })
   const { data: projects } = useFetch(() => listProjects(), 'agents-sidebar-projects', {
     pollMs: collapsed ? undefined : 3000,
   })
@@ -1519,6 +1546,7 @@ export function AgentSidebar({
 
   const listProps: ListPaneProps = {
     agents,
+    liveAgentId: liveAgentId(liveState),
     sessionsLoaded: sessions !== null,
     error,
     projects,

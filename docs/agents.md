@@ -904,3 +904,21 @@ rest on one faint meta line (`name · kind · model · task or workspace · upti
   another pending call. `AgentChild.description`/`command` carry the result; an unpaired shell
   shows a neutral sentence and no command. Nesting is always under the session,
   since a `ps` row cannot say whether a subagent launched it.
+
+## Default card view and the pinned live agent (mesa task 1491)
+
+- **Opens as full-width cards.** `AgentSidebar` starts with the list rail
+  maximized (`agentLive.ts::defaultListMaximized`, off on the phone tier, which
+  keeps its own one-pane layout), and `App` folds the main panel (task 1485) on
+  the edge where the panel goes from collapsed to open, so the cards span the
+  row. Clicking a card opens its pane as before (`togglePane` already
+  un-maximizes); the fold and maximize can each still be undone by hand.
+- **The live conversation's agent is pinned** above the buckets with no section
+  header, in violet (`.agent-card-live`). It is found by `LiveSession.agent_id`
+  (from `GET /api/live`, polled beside the list; `liveAgentId` needs
+  `status: live`) matching `AgentSession.id` — the id a handoff rebinds, so it
+  is always the current driver. No live session, or a job `claude agents` does
+  not list, and there is no card.
+- **No state badge on it**: the dot is fixed violet, and `waitingFor` shows only
+  when `state` is `blocked` on a permission prompt (`liveCardWait`, the same
+  notion as `agents::blocked`, mesa task 1293).

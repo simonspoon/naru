@@ -11320,3 +11320,19 @@ body.live-panel-ratio-resizing .live-panel-divider {
     display: none;
   }
 }
+
+/* The live conversation's agent (mesa task 1491): pinned alone above the
+   buckets in violet — the colour this app already means by an agent — and
+   carrying no state colour of its own. */
+.agent-list-live {
+  margin-bottom: 0.75rem;
+}
+
+.agent-list .agent-card-live {
+  background: var(--violet-dim);
+  border-color: var(--violet-edge);
+}
+
+.agent-card-dot-live {
+  background: var(--violet);
+}
