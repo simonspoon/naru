@@ -130,14 +130,18 @@ import {
   saveLiveBoardWidth,
 } from '../liveBoardWidth'
 import {
-  clampLiveLayoutRatio,
   DEFAULT_LIVE_LAYOUT_RATIO,
+  dividerToRatio,
   loadLiveLayout,
-  saveBoardCollapsed,
-  saveChatCollapsed,
+  saveBoardHidden,
+  saveChatHidden,
   saveLiveArrangement,
   saveLiveLayoutRatio,
+  saveLiveSwapped,
+  togglePane,
+  visiblePanes,
   type LiveArrangement,
+  type LivePane,
 } from '../liveLayout'
 import { BARGE_IN_VAD, DEFAULT_VAD, initialVad, PRE_ROLL_MS, vadCut, vadStep } from '../liveVad'
 import {
@@ -448,20 +452,34 @@ const ReplayPendingIcon = () => (
   </ReplayIcon>
 )
 
-/** The chat section's own fold glyph (mesa task 1447) — `LiveBoardPanel`'s own
- *  `FoldMark`, redrawn here rather than exported: each panel already draws
- *  its own icons rather than importing the other's. */
-function FoldChevron({ expanded }: { expanded: boolean }) {
+/** The toolbar's show/hide-chat glyph (mesa task 1483): a speech bubble. */
+function ChatMark() {
   return (
     <svg
       className="live-icon-mark"
       viewBox="0 0 24 24"
-      width="14"
-      height="14"
+      width="15"
+      height="15"
       aria-hidden="true"
       focusable="false"
     >
-      <path d={expanded ? 'M6 9l6 6 6-6' : 'M6 15l6-6 6 6'} />
+      <path d="M4 5h16v11H9l-5 4z" />
+    </svg>
+  )
+}
+
+/** The toolbar's swap glyph: two arrows passing each other. */
+function SwapMark() {
+  return (
+    <svg
+      className="live-icon-mark"
+      viewBox="0 0 24 24"
+      width="15"
+      height="15"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path d="M4 8h15M15 4l4 4-4 4M20 16H5M9 12l-4 4 4 4" />
     </svg>
   )
 }
@@ -753,7 +771,8 @@ export function LiveHub({
   // nothing — the session, the audio and the capture box all carry on.
   const [open, setOpen] = useState(false)
   // The panel's two sections (mesa task 1447, `liveLayout.ts`): stacked or
-  // side by side, the divider's own position, and each section's fold — read
+  // side by side, the divider's own position, which are showing and which
+  // comes first (the toolbar's four toggles, mesa task 1483) — read
   // once at mount and written straight through to storage on every change, the
   // same discipline `width` below already keeps.
   const [layout, setLayout] = useState(() => loadLiveLayout())
@@ -761,13 +780,35 @@ export function LiveHub({
     saveLiveArrangement(arrangement)
     setLayout((l) => ({ ...l, arrangement }))
   }, [])
-  const foldBoard = useCallback((collapsed: boolean) => {
-    saveBoardCollapsed(collapsed)
-    setLayout((l) => ({ ...l, boardCollapsed: collapsed }))
+  const hasBoardsRef = useRef(false)
+  const togglePaneShown = useCallback((pane: LivePane) => {
+    setLayout((l) => {
+      const next = togglePane(l, pane, hasBoardsRef.current)
+      saveBoardHidden(next.boardHidden)
+      saveChatHidden(next.chatHidden)
+      return next
+    })
   }, [])
-  const foldChat = useCallback((collapsed: boolean) => {
-    saveChatCollapsed(collapsed)
-    setLayout((l) => ({ ...l, chatCollapsed: collapsed }))
+  const showBoard = useCallback(() => {
+    saveBoardHidden(false)
+    setLayout((l) => ({ ...l, boardHidden: false }))
+  }, [])
+  const hideBoard = useCallback(() => {
+    // Through the toggle, not a bare flag: hiding the board while the chat is
+    // hidden too must bring the chat back rather than empty the panel.
+    setLayout((l) => {
+      if (!visiblePanes(l, hasBoardsRef.current).board) return l
+      const next = togglePane(l, 'board', hasBoardsRef.current)
+      saveBoardHidden(next.boardHidden)
+      saveChatHidden(next.chatHidden)
+      return next
+    })
+  }, [])
+  const toggleSwapped = useCallback(() => {
+    setLayout((l) => {
+      saveLiveSwapped(!l.swapped)
+      return { ...l, swapped: !l.swapped }
+    })
   }, [])
   // The arrangement actually on screen right now, as opposed to the one
   // stored (mesa task 1447 fix round, finding 3): the phone tier's own
@@ -1202,7 +1243,7 @@ export function LiveHub({
     if (data === null || boardSeenBaseline.current !== undefined) return
     // Seeds silently: whatever this first response's boards already are is
     // the baseline, not a push — a page reloaded mid-conversation must show
-    // whatever fold state the person left it in (`mesa-live-board-collapsed`),
+    // whether the person left it hidden (`mesa-live-board-hidden`),
     // not force every board open again just because this mount has never
     // seen it before (mesa task 1447 fix round 1).
     boardSeenBaseline.current = boardSeen
@@ -1222,18 +1263,20 @@ export function LiveHub({
       // The conversation ended or its boards were cleared: nothing to expand
       // or open for a board that no longer exists.
       if (boardSeen === null) return
-      foldBoard(false)
+      showBoard()
       setOpen(true)
     }
     settle()
-  }, [boardSeen, foldBoard])
+  }, [boardSeen, showBoard])
   const hasBoards = boards.length > 0
-  // Whether each section is actually showing right now. Folding either one,
-  // or closing the panel altogether, takes it off screen without touching the
+  useEffect(() => {
+    hasBoardsRef.current = hasBoards
+  }, [hasBoards])
+  // Whether each section is actually showing right now. Hiding either one, or
+  // closing the panel altogether, takes it off screen without touching the
   // other's own state — `boardExpanded` is `false` with no boards at all
-  // (there is nothing to fold) as much as it is once folded.
-  const boardExpanded = hasBoards && !layout.boardCollapsed
-  const chatExpanded = !layout.chatCollapsed
+  // (there is nothing to show) as much as it is once hidden.
+  const { board: boardExpanded, chat: chatExpanded } = visiblePanes(layout, hasBoards)
 
   // The person's ink on the boards (mesa task 1353), by board id — held here
   // rather than in the panel because a turn this component sends is what
@@ -1315,6 +1358,10 @@ export function LiveHub({
   const [ratioResizing, setRatioResizing] = useState(false)
   const sectionsRef = useRef<HTMLDivElement | null>(null)
   const ratioRef = useRef(layout.ratio)
+  const swappedRef = useRef(layout.swapped)
+  useEffect(() => {
+    swappedRef.current = layout.swapped
+  }, [layout.swapped])
   useEffect(() => {
     ratioRef.current = layout.ratio
   }, [layout.ratio])
@@ -3308,7 +3355,7 @@ export function LiveHub({
         effectiveArrangement === 'side'
           ? (e.clientX - box.left) / box.width
           : (e.clientY - box.top) / box.height
-      const next = clampLiveLayoutRatio(fraction)
+      const next = dividerToRatio(fraction, swappedRef.current)
       ratioRef.current = next
       setLayout((l) => ({ ...l, ratio: next }))
     }
@@ -3736,8 +3783,8 @@ export function LiveHub({
       )}
       {/* Bringing the whiteboard back (mesa task 1113, folded into the panel
           by 1447): shown once there is history to show and the board section
-          is not currently showing it — folded, or the whole panel closed.
-          Expands the section *and* opens the panel, since a folded section
+          is not currently showing it — hidden, or the whole panel closed.
+          Shows the section *and* opens the panel, since a hidden section
           inside a closed panel is still nothing on screen. */}
       {hasBoards && !(open && boardExpanded) && (
         <button
@@ -3745,7 +3792,7 @@ export function LiveHub({
           className="live-toggle live-panel-toggle"
           aria-label="show the whiteboard"
           onClick={() => {
-            foldBoard(false)
+            showBoard()
             setOpen(true)
           }}
         >
@@ -3858,7 +3905,81 @@ export function LiveHub({
                   either in the page header, where it had to answer for a
                   conversation whose panel was usually shut, or nowhere. */}
               <div className="live-sidebar-head">
-                <div className="live-head-row">
+                {/* The one thin toolbar (mesa task 1483, replacing the
+                    per-pane fold arrows and pane headers): the four layout
+                    toggles on the left, the session's own state and presses
+                    on the right. Frozen ink locks the four, as it locked the
+                    fold buttons and the arrangement toggle they replace —
+                    each one moves or resizes the board the strokes are
+                    pinned to. With no board history there is one pane and
+                    nothing to lay out, so none of them is offered. */}
+                <div className="live-head-row live-toolbar">
+                  {hasBoards && (
+                    <div className="live-toolbar-panes">
+                      <button
+                        type="button"
+                        className="live-icon"
+                        aria-label={boardExpanded ? 'hide the whiteboard' : 'show the whiteboard'}
+                        title={boardExpanded ? 'Hide the board' : 'Show the board'}
+                        aria-pressed={boardExpanded}
+                        tabIndex={open ? undefined : -1}
+                        disabled={frozen}
+                        onClick={() => togglePaneShown('board')}
+                      >
+                        <BoardMark />
+                      </button>
+                      <button
+                        type="button"
+                        className="live-icon"
+                        aria-label={
+                          chatExpanded ? 'hide the conversation' : 'show the conversation'
+                        }
+                        title={chatExpanded ? 'Hide the chat' : 'Show the chat'}
+                        aria-pressed={chatExpanded}
+                        tabIndex={open ? undefined : -1}
+                        disabled={frozen}
+                        onClick={() => togglePaneShown('chat')}
+                      >
+                        <ChatMark />
+                      </button>
+                      <button
+                        type="button"
+                        className="live-icon live-panel-swap"
+                        aria-label="swap the whiteboard and the conversation"
+                        title="Swap board and chat"
+                        aria-pressed={layout.swapped}
+                        tabIndex={open ? undefined : -1}
+                        disabled={frozen}
+                        onClick={toggleSwapped}
+                      >
+                        <SwapMark />
+                      </button>
+                      {/* Stacked vs. side by side (mesa task 1447). The phone
+                          drawer forces a column, so the toggle would do
+                          nothing there. */}
+                      {!phone && (
+                        <button
+                          type="button"
+                          className="live-icon live-panel-arrange"
+                          aria-label={
+                            layout.arrangement === 'stacked'
+                              ? 'put the whiteboard beside the conversation'
+                              : 'put the whiteboard above the conversation'
+                          }
+                          title={
+                            layout.arrangement === 'stacked' ? 'Side by side' : 'Stacked'
+                          }
+                          tabIndex={open ? undefined : -1}
+                          disabled={frozen}
+                          onClick={() =>
+                            setArrangement(layout.arrangement === 'stacked' ? 'side' : 'stacked')
+                          }
+                        >
+                          <ArrangeMark side={layout.arrangement === 'side'} />
+                        </button>
+                      )}
+                    </div>
+                  )}
                   {/* Fixed box whether or not there is a state to draw, so the
                       row does not jump 44px sideways the moment the aperture
                       has something to say. */}
@@ -3874,6 +3995,11 @@ export function LiveHub({
                         than as "this path uses something else". */}
                     {path === 'auris' && recognizes && <LiveMeter level={level} />}
                   </div>
+                  {session !== null && (
+                    <span className="live-head-clock">
+                      <LiveElapsed startedAt={session.started_at} />
+                    </span>
+                  )}
                   <div className="live-head-actions">
                     {/* Muting Naru's voice (mesa task 1327), on Pause's terms:
                         live, and this browser is in it. The microphone and
@@ -3928,35 +4054,6 @@ export function LiveHub({
                         <EndMark />
                       </button>
                     )}
-                    {/* Stacked vs. side by side (mesa task 1447) — offered
-                        only once there is a board section to arrange against
-                        the chat, since a single section has nothing to lay
-                        out. Frozen ink locks it: switching axes while a
-                        stroke is unsent would move the section it is pinned
-                        to. */}
-                    {hasBoards && (
-                      <button
-                        type="button"
-                        className="live-icon live-panel-arrange"
-                        aria-label={
-                          layout.arrangement === 'stacked'
-                            ? 'put the whiteboard beside the conversation'
-                            : 'put the whiteboard above the conversation'
-                        }
-                        title={
-                          layout.arrangement === 'stacked'
-                            ? 'Side by side'
-                            : 'Stacked'
-                        }
-                        tabIndex={open ? undefined : -1}
-                        disabled={frozen}
-                        onClick={() =>
-                          setArrangement(layout.arrangement === 'stacked' ? 'side' : 'stacked')
-                        }
-                      >
-                        <ArrangeMark side={layout.arrangement === 'side'} />
-                      </button>
-                    )}
                     <button
                       type="button"
                       className="live-icon live-sidebar-close"
@@ -3974,20 +4071,25 @@ export function LiveHub({
                   </div>
                 </div>
 
-                {/* How long, and what this conversation is about. Both are
-                    shown only where they are actually known: a session that
-                    has not started has no clock, and an unscoped one has no
-                    project — a fabricated chip is worse than a missing one. */}
+                {/* One line under the toolbar: how full the driver's context
+                    is, the sentence for what the
+                    conversation is doing and, only where they are
+                    actually known, the chips — a fabricated chip is worse
+                    than a missing one. */}
                 <div className="live-head-meta">
-                  <span className="live-head-clock">
-                    {session !== null && (
-                      <>
-                        <LiveElapsed startedAt={session.started_at} />
-                        {contextLabel(data?.context_tokens) !== null && (
-                          <> · {contextLabel(data?.context_tokens)}</>
-                        )}
-                      </>
-                    )}
+                  {/* Only the context size, and only where the driver's is
+                      known: at the plain panel width (~416px) the toolbar has
+                      no room for it beside mute and pause, so it sits here
+                      while the clock stays at the toolbar's right. */}
+                  {session !== null && contextLabel(data?.context_tokens) !== null && (
+                    <span className="live-head-clock">
+                      {contextLabel(data?.context_tokens)}
+                    </span>
+                  )}
+                  <span
+                    className={`live-head-status ${actionError !== null ? 'error' : 'muted'}`}
+                  >
+                    {liveStatusLine(session, speaking, actionError, paused, path === 'unavailable')}
                   </span>
                   <span className="live-head-chips">
                     {recognizes && (
@@ -4037,16 +4139,6 @@ export function LiveHub({
                   </div>
                 )}
 
-                {/* The sentence under the instruments: what the conversation
-                    is doing in the words a person would use, and the one place
-                    a failed press is reported. The title above says the state
-                    in a word; this says why — "no agent is attached", "press
-                    Go live" — which a one-word title cannot. */}
-                <span
-                  className={`live-head-status ${actionError !== null ? 'error' : 'muted'}`}
-                >
-                  {liveStatusLine(session, speaking, actionError, paused, path === 'unavailable')}
-                </span>
               </div>
 
               {error && <p className="error">{error}</p>}
@@ -4056,17 +4148,20 @@ export function LiveHub({
                   history to show — the divider between them while both are
                   showing, and the chat. `LiveBoardPanel` is rendered
                   unconditionally whenever there is a board history, never
-                  gated on `boardExpanded`: folding is CSS, not unmounting —
-                  the reason lives with the component. */}
+                  gated on `boardExpanded`: hiding it is CSS, not unmounting —
+                  the reason lives with the component. Swapped is CSS `order`
+                  (App.css), so the board never remounts to change places. */}
               <div
                 ref={sectionsRef}
-                className={`live-panel-sections live-panel-${layout.arrangement}`}
+                className={`live-panel-sections live-panel-${layout.arrangement}${
+                  layout.swapped ? ' live-panel-swapped' : ''
+                }`}
               >
                 {hasBoards && (
                   <div
                     ref={boardSectionRef}
                     className={`live-panel-section live-panel-board live-board-section${
-                      boardExpanded ? '' : ' folded'
+                      boardExpanded ? '' : ' pane-hidden'
                     }`}
                     // The ratio sets the section's *share*; the frozen
                     // min-size is a floor under it, not an alternative to it
@@ -4088,7 +4183,7 @@ export function LiveHub({
                     <LiveBoardPanel
                       boards={boards}
                       expanded={boardExpanded}
-                      onToggleFold={() => foldBoard(boardExpanded)}
+                      onHide={hideBoard}
                       ink={ink}
                       onInk={updateInk}
                       flattenRef={flattenInk}
@@ -4116,7 +4211,7 @@ export function LiveHub({
 
                 <div
                   className={`live-panel-section live-panel-chat${
-                    chatExpanded ? '' : ' folded'
+                    chatExpanded ? '' : ' pane-hidden'
                   }`}
                   style={
                     hasBoards && boardExpanded && chatExpanded
@@ -4124,32 +4219,6 @@ export function LiveHub({
                       : undefined
                   }
                 >
-                  {/* The chat's own fold header — offered only once there is a
-                      board to fold it against, exactly as the arrangement
-                      toggle above is: a single section has nothing to give its
-                      space to. */}
-                  {hasBoards && (
-                    <div className="live-panel-section-head">
-                      <span className="live-panel-section-title">Conversation</span>
-                      <button
-                        type="button"
-                        className="live-icon live-panel-fold"
-                        aria-label={
-                          chatExpanded ? 'fold the conversation' : 'show the conversation'
-                        }
-                        // Frozen ink pins the board section's size against the
-                        // ratio (`frozenSize` below); folding chat out from
-                        // under it would still hand the board 100% of the
-                        // panel via `.live-panel-section:not(.folded)`'s own
-                        // `flex: 1`, resizing it anyway. Locked in step with
-                        // the arrangement toggle and the divider drag.
-                        disabled={frozen}
-                        onClick={() => foldChat(chatExpanded)}
-                      >
-                        <FoldChevron expanded={chatExpanded} />
-                      </button>
-                    </div>
-                  )}
                   {chatExpanded && (
                     <>
                       <div className="live-transcript" ref={scroller}>

@@ -9714,8 +9714,8 @@ button:focus-visible,
 
 /* Each section is a flex item along whichever axis the arrangement picked;
    `LiveHub` sets `flexBasis` inline to the divider's ratio while both are
-   showing, and CSS alone decides the rest: a folded section shrinks to its
-   own header strip and its sibling is free to fill what it gave up. */
+   showing, and CSS alone decides the rest: a hidden section is gone
+   entirely (no rail) and its sibling fills what it gave up. */
 .live-panel-section {
   display: flex;
   flex-direction: column;
@@ -9723,12 +9723,28 @@ button:focus-visible,
   min-width: 0;
 }
 
-.live-panel-section:not(.folded) {
+.live-panel-section:not(.pane-hidden) {
   flex: 1 1 0%;
 }
 
-.live-panel-section.folded {
-  flex: none;
+/* `display: none`, never unmounted: the board's `<iframe>` keeps its
+   document (`LiveBoardPanel`'s module note). */
+.live-panel-section.pane-hidden {
+  display: none;
+}
+
+/* Swapped (mesa task 1483): chat first. Only `order` moves — the board stays
+   mounted where it is, so its frame is not torn down to change places. */
+.live-panel-swapped > .live-panel-chat {
+  order: 1;
+}
+
+.live-panel-swapped > .live-panel-divider {
+  order: 2;
+}
+
+.live-panel-swapped > .live-board-section {
+  order: 3;
 }
 
 /* The divider between the two sections, when both are showing — the
@@ -9760,36 +9776,6 @@ body.live-panel-ratio-resizing .live-panel-divider {
   background: var(--cyan-dim, rgba(0, 229, 255, 0.3));
 }
 
-/* A section's own fold header (the chat section's — the board section draws
-   its equivalent controls into `.live-board-head` instead, since it already
-   has one). One line: a name, and the same fold glyph the board's button
-   wears. */
-.live-panel-section-head {
-  flex: none;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding-bottom: 0.35rem;
-}
-
-.live-panel-section-title {
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 1.4px;
-  text-transform: uppercase;
-  color: var(--muted);
-}
-
-/* Folded: the name is what was keeping the strip as wide (side arrangement)
-   or as tall (stacked, since it forced `justify-content: space-between` to
-   spread the row) as itself — `.live-panel-section.folded` is only
-   `flex: none` above, a content-based size, so a long title kept the strip
-   from ever shrinking to its fold button. Dropping the name leaves just that
-   button and the head's own padding, mesa task 1474. */
-.live-panel-section.folded .live-panel-section-title {
-  display: none;
-}
-
 /* The whiteboard section itself — what used to be `.live-board`'s own
    floating overlay (mesa task 1071), folded into the panel by mesa task
    1447. No more absolute position, no more own width: this is now sized by
@@ -9811,23 +9797,12 @@ body.live-panel-ratio-resizing .live-panel-divider {
    nested one level inside the flex item above (`LiveHub`'s wrapper div) —
    this selector's `>` is what tells the two apart. Only the inner one needs
    to be a flex column filling its slot: the outer wrapper already gets its
-   size from `.live-panel-section`'s own flex rules above, and a `folded`
-   outer wrapper is `flex: none` sized to its header — giving it `height:
-   100%` too would hand a folded section the whole panel's height instead
-   (the regression this comment now guards against). */
+   size from `.live-panel-section`'s own flex rules above. */
 .live-panel-section > .live-board-section {
   display: flex;
   flex-direction: column;
   height: 100%;
   min-height: 0;
-}
-
-/* Folded: the section shrinks to its own head row and the stage under it is
-   clipped away — never unmounted, so a framed board's `<iframe>` keeps its
-   document rather than reloading it on every unfold (`LiveBoardPanel`'s own
-   module note). */
-.live-board-section.folded .live-board-stage {
-  display: none;
 }
 
 /* Maximised: the section escapes the panel's own layout and fills the
@@ -9845,6 +9820,7 @@ body.live-panel-ratio-resizing .live-panel-divider {
 }
 
 .live-board-body {
+  position: relative;
   flex: 1;
   min-height: 0;
   width: 100%;
@@ -9854,17 +9830,28 @@ body.live-panel-ratio-resizing .live-panel-divider {
   padding: 0.75rem;
 }
 
-/* The head is `.live-sidebar-head`'s one-row form: this panel has a name, a
-   kind and a place in the history to show, and nothing that is *happening*. */
-.live-board-head {
-  gap: 0;
+/* The board's own tools (mesa task 1483, replacing its title header): a small
+   cluster floating over the stage's top-right corner. The stage scrolls
+   underneath it. */
+.live-board-tools {
+  position: absolute;
+  top: calc(0.75rem + 6px);
+  right: calc(0.75rem + 6px);
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px;
+  background: rgba(6, 10, 16, 0.85);
+  border: 1px solid var(--border);
 }
 
-.live-board-kind {
-  align-self: flex-start;
+.live-board-tools .live-icon {
+  width: 28px;
+  height: 28px;
 }
 
-/* ‹ N/M › — the history, beside the close button. */
+/* ‹ N/M › — the history. */
 .live-board-steps {
   display: inline-flex;
   align-items: center;
@@ -9987,28 +9974,13 @@ body.live-panel-ratio-resizing .live-panel-divider {
   border: 1px solid var(--border);
 }
 
-/* The board's name is the document's title: the head's display line, lit
-   like every other h1/h2 in the app (index.css). */
-.live-board-head .live-head-title {
-  text-shadow: 0 0 12px var(--cyan-dim);
-}
-
-/* Folded, the board's own name is what kept the strip as wide/tall as itself
- * — `.live-head-say` holds the title (and, expanded, the kind chip), and
- * `.live-board-section.folded` is a content-based `flex: none` size, so a
- * long board title never let it shrink to just the fold button beside it.
- * Same fix as `.live-panel-section-title` above, mesa task 1474. */
-.live-board-section.folded .live-head-say {
-  display: none;
-}
-
 /* The head (mesa task 1069): the panel's instrument cluster — three stacked
    rows, of which only the first is ever busy. */
 .live-sidebar-head {
   display: flex;
   flex-direction: column;
-  gap: 0.35rem;
-  padding-bottom: 0.5rem;
+  gap: 0.25rem;
+  padding-bottom: 0.4rem;
   border-bottom: 1px solid var(--border);
 }
 
@@ -10019,6 +9991,64 @@ body.live-panel-ratio-resizing .live-panel-divider {
   display: flex;
   align-items: center;
   gap: 0.75rem;
+}
+
+/* The one thin toolbar (mesa task 1483): the layout toggles on the left, the
+   session's state and presses on the right, in one ~32px row — the 28px
+   squares below are what keep it that thin. The wider `.live-icon` stays for
+   everything that is not in a toolbar. */
+.live-toolbar {
+  gap: 6px;
+  min-height: 32px;
+}
+
+.live-toolbar .live-icon {
+  width: 28px;
+  height: 28px;
+}
+
+.live-toolbar-panes {
+  flex: none;
+  display: flex;
+  gap: 4px;
+  padding-right: 6px;
+  border-right: 1px solid var(--border);
+}
+
+.live-toolbar .live-icon[aria-pressed='true'] {
+  color: var(--cyan);
+  border-color: var(--cyan-dim, rgba(0, 229, 255, 0.3));
+}
+
+/* Its own colour wins over the generic toggle-on tint above: the mute switch
+   and the mic are pressed *when something is being held back*. */
+.live-toolbar .live-icon-speech[aria-pressed='true'] {
+  color: var(--amber);
+  border-color: rgba(255, 180, 68, 0.5);
+}
+
+.live-toolbar .live-head-aperture {
+  width: 28px;
+  height: 28px;
+}
+
+.live-toolbar .live-head-say {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+.live-toolbar .live-head-title {
+  font-size: 12px;
+  letter-spacing: 1.2px;
+}
+
+.live-toolbar .live-meter {
+  max-width: 60px;
+}
+
+.live-toolbar .live-head-actions {
+  gap: 4px;
 }
 
 /* Held at the aperture's own size whether or not there is a state to draw, so
@@ -10042,8 +10072,8 @@ body.live-panel-ratio-resizing .live-panel-divider {
 
 /* The one line of display type in the panel: this is the conversation's own
    name for what it is doing, and Orbitron is what this app titles things in.
-   Ellipsised rather than wrapped — the row is 44px tall by the aperture
-   beside it, and a second line would push the meter out of it. */
+   Ellipsised rather than wrapped — the toolbar row is one line tall by
+   design, and a second line would push it taller. */
 .live-head-title {
   font-family: var(--font-display);
   font-weight: 600;
@@ -10084,10 +10114,10 @@ body.live-panel-ratio-resizing .live-panel-divider {
   gap: 8px;
 }
 
-/* A 44px square with a drawn glyph in it, in the colour of what it does: the
-   head has room for three presses or for three words, and it wants three
-   presses. Sized to the touch target the phone tier needs, so the same button
-   serves both tiers. */
+/* A 44px square with a drawn glyph in it, in the colour of what it does — the
+   default size outside the toolbar (the composer's mic, say), sized to the
+   touch target the phone tier needs. Inside `.live-toolbar` it is 28px (32px
+   on the phone tier) so the row stays one thin line. */
 .live-icon {
   width: 44px;
   height: 44px;
@@ -10222,7 +10252,17 @@ body.live-panel-ratio-resizing .live-panel-divider {
    title cannot say — that no agent is attached, or that the last press
    failed. */
 .live-head-status {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 0.75rem;
+}
+
+.live-head-meta .live-chip {
+  height: 20px;
+  line-height: 18px;
 }
 
 /* The server's speech engine is not ready (mesa task 1390): the sentence, the
@@ -10564,7 +10604,7 @@ body.live-panel-ratio-resizing .live-panel-divider {
      question the comment above used to answer): the board is a section of
      this same drawer now, so forcing the arrangement to stacked is all this
      tier needs — there is no room on a 390px screen for a divider to run
-     sideways, and a folded section still gives its space to the other one
+     sideways, and a hidden section still gives its space to the other one
      exactly as the desktop tiers do. */
   .live-panel-side {
     flex-direction: column;
@@ -10582,12 +10622,38 @@ body.live-panel-ratio-resizing .live-panel-divider {
     cursor: row-resize;
   }
 
-  /* The head's meter is the first thing to give at 390px, and the only one:
-     the title has to stay readable and the three presses have to stay 44px
-     to stay pressable, so the one part of the row with no words in it is
-     what goes. */
+  /* The toolbar's meter is the first thing to give at 390px: the presses have
+     to stay pressable, so the one part of the row with no words in it is what
+     goes. */
   .live-meter {
     display: none;
+  }
+
+  /* The toolbar keeps every toggle and press at this width by giving up the
+     one thing with only words in it. */
+  .live-toolbar .live-head-title {
+    display: none;
+  }
+
+  .live-toolbar .live-icon {
+    width: 30px;
+    height: 30px;
+  }
+
+  /* Tighter gaps: with the clock in the row, 32px squares at the default gaps
+     ran the row 12px past the drawer, and 30px squares at these gaps is what
+     leaves the last control a margin inside it. */
+  .live-toolbar {
+    gap: 4px;
+  }
+
+  .live-toolbar-panes {
+    gap: 2px;
+    padding-right: 4px;
+  }
+
+  .live-toolbar .live-head-actions {
+    gap: 2px;
   }
 
   .live-head-row {

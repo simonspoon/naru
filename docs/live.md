@@ -1517,14 +1517,31 @@ never stored, `null` for every session that was not a live driver.
 
 As of mesa task 1447 the whiteboard is no longer its own floating overlay: it
 is a **section** of the conversation panel itself (`frontend/src/liveLayout.ts`),
-stacked above the chat by default or dragged to sit beside it, each section
-foldable on its own header strip and the panel widening to make room — so an
-open board pushes the page over rather than covering it, and closing either
-section hands its space straight to the other. `LiveBoardPanel` still renders
-in one fixed place in the tree regardless (never conditionally, so a framed
-board's `<iframe>` survives a fold), and every control below — the drag, the
-maximise, Escape, the reopen — carries over unchanged, now scoped to the
-section rather than to a panel of its own.
+stacked above the chat by default or dragged to sit beside it, and the panel
+widening to make room — so an open board pushes the page over rather than
+covering it, and hiding either section hands its space straight to the other.
+Since mesa task 1483 the layout is driven by **one thin toolbar** (~32px) at the
+top of the panel — no per-pane fold arrows and no pane title headers: on the
+left four icon toggles (show/hide board, show/hide chat, swap board and chat,
+stacked vs. side by side), on the right the session's own state — aperture,
+state word, level meter, clock — and its presses (mute voice, pause, end,
+close); the context size sits on the one status line under it, since the
+toolbar's fixed-size controls leave it no room at the plain panel width. A hidden pane is `display: none`, not a rail: the other
+fills the panel. Hiding the *last* visible pane shows the other instead, so the
+panel is never empty, and with no board history the chat is the only pane and
+none of the four toggles is offered (the stacked/side toggle is also dropped
+on the phone tier, whose drawer forces a column). Frozen ink locks all four,
+as each would move the board the strokes are pinned to. The prefs are
+localStorage flags beside the arrangement and ratio (`mesa-live-board-hidden`,
+`mesa-live-chat-hidden`, `mesa-live-swapped`); the retired
+`mesa-live-*-collapsed` keys are ignored. Swap is CSS `order`, and the stored
+ratio is always the board's share whichever pane is first. The board's own
+tools (history `‹ N/M ›`, pen, undo, clear, maximise) are a small cluster
+floating over the stage's corner, with its title and kind as the tooltip.
+`LiveBoardPanel` still renders in one fixed place in the tree regardless
+(never conditionally, so a framed board's `<iframe>` survives a hide), and
+every control below — the drag, the maximise, Escape, the reopen — carries
+over unchanged, now scoped to the section rather than to a panel of its own.
 
 The width is still a drag handle, but it is now the **panel's** — one handle
 on the aside's left edge, editing one of **two** stored widths
@@ -1536,38 +1553,28 @@ actually drags: the aside then sets no inline `--live-sidebar-width` at all
 and App.css's `min()` decides, `min(26rem, 40vw)` for the plain panel or
 `min(56rem, 60vw)` (`.live-sidebar.board-open`) once a board section is
 expanded. Which of the two a drag edits, and which default applies, follows
-from whether the board section is expanded, read live rather than stored — a
-folded section or an empty history means the plain default, however the board
-was last sized. A maximise button in the board section's own head still fills
+from whether the board section is showing, read live rather than stored — a
+hidden section or an empty history means the plain default, however the board
+was last sized. A maximise button in the board's tool cluster still fills
 the whole viewport with it (`position: fixed; inset: 0`, no longer `100%` of
 `.main-slot`, since the section no longer sits inside that box), and Escape
 still restores a maximised board first and, once it is back at its normal
-size, **folds the section** rather than closing a panel of its own — one press
+size, **hides the section** rather than closing a panel of its own — one press
 should never do both.
-A folded section is brought back by its own fold button (a chevron on its
-header strip) or, if the whole panel is closed too, by the `show the
-whiteboard` press beside the conversation toggle in the header (mesa task
-1113), offered only while the conversation has a board and it is not both
-open and expanded already: it expands the section and opens the panel without
-touching `seen`, so the rule that only a *newer* board does that on its own is
-unchanged — and, since a mesa task 1447 fix, that rule now also spares a page
-that merely *reloaded*: the first poll after mount seeds what this component
-has seen without expanding or opening anything, so a section the person folded
-before reloading stays folded, and only a board pushed *after* that baseline
-poll counts as new.
-
-Folding either section is **`display: none`** on its stage, not a width or a
-clip-path: a folded section shrinks to its own header strip on a plain flex
-`flex: none`, and its sibling's `flex: 1 1 0%` claims the room this gives up.
-That is deliberately not the open/close transition the panel itself still
-uses — a *board* section's stage holds the `<iframe>` this whole design exists
-to keep alive (a torn-down frame reloads its document), and `display: none`,
-unlike a width or clip-path animated across several frames, hides it in the
-one frame the fold happens in with nothing to re-lay-out along the way.
+A hidden section is brought back by its toolbar toggle or, if the whole panel
+is closed too, by the `show the whiteboard` press beside the conversation
+toggle in the header (mesa task 1113), offered only while the conversation has
+a board and it is not both open and showing already: it shows the section and
+opens the panel, without touching `seen`, so the rule that only a *newer* board
+does that on its own is unchanged — and, since a mesa task 1447 fix, that rule
+also spares a page that merely *reloaded*: the first poll after mount seeds what
+this component has seen without showing or opening anything, so a section the
+person hid before reloading stays hidden, and only a board pushed *after* that
+baseline poll counts as new.
 
 ### Ink: the person's pen on a board (mesa task 1353)
 
-The panel's head carries a **pen** toggle. With it on, a drag draws on a canvas
+The board's tool cluster carries a **pen** toggle. With it on, a drag draws on a canvas
 laid exactly over the board, with **undo** and **clear** beside it; with it off
 the canvas takes no pointer at all, so the board scrolls and an HTML mockup
 takes clicks exactly as before. The ink is the person's and **local**: held

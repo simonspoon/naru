@@ -45,7 +45,7 @@ import { Markdown } from './Markdown'
  * conversation panel (mesa task 1447, folded in from a floating overlay of
  * its own) showing the one board the agent pushed last, with the history
  * behind it a step away. `LiveHub` renders this component in one fixed place
- * in the panel's tree whether or not the section is folded — see `expanded`
+ * in the panel's tree whether or not the section is showing — see `expanded`
  * below for why it is never conditionally rendered.
  *
  * The panel is a **reader**. There is no board write route at all: boards are
@@ -141,25 +141,6 @@ function BoardMarkdown({ id }: { id: number }) {
     <div className="live-board-markdown markdown-body markdown-doc">
       <Markdown text={data} />
     </div>
-  )
-}
-
-/** The fold button's glyph (mesa task 1447) — a chevron pointing the
- *  direction the press collapses towards, `LiveHub`'s `ArrangeMark`'s own
- *  vocabulary for this button rather than the close cross this replaced,
- *  since the section is never destroyed, only put away. */
-function FoldMark({ expanded }: { expanded: boolean }) {
-  return (
-    <svg
-      className="live-icon-mark"
-      viewBox="0 0 24 24"
-      width="14"
-      height="14"
-      aria-hidden="true"
-      focusable="false"
-    >
-      <path d={expanded ? 'M6 9l6 6 6-6' : 'M6 15l6-6 6 6'} />
-    </svg>
   )
 }
 
@@ -437,7 +418,7 @@ async function flattenAt(
 export function LiveBoardPanel({
   boards,
   expanded,
-  onToggleFold,
+  onHide,
   ink,
   onInk,
   flattenRef,
@@ -446,14 +427,14 @@ export function LiveBoardPanel({
   /** The conversation's whole board history, oldest first and bodiless — the
    *  `boards` array of the poll `LiveHub` already makes, never a second one. */
   boards: LiveBoardSummary[]
-  /** Whether the section is folded open — CSS-driven, never a reason to skip
+  /** Whether the section is showing — CSS-driven, never a reason to skip
    *  mounting this component: an `<iframe>` that is torn down reloads its
-   *  document on every unfold, and a board is a snapshot that should look the
+   *  document on every re-show, and a board is a snapshot that should look the
    *  same each time it is looked at. */
   expanded: boolean
-  /** Toggles the section's own fold and nothing else: there is no route
-   *  behind this. */
-  onToggleFold: () => void
+  /** Hides the section (Escape, once nothing is maximised) and nothing else:
+   *  there is no route behind this. */
+  onHide: () => void
   /** Every board's ink, held by the hub so a turn it sends can carry it. */
   ink: InkBook
   /** The one write path for `ink`. */
@@ -516,7 +497,7 @@ export function LiveBoardPanel({
   const asideRef = useRef<HTMLDivElement | null>(null)
 
   // Escape is the way out of whatever the section is currently doing: it
-  // restores a maximised board first, and only folds the section once the
+  // restores a maximised board first, and only hides the section once the
   // board is back at its normal size — one press should never do both. Bound
   // only while expanded, so it never swallows an Escape the rest of the app
   // wants while there is nothing to see.
@@ -530,11 +511,11 @@ export function LiveBoardPanel({
       // 1354) stands down while it is closing the board.
       e.preventDefault()
       if (maximized) setMaximized(false)
-      else onToggleFold()
+      else onHide()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [expanded, frozen, maximized, onToggleFold])
+  }, [expanded, frozen, maximized, onHide])
 
   // ---- the pen (mesa task 1353) ----
 
@@ -704,123 +685,101 @@ export function LiveBoardPanel({
   return (
     <div
       ref={asideRef}
-      className={`live-board-section${expanded ? '' : ' folded'}${
+      className={`live-board-section${
         maximized ? ' maximized' : ''
       }`}
       aria-label="the live whiteboard"
     >
       <div className="live-board-body">
-        <div className="live-sidebar-head live-board-head">
-          <div className="live-head-row">
-            <div className="live-head-say">
-              <div className="live-head-title">
-                {showing === null ? 'Whiteboard' : boardTitle(showing)}
-              </div>
-              {showing !== null && expanded && (
-                <span className="live-chip live-board-kind">{showing.kind}</span>
-              )}
-            </div>
-            <div className="live-head-actions">
-              {/* The history, and the pen/maximize controls beside it: none of
-                  them mean anything on a folded strip with no stage under it. */}
-              {expanded && (
-                <>
-                  {/* Shown once there is more than one board: a single board
-                      has nothing to step through, and `‹ 1/1 ›` reads as two
-                      buttons that are broken. */}
-                  {boards.length > 1 && (
-                    <div className="live-board-steps">
-                      <button
-                        type="button"
-                        className="live-board-step"
-                        aria-label="the previous board"
-                        disabled={first || frozen}
-                        onClick={() => step(-1)}
-                      >
-                        ‹
-                      </button>
-                      <span className="live-board-count">
-                        {at}/{boards.length}
-                      </span>
-                      <button
-                        type="button"
-                        className="live-board-step"
-                        aria-label="the next board"
-                        disabled={last || frozen}
-                        onClick={() => step(1)}
-                      >
-                        ›
-                      </button>
-                    </div>
-                  )}
-                  {/* The pen, and while it is on, its undo and clear. */}
-                  {showing !== null && (
-                    <button
-                      type="button"
-                      className="live-icon live-board-pen"
-                      aria-label={pen ? 'put the pen down' : 'draw on the whiteboard'}
-                      aria-pressed={pen}
-                      title={pen ? 'Stop drawing' : 'Draw on the board'}
-                      onClick={() => setPen((on) => !on)}
-                    >
-                      <PenMark />
-                    </button>
-                  )}
-                  {pen && showing !== null && (
-                    <>
-                      <button
-                        type="button"
-                        className="live-icon live-board-undo"
-                        aria-label="undo the last stroke"
-                        title="Undo"
-                        disabled={(showingInk?.strokes.length ?? 0) === 0}
-                        onClick={undo}
-                      >
-                        <UndoMark />
-                      </button>
-                      <button
-                        type="button"
-                        className="live-icon live-board-clear"
-                        aria-label="clear the ink"
-                        title="Clear the ink"
-                        disabled={(showingInk?.strokes.length ?? 0) === 0}
-                        onClick={clear}
-                      >
-                        <ClearMark />
-                      </button>
-                    </>
-                  )}
-                  <button
-                    type="button"
-                    className="live-icon live-board-maximize"
-                    aria-label={
-                      maximized
-                        ? 'restore the whiteboard'
-                        : 'fill the page with the whiteboard'
-                    }
-                    title={maximized ? 'Restore (Esc)' : 'Fill the page'}
-                    disabled={frozen}
-                    onClick={() => setMaximized((m) => !m)}
-                  >
-                    <MaximizeMark restore={maximized} />
-                  </button>
-                </>
-              )}
-              {/* Folds the section (mesa task 1447 — this used to close the
-                  whole floating panel). Always shown, even folded: it is the
-                  section's own way back open, beside the panel head's reopen
-                  button. */}
+        {/* No title header (mesa task 1483): the pane toggles live in the
+            panel's toolbar. What is left is the board's own tools — the
+            history, the pen and maximise — as a small cluster floating over
+            the stage's top-right corner, and the board's title and kind as
+            its tooltip. */}
+        <div
+          className="live-board-tools"
+          title={showing === null ? 'Whiteboard' : `${boardTitle(showing)} · ${showing.kind}`}
+        >
+          {/* The history, and the pen/maximize controls beside it. */}
+          {/* Shown once there is more than one board: a single board
+              has nothing to step through, and `‹ 1/1 ›` reads as two
+              buttons that are broken. */}
+          {boards.length > 1 && (
+            <div className="live-board-steps">
               <button
                 type="button"
-                className="live-icon live-board-close"
-                aria-label={expanded ? 'fold the whiteboard' : 'show the whiteboard'}
-                disabled={frozen}
-                onClick={onToggleFold}
+                className="live-board-step"
+                aria-label="the previous board"
+                disabled={first || frozen}
+                onClick={() => step(-1)}
               >
-                <FoldMark expanded={expanded} />
+                ‹
+              </button>
+              <span className="live-board-count">
+                {at}/{boards.length}
+              </span>
+              <button
+                type="button"
+                className="live-board-step"
+                aria-label="the next board"
+                disabled={last || frozen}
+                onClick={() => step(1)}
+              >
+                ›
               </button>
             </div>
-          </div>
+          )}
+          {/* The pen, and while it is on, its undo and clear. */}
+          {showing !== null && (
+            <button
+              type="button"
+              className="live-icon live-board-pen"
+              aria-label={pen ? 'put the pen down' : 'draw on the whiteboard'}
+              aria-pressed={pen}
+              title={pen ? 'Stop drawing' : 'Draw on the board'}
+              onClick={() => setPen((on) => !on)}
+            >
+              <PenMark />
+            </button>
+          )}
+          {pen && showing !== null && (
+            <>
+              <button
+                type="button"
+                className="live-icon live-board-undo"
+                aria-label="undo the last stroke"
+                title="Undo"
+                disabled={(showingInk?.strokes.length ?? 0) === 0}
+                onClick={undo}
+              >
+                <UndoMark />
+              </button>
+              <button
+                type="button"
+                className="live-icon live-board-clear"
+                aria-label="clear the ink"
+                title="Clear the ink"
+                disabled={(showingInk?.strokes.length ?? 0) === 0}
+                onClick={clear}
+              >
+                <ClearMark />
+              </button>
+            </>
+          )}
+          <button
+            type="button"
+            className="live-icon live-board-maximize"
+            aria-label={
+              maximized
+                ? 'restore the whiteboard'
+                : 'fill the page with the whiteboard'
+            }
+            title={maximized ? 'Restore (Esc)' : 'Fill the page'}
+            disabled={frozen}
+            onClick={() => setMaximized((m) => !m)}
+          >
+            <MaximizeMark restore={maximized} />
+          </button>
         </div>
 
         {/* The stage holds the content box and the ink canvas laid exactly

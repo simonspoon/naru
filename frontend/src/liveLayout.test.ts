@@ -3,15 +3,21 @@ import {
   clampLiveLayoutRatio,
   DEFAULT_ARRANGEMENT,
   DEFAULT_LIVE_LAYOUT_RATIO,
-  loadBoardCollapsed,
-  loadChatCollapsed,
+  dividerToRatio,
+  loadBoardHidden,
+  loadChatHidden,
+  loadLiveSwapped,
+  paneOrder,
+  saveBoardHidden,
+  saveChatHidden,
+  saveLiveSwapped,
+  togglePane,
+  visiblePanes,
   loadLiveArrangement,
   loadLiveLayout,
   loadLiveLayoutRatio,
   MAX_LIVE_LAYOUT_RATIO,
   MIN_LIVE_LAYOUT_RATIO,
-  saveBoardCollapsed,
-  saveChatCollapsed,
   saveLiveArrangement,
   saveLiveLayoutRatio,
 } from './liveLayout'
@@ -82,31 +88,40 @@ describe('ratio load/save', () => {
   })
 })
 
-describe('collapsed flags', () => {
+describe('hidden and swapped flags', () => {
   beforeEach(() => {
     localStorage.clear()
   })
 
-  it('default to expanded — nothing stored means no opinion', () => {
-    expect(loadBoardCollapsed()).toBe(false)
-    expect(loadChatCollapsed()).toBe(false)
+  it('default to showing, unswapped — nothing stored means no opinion', () => {
+    expect(loadBoardHidden()).toBe(false)
+    expect(loadChatHidden()).toBe(false)
+    expect(loadLiveSwapped()).toBe(false)
   })
 
   it('round-trip independently of each other', () => {
-    saveBoardCollapsed(true)
-    expect(loadBoardCollapsed()).toBe(true)
-    expect(loadChatCollapsed()).toBe(false)
-    saveChatCollapsed(true)
-    expect(loadChatCollapsed()).toBe(true)
-    saveBoardCollapsed(false)
-    expect(loadBoardCollapsed()).toBe(false)
-    expect(loadChatCollapsed()).toBe(true)
+    saveBoardHidden(true)
+    expect(loadBoardHidden()).toBe(true)
+    expect(loadChatHidden()).toBe(false)
+    saveChatHidden(true)
+    saveLiveSwapped(true)
+    saveBoardHidden(false)
+    expect(loadBoardHidden()).toBe(false)
+    expect(loadChatHidden()).toBe(true)
+    expect(loadLiveSwapped()).toBe(true)
   })
 
   it('writes no key at all for the false state a fresh browser starts in', () => {
-    saveBoardCollapsed(true)
-    saveBoardCollapsed(false)
-    expect(localStorage.getItem('mesa-live-board-collapsed')).toBeNull()
+    saveBoardHidden(true)
+    saveBoardHidden(false)
+    expect(localStorage.getItem('mesa-live-board-hidden')).toBeNull()
+  })
+
+  it('ignores the retired collapsed keys', () => {
+    localStorage.setItem('mesa-live-board-collapsed', 'true')
+    localStorage.setItem('mesa-live-chat-collapsed', 'true')
+    expect(loadBoardHidden()).toBe(false)
+    expect(loadChatHidden()).toBe(false)
   })
 })
 
@@ -119,20 +134,86 @@ describe('loadLiveLayout', () => {
     expect(loadLiveLayout()).toEqual({
       arrangement: 'stacked',
       ratio: DEFAULT_LIVE_LAYOUT_RATIO,
-      boardCollapsed: false,
-      chatCollapsed: false,
+      boardHidden: false,
+      chatHidden: false,
+      swapped: false,
     })
   })
 
   it('assembles whatever each preference has stored', () => {
     saveLiveArrangement('side')
     saveLiveLayoutRatio(0.25)
-    saveBoardCollapsed(true)
+    saveBoardHidden(true)
+    saveLiveSwapped(true)
     expect(loadLiveLayout()).toEqual({
       arrangement: 'side',
       ratio: 0.25,
-      boardCollapsed: true,
-      chatCollapsed: false,
+      boardHidden: true,
+      chatHidden: false,
+      swapped: true,
     })
+  })
+})
+
+describe('visiblePanes', () => {
+  it('shows both by default when there is a board', () => {
+    expect(visiblePanes({ boardHidden: false, chatHidden: false }, true)).toEqual({
+      board: true,
+      chat: true,
+    })
+  })
+
+  it('never shows a board with no history', () => {
+    expect(visiblePanes({ boardHidden: false, chatHidden: false }, false)).toEqual({
+      board: false,
+      chat: true,
+    })
+  })
+
+  it('keeps the chat up when nothing else is', () => {
+    expect(visiblePanes({ boardHidden: false, chatHidden: true }, false).chat).toBe(true)
+    expect(visiblePanes({ boardHidden: true, chatHidden: true }, true)).toEqual({
+      board: false,
+      chat: true,
+    })
+  })
+})
+
+describe('togglePane', () => {
+  const both = { boardHidden: false, chatHidden: false }
+
+  it('hides one pane and shows it again', () => {
+    const hidden = togglePane(both, 'board', true)
+    expect(hidden).toEqual({ boardHidden: true, chatHidden: false })
+    expect(togglePane(hidden, 'board', true)).toEqual(both)
+  })
+
+  it('hiding the last visible pane shows the other instead', () => {
+    expect(togglePane({ boardHidden: true, chatHidden: false }, 'chat', true)).toEqual({
+      boardHidden: false,
+      chatHidden: true,
+    })
+    expect(togglePane({ boardHidden: false, chatHidden: true }, 'board', true)).toEqual({
+      boardHidden: true,
+      chatHidden: false,
+    })
+  })
+
+  it('changes nothing without a board history', () => {
+    expect(togglePane(both, 'chat', false)).toBe(both)
+    expect(togglePane(both, 'board', false)).toBe(both)
+  })
+})
+
+describe('paneOrder and dividerToRatio', () => {
+  it('lays the board first unless swapped', () => {
+    expect(paneOrder(false)).toEqual(['board', 'chat'])
+    expect(paneOrder(true)).toEqual(['chat', 'board'])
+  })
+
+  it('reads a drag as the board share whichever pane is first', () => {
+    expect(dividerToRatio(0.3, false)).toBe(0.3)
+    expect(dividerToRatio(0.3, true)).toBeCloseTo(0.7)
+    expect(dividerToRatio(0, true)).toBe(MAX_LIVE_LAYOUT_RATIO)
   })
 })

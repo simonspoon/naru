@@ -11,8 +11,13 @@ export type LiveArrangement = 'stacked' | 'side'
 
 const ARRANGEMENT_KEY = 'mesa-live-arrangement'
 const RATIO_KEY = 'mesa-live-panel-ratio'
-const BOARD_COLLAPSED_KEY = 'mesa-live-board-collapsed'
-const CHAT_COLLAPSED_KEY = 'mesa-live-chat-collapsed'
+// Hidden, not "collapsed": the fold arrows (mesa task 1474's rail) are gone
+// (mesa task 1483), so the two old `-collapsed` keys are deliberately not read
+// — a pane folded under the old scheme comes back showing rather than
+// vanishing under a control that no longer says why.
+const BOARD_HIDDEN_KEY = 'mesa-live-board-hidden'
+const CHAT_HIDDEN_KEY = 'mesa-live-chat-hidden'
+const SWAPPED_KEY = 'mesa-live-swapped'
 
 export const DEFAULT_ARRANGEMENT: LiveArrangement = 'stacked'
 
@@ -21,8 +26,8 @@ export const DEFAULT_ARRANGEMENT: LiveArrangement = 'stacked'
 export const DEFAULT_LIVE_LAYOUT_RATIO = 0.5
 
 /** Neither section may be dragged away to nothing: each end of the divider's
- *  travel still leaves the section on that side a usable sliver rather than a
- *  header strip with no body under it (folding it is how you get that). */
+ *  travel still leaves the section on that side a usable sliver (hiding it,
+ *  from the toolbar, is how you get rid of one). */
 export const MIN_LIVE_LAYOUT_RATIO = 0.15
 export const MAX_LIVE_LAYOUT_RATIO = 0.85
 
@@ -66,40 +71,99 @@ function loadFlag(key: string): boolean {
 function saveFlag(key: string, value: boolean): void {
   // `removeItem` rather than storing `'false'`: an absent key and an explicit
   // false read identically on load, so there is no reason to write bytes for
-  // the state every fresh browser already starts in.
+  // the state every fresh browser starts in.
   if (value) localStorage.setItem(key, 'true')
   else localStorage.removeItem(key)
 }
 
-export function loadBoardCollapsed(): boolean {
-  return loadFlag(BOARD_COLLAPSED_KEY)
+export function loadBoardHidden(): boolean {
+  return loadFlag(BOARD_HIDDEN_KEY)
 }
 
-export function saveBoardCollapsed(collapsed: boolean): void {
-  saveFlag(BOARD_COLLAPSED_KEY, collapsed)
+export function saveBoardHidden(hidden: boolean): void {
+  saveFlag(BOARD_HIDDEN_KEY, hidden)
 }
 
-export function loadChatCollapsed(): boolean {
-  return loadFlag(CHAT_COLLAPSED_KEY)
+export function loadChatHidden(): boolean {
+  return loadFlag(CHAT_HIDDEN_KEY)
 }
 
-export function saveChatCollapsed(collapsed: boolean): void {
-  saveFlag(CHAT_COLLAPSED_KEY, collapsed)
+export function saveChatHidden(hidden: boolean): void {
+  saveFlag(CHAT_HIDDEN_KEY, hidden)
+}
+
+/** Whether the chat comes first (above / left of) the board. */
+export function loadLiveSwapped(): boolean {
+  return loadFlag(SWAPPED_KEY)
+}
+
+export function saveLiveSwapped(swapped: boolean): void {
+  saveFlag(SWAPPED_KEY, swapped)
 }
 
 /** Every persisted layout preference, read once at mount. */
 export interface LiveLayoutPrefs {
   arrangement: LiveArrangement
   ratio: number
-  boardCollapsed: boolean
-  chatCollapsed: boolean
+  boardHidden: boolean
+  chatHidden: boolean
+  swapped: boolean
 }
 
 export function loadLiveLayout(): LiveLayoutPrefs {
   return {
     arrangement: loadLiveArrangement(),
     ratio: loadLiveLayoutRatio(),
-    boardCollapsed: loadBoardCollapsed(),
-    chatCollapsed: loadChatCollapsed(),
+    boardHidden: loadBoardHidden(),
+    chatHidden: loadChatHidden(),
+    swapped: loadLiveSwapped(),
   }
+}
+
+export type LivePane = 'board' | 'chat'
+
+/** Which panes are on screen. The board needs a history to show at all, and
+ *  the conversation is never absent with nothing else to show — so a stored
+ *  "chat hidden" with no board (or a hand-edited both-hidden) still answers
+ *  with the chat, rather than an empty panel. */
+export function visiblePanes(
+  prefs: Pick<LiveLayoutPrefs, 'boardHidden' | 'chatHidden'>,
+  hasBoards: boolean,
+): { board: boolean; chat: boolean } {
+  const board = hasBoards && !prefs.boardHidden
+  return { board, chat: !prefs.chatHidden || !board }
+}
+
+/** The toolbar's show/hide toggle for one pane. Hiding the last visible pane
+ *  is not a state: it shows the other one instead, so the press swaps which
+ *  one is up rather than emptying the panel. With no board history the
+ *  conversation is the only pane and its toggle changes nothing. */
+export function togglePane<T extends Pick<LiveLayoutPrefs, 'boardHidden' | 'chatHidden'>>(
+  prefs: T,
+  pane: LivePane,
+  hasBoards: boolean,
+): T {
+  if (!hasBoards) return prefs
+  const shown = visiblePanes(prefs, hasBoards)
+  const hide = shown[pane]
+  const other: LivePane = pane === 'board' ? 'chat' : 'board'
+  const next = { ...prefs }
+  const set = (p: LivePane, hidden: boolean) => {
+    if (p === 'board') next.boardHidden = hidden
+    else next.chatHidden = hidden
+  }
+  set(pane, hide)
+  if (hide && !shown[other]) set(other, false)
+  return next
+}
+
+/** The panes in the order they are laid out, first = above / left. */
+export function paneOrder(swapped: boolean): [LivePane, LivePane] {
+  return swapped ? ['chat', 'board'] : ['board', 'chat']
+}
+
+/** The stored ratio is always the *board's* share; a drag measures the first
+ *  pane's, which is the chat's once the panes are swapped. */
+export function dividerToRatio(fraction: number, swapped: boolean): number {
+  return clampLiveLayoutRatio(swapped ? 1 - fraction : fraction)
 }
