@@ -556,9 +556,9 @@ carries a derived, never-stored `context_tokens` on `LiveState` (not on
 `LiveSession`, so `live status` output is unchanged) — `find_session_for_job`
 then `cc::session_pulse`, cached 5s per job id like `blocked`. A handoff binds
 a new job id, so the successor's number starts fresh. It is `null` for no
-agent, an unlisted job or an unreadable transcript, and the head's meta line
-(`12:04 · 38.5k context`, `liveHead.ts::contextLabel`) then shows only the
-elapsed time.
+agent, an unlisted job or an unreadable transcript, and the head's toolbar
+(`38.5k ctx 12:04`, `liveHead.ts::contextLabel`, in violet just left of the
+clock) then shows only the elapsed time.
 
 ### What the person sees
 

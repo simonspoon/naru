@@ -10126,72 +10126,36 @@ body.live-panel-ratio-resizing .live-panel-divider {
   color: var(--text-h);
 }
 
-/* How long, and what this is about. Small, upright, and the only tabular
-   figures in the panel — a clock that re-flows its own width every second is
-   a distraction beside a title that does not move. */
-.live-head-meta {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.5rem;
-  font-size: 11px;
-  letter-spacing: 1px;
-  text-transform: uppercase;
-  color: var(--muted);
-}
-
 .live-head-clock {
   flex: none;
   font-variant-numeric: tabular-nums;
 }
 
-.live-head-chips {
-  display: flex;
-  gap: 8px;
-  /* Shrinkable, and allowed to go below its content width: the clock beside it
-     is `flex: none`, so this row is what gives when a project is called
-     something long. */
-  flex: 0 1 auto;
-  min-width: 0;
-}
-
-/* Each chip is a fact about the conversation that is only shown when it is
-   actually known (`LiveHub` decides): the microphone is genuinely open, or
-   this conversation is genuinely scoped to a project.
-
-   `inline-block` rather than `inline-flex`, and centred on its own line box:
-   the project chip carries a name of any length, and `text-overflow` needs a
-   block box with the text inside it — inside a flex container the text is an
-   anonymous item and the ellipsis never lands, which is how a long name came
-   to be sliced off mid-word at the phone tier instead of trailing off. */
-.live-chip {
-  flex: 0 1 auto;
-  min-width: 0;
-  display: inline-block;
-  height: 28px;
-  /* 28px minus the two 1px borders — `box-sizing` is `border-box` here. */
-  line-height: 26px;
-  padding: 0 10px;
-  clip-path: var(--cut-sm);
-  background: var(--panel);
-  border: 1px solid var(--border);
-  color: var(--muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-/* Two words, and the one chip whose whole content is load-bearing: it is
-   either there or it is not, so it never gives up width to its neighbour. */
-.live-chip-mic {
+/* The driver's context size, left of the clock, in the colour this app means
+   by an agent. */
+.live-head-ctx {
   flex: none;
-  color: var(--green);
-  border-color: rgba(43, 255, 156, 0.35);
+  font-size: 11px;
+  letter-spacing: 1px;
+  font-variant-numeric: tabular-nums;
+  color: var(--violet);
 }
 
-/* The sentence under the instruments (`liveStatusLine`): what a one-word
-   title cannot say — that no agent is attached, or that the last press
-   failed. */
+/* Mic ready: a dot before the title, present only while the microphone is the
+   way in. */
+.live-mic-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 8px;
+  border-radius: 50%;
+  vertical-align: middle;
+  background: var(--green);
+}
+
+/* The sentence under the toolbar (`liveStatusLine`): what a one-word title
+   cannot say — that no agent is attached, or that the last press failed. Only
+   rendered when there is one. */
 .live-head-status {
   flex: 1 1 auto;
   min-width: 0;
@@ -10199,11 +10163,6 @@ body.live-panel-ratio-resizing .live-panel-divider {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 0.75rem;
-}
-
-.live-head-meta .live-chip {
-  height: 20px;
-  line-height: 18px;
 }
 
 /* The server's speech engine is not ready (mesa task 1390): the sentence, the

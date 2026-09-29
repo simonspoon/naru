@@ -709,31 +709,22 @@ export function LiveHub({
   // Every project's name by id, off the same fetch, for the view line's
   // project part (mesa task 1424) — the route's project, not the session's.
   const projectNames = useRef<Map<number, string>>(new Map())
-  // What the conversation is *about*, for the head's chip (mesa task 1069) —
-  // the name behind the session's `project_id`, off the fetch above rather
-  // than a second one. Null while it is unknown, and the chip simply does not
-  // render then: a conversation is routinely unscoped, and "Project · —" is a
-  // worse answer than no chip at all.
-  const [projectName, setProjectName] = useState<string | null>(null)
   useEffect(() => {
     const id = session?.id ?? null
     if (id === null || vocabBuiltFor.current === id) return
     vocabBuiltFor.current = id
-    const scope = session?.project_id ?? null
     listProjects()
       .then((projects) => {
         vocabRef.current = buildVocabulary([
           ...MESA_VOCABULARY,
           ...projects.map((p) => p.name),
         ])
-        setProjectName(projects.find((p) => p.id === scope)?.name ?? null)
         projectNames.current = new Map(projects.map((p) => [p.id, p.name]))
       })
       .catch(() => {
         vocabRef.current = buildVocabulary(MESA_VOCABULARY)
-        setProjectName(null)
       })
-  }, [session?.id, session?.project_id])
+  }, [session?.id])
 
   // The transcript, accumulated: each poll answers only with what is new, so
   // this component holds the conversation and the server holds the tail.
@@ -3725,6 +3716,7 @@ export function LiveHub({
     draft,
     error: actionError,
   })
+  const statusLine = liveStatusLine(session, speaking, actionError, paused, path === 'unavailable')
   // Whether mesa is saying something *right now*, for the status pill above
   // the composer. `sounding` is a ref because the run advances from a media
   // event, ahead of any render — but `speaking` is state, set from the
@@ -3988,7 +3980,17 @@ export function LiveHub({
                     {indicator !== null && <LiveBand state={indicator} level={level} />}
                   </div>
                   <div className="live-head-say">
-                    <div className="live-head-title">{headTitle}</div>
+                    <div className="live-head-title">
+                      {recognizes && (
+                        <span
+                          className="live-mic-dot"
+                          role="img"
+                          aria-label="Mic ready"
+                          title="Mic ready"
+                        />
+                      )}
+                      {headTitle}
+                    </div>
                     {/* The level meter (mesa task 956, moved here by 1069):
                         shown on the auris path alone, since a browser-path
                         page reports itself through the interim guess instead
@@ -3996,6 +3998,9 @@ export function LiveHub({
                         than as "this path uses something else". */}
                     {path === 'auris' && recognizes && <LiveMeter level={level} />}
                   </div>
+                  {session !== null && contextLabel(data?.context_tokens) !== null && (
+                    <span className="live-head-ctx">{contextLabel(data?.context_tokens)}</span>
+                  )}
                   {session !== null && (
                     <span className="live-head-clock">
                       <LiveElapsed startedAt={session.started_at} />
@@ -4072,35 +4077,15 @@ export function LiveHub({
                   </div>
                 </div>
 
-                {/* One line under the toolbar: how full the driver's context
-                    is, the sentence for what the
-                    conversation is doing and, only where they are
-                    actually known, the chips — a fabricated chip is worse
-                    than a missing one. */}
-                <div className="live-head-meta">
-                  {/* Only the context size, and only where the driver's is
-                      known: at the plain panel width (~416px) the toolbar has
-                      no room for it beside mute and pause, so it sits here
-                      while the clock stays at the toolbar's right. */}
-                  {session !== null && contextLabel(data?.context_tokens) !== null && (
-                    <span className="live-head-clock">
-                      {contextLabel(data?.context_tokens)}
-                    </span>
-                  )}
-                  <span
-                    className={`live-head-status ${actionError !== null ? 'error' : 'muted'}`}
-                  >
-                    {liveStatusLine(session, speaking, actionError, paused, path === 'unavailable')}
-                  </span>
-                  <span className="live-head-chips">
-                    {recognizes && (
-                      <span className="live-chip live-chip-mic">Mic ready</span>
-                    )}
-                    {projectName !== null && (
-                      <span className="live-chip">Project · {projectName}</span>
-                    )}
-                  </span>
-                </div>
+                {/* One sentence under the toolbar, only when there is something
+                    to say (an error, paused, resting, ended, no agent, speech
+                    unavailable): the plain listening state is silent, so the
+                    head stays a single row. */}
+                {statusLine !== null && (
+                  <div className={`live-head-status ${actionError !== null ? 'error' : 'muted'}`}>
+                    {statusLine}
+                  </div>
+                )}
 
                 {/* The server's speech engine is not ready (mesa task 1390,
                     design §4.4): said loudly, with the way to fix it and a

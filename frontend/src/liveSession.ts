@@ -168,7 +168,7 @@ export function liveStatusLine(
   error: string | null,
   paused: boolean,
   unavailable = false,
-): string {
+): string | null {
   if (error !== null) return error
   if (session === null) return 'Not live. Press Go live to start a conversation.'
   if (!isLive(session)) {
@@ -185,5 +185,6 @@ export function liveStatusLine(
     return 'Live, but no agent is attached — nothing will answer.'
   }
   if (unavailable) return 'Live, but speech is not available — type into the box below.'
-  return 'Listening. Dictate into the box below — a settled line sends itself.'
+  // The default, listening state says nothing: the head's title already does.
+  return null
 }

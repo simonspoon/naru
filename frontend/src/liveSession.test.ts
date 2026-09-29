@@ -187,8 +187,8 @@ describe('liveStatusLine', () => {
     expect(liveStatusLine(session(), false, null, true, true)).toMatch(/^Paused/)
   })
 
-  it('otherwise says it is listening', () => {
-    expect(liveStatusLine(session(), false, null, false)).toMatch(/^Listening\./)
+  it('says nothing in the plain listening state', () => {
+    expect(liveStatusLine(session(), false, null, false)).toBeNull()
   })
 
   it('says it is paused, above everything the conversation would say', () => {
