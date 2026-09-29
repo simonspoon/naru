@@ -182,21 +182,31 @@ pub struct PendingBash {
     pub at: Option<i64>,
 }
 
+/// The pending-`Bash` list [`fold_pending`] keeps: `(tool_use id, background
+/// task id, call)`. The second slot is set once the call's `tool_result` turns
+/// out to be a background launch.
+type PendingCalls = Vec<(String, Option<String>, PendingBash)>;
+
+/// What Claude Code answers a `run_in_background` `Bash` call with, right
+/// away: `Command running in background with ID: <id>. Output is …`. The same
+/// id is the line's `toolUseResult.backgroundTaskId`, which is not parsed —
+/// `RawLine` is the ingest's line type and that field is an unbounded blob.
+const BACKGROUND_LAUNCH_PREFIX: &str = "Command running in background with ID: ";
+
 /// Folds one transcript line into a pending-`Bash` list: a `Bash` call
-/// appends, a `tool_result` for a listed id removes it. Order is dispatch
-/// order.
-fn fold_pending(
-    pending: &mut Vec<(String, PendingBash)>,
-    kind: Option<&str>,
-    at: Option<i64>,
-    msg: &RawMessage,
-) {
+/// appends, a `tool_result` for a listed id removes it — unless that result is
+/// a **background launch** (mesa task 1505), which only answers "started": the
+/// shell lives on, so the entry stays and remembers the background id. It
+/// leaves on a completion signal instead — [`fold_notification`], or a
+/// `KillShell`/`TaskStop` naming the id. Order is dispatch order.
+fn fold_pending(pending: &mut PendingCalls, kind: Option<&str>, at: Option<i64>, msg: &RawMessage) {
     match kind {
         Some("assistant") => {
             for d in msg.tool_details() {
                 if d.name == "Bash" {
                     pending.push((
                         d.id,
+                        None,
                         PendingBash {
                             description: d.description,
                             command: d.command,
@@ -205,14 +215,72 @@ fn fold_pending(
                     ));
                 }
             }
+            let stopped = msg.stopped_tasks();
+            if !stopped.is_empty() {
+                pending.retain(|(_, bg, _)| bg.as_ref().is_none_or(|b| !stopped.contains(b)));
+            }
         }
         Some("user") => {
+            let launches = msg.background_launches();
             for (id, _) in msg.tool_results() {
-                pending.retain(|(p, _)| *p != id);
+                match launches.iter().find(|(l, _)| *l == id) {
+                    Some((_, bg)) => {
+                        if let Some(entry) = pending.iter_mut().find(|(p, _, _)| *p == id) {
+                            entry.1 = Some(bg.clone());
+                        }
+                    }
+                    None => pending.retain(|(p, _, _)| *p != id),
+                }
             }
         }
         _ => {}
     }
+}
+
+/// Drops the pending call a `<task-notification>` names — the background
+/// command finished (mesa task 1505). The XML rides in three line shapes, all
+/// caught here off the raw text: a `queue-operation` line's `content`, an
+/// `attachment` line's `attachment.prompt` (`queued_command`), and a `user`
+/// message's text. The notification names the call by `<tool-use-id>` and the
+/// background command by `<task-id>`; either matches. The substring guard
+/// keeps the JSON parse off every line that is not one.
+fn fold_notification(pending: &mut PendingCalls, line: &str) {
+    if !line.contains("<task-notification>") {
+        return;
+    }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+        return;
+    };
+    let mut texts: Vec<&str> = Vec::new();
+    match v.get("type").and_then(|t| t.as_str()) {
+        Some("queue-operation") => texts.extend(v.get("content").and_then(|c| c.as_str())),
+        Some("attachment") => {
+            texts.extend(v.pointer("/attachment/prompt").and_then(|c| c.as_str()))
+        }
+        Some("user") => match v.pointer("/message/content") {
+            Some(serde_json::Value::String(s)) => texts.push(s),
+            Some(serde_json::Value::Array(blocks)) => {
+                texts.extend(blocks.iter().filter_map(|b| b.get("text")?.as_str()))
+            }
+            _ => {}
+        },
+        _ => {}
+    }
+    for text in texts {
+        let task_id = xml_tag(text, "task-id");
+        let tool_use_id = xml_tag(text, "tool-use-id");
+        pending.retain(|(id, bg, _)| {
+            tool_use_id != Some(id.as_str()) && (task_id.is_none() || task_id != bg.as_deref())
+        });
+    }
+}
+
+/// The text of the first `<tag>…</tag>` in `text`, if any.
+fn xml_tag<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
+    let open = format!("<{tag}>");
+    let from = text.find(&open)? + open.len();
+    let len = text[from..].find(&format!("</{tag}>"))?;
+    Some(text[from..from + len].trim())
 }
 
 #[derive(Deserialize)]
@@ -298,6 +366,54 @@ impl RawMessage {
             .filter_map(|b| {
                 let id = b.get("tool_use_id")?.as_str()?;
                 Some((id.to_string(), result_text(b.get("content"))))
+            })
+            .collect()
+    }
+
+    /// The `(tool_use_id, background id)` of every `tool_result` block that is
+    /// a background launch (see [`BACKGROUND_LAUNCH_PREFIX`]) — mesa task 1505.
+    fn background_launches(&self) -> Vec<(String, String)> {
+        let Some(blocks) = self.content.as_ref().and_then(|c| c.as_array()) else {
+            return Vec::new();
+        };
+        blocks
+            .iter()
+            .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
+            .filter_map(|b| {
+                let id = b.get("tool_use_id")?.as_str()?;
+                let text = match b.get("content")? {
+                    serde_json::Value::String(s) => s.as_str(),
+                    serde_json::Value::Array(parts) => parts.first()?.get("text")?.as_str()?,
+                    _ => return None,
+                };
+                let rest = text.strip_prefix(BACKGROUND_LAUNCH_PREFIX)?;
+                let bg: String = rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric())
+                    .collect();
+                (!bg.is_empty()).then(|| (id.to_string(), bg))
+            })
+            .collect()
+    }
+
+    /// The background ids a `KillShell` (`shell_id`) or `TaskStop`
+    /// (`task_id`, else `shell_id`) call in this message names — mesa task 1505.
+    fn stopped_tasks(&self) -> Vec<String> {
+        let Some(blocks) = self.content.as_ref().and_then(|c| c.as_array()) else {
+            return Vec::new();
+        };
+        blocks
+            .iter()
+            .filter(|b| {
+                matches!(
+                    b.get("name").and_then(|n| n.as_str()),
+                    Some("KillShell") | Some("TaskStop")
+                )
+            })
+            .filter_map(|b| {
+                let input = b.get("input")?;
+                let id = input.get("task_id").or_else(|| input.get("shell_id"))?;
+                Some(id.as_str()?.to_string())
             })
             .collect()
     }
@@ -4151,12 +4267,13 @@ pub fn session_pulse(session_id: &str) -> SessionPulse {
 /// report one of those as something the agent said.
 fn pulse_from_text(text: &str) -> SessionPulse {
     let mut pulse = SessionPulse::default();
-    let mut pending: Vec<(String, PendingBash)> = Vec::new();
+    let mut pending: PendingCalls = Vec::new();
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
+        fold_notification(&mut pending, line);
         let Ok(raw) = serde_json::from_str::<RawLine>(line) else {
             continue;
         };
@@ -4197,7 +4314,7 @@ fn pulse_from_text(text: &str) -> SessionPulse {
             pulse.model = Some(model.clone());
         }
     }
-    pulse.pending_bash = pending.into_iter().map(|(_, p)| p).collect();
+    pulse.pending_bash = pending.into_iter().map(|(_, _, p)| p).collect();
     pulse
 }
 
@@ -4258,12 +4375,13 @@ pub(crate) fn subagent_pulse(path: &Path) -> SubagentPulse {
 /// message's prose if it said anything, otherwise the tool it called.
 fn subagent_from_text(text: &str) -> SubagentPulse {
     let mut pulse = SubagentPulse::default();
-    let mut pending: Vec<(String, PendingBash)> = Vec::new();
+    let mut pending: PendingCalls = Vec::new();
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
+        fold_notification(&mut pending, line);
         let Ok(raw) = serde_json::from_str::<RawLine>(line) else {
             continue;
         };
@@ -4300,7 +4418,7 @@ fn subagent_from_text(text: &str) -> SubagentPulse {
             pulse.model = Some(model.clone());
         }
     }
-    pulse.pending_bash = pending.into_iter().map(|(_, p)| p).collect();
+    pulse.pending_bash = pending.into_iter().map(|(_, _, p)| p).collect();
     pulse
 }
 
@@ -7734,6 +7852,113 @@ mod tests {
             ],
             "t2 was answered so it is gone; t3 and t5 are in flight, in dispatch order"
         );
+    }
+
+    /// Mesa task 1505: the real shapes of a `run_in_background` launch, its
+    /// immediate `tool_result`, and the three ways a completion is written.
+    const BG_CALL: &str = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_bg1","name":"Bash","input":{"command":"sleep 1200","description":"Arm alarm","run_in_background":true}}]}}"#;
+    const BG_RESULT: &str = r#"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_bg1","type":"tool_result","content":"Command running in background with ID: beme75mvw. Output is being written to: /tmp/x/tasks/beme75mvw.output. You will be notified when it completes.","is_error":false}]},"toolUseResult":{"stdout":"","backgroundTaskId":"beme75mvw"}}"#;
+    const BG_NOTIFICATION: &str = "<task-notification>\n<task-id>beme75mvw</task-id>\n<tool-use-id>toolu_bg1</tool-use-id>\n<status>failed</status>\n</task-notification>";
+
+    fn transcript(lines: &[&str]) -> String {
+        lines.join("\n") + "\n"
+    }
+
+    #[test]
+    fn a_background_launch_result_keeps_the_call_pending() {
+        let pulse = pulse_from_text(&transcript(&[BG_CALL, BG_RESULT]));
+        assert_eq!(pulse.pending_bash.len(), 1);
+        assert_eq!(pulse.pending_bash[0].command.as_deref(), Some("sleep 1200"));
+        // The subagent reader folds the same way.
+        assert_eq!(
+            subagent_from_text(&transcript(&[BG_CALL, BG_RESULT]))
+                .pending_bash
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_foreground_result_still_removes_the_call() {
+        let call = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"fg1","name":"Bash","input":{"command":"ls"}}]}}"#;
+        let result = r#"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"fg1","type":"tool_result","content":"a\nb"}]}}"#;
+        assert!(
+            pulse_from_text(&transcript(&[call, result]))
+                .pending_bash
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_task_notification_in_any_shape_ends_a_background_call() {
+        let queue = serde_json::json!({
+            "type": "queue-operation", "operation": "enqueue", "content": BG_NOTIFICATION
+        })
+        .to_string();
+        let attachment = serde_json::json!({
+            "type": "attachment",
+            "attachment": {"type": "queued_command", "prompt": BG_NOTIFICATION}
+        })
+        .to_string();
+        let user_text = serde_json::json!({
+            "type": "user",
+            "message": {"role": "user", "content": [{"type": "text", "text": BG_NOTIFICATION}]}
+        })
+        .to_string();
+        let user_string = serde_json::json!({
+            "type": "user", "message": {"role": "user", "content": BG_NOTIFICATION}
+        })
+        .to_string();
+        for done in [queue, attachment, user_text, user_string] {
+            let text = transcript(&[BG_CALL, BG_RESULT, &done]);
+            assert!(pulse_from_text(&text).pending_bash.is_empty(), "{done}");
+            assert!(subagent_from_text(&text).pending_bash.is_empty(), "{done}");
+        }
+        // A notification naming only the task id (no tool-use id) also matches.
+        let by_task = serde_json::json!({
+            "type": "queue-operation", "operation": "enqueue",
+            "content": "<task-notification>\n<task-id>beme75mvw</task-id>\n</task-notification>"
+        })
+        .to_string();
+        assert!(
+            pulse_from_text(&transcript(&[BG_CALL, BG_RESULT, &by_task]))
+                .pending_bash
+                .is_empty()
+        );
+        // Someone else's notification leaves it alone.
+        let other = queue_for("zzz", "toolu_other");
+        assert_eq!(
+            pulse_from_text(&transcript(&[BG_CALL, BG_RESULT, &other]))
+                .pending_bash
+                .len(),
+            1
+        );
+    }
+
+    fn queue_for(task: &str, tool: &str) -> String {
+        serde_json::json!({
+            "type": "queue-operation", "operation": "enqueue",
+            "content": format!("<task-notification>\n<task-id>{task}</task-id>\n<tool-use-id>{tool}</tool-use-id>\n</task-notification>")
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn killshell_and_taskstop_end_a_background_call() {
+        for (tool, key) in [("TaskStop", "task_id"), ("KillShell", "shell_id")] {
+            let stop = serde_json::json!({
+                "type": "assistant",
+                "message": {"content": [{"type": "tool_use", "id": "k1", "name": tool,
+                    "input": {key: "beme75mvw"}}]}
+            })
+            .to_string();
+            assert!(
+                pulse_from_text(&transcript(&[BG_CALL, BG_RESULT, &stop]))
+                    .pending_bash
+                    .is_empty(),
+                "{tool}"
+            );
+        }
     }
 
     #[test]

@@ -2029,6 +2029,23 @@ echo "backgrounded · cf0c3945 · proj: do the thing""#,
         assert_eq!(more_shells[1].command, None, "no call left for the rest");
     }
 
+    /// Mesa task 1505: a background call stays pending after its launch
+    /// result, so the long-lived shell pairs with it even beside a newer
+    /// foreground call.
+    #[test]
+    fn a_background_call_pairs_with_its_long_lived_shell() {
+        let mut shells = vec![
+            shell_at(Some("2026-09-28 10:00:10")),
+            shell_at(Some("2026-09-28 10:05:00")),
+        ];
+        pair_shells(
+            &mut shells,
+            &[call_at("sleep 1200", 100), call_at("cargo test", 400)],
+        );
+        assert_eq!(shells[0].command.as_deref(), Some("sleep 1200"));
+        assert_eq!(shells[1].command.as_deref(), Some("cargo test"));
+    }
+
     #[test]
     fn a_subagent_child_carries_its_sidecar_description() {
         let dir = tempfile::tempdir().unwrap();
