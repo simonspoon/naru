@@ -6,6 +6,9 @@
 // A row renders nothing at all in that case: "no transcript yet" and "no
 // usage line yet" must not read as an empty response or as zero tokens.
 
+import type { AgentSession } from './types/AgentSession'
+import { isRunningAgent } from './agentProject'
+
 /**
  * The context-window figure for a row's right-hand meta slot: a compact,
  * fixed-width-ish token count.
@@ -47,14 +50,17 @@ export function responsePreview(text: string | null | undefined): string | null 
 /**
  * The one big sentence a card leads with (mesa task 1484): what the agent is
  * doing, best effort, in this order — the in-progress todo / newest tool
- * description the server lifted (`activity`), else the latest assistant prose.
+ * description the server lifted (`activity`, only while the session is
+ * running), else the latest assistant prose.
  * `null` when neither is known, and the card then shows its name alone.
  */
-export function agentHeadline(a: {
-  activity: string | null
-  lastResponse: string | null
-}): string | null {
-  return responsePreview(a.activity) ?? responsePreview(a.lastResponse)
+export function agentHeadline(
+  a: Pick<AgentSession, 'pid' | 'state' | 'activity' | 'lastResponse'>,
+): string | null {
+  // `activity` is a doing-now sentence: once the session is done or gone the
+  // last todo / tool description would sit there for ever, so the closing
+  // reply takes over.
+  return (isRunningAgent(a) ? responsePreview(a.activity) : null) ?? responsePreview(a.lastResponse)
 }
 
 /**

@@ -9355,11 +9355,10 @@ async fn list_project_agents(
     // new session, so we skip caching (serve it, but don't poison the cache).
     let gen0 = state.agents_gen.load(Ordering::SeqCst);
     let dir = path.clone();
-    let sessions = tokio::task::spawn_blocking(move || agents::list_under(&dir))
+    let mut sessions = tokio::task::spawn_blocking(move || agents::list_under(&dir))
         .await
         .map_err(|e| agents_unavailable(format!("agents list panicked: {e}")))?
         .map_err(agents_unavailable)?;
-    let mut sessions = sessions;
     attach_agent_tasks(&state, &mut sessions);
     if state.agents_gen.load(Ordering::SeqCst) == gen0 {
         let mut cache = state.agents_cache.lock().unwrap();
@@ -9407,11 +9406,10 @@ async fn list_all_agents(
         }
     }
     let gen0 = state.agents_gen.load(Ordering::SeqCst);
-    let sessions = tokio::task::spawn_blocking(agents::list_all)
+    let mut sessions = tokio::task::spawn_blocking(agents::list_all)
         .await
         .map_err(|e| agents_unavailable(format!("agents list panicked: {e}")))?
         .map_err(agents_unavailable)?;
-    let mut sessions = sessions;
     attach_agent_tasks(&state, &mut sessions);
     if state.agents_gen.load(Ordering::SeqCst) == gen0 {
         let mut cache = state.agents_cache.lock().unwrap();

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isRunningAgent, liveWorkLabel, projectForCwd } from './agentProject'
+import { isRunningAgent, projectForCwd } from './agentProject'
 import type { AgentSession } from './types/AgentSession'
 import type { Project } from './types/Project'
 
@@ -157,27 +157,5 @@ describe('isRunningAgent', () => {
         session({ pid: null, state: 'done', liveShells: 3, liveSubagents: 2 }),
       ),
     ).toBe(false)
-  })
-})
-
-describe('liveWorkLabel', () => {
-  it('is null with nothing live', () => {
-    expect(liveWorkLabel(session())).toBeNull()
-  })
-
-  it('singularizes a count of one', () => {
-    expect(liveWorkLabel(session({ liveShells: 1 }))).toBe('1 shell')
-    expect(liveWorkLabel(session({ liveSubagents: 1 }))).toBe('1 subagent')
-  })
-
-  it('pluralizes above one', () => {
-    expect(liveWorkLabel(session({ liveShells: 2 }))).toBe('2 shells')
-    expect(liveWorkLabel(session({ liveSubagents: 3 }))).toBe('3 subagents')
-  })
-
-  it('joins both when both are live', () => {
-    expect(liveWorkLabel(session({ liveShells: 2, liveSubagents: 1 }))).toBe(
-      '2 shells · 1 subagent',
-    )
   })
 })

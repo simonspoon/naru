@@ -240,9 +240,9 @@ already use.
   Upstream's `state` reaches `done` the moment a turn ends, while the work
   that turn started is still running — Naru computes the liveness upstream
   doesn't report. Since task 858 these no longer decide whether a session is
-  running (list presence and `state` do, above), so in the sidebar they are
-  the work-in-flight badge (`liveWorkLabel`, e.g. `2 shells · 1 subagent`) and
-  its tooltip — which is why a DONE session can still carry one. They still
+  running (list presence and `state` do, above), so the sidebar no longer
+  shows them as a badge (mesa task 1484: the card's meta line says "N running
+  below", counted from `children`). They still
   **do** decide a slot in the todo watcher, where the question is different: a
   project is busy if a session under it holds work in flight, not merely if a
   finished-but-alive process is still listed — counting mere presence there
@@ -280,9 +280,9 @@ already use.
 - **`children` is those counts in detail** (mesa task 1277): a `Vec<AgentChild>`
   on every `AgentSession`, one entry per fresh subagent transcript and per live
   shell child, so the sidebar can hang a small card off each agent row instead
-  of only showing the badge. It is **additive** — `liveShells` and
+  of only showing a count. It is **additive** — `liveShells` and
   `liveSubagents` keep their exact meanings and values, and are derived from
-  the same walk that builds the list so badge and cards can never disagree.
+  the same walk that builds the list so count and cards can never disagree.
   - A child carries `id`, `kind` (`subagent` | `shell`), `name`, `detail`,
     `startedAt`, `contextTokens` and `state` (`running` | `finished`). Always
     present, empty when nothing is live; subagents come first, then shells, and
@@ -897,6 +897,8 @@ rest on one faint meta line (`name · kind · model · task or workspace · upti
 - **Shells** are named from the parent's unanswered `Bash` tool calls
   (`agents::pair_shells`): oldest shell with the oldest of the newest N pending
   calls, falling back to running subagents' pending calls when the session has
-  none. `AgentChild.description`/`command` carry the result; an unpaired shell
+  none. A `run_in_background` Bash call gets its `tool_result` at once, so it is
+  never pending: a background shell can be left unpaired or mis-paired with
+  another pending call. `AgentChild.description`/`command` carry the result; an unpaired shell
   shows a neutral sentence and no command. Nesting is always under the session,
   since a `ps` row cannot say whether a subagent launched it.

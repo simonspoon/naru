@@ -52,13 +52,23 @@ describe('responsePreview', () => {
 })
 
 describe('agentHeadline (mesa task 1484)', () => {
-  it('prefers the server-lifted activity over the latest prose', () => {
-    expect(agentHeadline({ activity: 'Adding  tests', lastResponse: 'done' })).toBe('Adding tests')
+  const running = { pid: 1, state: 'working' as string | null }
+
+  it('prefers the server-lifted activity over the latest prose while running', () => {
+    expect(agentHeadline({ ...running, activity: 'Adding  tests', lastResponse: 'done' })).toBe(
+      'Adding tests',
+    )
   })
 
   it('falls back to the latest prose, then to nothing', () => {
-    expect(agentHeadline({ activity: null, lastResponse: 'On it.' })).toBe('On it.')
-    expect(agentHeadline({ activity: '  ', lastResponse: null })).toBeNull()
+    expect(agentHeadline({ ...running, activity: null, lastResponse: 'On it.' })).toBe('On it.')
+    expect(agentHeadline({ ...running, activity: '  ', lastResponse: null })).toBeNull()
+  })
+
+  it('shows the closing reply, not a stale activity, once the session is done or gone', () => {
+    const stale = { activity: 'Adding tests', lastResponse: 'All done.' }
+    expect(agentHeadline({ pid: 1, state: 'done', ...stale })).toBe('All done.')
+    expect(agentHeadline({ pid: null, state: 'working', ...stale })).toBe('All done.')
   })
 })
 
