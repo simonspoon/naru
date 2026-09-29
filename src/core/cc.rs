@@ -175,12 +175,22 @@ struct ToolDetail {
 pub struct PendingBash {
     pub description: Option<String>,
     pub command: Option<String>,
+    /// When the call was dispatched (epoch seconds, from the transcript
+    /// line's `timestamp`) — what lets the session's and its sub-agents'
+    /// pending calls be ordered against each other. `None` when the line
+    /// carried none.
+    pub at: Option<i64>,
 }
 
 /// Folds one transcript line into a pending-`Bash` list: a `Bash` call
 /// appends, a `tool_result` for a listed id removes it. Order is dispatch
 /// order.
-fn fold_pending(pending: &mut Vec<(String, PendingBash)>, kind: Option<&str>, msg: &RawMessage) {
+fn fold_pending(
+    pending: &mut Vec<(String, PendingBash)>,
+    kind: Option<&str>,
+    at: Option<i64>,
+    msg: &RawMessage,
+) {
     match kind {
         Some("assistant") => {
             for d in msg.tool_details() {
@@ -190,6 +200,7 @@ fn fold_pending(pending: &mut Vec<(String, PendingBash)>, kind: Option<&str>, ms
                         PendingBash {
                             description: d.description,
                             command: d.command,
+                            at,
                         },
                     ));
                 }
@@ -4157,7 +4168,12 @@ fn pulse_from_text(text: &str) -> SessionPulse {
         let Some(msg) = raw.message.as_ref() else {
             continue;
         };
-        fold_pending(&mut pending, raw.kind.as_deref(), msg);
+        fold_pending(
+            &mut pending,
+            raw.kind.as_deref(),
+            raw.timestamp.as_deref().and_then(parse_ts),
+            msg,
+        );
         if raw.kind.as_deref() != Some("assistant") {
             continue;
         }
@@ -4255,7 +4271,12 @@ fn subagent_from_text(text: &str) -> SubagentPulse {
             continue;
         };
         // No `is_sidechain` filter, deliberately: every line here is one.
-        fold_pending(&mut pending, raw.kind.as_deref(), msg);
+        fold_pending(
+            &mut pending,
+            raw.kind.as_deref(),
+            raw.timestamp.as_deref().and_then(parse_ts),
+            msg,
+        );
         if raw.kind.as_deref() != Some("assistant") {
             continue;
         }
@@ -7703,14 +7724,24 @@ mod tests {
                 PendingBash {
                     description: Some("Running frontend tests".into()),
                     command: Some("npx vitest run".into()),
+                    at: None,
                 },
                 PendingBash {
                     description: None,
                     command: Some("sleep 5".into()),
+                    at: None,
                 },
             ],
             "t2 was answered so it is gone; t3 and t5 are in flight, in dispatch order"
         );
+    }
+
+    #[test]
+    fn a_pending_bash_call_carries_its_dispatch_time() {
+        let line = r#"{"type":"assistant","timestamp":"2026-08-01T10:00:04.000Z","message":{"content":[{"type":"tool_use","id":"b1","name":"Bash","input":{"command":"ls"}}]}}"#;
+        let at = pulse_from_text(line).pending_bash[0].at;
+        assert_eq!(at, parse_ts("2026-08-01T10:00:04.000Z"));
+        assert!(at.is_some());
     }
 
     #[test]

@@ -896,8 +896,10 @@ rest on one faint meta line (`name · kind · model · task or workspace · upti
 - **Sub-agents** show the `description` from their `.meta.json` sidecar.
 - **Shells** are named from the parent's unanswered `Bash` tool calls
   (`agents::pair_shells`): oldest shell with the oldest of the newest N pending
-  calls, falling back to running subagents' pending calls when the session has
-  none. A `run_in_background` Bash call gets its `tool_result` at once, so it is
+  calls, where the pool is the session's own pending calls **and** every running
+  subagent's, merged by the dispatch `timestamp` of their transcript lines (a
+  call with no timestamp sorts last, ties keep pool order: the session first,
+  then subagents by path). A `run_in_background` Bash call gets its `tool_result` at once, so it is
   never pending: a background shell can be left unpaired or mis-paired with
   another pending call. `AgentChild.description`/`command` carry the result; an unpaired shell
   shows a neutral sentence and no command. Nesting is always under the session,

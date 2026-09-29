@@ -157,15 +157,14 @@ fn enrich_liveness(sessions: &mut [AgentSession], pending: &[Vec<cc::PendingBash
             None => Vec::new(),
         };
         if !shells.is_empty() {
-            // The session's own pending calls first; a run of subagents
-            // running the tests is the other place a shell comes from.
-            let mut calls = pending.get(i).cloned().unwrap_or_default();
-            if calls.is_empty()
-                && let Some(root) = root.as_deref()
-            {
-                calls = subagent_pending(root, &session.session_id, now);
-            }
-            pair_shells(&mut shells, &calls);
+            // A shell may belong to the session or to a running subagent, so
+            // both pools of pending calls are merged by dispatch time.
+            let own = pending.get(i).cloned().unwrap_or_default();
+            let subs = match root.as_deref() {
+                Some(root) => subagent_pending(root, &session.session_id, now),
+                None => Vec::new(),
+            };
+            pair_shells(&mut shells, &pool_pending(own, subs));
         }
         session.live_shells = shells.len() as u32;
         children.extend(shells);
@@ -251,9 +250,23 @@ fn pair_shells(shells: &mut [AgentChild], pending: &[cc::PendingBash]) {
     }
 }
 
+/// The session's own pending `Bash` calls and its running subagents' merged
+/// into one list, oldest dispatch first — the order [`pair_shells`] expects.
+/// Ordered by the transcript line timestamps; a call with none sorts after
+/// every timestamped one, and ties (and untimestamped calls among
+/// themselves) keep pool order: the session's own, then subagents by path.
+fn pool_pending(
+    own: Vec<cc::PendingBash>,
+    subagents: Vec<cc::PendingBash>,
+) -> Vec<cc::PendingBash> {
+    let mut all = own;
+    all.extend(subagents);
+    all.sort_by_key(|c| c.at.unwrap_or(i64::MAX));
+    all
+}
+
 /// Pending `Bash` calls of the session's running subagents, in transcript
-/// path order — the fallback [`pair_shells`] source when the session's own
-/// transcript has none pending.
+/// path order — pooled with the session's own by [`pool_pending`].
 fn subagent_pending(root: &Path, session_id: &str, now: SystemTime) -> Vec<cc::PendingBash> {
     let mut paths: Vec<_> = subagent_transcripts(root, session_id, now, cc::ACTIVE_SECS)
         .into_iter()
@@ -1953,7 +1966,48 @@ echo "backgrounded · cf0c3945 · proj: do the thing""#,
         cc::PendingBash {
             description: Some(format!("run {command}")),
             command: Some(command.to_string()),
+            at: None,
         }
+    }
+
+    fn call_at(command: &str, at: i64) -> cc::PendingBash {
+        cc::PendingBash {
+            at: Some(at),
+            ..call(command)
+        }
+    }
+
+    /// A shell in a running subagent while the session has a pending call of
+    /// its own: both pools feed the pairing, ordered by dispatch time.
+    #[test]
+    fn pools_session_and_subagent_pending_calls_by_dispatch_time() {
+        let pooled = pool_pending(
+            vec![call_at("session-late", 200)],
+            vec![call_at("sub-early", 100), call("no-stamp")],
+        );
+        let names: Vec<_> = pooled
+            .iter()
+            .map(|c| c.command.as_deref().unwrap())
+            .collect();
+        assert_eq!(names, ["sub-early", "session-late", "no-stamp"]);
+
+        let mut shells = vec![
+            shell_at(Some("2026-09-28 10:00:30")),
+            shell_at(Some("2026-09-28 10:00:10")),
+        ];
+        pair_shells(
+            &mut shells,
+            &pool_pending(
+                vec![call_at("session-late", 200)],
+                vec![call_at("sub-early", 100)],
+            ),
+        );
+        assert_eq!(
+            shells[1].command.as_deref(),
+            Some("sub-early"),
+            "older shell"
+        );
+        assert_eq!(shells[0].command.as_deref(), Some("session-late"));
     }
 
     /// Mesa task 1484: the oldest shell takes the oldest of the newest N
