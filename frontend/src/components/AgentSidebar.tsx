@@ -33,7 +33,7 @@ import {
   parseChildPaneId,
 } from '../agentChild'
 import { defaultListMaximized, liveAgentId, liveCardWait, pinLiveAgent } from '../agentLive'
-import { agentHeadline, formatContextTokens, runningBelow } from '../agentRow'
+import { agentHeadline, agentTint, formatContextTokens, runningBelow } from '../agentRow'
 import { publishOpenAgents } from '../liveView'
 import {
   clampAgentSidebarWidth,
@@ -685,6 +685,7 @@ function AgentListContent({
     const headline = agentHeadline(a)
     const label = agentLabel(a)
     const below = runningBelow(a.children)
+    const tint = pinned ? null : agentTint(a)
     // The task chip links only when a project claims the
     // folder — the route needs the project id.
     const taskHref =
@@ -694,6 +695,7 @@ function AgentListContent({
         key={a.sessionId}
         className={
           (pinned ? 'agent-card-live ' : '') +
+          (tint !== null ? `agent-card-${tint} ` : '') +
           (a.id !== null ? 'attachable' : '') +
           (a.id !== null && openIds.includes(a.id) ? ' selected' : '')
         }
@@ -705,7 +707,7 @@ function AgentListContent({
           {/* The state as a dot, not a pill: the meta line
               below carries the words (mesa task 1484). */}
           <span
-            className={`agent-card-dot agent-card-dot-${pinned ? 'live' : (a.state ?? a.status ?? 'unknown')}`}
+            className={`agent-card-dot agent-card-dot-${pinned ? 'live' : (tint ?? a.state ?? a.status ?? 'unknown')}`}
             title={
               pinned
                 ? 'the live conversation agent'

@@ -11182,8 +11182,13 @@ body.live-panel-ratio-resizing .live-panel-divider {
 }
 
 .agent-card-dot-working,
-.agent-card-dot-busy {
+.agent-card-dot-busy,
+.agent-card-dot-stale {
   background: var(--amber);
+}
+
+.agent-card-dot-active {
+  background: var(--green);
 }
 
 .agent-card-dot-blocked,
@@ -11329,4 +11334,18 @@ body.live-panel-ratio-resizing .live-panel-divider {
 
 .agent-card-dot-live {
   background: var(--violet);
+}
+
+/* Top-level cards tinted by activity (mesa task 1502), in the live card's
+   style: green while actively working, amber when running but stale (the
+   idle + working pair). Only the card — its sub-agent and shell rows stay
+   dark. */
+.agent-list .agent-card-active {
+  background: rgba(43, 255, 156, 0.12);
+  border-color: rgba(43, 255, 156, 0.4);
+}
+
+.agent-list .agent-card-stale {
+  background: rgba(255, 180, 68, 0.12);
+  border-color: rgba(255, 180, 68, 0.4);
 }

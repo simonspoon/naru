@@ -72,3 +72,17 @@ export function runningBelow(children: { state: string }[]): string | null {
   const n = children.filter((c) => c.state === 'running').length
   return n === 0 ? null : `${n} running below`
 }
+
+/**
+ * The tint a top-level card wears (mesa task 1502), and the colour of its
+ * dot: `active` while the session is `working` (or, with no `state` at all,
+ * `busy`) and its process is busy, `stale` for the sticky `idle` + `working`
+ * pair (`AgentSidebar.tsx::bucketOf` — a background session can sit there
+ * for 90+ minutes after its turn, mesa task 571), `null` for every other
+ * state, which keeps its old look.
+ */
+export function agentTint(a: Pick<AgentSession, 'state' | 'status'>): 'active' | 'stale' | null {
+  const working = a.state === 'working' || (a.state === null && a.status === 'busy')
+  if (!working) return null
+  return a.status === 'idle' ? 'stale' : 'active'
+}

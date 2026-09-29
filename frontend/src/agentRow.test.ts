@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { agentHeadline, formatContextTokens, responsePreview, runningBelow } from './agentRow'
+import { agentHeadline, agentTint, formatContextTokens, responsePreview, runningBelow } from './agentRow'
 
 describe('formatContextTokens', () => {
   it('shows a sub-1k count exactly', () => {
@@ -79,5 +79,23 @@ describe('runningBelow', () => {
     )
     expect(runningBelow([{ state: 'finished' }])).toBeNull()
     expect(runningBelow([])).toBeNull()
+  })
+})
+
+describe('agentTint', () => {
+  it('is active while working and busy', () => {
+    expect(agentTint({ state: 'working', status: 'busy' })).toBe('active')
+    expect(agentTint({ state: null, status: 'busy' })).toBe('active')
+  })
+
+  it('is stale for the idle + working pair', () => {
+    expect(agentTint({ state: 'working', status: 'idle' })).toBe('stale')
+  })
+
+  it('is null for every other state', () => {
+    expect(agentTint({ state: 'done', status: 'idle' })).toBeNull()
+    expect(agentTint({ state: 'blocked', status: 'busy' })).toBeNull()
+    expect(agentTint({ state: 'failed', status: null })).toBeNull()
+    expect(agentTint({ state: null, status: 'idle' })).toBeNull()
   })
 })
