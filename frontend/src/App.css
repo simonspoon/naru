@@ -9985,7 +9985,10 @@ body.live-panel-ratio-resizing .live-panel-divider {
 }
 
 .live-toolbar .live-meter {
-  max-width: 60px;
+  flex: none;
+  width: 56px;
+  max-width: none;
+  gap: 2px;
 }
 
 .live-toolbar .live-head-actions {
