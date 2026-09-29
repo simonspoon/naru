@@ -54,4 +54,17 @@ contextTokens: number | null,
  * names one" figure a session's own `model` is. Always `None` for a
  * shell: a `ps` row is all there is of one, and it names no model.
  */
-model: string | null, state: AgentChildState, };
+model: string | null, 
+/**
+ * What this child is for, in plain English (mesa task 1484). A
+ * subagent: the `description` in its `.meta.json` sidecar. A shell: the
+ * `description` on the parent's pending `Bash` call it was paired with
+ * (`agents::pair_shells`). `None` when unknown.
+ */
+description: string | null, 
+/**
+ * A shell's real command, from the paired pending `Bash` call rather than
+ * the `zsh -c 'source …'` wrapper `ps` shows. `None` for a subagent and
+ * for a shell no pending call could be paired with.
+ */
+command: string | null, state: AgentChildState, };

@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 import {
   childElapsed,
   childForPane,
+  childHeadline,
+  childSubline,
   childLabel,
   childPaneHeading,
   childPaneId,
@@ -22,6 +24,8 @@ function child(over: Partial<AgentChild> = {}): AgentChild {
     startedAt: null,
     contextTokens: null,
     model: null,
+    description: null,
+    command: null,
     state: 'running',
     ...over,
   }
@@ -216,5 +220,35 @@ describe('childPaneName and childPaneHeading', () => {
 describe('childPromptLabel', () => {
   it('attributes the opening turn to the parent, never to the reader', () => {
     expect(childPromptLabel('supervisor', 'implementer')).toBe('supervisor → implementer')
+  })
+})
+
+describe('childHeadline / childSubline (mesa task 1484)', () => {
+  it('a subagent leads with its type and shows its description underneath', () => {
+    const c = child({ description: 'Replace fold arrows', detail: 'Edit' })
+    expect(childHeadline(c)).toBe('implementer')
+    expect(childSubline(c)).toBe('Replace fold arrows')
+  })
+
+  it('a subagent without a description falls back to what it last did', () => {
+    expect(childSubline(child({ detail: 'reading the store' }))).toBe('reading the store')
+    expect(childSubline(child())).toBeNull()
+  })
+
+  it('a shell shows its description and real command, never the ps wrapper', () => {
+    const c = child({
+      kind: 'shell',
+      name: "/bin/zsh -c source /snap && eval 'x'",
+      description: 'Running frontend tests',
+      command: 'npx vitest run',
+    })
+    expect(childHeadline(c)).toBe('Running frontend tests')
+    expect(childSubline(c)).toBe('npx vitest run')
+  })
+
+  it('an unpaired shell gets a neutral sentence and no subline', () => {
+    const c = child({ kind: 'shell', name: '/bin/zsh -c source /snap' })
+    expect(childHeadline(c)).toBe('Running a shell command')
+    expect(childSubline(c)).toBeNull()
   })
 })

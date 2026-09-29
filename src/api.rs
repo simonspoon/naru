@@ -9359,6 +9359,8 @@ async fn list_project_agents(
         .await
         .map_err(|e| agents_unavailable(format!("agents list panicked: {e}")))?
         .map_err(agents_unavailable)?;
+    let mut sessions = sessions;
+    attach_agent_tasks(&state, &mut sessions);
     if state.agents_gen.load(Ordering::SeqCst) == gen0 {
         let mut cache = state.agents_cache.lock().unwrap();
         // Keys are per-folder; a project that changes local_path leaves its
@@ -9374,6 +9376,16 @@ async fn list_project_agents(
         agents: sessions,
     })
     .into_response())
+}
+
+/// Fills in each listed session's task link (mesa task 1484) under a brief
+/// store lock, before the list is cached.
+fn attach_agent_tasks(state: &AppState, sessions: &mut [AgentSession]) {
+    let store = match state.store.lock() {
+        Ok(s) => s,
+        Err(e) => e.into_inner(),
+    };
+    agents::attach_tasks(sessions, &store);
 }
 
 /// Lists every live Claude Code session on the machine (no folder filter) —
@@ -9399,6 +9411,8 @@ async fn list_all_agents(
         .await
         .map_err(|e| agents_unavailable(format!("agents list panicked: {e}")))?
         .map_err(agents_unavailable)?;
+    let mut sessions = sessions;
+    attach_agent_tasks(&state, &mut sessions);
     if state.agents_gen.load(Ordering::SeqCst) == gen0 {
         let mut cache = state.agents_cache.lock().unwrap();
         cache.insert(

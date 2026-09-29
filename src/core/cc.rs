@@ -155,6 +155,55 @@ impl RawOrigin {
     }
 }
 
+/// One tool call's self-description — see [`RawMessage::tool_details`].
+struct ToolDetail {
+    id: String,
+    name: String,
+    /// `input.description` (`Bash`, and most tools), or an `Agent` call's
+    /// description/prompt.
+    description: Option<String>,
+    /// A `Bash` call's real command.
+    command: Option<String>,
+    /// A `TodoWrite`'s in-progress entry (`activeForm`, else `content`).
+    active_form: Option<String>,
+}
+
+/// A `Bash` call dispatched and not yet answered by a `tool_result` — the
+/// command a live shell child is running (mesa task 1484). `ps` shows only
+/// Claude Code's `zsh -c 'source …snapshot && eval …'` wrapper.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingBash {
+    pub description: Option<String>,
+    pub command: Option<String>,
+}
+
+/// Folds one transcript line into a pending-`Bash` list: a `Bash` call
+/// appends, a `tool_result` for a listed id removes it. Order is dispatch
+/// order.
+fn fold_pending(pending: &mut Vec<(String, PendingBash)>, kind: Option<&str>, msg: &RawMessage) {
+    match kind {
+        Some("assistant") => {
+            for d in msg.tool_details() {
+                if d.name == "Bash" {
+                    pending.push((
+                        d.id,
+                        PendingBash {
+                            description: d.description,
+                            command: d.command,
+                        },
+                    ));
+                }
+            }
+        }
+        Some("user") => {
+            for (id, _) in msg.tool_results() {
+                pending.retain(|(p, _)| *p != id);
+            }
+        }
+        _ => {}
+    }
+}
+
 #[derive(Deserialize)]
 struct RawMessage {
     /// The API response id (`msg_…`). One response is written as SEVERAL
@@ -262,6 +311,69 @@ impl RawMessage {
             .filter_map(|b| {
                 let id = b.get("tool_use_id")?.as_str()?;
                 Some((id.to_string(), result_len(b.get("content"))))
+            })
+            .collect()
+    }
+
+    /// What each tool call in this message says it is *for* (mesa task 1484):
+    /// the human `description` Claude Code puts on `Bash`/`Agent` calls, a
+    /// `Bash` call's real `command`, and a `TodoWrite`'s in-progress
+    /// `activeForm`. Read for the Agents panel's headline and its shell cards
+    /// only — none of it is stored — and every string goes through
+    /// [`sanitize_capped`], being model-authored text on a poll.
+    ///
+    /// Deliberately a separate reader from [`RawMessage::tool_uses`]: that one
+    /// feeds the db and lifts at most one scalar by a fixed key list.
+    fn tool_details(&self) -> Vec<ToolDetail> {
+        let Some(blocks) = self.content.as_ref().and_then(|c| c.as_array()) else {
+            return Vec::new();
+        };
+        blocks
+            .iter()
+            .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_use"))
+            .filter_map(|b| {
+                let id = b.get("id")?.as_str()?.to_string();
+                let name = b.get("name")?.as_str()?.to_string();
+                let input = b.get("input").and_then(|i| i.as_object());
+                let text = |key: &str| {
+                    input
+                        .and_then(|o| o.get(key))
+                        .and_then(|v| v.as_str())
+                        .and_then(sanitize_capped)
+                };
+                let (description, command, active_form) = match name.as_str() {
+                    "Bash" => (text("description"), text("command"), None),
+                    // A delegated job: its description, else the start of the
+                    // prompt it was handed.
+                    "Agent" | "Task" => {
+                        (text("description").or_else(|| text("prompt")), None, None)
+                    }
+                    "TodoWrite" => {
+                        let active = input
+                            .and_then(|o| o.get("todos"))
+                            .and_then(|t| t.as_array())
+                            .and_then(|todos| {
+                                todos.iter().find(|t| {
+                                    t.get("status").and_then(|s| s.as_str()) == Some("in_progress")
+                                })
+                            })
+                            .and_then(|t| {
+                                t.get("activeForm")
+                                    .or_else(|| t.get("content"))
+                                    .and_then(|v| v.as_str())
+                            })
+                            .and_then(sanitize_capped);
+                        (None, None, active)
+                    }
+                    _ => (text("description"), None, None),
+                };
+                Some(ToolDetail {
+                    id,
+                    name,
+                    description,
+                    command,
+                    active_form,
+                })
             })
             .collect()
     }
@@ -3971,6 +4083,16 @@ pub struct SessionPulse {
     /// model this session is running on **now**, not a list: a session may
     /// switch models mid-conversation, and the card reports the current one.
     pub model: Option<String>,
+    /// The in-progress entry of the newest `TodoWrite` call (its
+    /// `activeForm`) — what the session says it is doing. `None` when the
+    /// newest `TodoWrite` had nothing in progress, or there is none in the
+    /// window (mesa task 1484).
+    pub todo_active: Option<String>,
+    /// The newest `description` any non-`TodoWrite` tool call carried
+    /// (`Bash`, `Agent`, …).
+    pub tool_doing: Option<String>,
+    /// `Bash` calls dispatched and not yet answered, oldest first.
+    pub pending_bash: Vec<PendingBash>,
 }
 
 /// One session's pulse, read **live off its transcript** — the fourth read to
@@ -4018,6 +4140,7 @@ pub fn session_pulse(session_id: &str) -> SessionPulse {
 /// report one of those as something the agent said.
 fn pulse_from_text(text: &str) -> SessionPulse {
     let mut pulse = SessionPulse::default();
+    let mut pending: Vec<(String, PendingBash)> = Vec::new();
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() {
@@ -4028,14 +4151,25 @@ fn pulse_from_text(text: &str) -> SessionPulse {
         };
         // A subagent's turns are its own; the same main-thread-only rule
         // `chat_turns` keeps.
-        if raw.is_sidechain == Some(true) || raw.kind.as_deref() != Some("assistant") {
+        if raw.is_sidechain == Some(true) {
             continue;
         }
         let Some(msg) = raw.message.as_ref() else {
             continue;
         };
+        fold_pending(&mut pending, raw.kind.as_deref(), msg);
+        if raw.kind.as_deref() != Some("assistant") {
+            continue;
+        }
         if let Some(prose) = msg.assistant_text() {
             pulse.last_response = Some(prose);
+        }
+        for d in msg.tool_details() {
+            if d.name == "TodoWrite" {
+                pulse.todo_active = d.active_form;
+            } else if d.description.is_some() {
+                pulse.tool_doing = d.description;
+            }
         }
         if let Some(u) = msg.usage.as_ref() {
             // Input side only: the context window is the size of the newest
@@ -4047,6 +4181,7 @@ fn pulse_from_text(text: &str) -> SessionPulse {
             pulse.model = Some(model.clone());
         }
     }
+    pulse.pending_bash = pending.into_iter().map(|(_, p)| p).collect();
     pulse
 }
 
@@ -4079,6 +4214,10 @@ pub struct SubagentPulse {
     /// The model the newest assistant message that names one ran on, the same
     /// "what it is running on now" figure [`SessionPulse`] reports.
     pub model: Option<String>,
+    /// `Bash` calls this run dispatched and has not seen answered, oldest
+    /// first (mesa task 1484) — the fallback source of a live shell's command
+    /// when the parent session has none pending.
+    pub pending_bash: Vec<PendingBash>,
 }
 
 /// One subagent transcript's pulse. **Fails open in every direction** — an
@@ -4103,6 +4242,7 @@ pub(crate) fn subagent_pulse(path: &Path) -> SubagentPulse {
 /// message's prose if it said anything, otherwise the tool it called.
 fn subagent_from_text(text: &str) -> SubagentPulse {
     let mut pulse = SubagentPulse::default();
+    let mut pending: Vec<(String, PendingBash)> = Vec::new();
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() {
@@ -4111,18 +4251,25 @@ fn subagent_from_text(text: &str) -> SubagentPulse {
         let Ok(raw) = serde_json::from_str::<RawLine>(line) else {
             continue;
         };
-        // No `is_sidechain` filter, deliberately: every line here is one.
-        if raw.kind.as_deref() != Some("assistant") {
-            continue;
-        }
         let Some(msg) = raw.message.as_ref() else {
             continue;
         };
+        // No `is_sidechain` filter, deliberately: every line here is one.
+        fold_pending(&mut pending, raw.kind.as_deref(), msg);
+        if raw.kind.as_deref() != Some("assistant") {
+            continue;
+        }
         let calls = msg.tool_uses();
         if let Some(prose) = msg.assistant_text() {
             pulse.detail = Some(prose);
         } else if let Some(call) = calls.first() {
-            pulse.detail = sanitize_capped(&call.1);
+            // What the call says it is for; the tool's name only when it
+            // said nothing (mesa task 1484).
+            pulse.detail = msg
+                .tool_details()
+                .into_iter()
+                .find_map(|d| d.description.or(d.active_form))
+                .or_else(|| sanitize_capped(&call.1));
         }
         if let Some(u) = msg.usage.as_ref() {
             pulse.context_tokens =
@@ -4132,6 +4279,7 @@ fn subagent_from_text(text: &str) -> SubagentPulse {
             pulse.model = Some(model.clone());
         }
     }
+    pulse.pending_bash = pending.into_iter().map(|(_, p)| p).collect();
     pulse
 }
 
@@ -7520,6 +7668,67 @@ mod tests {
             subagent_pulse(&dir.path().join("agent-nope.jsonl")),
             SubagentPulse::default()
         );
+    }
+
+    /// Mesa task 1484: the pulse lifts what a tool call says it is *for* —
+    /// a `Bash` description, an `Agent` description (else its prompt), a
+    /// `TodoWrite`'s in-progress `activeForm` — and the `Bash` calls not yet
+    /// answered by a `tool_result`.
+    const DOING_LINES: &str = concat!(
+        r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"TodoWrite","input":{"todos":[{"content":"Fix it","status":"completed","activeForm":"Fixing it"},{"content":"Add tests","status":"in_progress","activeForm":"Adding tests"}]}}]}}"#,
+        "\n",
+        r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t2","name":"Bash","input":{"command":"cargo test\n--all","description":"Run the unit tests"}}]}}"#,
+        "\n",
+        r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t2","content":"ok"}]}}"#,
+        "\n",
+        r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t3","name":"Bash","input":{"command":"npx vitest run","description":"Running frontend tests"}},{"type":"tool_use","id":"t4","name":"Agent","input":{"prompt":"Review the diff","subagent_type":"x"}},{"type":"tool_use","id":"t5","name":"Bash","input":{"command":"sleep 5"}}]}}"#,
+        "\n",
+    );
+
+    #[test]
+    fn pulse_captures_what_a_tool_call_is_for() {
+        let pulse = pulse_from_text(DOING_LINES);
+        assert_eq!(pulse.todo_active.as_deref(), Some("Adding tests"));
+        // The newest description, and an `Agent` call with no description
+        // falls back to its prompt.
+        assert_eq!(pulse.tool_doing.as_deref(), Some("Review the diff"));
+    }
+
+    #[test]
+    fn pulse_lists_bash_calls_still_unanswered_oldest_first() {
+        let pulse = pulse_from_text(DOING_LINES);
+        assert_eq!(
+            pulse.pending_bash,
+            vec![
+                PendingBash {
+                    description: Some("Running frontend tests".into()),
+                    command: Some("npx vitest run".into()),
+                },
+                PendingBash {
+                    description: None,
+                    command: Some("sleep 5".into()),
+                },
+            ],
+            "t2 was answered so it is gone; t3 and t5 are in flight, in dispatch order"
+        );
+    }
+
+    #[test]
+    fn a_todowrite_with_nothing_in_progress_clears_the_activity() {
+        let cleared = format!(
+            "{DOING_LINES}{}\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t9","name":"TodoWrite","input":{"todos":[{"content":"x","status":"completed","activeForm":"Xing"}]}}]}}"#
+        );
+        assert_eq!(pulse_from_text(&cleared).todo_active, None);
+    }
+
+    #[test]
+    fn a_subagent_pulse_names_a_tool_call_by_its_description() {
+        let described = r#"{"type":"assistant","isSidechain":true,"message":{"content":[{"type":"tool_use","id":"b1","name":"Bash","input":{"command":"ls","description":"List the files"}}]}}"#;
+        let pulse = subagent_from_text(described);
+        assert_eq!(pulse.detail.as_deref(), Some("List the files"));
+        assert_eq!(pulse.pending_bash.len(), 1);
+        assert_eq!(pulse.pending_bash[0].command.as_deref(), Some("ls"));
     }
 
     #[test]

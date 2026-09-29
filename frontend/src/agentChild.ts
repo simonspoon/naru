@@ -29,6 +29,31 @@ export function childLabel(child: AgentChild): string {
 }
 
 /**
+ * The line a nested child row leads with (mesa task 1484). A subagent leads
+ * with its agent type (the SUB-AGENT tag sits beside it); a shell leads with
+ * the human description of the Bash call it was paired with, falling back to
+ * a neutral sentence — never `ps`'s `zsh -c 'source …'` wrapper, which is
+ * setup boilerplate.
+ */
+export function childHeadline(child: AgentChild): string {
+  if (child.kind === 'subagent') return childLabel(child)
+  return responsePreview(child.description) ?? 'Running a shell command'
+}
+
+/**
+ * The dim second line under a child: a subagent's description (what its
+ * parent asked of it), else the last thing it did; a shell's real command.
+ * `null` for a shell no pending Bash call could be paired with — its only
+ * other text is the wrapper, which is not worth a line.
+ */
+export function childSubline(child: AgentChild): string | null {
+  if (child.kind === 'subagent') {
+    return responsePreview(child.description) ?? responsePreview(child.detail)
+  }
+  return responsePreview(child.command)
+}
+
+/**
  * How long a child has been running, in the compact form a card has room
  * for: `7s`, `4m`, `2h`, `3d`. Floors rather than rounds, so it never claims
  * more time than has passed, and a clock-skewed future stamp reads `0s`

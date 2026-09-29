@@ -89,4 +89,23 @@ model: string | null,
  * Always present, empty when there is nothing live. Subagents come first,
  * then shells; the page decides the order it renders (`agentChild.ts`).
  */
-children: Array<AgentChild>, };
+children: Array<AgentChild>, 
+/**
+ * **mesa-derived, not from the CLI payload** (mesa task 1484). What the
+ * session says it is doing right now, for the Agents panel's headline:
+ * the in-progress `activeForm` of its newest `TodoWrite`, else the
+ * newest `description` a tool call carried. `null` when neither is in
+ * the transcript window — the page then falls back to `last_response`.
+ * Bounded by `cc::sanitize_capped`.
+ */
+activity: string | null, 
+/**
+ * **mesa-derived** (task 1484): the id of the task whose `owner` is this
+ * session's id, when one claimed its work that way. `null` is the common
+ * case — the page then shows the workspace instead.
+ */
+taskId: number | null, 
+/**
+ * The `task_id` task's derived name, so the card can label the link.
+ */
+taskName: string | null, };

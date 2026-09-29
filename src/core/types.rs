@@ -207,6 +207,23 @@ pub struct AgentSession {
     /// then shells; the page decides the order it renders (`agentChild.ts`).
     #[serde(default)]
     pub children: Vec<AgentChild>,
+    /// **mesa-derived, not from the CLI payload** (mesa task 1484). What the
+    /// session says it is doing right now, for the Agents panel's headline:
+    /// the in-progress `activeForm` of its newest `TodoWrite`, else the
+    /// newest `description` a tool call carried. `null` when neither is in
+    /// the transcript window — the page then falls back to `last_response`.
+    /// Bounded by `cc::sanitize_capped`.
+    #[serde(default)]
+    pub activity: Option<String>,
+    /// **mesa-derived** (task 1484): the id of the task whose `owner` is this
+    /// session's id, when one claimed its work that way. `null` is the common
+    /// case — the page then shows the workspace instead.
+    #[ts(type = "number | null")]
+    #[serde(default)]
+    pub task_id: Option<i64>,
+    /// The `task_id` task's derived name, so the card can label the link.
+    #[serde(default)]
+    pub task_name: Option<String>,
 }
 
 /// Which of the two kinds of work an [`AgentChild`] is. Exactly two: a
@@ -282,6 +299,17 @@ pub struct AgentChild {
     /// shell: a `ps` row is all there is of one, and it names no model.
     #[serde(default)]
     pub model: Option<String>,
+    /// What this child is for, in plain English (mesa task 1484). A
+    /// subagent: the `description` in its `.meta.json` sidecar. A shell: the
+    /// `description` on the parent's pending `Bash` call it was paired with
+    /// (`agents::pair_shells`). `None` when unknown.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// A shell's real command, from the paired pending `Bash` call rather than
+    /// the `zsh -c 'source …'` wrapper `ps` shows. `None` for a subagent and
+    /// for a shell no pending call could be paired with.
+    #[serde(default)]
+    pub command: Option<String>,
     pub state: AgentChildState,
 }
 

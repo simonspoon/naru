@@ -43,3 +43,26 @@ export function responsePreview(text: string | null | undefined): string | null 
   const collapsed = text.replace(/\s+/g, ' ').trim()
   return collapsed === '' ? null : collapsed
 }
+
+/**
+ * The one big sentence a card leads with (mesa task 1484): what the agent is
+ * doing, best effort, in this order — the in-progress todo / newest tool
+ * description the server lifted (`activity`), else the latest assistant prose.
+ * `null` when neither is known, and the card then shows its name alone.
+ */
+export function agentHeadline(a: {
+  activity: string | null
+  lastResponse: string | null
+}): string | null {
+  return responsePreview(a.activity) ?? responsePreview(a.lastResponse)
+}
+
+/**
+ * The card's `N running below` meta fragment: how many nested children are
+ * still running. `null` for none, so the fragment is dropped rather than
+ * reading `0 running below`.
+ */
+export function runningBelow(children: { state: string }[]): string | null {
+  const n = children.filter((c) => c.state === 'running').length
+  return n === 0 ? null : `${n} running below`
+}

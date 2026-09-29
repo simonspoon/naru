@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatContextTokens, responsePreview } from './agentRow'
+import { agentHeadline, formatContextTokens, responsePreview, runningBelow } from './agentRow'
 
 describe('formatContextTokens', () => {
   it('shows a sub-1k count exactly', () => {
@@ -48,5 +48,26 @@ describe('responsePreview', () => {
     expect(responsePreview('   \n\t ')).toBeNull()
     expect(responsePreview(null)).toBeNull()
     expect(responsePreview(undefined)).toBeNull()
+  })
+})
+
+describe('agentHeadline (mesa task 1484)', () => {
+  it('prefers the server-lifted activity over the latest prose', () => {
+    expect(agentHeadline({ activity: 'Adding  tests', lastResponse: 'done' })).toBe('Adding tests')
+  })
+
+  it('falls back to the latest prose, then to nothing', () => {
+    expect(agentHeadline({ activity: null, lastResponse: 'On it.' })).toBe('On it.')
+    expect(agentHeadline({ activity: '  ', lastResponse: null })).toBeNull()
+  })
+})
+
+describe('runningBelow', () => {
+  it('counts running children only and drops the fragment at zero', () => {
+    expect(runningBelow([{ state: 'running' }, { state: 'finished' }, { state: 'running' }])).toBe(
+      '2 running below',
+    )
+    expect(runningBelow([{ state: 'finished' }])).toBeNull()
+    expect(runningBelow([])).toBeNull()
   })
 })

@@ -18,18 +18,20 @@ import {
 } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { listAllAgents, listProjects, spawnProjectAgent, stopAgent } from '../api'
-import { liveWorkLabel, projectForCwd } from '../agentProject'
+import { projectForCwd } from '../agentProject'
 import {
   childElapsed,
   childForPane,
+  childHeadline,
   childLabel,
+  childSubline,
   childPaneHeading,
   childPaneId,
   isChildPaneId,
   orderedChildren,
   parseChildPaneId,
 } from '../agentChild'
-import { formatContextTokens, responsePreview } from '../agentRow'
+import { agentHeadline, formatContextTokens, runningBelow } from '../agentRow'
 import { publishOpenAgents } from '../liveView'
 import {
   clampAgentSidebarWidth,
@@ -298,15 +300,6 @@ function bucketOf(a: AgentSession): Bucket {
   if (a.state === 'blocked') return 'BLOCKED'
   return a.state === 'done' ? 'DONE' : 'ACTIVE'
 }
-
-// The work-in-flight badge's tooltip. mesa counts running Bash calls and
-// subagents itself, so this can contradict upstream's `state` (which reports
-// a session finished the moment its turn ends) — the hint is what keeps that
-// disagreement from reading as a mesa bug (mesa task 802).
-const LIVE_WORK_HINT =
-  'Naru sees this session holding a running Bash call or subagent — it counts those ' +
-  'directly, so the todo watcher will not refill its slot yet. `claude` can report the ' +
-  'session as finished at the same time; its `state` ends at the turn, not at the work.'
 
 const BUCKETS: Bucket[] = ['BLOCKED', 'ACTIVE', 'DONE']
 
@@ -704,11 +697,17 @@ function AgentListContent({
                       // yet), and both then render nothing at all rather than
                       // a placeholder that would read as an empty reply or as
                       // zero tokens — see `agentRow.ts`.
-                      const preview = responsePreview(a.lastResponse)
                       const context = formatContextTokens(a.contextTokens)
                       // Absent on a session with no transcript yet, and then
                       // rendered as nothing at all rather than an empty pill.
                       const model = shortModel(a.model)
+                      const headline = agentHeadline(a)
+                      const label = agentLabel(a)
+                      const below = runningBelow(a.children)
+                      // The task chip links only when a project claims the
+                      // folder — the route needs the project id.
+                      const taskHref =
+                        a.taskId !== null && proj ? `#/projects/${proj.id}/tasks/${a.taskId}` : null
                       return (
                         <li
                           key={a.sessionId}
@@ -721,7 +720,19 @@ function AgentListContent({
                           }}
                         >
                           <div className="agent-row-title">
-                            <span className="agent-name">{agentLabel(a)}</span>
+                            {/* The state as a dot, not a pill: the meta line
+                                below carries the words (mesa task 1484). */}
+                            <span
+                              className={`agent-card-dot agent-card-dot-${a.state ?? a.status ?? 'unknown'}`}
+                              title={[a.status, a.state].filter(Boolean).join(' · ') || 'unknown'}
+                            />
+                            {/* The card's one big sentence: what the agent
+                                is doing (`agentHeadline`), else its name.
+                                Model-authored text — a plain text node,
+                                never HTML — and the same string in `title`. */}
+                            <span className="agent-card-headline" title={headline ?? label}>
+                              {headline ?? label}
+                            </span>
                             {/* Only a background session has a short job id,
                                 and `claude stop` takes exactly that — an
                                 interactive one has nothing to stop, the same
@@ -746,80 +757,65 @@ function AgentListContent({
                               </button>
                             )}
                           </div>
-                          <div className="agent-row-badges">
-                            {model && <span className="badge agent-model">{model}</span>}
-                            <span className={`badge agent-kind-${a.kind}`}>{a.kind}</span>
-                            {a.status && <span className={`badge agent-status-${a.status}`}>{a.status}</span>}
-                            {a.state && a.state !== a.status && (
-                              <span className={`badge agent-state-${a.state}`}>{a.state}</span>
-                            )}
-                            {liveWorkLabel(a) && (
-                              <span className="badge agent-live-work" title={LIVE_WORK_HINT}>
-                                {liveWorkLabel(a)}
+                          {/* One faint line: name · kind · model · task or
+                              workspace · uptime · ctx · N running below. */}
+                          <div className="muted agent-card-meta">
+                            {headline && <span className="agent-card-meta-name">{label}</span>}
+                            <span>{a.kind}</span>
+                            {model && <span>{model}</span>}
+                            {a.taskId !== null ? (
+                              taskHref ? (
+                                <a
+                                  className="agent-card-task"
+                                  href={taskHref}
+                                  title={a.taskName ?? undefined}
+                                  onClick={(e) => e.stopPropagation()}
+                                >
+                                  task #{a.taskId}
+                                </a>
+                              ) : (
+                                <span className="agent-card-task" title={a.taskName ?? undefined}>
+                                  task #{a.taskId}
+                                </span>
+                              )
+                            ) : (
+                              <span className="agent-row-meta-where" title={proj ? proj.name : a.cwd}>
+                                {proj ? proj.name : a.cwd}
                               </span>
                             )}
-                            {a.waitingFor && <span className="badge blocked">{a.waitingFor}</span>}
-                          </div>
-                          {/* Model-authored text: a plain text node, never
-                              HTML/markdown/a URL — and the same string in
-                              `title`, so the clamped line is readable in full
-                              without the row growing. */}
-                          {preview && (
-                            <div className="agent-row-response" title={preview}>
-                              {preview}
-                            </div>
-                          )}
-                          <div className="muted agent-meta agent-row-meta">
-                            {/* The project (or the raw cwd when no project
-                                claims it) is the only part that may be
-                                ellipsized: a cwd is long enough to eat the
-                                whole line, and the age is the half that
-                                actually changes. */}
-                            <span className="agent-row-meta-where" title={proj ? proj.name : a.cwd}>
-                              {proj ? proj.name : a.cwd}
-                              {a.id === null && ' · external terminal — not attachable'}
-                            </span>
-                            {/* Bare age, with the sentence in the tooltip: at
-                                the rail's 240px the word "started" is what
-                                ellipsizes the project name away. */}
-                            <span
-                              className="agent-row-meta-age"
-                              title={`started ${startedAgo(a.startedAt)}`}
-                            >
-                              {startedAgo(a.startedAt)}
-                            </span>
+                            <span title={`started ${startedAgo(a.startedAt)}`}>{startedAgo(a.startedAt)}</span>
                             {context && (
                               <span
                                 className="agent-row-context"
                                 title={`${a.contextTokens} tokens in the context window`}
                               >
-                                {context}
+                                {context} ctx
                               </span>
                             )}
+                            {below && <span>{below}</span>}
+                            {a.id === null && <span>external terminal — not attachable</span>}
+                            {a.waitingFor && <span className="badge blocked">{a.waitingFor}</span>}
                           </div>
-                          {/* The work this session holds in flight, one small
-                              card per subagent and per running shell (mesa
-                              task 1277) — the detailed twin of the count
-                              badge above, which is deliberately unchanged.
-                              Order is `agentChild.ts`'s decision, not the
-                              server's. */}
+                          {/* The work this session holds in flight, nested
+                              under it (mesa tasks 1277, 1484): a subagent
+                              leads with its type and description, a shell
+                              with what its Bash call is for and the real
+                              command dim underneath. Order is
+                              `agentChild.ts`'s decision, not the server's. */}
                           {a.children.length > 0 && (
                             <ul className="agent-children">
                               {orderedChildren(a.children).map((child, i) => {
-                                const label = childLabel(child)
-                                const did = responsePreview(child.detail)
+                                const childName = childHeadline(child)
+                                const sub = childSubline(child)
                                 const elapsed = childElapsed(child.startedAt, Date.now())
                                 const childContext = formatContextTokens(child.contextTokens)
-                                // Always absent for a shell, which has no
-                                // transcript to name a model.
-                                const childModel = shortModel(child.model)
                                 const paneId = a.id !== null ? childPaneId(a.id, child) : null
                                 return (
-                                  <li key={`${child.kind}-${label}-${i}`}>
+                                  <li key={`${child.kind}-${childLabel(child)}-${i}`}>
                                     <button
                                       type="button"
                                       className={
-                                        `agent-child agent-child-${child.state}` +
+                                        `agent-child agent-child-${child.state} agent-child-of-${child.kind}` +
                                         (paneId !== null && openIds.includes(paneId)
                                           ? ' selected'
                                           : '')
@@ -840,41 +836,39 @@ function AgentListContent({
                                       disabled={a.id === null}
                                     >
                                       <div className="agent-child-title">
-                                        {childModel && (
-                                          <span className="badge agent-model">{childModel}</span>
-                                        )}
-                                        <span className={`badge agent-child-kind-${child.kind}`}>
-                                          {child.kind}
+                                        {/* Untrusted text from outside mesa:
+                                            plain text nodes, never HTML or a
+                                            URL, with the full string in
+                                            `title`. */}
+                                        <span className="agent-child-name" title={childName}>
+                                          {childName}
                                         </span>
-                                        {/* Untrusted text from outside mesa (a
-                                            transcript sidecar, a command line):
-                                            a plain text node, never HTML or a
-                                            URL — and the same string in
-                                            `title`, so the clamped line is
-                                            readable in full. */}
-                                        <span className="agent-child-name" title={label}>
-                                          {label}
+                                        {child.kind === 'subagent' && (
+                                          <span className="agent-child-tag">sub-agent</span>
+                                        )}
+                                        <span className="muted agent-child-meta">
+                                          {child.state === 'finished' && <span>finished</span>}
+                                          {elapsed && (
+                                            <span title={`running for ${elapsed}`}>{elapsed}</span>
+                                          )}
+                                          {childContext && (
+                                            <span
+                                              className="agent-child-context"
+                                              title={`${child.contextTokens} tokens in the context window`}
+                                            >
+                                              {childContext}
+                                            </span>
+                                          )}
                                         </span>
                                       </div>
-                                      {did && (
-                                        <div className="agent-child-detail" title={did}>
-                                          {did}
+                                      {sub && (
+                                        <div
+                                          className={`agent-child-detail${child.kind === 'shell' ? ' agent-child-command' : ''}`}
+                                          title={sub}
+                                        >
+                                          {child.kind === 'shell' ? `$ ${sub}` : sub}
                                         </div>
                                       )}
-                                      <div className="muted agent-child-meta">
-                                        {elapsed && (
-                                          <span title={`running for ${elapsed}`}>{elapsed}</span>
-                                        )}
-                                        {child.state === 'finished' && <span>finished</span>}
-                                        {childContext && (
-                                          <span
-                                            className="agent-child-context"
-                                            title={`${child.contextTokens} tokens in the context window`}
-                                          >
-                                            {childContext}
-                                          </span>
-                                        )}
-                                      </div>
                                     </button>
                                   </li>
                                 )

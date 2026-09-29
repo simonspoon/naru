@@ -1667,6 +1667,8 @@ question is a task, not a note",
             started_at: None,
             context_tokens: None,
             model: None,
+            description: None,
+            command: None,
             state: crate::core::types::AgentChildState::Running,
         };
         let turns = [sample_turn(1, crate::core::LiveRole::User, "hello there")];

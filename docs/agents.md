@@ -879,3 +879,24 @@ column, and an `in_progress` row whose agent is gone does not animate.
   only the pulse stops.
 - Covered by vitest (`boardView.test.ts`) plus live QA; no CLI/API/db surface
   changed, so no `scripts/*-check.sh` gate moves.
+
+## Headline cards (mesa task 1484)
+
+Each session row is a card led by one sentence of what it is doing, with the
+rest on one faint meta line (`name · kind · model · task or workspace · uptime
+· ctx · N running below`) and its children nested underneath.
+
+- **Headline** (`agentRow.ts::agentHeadline`): `AgentSession.activity` — the
+  in-progress `activeForm` of the newest `TodoWrite`, else the newest tool-call
+  `description` in the transcript tail (`cc::pulse_from_text`) — else the latest
+  assistant prose.
+- **Task link**: `AgentSession.taskId`/`taskName`, set by `agents::attach_tasks`
+  from the task whose `owner` is the session id (`Store::find_task_by_owner`).
+  Most sessions claim under another owner, so the card then shows the workspace.
+- **Sub-agents** show the `description` from their `.meta.json` sidecar.
+- **Shells** are named from the parent's unanswered `Bash` tool calls
+  (`agents::pair_shells`): oldest shell with the oldest of the newest N pending
+  calls, falling back to running subagents' pending calls when the session has
+  none. `AgentChild.description`/`command` carry the result; an unpaired shell
+  shows a neutral sentence and no command. Nesting is always under the session,
+  since a `ps` row cannot say whether a subagent launched it.

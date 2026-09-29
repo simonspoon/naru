@@ -84,8 +84,10 @@ fn list_sessions(bin: &str) -> Result<Vec<AgentSession>, String> {
     // in `list_under` so a project-scoped read costs the same one `ps` as the
     // global one — and so both surfaces (and the `agents_cache` TTL in
     // `src/api.rs`, which caches whatever this returns) see the same numbers.
-    enrich_liveness(&mut sessions);
-    enrich_pulse(&mut sessions);
+    // Pulse first: it yields each session's pending `Bash` calls, which
+    // liveness needs to name the live shells (mesa task 1484).
+    let pending = enrich_pulse(&mut sessions);
+    enrich_liveness(&mut sessions, &pending);
     Ok(sessions)
 }
 
@@ -134,14 +136,14 @@ struct ProcRow {
 /// badge and the cards can never disagree — but they keep their exact
 /// meanings: `live_subagents` counts only the **running** ones, while the
 /// list also carries a finished subagent still inside the freshness window.
-fn enrich_liveness(sessions: &mut [AgentSession]) {
+fn enrich_liveness(sessions: &mut [AgentSession], pending: &[Vec<cc::PendingBash>]) {
     if sessions.is_empty() {
         return;
     }
     let table = read_proc_table();
     let root = cc::projects_dir();
     let now = SystemTime::now();
-    for session in sessions.iter_mut() {
+    for (i, session) in sessions.iter_mut().enumerate() {
         let mut children = match root.as_deref() {
             Some(root) => subagent_children(root, &session.session_id, now),
             None => Vec::new(),
@@ -150,10 +152,21 @@ fn enrich_liveness(sessions: &mut [AgentSession]) {
             .iter()
             .filter(|child| child.state == AgentChildState::Running)
             .count() as u32;
-        let shells = match session.pid {
+        let mut shells = match session.pid {
             Some(pid) => shell_children(pid, &table, now),
             None => Vec::new(),
         };
+        if !shells.is_empty() {
+            // The session's own pending calls first; a run of subagents
+            // running the tests is the other place a shell comes from.
+            let mut calls = pending.get(i).cloned().unwrap_or_default();
+            if calls.is_empty()
+                && let Some(root) = root.as_deref()
+            {
+                calls = subagent_pending(root, &session.session_id, now);
+            }
+            pair_shells(&mut shells, &calls);
+        }
         session.live_shells = shells.len() as u32;
         children.extend(shells);
         session.children = children;
@@ -173,13 +186,85 @@ fn enrich_liveness(sessions: &mut [AgentSession]) {
 /// Runs on the same list, at the same place, for the same reason
 /// [`enrich_liveness`] does: so `list_all` and `list_under` and the
 /// `agents_cache` TTL in `src/api.rs` all see one set of numbers.
-fn enrich_pulse(sessions: &mut [AgentSession]) {
+///
+/// Returns each session's pending `Bash` calls (same order as `sessions`),
+/// the input [`pair_shells`] names a live shell from.
+fn enrich_pulse(sessions: &mut [AgentSession]) -> Vec<Vec<cc::PendingBash>> {
+    sessions
+        .iter_mut()
+        .map(|session| {
+            let pulse = cc::session_pulse(&session.session_id);
+            session.last_response = pulse.last_response;
+            session.context_tokens = pulse.context_tokens;
+            session.model = pulse.model;
+            // The headline's first choice: the todo in progress, else the
+            // newest tool description (mesa task 1484).
+            session.activity = pulse.todo_active.or(pulse.tool_doing);
+            pulse.pending_bash
+        })
+        .collect()
+}
+
+/// Links each session to the task that names it as `owner` (mesa task 1484),
+/// for the Agents panel's task chip. A separate step from the `ps`/transcript
+/// enrichment because it needs the db, which `list_all` never opens; the API
+/// handlers run it under the store lock before caching. Best effort: a
+/// session nobody claimed with its own id keeps `None`, and a db error leaves
+/// the link off rather than failing the list.
+pub fn attach_tasks(sessions: &mut [AgentSession], store: &crate::core::store::Store) {
     for session in sessions.iter_mut() {
-        let pulse = cc::session_pulse(&session.session_id);
-        session.last_response = pulse.last_response;
-        session.context_tokens = pulse.context_tokens;
-        session.model = pulse.model;
+        if let Ok(Some(task)) = store.find_task_by_owner(&session.session_id) {
+            session.task_id = Some(task.id);
+            session.task_name = Some(task.name);
+        }
     }
+}
+
+/// Names the live shells from the `Bash` calls the transcript has dispatched
+/// and not yet answered (mesa task 1484). A `ps` row carries only Claude
+/// Code's `zsh -c 'source …snapshot && eval …'` wrapper, while the transcript
+/// holds the real command and its description.
+///
+/// **Heuristic, best effort:** Claude Code writes the `tool_use` when it
+/// dispatches the call and the `tool_result` when it returns, so a running
+/// shell is one of the unanswered calls, and the oldest shell belongs to the
+/// oldest call. Shells are paired oldest-first (earliest `started_at`; an
+/// unknown start sorts last) with the **newest** `shells.len()` pending
+/// calls — when more calls are pending than shells (an interrupted call never
+/// gets a result) the surplus is the older ones. Fewer calls than shells
+/// leaves the newest shells unpaired. `shells` keeps its order; only
+/// `description`/`command` are filled in.
+fn pair_shells(shells: &mut [AgentChild], pending: &[cc::PendingBash]) {
+    let take = shells.len().min(pending.len());
+    let calls = &pending[pending.len() - take..];
+    let mut order: Vec<usize> = (0..shells.len()).collect();
+    order.sort_by(|&a, &b| {
+        shells[a]
+            .started_at
+            .is_none()
+            .cmp(&shells[b].started_at.is_none())
+            .then_with(|| shells[a].started_at.cmp(&shells[b].started_at))
+    });
+    for (&idx, call) in order.iter().zip(calls) {
+        shells[idx].description.clone_from(&call.description);
+        shells[idx].command.clone_from(&call.command);
+    }
+}
+
+/// Pending `Bash` calls of the session's running subagents, in transcript
+/// path order — the fallback [`pair_shells`] source when the session's own
+/// transcript has none pending.
+fn subagent_pending(root: &Path, session_id: &str, now: SystemTime) -> Vec<cc::PendingBash> {
+    let mut paths: Vec<_> = subagent_transcripts(root, session_id, now, cc::ACTIVE_SECS)
+        .into_iter()
+        .map(|(path, _)| path)
+        .filter(|path| !subagent_finished(path))
+        .collect();
+    paths.sort();
+    paths
+        .iter()
+        .flat_map(|path| cc::subagent_pulse(path).pending_bash)
+        .collect()
 }
 
 /// One `ps -A` for the whole session list, not one call per pid. An absent or
@@ -283,6 +368,9 @@ fn shell_children(pid: i64, table: &[ProcRow], now: SystemTime) -> Vec<AgentChil
             name: cc::sanitize_capped(&row.args).unwrap_or_else(|| row.comm.clone()),
             // A Bash call in flight has returned nothing yet.
             detail: None,
+            // Filled in by `pair_shells` when the transcript names the call.
+            description: None,
+            command: None,
             started_at: row.elapsed_secs.and_then(|secs| started_ago(now, secs)),
             context_tokens: None,
             // A shell has no transcript, so nothing names a model here.
@@ -380,6 +468,8 @@ fn subagent_child(path: &Path) -> AgentChild {
         started_at: pulse.started_at,
         context_tokens: pulse.context_tokens,
         model: pulse.model,
+        description: meta_description(path),
+        command: None,
         state: if subagent_finished(path) {
             AgentChildState::Finished
         } else {
@@ -400,6 +490,14 @@ fn subagent_name(path: &Path) -> String {
             .unwrap_or("subagent")
             .to_string()
     })
+}
+
+/// The `description` the same sidecar carries: what the parent asked this run
+/// to do, in the parent's own words (mesa task 1484).
+fn meta_description(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path.with_extension("meta.json")).ok()?;
+    let meta: serde_json::Value = serde_json::from_str(&text).ok()?;
+    cc::sanitize_capped(meta.get("description")?.as_str()?)
 }
 
 fn meta_agent_type(path: &Path) -> Option<String> {
@@ -1822,6 +1920,8 @@ echo "backgrounded · cf0c3945 · proj: do the thing""#,
             started_at: Some("2026-09-21 13:00:15".into()),
             context_tokens: Some(4100),
             model: Some("claude-sonnet-5".into()),
+            description: None,
+            command: None,
             state: AgentChildState::Finished,
         }];
         let json = serde_json::to_value(&session).unwrap();
@@ -1832,6 +1932,62 @@ echo "backgrounded · cf0c3945 · proj: do the thing""#,
         // The pane id (mesa task 1278): the transcript stem for a subagent,
         // and explicitly null — not absent — for a shell, which has none.
         assert_eq!(json["children"][0]["id"], "agent-implementer-1a2b3c");
+    }
+
+    fn shell_at(started_at: Option<&str>) -> AgentChild {
+        AgentChild {
+            id: None,
+            kind: AgentChildKind::Shell,
+            name: "/bin/zsh -c source snapshot && eval".into(),
+            detail: None,
+            started_at: started_at.map(str::to_string),
+            context_tokens: None,
+            model: None,
+            description: None,
+            command: None,
+            state: AgentChildState::Running,
+        }
+    }
+
+    fn call(command: &str) -> cc::PendingBash {
+        cc::PendingBash {
+            description: Some(format!("run {command}")),
+            command: Some(command.to_string()),
+        }
+    }
+
+    /// Mesa task 1484: the oldest shell takes the oldest of the newest N
+    /// pending calls; surplus older calls and unmatched shells stay unpaired.
+    #[test]
+    fn pairs_shells_oldest_first_with_the_newest_pending_calls() {
+        let mut shells = vec![
+            shell_at(Some("2026-09-28 10:00:30")),
+            shell_at(Some("2026-09-28 10:00:10")),
+        ];
+        pair_shells(&mut shells, &[call("stale"), call("first"), call("second")]);
+        assert_eq!(shells[1].command.as_deref(), Some("first"), "older shell");
+        assert_eq!(shells[0].command.as_deref(), Some("second"));
+        assert_eq!(shells[1].description.as_deref(), Some("run first"));
+
+        let mut more_shells = vec![shell_at(Some("2026-09-28 10:00:10")), shell_at(None)];
+        pair_shells(&mut more_shells, &[call("only")]);
+        assert_eq!(more_shells[0].command.as_deref(), Some("only"));
+        assert_eq!(more_shells[1].command, None, "no call left for the rest");
+    }
+
+    #[test]
+    fn a_subagent_child_carries_its_sidecar_description() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent-x1.jsonl");
+        std::fs::write(&path, "").unwrap();
+        std::fs::write(
+            dir.path().join("agent-x1.meta.json"),
+            r#"{"agentType":"implementer","description":"Replace fold arrows"}"#,
+        )
+        .unwrap();
+        let child = subagent_child(&path);
+        assert_eq!(child.name, "implementer");
+        assert_eq!(child.description.as_deref(), Some("Replace fold arrows"));
     }
 
     #[test]
