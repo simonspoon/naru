@@ -332,7 +332,7 @@ function App() {
       : null
   const diagramMatch = /^\/projects\/(\d+)\/diagrams\/(\d+)$/.exec(path)
   const diagramListMatch = /^\/projects\/(\d+)\/diagrams$/.exec(path)
-  const gitMatch = /^\/projects\/(\d+)\/git(?:\?.*)?$/.exec(path)
+  const gitMatch = /^\/projects\/(\d+)\/git$/.exec(path)
   const filesMatch = /^\/projects\/(\d+)\/files$/.exec(path)
   const artifactsMatch = /^\/projects\/(\d+)\/artifacts$/.exec(path)
   // Distinct from `terminalMatch` above: this one is a project tab rendered

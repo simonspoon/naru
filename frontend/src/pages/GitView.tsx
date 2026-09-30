@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   getProjectGit,
   getProjectGitCommitDiff,
@@ -623,6 +623,18 @@ export function GitView({ projectId }: { projectId: number }) {
     setPrevProject(projectId)
     setRequested(readRoute())
   }
+  // Back/Forward or a re-click of the tab rewrites the hash without
+  // remounting; follow it while this is the routed view (a Custom pane has no
+  // git route and keeps its local pick).
+  useEffect(() => {
+    const onChange = () => {
+      if (window.location.hash.startsWith(`#/projects/${projectId}/git`)) {
+        setRequested(repoFromHash(window.location.hash))
+      }
+    }
+    window.addEventListener('hashchange', onChange)
+    return () => window.removeEventListener('hashchange', onChange)
+  }, [projectId])
 
   if (error && !data) return <p className="error">{error}</p>
   if (!data) return <p className="muted">Loading…</p>

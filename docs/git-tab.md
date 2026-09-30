@@ -19,7 +19,9 @@ nothing.
   submodules count — down to 4 levels, at most 50. A found repo is still
   descended into, so a nested repo its parent gitignores is listed too.
   Never entered: `node_modules`, `target`, `.build`, `dist`, `venv`, `.venv`,
-  `.git`; symlinks are not followed. Order: `"."` first, then by path.
+  `.git`; symlinks are not followed. Order: `"."` first, then by path. The walk visits at most 5000 directories and
+  then stops early. Git runs inside every discovered nested repo, with the
+  same trust as the user having cloned it there.
   `branch` is the branch, the short sha when detached, `null` on an unborn
   HEAD. Empty `repos` = no folder, dead folder or none found. Cached 5s per
   `local_path` (`AppState.git_repos_cache`).

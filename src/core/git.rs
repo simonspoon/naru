@@ -63,6 +63,8 @@ const DISCOVER_SKIP: &[&str] = &[
 /// (root = 0), and the most repos it will report.
 const DISCOVER_DEPTH: usize = 4;
 const DISCOVER_CAP: usize = 50;
+/// Most directories the walk will visit before stopping early.
+const DISCOVER_VISIT_CAP: usize = 5000;
 
 /// Every git repo at or under `root`: the root itself if it has a `.git`,
 /// then descendants down to `DISCOVER_DEPTH` levels whose directory holds a
@@ -74,7 +76,12 @@ pub fn discover_repos(root: &str) -> Vec<GitRepo> {
     let root = std::path::Path::new(root);
     let mut found: Vec<String> = Vec::new();
     let mut stack = vec![(root.to_path_buf(), String::new(), 0usize)];
+    let mut visited = 0usize;
     while let Some((dir, rel, depth)) = stack.pop() {
+        visited += 1;
+        if visited > DISCOVER_VISIT_CAP {
+            break;
+        }
         if std::fs::symlink_metadata(dir.join(".git")).is_ok() {
             found.push(if rel.is_empty() {
                 ".".into()
