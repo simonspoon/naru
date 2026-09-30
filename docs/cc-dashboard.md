@@ -1131,3 +1131,49 @@ the plan does not meter, because the header has no room to explain a failed
 network read — the card does. Both surfaces clamp and colour-band through the
 one shared module (`frontend/src/usageMeter.ts`, warn ≥70%, crit ≥90%), so a
 percentage can never differ between them.
+
+## Scorecard (comparing models by outcome data)
+
+`mesa cc scorecard [--since D] [--until D] [--agent NAME]`, `GET
+/api/cc/scorecard?since=&until=` and the **Scorecard** section of the Skills &
+Agents tab (`#/cc/skills-agents`) answer "how does this agent do on this
+model", from the db alone (mesa task 1514). No migration: it reads
+`cc_agent_runs`, `cc_messages`, `cc_tool_calls` and the library's
+`library_versions`.
+
+- **A run** is one `cc_agent_runs` row with a non-null `agent`. Its messages
+  are the `cc_messages` rows carrying its `agent_id` in its session, billed
+  responses deduped on `message_id` exactly as the dashboard does
+  (`dedupe_key`). Its **model** is the one with the most billed turns, ties to
+  the lower name (`top_model`); **turns** = billed responses; **cost** goes
+  through the same `PriceTable` as every other cc figure, never a second
+  pricing path; **tokens** = input + output + cache read + cache creation;
+  **wall seconds** = max minus min `ts` over its messages *and* tool calls;
+  **start** = the min `ts`. A run with no billed response has no model and is
+  left out.
+- **`since`/`until`** bound a run's **start** (`since` inclusive, `until`
+  exclusive), `YYYY-MM-DD` (midnight UTC) or a full `YYYY-MM-DDTHH:MM:SSZ`.
+  Anything else, including a date that does not exist, is `validation`
+  (exit 1 / 422). `--agent` (CLI only) keeps one agent's rows and markers.
+- **Output** is `{rows, model_changes, since, until}`. Runs group by
+  `(agent, model)`; a row carries `runs` (n), `total_cost`, `cost_per_run`,
+  `turns_per_run`, `tokens_per_run`, `wall_secs_per_run` (mean),
+  `wall_secs_median`, `first_run`, `last_run`; rows sort by agent, then runs
+  descending. A mean over two runs is a hunch, which is why the page shows n
+  first.
+- **Model-change markers.** For every agent-kind library item the versions are
+  walked oldest to newest and the frontmatter `model:` and `effort:` keys
+  parsed; a marker `{agent, at, from_model, to_model, from_effort,
+  to_effort}` is emitted for the first version (`from_*` null) and whenever
+  either key differs from the previous version. A version with no frontmatter
+  is skipped and does not reset the comparison. Unshadowed built-ins have no
+  versions and so no markers until forked.
+- **Reasoning effort is not in any transcript**, so it appears **only** on the
+  markers, never as a column on a row. Attributing a run to the effort in
+  force then means reading the markers against the run dates.
+- **Not here:** outcome signals (task done or requeued, reviewer findings,
+  verifier verdicts). There is no clean run-to-task join yet; that is a
+  follow-up.
+
+The grouping and formatting logic of the page lives in
+`frontend/src/ccScorecard.ts` (vitest: `ccScorecard.test.ts`).

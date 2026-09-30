@@ -3088,6 +3088,30 @@ EXAMPLES
         #[arg(long, default_value = "30d")]
         window: String,
     },
+    /// Print the model scorecard: subagent runs grouped by (agent, model)
+    ///
+    /// One JSON object `{rows, model_changes, since, until}`. A run is one
+    /// subagent run with an attributed agent name, costed and timed from its
+    /// own messages; rows carry the run count, cost / turns / tokens per run
+    /// and mean and median wall seconds. `model_changes` marks every point an
+    /// agent definition's `model:` or `effort:` frontmatter changed between
+    /// library versions. Reasoning effort is in no transcript, so it is only
+    /// on those markers, never a column.
+    #[command(after_help = "\
+EXAMPLES
+  mesa cc scorecard --since 2026-09-22
+  mesa cc scorecard --agent implementer --until 2026-10-01")]
+    Scorecard {
+        /// Only runs that started on/after this (YYYY-MM-DD or a full timestamp, UTC)
+        #[arg(long, value_name = "DATE")]
+        since: Option<String>,
+        /// Only runs that started before this (YYYY-MM-DD or a full timestamp, UTC)
+        #[arg(long, value_name = "DATE")]
+        until: Option<String>,
+        /// Only this agent
+        #[arg(long, value_name = "NAME")]
+        agent: Option<String>,
+    },
     /// Ingest new transcript lines into the mesa store and print a report
     ///
     /// Walks Claude Code's transcripts and incrementally ingests anything new
@@ -5094,6 +5118,20 @@ fn run_cc(cmd: CcCmd) -> Result<()> {
             let mut store = Store::open_default()?;
             crate::core::cc::sync(&mut store, false)?;
             print_json(&cc_collect(&store, &window)?.skills)
+        }
+        CcCmd::Scorecard {
+            since,
+            until,
+            agent,
+        } => {
+            let mut store = Store::open_default()?;
+            crate::core::cc::sync(&mut store, false)?;
+            print_json(&crate::core::cc::scorecard(
+                &store,
+                since.as_deref(),
+                until.as_deref(),
+                agent.as_deref(),
+            )?)
         }
         CcCmd::Sync { rebuild } => {
             let mut store = Store::open_default()?;

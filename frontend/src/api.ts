@@ -7,6 +7,7 @@
 // call, `libraryHooks.test.ts`) and the script-run stream's NDJSON line
 // cutting (`scriptRun.test.ts`).
 import { unregisterHookQuery } from './libraryHooks'
+import { scorecardQuery } from './ccScorecard'
 import { finishNdjson, parseEvent, splitNdjson } from './scriptRun'
 
 import type { ImportResolution } from './libraryImport'
@@ -19,6 +20,7 @@ import type { ArtifactSummary } from './types/ArtifactSummary'
 import type { Attachment } from './types/Attachment'
 import type { CcDashboard } from './types/CcDashboard'
 import type { CcLive } from './types/CcLive'
+import type { CcScorecard } from './types/CcScorecard'
 import type { CcNodeText } from './types/CcNodeText'
 import type { CcSessionChat } from './types/CcSessionChat'
 import type { CcSessionDetail } from './types/CcSessionDetail'
@@ -1123,6 +1125,11 @@ export function liveSpeakUrl(id: number): string {
 }
 
 // ---- CC Dashboard (Claude Code telemetry) ----
+
+/** Model scorecard; blank bounds are omitted (mesa task 1514). */
+export function getCcScorecard(since: string, until: string): Promise<CcScorecard> {
+  return request(`/api/cc/scorecard${scorecardQuery(since, until)}`)
+}
 
 /** Claude Code telemetry for a window (`7d` | `30d` | `90d` | `all`). */
 export function getCcDashboard(window: string): Promise<CcDashboard> {

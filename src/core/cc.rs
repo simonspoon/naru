@@ -61,10 +61,11 @@ use super::types::{
     CcAgentStat, CcChatAsk, CcChatOption, CcChatQuestion, CcChatTurn, CcChatTurnKind, CcDashboard,
     CcDayPoint, CcDenialKind, CcErrorCommandStat, CcErrorDenial, CcErrorMessageStat,
     CcErrorToolStat, CcErrorTotals, CcErrors, CcGraphEdge, CcGraphNode, CcGraphNodeKind,
-    CcInterval, CcLive, CcLiveSession, CcLiveSubagent, CcModelStat, CcNodeText, CcNodeTextFormat,
-    CcOverview, CcProjectStat, CcRepeat, CcSessionBucket, CcSessionChat, CcSessionDetail,
-    CcSessionGraph, CcSessionModelStat, CcSessionRow, CcSessionSkillStat, CcSessionThreadStat,
-    CcSessionToolStat, CcSkillStat, CcTokens, CcToolStat, CcUsage,
+    CcInterval, CcLive, CcLiveSession, CcLiveSubagent, CcModelChange, CcModelStat, CcNodeText,
+    CcNodeTextFormat, CcOverview, CcProjectStat, CcRepeat, CcScorecard, CcScorecardRow,
+    CcSessionBucket, CcSessionChat, CcSessionDetail, CcSessionGraph, CcSessionModelStat,
+    CcSessionRow, CcSessionSkillStat, CcSessionThreadStat, CcSessionToolStat, CcSkillStat,
+    CcTokens, CcToolStat, CcUsage,
 };
 
 // ---- transcript line shape (only the fields we read) ----
@@ -3519,6 +3520,238 @@ fn top_model(models: &BTreeMap<String, i64>) -> Option<String> {
         .map(|(m, _)| m.clone())
 }
 
+/// A `--since`/`--until` bound: `YYYY-MM-DD` (midnight UTC) or a full
+/// `YYYY-MM-DD[T ]HH:MM:SS` timestamp, to Unix seconds — the unit every cc
+/// window compares `ts` in. Anything else is `validation`.
+fn parse_scorecard_bound(label: &str, s: &str) -> Result<i64> {
+    let bad = || {
+        Error::Validation(format!(
+            "--{label} must be YYYY-MM-DD or a full timestamp, got {s:?}"
+        ))
+    };
+    let s = s.trim();
+    let ok_shape = |t: &str| t.bytes().all(|b| b.is_ascii_digit() || b == b'-');
+    let date = s.get(..10).ok_or_else(bad)?;
+    if !ok_shape(date) || date.as_bytes()[4] != b'-' || date.as_bytes()[7] != b'-' {
+        return Err(bad());
+    }
+    let ts = if s.len() == 10 {
+        parse_ts(&format!("{s}T00:00:00Z"))
+    } else if matches!(s.as_bytes()[10], b'T' | b' ') {
+        parse_ts(s)
+    } else {
+        None
+    }
+    .ok_or_else(bad)?;
+    // `parse_ts` is lenient about out-of-range parts (2026-13-45 rolls over);
+    // a date that does not round-trip is not a date.
+    if fmt_date(ts) != date {
+        return Err(bad());
+    }
+    Ok(ts)
+}
+
+/// The `model:` and `effort:` values of a markdown body's YAML frontmatter
+/// (surrounding quotes stripped), or `None` when it has no frontmatter.
+fn frontmatter_model_effort(body: &str) -> Option<(Option<String>, Option<String>)> {
+    let rest = body
+        .strip_prefix("---")?
+        .strip_prefix('\n')
+        .or_else(|| body.strip_prefix("---")?.strip_prefix("\r\n"))?;
+    let mut model = None;
+    let mut effort = None;
+    for line in rest.lines() {
+        if line.trim_end() == "---" {
+            return Some((model, effort));
+        }
+        let Some((k, v)) = line.split_once(':') else {
+            continue;
+        };
+        let v = v.trim().trim_matches(|c| c == '"' || c == '\'').trim();
+        if v.is_empty() {
+            continue;
+        }
+        match k.trim() {
+            "model" => model = Some(v.to_string()),
+            "effort" => effort = Some(v.to_string()),
+            _ => {}
+        }
+    }
+    // No closing fence: not frontmatter.
+    None
+}
+
+/// The model scorecard (mesa task 1514): every subagent run with an
+/// attributed agent, costed and timed from its own messages, grouped by
+/// `(agent, model)`, plus the points where an agent definition's `model:` /
+/// `effort:` changed. `since`/`until` bound a run's **start** (inclusive /
+/// exclusive). Reasoning effort is in no transcript, so it appears only on the
+/// change markers, never as a column.
+pub fn scorecard(
+    store: &Store,
+    since: Option<&str>,
+    until: Option<&str>,
+    agent: Option<&str>,
+) -> Result<CcScorecard> {
+    let since_ts = since
+        .map(|s| parse_scorecard_bound("since", s))
+        .transpose()?;
+    let until_ts = until
+        .map(|s| parse_scorecard_bound("until", s))
+        .transpose()?;
+    let prices = load_prices()?;
+
+    #[derive(Default)]
+    struct Run {
+        models: BTreeMap<String, i64>,
+        turns: i64,
+        tokens: i64,
+        cost: f64,
+        min_ts: Option<i64>,
+        max_ts: Option<i64>,
+    }
+    impl Run {
+        fn touch(&mut self, ts: i64) {
+            self.min_ts = Some(self.min_ts.map_or(ts, |m| m.min(ts)));
+            self.max_ts = Some(self.max_ts.map_or(ts, |m| m.max(ts)));
+        }
+    }
+
+    let mut runs: HashMap<(String, String), (String, Run)> = HashMap::new();
+    for (session, agent_id, name) in store.cc_read_attributed_runs()? {
+        if agent.is_some_and(|a| a != name) {
+            continue;
+        }
+        runs.insert((session, agent_id), (name, Run::default()));
+    }
+
+    // Billed responses deduped exactly as `collect_inner` does.
+    let mut seen: HashSet<String> = HashSet::new();
+    for m in store.cc_read_messages(None)? {
+        let Some(agent_id) = m.agent_id.clone() else {
+            continue;
+        };
+        let Some((_, r)) = runs.get_mut(&(m.session_id.clone(), agent_id)) else {
+            continue;
+        };
+        r.touch(m.ts);
+        if !seen.insert(dedupe_key(&m).to_string()) {
+            continue;
+        }
+        *r.models.entry(m.model.clone()).or_default() += 1;
+        r.turns += 1;
+        r.tokens +=
+            m.input_tokens + m.output_tokens + m.cache_read_tokens + m.cache_creation_tokens;
+        r.cost += row_cost(&prices, &m);
+    }
+    for t in store.cc_read_tool_calls(None)? {
+        let Some(agent_id) = t.agent_id else { continue };
+        if let Some((_, r)) = runs.get_mut(&(t.session_id, agent_id)) {
+            r.touch(t.ts);
+        }
+    }
+
+    #[derive(Default)]
+    struct Group {
+        runs: i64,
+        cost: f64,
+        turns: i64,
+        tokens: i64,
+        walls: Vec<f64>,
+        first: i64,
+        last: i64,
+    }
+    let mut groups: BTreeMap<(String, String), Group> = BTreeMap::new();
+    for (_, (name, r)) in runs {
+        // A run with no billed response has no model to group under.
+        let (Some(model), Some(start), Some(end)) = (top_model(&r.models), r.min_ts, r.max_ts)
+        else {
+            continue;
+        };
+        if since_ts.is_some_and(|s| start < s) || until_ts.is_some_and(|u| start >= u) {
+            continue;
+        }
+        let g = groups.entry((name, model)).or_default();
+        if g.runs == 0 {
+            g.first = start;
+            g.last = start;
+        }
+        g.runs += 1;
+        g.cost += r.cost;
+        g.turns += r.turns;
+        g.tokens += r.tokens;
+        g.walls.push((end - start) as f64);
+        g.first = g.first.min(start);
+        g.last = g.last.max(start);
+    }
+    let mut rows: Vec<CcScorecardRow> = groups
+        .into_iter()
+        .map(|((agent, model), mut g)| {
+            let n = g.runs as f64;
+            g.walls.sort_by(|a, b| a.total_cmp(b));
+            let mid = g.walls.len() / 2;
+            let median = if g.walls.len() % 2 == 1 {
+                g.walls[mid]
+            } else {
+                (g.walls[mid - 1] + g.walls[mid]) / 2.0
+            };
+            CcScorecardRow {
+                agent,
+                model,
+                runs: g.runs,
+                total_cost: g.cost,
+                cost_per_run: g.cost / n,
+                turns_per_run: g.turns as f64 / n,
+                tokens_per_run: g.tokens as f64 / n,
+                wall_secs_per_run: g.walls.iter().sum::<f64>() / n,
+                wall_secs_median: median,
+                first_run: fmt_store_ts(g.first),
+                last_run: fmt_store_ts(g.last),
+            }
+        })
+        .collect();
+    rows.sort_by(|a, b| a.agent.cmp(&b.agent).then(b.runs.cmp(&a.runs)));
+
+    // Change markers: walk each agent item's versions oldest to newest.
+    let mut model_changes: Vec<CcModelChange> = Vec::new();
+    type ModelEffort = (Option<String>, Option<String>);
+    let mut prev: Option<(String, ModelEffort)> = None;
+    for (name, at, body) in store.library_agent_versions()? {
+        if agent.is_some_and(|a| a != name) {
+            continue;
+        }
+        if prev.as_ref().is_some_and(|(n, _)| *n != name) {
+            prev = None;
+        }
+        let Some(cur) = frontmatter_model_effort(&body) else {
+            continue;
+        };
+        let (from_model, from_effort) = match &prev {
+            Some((_, p)) => p.clone(),
+            None => (None, None),
+        };
+        if prev.is_none() || from_model != cur.0 || from_effort != cur.1 {
+            model_changes.push(CcModelChange {
+                agent: name.clone(),
+                at,
+                from_model,
+                to_model: cur.0.clone(),
+                from_effort,
+                to_effort: cur.1.clone(),
+            });
+        }
+        prev = Some((name, cur));
+    }
+    model_changes.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.agent.cmp(&b.agent)));
+
+    Ok(CcScorecard {
+        rows,
+        model_changes,
+        since: since.map(str::to_string),
+        until: until.map(str::to_string),
+    })
+}
+
 /// First dash-group of a session UUID — enough to recognise, short enough to
 /// sit in a graph node.
 fn short_session(session_id: &str) -> String {
@@ -6880,6 +7113,229 @@ mod tests {
                 },
             )
             .unwrap();
+    }
+
+    /// Two sessions' worth of subagent runs for the scorecard. `t0` is
+    /// 2026-09-01 00:00 UTC. Runs: `a1` Explore (two lines of one response +
+    /// a second response, tool call 100s after the start), `a2` Explore on a
+    /// different model a day later, `a3` Explore with a model tie, `a4` with
+    /// no agent name.
+    fn seed_scorecard(store: &mut Store) -> i64 {
+        let t0 = parse_ts("2026-09-01T00:00:00Z").unwrap();
+        let msg = |uuid: &str, mid: Option<&str>, run: &str, ts: i64, model: &str| CcMessageRow {
+            message_id: mid.map(str::to_string),
+            uuid: uuid.into(),
+            session_id: "s".into(),
+            agent_id: Some(run.into()),
+            ts,
+            model: model.into(),
+            input_tokens: 1000,
+            output_tokens: 500,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            skill: None,
+            agent: None,
+            preview: None,
+        };
+        let run = |id: &str, agent: Option<&str>| CcAgentRunUpsert {
+            session_id: "s".into(),
+            agent_id: id.into(),
+            agent: agent.map(str::to_string),
+            skill: None,
+            tool_use_id: None,
+            description: None,
+            spawn_depth: Some(1),
+            parent_agent_id: None,
+        };
+        let day = 86_400;
+        store
+            .cc_ingest_file(
+                "/t/s.jsonl",
+                &CcFileCursor {
+                    mtime: 1,
+                    size: 1,
+                    byte_offset: 1,
+                },
+                &CcFileBatch {
+                    sessions: vec![CcSessionUpsert {
+                        session_id: "s".into(),
+                        cwd: None,
+                        git_branch: None,
+                        entrypoint: None,
+                        used_subagent: true,
+                        start_ts: Some(t0),
+                        end_ts: Some(t0 + 3 * day),
+                    }],
+                    agent_runs: vec![
+                        run("a1", Some("Explore")),
+                        run("a2", Some("Explore")),
+                        run("a3", Some("Explore")),
+                        run("a4", None),
+                    ],
+                    messages: vec![
+                        // a1: one response on two lines + one more → 2 turns.
+                        msg("u1", Some("m1"), "a1", t0 + 10, "claude-haiku-4-5"),
+                        msg("u2", Some("m1"), "a1", t0 + 11, "claude-haiku-4-5"),
+                        msg("u3", Some("m2"), "a1", t0 + 40, "claude-haiku-4-5"),
+                        // a2: a day later, another model.
+                        msg("u4", Some("m3"), "a2", t0 + day, "claude-sonnet-4-6"),
+                        // a3: one turn each on two models → tie → lower name.
+                        msg("u5", Some("m4"), "a3", t0 + 2 * day, "claude-sonnet-4-6"),
+                        msg("u6", Some("m5"), "a3", t0 + 2 * day + 4, "claude-haiku-4-5"),
+                        msg("u7", Some("m6"), "a4", t0 + 5, "claude-haiku-4-5"),
+                    ],
+                    tool_calls: vec![CcToolCallRow {
+                        tool_use_id: "tu1".into(),
+                        message_uuid: "u3".into(),
+                        session_id: "s".into(),
+                        agent_id: Some("a1".into()),
+                        name: "Bash".into(),
+                        caller: None,
+                        ts: t0 + 110,
+                        target: None,
+                    }],
+                    tool_errors: Vec::new(),
+                    prompts: Vec::new(),
+                    node_files: Vec::new(),
+                },
+            )
+            .unwrap();
+        t0
+    }
+
+    #[test]
+    fn scorecard_dedupes_picks_model_and_measures_wall_time() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&tmp.path().join("mesa.db")).unwrap();
+        seed_scorecard(&mut store);
+
+        let sc = scorecard(&store, None, None, None).unwrap();
+        // a4 has no agent name → not a run. a1 + a3 are haiku, a2 is sonnet.
+        assert_eq!(sc.rows.len(), 2);
+        let haiku = &sc.rows[0];
+        assert_eq!(
+            (haiku.agent.as_str(), haiku.model.as_str()),
+            ("Explore", "claude-haiku-4-5")
+        );
+        assert_eq!(haiku.runs, 2);
+        // a1 = 2 deduped turns (m1 once), a3 = 2 turns on a tie → haiku (lower name).
+        assert_eq!(haiku.turns_per_run, 2.0);
+        assert_eq!(haiku.tokens_per_run, 3000.0);
+        // wall: a1 spans t0+10 .. tool call t0+110 = 100s; a3 = 4s.
+        assert_eq!(haiku.wall_secs_per_run, 52.0);
+        assert_eq!(haiku.wall_secs_median, 52.0);
+        assert!(haiku.total_cost > 0.0);
+        assert!((haiku.cost_per_run * 2.0 - haiku.total_cost).abs() < 1e-12);
+        assert_eq!(haiku.first_run, "2026-09-01 00:00:10");
+        assert_eq!(sc.rows[1].model, "claude-sonnet-4-6");
+        assert_eq!(sc.rows[1].runs, 1);
+    }
+
+    #[test]
+    fn scorecard_since_until_bound_the_run_start() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&tmp.path().join("mesa.db")).unwrap();
+        seed_scorecard(&mut store);
+
+        // since is inclusive: a2 starts exactly at 2026-09-02 00:00:00.
+        let sc = scorecard(&store, Some("2026-09-02"), None, None).unwrap();
+        assert_eq!(sc.rows.iter().map(|r| r.runs).sum::<i64>(), 2);
+        // until is exclusive: a2 is out, a1 is in.
+        let sc = scorecard(&store, None, Some("2026-09-02"), None).unwrap();
+        assert_eq!(sc.rows.len(), 1);
+        assert_eq!(sc.rows[0].runs, 1);
+        assert_eq!(sc.until.as_deref(), Some("2026-09-02"));
+        // A full timestamp works.
+        let sc = scorecard(
+            &store,
+            Some("2026-09-01T00:00:11Z"),
+            Some("2026-09-01 12:00:00"),
+            None,
+        )
+        .unwrap();
+        assert!(sc.rows.is_empty());
+        // The agent filter.
+        assert!(
+            scorecard(&store, None, None, Some("Nope"))
+                .unwrap()
+                .rows
+                .is_empty()
+        );
+        for bad in ["yesterday", "2026-13-01", "2026-09-31", "2026-9-1"] {
+            assert!(
+                matches!(
+                    scorecard(&store, Some(bad), None, None),
+                    Err(Error::Validation(_))
+                ),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn scorecard_marks_model_and_effort_changes_between_versions() {
+        use super::super::store::LibraryPatch;
+        use super::super::types::{LibraryKind, LibraryScope};
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&tmp.path().join("mesa.db")).unwrap();
+        let item = store
+            .create_library_item(
+                LibraryKind::Agent,
+                LibraryScope::User,
+                None,
+                "implementer",
+                "---\nname: implementer\nmodel: opus\n---\nbody\n",
+                None,
+                false,
+            )
+            .unwrap();
+        let id = item.id.unwrap();
+        for body in [
+            // Same keys, different prose: no marker.
+            "---\nname: implementer\nmodel: opus\n---\nbody two\n",
+            "---\nname: implementer\nmodel: \"sonnet\"\neffort: high\n---\nbody two\n",
+            // No frontmatter: skipped, and does not reset the previous state.
+            "just prose\n",
+            "---\nname: implementer\nmodel: sonnet\neffort: high\n---\nx\n",
+            "---\nname: implementer\nmodel: sonnet\neffort: low\n---\nx\n",
+        ] {
+            store
+                .update_library_item(
+                    id,
+                    LibraryPatch {
+                        body: Some(body.into()),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+        }
+        let ch = scorecard(&store, None, None, None).unwrap().model_changes;
+        let got: Vec<_> = ch
+            .iter()
+            .map(|c| {
+                (
+                    c.from_model.as_deref(),
+                    c.to_model.as_deref(),
+                    c.from_effort.as_deref(),
+                    c.to_effort.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (None, Some("opus"), None, None),
+                (Some("opus"), Some("sonnet"), None, Some("high")),
+                (Some("sonnet"), Some("sonnet"), Some("high"), Some("low")),
+            ]
+        );
+        assert!(ch.iter().all(|c| c.agent == "implementer"));
+        assert!(
+            scorecard(&store, None, None, Some("other"))
+                .unwrap()
+                .model_changes
+                .is_empty()
+        );
     }
 
     #[test]

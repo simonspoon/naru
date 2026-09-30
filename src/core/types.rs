@@ -2909,6 +2909,55 @@ pub struct CcAgentStat {
     pub est_cost_usd: f64,
 }
 
+/// One row of the model scorecard: every subagent run of one agent on one
+/// model (`mesa cc scorecard`, mesa task 1514). Reasoning effort is not in any
+/// transcript, so it is deliberately not a column here — it rides only on
+/// [`CcModelChange`].
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct CcScorecardRow {
+    pub agent: String,
+    pub model: String,
+    /// Runs in this group — the sample size every mean below rests on.
+    #[ts(type = "number")]
+    pub runs: i64,
+    pub total_cost: f64,
+    pub cost_per_run: f64,
+    pub turns_per_run: f64,
+    pub tokens_per_run: f64,
+    pub wall_secs_per_run: f64,
+    pub wall_secs_median: f64,
+    /// Start of the earliest / latest run, `YYYY-MM-DD HH:MM:SS` UTC.
+    pub first_run: String,
+    pub last_run: String,
+}
+
+/// A point where an agent definition's `model:` or `effort:` frontmatter key
+/// changed between two library versions (the first version is a marker with
+/// null `from_*`).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct CcModelChange {
+    pub agent: String,
+    /// The version's stored `created_at` (`YYYY-MM-DD HH:MM:SS`, UTC).
+    pub at: String,
+    pub from_model: Option<String>,
+    pub to_model: Option<String>,
+    pub from_effort: Option<String>,
+    pub to_effort: Option<String>,
+}
+
+/// `mesa cc scorecard` / `GET /api/cc/scorecard`.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct CcScorecard {
+    pub rows: Vec<CcScorecardRow>,
+    pub model_changes: Vec<CcModelChange>,
+    /// The bounds as the caller gave them, echoed; null when absent.
+    pub since: Option<String>,
+    pub until: Option<String>,
+}
+
 /// Usage rolled up by working directory (`cwd`).
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../frontend/src/types/")]

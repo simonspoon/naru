@@ -1,8 +1,17 @@
 import { useState } from 'react'
-import { getCcDashboard, getCcLive, getCcUsage, getProjectCcDashboard } from '../api'
+import { getCcDashboard, getCcLive, getCcScorecard, getCcUsage, getProjectCcDashboard } from '../api'
 import { Donut, DivergingBars, Sparkbars, type Slice } from '../components/charts'
 import { DataTable, Kpi } from '../components/ccTable'
 import { ccSessionHref, type CcOrigin } from '../ccOrigin'
+import {
+  changeDate,
+  fmtModelChange,
+  fmtRunCost,
+  fmtTurns,
+  fmtWall,
+  scorecardRowKey,
+  sortedChanges,
+} from '../ccScorecard'
 import { CC_TABS, ccTabHref, ccTabLabel, type CcTab } from '../ccTab'
 import { boardCountBadge } from '../liveBoard'
 import { shortModel } from '../sessionGraph'
@@ -468,6 +477,79 @@ function Overview({ data }: { data: CcDashboard }) {
 
 // Skills/Agents (#/cc/skills-agents): the two attribution tables side by side.
 function SkillsAgents({ data }: { data: CcDashboard }) {
+  return (
+    <>
+      <SkillsAgentsPair data={data} />
+      <Scorecard />
+    </>
+  )
+}
+
+// Scorecard (mesa task 1514): subagent runs grouped by (agent, model), with n
+// first because a mean over two runs is a hunch, not a comparison. Effort is
+// in no transcript, so it shows only on the change list beneath.
+function Scorecard() {
+  const [since, setSince] = useState('')
+  const [until, setUntil] = useState('')
+  const { data, error } = useFetch(
+    () => getCcScorecard(since, until),
+    `cc-scorecard-${since}-${until}`,
+    { pollMs: 20000 },
+  )
+  return (
+    <section className="cc-panel">
+      <h2>Scorecard</h2>
+      <p className="muted cc-hint">
+        Subagent runs by agent and model, bounded by run start. Judge a row by
+        its n before its mean.
+      </p>
+      <p className="cc-hint">
+        <label>
+          since <input type="date" value={since} onChange={(e) => setSince(e.target.value)} />
+        </label>{' '}
+        <label>
+          until <input type="date" value={until} onChange={(e) => setUntil(e.target.value)} />
+        </label>
+      </p>
+      {error && <p className="error">{error}</p>}
+      {data && (
+        <>
+          <DataTable
+            rows={data.rows}
+            rowKey={scorecardRowKey}
+            initialKey="agent"
+            initialDir="asc"
+            empty="No agent runs in this range."
+            cols={[
+              { key: 'agent', label: 'Agent', render: (r) => r.agent, sort: (r) => r.agent },
+              { key: 'model', label: 'Model', render: (r) => <span title={r.model}>{shortModel(r.model)}</span>, sort: (r) => r.model },
+              { key: 'runs', label: 'n', numeric: true, render: (r) => <strong>{fmtInt(r.runs)}</strong>, sort: (r) => r.runs },
+              { key: 'cost', label: '$/run', numeric: true, render: (r) => fmtRunCost(r.cost_per_run), sort: (r) => r.cost_per_run },
+              { key: 'turns', label: 'Turns/run', numeric: true, render: (r) => fmtTurns(r.turns_per_run), sort: (r) => r.turns_per_run },
+              { key: 'wall', label: 'Wall/run (median)', numeric: true, render: (r) => fmtWall(r.wall_secs_median), sort: (r) => r.wall_secs_median },
+              { key: 'total', label: 'Total $', numeric: true, render: (r) => fmtUsd(r.total_cost), sort: (r) => r.total_cost },
+            ]}
+          />
+          {data.model_changes.length > 0 && (
+            <>
+              <h3>Model changes</h3>
+              <ul className="cc-legend">
+                {sortedChanges(data.model_changes).map((c) => (
+                  <li key={`${c.agent}-${c.at}`}>
+                    <span className="num">{changeDate(c)}</span>{' '}
+                    <span className="cc-legend-name">{c.agent}</span> {fmtModelChange(c)}
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+        </>
+      )}
+    </section>
+  )
+}
+
+function SkillsAgentsPair({ data }: { data: CcDashboard }) {
   return (
     <div className="cc-pair">
       <section className="cc-panel">

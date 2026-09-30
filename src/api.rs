@@ -2617,6 +2617,7 @@ fn router(state: AppState) -> Router {
         // CC Dashboard: read-only Claude Code telemetry (no Store access).
         .route("/api/cc/usage", get(get_cc_usage))
         .route("/api/cc", get(get_cc_dashboard))
+        .route("/api/cc/scorecard", get(get_cc_scorecard))
         // Live sessions: cheap, frequently-polled slice of the telemetry.
         .route("/api/cc/live", get(get_cc_live))
         // The drill-down pair: aggregate detail (the default) and the call tree.
@@ -10051,6 +10052,30 @@ async fn pump_pty(mut socket: WebSocket, cmd: CommandBuilder, size: PtySize) -> 
 }
 
 // ---- CC Dashboard (Claude Code telemetry) ----
+
+#[derive(Deserialize)]
+struct CcScorecardQuery {
+    /// `YYYY-MM-DD` or a full timestamp; a run's start, inclusive.
+    #[serde(default)]
+    since: Option<String>,
+    /// Same shape; exclusive.
+    #[serde(default)]
+    until: Option<String>,
+}
+
+/// The model scorecard (mesa task 1514): `cc::scorecard`, unfiltered by agent.
+/// A bad date is 422 `validation`.
+async fn get_cc_scorecard(
+    State(state): State<AppState>,
+    Query(q): Query<CcScorecardQuery>,
+) -> ApiResult<Response> {
+    let card = {
+        let mut store = state.store.lock().unwrap();
+        crate::core::cc::sync(&mut store, false)?;
+        crate::core::cc::scorecard(&store, q.since.as_deref(), q.until.as_deref(), None)?
+    };
+    Ok(Json(card).into_response())
+}
 
 #[derive(Deserialize)]
 struct CcQuery {

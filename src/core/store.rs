@@ -9281,6 +9281,30 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
     }
 
+    /// Subagent runs that carry an attributed agent name, as
+    /// `(session_id, agent_id, agent)` — the scorecard's population.
+    pub fn cc_read_attributed_runs(&self) -> Result<Vec<(String, String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT session_id, agent_id, agent FROM cc_agent_runs WHERE agent IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Every stored version of every agent-kind library item, as
+    /// `(item name, created_at, body)` ordered name then oldest first — what
+    /// the scorecard walks for model-change markers. Unshadowed built-ins are
+    /// code, not rows, and have no history.
+    pub fn library_agent_versions(&self) -> Result<Vec<(String, String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT i.name, v.created_at, v.body FROM library_versions v \
+             JOIN library_items i ON i.id = v.item_id \
+             WHERE i.kind = 'agent' ORDER BY i.name, i.id, v.id",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// Stamp of persisted cc state: total rows across `cc_messages`,
     /// `cc_tool_calls`, `cc_sessions`. It normally only grows (ingest is
     /// insert-only); [`Store::cc_reset`] is the one thing that can move it

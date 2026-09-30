@@ -99,6 +99,66 @@ assert r["tool_calls_added"]==0, r
 print("sync --rebuild ok")
 ' || fail "sync --rebuild did not re-walk without duplicating rows"
 
+# ---- cc scorecard: the model scorecard (mesa task 1514) ----
+#
+# The main tree has ONE subagent run: Explore (agent x1) on claude-haiku-4-5,
+# a single billed response. A library agent item with two versions gives the
+# change markers: the first version (from null) and a model+effort change.
+"$BIN" cc scorecard | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+assert set(d)=={"rows","model_changes","since","until"}, sorted(d)
+assert d["since"] is None and d["until"] is None, d
+assert len(d["rows"])==1, d["rows"]
+r=d["rows"][0]
+assert r["agent"]=="Explore" and r["model"]=="claude-haiku-4-5", r
+assert r["runs"]==1 and r["turns_per_run"]==1, r
+assert r["total_cost"]>0 and r["cost_per_run"]==r["total_cost"], r
+assert r["wall_secs_per_run"]==0 and r["wall_secs_median"]==0, r
+assert r["first_run"]==r["last_run"]=="2026-06-15 01:10:00", r
+# Effort is in no transcript: it is never a column.
+assert not any("effort" in k for k in r), r
+print("cc scorecard ok")
+' || fail "cc scorecard contract"
+
+"$BIN" cc scorecard --quiet | python3 -c '
+import json,sys
+assert json.load(sys.stdin)["rows"][0]["runs"]==1
+' || fail "cc scorecard --quiet is not an accepted no-op"
+
+# since is inclusive, until exclusive, both on the run START.
+"$BIN" cc scorecard --since 2026-06-15 --until 2026-06-16 | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+assert d["since"]=="2026-06-15" and d["until"]=="2026-06-16", d
+assert [r["runs"] for r in d["rows"]]==[1], d
+' || fail "cc scorecard --since/--until inside the run"
+for args in "--since 2026-06-16" "--until 2026-06-15" "--agent Nobody"; do
+  "$BIN" cc scorecard $args | python3 -c '
+import json,sys
+assert json.load(sys.stdin)["rows"]==[]
+' || fail "cc scorecard $args should be empty"
+done
+
+SRC=0
+"$BIN" cc scorecard --since yesterday >/dev/null 2>"$TMP/sc-bad" || SRC=$?
+[ "$SRC" = "1" ] || fail "cc scorecard --since yesterday expected exit 1, got $SRC"
+python3 -c '
+import json
+assert json.load(open("'"$TMP"'/sc-bad"))["error"]["code"]=="validation"
+' || fail "cc scorecard bad --since is not a validation error"
+
+"$BIN" library create agent scorecard-probe $'---\nname: scorecard-probe\nmodel: opus\n---\nx\n' >/dev/null
+"$BIN" library update scorecard-probe --body $'---\nname: scorecard-probe\nmodel: sonnet\neffort: high\n---\nx\n' >/dev/null
+"$BIN" cc scorecard --agent scorecard-probe | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+ch=[(c["from_model"],c["to_model"],c["from_effort"],c["to_effort"]) for c in d["model_changes"]]
+assert ch==[(None,"opus",None,None),("opus","sonnet",None,"high")], ch
+assert d["rows"]==[], d
+print("cc scorecard model_changes ok")
+' || fail "cc scorecard model change markers"
+
 # cc reset: purges every cc_* row, then re-ingests. Unlike the rebuild above it
 # is corrective, so the rows really are re-ADDED (messages_added > 0 where the
 # rebuild added zero) — and because every transcript is still on disk, the
