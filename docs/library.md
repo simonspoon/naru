@@ -601,6 +601,20 @@ A block is `{"decision":"block","reason":"…"}` on stdout, exit 0.
 `scripts/stop-guard-check.sh` runs the extracted body against synthetic
 transcripts and a throwaway `MESA_DB`/`HOME`.
 
+### The alarm-disarm hook
+
+`alarm-disarm` (mesa task 1512, body `core::alarm::ALARM_HOOK`) is a Claude
+Code **SubagentStop** hook that disarms the supervisor's `naru alarm arm`
+for the session. Installed through the ordinary registration flow, user
+scope:
+
+```
+naru library hook enable alarm-disarm --event SubagentStop
+```
+
+It pipes the payload to `naru alarm disarm`, discards the output and always
+exits 0, so it never wedges a session. See `docs/alarm.md`.
+
 ### Hooks wired from outside `.claude/hooks/`
 
 A settings.json command may name a script anywhere — `bash

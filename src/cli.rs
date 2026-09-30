@@ -22,7 +22,7 @@ use std::process::ExitCode;
 use base64::Engine;
 use clap::error::ErrorKind;
 use clap::{ArgGroup, Parser, Subcommand};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::core::{
     ArchiveOutcome, Artifact, ArtifactPatch, Diagram, DiagramPatch, DiagramType, DiagramView,
@@ -252,6 +252,9 @@ EXAMPLES
   mesa system
   mesa system | jq .ram_used_bytes")]
     System,
+    /// A self-disarming alarm for a supervisor's handoffs (mesa task 1512)
+    #[command(subcommand)]
+    Alarm(AlarmCmd),
     /// Send a message to the person's phone through the external `vox` CLI
     ///
     /// `--open <route>` adds a Telegram button that opens Naru's `/open/<route>`
@@ -280,6 +283,53 @@ EXAMPLES
         /// `notify.base-url` from the config, else this machine's LAN address
         #[arg(long)]
         base_url: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum AlarmCmd {
+    /// Block until a subagent of the session stops, or the timeout passes
+    ///
+    /// Run it in the background right after a handoff. A `SubagentStop` hook
+    /// (the `alarm-disarm` library built-in) stamps a marker for the session;
+    /// a marker stamped after this command began disarms it quietly, and
+    /// one older than that does not count. Exits 0 either way; the JSON says
+    /// which: `{outcome: "disarmed", label, session_id, agent_id, waited_secs}`
+    /// or `{outcome: "fired", label, session_id, after_secs, message}` where
+    /// `message` starts `ALARM:`. The session is `--session`, else
+    /// `CLAUDE_CODE_SESSION_ID`. Session-scoped: any subagent stopping
+    /// disarms. Takes no `--quiet`. See docs/alarm.md.
+    #[command(after_help = "\
+EXAMPLES
+  naru alarm arm reviewer --after 20m
+  naru alarm arm --after 90 --session 5c1e0d2a-1111-2222-3333-444455556666")]
+    Arm {
+        /// What the alarm is waiting for, named in its message
+        #[arg(default_value = "agent")]
+        label: String,
+        /// How long to wait: `<n>s`, `<n>m`, `<n>h` or bare seconds (1s to 24h)
+        #[arg(long, default_value = "20m")]
+        after: String,
+        /// The parent session id; default is `CLAUDE_CODE_SESSION_ID`
+        #[arg(long)]
+        session: Option<String>,
+    },
+    /// Record that a subagent of the session stopped, disarming its alarm
+    ///
+    /// With no `--session` the `SubagentStop` hook payload is read as JSON
+    /// from stdin (`session_id`, `agent_id`). Prints
+    /// `{disarmed: true, session_id}`. Takes no `--quiet`. See docs/alarm.md.
+    #[command(after_help = "\
+EXAMPLES
+  echo '{\"session_id\":\"abc\",\"agent_id\":\"a1\"}' | naru alarm disarm
+  naru alarm disarm --session abc --agent-id a1")]
+    Disarm {
+        /// The parent session id; default is read from the hook payload on stdin
+        #[arg(long)]
+        session: Option<String>,
+        /// The stopped agent's id, kept in the marker
+        #[arg(long)]
+        agent_id: Option<String>,
     },
 }
 
@@ -4223,6 +4273,7 @@ fn execute(command: Command) -> Result<()> {
             print_json(&system::snapshot());
             Ok(())
         }
+        Command::Alarm(cmd) => run_alarm(cmd),
         Command::Notify {
             message,
             title,
@@ -4242,6 +4293,67 @@ fn execute(command: Command) -> Result<()> {
             let store = Store::open_default()?;
             store.backup(&path)?;
             print_json(&json!({"backed_up_to": path}));
+            Ok(())
+        }
+    }
+}
+
+fn run_alarm(cmd: AlarmCmd) -> Result<()> {
+    use crate::core::alarm;
+    match cmd {
+        AlarmCmd::Arm {
+            label,
+            after,
+            session,
+        } => {
+            let session = session
+                .or_else(|| std::env::var("CLAUDE_CODE_SESSION_ID").ok())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    Error::Validation(
+                        "no session: pass --session or run inside Claude Code \
+                         (CLAUDE_CODE_SESSION_ID)"
+                            .into(),
+                    )
+                })?;
+            let after_d = alarm::parse_after(&after)?;
+            match alarm::arm(&session, after_d)? {
+                alarm::Outcome::Disarmed { agent_id, waited } => print_json(&json!({
+                    "outcome": "disarmed",
+                    "label": label,
+                    "session_id": session,
+                    "agent_id": agent_id,
+                    "waited_secs": waited.as_secs(),
+                })),
+                alarm::Outcome::Fired => print_json(&json!({
+                    "outcome": "fired",
+                    "label": label,
+                    "session_id": session,
+                    "after_secs": after_d.as_secs(),
+                    "message": format!("ALARM: {label} has not reported after {}", alarm::format_duration(after_d)),
+                })),
+            }
+            Ok(())
+        }
+        AlarmCmd::Disarm { session, agent_id } => {
+            let (session, agent_id) = match session {
+                Some(s) => (s, agent_id),
+                None => {
+                    let mut buf = String::new();
+                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
+                    let payload: Value = serde_json::from_str(&buf).map_err(|e| {
+                        Error::Validation(format!("stdin is not a hook payload: {e}"))
+                    })?;
+                    let field =
+                        |k: &str| payload.get(k).and_then(Value::as_str).map(str::to_string);
+                    let s = field("session_id").ok_or_else(|| {
+                        Error::Validation("hook payload has no session_id".into())
+                    })?;
+                    (s, agent_id.or_else(|| field("agent_id")))
+                }
+            };
+            alarm::disarm(&session, agent_id.as_deref())?;
+            print_json(&json!({"disarmed": true, "session_id": session}));
             Ok(())
         }
     }
