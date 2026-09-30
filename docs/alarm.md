@@ -31,7 +31,7 @@ naming the flag. Exit 0 either way; stdout is JSON:
 
 `naru alarm disarm [--session <id>] [--agent-id <id>]` with no `--session`
 reads the hook payload JSON from stdin (`session_id`, `agent_id`) and prints
-`{"disarmed":true,"session_id":…}`. Neither command takes `--quiet` (exit 2).
+`{"disarmed":true,"session_id":…}`. Neither command has a `--quiet` of its own; it is accepted and ignored (mesa task 1513).
 
 ## The hook
 

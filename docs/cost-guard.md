@@ -313,8 +313,8 @@ one of them — identity, `running_minutes`, the token split the rules read,
   cannot silence one.
 - No `cc sync`: the subject is what is running now, which is a live transcript
   read (`cc live`), not a db aggregate.
-- No `--quiet` — it is neither a mutation nor a `show`, so the flag is an
-  unknown argument, exit 2, like `cc live` and `live turns`.
+- No `--quiet` — it is neither a mutation nor a `show`, so the flag is accepted
+  and ignored (mesa task 1513), like `cc live` and `live turns`.
 - Deliberately **no HTTP route**. Nothing here is unsafe to serve, but the
   watcher is the surface the server offers and the CLI is the surface an agent
   drives; a third read of the same numbers over HTTP would be a route with no
@@ -378,7 +378,7 @@ and the 29-call sibling trips nothing, that each of the three breaching
 sessions is stopped **exactly once** and not again on later ticks, that the
 bodies name `claude stop`/`claude attach`, no alert and exactly one stderr
 warning — naming the stop — for the unattributable one, `cc guard`'s three rows
-and its `--quiet` refusal, the built-in thresholds and `stop` action under an
+and its `--quiet` no-op, the built-in thresholds and `stop` action under an
 absent config, that `"action": "report"` on a fresh server files alerts and
 stops nothing, that a `MESA_CLAUDE_BIN` pointing at nothing is a reported
 outcome rather than a failed tick, that the context-only session is alerted

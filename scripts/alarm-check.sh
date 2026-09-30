@@ -8,7 +8,7 @@
 #   * a SubagentStop payload fed to the hook while an arm waits -> the arm
 #     exits within seconds, outcome disarmed, carrying the agent id;
 #   * a disarm BEFORE the arm, or for another session, does not disarm;
-#   * no session / bad --after -> validation (exit 1); --quiet -> exit 2;
+#   * no session / bad --after -> validation (exit 1); --quiet accepted and ignored;
 #   * the hook with garbage stdin, or no naru on PATH, exits 0.
 set -euo pipefail
 # Drop inherited NARU_* vars: Naru reads them before MESA_*, so one would escape this script's isolation.
@@ -95,12 +95,17 @@ set +e
 err=$("$NARU" alarm arm --after 2s --session '../x' 2>&1 >/dev/null); rc=$?
 set -e
 [ "$rc" = 1 ] && [ "$(jq -r .error.code <<<"$err")" = validation ] || fail "unsafe session: rc=$rc $err"
+# --quiet is accepted and ignored (mesa task 1513): the same outcome as without
+# it, never a usage error. A failing arm (bad --after) and a disarm keep it fast.
 set +e
-"$NARU" alarm arm --after 2s --session s --quiet >/dev/null 2>&1; rc=$?
-"$NARU" alarm disarm --session s --quiet >/dev/null 2>&1; rc2=$?
+"$NARU" alarm arm --after 5x --session s >/dev/null 2>"$TMP/q0"; rc0=$?
+"$NARU" alarm arm --after 5x --session s --quiet >/dev/null 2>"$TMP/q1"; rc1=$?
+out0=$("$NARU" alarm disarm --session s 2>&1); d0=$?
+out1=$("$NARU" alarm disarm --session s --quiet 2>&1); d1=$?
 set -e
-[ "$rc" = 2 ] && [ "$rc2" = 2 ] || fail "--quiet must be a usage error (got $rc, $rc2)"
-ok "missing session, bad/zero --after and an unsafe session id are validation; --quiet is exit 2"
+[ "$rc0" = 1 ] && [ "$rc1" = 1 ] && cmp -s "$TMP/q0" "$TMP/q1" || fail "arm --quiet must behave as without it (got $rc0, $rc1)"
+[ "$d0" = "$d1" ] && [ "$d1" != 2 ] && [ "$out0" = "$out1" ] || fail "disarm --quiet must behave as without it (got $d0, $d1)"
+ok "missing session, bad/zero --after and an unsafe session id are validation; --quiet is an accepted no-op"
 
 # (f) the hook never wedges
 echo 'not json {' | "$HOOK" || fail "garbage stdin must exit 0"

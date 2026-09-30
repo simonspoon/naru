@@ -1012,8 +1012,8 @@ session: the notebook is edited between conversations too, and the archive is
 read whenever.
 
 - **`list [--all]`** — a bare array, oldest first; active entries only unless
-  `--all`, which is the archive's view of the notebook. Rejects `--quiet`
-  (exit 2), like every other `list`.
+  `--all`, which is the archive's view of the notebook. Ignores `--quiet`
+  (accepted no-op), like every other `list`.
 - **`show <ID>`** (alias `get`) — one entry, retired or not.
 - **`add <TEXT>…`** — trailing var-args exactly like `live say`, so
   `--quiet` must come **before** the text or it lands in the bullet.
@@ -1029,10 +1029,10 @@ read whenever.
   project entry is `not_found`. CLI only — no HTTP route.
 - **`search <WORDS>… [--limit N]`** — a bare array of hits; `--limit` (and
   any other flag) must come **before** the words, since everything after
-  `search` that is not a leading flag is a word. Rejects `--quiet`.
+  `search` that is not a leading flag is a word. Ignores a leading `--quiet`.
 - **`merge --ids <ID,ID,…> <TEXT>…`**, **`restore <ID>`** and **`dream`**
   (mesa task 1152) — the dream pass's verbs, "Dreaming" below. `--ids` and
-  `--quiet` come **before** the text, the `add` rule; `dream` rejects
+  `--quiet` come **before** the text, the `add` rule; `dream` ignores
   `--quiet` like `search`.
 - **`--quiet` on `show`/`add`/`replace`/`delete`/`touch`/`keep`/`merge`/`restore`
   drops `body`** — the one unbounded field (`QUIET_DROP_LIVE_NOTEBOOK`, with
@@ -1730,8 +1730,8 @@ the group (with none live, `not_found` naming `mesa live start`).
   sentence is.
 - **`--quiet` drops `body`**, the one unbounded field
   (`QUIET_DROP_LIVE_BOARD`), with the usual key-parity `#[test]` forcing a
-  decision on the next field a board gains. `list` rejects `--quiet` with exit
-  2 like every other `list`; `clear` accepts it and changes nothing, since a
+  decision on the next field a board gains. `list` ignores `--quiet` like every
+  other `list`; `clear` accepts it and changes nothing, since a
   board summary has nothing unbounded to drop.
 - **`clear` echoes the boards it destroyed** — the delete-echo safety floor
   Naru has instead of a confirmation prompt — bodiless, like every other board
@@ -3502,7 +3502,7 @@ that has reported no box at all (`unavailable`, and nothing spawned), the
 window box round-tripping from the page's HTTP report to `mesa live status`
 over its own `Store`, an out-of-range box as 422 writing nothing, the default
 temp path and an explicit `--output` both landing a real file on disk, and
-`--quiet` refused with exit 2. On a machine that is not a Mac the section
+`--quiet` accepted and ignored. On a machine that is not a Mac the section
 asserts the one thing that is true there instead: `unavailable`, saying loki is
 a macOS tool.
 

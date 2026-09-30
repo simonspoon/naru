@@ -1048,7 +1048,7 @@ comments — several entries are the bare `DELETE FROM cc_files;` cursor clear.
   agreeing **with the graph's** `total_tokens`/`est_cost_usd` (two code paths,
   one answer), `agents` length matching `agent_runs`, the activity buckets
   summing to the session's own message/tool-call/token totals, an HTTP payload
-  equal to the CLI's, `--quiet` rejected (exit 2), and `not_found`/404 on an
+  equal to the CLI's, `--quiet` accepted and ignored, and `not_found`/404 on an
   unknown session. Exactness past the graph's cap is a `cc.rs` unit test (701
   tool calls in one session), not a shell fixture.
   `cc text` gets a **fourth appended fixture project** whose every body — human

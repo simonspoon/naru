@@ -92,7 +92,8 @@ done
 echo "ok: all 5 tasks reflect the writes"
 
 # ---- final state consistent from both surfaces ----
-CLI_VIEW=$("$MESA" task list --project "$P" | jq -S 'sort_by(.id)')
+# `title` is a CLI-only output alias of `name` (mesa task 1513); the API has none.
+CLI_VIEW=$("$MESA" task list --project "$P" | jq -S 'map(del(.title)) | sort_by(.id)')
 API_VIEW=$(curl -s "$BASE/api/tasks?project=$P" | jq -S 'sort_by(.id)')
 [ "$CLI_VIEW" = "$API_VIEW" ] ||
   fail "surfaces disagree:
