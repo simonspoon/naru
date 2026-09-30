@@ -10,7 +10,7 @@
 //!   bounded shape `task list` already emits. Accepted on every mutation and
 //!   `show`/`get` in `project`, `task`, `diagram` (+ `frame`, `edge`),
 //!   `inbox`, `script`, `artifact` and `live`; composites keep their key
-//!   structure and compact their members.
+//!   structure and compact their members. Elsewhere it is accepted and ignored.
 //!   Default output is unchanged. On a `delete` it waives the full echo, which
 //!   is mesa's recovery transcript.
 //! - Errors are `{"error": {"code", "message"}}` on stderr; clap usage errors
@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use base64::Engine;
-use clap::error::ErrorKind;
+use clap::error::{ContextKind, ContextValue, ErrorKind};
 use clap::{ArgGroup, Parser, Subcommand};
 use serde_json::{Value, json};
 
@@ -568,7 +568,8 @@ EXAMPLES
   mesa task create mesa \"Review copy\" --priority high --tags writing,review
   mesa task create 1 \"In flight\" --status in_progress  # straight into a column
   mesa task create --project 1 --description \"Outline\" --parent 7  # flag form; subtask of task 7
-  mesa task create 1 --description-file - < spec.md   # multi-line body from stdin")]
+  mesa task create 1 --description-file - < spec.md   # multi-line body from stdin
+  mesa task create 1 \"Draft copy\" --description \"Three sections.\"  # name + body")]
     Create {
         /// Project the task belongs to, by id or name (immutable after creation)
         #[arg(value_name = "PROJECT", required_unless_present = "project")]
@@ -583,14 +584,13 @@ EXAMPLES
         #[arg(long, conflicts_with = "project_pos")]
         project: Option<String>,
         /// The task itself (flag form of DESCRIPTION)
-        #[arg(long, allow_hyphen_values = true, conflicts_with = "description_pos")]
+        ///
+        /// Given beside a positional DESCRIPTION, that positional is the task's
+        /// name and this is its body: the stored description is `<NAME>\n\n<BODY>`
+        #[arg(long, allow_hyphen_values = true)]
         description: Option<String>,
-        /// Read the description from a file (`-` = stdin); conflicts with DESCRIPTION/--description
-        #[arg(
-            long,
-            value_name = "PATH",
-            conflicts_with_all = ["description", "description_pos"],
-        )]
+        /// Read the description from a file (`-` = stdin); conflicts with --description
+        #[arg(long, value_name = "PATH", conflicts_with = "description")]
         description_file: Option<String>,
         /// Priority: low|medium|high
         #[arg(long, value_parser = parse_priority, default_value = "medium")]
@@ -3118,7 +3118,9 @@ EXAMPLES
 EXAMPLES
   mesa cc errors                  # last 30 days
   mesa cc errors --window 7d
-  mesa cc errors --window all")]
+  mesa cc errors --window all
+  mesa cc errors <session-id>     # one session (same as --session)
+  mesa cc errors --cli            # only failed naru/mesa commands")]
     Errors {
         /// Time window: 7d | 30d | 90d | all | <n>d (n >= 1; anything else
         /// falls back to 30d), or cc-5h | cc-7d for the currently-open Claude
@@ -3127,8 +3129,14 @@ EXAMPLES
         window: String,
         /// Only failures from this Claude Code session; every session when
         /// absent
-        #[arg(long, value_name = "SID")]
+        #[arg(long, value_name = "SID", conflicts_with = "session_pos")]
         session: Option<String>,
+        /// Session id (positional form of --session)
+        #[arg(value_name = "SESSION")]
+        session_pos: Option<String>,
+        /// Only failures of `Bash` calls whose command invokes `naru`/`mesa`
+        #[arg(long)]
+        cli: bool,
     },
     /// Print per-skill usage as a bare JSON array, highest token use first
     Skills {
@@ -3913,6 +3921,7 @@ fn compact(t: &Task) -> serde_json::Value {
         "project_id": t.project_id,
         "parent_id": t.parent_id,
         "name": t.name,
+        "title": t.name,
         "status": t.status,
         "priority": t.priority,
         "tags": t.tags,
@@ -3926,6 +3935,23 @@ fn compact(t: &Task) -> serde_json::Value {
     })
 }
 
+/// A `Task` as the CLI prints it: the record in declaration order plus an
+/// output-only `title` equal to the derived `name`, for agents that guess the
+/// old field name. Never stored, never on the `Task` type, the API or ts-rs.
+#[derive(serde::Serialize)]
+struct TaskOut<'a> {
+    #[serde(flatten)]
+    task: &'a Task,
+    title: &'a str,
+}
+
+fn task_out(t: &Task) -> TaskOut<'_> {
+    TaskOut {
+        task: t,
+        title: &t.name,
+    }
+}
+
 /// Print one task: the full record, or its quiet shape under `--quiet`.
 ///
 /// The quiet shape is the existing [`compact`] — the same bounded object
@@ -3934,7 +3960,7 @@ fn print_task(task: &Task, quiet: bool) {
     if quiet {
         print_json(&compact(task));
     } else {
-        print_json(task);
+        print_json(&task_out(task));
     }
 }
 
@@ -3944,7 +3970,7 @@ fn print_tasks(tasks: &[Task], quiet: bool) {
     if quiet {
         print_json(&tasks.iter().map(compact).collect::<Vec<_>>());
     } else {
-        print_json(&tasks);
+        print_json(&tasks.iter().map(task_out).collect::<Vec<_>>());
     }
 }
 
@@ -4087,7 +4113,11 @@ fn print_project_delete(
             "tasks": tasks.iter().map(compact).collect::<Vec<_>>(),
         }));
     } else {
-        print_json(&json!({"project": project, "subprojects": subprojects, "tasks": tasks}));
+        print_json(&json!({
+            "project": project,
+            "subprojects": subprojects,
+            "tasks": tasks.iter().map(task_out).collect::<Vec<_>>(),
+        }));
     }
 }
 
@@ -4198,6 +4228,103 @@ fn print_error(code: &str, message: &str) {
     eprintln!("{}", json!({"error": {"code": code, "message": message}}));
 }
 
+/// Parse the process arguments. `--quiet` is accepted on every command (mesa
+/// task 1513): where a command defines it, it means what it always did; where
+/// it does not, clap rejects it as an unknown argument and the parse is
+/// retried without it, so it is a no-op there. Commands with trailing var-args
+/// swallow it as text and never reach the retry, exactly as before.
+fn parse_args(args: &[std::ffi::OsString]) -> std::result::Result<Cli, clap::Error> {
+    match Cli::try_parse_from(args) {
+        Err(err)
+            if err.kind() == ErrorKind::UnknownArgument
+                && err
+                    .get(ContextKind::InvalidArg)
+                    .is_some_and(|v| v.to_string() == "--quiet") =>
+        {
+            let mut after_dd = false;
+            let stripped: Vec<&std::ffi::OsString> = args
+                .iter()
+                .enumerate()
+                .filter(|(i, a)| {
+                    after_dd |= *a == "--";
+                    *i == 0 || after_dd || *a != "--quiet"
+                })
+                .map(|(_, a)| a)
+                .collect();
+            Cli::try_parse_from(stripped)
+        }
+        other => other,
+    }
+}
+
+/// A corrected full command for a clap usage error, when clap itself suggested
+/// one: the offending flag or subcommand token swapped for the suggestion.
+fn did_you_mean(err: &clap::Error, args: &[std::ffi::OsString]) -> Option<String> {
+    let (invalid_kind, suggested_kind) = match err.kind() {
+        ErrorKind::UnknownArgument => (ContextKind::InvalidArg, ContextKind::SuggestedArg),
+        ErrorKind::InvalidSubcommand => (
+            ContextKind::InvalidSubcommand,
+            ContextKind::SuggestedSubcommand,
+        ),
+        _ => return None,
+    };
+    let first = |v: &ContextValue| match v {
+        ContextValue::String(s) => Some(s.clone()),
+        ContextValue::Strings(v) => v.first().cloned(),
+        _ => None,
+    };
+    let invalid = err.get(invalid_kind).and_then(first)?;
+    let suggested = err.get(suggested_kind).and_then(first)?;
+    // clap may print the invalid arg with its value placeholder; the token on
+    // the command line is the first word of it.
+    let invalid = invalid.split_whitespace().next()?.to_string();
+    let suggested = suggested.split_whitespace().next()?.to_string();
+    let mut swapped = false;
+    let words: Vec<String> = args
+        .iter()
+        .enumerate()
+        .map(|(i, a)| {
+            let a = a.to_string_lossy().into_owned();
+            if i == 0 {
+                return "naru".to_string();
+            }
+            if swapped {
+                return a;
+            }
+            if a == invalid {
+                swapped = true;
+                return suggested.clone();
+            }
+            match a.split_once('=') {
+                Some((flag, value)) if flag == invalid => {
+                    swapped = true;
+                    format!("{suggested}={value}")
+                }
+                _ => a,
+            }
+        })
+        .collect();
+    swapped.then(|| {
+        words
+            .iter()
+            .map(|w| shell_word(w))
+            .collect::<Vec<_>>()
+            .join(" ")
+    })
+}
+
+/// A word as it would be typed: bare when it is plain, else single-quoted.
+fn shell_word(w: &str) -> String {
+    let plain = !w.is_empty()
+        && w.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_./=:,@%+".contains(c));
+    if plain {
+        w.to_string()
+    } else {
+        format!("'{}'", w.replace('\'', "'\\''"))
+    }
+}
+
 fn error_code(err: &Error) -> &'static str {
     match err {
         Error::NotFound(_) => "not_found",
@@ -4210,7 +4337,8 @@ fn error_code(err: &Error) -> &'static str {
 }
 
 pub fn run() -> ExitCode {
-    let cli = match Cli::try_parse() {
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    let cli = match parse_args(&args) {
         Ok(cli) => cli,
         Err(err) => {
             // --help / --version stay human text on stdout, exit 0.
@@ -4223,7 +4351,13 @@ pub fn run() -> ExitCode {
             }
             // Everything else (unknown command, bad value, missing arg) is a
             // usage error in the JSON contract shape.
-            print_error("usage", err.render().to_string().trim_end());
+            let mut payload = json!({
+                "error": {"code": "usage", "message": err.render().to_string().trim_end()}
+            });
+            if let Some(cmd) = did_you_mean(&err, &args) {
+                payload["error"]["did_you_mean"] = json!(cmd);
+            }
+            eprintln!("{payload}");
             return ExitCode::from(2);
         }
     };
@@ -4544,12 +4678,14 @@ fn run_task(cmd: TaskCmd) -> Result<()> {
             // exactly one of the three description forms.
             let project = project.or(project_pos).unwrap();
             let mut stdin_used = false;
-            let description = resolve_field(
-                description.or(description_pos),
-                description_file,
-                &mut stdin_used,
-            )?
-            .unwrap_or_default();
+            let body = resolve_field(description, description_file, &mut stdin_used)?;
+            // A positional beside a body is the name; the derived name is the
+            // first non-empty line, so name + blank line + body keeps both.
+            let description = match (description_pos, body) {
+                (Some(name), Some(body)) => format!("{name}\n\n{body}"),
+                (Some(text), None) | (None, Some(text)) => text,
+                (None, None) => String::new(),
+            };
             let acceptance = resolve_field(acceptance, acceptance_file, &mut stdin_used)?;
             let tags = tags.map(parse_tags).unwrap_or_default();
             let project = resolve_project(&store, &project)?;
@@ -4606,7 +4742,7 @@ fn run_task(cmd: TaskCmd) -> Result<()> {
         } => {
             let project = project.or(project_pos);
             match store.next_task(resolve_project_opt(&store, project.as_deref())?)? {
-                NextResult::Task(task) => print_json(&task),
+                NextResult::Task(task) => print_json(&task_out(&task)),
                 NextResult::None {
                     blocked,
                     in_progress,
@@ -5120,14 +5256,19 @@ fn cc_collect(store: &Store, window: &str) -> Result<crate::core::CcDashboard> {
 /// subscription windows, whose cutoff only the live usage endpoint knows — and
 /// exists twice because the two views build different objects, not because
 /// they take different windows.
-fn cc_errors(store: &Store, window: &str, session: Option<&str>) -> Result<crate::core::CcErrors> {
+fn cc_errors(
+    store: &Store,
+    window: &str,
+    session: Option<&str>,
+    cli_only: bool,
+) -> Result<crate::core::CcErrors> {
     if !crate::core::cc::is_usage_window(window) {
-        return crate::core::cc::errors(store, window, session);
+        return crate::core::cc::errors(store, window, session, cli_only);
     }
     let usage = crate::core::usage::fetch().map_err(Error::Unavailable)?;
     let since = crate::core::cc::usage_window_start(window, &usage)
         .ok_or_else(|| Error::Unavailable(format!("no open {window} usage window to report on")))?;
-    crate::core::cc::errors_since(store, window, since, session)
+    crate::core::cc::errors_since(store, window, since, session, cli_only)
 }
 
 /// Dashboard reads (`summary`/`sessions`/`skills`) auto-ingest new transcript
@@ -5197,10 +5338,16 @@ fn run_cc(cmd: CcCmd) -> Result<()> {
             // makes it answer for a session that has never been ingested.
             print_json(&crate::core::cc::session_chat(&session_id, limit)?)
         }
-        CcCmd::Errors { window, session } => {
+        CcCmd::Errors {
+            window,
+            session,
+            session_pos,
+            cli,
+        } => {
+            let session = session.or(session_pos);
             let mut store = Store::open_default()?;
             crate::core::cc::sync(&mut store, false)?;
-            print_json(&cc_errors(&store, &window, session.as_deref())?)
+            print_json(&cc_errors(&store, &window, session.as_deref(), cli)?)
         }
         CcCmd::Skills { window } => {
             let mut store = Store::open_default()?;
@@ -7665,7 +7812,7 @@ mod tests {
     fn compact_matches_task_summary_keys() {
         let task = sample_task();
         assert_eq!(
-            sorted_owned(value_keys(&compact(&task))),
+            minus(&sorted_owned(value_keys(&compact(&task))), &["title"]),
             sorted_owned(keys(&TaskSummary::from(&task))),
         );
     }
@@ -7699,7 +7846,7 @@ mod tests {
              (the --quiet and `task list` shape) before updating this list",
         );
         assert_eq!(
-            sorted_owned(value_keys(&compact(&task))),
+            minus(&sorted_owned(value_keys(&compact(&task))), &["title"]),
             minus(&full, &["description", "result", "created_at"]),
         );
     }

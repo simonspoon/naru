@@ -501,9 +501,11 @@ ok "diagram/frame/edge update --quiet with no field flag: exit 2, code=usage"
 run 2 "$MESA" diagram show "$SSB" -q
 ok "diagram show -q: exit 2 (long form only, no short alias)"
 
-run 2 "$MESA" diagram list --quiet
-run 2 "$MESA" diagram events "$SSB" --quiet
-ok "diagram list/events --quiet: exit 2 (unknown argument; out of scope)"
+PLAIN=$("$MESA" diagram list)
+run 0 "$MESA" diagram list --quiet
+[ "$STDOUT" = "$PLAIN" ] || fail "diagram list --quiet: output must equal the plain list"
+run 0 "$MESA" diagram events "$SSB" --quiet
+ok "diagram list/events --quiet: accepted and ignored (mesa task 1513)"
 
 # all 10 in-scope subcommands advertise the flag
 while read -r SUB; do
@@ -541,9 +543,10 @@ run 0 "$MESA" project delete "$QP"
 # the whole matrix below is driven off its output rather than a copy of the
 # value sets. A listed value must create; an unlisted one must be rejected.
 
-run 2 "$MESA" diagram types --quiet
-[ "$(jqe .error.code)" = "usage" ] || fail "diagram types --quiet: code=usage"
-ok "diagram types --quiet: exit 2 (a read command, out of scope)"
+PLAIN=$("$MESA" diagram types)
+run 0 "$MESA" diagram types --quiet
+[ "$STDOUT" = "$PLAIN" ] || fail "diagram types --quiet: output must equal the plain one"
+ok "diagram types --quiet: accepted and ignored (mesa task 1513)"
 
 run 0 "$MESA" diagram types
 capture "$TMP/types.json"

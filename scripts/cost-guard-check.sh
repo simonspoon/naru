@@ -265,11 +265,15 @@ ok "cc guard: a 201,000-token context trips context alone"
   fail "a session under every threshold must not be reported: $STDOUT"
 ok "cc guard: a healthy session is not reported"
 
-# `--quiet` is not a flag this command has (it is neither a mutation nor a
-# show) — clap refuses it as an unknown argument, exit 2.
-run 2 "$MESA" cc guard --quiet
-[ -z "$STDOUT" ] || fail "cc guard --quiet must print nothing on stdout"
-ok "cc guard rejects --quiet (exit 2, empty stdout)"
+# `--quiet` is not a flag this command has — it is accepted and ignored
+# (mesa task 1513), so the output is the plain one.
+run 0 "$MESA" cc guard
+PLAIN=$STDOUT
+run 0 "$MESA" cc guard --quiet
+# session order is not stable between two runs, so compare the set of sessions
+[ "$(jq -S '.sessions | map(.session_id) | sort' <<<"$STDOUT")" = "$(jq -S '.sessions | map(.session_id) | sort' <<<"$PLAIN")" ] ||
+  fail "cc guard --quiet must report what cc guard reports"
+ok "cc guard ignores --quiet (exit 0, output identical)"
 
 # ---- flag OFF: no alerts, ever --------------------------------------------
 

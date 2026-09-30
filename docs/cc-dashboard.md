@@ -208,14 +208,23 @@ comments — several entries are the bare `DELETE FROM cc_files;` cursor clear.
   `--session <id>` narrows the whole view to one session — applied in SQL so
   `idx_cc_tool_errors_session` does the work, echoed back as the response's
   `session` (null when unfiltered), and an unknown id is a zero state rather
-  than an error, exactly as an empty window is.
+  than an error, exactly as an empty window is. The session id may also be
+  given positionally (`mesa cc errors <id>`, mesa task 1513); both forms
+  together are a usage error.
+
+  `--cli` (mesa task 1513) keeps only the failures of `Bash` calls whose command
+  invokes `naru`/`mesa` — the first word of any command segment (split on `;`,
+  `&`, `|`, newlines, `(`, `{`, backtick, after leading `VAR=value` words) is
+  `naru` or `mesa`, bare or a path ending in it (`cc::invokes_naru`). It
+  filters the rows before any grouping, so every count, `by_*` list and
+  `denials` agree; the response carries no new key.
 
   Like every derived `cc_*` column, this only exists for lines ingested since
   the table shipped: `mesa cc sync --rebuild` clears the cursors and backfills
   the history in one re-walk. There is deliberately **no HTTP route and no web
   view** — it is a CLI verb, `mesa cc errors [--window …] [--session <id>]`,
   taking the same windows `cc summary` does (subscription windows included)
-  and rejecting `--quiet` like every other `cc` subcommand.
+  and ignoring `--quiet` like every other `cc` subcommand.
 - **One API response is several transcript lines, and usage is counted once per
   response.** Claude Code writes a single assistant response as a *line per
   content-block group* — typically a `thinking` line, then the

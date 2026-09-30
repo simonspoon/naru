@@ -91,7 +91,7 @@ The code is the source of truth. These are the invariants you must not break:
   its first non-empty line cut to 50 chars (`…` marks the cut), computed on
   every read by `types::task_name` — the one implementation, shared by the
   board card, `task list`, the not-found hint and every agent session name.
-  Never re-derive it in TypeScript, never store it, never add a `title` back.
+  Never re-derive it in TypeScript, never store it, never add a `title` back. (The CLI's task JSON does carry a `title` key equal to `name` — an output-only alias added in `cli.rs` (`TaskOut`, `compact()`) for agents that guess it, mesa task 1513; it is not on the `Task` type, the API or ts-rs, and is never stored or an input.)
 - **All DB writes go through `Store` methods** (`src/core/store.rs`) — the single
   insertion point. Do not open a second write path.
 - **All agent spawns go through `agents::spawn_bg`**, whose argv comes from a
@@ -155,10 +155,14 @@ The code is the source of truth. These are the invariants you must not break:
   long form only (no `-q`, no env var, no config key, never default-on), accepted
   on every mutation and `show`/`get`/`status` across `task`, `project`,
   `diagram` (+ `frame`, `edge`), `inbox`, `live` and `memory` — and on
-  nothing else (`list`, `turns`, `deps`,
+  nothing else; on every other command (`list`, `turns`, `deps`,
   `events`, `types`, `next`, `resolve`, `execute`, `attachment`, `cc`, `alarm`,
-  `backup`, `serve`, and `memory`'s `list`/`search`/`context`/`dream`/`import`
-  reject it as an unknown argument, exit 2). The quiet shape is the record minus
+  `backup`, `serve`, `memory`'s `list`/`search`/`context`/`dream`/`import`…) it is
+  **accepted and ignored** (mesa task 1513, `cli.rs::parse_args`: clap's
+  unknown-argument rejection of `--quiet` is retried without it), so an agent's
+  habitual flag never costs a turn — output identical to without it. A
+  trailing-var-args command (`live say`, `inbox add`) still takes `--quiet`
+  after the text as message text. The quiet shape is the record minus
   its unbounded free-text field(s), derived by removing named keys from the
   serialized record — never a hand-written second projection (`quiet()` in
   `src/cli.rs`, with a key-parity `#[test]` per record type so a new field on a

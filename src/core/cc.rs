@@ -1241,8 +1241,16 @@ struct RawIteration {
 /// Db-backed like [`collect`] rather than a live transcript read like
 /// [`live`]: the question is what has been going wrong *over a window*, and a
 /// transcript Claude Code has since deleted still counts.
-pub fn errors(store: &Store, window: &str, session: Option<&str>) -> Result<CcErrors> {
-    errors_inner(store, window, None, session)
+///
+/// `cli_only` (`mesa cc errors --cli`, mesa task 1513) keeps only the failures
+/// of `Bash` calls whose command invokes `naru`/`mesa` ([`invokes_naru`]).
+pub fn errors(
+    store: &Store,
+    window: &str,
+    session: Option<&str>,
+    cli_only: bool,
+) -> Result<CcErrors> {
+    errors_inner(store, window, None, session, cli_only)
 }
 
 /// [`errors`] with a caller-supplied cutoff, for the reason [`collect_since`]
@@ -1253,8 +1261,25 @@ pub fn errors_since(
     window: &str,
     since: i64,
     session: Option<&str>,
+    cli_only: bool,
 ) -> Result<CcErrors> {
-    errors_inner(store, window, Some(since), session)
+    errors_inner(store, window, Some(since), session, cli_only)
+}
+
+/// Whether any command segment of a shell line starts with `naru` or `mesa`
+/// (bare or as a path ending in them), after leading `VAR=value` words.
+/// Segments split on `;`, `&`, `|`, newlines, and `(`/`{`/backtick openers.
+pub fn invokes_naru(command: &str) -> bool {
+    command
+        .split([';', '&', '|', '\n', '(', '{', '`'])
+        .any(|seg| {
+            seg.split_whitespace()
+                .find(|w| !w.contains('=') || w.starts_with('/'))
+                .is_some_and(|w| {
+                    let base = w.trim_matches(['"', '\'']).rsplit('/').next().unwrap_or("");
+                    base == "naru" || base == "mesa"
+                })
+        })
 }
 
 fn errors_inner(
@@ -1262,6 +1287,7 @@ fn errors_inner(
     window: &str,
     since: Option<i64>,
     session: Option<&str>,
+    cli_only: bool,
 ) -> Result<CcErrors> {
     let now = now_unix();
     if since.is_none() {
@@ -1269,7 +1295,12 @@ fn errors_inner(
     }
     let cutoff = since.or_else(|| window_cutoff(window, now));
 
-    let rows = store.cc_read_tool_errors(cutoff, session)?;
+    let mut rows = store.cc_read_tool_errors(cutoff, session)?;
+    if cli_only {
+        rows.retain(|r| {
+            r.name.as_deref() == Some("Bash") && r.target.as_deref().is_some_and(invokes_naru)
+        });
+    }
     let mut total = CcErrorTotals {
         errors: 0,
         sidechain: 0,
@@ -8084,6 +8115,23 @@ mod tests {
     }
 
     #[test]
+    fn invokes_naru_reads_the_first_word_of_each_segment() {
+        for (command, want) in [
+            ("naru task list", true),
+            ("mesa task list | jq .", true),
+            ("cd /repo && naru task show 3", true),
+            ("FOO=1 ~/.local/bin/naru inbox add x", true),
+            ("echo hi; /usr/local/bin/mesa cc errors", true),
+            ("echo naru", false),
+            ("git log mesa", false),
+            ("cat naru.txt", false),
+            ("", false),
+        ] {
+            assert_eq!(invokes_naru(command), want, "invokes_naru({command:?})");
+        }
+    }
+
+    #[test]
     fn command_prefix_groups_the_head_of_a_command() {
         // Each case is a rule of `command_prefix`, in the order it applies.
         for (command, want) in [
@@ -8282,7 +8330,7 @@ mod tests {
         unsafe {
             std::env::remove_var("MESA_CC_PROJECTS_DIR");
         }
-        let e = errors(&store, "all", None).unwrap();
+        let e = errors(&store, "all", None, false).unwrap();
 
         assert_eq!(e.total.errors, 3, "the successful tu2 result is not one");
         assert_eq!(e.total.sidechain, 1);
@@ -8333,7 +8381,7 @@ mod tests {
 
         // Re-ingesting the same file adds nothing: the rows insert on their
         // `tool_use_id`, like every other cc row.
-        let again = errors(&store, "all", None).unwrap();
+        let again = errors(&store, "all", None, false).unwrap();
         assert_eq!(again.total.errors, e.total.errors);
     }
 
@@ -8374,7 +8422,7 @@ mod tests {
             std::env::remove_var("MESA_CC_PROJECTS_DIR");
         }
 
-        let e = errors(&store, "all", None).unwrap();
+        let e = errors(&store, "all", None, false).unwrap();
         assert_eq!(e.session, None, "unfiltered echoes no session");
         assert_eq!(e.total.errors, 3);
         let both = vec!["s1".to_string(), "s2".to_string()];
@@ -8383,12 +8431,12 @@ mod tests {
         assert_eq!(e.by_command[0].sessions, both, "{:?}", e.by_command);
         assert_eq!(e.by_message[0].sessions, both, "{:?}", e.by_message);
 
-        let one = errors(&store, "all", Some("s1")).unwrap();
+        let one = errors(&store, "all", Some("s1"), false).unwrap();
         assert_eq!(one.session.as_deref(), Some("s1"), "the filter echoes back");
         assert_eq!(one.total.errors, 2, "narrowed to the one session");
         assert_eq!(one.by_command[0].sessions, vec!["s1".to_string()]);
         // An unknown session is an empty view, not an error.
-        let none = errors(&store, "all", Some("nope")).unwrap();
+        let none = errors(&store, "all", Some("nope"), false).unwrap();
         assert_eq!(none.total.errors, 0);
         assert!(none.by_tool.is_empty());
     }
@@ -8446,7 +8494,7 @@ mod tests {
             )
             .unwrap();
 
-        let e = errors(&store, "all", None).unwrap();
+        let e = errors(&store, "all", None, false).unwrap();
         assert_eq!(e.total.denials, 3);
         assert_eq!(e.denials.len(), 1, "one reason is one row: {:?}", e.denials);
         assert_eq!(e.denials[0].count, 3);
@@ -8498,7 +8546,7 @@ mod tests {
                 },
             )
             .unwrap();
-        let e = errors(&store, "all", None).unwrap();
+        let e = errors(&store, "all", None, false).unwrap();
         assert_eq!(e.total.errors, 1);
         assert_eq!(e.by_tool.len(), 1);
         assert_eq!(e.by_tool[0].name, "unknown");

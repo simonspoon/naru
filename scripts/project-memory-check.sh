@@ -108,12 +108,11 @@ run 0 "$NARU" memory get --project "$P" "$E1" --quiet
 printf '%s' "$STDOUT" >"$TMP/quiet.json"
 jq -e --slurpfile q "$TMP/quiet.json" 'del(.body) == $q[0]' "$TMP/full.json" >/dev/null ||
   fail "memory show --quiet must be the full record minus body and nothing else"
-for verb in list search context dream import; do
-  run 2 "$NARU" memory "$verb" --quiet x
-  [ -z "$STDOUT" ] && [ "$(jqe .error.code)" = "usage" ] || fail "memory $verb --quiet: usage, empty stdout"
-done
+PLAIN=$("$NARU" memory list --project "$P")
+run 0 "$NARU" memory list --project "$P" --quiet
+[ "$STDOUT" = "$PLAIN" ] || fail "memory list --quiet: accepted and ignored (mesa task 1513)"
 run 2 "$NARU" memory context --project "$P"
-ok "memory list/show/get; --quiet on show only drops body; list/search/context/dream/import refuse --quiet; context takes no --project"
+ok "memory list/show/get; --quiet on show only drops body; list ignores --quiet; context takes no --project"
 
 run 0 "$NARU" memory replace --project "$P" "$E3" A replaced note.
 [ "$(jqs .body)" = "A replaced note." ] && [ "$(jqs .last_used_at)" != "null" ] ||
