@@ -110,6 +110,10 @@ wait_inbox() { # wait_inbox <n> — blocks until the inbox holds >= n items
 #              rule can see it, which is the whole reason that rule exists.
 #   nearly   — the same loop 29 calls deep, one short of the built-in count.
 #              It must never breach.
+#   ctxonly  — a cheap session whose newest turn re-read 201,000 tokens of
+#              context: over the 120,000 `context` ceiling and nothing else. It
+#              must be ALERTED and must NOT be stopped (the context rule is
+#              alert-only, whatever the action says).
 
 NOW=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
 REPO="$TMP/repo"
@@ -120,6 +124,7 @@ QUIET=aaaa1111-2222-3333-4444-555566667777
 ORPHAN=bbbb1111-2222-3333-4444-555566667777
 LOOPER=dddd1111-2222-3333-4444-555566667777
 NEARLY=eeee1111-2222-3333-4444-555566667777
+CTXONLY=ffff1111-2222-3333-4444-555566667777
 
 # ---- the stub `claude` ----------------------------------------------------
 #
@@ -132,7 +137,8 @@ cat > "$AGENTS" <<JSON
   {"pid":1,"id":"job-run","cwd":"$REPO","kind":"background","startedAt":1,"sessionId":"$RUNAWAY"},
   {"pid":2,"id":"job-loop","cwd":"$REPO","kind":"background","startedAt":2,"sessionId":"$LOOPER"},
   {"pid":3,"id":"job-orph","cwd":"$TMP/nowhere","kind":"background","startedAt":3,"sessionId":"$ORPHAN"},
-  {"pid":4,"cwd":"$REPO","kind":"interactive","startedAt":4,"sessionId":"$QUIET"}
+  {"pid":4,"cwd":"$REPO","kind":"interactive","startedAt":4,"sessionId":"$QUIET"},
+  {"pid":5,"id":"job-ctx","cwd":"$REPO","kind":"background","startedAt":5,"sessionId":"$CTXONLY"}
 ]
 JSON
 
@@ -187,6 +193,13 @@ write_loop() { # write_loop <session id> <count> <file>
 write_loop "$LOOPER" 35 "$MESA_CC_PROJECTS_DIR/-repo/looper.jsonl"
 write_loop "$NEARLY" 29 "$MESA_CC_PROJECTS_DIR/-repo/nearly.jsonl"
 
+# One cheap turn: 1000 + 200000 input-side tokens (~$0.30), under the spin
+# floor and every money rule — only `context` can see it.
+cat > "$MESA_CC_PROJECTS_DIR/-repo/ctxonly.jsonl" <<JSONL
+{"type":"user","sessionId":"$CTXONLY","timestamp":"$NOW","cwd":"$REPO","message":{"role":"user","content":"hi"}}
+{"type":"assistant","uuid":"c1","sessionId":"$CTXONLY","timestamp":"$NOW","cwd":"$REPO","message":{"id":"msg_c1","model":"claude-opus-4-8","usage":{"input_tokens":1000,"output_tokens":50,"cache_read_input_tokens":200000,"cache_creation_input_tokens":0}}}
+JSONL
+
 # ---- the mesa side: a project bound to $REPO, and a claimed task ----------
 
 run 0 "$MESA" project create guarded --path "$REPO" --no-git
@@ -199,18 +212,23 @@ run 0 "$MESA" task claim "$TASK" --owner "$RUNAWAY"
 run 0 "$MESA" task create "$PROJECT" "Poll the queue"
 LOOP_TASK=$(jqs .id)
 run 0 "$MESA" task claim "$LOOP_TASK" --owner "$LOOPER"
+run 0 "$MESA" task create "$PROJECT" "Long conversation"
+CTX_TASK=$(jqs .id)
+run 0 "$MESA" task claim "$CTX_TASK" --owner "$CTXONLY"
 
 # ---- `mesa cc guard`: the read-only inspector ------------------------------
 
 run 0 "$MESA" cc guard
-[ "$(jqs '.sessions | length')" = "3" ] ||
-  fail "expected the two runaways and the looper to breach, got: $STDOUT"
+[ "$(jqs '.sessions | length')" = "4" ] ||
+  fail "expected the two runaways, the looper and the context-only session to breach, got: $STDOUT"
 [ "$(jqs ".sessions[] | select(.session_id==\"$RUNAWAY\") | .task_id")" = "$TASK" ] ||
   fail "the claimed session must resolve to task $TASK: $STDOUT"
 [ "$(jqs ".sessions[] | select(.session_id==\"$ORPHAN\") | .task_id")" = "null" ] ||
   fail "the unattributable session must report task_id null: $STDOUT"
-[ "$(jqs ".sessions[] | select(.session_id==\"$RUNAWAY\") | .breaches | map(.threshold) | sort | join(\",\")")" = "cost,spin,tokens" ] ||
-  fail "the runaway must trip all three rules: $STDOUT"
+[ "$(jqs ".sessions[] | select(.session_id==\"$RUNAWAY\") | .breaches | map(.threshold) | sort | join(\",\")")" = "context,cost,spin,tokens" ] ||
+  fail "the runaway must trip all four rules (its context is ~459M): $STDOUT"
+jq -e '.thresholds.context_tokens == 120000' <<<"$STDOUT" >/dev/null ||
+  fail "an absent config must use the built-in 120000-token context ceiling: $STDOUT"
 jq -e '.thresholds.cost_usd == 25' <<<"$STDOUT" >/dev/null ||
   fail "an absent config must use the built-in \$25 ceiling: $STDOUT"
 [ "$(jqs '.window_minutes')" = "60" ] || fail "expected the 60-minute guard window: $STDOUT"
@@ -235,6 +253,13 @@ ok "cc guard: both runaways listed, the claimed one resolved to its task, the or
   fail "a 29-long run must not breach the 30 threshold: $STDOUT"
 ok "cc guard: a 35-call echo loop trips repeat alone; a 29-call one trips nothing"
 
+# The context rule: a session over nothing but the context ceiling.
+[ "$(jqs ".sessions[] | select(.session_id==\"$CTXONLY\") | .breaches | map(.threshold) | join(\",\")")" = "context" ] ||
+  fail "the context-only session must trip context and nothing else: $STDOUT"
+[ "$(jqs ".sessions[] | select(.session_id==\"$CTXONLY\") | .context_tokens")" = "201000" ] ||
+  fail "the report must carry the newest turn's context (201000): $STDOUT"
+ok "cc guard: a 201,000-token context trips context alone"
+
 # The quiet session is under every line and must not appear at all.
 [ "$(jqs ".sessions[] | select(.session_id==\"$QUIET\") | .session_id")" = "" ] ||
   fail "a session under every threshold must not be reported: $STDOUT"
@@ -258,12 +283,12 @@ ok "watch_cost off: no alerts and no stops"
 # ---- flag ON: exactly one item per session per threshold -------------------
 
 start_server --watch-cost
-wait_inbox 2
+wait_inbox 3
 wait_stops 3
 sleep 1  # several more ticks: the fire-once and already-stopped sets must hold
 run 0 "$MESA" inbox list
-[ "$(jqs 'length')" -eq 2 ] ||
-  fail "expected exactly two alerts, got $(jqs 'length'): $STDOUT"
+[ "$(jqs 'length')" -eq 3 ] ||
+  fail "expected exactly three alerts, got $(jqs 'length'): $STDOUT"
 for AUTHOR in $(jqs '.[].author'); do
   [ "$AUTHOR" = "cost-guard" ] || fail "the alerts must be authored by the cost guard: $STDOUT"
 done
@@ -272,15 +297,18 @@ for KIND in $(jqs '.[].kind'); do
 done
 RUN_BODY=$(jqs ".[] | select(.task_id==$TASK) | .body")
 LOOP_BODY=$(jqs ".[] | select(.task_id==$LOOP_TASK) | .body")
+CTX_BODY=$(jqs ".[] | select(.task_id==$CTX_TASK) | .body")
 [ -n "$RUN_BODY" ] || fail "no alert filed against the runaway's claimed task: $STDOUT"
 [ -n "$LOOP_BODY" ] || fail "no alert filed against the looper's claimed task: $STDOUT"
-ok "watch_cost on: one alert each for the runaway and the looper, task-summary kind, filed against their claimed tasks"
+[ -n "$CTX_BODY" ] || fail "no alert filed against the context-only session's claimed task: $STDOUT"
+ok "watch_cost on: one alert each for the runaway, the looper and the context-only session, task-summary kind, filed against their claimed tasks"
 
 # The runaway's alert carries all three money rules — and nothing about the
 # orphan, which filed nothing at all.
 grep -q "Spin loop" <<<"$RUN_BODY" || fail "no spin-loop alert: $RUN_BODY"
 grep -q "Cost:" <<<"$RUN_BODY" || fail "no cost alert: $RUN_BODY"
 grep -q "Volume:" <<<"$RUN_BODY" || fail "no volume alert: $RUN_BODY"
+grep -q "Context:" <<<"$RUN_BODY" || fail "no context alert: $RUN_BODY"
 grep -q "$RUNAWAY" <<<"$RUN_BODY" || fail "an alert must name its session: $RUN_BODY"
 ! grep -q "$ORPHAN" <<<"$RUN_BODY" || fail "the unattributable session must file nothing: $RUN_BODY"
 ! grep -q '|' <<<"$RUN_BODY" || fail "alert bodies are spoken prose, never tables: $RUN_BODY"
@@ -289,7 +317,11 @@ grep -q "Repeat:" <<<"$LOOP_BODY" || fail "the looper's alert must name the repe
 grep -q "echo idle" <<<"$LOOP_BODY" || fail "the looper's alert must name the command: $LOOP_BODY"
 grep -q "35 times in a row" <<<"$LOOP_BODY" || fail "the looper's alert must count the run: $LOOP_BODY"
 ! grep -q "Cost:" <<<"$LOOP_BODY" || fail "the looper is under every money rule: $LOOP_BODY"
-ok "alert bodies are prose naming the session and the rule; the repeat alert names the command and the count"
+grep -q "Context: its latest turn re-read 201,000 tokens" <<<"$CTX_BODY" ||
+  fail "the context alert must state the size and the ceiling: $CTX_BODY"
+grep -q "120,000 ceiling" <<<"$CTX_BODY" || fail "the context alert must name the ceiling: $CTX_BODY"
+! grep -q "Cost:" <<<"$CTX_BODY" || fail "the context-only session is under every money rule: $CTX_BODY"
+ok "alert bodies are prose naming the session and the rule; the repeat alert names the command and the count; the context alert names its size"
 
 # ---- the guard ACTED: each breaching session stopped exactly once ----------
 
@@ -302,7 +334,14 @@ grep -q "claude stop job-loop" <<<"$LOOP_BODY" || fail "the looper's alert must 
   fail "an unattributable runaway is still stopped — that is the whole point: $(cat "$STOPS")"
 [ "$(wc -l < "$STOPS")" -eq 3 ] ||
   fail "only the three breaching sessions may be stopped: $(cat "$STOPS")"
-ok "each breaching session is stopped exactly once, the alert says so and how to resume it"
+# The context rule is alert-only: a background session over nothing else is
+# reported, left running, and never handed to `claude stop`.
+[ "$(stops_of job-ctx)" -eq 0 ] ||
+  fail "a context-only breach must never stop the session: $(cat "$STOPS")"
+grep -q "left this session running" <<<"$CTX_BODY" ||
+  fail "the context alert must say the session was left running: $CTX_BODY"
+! grep -q "claude stop" <<<"$CTX_BODY" || fail "nothing was stopped: $CTX_BODY"
+ok "each breaching session is stopped exactly once, the alert says so and how to resume it; a context-only session is alerted and not stopped"
 
 # stderr said so once, rather than every tick — and says what happened to it.
 WARNINGS=$(grep -c "names no mesa task" "$TMP/server.log" || true)
@@ -315,7 +354,7 @@ ok "an unattributable runaway warns once on stderr, naming the stop"
 # ---- a second tick adds nothing -------------------------------------------
 
 sleep 1
-[ "$(inbox_count)" -eq 2 ] || fail "later ticks must not re-file: $(inbox_count) items"
+[ "$(inbox_count)" -eq 3 ] || fail "later ticks must not re-file: $(inbox_count) items"
 [ "$(wc -l < "$STOPS")" -eq 3 ] || fail "later ticks must not re-stop: $(cat "$STOPS")"
 stop_server
 ok "the fire-once and already-stopped sets hold across ticks"
@@ -330,7 +369,7 @@ BEFORE=$(inbox_count)
 mkdir -p "$FAKE_HOME/.mesa"
 echo '{"guard": {"action": "report"}}' > "$CONFIG"
 start_server --watch-cost
-wait_inbox $((BEFORE + 2))
+wait_inbox $((BEFORE + 3))
 sleep 1
 [ ! -s "$STOPS" ] || fail "the report action must stop nothing: $(cat "$STOPS")"
 run 0 "$MESA" inbox list
@@ -349,11 +388,11 @@ rm -f "$CONFIG"
 GOOD_CLAUDE="$MESA_CLAUDE_BIN"
 export MESA_CLAUDE_BIN="$TMP/no-such-claude"
 start_server --watch-cost
-wait_inbox $((BEFORE + 2))
+wait_inbox $((BEFORE + 3))
 sleep 1
 [ ! -s "$STOPS" ] || fail "a missing binary cannot have stopped anything"
 run 0 "$MESA" inbox list
-LATEST=$(jqs '.[0].body')
+LATEST=$(jqs "[.[] | select(.task_id==$TASK)] | max_by(.id) | .body")
 grep -q "could not" <<<"$LATEST" ||
   fail "a failed stop must be reported in the body: $LATEST"
 grep -q "still running" <<<"$LATEST" ||
@@ -378,10 +417,12 @@ jq -e '.total_tokens_default == 100000000' <<<"$CFG" >/dev/null || fail "built-i
 jq -e '.cache_read_share_default == 0.98' <<<"$CFG" >/dev/null || fail "built-in share default: $CFG"
 jq -e '.cache_read_min_tokens_default == 20000000' <<<"$CFG" >/dev/null || fail "built-in floor default: $CFG"
 jq -e '.repeat_count_default == 30' <<<"$CFG" >/dev/null || fail "built-in repeat default: $CFG"
+jq -e '.context_tokens_default == 120000' <<<"$CFG" >/dev/null || fail "built-in context default: $CFG"
+[ "$(jq -r '.context_tokens' <<<"$CFG")" = "null" ] || fail "unset context-tokens must read null: $CFG"
 jq -e '.action_default == "stop"' <<<"$CFG" >/dev/null || fail "built-in action default: $CFG"
 [ "$(jq -r '.repeat_count' <<<"$CFG")" = "null" ] || fail "unset repeat-count must read null: $CFG"
 [ "$(jq -r '.action' <<<"$CFG")" = "null" ] || fail "unset action must read null: $CFG"
-ok "GET /api/config/guard: absent config = null values beside the built-in defaults, six keys"
+ok "GET /api/config/guard: absent config = null values beside the built-in defaults, seven keys"
 
 # ---- the other six sections survive this one's save ------------------------
 #
@@ -408,11 +449,11 @@ curl -sf -X PUT -H 'Content-Type: application/json' \
   "http://127.0.0.1:$PORT/api/config/listen" >/dev/null || fail "seed listen"
 
 CFG=$(curl -sf -X PUT -H 'Content-Type: application/json' \
-  -d '{"cost_usd":9.5,"total_tokens":250,"cache_read_share":0.75,"cache_read_min_tokens":100,"repeat_count":7,"action":"report"}' \
+  -d '{"cost_usd":9.5,"total_tokens":250,"cache_read_share":0.75,"cache_read_min_tokens":100,"repeat_count":7,"context_tokens":150000,"action":"report"}' \
   "http://127.0.0.1:$PORT/api/config/guard") || fail "PUT guard"
 jq -e '.cost_usd == 9.5' <<<"$CFG" >/dev/null || fail "PUT echoed the wrong cost: $CFG"
 jq -e '.cache_read_share == 0.75' <<<"$CFG" >/dev/null || fail "PUT echoed the wrong share: $CFG"
-jq -e '.repeat_count == 7 and .action == "report"' <<<"$CFG" >/dev/null ||
+jq -e '.repeat_count == 7 and .context_tokens == 150000 and .action == "report"' <<<"$CFG" >/dev/null ||
   fail "PUT echoed the wrong repeat/action: $CFG"
 
 jq -e '.commands["todo-watcher"] == "mytool --bg -- /go {id}"' "$CONFIG" >/dev/null ||
@@ -427,7 +468,7 @@ jq -e '.live["auto-send-ms"] == 3500' "$CONFIG" >/dev/null ||
   fail "the live section did not survive: $(cat "$CONFIG")"
 jq -e '.listen.model == "small"' "$CONFIG" >/dev/null ||
   fail "the listen section did not survive: $(cat "$CONFIG")"
-jq -e '.guard["cost-usd"] == 9.5 and .guard["total-tokens"] == 250 and .guard["repeat-count"] == 7' "$CONFIG" >/dev/null ||
+jq -e '.guard["cost-usd"] == 9.5 and .guard["total-tokens"] == 250 and .guard["repeat-count"] == 7 and .guard["context-tokens"] == 150000' "$CONFIG" >/dev/null ||
   fail "the guard section is not on disk in kebab-case: $(cat "$CONFIG")"
 ok "saving the guard section preserves commands, pricing, watchers, speech, live and listen"
 
@@ -440,6 +481,8 @@ for BAD in '{"cost_usd":0}' '{"cost_usd":-3}' '{"cost_usd":"lots"}' \
            '{"cache_read_min_tokens":0}' \
            '{"repeat_count":0}' '{"repeat_count":-4}' '{"repeat_count":2.5}' \
            '{"repeat_count":100001}' '{"repeat_count":"30"}' \
+           '{"context_tokens":0}' '{"context_tokens":-5}' '{"context_tokens":1.5}' \
+           '{"context_tokens":"x"}' \
            '{"action":"pause"}' '{"action":"Stop"}' '{"action":1}' '{"action":true}'; do
   CODE=$(curl -s -o "$TMP/body" -w '%{http_code}' -X PUT \
     -H 'Content-Type: application/json' -d "$BAD" \
@@ -479,7 +522,7 @@ ok "configured thresholds are read fresh and actually govern the verdict"
 
 # `null` puts a key back to the built-in.
 CFG=$(curl -sf -X PUT -H 'Content-Type: application/json' \
-  -d '{"cost_usd":null,"total_tokens":null,"cache_read_share":null,"cache_read_min_tokens":null,"repeat_count":null,"action":null}' \
+  -d '{"cost_usd":null,"total_tokens":null,"cache_read_share":null,"cache_read_min_tokens":null,"repeat_count":null,"context_tokens":null,"action":null}' \
   "http://127.0.0.1:$PORT/api/config/guard") || fail "PUT nulls"
 [ "$(jq -r '.cost_usd' <<<"$CFG")" = "null" ] || fail "null must clear the key: $CFG"
 [ "$(jq -r '.action' <<<"$CFG")" = "null" ] || fail "null must clear the action: $CFG"
@@ -489,6 +532,8 @@ run 0 "$MESA" cc guard
 jq -e '.thresholds.cost_usd == 25' <<<"$STDOUT" >/dev/null || fail "cleared keys must restore the built-in: $STDOUT"
 jq -e '.thresholds.repeat_count == 30 and .thresholds.action == "stop"' <<<"$STDOUT" >/dev/null ||
   fail "cleared keys must restore the built-in repeat count and action: $STDOUT"
+jq -e '.thresholds.context_tokens == 120000' <<<"$STDOUT" >/dev/null ||
+  fail "a null context-tokens must restore the built-in ceiling: $STDOUT"
 ok "null restores the built-in threshold"
 
 stop_server

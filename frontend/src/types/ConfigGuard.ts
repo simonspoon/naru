@@ -55,6 +55,15 @@ repeat_count: number | null,
  */
 repeat_count_default: number, 
 /**
+ * The context ceiling the `context` rule fires at, or `null` for the
+ * built-in.
+ */
+context_tokens: number | null, 
+/**
+ * The built-in context ceiling mesa ships.
+ */
+context_tokens_default: number, 
+/**
  * What the watcher does about a breach — `"stop"` or `"report"` — or
  * `null` for the built-in.
  */

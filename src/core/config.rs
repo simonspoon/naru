@@ -2930,6 +2930,8 @@ pub const GUARD_CACHE_READ_MIN_TOKENS: &str = "cache-read-min-tokens";
 /// The config key holding how many identical trivial `Bash` calls in a row
 /// fire the repeat rule.
 pub const GUARD_REPEAT_COUNT: &str = "repeat-count";
+/// The config key holding the context ceiling the `context` rule fires at.
+pub const GUARD_CONTEXT_TOKENS: &str = "context-tokens";
 /// The config key holding what the watcher does about a breach.
 pub const GUARD_ACTION: &str = "action";
 
@@ -2938,6 +2940,7 @@ const GUARD_KEYS: &[&str] = &[
     GUARD_ACTION,
     GUARD_CACHE_READ_MIN_TOKENS,
     GUARD_CACHE_READ_SHARE,
+    GUARD_CONTEXT_TOKENS,
     GUARD_COST_USD,
     GUARD_REPEAT_COUNT,
     GUARD_TOTAL_TOKENS,
@@ -2985,6 +2988,12 @@ pub const DEFAULT_GUARD_REPEAT_COUNT: i64 = 30;
 /// sanity bound, not a policy. Past it the rule could never fire.
 pub const MAX_GUARD_REPEAT_COUNT: i64 = 100_000;
 
+/// Input-side tokens of a session's newest main-thread turn at which the
+/// `context` rule reports it: a long-lived session re-reads its whole context
+/// on every turn, so this is the size past which a fresh session seeded with a
+/// checkpoint is cheaper. Alert-only (`docs/cost-guard.md`).
+pub const DEFAULT_GUARD_CONTEXT_TOKENS: i64 = 120_000;
+
 /// What the watcher does about a breach when the config says nothing:
 /// **stop** the session (`docs/cost-guard.md`, mesa task 1054).
 pub const DEFAULT_GUARD_ACTION: GuardAction = GuardAction::Stop;
@@ -3010,6 +3019,8 @@ struct GuardSection {
     cache_read_min_tokens: Option<i64>,
     #[serde(default, rename = "repeat-count")]
     repeat_count: Option<i64>,
+    #[serde(default, rename = "context-tokens")]
+    context_tokens: Option<i64>,
     /// Kept as the raw string the file holds, not a parsed [`GuardAction`]: a
     /// word mesa does not know falls back to the built-in on the watcher's
     /// side and is still shown **verbatim** by the editor, the clamp posture
@@ -3067,6 +3078,10 @@ fn guard_thresholds_in(path: &Path) -> Result<GuardThresholds, String> {
             .repeat_count
             .filter(|v| (1..=MAX_GUARD_REPEAT_COUNT).contains(v))
             .unwrap_or(DEFAULT_GUARD_REPEAT_COUNT) as u64,
+        context_tokens: section
+            .context_tokens
+            .filter(|v| *v >= 1)
+            .unwrap_or(DEFAULT_GUARD_CONTEXT_TOKENS) as u64,
         action: section
             .action
             .as_deref()
@@ -3098,6 +3113,8 @@ fn guard_in(path: &Path) -> Result<ConfigGuard, String> {
         cache_read_min_tokens_default: DEFAULT_GUARD_CACHE_READ_MIN_TOKENS,
         repeat_count: section.repeat_count,
         repeat_count_default: DEFAULT_GUARD_REPEAT_COUNT,
+        context_tokens: section.context_tokens,
+        context_tokens_default: DEFAULT_GUARD_CONTEXT_TOKENS,
         action: section.action,
         action_default: DEFAULT_GUARD_ACTION.as_str().to_string(),
     })
@@ -3177,8 +3194,9 @@ fn save_guard_in(
     write_atomically(path, &body)
 }
 
-/// The rule for one guard threshold. Two of the four are counts of tokens and
-/// must be whole numbers; two are continuous. A value of the wrong *shape* is
+/// The rule for one guard threshold. Four are whole-number counts
+/// (`total-tokens`, `cache-read-min-tokens`, `context-tokens`, `repeat-count`)
+/// and two are continuous (`cost-usd`, `cache-read-share`). A value of the wrong *shape* is
 /// named here rather than coerced into something the person did not ask for.
 fn validate_guard(key: &str, value: &serde_json::Value) -> Result<(), String> {
     match key {
@@ -3195,7 +3213,7 @@ fn validate_guard(key: &str, value: &serde_json::Value) -> Result<(), String> {
                 ));
             }
         }
-        GUARD_TOTAL_TOKENS | GUARD_CACHE_READ_MIN_TOKENS => {
+        GUARD_TOTAL_TOKENS | GUARD_CACHE_READ_MIN_TOKENS | GUARD_CONTEXT_TOKENS => {
             let Some(v) = value.as_i64() else {
                 return Err(format!(
                     "{key} must be a whole number of tokens of at least 1, got {value}"
@@ -3876,6 +3894,46 @@ mod tests {
         // skips rather than guessing.
         let path = write_config(dir.path(), r#"{"guard": {"action": 3}}"#);
         assert!(guard_thresholds_in(&path).is_err());
+    }
+
+    #[test]
+    fn the_context_ceiling_reads_clamps_validates_and_restores() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(dir.path(), r#"{}"#);
+        assert_eq!(guard_thresholds_in(&path).unwrap().context_tokens, 120_000);
+        let shown = guard_in(&path).unwrap();
+        assert_eq!(shown.context_tokens, None);
+        assert_eq!(shown.context_tokens_default, DEFAULT_GUARD_CONTEXT_TOKENS);
+
+        let path = write_config(dir.path(), r#"{"guard": {"context-tokens": 50000}}"#);
+        assert_eq!(guard_thresholds_in(&path).unwrap().context_tokens, 50_000);
+
+        // Out of range falls back for that key alone; the editor shows the file.
+        let path = write_config(dir.path(), r#"{"guard": {"context-tokens": 0}}"#);
+        assert_eq!(guard_thresholds_in(&path).unwrap().context_tokens, 120_000);
+        assert_eq!(guard_in(&path).unwrap().context_tokens, Some(0));
+
+        let before = r#"{"guard": {"cost-usd": 12.0}}"#;
+        let path = write_config(dir.path(), before);
+        for value in [
+            serde_json::json!(0),
+            serde_json::json!(-5),
+            serde_json::json!(1.5),
+            serde_json::json!("x"),
+        ] {
+            let err = save_guard_in(&path, &guard_update(&[(GUARD_CONTEXT_TOKENS, Some(value))]))
+                .unwrap_err();
+            assert!(matches!(err, SaveError::Validation(_)), "{err:?}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        }
+        save_guard_in(
+            &path,
+            &guard_update(&[(GUARD_CONTEXT_TOKENS, Some(serde_json::json!(200_000)))]),
+        )
+        .unwrap();
+        assert_eq!(guard_thresholds_in(&path).unwrap().context_tokens, 200_000);
+        save_guard_in(&path, &guard_update(&[(GUARD_CONTEXT_TOKENS, None)])).unwrap();
+        assert_eq!(guard_thresholds_in(&path).unwrap().context_tokens, 120_000);
     }
 
     #[test]

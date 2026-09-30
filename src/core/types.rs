@@ -623,6 +623,13 @@ pub struct ConfigGuard {
     /// The built-in repeat count mesa ships.
     #[ts(type = "number")]
     pub repeat_count_default: i64,
+    /// The context ceiling the `context` rule fires at, or `null` for the
+    /// built-in.
+    #[ts(type = "number | null")]
+    pub context_tokens: Option<i64>,
+    /// The built-in context ceiling mesa ships.
+    #[ts(type = "number")]
+    pub context_tokens_default: i64,
     /// What the watcher does about a breach — `"stop"` or `"report"` — or
     /// `null` for the built-in.
     pub action: Option<String>,
@@ -3689,6 +3696,12 @@ pub struct CcLiveSession {
     /// currently in, or `null` when its newest tool call was anything else.
     /// The cost guard's `repeat` rule reads it (`docs/cost-guard.md`).
     pub repeat: Option<CcRepeat>,
+    /// The newest main-thread (non-sidechain) assistant turn's input side —
+    /// `input + cache read + cache creation` tokens, the measure
+    /// `SessionPulse.context_tokens` uses — or `null` when none was seen in the
+    /// window. The cost guard's `context` rule reads it (`docs/cost-guard.md`).
+    #[ts(type = "number | null")]
+    pub context_tokens: Option<u64>,
 }
 
 /// A session stuck repeating one trivial shell command — the *shape* of a

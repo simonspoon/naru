@@ -2229,6 +2229,9 @@ struct LiveAcc {
     spark: Vec<i64>,
     /// Rolling state for the repeat rule.
     repeat: RepeatAcc,
+    /// The newest main-thread assistant turn's input side, with its timestamp
+    /// (for the context rule). Sidechain turns never update it.
+    context: Option<(i64, i64)>,
 }
 
 /// How long a `tool_result` may be and still count as **trivial**, in bytes.
@@ -2439,6 +2442,7 @@ pub fn live(window_minutes: i64) -> CcLive {
                 subagents,
                 spark: s.spark,
                 repeat: s.repeat.finish(),
+                context_tokens: s.context.map(|(_, c)| c as u64),
             }
         })
         .collect();
@@ -2573,6 +2577,16 @@ fn parse_live_file(
         s.models.insert(model.clone());
         s.messages += 1;
         s.tokens.add(usage);
+        // The input side of the newest main-thread turn — `session_pulse`'s
+        // measure. `>=` so a later line of equal timestamp wins.
+        if raw.is_sidechain != Some(true) && s.context.is_none_or(|(t, _)| ts >= t) {
+            s.context = Some((
+                ts,
+                usage.input_tokens
+                    + usage.cache_read_input_tokens
+                    + usage.cache_creation_input_tokens,
+            ));
+        }
         s.cost += estimate_cost(prices, &model, usage);
         // The entry was already created above for any line carrying an `agentId`,
         // so reuse it by mutable handle (no second insert, no clone).
@@ -5533,6 +5547,43 @@ mod tests {
         assert_eq!(sub.total_tokens, 30);
         assert_eq!(sub.messages, 1);
         assert!(sub.idle_seconds <= ACTIVE_SECS);
+    }
+
+    #[test]
+    fn live_context_tokens_is_the_newest_main_thread_turn() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("-live-project");
+        let subs = proj.join("ctx").join("subagents");
+        fs::create_dir_all(&subs).unwrap();
+        let turn = |id: &str, side: bool, secs_ago: i64, input: i64, read: i64, create: i64| {
+            format!(
+                r#"{{"type":"assistant","isSidechain":{side},"sessionId":"ctx","timestamp":"{ts}","cwd":"/home/me/work/widget","message":{{"id":"{id}","model":"claude-opus-4-8","usage":{{"input_tokens":{input},"output_tokens":7,"cache_read_input_tokens":{read},"cache_creation_input_tokens":{create}}}}}}}"#,
+                ts = iso_at(secs_ago)
+            )
+        };
+        // Written out of order on purpose: "latest" is by timestamp.
+        let newest = turn("m3", false, 10, 5, 1_000, 200);
+        let older = turn("m1", false, 50, 1, 900_000, 0);
+        let side = turn("s1", true, 5, 1, 9_000_000, 0);
+        write_jsonl(&proj, "ctx.jsonl", &[newest.as_str(), older.as_str()]);
+        write_jsonl(&subs, "agent-x.jsonl", &[side.as_str()]);
+        // A session with only sidechain usage has no main-thread context.
+        let only_side = format!(
+            r#"{{"type":"assistant","isSidechain":true,"sessionId":"side","timestamp":"{}","message":{{"id":"z","model":"claude-opus-4-8","usage":{{"input_tokens":3,"output_tokens":1}}}}}}"#,
+            iso_at(10)
+        );
+        write_jsonl(&proj, "side.jsonl", &[only_side.as_str()]);
+        unsafe {
+            std::env::set_var("MESA_CC_PROJECTS_DIR", tmp.path());
+        }
+        let l = live(15);
+        unsafe {
+            std::env::remove_var("MESA_CC_PROJECTS_DIR");
+        }
+        let get = |id: &str| l.sessions.iter().find(|s| s.session_id == id).unwrap();
+        assert_eq!(get("ctx").context_tokens, Some(5 + 1_000 + 200));
+        assert_eq!(get("side").context_tokens, None);
     }
 
     #[test]
