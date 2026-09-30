@@ -11267,8 +11267,13 @@ body.live-panel-ratio-resizing .live-panel-divider {
    a slim button strip; the two page panes stay mounted (Terminal's PTYs must
    survive) at a fixed width, clipped and invisible, so a fold never refits a
    terminal. The freed row goes to whichever of the live and agents panels
-   are open: each keeps its own width as the flex basis and both grow, and
-   their bodies, otherwise held at the open width, follow the panel. */
+   are open: each keeps its own width as the flex basis and grows, and their
+   bodies, otherwise held at the open width, follow the panel. With both
+   open, though, only the live panel grows (mesa task 1524): the agents
+   panel's drag sets its width to the pointer's distance from the right edge,
+   so any grow on top of that basis lands the handle away from the pointer
+   and tracks at half rate. It stays at exactly `--agent-sidebar-width`; live
+   takes the rest. Alone, agents still fills the row. */
 .main-rail {
   position: absolute;
   inset: 0;
@@ -11306,6 +11311,10 @@ body.live-panel-ratio-resizing .live-panel-divider {
   .shell-body.main-collapsed .live-sidebar:not(.collapsed),
   .shell-body.main-collapsed .agent-sidebar:not(.collapsed) {
     flex: 1 1 auto;
+  }
+
+  .shell-body.main-collapsed:has(.live-sidebar:not(.collapsed)) .agent-sidebar:not(.collapsed) {
+    flex: 0 0 auto;
   }
 
   .shell-body.main-collapsed .live-sidebar:not(.collapsed) .live-sidebar-body,
