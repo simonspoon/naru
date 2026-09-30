@@ -148,8 +148,8 @@ import json
 assert json.load(open("'"$TMP"'/sc-bad"))["error"]["code"]=="validation"
 ' || fail "cc scorecard bad --since is not a validation error"
 
-"$BIN" library create agent scorecard-probe $'---\nname: scorecard-probe\nmodel: opus\n---\nx\n' >/dev/null
-"$BIN" library update scorecard-probe --body $'---\nname: scorecard-probe\nmodel: sonnet\neffort: high\n---\nx\n' >/dev/null
+"$BIN" library create agent scorecard-probe --body=$'---\nname: scorecard-probe\nmodel: opus\n---\nx\n' >/dev/null
+"$BIN" library update scorecard-probe --body=$'---\nname: scorecard-probe\nmodel: sonnet\neffort: high\n---\nx\n' >/dev/null
 "$BIN" cc scorecard --agent scorecard-probe | python3 -c '
 import json,sys
 d=json.load(sys.stdin)
