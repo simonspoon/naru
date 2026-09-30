@@ -1351,6 +1351,12 @@ run 2 "$MESA" task list --stauts todo
   fail "typo'd flag: did_you_mean was $(jqe .error.did_you_mean)"
 run 2 "$MESA" taks list
 [ "$(jqe '.error.did_you_mean')" = "naru task list" ] || fail "typo'd subcommand: did_you_mean"
+run 2 "$MESA" task creat "$PF" x
+[ "$(jqe .error.did_you_mean)" = "naru task create $PF x" ] ||
+  fail "several candidates: the closest wins, got $(jqe .error.did_you_mean)"
+run 0 "$MESA" task create "$PF" "Empty body" --description "  "
+[ "$(jqs .description)" = "Empty body" ] || fail "empty body: name alone"
+run 0 "$MESA" task create "$PF" --description "Only body"
 run 2 "$MESA" task show
 [ "$(jqe '.error | has("did_you_mean")')" = "false" ] || fail "no suggestion: key must be omitted"
 ok "usage errors: did_you_mean on a typo'd flag/subcommand, omitted otherwise, exit 2"

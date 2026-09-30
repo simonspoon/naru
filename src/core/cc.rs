@@ -1267,19 +1267,43 @@ pub fn errors_since(
 }
 
 /// Whether any command segment of a shell line starts with `naru` or `mesa`
-/// (bare or as a path ending in them), after leading `VAR=value` words.
-/// Segments split on `;`, `&`, `|`, newlines, and `(`/`{`/backtick openers.
+/// (bare or as a path ending in them), after leading `VAR=value` words and the
+/// wrappers `sudo`, `time`, `env`, `timeout <n>`, `nohup` and `xargs`.
+/// Quoted spans are blanked first, so `git commit -m "fix; naru x"` and
+/// `grep 'a|mesa' .` do not match. Segments split on `;`, `&`, `|`, newlines,
+/// and `(`/`{`/backtick openers.
 pub fn invokes_naru(command: &str) -> bool {
-    command
-        .split([';', '&', '|', '\n', '(', '{', '`'])
-        .any(|seg| {
-            seg.split_whitespace()
-                .find(|w| !w.contains('=') || w.starts_with('/'))
-                .is_some_and(|w| {
-                    let base = w.trim_matches(['"', '\'']).rsplit('/').next().unwrap_or("");
-                    base == "naru" || base == "mesa"
-                })
-        })
+    let mut bare = String::with_capacity(command.len());
+    let mut quote: Option<char> = None;
+    for c in command.chars() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None if c == '\'' || c == '"' => quote = Some(c),
+            None => bare.push(c),
+        }
+    }
+    bare.split([';', '&', '|', '\n', '(', '{', '`']).any(|seg| {
+        let mut words = seg.split_whitespace().peekable();
+        while let Some(w) = words.next() {
+            match w {
+                "sudo" | "time" | "env" | "nohup" | "xargs" => continue,
+                "timeout" => {
+                    // `timeout [-flags] <duration> cmd`
+                    while words.next_if(|w| w.starts_with('-')).is_some() {}
+                    words.next();
+                    continue;
+                }
+                _ if w.contains('=') && !w.starts_with('/') => continue,
+                _ if w.starts_with('-') => continue,
+                _ => {
+                    let base = w.rsplit('/').next().unwrap_or("");
+                    return base == "naru" || base == "mesa";
+                }
+            }
+        }
+        false
+    })
 }
 
 fn errors_inner(
@@ -8123,6 +8147,15 @@ mod tests {
             ("FOO=1 ~/.local/bin/naru inbox add x", true),
             ("echo hi; /usr/local/bin/mesa cc errors", true),
             ("echo naru", false),
+            ("git commit -m \"fix; naru thing\"", false),
+            ("grep -r 'a|mesa' .", false),
+            ("sudo naru task list", true),
+            ("time mesa task list", true),
+            ("env FOO=1 naru task list", true),
+            ("timeout 5 naru task list", true),
+            ("nohup naru serve", true),
+            ("ls | xargs naru task show", true),
+            ("sudo echo naru", false),
             ("git log mesa", false),
             ("cat naru.txt", false),
             ("", false),

@@ -4268,17 +4268,23 @@ fn did_you_mean(err: &clap::Error, args: &[std::ffi::OsString]) -> Option<String
         ),
         _ => return None,
     };
-    let first = |v: &ContextValue| match v {
-        ContextValue::String(s) => Some(s.clone()),
-        ContextValue::Strings(v) => v.first().cloned(),
-        _ => None,
+    let invalid = err
+        .get(invalid_kind)
+        .and_then(|v| word(v).into_iter().next())?;
+    // clap may list several candidates (`'receipt', 'create'` for `creat`),
+    // in its own order. Take the one closest to the typo; a tie has no honest
+    // answer, so it gets none.
+    let mut candidates = word(err.get(suggested_kind)?);
+    let distance = |c: &String| edit_distance(&invalid, c);
+    candidates.sort_by_key(distance);
+    let suggested = match candidates.as_slice() {
+        [] => return None,
+        [only] => only.clone(),
+        [best, next, ..] if distance(best) < distance(next) => best.clone(),
+        _ => return None,
     };
-    let invalid = err.get(invalid_kind).and_then(first)?;
-    let suggested = err.get(suggested_kind).and_then(first)?;
-    // clap may print the invalid arg with its value placeholder; the token on
-    // the command line is the first word of it.
-    let invalid = invalid.split_whitespace().next()?.to_string();
-    let suggested = suggested.split_whitespace().next()?.to_string();
+    // clap does not report where on the command line the bad token sat, so the
+    // first word equal to it is the one replaced.
     let mut swapped = false;
     let words: Vec<String> = args
         .iter()
@@ -4311,6 +4317,35 @@ fn did_you_mean(err: &clap::Error, args: &[std::ffi::OsString]) -> Option<String
             .collect::<Vec<_>>()
             .join(" ")
     })
+}
+
+/// Each candidate of a clap suggestion, reduced to its first word (clap may
+/// print an arg with its value placeholder).
+fn word(v: &ContextValue) -> Vec<String> {
+    let all = match v {
+        ContextValue::String(s) => vec![s.clone()],
+        ContextValue::Strings(v) => v.clone(),
+        _ => vec![],
+    };
+    all.iter()
+        .filter_map(|s| s.split_whitespace().next().map(str::to_string))
+        .collect()
+}
+
+/// Levenshtein distance, for ranking clap's suggestions against the typo.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut prev = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cur = row[j + 1];
+            row[j + 1] = (prev + usize::from(ca != *cb)).min(row[j] + 1).min(cur + 1);
+            prev = cur;
+        }
+    }
+    row[b.len()]
 }
 
 /// A word as it would be typed: bare when it is plain, else single-quoted.
@@ -4682,6 +4717,8 @@ fn run_task(cmd: TaskCmd) -> Result<()> {
             // A positional beside a body is the name; the derived name is the
             // first non-empty line, so name + blank line + body keeps both.
             let description = match (description_pos, body) {
+                (Some(name), Some(body)) if name.trim().is_empty() => body,
+                (Some(name), Some(body)) if body.trim().is_empty() => name,
                 (Some(name), Some(body)) => format!("{name}\n\n{body}"),
                 (Some(text), None) | (None, Some(text)) => text,
                 (None, None) => String::new(),
