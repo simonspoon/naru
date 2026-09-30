@@ -5,14 +5,24 @@ import {
   getProjectGitCommitFiles,
   getProjectGitDiff,
   getProjectGitLog,
+  getProjectGitRepos,
 } from '../api'
 import type { GitCommit } from '../types/GitCommit'
 import type { GitCommitFile } from '../types/GitCommitFile'
 import type { GitFile } from '../types/GitFile'
+import type { GitRepo } from '../types/GitRepo'
 import type { GitWorktree } from '../types/GitWorktree'
 import { useLiveContext } from '../liveContext'
 import { LiveFocus } from './LiveFocus'
 import { useFetch } from '../useFetch'
+import {
+  effectiveRepo,
+  hashWithRepo,
+  repoFromHash,
+  repoLabel,
+  repoParam,
+  showRepoPicker,
+} from '../gitRepos'
 
 // Human word for one porcelain-v2 status char. X = staged column,
 // Y = unstaged column, '.' = unchanged in that column.
@@ -107,14 +117,16 @@ function DiffPane({
   projectId,
   path,
   worktree,
+  repo,
 }: {
   projectId: number
   path: string
   worktree: string | null
+  repo: string | undefined
 }) {
   const { data, error } = useFetch(
-    () => getProjectGitDiff(projectId, path, worktree ?? undefined),
-    `git-diff-${projectId}-${worktree ?? ''}-${path}`,
+    () => getProjectGitDiff(projectId, path, worktree ?? undefined, repo),
+    `git-diff-${projectId}-${repo ?? ''}-${worktree ?? ''}-${path}`,
   )
   if (error) return <p className="error">{error}</p>
   if (!data) return <p className="muted">Loading…</p>
@@ -128,14 +140,16 @@ function CommitDiffPane({
   projectId,
   sha,
   path,
+  repo,
 }: {
   projectId: number
   sha: string
   path: string
+  repo: string | undefined
 }) {
   const { data, error } = useFetch(
-    () => getProjectGitCommitDiff(projectId, sha, path),
-    `git-commit-diff-${projectId}-${sha}-${path}`,
+    () => getProjectGitCommitDiff(projectId, sha, path, repo),
+    `git-commit-diff-${projectId}-${repo ?? ''}-${sha}-${path}`,
   )
   if (error) return <p className="error">{error}</p>
   if (!data) return <p className="muted">Loading…</p>
@@ -187,20 +201,22 @@ function NotARepoPlaceholder({ path }: { path: string }) {
  */
 function CommitFileList({
   projectId,
+  repo,
   commit,
   selectedPath,
   onSelectPath,
   onBack,
 }: {
   projectId: number
+  repo: string | undefined
   commit: GitCommit
   selectedPath: string | null
   onSelectPath: (path: string) => void
   onBack: () => void
 }) {
   const { data, error } = useFetch(
-    () => getProjectGitCommitFiles(projectId, commit.hash),
-    `git-commit-files-${projectId}-${commit.hash}`,
+    () => getProjectGitCommitFiles(projectId, commit.hash, repo),
+    `git-commit-files-${projectId}-${repo ?? ''}-${commit.hash}`,
   )
   return (
     <div className="git-file-list">
@@ -249,13 +265,15 @@ function CommitFileList({
 function HistoryPane({
   projectId,
   worktree,
+  repo,
 }: {
   projectId: number
   worktree: string | null
+  repo: string | undefined
 }) {
   const { data: log, error: logError } = useFetch(
-    () => getProjectGitLog(projectId, worktree ?? undefined),
-    `git-log-${projectId}-${worktree ?? ''}`,
+    () => getProjectGitLog(projectId, worktree ?? undefined, repo),
+    `git-log-${projectId}-${repo ?? ''}-${worktree ?? ''}`,
   )
   const [selectedCommit, setSelectedCommit] = useState<GitCommit | null>(null)
   const [selectedCommitPath, setSelectedCommitPath] = useState<string | null>(
@@ -310,6 +328,7 @@ function HistoryPane({
       ) : (
         <CommitFileList
           projectId={projectId}
+          repo={repo}
           commit={selectedCommit}
           selectedPath={selectedCommitPath}
           onSelectPath={setSelectedCommitPath}
@@ -323,6 +342,7 @@ function HistoryPane({
         {selectedCommit !== null && selectedCommitPath !== null ? (
           <CommitDiffPane
             projectId={projectId}
+            repo={repo}
             sha={selectedCommit.hash}
             path={selectedCommitPath}
           />
@@ -401,15 +421,21 @@ function WorktreeList({
  * window focus (no poll — git state changes from terminal work outside the
  * app, and the server caches the status call for 5s anyway).
  */
-export function GitView({ projectId }: { projectId: number }) {
+function GitRepoPane({
+  projectId,
+  repo,
+}: {
+  projectId: number
+  repo: string | undefined
+}) {
   // null = no explicit pick yet, i.e. "whichever worktree is_current" (the
   // server's own default when `?worktree=` is omitted).
   const [selectedWorktree, setSelectedWorktree] = useState<string | null>(
     null,
   )
   const { data, error } = useFetch(
-    () => getProjectGit(projectId, selectedWorktree ?? undefined),
-    `git-${projectId}-${selectedWorktree ?? ''}`,
+    () => getProjectGit(projectId, selectedWorktree ?? undefined, repo),
+    `git-${projectId}-${repo ?? ''}-${selectedWorktree ?? ''}`,
   )
   // Selected path is component state, not URL (no deep-linking a file).
   const [selectedPath, setSelectedPath] = useState<string | null>(null)
@@ -504,7 +530,11 @@ export function GitView({ projectId }: { projectId: number }) {
       </div>
 
       {mode === 'history' ? (
-        <HistoryPane projectId={projectId} worktree={selectedWorktree} />
+        <HistoryPane
+          projectId={projectId}
+          worktree={selectedWorktree}
+          repo={repo}
+        />
       ) : files.length === 0 ? (
         <p className="muted">Working tree clean — no changed files.</p>
       ) : (
@@ -528,6 +558,7 @@ export function GitView({ projectId }: { projectId: number }) {
                 projectId={projectId}
                 path={selected.path}
                 worktree={selectedWorktree}
+                repo={repo}
               />
             ) : (
               <p className="muted">Select a file to see its diff.</p>
@@ -536,5 +567,83 @@ export function GitView({ projectId }: { projectId: number }) {
         </div>
       )}
     </div>
+  )
+}
+
+/**
+ * Repo picker (mesa task 1509): a project folder may hold several checked-out
+ * repos (or nest one inside another), discovered server-side. One chip per
+ * repo — relative path plus branch — shown only when there is more than one;
+ * a lone repo is selected silently and none is today's empty state (the pane
+ * below explains it). The choice rides in the route's `?repo=` so a reload
+ * keeps it (`gitRepos.ts` holds the rules).
+ */
+function RepoList({
+  repos,
+  selected,
+  onSelect,
+}: {
+  repos: GitRepo[]
+  selected: string | null
+  onSelect: (path: string) => void
+}) {
+  return (
+    <div className="git-worktree-list git-repo-list">
+      {repos.map((r) => (
+        <button
+          key={r.path}
+          type="button"
+          className={r.path === selected ? 'active' : ''}
+          title={r.path}
+          onClick={() => onSelect(r.path)}
+        >
+          {repoLabel(r)}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+/** The Git tab: repo picker over the selected repo's `GitRepoPane`. */
+export function GitView({ projectId }: { projectId: number }) {
+  const { data, error } = useFetch(
+    () => getProjectGitRepos(projectId),
+    `git-repos-${projectId}`,
+  )
+  // The pick, seeded from the route when it is this project's git route.
+  // Component state after that — the hash is written, not re-read, so the tab
+  // also works as a pane in the Custom layout, which has no git route.
+  const readRoute = () =>
+    window.location.hash.startsWith(`#/projects/${projectId}/git`)
+      ? repoFromHash(window.location.hash)
+      : null
+  const [requested, setRequested] = useState<string | null>(readRoute)
+  const [prevProject, setPrevProject] = useState(projectId)
+  if (projectId !== prevProject) {
+    setPrevProject(projectId)
+    setRequested(readRoute())
+  }
+
+  if (error && !data) return <p className="error">{error}</p>
+  if (!data) return <p className="muted">Loading…</p>
+
+  const selected = effectiveRepo(data.repos, requested)
+  const pick = (path: string) => {
+    setRequested(path)
+    if (window.location.hash.startsWith(`#/projects/${projectId}/git`)) {
+      window.location.hash = hashWithRepo(window.location.hash, path)
+    }
+  }
+  return (
+    <>
+      {showRepoPicker(data.repos) && (
+        <RepoList repos={data.repos} selected={selected} onSelect={pick} />
+      )}
+      <GitRepoPane
+        key={selected ?? ''}
+        projectId={projectId}
+        repo={repoParam(selected)}
+      />
+    </>
   )
 }

@@ -59,7 +59,8 @@ const CC_KEY = 'mesa-last-cc-tab'
 export function projectViewFromPath(
   path: string,
 ): { id: number; tab: ProjectTab } | null {
-  const m = /^\/projects\/(\d+)(?:\/([^/]+))?(?:\/.*)?$/.exec(path)
+  // A query (`git?repo=…`) is not part of the tab segment.
+  const m = /^\/projects\/(\d+)(?:\/([^/?]+))?(?:[/?].*)?$/.exec(path)
   if (m === null) return null
   const seg = m[2]
   const tab = (TAB_SEGMENTS as readonly string[]).includes(seg)

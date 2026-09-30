@@ -76,6 +76,7 @@ import type { ModelRates } from './types/ModelRates'
 import type { ProjectFileSearch } from './types/ProjectFileSearch'
 import type { ProjectFileTree } from './types/ProjectFileTree'
 import type { ProjectGitLog } from './types/ProjectGitLog'
+import type { ProjectGitRepos } from './types/ProjectGitRepos'
 import type { ProjectGitStatus } from './types/ProjectGitStatus'
 import type { ProjectGitView } from './types/ProjectGitView'
 import type { ProjectVersion } from './types/ProjectVersion'
@@ -418,9 +419,25 @@ export function getProjectVersion(id: number): Promise<ProjectVersion> {
 export function getProjectGit(
   id: number,
   worktree?: string,
+  repo?: string,
 ): Promise<ProjectGitView> {
-  const q = worktree ? `?worktree=${encodeURIComponent(worktree)}` : ''
-  return request(`/api/projects/${id}/git${q}`)
+  return request(`/api/projects/${id}/git${gitQuery({ worktree, repo })}`)
+}
+
+/** Query string from the defined members (`?a=1&b=2`), or ''. `repo` selects
+ * one of the repos `getProjectGitRepos` lists (omitted = the project folder's
+ * own repo) on every git read below that takes it. */
+function gitQuery(p: Record<string, string | undefined>): string {
+  const q = new URLSearchParams()
+  for (const [k, v] of Object.entries(p)) if (v) q.set(k, v)
+  const s = q.toString()
+  return s === '' ? '' : `?${s}`
+}
+
+/** Git repos discovered under the project's local_path (the folder itself
+ * first, when it is one). Empty = no folder, dead folder or none found. */
+export function getProjectGitRepos(id: number): Promise<ProjectGitRepos> {
+  return request(`/api/projects/${id}/git/repos`)
 }
 
 /**
@@ -433,10 +450,10 @@ export function getProjectGitDiff(
   id: number,
   path: string,
   worktree?: string,
+  repo?: string,
 ): Promise<GitFileDiff> {
-  const wt = worktree ? `&worktree=${encodeURIComponent(worktree)}` : ''
   return request(
-    `/api/projects/${id}/git/diff?path=${encodeURIComponent(path)}${wt}`,
+    `/api/projects/${id}/git/diff${gitQuery({ path, worktree, repo })}`,
   )
 }
 
@@ -448,9 +465,9 @@ export function getProjectGitDiff(
 export function getProjectGitLog(
   id: number,
   worktree?: string,
+  repo?: string,
 ): Promise<ProjectGitLog> {
-  const q = worktree ? `?worktree=${encodeURIComponent(worktree)}` : ''
-  return request(`/api/projects/${id}/git/log${q}`)
+  return request(`/api/projects/${id}/git/log${gitQuery({ worktree, repo })}`)
 }
 
 /** Commit history for ONE file under the project's local_path — backs the
@@ -474,9 +491,10 @@ export function getProjectGitFileLog(
 export function getProjectGitCommitFiles(
   id: number,
   sha: string,
+  repo?: string,
 ): Promise<GitCommitFile[]> {
   return request(
-    `/api/projects/${id}/git/commits/${encodeURIComponent(sha)}/files`,
+    `/api/projects/${id}/git/commits/${encodeURIComponent(sha)}/files${gitQuery({ repo })}`,
   )
 }
 
@@ -487,9 +505,10 @@ export function getProjectGitCommitDiff(
   id: number,
   sha: string,
   path: string,
+  repo?: string,
 ): Promise<GitFileDiff> {
   return request(
-    `/api/projects/${id}/git/commits/${encodeURIComponent(sha)}/diff?path=${encodeURIComponent(path)}`,
+    `/api/projects/${id}/git/commits/${encodeURIComponent(sha)}/diff${gitQuery({ path, repo })}`,
   )
 }
 

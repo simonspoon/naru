@@ -11,6 +11,33 @@ store only to read `local_path`. No CLI (an agent in a terminal uses `git`
 directly). Standard middleware guard only — no agent-style gate, it executes
 nothing.
 
+- **Several repos under one folder** (mesa task 1509).
+  `GET /api/projects/{id}/git/repos` → `ProjectGitRepos { path, repos:
+  [GitRepo { path, branch }] }` via `git::discover_repos`: `local_path`
+  itself (`"."`) if it holds a `.git`, then every descendant directory
+  holding a `.git` — a directory *or* a file, so linked worktrees and
+  submodules count — down to 4 levels, at most 50. A found repo is still
+  descended into, so a nested repo its parent gitignores is listed too.
+  Never entered: `node_modules`, `target`, `.build`, `dist`, `venv`, `.venv`,
+  `.git`; symlinks are not followed. Order: `"."` first, then by path.
+  `branch` is the branch, the short sha when detached, `null` on an unborn
+  HEAD. Empty `repos` = no folder, dead folder or none found. Cached 5s per
+  `local_path` (`AppState.git_repos_cache`).
+  The routes `/git`, `/git/diff`, `/git/log`, `/git/commits/{sha}/files` and
+  `/git/commits/{sha}/diff` take an optional **`?repo=<path>`** naming one of
+  those `path`s; the route then reads that repo instead of `local_path`
+  (its worktrees, status, log, commits), everything else unchanged. Absent,
+  empty or `.` = today's behaviour byte-identical. `repo` is a security
+  boundary (`resolve_repo_dir`): it must be byte-equal to a discovered
+  `path` (so `..`, absolute paths and skipped directories are never members)
+  *and* pass `files::safe_path` (a symlink cannot escape `local_path`);
+  anything else is 404 `not_found`. `file-log` takes none (Files tab).
+  The page (`GitView` + `frontend/src/gitRepos.ts`) shows a repo picker above
+  the tab only when more than one repo was found; the default is the root
+  repo, else the first found (a lone repo is selected silently, none is the
+  usual empty state). The pick rides in the route as
+  `#/projects/7/git?repo=<path>` and survives a reload; a stale value falls
+  back to the default.
 - `GET /api/projects/{id}/git[?worktree=<path>]` → `ProjectGitView` via
   `git::view_of`/`git::worktrees_of` (porcelain-v2 parse). Empty-state ladder
   like the agents endpoint: no `local_path` → `{path: null, repo: null,

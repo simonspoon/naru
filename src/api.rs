@@ -41,17 +41,17 @@ use crate::core::{
     AgentSession, AgentSpawned, AnchorSide, ArchiveOutcome, Artifact, ArtifactPatch,
     ArtifactSummary, CcDashboard, CcLiveSession, CcUsage, DiagramPatch, DiagramType, EdgeMarker,
     EdgeNew, EdgePatch, EdgeStyle, Error, FileTreeEntry, FrameNew, FramePatch, FrameShape,
-    GitCommit, GitCommitFile, GitFileDiff, GitRepoView, GitStatus, GitWorktree, InboxItem,
+    GitCommit, GitCommitFile, GitFileDiff, GitRepo, GitRepoView, GitStatus, GitWorktree, InboxItem,
     InboxKind, LIVE_AUDIO_MAX, LIVE_BOARD_KEEP, LIVE_INK_MAX, LibraryBuiltinAction, LibraryBundle,
     LibraryImportResult, LibraryKind, LibraryPatch, LibraryScope, LiveBoardHistoryEntry,
     LiveBoardInkEntry, LiveBoardKind, LiveContext, LiveNotebookEntry, LiveNotice, LiveState,
     LiveStatus, LiveTranscript, LiveWindow, ModelRates, NaruVersion, NextResult, Priority,
-    ProjectAgents, ProjectFileTree, ProjectGitLog, ProjectGitStatus, ProjectGitView, ProjectPatch,
-    ProjectVersion, ReceiptPatch, STALE_CLAIM_MINUTES, Script, ScriptArg, ScriptPatch,
-    ScriptRunEvent, Status, Store, SystemInfo, Task, TaskPatch, TaskSummary, Waypoint, agents,
-    attachments, audio, board, config, files, git, guard, hooks, inbox_triage, library, listen,
-    live, project_memory, receipt, retro, script_runs, scripts, speech, supervisor, system,
-    validate_live_client, version,
+    ProjectAgents, ProjectFileTree, ProjectGitLog, ProjectGitRepos, ProjectGitStatus,
+    ProjectGitView, ProjectPatch, ProjectVersion, ReceiptPatch, STALE_CLAIM_MINUTES, Script,
+    ScriptArg, ScriptPatch, ScriptRunEvent, Status, Store, SystemInfo, Task, TaskPatch,
+    TaskSummary, Waypoint, agents, attachments, audio, board, config, files, git, guard, hooks,
+    inbox_triage, library, listen, live, project_memory, receipt, retro, script_runs, scripts,
+    speech, supervisor, system, validate_live_client, version,
 };
 
 /// The Vite build output, embedded into the binary at compile time.
@@ -161,6 +161,10 @@ struct AppState {
     /// GIT_TTL/eviction-cap machinery as every other cache here rather than
     /// special-casing "cache forever" for one map.
     git_commit_files_cache: Arc<Mutex<HashMap<(String, String), (Instant, Vec<GitCommitFile>)>>>,
+    /// Repos discovered under a project's `local_path` (`git::discover_repos`),
+    /// keyed by `local_path` — backs the git tab's repo picker and the
+    /// `?repo=` allowlist on the git routes. Same GIT_TTL/eviction-cap pattern.
+    git_repos_cache: Arc<Mutex<HashMap<String, (Instant, Vec<GitRepo>)>>>,
     /// One file's commit history, keyed by `(local_path, rel)` — backs the
     /// Files tab's per-file History pane. Separate map from `git_log_cache`
     /// (whole-repo log, keyed by folder alone) because the key shape differs;
@@ -2034,6 +2038,7 @@ pub fn serve(
         git_log_cache: Arc::new(Mutex::new(HashMap::new())),
         git_commit_files_cache: Arc::new(Mutex::new(HashMap::new())),
         git_file_log_cache: Arc::new(Mutex::new(HashMap::new())),
+        git_repos_cache: Arc::new(Mutex::new(HashMap::new())),
         files_tree_cache: Arc::new(Mutex::new(HashMap::new())),
         restart_requested: restart_requested.clone(),
         shutdown_tx: Arc::new(Mutex::new(Some(shutdown_tx))),
@@ -2535,6 +2540,7 @@ fn router(state: AppState) -> Router {
         // routes — a plain file read of the project's own folder, no cache
         // (this is a per-page fetch, not a poll).
         .route("/api/projects/{id}/version", get(get_project_version))
+        .route("/api/projects/{id}/git/repos", get(get_project_git_repos))
         .route("/api/projects/{id}/git/diff", get(get_project_git_diff))
         // Commit history: recent log, one commit's changed files, and one
         // commit-file's diff. Same read-only/standard-guard-only posture as
@@ -6919,15 +6925,104 @@ async fn project_git_view(
     state: &AppState,
     id: i64,
 ) -> ApiResult<(Option<String>, Option<GitRepoView>)> {
+    let (path, _dir, view) = project_git_view_in(state, id, None).await?;
+    Ok((path, view))
+}
+
+/// `project_git_view` with a `?repo=` selection: additionally returns the
+/// directory actually read (`local_path`, or the selected repo under it),
+/// which every git route then uses in place of `local_path`. An unlisted
+/// `repo` is 404 (`resolve_repo_dir`); `None` is byte-identical to before.
+async fn project_git_view_in(
+    state: &AppState,
+    id: i64,
+    repo: Option<&str>,
+) -> ApiResult<(Option<String>, Option<String>, Option<GitRepoView>)> {
     let local_path = state.store.lock().unwrap().get_project(id)?.local_path;
     let Some(path) = local_path else {
-        return Ok((None, None));
+        return Ok((None, None, None));
     };
     if !std::path::Path::new(&path).is_dir() {
-        return Ok((Some(path), None));
+        return Ok((Some(path), None, None));
     }
-    let view = git_view_at(state, &path).await;
-    Ok((Some(path), view))
+    let dir = resolve_repo_dir(state, &path, repo).await?;
+    let view = git_view_at(state, &dir).await;
+    Ok((Some(path), Some(dir), view))
+}
+
+/// Repos under `local_path` through `git_repos_cache`.
+async fn git_repos_at(state: &AppState, local_path: &str) -> Vec<GitRepo> {
+    let cached = {
+        let cache = state.git_repos_cache.lock().unwrap();
+        cache
+            .get(local_path)
+            .filter(|(at, _)| at.elapsed() < GIT_TTL)
+            .map(|(_, r)| r.clone())
+    };
+    if let Some(r) = cached {
+        return r;
+    }
+    let d = local_path.to_string();
+    let repos = tokio::task::spawn_blocking(move || git::discover_repos(&d))
+        .await
+        .unwrap_or_default();
+    let mut cache = state.git_repos_cache.lock().unwrap();
+    if cache.len() >= 64 {
+        cache.retain(|_, (at, _)| at.elapsed() < GIT_TTL);
+    }
+    cache.insert(local_path.to_string(), (Instant::now(), repos.clone()));
+    repos
+}
+
+/// The directory a git request reads: `local_path` when `repo` is absent,
+/// empty or `"."`; else the selected repo under it. `repo` is a security
+/// boundary: it must be byte-equal to one of `git_repos_at`'s `path`
+/// entries (the allowlist — so `..`, absolute paths and skipped directories
+/// never match) and must also survive `files::safe_path` (a symlink
+/// swapped in after discovery cannot escape `local_path`).
+async fn resolve_repo_dir(
+    state: &AppState,
+    local_path: &str,
+    repo: Option<&str>,
+) -> ApiResult<String> {
+    let rel = match repo {
+        None | Some("") | Some(".") => return Ok(local_path.to_string()),
+        Some(r) => r,
+    };
+    let not_found = || ApiError {
+        status: StatusCode::NOT_FOUND,
+        code: "not_found",
+        message: format!("repo not found: {rel}"),
+    };
+    let listed = git_repos_at(state, local_path)
+        .await
+        .iter()
+        .any(|r| r.path == rel);
+    if !listed || files::safe_path(local_path, rel).is_none() {
+        return Err(not_found());
+    }
+    Ok(std::path::Path::new(local_path)
+        .join(rel)
+        .to_string_lossy()
+        .into_owned())
+}
+
+/// Git repos discovered under the project's `local_path` — the git tab's
+/// repo picker. Standard guard only, like the other git reads.
+async fn get_project_git_repos(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> ApiResult<Response> {
+    let local_path = state.store.lock().unwrap().get_project(id)?.local_path;
+    let repos = match &local_path {
+        Some(p) if std::path::Path::new(p).is_dir() => git_repos_at(&state, p).await,
+        _ => Vec::new(),
+    };
+    Ok(Json(ProjectGitRepos {
+        path: local_path,
+        repos,
+    })
+    .into_response())
 }
 
 /// The working-tree view (branch + changed-file list) of one directory,
@@ -7029,6 +7124,10 @@ struct GitViewQuery {
     /// path from this same response's `worktrees` list (see
     /// `resolve_git_dir`). Omitted → the project's own `local_path`.
     worktree: Option<String>,
+    /// Selects a repo discovered under `local_path` (`GET .../git/repos`,
+    /// its `path`) to read instead of `local_path` itself; worktrees are
+    /// then those of that repo. Omitted → `local_path`, as before.
+    repo: Option<String>,
 }
 
 /// Working-tree view (branch + changed-file list) of this project's
@@ -7057,7 +7156,8 @@ async fn get_project_git(
         })
         .into_response());
     }
-    let (dir, worktrees) = resolve_git_dir(&state, &local_path, q.worktree.as_deref()).await?;
+    let base = resolve_repo_dir(&state, &local_path, q.repo.as_deref()).await?;
+    let (dir, worktrees) = resolve_git_dir(&state, &base, q.worktree.as_deref()).await?;
     let repo = git_view_at(&state, &dir).await;
     Ok(Json(ProjectGitView {
         path: Some(local_path),
@@ -7068,12 +7168,19 @@ async fn get_project_git(
 }
 
 #[derive(Deserialize)]
+struct GitRepoQuery {
+    repo: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct GitDiffQuery {
     path: Option<String>,
     /// Same worktree selector as `GitViewQuery` — the diff is read from the
     /// selected worktree's directory, and `path` is checked against *that*
     /// worktree's own file-status list, not the project's default one.
     worktree: Option<String>,
+    /// Same repo selector as `GitViewQuery`.
+    repo: Option<String>,
 }
 
 /// Unified diff for one file from the selected worktree's (default: the
@@ -7104,7 +7211,8 @@ async fn get_project_git_diff(
     if !std::path::Path::new(&local_path).is_dir() {
         return Err(not_found());
     }
-    let (dir, _worktrees) = resolve_git_dir(&state, &local_path, q.worktree.as_deref()).await?;
+    let base = resolve_repo_dir(&state, &local_path, q.repo.as_deref()).await?;
+    let (dir, _worktrees) = resolve_git_dir(&state, &base, q.worktree.as_deref()).await?;
     let repo = git_view_at(&state, &dir).await;
     let file = repo.as_ref().and_then(|r| {
         r.files
@@ -7143,11 +7251,10 @@ async fn get_project_git_log(
     Path(id): Path<i64>,
     Query(q): Query<GitViewQuery>,
 ) -> ApiResult<Response> {
-    let (path, repo) = project_git_view(&state, id).await?;
-    let commits = match (&path, &repo) {
-        (Some(local_path), Some(_)) => {
-            let (dir, _worktrees) =
-                resolve_git_dir(&state, local_path, q.worktree.as_deref()).await?;
+    let (path, base, repo) = project_git_view_in(&state, id, q.repo.as_deref()).await?;
+    let commits = match (&base, &repo) {
+        (Some(base), Some(_)) => {
+            let (dir, _worktrees) = resolve_git_dir(&state, base, q.worktree.as_deref()).await?;
             let cached = {
                 let cache = state.git_log_cache.lock().unwrap();
                 cache
@@ -7275,14 +7382,15 @@ async fn project_commit_files(
     state: &AppState,
     id: i64,
     sha: &str,
+    repo: Option<&str>,
 ) -> ApiResult<(String, Vec<GitCommitFile>)> {
     let not_found = || ApiError {
         status: StatusCode::NOT_FOUND,
         code: "not_found",
         message: format!("unknown commit: {sha}"),
     };
-    let (path, repo) = project_git_view(state, id).await?;
-    let (Some(dir), Some(_)) = (path, repo) else {
+    let (_path, dir, view) = project_git_view_in(state, id, repo).await?;
+    let (Some(dir), Some(_)) = (dir, view) else {
         return Err(not_found());
     };
     let key = (dir.clone(), sha.to_string());
@@ -7319,8 +7427,9 @@ async fn project_commit_files(
 async fn get_project_git_commit_files(
     State(state): State<AppState>,
     Path((id, sha)): Path<(i64, String)>,
+    Query(q): Query<GitRepoQuery>,
 ) -> ApiResult<Response> {
-    let (_dir, files) = project_commit_files(&state, id, &sha).await?;
+    let (_dir, files) = project_commit_files(&state, id, &sha, q.repo.as_deref()).await?;
     Ok(Json(files).into_response())
 }
 
@@ -7340,7 +7449,7 @@ async fn get_project_git_commit_diff(
         code: "validation",
         message: "path query parameter is required".into(),
     })?;
-    let (dir, files) = project_commit_files(&state, id, &sha).await?;
+    let (dir, files) = project_commit_files(&state, id, &sha, q.repo.as_deref()).await?;
     let is_member = files
         .iter()
         .any(|f| f.path == wanted || f.orig_path.as_deref() == Some(wanted.as_str()));
@@ -10584,6 +10693,7 @@ mod tests {
             git_log_cache: Arc::new(Mutex::new(HashMap::new())),
             git_commit_files_cache: Arc::new(Mutex::new(HashMap::new())),
             git_file_log_cache: Arc::new(Mutex::new(HashMap::new())),
+            git_repos_cache: Arc::new(Mutex::new(HashMap::new())),
             files_tree_cache: Arc::new(Mutex::new(HashMap::new())),
             restart_requested: Arc::new(AtomicBool::new(false)),
             shutdown_tx: Arc::new(Mutex::new(None)),
@@ -10612,6 +10722,97 @@ mod tests {
             .await
             .unwrap();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    fn git_in(dir: &std::path::Path, args: &[&str]) {
+        let ok = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(ok, "git {args:?} failed in {dir:?}");
+    }
+
+    fn init_repo(dir: &std::path::Path, msg: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        git_in(dir, &["init", "-q"]);
+        git_in(dir, &["commit", "-q", "--allow-empty", "-m", msg]);
+    }
+
+    /// Multi-repo git tab (mesa task 1509): root + two siblings + a nested
+    /// gitignored repo are discovered, a repo under node_modules is not,
+    /// `?repo=` reads the selected repo and refuses everything unlisted.
+    #[tokio::test]
+    async fn git_repos_are_discovered_and_selectable() {
+        let (_db, state) = test_state();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("proj");
+        init_repo(&root, "root commit");
+        init_repo(&root.join("a"), "a commit");
+        init_repo(&root.join("b"), "b commit");
+        init_repo(&root.join("a/vendor/inner"), "inner commit");
+        std::fs::write(root.join(".gitignore"), "a/\nb/\n").unwrap();
+        init_repo(&root.join("node_modules/dep"), "dep commit");
+        let id = new_project(&state, Some(root.to_str().unwrap()));
+
+        let resp = get_project_git_repos(State(state.clone()), Path(id))
+            .await
+            .unwrap();
+        let body = json_body(resp).await;
+        let paths: Vec<&str> = body["repos"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(paths, [".", "a", "a/vendor/inner", "b"]);
+        assert!(body["repos"][1]["branch"].is_string());
+
+        let log = |repo: Option<&str>| {
+            let state = state.clone();
+            let q = GitViewQuery {
+                worktree: None,
+                repo: repo.map(String::from),
+            };
+            async move { get_project_git_log(State(state), Path(id), Query(q)).await }
+        };
+        let resp = log(Some("b")).await.unwrap();
+        let body = json_body(resp).await;
+        assert_eq!(body["commits"][0]["subject"], "b commit");
+        let resp = log(Some("a/vendor/inner")).await.unwrap();
+        assert_eq!(
+            json_body(resp).await["commits"][0]["subject"],
+            "inner commit"
+        );
+        // Absent / "." are the root repo, as before.
+        let resp = log(None).await.unwrap();
+        assert_eq!(
+            json_body(resp).await["commits"][0]["subject"],
+            "root commit"
+        );
+        let resp = log(Some(".")).await.unwrap();
+        assert_eq!(
+            json_body(resp).await["commits"][0]["subject"],
+            "root commit"
+        );
+
+        let outside = tmp.path().join("outside");
+        init_repo(&outside, "outside commit");
+        for bad in [
+            "../outside",
+            "node_modules/dep",
+            "/tmp",
+            outside.to_str().unwrap(),
+            "a/../b",
+            "nope",
+        ] {
+            let err = log(Some(bad)).await.err().unwrap();
+            assert_eq!(err.status, StatusCode::NOT_FOUND, "{bad}");
+        }
     }
 
     fn no_path_query() -> Query<FilesTreeQuery> {

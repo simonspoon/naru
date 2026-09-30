@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use std::process::{Command, Stdio};
 
 use crate::core::types::{
-    DiffStat, GitCommit, GitCommitFile, GitFile, GitRepoView, GitStatus, GitWorktree,
+    DiffStat, GitCommit, GitCommitFile, GitFile, GitRepo, GitRepoView, GitStatus, GitWorktree,
 };
 
 /// Diff text is capped so one huge file can't balloon the JSON response
@@ -44,6 +44,103 @@ pub fn root_commit(path: Option<&std::path::Path>) -> Option<String> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(String::from)
+}
+
+/// Directory names `discover_repos` never descends into: dependency and
+/// build output, where a checked-out repo is vendored noise, not the
+/// project's own.
+const DISCOVER_SKIP: &[&str] = &[
+    "node_modules",
+    "target",
+    ".build",
+    "dist",
+    "venv",
+    ".venv",
+    ".git",
+];
+
+/// How many directory levels below the root `discover_repos` looks
+/// (root = 0), and the most repos it will report.
+const DISCOVER_DEPTH: usize = 4;
+const DISCOVER_CAP: usize = 50;
+
+/// Every git repo at or under `root`: the root itself if it has a `.git`,
+/// then descendants down to `DISCOVER_DEPTH` levels whose directory holds a
+/// `.git` (a directory, or a file — linked worktrees and submodules). A
+/// found repo is still descended into, since a nested repo is typically
+/// gitignored by its parent. Symlinks are never followed and `DISCOVER_SKIP`
+/// names are never entered. Root (`"."`) first, then by relative path.
+pub fn discover_repos(root: &str) -> Vec<GitRepo> {
+    let root = std::path::Path::new(root);
+    let mut found: Vec<String> = Vec::new();
+    let mut stack = vec![(root.to_path_buf(), String::new(), 0usize)];
+    while let Some((dir, rel, depth)) = stack.pop() {
+        if std::fs::symlink_metadata(dir.join(".git")).is_ok() {
+            found.push(if rel.is_empty() {
+                ".".into()
+            } else {
+                rel.clone()
+            });
+        }
+        if depth >= DISCOVER_DEPTH {
+            continue;
+        }
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            let Ok(ft) = entry.file_type() else { continue };
+            if !ft.is_dir() {
+                continue;
+            }
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if DISCOVER_SKIP.contains(&name) {
+                continue;
+            }
+            let child = if rel.is_empty() {
+                name.to_string()
+            } else {
+                format!("{rel}/{name}")
+            };
+            stack.push((entry.path(), child, depth + 1));
+        }
+    }
+    found.sort_by(|a, b| (a != ".", a).cmp(&(b != ".", b)));
+    found.truncate(DISCOVER_CAP);
+    found
+        .into_iter()
+        .map(|path| {
+            let dir = if path == "." {
+                root.to_path_buf()
+            } else {
+                root.join(&path)
+            };
+            let branch = branch_of(&dir);
+            GitRepo { path, branch }
+        })
+        .collect()
+}
+
+/// Current branch of the repo at `dir`, the short sha when detached, `None`
+/// on an unborn HEAD or a failed call.
+fn branch_of(dir: &std::path::Path) -> Option<String> {
+    let run = |args: &[&str]| -> Option<String> {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let s = String::from_utf8(out.stdout).ok()?.trim().to_string();
+        (!s.is_empty()).then_some(s)
+    };
+    run(&["symbolic-ref", "--short", "-q", "HEAD"])
+        .or_else(|| run(&["rev-parse", "--short", "HEAD"]))
 }
 
 /// Reads the working-tree status of the repo at `dir`, or `None` when `dir`

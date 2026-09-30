@@ -121,7 +121,7 @@ The code is the source of truth. These are the invariants you must not break:
   rendering. The subject is the side-effect-free modules the components import
   (`agentChat`, `agentChild`, `agentProject`, `agentRow`, `agentSidebarWidth`, `artifactDraft`, `audioDraft`, `boardView`, `ccOrigin`, `ccTab`, `clipboardFiles`,
   `editorInput`, `editorStatus`, `fileCsv`, `fileDirty`, `fileFind`, `fileHtml`, `fileImage`,
-  `fileSearch`, `fileTabs`, `filesTreeWidth`, `inboxArchive`, `inboxFilter`, `inboxKind`, `inboxOrigin`, `inboxQueue`, `inboxRead`,
+  `fileSearch`, `fileTabs`, `gitRepos`, `filesTreeWidth`, `inboxArchive`, `inboxFilter`, `inboxKind`, `inboxOrigin`, `inboxQueue`, `inboxRead`,
   `keyboardScope`, `keymap`, `keymapDraft`,
   `lastView`, `layout`, `libraryBuiltinUpdate`, `libraryBundle`, `libraryDraft`, `libraryHistory`, `libraryImport`, `libraryOverride`, `librarySync`, `listenDraft`, `liveAudio`, `liveBand`, `liveBoard`, `liveBoardWidth`, `liveCancel`, `liveCapture`, `liveContext`, `liveDevices`, `liveDrain`, `liveHead`, `liveInk`, `liveIndicator`, `liveLayout`, `livePastedImage`, `livePausePhrase`, `livePromptDraft`,
   `liveRecognition`, `liveReplay`,

@@ -820,6 +820,29 @@ pub struct GitWorktree {
     pub is_current: bool,
 }
 
+/// One git repo discovered under a project's `local_path` (see
+/// `core::git::discover_repos`), for the git tab's repo picker.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct GitRepo {
+    /// Path relative to `local_path`; `"."` is `local_path` itself. This is
+    /// exactly the value `?repo=` accepts on the git routes.
+    pub path: String,
+    /// Checked-out branch; short sha when detached; None on an unborn HEAD
+    /// or when git could not be asked.
+    pub branch: Option<String>,
+}
+
+/// `GET /api/projects/{id}/git/repos` response. Empty-state ladder like
+/// `ProjectGitView`: path null = no local_path; `repos` empty = dead folder
+/// or no repo anywhere under it. Never an error.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct ProjectGitRepos {
+    pub path: Option<String>,
+    pub repos: Vec<GitRepo>,
+}
+
 /// `GET /api/projects/{id}/git` response. Mirrors ProjectAgents' empty-state
 /// pattern: path null = no local_path; path set + repo null = folder gone
 /// or not a git repo. Never an error.
