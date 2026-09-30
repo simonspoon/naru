@@ -39,6 +39,9 @@ pub const TOKENS: &str = "tokens";
 pub const SPIN: &str = "spin";
 /// The repeat rule: the same trivial shell command, over and over.
 pub const REPEAT: &str = "repeat";
+/// The context-size rule: the newest main-thread turn re-read a huge context.
+/// Alert-only by design — it never stops a session by itself ([`wants_stop`]).
+pub const CONTEXT: &str = "context";
 
 /// What the watcher does about a breach (mesa task 1054).
 ///
@@ -101,6 +104,9 @@ pub enum StopOutcome {
     NotBackground,
     /// The `report` action: mesa did not try.
     Reported,
+    /// Every breach this time was the `context` rule, which only reports:
+    /// mesa did not try to stop it, whatever the action says.
+    ContextOnly,
 }
 
 /// The resolved numbers one tick guards against, read fresh from
@@ -121,6 +127,10 @@ pub struct GuardThresholds {
     /// fires.
     #[serde(rename = "repeat_count")]
     pub repeat_count: u64,
+    /// Input-side tokens of a session's newest main-thread turn at or above
+    /// which `context` fires.
+    #[serde(rename = "context_tokens")]
+    pub context_tokens: u64,
     /// What the watcher does about any of the above.
     pub action: GuardAction,
 }
@@ -140,8 +150,15 @@ pub struct GuardBreach {
     pub limit: f64,
 }
 
+/// Whether any of `fresh` calls for a stop: anything but `context`, which is
+/// alert-only by design — a long conversation is not a runaway, and stopping
+/// one for its size alone would interrupt good work.
+pub fn wants_stop(fresh: &[GuardBreach]) -> bool {
+    fresh.iter().any(|b| b.threshold != CONTEXT)
+}
+
 /// Every rule `session` currently trips, in a fixed order (cost, tokens,
-/// spin).
+/// spin, repeat, context).
 ///
 /// A session can trip several at once and each is reported separately: they
 /// are different findings, not three spellings of one. "$40 spent" tells a
@@ -190,6 +207,15 @@ pub fn breaches(session: &CcLiveSession, t: &GuardThresholds) -> Vec<GuardBreach
             threshold: REPEAT,
             observed: repeat.count as f64,
             limit: t.repeat_count as f64,
+        });
+    }
+    if let Some(context) = session.context_tokens
+        && context >= t.context_tokens
+    {
+        out.push(GuardBreach {
+            threshold: CONTEXT,
+            observed: context as f64,
+            limit: t.context_tokens as f64,
         });
     }
     out
@@ -284,6 +310,10 @@ fn outcome_sentence(outcome: &StopOutcome) -> String {
              is still running. If it is working as intended, no action is needed; otherwise it is \
              the one to interrupt."
             .to_string(),
+        StopOutcome::ContextOnly => "mesa left this session running: the context rule only \
+             reports, it never stops a session. If it is working as intended, no action is \
+             needed; otherwise it is the one to wrap up."
+            .to_string(),
     }
 }
 
@@ -319,8 +349,27 @@ fn explain(b: &GuardBreach, session: &CcLiveSession) -> String {
                 b.observed as i64, b.limit as i64
             )
         }
+        CONTEXT => format!(
+            "Context: its latest turn re-read {} tokens of context, past the {} ceiling; a fresh \
+             session seeded with a checkpoint would be cheaper.",
+            group(b.observed as u64),
+            group(b.limit as u64)
+        ),
         other => format!("{other}: {} reached {}.", b.observed, b.limit),
     }
+}
+
+/// A count with thousands separators — "584,000".
+fn group(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// A whole number of minutes as English — "45 minutes", "1 hour 5 minutes",
@@ -361,6 +410,8 @@ pub struct GuardSessionReport {
     pub cache_read_share: f64,
     /// The trailing run of identical trivial `Bash` calls, or `null`.
     pub repeat: Option<crate::core::types::CcRepeat>,
+    /// The newest main-thread turn's input-side tokens, or `null`.
+    pub context_tokens: Option<u64>,
     pub breaches: Vec<GuardBreach>,
     /// The task an alert about this session would name, resolved through
     /// [`resolve_task`]; `null` when nothing in mesa claims it.
@@ -476,6 +527,7 @@ pub fn report(store: &Store, live: &CcLive, thresholds: &GuardThresholds) -> Res
             est_cost_usd: session.est_cost_usd,
             cache_read_share: cache_read_share(session),
             repeat: session.repeat.clone(),
+            context_tokens: session.context_tokens,
             breaches,
             task_id: resolve_task(store, session)?,
         });
@@ -500,6 +552,7 @@ mod tests {
             cache_read_share: 0.98,
             cache_read_min_tokens: 20_000_000,
             repeat_count: 30,
+            context_tokens: 120_000,
             action: GuardAction::Stop,
         }
     }
@@ -530,6 +583,7 @@ mod tests {
             subagents: vec![],
             spark: vec![],
             repeat: None,
+            context_tokens: None,
         }
     }
 
@@ -827,6 +881,54 @@ mod tests {
         for text in [stopped, failed, not_bg, reported] {
             assert!(text.contains("mesa cc guard"), "{text}");
         }
+    }
+
+    fn with_context(tokens: u64) -> CcLiveSession {
+        let mut s = session(0.10, 5_000, 400, 1_000);
+        s.context_tokens = Some(tokens);
+        s
+    }
+
+    #[test]
+    fn context_fires_at_the_ceiling_and_not_below_it() {
+        assert_eq!(kinds(&with_context(120_000)), vec![CONTEXT]);
+        assert_eq!(kinds(&with_context(584_000)), vec![CONTEXT]);
+        assert!(kinds(&with_context(119_999)).is_empty());
+        // No main-thread usage seen: never a breach.
+        assert!(kinds(&session(0.10, 5_000, 400, 1_000)).is_empty());
+    }
+
+    #[test]
+    fn a_context_only_breach_never_wants_a_stop() {
+        let only = breaches(&with_context(584_000), &thresholds());
+        assert!(!wants_stop(&only));
+        // Any other rule alongside it does.
+        let mut both = with_context(584_000);
+        both.est_cost_usd = 30.0;
+        assert!(wants_stop(&breaches(&both, &thresholds())));
+        assert!(!wants_stop(&[]));
+    }
+
+    #[test]
+    fn a_context_breach_is_prose_and_says_it_was_left_running() {
+        let s = with_context(584_000);
+        let body = alert_body(
+            &s,
+            &breaches(&s, &thresholds()),
+            60,
+            None,
+            &StopOutcome::ContextOnly,
+        );
+        assert!(
+            body.contains("Context: its latest turn re-read 584,000 tokens"),
+            "{body}"
+        );
+        assert!(body.contains("120,000 ceiling"), "{body}");
+        assert!(body.contains("left this session running"), "{body}");
+        assert!(!body.contains('|'), "no markdown tables: {body}");
+        assert_eq!(group(999), "999");
+        assert_eq!(group(1_000), "1,000");
+        assert_eq!(group(1_234_567), "1,234,567");
     }
 
     #[test]

@@ -1242,8 +1242,16 @@ struct RawIteration {
 /// Db-backed like [`collect`] rather than a live transcript read like
 /// [`live`]: the question is what has been going wrong *over a window*, and a
 /// transcript Claude Code has since deleted still counts.
-pub fn errors(store: &Store, window: &str, session: Option<&str>) -> Result<CcErrors> {
-    errors_inner(store, window, None, session)
+///
+/// `cli_only` (`mesa cc errors --cli`, mesa task 1513) keeps only the failures
+/// of `Bash` calls whose command invokes `naru`/`mesa` ([`invokes_naru`]).
+pub fn errors(
+    store: &Store,
+    window: &str,
+    session: Option<&str>,
+    cli_only: bool,
+) -> Result<CcErrors> {
+    errors_inner(store, window, None, session, cli_only)
 }
 
 /// [`errors`] with a caller-supplied cutoff, for the reason [`collect_since`]
@@ -1254,8 +1262,49 @@ pub fn errors_since(
     window: &str,
     since: i64,
     session: Option<&str>,
+    cli_only: bool,
 ) -> Result<CcErrors> {
-    errors_inner(store, window, Some(since), session)
+    errors_inner(store, window, Some(since), session, cli_only)
+}
+
+/// Whether any command segment of a shell line starts with `naru` or `mesa`
+/// (bare or as a path ending in them), after leading `VAR=value` words and the
+/// wrappers `sudo`, `time`, `env`, `timeout <n>`, `nohup` and `xargs`.
+/// Quoted spans are blanked first, so `git commit -m "fix; naru x"` and
+/// `grep 'a|mesa' .` do not match. Segments split on `;`, `&`, `|`, newlines,
+/// and `(`/`{`/backtick openers.
+pub fn invokes_naru(command: &str) -> bool {
+    let mut bare = String::with_capacity(command.len());
+    let mut quote: Option<char> = None;
+    for c in command.chars() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None if c == '\'' || c == '"' => quote = Some(c),
+            None => bare.push(c),
+        }
+    }
+    bare.split([';', '&', '|', '\n', '(', '{', '`']).any(|seg| {
+        let mut words = seg.split_whitespace().peekable();
+        while let Some(w) = words.next() {
+            match w {
+                "sudo" | "time" | "env" | "nohup" | "xargs" => continue,
+                "timeout" => {
+                    // `timeout [-flags] <duration> cmd`
+                    while words.next_if(|w| w.starts_with('-')).is_some() {}
+                    words.next();
+                    continue;
+                }
+                _ if w.contains('=') && !w.starts_with('/') => continue,
+                _ if w.starts_with('-') => continue,
+                _ => {
+                    let base = w.rsplit('/').next().unwrap_or("");
+                    return base == "naru" || base == "mesa";
+                }
+            }
+        }
+        false
+    })
 }
 
 fn errors_inner(
@@ -1263,6 +1312,7 @@ fn errors_inner(
     window: &str,
     since: Option<i64>,
     session: Option<&str>,
+    cli_only: bool,
 ) -> Result<CcErrors> {
     let now = now_unix();
     if since.is_none() {
@@ -1270,7 +1320,12 @@ fn errors_inner(
     }
     let cutoff = since.or_else(|| window_cutoff(window, now));
 
-    let rows = store.cc_read_tool_errors(cutoff, session)?;
+    let mut rows = store.cc_read_tool_errors(cutoff, session)?;
+    if cli_only {
+        rows.retain(|r| {
+            r.name.as_deref() == Some("Bash") && r.target.as_deref().is_some_and(invokes_naru)
+        });
+    }
     let mut total = CcErrorTotals {
         errors: 0,
         sidechain: 0,
@@ -2230,6 +2285,9 @@ struct LiveAcc {
     spark: Vec<i64>,
     /// Rolling state for the repeat rule.
     repeat: RepeatAcc,
+    /// The newest main-thread assistant turn's input side, with its timestamp
+    /// (for the context rule). Sidechain turns never update it.
+    context: Option<(i64, i64)>,
 }
 
 /// How long a `tool_result` may be and still count as **trivial**, in bytes.
@@ -2440,6 +2498,7 @@ pub fn live(window_minutes: i64) -> CcLive {
                 subagents,
                 spark: s.spark,
                 repeat: s.repeat.finish(),
+                context_tokens: s.context.map(|(_, c)| c as u64),
             }
         })
         .collect();
@@ -2574,6 +2633,16 @@ fn parse_live_file(
         s.models.insert(model.clone());
         s.messages += 1;
         s.tokens.add(usage);
+        // The input side of the newest main-thread turn — `session_pulse`'s
+        // measure. `>=` so a later line of equal timestamp wins.
+        if raw.is_sidechain != Some(true) && s.context.is_none_or(|(t, _)| ts >= t) {
+            s.context = Some((
+                ts,
+                usage.input_tokens
+                    + usage.cache_read_input_tokens
+                    + usage.cache_creation_input_tokens,
+            ));
+        }
         s.cost += estimate_cost(prices, &model, usage);
         // The entry was already created above for any line carrying an `agentId`,
         // so reuse it by mutable handle (no second insert, no clone).
@@ -5769,6 +5838,43 @@ mod tests {
     }
 
     #[test]
+    fn live_context_tokens_is_the_newest_main_thread_turn() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("-live-project");
+        let subs = proj.join("ctx").join("subagents");
+        fs::create_dir_all(&subs).unwrap();
+        let turn = |id: &str, side: bool, secs_ago: i64, input: i64, read: i64, create: i64| {
+            format!(
+                r#"{{"type":"assistant","isSidechain":{side},"sessionId":"ctx","timestamp":"{ts}","cwd":"/home/me/work/widget","message":{{"id":"{id}","model":"claude-opus-4-8","usage":{{"input_tokens":{input},"output_tokens":7,"cache_read_input_tokens":{read},"cache_creation_input_tokens":{create}}}}}}}"#,
+                ts = iso_at(secs_ago)
+            )
+        };
+        // Written out of order on purpose: "latest" is by timestamp.
+        let newest = turn("m3", false, 10, 5, 1_000, 200);
+        let older = turn("m1", false, 50, 1, 900_000, 0);
+        let side = turn("s1", true, 5, 1, 9_000_000, 0);
+        write_jsonl(&proj, "ctx.jsonl", &[newest.as_str(), older.as_str()]);
+        write_jsonl(&subs, "agent-x.jsonl", &[side.as_str()]);
+        // A session with only sidechain usage has no main-thread context.
+        let only_side = format!(
+            r#"{{"type":"assistant","isSidechain":true,"sessionId":"side","timestamp":"{}","message":{{"id":"z","model":"claude-opus-4-8","usage":{{"input_tokens":3,"output_tokens":1}}}}}}"#,
+            iso_at(10)
+        );
+        write_jsonl(&proj, "side.jsonl", &[only_side.as_str()]);
+        unsafe {
+            std::env::set_var("MESA_CC_PROJECTS_DIR", tmp.path());
+        }
+        let l = live(15);
+        unsafe {
+            std::env::remove_var("MESA_CC_PROJECTS_DIR");
+        }
+        let get = |id: &str| l.sessions.iter().find(|s| s.session_id == id).unwrap();
+        assert_eq!(get("ctx").context_tokens, Some(5 + 1_000 + 200));
+        assert_eq!(get("side").context_tokens, None);
+    }
+
+    #[test]
     fn tool_uses_parses_blocks_leniently() {
         // Mixed content: a real tool_use (object caller), a text block, a
         // malformed tool_use (no id), and a string-caller tool_use.
@@ -8489,6 +8595,32 @@ mod tests {
     }
 
     #[test]
+    fn invokes_naru_reads_the_first_word_of_each_segment() {
+        for (command, want) in [
+            ("naru task list", true),
+            ("mesa task list | jq .", true),
+            ("cd /repo && naru task show 3", true),
+            ("FOO=1 ~/.local/bin/naru inbox add x", true),
+            ("echo hi; /usr/local/bin/mesa cc errors", true),
+            ("echo naru", false),
+            ("git commit -m \"fix; naru thing\"", false),
+            ("grep -r 'a|mesa' .", false),
+            ("sudo naru task list", true),
+            ("time mesa task list", true),
+            ("env FOO=1 naru task list", true),
+            ("timeout 5 naru task list", true),
+            ("nohup naru serve", true),
+            ("ls | xargs naru task show", true),
+            ("sudo echo naru", false),
+            ("git log mesa", false),
+            ("cat naru.txt", false),
+            ("", false),
+        ] {
+            assert_eq!(invokes_naru(command), want, "invokes_naru({command:?})");
+        }
+    }
+
+    #[test]
     fn command_prefix_groups_the_head_of_a_command() {
         // Each case is a rule of `command_prefix`, in the order it applies.
         for (command, want) in [
@@ -8687,7 +8819,7 @@ mod tests {
         unsafe {
             std::env::remove_var("MESA_CC_PROJECTS_DIR");
         }
-        let e = errors(&store, "all", None).unwrap();
+        let e = errors(&store, "all", None, false).unwrap();
 
         assert_eq!(e.total.errors, 3, "the successful tu2 result is not one");
         assert_eq!(e.total.sidechain, 1);
@@ -8738,7 +8870,7 @@ mod tests {
 
         // Re-ingesting the same file adds nothing: the rows insert on their
         // `tool_use_id`, like every other cc row.
-        let again = errors(&store, "all", None).unwrap();
+        let again = errors(&store, "all", None, false).unwrap();
         assert_eq!(again.total.errors, e.total.errors);
     }
 
@@ -8779,7 +8911,7 @@ mod tests {
             std::env::remove_var("MESA_CC_PROJECTS_DIR");
         }
 
-        let e = errors(&store, "all", None).unwrap();
+        let e = errors(&store, "all", None, false).unwrap();
         assert_eq!(e.session, None, "unfiltered echoes no session");
         assert_eq!(e.total.errors, 3);
         let both = vec!["s1".to_string(), "s2".to_string()];
@@ -8788,12 +8920,12 @@ mod tests {
         assert_eq!(e.by_command[0].sessions, both, "{:?}", e.by_command);
         assert_eq!(e.by_message[0].sessions, both, "{:?}", e.by_message);
 
-        let one = errors(&store, "all", Some("s1")).unwrap();
+        let one = errors(&store, "all", Some("s1"), false).unwrap();
         assert_eq!(one.session.as_deref(), Some("s1"), "the filter echoes back");
         assert_eq!(one.total.errors, 2, "narrowed to the one session");
         assert_eq!(one.by_command[0].sessions, vec!["s1".to_string()]);
         // An unknown session is an empty view, not an error.
-        let none = errors(&store, "all", Some("nope")).unwrap();
+        let none = errors(&store, "all", Some("nope"), false).unwrap();
         assert_eq!(none.total.errors, 0);
         assert!(none.by_tool.is_empty());
     }
@@ -8851,7 +8983,7 @@ mod tests {
             )
             .unwrap();
 
-        let e = errors(&store, "all", None).unwrap();
+        let e = errors(&store, "all", None, false).unwrap();
         assert_eq!(e.total.denials, 3);
         assert_eq!(e.denials.len(), 1, "one reason is one row: {:?}", e.denials);
         assert_eq!(e.denials[0].count, 3);
@@ -8903,7 +9035,7 @@ mod tests {
                 },
             )
             .unwrap();
-        let e = errors(&store, "all", None).unwrap();
+        let e = errors(&store, "all", None, false).unwrap();
         assert_eq!(e.total.errors, 1);
         assert_eq!(e.by_tool.len(), 1);
         assert_eq!(e.by_tool[0].name, "unknown");

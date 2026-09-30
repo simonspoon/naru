@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useRef, useState } from 'react'
 import { mainFloor, mainIsCollapsed } from '../mainCollapse'
+import { MIN_LIVE_SIDEBAR_WIDTH } from '../liveSidebarWidth'
 import type { CSSProperties, ReactNode } from 'react'
 import {
   DndContext,
@@ -1082,11 +1083,33 @@ function SplitNodeView({
  * every measurement made before that feature existed — and zero on the phone
  * tier, where it is an overlay drawer (`position: fixed`) taking no room on
  * the row at all: subtracting it there would narrow this panel by a box that
- * is not in the layout, and the shrink is never given back. */
+ * is not in the layout, and the shrink is never given back.
+ *
+ * With `main` folded an open conversation is the flex filler (App.css, mesa
+ * task 1524): its rendered width is whatever this panel leaves, so measuring
+ * it would make the ceiling equal the current width and the panel could never
+ * grow. What this panel must leave it is the conversation's own floor. */
 function liveSidebarWidth(): number {
   const live = document.querySelector('.live-sidebar')
   if (live === null || getComputedStyle(live).position === 'fixed') return 0
+  if (mainIsCollapsed()) {
+    return live.classList.contains('collapsed') ? 0 : MIN_LIVE_SIDEBAR_WIDTH
+  }
   return live.getBoundingClientRect().width
+}
+
+/** The x the row's free space starts at, for the two width clamps. Normally
+ * `main`'s left edge. Folded, `main` sits in a hidden fixed-width pane the
+ * slot clips, so its rect says nothing; the room taken is the slot's own
+ * 1.75rem rail, and the space starts at that slot's right edge (mesa task
+ * 1524) — otherwise the rail's width is counted as free and the live panel is
+ * left under its floor. */
+function mainEdge(): number {
+  if (mainIsCollapsed()) {
+    const slot = document.querySelector('.main-slot')
+    if (slot !== null) return slot.getBoundingClientRect().right
+  }
+  return document.querySelector('main')?.getBoundingClientRect().left ?? 0
 }
 
 export function AgentSidebar({
@@ -1268,7 +1291,7 @@ export function AgentSidebar({
     if (!resizing) return
     const onMove = (e: MouseEvent) => {
       const next = window.innerWidth - e.clientX
-      const mainLeft = document.querySelector('main')?.getBoundingClientRect().left ?? 0
+      const mainLeft = mainEdge()
       const max = window.innerWidth - mainLeft - mainFloor(mainIsCollapsed(), MIN_MAIN_WIDTH) - liveSidebarWidth()
       setWidth(clampAgentSidebarWidth(next, max))
     }
@@ -1296,7 +1319,7 @@ export function AgentSidebar({
   useEffect(() => {
     if (collapsed) return
     const clampToLayout = () => {
-      const mainLeft = document.querySelector('main')?.getBoundingClientRect().left ?? 0
+      const mainLeft = mainEdge()
       const max = window.innerWidth - mainLeft - mainFloor(mainIsCollapsed(), MIN_MAIN_WIDTH) - liveSidebarWidth()
       // `Math.min` on top of the clamp is the only-shrink rule: the clamp
       // alone would also *raise* a sub-floor width, which is not this

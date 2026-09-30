@@ -707,7 +707,7 @@ fn cost_watcher_tick(state: &AppState) {
         // first is deliberate — the alert's closing sentence is the outcome,
         // and a person reading it needs to know whether the thing is still
         // running.
-        let outcome = stop_runaway(state, &thresholds, &session.session_id);
+        let outcome = stop_runaway(state, &thresholds, &session.session_id, &fresh);
         let body = guard::alert_body(
             session,
             &fresh,
@@ -781,6 +781,7 @@ fn stop_runaway(
     state: &AppState,
     thresholds: &guard::GuardThresholds,
     session_id: &str,
+    fresh: &[guard::GuardBreach],
 ) -> guard::StopOutcome {
     if thresholds.action == guard::GuardAction::Report {
         return guard::StopOutcome::Reported;
@@ -793,6 +794,11 @@ fn stop_runaway(
         if stopped.contains(session_id) {
             return guard::StopOutcome::AlreadyStopped;
         }
+    }
+    // The context rule only reports: a tick whose every new breach is
+    // `context` leaves the session running, whatever the action says.
+    if !guard::wants_stop(fresh) {
+        return guard::StopOutcome::ContextOnly;
     }
     let outcome = match agents::find_job_for_session(session_id) {
         Ok(Some(job_id)) => match agents::stop(&job_id) {
@@ -827,6 +833,9 @@ fn outcome_note(outcome: &guard::StopOutcome) -> String {
         }
         guard::StopOutcome::Reported => {
             "mesa is configured to report only, so it is still running".to_string()
+        }
+        guard::StopOutcome::ContextOnly => {
+            "the context rule only reports, so it is still running".to_string()
         }
     }
 }
@@ -8812,6 +8821,8 @@ struct GuardUpdate {
     #[serde(default, deserialize_with = "deserialize_some")]
     repeat_count: Option<Option<serde_json::Value>>,
     #[serde(default, deserialize_with = "deserialize_some")]
+    context_tokens: Option<Option<serde_json::Value>>,
+    #[serde(default, deserialize_with = "deserialize_some")]
     action: Option<Option<serde_json::Value>>,
 }
 
@@ -8837,6 +8848,7 @@ async fn update_config_guard(
             body.cache_read_min_tokens,
         ),
         (config::GUARD_REPEAT_COUNT, body.repeat_count),
+        (config::GUARD_CONTEXT_TOKENS, body.context_tokens),
         (config::GUARD_ACTION, body.action),
     ] {
         if let Some(value) = value {
@@ -12357,6 +12369,7 @@ mod tests {
                             cache_read_share: None,
                             cache_read_min_tokens: None,
                             repeat_count: None,
+                            context_tokens: None,
                             action: None,
                         }),
                     )

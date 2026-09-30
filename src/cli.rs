@@ -10,7 +10,7 @@
 //!   bounded shape `task list` already emits. Accepted on every mutation and
 //!   `show`/`get` in `project`, `task`, `diagram` (+ `frame`, `edge`),
 //!   `inbox`, `script`, `artifact` and `live`; composites keep their key
-//!   structure and compact their members.
+//!   structure and compact their members. Elsewhere it is accepted and ignored.
 //!   Default output is unchanged. On a `delete` it waives the full echo, which
 //!   is mesa's recovery transcript.
 //! - Errors are `{"error": {"code", "message"}}` on stderr; clap usage errors
@@ -20,9 +20,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use base64::Engine;
-use clap::error::ErrorKind;
+use clap::error::{ContextKind, ContextValue, ErrorKind};
 use clap::{ArgGroup, Parser, Subcommand};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::core::{
     ArchiveOutcome, Artifact, ArtifactPatch, Diagram, DiagramPatch, DiagramType, DiagramView,
@@ -252,6 +252,9 @@ EXAMPLES
   mesa system
   mesa system | jq .ram_used_bytes")]
     System,
+    /// A self-disarming alarm for a supervisor's handoffs (mesa task 1512)
+    #[command(subcommand)]
+    Alarm(AlarmCmd),
     /// Send a message to the person's phone through the external `vox` CLI
     ///
     /// `--open <route>` adds a Telegram button that opens Naru's `/open/<route>`
@@ -280,6 +283,53 @@ EXAMPLES
         /// `notify.base-url` from the config, else this machine's LAN address
         #[arg(long)]
         base_url: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum AlarmCmd {
+    /// Block until a subagent of the session stops, or the timeout passes
+    ///
+    /// Run it in the background right after a handoff. A `SubagentStop` hook
+    /// (the `alarm-disarm` library built-in) stamps a marker for the session;
+    /// a marker stamped after this command began disarms it quietly, and
+    /// one older than that does not count. Exits 0 either way; the JSON says
+    /// which: `{outcome: "disarmed", label, session_id, agent_id, waited_secs}`
+    /// or `{outcome: "fired", label, session_id, after_secs, message}` where
+    /// `message` starts `ALARM:`. The session is `--session`, else
+    /// `CLAUDE_CODE_SESSION_ID`. Session-scoped: any subagent stopping
+    /// disarms. Takes no `--quiet`. See docs/alarm.md.
+    #[command(after_help = "\
+EXAMPLES
+  naru alarm arm reviewer --after 20m
+  naru alarm arm --after 90 --session 5c1e0d2a-1111-2222-3333-444455556666")]
+    Arm {
+        /// What the alarm is waiting for, named in its message
+        #[arg(default_value = "agent")]
+        label: String,
+        /// How long to wait: `<n>s`, `<n>m`, `<n>h` or bare seconds (1s to 24h)
+        #[arg(long, default_value = "20m")]
+        after: String,
+        /// The parent session id; default is `CLAUDE_CODE_SESSION_ID`
+        #[arg(long)]
+        session: Option<String>,
+    },
+    /// Record that a subagent of the session stopped, disarming its alarm
+    ///
+    /// With no `--session` the `SubagentStop` hook payload is read as JSON
+    /// from stdin (`session_id`, `agent_id`). Prints
+    /// `{disarmed: true, session_id}`. Takes no `--quiet`. See docs/alarm.md.
+    #[command(after_help = "\
+EXAMPLES
+  echo '{\"session_id\":\"abc\",\"agent_id\":\"a1\"}' | naru alarm disarm
+  naru alarm disarm --session abc --agent-id a1")]
+    Disarm {
+        /// The parent session id; default is read from the hook payload on stdin
+        #[arg(long)]
+        session: Option<String>,
+        /// The stopped agent's id, kept in the marker
+        #[arg(long)]
+        agent_id: Option<String>,
     },
 }
 
@@ -518,7 +568,8 @@ EXAMPLES
   mesa task create mesa \"Review copy\" --priority high --tags writing,review
   mesa task create 1 \"In flight\" --status in_progress  # straight into a column
   mesa task create --project 1 --description \"Outline\" --parent 7  # flag form; subtask of task 7
-  mesa task create 1 --description-file - < spec.md   # multi-line body from stdin")]
+  mesa task create 1 --description-file - < spec.md   # multi-line body from stdin
+  mesa task create 1 \"Draft copy\" --description \"Three sections.\"  # name + body")]
     Create {
         /// Project the task belongs to, by id or name (immutable after creation)
         #[arg(value_name = "PROJECT", required_unless_present = "project")]
@@ -533,14 +584,13 @@ EXAMPLES
         #[arg(long, conflicts_with = "project_pos")]
         project: Option<String>,
         /// The task itself (flag form of DESCRIPTION)
-        #[arg(long, allow_hyphen_values = true, conflicts_with = "description_pos")]
+        ///
+        /// Given beside a positional DESCRIPTION, that positional is the task's
+        /// name and this is its body: the stored description is `<NAME>\n\n<BODY>`
+        #[arg(long, allow_hyphen_values = true)]
         description: Option<String>,
-        /// Read the description from a file (`-` = stdin); conflicts with DESCRIPTION/--description
-        #[arg(
-            long,
-            value_name = "PATH",
-            conflicts_with_all = ["description", "description_pos"],
-        )]
+        /// Read the description from a file (`-` = stdin); conflicts with --description
+        #[arg(long, value_name = "PATH", conflicts_with = "description")]
         description_file: Option<String>,
         /// Priority: low|medium|high
         #[arg(long, value_parser = parse_priority, default_value = "medium")]
@@ -3068,7 +3118,9 @@ EXAMPLES
 EXAMPLES
   mesa cc errors                  # last 30 days
   mesa cc errors --window 7d
-  mesa cc errors --window all")]
+  mesa cc errors --window all
+  mesa cc errors <session-id>     # one session (same as --session)
+  mesa cc errors --cli            # only failed naru/mesa commands")]
     Errors {
         /// Time window: 7d | 30d | 90d | all | <n>d (n >= 1; anything else
         /// falls back to 30d), or cc-5h | cc-7d for the currently-open Claude
@@ -3077,8 +3129,14 @@ EXAMPLES
         window: String,
         /// Only failures from this Claude Code session; every session when
         /// absent
-        #[arg(long, value_name = "SID")]
+        #[arg(long, value_name = "SID", conflicts_with = "session_pos")]
         session: Option<String>,
+        /// Session id (positional form of --session)
+        #[arg(value_name = "SESSION")]
+        session_pos: Option<String>,
+        /// Only failures of `Bash` calls whose command invokes `naru`/`mesa`
+        #[arg(long)]
+        cli: bool,
     },
     /// Print per-skill usage as a bare JSON array, highest token use first
     Skills {
@@ -3887,6 +3945,7 @@ fn compact(t: &Task) -> serde_json::Value {
         "project_id": t.project_id,
         "parent_id": t.parent_id,
         "name": t.name,
+        "title": t.name,
         "status": t.status,
         "priority": t.priority,
         "tags": t.tags,
@@ -3900,6 +3959,23 @@ fn compact(t: &Task) -> serde_json::Value {
     })
 }
 
+/// A `Task` as the CLI prints it: the record in declaration order plus an
+/// output-only `title` equal to the derived `name`, for agents that guess the
+/// old field name. Never stored, never on the `Task` type, the API or ts-rs.
+#[derive(serde::Serialize)]
+struct TaskOut<'a> {
+    #[serde(flatten)]
+    task: &'a Task,
+    title: &'a str,
+}
+
+fn task_out(t: &Task) -> TaskOut<'_> {
+    TaskOut {
+        task: t,
+        title: &t.name,
+    }
+}
+
 /// Print one task: the full record, or its quiet shape under `--quiet`.
 ///
 /// The quiet shape is the existing [`compact`] — the same bounded object
@@ -3908,7 +3984,7 @@ fn print_task(task: &Task, quiet: bool) {
     if quiet {
         print_json(&compact(task));
     } else {
-        print_json(task);
+        print_json(&task_out(task));
     }
 }
 
@@ -3918,7 +3994,7 @@ fn print_tasks(tasks: &[Task], quiet: bool) {
     if quiet {
         print_json(&tasks.iter().map(compact).collect::<Vec<_>>());
     } else {
-        print_json(&tasks);
+        print_json(&tasks.iter().map(task_out).collect::<Vec<_>>());
     }
 }
 
@@ -4061,7 +4137,11 @@ fn print_project_delete(
             "tasks": tasks.iter().map(compact).collect::<Vec<_>>(),
         }));
     } else {
-        print_json(&json!({"project": project, "subprojects": subprojects, "tasks": tasks}));
+        print_json(&json!({
+            "project": project,
+            "subprojects": subprojects,
+            "tasks": tasks.iter().map(task_out).collect::<Vec<_>>(),
+        }));
     }
 }
 
@@ -4172,6 +4252,138 @@ fn print_error(code: &str, message: &str) {
     eprintln!("{}", json!({"error": {"code": code, "message": message}}));
 }
 
+/// Parse the process arguments. `--quiet` is accepted on every command (mesa
+/// task 1513): where a command defines it, it means what it always did; where
+/// it does not, clap rejects it as an unknown argument and the parse is
+/// retried without it, so it is a no-op there. Commands with trailing var-args
+/// swallow it as text and never reach the retry, exactly as before.
+fn parse_args(args: &[std::ffi::OsString]) -> std::result::Result<Cli, clap::Error> {
+    match Cli::try_parse_from(args) {
+        Err(err)
+            if err.kind() == ErrorKind::UnknownArgument
+                && err
+                    .get(ContextKind::InvalidArg)
+                    .is_some_and(|v| v.to_string() == "--quiet") =>
+        {
+            let mut after_dd = false;
+            let stripped: Vec<&std::ffi::OsString> = args
+                .iter()
+                .enumerate()
+                .filter(|(i, a)| {
+                    after_dd |= *a == "--";
+                    *i == 0 || after_dd || *a != "--quiet"
+                })
+                .map(|(_, a)| a)
+                .collect();
+            Cli::try_parse_from(stripped)
+        }
+        other => other,
+    }
+}
+
+/// A corrected full command for a clap usage error, when clap itself suggested
+/// one: the offending flag or subcommand token swapped for the suggestion.
+fn did_you_mean(err: &clap::Error, args: &[std::ffi::OsString]) -> Option<String> {
+    let (invalid_kind, suggested_kind) = match err.kind() {
+        ErrorKind::UnknownArgument => (ContextKind::InvalidArg, ContextKind::SuggestedArg),
+        ErrorKind::InvalidSubcommand => (
+            ContextKind::InvalidSubcommand,
+            ContextKind::SuggestedSubcommand,
+        ),
+        _ => return None,
+    };
+    let invalid = err
+        .get(invalid_kind)
+        .and_then(|v| word(v).into_iter().next())?;
+    // clap may list several candidates (`'receipt', 'create'` for `creat`),
+    // in its own order. Take the one closest to the typo; a tie has no honest
+    // answer, so it gets none.
+    let mut candidates = word(err.get(suggested_kind)?);
+    let distance = |c: &String| edit_distance(&invalid, c);
+    candidates.sort_by_key(distance);
+    let suggested = match candidates.as_slice() {
+        [] => return None,
+        [only] => only.clone(),
+        [best, next, ..] if distance(best) < distance(next) => best.clone(),
+        _ => return None,
+    };
+    // clap does not report where on the command line the bad token sat, so the
+    // first word equal to it is the one replaced.
+    let mut swapped = false;
+    let words: Vec<String> = args
+        .iter()
+        .enumerate()
+        .map(|(i, a)| {
+            let a = a.to_string_lossy().into_owned();
+            if i == 0 {
+                return "naru".to_string();
+            }
+            if swapped {
+                return a;
+            }
+            if a == invalid {
+                swapped = true;
+                return suggested.clone();
+            }
+            match a.split_once('=') {
+                Some((flag, value)) if flag == invalid => {
+                    swapped = true;
+                    format!("{suggested}={value}")
+                }
+                _ => a,
+            }
+        })
+        .collect();
+    swapped.then(|| {
+        words
+            .iter()
+            .map(|w| shell_word(w))
+            .collect::<Vec<_>>()
+            .join(" ")
+    })
+}
+
+/// Each candidate of a clap suggestion, reduced to its first word (clap may
+/// print an arg with its value placeholder).
+fn word(v: &ContextValue) -> Vec<String> {
+    let all = match v {
+        ContextValue::String(s) => vec![s.clone()],
+        ContextValue::Strings(v) => v.clone(),
+        _ => vec![],
+    };
+    all.iter()
+        .filter_map(|s| s.split_whitespace().next().map(str::to_string))
+        .collect()
+}
+
+/// Levenshtein distance, for ranking clap's suggestions against the typo.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut prev = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cur = row[j + 1];
+            row[j + 1] = (prev + usize::from(ca != *cb)).min(row[j] + 1).min(cur + 1);
+            prev = cur;
+        }
+    }
+    row[b.len()]
+}
+
+/// A word as it would be typed: bare when it is plain, else single-quoted.
+fn shell_word(w: &str) -> String {
+    let plain = !w.is_empty()
+        && w.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_./=:,@%+".contains(c));
+    if plain {
+        w.to_string()
+    } else {
+        format!("'{}'", w.replace('\'', "'\\''"))
+    }
+}
+
 fn error_code(err: &Error) -> &'static str {
     match err {
         Error::NotFound(_) => "not_found",
@@ -4184,7 +4396,8 @@ fn error_code(err: &Error) -> &'static str {
 }
 
 pub fn run() -> ExitCode {
-    let cli = match Cli::try_parse() {
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    let cli = match parse_args(&args) {
         Ok(cli) => cli,
         Err(err) => {
             // --help / --version stay human text on stdout, exit 0.
@@ -4197,7 +4410,13 @@ pub fn run() -> ExitCode {
             }
             // Everything else (unknown command, bad value, missing arg) is a
             // usage error in the JSON contract shape.
-            print_error("usage", err.render().to_string().trim_end());
+            let mut payload = json!({
+                "error": {"code": "usage", "message": err.render().to_string().trim_end()}
+            });
+            if let Some(cmd) = did_you_mean(&err, &args) {
+                payload["error"]["did_you_mean"] = json!(cmd);
+            }
+            eprintln!("{payload}");
             return ExitCode::from(2);
         }
     };
@@ -4247,6 +4466,7 @@ fn execute(command: Command) -> Result<()> {
             print_json(&system::snapshot());
             Ok(())
         }
+        Command::Alarm(cmd) => run_alarm(cmd),
         Command::Notify {
             message,
             title,
@@ -4266,6 +4486,67 @@ fn execute(command: Command) -> Result<()> {
             let store = Store::open_default()?;
             store.backup(&path)?;
             print_json(&json!({"backed_up_to": path}));
+            Ok(())
+        }
+    }
+}
+
+fn run_alarm(cmd: AlarmCmd) -> Result<()> {
+    use crate::core::alarm;
+    match cmd {
+        AlarmCmd::Arm {
+            label,
+            after,
+            session,
+        } => {
+            let session = session
+                .or_else(|| std::env::var("CLAUDE_CODE_SESSION_ID").ok())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    Error::Validation(
+                        "no session: pass --session or run inside Claude Code \
+                         (CLAUDE_CODE_SESSION_ID)"
+                            .into(),
+                    )
+                })?;
+            let after_d = alarm::parse_after(&after)?;
+            match alarm::arm(&session, after_d)? {
+                alarm::Outcome::Disarmed { agent_id, waited } => print_json(&json!({
+                    "outcome": "disarmed",
+                    "label": label,
+                    "session_id": session,
+                    "agent_id": agent_id,
+                    "waited_secs": waited.as_secs(),
+                })),
+                alarm::Outcome::Fired => print_json(&json!({
+                    "outcome": "fired",
+                    "label": label,
+                    "session_id": session,
+                    "after_secs": after_d.as_secs(),
+                    "message": format!("ALARM: {label} has not reported after {}", alarm::format_duration(after_d)),
+                })),
+            }
+            Ok(())
+        }
+        AlarmCmd::Disarm { session, agent_id } => {
+            let (session, agent_id) = match session {
+                Some(s) => (s, agent_id),
+                None => {
+                    let mut buf = String::new();
+                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
+                    let payload: Value = serde_json::from_str(&buf).map_err(|e| {
+                        Error::Validation(format!("stdin is not a hook payload: {e}"))
+                    })?;
+                    let field =
+                        |k: &str| payload.get(k).and_then(Value::as_str).map(str::to_string);
+                    let s = field("session_id").ok_or_else(|| {
+                        Error::Validation("hook payload has no session_id".into())
+                    })?;
+                    (s, agent_id.or_else(|| field("agent_id")))
+                }
+            };
+            alarm::disarm(&session, agent_id.as_deref())?;
+            print_json(&json!({"disarmed": true, "session_id": session}));
             Ok(())
         }
     }
@@ -4456,12 +4737,16 @@ fn run_task(cmd: TaskCmd) -> Result<()> {
             // exactly one of the three description forms.
             let project = project.or(project_pos).unwrap();
             let mut stdin_used = false;
-            let description = resolve_field(
-                description.or(description_pos),
-                description_file,
-                &mut stdin_used,
-            )?
-            .unwrap_or_default();
+            let body = resolve_field(description, description_file, &mut stdin_used)?;
+            // A positional beside a body is the name; the derived name is the
+            // first non-empty line, so name + blank line + body keeps both.
+            let description = match (description_pos, body) {
+                (Some(name), Some(body)) if name.trim().is_empty() => body,
+                (Some(name), Some(body)) if body.trim().is_empty() => name,
+                (Some(name), Some(body)) => format!("{name}\n\n{body}"),
+                (Some(text), None) | (None, Some(text)) => text,
+                (None, None) => String::new(),
+            };
             let acceptance = resolve_field(acceptance, acceptance_file, &mut stdin_used)?;
             let tags = tags.map(parse_tags).unwrap_or_default();
             let project = resolve_project(&store, &project)?;
@@ -4518,7 +4803,7 @@ fn run_task(cmd: TaskCmd) -> Result<()> {
         } => {
             let project = project.or(project_pos);
             match store.next_task(resolve_project_opt(&store, project.as_deref())?)? {
-                NextResult::Task(task) => print_json(&task),
+                NextResult::Task(task) => print_json(&task_out(&task)),
                 NextResult::None {
                     blocked,
                     in_progress,
@@ -5032,14 +5317,19 @@ fn cc_collect(store: &Store, window: &str) -> Result<crate::core::CcDashboard> {
 /// subscription windows, whose cutoff only the live usage endpoint knows — and
 /// exists twice because the two views build different objects, not because
 /// they take different windows.
-fn cc_errors(store: &Store, window: &str, session: Option<&str>) -> Result<crate::core::CcErrors> {
+fn cc_errors(
+    store: &Store,
+    window: &str,
+    session: Option<&str>,
+    cli_only: bool,
+) -> Result<crate::core::CcErrors> {
     if !crate::core::cc::is_usage_window(window) {
-        return crate::core::cc::errors(store, window, session);
+        return crate::core::cc::errors(store, window, session, cli_only);
     }
     let usage = crate::core::usage::fetch().map_err(Error::Unavailable)?;
     let since = crate::core::cc::usage_window_start(window, &usage)
         .ok_or_else(|| Error::Unavailable(format!("no open {window} usage window to report on")))?;
-    crate::core::cc::errors_since(store, window, since, session)
+    crate::core::cc::errors_since(store, window, since, session, cli_only)
 }
 
 /// Dashboard reads (`summary`/`sessions`/`skills`) auto-ingest new transcript
@@ -5109,10 +5399,16 @@ fn run_cc(cmd: CcCmd) -> Result<()> {
             // makes it answer for a session that has never been ingested.
             print_json(&crate::core::cc::session_chat(&session_id, limit)?)
         }
-        CcCmd::Errors { window, session } => {
+        CcCmd::Errors {
+            window,
+            session,
+            session_pos,
+            cli,
+        } => {
+            let session = session.or(session_pos);
             let mut store = Store::open_default()?;
             crate::core::cc::sync(&mut store, false)?;
-            print_json(&cc_errors(&store, &window, session.as_deref())?)
+            print_json(&cc_errors(&store, &window, session.as_deref(), cli)?)
         }
         CcCmd::Skills { window } => {
             let mut store = Store::open_default()?;
@@ -7591,7 +7887,7 @@ mod tests {
     fn compact_matches_task_summary_keys() {
         let task = sample_task();
         assert_eq!(
-            sorted_owned(value_keys(&compact(&task))),
+            minus(&sorted_owned(value_keys(&compact(&task))), &["title"]),
             sorted_owned(keys(&TaskSummary::from(&task))),
         );
     }
@@ -7625,7 +7921,7 @@ mod tests {
              (the --quiet and `task list` shape) before updating this list",
         );
         assert_eq!(
-            sorted_owned(value_keys(&compact(&task))),
+            minus(&sorted_owned(value_keys(&compact(&task))), &["title"]),
             minus(&full, &["description", "result", "created_at"]),
         );
     }

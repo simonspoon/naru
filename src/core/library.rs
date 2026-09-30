@@ -76,6 +76,9 @@ pub struct Builtin {
 /// `core::project_memory::PROJECT_MEMORY_HOOK`, installed by `naru library
 /// hook enable project-memory.sh --event SessionStart --matcher
 /// 'startup|resume|clear|compact'`.
+/// `alarm-disarm` is the fourth (mesa task 1512): a `SubagentStop` hook that
+/// disarms the supervisor's `naru alarm arm` — body `core::alarm::ALARM_HOOK`,
+/// installed by `naru library hook enable alarm-disarm --event SubagentStop`.
 pub const BUILTINS: &[Builtin] = &[
     Builtin {
         id: crate::core::live::LIVE_AGENT_BUILTIN,
@@ -145,6 +148,13 @@ echo \"Claude Code stopped in $(pwd)\"
         kind: LibraryKind::Hook,
         scope: LibraryScope::User,
         body: crate::core::stop_guard::STOP_GUARD_HOOK,
+    },
+    Builtin {
+        id: crate::core::alarm::ALARM_HOOK_BUILTIN,
+        name: crate::core::alarm::ALARM_HOOK_NAME,
+        kind: LibraryKind::Hook,
+        scope: LibraryScope::User,
+        body: crate::core::alarm::ALARM_HOOK,
     },
     Builtin {
         id: crate::core::project_memory::PROJECT_MEMORY_HOOK_BUILTIN,

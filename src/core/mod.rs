@@ -1,4 +1,5 @@
 pub mod agents;
+pub mod alarm;
 pub mod attachments;
 pub mod audio;
 pub mod board;

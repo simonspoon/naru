@@ -405,7 +405,7 @@ posture CLAUDE.md's frontend list describes.
 
 `scripts/artifacts-check.sh` exercises the CLI CRUD contract, the `--quiet`
 key set (checked with `jq`, never byte comparison), `list` omitting `body`
-and rejecting `--quiet`, the delete echo, the Content-Type allowlist
+and ignoring `--quiet`, the delete echo, the Content-Type allowlist
 rejection, case-insensitive name-uniqueness `conflict`, the `ARTIFACT_BODY_MAX`
 cap, project-delete CASCADE versus task-delete SET NULL, and — over a live
 `serve` — the render route serving the stored body byte-identically with its

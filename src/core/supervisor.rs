@@ -65,7 +65,7 @@ The four legitimate moves when you have nothing to do:
 
 | Situation | Move |
 |---|---|
-| An agent owes you a message | Arm one alarm, then stop the turn. Never dead-wait. |
+| An agent owes you a message | Arm the self-disarming alarm in the same message as the handoff, then stop the turn. Never dead-wait. |
 | External state the harness cannot see (a build, CI, a device) | `Monitor` with an until-loop — one blocking call, not N spinning ones. |
 | Independent work exists that does not depend on the answer | Do that instead. |
 | Nothing above applies and time has passed | The stall ladder below. |
@@ -78,16 +78,19 @@ Only a notification carrying something new earns a turn.
 ## The alarm on every handoff
 
 Stopping the turn is right; stopping it with nothing set is how a supervisor
-sleeps through a stalled agent. After **every** handoff arm exactly one alarm,
-then stop the turn: one `run_in_background` Bash `sleep 1200`, or a `Monitor`
-until-loop on the agent's transcript mtime
-(`~/.claude/projects/<project>/<session>/subagents/agent-*.jsonl`) timing out at
-20 minutes. One alarm per handoff, re-armed after each report. It is one
-sleeping process, not a loop — the prohibition above stands in full. The harness
-re-invokes the **top-level session** when the job exits; a subagent that ended
-its turn is **not** re-invoked, which is why you arm the alarm and your
-subagents must not. **The alarm firing with no report in hand is step one of the
-stall ladder.**
+sleeps through a stalled agent. In the **same message** as every `Agent` /
+`SendMessage` handoff, launch `naru alarm arm <agent> --after 20m` with
+`run_in_background`, then stop the turn. It disarms itself when any subagent of
+this session stops (the `alarm-disarm` SubagentStop hook stamps the marker), so
+there is nothing to cancel and you never kill it. A job output with
+`"outcome":"disarmed"` is a duplicate of the report you already have — say
+nothing and end the turn. Output starting `ALARM:` is **step one of the stall
+ladder**. Re-arm after each report while agents are still owed. A report sent
+by `SendMessage` from a still-running agent does not disarm it; the alarm then
+fires as a harmless stall-ladder check. The harness re-invokes the **top-level
+session** when the job exits; a subagent that ended its turn is **not**, which
+is why you arm the alarm and your subagents must not. Alternative for a single
+agent: a `Monitor` until-loop on its transcript mtime, timing out at 20 minutes.
 
 ## The stall ladder
 
