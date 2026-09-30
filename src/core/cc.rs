@@ -3607,6 +3607,10 @@ fn parse_scorecard_bound(label: &str, s: &str) -> Result<i64> {
     let ts = if s.len() == 10 {
         parse_ts(&format!("{s}T00:00:00Z"))
     } else if matches!(s.as_bytes()[10], b'T' | b' ') {
+        // `parse_ts` reads any offset as UTC; only UTC is honest here.
+        if s[11..].contains(['+', '-']) {
+            return Err(bad());
+        }
         parse_ts(s)
     } else {
         None
@@ -3633,9 +3637,14 @@ fn frontmatter_model_effort(body: &str) -> Option<(Option<String>, Option<String
         if line.trim_end() == "---" {
             return Some((model, effort));
         }
+        // Top-level keys only: an indented `model:` belongs to a nested map.
+        if line.starts_with([' ', '\t']) {
+            continue;
+        }
         let Some((k, v)) = line.split_once(':') else {
             continue;
         };
+        let v = v.split(" #").next().unwrap_or(v);
         let v = v.trim().trim_matches(|c| c == '"' || c == '\'').trim();
         if v.is_empty() {
             continue;
@@ -3696,7 +3705,7 @@ pub fn scorecard(
 
     // Billed responses deduped exactly as `collect_inner` does.
     let mut seen: HashSet<String> = HashSet::new();
-    for m in store.cc_read_messages(None)? {
+    for m in store.cc_read_scorecard_messages(agent)? {
         let Some(agent_id) = m.agent_id.clone() else {
             continue;
         };
@@ -3713,10 +3722,9 @@ pub fn scorecard(
             m.input_tokens + m.output_tokens + m.cache_read_tokens + m.cache_creation_tokens;
         r.cost += row_cost(&prices, &m);
     }
-    for t in store.cc_read_tool_calls(None)? {
-        let Some(agent_id) = t.agent_id else { continue };
-        if let Some((_, r)) = runs.get_mut(&(t.session_id, agent_id)) {
-            r.touch(t.ts);
+    for (session, agent_id, ts) in store.cc_read_scorecard_tool_ts(agent)? {
+        if let Some((_, r)) = runs.get_mut(&(session, agent_id)) {
+            r.touch(ts);
         }
     }
 
@@ -3799,7 +3807,9 @@ pub fn scorecard(
             Some((_, p)) => p.clone(),
             None => (None, None),
         };
-        if prev.is_none() || from_model != cur.0 || from_effort != cur.1 {
+        // The first version is a marker only when it sets something.
+        let first = prev.is_none() && (cur.0.is_some() || cur.1.is_some());
+        if first || (prev.is_some() && (from_model != cur.0 || from_effort != cur.1)) {
             model_changes.push(CcModelChange {
                 agent: name.clone(),
                 at,
@@ -7376,6 +7386,81 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    #[test]
+    fn scorecard_bounds_reject_non_utc_offsets() {
+        for ok in ["2026-09-01T00:00:00Z", "2026-09-01 00:00:00", "2026-09-01"] {
+            assert!(parse_scorecard_bound("since", ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "2026-09-01T00:00:00+02:00",
+            "2026-09-01T00:00:00-05:00",
+            "2026-09-01T00:00:00+0000",
+        ] {
+            assert!(
+                matches!(
+                    parse_scorecard_bound("since", bad),
+                    Err(Error::Validation(_))
+                ),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn frontmatter_model_effort_reads_top_level_keys_and_strips_comments() {
+        let fm = |b: &str| frontmatter_model_effort(b).unwrap();
+        // Nested keys are not the definition's own.
+        assert_eq!(
+            fm("---\nname: a\nmeta:\n  model: haiku\n  effort: low\nmodel: opus\n---\n"),
+            (Some("opus".into()), None)
+        );
+        // A trailing comment is not part of the value.
+        assert_eq!(
+            fm("---\nmodel: opus # the big one\neffort: \"high\" # why\n---\n"),
+            (Some("opus".into()), Some("high".into()))
+        );
+        // A `#` inside a value (no space before it) survives.
+        assert_eq!(fm("---\nmodel: a#b\n---\n").0, Some("a#b".into()));
+    }
+
+    #[test]
+    fn scorecard_first_version_without_model_or_effort_is_no_marker() {
+        use super::super::store::LibraryPatch;
+        use super::super::types::{LibraryKind, LibraryScope};
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&tmp.path().join("mesa.db")).unwrap();
+        let item = store
+            .create_library_item(
+                LibraryKind::Agent,
+                LibraryScope::User,
+                None,
+                "plain",
+                "---\nname: plain\n---\nbody\n",
+                None,
+                false,
+            )
+            .unwrap();
+        assert!(
+            scorecard(&store, None, None, None)
+                .unwrap()
+                .model_changes
+                .is_empty()
+        );
+        store
+            .update_library_item(
+                item.id.unwrap(),
+                LibraryPatch {
+                    body: Some("---\nname: plain\nmodel: opus\n---\nbody\n".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let ch = scorecard(&store, None, None, None).unwrap().model_changes;
+        assert_eq!(ch.len(), 1);
+        assert_eq!(ch[0].from_model, None);
+        assert_eq!(ch[0].to_model.as_deref(), Some("opus"));
     }
 
     #[test]

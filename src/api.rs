@@ -39,19 +39,19 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::core::{
     AgentSession, AgentSpawned, AnchorSide, ArchiveOutcome, Artifact, ArtifactPatch,
-    ArtifactSummary, CcDashboard, CcLiveSession, CcUsage, DiagramPatch, DiagramType, EdgeMarker,
-    EdgeNew, EdgePatch, EdgeStyle, Error, FileTreeEntry, FrameNew, FramePatch, FrameShape,
-    GitCommit, GitCommitFile, GitFileDiff, GitRepo, GitRepoView, GitStatus, GitWorktree, InboxItem,
-    InboxKind, LIVE_AUDIO_MAX, LIVE_BOARD_KEEP, LIVE_INK_MAX, LibraryBuiltinAction, LibraryBundle,
-    LibraryImportResult, LibraryKind, LibraryPatch, LibraryScope, LiveBoardHistoryEntry,
-    LiveBoardInkEntry, LiveBoardKind, LiveContext, LiveNotebookEntry, LiveNotice, LiveState,
-    LiveStatus, LiveTranscript, LiveWindow, ModelRates, NaruVersion, NextResult, Priority,
-    ProjectAgents, ProjectFileTree, ProjectGitLog, ProjectGitRepos, ProjectGitStatus,
-    ProjectGitView, ProjectPatch, ProjectVersion, ReceiptPatch, STALE_CLAIM_MINUTES, Script,
-    ScriptArg, ScriptPatch, ScriptRunEvent, Status, Store, SystemInfo, Task, TaskPatch,
-    TaskSummary, Waypoint, agents, attachments, audio, board, config, files, git, guard, hooks,
-    inbox_triage, library, listen, live, project_memory, receipt, retro, script_runs, scripts,
-    speech, supervisor, system, validate_live_client, version,
+    ArtifactSummary, CcDashboard, CcLiveSession, CcScorecard, CcUsage, DiagramPatch, DiagramType,
+    EdgeMarker, EdgeNew, EdgePatch, EdgeStyle, Error, FileTreeEntry, FrameNew, FramePatch,
+    FrameShape, GitCommit, GitCommitFile, GitFileDiff, GitRepo, GitRepoView, GitStatus,
+    GitWorktree, InboxItem, InboxKind, LIVE_AUDIO_MAX, LIVE_BOARD_KEEP, LIVE_INK_MAX,
+    LibraryBuiltinAction, LibraryBundle, LibraryImportResult, LibraryKind, LibraryPatch,
+    LibraryScope, LiveBoardHistoryEntry, LiveBoardInkEntry, LiveBoardKind, LiveContext,
+    LiveNotebookEntry, LiveNotice, LiveState, LiveStatus, LiveTranscript, LiveWindow, ModelRates,
+    NaruVersion, NextResult, Priority, ProjectAgents, ProjectFileTree, ProjectGitLog,
+    ProjectGitRepos, ProjectGitStatus, ProjectGitView, ProjectPatch, ProjectVersion, ReceiptPatch,
+    STALE_CLAIM_MINUTES, Script, ScriptArg, ScriptPatch, ScriptRunEvent, Status, Store, SystemInfo,
+    Task, TaskPatch, TaskSummary, Waypoint, agents, attachments, audio, board, config, files, git,
+    guard, hooks, inbox_triage, library, listen, live, project_memory, receipt, retro, script_runs,
+    scripts, speech, supervisor, system, validate_live_client, version,
 };
 
 /// The Vite build output, embedded into the binary at compile time.
@@ -90,6 +90,12 @@ struct AppState {
     /// counter, so any ingest anywhere conservatively invalidates every
     /// project's cached entry too.
     project_cc_cache: Arc<Mutex<HashMap<(i64, String), (i64, CcDashboard)>>>,
+    /// Model scorecard cache (mesa task 1514), keyed by the `(since, until)`
+    /// strings as sent. Each entry carries the `cc_stamp` plus the stored
+    /// agent-definition version count (the change markers come from the
+    /// library, not `cc_*`) it was built with; same stamp-gated staleness as
+    /// `cc_cache`.
+    cc_scorecard_cache: Arc<Mutex<HashMap<ScorecardKey, ((i64, i64), CcScorecard)>>>,
     /// Live subscription-usage cache: `(fetched_unix, data)`. The UI polls this,
     /// but each fetch hits Anthropic's usage endpoint, so a short TTL throttles
     /// outbound calls. Read-only live data — not the mesa store. Concurrent
@@ -2034,6 +2040,7 @@ pub fn serve(
         allow_hosts: allow_hosts.clone(),
         cc_cache: Arc::new(Mutex::new(HashMap::new())),
         project_cc_cache: Arc::new(Mutex::new(HashMap::new())),
+        cc_scorecard_cache: Arc::new(Mutex::new(HashMap::new())),
         usage_cache: Arc::new(Mutex::new(None)),
         usage_lock: Arc::new(tokio::sync::Mutex::new(())),
         usage_refreshing: Arc::new(AtomicBool::new(false)),
@@ -10075,17 +10082,41 @@ struct CcScorecardQuery {
     until: Option<String>,
 }
 
+/// `(since, until)` as the caller sent them — the scorecard cache key.
+type ScorecardKey = (Option<String>, Option<String>);
+
 /// The model scorecard (mesa task 1514): `cc::scorecard`, unfiltered by agent.
 /// A bad date is 422 `validation`.
 async fn get_cc_scorecard(
     State(state): State<AppState>,
     Query(q): Query<CcScorecardQuery>,
 ) -> ApiResult<Response> {
-    let card = {
+    let stamp = {
         let mut store = state.store.lock().unwrap();
         crate::core::cc::sync(&mut store, false)?;
+        (store.cc_stamp()?, store.library_versions_stamp()?)
+    };
+    let key: ScorecardKey = (q.since.clone(), q.until.clone());
+    {
+        let cache = state.cc_scorecard_cache.lock().unwrap();
+        if let Some((cached, card)) = cache.get(&key)
+            && *cached == stamp
+        {
+            return Ok(Json(card.clone()).into_response());
+        }
+    }
+    let card = {
+        let store = state.store.lock().unwrap();
         crate::core::cc::scorecard(&store, q.since.as_deref(), q.until.as_deref(), None)?
     };
+    {
+        let mut cache = state.cc_scorecard_cache.lock().unwrap();
+        // The bounds are caller input; cap the distinct-key count.
+        if cache.len() >= 16 {
+            cache.clear();
+        }
+        cache.insert(key, (stamp, card.clone()));
+    }
     Ok(Json(card).into_response())
 }
 
@@ -10717,6 +10748,7 @@ mod tests {
             allow_hosts: Arc::from(Vec::new()),
             cc_cache: Arc::new(Mutex::new(HashMap::new())),
             project_cc_cache: Arc::new(Mutex::new(HashMap::new())),
+            cc_scorecard_cache: Arc::new(Mutex::new(HashMap::new())),
             usage_cache: Arc::new(Mutex::new(None)),
             usage_lock: Arc::new(tokio::sync::Mutex::new(())),
             usage_refreshing: Arc::new(AtomicBool::new(false)),

@@ -501,14 +501,14 @@ function Scorecard() {
       <h2>Scorecard</h2>
       <p className="muted cc-hint">
         Subagent runs by agent and model, bounded by run start. Judge a row by
-        its n before its mean.
+        its n before its mean. Model changes are not date-filtered.
       </p>
       <p className="cc-hint">
         <label>
           since <input type="date" value={since} onChange={(e) => setSince(e.target.value)} />
         </label>{' '}
         <label>
-          until <input type="date" value={until} onChange={(e) => setUntil(e.target.value)} />
+          until (exclusive) <input type="date" value={until} onChange={(e) => setUntil(e.target.value)} />
         </label>
       </p>
       {error && <p className="error">{error}</p>}
@@ -534,8 +534,8 @@ function Scorecard() {
             <>
               <h3>Model changes</h3>
               <ul className="cc-legend">
-                {sortedChanges(data.model_changes).map((c) => (
-                  <li key={`${c.agent}-${c.at}`}>
+                {sortedChanges(data.model_changes).map((c, i) => (
+                  <li key={`${c.agent}-${c.at}-${i}`}>
                     <span className="num">{changeDate(c)}</span>{' '}
                     <span className="cc-legend-name">{c.agent}</span> {fmtModelChange(c)}
                   </li>

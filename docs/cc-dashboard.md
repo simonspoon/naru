@@ -1159,9 +1159,11 @@ model", from the db alone (mesa task 1514). No migration: it reads
   pricing path; **tokens** = input + output + cache read + cache creation;
   **wall seconds** = max minus min `ts` over its messages *and* tool calls;
   **start** = the min `ts`. A run with no billed response has no model and is
-  left out.
+  left out. A run that used several models is counted wholly under its
+  most-used model, and a run with a single response has wall time 0.
 - **`since`/`until`** bound a run's **start** (`since` inclusive, `until`
-  exclusive), `YYYY-MM-DD` (midnight UTC) or a full `YYYY-MM-DDTHH:MM:SSZ`.
+  exclusive), `YYYY-MM-DD` (midnight UTC) or a full `YYYY-MM-DDTHH:MM:SSZ` (UTC only: any other offset is
+  `validation`).
   Anything else, including a date that does not exist, is `validation`
   (exit 1 / 422). `--agent` (CLI only) keeps one agent's rows and markers.
 - **Output** is `{rows, model_changes, since, until}`. Runs group by
@@ -1173,7 +1175,7 @@ model", from the db alone (mesa task 1514). No migration: it reads
 - **Model-change markers.** For every agent-kind library item the versions are
   walked oldest to newest and the frontmatter `model:` and `effort:` keys
   parsed; a marker `{agent, at, from_model, to_model, from_effort,
-  to_effort}` is emitted for the first version (`from_*` null) and whenever
+  to_effort}` is emitted for the first version that sets either key (`from_*` null) and whenever
   either key differs from the previous version. A version with no frontmatter
   is skipped and does not reset the comparison. Unshadowed built-ins have no
   versions and so no markers until forked.

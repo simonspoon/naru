@@ -9095,6 +9095,70 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// The scorecard's message population (mesa task 1514): rows of a
+    /// subagent run that carries an attributed agent name (`name` narrows it
+    /// to one), with no `preview`/`skill`/`agent` — the scorecard never reads
+    /// them and the preview is the bulk of the table. Same `ts, uuid` order as
+    /// [`Store::cc_read_messages`], so the read-time dedupe keeps the same row.
+    pub fn cc_read_scorecard_messages(&self, name: Option<&str>) -> Result<Vec<CcMessageRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT m.uuid, m.session_id, m.agent_id, m.ts, m.model, m.input_tokens, \
+                    m.output_tokens, m.cache_read_tokens, m.cache_creation_tokens, \
+                    m.message_id \
+             FROM cc_messages m \
+             WHERE m.agent_id IS NOT NULL AND EXISTS ( \
+                 SELECT 1 FROM cc_agent_runs r \
+                 WHERE r.session_id = m.session_id AND r.agent_id = m.agent_id \
+                   AND r.agent IS NOT NULL AND (?1 IS NULL OR r.agent = ?1)) \
+             ORDER BY m.ts, m.uuid",
+        )?;
+        let rows = stmt.query_map([name], |r| {
+            Ok(CcMessageRow {
+                uuid: r.get(0)?,
+                session_id: r.get(1)?,
+                agent_id: r.get(2)?,
+                ts: r.get(3)?,
+                model: r.get(4)?,
+                input_tokens: r.get(5)?,
+                output_tokens: r.get(6)?,
+                cache_read_tokens: r.get(7)?,
+                cache_creation_tokens: r.get(8)?,
+                skill: None,
+                agent: None,
+                preview: None,
+                message_id: r.get(9)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// The scorecard's tool-call population: `(session_id, agent_id, ts)` of
+    /// every call made inside a subagent run with an attributed agent name
+    /// (`name` narrows it to one) — the timestamps that stretch a run's wall
+    /// time, nothing else.
+    pub fn cc_read_scorecard_tool_ts(
+        &self,
+        name: Option<&str>,
+    ) -> Result<Vec<(String, String, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT t.session_id, t.agent_id, t.ts FROM cc_tool_calls t \
+             WHERE t.agent_id IS NOT NULL AND EXISTS ( \
+                 SELECT 1 FROM cc_agent_runs r \
+                 WHERE r.session_id = t.session_id AND r.agent_id = t.agent_id \
+                   AND r.agent IS NOT NULL AND (?1 IS NULL OR r.agent = ?1))",
+        )?;
+        let rows = stmt.query_map([name], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Stamp of the stored agent-definition history (version rows), the half of
+    /// the scorecard that does not come from `cc_*`.
+    pub fn library_versions_stamp(&self) -> Result<i64> {
+        Ok(self
+            .conn
+            .query_row("SELECT COUNT(*) FROM library_versions", [], |r| r.get(0))?)
+    }
+
     /// Failed tool calls with `ts >= cutoff` (`None` = all), each already LEFT
     /// JOINed to its `cc_tool_calls` row for the tool's name and what it acted
     /// on. The join is **outer**: an error whose call line has not been
