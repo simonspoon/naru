@@ -6,6 +6,7 @@
 set -euo pipefail
 # Drop inherited NARU_* vars: Naru reads them before MESA_*, so one would escape this script's isolation.
 unset $(env | sed -n 's/^\(NARU_[A-Za-z0-9_]*\)=.*/\1/p')
+unset CLAUDE_CODE_SESSION_ID
 
 cd "$(dirname "$0")/.."
 command -v jq >/dev/null || { echo "jq is required" >&2; exit 1; }
@@ -1049,5 +1050,84 @@ sleep 0.3
 ok "once the cause is fixed the untouched task dispatches on a later tick"
 
 kill "$SERVER_PID" 2>/dev/null; wait "$SERVER_PID" 2>/dev/null || true; SERVER_PID=""
+
+# ---- the close guard (mesa task 1515): `task update --status done` with
+# CLAUDE_CODE_SESSION_ID set is refused while that session still holds running
+# work. Lives here rather than in cli-check.sh because it needs a stub `claude`
+# and the real holder shell above (cli-check stays claude-free). The caller is
+# not a descendant of the holder, so nothing is excluded as "the caller". ----
+
+GUARD_SID="guard0001-0000-0000-0000-000000000000"
+GUARD_HOME="$TMP/guardhome"
+GUARD_CC="$TMP/guard-cc-projects"
+mkdir -p "$GUARD_HOME" "$GUARD_CC" "$TMP/guardDir"
+GUARD_DIR=$(cd "$TMP/guardDir" && pwd -P)
+GUARD_STUB="$STUB_DIR/claude-guard"
+GUARD_FAIL_STUB="$STUB_DIR/claude-guard-fail"
+cat > "$GUARD_STUB" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "agents" ]; then
+  printf '[{"pid":%s,"id":"guard001","cwd":"$GUARD_DIR","kind":"background","startedAt":1783000000000,"sessionId":"$GUARD_SID","name":"guard","status":"busy","state":"working"}]\n' "\$(cat "$LIVE_PID_FILE")"
+  exit 0
+fi
+exit 2
+EOF
+printf '#!/usr/bin/env bash\necho "stub claude agents is down" >&2\nexit 1\n' > "$GUARD_FAIL_STUB"
+chmod +x "$GUARD_STUB" "$GUARD_FAIL_STUB"
+GUARD_LOG="$GUARD_HOME/.naru/logs/task-close-guard.log"
+
+export MESA_DB="$TMP/guard.db"
+run 0 "$MESA" project create "Guard" --no-git
+GUARD_P=$(jqs .id)
+run 0 "$MESA" task create "$GUARD_P" "task guard"
+GUARD_T=$(jqs .id)
+run 0 "$MESA" task update "$GUARD_T" --status in_progress
+
+# run_guard <expected-exit> <stub> <args...> — `task update` as if run inside the session.
+run_guard() {
+  local expected=$1 stub=$2; shift 2
+  set +e
+  STDOUT=$(env HOME="$GUARD_HOME" CLAUDE_CODE_SESSION_ID="$GUARD_SID" MESA_CLAUDE_BIN="$stub" \
+    MESA_CC_PROJECTS_DIR="$GUARD_CC" "$MESA" task update "$GUARD_T" "$@" 2>"$TMP/stderr")
+  CODE=$?
+  set -e
+  STDERR=$(cat "$TMP/stderr")
+  [ "$CODE" -eq "$expected" ] || fail "expected exit $expected, got $CODE: $* (stderr: $STDERR)"
+}
+
+start_holder
+run_guard 1 "$GUARD_STUB" --status done
+[ "$(jq -r .error.code <<<"$STDERR")" = "conflict" ] || fail "the refusal must be a conflict: $STDERR"
+jq -r .error.message <<<"$STDERR" | grep -q "shell pid $HOLDER_CHILD" ||
+  fail "the refusal must name the shell's pid $HOLDER_CHILD: $STDERR"
+jq -r .error.message <<<"$STDERR" | grep -q -- '--force' || fail "the refusal must name --force: $STDERR"
+[ "$("$MESA" task show "$GUARD_T" | jq -r .status)" = "in_progress" ] || fail "a refused close must write nothing"
+grep -q "outcome=refused" "$GUARD_LOG" || fail "a refusal must be logged"
+ok "a close inside a session with a live shell child is refused (conflict, names the pid), nothing written, logged"
+
+run_guard 2 "$GUARD_STUB" --status done --force ""
+ok "--force with an empty reason is a usage error"
+
+run_guard 0 "$GUARD_STUB" --status done --force "handing off to the verifier"
+[ "$(jqs .status)" = "done" ] || fail "--force must close the task"
+grep -q 'outcome=forced .*reason="handing off to the verifier"' "$GUARD_LOG" ||
+  fail "a forced close must log its reason: $(cat "$GUARD_LOG")"
+ok "--force \"<reason>\" closes anyway and logs outcome=forced with the reason"
+
+run 0 "$MESA" task update "$GUARD_T" --status in_progress
+run 0 env HOME="$GUARD_HOME" MESA_CLAUDE_BIN="$GUARD_STUB" "$MESA" task update "$GUARD_T" --status done
+[ "$(jqs .status)" = "done" ] || fail "no CLAUDE_CODE_SESSION_ID must close unguarded"
+ok "with no CLAUDE_CODE_SESSION_ID the close is unguarded"
+
+run 0 "$MESA" task update "$GUARD_T" --status in_progress
+run_guard 0 "$GUARD_FAIL_STUB" --status done
+[ "$(jqs .status)" = "done" ] || fail "a failing agents probe must allow the close"
+ok "a failing 'claude agents' probe fails open: the close goes through"
+
+stop_holder
+run 0 "$MESA" task update "$GUARD_T" --status in_progress
+run_guard 0 "$GUARD_STUB" --status done
+[ "$(jqs .status)" = "done" ] || fail "no running work must allow the close"
+ok "once the shell child is gone the close is allowed"
 
 echo "ALL OK ($CHECKS checks)"

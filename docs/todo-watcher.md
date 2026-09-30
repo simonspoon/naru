@@ -306,6 +306,36 @@ because someone ran `mesa serve`.
     the two other `todo_reaper_tick_reports_*` tests and the six
     `reap_verdict_*` unit tests, plus the reaper block in
     `scripts/todo-watcher-check.sh` end-to-end.
+  - **The close guard** (mesa task 1515) is the reaper's mirror on the agent's
+    side: `naru task update <id> --status done` run inside a Claude Code
+    session (`CLAUDE_CODE_SESSION_ID` set and non-empty) is refused —
+    exit 1, `conflict` — while that session's own work is still running,
+    because the close is exactly what lets the reaper stop the session and cut
+    that work off. CLI only (not `receipt::update_task`, not the API), and only
+    for a close of a task that is not already `done`; no env var means no probe
+    and byte-identical behaviour. The probe is `agents::close_blockers`
+    (`agents::list_all()`, the row whose `session_id` matches: its live shells
+    and running subagents) and **fails open** — a probe error, no matching row
+    or a probe that has not answered in 5s (one stderr line) allows the close;
+    a row with no pid still has its subagents judged, only the shell half needs
+    the pid. The caller itself is excluded: a shell child
+    that is an ancestor of the `naru` process (the `zsh -c` running this very
+    call) and a subagent whose transcript ends on a pending `Bash` call
+    containing `task update`, the id being closed and `done` as whole words (a
+    subagent running *this* close; a sibling updating another task still
+    blocks, since the reaper kills the whole session). The refusal lists
+    each blocker on its own line (subagent id/type/description with
+    `TaskStop <id>`, the id without the transcript's `agent-` prefix; shell
+    pid/command — the command after `eval` in Claude Code's snapshot wrapper —
+    with `KillShell`/`kill <pid>`) and ends
+    with the way out: `--force "<reason>"` (required, non-empty) closes anyway.
+    Every refusal and every forced close (one where the probe would have
+    blocked) is one line in `logs/task-close-guard.log`, beside the reaper log:
+    `<UTC> task=<id> session=<sid> outcome=refused|forced still_running="<n>
+    shell(s), <n> subagent(s)" reason="<reason>"`; a log that cannot be written
+    is one stderr line, never a failed command. Covered by the close-guard block
+    in `scripts/todo-watcher-check.sh` and the `close_*`/`a_subagent_running_*`
+    unit tests in `src/core/agents.rs`.
 - The tick cadence is a fixed internal constant (`WATCH_TODO_TICK`, 60s), not
   user-configurable. `MESA_WATCH_TODO_TICK_MS` overrides it, a test-only seam
   (mirrors `MESA_CLAUDE_BIN`) so `scripts/todo-watcher-check.sh` isn't stuck

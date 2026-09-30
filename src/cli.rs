@@ -791,6 +791,16 @@ EXAMPLES
         /// (exit 2) rather than a legal call that silently does nothing.
         #[arg(long)]
         quiet: bool,
+        /// Close anyway while this session's own shells/subagents still run
+        ///
+        /// `--status done` inside a Claude Code session (CLAUDE_CODE_SESSION_ID)
+        /// is refused (`conflict`) while that session has running work other
+        /// than this very call. `--force "<reason>"` closes regardless and
+        /// logs the reason to `logs/task-close-guard.log`. Outside the
+        /// `fields` group, like `--quiet`. It has no effect unless the guard
+        /// would run: a fresh `--status done` inside a Claude Code session.
+        #[arg(long, value_name = "REASON", value_parser = clap::builder::NonEmptyStringValueParser::new())]
+        force: Option<String>,
     },
     /// Delete a task AND all its subtasks (no confirmation)
     ///
@@ -4715,6 +4725,70 @@ fn run_project_path(store: &mut Store, cmd: ProjectPathCmd) -> Result<()> {
     Ok(())
 }
 
+/// The close guard (mesa task 1515): `naru task update --status done` inside a
+/// Claude Code session (`CLAUDE_CODE_SESSION_ID`) is a `conflict` while that
+/// session's own shells/subagents still run, since closing is what makes the
+/// todo-watcher's reaper stop the session. No env var means no probe; a probe
+/// that fails or finds nothing allows the close. `force` (a reason) closes
+/// anyway, and the refusal and the forced close are both logged.
+fn close_guard(task_id: i64, force: Option<&str>) -> Result<()> {
+    let Some(session) = std::env::var("CLAUDE_CODE_SESSION_ID")
+        .ok()
+        .filter(|s| !s.is_empty())
+    else {
+        return Ok(());
+    };
+    let Some(blockers) = crate::core::agents::close_blockers(&session, task_id) else {
+        return Ok(());
+    };
+    if blockers.is_empty() {
+        return Ok(());
+    }
+    log_close_guard(
+        task_id,
+        &session,
+        if force.is_some() { "forced" } else { "refused" },
+        &blockers.summary(),
+        force.unwrap_or(""),
+    );
+    match force {
+        Some(_) => Ok(()),
+        None => Err(Error::Conflict(blockers.refusal_message())),
+    }
+}
+
+/// One line in `logs/task-close-guard.log` (beside the reaper's log). Best
+/// effort: a log that cannot be written is one stderr line, never a failed
+/// command.
+fn log_close_guard(task_id: i64, session: &str, outcome: &str, still_running: &str, reason: &str) {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let line = format!(
+        "{} task={task_id} session={session} outcome={outcome} still_running=\"{still_running}\" \
+         reason={:?}\n",
+        crate::core::cc::fmt_store_ts(secs),
+        reason,
+    );
+    let written = (|| {
+        use std::io::Write;
+        let home = directories::BaseDirs::new()
+            .map(|d| d.home_dir().to_path_buf())
+            .ok_or_else(|| std::io::Error::other("no home directory"))?;
+        let dir = crate::core::config::dot_dir_in(&home).join("logs");
+        std::fs::create_dir_all(&dir)?;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("task-close-guard.log"))?
+            .write_all(line.as_bytes())
+    })();
+    if let Err(e) = written {
+        eprintln!("task close guard: writing the log failed: {e}");
+    }
+}
+
 fn run_task(cmd: TaskCmd) -> Result<()> {
     let mut store = Store::open_default()?;
     match cmd {
@@ -4849,6 +4923,7 @@ fn run_task(cmd: TaskCmd) -> Result<()> {
             result_file,
             append,
             quiet,
+            force,
         } => {
             let mut stdin_used = false;
             let description = resolve_field(description, description_file, &mut stdin_used)?;
@@ -4902,6 +4977,9 @@ fn run_task(cmd: TaskCmd) -> Result<()> {
             // every agent spawn goes through instead of four separate
             // `Command::new("claude")` call sites.
             let was_done = store.get_task(id)?.status == Status::Done;
+            if status == Some(Status::Done) && !was_done {
+                close_guard(id, force.as_deref())?;
+            }
             let task = receipt::update_task(&mut store, id, &patch)?;
             print_task(&task, quiet);
             // mesa task 1339: a close is when an over-budget project notebook
