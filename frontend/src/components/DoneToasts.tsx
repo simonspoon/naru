@@ -26,11 +26,17 @@ export function DoneToasts() {
 
   useEffect(() => {
     let cancelled = false
+    // A request outlasting the interval must not let a second tick share its
+    // cursor and seen set, or one task toasts twice.
+    let inFlight = false
+    // Fixed at mount so a failing seed poll or a hidden tab cannot drift it.
+    const seedFrom = seedCursor(new Date())
     const tick = async () => {
-      if (document.hidden) return
+      if (document.hidden || inFlight) return
+      inFlight = true
       try {
         const seed = state.current === null
-        const cur = state.current ?? { cursor: seedCursor(new Date()), seen: new Set<number>() }
+        const cur = state.current ?? { cursor: seedFrom, seen: new Set<number>() }
         const done = await listTasks({ status: 'done', updatedSince: cur.cursor })
         if (cancelled) return
         const r = detectDone(cur, done, seed)
@@ -50,6 +56,8 @@ export function DoneToasts() {
         setToasts((s) => pushToasts(s, r.fresh, names, key))
       } catch {
         /* the next tick retries */
+      } finally {
+        inFlight = false
       }
     }
     void tick()
