@@ -24,8 +24,10 @@ export interface Point {
 
 /** A release within this many px of the top edge docks the orb there. */
 export const DOCK_ZONE = 80
-/** Top of a docked orb: the same gap the pie needs to bloom unclipped. */
-export const DOCK_Y = ORB_MARGIN
+/** Top of a docked orb: the window's top edge, so the shrunk orb's centre sits
+ *  inside the title bar (mesa task 1563). The pie's top segments bloom past
+ *  the edge and clip while it is docked and hovered. */
+export const DOCK_Y = 0
 
 /** Where the orb rests: its top-left, and whether it is docked to the top
  *  edge (drawn shrunk until hovered). Anywhere else is exactly where it was

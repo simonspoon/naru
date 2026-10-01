@@ -32,6 +32,10 @@ describe('settle', () => {
     expect(settle({ x: 400, y: DOCK_ZONE - 1 }, VW, VH)).toEqual({ x: 400, y: DOCK_Y, docked: true })
     expect(settle({ x: 400, y: -30 }, VW, VH)).toEqual({ x: 400, y: DOCK_Y, docked: true })
   })
+  it('docks at the window top, so the centre reaches the title bar (task 1563)', () => {
+    expect(DOCK_Y).toBe(0)
+    expect(settle({ x: 400, y: 0 }, VW, VH)).toEqual({ x: 400, y: 0, docked: true })
+  })
   it('clamps into the viewport', () => {
     expect(settle({ x: -50, y: 5000 }, VW, VH)).toEqual({ x: 0, y: VH - ORB_SIZE, docked: false })
     expect(settle({ x: 5000, y: 300 }, VW, VH).x).toBe(VW - ORB_SIZE)
@@ -97,8 +101,7 @@ describe('usableHeight (phone tab bar)', () => {
 
 describe('docked in a short viewport', () => {
   it('never leaves the page', () => {
-    const h = ORB_SIZE + DOCK_Y - 10
-    expect(clampPlacement({ x: 10, y: 0, docked: true }, VW, h)).toEqual({ x: 10, y: h - ORB_SIZE, docked: true })
+    expect(clampPlacement({ x: 10, y: 0, docked: true }, VW, ORB_SIZE - 10)).toEqual({ x: 10, y: 0, docked: true })
     expect(clampPlacement({ x: 10, y: 0, docked: true }, VW, 50)).toEqual({ x: 10, y: 0, docked: true })
   })
 })
