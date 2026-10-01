@@ -818,8 +818,8 @@ PJQ=$(jqs .id)
 # moves between the two calls (Project carries no timestamp at all).
 run 0 "$MESA" project show "$PJQ"
 printf '%s' "$STDOUT" >"$TMP/pfull.json"
-# non-quiet output is unchanged: the full 9-key project object
-[ "$(jqs 'keys | join(",")')" = "archived,description,id,local_path,name,parent_id,previous_paths,root_commit,sort_order" ] ||
+# non-quiet output is unchanged: the full 10-key project object
+[ "$(jqs 'keys | join(",")')" = "archived,description,id,local_path,name,parent_id,previous_paths,root_commit,shared_notebook,sort_order" ] ||
   fail "project show (no --quiet): full key set must be unchanged"
 [ "$(jqs 'has("description")')" = "true" ] || fail "project show (no --quiet): description present"
 run 0 "$MESA" project show "$PJQ" --quiet
