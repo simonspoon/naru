@@ -147,7 +147,7 @@ button {
   font-weight: 500;
   color: var(--cyan);
   background: rgba(0, 229, 255, 0.08);
-  border: 0;
+  border: 1px solid transparent;
   border-radius: var(--r-sm);
   padding: 0.3rem 0.9rem;
   cursor: pointer;
@@ -182,7 +182,7 @@ textarea {
   font-size: 0.95rem;
   color: var(--text);
   background: var(--surface-field);
-  border: 0;
+  border: 1px solid transparent;
   border-radius: var(--r-sm);
   box-shadow: var(--ring);
   padding: 0.3rem 0.6rem;

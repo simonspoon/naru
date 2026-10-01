@@ -9,8 +9,9 @@ the rules below are applied across `frontend/src/App.css`.
 - **Dark navy base** (`--bg`, the faint grid) stays.
 - **Soft, tinted, rounded surfaces** instead of heavy bordered boxes. A panel
   is `--surface` (translucent cyan tint) with `--r-md`; a card inside it is
-  `--surface-raised`, hover `--surface-hover`. Layout-preserving panels keep a
-  `1px solid transparent` border so widths do not move.
+  `--surface-raised`, hover `--surface-hover`. Buttons, fields, panels, cards and chips keep a
+  `1px solid transparent` border (the ring is a box-shadow), so a control is the
+  same size it was when it wore a visible border.
 - **Separation by ring, edge or spacing**, not outline: `--ring` (a 1px
   box-shadow), `--edge-cyan` (inset 2px left edge on cards and bubbles),
   `--hairline` for row dividers. Floating layers (modals, palette, popovers)

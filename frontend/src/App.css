@@ -1080,7 +1080,7 @@ main {
 
 /* Claim marker (task 576), in the same amber the `in_progress` status badge
    uses — a claim only exists on an in_progress row, so the two always agree.
-   `text-transform: none` is the load-bearing part: `.badge` uppercases, and
+   `text-transform: none` is the load-bearing part: `.badge` once uppercased, and
    an `owner` is an opaque case-sensitive session id the reader pastes into
    `claude attach <owner>`, so an uppercased one would display a string that
    does not work. Two-class selector for the same reason as the variants
@@ -1187,7 +1187,7 @@ main {
 
 .kanban-column {
   background: var(--surface);
-  border: 0;
+  border: 1px solid transparent;
   border-radius: var(--r-lg);
   padding: 0.5rem;
   min-height: 8rem;
@@ -1229,7 +1229,7 @@ main {
 
 .kanban-card {
   background: var(--surface-raised);
-  border: 0;
+  border: 1px solid transparent;
   box-shadow: var(--edge-cyan);
   border-radius: var(--r-md);
   padding: 0.4rem 0.5rem;
@@ -6593,8 +6593,7 @@ body.live-panel-ratio-resizing {
   margin: 1.5rem 0 0.6rem;
   font-weight: 600;
 }
-/* h1/h2 keep the app's own title treatment (index.css: uppercase, spaced,
-   glowing); h1 gets a rule under it as the document's masthead. */
+/* h1/h2 keep the app's own title treatment (index.css: Inter semibold); h1 gets a rule under it as the document's masthead. */
 .markdown-body.markdown-doc :where(h1) {
   font-size: 1.35rem;
   padding-bottom: 0.4rem;
@@ -7106,7 +7105,7 @@ body.live-panel-ratio-resizing {
     padding-bottom: env(safe-area-inset-bottom);
   }
 
-  /* Reset the global button chrome (border, clip-path, shadow) the same way
+  /* Reset the global button chrome (border, radius, shadow) the same way
      `.sidebar-toggle` does, so the <a> and <button> slots are identical. */
   .phone-tab {
     flex: 1;
@@ -7305,8 +7304,8 @@ body.live-panel-ratio-resizing {
     max-height: none;
     overscroll-behavior: contain;
     /* The decorative shell belongs to a floating card: at the viewport edge
-       the `--cut` corner notch clips against the screen rather than reading
-       as a bevel, and a border/glow on an edge with nothing behind it is
+       the rounded corner meets the screen edge rather than reading as a
+       card, and a border/glow on an edge with nothing behind it is
        just a seam. */
     border: none;
     clip-path: none;
@@ -7759,8 +7758,8 @@ body.live-panel-ratio-resizing {
    stylesheet touches on these elements, so it always renders regardless of
    which other state classes are present, with no specificity contest to
    referee. A negative `outline-offset` keeps it inside the border box, so
-   it isn't cropped at the corners on the clip-path-cut buttons/cards the
-   way an outset box-shadow is (`--cut`, index.css). */
+   it isn't cropped by a rounded button/card's own corners the way an
+   outset box-shadow can be. */
 a:focus-visible,
 button:focus-visible,
 .inline-edit:focus-visible,
@@ -9056,7 +9055,7 @@ button:focus-visible,
 
 /* Phone: back to the full-screen sheet `.create-task-modal` / `.task-modal`
    already become at this tier. The desktop box above only overrode their
-   width/height, so only those need restating; the border, notch and glow the
+   width/height, so only those need restating; the border, radius and glow the
    sheet drops are still handled by the rule up in the phone block. */
 @media (max-width: 600px) {
   .cc-nodetext-modal {
@@ -9220,8 +9219,8 @@ button:focus-visible,
 
 /* ── Diagram index rows (mesa task 854) ────────────────────────────────────
    Each board on its own row: a mini-map of its saved state on the left, then
-   title / description / meta. `.card-list li` still supplies the panel, notch
-   and hover glow — only the inside of the row is new, so nothing else that
+   title / description / meta. `.card-list li` still supplies the panel, radius
+   and hover tint — only the inside of the row is new, so nothing else that
    uses `.card-list` moves. */
 .diagram-row {
   display: flex;
@@ -10693,9 +10692,8 @@ body.live-panel-ratio-resizing .live-panel-divider {
    one it is. The 2px the thicker edge takes comes back off the padding, so the
    text stays in the same column as every collapsed row above it.
 
-   No drop shadow: `.card-list li`'s `clip-path: var(--cut)` clips at the
-   border box, so an outer shadow renders nothing at all (which is also why the
-   `:hover` glow on these cards has never shown). The lift is carried by the
+   No drop shadow: the card is a flat tinted surface (`.card-list li`), so the
+   lift is carried by the
    contrast against the dimmed siblings below instead. */
 .library-item.open {
   background: var(--panel-raised);
@@ -11683,8 +11681,8 @@ body.live-panel-ratio-resizing .live-panel-divider {
   text-align: left;
   text-transform: none;
   letter-spacing: normal;
-  /* The global button chamfer would clip the card's own text at both ends;
-     the card (`li`) already carries one. */
+  /* The global button's rounded tint would sit inside the card's own;
+     the card (`li`) already carries the surface. */
   clip-path: none;
   color: inherit;
   background: none;
