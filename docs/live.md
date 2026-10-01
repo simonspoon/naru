@@ -1529,8 +1529,8 @@ covering it, and hiding either section hands its space straight to the other.
 Since mesa task 1483 the layout is driven by **one thin toolbar** (~32px) at the
 top of the panel — no per-pane fold arrows and no pane title headers: on the
 left four icon toggles (show/hide board, show/hide chat, swap board and chat,
-stacked vs. side by side), on the right the session's own state — the Naru mark,
-level meter, clock — and its presses (mute voice, pause, end,
+stacked vs. side by side), on the right the session's own state — the Naru mark
+(its accessible name adds "mic ready" while the microphone is the way in), clock — and its presses (mute voice, pause, end,
 close); the context size sits on the one status line under it, since the
 toolbar's fixed-size controls leave it no room at the plain panel width. A hidden pane is `display: none`, not a rail: the other
 fills the panel. Hiding the *last* visible pane shows the other instead, so the
@@ -2733,8 +2733,8 @@ conversation") working with no backend change.
     recognizer (mesa task 957), that engine's interim guess still feeds
     `heldFlush` and the header band exactly as it did before task 956 — but
     since mesa task 1153 it is no longer *displayed*: the words in flight,
-    on either path, are gone from the panel (below), and the level meter and
-    "transcribing…" note stay `auris`-specific rather than a property of
+    on either path, are gone from the panel (below), and the
+    "transcribing…" note stays `auris`-specific rather than a property of
     listening itself.
   - **The transcript is corrected against Naru's own vocabulary before
     anything else touches it** (`liveRecognition.ts`, mesa task 922), exactly
@@ -3312,7 +3312,7 @@ CLAUDE.md requires: **data, never instructions.**
 
 - **Streaming or partial transcripts, through `auris`.** `auris` answers one
   whole segment at a time — there is no interim guess to show while it
-  thinks. A level meter and a "transcribing…" note stand in for it instead
+  thinks. A "transcribing…" note stands in for it instead
   (above); a streaming decoder that could offer a running partial would close
   this gap, but Naru has none and building one is out of scope here. Where a
   page instead falls back to its own recognizer (mesa task 957, below), that

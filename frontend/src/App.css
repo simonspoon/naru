@@ -9925,24 +9925,6 @@ body.live-panel-ratio-resizing .live-panel-divider {
   height: 28px;
 }
 
-.live-toolbar .live-head-say {
-  flex-direction: row;
-  align-items: center;
-  gap: 8px;
-}
-
-.live-toolbar .live-head-title {
-  font-size: 12px;
-  letter-spacing: 1.2px;
-}
-
-.live-toolbar .live-meter {
-  flex: none;
-  width: 56px;
-  max-width: none;
-  gap: 2px;
-}
-
 .live-toolbar .live-head-actions {
   gap: 4px;
 }
@@ -9956,52 +9938,8 @@ body.live-panel-ratio-resizing .live-panel-divider {
   display: flex;
   align-items: center;
   justify-content: center;
-}
-
-.live-head-say {
-  flex: 1 1 auto;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-
-/* The one line of display type in the panel: this is the conversation's own
-   name for what it is doing, and Orbitron is what this app titles things in.
-   Ellipsised rather than wrapped — the toolbar row is one line tall by
-   design, and a second line would push it taller. */
-.live-head-title {
-  font-family: var(--font-display);
-  font-weight: 600;
-  font-size: 14px;
-  letter-spacing: 1.44px;
-  text-transform: uppercase;
-  color: var(--text-h);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* The level meter (mesa task 956, moved here by 1069): twelve bars of how
-   loud this room has been, newest on the right, bottom-aligned so the row
-   reads as a skyline rather than as text. `LiveMeter` owns the history and
-   the heights; this owns the box it sits in — and it shrinks (to nothing, if
-   it has to) before any button does. */
-.live-meter {
-  display: flex;
-  align-items: flex-end;
-  gap: 3px;
-  height: 18px;
-  max-width: 120px;
-  min-width: 0;
-  overflow: hidden;
-}
-
-.live-meter-bar {
-  flex: 1 1 11px;
-  min-width: 0;
-  background: var(--green);
-  opacity: 0.85;
+  /* Takes the row's slack, so the context size, clock and presses sit right. */
+  margin-right: auto;
 }
 
 .live-head-actions {
@@ -10094,18 +10032,6 @@ body.live-panel-ratio-resizing .live-panel-divider {
   letter-spacing: 1px;
   font-variant-numeric: tabular-nums;
   color: var(--violet);
-}
-
-/* Mic ready: a dot before the title, present only while the microphone is the
-   way in. */
-.live-mic-dot {
-  display: inline-block;
-  width: 7px;
-  height: 7px;
-  margin-right: 8px;
-  border-radius: 50%;
-  vertical-align: middle;
-  background: var(--green);
 }
 
 /* The sentence under the toolbar (`liveStatusLine`): what a one-word title
@@ -10477,20 +10403,7 @@ body.live-panel-ratio-resizing .live-panel-divider {
     cursor: row-resize;
   }
 
-  /* The toolbar's meter is the first thing to give at 390px: the presses have
-     to stay pressable, so the one part of the row with no words in it is what
-     goes. */
-  .live-meter {
-    display: none;
-  }
-
-  /* The toolbar keeps every toggle and press at this width by giving up the
-     one thing with only words in it. */
-  .live-toolbar .live-head-title {
-    display: none;
-  }
-
-  .live-toolbar .live-icon {
+    .live-toolbar .live-icon {
     width: 30px;
     height: 30px;
   }

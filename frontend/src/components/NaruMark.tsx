@@ -48,10 +48,12 @@ export function NaruMark({
   state,
   level,
   speechRms,
+  micReady = false,
 }: {
   state: LiveIndicator | null
   level: number
   speechRms: () => number | null
+  micReady?: boolean
 }) {
   const svgRef = useRef<SVGSVGElement>(null)
   const stateRef = useRef(state)
@@ -168,7 +170,7 @@ export function NaruMark({
       viewBox="0 0 64 64"
       strokeLinecap="round"
       role="status"
-      aria-label={state === null ? 'Naru' : indicatorLabel(state)}
+      aria-label={`${state === null ? 'Naru' : indicatorLabel(state)}${micReady ? ', mic ready' : ''}`}
     >
       {X.map((x, i) => (
         <g key={x} className="mark-bar">

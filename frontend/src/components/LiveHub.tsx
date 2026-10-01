@@ -3,7 +3,6 @@ import { mainFloor, mainIsCollapsed } from '../mainCollapse'
 import { createPortal } from 'react-dom'
 import { NaruMark } from './NaruMark'
 import { LiveBoardPanel, type InkFlatten } from './LiveBoardPanel'
-import { LiveMeter } from './LiveMeter'
 import {
   claimLiveSpeaker,
   getListen,
@@ -3974,25 +3973,12 @@ export function LiveHub({
                       the conversation, no text — its colour and motion are the
                       state, and its accessible name says it. */}
                   <div className="live-head-aperture">
-                    <NaruMark state={indicator} level={level} speechRms={speechRms} />
-                  </div>
-                  <div className="live-head-say">
-                    <div className="live-head-title">
-                      {recognizes && (
-                        <span
-                          className="live-mic-dot"
-                          role="img"
-                          aria-label="Mic ready"
-                          title="Mic ready"
-                        />
-                      )}
-                    </div>
-                    {/* The level meter (mesa task 956, moved here by 1069):
-                        shown on the auris path alone, since a browser-path
-                        page reports itself through the interim guess instead
-                        and a meter nothing feeds would read as broken rather
-                        than as "this path uses something else". */}
-                    {path === 'auris' && recognizes && <LiveMeter level={level} />}
+                    <NaruMark
+                      state={indicator}
+                      level={level}
+                      speechRms={speechRms}
+                      micReady={recognizes}
+                    />
                   </div>
                   {session !== null && contextLabel(data?.context_tokens) !== null && (
                     <span className="live-head-ctx">{contextLabel(data?.context_tokens)}</span>
