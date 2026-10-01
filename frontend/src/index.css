@@ -1,13 +1,16 @@
-/* Dark-only cyberpunk/Tron theme (spec 2026-06-12-web-ui-crud-cyberpunk
-   Requirement 9): neon cyan/magenta on near-black, grid backdrop, glows
-   on interactive elements, Orbitron headings, Share Tech Mono body. */
+/* Naru style guide (docs/style-guide.md, mesa task 1566) — the look the live
+   chat panel set in mesa task 1565, applied site-wide. Dark navy base kept;
+   soft tinted, rounded surfaces instead of heavy bordered boxes; Inter for
+   body text with monospace reserved for small meta (ids, times, chips, code,
+   terminal/editor/diff content); cyan/violet as glows and edges rather than
+   outlines everywhere; rounded inputs with their controls inside. */
 
 :root {
   --bg: #060a10;
   --panel: #0b1119;
   --panel-raised: #0e1722;
-  --border: #16384a;
-  --border-bright: #2a6a8a;
+  --border: rgba(42, 106, 138, 0.28);
+  --border-bright: rgba(42, 106, 138, 0.55);
   --grid-line: rgba(0, 229, 255, 0.05);
   --text: #b8dde8;
   --text-h: #e8fbff;
@@ -24,8 +27,35 @@
   --amber: #ffb444;
   --green: #2bff9c;
   --red: #ff3b5c;
-  --font-display: 'Orbitron', sans-serif;
+  --font-sans: 'Inter', -apple-system, 'SF Pro Text', system-ui, sans-serif;
+  --font-brand: 'Orbitron', sans-serif;
   --font-mono: 'Share Tech Mono', monospace;
+  /* Rounded corners: small for chips and icons, medium for cards, large for
+     bubbles and fields. */
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-lg: 16px;
+  --r-pill: 999px;
+  /* Soft tinted surfaces (translucent, so the grid shows through faintly)
+     and the rings/glows that separate them without a border. */
+  --surface: rgba(0, 229, 255, 0.04);
+  --surface-raised: rgba(0, 229, 255, 0.07);
+  --surface-hover: rgba(0, 229, 255, 0.11);
+  --surface-field: rgba(6, 10, 16, 0.8);
+  --hairline: rgba(42, 106, 138, 0.16);
+  --ring: 0 0 0 1px rgba(42, 106, 138, 0.45);
+  --ring-focus: 0 0 0 1px rgba(0, 229, 255, 0.6), 0 0 18px rgba(0, 229, 255, 0.08);
+  /* The one remaining chamfer: a diagram frame's rectangular card, which sits
+     beside the shaped silhouettes `shapeBox.ts` mirrors. Nothing else cuts. */
+  --cut: polygon(
+    0 0,
+    calc(100% - 10px) 0,
+    100% 10px,
+    100% 100%,
+    10px 100%,
+    0 calc(100% - 10px)
+  );
+  --edge-cyan: inset 2px 0 0 rgba(0, 229, 255, 0.55);
   /* xterm's own font size (mesa task 560). Lives here rather than as a
      literal in `PtyTerminal.tsx` so the phone tier can override it in CSS
      like every other breakpoint-dependent value — xterm reads it as a JS
@@ -35,27 +65,6 @@
      chrome and scrolls internally (diagram canvas, agents terminal). */
   --tab-viewport-height: calc(100vh - 18rem);
   --tab-viewport-min: 24rem;
-  /* Angular corner cut shared by panels, cards, and buttons. */
-  --cut: polygon(
-    0 0,
-    calc(100% - 10px) 0,
-    100% 10px,
-    100% 100%,
-    10px 100%,
-    0 calc(100% - 10px)
-  );
-  /* The same chamfer at half the bite, for the things too small to wear the
-     10px one: a 44px icon button, a 28px chip, a speech bubble. At 10px the
-     cut eats a visible fraction of a 28px-tall box and the shape stops
-     reading as a corner. */
-  --cut-sm: polygon(
-    0 0,
-    calc(100% - 6px) 0,
-    100% 6px,
-    100% 100%,
-    6px 100%,
-    0 calc(100% - 6px)
-  );
 }
 
 * {
@@ -64,7 +73,8 @@
 
 body {
   margin: 0;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
+  font-size: 14.5px;
   color: var(--text);
   background-color: var(--bg);
   /* Static Tron grid backdrop. */
@@ -93,12 +103,10 @@ body {
 
 h1,
 h2 {
-  font-family: var(--font-display);
+  font-family: var(--font-sans);
+  font-weight: 600;
   color: var(--text-h);
-  line-height: 1.2;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  text-shadow: 0 0 12px var(--cyan-dim);
+  line-height: 1.25;
 }
 
 h1 {
@@ -127,59 +135,58 @@ a:hover {
 
 code {
   background: var(--panel-raised);
-  border: 1px solid var(--border);
-  border-radius: 0;
-  padding: 1px 4px;
+  font-family: var(--font-mono);
+  border-radius: 6px;
+  padding: 1px 5px;
   font-size: 0.9em;
 }
 
 button {
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 0.9rem;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+  font-weight: 500;
   color: var(--cyan);
-  background: transparent;
-  border: 1px solid var(--border-bright);
-  clip-path: var(--cut);
-  padding: 0.25rem 0.9rem;
+  background: rgba(0, 229, 255, 0.08);
+  border: 0;
+  border-radius: var(--r-sm);
+  padding: 0.3rem 0.9rem;
   cursor: pointer;
   transition: box-shadow 0.15s, background 0.15s;
 }
 
 button:hover:not(:disabled) {
-  background: rgba(0, 229, 255, 0.08);
-  box-shadow: 0 0 10px var(--cyan-dim), inset 0 0 6px rgba(0, 229, 255, 0.15);
+  background: rgba(0, 229, 255, 0.16);
+  box-shadow: 0 0 12px rgba(0, 229, 255, 0.15);
 }
 
 button:disabled {
   color: var(--muted);
-  border-color: var(--border);
+  background: rgba(93, 127, 143, 0.1);
   cursor: default;
 }
 
 button.danger {
   color: var(--red);
-  border-color: rgba(255, 59, 92, 0.5);
+  background: rgba(255, 59, 92, 0.1);
 }
 
 button.danger:hover:not(:disabled) {
-  background: rgba(255, 59, 92, 0.08);
-  box-shadow: 0 0 10px rgba(255, 59, 92, 0.4),
-    inset 0 0 6px rgba(255, 59, 92, 0.15);
+  background: rgba(255, 59, 92, 0.18);
+  box-shadow: 0 0 12px rgba(255, 59, 92, 0.25);
 }
 
 input,
 select,
 textarea {
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 0.95rem;
   color: var(--text);
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 0;
-  padding: 0.25rem 0.5rem;
-  transition: border-color 0.15s, box-shadow 0.15s;
+  background: var(--surface-field);
+  border: 0;
+  border-radius: var(--r-sm);
+  box-shadow: var(--ring);
+  padding: 0.3rem 0.6rem;
+  transition: box-shadow 0.15s;
 }
 
 input::placeholder,
@@ -191,18 +198,13 @@ input:focus,
 select:focus,
 textarea:focus {
   outline: none;
-  border-color: var(--cyan);
-  box-shadow: 0 0 8px var(--cyan-dim);
+  box-shadow: var(--ring-focus);
 }
 
 /* Shared keyboard-focus highlight for buttons, links, kanban cards and
    InlineEdit (spec 449, story 453) is defined at the bottom of App.css —
    see the comment there for why it uses `outline` rather than extending
    this file's border/box-shadow pattern. */
-
-select {
-  text-transform: uppercase;
-}
 
 select option {
   background: var(--panel);
