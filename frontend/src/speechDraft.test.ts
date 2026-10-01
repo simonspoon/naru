@@ -86,6 +86,11 @@ describe('draftFrom', () => {
     })
   })
 
+  it('is not dirty for a hand-edited off-step speed, once loaded', () => {
+    const odd = { ...SET, speed: 1.234 }
+    expect(isDirty(odd, draftFrom(odd))).toBe(false)
+  })
+
   it('reports a freshly loaded section as pristine', () => {
     expect(isDirty(DEFAULTED, draftFrom(DEFAULTED))).toBe(false)
     expect(isDirty(SET, draftFrom(SET))).toBe(false)

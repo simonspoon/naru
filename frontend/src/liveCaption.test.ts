@@ -74,6 +74,16 @@ describe('captionFraction', () => {
     expect(captionFraction(5, null, text)).toBeCloseTo(0.5)
     expect(captionFraction(100, Infinity, text)).toBe(CAPTION_ESTIMATE_CAP)
   })
+  it('stretches the estimate by the speed of the stretched output clock', () => {
+    const text = 'x'.repeat(CAPTION_CHARS_PER_SECOND * 10)
+    // 0.75x: ten 1x seconds take 13.33s, so 5s is 0.375 (not ahead at 0.5).
+    expect(captionFraction(5, null, text, 0.75)).toBeCloseTo(0.375)
+    // 1.5x: 6.67s total, so 5s is 0.75 (not lagging at 0.5).
+    expect(captionFraction(5, null, text, 1.5)).toBeCloseTo(0.75)
+  })
+  it('leaves a known duration (the element path) unscaled by speed', () => {
+    expect(captionFraction(2, 8, 'hello', 1.5)).toBe(0.25)
+  })
 })
 
 describe('captionLength', () => {

@@ -86,12 +86,15 @@ export function captionFraction(
   elapsed: number | null,
   duration: number | null,
   text: string,
+  speed = 1,
 ): number {
   if (elapsed === null || !Number.isFinite(elapsed) || elapsed <= 0) return 0
   if (duration !== null && Number.isFinite(duration) && duration > 0) {
     return Math.min(CAPTION_ESTIMATE_CAP, elapsed / duration)
   }
-  const estimate = Math.max(1, text.length / CAPTION_CHARS_PER_SECOND)
+  // The estimate is at 1x; stretched output runs 1/speed as long (mesa task
+  // 1560). The element path's `currentTime` is media time and passes 1.
+  const estimate = Math.max(1, text.length / (CAPTION_CHARS_PER_SECOND * speed))
   return Math.min(CAPTION_ESTIMATE_CAP, elapsed / estimate)
 }
 

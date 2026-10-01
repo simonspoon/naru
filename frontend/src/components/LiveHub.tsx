@@ -3170,7 +3170,7 @@ export function LiveHub({
       const el = player.current
       const elapsed = stream !== null ? stream.elapsed() : (el?.currentTime ?? null)
       const duration = stream !== null ? null : (el?.duration ?? null)
-      setCaptionChars(captionLength(turn.text, captionFraction(elapsed, duration, turn.text)))
+      setCaptionChars(captionLength(turn.text, captionFraction(elapsed, duration, turn.text, stream?.speed ?? 1)))
     }
     const timer = window.setInterval(tick, 100)
     return () => window.clearInterval(timer)

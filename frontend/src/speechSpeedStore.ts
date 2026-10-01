@@ -38,7 +38,9 @@ export function loadSpeechSpeed(): void {
   getSpeech().then(
     (speech) => publishSpeechSpeed(speech.speed),
     () => {
-      // Unreadable config: the built-in speed is already in force.
+      // Unreadable config: the built-in speed stays in force, and the next
+      // caller retries (a server mid-restart must not pin 1x for the page).
+      started = false
     },
   )
 }

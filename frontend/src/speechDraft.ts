@@ -169,7 +169,7 @@ export function isDirty(speech: ConfigSpeech, draft: SpeechDraft): boolean {
 
 /** Whether the drafted speed differs from the saved one (1 when unset). */
 function speedChanged(speech: ConfigSpeech, draft: SpeechDraft): boolean {
-  return Math.abs(draft.speed - (speech.speed ?? SPEED_DEFAULT)) > 1e-9
+  return Math.abs(draft.speed - normalizeSpeed(speech.speed)) > 1e-9
 }
 
 /** True when nothing drafted would be rejected by the server. */

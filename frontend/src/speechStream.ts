@@ -89,6 +89,8 @@ export interface SpeechStream {
   /** The playhead in item seconds — what has been heard, 0 before the first
    *  sample sounds (mesa task 1555, the live captions' clock). */
   elapsed: () => number
+  /** The speed this item was stretched at, fixed for its life. */
+  speed: number
 }
 
 /**
@@ -310,6 +312,7 @@ export async function playSpeechStream(
         schedule(played[index].buffer, from, at + delay)
       }
     },
+    speed,
     elapsed() {
       return started ? Math.max(0, Math.min(ctx.currentTime - origin, filled)) : 0
     },
