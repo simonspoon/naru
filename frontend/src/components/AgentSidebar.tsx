@@ -35,6 +35,17 @@ import {
 } from '../agentChild'
 import { defaultListMaximized, liveAgentId, liveCardWait, pinLiveAgent } from '../agentLive'
 import { agentHeadline, agentTint, formatContextTokens, runningBelow } from '../agentRow'
+import {
+  agentChips,
+  agentColor,
+  elapsedSince,
+  isEntering,
+  markSeen,
+  nextExpiry,
+  reconcileLingering,
+  withLingering,
+  type Lingering,
+} from '../agentCard'
 import { publishOpenAgents } from '../liveView'
 import {
   clampAgentSidebarWidth,
@@ -275,6 +286,14 @@ function startedAgo(ms: number): string {
   const hours = Math.floor(mins / 60)
   if (hours < 24) return `${hours}h ${mins % 60}m ago`
   return `${Math.floor(hours / 24)}d ago`
+}
+
+function enteringNow(seen: Record<string, number>, id: string): boolean {
+  return isEntering(seen, id, Date.now())
+}
+
+function elapsedNow(ms: number): string {
+  return elapsedSince(ms, Date.now())
 }
 
 type Bucket = 'BLOCKED' | 'ACTIVE' | 'DONE'
@@ -630,6 +649,10 @@ function MaximizeGlyph({ restore }: { restore: boolean }) {
  * bundled into one object and spread onto `AgentListContent` below. */
 type ListPaneProps = {
   agents: AgentSession[]
+  /** Session ids that just left the list and are dissolving (task 1554). */
+  leaving: string[]
+  /** Session id to when it was first shown (`agentCard.ts::isEntering`). */
+  seen: Record<string, number>
   /** The live conversation's job id (mesa task 1491), pinned above the
    *  buckets; `null` when nothing is live. */
   liveAgentId: string | null
@@ -657,6 +680,8 @@ type ListPaneProps = {
  * supplies its own fixed header/toggle/resize-handle. */
 function AgentListContent({
   agents: allAgents,
+  leaving,
+  seen,
   liveAgentId,
   sessionsLoaded,
   error,
@@ -687,16 +712,28 @@ function AgentListContent({
     const label = agentLabel(a)
     const below = runningBelow(a.children)
     const tint = pinned ? null : agentTint(a)
+    const chips = agentChips(a, proj)
+    const leavingNow = leaving.includes(a.sessionId)
+    const finished = leavingNow || (!pinned && a.state === 'done')
     // The task chip links only when a project claims the
     // folder — the route needs the project id.
     const taskHref =
       a.taskId !== null && proj ? `#/projects/${proj.id}/tasks/${a.taskId}` : null
+    const elapsed = elapsedNow(a.startedAt)
+    const wait = pinned ? liveCardWait(a) : a.waitingFor
     return (
       <li
         key={a.sessionId}
+        // A dissolving card is not interactive, by mouse or keyboard.
+        inert={leavingNow ? true : undefined}
+        style={{ '--k': pinned ? 'var(--violet)' : agentColor(a.sessionId) } as CSSProperties}
         className={
+          'agent-card ' +
           (pinned ? 'agent-card-live ' : '') +
           (tint !== null ? `agent-card-${tint} ` : '') +
+          (enteringNow(seen, a.sessionId) ? 'agent-card-enter ' : '') +
+          (finished ? 'agent-card-finished ' : '') +
+          (leavingNow ? 'agent-card-leaving ' : '') +
           (a.id !== null ? 'attachable' : '') +
           (a.id !== null && openIds.includes(a.id) ? ' selected' : '')
         }
@@ -705,8 +742,7 @@ function AgentListContent({
         }}
       >
         <div className="agent-row-title">
-          {/* The state as a dot, not a pill: the meta line
-              below carries the words (mesa task 1484). */}
+          {/* The state as a dot, not a pill (mesa task 1484). */}
           <span
             className={`agent-card-dot agent-card-dot-${pinned ? 'live' : (tint ?? a.state ?? a.status ?? 'unknown')}`}
             title={
@@ -715,12 +751,40 @@ function AgentListContent({
                 : [a.status, a.state].filter(Boolean).join(' · ') || 'unknown'
             }
           />
-          {/* The card's one big sentence: what the agent
-              is doing (`agentHeadline`), else its name.
-              Model-authored text — a plain text node,
-              never HTML — and the same string in `title`. */}
-          <span className="agent-card-headline" title={headline ?? label}>
-            {headline ?? label}
+          <span className="agent-card-name" title={label}>
+            {label}
+          </span>
+          {chips.project && (
+            <span className="agent-chip" title={proj ? proj.name : a.cwd}>
+              {chips.project}
+            </span>
+          )}
+          {chips.task &&
+            (taskHref ? (
+              <a
+                className="agent-chip agent-chip-task"
+                href={taskHref}
+                title={a.taskName ?? undefined}
+                onClick={(e) => e.stopPropagation()}
+              >
+                {chips.task}
+              </a>
+            ) : (
+              <span className="agent-chip agent-chip-task" title={a.taskName ?? undefined}>
+                {chips.task}
+              </span>
+            ))}
+          {/* Time and context, small and quiet, on the right. */}
+          <span className="agent-card-right">
+            <span title={`started ${startedAgo(a.startedAt)}`}>{elapsed}</span>
+            {context && (
+              <span
+                className="agent-row-context"
+                title={`${a.contextTokens} tokens in the context window`}
+              >
+                {context}
+              </span>
+            )}
           </span>
           {/* Only a background session has a short job id,
               and `claude stop` takes exactly that — an
@@ -728,11 +792,13 @@ function AgentListContent({
               reason its row is not attachable. No
               confirmation: the conversation survives a stop
               and `claude attach` resumes it, which is the
-              reversibility mesa uses instead of a prompt. */}
+              reversibility mesa uses instead of a prompt.
+              Revealed on hover/focus in the corner. */}
           {a.id !== null && (
             <button
               type="button"
               className="agent-row-stop"
+              aria-label="Stop this session"
               title={`Stop this session (claude stop ${a.id}). The conversation is kept — claude attach ${a.id} resumes it.`}
               // The row underneath toggles the attach pane;
               // a press on the button is about the button.
@@ -742,53 +808,26 @@ function AgentListContent({
               }}
               disabled={stoppingIds.includes(a.id)}
             >
-              stop
+              ■
             </button>
           )}
         </div>
-        {/* One faint line: name · kind · model · task or
-            workspace · uptime · ctx · N running below. */}
-        <div className="muted agent-card-meta">
-          {headline && <span className="agent-card-meta-name">{label}</span>}
-          <span>{a.kind}</span>
-          {model && <span>{model}</span>}
-          {a.taskId !== null ? (
-            taskHref ? (
-              <a
-                className="agent-card-task"
-                href={taskHref}
-                title={a.taskName ?? undefined}
-                onClick={(e) => e.stopPropagation()}
-              >
-                task #{a.taskId}
-              </a>
-            ) : (
-              <span className="agent-card-task" title={a.taskName ?? undefined}>
-                task #{a.taskId}
-              </span>
-            )
-          ) : (
-            <span className="agent-row-meta-where" title={proj ? proj.name : a.cwd}>
-              {proj ? proj.name : a.cwd}
-            </span>
-          )}
-          <span title={`started ${startedAgo(a.startedAt)}`}>{startedAgo(a.startedAt)}</span>
-          {context && (
-            <span
-              className="agent-row-context"
-              title={`${a.contextTokens} tokens in the context window`}
-            >
-              {context} ctx
-            </span>
-          )}
-          {below && <span>{below}</span>}
-          {a.id === null && <span>external terminal — not attachable</span>}
-          {pinned ? (
-            liveCardWait(a) && <span className="badge blocked">{liveCardWait(a)}</span>
-          ) : (
-            a.waitingFor && <span className="badge blocked">{a.waitingFor}</span>
-          )}
-        </div>
+        {/* What it is doing — model-authored text, a plain
+            text node, never HTML. Nothing when unknown: the
+            name is already on the line above. */}
+        {headline && (
+          <div className="agent-card-doing" title={headline}>
+            {headline}
+          </div>
+        )}
+        {(wait || below || a.id === null || model) && (
+          <div className="muted agent-card-meta">
+            {model && <span>{model}</span>}
+            {below && <span>{below}</span>}
+            {a.id === null && <span>external terminal — not attachable</span>}
+            {wait && <span className="badge blocked">{wait}</span>}
+          </div>
+        )}
         {/* The work this session holds in flight, nested
             under it (mesa tasks 1277, 1484): a subagent
             leads with its type and description, a shell
@@ -1533,7 +1572,33 @@ export function AgentSidebar({
     return () => clearInterval(t)
   }, [])
 
-  const agents = [...(sessions ?? [])].sort((a, b) => b.startedAt - a.startedAt)
+  const live = [...(sessions ?? [])].sort((a, b) => b.startedAt - a.startedAt)
+  // A session that leaves the list lingers a moment so its card can go green
+  // and dissolve (mesa task 1554); `agentCard.ts` holds the bookkeeping.
+  const [lingering, setLingering] = useState<Lingering[]>([])
+  const prevSessions = useRef<AgentSession[]>([])
+  // When each id was first shown: a card flies in only inside `ENTER_MS` of it.
+  const [seen, setSeen] = useState<Record<string, number>>({})
+  useEffect(() => {
+    if (sessions === null) return
+    // Captured here: React may run the updater after the ref is reassigned.
+    const prev = prevSessions.current
+    const now = Date.now()
+    setLingering((l) => reconcileLingering(l, prev, sessions, now))
+    setSeen((s) => markSeen(s, sessions, now))
+    prevSessions.current = sessions
+  }, [sessions])
+  useEffect(() => {
+    const wait = nextExpiry(lingering, Date.now())
+    if (wait === null) return
+    const current = prevSessions.current
+    const t = setTimeout(
+      () => setLingering((l) => reconcileLingering(l, [], current, Date.now())),
+      wait,
+    )
+    return () => clearTimeout(t)
+  }, [lingering])
+  const { agents, leaving } = withLingering(live, lingering)
   const openIds = collectLeafIds(root)
   // The open agent panes, for the live conversation's view line (mesa task
   // 1424, `liveView.ts`) — agent panes only, not their child panes.
@@ -1571,6 +1636,8 @@ export function AgentSidebar({
 
   const listProps: ListPaneProps = {
     agents,
+    leaving,
+    seen,
     liveAgentId: liveAgentId(liveState),
     sessionsLoaded: sessions !== null,
     error,
