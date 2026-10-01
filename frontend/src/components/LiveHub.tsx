@@ -3989,6 +3989,39 @@ export function LiveHub({
                     </span>
                   )}
                   <div className="live-head-actions">
+                    {/* Offered on the same terms as Pause: there is a live
+                      conversation, this browser is in it, and the microphone
+                      could actually open — a browser with no recognizer, or one
+                      whose microphone was refused, has nothing for this switch
+                      to do, and the caption below says which of the two it is.
+                      A switch reading "listening" before the conversation has
+                      started would claim something that is not happening.
+
+                      A press, not a hold (mesa task 1069 kept this deliberately):
+                      it is the same toggle the ⌘/Ctrl+Shift+L chord drives, and
+                      the two must not mean different things. */}
+                    {live && unlocked && supported && !blocked && (
+                      <button
+                        type="button"
+                        className={`live-icon live-mic${muted ? '' : ' live-on'}`}
+                        aria-pressed={!muted}
+                        aria-label={
+                          muted ? 'listen through this browser' : 'stop listening'
+                        }
+                        // Out of the tab order while the panel is clipped, for
+                        // the same reason the close button is: `pointer-events`
+                        // stops the mouse, not a Tab, and an invisible control
+                        // that toggles the microphone on Enter is worse than a
+                        // button nobody can reach.
+                        tabIndex={open ? undefined : -1}
+                        title={`${
+                          muted ? 'Listen through this browser' : 'Stop listening'
+                        } (${listenChordLabel})`}
+                        onClick={() => toggleListening(!muted)}
+                      >
+                        <MicMark />
+                      </button>
+                    )}
                     {/* Muting Naru's voice (mesa task 1327), on Pause's terms:
                         live, and this browser is in it. The microphone and
                         the transcript carry on; only the speech stops. */}
@@ -4334,13 +4367,9 @@ export function LiveHub({
                             </button>
                           </div>
                         )}
-                        {/* The box and the switch, on one line (mesa task 1069):
-                            the microphone is a square beside the field rather than a
-                            word above it, since it is the other way of saying the
-                            same thing the box is for. Both stay in the panel rather
-                            than the header cluster (mesa task 887) — they are
-                            settings on the conversation's input, read at the moment
-                            the person is deciding whether to talk or to type. */}
+                        {/* The box alone: the microphone switch moved up beside the
+                            speech mute in the head's presses (mesa task 1551), so
+                            dictation is reachable with the chat pane hidden. */}
                         <div className="live-input-row">
                           <textarea
                             className="live-input"
@@ -4386,39 +4415,6 @@ export function LiveHub({
                               send()
                             }}
                           />
-                          {/* Offered on the same terms as Pause: there is a live
-                            conversation, this browser is in it, and the microphone
-                            could actually open — a browser with no recognizer, or one
-                            whose microphone was refused, has nothing for this switch
-                            to do, and the caption below says which of the two it is.
-                            A switch reading "listening" before the conversation has
-                            started would claim something that is not happening.
-
-                            A press, not a hold (mesa task 1069 kept this deliberately):
-                            it is the same toggle the ⌘/Ctrl+Shift+L chord drives, and
-                            the two must not mean different things. */}
-                          {live && unlocked && supported && !blocked && (
-                            <button
-                              type="button"
-                              className={`live-icon live-mic${muted ? '' : ' live-on'}`}
-                              aria-pressed={!muted}
-                              aria-label={
-                                muted ? 'listen through this browser' : 'stop listening'
-                              }
-                              // Out of the tab order while the panel is clipped, for
-                              // the same reason the close button is: `pointer-events`
-                              // stops the mouse, not a Tab, and an invisible control
-                              // that toggles the microphone on Enter is worse than a
-                              // button nobody can reach.
-                              tabIndex={open ? undefined : -1}
-                              title={`${
-                                muted ? 'Listen through this browser' : 'Stop listening'
-                              } (${listenChordLabel})`}
-                              onClick={() => toggleListening(!muted)}
-                            >
-                              <MicMark />
-                            </button>
-                          )}
                         </div>
                         {/* The caption under the box: which microphone, and what the
                             page is doing with it. The chooser moved down here from

@@ -9915,6 +9915,11 @@ body.live-panel-ratio-resizing .live-panel-divider {
 
 /* Its own colour wins over the generic toggle-on tint above: the mute switch
    and the mic are pressed *when something is being held back*. */
+.live-toolbar .live-mic[aria-pressed='true'] {
+  color: var(--green);
+  border-color: rgba(43, 255, 156, 0.5);
+}
+
 .live-toolbar .live-icon-speech[aria-pressed='true'] {
   color: var(--amber);
   border-color: rgba(255, 180, 68, 0.5);
@@ -10255,7 +10260,7 @@ body.live-panel-ratio-resizing .live-panel-divider {
   line-height: 1;
 }
 
-/* The box and the switch, on one line (mesa task 1069). */
+/* The box, on its own line (the mic switch moved to the head, mesa task 1551). */
 .live-input-row {
   display: flex;
   align-items: center;
