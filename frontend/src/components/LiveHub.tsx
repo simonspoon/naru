@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { mainFloor, mainIsCollapsed } from '../mainCollapse'
 import { createPortal } from 'react-dom'
+import * as dockHosts from '../lib/dockHosts'
 import { NaruMark } from './NaruMark'
 import { LiveGlow } from './LiveGlow'
 import { LiveOrb } from './LiveOrb'
@@ -673,9 +674,24 @@ async function openPcmCapture(
   return true
 }
 
+/**
+ * What the dock (mesa task 1567, `docs/dock.md`) lends the hub in place of the
+ * right-hand sidebar: whether its two panels are showing, and the verbs to
+ * show or hide them. Absent on the phone tier, which keeps the one aside.
+ */
+export type LiveDock = {
+  chatVisible: boolean
+  boardVisible: boolean
+  reveal: (panel: 'chat' | 'board' | 'main') => void
+  hide: (panel: 'chat' | 'board') => void
+  /** Unsent ink pins the board: the dock must not move or close it. */
+  setBoardFrozen: (frozen: boolean) => void
+}
+
 export function LiveHub({
   onSidebars,
   slot,
+  dock = null,
   navCollapsed,
   agentsCollapsed,
   activeProjectId,
@@ -686,6 +702,8 @@ export function LiveHub({
   /** Where the conversation panel is rendered (mesa task 887): the shell's
    *  right-hand sidebar slot, `null` until App's own ref has landed. */
   slot: HTMLElement | null
+  /** Docked (mesa task 1567): the panels live in the dock, not in `slot`. */
+  dock?: LiveDock | null
   /** App's two sidebar flags and the project the route is on, read only
    *  into the view line each turn carries (mesa task 1424, `liveView.ts`). */
   navCollapsed: boolean
@@ -815,7 +833,6 @@ export function LiveHub({
   }, [client])
   // The conversation panel. Purely visual: closing it calls no route and stops
   // nothing — the session, the audio and the capture box all carry on.
-  const [open, setOpen] = useState(false)
   // The panel's two sections (mesa task 1447, `liveLayout.ts`): stacked or
   // side by side, the divider's own position, which are showing and which
   // comes first (the toolbar's four toggles, mesa task 1483) — read
@@ -835,11 +852,27 @@ export function LiveHub({
       return next
     })
   }, [])
+  const [openLocal, setOpenLocal] = useState(false)
+  // Docked, "open" is the chat panel being the front tab of a group, and every
+  // opener goes through the dock; the ref keeps the stable callbacks below (and
+  // the `#/live` listener) on the current dock without re-subscribing.
+  const dockRef = useRef(dock)
+  useEffect(() => {
+    dockRef.current = dock
+  }, [dock])
   const showBoard = useCallback(() => {
+    if (dockRef.current) {
+      dockRef.current.reveal('board')
+      return
+    }
     saveBoardHidden(false)
     setLayout((l) => ({ ...l, boardHidden: false }))
   }, [])
   const hideBoard = useCallback(() => {
+    if (dockRef.current) {
+      dockRef.current.hide('board')
+      return
+    }
     // Through the toggle, not a bare flag: hiding the board while the chat is
     // hidden too must bring the chat back rather than empty the panel.
     setLayout((l) => {
@@ -855,6 +888,13 @@ export function LiveHub({
       saveLiveSwapped(!l.swapped)
       return { ...l, swapped: !l.swapped }
     })
+  }, [])
+  const open = dock ? dock.chatVisible : openLocal
+  const setOpen = useCallback((next: boolean) => {
+    const d = dockRef.current
+    if (!d) setOpenLocal(next)
+    else if (next) d.reveal('chat')
+    else d.hide('chat')
   }, [])
   // The arrangement actually on screen right now, as opposed to the one
   // stored (mesa task 1447 fix round, finding 3): the phone tier's own
@@ -1311,11 +1351,13 @@ export function LiveHub({
       // The conversation ended or its boards were cleared: nothing to expand
       // or open for a board that no longer exists.
       if (boardSeen === null) return
+      // A board push shows the whiteboard; only the old aside holds both in
+      // one panel, so only it must be opened as well.
       showBoard()
-      setOpen(true)
+      if (!dockRef.current) setOpen(true)
     }
     settle()
-  }, [boardSeen, showBoard])
+  }, [boardSeen, showBoard, setOpen])
   const hasBoards = boards.length > 0
   useEffect(() => {
     hasBoardsRef.current = hasBoards
@@ -1324,7 +1366,13 @@ export function LiveHub({
   // closing the panel altogether, takes it off screen without touching the
   // other's own state — `boardExpanded` is `false` with no boards at all
   // (there is nothing to show) as much as it is once hidden.
-  const { board: boardExpanded, chat: chatExpanded } = visiblePanes(layout, hasBoards)
+  const panes = visiblePanes(layout, hasBoards)
+  // Docked, the board panel is showing whenever it is on screen (it carries
+  // its own empty state) and the chat panel is always its own panel.
+  const boardExpanded = dock ? dock.boardVisible : panes.board
+  const chatExpanded = dock ? true : panes.chat
+  // The board on screen *now*: the old aside needs the whole panel open too.
+  const boardShown = dock ? boardExpanded : open && boardExpanded
 
   // The person's ink on the boards (mesa task 1353), by board id — held here
   // rather than in the panel because a turn this component sends is what
@@ -1368,6 +1416,9 @@ export function LiveHub({
   // resize or an arrangement switch cannot shrink it out from under the
   // strokes.
   const frozen = frozenBoard(ink) !== null
+  useEffect(() => {
+    dockRef.current?.setBoardFrozen(frozen)
+  }, [frozen])
   const boardSectionRef = useRef<HTMLDivElement | null>(null)
   const [frozenSize, setFrozenSize] = useState<{ width: number; height: number } | null>(
     null,
@@ -1430,7 +1481,7 @@ export function LiveHub({
         chatOpen: open,
         agentsOpen: !agentsCollapsed,
         agentDetail: agentsLabel(openAgents()),
-        boardOpen: open && boardExpanded,
+        boardOpen: hasBoards && boardShown,
         boardId: boardShowing.current,
         navCollapsed,
       })
@@ -3124,6 +3175,7 @@ export function LiveHub({
       if (actsOn(turn, performed.current)) {
         performed.current.add(turn.id)
         const target = navigateTarget(turn)
+        if (target !== null) dockRef.current?.reveal('main')
         if (target !== null && window.location.hash !== target) {
           // eslint-disable-next-line react-hooks/immutability -- `run()` never executes during render: it is called only from effects and event-handler callbacks (`pump.current`/`ended.current`, a claim/press handler). Pre-existing, unrelated to mesa task 1449 — that task's own fix (reading `sounding` via `speaking` state rather than the ref) is what let the compiler's analysis reach this far into the component for the first time.
           window.location.hash = target
@@ -3423,7 +3475,7 @@ export function LiveHub({
     intercept()
     window.addEventListener('hashchange', intercept)
     return () => window.removeEventListener('hashchange', intercept)
-  }, [])
+  }, [setOpen])
 
   // ---- the press ----
 
@@ -3974,6 +4026,596 @@ export function LiveHub({
     transcribing: interim === '' && hearing > 0,
   })
 
+  // The three pieces of the conversation panel, rendered by whichever surface
+  // is showing them (functions, not consts: the compiler declines the whole
+  // component over JSX held in a const): the phone tier's one aside, or — docked
+  // (mesa task 1567) — the chat and board panels' own portals below.
+  // The head (mesa task 1069): the Naru mark (no word; its accessible
+  // name says what is happening), how loud the room has been, and the two
+  // presses that belong to a running conversation. It is the
+  // panel's own instrument cluster — everything here used to be
+  // either in the page header, where it had to answer for a
+  // conversation whose panel was usually shut, or nowhere.
+  const renderHead = () => (
+    <div className="live-sidebar-head">
+      {/* The one thin toolbar (mesa task 1483, replacing the
+          per-pane fold arrows and pane headers): the four layout
+          toggles on the left, the session's own state and presses
+          on the right. Frozen ink locks the four, as it locked the
+          fold buttons and the arrangement toggle they replace —
+          each one moves or resizes the board the strokes are
+          pinned to. With no board history there is one pane and
+          nothing to lay out, so none of them is offered. */}
+      <div className="live-head-row live-toolbar">
+        {hasBoards && !dock && (
+          <div className="live-toolbar-panes">
+            <button
+              type="button"
+              className="live-icon"
+              aria-label={boardExpanded ? 'hide the whiteboard' : 'show the whiteboard'}
+              title={boardExpanded ? 'Hide the board' : 'Show the board'}
+              aria-pressed={boardExpanded}
+              tabIndex={open ? undefined : -1}
+              disabled={frozen}
+              onClick={() => togglePaneShown('board')}
+            >
+              <BoardMark />
+            </button>
+            <button
+              type="button"
+              className="live-icon"
+              aria-label={
+                chatExpanded ? 'hide the conversation' : 'show the conversation'
+              }
+              title={chatExpanded ? 'Hide the chat' : 'Show the chat'}
+              aria-pressed={chatExpanded}
+              tabIndex={open ? undefined : -1}
+              disabled={frozen}
+              onClick={() => togglePaneShown('chat')}
+            >
+              <ChatMark />
+            </button>
+            <button
+              type="button"
+              className="live-icon live-panel-swap"
+              aria-label="swap the whiteboard and the conversation"
+              title="Swap board and chat"
+              aria-pressed={layout.swapped}
+              tabIndex={open ? undefined : -1}
+              disabled={frozen}
+              onClick={toggleSwapped}
+            >
+              <SwapMark />
+            </button>
+            {/* Stacked vs. side by side (mesa task 1447). The phone
+                drawer forces a column, so the toggle would do
+                nothing there. */}
+            {!phone && (
+              <button
+                type="button"
+                className="live-icon live-panel-arrange"
+                aria-label={
+                  layout.arrangement === 'stacked'
+                    ? 'put the whiteboard beside the conversation'
+                    : 'put the whiteboard above the conversation'
+                }
+                title={
+                  layout.arrangement === 'stacked' ? 'Side by side' : 'Stacked'
+                }
+                tabIndex={open ? undefined : -1}
+                disabled={frozen}
+                onClick={() =>
+                  setArrangement(layout.arrangement === 'stacked' ? 'side' : 'stacked')
+                }
+              >
+                <ArrangeMark side={layout.arrangement === 'side'} />
+              </button>
+            )}
+          </div>
+        )}
+        {/* The Naru waveform mark (mesa task 1544): the one picture of
+            the conversation, no text — its colour and motion are the
+            state, and its accessible name says it. */}
+        <div className="live-head-aperture">
+          <NaruMark
+            state={indicator}
+            level={level}
+            speechRms={speechRms}
+            micReady={recognizes}
+          />
+        </div>
+        {session !== null && headMeta(driverModel, data?.context_tokens) !== '' && (
+          <span className="live-head-ctx">
+            {headMeta(driverModel, data?.context_tokens)}
+          </span>
+        )}
+        {session !== null && (
+          <span className="live-head-clock">
+            <LiveElapsed startedAt={session.started_at} />
+          </span>
+        )}
+        <div className="live-head-actions">
+          {/* Offered on the same terms as Pause: there is a live
+            conversation, this browser is in it, and the microphone
+            could actually open — a browser with no recognizer, or one
+            whose microphone was refused, has nothing for this switch
+            to do, and the caption below says which of the two it is.
+            A switch reading "listening" before the conversation has
+            started would claim something that is not happening.
+
+            A press, not a hold (mesa task 1069 kept this deliberately):
+            it is the same toggle the ⌘/Ctrl+Shift+L chord drives, and
+            the two must not mean different things. */}
+          {live && unlocked && supported && !blocked && (
+            <button
+              type="button"
+              className={`live-icon live-mic${muted ? '' : ' live-on'}`}
+              aria-pressed={!muted}
+              aria-label={
+                muted ? 'listen through this browser' : 'stop listening'
+              }
+              // Out of the tab order while the panel is clipped, for
+              // the same reason the close button is: `pointer-events`
+              // stops the mouse, not a Tab, and an invisible control
+              // that toggles the microphone on Enter is worse than a
+              // button nobody can reach.
+              tabIndex={open ? undefined : -1}
+              title={`${
+                muted ? 'Listen through this browser' : 'Stop listening'
+              } (${listenChordLabel})`}
+              onClick={() => toggleListening(!muted)}
+            >
+              <MicMark />
+            </button>
+          )}
+          {/* Muting Naru's voice (mesa task 1327), on Pause's terms:
+              live, and this browser is in it. The microphone and
+              the transcript carry on; only the speech stops. */}
+          {pauseButton && (
+            <button
+              type="button"
+              className="live-icon live-icon-speech"
+              aria-pressed={speechMuted}
+              aria-label={
+                speechMuted ? 'unmute spoken replies' : 'mute spoken replies'
+              }
+              title={speechMuted ? 'Unmute spoken replies' : 'Mute spoken replies'}
+              tabIndex={open ? undefined : -1}
+              onClick={toggleSpeechMuted}
+            >
+              <SpeakerMark muted={speechMuted} />
+            </button>
+          )}
+          {/* Stepping out without ending it (mesa task 882) — offered
+              only while the conversation is live and this browser is
+              in it. Sits before End so the press that destroys the
+              conversation stays last. */}
+          {pauseButton && (
+            <button
+              type="button"
+              className="live-icon live-icon-pause"
+              aria-label={
+                paused ? 'resume the conversation' : 'pause the conversation'
+              }
+              title={pauseButton.label}
+              // Out of the tab order while the panel is clipped, for
+              // the reason the close button is: `pointer-events`
+              // stops the mouse, not a Tab.
+              tabIndex={open ? undefined : -1}
+              disabled={pauseButton.disabled}
+              onClick={() => togglePause(pauseButton)}
+            >
+              {paused ? <ResumeMark /> : <PauseMark />}
+            </button>
+          )}
+          {endButton && (
+            <button
+              type="button"
+              className="live-icon live-icon-end"
+              aria-label="end the conversation"
+              title={endButton.label}
+              tabIndex={open ? undefined : -1}
+              disabled={endButton.disabled}
+              onClick={() => act(endButton)}
+            >
+              <EndMark />
+            </button>
+          )}
+          <button
+            type="button"
+            className="live-icon live-sidebar-close"
+            aria-label="hide the conversation"
+            // Out of the tab order while clipped: an invisible button a Tab
+            // can land on is a trap. The textarea stays tabbable — it is the
+            // one element meant to hold focus while the panel is shut.
+            tabIndex={open ? undefined : -1}
+            onClick={() => {
+              setOpen(false)
+            }}
+          >
+            <CloseMark />
+          </button>
+        </div>
+      </div>
+
+      {/* One sentence under the toolbar, only when there is something
+          to say (an error, paused, resting, ended, no agent, speech
+          unavailable): the plain listening state is silent, so the
+          head stays a single row. */}
+      {statusLine !== null && (
+        <div className={`live-head-status ${actionError !== null ? 'error' : 'muted'}`}>
+          {statusLine}
+        </div>
+      )}
+
+      {/* The server's speech engine is not ready (mesa task 1390,
+          design §4.4): said loudly, with the way to fix it and a
+          Retry, rather than quietly falling back to the browser's
+          recognizer. */}
+      {banner !== null && (
+        <div className="live-unavailable" role="alert">
+          <span className="live-unavailable-text">{banner.text}</span>
+          <div className="live-unavailable-actions">
+            {banner.command !== null && (
+              <>
+                <code className="live-unavailable-command">{banner.command}</code>
+                <button
+                  type="button"
+                  className="live-unavailable-copy"
+                  tabIndex={open ? undefined : -1}
+                  onClick={() => {
+                    void navigator.clipboard
+                      ?.writeText(banner.command ?? '')
+                      .catch(() => undefined)
+                  }}
+                >
+                  Copy
+                </button>
+              </>
+            )}
+            <button
+              type="button"
+              className="live-unavailable-retry"
+              tabIndex={open ? undefined : -1}
+              disabled={retrying}
+              onClick={retryProbe}
+            >
+              {retrying ? 'Retrying…' : 'Retry'}
+            </button>
+          </div>
+        </div>
+      )}
+
+    </div>
+  )
+  const renderBoardPanel = () => (
+    <LiveBoardPanel
+      boards={boards}
+      expanded={boardExpanded}
+      onHide={hideBoard}
+      ink={ink}
+      onInk={updateInk}
+      flattenRef={flattenInk}
+      showingRef={boardShowing}
+    />
+  )
+  const renderChatBody = () => (
+    <>
+      <div className="live-transcript" ref={scroller} onScroll={onTranscriptScroll}>
+        {groups.length === 0 ? (
+          <p className="muted">
+            Nothing said yet. Press {controls.primary.label} to begin.
+          </p>
+        ) : (
+          groups.map((group) => (
+            <div
+              key={group.turns[0].id}
+              className={`live-group live-${group.role}`}
+            >
+              {(() => {
+                // The speaker and the clock, once per group; a
+                // Naru group's own play button sits beside the
+                // clock and plays its first spoken turn.
+                const clock = turnClock(group.turns[0].created_at)
+                const who = (
+                  <span className="live-who">
+                    {turnLabel(group.role, group.notice)}
+                  </span>
+                )
+                const lead = group.turns.find((t) => replayState(t) !== 'hidden')
+                return (
+                  <div className="live-meta">
+                    {group.role === 'user' ? (
+                      <>
+                        {clock !== '' && <span>{clock}</span>}
+                        {who}
+                      </>
+                    ) : (
+                      <>
+                        {who}
+                        {clock !== '' && <span>{clock}</span>}
+                        {lead !== undefined && renderReplay(lead, 'live-play-head')}
+                      </>
+                    )}
+                  </div>
+                )
+              })()}
+              {group.turns.map((turn) => {
+                return (
+                  <div key={turn.id} className="live-turn">
+                    {/* Plain text, never markdown: a mesa turn is
+                        prose meant to be *spoken*, and a user turn
+                        is untrusted dictation. */}
+                    {turn.text !== '' && (
+                      <div className="live-text">
+                        {taskSegments(captioned(turn)).map((seg, i) =>
+                          seg.kind === 'task' ? (
+                            <a
+                              key={i}
+                              className="live-task-chip"
+                              href={taskHash(seg.id)}
+                              tabIndex={open ? undefined : -1}
+                            >
+                              {seg.text}
+                            </a>
+                          ) : (
+                            seg.text
+                          ),
+                        )}
+                      </div>
+                    )}
+                    {/* The person's board ink or a picture they pasted
+                        (mesa task 1475) — a small thumbnail of what the
+                        agent was shown. */}
+                    {turn.image_path !== null && (
+                      <img
+                        src={liveTurnInkUrl(turn.id)}
+                        alt=""
+                        className="live-turn-image"
+                      />
+                    )}
+                    {navigateTarget(turn) !== null && (
+                      <div className="live-navigated">
+                        went to {navigateTarget(turn)}
+                      </div>
+                    )}
+                    {sidebarsIntent(turn) !== null && (
+                      <div className="live-navigated">
+                        {sidebarsIntent(turn) === 'collapse'
+                          ? 'collapsed the sidebars'
+                          : 'opened the sidebars'}
+                      </div>
+                    )}
+                    {/* Replay (mesa task 1449): re-hear this one
+                        bubble on demand — now a round icon that
+                        appears beside the bubble on hover (mesa
+                        task 1565), the group head holding the
+                        always-visible one. */}
+                    {renderReplay(turn, 'live-play-side')}
+                  </div>
+                )
+              })}
+            </div>
+          ))
+        )}
+        {awayAt !== null && (
+          <div className="live-jump">
+            <button type="button" className="live-jump-pill" onClick={jumpToLatest}>
+              Jump to latest
+              {newSince(turns.length, awayAt) > 0 &&
+                ` (${newSince(turns.length, awayAt)} new)`}
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* What is happening right now, in one word or two
+          (mesa task 1153) — one pill between the settled
+          transcript and the box, since at any moment there is
+          at most one thing in flight. `statusPill` ranks
+          mesa's own line above the person being heard for
+          `liveIndicator.ts`'s reason: while she speaks the
+          microphone is shut. The row is always rendered, at a
+          fixed height, with the text hidden rather than the
+          element gone: the composer must not jump as the
+          pill comes and goes, and a live region that is
+          *mounted* when its text changes is announced where a
+          freshly mounted one often is not. */}
+      <div
+        className={`live-status-pill${
+          pill === 'Naru speaking'
+            ? ' live-status-mesa'
+            : pill !== null
+              ? ' live-status-hearing'
+              : ''
+        }`}
+        aria-live="polite"
+      >
+        {pill ?? ''}
+      </div>
+
+      <form
+        className="live-composer"
+        onSubmit={(e) => {
+          e.preventDefault()
+          send()
+        }}
+      >
+        {/* A picture pasted into the box, staged for the next turn
+            (mesa task 1475) — a small chip with a thumbnail and a
+            way to drop it before sending. */}
+        {pastedImage && (
+          <div className="live-pasted-image">
+            <img
+              src={pastedImage.previewUrl}
+              alt="pasted"
+              className="live-pasted-image-thumb"
+            />
+            <button
+              type="button"
+              className="live-pasted-image-remove"
+              aria-label="remove the pasted image"
+              onClick={() => setPastedImage(null)}
+            >
+              ×
+            </button>
+          </div>
+        )}
+        {/* The box alone: the microphone switch moved up beside the
+            speech mute in the head's presses (mesa task 1551), so
+            dictation is reachable with the chat pane hidden. */}
+        <div className="live-input-row">
+          <textarea
+            className="live-input"
+            rows={2}
+            value={draft}
+            // Paused is the same answer as not-live for the box: nothing typed
+            // here would be heard until Resume, and a field that accepts words
+            // nobody will read is worse than one that says it is shut.
+            disabled={!live || paused}
+            placeholder={
+              !live
+                ? 'go live to start the conversation'
+                : paused
+                  ? 'paused — press Resume to talk to Naru'
+                  : recognizes
+                    ? 'listening — or type here'
+                    : 'dictate or type here…'
+            }
+            aria-label="say something to Naru"
+            onChange={(e) => {
+              // eslint-disable-next-line react-hooks/refs -- an event handler; the compiler counts it as render only because `renderChatBody()` is called while rendering
+              updateDraft(e.target.value)
+              // Typing or pasting while listening is the person still
+              // adding to the recording (mesa task 1351), so the silence
+              // wait restarts rather than sending the speech without it.
+              // eslint-disable-next-line react-hooks/refs -- as above
+              if (recognizes) markHeard()
+            }}
+            onPaste={(e) => {
+              // An image paste (mesa task 1475) is staged rather than
+              // typed — a plain text paste falls through unchanged.
+              const files = imageFilesFromClipboard(e.clipboardData, Date.now())
+              if (files.length === 0) return
+              e.preventDefault()
+              void stagePastedImage(files[0])
+            }}
+            onKeyDown={(e) => {
+              if (e.key !== 'Enter' || e.shiftKey) return
+              // The Enter that commits an IME candidate is not a send: it
+              // arrives as a plain `Enter` keydown with `isComposing` set, and
+              // acting on it would ship half-converted text. The same guard,
+              // for the same reason, as the agent chat composer's.
+              if (e.nativeEvent.isComposing) return
+              e.preventDefault()
+              send()
+            }}
+          />
+          {/* The microphone chooser, folded into a sliders icon
+              (mesa task 1565): the real <select> lies invisibly
+              over it, so the semantics, the keyboard and the
+              native picker are all unchanged. Offered only
+              where there is more than one microphone and the
+              browser takes a track (`liveDevices.ts`) — a
+              control that cannot change what mesa hears is
+              worse than no control. */}
+          {choosesInput && (
+            <label className="live-mic-source" title="Microphone source">
+              <SlidersMark />
+              <select
+                className="live-input-choice"
+                aria-label="microphone"
+                tabIndex={open ? undefined : -1}
+                value={chosen}
+                onChange={(event) => {
+                  const next = event.target.value
+                  writeInputChoice(next)
+                  setStoredInput(next)
+                  // Choosing is asking again: a device that refused
+                  // before may be free now, and the person picking it is
+                  // who decides to retry.
+                  setRefusedInput(null)
+                }}
+              >
+                <option value={DEFAULT_INPUT}>Default mic</option>
+                {inputs.map((input, index) => (
+                  <option key={input.deviceId} value={input.deviceId}>
+                    {inputLabel(input, index)}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          {live && unlocked && supported && !blocked && (
+            <button
+              type="button"
+              className={`live-composer-mic${muted ? '' : ' live-on'}`}
+              aria-pressed={!muted}
+              aria-label={muted ? 'listen through this browser' : 'stop listening'}
+              tabIndex={open ? undefined : -1}
+              title={`${
+                muted ? 'Listen through this browser' : 'Stop listening'
+              } (${listenChordLabel})`}
+              onClick={() => toggleListening(!muted)}
+            >
+              <MicMark />
+            </button>
+          )}
+          <button
+            type="submit"
+            className="live-send"
+            aria-label="send"
+            title="Send (Enter)"
+            tabIndex={open ? undefined : -1}
+            disabled={!live || paused}
+          >
+            <SendMark />
+          </button>
+        </div>
+        {/* The one quiet line under the box (mesa task 1565):
+            the chord, or whatever `captureHint` has to say in a
+            state that is not the plain resting one, and which
+            microphone is in use. */}
+        {(() => {
+          const hint = quietHint({
+            live,
+            joined: unlocked,
+            path,
+            blocked,
+            listening: recognizes,
+            paused,
+            muted,
+            chord: listenChordLabel,
+            audioEngine: audio?.engine ?? null,
+          })
+          const micName =
+            chosen === DEFAULT_INPUT
+              ? 'default mic'
+              : inputLabel(
+                  inputs.find((i) => i.deviceId === chosen) ?? inputs[0],
+                  Math.max(
+                    0,
+                    inputs.findIndex((i) => i.deviceId === chosen),
+                  ),
+                )
+          return (
+            <div className="live-caption">
+              <span
+                className="live-hint muted"
+                title={hint.chord === null ? hint.text : undefined}
+              >
+                {hint.chord !== null && <kbd>{hint.chord}</kbd>} {hint.text}
+              </span>
+              {choosesInput && (
+                <span className="live-hint-mic muted">{micName}</span>
+              )}
+            </div>
+          )
+        })()}
+      </form>
+    </>
+  )
+
   return (
     <div className="live-hub">
       {controls.panel && (
@@ -3983,7 +4625,7 @@ export function LiveHub({
           aria-label="show the conversation"
           aria-expanded={open}
           onClick={() => {
-            setOpen((o) => !o)
+            setOpen(!open)
           }}
         >
           <LiveMark />
@@ -4020,14 +4662,14 @@ export function LiveHub({
           onToggleSpeech={toggleSpeechMuted}
         />
       )}
-      {hasBoards && !(open && boardExpanded) && (
+      {hasBoards && !boardShown && (
         <button
           type="button"
           className="live-toggle live-panel-toggle"
           aria-label="show the whiteboard"
           onClick={() => {
             showBoard()
-            setOpen(true)
+            if (!dock) setOpen(true)
           }}
         >
           <BoardMark />
@@ -4082,7 +4724,31 @@ export function LiveHub({
           and the dictation flowing into it, across a close. No `aria-hidden`
           while closed either — the box deliberately keeps real focus, which
           aria-hidden forbids. Closing is CSS width: no route, no stop. */}
-      {slot !== null &&
+      {/* Docked (mesa task 1567): the chat and the whiteboard are two panels,
+          each portalled into its own stable host (`lib/dockHosts.ts`) so the
+          dock can move either without remounting this component's state. */}
+      {dock &&
+        createPortal(
+          <div className="live-sidebar-body dock-chat" aria-label="the live conversation">
+            {renderHead()}
+            {error && <p className="error">{error}</p>}
+            <div className="live-panel-section live-panel-chat">{renderChatBody()}</div>
+          </div>,
+          dockHosts.hostFor('chat'),
+        )}
+      {dock &&
+        createPortal(
+          hasBoards ? (
+            <div className="live-panel-section live-panel-board live-board-section dock-board">
+              {renderBoardPanel()}
+            </div>
+          ) : (
+            <p className="muted dock-empty-note">No whiteboard yet — it appears when Naru pushes one.</p>
+          ),
+          dockHosts.hostFor('board'),
+        )}
+      {!dock &&
+        slot !== null &&
         createPortal(
           <aside
             ref={asideRef}
@@ -4132,262 +4798,7 @@ export function LiveHub({
               />
             )}
             <div className="live-sidebar-body">
-              {/* The head (mesa task 1069): the Naru mark (no word; its accessible
-                  name says what is happening), how loud the room has been, and the two
-                  presses that belong to a running conversation. It is the
-                  panel's own instrument cluster — everything here used to be
-                  either in the page header, where it had to answer for a
-                  conversation whose panel was usually shut, or nowhere. */}
-              <div className="live-sidebar-head">
-                {/* The one thin toolbar (mesa task 1483, replacing the
-                    per-pane fold arrows and pane headers): the four layout
-                    toggles on the left, the session's own state and presses
-                    on the right. Frozen ink locks the four, as it locked the
-                    fold buttons and the arrangement toggle they replace —
-                    each one moves or resizes the board the strokes are
-                    pinned to. With no board history there is one pane and
-                    nothing to lay out, so none of them is offered. */}
-                <div className="live-head-row live-toolbar">
-                  {hasBoards && (
-                    <div className="live-toolbar-panes">
-                      <button
-                        type="button"
-                        className="live-icon"
-                        aria-label={boardExpanded ? 'hide the whiteboard' : 'show the whiteboard'}
-                        title={boardExpanded ? 'Hide the board' : 'Show the board'}
-                        aria-pressed={boardExpanded}
-                        tabIndex={open ? undefined : -1}
-                        disabled={frozen}
-                        onClick={() => togglePaneShown('board')}
-                      >
-                        <BoardMark />
-                      </button>
-                      <button
-                        type="button"
-                        className="live-icon"
-                        aria-label={
-                          chatExpanded ? 'hide the conversation' : 'show the conversation'
-                        }
-                        title={chatExpanded ? 'Hide the chat' : 'Show the chat'}
-                        aria-pressed={chatExpanded}
-                        tabIndex={open ? undefined : -1}
-                        disabled={frozen}
-                        onClick={() => togglePaneShown('chat')}
-                      >
-                        <ChatMark />
-                      </button>
-                      <button
-                        type="button"
-                        className="live-icon live-panel-swap"
-                        aria-label="swap the whiteboard and the conversation"
-                        title="Swap board and chat"
-                        aria-pressed={layout.swapped}
-                        tabIndex={open ? undefined : -1}
-                        disabled={frozen}
-                        onClick={toggleSwapped}
-                      >
-                        <SwapMark />
-                      </button>
-                      {/* Stacked vs. side by side (mesa task 1447). The phone
-                          drawer forces a column, so the toggle would do
-                          nothing there. */}
-                      {!phone && (
-                        <button
-                          type="button"
-                          className="live-icon live-panel-arrange"
-                          aria-label={
-                            layout.arrangement === 'stacked'
-                              ? 'put the whiteboard beside the conversation'
-                              : 'put the whiteboard above the conversation'
-                          }
-                          title={
-                            layout.arrangement === 'stacked' ? 'Side by side' : 'Stacked'
-                          }
-                          tabIndex={open ? undefined : -1}
-                          disabled={frozen}
-                          onClick={() =>
-                            setArrangement(layout.arrangement === 'stacked' ? 'side' : 'stacked')
-                          }
-                        >
-                          <ArrangeMark side={layout.arrangement === 'side'} />
-                        </button>
-                      )}
-                    </div>
-                  )}
-                  {/* The Naru waveform mark (mesa task 1544): the one picture of
-                      the conversation, no text — its colour and motion are the
-                      state, and its accessible name says it. */}
-                  <div className="live-head-aperture">
-                    <NaruMark
-                      state={indicator}
-                      level={level}
-                      speechRms={speechRms}
-                      micReady={recognizes}
-                    />
-                  </div>
-                  {session !== null && headMeta(driverModel, data?.context_tokens) !== '' && (
-                    <span className="live-head-ctx">
-                      {headMeta(driverModel, data?.context_tokens)}
-                    </span>
-                  )}
-                  {session !== null && (
-                    <span className="live-head-clock">
-                      <LiveElapsed startedAt={session.started_at} />
-                    </span>
-                  )}
-                  <div className="live-head-actions">
-                    {/* Offered on the same terms as Pause: there is a live
-                      conversation, this browser is in it, and the microphone
-                      could actually open — a browser with no recognizer, or one
-                      whose microphone was refused, has nothing for this switch
-                      to do, and the caption below says which of the two it is.
-                      A switch reading "listening" before the conversation has
-                      started would claim something that is not happening.
-
-                      A press, not a hold (mesa task 1069 kept this deliberately):
-                      it is the same toggle the ⌘/Ctrl+Shift+L chord drives, and
-                      the two must not mean different things. */}
-                    {live && unlocked && supported && !blocked && (
-                      <button
-                        type="button"
-                        className={`live-icon live-mic${muted ? '' : ' live-on'}`}
-                        aria-pressed={!muted}
-                        aria-label={
-                          muted ? 'listen through this browser' : 'stop listening'
-                        }
-                        // Out of the tab order while the panel is clipped, for
-                        // the same reason the close button is: `pointer-events`
-                        // stops the mouse, not a Tab, and an invisible control
-                        // that toggles the microphone on Enter is worse than a
-                        // button nobody can reach.
-                        tabIndex={open ? undefined : -1}
-                        title={`${
-                          muted ? 'Listen through this browser' : 'Stop listening'
-                        } (${listenChordLabel})`}
-                        onClick={() => toggleListening(!muted)}
-                      >
-                        <MicMark />
-                      </button>
-                    )}
-                    {/* Muting Naru's voice (mesa task 1327), on Pause's terms:
-                        live, and this browser is in it. The microphone and
-                        the transcript carry on; only the speech stops. */}
-                    {pauseButton && (
-                      <button
-                        type="button"
-                        className="live-icon live-icon-speech"
-                        aria-pressed={speechMuted}
-                        aria-label={
-                          speechMuted ? 'unmute spoken replies' : 'mute spoken replies'
-                        }
-                        title={speechMuted ? 'Unmute spoken replies' : 'Mute spoken replies'}
-                        tabIndex={open ? undefined : -1}
-                        onClick={toggleSpeechMuted}
-                      >
-                        <SpeakerMark muted={speechMuted} />
-                      </button>
-                    )}
-                    {/* Stepping out without ending it (mesa task 882) — offered
-                        only while the conversation is live and this browser is
-                        in it. Sits before End so the press that destroys the
-                        conversation stays last. */}
-                    {pauseButton && (
-                      <button
-                        type="button"
-                        className="live-icon live-icon-pause"
-                        aria-label={
-                          paused ? 'resume the conversation' : 'pause the conversation'
-                        }
-                        title={pauseButton.label}
-                        // Out of the tab order while the panel is clipped, for
-                        // the reason the close button is: `pointer-events`
-                        // stops the mouse, not a Tab.
-                        tabIndex={open ? undefined : -1}
-                        disabled={pauseButton.disabled}
-                        onClick={() => togglePause(pauseButton)}
-                      >
-                        {paused ? <ResumeMark /> : <PauseMark />}
-                      </button>
-                    )}
-                    {endButton && (
-                      <button
-                        type="button"
-                        className="live-icon live-icon-end"
-                        aria-label="end the conversation"
-                        title={endButton.label}
-                        tabIndex={open ? undefined : -1}
-                        disabled={endButton.disabled}
-                        onClick={() => act(endButton)}
-                      >
-                        <EndMark />
-                      </button>
-                    )}
-                    <button
-                      type="button"
-                      className="live-icon live-sidebar-close"
-                      aria-label="hide the conversation"
-                      // Out of the tab order while clipped: an invisible button a Tab
-                      // can land on is a trap. The textarea stays tabbable — it is the
-                      // one element meant to hold focus while the panel is shut.
-                      tabIndex={open ? undefined : -1}
-                      onClick={() => {
-                        setOpen(false)
-                      }}
-                    >
-                      <CloseMark />
-                    </button>
-                  </div>
-                </div>
-
-                {/* One sentence under the toolbar, only when there is something
-                    to say (an error, paused, resting, ended, no agent, speech
-                    unavailable): the plain listening state is silent, so the
-                    head stays a single row. */}
-                {statusLine !== null && (
-                  <div className={`live-head-status ${actionError !== null ? 'error' : 'muted'}`}>
-                    {statusLine}
-                  </div>
-                )}
-
-                {/* The server's speech engine is not ready (mesa task 1390,
-                    design §4.4): said loudly, with the way to fix it and a
-                    Retry, rather than quietly falling back to the browser's
-                    recognizer. */}
-                {banner !== null && (
-                  <div className="live-unavailable" role="alert">
-                    <span className="live-unavailable-text">{banner.text}</span>
-                    <div className="live-unavailable-actions">
-                      {banner.command !== null && (
-                        <>
-                          <code className="live-unavailable-command">{banner.command}</code>
-                          <button
-                            type="button"
-                            className="live-unavailable-copy"
-                            tabIndex={open ? undefined : -1}
-                            onClick={() => {
-                              void navigator.clipboard
-                                ?.writeText(banner.command ?? '')
-                                .catch(() => undefined)
-                            }}
-                          >
-                            Copy
-                          </button>
-                        </>
-                      )}
-                      <button
-                        type="button"
-                        className="live-unavailable-retry"
-                        tabIndex={open ? undefined : -1}
-                        disabled={retrying}
-                        onClick={retryProbe}
-                      >
-                        {retrying ? 'Retrying…' : 'Retry'}
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-              </div>
+              {renderHead()}
 
               {error && <p className="error">{error}</p>}
 
@@ -4428,15 +4839,7 @@ export function LiveHub({
                         : {}),
                     }}
                   >
-                    <LiveBoardPanel
-                      boards={boards}
-                      expanded={boardExpanded}
-                      onHide={hideBoard}
-                      ink={ink}
-                      onInk={updateInk}
-                      flattenRef={flattenInk}
-                      showingRef={boardShowing}
-                    />
+                    {renderBoardPanel()}
                   </div>
                 )}
 
@@ -4470,320 +4873,7 @@ export function LiveHub({
                       : undefined
                   }
                 >
-                  {chatExpanded && (
-                    <>
-                      <div className="live-transcript" ref={scroller} onScroll={onTranscriptScroll}>
-                        {groups.length === 0 ? (
-                          <p className="muted">
-                            Nothing said yet. Press {controls.primary.label} to begin.
-                          </p>
-                        ) : (
-                          groups.map((group) => (
-                            <div
-                              key={group.turns[0].id}
-                              className={`live-group live-${group.role}`}
-                            >
-                              {(() => {
-                                // The speaker and the clock, once per group; a
-                                // Naru group's own play button sits beside the
-                                // clock and plays its first spoken turn.
-                                const clock = turnClock(group.turns[0].created_at)
-                                const who = (
-                                  <span className="live-who">
-                                    {turnLabel(group.role, group.notice)}
-                                  </span>
-                                )
-                                const lead = group.turns.find((t) => replayState(t) !== 'hidden')
-                                return (
-                                  <div className="live-meta">
-                                    {group.role === 'user' ? (
-                                      <>
-                                        {clock !== '' && <span>{clock}</span>}
-                                        {who}
-                                      </>
-                                    ) : (
-                                      <>
-                                        {who}
-                                        {clock !== '' && <span>{clock}</span>}
-                                        {lead !== undefined && renderReplay(lead, 'live-play-head')}
-                                      </>
-                                    )}
-                                  </div>
-                                )
-                              })()}
-                              {group.turns.map((turn) => {
-                                return (
-                                  <div key={turn.id} className="live-turn">
-                                    {/* Plain text, never markdown: a mesa turn is
-                                        prose meant to be *spoken*, and a user turn
-                                        is untrusted dictation. */}
-                                    {turn.text !== '' && (
-                                      <div className="live-text">
-                                        {taskSegments(captioned(turn)).map((seg, i) =>
-                                          seg.kind === 'task' ? (
-                                            <a
-                                              key={i}
-                                              className="live-task-chip"
-                                              href={taskHash(seg.id)}
-                                              tabIndex={open ? undefined : -1}
-                                            >
-                                              {seg.text}
-                                            </a>
-                                          ) : (
-                                            seg.text
-                                          ),
-                                        )}
-                                      </div>
-                                    )}
-                                    {/* The person's board ink or a picture they pasted
-                                        (mesa task 1475) — a small thumbnail of what the
-                                        agent was shown. */}
-                                    {turn.image_path !== null && (
-                                      <img
-                                        src={liveTurnInkUrl(turn.id)}
-                                        alt=""
-                                        className="live-turn-image"
-                                      />
-                                    )}
-                                    {navigateTarget(turn) !== null && (
-                                      <div className="live-navigated">
-                                        went to {navigateTarget(turn)}
-                                      </div>
-                                    )}
-                                    {sidebarsIntent(turn) !== null && (
-                                      <div className="live-navigated">
-                                        {sidebarsIntent(turn) === 'collapse'
-                                          ? 'collapsed the sidebars'
-                                          : 'opened the sidebars'}
-                                      </div>
-                                    )}
-                                    {/* Replay (mesa task 1449): re-hear this one
-                                        bubble on demand — now a round icon that
-                                        appears beside the bubble on hover (mesa
-                                        task 1565), the group head holding the
-                                        always-visible one. */}
-                                    {renderReplay(turn, 'live-play-side')}
-                                  </div>
-                                )
-                              })}
-                            </div>
-                          ))
-                        )}
-                        {awayAt !== null && (
-                          <div className="live-jump">
-                            <button type="button" className="live-jump-pill" onClick={jumpToLatest}>
-                              Jump to latest
-                              {newSince(turns.length, awayAt) > 0 &&
-                                ` (${newSince(turns.length, awayAt)} new)`}
-                            </button>
-                          </div>
-                        )}
-                      </div>
-
-                      {/* What is happening right now, in one word or two
-                          (mesa task 1153) — one pill between the settled
-                          transcript and the box, since at any moment there is
-                          at most one thing in flight. `statusPill` ranks
-                          mesa's own line above the person being heard for
-                          `liveIndicator.ts`'s reason: while she speaks the
-                          microphone is shut. The row is always rendered, at a
-                          fixed height, with the text hidden rather than the
-                          element gone: the composer must not jump as the
-                          pill comes and goes, and a live region that is
-                          *mounted* when its text changes is announced where a
-                          freshly mounted one often is not. */}
-                      <div
-                        className={`live-status-pill${
-                          pill === 'Naru speaking'
-                            ? ' live-status-mesa'
-                            : pill !== null
-                              ? ' live-status-hearing'
-                              : ''
-                        }`}
-                        aria-live="polite"
-                      >
-                        {pill ?? ''}
-                      </div>
-
-                      <form
-                        className="live-composer"
-                        onSubmit={(e) => {
-                          e.preventDefault()
-                          send()
-                        }}
-                      >
-                        {/* A picture pasted into the box, staged for the next turn
-                            (mesa task 1475) — a small chip with a thumbnail and a
-                            way to drop it before sending. */}
-                        {pastedImage && (
-                          <div className="live-pasted-image">
-                            <img
-                              src={pastedImage.previewUrl}
-                              alt="pasted"
-                              className="live-pasted-image-thumb"
-                            />
-                            <button
-                              type="button"
-                              className="live-pasted-image-remove"
-                              aria-label="remove the pasted image"
-                              onClick={() => setPastedImage(null)}
-                            >
-                              ×
-                            </button>
-                          </div>
-                        )}
-                        {/* The box alone: the microphone switch moved up beside the
-                            speech mute in the head's presses (mesa task 1551), so
-                            dictation is reachable with the chat pane hidden. */}
-                        <div className="live-input-row">
-                          <textarea
-                            className="live-input"
-                            rows={2}
-                            value={draft}
-                            // Paused is the same answer as not-live for the box: nothing typed
-                            // here would be heard until Resume, and a field that accepts words
-                            // nobody will read is worse than one that says it is shut.
-                            disabled={!live || paused}
-                            placeholder={
-                              !live
-                                ? 'go live to start the conversation'
-                                : paused
-                                  ? 'paused — press Resume to talk to Naru'
-                                  : recognizes
-                                    ? 'listening — or type here'
-                                    : 'dictate or type here…'
-                            }
-                            aria-label="say something to Naru"
-                            onChange={(e) => {
-                              updateDraft(e.target.value)
-                              // Typing or pasting while listening is the person still
-                              // adding to the recording (mesa task 1351), so the silence
-                              // wait restarts rather than sending the speech without it.
-                              if (recognizes) markHeard()
-                            }}
-                            onPaste={(e) => {
-                              // An image paste (mesa task 1475) is staged rather than
-                              // typed — a plain text paste falls through unchanged.
-                              const files = imageFilesFromClipboard(e.clipboardData, Date.now())
-                              if (files.length === 0) return
-                              e.preventDefault()
-                              void stagePastedImage(files[0])
-                            }}
-                            onKeyDown={(e) => {
-                              if (e.key !== 'Enter' || e.shiftKey) return
-                              // The Enter that commits an IME candidate is not a send: it
-                              // arrives as a plain `Enter` keydown with `isComposing` set, and
-                              // acting on it would ship half-converted text. The same guard,
-                              // for the same reason, as the agent chat composer's.
-                              if (e.nativeEvent.isComposing) return
-                              e.preventDefault()
-                              send()
-                            }}
-                          />
-                          {/* The microphone chooser, folded into a sliders icon
-                              (mesa task 1565): the real <select> lies invisibly
-                              over it, so the semantics, the keyboard and the
-                              native picker are all unchanged. Offered only
-                              where there is more than one microphone and the
-                              browser takes a track (`liveDevices.ts`) — a
-                              control that cannot change what mesa hears is
-                              worse than no control. */}
-                          {choosesInput && (
-                            <label className="live-mic-source" title="Microphone source">
-                              <SlidersMark />
-                              <select
-                                className="live-input-choice"
-                                aria-label="microphone"
-                                tabIndex={open ? undefined : -1}
-                                value={chosen}
-                                onChange={(event) => {
-                                  const next = event.target.value
-                                  writeInputChoice(next)
-                                  setStoredInput(next)
-                                  // Choosing is asking again: a device that refused
-                                  // before may be free now, and the person picking it is
-                                  // who decides to retry.
-                                  setRefusedInput(null)
-                                }}
-                              >
-                                <option value={DEFAULT_INPUT}>Default mic</option>
-                                {inputs.map((input, index) => (
-                                  <option key={input.deviceId} value={input.deviceId}>
-                                    {inputLabel(input, index)}
-                                  </option>
-                                ))}
-                              </select>
-                            </label>
-                          )}
-                          {live && unlocked && supported && !blocked && (
-                            <button
-                              type="button"
-                              className={`live-composer-mic${muted ? '' : ' live-on'}`}
-                              aria-pressed={!muted}
-                              aria-label={muted ? 'listen through this browser' : 'stop listening'}
-                              tabIndex={open ? undefined : -1}
-                              title={`${
-                                muted ? 'Listen through this browser' : 'Stop listening'
-                              } (${listenChordLabel})`}
-                              onClick={() => toggleListening(!muted)}
-                            >
-                              <MicMark />
-                            </button>
-                          )}
-                          <button
-                            type="submit"
-                            className="live-send"
-                            aria-label="send"
-                            title="Send (Enter)"
-                            tabIndex={open ? undefined : -1}
-                            disabled={!live || paused}
-                          >
-                            <SendMark />
-                          </button>
-                        </div>
-                        {/* The one quiet line under the box (mesa task 1565):
-                            the chord, or whatever `captureHint` has to say in a
-                            state that is not the plain resting one, and which
-                            microphone is in use. */}
-                        {(() => {
-                          const hint = quietHint({
-                            live,
-                            joined: unlocked,
-                            path,
-                            blocked,
-                            listening: recognizes,
-                            paused,
-                            muted,
-                            chord: listenChordLabel,
-                            audioEngine: audio?.engine ?? null,
-                          })
-                          const micName =
-                            chosen === DEFAULT_INPUT
-                              ? 'default mic'
-                              : inputLabel(
-                                  inputs.find((i) => i.deviceId === chosen) ?? inputs[0],
-                                  Math.max(
-                                    0,
-                                    inputs.findIndex((i) => i.deviceId === chosen),
-                                  ),
-                                )
-                          return (
-                            <div className="live-caption">
-                              <span
-                                className="live-hint muted"
-                                title={hint.chord === null ? hint.text : undefined}
-                              >
-                                {hint.chord !== null && <kbd>{hint.chord}</kbd>} {hint.text}
-                              </span>
-                              {choosesInput && (
-                                <span className="live-hint-mic muted">{micName}</span>
-                              )}
-                            </div>
-                          )
-                        })()}
-                      </form>
-                    </>
-                  )}
+                  {chatExpanded && renderChatBody()}
                 </div>
               </div>
             </div>

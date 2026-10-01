@@ -1,8 +1,14 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import './App.css'
 import { getCcUsage, getNaruVersion, getTask, listInbox } from './api'
 import { AgentSidebar } from './components/AgentSidebar'
 import { CommandPalette } from './components/CommandPalette'
+import { DiagramsPanel } from './components/DiagramsPanel'
+import { DockBar, DockLayout } from './components/DockLayout'
+import { useDockStore } from './useDockStore'
+import { isVisible, type PanelId } from './dockLayout'
+import { hostFor } from './lib/dockHosts'
 import { DoneToasts } from './components/DoneToasts'
 import { PhoneTabBar } from './components/PhoneTabBar'
 import { PtyPool } from './components/PtyPool'
@@ -19,14 +25,14 @@ import { CCSessionDetailView } from './pages/CCSessionDetailView'
 import { CCSessionTimelineView } from './pages/CCSessionTimelineView'
 import { InboxView } from './pages/InboxView'
 import { LibraryView } from './pages/LibraryView'
-import { LiveHub } from './components/LiveHub'
+import { LiveHub, type LiveDock } from './components/LiveHub'
 import { ProjectTasksPage } from './pages/ProjectTasksPage'
 import { ScriptsView } from './pages/ScriptsView'
 import { SettingsView } from './pages/SettingsView'
 import { settingsTabFromPath } from './settingsTab'
 import { TerminalPage } from './pages/TerminalPage'
 import { isNavLinkClick, loadMainCollapsed, saveMainCollapsed } from './mainCollapse'
-import { isPhone, onPhoneTierChange } from './phoneTier'
+import { isPhone, onPhoneTierChange, usePhoneTier } from './phoneTier'
 import { useSpatialNav } from './spatialNav'
 import { useFetch } from './useFetch'
 import { usagePct, usageSeverity } from './usageMeter'
@@ -166,6 +172,26 @@ function App() {
   // rendered in this same commit, so it does not exist while the hub above is
   // rendering, and the ref landing is what says it does now.
   const [liveSlot, setLiveSlot] = useState<HTMLDivElement | null>(null)
+  // The dock (mesa task 1567, docs/dock.md): on the desktop tiers every panel
+  // but the nav is a dockable panel; the phone tier keeps its drawers and tab
+  // bar exactly as they were.
+  const docked = !usePhoneTier()
+  const dock = useDockStore()
+  const [boardFrozen, setBoardFrozen] = useState(false)
+  const locked = useMemo<ReadonlySet<PanelId>>(
+    () => new Set<PanelId>(boardFrozen ? ['board'] : []),
+    [boardFrozen],
+  )
+  const agentsVisible = isVisible(dock.state, 'agents')
+  const terminalVisible = isVisible(dock.state, 'terminal')
+  const chatVisible = isVisible(dock.state, 'chat')
+  const boardVisible = isVisible(dock.state, 'board')
+  const { reveal, hide } = dock
+  const liveDock = useMemo<LiveDock | null>(
+    () =>
+      docked ? { chatVisible, boardVisible, reveal, hide, setBoardFrozen } : null,
+    [docked, chatVisible, boardVisible, reveal, hide],
+  )
   // What the keyboard is bound to right now — the shipped chords until the
   // one `GET /api/config/keymap` this page makes resolves (mesa task 1079).
   const keymap = useKeymap()
@@ -231,6 +257,35 @@ function App() {
     saveMainCollapsed(false)
     setMainCollapsedState(false)
   }, [path])
+  // Docked, a route change brings the main panel forward (it may be a background
+  // tab or closed), and `#/terminal` is a verb like `#/live`: it shows the
+  // terminal panel and the hash goes back to where the person was, since the
+  // terminal is a panel here, not a page. `bounced` stops the put-back, which
+  // is itself a path change, from pulling main back over the terminal.
+  const prevHash = useRef(`#${hash}`)
+  const bounced = useRef(false)
+  // `null` until the first run: the mount keeps the remembered layout (a
+  // closed main stays closed over a reload), except that a page loaded *on*
+  // `#/terminal` still has to bounce.
+  const dockSeenPath = useRef<string | null>(null)
+  useEffect(() => {
+    if (!docked || dockSeenPath.current === path) return
+    const first = dockSeenPath.current === null
+    dockSeenPath.current = path
+    if (first && path !== '/terminal') return
+    if (path === '/terminal') {
+      bounced.current = true
+      reveal('terminal')
+      window.location.replace(prevHash.current)
+      return
+    }
+    prevHash.current = `#${hash}`
+    if (bounced.current) {
+      bounced.current = false
+      return
+    }
+    reveal('main')
+  }, [path, hash, docked, reveal])
   // `useState(isPhone)` above decides the nav drawer's state once, at mount,
   // and nothing re-decided it afterwards (mesa task 562; the flaw predates the
   // hoist to App and was filed against Sidebar.tsx, where it used to live).
@@ -681,7 +736,9 @@ function App() {
         </a>
         {/* The right cluster (mesa task 857): the live conversation's controls
             sit beside the plan-limit chips, on every page. */}
+        {docked && <DockBar dock={dock} locked={locked} />}
         <div className="header-right">
+          {!docked && (
           <button
             type="button"
             className="sidebar-toggle main-collapse-toggle"
@@ -692,27 +749,33 @@ function App() {
           >
             {mainCollapsed ? '▣' : '◧'}
           </button>
+          )}
           {/* A `collapse-sidebars` turn moves both panels at once (task 859):
               the conversation asked for room, and "the sidebars" is the pair.
               Both flags live here already — the phone tab bar writes the same
               two — so the hub relays the request rather than owning it. */}
           <LiveHub
-            slot={liveSlot}
+            slot={docked ? null : liveSlot}
+            dock={liveDock}
             navCollapsed={navCollapsed}
-            agentsCollapsed={agentsCollapsed}
+            agentsCollapsed={docked ? !agentsVisible : agentsCollapsed}
             activeProjectId={activeProjectId}
             onSidebars={(collapsed) => {
               setNavCollapsed(collapsed)
-              setAgentsCollapsed(collapsed)
+              if (!docked) setAgentsCollapsed(collapsed)
+              // Docked, "closing the agents panel" is closing the panel, which
+              // remembers its spot for the expand that follows.
+              else if (collapsed) hide('agents')
+              else reveal('agents')
             }}
           />
           <HeaderUsage />
         </div>
       </header>
       <div
-        className={`shell-body${mainCollapsed ? ' main-collapsed' : ''}`}
+        className={`shell-body${mainCollapsed && !docked ? ' main-collapsed' : ''}${docked ? ' docked' : ''}`}
         onClick={(e) => {
-          if (mainCollapsed && isNavLinkClick(e.target)) setMainCollapsed(false)
+          if (!docked && mainCollapsed && isNavLinkClick(e.target)) setMainCollapsed(false)
         }}
       >
         <Sidebar
@@ -728,6 +791,12 @@ function App() {
           collapsed={navCollapsed}
           onCollapsedChange={setNavCollapsed}
         />
+        {docked ? (
+          <div className="dock-area">
+            <DockLayout state={dock.state} update={dock.update} locked={locked} />
+          </div>
+        ) : (
+          <>
         <div className="main-slot">
           {mainCollapsed && (
             <button
@@ -770,6 +839,28 @@ function App() {
           collapsed={agentsCollapsed}
           onCollapsedChange={setAgentsCollapsed}
         />
+          </>
+        )}
+        {/* Each dock panel renders once into its own stable host, which the
+            dock moves between groups (`lib/dockHosts.ts`), so re-docking never
+            remounts the page, the terminal's shells or the agents' panes. The
+            conversation's two panels are portalled the same way by LiveHub. */}
+        {docked &&
+          createPortal(<main>{page}</main>, hostFor('main'))}
+        {docked &&
+          createPortal(<TerminalPage active={terminalVisible} />, hostFor('terminal'))}
+        {docked &&
+          createPortal(
+            <AgentSidebar
+              docked
+              activeProjectId={activeProjectId}
+              collapsed={!agentsVisible}
+              onCollapsedChange={(collapsed) => (collapsed ? hide('agents') : reveal('agents'))}
+            />,
+            hostFor('agents'),
+          )}
+        {docked &&
+          createPortal(<DiagramsPanel projectId={activeProjectId} />, hostFor('diagrams'))}
         {/* Single always-mounted owner of every open leaf's PtyTerminal
             (mesa task 399, .scratch/arch.md §6.2), across BOTH AgentSidebar
             and TerminalPage — a permanent sibling, never inside `page` or

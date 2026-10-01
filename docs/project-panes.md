@@ -19,7 +19,8 @@ never project or server data.
 | Page | `frontend/src/pages/ProjectTasksPage.tsx` | the tab strip, the route, which view each pane renders |
 
 The split tree itself is **not** new: it is `frontend/src/lib/paneTree.ts`, the
-same engine the Agent sidebar and the Terminal page use, instantiated at
+same engine the Agent sidebar, the Terminal page and the app-level dock
+(`docs/dock.md`) use, instantiated at
 `contentKind: 'view'`. Every gesture here is that engine's `resolveDrop` — so
 the edge zones, the split orientation, the ratios and the canonicalization
 match those surfaces instead of being a second interaction model.

@@ -1148,7 +1148,8 @@ export function AgentSidebar({
   activeProjectId,
   collapsed,
   onCollapsedChange,
-  liveSlot,
+  liveSlot = null,
+  docked = false,
 }: {
   activeProjectId: number | null
   // Owned by `App.tsx` since mesa task 556: the phone tab bar's "Agents" slot
@@ -1161,7 +1162,13 @@ export function AgentSidebar({
    *  for one thing only: this panel's width clamp has to know when that one
    *  opens, and the element it renders does not exist until App's own ref has
    *  landed. `null` until then. */
-  liveSlot: HTMLElement | null
+  liveSlot?: HTMLElement | null
+  /** Shown as a dock panel (mesa task 1567): the dock owns this panel's box, so
+   *  the width clamp and its observer, the left-edge resize handle, the collapse
+   *  arrow and "maximize" (all of which assume a sidebar in `.shell-body`'s row)
+   *  are off, and the panel fills whatever the dock gives it. `collapsed` still
+   *  means "nobody can see it" and still gates the polling. */
+  docked?: boolean
 }) {
   const setCollapsed = onCollapsedChange
   // Split tree holding every open AGENT pane + how each split's children
@@ -1349,7 +1356,7 @@ export function AgentSidebar({
   // open, `main`'s own floor is what a resize would violate, and that is
   // enforced the same way everywhere else in the shell.
   useEffect(() => {
-    if (collapsed) return
+    if (collapsed || docked) return
     const clampToLayout = () => {
       const mainLeft = mainEdge()
       const max = window.innerWidth - mainLeft - mainFloor(mainIsCollapsed(), MIN_MAIN_WIDTH) - liveSidebarWidth()
@@ -1374,7 +1381,7 @@ export function AgentSidebar({
     // panel is portalled in, so it does not exist on the first commit, and an
     // effect that looked for it then would silently never observe anything —
     // working only because this panel happens to start collapsed.
-  }, [collapsed, liveSlot])
+  }, [collapsed, liveSlot, docked])
 
   // List-rail drag-resize (mesa task 414): the handle sits on the rail's own
   // left edge, so the new width is the distance from the pointer to the
@@ -1881,7 +1888,7 @@ export function AgentSidebar({
           tap-to-dismiss target and the same block on touch-scrolling the page
           behind it. Collapsing here matches the toggle button below rather
           than only flipping `collapsed`. */}
-      {!collapsed && (
+      {!collapsed && !docked && (
         <div
           className="drawer-scrim"
           aria-hidden="true"
@@ -1893,10 +1900,10 @@ export function AgentSidebar({
         />
       )}
       <aside
-        className={`agent-sidebar${collapsed ? ' collapsed' : ''}${resizing ? ' resizing' : ''}${maximized ? ' maximized' : ''}`}
-        style={{ '--agent-sidebar-width': `${width}px` } as CSSProperties}
+        className={`agent-sidebar${collapsed ? ' collapsed' : ''}${resizing ? ' resizing' : ''}${maximized ? ' maximized' : ''}${docked ? ' docked' : ''}`}
+        style={docked ? undefined : ({ '--agent-sidebar-width': `${width}px` } as CSSProperties)}
       >
-        {!collapsed && !maximized && (
+        {!collapsed && !maximized && !docked && (
           <div
             className="agent-sidebar-resize-handle"
             onMouseDown={(e) => {
@@ -1906,6 +1913,7 @@ export function AgentSidebar({
           />
         )}
         <div className="agent-sidebar-header-actions">
+          {!docked && (
           <button
             type="button"
             className="sidebar-toggle agent-sidebar-toggle"
@@ -1919,7 +1927,8 @@ export function AgentSidebar({
           >
             {collapsed ? '«' : '»'}
           </button>
-          {!collapsed && (
+          )}
+          {!collapsed && !docked && (
             <button
               type="button"
               className={`agent-sidebar-maximize${maximized ? ' active' : ''}`}

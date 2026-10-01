@@ -1,5 +1,9 @@
 # Mobile (phone form factor)
 
+The phone tier is the one tier the dock (`docs/dock.md`) does not touch: above
+600px the shell docks its panels; at and below it the drawers, tab bar and the
+conversation's fixed right-edge drawer described here are unchanged.
+
 How the web UI behaves below tablet width. Frontend-only — no CLI, API, or
 Rust surface. Two width tiers, both in `frontend/src/App.css`, deliberately
 kept at the **end** of that file so they override the desktop rules above at

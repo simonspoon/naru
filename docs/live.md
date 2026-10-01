@@ -1574,6 +1574,9 @@ floating over the stage's corner, with its title and kind as the tooltip.
 every control below — the drag, the maximise, Escape, the reopen — carries
 over unchanged, now scoped to the section rather than to a panel of its own.
 
+(Phone tier only once docked — `docs/dock.md`; the dock's dividers replace the
+width and ratio drags, and a board push reveals the board panel on its own.)
+
 The width is still a drag handle, but it is now the **panel's** — one handle
 on the aside's left edge, editing one of **two** stored widths
 (`frontend/src/liveSidebarWidth.ts` for the plain panel, and
@@ -1900,7 +1903,9 @@ scripts page).
 side panels — the left nav and the agents sidebar — away and back. They are the
 other half of "show me that": a person talking hands-free asked for a page, and
 sometimes what they want is the *room* for it. Both panels move together,
-because "the sidebars" is the pair; the two flags already live in `App`
+because "the sidebars" is the pair; the two flags already live in `App` (docked, the
+agents half is the dock's agents panel: collapse closes it, remembering its spot,
+expand reveals it)
 (the phone tab bar writes the same two), so `LiveHub` relays the request rather
 than owning any collapse state of its own. They carry **no target** — the verb
 is the whole instruction, which is why they are two values rather than one verb
@@ -2650,6 +2655,10 @@ conversation") working with no backend change.
   muted, paused) — colour alone, no strike-through. A muted mic or voice
   leaves the orb visible but quiet: a low-saturation translucent red ring and
   a small badge naming which is muted.
+- **Docked (mesa task 1567, `docs/dock.md`):** on the desktop tiers the chat and
+  the whiteboard are two independent dock panels, each portalled into its own
+  host container, and the right-hand-sidebar, `.live-slot`, width-drag and
+  section-ratio description below applies to the **phone tier only**.
 - **The conversation is a right-hand sidebar** (task 887), a sibling of the
   agents one in `.shell-body`'s flex row, so the two are independent: both open
   at once, either alone, or neither — and the page the conversation is *about*
