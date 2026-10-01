@@ -2485,7 +2485,24 @@ EXAMPLES
         #[arg(long, value_name = "N", default_value_t = 20)]
         limit: i64,
     },
+    /// Copy a board from ANY past conversation into this one, as a new board
+    ///
+    /// The way to bring an old picture back up: find it with `naru live memory
+    /// search` (a `board` hit's `ref_id` is the id), then `repush` it. The
+    /// copy is a fresh board in the current session and becomes the one
+    /// showing; the original is untouched. Ink is not copied.
+    Repush {
+        /// The board to copy, from any conversation
+        #[arg(value_name = "ID")]
+        id: i64,
+        /// Print the new board without its `body` instead of in full
+        #[arg(long)]
+        quiet: bool,
+    },
     /// Print one board in full; without an ID, the one showing
+    ///
+    /// With an ID this works for a board of ANY conversation, live or ended,
+    /// and needs no live session; without one it is the current session's.
     #[command(visible_alias = "get")]
     Show {
         /// Which board to print; defaults to the one showing
@@ -6837,6 +6854,23 @@ fn wait_out_live_rest(store: &mut Store, session_id: i64) -> Result<()> {
 /// to a conversation, so with none live there is nothing to push to, show or
 /// keep.
 fn run_live_board(store: &mut Store, cmd: LiveBoardCmd) -> Result<()> {
+    // `show <ID>` is a read-only lookup of any board in the db, from any
+    // conversation, live or ended (mesa task 1548) — so it needs no session.
+    if let LiveBoardCmd::Show {
+        id: Some(id),
+        quiet,
+    } = cmd
+    {
+        let board = store.get_live_board(id).map_err(|e| match e {
+            Error::NotFound(m) => Error::NotFound(format!(
+                "{m} (its row may have been cleared; its text can still turn up in \
+                 `naru live memory search`)"
+            )),
+            e => e,
+        })?;
+        print_live_board(&board, quiet);
+        return Ok(());
+    }
     let session = current_live_session(store)?;
     match cmd {
         LiveBoardCmd::Push {
@@ -7023,14 +7057,25 @@ fn run_live_board(store: &mut Store, cmd: LiveBoardCmd) -> Result<()> {
             let board = resolve_live_board(store, &session, id)?;
             print_live_board(&board, quiet);
         }
+        LiveBoardCmd::Repush { id, quiet } => {
+            let old = store.get_live_board(id)?;
+            let board = store.add_live_board(
+                session.id,
+                old.kind,
+                old.title.as_deref(),
+                &old.body,
+                old.content_type.as_deref(),
+            )?;
+            print_live_board(&board, quiet);
+        }
     }
     Ok(())
 }
 
 /// The board a command means: the one named by `--id`/`ID`, else the one
 /// showing. A board from another conversation is `not_found` rather than
-/// reachable by id — every verb here is scoped to the current session, and a
-/// board is part of the conversation it was pushed into.
+/// reachable by id — `keep` is scoped to the current session (`show` and
+/// `repush` reach any conversation's boards, mesa task 1548).
 fn resolve_live_board(store: &Store, session: &LiveSession, id: Option<i64>) -> Result<LiveBoard> {
     match id {
         Some(id) => {

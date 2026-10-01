@@ -4538,9 +4538,10 @@ pub struct LiveNotebookEntry {
 /// consumer.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct LiveMemoryHit {
-    /// `turn` | `summary` | `note`.
+    /// `turn` | `summary` | `note` | `board` (mesa task 1548).
     pub kind: String,
-    /// The turn id, the summary's session id, or the notebook entry id.
+    /// The turn id, the summary's session id, the notebook entry id, or the
+    /// board id (the board row may be gone; the archive entry is not).
     pub ref_id: i64,
     /// The conversation it belongs to; null for a notebook entry written
     /// before any conversation existed.

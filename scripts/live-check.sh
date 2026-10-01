@@ -2444,11 +2444,21 @@ run 0 "$MESA" live board keep --id "$CAP" --task "$TASK"
   fail "board keep: the extension comes from the board, not the title, got $(jqs .filename)"
 ok "live board keep: into an artifact (content type by kind, name from the title) and onto a task (decoded image bytes, authored naru-live); an image board refuses the artifact and names --task"
 
-# A board from another conversation is not reachable by id: every verb here is
-# scoped to the current session.
+# `show <id>` reads a board of ANY conversation (mesa task 1548); only an
+# unknown id is not_found. `repush` copies one into the current conversation,
+# and every board is searchable as kind `board`.
 run 1 "$MESA" live board show 999999
 [ "$(jqe .error.code)" = "not_found" ] || fail "live board show <unknown>: error.code"
-ok "live board show on a board this conversation does not own: not_found"
+run 0 "$MESA" live memory search Mockup
+[ "$(jqs '[.[] | select(.kind=="board" and .ref_id=='"$B_HTML"')] | length')" = "1" ] ||
+  fail "live memory search: the html board must be a board hit, got $STDOUT"
+RP=$("$MESA" live board repush --quiet "$B_MD" | jq -r .id)
+[ -n "$RP" ] && [ "$RP" != "$B_MD" ] || fail "board repush: a new board id, got $RP"
+run 0 "$MESA" live board show "$RP"
+[ "$(jqs .body)" = "## Plan Three steps." ] || fail "board repush: the copy holds the same body"
+run 1 "$MESA" live board repush 999999
+[ "$(jqe .error.code)" = "not_found" ] || fail "board repush <unknown>: error.code"
+ok "live board show <unknown>: not_found; html board searchable as kind board; repush copies a board into this conversation"
 
 # ---- the poll payload: bodiless, and capped at the poll's own bandwidth
 # bound — but boards are no longer pruned (mesa task 1448): 22 pushed, all 22
@@ -2475,12 +2485,12 @@ ok "live board push keeps every board pushed (22 pushed, 22 kept); only the poll
 
 # ---- clear: the delete echo ----
 
-# 29 boards survive to this point — the six ordinary pushes above, the CAP
-# board, and the 22-board bulk loop — since nothing was ever pruned
+# 30 boards survive to this point — the six ordinary pushes above, the
+# repushed copy (mesa task 1548), the CAP board, and the 22-board bulk loop — since nothing was ever pruned
 # (mesa task 1448): `clear`'s echo must carry every one of them, not just
 # the newest twenty the poll would have shown.
 run 0 "$MESA" live board clear
-[ "$(jqs 'length')" = "29" ] || fail "live board clear: the echo must carry every destroyed board, got $(jqs 'length')"
+[ "$(jqs 'length')" = "30" ] || fail "live board clear: the echo must carry every destroyed board, got $(jqs 'length')"
 jq -e 'map(has("body")) | any | not' <<<"$STDOUT" >/dev/null ||
   fail "live board clear: the echo is bodiless, like every other board listing"
 run 0 "$MESA" live board list
@@ -2490,6 +2500,37 @@ run 1 "$MESA" live board show
 run 0 "$MESA" live board clear --quiet
 [ "$STDOUT" = "[]" ] || fail "live board clear on an empty whiteboard: an empty echo, not an error"
 ok "live board clear: echoes the destroyed boards (the delete-echo safety floor) and is empty-safe"
+
+# ---- a board across conversations (mesa task 1548) ----
+#
+# `show <id>` reads a past conversation's board with no live session at all;
+# `repush <id>` copies it into the conversation that is live now.
+
+SESS_A=$("$MESA" live status | jq -r .id)
+X_ID=$("$MESA" live board push --quiet --title "Old plan" 'the archived disk hogs' | jq -r .id)
+run 0 "$MESA" live stop >/dev/null
+run 1 "$MESA" live board show
+[ "$(jqe .error.code)" = "not_found" ] || fail "board show with no id and no live session: not_found"
+run 0 "$MESA" live board show "$X_ID"
+[ "$(jqs .session_id)" = "$SESS_A" ] || fail "board show <id> with no live session: session_id, got $STDOUT"
+[ "$(jqs .body)" = "the archived disk hogs" ] || fail "board show <id> with no live session: body"
+run 1 "$MESA" live board repush "$X_ID"
+[ "$(jqe .error.code)" = "not_found" ] || fail "board repush with no live session: not_found"
+run 0 "$MESA" live start --no-agent
+SESS_B=$(jqs .id)
+[ "$SESS_B" != "$SESS_A" ] || fail "a second conversation must be a new session"
+run 0 "$MESA" live board show "$X_ID"
+[ "$(jqs .session_id)" = "$SESS_A" ] || fail "board show <id> from another session: A's session_id, got $STDOUT"
+run 0 "$MESA" live board repush "$X_ID"
+[ "$(jqs .session_id)" = "$SESS_B" ] || fail "board repush: the copy lands in session B, got $STDOUT"
+[ "$(jqs .id)" != "$X_ID" ] || fail "board repush: a new board id"
+[ "$(jqs .title)" = "Old plan" ] && [ "$(jqs .body)" = "the archived disk hogs" ] ||
+  fail "board repush: same title and body, got $STDOUT"
+run 0 "$MESA" live board show "$X_ID"
+[ "$(jqs .session_id)" = "$SESS_A" ] || fail "board repush leaves the original in A"
+run 0 "$MESA" live board clear >/dev/null
+BS=$SESS_B # the conversation the sections below run in
+ok "board show/repush across conversations: show works with no live session and from another session (A's session_id); repush copies title and body into B, leaving A's board"
 
 # ---- the render route, in DEFAULT mode ----
 

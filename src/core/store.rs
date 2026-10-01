@@ -1249,6 +1249,11 @@ const MIGRATIONS: &[&str] = &[
     // that turn and by the page's route report). NULL when no page said.
     "ALTER TABLE live_turns ADD COLUMN view TEXT;
      ALTER TABLE live_sessions ADD COLUMN view TEXT;",
+    // Task 1548: whiteboards join the live-memory archive as kind `board`.
+    // Nothing to run as SQL — extracting an HTML board's text is Rust, so
+    // `migrate` calls `backfill_board_index` when it applies this index —
+    // but the slot is what orders it after every shipped migration.
+    "-- live_boards -> live_memory_fts backfill (see migrate)",
 ];
 
 /// Selects full task rows including the derived `blocked` flag.
@@ -7455,13 +7460,14 @@ impl Store {
         let limit = limit.clamp(1, LIVE_MEMORY_SEARCH_MAX);
         let mut stmt = self.conn.prepare(
             "SELECT live_memory_fts.kind, live_memory_fts.ref_id, live_memory_fts.session_id, \
-                    COALESCE(t.created_at, s.created_at, n.created_at, ''), t.role, \
+                    COALESCE(t.created_at, s.created_at, n.created_at, b.created_at, ''), t.role, \
                     snippet(live_memory_fts, 3, '[', ']', '…', 16) \
              FROM live_memory_fts \
              LEFT JOIN live_turns t ON live_memory_fts.kind = 'turn' AND t.id = live_memory_fts.ref_id \
              LEFT JOIN live_summaries s \
                     ON live_memory_fts.kind = 'summary' AND s.session_id = live_memory_fts.ref_id \
              LEFT JOIN live_notebook n ON live_memory_fts.kind = 'note' AND n.id = live_memory_fts.ref_id \
+             LEFT JOIN live_boards b ON live_memory_fts.kind = 'board' AND b.id = live_memory_fts.ref_id \
              WHERE live_memory_fts MATCH ?1 \
                AND CASE WHEN ?3 IS NULL \
                         THEN live_memory_fts.kind <> 'note' OR n.project_id IS NULL \
@@ -7583,12 +7589,26 @@ impl Store {
                 None
             }
         };
-        self.conn.execute(
+        // One transaction: a failed index write must not leave a board that
+        // is never searchable.
+        let tx = self.conn.transaction()?;
+        tx.execute(
             "INSERT INTO live_boards (session_id, kind, title, body, content_type, created_at) \
              VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'))",
             (session_id, kind.as_str(), title, body, content_type),
         )?;
-        let id = self.conn.last_insert_rowid();
+        let id = tx.last_insert_rowid();
+        // The archive index (mesa task 1548): a board's title and text are
+        // searchable by `mesa live memory search` as kind `board`. Never
+        // deleted with the row — see `clear_live_boards`.
+        if let Some(text) = board::search_text(kind, title, body) {
+            tx.execute(
+                "INSERT INTO live_memory_fts (kind, ref_id, session_id, text) \
+                 VALUES ('board', ?1, ?2, ?3)",
+                (id, session_id, text),
+            )?;
+        }
+        tx.commit()?;
         self.get_live_board(id)
     }
 
@@ -7664,6 +7684,10 @@ impl Store {
     /// pruned, this delete is the only way any of them stop existing, and a
     /// destructive echo that silently dropped older ones would defeat the
     /// safety floor it exists to be.
+    ///
+    /// The board's `live_memory_fts` entry is **kept** (mesa task 1548): the
+    /// archive is append-only like turns and summaries, so a cleared board's
+    /// words stay searchable, and a hit whose row is gone says so on `show`.
     pub fn clear_live_boards(&mut self, session_id: i64) -> Result<Vec<LiveBoardSummary>> {
         let destroyed = self.list_live_boards_all(session_id)?;
         self.conn.execute(
@@ -9481,6 +9505,40 @@ fn would_cycle(conn: &Connection, task_id: i64, blocker_id: i64) -> Result<bool>
     Ok(false)
 }
 
+/// The `MIGRATIONS` index that indexes existing whiteboards (mesa task 1548).
+const BOARD_INDEX_MIGRATION: usize = 79;
+
+/// Indexes every board a db already holds into the live-memory archive, the
+/// text rule being [`board::search_text`]'s. Runs once, inside the migration's
+/// transaction.
+fn backfill_board_index(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("SELECT id, session_id, kind, title, body FROM live_boards")?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, String>(4)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (id, session_id, kind, title, body) in rows {
+        let Some(kind) = LiveBoardKind::parse(&kind) else {
+            continue;
+        };
+        if let Some(text) = board::search_text(kind, title.as_deref(), &body) {
+            conn.execute(
+                "INSERT INTO live_memory_fts (kind, ref_id, session_id, text) \
+                 VALUES ('board', ?1, ?2, ?3)",
+                (id, session_id, text),
+            )?;
+        }
+    }
+    Ok(())
+}
+
 /// `BEGIN IMMEDIATE` serializes concurrent first-opens of a brand-new db: two
 /// processes racing here would otherwise both read `user_version = 0` and
 /// both try to `CREATE TABLE`, crashing the loser with "table already
@@ -9494,6 +9552,9 @@ fn migrate(conn: &Connection) -> Result<()> {
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         for (i, sql) in MIGRATIONS.iter().enumerate().skip(version as usize) {
             conn.execute_batch(sql)?;
+            if i == BOARD_INDEX_MIGRATION {
+                backfill_board_index(conn)?;
+            }
             conn.pragma_update(None, "user_version", (i + 1) as i64)?;
         }
         Ok(())
@@ -15025,15 +15086,15 @@ mod tests {
         );
         assert_eq!(
             MIGRATIONS.len(),
-            79,
-            "a fresh db should report user_version 79"
+            80,
+            "a fresh db should report user_version 80"
         );
         let (store, _dir) = temp_store();
         let version: i64 = store
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 79);
+        assert_eq!(version, 80);
     }
 
     /// Pins the project-notebook columns (mesa task 1333) at index 72
@@ -16433,6 +16494,119 @@ mod tests {
         assert!(store.current_live_board(session.id).unwrap().is_none());
         // Clearing an empty whiteboard is an empty echo, not an error.
         assert!(store.clear_live_boards(session.id).unwrap().is_empty());
+    }
+
+    /// Boards join the live-memory archive (mesa task 1548): a markdown and an
+    /// HTML board are found by their text as kind `board`, an image board by
+    /// its caption alone, and clearing the boards leaves the archive entry.
+    #[test]
+    fn live_boards_are_searchable_and_survive_a_clear() {
+        let (mut store, _dir) = temp_store();
+        let session = store.start_live_session(None).unwrap();
+        let md = store
+            .add_live_board(
+                session.id,
+                LiveBoardKind::Markdown,
+                Some("Cleanup"),
+                "## Biggest disk hogs\n- node_modules",
+                None,
+            )
+            .unwrap();
+        let html = store
+            .add_live_board(
+                session.id,
+                LiveBoardKind::Html,
+                None,
+                "<html><style>.zebra{}</style><body><h1>Mockup</h1><p>quiet <b>pelican</b> &amp; co</p></body></html>",
+                None,
+            )
+            .unwrap();
+        let img = store
+            .add_live_board(
+                session.id,
+                LiveBoardKind::Image,
+                Some("the overlap screenshot"),
+                "aGVsbG8=",
+                Some("image/png"),
+            )
+            .unwrap();
+        let hit = |words: &str| store.search_live_memory(words, 10).unwrap();
+        let hogs = hit("disk hogs");
+        assert_eq!(hogs.len(), 1, "{hogs:?}");
+        assert_eq!(hogs[0].kind, "board");
+        assert_eq!(hogs[0].ref_id, md.id);
+        assert_eq!(hogs[0].session_id, Some(session.id));
+        assert!(!hogs[0].created_at.is_empty());
+        assert_eq!(hit("pelican")[0].ref_id, html.id);
+        assert_eq!(hit("co")[0].kind, "board", "entities are decoded");
+        assert!(hit("zebra").is_empty(), "style bodies are not text");
+        assert!(hit("h1").is_empty(), "tags are not text");
+        assert_eq!(hit("overlap")[0].ref_id, img.id);
+        assert!(hit("aGVsbG8").is_empty(), "image bytes are not indexed");
+
+        store.clear_live_boards(session.id).unwrap();
+        let after = store.search_live_memory("disk hogs", 10).unwrap();
+        assert_eq!(after.len(), 1, "the archive outlives the board row");
+        assert_eq!(after[0].kind, "board");
+        assert!(store.get_live_board(md.id).is_err());
+    }
+
+    /// `get_live_board` is not scoped to a session (mesa task 1548): a board
+    /// of an ended conversation is read by id from any other.
+    #[test]
+    fn a_board_is_readable_across_sessions() {
+        let (mut store, _dir) = temp_store();
+        let a = store.start_live_session(None).unwrap();
+        let board = store
+            .add_live_board(a.id, LiveBoardKind::Markdown, Some("Old"), "body", None)
+            .unwrap();
+        store.end_live_session(a.id).unwrap();
+        let b = store.start_live_session(None).unwrap();
+        let got = store.get_live_board(board.id).unwrap();
+        assert_eq!((got.session_id, got.body.as_str()), (a.id, "body"));
+        assert_ne!(got.session_id, b.id);
+    }
+
+    /// The board-index migration (mesa task 1548) is pinned at index 79 and
+    /// backfills the boards a db already holds, HTML stripped.
+    #[test]
+    fn the_board_index_migration_backfills_existing_boards() {
+        const BOARDS: usize = 79;
+        assert_eq!(BOARD_INDEX_MIGRATION, BOARDS);
+        assert!(
+            MIGRATIONS[BOARDS].contains("live_boards -> live_memory_fts"),
+            "migration {BOARDS} is no longer the board index migration"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            for sql in &MIGRATIONS[..BOARDS] {
+                conn.execute_batch(sql).unwrap();
+            }
+            conn.pragma_update(None, "user_version", BOARDS as i64)
+                .unwrap();
+            conn.execute_batch(
+                "INSERT INTO live_sessions (id, status, started_at, updated_at, ended_at) \
+                    VALUES (1, 'ended', datetime('now'), datetime('now'), datetime('now'));
+                 INSERT INTO live_boards (id, session_id, kind, title, body, created_at) \
+                    VALUES (168, 1, 'markdown', NULL, 'the disk hogs', datetime('now'));
+                 INSERT INTO live_boards (id, session_id, kind, title, body, created_at) \
+                    VALUES (169, 1, 'html', 'Mock', '<p>walrus <i>plan</i></p><script>nope()</script>', datetime('now'));",
+            )
+            .unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        let hogs = store.search_live_memory("disk hogs", 10).unwrap();
+        assert_eq!(
+            (hogs.len(), hogs[0].kind.as_str(), hogs[0].ref_id),
+            (1, "board", 168)
+        );
+        assert_eq!(
+            store.search_live_memory("walrus", 10).unwrap()[0].ref_id,
+            169
+        );
+        assert!(store.search_live_memory("nope", 10).unwrap().is_empty());
     }
 
     /// The cc↔live join (mesa task 1448): a cc session whose first prompt is

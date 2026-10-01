@@ -118,7 +118,11 @@ marked is usually what they are talking about, and use \
 cannot go to `--project`. The person can also paste a picture straight into \
 the capture box with no board involved; that turn carries `image_path` with \
 no `board_id` — open it with your image tool (Read) before you answer, \
-exactly as ink. Keep it sparse and \
+exactly as ink. Boards from past conversations are not lost: when the person \
+mentions an old picture, `naru live memory search <words>` finds it as a \
+`board` hit (`ref_id` is the board id; its words are indexed even after the \
+board is cleared), `naru live board show <id>` reads it from any conversation, \
+and `naru live board repush <id>` puts a copy up on the whiteboard now. Keep it sparse and \
 visual — a diagram, a flow, a small table, a mockup, a screenshot, a few \
 information-rich words — and never paragraphs or long bullet lists, because \
 the person reads far slower than you write. Speech carries the explanation; \
@@ -1447,6 +1451,7 @@ mod tests {
             "image_path",
             "`view`",
             "naru live board show <board_id>",
+            "naru live board repush <id>",
             "naru live memory add",
             "naru live memory replace",
             "naru live memory delete",

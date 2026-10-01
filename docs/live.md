@@ -1476,6 +1476,31 @@ twenty. They no longer are: a board lives until the session row is deleted
 `clear`'s delete echo reports as destroyed, and what backs the whole-history
 route below).
 
+### Finding and bringing back an old board (mesa task 1548)
+
+Boards are part of the live-memory archive: `Store::add_live_board` writes a
+`live_memory_fts` entry of kind `board` (`ref_id` = the board id, `session_id`
+its conversation) beside the row — title plus text, where text is markdown
+as written and HTML with its tags, `<script>`/`<style>` and comments stripped
+(`board::search_text`); an `image` or `diagram` board is indexed by its title
+alone. `mesa live memory search` therefore returns `board` hits, and a db
+upgrading past migration index **79** has its existing boards indexed by a
+Rust pass `migrate` runs at that index (HTML needs real stripping, so the
+migration string itself is only a marker).
+
+What deletes boards: only `mesa live board clear` (`Store::clear_live_boards`)
+and the session row's `ON DELETE CASCADE` (no app path deletes a session row
+today). **Neither touches the index**, so the archive stays append-only like
+turns and summaries: a hit may name a board whose row is gone (its
+`created_at` then reads empty), and `board show <id>` answers `not_found`
+saying the row may have been cleared while the words remain searchable.
+
+`mesa live board show <ID>` reads any board of any conversation, live or
+ended, and needs no live session (without an ID it is still the current
+session's showing board). `mesa live board repush <ID>` copies a board from any
+past conversation into the current live one as a new board — it becomes the one
+showing; ink is not copied. `keep` stays scoped to the current session.
+
 ### Looking up a past session's whiteboards
 
 The live panel only ever shows one running conversation; a **past** one's
