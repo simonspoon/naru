@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties }
 import { mainFloor, mainIsCollapsed } from '../mainCollapse'
 import { createPortal } from 'react-dom'
 import { NaruMark } from './NaruMark'
+import { LiveOrb } from './LiveOrb'
 import { LiveBoardPanel, type InkFlatten } from './LiveBoardPanel'
 import {
   claimLiveSpeaker,
@@ -3796,6 +3797,29 @@ export function LiveHub({
           is not currently showing it — hidden, or the whole panel closed.
           Shows the section *and* opens the panel, since a hidden section
           inside a closed panel is still nothing on screen. */}
+      {/* The floating orb (mesa task 1553): the mark above every page while a
+          conversation is live and this browser is in it — the same terms the
+          head's Pause and mute buttons are offered on — wired to the very
+          handlers those buttons call. */}
+      {live && unlocked && (
+        <LiveOrb
+          state={indicator}
+          level={level}
+          speechRms={speechRms}
+          micAvailable={supported && !blocked}
+          micMuted={muted}
+          speechMuted={speechMuted}
+          paused={paused}
+          pauseLabel={pauseButton?.label ?? ''}
+          pauseDisabled={pauseButton?.disabled ?? true}
+          canPause={pauseButton !== undefined && pauseButton !== null}
+          onToggleMic={() => toggleListening(!muted)}
+          onTogglePause={() => {
+            if (pauseButton) togglePause(pauseButton)
+          }}
+          onToggleSpeech={toggleSpeechMuted}
+        />
+      )}
       {hasBoards && !(open && boardExpanded) && (
         <button
           type="button"

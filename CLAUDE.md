@@ -124,7 +124,7 @@ The code is the source of truth. These are the invariants you must not break:
   `editorInput`, `editorStatus`, `fileCsv`, `fileDirty`, `fileFind`, `fileHtml`, `fileImage`,
   `fileSearch`, `fileTabs`, `gitRepos`, `filesTreeWidth`, `inboxArchive`, `inboxFilter`, `inboxKind`, `inboxOrigin`, `inboxQueue`, `inboxRead`,
   `keyboardScope`, `keymap`, `keymapDraft`,
-  `lastView`, `layout`, `libraryBuiltinUpdate`, `libraryBundle`, `libraryDraft`, `libraryHistory`, `libraryImport`, `libraryOverride`, `librarySync`, `listenDraft`, `liveAudio`, `liveBand`, `liveBoard`, `liveBoardWidth`, `liveCancel`, `liveCapture`, `liveContext`, `liveDevices`, `liveDrain`, `liveHead`, `liveInk`, `liveIndicator`, `liveLayout`, `liveMark`, `livePastedImage`, `livePausePhrase`, `livePromptDraft`,
+  `lastView`, `layout`, `libraryBuiltinUpdate`, `libraryBundle`, `libraryDraft`, `libraryHistory`, `libraryImport`, `libraryOverride`, `librarySync`, `listenDraft`, `liveAudio`, `liveBand`, `liveBoard`, `liveBoardWidth`, `liveCancel`, `liveCapture`, `liveContext`, `liveDevices`, `liveDrain`, `liveHead`, `liveInk`, `liveIndicator`, `liveLayout`, `liveMark`, `liveOrb`, `livePastedImage`, `livePausePhrase`, `livePromptDraft`,
   `liveRecognition`, `liveReplay`,
   `liveScroll`, `liveSession`, `liveSidebarWidth`, `liveSpeaker`, `liveStream`,
   `liveTurns`,

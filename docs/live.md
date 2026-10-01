@@ -2588,6 +2588,22 @@ conversation") working with no backend change.
   work, which is exactly the thing that surface could not otherwise tell from
   silence. Its input is the session's own `working_since` (below), which
   arrives on the poll the page already makes.
+
+- **The floating orb** (mesa task 1553, `components/LiveOrb.tsx`, logic in
+  `liveOrb.ts`): the same mark, lifted into a ~116px panel portalled to
+  `document.body` so it sits above every sidebar, drawer and route. Rendered
+  by `LiveHub` while `live && unlocked` (the terms the head's Pause and mute
+  buttons are offered on); no text on it. The body is the drag handle and
+  snaps on release to the nearest of eight anchors (four corners, four edge
+  midpoints), remembered as `{col,row}` in `localStorage` key `naru.live-orb`.
+  Rest (no state, paused, or plain listening — the mic open and nobody
+  talking) is dull and translucent; speaking, working, resting and hearing
+  are fully lit with a state-coloured glow.
+  Hovering (or tapping, for touch) blooms a three-segment pie: mic left,
+  pause right, sound below, calling the hub's own `toggleListening`,
+  `togglePause` and `toggleSpeechMuted`. A muted mic or voice leaves the orb
+  visible but quiet: a low-saturation translucent red ring and slash and a
+  small badge naming which is muted.
 - **The conversation is a right-hand sidebar** (task 887), a sibling of the
   agents one in `.shell-body`'s flex row, so the two are independent: both open
   at once, either alone, or neither — and the page the conversation is *about*

@@ -49,11 +49,15 @@ export function NaruMark({
   level,
   speechRms,
   micReady = false,
+  decorative = false,
 }: {
   state: LiveIndicator | null
   level: number
   speechRms: () => number | null
   micReady?: boolean
+  /** Hidden from assistive tech: a second mark (the floating orb) beside the
+   *  head's, whose `role=status` already announces every state. */
+  decorative?: boolean
 }) {
   const svgRef = useRef<SVGSVGElement>(null)
   const stateRef = useRef(state)
@@ -169,8 +173,12 @@ export function NaruMark({
       className="naru-mark"
       viewBox="0 0 64 64"
       strokeLinecap="round"
-      role="status"
-      aria-label={`${state === null ? 'Naru' : indicatorLabel(state)}${micReady ? ', mic ready' : ''}`}
+      {...(decorative
+        ? { 'aria-hidden': true }
+        : {
+            role: 'status',
+            'aria-label': `${state === null ? 'Naru' : indicatorLabel(state)}${micReady ? ', mic ready' : ''}`,
+          })}
     >
       {X.map((x, i) => (
         <g key={x} className="mark-bar">
