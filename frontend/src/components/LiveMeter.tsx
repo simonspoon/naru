@@ -13,7 +13,7 @@ import { emptyMeterHistory, METER_FRAMES_PER_BAR, pushMeterHistory } from '../li
  * level because the head is read at a glance: one bar rising and falling says
  * "something", twelve say whether the last second was a sentence or a cough.
  *
- * Its own component, and its own state, for `LiveBand`'s reason: the row
+ * Its own component, and its own state, for `NaruMark`'s reason: the row
  * advances twelve times a second, and `LiveHub` is not a tree to re-render at
  * that rate. Everything the loop reads lives in a ref; the only state is the
  * finished row, written on the frames that actually change it

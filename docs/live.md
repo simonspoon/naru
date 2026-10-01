@@ -571,8 +571,8 @@ the successor's first `listen --lease <n>`, in order, exactly once.
 
 A handoff that dreams (mesa task 1155) is the one the person *does* see:
 the outgoing agent says it needs to rest for a few minutes, `GET /api/live`
-carries `resting_since` on the session, and the panel's aperture shows a
-**resting** state — listening's breathing halo in the agent's violet
+carries `resting_since` on the session, and the panel's mark shows a
+**resting** state — the thinking look, in the agent's violet
 (`liveIndicator.ts`, ranked under being heard and over working, since the
 person can still talk and nothing is being worked on) — with the status
 line saying memory is being tidied. Anything said meanwhile
@@ -1529,8 +1529,8 @@ covering it, and hiding either section hands its space straight to the other.
 Since mesa task 1483 the layout is driven by **one thin toolbar** (~32px) at the
 top of the panel — no per-pane fold arrows and no pane title headers: on the
 left four icon toggles (show/hide board, show/hide chat, swap board and chat,
-stacked vs. side by side), on the right the session's own state — aperture,
-state word, level meter, clock — and its presses (mute voice, pause, end,
+stacked vs. side by side), on the right the session's own state — the Naru mark,
+level meter, clock — and its presses (mute voice, pause, end,
 close); the context size sits on the one status line under it, since the
 toolbar's fixed-size controls leave it no room at the plain panel width. A hidden pane is `display: none`, not a rail: the other
 fills the panel. Hiding the *last* visible pane shows the other instead, so the
@@ -2453,7 +2453,7 @@ stale claim with two pages joined, say), a muted page stamps each turn
 those turns yet will not speak them. That is accepted: an unclaimed
 conversation is speakable by every client, and the alternative — leaving the
 turns unstamped — would replay the whole backlog on unmute. Since
-nothing sounds, `speaking` never goes true — the aperture never shows
+nothing sounds, `speaking` never goes true — the mark never shows
 speaking, `shouldListen` keeps the microphone open, and barge-in is never
 engaged.
 
@@ -2512,65 +2512,40 @@ conversation") working with no backend change.
   and a routed page would be torn down by the very navigation it just
   performed — cutting its own sentence off mid-word and stopping the route
   reports below.
-- **An 18×18 canvas sits centered in the header band, in one of five
-  states** (`liveIndicator.ts` for the ranking, `liveBand.ts`'s `drawAperture`
-  for the drawing, `components/LiveBand.tsx` for the one rAF loop that paints
-  it, tasks 874, 882, 894 and 973) — the only sign of the conversation while
-  the panel is closed, so it answers for *both* sides of it rather than only
-  for Naru. The drawing is a single **aperture** — a ring, or a few, around a
-  lit centre — rather than the five bars of a level meter it replaced (task
-  973): three of the five states are not about how loud anything is (paused
-  and listening are about *whether* something is happening at all), and one
-  shape family turns out to draw all five without switching metaphors partway
-  through:
-  - **Naru speaking** (cyan) — rings travelling outward from a glowing core,
-    faster and brighter the louder the (simulated) voice. Outward motion reads
-    as Naru's voice going out. The amplitude driving it is not tapped from
-    real playback — Naru's audio runs through two different code paths (a
-    plain `<audio>` element and, on browsers whose media stack refuses a
-    range-less stream, a Web Audio decode-and-schedule fallback), and wiring a
-    real `AnalyserNode` to both to get one true signal was out of scope for
-    this drawing — so speaking instead animates a *simulated* envelope
-    (`simEnvelope`, ported unchanged from the design mockup): a slow
-    phrase-shaped rise and fall with two faster, mutually awkward syllable
-    oscillations riding on top, tuned to read as a voice rather than a
-    metronome.
-  - **paused** (muted, at half opacity, and the only one that does not move)
-    — the person stepped out (task 882). It is also the only state that draws
-    no full circle: a single open arc, so the shape itself — not merely its
-    stillness — says paused, since a dimmed ring reads too easily as
-    "listening, but dimmer," the state it would otherwise be confused with.
-  - **being heard** (green) — the same rings as speaking, run in reverse:
-    travelling *inward*, toward the core, because it is the other side of the
-    same conversation drawn with the same renderer, and the mirrored direction
-    is unmistakably the other one at a glance where colour alone would not be.
-    Unlike speaking, this amplitude is real: the smoothed microphone level
-    `LiveHub` already computes for the listen meter is passed to the band and
-    smoothed again per frame with a fast-attack, slow-release curve
-    (`smoothLevel`, 0.55 rising / 0.14 falling — jump up the instant sound
-    arrives, fall back gradually so it doesn't flicker to zero between
-    syllables), so the core and the rings genuinely swell with how loud the
-    room actually is. This is the one part of the redraw that changed what the
-    band *knows*, not just how it looks: the old bars ran a fixed animation no
-    matter how loud the person was.
-  - **the agent working** (violet) — she has taken what was said and has not
-    gone back to waiting (task 894). Violet because violet is already what this
-    app means by *an agent* (the sidebar pane header, task 819), so the colour
-    alone separates her doing something from her saying something. The drawing
-    is a dot orbiting a dim, static ring with a fading trail behind it — motion
-    with no amplitude in it at all, because nothing about the agent thinking is
-    loud or quiet, only ongoing, and it can be lit for minutes on a page
-    somebody is reading.
-  - **listening** (muted) — the microphone is open and the room is quiet: a
-    small dim core inside a slow, low-alpha breathing halo — present enough to
-    say the microphone is open, faint enough that nobody mistakes it for
-    speech. Shown only where recognition really is the way in
-    (`recognizesSpeech`); a browser that types into the fallback box gets no
-    resting indicator, since a permanent glyph meaning "a text box exists" is
-    noise.
+- **The Naru waveform mark sits in the panel head, in one of five states**
+  (`liveIndicator.ts` for the ranking, `liveMark.ts` for what each looks like,
+  `components/NaruMark.tsx` for the one rAF loop that paints it, tasks 874,
+  882, 894 and 1544). It replaced the aperture canvas (task 973) and the
+  head's text title ("Live", "Hearing you", "Naru speaking"…): the mark is
+  the favicon's seven bars and carries no visible label, only an accessible
+  name (`indicatorLabel`). Palettes and motion are the approved mockup's:
+  - **Naru speaking** — warm amber/coral (`#ff5a3c` … `#ffe2a8`), scale and
+    bar heights following the **real playback level**: an `AnalyserNode`
+    (`speechTap.ts`) sits between the sound and the speakers on both paths —
+    the Web Audio decode fallback connects its sources to it, and the single
+    `<audio>` element is routed through it once (`createMediaElementSource`,
+    attempted only while the clock's context is running, since rerouting is
+    irreversible and silences an element whose context never runs). If the
+    element cannot be tapped, speaking falls back to `simEnvelope`, the old
+    simulated envelope, for that playback only.
+  - **being heard** — electric cyan (`#1f7fff` … `#b8f6ff`), scale, glow and
+    bars following the **real microphone level** `LiveHub` computes for the
+    listen meter, smoothed per frame (`smoothLevel`, 0.55 rising / 0.14
+    falling) after `levelFromRms` maps RMS to 0..1.
+  - **the agent working / resting** — the mockup's violet (`#6a2bff` …
+    `#e6d1ff`), no sound: a soft shimmer sweeps across the bars with a slow
+    glow pulse. Violet is what this app already means by *an agent*.
+  - **listening**, or no state at all — dim slate lavender (`#3b3550` …
+    `#6d6592`), a slow gentle breathe. Unlike the old aperture the mark is
+    always present; idle is its resting look.
+  - **paused** — the same dim palette, held still: no breathe, bars held low,
+    half opacity, so a stepped-out conversation reads as nothing moving.
+
+  Every transition eases (colour, scale, glow, bar heights — `easeToward`,
+  exponential, frame-rate independent) rather than snapping.
 
   The order is the decision: **speaking outranks everything** (while she talks
-  the microphone is shut, so a band claiming to hear the person would be
+  the microphone is shut, so a mark claiming to hear the person would be
   describing a microphone that is not open), **paused outranks both of the
   states under it** (the microphone is shut and the box is disabled, so a
   draft left over from before the pause must not read as the person still
@@ -2579,15 +2554,9 @@ conversation") working with no backend change.
   **working outranks listening** (listening is the resting state, and work is
   not rest). Whitespace is not speech. Under `prefers-reduced-motion` every
   state keeps its motion but runs it at **half speed** (mesa task 1145 —
-  reduce, not remove, macOS's own convention for a progress spinner): the
-  indicator used to freeze to one representative still frame, and the person
-  reported that as a bug, since an 18px status glyph is not the vestibular
-  motion the preference targets and a still frame cannot say "still
-  working". It is no longer a CSS media block (a canvas has nothing for a
-  media query to hook), but a `rate` inside `drawAperture` itself, driven by
-  a flag the component maintains by subscribing to the query live, since a
-  setting flipped mid-session used to take effect with no reload and still
-  should; `paused` never read the clock and is unchanged.
+  reduce, not remove): `markFrame` halves its clock, driven by a flag the
+  component maintains by subscribing to the query live, so a setting flipped
+  mid-session still takes effect with no reload.
 
   Working is the one state shown to a browser that types into the fallback box
   as well: unlike listening it is not "a text box exists" — someone is doing

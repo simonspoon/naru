@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { mainFloor, mainIsCollapsed } from '../mainCollapse'
 import { createPortal } from 'react-dom'
-import { LiveBand } from './LiveBand'
+import { NaruMark } from './NaruMark'
 import { LiveBoardPanel, type InkFlatten } from './LiveBoardPanel'
 import { LiveMeter } from './LiveMeter'
 import {
@@ -69,7 +69,7 @@ import {
 import { MIN_MAIN_WIDTH } from '../agentSidebarWidth'
 import { chordLabel, matchesShortcut } from '../keymap'
 import { useKeymap } from '../keymapStore'
-import { contextLabel, elapsedLabel, endsInHead, liveHeadTitle } from '../liveHead'
+import { contextLabel, elapsedLabel, endsInHead } from '../liveHead'
 import { headerIndicator } from '../liveIndicator'
 import {
   buildVocabulary,
@@ -165,6 +165,7 @@ import {
 } from '../liveStream'
 import { playFailure } from '../speechPlayback'
 import { playSpeechStream, type SpeechStream } from '../speechStream'
+import { decodeOutput, speechRms, tapElement } from '../speechTap'
 import { parseTimestamp } from '../time'
 import { usePhoneTier } from '../phoneTier'
 import type { ConfigLive } from '../types/ConfigLive'
@@ -309,7 +310,7 @@ function BoardMark() {
  * The head's presses, as glyphs (mesa task 1069; the voice switch, 1327).
  *
  * Mute, Pause, End and Close are 44px squares in a strip that also holds a 44px
- * aperture and a title, and four words there would be a paragraph. They are
+ * mark and no title, and four words there would be a paragraph. They are
  * drawn rather than lettered for `LiveMark`'s reason: one stroked path in
  * `currentColor` takes the button's amber/red/muted and its hover for free,
  * and each has a real `aria-label`, so nothing is lost to the reader who
@@ -1070,7 +1071,7 @@ export function LiveHub({
   // When the person was last audibly talking, or `null` while the microphone
   // is shut. Written from the same place `level` is, and read only through
   // `showsHearing` — the hold it feeds is what keeps the status pill and the
-  // header aperture steady across a sentence instead of blinking once per
+  // header mark steady across a sentence instead of blinking once per
   // segment (mesa task 1073).
   const [voicedAt, setVoicedAt] = useState<number | null>(null)
   // What actually drops the pill when the person goes quiet. `showsHearing`
@@ -1488,6 +1489,7 @@ export function LiveHub({
           onError: failed,
         },
         request.signal,
+        decodeOutput(ctx),
       ).then(
         (stream) => {
           // Stopped, or another turn started, while the first bytes were on
@@ -1523,6 +1525,11 @@ export function LiveHub({
       playDecoded(id, ctx)
       return
     }
+    // Routes the element through the level analyser for the header mark; a
+    // context that is not running leaves it alone (`speechTap.tapElement`).
+    // Once routed, the sound is only as live as the context: resume it first.
+    tapElement(ctx, el)
+    void ctx.resume()
     el.src = liveSpeakUrl(id)
     // A source that will not load arrives as the element's own `error` event,
     // which is where the fallback lives; the only rejection to report from here
@@ -3133,12 +3140,12 @@ export function LiveHub({
   ])
 
   // The header never unmounts, but strict-mode remounts in dev do pass here:
-  // drop the body still arriving and hand the clock back.
+  // drop the body still arriving. The clock is *kept*: the one <audio> element
+  // may be routed through it (`speechTap.tapElement`, irreversible), so a closed
+  // or replaced context would leave that element — the voice — silent for good.
   useEffect(
     () => () => {
       releasePlayer()
-      void clock.current?.close()
-      clock.current = null
     },
     [releasePlayer],
   )
@@ -3706,16 +3713,6 @@ export function LiveHub({
     : endsInHead(secondary)
       ? secondary
       : null
-  // What the head says about the conversation, in one word (`liveHead.ts`) —
-  // the same ranking the aperture beside it draws.
-  const headTitle = liveHeadTitle({
-    live,
-    speaking,
-    paused,
-    interim: interim !== '' ? interim : recording,
-    draft,
-    error: actionError,
-  })
   const statusLine = liveStatusLine(session, speaking, actionError, paused, path === 'unavailable')
   // Whether mesa is saying something *right now*, for the status pill above
   // the composer. `sounding` is a ref because the run advances from a media
@@ -3891,8 +3888,8 @@ export function LiveHub({
               />
             )}
             <div className="live-sidebar-body">
-              {/* The head (mesa task 1069): the aperture, one word for what
-                  is happening, how loud the room has been, and the two
+              {/* The head (mesa task 1069): the Naru mark (no word; its accessible
+                  name says what is happening), how loud the room has been, and the two
                   presses that belong to a running conversation. It is the
                   panel's own instrument cluster — everything here used to be
                   either in the page header, where it had to answer for a
@@ -3973,11 +3970,11 @@ export function LiveHub({
                       )}
                     </div>
                   )}
-                  {/* Fixed box whether or not there is a state to draw, so the
-                      row does not jump 44px sideways the moment the aperture
-                      has something to say. */}
+                  {/* The Naru waveform mark (mesa task 1544): the one picture of
+                      the conversation, no text — its colour and motion are the
+                      state, and its accessible name says it. */}
                   <div className="live-head-aperture">
-                    {indicator !== null && <LiveBand state={indicator} level={level} />}
+                    <NaruMark state={indicator} level={level} speechRms={speechRms} />
                   </div>
                   <div className="live-head-say">
                     <div className="live-head-title">
@@ -3989,7 +3986,6 @@ export function LiveHub({
                           title="Mic ready"
                         />
                       )}
-                      {headTitle}
                     </div>
                     {/* The level meter (mesa task 956, moved here by 1069):
                         shown on the auris path alone, since a browser-path

@@ -9451,64 +9451,22 @@ button:focus-visible,
   display: block;
 }
 
-/* The conversation indicator (mesa task 874, redrawn as an aperture by mesa
-   task 973, moved into the panel head at 44px by task 1069): one canvas in
-   one state at a time — mesa speaking, the person being heard, the agent at
-   work on what was said (task 894), a paused page, or the microphone simply
-   open. Which state it is has to read at a glance: colour carries who (cyan
-   is mesa, green is the person, violet is the agent working, muted is nobody
-   yet) and the drawing itself — rings, an orbit, a breathing dot, a single
-   still arc — carries how much is happening and in which direction
-   (`liveBand.ts` has the full reasoning for each shape). The canvas sizes
-   itself in JS and paints itself; nothing here animates. */
-.live-band {
+/* The Naru waveform mark (mesa task 1544, replacing the aperture canvas of
+   tasks 874/973): the favicon's seven bars, painted by `NaruMark.tsx` from
+   `liveMark.ts` — colour, scale and glow all set inline each frame, so
+   nothing here animates. It fills its `.live-head-aperture` box; the bars
+   scale about their own centres. */
+.naru-mark {
   display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
   pointer-events: none;
 }
 
-/* mesa speaking: cyan with a glow, the loudest of the five and the only one
-   that gets one — the same drop-shadow the old bars carried, so the change
-   from bars to an aperture did not also quietly turn the glow off. */
-.live-band-speaking {
-  color: var(--cyan);
-  filter: drop-shadow(0 0 4px var(--cyan-dim));
-}
-
-/* The person being heard: the same drawing as speaking, mirrored (the rings
-   travel inward instead of out — `drawAperture`'s own doc comment explains
-   the mirroring), in green rather than cyan. */
-.live-band-hearing {
-  color: var(--green);
-}
-
-/* The agent at work (mesa task 894): violet, because violet is what this app
-   already means by "an agent" (the sidebar pane header, task 819) — so the
-   colour alone separates her doing something from her saying something
-   (cyan) and from the person being taken in (green). */
-.live-band-working {
-  color: var(--violet);
-}
-
-/* Resting (mesa task 1155): listening's breathing halo in the agent's own
-   colour — the agent is away for a few minutes, not the microphone. */
-.live-band-resting {
-  color: var(--violet);
-}
-
-/* The microphone open and the room quiet: low, slow and muted — present
-   enough to say the page is listening, dim enough that nobody reads it as
-   speech. */
-.live-band-listening {
-  color: var(--muted);
-}
-
-/* Paused: muted like listening, which is the state it is most easily
-   confused with, but dimmed further and — the real distinction —
-   `drawAperture` draws it as an open arc rather than a closed ring, so the
-   two are told apart by shape, not only by how bright they are. */
-.live-band-paused {
-  color: var(--muted);
-  opacity: 0.5;
+.naru-mark .mark-bar {
+  transform-box: fill-box;
+  transform-origin: center;
 }
 
 /* Where the hub portals its panel: a flex child of `.shell-body` that is not
@@ -10388,7 +10346,7 @@ body.live-panel-ratio-resizing .live-panel-divider {
 
 /* Listening is a state, not just a press — the same deal `.live-toggle.live-on`
    gets. Green rather than the cyan the word-shaped switch used to carry: this
-   is the microphone, and green is what the aperture and the meter above
+   is the microphone, and green is what the mark and the meter above
    already mean by the person being heard. Amber while muted, so a switch that
    is off says so in a colour rather than only in a label. */
 .live-mic {

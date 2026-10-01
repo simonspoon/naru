@@ -102,6 +102,9 @@ export async function playSpeechStream(
   ctx: AudioContext,
   events: SpeechStreamEvents,
   signal: AbortSignal,
+  /** Where sources are connected; `ctx.destination` unless the caller taps
+   *  the level (mesa task 1544 — an analyser that passes audio through). */
+  output: AudioNode = ctx.destination,
 ): Promise<SpeechStream> {
   const body = await fetchSpeech(url, signal)
 
@@ -154,7 +157,7 @@ export async function playSpeechStream(
   function schedule(buffer: AudioBuffer, from: number, at: number) {
     const source = ctx.createBufferSource()
     source.buffer = buffer
-    source.connect(ctx.destination)
+    source.connect(output)
     live.add(source)
     source.onended = () => {
       live.delete(source)
