@@ -1,9 +1,10 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { collectLeafIds } from './lib/paneTree'
 import {
   activateTab,
   closePanel,
   closedPanels,
+  debouncedSaver,
   defaultStore,
   deleteLayout,
   dropPanel,
@@ -223,5 +224,26 @@ describe('store', () => {
     s = deleteLayout(selectLayout(s, mine), mine)
     expect(s.layouts).toHaveLength(3)
     expect(s.active).toBe('talk')
+  })
+})
+
+describe('debouncedSaver', () => {
+  it('writes only the last state after the wait, and flush writes at once', () => {
+    vi.useFakeTimers()
+    const saved: string[] = []
+    const saver = debouncedSaver((s) => saved.push(s.active), 250)
+    const a = { ...defaultStore(), active: 'a' }
+    saver.schedule(a)
+    saver.schedule({ ...a, active: 'b' })
+    vi.advanceTimersByTime(249)
+    expect(saved).toEqual([])
+    vi.advanceTimersByTime(1)
+    expect(saved).toEqual(['b'])
+    saver.schedule({ ...a, active: 'c' })
+    saver.flush()
+    saver.flush()
+    vi.advanceTimersByTime(1000)
+    expect(saved).toEqual(['b', 'c'])
+    vi.useRealTimers()
   })
 })

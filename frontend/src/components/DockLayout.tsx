@@ -114,7 +114,9 @@ function DockGroupView({ id, ratio, ctx }: { id: string; ratio: number; ctx: Ctx
         })}
       </div>
       <div className="dock-body">
-        <DockSlot key={group.active} panel={group.active} />
+        {group.tabs.map((t) => (
+          <DockSlot key={t} panel={t} active={t === group.active} />
+        ))}
       </div>
       {/* While a panel is dragged, a transparent shield over the whole group:
           an iframe (a board) or xterm underneath would otherwise swallow the
@@ -218,10 +220,14 @@ export function DockLayout({
 
   // The shield goes up a tick *after* the drag starts: mounting it inside
   // `dragstart` makes some browsers cancel the drag at once.
+  const shieldTimer = useRef<number | null>(null)
   const onDragStart = useCallback((p: PanelId) => {
-    window.setTimeout(() => setDragging(p), 0)
+    shieldTimer.current = window.setTimeout(() => setDragging(p), 0)
   }, [])
   const onDragEnd = useCallback(() => {
+    // A drag that ends inside that tick must not raise the shield afterwards.
+    if (shieldTimer.current !== null) window.clearTimeout(shieldTimer.current)
+    shieldTimer.current = null
     setDragging(null)
     setOver(null)
   }, [])
@@ -320,6 +326,9 @@ export function DockBar({
   const menuRef = useRef<HTMLDivElement>(null)
   const current = activeLayout(store)
   const closed = useMemo(() => closedPanels(state), [state])
+  // Unsent ink pins the board in place, so the arrangement may not change
+  // under it: no switching, saving or resetting while it is held.
+  const frozen = locked.size > 0
 
   useEffect(() => {
     if (!menuOpen) return
@@ -346,6 +355,7 @@ export function DockBar({
             type="button"
             className={`dock-preset${l.id === store.active ? ' on' : ''}`}
             aria-pressed={l.id === store.active}
+            disabled={frozen}
             onClick={() => setStore((s) => selectLayout(s, l.id))}
           >
             {l.name}
@@ -355,6 +365,7 @@ export function DockBar({
           <button
             type="button"
             className="dock-preset dock-preset-add"
+            disabled={frozen}
             aria-label="Save this arrangement as a new layout"
             title="Save this arrangement as a new layout"
             onClick={() => setNaming('')}
@@ -384,6 +395,7 @@ export function DockBar({
             type="button"
             className="dock-preset dock-preset-aux"
             aria-label={`Reset ${current.name} to its preset`}
+            disabled={frozen}
             title={`Reset ${current.name} to its preset`}
             onClick={() => setStore((s) => resetLayout(s, current.id))}
           >
@@ -394,6 +406,7 @@ export function DockBar({
             type="button"
             className="dock-preset dock-preset-aux"
             aria-label={`Delete layout ${current.name}`}
+            disabled={frozen}
             title={`Delete layout ${current.name}`}
             onClick={() => setStore((s) => deleteLayout(s, current.id))}
           >

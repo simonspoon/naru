@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   activeLayout,
   closePanel,
+  debouncedSaver,
   isVisible,
   loadStore,
   revealPanel,
@@ -14,14 +15,23 @@ import {
 export type Update = (update: (s: DockState) => DockState) => void
 
 /**
- * The dock's state: the saved-layout store (`dockLayout.ts`), persisted on
- * every change, with the active layout's state and the handful of verbs the
+ * The dock's state: the saved-layout store (`dockLayout.ts`), persisted
+ * (debounced) on every change, with the active layout's state and the handful of verbs the
  * shell needs. `reveal`/`hide` are stable and functional so a live-conversation
  * effect can call them on every event without re-subscribing or re-rendering.
  */
 export function useDockStore() {
   const [store, setStore] = useState(loadStore)
-  useEffect(() => saveStore(store), [store])
+  const saver = useMemo(() => debouncedSaver(saveStore, 250), [])
+  useEffect(() => saver.schedule(store), [store, saver])
+  // The last state must land even if the page goes away inside the wait.
+  useEffect(() => {
+    window.addEventListener('pagehide', saver.flush)
+    return () => {
+      window.removeEventListener('pagehide', saver.flush)
+      saver.flush()
+    }
+  }, [saver])
   const state = activeLayout(store).state
   const stateRef = useRef(state)
   useEffect(() => {

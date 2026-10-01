@@ -262,7 +262,7 @@ function App() {
   // terminal panel and the hash goes back to where the person was, since the
   // terminal is a panel here, not a page. `bounced` stops the put-back, which
   // is itself a path change, from pulling main back over the terminal.
-  const prevHash = useRef(`#${hash}`)
+  const prevHash = useRef(hash === '/terminal' ? '#/' : `#${hash}`)
   const bounced = useRef(false)
   // `null` until the first run: the mount keeps the remembered layout (a
   // closed main stays closed over a reload), except that a page loaded *on*
@@ -276,7 +276,7 @@ function App() {
     if (path === '/terminal') {
       bounced.current = true
       reveal('terminal')
-      window.location.replace(prevHash.current)
+      window.location.replace(prevHash.current === '#/terminal' ? '#/' : prevHash.current)
       return
     }
     prevHash.current = `#${hash}`

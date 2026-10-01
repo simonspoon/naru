@@ -58,9 +58,17 @@ A panel's content renders **once**, by `createPortal` into its host container
 shows the panel and parks it in a hidden div otherwise. So the conversation's
 microphone, audio element and session state (LiveHub), the agents' PTYs and
 the terminal's shells never restart because a tab moved. A move carries scroll
-offsets and focus across the reparent. An `<iframe>` inside a moved container
-still reloads (the browser does that on any reparent): a board's document
-re-renders from its stored body.
+offsets and focus across the reparent. A background tab stays in its own group,
+hidden in place (`visibility: hidden`), so a tab switch reparents nothing. The
+limit: an `<iframe>` reloads whenever the browser reparents it, so **moving a
+panel to another group, or closing and reopening it, reloads a board's
+document** (it re-renders from its stored body); a closed panel is parked in a
+hidden div.
+
+Crossing the 600px phone tier switches between the dock and the old layout, so
+the **page, agents and terminal panels remount** (the PTYs live in the pool and
+LiveHub is mounted either way, so shells and the conversation survive; the
+agents' pane tree and the page's local state reset).
 
 ## Persistence
 
@@ -68,7 +76,10 @@ One `localStorage` key, `naru-dock-layouts` = `{v: 1, active, layouts: [{id,
 name, builtin, state}]}`; machine-local. Parsing is total: unknown panel ids
 are dropped, a panel in two groups (or a group named twice) rejects that
 layout, and a layout with nothing docked falls back to its preset (a built-in)
-or is dropped (a user one) — never an empty layout.
+or is dropped (a user one) — never an empty layout. (So a user layout with
+every panel closed is dropped on the next reload.) Writes are debounced
+(250ms, flushed on page hide and unmount), so a divider drag is one write.
+While a board holds unsent ink the header's switch, `+` and reset are disabled.
 
 ## Live behaviours
 

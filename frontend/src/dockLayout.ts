@@ -415,6 +415,33 @@ export function saveStore(store: DockStore): void {
   }
 }
 
+/**
+ * Trailing-edge debounce for the store write: a divider drag changes the store
+ * on every mousemove, and `localStorage` is synchronous. `flush` writes what is
+ * pending at once (unmount, page hide), so the final state is never lost.
+ */
+export function debouncedSaver(save: (s: DockStore) => void, ms: number) {
+  let pending: DockStore | null = null
+  let timer: ReturnType<typeof setTimeout> | null = null
+  const flush = () => {
+    if (timer !== null) clearTimeout(timer)
+    timer = null
+    if (pending !== null) {
+      const s = pending
+      pending = null
+      save(s)
+    }
+  }
+  return {
+    schedule(s: DockStore) {
+      pending = s
+      if (timer !== null) clearTimeout(timer)
+      timer = setTimeout(flush, ms)
+    },
+    flush,
+  }
+}
+
 export function activeLayout(store: DockStore): SavedLayout {
   return store.layouts.find((l) => l.id === store.active) ?? store.layouts[0]
 }

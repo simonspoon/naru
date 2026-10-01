@@ -12083,6 +12083,12 @@ body.live-panel-ratio-resizing .live-panel-divider {
   display: flex;
 }
 
+/* A background tab stays attached (its iframe must not reload) but unseen. */
+.dock-slot-inactive {
+  visibility: hidden;
+  pointer-events: none;
+}
+
 /* A panel's stable container (lib/dockHosts.ts): fills whatever slot holds it. */
 .dock-host {
   flex: 1;
