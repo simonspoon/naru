@@ -3,19 +3,21 @@ import { createPortal } from 'react-dom'
 import type { LiveIndicator } from '../liveIndicator'
 import { markMode } from '../liveMark'
 import {
-  anchorPosition,
+  clampPlacement,
   clampPoint,
   isDrag,
   muteIcon,
   ORB_SIZE,
   ORB_STORAGE_KEY,
   orbBrightness,
-  parseAnchor,
-  serializeAnchor,
-  snapAnchor,
-  type OrbAnchor,
+  parsePlacement,
+  serializePlacement,
+  settle,
+  type Placement,
   type Point,
+  usableHeight,
 } from '../liveOrb'
+import { isPhone, usePhoneTier } from '../phoneTier'
 import { NaruMark } from './NaruMark'
 
 /** How far the pie blooms past the body, px, and its ring radii in the
@@ -77,6 +79,7 @@ function Segment({
   at,
   label,
   active,
+  off,
   disabled,
   onPress,
   children,
@@ -85,13 +88,15 @@ function Segment({
   at: { x: number; y: number }
   label: string
   active: boolean
+  /** The control is in its off state (muted / paused): drawn red, else blue. */
+  off: boolean
   disabled?: boolean
   onPress: () => void
   children: React.ReactNode
 }) {
   return (
     <g
-      className={`live-orb-seg${active ? ' on' : ''}${disabled ? ' disabled' : ''}`}
+      className={`live-orb-seg${off ? ' off' : ''}${disabled ? ' disabled' : ''}`}
       role="button"
       tabIndex={disabled ? -1 : 0}
       aria-label={label}
@@ -119,19 +124,28 @@ function Segment({
   )
 }
 
-function loadAnchor(): OrbAnchor {
+/** Height of the phone tab bar, or 0 off the phone tier (the bar's own 3rem
+ *  reserve stands in before it has mounted). */
+function tabbarHeight(phone: boolean): number {
+  if (!phone) return 0
+  return document.querySelector('.phone-tabbar')?.getBoundingClientRect().height || 48
+}
+
+function loadPlacement(): Placement {
+  const w = window.innerWidth
+  const h = usableHeight(window.innerHeight, tabbarHeight(isPhone()))
   try {
-    return parseAnchor(window.localStorage.getItem(ORB_STORAGE_KEY))
+    return parsePlacement(window.localStorage.getItem(ORB_STORAGE_KEY), w, h)
   } catch {
-    return parseAnchor(null)
+    return parsePlacement(null, w, h)
   }
 }
 
 /**
  * The floating Naru orb (mesa task 1553): the animated mark as a draggable
  * panel above every page for as long as a conversation is live and joined.
- * The body is the drag handle and snaps to the nearest corner/edge on release
- * (remembered in localStorage); hovering — or tapping, for touch — blooms a
+ * The body is the drag handle and stays exactly where it is dropped, except
+ * near the top edge, where it docks small (remembered in localStorage); hovering — or tapping, for touch — blooms a
  * three-segment pie: mic left, pause right, sound below. The segments are the
  * hub's own handlers, passed in, so the orb and the panel head can never
  * disagree. No text is drawn on it. Portalled to `document.body` so no
@@ -169,7 +183,7 @@ export function LiveOrb({
   onTogglePause: () => void
   onToggleSpeech: () => void
 }) {
-  const [anchor, setAnchor] = useState<OrbAnchor>(loadAnchor)
+  const [placed, setPlaced] = useState<Placement>(loadPlacement)
   const [vp, setVp] = useState({ w: window.innerWidth, h: window.innerHeight })
   const [drag, setDrag] = useState<Point | null>(null)
   const [pinned, setPinned] = useState(false)
@@ -199,21 +213,30 @@ export function LiveOrb({
     }
   }, [pinned])
 
-  const rest = anchorPosition(anchor, vp.w, vp.h)
+  const phone = usePhoneTier()
+  const vh = usableHeight(vp.h, tabbarHeight(phone))
+  const rest = clampPlacement(placed, vp.w, vh)
   const pos = drag ?? rest
 
   const onDown = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
       if (e.button !== 0) return
       e.currentTarget.setPointerCapture(e.pointerId)
+      const box = e.currentTarget.getBoundingClientRect()
       press.current = {
         id: e.pointerId,
         start: { x: e.clientX, y: e.clientY },
-        grab: { x: e.clientX - rest.x, y: e.clientY - rest.y },
+        // The point on the body under the pointer, as a fraction of its box as
+        // painted now (a docked orb is shrunk), so growing under the pointer
+        // on a drag does not move the orb out from under it.
+        grab: {
+          x: ((e.clientX - box.left) / box.width) * ORB_SIZE,
+          y: ((e.clientY - box.top) / box.height) * ORB_SIZE,
+        },
         moved: false,
       }
     },
-    [rest.x, rest.y],
+    [],
   )
   const onMove = (e: React.PointerEvent<HTMLDivElement>): void => {
     const p = press.current
@@ -221,7 +244,7 @@ export function LiveOrb({
     const at = { x: e.clientX, y: e.clientY }
     if (!p.moved && !isDrag(p.start, at)) return
     p.moved = true
-    const next = clampPoint({ x: at.x - p.grab.x, y: at.y - p.grab.y }, vp.w, vp.h)
+    const next = clampPoint({ x: at.x - p.grab.x, y: at.y - p.grab.y }, vp.w, vh)
     dragRef.current = next
     setDrag(next)
   }
@@ -236,12 +259,12 @@ export function LiveOrb({
     const to = dragRef.current ?? rest
     dragRef.current = null
     setDrag(null)
-    const next = snapAnchor(to, vp.w, vp.h)
-    setAnchor(next)
+    const next = settle(to, vp.w, vh)
+    setPlaced(next)
     try {
-      window.localStorage.setItem(ORB_STORAGE_KEY, serializeAnchor(next))
+      window.localStorage.setItem(ORB_STORAGE_KEY, serializePlacement(next))
     } catch {
-      // Storage refused (private mode): the orb still snaps, it just forgets.
+      // Storage refused (private mode): the orb still stays, it just forgets.
     }
   }
 
@@ -253,7 +276,7 @@ export function LiveOrb({
   return createPortal(
     <div
       className={`live-orb ${bright ? 'bright' : 'dim'} mode-${mode}${mute !== null ? ' muted' : ''}${
-        drag !== null ? ' dragging' : ` row-${anchor.row}`
+        (drag !== null ? ' dragging' : '') + (rest.docked ? ' docked' : '')
       }${pinned ? ' pinned' : ''}`}
       style={{ left: pos.x, top: pos.y, width: ORB_SIZE, height: ORB_SIZE }}
     >
@@ -265,6 +288,7 @@ export function LiveOrb({
               at={mid(180)}
               label={micMuted ? 'Listen through this browser' : 'Stop listening'}
               active={!micMuted}
+              off={micMuted}
               onPress={onToggleMic}
             >
               <MicGlyph />
@@ -276,6 +300,7 @@ export function LiveOrb({
               at={mid(0)}
               label={pauseLabel}
               active={paused}
+              off={paused}
               disabled={pauseDisabled}
               onPress={onTogglePause}
             >
@@ -288,6 +313,7 @@ export function LiveOrb({
               at={mid(90)}
               label={speechMuted ? 'Unmute spoken replies' : 'Mute spoken replies'}
               active={speechMuted}
+              off={speechMuted}
               onPress={onToggleSpeech}
             >
               <SpeakerGlyph muted={speechMuted} />
@@ -309,19 +335,12 @@ export function LiveOrb({
         <div className="live-orb-mark">
           <NaruMark state={state} level={level} speechRms={speechRms} decorative />
         </div>
-        {mute !== null && (
-          <svg className="live-orb-slash" viewBox="0 0 100 100" aria-hidden="true">
-            <circle cx="50" cy="50" r="47" />
-            <path d="M17 17L83 83" />
-          </svg>
-        )}
       </div>
       {mute !== null && (
         <span className="live-orb-badge" aria-hidden="true">
           {(mute === 'mic' || mute === 'both') && (
             <svg viewBox="0 0 24 24" width="14" height="14">
               <MicGlyph />
-              <path d="M3 3l18 18" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" />
             </svg>
           )}
           {(mute === 'speaker' || mute === 'both') && (

@@ -11257,6 +11257,7 @@ body.live-panel-ratio-resizing .live-panel-divider {
   transition:
     left 0.22s ease,
     top 0.22s ease,
+    scale 0.22s ease,
     opacity 0.4s ease;
   touch-action: none;
   /* The square's corners must not swallow page clicks: only the body, the
@@ -11264,7 +11265,19 @@ body.live-panel-ratio-resizing .live-panel-divider {
   pointer-events: none;
 }
 .live-orb.dragging {
-  transition: none;
+  /* Position follows the pointer at once; only the dock's scale eases. */
+  transition: scale 0.22s ease;
+}
+/* Docked to the top edge: shrunk back until touched. */
+.live-orb.docked {
+  scale: 0.55;
+  transform-origin: 50% 0;
+}
+.live-orb.docked:hover,
+.live-orb.docked:focus-within,
+.live-orb.docked.pinned,
+.live-orb.docked.dragging {
+  scale: 1;
 }
 .live-orb-body {
   position: absolute;
@@ -11316,27 +11329,13 @@ body.live-panel-ratio-resizing .live-panel-divider {
     0 0 26px rgba(176, 107, 255, 0.55),
     inset 0 0 18px rgba(176, 107, 255, 0.2);
 }
-/* Muted: visible but quiet — a low-saturation translucent red ring and slash. */
+/* Muted: visible but quiet — a low-saturation translucent red ring. */
 .live-orb.muted .live-orb-body {
   border-color: rgba(200, 90, 100, 0.4);
   box-shadow: none;
 }
 .live-orb.muted.bright .live-orb-body {
   opacity: 0.75;
-}
-.live-orb-slash {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  pointer-events: none;
-  fill: none;
-  stroke: rgba(210, 80, 95, 0.5);
-  stroke-width: 3;
-  stroke-linecap: round;
-}
-.live-orb.dim.muted .live-orb-slash {
-  stroke: rgba(210, 80, 95, 0.35);
 }
 .live-orb-badge {
   position: absolute;
@@ -11374,13 +11373,13 @@ body.live-panel-ratio-resizing .live-panel-divider {
   pointer-events: auto;
 }
 .live-orb-seg {
-  color: #29e6ff;
+  color: var(--cyan);
   cursor: pointer;
   outline: none;
 }
 .live-orb-seg path:first-of-type {
   fill: rgba(10, 16, 30, 0.88);
-  stroke: rgba(41, 230, 255, 0.55);
+  stroke: var(--cyan-dim);
   stroke-width: 1.5;
 }
 .live-orb-seg:hover path:first-of-type,
@@ -11391,23 +11390,15 @@ body.live-panel-ratio-resizing .live-panel-divider {
   stroke: #fff;
   stroke-width: 2.5;
 }
-.live-orb-seg.on {
-  color: #ff8a8f;
+.live-orb-seg.off {
+  color: var(--red);
 }
-.live-orb-seg.on path:first-of-type {
-  stroke: rgba(225, 100, 110, 0.6);
+.live-orb-seg.off path:first-of-type {
+  stroke: var(--red);
 }
 .live-orb-seg.disabled {
   opacity: 0.4;
   cursor: default;
-}
-
-/* Phone tier: the tab bar owns the bottom edge, so a bottom-row orb rides
-   above it and its pie (which blooms 34px past the body) stays clear. */
-@media (max-width: 600px) {
-  .live-orb.row-2 {
-    translate: 0 calc(-1 * var(--phone-tabbar-reserve));
-  }
 }
 
 /* Swarm cards (mesa task 1554): compact, one accent colour per card (`--k`,

@@ -3,8 +3,8 @@ import type { LiveIndicator } from './liveIndicator'
 /**
  * The floating Naru orb's logic (mesa task 1553): the animated mark lifted out
  * of the panel head into a draggable panel above every page. Everything that
- * can be decided without a DOM lives here — where a release snaps to, how a
- * remembered position is read back, how bright a state is, which mute icon to
+ * can be decided without a DOM lives here — where a release comes to rest, how
+ * a remembered position is read back, how bright a state is, which mute icon to
  * show — so `components/LiveOrb.tsx` is left with only pointers and paint.
  */
 
@@ -14,92 +14,83 @@ export const ORB_SIZE = 116
  *  the hover pie, which blooms past the body, is never clipped. */
 export const ORB_MARGIN = 36
 
-/** localStorage key for the remembered anchor (machine-local, per browser). */
+/** localStorage key for the remembered position (machine-local, per browser). */
 export const ORB_STORAGE_KEY = 'naru.live-orb'
-
-/** One of the eight resting places: a corner or an edge midpoint. `col`/`row`
- *  are 0 (left/top), 1 (middle) or 2 (right/bottom); (1, 1) — the centre of
- *  the page — is not one. */
-export interface OrbAnchor {
-  col: 0 | 1 | 2
-  row: 0 | 1 | 2
-}
-
-/** Where a fresh install puts it: the bottom-right corner, clear of the
- *  header's conversation controls the top-right pie would cover. */
-export const DEFAULT_ANCHOR: OrbAnchor = { col: 2, row: 2 }
-
-export const ANCHORS: OrbAnchor[] = [
-  { col: 0, row: 0 },
-  { col: 1, row: 0 },
-  { col: 2, row: 0 },
-  { col: 0, row: 1 },
-  { col: 2, row: 1 },
-  { col: 0, row: 2 },
-  { col: 1, row: 2 },
-  { col: 2, row: 2 },
-]
 
 export interface Point {
   x: number
   y: number
 }
 
-function axis(index: number, extent: number): number {
-  const span = Math.max(0, extent - ORB_SIZE - 2 * ORB_MARGIN)
-  return ORB_MARGIN + (span * index) / 2
+/** A release within this many px of the top edge docks the orb there. */
+export const DOCK_ZONE = 80
+/** Top of a docked orb: the same gap the pie needs to bloom unclipped. */
+export const DOCK_Y = ORB_MARGIN
+
+/** Where the orb rests: its top-left, and whether it is docked to the top
+ *  edge (drawn shrunk until hovered). Anywhere else is exactly where it was
+ *  dropped. */
+export interface Placement extends Point {
+  docked: boolean
 }
 
-/** Top-left of the orb at an anchor, in a viewport of `vw` x `vh`. */
-export function anchorPosition(a: OrbAnchor, vw: number, vh: number): Point {
-  return { x: axis(a.col, vw), y: axis(a.row, vh) }
+/** Where a fresh install puts it: the bottom-right corner, clear of the
+ *  header's conversation controls the top-right pie would cover. */
+export function defaultPlacement(vw: number, vh: number): Placement {
+  return clampPlacement({ x: vw - ORB_SIZE - ORB_MARGIN, y: vh - ORB_SIZE - ORB_MARGIN, docked: false }, vw, vh)
 }
 
-/** Keeps a dragged top-left inside the viewport (a drag may use the margin,
- *  but never leave the page). */
+/** Keeps a top-left inside the viewport (never leave the page). */
 export function clampPoint(p: Point, vw: number, vh: number): Point {
   const maxX = Math.max(0, vw - ORB_SIZE)
   const maxY = Math.max(0, vh - ORB_SIZE)
   return { x: Math.min(maxX, Math.max(0, p.x)), y: Math.min(maxY, Math.max(0, p.y)) }
 }
 
-/** The anchor nearest to where the orb was let go (its top-left `p`). */
-export function snapAnchor(p: Point, vw: number, vh: number): OrbAnchor {
-  let best = DEFAULT_ANCHOR
-  let bestD = Infinity
-  for (const a of ANCHORS) {
-    const at = anchorPosition(a, vw, vh)
-    const d = (at.x - p.x) ** 2 + (at.y - p.y) ** 2
-    if (d < bestD) {
-      bestD = d
-      best = a
-    }
-  }
-  return best
+/** A placement clamped to the viewport; a docked one sits at the top-edge y. */
+export function clampPlacement(p: Placement, vw: number, vh: number): Placement {
+  const c = clampPoint(p, vw, vh)
+  return p.docked ? { x: c.x, y: Math.min(DOCK_Y, Math.max(0, vh - ORB_SIZE)), docked: true } : { ...c, docked: false }
 }
 
-function isIndex(v: unknown): v is 0 | 1 | 2 {
-  return v === 0 || v === 1 || v === 2
+/** Where a release at top-left `p` comes to rest: exactly there, clamped —
+ *  except near the top edge, which docks it. The only snap there is. */
+export function settle(p: Point, vw: number, vh: number): Placement {
+  const c = clampPoint(p, vw, vh)
+  return c.y < DOCK_ZONE ? clampPlacement({ ...c, docked: true }, vw, vh) : { ...c, docked: false }
 }
 
-/** Reads a stored anchor back; anything unusable (missing, bad JSON, the
- *  centre, out-of-range) is the default rather than an error. */
-export function parseAnchor(raw: string | null): OrbAnchor {
-  if (raw === null) return DEFAULT_ANCHOR
+/** Reads a stored placement back; anything unusable (missing, bad JSON,
+ *  non-finite numbers — including the old `{col,row}` anchors) is the
+ *  default rather than an error. */
+export function parsePlacement(raw: string | null, vw: number, vh: number): Placement {
+  if (raw === null) return defaultPlacement(vw, vh)
   try {
     const v: unknown = JSON.parse(raw)
-    if (typeof v !== 'object' || v === null) return DEFAULT_ANCHOR
-    const { col, row } = v as { col?: unknown; row?: unknown }
-    if (!isIndex(col) || !isIndex(row)) return DEFAULT_ANCHOR
-    if (col === 1 && row === 1) return DEFAULT_ANCHOR
-    return { col, row }
+    if (typeof v !== 'object' || v === null) return defaultPlacement(vw, vh)
+    const { x, y, docked } = v as { x?: unknown; y?: unknown; docked?: unknown }
+    if (typeof x !== 'number' || typeof y !== 'number' || !Number.isFinite(x) || !Number.isFinite(y)) {
+      return defaultPlacement(vw, vh)
+    }
+    return clampPlacement({ x, y, docked: docked === true }, vw, vh)
   } catch {
-    return DEFAULT_ANCHOR
+    return defaultPlacement(vw, vh)
   }
 }
 
-export function serializeAnchor(a: OrbAnchor): string {
-  return JSON.stringify({ col: a.col, row: a.row })
+export function serializePlacement(p: Placement): string {
+  return JSON.stringify({ x: Math.round(p.x), y: Math.round(p.y), docked: p.docked })
+}
+
+/** How far the pie blooms past the body, px. */
+export const ORB_PIE_BLEED = 34
+
+/** The viewport height the orb may use: on the phone tier the tab bar (`tabbar`
+ *  px tall, 0 elsewhere) owns the bottom edge, and the pie blooms past the
+ *  body, so the body stops a bleed above it. Pass the result as `vh` to the
+ *  placement functions so drop, clamp and default all agree. */
+export function usableHeight(vh: number, tabbar: number): number {
+  return tabbar > 0 ? Math.max(0, vh - tabbar - ORB_PIE_BLEED) : vh
 }
 
 /** `bright` states are the ones something is happening in — Naru speaking or
