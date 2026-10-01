@@ -23,6 +23,8 @@ import {
   REWIND_STEP_SECONDS,
   rewindTarget,
 } from '../speechPlayback'
+import { applyElementSpeed } from '../speechSpeed'
+import { getSpeechSpeed, loadSpeechSpeed } from '../speechSpeedStore'
 import { playSpeechStream, type SpeechStream } from '../speechStream'
 import { useFetch } from '../useFetch'
 
@@ -131,6 +133,8 @@ export function InboxView({ filter }: { filter: InboxFilter }) {
   // computed after the state below, since what the reader has open is part of
   // it (see `filterInbox`).
   // Projects for the assignment dropdown; refreshed less often than the inbox.
+  // Learn the speech speed up front, so the first item is already at it.
+  useEffect(loadSpeechSpeed, [])
   const { data: projects } = useFetch(() => listProjects(), 'inbox-projects', {
     pollMs: 10000,
   })
@@ -421,6 +425,9 @@ export function InboxView({ filter }: { filter: InboxFilter }) {
       void playDecoded(id, clock.current)
       return
     }
+    // The speed setting (mesa task 1560); both rates, since a new source
+    // resets the playback rate to the default one.
+    applyElementSpeed(el, getSpeechSpeed())
     el.src = inboxSpeakUrl(id)
     // A source that will not load arrives as the element's own `error` event,
     // which is where the fallback lives; the only rejection to report from here

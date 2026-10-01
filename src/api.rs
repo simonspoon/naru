@@ -8990,6 +8990,10 @@ struct SpeechUpdate {
     /// absent leaves it, `null`/blank restores naru-audio's default.
     #[serde(default, deserialize_with = "deserialize_some")]
     model: Option<Option<String>>,
+    /// The playback speed (mesa task 1560): a JSON number, same three-way
+    /// shape; kept raw so a string or bool is a 422 `validation` here.
+    #[serde(default, deserialize_with = "deserialize_some")]
+    speed: Option<Option<serde_json::Value>>,
 }
 
 /// `PUT /api/config/speech` — writes the voice and echoes the settings.
@@ -9010,6 +9014,20 @@ async fn update_config_speech(
     }
     if let Some(value) = body.model {
         updates.insert(config::MODEL.to_string(), value);
+    }
+    if let Some(value) = body.speed {
+        let text = match value {
+            None => None,
+            Some(serde_json::Value::Number(n)) => Some(n.to_string()),
+            Some(other) => {
+                return Err(ApiError {
+                    status: StatusCode::UNPROCESSABLE_ENTITY,
+                    code: "validation",
+                    message: format!("speech speed must be a number, got {other}"),
+                });
+            }
+        };
+        updates.insert(config::SPEED.to_string(), text);
     }
     // Validating a voice consults the same (possibly uncached) voice list the
     // getter does, so the save is a blocking call too.
@@ -12347,6 +12365,7 @@ mod tests {
                         Json(SpeechUpdate {
                             voice: None,
                             model: None,
+                            speed: None,
                         }),
                     )
                     .await

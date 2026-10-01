@@ -1072,6 +1072,58 @@ api GET "/api/config/speech?model=-o"
   fail "a rejected speech model PUT must not touch the file: $(cat "$CONFIG")"
 ok "a speech model that isn't a model name is 422 validation on PUT and on GET ?model=, writing nothing"
 
+# The playback speed (mesa task 1560): a JSON *number* in the same section,
+# applied by the page, never the engine — so it is stored and reported and must
+# leave the synthesiser's argv byte-identical.
+api GET /api/config/speech
+[ "$(jq '.speed == 1' <<<"$STDOUT")" = "true" ] ||
+  fail "an unconfigured speed must report 1, got $STDOUT"
+api PUT /api/config/speech '{"speed": 1.25}'
+[ "$CODE" = "200" ] || fail "PUT speech speed: expected 200, got $CODE: $STDOUT"
+[ "$(jq -r '.speed' <<<"$STDOUT")" = "1.25" ] ||
+  fail "PUT must echo the stored speed: $STDOUT"
+[ "$(jq -c '.speech.speed | [., type]' < "$CONFIG")" = '[1.25,"number"]' ] ||
+  fail "the speed must be stored as a JSON number: $(cat "$CONFIG")"
+[ "$(jq -r '.speech.voice' < "$CONFIG")" = "bm_george" ] ||
+  fail "a speed write dropped the voice: $(cat "$CONFIG")"
+speak "$ITEM_1"
+[ "$CODE" = "200" ] || fail "speak with a speed: expected 200, got $CODE: $(cat "$TMP/audio")"
+[ "$(cat "$KOKORO_ARGV")" = "-q -o - -v bm_george" ] ||
+  fail "a speed must never reach the synthesiser's argv, got $(cat "$KOKORO_ARGV")"
+# Saving the voice must not touch the speed beside it.
+api PUT /api/config/speech '{"voice": "af_bella"}'
+[ "$CODE" = "200" ] || fail "PUT speech voice after speed: got $CODE: $STDOUT"
+[ "$(jq -c '.speech | [.voice, .speed]' < "$CONFIG")" = '["af_bella",1.25]' ] ||
+  fail "saving the voice must preserve the speed: $(cat "$CONFIG")"
+api PUT /api/config/speech '{"voice": "bm_george"}'
+ok "PUT /api/config/speech stores a speed as a number beside the voice, preserved by a voice save, never reaching the argv"
+
+SBEFORE=$(cat "$CONFIG")
+for BAD in '0.5' '2' '0.74' '1.51' '"fast"' '"1.2"' 'true'; do
+  api PUT /api/config/speech "{\"speed\": $BAD}"
+  [ "$CODE" = "422" ] || fail "speed $BAD: expected 422, got $CODE: $STDOUT"
+  [ "$(jq -r .error.code <<<"$STDOUT")" = "validation" ] ||
+    fail "speed $BAD: expected code validation, got $STDOUT"
+  [ "$(cat "$CONFIG")" = "$SBEFORE" ] ||
+    fail "a rejected speed $BAD must not touch the file: $(cat "$CONFIG")"
+done
+ok "a speed outside 0.75..1.5, or not a number, is 422 validation, writing nothing"
+
+api PUT /api/config/speech '{"speed": null}'
+[ "$CODE" = "200" ] || fail "PUT speech speed null: expected 200, got $CODE: $STDOUT"
+[ "$(jq '.speed == 1' <<<"$STDOUT")" = "true" ] ||
+  fail "PUT speed null must report 1, got $STDOUT"
+[ "$(jq -c '.speech' < "$CONFIG")" = '{"voice":"bm_george"}' ] ||
+  fail "PUT speed null must remove only the speed key: $(cat "$CONFIG")"
+# A hand-edited bad value reads as the built-in rather than a nonsense rate.
+SAFTER=$(cat "$CONFIG")
+jq '.speech.speed = 9' <<<"$SAFTER" > "$CONFIG"
+api GET /api/config/speech
+[ "$(jq -c '[.voice, (.speed == 1)]' <<<"$STDOUT")" = '["bm_george",true]' ] ||
+  fail "a hand-edited out-of-range speed must report 1, voice intact: $STDOUT"
+printf '%s\n' "$SAFTER" > "$CONFIG"
+ok "PUT speed null removes the key; a hand-edited out-of-range speed reads as 1"
+
 # ---- the live section: GET/PUT /api/config/live (mesa task 867, 886, 919) ----
 #
 # The fifth section of the file. It used to hold two keys — the instruction

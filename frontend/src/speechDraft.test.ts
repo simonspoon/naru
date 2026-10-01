@@ -43,6 +43,7 @@ const DEFAULTED: ConfigSpeech = {
   cloned: [],
   models: [],
   capabilities: [],
+  speed: 1,
 }
 const SET: ConfigSpeech = {
   voice: 'bm_george',
@@ -51,6 +52,7 @@ const SET: ConfigSpeech = {
   cloned: [],
   models: [],
   capabilities: [],
+  speed: 1,
 }
 /** What a machine with no synthesiser installed reports. */
 const NO_BINARY: ConfigSpeech = {
@@ -60,6 +62,7 @@ const NO_BINARY: ConfigSpeech = {
   cloned: [],
   models: [],
   capabilities: [],
+  speed: 1,
 }
 /** naru-audio, with a model chosen (mesa task 1425). */
 const DAEMON: ConfigSpeech = {
@@ -69,15 +72,17 @@ const DAEMON: ConfigSpeech = {
   cloned: [],
   models: MODELS,
   capabilities: CAPS,
+  speed: 1,
 }
 
 describe('draftFrom', () => {
   it('renders an unconfigured voice blank and a configured one as text', () => {
-    expect(draftFrom(DEFAULTED)).toEqual({ voice: '', model: '' })
-    expect(draftFrom(SET)).toEqual({ voice: 'bm_george', model: '' })
+    expect(draftFrom(DEFAULTED)).toEqual({ voice: '', model: '', speed: 1 })
+    expect(draftFrom(SET)).toEqual({ voice: 'bm_george', model: '', speed: 1 })
     expect(draftFrom(DAEMON)).toEqual({
       voice: 'bm_george',
       model: 'kokoro-v1.0',
+      speed: 1,
     })
   })
 
@@ -147,17 +152,17 @@ describe('models (mesa task 1425)', () => {
     expect(modelError('-o')).not.toBeNull()
     expect(modelError('a b')).not.toBeNull()
     expect(modelError('a'.repeat(65))).not.toBeNull()
-    expect(isSavable({ voice: '', model: '-o' })).toBe(false)
+    expect(isSavable({ voice: '', model: '-o', speed: 1 })).toBe(false)
   })
 
   it('sends only the keys that changed, null for a cleared model', () => {
     expect(
-      changedSpeech(DAEMON, { voice: 'bm_george', model: 'pocket-tts-int8' }),
+      changedSpeech(DAEMON, { voice: 'bm_george', model: 'pocket-tts-int8', speed: 1 }),
     ).toEqual({ model: 'pocket-tts-int8' })
     expect(
-      changedSpeech(DAEMON, { voice: '', model: 'pocket-tts-int8' }),
+      changedSpeech(DAEMON, { voice: '', model: 'pocket-tts-int8', speed: 1 }),
     ).toEqual({ voice: null, model: 'pocket-tts-int8' })
-    expect(changedSpeech(DAEMON, { voice: 'bm_george', model: '' })).toEqual({
+    expect(changedSpeech(DAEMON, { voice: 'bm_george', model: '', speed: 1 })).toEqual({
       model: null,
     })
   })
@@ -187,7 +192,7 @@ describe('valueError', () => {
   it('accepts blank — that is the default, not a mistake', () => {
     expect(valueError('')).toBeNull()
     expect(valueError('   ')).toBeNull()
-    expect(isSavable({ voice: '', model: '' })).toBe(true)
+    expect(isSavable({ voice: '', model: '', speed: 1 })).toBe(true)
   })
 
   it('accepts a voice name, trimmed', () => {
@@ -202,7 +207,32 @@ describe('valueError', () => {
     expect(valueError('af heart')).not.toBeNull()
     expect(valueError('af_heart; rm -rf /')).not.toBeNull()
     expect(valueError('a'.repeat(65))).not.toBeNull()
-    expect(isSavable({ voice: '-o', model: '' })).toBe(false)
+    expect(isSavable({ voice: '-o', model: '', speed: 1 })).toBe(false)
+  })
+})
+
+describe('speed (mesa task 1560)', () => {
+  it('loads the saved speed into the draft', () => {
+    expect(draftFrom({ ...SET, speed: 1.25 }).speed).toBe(1.25)
+  })
+
+  it('is dirty and sent as a number when the slider moves', () => {
+    const draft = { ...draftFrom(SET), speed: 1.25 }
+    expect(isDirty(SET, draft)).toBe(true)
+    expect(changedSpeech(SET, draft)).toEqual({ speed: 1.25 })
+  })
+
+  it('sends null when the slider returns to 1 — the reset', () => {
+    const saved = { ...SET, speed: 1.25 }
+    expect(changedSpeech(saved, { ...draftFrom(saved), speed: 1 })).toEqual({
+      speed: null,
+    })
+  })
+
+  it('is clean at the saved speed', () => {
+    const saved = { ...SET, speed: 0.8 }
+    expect(isDirty(saved, draftFrom(saved))).toBe(false)
+    expect(changedSpeech(saved, draftFrom(saved))).toEqual({})
   })
 })
 
@@ -212,17 +242,17 @@ describe('changedSpeech', () => {
   })
 
   it('sends the new voice, trimmed', () => {
-    expect(changedSpeech(SET, { voice: ' af_heart ', model: '' })).toEqual({
+    expect(changedSpeech(SET, { voice: ' af_heart ', model: '', speed: 1 })).toEqual({
       voice: 'af_heart',
     })
   })
 
   it('sends null when the box is cleared — the reset', () => {
-    expect(changedSpeech(SET, { voice: '', model: '' })).toEqual({ voice: null })
+    expect(changedSpeech(SET, { voice: '', model: '', speed: 1 })).toEqual({ voice: null })
   })
 
   it('sends nothing the server would reject', () => {
-    expect(changedSpeech(SET, { voice: '-o', model: '' })).toEqual({})
+    expect(changedSpeech(SET, { voice: '-o', model: '', speed: 1 })).toEqual({})
   })
 })
 

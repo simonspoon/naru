@@ -1373,7 +1373,7 @@ export function getSpeech(model?: string): Promise<ConfigSpeech> {
  * offers), and nothing is written in that case.
  */
 export function updateSpeech(
-  speech: Record<string, string | null>,
+  speech: Record<string, string | number | null>,
 ): Promise<ConfigSpeech> {
   return request('/api/config/speech', jsonInit('PUT', speech))
 }

@@ -1,5 +1,6 @@
 import type { ConfigSpeech } from './types/ConfigSpeech'
 import type { SpeechModelCaps } from './types/SpeechModelCaps'
+import { normalizeSpeed, SPEED_DEFAULT } from './speechSpeed'
 
 /**
  * Pure draft logic for the Settings page's speech editor (mesa task 822),
@@ -20,12 +21,20 @@ import type { SpeechModelCaps } from './types/SpeechModelCaps'
  *   model has it ([`voiceForModel`]).
  */
 
-/** The section's boxes as typed: the voice and the text-to-speech model. */
-export type SpeechDraft = { voice: string; model: string }
+/**
+ * The section's boxes as typed: the voice, the text-to-speech model and the
+ * playback speed (mesa task 1560 — a number, 1 being the unconfigured
+ * default; saving 1 removes the key).
+ */
+export type SpeechDraft = { voice: string; model: string; speed: number }
 
 /** The editable text as loaded: an unconfigured voice or model is blank. */
 export function draftFrom(speech: ConfigSpeech): SpeechDraft {
-  return { voice: speech.voice ?? '', model: speech.model ?? '' }
+  return {
+    voice: speech.voice ?? '',
+    model: speech.model ?? '',
+    speed: normalizeSpeed(speech.speed),
+  }
 }
 
 /**
@@ -153,8 +162,14 @@ function valueOf(text: string): string | null {
 export function isDirty(speech: ConfigSpeech, draft: SpeechDraft): boolean {
   return (
     valueOf(draft.voice) !== (speech.voice ?? null) ||
-    valueOf(draft.model) !== (speech.model ?? null)
+    valueOf(draft.model) !== (speech.model ?? null) ||
+    speedChanged(speech, draft)
   )
+}
+
+/** Whether the drafted speed differs from the saved one (1 when unset). */
+function speedChanged(speech: ConfigSpeech, draft: SpeechDraft): boolean {
+  return Math.abs(draft.speed - (speech.speed ?? SPEED_DEFAULT)) > 1e-9
 }
 
 /** True when nothing drafted would be rejected by the server. */
@@ -174,14 +189,18 @@ export function isSavable(draft: SpeechDraft): boolean {
 export function changedSpeech(
   speech: ConfigSpeech,
   draft: SpeechDraft,
-): Record<string, string | null> {
+): Record<string, string | number | null> {
   if (!isDirty(speech, draft) || !isSavable(draft)) return {}
-  const changed: Record<string, string | null> = {}
+  const changed: Record<string, string | number | null> = {}
   if (valueOf(draft.voice) !== (speech.voice ?? null)) {
     changed.voice = valueOf(draft.voice)
   }
   if (valueOf(draft.model) !== (speech.model ?? null)) {
     changed.model = valueOf(draft.model)
+  }
+  if (speedChanged(speech, draft)) {
+    // Back to 1 is the reset: `null` removes the key.
+    changed.speed = draft.speed === SPEED_DEFAULT ? null : draft.speed
   }
   return changed
 }

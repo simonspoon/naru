@@ -2053,7 +2053,17 @@ pub const VOICE: &str = "voice";
 /// Every key the `speech` section understands, for the unknown-key error.
 /// [`MODEL`] is the text-to-speech model naru-audio speaks in (mesa task
 /// 1425) — the listen section's key name, in this section.
-const SPEECH_KEYS: &[&str] = &[VOICE, MODEL];
+const SPEECH_KEYS: &[&str] = &[VOICE, MODEL, SPEED];
+
+/// The config key holding the playback speed of everything Naru speaks (mesa
+/// task 1560). Applied by the **page**, never the engine — see
+/// `docs/config.md` "Speech"; the server only stores it.
+pub const SPEED: &str = "speed";
+/// The built-in speed: spoken as rendered.
+pub const SPEECH_SPEED_DEFAULT: f64 = 1.0;
+/// The bounds a saved speed must lie within, inclusive.
+pub const SPEECH_SPEED_MIN: f64 = 0.75;
+pub const SPEECH_SPEED_MAX: f64 = 1.5;
 
 /// The `speech` map, deserialized on its own for the reason every other
 /// section is: four independent features share one file, and a broken value in
@@ -2071,6 +2081,17 @@ struct SpeechSection {
     voice: Option<String>,
     #[serde(default)]
     model: Option<String>,
+    /// Raw JSON: a hand-edited string or out-of-range number must not make
+    /// the whole section unreadable (the other speech keys still apply).
+    #[serde(default)]
+    speed: Option<serde_json::Value>,
+}
+
+/// A stored speed in range, else `None`.
+fn valid_speed(value: &serde_json::Value) -> Option<f64> {
+    value
+        .as_f64()
+        .filter(|v| v.is_finite() && (SPEECH_SPEED_MIN..=SPEECH_SPEED_MAX).contains(v))
 }
 
 fn read_speech(path: &Path) -> Result<SpeechSection, String> {
@@ -2119,6 +2140,21 @@ fn speech_model_in(path: &Path) -> Result<Option<String>, String> {
         .filter(|v| listen::is_model_name(v)))
 }
 
+/// The speech playback speed, [`SPEECH_SPEED_DEFAULT`] when the file says
+/// nothing or a hand-edited value is out of range (the [`todo_concurrency`]
+/// clamp posture — playback never fails on it). An unreadable file is `Err`.
+pub fn speech_speed() -> Result<f64, String> {
+    speech_speed_in(&config_file())
+}
+
+fn speech_speed_in(path: &Path) -> Result<f64, String> {
+    Ok(read_speech(path)?
+        .speed
+        .as_ref()
+        .and_then(valid_speed)
+        .unwrap_or(SPEECH_SPEED_DEFAULT))
+}
+
 /// The speech settings for the Settings page (`GET /api/config/speech`): the
 /// configured voice and model (`null` when the file says nothing) plus the
 /// voices and models the engine offers, so the editor can be a list rather
@@ -2164,6 +2200,13 @@ fn speech_in(path: &Path, voices_for: Option<&str>) -> Result<ConfigSpeech, Stri
             .filter(|v| !v.is_empty()),
         models: speech::models(),
         capabilities: speech::model_caps(),
+        // Invalid on disk reads as the built-in, so a page never plays at a
+        // nonsense rate; a save of any value rewrites it.
+        speed: section
+            .speed
+            .as_ref()
+            .and_then(valid_speed)
+            .unwrap_or(SPEECH_SPEED_DEFAULT),
     })
 }
 
@@ -2226,6 +2269,8 @@ fn save_speech_in(
         {
             if key.as_str() == MODEL {
                 validate_model(value, offered_models).map_err(SaveError::Validation)?;
+            } else if key.as_str() == SPEED {
+                parse_speed(value).map_err(SaveError::Validation)?;
             } else {
                 validate_voice(value, offered).map_err(SaveError::Validation)?;
             }
@@ -2255,6 +2300,14 @@ fn save_speech_in(
             None | Some("") => {
                 section.remove(key);
             }
+            // The speed is a JSON number, not a string (mesa task 1560); the
+            // map carries its text and it was validated above.
+            Some(value) if key.as_str() == SPEED => {
+                let n = parse_speed(value).map_err(SaveError::Validation)?;
+                if let Some(n) = serde_json::Number::from_f64(n) {
+                    section.insert(key.clone(), serde_json::Value::Number(n));
+                }
+            }
             Some(value) => {
                 section.insert(key.clone(), serde_json::Value::String(value.to_string()));
             }
@@ -2265,6 +2318,19 @@ fn save_speech_in(
         .map_err(|e| SaveError::Unavailable(format!("cannot serialize the mesa config: {e}")))?;
     body.push('\n');
     write_atomically(path, &body)
+}
+
+/// A speed is a finite number within [`SPEECH_SPEED_MIN`]..=[`SPEECH_SPEED_MAX`].
+fn parse_speed(text: &str) -> Result<f64, String> {
+    let n: f64 = text
+        .parse()
+        .map_err(|_| format!("speech speed must be a number, got {text:?}"))?;
+    if !n.is_finite() || !(SPEECH_SPEED_MIN..=SPEECH_SPEED_MAX).contains(&n) {
+        return Err(format!(
+            "speech speed must be between {SPEECH_SPEED_MIN} and {SPEECH_SPEED_MAX}, got {text}"
+        ));
+    }
+    Ok(n)
 }
 
 /// A voice has to be a name the synthesiser could accept: a bounded identifier
@@ -5799,6 +5865,66 @@ mod tests {
         );
     }
 
+    /// The speech speed (mesa task 1560) is a JSON number beside the voice.
+    #[test]
+    fn speech_round_trips_a_speed_beside_the_voice() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(dir.path(), r#"{"speech": {"voice": "bm_george"}}"#);
+        assert_eq!(speech_speed_in(&path).unwrap(), 1.0);
+        assert_eq!(speech_in(&path, None).unwrap().speed, 1.0);
+
+        save_speech_in(&path, &voice(&[(SPEED, Some("1.25"))]), &[], &[]).unwrap();
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(written["speech"][SPEED], serde_json::json!(1.25));
+        assert!(written["speech"][SPEED].is_number());
+        assert_eq!(written["speech"][VOICE], "bm_george");
+        assert_eq!(speech_speed_in(&path).unwrap(), 1.25);
+        assert_eq!(speech_in(&path, None).unwrap().speed, 1.25);
+
+        // Saving the voice leaves the speed alone.
+        save_speech_in(&path, &voice(&[(VOICE, Some("af_bella"))]), &[], &[]).unwrap();
+        assert_eq!(speech_speed_in(&path).unwrap(), 1.25);
+
+        save_speech_in(&path, &voice(&[(SPEED, None)]), &[], &[]).unwrap();
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(written["speech"].get(SPEED).is_none());
+        assert_eq!(speech_speed_in(&path).unwrap(), 1.0);
+    }
+
+    #[test]
+    fn save_speech_rejects_a_bad_speed_without_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let before = r#"{"speech": {"speed": 1.1}}"#;
+        let path = write_config(dir.path(), before);
+        for bad in ["0.5", "2", "0.74", "1.51", "fast", "NaN", "inf"] {
+            let err = save_speech_in(&path, &voice(&[(SPEED, Some(bad))]), &[], &[]).unwrap_err();
+            assert!(
+                matches!(&err, SaveError::Validation(m) if m.contains("speed")),
+                "{bad:?}: {err:?}"
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "{bad:?}");
+        }
+        for ok in ["0.75", "1.5"] {
+            save_speech_in(&path, &voice(&[(SPEED, Some(ok))]), &[], &[]).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_hand_edited_speed_reads_as_the_built_in_but_reaches_nothing_else() {
+        let dir = tempfile::tempdir().unwrap();
+        for raw in ["3", "0", "\"fast\"", "-1"] {
+            let path = write_config(
+                dir.path(),
+                &format!(r#"{{"speech": {{"voice": "af_heart", "speed": {raw}}}}}"#),
+            );
+            assert_eq!(speech_speed_in(&path).unwrap(), 1.0, "{raw}");
+            assert_eq!(speech_in(&path, None).unwrap().speed, 1.0, "{raw}");
+            assert_eq!(speech_voice_in(&path).unwrap().as_deref(), Some("af_heart"));
+        }
+    }
+
     #[test]
     fn save_speech_rejects_a_name_that_is_not_a_voice_without_writing() {
         let dir = tempfile::tempdir().unwrap();
@@ -5817,7 +5943,7 @@ mod tests {
         }
         // An unknown key in the section is a validation error too.
         let err =
-            save_speech_in(&path, &voice(&[("speed", Some("1.2"))]), &offered(), &[]).unwrap_err();
+            save_speech_in(&path, &voice(&[("tempo", Some("1.2"))]), &offered(), &[]).unwrap_err();
         assert!(
             matches!(&err, SaveError::Validation(m) if m.contains("unknown speech setting")),
             "{err:?}"

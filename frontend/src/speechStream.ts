@@ -30,6 +30,12 @@
  * The listener hears a longer first wait and, on a stall, a gap; never a
  * sample dropped and never a turn cut short.
  *
+ * The speech speed (mesa task 1560) is applied here by time-stretching the
+ * decoded samples — `timeStretch.ts`, pitch-preserving, stateful across
+ * chunks — read once when the item starts. Every buffer on the clock is
+ * already the stretched audio, so `duration` and the rewind arithmetic need
+ * no knowledge of it; at 1x the stretcher is an exact passthrough.
+ *
  * What lives here is the imperative half — a fetch, a clock, and scheduled
  * source nodes. The arithmetic worth pinning is in `speechPlayback.ts`.
  */
@@ -42,6 +48,8 @@ import {
   scheduleAt,
   STALL_SECONDS,
 } from './speechPlayback'
+import { getSpeechSpeed } from './speechSpeedStore'
+import { createStretcher, deinterleave, type Stretcher } from './timeStretch'
 import { createWavDecoder, type WavFormat } from './wavStream'
 
 /** What the caller needs told; the rest it drives itself. */
@@ -129,6 +137,11 @@ export async function playSpeechStream(
   let stall: ReturnType<typeof setTimeout> | null = null
 
   const decoder = createWavDecoder()
+  // Fixed for the item: a speed saved mid-turn applies from the next one.
+  const speed = getSpeechSpeed()
+  // Made on the first chunk, when the sample rate and channel count are known.
+  let stretcher: Stretcher | null = null
+  let stretchFormat: WavFormat | null = null
   const reader = body.getReader()
 
   function clearStall() {
@@ -193,19 +206,29 @@ export async function playSpeechStream(
     queued = 0
   }
 
-  function append(samples: Float32Array, format: WavFormat) {
-    if (samples.length === 0) return
-    const frames = Math.floor(samples.length / format.channels)
+  function enqueue(planar: Float32Array[], format: WavFormat) {
+    const frames = planar[0]?.length ?? 0
+    if (frames === 0) return
     const buffer = ctx.createBuffer(format.channels, frames, format.sampleRate)
     for (let channel = 0; channel < format.channels; channel++) {
-      const track = buffer.getChannelData(channel)
-      for (let frame = 0; frame < frames; frame++) {
-        track[frame] = samples[frame * format.channels + channel]
-      }
+      buffer.getChannelData(channel).set(planar[channel])
     }
     queue.push(buffer)
     queued += buffer.duration
     if (!holding || readyToStart(queued, complete)) flush()
+  }
+
+  function append(samples: Float32Array, format: WavFormat) {
+    if (samples.length === 0) return
+    stretcher ??= createStretcher(speed, format.sampleRate, format.channels)
+    stretchFormat = format
+    enqueue(stretcher.push(deinterleave(samples, format.channels)), format)
+  }
+
+  /** The stretcher's held tail, once no more input is coming. */
+  function finishStretch() {
+    if (stretcher && stretchFormat) enqueue(stretcher.flush(), stretchFormat)
+    stretcher = null
   }
 
   // Reading runs on after this function returns: the body arrives for as long
@@ -234,6 +257,7 @@ export async function playSpeechStream(
       // Something had decoded, so the item just ends where the audio does:
       // what is held goes on the clock, what is scheduled plays out, and
       // `onEnded` follows the last of it.
+      finishStretch()
       flush()
       if (ended()) events.onEnded()
       return
@@ -244,6 +268,7 @@ export async function playSpeechStream(
     // short item, and what lets a held remainder play out. A body that ended
     // before a single sample — a synthesiser that wrote only a header — has
     // nothing to wait for.
+    finishStretch()
     flush()
     if (ended()) events.onEnded()
   })()

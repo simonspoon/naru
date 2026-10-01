@@ -164,6 +164,8 @@ import {
   STOP_WAIT_MS,
 } from '../liveStream'
 import { playFailure } from '../speechPlayback'
+import { applyElementSpeed } from '../speechSpeed'
+import { getSpeechSpeed, loadSpeechSpeed } from '../speechSpeedStore'
 import { playSpeechStream, type SpeechStream } from '../speechStream'
 import { parseTimestamp } from '../time'
 import { usePhoneTier } from '../phoneTier'
@@ -650,6 +652,8 @@ export function LiveHub({
   agentsCollapsed: boolean
   activeProjectId: number | null
 }) {
+  // Learn the speech speed up front, so the first item is already at it.
+  useEffect(loadSpeechSpeed, [])
   // What the listen switch is bound to (mesa task 1079). The keymap is the
   // page-wide one; the label is what the button's title and the capture hint
   // say, so a rebound chord is named wherever the shipped one used to be.
@@ -1523,6 +1527,9 @@ export function LiveHub({
       playDecoded(id, ctx)
       return
     }
+    // The speed setting (mesa task 1560); both rates, since a new source
+    // resets the playback rate to the default one.
+    applyElementSpeed(el, getSpeechSpeed())
     el.src = liveSpeakUrl(id)
     // A source that will not load arrives as the element's own `error` event,
     // which is where the fallback lives; the only rejection to report from here

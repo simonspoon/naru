@@ -697,6 +697,33 @@ in, and is modelled exactly on `voice` below; see "The model" after the list.
   otherwise at save time (`422`) and dropped on the read path, the voice's
   split exactly: the editor sees the raw stored value, the daemon never does.
 
+### The speed (mesa task 1560)
+
+`speed` is a **JSON number**, 0.75..=1.5 (step 0.05 in the editor), how fast
+everything Naru speaks plays — live turns, inbox items, the Settings sample
+and the voice-design takes — **without changing the pitch**.
+
+- **Absent or `null` ⇒ 1.** `PUT {"speed": null}` removes the key; a value
+  outside the range, a non-finite one or a non-number (`"fast"`, `true`) is
+  **422 `validation`**, writing nothing. `GET` always reports a number
+  (`ConfigSpeech.speed`): a hand-edited out-of-range or non-numeric value
+  reads as 1 (playback never fails on it), and the other speech keys are
+  unaffected by it. Saving the voice or model preserves the speed.
+- **It is applied by the page, never the engine.** The engine-side `speed`
+  request field is honoured only by kokoro: qwen3-tts ignores it and some
+  daemon models reject it, so relying on it would make the setting depend on
+  the model. The server therefore only stores it and **every engine request
+  is byte-identical** with or without it. The page reads it once
+  (`speechSpeedStore.ts`, one `GET` per page, 1 until it answers, updated in
+  place when Settings saves) and each player scales its own audio: an
+  `<audio>` element through `playbackRate` (+ `defaultPlaybackRate`, which a
+  new `src` resets to) with `preservesPitch` set, and the decoded Web Audio
+  fallback (`speechStream.ts`) through a pitch-preserving WSOLA time-stretch
+  of the decoded samples (`timeStretch.ts`, stateful across chunks; at 1 an
+  exact passthrough). A speed saved mid-turn applies from the next item.
+- The Settings **Speed** slider moves the sample preview and the design takes
+  at the drafted value at once; **save** persists it with the rest.
+
 ### Per-model capabilities (mesa task 1455)
 
 Different text-to-speech models on naru-audio clone differently — some need

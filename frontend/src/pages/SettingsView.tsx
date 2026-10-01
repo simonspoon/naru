@@ -56,6 +56,15 @@ import {
 } from '../keymapDraft'
 import { publishKeymap } from '../keymapStore'
 import {
+  applyElementSpeed,
+  formatSpeed,
+  SPEED_DEFAULT,
+  SPEED_MAX,
+  SPEED_MIN,
+  SPEED_STEP,
+} from '../speechSpeed'
+import { publishSpeechSpeed } from '../speechSpeedStore'
+import {
   bodyError as memoryBodyError,
   budgetMeter,
   isSendable as isMemorySendable,
@@ -1182,7 +1191,9 @@ function SpeechSection() {
   const pickedFile = useRef<File | null>(null)
 
   const seeded: SpeechDraft =
-    draft ?? (speech ? speechDraftFrom(speech) : { voice: '', model: '' })
+    draft ?? (speech
+        ? speechDraftFrom(speech)
+        : { voice: '', model: '', speed: SPEED_DEFAULT })
   const listed =
     voicesFor && voicesFor.model === seeded.model.trim() ? voicesFor : null
   const voices = listed ? listed.voices : (speech?.voices ?? [])
@@ -1356,6 +1367,8 @@ function SpeechSection() {
       (fresh) => {
         // Re-seed from what the server read back, so the box shows what landed.
         setDraft(speechDraftFrom(fresh))
+        // Every player on the page picks the saved speed up now.
+        publishSpeechSpeed(fresh.speed)
         setVoicesFor(null)
         setSaving(false)
         setSaved(true)
@@ -1505,6 +1518,34 @@ function SpeechSection() {
         {sampleError && (
           <p className="error">could not play a sample in this voice</p>
         )}
+      </section>
+
+      <section className="settings-command">
+        <label htmlFor="speech-speed">
+          <span className="settings-command-title">Speed</span>
+          <code className="settings-command-key">speed</code>
+        </label>
+        <p className="muted settings-command-blurb">
+          How fast everything Naru speaks plays — live replies, inbox items and
+          the samples on this page — without changing the pitch. The page
+          applies it whatever the voice or engine, so a change is heard on the
+          next thing spoken; the sample above follows the slider at once.
+        </p>
+        <div className="settings-voice-row">
+          <input
+            id="speech-speed"
+            type="range"
+            min={SPEED_MIN}
+            max={SPEED_MAX}
+            step={SPEED_STEP}
+            value={seeded.speed}
+            onChange={(e) => {
+              setDraft({ ...seeded, speed: Number(e.target.value) })
+              setSaved(false)
+            }}
+          />
+          <span>{formatSpeed(seeded.speed)}</span>
+        </div>
       </section>
 
       {naruAudio && currentCaps?.clone === true && (
@@ -1663,7 +1704,11 @@ function SpeechSection() {
       )}
 
       {naruAudio && canDesignVoice(currentCaps) && (
-        <VoiceDesignPanel model={currentModel} refreshVoices={refreshVoices} />
+        <VoiceDesignPanel
+          model={currentModel}
+          speed={seeded.speed}
+          refreshVoices={refreshVoices}
+        />
       )}
 
       {/* One player, unmounted to stop — the same shape (and the same
@@ -1682,6 +1727,8 @@ function SpeechSection() {
             // Inbox player guards the same race with its item id. The cleanup
             // runs on unmount, which is exactly when this closure goes stale.
             let live = true
+            // The drafted speed, so the slider is audible on the sample at once.
+            if (el) applyElementSpeed(el, seeded.speed)
             el?.play().catch((err: DOMException) => {
               if (err.name === 'AbortError' || !live) return
               setSampleError(true)
@@ -1735,9 +1782,12 @@ function SpeechSection() {
  */
 function VoiceDesignPanel({
   model,
+  speed,
   refreshVoices,
 }: {
   model: string
+  /** The drafted playback speed the takes are auditioned at. */
+  speed: number
   refreshVoices: () => Promise<string[]>
 }) {
   const info = useFetch(
@@ -1883,7 +1933,15 @@ function VoiceDesignPanel({
         </button>
       </div>
       {sampleUrl && (
-        <audio key={sampleUrl} src={sampleUrl} controls autoPlay />
+        <audio
+          key={sampleUrl}
+          src={sampleUrl}
+          controls
+          autoPlay
+          ref={(el) => {
+            if (el) applyElementSpeed(el, speed)
+          }}
+        />
       )}
       {state.kept !== null && referenceUrl && (
         <>
@@ -1893,7 +1951,14 @@ function VoiceDesignPanel({
             Reference clip — “{state.kept}” — reading: “{info.data.reference}”
           </p>
           <div className="settings-voice-row">
-            <audio key={referenceUrl} src={referenceUrl} controls />
+            <audio
+              key={referenceUrl}
+              src={referenceUrl}
+              controls
+              ref={(el) => {
+                if (el) applyElementSpeed(el, speed)
+              }}
+            />
             <button
               type="button"
               disabled={!canReroll(state)}

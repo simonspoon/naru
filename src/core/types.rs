@@ -439,6 +439,10 @@ pub struct ConfigSpeech {
     /// than always the daemon's own default. Always empty on the legacy
     /// engine and whenever `models` is.
     pub capabilities: Vec<SpeechModelCaps>,
+    /// How fast the page plays everything Naru speaks (mesa task 1560),
+    /// 0.75..=1.5, `1` when the config says nothing or holds a bad value.
+    /// Applied client-side with pitch preserved; the engine never sees it.
+    pub speed: f64,
 }
 
 /// One text-to-speech model's advertised capabilities (`GET /v1/models`,
