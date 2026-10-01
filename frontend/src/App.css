@@ -10217,10 +10217,6 @@ body.live-panel-ratio-resizing .live-panel-divider {
   display: flex;
   flex-direction: column;
   gap: 0.35rem;
-  /* The floating orb's default footprint (`ORB_SIZE` + `ORB_MARGIN`, minus the
-     composer's own gutter) is the panel's bottom-right corner; leave it clear
-     so the send button and the hint are not under it. */
-  padding-right: 128px;
 }
 
 /* What is happening right now (mesa task 1153), in one line: "mesa speaking",
