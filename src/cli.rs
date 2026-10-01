@@ -601,6 +601,9 @@ EXAMPLES
         /// Only tasks whose claim is at least this many minutes old
         #[arg(long, value_name = "MINUTES")]
         stale_claim_minutes: Option<u32>,
+        /// Only tasks updated at or after this UTC timestamp ("YYYY-MM-DD HH:MM:SS")
+        #[arg(long, value_name = "TIMESTAMP")]
+        updated_since: Option<String>,
     },
     /// Print the next actionable task (todo + unblocked) as a full JSON object
     ///
@@ -4463,8 +4466,12 @@ fn run_task(cmd: TaskCmd) -> Result<()> {
             parent,
             unblocked,
             stale_claim_minutes,
+            updated_since,
         } => {
             let project = project.or(project_pos);
+            if let Some(bound) = &updated_since {
+                Store::check_updated_since(bound)?;
+            }
             let project = resolve_project_opt(&store, project.as_deref())?;
             // One cutoff for the whole call, not one per row: the clock must
             // not move underneath the filter.
@@ -4484,6 +4491,7 @@ fn run_task(cmd: TaskCmd) -> Result<()> {
                         .as_ref()
                         .is_none_or(|cutoff| t.claimed_at.as_ref().is_some_and(|at| at <= cutoff))
                 })
+                .filter(|t| updated_since.as_ref().is_none_or(|b| t.updated_at >= *b))
                 .map(compact)
                 .collect();
             print_json(&tasks);

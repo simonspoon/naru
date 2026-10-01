@@ -6,18 +6,22 @@ import {
   detectDone,
   dismissToast,
   pushToasts,
+  seedCursor,
   toastHref,
+  type DoneState,
   type DoneToast,
 } from '../doneToast'
 
 // Task-done toasts (mesa task 1556), mounted once at app level. The web UI
 // does not live-sync, so this polls the one cross-project read that already
-// exists — `GET /api/tasks?status=done` — and diffs it (`doneToast.ts`); the
-// first poll only seeds, so nothing already done at mount toasts. Paused while
-// the tab is hidden.
+// exists — `GET /api/tasks?status=done&updated_since=<cursor>` — so the reply
+// is only what changed lately, never every done task. The cursor is the
+// newest server `updated_at` seen (`doneToast.ts`); the first poll seeds from
+// the client clock a minute back and only records ids, so nothing already done
+// at mount toasts. Paused while the tab is hidden.
 export function DoneToasts() {
   const [toasts, setToasts] = useState<DoneToast[]>([])
-  const seen = useRef<Set<number> | null>(null)
+  const state = useRef<DoneState | null>(null)
   const nextKey = useRef(0)
 
   useEffect(() => {
@@ -25,10 +29,12 @@ export function DoneToasts() {
     const tick = async () => {
       if (document.hidden) return
       try {
-        const done = await listTasks({ status: 'done' })
+        const seed = state.current === null
+        const cur = state.current ?? { cursor: seedCursor(new Date()), seen: new Set<number>() }
+        const done = await listTasks({ status: 'done', updatedSince: cur.cursor })
         if (cancelled) return
-        const r = detectDone(seen.current, done)
-        seen.current = r.seen
+        const r = detectDone(cur, done, seed)
+        state.current = r.state
         if (r.fresh.length === 0) return
         // Names are read fresh only when something fired; a failure just
         // leaves the project line off.

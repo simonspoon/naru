@@ -4289,6 +4289,29 @@ impl Store {
         )?)
     }
 
+    /// Validate an `updated_since` bound (`task list --updated-since`, `GET
+    /// /api/tasks?updated_since=`): exactly Naru's timestamp text,
+    /// `YYYY-MM-DD HH:MM:SS`, so `updated_at >= bound` is the same ordinary
+    /// string comparison `claim_cutoff` relies on. Anything else is
+    /// `validation`. The filter is applied in Rust over the listed rows, so
+    /// the value never reaches SQL.
+    pub fn check_updated_since(bound: &str) -> Result<()> {
+        let ok = bound.len() == 19
+            && bound.bytes().enumerate().all(|(i, b)| match i {
+                4 | 7 => b == b'-',
+                10 => b == b' ',
+                13 | 16 => b == b':',
+                _ => b.is_ascii_digit(),
+            });
+        if ok {
+            Ok(())
+        } else {
+            Err(Error::Validation(format!(
+                "updated_since must be a UTC timestamp like \"2026-01-31 08:30:00\", got {bound:?}"
+            )))
+        }
+    }
+
     /// One task's receipt, or `None` when it has never closed with a claim
     /// (no receipt was ever generated). `NotFound` only when the task itself
     /// doesn't exist — a task with no receipt yet is a normal, quiet answer.
@@ -10468,6 +10491,50 @@ mod tests {
                 [id],
             )
             .unwrap();
+    }
+
+    #[test]
+    fn updated_since_accepts_only_naru_timestamp_text() {
+        assert!(Store::check_updated_since("2026-01-31 08:30:00").is_ok());
+        for bad in [
+            "",
+            "2026-01-31",
+            "2026-01-31T08:30:00",
+            "2026-01-31 08:30",
+            "2026-01-31 08:30:00Z",
+            "yesterday",
+            "2026-01-31 08:30:0x",
+        ] {
+            assert!(
+                matches!(Store::check_updated_since(bad), Err(Error::Validation(_))),
+                "{bad:?} must be validation"
+            );
+        }
+    }
+
+    #[test]
+    fn updated_since_bound_keeps_recent_rows_and_includes_the_boundary() {
+        let (mut store, _dir) = temp_store();
+        let p = store.create_project("p", None, None, None, None).unwrap();
+        let old = add_task(&mut store, p.id, "old");
+        let fresh = add_task(&mut store, p.id, "fresh");
+        store
+            .conn
+            .execute(
+                "UPDATE tasks SET updated_at = datetime('now', '-90 minutes') WHERE id = ?1",
+                [old.id],
+            )
+            .unwrap();
+        let bound = store.claim_cutoff(30).unwrap();
+        Store::check_updated_since(&bound).unwrap();
+        let kept: Vec<i64> = store
+            .list_tasks(Some(p.id))
+            .unwrap()
+            .iter()
+            .filter(|t| t.updated_at >= bound)
+            .map(|t| t.id)
+            .collect();
+        assert_eq!(kept, vec![fresh.id], "the 90-minute-old row is excluded");
     }
 
     #[test]

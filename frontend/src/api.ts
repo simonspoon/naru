@@ -145,6 +145,8 @@ export interface TaskFilters {
   status?: Status
   tag?: string
   unblocked?: boolean
+  /** `YYYY-MM-DD HH:MM:SS` UTC: only tasks updated at or after it. */
+  updatedSince?: string
 }
 
 /**
@@ -169,6 +171,7 @@ export function listTasks(filters: TaskFilters = {}): Promise<TaskSummary[]> {
   if (filters.status !== undefined) params.set('status', filters.status)
   if (filters.tag !== undefined && filters.tag !== '') params.set('tag', filters.tag)
   if (filters.unblocked) params.set('unblocked', 'true')
+  if (filters.updatedSince) params.set('updated_since', filters.updatedSince)
   const qs = params.toString()
   return request(`/api/tasks${qs ? `?${qs}` : ''}`)
 }

@@ -1,16 +1,18 @@
 // Task-done toast logic (mesa task 1556): which tasks newly entered `done`
-// between two polls of `GET /api/tasks?status=done`, and the toast stack they
-// feed. Pure, so the predicates are unit-tested rather than living in the
+// between two polls of `GET /api/tasks?status=done&updated_since=<cursor>`,
+// and the toast stack they feed. Pure, so the predicates are unit-tested rather than living in the
 // component.
 
 export interface DoneTask {
   id: number
   name: string
   project_id: number
+  /** Server clock, `YYYY-MM-DD HH:MM:SS` UTC. */
+  updated_at: string
 }
 
 export interface DoneToast {
-  /** Unique per toast, so a task that is reopened and closed again gets a new one. */
+  /** Unique per toast. */
   key: number
   taskId: number
   name: string
@@ -26,19 +28,45 @@ export const TOAST_MAX = 4
 
 export const DONE_POLL_MS = 2000
 
+/** Naru's timestamp text for a client clock, `secondsAgo` before `now`. */
+export function seedCursor(now: Date, secondsAgo = 60): string {
+  return new Date(now.getTime() - secondsAgo * 1000)
+    .toISOString()
+    .slice(0, 19)
+    .replace('T', ' ')
+}
+
+export interface DoneState {
+  /** The `updated_since` the next poll asks for. */
+  cursor: string
+  /** Every id already seen (toasted or seeded) this page life. */
+  seen: ReadonlySet<number>
+}
+
 /**
- * Compare a poll of the done tasks against the ids already seen. The first
- * poll (`seen === null`) only seeds — tasks already done at mount never toast.
- * The returned set is exactly the ids done now, so a task that leaves `done`
- * and returns toasts again, and one still done never toasts twice.
+ * Fold one poll of `status=done&updated_since=<cursor>` into the state. The
+ * cursor only moves to the newest `updated_at` the server reported, so the
+ * client clock is used for the seed alone. The filter is `>=`, so the row at
+ * the cursor comes back next time; the id set is what stops it toasting twice,
+ * and a task toasts at most once per page life. The seed poll (`seed: true`)
+ * only records ids.
  */
 export function detectDone(
-  seen: ReadonlySet<number> | null,
+  state: DoneState,
   done: readonly DoneTask[],
-): { seen: Set<number>; fresh: DoneTask[] } {
-  const next = new Set(done.map((t) => t.id))
-  if (seen === null) return { seen: next, fresh: [] }
-  return { seen: next, fresh: done.filter((t) => !seen.has(t.id)) }
+  seed = false,
+): { state: DoneState; fresh: DoneTask[] } {
+  const seen = new Set(state.seen)
+  let cursor = state.cursor
+  const fresh: DoneTask[] = []
+  for (const t of done) {
+    if (!seen.has(t.id)) {
+      seen.add(t.id)
+      if (!seed) fresh.push(t)
+    }
+    if (t.updated_at > cursor) cursor = t.updated_at
+  }
+  return { state: { cursor, seen }, fresh }
 }
 
 /** Append toasts for `fresh` (keys from `nextKey`), newest last, capped at `TOAST_MAX`. */

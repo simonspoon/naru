@@ -2,31 +2,58 @@ import { describe, expect, it } from 'vitest'
 import {
   TOAST_MAX,
   detectDone,
+  seedCursor,
   dismissToast,
   pushToasts,
   toastHref,
+  type DoneState,
   type DoneTask,
 } from './doneToast'
 
-const task = (id: number, project_id = 1): DoneTask => ({ id, name: `t${id}`, project_id })
+const task = (id: number, project_id = 1, updated_at = '2026-01-01 00:00:10'): DoneTask => ({
+  id,
+  name: `t${id}`,
+  project_id,
+  updated_at,
+})
+const start = (cursor = '2026-01-01 00:00:00'): DoneState => ({ cursor, seen: new Set() })
+
+describe('seedCursor', () => {
+  it('formats the client clock as Naru text, a minute back', () => {
+    expect(seedCursor(new Date('2026-03-05T10:00:30.900Z'))).toBe('2026-03-05 09:59:30')
+  })
+})
 
 describe('detectDone', () => {
-  it('seeds on the first poll without firing', () => {
-    const r = detectDone(null, [task(1), task(2)])
+  it('seeds without firing, recording ids and moving the cursor', () => {
+    const r = detectDone(start(), [task(1), task(2, 1, '2026-01-01 00:00:20')], true)
     expect(r.fresh).toEqual([])
-    expect([...r.seen]).toEqual([1, 2])
+    expect([...r.state.seen]).toEqual([1, 2])
+    expect(r.state.cursor).toBe('2026-01-01 00:00:20')
   })
-  it('fires only for ids new since the last poll, never twice', () => {
-    const a = detectDone(null, [task(1)])
-    const b = detectDone(a.seen, [task(1), task(2)])
+  it('keeps the cursor when a poll is empty', () => {
+    const r = detectDone(start('2026-01-01 00:00:05'), [])
+    expect(r.state.cursor).toBe('2026-01-01 00:00:05')
+    expect(r.fresh).toEqual([])
+  })
+  it('fires for new ids, and a >= boundary row returning does not refire', () => {
+    const a = detectDone(start(), [task(1)], true)
+    const b = detectDone(a.state, [task(1), task(2)])
     expect(b.fresh.map((t) => t.id)).toEqual([2])
-    const c = detectDone(b.seen, [task(1), task(2)])
+    expect(b.state.cursor).toBe('2026-01-01 00:00:10')
+    const c = detectDone(b.state, [task(1), task(2)])
     expect(c.fresh).toEqual([])
   })
-  it('fires again when a task leaves done and returns', () => {
-    const a = detectDone(null, [task(1)])
-    const b = detectDone(a.seen, [])
-    expect(detectDone(b.seen, [task(1)]).fresh.map((t) => t.id)).toEqual([1])
+  it('fires a same-second sibling that arrives in a later poll', () => {
+    const a = detectDone(start(), [task(1)])
+    const b = detectDone(a.state, [task(1), task(2)])
+    expect(b.fresh.map((t) => t.id)).toEqual([2])
+  })
+  it('toasts a task at most once per page life, even if rewritten', () => {
+    const a = detectDone(start(), [task(1)])
+    const b = detectDone(a.state, [task(1, 1, '2026-01-01 00:05:00')])
+    expect(b.fresh).toEqual([])
+    expect(b.state.cursor).toBe('2026-01-01 00:05:00')
   })
 })
 

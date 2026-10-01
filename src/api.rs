@@ -3089,6 +3089,10 @@ struct TaskQuery {
     /// CLI's `--stale-claim-minutes`.
     #[serde(default)]
     stale_claim_minutes: Option<u32>,
+    /// Only tasks with `updated_at` at or after this UTC timestamp
+    /// (`YYYY-MM-DD HH:MM:SS`), matching the CLI's `--updated-since`.
+    #[serde(default)]
+    updated_since: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -3107,6 +3111,9 @@ async fn list_tasks(
         Some(minutes) => Some(store.claim_cutoff(minutes)?),
         None => None,
     };
+    if let Some(bound) = &q.updated_since {
+        Store::check_updated_since(bound)?;
+    }
     let tasks: Vec<TaskSummary> = store
         .list_tasks(q.project)?
         .iter()
@@ -3119,6 +3126,7 @@ async fn list_tasks(
                 .as_ref()
                 .is_none_or(|cutoff| t.claimed_at.as_ref().is_some_and(|at| at <= cutoff))
         })
+        .filter(|t| q.updated_since.as_ref().is_none_or(|b| t.updated_at >= *b))
         .map(TaskSummary::from)
         .collect();
     Ok(Json(tasks).into_response())

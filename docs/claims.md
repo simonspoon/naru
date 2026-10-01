@@ -58,6 +58,8 @@ Two read-side surfaces, no writes, no new column and no new status.
   default output is byte-identical, and no record grew a field. `0` is legal
   and means "every claimed task"; there is nothing to validate.
 
+  Beside it, `task list --updated-since <TIMESTAMP>` / `GET /api/tasks?updated_since=<TIMESTAMP>` (UTC, `YYYY-MM-DD HH:MM:SS`, else `validation`/422) keeps only tasks with `updated_at` at or after it; absent is byte-identical. The web UI's task-done toast polls `status=done` with it so the poll stays small.
+
   The cutoff is `Store::claim_cutoff(minutes)` — `SELECT datetime('now', '-N
   minutes')`, **SQLite's clock**, the one that stamped `claimed_at`, never a
   second time source in Rust — computed once per call, before the filter chain,
