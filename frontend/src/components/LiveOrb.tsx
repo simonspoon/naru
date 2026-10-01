@@ -336,18 +336,11 @@ export function LiveOrb({
           <NaruMark state={state} level={level} speechRms={speechRms} decorative />
         </div>
       </div>
-      {mute !== null && (
+      {(mute === 'speaker' || mute === 'both') && (
         <span className="live-orb-badge" aria-hidden="true">
-          {(mute === 'mic' || mute === 'both') && (
-            <svg viewBox="0 0 24 24" width="14" height="14">
-              <MicGlyph />
-            </svg>
-          )}
-          {(mute === 'speaker' || mute === 'both') && (
-            <svg viewBox="0 0 24 24" width="14" height="14">
-              <SpeakerGlyph muted />
-            </svg>
-          )}
+          <svg viewBox="0 0 24 24" width="14" height="14">
+            <SpeakerGlyph muted />
+          </svg>
         </span>
       )}
     </div>,
