@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isLive, liveControls, liveStatusLine } from './liveSession'
+import { isLive, listenChordAction, liveControls, liveStatusLine } from './liveSession'
 import type { LiveSession } from './types/LiveSession'
 
 function session(patch: Partial<LiveSession> = {}): LiveSession {
@@ -207,5 +207,14 @@ describe('liveStatusLine', () => {
       /^That conversation has ended\./,
     )
     expect(liveStatusLine(null, false, null, true)).toMatch(/^Not live\./)
+  })
+})
+
+describe('listenChordAction', () => {
+  it('joins a live session this browser has not joined, toggles once joined', () => {
+    expect(listenChordAction(true, false)).toBe('join')
+    expect(listenChordAction(true, true)).toBe('toggle')
+    expect(listenChordAction(false, false)).toBe('none')
+    expect(listenChordAction(false, true)).toBe('none')
   })
 })

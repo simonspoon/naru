@@ -188,3 +188,19 @@ export function liveStatusLine(
   // The default, listening state says nothing: the head's title already does.
   return null
 }
+
+/**
+ * What the listen chord does (`live-listen`). A live session this browser has
+ * not joined is silent whatever `muted` says — the microphone needs the
+ * join's gesture, claim and unlock — so flipping `muted` alone was a no-op
+ * from a page that had had no press. There the chord *is* the Listen press
+ * (the keystroke is a user gesture), and joining opens the microphone itself.
+ * With no live session there is nothing to listen to, so it does nothing.
+ */
+export function listenChordAction(
+  live: boolean,
+  unlocked: boolean,
+): 'join' | 'toggle' | 'none' {
+  if (!live) return 'none'
+  return unlocked ? 'toggle' : 'join'
+}

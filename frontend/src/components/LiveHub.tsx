@@ -101,6 +101,7 @@ import {
 } from '../liveRecognition'
 import {
   isLive,
+  listenChordAction,
   liveControls,
   liveStatusLine,
   type LiveButton,
@@ -1919,6 +1920,8 @@ export function LiveHub({
     if (silenceVerdict()) flushRef.current()
   }, [segmentOpen, hearing, silenceVerdict])
 
+  // The Listen press, for the chord: set each render beside `act`.
+  const joinRef = useRef<() => void>(() => {})
   const toggleListening = useCallback(
     (next: boolean, discard = false) => {
       // The ref first, before the cut and the close below: a segment that
@@ -1983,13 +1986,18 @@ export function LiveHub({
   // while mesa is on screen.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // A held chord must not join and then immediately mute.
+      if (e.repeat) return
       if (!matchesShortcut('live-listen', e, keymap)) return
       e.preventDefault()
-      toggleListening(!mutedRef.current)
+      const what = listenChordAction(live, unlocked)
+      // Not joined yet: the chord is the Listen press (joining opens the mic).
+      if (what === 'join') joinRef.current()
+      else if (what === 'toggle') toggleListening(!mutedRef.current)
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [toggleListening, keymap])
+  }, [toggleListening, keymap, live, unlocked])
 
   // The discard key (mesa task 1354, `live-cancel`, Escape by default): the
   // person was interrupted mid-sentence, so what the microphone has heard and
@@ -3495,6 +3503,13 @@ export function LiveHub({
     setReplaying(null)
     stopLive().then(() => refetch(), failed).finally(() => setPending(null))
   }
+
+  useEffect(() => {
+    // Not while a press is in flight ('Ending…' is disabled; so is the chord).
+    joinRef.current = () => {
+      if (pending === null) act({ label: 'Listen', action: 'listen', disabled: false })
+    }
+  })
 
   /**
    * Stepping out of the conversation, and back in (mesa task 882).
