@@ -10038,15 +10038,31 @@ body.live-panel-ratio-resizing .live-panel-divider {
 .live-group.live-user,
 .live-group.live-mesa,
 .live-group.live-naru {
-  max-width: 86%;
+  max-width: 92%;
+}
+
+/* The speaker and the clock, once per run (mesa task 1565): mono only for
+   this small meta, the person's side reading time then name. */
+.live-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 0.5rem;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 1.2px;
+  color: var(--muted);
+}
+
+.live-user .live-meta {
+  justify-content: flex-end;
 }
 
 .live-who {
-  font-size: 11px;
   font-weight: 700;
   letter-spacing: 1.4px;
   text-transform: uppercase;
-  color: var(--muted);
+  color: var(--cyan);
 }
 
 .live-user .live-who {
@@ -10054,25 +10070,46 @@ body.live-panel-ratio-resizing .live-panel-divider {
 }
 
 /* Dictation and spoken prose are both free text that may carry a bare URL with
-   no break opportunity at all — the same rule `.inbox-body` needs. */
+   no break opportunity at all — the same rule `.inbox-body` needs. Soft tinted
+   bubbles, no border (mesa task 1565): Naru's navy with a cyan left edge, the
+   person's a violet tint; the body is proportional, mono being for the meta. */
 .live-turn {
-  padding: 8px 11px;
-  border: 1px solid var(--border);
-  background: var(--bg);
-  clip-path: var(--cut-sm);
-  font-size: 13.5px;
-  line-height: 1.6;
+  position: relative;
+  padding: 10px 15px;
+  border-radius: 16px 16px 16px 6px;
+  background: rgba(0, 229, 255, 0.06);
+  box-shadow: inset 2px 0 0 rgba(0, 229, 255, 0.55);
+  color: var(--text-h);
+  font-family: var(--font-sans, -apple-system, 'SF Pro Text', system-ui, sans-serif);
+  font-size: 14px;
+  line-height: 1.55;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
+  text-align: left;
 }
 
 /* The dictated side is the brighter one: it is what the person said, and it is
    what they check when a mishearing needs spotting. */
 .live-user .live-turn {
-  background: var(--violet-dim);
-  border-color: var(--violet-edge);
-  color: var(--text-h);
-  text-align: left;
+  border-radius: 16px 16px 6px 16px;
+  background: linear-gradient(135deg, rgba(176, 107, 255, 0.22), rgba(120, 70, 220, 0.14));
+  box-shadow: none;
+}
+
+/* A task number in a turn (mesa task 1565): a small chip that opens the task. */
+.live-task-chip {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--cyan);
+  background: rgba(0, 229, 255, 0.1);
+  border: 1px solid rgba(0, 229, 255, 0.25);
+  padding: 0 6px;
+  border-radius: 6px;
+  text-decoration: none;
+}
+
+.live-task-chip:hover {
+  background: rgba(0, 229, 255, 0.2);
 }
 
 /* What a turn DID, as opposed to what it said: a navigate turn may carry no
@@ -10096,25 +10133,48 @@ body.live-panel-ratio-resizing .live-panel-divider {
   clip-path: var(--cut-sm);
 }
 
-/* Replay (mesa task 1449): a small transport button on every mesa turn with
-   spoken text, so a reply can be heard again without waiting for the
-   conversation to reach it. Sits inside the bubble it replays rather than
-   beside it, so it scrolls with the turn. */
+/* Replay (mesa task 1449, restyled by task 1565): a small round play icon —
+   one beside the clock in a Naru group's head, one beside a bubble that shows
+   on hover or keyboard focus. */
 .live-turn-replay {
-  margin-top: 0.35rem;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 1.75rem;
-  padding: 0.15rem 0.4rem;
+  width: 18px;
+  height: 18px;
+  padding: 0;
   background: transparent;
-  border: 1px solid var(--border);
-  color: var(--muted);
-  clip-path: var(--cut-sm);
+  border: 1px solid rgba(0, 229, 255, 0.35);
+  border-radius: 50%;
+  color: var(--cyan);
+  clip-path: none;
+}
+
+.live-turn-replay .transport-icon {
+  width: 8px;
+  height: 8px;
 }
 
 .live-turn-replay:disabled {
   opacity: 0.4;
+}
+
+.live-play-head {
+  opacity: 0.6;
+}
+
+.live-play-side {
+  position: absolute;
+  top: 10px;
+  left: 100%;
+  margin-left: 8px;
+  opacity: 0;
+}
+
+.live-turn:hover > .live-play-side,
+.live-play-side:focus-visible {
+  opacity: 1;
+  box-shadow: 0 0 10px rgba(0, 229, 255, 0.4);
 }
 
 .live-composer {
@@ -10189,12 +10249,98 @@ body.live-panel-ratio-resizing .live-panel-divider {
   gap: 9px;
 }
 
+/* One rounded field holding the box, the source icon, the mic and send (mesa
+   task 1565). */
+.live-input-row {
+  padding: 6px 6px 6px 14px;
+  border-radius: 14px;
+  background: rgba(6, 10, 16, 0.8);
+  box-shadow: 0 0 0 1px rgba(42, 106, 138, 0.45);
+}
+
+.live-input-row:focus-within {
+  box-shadow: 0 0 0 1px rgba(0, 229, 255, 0.6), 0 0 18px rgba(0, 229, 255, 0.08);
+}
+
 .live-input {
   flex: 1 1 auto;
   min-width: 0;
-  min-height: 42px;
-  clip-path: var(--cut-sm);
-  resize: vertical;
+  min-height: 0;
+  padding: 6px 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  outline: none;
+  font-family: var(--font-sans, -apple-system, 'SF Pro Text', system-ui, sans-serif);
+  font-size: 14px;
+  clip-path: none;
+  resize: none;
+}
+
+/* The chooser is the real <select>, laid invisibly over the icon. */
+.live-mic-source {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 32px;
+  height: 32px;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.live-mic-source:hover,
+.live-mic-source:focus-within {
+  color: var(--cyan);
+}
+
+.live-mic-source .live-input-choice {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  max-width: none;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.live-composer-mic,
+.live-send {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  padding: 0;
+  clip-path: none;
+}
+
+.live-composer-mic {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  color: var(--amber);
+  background: radial-gradient(circle, rgba(255, 180, 68, 0.18), rgba(255, 180, 68, 0.04));
+  border: 1px solid rgba(255, 180, 68, 0.5);
+}
+
+.live-composer-mic.live-on {
+  color: var(--green);
+  background: radial-gradient(circle, rgba(43, 255, 156, 0.2), rgba(43, 255, 156, 0.05));
+  border-color: rgba(43, 255, 156, 0.5);
+  box-shadow: 0 0 14px rgba(43, 255, 156, 0.25);
+}
+
+.live-send {
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  border: 0;
+  background: var(--cyan);
+  color: #04131a;
+}
+
+.live-send:disabled {
+  opacity: 0.35;
 }
 
 /* Listening is a state, not just a press — the same deal `.live-toggle.live-on`
@@ -10216,9 +10362,11 @@ body.live-panel-ratio-resizing .live-panel-divider {
    with it. */
 .live-caption {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
+  justify-content: space-between;
   gap: 0.35rem 0.5rem;
+  padding: 0 4px;
 }
 
 /* The hint takes a line of its own under the chooser rather than the ~230px
@@ -10227,9 +10375,27 @@ body.live-panel-ratio-resizing .live-panel-divider {
    forces the wrap: it can never share a line, so the row is one line when
    there is no chooser and two when there is. */
 .live-hint {
-  flex: 1 1 100%;
+  flex: 1 1 auto;
   min-width: 0;
-  font-size: 0.75rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+
+.live-hint kbd {
+  font-family: inherit;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 4px;
+  color: var(--text);
+}
+
+.live-hint-mic {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
 }
 
 /* Phone: the panel becomes a drawer, and the header is allowed to wrap

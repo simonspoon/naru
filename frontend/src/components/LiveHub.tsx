@@ -10,6 +10,7 @@ import {
   getListen,
   getLive,
   getLiveConfig,
+  listAllAgents,
   listProjects,
   liveSpeakUrl,
   liveTurnInkUrl,
@@ -70,11 +71,11 @@ import {
 import { MIN_MAIN_WIDTH } from '../agentSidebarWidth'
 import { chordLabel, matchesShortcut } from '../keymap'
 import { useKeymap } from '../keymapStore'
-import { contextLabel, elapsedLabel, endsInHead } from '../liveHead'
+import { elapsedLabel, endsInHead } from '../liveHead'
+import { headMeta, quietHint, taskHash, taskSegments, turnClock } from '../liveChat'
 import { headerIndicator } from '../liveIndicator'
 import {
   buildVocabulary,
-  captureHint,
   correctVocabulary,
   isBlockingError,
   HEARING_HOLD_MS,
@@ -461,6 +462,38 @@ const ReplayPendingIcon = () => (
 )
 
 /** The toolbar's show/hide-chat glyph (mesa task 1483): a speech bubble. */
+/** The composer's microphone-source glyph (mesa task 1565): three sliders. */
+function SlidersMark() {
+  return (
+    <svg
+      className="live-icon-mark"
+      viewBox="0 0 24 24"
+      width="16"
+      height="16"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6" />
+    </svg>
+  )
+}
+
+/** The composer's send glyph (mesa task 1565): an arrow. */
+function SendMark() {
+  return (
+    <svg
+      className="live-icon-mark"
+      viewBox="0 0 24 24"
+      width="16"
+      height="16"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path d="M5 12h14M13 6l6 6-6 6" />
+    </svg>
+  )
+}
+
 function ChatMark() {
   return (
     <svg
@@ -596,7 +629,9 @@ async function openPcmCapture(
   running: () => boolean,
   onFrame: (samples: Float32Array) => void,
 ): Promise<boolean> {
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: constraint })
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: constraint,
+  })
   cap.stream = stream
   if (!running()) {
     stream.getTracks().forEach((t) => t.stop())
@@ -1134,7 +1169,9 @@ export function LiveHub({
       noticed.current = new Set()
     }
     const before = watchdog.current
-    watchdog.current = watchdogAfterPoll(before, { blocked: state.blocked ?? null })
+    watchdog.current = watchdogAfterPoll(before, {
+      blocked: state.blocked ?? null,
+    })
     // The span the server dedupes by: the working span, or the whole session
     // while nobody is working.
     const spanStart = current.working_since ?? current.started_at
@@ -2867,7 +2904,9 @@ export function LiveHub({
       const held = stream?.getAudioTracks().find((t) => t.readyState === 'live')
       if (held) return held
       stream?.getTracks().forEach((t) => t.stop())
-      stream = await media.getUserMedia({ audio: { deviceId: { exact: chosen } } })
+      stream = await media.getUserMedia({
+        audio: { deviceId: { exact: chosen } },
+      })
       return stream.getAudioTracks()[0]
     }
 
@@ -3295,7 +3334,13 @@ export function LiveHub({
       // next trigger rather than being treated as already told.
       reportLiveRoute(route, context, box, client, view === '' ? null : view)
         .then(() => {
-          reported.current = { route, context, window: box, view, at: Date.now() }
+          reported.current = {
+            route,
+            context,
+            window: box,
+            view,
+            at: Date.now(),
+          }
         })
         .catch(() => {})
     }, REPORT_DEBOUNCE_MS)
@@ -3330,6 +3375,31 @@ export function LiveHub({
     const timer = window.setInterval(reportRoute, POLL_MS)
     return () => window.clearInterval(timer)
   }, [live, reportRoute])
+
+  // The driver's model for the head (mesa task 1565): the agents endpoint's
+  // session for this conversation's job, polled on the same cadence while live.
+  // Absent when `claude` lists no such job; effort is not reachable from here.
+  const [driver, setDriver] = useState<{ id: string; model: string | null } | null>(null)
+  const driverId = session?.agent_id ?? null
+  useEffect(() => {
+    if (!live || driverId === null) return
+    let cancelled = false
+    const look = () => {
+      listAllAgents()
+        .then((all) => {
+          if (!cancelled)
+            setDriver({ id: driverId, model: all.find((a) => a.id === driverId)?.model ?? null })
+        })
+        .catch(() => {})
+    }
+    look()
+    const timer = window.setInterval(look, 10_000)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [live, driverId])
+  const driverModel = driver !== null && driver.id === driverId ? driver.model : null
 
   // `#/live` was the conversation's page (task 855); it is a verb now: the
   // agent's `navigate '#/live'` and the command palette both still land here,
@@ -3776,6 +3846,41 @@ export function LiveHub({
   })
 
   const groups = turnGroups(turns)
+  const replayState = (turn: LiveTurn) =>
+    replayControl(turn, {
+      unlocked,
+      speechMuted,
+      paused,
+      liveSounding,
+      replaying: replayingId,
+    })
+  // One round replay button (mesa task 1449's handler, task 1565's look).
+  const renderReplay = (turn: LiveTurn, cls: string) => {
+    const replay = replayState(turn)
+    if (replay === 'hidden') return null
+    const label = replay === 'stop' ? 'stop replaying' : 'replay this message'
+    return (
+      <button
+        type="button"
+        className={`live-turn-replay ${cls}`}
+        aria-label={label}
+        title={label}
+        tabIndex={open ? undefined : -1}
+        disabled={replay === 'disabled'}
+        onClick={() => toggleReplay(turn.id)}
+      >
+        {replay === 'stop' ? (
+          speaking ? (
+            <ReplayStopIcon />
+          ) : (
+            <ReplayPendingIcon />
+          )
+        ) : (
+          <ReplayPlayIcon />
+        )}
+      </button>
+    )
+  }
   // A turn's text as the page shows it: the words the voice has reached while
   // it is being spoken, otherwise all of it (mesa task 1555).
   const captioned = (turn: LiveTurn): string => {
@@ -4120,8 +4225,10 @@ export function LiveHub({
                       micReady={recognizes}
                     />
                   </div>
-                  {session !== null && contextLabel(data?.context_tokens) !== null && (
-                    <span className="live-head-ctx">{contextLabel(data?.context_tokens)}</span>
+                  {session !== null && headMeta(driverModel, data?.context_tokens) !== '' && (
+                    <span className="live-head-ctx">
+                      {headMeta(driverModel, data?.context_tokens)}
+                    </span>
                   )}
                   {session !== null && (
                     <span className="live-head-clock">
@@ -4344,7 +4451,10 @@ export function LiveHub({
                     onDoubleClick={() => {
                       if (frozen) return
                       ratioRef.current = DEFAULT_LIVE_LAYOUT_RATIO
-                      setLayout((l) => ({ ...l, ratio: DEFAULT_LIVE_LAYOUT_RATIO }))
+                      setLayout((l) => ({
+                        ...l,
+                        ratio: DEFAULT_LIVE_LAYOUT_RATIO,
+                      }))
                       saveLiveLayoutRatio(DEFAULT_LIVE_LAYOUT_RATIO)
                     }}
                   />
@@ -4373,24 +4483,57 @@ export function LiveHub({
                               key={group.turns[0].id}
                               className={`live-group live-${group.role}`}
                             >
-                              <div className="live-who">
-                                {turnLabel(group.role, group.notice)}
-                              </div>
+                              {(() => {
+                                // The speaker and the clock, once per group; a
+                                // Naru group's own play button sits beside the
+                                // clock and plays its first spoken turn.
+                                const clock = turnClock(group.turns[0].created_at)
+                                const who = (
+                                  <span className="live-who">
+                                    {turnLabel(group.role, group.notice)}
+                                  </span>
+                                )
+                                const lead = group.turns.find((t) => replayState(t) !== 'hidden')
+                                return (
+                                  <div className="live-meta">
+                                    {group.role === 'user' ? (
+                                      <>
+                                        {clock !== '' && <span>{clock}</span>}
+                                        {who}
+                                      </>
+                                    ) : (
+                                      <>
+                                        {who}
+                                        {clock !== '' && <span>{clock}</span>}
+                                        {lead !== undefined && renderReplay(lead, 'live-play-head')}
+                                      </>
+                                    )}
+                                  </div>
+                                )
+                              })()}
                               {group.turns.map((turn) => {
-                                const replay = replayControl(turn, {
-                                  unlocked,
-                                  speechMuted,
-                                  paused,
-                                  liveSounding,
-                                  replaying: replayingId,
-                                })
                                 return (
                                   <div key={turn.id} className="live-turn">
                                     {/* Plain text, never markdown: a mesa turn is
                                         prose meant to be *spoken*, and a user turn
                                         is untrusted dictation. */}
                                     {turn.text !== '' && (
-                                      <div className="live-text">{captioned(turn)}</div>
+                                      <div className="live-text">
+                                        {taskSegments(captioned(turn)).map((seg, i) =>
+                                          seg.kind === 'task' ? (
+                                            <a
+                                              key={i}
+                                              className="live-task-chip"
+                                              href={taskHash(seg.id)}
+                                              tabIndex={open ? undefined : -1}
+                                            >
+                                              {seg.text}
+                                            </a>
+                                          ) : (
+                                            seg.text
+                                          ),
+                                        )}
+                                      </div>
                                     )}
                                     {/* The person's board ink or a picture they pasted
                                         (mesa task 1475) — a small thumbnail of what the
@@ -4415,38 +4558,11 @@ export function LiveHub({
                                       </div>
                                     )}
                                     {/* Replay (mesa task 1449): re-hear this one
-                                        bubble on demand, independent of the run
-                                        that already said it once. Hidden for a
-                                        turn with nothing spoken (`replayControl`
-                                        is the one place that decides). */}
-                                    {replay !== 'hidden' && (
-                                      <button
-                                        type="button"
-                                        className="live-turn-replay"
-                                        aria-label={
-                                          replay === 'stop'
-                                            ? 'stop replaying'
-                                            : 'replay this message'
-                                        }
-                                        title={
-                                          replay === 'stop'
-                                            ? 'stop replaying'
-                                            : 'replay this message'
-                                        }
-                                        disabled={replay === 'disabled'}
-                                        onClick={() => toggleReplay(turn.id)}
-                                      >
-                                        {replay === 'stop' ? (
-                                          speaking ? (
-                                            <ReplayStopIcon />
-                                          ) : (
-                                            <ReplayPendingIcon />
-                                          )
-                                        ) : (
-                                          <ReplayPlayIcon />
-                                        )}
-                                      </button>
-                                    )}
+                                        bubble on demand — now a round icon that
+                                        appears beside the bubble on hover (mesa
+                                        task 1565), the group head holding the
+                                        always-visible one. */}
+                                    {renderReplay(turn, 'live-play-side')}
                                   </div>
                                 )
                               })}
@@ -4564,57 +4680,107 @@ export function LiveHub({
                               send()
                             }}
                           />
-                        </div>
-                        {/* The caption under the box: which microphone, and what the
-                            page is doing with it. The chooser moved down here from
-                            the row above (mesa task 1069) — it is a machine-local
-                            setting read once, not a control the person reaches for
-                            mid-sentence, and the box and the switch own that line
-                            now. */}
-                        <div className="live-caption">
-                          {/* Offered only where there is more than one microphone and
-                              the browser takes a track (`liveDevices.ts`) — a control
-                              that cannot change what mesa hears is worse than no
-                              control. */}
+                          {/* The microphone chooser, folded into a sliders icon
+                              (mesa task 1565): the real <select> lies invisibly
+                              over it, so the semantics, the keyboard and the
+                              native picker are all unchanged. Offered only
+                              where there is more than one microphone and the
+                              browser takes a track (`liveDevices.ts`) — a
+                              control that cannot change what mesa hears is
+                              worse than no control. */}
                           {choosesInput && (
-                            <select
-                              className="live-input-choice"
-                              aria-label="microphone"
-                              tabIndex={open ? undefined : -1}
-                              value={chosen}
-                              onChange={(event) => {
-                                const next = event.target.value
-                                writeInputChoice(next)
-                                setStoredInput(next)
-                                // Choosing is asking again: a device that refused
-                                // before may be free now, and the person picking it is
-                                // who decides to retry.
-                                setRefusedInput(null)
-                              }}
-                            >
-                              <option value={DEFAULT_INPUT}>Default mic</option>
-                              {inputs.map((input, index) => (
-                                <option key={input.deviceId} value={input.deviceId}>
-                                  {inputLabel(input, index)}
-                                </option>
-                              ))}
-                            </select>
+                            <label className="live-mic-source" title="Microphone source">
+                              <SlidersMark />
+                              <select
+                                className="live-input-choice"
+                                aria-label="microphone"
+                                tabIndex={open ? undefined : -1}
+                                value={chosen}
+                                onChange={(event) => {
+                                  const next = event.target.value
+                                  writeInputChoice(next)
+                                  setStoredInput(next)
+                                  // Choosing is asking again: a device that refused
+                                  // before may be free now, and the person picking it is
+                                  // who decides to retry.
+                                  setRefusedInput(null)
+                                }}
+                              >
+                                <option value={DEFAULT_INPUT}>Default mic</option>
+                                {inputs.map((input, index) => (
+                                  <option key={input.deviceId} value={input.deviceId}>
+                                    {inputLabel(input, index)}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
                           )}
-                          <span className="live-hint muted">
-                            {captureHint({
-                              live,
-                              joined: unlocked,
-                              path,
-                              blocked,
-                              listening: recognizes,
-                              paused,
-                              muted,
-                              chord: listenChordLabel,
-                              audioEngine: audio?.engine ?? null,
-                            })}{' '}
-                            {!paused && 'Enter sends.'}
-                          </span>
+                          {live && unlocked && supported && !blocked && (
+                            <button
+                              type="button"
+                              className={`live-composer-mic${muted ? '' : ' live-on'}`}
+                              aria-pressed={!muted}
+                              aria-label={muted ? 'listen through this browser' : 'stop listening'}
+                              tabIndex={open ? undefined : -1}
+                              title={`${
+                                muted ? 'Listen through this browser' : 'Stop listening'
+                              } (${listenChordLabel})`}
+                              onClick={() => toggleListening(!muted)}
+                            >
+                              <MicMark />
+                            </button>
+                          )}
+                          <button
+                            type="submit"
+                            className="live-send"
+                            aria-label="send"
+                            title="Send (Enter)"
+                            tabIndex={open ? undefined : -1}
+                            disabled={!live || paused}
+                          >
+                            <SendMark />
+                          </button>
                         </div>
+                        {/* The one quiet line under the box (mesa task 1565):
+                            the chord, or whatever `captureHint` has to say in a
+                            state that is not the plain resting one, and which
+                            microphone is in use. */}
+                        {(() => {
+                          const hint = quietHint({
+                            live,
+                            joined: unlocked,
+                            path,
+                            blocked,
+                            listening: recognizes,
+                            paused,
+                            muted,
+                            chord: listenChordLabel,
+                            audioEngine: audio?.engine ?? null,
+                          })
+                          const micName =
+                            chosen === DEFAULT_INPUT
+                              ? 'default mic'
+                              : inputLabel(
+                                  inputs.find((i) => i.deviceId === chosen) ?? inputs[0],
+                                  Math.max(
+                                    0,
+                                    inputs.findIndex((i) => i.deviceId === chosen),
+                                  ),
+                                )
+                          return (
+                            <div className="live-caption">
+                              <span
+                                className="live-hint muted"
+                                title={hint.chord === null ? hint.text : undefined}
+                              >
+                                {hint.chord !== null && <kbd>{hint.chord}</kbd>} {hint.text}
+                              </span>
+                              {choosesInput && (
+                                <span className="live-hint-mic muted">{micName}</span>
+                              )}
+                            </div>
+                          )
+                        })()}
                       </form>
                     </>
                   )}
