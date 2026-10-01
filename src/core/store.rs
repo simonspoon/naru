@@ -1254,6 +1254,9 @@ const MIGRATIONS: &[&str] = &[
     // `migrate` calls `backfill_board_index` when it applies this index —
     // but the slot is what orders it after every shipped migration.
     "-- live_boards -> live_memory_fts backfill (see migrate)",
+    // Task 1550: a project may own the notebook for every folder under its
+    // `local_path` (opt-in; default off, so existing resolution is unchanged).
+    "ALTER TABLE projects ADD COLUMN shared_notebook INTEGER NOT NULL DEFAULT 0;",
 ];
 
 /// Selects full task rows including the derived `blocked` flag.
@@ -1350,8 +1353,8 @@ fn row_to_receipt(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskReceipt> {
     })
 }
 
-const PROJECT_COLUMNS: &str =
-    "id, name, description, root_commit, local_path, archived, sort_order, parent_id";
+const PROJECT_COLUMNS: &str = "id, name, description, root_commit, local_path, archived, sort_order, parent_id, \
+     shared_notebook";
 
 /// Maps a `projects` row; `previous_paths` is left empty and filled in
 /// afterwards by [`hydrate_previous_paths`], since it lives in a sibling
@@ -1367,6 +1370,7 @@ fn row_to_project(row: &rusqlite::Row<'_>) -> rusqlite::Result<Project> {
         archived: row.get(5)?,
         sort_order: row.get(6)?,
         parent_id: row.get(7)?,
+        shared_notebook: row.get(8)?,
         previous_paths: Vec::new(),
     })
 }
@@ -2617,6 +2621,8 @@ pub struct ProjectPatch {
     /// nothing else: `sort_order`, `archived`, `root_commit` and `local_path`
     /// are unchanged by it.
     pub parent_id: Option<Option<i64>>,
+    /// Turns the shared notebook (task 1550) on or off. Touches nothing else.
+    pub shared_notebook: Option<bool>,
 }
 
 /// Fields to change on a task; `None` means leave unchanged.
@@ -3397,10 +3403,14 @@ impl Store {
             }
             project.parent_id = parent_id;
         }
+        if let Some(shared) = patch.shared_notebook {
+            project.shared_notebook = shared;
+        }
         self.conn
             .execute(
                 "UPDATE projects SET name = ?1, description = ?2, root_commit = ?3, \
-                 local_path = ?4, sort_order = ?5, parent_id = ?6 WHERE id = ?7",
+                 local_path = ?4, sort_order = ?5, parent_id = ?6, shared_notebook = ?7 \
+                 WHERE id = ?8",
                 (
                     &project.name,
                     &project.description,
@@ -3408,6 +3418,7 @@ impl Store {
                     &project.local_path,
                     project.sort_order,
                     project.parent_id,
+                    project.shared_notebook,
                     id,
                 ),
             )
@@ -15086,15 +15097,15 @@ mod tests {
         );
         assert_eq!(
             MIGRATIONS.len(),
-            80,
-            "a fresh db should report user_version 80"
+            81,
+            "a fresh db should report user_version 81"
         );
         let (store, _dir) = temp_store();
         let version: i64 = store
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 80);
+        assert_eq!(version, 81);
     }
 
     /// Pins the project-notebook columns (mesa task 1333) at index 72

@@ -224,6 +224,9 @@ export interface ProjectPatch {
   /** Parent project (task 668); `null` detaches to top level. A cycle is a
    *  409, an unknown parent a 422. */
   parent_id?: number | null
+  /** Shared project notebook (task 1550): this project owns the notebook of
+   *  every folder under its path. */
+  shared_notebook?: boolean
 }
 
 export interface TaskCreate {

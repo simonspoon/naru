@@ -443,6 +443,10 @@ EXAMPLES
         /// move it back to the top level
         #[arg(long, group = "fields", value_name = "ID|NAME")]
         parent: Option<String>,
+        /// Make this project own the notebook of every folder under its path
+        /// (`true`) or stop doing so (`false`)
+        #[arg(long, group = "fields", value_name = "true|false")]
+        shared_notebook: Option<bool>,
         /// Print the project without its `description` instead of in full
         ///
         /// Deliberately outside the `fields` group: it is a modifier, so
@@ -4677,6 +4681,7 @@ fn run_project(cmd: ProjectCmd) -> Result<()> {
             path,
             sort_order,
             parent,
+            shared_notebook,
             quiet,
         } => {
             let id = resolve_project(&store, &project)?;
@@ -4700,6 +4705,7 @@ fn run_project(cmd: ProjectCmd) -> Result<()> {
                 local_path,
                 sort_order,
                 parent_id,
+                shared_notebook,
             };
             print_project(&store.update_project(id, &patch)?, quiet);
         }
@@ -7775,6 +7781,7 @@ mod tests {
             archived: false,
             sort_order: 3.5,
             parent_id: Some(7),
+            shared_notebook: false,
             previous_paths: vec!["/tmp/old-p".into()],
         }
     }
@@ -8068,6 +8075,9 @@ mod tests {
                 // pointer, and it is what makes a quiet project row placeable
                 // in the tree at all.
                 "parent_id",
+                // Task 1550. A bool, bounded, and the field `project update
+                // --shared-notebook` just wrote.
+                "shared_notebook",
                 // Task 1262. Kept for the same reason `artifact` is kept on a
                 // task: a bounded list of paths, and it is the field
                 // `project path add`/`remove` just wrote — echoing it back

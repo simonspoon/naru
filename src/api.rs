@@ -2930,6 +2930,9 @@ struct ProjectUpdate {
     /// project to top level.
     #[serde(default, deserialize_with = "double_option")]
     parent_id: Option<Option<i64>>,
+    /// Shared project notebook (task 1550); absent leaves it alone.
+    #[serde(default)]
+    shared_notebook: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -3007,6 +3010,7 @@ async fn update_project(
         local_path: body.local_path,
         sort_order: body.sort_order,
         parent_id: body.parent_id,
+        shared_notebook: body.shared_notebook,
     };
     let mut store = state.store.lock().unwrap();
     Ok(Json(store.update_project(id, &patch)?).into_response())

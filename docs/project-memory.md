@@ -53,6 +53,18 @@ whose sources come from two notebooks is `validation`.
 
 `core::project_memory::resolve_project_for_path`:
 
+0. a **shared notebook** (mesa task 1550): the nearest ancestor-or-self of
+   the folder that is the `local_path` of a project with `shared_notebook` on
+   (current paths first, then previous paths) — wins over everything below,
+   including a repo bound to its own project. For a product whose root
+   folder is not a git repo and whose feature folders (each holding notes
+   and repos) come and go: one notebook for all of it, nested to any depth,
+   git or not. Nested shared parents: the nearest wins. The notebook is
+   keyed by project id, never by the folder, so moving or deleting a feature
+   folder loses nothing. Off by default; with no shared ancestor the steps
+   below are unchanged. Switch: `naru project update <id> --shared-notebook
+   true|false`, `PATCH /api/projects/{id} {"shared_notebook": bool}`, or the
+   checkbox on the project's Settings tab. `--project` is unchanged;
 1. the folder's repo root commit (`core::git::root_commit`, the helper
    `project create`/`resolve` and `migrate` share) bound to a project — so
    every worktree and subfolder of a repo resolves;

@@ -109,6 +109,11 @@ pub struct Project {
     /// is** (`docs/archiving.md`).
     #[ts(type = "number | null")]
     pub parent_id: Option<i64>,
+    /// Opt-in (task 1550): this project owns the notebook for every folder
+    /// under its `local_path` (or a previous path), nested to any depth, git
+    /// repo or not — the nearest such ancestor wins over the root-commit
+    /// resolution (`docs/project-memory.md`). Default false.
+    pub shared_notebook: bool,
     /// Folders this project's `local_path` used to be (task 1262), oldest
     /// first. Derived on every read from the `project_paths` table, never a
     /// column on `projects`: it is a set, and a project may have moved any
