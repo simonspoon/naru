@@ -9930,10 +9930,25 @@ body.live-panel-ratio-resizing .live-panel-divider {
    by an agent. */
 .live-head-ctx {
   flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-family: var(--font-mono);
   font-size: 11px;
-  letter-spacing: 1px;
+  letter-spacing: 0.5px;
   font-variant-numeric: tabular-nums;
-  color: var(--violet);
+  color: var(--muted);
+}
+
+/* The status dot: green while a conversation is live (the span is only
+   rendered then). */
+.live-head-ctx::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #2bff9c;
+  box-shadow: 0 0 8px #2bff9c;
 }
 
 /* The sentence under the toolbar (`liveStatusLine`): what a one-word title
@@ -9991,8 +10006,6 @@ body.live-panel-ratio-resizing .live-panel-divider {
   flex-direction: column;
   gap: 0.75rem;
   padding: 0.75rem;
-  background: var(--panel);
-  border: 1px solid var(--border);
 }
 
 /* "Jump to latest": a zero-height sticky row at the transcript's foot, so the
@@ -10058,6 +10071,12 @@ body.live-panel-ratio-resizing .live-panel-divider {
   justify-content: flex-end;
 }
 
+/* The dot between the two halves of the meta line. */
+.live-meta > :first-child:not(:last-child)::after {
+  content: '·';
+  margin-left: 8px;
+}
+
 .live-who {
   font-weight: 700;
   letter-spacing: 1.4px;
@@ -10099,12 +10118,12 @@ body.live-panel-ratio-resizing .live-panel-divider {
 /* A task number in a turn (mesa task 1565): a small chip that opens the task. */
 .live-task-chip {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 13px;
   color: var(--cyan);
   background: rgba(0, 229, 255, 0.1);
-  border: 1px solid rgba(0, 229, 255, 0.25);
-  padding: 0 6px;
-  border-radius: 6px;
+  border: 1px solid rgba(0, 229, 255, 0.45);
+  padding: 1px 7px;
+  border-radius: 8px;
   text-decoration: none;
 }
 
@@ -10163,11 +10182,16 @@ body.live-panel-ratio-resizing .live-panel-divider {
   opacity: 0.6;
 }
 
-.live-play-side {
+/* Inside the bubble's right padding, so it can never overflow a narrow panel. */
+.live-group:not(.live-user) .live-turn {
+  padding-right: 38px;
+}
+
+.live-play-side,
+.live-play-side:disabled {
   position: absolute;
   top: 10px;
-  left: 100%;
-  margin-left: 8px;
+  right: 10px;
   opacity: 0;
 }
 
@@ -10177,10 +10201,26 @@ body.live-panel-ratio-resizing .live-panel-divider {
   box-shadow: 0 0 10px rgba(0, 229, 255, 0.4);
 }
 
+.live-turn:hover > .live-play-side:disabled {
+  opacity: 0.4;
+}
+
+/* No hover to reveal it: keep it visible so a touch user can replay any turn. */
+@media (hover: none) {
+  .live-play-side,
+  .live-play-side:disabled {
+    opacity: 0.6;
+  }
+}
+
 .live-composer {
   display: flex;
   flex-direction: column;
   gap: 0.35rem;
+  /* The floating orb's default footprint (`ORB_SIZE` + `ORB_MARGIN`, minus the
+     composer's own gutter) is the panel's bottom-right corner; leave it clear
+     so the send button and the hint are not under it. */
+  padding-right: 128px;
 }
 
 /* What is happening right now (mesa task 1153), in one line: "mesa speaking",

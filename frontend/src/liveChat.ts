@@ -22,13 +22,15 @@ export type TextSegment =
  */
 export function taskSegments(text: string): TextSegment[] {
   const out: TextSegment[] = []
-  const re = /(?<![\w/#&])#(\d{1,9})(?![\w/]|\.\d)/g
+  // The leading boundary is matched as a character (or the start) rather than
+  // a lookbehind, which older Safari cannot parse.
+  const re = /(^|[^\w/#&])#(\d{1,9})(?![\w/]|\.\d)/g
   let last = 0
   for (const m of text.matchAll(re)) {
-    const at = m.index ?? 0
+    const at = (m.index ?? 0) + m[1].length
     if (at > last) out.push({ kind: 'text', text: text.slice(last, at) })
-    out.push({ kind: 'task', id: Number(m[1]), text: m[0] })
-    last = at + m[0].length
+    out.push({ kind: 'task', id: Number(m[2]), text: `#${m[2]}` })
+    last = at + m[2].length + 1
   }
   if (last < text.length) out.push({ kind: 'text', text: text.slice(last) })
   return out
