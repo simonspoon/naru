@@ -156,9 +156,10 @@ run 0 "$MESA" retro finding show "$F1"
 [ "$(jqs .count)" = "3" ] || fail "show reflects the third report: $STDOUT"
 run 0 "$MESA" retro finding get "$F1"
 [ "$(jqs .id)" = "$F1" ] || fail "get is an alias for show"
-run 2 "$MESA" retro finding list --quiet
-[ -z "$STDOUT" ] || fail "a usage error prints nothing on stdout"
-ok "--quiet drops summary and evidence (keeping session_ids) on record/show and is a usage error (exit 2) on list"
+PLAIN=$("$MESA" retro finding list)
+run 0 "$MESA" retro finding list --quiet
+[ "$STDOUT" = "$PLAIN" ] || fail "finding list --quiet must equal the plain list"
+ok "--quiet drops summary and evidence (keeping session_ids) on record/show and is an accepted no-op on list"
 
 # ---- list: newest-seen first, bare array, --limit ----
 

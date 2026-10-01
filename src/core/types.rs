@@ -109,6 +109,11 @@ pub struct Project {
     /// is** (`docs/archiving.md`).
     #[ts(type = "number | null")]
     pub parent_id: Option<i64>,
+    /// Opt-in (task 1550): this project owns the notebook for every folder
+    /// under its `local_path` (or a previous path), nested to any depth, git
+    /// repo or not — the nearest such ancestor wins over the root-commit
+    /// resolution (`docs/project-memory.md`). Default false.
+    pub shared_notebook: bool,
     /// Folders this project's `local_path` used to be (task 1262), oldest
     /// first. Derived on every read from the `project_paths` table, never a
     /// column on `projects`: it is a set, and a project may have moved any
@@ -623,6 +628,13 @@ pub struct ConfigGuard {
     /// The built-in repeat count mesa ships.
     #[ts(type = "number")]
     pub repeat_count_default: i64,
+    /// The context ceiling the `context` rule fires at, or `null` for the
+    /// built-in.
+    #[ts(type = "number | null")]
+    pub context_tokens: Option<i64>,
+    /// The built-in context ceiling mesa ships.
+    #[ts(type = "number")]
+    pub context_tokens_default: i64,
     /// What the watcher does about a breach — `"stop"` or `"report"` — or
     /// `null` for the built-in.
     pub action: Option<String>,
@@ -2909,6 +2921,55 @@ pub struct CcAgentStat {
     pub est_cost_usd: f64,
 }
 
+/// One row of the model scorecard: every subagent run of one agent on one
+/// model (`mesa cc scorecard`, mesa task 1514). Reasoning effort is not in any
+/// transcript, so it is deliberately not a column here — it rides only on
+/// [`CcModelChange`].
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct CcScorecardRow {
+    pub agent: String,
+    pub model: String,
+    /// Runs in this group — the sample size every mean below rests on.
+    #[ts(type = "number")]
+    pub runs: i64,
+    pub total_cost: f64,
+    pub cost_per_run: f64,
+    pub turns_per_run: f64,
+    pub tokens_per_run: f64,
+    pub wall_secs_per_run: f64,
+    pub wall_secs_median: f64,
+    /// Start of the earliest / latest run, `YYYY-MM-DD HH:MM:SS` UTC.
+    pub first_run: String,
+    pub last_run: String,
+}
+
+/// A point where an agent definition's `model:` or `effort:` frontmatter key
+/// changed between two library versions (the first version is a marker with
+/// null `from_*`).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct CcModelChange {
+    pub agent: String,
+    /// The version's stored `created_at` (`YYYY-MM-DD HH:MM:SS`, UTC).
+    pub at: String,
+    pub from_model: Option<String>,
+    pub to_model: Option<String>,
+    pub from_effort: Option<String>,
+    pub to_effort: Option<String>,
+}
+
+/// `mesa cc scorecard` / `GET /api/cc/scorecard`.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct CcScorecard {
+    pub rows: Vec<CcScorecardRow>,
+    pub model_changes: Vec<CcModelChange>,
+    /// The bounds as the caller gave them, echoed; null when absent.
+    pub since: Option<String>,
+    pub until: Option<String>,
+}
+
 /// Usage rolled up by working directory (`cwd`).
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../frontend/src/types/")]
@@ -3689,6 +3750,12 @@ pub struct CcLiveSession {
     /// currently in, or `null` when its newest tool call was anything else.
     /// The cost guard's `repeat` rule reads it (`docs/cost-guard.md`).
     pub repeat: Option<CcRepeat>,
+    /// The newest main-thread (non-sidechain) assistant turn's input side —
+    /// `input + cache read + cache creation` tokens, the measure
+    /// `SessionPulse.context_tokens` uses — or `null` when none was seen in the
+    /// window. The cost guard's `context` rule reads it (`docs/cost-guard.md`).
+    #[ts(type = "number | null")]
+    pub context_tokens: Option<u64>,
 }
 
 /// A session stuck repeating one trivial shell command — the *shape* of a
@@ -4476,9 +4543,10 @@ pub struct LiveNotebookEntry {
 /// consumer.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct LiveMemoryHit {
-    /// `turn` | `summary` | `note`.
+    /// `turn` | `summary` | `note` | `board` (mesa task 1548).
     pub kind: String,
-    /// The turn id, the summary's session id, or the notebook entry id.
+    /// The turn id, the summary's session id, the notebook entry id, or the
+    /// board id (the board row may be gone; the archive entry is not).
     pub ref_id: i64,
     /// The conversation it belongs to; null for a notebook entry written
     /// before any conversation existed.

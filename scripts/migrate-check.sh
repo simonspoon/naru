@@ -273,12 +273,10 @@ grep -q "bash $SAME/new/projects/p1/hooks/h.sh" "$SAME/.claude/settings.json" ||
 ok "same username: relocated repo root detected by root commit, settings.json rewritten, unresolved paths reported"
 
 # ================= usage and validation =================
-for sub in check "export $TMP/q.tar.gz" "import $TMP/move.tar.gz"; do
-  # shellcheck disable=SC2086
-  run 2 as_dst migrate $sub --quiet
-  [ "$(jqe .error.code)" = usage ] || fail "migrate $sub --quiet: usage"
-done
-ok "--quiet refused, exit 2"
+# --quiet is accepted and ignored (mesa task 1513): never a usage error
+as_dst migrate check --quiet >/dev/null 2>"$TMP/q.err" || true
+[ "$(jq -r '.error.code // "none"' <"$TMP/q.err" 2>/dev/null || echo none)" != usage ] || fail "migrate check --quiet: must not be usage"
+ok "--quiet accepted and ignored"
 
 run 1 as_dst migrate import "$TMP/move.tar.gz" --home-map nonsense
 [ "$(jqe .error.code)" = validation ] || fail "bad --home-map: validation"

@@ -78,7 +78,7 @@ Server** action relaunches with.
 5. **File**, taking the store lock only for the task resolution and the inbox
    write. The alert's last sentence is what step 4 actually did.
 
-## Four rules, and why four
+## Five rules, and why five
 
 `core::guard::breaches` is a pure function over one `CcLiveSession` and the
 thresholds. Every comparison is `>=` — a limit is a limit, not a number to
@@ -90,8 +90,9 @@ exceed.
 | `tokens` | `total_tokens >= total-tokens` | 100,000,000 |
 | `spin` | `total_tokens >= cache-read-min-tokens` **and** `cache_read / total_tokens >= cache-read-share` | 20,000,000 and 0.98 |
 | `repeat` | the newest `repeat-count` tool calls are the same trivial `Bash` command | 30 |
+| `context` | the newest main-thread turn's input side `>= context-tokens` (**alert-only**, never stops) | 120,000 |
 
-They are not four spellings of one rule:
+They are not five spellings of one rule:
 
 - **`cost`** is the number a person actually cares about, but it is estimated
   from a price table (`docs/config.md`'s `pricing` section) and a cheap model
@@ -107,11 +108,39 @@ They are not four spellings of one rule:
   off the meter. A wedged agent running `echo idle` costs a few tokens per call
   and can run for hours under every other line; what gives it away is that it
   is doing the same nothing over and over.
+- **`context`** is about a session's *size*, not its window's spend. A
+  long-lived session re-reads its whole context on every turn, so one carrying
+  a huge context dominates spend while tripping none of the window rules above.
+  See below.
 
 The `cache-read-min-tokens` floor is what makes `spin` usable at all: a session
 three messages long is trivially 100% cache reads and perfectly healthy. The
 floor is also, by construction, what makes the division safe — a session with
 no tokens can never reach it, so there is no divide-by-zero to guard separately.
+
+### The context rule
+
+The measure is `CcLiveSession::context_tokens`: the **latest main-thread**
+(non-`isSidechain`) assistant turn's `input_tokens + cache_read_input_tokens +
+cache_creation_input_tokens` — the same measure as `SessionPulse.context_tokens`
+shows the Agents panel (the newest main-thread turn by timestamp) — tracked in `cc::parse_live_file` after the per-response
+dedupe, latest by timestamp. A subagent's bigger context never wins. `null`
+when no main-thread assistant usage was seen, and `null` never breaches. It is
+also shown per session in `mesa cc live` and `mesa cc guard`. Like the other
+rules, it fires once per (session, rule) for the life of the server, so a
+session that compacts and regrows does not re-alert.
+
+**Alert-only by design, whatever `action` says.** A long conversation is not a
+runaway and may be good work; stopping one for its size alone would interrupt
+it. A tick whose only newly tripped rule is `context` therefore files the alert
+and never runs `claude stop` (`guard::wants_stop`), and the alert closes by
+saying Naru left the session running because the context rule only reports. If
+another rule trips alongside it, that rule's stop proceeds as usual.
+
+The 120,000-token default is the size past which a fresh session seeded with a
+checkpoint is cheaper than carrying the context forward. That is the point of
+the alert; the checkpoint/relay handoff that would act on it is future work, and
+this rule is only its trigger.
 
 ### The repeat rule
 
@@ -271,10 +300,11 @@ mesa cc guard [--minutes N]
 ```
 
 The read-only half. Prints one JSON object: `generated_at_unix`,
-`window_minutes`, the `thresholds` in force (all six, `repeat_count` and
-`action` included), and a `sessions` array of every live session currently over
+`window_minutes`, the `thresholds` in force (all seven, `repeat_count`,
+`context_tokens` and `action` included), and a `sessions` array of every live session currently over
 one of them — identity, `running_minutes`, the token split the rules read,
-`est_cost_usd`, `cache_read_share`, the `repeat` run it is in (or `null`), the
+`est_cost_usd`, `cache_read_share`, the `repeat` run it is in (or `null`), its
+`context_tokens` (or `null`), the
 `breaches` it tripped and the resolved `task_id` (or `null`).
 
 - Reads transcripts and the Naru db; **writes nothing**, files nothing, **stops
@@ -283,8 +313,8 @@ one of them — identity, `running_minutes`, the token split the rules read,
   cannot silence one.
 - No `cc sync`: the subject is what is running now, which is a live transcript
   read (`cc live`), not a db aggregate.
-- No `--quiet` — it is neither a mutation nor a `show`, so the flag is an
-  unknown argument, exit 2, like `cc live` and `live turns`.
+- No `--quiet` — it is neither a mutation nor a `show`, so the flag is accepted
+  and ignored (mesa task 1513), like `cc live` and `live turns`.
 - Deliberately **no HTTP route**. Nothing here is unsafe to serve, but the
   watcher is the surface the server offers and the CLI is the surface an agent
   drives; a third read of the same numbers over HTTP would be a route with no
@@ -303,12 +333,14 @@ The `guard` section of `~/.mesa/config.json` — a seventh independent section
     "cache-read-share": 0.98,
     "cache-read-min-tokens": 20000000,
     "repeat-count": 30,
+    "context-tokens": 120000,
     "action": "stop"
   }
 }
 ```
 
-`repeat-count` is a whole number between 1 and 100,000. `action` is exactly
+`repeat-count` is a whole number between 1 and 100,000. `context-tokens` is a
+whole number of at least 1. `action` is exactly
 `"stop"` or `"report"` — lowercase, and any other word is refused by the editor
 and falls back to the built-in in a hand-edited file, the clamp posture the
 numbers take. There is deliberately **no Settings UI** for this section: there
@@ -333,10 +365,11 @@ A value of the wrong *type* is an error on read, and the tick skips.
 (`MESA_CC_PROJECTS_DIR`, the seam `scripts/cc-check.sh` uses), a throwaway db
 and `HOME`, and a stub `claude` (`MESA_CLAUDE_BIN`) that answers
 `agents --json --all` from a fixture and records every `stop` call to a file.
-Five synthetic sessions: a runaway in a folder Naru knows, a healthy session
+Six synthetic sessions: a runaway in a folder Naru knows, a healthy session
 beside it, a runaway in a folder no project claims, a `looper` that is under
-every money threshold but 35 `echo idle` calls deep, and a sibling one call
-short of the count.
+every money threshold but 35 `echo idle` calls deep, a sibling one call
+short of the count, and a `ctxonly` session whose only breach is a 201,000-token
+context.
 
 It asserts the flag-off silence (no alerts *and* no stops), one alert each for
 the runaway and the looper (task-summary, authored `cost-guard`, filed against
@@ -345,12 +378,14 @@ and the 29-call sibling trips nothing, that each of the three breaching
 sessions is stopped **exactly once** and not again on later ticks, that the
 bodies name `claude stop`/`claude attach`, no alert and exactly one stderr
 warning — naming the stop — for the unattributable one, `cc guard`'s three rows
-and its `--quiet` refusal, the built-in thresholds and `stop` action under an
+and its `--quiet` no-op, the built-in thresholds and `stop` action under an
 absent config, that `"action": "report"` on a fresh server files alerts and
 stops nothing, that a `MESA_CLAUDE_BIN` pointing at nothing is a reported
-outcome rather than a failed tick, that a configured threshold actually governs
-the verdict with no restart, that every bad value (the new `repeat-count` and
-`action` included) is a 422 that writes nothing, that `null` restores the
+outcome rather than a failed tick, that the context-only session is alerted
+(`Context:`, saying it was left running) and **never stopped** under the
+default `stop` action, that a configured threshold actually governs
+the verdict with no restart, that every bad value (the `repeat-count`,
+`context-tokens` and `action` included) is a 422 that writes nothing, that `null` restores the
 built-in, and that **all six** other config sections survive the guard
 section's save.
 
@@ -363,4 +398,4 @@ loop), the alert body under every stop outcome, `agents::job_for_session`
 (match, interactive row, no match, unknown fields, malformed JSON), the
 resolution ladder's three rungs including exact-`cwd` matching,
 `find_task_by_owner`, and the config section's read/validate/save behaviour for
-all six keys.
+all seven keys.

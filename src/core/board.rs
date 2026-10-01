@@ -21,6 +21,67 @@ use std::path::{Path, PathBuf};
 
 use super::types::{DiagramView, LiveBoard, LiveBoardKind};
 
+/// What the live-memory archive indexes for a board (mesa task 1548): its
+/// title plus the text it holds — markdown as written, HTML with its tags,
+/// `<script>`/`<style>` bodies and comments stripped and the common entities
+/// decoded. An `image` or `diagram` board holds bytes or generated markup, so
+/// only its title (the caption) is searchable. `None` when nothing is left.
+pub fn search_text(kind: LiveBoardKind, title: Option<&str>, body: &str) -> Option<String> {
+    let content = match kind {
+        LiveBoardKind::Markdown => body.to_string(),
+        LiveBoardKind::Html => html_text(body),
+        LiveBoardKind::Diagram | LiveBoardKind::Image => String::new(),
+    };
+    let text = format!("{}\n{}", title.unwrap_or(""), content);
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_string())
+}
+
+/// Visible text of an HTML document, by a plain scan — good enough to make a
+/// mockup's words findable, not a parser.
+fn html_text(html: &str) -> String {
+    let lower = html.to_ascii_lowercase();
+    let mut out = String::with_capacity(html.len() / 2);
+    let mut i = 0;
+    while i < html.len() {
+        let rest = &html[i..];
+        if rest.starts_with("<!--") {
+            i += rest.find("-->").map_or(rest.len(), |e| e + 3);
+        } else if rest.starts_with('<')
+            && rest[1..]
+                .starts_with(|c: char| c.is_ascii_alphabetic() || matches!(c, '/' | '!' | '?'))
+        {
+            let skipped = ["script", "style"].iter().find_map(|t| {
+                let open = &lower[i + 1..];
+                (open.starts_with(t)
+                    && open[t.len()..].starts_with(|c: char| c == '>' || c.is_whitespace()))
+                .then(|| {
+                    let close = format!("</{t}");
+                    lower[i..].find(&close).map(|e| i + e)
+                })
+            });
+            if let Some(end) = skipped {
+                i = end.unwrap_or(html.len());
+            }
+            i += html[i..].find('>').map_or(html.len() - i, |e| e + 1);
+            out.push(' ');
+        } else {
+            // Skip the first char: a bare `<` (not a tag) is text and would
+            // otherwise match itself here.
+            let first = rest.chars().next().map_or(0, char::len_utf8);
+            let next = first + rest[first..].find('<').unwrap_or(rest.len() - first);
+            out.push_str(&rest[..next]);
+            i += next;
+        }
+    }
+    out.replace("&nbsp;", " ")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&")
+}
+
 /// The file extension a board's bytes should carry — what the render route
 /// names its `Content-Disposition` and what `mesa live board keep` defaults an
 /// artifact's or an attachment's filename to, so the two can never disagree.
@@ -264,6 +325,12 @@ mod tests {
 
     /// The ink rides beside the board under the board's own stem, so a
     /// titled board and an untitled one both keep a recognisable pair.
+    #[test]
+    fn html_text_keeps_a_bare_less_than_as_text() {
+        assert_eq!(html_text("a 1 < 2 <b>b</b> c<3"), "a 1 < 2  b  c<3");
+        assert_eq!(html_text("x <"), "x <");
+    }
+
     #[test]
     fn ink_filename_is_the_board_stem_plus_ink_png() {
         assert_eq!(ink_filename("plan.md"), "plan-ink.png");

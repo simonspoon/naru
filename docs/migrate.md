@@ -208,4 +208,4 @@ differing files are rewritten.
   `$HOME/` (the latter two expanded onto the new home), at least two
   components — that does not exist.
 
-None of the three accepts `--quiet` (exit 2).
+None of the three has a `--quiet`; it is accepted and ignored (mesa task 1513).

@@ -9451,64 +9451,22 @@ button:focus-visible,
   display: block;
 }
 
-/* The conversation indicator (mesa task 874, redrawn as an aperture by mesa
-   task 973, moved into the panel head at 44px by task 1069): one canvas in
-   one state at a time — mesa speaking, the person being heard, the agent at
-   work on what was said (task 894), a paused page, or the microphone simply
-   open. Which state it is has to read at a glance: colour carries who (cyan
-   is mesa, green is the person, violet is the agent working, muted is nobody
-   yet) and the drawing itself — rings, an orbit, a breathing dot, a single
-   still arc — carries how much is happening and in which direction
-   (`liveBand.ts` has the full reasoning for each shape). The canvas sizes
-   itself in JS and paints itself; nothing here animates. */
-.live-band {
+/* The Naru waveform mark (mesa task 1544, replacing the aperture canvas of
+   tasks 874/973): the favicon's seven bars, painted by `NaruMark.tsx` from
+   `liveMark.ts` — colour, scale and glow all set inline each frame, so
+   nothing here animates. It fills its `.live-head-aperture` box; the bars
+   scale about their own centres. */
+.naru-mark {
   display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
   pointer-events: none;
 }
 
-/* mesa speaking: cyan with a glow, the loudest of the five and the only one
-   that gets one — the same drop-shadow the old bars carried, so the change
-   from bars to an aperture did not also quietly turn the glow off. */
-.live-band-speaking {
-  color: var(--cyan);
-  filter: drop-shadow(0 0 4px var(--cyan-dim));
-}
-
-/* The person being heard: the same drawing as speaking, mirrored (the rings
-   travel inward instead of out — `drawAperture`'s own doc comment explains
-   the mirroring), in green rather than cyan. */
-.live-band-hearing {
-  color: var(--green);
-}
-
-/* The agent at work (mesa task 894): violet, because violet is what this app
-   already means by "an agent" (the sidebar pane header, task 819) — so the
-   colour alone separates her doing something from her saying something
-   (cyan) and from the person being taken in (green). */
-.live-band-working {
-  color: var(--violet);
-}
-
-/* Resting (mesa task 1155): listening's breathing halo in the agent's own
-   colour — the agent is away for a few minutes, not the microphone. */
-.live-band-resting {
-  color: var(--violet);
-}
-
-/* The microphone open and the room quiet: low, slow and muted — present
-   enough to say the page is listening, dim enough that nobody reads it as
-   speech. */
-.live-band-listening {
-  color: var(--muted);
-}
-
-/* Paused: muted like listening, which is the state it is most easily
-   confused with, but dimmed further and — the real distinction —
-   `drawAperture` draws it as an open arc rather than a closed ring, so the
-   two are told apart by shape, not only by how bright they are. */
-.live-band-paused {
-  color: var(--muted);
-  opacity: 0.5;
+.naru-mark .mark-bar {
+  transform-box: fill-box;
+  transform-origin: center;
 }
 
 /* Where the hub portals its panel: a flex child of `.shell-body` that is not
@@ -9957,6 +9915,11 @@ body.live-panel-ratio-resizing .live-panel-divider {
 
 /* Its own colour wins over the generic toggle-on tint above: the mute switch
    and the mic are pressed *when something is being held back*. */
+.live-toolbar .live-mic[aria-pressed='true'] {
+  color: var(--green);
+  border-color: rgba(43, 255, 156, 0.5);
+}
+
 .live-toolbar .live-icon-speech[aria-pressed='true'] {
   color: var(--amber);
   border-color: rgba(255, 180, 68, 0.5);
@@ -9965,24 +9928,6 @@ body.live-panel-ratio-resizing .live-panel-divider {
 .live-toolbar .live-head-aperture {
   width: 28px;
   height: 28px;
-}
-
-.live-toolbar .live-head-say {
-  flex-direction: row;
-  align-items: center;
-  gap: 8px;
-}
-
-.live-toolbar .live-head-title {
-  font-size: 12px;
-  letter-spacing: 1.2px;
-}
-
-.live-toolbar .live-meter {
-  flex: none;
-  width: 56px;
-  max-width: none;
-  gap: 2px;
 }
 
 .live-toolbar .live-head-actions {
@@ -9998,52 +9943,8 @@ body.live-panel-ratio-resizing .live-panel-divider {
   display: flex;
   align-items: center;
   justify-content: center;
-}
-
-.live-head-say {
-  flex: 1 1 auto;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-
-/* The one line of display type in the panel: this is the conversation's own
-   name for what it is doing, and Orbitron is what this app titles things in.
-   Ellipsised rather than wrapped — the toolbar row is one line tall by
-   design, and a second line would push it taller. */
-.live-head-title {
-  font-family: var(--font-display);
-  font-weight: 600;
-  font-size: 14px;
-  letter-spacing: 1.44px;
-  text-transform: uppercase;
-  color: var(--text-h);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* The level meter (mesa task 956, moved here by 1069): twelve bars of how
-   loud this room has been, newest on the right, bottom-aligned so the row
-   reads as a skyline rather than as text. `LiveMeter` owns the history and
-   the heights; this owns the box it sits in — and it shrinks (to nothing, if
-   it has to) before any button does. */
-.live-meter {
-  display: flex;
-  align-items: flex-end;
-  gap: 3px;
-  height: 18px;
-  max-width: 120px;
-  min-width: 0;
-  overflow: hidden;
-}
-
-.live-meter-bar {
-  flex: 1 1 11px;
-  min-width: 0;
-  background: var(--green);
-  opacity: 0.85;
+  /* Takes the row's slack, so the context size, clock and presses sit right. */
+  margin-right: auto;
 }
 
 .live-head-actions {
@@ -10138,18 +10039,6 @@ body.live-panel-ratio-resizing .live-panel-divider {
   color: var(--violet);
 }
 
-/* Mic ready: a dot before the title, present only while the microphone is the
-   way in. */
-.live-mic-dot {
-  display: inline-block;
-  width: 7px;
-  height: 7px;
-  margin-right: 8px;
-  border-radius: 50%;
-  vertical-align: middle;
-  background: var(--green);
-}
-
 /* The sentence under the toolbar (`liveStatusLine`): what a one-word title
    cannot say — that no agent is attached, or that the last press failed. Only
    rendered when there is one. */
@@ -10207,6 +10096,31 @@ body.live-panel-ratio-resizing .live-panel-divider {
   padding: 0.75rem;
   background: var(--panel);
   border: 1px solid var(--border);
+}
+
+/* "Jump to latest": a zero-height sticky row at the transcript's foot, so the
+   pill floats over the bottom edge of the scroller without taking layout. */
+.live-jump {
+  position: sticky;
+  bottom: 0.25rem;
+  height: 0;
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: center;
+  overflow: visible;
+}
+
+.live-jump-pill {
+  position: absolute;
+  bottom: 0;
+  padding: 0.25rem 0.75rem;
+  font-size: 0.8rem;
+  color: var(--text-h);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  cursor: pointer;
 }
 
 /* The two sides, told apart by where they sit and what colour they carry — the
@@ -10371,7 +10285,7 @@ body.live-panel-ratio-resizing .live-panel-divider {
   line-height: 1;
 }
 
-/* The box and the switch, on one line (mesa task 1069). */
+/* The box, on its own line (the mic switch moved to the head, mesa task 1551). */
 .live-input-row {
   display: flex;
   align-items: center;
@@ -10388,7 +10302,7 @@ body.live-panel-ratio-resizing .live-panel-divider {
 
 /* Listening is a state, not just a press — the same deal `.live-toggle.live-on`
    gets. Green rather than the cyan the word-shaped switch used to carry: this
-   is the microphone, and green is what the aperture and the meter above
+   is the microphone, and green is what the mark and the meter above
    already mean by the person being heard. Amber while muted, so a switch that
    is off says so in a colour rather than only in a label. */
 .live-mic {
@@ -10519,20 +10433,7 @@ body.live-panel-ratio-resizing .live-panel-divider {
     cursor: row-resize;
   }
 
-  /* The toolbar's meter is the first thing to give at 390px: the presses have
-     to stay pressable, so the one part of the row with no words in it is what
-     goes. */
-  .live-meter {
-    display: none;
-  }
-
-  /* The toolbar keeps every toggle and press at this width by giving up the
-     one thing with only words in it. */
-  .live-toolbar .live-head-title {
-    display: none;
-  }
-
-  .live-toolbar .live-icon {
+    .live-toolbar .live-icon {
     width: 30px;
     height: 30px;
   }
@@ -11267,8 +11168,13 @@ body.live-panel-ratio-resizing .live-panel-divider {
    a slim button strip; the two page panes stay mounted (Terminal's PTYs must
    survive) at a fixed width, clipped and invisible, so a fold never refits a
    terminal. The freed row goes to whichever of the live and agents panels
-   are open: each keeps its own width as the flex basis and both grow, and
-   their bodies, otherwise held at the open width, follow the panel. */
+   are open: each keeps its own width as the flex basis and grows, and their
+   bodies, otherwise held at the open width, follow the panel. With both
+   open, though, only the live panel grows (mesa task 1524): the agents
+   panel's drag sets its width to the pointer's distance from the right edge,
+   so any grow on top of that basis lands the handle away from the pointer
+   and tracks at half rate. It stays at exactly `--agent-sidebar-width`; live
+   takes the rest. Alone, agents still fills the row. */
 .main-rail {
   position: absolute;
   inset: 0;
@@ -11308,6 +11214,10 @@ body.live-panel-ratio-resizing .live-panel-divider {
     flex: 1 1 auto;
   }
 
+  .shell-body.main-collapsed:has(.live-sidebar:not(.collapsed)) .agent-sidebar:not(.collapsed) {
+    flex: 0 0 auto;
+  }
+
   .shell-body.main-collapsed .live-sidebar:not(.collapsed) .live-sidebar-body,
   .shell-body.main-collapsed .agent-sidebar:not(.collapsed) .agent-sidebar-body {
     width: 100%;
@@ -11336,18 +11246,422 @@ body.live-panel-ratio-resizing .live-panel-divider {
   background: var(--violet);
 }
 
-/* Top-level cards tinted by activity (mesa task 1502), in the live card's
-   style: green while actively working, amber when running but stale (the
-   idle + working pair). Only the card — its sub-agent and shell rows stay
-   dark. */
-.agent-list .agent-card-active {
-  background: rgba(43, 255, 156, 0.12);
-  border-color: rgba(43, 255, 156, 0.4);
+/* The floating Naru orb (mesa task 1553), portalled to <body> by
+   `LiveOrb.tsx`: above every sidebar, drawer and modal (the highest in the
+   sheet is 1250). Position is inline; the transition applies only while it is
+   settling onto an anchor. The pie is drawn past the body and stays
+   invisible — and click-through — until hover, focus or a tap pins it. */
+.live-orb {
+  position: fixed;
+  z-index: 1300;
+  transition:
+    left 0.22s ease,
+    top 0.22s ease,
+    opacity 0.4s ease;
+  touch-action: none;
+  /* The square's corners must not swallow page clicks: only the body, the
+     visible segments and the badge take the pointer. */
+  pointer-events: none;
+}
+.live-orb.dragging {
+  transition: none;
+}
+.live-orb-body {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: radial-gradient(circle at 50% 40%, rgba(24, 28, 48, 0.92), rgba(8, 10, 20, 0.92));
+  border: 1px solid rgba(120, 130, 170, 0.28);
+  cursor: grab;
+  pointer-events: auto;
+  transition:
+    opacity 0.4s ease,
+    box-shadow 0.4s ease,
+    border-color 0.4s ease;
+}
+.live-orb.dragging .live-orb-body {
+  cursor: grabbing;
+}
+.live-orb-mark {
+  position: absolute;
+  inset: 22%;
+  pointer-events: none;
+}
+/* Rest: dull and translucent. */
+.live-orb.dim .live-orb-body {
+  opacity: 0.42;
+}
+.live-orb.dim:hover .live-orb-body,
+.live-orb.dim.pinned .live-orb-body,
+.live-orb.dim.dragging .live-orb-body {
+  opacity: 0.85;
+}
+/* Anything happening: fully lit, glowing in the state's colour. */
+.live-orb.bright .live-orb-body {
+  opacity: 1;
+  border-color: rgba(41, 230, 255, 0.55);
+  box-shadow:
+    0 0 22px rgba(41, 230, 255, 0.42),
+    inset 0 0 18px rgba(41, 230, 255, 0.18);
+}
+.live-orb.mode-speak .live-orb-body {
+  border-color: rgba(255, 160, 43, 0.7);
+  box-shadow:
+    0 0 26px rgba(255, 160, 43, 0.55),
+    inset 0 0 18px rgba(255, 160, 43, 0.2);
+}
+.live-orb.mode-think .live-orb-body {
+  border-color: rgba(176, 107, 255, 0.7);
+  box-shadow:
+    0 0 26px rgba(176, 107, 255, 0.55),
+    inset 0 0 18px rgba(176, 107, 255, 0.2);
+}
+/* Muted: visible but quiet — a low-saturation translucent red ring and slash. */
+.live-orb.muted .live-orb-body {
+  border-color: rgba(200, 90, 100, 0.4);
+  box-shadow: none;
+}
+.live-orb.muted.bright .live-orb-body {
+  opacity: 0.75;
+}
+.live-orb-slash {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  fill: none;
+  stroke: rgba(210, 80, 95, 0.5);
+  stroke-width: 3;
+  stroke-linecap: round;
+}
+.live-orb.dim.muted .live-orb-slash {
+  stroke: rgba(210, 80, 95, 0.35);
+}
+.live-orb-badge {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 999px;
+  background: rgba(40, 16, 22, 0.85);
+  color: rgba(225, 120, 130, 0.85);
+  pointer-events: auto;
+}
+.live-orb-pie {
+  position: absolute;
+  left: -34px;
+  top: -34px;
+  overflow: visible;
+  pointer-events: none;
+  opacity: 0;
+  transform: scale(0.82);
+  transition:
+    opacity 0.18s ease,
+    transform 0.18s ease;
+}
+.live-orb:hover .live-orb-pie,
+.live-orb:focus-within .live-orb-pie,
+.live-orb.pinned .live-orb-pie {
+  opacity: 1;
+  transform: none;
+}
+.live-orb:hover .live-orb-seg,
+.live-orb:focus-within .live-orb-seg,
+.live-orb.pinned .live-orb-seg {
+  pointer-events: auto;
+}
+.live-orb-seg {
+  color: #29e6ff;
+  cursor: pointer;
+  outline: none;
+}
+.live-orb-seg path:first-of-type {
+  fill: rgba(10, 16, 30, 0.88);
+  stroke: rgba(41, 230, 255, 0.55);
+  stroke-width: 1.5;
+}
+.live-orb-seg:hover path:first-of-type,
+.live-orb-seg:focus-visible path:first-of-type {
+  fill: rgba(20, 50, 70, 0.95);
+}
+.live-orb-seg:focus-visible path:first-of-type {
+  stroke: #fff;
+  stroke-width: 2.5;
+}
+.live-orb-seg.on {
+  color: #ff8a8f;
+}
+.live-orb-seg.on path:first-of-type {
+  stroke: rgba(225, 100, 110, 0.6);
+}
+.live-orb-seg.disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 
-.agent-list .agent-card-stale {
-  background: rgba(255, 180, 68, 0.12);
-  border-color: rgba(255, 180, 68, 0.4);
+/* Phone tier: the tab bar owns the bottom edge, so a bottom-row orb rides
+   above it and its pie (which blooms 34px past the body) stays clear. */
+@media (max-width: 600px) {
+  .live-orb.row-2 {
+    translate: 0 calc(-1 * var(--phone-tabbar-reserve));
+  }
+}
+
+/* Swarm cards (mesa task 1554): compact, one accent colour per card (`--k`,
+   set inline from the session id). Top line = dot, name, project chip, task
+   chip, then time and context pinned small and quiet on the right; under it
+   one "doing" line. The tint backgrounds of task 1502 stand down — the dot
+   still carries working/stale, and green now means finished. */
+.agent-list .agent-card {
+  position: relative;
+  padding: 0.5rem 0.65rem;
+  background: var(--panel, rgba(15, 23, 41, 0.85));
+  border-color: var(--border);
+  border-left: 3px solid var(--k);
+}
+
+/* Only a first-seen card flies in (`agentCard.ts::markSeen`). */
+.agent-list .agent-card-enter {
+  animation: agent-fly-in 0.6s ease-out both;
+}
+
+.agent-list .agent-card-live {
+  background: var(--violet-dim);
+}
+
+.agent-list .agent-card-active {
+  animation: agent-glow 2.4s ease-in-out infinite;
+}
+
+.agent-list .agent-card-active.agent-card-enter {
+  animation:
+    agent-fly-in 0.6s ease-out both,
+    agent-glow 2.4s ease-in-out 0.6s infinite;
+}
+
+.agent-list .agent-card-finished {
+  border-left-color: var(--green);
+}
+
+.agent-list .agent-card-finished:not(.agent-card-leaving) {
+  animation: none;
+}
+
+.agent-list .agent-card-leaving {
+  animation: agent-dissolve 2.4s ease-in forwards;
+  pointer-events: none;
+}
+
+.agent-card-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--k);
+}
+
+/* Chips never shrink — the name is the part that truncates; a long project
+   name is capped with an ellipsis instead. */
+.agent-chip {
+  flex: 0 0 auto;
+  max-width: 10ch;
+  margin-left: 0.4rem;
+  padding: 0 0.4rem;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 0.68rem;
+  line-height: 1.5;
+  border: 1px solid var(--border-bright);
+  border-radius: 999px;
+  color: var(--muted);
+}
+
+.agent-chip-task {
+  flex: none;
+  color: var(--cyan);
+}
+
+.agent-card-right {
+  display: flex;
+  flex: none;
+  gap: 0.45rem;
+  margin-left: auto;
+  padding-left: 0.5rem;
+  align-items: baseline;
+  font-size: 0.68rem;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  transition: opacity 0.15s;
+}
+
+.agent-card-right .agent-row-context {
+  margin-left: 0;
+  color: var(--muted);
+}
+
+.agent-card-doing {
+  margin-top: 0.2rem;
+  font-size: 0.78rem;
+  line-height: 1.35;
+  color: var(--text);
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+/* Stop: a corner icon revealed on hover or keyboard focus, drawn over the
+   time/context cluster, which steps aside while it shows. */
+.agent-row-title .agent-row-stop {
+  position: absolute;
+  top: 0.3rem;
+  right: 0.35rem;
+  margin: 0;
+  padding: 0 0.35rem;
+  transition: opacity 0.15s;
+}
+
+/* With a hover device the icon is hidden until hover or focus; hidden, it is
+   also unclickable. */
+@media (hover: hover) {
+  .agent-row-title .agent-row-stop {
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .agent-card:hover .agent-row-stop,
+  .agent-row-stop:focus-visible,
+  .agent-row-stop:disabled {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .agent-card:hover .agent-card-right,
+  .agent-card:has(.agent-row-stop:focus-visible) .agent-card-right {
+    opacity: 0;
+  }
+}
+
+/* Touch has no hover: the icon stays visible (quiet), so a tap on it is
+   never a silent stop, and the clock steps left to make room. */
+@media (hover: none) {
+  .agent-row-title .agent-row-stop {
+    opacity: 0.6;
+  }
+
+  .agent-card-right {
+    margin-right: 1.6rem;
+  }
+}
+
+/* Sub-agents: indented under their parent behind a rail in its colour. */
+.agent-card .agent-children {
+  margin: 0.4rem 0 0 0.35rem;
+  padding: 0 0 0 0.5rem;
+  border-left: 2px solid var(--k);
+}
+
+.agent-card .agent-children > li {
+  animation: agent-fly-in 0.5s ease-out both;
+}
+
+@keyframes agent-fly-in {
+  0% {
+    opacity: 0;
+    transform: translateX(60px) scale(0.96);
+    filter: blur(4px);
+  }
+  55% {
+    opacity: 1;
+    transform: none;
+    filter: none;
+    box-shadow:
+      0 0 0 1px var(--k, var(--cyan)),
+      0 0 28px -4px var(--k, var(--cyan));
+  }
+  100% {
+    opacity: 1;
+    transform: none;
+    filter: none;
+  }
+}
+
+@keyframes agent-glow {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+  50% {
+    box-shadow: 0 0 14px -4px var(--k);
+  }
+}
+
+@keyframes agent-dissolve {
+  0% {
+    opacity: 1;
+    border-left-color: var(--green);
+  }
+  30% {
+    opacity: 1;
+    border-left-color: var(--green);
+    box-shadow: 0 0 16px -4px var(--green);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.97);
+    filter: blur(3px);
+    border-left-color: var(--green);
+  }
+}
+
+/* Calm: no fly-in, glow or blur — a plain fade in, and a plain fade out. */
+@media (prefers-reduced-motion: reduce) {
+  .agent-list .agent-card-active,
+  .agent-list .agent-card-active.agent-card-enter {
+    animation: none;
+  }
+
+  .agent-list .agent-card-enter,
+  .agent-list .agent-card-active.agent-card-enter,
+  .agent-card .agent-children > li {
+    animation: agent-fade-in 0.3s ease-out both;
+  }
+
+  /* Fades over the whole linger, so it never sits invisible. */
+  .agent-list .agent-card-leaving,
+  .agent-list .agent-card-leaving.agent-card-enter {
+    animation: agent-fade-out 2.4s ease-in forwards;
+  }
+
+  @keyframes agent-fade-in {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+
+  @keyframes agent-fade-out {
+    from {
+      opacity: 1;
+    }
+    to {
+      opacity: 0;
+    }
+  }
 }
 
 /* Task-done toasts (mesa task 1556): a small stack under the header's right

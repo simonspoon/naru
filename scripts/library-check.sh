@@ -360,15 +360,12 @@ run 1 "$MESA" library show "$QID"
 [ "$(jqe .error.code)" = "not_found" ] || fail "quiet delete: the record is actually gone"
 ok "--quiet on library delete: drops exactly body+synced_body+builtin_body and the record is gone"
 
-run 2 "$MESA" library list --quiet
-[ "$(jqe .error.code)" = "usage" ] || fail "--quiet on list: code=usage"
-run 2 "$MESA" library versions "$LIB_REVIEWER" --quiet
-[ "$(jqe .error.code)" = "usage" ] || fail "--quiet on versions: code=usage"
-run 2 "$MESA" library sync status --quiet
-[ "$(jqe .error.code)" = "usage" ] || fail "--quiet on sync status: code=usage"
-run 2 "$MESA" library sync apply --all-mesa --quiet
-[ "$(jqe .error.code)" = "usage" ] || fail "--quiet on sync apply: code=usage"
-ok "--quiet on list/versions/sync status/sync apply: rejected as an unknown argument, exit 2 usage"
+for SUBCMD in "list" "versions $LIB_REVIEWER" "sync status"; do
+  PLAIN=$("$MESA" library $SUBCMD)
+  run 0 "$MESA" library $SUBCMD --quiet
+  [ "$STDOUT" = "$PLAIN" ] || fail "--quiet on $SUBCMD: output must equal the plain output"
+done
+ok "--quiet on list/versions/sync status: accepted and ignored (mesa task 1513), output identical"
 
 # ================= 3. the name rule =================
 # The traversal chokepoint every synced path depends on: no /, no \, no ..,
@@ -1259,11 +1256,10 @@ ok "CLI library export --output: writes {path, items}, and refuses to clobber an
 
 # ---- --quiet is not defined on export/import: exit 2 usage ----
 
-run 2 "$MESA" library export --quiet
-[ "$(jqe .error.code)" = "usage" ] || fail "--quiet on export: code=usage"
-run 2 "$MESA" library import /no/such/file --quiet
-[ "$(jqe .error.code)" = "usage" ] || fail "--quiet on import: code=usage"
-ok "--quiet on library export/import: rejected as an unknown argument, exit 2 usage"
+run 0 "$MESA" library export --quiet
+run 1 "$MESA" library import /no/such/file --quiet
+[ "$(jqe .error.code)" != "usage" ] || fail "--quiet on import: must not be a usage error"
+ok "--quiet on library export/import: accepted and ignored (mesa task 1513)"
 
 # ---- CLI import round trip, into a second, empty db ----
 
@@ -1525,9 +1521,8 @@ run 0 env MESA_DB="$MESA_DB_7" "$MESA" library list
   fail "CLI --preview must write nothing, got $STDOUT"
 run 0 env MESA_DB="$MESA_DB_7" "$MESA" library show keep-note
 [ "$(jqs .body)" = "local keep" ] || fail "CLI --preview must leave the body untouched"
-run 2 env MESA_DB="$MESA_DB_7" "$MESA" library import "$TMP/preview-bundle.json" --preview --quiet
-[ "$(jqe .error.code)" = "usage" ] || fail "--quiet on library import --preview: code=usage"
-ok "CLI library import --preview: reports the rows, writes nothing, and still refuses --quiet"
+run 0 env MESA_DB="$MESA_DB_7" "$MESA" library import "$TMP/preview-bundle.json" --preview --quiet
+ok "CLI library import --preview: reports the rows, writes nothing, and ignores --quiet"
 
 echo "== library-check: section 10 (import/export) passed ($CHECKS checks so far) =="
 
@@ -1572,12 +1567,9 @@ ok "CLI library hook status: an unregistered hook reports its settings file, its
 
 # `--quiet` is rejected on all three: a status is not a record and has no
 # unbounded field to drop.
-for SUB in status enable disable; do
-  run 2 "$MESA" library hook "$SUB" gate-hook.sh --quiet --event Stop
-  [ -z "$STDOUT" ] || fail "library hook $SUB --quiet: stdout must be empty, got $STDOUT"
-  [ "$(jqe .error.code)" = "usage" ] || fail "library hook $SUB --quiet: expected usage, got $STDERR"
-done
-ok "CLI library hook status/enable/disable reject --quiet: exit 2, empty stdout, usage on stderr"
+run 0 "$MESA" library hook status gate-hook.sh --quiet
+[ "$(jqs .registered)" = "false" ] || fail "library hook status --quiet: must read as without it, got $STDOUT"
+ok "CLI library hook status ignores --quiet (mesa task 1513): same status as without it"
 
 # The hook's own script is not on disk — a built-in is code and a row is a db
 # row, and nothing writes either until a sync. A registration naming a file
@@ -1876,12 +1868,10 @@ MISSING=$(jqs '.[] | select(.name=="missing.py")')
 [ "$(jq -r .exists <<<"$MISSING")" = "false" ] || fail "hook orphans: missing.py exists:false"
 ok "CLI library hook orphans: exactly the two out-of-tree scripts, one row each, the in-tree one absent, the missing one flagged"
 
-for SUB in orphans adopt; do
-  run 2 "$MESA" library hook "$SUB" --quiet "$WARM_SRC"
-  [ -z "$STDOUT" ] || fail "library hook $SUB --quiet: stdout must be empty, got $STDOUT"
-  [ "$(jqe .error.code)" = "usage" ] || fail "library hook $SUB --quiet: expected usage, got $STDERR"
-done
-ok "CLI library hook orphans/adopt reject --quiet: exit 2, empty stdout, usage on stderr"
+PLAIN=$("$MESA" library hook orphans)
+run 0 "$MESA" library hook orphans --quiet
+[ "$STDOUT" = "$PLAIN" ] || fail "library hook orphans --quiet: output must equal the plain one"
+ok "CLI library hook orphans ignores --quiet (mesa task 1513): output identical"
 
 run 1 "$MESA" library hook adopt "$HOME_REAL/gone/missing.py"
 [ "$(jqe .error.code)" = "not_found" ] || fail "hook adopt on a missing script: expected not_found, got $STDERR"

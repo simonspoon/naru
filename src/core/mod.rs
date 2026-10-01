@@ -1,4 +1,5 @@
 pub mod agents;
+pub mod alarm;
 pub mod attachments;
 pub mod audio;
 pub mod board;
@@ -42,20 +43,21 @@ pub use store::{
 pub use types::{
     ARTIFACT_CONTENT_TYPES, AgentSession, AgentSpawned, AnchorSide, ArchiveOutcome, Artifact,
     ArtifactSummary, Attachment, CcAgentStat, CcDashboard, CcDayPoint, CcErrors, CcInterval,
-    CcLiveSession, CcModelStat, CcOverview, CcProjectStat, CcSessionBucket, CcSessionDetail,
-    CcSessionModelStat, CcSessionRow, CcSessionSkillStat, CcSessionThreadStat, CcSessionToolStat,
-    CcSkillStat, CcTokens, CcUsage, CcUsageExtra, CcUsageWindow, ConfigCommand, ConfigPrice,
-    DEFAULT_ARTIFACT_CONTENT_TYPE, Dependency, Diagram, DiagramEvent, DiagramType, DiagramView,
-    DiffStat, DirEntry, DirListing, EdgeMarker, EdgeStyle, FileContentView, FileTreeEntry, Frame,
-    FrameEdge, FrameShape, GitCommit, GitCommitFile, GitFileDiff, GitRepo, GitRepoView, GitStatus,
-    GitWorktree, GpuInfo, HookRun, InboxItem, InboxKind, LibraryBundle, LibraryImportResult,
-    LibraryItem, LibraryKind, LibraryScope, LibrarySyncResult, LibrarySyncRow, LibrarySyncStatus,
-    LibraryVersion, LiveAction, LiveBoard, LiveBoardHistoryEntry, LiveBoardInkEntry, LiveBoardKind,
-    LiveBoardSummary, LiveContext, LiveContextKind, LiveMemoryHit, LiveNotebookEntry, LiveNotice,
-    LiveResult, LiveRole, LiveSession, LiveState, LiveStatus, LiveSummary, LiveTranscript,
-    LiveTurn, LiveWindow, ModelRates, NaruVersion, Priority, Project, ProjectAgents,
-    ProjectFileTree, ProjectGitLog, ProjectGitRepos, ProjectGitStatus, ProjectGitView,
-    ProjectVersion, RetroFinding, RetroRun, RetroStatus, Script, ScriptArg, ScriptArgKind,
-    ScriptRun, ScriptRunEvent, ScriptRunRecord, ScriptRunStatus, ScriptStream, Status, SystemInfo,
-    Task, TaskReceipt, TaskSummary, Waypoint, is_valid_artifact_content_type, task_name,
+    CcLiveSession, CcModelStat, CcOverview, CcProjectStat, CcScorecard, CcSessionBucket,
+    CcSessionDetail, CcSessionModelStat, CcSessionRow, CcSessionSkillStat, CcSessionThreadStat,
+    CcSessionToolStat, CcSkillStat, CcTokens, CcUsage, CcUsageExtra, CcUsageWindow, ConfigCommand,
+    ConfigPrice, DEFAULT_ARTIFACT_CONTENT_TYPE, Dependency, Diagram, DiagramEvent, DiagramType,
+    DiagramView, DiffStat, DirEntry, DirListing, EdgeMarker, EdgeStyle, FileContentView,
+    FileTreeEntry, Frame, FrameEdge, FrameShape, GitCommit, GitCommitFile, GitFileDiff, GitRepo,
+    GitRepoView, GitStatus, GitWorktree, GpuInfo, HookRun, InboxItem, InboxKind, LibraryBundle,
+    LibraryImportResult, LibraryItem, LibraryKind, LibraryScope, LibrarySyncResult, LibrarySyncRow,
+    LibrarySyncStatus, LibraryVersion, LiveAction, LiveBoard, LiveBoardHistoryEntry,
+    LiveBoardInkEntry, LiveBoardKind, LiveBoardSummary, LiveContext, LiveContextKind,
+    LiveMemoryHit, LiveNotebookEntry, LiveNotice, LiveResult, LiveRole, LiveSession, LiveState,
+    LiveStatus, LiveSummary, LiveTranscript, LiveTurn, LiveWindow, ModelRates, NaruVersion,
+    Priority, Project, ProjectAgents, ProjectFileTree, ProjectGitLog, ProjectGitRepos,
+    ProjectGitStatus, ProjectGitView, ProjectVersion, RetroFinding, RetroRun, RetroStatus, Script,
+    ScriptArg, ScriptArgKind, ScriptRun, ScriptRunEvent, ScriptRunRecord, ScriptRunStatus,
+    ScriptStream, Status, SystemInfo, Task, TaskReceipt, TaskSummary, Waypoint,
+    is_valid_artifact_content_type, task_name,
 };

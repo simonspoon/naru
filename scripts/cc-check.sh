@@ -99,6 +99,66 @@ assert r["tool_calls_added"]==0, r
 print("sync --rebuild ok")
 ' || fail "sync --rebuild did not re-walk without duplicating rows"
 
+# ---- cc scorecard: the model scorecard (mesa task 1514) ----
+#
+# The main tree has ONE subagent run: Explore (agent x1) on claude-haiku-4-5,
+# a single billed response. A library agent item with two versions gives the
+# change markers: the first version (from null) and a model+effort change.
+"$BIN" cc scorecard | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+assert set(d)=={"rows","model_changes","since","until"}, sorted(d)
+assert d["since"] is None and d["until"] is None, d
+assert len(d["rows"])==1, d["rows"]
+r=d["rows"][0]
+assert r["agent"]=="Explore" and r["model"]=="claude-haiku-4-5", r
+assert r["runs"]==1 and r["turns_per_run"]==1, r
+assert r["total_cost"]>0 and r["cost_per_run"]==r["total_cost"], r
+assert r["wall_secs_per_run"]==0 and r["wall_secs_median"]==0, r
+assert r["first_run"]==r["last_run"]=="2026-06-15 01:10:00", r
+# Effort is in no transcript: it is never a column.
+assert not any("effort" in k for k in r), r
+print("cc scorecard ok")
+' || fail "cc scorecard contract"
+
+"$BIN" cc scorecard --quiet | python3 -c '
+import json,sys
+assert json.load(sys.stdin)["rows"][0]["runs"]==1
+' || fail "cc scorecard --quiet is not an accepted no-op"
+
+# since is inclusive, until exclusive, both on the run START.
+"$BIN" cc scorecard --since 2026-06-15 --until 2026-06-16 | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+assert d["since"]=="2026-06-15" and d["until"]=="2026-06-16", d
+assert [r["runs"] for r in d["rows"]]==[1], d
+' || fail "cc scorecard --since/--until inside the run"
+for args in "--since 2026-06-16" "--until 2026-06-15" "--agent Nobody"; do
+  "$BIN" cc scorecard $args | python3 -c '
+import json,sys
+assert json.load(sys.stdin)["rows"]==[]
+' || fail "cc scorecard $args should be empty"
+done
+
+SRC=0
+"$BIN" cc scorecard --since yesterday >/dev/null 2>"$TMP/sc-bad" || SRC=$?
+[ "$SRC" = "1" ] || fail "cc scorecard --since yesterday expected exit 1, got $SRC"
+python3 -c '
+import json
+assert json.load(open("'"$TMP"'/sc-bad"))["error"]["code"]=="validation"
+' || fail "cc scorecard bad --since is not a validation error"
+
+"$BIN" library create agent scorecard-probe --body=$'---\nname: scorecard-probe\nmodel: opus\n---\nx\n' >/dev/null
+"$BIN" library update scorecard-probe --body=$'---\nname: scorecard-probe\nmodel: sonnet\neffort: high\n---\nx\n' >/dev/null
+"$BIN" cc scorecard --agent scorecard-probe | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+ch=[(c["from_model"],c["to_model"],c["from_effort"],c["to_effort"]) for c in d["model_changes"]]
+assert ch==[(None,"opus",None,None),("opus","sonnet",None,"high")], ch
+assert d["rows"]==[], d
+print("cc scorecard model_changes ok")
+' || fail "cc scorecard model change markers"
+
 # cc reset: purges every cc_* row, then re-ingests. Unlike the rebuild above it
 # is corrective, so the rows really are re-ADDED (messages_added > 0 where the
 # rebuild added zero) — and because every transcript is still on disk, the
@@ -936,11 +996,12 @@ assert d["error"]["code"]=="not_found", d
 ' || fail "cc session unknown session did not return error.code=not_found"
 echo "cc session: unknown session -> not_found ok"
 
-# `--quiet` is not accepted on any `cc` subcommand: unknown argument, exit 2.
+# `--quiet` is accepted and ignored on every `cc` subcommand (mesa task 1513):
+# the same not_found, exit 1, as without it — never a usage error.
 RC=0
-"$BIN" cc session a --quiet >/dev/null 2>&1 || RC=$?
-[ "$RC" = "2" ] || fail "cc session --quiet expected exit 2, got $RC"
-echo "cc session: --quiet rejected (exit 2) ok"
+"$BIN" cc session no-such-session --quiet >/dev/null 2>&1 || RC=$?
+[ "$RC" = "1" ] || fail "cc session --quiet expected exit 1 (ignored flag), got $RC"
+echo "cc session: --quiet ignored ok"
 
 PORT=17773
 # The server resolves `cc-5h`/`cc-7d` through the same usage fetch the CLI does,
@@ -1422,16 +1483,56 @@ assert d["by_tool"]==[] and d["by_command"]==[] and d["by_message"]==[] and d["d
 print("cc errors: out-of-window is a zero state ok")
 ' || fail "cc errors --window 7d did not answer a zero state"
 
-# `--quiet` is rejected on every cc verb, this one included.
-ERC=0
+# `--quiet` is accepted and ignored here: output identical to without it.
 MESA_CC_PROJECTS_DIR="$TMP/etree" MESA_DB="$TMP/errors.db" \
-  "$BIN" cc errors --quiet >/dev/null 2>"$TMP/errors-quiet" || ERC=$?
-[ "$ERC" = "2" ] || fail "cc errors --quiet expected exit 2, got $ERC"
+  "$BIN" cc errors --window all >"$TMP/errors-plain.json"
+MESA_CC_PROJECTS_DIR="$TMP/etree" MESA_DB="$TMP/errors.db" \
+  "$BIN" cc errors --window all --quiet >"$TMP/errors-quiet.json"
 python3 -c '
 import json
-d=json.load(open("'"$TMP"'/errors-quiet"))
-assert d["error"]["code"]=="usage", d
-' || fail "cc errors --quiet did not print a usage error"
-echo "cc errors: --quiet rejected (exit 2) ok"
+a=json.load(open("'"$TMP"'/errors-plain.json")); b=json.load(open("'"$TMP"'/errors-quiet.json"))
+a.pop("generated_at_unix"); b.pop("generated_at_unix")
+assert a==b, (a, b)
+' || fail "cc errors --quiet changed the output"
+echo "cc errors: --quiet ignored ok"
+
+# Positional session id == --session.
+MESA_CC_PROJECTS_DIR="$TMP/stree" MESA_DB="$TMP/sessions.db" \
+  "$BIN" cc errors --window all sx | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+assert d["session"]=="sx" and d["total"]["errors"]==2, d
+print("cc errors <session> ok")
+' || fail "cc errors positional session did not narrow the view"
+RC=0
+MESA_CC_PROJECTS_DIR="$TMP/stree" MESA_DB="$TMP/sessions.db" \
+  "$BIN" cc errors sx --session sy >/dev/null 2>&1 || RC=$?
+[ "$RC" = "2" ] || fail "cc errors <id> --session <id> expected exit 2, got $RC"
+echo "cc errors: positional + --session is a usage error ok"
+
+# --cli: only failed Bash calls that invoke naru/mesa.
+mkdir -p "$TMP/ctree/-cli-project"
+cat > "$TMP/ctree/-cli-project/c.jsonl" <<'JSONL'
+{"type":"assistant","uuid":"c1","sessionId":"cs","timestamp":"2026-06-15T04:00:00.000Z","cwd":"/home/me/cli","message":{"model":"claude-opus-4-8","content":[{"type":"tool_use","id":"cu_1","name":"Bash","input":{"command":"naru task show 99999"}},{"type":"tool_use","id":"cu_2","name":"Bash","input":{"command":"cd /repo && ~/.local/bin/mesa cc errors --bogus"}},{"type":"tool_use","id":"cu_3","name":"Bash","input":{"command":"sed -n p missing"}},{"type":"tool_use","id":"cu_4","name":"Read","input":{"file_path":"/home/me/naru"}}],"usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}
+{"type":"user","uuid":"c2","sessionId":"cs","timestamp":"2026-06-15T04:00:01.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"cu_1","is_error":true,"content":"{\"error\":{\"code\":\"not_found\"}}"}]}}
+{"type":"user","uuid":"c3","sessionId":"cs","timestamp":"2026-06-15T04:00:02.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"cu_2","is_error":true,"content":"usage error"}]}}
+{"type":"user","uuid":"c4","sessionId":"cs","timestamp":"2026-06-15T04:00:03.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"cu_3","is_error":true,"content":"sed: no such file"}]}}
+{"type":"user","uuid":"c5","sessionId":"cs","timestamp":"2026-06-15T04:00:04.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"cu_4","is_error":true,"content":"File does not exist."}]}}
+JSONL
+MESA_CC_PROJECTS_DIR="$TMP/ctree" MESA_DB="$TMP/cli.db" \
+  "$BIN" cc errors --window all | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+assert d["total"]["errors"]==4, d["total"]
+' || fail "cc errors (unfiltered) over the --cli tree"
+MESA_CC_PROJECTS_DIR="$TMP/ctree" MESA_DB="$TMP/cli.db" \
+  "$BIN" cc errors --window all --cli | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+assert d["total"]["errors"]==2, d["total"]
+assert [x["name"] for x in d["by_tool"]]==["Bash"], d["by_tool"]
+assert len(d["by_command"])==2, d["by_command"]
+print("cc errors --cli ok")
+' || fail "cc errors --cli did not keep only naru/mesa Bash failures"
 
 echo "ok: cc-check passed"

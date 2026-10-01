@@ -424,13 +424,13 @@ run 1 "$MESA" script show "$QID"
 ok "--quiet on script delete: drops exactly body+description and the record is gone"
 
 # quiet output is JSON with the same keys — never byte-identical ordering games
-run 2 "$MESA" script list --quiet
-[ "$(jqe .error.code)" = "usage" ] || fail "--quiet on list: code=usage"
-ok "--quiet on script list: rejected as an unknown argument, exit 2 usage"
+PLAIN=$("$MESA" script list)
+run 0 "$MESA" script list --quiet
+[ "$STDOUT" = "$PLAIN" ] || fail "--quiet on list: output must equal the plain list"
+ok "--quiet on script list: accepted and ignored (mesa task 1513)"
 
-run 2 "$MESA" script run echoer --set target=x --quiet
-[ "$(jqe .error.code)" = "usage" ] || fail "--quiet on run: code=usage"
-ok "--quiet on script run: rejected as an unknown argument, exit 2 usage"
+run 0 "$MESA" script run echoer --set target=x --quiet
+ok "--quiet on script run: accepted and ignored (mesa task 1513)"
 
 # ---- delete echoes the full destroyed record (the safety floor) ----
 

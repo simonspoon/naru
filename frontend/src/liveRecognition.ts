@@ -383,7 +383,7 @@ export const HEARING_HOLD_MS = DEFAULT_VAD.hangoverMs + 300
 
 /**
  * Whether the person is being heard right now — the one rule behind both the
- * "hearing" panel under the transcript and the header aperture's own hearing
+ * "hearing" panel under the transcript and the header mark's own hearing
  * state (mesa task 1073).
  *
  * The three original signals are all **edge-triggered and non-overlapping**,

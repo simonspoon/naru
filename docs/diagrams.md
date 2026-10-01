@@ -424,8 +424,8 @@ in `src/cli.rs` forces that decision explicitly.
   diagram type: `{type, shapes, generic_frame, edge_styles, edge_markers}`.
   This is the "matching options depending on the diagram type" surface — how an
   agent discovers the legal values instead of guessing and taking a
-  `validation` error. It is a **read** command, so it rejects `--quiet` as an
-  unknown argument (exit 2), like `list`/`events`. It is also the one diagram
+  `validation` error. It is a **read** command, so it ignores `--quiet` (accepted
+  no-op, mesa task 1513), like `list`/`events`. It is also the one diagram
   command that opens **no database**: the sets are compiled in, so it answers
   before `Store::open_default()` and never creates a db as a side effect.
   `scripts/diagram-check.sh` drives its whole shape/marker matrix off this

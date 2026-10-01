@@ -1318,6 +1318,7 @@ against, and what the watcher does about a session that crosses one (mesa tasks
     "cache-read-share": 0.98,
     "cache-read-min-tokens": 20000000,
     "repeat-count": 30,
+    "context-tokens": 120000,
     "action": "stop"
   }
 }
@@ -1345,6 +1346,11 @@ against, and what the watcher does about a session that crosses one (mesa tasks
   cap, not a policy. "Trivial" means the command's output was under 16 bytes,
   which is what separates a wedged `echo idle` loop from an agent legitimately
   re-running something that produces work.
+- `context-tokens` — the input-side size (`input + cache read + cache
+  creation` tokens) of a session's newest main-thread turn at which the
+  `context` rule reports it. **Absent or `null` ⇒ 120000.** A whole number ≥ 1.
+  Alert-only whatever `action` says: a session over this and nothing else is
+  reported and left running.
 - `action` — what the watcher **does** about a breach. **Absent or `null` ⇒
   `"stop"`.** Exactly one of two lowercase strings:
   - `"stop"` — run `claude stop <job id>` on the session, then file the alert
@@ -1366,13 +1372,15 @@ against, and what the watcher does about a session that crosses one (mesa tasks
 
 ### Routes
 
-- `GET /api/config/guard` → `ConfigGuard`: each of the six keys **verbatim**
+- `GET /api/config/guard` → `ConfigGuard`: each of the seven keys **verbatim**
   (`null` when unset) beside its built-in (`cost_usd_default`,
   `total_tokens_default`, `cache_read_share_default`,
-  `cache_read_min_tokens_default`, `repeat_count_default`, `action_default`). Gated like the other config getters
+  `cache_read_min_tokens_default`, `repeat_count_default`,
+  `context_tokens_default`, `action_default`). Gated like the other config getters
   (`require_agent_access`); a malformed config is **502 `unavailable`**.
 - `PUT /api/config/guard`, body `{"cost_usd": <n> | null, "total_tokens": …,
   "cache_read_share": …, "cache_read_min_tokens": …, "repeat_count": …,
+  "context_tokens": …,
   "action": "stop" | "report" | null}` → echoes the getter.
   Absent leaves a key alone; `null` removes it, restoring the built-in. Any
   out-of-range or wrong-typed value is **422 `validation`**, writing nothing —

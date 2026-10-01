@@ -6,6 +6,7 @@
 set -euo pipefail
 # Drop inherited NARU_* vars: Naru reads them before MESA_*, so one would escape this script's isolation.
 unset $(env | sed -n 's/^\(NARU_[A-Za-z0-9_]*\)=.*/\1/p')
+unset CLAUDE_CODE_SESSION_ID
 
 cd "$(dirname "$0")/.."
 command -v jq >/dev/null || { echo "jq is required" >&2; exit 1; }
@@ -150,17 +151,22 @@ run 0 "$MESA" task delete "$(jqs .id)"
 run 0 "$MESA" task create "$P" --description "Mixed form"
 [ "$(jqs .description)" = "Mixed form" ] || fail "task create mixed: description"
 run 0 "$MESA" task delete "$(jqs .id)"
-run 2 "$MESA" task create "$P" "twice" --description "conflict"
-[ "$(jqe .error.code)" = "usage" ] || fail "positional+flag description: code=usage"
+# a positional beside --description is the name, the flag its body (task 1513)
+run 0 "$MESA" task create "$P" "twice" --description "conflict"
+[ "$(jqs .name)" = "twice" ] || fail "positional+flag description: name"
+run 0 "$MESA" task delete "$(jqs .id)"
+run 2 "$MESA" task create "$P" --description "a" --description-file -
+[ "$(jqe .error.code)" = "usage" ] || fail "--description + --description-file: code=usage"
 run 2 "$MESA" task create "$P"
 [ "$(jqe .error.code)" = "usage" ] || fail "missing description: code=usage"
 # the third form: a body from a file (or stdin) satisfies the same requirement
 run 0 bash -c "printf 'From a file\n\nwith a body' | $MESA task create '$P' --description-file -"
 [ "$(jqs .name)" = "From a file" ] || fail "task create --description-file: derived name"
 run 0 "$MESA" task delete "$(jqs .id)"
-run 2 "$MESA" task create "$P" "twice" --description-file -
-[ "$(jqe .error.code)" = "usage" ] || fail "positional+--description-file: code=usage"
-ok "task create: positional/flag/file forms; more than one is usage"
+run 0 bash -c "printf 'the body' | $MESA task create '$P' 'named' --description-file -"
+[ "$(jqs .name)" = "named" ] || fail "positional+--description-file: name"
+run 0 "$MESA" task delete "$(jqs .id)"
+ok "task create: positional/flag/file forms; name+body accepted, two bodies are usage"
 
 # the derived name: first line only, cut to 50 chars with an ellipsis marking
 # the cut. Never stored — it always follows the body it was cut from.
@@ -670,8 +676,8 @@ run 0 "$MESA" task create "$PQ" --description "$(body_with 'Quiet subject')" \
 QT=$(jqs .id)
 run 0 "$MESA" task show "$QT"
 printf '%s' "$STDOUT" >"$TMP/full.json"
-# non-quiet output is unchanged: the full 17-key task object
-[ "$(jqs 'keys | join(",")')" = "acceptance,artifact,blocked,claimed_at,created_at,description,id,name,owner,parent_id,priority,project_id,result,sort_order,status,tags,updated_at" ] ||
+# non-quiet output is unchanged: the full 17-key task object plus the output-only `title` alias (task 1513)
+[ "$(jqs 'keys | join(",")')" = "acceptance,artifact,blocked,claimed_at,created_at,description,id,name,owner,parent_id,priority,project_id,result,sort_order,status,tags,title,updated_at" ] ||
   fail "task show (no --quiet): full key set must be unchanged"
 run 0 "$MESA" task show "$QT" --quiet
 printf '%s' "$STDOUT" >"$TMP/quiet.json"
@@ -750,12 +756,14 @@ ok "task update --quiet with no field flag: exit 2, empty stdout, code=usage"
 run 2 "$MESA" task show "$QT" -q
 ok "task show -q: exit 2 (no short alias)"
 
-# --quiet does not exist outside the 9 subcommands in scope
-run 2 "$MESA" task list --quiet
-run 2 "$MESA" task next --quiet
-run 2 "$MESA" task deps "$QT" --quiet
-run 2 "$MESA" task events "$QT" --quiet
-ok "task list/next/deps/events --quiet: exit 2 (unknown argument)"
+# --quiet outside the subcommands that define it is a no-op (mesa task 1513):
+# accepted, output byte-identical to without it.
+for sub in "list" "next" "deps $QT" "events $QT"; do
+  WITHOUT=$("$MESA" task $sub)
+  run 0 "$MESA" task $sub --quiet
+  [ "$STDOUT" = "$WITHOUT" ] || fail "task $sub --quiet: output differs from without it"
+done
+ok "task list/next/deps/events --quiet: accepted, output identical (no-op)"
 
 # every one of the 9 advertises the flag in --help
 for SUB in create import show update delete claim release block unblock; do
@@ -810,8 +818,8 @@ PJQ=$(jqs .id)
 # moves between the two calls (Project carries no timestamp at all).
 run 0 "$MESA" project show "$PJQ"
 printf '%s' "$STDOUT" >"$TMP/pfull.json"
-# non-quiet output is unchanged: the full 9-key project object
-[ "$(jqs 'keys | join(",")')" = "archived,description,id,local_path,name,parent_id,previous_paths,root_commit,sort_order" ] ||
+# non-quiet output is unchanged: the full 10-key project object
+[ "$(jqs 'keys | join(",")')" = "archived,description,id,local_path,name,parent_id,previous_paths,root_commit,shared_notebook,sort_order" ] ||
   fail "project show (no --quiet): full key set must be unchanged"
 [ "$(jqs 'has("description")')" = "true" ] || fail "project show (no --quiet): description present"
 run 0 "$MESA" project show "$PJQ" --quiet
@@ -894,10 +902,11 @@ ok "project update --quiet with no field flag: exit 2, empty stdout, code=usage"
 run 2 "$MESA" project show "$PJQ4" -q
 ok "project show -q: exit 2 (no short alias)"
 
-# --quiet does not exist outside the 6 subcommands in scope
-run 2 "$MESA" project list --quiet
-run 2 "$MESA" project resolve --quiet
-ok "project list/resolve --quiet: exit 2 (unknown argument)"
+# --quiet outside the 6 subcommands in scope is an accepted no-op (mesa task 1513)
+WITHOUT=$("$MESA" project list)
+run 0 "$MESA" project list --quiet
+[ "$STDOUT" = "$WITHOUT" ] || fail "project list --quiet: output differs from without it"
+ok "project list --quiet: accepted, output identical (no-op)"
 
 # every one of the 6 advertises the flag in --help
 for SUB in create show update delete archive unarchive; do
@@ -1160,9 +1169,11 @@ run 0 "$MESA" inbox delete "$IQT2"
 run 2 "$MESA" inbox show "$IQ" -q
 ok "inbox show -q: exit 2 (no short alias)"
 
-# --quiet does not exist outside the 5 subcommands in scope
-run 2 "$MESA" inbox list --quiet
-ok "inbox list --quiet: exit 2 (unknown argument)"
+# --quiet outside the 5 subcommands in scope is an accepted no-op (mesa task 1513)
+WITHOUT=$("$MESA" inbox list)
+run 0 "$MESA" inbox list --quiet
+[ "$STDOUT" = "$WITHOUT" ] || fail "inbox list --quiet: output differs from without it"
+ok "inbox list --quiet: accepted, output identical (no-op)"
 
 # every one of the 5 advertises the flag in --help
 for SUB in add show assign read delete; do
@@ -1305,5 +1316,50 @@ MESA_DB="$TMP/snap.db" run 0 "$MESA" project list
 [ "$(jqs length)" = "1" ] || fail "backup: snapshot project count"
 [ "$(jqs '.[0].id')" = "$P2" ] || fail "backup: snapshot contents"
 ok "backup: VACUUM INTO snapshot readable via MESA_DB"
+
+# ---- forgiving CLI (mesa task 1513) ----
+PF=$("$MESA" project create forgiving --no-git | jq -r .id)
+
+# `title` is an output-only alias of the derived `name`, on every task shape.
+run 0 "$MESA" task create "$PF" "Alias check"
+[ "$(jqs '.title')" = "Alias check" ] && [ "$(jqs '.title == .name')" = "true" ] ||
+  fail "task create: title must equal name"
+TF=$(jqs .id)
+run 0 "$MESA" task show "$TF"
+[ "$(jqs '.title == .name and (.description | length > 0)')" = "true" ] || fail "task show: title"
+run 0 "$MESA" task show "$TF" --quiet
+[ "$(jqs '.title == .name')" = "true" ] || fail "task show --quiet: title"
+run 0 "$MESA" task list "$PF"
+[ "$(jqs '.[0].title == .[0].name')" = "true" ] || fail "task list: title"
+ok "task JSON carries title == name (full, quiet, list)"
+
+# Positional NAME plus --description BODY: name is the derived first line.
+run 0 "$MESA" task create "$PF" "Named task" --description "The body text."
+[ "$(jqs .name)" = "Named task" ] || fail "name + --description: name"
+[ "$(jqs .description)" = $'Named task\n\nThe body text.' ] || fail "name + --description: stored description"
+printf 'From a file.\n' >"$TMP/body.txt"
+run 0 "$MESA" task create "$PF" "File named" --description-file "$TMP/body.txt"
+[ "$(jqs .description)" = $'File named\n\nFrom a file.' ] || fail "name + --description-file: description"
+run 2 "$MESA" task create "$PF" --description a --description-file "$TMP/body.txt"
+run 0 "$MESA" task create "$PF" --description "Flag only"
+[ "$(jqs .description)" = "Flag only" ] || fail "--description alone unchanged"
+ok "task create: NAME + --description/--description-file stores NAME\\n\\nBODY"
+
+# A clap usage error carries did_you_mean when clap can suggest a fix.
+run 2 "$MESA" task list --stauts todo
+[ "$(jqe .error.code)" = "usage" ] || fail "typo'd flag: code"
+[ "$(jqe .error.did_you_mean)" = "naru task list --status todo" ] ||
+  fail "typo'd flag: did_you_mean was $(jqe .error.did_you_mean)"
+run 2 "$MESA" taks list
+[ "$(jqe '.error.did_you_mean')" = "naru task list" ] || fail "typo'd subcommand: did_you_mean"
+run 2 "$MESA" task creat "$PF" x
+[ "$(jqe .error.did_you_mean)" = "naru task create $PF x" ] ||
+  fail "several candidates: the closest wins, got $(jqe .error.did_you_mean)"
+run 0 "$MESA" task create "$PF" "Empty body" --description "  "
+[ "$(jqs .description)" = "Empty body" ] || fail "empty body: name alone"
+run 0 "$MESA" task create "$PF" --description "Only body"
+run 2 "$MESA" task show
+[ "$(jqe '.error | has("did_you_mean")')" = "false" ] || fail "no suggestion: key must be omitted"
+ok "usage errors: did_you_mean on a typo'd flag/subcommand, omitted otherwise, exit 2"
 
 echo "all $CHECKS checks passed"
