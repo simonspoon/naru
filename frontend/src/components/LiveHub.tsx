@@ -164,6 +164,7 @@ import {
   STOP_WAIT_MS,
 } from '../liveStream'
 import { playFailure } from '../speechPlayback'
+import { captionActive, captionFraction, captionHeld, captionLength } from '../liveCaption'
 import { playSpeechStream, type SpeechStream } from '../speechStream'
 import { decodeOutput, speechRms, tapElement } from '../speechTap'
 import { parseTimestamp } from '../time'
@@ -736,6 +737,16 @@ export function LiveHub({
   // top rank, since a panel that says "listening" after a failure is lying.
   const [actionError, setActionError] = useState<string | null>(null)
   const [speaking, setSpeaking] = useState(false)
+  // Live captions (mesa task 1555): the turn the player took in hand to speak,
+  // and how many characters of it the voice has reached. Cleared wherever the
+  // player is released, so everything that is not a turn being spoken shows
+  // its whole text (`liveCaption.ts::captionActive`).
+  const [captionId, setCaptionId] = useState<number | null>(null)
+  const [captionChars, setCaptionChars] = useState(0)
+  // Every turn the player has taken in hand, kept after it ends: `captionId`
+  // clears at the end but `played_at` only arrives on the next poll, and a turn
+  // just heard must not be held back again in between.
+  const [captionedIds, setCaptionedIds] = useState<ReadonlySet<number>>(new Set())
   // Whether this component must decode the audio itself rather than hand the
   // URL to an <audio> element — the same latch, for the same reason, as the
   // inbox's: set only once decoded audio has actually sounded, because a media
@@ -1395,7 +1406,7 @@ export function LiveHub({
   useEffect(() => {
     const el = scroller.current
     if (el && stuck.current) el.scrollTop = el.scrollHeight
-  }, [turns, open])
+  }, [turns, open, captionChars])
   function onTranscriptScroll() {
     const el = scroller.current
     if (!el) return
@@ -1449,6 +1460,7 @@ export function LiveHub({
   const releasePlayer = useCallback(() => {
     press.current += 1
     sounding.current = null
+    setCaptionId(null)
     fetching.current?.abort()
     fetching.current = null
     decoded.current?.stop()
@@ -1481,6 +1493,7 @@ export function LiveHub({
         if (press.current !== attempt) return
         setActionError(err instanceof Error ? err.message : String(err))
         setSpeaking(false)
+        setCaptionId(null)
         sounding.current = null
         // A replay that failed to decode is not a live turn ending — it never
         // reached `markPlayed` and must not: clear the button rather than
@@ -1540,6 +1553,11 @@ export function LiveHub({
     const attempt = press.current
     sounding.current = id
     setSpeaking(false)
+    // A replay re-hears a turn already on screen in full; only a first
+    // hearing is captioned.
+    setCaptionChars(0)
+    setCaptionId(replaying.current === null ? id : null)
+    setCaptionedIds((prev) => new Set(prev).add(id))
     const el = player.current
     if (!el) return
     if (decodes) {
@@ -1559,6 +1577,7 @@ export function LiveHub({
       if (err.name !== 'NotAllowedError' || press.current !== attempt) return
       setActionError('this browser would not start playback')
       sounding.current = null
+      setCaptionId(null)
       ended.current(id)
     })
   }
@@ -3108,6 +3127,7 @@ export function LiveHub({
     if (sounding.current !== id) return
     sounding.current = null
     setSpeaking(false)
+    setCaptionId(null)
     if (replaying.current === id) setReplaying(null)
     else markPlayed(id)
     run()
@@ -3127,6 +3147,26 @@ export function LiveHub({
     if (id !== null && !turns.some((t) => t.id === id)) ended.current(id)
     pump.current()
   }, [turns])
+
+  // The caption clock (mesa task 1555), sampled ten times a second and only
+  // written when a new word is reached. On the element path it is the
+  // element's own `currentTime`/`duration` (a chunked body reports no finite
+  // duration, which `captionFraction` estimates from the text); on the decode
+  // path it is the stream's playhead, whose total is never known up front.
+  useEffect(() => {
+    if (captionId === null) return
+    const tick = () => {
+      const turn = held.current.find((t) => t.id === captionId)
+      if (turn === undefined) return
+      const stream = decoded.current
+      const el = player.current
+      const elapsed = stream !== null ? stream.elapsed() : (el?.currentTime ?? null)
+      const duration = stream !== null ? null : (el?.duration ?? null)
+      setCaptionChars(captionLength(turn.text, captionFraction(elapsed, duration, turn.text)))
+    }
+    const timer = window.setInterval(tick, 100)
+    return () => window.clearInterval(timer)
+  }, [captionId])
 
   // A conversation that has ended stops speaking. Edge-triggered on the status,
   // not derived: a stop touches the element and the stream, which is not
@@ -3713,6 +3753,35 @@ export function LiveHub({
   })
 
   const groups = turnGroups(turns)
+  // A turn's text as the page shows it: the words the voice has reached while
+  // it is being spoken, otherwise all of it (mesa task 1555).
+  const captioned = (turn: LiveTurn): string => {
+    const heard = turn.played_at !== null
+    if (
+      captionHeld({
+        captionId,
+        turnId: turn.id,
+        heard,
+        captioned: captionedIds.has(turn.id),
+        willSpeak:
+          live && spokenTurnVerdict(turn, session?.speaker ?? null, client, speechMuted) === 'speak',
+        unlocked,
+        paused,
+      })
+    ) {
+      return ''
+    }
+    return captionActive({
+      captionId,
+      turnId: turn.id,
+      heard,
+      replaying: replayingId === turn.id,
+      speechMuted,
+      paused,
+    })
+      ? turn.text.slice(0, captionChars)
+      : turn.text
+  }
   // Whether a *live* turn — not a replay — is audibly sounding right now
   // (mesa task 1449): every replay button but the one already sounding reads
   // this to disable itself, so a replay can queue behind live speech but
@@ -4295,7 +4364,7 @@ export function LiveHub({
                                         prose meant to be *spoken*, and a user turn
                                         is untrusted dictation. */}
                                     {turn.text !== '' && (
-                                      <div className="live-text">{turn.text}</div>
+                                      <div className="live-text">{captioned(turn)}</div>
                                     )}
                                     {/* The person's board ink or a picture they pasted
                                         (mesa task 1475) — a small thumbnail of what the

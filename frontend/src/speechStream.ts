@@ -78,6 +78,9 @@ export interface SpeechStream {
   rewind: () => void
   /** Drops the body still arriving and silences what is scheduled. */
   stop: () => void
+  /** The playhead in item seconds — what has been heard, 0 before the first
+   *  sample sounds (mesa task 1555, the live captions' clock). */
+  elapsed: () => number
 }
 
 /**
@@ -281,6 +284,9 @@ export async function playSpeechStream(
       for (const { index, from, delay } of replaySlices(holding, target)) {
         schedule(played[index].buffer, from, at + delay)
       }
+    },
+    elapsed() {
+      return started ? Math.max(0, Math.min(ctx.currentTime - origin, filled)) : 0
     },
     stop() {
       stopped = true

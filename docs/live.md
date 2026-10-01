@@ -1827,6 +1827,36 @@ the conversation panel's own: closing a picture is not a write.
 - **No project binding.** A board has no `project_id`. It belongs to the
   conversation, and `keep` is the one moment a person chooses to give it a home.
 
+## Live captions (mesa task 1555)
+
+A Naru turn that is being spoken for the first time reveals **word by word in
+time with the voice** instead of landing whole. Frontend only — no route, no
+timings: the speak route carries none, so `liveCaption.ts` places words by
+**character length** (the share of the text shown is the share of the audio
+heard, never splitting a word). The clock is whichever the playback path has:
+the `<audio>` element's `currentTime`/`duration`, or on the decode-it-yourself
+path `SpeechStream.elapsed()`, the Web Audio playhead. A chunked body reports
+no finite duration, so one is estimated from the text (`CAPTION_CHARS_PER_SECOND`)
+and the share is capped at `CAPTION_ESTIMATE_CAP` — also with a finite duration,
+since a chunked body's duration can grow as bytes arrive: the caption can lag
+but never overtake the voice, and the whole text appears the moment playback ends.
+`LiveHub` samples the clock ten times a second and writes state only when a new
+word is reached.
+
+Only the turn the player took in hand (`captionId`, set in `speak()`, cleared
+wherever the player is released, a turn ends or playback fails) is paced. A turn
+this page *will* speak but has not yet taken in hand (new, or queued behind the
+sounding one) is held at zero characters (`captionHeld`) rather than painted
+whole; the ids ever taken in hand are remembered so a turn that just finished is
+not held again before the poll delivers `played_at`. Full text at once for
+everything else: a turn with `played_at` (history on join), a replay, a muted
+voice (the run never speaks it), a pause, a page that may not speak
+(`liveSpeaker`'s `maySpeak` — it never takes the turn in hand), a page that has
+not joined, and a turn with no audio. An unrelated page error does not affect
+captions. The transcript follows the growing caption (`captionChars` is an
+effect dependency), still only while the reader is near the bottom
+(`liveScroll`).
+
 ## The action vocabulary
 
 Three values, and they are all one idea: **what the person is looking at.**
