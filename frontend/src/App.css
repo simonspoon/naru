@@ -3467,8 +3467,8 @@ main {
   flex-direction: column;
   border: 1px solid transparent;
   border-radius: var(--r-md);
-  background: var(--bg);
-  box-shadow: 0 0 12px rgba(0, 229, 255, 0.1);
+  background: var(--surface);
+  box-shadow: var(--ring);
 }
 
 /* `min-width: 0` is as load-bearing as `min-height: 0`, and for a subtler
@@ -3505,6 +3505,7 @@ main {
   gap: 0.6rem;
   padding: 0.3rem 0.6rem;
   border-bottom: 1px solid var(--hairline);
+  border-radius: var(--r-md) var(--r-md) 0 0;
   font-family: var(--font-mono);
   color: var(--muted);
 }
@@ -3534,6 +3535,9 @@ main {
   min-width: 0;
   min-height: 0;
   overflow: hidden;
+  /* Already clipped (and not what FitAddon scrolls); the radius only rounds
+     the pane's bottom corners. */
+  border-radius: 0 0 var(--r-md) var(--r-md);
 }
 
 /* Padding lives on .xterm itself, not .agent-terminal-screen: FitAddon reads
@@ -3985,8 +3989,8 @@ body.live-panel-ratio-resizing {
   flex-direction: column;
   border: 1px solid transparent;
   border-radius: var(--r-md);
-  background: var(--bg);
-  box-shadow: 0 0 12px rgba(0, 229, 255, 0.1);
+  background: var(--surface);
+  box-shadow: var(--ring);
 }
 
 .agent-sidebar-pane.dragging {
