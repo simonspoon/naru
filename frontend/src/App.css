@@ -10098,6 +10098,31 @@ body.live-panel-ratio-resizing .live-panel-divider {
   border: 1px solid var(--border);
 }
 
+/* "Jump to latest": a zero-height sticky row at the transcript's foot, so the
+   pill floats over the bottom edge of the scroller without taking layout. */
+.live-jump {
+  position: sticky;
+  bottom: 0.25rem;
+  height: 0;
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: center;
+  overflow: visible;
+}
+
+.live-jump-pill {
+  position: absolute;
+  bottom: 0;
+  padding: 0.25rem 0.75rem;
+  font-size: 0.8rem;
+  color: var(--text-h);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  cursor: pointer;
+}
+
 /* The two sides, told apart by where they sit and what colour they carry — the
    dictated side to the right in violet, mesa's replies to the left. The word
    above each run says it as well, for the reader the placement is lost on. */

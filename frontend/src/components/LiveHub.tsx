@@ -174,6 +174,7 @@ import type { LiveState } from '../types/LiveState'
 import type { LiveTurn } from '../types/LiveTurn'
 import type { LiveWindow } from '../types/LiveWindow'
 import type { TranscribeStatus } from '../types/TranscribeStatus'
+import { isNearBottom, newSince } from '../liveScroll'
 import { useFetch } from '../useFetch'
 
 /**
@@ -1383,11 +1384,31 @@ export function LiveHub({
   // The transcript follows the conversation: a spoken reply the reader cannot
   // see is the one thing the panel must never do. The clip-hidden closed state
   // still lays out, so this works whether or not it is open.
+  // It follows only while the reader is at (within a few px of) the bottom: the
+  // 2s poll hands `turns` a fresh array every time, so an unconditional jump
+  // yanked a reader who had scrolled up back down. Scrolled away, a "jump to
+  // latest" pill counts what arrived since (`awayAt` = the turn count then).
   const scroller = useRef<HTMLDivElement | null>(null)
+  const stuck = useRef(true)
+  const [awayAt, setAwayAt] = useState<number | null>(null)
   useEffect(() => {
     const el = scroller.current
-    if (el) el.scrollTop = el.scrollHeight
+    if (el && stuck.current) el.scrollTop = el.scrollHeight
   }, [turns, open])
+  function onTranscriptScroll() {
+    const el = scroller.current
+    if (!el) return
+    const near = isNearBottom(el.scrollTop, el.scrollHeight, el.clientHeight)
+    stuck.current = near
+    setAwayAt((prev) => (near ? null : (prev ?? turns.length)))
+  }
+  function jumpToLatest() {
+    const el = scroller.current
+    if (!el) return
+    stuck.current = true
+    setAwayAt(null)
+    el.scrollTop = el.scrollHeight
+  }
 
   // ---- playback ----
 
@@ -4222,7 +4243,7 @@ export function LiveHub({
                 >
                   {chatExpanded && (
                     <>
-                      <div className="live-transcript" ref={scroller}>
+                      <div className="live-transcript" ref={scroller} onScroll={onTranscriptScroll}>
                         {groups.length === 0 ? (
                           <p className="muted">
                             Nothing said yet. Press {controls.primary.label} to begin.
@@ -4312,6 +4333,15 @@ export function LiveHub({
                               })}
                             </div>
                           ))
+                        )}
+                        {awayAt !== null && (
+                          <div className="live-jump">
+                            <button type="button" className="live-jump-pill" onClick={jumpToLatest}>
+                              Jump to latest
+                              {newSince(turns.length, awayAt) > 0 &&
+                                ` (${newSince(turns.length, awayAt)} new)`}
+                            </button>
+                          </div>
                         )}
                       </div>
 
