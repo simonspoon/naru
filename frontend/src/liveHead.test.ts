@@ -4,65 +4,11 @@ import {
   elapsedLabel,
   emptyMeterHistory,
   endsInHead,
-  liveHeadTitle,
   METER_BARS,
   METER_FRAMES_PER_BAR,
   pushMeterHistory,
 } from './liveHead'
 import type { LiveButton } from './liveSession'
-
-function input(patch: Partial<Parameters<typeof liveHeadTitle>[0]> = {}) {
-  return {
-    live: true,
-    speaking: false,
-    paused: false,
-    interim: '',
-    draft: '',
-    error: null,
-    ...patch,
-  }
-}
-
-describe('liveHeadTitle', () => {
-  it('rests on Live while the conversation is simply running', () => {
-    expect(liveHeadTitle(input())).toBe('Live')
-  })
-
-  it('reports being heard, by either route in', () => {
-    expect(liveHeadTitle(input({ interim: 'the quick brown' }))).toBe('Hearing you')
-    expect(liveHeadTitle(input({ draft: 'typed at it' }))).toBe('Hearing you')
-    // Whitespace is not speech — `headerIndicator`'s rule, unchanged.
-    expect(liveHeadTitle(input({ interim: '  ', draft: '\n' }))).toBe('Live')
-  })
-
-  it('lets mesa speaking outrank the person, and paused outrank a stale draft', () => {
-    expect(liveHeadTitle(input({ speaking: true, draft: 'over her' }))).toBe(
-      'Naru speaking',
-    )
-    expect(liveHeadTitle(input({ speaking: true, paused: true }))).toBe('Naru speaking')
-    expect(liveHeadTitle(input({ paused: true, draft: 'left in the box' }))).toBe(
-      'Paused',
-    )
-  })
-
-  it('puts the session itself above anything happening inside it', () => {
-    expect(liveHeadTitle(input({ live: false }))).toBe('Disconnected')
-    expect(liveHeadTitle(input({ live: false, paused: true }))).toBe('Disconnected')
-    // A tail of audio outliving the conversation still says the session is gone:
-    // unlike the aperture, this line is about the conversation, not the sound.
-    expect(liveHeadTitle(input({ live: false, speaking: true }))).toBe('Disconnected')
-  })
-
-  it('lets a failure outrank everything', () => {
-    expect(liveHeadTitle(input({ error: 'fetch failed' }))).toBe('Reconnecting')
-    expect(liveHeadTitle(input({ error: 'fetch failed', live: false }))).toBe(
-      'Reconnecting',
-    )
-    expect(liveHeadTitle(input({ error: 'fetch failed', speaking: true }))).toBe(
-      'Reconnecting',
-    )
-  })
-})
 
 describe('elapsedLabel', () => {
   it('zero-pads both halves', () => {

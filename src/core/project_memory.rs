@@ -73,6 +73,13 @@ pub const CONTEXT_MAX_CHARS: usize = 9_000;
 
 /// Which project a folder belongs to, or `None`:
 ///
+/// 0. a **shared notebook** (task 1550): the nearest ancestor-or-self folder
+///    that is the `local_path` of a project with `shared_notebook` on wins
+///    outright — over everything below, so a repo bound to its own project
+///    that sits under a shared parent still resolves to the parent. Current
+///    `local_path`s are searched before previous paths, as in step 2/3.
+///    Nothing is keyed by the folder asked about, so a feature folder under
+///    the parent can move or vanish without losing a note;
 /// 1. the project bound to the folder's repo root commit
 ///    ([`git::root_commit`] → `Store::find_project_by_root_commit`) — so
 ///    every worktree and subfolder of a repo resolves to its project;
@@ -86,6 +93,29 @@ pub const CONTEXT_MAX_CHARS: usize = 9_000;
 /// Archived projects count: an agent working in an archived project's folder
 /// still belongs to it.
 pub fn resolve_project_for_path(store: &Store, path: &Path) -> Result<Option<Project>> {
+    let canonical: PathBuf = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let projects = store.list_projects_all()?;
+    let nearest = |shared_only: bool, paths: &dyn Fn(&Project) -> Vec<&str>| {
+        projects
+            .iter()
+            .filter(|p| !shared_only || p.shared_notebook)
+            .flat_map(|p| paths(p).into_iter().map(move |dir| (p, dir)))
+            .filter(|(_, dir)| !dir.is_empty() && canonical.starts_with(dir))
+            .max_by_key(|(_, dir)| Path::new(dir).components().count())
+            .map(|(p, _)| p.clone())
+    };
+    fn current(p: &Project) -> Vec<&str> {
+        p.local_path.as_deref().into_iter().collect()
+    }
+    fn previous(p: &Project) -> Vec<&str> {
+        p.previous_paths.iter().map(String::as_str).collect()
+    }
+    if let Some(project) = nearest(true, &current) {
+        return Ok(Some(project));
+    }
+    if let Some(project) = nearest(true, &previous) {
+        return Ok(Some(project));
+    }
     if let Some(commit) = git::root_commit(Some(path)) {
         match store.find_project_by_root_commit(&commit) {
             Ok(project) => return Ok(Some(project)),
@@ -93,22 +123,10 @@ pub fn resolve_project_for_path(store: &Store, path: &Path) -> Result<Option<Pro
             Err(e) => return Err(e),
         }
     }
-    let path: PathBuf = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let projects = store.list_projects_all()?;
-    let nearest = |paths: &dyn Fn(&Project) -> Vec<&str>| {
-        projects
-            .iter()
-            .flat_map(|p| paths(p).into_iter().map(move |dir| (p, dir)))
-            .filter(|(_, dir)| !dir.is_empty() && path.starts_with(dir))
-            .max_by_key(|(_, dir)| Path::new(dir).components().count())
-            .map(|(p, _)| p.clone())
-    };
-    if let Some(project) = nearest(&|p| p.local_path.as_deref().into_iter().collect()) {
+    if let Some(project) = nearest(false, &current) {
         return Ok(Some(project));
     }
-    Ok(nearest(&|p| {
-        p.previous_paths.iter().map(String::as_str).collect()
-    }))
+    Ok(nearest(false, &previous))
 }
 
 /// The text `naru memory context` prints for the SessionStart hook: a header
@@ -580,6 +598,112 @@ mod tests {
         set_path(&mut store, a.id, moved.to_str().unwrap());
         let resolve = |p: &Path| resolve_project_for_path(&store, p).unwrap().map(|p| p.id);
         assert_eq!(resolve(&moved.join("sub")), Some(a.id));
+    }
+
+    fn set_shared(store: &mut Store, id: i64, on: bool) {
+        store
+            .update_project(
+                id,
+                &ProjectPatch {
+                    shared_notebook: Some(on),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn a_shared_notebook_claims_every_folder_under_it_including_a_bound_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(tmp.path()).unwrap();
+        let root = base.join("product");
+        let plain = root.join("feature-a/notes/deep");
+        let repo = root.join("feature-b/repo");
+        std::fs::create_dir_all(&plain).unwrap();
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "root"]);
+        let commit = git::root_commit(Some(&repo)).unwrap();
+        let (_db, mut store) = store();
+        let parent = store
+            .create_project("Product", None, None, None, None)
+            .unwrap();
+        let own = store
+            .create_project("Repo", None, Some(&commit), None, None)
+            .unwrap();
+        set_path(&mut store, parent.id, root.to_str().unwrap());
+        let resolve =
+            |store: &Store, p: &Path| resolve_project_for_path(store, p).unwrap().map(|p| p.id);
+
+        // Off: unchanged — the repo is its own project, a plain folder is
+        // still the parent's by local_path ancestry, a sibling outside is none.
+        assert_eq!(resolve(&store, &repo.join("src")), Some(own.id));
+        assert_eq!(resolve(&store, &plain), Some(parent.id));
+
+        // On: the repo under the shared parent resolves to the parent too.
+        set_shared(&mut store, parent.id, true);
+        assert!(store.get_project(parent.id).unwrap().shared_notebook);
+        assert_eq!(resolve(&store, &repo.join("src")), Some(parent.id));
+        assert_eq!(resolve(&store, &plain), Some(parent.id));
+        assert_eq!(resolve(&store, &root), Some(parent.id));
+        // A repo outside the shared folder is untouched.
+        let outside = base.join("other");
+        std::fs::create_dir_all(&outside).unwrap();
+        assert_eq!(resolve(&store, &outside), None);
+
+        // Off again: back to the root-commit resolution.
+        set_shared(&mut store, parent.id, false);
+        assert_eq!(resolve(&store, &repo.join("src")), Some(own.id));
+
+        // Moving or deleting a feature folder loses nothing: the answer is
+        // keyed by the parent project, not by the folder asked about.
+        set_shared(&mut store, parent.id, true);
+        std::fs::remove_dir_all(root.join("feature-a")).unwrap();
+        assert_eq!(
+            resolve(&store, &root.join("feature-a/notes")),
+            Some(parent.id)
+        );
+        std::fs::rename(root.join("feature-b"), root.join("archive-b")).unwrap();
+        assert_eq!(
+            resolve(&store, &root.join("archive-b/repo/src")),
+            Some(parent.id)
+        );
+    }
+
+    #[test]
+    fn the_nearest_shared_notebook_wins_and_previous_paths_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(tmp.path()).unwrap();
+        let outer = base.join("outer");
+        let inner = outer.join("mid/inner");
+        let moved = base.join("old-home");
+        std::fs::create_dir_all(inner.join("leaf")).unwrap();
+        std::fs::create_dir_all(moved.join("leaf")).unwrap();
+        let (_db, mut store) = store();
+        let a = store
+            .create_project("Outer", None, None, None, None)
+            .unwrap();
+        let b = store
+            .create_project("Inner", None, None, None, None)
+            .unwrap();
+        let c = store
+            .create_project("Moved", None, None, None, None)
+            .unwrap();
+        set_path(&mut store, a.id, outer.to_str().unwrap());
+        set_path(&mut store, b.id, inner.to_str().unwrap());
+        set_path(&mut store, c.id, moved.to_str().unwrap());
+        set_path(&mut store, c.id, base.join("elsewhere").to_str().unwrap());
+        for id in [a.id, b.id, c.id] {
+            set_shared(&mut store, id, true);
+        }
+        let resolve =
+            |store: &Store, p: &Path| resolve_project_for_path(store, p).unwrap().map(|p| p.id);
+        assert_eq!(resolve(&store, &inner.join("leaf")), Some(b.id));
+        assert_eq!(resolve(&store, &outer.join("mid")), Some(a.id));
+        assert_eq!(resolve(&store, &moved.join("leaf")), Some(c.id));
+        // Inner stops sharing: the next shared ancestor takes over.
+        set_shared(&mut store, b.id, false);
+        assert_eq!(resolve(&store, &inner.join("leaf")), Some(a.id));
     }
 
     #[test]

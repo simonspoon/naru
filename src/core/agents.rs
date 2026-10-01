@@ -551,6 +551,196 @@ fn stop_reason(v: &serde_json::Value) -> Option<&str> {
         .flatten()
 }
 
+/// What was still running under a session when a task close was asked for
+/// (mesa task 1515) — the caller's own shell and subagent already excluded.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct CloseBlockers {
+    /// `(pid, command line)` per live shell child.
+    pub shells: Vec<(i64, String)>,
+    /// `(transcript id, agent type, description)` per running subagent.
+    pub subagents: Vec<(String, String, String)>,
+}
+
+impl CloseBlockers {
+    pub fn is_empty(&self) -> bool {
+        self.shells.is_empty() && self.subagents.is_empty()
+    }
+
+    /// `"<n> shell(s), <n> subagent(s)"` — the log's `still_running` value.
+    pub fn summary(&self) -> String {
+        format!(
+            "{} shell(s), {} subagent(s)",
+            self.shells.len(),
+            self.subagents.len()
+        )
+    }
+
+    /// The refusal text: one blocking item per line, then the way out.
+    pub fn refusal_message(&self) -> String {
+        let mut lines = vec![
+            "this session's own work is still running; closing the task now would cut it off:"
+                .to_string(),
+        ];
+        for (id, kind, description) in &self.subagents {
+            // TaskStop takes the bare id, without the transcript's `agent-`.
+            let id = id.strip_prefix("agent-").unwrap_or(id);
+            lines.push(format!(
+                "  subagent {id} ({kind}): {description} - stop it with TaskStop {id} or wait for its report"
+            ));
+        }
+        for (pid, command) in &self.shells {
+            let command: String = command.chars().take(120).collect();
+            lines.push(format!(
+                "  shell pid {pid}: {command} - stop it with KillShell / kill {pid}"
+            ));
+        }
+        lines.push("or pass --force \"<reason>\" to close anyway".to_string());
+        lines.join("\n")
+    }
+}
+
+/// `start` and every ancestor of it, by walking parent pids through `table`.
+fn ancestor_pids(table: &[ProcRow], start: i64) -> Vec<i64> {
+    let mut out = vec![start];
+    let mut cur = start;
+    // Bounded, so a cyclic table can never loop.
+    for _ in 0..64 {
+        match table.iter().find(|row| row.pid == cur) {
+            Some(row) if row.ppid > 0 && !out.contains(&row.ppid) => {
+                out.push(row.ppid);
+                cur = row.ppid;
+            }
+            _ => break,
+        }
+    }
+    out
+}
+
+/// Shell children of the session `pid` that are real blockers: every live
+/// shell except the ones on `caller`'s own ancestry — the `zsh -c` running the
+/// `naru task update` that asked is the caller itself, not work to wait for.
+fn blocking_shells(pid: i64, table: &[ProcRow], caller: &[i64]) -> Vec<(i64, String)> {
+    table
+        .iter()
+        .filter(|row| {
+            row.ppid == pid
+                && row.pid != pid
+                && SHELL_COMMS.contains(&basename(&row.comm))
+                && !caller.contains(&row.pid)
+        })
+        .map(|row| {
+            (
+                row.pid,
+                cc::sanitize_capped(&shell_display(&row.args)).unwrap_or_else(|| row.comm.clone()),
+            )
+        })
+        .collect()
+}
+
+/// The command a live shell is running. Claude Code wraps every Bash call as
+/// `zsh -c source …/shell-snapshots/… && eval '<command>' < /dev/null && …`;
+/// for that wrapper this is what follows `eval ` (one simple quoted word
+/// unquoted), best effort. Any other `args` come back as they are. Capped at
+/// 120 characters.
+fn shell_display(args: &str) -> String {
+    let shown = args
+        .contains("shell-snapshots/")
+        .then(|| args.split_once(" eval ").map(|(_, rest)| rest.trim_start()))
+        .flatten()
+        .map(|rest| match rest.chars().next() {
+            Some(q @ ('\'' | '"')) => match rest[1..].find(q) {
+                Some(end) => &rest[1..1 + end],
+                None => &rest[1..],
+            },
+            _ => rest,
+        })
+        .unwrap_or(args);
+    shown.chars().take(120).collect()
+}
+
+/// True iff `word` is one of the alphanumeric words of `text`.
+fn has_word(text: &str, word: &str) -> bool {
+    text.split(|c: char| !c.is_alphanumeric())
+        .any(|w| w == word)
+}
+
+/// True iff a subagent transcript's last record is a dispatched `Bash` call
+/// that is this very close — `task update`, the id `task_id` being closed and
+/// `done`, the last two as whole words — so the subagent is itself running the
+/// close that is asking. A sibling updating some other task is still work.
+fn is_closing_subagent(last: &serde_json::Value, task_id: i64) -> bool {
+    let id = task_id.to_string();
+    last["type"] == "assistant"
+        && last["message"]["content"].as_array().is_some_and(|blocks| {
+            blocks.iter().any(|b| {
+                b["type"] == "tool_use"
+                    && b["name"] == "Bash"
+                    && b["input"]["command"].as_str().is_some_and(|c| {
+                        c.contains("task update") && has_word(c, &id) && has_word(c, "done")
+                    })
+            })
+        })
+}
+
+/// What `session_id` still has running, for the close guard of `naru task
+/// update --status done` (mesa task 1515). **Fails open**: a probe error, no
+/// matching row answers `None`, which allows the close, and so does a probe
+/// that has not answered within [`CLOSE_PROBE_TIMEOUT`] (one stderr line). A
+/// row without a pid still has its subagents judged; only the shell half needs
+/// the pid. The running shells and subagents the caller itself accounts for
+/// are left out ([`ancestor_pids`], [`is_closing_subagent`]).
+pub fn close_blockers(session_id: &str, task_id: i64) -> Option<CloseBlockers> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let session_id = session_id.to_string();
+    std::thread::spawn(move || {
+        let _ = tx.send(probe_close_blockers(&session_id, task_id));
+    });
+    match rx.recv_timeout(CLOSE_PROBE_TIMEOUT) {
+        Ok(found) => found,
+        Err(_) => {
+            eprintln!("task close guard: the running-work probe timed out; closing anyway");
+            None
+        }
+    }
+}
+
+/// How long the close guard waits on `claude agents` and `ps` before failing open.
+const CLOSE_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+fn probe_close_blockers(session_id: &str, task_id: i64) -> Option<CloseBlockers> {
+    let sessions = list_all().ok()?;
+    let session = sessions.iter().find(|s| s.session_id == session_id)?;
+    let mut blockers = CloseBlockers::default();
+    if let Some(pid) = session.pid {
+        let table = read_proc_table();
+        let caller = ancestor_pids(&table, std::process::id() as i64);
+        blockers.shells = blocking_shells(pid, &table, &caller);
+    }
+    let root = cc::projects_dir();
+    for child in &session.children {
+        if child.kind != AgentChildKind::Subagent || child.state != AgentChildState::Running {
+            continue;
+        }
+        let Some(id) = child.id.clone() else { continue };
+        let closing = root.as_deref().is_some_and(|root| {
+            subagent_transcripts(root, session_id, SystemTime::now(), cc::ACTIVE_SECS)
+                .iter()
+                .any(|(path, _)| {
+                    path.file_stem().and_then(|s| s.to_str()) == Some(id.as_str())
+                        && last_record(path).is_some_and(|v| is_closing_subagent(&v, task_id))
+                })
+        });
+        if !closing {
+            blockers.subagents.push((
+                id,
+                child.name.clone(),
+                child.description.clone().unwrap_or_default(),
+            ));
+        }
+    }
+    Some(blockers)
+}
+
 /// Resolves the script to run for one spawn `action` (`config::TODO_WATCHER`,
 /// `INBOX_WATCHER` or `AGENT_SPAWN`): the user's `~/.mesa/config.json` hook
 /// if it configures that action, else the built-in default. Both go through
@@ -1669,6 +1859,75 @@ echo "backgrounded · cf0c3945 · proj: do the thing""#,
 86610 86593       04:00 node             node server.js
 90001     1    09:09:09 bash             bash
 ";
+
+    #[test]
+    fn close_guard_excludes_the_callers_own_shell() {
+        let table = parse_proc_table(
+            "100 1 01:00 claude claude\n\
+             101 100 00:05 /bin/zsh /bin/zsh -c naru task update 1 --status done\n\
+             102 101 00:01 naru naru task update 1 --status done\n\
+             103 100 00:30 /bin/zsh /bin/zsh -c sleep 300\n",
+        );
+        let caller = ancestor_pids(&table, 102);
+        assert_eq!(caller, vec![102, 101, 100, 1]);
+        let shells = blocking_shells(100, &table, &caller);
+        assert_eq!(shells.len(), 1);
+        assert_eq!(shells[0].0, 103);
+        assert_eq!(blocking_shells(100, &table, &[]).len(), 2);
+    }
+
+    #[test]
+    fn a_subagent_running_task_update_is_the_caller() {
+        let closing = serde_json::json!({"type":"assistant","message":{"content":[
+            {"type":"tool_use","name":"Bash","input":{"command":"naru task update 7 --status done"}}]}});
+        let other = serde_json::json!({"type":"assistant","message":{"content":[
+            {"type":"tool_use","name":"Bash","input":{"command":"cargo test"}}]}});
+        let text = serde_json::json!({"type":"assistant","message":{"content":[
+            {"type":"text","text":"task update"}]}});
+        let user = serde_json::json!({"type":"user","message":{"content":"task update"}});
+        let sibling = serde_json::json!({"type":"assistant","message":{"content":[
+            {"type":"tool_use","name":"Bash","input":{"command":"naru task update 8 --status in_progress"}}]}});
+        let other_id = serde_json::json!({"type":"assistant","message":{"content":[
+            {"type":"tool_use","name":"Bash","input":{"command":"naru task update 77 --status done"}}]}});
+        assert!(is_closing_subagent(&closing, 7));
+        assert!(!is_closing_subagent(&closing, 8));
+        assert!(!is_closing_subagent(&sibling, 8));
+        assert!(!is_closing_subagent(&sibling, 7));
+        assert!(!is_closing_subagent(&other_id, 7));
+        assert!(!is_closing_subagent(&other, 7));
+        assert!(!is_closing_subagent(&text, 7));
+        assert!(!is_closing_subagent(&user, 7));
+    }
+
+    #[test]
+    fn shell_display_unwraps_the_snapshot_wrapper() {
+        let wrapped = "/bin/zsh -c source /Users/x/.claude/shell-snapshots/snapshot-zsh-1.sh 2>/dev/null || true && setopt NO_EXTENDED_GLOB && eval 'cargo test -- --nocapture' < /dev/null && pwd -P >| /tmp/cwd";
+        assert_eq!(shell_display(wrapped), "cargo test -- --nocapture");
+        let dq = "zsh -c source /h/.claude/shell-snapshots/s.sh && eval \"sleep 300\" < /dev/null";
+        assert_eq!(shell_display(dq), "sleep 300");
+        assert_eq!(
+            shell_display("/bin/zsh -c sleep 300"),
+            "/bin/zsh -c sleep 300"
+        );
+        assert_eq!(shell_display(&"x".repeat(300)).chars().count(), 120);
+    }
+
+    #[test]
+    fn close_refusal_lists_each_blocker_and_the_way_out() {
+        let b = CloseBlockers {
+            shells: vec![(4242, "x".repeat(300))],
+            subagents: vec![("agent-abc".into(), "explorer".into(), "scan".into())],
+        };
+        let msg = b.refusal_message();
+        assert!(msg.contains("TaskStop abc"));
+        assert!(!msg.contains("agent-abc"));
+        assert!(msg.contains("shell pid 4242"));
+        assert!(msg.contains("kill 4242"));
+        assert!(!msg.contains(&"x".repeat(121)));
+        assert!(msg.ends_with("or pass --force \"<reason>\" to close anyway"));
+        assert_eq!(b.summary(), "1 shell(s), 1 subagent(s)");
+        assert!(CloseBlockers::default().is_empty());
+    }
 
     /// The count half of [`shell_children`], which is what `live_shells` is.
     fn shell_count(pid: i64, table: &[ProcRow]) -> usize {

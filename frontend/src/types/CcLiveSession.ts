@@ -49,4 +49,11 @@ spark: Array<number>,
  * currently in, or `null` when its newest tool call was anything else.
  * The cost guard's `repeat` rule reads it (`docs/cost-guard.md`).
  */
-repeat: CcRepeat | null, };
+repeat: CcRepeat | null, 
+/**
+ * The newest main-thread (non-sidechain) assistant turn's input side —
+ * `input + cache read + cache creation` tokens, the measure
+ * `SessionPulse.context_tokens` uses — or `null` when none was seen in the
+ * window. The cost guard's `context` rule reads it (`docs/cost-guard.md`).
+ */
+context_tokens: number | null, };

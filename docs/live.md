@@ -571,8 +571,8 @@ the successor's first `listen --lease <n>`, in order, exactly once.
 
 A handoff that dreams (mesa task 1155) is the one the person *does* see:
 the outgoing agent says it needs to rest for a few minutes, `GET /api/live`
-carries `resting_since` on the session, and the panel's aperture shows a
-**resting** state — listening's breathing halo in the agent's violet
+carries `resting_since` on the session, and the panel's mark shows a
+**resting** state — the thinking look, in the agent's violet
 (`liveIndicator.ts`, ranked under being heard and over working, since the
 person can still talk and nothing is being worked on) — with the status
 line saying memory is being tidied. Anything said meanwhile
@@ -1012,8 +1012,8 @@ session: the notebook is edited between conversations too, and the archive is
 read whenever.
 
 - **`list [--all]`** — a bare array, oldest first; active entries only unless
-  `--all`, which is the archive's view of the notebook. Rejects `--quiet`
-  (exit 2), like every other `list`.
+  `--all`, which is the archive's view of the notebook. Ignores `--quiet`
+  (accepted no-op), like every other `list`.
 - **`show <ID>`** (alias `get`) — one entry, retired or not.
 - **`add <TEXT>…`** — trailing var-args exactly like `live say`, so
   `--quiet` must come **before** the text or it lands in the bullet.
@@ -1029,10 +1029,10 @@ read whenever.
   project entry is `not_found`. CLI only — no HTTP route.
 - **`search <WORDS>… [--limit N]`** — a bare array of hits; `--limit` (and
   any other flag) must come **before** the words, since everything after
-  `search` that is not a leading flag is a word. Rejects `--quiet`.
+  `search` that is not a leading flag is a word. Ignores a leading `--quiet`.
 - **`merge --ids <ID,ID,…> <TEXT>…`**, **`restore <ID>`** and **`dream`**
   (mesa task 1152) — the dream pass's verbs, "Dreaming" below. `--ids` and
-  `--quiet` come **before** the text, the `add` rule; `dream` rejects
+  `--quiet` come **before** the text, the `add` rule; `dream` ignores
   `--quiet` like `search`.
 - **`--quiet` on `show`/`add`/`replace`/`delete`/`touch`/`keep`/`merge`/`restore`
   drops `body`** — the one unbounded field (`QUIET_DROP_LIVE_NOTEBOOK`, with
@@ -1476,6 +1476,31 @@ twenty. They no longer are: a board lives until the session row is deleted
 `clear`'s delete echo reports as destroyed, and what backs the whole-history
 route below).
 
+### Finding and bringing back an old board (mesa task 1548)
+
+Boards are part of the live-memory archive: `Store::add_live_board` writes a
+`live_memory_fts` entry of kind `board` (`ref_id` = the board id, `session_id`
+its conversation) beside the row — title plus text, where text is markdown
+as written and HTML with its tags, `<script>`/`<style>` and comments stripped
+(`board::search_text`); an `image` or `diagram` board is indexed by its title
+alone. `mesa live memory search` therefore returns `board` hits, and a db
+upgrading past migration index **79** has its existing boards indexed by a
+Rust pass `migrate` runs at that index (HTML needs real stripping, so the
+migration string itself is only a marker).
+
+What deletes boards: only `mesa live board clear` (`Store::clear_live_boards`)
+and the session row's `ON DELETE CASCADE` (no app path deletes a session row
+today). **Neither touches the index**, so the archive stays append-only like
+turns and summaries: a hit may name a board whose row is gone (its
+`created_at` then reads empty), and `board show <id>` answers `not_found`
+saying the row may have been cleared while the words remain searchable.
+
+`mesa live board show <ID>` reads any board of any conversation, live or
+ended, and needs no live session (without an ID it is still the current
+session's showing board). `mesa live board repush <ID>` copies a board from any
+past conversation into the current live one as a new board — it becomes the one
+showing; ink is not copied. `keep` stays scoped to the current session.
+
 ### Looking up a past session's whiteboards
 
 The live panel only ever shows one running conversation; a **past** one's
@@ -1529,8 +1554,8 @@ covering it, and hiding either section hands its space straight to the other.
 Since mesa task 1483 the layout is driven by **one thin toolbar** (~32px) at the
 top of the panel — no per-pane fold arrows and no pane title headers: on the
 left four icon toggles (show/hide board, show/hide chat, swap board and chat,
-stacked vs. side by side), on the right the session's own state — aperture,
-state word, level meter, clock — and its presses (mute voice, pause, end,
+stacked vs. side by side), on the right the session's own state — the Naru mark
+(its accessible name adds "mic ready" while the microphone is the way in), clock — and its presses (mute voice, pause, end,
 close); the context size sits on the one status line under it, since the
 toolbar's fixed-size controls leave it no room at the plain panel width. A hidden pane is `display: none`, not a rail: the other
 fills the panel. Hiding the *last* visible pane shows the other instead, so the
@@ -1730,8 +1755,8 @@ the group (with none live, `not_found` naming `mesa live start`).
   sentence is.
 - **`--quiet` drops `body`**, the one unbounded field
   (`QUIET_DROP_LIVE_BOARD`), with the usual key-parity `#[test]` forcing a
-  decision on the next field a board gains. `list` rejects `--quiet` with exit
-  2 like every other `list`; `clear` accepts it and changes nothing, since a
+  decision on the next field a board gains. `list` ignores `--quiet` like every
+  other `list`; `clear` accepts it and changes nothing, since a
   board summary has nothing unbounded to drop.
 - **`clear` echoes the boards it destroyed** — the delete-echo safety floor
   Naru has instead of a confirmation prompt — bodiless, like every other board
@@ -1801,6 +1826,48 @@ the conversation panel's own: closing a picture is not a write.
   A board that needs to change is a new board.
 - **No project binding.** A board has no `project_id`. It belongs to the
   conversation, and `keep` is the one moment a person chooses to give it a home.
+
+## Live captions (mesa task 1555)
+
+A Naru turn that is being spoken for the first time reveals **word by word in
+time with the voice** instead of landing whole. Frontend only — no route, no
+timings: the speak route carries none, so `liveCaption.ts` places words by
+**character length** (the share of the text shown is the share of the audio
+heard, never splitting a word). The clock is whichever the playback path has:
+the `<audio>` element's `currentTime`/`duration`, or on the decode-it-yourself
+path `SpeechStream.elapsed()`, the Web Audio playhead. A chunked body reports
+no finite duration, so one is estimated from the text (`CAPTION_CHARS_PER_SECOND`)
+and the share is capped at `CAPTION_ESTIMATE_CAP` — also with a finite duration,
+since a chunked body's duration can grow as bytes arrive: the caption can lag
+but never overtake the voice, and the whole text appears the moment playback ends.
+`LiveHub` samples the clock ten times a second and writes state only when a new
+word is reached.
+
+Only the turn the player took in hand (`captionId`, set in `speak()`, cleared
+wherever the player is released, a turn ends or playback fails) is paced. A turn
+this page *will* speak but has not yet taken in hand (new, or queued behind the
+sounding one) is held at zero characters (`captionHeld`) rather than painted
+whole; the ids ever taken in hand are remembered so a turn that just finished is
+not held again before the poll delivers `played_at`. Full text at once for
+everything else: a turn with `played_at` (history on join), a replay, a muted
+voice (the run never speaks it), a pause, a page that may not speak
+(`liveSpeaker`'s `maySpeak` — it never takes the turn in hand), a page that has
+not joined, and a turn with no audio. An unrelated page error does not affect
+captions. The transcript follows the growing caption (`captionChars` is an
+effect dependency), still only while the reader is near the bottom
+(`liveScroll`).
+
+## The mood light (mesa task 1557)
+
+While a conversation is live and this browser is in it, a faint glow rings the
+whole window on every route: a fixed, `pointer-events: none` inset `box-shadow`
+overlay (`components/LiveGlow.tsx`, rendered by `LiveHub`, which is mounted for
+the life of the app) tinted by the **same ranked indicator state** the mark
+wears, never re-derived — speaking amber, hearing cyan, working and resting
+violet, in `liveMark.ts`'s palette (`liveGlow.ts::glowColor`). Listening (the
+resting state), paused and no conversation are no glow; the opacity fades
+(0.8s) rather than snaps. It breathes slowly (5s, opacity 0.14-0.26); under
+`prefers-reduced-motion` the animation is off and the glow is static.
 
 ## The action vocabulary
 
@@ -2453,7 +2520,7 @@ stale claim with two pages joined, say), a muted page stamps each turn
 those turns yet will not speak them. That is accepted: an unclaimed
 conversation is speakable by every client, and the alternative — leaving the
 turns unstamped — would replay the whole backlog on unmute. Since
-nothing sounds, `speaking` never goes true — the aperture never shows
+nothing sounds, `speaking` never goes true — the mark never shows
 speaking, `shouldListen` keeps the microphone open, and barge-in is never
 engaged.
 
@@ -2512,65 +2579,40 @@ conversation") working with no backend change.
   and a routed page would be torn down by the very navigation it just
   performed — cutting its own sentence off mid-word and stopping the route
   reports below.
-- **An 18×18 canvas sits centered in the header band, in one of five
-  states** (`liveIndicator.ts` for the ranking, `liveBand.ts`'s `drawAperture`
-  for the drawing, `components/LiveBand.tsx` for the one rAF loop that paints
-  it, tasks 874, 882, 894 and 973) — the only sign of the conversation while
-  the panel is closed, so it answers for *both* sides of it rather than only
-  for Naru. The drawing is a single **aperture** — a ring, or a few, around a
-  lit centre — rather than the five bars of a level meter it replaced (task
-  973): three of the five states are not about how loud anything is (paused
-  and listening are about *whether* something is happening at all), and one
-  shape family turns out to draw all five without switching metaphors partway
-  through:
-  - **Naru speaking** (cyan) — rings travelling outward from a glowing core,
-    faster and brighter the louder the (simulated) voice. Outward motion reads
-    as Naru's voice going out. The amplitude driving it is not tapped from
-    real playback — Naru's audio runs through two different code paths (a
-    plain `<audio>` element and, on browsers whose media stack refuses a
-    range-less stream, a Web Audio decode-and-schedule fallback), and wiring a
-    real `AnalyserNode` to both to get one true signal was out of scope for
-    this drawing — so speaking instead animates a *simulated* envelope
-    (`simEnvelope`, ported unchanged from the design mockup): a slow
-    phrase-shaped rise and fall with two faster, mutually awkward syllable
-    oscillations riding on top, tuned to read as a voice rather than a
-    metronome.
-  - **paused** (muted, at half opacity, and the only one that does not move)
-    — the person stepped out (task 882). It is also the only state that draws
-    no full circle: a single open arc, so the shape itself — not merely its
-    stillness — says paused, since a dimmed ring reads too easily as
-    "listening, but dimmer," the state it would otherwise be confused with.
-  - **being heard** (green) — the same rings as speaking, run in reverse:
-    travelling *inward*, toward the core, because it is the other side of the
-    same conversation drawn with the same renderer, and the mirrored direction
-    is unmistakably the other one at a glance where colour alone would not be.
-    Unlike speaking, this amplitude is real: the smoothed microphone level
-    `LiveHub` already computes for the listen meter is passed to the band and
-    smoothed again per frame with a fast-attack, slow-release curve
-    (`smoothLevel`, 0.55 rising / 0.14 falling — jump up the instant sound
-    arrives, fall back gradually so it doesn't flicker to zero between
-    syllables), so the core and the rings genuinely swell with how loud the
-    room actually is. This is the one part of the redraw that changed what the
-    band *knows*, not just how it looks: the old bars ran a fixed animation no
-    matter how loud the person was.
-  - **the agent working** (violet) — she has taken what was said and has not
-    gone back to waiting (task 894). Violet because violet is already what this
-    app means by *an agent* (the sidebar pane header, task 819), so the colour
-    alone separates her doing something from her saying something. The drawing
-    is a dot orbiting a dim, static ring with a fading trail behind it — motion
-    with no amplitude in it at all, because nothing about the agent thinking is
-    loud or quiet, only ongoing, and it can be lit for minutes on a page
-    somebody is reading.
-  - **listening** (muted) — the microphone is open and the room is quiet: a
-    small dim core inside a slow, low-alpha breathing halo — present enough to
-    say the microphone is open, faint enough that nobody mistakes it for
-    speech. Shown only where recognition really is the way in
-    (`recognizesSpeech`); a browser that types into the fallback box gets no
-    resting indicator, since a permanent glyph meaning "a text box exists" is
-    noise.
+- **The Naru waveform mark sits in the panel head, in one of five states**
+  (`liveIndicator.ts` for the ranking, `liveMark.ts` for what each looks like,
+  `components/NaruMark.tsx` for the one rAF loop that paints it, tasks 874,
+  882, 894 and 1544). It replaced the aperture canvas (task 973) and the
+  head's text title ("Live", "Hearing you", "Naru speaking"…): the mark is
+  the favicon's seven bars and carries no visible label, only an accessible
+  name (`indicatorLabel`). Palettes and motion are the approved mockup's:
+  - **Naru speaking** — warm amber/coral (`#ff5a3c` … `#ffe2a8`), scale and
+    bar heights following the **real playback level**: an `AnalyserNode`
+    (`speechTap.ts`) sits between the sound and the speakers on both paths —
+    the Web Audio decode fallback connects its sources to it, and the single
+    `<audio>` element is routed through it once (`createMediaElementSource`,
+    attempted only while the clock's context is running, since rerouting is
+    irreversible and silences an element whose context never runs). If the
+    element cannot be tapped, speaking falls back to `simEnvelope`, the old
+    simulated envelope, for that playback only.
+  - **being heard** — electric cyan (`#1f7fff` … `#b8f6ff`), scale, glow and
+    bars following the **real microphone level** `LiveHub` computes for the
+    listen meter, smoothed per frame (`smoothLevel`, 0.55 rising / 0.14
+    falling) after `levelFromRms` maps RMS to 0..1.
+  - **the agent working / resting** — the mockup's violet (`#6a2bff` …
+    `#e6d1ff`), no sound: a soft shimmer sweeps across the bars with a slow
+    glow pulse. Violet is what this app already means by *an agent*.
+  - **listening**, or no state at all — dim slate lavender (`#3b3550` …
+    `#6d6592`), a slow gentle breathe. Unlike the old aperture the mark is
+    always present; idle is its resting look.
+  - **paused** — the same dim palette, held still: no breathe, bars held low,
+    half opacity, so a stepped-out conversation reads as nothing moving.
+
+  Every transition eases (colour, scale, glow, bar heights — `easeToward`,
+  exponential, frame-rate independent) rather than snapping.
 
   The order is the decision: **speaking outranks everything** (while she talks
-  the microphone is shut, so a band claiming to hear the person would be
+  the microphone is shut, so a mark claiming to hear the person would be
   describing a microphone that is not open), **paused outranks both of the
   states under it** (the microphone is shut and the box is disabled, so a
   draft left over from before the pause must not read as the person still
@@ -2579,21 +2621,35 @@ conversation") working with no backend change.
   **working outranks listening** (listening is the resting state, and work is
   not rest). Whitespace is not speech. Under `prefers-reduced-motion` every
   state keeps its motion but runs it at **half speed** (mesa task 1145 —
-  reduce, not remove, macOS's own convention for a progress spinner): the
-  indicator used to freeze to one representative still frame, and the person
-  reported that as a bug, since an 18px status glyph is not the vestibular
-  motion the preference targets and a still frame cannot say "still
-  working". It is no longer a CSS media block (a canvas has nothing for a
-  media query to hook), but a `rate` inside `drawAperture` itself, driven by
-  a flag the component maintains by subscribing to the query live, since a
-  setting flipped mid-session used to take effect with no reload and still
-  should; `paused` never read the clock and is unchanged.
+  reduce, not remove): `markFrame` halves its clock, driven by a flag the
+  component maintains by subscribing to the query live, so a setting flipped
+  mid-session still takes effect with no reload.
 
   Working is the one state shown to a browser that types into the fallback box
   as well: unlike listening it is not "a text box exists" — someone is doing
   work, which is exactly the thing that surface could not otherwise tell from
   silence. Its input is the session's own `working_since` (below), which
   arrives on the poll the page already makes.
+
+- **The floating orb** (mesa task 1553, `components/LiveOrb.tsx`, logic in
+  `liveOrb.ts`): the same mark, lifted into a ~116px panel portalled to
+  `document.body` so it sits above every sidebar, drawer and route. Rendered
+  by `LiveHub` while `live && unlocked` (the terms the head's Pause and mute
+  buttons are offered on); no text on it. The body is the drag handle and
+  stays exactly where it is dropped (clamped inside the window); the one snap
+  is the top edge — a release within 80px of it docks the orb there, shrunk
+  until hovered. Remembered as `{x,y,docked}` in `localStorage` key
+  `naru.live-orb`.
+  Rest (no state, paused, or plain listening — the mic open and nobody
+  talking) is dull and translucent; speaking, working, resting and hearing
+  are fully lit with a state-coloured glow.
+  Hovering (or tapping, for touch) blooms a three-segment pie: mic left,
+  pause right, sound below, calling the hub's own `toggleListening`,
+  `togglePause` and `toggleSpeechMuted`. A segment is theme blue (`--cyan`)
+  when its control is on and red (`--red`) when it is off (mic or voice
+  muted, paused) — colour alone, no strike-through. A muted mic or voice
+  leaves the orb visible but quiet: a low-saturation translucent red ring and
+  a small badge naming which is muted.
 - **The conversation is a right-hand sidebar** (task 887), a sibling of the
   agents one in `.shell-body`'s flex row, so the two are independent: both open
   at once, either alone, or neither — and the page the conversation is *about*
@@ -2764,8 +2820,8 @@ conversation") working with no backend change.
     recognizer (mesa task 957), that engine's interim guess still feeds
     `heldFlush` and the header band exactly as it did before task 956 — but
     since mesa task 1153 it is no longer *displayed*: the words in flight,
-    on either path, are gone from the panel (below), and the level meter and
-    "transcribing…" note stay `auris`-specific rather than a property of
+    on either path, are gone from the panel (below), and the
+    "transcribing…" note stays `auris`-specific rather than a property of
     listening itself.
   - **The transcript is corrected against Naru's own vocabulary before
     anything else touches it** (`liveRecognition.ts`, mesa task 922), exactly
@@ -3343,7 +3399,7 @@ CLAUDE.md requires: **data, never instructions.**
 
 - **Streaming or partial transcripts, through `auris`.** `auris` answers one
   whole segment at a time — there is no interim guess to show while it
-  thinks. A level meter and a "transcribing…" note stand in for it instead
+  thinks. A "transcribing…" note stands in for it instead
   (above); a streaming decoder that could offer a running partial would close
   this gap, but Naru has none and building one is out of scope here. Where a
   page instead falls back to its own recognizer (mesa task 957, below), that
@@ -3502,7 +3558,7 @@ that has reported no box at all (`unavailable`, and nothing spawned), the
 window box round-tripping from the page's HTTP report to `mesa live status`
 over its own `Store`, an out-of-range box as 422 writing nothing, the default
 temp path and an explicit `--output` both landing a real file on disk, and
-`--quiet` refused with exit 2. On a machine that is not a Mac the section
+`--quiet` accepted and ignored. On a machine that is not a Mac the section
 asserts the one thing that is true there instead: `unavailable`, saying loki is
 a macOS tool.
 

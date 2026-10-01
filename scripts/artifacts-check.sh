@@ -173,9 +173,10 @@ run 0 "$MESA" artifact list
   fail "CLI list with no PROJECT: expected P's 4 artifacts present, got $STDOUT"
 ok "CLI artifact list with no PROJECT: unscoped, spans every project"
 
-run 2 "$MESA" artifact list "$P" --quiet
-[ "$(jqe .error.code)" = "usage" ] || fail "--quiet on list: code=usage"
-ok "--quiet on artifact list: rejected as an unknown argument, exit 2 usage"
+PLAIN=$("$MESA" artifact list "$P")
+run 0 "$MESA" artifact list "$P" --quiet
+[ "$STDOUT" = "$PLAIN" ] || fail "--quiet on list: output must equal the plain list"
+ok "--quiet on artifact list: accepted and ignored (mesa task 1513), output identical"
 
 # ---- show / get ----
 

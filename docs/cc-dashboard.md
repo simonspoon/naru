@@ -208,14 +208,23 @@ comments — several entries are the bare `DELETE FROM cc_files;` cursor clear.
   `--session <id>` narrows the whole view to one session — applied in SQL so
   `idx_cc_tool_errors_session` does the work, echoed back as the response's
   `session` (null when unfiltered), and an unknown id is a zero state rather
-  than an error, exactly as an empty window is.
+  than an error, exactly as an empty window is. The session id may also be
+  given positionally (`mesa cc errors <id>`, mesa task 1513); both forms
+  together are a usage error.
+
+  `--cli` (mesa task 1513) keeps only the failures of `Bash` calls whose command
+  invokes `naru`/`mesa` — the first word of any command segment (split on `;`,
+  `&`, `|`, newlines, `(`, `{`, backtick, after leading `VAR=value` words) is
+  `naru` or `mesa`, bare or a path ending in it (`cc::invokes_naru`). It
+  filters the rows before any grouping, so every count, `by_*` list and
+  `denials` agree; the response carries no new key.
 
   Like every derived `cc_*` column, this only exists for lines ingested since
   the table shipped: `mesa cc sync --rebuild` clears the cursors and backfills
   the history in one re-walk. There is deliberately **no HTTP route and no web
   view** — it is a CLI verb, `mesa cc errors [--window …] [--session <id>]`,
   taking the same windows `cc summary` does (subscription windows included)
-  and rejecting `--quiet` like every other `cc` subcommand.
+  and ignoring `--quiet` like every other `cc` subcommand.
 - **One API response is several transcript lines, and usage is counted once per
   response.** Claude Code writes a single assistant response as a *line per
   content-block group* — typically a `thinking` line, then the
@@ -1039,7 +1048,7 @@ comments — several entries are the bare `DELETE FROM cc_files;` cursor clear.
   agreeing **with the graph's** `total_tokens`/`est_cost_usd` (two code paths,
   one answer), `agents` length matching `agent_runs`, the activity buckets
   summing to the session's own message/tool-call/token totals, an HTTP payload
-  equal to the CLI's, `--quiet` rejected (exit 2), and `not_found`/404 on an
+  equal to the CLI's, `--quiet` accepted and ignored, and `not_found`/404 on an
   unknown session. Exactness past the graph's cap is a `cc.rs` unit test (701
   tool calls in one session), not a shell fixture.
   `cc text` gets a **fourth appended fixture project** whose every body — human
@@ -1131,3 +1140,51 @@ the plan does not meter, because the header has no room to explain a failed
 network read — the card does. Both surfaces clamp and colour-band through the
 one shared module (`frontend/src/usageMeter.ts`, warn ≥70%, crit ≥90%), so a
 percentage can never differ between them.
+
+## Scorecard (comparing models by outcome data)
+
+`mesa cc scorecard [--since D] [--until D] [--agent NAME]`, `GET
+/api/cc/scorecard?since=&until=` and the **Scorecard** section of the Skills &
+Agents tab (`#/cc/skills-agents`) answer "how does this agent do on this
+model", from the db alone (mesa task 1514). No migration: it reads
+`cc_agent_runs`, `cc_messages`, `cc_tool_calls` and the library's
+`library_versions`.
+
+- **A run** is one `cc_agent_runs` row with a non-null `agent`. Its messages
+  are the `cc_messages` rows carrying its `agent_id` in its session, billed
+  responses deduped on `message_id` exactly as the dashboard does
+  (`dedupe_key`). Its **model** is the one with the most billed turns, ties to
+  the lower name (`top_model`); **turns** = billed responses; **cost** goes
+  through the same `PriceTable` as every other cc figure, never a second
+  pricing path; **tokens** = input + output + cache read + cache creation;
+  **wall seconds** = max minus min `ts` over its messages *and* tool calls;
+  **start** = the min `ts`. A run with no billed response has no model and is
+  left out. A run that used several models is counted wholly under its
+  most-used model, and a run with a single response has wall time 0.
+- **`since`/`until`** bound a run's **start** (`since` inclusive, `until`
+  exclusive), `YYYY-MM-DD` (midnight UTC) or a full `YYYY-MM-DDTHH:MM:SSZ` (UTC only: any other offset is
+  `validation`).
+  Anything else, including a date that does not exist, is `validation`
+  (exit 1 / 422). `--agent` (CLI only) keeps one agent's rows and markers.
+- **Output** is `{rows, model_changes, since, until}`. Runs group by
+  `(agent, model)`; a row carries `runs` (n), `total_cost`, `cost_per_run`,
+  `turns_per_run`, `tokens_per_run`, `wall_secs_per_run` (mean),
+  `wall_secs_median`, `first_run`, `last_run`; rows sort by agent, then runs
+  descending. A mean over two runs is a hunch, which is why the page shows n
+  first.
+- **Model-change markers.** For every agent-kind library item the versions are
+  walked oldest to newest and the frontmatter `model:` and `effort:` keys
+  parsed; a marker `{agent, at, from_model, to_model, from_effort,
+  to_effort}` is emitted for the first version that sets either key (`from_*` null) and whenever
+  either key differs from the previous version. A version with no frontmatter
+  is skipped and does not reset the comparison. Unshadowed built-ins have no
+  versions and so no markers until forked.
+- **Reasoning effort is not in any transcript**, so it appears **only** on the
+  markers, never as a column on a row. Attributing a run to the effort in
+  force then means reading the markers against the run dates.
+- **Not here:** outcome signals (task done or requeued, reviewer findings,
+  verifier verdicts). There is no clean run-to-task join yet; that is a
+  follow-up.
+
+The grouping and formatting logic of the page lives in
+`frontend/src/ccScorecard.ts` (vitest: `ccScorecard.test.ts`).

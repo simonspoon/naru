@@ -41,6 +41,9 @@ export function ProjectSettingsView({
   // Reparenting (task 668) — an ordinary edit, its own in-flight/error pair.
   const [reparenting, setReparenting] = useState(false)
   const [parentError, setParentError] = useState<string | null>(null)
+  // Shared notebook (task 1550) — its own in-flight/error pair.
+  const [savingShared, setSavingShared] = useState(false)
+  const [sharedError, setSharedError] = useState<string | null>(null)
   // Archiving (task 509). One flag / one error slot covers both directions:
   // this section only ever offers whichever of archive/unarchive the project
   // isn't already in.
@@ -81,6 +84,20 @@ export function ProjectSettingsView({
       .catch((err: unknown) => {
         setSavingPath(false)
         setPathError(err instanceof Error ? err.message : String(err))
+      })
+  }
+
+  function saveShared(value: boolean) {
+    setSavingShared(true)
+    setSharedError(null)
+    updateProject(projectId, { shared_notebook: value })
+      .then(() => {
+        setSavingShared(false)
+        refetchProject()
+      })
+      .catch((err: unknown) => {
+        setSavingShared(false)
+        setSharedError(err instanceof Error ? err.message : String(err))
       })
   }
 
@@ -163,6 +180,25 @@ export function ProjectSettingsView({
           </div>
         )}
         {pathError && <span className="error">{pathError}</span>}
+      </section>
+
+      <section>
+        <h2>Shared notebook</h2>
+        <p className="muted settings-hint">
+          Every folder under the project folder — a git repo or not, however
+          deep — uses this project&apos;s notebook, even a repo bound to
+          another project. The nearest shared folder wins.
+        </p>
+        <label>
+          <input
+            type="checkbox"
+            checked={project.shared_notebook}
+            disabled={savingShared}
+            onChange={(e) => saveShared(e.target.checked)}
+          />{' '}
+          share this project&apos;s notebook with the folders under it
+        </label>
+        {sharedError && <span className="error">{sharedError}</span>}
       </section>
 
       {/* Parent project (task 668): the UI half of a field that would

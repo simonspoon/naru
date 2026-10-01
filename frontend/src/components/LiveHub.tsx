@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { mainFloor, mainIsCollapsed } from '../mainCollapse'
 import { createPortal } from 'react-dom'
-import { LiveBand } from './LiveBand'
+import { NaruMark } from './NaruMark'
+import { LiveGlow } from './LiveGlow'
+import { LiveOrb } from './LiveOrb'
 import { LiveBoardPanel, type InkFlatten } from './LiveBoardPanel'
-import { LiveMeter } from './LiveMeter'
 import {
   claimLiveSpeaker,
   getListen,
@@ -69,7 +70,7 @@ import {
 import { MIN_MAIN_WIDTH } from '../agentSidebarWidth'
 import { chordLabel, matchesShortcut } from '../keymap'
 import { useKeymap } from '../keymapStore'
-import { contextLabel, elapsedLabel, endsInHead, liveHeadTitle } from '../liveHead'
+import { contextLabel, elapsedLabel, endsInHead } from '../liveHead'
 import { headerIndicator } from '../liveIndicator'
 import {
   buildVocabulary,
@@ -164,9 +165,11 @@ import {
   STOP_WAIT_MS,
 } from '../liveStream'
 import { playFailure } from '../speechPlayback'
+import { captionActive, captionFraction, captionHeld, captionLength } from '../liveCaption'
 import { applyElementSpeed } from '../speechSpeed'
 import { getSpeechSpeed, loadSpeechSpeed } from '../speechSpeedStore'
 import { playSpeechStream, type SpeechStream } from '../speechStream'
+import { decodeOutput, speechRms, tapElement } from '../speechTap'
 import { parseTimestamp } from '../time'
 import { usePhoneTier } from '../phoneTier'
 import type { ConfigLive } from '../types/ConfigLive'
@@ -176,6 +179,7 @@ import type { LiveState } from '../types/LiveState'
 import type { LiveTurn } from '../types/LiveTurn'
 import type { LiveWindow } from '../types/LiveWindow'
 import type { TranscribeStatus } from '../types/TranscribeStatus'
+import { isNearBottom, newSince } from '../liveScroll'
 import { useFetch } from '../useFetch'
 
 /**
@@ -311,7 +315,7 @@ function BoardMark() {
  * The head's presses, as glyphs (mesa task 1069; the voice switch, 1327).
  *
  * Mute, Pause, End and Close are 44px squares in a strip that also holds a 44px
- * aperture and a title, and four words there would be a paragraph. They are
+ * mark and no title, and four words there would be a paragraph. They are
  * drawn rather than lettered for `LiveMark`'s reason: one stroked path in
  * `currentColor` takes the button's amber/red/muted and its hover for free,
  * and each has a real `aria-label`, so nothing is lost to the reader who
@@ -738,6 +742,16 @@ export function LiveHub({
   // top rank, since a panel that says "listening" after a failure is lying.
   const [actionError, setActionError] = useState<string | null>(null)
   const [speaking, setSpeaking] = useState(false)
+  // Live captions (mesa task 1555): the turn the player took in hand to speak,
+  // and how many characters of it the voice has reached. Cleared wherever the
+  // player is released, so everything that is not a turn being spoken shows
+  // its whole text (`liveCaption.ts::captionActive`).
+  const [captionId, setCaptionId] = useState<number | null>(null)
+  const [captionChars, setCaptionChars] = useState(0)
+  // Every turn the player has taken in hand, kept after it ends: `captionId`
+  // clears at the end but `played_at` only arrives on the next poll, and a turn
+  // just heard must not be held back again in between.
+  const [captionedIds, setCaptionedIds] = useState<ReadonlySet<number>>(new Set())
   // Whether this component must decode the audio itself rather than hand the
   // URL to an <audio> element — the same latch, for the same reason, as the
   // inbox's: set only once decoded audio has actually sounded, because a media
@@ -1074,7 +1088,7 @@ export function LiveHub({
   // When the person was last audibly talking, or `null` while the microphone
   // is shut. Written from the same place `level` is, and read only through
   // `showsHearing` — the hold it feeds is what keeps the status pill and the
-  // header aperture steady across a sentence instead of blinking once per
+  // header mark steady across a sentence instead of blinking once per
   // segment (mesa task 1073).
   const [voicedAt, setVoicedAt] = useState<number | null>(null)
   // What actually drops the pill when the person goes quiet. `showsHearing`
@@ -1387,11 +1401,31 @@ export function LiveHub({
   // The transcript follows the conversation: a spoken reply the reader cannot
   // see is the one thing the panel must never do. The clip-hidden closed state
   // still lays out, so this works whether or not it is open.
+  // It follows only while the reader is at (within a few px of) the bottom: the
+  // 2s poll hands `turns` a fresh array every time, so an unconditional jump
+  // yanked a reader who had scrolled up back down. Scrolled away, a "jump to
+  // latest" pill counts what arrived since (`awayAt` = the turn count then).
   const scroller = useRef<HTMLDivElement | null>(null)
+  const stuck = useRef(true)
+  const [awayAt, setAwayAt] = useState<number | null>(null)
   useEffect(() => {
     const el = scroller.current
-    if (el) el.scrollTop = el.scrollHeight
-  }, [turns, open])
+    if (el && stuck.current) el.scrollTop = el.scrollHeight
+  }, [turns, open, captionChars])
+  function onTranscriptScroll() {
+    const el = scroller.current
+    if (!el) return
+    const near = isNearBottom(el.scrollTop, el.scrollHeight, el.clientHeight)
+    stuck.current = near
+    setAwayAt((prev) => (near ? null : (prev ?? turns.length)))
+  }
+  function jumpToLatest() {
+    const el = scroller.current
+    if (!el) return
+    stuck.current = true
+    setAwayAt(null)
+    el.scrollTop = el.scrollHeight
+  }
 
   // ---- playback ----
 
@@ -1431,6 +1465,7 @@ export function LiveHub({
   const releasePlayer = useCallback(() => {
     press.current += 1
     sounding.current = null
+    setCaptionId(null)
     fetching.current?.abort()
     fetching.current = null
     decoded.current?.stop()
@@ -1463,6 +1498,7 @@ export function LiveHub({
         if (press.current !== attempt) return
         setActionError(err instanceof Error ? err.message : String(err))
         setSpeaking(false)
+        setCaptionId(null)
         sounding.current = null
         // A replay that failed to decode is not a live turn ending — it never
         // reached `markPlayed` and must not: clear the button rather than
@@ -1492,6 +1528,7 @@ export function LiveHub({
           onError: failed,
         },
         request.signal,
+        decodeOutput(ctx),
       ).then(
         (stream) => {
           // Stopped, or another turn started, while the first bytes were on
@@ -1521,6 +1558,11 @@ export function LiveHub({
     const attempt = press.current
     sounding.current = id
     setSpeaking(false)
+    // A replay re-hears a turn already on screen in full; only a first
+    // hearing is captioned.
+    setCaptionChars(0)
+    setCaptionId(replaying.current === null ? id : null)
+    setCaptionedIds((prev) => new Set(prev).add(id))
     const el = player.current
     if (!el) return
     if (decodes) {
@@ -1530,6 +1572,11 @@ export function LiveHub({
     // The speed setting (mesa task 1560); both rates, since a new source
     // resets the playback rate to the default one.
     applyElementSpeed(el, getSpeechSpeed())
+    // Routes the element through the level analyser for the header mark; a
+    // context that is not running leaves it alone (`speechTap.tapElement`).
+    // Once routed, the sound is only as live as the context: resume it first.
+    tapElement(ctx, el)
+    void ctx.resume()
     el.src = liveSpeakUrl(id)
     // A source that will not load arrives as the element's own `error` event,
     // which is where the fallback lives; the only rejection to report from here
@@ -1538,6 +1585,7 @@ export function LiveHub({
       if (err.name !== 'NotAllowedError' || press.current !== attempt) return
       setActionError('this browser would not start playback')
       sounding.current = null
+      setCaptionId(null)
       ended.current(id)
     })
   }
@@ -3087,6 +3135,7 @@ export function LiveHub({
     if (sounding.current !== id) return
     sounding.current = null
     setSpeaking(false)
+    setCaptionId(null)
     if (replaying.current === id) setReplaying(null)
     else markPlayed(id)
     run()
@@ -3106,6 +3155,26 @@ export function LiveHub({
     if (id !== null && !turns.some((t) => t.id === id)) ended.current(id)
     pump.current()
   }, [turns])
+
+  // The caption clock (mesa task 1555), sampled ten times a second and only
+  // written when a new word is reached. On the element path it is the
+  // element's own `currentTime`/`duration` (a chunked body reports no finite
+  // duration, which `captionFraction` estimates from the text); on the decode
+  // path it is the stream's playhead, whose total is never known up front.
+  useEffect(() => {
+    if (captionId === null) return
+    const tick = () => {
+      const turn = held.current.find((t) => t.id === captionId)
+      if (turn === undefined) return
+      const stream = decoded.current
+      const el = player.current
+      const elapsed = stream !== null ? stream.elapsed() : (el?.currentTime ?? null)
+      const duration = stream !== null ? null : (el?.duration ?? null)
+      setCaptionChars(captionLength(turn.text, captionFraction(elapsed, duration, turn.text)))
+    }
+    const timer = window.setInterval(tick, 100)
+    return () => window.clearInterval(timer)
+  }, [captionId])
 
   // A conversation that has ended stops speaking. Edge-triggered on the status,
   // not derived: a stop touches the element and the stream, which is not
@@ -3140,12 +3209,12 @@ export function LiveHub({
   ])
 
   // The header never unmounts, but strict-mode remounts in dev do pass here:
-  // drop the body still arriving and hand the clock back.
+  // drop the body still arriving. The clock is *kept*: the one <audio> element
+  // may be routed through it (`speechTap.tapElement`, irreversible), so a closed
+  // or replaced context would leave that element — the voice — silent for good.
   useEffect(
     () => () => {
       releasePlayer()
-      void clock.current?.close()
-      clock.current = null
     },
     [releasePlayer],
   )
@@ -3692,6 +3761,35 @@ export function LiveHub({
   })
 
   const groups = turnGroups(turns)
+  // A turn's text as the page shows it: the words the voice has reached while
+  // it is being spoken, otherwise all of it (mesa task 1555).
+  const captioned = (turn: LiveTurn): string => {
+    const heard = turn.played_at !== null
+    if (
+      captionHeld({
+        captionId,
+        turnId: turn.id,
+        heard,
+        captioned: captionedIds.has(turn.id),
+        willSpeak:
+          live && spokenTurnVerdict(turn, session?.speaker ?? null, client, speechMuted) === 'speak',
+        unlocked,
+        paused,
+      })
+    ) {
+      return ''
+    }
+    return captionActive({
+      captionId,
+      turnId: turn.id,
+      heard,
+      replaying: replayingId === turn.id,
+      speechMuted,
+      paused,
+    })
+      ? turn.text.slice(0, captionChars)
+      : turn.text
+  }
   // Whether a *live* turn — not a replay — is audibly sounding right now
   // (mesa task 1449): every replay button but the one already sounding reads
   // this to disable itself, so a replay can queue behind live speech but
@@ -3713,16 +3811,6 @@ export function LiveHub({
     : endsInHead(secondary)
       ? secondary
       : null
-  // What the head says about the conversation, in one word (`liveHead.ts`) —
-  // the same ranking the aperture beside it draws.
-  const headTitle = liveHeadTitle({
-    live,
-    speaking,
-    paused,
-    interim: interim !== '' ? interim : recording,
-    draft,
-    error: actionError,
-  })
   const statusLine = liveStatusLine(session, speaking, actionError, paused, path === 'unavailable')
   // Whether mesa is saying something *right now*, for the status pill above
   // the composer. `sounding` is a ref because the run advances from a media
@@ -3786,6 +3874,32 @@ export function LiveHub({
           is not currently showing it — hidden, or the whole panel closed.
           Shows the section *and* opens the panel, since a hidden section
           inside a closed panel is still nothing on screen. */}
+      {/* The mood light (mesa task 1557): the same ranked state, as a faint
+          glow round the whole window on every route. */}
+      <LiveGlow state={live && unlocked ? indicator : null} />
+      {/* The floating orb (mesa task 1553): the mark above every page while a
+          conversation is live and this browser is in it — the same terms the
+          head's Pause and mute buttons are offered on — wired to the very
+          handlers those buttons call. */}
+      {live && unlocked && (
+        <LiveOrb
+          state={indicator}
+          level={level}
+          speechRms={speechRms}
+          micAvailable={supported && !blocked}
+          micMuted={muted}
+          speechMuted={speechMuted}
+          paused={paused}
+          pauseLabel={pauseButton?.label ?? ''}
+          pauseDisabled={pauseButton?.disabled ?? true}
+          canPause={pauseButton !== undefined && pauseButton !== null}
+          onToggleMic={() => toggleListening(!muted)}
+          onTogglePause={() => {
+            if (pauseButton) togglePause(pauseButton)
+          }}
+          onToggleSpeech={toggleSpeechMuted}
+        />
+      )}
       {hasBoards && !(open && boardExpanded) && (
         <button
           type="button"
@@ -3898,8 +4012,8 @@ export function LiveHub({
               />
             )}
             <div className="live-sidebar-body">
-              {/* The head (mesa task 1069): the aperture, one word for what
-                  is happening, how loud the room has been, and the two
+              {/* The head (mesa task 1069): the Naru mark (no word; its accessible
+                  name says what is happening), how loud the room has been, and the two
                   presses that belong to a running conversation. It is the
                   panel's own instrument cluster — everything here used to be
                   either in the page header, where it had to answer for a
@@ -3980,30 +4094,16 @@ export function LiveHub({
                       )}
                     </div>
                   )}
-                  {/* Fixed box whether or not there is a state to draw, so the
-                      row does not jump 44px sideways the moment the aperture
-                      has something to say. */}
+                  {/* The Naru waveform mark (mesa task 1544): the one picture of
+                      the conversation, no text — its colour and motion are the
+                      state, and its accessible name says it. */}
                   <div className="live-head-aperture">
-                    {indicator !== null && <LiveBand state={indicator} level={level} />}
-                  </div>
-                  <div className="live-head-say">
-                    <div className="live-head-title">
-                      {recognizes && (
-                        <span
-                          className="live-mic-dot"
-                          role="img"
-                          aria-label="Mic ready"
-                          title="Mic ready"
-                        />
-                      )}
-                      {headTitle}
-                    </div>
-                    {/* The level meter (mesa task 956, moved here by 1069):
-                        shown on the auris path alone, since a browser-path
-                        page reports itself through the interim guess instead
-                        and a meter nothing feeds would read as broken rather
-                        than as "this path uses something else". */}
-                    {path === 'auris' && recognizes && <LiveMeter level={level} />}
+                    <NaruMark
+                      state={indicator}
+                      level={level}
+                      speechRms={speechRms}
+                      micReady={recognizes}
+                    />
                   </div>
                   {session !== null && contextLabel(data?.context_tokens) !== null && (
                     <span className="live-head-ctx">{contextLabel(data?.context_tokens)}</span>
@@ -4014,6 +4114,39 @@ export function LiveHub({
                     </span>
                   )}
                   <div className="live-head-actions">
+                    {/* Offered on the same terms as Pause: there is a live
+                      conversation, this browser is in it, and the microphone
+                      could actually open — a browser with no recognizer, or one
+                      whose microphone was refused, has nothing for this switch
+                      to do, and the caption below says which of the two it is.
+                      A switch reading "listening" before the conversation has
+                      started would claim something that is not happening.
+
+                      A press, not a hold (mesa task 1069 kept this deliberately):
+                      it is the same toggle the ⌘/Ctrl+Shift+L chord drives, and
+                      the two must not mean different things. */}
+                    {live && unlocked && supported && !blocked && (
+                      <button
+                        type="button"
+                        className={`live-icon live-mic${muted ? '' : ' live-on'}`}
+                        aria-pressed={!muted}
+                        aria-label={
+                          muted ? 'listen through this browser' : 'stop listening'
+                        }
+                        // Out of the tab order while the panel is clipped, for
+                        // the same reason the close button is: `pointer-events`
+                        // stops the mouse, not a Tab, and an invisible control
+                        // that toggles the microphone on Enter is worse than a
+                        // button nobody can reach.
+                        tabIndex={open ? undefined : -1}
+                        title={`${
+                          muted ? 'Listen through this browser' : 'Stop listening'
+                        } (${listenChordLabel})`}
+                        onClick={() => toggleListening(!muted)}
+                      >
+                        <MicMark />
+                      </button>
+                    )}
                     {/* Muting Naru's voice (mesa task 1327), on Pause's terms:
                         live, and this browser is in it. The microphone and
                         the transcript carry on; only the speech stops. */}
@@ -4214,7 +4347,7 @@ export function LiveHub({
                 >
                   {chatExpanded && (
                     <>
-                      <div className="live-transcript" ref={scroller}>
+                      <div className="live-transcript" ref={scroller} onScroll={onTranscriptScroll}>
                         {groups.length === 0 ? (
                           <p className="muted">
                             Nothing said yet. Press {controls.primary.label} to begin.
@@ -4242,7 +4375,7 @@ export function LiveHub({
                                         prose meant to be *spoken*, and a user turn
                                         is untrusted dictation. */}
                                     {turn.text !== '' && (
-                                      <div className="live-text">{turn.text}</div>
+                                      <div className="live-text">{captioned(turn)}</div>
                                     )}
                                     {/* The person's board ink or a picture they pasted
                                         (mesa task 1475) — a small thumbnail of what the
@@ -4305,6 +4438,15 @@ export function LiveHub({
                             </div>
                           ))
                         )}
+                        {awayAt !== null && (
+                          <div className="live-jump">
+                            <button type="button" className="live-jump-pill" onClick={jumpToLatest}>
+                              Jump to latest
+                              {newSince(turns.length, awayAt) > 0 &&
+                                ` (${newSince(turns.length, awayAt)} new)`}
+                            </button>
+                          </div>
+                        )}
                       </div>
 
                       {/* What is happening right now, in one word or two
@@ -4359,13 +4501,9 @@ export function LiveHub({
                             </button>
                           </div>
                         )}
-                        {/* The box and the switch, on one line (mesa task 1069):
-                            the microphone is a square beside the field rather than a
-                            word above it, since it is the other way of saying the
-                            same thing the box is for. Both stay in the panel rather
-                            than the header cluster (mesa task 887) — they are
-                            settings on the conversation's input, read at the moment
-                            the person is deciding whether to talk or to type. */}
+                        {/* The box alone: the microphone switch moved up beside the
+                            speech mute in the head's presses (mesa task 1551), so
+                            dictation is reachable with the chat pane hidden. */}
                         <div className="live-input-row">
                           <textarea
                             className="live-input"
@@ -4411,39 +4549,6 @@ export function LiveHub({
                               send()
                             }}
                           />
-                          {/* Offered on the same terms as Pause: there is a live
-                            conversation, this browser is in it, and the microphone
-                            could actually open — a browser with no recognizer, or one
-                            whose microphone was refused, has nothing for this switch
-                            to do, and the caption below says which of the two it is.
-                            A switch reading "listening" before the conversation has
-                            started would claim something that is not happening.
-
-                            A press, not a hold (mesa task 1069 kept this deliberately):
-                            it is the same toggle the ⌘/Ctrl+Shift+L chord drives, and
-                            the two must not mean different things. */}
-                          {live && unlocked && supported && !blocked && (
-                            <button
-                              type="button"
-                              className={`live-icon live-mic${muted ? '' : ' live-on'}`}
-                              aria-pressed={!muted}
-                              aria-label={
-                                muted ? 'listen through this browser' : 'stop listening'
-                              }
-                              // Out of the tab order while the panel is clipped, for
-                              // the same reason the close button is: `pointer-events`
-                              // stops the mouse, not a Tab, and an invisible control
-                              // that toggles the microphone on Enter is worse than a
-                              // button nobody can reach.
-                              tabIndex={open ? undefined : -1}
-                              title={`${
-                                muted ? 'Listen through this browser' : 'Stop listening'
-                              } (${listenChordLabel})`}
-                              onClick={() => toggleListening(!muted)}
-                            >
-                              <MicMark />
-                            </button>
-                          )}
                         </div>
                         {/* The caption under the box: which microphone, and what the
                             page is doing with it. The chooser moved down here from

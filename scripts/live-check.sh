@@ -452,17 +452,18 @@ ok "every other live verb with no session: exit 1 not_found, hinting at \`live s
 
 # ---- usage errors (exit 2), and the one --quiet exclusion ----
 
-run 2 "$MESA" live turns --quiet
-[ -z "$STDOUT" ] || fail "live turns --quiet: stdout must be empty on a usage error"
-[ "$(jqe .error.code)" = "usage" ] || fail "live turns --quiet: error.code"
-ok "live turns --quiet: unknown argument, exit 2, empty stdout (the --quiet contract)"
+run 1 "$MESA" live turns
+PLAIN=$STDERR
+run 1 "$MESA" live turns --quiet
+[ "$STDERR" = "$PLAIN" ] || fail "live turns --quiet: must fail exactly as without it (not a usage error)"
+ok "live turns --quiet: accepted and ignored (mesa task 1513), output identical"
 
 # `look` is the other command with no record to project: it prints a shot, not
 # a stored object, so there is nothing for --quiet to drop.
-run 2 "$MESA" live look --quiet
-[ -z "$STDOUT" ] || fail "live look --quiet: stdout must be empty on a usage error"
-[ "$(jqe .error.code)" = "usage" ] || fail "live look --quiet: error.code"
-ok "live look --quiet: unknown argument, exit 2, empty stdout (the --quiet contract)"
+LOOK_A=0; "$MESA" live look >/dev/null 2>&1 || LOOK_A=$?
+LOOK_B=0; "$MESA" live look --quiet >/dev/null 2>&1 || LOOK_B=$?
+[ "$LOOK_A" = "$LOOK_B" ] && [ "$LOOK_B" != 2 ] || fail "live look --quiet: must behave as without it ($LOOK_A vs $LOOK_B)"
+ok "live look --quiet: accepted and ignored (mesa task 1513), same exit as without it"
 
 run 2 "$MESA" live listen --wait not-a-number
 [ "$(jqe .error.code)" = "usage" ] || fail "live listen --wait <junk>: error.code"
@@ -1821,10 +1822,10 @@ run 0 "$MESA" live summary show "$SUM1" --quiet
 [ "$(jqs .session_id)" = "$SUM1" ] || fail "live summary show --quiet: session_id must survive"
 ok "live summary show --quiet: the same projection as set"
 
-run 2 "$MESA" live summary list --quiet
-[ -z "$STDOUT" ] || fail "live summary list --quiet: stdout must be empty on a usage error"
-[ "$(jqe .error.code)" = "usage" ] || fail "live summary list --quiet: error.code"
-ok "live summary list --quiet: unknown argument, exit 2, empty stdout"
+PLAIN=$("$MESA" live summary list)
+run 0 "$MESA" live summary list --quiet
+[ "$STDOUT" = "$PLAIN" ] || fail "live summary list --quiet: output must equal the plain one"
+ok "live summary list --quiet: accepted and ignored (mesa task 1513)"
 
 # `--quiet` typed AFTER the id/text is spoken into the body, never parsed as
 # the flag — the exact trap `live say` sets, since everything after the id
@@ -2379,10 +2380,10 @@ run 2 "$MESA" live board keep
 [ "$(jqe .error.code)" = "usage" ] || fail "live board keep with no destination: error.code"
 run 2 "$MESA" live board keep --project "$PROJ" --task 1
 [ "$(jqe .error.code)" = "usage" ] || fail "live board keep with both destinations: error.code"
-run 2 "$MESA" live board list --quiet
-[ -z "$STDOUT" ] || fail "live board list --quiet: stdout must be empty on a usage error"
-[ "$(jqe .error.code)" = "usage" ] || fail "live board list --quiet: error.code"
-ok "live board usage errors are exit 2: no source, two sources, --kind on a non-text source, no destination, both destinations, and --quiet on \`list\`"
+PLAIN=$("$MESA" live board list)
+run 0 "$MESA" live board list --quiet
+[ "$STDOUT" = "$PLAIN" ] || fail "live board list --quiet: output must equal the plain one"
+ok "live board usage errors are exit 2: no source, two sources, --kind on a non-text source, no destination, both destinations; --quiet on \`list\` is an accepted no-op"
 
 # ---- list, show and the --quiet key sets (jq, never byte-for-byte) ----
 
@@ -2443,11 +2444,21 @@ run 0 "$MESA" live board keep --id "$CAP" --task "$TASK"
   fail "board keep: the extension comes from the board, not the title, got $(jqs .filename)"
 ok "live board keep: into an artifact (content type by kind, name from the title) and onto a task (decoded image bytes, authored naru-live); an image board refuses the artifact and names --task"
 
-# A board from another conversation is not reachable by id: every verb here is
-# scoped to the current session.
+# `show <id>` reads a board of ANY conversation (mesa task 1548); only an
+# unknown id is not_found. `repush` copies one into the current conversation,
+# and every board is searchable as kind `board`.
 run 1 "$MESA" live board show 999999
 [ "$(jqe .error.code)" = "not_found" ] || fail "live board show <unknown>: error.code"
-ok "live board show on a board this conversation does not own: not_found"
+run 0 "$MESA" live memory search Mockup
+[ "$(jqs '[.[] | select(.kind=="board" and .ref_id=='"$B_HTML"')] | length')" = "1" ] ||
+  fail "live memory search: the html board must be a board hit, got $STDOUT"
+RP=$("$MESA" live board repush --quiet "$B_MD" | jq -r .id)
+[ -n "$RP" ] && [ "$RP" != "$B_MD" ] || fail "board repush: a new board id, got $RP"
+run 0 "$MESA" live board show "$RP"
+[ "$(jqs .body)" = "## Plan Three steps." ] || fail "board repush: the copy holds the same body"
+run 1 "$MESA" live board repush 999999
+[ "$(jqe .error.code)" = "not_found" ] || fail "board repush <unknown>: error.code"
+ok "live board show <unknown>: not_found; html board searchable as kind board; repush copies a board into this conversation"
 
 # ---- the poll payload: bodiless, and capped at the poll's own bandwidth
 # bound — but boards are no longer pruned (mesa task 1448): 22 pushed, all 22
@@ -2474,12 +2485,12 @@ ok "live board push keeps every board pushed (22 pushed, 22 kept); only the poll
 
 # ---- clear: the delete echo ----
 
-# 29 boards survive to this point — the six ordinary pushes above, the CAP
-# board, and the 22-board bulk loop — since nothing was ever pruned
+# 30 boards survive to this point — the six ordinary pushes above, the
+# repushed copy (mesa task 1548), the CAP board, and the 22-board bulk loop — since nothing was ever pruned
 # (mesa task 1448): `clear`'s echo must carry every one of them, not just
 # the newest twenty the poll would have shown.
 run 0 "$MESA" live board clear
-[ "$(jqs 'length')" = "29" ] || fail "live board clear: the echo must carry every destroyed board, got $(jqs 'length')"
+[ "$(jqs 'length')" = "30" ] || fail "live board clear: the echo must carry every destroyed board, got $(jqs 'length')"
 jq -e 'map(has("body")) | any | not' <<<"$STDOUT" >/dev/null ||
   fail "live board clear: the echo is bodiless, like every other board listing"
 run 0 "$MESA" live board list
@@ -2489,6 +2500,37 @@ run 1 "$MESA" live board show
 run 0 "$MESA" live board clear --quiet
 [ "$STDOUT" = "[]" ] || fail "live board clear on an empty whiteboard: an empty echo, not an error"
 ok "live board clear: echoes the destroyed boards (the delete-echo safety floor) and is empty-safe"
+
+# ---- a board across conversations (mesa task 1548) ----
+#
+# `show <id>` reads a past conversation's board with no live session at all;
+# `repush <id>` copies it into the conversation that is live now.
+
+SESS_A=$("$MESA" live status | jq -r .id)
+X_ID=$("$MESA" live board push --quiet --title "Old plan" 'the archived disk hogs' | jq -r .id)
+run 0 "$MESA" live stop >/dev/null
+run 1 "$MESA" live board show
+[ "$(jqe .error.code)" = "not_found" ] || fail "board show with no id and no live session: not_found"
+run 0 "$MESA" live board show "$X_ID"
+[ "$(jqs .session_id)" = "$SESS_A" ] || fail "board show <id> with no live session: session_id, got $STDOUT"
+[ "$(jqs .body)" = "the archived disk hogs" ] || fail "board show <id> with no live session: body"
+run 1 "$MESA" live board repush "$X_ID"
+[ "$(jqe .error.code)" = "not_found" ] || fail "board repush with no live session: not_found"
+run 0 "$MESA" live start --no-agent
+SESS_B=$(jqs .id)
+[ "$SESS_B" != "$SESS_A" ] || fail "a second conversation must be a new session"
+run 0 "$MESA" live board show "$X_ID"
+[ "$(jqs .session_id)" = "$SESS_A" ] || fail "board show <id> from another session: A's session_id, got $STDOUT"
+run 0 "$MESA" live board repush "$X_ID"
+[ "$(jqs .session_id)" = "$SESS_B" ] || fail "board repush: the copy lands in session B, got $STDOUT"
+[ "$(jqs .id)" != "$X_ID" ] || fail "board repush: a new board id"
+[ "$(jqs .title)" = "Old plan" ] && [ "$(jqs .body)" = "the archived disk hogs" ] ||
+  fail "board repush: same title and body, got $STDOUT"
+run 0 "$MESA" live board show "$X_ID"
+[ "$(jqs .session_id)" = "$SESS_A" ] || fail "board repush leaves the original in A"
+run 0 "$MESA" live board clear >/dev/null
+BS=$SESS_B # the conversation the sections below run in
+ok "board show/repush across conversations: show works with no live session and from another session (A's session_id); repush copies title and body into B, leaving A's board"
 
 # ---- the render route, in DEFAULT mode ----
 
@@ -2862,16 +2904,17 @@ for id in $(jqs '.[].id'); do
 done
 run 0 "$MESA" live memory show "$NOTE_ID"
 [ "$(jqs .retired_reason)" = "deleted" ] || fail "section 11's entry is retired by the explicit delete"
-run 2 "$MESA" live memory list --quiet
-[ -z "$STDOUT" ] || fail "live memory list --quiet: stdout must be empty on a usage error"
-[ "$(jqe .error.code)" = "usage" ] || fail "live memory list --quiet: error.code"
+PLAIN=$("$MESA" live memory list)
+run 0 "$MESA" live memory list --quiet
+[ "$STDOUT" = "$PLAIN" ] || fail "live memory list --quiet: output must equal the plain one"
 # `--quiet` BEFORE the words (after them it is a search word, the trailing
 # var-arg rule `say`/`add` share).
-run 2 "$MESA" live memory search --quiet pelican
-[ "$(jqe .error.code)" = "usage" ] || fail "live memory search --quiet: error.code"
+PLAIN=$("$MESA" live memory search pelican)
+run 0 "$MESA" live memory search --quiet pelican
+[ "$STDOUT" = "$PLAIN" ] || fail "live memory search --quiet: accepted and ignored"
 run 2 "$MESA" live memory search
 [ "$(jqe .error.code)" = "usage" ] || fail "live memory search with no words: usage"
-ok "live memory list/search: bare arrays; --quiet is a usage error on both, exit 2"
+ok "live memory list/search: bare arrays; --quiet is an accepted no-op on both"
 
 # ---- delete below the floor: any edit is allowed, and the row is retired,
 #      not destroyed ----
@@ -3310,9 +3353,8 @@ LAN_PID=
 
 # `dream` takes no --quiet (like `search`), and with fewer than two active
 # entries it spawns nothing and says so on stdout, exit 0.
-run 2 "$MESA" live memory dream --quiet
-[ -z "$STDOUT" ] || fail "live memory dream --quiet: stdout must be empty on a usage error"
-[ "$(jqe .error.code)" = "usage" ] || fail "live memory dream --quiet: error.code"
+run 0 "$MESA" live memory dream --quiet
+[ "$(jqs .spawned)" = "false" ] || fail "live memory dream --quiet: accepted and ignored (mesa task 1513)"
 rm -f "$STUB_DIR/last-argc"
 run 0 "$MESA" live memory dream
 [ "$(jqs .spawned)" = "false" ] || fail "dream over an empty notebook: spawned must be false (got $STDOUT)"
@@ -3776,10 +3818,9 @@ run 0 "$MESA" live context
 [ "$(jqs .lease)" = "2" ] || fail "live context: the current lease"
 [ "$(jqs .context_tokens)" = "null" ] ||
   fail "live context: the stub's uuid has no transcript, so context_tokens is null (got $(jqs .context_tokens))"
-run 2 "$MESA" live context --quiet
-[ -z "$STDOUT" ] || fail "live context --quiet: stdout must be empty on a usage error"
-[ "$(jqe .error.code)" = "usage" ] || fail "live context --quiet: unknown argument, exit 2"
-ok "live context: {session_id, agent_id, lease, context_tokens, dream} for the current agent; --quiet is a usage error"
+run 0 "$MESA" live context --quiet
+[ "$(jqs .lease)" = "2" ] || fail "live context --quiet: accepted and ignored (mesa task 1513)"
+ok "live context: {session_id, agent_id, lease, context_tokens, dream} for the current agent; --quiet is an accepted no-op"
 
 # ---- (i) the page sees one session id throughout ----
 api 200 GET "/api/live"

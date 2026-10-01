@@ -601,6 +601,20 @@ A block is `{"decision":"block","reason":"…"}` on stdout, exit 0.
 `scripts/stop-guard-check.sh` runs the extracted body against synthetic
 transcripts and a throwaway `MESA_DB`/`HOME`.
 
+### The alarm-disarm hook
+
+`alarm-disarm` (mesa task 1512, body `core::alarm::ALARM_HOOK`) is a Claude
+Code **SubagentStop** hook that disarms the supervisor's `naru alarm arm`
+for the session. Installed through the ordinary registration flow, user
+scope:
+
+```
+naru library hook enable alarm-disarm --event SubagentStop
+```
+
+It pipes the payload to `naru alarm disarm`, discards the output and always
+exits 0, so it never wedges a session. See `docs/alarm.md`.
+
 ### Hooks wired from outside `.claude/hooks/`
 
 A settings.json command may name a script anywhere — `bash
@@ -679,7 +693,7 @@ consistent — the file settings.json names exists — and a library sync picks
 the copy up as `disk-new`. An existing `.claude/hooks/<name>` is never
 overwritten: it is a `conflict` on the read and on the press.
 
-Both surfaces print JSON; neither takes `--quiet` (exit 2, like the trio).
+Both surfaces print JSON; neither has a `--quiet`; it is accepted and ignored (like the trio).
 On `#/library` the rows sit in their own section, "Hooks outside
 .claude/hooks", read for the user scope and every project with a
 `local_path` (`libraryHooks.ts::orphanScopesFor`; a scope whose file Naru
@@ -1254,7 +1268,7 @@ API:
   receiving instance is `failed` on its own, with the rest of the batch still
   applied. A bundle carrying an unknown `version` is refused whole
   (`validation`, exit 1, nothing written). `--quiet` on `export` and on
-  `import` is the unknown-argument error, exit 2. `--output` to a path that
+  `import` is accepted and ignored. `--output` to a path that
   already exists refuses rather than overwriting.
 - **The live conversation's agent definition coming from the library**:
   `naru-live` starts unshadowed (`id: null`, kind `agent`, path
@@ -1275,7 +1289,7 @@ API:
   as a no-op success touching nothing; a `"hooks": null` file read as an
   empty one by both verbs rather than refused; a mistyped event naming the
   vocabulary, a non-hook item and an unknown item each exit 1; and `--quiet`
-  rejected on all three subcommands (usage, exit 2, empty stdout).
+  accepted and ignored on the subcommands that read.
 - **Hooks wired from outside `.claude/hooks/`** (mesa task 1128): against a
   settings file holding an unrelated key, somebody else's registration, an
   in-tree `.claude/hooks/` command, `bash $HOME/scripts/warm.sh --fast`
@@ -1288,7 +1302,7 @@ API:
   in-tree path with `bash ` and `--fast` kept, the file otherwise
   **byte-identical** (`cmp` against a `sed` of the original), `hook status`
   on the new item seeing both registrations and `sync status` reading
-  `in-sync`, `orphans` no longer listing it; `--quiet` rejected on both;
+  `in-sync`, `orphans` no longer listing it; `--quiet` ignored on both;
   and the two routes serving over the API and joining the gate sweeps in
   both serve modes.
 - **The command kind folded into prompt** (mesa task 1139): a db wound back

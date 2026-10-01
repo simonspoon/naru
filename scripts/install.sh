@@ -18,7 +18,16 @@ BIN_DIR="${BIN_DIR:-$HOME/.local/bin}"
 scripts/build.sh
 
 mkdir -p "$BIN_DIR"
-install -m 0755 target/release/naru "$BIN_DIR/naru"
+# Never overwrite the installed file in place: macOS caches a binary's code
+# signature per inode, so new bytes under a validated inode get every later run
+# SIGKILLed (exit 137). Copy beside it, ad-hoc sign, then rename over it.
+tmp="$(mktemp "$BIN_DIR/.naru.XXXXXX")"
+trap 'rm -f "$tmp"' EXIT
+install -m 0755 target/release/naru "$tmp"
+if command -v codesign >/dev/null 2>&1; then
+  codesign --force --sign - "$tmp"
+fi
+mv -f "$tmp" "$BIN_DIR/naru"
 # Replaces an older install's real `mesa` binary with the symlink.
 ln -sf naru "$BIN_DIR/mesa"
 

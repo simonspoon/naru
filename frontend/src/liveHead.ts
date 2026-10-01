@@ -6,65 +6,15 @@
  * and the only *picture* of the conversation was an 18px canvas centered in
  * the page header, where it had to answer for a conversation whose panel was
  * usually shut. The head is where both belong once the panel is the surface
- * the person is actually looking at: the aperture, a word for what is
- * happening, how loud the room is, and how long this has been going on.
+ * the person is actually looking at: the Naru mark (no word — mesa task
+ * 1544 removed the title), how loud the room is, and how long this has been going on.
  *
- * Everything here is presentation, and deliberately pure — the ranking below
- * is the same one `liveIndicator.ts` and `liveStatusLine` already make, said
- * in one word instead of a drawing or a sentence, and the two clocks are
- * arithmetic the component would otherwise do inline in JSX.
+ * Everything here is presentation, and deliberately pure — the clocks and
+ * the meter history are arithmetic the component would otherwise do inline
+ * in JSX.
  */
 
 import type { LiveButton } from './liveSession'
-
-/** The word the head leads with. A closed vocabulary: the head is one line
- *  of ~14px display type, so every state has to fit in two words. */
-export type LiveHeadTitle =
-  'Live' | 'Hearing you' | 'Naru speaking' | 'Paused' | 'Reconnecting' | 'Disconnected'
-
-/**
- * What the head says, in the precedence the rest of the surface already uses.
- *
- * The order is `liveStatusLine`'s and `headerIndicator`'s merged, and neither
- * is re-litigated here:
- *
- * - **An error outranks everything** (`liveStatusLine`'s first arm). A head
- *   that reads "hearing you" while the last call failed is the one way this
- *   line can lie; the status line under it says what actually broke, so the
- *   title only has to say that the page is out of touch and trying again —
- *   which the 2s poll genuinely is.
- * - **A conversation that is not running comes next**, for `liveStatusLine`'s
- *   reason: those two arms describe the *session*, which none of the states
- *   below can change.
- * - **mesa speaking, then paused, then hearing** — `headerIndicator`'s
- *   ranking exactly, including why speaking sits above paused (a tail of
- *   audio still sounding is audio) and why paused sits above hearing (a draft
- *   left in the box from before the pause is not the person still talking).
- * - **Everything else is "Live"** — including the agent working, which the
- *   aperture beside this word says in violet and which has no two-word name
- *   of its own that is not just "working" restating the animation.
- */
-export function liveHeadTitle(input: {
-  /** The conversation is running (`liveSession.ts::isLive`). */
-  live: boolean
-  /** mesa's own audio is sounding. */
-  speaking: boolean
-  /** The person stepped out without ending it. */
-  paused: boolean
-  /** What the engine is still guessing at, or what is in the capture box —
-   *  the same pair `headerIndicator` reads, and for the same reason. */
-  interim: string
-  draft: string
-  /** The last failure this page has to report, or null. */
-  error: string | null
-}): LiveHeadTitle {
-  if (input.error !== null) return 'Reconnecting'
-  if (!input.live) return 'Disconnected'
-  if (input.speaking) return 'Naru speaking'
-  if (input.paused) return 'Paused'
-  if (input.interim.trim() !== '' || input.draft.trim() !== '') return 'Hearing you'
-  return 'Live'
-}
 
 /**
  * How long the conversation has been going, as `MM:SS`.

@@ -39,19 +39,19 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::core::{
     AgentSession, AgentSpawned, AnchorSide, ArchiveOutcome, Artifact, ArtifactPatch,
-    ArtifactSummary, CcDashboard, CcLiveSession, CcUsage, DiagramPatch, DiagramType, EdgeMarker,
-    EdgeNew, EdgePatch, EdgeStyle, Error, FileTreeEntry, FrameNew, FramePatch, FrameShape,
-    GitCommit, GitCommitFile, GitFileDiff, GitRepo, GitRepoView, GitStatus, GitWorktree, InboxItem,
-    InboxKind, LIVE_AUDIO_MAX, LIVE_BOARD_KEEP, LIVE_INK_MAX, LibraryBuiltinAction, LibraryBundle,
-    LibraryImportResult, LibraryKind, LibraryPatch, LibraryScope, LiveBoardHistoryEntry,
-    LiveBoardInkEntry, LiveBoardKind, LiveContext, LiveNotebookEntry, LiveNotice, LiveState,
-    LiveStatus, LiveTranscript, LiveWindow, ModelRates, NaruVersion, NextResult, Priority,
-    ProjectAgents, ProjectFileTree, ProjectGitLog, ProjectGitRepos, ProjectGitStatus,
-    ProjectGitView, ProjectPatch, ProjectVersion, ReceiptPatch, STALE_CLAIM_MINUTES, Script,
-    ScriptArg, ScriptPatch, ScriptRunEvent, Status, Store, SystemInfo, Task, TaskPatch,
-    TaskSummary, Waypoint, agents, attachments, audio, board, config, files, git, guard, hooks,
-    inbox_triage, library, listen, live, project_memory, receipt, retro, script_runs, scripts,
-    speech, supervisor, system, validate_live_client, version,
+    ArtifactSummary, CcDashboard, CcLiveSession, CcScorecard, CcUsage, DiagramPatch, DiagramType,
+    EdgeMarker, EdgeNew, EdgePatch, EdgeStyle, Error, FileTreeEntry, FrameNew, FramePatch,
+    FrameShape, GitCommit, GitCommitFile, GitFileDiff, GitRepo, GitRepoView, GitStatus,
+    GitWorktree, InboxItem, InboxKind, LIVE_AUDIO_MAX, LIVE_BOARD_KEEP, LIVE_INK_MAX,
+    LibraryBuiltinAction, LibraryBundle, LibraryImportResult, LibraryKind, LibraryPatch,
+    LibraryScope, LiveBoardHistoryEntry, LiveBoardInkEntry, LiveBoardKind, LiveContext,
+    LiveNotebookEntry, LiveNotice, LiveState, LiveStatus, LiveTranscript, LiveWindow, ModelRates,
+    NaruVersion, NextResult, Priority, ProjectAgents, ProjectFileTree, ProjectGitLog,
+    ProjectGitRepos, ProjectGitStatus, ProjectGitView, ProjectPatch, ProjectVersion, ReceiptPatch,
+    STALE_CLAIM_MINUTES, Script, ScriptArg, ScriptPatch, ScriptRunEvent, Status, Store, SystemInfo,
+    Task, TaskPatch, TaskSummary, Waypoint, agents, attachments, audio, board, config, files, git,
+    guard, hooks, inbox_triage, library, listen, live, project_memory, receipt, retro, script_runs,
+    scripts, speech, supervisor, system, validate_live_client, version,
 };
 
 /// The Vite build output, embedded into the binary at compile time.
@@ -90,6 +90,12 @@ struct AppState {
     /// counter, so any ingest anywhere conservatively invalidates every
     /// project's cached entry too.
     project_cc_cache: Arc<Mutex<HashMap<(i64, String), (i64, CcDashboard)>>>,
+    /// Model scorecard cache (mesa task 1514), keyed by the `(since, until)`
+    /// strings as sent. Each entry carries the `cc_stamp` plus the stored
+    /// agent-definition version count (the change markers come from the
+    /// library, not `cc_*`) it was built with; same stamp-gated staleness as
+    /// `cc_cache`.
+    cc_scorecard_cache: Arc<Mutex<HashMap<ScorecardKey, ((i64, i64), CcScorecard)>>>,
     /// Live subscription-usage cache: `(fetched_unix, data)`. The UI polls this,
     /// but each fetch hits Anthropic's usage endpoint, so a short TTL throttles
     /// outbound calls. Read-only live data — not the mesa store. Concurrent
@@ -707,7 +713,7 @@ fn cost_watcher_tick(state: &AppState) {
         // first is deliberate — the alert's closing sentence is the outcome,
         // and a person reading it needs to know whether the thing is still
         // running.
-        let outcome = stop_runaway(state, &thresholds, &session.session_id);
+        let outcome = stop_runaway(state, &thresholds, &session.session_id, &fresh);
         let body = guard::alert_body(
             session,
             &fresh,
@@ -781,6 +787,7 @@ fn stop_runaway(
     state: &AppState,
     thresholds: &guard::GuardThresholds,
     session_id: &str,
+    fresh: &[guard::GuardBreach],
 ) -> guard::StopOutcome {
     if thresholds.action == guard::GuardAction::Report {
         return guard::StopOutcome::Reported;
@@ -793,6 +800,11 @@ fn stop_runaway(
         if stopped.contains(session_id) {
             return guard::StopOutcome::AlreadyStopped;
         }
+    }
+    // The context rule only reports: a tick whose every new breach is
+    // `context` leaves the session running, whatever the action says.
+    if !guard::wants_stop(fresh) {
+        return guard::StopOutcome::ContextOnly;
     }
     let outcome = match agents::find_job_for_session(session_id) {
         Ok(Some(job_id)) => match agents::stop(&job_id) {
@@ -827,6 +839,9 @@ fn outcome_note(outcome: &guard::StopOutcome) -> String {
         }
         guard::StopOutcome::Reported => {
             "mesa is configured to report only, so it is still running".to_string()
+        }
+        guard::StopOutcome::ContextOnly => {
+            "the context rule only reports, so it is still running".to_string()
         }
     }
 }
@@ -2025,6 +2040,7 @@ pub fn serve(
         allow_hosts: allow_hosts.clone(),
         cc_cache: Arc::new(Mutex::new(HashMap::new())),
         project_cc_cache: Arc::new(Mutex::new(HashMap::new())),
+        cc_scorecard_cache: Arc::new(Mutex::new(HashMap::new())),
         usage_cache: Arc::new(Mutex::new(None)),
         usage_lock: Arc::new(tokio::sync::Mutex::new(())),
         usage_refreshing: Arc::new(AtomicBool::new(false)),
@@ -2617,6 +2633,7 @@ fn router(state: AppState) -> Router {
         // CC Dashboard: read-only Claude Code telemetry (no Store access).
         .route("/api/cc/usage", get(get_cc_usage))
         .route("/api/cc", get(get_cc_dashboard))
+        .route("/api/cc/scorecard", get(get_cc_scorecard))
         // Live sessions: cheap, frequently-polled slice of the telemetry.
         .route("/api/cc/live", get(get_cc_live))
         // The drill-down pair: aggregate detail (the default) and the call tree.
@@ -2913,6 +2930,9 @@ struct ProjectUpdate {
     /// project to top level.
     #[serde(default, deserialize_with = "double_option")]
     parent_id: Option<Option<i64>>,
+    /// Shared project notebook (task 1550); absent leaves it alone.
+    #[serde(default)]
+    shared_notebook: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -2990,6 +3010,7 @@ async fn update_project(
         local_path: body.local_path,
         sort_order: body.sort_order,
         parent_id: body.parent_id,
+        shared_notebook: body.shared_notebook,
     };
     let mut store = state.store.lock().unwrap();
     Ok(Json(store.update_project(id, &patch)?).into_response())
@@ -3089,6 +3110,10 @@ struct TaskQuery {
     /// CLI's `--stale-claim-minutes`.
     #[serde(default)]
     stale_claim_minutes: Option<u32>,
+    /// Only tasks with `updated_at` at or after this UTC timestamp
+    /// (`YYYY-MM-DD HH:MM:SS`), matching the CLI's `--updated-since`.
+    #[serde(default)]
+    updated_since: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -3107,6 +3132,9 @@ async fn list_tasks(
         Some(minutes) => Some(store.claim_cutoff(minutes)?),
         None => None,
     };
+    if let Some(bound) = &q.updated_since {
+        Store::check_updated_since(bound)?;
+    }
     let tasks: Vec<TaskSummary> = store
         .list_tasks(q.project)?
         .iter()
@@ -3119,6 +3147,7 @@ async fn list_tasks(
                 .as_ref()
                 .is_none_or(|cutoff| t.claimed_at.as_ref().is_some_and(|at| at <= cutoff))
         })
+        .filter(|t| q.updated_since.as_ref().is_none_or(|b| t.updated_at >= *b))
         .map(TaskSummary::from)
         .collect();
     Ok(Json(tasks).into_response())
@@ -8811,6 +8840,8 @@ struct GuardUpdate {
     #[serde(default, deserialize_with = "deserialize_some")]
     repeat_count: Option<Option<serde_json::Value>>,
     #[serde(default, deserialize_with = "deserialize_some")]
+    context_tokens: Option<Option<serde_json::Value>>,
+    #[serde(default, deserialize_with = "deserialize_some")]
     action: Option<Option<serde_json::Value>>,
 }
 
@@ -8836,6 +8867,7 @@ async fn update_config_guard(
             body.cache_read_min_tokens,
         ),
         (config::GUARD_REPEAT_COUNT, body.repeat_count),
+        (config::GUARD_CONTEXT_TOKENS, body.context_tokens),
         (config::GUARD_ACTION, body.action),
     ] {
         if let Some(value) = value {
@@ -10071,6 +10103,54 @@ async fn pump_pty(mut socket: WebSocket, cmd: CommandBuilder, size: PtySize) -> 
 // ---- CC Dashboard (Claude Code telemetry) ----
 
 #[derive(Deserialize)]
+struct CcScorecardQuery {
+    /// `YYYY-MM-DD` or a full timestamp; a run's start, inclusive.
+    #[serde(default)]
+    since: Option<String>,
+    /// Same shape; exclusive.
+    #[serde(default)]
+    until: Option<String>,
+}
+
+/// `(since, until)` as the caller sent them — the scorecard cache key.
+type ScorecardKey = (Option<String>, Option<String>);
+
+/// The model scorecard (mesa task 1514): `cc::scorecard`, unfiltered by agent.
+/// A bad date is 422 `validation`.
+async fn get_cc_scorecard(
+    State(state): State<AppState>,
+    Query(q): Query<CcScorecardQuery>,
+) -> ApiResult<Response> {
+    let stamp = {
+        let mut store = state.store.lock().unwrap();
+        crate::core::cc::sync(&mut store, false)?;
+        (store.cc_stamp()?, store.library_versions_stamp()?)
+    };
+    let key: ScorecardKey = (q.since.clone(), q.until.clone());
+    {
+        let cache = state.cc_scorecard_cache.lock().unwrap();
+        if let Some((cached, card)) = cache.get(&key)
+            && *cached == stamp
+        {
+            return Ok(Json(card.clone()).into_response());
+        }
+    }
+    let card = {
+        let store = state.store.lock().unwrap();
+        crate::core::cc::scorecard(&store, q.since.as_deref(), q.until.as_deref(), None)?
+    };
+    {
+        let mut cache = state.cc_scorecard_cache.lock().unwrap();
+        // The bounds are caller input; cap the distinct-key count.
+        if cache.len() >= 16 {
+            cache.clear();
+        }
+        cache.insert(key, (stamp, card.clone()));
+    }
+    Ok(Json(card).into_response())
+}
+
+#[derive(Deserialize)]
 struct CcQuery {
     /// `7d` | `30d` | `90d` | `all` | `<n>d` | `cc-5h` | `cc-7d`; defaults to
     /// `30d`. The two `cc-*` tokens scope the dashboard to the currently-open
@@ -10698,6 +10778,7 @@ mod tests {
             allow_hosts: Arc::from(Vec::new()),
             cc_cache: Arc::new(Mutex::new(HashMap::new())),
             project_cc_cache: Arc::new(Mutex::new(HashMap::new())),
+            cc_scorecard_cache: Arc::new(Mutex::new(HashMap::new())),
             usage_cache: Arc::new(Mutex::new(None)),
             usage_lock: Arc::new(tokio::sync::Mutex::new(())),
             usage_refreshing: Arc::new(AtomicBool::new(false)),
@@ -12350,6 +12431,7 @@ mod tests {
                             cache_read_share: None,
                             cache_read_min_tokens: None,
                             repeat_count: None,
+                            context_tokens: None,
                             action: None,
                         }),
                     )

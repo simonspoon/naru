@@ -35,6 +35,7 @@
 set -euo pipefail
 # Drop inherited NARU_* vars: Naru reads them before MESA_*, so one would escape this script's isolation.
 unset $(env | sed -n 's/^\(NARU_[A-Za-z0-9_]*\)=.*/\1/p')
+unset CLAUDE_CODE_SESSION_ID
 
 cd "$(dirname "$0")/.."
 command -v jq >/dev/null || { echo "jq is required" >&2; exit 1; }
@@ -108,12 +109,11 @@ run 0 "$NARU" memory get --project "$P" "$E1" --quiet
 printf '%s' "$STDOUT" >"$TMP/quiet.json"
 jq -e --slurpfile q "$TMP/quiet.json" 'del(.body) == $q[0]' "$TMP/full.json" >/dev/null ||
   fail "memory show --quiet must be the full record minus body and nothing else"
-for verb in list search context dream import; do
-  run 2 "$NARU" memory "$verb" --quiet x
-  [ -z "$STDOUT" ] && [ "$(jqe .error.code)" = "usage" ] || fail "memory $verb --quiet: usage, empty stdout"
-done
+PLAIN=$("$NARU" memory list --project "$P")
+run 0 "$NARU" memory list --project "$P" --quiet
+[ "$STDOUT" = "$PLAIN" ] || fail "memory list --quiet: accepted and ignored (mesa task 1513)"
 run 2 "$NARU" memory context --project "$P"
-ok "memory list/show/get; --quiet on show only drops body; list/search/context/dream/import refuse --quiet; context takes no --project"
+ok "memory list/show/get; --quiet on show only drops body; list ignores --quiet; context takes no --project"
 
 run 0 "$NARU" memory replace --project "$P" "$E3" A replaced note.
 [ "$(jqs .body)" = "A replaced note." ] && [ "$(jqs .last_used_at)" != "null" ] ||
@@ -399,6 +399,42 @@ close_task "$OB"
 [ "$(spawns)" = "$((BEFORE + 3))" ] || fail "after a failed spawn the next close retries"
 ok "task close: an over-budget notebook's dream spawned once, stdout unchanged; none while its job runs or inside the grace window of one with no receipt; none within budget; a failed spawn exit 0 and retried"
 
+# ---- shared notebook (mesa task 1550): a parent folder owns everything under it ----
+SH="$TMP/product"
+mkdir -p "$SH/feature-a/notes" "$SH/feature-b/repo"
+git -C "$SH/feature-b/repo" init -q
+git -C "$SH/feature-b/repo" -c user.name=t -c user.email=t@t commit -q --allow-empty -m shared-root
+run 0 "$NARU" project create "Product" --no-git
+S=$(jqs .id)
+[ "$(jqs .shared_notebook)" = "false" ] || fail "shared_notebook defaults to false (got $STDOUT)"
+run 0 "$NARU" project update "$S" --path "$SH"
+run 0 "$NARU" project create "FeatureRepo" --path "$SH/feature-b/repo"
+F=$(jqs .id)
+cd "$SH/feature-b/repo"; run 0 "$NARU" memory add own repo note
+[ "$(jqs .project_id)" = "$F" ] || fail "off: a bound repo resolves to its own project (got $STDOUT)"
+run 0 "$NARU" project update "$S" --shared-notebook true
+[ "$(jqs .shared_notebook)" = "true" ] || fail "update --shared-notebook true (got $STDOUT)"
+cd "$SH/feature-b/repo"; run 0 "$NARU" memory add shared note from a repo
+SE=$(jqs .id)
+[ "$(jqs .project_id)" = "$S" ] || fail "on: a repo bound to another project resolves to the shared parent (got $STDOUT)"
+cd "$SH/feature-a/notes"; run 0 "$NARU" memory list
+jq -e --argjson id "$SE" 'map(.id) | index($id) != null' <<<"$STDOUT" >/dev/null ||
+  fail "a non-git nested folder lists the parent's notebook (got $STDOUT)"
+run 0 "$NARU" memory context --path "$SH/feature-a/notes"
+grep -q "project \"Product\" (id $S)" <<<"$STDOUT" || fail "context from a nested folder names the shared parent (got $STDOUT)"
+run 0 "$NARU" memory add --project "$F" explicit project is unchanged
+[ "$(jqs .project_id)" = "$F" ] || fail "explicit --project still wins (got $STDOUT)"
+# Moving the feature folder loses nothing: the notebook is keyed by project.
+mv "$SH/feature-a" "$SH/archived-a"
+cd "$SH/archived-a/notes"; run 0 "$NARU" memory list
+jq -e --argjson id "$SE" 'map(.id) | index($id) != null' <<<"$STDOUT" >/dev/null ||
+  fail "after moving a feature folder the notebook is still reached (got $STDOUT)"
+run 0 "$NARU" project update "$S" --shared-notebook false
+cd "$SH/feature-b/repo"; run 0 "$NARU" memory add back to the repo
+[ "$(jqs .project_id)" = "$F" ] || fail "off again: root-commit resolution restored (got $STDOUT)"
+ok "shared notebook: nested non-git folders and a bound repo resolve to the parent while on, own project when off, --project unchanged, a moved feature folder loses nothing"
+
+cd "$TMP"
 # ---- the hook is a library built-in, enabled on SessionStart ----
 run 0 "$NARU" library hook enable project-memory.sh --event SessionStart --matcher 'startup|resume|clear|compact'
 [ -x "$HOME/.claude/hooks/project-memory.sh" ] || fail "enable seeds the hook script"

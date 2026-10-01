@@ -86,6 +86,9 @@ export interface SpeechStream {
   rewind: () => void
   /** Drops the body still arriving and silences what is scheduled. */
   stop: () => void
+  /** The playhead in item seconds — what has been heard, 0 before the first
+   *  sample sounds (mesa task 1555, the live captions' clock). */
+  elapsed: () => number
 }
 
 /**
@@ -110,6 +113,9 @@ export async function playSpeechStream(
   ctx: AudioContext,
   events: SpeechStreamEvents,
   signal: AbortSignal,
+  /** Where sources are connected; `ctx.destination` unless the caller taps
+   *  the level (mesa task 1544 — an analyser that passes audio through). */
+  output: AudioNode = ctx.destination,
 ): Promise<SpeechStream> {
   const body = await fetchSpeech(url, signal)
 
@@ -167,7 +173,7 @@ export async function playSpeechStream(
   function schedule(buffer: AudioBuffer, from: number, at: number) {
     const source = ctx.createBufferSource()
     source.buffer = buffer
-    source.connect(ctx.destination)
+    source.connect(output)
     live.add(source)
     source.onended = () => {
       live.delete(source)
@@ -303,6 +309,9 @@ export async function playSpeechStream(
       for (const { index, from, delay } of replaySlices(holding, target)) {
         schedule(played[index].buffer, from, at + delay)
       }
+    },
+    elapsed() {
+      return started ? Math.max(0, Math.min(ctx.currentTime - origin, filled)) : 0
     },
     stop() {
       stopped = true
