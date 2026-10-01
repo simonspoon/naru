@@ -1857,6 +1857,18 @@ captions. The transcript follows the growing caption (`captionChars` is an
 effect dependency), still only while the reader is near the bottom
 (`liveScroll`).
 
+## The mood light (mesa task 1557)
+
+While a conversation is live and this browser is in it, a faint glow rings the
+whole window on every route: a fixed, `pointer-events: none` inset `box-shadow`
+overlay (`components/LiveGlow.tsx`, rendered by `LiveHub`, which is mounted for
+the life of the app) tinted by the **same ranked indicator state** the mark
+wears, never re-derived — speaking amber, hearing cyan, working and resting
+violet, in `liveMark.ts`'s palette (`liveGlow.ts::glowColor`). Listening (the
+resting state), paused and no conversation are no glow; the opacity fades
+(0.8s) rather than snaps. It breathes slowly (5s, opacity 0.14-0.26); under
+`prefers-reduced-motion` the animation is off and the glow is static.
+
 ## The action vocabulary
 
 Three values, and they are all one idea: **what the person is looking at.**

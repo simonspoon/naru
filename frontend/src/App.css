@@ -11784,3 +11784,33 @@ body.live-panel-ratio-resizing .live-panel-divider {
     display: none;
   }
 }
+
+/* The mood light (mesa task 1557): a faint inset glow round the whole window,
+   never in the way of a click. Off = opacity 0, so it fades both ways. */
+.live-glow {
+  position: fixed;
+  inset: 0;
+  z-index: 9000;
+  pointer-events: none;
+  opacity: 0;
+  box-shadow: inset 0 0 90px 12px var(--glow, #b06bff);
+  transition: opacity 0.8s ease;
+}
+.live-glow-on {
+  opacity: 0.22;
+  animation: live-glow-breathe 5s ease-in-out infinite;
+}
+@keyframes live-glow-breathe {
+  0%,
+  100% {
+    opacity: 0.14;
+  }
+  50% {
+    opacity: 0.26;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .live-glow-on {
+    animation: none;
+  }
+}
