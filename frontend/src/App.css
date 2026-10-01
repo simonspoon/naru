@@ -3426,109 +3426,6 @@ main {
   color: var(--text);
 }
 
-/* The child cards hanging off an agent row (mesa task 1277): one per live
-   subagent and per running shell. Indented, so they read as work belonging
-   to that session rather than as rows of their own. Nothing above is
-   restyled — the count badge stays exactly where it was. */
-.agent-children {
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
-  margin: 0.4rem 0 0 0.3rem;
-  padding: 0 0 0 calc(0.5rem + 1px);
-}
-
-/* A `<button>`, because the card is clickable (the read-only pane it opens
-   is a sibling task) — so the browser's own keyboard and focus handling
-   apply rather than a click handler on a div. Every inherited button style
-   is stood down; the card draws itself. */
-.agent-child {
-  display: block;
-  width: 100%;
-  min-width: 0;
-  text-align: left;
-  padding: 0.2rem 0.35rem;
-  font: inherit;
-  color: inherit;
-  background: none;
-  border: none;
-  cursor: pointer;
-}
-
-/* A finished subagent is on its way out — it is listed only while its
-   transcript is still fresh — so it reads back rather than competing with
-   work that is still happening. */
-.agent-child-finished {
-  opacity: 0.6;
-}
-
-.agent-child-title {
-  display: flex;
-  align-items: baseline;
-  gap: 0.4rem;
-  min-width: 0;
-}
-
-/* Only the name may shrink: a shell's card is named by a whole command line,
-   which is long enough to eat the rail several times over. */
-.agent-child-name {
-  flex: 0 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  font-size: 0.78rem;
-  color: var(--text-h);
-}
-
-/* The last thing a subagent did. One line, unlike the parent row's two: a
-   child card is a summary of a summary. */
-.agent-child-detail {
-  margin-top: 0.15rem;
-  font-size: 0.74rem;
-  line-height: 1.3;
-  color: var(--muted);
-  overflow: hidden;
-  overflow-wrap: anywhere;
-  display: -webkit-box;
-  -webkit-line-clamp: 1;
-  line-clamp: 1;
-  -webkit-box-orient: vertical;
-}
-
-.agent-child-meta {
-  display: flex;
-  align-items: baseline;
-  gap: 0.5rem;
-  margin-left: auto;
-  flex: none;
-  font-size: 0.72rem;
-}
-
-/* Pinned right, like the parent row's own context figure. */
-.agent-child-context {
-  flex: none;
-  font-family: var(--font-mono);
-  font-variant-numeric: tabular-nums;
-  color: var(--cyan);
-}
-
-/* The card whose read-only pane is open (mesa task 1278) — the same cyan the
-   session row above it wears when its own pane is, so "this is on screen"
-   reads identically at both levels. */
-.agent-children li:has(> .agent-child.selected) {
-  border-color: var(--cyan);
-  box-shadow: 0 0 10px var(--cyan-dim);
-}
-
-/* An interactive session has no pane to hang a child off, so its cards say
-   so by being unpressable rather than by disappearing. */
-.agent-child:disabled {
-  cursor: default;
-  opacity: 0.55;
-}
-
 /* A child pane (mesa task 1278): the chat pane's frame with a live meta line
    where the composer is not. */
 .agent-child-pane-meta {
@@ -11150,15 +11047,6 @@ body.live-panel-ratio-resizing .live-panel-divider {
   color: var(--violet);
 }
 
-.agent-child-command {
-  font-family: var(--font-mono);
-  font-size: 0.7rem;
-}
-
-.agent-child-of-shell {
-  margin-left: 0.5rem;
-}
-
 .agent-card-meta .agent-row-context {
   margin-left: 0;
 }
@@ -11505,12 +11393,10 @@ body.live-panel-ratio-resizing .live-panel-divider {
   font-size: 0.78rem;
   line-height: 1.35;
   color: var(--text);
+  /* One line, ellipsised — plain text, a card is a glance. */
   overflow: hidden;
-  overflow-wrap: anywhere;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
-  -webkit-box-orient: vertical;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 /* Stop: a corner icon revealed on hover or keyboard focus, drawn over the
@@ -11557,15 +11443,49 @@ body.live-panel-ratio-resizing .live-panel-divider {
   }
 }
 
-/* Sub-agents: indented under their parent behind a rail in its colour. */
-.agent-card .agent-children {
-  margin: 0.4rem 0 0 0.35rem;
-  padding: 0 0 0 0.5rem;
-  border-left: 2px solid var(--k);
+/* Sub-agents (mesa task 1561): each its own compact card right under its
+   parent, indented on a rail in the parent's colour. The rail is the card's
+   own left edge, so green-on-finish and the dissolve work unchanged. */
+.agent-list .agent-subcard {
+  margin-left: 1.4rem;
+  padding: 0.3rem 0.9rem 0.3rem 0.55rem;
 }
 
-.agent-card .agent-children > li {
-  animation: agent-fly-in 0.5s ease-out both;
+/* A button, so keyboard and focus are the browser's; the card draws itself. */
+.agent-subcard-btn {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  font: inherit;
+  text-align: left;
+  text-transform: none;
+  letter-spacing: normal;
+  /* The global button chamfer would clip the card's own text at both ends;
+     the card (`li`) already carries one. */
+  clip-path: none;
+  color: inherit;
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+
+.agent-subcard-btn .agent-child-tag {
+  margin-left: 0.4rem;
+}
+
+.agent-subcard-btn:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.agent-subcard.selected {
+  border-color: var(--cyan);
+  box-shadow: 0 0 10px var(--cyan-dim);
+}
+
+.agent-card-dot-done {
+  background: var(--green);
 }
 
 @keyframes agent-fly-in {
@@ -11625,8 +11545,7 @@ body.live-panel-ratio-resizing .live-panel-divider {
   }
 
   .agent-list .agent-card-enter,
-  .agent-list .agent-card-active.agent-card-enter,
-  .agent-card .agent-children > li {
+  .agent-list .agent-card-active.agent-card-enter {
     animation: agent-fade-in 0.3s ease-out both;
   }
 

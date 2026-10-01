@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
+  childCard,
   childElapsed,
   childForPane,
-  childHeadline,
   childSubline,
   childLabel,
   childPaneHeading,
@@ -223,10 +223,9 @@ describe('childPromptLabel', () => {
   })
 })
 
-describe('childHeadline / childSubline (mesa task 1484)', () => {
+describe('childSubline (mesa task 1484)', () => {
   it('a subagent leads with its type and shows its description underneath', () => {
     const c = child({ description: 'Replace fold arrows', detail: 'Edit' })
-    expect(childHeadline(c)).toBe('implementer')
     expect(childSubline(c)).toBe('Replace fold arrows')
   })
 
@@ -242,13 +241,27 @@ describe('childHeadline / childSubline (mesa task 1484)', () => {
       description: 'Running frontend tests',
       command: 'npx vitest run',
     })
-    expect(childHeadline(c)).toBe('Running frontend tests')
     expect(childSubline(c)).toBe('npx vitest run')
   })
 
   it('an unpaired shell gets a neutral sentence and no subline', () => {
     const c = child({ kind: 'shell', name: '/bin/zsh -c source /snap' })
-    expect(childHeadline(c)).toBe('Running a shell command')
     expect(childSubline(c)).toBeNull()
+  })
+})
+
+describe('childCard', () => {
+  it('a subagent: agent type, then what it was asked, else its last act', () => {
+    expect(childCard(child({ description: 'Build  the\norb', detail: 'x' }))).toEqual({
+      name: 'implementer',
+      body: 'Build the orb',
+    })
+    expect(childCard(child({ detail: 'Ran tests' })).body).toBe('Ran tests')
+    expect(childCard(child()).body).toBeNull()
+  })
+  it('a shell: named shell, one line of what it is for, else the command', () => {
+    const shell = child({ kind: 'shell', name: "zsh -c 'source …'", command: 'sleep 9' })
+    expect(childCard(shell)).toEqual({ name: 'shell', body: 'sleep 9' })
+    expect(childCard({ ...shell, description: 'Wait\nfor it' }).body).toBe('Wait for it')
   })
 })

@@ -29,18 +29,6 @@ export function childLabel(child: AgentChild): string {
 }
 
 /**
- * The line a nested child row leads with (mesa task 1484). A subagent leads
- * with its agent type (the SUB-AGENT tag sits beside it); a shell leads with
- * the human description of the Bash call it was paired with, falling back to
- * a neutral sentence — never `ps`'s `zsh -c 'source …'` wrapper, which is
- * setup boilerplate.
- */
-export function childHeadline(child: AgentChild): string {
-  if (child.kind === 'subagent') return childLabel(child)
-  return responsePreview(child.description) ?? 'Running a shell command'
-}
-
-/**
  * The dim second line under a child: a subagent's description (what its
  * parent asked of it), else the last thing it did; a shell's real command.
  * `null` for a shell no pending Bash call could be paired with — its only
@@ -51,6 +39,18 @@ export function childSubline(child: AgentChild): string | null {
     return responsePreview(child.description) ?? responsePreview(child.detail)
   }
   return responsePreview(child.command)
+}
+
+/**
+ * A child's compact card (mesa task 1561): its name beside the dot and the
+ * ONE line of plain text under it — what it is doing, never more. A subagent
+ * is named by its agent type and says what its parent asked of it, else its
+ * last act; a shell is named `shell` and says what its Bash call is for,
+ * else the real command. `body` is `null` when there is nothing to say.
+ */
+export function childCard(child: AgentChild): { name: string; body: string | null } {
+  if (child.kind === 'subagent') return { name: childLabel(child), body: childSubline(child) }
+  return { name: 'shell', body: responsePreview(child.description) ?? responsePreview(child.command) }
 }
 
 /**

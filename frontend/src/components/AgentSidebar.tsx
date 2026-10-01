@@ -24,26 +24,29 @@ import { projectForCwd } from '../agentProject'
 import {
   childElapsed,
   childForPane,
-  childHeadline,
-  childLabel,
-  childSubline,
+  childCard,
   childPaneHeading,
   childPaneId,
   isChildPaneId,
-  orderedChildren,
   parseChildPaneId,
 } from '../agentChild'
 import { defaultListMaximized, liveAgentId, liveCardWait, pinLiveAgent } from '../agentLive'
-import { agentHeadline, agentTint, formatContextTokens, runningBelow } from '../agentRow'
+import { agentHeadline, agentTint, formatContextTokens } from '../agentRow'
 import {
   agentChips,
   agentColor,
+  cardChildren,
+  childRowsOf,
   elapsedSince,
   isEntering,
   markSeen,
+  markSeenKeys,
   nextExpiry,
+  reconcileChildLingering,
   reconcileLingering,
+  visibleChildren,
   withLingering,
+  type ChildLingering,
   type Lingering,
 } from '../agentCard'
 import { publishOpenAgents } from '../liveView'
@@ -290,6 +293,10 @@ function startedAgo(ms: number): string {
 
 function enteringNow(seen: Record<string, number>, id: string): boolean {
   return isEntering(seen, id, Date.now())
+}
+
+function clockNow(): number {
+  return Date.now()
 }
 
 function elapsedNow(ms: number): string {
@@ -651,8 +658,11 @@ type ListPaneProps = {
   agents: AgentSession[]
   /** Session ids that just left the list and are dissolving (task 1554). */
   leaving: string[]
-  /** Session id to when it was first shown (`agentCard.ts::isEntering`). */
+  /** Session id (or child key) to when it was first shown
+   *  (`agentCard.ts::isEntering`). */
   seen: Record<string, number>
+  /** Children that just left the list and are dissolving (task 1561). */
+  childLingering: ChildLingering[]
   /** The live conversation's job id (mesa task 1491), pinned above the
    *  buckets; `null` when nothing is live. */
   liveAgentId: string | null
@@ -682,6 +692,7 @@ function AgentListContent({
   agents: allAgents,
   leaving,
   seen,
+  childLingering,
   liveAgentId,
   sessionsLoaded,
   error,
@@ -710,7 +721,6 @@ function AgentListContent({
     const model = shortModel(a.model)
     const headline = agentHeadline(a)
     const label = agentLabel(a)
-    const below = runningBelow(a.children)
     const tint = pinned ? null : agentTint(a)
     const chips = agentChips(a, proj)
     const leavingNow = leaving.includes(a.sessionId)
@@ -721,9 +731,13 @@ function AgentListContent({
       a.taskId !== null && proj ? `#/projects/${proj.id}/tasks/${a.taskId}` : null
     const elapsed = elapsedNow(a.startedAt)
     const wait = pinned ? liveCardWait(a) : a.waitingFor
+    const nowMs = clockNow()
+    // The work this session holds in flight: each child is a card of its own
+    // right under it (mesa tasks 1277, 1561), not a row inside it.
+    const subs = cardChildren(a.sessionId, visibleChildren(a, nowMs), childLingering)
     return (
+      <Fragment key={a.sessionId}>
       <li
-        key={a.sessionId}
         // A dissolving card is not interactive, by mouse or keyboard.
         inert={leavingNow ? true : undefined}
         style={{ '--k': pinned ? 'var(--violet)' : agentColor(a.sessionId) } as CSSProperties}
@@ -751,7 +765,7 @@ function AgentListContent({
                 : [a.status, a.state].filter(Boolean).join(' · ') || 'unknown'
             }
           />
-          <span className="agent-card-name" title={label}>
+          <span className="agent-card-name" title={model ? `${label} · ${model}` : label}>
             {label}
           </span>
           {chips.project && (
@@ -820,94 +834,73 @@ function AgentListContent({
             {headline}
           </div>
         )}
-        {(wait || below || a.id === null || model) && (
+        {(wait || a.id === null) && (
           <div className="muted agent-card-meta">
-            {model && <span>{model}</span>}
-            {below && <span>{below}</span>}
             {a.id === null && <span>external terminal — not attachable</span>}
             {wait && <span className="badge blocked">{wait}</span>}
           </div>
         )}
-        {/* The work this session holds in flight, nested
-            under it (mesa tasks 1277, 1484): a subagent
-            leads with its type and description, a shell
-            with what its Bash call is for and the real
-            command dim underneath. Order is
-            `agentChild.ts`'s decision, not the server's. */}
-        {a.children.length > 0 && (
-          <ul className="agent-children">
-            {orderedChildren(a.children).map((child, i) => {
-              const childName = childHeadline(child)
-              const sub = childSubline(child)
-              const elapsed = childElapsed(child.startedAt, Date.now())
-              const childContext = formatContextTokens(child.contextTokens)
-              const paneId = a.id !== null ? childPaneId(a.id, child) : null
-              return (
-                <li key={`${child.kind}-${childLabel(child)}-${i}`}>
-                  <button
-                    type="button"
-                    className={
-                      `agent-child agent-child-${child.state} agent-child-of-${child.kind}` +
-                      (paneId !== null && openIds.includes(paneId)
-                        ? ' selected'
-                        : '')
-                    }
-                    // Opens this child as a read-only pane
-                    // beside its parent (mesa task 1278).
-                    // `stopPropagation` stays: the row
-                    // underneath toggles the parent's own
-                    // attach pane, and a tap on a card is
-                    // about the card.
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      if (a.id !== null) onToggleChildPane(a.id, child)
-                    }}
-                    // An interactive session has no pane id
-                    // to hang a child off — the same reason
-                    // its own row is not attachable.
-                    disabled={a.id === null}
-                  >
-                    <div className="agent-child-title">
-                      {/* Untrusted text from outside mesa:
-                          plain text nodes, never HTML or a
-                          URL, with the full string in
-                          `title`. */}
-                      <span className="agent-child-name" title={childName}>
-                        {childName}
-                      </span>
-                      {child.kind === 'subagent' && (
-                        <span className="agent-child-tag">sub-agent</span>
-                      )}
-                      <span className="muted agent-child-meta">
-                        {child.state === 'finished' && <span>finished</span>}
-                        {elapsed && (
-                          <span title={`running for ${elapsed}`}>{elapsed}</span>
-                        )}
-                        {childContext && (
-                          <span
-                            className="agent-child-context"
-                            title={`${child.contextTokens} tokens in the context window`}
-                          >
-                            {childContext}
-                          </span>
-                        )}
-                      </span>
-                    </div>
-                    {sub && (
-                      <div
-                        className={`agent-child-detail${child.kind === 'shell' ? ' agent-child-command' : ''}`}
-                        title={sub}
-                      >
-                        {child.kind === 'shell' ? `$ ${sub}` : sub}
-                      </div>
-                    )}
-                  </button>
-                </li>
-              )
-            })}
-          </ul>
-        )}
       </li>
+      {subs.map(({ key, child, leaving: childLeaving }) => {
+        const { name, body } = childCard(child)
+        const elapsed = childElapsed(child.startedAt, nowMs)
+        const childContext = formatContextTokens(child.contextTokens)
+        const paneId = a.id !== null ? childPaneId(a.id, child) : null
+        const gone = childLeaving || leavingNow
+        const done = gone || child.state === 'finished'
+        return (
+          <li
+            key={key}
+            inert={gone ? true : undefined}
+            style={{ '--k': agentColor(a.sessionId) } as CSSProperties}
+            className={
+              'agent-card agent-subcard ' +
+              (child.state === 'running' && !done ? 'agent-card-active ' : '') +
+              (isEntering(seen, key, nowMs) ? 'agent-card-enter ' : '') +
+              (done ? 'agent-card-finished ' : '') +
+              (gone ? 'agent-card-leaving ' : '') +
+              (paneId !== null && openIds.includes(paneId) ? 'selected' : '')
+            }
+          >
+            {/* A button, so the keyboard and focus rules are the browser's.
+                Opens this child as a read-only pane beside its parent (mesa
+                task 1278); an interactive session has no pane id to hang one
+                off, so its cards are unpressable. */}
+            <button
+              type="button"
+              className="agent-subcard-btn"
+              onClick={() => {
+                if (a.id !== null) onToggleChildPane(a.id, child)
+              }}
+              disabled={a.id === null}
+            >
+              <div className="agent-row-title">
+                <span className={`agent-card-dot agent-card-dot-${done ? 'done' : 'active'}`} />
+                {/* Untrusted text from outside Naru: plain text nodes, the
+                    full string in `title`. */}
+                <span className="agent-card-name" title={name}>
+                  {name}
+                </span>
+                {child.kind === 'subagent' && <span className="agent-child-tag">sub-agent</span>}
+                <span className="agent-card-right">
+                  {elapsed && <span title={`running for ${elapsed}`}>{elapsed}</span>}
+                  {childContext && (
+                    <span title={`${child.contextTokens} tokens in the context window`}>
+                      {childContext}
+                    </span>
+                  )}
+                </span>
+              </div>
+              {body && (
+                <div className="agent-card-doing" title={body}>
+                  {child.kind === 'shell' && child.description === null ? `$ ${body}` : body}
+                </div>
+              )}
+            </button>
+          </li>
+        )
+      })}
+      </Fragment>
     )
   }
 
@@ -1576,28 +1569,41 @@ export function AgentSidebar({
   // A session that leaves the list lingers a moment so its card can go green
   // and dissolve (mesa task 1554); `agentCard.ts` holds the bookkeeping.
   const [lingering, setLingering] = useState<Lingering[]>([])
-  const prevSessions = useRef<AgentSession[]>([])
   // When each id was first shown: a card flies in only inside `ENTER_MS` of it.
   const [seen, setSeen] = useState<Record<string, number>>({})
+  // The same for each session's children, which are cards of their own
+  // (mesa task 1561); their keys share `seen` with the session ids.
+  const [childLingering, setChildLingering] = useState<ChildLingering[]>([])
+  const prevSessions = useRef<AgentSession[]>([])
   useEffect(() => {
     if (sessions === null) return
     // Captured here: React may run the updater after the ref is reassigned.
     const prev = prevSessions.current
     const now = Date.now()
+    const rows = childRowsOf(sessions, now)
     setLingering((l) => reconcileLingering(l, prev, sessions, now))
-    setSeen((s) => markSeen(s, sessions, now))
+    setChildLingering((l) => reconcileChildLingering(l, childRowsOf(prev, now), rows, now))
+    setSeen((s) =>
+      markSeenKeys(
+        markSeen(s, sessions, now),
+        rows.map((r) => r.key),
+        now,
+      ),
+    )
     prevSessions.current = sessions
   }, [sessions])
   useEffect(() => {
-    const wait = nextExpiry(lingering, Date.now())
+    const wait = nextExpiry([...lingering, ...childLingering], Date.now())
     if (wait === null) return
     const current = prevSessions.current
-    const t = setTimeout(
-      () => setLingering((l) => reconcileLingering(l, [], current, Date.now())),
-      wait,
-    )
+    const t = setTimeout(() => {
+      setLingering((l) => reconcileLingering(l, [], current, Date.now()))
+      setChildLingering((l) =>
+        reconcileChildLingering(l, [], childRowsOf(current, Date.now()), Date.now()),
+      )
+    }, wait)
     return () => clearTimeout(t)
-  }, [lingering])
+  }, [lingering, childLingering])
   const { agents, leaving } = withLingering(live, lingering)
   const openIds = collectLeafIds(root)
   // The open agent panes, for the live conversation's view line (mesa task
@@ -1638,6 +1644,7 @@ export function AgentSidebar({
     agents,
     leaving,
     seen,
+    childLingering,
     liveAgentId: liveAgentId(liveState),
     sessionsLoaded: sessions !== null,
     error,

@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import {
   LINGER_MS,
+  STALE_CHILD_MS,
+  cardChildren,
+  childKey,
+  childKeys,
+  childRowsOf,
+  reconcileChildLingering,
+  visibleChildren,
   agentChips,
   agentColor,
   elapsedSince,
@@ -12,6 +19,7 @@ import {
   withLingering,
   type Lingering,
 } from './agentCard'
+import type { AgentChild } from './types/AgentChild'
 import type { AgentSession } from './types/AgentSession'
 
 const s = (sessionId: string, startedAt = 0) => ({ sessionId, startedAt }) as AgentSession
@@ -105,5 +113,79 @@ describe('markSeen / isEntering', () => {
     const seen = markSeen({}, [s('a')], 0)
     expect(isEntering(seen, 'a', ENTER_MS + 5000)).toBe(false)
     expect(markSeen(seen, [s('a')], ENTER_MS + 5000)).toBe(seen)
+  })
+})
+
+const NOW = Date.parse('2026-10-01T12:00:00Z')
+const ts = (ms: number) => new Date(ms).toISOString().slice(0, 19).replace('T', ' ')
+const kid = (over: Partial<AgentChild>) =>
+  ({ id: null, kind: 'shell', name: 'sleep 9', state: 'running', startedAt: null, ...over }) as AgentChild
+
+describe('visibleChildren', () => {
+  const week = ts(NOW - 7 * 86_400_000)
+  it('drops a running child a week old under a done session — the ghost', () => {
+    const done = { state: 'done', children: [kid({ startedAt: week })] }
+    expect(visibleChildren(done, NOW)).toEqual([])
+  })
+  it('keeps recent work in flight under a done session, and unknown ages', () => {
+    const recent = kid({ startedAt: ts(NOW - STALE_CHILD_MS + 60_000) })
+    const unknown = kid({ name: 'x' })
+    expect(visibleChildren({ state: 'done', children: [recent, unknown] }, NOW)).toHaveLength(2)
+  })
+  it('keeps a finished child under a done session', () => {
+    const fin = kid({ state: 'finished', startedAt: week })
+    expect(visibleChildren({ state: 'done', children: [fin] }, NOW)).toEqual([fin])
+  })
+  it('never filters a session that is not done', () => {
+    const c = kid({ startedAt: week })
+    expect(visibleChildren({ state: 'working', children: [c] }, NOW)).toEqual([c])
+  })
+})
+
+describe('childKey', () => {
+  it('uses the transcript id, else the command, never an index', () => {
+    expect(childKey('p', kid({ id: 'agent-1' }))).toBe('p|agent-1')
+    expect(childKey('p', kid({}))).toBe('p|cmd:sleep 9')
+  })
+})
+
+describe('childKeys', () => {
+  it('numbers identical shells so two parallel ones stay two cards', () => {
+    const a = kid({})
+    const b = kid({})
+    const other = kid({ name: 'ls' })
+    expect(childKeys('p', [a, other, b])).toEqual(['p|cmd:sleep 9', 'p|cmd:ls', 'p|cmd:sleep 9#2'])
+  })
+  it('keeps both through lingering and card order', () => {
+    const p = { sessionId: 'p', state: 'working', children: [kid({}), kid({})] } as AgentSession
+    const rows = childRowsOf([p], NOW)
+    expect(new Set(rows.map((r) => r.key)).size).toBe(2)
+    const l = reconcileChildLingering([], rows, [], NOW)
+    expect(cardChildren('p', [], l).map((c) => c.key)).toEqual(rows.map((r) => r.key))
+    expect(cardChildren('p', p.children, []).map((c) => c.key)).toEqual(rows.map((r) => r.key))
+  })
+})
+
+describe('child lingering', () => {
+  const parent = (children: AgentChild[]) =>
+    ({ sessionId: 'p', state: 'working', children }) as AgentSession
+  const a = kid({ id: 'agent-a', kind: 'subagent' })
+  const b = kid({})
+  it('keeps a vanished child for LINGER_MS, then drops it', () => {
+    const prev = childRowsOf([parent([a, b])], NOW)
+    const next = childRowsOf([parent([a])], NOW)
+    const l = reconcileChildLingering([], prev, next, NOW)
+    expect(l.map((x) => x.row.key)).toEqual(['p|cmd:sleep 9'])
+    expect(reconcileChildLingering(l, next, next, NOW + 100)).toBe(l)
+    expect(reconcileChildLingering(l, next, next, NOW + LINGER_MS)).toEqual([])
+  })
+  it('lists live children first, then dissolving ones flagged leaving', () => {
+    const prev = childRowsOf([parent([a, b])], NOW)
+    const l = reconcileChildLingering([], prev, childRowsOf([parent([a])], NOW), NOW)
+    expect(cardChildren('p', [a], l).map((c) => [c.key, c.leaving])).toEqual([
+      ['p|agent-a', false],
+      ['p|cmd:sleep 9', true],
+    ])
+    expect(cardChildren('other', [], l)).toEqual([])
   })
 })

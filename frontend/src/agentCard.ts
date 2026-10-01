@@ -2,8 +2,11 @@
 // behind them, kept out of `AgentSidebar.tsx` so they can be unit-tested.
 // The clock is an argument everywhere, exactly as in `agentChild.ts`.
 
+import type { AgentChild } from './types/AgentChild'
 import type { AgentSession } from './types/AgentSession'
 import type { Project } from './types/Project'
+import { orderedChildren } from './agentChild'
+import { parseTimestamp } from './time'
 
 /** How long a card that left the list stays, green, before it is gone — the
  * length of the CSS dissolve (`agent-card-leaving`), so nothing sits invisible. */
@@ -58,7 +61,7 @@ export function reconcileLingering(
 }
 
 /** Ms until the earliest lingering card is due to go, or `null` for none. */
-export function nextExpiry(lingering: Lingering[], now: number): number | null {
+export function nextExpiry(lingering: { leftAt: number }[], now: number): number | null {
   if (lingering.length === 0) return null
   return Math.max(0, Math.min(...lingering.map((l) => l.leftAt + LINGER_MS)) - now)
 }
@@ -88,10 +91,23 @@ export function markSeen(
   sessions: AgentSession[],
   now: number,
 ): Record<string, number> {
-  const fresh = sessions.filter((s) => !(s.sessionId in seen))
+  return markSeenKeys(
+    seen,
+    sessions.map((s) => s.sessionId),
+    now,
+  )
+}
+
+/** `markSeen` over bare keys — a session's id or a child's `childKey`. */
+export function markSeenKeys(
+  seen: Record<string, number>,
+  keys: string[],
+  now: number,
+): Record<string, number> {
+  const fresh = keys.filter((k) => !(k in seen))
   if (fresh.length === 0) return seen
   const next = { ...seen }
-  for (const s of fresh) next[s.sessionId] = now
+  for (const k of fresh) next[k] = now
   return next
 }
 
@@ -113,4 +129,110 @@ export function elapsedSince(startedAt: number, now: number): string {
   if (mins < 60) return `${mins}m`
   const hours = Math.floor(mins / 60)
   return hours < 24 ? `${hours}h` : `${Math.floor(hours / 24)}d`
+}
+
+// --- Sub-agents as their own cards (mesa task 1561) ---------------------
+//
+// A session's `children` are drawn as cards of their own right under it, so
+// each needs a stable key (for the enter flash and the dissolve) and the
+// same lingering bookkeeping a session has.
+
+/** A running child older than this under a `done` session is a leaked
+ * process, not work in flight (see `visibleChildren`). */
+export const STALE_CHILD_MS = 60 * 60 * 1000
+
+/**
+ * The children of `a` worth a card. A `done` session may still hold work in
+ * flight (mesa task 571/802), so its running children stay — but one running
+ * for over `STALE_CHILD_MS` under a finished session is a shell nothing
+ * ever reaped (a hung pipeline in a process that outlived its work), and
+ * showing it as "running" for days is the ghost mesa task 1561 reported.
+ * A child with no start time is kept: absence is not age.
+ */
+export function visibleChildren(
+  a: Pick<AgentSession, 'state' | 'children'>,
+  now: number,
+): AgentChild[] {
+  if (a.state !== 'done') return a.children
+  return a.children.filter((c) => {
+    if (c.state !== 'running' || c.startedAt === null) return true
+    const started = parseTimestamp(c.startedAt).getTime()
+    return !Number.isFinite(started) || now - started < STALE_CHILD_MS
+  })
+}
+
+/** A child's identity across polls: its parent plus the transcript id, or the
+ * command line for a shell (`agentChild.ts::childPaneId`'s rule) — never an
+ * index, since cards reorder. */
+export function childKey(parentSessionId: string, child: AgentChild): string {
+  return `${parentSessionId}|${child.id ?? `cmd:${child.name}`}`
+}
+
+/** `childKey` for every child of one session, in the given (server) order,
+ * the second and later of an identical key suffixed `#2`, `#3` — two parallel
+ * shells running the same command line are two cards, not one. */
+export function childKeys(parentSessionId: string, children: AgentChild[]): string[] {
+  const count = new Map<string, number>()
+  return children.map((child) => {
+    const base = childKey(parentSessionId, child)
+    const n = (count.get(base) ?? 0) + 1
+    count.set(base, n)
+    return n === 1 ? base : `${base}#${n}`
+  })
+}
+
+/** One child with the session it hangs off. */
+export type ChildRow = { key: string; parent: string; child: AgentChild }
+
+/** Every visible child of every session, flat. */
+export function childRowsOf(sessions: AgentSession[], now: number): ChildRow[] {
+  return sessions.flatMap((s) => {
+    const children = visibleChildren(s, now)
+    const keys = childKeys(s.sessionId, children)
+    return children.map((child, i) => ({ key: keys[i], parent: s.sessionId, child }))
+  })
+}
+
+/** A child that dropped off the list, kept a moment so it can dissolve. */
+export type ChildLingering = { row: ChildRow; leftAt: number }
+
+/** `reconcileLingering`, for children. */
+export function reconcileChildLingering(
+  lingering: ChildLingering[],
+  prev: ChildRow[],
+  next: ChildRow[],
+  now: number,
+): ChildLingering[] {
+  const live = new Set(next.map((r) => r.key))
+  const kept = lingering.filter((l) => !live.has(l.row.key) && now - l.leftAt < LINGER_MS)
+  const have = new Set(kept.map((l) => l.row.key))
+  const added = prev
+    .filter((r) => !live.has(r.key) && !have.has(r.key))
+    .map((row) => ({ row, leftAt: now }))
+  if (added.length === 0 && kept.length === lingering.length) return lingering
+  return [...kept, ...added]
+}
+
+/** The cards under one session, in order: its live children
+ * (`orderedChildren`), then the lingering ones, flagged `leaving`. A child
+ * that finished but is still listed is not `leaving` — it is green but
+ * stays until it drops off. */
+export function cardChildren(
+  parentSessionId: string,
+  live: AgentChild[],
+  lingering: ChildLingering[],
+): { key: string; child: AgentChild; leaving: boolean }[] {
+  // Keys come from the server's order, before `orderedChildren` reshuffles.
+  const keys = childKeys(parentSessionId, live)
+  const keyOf = new Map(live.map((child, i) => [child, keys[i]]))
+  const shown = orderedChildren(live).map((child) => ({
+    key: keyOf.get(child) as string,
+    child,
+    leaving: false,
+  }))
+  const have = new Set(shown.map((c) => c.key))
+  const gone = lingering
+    .filter((l) => l.row.parent === parentSessionId && !have.has(l.row.key))
+    .map((l) => ({ key: l.row.key, child: l.row.child, leaving: true }))
+  return [...shown, ...gone]
 }

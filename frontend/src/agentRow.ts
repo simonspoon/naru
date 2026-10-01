@@ -64,16 +64,6 @@ export function agentHeadline(
 }
 
 /**
- * The card's `N running below` meta fragment: how many nested children are
- * still running. `null` for none, so the fragment is dropped rather than
- * reading `0 running below`.
- */
-export function runningBelow(children: { state: string }[]): string | null {
-  const n = children.filter((c) => c.state === 'running').length
-  return n === 0 ? null : `${n} running below`
-}
-
-/**
  * The tint a top-level card wears (mesa task 1502), and the colour of its
  * dot: `active` while the session is `working` (or, with no `state` at all,
  * `busy`) and its process is busy, `stale` for the sticky `idle` + `working`

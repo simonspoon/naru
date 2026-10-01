@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { agentHeadline, agentTint, formatContextTokens, responsePreview, runningBelow } from './agentRow'
+import { agentHeadline, agentTint, formatContextTokens, responsePreview } from './agentRow'
 
 describe('formatContextTokens', () => {
   it('shows a sub-1k count exactly', () => {
@@ -69,16 +69,6 @@ describe('agentHeadline (mesa task 1484)', () => {
     const stale = { activity: 'Adding tests', lastResponse: 'All done.' }
     expect(agentHeadline({ pid: 1, state: 'done', ...stale })).toBe('All done.')
     expect(agentHeadline({ pid: null, state: 'working', ...stale })).toBe('All done.')
-  })
-})
-
-describe('runningBelow', () => {
-  it('counts running children only and drops the fragment at zero', () => {
-    expect(runningBelow([{ state: 'running' }, { state: 'finished' }, { state: 'running' }])).toBe(
-      '2 running below',
-    )
-    expect(runningBelow([{ state: 'finished' }])).toBeNull()
-    expect(runningBelow([])).toBeNull()
   })
 })
 
