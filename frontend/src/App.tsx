@@ -3,6 +3,7 @@ import './App.css'
 import { getCcUsage, getNaruVersion, getTask, listInbox } from './api'
 import { AgentSidebar } from './components/AgentSidebar'
 import { CommandPalette } from './components/CommandPalette'
+import { DoneToasts } from './components/DoneToasts'
 import { PhoneTabBar } from './components/PhoneTabBar'
 import { PtyPool } from './components/PtyPool'
 import { Sidebar } from './components/Sidebar'
@@ -637,6 +638,7 @@ function App() {
 
   return (
     <>
+      <DoneToasts />
       <header>
         <a className="brand" href="#/">
           <svg className="brand-mark" viewBox="0 0 64 64" role="img" aria-hidden="true">

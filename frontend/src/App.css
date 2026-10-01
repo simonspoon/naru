@@ -11349,3 +11349,124 @@ body.live-panel-ratio-resizing .live-panel-divider {
   background: rgba(255, 180, 68, 0.12);
   border-color: rgba(255, 180, 68, 0.4);
 }
+
+/* Task-done toasts (mesa task 1556): a small stack under the header's right
+   edge. The card is a link to the task; the sparkle is one glow sweep. */
+.done-toasts {
+  position: fixed;
+  top: 3.5rem;
+  right: 1rem;
+  z-index: 1400;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  width: min(20rem, calc(100vw - 2rem));
+  pointer-events: none;
+}
+
+.done-toast {
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.6rem 0.85rem;
+  background: var(--panel-raised);
+  border: 1px solid var(--green);
+  color: var(--text);
+  text-decoration: none;
+  pointer-events: auto;
+  box-shadow: 0 0 14px rgba(43, 255, 156, 0.28);
+  animation:
+    done-toast-in 0.25s ease-out,
+    done-toast-glow 2.4s ease-in-out 0.25s 2;
+}
+
+.done-toast::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    105deg,
+    transparent 35%,
+    rgba(43, 255, 156, 0.22) 50%,
+    transparent 65%
+  );
+  transform: translateX(-100%);
+  animation: done-toast-sweep 1.2s ease-out 0.2s 1 forwards;
+  pointer-events: none;
+}
+
+.done-toast:hover {
+  border-color: var(--cyan);
+}
+
+.done-toast-check {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 1.6rem;
+  height: 1.6rem;
+  border-radius: 50%;
+  color: var(--bg);
+  background: var(--green);
+  font-weight: bold;
+}
+
+.done-toast-body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.done-toast-title {
+  color: var(--green);
+  font-family: var(--font-display);
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.done-toast-name {
+  color: var(--text-h);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.done-toast-project {
+  color: var(--muted);
+  font-size: 0.8rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@keyframes done-toast-in {
+  from {
+    opacity: 0;
+    transform: translateX(1rem);
+  }
+}
+
+@keyframes done-toast-glow {
+  50% {
+    box-shadow: 0 0 24px rgba(43, 255, 156, 0.5);
+  }
+}
+
+@keyframes done-toast-sweep {
+  to {
+    transform: translateX(100%);
+  }
+}
+
+/* Reduced motion keeps the toast and its static glow; only the movement goes. */
+@media (prefers-reduced-motion: reduce) {
+  .done-toast {
+    animation: none;
+  }
+  .done-toast::after {
+    display: none;
+  }
+}

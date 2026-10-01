@@ -119,7 +119,7 @@ The code is the source of truth. These are the invariants you must not break:
 - **Frontend unit tests cover the pure logic modules, not components.** vitest
   (jsdom) over `frontend/src/*.test.ts` — no React testing library, no component
   rendering. The subject is the side-effect-free modules the components import
-  (`agentChat`, `agentChild`, `agentProject`, `agentRow`, `agentSidebarWidth`, `artifactDraft`, `audioDraft`, `boardView`, `ccOrigin`, `ccTab`, `clipboardFiles`,
+  (`agentChat`, `agentChild`, `agentProject`, `agentRow`, `agentSidebarWidth`, `artifactDraft`, `audioDraft`, `boardView`, `ccOrigin`, `ccTab`, `clipboardFiles`, `doneToast`,
   `editorInput`, `editorStatus`, `fileCsv`, `fileDirty`, `fileFind`, `fileHtml`, `fileImage`,
   `fileSearch`, `fileTabs`, `gitRepos`, `filesTreeWidth`, `inboxArchive`, `inboxFilter`, `inboxKind`, `inboxOrigin`, `inboxQueue`, `inboxRead`,
   `keyboardScope`, `keymap`, `keymapDraft`,
