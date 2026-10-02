@@ -1,7 +1,6 @@
 # Config (`~/.mesa/config.json`)
 
-Naru starts a coding agent from exactly seven places, and makes one
-synchronous model call (the workflow `prompt` node, the eighth key). Each one's command line
+Naru starts a coding agent from exactly seven places. Each one's command line
 is a **template** in `~/.mesa/config.json`, so the program, its flags, the
 persona and the slash command can all change without rebuilding Naru:
 
@@ -13,7 +12,6 @@ persona and the slash command can all change without rebuilding Naru:
 | `live-agent` | `mesa live start`, `POST /api/live` — the session that holds a spoken conversation (`docs/live.md`) | `claude --bg --agent naru-live --name {name} -- {prompt}` |
 | `live-summary` | `live stop`'s CLI handler and the API's stop route — the short-lived agent that writes a live conversation's memory once it ends (mesa task 921, `docs/live.md`) | `claude --bg --name {name} -- {prompt}` |
 | `live-dream` | The pass that tidies the live notebook — `mesa live memory dream` explicitly, and on its own at a handoff or when a conversation ends once `live::dream_wanted` says the notebook needs it (mesa task 1155): merges duplicate entries, deletes superseded ones, one guarded command at a time (mesa task 1152, `docs/live.md`) | `claude --bg --name {name} -- {prompt}` |
-| `workflow-prompt` | A workflow's **`prompt` node** (mesa task 1607, `docs/workflows.md`): one synchronous model call whose stdout is the node's output. Not a background session — `agents::run_sync` waits for it, with the node's timeout. Offers `{model}`, `{thinking}` and `{prompt}` | a multi-line bash template: `claude -p --model "$model" --settings '{"alwaysThinkingEnabled":…}' -- {prompt}`, or `ollama run` for a `local:<name>` model (below) |
 | `retro` | `serve --watch-retro` every `watchers.retro-interval-hours`, and `mesa retro run` — the session retrospective that reviews finished task sessions for friction and files suggestions into the inbox, proposing only (mesa task 1158, `docs/retro.md`) | `claude --bg --agent naru-retro --name {name} -- "Run mesa session retrospective {id}."` |
 
 The defaults are **plain, editable command lines** (mesa task 1141): the
@@ -32,55 +30,10 @@ from the vocabulary (see *Retired placeholders* below).
     "live-agent":     "claude --bg --agent naru-live --name {name} -- {prompt}",
     "live-summary":   "claude --bg --name {name} -- {prompt}",
     "live-dream":     "claude --bg --name {name} -- {prompt}",
-    "retro":          "claude --bg --agent naru-retro --name {name} -- \"Run mesa session retrospective {id}.\"",
-    "workflow-prompt": "claude -p --model {model} -- {prompt}"
+    "retro":          "claude --bg --agent naru-retro --name {name} -- \"Run mesa session retrospective {id}.\""
   }
 }
 ```
-
-`workflow-prompt` (mesa task 1607) is the one template that is not a spawn:
-`agents::run_sync`, the synchronous sibling of `spawn_bg`, runs it under
-`bash -c` in the workflow's working directory, waits (the node's
-`timeout_secs`, default 600; past it the whole process group is killed) and
-reads stdout. Its built-in default is a short multi-line script switching on
-`{model}`:
-
-```bash
-model={model}
-case "$model" in
-  local:*)
-    printf '%s' {prompt} | ollama run "${model#local:}"
-    ;;
-  *)
-    if [ {thinking} = on ]; then
-      settings='{"alwaysThinkingEnabled":true}'
-    else
-      settings='{"alwaysThinkingEnabled":false}'
-    fi
-    claude -p --model "$model" --tools "" --strict-mcp-config --settings "$settings" -- {prompt}
-    ;;
-esac
-```
-
-The call has **no tools**: `--tools ""` disables every built-in tool and
-`--strict-mcp-config` (with no `--mcp-config`) every MCP server, because a
-prompt node is a pure text call over *untrusted* upstream text and a model that
-could act on it would be a prompt-injection path to the shell. Checked against
-the real `claude -p --model haiku`: it still answers, and a request to `touch`
-a file leaves none (without the flag the file is created).
-
-`{model}` is `haiku`, `sonnet`, `opus` or `local:<name>`; `{thinking}` is `on`
-or `off`; `{prompt}` is the node's prompt text, a blank line, then the node's
-input (just the prompt when the input is empty) — one quoted value, so a
-hostile input is a string, never syntax. Thinking is the documented
-`alwaysThinkingEnabled` setting passed with `--settings`; it was checked
-against the real `claude -p --model haiku`, which accepts both forms. A local
-model has no such switch, so `{thinking}` is ignored there. The
-`MESA_CLAUDE_BIN` seam works for this default as for every other: because
-`claude` is not the script's first word, `run_sync` defines a `claude()` shell
-function that calls the stub for that one run. A configured template runs as
-written. A missing binary is bash's own `command not found`, which the node
-reports as its failure.
 
 `live-agent`'s default is the union of the two shapes above it, because a live
 session is both a Naru record (so it has an `{id}` and a `{name}`) *and* a
@@ -203,9 +156,7 @@ knows about:
 | --- | --- | --- |
 | `{id}` | watchers, `retro`, `live-agent`, `live-summary`, `live-dream` | the task id / inbox item id / retro run id / live session id (for `live-dream`, the newest session's; empty on an install that has never held one) |
 | `{name}` | watchers, `retro`, `live-agent`, `live-summary`, `live-dream` | the session name Naru derives — `<project>: <task name>` (todo-watcher), `inbox <id>: <first body line>` (**untrusted text**), `naru retro <id>`, the live session's own name, or the literal `live memory dream` |
-| `{prompt}` | `agent-spawn`, `live-agent`, `live-summary`, `live-dream`, `workflow-prompt` | the POST body's `prompt` (`agent-spawn`; absent when omitted) / the live agent's, summariser's or dream pass's instruction block, always present / the workflow node's prompt, a blank line and its input (`workflow-prompt`) |
-| `{model}` | `workflow-prompt` | the node's `model`: `haiku`, `sonnet`, `opus` or `local:<name>` |
-| `{thinking}` | `workflow-prompt` | `on` or `off`, the node's `thinking` flag |
+| `{prompt}` | `agent-spawn`, `live-agent`, `live-summary`, `live-dream` | the POST body's `prompt` (`agent-spawn`; absent when omitted) / the live agent's, summariser's or dream pass's instruction block, always present |
 
 ### Quoted for where it sits
 

@@ -3,7 +3,8 @@
 //! [`WorkflowStep`] per node. **The graph decides what runs, never an
 //! agent** — order is a topological sort with ties broken by node id, a
 //! `branch` node's verdict picks which of its edges are active, and the only
-//! model call anywhere is a `prompt` node's one `agents::run_sync`.
+//! model call anywhere is a `prompt` node's one `llm::complete` (a direct
+//! HTTP request to a model API — never a Claude Code process).
 //!
 //! Storage lives in `Store`; this module is execution, so it follows
 //! `scripts.rs` and `hooks.rs`: it owns processes, `Store` owns rows. The
@@ -33,7 +34,7 @@ use crate::core::types::{
     WorkflowNodeKind, WorkflowRun, WorkflowRunStatus, WorkflowStep, WorkflowStepStatus,
     WorkflowTrigger, WorkflowView,
 };
-use crate::core::{agents, config, library, scripts};
+use crate::core::{agents, config, llm, scripts};
 
 /// A step's `output` (and a `cli` node's captured stdout) is capped at 64 KiB,
 /// the scripts' own cap.
@@ -45,12 +46,12 @@ pub const DEFAULT_PROMPT_TIMEOUT_SECS: u64 = 600;
 /// `NARU_INPUT` is exported only up to this size: a process environment has
 /// a hard limit, and stdin always carries the whole input anyway.
 const ENV_INPUT_MAX: usize = 64 * 1024;
-/// The most text a node may pass as **argv or environment** — a `prompt`
-/// node's prompt (one quoted word in the `bash -c` script) and the sum of a
-/// `script` node's values (each rides as `$n` and two `*_ARG_*` variables).
-/// Over it the node fails with a message naming the limit, rather than the
-/// OS refusing the exec with `Argument list too long`. A `cli` node has no
-/// such limit: its input rides on stdin.
+/// The most text a `script` node may pass as **argv or environment**: the sum
+/// of its values (each rides as `$n` and two `*_ARG_*` variables). Over it
+/// the node fails with a message naming the limit, rather than the OS
+/// refusing the exec with `Argument list too long`. A `cli` node has no such
+/// limit (its input rides on stdin), nor has a `prompt` node (its request
+/// body rides on curl's stdin).
 const ARG_INPUT_MAX: usize = 64 * 1024;
 
 /// How the engine reaches the store: lock, run `f`, unlock. Implemented for
@@ -673,35 +674,14 @@ fn run_node<A: StoreAccess>(
             } else {
                 format!("{prompt}\n\n{input}")
             };
-            if full.len() > ARG_INPUT_MAX {
-                return Err(format!(
-                    "the prompt and its input are {} bytes, over the {ARG_INPUT_MAX}-byte limit \
-                     for a prompt node (it travels as one argument); shorten the input upstream",
-                    full.len()
-                ));
-            }
             let timeout = cfg
                 .get("timeout_secs")
                 .and_then(Value::as_u64)
                 .unwrap_or(DEFAULT_PROMPT_TIMEOUT_SECS);
-            let prompts = access
-                .with(|s| library::prompts(s))
-                .map_err(|e| e.to_string())?;
-            let thinking = if cfg.get("thinking").and_then(Value::as_bool) == Some(true) {
-                "on"
-            } else {
-                "off"
-            };
-            let out = agents::run_sync(
-                config::WORKFLOW_PROMPT,
-                cwd,
-                &config::Vars {
-                    model: Some(str_of("model")),
-                    thinking: Some(thinking),
-                    prompt: Some(&full),
-                    prompts: Some(&prompts),
-                    ..Default::default()
-                },
+            let out = llm::complete(
+                str_of("model"),
+                cfg.get("thinking").and_then(Value::as_bool) == Some(true),
+                &full,
                 Duration::from_secs(timeout),
             )?;
             Ok((out.trim().to_string(), None))
@@ -1538,40 +1518,6 @@ mod tests {
         let big = "x".repeat(ARG_INPUT_MAX + 1);
         let run = run_workflow(&st, wf, WorkflowTrigger::Manual, &big).unwrap();
         assert!(run.steps[1].error.as_deref().unwrap().contains("limit"));
-    }
-
-    #[test]
-    fn an_oversized_prompt_fails_the_node_before_any_process() {
-        let (st, _d) = store();
-        let wf = st.with(|s| {
-            let wf = s.create_workflow(None, "Big", None).unwrap().id;
-            let t = node(
-                s,
-                wf,
-                WorkflowNodeKind::Trigger,
-                "T",
-                json!({"mode": "manual"}),
-            );
-            let p = node(
-                s,
-                wf,
-                WorkflowNodeKind::Prompt,
-                "P",
-                json!({"model": "haiku", "prompt": "p"}),
-            );
-            s.create_workflow_edge(wf, t, p, None).unwrap();
-            wf
-        });
-        let big = "x".repeat(ARG_INPUT_MAX);
-        let run = run_workflow(&st, wf, WorkflowTrigger::Manual, &big).unwrap();
-        assert_eq!(run.steps[1].status, WorkflowStepStatus::Failed);
-        assert!(
-            run.steps[1]
-                .error
-                .as_deref()
-                .unwrap()
-                .contains("byte limit")
-        );
     }
 
     #[test]

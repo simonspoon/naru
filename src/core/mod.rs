@@ -15,6 +15,7 @@ pub mod inbox_triage;
 pub mod library;
 pub mod listen;
 pub mod live;
+pub mod llm;
 pub mod look;
 pub mod migrate;
 pub mod notify;

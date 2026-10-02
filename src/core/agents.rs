@@ -774,7 +774,6 @@ fn spawn_for(
             name,
             prompt,
             prompts: Some(prompts),
-            ..Default::default()
         },
     )?;
     Ok(if configured.is_none() {
@@ -832,58 +831,6 @@ pub fn spawn_bg(
     prompts: &config::Prompts,
 ) -> Result<Option<String>, String> {
     run_script(&spawn_for(action, id, name, prompt, prompts)?, dir)
-}
-
-/// Runs one **synchronous** model call — the `workflow-prompt` action
-/// (mesa task 1607) — and returns its stdout.
-///
-/// The sibling of [`spawn_bg`] and the same single chokepoint: the script is
-/// resolved from the configured (or default) template through
-/// `config::resolve`, so `model`, `thinking` and `prompt` reach it only as
-/// shell-quoted `{placeholder}` values, and the `MESA_CLAUDE_BIN` seam is the
-/// same default-template-only one. The difference is that this waits, through
-/// [`capture`]: a nonzero exit is `Err` carrying the script's stderr (a
-/// missing binary is bash's own `claude: command not found`, exit 127) and
-/// so is a run past `timeout`.
-///
-/// The store is never involved: callers hold no lock across this call.
-pub fn run_sync(
-    action: &str,
-    dir: &str,
-    vars: &config::Vars,
-    timeout: std::time::Duration,
-) -> Result<String, String> {
-    let configured = config::command_for(action)?;
-    let template = match &configured {
-        Some(t) => t.as_str(),
-        None => config::default_command(action)
-            .ok_or_else(|| format!("no default command for {action}"))?,
-    };
-    let mut script = config::resolve(action, template, vars)?;
-    if configured.is_none() && claude_bin() != "claude" {
-        // The stub seam for a default template whose `claude` is not the
-        // first word: a shell function shadows the program for this run only.
-        script = format!(
-            "claude() {{ '{}' \"$@\"; }}\n{script}",
-            claude_bin().replace('\'', "'\\''")
-        );
-    }
-    let mut cmd = Command::new("bash");
-    cmd.arg("-c").arg(&script).current_dir(dir);
-    let out = capture(cmd, None, timeout)?;
-    if out.code != 0 {
-        // `ollama` draws a progress spinner with escapes and carriage returns
-        // on stderr; keep the last few real lines, escapes stripped.
-        let stderr = strip_ansi(&String::from_utf8_lossy(&out.stderr));
-        let tail: Vec<&str> = stderr
-            .split(['\n', '\r'])
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .collect();
-        let tail = tail[tail.len().saturating_sub(3)..].join(" | ");
-        return Err(format!("the model call exited {}: {tail}", out.code));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// What [`capture`] read off a finished process.
