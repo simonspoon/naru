@@ -300,8 +300,8 @@ export function DockLayout({
 
 /**
  * The header's layout strip: the saved layouts as a switcher, a "+" that saves
- * the current arrangement under a name, and the panels menu — every panel with
- * whether it is showing, which is how a closed one comes back.
+ * the current arrangement under a name, and the panels menu — the closed
+ * panels only, which is how one comes back (click, or drag it where it goes).
  */
 export function DockBar({
   dock,
@@ -313,6 +313,8 @@ export function DockBar({
   const { store, setStore, state, update } = dock
   const [naming, setNaming] = useState<string | null>(null)
   const [menuOpen, setMenuOpen] = useState(false)
+  // A row of the menu is being dragged out: the menu is hidden, not closed.
+  const [menuDrag, setMenuDrag] = useState(false)
   // The per-layout menu (right-click a layout, or its ⋮ button) and the layout
   // being renamed in place.
   const [layoutMenu, setLayoutMenu] = useState<string | null>(null)
@@ -348,6 +350,20 @@ export function DockBar({
       document.removeEventListener('keydown', onKey)
     }
   }, [menuOpen])
+
+  // A drop that opens the dragged panel removes its row, so the row's own
+  // dragend never fires; the drop reaches the document (nothing stops it), which
+  // is where the hidden menu is finally closed.
+  useEffect(() => {
+    if (!menuDrag) return
+    const done = () => {
+      endPanelDrag()
+      setMenuDrag(false)
+      setMenuOpen(false)
+    }
+    document.addEventListener('drop', done)
+    return () => document.removeEventListener('drop', done)
+  }, [menuDrag])
 
   useEffect(() => {
     if (layoutMenu === null) return
@@ -537,27 +553,45 @@ export function DockBar({
           ⋯
         </button>
         {menuOpen && (
-          <div className="dock-menu-list" role="menu">
-            {PANEL_IDS.map((p) => {
-              const docked = !closed.includes(p)
-              return (
-                <button
-                  key={p}
-                  type="button"
-                  role="menuitemcheckbox"
-                  aria-checked={docked}
-                  disabled={locked.has(p) && docked}
-                  onClick={() => {
-                    update((s) => (docked ? closePanel(s, p) : revealPanel(s, p)))
+          <div className={`dock-menu-list${menuDrag ? ' dragging' : ''}`} role="menu">
+            {closed.length === 0 && <div className="dock-menu-empty">Every panel is open</div>}
+            {closed.map((p) => (
+              // A div, not a <button>: Firefox does not start a drag from a button.
+              <div
+                key={p}
+                role="menuitem"
+                tabIndex={0}
+                className="dock-menu-row"
+                draggable
+                title={`Open ${panelLabel(p)}, or drag it where you want it`}
+                onDragStart={(e) => {
+                  beginPanelDrag(e, p)
+                  // Hide, never unmount: this row is the drag source.
+                  setMenuDrag(true)
+                }}
+                onDragEnd={() => {
+                  endPanelDrag()
+                  setMenuDrag(false)
+                  setMenuOpen(false)
+                }}
+                onClick={() => {
+                  update((s) => revealPanel(s, p))
+                  setMenuOpen(false)
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault()
+                    update((s) => revealPanel(s, p))
                     setMenuOpen(false)
-                  }}
-                >
-                  <span className="dock-menu-check">{docked ? '✓' : ''}</span>
-                  {panelLabel(p)}
-                  {!docked && <span className="muted"> · closed</span>}
-                </button>
-              )
-            })}
+                  }
+                }}
+              >
+                <span className="dock-grip" aria-hidden="true">
+                  ⠿
+                </span>
+                {panelLabel(p)}
+              </div>
+            ))}
           </div>
         )}
       </div>

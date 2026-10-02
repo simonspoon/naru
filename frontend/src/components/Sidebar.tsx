@@ -218,7 +218,6 @@ export function Sidebar({
   collapsed,
   onCollapsedChange,
   dockZone,
-  panelsList,
   rail,
 }: {
   activeProjectId: number | null
@@ -245,7 +244,6 @@ export function Sidebar({
   // dock into above the nav items, the Panels list among them, and what the
   // collapsed nav shows in place of the bare expand handle.
   dockZone?: ReactNode
-  panelsList?: ReactNode
   rail?: ReactNode
 }) {
   const setCollapsed = onCollapsedChange
@@ -601,7 +599,6 @@ export function Sidebar({
         <a className={`nav-item${libraryActive ? ' active' : ''}`} href="#/library">
           <span className="nav-item-label">Library</span>
         </a>
-        {panelsList}
         <button
           type="button"
           className="nav-item nav-section"

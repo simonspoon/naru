@@ -17,8 +17,7 @@ import type { Update } from '../useDockStore'
 import { DockSlot } from './DockSlot'
 
 // The nav as a dock zone (mesa task 1574, docs/dock.md): the panels docked into
-// the left navigation, the Panels list that opens/places every panel, and the
-// slim rail the collapsed nav becomes.
+// the left navigation, and the slim rail the collapsed nav becomes.
 
 type Locked = ReadonlySet<PanelId>
 
@@ -100,56 +99,6 @@ export function NavZone({ state, update, locked }: { state: DockState; update: U
       })}
       {at === state.nav.length && <div className="nav-dock-line" />}
       {state.nav.length === 0 && <div className="nav-dock-empty">Dock a panel here</div>}
-    </div>
-  )
-}
-
-/** The nav's Panels section: every panel with an open/closed dot. A click opens
- *  it where it last sat; dragging a row out docks it where it is dropped. */
-export function NavPanels({
-  state,
-  navCollapsed,
-  locked,
-  onReveal,
-}: {
-  state: DockState
-  navCollapsed: boolean
-  locked: Locked
-  onReveal: (p: PanelId) => void
-}) {
-  return (
-    <div className="nav-panels" role="group" aria-label="Panels">
-      <div className="nav-panels-head">
-        <span>Panels</span>
-        <span>open ●</span>
-      </div>
-      {panelEntries(state, navCollapsed).map((e) => (
-        // A div, not a <button>: Firefox does not start a drag from a button.
-        <div
-          key={e.id}
-          role="button"
-          tabIndex={0}
-          className={`nav-panel-row${e.open ? ' open' : ''}`}
-          draggable={!locked.has(e.id)}
-          onDragStart={(ev) => beginPanelDrag(ev, e.id)}
-          onDragEnd={endPanelDrag}
-          onClick={() => onReveal(e.id)}
-          onKeyDown={(ev) => {
-            if (ev.key === 'Enter' || ev.key === ' ') {
-              ev.preventDefault()
-              onReveal(e.id)
-            }
-          }}
-          title={`Open ${e.label}, or drag it where you want it`}
-        >
-          <span className="dock-grip" aria-hidden="true">
-            ⠿
-          </span>
-          <span className="nav-panel-name">{e.label}</span>
-          <em>{e.where === 'nav' ? 'in nav' : e.where === 'closed' ? 'closed' : ''}</em>
-          <span className={`nav-panel-dot${e.open ? ' open' : ''}`} aria-label={e.open ? 'open' : 'closed'} />
-        </div>
-      ))}
     </div>
   )
 }

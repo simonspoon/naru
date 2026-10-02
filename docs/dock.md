@@ -18,7 +18,7 @@ or Rust surface.
 Each panel appears at most once. The phone tier (`usePhoneTier()`) is **not**
 docked and keeps its drawers, tab bar and the old live aside unchanged.
 
-## The nav zone, the Panels list and the rail (mesa task 1574)
+## The nav zone and the rail (mesa task 1574)
 
 `DockState.nav` is an ordered stack of panels docked into the left nav, above
 its links, outside the split tree; a panel is in a group **or** in `nav`.
@@ -32,11 +32,10 @@ as the rail's mini orb), and revealing one expands the nav — only then
 (`revealNeedsNav`): a board push or route change on any other panel never
 re-expands a nav the person collapsed.
 
-The nav's **Panels** list (after Library) shows every panel with an open dot and
-"in nav"/"closed". A click is `revealPanel`; dragging a row out docks it where
-it is dropped (a group edge or centre, or the nav zone). It replaces the old
-top-right chat and whiteboard toggles, which are no longer rendered when docked
-(the phone tier keeps them).
+There is no Panels list in the nav: the header `⋯` menu (see Close / reopen)
+is the one place that lists panels. It replaces the old top-right chat and
+whiteboard toggles, which are no longer rendered when docked (the phone tier
+keeps them).
 
 Collapsing the nav leaves a slim **rail**: the expand handle, a mini orb (a small
 `InlineOrb` sphere, no controls) that reacts exactly as the orb panel does, a
@@ -48,12 +47,12 @@ header) owns the mic level, playback level and indicator state and portals the
 orb panel and the rail's mini orb (`dockHosts` host `rail-orb`) from them, so
 closing Chat, moving the orb or collapsing the nav stops nothing — listening and
 the orb's reaction need no chat panel. On the dock tiers the free-floating orb
-is retired outright, panel open or closed (reopen it from the Panels list); the
+is retired outright, panel open or closed (reopen it from the header `⋯` menu); the
 phone tier, which has no dock, keeps the floating orb.
 
 ## Gestures
 
-- **Drag by the tab** (or, for any panel, by a nav item or a Panels row; the
+- **Drag by the tab** (or, for any panel, by a nav item or a row of the `⋯` menu; the
   in-flight drag is `lib/panelDrag.ts`). Dropping on a panel's body lights five zones
   (`computeDropEdge`'s rule: the middle 40% stacks, the outer ring is
   quartered): left/right/top/bottom split the target, the centre stacks the
@@ -65,7 +64,12 @@ phone tier, which has no dock, keeps the floating orb.
 - **Thin dividers** resize splits (the other pane surfaces' divider math,
   `MIN_PANE_PX` floor).
 - **Close / reopen.** A tab's × closes the panel; the header's `⋯` menu lists
-  every panel and reopens a closed one. A closed panel remembers where it sat
+  **only the closed panels** (`closedPanels`: in no group and not in the nav) —
+  opening or docking one removes its row, closing one puts it back, and with
+  none closed it says "Every panel is open". A click reopens a row where it sat;
+  dragging a row docks it where dropped (the same `panelDrag` flow as a tab).
+  The menu is hidden, not unmounted, while a row is dragged — unmounting the
+  drag source cancels the drag — and closes on drop or dragend. A closed panel remembers where it sat
   (`lastSpot`: beside the neighbour it left, or stacked with its tab mate) and
   reopens there, else on the root's right.
 - **Saved layouts.** The header switcher holds Talk, Review and Build plus any
@@ -84,8 +88,8 @@ phone tier, which has no dock, keeps the floating orb.
 
 | Piece | File | Owns |
 |---|---|---|
-| State | `frontend/src/dockLayout.ts` (+ `.test.ts`) | pure: types, `dropPanel`, `dockToNav`, `closePanel`, `revealPanel`, `isVisible`, `panelEntries` (the Panels list), presets, versioned parse/serialize, saved-layout CRUD (rename, delete, move, restore defaults) |
-| Nav | `frontend/src/components/NavDock.tsx` | the nav zone, the Panels list, the collapsed rail |
+| State | `frontend/src/dockLayout.ts` (+ `.test.ts`) | pure: types, `dropPanel`, `dockToNav`, `closePanel`, `revealPanel`, `isVisible`, `panelEntries` (the rail), presets, versioned parse/serialize, saved-layout CRUD (rename, delete, move, restore defaults) |
+| Nav | `frontend/src/components/NavDock.tsx` | the nav zone, the collapsed rail |
 | Store hook | `frontend/src/useDockStore.ts` | the store in React, persisted on every change; stable `reveal`/`hide` |
 | Hosts | `frontend/src/lib/dockHosts.ts`, `components/DockSlot.tsx` | one container per panel, moved between groups |
 | Chrome | `frontend/src/components/DockLayout.tsx` | the split tree, tab strips, shield/zones, dividers, the header bar |

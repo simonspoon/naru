@@ -8,7 +8,7 @@ import { DiagramsPanel } from './components/DiagramsPanel'
 import { DockBar, DockLayout } from './components/DockLayout'
 import { useDockStore } from './useDockStore'
 import { inNav, isVisible, revealNeedsNav, type PanelId } from './dockLayout'
-import { NavPanels, NavRail, NavZone } from './components/NavDock'
+import { NavRail, NavZone } from './components/NavDock'
 import { hostFor } from './lib/dockHosts'
 import { DoneToasts } from './components/DoneToasts'
 import { PhoneTabBar } from './components/PhoneTabBar'
@@ -816,7 +816,6 @@ function App() {
           collapsed={navCollapsed}
           onCollapsedChange={setNavCollapsed}
           dockZone={docked ? <NavZone state={dock.state} update={dock.update} locked={locked} /> : undefined}
-          panelsList={docked ? <NavPanels state={dock.state} navCollapsed={navCollapsed} locked={locked} onReveal={reveal} /> : undefined}
           rail={
             docked ? (
               <NavRail state={dock.state} navCollapsed={navCollapsed} unread={unread} onReveal={reveal} onExpand={() => setNavCollapsed(false)} />

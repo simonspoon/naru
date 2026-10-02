@@ -12440,6 +12440,34 @@ body.dock-resizing .dock-body {
   background: var(--surface-hover);
 }
 
+.dock-menu-row {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.3rem 0.5rem;
+  border-radius: var(--r-sm, 8px);
+  font-size: 0.8rem;
+  cursor: grab;
+}
+
+.dock-menu-row:hover {
+  background: var(--surface-hover);
+}
+
+.dock-menu-empty {
+  padding: 0.4rem 0.5rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+/* While a row is dragged out the menu stays mounted (unmounting the drag source
+   cancels the drag) but is hidden and lets the drop through. */
+.dock-menu-list.dragging {
+  visibility: hidden;
+  pointer-events: none;
+}
+
 .dock-menu-check {
   display: inline-block;
   width: 1em;
@@ -12532,75 +12560,6 @@ body.dock-resizing .dock-body {
   font-size: 0.8rem;
   border: 1px dashed var(--cyan);
   border-radius: var(--r-md);
-}
-
-.nav-panels {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  margin: 0.5rem 0;
-}
-
-.nav-panels-head {
-  display: flex;
-  justify-content: space-between;
-  padding: 0.25rem 0.5rem;
-  color: var(--muted);
-  font-size: 0.7rem;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-}
-
-.nav-panels .nav-panel-row {
-  box-sizing: border-box;
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  justify-content: flex-start;
-  width: 100%;
-  padding: 0.3rem 0.5rem;
-  background: transparent;
-  box-shadow: none;
-  border: none;
-  border-radius: var(--r-sm, 8px);
-  color: var(--text);
-  font-size: 0.85rem;
-  text-align: left;
-  cursor: grab;
-}
-
-.nav-panels .nav-panel-row:hover {
-  background: var(--surface-hover);
-}
-
-.nav-panel-row em {
-  margin-left: auto;
-  font-style: normal;
-  color: var(--muted);
-  font-size: 0.7rem;
-}
-
-.nav-panel-dot {
-  flex: none;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  border: 1px solid var(--muted);
-}
-
-.nav-panel-row em:empty + .nav-panel-dot,
-.nav-panel-dot.open {
-  margin-left: auto;
-}
-
-.nav-panel-row em:not(:empty) + .nav-panel-dot {
-  margin-left: 0;
-}
-
-.nav-panel-dot.open {
-  background: var(--cyan);
-  border-color: var(--cyan);
-  box-shadow: 0 0 6px var(--cyan);
 }
 
 /* The collapsed nav as a rail: expand handle, mini orb, one icon per panel. */
