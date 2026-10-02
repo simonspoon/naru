@@ -2,6 +2,7 @@ pub mod agents;
 pub mod alarm;
 pub mod attachments;
 pub mod audio;
+pub mod barge_in;
 pub mod board;
 pub mod cc;
 pub mod config;

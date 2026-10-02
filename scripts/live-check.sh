@@ -75,6 +75,16 @@
 #      stopping it once; a listen left waiting across a handoff ending in
 #      conflict, and a later handoff or `live stop` stopping a predecessor
 #      that is still deferred;
+#  18. barge-in (mesa task 1595): `mesa live hook` and the `live-barge-in.sh`
+#      built-in delivering mid-turn speech at the agent's next tool call — a
+#      PreToolUse deny carrying the words, a PostToolUse additionalContext,
+#      two turns in order, claimed once (listen then gets `null`), scoped to
+#      the naru-live main thread (a subagent's `agent_id`, another
+#      `agent_type`, another event, a wrong lease or session, no drive line all
+#      print nothing and leave the turn), a delegate result left for `listen`,
+#      `working_since` opened by a claim and never cleared by an empty one,
+#      and the extracted script (shebang, `bash -n`, passes the deny through,
+#      ignores an ordinary payload, garbage exits 0);
 #  11. session memory (mesa task 921): the `mesa live summary` CLI round-trip
 #      (set/show/list, the upsert keeping `created_at`), its `--quiet`
 #      contract (drops `body` only; `list --quiet` is a usage error; `--quiet`
@@ -4321,6 +4331,154 @@ run 0 "$MESA" live stop
 [ "$(sed -n 3p "$STUB_DIR/last-flags")" = "Live gate project: live $(jqs .id) summary" ] ||
   fail "live stop under threshold: the one spawn is the summariser (got $(sed -n 3p "$STUB_DIR/last-flags"))"
 ok "the automatic dream: live stop spawns the dream beside the summariser over threshold and only the summariser under it"
+
+# =====================================================================
+# 18. Barge-in (mesa task 1595): `mesa live hook` and the live-barge-in.sh
+#     built-in deliver mid-turn speech at the agent's next tool call
+# =====================================================================
+#
+# A PreToolUse payload is answered with a deny whose reason carries the
+# person's words, a PostToolUse payload with additionalContext. Only the
+# naru-live main thread (agent_type naru-live, no agent_id) holding the
+# current lease is answered; every other payload prints nothing and leaves
+# the turns for `listen`. Delegate results are never claimed.
+
+BI_DIR="$TMP/barge-in"
+BI_BIN=$(cd "$(dirname "$MESA")" && pwd)
+mkdir -p "$BI_DIR"
+run 0 "$MESA" live start --no-agent
+BI_ID=$(jqs .id)
+BI_LEASE=$(jqs .lease)
+# bi_transcript <session> <lease> -> a one-record transcript whose first user
+# message is the drive line, as `prompt_with` writes it.
+bi_transcript() {
+  jq -nc --arg t "Drive naru live session $1 (lease $2)." \
+    '{type:"user",message:{role:"user",content:$t}}' >"$BI_DIR/t.jsonl"
+}
+# bi_payload <event> [extra jq object merged in] -> a hook payload on stdout.
+bi_payload() {
+  local x=${2:-}
+  [ -n "$x" ] || x='{}'
+  jq -nc --arg e "$1" --arg p "$BI_DIR/t.jsonl" --argjson x "$x" \
+    '{session_id:"s1",transcript_path:$p,cwd:"/tmp",agent_type:"naru-live",
+      hook_event_name:$e,tool_name:"Bash",tool_input:{command:"ls"},tool_use_id:"tu1"} + $x'
+}
+bi_hook() { bi_payload "$@" | "$MESA" live hook; }
+bi_say() { api 201 POST "/api/live/utterance" "$(jq -nc --arg t "$1" '{text:$t}')"; }
+
+bi_transcript "$BI_ID" "$BI_LEASE"
+
+# nothing waiting: empty, and the garbage / empty-stdin cases exit 0 silent
+OUT=$(bi_hook PreToolUse); [ -z "$OUT" ] || fail "barge-in: no waiting turn prints nothing (got $OUT)"
+OUT=$(printf 'not json' | "$MESA" live hook); [ -z "$OUT" ] || fail "barge-in: garbage stdin prints nothing"
+OUT=$("$MESA" live hook </dev/null); [ -z "$OUT" ] || fail "barge-in: empty stdin prints nothing"
+ok "barge-in: nothing waiting, garbage and empty stdin all print nothing and exit 0"
+
+# PreToolUse: deny carrying the words; the turn is delivered
+bi_say "stop and look at the build"
+OUT=$(bi_hook PreToolUse)
+[ "$(jq -r .hookSpecificOutput.permissionDecision <<<"$OUT")" = "deny" ] || fail "barge-in: PreToolUse must deny (got $OUT)"
+[ "$(jq -r .hookSpecificOutput.hookEventName <<<"$OUT")" = "PreToolUse" ] || fail "barge-in: hookEventName (got $OUT)"
+jq -r .hookSpecificOutput.permissionDecisionReason <<<"$OUT" | grep -q "stop and look at the build" ||
+  fail "barge-in: the reason carries the person's words (got $OUT)"
+jq -r .hookSpecificOutput.permissionDecisionReason <<<"$OUT" | grep -q "was NOT run" ||
+  fail "barge-in: the reason says the call did not run"
+OUT=$(bi_hook PreToolUse); [ -z "$OUT" ] || fail "barge-in: a claimed turn is not claimed twice (got $OUT)"
+run 0 "$MESA" live listen --wait 0
+[ "$STDOUT" = "null" ] || fail "barge-in: listen finds nothing after a claim (got $STDOUT)"
+ok "barge-in: PreToolUse denies with the words once; listen gets nothing"
+
+# PostToolUse: additionalContext, no 'NOT run' sentence
+bi_say "also the tests"
+OUT=$(bi_hook PostToolUse)
+[ "$(jq -r .hookSpecificOutput.hookEventName <<<"$OUT")" = "PostToolUse" ] || fail "barge-in: PostToolUse shape (got $OUT)"
+jq -r .hookSpecificOutput.additionalContext <<<"$OUT" | grep -q "also the tests" || fail "barge-in: additionalContext carries the words"
+jq -r .hookSpecificOutput.additionalContext <<<"$OUT" | grep -q "NOT run" && fail "barge-in: PostToolUse must not say the call was not run"
+ok "barge-in: PostToolUse answers additionalContext"
+
+# two pending turns arrive together, in order
+bi_say "first thing"; bi_say "second thing"
+OUT=$(bi_hook PostToolUse)
+CTX=$(jq -r .hookSpecificOutput.additionalContext <<<"$OUT")
+[ "$(grep -n 'first thing' <<<"$CTX" | cut -d: -f1)" -lt "$(grep -n 'second thing' <<<"$CTX" | cut -d: -f1)" ] ||
+  fail "barge-in: both turns, oldest first (got $CTX)"
+ok "barge-in: two pending turns arrive in one output, in order"
+
+# scoping: a subagent, another agent_type, another event, a wrong event all leave the turn
+bi_say "keep me for listen"
+OUT=$(bi_hook PreToolUse '{"agent_id":"a1"}'); [ -z "$OUT" ] || fail "barge-in: a subagent's tool call is not answered"
+OUT=$(bi_hook PreToolUse '{"agent_type":"other"}'); [ -z "$OUT" ] || fail "barge-in: another agent_type is not answered"
+OUT=$(bi_payload PreToolUse | jq -c 'del(.agent_type)' | "$MESA" live hook); [ -z "$OUT" ] || fail "barge-in: no agent_type is not answered"
+OUT=$(bi_hook Stop); [ -z "$OUT" ] || fail "barge-in: another event is not answered"
+ok "barge-in: subagent, other agent, other event are all left alone"
+
+# lease: a forged lower/higher lease or another session id claims nothing
+bi_transcript "$BI_ID" "$((BI_LEASE + 1))"
+OUT=$(bi_hook PreToolUse); [ -z "$OUT" ] || fail "barge-in: a stale/forged lease must not steal turns"
+bi_transcript "$((BI_ID + 99))" "$BI_LEASE"
+OUT=$(bi_hook PreToolUse); [ -z "$OUT" ] || fail "barge-in: another session's drive line must not steal turns"
+bi_transcript 0 0 && echo '{"type":"user","message":{"content":"hello"}}' >"$BI_DIR/t.jsonl"
+OUT=$(bi_hook PreToolUse); [ -z "$OUT" ] || fail "barge-in: no drive line must not steal turns"
+OUT=$(bi_payload PreToolUse | jq -c '.transcript_path="/nonexistent"' | "$MESA" live hook); [ -z "$OUT" ] || fail "barge-in: unreadable transcript prints nothing"
+ok "barge-in: wrong lease, wrong session, no drive line, no transcript claim nothing"
+
+# a text-block content and the old 'mesa' spelling are read too
+jq -nc --arg t "Drive mesa live session $BI_ID (lease $BI_LEASE)." \
+  '{type:"user",message:{role:"user",content:[{type:"text",text:$t}]}}' >"$BI_DIR/t.jsonl"
+# a pending delegate result is not claimed
+run 0 "$MESA" live result "delegate found a thing"
+OUT=$(bi_hook PreToolUse)
+jq -r .hookSpecificOutput.permissionDecisionReason <<<"$OUT" | grep -q "keep me for listen" ||
+  fail "barge-in: block-content transcript with the mesa spelling is read (got $OUT)"
+run 0 "$MESA" live listen --wait 0
+[ "$(jqs .kind)" = "result" ] || fail "barge-in: the delegate result stays for listen (got $STDOUT)"
+ok "barge-in: text-block + mesa-spelling drive line read; delegate result left for listen"
+
+# a live-loop Bash command is never denied: the turn stays pending
+bi_say "leave me for listen"
+OUT=$(bi_hook PreToolUse '{"tool_input":{"command":"naru live listen --lease 1"}}'); [ -z "$OUT" ] || fail "barge-in: a naru live listen is never denied (got $OUT)"
+OUT=$(bi_hook PreToolUse '{"tool_input":{"command":"cd /x && mesa live say hi"}}'); [ -z "$OUT" ] || fail "barge-in: a mesa live say is never denied (got $OUT)"
+run 0 "$MESA" live listen --wait 0
+[ "$(jqs .text)" = "leave me for listen" ] || fail "barge-in: the turn stayed pending for listen (got $STDOUT)"
+ok "barge-in: PreToolUse never claims on a naru/mesa live command"
+
+# an empty claim does not clear working_since
+run 0 "$MESA" live listen --wait 0
+[ "$STDOUT" = "null" ] || fail "barge-in: setup listen finds nothing"
+run 0 "$MESA" live status
+[ "$(jqs .working_since)" = "null" ] || fail "barge-in: an empty listen clears working_since"
+bi_say "open the span"
+bi_hook PostToolUse >/dev/null
+run 0 "$MESA" live status
+[ "$(jqs .working_since)" != "null" ] || fail "barge-in: a claim opens working_since"
+OUT=$(bi_hook PostToolUse); [ -z "$OUT" ] || fail "barge-in: nothing left"
+run 0 "$MESA" live status
+[ "$(jqs .working_since)" != "null" ] || fail "barge-in: an empty claim must not clear working_since"
+ok "barge-in: working_since cleared by an empty listen, opened by a claim, not cleared by an empty claim"
+
+# the library built-in
+run 0 "$MESA" library show live-barge-in.sh
+jq -r .body <<<"$STDOUT" >"$BI_DIR/hook.sh"
+[ "$(head -1 "$BI_DIR/hook.sh")" = "#!/usr/bin/env bash" ] || fail "barge-in: hook shebang"
+bash -n "$BI_DIR/hook.sh" || fail "barge-in: hook script must parse"
+bi_say "through the script"
+bi_transcript "$BI_ID" "$BI_LEASE"
+OUT=$(PATH="$BI_BIN:$PATH" bi_payload PreToolUse | PATH="$BI_BIN:$PATH" bash "$BI_DIR/hook.sh"); RC=$?
+[ "$RC" = 0 ] || fail "barge-in: hook exits 0"
+jq -r .hookSpecificOutput.permissionDecisionReason <<<"$OUT" | grep -q "through the script" ||
+  fail "barge-in: the script passes the deny through (got $OUT)"
+bi_say "not for the script"
+mkdir -p "$BI_DIR/stub"
+printf '#!/bin/sh\necho x >> "%s/calls"\n' "$BI_DIR" >"$BI_DIR/stub/naru"
+cp "$BI_DIR/stub/naru" "$BI_DIR/stub/mesa"; chmod +x "$BI_DIR/stub/naru" "$BI_DIR/stub/mesa"
+OUT=$(bi_payload PreToolUse '{"agent_type":"ordinary"}' | PATH="$BI_DIR/stub:$PATH" bash "$BI_DIR/hook.sh"); RC=$?
+[ "$RC" = 0 ] && [ -z "$OUT" ] || fail "barge-in: a non-naru-live payload exits 0 silently"
+[ ! -e "$BI_DIR/calls" ] || fail "barge-in: an ordinary payload must never spawn naru"
+OUT=$(printf 'garbage' | bash "$BI_DIR/hook.sh"); [ $? = 0 ] && [ -z "$OUT" ] || fail "barge-in: garbage through the script"
+run 0 "$MESA" live listen --wait 0
+[ "$(jqs .text)" = "not for the script" ] || fail "barge-in: the non-naru-live payload left its turn (got $STDOUT)"
+run 0 "$MESA" live stop
+ok "barge-in: live-barge-in.sh parses, passes the deny through, ignores ordinary sessions"
 
 kill "$SERVER_PID" 2>/dev/null || true
 wait "$SERVER_PID" 2>/dev/null || true

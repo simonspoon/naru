@@ -6432,6 +6432,47 @@ impl Store {
         Ok(turn)
     }
 
+    /// Whether the session has a user utterance nobody has been handed — the
+    /// barge-in hook's cheap read, before it opens a transcript.
+    pub fn has_undelivered_user_turn(&self, session_id: i64) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM live_turns \
+             WHERE session_id = ?1 AND role = ?2 AND delivered_at IS NULL)",
+            (session_id, LiveRole::User.as_str()),
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Claims **every** undelivered user utterance of the session in one
+    /// statement, oldest first (mesa task 1595) — the barge-in hook's take,
+    /// where [`Store::next_user_turn`] hands out one for `listen`.
+    ///
+    /// Same one-statement rule, so a hook and a `listen` racing can never both
+    /// be handed a turn. Delegate results are not touched: they belong to
+    /// `listen`. A claim opens `working_since` like any handed-out turn, but an
+    /// empty claim never clears it — the agent is mid-turn, which is exactly
+    /// why the hook ran, and only `listen`'s own empty poll ends the span.
+    pub fn claim_user_turns(&mut self, session_id: i64) -> Result<Vec<LiveTurn>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "UPDATE live_turns SET delivered_at = datetime('now') \
+             WHERE session_id = ?1 AND role = ?2 AND delivered_at IS NULL \
+             RETURNING {LIVE_TURN_COLUMNS}"
+        ))?;
+        let mut turns = stmt
+            .query_map((session_id, LiveRole::User.as_str()), row_to_live_turn)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(stmt);
+        turns.sort_by_key(|t| t.id);
+        if !turns.is_empty() {
+            self.conn.execute(
+                "UPDATE live_sessions SET working_since = datetime('now') \
+                 WHERE id = ?1 AND status = ?2",
+                (session_id, LiveStatus::Live.as_str()),
+            )?;
+        }
+        Ok(turns)
+    }
+
     /// Records a delegate's result against the one live conversation (mesa
     /// task 1359), for `listen` to hand to whichever agent is driving it.
     /// `NotFound` with no live session, like every other `live` verb; the
@@ -15055,6 +15096,44 @@ mod tests {
                 .working_since
                 .is_none()
         );
+    }
+
+    /// The barge-in claim takes every waiting utterance at once, in order,
+    /// leaves nothing for `listen`, and never clears `working_since`.
+    #[test]
+    fn claim_user_turns_takes_all_once_and_never_clears_working() {
+        let (mut store, _dir) = temp_store();
+        let session = store.start_live_session(None).unwrap();
+        assert!(store.claim_user_turns(session.id).unwrap().is_empty());
+        let a = store
+            .add_live_turn(session.id, LiveRole::User, "one", None, None)
+            .unwrap();
+        let b = store
+            .add_live_turn(session.id, LiveRole::User, "two", None, None)
+            .unwrap();
+        store
+            .add_live_turn(session.id, LiveRole::Naru, "hello", None, None)
+            .unwrap();
+        let got = store.claim_user_turns(session.id).unwrap();
+        assert_eq!(got.iter().map(|t| t.id).collect::<Vec<_>>(), [a.id, b.id]);
+        assert!(got.iter().all(|t| t.delivered_at.is_some()));
+        assert!(
+            store
+                .get_live_session(session.id)
+                .unwrap()
+                .working_since
+                .is_some()
+        );
+        assert!(store.claim_user_turns(session.id).unwrap().is_empty());
+        assert!(
+            store
+                .get_live_session(session.id)
+                .unwrap()
+                .working_since
+                .is_some(),
+            "an empty claim does not end the span"
+        );
+        assert!(store.next_user_turn(session.id).unwrap().is_none());
     }
 
     /// The delivery stamp is what makes the loop safe: two listeners must

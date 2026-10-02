@@ -615,6 +615,20 @@ naru library hook enable alarm-disarm --event SubagentStop
 It pipes the payload to `naru alarm disarm`, discards the output and always
 exits 0, so it never wedges a session. See `docs/alarm.md`.
 
+### The live-barge-in hook
+
+`live-barge-in` (mesa task 1595, body `core::barge_in::BARGE_IN_HOOK`) is a
+**PreToolUse**/**PostToolUse** hook that delivers what the person said while
+the `naru-live` agent was mid-turn. Register it for both events:
+
+```
+naru library hook enable live-barge-in.sh --event PreToolUse
+naru library hook enable live-barge-in.sh --event PostToolUse
+```
+
+It pipes the payload to `naru live hook` only when it mentions `naru-live`,
+and always exits 0. See `docs/live.md` "Barging in".
+
 ### Hooks wired from outside `.claude/hooks/`
 
 A settings.json command may name a script anywhere — `bash

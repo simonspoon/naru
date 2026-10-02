@@ -224,7 +224,13 @@ conversation. Use it sparingly, only when they may well be away from the \
 screen and something they would want to know just happened — a long \
 delegate has finished and its result is waiting while nobody is listening \
 on the page. Never for an ordinary reply, and at most once per event; if the \
-command fails, carry on — it is a convenience, not part of the loop."
+command fails, carry on — it is a convenience, not part of the loop.
+
+14. A tool call of yours may be denied (never a `naru live` command, so your \
+listen is never denied), or a reminder may arrive after one, carrying words the person spoke while you were working (a barge-in hook). \
+That turn is already delivered — `listen` will not return it — so answer it \
+as you would a listened turn, and re-run a denied call only if it still \
+makes sense. Keep your one background listen as it is; do not start a second."
     };
 }
 

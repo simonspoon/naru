@@ -79,6 +79,10 @@ pub struct Builtin {
 /// `alarm-disarm` is the fourth (mesa task 1512): a `SubagentStop` hook that
 /// disarms the supervisor's `naru alarm arm` — body `core::alarm::ALARM_HOOK`,
 /// installed by `naru library hook enable alarm-disarm --event SubagentStop`.
+/// `live-barge-in` is the fifth (mesa task 1595): a `PreToolUse`/`PostToolUse`
+/// hook that delivers what the person said mid-turn to the `naru-live` agent —
+/// body `core::barge_in::BARGE_IN_HOOK`, installed by `naru library hook enable
+/// live-barge-in.sh --event PreToolUse` (and again for `PostToolUse`).
 pub const BUILTINS: &[Builtin] = &[
     Builtin {
         id: crate::core::live::LIVE_AGENT_BUILTIN,
@@ -162,6 +166,13 @@ echo \"Claude Code stopped in $(pwd)\"
         kind: LibraryKind::Hook,
         scope: LibraryScope::User,
         body: crate::core::project_memory::PROJECT_MEMORY_HOOK,
+    },
+    Builtin {
+        id: crate::core::barge_in::BARGE_IN_HOOK_BUILTIN,
+        name: crate::core::barge_in::BARGE_IN_HOOK_NAME,
+        kind: LibraryKind::Hook,
+        scope: LibraryScope::User,
+        body: crate::core::barge_in::BARGE_IN_HOOK,
     },
 ];
 

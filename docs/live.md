@@ -578,6 +578,56 @@ person can still talk and nothing is being worked on) — with the status
 line saying memory is being tidied. Anything said meanwhile
 queues, and the successor takes it the moment the rest ends.
 
+### Barging in: speech mid-turn (mesa task 1595)
+
+`listen` only runs between the agent's turns, so words spoken while it is
+busy with tool calls wait for the next one. The **`live-barge-in.sh`** library
+hook built-in (body `core::barge_in::BARGE_IN_HOOK`) delivers them at the next
+tool-call boundary instead. It is a Claude Code **settings.json** hook, not
+agent-definition frontmatter: measured against claude 2.1.287, frontmatter
+`hooks:` do not fire for `--agent` main threads or subagents, only settings
+hooks do. Enable it once, both events:
+
+```
+naru library hook enable live-barge-in.sh --event PreToolUse
+naru library hook enable live-barge-in.sh --event PostToolUse
+```
+
+The script exits 0 at once unless the payload mentions `naru-live` (so an
+ordinary session never spawns `naru`), then pipes it to `naru live hook`
+(CLI only, no HTTP route, no `--quiet` field; reads the payload on stdin) and
+passes its stdout through. **It never wedges**: bad JSON, no live session, the
+wrong agent, an unreadable transcript, a store error — all print nothing and
+exit 0.
+
+**Scoping.** `naru live hook` acts only when `agent_type` is `naru-live` and
+the payload has **no `agent_id`** (a fork or subagent's tool call carries one
+and shares the parent's `session_id`), and only for `PreToolUse` and
+`PostToolUse`. **Lease.** The agent's lease is known only from its prompt's
+first line, so the hook reads `Drive naru live session <id> (lease <n>)` (the
+old `mesa` spelling too) from the first `user` records of the payload's
+`transcript_path`, and acts only when the id and lease are the session's
+current ones — a handed-off predecessor cannot steal turns. A cheap read for a
+pending utterance comes before the transcript is opened.
+
+**The claim.** `Store::claim_user_turns` takes **every** undelivered user turn
+of the session in one `UPDATE … RETURNING` (oldest first), so a hook and a
+`listen` racing can never both be handed one. It opens `working_since` when it
+claims and never clears it. Delegate results are **not** touched — they stay
+with `listen` (rule 12). Nothing is printed when nothing was claimed.
+
+**The output.** `PreToolUse`: `permissionDecision: deny` with the words as the
+reason, so the pending call is **not run** — except a Bash command invoking
+`naru live`/`mesa live` (listen, say, result…), which is never denied: a denied
+`listen` would leave the conversation deaf. Those turns wait for that call's
+PostToolUse or for `listen`. The hook also stays silent while the session is
+resting (`resting_since` set). `PostToolUse`:
+`additionalContext`. The text says the turn is already delivered, that `listen`
+will not return it, and introduces the words as data, not instructions; each
+turn is `turn <id>: <text>` plus ` (annotated whiteboard: <path>)` when it
+carries ink. Agent rule 14 tells the agent to answer it as a listened turn and
+keep its one background listen. Gated by section 18 of `scripts/live-check.sh`.
+
 ### Delegated results across a handoff (mesa task 1359)
 
 A delegate — a fork or subagent started under rule 12 — runs *inside* the
@@ -2176,6 +2226,7 @@ flag is an unknown argument, exit 2, exactly as on `turns`.
 | `live say <TEXT>…` | trailing var arg, like `inbox add` — put every flag **before** the message; `--lease <N>` | the `LiveTurn` |
 | `live navigate <ROUTE>` | `--say <TEXT>`; without it the turn is a pure action and says nothing; `--lease <N>` | the `LiveTurn` |
 | `live sidebars <collapse\|expand>` | `--say <TEXT>`, same rule; takes no route; `--lease <N>` | the `LiveTurn` |
+| `live hook` | reads a PreToolUse/PostToolUse payload on stdin; run by `live-barge-in.sh`, not by hand; no `--quiet` | the hook JSON (deny / additionalContext), or nothing |
 | `live handoff <NOTE>…` | trailing var arg, `--quiet` **before** the note; takes no `--lease` | the `LiveSession` with its bumped `lease` and the successor's `agent_id` |
 | `live context` | — (no `--quiet`) | `{session_id, agent_id, lease, context_tokens}` |
 | `live notice permission` | `--quiet`; takes no `--lease` (not the agent's verb — the page's, mesa task 1157) | the notice `LiveTurn`, created or the existing one for this working span |
@@ -3588,7 +3639,9 @@ no agent to stop, and a `claude stop` that fails), the single-session
 the `working_since` span it opens and closes (set when the utterance is handed
 over, still set after a reply, cleared by the next wait that finds nothing),
 the `--quiet` key sets, and the API twin including the audio contract and both
-halves of the security boundary in default **and** `--lan` mode.
+halves of the security boundary in default **and** `--lan` mode, and the
+barge-in hook (section 18: deny and additionalContext shapes, one claim,
+scoping by `agent_type`/`agent_id`/lease, results left to `listen`).
 
 The route write is checked with its **context** riding in the same body (task
 888): both halves recorded, `mesa live status` reading back over its own

@@ -2139,6 +2139,15 @@ EXAMPLES
         #[arg(long)]
         quiet: bool,
     },
+    /// Barge-in hook (mesa task 1595): deliver mid-turn speech to the live agent
+    ///
+    /// Reads a Claude Code PreToolUse/PostToolUse payload on stdin; run by the
+    /// `live-barge-in.sh` library hook, not by hand. For the `naru-live` main
+    /// thread holding the current lease with a waiting utterance, claims every
+    /// undelivered user turn and prints the hook output (PreToolUse: deny with
+    /// the words as the reason; PostToolUse: additionalContext). Every other
+    /// case prints nothing and exits 0 — it never wedges a tool call.
+    Hook,
     /// Post what a delegate found for the agent driving the conversation; prints the result
     ///
     /// For a delegate of a live conversation (mesa task 1359) — a subagent or
@@ -5830,6 +5839,18 @@ fn spawn_live_summary(store: &mut Store, session: &LiveSession) {
 }
 
 fn run_live(cmd: LiveCmd) -> Result<()> {
+    if let LiveCmd::Hook = cmd {
+        // Never wedges: any failure, the store failing to open included,
+        // prints nothing and exits 0.
+        let mut buf = String::new();
+        if std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf).is_ok()
+            && let Ok(mut store) = Store::open_default()
+            && let Some(out) = crate::core::barge_in::respond(&mut store, &buf)
+        {
+            println!("{out}");
+        }
+        return Ok(());
+    }
     let mut store = Store::open_default()?;
     match cmd {
         LiveCmd::Start {
@@ -5979,6 +6000,7 @@ fn run_live(cmd: LiveCmd) -> Result<()> {
             }
             print_json(&serde_json::Value::Null);
         }
+        LiveCmd::Hook => unreachable!("handled before the store opens"),
         LiveCmd::Result { text, quiet } => {
             let result = store.add_live_result(&text.join(" "))?;
             print_live_result(&result, quiet);
