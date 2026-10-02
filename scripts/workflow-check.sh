@@ -434,7 +434,7 @@ run 0 "$NARU" workflow run Prompting --input x
 reset_claude
 touch "$STUB_DIR/no-answer"
 run 0 "$NARU" workflow run Prompting --input x
-[ "$(jqs .status)" = "failed" ] && grep -q "no answer" <<<"$(jqs '.steps[1].error')" || fail "a transcript with no answer fails the node: $STDOUT"
+[ "$(jqs .status)" = "failed" ] && grep -q "no settled answer" <<<"$(jqs '.steps[1].error')" || fail "a transcript with no answer fails the node: $STDOUT"
 [ "$(stops)" = "1" ] || fail "an unanswered agent is still stopped, got $(stops)"
 reset_claude
 touch "$STUB_DIR/never-done"

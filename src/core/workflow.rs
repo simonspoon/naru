@@ -51,8 +51,9 @@ const ENV_INPUT_MAX: usize = 64 * 1024;
 /// of its values (each rides as `$n` and two `*_ARG_*` variables). Over it
 /// the node fails with a message naming the limit, rather than the OS
 /// refusing the exec with `Argument list too long`. A `cli` node has no such
-/// limit (its input rides on stdin), nor has a `prompt` node (its request
-/// body rides on curl's stdin).
+/// limit (its input rides on stdin). A `prompt` node on an Anthropic model has
+/// its own cap ([`llm::AGENT_PROMPT_MAX`]: the prompt is an argument of the
+/// spawn); a `local:` one sends its body on curl's stdin.
 const ARG_INPUT_MAX: usize = 64 * 1024;
 
 /// How the engine reaches the store: lock, run `f`, unlock. Implemented for

@@ -43,6 +43,17 @@ const POLL: Duration = Duration::from_millis(500);
 /// How long a just-spawned job may be missing from `claude agents` before the
 /// node gives up on it (it registers a moment after the receipt prints).
 const REGISTER_GRACE: Duration = Duration::from_secs(30);
+/// How long after `done` the transcript may take to hold the answer.
+const FLUSH_WINDOW: Duration = Duration::from_secs(5);
+/// The gap between the two reads that must agree.
+const STABLE_GAP: Duration = Duration::from_millis(250);
+/// Consecutive failed `claude agents` probes tolerated before the node fails.
+const PROBE_ERRORS_TOLERATED: u32 = 3;
+/// The most prompt text an agent-backed node sends. The prompt is one argument
+/// of the spawn script, single-quoted — each `'` becomes `'\''`, so it can grow
+/// fourfold — and Linux caps one argument at 128 KiB: 24 KiB x 4 plus the
+/// template stays under it.
+pub const AGENT_PROMPT_MAX: usize = 24 * 1024;
 /// The answer is read whole; cap it so a runaway cannot balloon memory.
 const ANSWER_CAP: usize = 4 * 1024 * 1024;
 
@@ -66,6 +77,15 @@ pub fn complete(
     if !["haiku", "sonnet", "opus"].contains(&model) {
         return Err(format!("unknown model {model:?}"));
     }
+    if prompt.len() > AGENT_PROMPT_MAX {
+        return Err(format!(
+            "the prompt and its input are {} bytes, over the {AGENT_PROMPT_MAX}-byte limit for a \
+             prompt node on an Anthropic model (it travels as one argument to the spawn, and \
+             quoting can grow it fourfold against the OS's single-argument limit); shorten \
+             the input upstream",
+            prompt.len()
+        ));
+    }
     let started = Instant::now();
     let job = agents::spawn_workflow_prompt(cwd, name, model, thinking, prompt, prompts)?
         .ok_or_else(|| {
@@ -73,57 +93,140 @@ pub fn complete(
              no job to wait on or stop"
                 .to_string()
         })?;
-    let result = wait_for_answer(&job, started, timeout);
-    // On every outcome: an idle background session left behind per node would
-    // pile up. A stop that fails changes nothing about the answer.
-    if let Err(e) = agents::stop(&job) {
-        eprintln!("workflow: could not stop agent {job}: {e}");
-    }
-    result
+    // On every outcome — answer, failure, timeout, even a panic below — the
+    // job is stopped, exactly once: an idle background session left behind per
+    // node would pile up. A stop that fails changes nothing about the answer.
+    let _stop = OnDrop(Some(|| {
+        if let Err(e) = agents::stop(&job) {
+            eprintln!("workflow: could not stop agent {job}: {e}");
+        }
+    }));
+    wait_for_answer(
+        &job,
+        started,
+        timeout,
+        agents::job_state,
+        |session| {
+            cc::session_chat(session, 500)
+                .ok()
+                .and_then(|chat| answer_of(&chat.turns))
+        },
+        &Timing::REAL,
+    )
 }
 
+/// Runs its closure once when dropped — on a normal return and on unwind alike.
+struct OnDrop<F: FnMut()>(Option<F>);
+
+impl<F: FnMut()> Drop for OnDrop<F> {
+    fn drop(&mut self) {
+        if let Some(mut f) = self.0.take() {
+            f();
+        }
+    }
+}
+
+/// The waits [`wait_for_answer`] makes, a value so a test can run them in
+/// milliseconds.
+struct Timing {
+    /// Between two probes of a running job.
+    poll: Duration,
+    /// How long a just-spawned job may be missing from `claude agents`.
+    register_grace: Duration,
+    /// How long, **from the moment the job is first seen `done`**, the
+    /// transcript may take to hold a settled answer.
+    flush_window: Duration,
+    /// The gap between the two reads that must agree before an answer counts.
+    stable_gap: Duration,
+}
+
+impl Timing {
+    const REAL: Timing = Timing {
+        poll: POLL,
+        register_grace: REGISTER_GRACE,
+        flush_window: FLUSH_WINDOW,
+        stable_gap: STABLE_GAP,
+    };
+}
+
+type JobProbe = Result<Option<(String, Option<String>)>, String>;
+
 /// Polls `job` until it is `done`, then reads its answer off the transcript.
-/// `Err` on a `failed`/`stopped` job, a job that never registers, no answer in
-/// the transcript, or `timeout` (counted from `started`).
-fn wait_for_answer(job: &str, started: Instant, timeout: Duration) -> Result<String, String> {
+/// `Err` on a `failed`/`stopped` job, a job that never registers, more than
+/// [`PROBE_ERRORS_TOLERATED`] probe errors in a row, an answer that never
+/// settles, or `timeout` (counted from `started`).
+///
+/// Two traps this avoids: the transcript can lag the `done` row, so its retry
+/// window starts when `done` is **first seen** (not at the spawn — a slow job
+/// would otherwise arrive with the window already spent); and a read can land
+/// mid-flush, so an answer counts only when **two reads a short gap apart
+/// agree**.
+fn wait_for_answer(
+    job: &str,
+    started: Instant,
+    timeout: Duration,
+    mut probe: impl FnMut(&str) -> JobProbe,
+    mut read: impl FnMut(&str) -> Option<String>,
+    timing: &Timing,
+) -> Result<String, String> {
     let timed_out = || {
         format!(
             "timed out after {}s waiting for the agent",
             timeout.as_secs()
         )
     };
+    let mut probe_errors = 0;
     let session = loop {
         if started.elapsed() >= timeout {
             return Err(timed_out());
         }
-        match agents::job_state(job)? {
-            None if started.elapsed() > REGISTER_GRACE => {
+        match probe(job) {
+            Err(e) => {
+                probe_errors += 1;
+                if probe_errors > PROBE_ERRORS_TOLERATED {
+                    return Err(format!(
+                        "could not ask `claude agents` about {job} ({probe_errors} failures in a \
+                         row): {e}"
+                    ));
+                }
+                std::thread::sleep(timing.poll);
+            }
+            Ok(None) if started.elapsed() > timing.register_grace => {
                 return Err(format!("the agent {job} never appeared in `claude agents`"));
             }
-            Some((state, session)) if state == "done" => {
+            Ok(Some((state, session))) if state == "done" => {
                 break session.ok_or_else(|| format!("the agent {job} reported no session id"))?;
             }
-            Some((state, _)) if state == "failed" || state == "stopped" => {
+            Ok(Some((state, _))) if state == "failed" || state == "stopped" => {
                 return Err(format!("the agent {job} ended `{state}` without answering"));
             }
-            _ => std::thread::sleep(POLL),
+            Ok(_) => {
+                probe_errors = 0;
+                std::thread::sleep(timing.poll);
+            }
         }
     };
-    // The row can say `done` a beat before the transcript's last line is
-    // readable, so an empty read is retried within the same deadline.
+    let flush_deadline = Instant::now() + timing.flush_window;
+    let mut previous: Option<String> = None;
     loop {
-        if let Some(answer) = cc::session_chat(&session, 500)
-            .ok()
-            .and_then(|chat| answer_of(&chat.turns))
-        {
-            return Ok(answer);
+        let current = read(&session);
+        if let Some(answer) = current.as_ref().filter(|a| previous.as_ref() == Some(*a)) {
+            return Ok(answer.clone());
         }
-        if started.elapsed() >= timeout || started.elapsed() > REGISTER_GRACE {
+        std::thread::sleep(if current.is_some() {
+            timing.stable_gap
+        } else {
+            timing.poll
+        });
+        previous = current;
+        if started.elapsed() >= timeout {
+            return Err(timed_out());
+        }
+        if Instant::now() >= flush_deadline {
             return Err(format!(
-                "the agent {job} finished but its transcript holds no answer"
+                "the agent {job} finished but its transcript holds no settled answer"
             ));
         }
-        std::thread::sleep(POLL);
     }
 }
 
@@ -351,6 +454,148 @@ mod tests {
             "{cfg}"
         );
         assert!(cfg.contains("max-time = 9\n"));
+    }
+
+    fn fast() -> Timing {
+        Timing {
+            poll: Duration::from_millis(5),
+            register_grace: Duration::from_millis(40),
+            flush_window: Duration::from_millis(300),
+            stable_gap: Duration::from_millis(10),
+        }
+    }
+
+    fn done() -> JobProbe {
+        Ok(Some(("done".into(), Some("sess".into()))))
+    }
+
+    /// A job slower than the register grace still gets its whole flush
+    /// window once `done` shows up (the window is not measured from the
+    /// spawn), and the answer arriving late is found.
+    #[test]
+    fn a_slow_job_still_gets_a_fresh_flush_window() {
+        let t0 = Instant::now();
+        let mut reads = 0;
+        let out = wait_for_answer(
+            "j",
+            t0,
+            Duration::from_secs(5),
+            |_| {
+                if t0.elapsed() < Duration::from_millis(80) {
+                    Ok(Some(("working".into(), None)))
+                } else {
+                    done()
+                }
+            },
+            |_| {
+                reads += 1;
+                (reads > 6).then(|| "late answer".to_string())
+            },
+            &fast(),
+        );
+        assert_eq!(out.unwrap(), "late answer");
+    }
+
+    /// A reply caught mid-flush is not returned: two reads must agree.
+    #[test]
+    fn a_partial_reply_is_not_the_answer() {
+        let mut seen = vec!["par", "partial reply", "partial reply"].into_iter();
+        let out = wait_for_answer(
+            "j",
+            Instant::now(),
+            Duration::from_secs(5),
+            |_| done(),
+            |_| seen.next().map(str::to_string),
+            &fast(),
+        );
+        assert_eq!(out.unwrap(), "partial reply");
+        // One that never settles fails clearly instead of returning a fragment.
+        let mut n = 0;
+        let err = wait_for_answer(
+            "j",
+            Instant::now(),
+            Duration::from_secs(5),
+            |_| done(),
+            |_| {
+                n += 1;
+                Some("x".repeat(n))
+            },
+            &fast(),
+        )
+        .unwrap_err();
+        assert!(err.contains("no settled answer"), "{err}");
+    }
+
+    #[test]
+    fn a_few_failed_probes_are_tolerated_but_not_many() {
+        let mut calls = 0;
+        let out = wait_for_answer(
+            "j",
+            Instant::now(),
+            Duration::from_secs(5),
+            |_| {
+                calls += 1;
+                if calls <= PROBE_ERRORS_TOLERATED {
+                    Err("claude agents failed".into())
+                } else {
+                    done()
+                }
+            },
+            |_| Some("ok".into()),
+            &fast(),
+        );
+        assert_eq!(out.unwrap(), "ok");
+        let err = wait_for_answer(
+            "j",
+            Instant::now(),
+            Duration::from_secs(5),
+            |_| Err("down".into()),
+            |_| None,
+            &fast(),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("failures in a row") && err.contains("down"),
+            "{err}"
+        );
+    }
+
+    /// The stop guard runs once on a normal drop and once on a panic's unwind.
+    #[test]
+    fn the_stop_guard_runs_exactly_once_even_on_a_panic() {
+        use std::cell::Cell;
+        let stops = Cell::new(0);
+        {
+            let _g = OnDrop(Some(|| stops.set(stops.get() + 1)));
+        }
+        assert_eq!(stops.get(), 1);
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _g = OnDrop(Some(|| stops.set(stops.get() + 1)));
+            panic!("boom");
+        }));
+        assert!(caught.is_err());
+        assert_eq!(stops.get(), 2);
+    }
+
+    /// An oversized prompt fails before anything is spawned: a model that
+    /// would spawn through a missing `claude` would say so instead.
+    #[test]
+    fn an_oversized_prompt_is_refused_before_any_spawn() {
+        let big = "x".repeat(AGENT_PROMPT_MAX + 1);
+        let err = complete(
+            "haiku",
+            false,
+            "n",
+            &big,
+            &config::Prompts::default(),
+            ".",
+            Duration::from_secs(1),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("byte limit") && err.contains("shorten"),
+            "{err}"
+        );
     }
 
     #[test]

@@ -82,13 +82,17 @@ anything.**
 2. It polls `claude agents --json --all` every 500 ms (`agents::job_state`)
    until the job's `state` is `done` — a job that has answered its one prompt
    goes `done` by itself (checked against the real CLI). `failed`/`stopped` is
-   a node failure; a job that never appears in 30 s is one too; **`timeout_secs`
-   (default 600) bounds the whole wait** and a timeout fails the node.
+   a node failure; a job that never appears in 30 s is one too; up to 3 failed
+   probes in a row are tolerated; **`timeout_secs` (default 600) bounds the
+   whole wait** and a timeout fails the node.
 3. It reads that row's `sessionId` transcript with `cc::session_chat` — the
    reader the Agents chat pane uses — and takes the assistant prose after the
-   last prompt. No answer in the transcript is a node failure.
+   last prompt. The transcript can lag the `done` row, so this read has its own
+   5 s window that starts when `done` is first seen (not at the spawn), and an
+   answer only counts once **two reads 250 ms apart agree** (a read can land
+   mid-flush). No settled answer is a node failure.
 4. It runs **`claude stop <job>` on every outcome** (answer, failure,
-   timeout), so a run never leaves an idle background session behind.
+   timeout, even a panic — a drop guard stops it exactly once), so a run never leaves an idle background session behind.
 
 Why the transcript and not "tell the agent to deliver its answer with a `naru
 workflow …` command": that needs the Bash tool this node must not have (its
@@ -112,8 +116,11 @@ the workflow's project `local_path` (when that folder exists), else
 **Size limits.** The sum of a `script` node's values is capped at **64 KiB**:
 they travel as argv/environment, so over the cap the node fails with a message
 naming the limit rather than the OS refusing the exec. A `cli` node has no such
-cap (its input rides on stdin), nor has a `prompt` node (its request body rides
-on curl's stdin).
+cap (its input rides on stdin). A `prompt` node on an Anthropic model is capped
+at **24 KiB** (`llm::AGENT_PROMPT_MAX`) — its prompt is one single-quoted
+argument of the spawn script, which quoting can grow fourfold against Linux's
+128 KiB single-argument limit — and fails before anything is spawned; a
+`local:` node sends its body on curl's stdin and has no cap.
 
 **Process groups.** Every `cli` and `script` process (and a local prompt's curl) runs in its own
 group (`agents::capture`). Past the deadline the group is killed; and when the
