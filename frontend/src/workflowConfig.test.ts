@@ -7,6 +7,7 @@ import {
   defaultConfig,
   draftFromConfig,
   hasInput,
+  inspectorKey,
   hasOutput,
   missingValueRows,
   summarize,
@@ -146,5 +147,17 @@ describe('decodeKindDrag', () => {
     expect(decodeKindDrag('')).toBeNull()
     expect(decodeKindDrag('diagram')).toBeNull()
     expect(decodeKindDrag('/etc/passwd')).toBeNull()
+  })
+})
+
+describe('inspectorKey', () => {
+  const node = { id: 3, title: 'Gate', config: { op: 'contains', value: 'x' } }
+  it('ignores position and timestamps, follows title and config', () => {
+    expect(inspectorKey({ ...node, x: 1, y: 2, updated_at: 'a' } as typeof node)).toBe(
+      inspectorKey({ ...node, x: 9, y: 9, updated_at: 'b' } as typeof node),
+    )
+    expect(inspectorKey({ ...node, title: 'Other' })).not.toBe(inspectorKey(node))
+    expect(inspectorKey({ ...node, config: { op: 'equals', value: 'x' } })).not.toBe(inspectorKey(node))
+    expect(inspectorKey({ ...node, id: 4 })).not.toBe(inspectorKey(node))
   })
 })

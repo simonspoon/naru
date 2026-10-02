@@ -70,7 +70,7 @@ export function capColumn<T>(
 // user's machine (localStorage), keyed by workflow id — never on the server
 // and never shared across devices.
 
-const KEY = (workflowId: number) => `mesa-board-view-${workflowId}`
+const KEY = (workflowId: number) => `naru-workflow-view-${workflowId}`
 
 /** The pan/zoom transform applied to the canvas content layer. Mirrors the
  *  React Flow `Viewport` shape in WorkflowCanvas; kept structural so a saved view

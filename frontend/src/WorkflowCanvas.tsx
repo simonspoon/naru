@@ -42,6 +42,7 @@ import {
   draftFromConfig,
   hasInput,
   hasOutput,
+  inspectorKey,
   kindInfo,
   missingValueRows,
   summarize,
@@ -76,8 +77,8 @@ function NodeCard({ data, selected }: NodeProps<CardNode>) {
           {info.icon}
         </span>
         <b className="wf-node-title">{node.title}</b>
-        {status && <span className="wf-node-step">{status}</span>}
       </div>
+      {status && <span className="wf-node-step">{status}</span>}
       <div className="wf-node-sum">{summarize(node.kind, node.config)}</div>
       {node.kind === 'branch' ? (
         <>
@@ -467,18 +468,36 @@ export function WorkflowCanvas({
   const statuses = useMemo(() => stepStatusByNode(run), [run])
 
   // The graph the server holds is the truth: re-derive the card nodes from it
-  // whenever it, the shown run or the selection changes.
+  // whenever it or the shown run changes. Selection is deliberately not a
+  // dependency (it is read through a ref): a position rebuild on a click would
+  // snap a just-dragged node back until its PATCH has been refetched.
+  const selectionRef = useRef(selection)
   useEffect(() => {
+    selectionRef.current = selection
+  }, [selection])
+  useEffect(() => {
+    const sel = selectionRef.current
     setNodes(
       view.nodes.map((n) => ({
         id: String(n.id),
         type: 'card' as const,
         position: { x: n.x, y: n.y },
-        selected: selection?.kind === 'node' && selection.id === n.id,
+        selected: sel?.kind === 'node' && sel.id === n.id,
         data: { node: n, status: statuses.get(n.id) },
       })),
     )
-  }, [view.nodes, statuses, selection, setNodes])
+  }, [view.nodes, statuses, setNodes])
+
+  // A selection change only flips the `selected` flags, leaving every position
+  // (including one mid-drag) as the canvas holds it.
+  useEffect(() => {
+    setNodes((prev) =>
+      prev.map((n) => {
+        const s = selection?.kind === 'node' && String(selection.id) === n.id
+        return n.selected === s ? n : { ...n, selected: s }
+      }),
+    )
+  }, [selection, setNodes])
 
   const edges: Edge[] = useMemo(
     () =>
@@ -669,7 +688,7 @@ export function WorkflowCanvas({
         </div>
         {selectedNode && (
           <NodeInspector
-            key={`${selectedNode.id}-${selectedNode.updated_at}`}
+            key={inspectorKey(selectedNode)}
             node={selectedNode}
             scripts={scripts ?? []}
             onSaved={changed}

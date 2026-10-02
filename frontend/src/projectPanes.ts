@@ -216,7 +216,11 @@ const KEY = 'mesa-project-panes'
 function parseNode(value: unknown): PaneRoot | ViewLeaf | null {
   if (value === null || typeof value !== 'object') return null
   const n = value as Record<string, unknown>
-  if (n.kind === 'leaf') return isPaneTab(n.id) ? leaf(n.id) : null
+  if (n.kind === 'leaf') {
+    // The Diagrams tab became Workflows (mesa task 1607): a stored layout keeps its pane.
+    const id = n.id === 'diagrams' ? 'workflows' : n.id
+    return isPaneTab(id) ? leaf(id) : null
+  }
   if (n.kind !== 'split') return null
   if (n.orientation !== 'row' && n.orientation !== 'column') return null
   if (!Array.isArray(n.children)) return null

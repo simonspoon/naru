@@ -307,3 +307,14 @@ export const NODE_DRAG_MIME = 'application/x-naru-workflow-node'
 export function decodeKindDrag(raw: string): WorkflowNodeKind | null {
   return isNodeKind(raw) ? raw : null
 }
+
+/** The key the inspector is remounted on: the node's identity plus what the
+ *  server holds for its title and config, never its position or timestamp, so a
+ *  drag or an auto-layout of the selected node keeps the draft being typed. */
+export function inspectorKey(node: {
+  id: number
+  title: string
+  config: NodeConfig
+}): string {
+  return `${node.id}:${JSON.stringify([node.title, node.config])}`
+}

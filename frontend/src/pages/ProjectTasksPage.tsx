@@ -378,7 +378,7 @@ export function ProjectTasksPage({
         )
       case 'workflows':
         return workflowId !== null ? (
-          <WorkflowBuilderView projectId={projectId} workflowId={workflowId} />
+          <WorkflowBuilderView key={workflowId} projectId={projectId} workflowId={workflowId} />
         ) : (
           <WorkflowListView projectId={projectId} />
         )

@@ -165,6 +165,18 @@ describe('closePane', () => {
 })
 
 describe('parseLayout', () => {
+  it('reads a stored Diagrams pane as Workflows', () => {
+    const root = parseLayout({
+      kind: 'split',
+      orientation: 'row',
+      children: [
+        { ratio: 1, node: { kind: 'leaf', id: 'board' } },
+        { ratio: 1, node: { kind: 'leaf', id: 'diagrams' } },
+      ],
+    })
+    expect(root).not.toBeNull()
+    expect(paneTabs(root!)).toEqual(['board', 'workflows'])
+  })
   it('reads back a tree it wrote', () => {
     const two = dropTab(singlePane('board'), 'files', 'board', RIGHT_EDGE, rect)
     const round = parseLayout(JSON.parse(JSON.stringify(two)))
