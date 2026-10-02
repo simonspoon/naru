@@ -2946,6 +2946,18 @@ pub struct CcScorecardRow {
     /// Start of the earliest / latest run, `YYYY-MM-DD HH:MM:SS` UTC.
     pub first_run: String,
     pub last_run: String,
+    /// Runs whose session's first prompt names an existing task (mesa task
+    /// 1534) — the sample size of the two counts below. Unlinked runs are in
+    /// `runs` but not here.
+    #[ts(type = "number")]
+    pub task_runs: i64,
+    /// Of `task_runs`, those whose task is `done` **now**.
+    #[ts(type = "number")]
+    pub task_done: i64,
+    /// Of `task_runs`, those whose task was moved `in_progress` back to
+    /// `todo`/`backlog` at or after the run's session started.
+    #[ts(type = "number")]
+    pub task_requeued: i64,
 }
 
 /// A point where an agent definition's `model:` or `effort:` frontmatter key

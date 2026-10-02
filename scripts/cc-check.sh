@@ -116,6 +116,8 @@ assert r["runs"]==1 and r["turns_per_run"]==1, r
 assert r["total_cost"]>0 and r["cost_per_run"]==r["total_cost"], r
 assert r["wall_secs_per_run"]==0 and r["wall_secs_median"]==0, r
 assert r["first_run"]==r["last_run"]=="2026-06-15 01:10:00", r
+# No session in this tree opens by naming a task: nothing links.
+assert (r["task_runs"],r["task_done"],r["task_requeued"])==(0,0,0), r
 # Effort is in no transcript: it is never a column.
 assert not any("effort" in k for k in r), r
 print("cc scorecard ok")
@@ -158,6 +160,42 @@ assert ch==[(None,"opus",None,None),("opus","sonnet",None,"high")], ch
 assert d["rows"]==[], d
 print("cc scorecard model_changes ok")
 ' || fail "cc scorecard model change markers"
+
+# Task-outcome signals (mesa task 1534): a session whose FIRST prompt names an
+# existing task links its runs to it. A tree and db of their own, because the
+# main tree's counts are pinned to its exact line set. Session `t1` opens
+# "Execte this task: <id>" (the configured template's typo) on a task taken
+# in_progress, sent back to todo, then done -> done AND requeued; `t2` opens
+# with ordinary prose -> unlinked, counted in runs only.
+TT="$TMP/ttree"
+mkdir -p "$TT/-t/t1/subagents" "$TT/-t/t2/subagents"
+export TASKDB="$TMP/task.db"
+TP=$(MESA_DB="$TASKDB" "$BIN" project create tscore --no-git | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
+TID=$(MESA_DB="$TASKDB" "$BIN" task create "$TP" "outcome probe" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
+for st in in_progress todo done; do
+  # The close guard reads the caller's own session; this is a throwaway db.
+  env -u CLAUDE_CODE_SESSION_ID MESA_DB="$TASKDB" "$BIN" task update "$TID" --status "$st" >/dev/null
+done
+for s in t1 t2; do
+  if [ "$s" = t1 ]; then PROMPT="Execte this task: $TID"; else PROMPT="poke around the repo, task $TID is unrelated"; fi
+  cat > "$TT/-t/$s.jsonl" <<JSONL
+{"type":"user","uuid":"p$s","sessionId":"$s","timestamp":"2026-06-15T01:00:00.000Z","cwd":"/home/me/t","origin":{"type":"human"},"message":{"role":"user","content":"$PROMPT"}}
+{"type":"assistant","uuid":"m$s","sessionId":"$s","timestamp":"2026-06-15T01:05:00.000Z","cwd":"/home/me/t","message":{"model":"claude-opus-4-8","usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"content":[{"type":"tool_use","id":"toolu_$s","name":"Bash","input":{"command":"ls"}}]}}
+JSONL
+  cat > "$TT/-t/$s/subagents/x.jsonl" <<JSONL
+{"type":"assistant","uuid":"a$s","isSidechain":true,"sessionId":"$s","agentId":"x$s","timestamp":"2026-06-15T01:10:00.000Z","attributionAgent":"Explore","message":{"model":"claude-haiku-4-5","usage":{"input_tokens":10,"output_tokens":20,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}
+JSONL
+  echo "{\"agentType\":\"Explore\",\"description\":\"d\",\"toolUseId\":\"toolu_$s\",\"spawnDepth\":1}" > "$TT/-t/$s/subagents/x.meta.json"
+done
+MESA_DB="$TASKDB" MESA_CC_PROJECTS_DIR="$TT" "$BIN" cc scorecard | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+assert len(d["rows"])==1, d["rows"]
+r=d["rows"][0]
+assert r["runs"]==2, r
+assert (r["task_runs"],r["task_done"],r["task_requeued"])==(1,1,1), r
+print("cc scorecard task outcomes ok")
+' || fail "cc scorecard task-outcome signals"
 
 # cc reset: purges every cc_* row, then re-ingests. Unlike the rebuild above it
 # is corrective, so the rows really are re-ADDED (messages_added > 0 where the

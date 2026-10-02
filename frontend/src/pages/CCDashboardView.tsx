@@ -7,6 +7,7 @@ import {
   changeDate,
   fmtModelChange,
   fmtRunCost,
+  fmtTaskOutcome,
   fmtTurns,
   fmtWall,
   scorecardRowKey,
@@ -501,7 +502,8 @@ function Scorecard() {
       <h2>Scorecard</h2>
       <p className="muted cc-hint">
         Subagent runs by agent and model, bounded by run start. Judge a row by
-        its n before its mean. Model changes are not date-filtered.
+        its n before its mean. Task outcome counts only runs whose session was
+        started on a task (done now / requeued since). Model changes are not date-filtered.
       </p>
       <p className="cc-hint">
         <label>
@@ -528,6 +530,7 @@ function Scorecard() {
               { key: 'turns', label: 'Turns/run', numeric: true, render: (r) => fmtTurns(r.turns_per_run), sort: (r) => r.turns_per_run },
               { key: 'wall', label: 'Wall/run (median)', numeric: true, render: (r) => fmtWall(r.wall_secs_median), sort: (r) => r.wall_secs_median },
               { key: 'total', label: 'Total $', numeric: true, render: (r) => fmtUsd(r.total_cost), sort: (r) => r.total_cost },
+              { key: 'outcome', label: 'Task outcome', render: (r) => fmtTaskOutcome(r), sort: (r) => (r.task_runs === 0 ? -1 : r.task_done / r.task_runs) },
             ]}
           />
           {data.model_changes.length > 0 && (

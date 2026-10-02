@@ -1716,6 +1716,50 @@ fn parse_live_session_prompt(text: &str) -> Option<i64> {
     None
 }
 
+/// What [`Store::cc_task_links`] knows about the task a session was spawned
+/// to execute.
+#[derive(Debug, Clone, Copy)]
+pub struct CcTaskLink {
+    pub done: bool,
+    pub requeued: bool,
+}
+
+/// Parses the task id out of a cc session's first prompt (mesa task 1534), or
+/// `None` when it is not one of the shapes a task-execution spawn opens with.
+/// The stored `preview` is already slash-command-unwrapped (`/name args`), so
+/// the shapes are: `Execte this task: N` (the configured template's typo) and
+/// `Execute this task: N`; `[/][plugin:]execute-mesa-task N`;
+/// `[/]execute-todo N`; and `[/]execute-todo ##Task Info … {"id":N,` (a JSON
+/// task blob — the first `"id":N`). Only the opening is read, so an id in
+/// later prose never links.
+fn parse_task_prompt(text: &str) -> Option<i64> {
+    fn leading_id(rest: &str) -> Option<i64> {
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        digits.parse().ok()
+    }
+    for prefix in ["Execte this task:", "Execute this task:"] {
+        if let Some(rest) = text.strip_prefix(prefix) {
+            return leading_id(rest.trim_start());
+        }
+    }
+    let cmd = text.strip_prefix('/').unwrap_or(text);
+    let (name, args) = cmd.split_once(char::is_whitespace)?;
+    let name = name.rsplit(':').next().unwrap_or(name);
+    let args = args.trim_start();
+    match name {
+        "execute-mesa-task" => leading_id(args),
+        "execute-todo" => {
+            if args.starts_with("##Task Info") {
+                let at = args.find("\"id\":")? + "\"id\":".len();
+                leading_id(args[at..].trim_start())
+            } else {
+                leading_id(args)
+            }
+        }
+        _ => None,
+    }
+}
+
 /// How many days a turn's ink stays on disk (mesa task 1355). Older ink is
 /// purged by [`Store::purge_live_ink`] each time a conversation starts; a
 /// board kept with `mesa live board keep --task` is a copy in the task's
@@ -7953,6 +7997,59 @@ impl Store {
         Ok(map)
     }
 
+    /// Maps each `cc_sessions.session_id` whose very first prompt names a
+    /// task ([`parse_task_prompt`]) to that task's outcome (mesa task 1534,
+    /// `docs/cc-dashboard.md` "Scorecard"): [`Store::cc_live_session_links`]'s
+    /// pattern — derived on every read, never stored. A task id that is not in
+    /// `tasks` (deleted) is no link. `done` is the task's status **now**;
+    /// `requeued` is a `task_events` move `in_progress` -> `todo`/`backlog` at
+    /// or after the session's `start_ts` (events are UTC datetime text, the
+    /// start Unix seconds; a session with no `start_ts` is never requeued).
+    pub fn cc_task_links(&self) -> Result<HashMap<String, CcTaskLink>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT session_id, preview FROM ( \
+               SELECT session_id, preview, \
+                      ROW_NUMBER() OVER ( \
+                        PARTITION BY session_id ORDER BY ts, uuid \
+                      ) AS rn \
+               FROM cc_prompts \
+             ) WHERE rn = 1 \
+               AND (preview LIKE 'Exec%this task:%' \
+                    OR preview LIKE '%execute-mesa-task %' \
+                    OR preview LIKE '%execute-todo %')",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        let mut candidates = Vec::new();
+        for row in rows {
+            let (session_id, preview) = row?;
+            if let Some(task_id) = parse_task_prompt(&preview) {
+                candidates.push((session_id, task_id));
+            }
+        }
+        let mut facts = self.conn.prepare(
+            "SELECT t.status = 'done', EXISTS ( \
+                      SELECT 1 FROM task_events e \
+                      WHERE e.task_id = t.id \
+                        AND e.from_status = 'in_progress' \
+                        AND e.to_status IN ('todo', 'backlog') \
+                        AND e.at >= datetime(s.start_ts, 'unixepoch')) \
+             FROM tasks t, cc_sessions s \
+             WHERE t.id = ?1 AND s.session_id = ?2",
+        )?;
+        let mut map = HashMap::new();
+        for (session_id, task_id) in candidates {
+            let found = facts
+                .query_row(rusqlite::params![task_id, session_id], |r| {
+                    Ok((r.get::<_, bool>(0)?, r.get::<_, bool>(1)?))
+                })
+                .optional()?;
+            if let Some((done, requeued)) = found {
+                map.insert(session_id, CcTaskLink { done, requeued });
+            }
+        }
+        Ok(map)
+    }
+
     /// [`Store::cc_live_session_links`]'s single-session twin, for
     /// `core::cc::session_detail`'s one-row read.
     pub fn cc_live_session_link(&self, session_id: &str) -> Result<Option<i64>> {
@@ -9756,6 +9853,102 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("test.db")).unwrap();
         (store, dir)
+    }
+
+    #[test]
+    fn task_prompt_parser_reads_the_known_openings_only() {
+        let p = parse_task_prompt;
+        assert_eq!(p("Execte this task: 1337"), Some(1337));
+        assert_eq!(p("Execute this task: 12"), Some(12));
+        assert_eq!(p("Execute this task:7 and more"), Some(7));
+        assert_eq!(p("execute-mesa-task 603"), Some(603));
+        assert_eq!(p("/execute-mesa-task 603"), Some(603));
+        assert_eq!(p("/inaros-swe:execute-mesa-task 603"), Some(603));
+        assert_eq!(p("/execute-todo 721"), Some(721));
+        assert_eq!(
+            p("/execute-todo ##Task Info > This is the task {\"id\":842,\"name\":\"x\",\"id\":9"),
+            Some(842)
+        );
+        assert_eq!(p("/execute-todo ##Task Info {\"id\": 5,"), Some(5));
+        // Negatives: no number, a later id, another command, another prompt.
+        assert_eq!(p("Execute this task:"), None);
+        assert_eq!(p("Execute this task: foo 12"), None);
+        assert_eq!(p("please Execute this task: 12"), None);
+        assert_eq!(p("/execute-mesa-task"), None);
+        assert_eq!(p("/execute-mesa-task now 12"), None);
+        assert_eq!(p("/execute-todo ##Task Info no id here"), None);
+        assert_eq!(p("/refine-mesa-task 12"), None);
+        assert_eq!(p("Drive naru live session 4"), None);
+    }
+
+    #[test]
+    fn cc_task_links_joins_existing_tasks_and_reads_outcomes() {
+        let (mut store, _dir) = temp_store();
+        let p = store.create_project("p", None, None, None, None).unwrap();
+        let mk = |s: &mut Store, d: &str| {
+            s.create_task(p.id, d, Priority::Medium, &[], None, None, None, None)
+                .unwrap()
+                .id
+        };
+        let done = mk(&mut store, "done one");
+        let requeued = mk(&mut store, "requeued one");
+        let old_requeue = mk(&mut store, "requeued before the run");
+        store
+            .conn
+            .execute("UPDATE tasks SET status='done' WHERE id=?1", [done])
+            .unwrap();
+        for (id, at) in [
+            (requeued, "2026-09-01 00:00:10"),
+            (old_requeue, "2026-08-31 23:59:59"),
+        ] {
+            store
+                .conn
+                .execute(
+                    "INSERT INTO task_events (task_id, from_status, to_status, at) \
+                     VALUES (?1, 'in_progress', 'todo', ?2)",
+                    rusqlite::params![id, at],
+                )
+                .unwrap();
+        }
+        // start_ts 2026-09-01 00:00:00 UTC.
+        let start = 1_788_220_800_i64;
+        let sessions = [
+            ("s-done", format!("Execte this task: {done}")),
+            ("s-req", format!("/inaros-swe:execute-mesa-task {requeued}")),
+            ("s-old", format!("/execute-todo {old_requeue}")),
+            ("s-gone", "Execute this task: 99999".to_string()),
+            ("s-none", "write some tests".to_string()),
+        ];
+        for (sid, preview) in &sessions {
+            store
+                .conn
+                .execute(
+                    "INSERT INTO cc_sessions (session_id, start_ts) VALUES (?1, ?2)",
+                    rusqlite::params![sid, start],
+                )
+                .unwrap();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO cc_prompts (uuid, session_id, ts, preview) VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![format!("u-{sid}"), sid, start, preview],
+                )
+                .unwrap();
+            // A later prompt naming a task must not matter: only the first counts.
+            store
+                .conn
+                .execute(
+                    "INSERT INTO cc_prompts (uuid, session_id, ts, preview) VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![format!("v-{sid}"), sid, start + 5, format!("Execute this task: {done}")],
+                )
+                .unwrap();
+        }
+        let links = store.cc_task_links().unwrap();
+        assert_eq!(links.len(), 3, "{links:?}");
+        assert!(links["s-done"].done && !links["s-done"].requeued);
+        assert!(!links["s-req"].done && links["s-req"].requeued);
+        assert!(!links["s-old"].requeued);
+        assert!(!links.contains_key("s-gone") && !links.contains_key("s-none"));
     }
 
     #[test]

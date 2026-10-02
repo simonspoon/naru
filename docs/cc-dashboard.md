@@ -1169,7 +1169,8 @@ model", from the db alone (mesa task 1514). No migration: it reads
 - **Output** is `{rows, model_changes, since, until}`. Runs group by
   `(agent, model)`; a row carries `runs` (n), `total_cost`, `cost_per_run`,
   `turns_per_run`, `tokens_per_run`, `wall_secs_per_run` (mean),
-  `wall_secs_median`, `first_run`, `last_run`; rows sort by agent, then runs
+  `wall_secs_median`, `first_run`, `last_run` and the task-outcome counts
+  below; rows sort by agent, then runs
   descending. A mean over two runs is a hunch, which is why the page shows n
   first.
 - **Model-change markers.** For every agent-kind library item the versions are
@@ -1182,9 +1183,31 @@ model", from the db alone (mesa task 1514). No migration: it reads
 - **Reasoning effort is not in any transcript**, so it appears **only** on the
   markers, never as a column on a row. Attributing a run to the effort in
   force then means reading the markers against the run dates.
-- **Not here:** outcome signals (task done or requeued, reviewer findings,
-  verifier verdicts). There is no clean run-to-task join yet; that is a
-  follow-up.
+- **Task outcomes** (mesa task 1534). Each row also carries `task_runs`,
+  `task_done`, `task_requeued`, counting **runs** (the row's own unit, so the
+  `since`/`until`/`--agent` filters narrow them too). A run is linked to a task
+  through its **session**: `Store::cc_task_links` reads each session's first
+  `cc_prompts` row (`ORDER BY ts, uuid`, the `cc_live_session_links` pattern;
+  `preview` is capped at 200 chars and slash commands are stored unwrapped as
+  `/name args`) and `parse_task_prompt` recognises exactly: `Execte this task:
+  N` (the configured template's typo) and `Execute this task: N`;
+  `[/][plugin:]execute-mesa-task N`; `[/]execute-todo N`; and
+  `[/]execute-todo ##Task Info … {"id":N,` (a JSON task blob, the first
+  `"id":N`). Anything else, an id in later prose or in a later prompt is no
+  link, and the id must exist in `tasks` (a deleted task is no link). Derived
+  on every read, never stored. `task_runs` is the n of the two others;
+  **unlinked runs are in `runs` but not counted here**. `task_done` = runs whose
+  task's status is `done` **now** (a later reopen changes it); `task_requeued`
+  = runs whose task has a `task_events` move `in_progress` to `todo`/`backlog`
+  at or after the session's `start_ts` (events are UTC datetime text, the start
+  Unix seconds; a session with no start is never requeued). No percentage is
+  stored; the page shows `done d/n · requeued r`, or `—` when n is 0. A session
+  runs several subagents, so every run in a linked session shares its task's
+  outcome.
+- **Not here:** reviewer finding counts and verifier PASS/FAIL (only a 200-char
+  free-prose preview of the reply is stored, no structured verdict, and parsing
+  prose would overclaim), and follow-up fix tasks (no task-to-task follow-up
+  relation exists to join on).
 
 The grouping and formatting logic of the page lives in
 `frontend/src/ccScorecard.ts` (vitest: `ccScorecard.test.ts`).

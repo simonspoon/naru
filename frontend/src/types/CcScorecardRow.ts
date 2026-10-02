@@ -14,4 +14,19 @@ runs: number, total_cost: number, cost_per_run: number, turns_per_run: number, t
 /**
  * Start of the earliest / latest run, `YYYY-MM-DD HH:MM:SS` UTC.
  */
-first_run: string, last_run: string, };
+first_run: string, last_run: string, 
+/**
+ * Runs whose session's first prompt names an existing task (mesa task
+ * 1534) — the sample size of the two counts below. Unlinked runs are in
+ * `runs` but not here.
+ */
+task_runs: number, 
+/**
+ * Of `task_runs`, those whose task is `done` **now**.
+ */
+task_done: number, 
+/**
+ * Of `task_runs`, those whose task was moved `in_progress` back to
+ * `todo`/`backlog` at or after the run's session started.
+ */
+task_requeued: number, };

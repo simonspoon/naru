@@ -55,7 +55,8 @@ use serde::{Deserialize, Serialize};
 use super::config::PriceTable;
 use super::store::{
     CcAgentRunUpsert, CcFileBatch, CcFileCursor, CcMessageRow, CcNodeFilePair, CcPromptRow,
-    CcSessionRecord, CcSessionUpsert, CcToolCallRow, CcToolErrorRow, Error, Result, Store,
+    CcSessionRecord, CcSessionUpsert, CcTaskLink, CcToolCallRow, CcToolErrorRow, Error, Result,
+    Store,
 };
 use super::types::{
     CcAgentStat, CcChatAsk, CcChatOption, CcChatQuestion, CcChatTurn, CcChatTurnKind, CcDashboard,
@@ -3687,6 +3688,7 @@ pub fn scorecard(
         cost: f64,
         min_ts: Option<i64>,
         max_ts: Option<i64>,
+        link: Option<CcTaskLink>,
     }
     impl Run {
         fn touch(&mut self, ts: i64) {
@@ -3695,12 +3697,17 @@ pub fn scorecard(
         }
     }
 
+    let task_links = store.cc_task_links()?;
     let mut runs: HashMap<(String, String), (String, Run)> = HashMap::new();
     for (session, agent_id, name) in store.cc_read_attributed_runs()? {
         if agent.is_some_and(|a| a != name) {
             continue;
         }
-        runs.insert((session, agent_id), (name, Run::default()));
+        let r = Run {
+            link: task_links.get(&session).copied(),
+            ..Run::default()
+        };
+        runs.insert((session, agent_id), (name, r));
     }
 
     // Billed responses deduped exactly as `collect_inner` does.
@@ -3735,6 +3742,9 @@ pub fn scorecard(
         turns: i64,
         tokens: i64,
         walls: Vec<f64>,
+        task_runs: i64,
+        task_done: i64,
+        task_requeued: i64,
         first: i64,
         last: i64,
     }
@@ -3758,6 +3768,11 @@ pub fn scorecard(
         g.turns += r.turns;
         g.tokens += r.tokens;
         g.walls.push((end - start) as f64);
+        if let Some(l) = r.link {
+            g.task_runs += 1;
+            g.task_done += l.done as i64;
+            g.task_requeued += l.requeued as i64;
+        }
         g.first = g.first.min(start);
         g.last = g.last.max(start);
     }
@@ -3784,6 +3799,9 @@ pub fn scorecard(
                 wall_secs_median: median,
                 first_run: fmt_store_ts(g.first),
                 last_run: fmt_store_ts(g.last),
+                task_runs: g.task_runs,
+                task_done: g.task_done,
+                task_requeued: g.task_requeued,
             }
         })
         .collect();
@@ -7345,6 +7363,139 @@ mod tests {
         assert_eq!(haiku.first_run, "2026-09-01 00:00:10");
         assert_eq!(sc.rows[1].model, "claude-sonnet-4-6");
         assert_eq!(sc.rows[1].runs, 1);
+    }
+
+    #[test]
+    fn scorecard_counts_task_outcomes_of_linked_runs_only() {
+        use crate::core::store::TaskPatch;
+        use crate::core::types::{Priority, Status};
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&tmp.path().join("mesa.db")).unwrap();
+        let t0 = seed_scorecard(&mut store);
+        let p = store.create_project("p", None, None, None, None).unwrap();
+        let task = store
+            .create_task(p.id, "t", Priority::Medium, &[], None, None, None, None)
+            .unwrap();
+        let set = |store: &mut Store, status| {
+            store
+                .update_task(
+                    task.id,
+                    &TaskPatch {
+                        description: None,
+                        status: Some(status),
+                        priority: None,
+                        tags: None,
+                        parent_id: None,
+                        acceptance: None,
+                        artifact: None,
+                        result: None,
+                        sort_order: None,
+                        append: false,
+                    },
+                )
+                .unwrap();
+        };
+        // In progress, sent back to todo, then done: requeued AND done.
+        set(&mut store, Status::InProgress);
+        set(&mut store, Status::Todo);
+        set(&mut store, Status::Done);
+        let ingest = |store: &mut Store, sess: &str, run: Option<&str>, prompt: &str| {
+            store
+                .cc_ingest_file(
+                    &format!("/t/{sess}.jsonl"),
+                    &CcFileCursor {
+                        mtime: 1,
+                        size: 1,
+                        byte_offset: 1,
+                    },
+                    &CcFileBatch {
+                        sessions: vec![CcSessionUpsert {
+                            session_id: sess.into(),
+                            cwd: None,
+                            git_branch: None,
+                            entrypoint: None,
+                            used_subagent: true,
+                            start_ts: Some(t0),
+                            end_ts: Some(t0 + 100),
+                        }],
+                        agent_runs: run
+                            .map(|id| CcAgentRunUpsert {
+                                session_id: sess.into(),
+                                agent_id: id.into(),
+                                agent: Some("Explore".into()),
+                                skill: None,
+                                tool_use_id: None,
+                                description: None,
+                                spawn_depth: Some(1),
+                                parent_agent_id: None,
+                            })
+                            .into_iter()
+                            .collect(),
+                        messages: run
+                            .map(|id| CcMessageRow {
+                                message_id: Some(format!("m-{id}")),
+                                uuid: format!("u-{id}"),
+                                session_id: sess.into(),
+                                agent_id: Some(id.into()),
+                                ts: t0 + 5,
+                                model: "claude-haiku-4-5".into(),
+                                input_tokens: 1,
+                                output_tokens: 1,
+                                cache_read_tokens: 0,
+                                cache_creation_tokens: 0,
+                                skill: None,
+                                agent: None,
+                                preview: None,
+                            })
+                            .into_iter()
+                            .collect(),
+                        tool_calls: Vec::new(),
+                        tool_errors: Vec::new(),
+                        prompts: vec![CcPromptRow {
+                            uuid: format!("p-{sess}"),
+                            session_id: sess.into(),
+                            ts: t0,
+                            preview: prompt.into(),
+                        }],
+                        node_files: Vec::new(),
+                    },
+                )
+                .unwrap();
+        };
+        // "s" (a1, a2, a3) executes the task; "s2" has one unlinked run.
+        ingest(
+            &mut store,
+            "s",
+            None,
+            &format!("Execte this task: {}", task.id),
+        );
+        ingest(&mut store, "s2", Some("b1"), "just poke around");
+
+        let sc = scorecard(&store, None, None, None).unwrap();
+        let haiku = sc
+            .rows
+            .iter()
+            .find(|r| r.model == "claude-haiku-4-5")
+            .unwrap();
+        let sonnet = sc
+            .rows
+            .iter()
+            .find(|r| r.model == "claude-sonnet-4-6")
+            .unwrap();
+        // haiku: a1, a3 (linked) + b1 (unlinked, in runs only).
+        assert_eq!(haiku.runs, 3);
+        assert_eq!(
+            (haiku.task_runs, haiku.task_done, haiku.task_requeued),
+            (2, 2, 2)
+        );
+        assert_eq!(
+            (sonnet.task_runs, sonnet.task_done, sonnet.task_requeued),
+            (1, 1, 1)
+        );
+        // The run filters narrow these counts too: only a2 starts on 09-02.
+        let sc = scorecard(&store, Some("2026-09-02"), Some("2026-09-03"), None).unwrap();
+        assert_eq!(sc.rows.len(), 1);
+        assert_eq!(sc.rows[0].task_runs, 1);
     }
 
     #[test]

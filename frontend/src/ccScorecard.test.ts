@@ -3,6 +3,7 @@ import {
   changeDate,
   fmtModelChange,
   fmtRunCost,
+  fmtTaskOutcome,
   fmtTurns,
   fmtWall,
   scorecardQuery,
@@ -56,6 +57,16 @@ describe('scorecardRowKey', () => {
   it('distinguishes the same agent on two models', () => {
     const r = (model: string) => ({ agent: 'a', model }) as CcScorecardRow
     expect(scorecardRowKey(r('x'))).not.toBe(scorecardRowKey(r('y')))
+  })
+})
+
+describe('fmtTaskOutcome', () => {
+  const r = (task_runs: number, task_done: number, task_requeued: number) =>
+    ({ task_runs, task_done, task_requeued }) as CcScorecardRow
+  it('shows done over n and the requeue count, a dash with no linked run', () => {
+    expect(fmtTaskOutcome(r(4, 3, 1))).toBe('done 3/4 · requeued 1')
+    expect(fmtTaskOutcome(r(1, 0, 0))).toBe('done 0/1 · requeued 0')
+    expect(fmtTaskOutcome(r(0, 0, 0))).toBe('—')
   })
 })
 

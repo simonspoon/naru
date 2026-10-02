@@ -26,6 +26,12 @@ export function fmtTurns(n: number): string {
   return Number.isInteger(n) ? String(n) : n.toFixed(1)
 }
 
+/** Task outcome cell: `done 3/4 · requeued 1`, or `—` when no run linked to a task. */
+export function fmtTaskOutcome(r: CcScorecardRow): string {
+  if (r.task_runs === 0) return '—'
+  return `done ${r.task_done}/${r.task_runs} · requeued ${r.task_requeued}`
+}
+
 /** A stable React/table key for a row: one row per (agent, model). */
 export function scorecardRowKey(r: CcScorecardRow): string {
   return `${r.agent}\u0000${r.model}`
