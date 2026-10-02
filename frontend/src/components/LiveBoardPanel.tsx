@@ -467,17 +467,12 @@ async function drawBoardBackground(
   const background = inkBackground(board.kind)
   if (background === 'caption') throw new Error('an html board cannot be read back')
   // The panel's own backdrop first, so whatever the board does not cover
-  // looks as it did on screen.
-  ctx.fillStyle = getComputedStyle(content.closest('.live-board') ?? content).backgroundColor
+  // looks as it did on screen: the section paints the opaque dark stage.
+  ctx.fillStyle = getComputedStyle(content.closest('.live-board-section') ?? content).backgroundColor
   ctx.fillRect(0, 0, frame.width, frame.height)
   if (background === 'image') {
     const img = content.querySelector<HTMLImageElement>('img.live-board-image')
     if (img === null) throw new Error('no image on the board')
-    // `.live-board` above matches nothing, so the backdrop read transparent
-    // and everything round a short image (a blank board, mesa task 1580)
-    // flattened to nothing. The section is the opaque dark the person sees.
-    ctx.fillStyle = getComputedStyle(content.closest('.live-board-section') ?? content).backgroundColor
-    ctx.fillRect(0, 0, frame.width, frame.height)
     await img.decode()
     const at = rectIn(img, content)
     ctx.drawImage(img, at.x, at.y, at.width, at.height)
