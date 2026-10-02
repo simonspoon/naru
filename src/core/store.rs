@@ -9458,6 +9458,19 @@ impl Store {
             .query_row("SELECT COUNT(*) FROM library_versions", [], |r| r.get(0))?)
     }
 
+    /// Stamp of the task-status history, the other half of the scorecard that
+    /// does not come from `cc_*` (its task-outcome columns read `tasks` and
+    /// `task_events`). Every status write inserts a `task_events` row, so the
+    /// row count and highest id move on any status change, and a task delete
+    /// cascades its events away and moves the count.
+    pub fn task_events_stamp(&self) -> Result<String> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) || ':' || COALESCE(MAX(id), 0) FROM task_events",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
     /// Failed tool calls with `ts >= cutoff` (`None` = all), each already LEFT
     /// JOINed to its `cc_tool_calls` row for the tool's name and what it acted
     /// on. The join is **outer**: an error whose call line has not been
@@ -20496,6 +20509,41 @@ mod tests {
             .position(|m| m.contains("CREATE TABLE cc_node_files"))
             .expect("the cc_node_files migration is gone");
         assert_eq!(MIGRATIONS[i + 1].trim(), "DELETE FROM cc_files;");
+    }
+
+    /// The scorecard's task-side cache key moves on a status change and on a
+    /// task delete (events cascade away).
+    #[test]
+    fn task_events_stamp_moves_on_status_change_and_delete() {
+        let (mut store, _dir) = temp_store();
+        let project = store.create_project("p", None, None, None, None).unwrap();
+        let task = store
+            .create_task(
+                project.id,
+                "t",
+                Priority::Medium,
+                &[],
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let created = store.task_events_stamp().unwrap();
+        assert_eq!(store.task_events_stamp().unwrap(), created);
+        store
+            .update_task(
+                task.id,
+                &TaskPatch {
+                    status: Some(Status::Done),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let done = store.task_events_stamp().unwrap();
+        assert_ne!(done, created);
+        store.delete_task(task.id).unwrap();
+        assert_ne!(store.task_events_stamp().unwrap(), done);
     }
 
     /// The API cache key: 0 on empty, moves when rows land, stays put on a

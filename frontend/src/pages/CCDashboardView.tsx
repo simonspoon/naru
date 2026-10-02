@@ -503,7 +503,10 @@ function Scorecard() {
       <p className="muted cc-hint">
         Subagent runs by agent and model, bounded by run start. Judge a row by
         its n before its mean. Task outcome counts only runs whose session was
-        started on a task (done now / requeued since). Model changes are not date-filtered.
+        started on a task: done counts tasks done now, not whether that run
+        finished them, and a retried task credits every session that worked on
+        it, so it is not a per-model success rate; requeued counts moves back
+        to todo/backlog since the run started. Model changes are not date-filtered.
       </p>
       <p className="cc-hint">
         <label>

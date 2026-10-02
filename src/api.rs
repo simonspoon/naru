@@ -93,9 +93,10 @@ struct AppState {
     /// Model scorecard cache (mesa task 1514), keyed by the `(since, until)`
     /// strings as sent. Each entry carries the `cc_stamp` plus the stored
     /// agent-definition version count (the change markers come from the
-    /// library, not `cc_*`) it was built with; same stamp-gated staleness as
+    /// library, not `cc_*`) and the task-event stamp (the task-outcome
+    /// columns) it was built with; same stamp-gated staleness as
     /// `cc_cache`.
-    cc_scorecard_cache: Arc<Mutex<HashMap<ScorecardKey, ((i64, i64), CcScorecard)>>>,
+    cc_scorecard_cache: Arc<Mutex<HashMap<ScorecardKey, ((i64, i64, String), CcScorecard)>>>,
     /// Live subscription-usage cache: `(fetched_unix, data)`. The UI polls this,
     /// but each fetch hits Anthropic's usage endpoint, so a short TTL throttles
     /// outbound calls. Read-only live data — not the mesa store. Concurrent
@@ -10541,7 +10542,11 @@ async fn get_cc_scorecard(
     let stamp = {
         let mut store = state.store.lock().unwrap();
         crate::core::cc::sync(&mut store, false)?;
-        (store.cc_stamp()?, store.library_versions_stamp()?)
+        (
+            store.cc_stamp()?,
+            store.library_versions_stamp()?,
+            store.task_events_stamp()?,
+        )
     };
     let key: ScorecardKey = (q.since.clone(), q.until.clone());
     {
