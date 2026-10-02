@@ -11411,6 +11411,10 @@ body.live-panel-ratio-resizing .live-panel-divider {
   line-height: 1;
 }
 
+.agent-card-icon {
+  flex: none;
+}
+
 .agent-card-activity-working {
   width: 0.5rem;
   height: 0.5rem;
@@ -11772,6 +11776,8 @@ body.live-panel-ratio-resizing .live-panel-divider {
 
 .agent-subcard-alarm {
   display: flex;
+  align-items: center;
+  gap: 0.25rem;
   justify-content: flex-end;
   margin-top: 0.15rem;
   font-size: 0.68rem;

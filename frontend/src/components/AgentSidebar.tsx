@@ -660,7 +660,7 @@ function MaximizeGlyph({ restore }: { restore: boolean }) {
   )
 }
 
-/** A subagent's attributed timer: ⏰ and the time left, on its own 1s tick so
+/** A subagent's attributed timer: an alarm icon and the time left, on its own 1s tick so
  * the rest of the sidebar keeps its 30s one. Nothing once it has run out. */
 function AlarmBadge({ endsAt }: { endsAt: number }) {
   const [now, setNow] = useState(() => Date.now())
@@ -673,7 +673,18 @@ function AlarmBadge({ endsAt }: { endsAt: number }) {
   const text = formatCountdown(left)
   return (
     <div className="agent-subcard-alarm" title={`alarm: ${text} left`}>
-      <span aria-hidden="true">⏰</span>&nbsp;{text}
+      <svg
+        className="live-icon-mark agent-card-icon"
+        viewBox="0 0 24 24"
+        width="1em"
+        height="1em"
+        aria-hidden="true"
+        focusable="false"
+      >
+        <circle cx="12" cy="13" r="7" />
+        <path d="M12 9v4l2.5 2M5 4 2.5 6.5M19 4l2.5 2.5" />
+      </svg>
+      {text}
     </div>
   )
 }
@@ -801,7 +812,19 @@ function AgentListContent({
               aria-label={activity}
               title={activity === 'listening' ? 'Listening for the next spoken turn' : 'Working'}
             >
-              {activity === 'listening' ? '🎙' : ''}
+              {activity === 'listening' && (
+                <svg
+                  className="live-icon-mark agent-card-icon"
+                  viewBox="0 0 24 24"
+                  width="1em"
+                  height="1em"
+                  aria-hidden="true"
+                  focusable="false"
+                >
+                  <rect x="9" y="3" width="6" height="11" rx="3" />
+                  <path d="M5 11a7 7 0 0 0 14 0M12 18v3" />
+                </svg>
+              )}
             </span>
           )}
           <span className="agent-card-name" title={model ? `${label} · ${model}` : label}>
