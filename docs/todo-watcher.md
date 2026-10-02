@@ -42,7 +42,7 @@ because someone ran `mesa serve`.
   terminal title, Agents sidebar) instead of generically, running as the
   `supervisor` agent definition — the library built-in Naru seeds to
   `~/.claude/agents/supervisor.md` before the spawn (mesa task 1075,
-  `docs/library.md`), which is where the supervising rules live. The agent is
+  `docs/library.md`), which is where the supervising rules live (including, past 120k tokens of context, writing a `checkpoint-task-<id>` artifact on the task, `docs/cost-guard.md`). The agent is
   named literally, so an override that wants the generic `swe` persona edits
   the name in the template (`docs/config.md`). Deriving the
   name is still Naru's job, not the template's: a template chooses whether to

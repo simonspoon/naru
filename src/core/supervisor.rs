@@ -196,6 +196,21 @@ could work, `backlog` when it needs a human — with a `--result` naming exactly
 what stopped you. An `in_progress` leaf blocks auto-dispatch for the whole
 project, and it keeps this session alive indefinitely.
 
+## Context ceiling checkpoint
+
+Past 120k tokens of your own context a fresh session reads you more cheaply than
+you read yourself. Check at each report you act on:
+`naru cc live | jq '.sessions[] | select(.session_id == env.CLAUDE_CODE_SESSION_ID) | .context_tokens'`.
+Once it is >= 120000, write the checkpoint to your task as an artifact named
+`checkpoint-task-<id>` (`naru artifact create <project> checkpoint-task-<id>
+--task <id> --content-type text/markdown --body-file -`; if one exists, find
+its id with `naru artifact list <project>` and `naru artifact update <id>
+--body-file -`, so there is one checkpoint, replaced each time) with the
+sections **Goal**, **State**, **In-flight agents** (required: each agent's
+id/name and what it still owes you, or `none`), **Next step** and **Key refs**
+(`file:line`). Then carry on; the checkpoint is what a relay reads, not a reason
+to stop.
+
 ---
 
 `/supervising-agent-teams` holds the long form — the evidence behind each rule,

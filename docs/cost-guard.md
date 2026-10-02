@@ -137,6 +137,8 @@ and never runs `claude stop` (`guard::wants_stop`), and the alert closes by
 saying Naru left the session running because the context rule only reports. If
 another rule trips alongside it, that rule's stop proceeds as usual.
 
+The `supervisor` agent definition (`core::supervisor`, what the todo-watcher's `--agent supervisor` spawn runs as) tells a task session that, past that same 120k, it writes its own checkpoint (goal, state, in-flight agents, next step, key refs) to a `checkpoint-task-<id>` artifact on its task, reading its occupied context from `naru cc live`.
+
 The 120,000-token default is the size past which a fresh session seeded with a
 checkpoint is cheaper than carrying the context forward. That is the point of
 the alert; the checkpoint/relay handoff that would act on it is future work, and
