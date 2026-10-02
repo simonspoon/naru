@@ -12603,35 +12603,96 @@ body.dock-resizing .dock-body {
   box-shadow: 0 0 6px var(--cyan);
 }
 
-/* The orb panel: the floating orb's sphere sized to the panel (`InlineOrb`),
-   its state in words under it. The orb keeps `.live-orb`'s look and glow;
-   only the fixed-position, drag and dock-to-edge parts stand down. */
+/* The orb panel (mesa task 1577): the animated mark filling the panel over a
+   soft glow, always-visible icon buttons bottom right. No sphere, ring or
+   words. The mark's box is a square from container units: height-bound in a
+   short wide panel, width-bound in a tall narrow one. */
 .orb-panel {
+  position: relative;
   flex: 1;
   min-width: 0;
   min-height: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  padding: 0.25rem 0.5rem 0.5rem;
 }
 
 .orb-panel-stage {
-  flex: 1;
-  min-width: 0;
-  min-height: 0;
-  width: 100%;
+  position: absolute;
+  inset: 0;
+  container-type: size;
   display: flex;
   align-items: center;
   justify-content: center;
 }
 
-.orb-panel-state {
-  flex: none;
+.orb-panel-mark {
+  position: relative;
+  width: max(0px, min(100cqw - 2rem, 100cqh - 2rem));
+  aspect-ratio: 1;
+}
+
+.orb-panel-mark .naru-mark {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.orb-panel-glow {
+  position: absolute;
+  inset: 10% 0;
+  border-radius: 50%;
+  filter: blur(36px);
+  opacity: 0.38;
+  background: #6d6592;
+  transition: background 0.4s ease;
+}
+
+.orb-panel.bright .orb-panel-glow {
+  background: #29e6ff;
+}
+
+.orb-panel.mode-speak .orb-panel-glow {
+  background: #ffa02b;
+}
+
+.orb-panel.mode-think .orb-panel-glow {
+  background: #b06bff;
+}
+
+.orb-panel-ctrls {
+  position: absolute;
+  right: 0.6rem;
+  bottom: 0.6rem;
+  display: flex;
+  gap: 0.4rem;
+}
+
+.orb-panel-btn {
+  width: 32px;
+  height: 32px;
+  min-width: 0;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 9px;
+  background: rgba(20, 30, 50, 0.75);
+  box-shadow: var(--ring);
   color: var(--cyan);
-  font-size: 0.7rem;
-  letter-spacing: 0.25em;
-  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.orb-panel-btn:hover {
+  background: rgba(30, 50, 80, 0.9);
+}
+
+.orb-panel-btn.off {
+  color: var(--red);
+  background: rgba(60, 18, 26, 0.55);
+}
+
+.orb-panel-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 
 .live-orb.live-orb-inline {

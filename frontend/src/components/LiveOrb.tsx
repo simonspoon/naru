@@ -45,11 +45,11 @@ function mid(deg: number): { x: number; y: number } {
   return { x: PIE / 2 + r * Math.cos(a), y: PIE / 2 + r * Math.sin(a) }
 }
 
-function MicGlyph() {
+function MicGlyph({ slashed = false }: { slashed?: boolean }) {
   return (
     <g fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <rect x="9" y="3" width="6" height="11" rx="3" />
-      <path d="M5 11a7 7 0 0 0 14 0M12 18v3" />
+      <path d={slashed ? 'M5 11a7 7 0 0 0 14 0M12 18v3M4 4l16 16' : 'M5 11a7 7 0 0 0 14 0M12 18v3'} />
     </g>
   )
 }
@@ -224,55 +224,103 @@ function orbClasses(state: LiveIndicator | null, mute: ReturnType<typeof muteIco
 }
 
 /**
- * The orb as a dock panel or the rail's mini (mesa task 1574, docs/dock.md):
- * the same sphere, pie, glow and badge as the floating orb, in flow, scaled to
- * `size` px (the sphere's diameter; the pie blooms past it). No dragging — the
- * dock places it. `pie={false}` is the rail's mini: a sphere that only reacts.
+ * The rail's mini orb (mesa task 1574, docs/dock.md): the floating orb's sphere,
+ * in flow, scaled to `size` px, that only reacts — no pie, no dragging.
  */
-export function InlineOrb({ size, pie = true, ...p }: OrbProps & { size: number; pie?: boolean }) {
-  const [pinned, setPinned] = useState(false)
+export function InlineOrb({ size, ...p }: OrbProps & { size: number }) {
   const mute = muteIcon(p.micAvailable && p.micMuted, p.speechMuted)
   const k = size / ORB_SIZE
   return (
     <div
-      className={`live-orb live-orb-inline ${orbClasses(p.state, mute)}${pinned ? ' pinned' : ''}`}
-      // The box keeps the 116px geometry the pie is drawn in; `scale` shrinks
-      // it, and the negative margin gives back the layout space it no longer takes.
+      className={`live-orb live-orb-inline ${orbClasses(p.state, mute)}`}
+      // The box keeps the 116px geometry; `scale` shrinks it, and the negative
+      // margin gives back the layout space it no longer takes.
       style={{ width: ORB_SIZE, height: ORB_SIZE, scale: k, margin: -((ORB_SIZE - size) / 2) }}
     >
-      {pie && <OrbPie {...p} />}
-      <div className="live-orb-body" onClick={() => setPinned((v) => !v)}>
+      <div className="live-orb-body">
         <div className="live-orb-mark">
           <NaruMark state={p.state} level={p.level} speechRms={p.speechRms} decorative />
         </div>
       </div>
-      <OrbBadge show={pie && (mute === 'speaker' || mute === 'both')} />
     </div>
   )
 }
 
-/**
- * The `orb` dock panel's body: an `InlineOrb` sized to the panel (measured, so
- * a drag of a divider resizes the sphere) over the state in words.
- */
-export function OrbPanel({ label, ...p }: OrbProps & { label: string }) {
-  const ref = useRef<HTMLDivElement>(null)
-  const [box, setBox] = useState({ w: 160, h: 140 })
-  useEffect(() => {
-    const el = ref.current
-    if (el === null) return
-    const ro = new ResizeObserver(() => setBox({ w: el.clientWidth, h: el.clientHeight }))
-    ro.observe(el)
-    return () => ro.disconnect()
-  }, [])
-  // The pie blooms 34px past the sphere's 116px, so the whole figure is PIE wide.
-  const size = Math.max(28, Math.min(220, (Math.min(box.w, box.h) * ORB_SIZE) / PIE))
+/** One of the panel's small icon buttons: a real button, named, no label. */
+function PanelButton({
+  label,
+  off,
+  disabled,
+  onPress,
+  children,
+}: {
+  label: string
+  /** The control is in its off state (muted / paused): drawn red. */
+  off: boolean
+  disabled?: boolean
+  onPress: () => void
+  children: React.ReactNode
+}) {
   return (
-    <div className="orb-panel" aria-label="the live orb">
-      <div className="orb-panel-stage" ref={ref}>
-        <InlineOrb {...p} size={size} />
+    <button
+      type="button"
+      className={`orb-panel-btn${off ? ' off' : ''}`}
+      aria-label={label}
+      title={label}
+      aria-pressed={off}
+      disabled={disabled}
+      onClick={onPress}
+    >
+      <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+        {children}
+      </svg>
+    </button>
+  )
+}
+
+/**
+ * The `orb` dock panel's body (mesa task 1577): the animated mark filling the
+ * panel over a soft glow in the state's colour — no sphere, no ring, no words —
+ * with mic / pause / sound as small always-visible icon buttons bottom right.
+ * The mark's box is a square fitted by container units, so it takes the height
+ * of a short wide panel and the width of a tall narrow one.
+ */
+export function OrbPanel(p: OrbProps) {
+  return (
+    <div className={`orb-panel ${orbClasses(p.state, null)}`} aria-label="the live orb">
+      <div className="orb-panel-stage">
+        <div className="orb-panel-mark">
+          <div className="orb-panel-glow" />
+          <NaruMark state={p.state} level={p.level} speechRms={p.speechRms} decorative />
+        </div>
       </div>
-      <div className="orb-panel-state">{label}</div>
+      {(p.micAvailable || p.canPause) && (
+        <div className="orb-panel-ctrls">
+          {p.micAvailable && (
+            <PanelButton
+              label={p.micMuted ? 'Listen through this browser' : 'Stop listening'}
+              off={p.micMuted}
+              onPress={p.onToggleMic}
+            >
+              <MicGlyph slashed={p.micMuted} />
+            </PanelButton>
+          )}
+          {p.canPause && (
+            <PanelButton label={p.pauseLabel} off={p.paused} disabled={p.pauseDisabled} onPress={p.onTogglePause}>
+              <PauseGlyph paused={p.paused} />
+            </PanelButton>
+          )}
+          {p.canPause && (
+            <PanelButton
+              label={p.speechMuted ? 'Unmute spoken replies' : 'Mute spoken replies'}
+              off={p.speechMuted}
+              onPress={p.onToggleSpeech}
+            >
+              <SpeakerGlyph muted={p.speechMuted} />
+            </PanelButton>
+          )}
+        </div>
+      )}
     </div>
   )
 }

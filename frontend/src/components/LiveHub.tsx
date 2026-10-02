@@ -74,7 +74,7 @@ import { chordLabel, matchesShortcut } from '../keymap'
 import { useKeymap } from '../keymapStore'
 import { elapsedLabel, endsInHead } from '../liveHead'
 import { headMeta, quietHint, taskHash, taskSegments, turnClock } from '../liveChat'
-import { headerIndicator, indicatorLabel } from '../liveIndicator'
+import { headerIndicator } from '../liveIndicator'
 import {
   buildVocabulary,
   correctVocabulary,
@@ -4747,10 +4747,10 @@ export function LiveHub({
         )}
       {dock?.orbPanelShown &&
         createPortal(
-          <OrbPanel {...orbProps} label={live && unlocked ? indicatorLabel(indicator ?? 'listening').replace('Naru is ', '') : 'not live'} />,
+          <OrbPanel {...orbProps} />,
           dockHosts.hostFor('orb'),
         )}
-      {dock && navCollapsed && createPortal(<InlineOrb {...orbProps} size={30} pie={false} />, dockHosts.hostFor('rail-orb'))}
+      {dock && navCollapsed && createPortal(<InlineOrb {...orbProps} size={30} />, dockHosts.hostFor('rail-orb'))}
       {dock &&
         createPortal(
           hasBoards ? (

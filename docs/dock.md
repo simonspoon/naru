@@ -13,7 +13,7 @@ or Rust surface.
 | `agents` | `AgentSidebar` with its `docked` prop |
 | `terminal` | the global `TerminalPage` |
 | `diagrams` | `DiagramsPanel`: the boards of the project the route is on, opened in place |
-| `orb` | the live orb (mesa task 1574): the floating orb of task 1553 (`LiveOrb.tsx`) as a sphere sized to its panel, with its pie (mic / pause / sound), state glow and muted badge, and its state in words under it |
+| `orb` | the live orb (mesa task 1574): the animated mark (`LiveOrb.tsx`'s `OrbPanel`, mesa task 1577) filling its panel over a soft state-coloured glow — no sphere, ring or status words — with always-visible mic / pause / sound icon buttons bottom right (the mic red and slashed when muted) |
 
 Each panel appears at most once. The phone tier (`usePhoneTier()`) is **not**
 docked and keeps its drawers, tab bar and the old live aside unchanged.
@@ -39,7 +39,7 @@ top-right chat and whiteboard toggles, which are no longer rendered when docked
 (the phone tier keeps them).
 
 Collapsing the nav leaves a slim **rail**: the expand handle, a mini orb (a small
-`InlineOrb` sphere, no pie) that reacts exactly as the orb panel does, a
+`InlineOrb` sphere, no controls) that reacts exactly as the orb panel does, a
 separator, the dashboard (⌂) and inbox (✉, with its unread count) links, a
 separator, and one icon per other panel (dotted when open; a click reveals it). Panels docked in a collapsed nav are parked, not shown.
 
