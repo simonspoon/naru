@@ -11795,6 +11795,29 @@ body.live-panel-ratio-resizing .live-panel-divider {
   opacity: 0.55;
 }
 
+/* Child card kinds (mesa task 1602): the background says what a child is at a
+   glance, the left edge staying the session accent (`--k`). A sub-agent gets a
+   faint cyan wash over the panel; a shell (background command) gets fine
+   diagonal hatching. Both are `background` only, so they sit under every state
+   rule above: glow is a box-shadow, finished and leaving change the border and
+   opacity, and the violet live wash is on `.agent-card-live`, which a child
+   never carries. The main card keeps its plain panel. */
+.agent-list .agent-subcard-subagent {
+  background:
+    linear-gradient(rgba(0, 229, 255, 0.07), rgba(0, 229, 255, 0.07)),
+    var(--panel, rgba(15, 23, 41, 0.85));
+}
+
+.agent-list .agent-subcard-shell {
+  background:
+    repeating-linear-gradient(
+      135deg,
+      rgba(184, 221, 232, 0.06) 0 6px,
+      transparent 6px 12px
+    ),
+    var(--panel, rgba(15, 23, 41, 0.85));
+}
+
 .agent-subcard.selected {
   border-color: var(--cyan);
   box-shadow: 0 0 10px var(--cyan-dim);

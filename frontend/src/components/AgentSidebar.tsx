@@ -917,6 +917,7 @@ function AgentListContent({
             style={{ '--k': agentColor(a.sessionId) } as CSSProperties}
             className={
               'agent-card agent-subcard ' +
+              (child.kind === 'subagent' ? 'agent-subcard-subagent ' : 'agent-subcard-shell ') +
               (child.state === 'running' && !done ? 'agent-card-active ' : '') +
               (isEntering(seen, key, nowMs) ? 'agent-card-enter ' : '') +
               (done ? 'agent-card-finished ' : '') +
