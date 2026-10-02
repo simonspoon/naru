@@ -3,6 +3,7 @@
 // default view. Pure, so the rules are unit-tested rather than inline in
 // `AgentSidebar.tsx`.
 
+import type { AgentChild } from './types/AgentChild'
 import type { AgentSession } from './types/AgentSession'
 import type { LiveState } from './types/LiveState'
 
@@ -39,4 +40,29 @@ export function liveCardWait(a: Pick<AgentSession, 'state' | 'waitingFor'>): str
  *  already shows one thing at a time, so it keeps its own layout. */
 export function defaultListMaximized(phone: boolean): boolean {
   return !phone
+}
+
+/** The live agent's parked `naru live listen` — a background shell the agent
+ *  keeps waiting for the next spoken turn (`mesa live listen` is the old
+ *  spelling). A shell's `command` is its paired Bash call's real command; a
+ *  shell no call was paired with only has the `zsh -c …` wrapper in `name`,
+ *  which carries the same text. */
+export function isListenChild(c: Pick<AgentChild, 'kind' | 'name' | 'command'>): boolean {
+  return c.kind === 'shell' && /\b(?:naru|mesa)\s+live\s+listen\b/.test(c.command ?? c.name)
+}
+
+/** The live card's children without the parked listen — it is not work, the
+ *  glyph (`liveActivity`) says it instead. Shells and subagents stay. */
+export function withoutListen<T extends Pick<AgentChild, 'kind' | 'name' | 'command'>>(
+  children: T[],
+): T[] {
+  return children.filter((c) => !isListenChild(c))
+}
+
+/** Hearing or working: `listening` while a listen child is running (the agent
+ *  is parked, waiting for the person), `working` otherwise. */
+export function liveActivity(
+  children: Pick<AgentChild, 'kind' | 'name' | 'command' | 'state'>[],
+): 'listening' | 'working' {
+  return children.some((c) => isListenChild(c) && c.state === 'running') ? 'listening' : 'working'
 }

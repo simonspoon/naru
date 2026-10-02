@@ -11402,6 +11402,39 @@ body.live-panel-ratio-resizing .live-panel-divider {
   background: var(--violet);
 }
 
+/* The live card's listening glyph / working pulse (mesa task 1597). */
+.agent-card-activity {
+  flex: none;
+  align-self: center;
+  margin-right: 0.4rem;
+  font-size: 0.75rem;
+  line-height: 1;
+}
+
+.agent-card-activity-working {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: var(--amber);
+  animation: agent-activity-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes agent-activity-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-card-activity-working {
+    animation: none;
+  }
+}
+
 /* The floating Naru orb (mesa task 1553), portalled to <body> by
    `LiveOrb.tsx`: above every sidebar, drawer and modal (the highest in the
    sheet is 1250). Position is inline; the transition applies only while it is

@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest'
-import { defaultListMaximized, liveAgentId, liveCardWait, pinLiveAgent } from './agentLive'
+import {
+  defaultListMaximized,
+  isListenChild,
+  liveActivity,
+  liveAgentId,
+  liveCardWait,
+  pinLiveAgent,
+  withoutListen,
+} from './agentLive'
+import type { AgentChild } from './types/AgentChild'
 import type { AgentSession } from './types/AgentSession'
 import type { LiveState } from './types/LiveState'
 
@@ -47,5 +56,33 @@ describe('defaultListMaximized', () => {
   it('is the card view off the phone tier', () => {
     expect(defaultListMaximized(false)).toBe(true)
     expect(defaultListMaximized(true)).toBe(false)
+  })
+})
+
+const shell = (command: string | null, name = "zsh -c 'source snap && eval x'", state = 'running') =>
+  ({ kind: 'shell', name, command, state }) as unknown as AgentChild
+const sub = (name: string) =>
+  ({ kind: 'subagent', name, command: null, state: 'running' }) as unknown as AgentChild
+
+describe('listen child', () => {
+  it('matches naru and mesa spellings, by command or the wrapper name', () => {
+    expect(isListenChild(shell('naru live listen --lease 3'))).toBe(true)
+    expect(isListenChild(shell('mesa live listen'))).toBe(true)
+    expect(isListenChild(shell(null, "zsh -c 'naru live listen'"))).toBe(true)
+  })
+  it('leaves other shells and subagents alone', () => {
+    expect(isListenChild(shell('naru live say hi'))).toBe(false)
+    expect(isListenChild(shell('sleep 5'))).toBe(false)
+    expect(isListenChild(sub('naru live listen'))).toBe(false)
+  })
+  it('withoutListen drops only the listen row', () => {
+    const keep = [shell('sleep 5'), sub('Explore')]
+    expect(withoutListen([shell('naru live listen'), ...keep])).toEqual(keep)
+  })
+  it('is listening only while a listen child runs', () => {
+    expect(liveActivity([shell('naru live listen'), sub('Explore')])).toBe('listening')
+    expect(liveActivity([shell('sleep 5'), sub('Explore')])).toBe('working')
+    expect(liveActivity([shell('naru live listen', undefined, 'finished')])).toBe('working')
+    expect(liveActivity([])).toBe('working')
   })
 })

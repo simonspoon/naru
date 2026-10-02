@@ -31,7 +31,14 @@ import {
   isChildPaneId,
   parseChildPaneId,
 } from '../agentChild'
-import { defaultListMaximized, liveAgentId, liveCardWait, pinLiveAgent } from '../agentLive'
+import {
+  defaultListMaximized,
+  liveActivity,
+  liveAgentId,
+  liveCardWait,
+  pinLiveAgent,
+  withoutListen,
+} from '../agentLive'
 import { agentHeadline, agentTint, formatContextTokens } from '../agentRow'
 import {
   agentChips,
@@ -753,7 +760,9 @@ function AgentListContent({
     const nowMs = clockNow()
     // The work this session holds in flight: each child is a card of its own
     // right under it (mesa tasks 1277, 1561), not a row inside it.
-    const subs = cardChildren(a.sessionId, visibleChildren(a, nowMs), childLingering)
+    const shown = visibleChildren(a, nowMs)
+    const subs = cardChildren(a.sessionId, pinned ? withoutListen(shown) : shown, childLingering)
+    const activity = pinned ? liveActivity(a.children) : null
     const alarmEnds = attributeAlarms(a.children).endsAt
     return (
       <Fragment key={a.sessionId}>
@@ -785,6 +794,16 @@ function AgentListContent({
                 : [a.status, a.state].filter(Boolean).join(' · ') || 'unknown'
             }
           />
+          {activity !== null && (
+            <span
+              className={`agent-card-activity agent-card-activity-${activity}`}
+              role="img"
+              aria-label={activity}
+              title={activity === 'listening' ? 'Listening for the next spoken turn' : 'Working'}
+            >
+              {activity === 'listening' ? '🎙' : ''}
+            </span>
+          )}
           <span className="agent-card-name" title={model ? `${label} · ${model}` : label}>
             {label}
           </span>
