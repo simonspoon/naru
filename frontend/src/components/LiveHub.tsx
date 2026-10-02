@@ -79,6 +79,7 @@ import {
 import { MIN_MAIN_WIDTH } from '../agentSidebarWidth'
 import { chordLabel, matchesShortcut } from '../keymap'
 import { useKeymap } from '../keymapStore'
+import { parseBoardKey } from '../liveBoardKeys'
 import { elapsedLabel, endsInHead } from '../liveHead'
 import { headMeta, quietHint, taskHash, taskSegments, turnClock } from '../liveChat'
 import { headerIndicator } from '../liveIndicator'
@@ -2192,6 +2193,28 @@ export function LiveHub({
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [toggleListening, keymap, live, unlocked])
+
+  // Keys pressed inside an `html` whiteboard (mesa task 1599). That frame is
+  // an opaque-origin document, so its keydowns never reach the window
+  // listeners above and below; the render route's relay posts them here and
+  // they are re-dispatched on `window`, so every global shortcut behaves as if
+  // the app had focus. Lives in the hub (mounted for the life of the app, one
+  // listener however many frames show) rather than in `BoardFrame`, which
+  // would re-dispatch once per frame. Only a message whose `source` is the
+  // window of a `.live-board-frame` is believed, and its shape is checked.
+  useEffect(() => {
+    const onMessage = (m: MessageEvent) => {
+      const key = parseBoardKey(m.data)
+      if (!key) return
+      const frames = document.querySelectorAll<HTMLIFrameElement>('iframe.live-board-frame')
+      if (![...frames].some((f) => f.contentWindow !== null && f.contentWindow === m.source)) return
+      window.dispatchEvent(
+        new KeyboardEvent('keydown', { ...key, bubbles: true, cancelable: true }),
+      )
+    }
+    window.addEventListener('message', onMessage)
+    return () => window.removeEventListener('message', onMessage)
+  }, [])
 
   // The discard key (mesa task 1354, `live-cancel`, Escape by default): the
   // person was interrupted mid-sentence, so what the microphone has heard and

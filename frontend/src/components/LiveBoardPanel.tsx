@@ -10,6 +10,8 @@ import {
   type SyntheticEvent,
 } from 'react'
 import { liveBoardRenderUrl } from '../api'
+import { useKeymap } from '../keymapStore'
+import { boundFunctionKeys } from '../liveBoardKeys'
 import { imageFilesFromClipboard } from '../clipboardFiles'
 import {
   boardAt,
@@ -124,12 +126,36 @@ export function BoardBody({ board }: { board: Pick<LiveBoardSummary, 'id' | 'kin
   if (render === 'image') {
     return <img className="live-board-image" src={url} alt={boardTitle(board)} />
   }
+  return <BoardFrame url={url} title={boardTitle(board)} />
+}
+
+/**
+ * The sandboxed document frame an html board renders in (mesa task 1599). The frame
+ * is an opaque origin, so its keydowns never reach the app's global
+ * shortcuts; the render route's key relay posts them to the hub, and this
+ * side hands the relay the one thing it cannot know — which bare function
+ * keys the keymap binds, so it can `preventDefault` those (a rebound F5 must
+ * not also reload the tab). Sent on `load` and again whenever the keymap
+ * changes; `'*'` because an opaque-origin frame has no origin to name.
+ */
+function BoardFrame({ url, title }: { url: string; title: string }) {
+  const keymap = useKeymap()
+  const ref = useRef<HTMLIFrameElement>(null)
+  const send = useCallback(() => {
+    ref.current?.contentWindow?.postMessage(
+      { naru: 'board-keys', prevent: boundFunctionKeys(keymap) },
+      '*',
+    )
+  }, [keymap])
+  useEffect(send, [send])
   return (
     <iframe
+      ref={ref}
       className="live-board-frame"
-      title={boardTitle(board)}
+      title={title}
       src={url}
       sandbox="allow-scripts"
+      onLoad={send}
     />
   )
 }

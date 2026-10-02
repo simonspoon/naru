@@ -1467,6 +1467,30 @@ history" below for what does and does not get pruned).
 | `diagram` | SVG markup, rendered **at push time** | `image/svg+xml; charset=utf-8`, served under the same CSP, shown in an `<img>` (mesa task 1353) |
 | `image` | base64 of the file's bytes | the allowlisted image mime, in an `<img>` |
 
+**Keys pressed inside an html board (mesa task 1599).** The frame is an
+opaque-origin document (`sandbox allow-scripts`), so its keydowns never reach
+the app's `window` listeners and the global shortcuts (`live-listen`,
+`live-cancel`, the palette) would go dead whenever focus sits in the board. The
+render route therefore serves an **html** board as its stored bytes followed by
+one fixed inline `<script>` (`BOARD_KEY_RELAY` in `src/api.rs`); markdown,
+diagram, image and artifact renders are untouched. The relay posts
+`{naru: 'board-key', key, code, metaKey, ctrlKey, altKey, shiftKey, repeat}` to
+`parent` for a capture-phase keydown only when it is a function key F1-F24
+(forwarded even from an editable element, as in `keyboardScope.ts`) or is held
+with Meta/Ctrl/Alt (and is not typed into an input/textarea/select/
+contenteditable). Every other bare key — letters, arrows, Escape, Space,
+PageDown, Shift alone — stays in the frame: the person is scrolling or typing
+there, and a bare arrow would otherwise move the app's focus. The hub's one `message` listener believes only a message whose
+`source` is the window of a `.live-board-frame` and whose shape passes
+`liveBoardKeys.ts::parseBoardKey`, then re-dispatches a `keydown` on `window`.
+Focus is never moved, so selection, copy and the board's own interactivity are
+untouched. The **prevent set**: `BoardFrame` posts
+`{naru: 'board-keys', prevent: [...]}` to the frame on `load` and whenever the
+keymap changes — the bare function keys the keymap binds
+(`boundFunctionKeys`) — and the relay `preventDefault`s exactly those, so a
+`live-listen` rebound to F5 does not also reload the tab while an unbound F-key
+keeps its browser default.
+
 Two of those choices are load-bearing:
 
 - **An image board holds the bytes, not a path.** Base64 in the row means the

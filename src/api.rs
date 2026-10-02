@@ -5073,6 +5073,47 @@ const RENDER_CSP: &str = "default-src 'none'; script-src 'unsafe-inline'; style-
      img-src data:; font-src data:; media-src data:; form-action 'none'; \
      base-uri 'none'; frame-ancestors 'self'; sandbox allow-scripts";
 
+/// Appended to an `html` live board's body by [`render_live_board`] (mesa task
+/// 1599). The board renders in an opaque-origin `sandbox allow-scripts`
+/// iframe, so its keydowns never reach the app's global shortcut listeners
+/// (the listen switch, the discard key, the palette); this relay posts them to
+/// the parent, whose hub re-dispatches them on `window`
+/// (`frontend/src/liveBoardKeys.ts`). It forwards only a function key F1-F24
+/// (even typed into an editable element, `keyboardScope.ts`'s exemption) or a
+/// key held with Meta/Ctrl/Alt (not into an editable element); every other
+/// bare key — letters, arrows, Escape, Space, PageDown, Shift alone — stays in
+/// the frame, since the person is scrolling or typing there and a bare default
+/// like an arrow would move the app's focus. The parent posts
+/// `{naru:'board-keys', prevent:[...]}` — the bare function keys the keymap
+/// binds — and those get `preventDefault`, so a rebound F5 does not also
+/// reload the tab while an unbound F-key keeps its browser default.
+/// A board ending inside an unclosed `<script>`/`<style>`/`<textarea>`/comment
+/// swallows the relay, so shortcuts stay dead there (graceful, not a hole).
+/// Inline script is what [`RENDER_CSP`] already allows; nothing is loaded.
+const BOARD_KEY_RELAY: &str = "\n<script>(function(){var P={};\
+addEventListener('message',function(e){var d=e.data;\
+if(e.source===parent&&d&&d.naru==='board-keys'&&Array.isArray(d.prevent)){P={};\
+d.prevent.forEach(function(k){P[k]=1})}});\
+addEventListener('keydown',function(e){\
+var f=/^F([1-9]|1[0-9]|2[0-4])$/.test(e.key),t=e.target,\
+ed=t&&(/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName)||t.isContentEditable),\
+bare=!e.metaKey&&!e.ctrlKey&&!e.altKey&&!e.shiftKey;\
+if(!f&&(ed||!(e.metaKey||e.ctrlKey||e.altKey)))return;\
+if(f&&bare&&P[e.key])e.preventDefault();\
+parent.postMessage({naru:'board-key',key:e.key,code:e.code,metaKey:e.metaKey,\
+ctrlKey:e.ctrlKey,altKey:e.altKey,shiftKey:e.shiftKey,repeat:e.repeat},'*')},true)})();\
+</script>\n";
+
+/// A board's body as the render route serves it: an `html` board is its
+/// stored bytes followed by [`BOARD_KEY_RELAY`]; every other kind is
+/// untouched.
+fn board_render_body(kind: LiveBoardKind, body: &str) -> String {
+    match kind {
+        LiveBoardKind::Html => format!("{body}{BOARD_KEY_RELAY}"),
+        _ => body.to_string(),
+    }
+}
+
 /// Serves one live board's stored body, framed for direct rendering: markdown
 /// as text the page hands to its own `<Markdown>`, an HTML document or a
 /// diagram snapshot inside a sandboxed `<iframe>`, an image as its own bytes
@@ -5140,7 +5181,10 @@ async fn render_live_board(
                 kind.content_type()
                     .expect("every non-image board kind names its content type")
             );
-            (content_type, board.body.clone().into_bytes())
+            (
+                content_type,
+                board_render_body(kind, &board.body).into_bytes(),
+            )
         }
     };
     let mut headers = HeaderMap::new();
@@ -10681,6 +10725,16 @@ mod tests {
     use super::*;
     use crate::core::LiveRole;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    #[test]
+    fn only_an_html_board_gets_the_key_relay() {
+        let html = board_render_body(LiveBoardKind::Html, "<p>hi</p>");
+        assert_eq!(html, format!("<p>hi</p>{BOARD_KEY_RELAY}"));
+        assert!(html.contains("naru:'board-key'"));
+        for kind in [LiveBoardKind::Markdown, LiveBoardKind::Diagram] {
+            assert_eq!(board_render_body(kind, "body"), "body");
+        }
+    }
 
     fn hdrs(host: Option<&str>, origin: Option<&str>) -> HeaderMap {
         let mut h = HeaderMap::new();
