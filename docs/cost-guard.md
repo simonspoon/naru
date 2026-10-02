@@ -90,7 +90,7 @@ exceed.
 | `tokens` | `total_tokens >= total-tokens` | 100,000,000 |
 | `spin` | `total_tokens >= cache-read-min-tokens` **and** `cache_read / total_tokens >= cache-read-share` | 20,000,000 and 0.98 |
 | `repeat` | the newest `repeat-count` tool calls are the same trivial `Bash` command | 30 |
-| `context` | the newest main-thread turn's input side `>= context-tokens` (**alert-only**, never stops) | 120,000 |
+| `context` | the newest main-thread turn's input side `>= context-tokens` (alert-only, except the relay below) | 120,000 |
 
 They are not five spellings of one rule:
 
@@ -130,19 +130,55 @@ also shown per session in `mesa cc live` and `mesa cc guard`. Like the other
 rules, it fires once per (session, rule) for the life of the server, so a
 session that compacts and regrows does not re-alert.
 
-**Alert-only by design, whatever `action` says.** A long conversation is not a
-runaway and may be good work; stopping one for its size alone would interrupt
-it. A tick whose only newly tripped rule is `context` therefore files the alert
-and never runs `claude stop` (`guard::wants_stop`), and the alert closes by
-saying Naru left the session running because the context rule only reports. If
-another rule trips alongside it, that rule's stop proceeds as usual.
+**Alert-only by default.** A long conversation is not a runaway and may be good
+work; stopping one for its size alone would interrupt it. A tick whose only
+newly tripped rule is `context` therefore files the alert and never runs
+`claude stop` (`guard::wants_stop`), and the alert closes by saying Naru left
+the session running because the context rule only reports. If another rule
+trips alongside it, that rule's stop proceeds as usual. The one exception is the
+relay below.
 
-The `supervisor` agent definition (`core::supervisor`, what the todo-watcher's `--agent supervisor` spawn runs as) tells a task session that, past that same 120k, it writes its own checkpoint (goal, state, in-flight agents, next step, key refs) to a `checkpoint-task-<id>` artifact on its task, reading its occupied context from `naru cc live`.
+The `supervisor` agent definition (`core::supervisor`, what the todo-watcher's `--agent supervisor` spawn runs as) tells a task session that, past that same 120k, it writes its own checkpoint (goal, state, in-flight agents, next step, key refs) to a `checkpoint-task-<id>` artifact on its task, reading its occupied context from `naru cc live`. A session starting on a task that already has one reads it first and resumes from its **Next step**.
 
 The 120,000-token default is the size past which a fresh session seeded with a
-checkpoint is cheaper than carrying the context forward. That is the point of
-the alert; the checkpoint/relay handoff that would act on it is future work, and
-this rule is only its trigger.
+checkpoint is cheaper than carrying the context forward.
+
+#### The relay (mesa task 1527)
+
+A session over the ceiling that the **todo-watcher dispatched for a task** is
+stopped and replaced by a fresh one on the same task, which reads the
+checkpoint. `relay_context_sessions` in `src/api.rs` evaluates it on every tick
+for each live session whose *current* breaches include `context` — not only a
+fresh one, because the checkpoint is usually written after the first breach tick
+— and `guard::relay_decision` (pure) says yes iff **all** hold:
+
+- the guard `action` is `stop` (`report` keeps the alert-only behaviour exactly);
+- the session's job id (`claude agents --json --all`) is in the todo-watcher's
+  dispatch memory (`todo_dispatched`) for a task;
+- that task is `in_progress`, and its project has a `local_path`;
+- a `checkpoint-task-<id>` artifact exists on that task (`guard::find_checkpoint`);
+- this process has not already relayed or stopped the session (`cost_relayed`,
+  in memory like `cost_stopped`).
+
+Otherwise nothing changes: the context-only alert still says the session was
+left running. The relay runs `claude stop <old job>`, then the same dispatch
+the todo-watcher uses (`dispatch_task_session`: seed the definition, run the
+`todo-watcher` template), and swaps the old job for the new in the dispatch
+memory so the reaper tracks the new session. It files **one** `task-summary`
+alert (author `cost-guard`) naming the checkpoint artifact and the new job
+(`StopOutcome::Relayed`). A failed stop spawns nothing, retries next tick and
+files one alert; a failed spawn is `StopOutcome::RelaySpawnFailed`, and the task
+stays `in_progress` with nothing on it, which the reaper's abandoned-task path
+reports. A successor starts with its predecessor's checkpoint still on the task, so a
+checkpoint is relayed only once it has been **rewritten since the last relay
+seeded one**: `cost_relay_seeded` remembers, per task, the `updated_at` of the
+checkpoint each successful relay seeded, and `relay_decision` refuses while the
+current checkpoint still carries it (the session then gets the ordinary
+"left running" alert). Every dispatch (the todo-watcher's and the relay's) also records the
+checkpoint already on the task, if any, as seeded, so an earlier run's
+checkpoint is never taken for the new session's own; entries for tasks no
+longer `in_progress` are pruned each tick. The map is in memory; after a restart it is empty, but
+so is `todo_dispatched`, so no relay can happen then anyway.
 
 ### The repeat rule
 

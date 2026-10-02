@@ -541,4 +541,196 @@ jq -e '.thresholds.context_tokens == 120000' <<<"$STDOUT" >/dev/null ||
 ok "null restores the built-in threshold"
 
 stop_server
+
+# ---- the relay (mesa task 1527) ---------------------------------------------
+#
+# A session the todo-watcher dispatched for a task, past the context ceiling
+# with a `checkpoint-task-<id>` artifact on its task, is stopped and replaced
+# by a fresh session on the same task. A fresh world: its own db, transcript
+# tree and HOME, and a stub `claude` that also answers `--bg` with a receipt,
+# so the watcher really dispatches. The first job started in a folder is the
+# one whose session has the over-ceiling transcript; a relayed (second) job
+# maps to a session with none.
+
+export MESA_DB="$TMP/relay.db"
+export MESA_CC_PROJECTS_DIR="$TMP/rtree"
+FAKE_HOME="$TMP/rhome"
+CONFIG="$FAKE_HOME/.mesa/config.json"
+mkdir -p "$FAKE_HOME" "$MESA_CC_PROJECTS_DIR/-relay"
+
+BGLOG="$TMP/bg.log"        # cwd|name|prompt|job id, one line per --bg
+RJOBS="$TMP/rjobs.json"    # one agents element per line, in spawn order
+RCOUNT="$TMP/rcount"
+: > "$STOPS"; : > "$BGLOG"; : > "$RJOBS"; echo 0 > "$RCOUNT"
+
+cat > "$STUB_BIN/claude" <<STUB
+#!/usr/bin/env bash
+case "\$1" in
+  --bg)
+    shift
+    [ "\$1" = "--agent" ] && { shift; shift; }
+    NAME=""; [ "\$1" = "--name" ] && { shift; NAME="\$1"; shift; }
+    PROMPT=""; [ "\$1" = "--" ] && { shift; PROMPT="\$1"; }
+    N=\$(( \$(cat "$RCOUNT") + 1 )); echo "\$N" > "$RCOUNT"
+    ID=\$(printf 'rjob%02d' "\$N")
+    DIR=\$(pwd -P)
+    if grep -q "\"cwd\":\"\$DIR\"" "$RJOBS"; then SESSION="\$ID-0000-0000-0000-000000000000"
+    else SESSION="sess-\$(basename "\$DIR")-0000-0000-0000-000000000000"; fi
+    echo "\$DIR|\$NAME|\$PROMPT|\$ID" >> "$BGLOG"
+    echo "{\"pid\":1,\"id\":\"\$ID\",\"cwd\":\"\$DIR\",\"kind\":\"background\",\"startedAt\":1,\"sessionId\":\"\$SESSION\",\"state\":\"idle\"}" >> "$RJOBS"
+    echo "backgrounded · \$ID (idle — send a prompt to start)" ;;
+  agents) printf '['; paste -sd, "$RJOBS"; printf ']\n' ;;
+  stop) echo "\$2" >> "$STOPS" ;;
+  *) echo "unexpected claude argv: \$*" >&2; exit 1 ;;
+esac
+STUB
+
+relay_server() { # relay_server <flags...>
+  HOME="$FAKE_HOME" MESA_WATCH_COST_TICK_MS=150 MESA_WATCH_TODO_TICK_MS=150 \
+    "$MESA" serve --port "$PORT" --watch-todo --watch-cost "$@" >"$TMP/server.log" 2>&1 &
+  SERVER_PID=$!
+  wait_for_server
+}
+wait_bg() { # wait_bg <n> — blocks until the stub has recorded >= n --bg spawns
+  for _ in $(seq 1 80); do
+    [ "$(wc -l < "$BGLOG")" -ge "$1" ] && return 0
+    sleep 0.1
+  done
+  fail "timed out waiting for $1 --bg spawn(s); log:\n$(cat "$BGLOG")\n$(cat "$TMP/server.log")"
+}
+bg_in() { grep -c "^$1|" "$BGLOG" || true; }
+# A session over the ceiling and under every money rule, cwd = $1, id = sess-<dir>-….
+write_ctx() { # write_ctx <dir> [session id] — the id defaults to the folder's first job's
+  local dir=$1 sid="${2:-sess-$(basename "$1")-0000-0000-0000-000000000000}"
+  cat > "$MESA_CC_PROJECTS_DIR/-relay/$sid.jsonl" <<JSONL
+{"type":"user","sessionId":"$sid","timestamp":"$NOW","cwd":"$dir","message":{"role":"user","content":"hi"}}
+{"type":"assistant","uuid":"x1","sessionId":"$sid","timestamp":"$NOW","cwd":"$dir","message":{"id":"msg_$sid","model":"claude-opus-4-8","usage":{"input_tokens":1000,"output_tokens":50,"cache_read_input_tokens":200000,"cache_creation_input_tokens":0}}}
+JSONL
+}
+mkproject() { # mkproject <name> -> sets P_ID, P_DIR, T_ID
+  P_DIR="$TMP/$1"; mkdir -p "$P_DIR"; P_DIR=$(cd "$P_DIR" && pwd -P)
+  run 0 "$MESA" project create "$1" --path "$P_DIR" --no-git
+  P_ID=$(jqs .id)
+  run 0 "$MESA" task create "$P_ID" "work on $1"
+  T_ID=$(jqs .id)
+}
+cg_alerts() { # cg_alerts <task id> — the cost-guard bodies filed against a task
+  HOME="$FAKE_HOME" "$MESA" inbox list | jq -r "[.[] | select(.author==\"cost-guard\" and .task_id==$1)] | length"
+}
+
+mkproject relayA; PA=$P_ID; DA=$P_DIR; TA=$T_ID
+mkproject relayB; PB=$P_ID; DB=$P_DIR; TB=$T_ID
+relay_server
+wait_bg 2
+[ "$(bg_in "$DA")" -eq 1 ] && [ "$(bg_in "$DB")" -eq 1 ] || fail "each task must be dispatched once: $(cat "$BGLOG")"
+JOB_A=$(grep "^$DA|" "$BGLOG" | cut -d'|' -f4)
+write_ctx "$DA"; write_ctx "$DB"
+wait_inbox 2
+sleep 1
+[ ! -s "$STOPS" ] || fail "no checkpoint yet: nothing may be stopped: $(cat "$STOPS")"
+[ "$(cg_alerts "$TA")" -eq 1 ] && [ "$(cg_alerts "$TB")" -eq 1 ] ||
+  fail "each over-ceiling session is alerted once, context-only"
+run 0 "$MESA" inbox list
+grep -q "left this session running" <<<"$(jqs ".[] | select(.task_id==$TA) | .body")" ||
+  fail "without a checkpoint the alert says the session was left running: $STDOUT"
+ok "relay: a dispatched session past the ceiling with no checkpoint is alerted and left running, nothing stopped or re-spawned"
+
+# Task A writes its checkpoint; B never does.
+run 0 "$MESA" artifact create "$PA" "checkpoint-task-$TA" --task "$TA" \
+  --content-type text/markdown --body "## Next step
+carry on"
+CK=$(jqs .id)
+wait_stops 1
+wait_bg 3
+wait_inbox 3
+sleep 1.5   # later ticks must neither re-stop nor re-spawn
+[ "$(stops_of "$JOB_A")" -eq 1 ] && [ "$(wc -l < "$STOPS")" -eq 1 ] ||
+  fail "exactly the checkpointed session is stopped, once: $(cat "$STOPS")"
+[ "$(bg_in "$DA")" -eq 2 ] || fail "task A must be re-dispatched exactly once: $(cat "$BGLOG")"
+[ "$(bg_in "$DB")" -eq 1 ] || fail "task B has no checkpoint and must not be re-spawned: $(cat "$BGLOG")"
+[ "$(grep "^$DA|" "$BGLOG" | cut -d'|' -f3 | sort -u)" = "/execute-mesa-task $TA" ] ||
+  fail "the relay must dispatch the same task: $(cat "$BGLOG")"
+NEW_A=$(grep "^$DA|" "$BGLOG" | tail -1 | cut -d'|' -f4)
+run 0 "$MESA" inbox list
+[ "$(jqs "[.[] | select(.task_id==$TA)] | length")" -eq 2 ] ||
+  fail "task A gets its context-only alert plus exactly one relay alert: $STDOUT"
+RELAY_BODY=$(jqs ".[] | select(.task_id==$TA) | .body | select(contains(\"relayed\"))")
+grep -q "claude stop $JOB_A" <<<"$RELAY_BODY" || fail "the relay alert names the stop: $RELAY_BODY"
+grep -q "$NEW_A" <<<"$RELAY_BODY" || fail "the relay alert names the new job: $RELAY_BODY"
+grep -q "artifact $CK" <<<"$RELAY_BODY" || fail "the relay alert names the checkpoint: $RELAY_BODY"
+[ "$(jqs "[.[] | select(.task_id==$TB)] | length")" -eq 1 ] || fail "task B stays at one alert: $STDOUT"
+run 0 "$MESA" task show "$TA"
+[ "$(jqs .status)" = "in_progress" ] || fail "the relayed task stays in_progress: $STDOUT"
+
+# The successor starts with its predecessor's checkpoint still on the task and
+# reaches the ceiling itself without having rewritten it: that stale checkpoint
+# must NOT be relayed again (everything the successor did would be lost).
+write_ctx "$DA" "$NEW_A-0000-0000-0000-000000000000"
+wait_inbox 4
+sleep 1.5
+[ "$(wc -l < "$STOPS")" -eq 1 ] || fail "a stale checkpoint must not stop the successor: $(cat "$STOPS")"
+[ "$(bg_in "$DA")" -eq 2 ] || fail "a stale checkpoint must not trigger a third spawn: $(cat "$BGLOG")"
+[ "$(cg_alerts "$TA")" -eq 3 ] || fail "the successor gets the ordinary left-running alert"
+ok "relay: a successor over the ceiling with its predecessor's unchanged checkpoint is alerted only, not stopped or re-spawned"
+
+# Rewritten since (SQLite's updated_at has one-second resolution), it counts.
+sleep 1.2
+run 0 "$MESA" artifact update "$CK" --body "## Next step
+gen 2 state"
+wait_stops 2
+wait_bg 4
+sleep 1.5
+[ "$(stops_of "$NEW_A")" -eq 1 ] && [ "$(wc -l < "$STOPS")" -eq 2 ] ||
+  fail "exactly one second relay stop, of the successor: $(cat "$STOPS")"
+[ "$(bg_in "$DA")" -eq 3 ] || fail "exactly one second re-dispatch: $(cat "$BGLOG")"
+[ "$(bg_in "$DB")" -eq 1 ] || fail "task B is still untouched: $(cat "$BGLOG")"
+[ "$(cg_alerts "$TA")" -eq 4 ] || fail "one more alert, the second relay's"
+ok "relay: a checkpoint rewritten by the successor is relayed exactly once more"
+stop_server
+ok "relay: the checkpointed session is stopped once, the same task re-dispatched once, one relay alert names the artifact and the new job; the checkpoint-less one is untouched"
+
+# A checkpoint already on the task when it is dispatched (an earlier run's) is
+# the session's starting point, not something it wrote: no relay until the
+# session rewrites it.
+mkproject relayD; PD=$P_ID; DD=$P_DIR; TD=$T_ID
+run 0 "$MESA" artifact create "$PD" "checkpoint-task-$TD" --task "$TD" --content-type text/markdown --body "old run"
+CKD=$(jqs .id)
+: > "$STOPS"
+BG0=$(wc -l < "$BGLOG")
+relay_server
+wait_bg $((BG0 + 1))
+write_ctx "$DD"
+for _ in $(seq 1 60); do [ "$(cg_alerts "$TD")" -ge 1 ] && break; sleep 0.1; done
+sleep 1.5
+[ "$(cg_alerts "$TD")" -eq 1 ] || fail "a pre-existing checkpoint: the session is alerted once, left running"
+[ ! -s "$STOPS" ] || fail "a checkpoint from before the dispatch must not be relayed: $(cat "$STOPS")"
+[ "$(bg_in "$DD")" -eq 1 ] || fail "no relay spawn on a pre-existing checkpoint: $(cat "$BGLOG")"
+sleep 1.2
+run 0 "$MESA" artifact update "$CKD" --body "this run's state"
+wait_stops 1
+wait_bg $((BG0 + 2))
+sleep 1.5
+[ "$(wc -l < "$STOPS")" -eq 1 ] && [ "$(bg_in "$DD")" -eq 2 ] ||
+  fail "rewritten, it is relayed exactly once: $(cat "$STOPS") / $(cat "$BGLOG")"
+stop_server
+ok "relay: a checkpoint already on the task at dispatch is not relayed until the session rewrites it"
+
+# action: report keeps the alert-only behaviour even with a checkpoint.
+mkdir -p "$FAKE_HOME/.mesa"
+echo '{"guard": {"action": "report"}}' > "$CONFIG"
+: > "$STOPS"
+mkproject relayC; PC=$P_ID; DC=$P_DIR; TC=$T_ID
+run 0 "$MESA" artifact create "$PC" "checkpoint-task-$TC" --task "$TC" --content-type text/markdown --body "x"
+BG0=$(wc -l < "$BGLOG")
+relay_server
+wait_bg $((BG0 + 1))
+write_ctx "$DC"
+for _ in $(seq 1 60); do [ "$(cg_alerts "$TC")" -ge 1 ] && break; sleep 0.1; done
+sleep 1
+[ "$(cg_alerts "$TC")" -eq 1 ] || fail "report: the over-ceiling session is alerted once"
+[ ! -s "$STOPS" ] || fail "report: nothing may be stopped: $(cat "$STOPS")"
+[ "$(bg_in "$DC")" -eq 1 ] || fail "report: no relay re-spawn: $(cat "$BGLOG")"
+stop_server
+ok "relay: under action report a checkpointed session is alerted only, never stopped or re-spawned"
+
 echo "cost-guard-check: $CHECKS checks passed"

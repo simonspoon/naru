@@ -279,6 +279,15 @@ because someone ran `mesa serve`.
     stop that then failed would be both unstopped and untracked. A superseded
     entry is what the reaper reads as a closed task, since the task itself is
     `in_progress` again under the new session.
+  - **The cost guard may relay a dispatched session** (mesa task 1527,
+    `docs/cost-guard.md` "The relay"): under `--watch-cost`, a session in this
+    map that passes the context ceiling with a `checkpoint-task-<id>` artifact
+    on its still-`in_progress` task is `claude stop`ped and re-dispatched for
+    the same task through the same spawn as the dispatch above
+    (`dispatch_task_session`); the old entry is marked superseded *before* the stop (so a reaper pass in
+    the window never reports the stopped session as dead) and swapped for the
+    new job in one lock scope; if the stop or the spawn fails it is
+    un-superseded, so the reaper still reports the task as abandoned. The fresh session reads the checkpoint (`core::supervisor`).
   - Every shell-out is best-effort and off the store lock. A failing listing
     keeps every entry rather than forgetting sessions Naru can no longer see,
     and a failing stop keeps its entry so the next pass retries. A pass with

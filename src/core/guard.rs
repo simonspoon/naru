@@ -17,7 +17,7 @@
 //! guard writes nothing of its own except the inbox item its watcher files.
 
 use crate::core::store::{Result, Store};
-use crate::core::types::{CcLive, CcLiveSession, Status, Task};
+use crate::core::types::{Artifact, CcLive, CcLiveSession, Status, Task};
 use serde::Serialize;
 
 /// How far back the guard looks: one hour.
@@ -107,6 +107,86 @@ pub enum StopOutcome {
     /// Every breach this time was the `context` rule, which only reports:
     /// mesa did not try to stop it, whatever the action says.
     ContextOnly,
+    /// The relay (mesa task 1527): the session was a todo-watcher dispatch past
+    /// the context ceiling with a checkpoint written, so mesa stopped it and
+    /// started a fresh session on the same task. `new_job` is `None` when the
+    /// spawn printed no receipt.
+    Relayed {
+        old_job: String,
+        new_job: Option<String>,
+        artifact_id: i64,
+    },
+    /// The relay's stop worked but the fresh session did not start; the task
+    /// stays `in_progress` and the todo-watcher's reaper reports it.
+    RelaySpawnFailed {
+        old_job: String,
+        artifact_id: i64,
+        reason: String,
+    },
+}
+
+/// Everything [`relay_decision`] needs, gathered by the caller (a job lookup, a
+/// store read) so the decision itself reads nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelayFacts {
+    pub action: GuardAction,
+    /// The session's *current* breaches include `context` (not merely a fresh
+    /// one: the checkpoint is often written after the first breach tick).
+    pub context_breached: bool,
+    /// The task the todo-watcher dispatched this session's job for, if any.
+    pub dispatched_task: Option<i64>,
+    pub task_in_progress: bool,
+    /// Id and `updated_at` of the task's `checkpoint-task-<id>` artifact, if
+    /// one exists.
+    pub checkpoint: Option<(i64, String)>,
+    /// The `updated_at` of the checkpoint the last relay of this task seeded
+    /// its successor with. A checkpoint still carrying it is the predecessor's
+    /// and must not be relayed again: only one rewritten since counts.
+    pub seeded: Option<String>,
+    /// The task's project has a folder to start a session in.
+    pub has_local_path: bool,
+    /// Already relayed or stopped by this process.
+    pub already_handled: bool,
+}
+
+/// The name of the artifact a supervisor session writes at the context ceiling
+/// (`core::supervisor`, "Context ceiling checkpoint").
+pub fn checkpoint_name(task_id: i64) -> String {
+    format!("checkpoint-task-{task_id}")
+}
+
+/// The id and `updated_at` of `task_id`'s checkpoint among a project's
+/// `artifacts`: the artifact named [`checkpoint_name`] (case-insensitively, as
+/// names are unique) and attached to that task.
+pub fn find_checkpoint(artifacts: &[Artifact], task_id: i64) -> Option<(i64, String)> {
+    let name = checkpoint_name(task_id);
+    artifacts
+        .iter()
+        .find(|a| a.task_id == Some(task_id) && a.name.eq_ignore_ascii_case(&name))
+        .map(|a| (a.id, a.updated_at.clone()))
+}
+
+/// Whether a context-ceiling breach is answered by a relay rather than an
+/// alert-only report: `Some((task id, checkpoint artifact id))` iff the action
+/// is `stop`, the session is a todo-watcher dispatch for an `in_progress` task
+/// that has a checkpoint **rewritten since the last relay seeded one** (a
+/// successor starts with its predecessor's checkpoint still on the task, and
+/// relaying that again would discard everything the successor did) and a
+/// folder, and it has not been relayed or stopped already. Pure — every input is an argument.
+pub fn relay_decision(f: &RelayFacts) -> Option<(i64, i64)> {
+    if f.action != GuardAction::Stop
+        || !f.context_breached
+        || !f.task_in_progress
+        || !f.has_local_path
+        || f.already_handled
+    {
+        return None;
+    }
+    let (artifact_id, updated_at) = f.checkpoint.as_ref()?;
+    if f.seeded.as_deref() == Some(updated_at.as_str()) {
+        return None;
+    }
+    Some((f.dispatched_task?, *artifact_id))
 }
 
 /// The resolved numbers one tick guards against, read fresh from
@@ -310,6 +390,31 @@ fn outcome_sentence(outcome: &StopOutcome) -> String {
              is still running. If it is working as intended, no action is needed; otherwise it is \
              the one to interrupt."
             .to_string(),
+        StopOutcome::Relayed {
+            old_job,
+            new_job,
+            artifact_id,
+        } => {
+            let fresh = match new_job {
+                Some(job) => format!("a fresh session on the same task, job {job}"),
+                None => "a fresh session on the same task".to_string(),
+            };
+            format!(
+                "mesa relayed this session: it stopped it by running claude stop {old_job} and \
+                 started {fresh}, which reads the checkpoint artifact {artifact_id} and carries \
+                 on. The old conversation is not lost: run claude attach {old_job} to look at it."
+            )
+        }
+        StopOutcome::RelaySpawnFailed {
+            old_job,
+            artifact_id,
+            reason,
+        } => format!(
+            "mesa stopped this session by running claude stop {old_job} to relay it, but the \
+             fresh session did not start: {reason}. The task is still in progress with nothing \
+             running on it; its checkpoint is artifact {artifact_id}, and the todo watcher will \
+             report it as abandoned."
+        ),
         StopOutcome::ContextOnly => "mesa left this session running: the context rule only \
              reports, it never stops a session. If it is working as intended, no action is \
              needed; otherwise it is the one to wrap up."
@@ -929,6 +1034,114 @@ mod tests {
         assert_eq!(group(999), "999");
         assert_eq!(group(1_000), "1,000");
         assert_eq!(group(1_234_567), "1,234,567");
+    }
+
+    fn facts() -> RelayFacts {
+        RelayFacts {
+            action: GuardAction::Stop,
+            context_breached: true,
+            dispatched_task: Some(7),
+            task_in_progress: true,
+            checkpoint: Some((42, "2026-01-01 10:00:00".to_string())),
+            seeded: None,
+            has_local_path: true,
+            already_handled: false,
+        }
+    }
+
+    #[test]
+    fn a_relay_needs_every_condition() {
+        assert_eq!(relay_decision(&facts()), Some((7, 42)));
+        let none = |f: RelayFacts| assert_eq!(relay_decision(&f), None, "{f:?}");
+        none(RelayFacts {
+            action: GuardAction::Report,
+            ..facts()
+        });
+        none(RelayFacts {
+            context_breached: false,
+            ..facts()
+        });
+        none(RelayFacts {
+            dispatched_task: None,
+            ..facts()
+        });
+        none(RelayFacts {
+            task_in_progress: false,
+            ..facts()
+        });
+        none(RelayFacts {
+            checkpoint: None,
+            ..facts()
+        });
+        none(RelayFacts {
+            has_local_path: false,
+            ..facts()
+        });
+        none(RelayFacts {
+            already_handled: true,
+            ..facts()
+        });
+    }
+
+    #[test]
+    fn a_checkpoint_the_last_relay_seeded_is_not_relayed_again() {
+        let same = RelayFacts {
+            seeded: Some("2026-01-01 10:00:00".to_string()),
+            ..facts()
+        };
+        assert_eq!(relay_decision(&same), None);
+        let rewritten = RelayFacts {
+            seeded: Some("2026-01-01 09:00:00".to_string()),
+            ..facts()
+        };
+        assert_eq!(relay_decision(&rewritten), Some((7, 42)));
+    }
+
+    fn artifact(id: i64, task_id: Option<i64>, name: &str) -> Artifact {
+        Artifact {
+            id,
+            project_id: 1,
+            task_id,
+            name: name.to_string(),
+            content_type: "text/markdown".to_string(),
+            body: String::new(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_checkpoint_is_named_for_and_attached_to_its_task() {
+        let all = [
+            artifact(1, Some(7), "notes"),
+            artifact(2, None, "checkpoint-task-7"),
+            artifact(3, Some(8), "checkpoint-task-8"),
+            artifact(4, Some(7), "Checkpoint-Task-7"),
+        ];
+        assert_eq!(find_checkpoint(&all, 7).map(|c| c.0), Some(4));
+        assert_eq!(find_checkpoint(&all, 8).map(|c| c.0), Some(3));
+        assert_eq!(find_checkpoint(&all, 9), None);
+        assert_eq!(checkpoint_name(7), "checkpoint-task-7");
+    }
+
+    #[test]
+    fn a_relay_alert_names_the_checkpoint_and_the_new_job() {
+        let relayed = outcome_sentence(&StopOutcome::Relayed {
+            old_job: "job-old".into(),
+            new_job: Some("job-new".into()),
+            artifact_id: 42,
+        });
+        assert!(relayed.contains("claude stop job-old"), "{relayed}");
+        assert!(relayed.contains("job-new"), "{relayed}");
+        assert!(relayed.contains("artifact 42"), "{relayed}");
+        assert!(relayed.contains("claude attach job-old"), "{relayed}");
+        let failed = outcome_sentence(&StopOutcome::RelaySpawnFailed {
+            old_job: "job-old".into(),
+            artifact_id: 42,
+            reason: "boom".into(),
+        });
+        assert!(failed.contains("did not start: boom"), "{failed}");
+        assert!(failed.contains("artifact 42"), "{failed}");
     }
 
     #[test]

@@ -211,6 +211,13 @@ id/name and what it still owes you, or `none`), **Next step** and **Key refs**
 (`file:line`). Then carry on; the checkpoint is what a relay reads, not a reason
 to stop.
 
+**If you are a relay.** At the start of a task, before anything else, look for
+`checkpoint-task-<id>` (`naru artifact list <project>`, then `naru artifact show
+<id>`). If it exists, Naru stopped your predecessor at the ceiling and started
+you from it: read it first and resume from its **Next step**. Its **In-flight
+agents** died with the previous session, so re-check or re-dispatch their work
+rather than waiting on them, and do not redo what **State** says is finished.
+
 ---
 
 `/supervising-agent-teams` holds the long form — the evidence behind each rule,

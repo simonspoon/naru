@@ -231,6 +231,17 @@ struct AppState {
     /// stop is recorded, so a failure retries on the next tick that finds a
     /// fresh breach. Not persisted, for `cost_alerted`'s reason.
     cost_stopped: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// Session ids the cost guard has already **relayed** — stopped at the
+    /// context ceiling and re-dispatched on their task with a checkpoint
+    /// (mesa task 1527, `docs/cost-guard.md`). The relay's fire-once set,
+    /// pruned alongside `cost_stopped` and not persisted for its reason.
+    cost_relayed: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// Task id → the `updated_at` of the checkpoint artifact the last relay of
+    /// that task seeded its successor with. A checkpoint still carrying it is
+    /// the predecessor's, so it is not relayed again until the successor
+    /// rewrites it. Not persisted; empty after a restart, as is
+    /// `todo_dispatched`, so no relay can happen then either.
+    cost_relay_seeded: Arc<Mutex<HashMap<i64, String>>>,
     /// Background job id → what it was dispatched for, for every session
     /// the todo-watcher or the inbox-watcher spawned in this server's
     /// lifetime and has not yet reaped (mesa tasks 1057, 1192). The reaper's
@@ -673,6 +684,11 @@ fn cost_watcher_tick(state: &AppState) {
     };
     let live = crate::core::cc::live(crate::core::guard::DEFAULT_GUARD_WINDOW_MINUTES);
 
+    // Before the ordinary alerts: a session the relay takes over must not also
+    // get a context-only "left running" alert for the same breach.
+    prune_relay_seeded(state);
+    relay_context_sessions(state, &thresholds, &live.sessions, live.window_minutes);
+
     // Phase one, lock-free: which session tripped what, and which of those
     // pairs this process has not already answered for.
     let mut pending: Vec<(&CcLiveSession, Vec<guard::GuardBreach>)> = Vec::new();
@@ -693,6 +709,13 @@ fn cost_watcher_tick(state: &AppState) {
                 Err(e) => e.into_inner(),
             };
             stopped.retain(|session_id| present.contains(session_id.as_str()));
+        }
+        {
+            let mut relayed = match state.cost_relayed.lock() {
+                Ok(r) => r,
+                Err(e) => e.into_inner(),
+            };
+            relayed.retain(|session_id| present.contains(session_id.as_str()));
         }
         for session in &live.sessions {
             let fresh: Vec<guard::GuardBreach> = guard::breaches(session, &thresholds)
@@ -824,6 +847,299 @@ fn stop_runaway(
     outcome
 }
 
+/// The context-ceiling relay (mesa task 1527, `docs/cost-guard.md`): for each
+/// live session whose *current* breaches include `context`, and which the
+/// todo-watcher dispatched for an `in_progress` task that has written its
+/// `checkpoint-task-<id>` artifact, stop it and start a fresh session on the
+/// same task. Not gated on the fire-once alert set — the checkpoint usually
+/// lands after the first breach tick — but on its own `cost_relayed` set.
+///
+/// The decision is [`guard::relay_decision`]; this gathers its facts (a job
+/// lookup, one store read) and acts, shell-outs off the store lock. A failed
+/// stop spawns nothing and files one alert; a failed spawn is a reported
+/// outcome, the task staying `in_progress` for the reaper to flag.
+fn relay_context_sessions(
+    state: &AppState,
+    t: &guard::GuardThresholds,
+    sessions: &[CcLiveSession],
+    window_minutes: i64,
+) {
+    if t.action != guard::GuardAction::Stop {
+        return;
+    }
+    for session in sessions {
+        let breaches = guard::breaches(session, t);
+        if !breaches.iter().any(|b| b.threshold == guard::CONTEXT) {
+            continue;
+        }
+        let sid = &session.session_id;
+        let handled = state
+            .cost_relayed
+            .lock()
+            .map_or_else(|e| e.into_inner().contains(sid), |r| r.contains(sid))
+            || state
+                .cost_stopped
+                .lock()
+                .map_or_else(|e| e.into_inner().contains(sid), |s| s.contains(sid));
+        if handled
+            || state
+                .todo_dispatched
+                .lock()
+                .map_or_else(|e| e.into_inner().is_empty(), |d| d.is_empty())
+        {
+            continue;
+        }
+        let Ok(Some(old_job)) = agents::find_job_for_session(sid) else {
+            continue;
+        };
+        let dispatched_task = {
+            let map = match state.todo_dispatched.lock() {
+                Ok(d) => d,
+                Err(e) => e.into_inner(),
+            };
+            match map.get(&old_job) {
+                Some(d) if !d.superseded => match d.target {
+                    DispatchTarget::Task(id) => Some(id),
+                    DispatchTarget::InboxItem(_) => None,
+                },
+                _ => None,
+            }
+        };
+        let Some(task_id) = dispatched_task else {
+            continue;
+        };
+        // One locked read for the task, its project and the checkpoint.
+        let (in_progress, local_path, session_name, checkpoint) = {
+            let store = match state.store.lock() {
+                Ok(s) => s,
+                Err(e) => e.into_inner(),
+            };
+            let Ok(task) = store.get_task(task_id) else {
+                continue;
+            };
+            let Ok(project) = store.get_project(task.project_id) else {
+                continue;
+            };
+            let checkpoint = store
+                .list_artifacts(Some(project.id))
+                .ok()
+                .and_then(|a| guard::find_checkpoint(&a, task_id));
+            (
+                task.status == Status::InProgress,
+                project.local_path.clone(),
+                format!("{}: {}", project.name, task.name),
+                checkpoint,
+            )
+        };
+        let facts = guard::RelayFacts {
+            action: t.action,
+            context_breached: true,
+            dispatched_task: Some(task_id),
+            task_in_progress: in_progress,
+            checkpoint,
+            seeded: state
+                .cost_relay_seeded
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&task_id)
+                .cloned(),
+            has_local_path: local_path.is_some(),
+            already_handled: false,
+        };
+        let Some((task_id, artifact_id)) = guard::relay_decision(&facts) else {
+            continue;
+        };
+        let local_path = local_path.unwrap_or_default();
+
+        // Superseded *before* the stop, as the todo-watcher's own re-dispatch
+        // does: a reaper pass landing between the stop and the spawn must read
+        // the old entry as replaced, not as a dead session to report.
+        let replaced = supersede_dispatch(state, task_id);
+        let outcome = match agents::stop(&old_job) {
+            Err(reason) => {
+                unsupersede_dispatch(state, &replaced);
+                // The ordinary phase must not file a second "left running"
+                // alert for this breach; the relay's own failure alert is
+                // fire-once, and the stop is retried next tick.
+                let mut alerted = state.cost_alerted.lock().unwrap_or_else(|e| e.into_inner());
+                alerted.insert((sid.clone(), guard::CONTEXT.to_string()));
+                if !alerted.insert((sid.clone(), "relay".to_string())) {
+                    continue;
+                }
+                guard::StopOutcome::StopFailed { reason }
+            }
+            Ok(()) => {
+                for set in [&state.cost_relayed, &state.cost_stopped] {
+                    set.lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(sid.clone());
+                }
+                // The relay's alert is this breach's alert.
+                state
+                    .cost_alerted
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert((sid.clone(), guard::CONTEXT.to_string()));
+                match dispatch_task_session(state, task_id, &local_path, &session_name) {
+                    Ok(new_job) => {
+                        // Anything else marked for the task is stopped as a
+                        // re-dispatch would; the old job and what stopped are
+                        // forgotten and the new one tracked in one lock scope.
+                        let gone: Vec<String> = replaced
+                            .iter()
+                            .filter(|j| **j == old_job || agents::stop(j).is_ok())
+                            .cloned()
+                            .collect();
+                        let mut map = state
+                            .todo_dispatched
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        for job in &gone {
+                            map.remove(job);
+                        }
+                        if let Some(job) = &new_job {
+                            map.insert(
+                                job.clone(),
+                                DispatchedSession::new(
+                                    DispatchTarget::Task(task_id),
+                                    Instant::now(),
+                                ),
+                            );
+                        }
+                        guard::StopOutcome::Relayed {
+                            old_job,
+                            new_job,
+                            artifact_id,
+                        }
+                    }
+                    // The old job goes back to unsuperseded: its session is
+                    // gone and the task still `in_progress`, which is exactly
+                    // what the reaper's abandoned-task report looks for.
+                    Err(reason) => {
+                        unsupersede_dispatch(state, &replaced);
+                        guard::StopOutcome::RelaySpawnFailed {
+                            old_job,
+                            artifact_id,
+                            reason: spawn_error_text(&reason),
+                        }
+                    }
+                }
+            }
+        };
+        eprintln!(
+            "cost-guard: session {sid} passed the context ceiling on task {task_id}: {}",
+            outcome_note(&outcome)
+        );
+        let body = guard::alert_body(
+            session,
+            &breaches,
+            window_minutes,
+            guard::running_minutes(session),
+            &outcome,
+        );
+        let mut store = match state.store.lock() {
+            Ok(s) => s,
+            Err(e) => e.into_inner(),
+        };
+        if let Err(e) = store.create_inbox_item(
+            Some(COST_GUARD_AUTHOR),
+            &body,
+            InboxKind::TaskSummary,
+            task_id,
+        ) {
+            eprintln!("cost-guard: filing the relay alert for session {sid} failed: {e}");
+        }
+    }
+}
+
+/// Starts the todo-watcher's session for `task_id` in `local_path`: seeds the
+/// `supervisor` definition, reads the library's prompts and runs the
+/// `todo-watcher` template through `spawn_bg`. The one spawn both the watcher's
+/// dispatch and the cost guard's relay use; returns the receipt's job id.
+fn dispatch_task_session(
+    state: &AppState,
+    task_id: i64,
+    local_path: &str,
+    session_name: &str,
+) -> Result<Option<String>, String> {
+    // The default template spawns `--agent supervisor`, so the definition
+    // has to be on disk before the spawn — `claude --agent` errors on an
+    // agent it has never seen (mesa task 1075). Taken as its own short lock,
+    // like the prompts read below.
+    {
+        let store = state.store.lock().unwrap();
+        supervisor::ensure_agent_definition(&store)
+            .map_err(|e| format!("cannot seed the supervisor agent definition: {e}"))?;
+    }
+    // The command — including which slash command executes a task — comes
+    // from `~/.mesa/config.json`'s `todo-watcher` entry, defaulting to
+    // `claude --bg --agent supervisor … -- /execute-mesa-task <id>`.
+    // The library's prompts, for any `{prompt:<name>}` the template names
+    // (mesa task 1138).
+    let prompts = {
+        let store = state.store.lock().unwrap();
+        library::prompts(&store).unwrap_or_default()
+    };
+    let job = agents::spawn_bg(
+        config::TODO_WATCHER,
+        local_path,
+        Some(task_id),
+        Some(session_name),
+        None,
+        &prompts,
+    )?;
+    // Whatever checkpoint the task already carries is what this session starts
+    // from, so the cost guard's relay must not treat it as one the session
+    // wrote: only a checkpoint rewritten after this point counts.
+    let checkpoint = {
+        let store = state.store.lock().unwrap();
+        store
+            .get_task(task_id)
+            .and_then(|t| store.list_artifacts(Some(t.project_id)))
+            .ok()
+            .and_then(|a| guard::find_checkpoint(&a, task_id))
+    };
+    let mut seeded = state
+        .cost_relay_seeded
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    match checkpoint {
+        Some((_, updated_at)) => seeded.insert(task_id, updated_at),
+        None => seeded.remove(&task_id),
+    };
+    Ok(job)
+}
+
+/// Drops `cost_relay_seeded` entries for tasks no longer `in_progress`, so the
+/// map cannot grow for the life of the server. A dispatch records its entry
+/// only after the task was claimed `in_progress`, so a live entry is kept.
+fn prune_relay_seeded(state: &AppState) {
+    let tasks: Vec<i64> = state
+        .cost_relay_seeded
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .keys()
+        .copied()
+        .collect();
+    if tasks.is_empty() {
+        return;
+    }
+    let gone: Vec<i64> = {
+        let store = state.store.lock().unwrap_or_else(|e| e.into_inner());
+        tasks
+            .into_iter()
+            .filter(|id| !matches!(store.get_task(*id), Ok(t) if t.status == Status::InProgress))
+            .collect()
+    };
+    let mut seeded = state
+        .cost_relay_seeded
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    for id in gone {
+        seeded.remove(&id);
+    }
+}
+
 /// The same outcome as a stderr fragment, for the one runaway that files no
 /// inbox item at all: an unattributable session is the one whose fate is
 /// *only* visible in the log, so the log has to say whether it was stopped.
@@ -842,6 +1158,17 @@ fn outcome_note(outcome: &guard::StopOutcome) -> String {
         }
         guard::StopOutcome::ContextOnly => {
             "the context rule only reports, so it is still running".to_string()
+        }
+        guard::StopOutcome::Relayed {
+            old_job, new_job, ..
+        } => format!(
+            "mesa relayed it (claude stop {old_job}, fresh session {})",
+            new_job.as_deref().unwrap_or("with no receipt")
+        ),
+        guard::StopOutcome::RelaySpawnFailed {
+            old_job, reason, ..
+        } => {
+            format!("mesa stopped it (claude stop {old_job}) but the relay spawn failed: {reason}")
         }
     }
 }
@@ -1151,39 +1478,10 @@ fn todo_watcher_tick(state: &AppState) {
         claimed
     };
     for (task_id, local_path, session_name) in claimed {
-        // The default template spawns `--agent supervisor`, so the definition
-        // has to be on disk before the spawn — `claude --agent` errors on an
-        // agent it has never seen (mesa task 1075). The store lock taken to
-        // claim the tasks above is long gone by here, so re-lock for this one
-        // read. A failure is a failed spawn for *this* task — reverted,
-        // backed off and alerted below exactly like a spawn error, rather than
-        // left `in_progress` with no agent — and the tick goes on.
-        let seeded = {
-            let store = state.store.lock().unwrap();
-            supervisor::ensure_agent_definition(&store)
-                .map(|_| ())
-                .map_err(|e| format!("cannot seed the supervisor agent definition: {e}"))
-        };
-        // The command — including which slash command executes a task — comes
-        // from `~/.mesa/config.json`'s `todo-watcher` entry, defaulting to
-        // `claude --bg --agent supervisor … -- /execute-mesa-task <id>`.
-        // The library's prompts, for any `{prompt:<name>}` the template names
-        // (mesa task 1138) — re-read per task for the same reason the
-        // definition seed above is, and for the same cost.
-        let spawned = seeded.and_then(|()| {
-            let prompts = {
-                let store = state.store.lock().unwrap();
-                library::prompts(&store).unwrap_or_default()
-            };
-            agents::spawn_bg(
-                config::TODO_WATCHER,
-                &local_path,
-                Some(task_id),
-                Some(&session_name),
-                None,
-                &prompts,
-            )
-        });
+        // Seeds the definition and runs the `todo-watcher` template; a failure
+        // of either is a failed spawn for *this* task — reverted, backed off
+        // and alerted below — and the tick goes on.
+        let spawned = dispatch_task_session(state, task_id, &local_path, &session_name);
         match spawned {
             // The receipt's short job id is what `claude stop` takes, so
             // remembering it here is the whole of what the reaper needs
@@ -1988,6 +2286,20 @@ fn supersede_dispatch(state: &AppState, task_id: i64) -> Vec<String> {
     stale
 }
 
+/// Undoes [`supersede_dispatch`] for `jobs` when the replacement never
+/// happened, so the reaper reads them as it did before.
+fn unsupersede_dispatch(state: &AppState, jobs: &[String]) {
+    let mut map = match state.todo_dispatched.lock() {
+        Ok(d) => d,
+        Err(e) => e.into_inner(),
+    };
+    for job in jobs {
+        if let Some(d) = map.get_mut(job) {
+            d.superseded = false;
+        }
+    }
+}
+
 /// Drops one job from `todo_dispatched` — the reaper is done with it, either
 /// because it stopped the session or because there was nothing to stop.
 fn forget_dispatch(state: &AppState, job_id: &str) {
@@ -2061,6 +2373,8 @@ pub fn serve(
         inbox_dispatched: Arc::new(Mutex::new(std::collections::HashSet::new())),
         cost_alerted: Arc::new(Mutex::new(std::collections::HashSet::new())),
         cost_stopped: Arc::new(Mutex::new(std::collections::HashSet::new())),
+        cost_relayed: Arc::new(Mutex::new(std::collections::HashSet::new())),
+        cost_relay_seeded: Arc::new(Mutex::new(HashMap::new())),
         todo_dispatched: Arc::new(Mutex::new(HashMap::new())),
         todo_spawn_failed: Arc::new(Mutex::new(HashMap::new())),
         script_runs: Arc::new(script_runs::Registry::new()),
@@ -10912,6 +11226,8 @@ mod tests {
             inbox_dispatched: Arc::new(Mutex::new(std::collections::HashSet::new())),
             cost_alerted: Arc::new(Mutex::new(std::collections::HashSet::new())),
             cost_stopped: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            cost_relayed: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            cost_relay_seeded: Arc::new(Mutex::new(HashMap::new())),
             todo_dispatched: Arc::new(Mutex::new(HashMap::new())),
             todo_spawn_failed: Arc::new(Mutex::new(HashMap::new())),
             script_runs: Arc::new(script_runs::Registry::new()),
