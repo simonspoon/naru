@@ -12345,3 +12345,290 @@ body.dock-resizing .dock-body {
   width: 1em;
   color: var(--cyan);
 }
+
+/* The nav as a dock zone, the Panels list, the rail and the orb panel (mesa
+   task 1574, docs/dock.md). Desktop tiers only: the phone tier never renders
+   any of these. */
+.nav-dock {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin: 0.25rem 0 0.75rem;
+}
+
+.nav-dock-item {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border-radius: var(--r-md);
+  box-shadow: var(--ring);
+  overflow: hidden;
+}
+
+.nav-dock-head {
+  flex: none;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0 0.3rem 0 0.6rem;
+  background: var(--surface);
+  border-bottom: 1px solid var(--hairline);
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: grab;
+  user-select: none;
+}
+
+.nav-dock-label {
+  flex: 1;
+  color: var(--text-h);
+}
+
+.nav-dock .nav-dock-close {
+  padding: 0 0.3rem;
+  min-width: 0;
+  background: transparent;
+  color: var(--muted);
+  box-shadow: none;
+  border: 1px solid transparent;
+  line-height: 1.2;
+}
+
+.nav-dock .nav-dock-close:hover {
+  color: var(--text-h);
+  background: var(--surface-raised);
+}
+
+.nav-dock-body {
+  position: relative;
+  height: 230px;
+}
+
+.nav-dock-item[data-panel='orb'] .nav-dock-body {
+  height: 170px;
+}
+
+.nav-dock-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 2px;
+  background: var(--cyan);
+  z-index: 2;
+}
+
+.nav-dock > .nav-dock-line {
+  position: relative;
+}
+
+.nav-dock-empty {
+  padding: 1rem;
+  text-align: center;
+  color: var(--cyan);
+  font-size: 0.8rem;
+  border: 1px dashed var(--cyan);
+  border-radius: var(--r-md);
+}
+
+.nav-panels {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 0.5rem 0;
+}
+
+.nav-panels-head {
+  display: flex;
+  justify-content: space-between;
+  padding: 0.25rem 0.5rem;
+  color: var(--muted);
+  font-size: 0.7rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.nav-panels .nav-panel-row {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  justify-content: flex-start;
+  width: 100%;
+  padding: 0.3rem 0.5rem;
+  background: transparent;
+  box-shadow: none;
+  border: none;
+  border-radius: var(--r-sm, 8px);
+  color: var(--text);
+  font-size: 0.85rem;
+  text-align: left;
+  cursor: grab;
+}
+
+.nav-panels .nav-panel-row:hover {
+  background: var(--surface-hover);
+}
+
+.nav-panel-row em {
+  margin-left: auto;
+  font-style: normal;
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
+.nav-panel-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 1px solid var(--muted);
+}
+
+.nav-panel-row em:empty + .nav-panel-dot,
+.nav-panel-dot.open {
+  margin-left: auto;
+}
+
+.nav-panel-row em:not(:empty) + .nav-panel-dot {
+  margin-left: 0;
+}
+
+.nav-panel-dot.open {
+  background: var(--cyan);
+  border-color: var(--cyan);
+  box-shadow: 0 0 6px var(--cyan);
+}
+
+/* The collapsed nav as a rail: expand handle, mini orb, one icon per panel. */
+.sidebar.collapsed.has-rail {
+  align-items: center;
+  padding: 0.5rem 0.4rem;
+}
+
+.nav-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.6rem;
+  margin-top: 0.4rem;
+}
+
+.nav-rail-orb {
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.nav-rail-orb > .dock-host {
+  flex: 1;
+  min-width: 0;
+  align-items: center;
+  justify-content: center;
+}
+
+.sidebar .nav-rail-icon {
+  text-decoration: none;
+}
+
+.nav-rail-badge {
+  position: absolute;
+  right: -6px;
+  top: -6px;
+  min-width: 14px;
+  padding: 0 3px;
+  border-radius: 8px;
+  background: var(--cyan);
+  color: #04131a;
+  font-size: 0.6rem;
+  line-height: 14px;
+  text-align: center;
+}
+
+.nav-rail-sep {
+  width: 26px;
+  height: 1px;
+  background: var(--hairline);
+}
+
+.sidebar .nav-rail-icon {
+  position: relative;
+  width: 28px;
+  height: 28px;
+  min-width: 0;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  box-shadow: var(--ring);
+  border: none;
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.sidebar .nav-rail-icon.open {
+  color: var(--cyan);
+}
+
+.sidebar .nav-rail-icon.open::after {
+  content: '';
+  position: absolute;
+  right: -3px;
+  top: -3px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--cyan);
+  box-shadow: 0 0 6px var(--cyan);
+}
+
+/* The orb panel: the floating orb's sphere sized to the panel (`InlineOrb`),
+   its state in words under it. The orb keeps `.live-orb`'s look and glow;
+   only the fixed-position, drag and dock-to-edge parts stand down. */
+.orb-panel {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 0.25rem 0.5rem 0.5rem;
+}
+
+.orb-panel-stage {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.orb-panel-state {
+  flex: none;
+  color: var(--cyan);
+  font-size: 0.7rem;
+  letter-spacing: 0.25em;
+  text-transform: uppercase;
+}
+
+.live-orb.live-orb-inline {
+  position: relative;
+  z-index: auto;
+  flex: none;
+  transition:
+    box-shadow 0.4s ease,
+    opacity 0.4s ease;
+}
+
+.live-orb-inline .live-orb-body {
+  cursor: default;
+}

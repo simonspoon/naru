@@ -217,6 +217,9 @@ export function Sidebar({
   unread,
   collapsed,
   onCollapsedChange,
+  dockZone,
+  panelsList,
+  rail,
 }: {
   activeProjectId: number | null
   // Which Inbox sub-view is open, or null when the inbox is not (mesa task
@@ -238,6 +241,12 @@ export function Sidebar({
   // `App.tsx` since the phone tab bar's "More" slot opens this drawer too.
   collapsed: boolean
   onCollapsedChange: (collapsed: boolean) => void
+  // The dock's pieces (mesa task 1574, desktop tiers only): the zone panels
+  // dock into above the nav items, the Panels list among them, and what the
+  // collapsed nav shows in place of the bare expand handle.
+  dockZone?: ReactNode
+  panelsList?: ReactNode
+  rail?: ReactNode
 }) {
   const setCollapsed = onCollapsedChange
   // Guards the one-shot deep-link reveal below (task 668).
@@ -524,16 +533,18 @@ export function Sidebar({
   }
   if (collapsed) {
     return (
-      <nav className="sidebar collapsed">
-        <button
-          type="button"
-          className="sidebar-toggle"
-          aria-label="Expand sidebar"
-          title="Expand sidebar"
-          onClick={() => setCollapsed(false)}
-        >
-          »
-        </button>
+      <nav className={`sidebar collapsed${rail ? ' has-rail' : ''}`}>
+        {rail ?? (
+          <button
+            type="button"
+            className="sidebar-toggle"
+            aria-label="Expand sidebar"
+            title="Expand sidebar"
+            onClick={() => setCollapsed(false)}
+          >
+            »
+          </button>
+        )}
       </nav>
     )
   }
@@ -564,6 +575,7 @@ export function Sidebar({
         >
           «
         </button>
+        {dockZone}
         {/* The href is the user's remembered CC tab (task 694); the tabs
             themselves live on the page (mesa task 1159). */}
         <a className={`nav-item${ccTab !== null ? ' active' : ''}`} href={ccHref()}>
@@ -589,6 +601,7 @@ export function Sidebar({
         <a className={`nav-item${libraryActive ? ' active' : ''}`} href="#/library">
           <span className="nav-item-label">Library</span>
         </a>
+        {panelsList}
         <button
           type="button"
           className="nav-item nav-section"

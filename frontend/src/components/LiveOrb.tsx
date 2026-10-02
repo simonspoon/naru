@@ -141,31 +141,9 @@ function loadPlacement(): Placement {
   }
 }
 
-/**
- * The floating Naru orb (mesa task 1553): the animated mark as a draggable
- * panel above every page for as long as a conversation is live and joined.
- * The body is the drag handle and stays exactly where it is dropped, except
- * near the top edge, where it docks small (remembered in localStorage); hovering — or tapping, for touch — blooms a
- * three-segment pie: mic left, pause right, sound below. The segments are the
- * hub's own handlers, passed in, so the orb and the panel head can never
- * disagree. No text is drawn on it. Portalled to `document.body` so no
- * sidebar, drawer or route can cover it.
- */
-export function LiveOrb({
-  state,
-  level,
-  speechRms,
-  micAvailable,
-  micMuted,
-  speechMuted,
-  paused,
-  pauseLabel,
-  pauseDisabled,
-  canPause,
-  onToggleMic,
-  onTogglePause,
-  onToggleSpeech,
-}: {
+/** What an orb shows and the three presses its pie offers — the hub's own
+ *  state and handlers, so every orb (floating, docked panel, rail) agrees. */
+export type OrbProps = {
   state: LiveIndicator | null
   level: number
   speechRms: () => number | null
@@ -182,7 +160,135 @@ export function LiveOrb({
   onToggleMic: () => void
   onTogglePause: () => void
   onToggleSpeech: () => void
-}) {
+}
+
+/** The three-segment pie: mic left, pause right, sound below. */
+function OrbPie(p: OrbProps) {
+  if (!(p.micAvailable || p.canPause)) return null
+  return (
+    <svg className="live-orb-pie" viewBox={`0 0 ${PIE} ${PIE}`} width={PIE} height={PIE}>
+      {p.micAvailable && (
+        <Segment
+          d={sector(140, 220)}
+          at={mid(180)}
+          label={p.micMuted ? 'Listen through this browser' : 'Stop listening'}
+          active={!p.micMuted}
+          off={p.micMuted}
+          onPress={p.onToggleMic}
+        >
+          <MicGlyph />
+        </Segment>
+      )}
+      {p.canPause && (
+        <Segment
+          d={sector(-40, 40)}
+          at={mid(0)}
+          label={p.pauseLabel}
+          active={p.paused}
+          off={p.paused}
+          disabled={p.pauseDisabled}
+          onPress={p.onTogglePause}
+        >
+          <PauseGlyph paused={p.paused} />
+        </Segment>
+      )}
+      {p.canPause && (
+        <Segment
+          d={sector(50, 130)}
+          at={mid(90)}
+          label={p.speechMuted ? 'Unmute spoken replies' : 'Mute spoken replies'}
+          active={p.speechMuted}
+          off={p.speechMuted}
+          onPress={p.onToggleSpeech}
+        >
+          <SpeakerGlyph muted={p.speechMuted} />
+        </Segment>
+      )}
+    </svg>
+  )
+}
+
+function OrbBadge({ show }: { show: boolean }) {
+  if (!show) return null
+  return (
+    <span className="live-orb-badge" aria-hidden="true">
+      <svg viewBox="0 0 24 24" width="14" height="14">
+        <SpeakerGlyph muted />
+      </svg>
+    </span>
+  )
+}
+
+function orbClasses(state: LiveIndicator | null, mute: ReturnType<typeof muteIcon>): string {
+  return `${orbBrightness(state) === 'bright' ? 'bright' : 'dim'} mode-${markMode(state)}${mute !== null ? ' muted' : ''}`
+}
+
+/**
+ * The orb as a dock panel or the rail's mini (mesa task 1574, docs/dock.md):
+ * the same sphere, pie, glow and badge as the floating orb, in flow, scaled to
+ * `size` px (the sphere's diameter; the pie blooms past it). No dragging — the
+ * dock places it. `pie={false}` is the rail's mini: a sphere that only reacts.
+ */
+export function InlineOrb({ size, pie = true, ...p }: OrbProps & { size: number; pie?: boolean }) {
+  const [pinned, setPinned] = useState(false)
+  const mute = muteIcon(p.micAvailable && p.micMuted, p.speechMuted)
+  const k = size / ORB_SIZE
+  return (
+    <div
+      className={`live-orb live-orb-inline ${orbClasses(p.state, mute)}${pinned ? ' pinned' : ''}`}
+      // The box keeps the 116px geometry the pie is drawn in; `scale` shrinks
+      // it, and the negative margin gives back the layout space it no longer takes.
+      style={{ width: ORB_SIZE, height: ORB_SIZE, scale: k, margin: -((ORB_SIZE - size) / 2) }}
+    >
+      {pie && <OrbPie {...p} />}
+      <div className="live-orb-body" onClick={() => setPinned((v) => !v)}>
+        <div className="live-orb-mark">
+          <NaruMark state={p.state} level={p.level} speechRms={p.speechRms} decorative />
+        </div>
+      </div>
+      <OrbBadge show={pie && (mute === 'speaker' || mute === 'both')} />
+    </div>
+  )
+}
+
+/**
+ * The `orb` dock panel's body: an `InlineOrb` sized to the panel (measured, so
+ * a drag of a divider resizes the sphere) over the state in words.
+ */
+export function OrbPanel({ label, ...p }: OrbProps & { label: string }) {
+  const ref = useRef<HTMLDivElement>(null)
+  const [box, setBox] = useState({ w: 160, h: 140 })
+  useEffect(() => {
+    const el = ref.current
+    if (el === null) return
+    const ro = new ResizeObserver(() => setBox({ w: el.clientWidth, h: el.clientHeight }))
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+  // The pie blooms 34px past the sphere's 116px, so the whole figure is PIE wide.
+  const size = Math.max(28, Math.min(220, (Math.min(box.w, box.h) * ORB_SIZE) / PIE))
+  return (
+    <div className="orb-panel" aria-label="the live orb">
+      <div className="orb-panel-stage" ref={ref}>
+        <InlineOrb {...p} size={size} />
+      </div>
+      <div className="orb-panel-state">{label}</div>
+    </div>
+  )
+}
+
+/**
+ * The floating Naru orb (mesa task 1553): the animated mark as a draggable
+ * panel above every page for as long as a conversation is live and joined.
+ * The body is the drag handle and stays exactly where it is dropped, except
+ * near the top edge, where it docks small (remembered in localStorage); hovering — or tapping, for touch — blooms a
+ * three-segment pie: mic left, pause right, sound below. The segments are the
+ * hub's own handlers, passed in, so the orb and the panel head can never
+ * disagree. No text is drawn on it. Portalled to `document.body` so no
+ * sidebar, drawer or route can cover it.
+ */
+export function LiveOrb(props: OrbProps) {
+  const { state, level, speechRms } = props
   const [placed, setPlaced] = useState<Placement>(loadPlacement)
   const [vp, setVp] = useState({ w: window.innerWidth, h: window.innerHeight })
   const [drag, setDrag] = useState<Point | null>(null)
@@ -268,59 +374,16 @@ export function LiveOrb({
     }
   }
 
-  const mute = muteIcon(micAvailable && micMuted, speechMuted)
-  const bright = orbBrightness(state) === 'bright'
-  const mode = markMode(state)
-  const hasPie = micAvailable || canPause
+  const mute = muteIcon(props.micAvailable && props.micMuted, props.speechMuted)
 
   return createPortal(
     <div
-      className={`live-orb ${bright ? 'bright' : 'dim'} mode-${mode}${mute !== null ? ' muted' : ''}${
+      className={`live-orb ${orbClasses(state, mute)}${
         (drag !== null ? ' dragging' : '') + (rest.docked ? ' docked' : '')
       }${pinned ? ' pinned' : ''}`}
       style={{ left: pos.x, top: pos.y, width: ORB_SIZE, height: ORB_SIZE }}
     >
-      {hasPie && (
-        <svg className="live-orb-pie" viewBox={`0 0 ${PIE} ${PIE}`} width={PIE} height={PIE}>
-          {micAvailable && (
-            <Segment
-              d={sector(140, 220)}
-              at={mid(180)}
-              label={micMuted ? 'Listen through this browser' : 'Stop listening'}
-              active={!micMuted}
-              off={micMuted}
-              onPress={onToggleMic}
-            >
-              <MicGlyph />
-            </Segment>
-          )}
-          {canPause && (
-            <Segment
-              d={sector(-40, 40)}
-              at={mid(0)}
-              label={pauseLabel}
-              active={paused}
-              off={paused}
-              disabled={pauseDisabled}
-              onPress={onTogglePause}
-            >
-              <PauseGlyph paused={paused} />
-            </Segment>
-          )}
-          {canPause && (
-            <Segment
-              d={sector(50, 130)}
-              at={mid(90)}
-              label={speechMuted ? 'Unmute spoken replies' : 'Mute spoken replies'}
-              active={speechMuted}
-              off={speechMuted}
-              onPress={onToggleSpeech}
-            >
-              <SpeakerGlyph muted={speechMuted} />
-            </Segment>
-          )}
-        </svg>
-      )}
+      <OrbPie {...props} />
       <div
         className="live-orb-body"
         onPointerDown={onDown}
@@ -336,13 +399,7 @@ export function LiveOrb({
           <NaruMark state={state} level={level} speechRms={speechRms} decorative />
         </div>
       </div>
-      {(mute === 'speaker' || mute === 'both') && (
-        <span className="live-orb-badge" aria-hidden="true">
-          <svg viewBox="0 0 24 24" width="14" height="14">
-            <SpeakerGlyph muted />
-          </svg>
-        </span>
-      )}
+      <OrbBadge show={mute === 'speaker' || mute === 'both'} />
     </div>,
     document.body,
   )

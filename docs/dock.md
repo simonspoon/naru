@@ -1,8 +1,9 @@
 # Dock (mesa task 1567)
 
-The desktop tiers' panel layout. The left nav stays pinned on the left (and
-collapsible as before); everything else is a **dockable panel** with a tab
-header and a grip. Frontend-only: no CLI, API or Rust surface.
+The desktop tiers' panel layout. The left nav stays on the left (collapsible as
+before) and is itself a **dock zone** (mesa task 1574, below); everything else
+is a **dockable panel** with a tab header and a grip. Frontend-only: no CLI, API
+or Rust surface.
 
 | Panel | Content |
 |---|---|
@@ -12,13 +13,48 @@ header and a grip. Frontend-only: no CLI, API or Rust surface.
 | `agents` | `AgentSidebar` with its `docked` prop |
 | `terminal` | the global `TerminalPage` |
 | `diagrams` | `DiagramsPanel`: the boards of the project the route is on, opened in place |
+| `orb` | the live orb (mesa task 1574): the floating orb of task 1553 (`LiveOrb.tsx`) as a sphere sized to its panel, with its pie (mic / pause / sound), state glow and muted badge, and its state in words under it |
 
 Each panel appears at most once. The phone tier (`usePhoneTier()`) is **not**
 docked and keeps its drawers, tab bar and the old live aside unchanged.
 
+## The nav zone, the Panels list and the rail (mesa task 1574)
+
+`DockState.nav` is an ordered stack of panels docked into the left nav, above
+its links, outside the split tree; a panel is in a group **or** in `nav`.
+Presets put `orb` there, so a fresh layout shows the orb at the top of the nav.
+Each nav item has a grip (drag it out), a label and a close; dropping a dragged
+panel on the zone (`NavZone`, `components/NavDock.tsx`) inserts it where the
+cyan line shows (`dockToNav`); an empty zone takes no room until a drag starts.
+Any panel may be docked there. A panel in a collapsed nav is not mounted, so it
+counts as hidden (`isVisible(state, panel, navCollapsed)`; the orb always shows,
+as the rail's mini orb), and revealing one expands the nav — only then
+(`revealNeedsNav`): a board push or route change on any other panel never
+re-expands a nav the person collapsed.
+
+The nav's **Panels** list (after Library) shows every panel with an open dot and
+"in nav"/"closed". A click is `revealPanel`; dragging a row out docks it where
+it is dropped (a group edge or centre, or the nav zone). It replaces the old
+top-right chat and whiteboard toggles, which are no longer rendered when docked
+(the phone tier keeps them).
+
+Collapsing the nav leaves a slim **rail**: the expand handle, a mini orb (a small
+`InlineOrb` sphere, no pie) that reacts exactly as the orb panel does, a
+separator, the dashboard (⌂) and inbox (✉, with its unread count) links, a
+separator, and one icon per other panel (dotted when open; a click reveals it). Panels docked in a collapsed nav are parked, not shown.
+
+The orb panel's state is not a second copy: `LiveHub` (mounted once, in the
+header) owns the mic level, playback level and indicator state and portals the
+orb panel and the rail's mini orb (`dockHosts` host `rail-orb`) from them, so
+closing Chat, moving the orb or collapsing the nav stops nothing — listening and
+the orb's reaction need no chat panel. On the dock tiers the free-floating orb
+is retired outright, panel open or closed (reopen it from the Panels list); the
+phone tier, which has no dock, keeps the floating orb.
+
 ## Gestures
 
-- **Drag by the tab.** Dropping on a panel's body lights five zones
+- **Drag by the tab** (or, for any panel, by a nav item or a Panels row; the
+  in-flight drag is `lib/panelDrag.ts`). Dropping on a panel's body lights five zones
   (`computeDropEdge`'s rule: the middle 40% stacks, the outer ring is
   quartered): left/right/top/bottom split the target, the centre stacks the
   dragged panel as a tab. While a drag is in flight a transparent shield sits
@@ -41,7 +77,8 @@ docked and keeps its drawers, tab bar and the old live aside unchanged.
 
 | Piece | File | Owns |
 |---|---|---|
-| State | `frontend/src/dockLayout.ts` (+ `.test.ts`) | pure: types, `dropPanel`, `closePanel`, `revealPanel`, `isVisible`, presets, versioned parse/serialize, saved-layout CRUD |
+| State | `frontend/src/dockLayout.ts` (+ `.test.ts`) | pure: types, `dropPanel`, `dockToNav`, `closePanel`, `revealPanel`, `isVisible`, `panelEntries` (the Panels list), presets, versioned parse/serialize, saved-layout CRUD |
+| Nav | `frontend/src/components/NavDock.tsx` | the nav zone, the Panels list, the collapsed rail |
 | Store hook | `frontend/src/useDockStore.ts` | the store in React, persisted on every change; stable `reveal`/`hide` |
 | Hosts | `frontend/src/lib/dockHosts.ts`, `components/DockSlot.tsx` | one container per panel, moved between groups |
 | Chrome | `frontend/src/components/DockLayout.tsx` | the split tree, tab strips, shield/zones, dividers, the header bar |
@@ -73,11 +110,14 @@ agents' pane tree and the page's local state reset).
 ## Persistence
 
 One `localStorage` key, `naru-dock-layouts` = `{v: 1, active, layouts: [{id,
-name, builtin, state}]}`; machine-local. Parsing is total: unknown panel ids
+name, builtin, state}]}`; machine-local. A state carries `nav` (the zone's
+panels); a layout saved before task 1574 has no `nav` key and loads with the
+orb at the top of the nav, while an explicit empty `nav` is the orb closed. Parsing is total: unknown panel ids
 are dropped, a panel in two groups (or a group named twice) rejects that
 layout, and a layout with nothing docked falls back to its preset (a built-in)
 or is dropped (a user one) — never an empty layout. (So a user layout with
-every panel closed is dropped on the next reload.) Writes are debounced
+every panel closed is dropped on the next reload; one whose only docked panels
+are in the nav zone is kept.) Writes are debounced
 (250ms, flushed on page hide and unmount), so a divider drag is one write.
 While a board holds unsent ink the header's switch, `+` and reset are disabled.
 
@@ -87,9 +127,9 @@ LiveHub takes an optional `dock` prop (`chatVisible`, `boardVisible`, `reveal`,
 `hide`, `setBoardFrozen`) instead of the `slot`: "open" is the chat panel being
 a group's front tab, and every opener goes through the dock.
 
-- A board push (and the header's "show the whiteboard") reveals the board panel.
+- A board push reveals the board panel.
 - `navigate` reveals the main panel; so does any route change. `#/live`
-  reveals the chat panel and the header chat toggle toggles it.
+  reveals the chat panel.
 - `#/terminal` is a verb like `#/live`: it reveals the terminal panel and the
   hash goes back to where the person was.
 - `collapse-sidebars` collapses the nav and closes the agents panel (remembering

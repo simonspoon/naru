@@ -11,6 +11,9 @@
 //   `projectPanes.dropTab` makes; a centre drop stacks the panel as a tab.
 // - **Closed is not absent.** Closing a panel remembers the spot it left
 //   (`lastSpot`), so reopening puts it back beside whatever it sat next to.
+// - **The nav is a dock zone too** (mesa task 1574): `nav` is an ordered stack
+//   of panels docked into the left navigation, outside the split tree. A panel
+//   is in a group *or* in `nav`, never both.
 
 import {
   canonicalize,
@@ -27,9 +30,9 @@ import {
   type SplitNode,
 } from './lib/paneTree'
 
-export type PanelId = 'main' | 'chat' | 'board' | 'agents' | 'terminal' | 'diagrams'
+export type PanelId = 'main' | 'chat' | 'board' | 'agents' | 'terminal' | 'diagrams' | 'orb'
 
-export const PANEL_IDS: readonly PanelId[] = ['main', 'chat', 'board', 'agents', 'terminal', 'diagrams']
+export const PANEL_IDS: readonly PanelId[] = ['main', 'chat', 'board', 'agents', 'terminal', 'diagrams', 'orb']
 
 const LABELS: Record<PanelId, string> = {
   main: 'Main',
@@ -38,6 +41,7 @@ const LABELS: Record<PanelId, string> = {
   agents: 'Agents',
   terminal: 'Terminal',
   diagrams: 'Diagrams',
+  orb: 'Orb',
 }
 
 export function panelLabel(id: PanelId): string {
@@ -57,12 +61,14 @@ export type DockRoot = SplitNode<'group'>
 export type DockGroup = { tabs: PanelId[]; active: PanelId }
 export type DropSpot = DropEdge | 'center'
 /** Where a closed panel last sat: beside `anchor`, on `edge` of it (`center` =
- *  stacked in its group). */
-export type LastSpot = { anchor: PanelId; edge: DropSpot }
+ *  stacked in its group), or in the nav zone. */
+export type LastSpot = { anchor: PanelId; edge: DropSpot } | { nav: true }
 
 export type DockState = {
   tree: DockRoot
   groups: Record<string, DockGroup>
+  /** Panels docked into the left navigation, top to bottom (mesa task 1574). */
+  nav: PanelId[]
   lastSpot: Partial<Record<PanelId, LastSpot>>
 }
 
@@ -102,20 +108,42 @@ export function groupOf(state: DockState, panel: PanelId): string | null {
   return null
 }
 
-/** In the tree *and* the front tab of its group — what the user can see. */
-export function isVisible(state: DockState, panel: PanelId): boolean {
+/** Docked in the nav zone. */
+export function inNav(state: DockState, panel: PanelId): boolean {
+  return state.nav.includes(panel)
+}
+
+/** In the nav zone, or the front tab of its group — what the user can see.
+ *  A collapsed nav mounts nothing but the orb's rail, so a panel docked in it
+ *  is visible only while the nav is expanded (the orb always: the rail shows it). */
+export function isVisible(state: DockState, panel: PanelId, navCollapsed = false): boolean {
+  if (inNav(state, panel)) return panel === 'orb' || !navCollapsed
   const g = groupOf(state, panel)
   return g !== null && state.groups[g].active === panel
 }
 
-/** Panels in no group at all: what the reopen menu lists. */
+/** Panels docked nowhere: what the reopen menu lists. */
 export function closedPanels(state: DockState): PanelId[] {
-  return PANEL_IDS.filter((p) => groupOf(state, p) === null)
+  return PANEL_IDS.filter((p) => groupOf(state, p) === null && !inNav(state, p))
+}
+
+export type PanelEntry = { id: PanelId; label: string; where: 'nav' | 'dock' | 'closed'; open: boolean }
+
+/** The nav's Panels list: every panel, where it sits, and whether it is
+ *  showing (a background tab is docked but not open). */
+export function panelEntries(state: DockState, navCollapsed = false): PanelEntry[] {
+  return PANEL_IDS.map((id) => ({
+    id,
+    label: LABELS[id],
+    where: inNav(state, id) ? 'nav' : groupOf(state, id) !== null ? 'dock' : 'closed',
+    open: isVisible(state, id, navCollapsed),
+  }))
 }
 
 // --- Gestures ----------------------------------------------------------
 
 function withoutPanel(state: DockState, panel: PanelId): DockState {
+  if (inNav(state, panel)) return { ...state, nav: state.nav.filter((p) => p !== panel) }
   const gid = groupOf(state, panel)
   if (gid === null) return state
   const g = state.groups[gid]
@@ -131,6 +159,7 @@ function withoutPanel(state: DockState, panel: PanelId): DockState {
 
 /** Where `panel` sits now, so a later reopen can put it back. */
 function spotOf(state: DockState, panel: PanelId): LastSpot | undefined {
+  if (inNav(state, panel)) return { nav: true }
   const gid = groupOf(state, panel)
   if (gid === null) return undefined
   const mates = state.groups[gid].tabs.filter((t) => t !== panel)
@@ -197,6 +226,23 @@ export function dropPanel(state: DockState, panel: PanelId, target: string, spot
   return { ...withLeaf, tree: normalize(splitLeafAt(withLeaf.tree, from2, to, spot)) }
 }
 
+/** `panel` dropped into the nav zone at `index` (before the item now there;
+ *  default: the bottom). The panel leaves wherever it was; moving within the
+ *  zone reorders. May leave the tree with no group at all: a layout whose only
+ *  docked panels are in the nav is valid (`parseState` keeps it). */
+export function dockToNav(state: DockState, panel: PanelId, index?: number): DockState {
+  const spotLeft = spotOf(state, panel)
+  const base = withoutPanel(state, panel)
+  const nav = [...base.nav]
+  // `index` counts the list as the person saw it, panel included.
+  const was = state.nav.indexOf(panel)
+  const want = index === undefined ? nav.length : was !== -1 && was < index ? index - 1 : index
+  const at = Math.max(0, Math.min(want, nav.length))
+  nav.splice(at, 0, panel)
+  const lastSpot = spotLeft && !('nav' in spotLeft) ? { ...base.lastSpot, [panel]: spotLeft } : base.lastSpot
+  return { ...base, nav, lastSpot, tree: normalize(base.tree) }
+}
+
 export function closePanel(state: DockState, panel: PanelId): DockState {
   const spot = spotOf(state, panel)
   if (spot === undefined && groupOf(state, panel) === null) return state
@@ -221,12 +267,40 @@ export function activateTab(state: DockState, group: string, panel: PanelId): Do
  * a caller can reveal on every event without re-rendering.
  */
 export function revealPanel(state: DockState, panel: PanelId): DockState {
+  if (inNav(state, panel)) return state
   const gid = groupOf(state, panel)
   if (gid !== null) return activateTab(state, gid, panel)
   const spot = state.lastSpot[panel]
-  const anchorGroup = spot ? groupOf(state, spot.anchor) : null
-  if (spot && anchorGroup !== null) return dropPanel(state, panel, anchorGroup, spot.edge)
+  if (spot && 'nav' in spot) return dockToNav(state, panel)
+  const anchorGroup = spot && 'anchor' in spot ? groupOf(state, spot.anchor) : null
+  if (spot && 'anchor' in spot && anchorGroup !== null) return dropPanel(state, panel, anchorGroup, spot.edge)
   return appendAtRight(state, panel)
+}
+
+/** Whether `revealPanel` would *change* anything by putting a closed `panel`
+ *  back into the nav zone (its last spot). A programmatic reveal of a panel
+ *  that is already docked changes nothing, so it must not re-expand a nav the
+ *  person collapsed; only this case does. */
+export function revealLandsInNav(state: DockState, panel: PanelId): boolean {
+  if (inNav(state, panel) || groupOf(state, panel) !== null) return false
+  const spot = state.lastSpot[panel]
+  return spot !== undefined && 'nav' in spot
+}
+
+/** Whether revealing `panel` must expand a collapsed nav: only when it would
+ *  otherwise stay hidden there — a non-orb panel docked in the nav, or closed
+ *  with the nav as its last spot. Any other reveal (a board push, a route
+ *  change) leaves the person's collapse alone; once expanded, later reveals
+ *  find the panel visible and change nothing. */
+export function revealNeedsNav(state: DockState, panel: PanelId, navCollapsed: boolean): boolean {
+  return navCollapsed && panel !== 'orb' && (inNav(state, panel) || revealLandsInNav(state, panel))
+}
+
+/** Where a dragged panel lands in the nav zone: the index of the first item
+ *  whose vertical midpoint is below `y`, else the end. */
+export function navDropIndex(items: { top: number; height: number }[], y: number): number {
+  for (let i = 0; i < items.length; i++) if (y < items[i].top + items[i].height / 2) return i
+  return items.length
 }
 
 /** Writes every child ratio of the split at `path` (a divider drag). */
@@ -246,8 +320,8 @@ function group(...tabs: PanelId[]): DockGroup {
   return { tabs, active: tabs[0] }
 }
 
-function make(tree: DockRoot, groups: Record<string, DockGroup>): DockState {
-  return { tree, groups, lastSpot: {} }
+function make(tree: DockRoot, groups: Record<string, DockGroup>, nav: PanelId[] = ['orb']): DockState {
+  return { tree, groups, nav, lastSpot: {} }
 }
 
 export const PRESETS: Record<string, { name: string; make: () => DockState }> = {
@@ -351,18 +425,39 @@ export function parseState(raw: unknown): DockState | null {
   for (const id of leaves) if (groups[id] === undefined) tree = removeLeaf(tree, id)
   const inTree = new Set(collectLeafIds(tree))
   for (const gid of Object.keys(groups)) if (!inTree.has(gid)) delete groups[gid]
-  if (Object.keys(groups).length === 0) return null
+  // The nav zone (mesa task 1574). A layout saved before it has no `nav` key
+  // and never heard of the orb: the orb lands at the top of the nav for it.
+  // One that has the key keeps exactly what it says (an empty list = closed).
+  const nav: PanelId[] = []
+  if (Array.isArray(raw.nav)) {
+    for (const p of raw.nav) {
+      if (!isPanelId(p) || nav.includes(p)) continue
+      if (seen.has(p)) return null
+      nav.push(p)
+    }
+  } else if (!seen.has('orb')) {
+    nav.push('orb')
+  }
+  // Nothing docked is no layout (a preset takes over) — unless the nav zone
+  // holds panels the layout itself named: docking the last group panel into
+  // the nav leaves exactly that, and must survive a reload.
+  if (Object.keys(groups).length === 0 && !(Array.isArray(raw.nav) && nav.length > 0)) return null
   const lastSpot: DockState['lastSpot'] = {}
   if (isObj(raw.lastSpot)) {
     for (const [p, s] of Object.entries(raw.lastSpot)) {
-      if (!isPanelId(p) || !isObj(s) || !isPanelId(s.anchor)) continue
+      if (!isPanelId(p) || !isObj(s)) continue
+      if (s.nav === true) {
+        lastSpot[p] = { nav: true }
+        continue
+      }
+      if (!isPanelId(s.anchor)) continue
       const edge = s.edge
       if (edge === 'center' || edge === 'left' || edge === 'right' || edge === 'top' || edge === 'bottom') {
         lastSpot[p] = { anchor: s.anchor, edge }
       }
     }
   }
-  return { tree: normalize(tree), groups, lastSpot }
+  return { tree: normalize(tree), groups, nav, lastSpot }
 }
 
 export function defaultStore(): DockStore {

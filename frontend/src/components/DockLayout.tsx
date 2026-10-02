@@ -22,6 +22,7 @@ import {
   type PanelId,
 } from '../dockLayout'
 import { axisPos, computeDropEdge, getNodeAtPath, MIN_PANE_PX } from '../lib/paneTree'
+import { beginPanelDrag, endPanelDrag, usePanelDrag } from '../lib/panelDrag'
 import { DockSlot } from './DockSlot'
 import type { Update, useDockStore } from '../useDockStore'
 
@@ -35,7 +36,6 @@ type Ctx = {
   dragging: PanelId | null
   over: Over
   setOver: (o: Over) => void
-  onDragStart: (p: PanelId) => void
   onDragEnd: () => void
   onDividerDown: (path: number[], i: number, o: 'row' | 'column', pos: number, el: HTMLElement) => void
 }
@@ -81,13 +81,7 @@ function DockGroupView({ id, ratio, ctx }: { id: string; ratio: number; ctx: Ctx
               className={`dock-tab${t === group.active ? ' active' : ''}`}
               draggable={!lock}
               onClick={() => ctx.update((s) => activateTab(s, id, t))}
-              onDragStart={(e) => {
-                e.dataTransfer.effectAllowed = 'move'
-                e.dataTransfer.setData(PANEL_DRAG_MIME, t)
-                // Some browsers cancel a drag that carries no `text/plain`.
-                e.dataTransfer.setData('text/plain', panelLabel(t))
-                ctx.onDragStart(t)
-              }}
+              onDragStart={(e) => beginPanelDrag(e, t)}
               onDragEnd={ctx.onDragEnd}
               title={lock ? 'Unsent ink on the board holds it in place' : `Drag ${panelLabel(t)} to rearrange`}
             >
@@ -206,7 +200,7 @@ export function DockLayout({
   update: Update
   locked: ReadonlySet<PanelId>
 }) {
-  const [dragging, setDragging] = useState<PanelId | null>(null)
+  const dragging = usePanelDrag()
   const [over, setOver] = useState<Over>(null)
   const [divider, setDivider] = useState<null | {
     path: number[]
@@ -218,17 +212,10 @@ export function DockLayout({
     size: number
   }>(null)
 
-  // The shield goes up a tick *after* the drag starts: mounting it inside
-  // `dragstart` makes some browsers cancel the drag at once.
-  const shieldTimer = useRef<number | null>(null)
-  const onDragStart = useCallback((p: PanelId) => {
-    shieldTimer.current = window.setTimeout(() => setDragging(p), 0)
-  }, [])
+  // The shield goes up a tick after the drag starts (`lib/panelDrag.ts`, shared
+  // with the nav zone and the Panels list, which drag panels too).
   const onDragEnd = useCallback(() => {
-    // A drag that ends inside that tick must not raise the shield afterwards.
-    if (shieldTimer.current !== null) window.clearTimeout(shieldTimer.current)
-    shieldTimer.current = null
-    setDragging(null)
+    endPanelDrag()
     setOver(null)
   }, [])
 
@@ -269,7 +256,6 @@ export function DockLayout({
     dragging,
     over,
     setOver,
-    onDragStart,
     onDragEnd,
     onDividerDown: (path, i, orientation, startPos, el) => {
       const node = getNodeAtPath(state.tree, path)

@@ -4,7 +4,7 @@ import { createPortal } from 'react-dom'
 import * as dockHosts from '../lib/dockHosts'
 import { NaruMark } from './NaruMark'
 import { LiveGlow } from './LiveGlow'
-import { LiveOrb } from './LiveOrb'
+import { InlineOrb, LiveOrb, OrbPanel } from './LiveOrb'
 import { LiveBoardPanel, type InkFlatten } from './LiveBoardPanel'
 import {
   claimLiveSpeaker,
@@ -74,7 +74,7 @@ import { chordLabel, matchesShortcut } from '../keymap'
 import { useKeymap } from '../keymapStore'
 import { elapsedLabel, endsInHead } from '../liveHead'
 import { headMeta, quietHint, taskHash, taskSegments, turnClock } from '../liveChat'
-import { headerIndicator } from '../liveIndicator'
+import { headerIndicator, indicatorLabel } from '../liveIndicator'
 import {
   buildVocabulary,
   correctVocabulary,
@@ -682,6 +682,9 @@ async function openPcmCapture(
 export type LiveDock = {
   chatVisible: boolean
   boardVisible: boolean
+  /** The orb panel is mounted on screen (not parked: a nav panel in a
+   *  collapsed nav, or a background tab), so only then does it render. */
+  orbPanelShown: boolean
   reveal: (panel: 'chat' | 'board' | 'main') => void
   hide: (panel: 'chat' | 'board') => void
   /** Unsent ink pins the board: the dock must not move or close it. */
@@ -4030,6 +4033,28 @@ export function LiveHub({
   // is showing them (functions, not consts: the compiler declines the whole
   // component over JSX held in a const): the phone tier's one aside, or — docked
   // (mesa task 1567) — the chat and board panels' own portals below.
+  // The orb panel (mesa task 1574): the floating orb's sphere, pie, glow and
+  // badge (`LiveOrb.tsx`), in the dock — the three presses are the pie's, wired
+  // to the very handlers the head's buttons call. Everything it shows is this
+  // component's own state, so closing a panel never stops the listening.
+  const orbProps = {
+    state: live && unlocked ? indicator : null,
+    level,
+    speechRms,
+    micAvailable: supported && !blocked,
+    micMuted: muted,
+    speechMuted,
+    paused,
+    pauseLabel: pauseButton?.label ?? '',
+    pauseDisabled: pauseButton?.disabled ?? true,
+    canPause: pauseButton !== undefined && pauseButton !== null,
+    onToggleMic: () => toggleListening(!muted),
+    onTogglePause: () => {
+      if (pauseButton) togglePause(pauseButton)
+    },
+    onToggleSpeech: toggleSpeechMuted,
+  }
+
   // The head (mesa task 1069): the Naru mark (no word; its accessible
   // name says what is happening), how loud the room has been, and the two
   // presses that belong to a running conversation. It is the
@@ -4618,7 +4643,7 @@ export function LiveHub({
 
   return (
     <div className="live-hub">
-      {controls.panel && (
+      {controls.panel && !dock && (
         <button
           type="button"
           className={`live-toggle live-panel-toggle${open ? ' live-open' : ''}`}
@@ -4643,26 +4668,10 @@ export function LiveHub({
           conversation is live and this browser is in it — the same terms the
           head's Pause and mute buttons are offered on — wired to the very
           handlers those buttons call. */}
-      {live && unlocked && (
-        <LiveOrb
-          state={indicator}
-          level={level}
-          speechRms={speechRms}
-          micAvailable={supported && !blocked}
-          micMuted={muted}
-          speechMuted={speechMuted}
-          paused={paused}
-          pauseLabel={pauseButton?.label ?? ''}
-          pauseDisabled={pauseButton?.disabled ?? true}
-          canPause={pauseButton !== undefined && pauseButton !== null}
-          onToggleMic={() => toggleListening(!muted)}
-          onTogglePause={() => {
-            if (pauseButton) togglePause(pauseButton)
-          }}
-          onToggleSpeech={toggleSpeechMuted}
-        />
+      {live && unlocked && !dock && (
+        <LiveOrb {...orbProps} />
       )}
-      {hasBoards && !boardShown && (
+      {hasBoards && !boardShown && !dock && (
         <button
           type="button"
           className="live-toggle live-panel-toggle"
@@ -4736,6 +4745,12 @@ export function LiveHub({
           </div>,
           dockHosts.hostFor('chat'),
         )}
+      {dock?.orbPanelShown &&
+        createPortal(
+          <OrbPanel {...orbProps} label={live && unlocked ? indicatorLabel(indicator ?? 'listening').replace('Naru is ', '') : 'not live'} />,
+          dockHosts.hostFor('orb'),
+        )}
+      {dock && navCollapsed && createPortal(<InlineOrb {...orbProps} size={30} pie={false} />, dockHosts.hostFor('rail-orb'))}
       {dock &&
         createPortal(
           hasBoards ? (

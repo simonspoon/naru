@@ -14,7 +14,11 @@ import type { PanelId } from '../dockLayout'
 // A panel with no slot (closed, or a background tab) is parked in a hidden div
 // rather than detached, so its content keeps a parent either way.
 
-const hosts = new Map<PanelId, HTMLDivElement>()
+// `rail-orb` is not a panel: it is the second view of the orb the collapsed
+// nav's rail shows (mesa task 1574), hosted the same way.
+export type HostId = PanelId | 'rail-orb'
+
+const hosts = new Map<HostId, HTMLDivElement>()
 let parkEl: HTMLDivElement | null = null
 
 function park(): HTMLDivElement {
@@ -28,7 +32,7 @@ function park(): HTMLDivElement {
 }
 
 /** The panel's container: created on first ask, never replaced. */
-export function hostFor(id: PanelId): HTMLDivElement {
+export function hostFor(id: HostId): HTMLDivElement {
   let el = hosts.get(id)
   if (el === undefined) {
     el = document.createElement('div')
@@ -59,13 +63,13 @@ function move(el: HTMLDivElement, to: HTMLElement): void {
   if (hadFocus && active instanceof HTMLElement && document.activeElement !== active) active.focus()
 }
 
-export function attach(id: PanelId, slot: HTMLElement): void {
+export function attach(id: HostId, slot: HTMLElement): void {
   move(hostFor(id), slot)
 }
 
 /** Parks the container, but only if `slot` still holds it: a panel that moved
  *  to another slot in the same commit has already been attached there. */
-export function release(id: PanelId, slot: HTMLElement): void {
+export function release(id: HostId, slot: HTMLElement): void {
   const el = hostFor(id)
   if (el.parentNode === slot) move(el, park())
 }

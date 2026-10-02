@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import './App.css'
 import { getCcUsage, getNaruVersion, getTask, listInbox } from './api'
@@ -7,7 +7,8 @@ import { CommandPalette } from './components/CommandPalette'
 import { DiagramsPanel } from './components/DiagramsPanel'
 import { DockBar, DockLayout } from './components/DockLayout'
 import { useDockStore } from './useDockStore'
-import { isVisible, type PanelId } from './dockLayout'
+import { inNav, isVisible, revealNeedsNav, type PanelId } from './dockLayout'
+import { NavPanels, NavRail, NavZone } from './components/NavDock'
 import { hostFor } from './lib/dockHosts'
 import { DoneToasts } from './components/DoneToasts'
 import { PhoneTabBar } from './components/PhoneTabBar'
@@ -182,16 +183,8 @@ function App() {
     () => new Set<PanelId>(boardFrozen ? ['board'] : []),
     [boardFrozen],
   )
-  const agentsVisible = isVisible(dock.state, 'agents')
-  const terminalVisible = isVisible(dock.state, 'terminal')
-  const chatVisible = isVisible(dock.state, 'chat')
-  const boardVisible = isVisible(dock.state, 'board')
-  const { reveal, hide } = dock
-  const liveDock = useMemo<LiveDock | null>(
-    () =>
-      docked ? { chatVisible, boardVisible, reveal, hide, setBoardFrozen } : null,
-    [docked, chatVisible, boardVisible, reveal, hide],
-  )
+  const { hide } = dock
+
   // What the keyboard is bound to right now — the shipped chords until the
   // one `GET /api/config/keymap` this page makes resolves (mesa task 1079).
   const keymap = useKeymap()
@@ -214,6 +207,38 @@ function App() {
   // The nav sidebar starts collapsed on phones (it is an overlay drawer
   // there); the agents sidebar defaults to collapsed at every width.
   const [navCollapsed, setNavCollapsed] = useState(isPhone)
+  // A panel docked in a collapsed nav is not mounted (the rail shows only the
+  // orb), so it counts as hidden there.
+  const agentsVisible = isVisible(dock.state, 'agents', navCollapsed)
+  const terminalVisible = isVisible(dock.state, 'terminal', navCollapsed)
+  const chatVisible = isVisible(dock.state, 'chat', navCollapsed)
+  const boardVisible = isVisible(dock.state, 'board', navCollapsed)
+  // The orb panel itself is shown only in an expanded nav (the rail's mini orb
+  // is the other view), or as the front tab of a group.
+  const orbPanelShown = inNav(dock.state, 'orb') ? !navCollapsed : isVisible(dock.state, 'orb')
+  // Revealing a panel that would stay hidden in a collapsed nav expands it —
+  // and only then (`revealNeedsNav`), so a board push or a route change never
+  // re-expands a nav the person collapsed. The refs are the latest dock state
+  // and collapse, so the callback below stays stable for LiveHub's effects.
+  const dockStateRef = useRef(dock.state)
+  const navCollapsedRef = useRef(navCollapsed)
+  useEffect(() => {
+    dockStateRef.current = dock.state
+    navCollapsedRef.current = navCollapsed
+  }, [dock.state, navCollapsed])
+  const dockReveal = dock.reveal
+  const reveal = useCallback(
+    (p: PanelId) => {
+      if (revealNeedsNav(dockStateRef.current, p, navCollapsedRef.current)) setNavCollapsed(false)
+      dockReveal(p)
+    },
+    [dockReveal],
+  )
+  const liveDock = useMemo<LiveDock | null>(
+    () =>
+      docked ? { chatVisible, boardVisible, orbPanelShown, reveal, hide, setBoardFrozen } : null,
+    [docked, chatVisible, boardVisible, orbPanelShown, reveal, hide],
+  )
   const [agentsCollapsed, setAgentsCollapsed] = useState(true)
   // The main panel folded to a rail so the live and agents panels take its
   // width (mesa task 1485). Desktop tiers only: App.css ignores the class on
@@ -790,6 +815,13 @@ function App() {
           unread={unread}
           collapsed={navCollapsed}
           onCollapsedChange={setNavCollapsed}
+          dockZone={docked ? <NavZone state={dock.state} update={dock.update} locked={locked} /> : undefined}
+          panelsList={docked ? <NavPanels state={dock.state} navCollapsed={navCollapsed} locked={locked} onReveal={reveal} /> : undefined}
+          rail={
+            docked ? (
+              <NavRail state={dock.state} navCollapsed={navCollapsed} unread={unread} onReveal={reveal} onExpand={() => setNavCollapsed(false)} />
+            ) : undefined
+          }
         />
         {docked ? (
           <div className="dock-area">

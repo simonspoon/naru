@@ -2655,6 +2655,13 @@ conversation") working with no backend change.
   muted, paused) — colour alone, no strike-through. A muted mic or voice
   leaves the orb visible but quiet: a low-saturation translucent red ring and
   a small badge naming which is muted.
+  **On the desktop dock tiers the free-floating orb is retired** (mesa task
+  1574, `docs/dock.md`): the same sphere, glow, pie and badge render as the
+  `orb` **dock panel** (`InlineOrb`/`OrbPanel` in `LiveOrb.tsx`, sized to the
+  panel, no dragging or top-edge snap) and as the collapsed nav rail's mini
+  orb, whether the panel is open or closed. The floating orb, its drag, snap
+  and `naru.live-orb` placement remain **the phone tier's** (`LiveHub` renders
+  it only when there is no dock).
 - **Docked (mesa task 1567, `docs/dock.md`):** on the desktop tiers the chat and
   the whiteboard are two independent dock panels, each portalled into its own
   host container, and the right-hand-sidebar, `.live-slot`, width-drag and

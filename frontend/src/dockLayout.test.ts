@@ -4,18 +4,24 @@ import {
   activateTab,
   closePanel,
   closedPanels,
+  dockToNav,
   debouncedSaver,
   defaultStore,
   deleteLayout,
   dropPanel,
   groupOf,
+  inNav,
   isVisible,
+  panelEntries,
   PANEL_IDS,
   parseState,
   parseStore,
   PRESETS,
   resetLayout,
   revealPanel,
+  revealLandsInNav,
+  revealNeedsNav,
+  navDropIndex,
   saveAs,
   selectLayout,
   serializeStore,
@@ -37,6 +43,9 @@ function consistent(s: DockState) {
   const tabs = Object.values(s.groups).flatMap((g) => g.tabs)
   expect(new Set(tabs).size).toBe(tabs.length)
   for (const g of Object.values(s.groups)) expect(g.tabs).toContain(g.active)
+  // The nav zone holds each panel at most once and shares none with a group.
+  expect(new Set(s.nav).size).toBe(s.nav.length)
+  for (const p of s.nav) expect(tabs).not.toContain(p)
 }
 
 describe('presets', () => {
@@ -53,6 +62,133 @@ describe('presets', () => {
     expect(groupOf(s, 'agents')).toBe(groupOf(s, 'terminal'))
     expect(isVisible(s, 'agents')).toBe(true)
     expect(isVisible(s, 'terminal')).toBe(false)
+  })
+})
+
+describe('nav zone', () => {
+  it('presets dock the orb at the top of the nav', () => {
+    for (const p of Object.values(PRESETS)) {
+      const s = p.make()
+      expect(s.nav).toEqual(['orb'])
+      expect(isVisible(s, 'orb')).toBe(true)
+    }
+  })
+  it('moves a panel out of its group into the nav and back', () => {
+    const into = dockToNav(talk(), 'chat')
+    consistent(into)
+    expect(inNav(into, 'chat')).toBe(true)
+    expect(groupOf(into, 'chat')).toBeNull()
+    expect(collectLeafIds(into.tree)).not.toContain('g-chat')
+    const out = dropPanel(into, 'chat', 'g-main', 'right')
+    consistent(out)
+    expect(inNav(out, 'chat')).toBe(false)
+    expect(groupOf(out, 'chat')).not.toBeNull()
+  })
+  it('reorders within the zone', () => {
+    let s = dockToNav(talk(), 'chat')
+    s = dockToNav(s, 'chat', 0)
+    expect(s.nav).toEqual(['chat', 'orb'])
+    s = dockToNav(s, 'chat')
+    expect(s.nav).toEqual(['orb', 'chat'])
+    // Dropped below itself: the index is the list the person saw.
+    expect(dockToNav(s, 'orb', 2).nav).toEqual(['chat', 'orb'])
+    expect(dockToNav(s, 'orb', 1).nav).toEqual(['orb', 'chat'])
+  })
+  it('closes and reopens the orb into the nav', () => {
+    const closed = closePanel(talk(), 'orb')
+    expect(closed.nav).toEqual([])
+    expect(closedPanels(closed)).toContain('orb')
+    const back = revealPanel(closed, 'orb')
+    expect(back.nav).toEqual(['orb'])
+    expect(revealPanel(back, 'orb')).toBe(back)
+  })
+  it('an orb dragged into a group reopens in the nav only if it left the nav closed', () => {
+    const s = dropPanel(talk(), 'orb', 'g-main', 'bottom')
+    consistent(s)
+    expect(inNav(s, 'orb')).toBe(false)
+    const closed = closePanel(s, 'orb')
+    expect(revealPanel(closed, 'orb').nav).toEqual([])
+    const fromNav = revealPanel(closePanel(dockToNav(talk(), 'orb', 0), 'orb'), 'orb')
+    expect(fromNav.nav).toEqual(['orb'])
+  })
+  it('a reveal lands in the nav only for a closed panel whose last spot is the nav', () => {
+    const s = dockToNav(talk(), 'chat')
+    expect(revealLandsInNav(s, 'chat')).toBe(false) // already docked there
+    expect(revealLandsInNav(closePanel(s, 'chat'), 'chat')).toBe(true)
+    expect(revealLandsInNav(talk(), 'chat')).toBe(false)
+    expect(revealLandsInNav(closePanel(talk(), 'chat'), 'chat')).toBe(false)
+  })
+  it('expands a collapsed nav only when the reveal would otherwise stay hidden', () => {
+    const s = dockToNav(talk(), 'chat')
+    expect(revealNeedsNav(s, 'chat', true)).toBe(true)
+    expect(revealNeedsNav(s, 'chat', false)).toBe(false) // already expanded: nothing to do
+    expect(revealNeedsNav(closePanel(s, 'chat'), 'chat', true)).toBe(true)
+    // A board push or a route change on panels docked elsewhere leaves it be.
+    expect(revealNeedsNav(s, 'board', true)).toBe(false)
+    expect(revealNeedsNav(s, 'main', true)).toBe(false)
+    expect(revealNeedsNav(closePanel(talk(), 'board'), 'board', true)).toBe(false)
+    // The orb's rail is always shown.
+    expect(revealNeedsNav(talk(), 'orb', true)).toBe(false)
+  })
+  it('a panel in a collapsed nav is not visible, except the orb', () => {
+    const s = dockToNav(talk(), 'chat')
+    expect(isVisible(s, 'chat')).toBe(true)
+    expect(isVisible(s, 'chat', false)).toBe(true)
+    expect(isVisible(s, 'chat', true)).toBe(false)
+    expect(isVisible(s, 'orb', true)).toBe(true)
+    expect(isVisible(s, 'main', true)).toBe(true)
+    expect(panelEntries(s, true).find((e) => e.id === 'chat')?.open).toBe(false)
+  })
+  it('docking the last group panel into the nav leaves a layout that survives a reload', () => {
+    let s = talk()
+    for (const p of ['main', 'chat', 'board', 'agents', 'terminal'] as const) s = dockToNav(s, p)
+    expect(s.tree.children).toHaveLength(0)
+    expect(Object.keys(s.groups)).toHaveLength(0)
+    const back = parseState(JSON.parse(JSON.stringify(s)))
+    expect(back).not.toBeNull()
+    expect(back!.nav).toEqual(['orb', 'main', 'chat', 'board', 'agents', 'terminal'])
+    // The same emptiness with nothing in the nav is still no layout.
+    const raw = JSON.parse(JSON.stringify(s))
+    raw.nav = []
+    expect(parseState(raw)).toBeNull()
+  })
+  it('navDropIndex picks the first item whose midpoint is below the pointer', () => {
+    const items = [
+      { top: 0, height: 100 },
+      { top: 110, height: 100 },
+    ]
+    expect(navDropIndex(items, 10)).toBe(0)
+    expect(navDropIndex(items, 60)).toBe(1)
+    expect(navDropIndex(items, 150)).toBe(1)
+    expect(navDropIndex(items, 170)).toBe(2)
+    expect(navDropIndex([], 5)).toBe(0)
+  })
+  it('lists every panel with where it sits and whether it is open', () => {
+    const e = panelEntries(talk())
+    expect(e.map((x) => x.id)).toEqual([...PANEL_IDS])
+    const by = Object.fromEntries(e.map((x) => [x.id, x]))
+    expect(by.orb).toMatchObject({ where: 'nav', open: true })
+    expect(by.chat).toMatchObject({ where: 'dock', open: true })
+    expect(by.terminal).toMatchObject({ where: 'dock', open: false })
+    expect(by.diagrams).toMatchObject({ where: 'closed', open: false })
+  })
+  it('a layout saved before the nav zone loads, with the orb at the top of the nav', () => {
+    const raw = JSON.parse(JSON.stringify(talk()))
+    delete raw.nav
+    const s = parseState(raw)!
+    consistent(s)
+    expect(s.nav).toEqual(['orb'])
+    // An explicit empty nav is the orb closed, kept.
+    raw.nav = []
+    expect(parseState(raw)!.nav).toEqual([])
+  })
+  it('round-trips the nav and its last spot; rejects a panel in a group and the nav', () => {
+    const s = closePanel(dockToNav(talk(), 'chat'), 'chat')
+    const back = parseState(JSON.parse(JSON.stringify(s)))!
+    expect(back.lastSpot.chat).toEqual({ nav: true })
+    const raw = JSON.parse(JSON.stringify(talk()))
+    raw.nav = ['main']
+    expect(parseState(raw)).toBeNull()
   })
 })
 
@@ -177,6 +313,7 @@ describe('parse', () => {
     expect(parseState({ tree: 3, groups: {} })).toBeNull()
     const raw = JSON.parse(JSON.stringify(talk()))
     for (const g of Object.values(raw.groups) as { tabs: string[] }[]) g.tabs = []
+    raw.nav = []
     expect(parseState(raw)).toBeNull()
   })
 })
