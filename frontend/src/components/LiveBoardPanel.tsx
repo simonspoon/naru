@@ -469,7 +469,11 @@ async function drawBoardBackground(
   // The panel's own backdrop first, so whatever the board does not cover
   // looks as it did on screen: the section paints the opaque dark stage.
   ctx.fillStyle = getComputedStyle(content.closest('.live-board-section') ?? content).backgroundColor
-  ctx.fillRect(0, 0, frame.width, frame.height)
+  // Filled in device pixels: the canvas is rounded up from a fractional box, so a CSS-unit fill leaves the last column/row partly clear.
+  ctx.save()
+  ctx.setTransform(1, 0, 0, 1, 0, 0)
+  ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height)
+  ctx.restore()
   if (background === 'image') {
     const img = content.querySelector<HTMLImageElement>('img.live-board-image')
     if (img === null) throw new Error('no image on the board')
