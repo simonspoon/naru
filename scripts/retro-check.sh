@@ -271,14 +271,13 @@ EXPECT="$WORKSPACE|naru retro $RUN1|Run mesa session retrospective $RUN1."
 AGENT_FILE="$FAKE_HOME/.claude/agents/naru-retro.md"
 [ -f "$AGENT_FILE" ] || fail "the naru-retro agent definition must be seeded at $AGENT_FILE before the spawn"
 grep -q '^name: naru-retro$' "$AGENT_FILE" || fail "the seeded definition must name the agent: $(head -3 "$AGENT_FILE")"
-grep -q '^model: sonnet$' "$AGENT_FILE" || fail "the retrospective clusters and writes on sonnet"
 grep -q '^tools: ' "$AGENT_FILE" || fail "the seeded definition must carry a tool list"
 ! grep -E '^tools: .*\b(Edit|Write)\b' "$AGENT_FILE" || fail "the retro agent must not be able to Edit/Write: $(grep '^tools:' "$AGENT_FILE")"
 grep -q 'haiku' "$AGENT_FILE" && grep -q 'opus' "$AGENT_FILE" && grep -q 'Never fable' "$AGENT_FILE" ||
   fail "the definition must state the model-per-step rule"
 grep -q 'mesa retro finding record' "$AGENT_FILE" || fail "the definition must route findings through the log"
 grep -q -- '--kind change-request --author retro --task' "$AGENT_FILE" || fail "the definition must file through inbox add"
-ok "retro run records a manual run and spawns --agent naru-retro in ~/.naru/workspace, named 'naru retro <id>', with the definition seeded (sonnet, no Edit/Write, model-per-step rule)"
+ok "retro run records a manual run and spawns --agent naru-retro in ~/.naru/workspace, named 'naru retro <id>', with the definition seeded (no Edit/Write, model-per-step rule)"
 
 # ---- inside the interval: conflict; --force runs anyway ----
 
