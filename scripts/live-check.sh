@@ -1719,6 +1719,13 @@ raw POST "/api/live/utterance" -H "Host: evil.example" -H 'Content-Type: applica
 [ "$STATUS" = "201" ] || fail "--lan: a JSON utterance from any Host must work, got $STATUS ($BODY)"
 ok "--lan: a JSON live write from any Host is accepted"
 
+raw PUT "/api/live/boards/1/ink-state" -H "Host: evil.example" -d 'x=1'
+[ "$STATUS" = "415" ] || fail "--lan: a form-encoded ink-state PUT must still be 415, got $STATUS"
+raw PUT "/api/live/boards/1/ink-state" -H "Host: evil.example" -H 'Content-Type: application/json' -d '{}'
+[ "$STATUS" != "415" ] && [ "$STATUS" != "403" ] ||
+  fail "--lan: a JSON ink-state PUT from any Host must reach the handler, got $STATUS"
+ok "--lan: the ink-state route skips the Host allowlist and keeps the Content-Type gate"
+
 # The agent-gated routes do NOT follow the Host allowlist off: under --lan a
 # DNS-name Host is still refused while the IP-literal Host a real LAN browser
 # sends is served — the pairing that must not drift apart.
@@ -4109,7 +4116,34 @@ raw POST "/api/live/boards" -d 'x=1'
 [ "$STATUS" = "415" ] || fail "POST /api/live/boards without JSON Content-Type: expected 415, got $STATUS"
 ok "POST /api/live/boards: 404 with nothing live, 201 a blank image board that joins the poll and renders, 415 without JSON"
 
+# ---- the board's saved ink: GET/PUT /api/live/boards/{id}/ink-state (mesa task 1582) ----
+api 200 GET "/api/live/boards/$BLANK_ID/ink-state"
+[ "$(jqb .state)" = "null" ] || fail "ink-state: nothing saved reads null (got $(jqb .state))"
+[ "$(jqb .updated_at)" = "null" ] || fail "ink-state: nothing saved has no stamp"
+api 200 PUT "/api/live/boards/$BLANK_ID/ink-state" \
+  '{"v":1,"strokes":[[{"x":1,"y":2},{"x":3,"y":4}]],"images":[],"dirty":false}'
+[ "$(jqb '.updated_at | type')" = "string" ] || fail "ink-state: PUT answers updated_at"
+api 200 GET "/api/live/boards/$BLANK_ID/ink-state"
+[ "$(jqb '.state.strokes[0][1].y')" = "4" ] || fail "ink-state: the saved body comes back (got $BODY)"
+api 200 PUT "/api/live/boards/$BLANK_ID/ink-state" '{"strokes":[],"images":[],"dirty":true}'
+api 200 GET "/api/live/boards/$BLANK_ID/ink-state"
+[ "$(jqb '.state.dirty')" = "true" ] && [ "$(jqb '.state.strokes | length')" = "0" ] ||
+  fail "ink-state: last write wins (got $BODY)"
+api 422 PUT "/api/live/boards/$BLANK_ID/ink-state" '[1,2]'
+[ "$(jqb .error.code)" = "validation" ] || fail "ink-state: a non-object body is validation"
+api 404 GET "/api/live/boards/999999/ink-state"
+api 404 PUT "/api/live/boards/999999/ink-state" '{}'
+raw PUT "/api/live/boards/$BLANK_ID/ink-state" -d 'x=1'
+[ "$STATUS" = "415" ] || fail "ink-state: a form-encoded PUT must be 415, got $STATUS"
+api 200 GET "/api/live/boards/$BLANK_ID/ink-state"
+[ "$(jqb '.state.dirty')" = "true" ] || fail "ink-state: the refused writes changed nothing"
+ok "GET/PUT /api/live/boards/{id}/ink-state: null until saved, round trip, last write wins, 422 non-object, 404 unknown board, 415 without JSON"
+
 # ---- GET /api/live: the derived blocked state ----
+#
+# A poll above (the blank board's) may have refreshed the cached null after
+# the first one, so the wait below is measured from the latest poll.
+BLOCKED_NULL_AT=$(date +%s)
 #
 # Read off `claude agents --json --all` by the session's job id, never
 # stored, cached for a few seconds per job. The stub now reports the job

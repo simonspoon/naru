@@ -1257,6 +1257,16 @@ const MIGRATIONS: &[&str] = &[
     // Task 1550: a project may own the notebook for every folder under its
     // `local_path` (opt-in; default off, so existing resolution is unchanged).
     "ALTER TABLE projects ADD COLUMN shared_notebook INTEGER NOT NULL DEFAULT 0;",
+    // Task 1582: the person's ink and dropped images stay on their board
+    // after a send, and survive a reload. A sibling table, one row per board:
+    // `body` is the page's own opaque JSON (strokes, images, frame) that Naru
+    // stores and hands back as received (parsed only to check it is an object), `updated_at` when it was last
+    // written. Dies with the board (`live board clear`, session delete).
+    "CREATE TABLE live_board_ink (
+        board_id   INTEGER PRIMARY KEY REFERENCES live_boards(id) ON DELETE CASCADE,
+        body       TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );",
 ];
 
 /// Selects full task rows including the derived `blocked` flag.
@@ -1559,6 +1569,10 @@ pub const LIVE_AUDIO_MAX: usize = 25 * 1024 * 1024;
 /// real panel; the cap is there so a runaway canvas is refused rather than
 /// written to disk, not to judge a display.
 pub const LIVE_INK_MAX: usize = 8 * 1024 * 1024;
+
+/// The most a board's saved ink state (mesa task 1582) may be, serialized:
+/// strokes plus images as data URLs. Over it is `validation`.
+pub const LIVE_BOARD_INK_STATE_MAX: usize = 32 * 1024 * 1024;
 
 /// The eight bytes every PNG file starts with — the one check that the ink a
 /// page posted is the image the turn will claim it is.
@@ -7745,6 +7759,79 @@ impl Store {
             [session_id],
         )?;
         Ok(destroyed)
+    }
+
+    /// A board's saved ink state (mesa task 1582): the page's own JSON object
+    /// and when it was written, or `None` when nothing was ever saved (or it
+    /// was cleared). An unknown board is `not_found`.
+    pub fn live_board_ink_state(
+        &self,
+        board_id: i64,
+    ) -> Result<Option<(serde_json::Value, String)>> {
+        self.require_live_board(board_id)?;
+        let row: Option<(String, String)> = self
+            .conn
+            .query_row(
+                "SELECT body, updated_at FROM live_board_ink WHERE board_id = ?1",
+                [board_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        match row {
+            None => Ok(None),
+            Some((body, at)) => {
+                let value = serde_json::from_str(&body)
+                    .map_err(|e| Error::Validation(format!("stored ink state is not JSON: {e}")))?;
+                Ok(Some((value, at)))
+            }
+        }
+    }
+
+    /// Replaces a board's saved ink state, last write wins. `body` must be a
+    /// JSON object of at most [`LIVE_BOARD_INK_STATE_MAX`] serialized bytes,
+    /// else `validation` with nothing written; the content is the page's and
+    /// is not interpreted (it is parsed only to check it is an object). An unknown board is `not_found`. Returns the stamp.
+    pub fn set_live_board_ink_state(
+        &mut self,
+        board_id: i64,
+        body: &serde_json::Value,
+    ) -> Result<String> {
+        self.require_live_board(board_id)?;
+        if !body.is_object() {
+            return Err(Error::Validation(
+                "the ink state must be a JSON object".into(),
+            ));
+        }
+        let text = body.to_string();
+        if text.len() > LIVE_BOARD_INK_STATE_MAX {
+            return Err(Error::Validation(format!(
+                "the ink state must be at most {LIVE_BOARD_INK_STATE_MAX} bytes"
+            )));
+        }
+        let at: String = self.conn.query_row(
+            "INSERT INTO live_board_ink (board_id, body, updated_at) \
+             VALUES (?1, ?2, datetime('now')) \
+             ON CONFLICT(board_id) DO UPDATE SET body = excluded.body, \
+                 updated_at = excluded.updated_at \
+             RETURNING updated_at",
+            rusqlite::params![board_id, text],
+            |r| r.get(0),
+        )?;
+        Ok(at)
+    }
+
+    fn require_live_board(&self, board_id: i64) -> Result<()> {
+        let found: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT id FROM live_boards WHERE id = ?1",
+                [board_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        found
+            .map(|_| ())
+            .ok_or_else(|| Error::NotFound(format!("live board {board_id} not found")))
     }
 
     /// One board's ink, oldest first: every `live_turns` row that carried an
@@ -15180,15 +15267,15 @@ mod tests {
         );
         assert_eq!(
             MIGRATIONS.len(),
-            81,
-            "a fresh db should report user_version 81"
+            82,
+            "a fresh db should report user_version 82"
         );
         let (store, _dir) = temp_store();
         let version: i64 = store
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 81);
+        assert_eq!(version, 82);
     }
 
     /// Pins the project-notebook columns (mesa task 1333) at index 72
@@ -16439,6 +16526,62 @@ mod tests {
             store.add_live_board(9999, LiveBoardKind::Markdown, None, "x", None),
             Err(Error::Validation(_))
         ));
+    }
+
+    /// A board's saved ink (mesa task 1582): none until written, last write
+    /// wins, an unknown board is `not_found`, a non-object or over-cap body is
+    /// `validation` leaving the old state, and it dies with the board.
+    #[test]
+    fn live_board_ink_state_round_trips_and_cascades_with_the_board() {
+        let (mut store, _dir) = temp_store();
+        let session = store.start_live_session(None).unwrap();
+        let board = store.add_blank_live_board(session.id).unwrap();
+
+        assert!(store.live_board_ink_state(board.id).unwrap().is_none());
+        assert!(matches!(
+            store.live_board_ink_state(9999),
+            Err(Error::NotFound(_))
+        ));
+        assert!(matches!(
+            store.set_live_board_ink_state(9999, &serde_json::json!({})),
+            Err(Error::NotFound(_))
+        ));
+
+        store
+            .set_live_board_ink_state(
+                board.id,
+                &serde_json::json!({"strokes": [[{"x": 1, "y": 2}]]}),
+            )
+            .unwrap();
+        store
+            .set_live_board_ink_state(board.id, &serde_json::json!({"strokes": []}))
+            .unwrap();
+        let (body, at) = store.live_board_ink_state(board.id).unwrap().unwrap();
+        assert_eq!(body, serde_json::json!({"strokes": []}), "last write wins");
+        assert!(!at.is_empty());
+
+        assert!(matches!(
+            store.set_live_board_ink_state(board.id, &serde_json::json!([1])),
+            Err(Error::Validation(_))
+        ));
+        let big = serde_json::json!({"pad": "x".repeat(LIVE_BOARD_INK_STATE_MAX)});
+        assert!(matches!(
+            store.set_live_board_ink_state(board.id, &big),
+            Err(Error::Validation(_))
+        ));
+        let (body, _) = store.live_board_ink_state(board.id).unwrap().unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({"strokes": []}),
+            "refusals write nothing"
+        );
+
+        store.clear_live_boards(session.id).unwrap();
+        let rows: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM live_board_ink", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 0, "cascade with the board");
     }
 
     #[test]

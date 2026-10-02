@@ -1046,6 +1046,20 @@ export function sendLiveUtterance(
   return request('/api/live/utterance', jsonInit('POST', body))
 }
 
+/** A board's saved ink (mesa task 1582): the page's own JSON, or `null` when
+ *  nothing was saved. */
+export function getLiveBoardInkState(boardId: number): Promise<{ state: unknown }> {
+  return request(`/api/live/boards/${boardId}/ink-state`)
+}
+
+/** Replaces a board's saved ink, last write wins (mesa task 1582). */
+export function putLiveBoardInkState(
+  boardId: number,
+  state: Record<string, unknown>,
+): Promise<{ updated_at: string }> {
+  return request(`/api/live/boards/${boardId}/ink-state`, jsonInit('PUT', state))
+}
+
 /**
  * mesa's own report about the agent — blocked on a permission prompt, or
  * silent too long (mesa task 1157, `liveWatchdog.ts`) — recorded by the server

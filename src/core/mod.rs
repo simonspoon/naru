@@ -34,11 +34,11 @@ pub mod version;
 
 pub use store::{
     ArtifactPatch, DiagramPatch, EdgeNew, EdgePatch, Error, FrameNew, FramePatch,
-    INBOX_ARCHIVE_REASON_MAX, ImportDoc, LIVE_AUDIO_MAX, LIVE_BOARD_BODY_MAX, LIVE_BOARD_KEEP,
-    LIVE_INK_MAX, LIVE_RESULT_MAX, LIVE_TEXT_MAX, LIVE_TURNS_MAX, LibraryBuiltinAction,
-    LibraryPatch, NextResult, ProjectPatch, ReceiptPatch, Result, SCRIPT_RUN_ABANDONED,
-    SCRIPT_RUN_KEEP, STALE_CLAIM_MINUTES, ScriptPatch, Store, TaskPatch, default_db_path,
-    validate_live_client,
+    INBOX_ARCHIVE_REASON_MAX, ImportDoc, LIVE_AUDIO_MAX, LIVE_BOARD_BODY_MAX,
+    LIVE_BOARD_INK_STATE_MAX, LIVE_BOARD_KEEP, LIVE_INK_MAX, LIVE_RESULT_MAX, LIVE_TEXT_MAX,
+    LIVE_TURNS_MAX, LibraryBuiltinAction, LibraryPatch, NextResult, ProjectPatch, ReceiptPatch,
+    Result, SCRIPT_RUN_ABANDONED, SCRIPT_RUN_KEEP, STALE_CLAIM_MINUTES, ScriptPatch, Store,
+    TaskPatch, default_db_path, validate_live_client,
 };
 pub use types::{
     ARTIFACT_CONTENT_TYPES, AgentSession, AgentSpawned, AnchorSide, ArchiveOutcome, Artifact,

@@ -1611,11 +1611,15 @@ baseline poll counts as new.
 The board's tool cluster carries a **pen** toggle. With it on, a drag draws on a canvas
 laid exactly over the board, with **undo** and **clear** beside it; with it off
 the canvas takes no pointer at all, so the board scrolls and an HTML mockup
-takes clicks exactly as before. The ink is the person's and **local**: held
+takes clicks exactly as before. The ink is the person's: held
 in the page per board id (`frontend/src/liveInk.ts`), never on a newly pushed
-board, and seen by the agent only when the person next sends a turn.
+board, and seen by the agent only when the person next sends a turn. It
+**stays on the board** after a send — editable (more strokes, undo, move,
+resize, remove), kept when stepping through the history, and saved
+server-side per board (below) so a reload brings it back; **Clear** is the
+only way to wipe it (mesa task 1582).
 
-- **The first unsent stroke freezes the layout.** Strokes are pixels over
+- **The first unsent change freezes the layout.** Strokes are pixels over
   content, so nothing may move the content under them: no resize handle, no
   maximise or restore, no Escape, no stepping between boards, no closing the
   panel, and no scroll — the content box's px width and height are pinned
@@ -1626,19 +1630,25 @@ board, and seen by the agent only when the person next sends a turn.
   *before* drawing. A board pushed meanwhile does **not** take the panel away
   (`heldBoardView`); the moment the freeze lifts the ordinary "newest board is
   showing" rule shows it. The freeze lifts when the turn carrying the ink is
-  sent, or when the ink is cleared.
-- **New ink rides on the next user turn.** "New" is a dirty flag: set while
-  anything is drawn, since every stroke left on a board is unsent; cleared when
-  a turn carrying it posts successfully (a failed post keeps it), by undoing
-  the last stroke, and by clearing. With no new ink a turn carries no image. A typed turn carries it;
+  sent, or when the ink is cleared; the ink itself stays.
+- **New ink rides on the next user turn.** "New" is a `dirty` flag on the
+  board's ink (`BoardInk.dirty`): set by any change — a stroke, an image added,
+  moved, resized or removed, an undo, even of a stroke an earlier turn
+  carried; cleared when a turn carrying the board posts successfully (a failed
+  post keeps it) — unless the person changed the board while the turn was on
+  its way, judged by identity of the carried strokes and images — and by
+  clearing, or by an edit that leaves the board empty (a blank board has
+  nothing to send, so clearing a sent board sends nothing until the person
+  draws again). With no new ink a turn carries no image. A typed turn carries it;
   a spoken recording flushed as several turns puts it on the **last** of them
   (`inkCarrier`), and the mid-recording posts the 8 KiB cap forces carry none.
   Every post runs through one queue, and reads the ink inside it, so two posts
   in quick succession can never both carry the same ink, and one with no ink
-  cannot overtake one still flattening. **A successful send takes the strokes
-  it carried off the board** — the PNG on the turn is their record, and once
-  the layout unlocks nothing would keep them over what they marked — leaving
-  only strokes drawn after the send's snapshot, still new and still frozen.
+  cannot overtake one still flattening. **A successful send keeps the strokes and images
+  on the board** and only clears the unsent mark and the freeze; the next turn
+  after more drawing flattens the **whole** board again, so each PNG is the
+  cumulative snapshot. (Once the layout unfreezes, content that reflows can
+  drift from old strokes; the freeze only guards unsent ink.)
   A flatten that fails, or a PNG still past the cap at 1×, sends the words
   alone and says so in the panel; the ink stays new for the next turn.
 - **Flattening is the page's**, on an offscreen canvas at the frozen size ×
@@ -1717,13 +1727,41 @@ opens the pen.
 Pictures **dropped** on the stage (a file drag) or **pasted** into it (⌘V with
 the board focused, which New board arranges; `imageFilesFromClipboard`) join
 the board's ink as `InkImage`s (`liveBoardImages.ts`: placement, move, resize
-arithmetic) held per board id beside the strokes, with no server storage. They
-freeze the layout and count as new ink like a stroke, are flattened **under**
-the strokes into the same PNG, and ride the next turn as `image_path`/
-`board_id`; a send drops them with the strokes it carried. They sit under the
+arithmetic) held per board id beside the strokes, as data URLs (so they can be saved).
+They freeze the layout and count as new ink like a stroke, are flattened
+**under** the strokes into the same PNG, and ride the next turn as
+`image_path`/`board_id`; a send keeps them on the board. They sit under the
 ink canvas, so they are moved (drag), resized (corner handle, aspect kept) and
 removed (×) with the pen up — a drop puts the pen up. Undo takes back strokes
 only; Clear wipes both.
+
+### Saved ink state (mesa task 1582)
+
+A board's ink also lives on the server, so it survives a reload and another
+client (the iOS app) could read it. Migration index **81** adds
+`live_board_ink(board_id PK -> live_boards ON DELETE CASCADE, body, updated_at)`:
+`body` is the page's own JSON object (`liveInk.ts::serializeInk` — strokes,
+images with their data-URL `src`, and `dirty`, never the frame), stored and
+handed back as received (the server parses it only to check it is an
+object), capped at `LIVE_BOARD_INK_STATE_MAX` (32 MiB serialized;
+over it, or a non-object, is `validation`). Two routes, ordinary live writes
+(the Content-Type gate applies in both serve modes, no per-route gate):
+
+- `GET /api/live/boards/{id}/ink-state` answers `{state, updated_at}` — both
+  `null` for a board with nothing saved; 404 only for an unknown board.
+- `PUT /api/live/boards/{id}/ink-state` replaces the body (last write wins)
+  and answers `{updated_at}`; 404 for an unknown board.
+
+The hub restores a board's state the first time the panel shows it, merging
+the saved strokes and images *under* anything drawn while the answer was on
+its way (a failed restore is retried once, then given up — that board's saved
+ink is lost to the next save); a board is never saved before its restore has
+settled. An unsent restore adopts the layout it is shown in as its frozen
+frame, so strokes drawn at another window size can land misplaced. Each
+changed board is saved 500 ms after the change, one request at a time per
+board (each sending the latest state when it runs; a failure re-arms the
+save), and at once when the tab is hidden or the page is closed (`pagehide`). The state goes with the board
+(`live board clear`, session delete).
 
 ### Pasted images (mesa task 1475)
 

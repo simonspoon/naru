@@ -16,6 +16,8 @@ import {
   listProjects,
   liveSpeakUrl,
   liveTurnInkUrl,
+  getLiveBoardInkState,
+  putLiveBoardInkState,
   markLiveTurnPlayed,
   reportLiveRoute,
   sendLiveNotice,
@@ -44,12 +46,16 @@ import { agentsLabel, openAgents, sectionFor, viewLine } from '../liveView'
 import { mayHold, SegmentChain } from '../liveDrain'
 import { DiscardLedger, liveCancelVerdict } from '../liveCancel'
 import {
+  deserializeInk,
   emptyInkBook,
+  hydrateInk,
   frozenBoard,
   inkCarrier,
   markInkSent,
   pendingInk,
   pruneInk,
+  serializeInk,
+  type BoardInk,
   type InkBook,
 } from '../liveInk'
 import { isPausePhrase } from '../livePausePhrase'
@@ -1400,6 +1406,102 @@ export function LiveHub({
     inkRef.current = next
     setInk(next)
   }, [])
+  // The board's ink lives on the server too (mesa task 1582), so it outlives a
+  // send and a reload. Restored the first time a board is shown — merged under
+  // anything drawn meanwhile — and saved (debounced) whenever a board's entry
+  // in the book changes. A board is never saved before its restore has
+  // settled, or a stroke drawn first would replace the saved ink; a restore
+  // that fails twice settles anyway (that board's saved ink is then lost to
+  // the next save). Saves run one at a time per board, each sending the book
+  // as it stands when it runs, so a slow one cannot land after a later one.
+  const inkRequested = useRef(new Set<number>())
+  const inkRestored = useRef(new Set<number>())
+  const inkSaved = useRef(new Map<number, BoardInk>())
+  const inkTimers = useRef(new Map<number, ReturnType<typeof setTimeout>>())
+  const inkChains = useRef(new Map<number, Promise<void>>())
+  const scheduleInkSave = useCallback((boardId: number, delay: number, saveNow: () => void) => {
+    clearTimeout(inkTimers.current.get(boardId))
+    inkTimers.current.set(boardId, setTimeout(saveNow, delay))
+  }, [])
+  // The retry re-enters the save it is part of, through a ref.
+  const saveInkRef = useRef<(boardId: number) => void>(() => {})
+  const saveInk = useCallback(
+    (boardId: number) => {
+      clearTimeout(inkTimers.current.get(boardId))
+      inkTimers.current.delete(boardId)
+      const run = async () => {
+        const board = inkRef.current[boardId]
+        if (board === undefined) return
+        try {
+          await putLiveBoardInkState(boardId, serializeInk(board))
+        } catch {
+          // The page's copy is still the live one: try again shortly.
+          inkSaved.current.delete(boardId)
+          scheduleInkSave(boardId, 5000, () => saveInkRef.current(boardId))
+        }
+      }
+      inkChains.current.set(
+        boardId,
+        (inkChains.current.get(boardId) ?? Promise.resolve()).then(run),
+      )
+    },
+    [scheduleInkSave],
+  )
+  useEffect(() => {
+    saveInkRef.current = saveInk
+  }, [saveInk])
+  const restoreInk = useCallback(
+    (boardId: number) => {
+      if (inkRequested.current.has(boardId)) return
+      inkRequested.current.add(boardId)
+      const settle = (state: unknown) => {
+        inkRestored.current.add(boardId)
+        const saved = deserializeInk(state)
+        const local = inkRef.current[boardId]
+        const edited = local !== undefined && (local.strokes.length > 0 || local.images.length > 0)
+        if (saved !== null) updateInk((book) => hydrateInk(book, boardId, saved))
+        const board = inkRef.current[boardId]
+        if (board === undefined) return
+        inkSaved.current.set(boardId, board)
+        // Local edits made while the answer was on its way are not on the server.
+        if (edited) scheduleInkSave(boardId, 500, () => saveInk(boardId))
+      }
+      getLiveBoardInkState(boardId).then(
+        ({ state }) => settle(state),
+        () =>
+          getLiveBoardInkState(boardId).then(
+            ({ state }) => settle(state),
+            () => settle(null),
+          ),
+      )
+    },
+    [updateInk, saveInk, scheduleInkSave],
+  )
+  useEffect(() => {
+    for (const [key, board] of Object.entries(ink)) {
+      const boardId = Number(key)
+      if (!inkRestored.current.has(boardId)) continue
+      if (inkSaved.current.get(boardId) === board) continue
+      inkSaved.current.set(boardId, board)
+      scheduleInkSave(boardId, 500, () => saveInk(boardId))
+    }
+  }, [ink, saveInk, scheduleInkSave])
+  // A tab sent to the background or closed may never run its timers again:
+  // save now.
+  useEffect(() => {
+    const flush = () => {
+      for (const boardId of [...inkTimers.current.keys()]) saveInk(boardId)
+    }
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') flush()
+    }
+    document.addEventListener('visibilitychange', onVisibility)
+    window.addEventListener('pagehide', flush)
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility)
+      window.removeEventListener('pagehide', flush)
+    }
+  }, [saveInk])
   // The panel's flatten, which only it can perform — it sees the pixels.
   const flattenInk = useRef<InkFlatten | null>(null)
   // Which board the panel is showing, set by the panel for the view line.
@@ -4312,7 +4414,6 @@ export function LiveHub({
           </div>
         </div>
       )}
-
     </div>
   )
   // The whiteboard's "New board" (mesa task 1580): a blank board in this
@@ -4337,6 +4438,7 @@ export function LiveHub({
       flattenRef={flattenInk}
       showingRef={boardShowing}
       onNewBoard={live ? newBoard : undefined}
+      onShowBoard={restoreInk}
     />
   )
   const renderChatBody = () => (

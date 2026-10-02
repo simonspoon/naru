@@ -42,11 +42,11 @@ use crate::core::{
     ArtifactSummary, CcDashboard, CcLiveSession, CcScorecard, CcUsage, DiagramPatch, DiagramType,
     EdgeMarker, EdgeNew, EdgePatch, EdgeStyle, Error, FileTreeEntry, FrameNew, FramePatch,
     FrameShape, GitCommit, GitCommitFile, GitFileDiff, GitRepo, GitRepoView, GitStatus,
-    GitWorktree, InboxItem, InboxKind, LIVE_AUDIO_MAX, LIVE_BOARD_KEEP, LIVE_INK_MAX,
-    LibraryBuiltinAction, LibraryBundle, LibraryImportResult, LibraryKind, LibraryPatch,
-    LibraryScope, LiveBoardHistoryEntry, LiveBoardInkEntry, LiveBoardKind, LiveContext,
-    LiveNotebookEntry, LiveNotice, LiveState, LiveStatus, LiveTranscript, LiveWindow, ModelRates,
-    NaruVersion, NextResult, Priority, ProjectAgents, ProjectFileTree, ProjectGitLog,
+    GitWorktree, InboxItem, InboxKind, LIVE_AUDIO_MAX, LIVE_BOARD_INK_STATE_MAX, LIVE_BOARD_KEEP,
+    LIVE_INK_MAX, LibraryBuiltinAction, LibraryBundle, LibraryImportResult, LibraryKind,
+    LibraryPatch, LibraryScope, LiveBoardHistoryEntry, LiveBoardInkEntry, LiveBoardKind,
+    LiveContext, LiveNotebookEntry, LiveNotice, LiveState, LiveStatus, LiveTranscript, LiveWindow,
+    ModelRates, NaruVersion, NextResult, Priority, ProjectAgents, ProjectFileTree, ProjectGitLog,
     ProjectGitRepos, ProjectGitStatus, ProjectGitView, ProjectPatch, ProjectVersion, ReceiptPatch,
     STALE_CLAIM_MINUTES, Script, ScriptArg, ScriptPatch, ScriptRunEvent, Status, Store, SystemInfo,
     Task, TaskPatch, TaskSummary, Waypoint, agents, attachments, audio, board, config, files, git,
@@ -2346,6 +2346,19 @@ fn router(state: AppState) -> Router {
         // A blank board the person starts from the whiteboard (mesa task
         // 1580): an ordinary write like the utterance, fixed content.
         .route("/api/live/boards", post(live_blank_board))
+        // The person's ink on one board, kept server-side (mesa task 1582) so
+        // it outlives a send and a reload: the page's own JSON, stored and
+        // handed back as received (parsed only to check it is an object). Ordinary live writes like the utterance; the
+        // body limit sits above the state cap so an over-cap save is the
+        // standard JSON `validation`, not a bare 413.
+        .route(
+            "/api/live/boards/{id}/ink-state",
+            get(get_live_board_ink_state)
+                .put(put_live_board_ink_state)
+                .layer(DefaultBodyLimit::max(
+                    LIVE_BOARD_INK_STATE_MAX + 1024 * 1024,
+                )),
+        )
         .route("/api/live/route", post(live_route))
         // Claiming the voice (mesa task 1267): which browser says this
         // conversation's turns out loud. Its own route rather than a flag on
@@ -4852,6 +4865,36 @@ async fn live_blank_board(State(state): State<AppState>) -> ApiResult<Response> 
     };
     let board = store.add_blank_live_board(session.id)?;
     Ok((StatusCode::CREATED, Json(board)).into_response())
+}
+
+/// `GET /api/live/boards/{id}/ink-state` — the board's saved ink (mesa task
+/// 1582): `{"state": <object>|null, "updated_at": <text>|null}`. A board with
+/// nothing saved is 200 with nulls; only an unknown board is 404.
+async fn get_live_board_ink_state(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> ApiResult<Response> {
+    let store = state.store.lock().unwrap();
+    let saved = store.live_board_ink_state(id)?;
+    let (body, at) = match saved {
+        Some((body, at)) => (Some(body), Some(at)),
+        None => (None, None),
+    };
+    Ok(Json(serde_json::json!({ "state": body, "updated_at": at })).into_response())
+}
+
+/// `PUT /api/live/boards/{id}/ink-state` — replaces the board's saved ink with
+/// the request body, which must be a JSON object (mesa task 1582). Last write
+/// wins. Answers `{"updated_at"}`. A `{}` body is how the page records "cleared".
+async fn put_live_board_ink_state(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    body: Result<Json<serde_json::Value>, JsonRejection>,
+) -> ApiResult<Response> {
+    let Json(body) = body?;
+    let mut store = state.store.lock().unwrap();
+    let at = store.set_live_board_ink_state(id, &body)?;
+    Ok(Json(serde_json::json!({ "updated_at": at })).into_response())
 }
 
 /// The page reporting where the user's browser is **and what is open on it**,
@@ -17468,6 +17511,48 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         assert_eq!(res.status(), StatusCode::CREATED);
         let store = state.store.lock().unwrap();
         assert_eq!(store.list_live_boards(session.id, 20).unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn live_board_ink_state_handlers_round_trip_and_404_an_unknown_board() {
+        let (_dir, state) = test_state();
+        let board_id = {
+            let mut store = state.store.lock().unwrap();
+            let session = store.start_live_session(None).unwrap();
+            store.add_blank_live_board(session.id).unwrap().id
+        };
+        let none = get_live_board_ink_state(State(state.clone()), Path(board_id))
+            .await
+            .unwrap();
+        assert_eq!(none.status(), StatusCode::OK);
+        put_live_board_ink_state(
+            State(state.clone()),
+            Path(board_id),
+            Ok(Json(serde_json::json!({"strokes": []}))),
+        )
+        .await
+        .unwrap();
+        assert!(
+            state
+                .store
+                .lock()
+                .unwrap()
+                .live_board_ink_state(board_id)
+                .unwrap()
+                .is_some()
+        );
+        let err = get_live_board_ink_state(State(state.clone()), Path(9999))
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, StatusCode::NOT_FOUND);
+        let err = put_live_board_ink_state(
+            State(state.clone()),
+            Path(board_id),
+            Ok(Json(serde_json::json!([]))),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     /// A turn may carry a pasted image (mesa task 1475) with no text, and

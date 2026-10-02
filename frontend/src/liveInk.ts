@@ -10,7 +10,9 @@ import type { LiveBoardSummary } from './types/LiveBoardSummary'
  *
  * Ink is **the person's, and local** until they speak: strokes are held per
  * board id in this browser, and the agent sees them only as a PNG riding on
- * the next user turn this page sends. So the questions that have historically
+ * the next user turn this page sends. Since mesa task 1582 they stay on the
+ * board after a send (the unsent mark is `dirty`) and are saved server-side
+ * per board so a reload brings them back. So the questions that have historically
  * shipped wrong are all here — whether there is ink the agent has not seen
  * yet, whether the layout is frozen for it, which turn of a flush carries it,
  * and whether a newly pushed board may take the panel away from it.
@@ -43,16 +45,21 @@ export interface InkFrame {
 
 /** One board's ink. */
 export interface BoardInk {
-  /** What is drawn and not yet sent, oldest first. A successful send drops
-   *  the strokes it carried: the PNG the server wrote is their record, and
-   *  once the layout unlocks nothing would keep them over what they marked. */
+  /** Everything drawn on the board, oldest first. A send does **not** take
+   *  strokes off the board (mesa task 1582): they stay, editable, and the
+   *  next turn carries the whole board again, cumulatively. */
   strokes: readonly InkStroke[]
   /** Pictures dropped or pasted onto the board (mesa task 1580), oldest
-   *  first — ink like a stroke, flattened under the strokes and dropped by a
-   *  send the same way. */
+   *  first — kept and edited like the strokes. */
   images: readonly InkImage[]
-  /** The frozen layout — present exactly while there is anything drawn or
-   *  placed. */
+  /** Whether anything changed since the last turn that carried this board —
+   *  the unsent mark. A stroke, an image added, moved, resized or removed, an
+   *  undo: all set it. A successful send clears it (`markInkSent`) unless the
+   *  person changed the board while the turn was on its way. Clearing the
+   *  board clears it too: a board with nothing on it has nothing to send. */
+  dirty: boolean
+  /** The frozen layout — present exactly while the board is `dirty` (a board
+   *  restored from the server adopts its frame on first sight, `adoptFrame`). */
   frame: InkFrame | null
 }
 
@@ -65,7 +72,7 @@ export function emptyInkBook(): InkBook {
   return {}
 }
 
-const BLANK: BoardInk = { strokes: [], images: [], frame: null }
+const BLANK: BoardInk = { strokes: [], images: [], dirty: false, frame: null }
 
 /** One board's ink, or none. */
 export function boardInk(book: InkBook, boardId: number): BoardInk {
@@ -73,14 +80,12 @@ export function boardInk(book: InkBook, boardId: number): BoardInk {
 }
 
 /**
- * Whether a board carries ink the agent has not seen — the dirty flag.
- *
- * Every stroke and image on the board is unsent, since a send drops what it
- * carried; so this is simply "is anything drawn or placed". Undoing every stroke, or clearing,
- * is clean again rather than a turn carrying a picture of nothing new.
+ * Whether a board carries ink the agent has not seen — the dirty flag. Ink
+ * stays on the board after a send, so "anything drawn" is no longer the
+ * question: it is "anything drawn that changed since the last carrying turn".
  */
 export function inkIsNew(ink: BoardInk): boolean {
-  return ink.strokes.length > 0 || ink.images.length > 0
+  return ink.dirty && (ink.strokes.length > 0 || ink.images.length > 0)
 }
 
 function withBoard(book: InkBook, boardId: number, ink: BoardInk): InkBook {
@@ -88,10 +93,31 @@ function withBoard(book: InkBook, boardId: number, ink: BoardInk): InkBook {
 }
 
 /**
- * A stroke drawn. The **first** new stroke freezes the layout at `frame`, the
- * content box as it stood when the pen went down; later ones keep that frame,
- * since the whole point of a frozen layout is that it does not move under
- * the ink. A stroke with no points is a tap that drew nothing.
+ * The board after an edit: `strokes`/`images` replace the old ones, the board
+ * is unsent, and the layout is frozen at `frame` unless it already was (later
+ * edits keep the first frame — the content must not move under the ink). An
+ * edit that leaves nothing on the board makes it clean and unfrozen.
+ */
+function edited(
+  ink: BoardInk,
+  strokes: readonly InkStroke[],
+  images: readonly InkImage[],
+  frame: InkFrame,
+): BoardInk {
+  if (strokes.length === 0 && images.length === 0) return BLANK
+  return {
+    strokes,
+    images,
+    dirty: true,
+    frame: ink.dirty ? (ink.frame ?? frame) : frame,
+  }
+}
+
+/**
+ * A stroke drawn. The **first** unsent change freezes the layout at `frame`,
+ * the content box as it stood when the pen went down; later ones keep that
+ * frame, since the whole point of a frozen layout is that it does not move
+ * under the ink. A stroke with no points is a tap that drew nothing.
  */
 export function addStroke(
   book: InkBook,
@@ -101,11 +127,7 @@ export function addStroke(
 ): InkBook {
   if (stroke.length === 0) return book
   const ink = boardInk(book, boardId)
-  return withBoard(book, boardId, {
-    ...ink,
-    strokes: [...ink.strokes, stroke],
-    frame: ink.frame ?? frame,
-  })
+  return withBoard(book, boardId, edited(ink, [...ink.strokes, stroke], ink.images, frame))
 }
 
 /** A picture dropped or pasted on. Freezes the layout like the first stroke:
@@ -117,61 +139,58 @@ export function addImage(
   frame: InkFrame,
 ): InkBook {
   const ink = boardInk(book, boardId)
-  return withBoard(book, boardId, {
-    ...ink,
-    images: [...ink.images, image],
-    frame: ink.frame ?? frame,
-  })
+  return withBoard(book, boardId, edited(ink, ink.strokes, [...ink.images, image], frame))
 }
 
 /** A placed picture replaced by its moved or resized self, by id. */
-export function updateImage(book: InkBook, boardId: number, image: InkImage): InkBook {
+export function updateImage(
+  book: InkBook,
+  boardId: number,
+  image: InkImage,
+  frame: InkFrame,
+): InkBook {
   const ink = boardInk(book, boardId)
   if (!ink.images.some((it) => it.id === image.id)) return book
-  return withBoard(book, boardId, {
-    ...ink,
-    images: ink.images.map((it) => (it.id === image.id ? image : it)),
-  })
+  const images = ink.images.map((it) => (it.id === image.id ? image : it))
+  return withBoard(book, boardId, edited(ink, ink.strokes, images, frame))
 }
 
-/** A placed picture taken off the board. Unfreezes when nothing is left. */
-export function removeImage(book: InkBook, boardId: number, imageId: number): InkBook {
+/** A placed picture taken off the board. */
+export function removeImage(
+  book: InkBook,
+  boardId: number,
+  imageId: number,
+  frame: InkFrame,
+): InkBook {
   const ink = boardInk(book, boardId)
   const images = ink.images.filter((it) => it.id !== imageId)
   if (images.length === ink.images.length) return book
-  return withBoard(book, boardId, {
-    ...ink,
-    images,
-    frame: ink.strokes.length > 0 || images.length > 0 ? ink.frame : null,
-  })
+  return withBoard(book, boardId, edited(ink, ink.strokes, images, frame))
 }
 
-/** The newest stroke taken back. Unfreezes when that leaves nothing drawn or
- *  placed. */
-export function undoStroke(book: InkBook, boardId: number): InkBook {
+/** The newest stroke taken back — even one a turn already carried; the next
+ *  turn then carries the board without it. */
+export function undoStroke(book: InkBook, boardId: number, frame: InkFrame): InkBook {
   const ink = boardInk(book, boardId)
   if (ink.strokes.length === 0) return book
-  const strokes = ink.strokes.slice(0, -1)
-  return withBoard(book, boardId, {
-    ...ink,
-    strokes,
-    frame: strokes.length > 0 || ink.images.length > 0 ? ink.frame : null,
-  })
+  return withBoard(book, boardId, edited(ink, ink.strokes.slice(0, -1), ink.images, frame))
 }
 
-/** Every stroke and image on a board wiped — and the layout unfrozen, with nothing new
- *  to send. */
+/** Every stroke and image on a board wiped — the one way to empty it. The
+ *  layout unfreezes and nothing is unsent: the board is blank, so no turn
+ *  carries it until the person draws again. */
 export function clearInk(book: InkBook, boardId: number): InkBook {
   if (!(boardId in book)) return book
   return withBoard(book, boardId, BLANK)
 }
 
 /**
- * A turn carrying `strokes` and `images` was sent. Those leave the board —
- * the PNG on the turn is their record — so the board is clean and unfrozen,
- * unless the person drew or placed more while the turn was on its way: the
- * later ones are still new, and the layout stays where they were drawn. An
- * image moved or resized meanwhile is a new object and so stays too.
+ * A turn carrying `strokes` and `images` was sent. The board stays as it is;
+ * only the unsent mark goes, and the layout unfreezes — unless the person
+ * changed the board while the turn was on its way (a stroke or image added,
+ * removed, moved or resized, an undo), in which case that change is still
+ * unsent and the layout stays where it froze. "Changed" is by identity: the
+ * carried arrays' members must be exactly the board's now.
  */
 export function markInkSent(
   book: InkBook,
@@ -180,17 +199,84 @@ export function markInkSent(
   images: readonly InkImage[] = [],
 ): InkBook {
   const ink = boardInk(book, boardId)
-  // Cleared while the turn was on its way: clearing already unfroze the
-  // layout, and a late answer has nothing left to take away.
-  if (ink.frame === null) return book
-  const sent = new Set(strokes)
-  const left = ink.strokes.filter((stroke) => !sent.has(stroke))
-  const sentImages = new Set(images)
-  const imagesLeft = ink.images.filter((image) => !sentImages.has(image))
+  if (!ink.dirty) return book
+  const same =
+    ink.strokes.length === strokes.length &&
+    ink.images.length === images.length &&
+    ink.strokes.every((stroke, i) => stroke === strokes[i]) &&
+    ink.images.every((image, i) => image === images[i])
+  if (!same) return book
+  return withBoard(book, boardId, { ...ink, dirty: false, frame: null })
+}
+
+/** An unsent board that has no frame yet — restored from the server — takes
+ *  the layout as it stands now. */
+export function adoptFrame(book: InkBook, boardId: number, frame: InkFrame): InkBook {
+  const ink = boardInk(book, boardId)
+  if (!inkIsNew(ink) || ink.frame !== null) return book
+  return withBoard(book, boardId, { ...ink, frame })
+}
+
+/** What the server keeps for a board (`PUT /api/live/boards/{id}/ink-state`):
+ *  a JSON object only this page reads. */
+export function serializeInk(ink: BoardInk): Record<string, unknown> {
+  return { v: 1, strokes: ink.strokes, images: ink.images, dirty: ink.dirty }
+}
+
+function isPoint(p: unknown): p is InkPoint {
+  if (typeof p !== 'object' || p === null) return false
+  const q = p as Record<string, unknown>
+  return typeof q.x === 'number' && typeof q.y === 'number'
+}
+
+function isImage(i: unknown): i is InkImage {
+  if (typeof i !== 'object' || i === null) return false
+  const q = i as Record<string, unknown>
+  return (
+    typeof q.id === 'number' &&
+    typeof q.src === 'string' &&
+    q.src.startsWith('data:image/') &&
+    typeof q.x === 'number' &&
+    typeof q.y === 'number' &&
+    typeof q.width === 'number' &&
+    typeof q.height === 'number'
+  )
+}
+
+/** A saved board's ink, or `null` for anything that is not one (an empty
+ *  object, a shape this page did not write). Tolerant by design: a bad saved
+ *  state costs the board its ink, never the page. The restored board has no
+ *  frame; `adoptFrame` gives an unsent one the layout it is shown in — so
+ *  restored unsent ink is read against the current layout's frame, and strokes
+ *  drawn at another window size can land misplaced. */
+export function deserializeInk(raw: unknown): BoardInk | null {
+  if (typeof raw !== 'object' || raw === null) return null
+  const o = raw as Record<string, unknown>
+  if (!Array.isArray(o.strokes) || !Array.isArray(o.images)) return null
+  const strokes = o.strokes.filter(
+    (s): s is InkStroke => Array.isArray(s) && s.length > 0 && s.every(isPoint),
+  )
+  const images = o.images.filter(isImage)
+  if (strokes.length === 0 && images.length === 0) return null
+  return { strokes, images, dirty: o.dirty === true, frame: null }
+}
+
+/** A board's saved ink joined to the book. Where the page holds nothing for
+ *  the board the saved ink simply joins; where it holds edits made while the
+ *  answer was on its way, the saved strokes and images come first and the
+ *  local ones after (an image id the page already holds wins), and the board
+ *  is unsent if either side was. A blank local entry counts as nothing. */
+export function hydrateInk(book: InkBook, boardId: number, saved: BoardInk): InkBook {
+  const local = book[boardId]
+  if (local === undefined || (local.strokes.length === 0 && local.images.length === 0)) {
+    return withBoard(book, boardId, saved)
+  }
+  const localIds = new Set(local.images.map((i) => i.id))
   return withBoard(book, boardId, {
-    strokes: left,
-    images: imagesLeft,
-    frame: left.length > 0 || imagesLeft.length > 0 ? ink.frame : null,
+    strokes: [...saved.strokes, ...local.strokes],
+    images: [...saved.images.filter((i) => !localIds.has(i.id)), ...local.images],
+    dirty: local.dirty || saved.dirty,
+    frame: local.dirty ? local.frame : null,
   })
 }
 

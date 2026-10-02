@@ -34,6 +34,7 @@ import {
   addImage,
   addStroke,
   base64Bytes,
+  adoptFrame,
   boardInk,
   clearInk,
   framePoint,
@@ -41,6 +42,7 @@ import {
   heldBoardView,
   inkBackground,
   inkCaption,
+  inkIsNew,
   removeImage,
   undoStroke,
   updateImage,
@@ -567,6 +569,7 @@ export function LiveBoardPanel({
   flattenRef,
   showingRef,
   onNewBoard,
+  onShowBoard,
 }: {
   /** The conversation's whole board history, oldest first and bodiless — the
    *  `boards` array of the poll `LiveHub` already makes, never a second one. */
@@ -592,6 +595,8 @@ export function LiveBoardPanel({
    *  `null` on failure (the hub reports it). Absent when no conversation is
    *  live, which hides the button (mesa task 1580). */
   onNewBoard?: () => Promise<number | null>
+  /** A board came on screen: the hub restores its saved ink (mesa task 1582). */
+  onShowBoard?: (boardId: number) => void
 }) {
   // The board the layout is frozen for, while it carries unsent ink (mesa
   // task 1353): a new push does not take the panel away from it
@@ -765,6 +770,21 @@ export function LiveBoardPanel({
     redraw()
   }, [redraw, box])
 
+  // Ink restored from the server that was still unsent has no frame yet
+  // (mesa task 1582): it freezes the layout as it stands now.
+  const needsFrame = showingInk !== null && inkIsNew(showingInk) && showingInk.frame === null
+  const showingId = showing?.id ?? null
+  useLayoutEffect(() => {
+    if (!needsFrame || showingId === null) return
+    const at = currentFrame()
+    if (at !== null) onInk((book) => adoptFrame(book, showingId, at))
+  }, [needsFrame, showingId, currentFrame, onInk])
+
+  // The hub restores a board's saved ink the first time it is shown.
+  useEffect(() => {
+    if (showingId !== null) onShowBoard?.(showingId)
+  }, [showingId, onShowBoard])
+
   function pointAt(e: ReactPointerEvent<HTMLCanvasElement>): InkPoint | null {
     const content = contentRef.current
     if (content === null) return null
@@ -812,13 +832,17 @@ export function LiveBoardPanel({
   function changeImage(next: InkImage) {
     if (showing === null) return
     const id = showing.id
-    onInk((book) => updateImage(book, id, next))
+    const at = currentFrame()
+    if (at === null) return
+    onInk((book) => updateImage(book, id, next, at))
   }
 
   function removeImageById(imageId: number) {
     if (showing === null) return
     const id = showing.id
-    onInk((book) => removeImage(book, id, imageId))
+    const at = currentFrame()
+    if (at === null) return
+    onInk((book) => removeImage(book, id, imageId, at))
   }
 
   async function newBoard() {
@@ -867,7 +891,9 @@ export function LiveBoardPanel({
   function undo() {
     if (showing === null) return
     const id = showing.id
-    onInk((book) => undoStroke(book, id))
+    const at = currentFrame()
+    if (at === null) return
+    onInk((book) => undoStroke(book, id, at))
   }
 
   function clear() {
