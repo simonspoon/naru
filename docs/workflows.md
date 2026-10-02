@@ -63,33 +63,44 @@ Stored config is the validated, normalized form.
 | `branch` | `{"op": "contains"\|"regex"\|"score_above"\|"score_below"\|"equals", "value": "…" (a number for `score_*`)}` | evaluates its input to a verdict; output is its input, unchanged |
 | `output` | `{"target": "log", "log": "<name>" (default `default`)}`, `{"target": "task", "project": "<id\|name>"}`, `{"target": "inbox", "task_id": N, "kind": "task-summary"\|"change-request" (default task-summary)}`, `{"target": "board", "title": "…"}` | delivers its input; output is a short receipt. A key that does not apply to the target is refused |
 
-**`prompt`.** One blocking HTTP request to a model API (`core::llm`) — **never
-a Claude Code process**: no agent is spawned, there is no config template, and
-no tool is ever offered. The prompt (the node's text, a blank line, then the
-node's input; just the text when the input is empty) goes in as **one user
-message**, and the answer is the model's text, trimmed. `thinking` is **off by
-default**.
+**`prompt`.** One model call (`core::llm`) — **never print mode (`-p`), and no API
+key anywhere**. The prompt (the node's text, a blank line, then the node's
+input; just the text when the input is empty) goes in as **one user message**,
+no tool is ever offered, and the answer is the model's text, trimmed.
+`thinking` is **off by default**.
 
-| `model` | Backend | Request |
-| --- | --- | --- |
-| `haiku` → `claude-haiku-4-5-20251001`, `sonnet` → `claude-sonnet-5-5`, `opus` → `claude-opus-5-5` (one const table, `llm::ANTHROPIC_MODELS`) | Anthropic Messages API | `POST {base}/v1/messages`, headers `x-api-key`, `anthropic-version: 2023-06-01`, `content-type`; body `{model, max_tokens, messages}`; thinking on adds `thinking: {type: "enabled", budget_tokens: 2048}` and raises `max_tokens` to 8192, off sends **no** `thinking` key; the answer is the concatenated `text` blocks, never the thinking blocks |
-| `local:<name>` | Ollama | `POST {OLLAMA_HOST}/api/chat`, `{model, messages, stream: false, think: <thinking>}`; answer is `message.content` |
-
-| Environment | Meaning |
+| `model` | Backend |
 | --- | --- |
-| `ANTHROPIC_API_KEY` | required for `haiku`/`sonnet`/`opus`, read from the environment of the process running the workflow (the CLI's, or the server's). Missing: the node fails naming this variable. Never logged or put on argv |
-| `NARU_ANTHROPIC_URL` (`MESA_ANTHROPIC_URL` too) | base URL, default `https://api.anthropic.com`; the test seam |
-| `OLLAMA_HOST` | default `127.0.0.1:11434`; with or without a scheme, as Ollama itself reads it. Ollama not running is a node failure that says so |
+| `haiku`, `sonnet`, `opus` | a **Naru background agent**: the `workflow-prompt` config template (`docs/config.md`) resolved by `agents::spawn_workflow_prompt` — the same spawn path the todo-watcher and live use — i.e. `claude --bg --model <m> --name "workflow <workflow> · <node>" --tools "" --strict-mcp-config --settings '{"alwaysThinkingEnabled":<thinking>}' -- <prompt>` |
+| `local:<name>` (a name never starts with `-`) | Ollama's HTTP API: `POST {OLLAMA_HOST}/api/chat`, `{model, messages: [one user message], stream: false, think: <thinking>}`; the answer is `message.content`. `OLLAMA_HOST` defaults to `127.0.0.1:11434`, with or without a scheme (as Ollama reads it); Ollama not running is a node failure that says so. Plain HTTP over `curl` with the request on stdin, so the prompt is never on argv |
 
-The model ids are the current ones (Haiku 4.5, Sonnet 5.5, Opus 5.5); they
-were **not** verified against `GET /v1/models` (no key was available when they
-were written), and a wrong id surfaces as the API's own `not_found_error` in the
-node's error. `timeout_secs` bounds the whole request. **Transport is
-`curl`**, the posture `usage.rs` takes for its Anthropic call: Naru's `ureq` is
-built without a TLS stack and cannot speak `https://api.anthropic.com`. The
-URL, key header and body travel as a curl config on **stdin** (`-K -`), so
-neither the key nor the untrusted prompt is on argv (`ps`) or parsed by a
-shell.
+**How the agent's answer comes back — deterministic, no agent deciding
+anything.**
+
+1. The engine spawns the agent (the receipt's job id; no receipt is a node
+   failure — there would be nothing to wait on or stop).
+2. It polls `claude agents --json --all` every 500 ms (`agents::job_state`)
+   until the job's `state` is `done` — a job that has answered its one prompt
+   goes `done` by itself (checked against the real CLI). `failed`/`stopped` is
+   a node failure; a job that never appears in 30 s is one too; **`timeout_secs`
+   (default 600) bounds the whole wait** and a timeout fails the node.
+3. It reads that row's `sessionId` transcript with `cc::session_chat` — the
+   reader the Agents chat pane uses — and takes the assistant prose after the
+   last prompt. No answer in the transcript is a node failure.
+4. It runs **`claude stop <job>` on every outcome** (answer, failure,
+   timeout), so a run never leaves an idle background session behind.
+
+Why the transcript and not "tell the agent to deliver its answer with a `naru
+workflow …` command": that needs the Bash tool this node must not have (its
+input is untrusted upstream text), and it makes the engine's progress depend on
+a model obeying an instruction; the transcript is Claude Code's own record of
+what the session said. The store lock is **never held** while the agent runs
+(only a brief read of the library's prompt table before the spawn). The agent
+starts in the workflow's project `local_path` (else `~/.naru/workspace`, the
+one folder whose Claude Code trust prompt is answered once — `claude --bg`
+refuses an untrusted folder), so a workflow whose project folder was never
+trusted fails its prompt node with Claude's own "Workspace not trusted"
+message.
 
 **`cli`.** The input arrives on **stdin** *and* as `NARU_INPUT` (set only when
 the input is ≤ 64 KiB — a process environment has a hard limit; stdin always
@@ -104,7 +115,7 @@ naming the limit rather than the OS refusing the exec. A `cli` node has no such
 cap (its input rides on stdin), nor has a `prompt` node (its request body rides
 on curl's stdin).
 
-**Process groups.** Every `cli`, `script` process (and the `prompt` node's curl) runs in its own
+**Process groups.** Every `cli` and `script` process (and a local prompt's curl) runs in its own
 group (`agents::capture`). Past the deadline the group is killed; and when the
 node's own process exits, the group is killed **too**, so a backgrounded
 grandchild (`sleep 1000 &`) can neither hold the node's pipes open nor outlive
@@ -289,9 +300,8 @@ A spoken thought, recorded for ten seconds, transcribed locally, kept only if
 words were heard, tagged by a small model with thinking off, and appended to a
 log. Needs `sox` (recording), `auris` (speech to text, `docs/listen.md`: reads
 audio on stdin, `--format json` prints JSON lines whose last `transcript` line
-is the text) and `jq`, plus `ANTHROPIC_API_KEY` in the environment for the
-labelling step (`export ANTHROPIC_API_KEY=…` before `naru workflow run`, or
-before `naru serve` if the server runs it).
+is the text) and `jq`, and Claude Code logged in (the labelling step runs as a
+background agent).
 
 ```bash
 naru workflow create ambient --description "Capture a spoken thought"
@@ -392,12 +402,13 @@ port): CRUD with the positional/flag create shapes and the `--quiet` key sets;
 every graph rule and its error code; a `cli → branch → output(log)` run taking
 the true path (false output skipped) and the reverse; a failing node failing
 the run (exit 0, record printed, rest skipped) and a timeout killing a node; a
-`prompt` node through a stub model API (an HTTP server behind
-`NARU_ANTHROPIC_URL` and `OLLAMA_HOST`) asserting the request it received — the
-model id, thinking present or absent, no tools, the header names, the prompt
-byte-identical for hostile text — plus a missing key, an Ollama that is down,
-and that **no `claude` binary is ever invoked** (`MESA_CLAUDE_BIN` points at a
-recorder); the script
+`prompt` node on an Anthropic model through a stub `claude`
+(`MESA_CLAUDE_BIN`) that speaks `--bg`, `agents --json --all` and `stop` and
+writes a synthetic transcript (`MESA_CC_PROJECTS_DIR`) — asserting the argv
+(model, the thinking form, no tools, never `-p`), the answer arriving as the
+node output, and the job stopped exactly once on success, failed spawn,
+unanswered transcript and timeout alike — and a `local:<name>` node through a
+stub Ollama HTTP server behind `OLLAMA_HOST`; the script
 node's `{input}` byte-identical for hostile text; the task, inbox and board
 outputs; `live board push --workflow`; the ambient capture example; the API
 routes including `require_agent_access` refusing a foreign Origin and Host on

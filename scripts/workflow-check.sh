@@ -9,11 +9,13 @@
 # over a cli -> branch -> output(log) graph taking the TRUE path with the
 # false one skipped, and the reverse; a failing cli node failing the run
 # while the command still exits 0 (the status is data) and the rest skipped;
-# a prompt node through a stub model API (an HTTP server behind
-# NARU_ANTHROPIC_URL and OLLAMA_HOST), asserting the request it received — the
-# model id, thinking present/absent, no tools, the header names, the prompt
-# byte-identical for hostile text — and that NO `claude` binary is ever
-# invoked (MESA_CLAUDE_BIN points at a recorder); the script node's `{input}` value
+# a prompt node on an Anthropic model through a stub `claude` (MESA_CLAUDE_BIN)
+# that speaks `--bg`, `agents --json --all` and `stop` and writes a synthetic
+# transcript (MESA_CC_PROJECTS_DIR): the argv it received (model, the thinking
+# form, no tools, NEVER `-p`), the answer arriving as the node output, the job
+# stopped exactly once on success, failure and timeout, and no API key
+# anywhere; a `local:<name>` prompt node through a stub Ollama HTTP server
+# behind OLLAMA_HOST; the script node's `{input}` value
 # arriving byte-identical for hostile text (never shell-parsed); the task and
 # inbox outputs; the ambient-capture example from docs/workflows.md with stub
 # `sox`/`auris`; the API routes, including `require_agent_access` refusing a
@@ -58,23 +60,56 @@ jqs() { jq -r "$1" <<<"$STDOUT"; }
 jqe() { jq -r "$1" <<<"$STDERR"; }
 keys() { jq -c 'keys' <<<"$1"; }
 
-# ---- stubs: a model API over HTTP, a claude recorder, sox, auris ----
+# ---- stubs: claude (background agents), an Ollama HTTP server, sox, auris ----
 STUB_DIR="$TMP/stub"
-mkdir -p "$STUB_DIR"
-# A prompt node calls model APIs directly and must never start Claude Code:
-# this stub records any call and fails it, and the gate asserts it never ran.
+mkdir -p "$STUB_DIR/jobs"
+export MESA_CC_PROJECTS_DIR="$TMP/projects"
+mkdir -p "$MESA_CC_PROJECTS_DIR/-stub"
+# A stub `claude`: `--bg` records its argv byte-exactly (one file per element),
+# prints the receipt and registers a job whose transcript is written under
+# MESA_CC_PROJECTS_DIR; `agents --json --all` lists the jobs; `stop` is
+# recorded. Switches: `bg-fail` (the spawn exits 1), `never-done` (the job
+# stays `working`), `no-answer` (done, but the transcript holds only the
+# prompt). Any `-p` anywhere is recorded in `p.calls`.
 cat > "$STUB_DIR/claude" <<EOS
 #!/usr/bin/env bash
-echo "\$*" >> "$STUB_DIR/claude.calls"
-echo "claude must never be invoked by a workflow" >&2
-exit 1
+D="$STUB_DIR"
+for a in "\$@"; do [ "\$a" = "-p" ] && echo "\$*" >> "\$D/p.calls"; done
+case "\$1" in
+  --bg)
+    [ -e "\$D/bg-fail" ] && { echo "stub claude is down" >&2; exit 1; }
+    rm -f "\$D"/argv.*
+    i=0; for a in "\$@"; do printf '%s' "\$a" > "\$D/argv.\$i"; i=\$((i + 1)); done
+    echo "\$i" > "\$D/argc"
+    n=\$(( \$(cat "\$D/jobs/count" 2>/dev/null || echo 0) + 1 )); echo "\$n" > "\$D/jobs/count"
+    id="job\$n"; sess="00000000-0000-4000-8000-00000000000\$n"
+    state=done; [ -e "\$D/never-done" ] && state=working
+    jq -nc --arg id "\$id" --arg s "\$sess" --arg st "\$state" '{id:\$id,sessionId:\$s,state:\$st}' > "\$D/jobs/\$id.json"
+    last="\${@: -1}"
+    {
+      jq -nc --arg p "\$last" '{type:"user",message:{role:"user",content:\$p},uuid:"u1",timestamp:"2026-01-01T00:00:00Z",isSidechain:false}'
+      [ -e "\$D/no-answer" ] || jq -nc '{type:"assistant",message:{role:"assistant",model:"claude-haiku-4-5-20251001",content:[{type:"text",text:"  idea: buy milk  "}],stop_reason:"end_turn"},uuid:"a1",timestamp:"2026-01-01T00:00:01Z",isSidechain:false}'
+    } > "$MESA_CC_PROJECTS_DIR/-stub/\$sess.jsonl"
+    echo "backgrounded · \$id · stub"
+    ;;
+  agents)
+    shopt -s nullglob
+    jq -sc '.' "\$D"/jobs/*.json
+    ;;
+  stop)
+    echo "\$2" >> "\$D/stop.calls"
+    echo "stopped \$2"
+    ;;
+  *) echo "stub claude: unexpected: \$*" >&2; exit 1 ;;
+esac
 EOS
 chmod +x "$STUB_DIR/claude"
 export MESA_CLAUDE_BIN="$STUB_DIR/claude"
+reset_claude() { rm -rf "$STUB_DIR/jobs" "$STUB_DIR/stop.calls" "$STUB_DIR/p.calls" "$STUB_DIR"/argv.* "$STUB_DIR/argc" "$STUB_DIR"/bg-fail "$STUB_DIR"/never-done "$STUB_DIR"/no-answer; mkdir -p "$STUB_DIR/jobs"; }
+argv() { cat "$STUB_DIR/argv.$1"; }
+stops() { [ -e "$STUB_DIR/stop.calls" ] && wc -l < "$STUB_DIR/stop.calls" | tr -d ' ' || echo 0; }
 
-# The model API stub: POST /v1/messages (Anthropic) and POST /api/chat (Ollama).
-# Records the last request byte-exactly (path, header lines, body); answers a
-# thinking block then padded text for Anthropic; `http-fail` makes it answer 500.
+# The Ollama stub (POST /api/chat): records the last request byte-exactly.
 MODEL_PORT=17797
 cat > "$STUB_DIR/model-server.py" <<'EOPY'
 import json, os, sys
@@ -84,15 +119,11 @@ class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get("content-length", 0)))
-        n = int(open(d + "/count").read()) + 1 if os.path.exists(d + "/count") else 1
-        open(d + "/count", "w").write(str(n))
         open(d + "/last.path", "w").write(self.path)
         open(d + "/last.headers", "w").write("".join(f"{k.lower()}: {v}\n" for k, v in self.headers.items()))
         open(d + "/last.body", "wb").write(body)
         if os.path.exists(d + "/http-fail"):
-            out, code = json.dumps({"error": {"message": "stub model is down"}}).encode(), 500
-        elif self.path == "/v1/messages":
-            out, code = json.dumps({"content": [{"type": "thinking", "thinking": "SECRET THOUGHT"}, {"type": "text", "text": "  idea: buy"}, {"type": "text", "text": " milk  "}]}).encode(), 200
+            out, code = json.dumps({"error": "stub model is down"}).encode(), 500
         elif self.path == "/api/chat":
             out, code = json.dumps({"message": {"content": "  local: hi  "}}).encode(), 200
         else:
@@ -107,9 +138,7 @@ EOPY
 python3 "$STUB_DIR/model-server.py" "$STUB_DIR" "$MODEL_PORT" >"$TMP/model-server.log" 2>&1 &
 MODEL_PID=$!
 trap 'rm -rf "$TMP"; [ -n "${SERVER_PID:-}" ] && kill "$SERVER_PID" 2>/dev/null; kill "$MODEL_PID" 2>/dev/null; true' EXIT
-export NARU_ANTHROPIC_URL="http://127.0.0.1:$MODEL_PORT"
 export OLLAMA_HOST="127.0.0.1:$MODEL_PORT"   # no scheme, as Ollama itself reads it
-export ANTHROPIC_API_KEY="sk-test-key"
 last() { cat "$STUB_DIR/last.$1"; }
 
 # sox: pretend to record; auris: print what "$STUB_DIR/heard" holds as the one
@@ -351,7 +380,7 @@ run 0 "$NARU" workflow run Failing
 grep -q "timed out" <<<"$(jqs '.steps[1].error')" || fail "timeout error: $STDOUT"
 ok "a cli node past its timeout_secs is killed and fails the run"
 
-# ================= prompt node through the stub model API =================
+# ================= prompt node: a background agent through the stub claude =================
 
 run 0 "$NARU" workflow create "Prompting"
 run 0 "$NARU" workflow node create Prompting trigger Start
@@ -364,37 +393,62 @@ run 0 "$NARU" workflow node create Prompting output Out --config '{"target":"log
 PO=$(jqs .id)
 "$NARU" workflow edge create Prompting "$PT" "$PP" >/dev/null
 "$NARU" workflow edge create Prompting "$PP" "$PO" >/dev/null
+reset_claude
 HOSTILE_P=$'buy $(touch /tmp/NARU_PWN) milk `x` "dq" \'sq\' \\ \n second line'
 run 0 "$NARU" workflow run Prompting --input "$HOSTILE_P"
 [ "$(jqs .status)" = "succeeded" ] || fail "prompt run: $STDOUT"
-[ "$(jqs '.steps[1].output')" = "idea: buy milk" ] || fail "the answer is the text blocks only (no thinking), trimmed: $STDOUT"
+[ "$(jqs '.steps[1].output')" = "idea: buy milk" ] || fail "the agent's answer is the node output, trimmed: $STDOUT"
 [ ! -e /tmp/NARU_PWN ] || { rm -f /tmp/NARU_PWN; fail "a hostile input was executed"; }
-[ "$(last path)" = "/v1/messages" ] || fail "Anthropic path: $(last path)"
-grep -qx 'x-api-key: sk-test-key' "$STUB_DIR/last.headers" || fail "x-api-key header: $(cat "$STUB_DIR/last.headers")"
-grep -qx 'anthropic-version: 2023-06-01' "$STUB_DIR/last.headers" || fail "anthropic-version header"
-grep -qx 'content-type: application/json' "$STUB_DIR/last.headers" || fail "content-type header"
-[ "$(jq -r .model "$STUB_DIR/last.body")" = "claude-haiku-4-5-20251001" ] || fail "model id: $(last body)"
-[ "$(jq 'has("thinking")' "$STUB_DIR/last.body")" = "false" ] || fail "thinking off sends no thinking key"
-[ "$(jq 'has("tools")' "$STUB_DIR/last.body")" = "false" ] || fail "no tools are ever offered"
-[ "$(jq '.messages | length' "$STUB_DIR/last.body")" = "1" ] && [ "$(jq -r '.messages[0].role' "$STUB_DIR/last.body")" = "user" ] || fail "one user message"
+[ "$(cat "$STUB_DIR/argc")" = "12" ] || fail "claude argv count: $(cat "$STUB_DIR/argc")"
+[ "$(argv 0)" = "--bg" ] && [ "$(argv 1)" = "--model" ] && [ "$(argv 2)" = "haiku" ] &&
+  [ "$(argv 3)" = "--name" ] && [ "$(argv 4)" = "workflow Prompting · Label" ] &&
+  [ "$(argv 5)" = "--tools" ] && [ "$(wc -c < "$STUB_DIR/argv.6" | tr -d ' ')" = "0" ] &&
+  [ "$(argv 7)" = "--strict-mcp-config" ] &&
+  [ "$(argv 8)" = "--settings" ] && [ "$(argv 9)" = '{"alwaysThinkingEnabled":false}' ] &&
+  [ "$(argv 10)" = "--" ] || fail "claude argv: $(for i in 0 1 2 3 4 5 6 7 8 9 10; do echo "[$(argv $i)]"; done)"
 EXPECTED_PROMPT="Tag this as idea/todo/note.
 
 $HOSTILE_P"
-[ "$(jq -r '.messages[0].content' "$STUB_DIR/last.body")" = "$EXPECTED_PROMPT" ] || fail "the prompt is the node's text, a blank line, then the input, byte-identical: $(jq -r '.messages[0].content' "$STUB_DIR/last.body")"
-! grep -q "sk-test-key" "$TMP/serve.log" 2>/dev/null || fail "the key leaked into a log"
-ok "prompt node (haiku): POST /v1/messages with x-api-key + anthropic-version, the model id, no thinking key, no tools, one user message holding prompt + blank line + hostile input byte-identical; thinking blocks dropped, text trimmed"
+[ "$(argv 11)" = "$EXPECTED_PROMPT" ] || fail "the prompt is the node's text, a blank line, then the input, byte-identical: $(argv 11)"
+[ ! -e "$STUB_DIR/p.calls" ] || fail "print mode (-p) was used: $(cat "$STUB_DIR/p.calls")"
+[ "$(stops)" = "1" ] && [ "$(cat "$STUB_DIR/stop.calls")" = "job1" ] || fail "the job must be stopped exactly once, got $(stops)"
+ok "prompt node (haiku): spawned as claude --bg --model haiku --name 'workflow <wf> · <node>' --tools \"\" --strict-mcp-config --settings {alwaysThinkingEnabled:false} -- <prompt>\\n\\n<input> (byte-identical, no -p), the answer read off the session transcript and trimmed, the job stopped exactly once"
 
+reset_claude
 run 0 "$NARU" workflow node update "$PP" --config '{"model":"opus","thinking":true,"prompt":"P"}'
 run 0 "$NARU" workflow run Prompting
-[ "$(jq -r .model "$STUB_DIR/last.body")" = "claude-opus-5-5" ] || fail "opus model id: $(last body)"
-[ "$(jq -cS .thinking "$STUB_DIR/last.body")" = '{"budget_tokens":2048,"type":"enabled"}' ] || fail "thinking on: $(last body)"
-[ "$(jq '.max_tokens > .thinking.budget_tokens' "$STUB_DIR/last.body")" = "true" ] || fail "max_tokens must exceed the thinking budget"
-[ "$(jq -r '.messages[0].content' "$STUB_DIR/last.body")" = "P" ] || fail "an empty input adds no blank line"
+[ "$(argv 2)" = "opus" ] && [ "$(argv 9)" = '{"alwaysThinkingEnabled":true}' ] || fail "opus / thinking on argv"
+[ "$(argv 11)" = "P" ] || fail "an empty input adds no blank line: [$(argv 11)]"
+[ "$(stops)" = "1" ] || fail "stopped once"
 run 0 "$NARU" workflow node update "$PP" --config '{"model":"sonnet","prompt":"P"}'
 run 0 "$NARU" workflow run Prompting
-[ "$(jq -r .model "$STUB_DIR/last.body")" = "claude-sonnet-5-5" ] || fail "sonnet model id"
-ok "prompt node: opus with thinking on sends thinking {enabled, budget_tokens} with max_tokens above it; sonnet maps to its id; an empty input adds nothing to the prompt"
+[ "$(argv 2)" = "sonnet" ] || fail "sonnet alias"
+ok "prompt node: opus with thinking on passes alwaysThinkingEnabled:true; sonnet maps through; an empty input adds nothing to the prompt"
 
+# failures: every one still stops what it started
+reset_claude
+touch "$STUB_DIR/bg-fail"
+run 0 "$NARU" workflow run Prompting --input x
+[ "$(jqs .status)" = "failed" ] && grep -q "stub claude is down" <<<"$(jqs '.steps[1].error')" || fail "a failing spawn fails the node: $STDOUT"
+[ "$(stops)" = "0" ] || fail "nothing was started, so nothing is stopped"
+reset_claude
+touch "$STUB_DIR/no-answer"
+run 0 "$NARU" workflow run Prompting --input x
+[ "$(jqs .status)" = "failed" ] && grep -q "no answer" <<<"$(jqs '.steps[1].error')" || fail "a transcript with no answer fails the node: $STDOUT"
+[ "$(stops)" = "1" ] || fail "an unanswered agent is still stopped, got $(stops)"
+reset_claude
+touch "$STUB_DIR/never-done"
+run 0 "$NARU" workflow node update "$PP" --config '{"model":"haiku","prompt":"P","timeout_secs":2}'
+START=$(date +%s)
+run 0 "$NARU" workflow run Prompting --input x
+[ $(($(date +%s) - START)) -lt 20 ] || fail "the timeout must bound the wait"
+[ "$(jqs .status)" = "failed" ] && grep -q "timed out" <<<"$(jqs '.steps[1].error')" || fail "a timeout fails the node: $STDOUT"
+[ "$(stops)" = "1" ] || fail "a timed-out agent is stopped, got $(stops)"
+reset_claude
+ok "a failing spawn, an unanswered transcript and a timeout each fail the node; whatever was started is stopped exactly once"
+
+# ---- local:<name>: the Ollama HTTP API, no claude at all ----
+reset_claude
 run 0 "$NARU" workflow node update "$PP" --config '{"model":"local:llama3.2:3b","thinking":true,"prompt":"P"}'
 run 0 "$NARU" workflow run Prompting --input "in"
 [ "$(jqs .status)" = "succeeded" ] && [ "$(jqs '.steps[1].output')" = "local: hi" ] || fail "local run: $STDOUT"
@@ -402,30 +456,21 @@ run 0 "$NARU" workflow run Prompting --input "in"
 [ "$(jq -r .model "$STUB_DIR/last.body")" = "llama3.2:3b" ] && [ "$(jq .stream "$STUB_DIR/last.body")" = "false" ] &&
   [ "$(jq .think "$STUB_DIR/last.body")" = "true" ] || fail "Ollama body: $(last body)"
 [ "$(jq -r '.messages[0].content' "$STUB_DIR/last.body")" = $'P\n\nin' ] || fail "Ollama prompt"
-grep -q 'x-api-key' "$STUB_DIR/last.headers" && fail "the Anthropic key must not go to Ollama"
+[ "$(jq '.messages | length' "$STUB_DIR/last.body")" = "1" ] && [ "$(jq 'has("tools")' "$STUB_DIR/last.body")" = "false" ] || fail "one user message, no tools"
+[ ! -e "$STUB_DIR/argc" ] || fail "a local model must not start claude"
 OLLAMA_HOST="http://127.0.0.1:$MODEL_PORT/" run 0 "$NARU" workflow run Prompting --input "in"
 [ "$(jqs .status)" = "succeeded" ] || fail "OLLAMA_HOST with a scheme: $STDOUT"
-ok "local:<name>: POST /api/chat on OLLAMA_HOST (with or without a scheme), stream false, think mirrors thinking, no Anthropic key sent"
-
 touch "$STUB_DIR/http-fail"
 run 0 "$NARU" workflow run Prompting --input x
-[ "$(jqs .status)" = "failed" ] && grep -q "500" <<<"$(jqs '.steps[1].error')" || fail "a failing model call fails the node: $STDOUT"
-run 0 "$NARU" workflow node update "$PP" --config '{"model":"haiku","prompt":"P"}'
-run 0 "$NARU" workflow run Prompting --input x
-grep -q "stub model is down" <<<"$(jqs '.steps[1].error')" || fail "the API's own message is surfaced: $STDOUT"
+[ "$(jqs .status)" = "failed" ] && grep -q "stub model is down" <<<"$(jqs '.steps[1].error')" || fail "Ollama's own message is surfaced: $STDOUT"
 rm -f "$STUB_DIR/http-fail"
-ok "a model API failure is a node failure carrying the API's message"
-
-env -u ANTHROPIC_API_KEY "$NARU" workflow run Prompting --input x >"$TMP/out" 2>&1 || true
-[ "$(jq -r .status "$TMP/out")" = "failed" ] && grep -q "ANTHROPIC_API_KEY" <<<"$(jq -r '.steps[1].error' "$TMP/out")" || fail "a missing key names the variable: $(cat "$TMP/out")"
-run 0 "$NARU" workflow node update "$PP" --config '{"model":"local:nope","prompt":"P"}'
 OLLAMA_HOST="127.0.0.1:1" run 0 "$NARU" workflow run Prompting --input x
 [ "$(jqs .status)" = "failed" ] && grep -q "Ollama" <<<"$(jqs '.steps[1].error')" || fail "Ollama down is a clear failure: $STDOUT"
-ok "a missing ANTHROPIC_API_KEY names the variable; an Ollama that is not running fails clearly"
+ok "local:<name>: POST /api/chat on OLLAMA_HOST (with or without a scheme), stream false, think mirrors thinking, one user message, no tools, no claude; failures are clear node failures"
 
-# ================= no claude process, ever =================
-[ ! -e "$STUB_DIR/claude.calls" ] || fail "a workflow invoked the claude binary: $(cat "$STUB_DIR/claude.calls")"
-ok "no claude binary was invoked by any prompt-node run above"
+# ================= no -p, ever =================
+[ ! -e "$STUB_DIR/p.calls" ] || fail "a workflow used print mode (-p): $(cat "$STUB_DIR/p.calls")"
+ok "print mode (-p) was never used by any prompt-node run above"
 
 # ================= script node: {input} arrives byte-identical =================
 
@@ -518,9 +563,7 @@ grep -q ">Gate</text>" <<<"$(jqs .body)" || fail "a board is a snapshot: later e
 run 0 "$NARU" live board push --workflow "$W"
 run 2 "$NARU" live board push --diagram 1
 [ "$(jqe .error.code)" = "usage" ] || fail "--diagram is retired: usage"
-# `live stop` legitimately spawns its own summariser through claude; keep that
-# out of the recorder that proves workflows never do.
-MESA_CLAUDE_BIN=/usr/bin/true run 0 "$NARU" live stop
+run 0 "$NARU" live stop
 ok "live board push --workflow: an SVG snapshot (kind diagram) with nodes and branch labels; --diagram is retired"
 
 # ================= the ambient-capture example =================
@@ -749,7 +792,7 @@ run 0 "$NARU" workflow run-show "$(jq -r '.[0].id' < <("$NARU" workflow runs Tic
 ok "serve --watch-workflows: a due time workflow runs once per interval (trigger=time); a manual one never"
 kill "$SERVER_PID" 2>/dev/null; wait "$SERVER_PID" 2>/dev/null || true; SERVER_PID=
 
-[ ! -e "$STUB_DIR/claude.calls" ] || fail "a workflow invoked the claude binary: $(cat "$STUB_DIR/claude.calls")"
-ok "no claude binary was invoked anywhere in this gate"
+[ ! -e "$STUB_DIR/p.calls" ] || fail "a workflow used print mode (-p): $(cat "$STUB_DIR/p.calls")"
+ok "print mode (-p) was never used anywhere in this gate"
 
 echo "workflow-check: $CHECKS checks passed"

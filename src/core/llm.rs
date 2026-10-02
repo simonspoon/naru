@@ -1,137 +1,147 @@
-//! The workflow `prompt` node's model call (mesa task 1607): one blocking
-//! HTTP request to a model API, **never a Claude Code process** — no agent is
-//! spawned, no config template is involved, and no tool is ever offered. The
-//! prompt goes in as a single user message and the model's text comes back.
+//! The workflow `prompt` node's model call (mesa task 1607) — **never print
+//! mode (`-p`), and no API key anywhere**. The prompt goes in as one user message, no
+//! tool is ever offered, and the model's text comes back. Two backends, picked
+//! by the node's `model`:
 //!
-//! Two backends, picked by the node's `model`:
-//!
-//! * `haiku` | `sonnet` | `opus` — the Anthropic Messages API
-//!   (`POST {base}/v1/messages`, `x-api-key` + `anthropic-version`). The key
-//!   is read from `ANTHROPIC_API_KEY` and its absence is a failure naming the
-//!   variable. The base is `https://api.anthropic.com` unless
-//!   `NARU_ANTHROPIC_URL` (or `MESA_ANTHROPIC_URL`) says otherwise — also the
-//!   test seam. Thinking on sends `thinking: {type: enabled, budget_tokens}`;
-//!   off sends no `thinking` key. The answer is the concatenated `text`
-//!   blocks, never the thinking blocks.
+//! * `haiku` | `sonnet` | `opus` — a **background agent**, spawned through the
+//!   same chokepoint every other agent is (`agents::spawn_workflow_prompt`:
+//!   the `workflow-prompt` config template, `claude --bg …`, `--tools ""
+//!   --strict-mcp-config`), waited on, read back, and stopped.
 //! * `local:<name>` — the Ollama HTTP API (`POST {OLLAMA_HOST or
-//!   http://127.0.0.1:11434}/api/chat`, `stream: false`), thinking as its
-//!   `think` bool.
+//!   http://127.0.0.1:11434}/api/chat`, `stream: false`, `think` mirroring the
+//!   node's thinking flag). Plain HTTP over `curl` — the request travels as a
+//!   curl config on stdin (`-K -`), so the prompt is never on argv or parsed
+//!   by a shell.
 //!
-//! **Transport is `curl`**, the posture `usage.rs` already takes for its
-//! Anthropic call: Naru's `ureq` is built without a TLS stack, so it cannot
-//! speak `https://api.anthropic.com`. The request is never put on argv — the
-//! URL, the key header and the body travel as a curl config on **stdin**
-//! (`-K -`), so neither the key nor the (untrusted) prompt is visible in `ps`
-//! or parsed by a shell.
+//! **How the answer comes back from a background agent.** Deterministically,
+//! with no agent deciding anything: [`wait_for_answer`] polls
+//! `claude agents --json --all` ([`agents::job_state`]) every half second
+//! until the job's `state` is `done` — a job that has answered its one prompt
+//! goes `done` by itself (checked against the real CLI) — then reads that
+//! row's `sessionId`'s transcript with `cc::session_chat`, the reader the
+//! Agents chat pane uses, and takes the assistant prose after the last prompt.
+//! The alternative — telling the agent to deliver its answer with a
+//! `naru workflow …` command — was rejected: it needs the Bash tool this
+//! node must not have (its input is untrusted upstream text), and it makes the
+//! engine's progress depend on a model obeying an instruction. The transcript
+//! is Claude Code's own record of what the session said, whatever it was told.
+//!
+//! The job is **stopped on every outcome** — answer, failure or timeout — so a
+//! run never leaves an idle background session behind, and nothing here holds
+//! the store lock (the engine passes in what it read before calling).
 
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-/// Model alias → Anthropic model id. One table, so a new generation is one
-/// edit. These are the ids Claude's current model list gives (Haiku 4.5,
-/// Sonnet 5.5, Opus 5.5); they were not checked against `GET /v1/models`
-/// from this environment (no key was available) — a wrong id is a clear
-/// `not_found_error` from the API, surfaced as the node's failure.
-pub const ANTHROPIC_MODELS: [(&str, &str); 3] = [
-    ("haiku", "claude-haiku-4-5-20251001"),
-    ("sonnet", "claude-sonnet-5-5"),
-    ("opus", "claude-opus-5-5"),
-];
+use crate::core::types::{CcChatTurn, CcChatTurnKind};
+use crate::core::{agents, cc, config};
 
-const ANTHROPIC_VERSION: &str = "2023-06-01";
-const ANTHROPIC_DEFAULT_URL: &str = "https://api.anthropic.com";
-/// `max_tokens` when thinking is off, and when it is on (which must exceed
-/// the thinking budget).
-const MAX_TOKENS: u32 = 4096;
-const MAX_TOKENS_THINKING: u32 = 8192;
-const THINKING_BUDGET: u32 = 2048;
+/// How often a running agent's state is asked for.
+const POLL: Duration = Duration::from_millis(500);
+/// How long a just-spawned job may be missing from `claude agents` before the
+/// node gives up on it (it registers a moment after the receipt prints).
+const REGISTER_GRACE: Duration = Duration::from_secs(30);
 /// The answer is read whole; cap it so a runaway cannot balloon memory.
 const ANSWER_CAP: usize = 4 * 1024 * 1024;
 
 /// One model call: `prompt` as the one user message, answered with the
-/// model's text. `Err` is a message fit for a node's `error`.
+/// model's text. `name` is the session name an agent run carries, `cwd` where
+/// it starts (a folder Claude Code trusts), `prompts` the library table the
+/// spawn template resolves against. `Err` is a message fit for a node's
+/// `error`.
 pub fn complete(
     model: &str,
     thinking: bool,
+    name: &str,
     prompt: &str,
+    prompts: &config::Prompts,
+    cwd: &str,
     timeout: Duration,
 ) -> Result<String, String> {
-    if let Some(name) = model.strip_prefix("local:") {
-        return ollama(name, thinking, prompt, timeout);
+    if let Some(local) = model.strip_prefix("local:") {
+        return ollama(local, thinking, prompt, timeout);
     }
-    let id = ANTHROPIC_MODELS
-        .iter()
-        .find(|(alias, _)| *alias == model)
-        .map(|(_, id)| *id)
-        .ok_or_else(|| format!("unknown model {model:?}"))?;
-    anthropic(id, thinking, prompt, timeout)
-}
-
-fn anthropic(id: &str, thinking: bool, prompt: &str, timeout: Duration) -> Result<String, String> {
-    let key = std::env::var("ANTHROPIC_API_KEY")
-        .ok()
-        .filter(|k| !k.trim().is_empty())
+    if !["haiku", "sonnet", "opus"].contains(&model) {
+        return Err(format!("unknown model {model:?}"));
+    }
+    let started = Instant::now();
+    let job = agents::spawn_workflow_prompt(cwd, name, model, thinking, prompt, prompts)?
         .ok_or_else(|| {
-            "ANTHROPIC_API_KEY is not set; a prompt node on haiku, sonnet or opus calls the \
-             Anthropic API directly and needs it in the environment of the process running \
-             the workflow"
+            "the workflow-prompt command printed no `backgrounded · <id>` receipt, so there is \
+             no job to wait on or stop"
                 .to_string()
         })?;
-    let base = crate::core::env::var("ANTHROPIC_URL")
-        .filter(|u| !u.trim().is_empty())
-        .unwrap_or_else(|| ANTHROPIC_DEFAULT_URL.to_string());
-    let url = format!("{}/v1/messages", base.trim_end_matches('/'));
-    let body = anthropic_body(id, thinking, prompt);
-    let (status, text) = post_json(
-        &url,
-        &[
-            ("x-api-key", key.trim()),
-            ("anthropic-version", ANTHROPIC_VERSION),
-        ],
-        &body,
-        timeout,
-    )?;
-    parse_anthropic(status, &text)
+    let result = wait_for_answer(&job, started, timeout);
+    // On every outcome: an idle background session left behind per node would
+    // pile up. A stop that fails changes nothing about the answer.
+    if let Err(e) = agents::stop(&job) {
+        eprintln!("workflow: could not stop agent {job}: {e}");
+    }
+    result
 }
 
-fn anthropic_body(id: &str, thinking: bool, prompt: &str) -> Value {
-    let mut body = json!({
-        "model": id,
-        "max_tokens": if thinking { MAX_TOKENS_THINKING } else { MAX_TOKENS },
-        "messages": [{"role": "user", "content": prompt}],
-    });
-    if thinking {
-        body["thinking"] = json!({"type": "enabled", "budget_tokens": THINKING_BUDGET});
-    }
-    body
-}
-
-/// The concatenated `text` blocks of a Messages answer; thinking blocks are
-/// dropped. A non-200 is the API's own `error.message`.
-fn parse_anthropic(status: u16, body: &str) -> Result<String, String> {
-    let parsed: Value = serde_json::from_str(body).unwrap_or(Value::Null);
-    if status != 200 {
-        let message = parsed["error"]["message"]
-            .as_str()
-            .map(str::to_string)
-            .unwrap_or_else(|| truncate(body));
-        return Err(format!(
-            "the Anthropic API answered HTTP {status}: {message}"
-        ));
-    }
-    let blocks = parsed["content"].as_array().ok_or_else(|| {
+/// Polls `job` until it is `done`, then reads its answer off the transcript.
+/// `Err` on a `failed`/`stopped` job, a job that never registers, no answer in
+/// the transcript, or `timeout` (counted from `started`).
+fn wait_for_answer(job: &str, started: Instant, timeout: Duration) -> Result<String, String> {
+    let timed_out = || {
         format!(
-            "the Anthropic API answered with no content: {}",
-            truncate(body)
+            "timed out after {}s waiting for the agent",
+            timeout.as_secs()
         )
-    })?;
-    Ok(blocks
+    };
+    let session = loop {
+        if started.elapsed() >= timeout {
+            return Err(timed_out());
+        }
+        match agents::job_state(job)? {
+            None if started.elapsed() > REGISTER_GRACE => {
+                return Err(format!("the agent {job} never appeared in `claude agents`"));
+            }
+            Some((state, session)) if state == "done" => {
+                break session.ok_or_else(|| format!("the agent {job} reported no session id"))?;
+            }
+            Some((state, _)) if state == "failed" || state == "stopped" => {
+                return Err(format!("the agent {job} ended `{state}` without answering"));
+            }
+            _ => std::thread::sleep(POLL),
+        }
+    };
+    // The row can say `done` a beat before the transcript's last line is
+    // readable, so an empty read is retried within the same deadline.
+    loop {
+        if let Some(answer) = cc::session_chat(&session, 500)
+            .ok()
+            .and_then(|chat| answer_of(&chat.turns))
+        {
+            return Ok(answer);
+        }
+        if started.elapsed() >= timeout || started.elapsed() > REGISTER_GRACE {
+            return Err(format!(
+                "the agent {job} finished but its transcript holds no answer"
+            ));
+        }
+        std::thread::sleep(POLL);
+    }
+}
+
+/// The assistant prose after the last prompt, joined — what the session said in
+/// reply to the one prompt it was given. Tool turns are skipped (there are none
+/// to see with `--tools ""`); `None` when nothing was said.
+fn answer_of(turns: &[CcChatTurn]) -> Option<String> {
+    let after = turns
         .iter()
-        .filter(|b| b["type"] == "text")
-        .filter_map(|b| b["text"].as_str())
-        .collect::<String>())
+        .rposition(|t| t.kind == CcChatTurnKind::Prompt)
+        .map_or(0, |i| i + 1);
+    let said: Vec<&str> = turns[after..]
+        .iter()
+        .filter(|t| t.kind == CcChatTurnKind::Response)
+        .map(|t| t.text.as_str())
+        .collect();
+    let answer = said.join("\n");
+    (!answer.trim().is_empty()).then_some(answer)
 }
 
 fn ollama(name: &str, thinking: bool, prompt: &str, timeout: Duration) -> Result<String, String> {
@@ -143,7 +153,7 @@ fn ollama(name: &str, thinking: bool, prompt: &str, timeout: Duration) -> Result
         "stream": false,
         "think": thinking,
     });
-    let (status, text) = post_json(&url, &[], &body, timeout).map_err(|e| {
+    let (status, text) = post_json(&url, &body, timeout).map_err(|e| {
         format!("could not reach Ollama at {base} (is it running? `ollama serve`): {e}")
     })?;
     parse_ollama(status, &text)
@@ -224,17 +234,11 @@ fn curl_quote(s: &str) -> String {
 }
 
 /// The curl config that makes the request: nothing here is ever on argv.
-fn curl_config(url: &str, headers: &[(&str, &str)], body: &str, timeout: Duration) -> String {
+fn curl_config(url: &str, body: &str, timeout: Duration) -> String {
     let mut cfg = String::new();
     cfg.push_str(&format!("url = {}\n", curl_quote(url)));
     cfg.push_str("request = \"POST\"\n");
     cfg.push_str("header = \"content-type: application/json\"\n");
-    for (name, value) in headers {
-        cfg.push_str(&format!(
-            "header = {}\n",
-            curl_quote(&format!("{name}: {value}"))
-        ));
-    }
     cfg.push_str(&format!("data-raw = {}\n", curl_quote(body)));
     cfg.push_str(&format!("max-time = {}\n", timeout.as_secs().max(1)));
     cfg.push_str("write-out = \"\\n%{http_code}\"\n");
@@ -244,13 +248,8 @@ fn curl_config(url: &str, headers: &[(&str, &str)], body: &str, timeout: Duratio
 /// POSTs `body` as JSON and answers `(status, response body)`. A transport
 /// failure (curl missing, connection refused, timeout) is `Err`; any HTTP
 /// status is data for the caller.
-fn post_json(
-    url: &str,
-    headers: &[(&str, &str)],
-    body: &Value,
-    timeout: Duration,
-) -> Result<(u16, String), String> {
-    let cfg = curl_config(url, headers, &body.to_string(), timeout);
+fn post_json(url: &str, body: &Value, timeout: Duration) -> Result<(u16, String), String> {
+    let cfg = curl_config(url, &body.to_string(), timeout);
     let mut cmd = Command::new("curl");
     cmd.args(["-sS", "-K", "-"]);
     let out = crate::core::agents::capture(
@@ -283,25 +282,35 @@ fn post_json(
 mod tests {
     use super::*;
 
-    #[test]
-    fn the_request_body_carries_thinking_only_when_asked() {
-        let off = anthropic_body("claude-haiku-4-5-20251001", false, "hi");
-        assert!(off.get("thinking").is_none());
-        assert_eq!(off["messages"][0]["role"], "user");
-        assert_eq!(off["messages"][0]["content"], "hi");
-        let on = anthropic_body("m", true, "hi");
-        assert_eq!(on["thinking"]["type"], "enabled");
-        assert!(on["max_tokens"].as_u64() > on["thinking"]["budget_tokens"].as_u64());
-        assert!(off.get("tools").is_none() && on.get("tools").is_none());
+    fn turn(kind: CcChatTurnKind, text: &str) -> CcChatTurn {
+        CcChatTurn {
+            id: "x".into(),
+            kind,
+            ts: None,
+            model: None,
+            name: None,
+            text: text.into(),
+        }
     }
 
     #[test]
-    fn the_answer_is_the_text_blocks_not_the_thinking_ones() {
-        let body = r#"{"content":[{"type":"thinking","thinking":"hmm"},{"type":"text","text":"a"},{"type":"text","text":"b"}]}"#;
-        assert_eq!(parse_anthropic(200, body).unwrap(), "ab");
-        let err = parse_anthropic(401, r#"{"error":{"message":"invalid x-api-key"}}"#).unwrap_err();
-        assert!(err.contains("401") && err.contains("invalid x-api-key"));
-        assert!(parse_anthropic(200, "{}").is_err());
+    fn the_answer_is_the_prose_after_the_last_prompt() {
+        use CcChatTurnKind::*;
+        let turns = [
+            turn(Prompt, "first"),
+            turn(Response, "old"),
+            turn(Prompt, "the prompt"),
+            turn(Tool, "ls"),
+            turn(Response, "idea:"),
+            turn(Response, "buy milk"),
+        ];
+        assert_eq!(answer_of(&turns).as_deref(), Some("idea:\nbuy milk"));
+        assert_eq!(answer_of(&turns[..3]), None, "a prompt nobody answered");
+        assert_eq!(answer_of(&[turn(Response, "  ")]), None);
+    }
+
+    #[test]
+    fn ollama_answers_parse() {
         assert_eq!(
             parse_ollama(200, r#"{"message":{"content":"yo","thinking":"t"}}"#).unwrap(),
             "yo"
@@ -333,12 +342,10 @@ mod tests {
     #[test]
     fn the_curl_config_quotes_what_a_prompt_can_hold() {
         let cfg = curl_config(
-            "http://h/v1",
-            &[("x-api-key", "k")],
+            "http://h/api",
             "a \"q\" \\ $(x) `y`\nline\t",
             Duration::from_secs(9),
         );
-        assert!(cfg.contains("header = \"x-api-key: k\"\n"));
         assert!(
             cfg.contains(r#"data-raw = "a \"q\" \\ $(x) `y`\nline\t""#),
             "{cfg}"
@@ -347,16 +354,17 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_key_names_the_variable() {
-        // The env var is process-wide; only assert when it is genuinely unset.
-        if std::env::var("ANTHROPIC_API_KEY").is_err() {
-            let err = complete("haiku", false, "x", Duration::from_secs(1)).unwrap_err();
-            assert!(err.contains("ANTHROPIC_API_KEY"), "{err}");
-        }
-        assert!(
-            complete("gpt", false, "x", Duration::from_secs(1))
-                .unwrap_err()
-                .contains("unknown model")
-        );
+    fn an_unknown_model_is_refused_before_anything_runs() {
+        let err = complete(
+            "gpt",
+            false,
+            "n",
+            "p",
+            &config::Prompts::default(),
+            ".",
+            Duration::from_secs(1),
+        )
+        .unwrap_err();
+        assert!(err.contains("unknown model"), "{err}");
     }
 }

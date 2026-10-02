@@ -3,8 +3,9 @@
 //! [`WorkflowStep`] per node. **The graph decides what runs, never an
 //! agent** — order is a topological sort with ties broken by node id, a
 //! `branch` node's verdict picks which of its edges are active, and the only
-//! model call anywhere is a `prompt` node's one `llm::complete` (a direct
-//! HTTP request to a model API — never a Claude Code process).
+//! model call anywhere is a `prompt` node's one `llm::complete` (a background
+//! agent for an Anthropic model, an Ollama HTTP call for `local:<name>`; never
+//! print mode).
 //!
 //! Storage lives in `Store`; this module is execution, so it follows
 //! `scripts.rs` and `hooks.rs`: it owns processes, `Store` owns rows. The
@@ -34,7 +35,7 @@ use crate::core::types::{
     WorkflowNodeKind, WorkflowRun, WorkflowRunStatus, WorkflowStep, WorkflowStepStatus,
     WorkflowTrigger, WorkflowView,
 };
-use crate::core::{agents, config, llm, scripts};
+use crate::core::{agents, config, library, llm, scripts};
 
 /// A step's `output` (and a `cli` node's captured stdout) is capped at 64 KiB,
 /// the scripts' own cap.
@@ -678,10 +679,18 @@ fn run_node<A: StoreAccess>(
                 .get("timeout_secs")
                 .and_then(Value::as_u64)
                 .unwrap_or(DEFAULT_PROMPT_TIMEOUT_SECS);
+            // The library table is read under a brief lock; the agent is
+            // spawned and waited on with the store free.
+            let prompts = access
+                .with(|s| library::prompts(s))
+                .map_err(|e| e.to_string())?;
             let out = llm::complete(
                 str_of("model"),
                 cfg.get("thinking").and_then(Value::as_bool) == Some(true),
+                &format!("workflow {} · {}", view.workflow.name, node.title),
                 &full,
+                &prompts,
+                cwd,
                 Duration::from_secs(timeout),
             )?;
             Ok((out.trim().to_string(), None))

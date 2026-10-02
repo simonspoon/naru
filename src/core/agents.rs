@@ -760,22 +760,28 @@ fn spawn_for(
     prompt: Option<&str>,
     prompts: &config::Prompts,
 ) -> Result<String, String> {
+    spawn_for_vars(
+        action,
+        &config::Vars {
+            id,
+            name,
+            prompt,
+            prompts: Some(prompts),
+            ..Default::default()
+        },
+    )
+}
+
+/// [`spawn_for`] with the whole [`config::Vars`] in hand — the one body both
+/// the ordinary spawns and the workflow prompt node resolve through.
+fn spawn_for_vars(action: &str, vars: &config::Vars) -> Result<String, String> {
     let configured = config::command_for(action)?;
     let template = match &configured {
         Some(t) => t.as_str(),
         None => config::default_command(action)
             .ok_or_else(|| format!("no default command for {action}"))?,
     };
-    let script = config::resolve(
-        action,
-        template,
-        &config::Vars {
-            id,
-            name,
-            prompt,
-            prompts: Some(prompts),
-        },
-    )?;
+    let script = config::resolve(action, template, vars)?;
     Ok(if configured.is_none() {
         with_default_bin(script, &claude_bin())
     } else {
@@ -912,6 +918,62 @@ pub fn capture(
         stdout: out.recv_timeout(grace).unwrap_or_default(),
         stderr: err.recv_timeout(grace).unwrap_or_default(),
     })
+}
+
+/// Starts the background agent for a workflow `prompt` node on an Anthropic
+/// model (mesa task 1607) and returns its short job id: the `workflow-prompt`
+/// template resolved through the same [`spawn_for_vars`] every spawn uses, so
+/// `{model}`, `{thinking}` (`true`/`false`), `{name}` and `{prompt}` reach it
+/// only as shell-quoted values. Like [`spawn_bg`] the id is `None` when the
+/// command printed no `backgrounded · <id>` receipt — which this caller treats
+/// as a failure, since without an id there is nothing to wait on or stop.
+pub fn spawn_workflow_prompt(
+    dir: &str,
+    name: &str,
+    model: &str,
+    thinking: bool,
+    prompt: &str,
+    prompts: &config::Prompts,
+) -> Result<Option<String>, String> {
+    let script = spawn_for_vars(
+        config::WORKFLOW_PROMPT,
+        &config::Vars {
+            name: Some(name),
+            prompt: Some(prompt),
+            model: Some(model),
+            thinking: Some(if thinking { "true" } else { "false" }),
+            prompts: Some(prompts),
+            ..Default::default()
+        },
+    )?;
+    run_script(&script, dir)
+}
+
+/// What `claude agents --json --all` says of the job `job_id`: its `state`
+/// (`working`, `blocked`, `done`, `failed`, `stopped`, …) and its `sessionId`,
+/// or `Ok(None)` when no row names it (a job not registered *yet* looks the
+/// same, so a caller that has just spawned one waits a grace before believing
+/// it). Unlike [`job_running`], a failed probe is an `Err`, not a verdict.
+pub fn job_state(job_id: &str) -> Result<Option<(String, Option<String>)>, String> {
+    state_of(&list_all_agents(&claude_bin())?, job_id)
+}
+
+fn state_of(bytes: &[u8], job_id: &str) -> Result<Option<(String, Option<String>)>, String> {
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(bytes)
+        .map_err(|e| format!("unexpected claude agents payload: {e}"))?;
+    Ok(rows.into_iter().find_map(|row| {
+        (row.get("id").and_then(|v| v.as_str()) == Some(job_id)).then(|| {
+            (
+                row.get("state")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                row.get("sessionId")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+            )
+        })
+    }))
 }
 
 /// Stops the background session with short job id `job_id`
@@ -1231,6 +1293,24 @@ pub fn strip_ansi(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `job_state` reads one job's `state` and `sessionId` off the payload,
+    /// `None` for a job nothing names, `Err` for a payload that is not rows.
+    #[test]
+    fn state_of_reads_a_jobs_state_and_session() {
+        let rows =
+            br#"[{"id":"a1","state":"working","sessionId":"s-1"},{"id":"b2","state":"done"}]"#;
+        assert_eq!(
+            state_of(rows, "a1").unwrap(),
+            Some(("working".to_string(), Some("s-1".to_string())))
+        );
+        assert_eq!(
+            state_of(rows, "b2").unwrap(),
+            Some(("done".to_string(), None))
+        );
+        assert_eq!(state_of(rows, "zz").unwrap(), None);
+        assert!(state_of(b"not json", "a1").is_err());
+    }
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
 
