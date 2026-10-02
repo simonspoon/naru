@@ -5,6 +5,7 @@
 import type { AgentChild } from './types/AgentChild'
 import type { AgentSession } from './types/AgentSession'
 import type { Project } from './types/Project'
+import { attributeAlarms } from './agentAlarm'
 import { orderedChildren } from './agentChild'
 import { parseTimestamp } from './time'
 
@@ -147,14 +148,21 @@ export const STALE_CHILD_MS = 60 * 60 * 1000
  * for over `STALE_CHILD_MS` under a finished session is a shell nothing
  * ever reaped (a hung pipeline in a process that outlived its work), and
  * showing it as "running" for days is the ghost mesa task 1561 reported.
- * A child with no start time is kept: absence is not age.
+ * A child with no start time is kept: absence is not age. `withHidden` keeps
+ * the alarm-attributed shells too (see `childRowsOf`).
  */
 export function visibleChildren(
   a: Pick<AgentSession, 'state' | 'children'>,
   now: number,
+  withHidden = false,
 ): AgentChild[] {
-  if (a.state !== 'done') return a.children
-  return a.children.filter((c) => {
+  // A timer shell attributed to a subagent is that card's countdown, not a
+  // row (`agentAlarm.ts`) — dropped here so the lingering path never sees it.
+  const { hidden } = attributeAlarms(a.children)
+  const children =
+    withHidden || hidden.size === 0 ? a.children : a.children.filter((c) => !hidden.has(c))
+  if (a.state !== 'done') return children
+  return children.filter((c) => {
     if (c.state !== 'running' || c.startedAt === null) return true
     const started = parseTimestamp(c.startedAt).getTime()
     return !Number.isFinite(started) || now - started < STALE_CHILD_MS
@@ -184,10 +192,13 @@ export function childKeys(parentSessionId: string, children: AgentChild[]): stri
 /** One child with the session it hangs off. */
 export type ChildRow = { key: string; parent: string; child: AgentChild }
 
-/** Every visible child of every session, flat. */
-export function childRowsOf(sessions: AgentSession[], now: number): ChildRow[] {
+/** Every visible child of every session, flat. `withHidden` also lists the
+ * timer shells hidden behind a subagent's countdown: pass it for the *next*
+ * poll in `reconcileChildLingering`, so a shell that became hidden between
+ * polls still counts as present and is not dissolved as a departed card. */
+export function childRowsOf(sessions: AgentSession[], now: number, withHidden = false): ChildRow[] {
   return sessions.flatMap((s) => {
-    const children = visibleChildren(s, now)
+    const children = visibleChildren(s, now, withHidden)
     const keys = childKeys(s.sessionId, children)
     return children.map((child, i) => ({ key: keys[i], parent: s.sessionId, child }))
   })

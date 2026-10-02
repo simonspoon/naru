@@ -179,6 +179,17 @@ describe('child lingering', () => {
     expect(reconcileChildLingering(l, next, next, NOW + 100)).toBe(l)
     expect(reconcileChildLingering(l, next, next, NOW + LINGER_MS)).toEqual([])
   })
+  it('does not dissolve a shell that became hidden behind a subagent timer', () => {
+    const t0 = '2026-10-01 11:59:00'
+    const shell = kid({ command: 'sleep 1200 & wait', startedAt: t0 })
+    const sub = kid({ id: 'agent-x', kind: 'subagent', name: 'Explore', startedAt: t0 })
+    const prev = childRowsOf([parent([shell])], NOW)
+    expect(prev).toHaveLength(1)
+    const nextSessions = [parent([shell, sub])]
+    expect(childRowsOf(nextSessions, NOW).map((r) => r.child)).toEqual([sub])
+    expect(reconcileChildLingering([], prev, childRowsOf(nextSessions, NOW), NOW)).toHaveLength(1)
+    expect(reconcileChildLingering([], prev, childRowsOf(nextSessions, NOW, true), NOW)).toEqual([])
+  })
   it('lists live children first, then dissolving ones flagged leaving', () => {
     const prev = childRowsOf([parent([a, b])], NOW)
     const l = reconcileChildLingering([], prev, childRowsOf([parent([a])], NOW), NOW)

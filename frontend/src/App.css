@@ -11737,6 +11737,16 @@ body.live-panel-ratio-resizing .live-panel-divider {
   cursor: pointer;
 }
 
+.agent-subcard-alarm {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 0.15rem;
+  font-size: 0.68rem;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
 .agent-subcard-btn .agent-child-tag {
   margin-left: 0.4rem;
 }

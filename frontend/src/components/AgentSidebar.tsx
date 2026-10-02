@@ -20,6 +20,7 @@ import {
 } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { getLive, listAllAgents, listProjects, spawnProjectAgent, stopAgent } from '../api'
+import { attributeAlarms, formatCountdown, remainingMs } from '../agentAlarm'
 import { projectForCwd } from '../agentProject'
 import {
   childElapsed,
@@ -652,6 +653,24 @@ function MaximizeGlyph({ restore }: { restore: boolean }) {
   )
 }
 
+/** A subagent's attributed timer: ⏰ and the time left, on its own 1s tick so
+ * the rest of the sidebar keeps its 30s one. Nothing once it has run out. */
+function AlarmBadge({ endsAt }: { endsAt: number }) {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(t)
+  }, [])
+  const left = remainingMs(endsAt, now)
+  if (left === null) return null
+  const text = formatCountdown(left)
+  return (
+    <div className="agent-subcard-alarm" title={`alarm: ${text} left`}>
+      <span aria-hidden="true">⏰</span>&nbsp;{text}
+    </div>
+  )
+}
+
 /** Props the 'Agents' list rail needs from `AgentSidebar`'s own state/data —
  * bundled into one object and spread onto `AgentListContent` below. */
 type ListPaneProps = {
@@ -735,6 +754,7 @@ function AgentListContent({
     // The work this session holds in flight: each child is a card of its own
     // right under it (mesa tasks 1277, 1561), not a row inside it.
     const subs = cardChildren(a.sessionId, visibleChildren(a, nowMs), childLingering)
+    const alarmEnds = attributeAlarms(a.children).endsAt
     return (
       <Fragment key={a.sessionId}>
       <li
@@ -895,6 +915,9 @@ function AgentListContent({
                 <div className="agent-card-doing" title={body}>
                   {child.kind === 'shell' && child.description === null ? `$ ${body}` : body}
                 </div>
+              )}
+              {!done && alarmEnds.has(child) && (
+                <AlarmBadge endsAt={alarmEnds.get(child) as number} />
               )}
             </button>
           </li>
@@ -1589,7 +1612,9 @@ export function AgentSidebar({
     const now = Date.now()
     const rows = childRowsOf(sessions, now)
     setLingering((l) => reconcileLingering(l, prev, sessions, now))
-    setChildLingering((l) => reconcileChildLingering(l, childRowsOf(prev, now), rows, now))
+    setChildLingering((l) =>
+      reconcileChildLingering(l, childRowsOf(prev, now), childRowsOf(sessions, now, true), now),
+    )
     setSeen((s) =>
       markSeenKeys(
         markSeen(s, sessions, now),
@@ -1606,7 +1631,7 @@ export function AgentSidebar({
     const t = setTimeout(() => {
       setLingering((l) => reconcileLingering(l, [], current, Date.now()))
       setChildLingering((l) =>
-        reconcileChildLingering(l, [], childRowsOf(current, Date.now()), Date.now()),
+        reconcileChildLingering(l, [], childRowsOf(current, Date.now(), true), Date.now()),
       )
     }, wait)
     return () => clearTimeout(t)
