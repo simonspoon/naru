@@ -326,6 +326,14 @@ pub const DEFAULT_RETRO: &str =
 /// accepts both forms. A local model has no such switch, so `{thinking}` is
 /// ignored there; its prompt goes in on stdin so a prompt starting with `-`
 /// can never read as a flag.
+///
+/// **No tools.** `--tools ""` disables every built-in tool and
+/// `--strict-mcp-config` (with no `--mcp-config`) every MCP server: a prompt
+/// node is a pure text call over *untrusted* upstream text (a transcript, a
+/// command's output), and a model that could act on that text would turn a
+/// workflow into a prompt-injection path to the shell. Checked against the
+/// real `claude -p --model haiku`: with the flag a request to `touch` a file
+/// leaves none, without it the file is created.
 pub const DEFAULT_WORKFLOW_PROMPT: &str = r#"model={model}
 case "$model" in
   local:*)
@@ -337,7 +345,7 @@ case "$model" in
     else
       settings='{"alwaysThinkingEnabled":false}'
     fi
-    claude -p --model "$model" --settings "$settings" -- {prompt}
+    claude -p --model "$model" --tools "" --strict-mcp-config --settings "$settings" -- {prompt}
     ;;
 esac"#;
 

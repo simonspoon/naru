@@ -509,10 +509,12 @@ fn workflow_watcher_tick(state: &AppState) {
                 Ok(s) => s,
                 Err(e) => e.into_inner(),
             };
-            workflow::claim_run(&mut store, id, WorkflowTrigger::Time, "")
+            workflow::claim_time_run(&mut store, id)
         };
         match claimed {
-            Ok((view, run)) => {
+            // Another claimer got the interval first (or it is no longer due).
+            Ok(None) => {}
+            Ok(Some((view, run))) => {
                 if let Err(e) = workflow::execute_run(&*state.store, &view, run) {
                     eprintln!("workflow-watcher: workflow {id} could not finish its run: {e}");
                 }
@@ -2460,6 +2462,24 @@ pub fn serve(
             }
             Ok(_) => {}
             Err(e) => eprintln!("mesa: could not reconcile script runs: {e}"),
+        }
+    }
+    // The same for workflow runs (mesa task 1607): a run whose owning process
+    // is dead (or is us, at start-up) is closed `failed`; a live foreign
+    // owner — a CLI run, a second `serve` — is never touched.
+    {
+        let mut store = state.store.lock().unwrap();
+        let pid = std::process::id() as i64;
+        match store.reconcile_workflow_runs(pid, script_runs::pid_is_live) {
+            Ok(ids) if !ids.is_empty() => {
+                eprintln!(
+                    "naru: closed {} workflow run(s) abandoned by a restart: {:?}",
+                    ids.len(),
+                    ids
+                );
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!("naru: could not reconcile workflow runs: {e}"),
         }
     }
     let host = if lan { "0.0.0.0" } else { "127.0.0.1" };

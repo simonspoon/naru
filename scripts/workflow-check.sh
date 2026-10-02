@@ -328,18 +328,21 @@ run 0 "$NARU" workflow run Prompting --input 'buy $(touch /tmp/NARU_PWN) milk'
 [ "$(jqs .status)" = "succeeded" ] || fail "prompt run: $STDOUT"
 [ "$(jqs '.steps[1].output')" = "idea: buy milk" ] || fail "the model's answer is the node output, trimmed: $STDOUT"
 [ ! -e /tmp/NARU_PWN ] || { rm -f /tmp/NARU_PWN; fail "a hostile input was executed"; }
-[ "$(cat "$STUB_DIR/argc")" = "7" ] || fail "claude argv count: $(cat "$STUB_DIR/argc")"
+[ "$(cat "$STUB_DIR/argc")" = "10" ] || fail "claude argv count: $(cat "$STUB_DIR/argc")"
+# A prompt node is a pure text call: no tools, no MCP servers (its input is untrusted upstream text).
 [ "$(argv 0)" = "-p" ] && [ "$(argv 1)" = "--model" ] && [ "$(argv 2)" = "haiku" ] &&
-  [ "$(argv 3)" = "--settings" ] && [ "$(argv 4)" = '{"alwaysThinkingEnabled":false}' ] &&
-  [ "$(argv 5)" = "--" ] || fail "claude argv (thinking off): $(for i in 0 1 2 3 4 5 6; do echo "[$(argv $i)]"; done)"
+  [ "$(argv 3)" = "--tools" ] && [ "$(wc -c < "$STUB_DIR/argv.4" | tr -d ' ')" = "0" ] &&
+  [ "$(argv 5)" = "--strict-mcp-config" ] &&
+  [ "$(argv 6)" = "--settings" ] && [ "$(argv 7)" = '{"alwaysThinkingEnabled":false}' ] &&
+  [ "$(argv 8)" = "--" ] || fail "claude argv (thinking off): $(for i in 0 1 2 3 4 5 6 7 8 9; do echo "[$(argv $i)]"; done)"
 EXPECTED_PROMPT=$'Tag this as idea/todo/note.\n\nbuy $(touch /tmp/NARU_PWN) milk'
-[ "$(argv 6)" = "$EXPECTED_PROMPT" ] || fail "the prompt is the node's text, a blank line, then the input: $(argv 6)"
+[ "$(argv 9)" = "$EXPECTED_PROMPT" ] || fail "the prompt is the node's text, a blank line, then the input: $(argv 9)"
 ok "prompt node: claude -p --model haiku --settings {alwaysThinkingEnabled:false} -- <prompt>\\n\\n<input>, the answer trimmed, hostile input inert"
 
 run 0 "$NARU" workflow node update "$PP" --config '{"model":"opus","thinking":true,"prompt":"P"}'
 run 0 "$NARU" workflow run Prompting
-[ "$(argv 2)" = "opus" ] && [ "$(argv 4)" = '{"alwaysThinkingEnabled":true}' ] || fail "thinking on / opus argv"
-[ "$(argv 6)" = "P" ] || fail "an empty input adds no blank line: [$(argv 6)]"
+[ "$(argv 2)" = "opus" ] && [ "$(argv 7)" = '{"alwaysThinkingEnabled":true}' ] || fail "thinking on / opus argv"
+[ "$(argv 9)" = "P" ] || fail "an empty input adds no blank line: [$(argv 9)]"
 ok "prompt node: opus with thinking on passes alwaysThinkingEnabled:true; an empty input adds nothing to the prompt"
 
 touch "$STUB_DIR/claude-fail"
@@ -375,6 +378,24 @@ run 0 "$NARU" workflow run Scripting --input x
 [ "$(jqs .status)" = "failed" ] && grep -q "no script named" <<<"$(jqs '.steps[1].error')" || fail "an unknown script fails the node: $STDOUT"
 ok "script node: an unknown script is a node failure"
 
+run 0 "$NARU" script create sleeper 'sleep 30'
+run 0 "$NARU" workflow node update "$SS" --config '{"script":"sleeper","timeout_secs":1}'
+START=$(date +%s)
+run 0 "$NARU" workflow run Scripting --input x
+[ $(($(date +%s) - START)) -lt 15 ] || fail "a script node must be killed at its timeout_secs"
+grep -q "timed out" <<<"$(jqs '.steps[1].error')" || fail "script timeout error: $STDOUT"
+run 1 "$NARU" workflow node update "$SS" --config '{"script":"x","timeout_secs":0}'
+[ "$(jqe .error.code)" = "validation" ] || fail "script timeout_secs 0: validation"
+ok "script node: past its timeout_secs the script's process group is killed and the node fails"
+
+run 1 "$NARU" workflow node create Scripting prompt Dash --config '{"model":"local:-h","prompt":"x"}'
+[ "$(jqe .error.code)" = "validation" ] || fail "a local model starting with '-': validation"
+run 1 "$NARU" workflow log --limit 0
+[ "$(jqe .error.code)" = "validation" ] || fail "log --limit 0: validation, got $STDERR"
+run 1 "$NARU" workflow log --limit 5000
+[ "$(jqe .error.code)" = "validation" ] || fail "log --limit 5000: validation"
+ok "local: model names starting with '-' and an out-of-range log --limit are validation"
+
 # ================= task and inbox outputs =================
 
 run 0 "$NARU" task create "$P" "the origin task" --quiet
@@ -400,8 +421,10 @@ run 0 "$NARU" inbox list
 ok "output nodes: target task creates a task in the named project, target inbox files an item for its task"
 
 run 0 "$NARU" workflow run Filing
-[ "$(jqs .status)" = "failed" ] && grep -q "must not be empty" <<<"$(jqs '.steps[1].error')" || fail "an empty input cannot file a task: $STDOUT"
-ok "an output node given no text fails rather than filing an empty record"
+[ "$(jqs '.steps | map(select(.title == "File task")) | .[0].output')" = "nothing to deliver" ] || fail "an empty input files nothing and says so: $STDOUT"
+run 0 "$NARU" task list "$P"
+[ "$(jqs 'length')" = "2" ] || fail "an empty input created no task: $STDOUT"
+ok "an output node given no text delivers nothing (output \"nothing to deliver\", no record) rather than failing the run"
 
 run 0 "$NARU" workflow node create Filing output "Board" --config '{"target":"board"}'
 "$NARU" workflow edge create Filing "$GT" "$(jqs .id)" >/dev/null
@@ -553,6 +576,8 @@ api 200 PATCH "/api/workflow-nodes/$AC" '{"title":"Shouting","x":120}'
 [ "$(jqb .title)" = "Shouting" ] && [ "$(jqb '.x == 120')" = "true" ] || fail "API node patch"
 api 422 PATCH "/api/workflow-nodes/$AC" '{"config":{"nope":1}}'
 api 404 GET /api/workflow-runs/999999
+api 422 GET "/api/workflow-log?limit=0"
+api 422 GET "/api/workflow-log?limit=5000"
 ok "API: show, list, patch (description null clears), node patch and its validation, unknown run 404"
 
 api 200 POST "/api/workflows/$AW/run" '{"input":"hello api"}'
@@ -564,10 +589,10 @@ api 200 GET "/api/workflow-runs/$AR"
 [ "$(jqb .input)" = "hello api" ] || fail "API run show"
 api 200 GET "/api/workflow-log?log=api&limit=5"
 [ "$(jqb '.[0].text')" = "HELLO API" ] || fail "API log: $BODY"
-# No input: the trigger hands on "", the log node refuses an empty line, so the
-# run is recorded as failed — still a 200.
+# No input: the trigger hands on "", the log node has nothing to deliver and
+# says so — the run succeeds.
 api 200 POST "/api/workflows/$AW/run" '{}'
-[ "$(jqb .status)" = "failed" ] || fail "API run with no input: $BODY"
+[ "$(jqb .status)" = "succeeded" ] && [ "$(jqb '.steps[2].output')" = "nothing to deliver" ] || fail "API run with no input: $BODY"
 api 422 POST "/api/workflows/$AW/run" "{\"input\":\"$(head -c 300000 /dev/zero | tr '\0' x)\"}"
 api 404 POST /api/workflows/999999/run '{}'
 api 200 DELETE "/api/workflow-edges/$AE"

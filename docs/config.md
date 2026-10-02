@@ -57,10 +57,17 @@ case "$model" in
     else
       settings='{"alwaysThinkingEnabled":false}'
     fi
-    claude -p --model "$model" --settings "$settings" -- {prompt}
+    claude -p --model "$model" --tools "" --strict-mcp-config --settings "$settings" -- {prompt}
     ;;
 esac
 ```
+
+The call has **no tools**: `--tools ""` disables every built-in tool and
+`--strict-mcp-config` (with no `--mcp-config`) every MCP server, because a
+prompt node is a pure text call over *untrusted* upstream text and a model that
+could act on it would be a prompt-injection path to the shell. Checked against
+the real `claude -p --model haiku`: it still answers, and a request to `touch`
+a file leaves none (without the flag the file is created).
 
 `{model}` is `haiku`, `sonnet`, `opus` or `local:<name>`; `{thinking}` is `on`
 or `off`; `{prompt}` is the node's prompt text, a blank line, then the node's

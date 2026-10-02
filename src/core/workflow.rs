@@ -45,6 +45,13 @@ pub const DEFAULT_PROMPT_TIMEOUT_SECS: u64 = 600;
 /// `NARU_INPUT` is exported only up to this size: a process environment has
 /// a hard limit, and stdin always carries the whole input anyway.
 const ENV_INPUT_MAX: usize = 64 * 1024;
+/// The most text a node may pass as **argv or environment** — a `prompt`
+/// node's prompt (one quoted word in the `bash -c` script) and the sum of a
+/// `script` node's values (each rides as `$n` and two `*_ARG_*` variables).
+/// Over it the node fails with a message naming the limit, rather than the
+/// OS refusing the exec with `Argument list too long`. A `cli` node has no
+/// such limit: its input rides on stdin.
+const ARG_INPUT_MAX: usize = 64 * 1024;
 
 /// How the engine reaches the store: lock, run `f`, unlock. Implemented for
 /// `Mutex<Store>`, which is all both callers need — and a trait rather than a
@@ -187,6 +194,7 @@ pub fn validate_config(
             let model = required_str(name, obj, "model")?;
             let local = model.strip_prefix("local:").is_some_and(|n| {
                 !n.is_empty()
+                    && !n.starts_with('-')
                     && n.chars().all(|c| {
                         c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':' | '/')
                     })
@@ -216,7 +224,7 @@ pub fn validate_config(
             }
         }
         WorkflowNodeKind::Script => {
-            only_keys(name, obj, &["script", "values"])?;
+            only_keys(name, obj, &["script", "values", "timeout_secs"])?;
             match obj.get("script") {
                 Some(Value::String(s)) if !s.trim().is_empty() => {
                     out.insert("script".into(), json!(s.trim()));
@@ -245,6 +253,9 @@ pub fn validate_config(
                 }
             }
             out.insert("values".into(), Value::Object(values));
+            if let Some(n) = optional_int(name, obj, "timeout_secs", 1..=86400)? {
+                out.insert("timeout_secs".into(), json!(n));
+            }
         }
         WorkflowNodeKind::Branch => {
             only_keys(name, obj, &["op", "value"])?;
@@ -418,6 +429,21 @@ pub fn claim_run(
     Ok((view, run))
 }
 
+/// The time watcher's claim: [`Store::claim_time_workflow_run`] (the due
+/// check and the `running` row are one statement under `BEGIN IMMEDIATE`)
+/// plus the view the run needs. `None` when the workflow is not due — most
+/// often because another claimer got the interval first.
+pub fn claim_time_run(
+    store: &mut Store,
+    workflow_id: i64,
+) -> Result<Option<(WorkflowView, WorkflowRun)>> {
+    let view = store.get_workflow_view(workflow_id)?;
+    trigger_of(&view)?;
+    Ok(store
+        .claim_time_workflow_run(workflow_id)?
+        .map(|run| (view, run)))
+}
+
 /// Runs a workflow to completion and answers its finished run record. A run
 /// that *failed* is still `Ok` — the record says `failed` and carries the
 /// steps; `Err` is only "could not run at all" (unknown workflow, no or two
@@ -481,6 +507,16 @@ pub fn execute_run<A: StoreAccess>(
         Ok(id) => id,
         Err(e) => return finish(WorkflowRunStatus::Failed, &[], Some(&e.to_string())),
     };
+    let order = topological_order(view);
+    if order.len() != view.nodes.len() {
+        // `Store` refuses every cycle, so this is a hand-edited database; a
+        // run over it would silently skip the nodes the sort dropped.
+        return finish(
+            WorkflowRunStatus::Failed,
+            &[],
+            Some("the graph is not a DAG (a cycle in the database); refusing to run it"),
+        );
+    }
     let nodes: HashMap<i64, &WorkflowNode> = view.nodes.iter().map(|n| (n.id, n)).collect();
     let project_dir = view.workflow.project_id.and_then(|id| {
         access
@@ -496,7 +532,7 @@ pub fn execute_run<A: StoreAccess>(
     let mut done: HashMap<i64, Done> = HashMap::new();
     let mut steps: Vec<WorkflowStep> = Vec::new();
     let mut failure: Option<String> = None;
-    for id in topological_order(view) {
+    for id in order {
         let node = nodes[&id];
         let skipped = |node: &WorkflowNode| WorkflowStep {
             node_id: node.id,
@@ -637,6 +673,13 @@ fn run_node<A: StoreAccess>(
             } else {
                 format!("{prompt}\n\n{input}")
             };
+            if full.len() > ARG_INPUT_MAX {
+                return Err(format!(
+                    "the prompt and its input are {} bytes, over the {ARG_INPUT_MAX}-byte limit \
+                     for a prompt node (it travels as one argument); shorten the input upstream",
+                    full.len()
+                ));
+            }
             let timeout = cfg
                 .get("timeout_secs")
                 .and_then(Value::as_u64)
@@ -713,7 +756,24 @@ fn run_node<A: StoreAccess>(
                         .collect()
                 })
                 .unwrap_or_default();
-            let run = scripts::run(&script, &values, Some(&dir))?;
+            let total: usize = values.values().map(String::len).sum();
+            if total > ARG_INPUT_MAX {
+                return Err(format!(
+                    "the script's values total {total} bytes, over the {ARG_INPUT_MAX}-byte limit \
+                     for a script node (they travel as arguments and environment); \
+                     shorten the input upstream"
+                ));
+            }
+            let timeout = cfg
+                .get("timeout_secs")
+                .and_then(Value::as_u64)
+                .unwrap_or(DEFAULT_CLI_TIMEOUT_SECS);
+            let run = scripts::run_with_timeout(
+                &script,
+                &values,
+                Some(&dir),
+                Duration::from_secs(timeout),
+            )?;
             if run.exit_code != 0 {
                 return Err(format!("exited {}: {}", run.exit_code, run.stderr.trim()));
             }
@@ -724,6 +784,12 @@ fn run_node<A: StoreAccess>(
             Ok((input.to_string(), Some(verdict)))
         }
         WorkflowNodeKind::Output => {
+            // A silent run (an empty transcript, a filter that let nothing
+            // through) has nothing to deliver, and that is not a failure: the
+            // node succeeds, says so, and writes no record.
+            if input.trim().is_empty() {
+                return Ok(("nothing to deliver".to_string(), None));
+            }
             let receipt = match str_of("target") {
                 "log" => {
                     let entry = access
@@ -1294,7 +1360,9 @@ mod tests {
             run_workflow(&st, wf, WorkflowTrigger::Manual, "").unwrap();
         }
         let runs = st.with(|s| s.list_workflow_runs(wf)).unwrap();
-        assert_eq!(runs.len() as i64, crate::core::store::WORKFLOW_RUN_KEEP);
+        // Pruned on insert, before the newest run is finished: the 50 kept
+        // finished runs plus the one just written.
+        assert_eq!(runs.len() as i64, crate::core::store::WORKFLOW_RUN_KEEP + 1);
         assert!(runs[0].id > runs[1].id);
     }
 
@@ -1398,5 +1466,274 @@ mod tests {
         });
         run_workflow(&st, other, WorkflowTrigger::Manual, "").unwrap();
         assert_eq!(st.with(|s| s.due_time_workflows()).unwrap(), vec![other]);
+    }
+    #[test]
+    fn local_model_names_cannot_start_with_a_dash_and_script_takes_a_timeout() {
+        let bad = |c: Value| validate_config(WorkflowNodeKind::Prompt, &c).unwrap_err();
+        assert!(bad(json!({"model": "local:-h", "prompt": "x"})).contains("model"));
+        assert!(
+            validate_config(
+                WorkflowNodeKind::Prompt,
+                &json!({"model": "local:hf.co/a/b:Q4", "prompt": "x"})
+            )
+            .is_ok()
+        );
+        let ok = validate_config(
+            WorkflowNodeKind::Script,
+            &json!({"script": "s", "timeout_secs": 5}),
+        )
+        .unwrap();
+        assert_eq!(ok["timeout_secs"], json!(5));
+        assert!(
+            validate_config(
+                WorkflowNodeKind::Script,
+                &json!({"script": "s", "timeout_secs": 0})
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_script_node_times_out_and_refuses_oversized_values() {
+        let (st, _d) = store();
+        let wf = st.with(|s| {
+            s.create_script(
+                None,
+                "slow",
+                None,
+                "case \"$1\" in slow) sleep 30;; *) printf '%s' \"$1\";; esac",
+                &[crate::core::types::ScriptArg {
+                    name: "t".into(),
+                    label: None,
+                    kind: crate::core::types::ScriptArgKind::Text,
+                    required: true,
+                    default: None,
+                    choices: None,
+                }],
+            )
+            .unwrap();
+            let wf = s.create_workflow(None, "Scr", None).unwrap().id;
+            let t = node(
+                s,
+                wf,
+                WorkflowNodeKind::Trigger,
+                "T",
+                json!({"mode": "manual"}),
+            );
+            let n = node(
+                s,
+                wf,
+                WorkflowNodeKind::Script,
+                "S",
+                json!({"script": "slow", "values": {"t": "{input}"}, "timeout_secs": 1}),
+            );
+            s.create_workflow_edge(wf, t, n, None).unwrap();
+            wf
+        });
+        let started = Instant::now();
+        let run = run_workflow(&st, wf, WorkflowTrigger::Manual, "slow").unwrap();
+        assert!(started.elapsed() < Duration::from_secs(15));
+        assert_eq!(run.steps[1].status, WorkflowStepStatus::Failed);
+        assert!(run.steps[1].error.as_deref().unwrap().contains("timed out"));
+        let big = "x".repeat(ARG_INPUT_MAX + 1);
+        let run = run_workflow(&st, wf, WorkflowTrigger::Manual, &big).unwrap();
+        assert!(run.steps[1].error.as_deref().unwrap().contains("limit"));
+    }
+
+    #[test]
+    fn an_oversized_prompt_fails_the_node_before_any_process() {
+        let (st, _d) = store();
+        let wf = st.with(|s| {
+            let wf = s.create_workflow(None, "Big", None).unwrap().id;
+            let t = node(
+                s,
+                wf,
+                WorkflowNodeKind::Trigger,
+                "T",
+                json!({"mode": "manual"}),
+            );
+            let p = node(
+                s,
+                wf,
+                WorkflowNodeKind::Prompt,
+                "P",
+                json!({"model": "haiku", "prompt": "p"}),
+            );
+            s.create_workflow_edge(wf, t, p, None).unwrap();
+            wf
+        });
+        let big = "x".repeat(ARG_INPUT_MAX);
+        let run = run_workflow(&st, wf, WorkflowTrigger::Manual, &big).unwrap();
+        assert_eq!(run.steps[1].status, WorkflowStepStatus::Failed);
+        assert!(
+            run.steps[1]
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("byte limit")
+        );
+    }
+
+    #[test]
+    fn empty_input_to_an_output_node_is_nothing_to_deliver_not_a_failure() {
+        let (st, _d) = store();
+        let wf = st.with(|s| {
+            let wf = s.create_workflow(None, "Quiet", None).unwrap().id;
+            let t = node(
+                s,
+                wf,
+                WorkflowNodeKind::Trigger,
+                "T",
+                json!({"mode": "manual"}),
+            );
+            let l = node(
+                s,
+                wf,
+                WorkflowNodeKind::Output,
+                "L",
+                json!({"target": "log"}),
+            );
+            s.create_workflow_edge(wf, t, l, None).unwrap();
+            wf
+        });
+        let run = run_workflow(&st, wf, WorkflowTrigger::Manual, "  \n").unwrap();
+        assert_eq!(run.status, WorkflowRunStatus::Succeeded, "{run:?}");
+        assert_eq!(run.steps[1].output, "nothing to deliver");
+        assert!(
+            st.with(|s| s.list_workflow_log(None, 10))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_cycle_in_the_database_refuses_to_run() {
+        let (st, _d) = store();
+        let (wf, a, b) = st.with(|s| {
+            let wf = s.create_workflow(None, "Loop", None).unwrap().id;
+            let t = node(
+                s,
+                wf,
+                WorkflowNodeKind::Trigger,
+                "T",
+                json!({"mode": "manual"}),
+            );
+            let a = node(s, wf, WorkflowNodeKind::Cli, "A", cli("true"));
+            let b = node(s, wf, WorkflowNodeKind::Cli, "B", cli("true"));
+            s.create_workflow_edge(wf, t, a, None).unwrap();
+            s.create_workflow_edge(wf, a, b, None).unwrap();
+            (wf, a, b)
+        });
+        // Smuggle in the back-edge the store would refuse.
+        st.with(|s| s.force_workflow_edge_for_test(wf, b, a));
+        let run = run_workflow(&st, wf, WorkflowTrigger::Manual, "").unwrap();
+        assert_eq!(run.status, WorkflowRunStatus::Failed);
+        assert!(run.error.as_deref().unwrap().contains("not a DAG"));
+    }
+
+    /// A backgrounded grandchild holds the pipes open after bash exits;
+    /// `capture` must kill the group and return, not wait it out.
+    #[test]
+    fn capture_returns_promptly_past_a_backgrounded_grandchild() {
+        let mut cmd = Command::new("bash");
+        cmd.arg("-c").arg("sleep 1000 & echo done");
+        let started = Instant::now();
+        let out = agents::capture(cmd, None, Duration::from_secs(60)).unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "done\n");
+        assert_eq!(out.code, 0);
+    }
+
+    #[test]
+    fn a_time_claim_is_atomic_across_connections() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        let wf = {
+            let mut s = Store::open(&path).unwrap();
+            let wf = s.create_workflow(None, "Tick", None).unwrap().id;
+            node(
+                &mut s,
+                wf,
+                WorkflowNodeKind::Trigger,
+                "T",
+                json!({"mode": "time", "every_minutes": 5}),
+            );
+            wf
+        };
+        let wins: usize = (0..8)
+            .map(|_| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let mut s = Store::open(&path).unwrap();
+                    s.claim_time_workflow_run(wf).unwrap().is_some() as usize
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .sum();
+        assert_eq!(wins, 1, "exactly one claimer fires an interval");
+        let mut s = Store::open(&path).unwrap();
+        assert!(s.claim_time_workflow_run(wf).unwrap().is_none());
+    }
+
+    #[test]
+    fn pruning_never_deletes_a_running_run_and_reconcile_closes_only_dead_owners() {
+        let (st, _d) = store();
+        st.with(|s| {
+            let wf = s.create_workflow(None, "Keep", None).unwrap().id;
+            node(
+                s,
+                wf,
+                WorkflowNodeKind::Trigger,
+                "T",
+                json!({"mode": "manual"}),
+            );
+            let running = s
+                .create_workflow_run(wf, WorkflowTrigger::Time, "")
+                .unwrap();
+            for _ in 0..(crate::core::store::WORKFLOW_RUN_KEEP + 5) {
+                let r = s
+                    .create_workflow_run(wf, WorkflowTrigger::Manual, "")
+                    .unwrap();
+                s.finish_workflow_run(r.id, WorkflowRunStatus::Succeeded, &[], None)
+                    .unwrap();
+            }
+            let all = s.list_workflow_runs(wf).unwrap();
+            assert!(
+                all.iter().any(|r| r.id == running.id),
+                "the running claim survives pruning"
+            );
+            assert_eq!(
+                all.iter()
+                    .filter(|r| r.status != WorkflowRunStatus::Running)
+                    .count() as i64,
+                crate::core::store::WORKFLOW_RUN_KEEP + 1
+            );
+            // Reconcile: ours (pid 1 here) and dead owners close; a live foreign one stays.
+            s.force_run_owner_for_test(running.id, 424242);
+            assert!(s.reconcile_workflow_runs(1, |_| true).unwrap().is_empty());
+            let closed = s.reconcile_workflow_runs(1, |_| false).unwrap();
+            assert_eq!(closed, vec![running.id]);
+            let r = s.get_workflow_run(running.id).unwrap();
+            assert_eq!(r.status, WorkflowRunStatus::Failed);
+            assert!(r.error.unwrap().contains("server restarted"));
+        });
+    }
+
+    #[test]
+    fn log_limit_out_of_range_is_validation() {
+        let (st, _d) = store();
+        for bad in [0, -1, 1001] {
+            assert!(matches!(
+                st.with(|s| s.list_workflow_log(None, bad)),
+                Err(Error::Validation(_))
+            ));
+        }
+        assert!(st.with(|s| s.list_workflow_log(None, 1000)).is_ok());
     }
 }

@@ -1280,7 +1280,10 @@ const MIGRATIONS: &[&str] = &[
     // (`config` is JSON, validated per kind by `core::workflow`); its edges
     // carry an optional `branch` verdict. Everything cascades from the
     // workflow except the log, whose lines are kept (`ON DELETE SET NULL`
-    // on both pointers): a log is the output the person reads.
+    // on both pointers): a log is the output the person reads. A run row
+    // carries the pid of the process that owns it (`owner_pid`, store-only —
+    // not on `WorkflowRun`), which is all `reconcile_workflow_runs` needs to
+    // close a run a dead process left `running`.
     "DROP TABLE IF EXISTS frame_edges;
      DROP TABLE IF EXISTS frames;
      DROP TABLE IF EXISTS diagram_events;
@@ -1328,7 +1331,8 @@ const MIGRATIONS: &[&str] = &[
         steps       TEXT NOT NULL DEFAULT '[]',
         error       TEXT,
         started_at  TEXT NOT NULL,
-        finished_at TEXT
+        finished_at TEXT,
+        owner_pid   INTEGER
      );
      CREATE INDEX idx_workflow_runs_workflow ON workflow_runs(workflow_id, id);
      CREATE TABLE workflow_log (
@@ -2596,6 +2600,9 @@ pub const WORKFLOW_RUN_KEEP: i64 = 50;
 const WORKFLOW_NAME_MAX: usize = 200;
 /// Largest run input, in bytes: it is stored on the run row and handed to
 /// every downstream node.
+/// The `error` of a run [`Store::reconcile_workflow_runs`] closes.
+pub const WORKFLOW_RUN_ABANDONED: &str =
+    "server restarted: the process running this workflow exited before it finished";
 pub const WORKFLOW_INPUT_MAX: usize = 256 * 1024;
 /// Largest text one log line may carry.
 const WORKFLOW_LOG_TEXT_MAX: usize = 64 * 1024;
@@ -4845,6 +4852,33 @@ impl Store {
         workflow_id: i64,
         new: &WorkflowNodeNew,
     ) -> Result<WorkflowNode> {
+        self.immediate(|s| s.create_workflow_node_checked(workflow_id, new))
+    }
+
+    /// Runs `f` inside `BEGIN IMMEDIATE … COMMIT`, rolling back on error: the
+    /// write lock is taken **before** the check `f` makes, so two writers
+    /// (the CLI and the server are separate processes) cannot both pass a
+    /// check and then both insert — the "at most one trigger" and "no cycle"
+    /// rules are check-then-insert.
+    fn immediate<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        match f(self) {
+            Ok(v) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(v)
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
+    fn create_workflow_node_checked(
+        &mut self,
+        workflow_id: i64,
+        new: &WorkflowNodeNew,
+    ) -> Result<WorkflowNode> {
         self.get_workflow(workflow_id)?;
         let title = validate_workflow_node_title(&new.title)?;
         let config = match &new.config {
@@ -4953,6 +4987,16 @@ impl Store {
     /// (`validation`: required on an edge leaving a branch node, refused on
     /// every other), and an exact duplicate (`conflict`).
     pub fn create_workflow_edge(
+        &mut self,
+        workflow_id: i64,
+        from_node: i64,
+        to_node: i64,
+        branch: Option<WorkflowBranch>,
+    ) -> Result<WorkflowEdge> {
+        self.immediate(|s| s.create_workflow_edge_checked(workflow_id, from_node, to_node, branch))
+    }
+
+    fn create_workflow_edge_checked(
         &mut self,
         workflow_id: i64,
         from_node: i64,
@@ -5098,17 +5142,100 @@ impl Store {
             )));
         }
         self.conn.execute(
-            "INSERT INTO workflow_runs (workflow_id, trigger, input, status, steps, started_at) \
-             VALUES (?1, ?2, ?3, 'running', '[]', datetime('now'))",
-            (workflow_id, trigger.as_str(), input),
+            "INSERT INTO workflow_runs \
+             (workflow_id, trigger, input, status, steps, started_at, owner_pid) \
+             VALUES (?1, ?2, ?3, 'running', '[]', datetime('now'), ?4)",
+            (
+                workflow_id,
+                trigger.as_str(),
+                input,
+                std::process::id() as i64,
+            ),
         )?;
         let id = self.conn.last_insert_rowid();
+        self.prune_workflow_runs(workflow_id)?;
+        self.get_workflow_run(id)
+    }
+
+    /// Keeps the newest [`WORKFLOW_RUN_KEEP`] **finished** runs. A `running`
+    /// row is never pruned: it is a live claim (the time watcher's interval
+    /// check reads it), and deleting one would let its workflow fire again.
+    fn prune_workflow_runs(&self, workflow_id: i64) -> Result<()> {
         self.conn.execute(
-            "DELETE FROM workflow_runs WHERE workflow_id = ?1 AND id NOT IN \
-             (SELECT id FROM workflow_runs WHERE workflow_id = ?1 ORDER BY id DESC LIMIT ?2)",
+            "DELETE FROM workflow_runs WHERE workflow_id = ?1 AND status != 'running' \
+             AND id NOT IN (SELECT id FROM workflow_runs \
+                 WHERE workflow_id = ?1 AND status != 'running' ORDER BY id DESC LIMIT ?2)",
             (workflow_id, WORKFLOW_RUN_KEEP),
         )?;
-        self.get_workflow_run(id)
+        Ok(())
+    }
+
+    /// Claims a time-triggered run **atomically**: inside `BEGIN IMMEDIATE`,
+    /// one `INSERT … SELECT … WHERE NOT EXISTS` writes the `running` row only
+    /// if the workflow's trigger is `mode: time` and no run with
+    /// `trigger = time` started within its `every_minutes` — the due check
+    /// and the claim are one statement under the write lock, so two servers
+    /// (or a tick racing a restart) cannot both fire one interval. `None`
+    /// when it is not due (or has no time trigger).
+    pub fn claim_time_workflow_run(&mut self, workflow_id: i64) -> Result<Option<WorkflowRun>> {
+        self.immediate(|s| {
+            let n = s.conn.execute(
+                "INSERT INTO workflow_runs \
+                 (workflow_id, trigger, input, status, steps, started_at, owner_pid) \
+                 SELECT w.id, 'time', '', 'running', '[]', datetime('now'), ?2 \
+                 FROM workflows w \
+                 JOIN workflow_nodes n ON n.workflow_id = w.id AND n.kind = 'trigger' \
+                 WHERE w.id = ?1 AND json_extract(n.config, '$.mode') = 'time' \
+                   AND NOT EXISTS (SELECT 1 FROM workflow_runs r \
+                        WHERE r.workflow_id = w.id AND r.trigger = 'time' \
+                          AND r.started_at > datetime('now', \
+                              '-' || json_extract(n.config, '$.every_minutes') || ' minutes'))",
+                (workflow_id, std::process::id() as i64),
+            )?;
+            if n == 0 {
+                return Ok(None);
+            }
+            let id = s.conn.last_insert_rowid();
+            s.prune_workflow_runs(workflow_id)?;
+            Ok(Some(s.get_workflow_run(id)?))
+        })
+    }
+
+    /// Closes every `running` workflow run this process cannot own, called
+    /// once by `serve` before it binds ([`Store::reconcile_script_runs`]'s
+    /// rule, for the same reasons): a run whose `owner_pid` is dead, missing
+    /// or equal to `our_pid` becomes `failed` with a note naming the
+    /// restart; a run owned by another **live** process (a CLI run, a second
+    /// `serve`) is never touched. Returns the ids it closed.
+    pub fn reconcile_workflow_runs(
+        &mut self,
+        our_pid: i64,
+        live: impl Fn(i64) -> bool,
+    ) -> Result<Vec<i64>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, owner_pid FROM workflow_runs WHERE status = 'running'")?;
+        let rows: Vec<(i64, Option<i64>)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(stmt);
+        let mut closed = Vec::new();
+        for (id, owner) in rows {
+            let abandoned = match owner {
+                None => true,
+                Some(pid) => pid == our_pid || !live(pid),
+            };
+            if !abandoned {
+                continue;
+            }
+            self.conn.execute(
+                "UPDATE workflow_runs SET status = 'failed', error = ?1, \
+                 finished_at = datetime('now') WHERE id = ?2 AND status = 'running'",
+                (WORKFLOW_RUN_ABANDONED, id),
+            )?;
+            closed.push(id);
+        }
+        Ok(closed)
     }
 
     /// Closes a `running` run with its outcome. `not_found` for an unknown id,
@@ -5223,12 +5350,39 @@ impl Store {
         log: Option<&str>,
         limit: i64,
     ) -> Result<Vec<WorkflowLogEntry>> {
+        if !(1..=1000).contains(&limit) {
+            return Err(Error::Validation(format!(
+                "a log limit is 1 to 1000, got {limit}"
+            )));
+        }
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {WORKFLOW_LOG_COLUMNS} FROM workflow_log \
              WHERE (?1 IS NULL OR log = ?1 COLLATE NOCASE) ORDER BY id DESC LIMIT ?2"
         ))?;
-        let rows = stmt.query_map((log, limit.clamp(1, 1000)), row_to_workflow_log)?;
+        let rows = stmt.query_map((log, limit), row_to_workflow_log)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Test seams for `core::workflow`'s tests: write what `Store` itself
+    /// would refuse (a back-edge), or set a run's owner.
+    #[cfg(test)]
+    pub(crate) fn force_workflow_edge_for_test(&mut self, wf: i64, from: i64, to: i64) {
+        self.conn
+            .execute(
+                "INSERT INTO workflow_edges (workflow_id, from_node, to_node) VALUES (?1, ?2, ?3)",
+                (wf, from, to),
+            )
+            .unwrap();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_run_owner_for_test(&mut self, run: i64, pid: i64) {
+        self.conn
+            .execute(
+                "UPDATE workflow_runs SET owner_pid = ?1 WHERE id = ?2",
+                (pid, run),
+            )
+            .unwrap();
     }
 
     // ---- inbox (global update requests) ----

@@ -208,6 +208,32 @@ pub fn run(
     })
 }
 
+/// [`run`] with a deadline: the same validation and [`command`], run through
+/// `agents::capture` — its own process group, both pipes drained on threads,
+/// the group killed at `timeout` (`Err("timed out after Ns")`). Output is
+/// the child's bytes capped at 64 KiB per stream, so a value a script echoes
+/// back arrives exactly as written (the streamed run's line events cannot
+/// promise that). A workflow `script` node runs through this.
+pub fn run_with_timeout(
+    script: &Script,
+    values: &BTreeMap<String, String>,
+    cwd: Option<&str>,
+    timeout: Duration,
+) -> Result<ScriptRun, String> {
+    let resolved = validate_values(&script.args, values)?;
+    let out = crate::core::agents::capture(command(script, &resolved, cwd), None, timeout)
+        .map_err(|e| format!("script {:?}: {e}", script.name))?;
+    let (stdout, out_cut) = capped(&out.stdout);
+    let (stderr, err_cut) = capped(&out.stderr);
+    Ok(ScriptRun {
+        script_id: script.id,
+        exit_code: out.code,
+        stdout,
+        stderr,
+        truncated: out_cut || err_cut,
+    })
+}
+
 /// A script started by [`start`], not yet read. Dropping it without calling
 /// [`Streaming::stream`] kills it.
 pub struct Streaming {

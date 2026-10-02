@@ -915,17 +915,28 @@ pub fn capture(
         .spawn()
         .map_err(|e| format!("failed to start {:?}: {e}", cmd.get_program()))?;
     let pgid = child.id();
+    let kill_group = || {
+        let _ = Command::new("kill")
+            .args(["-KILL", "--", &format!("-{pgid}")])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    };
     let mut pipe_in = child.stdin.take().expect("stdin was piped");
-    let writer = std::thread::spawn(move || {
+    std::thread::spawn(move || {
         // A child that exits without reading is not an error.
         let _ = pipe_in.write_all(&stdin.unwrap_or_default());
     });
+    // Each reader reports through a channel, so a join is a bounded
+    // `recv_timeout` rather than a wait on a pipe a stray descendant may hold.
     let drain = |mut pipe: Box<dyn Read + Send>| {
+        let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let mut buf = Vec::new();
             let _ = pipe.read_to_end(&mut buf);
-            buf
-        })
+            let _ = tx.send(buf);
+        });
+        rx
     };
     let out = drain(Box::new(child.stdout.take().expect("stdout was piped")));
     let err = drain(Box::new(child.stderr.take().expect("stderr was piped")));
@@ -934,11 +945,7 @@ pub fn capture(
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if started.elapsed() >= timeout => {
-                let _ = Command::new("kill")
-                    .args(["-KILL", "--", &format!("-{pgid}")])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
+                kill_group();
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(format!("timed out after {}s", timeout.as_secs()));
@@ -947,11 +954,16 @@ pub fn capture(
             Err(e) => return Err(format!("failed to wait for the process: {e}")),
         }
     };
-    let _ = writer.join();
+    // The leader is gone. Anything it backgrounded (`sleep 1000 &`) still
+    // holds the pipes open and would block the readers for its whole life, so
+    // the group is killed first; the reads are then bounded anyway, for a
+    // descendant that left the group.
+    kill_group();
+    let grace = std::time::Duration::from_secs(2);
     Ok(Captured {
         code: status.code().unwrap_or(-1),
-        stdout: out.join().unwrap_or_default(),
-        stderr: err.join().unwrap_or_default(),
+        stdout: out.recv_timeout(grace).unwrap_or_default(),
+        stderr: err.recv_timeout(grace).unwrap_or_default(),
     })
 }
 

@@ -18,7 +18,7 @@ Source of truth: `src/core/workflow.rs` (validation and engine),
 | `workflows` | `id`, `project_id` (nullable, `ON DELETE CASCADE`), `name`, `description`, timestamps | `name` is unique **case-insensitively across all workflows** (so the CLI and the voice agent can run one by name) and never a plain number (`<id\|name>` tries the integer first) |
 | `workflow_nodes` | `id`, `workflow_id` (cascade), `kind`, `title` (≤ 200), `config` (JSON), `x`, `y`, timestamps | `kind` is fixed at creation; `config` is validated per kind |
 | `workflow_edges` | `id`, `workflow_id` (cascade), `from_node`, `to_node` (both cascade), `branch` | a DAG: no self-edge, no cycle |
-| `workflow_runs` | `id`, `workflow_id` (cascade), `trigger`, `input`, `status`, `steps` (JSON), `error`, `started_at`, `finished_at` | the newest **50** per workflow are kept (pruned on insert) |
+| `workflow_runs` | `id`, `workflow_id` (cascade), `trigger`, `input`, `status`, `steps` (JSON), `error`, `started_at`, `finished_at`, plus a store-only `owner_pid` | the newest **50 finished** runs per workflow are kept (pruned on insert; a `running` row is never pruned — it is a live claim) |
 | `workflow_log` | `id`, `log`, `text`, `workflow_id` and `run_id` (both `ON DELETE SET NULL`), `created_at` | append-only; written by an `output` node with `target: log` |
 
 All writes go through `Store`. `Workflow` carries two **derived, never stored**
@@ -30,6 +30,11 @@ Graph rules (`Store`):
 
 - **At most one `trigger` node** per workflow, and a trigger has **no incoming
   edges** (`validation`). A *run* needs exactly one (`validation` otherwise).
+- Both "at most one trigger" and "no cycle" are check-then-insert, so node and
+  edge creation run inside `BEGIN IMMEDIATE` (the CLI and the server are
+  separate processes). `execute_run` also refuses (`failed`, naming a
+  cycle) a graph whose topological order is shorter than its node count — a
+  hand-edited database.
 - An edge's endpoints must both belong to the edge's workflow (`validation`).
 - A **self-edge** or an edge that would close a **cycle** is `cycle`.
 - An exact duplicate `(from, to, branch)` is `conflict`.
@@ -52,9 +57,9 @@ Stored config is the validated, normalized form.
 | Kind | Config | What it does |
 | --- | --- | --- |
 | `trigger` | `{"mode": "manual"\|"time"\|"voice", "every_minutes": 1..=10080 (required iff time), "phrase": "…" (optional, for voice)}` | the run's source; its output **is** the run input. Without `--config`, `{"mode":"manual"}` |
-| `prompt` | `{"model": "haiku"\|"sonnet"\|"opus"\|"local:<name>", "thinking": bool (default false), "prompt": "…" (non-empty), "timeout_secs": 1..=3600 (default 600)}` | one synchronous model call; the node's output is the model's text answer, trimmed |
+| `prompt` | `{"model": "haiku"\|"sonnet"\|"opus"\|"local:<name>" (a name never starts with `-`), "thinking": bool (default false), "prompt": "…" (non-empty), "timeout_secs": 1..=3600 (default 600)}` | one synchronous model call; the node's output is the model's text answer, trimmed |
 | `cli` | `{"command": "…" (non-empty), "timeout_secs": 1..=86400 (default 600)}` | `bash -c <command>` **verbatim** (the author wrote it, as with scripts); output is stdout |
-| `script` | `{"script": "<id or name>", "values": {"name": "…"}}` | runs a stored script (`docs/scripts.md`); output is stdout |
+| `script` | `{"script": "<id or name>", "values": {"name": "…"}, "timeout_secs": 1..=86400 (default 600)}` | runs a stored script (`docs/scripts.md`); output is stdout |
 | `branch` | `{"op": "contains"\|"regex"\|"score_above"\|"score_below"\|"equals", "value": "…" (a number for `score_*`)}` | evaluates its input to a verdict; output is its input, unchanged |
 | `output` | `{"target": "log", "log": "<name>" (default `default`)}`, `{"target": "task", "project": "<id\|name>"}`, `{"target": "inbox", "task_id": N, "kind": "task-summary"\|"change-request" (default task-summary)}`, `{"target": "board", "title": "…"}` | delivers its input; output is a short receipt. A key that does not apply to the target is refused |
 
@@ -64,7 +69,9 @@ Stored config is the validated, normalized form.
 `{prompt}` (the node's prompt text, a blank line, then the node's input; just
 the prompt when the input is empty) reach the script only as shell-quoted
 values, so a hostile input is a string, never syntax. The default calls
-`claude -p --model <m> --settings '{"alwaysThinkingEnabled":<bool>}' -- <prompt>`;
+`claude -p --model <m> --tools "" --strict-mcp-config --settings '{"alwaysThinkingEnabled":<bool>}' -- <prompt>`
+— **no tools and no MCP servers**, since the input is untrusted upstream text
+and a prompt node is a pure text call (`docs/config.md`);
 `local:<name>` runs `ollama run <name>` with the prompt on stdin (thinking is
 ignored there). A missing binary or a nonzero exit fails the node with the
 tail of its stderr. The cwd is the workflow's project `local_path`, else
@@ -77,8 +84,21 @@ stderr tail; past `timeout_secs` the whole process group is killed. The cwd is
 the workflow's project `local_path` (when that folder exists), else
 `~/.naru/workspace`.
 
+**Size limits.** A `prompt` node's prompt (its text, a blank line, its input)
+and the sum of a `script` node's values are each capped at **64 KiB**: they
+travel as argv/environment, so over the cap the node fails with a message
+naming the limit rather than the OS refusing the exec. A `cli` node has no
+such cap — its input rides on stdin.
+
+**Process groups.** Every `cli`, `script` and `prompt` process runs in its own
+group (`agents::capture`). Past the deadline the group is killed; and when the
+node's own process exits, the group is killed **too**, so a backgrounded
+grandchild (`sleep 1000 &`) can neither hold the node's pipes open nor outlive
+it. A command that deliberately daemonizes must `setsid` out of the group.
+
 **`script`.** Any value may contain the literal token `{input}`, replaced by
-the node's input text. The substituted text is handed to the script as one
+the node's input text. The script runs under `timeout_secs` (default 600),
+killed by process group past it, via `scripts::run_with_timeout`. The substituted text is handed to the script as one
 **argument value** (`$1`… and `NARU_ARG_<NAME>`), never a fragment of a shell
 command line — so `$()`, backticks and quotes arrive byte-identical
 (`scripts-check` and `workflow-check` pin it). Values are validated against the
@@ -102,8 +122,10 @@ after it; gate on the thing you want to carry forward.
 `inbox` files an item of the given kind naming `task_id` (an inbox item always
 names the task it came from); `board` pushes a markdown board onto the
 **current live session** (none is a node failure naming `naru live start`).
-All four refuse an empty input — a silent run files nothing rather than an
-empty record.
+An **empty input** (blank text) is **not a failure**: the node succeeds with
+output `nothing to deliver` and writes no record, so a silent run — an empty
+transcript, a filter that let nothing through — files nothing and still
+succeeds.
 
 ## Engine semantics
 
@@ -130,6 +152,13 @@ node's process runs**. The CLI wraps the `Store` it owns in a `Mutex`; the API
 hands over its `Arc<Mutex<Store>>` on a `spawn_blocking` thread — one engine for
 both, so a long run never stalls another request.
 
+**Crashes.** A run row carries the pid of the process that owns it
+(`owner_pid`, store-only, not on `WorkflowRun`). `serve` reconciles before it
+binds (`Store::reconcile_workflow_runs`, `reconcile_script_runs`' rule): a
+`running` run whose owner is dead — or is the starting server itself — becomes
+`failed` with `server restarted: …`; a run owned by another **live** process (a
+CLI run, a second `serve`) is never touched.
+
 ## CLI (`naru workflow`)
 
 JSON only, positional-or-flag create shapes, `<id|name>` everywhere a workflow
@@ -145,7 +174,7 @@ is named.
 | `workflow run <id\|name> [--input TEXT \| --input-file PATH\|-] [--trigger manual\|voice]` | the finished `WorkflowRun` |
 | `workflow runs <id\|name>` | a bare array of runs, newest first, **without `steps` and `input`** |
 | `workflow run-show <run id>` | one run in full |
-| `workflow log [<log>] [--limit N]` | the newest N lines (default 50, max 1000), newest first; no name = every log |
+| `workflow log [<log>] [--limit N]` | the newest N lines (default 50), newest first; no name = every log. A limit outside 1..=1000 is `validation` (the API's `?limit=` too), not clamped |
 | `workflow node create <WORKFLOW> <KIND> <TITLE> [--config JSON] [--x] [--y]` | the `WorkflowNode`; omitted coordinates place it in a row beside the others |
 | `workflow node update <id> [--title] [--config JSON] [--x] [--y]` | the node; `--config` **replaces** the whole config |
 | `workflow node delete <id>` | `{node, edges}` |
@@ -207,16 +236,21 @@ being a tagged union that two crates would have to keep in step.
 
 Off by default, independent of the other watchers, preserved across Restart
 Server. Every **60 s** (`NARU_WATCH_WORKFLOWS_TICK_MS` / `MESA_…` overrides it)
-it asks `Store::due_time_workflows`: a workflow whose trigger is `mode: time`
-and for which **no run with `trigger = time` started within the last
-`every_minutes`**, judged on the store's own clock (the `stale_claim_minutes`
-posture); a workflow of an archived project is never due. Following
-`retro_watcher_tick`, the **run row is the claim**, written before anything
-executes (`workflow::claim_run`) — so a run that outlasts the interval is not
-started twice and a *failed* run is not retried every tick — then the engine
-executes it off the store lock. A manual or voice workflow is never run by the
-watcher. A run that the server's death leaves `running` is not reconciled (known
-gap; it still counts as the interval's run, so it is not retried either).
+it asks `Store::due_time_workflows` for the workflows whose trigger is
+`mode: time` and for which **no run with `trigger = time` started within the
+last `every_minutes`**, judged on the store's own clock (the
+`stale_claim_minutes` posture); a workflow of an archived project is never due.
+That list is only a prefilter: the claim itself is
+`Store::claim_time_workflow_run`, **one `INSERT … SELECT … WHERE NOT EXISTS`
+(the same interval check) inside `BEGIN IMMEDIATE`**, so the due check and the
+`running` row are atomic and two servers — or a tick racing a restart — cannot
+both fire one interval. The run row is the claim, written before anything
+executes, and a `running` row is never pruned, so a run that outlasts the
+interval is not started twice and a *failed* run is not retried every tick.
+The engine then executes it off the store lock. A manual or voice workflow is
+never run by the watcher. A run the server's death leaves `running` is closed
+`failed` by the next start's reconcile (above), and still counts as that
+interval's run.
 
 ## Voice
 
