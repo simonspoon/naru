@@ -6,6 +6,7 @@ import {
   draftFrom,
   isDirty,
   isSavable,
+  handoffError,
   waitError,
 } from './livePromptDraft'
 import type { ConfigLive } from './types/ConfigLive'
@@ -13,19 +14,26 @@ import type { ConfigLive } from './types/ConfigLive'
 const DEFAULTED: ConfigLive = {
   auto_send_ms: null,
   auto_send_ms_default: 2000,
+  handoff_tokens: null,
+  handoff_tokens_default: 150000,
 }
 const SET: ConfigLive = {
   auto_send_ms: 4500,
   auto_send_ms_default: 2000,
+  handoff_tokens: 90000,
+  handoff_tokens_default: 150000,
 }
 
 /** A draft holding the one box, so a test names only the one it is about. */
-const draft = (auto_send_ms = '') => ({ auto_send_ms })
+const draft = (auto_send_ms = '', handoff_tokens = '') => ({
+  auto_send_ms,
+  handoff_tokens,
+})
 
 describe('draftFrom', () => {
   it('renders an unconfigured wait blank and a configured one as text', () => {
-    expect(draftFrom(DEFAULTED)).toEqual({ auto_send_ms: '' })
-    expect(draftFrom(SET)).toEqual({ auto_send_ms: '4500' })
+    expect(draftFrom(DEFAULTED)).toEqual({ auto_send_ms: '', handoff_tokens: '' })
+    expect(draftFrom(SET)).toEqual({ auto_send_ms: '4500', handoff_tokens: '90000' })
   })
 
   it('reports a freshly loaded section as pristine', () => {
@@ -41,11 +49,11 @@ describe('changedLive', () => {
   })
 
   it('sends nothing while the draft would be rejected', () => {
-    expect(changedLive(SET, draft('2.5'))).toEqual({})
+    expect(changedLive(SET, draft('2.5', '90000'))).toEqual({})
   })
 
   it('sends the wait as a number when it changed', () => {
-    expect(changedLive(SET, draft('6000'))).toEqual({
+    expect(changedLive(SET, draft('6000', '90000'))).toEqual({
       auto_send_ms: 6000,
     })
     expect(changedLive(DEFAULTED, draft('600'))).toEqual({
@@ -54,7 +62,7 @@ describe('changedLive', () => {
   })
 
   it('sends null for a cleared wait, restoring the wait mesa ships', () => {
-    expect(changedLive(SET, draft(''))).toEqual({
+    expect(changedLive(SET, draft('', '90000'))).toEqual({
       auto_send_ms: null,
     })
   })
@@ -83,5 +91,25 @@ describe('waitError', () => {
 
   it('counts a box the server would refuse as unsaved, not as stored', () => {
     expect(isDirty(SET, draft('soon'))).toBe(true)
+  })
+})
+
+describe('handoff threshold', () => {
+  it('accepts blank and in-range whole numbers, rejects the rest', () => {
+    expect(handoffError('')).toBeNull()
+    expect(handoffError('150000')).toBeNull()
+    expect(handoffError('19999')).toMatch(/between/)
+    expect(handoffError('1000001')).toMatch(/between/)
+    expect(handoffError('1.5e5')).toMatch(/whole number/)
+  })
+
+  it('sends the threshold as a number, null when cleared, nothing if bad', () => {
+    expect(changedLive(SET, draft('4500', '120000'))).toEqual({
+      handoff_tokens: 120000,
+    })
+    expect(changedLive(SET, draft('4500', ''))).toEqual({
+      handoff_tokens: null,
+    })
+    expect(changedLive(SET, draft('4500', '5'))).toEqual({})
   })
 })

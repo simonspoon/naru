@@ -23,4 +23,14 @@ auto_send_ms: number | null,
  * page has the number to fall back to without a second copy of it in
  * TypeScript.
  */
-auto_send_ms_default: number, };
+auto_send_ms_default: number, 
+/**
+ * The context size in tokens past which the live agent hands the
+ * conversation off, or `null` when the config says nothing (mesa task
+ * 1606).
+ */
+handoff_tokens: number | null, 
+/**
+ * The threshold mesa ships (`core::config::DEFAULT_LIVE_HANDOFF_TOKENS`).
+ */
+handoff_tokens_default: number, };

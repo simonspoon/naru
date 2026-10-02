@@ -177,10 +177,13 @@ import type { VoiceExport } from '../types/VoiceExport'
 import {
   changedLive,
   draftFrom as liveDraftFrom,
+  handoffError,
   isDirty as isLiveDirty,
   isSavable as isLiveSavable,
   MAX_AUTO_SEND_MS,
+  MAX_HANDOFF_TOKENS,
   MIN_AUTO_SEND_MS,
+  MIN_HANDOFF_TOKENS,
   waitError,
   type LivePromptDraft,
 } from '../livePromptDraft'
@@ -1017,7 +1020,7 @@ function LivePromptSection() {
   const [saving, setSaving] = useState(false)
 
   const seeded: LivePromptDraft =
-    draft ?? (live ? liveDraftFrom(live) : { auto_send_ms: '' })
+    draft ?? (live ? liveDraftFrom(live) : { auto_send_ms: '', handoff_tokens: '' })
 
   function edit(patch: Partial<LivePromptDraft>) {
     setDraft({ ...seeded, ...patch })
@@ -1063,6 +1066,7 @@ function LivePromptSection() {
   const dirty = isLiveDirty(live, seeded)
   const savable = isLiveSavable(seeded)
   const waitFieldError = waitError(seeded.auto_send_ms)
+  const handoffFieldError = handoffError(seeded.handoff_tokens)
 
   return (
     <>
@@ -1103,6 +1107,33 @@ function LivePromptSection() {
           onChange={(e) => edit({ auto_send_ms: e.target.value })}
         />
         {waitFieldError && <p className="error">{waitFieldError}</p>}
+      </section>
+
+      <section className="settings-command">
+        <label htmlFor="live-handoff">
+          <span className="settings-command-title">
+            Context size that triggers a handoff
+          </span>
+          <code className="settings-command-key">live.handoff-tokens</code>
+        </label>
+        <p className="muted settings-command-blurb">
+          When the agent driving a conversation holds this many tokens of
+          context, it hands the conversation to a fresh agent. Read when an
+          agent is spawned, so it applies to the next one. Blank ={' '}
+          {live.handoff_tokens_default} tokens (the default).
+        </p>
+        <input
+          id="live-handoff"
+          type="number"
+          min={MIN_HANDOFF_TOKENS}
+          max={MAX_HANDOFF_TOKENS}
+          step="10000"
+          className="settings-watcher-input"
+          value={seeded.handoff_tokens}
+          placeholder={String(live.handoff_tokens_default)}
+          onChange={(e) => edit({ handoff_tokens: e.target.value })}
+        />
+        {handoffFieldError && <p className="error">{handoffFieldError}</p>}
       </section>
 
       <div className="settings-actions">

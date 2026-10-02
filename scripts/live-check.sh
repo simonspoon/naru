@@ -3861,7 +3861,7 @@ ok "live handoff: a blank or over-long note is validation, and nothing is spawne
 
 # ---- (h) mesa live context ----
 run 0 "$MESA" live context
-[ "$(jq -c 'keys' <<<"$STDOUT")" = '["agent_id","context_tokens","dream","lease","session_id"]' ] ||
+[ "$(jq -c 'keys' <<<"$STDOUT")" = '["agent_id","context_tokens","dream","handoff_tokens","lease","over_handoff","session_id"]' ] ||
   fail "live context: key set (got $STDOUT)"
 [ "$(jqs .dream)" = "null" ] || fail "live context: a small notebook wants no dream (got $(jqs .dream))"
 [ "$(jqs .session_id)" = "$HS" ] || fail "live context: session_id"

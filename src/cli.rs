@@ -2283,13 +2283,16 @@ EXAMPLES
         #[arg(long)]
         quiet: bool,
     },
-    /// Print how full the driving agent's context is: `{session_id, agent_id, lease, context_tokens, dream}`
+    /// Print how full the driving agent's context is: `{session_id, agent_id, lease, context_tokens, handoff_tokens, over_handoff, dream}`
     ///
     /// How the agent decides a handoff is due (mesa task 1150): the occupied
     /// context of its own newest request, read live off the transcript the
     /// Agents sidebar already reads (`cc::session_pulse`), located through
     /// `claude agents --json --all` from the session's spawn receipt.
-    /// `context_tokens` is null when the transcript cannot be read; a session
+    /// `context_tokens` is null when the transcript cannot be read (then
+    /// `over_handoff` is null too); `handoff_tokens` is the configured
+    /// threshold (`live.handoff-tokens`) and `over_handoff` whether the
+    /// context has reached it. A session
     /// with no agent bound, or one `claude agents` does not list, is
     /// `unavailable`. `dream` is why the notebook wants a dream pass — the
     /// reason the next handoff will rest the conversation to run one (mesa
@@ -6218,11 +6221,14 @@ fn run_live(cmd: LiveCmd) -> Result<()> {
             // task 1155), so the agent can announce it — or hand off now.
             // No `crossed` ids, exactly like the handoff it forecasts.
             let dream = live::dream_wanted(&store.list_notebook(false)?, &[]);
+            let handoff_tokens = config::live_handoff_tokens();
             print_json(&serde_json::json!({
                 "session_id": session.id,
                 "agent_id": agent_id,
                 "lease": session.lease,
                 "context_tokens": pulse.context_tokens,
+                "handoff_tokens": handoff_tokens,
+                "over_handoff": pulse.context_tokens.map(|t| t >= i64::from(handoff_tokens)),
                 "dream": dream,
             }));
         }

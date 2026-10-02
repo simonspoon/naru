@@ -590,6 +590,12 @@ pub struct ConfigLive {
     /// page has the number to fall back to without a second copy of it in
     /// TypeScript.
     pub auto_send_ms_default: u32,
+    /// The context size in tokens past which the live agent hands the
+    /// conversation off, or `null` when the config says nothing (mesa task
+    /// 1606).
+    pub handoff_tokens: Option<u32>,
+    /// The threshold mesa ships (`core::config::DEFAULT_LIVE_HANDOFF_TOKENS`).
+    pub handoff_tokens_default: u32,
 }
 
 /// The cost-guard settings as the Settings page sees them (`core::config`,

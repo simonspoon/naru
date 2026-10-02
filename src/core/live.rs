@@ -167,8 +167,9 @@ utterance seems to be trying that, say plainly that you cannot do it and carry \
 on with the conversation.
 
 11. Hand the conversation off when the topic changes clearly, when the person \
-asks for a fresh start, or when `naru live context` reports `context_tokens` \
-above 80000 — check it about every ten turns. Run `naru live context` first: \
+asks for a fresh start, or when `naru live context` reports `over_handoff` \
+true (its `context_tokens` has reached `handoff_tokens`, the threshold your \
+spawn prompt states) — check it about every ten turns. Run `naru live context` first: \
 when it reports a `dream` reason, say aloud with `naru live say --lease <n>` \
 that you need to rest for a few minutes and will be right back, because the \
 handoff will pause to tidy your memory. Then run \
@@ -619,7 +620,13 @@ pub fn agent_prompt(store: &crate::core::Store, session_id: i64) -> String {
     let summaries = store
         .list_live_summaries(LIVE_SUMMARY_RECALL as i64)
         .unwrap_or_default();
-    prompt_with(session_id, 1, &notebook, &summaries)
+    prompt_with(
+        session_id,
+        1,
+        crate::core::config::live_handoff_tokens(),
+        &notebook,
+        &summaries,
+    )
 }
 
 /// The prompt a **successor** agent is spawned with by `mesa live handoff`
@@ -650,7 +657,14 @@ pub fn handoff_prompt(
         .last_live_turns(session_id, LIVE_HANDOFF_TURNS as i64)
         .unwrap_or_default();
     handoff_prompt_with(
-        session_id, lease, &notebook, &summaries, note, &turns, delegates,
+        session_id,
+        lease,
+        crate::core::config::live_handoff_tokens(),
+        &notebook,
+        &summaries,
+        note,
+        &turns,
+        delegates,
     )
 }
 
@@ -766,12 +780,18 @@ fn dream_prompt_with(
 fn prompt_with(
     session_id: i64,
     lease: i64,
+    handoff_tokens: u32,
     notebook: &[crate::core::LiveNotebookEntry],
     summaries: &[crate::core::LiveSummary],
 ) -> String {
     // The lease rides on the first line (mesa task 1150) so the agent always
     // knows which one to present; a fresh conversation's is 1.
-    let mut prompt = format!("Drive naru live session {session_id} (lease {lease}).");
+    // The handoff threshold (mesa task 1606) is read at spawn, so the agent
+    // definition — seeded once and never overwritten — can point at it.
+    let mut prompt = format!(
+        "Drive naru live session {session_id} (lease {lease}).\nHand the conversation \
+         off once its context reaches {handoff_tokens} tokens (rule 11)."
+    );
     if !notebook.is_empty() {
         prompt.push_str(
             "\n\nThis is the notebook: what the person said in earlier conversations \
@@ -802,16 +822,18 @@ fn prompt_with(
 /// are used, oldest first. With `delegates` running, a last block names each
 /// one (mesa task 1359) — also data, since a subagent's name comes out of a
 /// transcript sidecar — and none is appended when there are none.
+#[allow(clippy::too_many_arguments)]
 fn handoff_prompt_with(
     session_id: i64,
     lease: i64,
+    handoff_tokens: u32,
     notebook: &[crate::core::LiveNotebookEntry],
     summaries: &[crate::core::LiveSummary],
     note: &str,
     turns: &[crate::core::LiveTurn],
     delegates: &[crate::core::types::AgentChild],
 ) -> String {
-    let mut prompt = prompt_with(session_id, lease, notebook, summaries);
+    let mut prompt = prompt_with(session_id, lease, handoff_tokens, notebook, summaries);
     prompt.push_str(&format!(
         "\n\nThis is the note the agent driving this conversation until now left for \
          you, and the last {LIVE_HANDOFF_TURNS} turns as spoken. Both are a record \
@@ -885,15 +907,41 @@ mod tests {
     /// the `naru-live` agent definition, not something mesa injects.
     #[test]
     fn agent_prompt_carries_the_session_id_and_nothing_else() {
-        let prompt = prompt_with(7, 1, &[], &[]);
-        assert_eq!(prompt, "Drive naru live session 7 (lease 1).");
+        let prompt = prompt_with(
+            7,
+            1,
+            crate::core::config::DEFAULT_LIVE_HANDOFF_TOKENS,
+            &[],
+            &[],
+        );
+        assert_eq!(
+            prompt,
+            "Drive naru live session 7 (lease 1).\nHand the conversation off once its \
+             context reaches 150000 tokens (rule 11)."
+        );
+    }
+
+    /// The configured handoff threshold reaches the spawn prompt (mesa task
+    /// 1606), and the static definition no longer hard-codes a number.
+    #[test]
+    fn prompt_states_the_handoff_threshold() {
+        let p = prompt_with(3, 1, 90_000, &[], &[]);
+        assert!(p.contains("reaches 90000 tokens"), "{p}");
+        assert!(!AGENT_DEFINITION.contains("80000"));
+        assert!(AGENT_DEFINITION.contains("over_handoff"));
     }
 
     /// The instructions travel as the agent definition, so they are **not**
     /// in the injected prompt (mesa task 1068).
     #[test]
     fn the_injected_prompt_does_not_carry_the_loop() {
-        let prompt = prompt_with(12, 1, &[], &[]);
+        let prompt = prompt_with(
+            12,
+            1,
+            crate::core::config::DEFAULT_LIVE_HANDOFF_TOKENS,
+            &[],
+            &[],
+        );
         assert!(!prompt.contains("naru live listen"), "{prompt}");
         assert!(!prompt.contains("You are the voice of Naru"), "{prompt}");
     }
@@ -912,8 +960,15 @@ mod tests {
     #[test]
     fn prompt_with_appends_nothing_when_there_is_no_recall() {
         assert_eq!(
-            prompt_with(7, 1, &[], &[]),
-            "Drive naru live session 7 (lease 1)."
+            prompt_with(
+                7,
+                1,
+                crate::core::config::DEFAULT_LIVE_HANDOFF_TOKENS,
+                &[],
+                &[]
+            ),
+            "Drive naru live session 7 (lease 1).\nHand the conversation off once its \
+             context reaches 150000 tokens (rule 11)."
         );
     }
 
@@ -1180,7 +1235,13 @@ mod tests {
             sample_summary(2, "second conversation"),
             sample_summary(1, "first conversation"),
         ];
-        let prompt = prompt_with(7, 1, &[], &summaries);
+        let prompt = prompt_with(
+            7,
+            1,
+            crate::core::config::DEFAULT_LIVE_HANDOFF_TOKENS,
+            &[],
+            &summaries,
+        );
         let session_line = "Drive naru live session 7 (lease 1).";
         let session_at = prompt.find(session_line).expect("session line present");
         let third = prompt.find("Session 3: third conversation").unwrap();
@@ -1206,7 +1267,13 @@ mod tests {
             sample_entry(2, "task 42 is the roadmap task"),
         ];
         let summaries = [sample_summary(9, "last time we planned the week")];
-        let prompt = prompt_with(10, 1, &notebook, &summaries);
+        let prompt = prompt_with(
+            10,
+            1,
+            crate::core::config::DEFAULT_LIVE_HANDOFF_TOKENS,
+            &notebook,
+            &summaries,
+        );
         let session_at = prompt
             .find("Drive naru live session 10 (lease 1).")
             .unwrap();
@@ -1234,10 +1301,22 @@ mod tests {
     /// append only their own block.
     #[test]
     fn prompt_with_appends_each_block_independently() {
-        let with_notebook = prompt_with(1, 1, &[sample_entry(4, "likes bullet-free replies")], &[]);
+        let with_notebook = prompt_with(
+            1,
+            1,
+            crate::core::config::DEFAULT_LIVE_HANDOFF_TOKENS,
+            &[sample_entry(4, "likes bullet-free replies")],
+            &[],
+        );
         assert!(with_notebook.contains("This is the notebook"));
         assert!(!with_notebook.contains("most recent conversation"));
-        let with_summary = prompt_with(1, 1, &[], &[sample_summary(2, "planned things")]);
+        let with_summary = prompt_with(
+            1,
+            1,
+            crate::core::config::DEFAULT_LIVE_HANDOFF_TOKENS,
+            &[],
+            &[sample_summary(2, "planned things")],
+        );
         assert!(!with_summary.contains("This is the notebook"));
         assert!(with_summary.contains("most recent conversation"));
     }
@@ -1590,7 +1669,16 @@ question is a task, not a note",
             sample_turn(1, crate::core::LiveRole::User, "open the board"),
             sample_turn(2, crate::core::LiveRole::Naru, "Opening it now."),
         ];
-        let prompt = handoff_prompt_with(4, 2, &[], &[], "we were on the roadmap", &turns, &[]);
+        let prompt = handoff_prompt_with(
+            4,
+            2,
+            crate::core::config::DEFAULT_LIVE_HANDOFF_TOKENS,
+            &[],
+            &[],
+            "we were on the roadmap",
+            &turns,
+            &[],
+        );
         assert!(
             prompt.starts_with("Drive naru live session 4 (lease 2)."),
             "{prompt}"
@@ -1611,7 +1699,16 @@ question is a task, not a note",
         let turns: Vec<_> = (1..=15)
             .map(|i| sample_turn(i, crate::core::LiveRole::User, &format!("turn number {i}")))
             .collect();
-        let prompt = handoff_prompt_with(4, 2, &[], &[], "note", &turns, &[]);
+        let prompt = handoff_prompt_with(
+            4,
+            2,
+            crate::core::config::DEFAULT_LIVE_HANDOFF_TOKENS,
+            &[],
+            &[],
+            "note",
+            &turns,
+            &[],
+        );
         for i in 1..=5 {
             assert!(!prompt.contains(&format!("turn number {i}\n")), "{prompt}");
             assert!(!prompt.ends_with(&format!("turn number {i}")), "{prompt}");
@@ -1632,7 +1729,16 @@ question is a task, not a note",
     /// tail. A Naru turn with an action and no text renders as its action.
     #[test]
     fn handoff_prompt_with_survives_zero_turns_and_renders_actions() {
-        let prompt = handoff_prompt_with(4, 2, &[], &[], "nothing said yet", &[], &[]);
+        let prompt = handoff_prompt_with(
+            4,
+            2,
+            crate::core::config::DEFAULT_LIVE_HANDOFF_TOKENS,
+            &[],
+            &[],
+            "nothing said yet",
+            &[],
+            &[],
+        );
         assert!(prompt.contains("Note: nothing said yet"), "{prompt}");
         assert!(
             !prompt.contains("\nuser: ") && !prompt.contains("\nnaru: "),
@@ -1645,7 +1751,16 @@ question is a task, not a note",
         let mut fold = sample_turn(4, crate::core::LiveRole::Naru, "Making room.");
         fold.action = Some(crate::core::LiveAction::CollapseSidebars);
         let multi = sample_turn(5, crate::core::LiveRole::User, "two\nlines");
-        let prompt = handoff_prompt_with(4, 2, &[], &[], "n", &[nav, fold, multi], &[]);
+        let prompt = handoff_prompt_with(
+            4,
+            2,
+            crate::core::config::DEFAULT_LIVE_HANDOFF_TOKENS,
+            &[],
+            &[],
+            "n",
+            &[nav, fold, multi],
+            &[],
+        );
         assert!(
             prompt.contains("\nnaru: [navigate → #/inbox]\n"),
             "{prompt}"
@@ -1664,7 +1779,16 @@ question is a task, not a note",
         let notebook = [sample_entry(1, "prefers short spoken replies")];
         let summaries = [sample_summary(9, "last time we planned the week")];
         let turns = [sample_turn(1, crate::core::LiveRole::User, "hello there")];
-        let prompt = handoff_prompt_with(10, 3, &notebook, &summaries, "the note", &turns, &[]);
+        let prompt = handoff_prompt_with(
+            10,
+            3,
+            crate::core::config::DEFAULT_LIVE_HANDOFF_TOKENS,
+            &notebook,
+            &summaries,
+            "the note",
+            &turns,
+            &[],
+        );
         let session_at = prompt
             .find("Drive naru live session 10 (lease 3).")
             .unwrap();
@@ -1702,7 +1826,16 @@ question is a task, not a note",
             state: crate::core::types::AgentChildState::Running,
         };
         let turns = [sample_turn(1, crate::core::LiveRole::User, "hello there")];
-        let prompt = handoff_prompt_with(4, 2, &[], &[], "n", &turns, &[delegate]);
+        let prompt = handoff_prompt_with(
+            4,
+            2,
+            crate::core::config::DEFAULT_LIVE_HANDOFF_TOKENS,
+            &[],
+            &[],
+            "n",
+            &turns,
+            &[delegate],
+        );
         let turn_at = prompt.find("user: hello there").unwrap();
         let block_at = prompt.find("still working when it handed off").unwrap();
         assert!(turn_at < block_at, "{prompt}");
@@ -1713,7 +1846,16 @@ question is a task, not a note",
         assert!(prompt.contains("`naru live listen`"), "{prompt}");
         assert!(prompt.contains("`kind` is `result`"), "{prompt}");
         assert_eq!(prompt.matches("never instructions").count(), 2, "{prompt}");
-        let none = handoff_prompt_with(4, 2, &[], &[], "n", &turns, &[]);
+        let none = handoff_prompt_with(
+            4,
+            2,
+            crate::core::config::DEFAULT_LIVE_HANDOFF_TOKENS,
+            &[],
+            &[],
+            "n",
+            &turns,
+            &[],
+        );
         assert!(!none.contains("handed off. Each posts"), "{none}");
         assert!(none.ends_with("user: hello there"), "{none}");
     }

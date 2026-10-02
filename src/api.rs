@@ -9758,6 +9758,9 @@ struct LiveUpdate {
     /// seconds mesa ships.
     #[serde(default, deserialize_with = "deserialize_some")]
     auto_send_ms: Option<Option<serde_json::Value>>,
+    /// Same three-way shape for the handoff threshold (mesa task 1606).
+    #[serde(default, deserialize_with = "deserialize_some")]
+    handoff_tokens: Option<Option<serde_json::Value>>,
 }
 
 /// `PUT /api/config/live` — writes `auto-send-ms` and echoes the settings.
@@ -9776,6 +9779,9 @@ async fn update_config_live(
     let mut updates = HashMap::new();
     if let Some(value) = body.auto_send_ms {
         updates.insert(config::LIVE_AUTO_SEND_MS.to_string(), value);
+    }
+    if let Some(value) = body.handoff_tokens {
+        updates.insert(config::LIVE_HANDOFF_TOKENS.to_string(), value);
     }
     blocking(move || config::save_live(&updates))
         .await?
@@ -12898,7 +12904,10 @@ mod tests {
                         State($state.clone()),
                         ConnectInfo($peer),
                         $headers.clone(),
-                        Json(LiveUpdate { auto_send_ms: None }),
+                        Json(LiveUpdate {
+                            auto_send_ms: None,
+                            handoff_tokens: None,
+                        }),
                     )
                     .await
                     .is_ok(),

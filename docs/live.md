@@ -545,8 +545,12 @@ agent knows *before* handing off whether the handoff will rest the
 conversation.
 
 The agent definition's rule 11 names three triggers: the topic changing
-clearly, the person asking for a fresh start, or `context_tokens` above
-80000 (checked about every ten turns). On any of them: run `context`; when
+clearly, the person asking for a fresh start, or `context` reporting
+`over_handoff: true` (checked about every ten turns). The threshold is
+`live.handoff-tokens` (default 150000, `docs/config.md`), read at spawn and
+stated in the spawn prompt's second line, so the seeded definition holds no
+number; `context` also prints `handoff_tokens` and `over_handoff`
+(`context_tokens >= handoff_tokens`, `null` when the context is unknown). On any of them: run `context`; when
 it reports a `dream` reason, say aloud first that you need to rest for a
 few minutes and will be right back; then `handoff`, then end the turn — no
 further `listen`. When no dream is due there is no announcement.

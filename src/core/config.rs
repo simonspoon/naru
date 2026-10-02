@@ -2810,7 +2810,19 @@ pub const LIVE_AUTO_SEND_MS: &str = "auto-send-ms";
 /// Every key the `live` section understands, for the unknown-key error. Task
 /// 919 moved the instruction block out to the library, leaving this section
 /// with the one key.
-const LIVE_KEYS: &[&str] = &[LIVE_AUTO_SEND_MS];
+const LIVE_KEYS: &[&str] = &[LIVE_AUTO_SEND_MS, LIVE_HANDOFF_TOKENS];
+
+/// The config key holding the context size, in tokens, past which the live
+/// agent is told to hand the conversation off (mesa task 1606).
+pub const LIVE_HANDOFF_TOKENS: &str = "handoff-tokens";
+
+/// The handoff threshold with no config.
+pub const DEFAULT_LIVE_HANDOFF_TOKENS: u32 = 150_000;
+
+/// Sanity bounds for the handoff threshold: below the floor the agent would
+/// hand off almost every turn, above the ceiling it never would.
+pub const MIN_LIVE_HANDOFF_TOKENS: u32 = 20_000;
+pub const MAX_LIVE_HANDOFF_TOKENS: u32 = 1_000_000;
 
 /// How long an untouched draft waits with no config — the value that keeps an
 /// unconfigured install byte-identical to mesa before task 886, when the wait
@@ -2843,6 +2855,8 @@ struct LiveConfig {
 struct LiveSection {
     #[serde(default, rename = "auto-send-ms")]
     auto_send_ms: Option<u32>,
+    #[serde(default, rename = "handoff-tokens")]
+    handoff_tokens: Option<u32>,
 }
 
 fn read_live(path: &Path) -> Result<LiveSection, String> {
@@ -2870,7 +2884,24 @@ fn live_in(path: &Path) -> Result<ConfigLive, String> {
     Ok(ConfigLive {
         auto_send_ms: read_live(path)?.auto_send_ms,
         auto_send_ms_default: DEFAULT_LIVE_AUTO_SEND_MS,
+        handoff_tokens: read_live(path)?.handoff_tokens,
+        handoff_tokens_default: DEFAULT_LIVE_HANDOFF_TOKENS,
     })
+}
+
+/// The handoff threshold a live agent is spawned with (mesa task 1606): the
+/// configured value clamped into its bounds, else the built-in. Read fresh
+/// on every call; an unreadable file is the built-in, never a failed spawn.
+pub fn live_handoff_tokens() -> u32 {
+    live_handoff_tokens_in(&config_file())
+}
+
+fn live_handoff_tokens_in(path: &Path) -> u32 {
+    read_live(path)
+        .ok()
+        .and_then(|l| l.handoff_tokens)
+        .map(|n| n.clamp(MIN_LIVE_HANDOFF_TOKENS, MAX_LIVE_HANDOFF_TOKENS))
+        .unwrap_or(DEFAULT_LIVE_HANDOFF_TOKENS)
 }
 
 /// Writes the `live` entries named in `updates` into the config file.
@@ -2950,29 +2981,32 @@ fn save_live_in(
 }
 
 /// Whether this value is the section's spelling of "put it back to what mesa
-/// ships": `null`, the only reset `auto-send-ms` (the one key left in this
-/// section) ever needs — it has no textbox-shaped "blank" the way a command
+/// ships": `null`, the only reset either key in this
+/// section ever needs — it has no textbox-shaped "blank" the way a command
 /// or the old prompt did.
 fn is_live_reset(value: &serde_json::Value) -> bool {
     value.is_null()
 }
 
-/// The rule for one live value — currently just `auto-send-ms`, the one key
-/// left in this section: a whole number of milliseconds inside the sanity
-/// bounds. A value of the wrong *shape* is named here too — a wait sent as a
-/// string — rather than coerced into something the person did not ask for.
+/// The rule for one live value: `auto-send-ms` is a whole number of
+/// milliseconds inside the sanity bounds, `handoff-tokens` a whole number of
+/// tokens inside theirs. A value of the wrong *shape* is named here too — a
+/// number sent as a string — rather than coerced into something the person
+/// did not ask for.
 fn validate_live(key: &str, value: &serde_json::Value) -> Result<(), String> {
-    debug_assert_eq!(key, LIVE_AUTO_SEND_MS, "the live section has only one key");
-    let Some(ms) = value.as_u64() else {
+    let (min, max, unit) = if key == LIVE_HANDOFF_TOKENS {
+        (MIN_LIVE_HANDOFF_TOKENS, MAX_LIVE_HANDOFF_TOKENS, "tokens")
+    } else {
+        (MIN_LIVE_AUTO_SEND_MS, MAX_LIVE_AUTO_SEND_MS, "milliseconds")
+    };
+    let Some(n) = value.as_u64() else {
         return Err(format!(
-            "{key} must be a whole number of milliseconds between \
-             {MIN_LIVE_AUTO_SEND_MS} and {MAX_LIVE_AUTO_SEND_MS}, got {value}"
+            "{key} must be a whole number of {unit} between {min} and {max}, got {value}"
         ));
     };
-    if ms < u64::from(MIN_LIVE_AUTO_SEND_MS) || ms > u64::from(MAX_LIVE_AUTO_SEND_MS) {
+    if n < u64::from(min) || n > u64::from(max) {
         return Err(format!(
-            "{key} must be between {MIN_LIVE_AUTO_SEND_MS} and {MAX_LIVE_AUTO_SEND_MS} \
-             milliseconds, got {ms}"
+            "{key} must be between {min} and {max} {unit}, got {n}"
         ));
     }
     Ok(())
@@ -6414,6 +6448,44 @@ mod tests {
         value: Option<serde_json::Value>,
     ) -> HashMap<String, Option<serde_json::Value>> {
         HashMap::from([(key.to_string(), value)])
+    }
+
+    /// The handoff threshold (mesa task 1606): 150000 unconfigured, a saved
+    /// value wins, `null` restores it, bad values write nothing, and a
+    /// hand-edited out-of-range value is clamped for the spawn.
+    #[test]
+    fn live_handoff_tokens_contract() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        assert_eq!(live_handoff_tokens_in(&path), 150_000);
+        assert_eq!(live_in(&path).unwrap().handoff_tokens, None);
+        assert_eq!(live_in(&path).unwrap().handoff_tokens_default, 150_000);
+
+        save_live_in(
+            &path,
+            &live_json(LIVE_HANDOFF_TOKENS, Some(serde_json::json!(90_000))),
+        )
+        .unwrap();
+        assert_eq!(live_handoff_tokens_in(&path), 90_000);
+        assert_eq!(live_in(&path).unwrap().handoff_tokens, Some(90_000));
+
+        let before = std::fs::read_to_string(&path).unwrap();
+        for bad in [
+            serde_json::json!(MIN_LIVE_HANDOFF_TOKENS - 1),
+            serde_json::json!(MAX_LIVE_HANDOFF_TOKENS + 1),
+            serde_json::json!(2.5),
+            serde_json::json!("90000"),
+        ] {
+            let err = save_live_in(&path, &live_json(LIVE_HANDOFF_TOKENS, Some(bad))).unwrap_err();
+            assert!(matches!(err, SaveError::Validation(_)));
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+
+        std::fs::write(&path, r#"{"live": {"handoff-tokens": 5}}"#).unwrap();
+        assert_eq!(live_handoff_tokens_in(&path), MIN_LIVE_HANDOFF_TOKENS);
+
+        save_live_in(&path, &live_json(LIVE_HANDOFF_TOKENS, None)).unwrap();
+        assert_eq!(live_handoff_tokens_in(&path), 150_000);
     }
 
     /// The auto-send wait's whole contract (mesa task 886): nothing

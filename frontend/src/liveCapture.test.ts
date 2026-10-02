@@ -11,6 +11,8 @@ describe('autoSendIdleMs', () => {
   const live = (auto_send_ms: number | null): ConfigLive => ({
     auto_send_ms,
     auto_send_ms_default: AUTO_SEND_IDLE_MS,
+    handoff_tokens: null,
+    handoff_tokens_default: 150000,
   })
 
   it('is the built-in wait before the config has been read', () => {

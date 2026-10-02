@@ -1118,7 +1118,8 @@ someone edits it, and edited on `#/library` rather than in this file. This secti
 ```json
 {
   "live": {
-    "auto-send-ms": 2000
+    "auto-send-ms": 2000,
+    "handoff-tokens": 150000
   }
 }
 ```
@@ -1173,9 +1174,19 @@ conversation starting).
   whichever comes first: this silence boundary (`shouldFlushSilence`) or the
   listen switch.
 
+`handoff-tokens` (mesa task 1606) is the context size, in tokens, at which the
+live agent hands the conversation off. Absent or `null` ⇒
+`DEFAULT_LIVE_HANDOFF_TOKENS` (150000); a whole number in
+20000..=1000000, else 422 `validation` writing nothing. It is read fresh at
+every spawn (`config::live_handoff_tokens`, both spawn sites and the handoff
+successor) and stated in the spawn prompt; a hand-edited out-of-range value is
+clamped there, and an unreadable file is the default. `naru live context`
+reports it as `handoff_tokens` beside `over_handoff`.
+
 ### Routes
 
-- `GET /api/config/live` → `ConfigLive`: `{auto_send_ms, auto_send_ms_default}`
+- `GET /api/config/live` → `ConfigLive`: `{auto_send_ms, auto_send_ms_default,
+  handoff_tokens, handoff_tokens_default}`
   — the override (`null` when unset) beside the value Naru ships, sent by the
   server so the editor can show what blank means without a second copy of it
   in TypeScript. `prompt`/`default_prompt` are gone from this route entirely
@@ -1183,7 +1194,7 @@ conversation starting).
   (`GET /api/library`, `docs/library.md`). Gated like the other config
   getters (`require_agent_access`); a malformed config is **502
   `unavailable`**.
-- `PUT /api/config/live`, body `{"auto_send_ms": <ms> | null}` → echoes the
+- `PUT /api/config/live`, body `{"auto_send_ms": <ms> | null, "handoff_tokens": <n> | null}` → echoes the
   getter. Absent leaves the setting alone, `null` removes it, restoring the
   built-in. A wait outside 250..=60000, or the wrong shape, is **422
   `validation`**, writing nothing. (`save_live` takes a raw JSON value, like

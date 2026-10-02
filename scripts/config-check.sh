@@ -1149,6 +1149,9 @@ api GET /api/config/live
   fail "an unconfigured auto-send wait must report null, got $STDOUT"
 [ "$(jq -r '.auto_send_ms_default' <<<"$STDOUT")" = "2000" ] ||
   fail "GET live: auto_send_ms_default must be the built-in 2000: $STDOUT"
+[ "$(jq -r '.handoff_tokens' <<<"$STDOUT")" = "null" ] &&
+  [ "$(jq -r '.handoff_tokens_default' <<<"$STDOUT")" = "150000" ] ||
+  fail "GET live: handoff_tokens must be null with default 150000: $STDOUT"
 # `prompt`/`default_prompt` are gone from the route entirely (mesa task 919) —
 # not null, absent.
 [ "$(jq -r 'has("prompt") or has("default_prompt")' <<<"$STDOUT")" = "false" ] ||

@@ -20,8 +20,8 @@ import type { ConfigLive } from './types/ConfigLive'
  *   a string and only [`changedLive`] converts.
  */
 
-/** The section's one box as typed: the auto-send wait. */
-export type LivePromptDraft = { auto_send_ms: string }
+/** The section's boxes as typed: the auto-send wait and the handoff threshold. */
+export type LivePromptDraft = { auto_send_ms: string; handoff_tokens: string }
 
 /**
  * The wait's accepted range in milliseconds, mirroring the server's rule
@@ -31,11 +31,17 @@ export type LivePromptDraft = { auto_send_ms: string }
 export const MIN_AUTO_SEND_MS = 250
 export const MAX_AUTO_SEND_MS = 60_000
 
+/** The handoff threshold's range in tokens (`core::config::*_LIVE_HANDOFF_TOKENS`). */
+export const MIN_HANDOFF_TOKENS = 20_000
+export const MAX_HANDOFF_TOKENS = 1_000_000
+
 /** The editable text as loaded: an unconfigured value is blank. */
 export function draftFrom(live: ConfigLive): LivePromptDraft {
   return {
     auto_send_ms:
       live.auto_send_ms === null ? '' : String(live.auto_send_ms),
+    handoff_tokens:
+      live.handoff_tokens === null ? '' : String(live.handoff_tokens),
   }
 }
 
@@ -58,6 +64,23 @@ export function waitError(text: string): string | null {
   return null
 }
 
+/** The complaint about the handoff box, or `null`; blank is the reset. */
+export function handoffError(text: string): string | null {
+  const trimmed = (text ?? '').trim()
+  if (trimmed === '') return null
+  if (!/^-?\d+$/.test(trimmed)) return 'not a whole number of tokens'
+  const n = Number(trimmed)
+  if (n < MIN_HANDOFF_TOKENS || n > MAX_HANDOFF_TOKENS) {
+    return `must be between ${MIN_HANDOFF_TOKENS} and ${MAX_HANDOFF_TOKENS} tokens`
+  }
+  return null
+}
+
+function handoffOf(draft: LivePromptDraft): number | null {
+  const trimmed = (draft.handoff_tokens ?? '').trim()
+  return trimmed === '' ? null : Number(trimmed)
+}
+
 /** What the wait box means: a number, or `null` for "the wait mesa ships". */
 function waitOf(draft: LivePromptDraft): number | null {
   const trimmed = (draft.auto_send_ms ?? '').trim()
@@ -76,12 +99,20 @@ function isWaitDirty(live: ConfigLive, draft: LivePromptDraft): boolean {
 
 /** True when the box differs from what the server last reported. */
 export function isDirty(live: ConfigLive, draft: LivePromptDraft): boolean {
-  return isWaitDirty(live, draft)
+  return isWaitDirty(live, draft) || isHandoffDirty(live, draft)
+}
+
+function isHandoffDirty(live: ConfigLive, draft: LivePromptDraft): boolean {
+  if (handoffError(draft.handoff_tokens ?? '')) return true
+  return handoffOf(draft) !== live.handoff_tokens
 }
 
 /** True when nothing drafted would be rejected by the server. */
 export function isSavable(draft: LivePromptDraft): boolean {
-  return waitError(draft.auto_send_ms ?? '') === null
+  return (
+    waitError(draft.auto_send_ms ?? '') === null &&
+    handoffError(draft.handoff_tokens ?? '') === null
+  )
 }
 
 /**
@@ -97,5 +128,6 @@ export function changedLive(
   if (!isSavable(draft)) return {}
   const changed: Record<string, number | null> = {}
   if (isWaitDirty(live, draft)) changed.auto_send_ms = waitOf(draft)
+  if (isHandoffDirty(live, draft)) changed.handoff_tokens = handoffOf(draft)
   return changed
 }
