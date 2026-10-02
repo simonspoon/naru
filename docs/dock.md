@@ -13,7 +13,7 @@ or Rust surface.
 | `agents` | `AgentSidebar` with its `docked` prop |
 | `terminal` | the global `TerminalPage` |
 | `diagrams` | `DiagramsPanel`: the boards of the project the route is on, opened in place |
-| `orb` | the live orb (mesa task 1574): the animated mark (`LiveOrb.tsx`'s `OrbPanel`, mesa task 1577) filling its panel over a soft state-coloured glow — no sphere, ring or status words — with always-visible mic / pause / sound icon buttons bottom right (the mic red and slashed when muted) |
+| `orb` (labelled **Naru**; the id is unchanged so saved layouts load, mesa task 1579) | the animated mark (`LiveOrb.tsx`'s `OrbPanel`, mesa tasks 1574/1577) filling its panel over a soft state-coloured glow — pure orb, no sphere, ring, words or controls. Its mic / pause / sound icon buttons (the mic red and slashed when muted) live in the page header, left of the usage chips behind a thin divider (`OrbHeaderControls`, rendered by `LiveHub` on the dock tiers), so they work with the panel open, closed or docked in the collapsed nav |
 
 Each panel appears at most once. The phone tier (`usePhoneTier()`) is **not**
 docked and keeps its drawers, tab bar and the old live aside unchanged.

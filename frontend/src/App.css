@@ -12604,7 +12604,7 @@ body.dock-resizing .dock-body {
 }
 
 /* The orb panel (mesa task 1577): the animated mark filling the panel over a
-   soft glow, always-visible icon buttons bottom right. No sphere, ring or
+   soft glow. Its mic / pause / sound buttons moved to the header (task 1579). No sphere, ring or
    words. The mark's box is a square from container units: height-bound in a
    short wide panel, width-bound in a tall narrow one. */
 .orb-panel {
@@ -12657,40 +12657,43 @@ body.dock-resizing .dock-body {
   background: #b06bff;
 }
 
-.orb-panel-ctrls {
-  position: absolute;
-  right: 0.6rem;
-  bottom: 0.6rem;
+.header-orb-ctrls {
   display: flex;
-  gap: 0.4rem;
+  gap: 0.3rem;
 }
 
-.orb-panel-btn {
-  width: 32px;
-  height: 32px;
+.header-orb-divider {
+  width: 1px;
+  height: 18px;
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.header-orb-btn {
+  width: 26px;
+  height: 26px;
   min-width: 0;
   padding: 0;
   display: flex;
   align-items: center;
   justify-content: center;
   border: none;
-  border-radius: 9px;
+  border-radius: 8px;
   background: rgba(20, 30, 50, 0.75);
   box-shadow: var(--ring);
   color: var(--cyan);
   cursor: pointer;
 }
 
-.orb-panel-btn:hover {
+.header-orb-btn:hover {
   background: rgba(30, 50, 80, 0.9);
 }
 
-.orb-panel-btn.off {
+.header-orb-btn.off {
   color: var(--red);
   background: rgba(60, 18, 26, 0.55);
 }
 
-.orb-panel-btn:disabled {
+.header-orb-btn:disabled {
   opacity: 0.4;
   cursor: default;
 }

@@ -246,8 +246,28 @@ export function InlineOrb({ size, ...p }: OrbProps & { size: number }) {
   )
 }
 
-/** One of the panel's small icon buttons: a real button, named, no label. */
-function PanelButton({
+/**
+ * The `orb` dock panel's body (mesa task 1577): the animated mark filling the
+ * panel over a soft glow in the state's colour — no sphere, no ring, no words,
+ * no controls (those are `OrbHeaderControls`, in the page header).
+ * The mark's box is a square fitted by container units, so it takes the height
+ * of a short wide panel and the width of a tall narrow one.
+ */
+export function OrbPanel(p: OrbProps) {
+  return (
+    <div className={`orb-panel ${orbClasses(p.state, null)}`} aria-label="Naru">
+      <div className="orb-panel-stage">
+        <div className="orb-panel-mark">
+          <div className="orb-panel-glow" />
+          <NaruMark state={p.state} level={p.level} speechRms={p.speechRms} decorative />
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/** One of the header's small icon buttons: a real button, named, no label. */
+function HeaderButton({
   label,
   off,
   disabled,
@@ -264,7 +284,7 @@ function PanelButton({
   return (
     <button
       type="button"
-      className={`orb-panel-btn${off ? ' off' : ''}`}
+      className={`header-orb-btn${off ? ' off' : ''}`}
       aria-label={label}
       title={label}
       aria-pressed={off}
@@ -279,49 +299,42 @@ function PanelButton({
 }
 
 /**
- * The `orb` dock panel's body (mesa task 1577): the animated mark filling the
- * panel over a soft glow in the state's colour — no sphere, no ring, no words —
- * with mic / pause / sound as small always-visible icon buttons bottom right.
- * The mark's box is a square fitted by container units, so it takes the height
- * of a short wide panel and the width of a tall narrow one.
+ * The mic / pause / sound icon buttons in the page header, left of the usage
+ * chips (mesa task 1579). Rendered by `LiveHub` itself, which lives in the
+ * header, so they work whether the Naru panel is open, closed or docked in the
+ * collapsed nav; the muted mic is red and slashed.
  */
-export function OrbPanel(p: OrbProps) {
+export function OrbHeaderControls(p: OrbProps) {
+  if (!p.micAvailable && !p.canPause) return null
   return (
-    <div className={`orb-panel ${orbClasses(p.state, null)}`} aria-label="the live orb">
-      <div className="orb-panel-stage">
-        <div className="orb-panel-mark">
-          <div className="orb-panel-glow" />
-          <NaruMark state={p.state} level={p.level} speechRms={p.speechRms} decorative />
-        </div>
+    <>
+      <div className="header-orb-ctrls">
+        {p.micAvailable && (
+          <HeaderButton
+            label={p.micMuted ? 'Listen through this browser' : 'Stop listening'}
+            off={p.micMuted}
+            onPress={p.onToggleMic}
+          >
+            <MicGlyph slashed={p.micMuted} />
+          </HeaderButton>
+        )}
+        {p.canPause && (
+          <HeaderButton label={p.pauseLabel} off={p.paused} disabled={p.pauseDisabled} onPress={p.onTogglePause}>
+            <PauseGlyph paused={p.paused} />
+          </HeaderButton>
+        )}
+        {p.canPause && (
+          <HeaderButton
+            label={p.speechMuted ? 'Unmute spoken replies' : 'Mute spoken replies'}
+            off={p.speechMuted}
+            onPress={p.onToggleSpeech}
+          >
+            <SpeakerGlyph muted={p.speechMuted} />
+          </HeaderButton>
+        )}
       </div>
-      {(p.micAvailable || p.canPause) && (
-        <div className="orb-panel-ctrls">
-          {p.micAvailable && (
-            <PanelButton
-              label={p.micMuted ? 'Listen through this browser' : 'Stop listening'}
-              off={p.micMuted}
-              onPress={p.onToggleMic}
-            >
-              <MicGlyph slashed={p.micMuted} />
-            </PanelButton>
-          )}
-          {p.canPause && (
-            <PanelButton label={p.pauseLabel} off={p.paused} disabled={p.pauseDisabled} onPress={p.onTogglePause}>
-              <PauseGlyph paused={p.paused} />
-            </PanelButton>
-          )}
-          {p.canPause && (
-            <PanelButton
-              label={p.speechMuted ? 'Unmute spoken replies' : 'Mute spoken replies'}
-              off={p.speechMuted}
-              onPress={p.onToggleSpeech}
-            >
-              <SpeakerGlyph muted={p.speechMuted} />
-            </PanelButton>
-          )}
-        </div>
-      )}
-    </div>
+      <span className="header-orb-divider" aria-hidden="true" />
+    </>
   )
 }
 

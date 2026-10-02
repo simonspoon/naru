@@ -4,7 +4,7 @@ import { createPortal } from 'react-dom'
 import * as dockHosts from '../lib/dockHosts'
 import { NaruMark } from './NaruMark'
 import { LiveGlow } from './LiveGlow'
-import { InlineOrb, LiveOrb, OrbPanel } from './LiveOrb'
+import { InlineOrb, LiveOrb, OrbHeaderControls, OrbPanel } from './LiveOrb'
 import { LiveBoardPanel, type InkFlatten } from './LiveBoardPanel'
 import {
   claimLiveSpeaker,
@@ -4035,7 +4035,8 @@ export function LiveHub({
   // (mesa task 1567) — the chat and board panels' own portals below.
   // The orb panel (mesa task 1574): the floating orb's sphere, pie, glow and
   // badge (`LiveOrb.tsx`), in the dock — the three presses are the pie's, wired
-  // to the very handlers the head's buttons call. Everything it shows is this
+  // to the very handlers the head's buttons call — and the header controls
+  // (`OrbHeaderControls`, mesa task 1579). Everything it shows is this
   // component's own state, so closing a panel never stops the listening.
   const orbProps = {
     state: live && unlocked ? indicator : null,
@@ -4643,6 +4644,10 @@ export function LiveHub({
 
   return (
     <div className="live-hub">
+      {/* Mic / pause / sound (mesa task 1579): in the header beside the usage
+          chips, on the dock tiers, so they need no orb panel mounted. The
+          phone tier's floating orb carries them as its pie. */}
+      {dock && live && <OrbHeaderControls {...orbProps} />}
       {controls.panel && !dock && (
         <button
           type="button"

@@ -41,7 +41,7 @@ const LABELS: Record<PanelId, string> = {
   agents: 'Agents',
   terminal: 'Terminal',
   diagrams: 'Diagrams',
-  orb: 'Orb',
+  orb: 'Naru',
 }
 
 export function panelLabel(id: PanelId): string {
