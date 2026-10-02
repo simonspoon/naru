@@ -31,5 +31,10 @@ export_command: boolean,
 /**
  * [`LibraryItem::files`]; absent in a bundle older than mesa task 1604,
  * which reads as none.
+ *
+ * `None` is "this bundle says nothing about the siblings" (an old
+ * bundle, or a skill with none): import leaves a local skill's siblings
+ * alone and the preview does not compare them. A carried map is
+ * authoritative.
  */
 files?: Record<string, string>, };

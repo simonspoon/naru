@@ -407,7 +407,14 @@ pub fn ensure_agent_file(
 /// The sync decision table (`docs` in the design), a total function over the
 /// mesa body (M), the file on disk (D, `None` when no file exists) and the
 /// last-agreed baseline (B, `None` before the first sync).
-pub fn classify(mesa: &str, disk: Option<&str>, baseline: Option<&str>) -> LibrarySyncStatus {
+///
+/// Generic over what is compared: a plain `&str` for a file, `(body, siblings)`
+/// for a skill folder (mesa task 1604), so a folder is compared structurally.
+pub fn classify<T: PartialEq + ?Sized>(
+    mesa: &T,
+    disk: Option<&T>,
+    baseline: Option<&T>,
+) -> LibrarySyncStatus {
     match (disk, baseline) {
         (Some(d), _) if d == mesa => LibrarySyncStatus::InSync,
         (None, None) => LibrarySyncStatus::MesaNew,
@@ -583,10 +590,9 @@ fn read_bounded_with_mtime(path: &Path) -> Option<(String, Option<String>)> {
 }
 
 /// One string standing for a skill's whole content — `SKILL.md` plus its
-/// sibling files — so [`classify`] and the diff compare a folder as they
-/// compare a file (mesa task 1604). With no siblings it is the body itself,
-/// so every non-skill (and a lone `SKILL.md`) classifies exactly as before.
-/// Readable on purpose: it is what a sync diff shows.
+/// sibling files — for the sync diff to show (mesa task 1604). Display only:
+/// [`classify`] compares `(body, files)` structurally, since this text could
+/// be matched by a crafted body.
 fn fingerprint(body: &str, files: &BTreeMap<String, String>) -> String {
     let mut out = body.to_string();
     for (path, content) in files {
@@ -629,7 +635,7 @@ fn read_skill_files(base: &Path, name: &str) -> BTreeMap<String, String> {
             };
             if meta.is_dir() && depth < 8 {
                 stack.push((entry.path(), format!("{rel}/"), depth + 1));
-            } else if meta.is_file() && !rel.eq_ignore_ascii_case("SKILL.md") {
+            } else if meta.is_file() && crate::core::store::library_file_path_is_valid(&rel) {
                 let Some((content, _)) = read_bounded_with_mtime(&entry.path()) else {
                     continue;
                 };
@@ -656,7 +662,8 @@ fn read_skill_files(base: &Path, name: &str) -> BTreeMap<String, String> {
 /// Writes a skill's sibling files beside its `SKILL.md` (`skill_md_rel` is
 /// that file's path under `base`) and removes any other file
 /// [`read_skill_files`] saw there (`on_disk`), so choosing mesa's side leaves
-/// the folder equal to mesa's rather than never reading `in-sync`. Every
+/// the folder equal to mesa's — but only those `baseline` held, so nothing
+/// the library never knew of is deleted. Every
 /// target goes through [`resolve`], so a path that climbs out of the skill
 /// folder is refused.
 fn write_skill_files(
@@ -664,6 +671,7 @@ fn write_skill_files(
     skill_md_rel: &Path,
     files: &BTreeMap<String, String>,
     on_disk: &BTreeMap<String, String>,
+    baseline: &BTreeMap<String, String>,
 ) -> StoreResult<()> {
     let dir = skill_md_rel.parent().unwrap_or(Path::new(""));
     for (path, content) in files {
@@ -673,7 +681,13 @@ fn write_skill_files(
         }
         fs::write(&full, content)?;
     }
-    for path in on_disk.keys().filter(|p| !files.contains_key(*p)) {
+    // Only a file the last sync agreed on and the library has since dropped
+    // is removed; one the baseline never held (a row from before siblings
+    // were synced, or a file added on disk since) is never deleted.
+    for path in on_disk
+        .keys()
+        .filter(|p| !files.contains_key(*p) && baseline.contains_key(*p))
+    {
         if let Ok(full) = resolve(base, &dir.join(path)) {
             let _ = fs::remove_file(full);
         }
@@ -896,22 +910,18 @@ pub fn sync_status(store: &Store, project: Option<i64>) -> StoreResult<Vec<Libra
         };
         // A skill is its whole folder: the comparison strings carry the
         // sibling files too (mesa task 1604), a plain body for everything else.
-        let mesa_whole = fingerprint(&item.body, &item.files);
-        let disk_whole = disk_body.as_deref().map(|b| fingerprint(b, &disk_files));
-        let baseline_whole = baseline
-            .as_deref()
-            .map(|b| fingerprint(b, &item.synced_files));
-        let status = classify(
-            &mesa_whole,
-            disk_whole.as_deref(),
-            baseline_whole.as_deref(),
-        );
+        let mesa_whole = (item.body.as_str(), &item.files);
+        let disk_whole = disk_body.as_deref().map(|b| (b, &disk_files));
+        let baseline_whole = baseline.as_deref().map(|b| (b, &item.synced_files));
+        let status = classify(&mesa_whole, disk_whole.as_ref(), baseline_whole.as_ref());
         // Two-sided rows only: a one-sided row has nothing to diff against,
         // and an `in-sync` row's two sides are the same text.
-        let diff = disk_whole
-            .as_deref()
-            .filter(|d| *d != mesa_whole)
-            .map(|d| diff_lines(&mesa_whole, d));
+        let diff = disk_whole.filter(|d| *d != mesa_whole).map(|d| {
+            diff_lines(
+                &fingerprint(mesa_whole.0, mesa_whole.1),
+                &fingerprint(d.0, d.1),
+            )
+        });
         let mesa_updated_at = item
             .id
             .and_then(|id| version_dates.get(&id).cloned())
@@ -1218,12 +1228,17 @@ fn apply_naru(store: &mut Store, project: Option<i64>, row: &LibrarySyncRow) -> 
         fs::create_dir_all(parent)?;
     }
     fs::write(&full, body)?;
+    let baseline_files = match row.item_id {
+        Some(id) => store.get_library_item(id)?.synced_files,
+        None => BTreeMap::new(),
+    };
     if row.kind == LibraryKind::Skill {
         write_skill_files(
             &base,
             Path::new(&row.path),
             &row.mesa_files,
             &row.disk_files,
+            &baseline_files,
         )?;
     }
     // A hook is registered as its bare path, so the file Claude Code runs
@@ -1263,6 +1278,7 @@ fn apply_disk(store: &mut Store, row: &LibrarySyncRow) -> StoreResult<()> {
             // `.claude/commands` file and adopts with the flag on — the row
             // carries no separate flag because that is the only way a prompt
             // reaches this table.
+            crate::core::store::check_library_files(row.kind, &row.disk_files)?;
             let created = store.create_library_item(
                 row.kind,
                 row.scope,
@@ -1282,6 +1298,7 @@ fn apply_disk(store: &mut Store, row: &LibrarySyncRow) -> StoreResult<()> {
             let body = row.disk_body.as_ref().ok_or_else(|| {
                 Error::Validation(format!("{} has no disk body to pull", row.path))
             })?;
+            crate::core::store::check_library_files(row.kind, &row.disk_files)?;
             let id = match row.item_id {
                 Some(id) => id,
                 None => {
@@ -1343,7 +1360,9 @@ pub fn export(store: &Store, project: Option<i64>) -> StoreResult<LibraryBundle>
             body: item.body,
             builtin_id: item.builtin_id,
             export_command: item.export_command,
-            files: item.files,
+            // Carried only when there are siblings: absent means "this bundle
+            // says nothing about them" (an old bundle reads the same way).
+            files: (!item.files.is_empty()).then_some(item.files),
         })
         .collect();
     Ok(LibraryBundle {
@@ -1499,7 +1518,10 @@ pub fn import_preview(store: &Store, bundle: &LibraryBundle) -> StoreResult<Vec<
                 .id
                 .and_then(|id| version_dates.get(&id).cloned())
                 .or_else(|| existing.updated_at.clone());
-            if existing.body == item.body && existing.files == item.files {
+            // A bundle that carries no `files` key says nothing about the
+            // siblings, so only a carried map is compared.
+            let bundle_files = item.files.as_ref().unwrap_or(&existing.files);
+            if existing.body == item.body && existing.files == *bundle_files {
                 return row(
                     LibraryImportStatus::Identical,
                     existing.id,
@@ -1511,7 +1533,7 @@ pub fn import_preview(store: &Store, bundle: &LibraryBundle) -> StoreResult<Vec<
             }
             let diff = diff_lines(
                 &fingerprint(&existing.body, &existing.files),
-                &fingerprint(&item.body, &item.files),
+                &fingerprint(&item.body, bundle_files),
             );
             row(
                 LibraryImportStatus::Conflict,
@@ -1623,6 +1645,14 @@ fn import_one(
         Err(e) => return fail(e),
     };
 
+    // Validate a carried sibling map before anything is written, so a
+    // refusal leaves no half-imported row behind.
+    if let Some(files) = &item.files
+        && let Err(e) = crate::core::store::check_library_files(item.kind, files)
+    {
+        return fail(e.to_string());
+    }
+
     match existing {
         None => match store
             .create_library_item(
@@ -1644,8 +1674,11 @@ fn import_one(
                 _ => Ok(created),
             })
             .and_then(|created| match created.id {
-                Some(id) if !item.files.is_empty() => store.set_library_files(id, &item.files),
-                _ => Ok(created),
+                Some(id) => match &item.files {
+                    Some(files) if !files.is_empty() => store.set_library_files(id, files),
+                    _ => Ok(created),
+                },
+                None => Ok(created),
             }) {
             Ok(created) => LibraryImportResult {
                 name: item.name.clone(),
@@ -1673,8 +1706,12 @@ fn import_one(
                     ..Default::default()
                 },
             )
-            .and_then(|updated| {
-                store.set_library_files(updated.id.expect("an updated row has an id"), &item.files)
+            .and_then(|updated| match &item.files {
+                // Only a bundle that carried the key speaks for the siblings.
+                Some(files) => {
+                    store.set_library_files(updated.id.expect("an updated row has an id"), files)
+                }
+                None => Ok(updated),
             }) {
             Ok(updated) => LibraryImportResult {
                 name: item.name.clone(),
@@ -4552,6 +4589,8 @@ mod tests {
         let mut altered = bundle.clone();
         altered.items[0]
             .files
+            .as_mut()
+            .unwrap()
             .insert("briefs.md".into(), "other".into());
         let preview = import_preview(&b, &altered).unwrap();
         assert_eq!(preview[0].status, LibraryImportStatus::Conflict);
@@ -4601,13 +4640,200 @@ mod tests {
         let path = ".claude/skills/s/SKILL.md".to_string();
         let results = sync_apply(&mut store, Some(pid), &[(path.clone(), "mesa".into())]).unwrap();
         assert!(results[0].applied, "{:?}", results[0].error);
-        assert!(!dir_s.join("stale.md").exists());
         assert_eq!(fs::read_to_string(dir_s.join("SKILL.md")).unwrap(), "body");
+        // Regression (upgrade data loss): the baseline never held stale.md,
+        // so choosing the library side must not delete it.
+        assert!(dir_s.join("stale.md").exists());
+
+        // A file the baseline did hold, which the library has since dropped, goes.
+        let files: BTreeMap<String, String> =
+            [("stale.md".to_string(), "stale".to_string())].into();
+        store.set_library_files(id, &files).unwrap();
+        sync_apply(&mut store, Some(pid), &[(path.clone(), "mesa".into())]).unwrap();
+        store.set_library_files(id, &BTreeMap::new()).unwrap();
+        let results = sync_apply(&mut store, Some(pid), &[(path.clone(), "mesa".into())]).unwrap();
+        assert!(results[0].applied, "{:?}", results[0].error);
+        assert!(!dir_s.join("stale.md").exists());
         let rows = sync_status(&store, Some(pid)).unwrap();
         assert_eq!(
             rows.iter().find(|r| r.path == path).unwrap().status,
             LibrarySyncStatus::InSync
         );
+    }
+
+    fn skill_item(store: &mut Store, pid: i64, body: &str) -> i64 {
+        store
+            .create_library_item(
+                LibraryKind::Skill,
+                LibraryScope::Project,
+                Some(pid),
+                "s",
+                body,
+                None,
+                false,
+            )
+            .unwrap()
+            .id
+            .unwrap()
+    }
+
+    fn skill_bundle_item(body: &str, files: Option<BTreeMap<String, String>>) -> LibraryBundleItem {
+        LibraryBundleItem {
+            name: "s".into(),
+            kind: LibraryKind::Skill,
+            scope: LibraryScope::Project,
+            project: Some("proj".into()),
+            body: body.into(),
+            builtin_id: None,
+            export_command: false,
+            files,
+        }
+    }
+
+    /// Regression 1: a bundle with no `files` key says nothing about the
+    /// siblings — the preview does not compare them and a replace keeps them.
+    #[test]
+    fn a_bundle_without_files_leaves_a_skills_siblings_alone() {
+        let (mut store, dir) = temp_store();
+        let disk = dir.path().join("disk");
+        fs::create_dir_all(&disk).unwrap();
+        let pid = project_at(&mut store, &disk);
+        let id = skill_item(&mut store, pid, "body");
+        let files: BTreeMap<String, String> = [("a.md".to_string(), "A".to_string())].into();
+        store.set_library_files(id, &files).unwrap();
+
+        let same = bundle_of(vec![skill_bundle_item("body", None)]);
+        let preview = import_preview(&store, &same).unwrap();
+        assert_eq!(preview[0].status, LibraryImportStatus::Identical);
+
+        let changed = bundle_of(vec![skill_bundle_item("new body", None)]);
+        let imported = import(&mut store, &changed, "replace", &[]).unwrap();
+        assert_eq!(imported[0].status, "replaced", "{:?}", imported[0].error);
+        let got = store.get_library_item(id).unwrap();
+        assert_eq!(got.body, "new body");
+        assert_eq!(
+            got.files, files,
+            "siblings must survive an old-style bundle"
+        );
+
+        // An old bundle's JSON really has no key, and a carried empty map
+        // is distinct from an absent one.
+        let json = r#"{"name":"s","kind":"skill","scope":"project","project":"proj","body":"x"}"#;
+        let item: LibraryBundleItem = serde_json::from_str(json).unwrap();
+        assert!(item.files.is_none());
+        let wiped = bundle_of(vec![skill_bundle_item("new body", Some(BTreeMap::new()))]);
+        import(&mut store, &wiped, "replace", &[]).unwrap();
+        assert!(store.get_library_item(id).unwrap().files.is_empty());
+    }
+
+    /// Regression 2: the disk reader never returns what `Store` would refuse,
+    /// so adopting a folder with such files still succeeds and reads in-sync;
+    /// and an import carrying one fails before writing a row.
+    #[test]
+    fn the_skill_reader_and_the_store_agree_on_what_a_sibling_is() {
+        let (mut store, dir) = temp_store();
+        let disk = dir.path().join("disk");
+        fs::create_dir_all(&disk).unwrap();
+        let pid = project_at(&mut store, &disk);
+        let dir_s = disk.join(".claude/skills/s");
+        fs::create_dir_all(&dir_s).unwrap();
+        fs::write(dir_s.join("SKILL.md"), "body").unwrap();
+        fs::write(dir_s.join("back\\slash.md"), "x").unwrap();
+        fs::write(dir_s.join(format!("{}.md", "n".repeat(250))), "x").unwrap();
+        for i in 0..105 {
+            fs::write(dir_s.join(format!("f{i:03}.md")), "x").unwrap();
+        }
+        let read = read_skill_files(&disk, "s");
+        assert_eq!(read.len(), crate::core::store::LIBRARY_FILES_MAX);
+        assert!(
+            read.keys()
+                .all(|k| crate::core::store::library_file_path_is_valid(k))
+        );
+        crate::core::store::check_library_files(LibraryKind::Skill, &read).unwrap();
+
+        let path = ".claude/skills/s/SKILL.md".to_string();
+        let results = sync_apply(&mut store, Some(pid), &[(path.clone(), "disk".into())]).unwrap();
+        assert!(results[0].applied, "{:?}", results[0].error);
+        let item = store
+            .find_library_item(LibraryKind::Skill, LibraryScope::Project, Some(pid), "s")
+            .unwrap()
+            .unwrap();
+        assert_eq!(item.files.len(), crate::core::store::LIBRARY_FILES_MAX);
+        let rows = sync_status(&store, Some(pid)).unwrap();
+        assert_eq!(
+            rows.iter().find(|r| r.path == path).unwrap().status,
+            LibrarySyncStatus::InSync
+        );
+
+        // An import carrying an invalid sibling writes no row at all.
+        let (mut other, dir_o) = temp_store();
+        let disk_o = dir_o.path().join("disk");
+        fs::create_dir_all(&disk_o).unwrap();
+        project_at(&mut other, &disk_o);
+        let bad: BTreeMap<String, String> = [("a\\b.md".to_string(), "x".to_string())].into();
+        let bundle = bundle_of(vec![skill_bundle_item("body", Some(bad))]);
+        let imported = import(&mut other, &bundle, "skip", &[]).unwrap();
+        assert_eq!(imported[0].status, "failed");
+        assert!(
+            other
+                .find_library_item(LibraryKind::Skill, LibraryScope::Project, Some(1), "s")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// Regression 4: the validator rejects exactly what the reader skips —
+    /// dot-prefixed components and paths deeper than the reader walks — and
+    /// the reader's deepest accepted file passes the validator.
+    #[test]
+    fn the_sibling_validator_rejects_what_the_reader_skips() {
+        use crate::core::store::library_file_path_is_valid as ok;
+        assert!(!ok(".hidden.md"));
+        assert!(!ok("dir/.hidden.md"));
+        assert!(!ok(".git/config"));
+        assert!(!ok("a/b/c/d/e/f/g/h/i/j.md"));
+        assert!(ok("a/b/c/d/e/f/g/h/i.md"));
+
+        let dir = tempfile::tempdir().unwrap();
+        let skill = dir.path().join(".claude/skills/s");
+        let deep = skill.join("a/b/c/d/e/f/g/h");
+        fs::create_dir_all(&deep).unwrap();
+        fs::create_dir_all(deep.join("too")).unwrap();
+        fs::write(skill.join("SKILL.md"), "b").unwrap();
+        fs::write(deep.join("i.md"), "x").unwrap();
+        fs::write(deep.join("too/j.md"), "x").unwrap();
+        fs::create_dir_all(skill.join(".hid")).unwrap();
+        fs::write(skill.join(".hid/x.md"), "x").unwrap();
+        let read = read_skill_files(dir.path(), "s");
+        assert_eq!(
+            read.keys().collect::<Vec<_>>(),
+            vec!["a/b/c/d/e/f/g/h/i.md"]
+        );
+    }
+
+    /// Regression 6 and 7a: a body that spells the display fingerprint is not
+    /// its folder, and a skill with siblings cannot change kind.
+    #[test]
+    fn a_folder_compares_structurally_and_a_skill_with_siblings_keeps_its_kind() {
+        let files: BTreeMap<String, String> = [("x".to_string(), "Y".to_string())].into();
+        let none = BTreeMap::new();
+        let crafted = fingerprint("a", &files);
+        assert_eq!(
+            classify(&(crafted.as_str(), &none), Some(&("a", &files)), None),
+            LibrarySyncStatus::BothChanged
+        );
+
+        let (mut store, dir) = temp_store();
+        let disk = dir.path().join("disk");
+        fs::create_dir_all(&disk).unwrap();
+        let pid = project_at(&mut store, &disk);
+        let id = skill_item(&mut store, pid, "body");
+        store.set_library_files(id, &files).unwrap();
+        let patch = LibraryPatch {
+            kind: Some(LibraryKind::Agent),
+            ..Default::default()
+        };
+        assert!(store.update_library_item(id, patch).is_err());
     }
 
     /// `naru` is `mesa`'s new spelling (mesa task 1302): it writes the same

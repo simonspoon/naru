@@ -2658,9 +2658,14 @@ pub struct LibraryBundleItem {
     pub export_command: bool,
     /// [`LibraryItem::files`]; absent in a bundle older than mesa task 1604,
     /// which reads as none.
-    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    ///
+    /// `None` is "this bundle says nothing about the siblings" (an old
+    /// bundle, or a skill with none): import leaves a local skill's siblings
+    /// alone and the preview does not compare them. A carried map is
+    /// authoritative.
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "Record<string, string>")]
-    pub files: std::collections::BTreeMap<String, String>,
+    pub files: Option<std::collections::BTreeMap<String, String>>,
 }
 
 /// The wire shape [`LibraryBundleItem`] is read through: `kind` as the raw
@@ -2678,7 +2683,7 @@ struct LibraryBundleItemWire {
     #[serde(default)]
     export_command: bool,
     #[serde(default)]
-    files: std::collections::BTreeMap<String, String>,
+    files: Option<std::collections::BTreeMap<String, String>>,
 }
 
 impl<'de> Deserialize<'de> for LibraryBundleItem {

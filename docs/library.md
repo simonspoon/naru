@@ -95,8 +95,11 @@ column (`library_items.files`, with `synced_files` as the baseline's second
 half — migration index 82; only `Store::set_library_files` /
 `set_library_synced_files` write them). Only a `skill` may carry any;
 `validation` for another kind, for more than 100 files, a file over 1 MiB, a
-total over 4 MiB, or a path that is empty, absolute, holds a `.`/`..`
-component, a backslash or NUL, or names `SKILL.md`.
+total over 4 MiB, or a path that is empty, absolute, longer than 200
+characters, deeper than 9 components, holds a dot-prefixed (`.`/`..`/dotfile)
+component, a backslash or NUL, or names `SKILL.md`. The disk reader calls the
+same predicate, so it never returns what `Store` would refuse. A kind change
+away from `skill` is `validation` while the row holds siblings.
 
 - **Disk → library** (`sync apply … disk`, adopting a `disk-new` skill or
   pulling a changed one) reads every regular UTF-8 file under the skill dir,
@@ -107,23 +110,26 @@ component, a backslash or NUL, or names `SKILL.md`.
   read always passes the `Store` check.
 - **Library → disk** (`sync apply … mesa`) writes the siblings beside
   `SKILL.md`, creating directories, each target through `resolve`; and it
-  **removes** a sibling the scan saw on disk that the library does not hold,
-  because choosing a side makes the folder equal to it (otherwise the row
-  would never read `in-sync` again).
-- **Classification** compares the whole folder: `classify` is given a
-  fingerprint of `SKILL.md` + siblings for the library side, the disk side
-  and the baseline (`synced_body` + `synced_files`). With no siblings the
-  fingerprint is the body itself, so every other kind — and a lone
-  `SKILL.md` — classifies exactly as before. A sibling edit on either side
+  **removes** a sibling on disk only if the last sync agreed on it
+  (`synced_files`) and the library has since dropped it. A file the baseline
+  never held — a row from before siblings were synced, or one added on disk
+  since — is never deleted, so such a row keeps reading `disk-changed` until
+  the disk side is pulled.
+- **Classification** compares the whole folder structurally: `classify` is
+  generic and gets `(body, files)` for the library side, the disk side and
+  the baseline (`synced_body` + `synced_files`); a plain file is still a
+  `&str`, so every other kind classifies exactly as before. A sibling edit on either side
   is `disk-changed`/`mesa-changed`/`both-changed`, never `in-sync`, and the
   row's `diff` shows it as `=== file: <path> (<n> bytes) ===` sections. The
   row also carries `mesa_files`/`disk_files`.
-- **Bundle**: `LibraryBundleItem.files` (absent when empty, so a bundle with
-  no skill siblings is unchanged, and an old bundle without the field reads
-  as none). Import creates the skill with them or, on `replace`, sets them
-  (a bundle with none on a skill that has some replaces them with none);
-  `import --preview` counts a sibling difference as `conflict` (and its
-  `diff` shows it), never `identical`.
+- **Bundle**: `LibraryBundleItem.files` is optional on the wire: present for a
+  skill that has siblings, absent otherwise — and absent means "says nothing
+  about them" (an old bundle reads the same way), not "none". Import
+  validates a carried map before writing anything, creates the skill with it
+  or, on `replace`, sets it; a bundle without the key leaves a local
+  skill's siblings alone and the preview does not compare them. A carried
+  map that differs makes `import --preview` say `conflict` (its `diff` shows
+  it), never `identical`.
 - **Surfaces**: `files` is on the item JSON only when non-empty and is
   dropped by `--quiet`; the web card shows `+N files` (names on hover) and
   has no sibling editor.

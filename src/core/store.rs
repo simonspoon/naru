@@ -2343,17 +2343,34 @@ pub const LIBRARY_FILES_MAX: usize = 100;
 pub const LIBRARY_FILES_TOTAL_MAX: usize = 4 * 1024 * 1024;
 
 /// A sibling path is relative to the skill dir and is half a filename on
-/// disk: no empty, `.` or `..` component, no leading `/`, no backslash or
-/// NUL, and never `SKILL.md` itself (that is the `body`).
+/// disk: no empty, `.`/`..` or dot-prefixed component (the disk reader skips
+/// dotfiles), at most [`LIBRARY_FILE_DEPTH_MAX`] components, no leading `/`,
+/// no backslash or NUL, and never `SKILL.md` itself (that is the `body`). The
+/// disk reader (`core::library::read_skill_files`) calls this same predicate,
+/// so what it reads is exactly what `Store` accepts.
 pub fn library_file_path_is_valid(path: &str) -> bool {
     !path.is_empty()
         && path.len() <= 200
         && !path.starts_with('/')
         && !path.contains(['\\', '\0'])
         && !path.eq_ignore_ascii_case("SKILL.md")
+        && path.split('/').count() <= LIBRARY_FILE_DEPTH_MAX
         && path
             .split('/')
-            .all(|c| !c.is_empty() && c != "." && c != "..")
+            .all(|c| !c.is_empty() && !c.starts_with('.'))
+}
+
+/// Most path components a sibling may have (8 directories and the file).
+pub const LIBRARY_FILE_DEPTH_MAX: usize = 9;
+
+/// Whether `files` would be accepted as `kind`'s siblings — callers that
+/// write a row *and* its files check first, so a refusal leaves nothing
+/// half-written.
+pub fn check_library_files(
+    kind: LibraryKind,
+    files: &std::collections::BTreeMap<String, String>,
+) -> Result<()> {
+    validate_library_files(kind, files)
 }
 
 fn validate_library_files(
@@ -8805,6 +8822,8 @@ impl Store {
         };
         let next_export = patch.export_command.unwrap_or(current.export_command);
         validate_library_export(next_kind, next_export)?;
+        // A kind change away from skill would strand its sibling files.
+        validate_library_files(next_kind, &current.files)?;
 
         let identity_changed = next_kind != current.kind
             || next_scope != current.scope
