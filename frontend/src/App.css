@@ -9732,6 +9732,48 @@ body.live-panel-ratio-resizing .live-panel-divider {
   pointer-events: none;
 }
 
+/* A picture the person dropped or pasted on (mesa task 1580): absolutely
+   placed in the content box's coordinates, under the ink canvas. */
+.live-board-ink-image {
+  position: absolute;
+  cursor: move;
+  touch-action: none;
+  outline: 1px dashed rgba(255, 255, 255, 0.35);
+}
+
+.live-board-ink-image img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  user-select: none;
+}
+
+.live-board-ink-image-remove {
+  position: absolute;
+  top: -10px;
+  right: -10px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  line-height: 1;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: rgba(6, 10, 16, 0.9);
+  color: var(--muted);
+}
+
+.live-board-ink-image-handle {
+  position: absolute;
+  right: -6px;
+  bottom: -6px;
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+  background: #ff2bd6;
+  cursor: nwse-resize;
+}
+
 .live-board-pen[aria-pressed='true'] {
   color: #ff2bd6;
   border-color: rgba(255, 43, 214, 0.5);
@@ -9741,6 +9783,7 @@ body.live-panel-ratio-resizing .live-panel-divider {
    both axes: a board wider than the panel scrolls sideways rather than being
    cut off, which is the whole reason the panel can now be widened at all. */
 .live-board-content {
+  position: relative;
   flex: 1;
   min-height: 0;
   display: flex;

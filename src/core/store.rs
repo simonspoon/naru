@@ -7646,6 +7646,22 @@ impl Store {
         self.get_live_board(id)
     }
 
+    /// A blank dark canvas board for the person to draw on (mesa task 1580,
+    /// `POST /api/live/boards`): [`board::BLANK_BOARD_SVG`] through
+    /// [`Store::add_live_board`], so every rule of a pushed board — a live
+    /// session, the history, the poll — applies unchanged.
+    pub fn add_blank_live_board(&mut self, session_id: i64) -> Result<LiveBoard> {
+        use base64::Engine as _;
+        let body = base64::engine::general_purpose::STANDARD.encode(board::BLANK_BOARD_SVG);
+        self.add_live_board(
+            session_id,
+            LiveBoardKind::Image,
+            Some("Blank board"),
+            &body,
+            Some("image/svg+xml"),
+        )
+    }
+
     pub fn get_live_board(&self, id: i64) -> Result<LiveBoard> {
         self.conn
             .query_row(
@@ -16421,6 +16437,25 @@ mod tests {
         ));
         assert!(matches!(
             store.add_live_board(9999, LiveBoardKind::Markdown, None, "x", None),
+            Err(Error::Validation(_))
+        ));
+    }
+
+    #[test]
+    fn add_blank_live_board_is_an_ordinary_svg_image_board_in_a_live_session() {
+        let (mut store, _dir) = temp_store();
+        let session = store.start_live_session(None).unwrap();
+        let board = store.add_blank_live_board(session.id).unwrap();
+        assert_eq!(board.kind, LiveBoardKind::Image);
+        assert_eq!(board.content_type.as_deref(), Some("image/svg+xml"));
+        assert_eq!(
+            store.current_live_board(session.id).unwrap().unwrap().id,
+            board.id
+        );
+        assert_eq!(store.list_live_boards(session.id, 20).unwrap().len(), 1);
+        store.end_live_session(session.id).unwrap();
+        assert!(matches!(
+            store.add_blank_live_board(session.id),
             Err(Error::Validation(_))
         ));
     }

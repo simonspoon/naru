@@ -2343,6 +2343,9 @@ fn router(state: AppState) -> Router {
         // task 1157): the page posts it off the same poll it speaks turns
         // from. An ordinary write like the utterance, and deduped by `Store`.
         .route("/api/live/notice", post(live_notice))
+        // A blank board the person starts from the whiteboard (mesa task
+        // 1580): an ordinary write like the utterance, fixed content.
+        .route("/api/live/boards", post(live_blank_board))
         .route("/api/live/route", post(live_route))
         // Claiming the voice (mesa task 1267): which browser says this
         // conversation's turns out loud. Its own route rather than a flag on
@@ -4836,6 +4839,19 @@ async fn live_notice(
     };
     let (turn, _created) = store.add_live_notice(session.id, body.kind)?;
     Ok(Json(turn).into_response())
+}
+
+/// `POST /api/live/boards` — the whiteboard's "New board" button (mesa task
+/// 1580): a blank dark canvas added to the current conversation's history,
+/// answered 201 with the board. Gated like the utterance — an ordinary store
+/// write whose content is fixed, carrying nothing from the caller.
+async fn live_blank_board(State(state): State<AppState>) -> ApiResult<Response> {
+    let mut store = state.store.lock().unwrap();
+    let Some(session) = store.current_live_session()? else {
+        return Err(no_live_session());
+    };
+    let board = store.add_blank_live_board(session.id)?;
+    Ok((StatusCode::CREATED, Json(board)).into_response())
 }
 
 /// The page reporting where the user's browser is **and what is open on it**,
@@ -17433,6 +17449,25 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             assert_eq!(err.code, "not_found");
             assert!(err.message.contains("POST /api/live"), "{}", err.message);
         }
+    }
+
+    #[tokio::test]
+    async fn live_blank_board_needs_a_live_session_and_joins_the_history() {
+        let (_dir, state) = test_state();
+        let err = live_blank_board(State(state.clone())).await.unwrap_err();
+        assert_eq!(err.status, StatusCode::NOT_FOUND);
+        assert_eq!(err.code, "not_found");
+        let session = {
+            let mut store = state.store.lock().unwrap();
+            store.start_live_session(None).unwrap()
+        };
+        let res = live_blank_board(State(state.clone()))
+            .await
+            .unwrap()
+            .into_response();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let store = state.store.lock().unwrap();
+        assert_eq!(store.list_live_boards(session.id, 20).unwrap().len(), 1);
     }
 
     /// A turn may carry a pasted image (mesa task 1475) with no text, and

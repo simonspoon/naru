@@ -4,10 +4,13 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  type DragEvent,
   type PointerEvent as ReactPointerEvent,
   type RefObject,
+  type SyntheticEvent,
 } from 'react'
 import { liveBoardRenderUrl } from '../api'
+import { imageFilesFromClipboard } from '../clipboardFiles'
 import {
   boardAt,
   boardRender,
@@ -18,9 +21,17 @@ import {
   type BoardView,
 } from '../liveBoard'
 import {
+  moveImage,
+  nextImageId,
+  placeImage,
+  resizeImage,
+  type InkImage,
+} from '../liveBoardImages'
+import {
   INK_COLOR,
   INK_MAX_BYTES,
   INK_WIDTH,
+  addImage,
   addStroke,
   base64Bytes,
   boardInk,
@@ -30,7 +41,9 @@ import {
   heldBoardView,
   inkBackground,
   inkCaption,
+  removeImage,
   undoStroke,
+  updateImage,
   type InkBook,
   type InkFrame,
   type InkPoint,
@@ -48,8 +61,9 @@ import { Markdown } from './Markdown'
  * in the panel's tree whether or not the section is showing — see `expanded`
  * below for why it is never conditionally rendered.
  *
- * The panel is a **reader**. There is no board write route at all: boards are
- * pushed by the CLI, which is the agent running as the person, and the fold
+ * The panel is a **reader**. Boards are pushed by the CLI, which is the agent
+ * running as the person (the one write it makes itself is "New board", a
+ * blank canvas — mesa task 1580), and the fold
  * button here folds exactly like the conversation panel's own close — a
  * picture put away is not a write. The one request it makes is the render
  * route, and only for the board being looked at: `LiveState.boards` is
@@ -195,6 +209,22 @@ function PenMark() {
   )
 }
 
+function PlusMark() {
+  return (
+    <svg
+      className="live-icon-mark"
+      viewBox="0 0 24 24"
+      width="14"
+      height="14"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path d="M12 5v14" />
+      <path d="M5 12h14" />
+    </svg>
+  )
+}
+
 function UndoMark() {
   return (
     <svg
@@ -233,6 +263,7 @@ function ClearMark() {
 export type InkFlatten = (
   boardId: number,
   strokes: readonly InkStroke[],
+  images: readonly InkImage[],
   frame: InkFrame,
 ) => Promise<string>
 
@@ -257,6 +288,89 @@ function strokeOnto(ctx: CanvasRenderingContext2D, points: readonly InkPoint[]) 
   ctx.stroke()
 }
 
+/**
+ * One picture the person placed on the board (mesa task 1580): dragged to
+ * move, its corner handle dragged to resize, its × to remove. Its own
+ * component so the drag's bookkeeping stays out of the panel's. Sits under
+ * the ink canvas, so it takes the pointer only while the pen is up.
+ */
+function PlacedImage({
+  image,
+  bounds,
+  getOrigin,
+  onChange,
+  onRemove,
+}: {
+  image: InkImage
+  bounds: { width: number; height: number }
+  getOrigin: () => { x: number; y: number }
+  onChange: (next: InkImage) => void
+  onRemove: (imageId: number) => void
+}) {
+  const drag = useRef<{
+    mode: 'move' | 'resize'
+    startX: number
+    startY: number
+    orig: InkImage
+  } | null>(null)
+
+  function down(e: ReactPointerEvent<HTMLElement>, mode: 'move' | 'resize') {
+    e.preventDefault()
+    e.stopPropagation()
+    e.currentTarget.setPointerCapture(e.pointerId)
+    drag.current = { mode, startX: e.clientX, startY: e.clientY, orig: image }
+  }
+
+  function move(e: ReactPointerEvent<HTMLElement>) {
+    const d = drag.current
+    if (d === null) return
+    const dx = e.clientX - d.startX
+    const dy = e.clientY - d.startY
+    onChange(
+      d.mode === 'move'
+        ? moveImage(d.orig, dx, dy, bounds, getOrigin())
+        : resizeImage(d.orig, dx, dy, bounds),
+    )
+  }
+
+  function up() {
+    drag.current = null
+  }
+
+  return (
+    <div
+      className="live-board-ink-image"
+      style={{
+        left: `${image.x}px`,
+        top: `${image.y}px`,
+        width: `${image.width}px`,
+        height: `${image.height}px`,
+      }}
+      onPointerDown={(e) => down(e, 'move')}
+      onPointerMove={move}
+      onPointerUp={up}
+      onPointerCancel={up}
+    >
+      <img src={image.src} alt="" draggable={false} />
+      <button
+        type="button"
+        className="live-board-ink-image-remove"
+        aria-label="remove the picture"
+        title="Remove"
+        onPointerDown={(e) => e.stopPropagation()}
+        onClick={() => onRemove(image.id)}
+      >
+        ×
+      </button>
+      <div
+        className="live-board-ink-image-handle"
+        title="Resize"
+        onPointerDown={(e) => down(e, 'resize')}
+      />
+    </div>
+  )
+}
+
 /** An `<img>` loaded from `src`, or a rejection. */
 function loadImage(src: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
@@ -265,6 +379,20 @@ function loadImage(src: string): Promise<HTMLImageElement> {
     img.onerror = () => reject(new Error('the board image could not be loaded'))
     img.src = src
   })
+}
+
+/** A dropped or pasted picture, read into a data URL with its natural size
+ *  (a size-less SVG falls back to a default). Rejects on anything the browser
+ *  cannot decode. */
+async function readImage(file: File): Promise<{ src: string; width: number; height: number }> {
+  const src = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result))
+    reader.onerror = () => reject(new Error('the picture could not be read'))
+    reader.readAsDataURL(file)
+  })
+  const img = await loadImage(src)
+  return { src, width: img.naturalWidth || 300, height: img.naturalHeight || 200 }
 }
 
 /** Where an element sits inside the content box, in the frame's space — the
@@ -315,15 +443,20 @@ async function drawBoardBackground(
   ctx.fillStyle = getComputedStyle(content.closest('.live-board') ?? content).backgroundColor
   ctx.fillRect(0, 0, frame.width, frame.height)
   if (background === 'image') {
-    const img = content.querySelector('img')
+    const img = content.querySelector<HTMLImageElement>('img.live-board-image')
     if (img === null) throw new Error('no image on the board')
+    // `.live-board` above matches nothing, so the backdrop read transparent
+    // and everything round a short image (a blank board, mesa task 1580)
+    // flattened to nothing. The section is the opaque dark the person sees.
+    ctx.fillStyle = getComputedStyle(content.closest('.live-board-section') ?? content).backgroundColor
+    ctx.fillRect(0, 0, frame.width, frame.height)
     await img.decode()
     const at = rectIn(img, content)
     ctx.drawImage(img, at.x, at.y, at.width, at.height)
     return
   }
   if (background === 'svg') {
-    const img = content.querySelector('img')
+    const img = content.querySelector<HTMLImageElement>('img.live-board-image')
     if (img === null) throw new Error('no diagram on the board')
     const res = await fetch(liveBoardRenderUrl(board.id))
     if (!res.ok) throw new Error(`board ${board.id} could not be read`)
@@ -343,6 +476,8 @@ async function drawBoardBackground(
   // by the frozen scroll and cut to the frame — what was visible, and only
   // that.
   const clone = cloneWithStyles(content)
+  // The person's pictures are drawn once, by the flatten, over this.
+  clone.querySelectorAll('.live-board-ink-image').forEach((node) => node.remove())
   clone.style.width = `${frame.width}px`
   clone.style.height = 'auto'
   clone.style.overflow = 'visible'
@@ -390,6 +525,7 @@ async function flattenAt(
   board: LiveBoardSummary | null,
   content: HTMLElement | null,
   strokes: readonly InkStroke[],
+  images: readonly InkImage[],
   frame: InkFrame,
 ): Promise<string | null> {
   const canvas = document.createElement('canvas')
@@ -407,6 +543,13 @@ async function flattenAt(
   } else {
     drawCaptionBackground(ctx, board, frame)
   }
+  // The person's pictures over the board, under the strokes.
+  for (const image of images) {
+    const el = await loadImage(image.src).catch(() => null)
+    if (el !== null) {
+      ctx.drawImage(el, image.x - frame.scrollLeft, image.y - frame.scrollTop, image.width, image.height)
+    }
+  }
   for (const stroke of strokes) strokeOnto(ctx, stroke.map((p) => framePoint(p, frame)))
   try {
     return canvas.toDataURL('image/png').split(',')[1] ?? null
@@ -423,6 +566,7 @@ export function LiveBoardPanel({
   onInk,
   flattenRef,
   showingRef,
+  onNewBoard,
 }: {
   /** The conversation's whole board history, oldest first and bodiless — the
    *  `boards` array of the poll `LiveHub` already makes, never a second one. */
@@ -444,6 +588,10 @@ export function LiveBoardPanel({
   /** Set by this panel to the id of the board it is showing, for the hub's
    *  view line (mesa task 1424). */
   showingRef: RefObject<number | null>
+  /** Starts a blank board in the live conversation and answers its id, or
+   *  `null` on failure (the hub reports it). Absent when no conversation is
+   *  live, which hides the button (mesa task 1580). */
+  onNewBoard?: () => Promise<number | null>
 }) {
   // The board the layout is frozen for, while it carries unsent ink (mesa
   // task 1353): a new push does not take the panel away from it
@@ -522,6 +670,14 @@ export function LiveBoardPanel({
   // Opt-in, so a board with the pen off scrolls and its frame takes clicks
   // exactly as before; this browser's own switch, like pausing.
   const [pen, setPen] = useState(false)
+  // A board this panel just asked for (mesa task 1580): the pen opens once the
+  // poll delivers it, so the person lands on it ready to draw. Applied during
+  // render off the changed prop, the pattern the view above uses.
+  const [openPenFor, setOpenPenFor] = useState<number | null>(null)
+  if (openPenFor !== null && showing?.id === openPenFor) {
+    setOpenPenFor(null)
+    setPen(true)
+  }
   const contentRef = useRef<HTMLDivElement | null>(null)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   // The stroke being drawn, before the pen lifts and it joins the book — and
@@ -529,6 +685,11 @@ export function LiveBoardPanel({
   const drawing = useRef<{ points: InkPoint[]; frame: InkFrame } | null>(null)
   // The content box's size, which the overlay canvas is kept exactly over.
   const [box, setBox] = useState<{ width: number; height: number }>({ width: 0, height: 0 })
+  // Read after an await (`addFiles`), where the render's own `box` is stale.
+  const boxRef = useRef(box)
+  useEffect(() => {
+    boxRef.current = box
+  }, [box])
   const showingInk = showing === null ? null : boardInk(ink, showing.id)
   const frame = showing !== null && held === showing.id ? (showingInk?.frame ?? null) : null
   // Whether the content box had a vertical scrollbar when it froze: the
@@ -641,6 +802,68 @@ export function LiveBoardPanel({
     onInk((book) => addStroke(book, id, stroke.points, stroke.frame))
   }
 
+  // ---- pictures dropped or pasted on (mesa task 1580) ----
+
+  const scrollOrigin = () => ({
+    x: contentRef.current?.scrollLeft ?? 0,
+    y: contentRef.current?.scrollTop ?? 0,
+  })
+
+  function changeImage(next: InkImage) {
+    if (showing === null) return
+    const id = showing.id
+    onInk((book) => updateImage(book, id, next))
+  }
+
+  function removeImageById(imageId: number) {
+    if (showing === null) return
+    const id = showing.id
+    onInk((book) => removeImage(book, id, imageId))
+  }
+
+  async function newBoard() {
+    if (onNewBoard === undefined) return
+    const id = await onNewBoard()
+    if (id === null) return
+    setOpenPenFor(id)
+    // So a paste lands on the board without a click first.
+    contentRef.current?.focus()
+  }
+
+  async function addFiles(files: File[]) {
+    if (showing === null) return
+    const id = showing.id
+    for (const file of files) {
+      const loaded = await readImage(file).catch(() => null)
+      const content = contentRef.current
+      if (loaded === null || content === null) continue
+      const at = currentFrame()
+      if (at === null) break
+      const origin = { x: content.scrollLeft, y: content.scrollTop }
+      onInk((book) => {
+        const images = boardInk(book, id).images
+        const placed = placeImage(loaded, boxRef.current, images.length, origin)
+        return addImage(book, id, { id: nextImageId(images), src: loaded.src, ...placed }, at)
+      })
+    }
+    // Pictures are moved and resized with the pen up.
+    setPen(false)
+  }
+
+  function stageDragOver(e: DragEvent<HTMLElement>) {
+    if (showing !== null && Array.from(e.dataTransfer.types).includes('Files')) {
+      e.preventDefault()
+    }
+  }
+
+  // A drop or a paste carrying pictures; anything else falls through.
+  function takeImages(e: SyntheticEvent, data: DataTransfer) {
+    const files = imageFilesFromClipboard(data, Math.round(e.timeStamp))
+    if (files.length === 0) return
+    e.preventDefault()
+    void addFiles(files)
+  }
+
   function undo() {
     if (showing === null) return
     const id = showing.id
@@ -661,7 +884,7 @@ export function LiveBoardPanel({
   // flatten lives here and is handed up through a ref, refreshed every render
   // so it always reads the board that is showing now.
   useEffect(() => {
-    flattenRef.current = async (boardId, strokes, at) => {
+    flattenRef.current = async (boardId, strokes, images, at) => {
       const board = boards.find((b) => b.id === boardId) ?? null
       // Only the board on screen has pixels to read; any other falls to the
       // caption, and still carries its ink.
@@ -670,8 +893,8 @@ export function LiveBoardPanel({
       let png: string | null = null
       for (const scale of dpr > 1 ? [dpr, 1] : [1]) {
         png =
-          (await flattenAt(scale, true, board, content, strokes, at)) ??
-          (await flattenAt(scale, false, board, content, strokes, at))
+          (await flattenAt(scale, true, board, content, strokes, images, at)) ??
+          (await flattenAt(scale, false, board, content, strokes, images, at))
         // Past the server's cap it would be refused; redrawn at 1× instead.
         if (png !== null && base64Bytes(png) <= INK_MAX_BYTES) return png
       }
@@ -729,6 +952,19 @@ export function LiveBoardPanel({
               </button>
             </div>
           )}
+          {/* A fresh blank board to draw on (mesa task 1580). */}
+          {onNewBoard !== undefined && (
+            <button
+              type="button"
+              className="live-icon live-board-new"
+              aria-label="start a new blank board"
+              title="New board"
+              disabled={frozen}
+              onClick={() => void newBoard()}
+            >
+              <PlusMark />
+            </button>
+          )}
           {/* The pen, and while it is on, its undo and clear. */}
           {showing !== null && (
             <button
@@ -759,7 +995,7 @@ export function LiveBoardPanel({
                 className="live-icon live-board-clear"
                 aria-label="clear the ink"
                 title="Clear the ink"
-                disabled={(showingInk?.strokes.length ?? 0) === 0}
+                disabled={(showingInk?.strokes.length ?? 0) + (showingInk?.images.length ?? 0) === 0}
                 onClick={clear}
               >
                 <ClearMark />
@@ -786,7 +1022,12 @@ export function LiveBoardPanel({
             over it. Frozen, the box is pinned to the px size it had when the
             first unsent stroke went down, and its overflow hidden, so neither
             a window resize nor a scroll can move the content under the ink. */}
-        <div className="live-board-stage">
+        <div
+          className="live-board-stage"
+          onDragOver={stageDragOver}
+          onDrop={(e) => takeImages(e, e.dataTransfer)}
+          onPaste={(e) => takeImages(e, e.clipboardData)}
+        >
           <div
             ref={contentRef}
             className={`live-board-content${frozen ? ' inked' : ''}`}
@@ -817,6 +1058,19 @@ export function LiveBoardPanel({
               // while it loads.
               <BoardBody key={showing.id} board={showing} />
             )}
+            {/* The person's dropped and pasted pictures (mesa task 1580), in
+                the strokes' content coordinates. Under the ink canvas, so
+                they take the pointer only while the pen is up. */}
+            {(showingInk?.images ?? []).map((image) => (
+              <PlacedImage
+                key={image.id}
+                image={image}
+                bounds={box}
+                getOrigin={scrollOrigin}
+                onChange={changeImage}
+                onRemove={removeImageById}
+              />
+            ))}
           </div>
           <canvas
             ref={canvasRef}

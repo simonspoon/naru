@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { boardViewFor, emptyBoardView } from './liveBoard'
 import {
+  addImage,
   addStroke,
   base64Bytes,
   boardInk,
@@ -16,10 +17,13 @@ import {
   markInkSent,
   pendingInk,
   pruneInk,
+  removeImage,
   undoStroke,
+  updateImage,
   type InkFrame,
   type InkStroke,
 } from './liveInk'
+import type { InkImage } from './liveBoardImages'
 import type { LiveBoardSummary } from './types/LiveBoardSummary'
 
 function board(id: number, patch: Partial<LiveBoardSummary> = {}): LiveBoardSummary {
@@ -127,6 +131,54 @@ describe('the dirty flag and the freeze', () => {
     const after = markInkSent(book, 7, sent)
     expect(after).toBe(book)
     expect(frozenBoard(after)).toBeNull()
+  })
+})
+
+function picture(id: number): InkImage {
+  return { id, src: 'data:image/png;base64,AAAA', x: 10, y: 10, width: 100, height: 50 }
+}
+
+describe('images', () => {
+  it('make the board dirty and freeze it like a stroke', () => {
+    const a = picture(1)
+    let book = addImage(emptyInkBook(), 7, a, FRAME)
+    expect(inkIsNew(boardInk(book, 7))).toBe(true)
+    expect(boardInk(book, 7).frame).toEqual(FRAME)
+    expect(frozenBoard(book)).toBe(7)
+    expect(pendingInk(book)?.images).toEqual([a])
+    book = addImage(book, 7, picture(2), LATER)
+    expect(boardInk(book, 7).frame).toEqual(FRAME)
+  })
+
+  it('stay frozen while an image remains though every stroke is undone', () => {
+    let book = addImage(emptyInkBook(), 7, picture(1), FRAME)
+    book = addStroke(book, 7, stroke(1), FRAME)
+    book = undoStroke(book, 7)
+    expect(frozenBoard(book)).toBe(7)
+    book = removeImage(book, 7, 1)
+    expect(frozenBoard(book)).toBeNull()
+  })
+
+  it('are updated by id, and an unknown id changes nothing', () => {
+    const book = addImage(emptyInkBook(), 7, picture(1), FRAME)
+    const moved = { ...picture(1), x: 99 }
+    expect(boardInk(updateImage(book, 7, moved), 7).images).toEqual([moved])
+    expect(updateImage(book, 7, picture(5))).toBe(book)
+    expect(removeImage(book, 7, 5)).toBe(book)
+  })
+
+  it('are cleared by clear and dropped by a send, keeping later ones', () => {
+    let book = addImage(emptyInkBook(), 7, picture(1), FRAME)
+    book = addStroke(book, 7, stroke(1), FRAME)
+    const sent = pendingInk(book)!
+    const later = picture(2)
+    const withLater = addImage(book, 7, later, FRAME)
+    const after = markInkSent(withLater, 7, sent.strokes, sent.images)
+    expect(boardInk(after, 7).images).toEqual([later])
+    expect(boardInk(after, 7).strokes).toEqual([])
+    expect(frozenBoard(after)).toBe(7)
+    expect(frozenBoard(markInkSent(book, 7, sent.strokes, sent.images))).toBeNull()
+    expect(frozenBoard(clearInk(book, 7))).toBeNull()
   })
 })
 

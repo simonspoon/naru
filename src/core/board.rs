@@ -107,6 +107,13 @@ pub fn extension_for(kind: LiveBoardKind, content_type: Option<&str>) -> &'stati
     }
 }
 
+/// The blank dark canvas the page's "New board" button starts (mesa task
+/// 1580): an `image/svg+xml` board, so it rides the ordinary image path — the
+/// render route, the poll, the page's flatten and `live board keep` — with no
+/// kind of its own. 16:10, the page's dark backdrop colour.
+pub const BLANK_BOARD_SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1600\" \
+height=\"1000\" viewBox=\"0 0 1600 1000\"><rect width=\"1600\" height=\"1000\" fill=\"#0b0f16\"/></svg>";
+
 /// What one board is called when it leaves the conversation — the filename
 /// the render route puts in its `Content-Disposition`, and the default name
 /// `mesa live board keep` gives the artifact or attachment it writes. One

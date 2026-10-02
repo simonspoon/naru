@@ -65,6 +65,7 @@ import type { LibraryScope } from './types/LibraryScope'
 import type { LibrarySyncResult } from './types/LibrarySyncResult'
 import type { LibrarySyncRow } from './types/LibrarySyncRow'
 import type { LibraryVersion } from './types/LibraryVersion'
+import type { LiveBoard } from './types/LiveBoard'
 import type { LiveBoardHistoryEntry } from './types/LiveBoardHistoryEntry'
 import type { LiveContext } from './types/LiveContext'
 import type { LiveNotice } from './types/LiveNotice'
@@ -1006,6 +1007,14 @@ export function getLive(after?: number): Promise<LiveState> {
  */
 export function startLive(projectId?: number): Promise<LiveSession> {
   return request('/api/live', jsonInit('POST', { project_id: projectId ?? null }))
+}
+
+/**
+ * A blank dark canvas board added to the live conversation (mesa task 1580) —
+ * the whiteboard's "New board" button. `not_found` when nothing is live.
+ */
+export function createLiveBoard(): Promise<LiveBoard> {
+  return request('/api/live/boards', jsonInit('POST', {}))
 }
 
 /** Ends the conversation. Idempotent: ending an ended one returns it unchanged. */

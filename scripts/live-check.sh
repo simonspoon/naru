@@ -118,8 +118,8 @@
 #      `clear`'s bodiless echo, and `GET /api/live/boards/{id}/render` — a
 #      type per kind, nosniff, inline, byte-identical bodies and the artifact
 #      CSP verbatim on the two document kinds — with the identical header set
-#      in default mode AND under `--lan`, the absence of any board write
-#      route, and the render route answering 404 `not_found` once the
+#      in default mode AND under `--lan`, the absence of any route that writes
+#      caller-supplied board content, and the render route answering 404 `not_found` once the
 #      conversation has ended (the row survives like a turn's; every read of
 #      it stops); plus ink (mesa task 1353): an utterance carrying a PNG and
 #      its board id writing the PNG byte-identical under MESA_LIVE_INK_DIR
@@ -2608,12 +2608,14 @@ check_board_render() { # check_board_render <base> <label>
 check_board_render "$BASE" "render (default mode)"
 ok "GET /api/live/boards/{id}/render: markdown/html/diagram/image each with their own type, nosniff and inline, the artifact CSP on the two document kinds, byte-identical bodies, 404 for an unknown board"
 
-# There is no write route: boards are pushed by the CLI and read by the
-# browser, and the panel's close button is browser-side.
-STATUS=$(curl -s -o "$TMP/bbody" -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
-  -d '{"kind":"markdown","body":"from the network"}' "$BASE/api/live/boards")
-[ "$STATUS" != "200" ] && [ "$STATUS" != "201" ] ||
-  fail "there must be no POST board route, got $STATUS"
+# There is no route that writes a caller's board content: boards are pushed
+# by the CLI and read by the browser. The one POST on the collection starts a
+# blank board from nothing the caller sends (mesa task 1580, checked below), so
+# here only the Content-Type gate is asserted: a form post is refused.
+STATUS=$(curl -s -o "$TMP/bbody" -w '%{http_code}' -X POST \
+  -d 'kind=markdown&body=from the network' "$BASE/api/live/boards")
+[ "$STATUS" = "415" ] ||
+  fail "a non-JSON POST to /api/live/boards must be refused, got $STATUS"
 STATUS=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE -H 'Content-Type: application/json' \
   "$BASE/api/live/boards/$R_MD")
 [ "$STATUS" != "200" ] || fail "there must be no DELETE board route, got $STATUS"
@@ -4004,6 +4006,8 @@ run 1 "$MESA" live notice permission
 grep -q 'mesa live start' <<<"$STDERR" || fail "live notice with nothing live: the hint must name live start"
 api 404 POST "/api/live/notice" '{"kind":"permission"}'
 [ "$(jqb .error.code)" = "not_found" ] || fail "POST /api/live/notice with nothing live: not_found"
+api 404 POST "/api/live/boards"
+[ "$(jqb .error.code)" = "not_found" ] || fail "POST /api/live/boards with nothing live: not_found"
 ok "live notice with nothing live: not_found on both surfaces"
 
 # ---- the CLI: the turn's shape, and --quiet ----
@@ -4090,6 +4094,20 @@ run 0 "$MESA" live turns
 [ "$(jqs 'map(select(.notice != null)) | length')" = "2" ] ||
   fail "two notice rows across both surfaces (got $(jqs 'map(select(.notice != null)) | length'))"
 ok "POST /api/live/notice: 200 the turn (created or existing), 422 for a bad/missing/removed kind, 415 without JSON"
+
+# ---- POST /api/live/boards: the whiteboard's "New board" (mesa task 1580) ----
+api 201 POST "/api/live/boards"
+BLANK_ID=$(jqb .id)
+[ "$(jqb .kind)" = "image" ] || fail "POST /api/live/boards: an image board"
+[ "$(jqb .content_type)" = "image/svg+xml" ] || fail "POST /api/live/boards: svg content type"
+api 200 GET "/api/live"
+[ "$(jqb '.boards[-1].id')" = "$BLANK_ID" ] || fail "POST /api/live/boards: the blank board is the newest in GET /api/live"
+raw GET "/api/live/boards/$BLANK_ID/render"
+[ "$STATUS" = "200" ] || fail "the blank board renders: expected 200, got $STATUS"
+grep -q '<svg' <<<"$BODY" || fail "the blank board renders an svg"
+raw POST "/api/live/boards" -d 'x=1'
+[ "$STATUS" = "415" ] || fail "POST /api/live/boards without JSON Content-Type: expected 415, got $STATUS"
+ok "POST /api/live/boards: 404 with nothing live, 201 a blank image board that joins the poll and renders, 415 without JSON"
 
 # ---- GET /api/live: the derived blocked state ----
 #

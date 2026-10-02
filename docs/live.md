@@ -1702,6 +1702,29 @@ board, and seen by the agent only when the person next sends a turn.
   to open the PNG with its image tool before answering, and that `board_id`
   works with `naru live board show`.
 
+### New board: a blank canvas for the person (mesa task 1580)
+
+The board tools carry a **New board** button (hidden unless a conversation is
+live, disabled while ink freezes the layout). It calls `POST /api/live/boards`
+— no body, 404 `not_found` with nothing live, gated like the utterance —
+which runs `Store::add_blank_live_board`: `add_live_board` of a fixed dark
+`image/svg+xml` board titled "Blank board" (`board::BLANK_BOARD_SVG`). It is
+an ordinary `image` board in every respect — the history, the poll, the render
+route, `live board keep` — so the ink flatten described above reaches it
+unchanged (the `<img>`'s pixels, then the strokes). The panel then shows it and
+opens the pen.
+
+Pictures **dropped** on the stage (a file drag) or **pasted** into it (⌘V with
+the board focused, which New board arranges; `imageFilesFromClipboard`) join
+the board's ink as `InkImage`s (`liveBoardImages.ts`: placement, move, resize
+arithmetic) held per board id beside the strokes, with no server storage. They
+freeze the layout and count as new ink like a stroke, are flattened **under**
+the strokes into the same PNG, and ride the next turn as `image_path`/
+`board_id`; a send drops them with the strokes it carried. They sit under the
+ink canvas, so they are moved (drag), resized (corner handle, aspect kept) and
+removed (×) with the pen up — a drop puts the pen up. Undo takes back strokes
+only; Clear wipes both.
+
 ### Pasted images (mesa task 1475)
 
 The person can also paste a picture straight into the typed capture box
@@ -1812,10 +1835,12 @@ served `nosniff` and `inline`; the two document kinds carry the CSP, and so
 does markdown, which is never framed as a document at all — one answer for
 "what does this route serve markup under" is worth more than a saved header.
 
-**There is no POST or DELETE board route.** Boards are pushed by the CLI — the
-agent, running as the person — and read by the browser, exactly the asymmetry
-the rest of this surface has. The panel's close button is browser-side, like
-the conversation panel's own: closing a picture is not a write.
+**There is no DELETE board route, and no POST that takes a board's content.**
+Boards are pushed by the CLI — the agent, running as the person — and read by
+the browser, exactly the asymmetry the rest of this surface has. The panel's
+close button is browser-side, like the conversation panel's own: closing a
+picture is not a write. The one POST is `POST /api/live/boards` (mesa task
+1580, below), which reads no body and starts a fixed blank board.
 
 ### What is deliberately absent
 
@@ -3589,4 +3614,4 @@ usage errors, the bodiless oldest-first listing, `--quiet` dropping exactly
 the poll's newest-20 bound with the full unbounded history still reachable past it, `clear`'s echo, and the render route's exact header set —
 a type per kind, `nosniff`, `inline`, byte-identical bodies and the artifact
 CSP verbatim — asserted **identically in default mode and under `--lan`**,
-alongside the absence of any board write route.
+alongside the absence of any route that writes caller-supplied board content.

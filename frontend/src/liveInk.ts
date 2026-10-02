@@ -1,4 +1,5 @@
 import { boardTitle, boardViewFor, type BoardView } from './liveBoard'
+import type { InkImage } from './liveBoardImages'
 import type { LiveBoardKind } from './types/LiveBoardKind'
 import type { LiveBoardSummary } from './types/LiveBoardSummary'
 
@@ -46,7 +47,12 @@ export interface BoardInk {
    *  the strokes it carried: the PNG the server wrote is their record, and
    *  once the layout unlocks nothing would keep them over what they marked. */
   strokes: readonly InkStroke[]
-  /** The frozen layout — present exactly while there are strokes. */
+  /** Pictures dropped or pasted onto the board (mesa task 1580), oldest
+   *  first — ink like a stroke, flattened under the strokes and dropped by a
+   *  send the same way. */
+  images: readonly InkImage[]
+  /** The frozen layout — present exactly while there is anything drawn or
+   *  placed. */
   frame: InkFrame | null
 }
 
@@ -59,7 +65,7 @@ export function emptyInkBook(): InkBook {
   return {}
 }
 
-const BLANK: BoardInk = { strokes: [], frame: null }
+const BLANK: BoardInk = { strokes: [], images: [], frame: null }
 
 /** One board's ink, or none. */
 export function boardInk(book: InkBook, boardId: number): BoardInk {
@@ -69,12 +75,12 @@ export function boardInk(book: InkBook, boardId: number): BoardInk {
 /**
  * Whether a board carries ink the agent has not seen — the dirty flag.
  *
- * Every stroke on the board is unsent, since a send drops what it carried;
- * so this is simply "is anything drawn". Undoing every stroke, or clearing,
+ * Every stroke and image on the board is unsent, since a send drops what it
+ * carried; so this is simply "is anything drawn or placed". Undoing every stroke, or clearing,
  * is clean again rather than a turn carrying a picture of nothing new.
  */
 export function inkIsNew(ink: BoardInk): boolean {
-  return ink.strokes.length > 0
+  return ink.strokes.length > 0 || ink.images.length > 0
 }
 
 function withBoard(book: InkBook, boardId: number, ink: BoardInk): InkBook {
@@ -96,23 +102,64 @@ export function addStroke(
   if (stroke.length === 0) return book
   const ink = boardInk(book, boardId)
   return withBoard(book, boardId, {
+    ...ink,
     strokes: [...ink.strokes, stroke],
     frame: ink.frame ?? frame,
   })
 }
 
-/** The newest stroke taken back. Unfreezes when that leaves nothing drawn. */
+/** A picture dropped or pasted on. Freezes the layout like the first stroke:
+ *  its box is in content coordinates over the content under it. */
+export function addImage(
+  book: InkBook,
+  boardId: number,
+  image: InkImage,
+  frame: InkFrame,
+): InkBook {
+  const ink = boardInk(book, boardId)
+  return withBoard(book, boardId, {
+    ...ink,
+    images: [...ink.images, image],
+    frame: ink.frame ?? frame,
+  })
+}
+
+/** A placed picture replaced by its moved or resized self, by id. */
+export function updateImage(book: InkBook, boardId: number, image: InkImage): InkBook {
+  const ink = boardInk(book, boardId)
+  if (!ink.images.some((it) => it.id === image.id)) return book
+  return withBoard(book, boardId, {
+    ...ink,
+    images: ink.images.map((it) => (it.id === image.id ? image : it)),
+  })
+}
+
+/** A placed picture taken off the board. Unfreezes when nothing is left. */
+export function removeImage(book: InkBook, boardId: number, imageId: number): InkBook {
+  const ink = boardInk(book, boardId)
+  const images = ink.images.filter((it) => it.id !== imageId)
+  if (images.length === ink.images.length) return book
+  return withBoard(book, boardId, {
+    ...ink,
+    images,
+    frame: ink.strokes.length > 0 || images.length > 0 ? ink.frame : null,
+  })
+}
+
+/** The newest stroke taken back. Unfreezes when that leaves nothing drawn or
+ *  placed. */
 export function undoStroke(book: InkBook, boardId: number): InkBook {
   const ink = boardInk(book, boardId)
   if (ink.strokes.length === 0) return book
   const strokes = ink.strokes.slice(0, -1)
   return withBoard(book, boardId, {
+    ...ink,
     strokes,
-    frame: strokes.length > 0 ? ink.frame : null,
+    frame: strokes.length > 0 || ink.images.length > 0 ? ink.frame : null,
   })
 }
 
-/** Every stroke on a board wiped — and the layout unfrozen, with nothing new
+/** Every stroke and image on a board wiped — and the layout unfrozen, with nothing new
  *  to send. */
 export function clearInk(book: InkBook, boardId: number): InkBook {
   if (!(boardId in book)) return book
@@ -120,15 +167,17 @@ export function clearInk(book: InkBook, boardId: number): InkBook {
 }
 
 /**
- * A turn carrying `strokes` was sent. Those strokes leave the board — the
- * PNG on the turn is their record — so the board is clean and unfrozen,
- * unless the person drew more while the turn was on its way: the later
- * strokes are still new, and the layout stays where they were drawn.
+ * A turn carrying `strokes` and `images` was sent. Those leave the board —
+ * the PNG on the turn is their record — so the board is clean and unfrozen,
+ * unless the person drew or placed more while the turn was on its way: the
+ * later ones are still new, and the layout stays where they were drawn. An
+ * image moved or resized meanwhile is a new object and so stays too.
  */
 export function markInkSent(
   book: InkBook,
   boardId: number,
   strokes: readonly InkStroke[],
+  images: readonly InkImage[] = [],
 ): InkBook {
   const ink = boardInk(book, boardId)
   // Cleared while the turn was on its way: clearing already unfroze the
@@ -136,17 +185,28 @@ export function markInkSent(
   if (ink.frame === null) return book
   const sent = new Set(strokes)
   const left = ink.strokes.filter((stroke) => !sent.has(stroke))
-  return withBoard(book, boardId, { strokes: left, frame: left.length > 0 ? ink.frame : null })
+  const sentImages = new Set(images)
+  const imagesLeft = ink.images.filter((image) => !sentImages.has(image))
+  return withBoard(book, boardId, {
+    strokes: left,
+    images: imagesLeft,
+    frame: left.length > 0 || imagesLeft.length > 0 ? ink.frame : null,
+  })
 }
 
 /** The unsent ink the next turn should carry: which board, and exactly which
- *  strokes (so a send marks those, not whatever is drawn by the time it
- *  lands). `null` when nothing is new. */
-export function pendingInk(
-  book: InkBook,
-): { boardId: number; strokes: readonly InkStroke[]; frame: InkFrame | null } | null {
+ *  strokes and images (so a send marks those, not whatever is drawn by the
+ *  time it lands). `null` when nothing is new. */
+export function pendingInk(book: InkBook): {
+  boardId: number
+  strokes: readonly InkStroke[]
+  images: readonly InkImage[]
+  frame: InkFrame | null
+} | null {
   for (const [id, ink] of Object.entries(book)) {
-    if (inkIsNew(ink)) return { boardId: Number(id), strokes: ink.strokes, frame: ink.frame }
+    if (inkIsNew(ink)) {
+      return { boardId: Number(id), strokes: ink.strokes, images: ink.images, frame: ink.frame }
+    }
   }
   return null
 }

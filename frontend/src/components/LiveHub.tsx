@@ -8,6 +8,7 @@ import { InlineOrb, LiveOrb, OrbHeaderControls, OrbPanel } from './LiveOrb'
 import { LiveBoardPanel, type InkFlatten } from './LiveBoardPanel'
 import {
   claimLiveSpeaker,
+  createLiveBoard,
   getListen,
   getLive,
   getLiveConfig,
@@ -3804,7 +3805,7 @@ export function LiveHub({
     const flatten = flattenInk.current
     const drawn: Promise<string | null> =
       pending !== null && pending.frame !== null && flatten !== null
-        ? flatten(pending.boardId, pending.strokes, pending.frame).catch(() => null)
+        ? flatten(pending.boardId, pending.strokes, pending.images, pending.frame).catch(() => null)
         : Promise.resolve(null)
     return drawn
       .then((png) => {
@@ -3818,7 +3819,7 @@ export function LiveHub({
       .then(
         ({ carried, dropped }) => {
           if (carried !== null) {
-            updateInk((book) => markInkSent(book, carried.boardId, carried.strokes))
+            updateInk((book) => markInkSent(book, carried.boardId, carried.strokes, carried.images))
           }
           if (dropped) {
             setActionError(
@@ -4314,6 +4315,18 @@ export function LiveHub({
 
     </div>
   )
+  // The whiteboard's "New board" (mesa task 1580): a blank board in this
+  // conversation, polled in at once rather than on the next tick.
+  const newBoard = async (): Promise<number | null> => {
+    try {
+      const board = await createLiveBoard()
+      refetch()
+      return board.id
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : String(err))
+      return null
+    }
+  }
   const renderBoardPanel = () => (
     <LiveBoardPanel
       boards={boards}
@@ -4323,6 +4336,7 @@ export function LiveHub({
       onInk={updateInk}
       flattenRef={flattenInk}
       showingRef={boardShowing}
+      onNewBoard={live ? newBoard : undefined}
     />
   )
   const renderChatBody = () => (
@@ -4758,7 +4772,7 @@ export function LiveHub({
       {dock && navCollapsed && createPortal(<InlineOrb {...orbProps} size={30} />, dockHosts.hostFor('rail-orb'))}
       {dock &&
         createPortal(
-          hasBoards ? (
+          hasBoards || live ? (
             <div className="live-panel-section live-panel-board live-board-section dock-board">
               {renderBoardPanel()}
             </div>
