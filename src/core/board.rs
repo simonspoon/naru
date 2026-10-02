@@ -1,25 +1,27 @@
-//! Rendering a mesa diagram as a **snapshot** SVG, for the live conversation's
-//! whiteboard (mesa task 1071).
+//! Rendering a workflow's graph as a **snapshot** SVG, for the live
+//! conversation's whiteboard (mesa tasks 1071 and 1607).
 //!
-//! `mesa live board push --diagram <id>` reads a diagram's frames and edges
-//! once and renders this static picture, which is then what the board holds
-//! for the rest of the conversation. That is what "snapshot" means here: the
-//! canvas may be moved, relabelled or deleted afterwards and the board the
-//! person was shown does not change under them.
+//! `naru live board push --workflow <id|name>` reads a workflow's nodes and
+//! edges once and renders this static picture, which is then what the board
+//! holds for the rest of the conversation. That is what "snapshot" means
+//! here: the graph may be rearranged, relabelled or deleted afterwards and
+//! the board the person was shown does not change under them. The board's
+//! kind stays `diagram` — a stored SVG — so a board pushed from a diagram
+//! before workflows existed still renders beside one pushed from a workflow.
 //!
-//! It is deliberately plain — rectangles with their titles, straight lines
-//! between frame centres — and does not try to match the React canvas pixel
-//! for pixel. The canvas knows about shapes, markers, waypoints and
-//! Sugiyama-routed connectors (`docs/diagrams.md`); this is the picture a
-//! person glances at while someone talks them through it.
+//! It is deliberately plain — a box per node with its title and kind,
+//! straight lines between node centres — and does not try to match the
+//! editor pixel for pixel; this is the picture a person glances at while
+//! someone talks them through it.
 //!
 //! Every piece of text that reaches the output goes through [`escape`] first:
-//! a frame title is free text an untrusted source may have written, and the
+//! a node title is free text an untrusted source may have written, and the
 //! result is served as `image/svg+xml`, which is markup.
 
 use std::path::{Path, PathBuf};
 
-use super::types::{DiagramView, LiveBoard, LiveBoardKind};
+use super::types::WorkflowNodeKind;
+use super::types::{LiveBoard, LiveBoardKind, WorkflowView};
 
 /// What the live-memory archive indexes for a board (mesa task 1548): its
 /// title plus the text it holds — markdown as written, HTML with its tags,
@@ -211,14 +213,32 @@ pub fn ink_filename(name: &str) -> String {
 
 /// Padding around the content's bounding box, in canvas units.
 const PAD: f64 = 24.0;
+/// A node's box. The engine has no notion of size (a node is a point on the
+/// canvas), so the snapshot draws every node the same.
+const NODE_W: f64 = 200.0;
+const NODE_H: f64 = 64.0;
 
-/// Renders one diagram as a static SVG document.
+/// The stroke colour of a node box, by kind.
+fn kind_colour(kind: WorkflowNodeKind) -> &'static str {
+    match kind {
+        WorkflowNodeKind::Trigger => "#f5a524",
+        WorkflowNodeKind::Prompt => "#a78bfa",
+        WorkflowNodeKind::Cli => "#00e5ff",
+        WorkflowNodeKind::Script => "#4ade80",
+        WorkflowNodeKind::Branch => "#fb7185",
+        WorkflowNodeKind::Output => "#94a3b8",
+    }
+}
+
+/// Renders one workflow's graph as a static SVG document: a box per node
+/// (its title and, beneath it, its kind) and a line per edge, labelled with
+/// its branch verdict when it has one.
 ///
-/// The `viewBox` is the content's own bounding box plus [`PAD`], so a diagram
+/// The `viewBox` is the content's own bounding box plus [`PAD`], so a graph
 /// laid out anywhere in the canvas' coordinate space fills the picture; an
-/// empty diagram still renders (a titled, empty sheet) rather than answering
+/// empty workflow still renders (a titled, empty sheet) rather than answering
 /// with nothing a person could look at.
-pub fn diagram_svg(view: &DiagramView) -> String {
+pub fn workflow_svg(view: &WorkflowView) -> String {
     let (min_x, min_y, max_x, max_y) = bounds(view);
     let width = (max_x - min_x + PAD * 2.0).max(1.0);
     let height = (max_y - min_y + PAD * 2.0).max(1.0);
@@ -233,54 +253,54 @@ pub fn diagram_svg(view: &DiagramView) -> String {
         height,
         width,
         height,
-        escape(&view.diagram.title),
+        escape(&view.workflow.name),
         min_x - PAD,
         min_y - PAD,
         width,
         height,
     );
-    // Edges first, so a connector runs behind the cards it joins rather than
+    // Edges first, so a connector runs behind the boxes it joins rather than
     // across their titles.
     for edge in &view.edges {
-        let Some(from) = view.frames.iter().find(|f| f.id == edge.from_frame) else {
+        let Some(from) = view.nodes.iter().find(|n| n.id == edge.from_node) else {
             continue;
         };
-        let Some(to) = view.frames.iter().find(|f| f.id == edge.to_frame) else {
+        let Some(to) = view.nodes.iter().find(|n| n.id == edge.to_node) else {
             continue;
         };
-        let (x1, y1) = (from.x + from.w / 2.0, from.y + from.h / 2.0);
-        let (x2, y2) = (to.x + to.w / 2.0, to.y + to.h / 2.0);
+        let (x1, y1) = (from.x + NODE_W / 2.0, from.y + NODE_H / 2.0);
+        let (x2, y2) = (to.x + NODE_W / 2.0, to.y + NODE_H / 2.0);
         out.push_str(&format!(
             "<line x1=\"{x1:.0}\" y1=\"{y1:.0}\" x2=\"{x2:.0}\" y2=\"{y2:.0}\" \
              stroke=\"#5b6b7f\" stroke-width=\"2\"/>\n"
         ));
-        if let Some(label) = &edge.label {
+        if let Some(branch) = edge.branch {
             out.push_str(&format!(
                 "<text x=\"{:.0}\" y=\"{:.0}\" fill=\"#9fb0c3\" font-family=\"sans-serif\" \
                  font-size=\"12\" text-anchor=\"middle\">{}</text>\n",
                 (x1 + x2) / 2.0,
                 (y1 + y2) / 2.0 - 4.0,
-                escape(label),
+                escape(branch.as_str()),
             ));
         }
     }
-    for frame in &view.frames {
-        // A frame's own colour is a CSS colour string the canvas honours; it
-        // is free text, so it is escaped like everything else here.
-        let stroke = frame.color.as_deref().unwrap_or("#00e5ff");
+    for node in &view.nodes {
         out.push_str(&format!(
-            "<rect x=\"{:.0}\" y=\"{:.0}\" width=\"{:.0}\" height=\"{:.0}\" rx=\"8\" \
+            "<rect x=\"{:.0}\" y=\"{:.0}\" width=\"{NODE_W:.0}\" height=\"{NODE_H:.0}\" rx=\"8\" \
              fill=\"#131a22\" stroke=\"{}\" stroke-width=\"2\"/>\n\
              <text x=\"{:.0}\" y=\"{:.0}\" fill=\"#e6edf3\" font-family=\"sans-serif\" \
-             font-size=\"14\">{}</text>\n",
-            frame.x,
-            frame.y,
-            frame.w.max(1.0),
-            frame.h.max(1.0),
-            escape(stroke),
-            frame.x + 10.0,
-            frame.y + 24.0,
-            escape(&frame.title),
+             font-size=\"14\">{}</text>\n\
+             <text x=\"{:.0}\" y=\"{:.0}\" fill=\"#9fb0c3\" font-family=\"sans-serif\" \
+             font-size=\"11\">{}</text>\n",
+            node.x,
+            node.y,
+            kind_colour(node.kind),
+            node.x + 10.0,
+            node.y + 26.0,
+            escape(&node.title),
+            node.x + 10.0,
+            node.y + 46.0,
+            escape(node.kind.as_str()),
         ));
     }
     out.push_str("</svg>\n");
@@ -288,20 +308,20 @@ pub fn diagram_svg(view: &DiagramView) -> String {
 }
 
 /// The content's bounding box, or a modest empty sheet when there are no
-/// frames to bound.
-fn bounds(view: &DiagramView) -> (f64, f64, f64, f64) {
-    if view.frames.is_empty() {
+/// nodes to bound.
+fn bounds(view: &WorkflowView) -> (f64, f64, f64, f64) {
+    if view.nodes.is_empty() {
         return (0.0, 0.0, 320.0, 180.0);
     }
     let mut min_x = f64::MAX;
     let mut min_y = f64::MAX;
     let mut max_x = f64::MIN;
     let mut max_y = f64::MIN;
-    for frame in &view.frames {
-        min_x = min_x.min(frame.x);
-        min_y = min_y.min(frame.y);
-        max_x = max_x.max(frame.x + frame.w);
-        max_y = max_y.max(frame.y + frame.h);
+    for node in &view.nodes {
+        min_x = min_x.min(node.x);
+        min_y = min_y.min(node.y);
+        max_x = max_x.max(node.x + NODE_W);
+        max_y = max_y.max(node.y + NODE_H);
     }
     (min_x, min_y, max_x, max_y)
 }
@@ -328,7 +348,9 @@ fn escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::types::{Diagram, DiagramType, Frame, FrameEdge, LiveBoard};
+    use crate::core::types::{
+        Workflow, WorkflowBranch, WorkflowEdge, WorkflowNode, WorkflowNodeKind,
+    };
 
     /// The ink rides beside the board under the board's own stem, so a
     /// titled board and an untitled one both keep a recognisable pair.
@@ -345,53 +367,40 @@ mod tests {
         assert_eq!(ink_filename("notes"), "notes-ink.png");
     }
 
-    fn diagram() -> Diagram {
-        Diagram {
+    fn workflow() -> Workflow {
+        Workflow {
             id: 1,
-            project_id: 1,
-            title: "Flow & <plan>".into(),
+            project_id: None,
+            name: "Flow & <plan>".into(),
             description: None,
-            author: None,
-            diagram_type: DiagramType::Flowchart,
+            trigger: None,
+            trigger_phrase: None,
             created_at: "2026-01-01 00:00:00".into(),
             updated_at: "2026-01-01 00:00:00".into(),
         }
     }
 
-    fn frame(id: i64, title: &str, x: f64, y: f64) -> Frame {
-        Frame {
+    fn node(id: i64, title: &str, x: f64, y: f64) -> WorkflowNode {
+        WorkflowNode {
             id,
-            diagram_id: 1,
+            workflow_id: 1,
+            kind: WorkflowNodeKind::Cli,
             title: title.into(),
-            body: None,
+            config: serde_json::json!({}),
             x,
             y,
-            w: 160.0,
-            h: 80.0,
-            color: None,
-            task_id: None,
-            author: None,
-            shape: None,
             created_at: "2026-01-01 00:00:00".into(),
             updated_at: "2026-01-01 00:00:00".into(),
         }
     }
 
-    fn edge(from: i64, to: i64, label: Option<&str>) -> FrameEdge {
-        FrameEdge {
+    fn edge(from: i64, to: i64, branch: Option<WorkflowBranch>) -> WorkflowEdge {
+        WorkflowEdge {
             id: 1,
-            diagram_id: 1,
-            from_frame: from,
-            to_frame: to,
-            label: label.map(str::to_string),
-            author: None,
-            created_at: "2026-01-01 00:00:00".into(),
-            waypoints: vec![],
-            from_anchor: None,
-            to_anchor: None,
-            style: None,
-            from_marker: None,
-            to_marker: None,
+            workflow_id: 1,
+            from_node: from,
+            to_node: to,
+            branch,
         }
     }
 
@@ -441,75 +450,71 @@ mod tests {
     }
 
     #[test]
-    fn renders_frames_and_edges_inside_a_content_sized_viewbox() {
-        let view = DiagramView {
-            diagram: diagram(),
-            frames: vec![
-                frame(1, "Start", 100.0, 100.0),
-                frame(2, "End", 400.0, 300.0),
-            ],
-            edges: vec![edge(1, 2, Some("then"))],
+    fn renders_nodes_and_edges_inside_a_content_sized_viewbox() {
+        let view = WorkflowView {
+            workflow: workflow(),
+            nodes: vec![node(1, "Start", 100.0, 100.0), node(2, "End", 400.0, 300.0)],
+            edges: vec![edge(1, 2, Some(WorkflowBranch::True))],
         };
-        let svg = diagram_svg(&view);
+        let svg = workflow_svg(&view);
         assert!(
             svg.starts_with("<svg xmlns=\"http://www.w3.org/2000/svg\""),
             "{svg}"
         );
         assert!(svg.ends_with("</svg>\n"), "{svg}");
         // The box is the content plus PAD on every side, not the origin.
-        assert!(svg.contains("viewBox=\"76 76 508 328\""), "{svg}");
+        assert!(svg.contains("viewBox=\"76 76 548 312\""), "{svg}");
         assert!(svg.contains(">Start</text>"), "{svg}");
         assert!(svg.contains(">End</text>"), "{svg}");
-        // Centre to centre: (180,140) -> (480,340).
+        assert!(svg.contains(">cli</text>"), "{svg}");
+        // Centre to centre: (200,132) -> (500,332).
         assert!(
-            svg.contains("<line x1=\"180\" y1=\"140\" x2=\"480\" y2=\"340\""),
+            svg.contains("<line x1=\"200\" y1=\"132\" x2=\"500\" y2=\"332\""),
             "{svg}"
         );
-        assert!(svg.contains(">then</text>"), "{svg}");
+        assert!(svg.contains(">true</text>"), "{svg}");
     }
 
     /// Every string that reaches the picture is data: the output is markup a
-    /// browser parses, and a frame title may come from an untrusted source.
+    /// browser parses, and a node title may come from an untrusted source.
     #[test]
     fn escapes_every_piece_of_text_it_writes() {
-        let mut hostile = frame(1, "<script>alert('x')</script>", 0.0, 0.0);
-        hostile.color = Some("\"/><script>alert(1)</script>".into());
-        let view = DiagramView {
-            diagram: diagram(),
-            frames: vec![hostile],
+        let view = WorkflowView {
+            workflow: workflow(),
+            nodes: vec![node(1, "<script>alert('x')</script>", 0.0, 0.0)],
             edges: vec![],
         };
-        let svg = diagram_svg(&view);
+        let svg = workflow_svg(&view);
         assert!(!svg.contains("<script>"), "{svg}");
         assert!(
             svg.contains("&lt;script&gt;alert(&apos;x&apos;)&lt;/script&gt;"),
             "{svg}"
         );
-        // The diagram's own title too.
+        // The workflow's own name too.
         assert!(
             svg.contains("<title>Flow &amp; &lt;plan&gt;</title>"),
             "{svg}"
         );
     }
 
-    /// An edge whose endpoint is missing (a frame deleted between the two
+    /// An edge whose endpoint is missing (a node deleted between the two
     /// reads) is skipped rather than panicking or drawing a line to nowhere.
     #[test]
-    fn skips_an_edge_whose_frame_is_gone_and_still_renders_an_empty_diagram() {
-        let view = DiagramView {
-            diagram: diagram(),
-            frames: vec![frame(1, "Alone", 0.0, 0.0)],
+    fn skips_an_edge_whose_node_is_gone_and_still_renders_an_empty_workflow() {
+        let view = WorkflowView {
+            workflow: workflow(),
+            nodes: vec![node(1, "Alone", 0.0, 0.0)],
             edges: vec![edge(1, 99, None)],
         };
-        let svg = diagram_svg(&view);
+        let svg = workflow_svg(&view);
         assert!(!svg.contains("<line"), "{svg}");
 
-        let empty = DiagramView {
-            diagram: diagram(),
-            frames: vec![],
+        let empty = WorkflowView {
+            workflow: workflow(),
+            nodes: vec![],
             edges: vec![],
         };
-        let svg = diagram_svg(&empty);
+        let svg = workflow_svg(&empty);
         assert!(svg.contains("<svg"), "{svg}");
         assert!(svg.contains("viewBox=\"-24 -24 368 228\""), "{svg}");
     }

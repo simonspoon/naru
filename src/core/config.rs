@@ -225,11 +225,16 @@ pub const LIVE_DREAM: &str = "live-dream";
 /// run` on demand, to review finished task sessions for friction and file
 /// suggestions into the inbox. Proposes, never edits.
 pub const RETRO: &str = "retro";
+/// The synchronous model call a workflow's `prompt` node makes (mesa task
+/// 1607, `docs/workflows.md`). Unlike every spawn above it is not a
+/// background session: `agents::run_sync` runs it, waits, and reads its
+/// stdout as the node's output.
+pub const WORKFLOW_PROMPT: &str = "workflow-prompt";
 
 /// Every configurable command, in the order the docs and the Settings page
 /// list them. The single source of truth for "which keys mesa configures" —
 /// [`default_command`] answers the same question one key at a time.
-pub const ACTIONS: [&str; 7] = [
+pub const ACTIONS: [&str; 8] = [
     TODO_WATCHER,
     INBOX_WATCHER,
     AGENT_SPAWN,
@@ -237,6 +242,7 @@ pub const ACTIONS: [&str; 7] = [
     LIVE_SUMMARY,
     LIVE_DREAM,
     RETRO,
+    WORKFLOW_PROMPT,
 ];
 
 /// Built-in default for [`TODO_WATCHER`] — the argv mesa shipped before the
@@ -309,6 +315,31 @@ pub const DEFAULT_LIVE_DREAM: &str = "claude --bg --name {name} -- {prompt}";
 /// none.
 pub const DEFAULT_RETRO: &str =
     r#"claude --bg --agent naru-retro --name {name} -- "Run mesa session retrospective {id}.""#;
+/// Built-in default for [`WORKFLOW_PROMPT`] (mesa task 1607): a one-shot
+/// `claude -p` whose stdout is the answer, or `ollama run` for a
+/// `local:<name>` model. `{model}` is `haiku`/`sonnet`/`opus` or
+/// `local:<name>`; `{thinking}` is `on`/`off`; `{prompt}` is the node's prompt
+/// text, a blank line and the node's input, quoted as one value.
+///
+/// Thinking is `--settings '{"alwaysThinkingEnabled":…}'`, the documented
+/// setting — checked against the real `claude -p --model haiku`, which
+/// accepts both forms. A local model has no such switch, so `{thinking}` is
+/// ignored there; its prompt goes in on stdin so a prompt starting with `-`
+/// can never read as a flag.
+pub const DEFAULT_WORKFLOW_PROMPT: &str = r#"model={model}
+case "$model" in
+  local:*)
+    printf '%s' {prompt} | ollama run "${model#local:}"
+    ;;
+  *)
+    if [ {thinking} = on ]; then
+      settings='{"alwaysThinkingEnabled":true}'
+    else
+      settings='{"alwaysThinkingEnabled":false}'
+    fi
+    claude -p --model "$model" --settings "$settings" -- {prompt}
+    ;;
+esac"#;
 
 /// The built-in template for `action`, or `None` if `action` isn't one of
 /// [`ACTIONS`]. Public so the docs check and the API can report the shipped
@@ -322,6 +353,7 @@ pub fn default_command(action: &str) -> Option<&'static str> {
         LIVE_SUMMARY => Some(DEFAULT_LIVE_SUMMARY),
         LIVE_DREAM => Some(DEFAULT_LIVE_DREAM),
         RETRO => Some(DEFAULT_RETRO),
+        WORKFLOW_PROMPT => Some(DEFAULT_WORKFLOW_PROMPT),
         _ => None,
     }
 }
@@ -655,6 +687,8 @@ pub fn validate(action: &str, template: &str, prompts: &Prompts) -> Result<(), S
         id: Some(1),
         name: Some("name"),
         prompt: Some("prompt"),
+        model: Some("model"),
+        thinking: Some("on"),
         prompts: Some(prompts),
     };
     // Parse what `bash` will actually be handed — placeholders already
@@ -677,7 +711,7 @@ pub fn resolve(action: &str, template: &str, vars: &Vars) -> Result<String, Stri
 /// The three built-in placeholder names. Per-call data, so each is offered to
 /// a subset of the actions ([`offered_placeholders`]); the library's
 /// `{prompt:<name>}` form is orthogonal and offered everywhere.
-const BUILTIN_PLACEHOLDERS: [&str; 3] = ["id", "name", "prompt"];
+const BUILTIN_PLACEHOLDERS: [&str; 5] = ["id", "name", "prompt", "model", "thinking"];
 
 /// The `{prompt:<name>}` form's prefix — the one thing that keeps it from
 /// colliding with the built-in `{prompt}`, which has no colon.
@@ -1512,6 +1546,10 @@ pub struct Vars<'a> {
     pub id: Option<i64>,
     pub name: Option<&'a str>,
     pub prompt: Option<&'a str>,
+    /// `workflow-prompt`'s model (`haiku`, `local:<name>`, …) and thinking
+    /// switch (`on`/`off`) — offered to that action alone.
+    pub model: Option<&'a str>,
+    pub thinking: Option<&'a str>,
     /// The library's prompts, for `{prompt:<name>}` (mesa task 1138). Unlike
     /// the three above this is not per-call data but static library text, so
     /// every action offers it — which is why it sits beside them rather than
@@ -1548,6 +1586,8 @@ impl Vars<'_> {
             "id" => self.id.map(|i| i.to_string()),
             "name" => self.name.map(str::to_string),
             "prompt" => self.prompt.map(str::to_string),
+            "model" => self.model.map(str::to_string),
+            "thinking" => self.thinking.map(str::to_string),
             _ => None,
         })
     }
@@ -1564,6 +1604,7 @@ pub fn offered_placeholders(action: &str) -> &'static [&'static str] {
         // that borrows the newest session's id) is a mesa record *and*
         // carries a prompt.
         LIVE_AGENT | LIVE_SUMMARY | LIVE_DREAM => &["{id}", "{name}", "{prompt}"],
+        WORKFLOW_PROMPT => &["{model}", "{thinking}", "{prompt}"],
         _ => &["{id}", "{name}"],
     }
 }
@@ -4336,6 +4377,42 @@ mod tests {
         assert_eq!(settings[6].action, RETRO);
         assert_eq!(settings[6].default, DEFAULT_RETRO);
         assert_eq!(settings[6].placeholders, ["{id}", "{name}"]);
+        // The workflow prompt node (mesa task 1607) is the eighth: a
+        // synchronous model call, with its own vocabulary.
+        assert_eq!(settings[7].action, WORKFLOW_PROMPT);
+        assert_eq!(settings[7].default, DEFAULT_WORKFLOW_PROMPT);
+        assert_eq!(
+            settings[7].placeholders,
+            ["{model}", "{thinking}", "{prompt}"]
+        );
+    }
+
+    /// The workflow-prompt default passes the save-time validator and
+    /// resolves with every value quoted as one word — a hostile prompt is a
+    /// string literal, never syntax.
+    #[test]
+    fn workflow_prompt_default_validates_and_quotes_its_values() {
+        validate(
+            WORKFLOW_PROMPT,
+            DEFAULT_WORKFLOW_PROMPT,
+            &Prompts::default(),
+        )
+        .unwrap();
+        let vars = Vars {
+            model: Some("haiku"),
+            thinking: Some("off"),
+            prompt: Some("a $(touch /tmp/x) 'q' `b`"),
+            ..Default::default()
+        };
+        let script = resolve(WORKFLOW_PROMPT, DEFAULT_WORKFLOW_PROMPT, &vars).unwrap();
+        assert!(script.starts_with("model='haiku'\n"), "{script}");
+        assert!(script.contains("[ 'off' = on ]"), "{script}");
+        assert!(
+            script.contains(r#"-- 'a $(touch /tmp/x) '\''q'\'' `b`'"#),
+            "{script}"
+        );
+        // Not offered elsewhere.
+        assert!(resolve(RETRO, "claude {model}", &vars).is_err());
     }
 
     /// The retro default resolves like the inbox-watcher's: the run id lands
@@ -4530,6 +4607,7 @@ mod tests {
             name: Some("mesa live 12"),
             prompt: Some("listen; then say \"hi\""),
             prompts: None,
+            ..Default::default()
         };
         assert_eq!(
             resolve(LIVE_AGENT, DEFAULT_LIVE_AGENT, &live).unwrap(),
@@ -7055,6 +7133,7 @@ mod tests {
             name: Some("A: do it"),
             prompt: Some("ignored"),
             prompts: Some(&table),
+            ..Default::default()
         };
         // todo-watcher offers {id}/{name} but not {prompt}.
         assert_eq!(
@@ -7076,6 +7155,7 @@ mod tests {
             name: Some("n"),
             prompt: Some("p"),
             prompts: Some(&table),
+            ..Default::default()
         };
         for action in ACTIONS {
             assert_eq!(

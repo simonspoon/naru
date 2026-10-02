@@ -8,7 +8,7 @@
 //! - `--quiet` (opt-in, long form only) swaps that full object for the compact
 //!   projection — the record minus its unbounded free-text fields, the same
 //!   bounded shape `task list` already emits. Accepted on every mutation and
-//!   `show`/`get` in `project`, `task`, `diagram` (+ `frame`, `edge`),
+//!   `show`/`get` in `project`, `task`, `workflow` (+ `node`, `edge`),
 //!   `inbox`, `script`, `artifact` and `live`; composites keep their key
 //!   structure and compact their members. Elsewhere it is accepted and ignored.
 //!   Default output is unchanged. On a `delete` it waives the full echo, which
@@ -24,16 +24,17 @@ use clap::error::{ContextKind, ContextValue, ErrorKind};
 use clap::{ArgGroup, Parser, Subcommand};
 use serde_json::{Value, json};
 
+use crate::core::workflow;
 use crate::core::{
-    ArchiveOutcome, Artifact, ArtifactPatch, Diagram, DiagramPatch, DiagramType, DiagramView,
-    EdgeMarker, EdgeNew, EdgePatch, EdgeStyle, Error, Frame, FrameEdge, FrameNew, FramePatch,
-    FrameShape, ImportDoc, InboxItem, InboxKind, LIVE_TEXT_MAX, LibraryBuiltinAction,
-    LibraryBundle, LibraryItem, LibraryKind, LibraryPatch, LibraryScope, LibrarySyncStatus,
-    LiveAction, LiveBoard, LiveBoardKind, LiveNotebookEntry, LiveNotice, LiveResult, LiveRole,
-    LiveSession, LiveStatus, LiveSummary, LiveTurn, NextResult, Priority, Project, ProjectPatch,
-    ReceiptPatch, Result, Script, ScriptArg, ScriptArgKind, ScriptPatch, Status, Store, Task,
-    TaskPatch, TaskReceipt, agents, audio, board, cc, config, files, git, library, live, look,
-    migrate, project_memory, receipt, retro, system,
+    ArchiveOutcome, Artifact, ArtifactPatch, Error, ImportDoc, InboxItem, InboxKind, LIVE_TEXT_MAX,
+    LibraryBuiltinAction, LibraryBundle, LibraryItem, LibraryKind, LibraryPatch, LibraryScope,
+    LibrarySyncStatus, LiveAction, LiveBoard, LiveBoardKind, LiveNotebookEntry, LiveNotice,
+    LiveResult, LiveRole, LiveSession, LiveStatus, LiveSummary, LiveTurn, NextResult, Priority,
+    Project, ProjectPatch, ReceiptPatch, Result, Script, ScriptArg, ScriptArgKind, ScriptPatch,
+    Status, Store, Task, TaskPatch, TaskReceipt, Workflow, WorkflowBranch, WorkflowEdge,
+    WorkflowNode, WorkflowNodeKind, WorkflowNodeNew, WorkflowNodePatch, WorkflowPatch, WorkflowRun,
+    WorkflowTrigger, WorkflowView, agents, audio, board, cc, config, files, git, library, live,
+    look, migrate, project_memory, receipt, retro, system,
 };
 
 const TOP_AFTER_HELP: &str = "\
@@ -47,7 +48,7 @@ OUTPUT
   --quiet (opt-in, long form only; no -q) prints the COMPACT projection
   instead — the record minus its unbounded free-text fields; for a task that
   is exactly the bounded shape `task list` already emits. Accepted on every
-  mutation and `show`/`get` in `project`, `task`, `diagram` (+ `frame`,
+  mutation and `show`/`get` in `project`, `task`, `workflow` (+ `node`,
   `edge`), `inbox`, `script`, `artifact` and `live`; composite payloads keep their key structure and
   compact their members. It changes stdout only — never exit codes, stderr or
   stored data — and default output is byte-identical to before the flag
@@ -99,9 +100,9 @@ enum Command {
     /// Create, list, inspect, update, delete, and (un)block tasks
     #[command(subcommand)]
     Task(TaskCmd),
-    /// Create and edit visual diagrams (frames + connecting edges)
+    /// Build and run deterministic workflows (a DAG of typed nodes)
     #[command(subcommand)]
-    Diagram(DiagramCmd),
+    Workflow(WorkflowCmd),
     /// Send and triage global inbox items (project-update requests)
     #[command(subcommand)]
     Inbox(InboxCmd),
@@ -226,6 +227,14 @@ enum Command {
         /// Server action.
         #[arg(long, default_value_t = false)]
         watch_retro: bool,
+        /// Every minute, run each workflow whose trigger is `time` and which
+        /// is due (no time-triggered run started in the last
+        /// `every_minutes`). A run executes the workflow's shell and model
+        /// nodes with no user request behind it. Off by default; independent
+        /// of the other watchers. Preserved across the web UI's Restart
+        /// Server action.
+        #[arg(long, default_value_t = false)]
+        watch_workflows: bool,
     },
     /// Snapshot the database to a file (safe while the server runs)
 
@@ -458,7 +467,7 @@ EXAMPLES
     /// Delete a project, its subprojects AND all their tasks (no confirmation)
     ///
     /// Cascades immediately over the whole subtree — every descendant project,
-    /// its tasks and its diagrams go too. The output echoes the deleted
+    /// its tasks and its workflows go too. The output echoes the deleted
     /// project, the destroyed `subprojects` and every cascaded task in full, so
     /// the transcript is a recoverable record. Take `mesa backup <path>` first
     /// if you want a safety net.
@@ -1342,6 +1351,324 @@ EXAMPLES
         /// Supply one declared argument: NAME=VALUE (repeatable)
         #[arg(long = "set", value_name = "NAME=VALUE", allow_hyphen_values = true)]
         set: Vec<String>,
+    },
+}
+
+/// Deterministic workflows (mesa task 1607, `docs/workflows.md`): a DAG of
+/// typed nodes the engine walks in a fixed order. They replace diagrams.
+///
+/// A workflow is addressed by id **or name** (names are unique,
+/// case-insensitively, across all workflows, and never a plain number). A
+/// run executes shell and model calls, so the web routes behind it are all
+/// agent-gated; the CLI talks to the database directly like every other
+/// command.
+#[derive(Subcommand)]
+enum WorkflowCmd {
+    /// Create a workflow; prints the full created workflow (`--quiet`:
+    /// without its `description`)
+    ///
+    /// Add its steps with `workflow node create` and join them with
+    /// `workflow edge create`; run it with `workflow run`.
+    #[command(after_help = "\
+EXAMPLES
+  naru workflow create ambient --description \"Capture a spoken thought\"
+  naru workflow create \"Nightly digest\" --project naru")]
+    Create {
+        /// Unique workflow name (case-insensitive); how `run`/`show` resolve it
+        #[arg(value_name = "NAME", required_unless_present = "name")]
+        name_pos: Option<String>,
+        /// Workflow name (flag form of NAME)
+        #[arg(long, conflicts_with = "name_pos")]
+        name: Option<String>,
+        /// Bind to a project, by id or name (default: global)
+        ///
+        /// A bound workflow's `cli` nodes run in that project's `local_path`;
+        /// a global one runs in ~/.naru/workspace. Deleting the project
+        /// deletes its workflows.
+        #[arg(long)]
+        project: Option<String>,
+        /// What the workflow is for; free text
+        #[arg(long)]
+        description: Option<String>,
+        /// Print the workflow without its `description` instead of in full
+        #[arg(long)]
+        quiet: bool,
+    },
+    /// List workflows as a bare JSON array, by name
+    ///
+    /// Each row carries its trigger mode (`trigger`: manual|time|voice, or
+    /// null) and a voice trigger's `trigger_phrase`, so a caller can match a
+    /// request to a workflow without loading every graph.
+    List {
+        /// Only workflows bound to this project (id or name)
+        #[arg(value_name = "PROJECT")]
+        project_pos: Option<String>,
+        /// Only workflows bound to this project (id or name); flag form of [PROJECT]
+        #[arg(long, conflicts_with = "project_pos")]
+        project: Option<String>,
+    },
+    /// Print a workflow's full contents: {workflow, nodes, edges}
+    #[command(visible_alias = "get")]
+    Show {
+        /// Workflow id or name
+        workflow: String,
+        /// Keep the {workflow, nodes, edges} keys but drop each member's
+        /// free text (the workflow's `description`, every node's `config`)
+        #[arg(long)]
+        quiet: bool,
+    },
+    /// Update a workflow; at least one field flag is required
+    ///
+    /// `--description ""` clears the description; `--project ""` un-binds the
+    /// workflow (making it global).
+    #[command(group(ArgGroup::new("fields").required(true).multiple(true)))]
+    Update {
+        /// Workflow id or name
+        workflow: String,
+        /// New unique name
+        #[arg(long, group = "fields")]
+        name: Option<String>,
+        /// New description; pass "" to clear it
+        #[arg(long, group = "fields")]
+        description: Option<String>,
+        /// Bind to this project (id or name); pass "" to un-bind
+        #[arg(long, group = "fields")]
+        project: Option<String>,
+        /// Print the workflow without its `description` instead of in full
+        #[arg(long)]
+        quiet: bool,
+    },
+    /// Delete a workflow AND its nodes, edges and runs (no confirmation)
+    ///
+    /// The output echoes the full destroyed contents ({workflow, nodes,
+    /// edges}) so the transcript is a recoverable record. Its log lines stay.
+    Delete {
+        /// Workflow id or name
+        workflow: String,
+        /// Echo the destroyed {workflow, nodes, edges} with free text dropped
+        ///
+        /// The full echo is the recovery transcript that stands in for a
+        /// confirmation prompt; `--quiet` waives it for this call.
+        #[arg(long)]
+        quiet: bool,
+    },
+    /// Run a workflow and print the finished run record
+    ///
+    /// The graph decides the order: a topological sort, ties broken by node
+    /// id. The trigger hands `--input` (default empty) on as the run input;
+    /// every other node takes the outputs of its active upstream nodes,
+    /// joined by a newline in edge order. A `branch` node activates only the
+    /// edges matching its verdict, and a node none of whose incoming edges is
+    /// active is `skipped`.
+    ///
+    /// A run that FAILED is still a recorded run: the command prints the
+    /// record (`status: "failed"`, the steps, `error`) and exits 0, exactly
+    /// as `script run` treats a script's nonzero exit — the status is data.
+    /// Exit 1 is for "could not run at all": an unknown workflow, no (or two)
+    /// trigger nodes, an input over 256 KiB.
+    #[command(after_help = "\
+EXAMPLES
+  naru workflow run ambient
+  naru workflow run \"Label idea\" --input \"buy milk\" --trigger voice
+  naru workflow run ambient --input-file notes.txt")]
+    Run {
+        /// Workflow id or name
+        workflow: String,
+        /// The run input, handed on by the trigger node
+        #[arg(long, allow_hyphen_values = true)]
+        input: Option<String>,
+        /// Read the input from a file (`-` = stdin); conflicts with --input
+        #[arg(long, value_name = "PATH", conflicts_with = "input")]
+        input_file: Option<String>,
+        /// What started this run: `manual` (the default) or `voice`
+        #[arg(long, value_name = "TRIGGER", default_value = "manual", value_parser = parse_workflow_trigger)]
+        trigger: WorkflowTrigger,
+        /// Print the run without `steps` and `input` instead of in full
+        #[arg(long)]
+        quiet: bool,
+    },
+    /// List a workflow's runs, newest first, as a bare JSON array
+    ///
+    /// The newest 50 are kept. Rows omit `steps` and `input` (a run's outputs
+    /// can be large); `run-show` prints one in full.
+    Runs {
+        /// Workflow id or name
+        workflow: String,
+    },
+    /// Print one run in full, steps included
+    RunShow {
+        /// Run id
+        id: i64,
+        /// Print the run without `steps` and `input` instead of in full
+        #[arg(long)]
+        quiet: bool,
+    },
+    /// Print the newest lines of a log (what `output` nodes with
+    /// target `log` write), newest first
+    ///
+    /// Without a name, lines of every log.
+    Log {
+        /// Log name (case-insensitive); omit for every log
+        log: Option<String>,
+        /// How many lines (1 to 1000)
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+    },
+    /// Create, update and delete the nodes of a workflow
+    #[command(subcommand)]
+    Node(WorkflowNodeCmd),
+    /// Create and delete the edges between nodes
+    #[command(subcommand)]
+    Edge(WorkflowEdgeCmd),
+}
+
+#[derive(Subcommand)]
+enum WorkflowNodeCmd {
+    /// Add a node to a workflow; prints the created node (`--quiet`: without
+    /// its `config`)
+    ///
+    /// KIND is trigger|prompt|cli|script|branch|output and decides what
+    /// `--config` (a JSON object) may hold — unknown keys and bad values are
+    /// `validation`, and a workflow has at most one trigger. Without
+    /// `--config` a trigger is `{"mode":"manual"}`; every other kind needs
+    /// its required keys. Omitted coordinates place the node in a row to the
+    /// right of those already there.
+    #[command(after_help = "\
+CONFIG BY KIND
+  trigger  {\"mode\":\"manual|time|voice\",\"every_minutes\":N (time),\"phrase\":\"...\"}
+  prompt   {\"model\":\"haiku|sonnet|opus|local:<name>\",\"thinking\":false,\"prompt\":\"...\",\"timeout_secs\":N}
+  cli      {\"command\":\"...\",\"timeout_secs\":N}
+  script   {\"script\":\"<id or name>\",\"values\":{\"name\":\"... {input} ...\"}}
+  branch   {\"op\":\"contains|regex|score_above|score_below|equals\",\"value\":\"...\"}
+  output   {\"target\":\"log\",\"log\":\"name\"} | {\"target\":\"task\",\"project\":\"...\"} |
+           {\"target\":\"inbox\",\"task_id\":N,\"kind\":\"task-summary\"} | {\"target\":\"board\"}
+
+EXAMPLES
+  naru workflow node create ambient trigger Start
+  naru workflow node create ambient cli Record --config '{\"command\":\"sox -d /tmp/a.wav trim 0 10\"}'
+  naru workflow node create ambient branch Gate --config '{\"op\":\"score_above\",\"value\":0.8}'")]
+    Create {
+        /// Workflow id or name
+        #[arg(value_name = "WORKFLOW", required_unless_present = "workflow")]
+        workflow_pos: Option<String>,
+        /// trigger|prompt|cli|script|branch|output
+        #[arg(value_name = "KIND", required_unless_present = "kind", value_parser = parse_workflow_node_kind)]
+        kind_pos: Option<WorkflowNodeKind>,
+        /// Node title (≤ 200 characters)
+        #[arg(value_name = "TITLE", required_unless_present = "title")]
+        title_pos: Option<String>,
+        /// Workflow id or name (flag form of WORKFLOW)
+        #[arg(long, conflicts_with = "workflow_pos")]
+        workflow: Option<String>,
+        /// Node kind (flag form of KIND)
+        #[arg(long, conflicts_with = "kind_pos", value_parser = parse_workflow_node_kind)]
+        kind: Option<WorkflowNodeKind>,
+        /// Node title (flag form of TITLE)
+        #[arg(long, conflicts_with = "title_pos")]
+        title: Option<String>,
+        /// The node's config, a JSON object (see CONFIG BY KIND)
+        #[arg(long, value_name = "JSON", allow_hyphen_values = true)]
+        config: Option<String>,
+        /// Canvas x position
+        #[arg(long, allow_hyphen_values = true)]
+        x: Option<f64>,
+        /// Canvas y position
+        #[arg(long, allow_hyphen_values = true)]
+        y: Option<f64>,
+        /// Print the node without its `config` instead of in full
+        #[arg(long)]
+        quiet: bool,
+    },
+    /// Update a node; prints the full updated node (`--quiet`: without its
+    /// `config`)
+    ///
+    /// Only the flags you pass change; at least one is required. `--config`
+    /// REPLACES the whole config and is validated against the node's kind,
+    /// which is fixed at creation.
+    #[command(group(ArgGroup::new("fields").required(true).multiple(true)))]
+    Update {
+        /// Node id
+        id: i64,
+        /// New title
+        #[arg(long, group = "fields")]
+        title: Option<String>,
+        /// Replace the config with this JSON object
+        #[arg(
+            long,
+            value_name = "JSON",
+            allow_hyphen_values = true,
+            group = "fields"
+        )]
+        config: Option<String>,
+        /// New canvas x position
+        #[arg(long, allow_hyphen_values = true, group = "fields")]
+        x: Option<f64>,
+        /// New canvas y position
+        #[arg(long, allow_hyphen_values = true, group = "fields")]
+        y: Option<f64>,
+        /// Print the node without its `config` instead of in full
+        #[arg(long)]
+        quiet: bool,
+    },
+    /// Delete a node AND the edges touching it (no confirmation)
+    ///
+    /// The output echoes the destroyed node and edges ({node, edges}) so the
+    /// transcript is a recoverable record.
+    Delete {
+        /// Node id
+        id: i64,
+        /// Echo the destroyed {node, edges} with the node's `config` dropped
+        #[arg(long)]
+        quiet: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum WorkflowEdgeCmd {
+    /// Connect two nodes of a workflow with a directed edge; prints the edge
+    ///
+    /// A workflow is a DAG: a self-edge or an edge that would close a cycle
+    /// is `cycle`, an edge into the trigger is `validation`, and an exact
+    /// duplicate is `conflict`. An edge leaving a `branch` node needs
+    /// `--branch true|false` (the verdict it is active on); any other edge
+    /// refuses one.
+    #[command(after_help = "\
+EXAMPLES
+  naru workflow edge create ambient 1 2
+  naru workflow edge create ambient 3 4 --branch true")]
+    Create {
+        /// Workflow id or name
+        #[arg(value_name = "WORKFLOW", required_unless_present = "workflow")]
+        workflow_pos: Option<String>,
+        /// Source node id
+        #[arg(value_name = "FROM", required_unless_present = "from")]
+        from_pos: Option<i64>,
+        /// Destination node id
+        #[arg(value_name = "TO", required_unless_present = "to")]
+        to_pos: Option<i64>,
+        /// Workflow id or name (flag form of WORKFLOW)
+        #[arg(long, conflicts_with = "workflow_pos")]
+        workflow: Option<String>,
+        /// Source node id (flag form of FROM)
+        #[arg(long, conflicts_with = "from_pos")]
+        from: Option<i64>,
+        /// Destination node id (flag form of TO)
+        #[arg(long, conflicts_with = "to_pos")]
+        to: Option<i64>,
+        /// The verdict this edge leaves a branch node on: true|false
+        #[arg(long, value_name = "VERDICT", value_parser = parse_workflow_branch)]
+        branch: Option<WorkflowBranch>,
+        /// Accepted for uniformity; an edge has no free text to drop
+        #[arg(long)]
+        quiet: bool,
+    },
+    /// Delete an edge (no confirmation); echoes the destroyed edge
+    Delete {
+        /// Edge id
+        id: i64,
+        /// Accepted for uniformity; an edge has no free text to drop
+        #[arg(long)]
+        quiet: bool,
     },
 }
 
@@ -2401,10 +2728,10 @@ enum LiveBoardCmd {
     /// Exactly one source, and the source decides the kind: a text BODY typed
     /// after `push` (markdown, or `--kind html`), `--file` (kind from the
     /// extension), `--image` (any file the inline-image allowlist accepts —
-    /// png, jpg, gif, webp, bmp, ico, svg), or `--diagram <ID>`, which renders
-    /// that diagram to an SVG SNAPSHOT: the picture is frozen as it was at the
-    /// push, so a canvas edited afterwards does not change what the person was
-    /// shown. Each push replaces what is showing.
+    /// png, jpg, gif, webp, bmp, ico, svg), or `--workflow <ID|NAME>`, which
+    /// renders that workflow's graph to an SVG SNAPSHOT: the picture is frozen
+    /// as it was at the push, so a graph edited afterwards does not change
+    /// what the person was shown. Each push replaces what is showing.
     ///
     /// `--say` speaks a sentence alongside it, exactly like `navigate --say`.
     /// Put every flag BEFORE the body text: everything after `push` that is
@@ -2414,8 +2741,8 @@ EXAMPLES
   mesa live board push --title Plan '## Plan' 'Three steps, in order.'
   mesa live board push --kind html --file /tmp/mockup.html --say \"Here is the mockup.\"
   mesa live board push --image /tmp/screenshot.png --title \"The overlap\"
-  mesa live board push --diagram 7 --say \"This is the flow we discussed.\"")]
-    #[command(group(ArgGroup::new("source").required(true).args(["body", "file", "image", "diagram"])))]
+  mesa live board push --workflow ambient --say \"This is the flow we discussed.\"")]
+    #[command(group(ArgGroup::new("source").required(true).args(["body", "file", "image", "workflow"])))]
     Push {
         /// The board body as text (everything after `push`); quoting optional
         #[arg(num_args = 1.., trailing_var_arg = true)]
@@ -2429,15 +2756,15 @@ EXAMPLES
         /// Show an image file; its bytes are stored in the board itself
         #[arg(long, value_name = "PATH")]
         image: Option<String>,
-        /// Snapshot a mesa diagram as SVG, as it looks right now
-        #[arg(long, value_name = "ID")]
-        diagram: Option<i64>,
+        /// Snapshot a workflow's graph as SVG, as it looks right now
+        #[arg(long, value_name = "ID|NAME")]
+        workflow: Option<String>,
         /// `markdown` (the default) or `html` — text bodies only
         #[arg(
             long,
             value_name = "KIND",
             value_parser = parse_text_board_kind,
-            conflicts_with_all = ["image", "diagram"],
+            conflicts_with_all = ["image", "workflow"],
         )]
         kind: Option<LiveBoardKind>,
         /// Caption for the panel's head row (≤ 200 characters)
@@ -3291,381 +3618,6 @@ EXAMPLES
     Usage,
 }
 
-#[derive(Subcommand)]
-enum DiagramCmd {
-    /// Create a diagram in a project; prints the full created diagram
-    /// (`--quiet`: without its `description`)
-    ///
-    /// A diagram belongs to exactly one project, fixed at creation. It is a
-    /// freeform canvas of frames (cards) and the edges between them; add those
-    /// with `diagram frame create` and `diagram edge create`.
-    #[command(after_help = "\
-EXAMPLES
-  mesa diagram create 1 \"Onboarding flow\"
-  mesa diagram create mesa \"Checkout\" --author agent-7")]
-    Create {
-        /// Project the diagram belongs to, by id or name (immutable after creation)
-        #[arg(value_name = "PROJECT", required_unless_present = "project")]
-        project_pos: Option<String>,
-        /// Diagram title
-        #[arg(value_name = "TITLE", required_unless_present = "title")]
-        title_pos: Option<String>,
-        /// Project, by id or name (flag form of PROJECT)
-        #[arg(long, conflicts_with = "project_pos")]
-        project: Option<String>,
-        /// Diagram title (flag form of TITLE)
-        #[arg(long, allow_hyphen_values = true, conflicts_with = "title_pos")]
-        title: Option<String>,
-        /// Optional free-text description
-        #[arg(long)]
-        description: Option<String>,
-        /// Diagram type: storyboard|flowchart|erd|brainstorm (default
-        /// storyboard); immutable after creation — no --type on
-        /// `diagram update`
-        #[arg(long = "type", value_parser = parse_diagram_type)]
-        diagram_type: Option<DiagramType>,
-        /// Free-text actor id of the creator (an agent name or "user")
-        #[arg(long)]
-        author: Option<String>,
-        /// Print the diagram without its `description` instead of the full object
-        #[arg(long)]
-        quiet: bool,
-    },
-    /// List diagrams as a bare JSON array (no frames/edges; use `show`)
-    List {
-        /// Only diagrams in this project (id or name)
-        #[arg(value_name = "PROJECT")]
-        project_pos: Option<String>,
-        /// Only diagrams in this project (id or name); flag form of [PROJECT]
-        #[arg(long, conflicts_with = "project_pos")]
-        project: Option<String>,
-    },
-    /// Print a diagram's full contents: {diagram, frames, edges}
-    #[command(visible_alias = "get")]
-    Show {
-        /// Diagram id
-        id: i64,
-        /// Keep the {diagram, frames, edges} keys but drop each member's
-        /// free text (the diagram's `description`, every frame's `body`)
-        #[arg(long)]
-        quiet: bool,
-    },
-    /// Update a diagram's title/description; prints the full diagram
-    /// (`--quiet`: without its `description`)
-    ///
-    /// Only the flags you pass change; at least one is required. The project
-    /// and author are immutable. `--description ""` clears the description.
-    #[command(group(ArgGroup::new("fields").required(true).multiple(true)))]
-    Update {
-        /// Diagram id
-        id: i64,
-        /// New title
-        #[arg(long, group = "fields")]
-        title: Option<String>,
-        /// New description; pass "" to clear it
-        #[arg(long, group = "fields")]
-        description: Option<String>,
-        /// Free-text actor id for the change history (an agent name or "user")
-        #[arg(long)]
-        author: Option<String>,
-        /// Print the diagram without its `description` instead of the full
-        /// object
-        ///
-        /// Deliberately outside the `fields` group: it is a modifier, so
-        /// `--quiet` alone is still clap's "no field given" usage error
-        /// (exit 2) rather than a legal call that silently does nothing.
-        #[arg(long)]
-        quiet: bool,
-    },
-    /// Delete a diagram AND all its frames and edges (no confirmation)
-    ///
-    /// Cascades immediately, including the change history. The output echoes the
-    /// full destroyed contents ({diagram, frames, edges}) so the transcript
-    /// is a recoverable record.
-    Delete {
-        /// Diagram id
-        id: i64,
-        /// Echo the destroyed view with each member's free text dropped
-        ///
-        /// The full echo is the recovery transcript that stands in for a
-        /// confirmation prompt; `--quiet` waives it for this call.
-        #[arg(long)]
-        quiet: bool,
-    },
-    /// Print a diagram's change history as a JSON array, oldest first
-    ///
-    /// Each row records one change — who, what, when: {id, diagram_id, actor,
-    /// action, summary, at}. `action` is a stable token (diagram_created,
-    /// diagram_edited, frame_added, frame_moved, frame_edited, frame_removed,
-    /// edge_added, edge_relabeled, edge_rerouted, edge_anchor_changed,
-    /// edge_removed). This is the collaboration record across agents and users.
-    Events {
-        /// Diagram id
-        id: i64,
-    },
-    /// Print what each diagram type accepts, as a JSON array
-    ///
-    /// One object per type: {type, shapes, generic_frame, edge_styles,
-    /// edge_markers}. `shapes` is exactly what `diagram frame create --shape`
-    /// takes on a board of that type and `generic_frame` says whether the
-    /// shape may be omitted entirely; `edge_markers` is exactly what
-    /// `diagram edge create --from-marker/--to-marker` takes there (the
-    /// cardinality markers are erd-only). It prints the value sets
-    /// themselves, so it needs no board id and opens no database.
-    Types,
-    /// Create, update, and delete frames (cards) on a diagram
-    #[command(subcommand)]
-    Frame(FrameCmd),
-    /// Create, update, and delete edges (connections) between frames
-    #[command(subcommand)]
-    Edge(EdgeCmd),
-}
-
-#[derive(Subcommand)]
-enum FrameCmd {
-    /// Add a frame to a diagram; prints the full created frame (`--quiet`:
-    /// without its `body`)
-    ///
-    /// Position (--x/--y) and size (--w/--h) are abstract canvas units the web
-    /// renders as pixels. `--task` links the frame to a task in the same
-    /// project (a soft reference, cleared if that task is later deleted).
-    #[command(after_help = "\
-EXAMPLES
-  mesa diagram frame create 1 \"Land on home\" --x 40 --y 40
-  mesa diagram frame create 1 \"Sign up\" --task 7 --color '#ff2bd6'")]
-    Create {
-        /// Diagram the frame belongs to (immutable after creation)
-        #[arg(value_name = "DIAGRAM", required_unless_present = "diagram")]
-        diagram_pos: Option<i64>,
-        /// Frame title
-        #[arg(value_name = "TITLE", required_unless_present = "title")]
-        title_pos: Option<String>,
-        /// Diagram id (flag form of DIAGRAM)
-        #[arg(long, conflicts_with = "diagram_pos")]
-        diagram: Option<i64>,
-        /// Frame title (flag form of TITLE)
-        #[arg(long, allow_hyphen_values = true, conflicts_with = "title_pos")]
-        title: Option<String>,
-        /// Optional free-text body (markdown by convention)
-        #[arg(long)]
-        body: Option<String>,
-        /// X position of the top-left corner (canvas units)
-        #[arg(long, default_value_t = 40.0)]
-        x: f64,
-        /// Y position of the top-left corner (canvas units)
-        #[arg(long, default_value_t = 40.0)]
-        y: f64,
-        /// Width (canvas units)
-        #[arg(long, default_value_t = 240.0)]
-        w: f64,
-        /// Height (canvas units)
-        #[arg(long, default_value_t = 140.0)]
-        h: f64,
-        /// Optional colour hint (a CSS colour, e.g. '#00e5ff')
-        #[arg(long)]
-        color: Option<String>,
-        /// Optional task id to link (must be in the diagram's project)
-        #[arg(long)]
-        task: Option<i64>,
-        /// Node shape, required to match the board's diagram type — run
-        /// `mesa diagram types` for the exact set each type accepts. A
-        /// storyboard board also takes no shape at all (the generic card);
-        /// every other type requires one. Any mismatch — including omitting it
-        /// on a typed board — is a "validation" error (exit 1), while an
-        /// unknown value is a usage error (exit 2).
-        /// Immutable after creation — no --shape on `diagram frame update`
-        #[arg(long, value_parser = parse_frame_shape)]
-        shape: Option<FrameShape>,
-        /// Free-text actor id of the creator (an agent name or "user")
-        #[arg(long)]
-        author: Option<String>,
-        /// Print the frame without its `body` instead of the full object
-        #[arg(long)]
-        quiet: bool,
-    },
-    /// Update a frame; prints the full updated frame (`--quiet`: without its
-    /// `body`)
-    ///
-    /// Only the flags you pass change; at least one is required. The diagram
-    /// and author are immutable. `--body ""`/`--color ""` clear those fields;
-    /// `--no-task` unlinks the task.
-    #[command(after_help = "\
-EXAMPLES
-  mesa diagram frame update 3 --x 120 --y 80     # move it
-  mesa diagram frame update 3 --title \"Revised\" --no-task")]
-    #[command(group(ArgGroup::new("fields").required(true).multiple(true)))]
-    Update {
-        /// Frame id
-        id: i64,
-        /// New title
-        #[arg(long, group = "fields")]
-        title: Option<String>,
-        /// New body; pass "" to clear it
-        #[arg(long, group = "fields")]
-        body: Option<String>,
-        /// New X position (canvas units)
-        #[arg(long, group = "fields")]
-        x: Option<f64>,
-        /// New Y position (canvas units)
-        #[arg(long, group = "fields")]
-        y: Option<f64>,
-        /// New width (canvas units)
-        #[arg(long, group = "fields")]
-        w: Option<f64>,
-        /// New height (canvas units)
-        #[arg(long, group = "fields")]
-        h: Option<f64>,
-        /// New colour hint; pass "" to clear it
-        #[arg(long, group = "fields")]
-        color: Option<String>,
-        /// New linked task id (must be in the diagram's project)
-        #[arg(long, group = "fields", conflicts_with = "no_task")]
-        task: Option<i64>,
-        /// Unlink the frame from its task
-        #[arg(long, group = "fields")]
-        no_task: bool,
-        /// Free-text actor id for the change history (an agent name or "user")
-        #[arg(long)]
-        author: Option<String>,
-        /// Print the frame without its `body` instead of the full object
-        ///
-        /// Deliberately outside the `fields` group: it is a modifier, so
-        /// `--quiet` alone is still clap's "no field given" usage error
-        /// (exit 2) rather than a legal call that silently does nothing.
-        #[arg(long)]
-        quiet: bool,
-    },
-    /// Delete a frame AND the edges touching it (no confirmation)
-    ///
-    /// The output echoes the destroyed frame and edges ({frame, edges}) so the
-    /// transcript is a recoverable record.
-    Delete {
-        /// Frame id
-        id: i64,
-        /// Free-text actor id for the change history (an agent name or "user")
-        #[arg(long)]
-        author: Option<String>,
-        /// Echo the destroyed {frame, edges} with the frame's `body` dropped
-        ///
-        /// The full echo is the recovery transcript that stands in for a
-        /// confirmation prompt; `--quiet` waives it for this call.
-        #[arg(long)]
-        quiet: bool,
-    },
-}
-
-#[derive(Subcommand)]
-enum EdgeCmd {
-    /// Connect two frames of a diagram with a directed edge
-    ///
-    /// Both frames must belong to the diagram. Self-edges are rejected
-    /// (code "validation"); cycles are allowed (a diagram is a freeform
-    /// diagram, not a dependency graph). --style and the two --*-marker flags
-    /// are the connector's professional properties; `mesa diagram types` lists
-    /// what this board's type accepts.
-    #[command(after_help = "\
-EXAMPLES
-  mesa diagram edge create 1 3 4 --label \"then\"
-  mesa diagram edge create 1 3 4 --style dashed --to-marker hollow_arrow
-  mesa diagram edge create 2 5 6 --to-marker crows_foot   # erd boards only")]
-    Create {
-        /// Diagram both frames belong to
-        #[arg(value_name = "DIAGRAM", required_unless_present = "diagram")]
-        diagram_pos: Option<i64>,
-        /// Source frame id
-        #[arg(value_name = "FROM", required_unless_present = "from")]
-        from_pos: Option<i64>,
-        /// Destination frame id
-        #[arg(value_name = "TO", required_unless_present = "to")]
-        to_pos: Option<i64>,
-        /// Diagram id (flag form of DIAGRAM)
-        #[arg(long, conflicts_with = "diagram_pos")]
-        diagram: Option<i64>,
-        /// Source frame id (flag form of FROM)
-        #[arg(long, conflicts_with = "from_pos")]
-        from: Option<i64>,
-        /// Destination frame id (flag form of TO)
-        #[arg(long, conflicts_with = "to_pos")]
-        to: Option<i64>,
-        /// Optional edge label
-        #[arg(long)]
-        label: Option<String>,
-        /// Line style: solid|dashed|dotted (absent = solid, the default
-        /// rendering). Valid on every diagram type
-        #[arg(long, value_parser = parse_edge_style)]
-        style: Option<EdgeStyle>,
-        /// Decoration at the FROM end (absent = nothing, the default). The
-        /// cardinality markers are accepted on erd boards only; see
-        /// `mesa diagram types`
-        #[arg(long, value_parser = parse_edge_marker)]
-        from_marker: Option<EdgeMarker>,
-        /// Decoration at the TO end (absent = a closed arrowhead, the
-        /// default). Same per-type rule as --from-marker
-        #[arg(long, value_parser = parse_edge_marker)]
-        to_marker: Option<EdgeMarker>,
-        /// Free-text actor id of the creator (an agent name or "user")
-        #[arg(long)]
-        author: Option<String>,
-        /// Accepted for uniformity with the rest of the group; an edge has no
-        /// unbounded field, so the output is the same either way
-        #[arg(long)]
-        quiet: bool,
-    },
-    /// Update an edge's label, style or end markers; prints the full updated
-    /// edge (`--quiet` is accepted for uniformity; an edge has no unbounded
-    /// field, so the output is the same either way)
-    ///
-    /// `--label ""`, `--style ""`, `--from-marker ""` and `--to-marker ""`
-    /// clear those fields back to their defaults. Endpoints are immutable
-    /// (delete and re-create to re-route an edge); style and markers are not,
-    /// unlike a frame's --shape, because restyling a connector never moves it
-    /// into another type system.
-    #[command(after_help = "\
-EXAMPLES
-  mesa diagram edge update 3 --style dotted --to-marker circle
-  mesa diagram edge update 3 --style \"\"           # back to a solid line")]
-    #[command(group(ArgGroup::new("fields").required(true).multiple(true)))]
-    Update {
-        /// Edge id
-        id: i64,
-        /// New label; pass "" to clear it
-        #[arg(long, group = "fields")]
-        label: Option<String>,
-        /// New line style: solid|dashed|dotted; pass "" to clear it
-        #[arg(long, group = "fields", value_parser = parse_edge_style_or_clear)]
-        style: Option<String>,
-        /// New decoration at the FROM end; pass "" to clear it
-        #[arg(long, group = "fields", value_parser = parse_edge_marker_or_clear)]
-        from_marker: Option<String>,
-        /// New decoration at the TO end; pass "" to clear it
-        #[arg(long, group = "fields", value_parser = parse_edge_marker_or_clear)]
-        to_marker: Option<String>,
-        /// Free-text actor id for the change history (an agent name or "user")
-        #[arg(long)]
-        author: Option<String>,
-        /// Accepted for uniformity with the rest of the group; an edge has no
-        /// unbounded field, so the output is the same either way
-        ///
-        /// Deliberately outside the `fields` group: it is a modifier, so
-        /// `--quiet` alone is still clap's "no field given" usage error
-        /// (exit 2) rather than a legal call that silently does nothing.
-        #[arg(long)]
-        quiet: bool,
-    },
-    /// Delete an edge; echoes the destroyed edge
-    Delete {
-        /// Edge id
-        id: i64,
-        /// Free-text actor id for the change history (an agent name or "user")
-        #[arg(long)]
-        author: Option<String>,
-        /// Accepted for uniformity with the rest of the group; an edge has no
-        /// unbounded field, so the output is the same either way
-        #[arg(long)]
-        quiet: bool,
-    },
-}
-
 fn parse_status(s: &str) -> std::result::Result<Status, String> {
     Status::parse(s)
         .ok_or_else(|| format!("'{s}' is not one of backlog|todo|in_progress|done|cancelled"))
@@ -3751,7 +3703,7 @@ fn parse_live_notice(s: &str) -> std::result::Result<LiveNotice, String> {
 }
 
 /// `--kind` on `live board push` names one of the two **text** kinds. The
-/// other two are named by their own source flag (`--image`, `--diagram`),
+/// other two are named by their own source flag (`--image`, `--workflow`),
 /// which is also where the bytes come from, so offering them here would be a
 /// second way to say something the source already said.
 fn parse_text_board_kind(s: &str) -> std::result::Result<LiveBoardKind, String> {
@@ -3762,11 +3714,6 @@ fn parse_text_board_kind(s: &str) -> std::result::Result<LiveBoardKind, String> 
     }
 }
 
-fn parse_diagram_type(s: &str) -> std::result::Result<DiagramType, String> {
-    DiagramType::parse(s)
-        .ok_or_else(|| format!("'{s}' is not one of storyboard|flowchart|erd|brainstorm"))
-}
-
 /// Renders a value set as clap's `a|b|c` help/error alternation. Built from
 /// the enum's own `ALL`, so a new shape/style/marker cannot be legal but
 /// unmentioned.
@@ -3774,51 +3721,27 @@ fn alternation(values: impl IntoIterator<Item = &'static str>) -> String {
     values.into_iter().collect::<Vec<_>>().join("|")
 }
 
-fn parse_frame_shape(s: &str) -> std::result::Result<FrameShape, String> {
-    FrameShape::parse(s).ok_or_else(|| {
+fn parse_workflow_node_kind(s: &str) -> std::result::Result<WorkflowNodeKind, String> {
+    WorkflowNodeKind::parse(s).ok_or_else(|| {
         format!(
             "'{s}' is not one of {}",
-            alternation(FrameShape::ALL.iter().map(|v| v.as_str()))
+            alternation(WorkflowNodeKind::ALL.iter().map(|v| v.as_str()))
         )
     })
 }
 
-fn parse_edge_style(s: &str) -> std::result::Result<EdgeStyle, String> {
-    EdgeStyle::parse(s).ok_or_else(|| {
-        format!(
-            "'{s}' is not one of {}",
-            alternation(EdgeStyle::ALL.iter().map(|v| v.as_str()))
-        )
-    })
+fn parse_workflow_branch(s: &str) -> std::result::Result<WorkflowBranch, String> {
+    WorkflowBranch::parse(s).ok_or_else(|| format!("'{s}' is not one of true|false"))
 }
 
-fn parse_edge_marker(s: &str) -> std::result::Result<EdgeMarker, String> {
-    EdgeMarker::parse(s).ok_or_else(|| {
-        format!(
-            "'{s}' is not one of {}",
-            alternation(EdgeMarker::ALL.iter().map(|v| v.as_str()))
-        )
-    })
-}
-
-/// `diagram edge update`'s validating pass-through: `""` clears the field back
-/// to its default (exactly how `--label ""` clears), anything else must be a
-/// legal literal, so an unknown one is a clap **usage** error (exit 2) rather
-/// than reaching `Store`. The accepted string is returned verbatim and read
-/// back through `EdgeStyle::parse`/`EdgeMarker::parse` at the call site, where
-/// `""` parses to `None` — which is the clear.
-fn parse_edge_style_or_clear(s: &str) -> std::result::Result<String, String> {
-    if s.is_empty() {
-        return Ok(String::new());
+/// `run --trigger` names who started a run. `time` is the watcher's alone —
+/// a hand-made run claiming it would count against a schedule's interval.
+fn parse_workflow_trigger(s: &str) -> std::result::Result<WorkflowTrigger, String> {
+    match s {
+        "manual" => Ok(WorkflowTrigger::Manual),
+        "voice" => Ok(WorkflowTrigger::Voice),
+        _ => Err(format!("'{s}' is not one of manual|voice")),
     }
-    parse_edge_style(s).map(|v| v.as_str().to_string())
-}
-
-fn parse_edge_marker_or_clear(s: &str) -> std::result::Result<String, String> {
-    if s.is_empty() {
-        return Ok(String::new());
-    }
-    parse_edge_marker(s).map(|v| v.as_str().to_string())
 }
 
 /// Comma-separated tags; empty string yields the empty set (clears tags).
@@ -4056,10 +3979,16 @@ fn print_tasks(tasks: &[Task], quiet: bool) {
 
 /// Keys dropped from a `Project` under `--quiet`.
 const QUIET_DROP_PROJECT: &[&str] = &["description"];
-/// Keys dropped from a `Diagram` under `--quiet`.
-const QUIET_DROP_DIAGRAM: &[&str] = &["description"];
-/// Keys dropped from a `Frame` under `--quiet`.
-const QUIET_DROP_FRAME: &[&str] = &["body"];
+/// Keys dropped from a `Workflow` under `--quiet`.
+const QUIET_DROP_WORKFLOW: &[&str] = &["description"];
+/// Keys dropped from a `WorkflowNode` under `--quiet`: the per-kind config,
+/// which can hold a whole prompt or shell command.
+const QUIET_DROP_WORKFLOW_NODE: &[&str] = &["config"];
+/// A `WorkflowEdge` has no unbounded field: quiet output equals full output.
+const QUIET_DROP_WORKFLOW_EDGE: &[&str] = &[];
+/// Keys dropped from a `WorkflowRun` under `--quiet`: the input and every
+/// step's output, which are the unbounded part of a run.
+const QUIET_DROP_WORKFLOW_RUN: &[&str] = &["steps", "input"];
 /// Keys dropped from an `InboxItem` under `--quiet`.
 const QUIET_DROP_INBOX_ITEM: &[&str] = &["body"];
 /// Keys dropped from a `Script` under `--quiet`: both of its unbounded
@@ -4078,9 +4007,6 @@ const QUIET_DROP_ARTIFACT: &[&str] = &["body"];
 /// flag beside it stays. A skill's sibling `files` (mesa task 1604) are
 /// unbounded bodies too, and go.
 const QUIET_DROP_LIBRARY: &[&str] = &["body", "synced_body", "builtin_body", "files"];
-/// A `FrameEdge` has no unbounded field: quiet output equals full output.
-/// The flag is still accepted on edge subcommands, for uniformity.
-const QUIET_DROP_FRAME_EDGE: &[&str] = &[];
 /// Keys dropped from a `LiveTurn` under `--quiet`: the spoken body, capped at
 /// 8 KiB by `Store` but unbounded as far as a caller reading a JSON line is
 /// concerned. Everything else on a turn is an id, a fixed word, a timestamp or
@@ -4192,20 +4118,43 @@ fn print_project_delete(
     }
 }
 
-/// Print one diagram: the full record, or the record minus `description`.
-fn print_diagram(diagram: &Diagram, is_quiet: bool) {
-    print_record(diagram, is_quiet, QUIET_DROP_DIAGRAM);
+/// Print one workflow: the full record, or the record minus `description`.
+fn print_workflow(workflow: &Workflow, is_quiet: bool) {
+    print_record(workflow, is_quiet, QUIET_DROP_WORKFLOW);
 }
 
-/// Print one frame: the full record, or the record minus `body`.
-fn print_frame(frame: &Frame, is_quiet: bool) {
-    print_record(frame, is_quiet, QUIET_DROP_FRAME);
+/// Print one node: the full record, or the record minus `config`.
+fn print_workflow_node(node: &WorkflowNode, is_quiet: bool) {
+    print_record(node, is_quiet, QUIET_DROP_WORKFLOW_NODE);
 }
 
-/// Print one edge. A `FrameEdge` has no unbounded field, so the quiet shape IS
-/// the full record; the flag is accepted for uniformity across the group.
-fn print_edge(edge: &FrameEdge, is_quiet: bool) {
-    print_record(edge, is_quiet, QUIET_DROP_FRAME_EDGE);
+/// Print one edge. A `WorkflowEdge` has no unbounded field, so the quiet
+/// shape IS the full record; the flag is accepted for uniformity.
+fn print_workflow_edge(edge: &WorkflowEdge, is_quiet: bool) {
+    print_record(edge, is_quiet, QUIET_DROP_WORKFLOW_EDGE);
+}
+
+/// Print one run: the full record, or the record minus `steps` and `input`.
+fn print_workflow_run(run: &WorkflowRun, is_quiet: bool) {
+    print_record(run, is_quiet, QUIET_DROP_WORKFLOW_RUN);
+}
+
+/// Print a `{workflow, nodes, edges}` view (`workflow show`/`delete`).
+///
+/// Under `--quiet` the container KEY SET is unchanged — only the members are
+/// projected, so a client's `jq 'keys'` is identical either way. (Member and
+/// container key ORDER is alphabetical under `--quiet`, as for any
+/// `serde_json::Value`; the default, non-quiet output is untouched.)
+fn print_workflow_view(view: &WorkflowView, is_quiet: bool) {
+    if is_quiet {
+        print_json(&json!({
+            "workflow": quiet(&view.workflow, QUIET_DROP_WORKFLOW),
+            "nodes": quiet_all(&view.nodes, QUIET_DROP_WORKFLOW_NODE),
+            "edges": quiet_all(&view.edges, QUIET_DROP_WORKFLOW_EDGE),
+        }));
+    } else {
+        print_json(view);
+    }
 }
 
 /// Print one inbox item: the full record, or the record minus `body`.
@@ -4265,25 +4214,6 @@ fn print_notebook_entry(entry: &LiveNotebookEntry, is_quiet: bool) {
 /// `commits`/`note` (task 920).
 fn print_receipt(receipt: &TaskReceipt, is_quiet: bool) {
     print_record(receipt, is_quiet, QUIET_DROP_RECEIPT);
-}
-
-/// Print a `{diagram, frames, edges}` view (`diagram show`/`delete`).
-///
-/// Under `--quiet` the container KEY SET is unchanged — only the members are
-/// projected, so a client's `jq 'keys'` is identical either way. (Member and
-/// container key ORDER is alphabetical under `--quiet`, as for any
-/// `serde_json::Value`; JSON object order is not semantically meaningful and
-/// the default, non-quiet output is untouched.)
-fn print_diagram_view(view: &DiagramView, is_quiet: bool) {
-    if is_quiet {
-        print_json(&json!({
-            "diagram": quiet(&view.diagram, QUIET_DROP_DIAGRAM),
-            "frames": quiet_all(&view.frames, QUIET_DROP_FRAME),
-            "edges": quiet_all(&view.edges, QUIET_DROP_FRAME_EDGE),
-        }));
-    } else {
-        print_json(view);
-    }
 }
 
 /// Quiet projection of a slice of records, member by member.
@@ -4480,7 +4410,7 @@ fn execute(command: Command) -> Result<()> {
     match command {
         Command::Project(cmd) => run_project(cmd),
         Command::Task(cmd) => run_task(cmd),
-        Command::Diagram(cmd) => run_diagram(cmd),
+        Command::Workflow(cmd) => run_workflow_cmd(cmd),
         Command::Inbox(cmd) => run_inbox(cmd),
         Command::Script(cmd) => run_script_cmd(cmd),
         Command::Artifact(cmd) => run_artifact_cmd(cmd),
@@ -4499,6 +4429,7 @@ fn execute(command: Command) -> Result<()> {
             watch_inbox,
             watch_cost,
             watch_retro,
+            watch_workflows,
         } => crate::api::serve(
             port,
             lan,
@@ -4507,6 +4438,7 @@ fn execute(command: Command) -> Result<()> {
             watch_inbox,
             watch_cost,
             watch_retro,
+            watch_workflows,
         ),
 
         Command::System => {
@@ -5107,313 +5039,6 @@ fn run_task(cmd: TaskCmd) -> Result<()> {
                     std::process::exit(1);
                 }
             }
-        }
-    }
-    Ok(())
-}
-
-/// One row of `mesa diagram types`: what a board of this type accepts. Every
-/// list is read straight off the enums the `Store` validators consult
-/// (`DiagramType::shapes`/`allows_generic_frame`/`edge_markers`,
-/// `EdgeStyle::ALL`), so what this prints and what `create` accepts are the
-/// same answer by construction, not by two lists kept in step.
-#[derive(serde::Serialize)]
-struct DiagramTypeInfo {
-    #[serde(rename = "type")]
-    diagram_type: &'static str,
-    /// Values `diagram frame create --shape` takes on this board type.
-    shapes: Vec<&'static str>,
-    /// Whether `--shape` may be omitted (the generic card).
-    generic_frame: bool,
-    /// Values `diagram edge create --style` takes — the same on every type.
-    edge_styles: Vec<&'static str>,
-    /// Values `--from-marker`/`--to-marker` take on this board type.
-    edge_markers: Vec<&'static str>,
-}
-
-fn diagram_type_catalog() -> Vec<DiagramTypeInfo> {
-    DiagramType::ALL
-        .iter()
-        .map(|dt| DiagramTypeInfo {
-            diagram_type: dt.as_str(),
-            shapes: dt.shapes().iter().map(|s| s.as_str()).collect(),
-            generic_frame: dt.allows_generic_frame(),
-            edge_styles: EdgeStyle::ALL.iter().map(|s| s.as_str()).collect(),
-            edge_markers: dt.edge_markers().iter().map(|m| m.as_str()).collect(),
-        })
-        .collect()
-}
-
-/// `mesa diagram types` is only useful if it is the same answer `create`
-/// gives, so this asserts the agreement directly: every printed shape is
-/// accepted by `validate_frame_shape` for that type, every shape it omits is
-/// rejected, and the same both ways for markers against
-/// `validate_edge_markers`. Both validators are exercised through their public
-/// callers in `store.rs`'s own matrix tests; here the subject is the *lists*.
-#[cfg(test)]
-mod diagram_types_tests {
-    use super::*;
-
-    #[test]
-    fn catalog_states_exactly_what_each_type_accepts() {
-        let catalog = diagram_type_catalog();
-        assert_eq!(catalog.len(), DiagramType::ALL.len());
-        for (info, dt) in catalog.iter().zip(DiagramType::ALL.iter().copied()) {
-            assert_eq!(info.diagram_type, dt.as_str());
-            assert_eq!(info.generic_frame, dt.allows_generic_frame());
-            for shape in FrameShape::ALL.iter().copied() {
-                assert_eq!(
-                    info.shapes.contains(&shape.as_str()),
-                    dt.shapes().contains(&shape),
-                    "shape {} on {}",
-                    shape.as_str(),
-                    dt.as_str()
-                );
-            }
-            for marker in EdgeMarker::ALL.iter().copied() {
-                assert_eq!(
-                    info.edge_markers.contains(&marker.as_str()),
-                    dt.edge_markers().contains(&marker),
-                    "marker {} on {}",
-                    marker.as_str(),
-                    dt.as_str()
-                );
-            }
-            // Style has no per-type rule at all: every type lists every style.
-            let all_styles: Vec<&str> = EdgeStyle::ALL.iter().map(|s| s.as_str()).collect();
-            assert_eq!(info.edge_styles, all_styles);
-        }
-        // The cardinality family is on the erd row and nowhere else.
-        for info in &catalog {
-            let has_cardinality = EdgeMarker::CARDINALITY
-                .iter()
-                .any(|m| info.edge_markers.contains(&m.as_str()));
-            assert_eq!(has_cardinality, info.diagram_type == "erd");
-        }
-    }
-
-    /// Every value the catalog prints is a literal the CLI's own value parsers
-    /// accept — the flags and the discovery command speak one vocabulary.
-    #[test]
-    fn every_printed_value_parses_as_a_flag_argument() {
-        for info in diagram_type_catalog() {
-            for shape in info.shapes {
-                assert!(parse_frame_shape(shape).is_ok(), "{shape}");
-            }
-            for style in info.edge_styles {
-                assert!(parse_edge_style(style).is_ok(), "{style}");
-                assert!(parse_edge_style_or_clear(style).is_ok(), "{style}");
-            }
-            for marker in info.edge_markers {
-                assert!(parse_edge_marker(marker).is_ok(), "{marker}");
-                assert!(parse_edge_marker_or_clear(marker).is_ok(), "{marker}");
-            }
-        }
-        // `""` is the clear, not a value — and only on the update flags.
-        assert_eq!(parse_edge_style_or_clear(""), Ok(String::new()));
-        assert_eq!(parse_edge_marker_or_clear(""), Ok(String::new()));
-        assert!(parse_edge_style("").is_err());
-        assert!(parse_edge_marker("").is_err());
-        assert!(parse_edge_style_or_clear("bogus").is_err());
-        assert!(parse_edge_marker_or_clear("bogus").is_err());
-    }
-}
-
-fn run_diagram(cmd: DiagramCmd) -> Result<()> {
-    // The value sets are compiled in, so this is the one diagram command that
-    // answers without a database — and must not create one as a side effect.
-    if let DiagramCmd::Types = cmd {
-        print_json(&diagram_type_catalog());
-        return Ok(());
-    }
-    let mut store = Store::open_default()?;
-    match cmd {
-        DiagramCmd::Create {
-            project_pos,
-            title_pos,
-            project,
-            title,
-            description,
-            diagram_type,
-            author,
-            quiet,
-        } => print_diagram(
-            &store.create_diagram(
-                // clap guarantees exactly one of each positional/flag pair.
-                resolve_project(&store, &project.or(project_pos).unwrap())?,
-                &title.or(title_pos).unwrap(),
-                description.as_deref(),
-                author.as_deref(),
-                diagram_type,
-            )?,
-            quiet,
-        ),
-        DiagramCmd::List {
-            project_pos,
-            project,
-        } => {
-            let project = project.or(project_pos);
-            print_json(&store.list_diagrams(resolve_project_opt(&store, project.as_deref())?)?)
-        }
-        DiagramCmd::Show { id, quiet } => print_diagram_view(&store.get_diagram_view(id)?, quiet),
-        DiagramCmd::Update {
-            id,
-            title,
-            description,
-            author,
-            quiet,
-        } => {
-            let patch = DiagramPatch {
-                title,
-                description: description.map(clear_if_empty),
-            };
-            print_diagram(&store.update_diagram(id, &patch, author.as_deref())?, quiet);
-        }
-        DiagramCmd::Delete { id, quiet } => print_diagram_view(&store.delete_diagram(id)?, quiet),
-        DiagramCmd::Events { id } => print_json(&store.list_diagram_events(id)?),
-        DiagramCmd::Types => unreachable!("answered before the store is opened"),
-        DiagramCmd::Frame(cmd) => run_frame(&mut store, cmd)?,
-        DiagramCmd::Edge(cmd) => run_edge(&mut store, cmd)?,
-    }
-    Ok(())
-}
-
-fn run_frame(store: &mut Store, cmd: FrameCmd) -> Result<()> {
-    match cmd {
-        FrameCmd::Create {
-            diagram_pos,
-            title_pos,
-            diagram,
-            title,
-            body,
-            x,
-            y,
-            w,
-            h,
-            color,
-            task,
-            shape,
-            author,
-            quiet,
-        } => {
-            // clap guarantees exactly one of each positional/flag pair.
-            let diagram = diagram.or(diagram_pos).unwrap();
-            let new = FrameNew {
-                title: title.or(title_pos).unwrap(),
-                body,
-                x,
-                y,
-                w,
-                h,
-                color,
-                task_id: task,
-                author,
-                shape,
-            };
-            print_frame(&store.create_frame(diagram, &new)?, quiet);
-        }
-        FrameCmd::Update {
-            id,
-            title,
-            body,
-            x,
-            y,
-            w,
-            h,
-            color,
-            task,
-            no_task,
-            author,
-            quiet,
-        } => {
-            let patch = FramePatch {
-                title,
-                body: body.map(clear_if_empty),
-                x,
-                y,
-                w,
-                h,
-                color: color.map(clear_if_empty),
-                task_id: if no_task { Some(None) } else { task.map(Some) },
-            };
-            print_frame(&store.update_frame(id, &patch, author.as_deref())?, quiet);
-        }
-        FrameCmd::Delete {
-            id,
-            author,
-            quiet: is_quiet,
-        } => {
-            let (frame, edges) = store.delete_frame(id, author.as_deref())?;
-            // The container keys stay identical; only the members are projected.
-            if is_quiet {
-                print_json(&json!({
-                    "frame": quiet(&frame, QUIET_DROP_FRAME),
-                    "edges": quiet_all(&edges, QUIET_DROP_FRAME_EDGE),
-                }));
-            } else {
-                print_json(&json!({"frame": frame, "edges": edges}));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn run_edge(store: &mut Store, cmd: EdgeCmd) -> Result<()> {
-    match cmd {
-        EdgeCmd::Create {
-            diagram_pos,
-            from_pos,
-            to_pos,
-            diagram,
-            from,
-            to,
-            label,
-            style,
-            from_marker,
-            to_marker,
-            author,
-            quiet,
-        } => {
-            let new = EdgeNew {
-                // clap guarantees exactly one of each positional/flag pair.
-                from_frame: from.or(from_pos).unwrap(),
-                to_frame: to.or(to_pos).unwrap(),
-                label,
-                author,
-                style,
-                from_marker,
-                to_marker,
-            };
-            print_edge(
-                &store.create_edge(diagram.or(diagram_pos).unwrap(), &new)?,
-                quiet,
-            );
-        }
-        EdgeCmd::Update {
-            id,
-            label,
-            style,
-            from_marker,
-            to_marker,
-            author,
-            quiet,
-        } => {
-            // The value parsers already rejected anything but a legal literal
-            // or `""`, and `""` parses to `None` — which is the clear, the
-            // same three-state shape `--label ""` has.
-            let patch = EdgePatch {
-                label: label.map(clear_if_empty),
-                waypoints: None,
-                from_anchor: None,
-                to_anchor: None,
-                style: style.map(|s| EdgeStyle::parse(&s)),
-                from_marker: from_marker.map(|m| EdgeMarker::parse(&m)),
-                to_marker: to_marker.map(|m| EdgeMarker::parse(&m)),
-            };
-            print_edge(&store.update_edge(id, &patch, author.as_deref())?, quiet);
-        }
-        EdgeCmd::Delete { id, author, quiet } => {
-            print_edge(&store.delete_edge(id, author.as_deref())?, quiet)
         }
     }
     Ok(())
@@ -6920,7 +6545,7 @@ fn run_live_board(store: &mut Store, cmd: LiveBoardCmd) -> Result<()> {
             body,
             file,
             image,
-            diagram,
+            workflow,
             kind,
             title,
             say,
@@ -6946,12 +6571,15 @@ fn run_live_board(store: &mut Store, cmd: LiveBoardCmd) -> Result<()> {
                     base64::engine::general_purpose::STANDARD.encode(bytes),
                     Some(content_type.to_string()),
                 )
-            } else if let Some(id) = diagram {
-                // A SNAPSHOT: the diagram is read once, here, and the SVG the
+            } else if let Some(which) = workflow {
+                // A SNAPSHOT: the graph is read once, here, and the SVG the
                 // board holds never changes again. What the person was shown
-                // is what they were shown.
-                let view = store.get_diagram_view(id)?;
-                (LiveBoardKind::Diagram, board::diagram_svg(&view), None)
+                // is what they were shown. The kind stays `diagram` — "a
+                // graph snapshot" — so boards pushed before workflows
+                // existed render alongside.
+                let id = resolve_workflow(store, &which)?.id;
+                let view = store.get_workflow_view(id)?;
+                (LiveBoardKind::Diagram, board::workflow_svg(&view), None)
             } else if let Some(path) = file {
                 let text = std::fs::read_to_string(&path)
                     .map_err(|e| Error::Validation(format!("could not read {path}: {e}")))?;
@@ -7328,6 +6956,191 @@ fn run_script_cmd(cmd: ScriptCmd) -> Result<()> {
                 .map_err(Error::Validation)?;
             print_json(&run);
         }
+    }
+    Ok(())
+}
+
+/// Resolves a workflow argument — a numeric id or a workflow name — to the
+/// record (the `resolve_script` rule; a workflow name is never numeric).
+fn resolve_workflow(store: &Store, arg: &str) -> Result<Workflow> {
+    match arg.parse::<i64>() {
+        Ok(id) => store.get_workflow(id),
+        Err(_) => store.find_workflow_by_name(arg),
+    }
+}
+
+/// Parses a `--config` value: any JSON, so a non-object reaches `Store`'s
+/// per-kind validation and is refused there with the kind named.
+fn parse_config_json(s: &str) -> Result<serde_json::Value> {
+    serde_json::from_str(s)
+        .map_err(|e| Error::Validation(format!("--config is not valid JSON: {e}")))
+}
+
+fn run_workflow_cmd(cmd: WorkflowCmd) -> Result<()> {
+    let mut store = Store::open_default()?;
+    match cmd {
+        WorkflowCmd::Create {
+            name_pos,
+            name,
+            project,
+            description,
+            quiet,
+        } => {
+            let name = name.or(name_pos).unwrap();
+            let project = resolve_project_opt(&store, project.as_deref())?;
+            print_workflow(
+                &store.create_workflow(project, &name, description.as_deref())?,
+                quiet,
+            );
+        }
+        WorkflowCmd::List {
+            project_pos,
+            project,
+        } => {
+            let project = resolve_project_opt(&store, project.or(project_pos).as_deref())?;
+            print_json(&store.list_workflows(project)?);
+        }
+        WorkflowCmd::Show { workflow, quiet } => {
+            let id = resolve_workflow(&store, &workflow)?.id;
+            print_workflow_view(&store.get_workflow_view(id)?, quiet);
+        }
+        WorkflowCmd::Update {
+            workflow,
+            name,
+            description,
+            project,
+            quiet,
+        } => {
+            let id = resolve_workflow(&store, &workflow)?.id;
+            let project_id = match project.as_deref() {
+                None => None,
+                Some("") => Some(None),
+                Some(p) => Some(Some(resolve_project(&store, p)?)),
+            };
+            let patch = WorkflowPatch {
+                project_id,
+                name,
+                description: description.map(clear_if_empty),
+            };
+            print_workflow(&store.update_workflow(id, patch)?, quiet);
+        }
+        WorkflowCmd::Delete { workflow, quiet } => {
+            let id = resolve_workflow(&store, &workflow)?.id;
+            print_workflow_view(&store.delete_workflow(id)?, quiet);
+        }
+        WorkflowCmd::Run {
+            workflow,
+            input,
+            input_file,
+            trigger,
+            quiet,
+        } => {
+            let id = resolve_workflow(&store, &workflow)?.id;
+            let mut stdin_used = false;
+            let input = resolve_field(input, input_file, &mut stdin_used)?.unwrap_or_default();
+            // The engine borrows the store only around a node, never across
+            // its process; the CLI hands it the one it owns behind a `Mutex`.
+            let access = std::sync::Mutex::new(store);
+            print_workflow_run(
+                &workflow::run_workflow(&access, id, trigger, &input)?,
+                quiet,
+            );
+        }
+        WorkflowCmd::Runs { workflow } => {
+            let id = resolve_workflow(&store, &workflow)?.id;
+            print_json(&quiet_all(
+                &store.list_workflow_runs(id)?,
+                QUIET_DROP_WORKFLOW_RUN,
+            ));
+        }
+        WorkflowCmd::RunShow { id, quiet } => {
+            print_workflow_run(&store.get_workflow_run(id)?, quiet)
+        }
+        WorkflowCmd::Log { log, limit } => {
+            print_json(&store.list_workflow_log(log.as_deref(), limit)?);
+        }
+        WorkflowCmd::Node(cmd) => match cmd {
+            WorkflowNodeCmd::Create {
+                workflow_pos,
+                kind_pos,
+                title_pos,
+                workflow,
+                kind,
+                title,
+                config,
+                x,
+                y,
+                quiet,
+            } => {
+                let workflow = workflow.or(workflow_pos).unwrap();
+                let id = resolve_workflow(&store, &workflow)?.id;
+                let new = WorkflowNodeNew {
+                    kind: kind.or(kind_pos).unwrap(),
+                    title: title.or(title_pos).unwrap(),
+                    config: config.as_deref().map(parse_config_json).transpose()?,
+                    x,
+                    y,
+                };
+                print_workflow_node(&store.create_workflow_node(id, &new)?, quiet);
+            }
+            WorkflowNodeCmd::Update {
+                id,
+                title,
+                config,
+                x,
+                y,
+                quiet,
+            } => {
+                let patch = WorkflowNodePatch {
+                    title,
+                    config: config.as_deref().map(parse_config_json).transpose()?,
+                    x,
+                    y,
+                };
+                print_workflow_node(&store.update_workflow_node(id, patch)?, quiet);
+            }
+            WorkflowNodeCmd::Delete {
+                id,
+                quiet: is_quiet,
+            } => {
+                let (node, edges) = store.delete_workflow_node(id)?;
+                if is_quiet {
+                    print_json(&json!({
+                        "node": quiet(&node, QUIET_DROP_WORKFLOW_NODE),
+                        "edges": quiet_all(&edges, QUIET_DROP_WORKFLOW_EDGE),
+                    }));
+                } else {
+                    print_json(&json!({"node": node, "edges": edges}));
+                }
+            }
+        },
+        WorkflowCmd::Edge(cmd) => match cmd {
+            WorkflowEdgeCmd::Create {
+                workflow_pos,
+                from_pos,
+                to_pos,
+                workflow,
+                from,
+                to,
+                branch,
+                quiet,
+            } => {
+                let workflow = workflow.or(workflow_pos).unwrap();
+                let id = resolve_workflow(&store, &workflow)?.id;
+                print_workflow_edge(
+                    &store.create_workflow_edge(
+                        id,
+                        from.or(from_pos).unwrap(),
+                        to.or(to_pos).unwrap(),
+                        branch,
+                    )?,
+                    quiet,
+                );
+            }
+            WorkflowEdgeCmd::Delete { id, quiet } => {
+                print_workflow_edge(&store.delete_workflow_edge(id)?, quiet);
+            }
+        },
     }
     Ok(())
 }
@@ -7745,15 +7558,15 @@ mod tests {
     //!
     //! Each projection is pinned against an explicit expected key list for its
     //! record type. That list is the tripwire: add a field to `Project`,
-    //! `Diagram`, `Frame`, `FrameEdge`, `InboxItem`, `Script` or `Task` and the
+    //! `Workflow`, `WorkflowNode`, `WorkflowEdge`, `WorkflowRun`, `InboxItem`, `Script` or `Task` and the
     //! corresponding test goes red, forcing a decision about whether the new
     //! field belongs in the quiet shape — instead of it silently appearing
     //! (derived projections) or silently vanishing (`compact`'s literal).
 
     use super::*;
     use crate::core::{
-        AnchorSide, ArtifactSummary, Diagram, DiagramType, EdgeMarker, EdgeStyle, Frame, FrameEdge,
-        FrameShape, InboxItem, Project, TaskSummary, Waypoint,
+        ArtifactSummary, InboxItem, Project, TaskSummary, WorkflowRunStatus, WorkflowStep,
+        WorkflowStepStatus,
     };
     use crate::core::{DiffStat, GitCommit, LiveContext, LiveContextKind, LiveWindow};
     use crate::core::{RetroFinding, RetroRun, RetroStatus};
@@ -7846,53 +7659,62 @@ mod tests {
         }
     }
 
-    fn sample_diagram() -> Diagram {
-        Diagram {
+    fn sample_workflow() -> Workflow {
+        Workflow {
             id: 1,
-            project_id: 2,
-            title: "s".into(),
+            project_id: Some(2),
+            name: "w".into(),
             description: Some("d".into()),
-            author: Some("user".into()),
-            diagram_type: DiagramType::Storyboard,
+            trigger: Some(WorkflowTrigger::Voice),
+            trigger_phrase: Some("p".into()),
             created_at: "2026-01-01 00:00:00".into(),
             updated_at: "2026-01-02 00:00:00".into(),
         }
     }
 
-    fn sample_frame() -> Frame {
-        Frame {
+    fn sample_workflow_node() -> WorkflowNode {
+        WorkflowNode {
             id: 1,
-            diagram_id: 2,
-            title: "f".into(),
-            body: Some("b".into()),
+            workflow_id: 2,
+            kind: WorkflowNodeKind::Cli,
+            title: "n".into(),
+            config: json!({"command": "true"}),
             x: 40.0,
             y: 40.0,
-            w: 200.0,
-            h: 120.0,
-            color: Some("#00e5ff".into()),
-            task_id: Some(3),
-            author: Some("user".into()),
-            shape: Some(FrameShape::Process),
             created_at: "2026-01-01 00:00:00".into(),
             updated_at: "2026-01-02 00:00:00".into(),
         }
     }
 
-    fn sample_edge() -> FrameEdge {
-        FrameEdge {
+    fn sample_workflow_edge() -> WorkflowEdge {
+        WorkflowEdge {
             id: 1,
-            diagram_id: 2,
-            from_frame: 3,
-            to_frame: 4,
-            label: Some("l".into()),
-            author: Some("user".into()),
-            created_at: "2026-01-01 00:00:00".into(),
-            waypoints: vec![Waypoint { x: 1.0, y: 2.0 }],
-            from_anchor: Some(AnchorSide::Right),
-            to_anchor: Some(AnchorSide::Left),
-            style: Some(EdgeStyle::Dashed),
-            from_marker: Some(EdgeMarker::Circle),
-            to_marker: Some(EdgeMarker::Arrow),
+            workflow_id: 2,
+            from_node: 3,
+            to_node: 4,
+            branch: Some(WorkflowBranch::True),
+        }
+    }
+
+    fn sample_workflow_run() -> WorkflowRun {
+        WorkflowRun {
+            id: 1,
+            workflow_id: 2,
+            trigger: WorkflowTrigger::Manual,
+            input: "i".into(),
+            status: WorkflowRunStatus::Failed,
+            steps: vec![WorkflowStep {
+                node_id: 3,
+                title: "n".into(),
+                kind: WorkflowNodeKind::Cli,
+                status: WorkflowStepStatus::Failed,
+                output: "o".into(),
+                error: Some("e".into()),
+                duration_ms: 5,
+            }],
+            error: Some("e".into()),
+            started_at: "2026-01-01 00:00:00".into(),
+            finished_at: Some("2026-01-01 00:00:01".into()),
         }
     }
 
@@ -8134,93 +7956,104 @@ mod tests {
     }
 
     #[test]
-    fn diagram_quiet_drops_description() {
-        let full = keys(&sample_diagram());
+    fn workflow_quiet_drops_description() {
+        let full = keys(&sample_workflow());
         assert_eq!(
             sorted_owned(full.clone()),
             sorted(&[
                 "id",
                 "project_id",
-                "title",
+                "name",
                 "description",
-                "author",
-                "diagram_type",
+                "trigger",
+                "trigger_phrase",
                 "created_at",
                 "updated_at",
             ]),
-            "Diagram gained/lost a field: decide whether it belongs in the \
+            "Workflow gained/lost a field: decide whether it belongs in the \
              --quiet shape before updating this list",
         );
         assert_eq!(
-            sorted_owned(value_keys(&quiet(&sample_diagram(), QUIET_DROP_DIAGRAM))),
-            minus(&full, QUIET_DROP_DIAGRAM),
+            sorted_owned(value_keys(&quiet(&sample_workflow(), QUIET_DROP_WORKFLOW))),
+            minus(&full, QUIET_DROP_WORKFLOW),
         );
     }
 
     #[test]
-    fn frame_quiet_drops_body() {
-        let full = keys(&sample_frame());
+    fn workflow_node_quiet_drops_config() {
+        let full = keys(&sample_workflow_node());
         assert_eq!(
             sorted_owned(full.clone()),
             sorted(&[
                 "id",
-                "diagram_id",
+                "workflow_id",
+                "kind",
                 "title",
-                "body",
+                "config",
                 "x",
                 "y",
-                "w",
-                "h",
-                "color",
-                "task_id",
-                "author",
-                "shape",
                 "created_at",
                 "updated_at",
             ]),
-            "Frame gained/lost a field: decide whether it belongs in the \
+            "WorkflowNode gained/lost a field: decide whether it belongs in the \
              --quiet shape before updating this list",
         );
         assert_eq!(
-            sorted_owned(value_keys(&quiet(&sample_frame(), QUIET_DROP_FRAME))),
-            minus(&full, QUIET_DROP_FRAME),
+            sorted_owned(value_keys(&quiet(
+                &sample_workflow_node(),
+                QUIET_DROP_WORKFLOW_NODE
+            ))),
+            minus(&full, QUIET_DROP_WORKFLOW_NODE),
         );
     }
 
     #[test]
-    fn frame_edge_quiet_equals_full() {
-        let full = keys(&sample_edge());
+    fn workflow_edge_quiet_equals_full() {
+        let full = keys(&sample_workflow_edge());
         assert_eq!(
             sorted_owned(full.clone()),
-            sorted(&[
-                "id",
-                "diagram_id",
-                "from_frame",
-                "to_frame",
-                "label",
-                "author",
-                "created_at",
-                "waypoints",
-                "from_anchor",
-                "to_anchor",
-                // Task 854. All three are bounded enum values — the same kind
-                // of field as `from_anchor` — so the decision this test forces
-                // is "keep", and quiet stays a pass-through.
-                "style",
-                "from_marker",
-                "to_marker",
-            ]),
-            "FrameEdge gained/lost a field: it has no unbounded free text \
+            sorted(&["id", "workflow_id", "from_node", "to_node", "branch"]),
+            "WorkflowEdge gained/lost a field: it has no unbounded free text \
              today, so --quiet == full; revisit if that changes",
         );
         assert_eq!(
-            sorted_owned(value_keys(&quiet(&sample_edge(), QUIET_DROP_FRAME_EDGE))),
-            minus(&full, QUIET_DROP_FRAME_EDGE),
+            sorted_owned(value_keys(&quiet(
+                &sample_workflow_edge(),
+                QUIET_DROP_WORKFLOW_EDGE
+            ))),
+            minus(&full, QUIET_DROP_WORKFLOW_EDGE),
         );
-        // Quiet == full, values included, not just keys.
         assert_eq!(
-            quiet(&sample_edge(), QUIET_DROP_FRAME_EDGE),
-            serde_json::to_value(sample_edge()).unwrap(),
+            quiet(&sample_workflow_edge(), QUIET_DROP_WORKFLOW_EDGE),
+            serde_json::to_value(sample_workflow_edge()).unwrap(),
+        );
+    }
+
+    #[test]
+    fn workflow_run_quiet_drops_steps_and_input() {
+        let full = keys(&sample_workflow_run());
+        assert_eq!(
+            sorted_owned(full.clone()),
+            sorted(&[
+                "id",
+                "workflow_id",
+                "trigger",
+                "input",
+                "status",
+                "steps",
+                "error",
+                "started_at",
+                "finished_at",
+            ]),
+            "WorkflowRun gained/lost a field: decide whether it belongs in the \
+             --quiet shape before updating this list",
+        );
+        assert_eq!(
+            sorted_owned(value_keys(&quiet(
+                &sample_workflow_run(),
+                QUIET_DROP_WORKFLOW_RUN
+            ))),
+            minus(&full, QUIET_DROP_WORKFLOW_RUN),
         );
     }
 

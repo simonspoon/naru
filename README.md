@@ -6,7 +6,7 @@
 
 Naru is one binary and one SQLite file. Your agents drive it through a
 JSON-only CLI. You use a web UI, or just talk to it. Both work on the same
-store: projects, tasks and dependencies, diagrams, an inbox, memory, and your
+store: projects, tasks and dependencies, workflows, an inbox, memory, and your
 whole Claude Code setup. Naru can hand work to background agents, watch what
 they spend, and review how it went. It has no cloud service and no account,
 and Naru itself collects no telemetry. The Claude Code agents it starts talk
@@ -77,7 +77,7 @@ Each of these is off by default. You turn them on with a `naru serve` flag.
   type, and the agent works with the ordinary Naru CLI and answers out loud.
   It can move your browser to the page it is talking about and put a
   **whiteboard** in front of you: markdown, HTML, an image, or a snapshot of
-  a diagram. You can draw on the whiteboard, and your drawing reaches the
+  a workflow's graph. You can draw on the whiteboard, and your drawing reaches the
   agent. Long jobs go to delegate agents, so the agent keeps listening while
   they run, and a long call can be handed to a fresh agent midway. On macOS,
   `naru live look` lets the agent see your browser window
@@ -94,13 +94,14 @@ Each of these is off by default. You turn them on with a `naru serve` flag.
   exports to a single `naru-voice` file that you can import on another
   machine ([`docs/config.md`](docs/config.md)).
 
-### Think visually
+### Automate
 
-- **Diagrams** are freeform canvases of frames and edges, of four types:
-  **flowcharts**, **storyboards**, **ERDs** and **brainstorms**, each with its
-  own shapes. They include auto-layout and a change history showing who
-  edited what. Agents build them as JSON, and you drag them around in the
-  browser ([`docs/diagrams.md`](docs/diagrams.md)).
+- **Workflows** are saved graphs of typed steps — a trigger, model prompts,
+  shell commands, stored scripts, branches and outputs — that Naru runs in a
+  fixed, deterministic order: the graph decides what runs, never an agent.
+  Run one by hand, on a schedule, or by asking the live agent for it by name.
+  Each run is recorded step by step
+  ([`docs/workflows.md`](docs/workflows.md)).
 
 ### Remember
 
@@ -252,16 +253,17 @@ echo '{"project":1,"tasks":[
 
 If anything fails, nothing is created.
 
-### A diagram from the CLI
+### A workflow from the CLI
 
 ```bash
-D=$(naru diagram create 1 "Onboarding flow" --author agent-7 | jq .id)
-A=$(naru diagram frame create "$D" "Land on home" --x 40 --y 40 --author agent-7 | jq .id)
-B=$(naru diagram frame create "$D" "Sign up" --x 360 --y 40 --author agent-7 | jq .id)
-naru diagram edge create "$D" "$A" "$B" --label "then" --author agent-7
-naru diagram show "$D"      # {diagram, frames, edges}
-naru diagram events "$D"    # who changed what, when
-naru diagram types          # the shapes each diagram type accepts
+naru workflow create "Shout it"
+T=$(naru workflow node create "Shout it" trigger Start | jq .id)
+C=$(naru workflow node create "Shout it" cli Shout --config '{"command":"tr a-z A-Z"}' | jq .id)
+O=$(naru workflow node create "Shout it" output Keep --config '{"target":"log","log":"shouts"}' | jq .id)
+naru workflow edge create "Shout it" "$T" "$C"
+naru workflow edge create "Shout it" "$C" "$O"
+naru workflow run "Shout it" --input "hello" | jq '{status, out: .steps[1].output}'
+naru workflow log shouts    # the lines output nodes wrote
 ```
 
 ### Nested projects and repos

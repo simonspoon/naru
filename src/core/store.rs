@@ -9,14 +9,14 @@ use super::board;
 use super::files;
 use super::live;
 use super::types::{
-    AnchorSide, ArchiveOutcome, Artifact, Attachment, Diagram, DiagramEvent, DiagramType,
-    DiagramView, DiffStat, EdgeMarker, EdgeStyle, Frame, FrameEdge, FrameShape, GitCommit,
-    InboxItem, InboxKind, LibraryItem, LibraryKind, LibraryScope, LibraryVersion, LiveAction,
-    LiveBoard, LiveBoardKind, LiveBoardSummary, LiveContext, LiveMemoryHit, LiveNotebookEntry,
-    LiveNotice, LiveResult, LiveRole, LiveSession, LiveStatus, LiveSummary, LiveTurn, LiveWindow,
-    Priority, Project, RetroFinding, RetroRun, RetroStatus, Script, ScriptArg, ScriptArgKind,
-    ScriptRunRecord, ScriptRunStatus, Status, Task, TaskEvent, TaskReceipt, Waypoint,
-    is_valid_artifact_content_type, task_name,
+    ArchiveOutcome, Artifact, Attachment, DiffStat, GitCommit, InboxItem, InboxKind, LibraryItem,
+    LibraryKind, LibraryScope, LibraryVersion, LiveAction, LiveBoard, LiveBoardKind,
+    LiveBoardSummary, LiveContext, LiveMemoryHit, LiveNotebookEntry, LiveNotice, LiveResult,
+    LiveRole, LiveSession, LiveStatus, LiveSummary, LiveTurn, LiveWindow, Priority, Project,
+    RetroFinding, RetroRun, RetroStatus, Script, ScriptArg, ScriptArgKind, ScriptRunRecord,
+    ScriptRunStatus, Status, Task, TaskEvent, TaskReceipt, Workflow, WorkflowBranch, WorkflowEdge,
+    WorkflowLogEntry, WorkflowNode, WorkflowNodeKind, WorkflowRun, WorkflowRunStatus, WorkflowStep,
+    WorkflowTrigger, WorkflowView, is_valid_artifact_content_type, task_name,
 };
 
 #[derive(Debug)]
@@ -1273,6 +1273,73 @@ const MIGRATIONS: &[&str] = &[
     // (the baseline's second half). NULL = none. Only `Store` writes either.
     "ALTER TABLE library_items ADD COLUMN files TEXT;
      ALTER TABLE library_items ADD COLUMN synced_files TEXT;",
+    // Task 1607: workflows replace diagrams. The diagram tables go (nothing
+    // is migrated: saved diagrams were stale and unused) and the workflow
+    // tables arrive. `IF EXISTS` so a db opened from a historical fixture
+    // that never had them still migrates. A workflow is a DAG of typed nodes
+    // (`config` is JSON, validated per kind by `core::workflow`); its edges
+    // carry an optional `branch` verdict. Everything cascades from the
+    // workflow except the log, whose lines are kept (`ON DELETE SET NULL`
+    // on both pointers): a log is the output the person reads.
+    "DROP TABLE IF EXISTS frame_edges;
+     DROP TABLE IF EXISTS frames;
+     DROP TABLE IF EXISTS diagram_events;
+     DROP TABLE IF EXISTS diagrams;
+     DROP TABLE IF EXISTS storyboard_events;
+     DROP TABLE IF EXISTS storyboards;
+     CREATE TABLE workflows (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_id  INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+        name        TEXT NOT NULL,
+        description TEXT,
+        created_at  TEXT NOT NULL,
+        updated_at  TEXT NOT NULL
+     );
+     CREATE UNIQUE INDEX idx_workflows_name ON workflows(name COLLATE NOCASE);
+     CREATE INDEX idx_workflows_project ON workflows(project_id);
+     CREATE TABLE workflow_nodes (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        workflow_id INTEGER NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+        kind        TEXT NOT NULL,
+        title       TEXT NOT NULL,
+        config      TEXT NOT NULL DEFAULT '{}',
+        x           REAL NOT NULL DEFAULT 0,
+        y           REAL NOT NULL DEFAULT 0,
+        created_at  TEXT NOT NULL,
+        updated_at  TEXT NOT NULL
+     );
+     CREATE INDEX idx_workflow_nodes_workflow ON workflow_nodes(workflow_id);
+     CREATE TABLE workflow_edges (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        workflow_id INTEGER NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+        from_node   INTEGER NOT NULL REFERENCES workflow_nodes(id) ON DELETE CASCADE,
+        to_node     INTEGER NOT NULL REFERENCES workflow_nodes(id) ON DELETE CASCADE,
+        branch      TEXT
+     );
+     CREATE UNIQUE INDEX idx_workflow_edges_unique
+        ON workflow_edges(from_node, to_node, IFNULL(branch, ''));
+     CREATE INDEX idx_workflow_edges_workflow ON workflow_edges(workflow_id);
+     CREATE TABLE workflow_runs (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        workflow_id INTEGER NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+        trigger     TEXT NOT NULL,
+        input       TEXT NOT NULL DEFAULT '',
+        status      TEXT NOT NULL,
+        steps       TEXT NOT NULL DEFAULT '[]',
+        error       TEXT,
+        started_at  TEXT NOT NULL,
+        finished_at TEXT
+     );
+     CREATE INDEX idx_workflow_runs_workflow ON workflow_runs(workflow_id, id);
+     CREATE TABLE workflow_log (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        log         TEXT NOT NULL,
+        text        TEXT NOT NULL,
+        workflow_id INTEGER REFERENCES workflows(id) ON DELETE SET NULL,
+        run_id      INTEGER REFERENCES workflow_runs(id) ON DELETE SET NULL,
+        created_at  TEXT NOT NULL
+     );
+     CREATE INDEX idx_workflow_log_log ON workflow_log(log, id);",
 ];
 
 /// Selects full task rows including the derived `blocked` flag.
@@ -1425,7 +1492,7 @@ fn hydrate_previous_paths(conn: &Connection, projects: &mut [Project]) -> rusqli
 ///
 /// Prefix for a query that then filters on [`NOT_HIDDEN_PROJECT`]; defined
 /// once and shared by every unscoped site (`list_projects`, `list_tasks`,
-/// `next_task`, `list_diagrams`) so they cannot drift
+/// `next_task`, `list_workflows`) so they cannot drift
 /// apart on what "archived" means. `UNION` (not `UNION ALL`) so a malformed
 /// parent cycle terminates instead of recursing forever — the same guard
 /// `next_subtask` uses on the task tree.
@@ -1439,13 +1506,6 @@ const HIDDEN_PROJECTS_CTE: &str = "WITH RECURSIVE hidden_projects(id) AS ( \
 /// aliased as `p`, which every unscoped query here already does.
 const NOT_HIDDEN_PROJECT: &str = "p.id NOT IN (SELECT id FROM hidden_projects)";
 
-const DIAGRAM_COLUMNS: &str =
-    "id, project_id, title, description, author, diagram_type, created_at, updated_at";
-const FRAME_COLUMNS: &str = "id, diagram_id, title, body, x, y, w, h, color, task_id, author, \
-     shape, created_at, updated_at";
-const EDGE_COLUMNS: &str = "id, diagram_id, from_frame, to_frame, label, author, created_at, \
-     waypoints, from_anchor, to_anchor, style, from_marker, to_marker";
-const DIAGRAM_EVENT_COLUMNS: &str = "id, diagram_id, actor, action, summary, at";
 /// The item's own columns plus the two the origin task contributes: its
 /// description (the `task_name` is derived from it on every read, never stored)
 /// and its project's name. Both arrive through `INBOX_FROM`'s left joins, so
@@ -1529,7 +1589,7 @@ const LIVE_ROUTE_MAX: usize = 200;
 /// the route bound and the same number: a label may be **spoken**, and the
 /// whole context rides in every quiet projection of a session, so a page that
 /// reported a whole file's worth of text would make both worse. Generous but
-/// real — a file path or a diagram title fits with room to spare.
+/// real — a file path or a workflow title fits with room to spare.
 const LIVE_CONTEXT_FIELD_MAX: usize = 200;
 
 /// Largest coordinate or extent a reported window box may carry, in pixels.
@@ -2516,244 +2576,209 @@ fn row_to_attachment(row: &rusqlite::Row<'_>) -> rusqlite::Result<Attachment> {
     })
 }
 
-fn row_to_diagram(row: &rusqlite::Row<'_>) -> rusqlite::Result<Diagram> {
-    let diagram_type: String = row.get(5)?;
-    Ok(Diagram {
+const WORKFLOW_COLUMNS: &str = "w.id, w.project_id, w.name, w.description, \
+     (SELECT json_extract(n.config, '$.mode') FROM workflow_nodes n \
+        WHERE n.workflow_id = w.id AND n.kind = 'trigger' ORDER BY n.id LIMIT 1), \
+     (SELECT json_extract(n.config, '$.phrase') FROM workflow_nodes n \
+        WHERE n.workflow_id = w.id AND n.kind = 'trigger' ORDER BY n.id LIMIT 1), \
+     w.created_at, w.updated_at";
+const WORKFLOW_NODE_COLUMNS: &str =
+    "id, workflow_id, kind, title, config, x, y, created_at, updated_at";
+const WORKFLOW_EDGE_COLUMNS: &str = "id, workflow_id, from_node, to_node, branch";
+const WORKFLOW_RUN_COLUMNS: &str =
+    "id, workflow_id, trigger, input, status, steps, error, started_at, finished_at";
+const WORKFLOW_LOG_COLUMNS: &str = "id, log, text, workflow_id, run_id, created_at";
+
+/// Runs kept per workflow; the newest [`WORKFLOW_RUN_KEEP`] survive each
+/// insert (the `script_runs` rule).
+pub const WORKFLOW_RUN_KEEP: i64 = 50;
+/// Longest workflow, node or log-name text.
+const WORKFLOW_NAME_MAX: usize = 200;
+/// Largest run input, in bytes: it is stored on the run row and handed to
+/// every downstream node.
+pub const WORKFLOW_INPUT_MAX: usize = 256 * 1024;
+/// Largest text one log line may carry.
+const WORKFLOW_LOG_TEXT_MAX: usize = 64 * 1024;
+
+fn conversion_failure(col: usize, e: serde_json::Error) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(col, rusqlite::types::Type::Text, Box::new(e))
+}
+
+fn row_to_workflow(row: &rusqlite::Row<'_>) -> rusqlite::Result<Workflow> {
+    // Parsed leniently: a trigger mode this build does not know reads as no
+    // trigger rather than failing a whole list.
+    let trigger: Option<String> = row.get(4)?;
+    Ok(Workflow {
         id: row.get(0)?,
         project_id: row.get(1)?,
-        title: row.get(2)?,
+        name: row.get(2)?,
         description: row.get(3)?,
-        author: row.get(4)?,
-        diagram_type: DiagramType::parse(&diagram_type).expect("invalid diagram_type in db"),
+        trigger: trigger.as_deref().and_then(WorkflowTrigger::parse),
+        trigger_phrase: row.get(5)?,
         created_at: row.get(6)?,
         updated_at: row.get(7)?,
     })
 }
 
-fn row_to_frame(row: &rusqlite::Row<'_>) -> rusqlite::Result<Frame> {
-    let shape: Option<String> = row.get(11)?;
-    Ok(Frame {
+fn row_to_workflow_node(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowNode> {
+    let kind: String = row.get(2)?;
+    let config: String = row.get(4)?;
+    Ok(WorkflowNode {
         id: row.get(0)?,
-        diagram_id: row.get(1)?,
-        title: row.get(2)?,
-        body: row.get(3)?,
-        x: row.get(4)?,
-        y: row.get(5)?,
-        w: row.get(6)?,
-        h: row.get(7)?,
-        color: row.get(8)?,
-        task_id: row.get(9)?,
-        author: row.get(10)?,
-        shape: shape
-            .as_deref()
-            .map(|s| FrameShape::parse(s).expect("invalid shape in db")),
-        created_at: row.get(12)?,
-        updated_at: row.get(13)?,
+        workflow_id: row.get(1)?,
+        kind: WorkflowNodeKind::parse(&kind).expect("invalid workflow node kind in db"),
+        title: row.get(3)?,
+        config: serde_json::from_str(&config).map_err(|e| conversion_failure(4, e))?,
+        x: row.get(5)?,
+        y: row.get(6)?,
+        created_at: row.get(7)?,
+        updated_at: row.get(8)?,
     })
 }
 
-/// Validates a frame's `shape` against its board's `diagram_type` shape set —
-/// `DiagramType::shapes` plus `allows_generic_frame` for the `None` card, the
-/// same pair `mesa diagram types` prints, so the validator and the discovery
-/// command cannot answer differently.
-fn validate_frame_shape(diagram_type: DiagramType, shape: Option<FrameShape>) -> Result<()> {
-    let ok = match shape {
-        None => diagram_type.allows_generic_frame(),
-        Some(shape) => diagram_type.shapes().contains(&shape),
-    };
-    if ok {
-        Ok(())
-    } else {
-        let shape_str = shape.map(FrameShape::as_str).unwrap_or("none");
-        Err(Error::Validation(format!(
-            "shape '{shape_str}' is not valid for a {} board",
-            diagram_type.as_str()
-        )))
-    }
+fn row_to_workflow_edge(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowEdge> {
+    let branch: Option<String> = row.get(4)?;
+    Ok(WorkflowEdge {
+        id: row.get(0)?,
+        workflow_id: row.get(1)?,
+        from_node: row.get(2)?,
+        to_node: row.get(3)?,
+        branch: branch.as_deref().and_then(WorkflowBranch::parse),
+    })
 }
 
-/// Validates an edge's endpoint markers against its board's `diagram_type`
-/// marker set (`DiagramType::edge_markers`, again the list `mesa diagram
-/// types` prints). The general family draws on any board; the cardinality
-/// family states an ERD relation's multiplicity and is `erd`-only. `None` —
-/// the default rendering — is always valid, as is any `style`: a dashed line
-/// means the same weakening on every board type, so `EdgeStyle` has no
-/// per-type check at all.
-fn validate_edge_markers(
-    diagram_type: DiagramType,
-    from_marker: Option<EdgeMarker>,
-    to_marker: Option<EdgeMarker>,
-) -> Result<()> {
-    for marker in [from_marker, to_marker].into_iter().flatten() {
-        if !diagram_type.edge_markers().contains(&marker) {
-            return Err(Error::Validation(format!(
-                "marker '{}' is not valid for a {} board",
-                marker.as_str(),
-                diagram_type.as_str()
-            )));
-        }
+fn row_to_workflow_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRun> {
+    let trigger: String = row.get(2)?;
+    let status: String = row.get(4)?;
+    let steps: String = row.get(5)?;
+    Ok(WorkflowRun {
+        id: row.get(0)?,
+        workflow_id: row.get(1)?,
+        trigger: WorkflowTrigger::parse(&trigger).expect("invalid workflow run trigger in db"),
+        input: row.get(3)?,
+        status: WorkflowRunStatus::parse(&status).expect("invalid workflow run status in db"),
+        steps: serde_json::from_str(&steps).map_err(|e| conversion_failure(5, e))?,
+        error: row.get(6)?,
+        started_at: row.get(7)?,
+        finished_at: row.get(8)?,
+    })
+}
+
+fn row_to_workflow_log(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowLogEntry> {
+    Ok(WorkflowLogEntry {
+        id: row.get(0)?,
+        log: row.get(1)?,
+        text: row.get(2)?,
+        workflow_id: row.get(3)?,
+        run_id: row.get(4)?,
+        created_at: row.get(5)?,
+    })
+}
+
+/// A workflow's name: required, bounded, and never a plain integer — the CLI
+/// resolves `<id|name>` and tries the integer first, so a numeric name could
+/// never be reached by name.
+fn validate_workflow_name(name: &str) -> Result<String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(Error::Validation(
+            "workflow name is required and may not be empty".into(),
+        ));
+    }
+    if trimmed.chars().count() > WORKFLOW_NAME_MAX {
+        return Err(Error::Validation(format!(
+            "workflow name is at most {WORKFLOW_NAME_MAX} characters"
+        )));
+    }
+    if trimmed.parse::<i64>().is_ok() {
+        return Err(Error::Validation(
+            "workflow name may not be a plain number: `<id|name>` would read it as an id".into(),
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn validate_workflow_node_title(title: &str) -> Result<String> {
+    let trimmed = title.trim();
+    if trimmed.is_empty() {
+        return Err(Error::Validation(
+            "node title is required and may not be empty".into(),
+        ));
+    }
+    if trimmed.chars().count() > WORKFLOW_NAME_MAX {
+        return Err(Error::Validation(format!(
+            "node title is at most {WORKFLOW_NAME_MAX} characters"
+        )));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn validate_workflow_position(x: f64, y: f64) -> Result<()> {
+    if !x.is_finite() || !y.is_finite() {
+        return Err(Error::Validation("a node position must be finite".into()));
     }
     Ok(())
 }
 
-fn row_to_edge(row: &rusqlite::Row<'_>) -> rusqlite::Result<FrameEdge> {
-    let waypoints_json: Option<String> = row.get(7)?;
-    let waypoints = waypoints_json
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .and_then(|s| serde_json::from_str::<Vec<Waypoint>>(s).ok())
-        .unwrap_or_default();
-    let from_anchor: Option<String> = row.get(8)?;
-    let to_anchor: Option<String> = row.get(9)?;
-    let style: Option<String> = row.get(10)?;
-    let from_marker: Option<String> = row.get(11)?;
-    let to_marker: Option<String> = row.get(12)?;
-    Ok(FrameEdge {
-        id: row.get(0)?,
-        diagram_id: row.get(1)?,
-        from_frame: row.get(2)?,
-        to_frame: row.get(3)?,
-        label: row.get(4)?,
-        author: row.get(5)?,
-        created_at: row.get(6)?,
-        waypoints,
-        from_anchor: from_anchor
-            .as_deref()
-            .map(|s| AnchorSide::parse(s).expect("invalid anchor in db")),
-        to_anchor: to_anchor
-            .as_deref()
-            .map(|s| AnchorSide::parse(s).expect("invalid anchor in db")),
-        style: style
-            .as_deref()
-            .map(|s| EdgeStyle::parse(s).expect("invalid edge style in db")),
-        from_marker: from_marker
-            .as_deref()
-            .map(|s| EdgeMarker::parse(s).expect("invalid edge marker in db")),
-        to_marker: to_marker
-            .as_deref()
-            .map(|s| EdgeMarker::parse(s).expect("invalid edge marker in db")),
-    })
-}
-
-fn row_to_diagram_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<DiagramEvent> {
-    Ok(DiagramEvent {
-        id: row.get(0)?,
-        diagram_id: row.get(1)?,
-        actor: row.get(2)?,
-        action: row.get(3)?,
-        summary: row.get(4)?,
-        at: row.get(5)?,
-    })
-}
-
-/// Appends one change-history row for a diagram. Operates on any
-/// `Connection` (including an open transaction) so a mutation and its event
-/// commit atomically.
-fn insert_diagram_event(
-    conn: &Connection,
-    diagram_id: i64,
-    actor: Option<&str>,
-    action: &str,
-    summary: &str,
-) -> rusqlite::Result<()> {
-    conn.execute(
-        "INSERT INTO diagram_events (diagram_id, actor, action, summary, at) \
-         VALUES (?1, ?2, ?3, ?4, datetime('now'))",
-        (diagram_id, actor, action, summary),
-    )?;
-    Ok(())
-}
-
-/// Describes an anchor-lock change to `edge` relative to `current` for the
-/// `edge_anchor_changed` diagram event. Only called once at least one of
-/// `from_anchor`/`to_anchor` differs between the two.
-fn anchor_summary(edge: &FrameEdge, current: &FrameEdge) -> String {
-    let from_changed = edge.from_anchor != current.from_anchor;
-    let to_changed = edge.to_anchor != current.to_anchor;
-    let arrow = format!("edge #{} \u{2192} #{}", edge.from_frame, edge.to_frame);
-    if from_changed && to_changed {
-        return format!(
-            "changed anchors of {arrow} (from: {}, to: {})",
-            anchor_state_str(edge.from_anchor),
-            anchor_state_str(edge.to_anchor)
-        );
+fn validate_workflow_log_name(log: &str) -> Result<String> {
+    let trimmed = log.trim();
+    if trimmed.is_empty() || trimmed.chars().count() > 64 {
+        return Err(Error::Validation("a log name is 1 to 64 characters".into()));
     }
-    let (end, old, new) = if from_changed {
-        ("from", current.from_anchor, edge.from_anchor)
-    } else {
-        ("to", current.to_anchor, edge.to_anchor)
-    };
-    match (old, new) {
-        (None, Some(side)) => format!("locked {end}-anchor of {arrow} to {}", side.as_str()),
-        (Some(_), None) => format!("unlocked {end}-anchor of {arrow}"),
-        (Some(old_side), Some(new_side)) => format!(
-            "changed {end}-anchor of {arrow} from {} to {}",
-            old_side.as_str(),
-            new_side.as_str()
-        ),
-        (None, None) => unreachable!("anchor_summary called with no change"),
-    }
+    Ok(trimmed.to_string())
 }
 
-fn anchor_state_str(side: Option<AnchorSide>) -> &'static str {
-    match side {
-        Some(s) => s.as_str(),
-        None => "unlocked",
-    }
-}
-
-/// Describes a style/marker change to `edge` relative to `current` for the
-/// `edge_restyled` diagram event (mesa task 854). Only called once at least
-/// one of the three differs, and names only the parts that actually changed —
-/// `default` for a cleared one, mirroring `anchor_summary`'s `unlocked`.
-fn restyle_summary(edge: &FrameEdge, current: &FrameEdge) -> String {
-    let mut changed: Vec<String> = Vec::new();
-    if edge.style != current.style {
-        changed.push(format!(
-            "style: {}",
-            edge.style.map(EdgeStyle::as_str).unwrap_or("default")
-        ));
-    }
-    if edge.from_marker != current.from_marker {
-        changed.push(format!(
-            "from-marker: {}",
-            edge.from_marker
-                .map(EdgeMarker::as_str)
-                .unwrap_or("default")
-        ));
-    }
-    if edge.to_marker != current.to_marker {
-        changed.push(format!(
-            "to-marker: {}",
-            edge.to_marker.map(EdgeMarker::as_str).unwrap_or("default")
-        ));
-    }
-    format!(
-        "restyled edge #{} \u{2192} #{} ({})",
-        edge.from_frame,
-        edge.to_frame,
-        changed.join(", ")
-    )
-}
-
-/// Reads a diagram's frames, ordered by id. Operates on any `Connection`
-/// (including an open transaction) so a delete can echo an atomic snapshot.
-fn read_frames(conn: &Connection, diagram_id: i64) -> Result<Vec<Frame>> {
-    let mut stmt = conn.prepare(&format!(
-        "SELECT {FRAME_COLUMNS} FROM frames WHERE diagram_id = ?1 ORDER BY id"
-    ))?;
-    let rows = stmt.query_map([diagram_id], row_to_frame)?;
-    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-}
-
-/// Reads a diagram's edges, ordered by id. Operates on any `Connection`
+/// Reads a workflow's nodes, ordered by id. Operates on any `Connection`
 /// (including an open transaction).
-fn read_edges(conn: &Connection, diagram_id: i64) -> Result<Vec<FrameEdge>> {
+fn read_workflow_nodes(conn: &Connection, workflow_id: i64) -> Result<Vec<WorkflowNode>> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT {EDGE_COLUMNS} FROM frame_edges WHERE diagram_id = ?1 ORDER BY id"
+        "SELECT {WORKFLOW_NODE_COLUMNS} FROM workflow_nodes WHERE workflow_id = ?1 ORDER BY id"
     ))?;
-    let rows = stmt.query_map([diagram_id], row_to_edge)?;
+    let rows = stmt.query_map([workflow_id], row_to_workflow_node)?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn read_workflow_edges(conn: &Connection, workflow_id: i64) -> Result<Vec<WorkflowEdge>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {WORKFLOW_EDGE_COLUMNS} FROM workflow_edges WHERE workflow_id = ?1 ORDER BY id"
+    ))?;
+    let rows = stmt.query_map([workflow_id], row_to_workflow_edge)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// Fields to change on a workflow; `None` means leave unchanged.
+#[derive(Debug, Default, Clone)]
+pub struct WorkflowPatch {
+    /// `Some(None)` unbinds the workflow (makes it global).
+    pub project_id: Option<Option<i64>>,
+    pub name: Option<String>,
+    /// `Some(None)` clears the description.
+    pub description: Option<Option<String>>,
+}
+
+/// A new node. `config` absent means the kind's default (`{"mode":
+/// "manual"}` for a trigger, `{}` for the rest, which every other kind
+/// refuses for its required keys); an absent position places the node in a
+/// row to the right of the nodes already there, so scripted seeding does not
+/// stack every node at one point.
+#[derive(Debug, Clone)]
+pub struct WorkflowNodeNew {
+    pub kind: WorkflowNodeKind,
+    pub title: String,
+    pub config: Option<serde_json::Value>,
+    pub x: Option<f64>,
+    pub y: Option<f64>,
+}
+
+/// Fields to change on a node; `None` means leave unchanged. A node's kind
+/// and workflow are fixed at creation — re-kinding would move its config
+/// into another schema.
+#[derive(Debug, Default, Clone)]
+pub struct WorkflowNodePatch {
+    pub title: Option<String>,
+    pub config: Option<serde_json::Value>,
+    pub x: Option<f64>,
+    pub y: Option<f64>,
 }
 
 /// Fields to change on a project; `None` means leave unchanged.
@@ -2836,16 +2861,6 @@ pub struct ReceiptPatch {
     /// applying this patch sets `edited = 1` (spec D6) — a hand-corrected
     /// receipt must never silently pose as purely machine-generated.
     pub note: Option<Option<String>>,
-}
-
-/// Fields to change on a diagram; `None` means leave unchanged. A
-/// diagram's project and `author` (its creator) are immutable, so there is
-/// deliberately no field for either.
-#[derive(Debug, Default, Clone)]
-pub struct DiagramPatch {
-    pub title: Option<String>,
-    /// `Some(None)` clears the description.
-    pub description: Option<Option<String>>,
 }
 
 /// Fields to change on a script; `None` means leave unchanged (task 785).
@@ -2934,93 +2949,6 @@ impl LibraryBuiltinAction {
             _ => None,
         }
     }
-}
-
-/// A new frame to add to a diagram. Coordinates and size are caller-supplied
-/// (the CLI/API apply sensible defaults); `task_id`, if given, must reference a
-/// task in the diagram's project. `shape`, if given, must be a member of
-/// the diagram's `diagram_type` shape set (validated by
-/// `Store::create_frame`) — settable only at creation, no field on
-/// `FramePatch`.
-#[derive(Debug, Clone)]
-pub struct FrameNew {
-    pub title: String,
-    pub body: Option<String>,
-    pub x: f64,
-    pub y: f64,
-    pub w: f64,
-    pub h: f64,
-    pub color: Option<String>,
-    pub task_id: Option<i64>,
-    pub author: Option<String>,
-    pub shape: Option<FrameShape>,
-}
-
-/// Fields to change on a frame; `None` means leave unchanged. A frame's
-/// diagram and `author` are immutable.
-#[derive(Debug, Default, Clone)]
-pub struct FramePatch {
-    pub title: Option<String>,
-    /// `Some(None)` clears the body.
-    pub body: Option<Option<String>>,
-    pub x: Option<f64>,
-    pub y: Option<f64>,
-    pub w: Option<f64>,
-    pub h: Option<f64>,
-    /// `Some(None)` clears the colour.
-    pub color: Option<Option<String>>,
-    /// `Some(None)` unlinks the frame from its task.
-    pub task_id: Option<Option<i64>>,
-}
-
-/// A new edge to add to a diagram. The endpoints must be two distinct frames
-/// of that board; `from_marker`/`to_marker`, if given, must be members of the
-/// board's `diagram_type` marker set (validated by `Store::create_edge`).
-/// Mirrors `FrameNew` — a struct rather than a longer argument list, since an
-/// edge now carries as many optional properties as a frame does.
-#[derive(Debug, Default, Clone)]
-pub struct EdgeNew {
-    pub from_frame: i64,
-    pub to_frame: i64,
-    pub label: Option<String>,
-    pub author: Option<String>,
-    /// `None` is today's rendering (solid).
-    pub style: Option<EdgeStyle>,
-    /// `None` is today's rendering (nothing at the start).
-    pub from_marker: Option<EdgeMarker>,
-    /// `None` is today's rendering (a closed arrowhead).
-    pub to_marker: Option<EdgeMarker>,
-}
-
-/// Fields to change on an edge; `None` means leave unchanged. Endpoints and
-/// author are fixed at creation; everything else — label, waypoints, anchor
-/// locks, and the task 854 style/markers — is mutable. Style and markers are
-/// deliberately *not* immutable the way `Frame::shape`/`Diagram::diagram_type`
-/// are: re-shaping a frame would move it into another type system, whereas
-/// restyling a connector only changes how the same relation is drawn, and
-/// `validate_edge_markers` re-runs on every patch so a marker can never land
-/// on a board type that rejects it.
-#[derive(Debug, Default, Clone)]
-pub struct EdgePatch {
-    /// `Some(None)` clears the label.
-    pub label: Option<Option<String>>,
-    /// `Some(vec)` replaces the full ordered waypoint list (including
-    /// `Some(vec![])` to clear back to a straight auto-routed edge).
-    /// `None` leaves the stored waypoints untouched.
-    pub waypoints: Option<Vec<Waypoint>>,
-    /// `Some(None)` unlocks (returns to floating); `Some(Some(side))` locks
-    /// to that side; `None` leaves the current lock state untouched.
-    pub from_anchor: Option<Option<AnchorSide>>,
-    /// Same three-state contract as `from_anchor`, independent per endpoint.
-    pub to_anchor: Option<Option<AnchorSide>>,
-    /// `Some(None)` clears back to the default (solid); `Some(Some(style))`
-    /// sets it; `None` leaves it untouched — `from_anchor`'s three-state
-    /// contract exactly.
-    pub style: Option<Option<EdgeStyle>>,
-    /// Same three-state contract, for the `from_frame` end's decoration.
-    pub from_marker: Option<Option<EdgeMarker>>,
-    /// Same three-state contract, for the `to_frame` end's decoration.
-    pub to_marker: Option<Option<EdgeMarker>>,
 }
 
 /// Result of `next_task`: either the single actionable task, or — when none is
@@ -4760,602 +4688,547 @@ impl Store {
         Ok(attachment)
     }
 
-    // ---- diagrams ----
+    // ---- workflows (mesa task 1607) ----
 
-    /// Creates a diagram in an existing project. The project is fixed at
-    /// creation (immutable thereafter), mirroring tasks. `diagram_type`
-    /// defaults to `DiagramType::Storyboard` when omitted, matching the
-    /// column default — immutable after creation (no field on
-    /// `DiagramPatch`).
-    pub fn create_diagram(
+    /// Creates a workflow. The name is required and unique across **all**
+    /// workflows (case-insensitively), because the CLI and the voice agent
+    /// run one by name; `project_id`, when given, must exist.
+    pub fn create_workflow(
         &mut self,
-        project_id: i64,
-        title: &str,
+        project_id: Option<i64>,
+        name: &str,
         description: Option<&str>,
-        author: Option<&str>,
-        diagram_type: Option<DiagramType>,
-    ) -> Result<Diagram> {
-        let project_exists: bool = self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM projects WHERE id = ?1)",
-            [project_id],
-            |r| r.get(0),
+    ) -> Result<Workflow> {
+        let name = validate_workflow_name(name)?;
+        self.ensure_script_project(project_id)?;
+        self.ensure_workflow_name_free(&name, None)?;
+        self.conn.execute(
+            "INSERT INTO workflows (project_id, name, description, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, datetime('now'), datetime('now'))",
+            (project_id, &name, description),
         )?;
-        if !project_exists {
-            return Err(Error::Validation(format!("project {project_id} not found")));
-        }
-        let diagram_type = diagram_type.unwrap_or(DiagramType::Storyboard);
-        let id = {
-            let tx = self.conn.transaction()?;
-            tx.execute(
-                "INSERT INTO diagrams (project_id, title, description, author, diagram_type, created_at, updated_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'), datetime('now'))",
-                (project_id, title, description, author, diagram_type.as_str()),
-            )?;
-            let id = tx.last_insert_rowid();
-            insert_diagram_event(
-                &tx,
-                id,
-                author,
-                "diagram_created",
-                &format!("created diagram '{title}'"),
-            )?;
-            tx.commit()?;
-            id
-        };
-        self.get_diagram(id)
+        self.get_workflow(self.conn.last_insert_rowid())
     }
 
-    pub fn get_diagram(&self, id: i64) -> Result<Diagram> {
+    pub fn get_workflow(&self, id: i64) -> Result<Workflow> {
         self.conn
             .query_row(
-                &format!("SELECT {DIAGRAM_COLUMNS} FROM diagrams WHERE id = ?1"),
+                &format!("SELECT {WORKFLOW_COLUMNS} FROM workflows w WHERE w.id = ?1"),
                 [id],
-                row_to_diagram,
+                row_to_workflow,
             )
             .map_err(|e| match e {
                 rusqlite::Error::QueryReturnedNoRows => {
-                    Error::NotFound(format!("diagram {id} not found"))
+                    Error::NotFound(format!("workflow {id} not found"))
                 }
                 e => Error::Db(e),
             })
     }
 
-    /// Lists diagrams, newest activity is not implied — ordered by id.
-    /// Scoped to `project` if given (archived-agnostic); when `None`, excludes
-    /// diagrams whose project is archived. Frames and edges are omitted
-    /// (the compact list shape); use `get_diagram_view` for a board's full
-    /// contents.
-    pub fn list_diagrams(&self, project: Option<i64>) -> Result<Vec<Diagram>> {
-        // DIAGRAM_COLUMNS is unqualified; under the join both `id` and
-        // `description` collide with `projects` columns, so this query
-        // aliases the table and qualifies every column explicitly instead of
-        // reusing the shared constant.
+    /// Case-insensitive exact match — how `naru workflow <id-or-name>`
+    /// resolves a name. The `conflict` arm cannot fire while the unique index
+    /// holds; it is kept so a db that somehow carries duplicates says so.
+    pub fn find_workflow_by_name(&self, name: &str) -> Result<Workflow> {
         let mut stmt = self.conn.prepare(&format!(
-            "{HIDDEN_PROJECTS_CTE}SELECT s.id, s.project_id, s.title, s.description, s.author, \
-             s.diagram_type, s.created_at, s.updated_at \
-             FROM diagrams s JOIN projects p ON p.id = s.project_id \
-             WHERE (?1 IS NULL OR s.project_id = ?1) \
-             AND (?1 IS NOT NULL OR {NOT_HIDDEN_PROJECT}) \
-             ORDER BY s.id"
+            "SELECT {WORKFLOW_COLUMNS} FROM workflows w \
+             WHERE w.name = ?1 COLLATE NOCASE ORDER BY w.id"
         ))?;
-        let rows = stmt.query_map([project], row_to_diagram)?;
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        let matches = stmt
+            .query_map([name], row_to_workflow)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        match matches.len() {
+            0 => Err(Error::NotFound(format!(
+                "no workflow named {name:?}; pass a workflow id or an existing name \
+                 (see `naru workflow list`)"
+            ))),
+            1 => Ok(matches.into_iter().next().unwrap()),
+            _ => Err(Error::Conflict(format!(
+                "{} workflows are named {name:?} (ids {}); use the id",
+                matches.len(),
+                matches
+                    .iter()
+                    .map(|w| w.id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))),
+        }
     }
 
-    /// Returns a board's full contents: the diagram plus its frames and
-    /// edges (each ordered by id). `NotFound` if the board is absent.
-    pub fn get_diagram_view(&self, id: i64) -> Result<DiagramView> {
-        let diagram = self.get_diagram(id)?;
-        let frames = read_frames(&self.conn, id)?;
-        let edges = read_edges(&self.conn, id)?;
-        Ok(DiagramView {
-            diagram,
-            frames,
-            edges,
-        })
-    }
-
-    pub fn update_diagram(
-        &mut self,
-        id: i64,
-        patch: &DiagramPatch,
-        actor: Option<&str>,
-    ) -> Result<Diagram> {
-        let current = self.get_diagram(id)?;
-        let mut sb = current.clone();
-        if let Some(title) = &patch.title {
-            sb.title = title.clone();
-        }
-        if let Some(description) = &patch.description {
-            sb.description = description.clone();
-        }
-        // No-op patch: change nothing and log nothing, so the history records
-        // only real edits (and the CLI and API agree on the outcome).
-        if sb == current {
-            return Ok(current);
-        }
-        let tx = self.conn.transaction()?;
-        tx.execute(
-            "UPDATE diagrams SET title = ?1, description = ?2, updated_at = datetime('now') \
-             WHERE id = ?3",
-            (&sb.title, &sb.description, id),
-        )?;
-        insert_diagram_event(&tx, id, actor, "diagram_edited", "edited board details")?;
-        tx.commit()?;
-        self.get_diagram(id)
-    }
-
-    /// Deletes a diagram and all its frames, edges, and history (cascade).
-    /// Returns the full destroyed contents so the transcript stays a recoverable
-    /// record. The echo read and the delete run in one transaction, so the
-    /// echoed contents exactly match what was destroyed even under a concurrent
-    /// writer. No change-history row is written: the board's history dies with
-    /// it, and the delete echo is the recoverable record.
-    pub fn delete_diagram(&mut self, id: i64) -> Result<DiagramView> {
-        let tx = self.conn.transaction()?;
-        let diagram = tx
-            .query_row(
-                &format!("SELECT {DIAGRAM_COLUMNS} FROM diagrams WHERE id = ?1"),
-                [id],
-                row_to_diagram,
-            )
-            .map_err(|e| match e {
-                rusqlite::Error::QueryReturnedNoRows => {
-                    Error::NotFound(format!("diagram {id} not found"))
-                }
-                e => Error::Db(e),
-            })?;
-        let frames = read_frames(&tx, id)?;
-        let edges = read_edges(&tx, id)?;
-        tx.execute("DELETE FROM diagrams WHERE id = ?1", [id])?;
-        tx.commit()?;
-        Ok(DiagramView {
-            diagram,
-            frames,
-            edges,
-        })
-    }
-
-    /// Lists a diagram's change history, oldest first. `NotFound` if the
-    /// board is absent.
-    pub fn list_diagram_events(&self, diagram_id: i64) -> Result<Vec<DiagramEvent>> {
-        self.get_diagram(diagram_id)?;
-        let mut stmt = self.conn.prepare(&format!(
-            "SELECT {DIAGRAM_EVENT_COLUMNS} FROM diagram_events \
-             WHERE diagram_id = ?1 ORDER BY id"
-        ))?;
-        let rows = stmt.query_map([diagram_id], row_to_diagram_event)?;
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-    }
-
-    // ---- frames ----
-
-    /// Adds a frame to an existing diagram. An unknown diagram is a
-    /// validation error (the id is a request parameter, like a task's project).
-    /// A `task_id`, if given, must reference a task in the board's project.
-    /// `new.shape`, if given, must be a member of the board's `diagram_type`
-    /// shape set — a `storyboard` board takes no shape, a `flowchart` board
-    /// takes `process`/`decision`/`start_end`, an `erd` board takes only
-    /// `entity`, a `brainstorm` board takes `central`/`idea`; a mismatch is a
-    /// validation error.
-    pub fn create_frame(&mut self, diagram_id: i64, new: &FrameNew) -> Result<Frame> {
-        let sb = match self.get_diagram(diagram_id) {
-            Ok(sb) => sb,
-            Err(Error::NotFound(_)) => {
-                return Err(Error::Validation(format!("diagram {diagram_id} not found")));
-            }
-            Err(e) => return Err(e),
-        };
-        let project_id = sb.project_id;
-        if let Some(task_id) = new.task_id {
-            self.check_frame_task(task_id, project_id)?;
-        }
-        validate_frame_shape(sb.diagram_type, new.shape)?;
-        let id = {
-            let tx = self.conn.transaction()?;
-            tx.execute(
-                "INSERT INTO frames \
-                 (diagram_id, title, body, x, y, w, h, color, task_id, author, shape, created_at, updated_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, datetime('now'), datetime('now'))",
-                rusqlite::params![
-                    diagram_id,
-                    new.title,
-                    new.body,
-                    new.x,
-                    new.y,
-                    new.w,
-                    new.h,
-                    new.color,
-                    new.task_id,
-                    new.author,
-                    new.shape.map(FrameShape::as_str),
-                ],
-            )?;
-            let id = tx.last_insert_rowid();
-            insert_diagram_event(
-                &tx,
-                diagram_id,
-                new.author.as_deref(),
-                "frame_added",
-                // The canvas creates frames untitled so the user types straight
-                // into a focused, empty title field (mesa task 448), so the
-                // common case here is an empty title — spell that out rather
-                // than logging a bare `added frame '' (#N)`.
-                &if new.title.trim().is_empty() {
-                    format!("added untitled frame (#{id})")
-                } else {
-                    format!("added frame '{}' (#{id})", new.title)
-                },
-            )?;
-            tx.commit()?;
-            id
-        };
-        self.get_frame(id)
-    }
-
-    pub fn get_frame(&self, id: i64) -> Result<Frame> {
-        self.conn
-            .query_row(
-                &format!("SELECT {FRAME_COLUMNS} FROM frames WHERE id = ?1"),
-                [id],
-                row_to_frame,
-            )
-            .map_err(|e| match e {
-                rusqlite::Error::QueryReturnedNoRows => {
-                    Error::NotFound(format!("frame {id} not found"))
-                }
-                e => Error::Db(e),
-            })
-    }
-
-    pub fn update_frame(
-        &mut self,
-        id: i64,
-        patch: &FramePatch,
-        actor: Option<&str>,
-    ) -> Result<Frame> {
-        let current = self.get_frame(id)?;
-        let mut f = current.clone();
-        if let Some(title) = &patch.title {
-            f.title = title.clone();
-        }
-        if let Some(body) = &patch.body {
-            f.body = body.clone();
-        }
-        if let Some(x) = patch.x {
-            f.x = x;
-        }
-        if let Some(y) = patch.y {
-            f.y = y;
-        }
-        if let Some(w) = patch.w {
-            f.w = w;
-        }
-        if let Some(h) = patch.h {
-            f.h = h;
-        }
-        if let Some(color) = &patch.color {
-            f.color = color.clone();
-        }
-        if let Some(task_id) = patch.task_id {
-            if let Some(tid) = task_id {
-                let sb = self.get_diagram(f.diagram_id)?;
-                self.check_frame_task(tid, sb.project_id)?;
-            }
-            f.task_id = task_id;
-        }
-        // No-op patch (every field re-set to its current value): change nothing
-        // and log nothing, so the history records only real edits.
-        if f == current {
-            return Ok(current);
-        }
-        // A change touching only geometry is a "move"; anything else is an edit.
-        let only_geometry = patch.title.is_none()
-            && patch.body.is_none()
-            && patch.color.is_none()
-            && patch.task_id.is_none()
-            && (patch.x.is_some() || patch.y.is_some() || patch.w.is_some() || patch.h.is_some());
-        let (action, summary) = if only_geometry {
-            ("frame_moved", format!("moved frame '{}' (#{id})", f.title))
-        } else {
-            (
-                "frame_edited",
-                format!("edited frame '{}' (#{id})", f.title),
-            )
-        };
-        let tx = self.conn.transaction()?;
-        tx.execute(
-            "UPDATE frames SET title = ?1, body = ?2, x = ?3, y = ?4, w = ?5, h = ?6, \
-             color = ?7, task_id = ?8, updated_at = datetime('now') WHERE id = ?9",
-            rusqlite::params![f.title, f.body, f.x, f.y, f.w, f.h, f.color, f.task_id, id,],
-        )?;
-        insert_diagram_event(&tx, f.diagram_id, actor, action, &summary)?;
-        tx.commit()?;
-        self.get_frame(id)
-    }
-
-    /// Deletes a frame and the edges touching it (cascade). Returns the frame
-    /// and the destroyed edges so the transcript is a recoverable record.
-    pub fn delete_frame(
-        &mut self,
-        id: i64,
-        actor: Option<&str>,
-    ) -> Result<(Frame, Vec<FrameEdge>)> {
-        let frame = self.get_frame(id)?;
-        let tx = self.conn.transaction()?;
-        // Snapshot the touching edges and delete the frame in one transaction,
-        // so the echo exactly matches the edges the cascade destroys.
-        let edges = {
-            let mut stmt = tx.prepare(&format!(
-                "SELECT {EDGE_COLUMNS} FROM frame_edges \
-                 WHERE from_frame = ?1 OR to_frame = ?1 ORDER BY id"
+    /// Lists workflows by name. Scoped to a project it returns that
+    /// project's; unscoped it returns every workflow except those of an
+    /// archived project (or one under an archived ancestor) — the same
+    /// derived-visibility rule every unscoped read follows. A global workflow
+    /// (no project) is always visible.
+    pub fn list_workflows(&self, project: Option<i64>) -> Result<Vec<Workflow>> {
+        if let Some(project) = project {
+            let mut stmt = self.conn.prepare(&format!(
+                "SELECT {WORKFLOW_COLUMNS} FROM workflows w WHERE w.project_id = ?1 \
+                 ORDER BY w.name COLLATE NOCASE, w.id"
             ))?;
-            let rows = stmt.query_map([id], row_to_edge)?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()?
-        };
-        tx.execute("DELETE FROM frames WHERE id = ?1", [id])?;
-        insert_diagram_event(
-            &tx,
-            frame.diagram_id,
-            actor,
-            "frame_removed",
-            &format!("removed frame '{}' (#{id})", frame.title),
-        )?;
-        tx.commit()?;
-        Ok((frame, edges))
-    }
-
-    /// Validates that `task_id` exists and belongs to `project_id` (a frame may
-    /// only link a task in its board's project), mirroring `check_parent`.
-    fn check_frame_task(&self, task_id: i64, project_id: i64) -> Result<()> {
-        let task_project: Option<i64> = self
-            .conn
-            .query_row(
-                "SELECT project_id FROM tasks WHERE id = ?1",
-                [task_id],
-                |r| r.get(0),
-            )
-            .map(Some)
-            .or_else(|e| match e {
-                rusqlite::Error::QueryReturnedNoRows => Ok(None),
-                e => Err(Error::Db(e)),
-            })?;
-        let Some(task_project) = task_project else {
-            return Err(Error::Validation(format!("task {task_id} not found")));
-        };
-        if task_project != project_id {
-            return Err(Error::Validation(format!(
-                "task {task_id} belongs to project {task_project}, not the diagram's \
-                 project {project_id}: a frame may only link a task in its own project"
-            )));
+            let rows = stmt.query_map([project], row_to_workflow)?;
+            return Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?);
         }
-        Ok(())
+        let mut stmt = self.conn.prepare(&format!(
+            "{HIDDEN_PROJECTS_CTE}SELECT {WORKFLOW_COLUMNS} FROM workflows w \
+             WHERE w.project_id IS NULL OR w.project_id NOT IN (SELECT id FROM hidden_projects) \
+             ORDER BY w.name COLLATE NOCASE, w.id"
+        ))?;
+        let rows = stmt.query_map([], row_to_workflow)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    // ---- edges ----
+    pub fn get_workflow_view(&self, id: i64) -> Result<WorkflowView> {
+        let workflow = self.get_workflow(id)?;
+        Ok(WorkflowView {
+            nodes: read_workflow_nodes(&self.conn, id)?,
+            edges: read_workflow_edges(&self.conn, id)?,
+            workflow,
+        })
+    }
 
-    /// Connects two frames of the same diagram with a directed edge. Rejects
-    /// an unknown board, a self-edge, or an endpoint that is not a frame of this
-    /// board — all validation errors. Cycles are allowed. `new.from_marker`/
-    /// `new.to_marker`, if given, must be members of the board's
-    /// `diagram_type` marker set (the cardinality family is `erd`-only); a
-    /// mismatch is a validation error. `new.style` needs no check — every
-    /// style is valid on every board type.
-    pub fn create_edge(&mut self, diagram_id: i64, new: &EdgeNew) -> Result<FrameEdge> {
-        // The board's own type, read by the existence check itself rather than
-        // a second query: the marker rule needs it.
-        let diagram_type: Option<String> = self
+    pub fn update_workflow(&mut self, id: i64, patch: WorkflowPatch) -> Result<Workflow> {
+        let current = self.get_workflow(id)?;
+        let mut project_id = current.project_id;
+        let mut name = current.name.clone();
+        let mut description = current.description.clone();
+        if let Some(p) = patch.project_id {
+            self.ensure_script_project(p)?;
+            project_id = p;
+        }
+        if let Some(n) = &patch.name {
+            name = validate_workflow_name(n)?;
+            self.ensure_workflow_name_free(&name, Some(id))?;
+        }
+        if let Some(d) = patch.description {
+            description = d;
+        }
+        self.conn.execute(
+            "UPDATE workflows SET project_id = ?1, name = ?2, description = ?3, \
+             updated_at = datetime('now') WHERE id = ?4",
+            (project_id, &name, &description, id),
+        )?;
+        self.get_workflow(id)
+    }
+
+    /// Deletes a workflow with its nodes, edges and runs; echoes the whole
+    /// destroyed graph (the recovery transcript — deletes carry no prompt).
+    /// Its log lines stay, unattributed.
+    pub fn delete_workflow(&mut self, id: i64) -> Result<WorkflowView> {
+        let view = self.get_workflow_view(id)?;
+        self.conn
+            .execute("DELETE FROM workflows WHERE id = ?1", [id])?;
+        Ok(view)
+    }
+
+    fn ensure_workflow_name_free(&self, name: &str, except: Option<i64>) -> Result<()> {
+        let clash: Option<i64> = self
             .conn
             .query_row(
-                "SELECT diagram_type FROM diagrams WHERE id = ?1",
-                [diagram_id],
+                "SELECT id FROM workflows WHERE name = ?1 COLLATE NOCASE AND id IS NOT ?2 LIMIT 1",
+                (name, except),
                 |r| r.get(0),
             )
             .optional()?;
-        let Some(diagram_type) = diagram_type else {
-            return Err(Error::Validation(format!("diagram {diagram_id} not found")));
-        };
-        let diagram_type = DiagramType::parse(&diagram_type).expect("invalid diagram type in db");
-        let (from_frame, to_frame) = (new.from_frame, new.to_frame);
-        if from_frame == to_frame {
-            return Err(Error::Validation(format!(
-                "frame {from_frame} cannot connect to itself"
+        if let Some(other) = clash {
+            return Err(Error::Conflict(format!(
+                "workflow {other} is already named {name:?}; workflow names are unique"
             )));
         }
-        self.check_frame_in_diagram(from_frame, diagram_id, "from")?;
-        self.check_frame_in_diagram(to_frame, diagram_id, "to")?;
-        validate_edge_markers(diagram_type, new.from_marker, new.to_marker)?;
-        let summary = match new.label.as_deref() {
-            Some(l) if !l.is_empty() => {
-                format!("connected #{from_frame} \u{2192} #{to_frame} ({l})")
-            }
-            _ => format!("connected #{from_frame} \u{2192} #{to_frame}"),
-        };
-        let id = {
-            let tx = self.conn.transaction()?;
-            tx.execute(
-                "INSERT INTO frame_edges \
-                 (diagram_id, from_frame, to_frame, label, author, style, from_marker, to_marker, created_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, datetime('now'))",
-                rusqlite::params![
-                    diagram_id,
-                    from_frame,
-                    to_frame,
-                    new.label,
-                    new.author,
-                    new.style.map(EdgeStyle::as_str),
-                    new.from_marker.map(EdgeMarker::as_str),
-                    new.to_marker.map(EdgeMarker::as_str),
-                ],
-            )?;
-            let id = tx.last_insert_rowid();
-            insert_diagram_event(
-                &tx,
-                diagram_id,
-                new.author.as_deref(),
-                "edge_added",
-                &summary,
-            )?;
-            tx.commit()?;
-            id
-        };
-        self.get_edge(id)
+        Ok(())
     }
 
-    pub fn get_edge(&self, id: i64) -> Result<FrameEdge> {
+    /// Adds a node. The config is validated for the kind
+    /// (`core::workflow::validate_config`) and stored normalized; a workflow
+    /// holds at most one trigger node.
+    pub fn create_workflow_node(
+        &mut self,
+        workflow_id: i64,
+        new: &WorkflowNodeNew,
+    ) -> Result<WorkflowNode> {
+        self.get_workflow(workflow_id)?;
+        let title = validate_workflow_node_title(&new.title)?;
+        let config = match &new.config {
+            Some(c) => c.clone(),
+            None if new.kind == WorkflowNodeKind::Trigger => {
+                serde_json::json!({"mode": "manual"})
+            }
+            None => serde_json::json!({}),
+        };
+        let config =
+            super::workflow::validate_config(new.kind, &config).map_err(Error::Validation)?;
+        let (count, has_trigger): (i64, bool) = self.conn.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(kind = 'trigger'), 0) > 0 \
+             FROM workflow_nodes WHERE workflow_id = ?1",
+            [workflow_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        if new.kind == WorkflowNodeKind::Trigger && has_trigger {
+            return Err(Error::Validation(format!(
+                "workflow {workflow_id} already has a trigger node; a workflow has at most one"
+            )));
+        }
+        let x = new.x.unwrap_or(40.0 + 280.0 * count as f64);
+        let y = new.y.unwrap_or(40.0);
+        validate_workflow_position(x, y)?;
+        self.conn.execute(
+            "INSERT INTO workflow_nodes (workflow_id, kind, title, config, x, y, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'), datetime('now'))",
+            (
+                workflow_id,
+                new.kind.as_str(),
+                &title,
+                config.to_string(),
+                x,
+                y,
+            ),
+        )?;
+        self.touch_workflow(workflow_id)?;
+        self.get_workflow_node(self.conn.last_insert_rowid())
+    }
+
+    pub fn get_workflow_node(&self, id: i64) -> Result<WorkflowNode> {
         self.conn
             .query_row(
-                &format!("SELECT {EDGE_COLUMNS} FROM frame_edges WHERE id = ?1"),
+                &format!("SELECT {WORKFLOW_NODE_COLUMNS} FROM workflow_nodes WHERE id = ?1"),
                 [id],
-                row_to_edge,
+                row_to_workflow_node,
             )
             .map_err(|e| match e {
                 rusqlite::Error::QueryReturnedNoRows => {
-                    Error::NotFound(format!("edge {id} not found"))
+                    Error::NotFound(format!("workflow node {id} not found"))
                 }
                 e => Error::Db(e),
             })
     }
 
-    pub fn update_edge(
+    pub fn update_workflow_node(
         &mut self,
         id: i64,
-        patch: &EdgePatch,
-        actor: Option<&str>,
-    ) -> Result<FrameEdge> {
-        let current = self.get_edge(id)?;
-        let mut edge = current.clone();
-        if let Some(label) = &patch.label {
-            edge.label = label.clone();
-        }
-        if let Some(waypoints) = &patch.waypoints {
-            edge.waypoints = waypoints.clone();
-        }
-        if let Some(from_anchor) = &patch.from_anchor {
-            edge.from_anchor = *from_anchor;
-        }
-        if let Some(to_anchor) = &patch.to_anchor {
-            edge.to_anchor = *to_anchor;
-        }
-        if let Some(style) = &patch.style {
-            edge.style = *style;
-        }
-        if let Some(from_marker) = &patch.from_marker {
-            edge.from_marker = *from_marker;
-        }
-        if let Some(to_marker) = &patch.to_marker {
-            edge.to_marker = *to_marker;
-        }
-        // No-op patch: change nothing and log nothing.
-        if edge == current {
-            return Ok(current);
-        }
-        // The board's type is only needed to judge markers, so it is only read
-        // when a marker is actually being set — a label or waypoint patch
-        // still costs exactly the queries it did before.
-        if patch.from_marker.is_some() || patch.to_marker.is_some() {
-            let diagram = self.get_diagram(edge.diagram_id)?;
-            validate_edge_markers(diagram.diagram_type, edge.from_marker, edge.to_marker)?;
-        }
-        let tx = self.conn.transaction()?;
-        tx.execute(
-            "UPDATE frame_edges SET label = ?1, waypoints = ?2, from_anchor = ?3, to_anchor = ?4, \
-             style = ?5, from_marker = ?6, to_marker = ?7 \
-             WHERE id = ?8",
-            rusqlite::params![
-                &edge.label,
-                serde_json::to_string(&edge.waypoints).unwrap(),
-                edge.from_anchor.map(|a| a.as_str()),
-                edge.to_anchor.map(|a| a.as_str()),
-                edge.style.map(EdgeStyle::as_str),
-                edge.from_marker.map(EdgeMarker::as_str),
-                edge.to_marker.map(EdgeMarker::as_str),
-                id,
-            ],
-        )?;
-        let anchor_changed =
-            edge.from_anchor != current.from_anchor || edge.to_anchor != current.to_anchor;
-        let restyled = edge.style != current.style
-            || edge.from_marker != current.from_marker
-            || edge.to_marker != current.to_marker;
-        // One event per call, most-structural first. Anchors stay at the top
-        // (they decide where the connector attaches at all); `edge_restyled`
-        // sits next because a style or a marker changes what the connector
-        // *means* — a crow's foot states a cardinality — while a reroute or a
-        // relabel only changes how that same meaning is drawn or annotated.
-        let (action, summary) = if anchor_changed {
-            ("edge_anchor_changed", anchor_summary(&edge, &current))
-        } else if restyled {
-            ("edge_restyled", restyle_summary(&edge, &current))
-        } else if patch.waypoints.is_some() && edge.waypoints != current.waypoints {
-            (
-                "edge_rerouted",
-                format!(
-                    "rerouted edge #{} \u{2192} #{} ({} waypoint(s))",
-                    edge.from_frame,
-                    edge.to_frame,
-                    edge.waypoints.len()
-                ),
-            )
-        } else {
-            (
-                "edge_relabeled",
-                format!(
-                    "relabeled edge #{} \u{2192} #{}",
-                    edge.from_frame, edge.to_frame
-                ),
-            )
+        patch: WorkflowNodePatch,
+    ) -> Result<WorkflowNode> {
+        let current = self.get_workflow_node(id)?;
+        let title = match &patch.title {
+            Some(t) => validate_workflow_node_title(t)?,
+            None => current.title.clone(),
         };
-        insert_diagram_event(&tx, edge.diagram_id, actor, action, &summary)?;
-        tx.commit()?;
-        self.get_edge(id)
+        let config = match &patch.config {
+            Some(c) => {
+                super::workflow::validate_config(current.kind, c).map_err(Error::Validation)?
+            }
+            None => current.config.clone(),
+        };
+        let x = patch.x.unwrap_or(current.x);
+        let y = patch.y.unwrap_or(current.y);
+        validate_workflow_position(x, y)?;
+        self.conn.execute(
+            "UPDATE workflow_nodes SET title = ?1, config = ?2, x = ?3, y = ?4, \
+             updated_at = datetime('now') WHERE id = ?5",
+            (&title, config.to_string(), x, y, id),
+        )?;
+        self.touch_workflow(current.workflow_id)?;
+        self.get_workflow_node(id)
     }
 
-    pub fn delete_edge(&mut self, id: i64, actor: Option<&str>) -> Result<FrameEdge> {
-        let edge = self.get_edge(id)?;
-        let tx = self.conn.transaction()?;
-        tx.execute("DELETE FROM frame_edges WHERE id = ?1", [id])?;
-        insert_diagram_event(
-            &tx,
-            edge.diagram_id,
-            actor,
-            "edge_removed",
-            &format!(
-                "removed edge #{} \u{2192} #{}",
-                edge.from_frame, edge.to_frame
-            ),
+    /// Deletes a node and the edges touching it; echoes both.
+    pub fn delete_workflow_node(&mut self, id: i64) -> Result<(WorkflowNode, Vec<WorkflowEdge>)> {
+        let node = self.get_workflow_node(id)?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {WORKFLOW_EDGE_COLUMNS} FROM workflow_edges \
+             WHERE from_node = ?1 OR to_node = ?1 ORDER BY id"
+        ))?;
+        let edges = stmt
+            .query_map([id], row_to_workflow_edge)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(stmt);
+        self.conn
+            .execute("DELETE FROM workflow_nodes WHERE id = ?1", [id])?;
+        self.touch_workflow(node.workflow_id)?;
+        Ok((node, edges))
+    }
+
+    /// Connects two nodes of one workflow. Refused: a node of another
+    /// workflow (`validation`), a self-edge or any edge that would close a
+    /// cycle (`cycle` — a workflow is a DAG, unlike a diagram), an edge into
+    /// the trigger (`validation`), a missing or unexpected `branch`
+    /// (`validation`: required on an edge leaving a branch node, refused on
+    /// every other), and an exact duplicate (`conflict`).
+    pub fn create_workflow_edge(
+        &mut self,
+        workflow_id: i64,
+        from_node: i64,
+        to_node: i64,
+        branch: Option<WorkflowBranch>,
+    ) -> Result<WorkflowEdge> {
+        self.get_workflow(workflow_id)?;
+        let from = self.workflow_edge_end("from", workflow_id, from_node)?;
+        let to = self.workflow_edge_end("to", workflow_id, to_node)?;
+        if from_node == to_node {
+            return Err(Error::Cycle(format!(
+                "node {from_node} cannot connect to itself"
+            )));
+        }
+        if to.kind == WorkflowNodeKind::Trigger {
+            return Err(Error::Validation(format!(
+                "node {to_node} is the trigger; a trigger has no incoming edges"
+            )));
+        }
+        match (from.kind == WorkflowNodeKind::Branch, branch) {
+            (true, None) => {
+                return Err(Error::Validation(format!(
+                    "node {from_node} is a branch; its edges need --branch true|false"
+                )));
+            }
+            (false, Some(_)) => {
+                return Err(Error::Validation(format!(
+                    "node {from_node} is not a branch; only a branch node's edges carry a branch"
+                )));
+            }
+            _ => {}
+        }
+        let branch_text = branch.map(WorkflowBranch::as_str);
+        let duplicate: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT id FROM workflow_edges \
+                 WHERE from_node = ?1 AND to_node = ?2 AND IFNULL(branch, '') = IFNULL(?3, '')",
+                (from_node, to_node, branch_text),
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(other) = duplicate {
+            return Err(Error::Conflict(format!(
+                "edge {other} already connects {from_node} to {to_node}{}",
+                branch_text.map(|b| format!(" on {b}")).unwrap_or_default()
+            )));
+        }
+        // A new edge from -> to closes a cycle iff `from` is reachable from `to`.
+        let edges = read_workflow_edges(&self.conn, workflow_id)?;
+        let mut stack = vec![to_node];
+        let mut seen = HashSet::new();
+        while let Some(n) = stack.pop() {
+            if n == from_node {
+                return Err(Error::Cycle(format!(
+                    "edge {from_node} -> {to_node} would close a cycle; a workflow is a DAG"
+                )));
+            }
+            if seen.insert(n) {
+                stack.extend(edges.iter().filter(|e| e.from_node == n).map(|e| e.to_node));
+            }
+        }
+        self.conn.execute(
+            "INSERT INTO workflow_edges (workflow_id, from_node, to_node, branch) \
+             VALUES (?1, ?2, ?3, ?4)",
+            (workflow_id, from_node, to_node, branch_text),
         )?;
-        tx.commit()?;
+        self.touch_workflow(workflow_id)?;
+        self.get_workflow_edge(self.conn.last_insert_rowid())
+    }
+
+    fn workflow_edge_end(
+        &self,
+        which: &str,
+        workflow_id: i64,
+        node_id: i64,
+    ) -> Result<WorkflowNode> {
+        let node = match self.get_workflow_node(node_id) {
+            Ok(n) => n,
+            Err(Error::NotFound(_)) => {
+                return Err(Error::Validation(format!(
+                    "{which} node {node_id} not found"
+                )));
+            }
+            Err(e) => return Err(e),
+        };
+        if node.workflow_id != workflow_id {
+            return Err(Error::Validation(format!(
+                "{which} node {node_id} belongs to workflow {}, not workflow {workflow_id}: \
+                 an edge must connect two nodes of the same workflow",
+                node.workflow_id
+            )));
+        }
+        Ok(node)
+    }
+
+    pub fn get_workflow_edge(&self, id: i64) -> Result<WorkflowEdge> {
+        self.conn
+            .query_row(
+                &format!("SELECT {WORKFLOW_EDGE_COLUMNS} FROM workflow_edges WHERE id = ?1"),
+                [id],
+                row_to_workflow_edge,
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    Error::NotFound(format!("workflow edge {id} not found"))
+                }
+                e => Error::Db(e),
+            })
+    }
+
+    pub fn delete_workflow_edge(&mut self, id: i64) -> Result<WorkflowEdge> {
+        let edge = self.get_workflow_edge(id)?;
+        self.conn
+            .execute("DELETE FROM workflow_edges WHERE id = ?1", [id])?;
+        self.touch_workflow(edge.workflow_id)?;
         Ok(edge)
     }
 
-    /// Validates that `frame_id` exists and belongs to `diagram_id`. `which`
-    /// ("from"/"to") names the offending endpoint in the error message.
-    fn check_frame_in_diagram(&self, frame_id: i64, diagram_id: i64, which: &str) -> Result<()> {
-        let frame_board: Option<i64> = self
-            .conn
-            .query_row(
-                "SELECT diagram_id FROM frames WHERE id = ?1",
-                [frame_id],
-                |r| r.get(0),
-            )
-            .map(Some)
-            .or_else(|e| match e {
-                rusqlite::Error::QueryReturnedNoRows => Ok(None),
-                e => Err(Error::Db(e)),
-            })?;
-        let Some(frame_board) = frame_board else {
+    fn touch_workflow(&self, id: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE workflows SET updated_at = datetime('now') WHERE id = ?1",
+            [id],
+        )?;
+        Ok(())
+    }
+
+    /// Opens a run row `running` and prunes the workflow's history back to
+    /// [`WORKFLOW_RUN_KEEP`]. The row is the engine's claim: written before
+    /// anything executes, finished exactly once by
+    /// [`Store::finish_workflow_run`].
+    pub fn create_workflow_run(
+        &mut self,
+        workflow_id: i64,
+        trigger: WorkflowTrigger,
+        input: &str,
+    ) -> Result<WorkflowRun> {
+        self.get_workflow(workflow_id)?;
+        if input.len() > WORKFLOW_INPUT_MAX {
             return Err(Error::Validation(format!(
-                "{which} frame {frame_id} not found"
-            )));
-        };
-        if frame_board != diagram_id {
-            return Err(Error::Validation(format!(
-                "{which} frame {frame_id} belongs to diagram {frame_board}, not \
-                 diagram {diagram_id}: an edge must connect two frames of the same board"
+                "a run's input is at most {WORKFLOW_INPUT_MAX} bytes, got {}",
+                input.len()
             )));
         }
-        Ok(())
+        self.conn.execute(
+            "INSERT INTO workflow_runs (workflow_id, trigger, input, status, steps, started_at) \
+             VALUES (?1, ?2, ?3, 'running', '[]', datetime('now'))",
+            (workflow_id, trigger.as_str(), input),
+        )?;
+        let id = self.conn.last_insert_rowid();
+        self.conn.execute(
+            "DELETE FROM workflow_runs WHERE workflow_id = ?1 AND id NOT IN \
+             (SELECT id FROM workflow_runs WHERE workflow_id = ?1 ORDER BY id DESC LIMIT ?2)",
+            (workflow_id, WORKFLOW_RUN_KEEP),
+        )?;
+        self.get_workflow_run(id)
+    }
+
+    /// Closes a `running` run with its outcome. `not_found` for an unknown id,
+    /// `conflict` for one already finished.
+    pub fn finish_workflow_run(
+        &mut self,
+        id: i64,
+        status: WorkflowRunStatus,
+        steps: &[WorkflowStep],
+        error: Option<&str>,
+    ) -> Result<WorkflowRun> {
+        if status == WorkflowRunStatus::Running {
+            return Err(Error::Validation(
+                "a run is finished as succeeded or failed".into(),
+            ));
+        }
+        let steps = serde_json::to_string(steps)
+            .map_err(|e| Error::Validation(format!("steps are not serializable: {e}")))?;
+        let n = self.conn.execute(
+            "UPDATE workflow_runs SET status = ?1, steps = ?2, error = ?3, \
+             finished_at = datetime('now') WHERE id = ?4 AND status = 'running'",
+            (status.as_str(), steps, error, id),
+        )?;
+        if n == 0 {
+            self.get_workflow_run(id)?;
+            return Err(Error::Conflict(format!(
+                "workflow run {id} is already finished"
+            )));
+        }
+        self.get_workflow_run(id)
+    }
+
+    pub fn get_workflow_run(&self, id: i64) -> Result<WorkflowRun> {
+        self.conn
+            .query_row(
+                &format!("SELECT {WORKFLOW_RUN_COLUMNS} FROM workflow_runs WHERE id = ?1"),
+                [id],
+                row_to_workflow_run,
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    Error::NotFound(format!("workflow run {id} not found"))
+                }
+                e => Error::Db(e),
+            })
+    }
+
+    /// A workflow's runs, newest first.
+    pub fn list_workflow_runs(&self, workflow_id: i64) -> Result<Vec<WorkflowRun>> {
+        self.get_workflow(workflow_id)?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {WORKFLOW_RUN_COLUMNS} FROM workflow_runs WHERE workflow_id = ?1 \
+             ORDER BY id DESC"
+        ))?;
+        let rows = stmt.query_map([workflow_id], row_to_workflow_run)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// The workflows whose trigger is `mode: time` and which are due: no run
+    /// with `trigger = time` started within the last `every_minutes`, judged
+    /// on SQLite's own clock (the `stale_claim_minutes` posture). A workflow
+    /// of an archived project is never due. Oldest id first.
+    pub fn due_time_workflows(&self) -> Result<Vec<i64>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "{HIDDEN_PROJECTS_CTE}SELECT w.id FROM workflows w \
+             JOIN workflow_nodes n ON n.workflow_id = w.id AND n.kind = 'trigger' \
+             WHERE json_extract(n.config, '$.mode') = 'time' \
+               AND (w.project_id IS NULL OR w.project_id NOT IN (SELECT id FROM hidden_projects)) \
+               AND NOT EXISTS (SELECT 1 FROM workflow_runs r \
+                    WHERE r.workflow_id = w.id AND r.trigger = 'time' \
+                      AND r.started_at > datetime('now', \
+                          '-' || json_extract(n.config, '$.every_minutes') || ' minutes')) \
+             ORDER BY w.id"
+        ))?;
+        let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Appends one line to a named log — what an `output` node with
+    /// `target: log` writes. Append-only.
+    pub fn append_workflow_log(
+        &mut self,
+        log: &str,
+        text: &str,
+        workflow_id: Option<i64>,
+        run_id: Option<i64>,
+    ) -> Result<WorkflowLogEntry> {
+        let log = validate_workflow_log_name(log)?;
+        if text.trim().is_empty() {
+            return Err(Error::Validation("a log line may not be empty".into()));
+        }
+        if text.len() > WORKFLOW_LOG_TEXT_MAX {
+            return Err(Error::Validation(format!(
+                "a log line is at most {WORKFLOW_LOG_TEXT_MAX} bytes"
+            )));
+        }
+        self.conn.execute(
+            "INSERT INTO workflow_log (log, text, workflow_id, run_id, created_at) \
+             VALUES (?1, ?2, ?3, ?4, datetime('now'))",
+            (&log, text, workflow_id, run_id),
+        )?;
+        Ok(self.conn.query_row(
+            &format!("SELECT {WORKFLOW_LOG_COLUMNS} FROM workflow_log WHERE id = ?1"),
+            [self.conn.last_insert_rowid()],
+            row_to_workflow_log,
+        )?)
+    }
+
+    /// The newest `limit` lines of one log (or of every log), newest first.
+    pub fn list_workflow_log(
+        &self,
+        log: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<WorkflowLogEntry>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {WORKFLOW_LOG_COLUMNS} FROM workflow_log \
+             WHERE (?1 IS NULL OR log = ?1 COLLATE NOCASE) ORDER BY id DESC LIMIT ?2"
+        ))?;
+        let rows = stmt.query_map((log, limit.clamp(1, 1000)), row_to_workflow_log)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     // ---- inbox (global update requests) ----
@@ -10596,9 +10469,6 @@ mod tests {
             .unwrap();
         let t_child = add_task(&mut store, child.id, "child task");
         let t_other = add_task(&mut store, other.id, "other task");
-        store
-            .create_diagram(child.id, "child board", None, None, None)
-            .unwrap();
 
         store.archive_project(root.id).unwrap();
 
@@ -10625,7 +10495,6 @@ mod tests {
             store.next_task(None).unwrap(),
             NextResult::Task(t) if t.id == t_other.id
         ));
-        assert!(store.list_diagrams(None).unwrap().is_empty());
 
         // The descendants' own flag is untouched — nothing was written.
         assert_eq!(store.get_project(child.id).unwrap(), child);
@@ -10648,7 +10517,6 @@ mod tests {
             store.next_task(Some(child.id)).unwrap(),
             NextResult::Task(t) if t.id == t_child.id
         ));
-        assert_eq!(store.list_diagrams(Some(child.id)).unwrap().len(), 1);
 
         // Unarchiving the root restores the subtree with no per-child write.
         store.unarchive_project(root.id).unwrap();
@@ -10680,9 +10548,6 @@ mod tests {
         let t_root = add_task(&mut store, root.id, "root task");
         let t_grand = add_task(&mut store, grandchild.id, "grandchild task");
         let t_keep = add_task(&mut store, keep.id, "kept task");
-        let board = store
-            .create_diagram(grandchild.id, "board", None, None, None)
-            .unwrap();
 
         let (deleted, subprojects, tasks) = store.delete_project(root.id).unwrap();
         assert_eq!(deleted.id, root.id);
@@ -10704,10 +10569,6 @@ mod tests {
         }
         assert!(matches!(
             store.get_task(t_grand.id),
-            Err(Error::NotFound(_))
-        ));
-        assert!(matches!(
-            store.get_diagram(board.id),
             Err(Error::NotFound(_))
         ));
         assert_eq!(store.get_project(keep.id).unwrap(), keep);
@@ -12577,32 +12438,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn list_diagrams_unscoped_excludes_archived_project_scoped_unaffected() {
-        let (mut store, _dir) = temp_store();
-        let p1 = store.create_project("p1", None, None, None, None).unwrap();
-        let p2 = store.create_project("p2", None, None, None, None).unwrap();
-        let sb1 = store
-            .create_diagram(p1.id, "p1 board", None, None, None)
-            .unwrap();
-        let sb2 = store
-            .create_diagram(p2.id, "p2 board", None, None, None)
-            .unwrap();
-
-        store.archive_project(p2.id).unwrap();
-
-        let ids: Vec<i64> = store
-            .list_diagrams(None)
-            .unwrap()
-            .iter()
-            .map(|s| s.id)
-            .collect();
-        assert_eq!(ids, vec![sb1.id]);
-
-        // Scoped read of the archived project is completely unaffected.
-        assert_eq!(store.list_diagrams(Some(p2.id)).unwrap(), vec![sb2]);
-    }
-
     fn import_task(ref_: &str, description: &str) -> ImportTask {
         ImportTask {
             ref_: ref_.into(),
@@ -12847,980 +12682,6 @@ mod tests {
             .unwrap();
         assert_eq!(v, MIGRATIONS.len() as i64);
         assert!(store.list_projects().unwrap().is_empty());
-    }
-
-    // ---- diagrams ----
-
-    fn frame_new(title: &str) -> FrameNew {
-        FrameNew {
-            title: title.into(),
-            body: None,
-            x: 10.0,
-            y: 20.0,
-            w: 240.0,
-            h: 140.0,
-            color: None,
-            task_id: None,
-            author: None,
-            shape: None,
-        }
-    }
-
-    /// A plain connector: no label, no author, and every task 854 property at
-    /// its default, which is the shape almost every test here wants.
-    fn edge_new(from_frame: i64, to_frame: i64) -> EdgeNew {
-        EdgeNew {
-            from_frame,
-            to_frame,
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn diagram_crud_round_trip_with_view() {
-        let (mut store, _dir) = temp_store();
-        let p = store.create_project("p", None, None, None, None).unwrap();
-        let sb = store
-            .create_diagram(p.id, "flow", Some("the happy path"), Some("agent-1"), None)
-            .unwrap();
-        assert_eq!(sb.title, "flow");
-        assert_eq!(sb.description.as_deref(), Some("the happy path"));
-        assert_eq!(sb.author.as_deref(), Some("agent-1"));
-        assert_eq!(sb.created_at, sb.updated_at);
-
-        assert_eq!(store.get_diagram(sb.id).unwrap(), sb);
-        assert_eq!(store.list_diagrams(None).unwrap(), vec![sb.clone()]);
-        assert_eq!(store.list_diagrams(Some(p.id)).unwrap(), vec![sb.clone()]);
-        assert!(store.list_diagrams(Some(p.id + 1)).unwrap().is_empty());
-
-        // empty board view
-        let view = store.get_diagram_view(sb.id).unwrap();
-        assert_eq!(view.diagram, sb);
-        assert!(view.frames.is_empty());
-        assert!(view.edges.is_empty());
-
-        let updated = store
-            .update_diagram(
-                sb.id,
-                &DiagramPatch {
-                    title: Some("renamed".into()),
-                    description: Some(None),
-                },
-                Some("agent-2"),
-            )
-            .unwrap();
-        assert_eq!(updated.title, "renamed");
-        assert_eq!(updated.description, None);
-        // author is immutable; project is immutable.
-        assert_eq!(updated.author.as_deref(), Some("agent-1"));
-        assert_eq!(updated.project_id, p.id);
-
-        let destroyed = store.delete_diagram(sb.id).unwrap();
-        assert_eq!(destroyed.diagram.id, sb.id);
-        assert!(matches!(store.get_diagram(sb.id), Err(Error::NotFound(_))));
-    }
-
-    #[test]
-    fn create_diagram_unknown_project_is_validation_error() {
-        let (mut store, _dir) = temp_store();
-        let err = store
-            .create_diagram(999, "orphan", None, None, None)
-            .unwrap_err();
-        assert!(matches!(err, Error::Validation(_)));
-        assert!(err.to_string().contains("999"));
-    }
-
-    /// The whole matrix, driven off the value sets rather than a hand-written
-    /// copy of them: **every** (diagram_type, shape) pair, the generic `None`
-    /// card included, is created for real and its outcome checked against
-    /// `DiagramType::shapes`/`allows_generic_frame`. A shape added to a type's
-    /// set is therefore covered the moment it is listed, and a shape moved out
-    /// of one is asserted to be rejected there.
-    #[test]
-    fn frame_shape_must_belong_to_its_boards_diagram_type() {
-        let (mut store, _dir) = temp_store();
-        let p = store.create_project("p", None, None, None, None).unwrap();
-        let candidates: Vec<Option<FrameShape>> = std::iter::once(None)
-            .chain(FrameShape::ALL.iter().copied().map(Some))
-            .collect();
-        for diagram_type in DiagramType::ALL.iter().copied() {
-            let sb = store
-                .create_diagram(p.id, diagram_type.as_str(), None, None, Some(diagram_type))
-                .unwrap();
-            for shape in candidates.iter().copied() {
-                let allowed = match shape {
-                    None => diagram_type.allows_generic_frame(),
-                    Some(s) => diagram_type.shapes().contains(&s),
-                };
-                let result = store.create_frame(
-                    sb.id,
-                    &FrameNew {
-                        shape,
-                        ..frame_new("f")
-                    },
-                );
-                let named = shape.map(FrameShape::as_str).unwrap_or("none");
-                if allowed {
-                    let f = result
-                        .unwrap_or_else(|e| panic!("{named} on {}: {e}", diagram_type.as_str()));
-                    assert_eq!(f.shape, shape);
-                } else {
-                    let err = result.err().unwrap_or_else(|| {
-                        panic!("{named} must not be legal on a {}", diagram_type.as_str())
-                    });
-                    assert!(matches!(err, Error::Validation(_)));
-                    assert!(err.to_string().contains(diagram_type.as_str()));
-                    assert!(err.to_string().contains(named));
-                }
-            }
-        }
-    }
-
-    /// The marker twin of the shape matrix: every marker against every board
-    /// type, on both `create_edge` and `update_edge`, checked against
-    /// `DiagramType::edge_markers` — which is what makes the cardinality
-    /// family `erd`-only in one place rather than two.
-    #[test]
-    fn edge_markers_must_belong_to_its_boards_diagram_type() {
-        let (mut store, _dir) = temp_store();
-        let p = store.create_project("p", None, None, None, None).unwrap();
-        for diagram_type in DiagramType::ALL.iter().copied() {
-            let sb = store
-                .create_diagram(p.id, diagram_type.as_str(), None, None, Some(diagram_type))
-                .unwrap();
-            let shape = diagram_type.shapes().first().copied();
-            let a = store
-                .create_frame(
-                    sb.id,
-                    &FrameNew {
-                        shape,
-                        ..frame_new("a")
-                    },
-                )
-                .unwrap();
-            let b = store
-                .create_frame(
-                    sb.id,
-                    &FrameNew {
-                        shape,
-                        ..frame_new("b")
-                    },
-                )
-                .unwrap();
-            let plain = store.create_edge(sb.id, &edge_new(a.id, b.id)).unwrap();
-            for marker in EdgeMarker::ALL.iter().copied() {
-                let allowed = diagram_type.edge_markers().contains(&marker);
-                let created = store.create_edge(
-                    sb.id,
-                    &EdgeNew {
-                        to_marker: Some(marker),
-                        ..edge_new(a.id, b.id)
-                    },
-                );
-                let patched = store.update_edge(
-                    plain.id,
-                    &EdgePatch {
-                        from_marker: Some(Some(marker)),
-                        ..Default::default()
-                    },
-                    None,
-                );
-                if allowed {
-                    assert_eq!(created.unwrap().to_marker, Some(marker));
-                    assert_eq!(patched.unwrap().from_marker, Some(marker));
-                } else {
-                    for err in [created.unwrap_err(), patched.unwrap_err()] {
-                        assert!(matches!(err, Error::Validation(_)));
-                        assert_eq!(
-                            err.to_string(),
-                            format!(
-                                "marker '{}' is not valid for a {} board",
-                                marker.as_str(),
-                                diagram_type.as_str()
-                            )
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    /// Style/markers are mutable (unlike `shape`), with `from_anchor`'s
-    /// three-state patch contract, and a change that lands logs exactly one
-    /// `edge_restyled` event.
-    #[test]
-    fn edge_style_and_markers_are_patchable_and_log_one_restyle_event() {
-        let (mut store, _dir) = temp_store();
-        let p = store.create_project("p", None, None, None, None).unwrap();
-        let sb = store.create_diagram(p.id, "b", None, None, None).unwrap();
-        let a = store.create_frame(sb.id, &frame_new("a")).unwrap();
-        let b = store.create_frame(sb.id, &frame_new("b")).unwrap();
-        let e = store
-            .create_edge(
-                sb.id,
-                &EdgeNew {
-                    style: Some(EdgeStyle::Dashed),
-                    ..edge_new(a.id, b.id)
-                },
-            )
-            .unwrap();
-        assert_eq!(e.style, Some(EdgeStyle::Dashed));
-        assert_eq!(e.from_marker, None);
-
-        // Omitted leaves it alone; the marker set lands.
-        let e = store
-            .update_edge(
-                e.id,
-                &EdgePatch {
-                    to_marker: Some(Some(EdgeMarker::HollowArrow)),
-                    ..Default::default()
-                },
-                Some("user"),
-            )
-            .unwrap();
-        assert_eq!(e.style, Some(EdgeStyle::Dashed));
-        assert_eq!(e.to_marker, Some(EdgeMarker::HollowArrow));
-
-        // Re-asserting what is already stored is a no-op: no event.
-        let before = store.list_diagram_events(sb.id).unwrap().len();
-        store
-            .update_edge(
-                e.id,
-                &EdgePatch {
-                    style: Some(Some(EdgeStyle::Dashed)),
-                    ..Default::default()
-                },
-                Some("user"),
-            )
-            .unwrap();
-        assert_eq!(store.list_diagram_events(sb.id).unwrap().len(), before);
-
-        // Explicit `None` clears back to the default, and logs one event.
-        let e = store
-            .update_edge(
-                e.id,
-                &EdgePatch {
-                    style: Some(None),
-                    ..Default::default()
-                },
-                Some("user"),
-            )
-            .unwrap();
-        assert_eq!(e.style, None);
-        let events = store.list_diagram_events(sb.id).unwrap();
-        assert_eq!(events.len(), before + 1);
-        let last = events.last().unwrap();
-        assert_eq!(last.action, "edge_restyled");
-        assert!(last.summary.contains("style: default"), "{}", last.summary);
-
-        // An anchor change in the same call outranks the restyle: one event.
-        let before = events.len();
-        store
-            .update_edge(
-                e.id,
-                &EdgePatch {
-                    from_anchor: Some(Some(AnchorSide::Top)),
-                    to_marker: Some(Some(EdgeMarker::Circle)),
-                    ..Default::default()
-                },
-                Some("user"),
-            )
-            .unwrap();
-        let events = store.list_diagram_events(sb.id).unwrap();
-        assert_eq!(events.len(), before + 1);
-        assert_eq!(events.last().unwrap().action, "edge_anchor_changed");
-    }
-
-    #[test]
-    fn migration_backfills_diagram_type_and_leaves_shape_null_on_pre_357_data() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("pre-357.db");
-        // Index 16, not `MIGRATIONS.len() - 1`: the positional form silently
-        // re-aims at whatever shipped last (see `CURSOR_RESET` above), which
-        // would make this assert that some unrelated migration backfills
-        // diagram_type. The subject is migration 18 — index 17 — so the db is
-        // built from everything *before* it.
-        const DIAGRAM_TYPE: usize = 17;
-        assert!(
-            MIGRATIONS[DIAGRAM_TYPE].contains("ADD COLUMN diagram_type"),
-            "migration {DIAGRAM_TYPE} is no longer the diagram_type migration — \
-             a shipped migration was edited or reordered, which is never allowed"
-        );
-        // Build a db at the version just before the diagram_type/shape
-        // migration, with a pre-feature diagram and frame (spec 355 Must
-        // #1/#6: existing rows must read back as diagram_type=storyboard,
-        // shape=null, with no explicit backfill statement).
-        {
-            let conn = Connection::open(&path).unwrap();
-            for sql in &MIGRATIONS[..DIAGRAM_TYPE] {
-                conn.execute_batch(sql).unwrap();
-            }
-            conn.pragma_update(None, "user_version", DIAGRAM_TYPE as i64)
-                .unwrap();
-            conn.execute("INSERT INTO projects (name) VALUES ('kept')", [])
-                .unwrap();
-            conn.execute(
-                "INSERT INTO storyboards (project_id, title, author, created_at, updated_at) \
-                 VALUES (1, 'pre-feature board', NULL, datetime('now'), datetime('now'))",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO frames \
-                 (storyboard_id, title, x, y, w, h, author, created_at, updated_at) \
-                 VALUES (1, 'pre-feature frame', 0, 0, 240, 140, NULL, datetime('now'), datetime('now'))",
-                [],
-            )
-            .unwrap();
-        }
-        let store = Store::open(&path).unwrap();
-        let boards = store.list_diagrams(None).unwrap();
-        assert_eq!(boards.len(), 1);
-        assert_eq!(boards[0].diagram_type, DiagramType::Storyboard);
-        let view = store.get_diagram_view(boards[0].id).unwrap();
-        assert_eq!(view.frames.len(), 1);
-        assert_eq!(view.frames[0].shape, None);
-    }
-
-    #[test]
-    fn migration_leaves_style_and_markers_null_on_pre_854_edges() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("pre-854.db");
-        // Index 42 — migration 43 — pinned, NOT `MIGRATIONS.len() - 1`: the
-        // positional form silently re-aims at whatever ships next (see
-        // `CURSOR_RESET` above). The db is built from everything *before* it.
-        const EDGE_STYLE: usize = 42;
-        assert!(
-            MIGRATIONS[EDGE_STYLE].contains("ADD COLUMN from_marker"),
-            "migration {EDGE_STYLE} is no longer the edge style/marker migration — \
-             a shipped migration was edited or reordered, which is never allowed"
-        );
-        {
-            let conn = Connection::open(&path).unwrap();
-            for sql in &MIGRATIONS[..EDGE_STYLE] {
-                conn.execute_batch(sql).unwrap();
-            }
-            conn.pragma_update(None, "user_version", EDGE_STYLE as i64)
-                .unwrap();
-            conn.execute("INSERT INTO projects (name) VALUES ('kept')", [])
-                .unwrap();
-            conn.execute(
-                "INSERT INTO diagrams (project_id, title, author, created_at, updated_at) \
-                 VALUES (1, 'pre-feature board', NULL, datetime('now'), datetime('now'))",
-                [],
-            )
-            .unwrap();
-            for title in ["a", "b"] {
-                conn.execute(
-                    "INSERT INTO frames (diagram_id, title, x, y, w, h, created_at, updated_at) \
-                     VALUES (1, ?1, 0, 0, 240, 140, datetime('now'), datetime('now'))",
-                    [title],
-                )
-                .unwrap();
-            }
-            conn.execute(
-                "INSERT INTO frame_edges (diagram_id, from_frame, to_frame, created_at) \
-                 VALUES (1, 1, 2, datetime('now'))",
-                [],
-            )
-            .unwrap();
-        }
-        // Every pre-feature edge reads back at the default rendering — the
-        // whole point of the three columns being nullable.
-        let store = Store::open(&path).unwrap();
-        let edges = store.get_diagram_view(1).unwrap().edges;
-        assert_eq!(edges.len(), 1);
-        assert_eq!(edges[0].style, None);
-        assert_eq!(edges[0].from_marker, None);
-        assert_eq!(edges[0].to_marker, None);
-    }
-
-    #[test]
-    fn frame_crud_and_view_ordering() {
-        let (mut store, _dir) = temp_store();
-        let p = store.create_project("p", None, None, None, None).unwrap();
-        let sb = store.create_diagram(p.id, "b", None, None, None).unwrap();
-
-        let f1 = store
-            .create_frame(
-                sb.id,
-                &FrameNew {
-                    body: Some("note".into()),
-                    color: Some("#00e5ff".into()),
-                    author: Some("user".into()),
-                    ..frame_new("first")
-                },
-            )
-            .unwrap();
-        assert_eq!(f1.title, "first");
-        assert_eq!(f1.body.as_deref(), Some("note"));
-        assert_eq!(f1.x, 10.0);
-        assert_eq!(f1.h, 140.0);
-        assert_eq!(f1.color.as_deref(), Some("#00e5ff"));
-        assert_eq!(f1.task_id, None);
-
-        let f2 = store.create_frame(sb.id, &frame_new("second")).unwrap();
-
-        // The view lists frames by id.
-        let view = store.get_diagram_view(sb.id).unwrap();
-        let ids: Vec<i64> = view.frames.iter().map(|f| f.id).collect();
-        assert_eq!(ids, vec![f1.id, f2.id]);
-
-        // Move + relabel + clear body.
-        let moved = store
-            .update_frame(
-                f1.id,
-                &FramePatch {
-                    title: Some("renamed".into()),
-                    body: Some(None),
-                    x: Some(99.5),
-                    y: Some(88.0),
-                    ..Default::default()
-                },
-                Some("user"),
-            )
-            .unwrap();
-        assert_eq!(moved.title, "renamed");
-        assert_eq!(moved.body, None);
-        assert_eq!(moved.x, 99.5);
-        assert_eq!(moved.y, 88.0);
-        // untouched dimensions persist
-        assert_eq!(moved.w, 240.0);
-
-        let (deleted, edges) = store.delete_frame(f2.id, None).unwrap();
-        assert_eq!(deleted.id, f2.id);
-        assert!(edges.is_empty());
-        assert!(matches!(store.get_frame(f2.id), Err(Error::NotFound(_))));
-    }
-
-    #[test]
-    fn create_frame_unknown_diagram_is_validation_error() {
-        let (mut store, _dir) = temp_store();
-        let err = store.create_frame(999, &frame_new("x")).unwrap_err();
-        assert!(matches!(err, Error::Validation(_)));
-        assert!(err.to_string().contains("999"));
-    }
-
-    #[test]
-    fn frame_task_link_must_be_same_project_and_nulls_on_task_delete() {
-        let (mut store, _dir) = temp_store();
-        let p1 = store.create_project("p1", None, None, None, None).unwrap();
-        let p2 = store.create_project("p2", None, None, None, None).unwrap();
-        let sb = store.create_diagram(p1.id, "b", None, None, None).unwrap();
-        let t1 = add_task(&mut store, p1.id, "in p1");
-        let t2 = add_task(&mut store, p2.id, "in p2");
-
-        // cross-project link rejected
-        let err = store
-            .create_frame(
-                sb.id,
-                &FrameNew {
-                    task_id: Some(t2.id),
-                    ..frame_new("bad")
-                },
-            )
-            .unwrap_err();
-        assert!(matches!(err, Error::Validation(_)));
-
-        // unknown task rejected
-        let err = store
-            .create_frame(
-                sb.id,
-                &FrameNew {
-                    task_id: Some(9999),
-                    ..frame_new("bad")
-                },
-            )
-            .unwrap_err();
-        assert!(matches!(err, Error::Validation(_)));
-
-        // same-project link accepted
-        let f = store
-            .create_frame(
-                sb.id,
-                &FrameNew {
-                    task_id: Some(t1.id),
-                    ..frame_new("good")
-                },
-            )
-            .unwrap();
-        assert_eq!(f.task_id, Some(t1.id));
-
-        // update cross-project link rejected
-        let err = store
-            .update_frame(
-                f.id,
-                &FramePatch {
-                    task_id: Some(Some(t2.id)),
-                    ..Default::default()
-                },
-                None,
-            )
-            .unwrap_err();
-        assert!(matches!(err, Error::Validation(_)));
-
-        // deleting the linked task nulls the reference (ON DELETE SET NULL)
-        store.delete_task(t1.id).unwrap();
-        assert_eq!(store.get_frame(f.id).unwrap().task_id, None);
-    }
-
-    #[test]
-    fn edge_crud_rejects_self_and_foreign_frames_and_allows_cycles() {
-        let (mut store, _dir) = temp_store();
-        let p = store.create_project("p", None, None, None, None).unwrap();
-        let sb = store.create_diagram(p.id, "b", None, None, None).unwrap();
-        let other = store
-            .create_diagram(p.id, "other", None, None, None)
-            .unwrap();
-        let a = store.create_frame(sb.id, &frame_new("a")).unwrap();
-        let b = store.create_frame(sb.id, &frame_new("b")).unwrap();
-        let foreign = store.create_frame(other.id, &frame_new("foreign")).unwrap();
-
-        // self-edge rejected
-        let err = store.create_edge(sb.id, &edge_new(a.id, a.id)).unwrap_err();
-        assert!(matches!(err, Error::Validation(_)));
-
-        // endpoint not on this board rejected
-        let err = store
-            .create_edge(sb.id, &edge_new(a.id, foreign.id))
-            .unwrap_err();
-        assert!(matches!(err, Error::Validation(_)));
-
-        // unknown diagram rejected
-        let err = store.create_edge(999, &edge_new(a.id, b.id)).unwrap_err();
-        assert!(matches!(err, Error::Validation(_)));
-
-        // valid edge, and the reverse edge too: cycles are allowed
-        let e1 = store
-            .create_edge(
-                sb.id,
-                &EdgeNew {
-                    label: Some("then".into()),
-                    author: Some("user".into()),
-                    ..edge_new(a.id, b.id)
-                },
-            )
-            .unwrap();
-        assert_eq!(e1.from_frame, a.id);
-        assert_eq!(e1.to_frame, b.id);
-        assert_eq!(e1.label.as_deref(), Some("then"));
-        let e2 = store.create_edge(sb.id, &edge_new(b.id, a.id)).unwrap();
-
-        let view = store.get_diagram_view(sb.id).unwrap();
-        assert_eq!(view.edges.len(), 2);
-
-        // relabel + clear
-        let relabelled = store
-            .update_edge(
-                e1.id,
-                &EdgePatch {
-                    label: Some(Some("next".into())),
-                    ..Default::default()
-                },
-                Some("user"),
-            )
-            .unwrap();
-        assert_eq!(relabelled.label.as_deref(), Some("next"));
-        let cleared = store
-            .update_edge(
-                e1.id,
-                &EdgePatch {
-                    label: Some(None),
-                    ..Default::default()
-                },
-                None,
-            )
-            .unwrap();
-        assert_eq!(cleared.label, None);
-
-        let deleted = store.delete_edge(e2.id, None).unwrap();
-        assert_eq!(deleted.id, e2.id);
-        assert!(matches!(store.get_edge(e2.id), Err(Error::NotFound(_))));
-        assert_eq!(store.get_diagram_view(sb.id).unwrap().edges.len(), 1);
-    }
-
-    #[test]
-    fn delete_frame_cascades_edges_and_echoes_them() {
-        let (mut store, _dir) = temp_store();
-        let p = store.create_project("p", None, None, None, None).unwrap();
-        let sb = store.create_diagram(p.id, "b", None, None, None).unwrap();
-        let a = store.create_frame(sb.id, &frame_new("a")).unwrap();
-        let b = store.create_frame(sb.id, &frame_new("b")).unwrap();
-        let c = store.create_frame(sb.id, &frame_new("c")).unwrap();
-        let e_ab = store.create_edge(sb.id, &edge_new(a.id, b.id)).unwrap();
-        let e_ba = store.create_edge(sb.id, &edge_new(b.id, a.id)).unwrap();
-        let e_bc = store.create_edge(sb.id, &edge_new(b.id, c.id)).unwrap();
-
-        // deleting b removes the two edges touching it, not e? none other; a-c has none
-        let (deleted, edges) = store.delete_frame(b.id, None).unwrap();
-        assert_eq!(deleted.id, b.id);
-        let edge_ids: HashSet<i64> = edges.iter().map(|e| e.id).collect();
-        assert_eq!(edge_ids, HashSet::from([e_ab.id, e_ba.id, e_bc.id]));
-
-        // a and c survive; no edges remain
-        assert_eq!(store.get_frame(a.id).unwrap().id, a.id);
-        assert_eq!(store.get_frame(c.id).unwrap().id, c.id);
-        assert!(store.get_diagram_view(sb.id).unwrap().edges.is_empty());
-    }
-
-    #[test]
-    fn delete_diagram_cascades_and_echoes_full_view() {
-        let (mut store, _dir) = temp_store();
-        let p = store.create_project("p", None, None, None, None).unwrap();
-        let sb = store.create_diagram(p.id, "b", None, None, None).unwrap();
-        let a = store.create_frame(sb.id, &frame_new("a")).unwrap();
-        let b = store.create_frame(sb.id, &frame_new("b")).unwrap();
-        store.create_edge(sb.id, &edge_new(a.id, b.id)).unwrap();
-
-        let view = store.delete_diagram(sb.id).unwrap();
-        assert_eq!(view.frames.len(), 2);
-        assert_eq!(view.edges.len(), 1);
-        // gone, with frames and edges cascaded
-        assert!(matches!(store.get_diagram(sb.id), Err(Error::NotFound(_))));
-        assert!(matches!(store.get_frame(a.id), Err(Error::NotFound(_))));
-    }
-
-    #[test]
-    fn delete_project_cascades_diagrams() {
-        let (mut store, _dir) = temp_store();
-        let p = store
-            .create_project("doomed", None, None, None, None)
-            .unwrap();
-        let sb = store.create_diagram(p.id, "b", None, None, None).unwrap();
-        let a = store.create_frame(sb.id, &frame_new("a")).unwrap();
-        let b = store.create_frame(sb.id, &frame_new("b")).unwrap();
-        store.create_edge(sb.id, &edge_new(a.id, b.id)).unwrap();
-
-        store.delete_project(p.id).unwrap();
-        assert!(matches!(store.get_diagram(sb.id), Err(Error::NotFound(_))));
-        assert!(matches!(store.get_frame(a.id), Err(Error::NotFound(_))));
-        assert!(matches!(store.get_edge(1), Err(Error::NotFound(_))));
-    }
-
-    #[test]
-    fn diagram_change_history_records_actor_and_actions() {
-        let (mut store, _dir) = temp_store();
-        let p = store.create_project("p", None, None, None, None).unwrap();
-        let sb = store
-            .create_diagram(p.id, "flow", None, Some("agent-1"), None)
-            .unwrap();
-        let a = store
-            .create_frame(
-                sb.id,
-                &FrameNew {
-                    author: Some("user".into()),
-                    ..frame_new("a")
-                },
-            )
-            .unwrap();
-        let b = store.create_frame(sb.id, &frame_new("b")).unwrap();
-        let e = store
-            .create_edge(
-                sb.id,
-                &EdgeNew {
-                    label: Some("then".into()),
-                    author: Some("user".into()),
-                    ..edge_new(a.id, b.id)
-                },
-            )
-            .unwrap();
-
-        // a move (geometry only) vs an edit (a field change)
-        store
-            .update_frame(
-                a.id,
-                &FramePatch {
-                    x: Some(200.0),
-                    ..Default::default()
-                },
-                Some("user"),
-            )
-            .unwrap();
-        store
-            .update_frame(
-                a.id,
-                &FramePatch {
-                    title: Some("A!".into()),
-                    ..Default::default()
-                },
-                Some("agent-2"),
-            )
-            .unwrap();
-        store
-            .update_edge(
-                e.id,
-                &EdgePatch {
-                    label: Some(Some("next".into())),
-                    ..Default::default()
-                },
-                Some("user"),
-            )
-            .unwrap();
-        store
-            .update_edge(
-                e.id,
-                &EdgePatch {
-                    waypoints: Some(vec![Waypoint { x: 10.0, y: 20.0 }]),
-                    ..Default::default()
-                },
-                Some("user"),
-            )
-            .unwrap();
-        store.delete_edge(e.id, Some("agent-2")).unwrap();
-
-        let events = store.list_diagram_events(sb.id).unwrap();
-        let actions: Vec<&str> = events.iter().map(|e| e.action.as_str()).collect();
-        assert_eq!(
-            actions,
-            vec![
-                "diagram_created",
-                "frame_added",
-                "frame_added",
-                "edge_added",
-                "frame_moved",
-                "frame_edited",
-                "edge_relabeled",
-                "edge_rerouted",
-                "edge_removed",
-            ]
-        );
-        // attribution: who did what
-        assert_eq!(events[0].actor.as_deref(), Some("agent-1"));
-        assert_eq!(events[1].actor.as_deref(), Some("user"));
-        assert_eq!(events[2].actor, None); // frame b had no author
-        assert_eq!(events[5].actor.as_deref(), Some("agent-2")); // the edit
-        assert_eq!(events[8].actor.as_deref(), Some("agent-2")); // the delete
-        // summaries carry a human-readable line
-        assert!(events[4].summary.contains("moved frame"));
-        assert!(events[1].summary.contains("added frame 'a'"));
-
-        // deleting a frame logs a removal on the surviving board
-        store.delete_frame(a.id, Some("user")).unwrap();
-        let events = store.list_diagram_events(sb.id).unwrap();
-        assert_eq!(events.last().unwrap().action, "frame_removed");
-        assert_eq!(events.last().unwrap().actor.as_deref(), Some("user"));
-
-        // history dies with the board; unknown board is NotFound
-        assert!(matches!(
-            store.list_diagram_events(9999),
-            Err(Error::NotFound(_))
-        ));
-    }
-
-    #[test]
-    fn delete_diagram_cascades_its_change_history() {
-        let (mut store, _dir) = temp_store();
-        let p = store.create_project("p", None, None, None, None).unwrap();
-        let sb = store.create_diagram(p.id, "b", None, None, None).unwrap();
-        store.create_frame(sb.id, &frame_new("a")).unwrap();
-        assert!(!store.list_diagram_events(sb.id).unwrap().is_empty());
-        store.delete_diagram(sb.id).unwrap();
-        // a fresh board reuses no rows; the orphaned events are gone
-        let sb2 = store.create_diagram(p.id, "b2", None, None, None).unwrap();
-        let events = store.list_diagram_events(sb2.id).unwrap();
-        assert_eq!(events.len(), 1); // only its own creation
-        assert_eq!(events[0].action, "diagram_created");
-    }
-
-    #[test]
-    fn no_op_update_changes_nothing_and_logs_nothing() {
-        let (mut store, _dir) = temp_store();
-        let p = store.create_project("p", None, None, None, None).unwrap();
-        let sb = store
-            .create_diagram(p.id, "b", Some("d"), None, None)
-            .unwrap();
-        let f = store.create_frame(sb.id, &frame_new("a")).unwrap();
-        let g = store.create_frame(sb.id, &frame_new("g")).unwrap();
-        let e = store
-            .create_edge(
-                sb.id,
-                &EdgeNew {
-                    label: Some("lbl".into()),
-                    ..edge_new(f.id, g.id)
-                },
-            )
-            .unwrap();
-        let before = store.list_diagram_events(sb.id).unwrap().len();
-        let frame_updated_at = store.get_frame(f.id).unwrap().updated_at;
-
-        // Re-set every field to its current value: no change, no event, and
-        // updated_at is not bumped.
-        store
-            .update_diagram(
-                sb.id,
-                &DiagramPatch {
-                    title: Some("b".into()),
-                    description: Some(Some("d".into())),
-                },
-                Some("noop"),
-            )
-            .unwrap();
-        store
-            .update_frame(
-                f.id,
-                &FramePatch {
-                    title: Some("a".into()),
-                    x: Some(f.x),
-                    ..Default::default()
-                },
-                Some("noop"),
-            )
-            .unwrap();
-        store
-            .update_edge(
-                e.id,
-                &EdgePatch {
-                    label: Some(Some("lbl".into())),
-                    ..Default::default()
-                },
-                Some("noop"),
-            )
-            .unwrap();
-        assert_eq!(store.list_diagram_events(sb.id).unwrap().len(), before);
-        assert_eq!(store.get_frame(f.id).unwrap().updated_at, frame_updated_at);
-
-        // A real change still logs one event.
-        store
-            .update_frame(
-                f.id,
-                &FramePatch {
-                    x: Some(f.x + 5.0),
-                    ..Default::default()
-                },
-                Some("mover"),
-            )
-            .unwrap();
-        assert_eq!(store.list_diagram_events(sb.id).unwrap().len(), before + 1);
-    }
-
-    #[test]
-    fn edge_anchor_patch_is_three_state_preserved_and_logged() {
-        let (mut store, _dir) = temp_store();
-        let p = store.create_project("p", None, None, None, None).unwrap();
-        let sb = store.create_diagram(p.id, "b", None, None, None).unwrap();
-        let a = store.create_frame(sb.id, &frame_new("a")).unwrap();
-        let b = store.create_frame(sb.id, &frame_new("b")).unwrap();
-        let e = store
-            .create_edge(
-                sb.id,
-                &EdgeNew {
-                    label: Some("lbl".into()),
-                    ..edge_new(a.id, b.id)
-                },
-            )
-            .unwrap();
-        assert_eq!(e.from_anchor, None);
-        assert_eq!(e.to_anchor, None);
-
-        // Lock the "from" end.
-        let locked = store
-            .update_edge(
-                e.id,
-                &EdgePatch {
-                    from_anchor: Some(Some(AnchorSide::Right)),
-                    ..Default::default()
-                },
-                Some("user"),
-            )
-            .unwrap();
-        assert_eq!(locked.from_anchor, Some(AnchorSide::Right));
-        assert_eq!(locked.to_anchor, None);
-
-        // (1) A label-only PATCH leaves the existing anchor lock untouched.
-        let before = store.list_diagram_events(sb.id).unwrap().len();
-        let relabeled = store
-            .update_edge(
-                e.id,
-                &EdgePatch {
-                    label: Some(Some("lbl2".into())),
-                    ..Default::default()
-                },
-                Some("user"),
-            )
-            .unwrap();
-        assert_eq!(relabeled.from_anchor, Some(AnchorSide::Right));
-        assert_eq!(relabeled.to_anchor, None);
-        let events = store.list_diagram_events(sb.id).unwrap();
-        assert_eq!(events.len(), before + 1);
-        assert_eq!(events.last().unwrap().action, "edge_relabeled");
-
-        // (2) Locking the other end logs exactly one edge_anchor_changed event.
-        let before = store.list_diagram_events(sb.id).unwrap().len();
-        let changed = store
-            .update_edge(
-                e.id,
-                &EdgePatch {
-                    to_anchor: Some(Some(AnchorSide::Bottom)),
-                    ..Default::default()
-                },
-                Some("user"),
-            )
-            .unwrap();
-        assert_eq!(changed.to_anchor, Some(AnchorSide::Bottom));
-        assert_eq!(changed.from_anchor, Some(AnchorSide::Right)); // independent endpoints
-        let events = store.list_diagram_events(sb.id).unwrap();
-        assert_eq!(events.len(), before + 1);
-        assert_eq!(events.last().unwrap().action, "edge_anchor_changed");
-        assert!(events.last().unwrap().summary.contains("locked to-anchor"));
-
-        // (3) Re-PATCHing an endpoint to the side it's already locked to is a
-        // no-op: no change, no event.
-        let before = store.list_diagram_events(sb.id).unwrap().len();
-        let noop = store
-            .update_edge(
-                e.id,
-                &EdgePatch {
-                    to_anchor: Some(Some(AnchorSide::Bottom)),
-                    ..Default::default()
-                },
-                Some("user"),
-            )
-            .unwrap();
-        assert_eq!(noop.to_anchor, Some(AnchorSide::Bottom));
-        assert_eq!(store.list_diagram_events(sb.id).unwrap().len(), before);
-
-        // Unlocking logs its own event with the "unlocked" summary shape.
-        let before = store.list_diagram_events(sb.id).unwrap().len();
-        let unlocked = store
-            .update_edge(
-                e.id,
-                &EdgePatch {
-                    from_anchor: Some(None),
-                    ..Default::default()
-                },
-                Some("user"),
-            )
-            .unwrap();
-        assert_eq!(unlocked.from_anchor, None);
-        assert_eq!(unlocked.to_anchor, Some(AnchorSide::Bottom)); // untouched
-        let events = store.list_diagram_events(sb.id).unwrap();
-        assert_eq!(events.len(), before + 1);
-        assert_eq!(events.last().unwrap().action, "edge_anchor_changed");
-        assert!(
-            events
-                .last()
-                .unwrap()
-                .summary
-                .contains("unlocked from-anchor")
-        );
-
-        // Priority: when a single PATCH changes both an anchor and the label,
-        // the anchor change wins the one-event-per-call slot.
-        let before = store.list_diagram_events(sb.id).unwrap().len();
-        store
-            .update_edge(
-                e.id,
-                &EdgePatch {
-                    label: Some(Some("lbl3".into())),
-                    from_anchor: Some(Some(AnchorSide::Top)),
-                    ..Default::default()
-                },
-                Some("user"),
-            )
-            .unwrap();
-        let events = store.list_diagram_events(sb.id).unwrap();
-        assert_eq!(events.len(), before + 1);
-        assert_eq!(events.last().unwrap().action, "edge_anchor_changed");
     }
 
     // ---- inbox (global update requests) ----
@@ -14848,7 +13709,7 @@ mod tests {
         let (mut store, _dir) = temp_store();
         let session = store.start_live_session(None).unwrap();
         let good = LiveContext {
-            kind: LiveContextKind::Diagrams,
+            kind: LiveContextKind::Workflows,
             id: Some("7".into()),
             label: Some("Login flow".into()),
             detail: None,
@@ -14856,7 +13717,7 @@ mod tests {
         store
             .set_live_route(
                 session.id,
-                "#/projects/3/diagrams",
+                "#/projects/3/workflows",
                 Some(Some(&good)),
                 None,
                 None,
@@ -14896,7 +13757,7 @@ mod tests {
             }
         }
         let still = store.get_live_session(session.id).unwrap();
-        assert_eq!(still.route.as_deref(), Some("#/projects/3/diagrams"));
+        assert_eq!(still.route.as_deref(), Some("#/projects/3/workflows"));
         assert_eq!(still.context, Some(good));
     }
 
@@ -15697,15 +14558,65 @@ mod tests {
         );
         assert_eq!(
             MIGRATIONS.len(),
-            83,
-            "a fresh db should report user_version 83"
+            84,
+            "a fresh db should report user_version 84"
         );
         let (store, _dir) = temp_store();
         let version: i64 = store
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 83);
+        assert_eq!(version, 84);
+    }
+
+    /// Workflows replace diagrams at migration 83 (mesa task 1607): a db that
+    /// still holds the diagram tables loses them, nothing is carried over,
+    /// and the workflow tables arrive — pinned by index for the reason
+    /// [`the_live_summaries_table_arrives_at_migration_49`] gives.
+    #[test]
+    fn the_workflow_tables_replace_the_diagram_tables_at_migration_83() {
+        const WORKFLOWS: usize = 83;
+        assert!(
+            MIGRATIONS[WORKFLOWS].contains("CREATE TABLE workflows")
+                && MIGRATIONS[WORKFLOWS].contains("DROP TABLE IF EXISTS diagrams"),
+            "migration {WORKFLOWS} is no longer the workflows migration — a \
+             shipped migration was edited or reordered, which is never allowed"
+        );
+        let (store, dir) = temp_store();
+        let path = dir.path().join("test.db");
+        // Rewind to user_version 83: workflow tables gone, a diagram present.
+        store
+            .conn
+            .execute_batch(
+                "DROP TABLE workflow_log; DROP TABLE workflow_runs; DROP TABLE workflow_edges; \
+                 DROP TABLE workflow_nodes; DROP TABLE workflows; \
+                 CREATE TABLE diagrams (id INTEGER PRIMARY KEY, title TEXT); \
+                 INSERT INTO diagrams (title) VALUES ('stale'); \
+                 PRAGMA user_version = 83;",
+            )
+            .unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        let tables: Vec<String> = store
+            .conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        for gone in ["diagrams", "frames", "frame_edges", "diagram_events"] {
+            assert!(!tables.contains(&gone.to_string()), "{gone} survived");
+        }
+        for made in [
+            "workflows",
+            "workflow_nodes",
+            "workflow_edges",
+            "workflow_runs",
+            "workflow_log",
+        ] {
+            assert!(tables.contains(&made.to_string()), "{made} missing");
+        }
     }
 
     /// Pins the project-notebook columns (mesa task 1333) at index 72

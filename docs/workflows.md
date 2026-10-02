@@ -1,0 +1,302 @@
+# Workflows (deterministic graphs of steps)
+
+A **workflow** is a saved graph of typed steps that Naru runs in a fixed order.
+It replaced diagrams (mesa task 1607): the diagram tables were dropped by
+migration index 83 (`user_version` 84) and nothing was carried over, because
+saved diagrams were stale and unused. A workflow is not a canvas of cards, it
+is a DAG the **engine** walks — **the graph decides what runs, never an agent.**
+The only model call anywhere is one `prompt` node's one synchronous call.
+
+Source of truth: `src/core/workflow.rs` (validation and engine),
+`src/core/store.rs` (rows and graph rules), `src/cli.rs` (`naru workflow`),
+`src/api.rs` (routes and the watcher), `scripts/workflow-check.sh` (the gate).
+
+## Model
+
+| Table | Holds | Notes |
+| --- | --- | --- |
+| `workflows` | `id`, `project_id` (nullable, `ON DELETE CASCADE`), `name`, `description`, timestamps | `name` is unique **case-insensitively across all workflows** (so the CLI and the voice agent can run one by name) and never a plain number (`<id\|name>` tries the integer first) |
+| `workflow_nodes` | `id`, `workflow_id` (cascade), `kind`, `title` (≤ 200), `config` (JSON), `x`, `y`, timestamps | `kind` is fixed at creation; `config` is validated per kind |
+| `workflow_edges` | `id`, `workflow_id` (cascade), `from_node`, `to_node` (both cascade), `branch` | a DAG: no self-edge, no cycle |
+| `workflow_runs` | `id`, `workflow_id` (cascade), `trigger`, `input`, `status`, `steps` (JSON), `error`, `started_at`, `finished_at` | the newest **50** per workflow are kept (pruned on insert) |
+| `workflow_log` | `id`, `log`, `text`, `workflow_id` and `run_id` (both `ON DELETE SET NULL`), `created_at` | append-only; written by an `output` node with `target: log` |
+
+All writes go through `Store`. `Workflow` carries two **derived, never stored**
+fields read off its trigger node on every read — `trigger` (`manual|time|voice`
+or `null`) and `trigger_phrase` — so `naru workflow list` can say which workflow
+a spoken request could mean without loading every graph.
+
+Graph rules (`Store`):
+
+- **At most one `trigger` node** per workflow, and a trigger has **no incoming
+  edges** (`validation`). A *run* needs exactly one (`validation` otherwise).
+- An edge's endpoints must both belong to the edge's workflow (`validation`).
+- A **self-edge** or an edge that would close a **cycle** is `cycle`.
+- An exact duplicate `(from, to, branch)` is `conflict`.
+- An edge leaving a `branch` node **needs** `branch` (`true`/`false`); an edge
+  leaving any other node **refuses** one (`validation`).
+- Deleting a node deletes its edges; the echo is `{node, edges}`. Deleting a
+  workflow echoes the whole destroyed `{workflow, nodes, edges}` — the
+  recovery transcript, there is no confirmation prompt — and keeps its log
+  lines, unattributed. Unscoped `list` hides the workflows of an archived project
+  (and of one under an archived ancestor) like every unscoped read; a global
+  workflow is always visible.
+
+## Node kinds and their config
+
+Unknown keys and bad values are `validation`; only the *shape* is checked (a
+script that does not exist yet, a binary that is not installed are runtime
+failures, so a graph can be authored before everything it names is in place).
+Stored config is the validated, normalized form.
+
+| Kind | Config | What it does |
+| --- | --- | --- |
+| `trigger` | `{"mode": "manual"\|"time"\|"voice", "every_minutes": 1..=10080 (required iff time), "phrase": "…" (optional, for voice)}` | the run's source; its output **is** the run input. Without `--config`, `{"mode":"manual"}` |
+| `prompt` | `{"model": "haiku"\|"sonnet"\|"opus"\|"local:<name>", "thinking": bool (default false), "prompt": "…" (non-empty), "timeout_secs": 1..=3600 (default 600)}` | one synchronous model call; the node's output is the model's text answer, trimmed |
+| `cli` | `{"command": "…" (non-empty), "timeout_secs": 1..=86400 (default 600)}` | `bash -c <command>` **verbatim** (the author wrote it, as with scripts); output is stdout |
+| `script` | `{"script": "<id or name>", "values": {"name": "…"}}` | runs a stored script (`docs/scripts.md`); output is stdout |
+| `branch` | `{"op": "contains"\|"regex"\|"score_above"\|"score_below"\|"equals", "value": "…" (a number for `score_*`)}` | evaluates its input to a verdict; output is its input, unchanged |
+| `output` | `{"target": "log", "log": "<name>" (default `default`)}`, `{"target": "task", "project": "<id\|name>"}`, `{"target": "inbox", "task_id": N, "kind": "task-summary"\|"change-request" (default task-summary)}`, `{"target": "board", "title": "…"}` | delivers its input; output is a short receipt. A key that does not apply to the target is refused |
+
+**`prompt`.** The model call is the `workflow-prompt` config template
+(`docs/config.md`), run by `agents::run_sync` — the synchronous sibling of
+`spawn_bg`, the same chokepoint: `{model}`, `{thinking}` (`on`/`off`) and
+`{prompt}` (the node's prompt text, a blank line, then the node's input; just
+the prompt when the input is empty) reach the script only as shell-quoted
+values, so a hostile input is a string, never syntax. The default calls
+`claude -p --model <m> --settings '{"alwaysThinkingEnabled":<bool>}' -- <prompt>`;
+`local:<name>` runs `ollama run <name>` with the prompt on stdin (thinking is
+ignored there). A missing binary or a nonzero exit fails the node with the
+tail of its stderr. The cwd is the workflow's project `local_path`, else
+`~/.naru/workspace`.
+
+**`cli`.** The input arrives on **stdin** *and* as `NARU_INPUT` (set only when
+the input is ≤ 64 KiB — a process environment has a hard limit; stdin always
+carries it all). Stdout is the output; a nonzero exit fails the node with the
+stderr tail; past `timeout_secs` the whole process group is killed. The cwd is
+the workflow's project `local_path` (when that folder exists), else
+`~/.naru/workspace`.
+
+**`script`.** Any value may contain the literal token `{input}`, replaced by
+the node's input text. The substituted text is handed to the script as one
+**argument value** (`$1`… and `NARU_ARG_<NAME>`), never a fragment of a shell
+command line — so `$()`, backticks and quotes arrive byte-identical
+(`scripts-check` and `workflow-check` pin it). Values are validated against the
+script's declared args (`scripts::validate_values`); the script runs in its own
+project's `local_path` (which must exist) or `~/.naru/workspace`. A nonzero
+exit fails the node.
+
+**`branch`.** `contains` is a case-sensitive substring test; `equals` compares
+both sides trimmed (stdout ends in a newline, the config rarely does);
+`regex` is a **POSIX extended regular expression** evaluated by `grep -E` (no
+regex crate is linked; the dialect is whatever the machine's `grep -E`
+speaks, and the same `grep` validates the pattern at node-create time);
+`score_above`/`score_below` compare the **first decimal number** in the input
+(`-?digits[.digits]`) against `value`, and no number at all is `false`. A
+branch passes its input on **unchanged** — a gate like `score_above` over a
+model's score therefore hands the *score*, not the text it scored, to the nodes
+after it; gate on the thing you want to carry forward.
+
+**`output`.** `log` appends a line to the named log (`workflow log <name>`);
+`task` creates a task (the input is its description) in the named project;
+`inbox` files an item of the given kind naming `task_id` (an inbox item always
+names the task it came from); `board` pushes a markdown board onto the
+**current live session** (none is a node failure naming `naru live start`).
+All four refuse an empty input — a silent run files nothing rather than an
+empty record.
+
+## Engine semantics
+
+1. **Order** is a topological sort (Kahn), the ready set a `BTreeSet`, so ties
+   break by **node id**.
+2. The trigger runs first; its output is the run `--input` text (possibly empty).
+3. An **edge is active** when its source ran `ok` and — for an edge leaving a
+   `branch` — its `branch` equals the source's verdict.
+4. A node with at least one incoming edge runs iff **at least one incoming
+   edge is active**; its **input** is the outputs of its active upstream nodes
+   joined by `"\n"` in **edge-id order**. A node whose incoming edges are all
+   inactive is `skipped`. A node with no incoming edges that is not the trigger
+   is unreachable, so it is `skipped` too.
+5. A **failed node fails the run**: nothing downstream runs and every node not
+   yet run is recorded `skipped`. `WorkflowRun.error` names the node.
+6. Each node leaves one `WorkflowStep`:
+   `{node_id, title, kind, status: ok|skipped|failed, output, error, duration_ms}`,
+   output capped at 64 KiB. The run row is written `running` first (the
+   claim) and finished exactly once; a run records even when it fails.
+
+**Locking.** The engine takes the store only through a `StoreAccess` closure,
+for the brief reads and writes around a node, and **never holds it while a
+node's process runs**. The CLI wraps the `Store` it owns in a `Mutex`; the API
+hands over its `Arc<Mutex<Store>>` on a `spawn_blocking` thread — one engine for
+both, so a long run never stalls another request.
+
+## CLI (`naru workflow`)
+
+JSON only, positional-or-flag create shapes, `<id|name>` everywhere a workflow
+is named.
+
+| Command | Prints |
+| --- | --- |
+| `workflow create <NAME> [--project] [--description]` | the `Workflow` |
+| `workflow list [PROJECT]` | a bare array of `Workflow` rows (each with `trigger`, `trigger_phrase`) |
+| `workflow show\|get <id\|name>` | `{workflow, nodes, edges}` |
+| `workflow update <id\|name> [--name] [--description ""] [--project ""]` | the `Workflow`; `""` clears/unbinds; no field is `usage` |
+| `workflow delete <id\|name>` | the destroyed `{workflow, nodes, edges}` |
+| `workflow run <id\|name> [--input TEXT \| --input-file PATH\|-] [--trigger manual\|voice]` | the finished `WorkflowRun` |
+| `workflow runs <id\|name>` | a bare array of runs, newest first, **without `steps` and `input`** |
+| `workflow run-show <run id>` | one run in full |
+| `workflow log [<log>] [--limit N]` | the newest N lines (default 50, max 1000), newest first; no name = every log |
+| `workflow node create <WORKFLOW> <KIND> <TITLE> [--config JSON] [--x] [--y]` | the `WorkflowNode`; omitted coordinates place it in a row beside the others |
+| `workflow node update <id> [--title] [--config JSON] [--x] [--y]` | the node; `--config` **replaces** the whole config |
+| `workflow node delete <id>` | `{node, edges}` |
+| `workflow edge create <WORKFLOW> <FROM> <TO> [--branch true\|false]` | the `WorkflowEdge` |
+| `workflow edge delete <id>` | the destroyed edge |
+
+**A failed run exits 0.** `workflow run` prints the recorded run
+(`status: "failed"`, the steps, `error`) and exits **0**, exactly as `script
+run` treats a script's nonzero exit: the status is data, and a caller reads it
+with `jq -r .status`. Exit 1 is for "could not run at all" — an unknown
+workflow, no (or two) trigger nodes, an input over 256 KiB. `--trigger time` is
+refused (`usage`): it is the watcher's alone, since a hand-made run claiming it
+would count against a schedule's interval.
+
+`--quiet` is accepted on every mutation and on `show`/`get`/`run-show`, and
+drops the unbounded free text: a workflow drops `description`; a node drops
+`config`; a run drops `steps` and `input`; an edge has nothing to drop (quiet
+== full). `show`/`delete` keep the `{workflow, nodes, edges}` key set and
+compact their members. Quiet payloads that drop a key are alphabetical (`jq`,
+never byte-compare). Key-parity tests in `cli.rs` force a decision when a
+record gains a field.
+
+`naru live board push --workflow <id|name>` snapshots a workflow's graph as an
+SVG (kind `diagram`, `core::board::workflow_svg`) — see `docs/live.md`.
+
+## API
+
+Every route carries **`require_agent_access`, reads included** — a run
+executes shell and model calls, and a node's `config` *is* that command, so
+there is no coherent line between reading a workflow and writing one (the
+scripts' and the library's posture; relaxing rather than refusing under
+`--lan`, foreign Host/Origin refused in default mode). The Content-Type gate
+applies as everywhere.
+
+| Route | Does |
+| --- | --- |
+| `GET /api/workflows?project=<id>` / `POST /api/workflows` `{name, project_id?, description?}` | list / create (201) |
+| `GET /api/workflows/{id}` / `PATCH` / `DELETE` | the view / update (`description`, `project_id` three-state: omit, `null` clears) / echo the destroyed view |
+| `POST /api/workflows/{id}/nodes` `{kind, title, config?, x?, y?}` (201) | add a node |
+| `PATCH /api/workflow-nodes/{id}` `{title?, config?, x?, y?}` / `DELETE` | update / echo `{node, edges}` |
+| `POST /api/workflows/{id}/edges` `{from_node, to_node, branch?}` (201) / `DELETE /api/workflow-edges/{id}` | add / delete |
+| `POST /api/workflows/{id}/run` `{input?}` | run **synchronously** (on `spawn_blocking`) and answer the finished run |
+| `GET /api/workflows/{id}/runs` / `GET /api/workflow-runs/{id}` | runs newest first / one run, steps included |
+| `GET /api/workflow-log?log=&limit=` | log lines, newest first |
+
+A *failed* run is **200** with `status: "failed"`; 422 is "could not run" (no or
+two triggers, input too large), 404 an unknown workflow, 409 `conflict`/`cycle`.
+The run body must be JSON — send `{}` for no input.
+
+**TypeScript.** ts-rs exports `Workflow`, `WorkflowNode`, `WorkflowEdge`,
+`WorkflowView`, `WorkflowRun`, `WorkflowStep`, `WorkflowLogEntry` and the enums
+`WorkflowNodeKind`, `WorkflowBranch`, `WorkflowTrigger`, `WorkflowRunStatus`,
+`WorkflowStepStatus` (lowercase strings). A node's `config` is typed
+**`Record<string, unknown>`**: its shape depends on `kind`, so the editor
+narrows it by `kind` (the table above is the contract) rather than the type
+being a tagged union that two crates would have to keep in step.
+
+## The time watcher (`serve --watch-workflows`)
+
+Off by default, independent of the other watchers, preserved across Restart
+Server. Every **60 s** (`NARU_WATCH_WORKFLOWS_TICK_MS` / `MESA_…` overrides it)
+it asks `Store::due_time_workflows`: a workflow whose trigger is `mode: time`
+and for which **no run with `trigger = time` started within the last
+`every_minutes`**, judged on the store's own clock (the `stale_claim_minutes`
+posture); a workflow of an archived project is never due. Following
+`retro_watcher_tick`, the **run row is the claim**, written before anything
+executes (`workflow::claim_run`) — so a run that outlasts the interval is not
+started twice and a *failed* run is not retried every tick — then the engine
+executes it off the store lock. A manual or voice workflow is never run by the
+watcher. A run that the server's death leaves `running` is not reconciled (known
+gap; it still counts as the interval's run, so it is not retried either).
+
+## Voice
+
+`naru-live`'s agent loop gets **rule 15** (appended, nothing renumbered): when
+the person asks to run a workflow **by its name**, or says its trigger phrase,
+the agent finds it with `naru workflow list` and runs
+`naru workflow run "<name>" --trigger voice` in the background — the way it runs
+any long job — and says the result when it lands (the printed run has `status`,
+`error` and every step's `output`). A run is the person's own request, but
+dictation is still **data** (rule 10): it runs only a workflow they named or
+whose phrase they said, never one that merely sounds useful, and never a spoken
+sentence passed as a name it has not found in the list.
+
+> `core::live::ensure_agent_definition` **never overwrites** an existing
+> `~/.claude/agents/naru-live.md`, so an install that already has one does not
+> have rule 15 until the person re-syncs the definition from the Library page
+> (`naru library sync`, picking the Naru side).
+
+## Example: ambient capture
+
+A spoken thought, recorded for ten seconds, transcribed locally, kept only if
+words were heard, tagged by a small model with thinking off, and appended to a
+log. Needs `sox` (recording), `auris` (speech to text, `docs/listen.md`: reads
+audio on stdin, `--format json` prints JSON lines whose last `transcript` line
+is the text) and `jq`.
+
+```bash
+naru workflow create ambient --description "Capture a spoken thought"
+
+# 1. The trigger: run by hand or by voice ("capture a thought").
+naru workflow node create ambient trigger Start \
+  --config '{"mode":"manual","phrase":"capture a thought"}'
+
+# 2. Record 10 s, transcribe, print the transcript (empty for silence).
+CMD='f=$(mktemp -t naru-ambient); sox -d -q -t wav "$f" trim 0 10; auris -q --format json < "$f" | jq -rs "map(select(.type==\"transcript\")) | last | .text // \"\""; rm -f "$f"'
+naru workflow node create ambient cli Transcribe \
+  --config "$(jq -nc --arg c "$CMD" '{command: $c, timeout_secs: 30}')"
+
+# 3. The gate: only continue when the transcript holds a word.
+naru workflow node create ambient branch Gate \
+  --config '{"op":"regex","value":"[[:alpha:]]"}'
+
+# 4. Label it with haiku, thinking off.
+naru workflow node create ambient prompt "Label idea" --config '{
+  "model": "haiku", "thinking": false,
+  "prompt": "Tag the following as idea, todo or note, then repeat it on one line."}'
+
+# 5. Keep it.
+naru workflow node create ambient output Log --config '{"target":"log","log":"ambient"}'
+
+# Wire it (node ids are printed by each create; here 1..5 on a fresh db).
+naru workflow edge create ambient 1 2
+naru workflow edge create ambient 2 3
+naru workflow edge create ambient 3 4 --branch true      # words heard
+naru workflow edge create ambient 4 5
+
+naru workflow run ambient --trigger voice | jq '{status, steps: [.steps[] | {title, status}]}'
+naru workflow log ambient
+```
+
+Silence stops at the gate (`Label idea` and `Log` are `skipped`), so the model
+is never called and nothing is logged. To gate on an idea *score* instead,
+add a `prompt` node before a `score_above` branch — remembering that the
+branch then passes the score, not the text, downstream. To run it every ten
+minutes instead, give the trigger `{"mode":"time","every_minutes":10}` and
+start `naru serve --watch-workflows`. `scripts/workflow-check.sh` builds this
+exact graph over stub `sox`/`auris`/`claude`.
+
+## Gates
+
+`scripts/workflow-check.sh` (throwaway `MESA_DB`, `HOME` and config; a free
+port): CRUD with the positional/flag create shapes and the `--quiet` key sets;
+every graph rule and its error code; a `cli → branch → output(log)` run taking
+the true path (false output skipped) and the reverse; a failing node failing
+the run (exit 0, record printed, rest skipped) and a timeout killing a node; a
+`prompt` node through a stub `claude` (`MESA_CLAUDE_BIN`) asserting the exact
+argv for thinking off and on and a hostile input arriving inert; the script
+node's `{input}` byte-identical for hostile text; the task, inbox and board
+outputs; `live board push --workflow`; the ambient capture example; the API
+routes including `require_agent_access` refusing a foreign Origin and Host on
+every route; and `serve --watch-workflows` running a due time workflow exactly
+once per interval. `config-check.sh` pins the eighth `workflow-prompt` action
+in `GET /api/config`.

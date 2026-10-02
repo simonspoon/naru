@@ -133,7 +133,7 @@ updated_at`.
 - `list [PROJECT]` — positional-or-`--project`, neither means unscoped.
   Prints a **bare array of compact objects with no `body`** — the same
   posture `task list` takes toward `description`. **Unlike `/api/scripts`
-  and `/api/diagrams`, there is no flat `/api/artifacts?project=` sibling** —
+  and `/api/workflows`, there is no flat `/api/artifacts?project=` sibling** —
   the API's only collection route is the nested
   `/api/projects/{id}/artifacts`. This is a deliberate asymmetry, not a gap:
   `project_id` is `NOT NULL`, so an artifact is never meaningfully unscoped,

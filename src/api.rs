@@ -29,7 +29,7 @@ use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, Query, Request, State};
 use axum::http::{HeaderMap, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, patch, post};
+use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use base64::Engine;
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
@@ -38,20 +38,20 @@ use serde_json::json;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::core::{
-    AgentSession, AgentSpawned, AnchorSide, ArchiveOutcome, Artifact, ArtifactPatch,
-    ArtifactSummary, CcDashboard, CcLiveSession, CcScorecard, CcUsage, DiagramPatch, DiagramType,
-    EdgeMarker, EdgeNew, EdgePatch, EdgeStyle, Error, FileTreeEntry, FrameNew, FramePatch,
-    FrameShape, GitCommit, GitCommitFile, GitFileDiff, GitRepo, GitRepoView, GitStatus,
-    GitWorktree, InboxItem, InboxKind, LIVE_AUDIO_MAX, LIVE_BOARD_INK_STATE_MAX, LIVE_BOARD_KEEP,
-    LIVE_INK_MAX, LibraryBuiltinAction, LibraryBundle, LibraryImportResult, LibraryKind,
-    LibraryPatch, LibraryScope, LiveBoardHistoryEntry, LiveBoardInkEntry, LiveBoardKind,
-    LiveContext, LiveNotebookEntry, LiveNotice, LiveState, LiveStatus, LiveTranscript, LiveWindow,
-    ModelRates, NaruVersion, NextResult, Priority, ProjectAgents, ProjectFileTree, ProjectGitLog,
-    ProjectGitRepos, ProjectGitStatus, ProjectGitView, ProjectPatch, ProjectVersion, ReceiptPatch,
+    AgentSession, AgentSpawned, ArchiveOutcome, Artifact, ArtifactPatch, ArtifactSummary,
+    CcDashboard, CcLiveSession, CcScorecard, CcUsage, Error, FileTreeEntry, GitCommit,
+    GitCommitFile, GitFileDiff, GitRepo, GitRepoView, GitStatus, GitWorktree, InboxItem, InboxKind,
+    LIVE_AUDIO_MAX, LIVE_BOARD_INK_STATE_MAX, LIVE_BOARD_KEEP, LIVE_INK_MAX, LibraryBuiltinAction,
+    LibraryBundle, LibraryImportResult, LibraryKind, LibraryPatch, LibraryScope,
+    LiveBoardHistoryEntry, LiveBoardInkEntry, LiveBoardKind, LiveContext, LiveNotebookEntry,
+    LiveNotice, LiveState, LiveStatus, LiveTranscript, LiveWindow, ModelRates, NaruVersion,
+    NextResult, Priority, ProjectAgents, ProjectFileTree, ProjectGitLog, ProjectGitRepos,
+    ProjectGitStatus, ProjectGitView, ProjectPatch, ProjectVersion, ReceiptPatch,
     STALE_CLAIM_MINUTES, Script, ScriptArg, ScriptPatch, ScriptRunEvent, Status, Store, SystemInfo,
-    Task, TaskPatch, TaskSummary, Waypoint, agents, attachments, audio, board, config, files, git,
-    guard, hooks, inbox_triage, library, listen, live, project_memory, receipt, retro, script_runs,
-    scripts, speech, supervisor, system, validate_live_client, version,
+    Task, TaskPatch, TaskSummary, WorkflowBranch, WorkflowNodeKind, WorkflowNodeNew,
+    WorkflowNodePatch, WorkflowPatch, WorkflowTrigger, agents, attachments, audio, board, config,
+    files, git, guard, hooks, inbox_triage, library, listen, live, project_memory, receipt, retro,
+    script_runs, scripts, speech, supervisor, system, validate_live_client, version, workflow,
 };
 
 /// The Vite build output, embedded into the binary at compile time.
@@ -460,6 +460,64 @@ fn retro_watcher_tick(state: &AppState) {
                     run.id
                 );
             }
+        }
+    }
+}
+
+/// How often the workflow watcher (`watch_workflows`) asks which time-triggered
+/// workflows are due. A minute: the finest `every_minutes` is one minute, so a
+/// finer tick could only run a workflow early; `MESA_WATCH_WORKFLOWS_TICK_MS`
+/// is the matching test seam.
+const WATCH_WORKFLOWS_TICK: Duration = Duration::from_secs(60);
+
+fn watch_workflows_tick() -> Duration {
+    crate::core::env::var("WATCH_WORKFLOWS_TICK_MS")
+        .and_then(|s| s.parse().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(WATCH_WORKFLOWS_TICK)
+}
+
+/// One workflow-watcher pass (mesa task 1607, `docs/workflows.md`): run every
+/// workflow whose trigger is `mode: time` and which is due — no run with
+/// `trigger = time` started within its `every_minutes`, judged on the store's
+/// own clock (`Store::due_time_workflows`).
+///
+/// The run row is the claim, written **before** anything executes
+/// (`workflow::claim_run`, the retro watcher's pattern): it is what makes the
+/// workflow not due on the next tick, so a run that outlasts the interval is
+/// never started twice and a *failed* run does not retry every tick. Claim
+/// under the store lock, execute off it — the engine itself only takes the
+/// lock around brief reads and writes between nodes. Workflows of an
+/// archived project are never due.
+fn workflow_watcher_tick(state: &AppState) {
+    let due = {
+        let store = match state.store.lock() {
+            Ok(s) => s,
+            Err(e) => e.into_inner(),
+        };
+        match store.due_time_workflows() {
+            Ok(due) => due,
+            Err(e) => {
+                eprintln!("workflow-watcher: due_time_workflows failed: {e}");
+                return;
+            }
+        }
+    };
+    for id in due {
+        let claimed = {
+            let mut store = match state.store.lock() {
+                Ok(s) => s,
+                Err(e) => e.into_inner(),
+            };
+            workflow::claim_run(&mut store, id, WorkflowTrigger::Time, "")
+        };
+        match claimed {
+            Ok((view, run)) => {
+                if let Err(e) = workflow::execute_run(&*state.store, &view, run) {
+                    eprintln!("workflow-watcher: workflow {id} could not finish its run: {e}");
+                }
+            }
+            Err(e) => eprintln!("workflow-watcher: workflow {id} could not start: {e}"),
         }
     }
 }
@@ -2321,10 +2379,12 @@ fn forget_dispatch(state: &AppState, job_id: &str) {
 /// Server action like the flags below.
 /// `watch_todo` starts the periodic todo-watcher (see [`todo_watcher_tick`]),
 /// `watch_inbox` the periodic inbox-watcher (see [`inbox_watcher_tick`]) and
-/// `watch_retro` the scheduled retrospective (see [`retro_watcher_tick`]);
-/// all off by default, all propagated across the web UI's Restart Server
+/// `watch_retro` the scheduled retrospective (see [`retro_watcher_tick`]) and
+/// `watch_workflows` the time-triggered workflows (see
+/// [`workflow_watcher_tick`]); all off by default, all propagated across the web UI's Restart Server
 /// action. They are independent flags over independent queues — none implies
 /// another.
+#[allow(clippy::too_many_arguments)]
 pub fn serve(
     port: u16,
     lan: bool,
@@ -2333,6 +2393,7 @@ pub fn serve(
     watch_inbox: bool,
     watch_cost: bool,
     watch_retro: bool,
+    watch_workflows: bool,
 ) -> crate::core::Result<()> {
     let store = Store::open_default()?;
     let restart_requested = Arc::new(AtomicBool::new(false));
@@ -2465,6 +2526,18 @@ pub fn serve(
                 }
             });
         }
+        if watch_workflows {
+            let watch_state = state.clone();
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(watch_workflows_tick());
+                loop {
+                    ticker.tick().await;
+                    let state = watch_state.clone();
+                    let _ =
+                        tokio::task::spawn_blocking(move || workflow_watcher_tick(&state)).await;
+                }
+            });
+        }
         let listener = tokio::net::TcpListener::bind((host, port)).await?;
 
         println!("{}", json!({"listening": format!("http://{host}:{port}")}));
@@ -2506,6 +2579,9 @@ pub fn serve(
         }
         if watch_retro {
             args.push("--watch-retro".to_string());
+        }
+        if watch_workflows {
+            args.push("--watch-workflows".to_string());
         }
         std::process::Command::new(exe).args(args).spawn()?;
 
@@ -2574,21 +2650,27 @@ fn router(state: AppState) -> Router {
         // GET, not mutating — the Content-Type gate doesn't apply (matches
         // the git-diff/agents-list GET precedent below).
         .route("/api/attachments/{id}/download", get(download_attachment))
-        .route("/api/diagrams", get(list_diagrams).post(create_diagram))
+        // Workflows (mesa task 1607): a run executes shell and model calls,
+        // so every route — authoring, reading and running alike — carries
+        // `require_agent_access`, the scripts' gate. See `docs/workflows.md`.
+        .route("/api/workflows", get(list_workflows).post(create_workflow))
         .route(
-            "/api/diagrams/{id}",
-            get(show_diagram)
-                .patch(update_diagram)
-                .delete(delete_diagram),
+            "/api/workflows/{id}",
+            get(show_workflow)
+                .patch(update_workflow)
+                .delete(delete_workflow),
         )
-        .route("/api/diagrams/{id}/frames", post(create_frame))
-        .route("/api/diagrams/{id}/edges", post(create_edge))
-        .route("/api/diagrams/{id}/events", get(list_diagram_events))
-        .route("/api/frames/{id}", patch(update_frame).delete(delete_frame))
+        .route("/api/workflows/{id}/nodes", post(create_workflow_node))
+        .route("/api/workflows/{id}/edges", post(create_workflow_edge))
+        .route("/api/workflows/{id}/run", post(run_workflow_route))
+        .route("/api/workflows/{id}/runs", get(list_workflow_runs))
         .route(
-            "/api/edges/{id}",
-            get(show_edge).patch(update_edge).delete(delete_edge),
+            "/api/workflow-nodes/{id}",
+            patch(update_workflow_node).delete(delete_workflow_node),
         )
+        .route("/api/workflow-edges/{id}", delete(delete_workflow_edge))
+        .route("/api/workflow-runs/{id}", get(show_workflow_run))
+        .route("/api/workflow-log", get(list_workflow_log))
         .route("/api/inbox", get(list_inbox).post(create_inbox))
         .route(
             "/api/inbox/{id}",
@@ -3895,306 +3977,290 @@ async fn delete_attachment(
     Ok(Json(store.delete_attachment(id)?).into_response())
 }
 
-// ---- diagrams ----
+// ---- workflows (mesa task 1607) ----
+//
+// Every route here carries `require_agent_access`, reads included: a run
+// executes shell and model calls the person authored, and a node's config is
+// that command, so there is no coherent line between reading a workflow and
+// writing one (the scripts' and the library's posture, `docs/workflows.md`).
 
 #[derive(Deserialize)]
-struct DiagramQuery {
+struct WorkflowQuery {
     #[serde(default)]
     project: Option<i64>,
 }
 
 #[derive(Deserialize)]
-struct DiagramCreate {
-    project_id: i64,
-    title: String,
+struct WorkflowCreate {
+    name: String,
+    #[serde(default)]
+    project_id: Option<i64>,
     #[serde(default)]
     description: Option<String>,
-    #[serde(default)]
-    author: Option<String>,
-    /// Missing/null defaults to `DiagramType::Storyboard`. Immutable after
-    /// creation — no field on `DiagramUpdate`.
-    #[serde(default)]
-    diagram_type: Option<DiagramType>,
-}
-
-/// Optional `?author=` for the change history on body-less mutations (DELETE).
-#[derive(Deserialize)]
-struct ActorQuery {
-    #[serde(default)]
-    author: Option<String>,
 }
 
 #[derive(Deserialize)]
-struct DiagramUpdate {
+struct WorkflowUpdate {
     #[serde(default)]
-    title: Option<String>,
+    name: Option<String>,
     #[serde(default, deserialize_with = "double_option")]
     description: Option<Option<String>>,
-    /// Recorded as the change author; does not alter the board's own author.
-    #[serde(default)]
-    author: Option<String>,
+    #[serde(default, deserialize_with = "double_option")]
+    project_id: Option<Option<i64>>,
 }
 
 #[derive(Deserialize)]
-struct FrameCreate {
+struct WorkflowNodeCreate {
+    kind: WorkflowNodeKind,
     title: String,
     #[serde(default)]
-    body: Option<String>,
+    config: Option<serde_json::Value>,
     #[serde(default)]
     x: Option<f64>,
     #[serde(default)]
     y: Option<f64>,
-    #[serde(default)]
-    w: Option<f64>,
-    #[serde(default)]
-    h: Option<f64>,
-    #[serde(default)]
-    color: Option<String>,
-    #[serde(default)]
-    task_id: Option<i64>,
-    /// Must be a member of the board's `diagram_type` shape set; validated
-    /// by `Store::create_frame`. Immutable after creation — no field on
-    /// `FrameUpdate`.
-    #[serde(default)]
-    shape: Option<FrameShape>,
-    #[serde(default)]
-    author: Option<String>,
 }
 
 #[derive(Deserialize)]
-struct FrameUpdate {
+struct WorkflowNodeUpdate {
     #[serde(default)]
     title: Option<String>,
-    #[serde(default, deserialize_with = "double_option")]
-    body: Option<Option<String>>,
+    #[serde(default)]
+    config: Option<serde_json::Value>,
     #[serde(default)]
     x: Option<f64>,
     #[serde(default)]
     y: Option<f64>,
-    #[serde(default)]
-    w: Option<f64>,
-    #[serde(default)]
-    h: Option<f64>,
-    #[serde(default, deserialize_with = "double_option")]
-    color: Option<Option<String>>,
-    #[serde(default, deserialize_with = "double_option")]
-    task_id: Option<Option<i64>>,
-    /// Recorded as the change author; does not alter the frame's own author.
-    #[serde(default)]
-    author: Option<String>,
 }
 
 #[derive(Deserialize)]
-struct EdgeCreate {
-    from_frame: i64,
-    to_frame: i64,
+struct WorkflowEdgeCreate {
+    from_node: i64,
+    to_node: i64,
     #[serde(default)]
-    label: Option<String>,
+    branch: Option<WorkflowBranch>,
+}
+
+#[derive(Deserialize, Default)]
+struct WorkflowRunBody {
+    /// The run input the trigger node hands on; absent = empty.
     #[serde(default)]
-    author: Option<String>,
-    /// Missing/`null` is the default rendering (solid); an unknown literal
-    /// fails to deserialize -> the existing 422 `validation` path.
-    #[serde(default)]
-    style: Option<EdgeStyle>,
-    /// Missing/`null` is the default rendering (nothing at the start). A
-    /// syntactically valid but wrong-for-board-type marker is the `Store`
-    /// `validation` error instead.
-    #[serde(default)]
-    from_marker: Option<EdgeMarker>,
-    /// Missing/`null` is the default rendering (a closed arrowhead). Same
-    /// contract as `from_marker`.
-    #[serde(default)]
-    to_marker: Option<EdgeMarker>,
+    input: Option<String>,
 }
 
 #[derive(Deserialize)]
-struct EdgeUpdate {
-    #[serde(default, deserialize_with = "double_option")]
-    label: Option<Option<String>>,
+struct WorkflowLogQuery {
     #[serde(default)]
-    waypoints: Option<Vec<Waypoint>>,
-    #[serde(default, deserialize_with = "double_option")]
-    from_anchor: Option<Option<AnchorSide>>,
-    #[serde(default, deserialize_with = "double_option")]
-    to_anchor: Option<Option<AnchorSide>>,
-    /// Omitted leaves the style untouched, explicit `null` clears it back to
-    /// the default (solid), a literal sets it — `from_anchor`'s three-state
-    /// contract exactly.
-    #[serde(default, deserialize_with = "double_option")]
-    style: Option<Option<EdgeStyle>>,
-    /// Same three-state contract, for the `from_frame` end's decoration.
-    #[serde(default, deserialize_with = "double_option")]
-    from_marker: Option<Option<EdgeMarker>>,
-    /// Same three-state contract, for the `to_frame` end's decoration.
-    #[serde(default, deserialize_with = "double_option")]
-    to_marker: Option<Option<EdgeMarker>>,
-    /// Recorded as the change author.
+    log: Option<String>,
     #[serde(default)]
-    author: Option<String>,
+    limit: Option<i64>,
 }
 
-async fn list_diagrams(
+async fn list_workflows(
     State(state): State<AppState>,
-    Query(q): Query<DiagramQuery>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Query(q): Query<WorkflowQuery>,
 ) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
     let store = state.store.lock().unwrap();
-    Ok(Json(store.list_diagrams(q.project)?).into_response())
+    Ok(Json(store.list_workflows(q.project)?).into_response())
 }
 
-async fn create_diagram(
+async fn create_workflow(
     State(state): State<AppState>,
-    body: Result<Json<DiagramCreate>, JsonRejection>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Result<Json<WorkflowCreate>, JsonRejection>,
 ) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
     let Json(body) = body?;
     let mut store = state.store.lock().unwrap();
-    let diagram = store.create_diagram(
-        body.project_id,
-        &body.title,
-        body.description.as_deref(),
-        body.author.as_deref(),
-        body.diagram_type,
-    )?;
-    Ok((StatusCode::CREATED, Json(diagram)).into_response())
+    let workflow =
+        store.create_workflow(body.project_id, &body.name, body.description.as_deref())?;
+    Ok((StatusCode::CREATED, Json(workflow)).into_response())
 }
 
-/// Returns the board's full contents: {diagram, frames, edges}.
-async fn show_diagram(State(state): State<AppState>, Path(id): Path<i64>) -> ApiResult<Response> {
-    let store = state.store.lock().unwrap();
-    Ok(Json(store.get_diagram_view(id)?).into_response())
-}
-
-async fn update_diagram(
+/// Returns the workflow's full contents: {workflow, nodes, edges}.
+async fn show_workflow(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Path(id): Path<i64>,
-    body: Result<Json<DiagramUpdate>, JsonRejection>,
 ) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let store = state.store.lock().unwrap();
+    Ok(Json(store.get_workflow_view(id)?).into_response())
+}
+
+async fn update_workflow(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    body: Result<Json<WorkflowUpdate>, JsonRejection>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
     let Json(body) = body?;
-    let patch = DiagramPatch {
-        title: body.title,
+    let patch = WorkflowPatch {
+        project_id: body.project_id,
+        name: body.name,
         description: body.description,
     };
     let mut store = state.store.lock().unwrap();
-    Ok(Json(store.update_diagram(id, &patch, body.author.as_deref())?).into_response())
+    Ok(Json(store.update_workflow(id, patch)?).into_response())
 }
 
-async fn delete_diagram(State(state): State<AppState>, Path(id): Path<i64>) -> ApiResult<Response> {
-    let mut store = state.store.lock().unwrap();
-    Ok(Json(store.delete_diagram(id)?).into_response())
-}
-
-/// Diagram change history (who/what/when), oldest first.
-async fn list_diagram_events(
+/// Echoes the destroyed {workflow, nodes, edges}.
+async fn delete_workflow(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Path(id): Path<i64>,
 ) -> ApiResult<Response> {
-    let store = state.store.lock().unwrap();
-    Ok(Json(store.list_diagram_events(id)?).into_response())
+    require_agent_access(&state, &addr, &headers)?;
+    let mut store = state.store.lock().unwrap();
+    Ok(Json(store.delete_workflow(id)?).into_response())
 }
 
-async fn create_frame(
+async fn create_workflow_node(
     State(state): State<AppState>,
-    Path(diagram_id): Path<i64>,
-    payload: Result<Json<FrameCreate>, JsonRejection>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(workflow_id): Path<i64>,
+    body: Result<Json<WorkflowNodeCreate>, JsonRejection>,
 ) -> ApiResult<Response> {
-    let Json(payload) = payload?;
-    let new = FrameNew {
-        title: payload.title,
-        body: payload.body,
-        x: payload.x.unwrap_or(40.0),
-        y: payload.y.unwrap_or(40.0),
-        w: payload.w.unwrap_or(240.0),
-        h: payload.h.unwrap_or(140.0),
-        color: payload.color,
-        task_id: payload.task_id,
-        author: payload.author,
-        shape: payload.shape,
+    require_agent_access(&state, &addr, &headers)?;
+    let Json(body) = body?;
+    let new = WorkflowNodeNew {
+        kind: body.kind,
+        title: body.title,
+        config: body.config,
+        x: body.x,
+        y: body.y,
     };
     let mut store = state.store.lock().unwrap();
-    let frame = store.create_frame(diagram_id, &new)?;
-    Ok((StatusCode::CREATED, Json(frame)).into_response())
+    let node = store.create_workflow_node(workflow_id, &new)?;
+    Ok((StatusCode::CREATED, Json(node)).into_response())
 }
 
-async fn update_frame(
+async fn update_workflow_node(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Path(id): Path<i64>,
-    payload: Result<Json<FrameUpdate>, JsonRejection>,
+    body: Result<Json<WorkflowNodeUpdate>, JsonRejection>,
 ) -> ApiResult<Response> {
-    let Json(payload) = payload?;
-    let patch = FramePatch {
-        title: payload.title,
-        body: payload.body,
-        x: payload.x,
-        y: payload.y,
-        w: payload.w,
-        h: payload.h,
-        color: payload.color,
-        task_id: payload.task_id,
+    require_agent_access(&state, &addr, &headers)?;
+    let Json(body) = body?;
+    let patch = WorkflowNodePatch {
+        title: body.title,
+        config: body.config,
+        x: body.x,
+        y: body.y,
     };
     let mut store = state.store.lock().unwrap();
-    Ok(Json(store.update_frame(id, &patch, payload.author.as_deref())?).into_response())
+    Ok(Json(store.update_workflow_node(id, patch)?).into_response())
 }
 
-async fn delete_frame(
+/// Echoes the destroyed {node, edges}.
+async fn delete_workflow_node(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Path(id): Path<i64>,
-    Query(q): Query<ActorQuery>,
 ) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
     let mut store = state.store.lock().unwrap();
-    let (frame, edges) = store.delete_frame(id, q.author.as_deref())?;
-    Ok(Json(json!({"frame": frame, "edges": edges})).into_response())
+    let (node, edges) = store.delete_workflow_node(id)?;
+    Ok(Json(json!({"node": node, "edges": edges})).into_response())
 }
 
-async fn create_edge(
+async fn create_workflow_edge(
     State(state): State<AppState>,
-    Path(diagram_id): Path<i64>,
-    body: Result<Json<EdgeCreate>, JsonRejection>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(workflow_id): Path<i64>,
+    body: Result<Json<WorkflowEdgeCreate>, JsonRejection>,
 ) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
     let Json(body) = body?;
     let mut store = state.store.lock().unwrap();
-    let new = EdgeNew {
-        from_frame: body.from_frame,
-        to_frame: body.to_frame,
-        label: body.label,
-        author: body.author,
-        style: body.style,
-        from_marker: body.from_marker,
-        to_marker: body.to_marker,
-    };
-    let edge = store.create_edge(diagram_id, &new)?;
+    let edge =
+        store.create_workflow_edge(workflow_id, body.from_node, body.to_node, body.branch)?;
     Ok((StatusCode::CREATED, Json(edge)).into_response())
 }
 
-async fn show_edge(State(state): State<AppState>, Path(id): Path<i64>) -> ApiResult<Response> {
-    let store = state.store.lock().unwrap();
-    Ok(Json(store.get_edge(id)?).into_response())
+async fn delete_workflow_edge(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let mut store = state.store.lock().unwrap();
+    Ok(Json(store.delete_workflow_edge(id)?).into_response())
 }
 
-async fn update_edge(
+/// Runs a workflow to completion and answers its finished run record.
+///
+/// Synchronous: the response is held until the run ends, on a blocking
+/// thread, and **the store lock is never held across a node** — the engine
+/// takes the shared `Mutex<Store>` only around the brief reads and writes
+/// between nodes, so a long run does not stall every other request. A run
+/// that *failed* is 200 with `status: "failed"` (the status is data, as a
+/// script's nonzero exit is); 422 is "could not run at all" (no or two
+/// triggers, input too large), 404 an unknown workflow.
+async fn run_workflow_route(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Path(id): Path<i64>,
-    body: Result<Json<EdgeUpdate>, JsonRejection>,
+    body: Result<Json<WorkflowRunBody>, JsonRejection>,
 ) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
     let Json(body) = body?;
-    let patch = EdgePatch {
-        label: body.label,
-        waypoints: body.waypoints,
-        from_anchor: body.from_anchor,
-        to_anchor: body.to_anchor,
-        style: body.style,
-        from_marker: body.from_marker,
-        to_marker: body.to_marker,
-    };
-    let mut store = state.store.lock().unwrap();
-    Ok(Json(store.update_edge(id, &patch, body.author.as_deref())?).into_response())
+    let input = body.input.unwrap_or_default();
+    let store = state.store.clone();
+    let run = tokio::task::spawn_blocking(move || {
+        workflow::run_workflow(&*store, id, WorkflowTrigger::Manual, &input)
+    })
+    .await
+    .map_err(|e| agents_unavailable(format!("workflow run panicked: {e}")))??;
+    Ok(Json(run).into_response())
 }
 
-async fn delete_edge(
+async fn list_workflow_runs(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Path(id): Path<i64>,
-    Query(q): Query<ActorQuery>,
 ) -> ApiResult<Response> {
-    let mut store = state.store.lock().unwrap();
-    Ok(Json(store.delete_edge(id, q.author.as_deref())?).into_response())
+    require_agent_access(&state, &addr, &headers)?;
+    let store = state.store.lock().unwrap();
+    Ok(Json(store.list_workflow_runs(id)?).into_response())
+}
+
+async fn show_workflow_run(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let store = state.store.lock().unwrap();
+    Ok(Json(store.get_workflow_run(id)?).into_response())
+}
+
+async fn list_workflow_log(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Query(q): Query<WorkflowLogQuery>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let store = state.store.lock().unwrap();
+    Ok(Json(store.list_workflow_log(q.log.as_deref(), q.limit.unwrap_or(50))?).into_response())
 }
 
 // ---- inbox (global update requests) ----
@@ -13234,24 +13300,6 @@ mod tests {
         );
         assert!(!dir.path().join("rebound").exists());
         assert!(!dir.path().join("crosssite").exists());
-    }
-
-    // --- Locked edge anchors: three-state PATCH validation (mesa task 350) ---
-
-    /// An invalid `AnchorSide` literal fails to deserialize `EdgeUpdate` at
-    /// the serde boundary — the same mechanism that already maps an invalid
-    /// `status`/`priority` literal to a 422 `validation` error via
-    /// `impl From<JsonRejection> for ApiError` (see module docs). Once a
-    /// value reaches `Store::update_edge`, it is already a valid `AnchorSide`;
-    /// there is nothing left for a dedicated Store-level check to reject.
-    #[test]
-    fn edge_update_rejects_invalid_anchor_literal() {
-        assert!(serde_json::from_str::<EdgeUpdate>(r#"{"from_anchor":"diagonal"}"#).is_err());
-        assert!(serde_json::from_str::<EdgeUpdate>(r#"{"to_anchor":"diagonal"}"#).is_err());
-        // Valid literals, null (unlock), and omission all still parse.
-        assert!(serde_json::from_str::<EdgeUpdate>(r#"{"from_anchor":"top"}"#).is_ok());
-        assert!(serde_json::from_str::<EdgeUpdate>(r#"{"to_anchor":null}"#).is_ok());
-        assert!(serde_json::from_str::<EdgeUpdate>(r#"{}"#).is_ok());
     }
 
     // --- acceptance / artifact / result over PATCH (mesa task 500) ---------

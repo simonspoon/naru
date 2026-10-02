@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Seeds a fresh MESA_DB with fictional demo data for the promo-video
 # walkthrough (walkthrough.sh hardcodes the resulting ids: project 1 board,
-# tasks 1-5, diagram 1 with frames 1-3, project 2). Run against a
+# tasks 1-5, workflow 1 with nodes 1-3, project 2). Run against a
 # throwaway db/port — never the real dev instance (see
 # docs/mesa-live-server-verify in project memory: :7777 is live).
 #
@@ -25,15 +25,15 @@ mesa task block "$t4" --by "$t2" >/dev/null
 mesa task block "$t4" --by "$t3" >/dev/null
 mesa inbox add --task "$t3" "Customers report the old checkout still shows on mobile Safari" >/dev/null
 
-sb=$(mesa diagram create "$proj1" "Checkout Flow" | id)
-f1=$(mesa diagram frame create "$sb" "Cart" --x 40 --y 120 | id)
-f2=$(mesa diagram frame create "$sb" "Payment" --x 360 --y 120 | id)
-f3=$(mesa diagram frame create "$sb" "Confirmation" --x 680 --y 120 | id)
-mesa diagram edge create "$sb" "$f1" "$f2" >/dev/null
-mesa diagram edge create "$sb" "$f2" "$f3" >/dev/null
+wf=$(mesa workflow create "Checkout Flow" --project "$proj1" | id)
+f1=$(mesa workflow node create "$wf" trigger "Cart" --x 40 --y 120 | id)
+f2=$(mesa workflow node create "$wf" cli "Payment" --config '{"command":"echo paid"}' --x 360 --y 120 | id)
+f3=$(mesa workflow node create "$wf" output "Confirmation" --config '{"target":"log","log":"checkout"}' --x 680 --y 120 | id)
+mesa workflow edge create "$wf" "$f1" "$f2" >/dev/null
+mesa workflow edge create "$wf" "$f2" "$f3" >/dev/null
 
 proj2=$(mesa project create "Mobile App Launch" --no-git | id)
 mesa task create "$proj2" "Submit App Store review" --priority medium >/dev/null
 mesa task create "$proj2" "Write release notes" --priority low >/dev/null
 
-echo "seeded: project $proj1 (tasks $t1-$t4), diagram $sb (frames $f1-$f3), project $proj2" >&2
+echo "seeded: project $proj1 (tasks $t1-$t4), workflow $wf (nodes $f1-$f3), project $proj2" >&2

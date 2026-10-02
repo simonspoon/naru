@@ -1510,17 +1510,20 @@ Two of those choices are load-bearing:
   nothing else could answer at render time — `body` is bytes, and `title` is a
   caption the caller writes, so a route that read the type off the title would
   serve something different when the caption changed.
-- **A `diagram` board is a snapshot, not a view.** `core::board::diagram_svg`
-  reads the diagram, its frames and its edges **once**, at the push, and
-  renders a static SVG: frame rectangles with their titles, straight lines
-  between frame centres, a `viewBox` sized to the content. The canvas may be
-  rearranged or deleted afterwards and the picture the person was shown does
-  not change under them. It is deliberately plainer than the React canvas
-  (`docs/diagrams.md`) — no shapes, no markers, no routed connectors — because
+- **A `diagram` board is a snapshot, not a view.** `core::board::workflow_svg`
+  (mesa task 1607: workflows replaced diagrams, and `live board push
+  --diagram <ID>` became `--workflow <ID|NAME>`) reads the workflow, its nodes
+  and its edges **once**, at the push, and renders a static SVG: a box per
+  node with its title and kind, straight lines between node centres labelled
+  with a branch verdict where an edge has one, a `viewBox` sized to the
+  content. The graph may be rearranged or deleted afterwards and the picture
+  the person was shown does not change under them. It is deliberately plain —
   it is the picture someone glances at while being talked through it, not the
-  editor. Every piece of text that reaches it is XML-escaped: a frame title is
-  free text an untrusted source may have written (CLAUDE.md), and the output is
-  markup a browser parses.
+  editor. The kind stays `diagram` (a stored SVG) so a board pushed from a
+  diagram before workflows existed renders exactly as before. Every piece of
+  text that reaches it is XML-escaped: a node title is free text an untrusted
+  source may have written (CLAUDE.md), and the output is markup a browser
+  parses.
 
 `Store::add_live_board` is the single write path and holds every shape rule:
 the session must exist and still be `live` (a `validation` error, the call
@@ -1874,15 +1877,15 @@ the group (with none live, `not_found` naming `mesa live start`).
 
 | Command | Args | Prints |
 | --- | --- | --- |
-| `live board push [BODY]…` | exactly one source: a trailing var-arg text body, `--file <PATH>`, `--image <PATH>` or `--diagram <ID>`; plus `--kind markdown\|html` (text bodies only), `--title <TEXT>`, `--say <TEXT>`, `--quiet` | the created `LiveBoard` |
+| `live board push [BODY]…` | exactly one source: a trailing var-arg text body, `--file <PATH>`, `--image <PATH>` or `--workflow <ID\|NAME>`; plus `--kind markdown\|html` (text bodies only), `--title <TEXT>`, `--say <TEXT>`, `--quiet` | the created `LiveBoard` |
 | `live board show [ID]` (alias `get`) | `--quiet`; without an ID, the board that is showing | one `LiveBoard` |
 | `live board list` | `--limit <N>` (clamped to 1..=20) | a bare array of bodiless summaries, oldest first |
 | `live board clear` | `--quiet` | the summaries it destroyed |
 | `live board keep` | exactly one of `--project <ID\|NAME>` / `--task <ID>`; plus `--id <BOARD>`, `--name <NAME>`, `--quiet` | the created `Artifact` / `Attachment`, plus an `ink` key when `--task` keeps a board with ink |
 
 - **The source is a required `ArgGroup`**: exactly one of the body, `--file`,
-  `--image` and `--diagram`. None or two is `usage`, exit 2. `--kind` names one
-  of the two *text* kinds and conflicts with `--image`/`--diagram`, whose own
+  `--image` and `--workflow`. None or two is `usage`, exit 2. `--kind` names one
+  of the two *text* kinds and conflicts with `--image`/`--workflow`, whose own
   flag already said what the board is. `--file`'s extension picks the kind when
   `--kind` does not (`.html`/`.htm` is HTML, anything else is read as
   markdown).
@@ -2019,7 +2022,7 @@ Three values, and they are all one idea: **what the person is looking at.**
 
 `navigate`'s target is one of the app's own hash routes — `#/`, `#/live`,
 `#/inbox`, `#/cc`, `#/scripts`, `#/library`, `#/settings`, `#/terminal`, `#/projects/<id>`
-and that project's `tasks/<id>`, `diagrams`, `git`, `files`, `terminal`,
+and that project's `tasks/<id>`, `workflows`, `git`, `files`, `terminal`,
 `dashboard` and `settings`. The list is in `AGENT_PROMPT` so the agent knows
 what it may say; the *rule* Naru enforces is only the `#/` shape, since the
 route inventory is the frontend's business and pinning a second copy of it in
@@ -2260,7 +2263,7 @@ flag is an unknown argument, exit 2, exactly as on `turns`.
 | `live notice permission` | `--quiet`; takes no `--lease` (not the agent's verb — the page's, mesa task 1157) | the notice `LiveTurn`, created or the existing one for this working span |
 | `live turns` | `--after <ID>`, `--limit <N>` (clamped to 1..=500) | a bare array of turns, oldest first |
 | `live look` | `--output <PATH>` (default: a temp file named for the session) | the `LiveShot`: `path`, `window_id`, `width`, `height` |
-| `live board push [BODY]…` | exactly one source (body, `--file`, `--image`, `--diagram`), `--kind`, `--title`, `--say` — put every flag **before** the body | the created `LiveBoard` |
+| `live board push [BODY]…` | exactly one source (body, `--file`, `--image`, `--workflow`), `--kind`, `--title`, `--say` — put every flag **before** the body | the created `LiveBoard` |
 | `live board show [ID]` (alias `get`) | without an ID, the board that is showing | one `LiveBoard` |
 | `live board list` | `--limit <N>` (clamped to 1..=20) | a bare array of bodiless summaries, oldest first |
 | `live board clear` | — | the summaries it destroyed |
@@ -3724,8 +3727,8 @@ a macOS tool.
 
 The whiteboard (task 1071) has its own section: each of the four kinds pushed
 from its own source — with `--image` proving the extension allowlist decides
-the `content_type` and `--diagram` proving both that the SVG escapes a hostile frame
-title and that a later canvas edit does not reach the snapshot — the
+the `content_type` and `--workflow` proving both that the SVG escapes a hostile node
+title and that a later graph edit does not reach the snapshot — the
 required-source and required-destination `ArgGroup`s and the rest of the exit-2
 usage errors, the bodiless oldest-first listing, `--quiet` dropping exactly
 `body`, `keep` into an artifact and onto a task (decoded bytes, authored

@@ -25,4 +25,4 @@
  * The kind is the *page*; [`LiveContext`]'s other three fields are what is in
  * focus on it.
  */
-export type LiveContextKind = "artifacts" | "board" | "dashboard" | "diagrams" | "files" | "git" | "inbox" | "scripts" | "settings" | "terminal";
+export type LiveContextKind = "artifacts" | "board" | "dashboard" | "files" | "git" | "inbox" | "scripts" | "settings" | "terminal" | "workflows";

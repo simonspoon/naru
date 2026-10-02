@@ -117,8 +117,8 @@
 #  13. the whiteboard (mesa task 1071): `mesa live board` — the four kinds and
 #      where each body comes from (a typed body, `--file` with the kind from
 #      its extension, `--image` stored as base64 with its `content_type` from the
-#      inline-image allowlist, `--diagram` as an ESCAPED SVG snapshot a later
-#      canvas edit cannot change), `--say` speaking a turn beside the board,
+#      inline-image allowlist, `--workflow` as an ESCAPED SVG snapshot a later
+#      graph edit cannot change), `--say` speaking a turn beside the board,
 #      the required-source and required-destination ArgGroups and the rest of
 #      the exit-2 usage errors (`list --quiet` among them), the bodiless
 #      oldest-first `list`/`show` and the `--quiet` key set (drops `body`
@@ -1070,12 +1070,12 @@ ok "a refused context writes nothing: the stored route AND context are untouched
 # tabs plus the two global pages that have a focus. There is deliberately no
 # `custom`: a custom layout is several views at once and each publishes what
 # it holds, so the tab is never the answer (see `LiveContextKind`).
-for KIND in board dashboard diagrams files git inbox scripts settings terminal; do
+for KIND in board dashboard files git inbox scripts settings terminal workflows; do
   api 200 POST "/api/live/route" \
     "$(jq -n --arg k "$KIND" '{route:"#/projects/7", context:{kind:$k, label:"a thing"}}')"
   [ "$(jqb .context.kind)" = "$KIND" ] || fail "context kind $KIND must be accepted"
 done
-ok "all nine page kinds are accepted: board, dashboard, diagrams, files, git, inbox, scripts, settings, terminal"
+ok "all nine page kinds are accepted: board, dashboard, files, git, inbox, scripts, settings, terminal, workflows"
 
 # ---- the page's poll: session + turns, and the ?after= cursor ----
 "$MESA" live say "Opening the board." >/dev/null
@@ -2359,33 +2359,34 @@ run 1 "$MESA" live board push --image "$TMP/notes.txt"
 run 1 "$MESA" live board push --image "$TMP/no-such-file.png"
 [ "$(jqe .error.code)" = "validation" ] || fail "board push --image <missing>: error.code"
 
-# A diagram board is a SNAPSHOT: the SVG is rendered at push time and never
-# tracks the canvas again.
-DIA=$("$MESA" diagram create "$PROJ" "Board flow" | jq -r .id)
-"$MESA" diagram frame create "$DIA" "Start" --x 10 --y 10 >/dev/null
-"$MESA" diagram frame create "$DIA" '<script>alert(1)</script>' --x 300 --y 200 >/dev/null
-run 0 "$MESA" live board push --diagram "$DIA" --title "The flow"
+# A workflow board is a SNAPSHOT: the SVG is rendered at push time and never
+# tracks the graph again. It is stored as kind `diagram` (a stored SVG), so
+# boards pushed before workflows existed render the same way.
+DIA=$("$MESA" workflow create "Board flow" | jq -r .id)
+"$MESA" workflow node create "$DIA" cli "Start" --config '{"command":"true"}' --x 10 --y 10 >/dev/null
+"$MESA" workflow node create "$DIA" cli '<script>alert(1)</script>' --config '{"command":"true"}' --x 300 --y 200 >/dev/null
+run 0 "$MESA" live board push --workflow "$DIA" --title "The flow"
 B_SVG=$(jqs .id)
-[ "$(jqs .kind)" = "diagram" ] || fail "board push --diagram: kind"
-grep -q '<svg' <<<"$(jqs .body)" || fail "board push --diagram: the body must be SVG markup"
-grep -q '>Start</text>' <<<"$(jqs .body)" || fail "board push --diagram: a frame title must be drawn"
+[ "$(jqs .kind)" = "diagram" ] || fail "board push --workflow: kind"
+grep -q '<svg' <<<"$(jqs .body)" || fail "board push --workflow: the body must be SVG markup"
+grep -q '>Start</text>' <<<"$(jqs .body)" || fail "board push --workflow: a node title must be drawn"
 grep -q '<script>' <<<"$(jqs .body)" &&
-  fail "board push --diagram: a frame title must be ESCAPED — this is markup a browser parses"
-grep -q '&lt;script&gt;' <<<"$(jqs .body)" || fail "board push --diagram: the escaped title is missing"
-# The snapshot is frozen: renaming the frame afterwards changes nothing.
-SNAP_FRAME=$("$MESA" diagram show "$DIA" | jq -r '.frames[0].id')
-"$MESA" diagram frame update --title "Renamed" "$SNAP_FRAME" >/dev/null
+  fail "board push --workflow: a node title must be ESCAPED — this is markup a browser parses"
+grep -q '&lt;script&gt;' <<<"$(jqs .body)" || fail "board push --workflow: the escaped title is missing"
+# The snapshot is frozen: renaming the node afterwards changes nothing.
+SNAP_NODE=$("$MESA" workflow show "$DIA" | jq -r '.nodes[0].id')
+"$MESA" workflow node update "$SNAP_NODE" --title "Renamed" >/dev/null
 run 0 "$MESA" live board show "$B_SVG"
 grep -q '>Start</text>' <<<"$(jqs .body)" ||
-  fail "board push --diagram is a SNAPSHOT: a later canvas edit must not change it"
-ok "live board push: all four kinds — a text body, --file (kind from the extension), --image (base64 + allowlisted content_type) and --diagram (an escaped, frozen SVG snapshot) — plus --say speaking beside it"
+  fail "board push --workflow is a SNAPSHOT: a later graph edit must not change it"
+ok "live board push: all four kinds — a text body, --file (kind from the extension), --image (base64 + allowlisted content_type) and --workflow (an escaped, frozen SVG snapshot) — plus --say speaking beside it"
 
 # ---- the required source, and the other usage errors ----
 
 run 2 "$MESA" live board push
 [ -z "$STDOUT" ] || fail "live board push with no source: stdout must be empty"
 [ "$(jqe .error.code)" = "usage" ] || fail "live board push with no source: error.code"
-run 2 "$MESA" live board push --image "$TMP/shot.png" --diagram "$DIA"
+run 2 "$MESA" live board push --image "$TMP/shot.png" --workflow "$DIA"
 [ "$(jqe .error.code)" = "usage" ] || fail "live board push with two sources: error.code"
 run 2 "$MESA" live board push --file "$TMP/note.md" body words
 [ "$(jqe .error.code)" = "usage" ] || fail "live board push with --file AND a body: error.code"
@@ -2553,7 +2554,7 @@ ok "board show/repush across conversations: show works with no live session and 
 
 R_MD=$("$MESA" live board push --quiet --title "Rendered plan" '## Plan' | jq -r .id)
 R_HTML=$("$MESA" live board push --quiet --kind html --file "$TMP/mockup.html" | jq -r .id)
-R_SVG=$("$MESA" live board push --quiet --diagram "$DIA" | jq -r .id)
+R_SVG=$("$MESA" live board push --quiet --workflow "$DIA" | jq -r .id)
 R_IMG=$("$MESA" live board push --quiet --image "$TMP/shot.png" | jq -r .id)
 
 PORT=17781

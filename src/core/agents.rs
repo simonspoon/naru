@@ -774,6 +774,7 @@ fn spawn_for(
             name,
             prompt,
             prompts: Some(prompts),
+            ..Default::default()
         },
     )?;
     Ok(if configured.is_none() {
@@ -831,6 +832,127 @@ pub fn spawn_bg(
     prompts: &config::Prompts,
 ) -> Result<Option<String>, String> {
     run_script(&spawn_for(action, id, name, prompt, prompts)?, dir)
+}
+
+/// Runs one **synchronous** model call — the `workflow-prompt` action
+/// (mesa task 1607) — and returns its stdout.
+///
+/// The sibling of [`spawn_bg`] and the same single chokepoint: the script is
+/// resolved from the configured (or default) template through
+/// `config::resolve`, so `model`, `thinking` and `prompt` reach it only as
+/// shell-quoted `{placeholder}` values, and the `MESA_CLAUDE_BIN` seam is the
+/// same default-template-only one. The difference is that this waits, through
+/// [`capture`]: a nonzero exit is `Err` carrying the script's stderr (a
+/// missing binary is bash's own `claude: command not found`, exit 127) and
+/// so is a run past `timeout`.
+///
+/// The store is never involved: callers hold no lock across this call.
+pub fn run_sync(
+    action: &str,
+    dir: &str,
+    vars: &config::Vars,
+    timeout: std::time::Duration,
+) -> Result<String, String> {
+    let configured = config::command_for(action)?;
+    let template = match &configured {
+        Some(t) => t.as_str(),
+        None => config::default_command(action)
+            .ok_or_else(|| format!("no default command for {action}"))?,
+    };
+    let mut script = config::resolve(action, template, vars)?;
+    if configured.is_none() && claude_bin() != "claude" {
+        // The stub seam for a default template whose `claude` is not the
+        // first word: a shell function shadows the program for this run only.
+        script = format!(
+            "claude() {{ '{}' \"$@\"; }}\n{script}",
+            claude_bin().replace('\'', "'\\''")
+        );
+    }
+    let mut cmd = Command::new("bash");
+    cmd.arg("-c").arg(&script).current_dir(dir);
+    let out = capture(cmd, None, timeout)?;
+    if out.code != 0 {
+        // `ollama` draws a progress spinner with escapes and carriage returns
+        // on stderr; keep the last few real lines, escapes stripped.
+        let stderr = strip_ansi(&String::from_utf8_lossy(&out.stderr));
+        let tail: Vec<&str> = stderr
+            .split(['\n', '\r'])
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        let tail = tail[tail.len().saturating_sub(3)..].join(" | ");
+        return Err(format!("the model call exited {}: {tail}", out.code));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// What [`capture`] read off a finished process.
+pub struct Captured {
+    /// Exit code; -1 when a signal ended it.
+    pub code: i32,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
+/// Runs `cmd` to completion with `stdin` (empty when `None`, always closed
+/// after), in a process group of its own, and reads both pipes on threads so
+/// a chatty child cannot fill one and wedge. Past `timeout` the whole group is
+/// SIGKILLed and the answer is `Err("timed out after Ns")`; a nonzero exit is
+/// **data** in [`Captured::code`], and `Err` is only "could not spawn/wait".
+pub fn capture(
+    mut cmd: Command,
+    stdin: Option<Vec<u8>>,
+    timeout: std::time::Duration,
+) -> Result<Captured, String> {
+    use std::io::{Read, Write};
+    use std::os::unix::process::CommandExt;
+
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .spawn()
+        .map_err(|e| format!("failed to start {:?}: {e}", cmd.get_program()))?;
+    let pgid = child.id();
+    let mut pipe_in = child.stdin.take().expect("stdin was piped");
+    let writer = std::thread::spawn(move || {
+        // A child that exits without reading is not an error.
+        let _ = pipe_in.write_all(&stdin.unwrap_or_default());
+    });
+    let drain = |mut pipe: Box<dyn Read + Send>| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = pipe.read_to_end(&mut buf);
+            buf
+        })
+    };
+    let out = drain(Box::new(child.stdout.take().expect("stdout was piped")));
+    let err = drain(Box::new(child.stderr.take().expect("stderr was piped")));
+    let started = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() >= timeout => {
+                let _ = Command::new("kill")
+                    .args(["-KILL", "--", &format!("-{pgid}")])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("timed out after {}s", timeout.as_secs()));
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(25)),
+            Err(e) => return Err(format!("failed to wait for the process: {e}")),
+        }
+    };
+    let _ = writer.join();
+    Ok(Captured {
+        code: status.code().unwrap_or(-1),
+        stdout: out.join().unwrap_or_default(),
+        stderr: err.join().unwrap_or_default(),
+    })
 }
 
 /// Stops the background session with short job id `job_id`
