@@ -108,6 +108,9 @@
 #      are never read) adopted disk -> library, a sibling edit reading
 #      `disk-changed`, exported, imported into a second db + HOME, written
 #      library -> disk, and `diff -r` proving the two dirs byte-identical.
+#  16. editing a skill's siblings (mesa task 1605): PATCH with `files` absent
+#      (kept), present (replaced wholesale), a bad path or a non-skill 422
+#      writing nothing, and `sync apply … mesa` writing the edit to disk.
 set -euo pipefail
 # Drop inherited NARU_* vars: Naru reads them before MESA_*, so one would escape this script's isolation.
 unset $(env | sed -n 's/^\(NARU_[A-Za-z0-9_]*\)=.*/\1/p')
@@ -2154,6 +2157,63 @@ run 0 env HOME="$HOME_B" MESA_DB="$TMP/skill-b.db" "$MESA" library sync status
 ok "a skill carries its folder: disk -> library -> bundle -> library -> disk gives a byte-identical dir (diff -r), a sibling edit reads disk-changed, a dotfile and a symlink are never read"
 
 echo "== library-check: section 15 (a skill carries its folder) passed ($CHECKS checks so far) =="
+
+# ---- editing a skill's siblings over PATCH (mesa task 1605) ----
+# The Library page's skill editor saves the body and the whole sibling map in
+# one PATCH: `files` absent leaves the siblings, present replaces them, a bad
+# path is 422 writing nothing (the body in the same request included), and the
+# result reaches disk through the ordinary `sync apply … mesa`.
+PORT=17799
+"$MESA" serve --port "$PORT" >"$TMP/serve16.log" 2>&1 &
+SERVER_PID=$!
+for _ in $(seq 1 50); do
+  curl -sf "http://127.0.0.1:$PORT/api/projects" >/dev/null 2>&1 && break
+  sleep 0.1
+done
+curl -sf "http://127.0.0.1:$PORT/api/projects" >/dev/null ||
+  fail "section 16 server did not start (log: $(cat "$TMP/serve16.log"))"
+
+run 0 "$MESA" library show supervising-demo
+SKID=$(jqs .id)
+api 200 PATCH "/api/library/$SKID" '{"body":"index v2"}'
+[ "$(jqb '.files | length')" = "5" ] || fail "skill PATCH: files absent must leave the 5 siblings, got $BODY"
+api 200 PATCH "/api/library/$SKID" \
+  '{"body":"index v3","files":{"waiting.md":"edited over http\n","deep/new.md":"added\n"}}'
+[ "$(jqb .body)" = "index v3" ] || fail "skill PATCH: body"
+[ "$(jqb '.files | keys | join(",")')" = "deep/new.md,waiting.md" ] ||
+  fail "skill PATCH: files must be replaced wholesale (removed siblings gone), got $BODY"
+api 200 GET "/api/library/$SKID"
+[ "$(jqb '.files["waiting.md"]')" = "edited over http" ] || fail "skill PATCH: read-back, got $BODY"
+
+for BADFILES in '{"../escape.md":"x"}' '{"SKILL.md":"x"}' '{"/abs.md":"x"}' '{".hidden":"x"}' '{"a//b.md":"x"}'; do
+  api 422 PATCH "/api/library/$SKID" "{\"body\":\"must not land\",\"files\":$BADFILES}"
+  [ "$(jqb .error.code)" = "validation" ] || fail "skill PATCH bad files $BADFILES: error.code"
+done
+api 200 GET "/api/library/$SKID"
+[ "$(jqb .body)" = "index v3" ] || fail "skill PATCH: a refused files map must write no body"
+[ "$(jqb '.files | keys | join(",")')" = "deep/new.md,waiting.md" ] ||
+  fail "skill PATCH: a refused files map must write no files"
+
+# A non-skill kind refuses siblings, and nothing lands.
+api 201 POST /api/library '{"kind":"prompt","scope":"user","name":"files-refuser","body":"keep"}'
+NSID=$(jqb .id)
+api 422 PATCH "/api/library/$NSID" '{"body":"nope","files":{"a.md":"x"}}'
+api 200 GET "/api/library/$NSID"
+[ "$(jqb .body)" = "keep" ] || fail "non-skill PATCH with files: must write nothing"
+
+api 200 PATCH "/api/library/$SKID" '{"files":{}}'
+[ "$(jqb 'has("files")')" = "false" ] || fail "skill PATCH: an empty map must clear the siblings, got $BODY"
+api 200 PATCH "/api/library/$SKID" '{"files":{"waiting.md":"edited over http\n"}}'
+kill "$SERVER_PID"; wait "$SERVER_PID" 2>/dev/null || true; SERVER_PID=""
+
+run 0 "$MESA" library sync apply --resolve "$SK_PATH=mesa"
+[ "$(jq -r '.[0].applied' <<<"$STDOUT")" = "true" ] || fail "skill PATCH: sync apply mesa must apply, got $STDOUT"
+[ "$(cat "$SK_A/waiting.md")" = "edited over http" ] || fail "skill PATCH: waiting.md must reach disk"
+[ "$(cat "$SK_A/SKILL.md")" = "index v3" ] || fail "skill PATCH: SKILL.md must reach disk"
+[ ! -e "$SK_A/verifying.md" ] || fail "skill PATCH: a sibling dropped from the map must leave disk"
+ok "PATCH a skill's files: absent keeps, present replaces, bad paths 422 writing nothing (body too), non-skill 422, and a sync apply mesa writes waiting.md to disk"
+
+echo "== library-check: section 16 (editing a skill's siblings) passed ($CHECKS checks so far) =="
 
 echo
 echo "library-check: $CHECKS checks passed"

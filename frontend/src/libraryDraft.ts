@@ -1,6 +1,7 @@
 import type { LibraryItem } from './types/LibraryItem'
 import type { LibraryKind } from './types/LibraryKind'
 import type { LibraryScope } from './types/LibraryScope'
+import { filesDiffer, type SkillFiles } from './librarySkillFiles'
 
 /**
  * Pure draft logic for the Library page's authoring form, hoisted out of the
@@ -48,11 +49,14 @@ export interface LibraryDraft {
   name: string
   body: string
   exportCommand: boolean
+  /** A skill's sibling files beside SKILL.md (mesa task 1605, see
+   * `librarySkillFiles.ts`); empty for every other kind. */
+  files: SkillFiles
 }
 
 /** A blank form for the "new item" button. */
 export function emptyDraft(): LibraryDraft {
-  return { kind: 'agent', scope: 'user', projectId: '', name: '', body: '', exportCommand: false }
+  return { kind: 'agent', scope: 'user', projectId: '', name: '', body: '', exportCommand: false, files: {} }
 }
 
 /** The editable text for a stored item (or an unshadowed built-in, which
@@ -65,6 +69,7 @@ export function draftFrom(item: LibraryItem): LibraryDraft {
     name: item.name,
     body: item.body,
     exportCommand: item.export_command,
+    files: { ...(item.files ?? {}) },
   }
 }
 
@@ -200,6 +205,7 @@ export function isDirty(item: LibraryItem | null, draft: LibraryDraft): boolean 
   return (
     payload.name !== item.name ||
     payload.body !== item.body ||
-    payload.export_command !== item.export_command
+    payload.export_command !== item.export_command ||
+    (item.kind === 'skill' && filesDiffer(draft.files, item.files ?? {}))
   )
 }

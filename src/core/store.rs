@@ -2905,6 +2905,11 @@ pub struct LibraryPatch {
     /// `core::library::update_item` is the caller that removes the file a
     /// prompt stops owning, since `Store` never opens the filesystem.
     pub export_command: Option<bool>,
+    /// A skill's sibling files (mesa task 1605). `None` leaves them alone,
+    /// `Some` replaces the whole map — validated by `validate_library_files`
+    /// before anything is written, and written in the same `UPDATE` as the
+    /// body so a refusal leaves both untouched.
+    pub files: Option<std::collections::BTreeMap<String, String>>,
 }
 
 /// How a fork answers a built-in that changed under it (mesa task 1349,
@@ -8822,8 +8827,9 @@ impl Store {
         };
         let next_export = patch.export_command.unwrap_or(current.export_command);
         validate_library_export(next_kind, next_export)?;
-        // A kind change away from skill would strand its sibling files.
-        validate_library_files(next_kind, &current.files)?;
+        // Also catches a kind change away from skill stranding its siblings.
+        let next_files = patch.files.as_ref().unwrap_or(&current.files);
+        validate_library_files(next_kind, next_files)?;
 
         let identity_changed = next_kind != current.kind
             || next_scope != current.scope
@@ -8842,7 +8848,8 @@ impl Store {
 
         self.conn.execute(
             "UPDATE library_items SET name = ?1, kind = ?2, scope = ?3, project_id = ?4, \
-             body = ?5, export_command = ?6, updated_at = datetime('now') WHERE id = ?7",
+             body = ?5, export_command = ?6, files = ?7, updated_at = datetime('now') \
+             WHERE id = ?8",
             (
                 &next_name,
                 next_kind.as_str(),
@@ -8850,6 +8857,7 @@ impl Store {
                 next_project_id,
                 &next_body,
                 next_export,
+                library_files_json(next_files),
                 id,
             ),
         )?;

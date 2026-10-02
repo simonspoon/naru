@@ -6439,6 +6439,10 @@ struct LibraryUpdate {
     /// nothing to clear to.
     #[serde(default)]
     export_command: Option<bool>,
+    /// A skill's sibling files (mesa task 1605): absent or `null` leaves them
+    /// alone, a map replaces the whole set.
+    #[serde(default)]
+    files: Option<std::collections::BTreeMap<String, String>>,
 }
 
 #[derive(Deserialize)]
@@ -6592,6 +6596,7 @@ async fn update_library(
         scope: None,
         project_id: None,
         export_command: body.export_command,
+        files: body.files,
     };
     let mut store = state.store.lock().unwrap();
     // Through `library::update_item`, not the store directly: a prompt whose
@@ -17091,6 +17096,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                 name: None,
                 body: Some(Some("edited from a phone".to_string())),
                 export_command: None,
+                files: None,
             })),
         )
         .await
@@ -17240,6 +17246,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                         name: None,
                         body: Some(Some("hostile".to_string())),
                         export_command: None,
+                        files: None,
                     })),
                 )
                 .await,

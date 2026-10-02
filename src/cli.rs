@@ -7502,6 +7502,7 @@ fn run_library_cmd(cmd: LibraryCmd) -> Result<()> {
                         scope: None,
                         project_id: None,
                         export_command,
+                        files: None,
                     };
                     // Through `library::update_item`, not the store directly:
                     // a prompt whose flag goes off gives up its file.

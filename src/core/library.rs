@@ -4661,6 +4661,65 @@ mod tests {
         );
     }
 
+    #[test]
+    fn update_item_replaces_files_with_the_body_or_writes_nothing() {
+        let (mut store, dir) = temp_store();
+        let disk = dir.path().join("disk");
+        fs::create_dir_all(&disk).unwrap();
+        let pid = project_at(&mut store, &disk);
+        let id = skill_item(&mut store, pid, "body");
+        let files: BTreeMap<String, String> = [("a.md".to_string(), "A".to_string())].into();
+        let up = update_item(
+            &mut store,
+            id,
+            LibraryPatch {
+                body: Some("new".into()),
+                files: Some(files.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!((up.body.as_str(), &up.files), ("new", &files));
+        // Absent leaves the map alone.
+        let up = update_item(
+            &mut store,
+            id,
+            LibraryPatch {
+                body: Some("newer".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(up.files, files);
+        // A bad path refuses the whole patch, body included.
+        let bad: BTreeMap<String, String> = [("../x.md".to_string(), "x".to_string())].into();
+        assert!(
+            update_item(
+                &mut store,
+                id,
+                LibraryPatch {
+                    body: Some("lost".into()),
+                    files: Some(bad),
+                    ..Default::default()
+                },
+            )
+            .is_err()
+        );
+        let now = store.get_library_item(id).unwrap();
+        assert_eq!((now.body.as_str(), &now.files), ("newer", &files));
+        // An empty map clears them.
+        let up = update_item(
+            &mut store,
+            id,
+            LibraryPatch {
+                files: Some(BTreeMap::new()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(up.files.is_empty());
+    }
+
     fn skill_item(store: &mut Store, pid: i64, body: &str) -> i64 {
         store
             .create_library_item(

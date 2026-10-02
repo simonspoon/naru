@@ -52,6 +52,7 @@ describe('emptyDraft / draftFrom', () => {
       name: '',
       body: '',
       exportCommand: false,
+      files: {},
     })
   })
 
@@ -64,7 +65,18 @@ describe('emptyDraft / draftFrom', () => {
       name: 'my-agent',
       body: 'hello',
       exportCommand: false,
+      files: {},
     })
+  })
+
+  it('seeds a skill draft with its sibling files, and a change to one is dirty', () => {
+    const skill = item({ kind: 'skill', files: { 'waiting.md': 'w' } })
+    const draft = draftFrom(skill)
+    expect(draft.files).toEqual({ 'waiting.md': 'w' })
+    expect(isDirty(skill, draft)).toBe(false)
+    expect(isDirty(skill, { ...draft, files: { 'waiting.md': 'w2' } })).toBe(true)
+    expect(isDirty(skill, { ...draft, files: {} })).toBe(true)
+    expect(isDirty(skill, { ...draft, files: { ...draft.files, 'n.md': '' } })).toBe(true)
   })
 
   it('seeds exportCommand from an exporting prompt', () => {
@@ -179,6 +191,7 @@ describe('draftError / isSavable', () => {
       name: 'ok-name',
       body: 'body',
       exportCommand: false,
+      files: {},
     }
   }
 
@@ -223,6 +236,7 @@ describe('payloadFor', () => {
       name: '  spacey  ',
       body: '  keep me  ',
       exportCommand: false,
+      files: {},
     })
     expect(payload.name).toBe('spacey')
     expect(payload.body).toBe('  keep me  ')
@@ -236,12 +250,13 @@ describe('payloadFor', () => {
       name: 'n',
       body: '',
       exportCommand: false,
+      files: {},
     })
     expect(payload.project_id).toBeNull()
   })
 
   it('carries export_command for a prompt and folds it off elsewhere', () => {
-    const base = { scope: 'user' as const, projectId: '', name: 'n', body: '', exportCommand: true }
+    const base = { scope: 'user' as const, projectId: '', name: 'n', body: '', exportCommand: true, files: {} }
     expect(payloadFor({ ...base, kind: 'prompt' }).export_command).toBe(true)
     expect(payloadFor({ ...base, kind: 'hook' }).export_command).toBe(false)
   })
@@ -254,6 +269,7 @@ describe('payloadFor', () => {
       name: 'n',
       body: '',
       exportCommand: false,
+      files: {},
     })
     expect(payload.project_id).toBe(5)
   })
@@ -266,6 +282,7 @@ describe('payloadFor', () => {
       name: 'n',
       body: '',
       exportCommand: false,
+      files: {},
     })
     expect(payload.project_id).toBeNull()
   })

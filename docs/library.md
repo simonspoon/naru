@@ -130,9 +130,27 @@ away from `skill` is `validation` while the row holds siblings.
   skill's siblings alone and the preview does not compare them. A carried
   map that differs makes `import --preview` say `conflict` (its `diff` shows
   it), never `identical`.
+- **Editing** (mesa task 1605): `PATCH /api/library/{id}` takes an optional
+  `files` map beside `name`/`body`/`export_command` — absent (or `null`)
+  leaves the siblings alone, a map **replaces** the whole set, so a removed
+  file is just one the map no longer names and `{}` clears them. It rides in
+  the same `UPDATE` as the body (`LibraryPatch.files`, through
+  `library::update_item`), validated by the one `validate_library_files`
+  first, so a bad path, a non-skill kind or an oversized map is `422
+  validation` and writes **nothing** — the body in the same request
+  included. Siblings are not versioned: history is `SKILL.md` alone, and
+  `updated_at` moves with any write. The CLI's `library update` has no
+  `--files` (a folder arrives by `sync apply … disk` or an import).
 - **Surfaces**: `files` is on the item JSON only when non-empty and is
-  dropped by `--quiet`; the web card shows `+N files` (names on hover) and
-  has no sibling editor.
+  dropped by `--quiet`; the web card shows `+N files` (names on hover), and
+  editing a stored skill shows its files as a tab row — SKILL.md first, then
+  the siblings in path order, a `•` on each changed one — with a `×` on every
+  sibling (never SKILL.md) and an "add file" path box that mirrors the path
+  rules above (the server stays the authority). One save sends the body and
+  the whole map in one PATCH. The draft logic is
+  `frontend/src/librarySkillFiles.ts` (pinned by `librarySkillFiles.test.ts`).
+  Create and a built-in's fork show no file list, since neither has siblings
+  yet.
 
 There is no built-in skill; the first one you sync from disk is the first
 with siblings.

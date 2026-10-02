@@ -1877,6 +1877,9 @@ export interface LibraryPatch {
   name?: string
   body?: string
   export_command?: boolean
+  /** A skill's sibling files (mesa task 1605): absent leaves them alone, a
+   * map replaces the whole set. */
+  files?: Record<string, string>
 }
 
 /** Every library item — the db rows plus every built-in not shadowed by one

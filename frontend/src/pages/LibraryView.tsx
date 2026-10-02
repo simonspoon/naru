@@ -68,6 +68,18 @@ import {
   scopeLabel,
   type LibraryDraft,
 } from '../libraryDraft'
+import {
+  SKILL_FILE,
+  addFile,
+  changedFiles,
+  fileList,
+  filesPayload,
+  pathError,
+  removeFile,
+  selectionAfter,
+  setFileText,
+  textOf,
+} from '../librarySkillFiles'
 import { promptPlaceholder } from '../promptPlaceholders'
 import {
   changeDatesLabel,
@@ -119,6 +131,14 @@ function LibraryForm({
   const [draft, setDraft] = useState<LibraryDraft>(() => (item === null ? emptyDraft() : draftFrom(item)))
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // A skill is a folder (mesa task 1605): which of its files the editor shows,
+  // and the path being typed into "add file". Only an existing, stored skill
+  // edits its siblings — a create or a built-in fork has none to show.
+  const [selected, setSelected] = useState(SKILL_FILE)
+  const [newPath, setNewPath] = useState('')
+  const editsFiles = item !== null && !item.builtin && draft.kind === 'skill'
+  const shown = editsFiles ? selectionAfter(selected, draft.files) : SKILL_FILE
+  const newPathError = newPath === '' ? null : pathError(newPath.trim(), draft.files)
 
   // Kind/scope/project are fixed at creation (the PATCH contract carries
   // name/body/export_command) — editing an *existing* row, stored or
@@ -139,6 +159,7 @@ function LibraryForm({
               name: payload.name,
               body: payload.body,
               export_command: payload.export_command,
+              files: filesPayload(draft.kind, draft.files),
             })
     write.then(
       () => {
@@ -150,6 +171,14 @@ function LibraryForm({
         setError(err instanceof Error ? err.message : String(err))
       },
     )
+  }
+
+  function addNew() {
+    const path = newPath.trim()
+    if (path === '' || pathError(path, draft.files) !== null) return
+    setDraft({ ...draft, files: addFile(draft.files, path) })
+    setSelected(path)
+    setNewPath('')
   }
 
   const invalid = draftError(draft)
@@ -253,9 +282,75 @@ function LibraryForm({
         </label>
       )}
 
+      {editsFiles && (
+        <div className="library-skill-files">
+          <div className="library-skill-file-tabs" role="tablist">
+            {fileList(draft.files).map((path) => {
+              const changed = changedFiles(
+                item.body,
+                item.files ?? {},
+                draft.body,
+                draft.files,
+              ).includes(path)
+              return (
+                <span
+                  key={path}
+                  className={`library-skill-file${path === shown ? ' active' : ''}`}
+                >
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={path === shown}
+                    onClick={() => setSelected(path)}
+                  >
+                    {path}
+                    {changed ? ' •' : ''}
+                  </button>
+                  {path !== SKILL_FILE && (
+                    <button
+                      type="button"
+                      className="library-skill-file-remove"
+                      title={`remove ${path}`}
+                      aria-label={`remove ${path}`}
+                      onClick={() => setDraft({ ...draft, files: removeFile(draft.files, path) })}
+                    >
+                      ×
+                    </button>
+                  )}
+                </span>
+              )
+            })}
+          </div>
+          <div className="library-skill-file-add">
+            <input
+              type="text"
+              value={newPath}
+              placeholder="add file, e.g. notes.md or deep/more.md"
+              aria-label="new file path"
+              onChange={(e) => setNewPath(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault()
+                  addNew()
+                }
+              }}
+            />
+            <button
+              type="button"
+              disabled={newPath.trim() === '' || newPathError !== null}
+              onClick={addNew}
+            >
+              add file
+            </button>
+            {newPathError !== null && <span className="error">{newPathError}</span>}
+          </div>
+        </div>
+      )}
+
       <div className="library-body-editor">
         <CodeEditor
-          value={draft.body}
+          key={shown}
+          value={editsFiles ? textOf(shown, draft.body, draft.files) : draft.body}
           language={bodyLanguage(draft.kind)}
           autoFocus={false}
           // Every body on this surface is prose in markdown — an agent
@@ -265,7 +360,13 @@ function LibraryForm({
           // than a toggle: the Files tab offers the choice because it browses
           // arbitrary repos, and this box only ever holds the one shape.
           wrap
-          onChange={(body) => setDraft({ ...draft, body })}
+          onChange={(text) =>
+            setDraft(
+              editsFiles && shown !== SKILL_FILE
+                ? { ...draft, files: setFileText(draft.files, shown, text) }
+                : { ...draft, body: text },
+            )
+          }
         />
       </div>
 
