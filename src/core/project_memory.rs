@@ -303,9 +303,9 @@ differ in a detail. Delete an entry a newer entry plainly supersedes with \
 command refuses an edit that would remove too much at once; when one refuses, \
 stop rather than work around it.
 
-The notebook has a budget of 500 words. Nothing trims it during a session, \
+The notebook has a budget of 1000 words. Nothing trims it during a session, \
 so it may have run over; this pass owns the budget. When the notebook holds \
-more than 500 words, bring it back within 500 before you finish, in this \
+more than 1000 words, bring it back within 1000 before you finish, in this \
 order, stopping as soon as it fits: merge entries that say the same thing; \
 delete an entry a newer entry supersedes; shorten an entry with \
 `naru memory replace --project {id} <entry id> \"<shorter entry>\"`, keeping \
@@ -763,17 +763,17 @@ mod tests {
             .create_project("Naru", None, None, None, None)
             .unwrap();
         let exact = [
-            entry(1, &vec!["w"; 250].join(" ")),
-            entry(2, &vec!["v"; 250].join(" ")),
+            entry(1, &vec!["w"; 500].join(" ")),
+            entry(2, &vec!["v"; 500].join(" ")),
         ];
         assert!(!context_text(&p, &exact).contains("over its budget"));
         let over = [
-            entry(1, &vec!["w"; 250].join(" ")),
-            entry(2, &vec!["v"; 251].join(" ")),
+            entry(1, &vec!["w"; 500].join(" ")),
+            entry(2, &vec!["v"; 501].join(" ")),
         ];
         let text = context_text(&p, &over);
         let line = format!(
-            "The notebook holds 501 of its 500 words, over its budget; run \
+            "The notebook holds 1001 of its 1000 words, over its budget; run \
              `naru memory dream --project {}` to tidy it.\n\n- [#1,",
             p.id
         );
@@ -799,11 +799,11 @@ mod tests {
     fn dream_wanted_fires_only_strictly_over_the_budget_with_two_entries() {
         let words = |n: usize| vec!["w"; n].join(" ");
         assert_eq!(
-            dream_wanted(&[entry(1, &words(250)), entry(2, &words(251))]).as_deref(),
-            Some("the notebook holds 501 of its 500 words")
+            dream_wanted(&[entry(1, &words(500)), entry(2, &words(501))]).as_deref(),
+            Some("the notebook holds 1001 of its 1000 words")
         );
         assert_eq!(
-            dream_wanted(&[entry(1, &words(250)), entry(2, &words(250))]),
+            dream_wanted(&[entry(1, &words(500)), entry(2, &words(500))]),
             None
         );
         assert_eq!(
@@ -831,7 +831,7 @@ mod tests {
     /// prompt's own command spelling.
     #[test]
     fn the_project_dream_prompt_owns_the_budget_least_recently_used_first() {
-        let mut never = entry(5, &vec!["w"; 600].join(" "));
+        let mut never = entry(5, &vec!["w"; 1000].join(" "));
         never.last_used_at = None;
         never.created_at = "2026-09-02 09:00:00".into();
         let mut late = entry(2, "used late");
@@ -845,7 +845,7 @@ mod tests {
         );
         assert!(
             prompt.contains(
-                "\nThe notebook holds 606 of its 500 words. Entries are listed least \
+                "\nThe notebook holds 1006 of its 1000 words. Entries are listed least \
                  recently used first.\n- [#5,"
             ),
             "{prompt}"
@@ -863,9 +863,9 @@ mod tests {
         );
         assert!(
             prompt.contains(
-                "\n\nThe notebook has a budget of 500 words. Nothing trims it during a \
+                "\n\nThe notebook has a budget of 1000 words. Nothing trims it during a \
                  session, so it may have run over; this pass owns the budget. When the \
-                 notebook holds more than 500 words, bring it back within 500 before you \
+                 notebook holds more than 1000 words, bring it back within 1000 before you \
                  finish, in this order, stopping as soon as it fits: merge entries that say \
                  the same thing; delete an entry a newer entry supersedes; shorten an entry \
                  with `naru memory replace --project 9 <entry id> \"<shorter entry>\"`, \

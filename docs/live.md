@@ -875,7 +875,7 @@ for is meant to tune):
 
 | Constant | Value | What it bounds |
 | --- | --- | --- |
-| `LIVE_NOTEBOOK_BUDGET_WORDS` | 500 | words across every *active* entry |
+| `LIVE_NOTEBOOK_BUDGET_WORDS` | 1000 | words across every *active* entry |
 | `LIVE_NOTEBOOK_ENTRY_MAX` | 600 | characters in one entry |
 | `LIVE_NOTEBOOK_EDIT_MAX_REMOVAL` | 0.30 | the share of the notebook's words one replace/delete may remove |
 | `LIVE_NOTEBOOK_EDIT_FLOOR_WORDS` | 100 | below this many words the removal rule stands down |
@@ -897,11 +897,11 @@ the numbers, judged in `Store` on the notebook the write *would leave*:
   thing that makes context collapse impossible in a single command.
 
 **The budget is the dream's, never a write's** (mesa task 1337). No write
-is refused or trimmed for the 500 words: an add, a replace, a merge, a move
+is refused or trimmed for the 1000 words: an add, a replace, a merge, a move
 into a project's notebook and a restore all succeed however far past the
 budget they take the notebook, and nothing is retired to make room. The
 notebook may therefore run over between dreams; the **dream pass** owns the
-budget ("Dreaming" below) — over 500 words it merges, deletes and shortens
+budget ("Dreaming" below) — over 1000 words it merges, deletes and shortens
 entries until the notebook fits, never deleting a standing norm or a kept
 entry to make room — and its automatic trigger already fires whenever the
 notebook is over (`dream_wanted`'s 300-word mark, "When it runs"). The
@@ -1070,7 +1070,7 @@ refetches on its own writes.
 `#/settings/memory` (`settingsTab.ts`, the sixth tab): the active entries,
 each with its provenance line (`#id · added <date> · from session <s> · last
 used session <u>`, `memoryDraft.ts::metaLine`), an inline edit and a delete
-per row, an add box at the bottom, and a running `N / 500 words` meter off
+per row, an add box at the bottom, and a running `N / 1000 words` meter off
 the same word rule the server judges by (`memoryDraft.ts`, unit-tested). A
 422 shows inline beside the row that asked, with the server's numbers. Not a
 config section: the rows are db records, each its own request, so there is no
@@ -1123,11 +1123,11 @@ under "When it runs"), and since nothing retires an entry between passes,
 a norm added mid-conversation is still there for the next one to keep.
 
 **It owns the budget** (mesa task 1337). The listing it is handed opens with
-"The notebook holds <N> of its 500 words. Entries are listed least recently
+"The notebook holds <N> of its 1000 words. Entries are listed least recently
 used first." — ordered by `COALESCE(last_used_session_id, source_session_id,
 0), id`, the recency candidacy counts from — and a paragraph after the keep
-paragraphs tells it: when the notebook holds more than 500 words, bring it
-back within 500 before finishing, stopping as soon as it fits, in this
+paragraphs tells it: when the notebook holds more than 1000 words, bring it
+back within 1000 before finishing, stopping as soon as it fits, in this
 order — merge entries that say the same thing; delete one a newer entry
 supersedes; delete the unused entries about one project, feature, device or
 task; shorten an entry with `mesa live memory replace <id> "<shorter
@@ -1177,8 +1177,8 @@ request. Both automatic triggers are gated by one **cheap, deterministic
 check — no model call** — `live::dream_wanted(&active entries)`, which
 answers a reason string when either
 
-- the active notebook holds at least `LIVE_DREAM_MIN_WORDS` (300, 60% of
-  the 500-word budget) — "notebook holds 312 of 500 words" — or
+- the active notebook holds at least `LIVE_DREAM_MIN_WORDS` (300, 30% of
+  the 1000-word budget) — "notebook holds 312 of 1000 words" — or
 - two entries look alike: the Jaccard similarity of their lowercase
   alphanumeric token **sets** is at least `LIVE_DREAM_SIMILARITY` (0.5),
   entries under three tokens never compared — "entries 12 and 18 look

@@ -135,7 +135,7 @@
 #      errors; `--quiet` typed after the text lands in the body, and after
 #      search words is a word), `touch`
 #      with no live session being not_found, every guard — the empty body,
-#      the 600-char entry bound, and past the 500-word budget an add or
+#      the 600-char entry bound, and past the 1000-word budget an add or
 #      replace neither refused nor retiring anything (mesa task 1337: no
 #      `evicted` key on the CLI or over the API, no row ever retired as
 #      `evicted` — the dream pass owns the budget),
@@ -2890,8 +2890,8 @@ NB_ENTRY_MAX=$(grep -Eo 'pub const LIVE_NOTEBOOK_ENTRY_MAX: usize = [0-9]+' src/
   grep -Eo '[0-9]+$')
 [ -n "$NB_BUDGET" ] && [ -n "$NB_DECAY" ] && [ -n "$NB_ENTRY_MAX" ] ||
   fail "could not read the notebook constants from src/core/live.rs"
-[ "$NB_BUDGET" = "500" ] && [ "$NB_ENTRY_MAX" = "600" ] ||
-  fail "this section's arithmetic assumes a 500-word budget and a 600-char entry; update it with the constants"
+[ "$NB_BUDGET" = "1000" ] && [ "$NB_ENTRY_MAX" = "600" ] ||
+  fail "this section's arithmetic assumes a 1000-word budget and a 600-char entry; update it with the constants"
 
 words() { printf 'w%.0s ' $(seq 1 "$1") | sed 's/ $//'; } # N single-letter words
 
@@ -3096,14 +3096,22 @@ E5=$(jqs .id)
 run 0 "$MESA" live start --no-agent
 run 0 "$MESA" live memory touch "$E2"
 run 0 "$MESA" live stop >/dev/null
-# 406 + 150 = 556: past the budget, and the add still just lands.
+# 406 + 150 = 556 is not past a 1000-word budget, and an entry is capped at
+# 600 characters, so three filler entries of 290 words take it to 1276 first
+# (deleted again below, 18% of the notebook each, so the later arithmetic
+# is unchanged); then 1276 + 150 = 1426: past the budget, and the add still
+# just lands.
+for i in 1 2 3; do
+  run 0 "$MESA" live memory add "$(words 290)"
+  eval "F$i=$(jqs .id)"
+done
 run 0 "$MESA" live memory add "NOBUDGET-ADD $(words 149)"
 E6=$(jqs .id)
 [ "$(jqs .retired_at)" = "null" ] || fail "an add past the budget is active"
 [ "$(jqs 'has("evicted")')" = "false" ] || fail "an add past the budget answers the plain entry (got $STDOUT)"
 run 0 "$MESA" live memory show "$E1"
 [ "$(jqs .retired_at)" = "null" ] || fail "the least recently used entry must not be retired by an add past the budget"
-# A replace past the budget lands the same way: E4 99 → 160 (617). Under
+# A replace past the budget lands the same way: E4 99 → 160 (1487). Under
 # --quiet it is the entry minus body, nothing else.
 run 0 "$MESA" live memory replace --quiet "$E4" "$(words 160)"
 [ "$(jqs .id)" = "$E4" ] && [ "$(jqs 'has("body")')" = "false" ] || fail "replace --quiet: the entry minus body"
@@ -3111,9 +3119,9 @@ run 0 "$MESA" live memory replace --quiet "$E4" "$(words 160)"
 run 0 "$MESA" live memory add "$(words 91)"
 E7=$(jqs .id)
 run 0 "$MESA" live memory list
-[ "$(jqs '[.[].body | split(" ") | length] | add')" = "708" ] ||
-  fail "the notebook must hold all 708 words (got $(jqs '[.[].body | split(" ") | length] | add'))"
-[ "$(jqs 'map(.id) | join(",")')" = "$E1,$E2,$E3,$E4,$E5,$E6,$E7" ] || fail "every entry stays active past the budget (got $(jqs 'map(.id)'))"
+[ "$(jqs '[.[].body | split(" ") | length] | add')" = "1578" ] ||
+  fail "the notebook must hold all 1578 words (got $(jqs '[.[].body | split(" ") | length] | add'))"
+[ "$(jqs 'map(.id) | join(",")')" = "$E1,$E2,$E3,$E4,$E5,$F1,$F2,$F3,$E6,$E7" ] || fail "every entry stays active past the budget (got $(jqs 'map(.id)'))"
 run 0 "$MESA" live memory list --all
 [ "$(jqs 'map(select(.retired_reason == "evicted")) | length')" = "0" ] || fail "nothing is ever retired as evicted"
 ok "live memory: past the $NB_BUDGET-word budget an add or replace just lands — no entry retired, no evicted key; the dream pass owns the budget"
@@ -3122,8 +3130,12 @@ ok "live memory: past the $NB_BUDGET-word budget an add or replace just lands �
 #      make an entry a candidate the dream pass decides, never retire it ----
 #
 # First empty the notebook, in steps the removal guard allows (<= 30% each
-# while it holds 100+ words): 708 -> 548 -> 398 -> 299 -> 230 -> 171 -> 130
+# while it holds 100+ words); the fillers go first (1578 -> 1288 -> 998 ->
+# 708), then: 708 -> 548 -> 398 -> 299 -> 230 -> 171 -> 130
 # -> 100 -> 75, then below the floor anything goes.
+for id in "$F1" "$F2" "$F3"; do
+  run 0 "$MESA" live memory delete "$id"
+done
 run 0 "$MESA" live memory delete "$E4"
 run 0 "$MESA" live memory delete "$E6"
 run 0 "$MESA" live memory delete "$E2"
@@ -3259,24 +3271,29 @@ api 200 GET "/api/live/memory"
 api 404 DELETE "/api/live/memory/$M1"
 [ "$(jqb .error.code)" = "not_found" ] || fail "DELETE a retired row: not_found"
 # Past the budget the route neither refuses nor retires (mesa task 1337),
-# exactly as the CLI: 291 + 250 = 541, and both entries stay active.
+# exactly as the CLI: an entry is capped at 600 characters, so four of 291,
+# 290, 290 and 290 words make 1161, and all four stay active.
 api 201 POST "/api/live/memory" "{\"body\":\"API-BUDGET $(words 290)\"}"
 AE1=$(jqb .id)
 [ "$(jqb 'has("evicted")')" = "false" ] || fail "POST answers the plain entry, no evicted key (got $BODY)"
-api 201 POST "/api/live/memory" "{\"body\":\"$(words 250)\"}"
-AE2=$(jqb .id)
+for i in 2 3 4; do
+  api 201 POST "/api/live/memory" "{\"body\":\"$(words 290)\"}"
+  eval "AE$i=$(jqb .id)"
+done
 [ "$(jqb .retired_at)" = "null" ] || fail "POST past the budget: the written entry is active"
 [ "$(jqb 'has("evicted")')" = "false" ] || fail "POST past the budget answers no evicted key (got $BODY)"
 api 200 GET "/api/live/memory"
-[ "$(jqb 'map(.id) | join(",")')" = "$AE1,$AE2" ] || fail "POST past the budget retires nothing (got $BODY)"
-# Walk both back under the 100-word floor 30% at a time, then delete them,
-# so the notebook is empty again for what follows.
-for n in 175 123 87 61 43; do
-  api 200 PATCH "/api/live/memory/$AE1" "{\"body\":\"$(words "$n")\"}"
-  api 200 PATCH "/api/live/memory/$AE2" "{\"body\":\"$(words "$n")\"}"
+[ "$(jqb 'map(.id) | join(",")')" = "$AE1,$AE2,$AE3,$AE4" ] || fail "POST past the budget retires nothing (got $BODY)"
+# Walk all four back under the 100-word floor 30% at a time, then delete
+# them, so the notebook is empty again for what follows.
+for n in 175 123 87 61 43 30 20; do
+  for id in "$AE1" "$AE2" "$AE3" "$AE4"; do
+    api 200 PATCH "/api/live/memory/$id" "{\"body\":\"$(words "$n")\"}"
+  done
 done
-api 200 DELETE "/api/live/memory/$AE1"
-api 200 DELETE "/api/live/memory/$AE2"
+for id in "$AE1" "$AE2" "$AE3" "$AE4"; do
+  api 200 DELETE "/api/live/memory/$id"
+done
 api 200 GET "/api/live/memory"
 [ "$BODY" = "[]" ] || fail "the API budget check must leave the notebook empty (got $BODY)"
 # The 2s poll carries no notebook (`blocked` is the derived agent state of

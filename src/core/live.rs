@@ -140,7 +140,7 @@ on.
 for you. Keep it with `naru live memory add \"<one bullet>\"`, \
 `naru live memory replace <id> \"<text>\"` and `naru live memory delete <id>` — \
 one item per command, never rewriting it whole. The notebook has a \
-500-word budget, which the tidy pass between conversations keeps; an add is \
+1000-word budget, which the tidy pass between conversations keeps; an add is \
 never refused or trimmed for it. Put in it only preferences, \
 working norms, the reasons behind decisions and pointers to task ids — things \
 the person said outright — never task status (tasks hold that) and never \
@@ -349,9 +349,9 @@ protected when it is found, not once it goes unused, because the budget step \
 below must never delete a norm to make room, even one not yet marked unused. \
 Keep nothing else.
 
-The notebook has a budget of 500 words. Nothing trims it during a \
+The notebook has a budget of 1000 words. Nothing trims it during a \
 conversation, so it may have run over; this pass owns the budget. When the \
-notebook holds more than 500 words, bring it back within 500 before you \
+notebook holds more than 1000 words, bring it back within 1000 before you \
 finish, in this order, stopping as soon as it fits: merge entries that say \
 the same thing; delete an entry a newer entry supersedes; delete the unused \
 entries that are about one project, feature, device or task; shorten an entry \
@@ -413,7 +413,7 @@ pub fn notice_text(kind: crate::core::LiveNotice) -> &'static str {
 /// at write time (mesa task 1337): the notebook may run over it between
 /// dreams, and the dream pass brings it back within it. A first value
 /// mesa task 1147's eval harness is meant to tune.
-pub const LIVE_NOTEBOOK_BUDGET_WORDS: usize = 500;
+pub const LIVE_NOTEBOOK_BUDGET_WORDS: usize = 1000;
 
 /// An entry no conversation has used (`mesa live memory touch`, or a replace)
 /// for this many **ended** sessions is a **retirement candidate** (mesa task
@@ -438,7 +438,7 @@ pub const LIVE_NOTEBOOK_EDIT_FLOOR_WORDS: usize = 100;
 pub const LIVE_NOTEBOOK_ENTRY_MAX: usize = 600;
 
 /// The active notebook is worth a dream pass (mesa task 1155) once it holds
-/// this many words — 60% of [`LIVE_NOTEBOOK_BUDGET_WORDS`]. Below it a
+/// this many words — 30% of [`LIVE_NOTEBOOK_BUDGET_WORDS`]. Below it a
 /// notebook has room to grow, and a consolidation agent reading it would
 /// mostly find nothing to do; at it, the notebook is a few conversations from
 /// its budget, which only a dream pass brings it back within, and duplicates
@@ -966,7 +966,7 @@ mod tests {
     fn dream_prompt_owns_the_budget_and_lists_least_recently_used_first() {
         let mut recent = sample_entry(1, "prefers short replies");
         recent.last_used_session_id = Some(9);
-        let mut stale = sample_entry(2, &vec!["w"; 498].join(" "));
+        let mut stale = sample_entry(2, &vec!["w"; 998].join(" "));
         stale.last_used_session_id = None;
         stale.source_session_id = Some(4);
         let mut never = sample_entry(3, "a bullet from no conversation");
@@ -979,7 +979,7 @@ mod tests {
             &[recent.clone(), stale.clone(), never.clone(), tie.clone()],
             &[],
         );
-        let header = "\nThe notebook holds 510 of its 500 words. \
+        let header = "\nThe notebook holds 1010 of its 1000 words. \
                       Entries are listed least recently used first.\n- [#3,";
         assert!(prompt.contains(header), "{prompt}");
         let at = |e: &crate::core::LiveNotebookEntry| prompt.find(&notebook_line(e)).unwrap();
@@ -988,9 +988,9 @@ mod tests {
         assert!(at(&tie) < at(&recent), "{prompt}");
         assert!(
             prompt.contains(
-                "\n\nThe notebook has a budget of 500 words. Nothing trims it during a \
+                "\n\nThe notebook has a budget of 1000 words. Nothing trims it during a \
                  conversation, so it may have run over; this pass owns the budget. When the \
-                 notebook holds more than 500 words, bring it back within 500 before you \
+                 notebook holds more than 1000 words, bring it back within 1000 before you \
                  finish, in this order, stopping as soon as it fits: merge entries that say \
                  the same thing; delete an entry a newer entry supersedes; delete the unused \
                  entries that are about one project, feature, device or task; shorten an \
@@ -1035,7 +1035,7 @@ mod tests {
     fn rule_nine_says_the_tidy_pass_keeps_the_budget() {
         assert!(
             AGENT_PROMPT.contains(
-                "never rewriting it whole. The notebook has a 500-word budget, which the \
+                "never rewriting it whole. The notebook has a 1000-word budget, which the \
                  tidy pass between conversations keeps; an add is never refused or trimmed \
                  for it. Put in it only preferences,"
             ),
@@ -1788,7 +1788,7 @@ question is a task, not a note",
         let heavy = [sample_entry(1, &long), sample_entry(2, &long)];
         assert_eq!(
             dream_wanted(&heavy, &[]).as_deref(),
-            Some("notebook holds 300 of 500 words")
+            Some("notebook holds 300 of 1000 words")
         );
         let light = [sample_entry(1, &long), sample_entry(2, "just a few words")];
         assert_eq!(dream_wanted(&light, &[]), None);
@@ -1829,7 +1829,7 @@ question is a task, not a note",
         // The older triggers still win the reason.
         assert_eq!(
             dream_wanted(&heavy, &[1]).as_deref(),
-            Some("notebook holds 300 of 500 words")
+            Some("notebook holds 300 of 1000 words")
         );
     }
 

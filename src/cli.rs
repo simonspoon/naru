@@ -2612,7 +2612,7 @@ EXAMPLES
     /// task status, never a guess about the person. Type the text after `add`
     /// (quoting is optional; words are joined) — put --quiet BEFORE it,
     /// exactly as `live say` requires. Never refused or trimmed for the
-    /// notebook's 500-word budget: the dream pass between conversations
+    /// notebook's 1000-word budget: the dream pass between conversations
     /// keeps it.
     #[command(after_help = "\
 EXAMPLES
@@ -2781,7 +2781,7 @@ EXAMPLES
 /// resolved (its repo's root commit, else the nearest project `local_path`
 /// or previous path), and a folder no project holds is `not_found`. The
 /// rules are the live notebook's, per project: 600 characters an entry, a
-/// 500-word budget that `naru memory dream` keeps (never enforced at write
+/// 1000-word budget that `naru memory dream` keeps (never enforced at write
 /// time), a 30% removal guard, soft retirement. An id from another notebook is `not_found`.
 #[derive(Subcommand)]
 enum MemoryCmd {
@@ -2916,7 +2916,7 @@ EXAMPLES
     /// dream prompt, in the project's folder (the workspace when it has
     /// none). The agent merges duplicates and deletes what a newer entry
     /// supersedes, one guarded command at a time, and brings the notebook
-    /// back within its 500-word budget. With fewer than two active
+    /// back within its 1000-word budget. With fewer than two active
     /// entries nothing is spawned and `{"spawned": false, "reason": ...}` is
     /// printed. Takes no --quiet.
     Dream {

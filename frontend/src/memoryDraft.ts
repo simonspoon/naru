@@ -13,7 +13,7 @@ import type { LiveNotebookEntry } from './types/LiveNotebookEntry'
  */
 
 /** `core::live::LIVE_NOTEBOOK_BUDGET_WORDS`. */
-export const NOTEBOOK_BUDGET_WORDS = 500
+export const NOTEBOOK_BUDGET_WORDS = 1000
 /** `core::live::LIVE_NOTEBOOK_ENTRY_MAX`, in characters. */
 export const NOTEBOOK_ENTRY_MAX = 600
 
@@ -29,7 +29,7 @@ export function notebookWords(entries: readonly LiveNotebookEntry[]): number {
   return entries.reduce((sum, e) => sum + wordCount(e.body), 0)
 }
 
-/** The running meter, e.g. `120 / 500 words`. */
+/** The running meter, e.g. `120 / 1000 words`. */
 export function budgetMeter(words: number): string {
   return `${words} / ${NOTEBOOK_BUDGET_WORDS} words`
 }

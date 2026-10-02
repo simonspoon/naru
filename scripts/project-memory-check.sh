@@ -28,7 +28,7 @@
 #     the live-dream template (stub claude) in the project's folder with a
 #     prompt naming `naru memory merge --project <id>`.
 #   * the automatic dream (mesa task 1339): a task closing in a project whose
-#     notebook is over its 500 words spawns that dream, `task update`'s
+#     notebook is over its 1000 words spawns that dream, `task update`'s
 #     stdout unchanged; not again while its job runs or, with no receipt,
 #     inside the grace window; not for a within-budget notebook; a failing
 #     spawn still closes the task with exit 0 and the next close retries.
@@ -266,36 +266,36 @@ run 0 "$NARU" memory import --project "$Q" --from "$MEM" --dry-run
 [ "$(jqs '.imported | length')" = "2" ] || fail "import --from reads the named folder"
 run 1 "$NARU" memory import --project "$Q" --from "$TMP/nowhere"
 [ "$(jqe .error.code)" = "not_found" ] || fail "import from a missing folder: not_found"
-# Past the budget (mesa task 1337): four 250-word files make 1000 words, and
+# Past the budget (mesa task 1337): eight 250-word files make 2000 words, and
 # every one lands — nothing trims a notebook at write time. A re-import adds
 # nothing, and an entry since retired (a delete of 25%) stays skipped.
 BIG="$TMP/big-memory"
 mkdir -p "$BIG"
-for w in w x y z; do
+for w in a b c d e f g h; do
   for _ in $(seq 1 250); do printf '%s ' "$w"; done >"$BIG/$w.md"
 done
 run 0 "$NARU" project create "Big" --no-git
 B=$(jqs .id)
 run 0 "$NARU" memory import --project "$B" --from "$BIG"
-[ "$(jqs '.imported | length')" = "4" ] && [ "$(jqs 'has("evicted")')" = "false" ] ||
-  fail "import past the budget: four imported, no evicted key (got $STDOUT)"
+[ "$(jqs '.imported | length')" = "8" ] && [ "$(jqs 'has("evicted")')" = "false" ] ||
+  fail "import past the budget: eight imported, no evicted key (got $STDOUT)"
 BW=$(jqs '.imported[0].id')
 run 0 "$NARU" memory list --project "$B" --all
-[ "$(jqs 'map(select(.retired_at == null)) | length')" = "4" ] ||
+[ "$(jqs 'map(select(.retired_at == null)) | length')" = "8" ] ||
   fail "import past the budget retires nothing (got $STDOUT)"
-[ "$(jqs '[.[].body | split(" ") | map(select(. != "")) | length] | add')" = "1000" ] ||
-  fail "import past the budget: all 1000 words active (got $STDOUT)"
+[ "$(jqs '[.[].body | split(" ") | map(select(. != "")) | length] | add')" = "2000" ] ||
+  fail "import past the budget: all 2000 words active (got $STDOUT)"
 run 0 "$NARU" memory delete --project "$B" "$BW"
 run 0 "$NARU" memory import --project "$B" --from "$BIG"
 [ "$(jqs '.imported | length')" = "0" ] || fail "re-import past the budget must add nothing (got $STDOUT)"
 [ "$(jqs '[.skipped[] | select(.reason == "already in the notebook, retired")] | length')" = "1" ] ||
   fail "re-import names the deleted entry as retired (got $STDOUT)"
-# Over its budget, the context header says so and names the dream (750 words
+# Over its budget, the context header says so and names the dream (1750 words
 # left after the delete).
 mkdir -p "$TMP/big-folder"
 run 0 "$NARU" project update "$B" --path "$TMP/big-folder"
 run 0 "$NARU" memory context --path "$TMP/big-folder"
-grep -qF "The notebook holds 750 of its 500 words, over its budget; run \`naru memory dream --project $B\` to tidy it." <<<"$STDOUT" ||
+grep -qF "The notebook holds 1750 of its 1000 words, over its budget; run \`naru memory dream --project $B\` to tidy it." <<<"$STDOUT" ||
   fail "context over the budget names the dream (got $STDOUT)"
 ok "memory import: MEMORY.md skipped, description + body, long file cut with …, --dry-run writes nothing, re-import idempotent (past the budget too, nothing retired), missing folder not_found"
 
@@ -329,7 +329,7 @@ run 0 "$NARU" memory dream --project "$P"
 [ "$(cat "$STUB/last-cwd")" = "$REPO" ] || fail "dream runs in the project's folder (got $(cat "$STUB/last-cwd"))"
 grep -q "naru memory merge --project $P --ids" "$STUB/last-prompt" || fail "dream prompt names the project merge command"
 grep -q "Run cargo fmt before clippy" "$STUB/last-prompt" || fail "dream prompt carries the notebook"
-grep -q "of its 500 words. Entries are listed least recently used first." "$STUB/last-prompt" ||
+grep -q "of its 1000 words. Entries are listed least recently used first." "$STUB/last-prompt" ||
   fail "dream prompt opens its listing with the word count against the budget"
 grep -q "naru memory replace --project $P <entry id>" "$STUB/last-prompt" || fail "dream prompt names the project shorten command"
 ok "memory dream: nothing under two entries; otherwise the live-dream template in the project folder, prompt naming naru memory --project $P"
@@ -337,13 +337,14 @@ ok "memory dream: nothing under two entries; otherwise the live-dream template i
 # ---- the automatic dream after a task closes (mesa task 1339) ----
 spawns() { [ -e "$STUB/spawns" ] && wc -l <"$STUB/spawns" | tr -d ' ' || echo 0; }
 words() { printf 'w%.0s ' $(seq "$1"); }
-over_budget() { # <name> — a project whose notebook holds 501 words in two entries
+over_budget() { # <name> — a project whose notebook holds 1001 words in four entries
   run 0 "$NARU" project create "$1" --no-git
   OB=$(jqs .id)
   mkdir -p "$TMP/$1"
   run 0 "$NARU" project update "$OB" --path "$TMP/$1"
+  # an entry is capped at 600 characters, so four: 251 + 3 x 250 words
   run 0 "$NARU" memory add --project "$OB" "$(words 251)"
-  run 0 "$NARU" memory add --project "$OB" "$(words 250)"
+  for _ in 1 2 3; do run 0 "$NARU" memory add --project "$OB" "$(words 250)"; done
 }
 close_task() { # <project> — creates a task and closes it, STDOUT the update's
   run 0 "$NARU" task create "$1" "a task in project $1"
@@ -363,7 +364,7 @@ run 0 "$NARU" task show "$CLOSED"
 [ "$(spawns)" = "$((BEFORE + 1))" ] || fail "closing a task in an over-budget project spawns one dream"
 [ "$(cat "$STUB/last-cwd")" = "$TMP/Dreamy" ] || fail "the automatic dream runs in the project's folder"
 grep -q "naru memory merge --project $D --ids" "$STUB/last-prompt" || fail "the automatic dream is this project's dream"
-grep -q "The notebook holds 501 of its 500 words." "$STUB/last-prompt" || fail "the automatic dream prompt carries the word count"
+grep -q "The notebook holds 1001 of its 1000 words." "$STUB/last-prompt" || fail "the automatic dream prompt carries the word count"
 # The receipt's job still running: a second close spawns nothing.
 echo '[{"id": "cafe01", "state": "working"}]' >"$STUB/agents.json"
 close_task "$D"
@@ -381,9 +382,9 @@ close_task "$D"
 rm "$STUB/agents.json" "$STUB/no-receipt"
 close_task "$D"
 [ "$(spawns)" = "$((BEFORE + 2))" ] || fail "no second dream inside the grace window of one with no receipt"
-# Within budget (500 words exactly): a close spawns nothing.
-run 0 "$NARU" memory add --project "$R" "$(words 249)"
-run 0 "$NARU" memory add --project "$R" "$(words 248)"
+# Within budget (1000 words exactly): a close spawns nothing.
+for _ in 1 2 3; do run 0 "$NARU" memory add --project "$R" "$(words 299)"; done
+run 0 "$NARU" memory add --project "$R" "$(words 100)"
 close_task "$R"
 [ "$(spawns)" = "$((BEFORE + 2))" ] || fail "a close in a within-budget project spawns nothing"
 # A spawn that fails: the close still exits 0 closed, stdout the task, the

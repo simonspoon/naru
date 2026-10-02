@@ -36,8 +36,8 @@ live-notebook methods are the `None` scope):
 | Rule | Live notebook | A project notebook |
 | --- | --- | --- |
 | Entry bound | 600 characters | same |
-| Word budget | 500 words | 500 words **of its own** |
-| Past the budget | never refused or trimmed at write time (mesa task 1337); the dream brings it back within 500, and lists entries least recently used first by `COALESCE(last_used_session_id, source_session_id, 0), id` | same, by `COALESCE(last_used_at, created_at), id`; `naru memory dream` does it, run by hand or after a task closes (mesa task 1339) |
+| Word budget | 1000 words | 1000 words **of its own** |
+| Past the budget | never refused or trimmed at write time (mesa task 1337); the dream brings it back within 1000, and lists entries least recently used first by `COALESCE(last_used_session_id, source_session_id, 0), id` | same, by `COALESCE(last_used_at, created_at), id`; `naru memory dream` does it, run by hand or after a task closes (mesa task 1339) |
 | Removal guard | 30% once it holds 100 words | same, on its own words |
 | Provenance | `source_session_id`, `last_used_session_id` | none (both `NULL`) |
 | `touch` | needs a live session | stamps `last_used_at`, no session needed |
@@ -153,7 +153,7 @@ The live dream pass (`docs/live.md`, "Dreaming") for one project: the same
 show|list|search|merge|delete|replace --project <id>` and `naru task create
 <id>` for a contradiction — plus the notebook's word count against its
 budget and the active entries, least recently used first. Since mesa task
-1337 it owns the notebook's 500-word budget with the live dream's budget
+1337 it owns the notebook's 1000-word budget with the live dream's budget
 paragraph and step 3 (merge, delete, then shorten with `naru memory replace`,
 never deleting a standing norm to make room), minus the clauses about
 `unused`/`kept` marks a project notebook never carries. It runs in the project's
@@ -172,7 +172,7 @@ status, claimed or not) through `naru task update` or `PATCH
 dream — one `DreamSpawn`, shared with `naru memory dream` — when:
 
 - **the notebook is over its budget**: `project_memory::dream_wanted`, more
-  than 500 active words (500 exactly is within it) across at least two
+  than 1000 active words (1000 exactly is within it) across at least two
   entries. The budget only — not the live notebook's 300-word or lookalike
   rules, which exist to keep a live prompt small; and
 - **no earlier dream for the project is still running**: the

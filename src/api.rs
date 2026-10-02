@@ -17265,8 +17265,11 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         {
             let mut store = state.store.lock().unwrap();
             let words = |n: usize| vec!["w"; n].join(" ");
-            store.add_notebook_entry_in(Some(pid), &words(251)).unwrap();
-            store.add_notebook_entry_in(Some(pid), &words(250)).unwrap();
+            // An entry is capped at 600 characters: four of 251 words are
+            // 1004, one past the 1000-word budget.
+            for _ in 0..4 {
+                store.add_notebook_entry_in(Some(pid), &words(251)).unwrap();
+            }
         }
         let id = new_task(&state, pid);
 
