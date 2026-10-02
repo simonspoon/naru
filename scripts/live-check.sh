@@ -2607,7 +2607,9 @@ check_board_render() { # check_board_render <base> <label>
   # inline script posting keydowns to the parent.
   local html_len
   html_len=$(wc -c <"$TMP/mockup.html" | tr -d ' ')
-  cmp -s -n "$html_len" "$TMP/bbody" "$TMP/mockup.html" ||
+  # head | cmp, not `cmp -n`: macOS's cmp -n reports EOF on a file of exactly
+  # that length, failing a correct body.
+  head -c "$html_len" "$TMP/bbody" | cmp -s - "$TMP/mockup.html" ||
     fail "$label: the html body must start with the stored bytes"
   RELAY_TAIL=$(tail -c +"$((html_len + 1))" "$TMP/bbody")
   case "$RELAY_TAIL" in
