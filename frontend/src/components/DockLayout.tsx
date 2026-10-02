@@ -6,12 +6,16 @@ import {
   closedPanels,
   closePanel,
   deleteLayout,
+  missingBuiltins,
+  moveLayout,
   dropPanel,
   isPanelId,
   PANEL_DRAG_MIME,
   PANEL_IDS,
   panelLabel,
+  renameLayout,
   resetLayout,
+  restoreDefaultLayouts,
   revealPanel,
   saveAs,
   selectLayout,
@@ -309,12 +313,25 @@ export function DockBar({
   const { store, setStore, state, update } = dock
   const [naming, setNaming] = useState<string | null>(null)
   const [menuOpen, setMenuOpen] = useState(false)
+  // The per-layout menu (right-click a layout, or its ⋮ button) and the layout
+  // being renamed in place.
+  const [layoutMenu, setLayoutMenu] = useState<string | null>(null)
+  const [renaming, setRenaming] = useState<{ id: string; value: string; invalid?: boolean } | null>(null)
+  const layoutMenuRef = useRef<HTMLDivElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
   const current = activeLayout(store)
   const closed = useMemo(() => closedPanels(state), [state])
   // Unsent ink pins the board in place, so the arrangement may not change
   // under it: no switching, saving or resetting while it is held.
   const frozen = locked.size > 0
+
+  // Ink arriving while a layout menu or rename is open closes it, so nothing in
+  // either can still change the arrangement under the held board (adjusted
+  // during render, not in an effect).
+  if (frozen && (layoutMenu !== null || renaming !== null)) {
+    setLayoutMenu(null)
+    setRenaming(null)
+  }
 
   useEffect(() => {
     if (!menuOpen) return
@@ -332,21 +349,72 @@ export function DockBar({
     }
   }, [menuOpen])
 
+  useEffect(() => {
+    if (layoutMenu === null) return
+    const onDown = (e: MouseEvent) => {
+      if (layoutMenuRef.current && !layoutMenuRef.current.contains(e.target as Node)) setLayoutMenu(null)
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setLayoutMenu(null)
+    }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [layoutMenu])
+
+  const menuTarget = store.layouts.find((l) => l.id === layoutMenu) ?? null
+  const menuIndex = menuTarget === null ? -1 : store.layouts.indexOf(menuTarget)
+  const canRestore = missingBuiltins(store).length > 0
+
   return (
     <div className="dock-bar" role="group" aria-label="Saved layouts">
       <div className="dock-presets">
-        {store.layouts.map((l) => (
-          <button
-            key={l.id}
-            type="button"
-            className={`dock-preset${l.id === store.active ? ' on' : ''}`}
-            aria-pressed={l.id === store.active}
-            disabled={frozen}
-            onClick={() => setStore((s) => selectLayout(s, l.id))}
-          >
-            {l.name}
-          </button>
-        ))}
+        {store.layouts.map((l) =>
+          renaming?.id === l.id ? (
+            <input
+              key={l.id}
+              className="dock-name-input"
+              autoFocus
+              value={renaming.value}
+              aria-label={`Rename layout ${l.name}`}
+              aria-invalid={renaming.invalid ? 'true' : undefined}
+              disabled={frozen}
+              onChange={(e) => setRenaming({ id: l.id, value: e.target.value })}
+              onBlur={() => setRenaming(null)}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') setRenaming(null)
+                if (e.key === 'Enter') {
+                  // An empty or duplicate name leaves the store as it was: keep
+                  // the input open, marked, rather than losing what was typed.
+                  if (renameLayout(store, l.id, renaming.value) === store) {
+                    setRenaming({ ...renaming, invalid: true })
+                    return
+                  }
+                  setStore((st) => renameLayout(st, l.id, renaming.value))
+                  setRenaming(null)
+                }
+              }}
+            />
+          ) : (
+            <button
+              key={l.id}
+              type="button"
+              className={`dock-preset${l.id === store.active ? ' on' : ''}`}
+              aria-pressed={l.id === store.active}
+              disabled={frozen}
+              onClick={() => setStore((st) => selectLayout(st, l.id))}
+              onContextMenu={(e) => {
+                e.preventDefault()
+                setLayoutMenu(l.id)
+              }}
+            >
+              {l.name}
+            </button>
+          ),
+        )}
         {naming === null ? (
           <button
             type="button"
@@ -376,29 +444,86 @@ export function DockBar({
             }}
           />
         )}
-        {current.builtin ? (
+        {current.builtin && (
           <button
             type="button"
             className="dock-preset dock-preset-aux"
             aria-label={`Reset ${current.name} to its preset`}
             disabled={frozen}
             title={`Reset ${current.name} to its preset`}
-            onClick={() => setStore((s) => resetLayout(s, current.id))}
+            onClick={() => setStore((st) => resetLayout(st, current.id))}
           >
             ↺
           </button>
-        ) : (
+        )}
+        <div className="dock-menu" ref={layoutMenuRef}>
           <button
             type="button"
             className="dock-preset dock-preset-aux"
-            aria-label={`Delete layout ${current.name}`}
+            aria-haspopup="menu"
+            aria-expanded={layoutMenu !== null}
+            aria-label={`Layout options for ${current.name}`}
+            title={`Layout options for ${current.name}`}
             disabled={frozen}
-            title={`Delete layout ${current.name}`}
-            onClick={() => setStore((s) => deleteLayout(s, current.id))}
+            onClick={() => setLayoutMenu((m) => (m === null ? current.id : null))}
           >
-            ×
+            ⋮
           </button>
-        )}
+          {menuTarget !== null && (
+            <div className="dock-menu-list dock-layout-menu" role="menu" aria-label={`Layout ${menuTarget.name}`}>
+              <div className="dock-menu-heading">{menuTarget.name}</div>
+              <button
+                type="button"
+                role="menuitem"
+                disabled={frozen}
+                onClick={() => {
+                  setRenaming({ id: menuTarget.id, value: menuTarget.name })
+                  setLayoutMenu(null)
+                }}
+              >
+                Rename
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                disabled={frozen || store.layouts.length <= 1}
+                onClick={() => {
+                  setStore((st) => deleteLayout(st, menuTarget.id))
+                  setLayoutMenu(null)
+                }}
+              >
+                Delete
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                disabled={frozen || menuIndex <= 0}
+                onClick={() => setStore((st) => moveLayout(st, menuTarget.id, -1))}
+              >
+                Move left
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                disabled={frozen || menuIndex >= store.layouts.length - 1}
+                onClick={() => setStore((st) => moveLayout(st, menuTarget.id, 1))}
+              >
+                Move right
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                disabled={frozen || !canRestore}
+                onClick={() => {
+                  setStore((st) => restoreDefaultLayouts(st))
+                  setLayoutMenu(null)
+                }}
+              >
+                Restore default layouts
+              </button>
+            </div>
+          )}
+        </div>
       </div>
       <div className="dock-menu" ref={menuRef}>
         <button

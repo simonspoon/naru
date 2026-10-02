@@ -70,14 +70,21 @@ phone tier, which has no dock, keeps the floating orb.
   reopens there, else on the root's right.
 - **Saved layouts.** The header switcher holds Talk, Review and Build plus any
   the person adds with `+` (the current arrangement under a new name). Edits
-  save into the active layout live; a built-in has a reset (`↺`), a user layout
-  a delete (`×`). Diagrams starts closed in all three presets.
+  save into the active layout live; a built-in has a reset (`↺`). Every layout,
+  built-in or not, can be renamed, deleted and moved from its menu — right-click
+  the layout, or the `⋮` button beside the active one: Rename (inline, Enter
+  saves; empty or a name another layout wears is refused), Delete (refused for
+  the last layout), Move left / Move right, and Restore default layouts. A
+  built-in is tracked by its id (`talk`/`review`/`build`), never its name, so a
+  renamed Talk is still Talk: Restore appends only the built-ins whose id is gone
+  (default arrangement, a taken name gets a number) and touches nothing else.
+  Diagrams starts closed in all three presets.
 
 ## Pieces
 
 | Piece | File | Owns |
 |---|---|---|
-| State | `frontend/src/dockLayout.ts` (+ `.test.ts`) | pure: types, `dropPanel`, `dockToNav`, `closePanel`, `revealPanel`, `isVisible`, `panelEntries` (the Panels list), presets, versioned parse/serialize, saved-layout CRUD |
+| State | `frontend/src/dockLayout.ts` (+ `.test.ts`) | pure: types, `dropPanel`, `dockToNav`, `closePanel`, `revealPanel`, `isVisible`, `panelEntries` (the Panels list), presets, versioned parse/serialize, saved-layout CRUD (rename, delete, move, restore defaults) |
 | Nav | `frontend/src/components/NavDock.tsx` | the nav zone, the Panels list, the collapsed rail |
 | Store hook | `frontend/src/useDockStore.ts` | the store in React, persisted on every change; stable `reveal`/`hide` |
 | Hosts | `frontend/src/lib/dockHosts.ts`, `components/DockSlot.tsx` | one container per panel, moved between groups |
@@ -109,8 +116,10 @@ agents' pane tree and the page's local state reset).
 
 ## Persistence
 
-One `localStorage` key, `naru-dock-layouts` = `{v: 1, active, layouts: [{id,
-name, builtin, state}]}`; machine-local. A state carries `nav` (the zone's
+One `localStorage` key, `naru-dock-layouts` = `{v: 2, active, layouts: [{id,
+name, builtin, state}]}`; machine-local. A v1 store (before a built-in could be
+deleted) loads with any missing built-in put back and is rewritten as v2; in v2
+a deleted built-in stays deleted, and an empty store is the default one. A state carries `nav` (the zone's
 panels); a layout saved before task 1574 has no `nav` key and loads with the
 orb at the top of the nav, while an explicit empty `nav` is the orb closed. Parsing is total: unknown panel ids
 are dropped, a panel in two groups (or a group named twice) rejects that

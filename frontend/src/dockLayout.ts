@@ -367,7 +367,7 @@ export const DEFAULT_LAYOUT_ID = 'talk'
 // --- Persistence -------------------------------------------------------
 
 export type SavedLayout = { id: string; name: string; builtin: boolean; state: DockState }
-export type DockStore = { v: 1; active: string; layouts: SavedLayout[] }
+export type DockStore = { v: 2; active: string; layouts: SavedLayout[] }
 
 export const DOCK_STORAGE_KEY = 'naru-dock-layouts'
 
@@ -462,17 +462,22 @@ export function parseState(raw: unknown): DockState | null {
 
 export function defaultStore(): DockStore {
   return {
-    v: 1,
+    v: 2,
     active: DEFAULT_LAYOUT_ID,
     layouts: Object.entries(PRESETS).map(([id, p]) => ({ id, name: p.name, builtin: true, state: p.make() })),
   }
 }
 
-/** Total: garbage is the default store; a layout that does not parse is
- *  replaced by its preset (a built-in) or dropped (a user one); the three
- *  built-ins are always present. */
+/**
+ * Total: garbage is the default store; a layout that does not parse is
+ * replaced by its preset (a built-in) or dropped (a user one). A built-in is
+ * tracked by its id (`talk`/`review`/`build`), never its name, so it may be
+ * renamed. A v1 store (before built-ins could be deleted) has the missing
+ * built-ins put back; a v2 one keeps a deleted one deleted, and an empty one
+ * is the default store (a store always holds a layout).
+ */
 export function parseStore(raw: unknown): DockStore {
-  if (!isObj(raw) || raw.v !== 1 || !Array.isArray(raw.layouts)) return defaultStore()
+  if (!isObj(raw) || (raw.v !== 1 && raw.v !== 2) || !Array.isArray(raw.layouts)) return defaultStore()
   const layouts: SavedLayout[] = []
   const ids = new Set<string>()
   for (const l of raw.layouts) {
@@ -480,14 +485,18 @@ export function parseStore(raw: unknown): DockStore {
     const builtin = l.id in PRESETS
     const state = parseState(l.state) ?? (builtin ? PRESETS[l.id].make() : null)
     if (state === null) continue
+    const name = l.name.trim()
     ids.add(l.id)
-    layouts.push({ id: l.id, name: builtin ? PRESETS[l.id].name : l.name, builtin, state })
+    layouts.push({ id: l.id, name: raw.v === 1 && builtin ? PRESETS[l.id].name : name === '' ? l.id : name, builtin, state })
   }
-  for (const [id, p] of Object.entries(PRESETS)) {
-    if (!ids.has(id)) layouts.splice(Object.keys(PRESETS).indexOf(id), 0, { id, name: p.name, builtin: true, state: p.make() })
+  if (raw.v === 1) {
+    for (const [id, p] of Object.entries(PRESETS)) {
+      if (!ids.has(id)) layouts.splice(Object.keys(PRESETS).indexOf(id), 0, { id, name: p.name, builtin: true, state: p.make() })
+    }
   }
-  const active = typeof raw.active === 'string' && layouts.some((l) => l.id === raw.active) ? raw.active : DEFAULT_LAYOUT_ID
-  return { v: 1, active, layouts }
+  if (layouts.length === 0) return defaultStore()
+  const active = typeof raw.active === 'string' && layouts.some((l) => l.id === raw.active) ? raw.active : layouts[0].id
+  return { v: 2, active, layouts }
 }
 
 export function serializeStore(store: DockStore): string {
@@ -569,10 +578,48 @@ export function resetLayout(store: DockStore, id: string): DockStore {
   return { ...store, layouts: store.layouts.map((l) => (l.id === id ? { ...l, state: p.make() } : l)) }
 }
 
-/** User layouts only; deleting the active one falls back to the first. */
+/** Any layout, built-in or not — but never the last one. Deleting the active
+ *  one falls back to the first. */
 export function deleteLayout(store: DockStore, id: string): DockStore {
-  const target = store.layouts.find((l) => l.id === id)
-  if (!target || target.builtin) return store
+  if (store.layouts.length <= 1 || !store.layouts.some((l) => l.id === id)) return store
   const layouts = store.layouts.filter((l) => l.id !== id)
   return { ...store, layouts, active: store.active === id ? layouts[0].id : store.active }
+}
+
+/** Trimmed; an empty name or one another layout already wears is refused. */
+export function renameLayout(store: DockStore, id: string, name: string): DockStore {
+  const next = name.trim()
+  if (next === '' || !store.layouts.some((l) => l.id === id)) return store
+  if (store.layouts.some((l) => l.id !== id && l.name === next)) return store
+  return { ...store, layouts: store.layouts.map((l) => (l.id === id ? { ...l, name: next } : l)) }
+}
+
+/** One step left (-1) or right (+1); the ends do not wrap. */
+export function moveLayout(store: DockStore, id: string, delta: -1 | 1): DockStore {
+  const from = store.layouts.findIndex((l) => l.id === id)
+  const to = from + delta
+  if (from < 0 || to < 0 || to >= store.layouts.length) return store
+  const layouts = [...store.layouts]
+  ;[layouts[from], layouts[to]] = [layouts[to], layouts[from]]
+  return { ...store, layouts }
+}
+
+/** The built-ins (by id) the store no longer holds. */
+export function missingBuiltins(store: DockStore): string[] {
+  return Object.keys(PRESETS).filter((id) => !store.layouts.some((l) => l.id === id))
+}
+
+/** Appends each missing built-in in its default arrangement (a name another
+ *  layout wears gets a number); every layout still there, renamed or edited,
+ *  is untouched. */
+export function restoreDefaultLayouts(store: DockStore): DockStore {
+  const missing = missingBuiltins(store)
+  if (missing.length === 0) return store
+  const layouts = [...store.layouts]
+  for (const id of missing) {
+    let name = PRESETS[id].name
+    for (let n = 2; layouts.some((l) => l.name === name); n++) name = `${PRESETS[id].name} ${n}`
+    layouts.push({ id, name, builtin: true, state: PRESETS[id].make() })
+  }
+  return { ...store, layouts }
 }

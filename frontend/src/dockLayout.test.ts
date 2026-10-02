@@ -8,6 +8,10 @@ import {
   debouncedSaver,
   defaultStore,
   deleteLayout,
+  missingBuiltins,
+  moveLayout,
+  renameLayout,
+  restoreDefaultLayouts,
   dropPanel,
   groupOf,
   inNav,
@@ -335,7 +339,7 @@ describe('store', () => {
     expect(back.layouts.map((l) => l.id)).toEqual(['talk', 'review', 'build'])
     consistent(back.layouts[0].state)
   })
-  it('restores a missing built-in and a bad active id', () => {
+  it('a v1 store restores a missing built-in; a bad active id falls to the first', () => {
     const back = parseStore({ v: 1, active: 'zzz', layouts: [] })
     expect(back.layouts.map((l) => l.id)).toEqual(['talk', 'review', 'build'])
     expect(back.active).toBe('talk')
@@ -351,16 +355,81 @@ describe('store', () => {
     expect(closedPanels(s.layouts[3].state)).toContain('chat')
     expect(saveAs(s, '  ')).toBe(s)
   })
-  it('selects, resets built-ins and deletes only user layouts', () => {
+  it('selects, resets built-ins and deletes layouts', () => {
     let s = saveAs(defaultStore(), 'Mine')
     const mine = s.active
-    expect(deleteLayout(s, 'talk')).toBe(s)
     s = updateActive(selectLayout(s, 'talk'), closePanel(PRESETS.talk.make(), 'chat'))
     s = resetLayout(s, 'talk')
     expect(groupOf(s.layouts[0].state, 'chat')).not.toBeNull()
     s = deleteLayout(selectLayout(s, mine), mine)
     expect(s.layouts).toHaveLength(3)
     expect(s.active).toBe('talk')
+  })
+})
+
+describe('layout management', () => {
+  it('renames any layout, refusing empty and duplicate names', () => {
+    const s = defaultStore()
+    const r = renameLayout(s, 'talk', '  Chat  ')
+    expect(r.layouts[0]).toMatchObject({ id: 'talk', name: 'Chat', builtin: true })
+    expect(renameLayout(s, 'talk', '  ')).toBe(s)
+    expect(renameLayout(s, 'talk', 'Review')).toBe(s)
+    expect(renameLayout(s, 'talk', 'Talk').layouts[0].name).toBe('Talk')
+    expect(renameLayout(s, 'nope', 'X')).toBe(s)
+  })
+  it('deletes a built-in but never the last layout', () => {
+    let s = deleteLayout(defaultStore(), 'talk')
+    expect(s.layouts.map((l) => l.id)).toEqual(['review', 'build'])
+    expect(s.active).toBe('review')
+    s = deleteLayout(deleteLayout(s, 'review'), 'build')
+    expect(s.layouts.map((l) => l.id)).toEqual(['build'])
+    expect(deleteLayout(s, 'build')).toBe(s)
+  })
+  it('moves one step and stops at the ends', () => {
+    const s = defaultStore()
+    expect(moveLayout(s, 'talk', -1)).toBe(s)
+    expect(moveLayout(s, 'build', 1)).toBe(s)
+    expect(moveLayout(s, 'talk', 1).layouts.map((l) => l.id)).toEqual(['review', 'talk', 'build'])
+    expect(moveLayout(s, 'build', -1).layouts.map((l) => l.id)).toEqual(['talk', 'build', 'review'])
+  })
+  it('restores only the missing built-ins, appended, leaving the rest alone', () => {
+    let s = saveAs(defaultStore(), 'Mine')
+    s = renameLayout(s, 'review', 'Look')
+    s = updateActive(selectLayout(s, 'build'), closePanel(s.layouts[2].state, 'chat'))
+    const edited = s.layouts[2]
+    s = deleteLayout(deleteLayout(s, 'talk'), 'build')
+    expect(missingBuiltins(s)).toEqual(['talk', 'build'])
+    const r = restoreDefaultLayouts(s)
+    expect(r.layouts.map((l) => l.id).slice(0, 2)).toEqual(['review', s.layouts[1].id])
+    expect(r.layouts.map((l) => l.id).slice(2)).toEqual(['talk', 'build'])
+    expect(r.layouts[0].name).toBe('Look')
+    expect(r.layouts.map((l) => l.name)).not.toContain('Review')
+    expect(closedPanels(r.layouts[3].state)).toEqual(closedPanels(PRESETS.build.make()))
+    expect(closedPanels(r.layouts[3].state)).not.toEqual(closedPanels(edited.state))
+    expect(restoreDefaultLayouts(r)).toBe(r)
+  })
+  it('a restored name that is taken gets a number', () => {
+    let s = deleteLayout(defaultStore(), 'talk')
+    s = renameLayout(s, 'review', 'Talk')
+    expect(restoreDefaultLayouts(s).layouts.map((l) => l.name)).toEqual(['Talk', 'Build', 'Talk 2'])
+  })
+  it('a deleted built-in stays deleted across a reload; a rename survives', () => {
+    let s = renameLayout(defaultStore(), 'review', 'Look')
+    s = deleteLayout(s, 'talk')
+    const back = parseStore(JSON.parse(serializeStore(s)))
+    expect(back.active).toBe(s.active)
+    expect(back.layouts.map((l) => l.id)).toEqual(['review', 'build'])
+    expect(back.layouts[0]).toMatchObject({ name: 'Look', builtin: true })
+  })
+  it('a legacy v1 store loads with every built-in present', () => {
+    const v1 = { ...JSON.parse(serializeStore(defaultStore())), v: 1 }
+    v1.layouts = v1.layouts.slice(1)
+    const back = parseStore(v1)
+    expect(back.v).toBe(2)
+    expect(back.layouts.map((l) => l.id)).toEqual(['talk', 'review', 'build'])
+  })
+  it('a v2 store with nothing left is the default store', () => {
+    expect(parseStore({ v: 2, active: 'x', layouts: [] }).layouts).toHaveLength(3)
   })
 })
 

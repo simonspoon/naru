@@ -12307,6 +12307,20 @@ body.dock-resizing .dock-body {
   font-size: 0.8rem;
 }
 
+.dock-name-input[aria-invalid='true'] {
+  border-color: var(--red);
+}
+
+.dock-menu-heading {
+  padding: 0.25rem 0.5rem;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .dock-menu {
   position: relative;
 }
