@@ -319,6 +319,56 @@ minutes instead, give the trigger `{"mode":"time","every_minutes":10}` and
 start `naru serve --watch-workflows`. `scripts/workflow-check.sh` builds this
 exact graph over stub `sox`/`auris`/`claude`.
 
+## Web UI
+
+The web UI replaced the diagrams tab with a **Workflows** tab (mesa task 1607,
+frontend only; the routes are the ones above). `#/projects/<id>/workflows` is the
+list, `#/projects/<id>/workflows/<wid>` the builder; the same two views fill the
+**Workflows** dock panel (`WorkflowsPanel`, panel id `workflows`, which a saved
+dock layout's old `diagrams` id is renamed to on load). The page reports the live
+context kind `workflows`, with the workflow's id and name once one is open.
+
+- **List** (`WorkflowListView`): the project's workflows, each with its trigger
+  (`manual`, `time`, `voice · "<phrase>"`, or `no trigger`), a **run** button that
+  shows the run's one-line summary on the row, delete (the usual two-step
+  confirm, whose echo is the recovery transcript) and a create form (a name).
+- **Builder** (`WorkflowBuilderView` + `WorkflowCanvas`, on `@xyflow/react`). A
+  **NODES** palette down the left holds the six kinds as tinted pills (`--wf-*`
+  tokens): drag one onto the canvas, or click it to add one in a free spot; each
+  is one `POST .../nodes` with a config the server accepts as it stands
+  (`workflowConfig.ts::defaultConfig`). A node drag ends in one `PATCH` of x/y;
+  dragging from a node's right handle to another's left handle is one
+  `POST .../edges`. A **branch** node has two source handles, **true** (green)
+  and **false** (red), and the edge takes its `branch` from the handle it was
+  dragged from; only a branch node's edges carry one. A trigger has no input
+  handle and an output node no output handle. Click a node or an edge to select
+  it: the **inspector** (bottom-right) edits a node's title and a real control
+  per config key of its kind (trigger mode/every-minutes/phrase; prompt
+  model, thinking, prompt, timeout, with `local:<name>`; cli command and
+  timeout; script picker over `GET /api/scripts` plus value rows and a note on
+  `{input}`; branch operator and value; output target and only that target's
+  keys) and saves with one `PATCH`; an edge's inspector deletes it. Every
+  refusal from the store (`cycle`, `validation`, `conflict`, a second trigger)
+  is shown inline, on the canvas or in the inspector, never swallowed. **Auto
+  layout** lays the graph out left to right (`layout.ts`) and PATCHes what
+  moved. Pan/zoom is remembered per workflow in `localStorage`
+  (`boardView.ts`).
+- **Running**: the header's **▶ Run** (with an optional input) posts
+  `/api/workflows/{id}/run`, then paints each node with its step's status (ring
+  green for `ok`, red for `failed`, dimmed for `skipped`) and lists the steps
+  with duration, output and error in the run panel under the canvas. The panel's
+  other tabs are the recent runs (click one to repaint the canvas with it) and
+  the logs (`GET /api/workflow-log`, one named log or all).
+- **Logic in pure modules** (`frontend/src/*.test.ts`): `workflowConfig.ts`
+  (kinds, default config, the card's summary line, the draft ⇄ config round trip
+  with the shape checks of `validate_config`, the branch-handle rule) and
+  `workflowRun.ts` (step → node status, durations, the run summary, the trigger
+  label). The server stays the authority: the client checks only to name the
+  wrong field before the round trip.
+- **Keyboard**: a mounted `.workflow-canvas` suppresses the global single-key
+  shortcuts (`keyboardScope.ts` rule 4), exactly as the diagram canvas did. Node
+  and edge deletion are inspector buttons, not the Delete key.
+
 ## Gates
 
 `scripts/workflow-check.sh` (throwaway `MESA_DB`, `HOME` and config; a free

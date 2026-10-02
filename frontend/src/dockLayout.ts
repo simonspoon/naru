@@ -30,9 +30,9 @@ import {
   type SplitNode,
 } from './lib/paneTree'
 
-export type PanelId = 'main' | 'chat' | 'board' | 'agents' | 'terminal' | 'diagrams' | 'orb'
+export type PanelId = 'main' | 'chat' | 'board' | 'agents' | 'terminal' | 'workflows' | 'orb'
 
-export const PANEL_IDS: readonly PanelId[] = ['main', 'chat', 'board', 'agents', 'terminal', 'diagrams', 'orb']
+export const PANEL_IDS: readonly PanelId[] = ['main', 'chat', 'board', 'agents', 'terminal', 'workflows', 'orb']
 
 const LABELS: Record<PanelId, string> = {
   main: 'Main',
@@ -40,7 +40,7 @@ const LABELS: Record<PanelId, string> = {
   board: 'Whiteboard',
   agents: 'Agents',
   terminal: 'Terminal',
-  diagrams: 'Diagrams',
+  workflows: 'Workflows',
   orb: 'Naru',
 }
 
@@ -397,12 +397,45 @@ function parseNode(raw: unknown): PaneNode<'group'> | null {
 }
 
 /**
+ * The Diagrams panel became Workflows (mesa task 1607). A layout saved before
+ * that names `diagrams` in a group's tabs, its `active`, the nav list and a
+ * `lastSpot`; each is renamed so the panel keeps its place, rather than being
+ * dropped as an unknown id. A layout that already holds `workflows` keeps it
+ * (the unknown duplicate is dropped by the id filter, never double-docked).
+ */
+function renameLegacyPanels(raw: unknown): unknown {
+  if (!isObj(raw)) return raw
+  const id = (p: unknown) => (p === 'diagrams' ? 'workflows' : p)
+  const list = (v: unknown) => (Array.isArray(v) ? v.map(id) : v)
+  const out: Record<string, unknown> = { ...raw }
+  if (isObj(raw.groups)) {
+    out.groups = Object.fromEntries(
+      Object.entries(raw.groups).map(([gid, g]) => [
+        gid,
+        isObj(g) ? { ...g, tabs: list(g.tabs), active: id(g.active) } : g,
+      ]),
+    )
+  }
+  if (Array.isArray(raw.nav)) out.nav = list(raw.nav)
+  if (isObj(raw.lastSpot)) {
+    out.lastSpot = Object.fromEntries(
+      Object.entries(raw.lastSpot).map(([p, s]) => [
+        id(p),
+        isObj(s) && 'anchor' in s ? { ...s, anchor: id(s.anchor) } : s,
+      ]),
+    )
+  }
+  return out
+}
+
+/**
  * Total: unknown panel ids are dropped, a panel in two groups (or a group
  * named twice in the tree) rejects the whole state, and anything that leaves
  * no panel docked is `null` — the caller falls back to a preset, never to an
  * empty layout.
  */
-export function parseState(raw: unknown): DockState | null {
+export function parseState(raw0: unknown): DockState | null {
+  const raw = renameLegacyPanels(raw0)
   if (!isObj(raw) || !isObj(raw.groups)) return null
   const tree0 = parseNode(raw.tree)
   if (tree0 === null || tree0.kind !== 'split') return null

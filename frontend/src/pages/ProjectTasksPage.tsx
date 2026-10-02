@@ -31,8 +31,8 @@ import { useKeymap } from '../keymapStore'
 import { useFetch } from '../useFetch'
 import { ArtifactsView } from './ArtifactsView'
 import { CCDashboardView } from './CCDashboardView'
-import { DiagramBoardView } from './DiagramBoardView'
-import { DiagramListView } from './DiagramListView'
+import { WorkflowBuilderView } from './WorkflowBuilderView'
+import { WorkflowListView } from './WorkflowListView'
 import { FilesView } from './FilesView'
 import { GitView } from './GitView'
 import { LiveFocus } from './LiveFocus'
@@ -41,7 +41,7 @@ import { TerminalPage } from './TerminalPage'
 
 // 'a' opens the create-task form, on every view of a project page and not
 // just the Board (mesa task 811): a task is most often written *about* what is
-// currently on screen — a file, a diff, a diagram frame — so the view you
+// currently on screen — a file, a diff, a workflow node — so the view you
 // are on is the reason to create one, never a reason to have to leave first.
 //
 // It opens the panel in place rather than navigating to
@@ -51,7 +51,7 @@ import { TerminalPage } from './TerminalPage'
 //
 // `shouldIgnoreShortcut` (keyboardScope.ts) is what makes app-wide scope safe:
 // it already covers modifiers, text-editing contexts, xterm panes, the
-// diagram canvas and open modals — i.e. every place on these views where
+// workflow canvas and open modals — i.e. every place on these views where
 // 'a' means the letter a. The remaining views have no key handling of their
 // own to collide with. It is reached through `matchesShortcut` (keymap.ts,
 // mesa task 1079) rather than called here, so which chord this shortcut is
@@ -88,8 +88,8 @@ function useCreateTaskShortcut(onOpen: () => void, keymap: Keymap) {
 export function ProjectTasksPage({
   projectId,
   taskId,
-  diagrams,
-  diagramId,
+  workflows,
+  workflowId,
   git,
   files,
   artifacts,
@@ -102,10 +102,10 @@ export function ProjectTasksPage({
 }: {
   projectId: number
   taskId: number | null
-  // Diagrams is a URL-driven view (refresh-/back-stable): `diagrams` is
-  // true on the boards routes, `diagramId` selects a single board's canvas.
-  diagrams: boolean
-  diagramId: number | null
+  // Workflows is a URL-driven view (refresh-/back-stable): `workflows` is
+  // true on the boards routes, `workflowId` selects a single board's canvas.
+  workflows: boolean
+  workflowId: number | null
   // Git is another URL-driven view: working-tree status of the project's
   // linked folder, with a per-file diff pane.
   git: boolean
@@ -206,7 +206,7 @@ export function ProjectTasksPage({
   // once because both the 'a' shortcut and the agents poll below are scoped
   // to it.
   const onBoard =
-    !diagrams &&
+    !workflows &&
     !git &&
     !files &&
     !artifacts &&
@@ -229,8 +229,8 @@ export function ProjectTasksPage({
             ? 'artifacts'
             : terminal
               ? 'terminal'
-              : diagrams
-                ? 'diagrams'
+              : workflows
+                ? 'workflows'
                 : 'board'
 
   const {
@@ -268,7 +268,7 @@ export function ProjectTasksPage({
   const { data: sessions } = useFetch(() => listAllAgents(), 'board-agents', {
     pollMs: boardVisible ? 3000 : undefined,
   })
-  // Diagrams, Git, Files, Terminal, Dashboard and Settings are their own
+  // Workflows, Git, Files, Terminal, Dashboard and Settings are their own
   // views with their own fetches/error handling, so a failed task fetch must
   // not block them; only surface it where the board is actually on screen —
   // otherwise a Custom layout holding a board pane would show that pane
@@ -376,11 +376,11 @@ export function ProjectTasksPage({
           // rather than carrying the previous one's panes across.
           <TerminalPage key={`project-${projectId}`} projectId={projectId} />
         )
-      case 'diagrams':
-        return diagramId !== null ? (
-          <DiagramBoardView projectId={projectId} diagramId={diagramId} />
+      case 'workflows':
+        return workflowId !== null ? (
+          <WorkflowBuilderView projectId={projectId} workflowId={workflowId} />
         ) : (
-          <DiagramListView projectId={projectId} />
+          <WorkflowListView projectId={projectId} />
         )
       case 'board':
         return !tasks ? (
@@ -511,7 +511,7 @@ export function ProjectTasksPage({
             {project?.archived && (
               <span
                 className="badge project-archived-badge"
-                title="Hidden from the sidebar's main list and from unscoped task/diagram views. Restore from the Settings tab."
+                title="Hidden from the sidebar's main list and from unscoped task/workflow views. Restore from the Settings tab."
               >
                 archived
               </span>

@@ -27,7 +27,7 @@ function navigate(hash: string) {
 
 /**
  * Fixed top-level destinations plus, per project: "Go to <name>" (the
- * board), the git/files/terminal/dashboard/diagrams/settings sub-views,
+ * board), the git/files/terminal/dashboard/workflows/settings sub-views,
  * and
  * "Create task in <name>" (which lands on the create-task route —
  * ProjectTasksPage opens the form with its description field focused).
@@ -90,10 +90,10 @@ function buildCommands(projects: Project[]): Command[] {
       run: () => navigate(`#/projects/${p.id}/dashboard`),
     })
     commands.push({
-      id: `diagrams-${p.id}`,
-      label: `${p.name} — Diagrams`,
-      search: `${name} diagrams`,
-      run: () => navigate(`#/projects/${p.id}/diagrams`),
+      id: `workflows-${p.id}`,
+      label: `${p.name} — Workflows`,
+      search: `${name} workflows`,
+      run: () => navigate(`#/projects/${p.id}/workflows`),
     })
     commands.push({
       id: `settings-${p.id}`,
@@ -179,7 +179,7 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
       run(selected)
     } else if (e.key === 'Escape') {
       // Stop here so it doesn't also reach a background view's own Escape
-      // listener (e.g. the expanded diagram canvas) — the palette is a
+      // listener (e.g. the expanded workflow canvas) — the palette is a
       // modal, so Escape closes only it.
       e.preventDefault()
       e.stopPropagation()

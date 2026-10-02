@@ -67,8 +67,8 @@ so the board could not be scrolled by touch anywhere it mattered.
 constraint.
 
 **Scope, and the one place it does not apply.** The rule is about draggables
-inside a *scrolling* view. `.frame-header` on the diagram canvas keeps
-`touch-action: none` and is correct to — a pan/zoom canvas is the other case
+inside a *scrolling* view. The workflow canvas's React Flow pane and nodes keep
+`touch-action: none` and are correct to — a pan/zoom canvas is the other case
 entirely, and copying the kanban's `pan-y` there would break it. See *The
 canvas gesture model* below.
 
@@ -94,7 +94,7 @@ the page behind was never the drawer's scroll chain, it was simply the element
 under the finger. The scrim also gives the drawer a tap-to-dismiss target,
 which it previously lacked entirely.
 
-`z-index` ladder, lowest first: diagram takeover `1000` → scrim `1150` →
+`z-index` ladder, lowest first: takeover `1000` → scrim `1150` →
 drawers `1200` → **tab bar `1220`** → modal backdrop `1250` → command palette
 `1300`. A modal therefore still opens above an open drawer, and the tab bar
 stays tappable while a drawer is open (see *Bottom tab bar* below).
@@ -114,117 +114,25 @@ that already lived there.
 
 ## The canvas gesture model
 
-The diagram canvas is the one phone surface that is **not** a scrolling list, so
-invariant 1 inverts on it. It is a pan/zoom canvas (React Flow / `@xyflow`
-v12, `DiagramCanvas.tsx`), and a canvas has to own every touch that lands
-inside it — a browser that "helpfully" panned the page mid-pinch would make
-it unusable. React Flow says so itself: its own stylesheet puts
-`touch-action: none` on `.react-flow__pane` **and** `.react-flow__node`.
-`.frame-header` matching that is the canvas agreeing with its library, not
-the kanban bug surviving in a second place.
+The workflow canvas (mesa task 1607) is the one phone surface that is **not** a
+scrolling list, so invariant 1 inverts on it. It is a pan/zoom canvas (React
+Flow / `@xyflow` v12, `WorkflowCanvas.tsx`), and a canvas has to own every touch
+that lands inside it — a browser that "helpfully" panned the page mid-pinch would
+make it unusable. React Flow says so itself: its own stylesheet puts
+`touch-action: none` on `.react-flow__pane` **and** `.react-flow__node`, and the
+builder adds nothing to it. Inside `.wf-viewport` one finger on the background
+pans, two fingers zoom and a drag on a card moves it; the page can only be
+scrolled by the strips around the canvas box.
 
-Inside `.diagram-viewport`, measured at 390×844:
+At the narrow tier (`max-width: 860px`) the builder stacks: the palette becomes a
+wrapping row of tap-to-add buttons above the canvas (a finger cannot start an
+HTML5 drag, so a click on a palette item is the touch way to add a node) and the
+inspector spans the canvas's width instead of floating at 18rem.
 
-| Gesture | Owner | Measured |
-|---|---|---|
-| one finger on the background | canvas pans | viewport transform `0` → `-230px` |
-| two fingers | canvas zooms | `scale(1)` → `scale(2.13)` |
-| one finger on `.frame-header` | that frame moves | node `translate(84,124)` → `(108,188)` |
-| one finger on a frame's **body** | nothing | node unmoved, page unmoved |
-| tap / double-tap a card | select / edit | — |
-
-`main.scrollTop` stayed `0` through every one of those. It is not zero because
-nothing tried: the same swipe dispatched on the page *above* the canvas
-scrolls it `0 → 219`.
-
-Two consequences worth stating, because both are choices rather than
-accidents:
-
-- **The card body is deliberately inert to drag.** It holds markdown, links
-  and inline editors, so it is not a drag handle on desktop either; the phone
-  keeps that split rather than inventing a second one. Pan from the
-  background, move from the header.
-- **The page can only be scrolled by the strips around the canvas box**, since
-  the box itself absorbs everything. So the box may never grow tall enough to
-  leave no strip — `.diagram:not(.expanded) .diagram-viewport` carries a
-  `max-height` guard for that. At 390×844 the box is 556px against a 652px
-  ceiling, i.e. the guard is currently slack; it exists so a future
-  `--tab-viewport-height` change cannot strand the reader. Scrolled to the
-  bottom the whole canvas sits on screen (top 231, bottom 787, tab bar at 796).
-- **The shape palette is a strip above the box, not a column beside it** (mesa
-  task 868). A finger cannot start an HTML5 drag, so on this tier the rail is
-  what it already is underneath: one horizontally-scrolling row of
-  tap-to-add shapes, one 44px row tall, which is page chrome the reader can
-  still scroll the page by. Takeover mode is `flex-wrap: nowrap`, so there the
-  two are stacked explicitly (`.diagram.expanded { flex-direction: column }`)
-  — a full-width, unshrinkable strip in that row would otherwise leave the
-  canvas zero pixels wide.
-
-### The hazard this tier actually has: invisible hit targets
-
-Not `touch-action` — a canvas that owns its gestures is only as good as the
-agreement between what is hittable and what is visible, and hover is what
-desktop uses to keep those in sync. With no hover, anything
-`pointer-events: all` and invisible becomes a trap that swallows the pan with
-nothing on screen to explain the refusal. Two were found and fixed:
-
-- **Connection handles.** `.diagram .react-flow__handle` is `opacity: 0`
-  until its node is hovered, but stays hit-testable — 22×22, four per frame,
-  28 on the test board with six of them on screen at rest. They are now shown
-  (`opacity: 0.55`) on coarse pointers, which also makes touch edge-creation
-  possible at all.
-- **The control cluster's bounding box.** `.react-flow__panel` sets no
-  `pointer-events`, so the gaps *between* the buttons ate the gesture across
-  the canvas's whole top-left corner. The panel is now `pointer-events: none`
-  with its buttons `auto`.
-
-The handle fix lives in a third, **capability-scoped** block at the end of
-`App.css` — `@media (hover: none) and (pointer: coarse)`, the only one in the
-file. That is deliberate: the defect tracks the absence of hover, not the
-width. A 900px touch tablet has it; a 500px desktop window does not, and
-neither width tier could say so. Verified both ways — under touch emulation
-the query matches and the handles read `0.55`; in a plain 390px desktop
-window it does not match and they stay `0`.
-
-### Sizing
-
-Touch targets at the phone tier, all measured after the change:
-
-| Control | Before | After |
-|---|---|---|
-| React Flow zoom buttons | 26×26 | 44×44 |
-| auto layout / direction | 128×26 | ~110×44, wrapped into a row |
-| shape palette row (mesa task 868) | — | ~120×44, in a scrolling strip |
-| expand | 87×26 | 87×44 |
-| `.frame-header` (the drag handle) | 238×28 | 238×44 |
-| edge label ✕ | 19×18 | 28×28 |
-
-The edge chips stop at 28px on purpose. They float over the graph rather than
-over chrome, and a 44px chip on a 390px-wide canvas hides the connector it
-annotates — the 44px floor applies to the controls, not to annotations.
-
-Two layout changes follow from the same budget. The MiniMap is `display: none`
-here: 200×150 is a sixth of a 366×556 canvas, parked over the corner, and it
-blocks panning there. And the control cluster becomes a wrapping **row** — as
-a column of 44px rows it measured ~500px of a 556px canvas, i.e. the controls
-covering the drawing; as a row it is 260×128, 23% of the canvas height.
-
-The canvas hint is rendered twice, `.canvas-hint` and `.canvas-hint-touch`,
-swapped by CSS at this tier — the desktop copy names mouse gestures
-("double-click", "drag a side dot") that do not exist here, so the difference
-is the gesture model itself, not the wording. Two spans and a `display` swap,
-rather than a second `isPhone()` call.
-
-### Known gaps
-
-- **Waypoint handles and anchor-lock dots are unreachable by touch.** Both are
-  10px and both are rendered only while their edge is hovered (`FrameEdgeView`
-  keeps that in React state), so on a phone they are never in the DOM at all —
-  confirmed, not assumed: `.anchor-lock-halo`, `.anchor-lock-dot` and
-  `.waypoint-handle` all query to `0` at rest. Edge re-routing and anchor
-  locking are therefore desktop-only for now. Enlarging them would not help;
-  they need a touch-reachable way to be *revealed* first.
-- Frame resize has no touch affordance either, for the same reason.
+The earlier measurements of the diagram canvas (its 44px control sizing, the
+coarse-pointer handle visibility rule and the dedicated touch hint) went with
+it; the workflow builder has not been re-measured on a phone, so treat a
+touch-sized handle or control as a known gap rather than a verified one.
 
 ## Current per-surface state
 
@@ -238,7 +146,7 @@ rather than a second `isPhone()` call.
 | History rows | wrap instead of holding fixed timestamp/actor columns |
 | Modals (task detail, new task, new project) | full-screen sheets with a sticky close header |
 | Files tab | tree collapses when a file opens, behind a breadcrumb toggle; per-file diffs go unified; the content half is one pane, never split — see *Files tab and the unified diff* |
-| Diagram canvas | pan/zoom/move all work by touch; controls at 44px, MiniMap hidden — see *The canvas gesture model* |
+| Workflow canvas | React Flow's own pan/zoom/move by touch; palette becomes a tap-to-add row — see *The canvas gesture model* |
 | Terminal / Agent panes | one pane, no split UI; shell height follows the on-screen keyboard — see *Terminal and agent panes* |
 | Inbox | body text wraps unbreakable URLs; the assign `<select>` is capped to its row — see *Crossing the breakpoint* for the audit's other half. Since task 828 an item is collapsed to a 3-line preview with the playback glyphs pinned right: the preview is the flex item that gives way (`min-width: 0`), so the row holds at 390px with no rule of its own, and the triage controls only exist inside an opened item |
 | Project page header / tab strip | `.tabs` already wraps to two rows at 390px; all six tabs in-view and hit-testable, no change needed |
@@ -689,8 +597,8 @@ Checks worth re-running after any change to this surface:
    attached and still scrolled where it was. This is the one check a tab-bar
    change can silently break, and it fails loudly only in a *live* browser —
    nothing about the JSX makes a conditional render look wrong.
-5. Open a diagram: one finger on the canvas background pans it, two
-   fingers zoom, a drag on a frame header moves that frame, and
+5. Open a workflow: one finger on the canvas background pans it, two
+   fingers zoom, a drag on a node moves it, and
    `main.scrollTop` stays put through all three. Quote the transform values —
    "the canvas panned" is not a number.
 6. Open a task detail: the sheet fills the viewport, its body scrolls while

@@ -6,7 +6,7 @@ import type { LiveContext } from './types/LiveContext'
  * hub that reports it (mesa task 888).
  *
  * The route alone says which page is open; it does not say what is *in focus*
- * on it — which file the editor holds, which diagram the canvas is showing,
+ * on it — which file the editor holds, which workflow the canvas is showing,
  * which task the panel opened. That is the half a spoken conversation needs:
  * "rename this" is only answerable if mesa knows what "this" is.
  *

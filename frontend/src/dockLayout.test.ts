@@ -53,11 +53,11 @@ function consistent(s: DockState) {
 }
 
 describe('presets', () => {
-  it('are consistent and keep diagrams closed', () => {
+  it('are consistent and keep workflows closed', () => {
     for (const p of Object.values(PRESETS)) {
       const s = p.make()
       consistent(s)
-      expect(groupOf(s, 'diagrams')).toBeNull()
+      expect(groupOf(s, 'workflows')).toBeNull()
       expect(groupOf(s, 'main')).not.toBeNull()
     }
   })
@@ -174,7 +174,7 @@ describe('nav zone', () => {
     expect(by.orb).toMatchObject({ where: 'nav', open: true })
     expect(by.chat).toMatchObject({ where: 'dock', open: true })
     expect(by.terminal).toMatchObject({ where: 'dock', open: false })
-    expect(by.diagrams).toMatchObject({ where: 'closed', open: false })
+    expect(by.workflows).toMatchObject({ where: 'closed', open: false })
   })
   it('a layout saved before the nav zone loads, with the orb at the top of the nav', () => {
     const raw = JSON.parse(JSON.stringify(talk()))
@@ -185,6 +185,21 @@ describe('nav zone', () => {
     // An explicit empty nav is the orb closed, kept.
     raw.nav = []
     expect(parseState(raw)!.nav).toEqual([])
+  })
+  it('a layout saved with the Diagrams panel keeps it as Workflows, wherever it sat', () => {
+    const grouped = dropPanel(talk(), 'workflows', 'g-board', 'top')
+    const legacy = (state: DockState) =>
+      JSON.stringify(state).replaceAll('workflows', 'diagrams')
+    const g = parseState(JSON.parse(legacy(grouped)))!
+    consistent(g)
+    expect(groupOf(g, 'workflows')).not.toBeNull()
+    const inTheNav = dockToNav(talk(), 'workflows')
+    const n = parseState(JSON.parse(legacy(inTheNav)))!
+    expect(n.nav).toContain('workflows')
+    const closed = closePanel(grouped, 'workflows')
+    const c = parseState(JSON.parse(legacy(closed)))!
+    expect(c.lastSpot.workflows).toEqual(closed.lastSpot.workflows)
+    expect(JSON.stringify(c)).not.toContain('diagrams')
   })
   it('round-trips the nav and its last spot; rejects a panel in a group and the nav', () => {
     const s = closePanel(dockToNav(talk(), 'chat'), 'chat')
@@ -223,9 +238,9 @@ describe('dropPanel', () => {
     expect(dropPanel(s, 'chat', 'g-chat', 'left')).toBe(s)
   })
   it('opens a closed panel at the drop', () => {
-    const s = dropPanel(talk(), 'diagrams', 'g-board', 'top')
+    const s = dropPanel(talk(), 'workflows', 'g-board', 'top')
     consistent(s)
-    expect(isVisible(s, 'diagrams')).toBe(true)
+    expect(isVisible(s, 'workflows')).toBe(true)
   })
   it('keeps ratios summing to the child count', () => {
     const s = dropPanel(dropPanel(talk(), 'chat', 'g-board', 'left'), 'chat', 'g-board', 'right')
@@ -274,9 +289,9 @@ describe('closePanel / revealPanel', () => {
     expect(revealPanel(s, 'terminal')).toBe(s)
   })
   it('a never-docked panel with no lastSpot lands at the right', () => {
-    const s = revealPanel(talk(), 'diagrams')
+    const s = revealPanel(talk(), 'workflows')
     consistent(s)
-    expect(isVisible(s, 'diagrams')).toBe(true)
+    expect(isVisible(s, 'workflows')).toBe(true)
   })
 })
 

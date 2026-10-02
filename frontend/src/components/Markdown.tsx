@@ -28,9 +28,8 @@ import {
  * guarantee above is unaffected.
  *
  * `breaks` opts into `remark-breaks`, which turns a single newline into a hard
- * line break instead of CommonMark's soft break (collapsed to a space). Used by
- * ERD entity cards (task 492), whose bodies are line-per-attribute lists that
- * must not run together — see `EntityNode` in `DiagramCanvas.tsx`. Like
+ * line break instead of CommonMark's soft break (collapsed to a space). Used
+ * where a body is a line-per-item list that must not run together. Like
  * `remark-gfm` it is a source-text parser extension emitting ordinary mdast
  * nodes, so the no-raw-HTML guarantee is unaffected.
  *

@@ -28,12 +28,12 @@ the rules below are applied across `frontend/src/App.css`.
 | Token | Use |
 | --- | --- |
 | `--font-sans` | Inter: body, buttons, inputs, headings (semibold, no uppercase) |
-| `--font-brand` | Orbitron: the wordmark and diagram frame titles only |
+| `--font-brand` | Orbitron: the wordmark only |
 | `--font-mono` | Share Tech Mono: see "When to use mono" |
 | `--r-sm` / `--r-md` / `--r-lg` / `--r-pill` | 8 chips and icons / 12 cards and panels / 16 bubbles, modals / pill |
 | `--surface`, `--surface-raised`, `--surface-hover`, `--surface-field` | tinted fills |
 | `--ring`, `--ring-focus`, `--edge-cyan`, `--hairline`, `--border(-bright)` | separation |
-| `--cut` | the one remaining chamfer: a diagram frame's rectangular card |
+| `--wf-trigger` … `--wf-output`, `--wf-run` | the workflow builder's per-kind node tints and its Run pill |
 
 ## When to use mono
 

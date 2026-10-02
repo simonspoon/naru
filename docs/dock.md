@@ -12,7 +12,7 @@ or Rust surface.
 | `board` | the live whiteboard (`LiveBoardPanel`), or "No whiteboard yet" |
 | `agents` | `AgentSidebar` with its `docked` prop |
 | `terminal` | the global `TerminalPage` |
-| `diagrams` | `DiagramsPanel`: the boards of the project the route is on, opened in place |
+| `workflows` | `WorkflowsPanel`: the workflows of the project the route is on, opened in place (a saved layout naming the old `diagrams` id is renamed on load) |
 | `orb` (labelled **Naru**; the id is unchanged so saved layouts load, mesa task 1579) | the animated mark (`LiveOrb.tsx`'s `OrbPanel`, mesa tasks 1574/1577) filling its panel over a soft state-coloured glow — pure orb, no sphere, ring, words or controls. Its mic / pause / sound icon buttons (the mic red and slashed when muted) live in the page header, left of the usage chips behind a thin divider (`OrbHeaderControls`, rendered by `LiveHub` on the dock tiers), so they work with the panel open, closed or docked in the collapsed nav |
 
 Each panel appears at most once. The phone tier (`usePhoneTier()`) is **not**
@@ -82,7 +82,7 @@ phone tier, which has no dock, keeps the floating orb.
   built-in is tracked by its id (`talk`/`review`/`build`), never its name, so a
   renamed Talk is still Talk: Restore appends only the built-ins whose id is gone
   (default arrangement, a taken name gets a number) and touches nothing else.
-  Diagrams starts closed in all three presets.
+  Workflows starts closed in all three presets.
 
 ## Pieces
 

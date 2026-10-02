@@ -109,7 +109,7 @@ const RAIL_GLYPH: Record<PanelId, string> = {
   board: '◧',
   agents: '◎',
   terminal: '›_',
-  diagrams: '◇',
+  workflows: '◇',
   orb: '●',
 }
 

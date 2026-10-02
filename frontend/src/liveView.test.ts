@@ -23,7 +23,7 @@ const base: ViewParts = {
 describe('sectionFor', () => {
   it('reads the tab after a project id', () => {
     expect(sectionFor('#/projects/29/files')).toBe('files')
-    expect(sectionFor('#/projects/29/diagrams/4')).toBe('diagrams')
+    expect(sectionFor('#/projects/29/workflows/4')).toBe('workflows')
     expect(sectionFor('#/projects/29/git?x=1')).toBe('git')
   })
   it('calls a bare project and its task routes the board', () => {

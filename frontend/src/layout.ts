@@ -1,7 +1,7 @@
 // Auto-layout: a small hand-rolled layered (Sugiyama-style) graph layout for
-// the diagram canvas. Diagram edges may form cycles (a drawing, not a
-// dependency graph — see FrameEdge.ts), so layering first breaks cycles by
-// discarding DFS back-edges, then longest-path-ranks the remaining DAG into
+// the workflow canvas. A workflow is a DAG (`Store` refuses a cycle), but the
+// layering still breaks cycles by discarding DFS back-edges, so it is safe for
+// any graph, then longest-path-ranks the remaining DAG into
 // layers, then positions each layer along the chosen flow direction.
 //
 // An edge that spans more than one layer gets a **dummy** placed in each layer
@@ -15,8 +15,8 @@
 // the connector zigzag through it. They are dropped before the result is
 // returned: the caller only ever sees positions for real frames.
 
-export type LayoutFrame = { id: number; w: number; h: number }
-export type LayoutEdge = { from_frame: number; to_frame: number }
+export type LayoutNode = { id: number; w: number; h: number }
+export type LayoutEdge = { from: number; to: number }
 export type LayoutDirection = 'vertical' | 'horizontal'
 
 const GAP_LAYER = 80 // gap between layers, along the flow (primary) axis
@@ -32,9 +32,9 @@ function rankFrames(
   const known = new Set(ids)
   const adjAll = new Map<number, number[]>(ids.map((id) => [id, []]))
   for (const e of edges) {
-    if (e.from_frame === e.to_frame) continue
-    if (!known.has(e.from_frame) || !known.has(e.to_frame)) continue
-    adjAll.get(e.from_frame)!.push(e.to_frame)
+    if (e.from === e.to) continue
+    if (!known.has(e.from) || !known.has(e.to)) continue
+    adjAll.get(e.from)!.push(e.to)
   }
 
   const forward = new Map<number, number[]>(ids.map((id) => [id, []]))
@@ -71,8 +71,8 @@ function rankFrames(
  *  stacks them left-to-right. Order within a layer follows a barycenter of
  *  each frame's immediate predecessors' order in the previous layer, falling
  *  back to the input order — a standard crossing-reduction heuristic. */
-export function layoutFrames(
-  frames: LayoutFrame[],
+export function layoutNodes(
+  frames: LayoutNode[],
   edges: LayoutEdge[],
   direction: LayoutDirection,
 ): Map<number, { x: number; y: number }> {
@@ -99,13 +99,13 @@ export function layoutFrames(
   }
   let nextDummy = -1
   for (const e of edges) {
-    if (e.from_frame === e.to_frame) continue
-    const ru = rank.get(e.from_frame)
-    const rv = rank.get(e.to_frame)
+    if (e.from === e.to) continue
+    const ru = rank.get(e.from)
+    const rv = rank.get(e.to)
     // A back edge (the cycle-breaking pass already discarded it) and a
     // same-layer edge both have nothing to reserve and nothing to order by.
     if (ru === undefined || rv === undefined || rv <= ru) continue
-    let prev = e.from_frame
+    let prev = e.from
     for (let r = ru + 1; r < rv; r++) {
       const dummy = nextDummy--
       layers[r].push(dummy)
@@ -117,7 +117,7 @@ export function layoutFrames(
       predsOf(dummy).push(prev)
       prev = dummy
     }
-    predsOf(e.to_frame).push(prev)
+    predsOf(e.to).push(prev)
   }
 
   /** A dummy is a point: it consumes no cross-axis size of its own, so the

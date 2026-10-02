@@ -64,7 +64,7 @@ function ArchiveMeta({ item }: { item: InboxItem }) {
   const line = inboxArchiveLine(item)
   if (line === null) return null
   return (
-    <div className="muted diagram-meta">
+    <div className="muted meta-line">
       archived: {line.outcome}
       {line.outcome !== null && line.reason !== null && ' · '}
       {line.reason}
@@ -741,7 +741,7 @@ export function InboxView({ filter }: { filter: InboxFilter }) {
                       {item.body}
                     </div>
                   )}
-                  <div className="muted diagram-meta">
+                  <div className="muted meta-line">
                     <span className="inbox-kind">{inboxKindLabel(item.kind)}</span>
                     <span> · </span>
                     {item.author && <span>from {item.author} · </span>}

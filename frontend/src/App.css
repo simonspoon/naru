@@ -1349,1252 +1349,475 @@ main {
   flex-wrap: wrap;
 }
 
-/* ---- diagrams ---- */
+/* ---- small meta line (inbox rows) ---- */
 
-.diagram-meta {
+.meta-line {
   font-size: 0.75rem;
   margin-top: 0.2rem;
 }
 
-/* The canvas and the (optional) editor panel share a row; all canvas controls
-   now live as overlays inside the viewport itself (no separate toolbar row). */
-.diagram {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 1rem;
-  align-items: flex-start;
-}
 
-/* In-canvas control cluster (a React Flow Panel pins it top-left). Buttons
-   stack vertically; the hint/error wrap beneath them. */
-.canvas-controls {
-  display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
-  width: 9.5rem;
-}
-
-.canvas-controls button {
-  width: 100%;
-  background: rgba(6, 10, 16, 0.85);
-}
-
-/* Shape palette (mesa task 868) — the toolbar down the left of the diagram
-   space, replacing the wrapped add-frame button cluster that used to sit in
-   the in-canvas panel (story 360, widened by task 854). It is a real column
-   beside the viewport rather than an overlay: a flowchart board offers 7
-   shapes, and 7 rows tall enough to show a silhouette would have covered the
-   drawing. It scrolls at the viewport's own height, so a board type gaining
-   shapes lengthens the rail rather than the page. */
-.shape-rail {
-  flex: 0 0 auto;
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
-  /* Wide enough for the longest name a board type offers ("predefined"),
-     which is the whole point of a palette that names its shapes. */
-  width: 8.5rem;
-  max-height: var(--tab-viewport-height);
-  overflow-y: auto;
-  padding: 0.35rem;
-  border: 1px solid transparent;
-  border-radius: var(--r-md);
-  background: var(--surface);
-}
-
-.shape-rail-title {
-  font-size: 0.65rem;
-}
-
-/* A row is a button (clickable + keyboard-reachable) that is also the drag
-   source; `grab` is the affordance the drag needs to advertise. */
-.shape-rail-item {
+/* ── Workflows (mesa task 1607) ────────────────────────────────────────────
+   The index rows, the builder (palette · canvas · inspector) and the run
+   panel. Per-kind tints are the `--wf-*` tokens in index.css; everything else
+   is the site-wide surface/ring vocabulary. */
+.workflow-row {
   display: flex;
   align-items: center;
-  gap: 0.4rem;
-  width: 100%;
-  padding: 0.2rem 0.3rem;
+  gap: 1rem;
+}
+
+.workflow-row-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.workflow-row-title {
+  font-weight: 600;
+}
+
+.workflow-row-desc {
+  margin: 0.15rem 0 0;
+}
+
+.workflow-row-actions,
+.workflow-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.workflow-run-btn {
+  border-radius: var(--r-pill);
+  background: var(--wf-run);
+  border-color: transparent;
+  color: var(--text-h);
+  padding: 0.3rem 0.9rem;
+}
+
+.workflow-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.workflow-title {
+  margin: 0;
+  font-size: 1.15rem;
+}
+
+.workflow-title-tag {
+  font-size: 0.8rem;
+  font-weight: 400;
+}
+
+.workflow-run-input {
+  width: 14rem;
+}
+
+/* The builder: palette rail + canvas in one rounded panel. The canvas class is
+   also what keyboardScope.ts looks for. */
+.workflow-canvas {
+  display: flex;
+  height: var(--tab-viewport-height);
+  min-height: var(--tab-viewport-min);
+  background: var(--panel);
+  border-radius: var(--r-lg);
+  box-shadow: var(--ring);
+  overflow: hidden;
+}
+
+.wf-palette {
+  flex: none;
+  width: 9.5rem;
+  padding: 1rem 0.75rem;
+  background: var(--panel-raised);
+  border-right: 1px solid var(--hairline);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.wf-palette-title {
+  letter-spacing: 2px;
+  font-size: 0.7rem;
+  color: var(--muted);
+  margin-bottom: 0.25rem;
+}
+
+.wf-palette-item {
   text-align: left;
+  border: none;
+  border-radius: var(--r-sm);
+  padding: 0.5rem 0.6rem;
+  color: var(--text-h);
   cursor: grab;
 }
 
-.shape-rail-item:active {
-  cursor: grabbing;
+.wf-kind-trigger {
+  background: var(--wf-trigger);
+}
+.wf-kind-prompt {
+  background: var(--wf-prompt);
+}
+.wf-kind-cli {
+  background: var(--wf-cli);
+}
+.wf-kind-script {
+  background: var(--wf-script);
+}
+.wf-kind-branch {
+  background: var(--wf-branch);
+}
+.wf-kind-output {
+  background: var(--wf-output);
 }
 
-.shape-rail-icon {
-  flex: 0 0 auto;
-  width: 26px;
-  height: 16px;
-  /* The silhouette is stroked in `currentColor`, so it picks up the button's
-     own hover/focus colour with no second rule. */
-  color: inherit;
+.wf-viewport {
+  position: relative;
+  flex: 1;
+  min-width: 0;
 }
 
-.shape-rail-name {
-  font-size: 0.7rem;
+.wf-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.wf-error {
+  max-width: 24rem;
+}
+
+.wf-hint {
+  position: absolute;
+  left: 1rem;
+  bottom: 0.75rem;
+  font-size: 0.75rem;
+  pointer-events: none;
+}
+
+/* A node card: tinted by kind, a ring for selection and one for the last
+   run's step state (ok green, failed red, skipped dimmed). */
+.wf-node {
+  position: relative;
+  min-width: 11rem;
+  max-width: 16rem;
+  padding: 0.7rem 0.8rem;
+  border-radius: var(--r-md);
+  color: var(--text-h);
+  box-shadow: var(--ring);
+  font-size: 0.85rem;
+}
+
+.wf-node.selected {
+  box-shadow: 0 0 0 1px var(--violet), 0 0 16px var(--violet-dim);
+}
+
+.wf-node.step-ok {
+  box-shadow: 0 0 0 2px var(--green);
+}
+
+.wf-node.step-failed {
+  box-shadow: 0 0 0 2px var(--red);
+}
+
+.wf-node.step-skipped {
+  opacity: 0.45;
+}
+
+.wf-node-head {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.wf-node-title {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-/* Takeover mode: the rail is part of the fixed, full-height row. */
-.diagram.expanded .shape-rail {
-  max-height: 100%;
+.wf-node-step {
+  font-size: 0.65rem;
+  font-family: var(--font-mono);
+  color: var(--muted);
 }
 
-.canvas-hint,
-.canvas-hint-touch {
+.wf-node-sum {
+  margin-top: 0.15rem;
   font-size: 0.72rem;
-  line-height: 1.3;
-}
-
-/* The touch wording is the phone tier's; the mouse one above is the default.
-   Both spans always render — the phone tier swaps which is displayed. */
-.canvas-hint-touch {
-  display: none;
-}
-
-/* Expand/collapse toggle (a React Flow Panel pins it top-right). */
-.canvas-expand {
-  background: rgba(6, 10, 16, 0.85);
-}
-
-.canvas-expand.active {
-  color: var(--magenta);
-  border-color: var(--magenta);
-  box-shadow: 0 0 8px rgba(255, 43, 214, 0.4);
-}
-
-/* Expanded mode: the diagram takes over the whole window, the root
-   pinning to the viewport and the canvas viewport filling it. */
-.diagram.expanded {
-  position: fixed;
-  inset: 0;
-  z-index: 1000;
-  margin: 0;
-  padding: 0.6rem;
-  gap: 0.6rem;
-  background: var(--bg);
-  flex-wrap: nowrap;
-}
-
-.diagram.expanded .diagram-viewport {
-  flex: 1 1 auto;
-  height: 100%;
-}
-
-/* Viewport: fixed-size window React Flow fills (it needs an explicitly-sized
-   container); pan/zoom/drag are React Flow's own. */
-.diagram-viewport {
-  flex: 1 1 24rem;
-  min-width: 0;
+  color: var(--muted);
   overflow: hidden;
-  position: relative;
-  height: var(--tab-viewport-height);
-  min-height: var(--tab-viewport-min);
-  border: 1px solid transparent;
-  border-radius: var(--r-md);
-  background: var(--surface);
-}
-
-/* React Flow theming: match the app's panel/cyan look. The transparent pane
-   lets the viewport's own background show through. */
-.diagram .react-flow {
-  background: transparent;
-}
-
-.diagram .react-flow__edge-path {
-  stroke: var(--cyan-dim);
-  stroke-width: 2;
-}
-
-.diagram .react-flow__connection-path {
-  stroke: var(--cyan);
-  stroke-width: 2;
-}
-
-/* Connection dots on the frame sides: hidden until the frame is hovered so
-   the canvas stays uncluttered; deliberately revealed mid-connection too.
-   The element itself is sized to a generous hit target (React Flow starts a
-   drag on pointerdown over this exact box) — the visible 9px dot is drawn as
-   a centered ::after so it doesn't look larger than before. */
-.diagram .react-flow__handle {
-  width: 22px;
-  height: 22px;
-  background: transparent;
-  border: none;
-  border-radius: 50%;
-  opacity: 0;
-  transition: opacity 0.15s;
-}
-
-.diagram .react-flow__handle::after {
-  content: '';
-  position: absolute;
-  inset: 6.5px;
-  border-radius: 50%;
-  background: var(--panel-raised);
-  border: 1px solid var(--border-bright);
-}
-
-.diagram .react-flow__node:hover .react-flow__handle {
-  opacity: 1;
-}
-
-.diagram .react-flow__handle:hover::after {
-  background: var(--cyan);
-}
-
-/* Full-card drop target while a connection is in flight: invisible, but the
-   drop can land anywhere on the frame. No dot to draw, so the ::after above
-   is switched off. */
-.diagram .react-flow__handle.frame-drop-handle {
-  inset: 0;
-  transform: none;
-  width: 100%;
-  height: 100%;
-  border-radius: 0;
-  border: none;
-  background: transparent;
-  opacity: 1;
-}
-
-.diagram .react-flow__handle.frame-drop-handle::after {
-  content: none;
-}
-
-.diagram .react-flow__controls {
-  box-shadow: none;
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-}
-
-.diagram .react-flow__controls button {
-  background: rgba(6, 10, 16, 0.85);
-  border-bottom: 1px solid var(--hairline);
-  color: var(--cyan);
-  fill: var(--cyan);
-}
-
-.diagram .react-flow__controls button:hover {
-  background: var(--panel-raised);
-}
-
-.diagram .react-flow__minimap {
-  background: var(--panel);
-}
-
-.diagram .react-flow__minimap-mask {
-  fill: rgba(6, 10, 16, 0.7);
-}
-
-.diagram .react-flow__minimap-node {
-  fill: var(--border-bright);
-}
-
-.edge-label {
-  /* Positioned by the component (EdgeLabelRenderer children set their own
-     board-space transform inline); interactive labels must opt back into
-     pointer events — the renderer layer has them off. */
-  position: absolute;
-  pointer-events: all;
-  /* A column of one row (the label + its controls), plus the properties
-     popover below it when open — see `.edge-props`. */
-  display: inline-flex;
-  flex-direction: column;
-  gap: 0.25rem;
-  align-items: stretch;
-  background: var(--panel-raised);
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  padding: 0 0.2rem;
-  font-size: 0.75rem;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-/* While the properties block is open the whole cluster has to paint above the
-   nodes (mesa task 854 QA: a frame's card covered the open block). `z-index`
-   has to go **here**, not on the block: `.edge-label` carries the
-   EdgeLabelRenderer positioning transform, which makes it a stacking context,
-   so a z-index on any child only sorts inside it — the cluster's own painting
-   order against React Flow's node layer is decided by this element alone.
-   React Flow gives a node `z-index: 0` (1000 while dragging/elevated), so this
-   clears both. Only while open: a plain label must keep sitting under the
-   cards, as it always has. */
-.edge-label.open {
-  z-index: 1001;
+.wf-viewport .react-flow__handle {
+  width: 10px;
+  height: 10px;
+  background: var(--cyan);
+  border: 2px solid var(--bg);
 }
 
-/* The label's own row: the inline-editable text plus the ⋮/✕ controls. */
-.edge-label-row {
-  display: flex;
-  gap: 0.25rem;
-  align-items: center;
+.wf-viewport .react-flow__handle.wf-handle-true {
+  background: var(--green);
 }
 
-/* Inline-editable connector label: render compactly, no block wrapper. */
-.edge-label-text {
-  cursor: text;
-}
-.edge-label-text.editing input {
-  width: 7rem;
-  font-size: 0.75rem;
+.wf-viewport .react-flow__handle.wf-handle-false {
+  background: var(--red);
 }
 
-/* Connector delete control (#19): hidden until the label / connector is
-   hovered (or the label is focused-within, e.g. while editing), so it does not
-   clutter the canvas or invite accidental clicks. Hidden only — deletion still
-   works the moment it is revealed. */
-.edge-del {
-  padding: 0 0.3rem;
-  font-size: 0.7rem;
-  line-height: 1.4;
-  visibility: hidden;
-}
-
-/* Connector-properties toggle (mesa task 854), same restraint as the delete
-   control beside it: revealed on hover/focus, plus held visible while its own
-   popover is open (`.open`) so the button the popover hangs off doesn't vanish
-   under the pointer that opened it. */
-.edge-props-toggle {
-  padding: 0 0.3rem;
-  font-size: 0.7rem;
-  line-height: 1.4;
-  visibility: hidden;
-}
-
-/* `visibility: hidden` alone still reserves the two buttons' width, and the
-   cluster is centred on the connector by its own `translate(-50%, -50%)` — so
-   a `yes`/`no` label rendered as a box three times the width of its word with
-   the word itself pushed ~20px off the line it labels (mesa task 892). The
-   hidden controls collapse to zero width instead, which centres the *word* on
-   the connector; they take their width back on hover, where a small reflow of
-   a box the pointer is already on costs nothing. */
-.edge-del,
-.edge-props-toggle {
-  width: 0;
-  padding-left: 0;
-  padding-right: 0;
-  overflow: hidden;
-}
-
-.edge-label:hover .edge-del,
-.edge-label:focus-within .edge-del,
-.edge-label.open .edge-del,
-.edge-label:hover .edge-props-toggle,
-.edge-label:focus-within .edge-props-toggle,
-.edge-label.open .edge-props-toggle {
-  visibility: visible;
-  width: auto;
-  padding-left: 0.3rem;
-  padding-right: 0.3rem;
-  overflow: visible;
-}
-
-/* The popover itself: line style + both end markers, opening under the label
-   cluster it belongs to (the edge's one selected affordance) rather than in a
-   panel of its own.
-
-   It is a **flow child** of `.edge-label`, deliberately not an absolutely
-   positioned overlay: as an overlay it laid out at the right coordinates but
-   painted nothing at all (mesa task 854 QA). `.edge-label` is an
-   EdgeLabelRenderer child inside React Flow's transformed viewport, and it is
-   centred on the connector midpoint by its own `translate(-50%, -50%)` — so a
-   panel hanging *below* that box escapes into a layer this canvas does not
-   own and, near the bottom of the board, straight through
-   `.diagram-viewport`'s `overflow: hidden`. In flow it is part of the one box
-   that is already known to paint, and the label's centring transform
-   re-centres the taller cluster on the connector, which keeps it on screen. */
-.edge-props {
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
-  padding: 0.35rem 0.4rem;
-  background: var(--panel-raised);
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  box-shadow: 0 0 10px rgba(0, 0, 0, 0.45);
-}
-
-.edge-props label {
-  display: flex;
-  gap: 0.35rem;
-  align-items: center;
-  font-size: 0.7rem;
-}
-
-/* The row's name is a fixed column rather than a bare text node: as a flex
-   item that could shrink it lost against the select beside it and rendered as
-   nothing at all on the widest row (mesa task 854 QA — `line` vanished while
-   `start`/`end` still read). */
-.edge-props-name {
-  flex: 0 0 2.4rem;
-}
-
-.edge-props select {
-  flex: 1 1 auto;
-  min-width: 7rem;
-  font-size: 0.7rem;
-  padding: 0.1rem 0.3rem;
-}
-
-/* Endpoint marker definitions (mesa task 854): a zero-size carrier SVG whose
-   `<marker>`s every connector references by `url(#id)`. Never painted itself —
-   it only has to be in the document. */
-.edge-marker-defs {
+.wf-branch-label {
   position: absolute;
-  width: 0;
-  height: 0;
+  right: 0.9rem;
+  transform: translateY(-50%);
+  font-size: 0.62rem;
+  font-family: var(--font-mono);
   pointer-events: none;
 }
 
-/* Empty connector label (#17): show nothing on the line by default so blank
-   edges stay uncluttered, but keep the element present and hoverable (no
-   visibility:hidden / display:none on the container) so the editable label and
-   delete control can be revealed on hover / focus to add a label. */
-.edge-label.empty {
-  background: transparent;
-  border-color: transparent;
+.wf-branch-true,
+.wf-branch-true-text {
+  color: var(--green);
 }
-.edge-label.empty .edge-label-text {
-  opacity: 0;
+
+.wf-branch-false,
+.wf-branch-false-text {
+  color: var(--red);
 }
-.edge-label.empty:hover,
-.edge-label.empty:focus-within,
-.edge-label.empty.open {
+
+.wf-viewport .react-flow__edge-path {
+  stroke: var(--border-bright);
+  stroke-width: 2;
+}
+
+.wf-viewport .react-flow__edge.wf-edge-true .react-flow__edge-path {
+  stroke: var(--green);
+}
+
+.wf-viewport .react-flow__edge.wf-edge-false .react-flow__edge-path {
+  stroke: var(--red);
+}
+
+.wf-viewport .react-flow__edge.selected .react-flow__edge-path {
+  stroke: var(--violet);
+}
+
+.wf-viewport .react-flow__edge-textbg {
+  fill: var(--panel);
+}
+
+.wf-viewport .react-flow__edge-text {
+  fill: var(--text);
+  font-size: 10px;
+}
+
+.wf-viewport .react-flow__controls {
+  box-shadow: var(--ring);
+}
+
+.wf-viewport .react-flow__controls button {
   background: var(--panel-raised);
-  border-color: var(--border);
-}
-.edge-label.empty:hover .edge-label-text,
-.edge-label.empty:focus-within .edge-label-text,
-.edge-label.empty.open .edge-label-text {
-  opacity: 1;
+  color: var(--text);
+  border: none;
+  border-bottom: 1px solid var(--hairline);
 }
 
-/* Waypoint drag handle (#297/300): one per stored routing anchor, positioned
-   like the edge label via EdgeLabelRenderer's board-space transform. Always
-   faintly visible (unlike the label, it has no "empty" state to hide) so a
-   routed connector's handles are discoverable without hovering the exact
-   pixel of the thin connector line first. */
-.waypoint-handle {
+/* The inspector: a floating panel bottom-right, over the canvas. */
+.wf-inspector {
   position: absolute;
-  pointer-events: all;
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
+  right: 1rem;
+  bottom: 1rem;
+  z-index: 5;
+  width: 18rem;
+  max-height: calc(100% - 2rem);
+  overflow-y: auto;
+  padding: 0.9rem;
   background: var(--panel-raised);
-  border: 1px solid var(--cyan-dim);
-  cursor: grab;
-  opacity: 0.6;
+  border-radius: var(--r-md);
+  box-shadow: var(--ring);
+  font-size: 0.8rem;
 }
 
-.waypoint-handle:hover {
-  opacity: 1;
-  background: var(--cyan);
-  cursor: grab;
+.wf-inspector-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 0.4rem;
 }
 
-.waypoint-handle:active {
-  cursor: grabbing;
-}
-
-/* Anchor-lock dots (mesa task 353): 4 per endpoint (8 total), revealed only
-   while the edge is hovered (`FrameEdgeView`'s local `hovered` state) — quiet
-   by default, matching the waypoint handles' restraint on a plain edge.
-   Positioned a few px outside the frame's own always-on `.react-flow__handle`
-   connection dot (`ANCHOR_LOCK_OFFSET` in the component) so a click lands on
-   this dot, not the connection Handle underneath it. A distinct class (not
-   `.react-flow__handle`) keeps the two visually and functionally separate. */
-.anchor-lock-dot {
-  position: absolute;
-  pointer-events: all;
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background: transparent;
-  border: 1px solid var(--cyan-dim);
-  cursor: pointer;
-}
-
-.anchor-lock-dot:hover {
-  border-color: var(--cyan);
-}
-
-/* Filled = the endpoint's current locked side; the other 3 (or all 4, if
-   that endpoint is unlocked) stay outline-only. */
-.anchor-lock-dot.locked {
-  background: var(--cyan);
-  border-color: var(--cyan);
-}
-
-/* Invisible hover "halo" ring around a hovered edge's connected frames (mesa
-   task 353): four bars tiling the margin just outside each frame's border,
-   never over the frame body, so the pointer can travel continuously from any
-   anchor-lock dot to any other on that frame (including the far side, across
-   what would otherwise be bare canvas) without hover dropping mid-transit.
-   Purely a hit target — always fully transparent. */
-.anchor-lock-halo {
-  position: absolute;
-  pointer-events: all;
-  background: transparent;
-}
-
-/* The card itself, inside a React Flow node wrapper (which owns absolute
-   positioning); the connection handles are its siblings so the corner
-   clip-path never swallows them. */
-.frame {
-  background: var(--panel-raised);
-  border: 1px solid var(--border-bright);
-  clip-path: var(--cut);
+.wf-field {
   display: flex;
   flex-direction: column;
-  overflow: hidden;
-  box-shadow: 0 0 10px rgba(0, 0, 0, 0.45);
-  transition: box-shadow 0.15s;
+  gap: 0.2rem;
+  margin: 0.5rem 0;
 }
 
-.frame.selected {
-  border-color: var(--cyan);
-  box-shadow: 0 0 16px var(--cyan-dim);
-}
-
-/* Flowchart node shapes (mesa task 358) — same card, distinguished only by
-   silhouette + border tint so process/decision/start-end read as distinct
-   flowchart primitives at a glance. A `storyboard`-type board's frames never
-   carry these classes (`shape` is always null there), so its cards are
-   untouched. */
-.frame.frame-process {
-  clip-path: none;
-  border-radius: 6px;
-}
-
-/* A true `clip-path` diamond on the whole card clips the header (title +
-   `#id`) — it sits right at the top, where the diamond taper is narrowest,
-   so no amount of inner padding keeps it inside the silhouette without
-   also shrinking the diamond far below the card's actual w/h (checked
-   empirically with mesa task 358's khora pass: the leading letter of the
-   title and the id badge were both cut off). Instead the diamond is a
-   decorative backdrop (`::before`), larger than and behind the card, which
-   stays a normal unclipped rectangle — content is never touched, only the
-   silhouette around it reads as a diamond. `overflow: visible` lets that
-   backdrop extend past the card's own box; `position: relative` + the
-   backdrop's `z-index: -1` keeps it behind (not covering) the content. */
-.frame.frame-decision {
-  position: relative;
-  clip-path: none;
-  background: transparent;
-  border-color: transparent;
-  box-shadow: none;
-  overflow: visible;
-}
-/* Two stacked layers, not a bordered one (mesa task 892). A `clip-path` cuts
-   the element at the polygon while a CSS border is painted around its *box*,
-   so a clipped backdrop's border survives only where polygon and box touch —
-   for a diamond, four single points. Every clipped silhouette on this canvas
-   was therefore drawing as a flat unoutlined blob, which is most of what made
-   the shapes hard to tell apart at a glance. So `::before` paints the whole
-   silhouette in the *outline* colour and `::after` repaints it in the fill,
-   inset by a hairline; both sit behind the content at `z-index: -1`, and DOM
-   order puts the fill over the outline, leaving exactly a rim. `drop-shadow`
-   rather than `box-shadow` for the selected glow, because it follows the clip
-   instead of the box. Every other clipped shape below is built the same way. */
-.frame.frame-decision::before {
-  content: '';
-  position: absolute;
-  inset: -35% -20%;
-  z-index: -1;
-  background: var(--amber);
-  clip-path: polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%);
-  transition: background 0.15s, filter 0.15s;
-}
-.frame.frame-decision::after {
-  content: '';
-  position: absolute;
-  inset: calc(-35% + 1.5px) calc(-20% + 1.5px);
-  z-index: -1;
-  background: var(--panel-raised);
-  clip-path: polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%);
-}
-/* The backdrop being *around* the card is only half the job: the card is still
-   a full-width rectangle, and a diamond is at its narrowest exactly where that
-   rectangle's top and bottom edges are — so with no further rule the title and
-   the last line of the body both cross the slanted edge and hang outside the
-   silhouette (mesa task 892, the reported defect). The content is therefore
-   inset to the rectangle the diamond actually inscribes.
-
-   The number is geometry, not taste. With the backdrop at `-35% -20%` the
-   diamond is `1.4w x 1.7h` centred on the card, so a point `(x, y)` measured
-   from the card's centre is inside it iff
-   `|x| / (0.7w) + |y| / (0.85h) <= 1`. The content spans the card's full
-   height, so `|y| = 0.5h` costs `0.588` and leaves `0.412` of the budget for
-   the width: `|x| <= 0.288w`, i.e. the content may occupy the middle `57.6%`
-   of the card. Padding each side by `21%` lands exactly on that bound, and
-   `22%` keeps a hair of margin. Raise the backdrop's inflation and this can
-   come down; do not change one without the other. */
-.frame.frame-decision .frame-header,
-.frame.frame-decision .frame-body,
-.frame.frame-relationship .frame-header,
-.frame.frame-relationship .frame-body {
-  padding-left: 22%;
-  padding-right: 22%;
-  text-align: center;
-}
-/* Centred text wants a centred header row too — the title reads as the
-   diamond's label rather than as a bar pinned to one side. The band and rule
-   the rectangular shapes wear would cut straight across the silhouette at its
-   narrowest, so both come off here. `align-items: flex-start` keeps the `#id`
-   badge level with the title's *first* line: centred against a title that
-   wraps to three lines it floats off at mid-height, reading as a stray label
-   rather than as part of the heading. */
-.frame.frame-decision .frame-header,
-.frame.frame-relationship .frame-header {
-  justify-content: center;
-  align-items: flex-start;
-  background: transparent;
-  border-bottom: none;
-}
-
-/* A diamond is widest across its middle, so that is where its text belongs.
-   Every other shape stacks header-then-body from the top and lets the body
-   take the slack (`.frame-body { flex: 1 }`), which in a diamond leaves the
-   title crammed into the narrow tip with the empty slack below it. Here the
-   body claims only what it needs and the pair is centred as a block.
-
-   The ERD `attribute` oval takes the same treatment for the same reason: it is
-   widest across its middle too, and in Chen notation an attribute is a name in
-   an oval — a title pinned to the top with a bar under it is not that. It
-   needs no horizontal padding, though: at `24%` inflation the card's own
-   corners are already inside the curve, which is the whole point of that
-   number. */
-.frame.frame-decision,
-.frame.frame-relationship,
-.frame.frame-attribute {
-  justify-content: center;
-}
-.frame.frame-decision .frame-body,
-.frame.frame-relationship .frame-body,
-.frame.frame-attribute .frame-body {
-  flex: 0 1 auto;
-}
-.frame.frame-attribute .frame-header,
-.frame.frame-attribute .frame-body {
-  text-align: center;
-}
-/* A full-width band with a rule under it, drawn inside a curve, reads as a
-   rectangle someone dropped into the oval — the same mistake the cylinder's
-   cap made with its own header (mesa task 892 QA). */
-.frame.frame-attribute .frame-header {
-  justify-content: center;
-  align-items: flex-start;
-  background: transparent;
-  border-bottom: none;
-}
-
-/* While the card is being edited it is a *form*, not a shape's label: the
-   title input, the body textarea and the colour/task/delete row all want the
-   card's full width. Centred and inset to 22% the title input was narrow
-   enough to scroll its own text out of view (mesa task 892 QA). The backdrop
-   keeps drawing behind the open editor — it is still that frame's shape — but
-   the content stands the shape's rules down until the edit ends. */
-.frame.frame-decision.editing,
-.frame.frame-relationship.editing,
-.frame.frame-attribute.editing {
-  justify-content: flex-start;
-}
-.frame.frame-decision.editing .frame-header,
-.frame.frame-decision.editing .frame-body,
-.frame.frame-relationship.editing .frame-header,
-.frame.frame-relationship.editing .frame-body,
-.frame.frame-attribute.editing .frame-header,
-.frame.frame-attribute.editing .frame-body {
-  padding-left: 0.5rem;
-  padding-right: 0.5rem;
-  text-align: left;
-}
-.frame.frame-decision.editing .frame-header,
-.frame.frame-relationship.editing .frame-header,
-.frame.frame-attribute.editing .frame-header {
-  justify-content: space-between;
-  align-items: center;
-}
-.frame.frame-decision.selected::before,
-.frame.frame-decision.editing::before {
-  background: var(--cyan);
-  filter: drop-shadow(0 0 8px var(--cyan-dim));
-}
-
-.frame.frame-start-end {
-  clip-path: none;
-  /* Was the full `999px` stadium (mesa task 445): on the default 240x140 card
-     that clamps to a 70px corner radius, eating ~28px horizontally at the
-     header's mid-height while the header only inset 14.6px — so the title's
-     leading letter and the `#id` badge clipped. Same failure class as the
-     decision diamond, fixed the same way `.frame-central` was: a soft capsule
-     radius the header padding can actually clear. Still reads as the rounded
-     terminator next to `process`'s square corners; the green border does the
-     rest. */
-  border-radius: 32px;
-  border-color: var(--green);
-}
-.frame.frame-start-end .frame-header {
-  border-radius: 30px 30px 0 0;
-  /* Clears what's left of the corner curve at the title's own vertical band. */
-  padding-left: 1.1rem;
-  padding-right: 1.1rem;
-}
-
-/* ERD "entity" shape (mesa task 359) — a plain rectangle, like `frame-
-   process`, but tinted magenta so it reads as its own primitive next to the
-   flowchart shapes. Its distinguishing feature is the attribute list below
-   (`.frame-entity-body`), not the silhouette. */
-.frame.frame-entity {
-  clip-path: none;
-  border-radius: 2px;
-  border-color: var(--magenta);
-}
-
-/* Brainstorm mind-map shapes (mesa task 444) — the hub reads as the anchor
-   the ideas hang off, so `central` takes the heavier treatment (thicker amber
-   border + permanent glow, fully rounded) and `idea` the lighter one (a soft
-   rounded rectangle). Nothing enforces one central node per board; the
-   styling is the only thing that says "hub", exactly as the flowchart shapes
-   only *look* like their role. */
-.frame.frame-central {
-  clip-path: none;
-  /* Deliberately NOT the full `999px` stadium `.frame-start-end` uses. At a
-     default 240x140 card that clamps to a 70px corner radius, which eats
-     ~28px of horizontal space at the header's mid-height — more than any
-     sane title padding can clear, so the title's leading letter and the
-     `#id` badge get clipped (the same failure the decision diamond hit, and
-     why it became a `::before` backdrop instead). 32px keeps the hub reading
-     as a soft capsule while leaving the header legible; the 2px amber border
-     + permanent glow, not the silhouette, are what mark it as the hub. */
-  border-radius: 32px;
-  border: 2px solid var(--amber);
-  box-shadow: 0 0 18px rgba(255, 180, 68, 0.3);
-}
-.frame.frame-central .frame-header {
-  border-radius: 30px 30px 0 0;
-  /* Clears what's left of the corner curve at the title's own vertical band. */
-  padding-left: 1.1rem;
-  padding-right: 1.1rem;
-}
-
-.frame.frame-idea {
-  clip-path: none;
-  border-radius: 12px;
-  border-color: var(--green);
-}
-
-/* ---- mesa task 854's shapes ----------------------------------------------
-   Nine more silhouettes, under one hard rule learned from `.frame-decision`
-   and `.frame-central`: a silhouette that would eat the header (the title's
-   leading letter and the `#id` badge both sit in the top corners) is drawn as
-   an *oversized `::before` backdrop* behind an unclipped card — never as a
-   `clip-path` or a large radius on the card itself. Content is never clipped.
-
-   Two groups follow. The first three shapes only decorate the card's own box
-   (a band, a double border, an extra rule), so they need no backdrop; the six
-   below them are true silhouettes and all share the backdrop treatment. */
-
-/* Storyboard "scene": the card a storyboard is made of. A film-strip band
-   along the bottom is enough to say "a shot" — the card keeps its own
-   background and border, and the band is inset (not a clip), so nothing can
-   be cut off. The matching padding keeps the foot line off the band. */
-.frame.frame-scene {
-  position: relative;
-  clip-path: none;
-  border-radius: 4px;
-  border-color: var(--cyan-dim);
-  padding-bottom: 8px;
-}
-.frame.frame-scene::after {
-  content: '';
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  height: 8px;
-  background: repeating-linear-gradient(
-    90deg,
-    var(--cyan-dim) 0 6px,
-    transparent 6px 12px
-  );
-  opacity: 0.6;
-}
-
-/* ERD "weak entity": an entity whose identity depends on another. The
-   notation's double border is a `border-style: double`, i.e. still just the
-   card's own border — no silhouette change, so nothing to clip. Its body
-   reuses `.frame-entity-body` (WeakEntityNode passes entity's renderBody). */
-.frame.frame-weak-entity {
-  clip-path: none;
-  border-radius: 2px;
-  border: 4px double var(--magenta);
-}
-
-/* Flowchart "predefined process" (a call into a named subroutine): the
-   notation is a rectangle with a bar inset down each side. `border-style:
-   double` on just the two sides draws exactly that pair of rules, and the
-   header padding clears them so the title never sits on one. */
-.frame.frame-predefined-process {
-  clip-path: none;
-  border-radius: 2px;
-  border: 1px solid var(--cyan-dim);
-  border-left: 5px double var(--cyan);
-  border-right: 5px double var(--cyan);
-}
-.frame.frame-predefined-process .frame-header {
-  padding-left: 0.6rem;
-  padding-right: 0.6rem;
-}
-
-/* --- the backdrop shapes -------------------------------------------------
-   Same construction as `.frame-decision`: the card goes fully transparent and
-   keeps its content unclipped, while an oversized `::before` (z-index -1,
-   behind the content) carries the silhouette. Each shape only differs in how
-   far the backdrop is inflated and which clip/radius it wears — inflated
-   enough, in every case, that the shaped edge falls outside the header. */
-.frame.frame-note,
-.frame.frame-data,
-.frame.frame-document,
-.frame.frame-database,
-.frame.frame-relationship,
-.frame.frame-attribute {
-  position: relative;
-  clip-path: none;
-  background: transparent;
-  border-color: transparent;
-  box-shadow: none;
-  overflow: visible;
-}
-
-.frame.frame-note::before,
-.frame.frame-data::before,
-.frame.frame-document::before,
-.frame.frame-database::before,
-.frame.frame-relationship::before,
-.frame.frame-attribute::before {
-  content: '';
-  position: absolute;
-  z-index: -1;
-  background: var(--panel-raised);
-  border: 1px solid var(--border-bright);
-  transition: box-shadow 0.15s, border-color 0.15s;
-}
-
-.frame.frame-note.selected::before,
-.frame.frame-note.editing::before,
-.frame.frame-database.selected::before,
-.frame.frame-database.editing::before,
-.frame.frame-attribute.selected::before,
-.frame.frame-attribute.editing::before {
-  border-color: var(--cyan);
-  box-shadow: 0 0 16px var(--cyan-dim);
-}
-
-/* The clipped members of the group take the `.frame-decision` treatment above
-   instead of a border, for the reason recorded there: a border on a clipped
-   box is not drawn. `::after` is the fill layer, so the two shapes that use it
-   for something else (`note`'s turned-up flap, `database`'s cap rule) are the
-   two that keep a real border — and neither of them clips the edge its border
-   runs along. */
-.frame.frame-data::before,
-.frame.frame-document::before,
-.frame.frame-relationship::before {
-  border: none;
-}
-.frame.frame-data::after,
-.frame.frame-document::after,
-.frame.frame-relationship::after {
-  content: '';
-  position: absolute;
-  z-index: -1;
-  background: var(--panel-raised);
-}
-.frame.frame-data.selected::before,
-.frame.frame-data.editing::before,
-.frame.frame-document.selected::before,
-.frame.frame-document.editing::before,
-.frame.frame-relationship.selected::before,
-.frame.frame-relationship.editing::before {
-  background: var(--cyan);
-  filter: drop-shadow(0 0 8px var(--cyan-dim));
-}
-
-/* "Note": a folded-corner sticky (storyboard + brainstorm — commentary, in
-   neither type system). The fold is a clipped corner, which is exactly where
-   the `#id` badge lives, so the backdrop is inflated 22px to the *right*: the
-   whole fold then falls past the card's own right edge and the badge stays
-   clear of it. `::after` paints the turned-up flap over that corner (both
-   pseudo-elements sit at z-index -1, so DOM order puts the flap on top of the
-   sticky and both behind the content). */
-.frame.frame-note::before {
-  inset: -8px -26px -8px -8px;
-  background: rgba(255, 180, 68, 0.1);
-  border-color: var(--amber);
-  clip-path: polygon(0 0, calc(100% - 22px) 0, 100% 22px, 100% 100%, 0 100%);
-}
-.frame.frame-note::after {
-  content: '';
-  position: absolute;
-  z-index: -1;
-  top: -8px;
-  right: -26px;
-  width: 22px;
-  height: 22px;
-  background: var(--amber);
-  opacity: 0.35;
-  clip-path: polygon(0 0, 100% 100%, 0 100%);
-}
-/* The header's cyan band is drawn across the *card*, which on a sticky stops
-   26px short of the paper's own right edge — so it read as a bar someone had
-   left misaligned on the note, in the wrong colour for the amber paper besides
-   (mesa task 892 QA). The title keeps a rule, in the sticky's own colour;
-   the band goes. */
-.frame.frame-note .frame-header {
-  background: transparent;
-  border-bottom-color: rgba(255, 180, 68, 0.35);
-}
-
-/* Flowchart "data" (ANSI input/output): a parallelogram, inflated on each side
-   so both slanted edges clear the card's content entirely.
-
-   The slant used to be `14%` of an inflated backdrop — on a default card that
-   is ~40px, against only 22px of inflation, so the parallelogram's edges cut
-   ~18px *into* the card's own text (mesa task 892). Slant and inflation are now
-   the same 28px, which puts the card's left and right edges exactly on the
-   silhouette: nothing crosses, and the shape is no wider than it needs to be. */
-.frame.frame-data::before {
-  inset: -6px -28px;
-  background: var(--cyan);
-  clip-path: polygon(28px 0, 100% 0, calc(100% - 28px) 100%, 0 100%);
-}
-.frame.frame-data::after {
-  inset: calc(-6px + 1.5px) calc(-28px + 1.5px);
-  clip-path: polygon(28px 0, 100% 0, calc(100% - 28px) 100%, 0 100%);
-}
-
-/* Flowchart "document": a rectangle whose bottom edge waves. The wave is cut
-   from the bottom of an inflated backdrop, so it hangs below the card rather
-   than through the foot line. */
-.frame.frame-document::before {
-  inset: -6px -6px -28px -6px;
-  background: var(--cyan);
-  /* The wave is cut in px from the bottom of the backdrop, not in % of its
-     height: at `84%` a tall card put the trough ~40px up, i.e. through its own
-     last line of text (mesa task 892). Pinned to the bottom 28px — exactly the
-     backdrop's own bottom inflation — it hangs below the card at every card
-     height.
-
-     The points are one period of a sine sampled every 12.5%: midline 14px up
-     from the backdrop's bottom, amplitude 12px, so the crest sits 2px above
-     the bottom and the trough 26px, just clear of the card. The old four-point
-     polygon was a triangle wave of uneven amplitude and read as a torn page
-     rather than a curled one — the shape is a *document*, and the give-away is
-     that its bottom edge curves. */
-  clip-path: polygon(
-    0 0,
-    100% 0,
-    100% calc(100% - 14px),
-    87.5% calc(100% - 22.5px),
-    75% calc(100% - 26px),
-    62.5% calc(100% - 22.5px),
-    50% calc(100% - 14px),
-    37.5% calc(100% - 5.5px),
-    25% calc(100% - 2px),
-    12.5% calc(100% - 5.5px),
-    0 calc(100% - 14px)
-  );
-}
-.frame.frame-document::after {
-  inset: calc(-6px + 1.5px) calc(-6px + 1.5px) calc(-28px + 1.5px);
-  clip-path: polygon(
-    0 0,
-    100% 0,
-    100% calc(100% - 14px),
-    87.5% calc(100% - 22.5px),
-    75% calc(100% - 26px),
-    62.5% calc(100% - 22.5px),
-    50% calc(100% - 14px),
-    37.5% calc(100% - 5.5px),
-    25% calc(100% - 2px),
-    12.5% calc(100% - 5.5px),
-    0 calc(100% - 14px)
-  );
-}
-
-/* Flowchart "database": a cylinder. The elliptical top/bottom come from an
-   asymmetric `border-radius` on the backdrop (50% horizontally, 22px
-   vertically); `::after` redraws the top ellipse as a rule so the cylinder
-   reads as one rather than as a lozenge. The backdrop's vertical inflation is
-   what keeps both curves off the header and the foot.
-
-   The cap curve used to be `14%` of the backdrop's height against a flat 18px
-   of inflation — on any card taller than the default the ellipse reached
-   further down than the inflation did and clipped the header (mesa task 892).
-   Both are now 22px, so the card's top edge sits exactly at the cylinder's
-   widest point at every card height. */
-.frame.frame-database::before {
-  inset: -22px -10px;
-  border-color: var(--cyan);
-  border-radius: 50% / 22px;
-}
-.frame.frame-database::after {
-  content: '';
-  position: absolute;
-  z-index: -1;
-  top: -22px;
-  left: -10px;
-  right: -10px;
-  height: 44px;
-  border: 1px solid var(--cyan);
-  border-radius: 50%;
-  background: var(--panel-raised);
-}
-/* A cylinder's cap is a whole ellipse and its lower arc necessarily dips into
-   the body — by exactly the cap's own radius, 22px. That is the drawing, not a
-   bug; what *was* a bug is that the title sat in those 22px, so the arc ran
-   straight through the words (mesa task 892). The header is pushed below the
-   arc instead, and loses its band and rule while it is there: a full-width
-   bar drawn across the cap would cut the cylinder in half exactly where the
-   curve is meant to read. */
-.frame.frame-database .frame-header {
-  padding-top: 26px;
-  background: transparent;
-  border-bottom: none;
-}
-
-/* ERD "relationship" (Chen): a diamond, drawn exactly the way the flowchart
-   decision diamond is — the failure that technique exists for is the same one
-   here — but magenta, with the ERD shapes. */
-.frame.frame-relationship::before {
-  inset: -35% -20%;
-  background: var(--magenta);
-  clip-path: polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%);
-}
-.frame.frame-relationship::after {
-  inset: calc(-35% + 1.5px) calc(-20% + 1.5px);
-  clip-path: polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%);
-}
-
-/* ERD "attribute" (Chen): an ellipse. The inflation is symmetric, so the oval
-   stays centred on the card; the measurement is what it has to clear (the
-   discipline `.frame-start-end`/`.frame-central` record). At -26% vertically
-   the card's top edge sat at 17% of the oval's height, where the curve is only
-   ~122px wide against the card's own 240 — i.e. exactly on the title and the
-   `#id` badge (mesa task 854 QA: the header read as sitting *on* the oval's
-   rim rather than inside it). At -50%/-30% the card's top edge falls at 25% of
-   the height, where the oval is ~360px wide against the card's 240 — the whole
-   header, badge included, clears the curve with 60px to spare on each side,
-   at the cost of a larger silhouette. */
-.frame.frame-attribute::before {
-  /* Was `-50% -30%` — an oval `1.6w x 2h`, chosen by eye to clear the header.
-     Geometry gets there with far less: the card's corner `(0.5w, 0.5h)` is
-     inside an oval inflated by `a` on both axes iff
-     `(0.5 / (0.5 + a))^2 * 2 <= 1`, i.e. `a >= 0.207`. At `-21%` the whole
-     card — header, badge and last line — is inside the curve, in an oval a
-     third the area of the old one (mesa task 892). `24%` is that bound plus
-     the margin the bound itself does not cover: a 1px border, the card's own
-     antialiasing, and a glyph's ink not being its line box — at the exact
-     `20.7%` the curve visibly grazed the title in QA. */
-  inset: -24%;
-  border-color: var(--magenta);
-  border-radius: 50%;
-}
-
-.frame-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.25rem 0.5rem;
-  background: rgba(0, 229, 255, 0.06);
-  border-bottom: 1px solid var(--hairline);
-  cursor: grab;
-  touch-action: none;
-  user-select: none;
-}
-
-.frame-header:active {
-  cursor: grabbing;
-}
-
-.frame-title {
-  font-family: var(--font-brand);
-  font-size: 0.78rem;
-  color: var(--text-h);
-  /* Wrap rather than ellipsis-clip so the full title is visible (#20). */
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-
-.frame-id {
+.wf-field-label {
   font-size: 0.7rem;
-  flex: none;
+  color: var(--muted);
 }
 
-.frame-body {
-  flex: 1;
-  padding: 0.4rem 0.5rem;
-  font-size: 0.8rem;
-  /* No overflow clipping: the card grows to fit (#20). Long unbroken words
-     wrap instead of forcing horizontal overflow. */
-  overflow-wrap: anywhere;
+.wf-field-hint {
+  font-size: 0.68rem;
 }
 
-/* Rendered markdown inside cards (#21). Tight, card-appropriate spacing for the
-   block elements react-markdown emits; the source text stays plain markdown. */
-.frame-title :where(p),
-.frame-body :where(p) {
-  margin: 0;
-}
-.frame-body :where(p) + :where(p) {
-  margin-top: 0.4rem;
-}
-.frame-body :where(h1, h2, h3, h4, h5, h6) {
-  margin: 0.2rem 0;
-  font-size: 0.9rem;
-}
-.frame-body :where(ul, ol) {
-  margin: 0.2rem 0;
-  padding-left: 1.1rem;
-}
-.frame-body :where(code) {
-  font-family: var(--font-mono);
-  font-size: 0.95em;
-}
-.frame-body :where(pre) {
-  overflow-x: auto;
-  white-space: pre-wrap;
-}
-.frame-body :where(a),
-.frame-title :where(a) {
-  color: var(--cyan);
-}
-
-/* Markdown tables inside cards (mesa task 492). GFM tables were parseable long
-   before this but had no card styling at all, so they rendered as unaligned
-   runs of text; ERD entity bodies are the first surface that leans on them. */
-.frame-body :where(table) {
+.wf-field input,
+.wf-field select,
+.wf-field textarea,
+.wf-value-row input {
   width: 100%;
-  border-collapse: collapse;
-  margin: 0.2rem 0;
-  font-size: 0.95em;
-}
-.frame-body :where(th, td) {
-  text-align: left;
-  padding: 0.15rem 0.35rem;
-  border-bottom: 1px solid var(--hairline);
-  vertical-align: top;
-}
-.frame-body :where(th) {
-  color: var(--cyan);
-  font-weight: normal;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  font-size: 0.85em;
 }
 
-/* Entity body (mesa task 359; markdown since task 492) — a field list rather
-   than prose, so it stays tighter and monospaced than a generic card body.
-   `EntityNode` renders it through `Markdown` in `breaks` mode: one attribute
-   per line still reads as one line, but emphasis, `code`, and tables now
-   render instead of showing their literal source. */
-.frame-entity-body {
+.wf-field textarea {
   font-family: var(--font-mono);
-  font-size: 0.76rem;
-}
-.frame-entity-body :where(ul, ol) {
-  padding-left: 1.1rem;
-}
-
-.frame-foot {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.2rem 0.5rem;
-  font-size: 0.7rem;
-}
-
-.frame-field {
-  display: flex;
-  gap: 0.5rem;
-  align-items: center;
-  flex-wrap: wrap;
-}
-
-.task-input {
-  width: 6rem;
-}
-
-/* Inline edit mode (double-click a card): a comfortable minimum width for the
-   form fields (the node's own `width: f.w` inline style is suppressed while
-   editing — see FrameNode — so a narrow card can grow instead of clipping
-   its inputs), plus the same highlight as `.selected` since editing implies
-   selected. */
-.frame.editing {
-  min-width: 16rem;
-  border-color: var(--cyan);
-  box-shadow: 0 0 16px var(--cyan-dim);
-}
-
-.frame-title-input {
-  flex: 1;
-  min-width: 0;
-  font-family: var(--font-brand);
-  font-size: 0.78rem;
-  padding: 0.1rem 0.3rem;
-}
-
-.frame-done {
-  padding: 0.1rem 0.4rem;
-  font-size: 0.7rem;
-}
-
-.frame-body-input {
-  flex: 1;
-  margin: 0.4rem 0.5rem;
-  width: calc(100% - 1rem);
-  font-size: 0.8rem;
+  font-size: 0.75rem;
   resize: vertical;
 }
 
-/* Stand-in for the description textarea while the body is empty: keeps the
-   card compact but leaves the affordance visible (task 448). */
-.frame-add-body {
-  align-self: flex-start;
-  margin: 0.4rem 0.5rem;
-  padding: 0.1rem 0.4rem;
-  font-size: 0.7rem;
-}
-
-.frame-edit-fields {
+.wf-check {
   display: flex;
-  flex-direction: column;
+  align-items: center;
   gap: 0.4rem;
-  padding: 0.3rem 0.5rem 0.5rem;
-  border-top: 1px solid var(--hairline);
+  margin: 0.5rem 0;
 }
 
-.author-field input {
-  width: 8rem;
+.wf-value-row {
+  display: flex;
+  gap: 0.3rem;
+  margin: 0.25rem 0;
 }
 
-.diagram-history {
-  flex: 1 1 100%;
-  border: 1px solid transparent;
-  border-radius: var(--r-md);
+.wf-inspector-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.6rem;
+}
+
+.wf-inspector-error {
+  margin: 0.5rem 0 0;
+}
+
+/* The run panel beneath the canvas. */
+.workflow-runpanel {
+  margin-top: 1rem;
+}
+
+.workflow-steps,
+.workflow-runs,
+.workflow-log-lines {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.workflow-step {
+  padding: 0.4rem 0.6rem;
+  margin: 0.3rem 0;
+  border-radius: var(--r-sm);
   background: var(--surface);
-  padding: 0.5rem 1rem;
-  max-height: 16rem;
-  overflow: auto;
+  border-left: 3px solid var(--hairline);
 }
 
-.diagram-history h2 {
-  margin: 0.25rem 0 0.5rem;
+.workflow-step.step-ok {
+  border-left-color: var(--green);
+}
+
+.workflow-step.step-failed {
+  border-left-color: var(--red);
+}
+
+.workflow-step.step-skipped {
+  opacity: 0.6;
+}
+
+.workflow-step-head {
+  display: flex;
+  gap: 0.6rem;
+  align-items: baseline;
+}
+
+.workflow-step-status {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--muted);
+}
+
+.workflow-step-out {
+  margin: 0.3rem 0 0;
+  max-height: 10rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+}
+
+.workflow-runs-row {
+  display: flex;
+  gap: 0.8rem;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: var(--surface);
+  border-radius: var(--r-sm);
+  margin: 0.2rem 0;
+}
+
+.workflow-runs-row.active {
+  background: var(--surface-hover);
+}
+
+.workflow-log input {
+  width: min(24rem, 100%);
+  margin-bottom: 0.4rem;
+}
+
+.workflow-log-lines li {
+  display: flex;
+  gap: 0.8rem;
+  padding: 0.15rem 0;
+  border-bottom: 1px solid var(--hairline);
+  font-size: 0.8rem;
+}
+
+@media (max-width: 860px) {
+  .workflow-canvas {
+    flex-direction: column;
+    height: auto;
+  }
+
+  .wf-palette {
+    flex-direction: row;
+    flex-wrap: wrap;
+    width: auto;
+    border-right: none;
+    border-bottom: 1px solid var(--hairline);
+  }
+
+  .wf-palette-title {
+    display: none;
+  }
+
+  .wf-viewport {
+    height: var(--tab-viewport-height);
+    min-height: var(--tab-viewport-min);
+  }
+
+  .wf-inspector {
+    width: auto;
+    left: 1rem;
+  }
+
+  .workflow-row {
+    flex-direction: column;
+    align-items: flex-start;
+  }
 }
 
 .history-list {
@@ -6523,8 +5746,8 @@ body.live-panel-ratio-resizing {
    lines, so the chip's border/background gets painted around EVERY line and the
    block reads as a stack of boxed lines. Class-scoped (set in Markdown.tsx, on
    both the plain and the syntax-highlighted path) rather than a descendant
-   selector, so it covers every markdown surface — Files pane, task modal,
-   diagram cards — with one rule, and leaves inline code chips alone. */
+   selector, so it covers every markdown surface — Files pane and task modal
+   — with one rule, and leaves inline code chips alone. */
 .markdown-code-block {
   background: none;
   border: none;
@@ -6535,9 +5758,7 @@ body.live-panel-ratio-resizing {
   color: var(--cyan);
 }
 /* An inline markdown image never widens its surface — the Files pane and the
-   task modal are fixed-width columns. Diagram cards render into .frame-body,
-   not here, and are deliberately left alone: nothing resolves their images, so
-   the only ones they can show are remote. */
+   task modal are fixed-width columns. */
 .markdown-body :where(img) {
   max-width: 100%;
   height: auto;
@@ -6852,7 +6073,7 @@ body.live-panel-ratio-resizing {
 }
 
 /* Command palette (Cmd/Ctrl+Shift+P): a centered modal above every other
-   overlay in the app — higher than the expanded-diagram takeover (1000)
+   overlay in the app — higher than the full-window takeovers (1000)
    and the phone sidebar drawer (1200). */
 .command-palette-backdrop {
   position: fixed;
@@ -6925,7 +6146,7 @@ body.live-panel-ratio-resizing {
 }
 
 /* Shared backdrop for the centered modals (new task, new project, and task
-   detail — see TaskModal.tsx). Sits above the expanded-diagram takeover
+   detail — see TaskModal.tsx). Sits above the full-window takeovers
    (1000) and phone sidebar drawer (1200), below the command palette (1300)
    so Cmd/Ctrl+Shift+P still surfaces on top of it. Also one of the selectors
    `shouldIgnoreShortcut()` watches, so any modal using it suppresses the
@@ -7021,7 +6242,7 @@ body.live-panel-ratio-resizing {
 @media (max-width: 600px) {
   :root {
     /* Header + tabs + chrome are tighter on a phone; let viewport-bound panes
-       (diagram canvas, agents terminal) fit without forcing page scroll. */
+       (workflow canvas, agents terminal) fit without forcing page scroll. */
     --tab-viewport-min: 16rem;
     /* Tap-target row of the bottom tab bar, excluding the home-indicator
        inset. `--phone-tabbar-reserve` is the whole thing — what everything
@@ -7093,7 +6314,7 @@ body.live-panel-ratio-resizing {
      Sits at 1220: ABOVE both drawers (1200) so switching tabs while a drawer
      is open is one tap rather than dismiss-then-tap, and below the modal
      backdrop (1250) so a modal is still exclusive. Full ladder, lowest first:
-     diagram takeover 1000 → scrim 1150 → drawers 1200 → tab bar 1220 →
+     takeover 1000 → scrim 1150 → drawers 1200 → tab bar 1220 →
      modal backdrop 1250 → command palette 1300. */
   .phone-tabbar {
     display: flex;
@@ -7431,171 +6652,6 @@ body.live-panel-ratio-resizing {
     width: auto;
   }
 
-  /* ── Diagram canvas (mesa task 558) ──────────────────────────────────
-     The canvas is the phone tier's one *pan/zoom* surface rather than a
-     scrolling list, so it plays by the opposite rule to the kanban board:
-     React Flow's own `.react-flow__pane` and `.react-flow__node` set
-     `touch-action: none` and the canvas owns every touch inside its box.
-     The gesture model, and why `.frame-header`'s `touch-action: none` is
-     correct here where the kanban card's was a bug, are in docs/mobile.md
-     ("The canvas gesture model"). What is left for this tier is sizing:
-     everything inside the box is now reachable only by finger. */
-
-  /* Because the canvas swallows every touch it receives, `main` can only be
-     scrolled from the page strips above and below the box — so those strips
-     have to keep existing. Measured at 390x844 the box is 556px tall against
-     a 652px ceiling here, i.e. this is a guard rather than a change; it
-     stops a future `--tab-viewport-height` bump from stranding the reader on
-     a canvas with nothing left to scroll by. `:not(.expanded)` because the
-     takeover mode below is `position: fixed; inset: 0` and wants the lot. */
-  .diagram:not(.expanded) .diagram-viewport {
-    max-height: calc(100dvh - var(--phone-tabbar-reserve) - 9rem);
-  }
-
-  /* Takeover mode covers the viewport at z-index 1000; the tab bar (1220)
-     stays on top of it, so without this the bar sits over the bottom of the
-     canvas — including React Flow's own zoom controls, which pin there. */
-  .diagram.expanded {
-    padding-bottom: calc(0.6rem + var(--phone-tabbar-reserve));
-  }
-
-  /* 200x150 of a 364x556 canvas is a sixth of the drawing surface, parked on
-     the bottom-right corner where it also blocks panning. A phone has no
-     room for a second, smaller copy of the thing it is already looking at. */
-  .diagram .react-flow__minimap {
-    display: none;
-  }
-
-  /* React Flow ships 26x26 zoom buttons. */
-  .diagram .react-flow__controls button {
-    width: 44px;
-    height: 44px;
-  }
-
-  .diagram .react-flow__controls button svg {
-    max-width: 16px;
-    max-height: 16px;
-  }
-
-  /* The desktop cluster is a 9.5rem column of full-width buttons. Kept as a
-     column with 44px rows it measured ~500px tall on a 556px canvas — the
-     controls covering the drawing. A row wraps instead, so the cluster costs
-     one button-height plus the hint. */
-  .canvas-controls {
-    flex-direction: row;
-    flex-wrap: wrap;
-    align-items: flex-start;
-    /* Leaves the top-right expand button its corner. */
-    width: calc(100% - 6.5rem);
-    gap: 0.3rem;
-  }
-
-  /* The shape rail is a left-hand column on a screen that has no room for a
-     column — and a finger cannot start an HTML5 drag anyway, so on this tier
-     it is the tap-to-add strip it degrades to: one scrolling row above the
-     canvas, rows at the 44px floor. */
-  .shape-rail {
-    flex-direction: row;
-    width: 100%;
-    max-height: none;
-    overflow-x: auto;
-    overflow-y: hidden;
-  }
-
-  .shape-rail-title {
-    display: none;
-  }
-
-  .shape-rail-item {
-    width: auto;
-    flex: 0 0 auto;
-    min-height: 44px;
-    white-space: nowrap;
-  }
-
-  /* Takeover mode is `flex-wrap: nowrap`, so a full-width, unshrinkable strip
-     in that row would take the whole content box and leave the canvas zero
-     wide. On this tier the two stack instead: the strip on top, the canvas
-     taking what is left (`height: auto` because the desktop rule's `100%` is
-     the whole row's height, which here is only the canvas's share of it). */
-  .diagram.expanded {
-    flex-direction: column;
-    /* `.diagram`'s `align-items: flex-start` is the cross axis in a column,
-       so without this both children shrink to their content width and the
-       canvas draws 2px wide. */
-    align-items: stretch;
-  }
-
-  .diagram.expanded .shape-rail {
-    max-height: none;
-  }
-
-  .diagram.expanded .diagram-viewport {
-    height: auto;
-  }
-
-  /* Primary canvas actions to the 44px floor (measured: 26px tall before).
-     Width goes from 100% to content, which is what lets them sit in a row. */
-  .canvas-controls button,
-  .canvas-expand {
-    min-height: 44px;
-  }
-
-  .canvas-controls button {
-    width: auto;
-    padding: 0 0.55rem;
-    white-space: nowrap;
-  }
-
-  /* `.react-flow__panel` sets no `pointer-events`, so the cluster's whole
-     bounding box — including the gaps between buttons — swallowed the pan
-     gesture in the canvas's top-left corner. Only the buttons should. */
-  .canvas-controls,
-  .canvas-hint-touch {
-    pointer-events: none;
-  }
-
-  .canvas-controls button,
-  .canvas-controls .error {
-    pointer-events: auto;
-  }
-
-  /* Its own row beneath the buttons rather than a fourth column entry. */
-  .canvas-hint-touch {
-    flex-basis: 100%;
-  }
-
-  /* The frame drag handle — 28px, and the only way to move a card. Raising
-     it to 44 costs a third of a default 140px card's height, which is the
-     right trade when the alternative is a handle you cannot reliably hit. */
-  .frame-header {
-    min-height: 44px;
-  }
-
-  /* Deliberately NOT 44px. These two float over the graph itself rather than
-     over chrome, and a 44px chip on a 390px-wide canvas hides the connector
-     it belongs to. 28px is the compromise: comfortably hittable, still small
-     enough to read as an annotation on the edge. */
-  .edge-del {
-    min-width: 28px;
-    min-height: 28px;
-  }
-
-  .edge-label {
-    min-height: 28px;
-  }
-
-  /* The desktop hint names mouse gestures ("double-click", "drag a side
-     dot"); the touch one names the gestures this tier actually has. Both are
-     rendered and switched here, so there is no second JS media query. */
-  .canvas-hint {
-    display: none;
-  }
-
-  .canvas-hint-touch {
-    display: inline;
-  }
-
   /* ── Files tab (mesa task 559) ──────────────────────────────────────────
      The ≤860px tier already stacks `.files-layout` into a column, so the
      tree and the content pane were never side by side here. What it did not
@@ -7724,27 +6780,6 @@ body.live-panel-ratio-resizing {
     padding-left: 0.9rem;
   }
 }
-
-/* Coarse-pointer tier (mesa task 558) — a *capability* query, not a width
-   one, and the only such block in this file. The defect it fixes is caused
-   by the absence of hover, not by a narrow screen: a 900px touch tablet has
-   it and a 500px desktop window does not, so neither width tier above can
-   express it.
-
-   `.diagram .react-flow__handle` is `opacity: 0` until its node is
-   hovered, but it keeps `pointer-events: all` — 22x22 each, four per frame.
-   With no hover to reveal them they are invisible traps: measured at
-   390x844, six of the board's 28 handles sat on screen at rest, and a
-   one-finger drag that started on one produced no pan, no page scroll and
-   nothing on screen to explain the refusal. Showing them makes the hit
-   target and the visible affordance agree, and it is also the only way to
-   start an edge by touch at all. */
-@media (hover: none) and (pointer: coarse) {
-  .diagram .react-flow__handle {
-    opacity: 0.55;
-  }
-}
-
 /* Shared keyboard-focus highlight (spec 449, story 453): one treatment for
    every interactive element outside form fields (which already have their
    own cyan focus style, index.css) — buttons, links, kanban cards and
@@ -9090,7 +8125,7 @@ button:focus-visible,
 
 /* A view inside a pane is bounded by the PANE, not by the window: the tabs
    that size themselves off `--tab-viewport-height` (Files, Git, Terminal,
-   Diagrams) each ask for a full screen, which in a half-height pane is an
+   Workflows) each ask for a full screen, which in a half-height pane is an
    overflow. Redefining the two vars here rebinds that same request to this
    pane's own box — one declaration, no per-view CSS. */
 .project-pane-body {
@@ -9218,94 +8253,6 @@ button:focus-visible,
   .project-page-fills > .project-panes {
     height: auto;
     margin-bottom: 0;
-  }
-}
-
-/* ── Diagram index rows (mesa task 854) ────────────────────────────────────
-   Each board on its own row: a mini-map of its saved state on the left, then
-   title / description / meta. `.card-list li` still supplies the panel, radius
-   and hover tint — only the inside of the row is new, so nothing else that
-   uses `.card-list` moves. */
-.diagram-row {
-  display: flex;
-  gap: 0.75rem;
-  align-items: flex-start;
-}
-
-.diagram-row-main {
-  min-width: 0;
-  flex: 1;
-}
-
-.diagram-row-title {
-  font-family: var(--font-sans);
-  font-size: 0.9rem;
-  font-weight: 600;
-}
-
-/* One-line clamp: a description is free text and a row is an index entry, not
-   the board. */
-.diagram-row-desc {
-  margin: 0.15rem 0 0;
-  font-size: 0.8rem;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* The thumbnail is a fixed box so the titles line up down the list whatever
-   each board's aspect ratio is; `diagramThumb.ts` letterboxes into it. */
-.diagram-thumb {
-  flex: none;
-  width: 128px;
-  height: 80px;
-  background: var(--bg);
-  border: 1px solid transparent;
-  border-radius: var(--r-md);
-}
-
-.diagram-thumb rect {
-  fill: var(--panel-raised);
-  stroke: var(--border-bright);
-  stroke-width: 1;
-}
-
-.diagram-thumb line {
-  stroke: var(--cyan-dim);
-  stroke-width: 1;
-}
-
-/* Loading, failed and genuinely empty all land here — an inert box rather
-   than a broken `<svg>` or an error the page doesn't need to report. */
-.diagram-thumb-empty {
-  background: repeating-linear-gradient(
-    45deg,
-    var(--bg),
-    var(--bg) 6px,
-    var(--panel) 6px,
-    var(--panel) 12px
-  );
-}
-
-/* Narrow tier: the row still reads side-by-side, the mini-map just gives up
-   the width the text needs (docs/mobile.md — no new matchMedia, CSS only). */
-@media (max-width: 860px) {
-  .diagram-thumb {
-    width: 88px;
-    height: 56px;
-  }
-}
-
-/* Phone: below ~90px the mini-map is a smudge, so the row stacks — thumbnail
-   full-width above the text rather than squeezed beside it. */
-@media (max-width: 600px) {
-  .diagram-row {
-    flex-direction: column;
-  }
-
-  .diagram-thumb {
-    width: 100%;
-    height: 72px;
   }
 }
 
@@ -12271,7 +11218,7 @@ body.live-panel-ratio-resizing .live-panel-divider {
 .dock-host > .agent-sidebar,
 .dock-host > .dock-chat,
 .dock-host > .dock-board,
-.dock-host > .dock-diagrams {
+.dock-host > .dock-workflows {
   flex: 1;
   min-width: 0;
   min-height: 0;
@@ -12285,7 +11232,7 @@ body.live-panel-ratio-resizing .live-panel-divider {
   border-bottom: none;
 }
 
-.dock-diagrams {
+.dock-workflows {
   overflow-y: auto;
   padding: 0.75rem;
 }

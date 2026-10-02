@@ -14,7 +14,6 @@ import type { ImportResolution } from './libraryImport'
 
 import type { AgentSession } from './types/AgentSession'
 import type { AgentSpawned } from './types/AgentSpawned'
-import type { AnchorSide } from './types/AnchorSide'
 import type { Artifact } from './types/Artifact'
 import type { ArtifactSummary } from './types/ArtifactSummary'
 import type { Attachment } from './types/Attachment'
@@ -37,19 +36,10 @@ import type { TranscribeStatus } from './types/TranscribeStatus'
 import type { ConfigLive } from './types/ConfigLive'
 import type { LiveNotebookEntry } from './types/LiveNotebookEntry'
 import type { ConfigWatchers } from './types/ConfigWatchers'
-import type { Diagram } from './types/Diagram'
-import type { DiagramEvent } from './types/DiagramEvent'
-import type { DiagramType } from './types/DiagramType'
-import type { DiagramView } from './types/DiagramView'
 import type { DirEntry } from './types/DirEntry'
 import type { DirListing } from './types/DirListing'
-import type { EdgeMarker } from './types/EdgeMarker'
-import type { EdgeStyle } from './types/EdgeStyle'
 import type { FileContentView } from './types/FileContentView'
 import type { FileTreeEntry } from './types/FileTreeEntry'
-import type { Frame } from './types/Frame'
-import type { FrameEdge } from './types/FrameEdge'
-import type { FrameShape } from './types/FrameShape'
 import type { GitCommitFile } from './types/GitCommitFile'
 import type { GitFileDiff } from './types/GitFileDiff'
 import type { InboxItem } from './types/InboxItem'
@@ -96,7 +86,14 @@ import type { TaskReceipt } from './types/TaskReceipt'
 import type { TaskSummary } from './types/TaskSummary'
 import type { VoiceDesign } from './types/VoiceDesign'
 import type { VoiceExport } from './types/VoiceExport'
-import type { Waypoint } from './types/Waypoint'
+import type { Workflow } from './types/Workflow'
+import type { WorkflowBranch } from './types/WorkflowBranch'
+import type { WorkflowEdge } from './types/WorkflowEdge'
+import type { WorkflowLogEntry } from './types/WorkflowLogEntry'
+import type { WorkflowNode } from './types/WorkflowNode'
+import type { WorkflowNodeKind } from './types/WorkflowNodeKind'
+import type { WorkflowRun } from './types/WorkflowRun'
+import type { WorkflowView } from './types/WorkflowView'
 
 /** Error body shape shared by the API and CLI: {"error": {"code", "message"}}. */
 export class ApiError extends Error {
@@ -736,7 +733,7 @@ export function stopAgent(id: string): Promise<{ id: string }> {
   return request(`/api/agents/${encodeURIComponent(id)}/stop`, jsonInit('POST', {}))
 }
 
-// ---- diagrams ----
+// ---- workflows (mesa task 1607) ----
 // The guard middleware requires a JSON Content-Type on every mutating method,
 // so even body-less DELETEs send the header (src/api.rs Requirement 7).
 
@@ -744,141 +741,123 @@ function jsonDelete(): RequestInit {
   return { method: 'DELETE', headers: { 'Content-Type': 'application/json' } }
 }
 
-/** `?author=` query for the change history on body-less DELETEs. */
-function actorQuery(author?: string): string {
-  return author ? `?author=${encodeURIComponent(author)}` : ''
-}
-
-export function listDiagrams(project?: number): Promise<Diagram[]> {
+export function listWorkflows(project?: number): Promise<Workflow[]> {
   const qs = project !== undefined ? `?project=${project}` : ''
-  return request(`/api/diagrams${qs}`)
+  return request(`/api/workflows${qs}`)
 }
 
-/** A board's full contents in one object: the board plus its frames and edges. */
-export function getDiagram(id: number): Promise<DiagramView> {
-  return request(`/api/diagrams/${id}`)
+/** A workflow's whole graph in one object: the workflow, its nodes and edges. */
+export function getWorkflow(id: number): Promise<WorkflowView> {
+  return request(`/api/workflows/${id}`)
 }
 
-/** The board's change history (who/what/when), oldest first. */
-export function listDiagramEvents(id: number): Promise<DiagramEvent[]> {
-  return request(`/api/diagrams/${id}/events`)
-}
-
-export interface DiagramCreate {
-  project_id: number
-  title: string
+export interface WorkflowCreate {
+  name: string
+  project_id?: number
   description?: string
-  author?: string
-  diagram_type?: DiagramType
 }
 
-export function createDiagram(body: DiagramCreate): Promise<Diagram> {
-  return request('/api/diagrams', jsonInit('POST', body))
+export function createWorkflow(body: WorkflowCreate): Promise<Workflow> {
+  return request('/api/workflows', jsonInit('POST', body))
 }
 
-export interface DiagramPatch {
-  title?: string
+export interface WorkflowPatch {
+  name?: string
   description?: string | null
 }
 
-export function updateDiagram(
-  id: number,
-  patch: DiagramPatch,
-  author?: string,
-): Promise<Diagram> {
-  return request(`/api/diagrams/${id}`, jsonInit('PATCH', { ...patch, author }))
+export function updateWorkflow(id: number, patch: WorkflowPatch): Promise<Workflow> {
+  return request(`/api/workflows/${id}`, jsonInit('PATCH', patch))
 }
 
-/** Returns the destroyed contents: the board plus all cascaded frames/edges. */
-export function deleteDiagram(id: number): Promise<DiagramView> {
-  return request(`/api/diagrams/${id}`, jsonDelete())
+/** Returns the destroyed graph: the workflow plus its cascaded nodes and edges. */
+export function deleteWorkflow(id: number): Promise<WorkflowView> {
+  return request(`/api/workflows/${id}`, jsonDelete())
 }
 
-export interface FrameCreate {
+export interface WorkflowNodeCreate {
+  kind: WorkflowNodeKind
   title: string
-  body?: string
+  config?: Record<string, unknown>
   x?: number
   y?: number
-  w?: number
-  h?: number
-  color?: string
-  task_id?: number
-  author?: string
-  shape?: FrameShape
 }
 
-export function createFrame(
-  diagramId: number,
-  body: FrameCreate,
-): Promise<Frame> {
-  return request(`/api/diagrams/${diagramId}/frames`, jsonInit('POST', body))
+export function createWorkflowNode(
+  workflowId: number,
+  body: WorkflowNodeCreate,
+): Promise<WorkflowNode> {
+  return request(`/api/workflows/${workflowId}/nodes`, jsonInit('POST', body))
 }
 
-export interface FramePatch {
+export interface WorkflowNodePatch {
   title?: string
-  body?: string | null
+  /** Replaces the whole config. */
+  config?: Record<string, unknown>
   x?: number
   y?: number
-  w?: number
-  h?: number
-  color?: string | null
-  task_id?: number | null
 }
 
-export function updateFrame(
+export function updateWorkflowNode(
   id: number,
-  patch: FramePatch,
-  author?: string,
-): Promise<Frame> {
-  return request(`/api/frames/${id}`, jsonInit('PATCH', { ...patch, author }))
+  patch: WorkflowNodePatch,
+): Promise<WorkflowNode> {
+  return request(`/api/workflow-nodes/${id}`, jsonInit('PATCH', patch))
 }
 
-/** Returns the destroyed frame and the edges that cascaded with it. */
-export function deleteFrame(
+/** Returns the destroyed node and the edges that cascaded with it. */
+export function deleteWorkflowNode(
   id: number,
-  author?: string,
-): Promise<{ frame: Frame; edges: FrameEdge[] }> {
-  return request(`/api/frames/${id}${actorQuery(author)}`, jsonDelete())
+): Promise<{ node: WorkflowNode; edges: WorkflowEdge[] }> {
+  return request(`/api/workflow-nodes/${id}`, jsonDelete())
 }
 
-export interface EdgeCreate {
-  from_frame: number
-  to_frame: number
-  label?: string
-  author?: string
+export interface WorkflowEdgeCreate {
+  from_node: number
+  to_node: number
+  /** Required on an edge leaving a branch node, refused on any other. */
+  branch?: WorkflowBranch
 }
 
-export function createEdge(
-  diagramId: number,
-  body: EdgeCreate,
-): Promise<FrameEdge> {
-  return request(`/api/diagrams/${diagramId}/edges`, jsonInit('POST', body))
+export function createWorkflowEdge(
+  workflowId: number,
+  body: WorkflowEdgeCreate,
+): Promise<WorkflowEdge> {
+  return request(`/api/workflows/${workflowId}/edges`, jsonInit('POST', body))
 }
 
-export interface EdgePatch {
-  label?: string | null
-  waypoints?: Waypoint[]
-  from_anchor?: AnchorSide | null
-  to_anchor?: AnchorSide | null
-  /** Connector properties (mesa task 854). Same three-state `double_option`
-   *  contract as the anchors: omitted leaves the field untouched, an explicit
-   *  `null` clears it back to the default, a value sets it. */
-  style?: EdgeStyle | null
-  from_marker?: EdgeMarker | null
-  to_marker?: EdgeMarker | null
+export function deleteWorkflowEdge(id: number): Promise<WorkflowEdge> {
+  return request(`/api/workflow-edges/${id}`, jsonDelete())
 }
 
-export function updateEdge(
-  id: number,
-  patch: EdgePatch,
-  author?: string,
-): Promise<FrameEdge> {
-  return request(`/api/edges/${id}`, jsonInit('PATCH', { ...patch, author }))
+/** Runs the graph synchronously and answers the finished run. A *failed* run
+ *  is still a 200 with `status: "failed"`; an `ApiError` means it could not run. */
+export function runWorkflow(id: number, input?: string): Promise<WorkflowRun> {
+  return request(
+    `/api/workflows/${id}/run`,
+    jsonInit('POST', input ? { input } : {}),
+  )
 }
 
-/** Returns the destroyed edge. */
-export function deleteEdge(id: number, author?: string): Promise<FrameEdge> {
-  return request(`/api/edges/${id}${actorQuery(author)}`, jsonDelete())
+/** A workflow's runs, newest first, each with its steps. */
+export function listWorkflowRuns(id: number): Promise<WorkflowRun[]> {
+  return request(`/api/workflows/${id}/runs`)
+}
+
+export function getWorkflowRun(id: number): Promise<WorkflowRun> {
+  return request(`/api/workflow-runs/${id}`)
+}
+
+/** Log lines, newest first; no `log` = every log. */
+export function listWorkflowLog(
+  log?: string,
+  limit?: number,
+): Promise<WorkflowLogEntry[]> {
+  const q = new URLSearchParams()
+  if (log) q.set('log', log)
+  if (limit !== undefined) q.set('limit', String(limit))
+  const qs = q.toString()
+  return request(`/api/workflow-log${qs ? `?${qs}` : ''}`)
 }
 
 // ---- inbox (global update requests) ----

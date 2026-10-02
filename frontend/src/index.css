@@ -45,16 +45,15 @@
   --hairline: rgba(42, 106, 138, 0.16);
   --ring: 0 0 0 1px rgba(42, 106, 138, 0.45);
   --ring-focus: 0 0 0 1px rgba(0, 229, 255, 0.6), 0 0 18px rgba(0, 229, 255, 0.08);
-  /* The one remaining chamfer: a diagram frame's rectangular card, which sits
-     beside the shaped silhouettes `shapeBox.ts` mirrors. Nothing else cuts. */
-  --cut: polygon(
-    0 0,
-    calc(100% - 10px) 0,
-    100% 10px,
-    100% 100%,
-    10px 100%,
-    0 calc(100% - 10px)
-  );
+  /* Workflow node kinds (mesa task 1607): one tint per kind, shared by the
+     builder's palette and its cards, and the Run pill. */
+  --wf-trigger: #2a3355;
+  --wf-prompt: #3a2f5c;
+  --wf-cli: #24404a;
+  --wf-script: #3d3a2c;
+  --wf-branch: #4a3040;
+  --wf-output: #2e3a2e;
+  --wf-run: #7c6cf0;
   --edge-cyan: inset 2px 0 0 rgba(0, 229, 255, 0.55);
   /* xterm's own font size (mesa task 560). Lives here rather than as a
      literal in `PtyTerminal.tsx` so the phone tier can override it in CSS
@@ -62,7 +61,7 @@
      option, but the media query stays in one place. */
   --pty-font-size: 13px;
   /* A project-tab body pane that fills the viewport below the header/tabs/
-     chrome and scrolls internally (diagram canvas, agents terminal). */
+     chrome and scrolls internally (workflow canvas, agents terminal). */
   --tab-viewport-height: calc(100vh - 18rem);
   --tab-viewport-min: 24rem;
 }

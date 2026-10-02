@@ -142,9 +142,9 @@ describe('fillsViewport', () => {
   })
 
   it('leaves every flowing tab scrolling in main', () => {
-    // Git and the Diagrams index flow a header/list down the page, so they
+    // Git and the Workflows index flow a header/list down the page, so they
     // keep the document-flow frame even though Git's diff pane is bounded.
-    for (const tab of ['board', 'dashboard', 'diagrams', 'git', 'settings'] as const)
+    for (const tab of ['board', 'dashboard', 'workflows', 'git', 'settings'] as const)
       expect(fillsViewport(tab)).toBe(false)
   })
 

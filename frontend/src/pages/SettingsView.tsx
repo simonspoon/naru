@@ -560,7 +560,7 @@ function KeymapSection() {
         The shortcuts that work anywhere in the app. A chord is recorded from
         the next key you press — ⌘ and Ctrl are one modifier, so a keymap means
         the same thing on either platform. Shortcuts without a modifier stand
-        down while you are typing in a field, a terminal or a diagram; ones with
+        down while you are typing in a field, a terminal or a workflow canvas; ones with
         a modifier do not. The Files tab's own chords and a form's Escape are
         not here: they belong to one panel while it is on screen, not to the
         app.

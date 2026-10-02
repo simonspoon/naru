@@ -4,7 +4,7 @@ import './App.css'
 import { getCcUsage, getNaruVersion, getTask, listInbox } from './api'
 import { AgentSidebar } from './components/AgentSidebar'
 import { CommandPalette } from './components/CommandPalette'
-import { DiagramsPanel } from './components/DiagramsPanel'
+import { WorkflowsPanel } from './components/WorkflowsPanel'
 import { DockBar, DockLayout } from './components/DockLayout'
 import { useDockStore } from './useDockStore'
 import { inNav, isVisible, revealNeedsNav, type PanelId } from './dockLayout'
@@ -41,7 +41,7 @@ import { useVisualViewportHeightVar } from './visualViewport'
 
 // Hash-based routing: #/ (placeholder), #/projects/:id,
 // #/projects/:id/tasks/:tid (task open in the side panel),
-// #/projects/:id/diagrams, #/projects/:id/diagrams/:sid,
+// #/projects/:id/workflows, #/projects/:id/workflows/:sid,
 // #/projects/:id/git (working-tree status + per-file diffs),
 // #/projects/:id/files (file tree + content viewer),
 // #/projects/:id/terminal (the Terminal page's shell panes, rooted at the
@@ -411,8 +411,8 @@ function App() {
     : ccDetailMatch || ccTimelineMatch
       ? ('sessions' as CcTab)
       : null
-  const diagramMatch = /^\/projects\/(\d+)\/diagrams\/(\d+)$/.exec(path)
-  const diagramListMatch = /^\/projects\/(\d+)\/diagrams$/.exec(path)
+  const workflowMatch = /^\/projects\/(\d+)\/workflows\/(\d+)$/.exec(path)
+  const workflowListMatch = /^\/projects\/(\d+)\/workflows$/.exec(path)
   const gitMatch = /^\/projects\/(\d+)\/git$/.exec(path)
   const filesMatch = /^\/projects\/(\d+)\/files$/.exec(path)
   const artifactsMatch = /^\/projects\/(\d+)\/artifacts$/.exec(path)
@@ -436,10 +436,10 @@ function App() {
   const createTaskMatch = /^\/projects\/(\d+)\/create-task$/.exec(path)
   const projectMatch = /^\/projects\/(\d+)(?:\/tasks\/(\d+))?$/.exec(path)
   const legacyTaskMatch = /^\/tasks\/(\d+)$/.exec(path)
-  const activeProjectId = diagramMatch
-    ? Number(diagramMatch[1])
-    : diagramListMatch
-      ? Number(diagramListMatch[1])
+  const activeProjectId = workflowMatch
+    ? Number(workflowMatch[1])
+    : workflowListMatch
+      ? Number(workflowListMatch[1])
       : gitMatch
         ? Number(gitMatch[1])
         : filesMatch
@@ -493,14 +493,14 @@ function App() {
     // CC Dashboard: global telemetry view, also above projects. `ccTab` is
     // non-null whenever ccMatch is.
     page = <CCDashboardView tab={ccTab!} />
-  } else if (diagramMatch) {
-    // Single board: in-place diagram view inside the project page frame.
+  } else if (workflowMatch) {
+    // Single board: in-place workflow view inside the project page frame.
     page = (
       <ProjectTasksPage
-        projectId={Number(diagramMatch[1])}
+        projectId={Number(workflowMatch[1])}
         taskId={null}
-        diagrams
-        diagramId={Number(diagramMatch[2])}
+        workflows
+        workflowId={Number(workflowMatch[2])}
         git={false}
         files={false}
         artifacts={false}
@@ -512,14 +512,14 @@ function App() {
         onProjectsChanged={() => setNavVersion((v) => v + 1)}
       />
     )
-  } else if (diagramListMatch) {
-    // Boards index: in-place diagrams view inside the project page frame.
+  } else if (workflowListMatch) {
+    // Boards index: in-place workflows view inside the project page frame.
     page = (
       <ProjectTasksPage
-        projectId={Number(diagramListMatch[1])}
+        projectId={Number(workflowListMatch[1])}
         taskId={null}
-        diagrams
-        diagramId={null}
+        workflows
+        workflowId={null}
         git={false}
         files={false}
         artifacts={false}
@@ -537,8 +537,8 @@ function App() {
       <ProjectTasksPage
         projectId={Number(gitMatch[1])}
         taskId={null}
-        diagrams={false}
-        diagramId={null}
+        workflows={false}
+        workflowId={null}
         git
         files={false}
         artifacts={false}
@@ -556,8 +556,8 @@ function App() {
       <ProjectTasksPage
         projectId={Number(filesMatch[1])}
         taskId={null}
-        diagrams={false}
-        diagramId={null}
+        workflows={false}
+        workflowId={null}
         git={false}
         files
         artifacts={false}
@@ -576,8 +576,8 @@ function App() {
       <ProjectTasksPage
         projectId={Number(artifactsMatch[1])}
         taskId={null}
-        diagrams={false}
-        diagramId={null}
+        workflows={false}
+        workflowId={null}
         git={false}
         files={false}
         artifacts
@@ -600,8 +600,8 @@ function App() {
       <ProjectTasksPage
         projectId={Number(projectTerminalMatch[1])}
         taskId={null}
-        diagrams={false}
-        diagramId={null}
+        workflows={false}
+        workflowId={null}
         git={false}
         files={false}
         artifacts={false}
@@ -619,8 +619,8 @@ function App() {
       <ProjectTasksPage
         projectId={Number(dashboardMatch[1])}
         taskId={null}
-        diagrams={false}
-        diagramId={null}
+        workflows={false}
+        workflowId={null}
         git={false}
         files={false}
         artifacts={false}
@@ -639,8 +639,8 @@ function App() {
       <ProjectTasksPage
         projectId={Number(projectSettingsMatch[1])}
         taskId={null}
-        diagrams={false}
-        diagramId={null}
+        workflows={false}
+        workflowId={null}
         git={false}
         files={false}
         artifacts={false}
@@ -659,8 +659,8 @@ function App() {
       <ProjectTasksPage
         projectId={Number(projectCustomMatch[1])}
         taskId={projectCustomMatch[2] ? Number(projectCustomMatch[2]) : null}
-        diagrams={false}
-        diagramId={null}
+        workflows={false}
+        workflowId={null}
         git={false}
         files={false}
         artifacts={false}
@@ -679,8 +679,8 @@ function App() {
       <ProjectTasksPage
         projectId={Number(createTaskMatch[1])}
         taskId={null}
-        diagrams={false}
-        diagramId={null}
+        workflows={false}
+        workflowId={null}
         git={false}
         files={false}
         artifacts={false}
@@ -697,8 +697,8 @@ function App() {
       <ProjectTasksPage
         projectId={Number(projectMatch[1])}
         taskId={projectMatch[2] ? Number(projectMatch[2]) : null}
-        diagrams={false}
-        diagramId={null}
+        workflows={false}
+        workflowId={null}
         git={false}
         files={false}
         artifacts={false}
@@ -891,7 +891,7 @@ function App() {
             hostFor('agents'),
           )}
         {docked &&
-          createPortal(<DiagramsPanel projectId={activeProjectId} />, hostFor('diagrams'))}
+          createPortal(<WorkflowsPanel projectId={activeProjectId} />, hostFor('workflows'))}
         {/* Single always-mounted owner of every open leaf's PtyTerminal
             (mesa task 399, .scratch/arch.md §6.2), across BOTH AgentSidebar
             and TerminalPage — a permanent sibling, never inside `page` or

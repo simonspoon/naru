@@ -135,10 +135,10 @@ The code is the source of truth. These are the invariants you must not break:
   `navWidth`, `newFile`, `openFiles`, `panelDrag`, `pricingDraft`, `projectPanes`,
   `projectTree`, `promptPlaceholders`, `ptyResize`, `scriptDraft`, `scriptRun`, `sessionDetail`,
   `sessionGraph`,
-  `sessionTimeline`, `settingsDraft`, `settingsTab`, `shapeBox`, `shapePalette`, `speechDraft`,
+  `sessionTimeline`, `settingsDraft`, `settingsTab`, `speechDraft`,
   `speechPlayback`, `speechSpeed`,
   `syntaxHighlighter`, `systemMeter`,
-  `time`, `timeStretch`, `usageMeter`, `voiceClone`, `voiceDesign`, `voiceExport`, `watchersDraft`, `wavStream`, `wordWrap`) —
+  `time`, `timeStretch`, `usageMeter`, `voiceClone`, `voiceDesign`, `voiceExport`, `watchersDraft`, `wavStream`, `wordWrap`, `workflowConfig`, `workflowRun`) —
   predicates that historically shipped wrong.
   **Logic worth testing therefore belongs in one of those modules, not inline
   in a `.tsx`** (why `isRunningAgent` lives outside `AgentSidebar`).

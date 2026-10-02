@@ -31,7 +31,7 @@ const FUNCTION_KEY = /^F([1-9]|1[0-9]|2[0-4])$/
  *    Rules 3–5 still apply there; only this rule stands aside.
  * 3. The event target is inside an xterm terminal pane (`.xterm` or
  *    `.agent-terminal`).
- * 4. A diagram canvas is mounted anywhere on the page (`.diagram`) —
+ * 4. A workflow canvas is mounted anywhere on the page (`.workflow-canvas`) —
  *    it owns its own key handling and is its own spatial surface.
  * 5. A modal that owns its own key handling is open (create-task/
  *    create-project/command-palette backdrops).
@@ -52,7 +52,7 @@ export function shouldIgnoreShortcut(e: KeyboardEvent, claimedFrom?: string): bo
 
   if (target?.closest('.xterm, .agent-terminal')) return true
 
-  if (document.querySelector('.diagram') !== null) return true
+  if (document.querySelector('.workflow-canvas') !== null) return true
 
   if (
     document.querySelector(

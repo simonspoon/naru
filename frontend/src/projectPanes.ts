@@ -1,5 +1,5 @@
 // The project page's "Custom" tab (mesa task 843): the pane tree a user builds
-// by dragging view tabs (Dashboard, Board, Diagrams, …) into the main area,
+// by dragging view tabs (Dashboard, Board, Workflows, …) into the main area,
 // plus the machine-local memory that keeps it across navigations.
 //
 // Two deliberate shapes:
@@ -35,7 +35,7 @@ import {
 export const PANE_TABS: readonly PaneTab[] = [
   'dashboard',
   'board',
-  'diagrams',
+  'workflows',
   'git',
   'files',
   'artifacts',
@@ -67,7 +67,7 @@ export function isPaneTab(value: unknown): value is PaneTab {
 const LABELS: Record<PaneTab, string> = {
   dashboard: 'Dashboard',
   board: 'Board',
-  diagrams: 'Diagrams',
+  workflows: 'Workflows',
   git: 'Git',
   files: 'Files',
   artifacts: 'Artifacts',
@@ -86,8 +86,8 @@ export function paneLabel(tab: PaneTab): string {
  *  Files and Terminal are the two single-view tabs whose whole body is one
  *  such box; the Custom layout is the third case and the page adds it
  *  directly, since it is not a `PaneTab`. Everything else here — Board,
- *  Dashboard, Settings, the Diagrams *index* — is a column that flows down
- *  the page and scrolls in `main`, and Git and an open diagram board are
+ *  Dashboard, Settings, the Workflows *index* — is a column that flows down
+ *  the page and scrolls in `main`, and Git and an open workflow board are
  *  mixed (a flowing header above a bounded pane), so all of them keep the
  *  document-flow frame they have always had. */
 export function fillsViewport(tab: PaneTab): boolean {

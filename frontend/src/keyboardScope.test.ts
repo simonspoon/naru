@@ -92,10 +92,10 @@ describe('shouldIgnoreShortcut', () => {
     ).toBe(false)
   })
 
-  it('ignores every key while a diagram canvas is mounted anywhere', () => {
-    // Document-wide, not target-scoped: the diagram owns its own spatial
+  it('ignores every key while a workflow canvas is mounted anywhere', () => {
+    // Document-wide, not target-scoped: the workflow owns its own spatial
     // key handling even when focus sits elsewhere on the page.
-    mount('<div class="diagram"></div><button id="t"></button>')
+    mount('<div class="workflow-canvas"></div><button id="t"></button>')
     expect(ignores(document.getElementById('t')!)).toBe(true)
   })
 
@@ -207,8 +207,8 @@ describe('shouldIgnoreFilesShortcut', () => {
     },
   )
 
-  it('does not care about a diagram canvas — the Files tab is its own page', () => {
-    mount('<div class="diagram"></div><button id="t"></button>')
+  it('does not care about a workflow canvas — the Files tab is its own page', () => {
+    mount('<div class="workflow-canvas"></div><button id="t"></button>')
     expect(ignoresFind(document.getElementById('t')!)).toBe(false)
   })
 
