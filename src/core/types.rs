@@ -2377,6 +2377,18 @@ pub struct LibraryItem {
     /// client can diff the fork against it; `None` on everything that is not
     /// a fork of a built-in that still exists.
     pub builtin_body: Option<String>,
+    /// A `skill`'s sibling files beside `SKILL.md` (mesa task 1604) — path
+    /// relative to the skill dir to text — so the item carries its whole
+    /// folder. Empty (and absent on the wire) for every other kind and for a
+    /// skill that is just `SKILL.md`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    #[ts(optional, type = "Record<string, string>")]
+    pub files: std::collections::BTreeMap<String, String>,
+    /// [`files`](Self::files) as of the last sync agreement — the baseline's
+    /// second half. Store-only, never on the wire.
+    #[serde(skip)]
+    #[ts(skip)]
+    pub synced_files: std::collections::BTreeMap<String, String>,
 }
 
 /// One entry in a [`LibraryItem`]'s history. A row is appended only when the
@@ -2557,6 +2569,15 @@ pub struct LibrarySyncRow {
     /// from `status`, which compares Naru with the disk and so can read
     /// `in-sync` while the built-in has moved on.
     pub builtin_updated: bool,
+    /// A skill's sibling files on each side (mesa task 1604), empty and
+    /// absent for everything else. They are part of what `status` and `diff`
+    /// compare: a sibling edit on either side is never `in-sync`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    #[ts(optional, type = "Record<string, string>")]
+    pub mesa_files: std::collections::BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    #[ts(optional, type = "Record<string, string>")]
+    pub disk_files: std::collections::BTreeMap<String, String>,
 }
 
 /// Which side one line of a [`LibrarySyncRow::diff`] belongs to.
@@ -2635,6 +2656,11 @@ pub struct LibraryBundleItem {
     /// [`LibraryItem::export_command`]; absent in a bundle older than mesa
     /// task 1139, which reads as `false`.
     pub export_command: bool,
+    /// [`LibraryItem::files`]; absent in a bundle older than mesa task 1604,
+    /// which reads as none.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    #[ts(optional, type = "Record<string, string>")]
+    pub files: std::collections::BTreeMap<String, String>,
 }
 
 /// The wire shape [`LibraryBundleItem`] is read through: `kind` as the raw
@@ -2651,6 +2677,8 @@ struct LibraryBundleItemWire {
     builtin_id: Option<String>,
     #[serde(default)]
     export_command: bool,
+    #[serde(default)]
+    files: std::collections::BTreeMap<String, String>,
 }
 
 impl<'de> Deserialize<'de> for LibraryBundleItem {
@@ -2697,6 +2725,7 @@ impl<'de> Deserialize<'de> for LibraryBundleItem {
             body,
             builtin_id,
             export_command,
+            files: wire.files,
         })
     }
 }

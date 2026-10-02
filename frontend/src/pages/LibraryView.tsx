@@ -1494,6 +1494,15 @@ export function LibraryView() {
                           <span className="library-badge">slash command</span>
                         )}
                         {item.builtin && <span className="library-badge">built-in</span>}
+                        {Object.keys(item.files ?? {}).length > 0 && (
+                          // A skill's sibling files travel with it (mesa task 1604).
+                          <span
+                            className="library-badge"
+                            title={Object.keys(item.files ?? {}).join('\n')}
+                          >
+                            +{Object.keys(item.files ?? {}).length} files
+                          </span>
+                        )}
                         {review !== null && (
                           <span className="library-badge library-badge-alert">
                             built-in updated

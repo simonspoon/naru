@@ -71,4 +71,11 @@ builtin_updated: boolean,
  * client can diff the fork against it; `None` on everything that is not
  * a fork of a built-in that still exists.
  */
-builtin_body: string | null, };
+builtin_body: string | null, 
+/**
+ * A `skill`'s sibling files beside `SKILL.md` (mesa task 1604) — path
+ * relative to the skill dir to text — so the item carries its whole
+ * folder. Empty (and absent on the wire) for every other kind and for a
+ * skill that is just `SKILL.md`.
+ */
+files?: Record<string, string>, };

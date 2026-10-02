@@ -15,7 +15,7 @@
 //! turn a library's contents into a portable [`crate::core::types::LibraryBundle`]
 //! and back, for moving them to another mesa instance.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -582,6 +582,105 @@ fn read_bounded_with_mtime(path: &Path) -> Option<(String, Option<String>)> {
     Some((fs::read_to_string(path).ok()?, mtime))
 }
 
+/// One string standing for a skill's whole content — `SKILL.md` plus its
+/// sibling files — so [`classify`] and the diff compare a folder as they
+/// compare a file (mesa task 1604). With no siblings it is the body itself,
+/// so every non-skill (and a lone `SKILL.md`) classifies exactly as before.
+/// Readable on purpose: it is what a sync diff shows.
+fn fingerprint(body: &str, files: &BTreeMap<String, String>) -> String {
+    let mut out = body.to_string();
+    for (path, content) in files {
+        out.push_str(&format!(
+            "\n=== file: {path} ({} bytes) ===\n{content}",
+            content.len()
+        ));
+    }
+    out
+}
+
+/// The sibling files of the skill `name` under `base`: every regular UTF-8
+/// file under `.claude/skills/<name>/` but `SKILL.md` itself, keyed by its
+/// `/`-separated path relative to that folder. The folder goes through
+/// [`resolve`] like every other directory the scan walks, and inside it a
+/// symlink (file or directory) is skipped, never followed — so nothing
+/// outside the skill can come back. Dotfiles are skipped (`.DS_Store`),
+/// as is anything past [`crate::core::store::LIBRARY_FILES_MAX`] files or
+/// the total byte bound, so what this reads always passes `Store`'s check.
+fn read_skill_files(base: &Path, name: &str) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    let Ok(dir) = resolve(base, Path::new(&format!(".claude/skills/{name}"))) else {
+        return out;
+    };
+    let mut stack = vec![(dir, String::new(), 0usize)];
+    while let Some((dir, prefix, depth)) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Some(file_name) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            if file_name.starts_with('.') {
+                continue;
+            }
+            let rel = format!("{prefix}{file_name}");
+            let Ok(meta) = fs::symlink_metadata(entry.path()) else {
+                continue;
+            };
+            if meta.is_dir() && depth < 8 {
+                stack.push((entry.path(), format!("{rel}/"), depth + 1));
+            } else if meta.is_file() && !rel.eq_ignore_ascii_case("SKILL.md") {
+                let Some((content, _)) = read_bounded_with_mtime(&entry.path()) else {
+                    continue;
+                };
+                out.insert(rel, content);
+            }
+        }
+    }
+    // Bound deterministically (sorted order) after the walk, so the same
+    // folder always yields the same set whatever the directory order was.
+    let mut total = 0usize;
+    let mut kept = BTreeMap::new();
+    for (path, content) in out {
+        total += content.len();
+        if kept.len() >= crate::core::store::LIBRARY_FILES_MAX
+            || total > crate::core::store::LIBRARY_FILES_TOTAL_MAX
+        {
+            break;
+        }
+        kept.insert(path, content);
+    }
+    kept
+}
+
+/// Writes a skill's sibling files beside its `SKILL.md` (`skill_md_rel` is
+/// that file's path under `base`) and removes any other file
+/// [`read_skill_files`] saw there (`on_disk`), so choosing mesa's side leaves
+/// the folder equal to mesa's rather than never reading `in-sync`. Every
+/// target goes through [`resolve`], so a path that climbs out of the skill
+/// folder is refused.
+fn write_skill_files(
+    base: &Path,
+    skill_md_rel: &Path,
+    files: &BTreeMap<String, String>,
+    on_disk: &BTreeMap<String, String>,
+) -> StoreResult<()> {
+    let dir = skill_md_rel.parent().unwrap_or(Path::new(""));
+    for (path, content) in files {
+        let full = resolve(base, &dir.join(path)).map_err(Error::Validation)?;
+        if let Some(parent) = full.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&full, content)?;
+    }
+    for path in on_disk.keys().filter(|p| !files.contains_key(*p)) {
+        if let Ok(full) = resolve(base, &dir.join(path)) {
+            let _ = fs::remove_file(full);
+        }
+    }
+    Ok(())
+}
+
 /// A [`SystemTime`] in the same UTC text every mesa timestamp uses. A time
 /// before the epoch (a clock nobody should have) is `None` rather than a
 /// wrong date.
@@ -624,6 +723,8 @@ pub fn effective_items(store: &Store, project: Option<i64>) -> StoreResult<Vec<L
             updated_at: None,
             builtin_updated: false,
             builtin_body: None,
+            files: BTreeMap::new(),
+            synced_files: BTreeMap::new(),
         });
     }
     items.sort_by(|a, b| {
@@ -789,13 +890,28 @@ pub fn sync_status(store: &Store, project: Option<i64>) -> StoreResult<Vec<Libra
             None => (None, None),
         };
         let baseline = item.synced_body.clone();
-        let status = classify(&item.body, disk_body.as_deref(), baseline.as_deref());
+        let disk_files = match (item.kind, &disk_body) {
+            (LibraryKind::Skill, Some(_)) => read_skill_files(&base, &item.name),
+            _ => BTreeMap::new(),
+        };
+        // A skill is its whole folder: the comparison strings carry the
+        // sibling files too (mesa task 1604), a plain body for everything else.
+        let mesa_whole = fingerprint(&item.body, &item.files);
+        let disk_whole = disk_body.as_deref().map(|b| fingerprint(b, &disk_files));
+        let baseline_whole = baseline
+            .as_deref()
+            .map(|b| fingerprint(b, &item.synced_files));
+        let status = classify(
+            &mesa_whole,
+            disk_whole.as_deref(),
+            baseline_whole.as_deref(),
+        );
         // Two-sided rows only: a one-sided row has nothing to diff against,
         // and an `in-sync` row's two sides are the same text.
-        let diff = disk_body
+        let diff = disk_whole
             .as_deref()
-            .filter(|d| *d != item.body)
-            .map(|d| diff_lines(&item.body, d));
+            .filter(|d| *d != mesa_whole)
+            .map(|d| diff_lines(&mesa_whole, d));
         let mesa_updated_at = item
             .id
             .and_then(|id| version_dates.get(&id).cloned())
@@ -816,6 +932,8 @@ pub fn sync_status(store: &Store, project: Option<i64>) -> StoreResult<Vec<Libra
             mesa_updated_at,
             diff,
             builtin_updated: item.builtin_updated,
+            mesa_files: item.files.clone(),
+            disk_files,
         });
     }
 
@@ -845,6 +963,11 @@ pub fn sync_status(store: &Store, project: Option<i64>) -> StoreResult<Vec<Libra
                 LibraryScope::User => None,
                 LibraryScope::Project => project,
             };
+            let disk_files = if kind == LibraryKind::Skill {
+                read_skill_files(&base, &name)
+            } else {
+                BTreeMap::new()
+            };
             rows.push(LibrarySyncRow {
                 item_id: None,
                 builtin_id: None,
@@ -861,6 +984,8 @@ pub fn sync_status(store: &Store, project: Option<i64>) -> StoreResult<Vec<Libra
                 mesa_updated_at: None,
                 diff: None,
                 builtin_updated: false,
+                mesa_files: BTreeMap::new(),
+                disk_files,
             });
         }
     }
@@ -1093,6 +1218,14 @@ fn apply_naru(store: &mut Store, project: Option<i64>, row: &LibrarySyncRow) -> 
         fs::create_dir_all(parent)?;
     }
     fs::write(&full, body)?;
+    if row.kind == LibraryKind::Skill {
+        write_skill_files(
+            &base,
+            Path::new(&row.path),
+            &row.mesa_files,
+            &row.disk_files,
+        )?;
+    }
     // A hook is registered as its bare path, so the file Claude Code runs
     // must be executable — `fs::write` leaves a new file at the umask's 0644.
     if row.kind == LibraryKind::Hook {
@@ -1100,6 +1233,7 @@ fn apply_naru(store: &mut Store, project: Option<i64>, row: &LibrarySyncRow) -> 
     }
     if let Some(id) = row.item_id {
         store.set_library_synced(id, body)?;
+        store.set_library_synced_files(id, &row.mesa_files)?;
     }
     Ok(())
 }
@@ -1139,7 +1273,9 @@ fn apply_disk(store: &mut Store, row: &LibrarySyncRow) -> StoreResult<()> {
                 row.kind == LibraryKind::Prompt,
             )?;
             let id = created.id.expect("a created item always has an id");
+            store.set_library_files(id, &row.disk_files)?;
             store.set_library_synced(id, body)?;
+            store.set_library_synced_files(id, &row.disk_files)?;
             Ok(())
         }
         _ => {
@@ -1165,6 +1301,8 @@ fn apply_disk(store: &mut Store, row: &LibrarySyncRow) -> StoreResult<()> {
                 }
             };
             store.pull_library_body(id, body)?;
+            store.set_library_files(id, &row.disk_files)?;
+            store.set_library_synced_files(id, &row.disk_files)?;
             Ok(())
         }
     }
@@ -1205,6 +1343,7 @@ pub fn export(store: &Store, project: Option<i64>) -> StoreResult<LibraryBundle>
             body: item.body,
             builtin_id: item.builtin_id,
             export_command: item.export_command,
+            files: item.files,
         })
         .collect();
     Ok(LibraryBundle {
@@ -1360,7 +1499,7 @@ pub fn import_preview(store: &Store, bundle: &LibraryBundle) -> StoreResult<Vec<
                 .id
                 .and_then(|id| version_dates.get(&id).cloned())
                 .or_else(|| existing.updated_at.clone());
-            if existing.body == item.body {
+            if existing.body == item.body && existing.files == item.files {
                 return row(
                     LibraryImportStatus::Identical,
                     existing.id,
@@ -1370,7 +1509,10 @@ pub fn import_preview(store: &Store, bundle: &LibraryBundle) -> StoreResult<Vec<
                     None,
                 );
             }
-            let diff = diff_lines(&existing.body, &item.body);
+            let diff = diff_lines(
+                &fingerprint(&existing.body, &existing.files),
+                &fingerprint(&item.body, &item.files),
+            );
             row(
                 LibraryImportStatus::Conflict,
                 existing.id,
@@ -1500,6 +1642,10 @@ fn import_one(
             .and_then(|created| match (created.id, &item.builtin_id) {
                 (Some(id), Some(_)) => store.forget_library_builtin_base(id),
                 _ => Ok(created),
+            })
+            .and_then(|created| match created.id {
+                Some(id) if !item.files.is_empty() => store.set_library_files(id, &item.files),
+                _ => Ok(created),
             }) {
             Ok(created) => LibraryImportResult {
                 name: item.name.clone(),
@@ -1519,13 +1665,17 @@ fn import_one(
             item_id: existing.id,
             error: None,
         },
-        Some(existing) => match store.update_library_item(
-            existing.id.expect("a matched row always has an id"),
-            LibraryPatch {
-                body: Some(item.body.clone()),
-                ..Default::default()
-            },
-        ) {
+        Some(existing) => match store
+            .update_library_item(
+                existing.id.expect("a matched row always has an id"),
+                LibraryPatch {
+                    body: Some(item.body.clone()),
+                    ..Default::default()
+                },
+            )
+            .and_then(|updated| {
+                store.set_library_files(updated.id.expect("an updated row has an id"), &item.files)
+            }) {
             Ok(updated) => LibraryImportResult {
                 name: item.name.clone(),
                 kind: item.kind,
@@ -4284,6 +4434,182 @@ mod tests {
         assert_eq!(refreshed.synced_body.as_deref(), Some("reviewer body"));
     }
 
+    const SKILL_SIBLINGS: [(&str, &str); 5] = [
+        ("waiting.md", "# waiting\nwait with a clock\n"),
+        ("verifying.md", "# verifying\nno trailing newline"),
+        ("briefs.md", "# briefs\n\nunicode: caf\u{e9} \u{2014} ok\n"),
+        ("resources.md", ""),
+        ("deep/intervening.md", "# intervening\r\ncrlf kept\r\n"),
+    ];
+
+    fn write_skill_dir(base: &Path) {
+        let dir = base.join(".claude/skills/supervising");
+        fs::create_dir_all(dir.join("deep")).unwrap();
+        fs::write(dir.join("SKILL.md"), "---\nname: supervising\n---\nindex\n").unwrap();
+        for (path, content) in SKILL_SIBLINGS {
+            fs::write(dir.join(path), content).unwrap();
+        }
+        // Never read: a dotfile, and a symlink out of the folder.
+        fs::write(dir.join(".DS_Store"), "junk").unwrap();
+        let outside = base.join("outside.txt");
+        fs::write(&outside, "secret").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, dir.join("link.md")).unwrap();
+    }
+
+    fn assert_same_skill_dir(a: &Path, b: &Path) {
+        let (a, b) = (
+            a.join(".claude/skills/supervising"),
+            b.join(".claude/skills/supervising"),
+        );
+        for rel in std::iter::once("SKILL.md").chain(SKILL_SIBLINGS.iter().map(|(p, _)| *p)) {
+            assert_eq!(
+                fs::read(a.join(rel)).unwrap(),
+                fs::read(b.join(rel)).unwrap(),
+                "{rel} must be byte-identical"
+            );
+        }
+        assert!(!b.join("link.md").exists() && !b.join(".DS_Store").exists());
+    }
+
+    /// The person's norm (mesa task 1604): sync disk -> library on one
+    /// machine, export, import on another, sync library -> disk, and all six
+    /// files arrive byte-identical.
+    #[test]
+    fn a_skill_folder_round_trips_disk_library_bundle_library_disk() {
+        let (mut a, dir_a) = temp_store();
+        let disk_a = dir_a.path().join("disk");
+        fs::create_dir_all(&disk_a).unwrap();
+        let pid_a = project_at(&mut a, &disk_a);
+        write_skill_dir(&disk_a);
+
+        let path = ".claude/skills/supervising/SKILL.md".to_string();
+        let rows = sync_status(&a, Some(pid_a)).unwrap();
+        let row = rows.iter().find(|r| r.path == path).unwrap();
+        assert_eq!(row.status, LibrarySyncStatus::DiskNew);
+        assert_eq!(row.disk_files.len(), 5, "{:?}", row.disk_files);
+        let results = sync_apply(&mut a, Some(pid_a), &[(path.clone(), "disk".into())]).unwrap();
+        assert!(results[0].applied, "{:?}", results[0].error);
+        let item = a
+            .find_library_item(
+                LibraryKind::Skill,
+                LibraryScope::Project,
+                Some(pid_a),
+                "supervising",
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(item.files.len(), 5);
+        let rows = sync_status(&a, Some(pid_a)).unwrap();
+        assert_eq!(
+            rows.iter().find(|r| r.path == path).unwrap().status,
+            LibrarySyncStatus::InSync
+        );
+
+        // A sibling edit on disk is never in-sync, and its diff shows it.
+        let waiting = disk_a.join(".claude/skills/supervising/waiting.md");
+        fs::write(&waiting, "# waiting\nchanged\n").unwrap();
+        let rows = sync_status(&a, Some(pid_a)).unwrap();
+        let row = rows.iter().find(|r| r.path == path).unwrap();
+        assert_eq!(row.status, LibrarySyncStatus::DiskChanged);
+        assert!(row.diff.as_ref().is_some_and(|d| !d.is_empty()));
+        fs::write(&waiting, SKILL_SIBLINGS[0].1).unwrap();
+        // ...and so is one on the library side.
+        let mut changed = item.files.clone();
+        changed.insert("waiting.md".into(), "library edit".into());
+        a.set_library_files(item.id.unwrap(), &changed).unwrap();
+        let rows = sync_status(&a, Some(pid_a)).unwrap();
+        assert_eq!(
+            rows.iter().find(|r| r.path == path).unwrap().status,
+            LibrarySyncStatus::MesaChanged
+        );
+        a.set_library_files(item.id.unwrap(), &item.files).unwrap();
+
+        // Export, carry as JSON, import into a fresh store, sync to a fresh disk.
+        let bundle = export(&a, Some(pid_a)).unwrap();
+        let bundle: LibraryBundle =
+            serde_json::from_str(&serde_json::to_string(&bundle).unwrap()).unwrap();
+        let (mut b, dir_b) = temp_store();
+        let disk_b = dir_b.path().join("disk");
+        fs::create_dir_all(&disk_b).unwrap();
+        let pid_b = project_at(&mut b, &disk_b);
+        let preview = import_preview(&b, &bundle).unwrap();
+        assert_eq!(preview[0].status, LibraryImportStatus::New);
+        let imported = import(&mut b, &bundle, "skip", &[]).unwrap();
+        assert_eq!(imported[0].status, "created", "{:?}", imported[0].error);
+        let preview = import_preview(&b, &bundle).unwrap();
+        assert_eq!(preview[0].status, LibraryImportStatus::Identical);
+        let results = sync_apply(&mut b, Some(pid_b), &[(path.clone(), "mesa".into())]).unwrap();
+        assert!(results[0].applied, "{:?}", results[0].error);
+        assert_same_skill_dir(&disk_a, &disk_b);
+        let rows = sync_status(&b, Some(pid_b)).unwrap();
+        assert_eq!(
+            rows.iter().find(|r| r.path == path).unwrap().status,
+            LibrarySyncStatus::InSync
+        );
+
+        // A sibling-only difference is a conflict, and replace carries it.
+        let mut altered = bundle.clone();
+        altered.items[0]
+            .files
+            .insert("briefs.md".into(), "other".into());
+        let preview = import_preview(&b, &altered).unwrap();
+        assert_eq!(preview[0].status, LibraryImportStatus::Conflict);
+        assert!(preview[0].diff.as_ref().is_some_and(|d| !d.is_empty()));
+        import(&mut b, &altered, "replace", &[]).unwrap();
+        let got = b
+            .find_library_item(
+                LibraryKind::Skill,
+                LibraryScope::Project,
+                Some(pid_b),
+                "supervising",
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.files["briefs.md"], "other");
+    }
+
+    /// Choosing the library side removes a sibling the library does not
+    /// have, and a sibling path that climbs out of the folder is refused.
+    #[test]
+    fn a_skill_sibling_cannot_escape_its_folder_and_the_library_side_mirrors_it() {
+        let (mut store, dir) = temp_store();
+        let disk = dir.path().join("disk");
+        fs::create_dir_all(&disk).unwrap();
+        let pid = project_at(&mut store, &disk);
+        let item = store
+            .create_library_item(
+                LibraryKind::Skill,
+                LibraryScope::Project,
+                Some(pid),
+                "s",
+                "body",
+                None,
+                false,
+            )
+            .unwrap();
+        let id = item.id.unwrap();
+        let bad: BTreeMap<String, String> = [("../escape.md".to_string(), "x".to_string())].into();
+        assert!(store.set_library_files(id, &bad).is_err());
+        let bad: BTreeMap<String, String> = [("SKILL.md".to_string(), "x".to_string())].into();
+        assert!(store.set_library_files(id, &bad).is_err());
+
+        let dir_s = disk.join(".claude/skills/s");
+        fs::create_dir_all(&dir_s).unwrap();
+        fs::write(dir_s.join("SKILL.md"), "old").unwrap();
+        fs::write(dir_s.join("stale.md"), "stale").unwrap();
+        let path = ".claude/skills/s/SKILL.md".to_string();
+        let results = sync_apply(&mut store, Some(pid), &[(path.clone(), "mesa".into())]).unwrap();
+        assert!(results[0].applied, "{:?}", results[0].error);
+        assert!(!dir_s.join("stale.md").exists());
+        assert_eq!(fs::read_to_string(dir_s.join("SKILL.md")).unwrap(), "body");
+        let rows = sync_status(&store, Some(pid)).unwrap();
+        assert_eq!(
+            rows.iter().find(|r| r.path == path).unwrap().status,
+            LibrarySyncStatus::InSync
+        );
+    }
+
     /// `naru` is `mesa`'s new spelling (mesa task 1302): it writes the same
     /// file, and the result echoes the choice exactly as it was given.
     #[test]
@@ -4958,6 +5284,7 @@ mod tests {
             body: "original body".to_string(),
             builtin_id: None,
             export_command: false,
+            files: Default::default(),
         }]);
 
         let results = import(&mut store, &bundle, "skip", &[]).unwrap();
@@ -4997,6 +5324,7 @@ mod tests {
             body: body.to_string(),
             builtin_id: Some("live-summary-prompt".to_string()),
             export_command: false,
+            files: Default::default(),
         };
 
         let results = import(&mut store, &bundle_of(vec![fork(summary)]), "skip", &[]).unwrap();
@@ -5044,6 +5372,7 @@ mod tests {
                 body: "reviewer body".to_string(),
                 builtin_id: None,
                 export_command: false,
+                files: Default::default(),
             },
             LibraryBundleItem {
                 name: "my-hook".to_string(),
@@ -5053,6 +5382,7 @@ mod tests {
                 body: "hook body".to_string(),
                 builtin_id: None,
                 export_command: false,
+                files: Default::default(),
             },
         ]);
 
@@ -5074,6 +5404,7 @@ mod tests {
             body: "hook body".to_string(),
             builtin_id: None,
             export_command: false,
+            files: Default::default(),
         }]);
         let mut unknown_version = bundle;
         unknown_version.version = 99;
@@ -5101,6 +5432,7 @@ mod tests {
             body: "hook body".to_string(),
             builtin_id: None,
             export_command: false,
+            files: Default::default(),
         }]);
 
         let err = import(&mut store, &bundle, "merge", &[]).unwrap_err();
@@ -5120,6 +5452,7 @@ mod tests {
                 body: "evil body".to_string(),
                 builtin_id: None,
                 export_command: false,
+                files: Default::default(),
             },
             LibraryBundleItem {
                 name: "my-hook".to_string(),
@@ -5129,6 +5462,7 @@ mod tests {
                 body: "hook body".to_string(),
                 builtin_id: None,
                 export_command: false,
+                files: Default::default(),
             },
         ]);
 
@@ -5150,6 +5484,7 @@ mod tests {
             body: body.to_string(),
             builtin_id: None,
             export_command: false,
+            files: Default::default(),
         }
     }
 
@@ -5228,6 +5563,7 @@ mod tests {
             body: "body".to_string(),
             builtin_id: None,
             export_command: false,
+            files: Default::default(),
         }]);
         let rows = import_preview(&store, &bundle).unwrap();
         assert_eq!(rows.len(), 1);

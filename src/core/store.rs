@@ -1267,6 +1267,12 @@ const MIGRATIONS: &[&str] = &[
         body       TEXT NOT NULL,
         updated_at TEXT NOT NULL
     );",
+    // Task 1604: a skill carries its folder. `files` is the skill's sibling
+    // files beside SKILL.md as one JSON object (path relative to the skill
+    // dir -> text), `synced_files` the same map at the last sync agreement
+    // (the baseline's second half). NULL = none. Only `Store` writes either.
+    "ALTER TABLE library_items ADD COLUMN files TEXT;
+     ALTER TABLE library_items ADD COLUMN synced_files TEXT;",
 ];
 
 /// Selects full task rows including the derived `blocked` flag.
@@ -2267,7 +2273,7 @@ fn validate_artifact_body(body: &str) -> Result<String> {
 // ---- library (agents, skills, hooks, prompts, CLAUDE.md) ----
 
 const LIBRARY_COLUMNS: &str = "id, name, kind, scope, project_id, body, builtin_id, synced_body, synced_at, \
-     created_at, updated_at, export_command, builtin_base";
+     created_at, updated_at, export_command, builtin_base, files, synced_files";
 
 /// `builtin` is always `false` here — a row read out of the db is by
 /// definition a fork, never an unshadowed built-in (`core::library::BUILTINS`
@@ -2319,7 +2325,82 @@ fn row_to_library_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<LibraryItem>
         updated_at: row.get(10)?,
         builtin_updated,
         builtin_body,
+        files: parse_library_files(row.get(13)?),
+        synced_files: parse_library_files(row.get(14)?),
     })
+}
+
+/// A stored `files` / `synced_files` column read back: NULL or anything that
+/// is not a JSON object of strings is no files (only `Store` writes it).
+fn parse_library_files(raw: Option<String>) -> std::collections::BTreeMap<String, String> {
+    raw.and_then(|r| serde_json::from_str(&r).ok())
+        .unwrap_or_default()
+}
+
+/// Most sibling files a skill item may carry (mesa task 1604).
+pub const LIBRARY_FILES_MAX: usize = 100;
+/// Most bytes all of a skill's sibling files may total.
+pub const LIBRARY_FILES_TOTAL_MAX: usize = 4 * 1024 * 1024;
+
+/// A sibling path is relative to the skill dir and is half a filename on
+/// disk: no empty, `.` or `..` component, no leading `/`, no backslash or
+/// NUL, and never `SKILL.md` itself (that is the `body`).
+pub fn library_file_path_is_valid(path: &str) -> bool {
+    !path.is_empty()
+        && path.len() <= 200
+        && !path.starts_with('/')
+        && !path.contains(['\\', '\0'])
+        && !path.eq_ignore_ascii_case("SKILL.md")
+        && path
+            .split('/')
+            .all(|c| !c.is_empty() && c != "." && c != "..")
+}
+
+fn validate_library_files(
+    kind: LibraryKind,
+    files: &std::collections::BTreeMap<String, String>,
+) -> Result<()> {
+    if files.is_empty() {
+        return Ok(());
+    }
+    if kind != LibraryKind::Skill {
+        return Err(Error::Validation(
+            "only a skill item may carry sibling files".into(),
+        ));
+    }
+    if files.len() > LIBRARY_FILES_MAX {
+        return Err(Error::Validation(format!(
+            "a skill may carry at most {LIBRARY_FILES_MAX} sibling files"
+        )));
+    }
+    let mut total = 0usize;
+    for (path, content) in files {
+        if !library_file_path_is_valid(path) {
+            return Err(Error::Validation(format!(
+                "{path:?} is not a valid sibling file path"
+            )));
+        }
+        if content.len() > LIBRARY_BODY_MAX {
+            return Err(Error::Validation(format!(
+                "sibling file {path:?} must be at most {LIBRARY_BODY_MAX} bytes"
+            )));
+        }
+        total += content.len();
+    }
+    if total > LIBRARY_FILES_TOTAL_MAX {
+        return Err(Error::Validation(format!(
+            "a skill's sibling files must total at most {LIBRARY_FILES_TOTAL_MAX} bytes"
+        )));
+    }
+    Ok(())
+}
+
+fn library_files_json(files: &std::collections::BTreeMap<String, String>) -> Option<String> {
+    if files.is_empty() {
+        None
+    } else {
+        serde_json::to_string(files).ok()
+    }
 }
 
 /// Longest allowed [`LibraryItem::name`]. Generous relative to
@@ -8908,6 +8989,42 @@ impl Store {
         self.get_library_item(id)
     }
 
+    /// Sets a skill's sibling files (mesa task 1604) — the mesa side only;
+    /// the baseline is [`Store::set_library_synced_files`]. Moves
+    /// `updated_at` only when the map actually changes, since this call
+    /// changes what mesa holds.
+    pub fn set_library_files(
+        &mut self,
+        id: i64,
+        files: &std::collections::BTreeMap<String, String>,
+    ) -> Result<LibraryItem> {
+        let current = self.get_library_item(id)?;
+        validate_library_files(current.kind, files)?;
+        if current.files != *files {
+            self.conn.execute(
+                "UPDATE library_items SET files = ?1, updated_at = datetime('now') \
+                 WHERE id = ?2",
+                (library_files_json(files), id),
+            )?;
+        }
+        self.get_library_item(id)
+    }
+
+    /// Stamps the sibling files' half of the sync baseline; like
+    /// `set_library_synced`, no `updated_at` move.
+    pub fn set_library_synced_files(
+        &mut self,
+        id: i64,
+        files: &std::collections::BTreeMap<String, String>,
+    ) -> Result<LibraryItem> {
+        self.get_library_item(id)?;
+        self.conn.execute(
+            "UPDATE library_items SET synced_files = ?1 WHERE id = ?2",
+            (library_files_json(files), id),
+        )?;
+        self.get_library_item(id)
+    }
+
     /// Forgets the sync baseline — the mirror of `set_library_synced`, and
     /// like it does not move `updated_at`. Called when a prompt stops
     /// exporting (mesa task 1139): the baseline is a fact about a file the
@@ -8916,7 +9033,8 @@ impl Store {
     pub fn clear_library_synced(&mut self, id: i64) -> Result<LibraryItem> {
         self.get_library_item(id)?;
         self.conn.execute(
-            "UPDATE library_items SET synced_body = NULL, synced_at = NULL WHERE id = ?1",
+            "UPDATE library_items SET synced_body = NULL, synced_at = NULL, \
+             synced_files = NULL WHERE id = ?1",
             [id],
         )?;
         self.get_library_item(id)
@@ -15552,15 +15670,15 @@ mod tests {
         );
         assert_eq!(
             MIGRATIONS.len(),
-            82,
-            "a fresh db should report user_version 82"
+            83,
+            "a fresh db should report user_version 83"
         );
         let (store, _dir) = temp_store();
         let version: i64 = store
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 82);
+        assert_eq!(version, 83);
     }
 
     /// Pins the project-notebook columns (mesa task 1333) at index 72

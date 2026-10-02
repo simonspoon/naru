@@ -4072,8 +4072,9 @@ const QUIET_DROP_ARTIFACT: &[&str] = &["body"];
 /// `name`/`kind`/`scope`/`path` all stay, which is what makes a compact row
 /// identifiable at all. `builtin_body` (mesa task 1349) is a third copy of a
 /// body, the current built-in's, and goes too; the bounded `builtin_updated`
-/// flag beside it stays.
-const QUIET_DROP_LIBRARY: &[&str] = &["body", "synced_body", "builtin_body"];
+/// flag beside it stays. A skill's sibling `files` (mesa task 1604) are
+/// unbounded bodies too, and go.
+const QUIET_DROP_LIBRARY: &[&str] = &["body", "synced_body", "builtin_body", "files"];
 /// A `FrameEdge` has no unbounded field: quiet output equals full output.
 /// The flag is still accepted on edge subcommands, for uniformity.
 const QUIET_DROP_FRAME_EDGE: &[&str] = &[];
@@ -7959,6 +7960,8 @@ mod tests {
             updated_at: Some("2026-01-02 00:00:00".into()),
             builtin_updated: true,
             builtin_body: Some("# naru-live\n".into()),
+            files: [("notes.md".to_string(), "n\n".to_string())].into(),
+            synced_files: Default::default(),
         }
     }
 
@@ -8361,6 +8364,8 @@ mod tests {
                 // the current built-in body beside it is dropped.
                 "builtin_updated",
                 "builtin_body",
+                // Mesa task 1604: a skill's sibling files, dropped like a body.
+                "files",
             ]),
             "LibraryItem gained/lost a field: decide whether it belongs in the \
              --quiet shape before updating this list",

@@ -29,6 +29,7 @@ Table `library_items` (migration index 47, resulting `user_version` 48):
 | `synced_body` | TEXT NULL | the last body Naru and the disk agreed on — the sync baseline |
 | `synced_at` | TEXT NULL | when that agreement was recorded |
 | `export_command` | INTEGER NOT NULL DEFAULT 0 | a prompt's "also a slash command" flag (migration index 54, mesa task 1139); `validation` when set on any other kind |
+| `files` / `synced_files` | TEXT NULL | a `skill`'s sibling files and their sync baseline, one JSON object each (path relative to the skill dir → text; migration index 82, mesa task 1604) — see [Skills carry their folder](#skills-carry-their-folder) |
 | `builtin_base` | TEXT NULL | a fork's last-agreed built-in body (migration index 75, mesa task 1349) — store-only, never on the wire; see [When a built-in changes under a fork](#when-a-built-in-changes-under-a-fork) |
 | `created_at` / `updated_at` | TEXT NOT NULL | |
 
@@ -81,6 +82,54 @@ view shows both what is bound to it and what is personal, since either could
 apply there); with no project, only `scope: user` rows — the user-level view
 that is not standing in any particular project. This is the shape both the
 CLI's `library list [PROJECT]` and `GET /api/library?project=<id>` expose.
+
+## Skills carry their folder
+
+A skill is a directory, not a file: `.claude/skills/<name>/SKILL.md` plus
+whatever it points at (`waiting.md`, `deep/intervening.md`, …). Since mesa
+task 1604 a `skill` item carries those **sibling files** too, so a machine
+synced from the library gets the index *and* the files it names. `SKILL.md`
+stays the item's `body` (and its history); the siblings are `files`, a map of
+`/`-separated path relative to the skill dir → text, stored as one JSON
+column (`library_items.files`, with `synced_files` as the baseline's second
+half — migration index 82; only `Store::set_library_files` /
+`set_library_synced_files` write them). Only a `skill` may carry any;
+`validation` for another kind, for more than 100 files, a file over 1 MiB, a
+total over 4 MiB, or a path that is empty, absolute, holds a `.`/`..`
+component, a backslash or NUL, or names `SKILL.md`.
+
+- **Disk → library** (`sync apply … disk`, adopting a `disk-new` skill or
+  pulling a changed one) reads every regular UTF-8 file under the skill dir,
+  recursively (depth 8). The dir goes through `resolve` and, inside it, a
+  symlink — file or directory — is skipped, never followed; dotfiles
+  (`.DS_Store`) and non-UTF-8 or oversized files are skipped too, and
+  anything past the count/byte bounds is dropped in path order, so what is
+  read always passes the `Store` check.
+- **Library → disk** (`sync apply … mesa`) writes the siblings beside
+  `SKILL.md`, creating directories, each target through `resolve`; and it
+  **removes** a sibling the scan saw on disk that the library does not hold,
+  because choosing a side makes the folder equal to it (otherwise the row
+  would never read `in-sync` again).
+- **Classification** compares the whole folder: `classify` is given a
+  fingerprint of `SKILL.md` + siblings for the library side, the disk side
+  and the baseline (`synced_body` + `synced_files`). With no siblings the
+  fingerprint is the body itself, so every other kind — and a lone
+  `SKILL.md` — classifies exactly as before. A sibling edit on either side
+  is `disk-changed`/`mesa-changed`/`both-changed`, never `in-sync`, and the
+  row's `diff` shows it as `=== file: <path> (<n> bytes) ===` sections. The
+  row also carries `mesa_files`/`disk_files`.
+- **Bundle**: `LibraryBundleItem.files` (absent when empty, so a bundle with
+  no skill siblings is unchanged, and an old bundle without the field reads
+  as none). Import creates the skill with them or, on `replace`, sets them
+  (a bundle with none on a skill that has some replaces them with none);
+  `import --preview` counts a sibling difference as `conflict` (and its
+  `diff` shows it), never `identical`.
+- **Surfaces**: `files` is on the item JSON only when non-empty and is
+  dropped by `--quiet`; the web card shows `+N files` (names on hover) and
+  has no sibling editor.
+
+There is no built-in skill; the first one you sync from disk is the first
+with siblings.
 
 ## Built-ins are code, not rows
 

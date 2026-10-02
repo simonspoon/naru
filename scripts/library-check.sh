@@ -103,6 +103,11 @@
 #      404/422/415 shapes; and a fork exported and imported into a fresh db
 #      arriving with no base, flagged. Both gate sweeps in section 8 now
 #      cover all eighteen library routes, the import preview included.
+#  15. a skill carries its folder (mesa task 1604): a skill dir with five
+#      sibling files (one in a subdirectory, plus a dotfile and a symlink that
+#      are never read) adopted disk -> library, a sibling edit reading
+#      `disk-changed`, exported, imported into a second db + HOME, written
+#      library -> disk, and `diff -r` proving the two dirs byte-identical.
 set -euo pipefail
 # Drop inherited NARU_* vars: Naru reads them before MESA_*, so one would escape this script's isolation.
 unset $(env | sed -n 's/^\(NARU_[A-Za-z0-9_]*\)=.*/\1/p')
@@ -2085,6 +2090,70 @@ run 0 env MESA_DB="$TMP/import14.db" "$MESA" library show inbox-triage
 ok "an imported fork arrives with no base (a bundle carries none) and is flagged because its body differs"
 
 echo "== library-check: section 14 (a built-in changing under a fork) passed ($CHECKS checks so far) =="
+
+# ---- a skill carries its folder (mesa task 1604) ----
+# disk -> library on machine A, export, import on machine B (a second
+# throwaway db AND HOME), library -> disk: every file of the skill dir arrives
+# byte-identical, siblings in a subdirectory included, a symlink and a dotfile
+# never read.
+SK_A="$HOME/.claude/skills/supervising-demo"
+mkdir -p "$SK_A/deep"
+printf -- '---\nname: supervising-demo\n---\nindex\n' >"$SK_A/SKILL.md"
+printf '# waiting\nwait with a clock\n' >"$SK_A/waiting.md"
+printf '# verifying\nno trailing newline' >"$SK_A/verifying.md"
+printf '# briefs\n\nunicode: caf\xc3\xa9 \xe2\x80\x94 ok\n' >"$SK_A/briefs.md"
+: >"$SK_A/resources.md"
+printf '# intervening\r\ncrlf kept\r\n' >"$SK_A/deep/intervening.md"
+printf 'junk' >"$SK_A/.DS_Store"
+ln -s "$TMP/mesa.db" "$SK_A/link.md"
+SK_PATH=".claude/skills/supervising-demo/SKILL.md"
+jqp() { jq -r --arg p "$SK_PATH" "$1" <<<"$STDOUT"; }
+
+run 0 "$MESA" library sync status
+[ "$(jqp '.[] | select(.path==$p) | .status' | tr -d '\n')" = "disk-new" ] ||
+  fail "skill folder: must be disk-new, got $STDOUT"
+[ "$(jqp '.[] | select(.path==$p) | .disk_files | length')" = "5" ] ||
+  fail "skill folder: sync status must see exactly 5 sibling files, got $STDOUT"
+run 0 "$MESA" library sync apply --resolve "$SK_PATH=disk"
+[ "$(jq -r '.[0].applied' <<<"$STDOUT")" = "true" ] || fail "skill folder: adopt must apply, got $STDOUT"
+run 0 "$MESA" library show supervising-demo
+[ "$(jqs '.files | length')" = "5" ] || fail "skill folder: the row must carry 5 files, got $STDOUT"
+run 0 "$MESA" library show supervising-demo --quiet
+[ "$(jqs 'has("files")')" = "false" ] || fail "skill folder: --quiet must drop files"
+run 0 "$MESA" library sync status
+[ "$(jqp '.[] | select(.path==$p) | .status')" = "in-sync" ] ||
+  fail "skill folder: must be in-sync after adopting, got $STDOUT"
+
+# A sibling edit on disk is never in-sync.
+printf 'edited\n' >"$SK_A/waiting.md"
+run 0 "$MESA" library sync status
+[ "$(jqp '.[] | select(.path==$p) | .status')" = "disk-changed" ] ||
+  fail "skill folder: a sibling edit must read disk-changed, got $STDOUT"
+printf '# waiting\nwait with a clock\n' >"$SK_A/waiting.md"
+run 0 "$MESA" library sync status
+[ "$(jqp '.[] | select(.path==$p) | .status')" = "in-sync" ] ||
+  fail "skill folder: restoring the sibling must read in-sync again, got $STDOUT"
+
+run 0 "$MESA" library export --output "$TMP/skill-bundle.json"
+[ "$(jq -r '.items[] | select(.name=="supervising-demo") | .files | keys | length' "$TMP/skill-bundle.json")" = "5" ] ||
+  fail "skill folder: the bundle must carry the 5 siblings"
+
+HOME_B="$TMP/home-b"
+mkdir -p "$HOME_B"
+run 0 env HOME="$HOME_B" MESA_DB="$TMP/skill-b.db" "$MESA" library import "$TMP/skill-bundle.json"
+[ "$(jqs '.[] | select(.name=="supervising-demo") | .status')" = "created" ] ||
+  fail "skill folder: import must create the skill, got $STDOUT"
+run 0 env HOME="$HOME_B" MESA_DB="$TMP/skill-b.db" "$MESA" library sync apply --resolve "$SK_PATH=mesa"
+[ "$(jq -r '.[0].applied' <<<"$STDOUT")" = "true" ] || fail "skill folder: writing to machine B must apply, got $STDOUT"
+rm -f "$SK_A/.DS_Store" "$SK_A/link.md"
+diff -r "$SK_A" "$HOME_B/.claude/skills/supervising-demo" ||
+  fail "skill folder: machine B's skill dir must be byte-identical to machine A's"
+run 0 env HOME="$HOME_B" MESA_DB="$TMP/skill-b.db" "$MESA" library sync status
+[ "$(jqp '.[] | select(.path==$p) | .status')" = "in-sync" ] ||
+  fail "skill folder: machine B must read in-sync, got $STDOUT"
+ok "a skill carries its folder: disk -> library -> bundle -> library -> disk gives a byte-identical dir (diff -r), a sibling edit reads disk-changed, a dotfile and a symlink are never read"
+
+echo "== library-check: section 15 (a skill carries its folder) passed ($CHECKS checks so far) =="
 
 echo
 echo "library-check: $CHECKS checks passed"

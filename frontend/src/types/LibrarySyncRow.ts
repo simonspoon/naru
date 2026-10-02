@@ -40,4 +40,10 @@ diff: Array<LibraryDiffLine> | null,
  * from `status`, which compares Naru with the disk and so can read
  * `in-sync` while the built-in has moved on.
  */
-builtin_updated: boolean, };
+builtin_updated: boolean, 
+/**
+ * A skill's sibling files on each side (mesa task 1604), empty and
+ * absent for everything else. They are part of what `status` and `diff`
+ * compare: a sibling edit on either side is never `in-sync`.
+ */
+mesa_files?: Record<string, string>, disk_files?: Record<string, string>, };

@@ -27,4 +27,9 @@ builtin_id: string | null,
  * [`LibraryItem::export_command`]; absent in a bundle older than mesa
  * task 1139, which reads as `false`.
  */
-export_command: boolean, };
+export_command: boolean, 
+/**
+ * [`LibraryItem::files`]; absent in a bundle older than mesa task 1604,
+ * which reads as none.
+ */
+files?: Record<string, string>, };
