@@ -11800,3 +11800,11 @@ body.dock-resizing .dock-body {
 .live-orb-inline .live-orb-body {
   cursor: default;
 }
+
+/* Workflow builder icons (mesa task 1610): inline SVGs in currentColor. */
+.wf-icon {
+  width: 1em;
+  height: 1em;
+  display: inline-block;
+  vertical-align: -0.12em;
+}

@@ -13,6 +13,7 @@ import { useLiveContext } from '../liveContext'
 import { formatTimestamp, timeAgo } from '../time'
 import { useFetch } from '../useFetch'
 import { WorkflowCanvas } from '../WorkflowCanvas'
+import { PlayIcon } from '../components/WorkflowIcon'
 import { formatDuration, runSummary, stepClass } from '../workflowRun'
 import type { WorkflowRun } from '../types/WorkflowRun'
 
@@ -127,7 +128,7 @@ function LogPanel({ version }: { version: number }) {
 
 /**
  * One workflow rendered in place inside ProjectTasksPage's frame: its name
- * header with the ▶ Run button, the builder canvas, and the run panel (the
+ * header with the Run button, the builder canvas, and the run panel (the
  * shown run's steps, recent runs, and the logs). The canvas owns node/edge
  * editing; this owns the workflow-level fields and running it.
  */
@@ -206,7 +207,11 @@ export function WorkflowBuilderView({
             onChange={(e) => setInput(e.target.value)}
           />
           <button type="button" className="workflow-run-btn" disabled={running} onClick={run}>
-            {running ? 'running…' : '▶ Run'}
+            {running ? 'running…' : (
+              <>
+                <PlayIcon /> Run
+              </>
+            )}
           </button>
           <ConfirmDelete
             label="delete workflow"

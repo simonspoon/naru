@@ -55,6 +55,7 @@ import type { WorkflowNodeKind } from './types/WorkflowNodeKind'
 import type { WorkflowRun } from './types/WorkflowRun'
 import type { WorkflowStepStatus } from './types/WorkflowStepStatus'
 import type { WorkflowView } from './types/WorkflowView'
+import { KindIcon, SpeakIcon } from './components/WorkflowIcon'
 
 type CardData = { node: WorkflowNode; status: WorkflowStepStatus | undefined }
 type CardNode = Node<CardData, 'card'>
@@ -65,7 +66,6 @@ type CardNode = Node<CardData, 'card'>
  *  decided by where the line is dragged from. */
 function NodeCard({ data, selected }: NodeProps<CardNode>) {
   const { node, status } = data
-  const info = kindInfo(node.kind)
   return (
     <div
       className={`wf-node wf-kind-${node.kind}${selected ? ' selected' : ''} ${stepClass(status)}`}
@@ -74,7 +74,7 @@ function NodeCard({ data, selected }: NodeProps<CardNode>) {
       {hasInput(node.kind) && <Handle type="target" position={Position.Left} />}
       <div className="wf-node-head">
         <span className="wf-node-icon" aria-hidden="true">
-          {info.icon}
+          <KindIcon kind={node.kind} />
         </span>
         <b className="wf-node-title">{node.title}</b>
       </div>
@@ -182,7 +182,7 @@ function NodeInspector({
     <div className="wf-inspector">
       <div className="wf-inspector-head">
         <b>
-          {info.icon} {info.label}
+          <KindIcon kind={node.kind} /> {info.label}
         </b>
         <span className="muted">#{node.id}</span>
       </div>
@@ -639,7 +639,7 @@ export function WorkflowCanvas({
             }}
             onClick={() => addNode(k.kind)}
           >
-            <span aria-hidden="true">{k.icon}</span> {k.label}
+            <span aria-hidden="true"><KindIcon kind={k.kind} /></span> {k.label}
           </button>
         ))}
       </div>
@@ -684,7 +684,7 @@ export function WorkflowCanvas({
           </Panel>
         </ReactFlow>
         <div className="wf-hint muted">
-          🗣️ &ldquo;Naru, run {view.workflow.name}&rdquo; · or call it from a skill
+          <SpeakIcon /> &ldquo;Naru, run {view.workflow.name}&rdquo; · or call it from a skill
         </div>
         {selectedNode && (
           <NodeInspector

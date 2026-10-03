@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { createWorkflow, deleteWorkflow, listWorkflows, runWorkflow } from '../api'
 import { ConfirmDelete } from '../components/ConfirmDelete'
+import { PlayIcon } from '../components/WorkflowIcon'
 import { useLiveContext } from '../liveContext'
 import { formatTimestamp, timeAgo } from '../time'
 import { useFetch } from '../useFetch'
@@ -114,7 +115,7 @@ export function WorkflowListView({ projectId }: { projectId: number }) {
                     disabled={last === 'running'}
                     onClick={() => run(w.id)}
                   >
-                    ▶ run
+                    <PlayIcon /> run
                   </button>
                   <ConfirmDelete
                     label="delete"

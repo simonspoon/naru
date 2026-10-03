@@ -14,19 +14,18 @@ export type NodeConfig = Record<string, unknown>
 export interface KindInfo {
   kind: WorkflowNodeKind
   label: string
-  icon: string
   /** The default title a node dropped from the palette gets. */
   title: string
 }
 
 /** Palette order. */
 export const NODE_KINDS: readonly KindInfo[] = [
-  { kind: 'trigger', label: 'Trigger', icon: '⏰', title: 'Start' },
-  { kind: 'prompt', label: 'Prompt', icon: '✨', title: 'Prompt' },
-  { kind: 'cli', label: 'CLI tool', icon: '⌨️', title: 'Command' },
-  { kind: 'script', label: 'Script', icon: '📜', title: 'Script' },
-  { kind: 'branch', label: 'Branch', icon: '◇', title: 'Gate' },
-  { kind: 'output', label: 'Output', icon: '📤', title: 'Output' },
+  { kind: 'trigger', label: 'Trigger', title: 'Start' },
+  { kind: 'prompt', label: 'Prompt', title: 'Prompt' },
+  { kind: 'cli', label: 'CLI tool', title: 'Command' },
+  { kind: 'script', label: 'Script', title: 'Script' },
+  { kind: 'branch', label: 'Branch', title: 'Gate' },
+  { kind: 'output', label: 'Output', title: 'Output' },
 ]
 
 export function kindInfo(kind: WorkflowNodeKind): KindInfo {
