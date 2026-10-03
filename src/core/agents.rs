@@ -268,10 +268,10 @@ fn pool_pending(
 /// Pending `Bash` calls of the session's running subagents, in transcript
 /// path order — pooled with the session's own by [`pool_pending`].
 fn subagent_pending(root: &Path, session_id: &str, now: SystemTime) -> Vec<cc::PendingBash> {
-    let mut paths: Vec<_> = subagent_transcripts(root, session_id, now, cc::ACTIVE_SECS)
+    let mut paths: Vec<_> = subagent_transcripts(root, session_id, now, DELEGATE_TOOL_CALL_SECS)
         .into_iter()
+        .filter(|(path, age)| delegate_running(*age, last_record(path).as_ref()))
         .map(|(path, _)| path)
-        .filter(|path| !subagent_finished(path))
         .collect();
     paths.sort();
     paths
@@ -405,7 +405,11 @@ fn basename(comm: &str) -> &str {
     comm.rsplit('/').next().unwrap_or(comm)
 }
 
-/// Subagent transcripts for `session_id` touched within [`cc::ACTIVE_SECS`].
+/// Subagent transcripts for `session_id` touched within [`cc::ACTIVE_SECS`],
+/// plus any older one still waiting on a tool call ([`delegate_running`], mesa
+/// task 1612): a subagent inside one long Bash call writes nothing, and must
+/// neither vanish from the panel nor leave its shell to be paired with the
+/// parent's own call.
 ///
 /// Subagents run in-process, so there is no child to count; each one writes
 /// `<projects_dir>/<slug>/<session_id>/subagents/agent-*.jsonl`, and a recent
@@ -416,8 +420,11 @@ fn basename(comm: &str) -> &str {
 /// here, so every slug directory is checked for the session — the same
 /// glob-by-session-id shape `cc.rs` uses.
 fn subagent_children(root: &Path, session_id: &str, now: SystemTime) -> Vec<AgentChild> {
-    subagent_transcripts(root, session_id, now, cc::ACTIVE_SECS)
+    subagent_transcripts(root, session_id, now, DELEGATE_TOOL_CALL_SECS)
         .into_iter()
+        .filter(|(path, age)| {
+            *age <= cc::ACTIVE_SECS || delegate_running(*age, last_record(path).as_ref())
+        })
         .map(|(path, _)| subagent_child(&path))
         .collect()
 }
@@ -2544,5 +2551,34 @@ echo "backgrounded · cf0c3945 · proj: do the thing""#,
         let later = now + std::time::Duration::from_secs(40 * 60);
         assert!(running_delegates(dir.path(), "sess-1", later).is_empty());
         assert!(running_delegates(dir.path(), "sess-2", now).is_empty());
+    }
+
+    /// Mesa task 1612: a subagent silent past `cc::ACTIVE_SECS` inside a
+    /// pending tool call is still a running child and its Bash call is still
+    /// in the pairing pool; one that finished is neither.
+    #[test]
+    fn a_long_running_subagent_stays_listed_and_pooled() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("-slug").join("sess-1").join("subagents");
+        std::fs::create_dir_all(&sub).unwrap();
+        let call = r#"{"type":"assistant","message":{"stop_reason":"tool_use","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"sleep 600","description":"Waiting"}}]}}"#;
+        let end_turn = r#"{"type":"assistant","message":{"stop_reason":"end_turn"}}"#;
+        std::fs::write(sub.join("agent-busy.jsonl"), format!("{call}\n")).unwrap();
+        std::fs::write(
+            sub.join("agent-done.jsonl"),
+            format!("{call}\n{end_turn}\n"),
+        )
+        .unwrap();
+        let now = SystemTime::now();
+        // Fresh: both cards list (a finished one lingers), only busy pools.
+        assert_eq!(subagent_children(dir.path(), "sess-1", now).len(), 2);
+        // Ten minutes of silence: only the pending-call one remains.
+        let later = now + std::time::Duration::from_secs(10 * 60);
+        let kids = subagent_children(dir.path(), "sess-1", later);
+        assert_eq!(kids.len(), 1, "{kids:?}");
+        assert_eq!(kids[0].id.as_deref(), Some("agent-busy"));
+        let pending = subagent_pending(dir.path(), "sess-1", later);
+        assert_eq!(pending.len(), 1, "{pending:?}");
+        assert_eq!(pending[0].command.as_deref(), Some("sleep 600"));
     }
 }

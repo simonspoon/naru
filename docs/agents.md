@@ -259,7 +259,11 @@ already use.
     which is not work — counting it would mark every session busy forever.
   - `liveSubagents` counts `<projects_dir>/*/<sessionId>/subagents/*.jsonl`
     whose mtime is within `cc::ACTIVE_SECS` (90s, shared with the CC
-    dashboard's own liveness window). Subagents run **in-process** — there is
+    dashboard's own liveness window). The `children` cards and the pending-call
+    pool use a wider rule (mesa task 1612): a subagent whose last record is a
+    `tool_use` still awaiting its result stays listed as running for up to
+    `DELEGATE_TOOL_CALL_SECS` (30 min), since it writes nothing during one long
+    call; a finished or otherwise idle one still drops after 90s. Subagents run **in-process** — there is
     no child to count — so a freshly written transcript is the only signal
     available. The project slug is unknown at this point, so every slug
     directory is checked for the session id, the same glob shape `cc.rs` uses.
