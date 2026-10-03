@@ -1744,8 +1744,8 @@ only way to wipe it (mesa task 1582).
   - `markdown`: the content box cloned with every element's computed style
     inlined, into an SVG `<foreignObject>`, shifted by the frozen scroll and
     cut to the visible window;
-  - `html`: an opaque sandboxed frame no page can read back, so a white sheet
-    with a caption strip naming the board's title and kind.
+  - `html`: an opaque sandboxed frame no page can read back, so a dark sheet
+    (`#060a10`, the app canvas) with a caption strip naming the board's title and kind.
   Any background that fails to draw, or taints the canvas (Safari's answer to
   a `<foreignObject>`), falls back to that white-and-caption sheet. The ink
   itself is never dropped.

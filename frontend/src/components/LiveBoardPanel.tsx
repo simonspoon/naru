@@ -522,7 +522,7 @@ async function drawBoardBackground(
   ctx.drawImage(img, 0, 0, frame.width, frame.height)
 }
 
-/** The background no board can fail to have: white, with a strip naming the
+/** The background no board can fail to have: the app's dark canvas, with a strip naming the
  *  board. What an HTML board always gets, and any other kind whose own pixels
  *  could not be drawn or read back. */
 function drawCaptionBackground(
@@ -530,11 +530,11 @@ function drawCaptionBackground(
   board: LiveBoardSummary | null,
   frame: InkFrame,
 ) {
-  ctx.fillStyle = '#ffffff'
+  ctx.fillStyle = '#060a10'
   ctx.fillRect(0, 0, frame.width, frame.height)
-  ctx.fillStyle = '#eef1f5'
+  ctx.fillStyle = '#0e1722'
   ctx.fillRect(0, 0, frame.width, 32)
-  ctx.fillStyle = '#1f2933'
+  ctx.fillStyle = '#b8dde8'
   ctx.font = '14px sans-serif'
   ctx.textBaseline = 'middle'
   ctx.fillText(board === null ? 'Whiteboard' : inkCaption(board), 10, 16, frame.width - 20)

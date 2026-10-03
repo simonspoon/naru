@@ -5505,12 +5505,19 @@ parent.postMessage({naru:'board-key',key:e.key,code:e.code,metaKey:e.metaKey,\
 ctrlKey:e.ctrlKey,altKey:e.altKey,shiftKey:e.shiftKey,repeat:e.repeat},'*')},true)})();\
 </script>\n";
 
+/// Appended to an `html` live board's body (mesa task 1615): the app's dark
+/// canvas and text as the document's defaults. `:where()` gives it zero
+/// specificity, so any background or colour the board's own styles set on
+/// `html` wins; a board that sets neither is dark like the rest of the app.
+const BOARD_DARK_DEFAULTS: &str =
+    "\n<style>:where(html){color-scheme:dark;background:#060a10;color:#b8dde8}</style>";
+
 /// A board's body as the render route serves it: an `html` board is its
-/// stored bytes followed by [`BOARD_KEY_RELAY`]; every other kind is
-/// untouched.
+/// stored bytes followed by [`BOARD_DARK_DEFAULTS`] and [`BOARD_KEY_RELAY`];
+/// every other kind is untouched.
 fn board_render_body(kind: LiveBoardKind, body: &str) -> String {
     match kind {
-        LiveBoardKind::Html => format!("{body}{BOARD_KEY_RELAY}"),
+        LiveBoardKind::Html => format!("{body}{BOARD_DARK_DEFAULTS}{BOARD_KEY_RELAY}"),
         _ => body.to_string(),
     }
 }
@@ -11145,7 +11152,10 @@ mod tests {
     #[test]
     fn only_an_html_board_gets_the_key_relay() {
         let html = board_render_body(LiveBoardKind::Html, "<p>hi</p>");
-        assert_eq!(html, format!("<p>hi</p>{BOARD_KEY_RELAY}"));
+        assert_eq!(
+            html,
+            format!("<p>hi</p>{BOARD_DARK_DEFAULTS}{BOARD_KEY_RELAY}")
+        );
         assert!(html.contains("naru:'board-key'"));
         for kind in [LiveBoardKind::Markdown, LiveBoardKind::Diagram] {
             assert_eq!(board_render_body(kind, "body"), "body");
