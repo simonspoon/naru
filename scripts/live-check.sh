@@ -1572,18 +1572,30 @@ JSON
     fail "live look with no window at the box: the message must name the box it looked for"
   ok "live look with nothing at the reported box: exit 1 unavailable, never a nearest guess"
 
-  # Two windows genuinely stacked at one box is ambiguous, and ambiguity here
-  # means photographing the wrong screen — so both ids are named and the
-  # person can fix it.
+  # Several maximized windows share one box exactly. loki lists front to back
+  # and marks what is visible, so the frontmost on-screen one is picked: the
+  # off-screen one listed first and the on-screen one behind it are skipped.
   cat > "$STUB_DIR/windows.json" <<'JSON'
-[{"window_id":11,"title":"mesa","frame":{"x":118.0,"y":64.0,"width":1512.0,"height":982.0}},
- {"window_id":12,"title":"mesa","frame":{"x":118.0,"y":64.0,"width":1512.0,"height":982.0}}]
+[{"window_id":10,"title":"mesa","is_on_screen":false,"frame":{"x":118.0,"y":64.0,"width":1512.0,"height":982.0}},
+ {"window_id":11,"title":"mesa","is_on_screen":true,"frame":{"x":118.0,"y":64.0,"width":1512.0,"height":982.0}},
+ {"window_id":12,"title":"mesa","is_on_screen":true,"frame":{"x":118.0,"y":64.0,"width":1512.0,"height":982.0}}]
+JSON
+  run 0 "$MESA" live look
+  [ "$(jqs .window_id)" = "11" ] ||
+    fail "live look with stacked windows: must pick the frontmost on-screen one (11), got $(jqs .window_id)"
+  ok "live look with several windows at one box: the frontmost on-screen one is photographed"
+
+  # Tied and none on screen: nothing to tell them apart by, so both ids are
+  # named and the person can fix it.
+  cat > "$STUB_DIR/windows.json" <<'JSON'
+[{"window_id":11,"title":"mesa","is_on_screen":false,"frame":{"x":118.0,"y":64.0,"width":1512.0,"height":982.0}},
+ {"window_id":12,"title":"mesa","is_on_screen":false,"frame":{"x":118.0,"y":64.0,"width":1512.0,"height":982.0}}]
 JSON
   run 1 "$MESA" live look
-  [ "$(jqe .error.code)" = "conflict" ] || fail "live look with two windows at one box: error.code"
+  [ "$(jqe .error.code)" = "conflict" ] || fail "live look with two off-screen windows at one box: error.code"
   grep -q '11' <<<"$STDERR" && grep -q '12' <<<"$STDERR" ||
     fail "live look with two windows at one box: the message must name both ids"
-  ok "live look with two windows at one box: exit 1 conflict naming both — never a coin toss"
+  ok "live look with several off-screen windows at one box: exit 1 conflict naming both — never a coin toss"
 fi
 
 # There is deliberately no HTTP route for any of this: capturing the person's

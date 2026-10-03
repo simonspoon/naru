@@ -2189,14 +2189,16 @@ equals all four reported numbers, and then:
 - **none** — `unavailable`. The browser has moved or closed since it last
   reported, so this moment is wrong rather than the conversation being wrong;
   the message says so and says to bring the window back.
-- **two or more** — `conflict`, naming every candidate window id.
+- **two or more** (several maximized windows share one box) — the
+  **frontmost on-screen** one. loki's `windows` is
+  `CGWindowListCopyWindowInfo`, ordered front to back, and carries
+  `is_on_screen` (`kCGWindowIsOnscreen`); the first hit with it true is
+  photographed, so a headless or other-Space window never is. Only when none of
+  the tied windows is on screen is it a `conflict`, naming every candidate id.
 
-It is deliberately **not** a nearest match, and the two-candidate case is
-deliberately not a coin toss. Guessing wrong here does not produce a slightly
-worse answer, it photographs a screen the person did not offer, so "I am not
-sure which" has to be an error. Two browser windows genuinely stacked at one
-box is also something the person can fix in a second once they are told, which
-a silently-picked wrong window never gives them the chance to do.
+It is deliberately **not** a nearest match: the four numbers must be exact.
+A tie that cannot be broken by visibility stays a `conflict` rather than a
+coin toss, since guessing wrong photographs a screen the person did not offer.
 
 A session with **no** reported box — one started `--no-agent`, one driven
 entirely from the CLI, a page that has not joined — is `unavailable` too, and
@@ -3716,7 +3718,7 @@ and the half that is Naru's needs none of the three. The stub answers
 whatever `--output` names, so what is under test is which window the reported
 box picks: the **khora lookalike** (a second window titled `mesa` at a
 different size, which the shot must not land on), a box no window is at
-(`unavailable`), two windows at one box (`conflict` naming both ids), a session
+(`unavailable`), several windows at one box (the frontmost on-screen one picked; `conflict` naming both ids only when none is on screen), a session
 that has reported no box at all (`unavailable`, and nothing spawned), the
 window box round-tripping from the page's HTTP report to `mesa live status`
 over its own `Store`, an out-of-range box as 422 writing nothing, the default

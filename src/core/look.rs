@@ -49,14 +49,18 @@ fn loki_bin() -> String {
     crate::core::env::var("LOKI_BIN").unwrap_or_else(|| "loki".to_string())
 }
 
-/// One window as `loki -f json windows` reports it. Only the three fields mesa
-/// uses are named; loki reports more (`pid`, `title`, `bundle_id`,
-/// `is_on_screen`) and may grow others, so unknown keys are ignored rather
-/// than making the parse brittle.
+/// One window as `loki -f json windows` reports it. Only the fields mesa uses
+/// are named; loki reports more (`pid`, `title`, `bundle_id`) and may grow
+/// others, so unknown keys are ignored rather than making the parse brittle.
+///
+/// `is_on_screen` is `kCGWindowIsOnscreen` (visible on the current Space, not
+/// minimized or hidden). Absent reads as `false`.
 #[derive(Debug, Clone, Deserialize)]
 struct LokiWindow {
     window_id: i64,
     frame: LokiFrame,
+    #[serde(default)]
+    is_on_screen: bool,
 }
 
 /// A window's frame in screen coordinates. Floats, because loki reports the
@@ -190,8 +194,15 @@ fn excerpt(stderr: &[u8]) -> String {
 /// deliberately not a nearest-match: a wrong window here photographs something
 /// the person did not ask to be seen, so "I am not sure" must be an error and
 /// not a guess. That is also why two candidates are a `conflict` naming both
-/// rather than a coin toss — two browser windows genuinely stacked at the same
-/// box is a thing the person can fix, once they know.
+/// rather than a coin toss.
+///
+/// Several maximized windows share one box exactly, though, so a tie is first
+/// narrowed by what the person can actually see: only **on-screen** windows
+/// (a headless browser, a window on another Space or a minimized one is not),
+/// and of those the **frontmost**. loki lists windows with
+/// `CGWindowListCopyWindowInfo`, which Apple documents as ordered front to
+/// back, and the list order is preserved here, so the first on-screen hit is
+/// the topmost. Only when no tied window is on screen is it a `conflict`.
 fn match_window<'a>(windows: &'a [LokiWindow], want: &LiveWindow) -> Result<&'a LokiWindow> {
     let hits: Vec<&LokiWindow> = windows.iter().filter(|w| matches(w, want)).collect();
     match hits.as_slice() {
@@ -205,19 +216,24 @@ fn match_window<'a>(windows: &'a [LokiWindow], want: &LiveWindow) -> Result<&'a 
              person to bring it back and try again",
             want.width, want.height, want.x, want.y
         ))),
-        many => Err(Error::Conflict(format!(
-            "{} windows share the box the conversation's browser reported \
-             ({}×{} at {},{}): window ids {}",
-            many.len(),
-            want.width,
-            want.height,
-            want.x,
-            want.y,
-            many.iter()
-                .map(|w| w.window_id.to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ))),
+        many => {
+            if let Some(front) = many.iter().find(|w| w.is_on_screen) {
+                return Ok(front);
+            }
+            Err(Error::Conflict(format!(
+                "{} windows share the box the conversation's browser reported \
+             ({}×{} at {},{}), none of them on screen: window ids {}",
+                many.len(),
+                want.width,
+                want.height,
+                want.x,
+                want.y,
+                many.iter()
+                    .map(|w| w.window_id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )))
+        }
     }
 }
 
@@ -237,6 +253,7 @@ mod tests {
     fn window(id: i64, x: f64, y: f64, width: f64, height: f64) -> LokiWindow {
         LokiWindow {
             window_id: id,
+            is_on_screen: false,
             frame: LokiFrame {
                 x,
                 y,
@@ -286,11 +303,25 @@ mod tests {
         assert!(matches!(err, Error::Unavailable(_)), "{err:?}");
     }
 
-    /// Two windows genuinely stacked at one box is ambiguous, and ambiguity
-    /// here means photographing the wrong screen — so it is a `conflict` that
-    /// names both ids rather than a coin toss.
+    /// Several maximized windows share one box: the frontmost on-screen one
+    /// (first in loki's front-to-back list) wins, skipping off-screen ones
+    /// even when they are listed earlier.
     #[test]
-    fn two_windows_at_one_box_is_a_conflict_naming_both() {
+    fn tied_windows_pick_the_frontmost_on_screen_one() {
+        let mut windows = [
+            window(1, 22.0, 22.0, 1600.0, 1000.0),
+            window(2, 22.0, 22.0, 1600.0, 1000.0),
+            window(3, 22.0, 22.0, 1600.0, 1000.0),
+        ];
+        windows[1].is_on_screen = true;
+        windows[2].is_on_screen = true;
+        assert_eq!(match_window(&windows, &want()).unwrap().window_id, 2);
+    }
+
+    /// A tie with nothing on screen cannot be told apart: still a `conflict`
+    /// naming every id, never a coin toss.
+    #[test]
+    fn tied_windows_none_on_screen_is_a_conflict_naming_both() {
         let windows = [
             window(11, 22.0, 22.0, 1600.0, 1000.0),
             window(12, 22.0, 22.0, 1600.0, 1000.0),
@@ -313,6 +344,7 @@ mod tests {
             "frame":{"x":22.0,"y":22.0,"width":1600.0,"height":1000.0},
             "is_on_screen":false}]"#;
         let windows: Vec<LokiWindow> = serde_json::from_str(json).unwrap();
+        assert!(!windows[0].is_on_screen);
         assert_eq!(match_window(&windows, &want()).unwrap().window_id, 40041);
     }
 }
