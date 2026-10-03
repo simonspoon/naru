@@ -134,9 +134,12 @@ function LogPanel({ version }: { version: number }) {
 export function WorkflowBuilderView({
   projectId,
   workflowId,
+  onDeleted,
 }: {
   projectId: number
   workflowId: number
+  /** Called after a delete instead of leaving for the list route (the dock panel has no route to leave). */
+  onDeleted?: () => void
 }) {
   const { data: view, error, refetch } = useFetch(
     () => getWorkflow(workflowId),
@@ -210,6 +213,7 @@ export function WorkflowBuilderView({
             message={`Deletes this workflow, ${view.nodes.length} node(s) and ${view.edges.length} edge(s).`}
             onDelete={() =>
               deleteWorkflow(workflowId).then(() => {
+                if (onDeleted) return onDeleted()
                 window.location.hash = `#/projects/${projectId}/workflows`
               })
             }

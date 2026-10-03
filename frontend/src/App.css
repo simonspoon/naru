@@ -707,7 +707,7 @@ button.nav-subtree-caret:hover:not(:disabled) {
   min-height: 0;
 }
 
-/* One of these is visible at a time (toggled inline via `visibility`, never
+/* One of these is visible at a time (toggled via `visibility` (`.main-slot-pane-hidden`), never
    `display: none` or a conditional render — see the render in App.tsx and
    AgentSidebar's own collapse, which uses the identical technique). Both
    panes stay mounted and laid out at full size at all times, so a hidden
@@ -11209,6 +11209,15 @@ body.live-panel-ratio-resizing .live-panel-divider {
 .dock-slot-inactive {
   visibility: hidden;
   pointer-events: none;
+}
+
+/* A descendant that sets its own `visibility: visible` (React Flow's nodes do,
+   inline) would otherwise paint through the hidden slot and take clicks. */
+.dock-slot-inactive *,
+.main-slot-pane-hidden,
+.main-slot-pane-hidden * {
+  visibility: hidden !important;
+  pointer-events: none !important;
 }
 
 /* A panel's stable container (lib/dockHosts.ts): fills whatever slot holds it. */

@@ -847,12 +847,11 @@ function App() {
               Terminal's, so navigating to/from Terminal never touches
               TerminalPage's own mounted state (arch.md §4.3). */}
           <div
-            className="main-slot-pane"
-            style={{ visibility: terminalActive ? 'hidden' : 'visible' }}
+            className={terminalActive ? 'main-slot-pane main-slot-pane-hidden' : 'main-slot-pane'}
           >
             <main>{page}</main>
           </div>
-          <div className="main-slot-pane" style={{ visibility: terminalActive ? 'visible' : 'hidden' }}>
+          <div className={terminalActive ? 'main-slot-pane' : 'main-slot-pane main-slot-pane-hidden'}>
             <TerminalPage active={terminalActive} />
           </div>
         </div>
