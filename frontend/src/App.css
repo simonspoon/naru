@@ -8742,6 +8742,7 @@ body.live-panel-ratio-resizing .live-panel-divider {
   display: flex;
   flex-direction: column;
   overflow: auto;
+  background: var(--bg);
 }
 
 /* On white, always: an HTML mockup is written for a page, not for this app's

@@ -70,6 +70,15 @@
   box-sizing: border-box;
 }
 
+/* Dark UA chrome: the canvas behind the app, form controls and every
+   scrollbar track default to white without this. Scrollbars take the
+   theme's own edge colour on a transparent track. */
+html {
+  color-scheme: dark;
+  background-color: var(--bg);
+  scrollbar-color: var(--border) transparent;
+}
+
 body {
   margin: 0;
   font-family: var(--font-sans);
@@ -94,6 +103,7 @@ body {
    the shell to the viewport removes that document scroll entirely, so there is
    nothing left for the sidebar to chain into. */
 #root {
+  background-color: var(--bg);
   height: 100vh;
   display: flex;
   flex-direction: column;
