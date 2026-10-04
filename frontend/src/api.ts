@@ -35,6 +35,7 @@ import type { ConfigAudio } from './types/ConfigAudio'
 import type { TranscribeStatus } from './types/TranscribeStatus'
 import type { ConfigLive } from './types/ConfigLive'
 import type { LiveNotebookEntry } from './types/LiveNotebookEntry'
+import type { ConfigServe } from './types/ConfigServe'
 import type { ConfigWatchers } from './types/ConfigWatchers'
 import type { DirEntry } from './types/DirEntry'
 import type { DirListing } from './types/DirListing'
@@ -1336,6 +1337,28 @@ export function updateWatchers(
   watchers: Record<string, number | null>,
 ): Promise<ConfigWatchers> {
   return request('/api/config/watchers', jsonInit('PUT', watchers))
+}
+
+/**
+ * The `serve` section of `~/.mesa/config.json` (mesa task 1621): every `naru
+ * serve` flag as a config key, each with its default, the value this run is
+ * using and the command-line flag pinning it. `restart_required` is true when
+ * the config now gives a different port, LAN switch or host list than this
+ * process runs with. 502 `unavailable` as for `getConfig`.
+ */
+export function getServe(): Promise<ConfigServe> {
+  return request('/api/config/serve')
+}
+
+/**
+ * Writes `serve` settings and echoes them as re-read. Only the keys passed are
+ * touched; `null` removes one, restoring its default. 422 `validation` writes
+ * nothing.
+ */
+export function updateServe(
+  serve: Record<string, number | boolean | string[] | null>,
+): Promise<ConfigServe> {
+  return request('/api/config/serve', jsonInit('PUT', serve))
 }
 
 /**

@@ -11,6 +11,7 @@ import {
   getListen,
   getLiveConfig,
   getPricing,
+  getServe,
   getSpeech,
   getSpeechDesign,
   getSystemInfo,
@@ -29,6 +30,7 @@ import {
   updateLiveConfig,
   updateLiveMemory,
   updatePricing,
+  updateServe,
   updateSpeech,
   updateWatchers,
   type CcResetReport,
@@ -204,6 +206,18 @@ import {
   valueError,
   type WatchersDraft,
 } from '../watchersDraft'
+import {
+  WATCH_KEYS,
+  changedServe,
+  draftFrom as serveDraftFrom,
+  flagName,
+  hostsError,
+  isDirty as isServeDirty,
+  isSavable as isServeSavable,
+  portError,
+  type BoolKey,
+  type ServeDraft,
+} from '../serveDraft'
 
 /**
  * Human copy for each config key. The server sends the key, the default and
@@ -439,6 +453,7 @@ export function SettingsView({ tab }: { tab: SettingsTab }) {
         <PricingSection />
       </div>
       <div hidden={tab !== 'system'}>
+        <ServeSection />
         <SystemSection />
       </div>
     </div>
@@ -985,6 +1000,229 @@ function WatchersSection() {
           onClick={save}
         >
           {saving ? 'saving…' : 'save watchers'}
+        </button>
+        {dirty && savable && !saving && (
+          <span className="muted">unsaved changes</span>
+        )}
+        {saved && !dirty && <span className="settings-saved">saved</span>}
+      </div>
+      {saveError && <p className="error">{saveError}</p>}
+    </>
+  )
+}
+
+const SERVE_LABELS: Record<BoolKey, { title: string; blurb: string }> = {
+  lan: {
+    title: 'LAN access',
+    blurb:
+      'binds 0.0.0.0 and skips the Host check; no authentication, so every device on the network gets full access. Needs a restart.',
+  },
+  watch_todo: {
+    title: 'Todo watcher',
+    blurb: 'auto-starts an agent on actionable todo tasks.',
+  },
+  watch_inbox: {
+    title: 'Inbox watcher',
+    blurb: 'auto-triages pending change requests.',
+  },
+  watch_cost: {
+    title: 'Cost guard',
+    blurb: 'stops and reports runaway sessions.',
+  },
+  watch_retro: {
+    title: 'Retrospective',
+    blurb: 'periodically reviews finished task sessions.',
+  },
+  watch_workflows: {
+    title: 'Time workflows',
+    blurb: 'runs due time-triggered workflows.',
+  },
+}
+
+/**
+ * Server: every `naru serve` startup flag as a config key (mesa task 1621).
+ * The port, LAN access and allowed hosts are read once at start, so a change
+ * there shows a restart notice; the five watchers are re-read every tick and
+ * take effect within one. A setting a command-line flag pins is shown
+ * disabled — the flag wins this run.
+ */
+function ServeSection() {
+  const { data: serve, error, refetch } = useFetch(() => getServe(), 'serve')
+  const [draft, setDraft] = useState<ServeDraft | null>(null)
+  const [saveError, setSaveError] = useState<string | null>(null)
+  const [saved, setSaved] = useState(false)
+  const [saving, setSaving] = useState(false)
+
+  if (error) {
+    return (
+      <>
+        <h2>Server</h2>
+        <p className="error">{error}</p>
+      </>
+    )
+  }
+  if (!serve) {
+    return (
+      <>
+        <h2>Server</h2>
+        <p className="muted">Loading…</p>
+      </>
+    )
+  }
+
+  const seeded: ServeDraft = draft ?? serveDraftFrom(serve)
+  const dirty = isServeDirty(serve, seeded)
+  const savable = isServeSavable(seeded)
+  const portProblem = portError(seeded.port)
+  const hostsProblem = hostsError(seeded.allow_host)
+
+  function edit(patch: Partial<ServeDraft>) {
+    setDraft({ ...seeded, ...patch })
+    setSaved(false)
+  }
+
+  function save() {
+    if (!serve) return
+    setSaving(true)
+    setSaveError(null)
+    updateServe(changedServe(serve, seeded)).then(
+      (fresh) => {
+        setDraft(serveDraftFrom(fresh))
+        setSaving(false)
+        setSaved(true)
+        refetch()
+      },
+      (e: unknown) => {
+        setSaving(false)
+        setSaveError(e instanceof Error ? e.message : String(e))
+      },
+    )
+  }
+
+  const pin = (key: string, flag: unknown) =>
+    flag !== null && flag !== undefined ? (
+      <p className="muted settings-command-blurb">
+        set by <code>{flagName(key)}</code> on the command line (this run
+        ignores the config value)
+      </p>
+    ) : null
+  const portPinned = serve.port.flag !== null
+  const hostsPinned = serve.allow_host.flag !== null
+
+  return (
+    <>
+      <h2>Server</h2>
+      <p className="muted">
+        What <code>naru serve</code> starts with, so a bare{' '}
+        <code>naru serve</code> can run as a service. A command-line flag beats
+        these settings.
+      </p>
+      {serve.restart_required && (
+        <section className="settings-command">
+          <p className="error">
+            Restart required: the port, LAN access or allowed hosts saved here
+            differ from what this server is running with.
+          </p>
+          <ConfirmDelete
+            label="Restart server"
+            message="Relaunches Naru with the saved settings; reloads when it's back."
+            onDelete={handleRestart}
+          />
+        </section>
+      )}
+
+      <section className="settings-command">
+        <label htmlFor="serve-port">
+          <span className="settings-command-title">Port</span>
+          <code className="settings-command-key">port</code>
+        </label>
+        <p className="muted settings-command-blurb">
+          blank = {serve.port.default}; running on {serve.port.effective}. Needs
+          a restart.
+        </p>
+        <input
+          id="serve-port"
+          type="number"
+          min={1}
+          max={65535}
+          step="1"
+          className="settings-watcher-input"
+          disabled={portPinned}
+          value={seeded.port}
+          placeholder={String(serve.port.default)}
+          onChange={(e) => edit({ port: e.target.value })}
+        />
+        {portProblem && <p className="error">{portProblem}</p>}
+        {pin('port', serve.port.flag)}
+      </section>
+
+      <section className="settings-command">
+        <label htmlFor="serve-lan">
+          <span className="settings-command-title">
+            {SERVE_LABELS.lan.title}
+          </span>
+          <code className="settings-command-key">lan</code>
+        </label>
+        <p className="muted settings-command-blurb">{SERVE_LABELS.lan.blurb}</p>
+        <input
+          id="serve-lan"
+          type="checkbox"
+          disabled={serve.lan.flag !== null}
+          checked={serve.lan.flag ?? seeded.lan}
+          onChange={(e) => edit({ lan: e.target.checked })}
+        />
+        {pin('lan', serve.lan.flag)}
+      </section>
+
+      <section className="settings-command">
+        <label htmlFor="serve-allow-host">
+          <span className="settings-command-title">Allowed hosts</span>
+          <code className="settings-command-key">allow_host</code>
+        </label>
+        <p className="muted settings-command-blurb">
+          Under LAN access, also trust these exact hostnames (one per line or
+          comma separated). Needs a restart.
+        </p>
+        <textarea
+          id="serve-allow-host"
+          rows={3}
+          disabled={hostsPinned}
+          value={seeded.allow_host}
+          onChange={(e) => edit({ allow_host: e.target.value })}
+        />
+        {hostsProblem && <p className="error">{hostsProblem}</p>}
+        {pin('allow_host', serve.allow_host.flag)}
+      </section>
+
+      {WATCH_KEYS.map((key) => (
+        <section className="settings-command" key={key}>
+          <label htmlFor={`serve-${key}`}>
+            <span className="settings-command-title">
+              {SERVE_LABELS[key].title}
+            </span>
+            <code className="settings-command-key">{key}</code>
+          </label>
+          <p className="muted settings-command-blurb">
+            {SERVE_LABELS[key].blurb} Takes effect live, within one tick.
+          </p>
+          <input
+            id={`serve-${key}`}
+            type="checkbox"
+            disabled={serve[key].flag !== null}
+            checked={serve[key].flag ?? seeded[key]}
+            onChange={(e) => edit({ [key]: e.target.checked })}
+          />
+          {pin(key, serve[key].flag)}
+        </section>
+      ))}
+
+      <div className="settings-actions">
+        <button
+          type="button"
+          disabled={!dirty || !savable || saving}
+          onClick={save}
+        >
+          {saving ? 'saving…' : 'save server'}
         </button>
         {dirty && savable && !saving && (
           <span className="muted">unsaved changes</span>

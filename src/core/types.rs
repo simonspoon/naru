@@ -381,6 +381,65 @@ pub struct ConfigPrice {
     pub default: Option<ModelRates>,
 }
 
+/// One `serve` setting that is a number (the port), as the Settings page sees
+/// it (mesa task 1621): what the config says, the built-in default, what this
+/// run is using and the command-line flag pinning it, if any.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct ServeNumberSetting {
+    /// The configured value, or `null` when the config says nothing.
+    pub value: Option<u32>,
+    /// The built-in default behind a `null` value.
+    pub default: u32,
+    /// The value this process is running with (port) or would use now.
+    pub effective: u32,
+    /// The value the command line pinned, or `null`; set means the config
+    /// value is ignored this run.
+    pub flag: Option<u32>,
+}
+
+/// [`ServeNumberSetting`]'s twin for an on/off setting.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct ServeBoolSetting {
+    pub value: Option<bool>,
+    pub default: bool,
+    pub effective: bool,
+    pub flag: Option<bool>,
+}
+
+/// [`ServeNumberSetting`]'s twin for the `allow-host` list.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct ServeHostsSetting {
+    pub value: Option<Vec<String>>,
+    pub default: Vec<String>,
+    pub effective: Vec<String>,
+    /// The hosts the command line named, or `null` when it named none.
+    pub flag: Option<Vec<String>>,
+}
+
+/// The `serve` section as the Settings page sees it (`GET
+/// /api/config/serve`, mesa task 1621): every `naru serve` startup flag as a
+/// config key. `port`, `lan` and `allow_host` are read once at start, so a
+/// change needs a restart (`restart_required`); the five watcher switches are
+/// read on every tick.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct ConfigServe {
+    pub port: ServeNumberSetting,
+    pub lan: ServeBoolSetting,
+    pub allow_host: ServeHostsSetting,
+    pub watch_todo: ServeBoolSetting,
+    pub watch_inbox: ServeBoolSetting,
+    pub watch_cost: ServeBoolSetting,
+    pub watch_retro: ServeBoolSetting,
+    pub watch_workflows: ServeBoolSetting,
+    /// True when the port, LAN switch or allowed hosts the config would give a
+    /// fresh start differ from what this process is running with.
+    pub restart_required: bool,
+}
+
 /// The watcher settings as the Settings page sees them (`core::config`,
 /// `docs/config.md`, mesa task 777). A third view of `~/.mesa/config.json`
 /// beside [`ConfigCommand`] and [`ConfigPrice`], with the same
