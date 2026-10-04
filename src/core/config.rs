@@ -2081,6 +2081,218 @@ fn validate_limit(key: &str, value: &serde_json::Value, max: u32) -> Result<(), 
 }
 
 // ---------------------------------------------------------------------------
+// Serve (mesa task 1621)
+// ---------------------------------------------------------------------------
+
+/// The `serve` section's keys: every `naru serve` startup flag, spelled the
+/// way the flag is (without the dashes' leading pair). A flag on the command
+/// line beats the key; the key beats the default.
+pub const SERVE_PORT: &str = "port";
+pub const SERVE_LAN: &str = "lan";
+pub const SERVE_ALLOW_HOST: &str = "allow-host";
+pub const SERVE_WATCH_TODO: &str = "watch-todo";
+pub const SERVE_WATCH_INBOX: &str = "watch-inbox";
+pub const SERVE_WATCH_COST: &str = "watch-cost";
+pub const SERVE_WATCH_RETRO: &str = "watch-retro";
+pub const SERVE_WATCH_WORKFLOWS: &str = "watch-workflows";
+
+/// Every key the `serve` section understands, for the unknown-key error.
+const SERVE_KEYS: &[&str] = &[
+    SERVE_PORT,
+    SERVE_LAN,
+    SERVE_ALLOW_HOST,
+    SERVE_WATCH_TODO,
+    SERVE_WATCH_INBOX,
+    SERVE_WATCH_COST,
+    SERVE_WATCH_RETRO,
+    SERVE_WATCH_WORKFLOWS,
+];
+
+/// The five watcher keys (the ones that take effect live).
+const SERVE_WATCH_KEYS: &[&str] = &[
+    SERVE_WATCH_TODO,
+    SERVE_WATCH_INBOX,
+    SERVE_WATCH_COST,
+    SERVE_WATCH_RETRO,
+    SERVE_WATCH_WORKFLOWS,
+];
+
+/// The port `naru serve` binds with no flag and no config.
+pub const DEFAULT_SERVE_PORT: u16 = 7770;
+
+/// What the `serve` section holds, each key `None` when absent or — for a
+/// hand-edited file — unusable: a bad value costs that key alone its override
+/// and falls back to the default, the `todo-concurrency` clamp posture.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ServeSettings {
+    pub port: Option<u16>,
+    pub lan: Option<bool>,
+    pub allow_host: Option<Vec<String>>,
+    pub watch_todo: Option<bool>,
+    pub watch_inbox: Option<bool>,
+    pub watch_cost: Option<bool>,
+    pub watch_retro: Option<bool>,
+    pub watch_workflows: Option<bool>,
+}
+
+fn read_serve(path: &Path) -> Result<ServeSettings, String> {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(ServeSettings::default()),
+        Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
+    };
+    let root: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("malformed mesa config {}: {e}", path.display()))?;
+    let Some(section) = root.get("serve").and_then(|s| s.as_object()) else {
+        return Ok(ServeSettings::default());
+    };
+    let flag = |key: &str| section.get(key).and_then(|v| v.as_bool());
+    let allow_host = section
+        .get(SERVE_ALLOW_HOST)
+        .and_then(|v| v.as_array())
+        .and_then(|items| {
+            items
+                .iter()
+                .map(|h| h.as_str().and_then(normalize_serve_host))
+                .collect::<Option<Vec<String>>>()
+        });
+    Ok(ServeSettings {
+        port: section
+            .get(SERVE_PORT)
+            .and_then(|v| v.as_u64())
+            .and_then(|n| u16::try_from(n).ok())
+            .filter(|n| *n >= 1),
+        lan: flag(SERVE_LAN),
+        allow_host,
+        watch_todo: flag(SERVE_WATCH_TODO),
+        watch_inbox: flag(SERVE_WATCH_INBOX),
+        watch_cost: flag(SERVE_WATCH_COST),
+        watch_retro: flag(SERVE_WATCH_RETRO),
+        watch_workflows: flag(SERVE_WATCH_WORKFLOWS),
+    })
+}
+
+/// The `serve` section as the running server and the Settings page read it.
+/// Read fresh on every call, so a watcher toggle takes effect on the next tick.
+pub fn serve_settings() -> Result<ServeSettings, String> {
+    read_serve(&config_file())
+}
+
+/// A hostname the way `--allow-host` and the `serve` section both take it:
+/// trimmed and lowercased; `None` if that leaves nothing or leaves something
+/// that is not a bare name (whitespace, `/`, `:` — a scheme, a path or a
+/// port).
+pub fn normalize_serve_host(raw: &str) -> Option<String> {
+    let host = raw.trim().to_ascii_lowercase();
+    if host.is_empty() || host.contains(|c: char| c.is_whitespace() || c == '/' || c == ':') {
+        None
+    } else {
+        Some(host)
+    }
+}
+
+/// Writes the `serve` entries named in `updates` (`None` removes the key,
+/// restoring its default). [`save_watchers`]'s rules exactly: validated whole
+/// before anything is written, so a rejected save leaves the file
+/// byte-identical, and a read-modify-write over the whole document so every
+/// other section survives.
+pub fn save_serve(updates: &HashMap<String, Option<serde_json::Value>>) -> Result<(), SaveError> {
+    save_serve_in(&config_file(), updates)
+}
+
+fn save_serve_in(
+    path: &Path,
+    updates: &HashMap<String, Option<serde_json::Value>>,
+) -> Result<(), SaveError> {
+    if updates.is_empty() {
+        return Ok(());
+    }
+    let mut keys: Vec<&String> = updates.keys().collect();
+    keys.sort();
+    let mut normalized: HashMap<&String, Option<serde_json::Value>> = HashMap::new();
+    for key in &keys {
+        if !SERVE_KEYS.contains(&key.as_str()) {
+            return Err(SaveError::Validation(format!(
+                "unknown serve setting {key:?}; naru configures {}",
+                SERVE_KEYS.join(", ")
+            )));
+        }
+        let value = match &updates[*key] {
+            None => None,
+            Some(v) => Some(validate_serve_value(key, v).map_err(SaveError::Validation)?),
+        };
+        normalized.insert(key, value);
+    }
+
+    let mut root = read_config_document(path)?;
+    let Some(object) = root.as_object_mut() else {
+        return Err(SaveError::Unavailable(format!(
+            "malformed mesa config {}: the file is not a JSON object",
+            path.display()
+        )));
+    };
+    let section = object
+        .entry("serve")
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(section) = section.as_object_mut() else {
+        return Err(SaveError::Unavailable(format!(
+            "malformed mesa config {}: \"serve\" is not a JSON object",
+            path.display()
+        )));
+    };
+    for key in keys {
+        match normalized.remove(key).flatten() {
+            None => {
+                section.remove(key);
+            }
+            Some(value) => {
+                section.insert(key.clone(), value);
+            }
+        }
+    }
+
+    let mut body = serde_json::to_string_pretty(&root)
+        .map_err(|e| SaveError::Unavailable(format!("cannot serialize the mesa config: {e}")))?;
+    body.push('\n');
+    write_atomically(path, &body)
+}
+
+/// One `serve` value checked and, for hostnames, normalized. Raw JSON in so
+/// `"7770"` and `1.5` are a sentence naming the mistake.
+fn validate_serve_value(key: &str, value: &serde_json::Value) -> Result<serde_json::Value, String> {
+    if key == SERVE_PORT {
+        return match value.as_u64() {
+            Some(n) if (1..=65535).contains(&n) => Ok(value.clone()),
+            Some(n) => Err(format!("{key} must be between 1 and 65535, got {n}")),
+            None => Err(format!(
+                "{key} must be a whole number between 1 and 65535, got {value}"
+            )),
+        };
+    }
+    if key == SERVE_ALLOW_HOST {
+        let Some(items) = value.as_array() else {
+            return Err(format!("{key} must be a list of hostnames, got {value}"));
+        };
+        let mut hosts = Vec::new();
+        for item in items {
+            let Some(host) = item.as_str().and_then(normalize_serve_host) else {
+                return Err(format!(
+                    "{key} entries must be bare hostnames (no spaces, '/' or ':'), got {item}"
+                ));
+            };
+            hosts.push(serde_json::Value::String(host));
+        }
+        return Ok(serde_json::Value::Array(hosts));
+    }
+    debug_assert!(key == SERVE_LAN || SERVE_WATCH_KEYS.contains(&key));
+    if value.is_boolean() {
+        Ok(value.clone())
+    } else {
+        Err(format!("{key} must be true or false, got {value}"))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Speech (mesa task 822)
 // ---------------------------------------------------------------------------
 
@@ -5732,6 +5944,79 @@ mod tests {
         assert_eq!(watchers_in(&path).unwrap().todo_concurrency, None);
     }
 
+    fn serve_updates(
+        pairs: &[(&str, Option<serde_json::Value>)],
+    ) -> HashMap<String, Option<serde_json::Value>> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), v.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn serve_section_round_trips_normalizes_and_resets() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(dir.path(), r#"{"watchers": {"todo-concurrency": 4}}"#);
+        assert_eq!(read_serve(&path).unwrap(), ServeSettings::default());
+        save_serve_in(
+            &path,
+            &serve_updates(&[
+                (SERVE_PORT, Some(serde_json::json!(8000))),
+                (SERVE_WATCH_TODO, Some(serde_json::json!(true))),
+                (SERVE_ALLOW_HOST, Some(serde_json::json!([" Naru.Local "]))),
+            ]),
+        )
+        .unwrap();
+        let got = read_serve(&path).unwrap();
+        assert_eq!(got.port, Some(8000));
+        assert_eq!(got.watch_todo, Some(true));
+        assert_eq!(got.allow_host, Some(vec!["naru.local".to_string()]));
+        let root: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(root["watchers"][TODO_CONCURRENCY], 4);
+        save_serve_in(&path, &serve_updates(&[(SERVE_PORT, None)])).unwrap();
+        assert_eq!(read_serve(&path).unwrap().port, None);
+    }
+
+    #[test]
+    fn serve_section_rejects_bad_values_and_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(dir.path(), r#"{"serve": {"port": 8000}}"#);
+        let before = std::fs::read(&path).unwrap();
+        for (key, bad) in [
+            (SERVE_PORT, serde_json::json!(0)),
+            (SERVE_PORT, serde_json::json!(70000)),
+            (SERVE_PORT, serde_json::json!("80")),
+            (SERVE_LAN, serde_json::json!("yes")),
+            (SERVE_WATCH_COST, serde_json::json!(1)),
+            (SERVE_ALLOW_HOST, serde_json::json!("naru.local")),
+            (SERVE_ALLOW_HOST, serde_json::json!([""])),
+            (SERVE_ALLOW_HOST, serde_json::json!(["a b"])),
+            (SERVE_ALLOW_HOST, serde_json::json!(["http://x"])),
+            (SERVE_ALLOW_HOST, serde_json::json!(["x:80"])),
+        ] {
+            let err = save_serve_in(&path, &serve_updates(&[(key, Some(bad))])).unwrap_err();
+            assert!(matches!(err, SaveError::Validation(_)), "{key}");
+        }
+        let err = save_serve_in(&path, &serve_updates(&[("nope", None)])).unwrap_err();
+        assert!(matches!(err, SaveError::Validation(_)));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn serve_section_hand_edited_bad_value_falls_back_for_that_key_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(
+            dir.path(),
+            r#"{"serve": {"port": 99999, "lan": "yes", "watch-cost": true, "allow-host": ["a b"]}}"#,
+        );
+        let got = read_serve(&path).unwrap();
+        assert_eq!(got.port, None);
+        assert_eq!(got.lan, None);
+        assert_eq!(got.allow_host, None);
+        assert_eq!(got.watch_cost, Some(true));
+    }
+
     #[test]
     fn each_saver_preserves_the_other_sections_and_unknown_ones() {
         let dir = tempfile::tempdir().unwrap();
@@ -5741,6 +6026,7 @@ mod tests {
                  "commands": {"inbox-watcher": "mytool triage {id}"},
                  "pricing": {"claude-opus": {"input": 1, "output": 2, "cache_read": 3, "cache_write": 4}},
                  "watchers": {"todo-concurrency": 4},
+                 "serve": {"port": 8123},
                  "speech": {"voice": "bm_george"},
                  "listen": {"model": "parakeet-tdt-0.6b-v2-int8"},
                  "audio": {"engine": "naru-audio"},
@@ -5763,6 +6049,7 @@ mod tests {
             );
             assert_eq!(root["audio"][ENGINE], "naru-audio", "{label}");
             assert_eq!(root["future"]["x"], 1, "{label}");
+            assert_eq!(root["serve"][SERVE_PORT], 8123, "{label}");
             root
         };
 

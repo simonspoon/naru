@@ -4,7 +4,8 @@
 # and the Agents surface's spawn route — that every hook runs as one bash
 # script with its values quoted in (mesa task 1143), and that a missing or
 # broken config behaves the way docs/config.md says. It also covers the
-# pricing, watchers, keymap, speech, live and listen sections that share the
+# pricing, watchers, serve (mesa task 1621: every `serve` flag as a config
+# key, a flag beating it), keymap, speech, live and listen sections that share the
 # same file — the last of these (mesa task 955) names the model `live transcribe`
 # runs the external `auris` binary with, the input-side mirror of `speech`'s
 # `kokoro-rs` voice.
@@ -745,6 +746,116 @@ CODE=$(curl -s -o "$TMP/body" -w '%{http_code}' -X PUT -H 'Host: evil.example' \
 [ "$CODE" = "403" ] || fail "PUT watchers with a foreign Host: expected 403, got $CODE: $(cat "$TMP/body")"
 [ "$(cat "$CONFIG")" = "$BEFORE" ] || fail "a refused watchers PUT must not touch the file"
 ok "both watchers verbs sit behind the config routes' gate — a request that isn't from this machine's own page is refused, writing nothing"
+
+# ---- the serve section: GET/PUT /api/config/serve (mesa task 1621) ----
+#
+# Every `naru serve` flag as a config key. The server under test was started
+# with --port, --watch-todo and --watch-inbox, so those three report a `flag`
+# (the command line wins) and the rest do not.
+
+write_config <<EOF2
+{"other": {"x": 1}, "commands": {"todo-watcher": "$STUB_DIR/mytool dispatch {id}"}, "watchers": {"todo-concurrency": 3}}
+EOF2
+api GET /api/config/serve
+[ "$CODE" = "200" ] || fail "GET serve: expected 200, got $CODE: $STDOUT"
+[ "$(jq -r '.port.value' <<<"$STDOUT")" = "null" ] || fail "unconfigured port must report null: $STDOUT"
+[ "$(jq -r '.port.default' <<<"$STDOUT")" = "7770" ] || fail "port default wrong: $STDOUT"
+[ "$(jq -r '.port.effective' <<<"$STDOUT")" = "$PORT" ] || fail "effective port must be the running one: $STDOUT"
+[ "$(jq -r '.port.flag' <<<"$STDOUT")" = "$PORT" ] || fail "--port must be reported as the pinning flag: $STDOUT"
+[ "$(jq -r '.watch_todo.flag, .watch_inbox.flag, .watch_cost.flag, .lan.flag' <<<"$STDOUT" | tr '\n' ' ')" = "true true null null " ] ||
+  fail "flag pins wrong: $STDOUT"
+[ "$(jq -r '.allow_host.value, .allow_host.flag' <<<"$STDOUT" | tr '\n' ' ')" = "null null " ] ||
+  fail "unconfigured allow_host wrong: $STDOUT"
+[ "$(jq -r .restart_required <<<"$STDOUT")" = "false" ] || fail "fresh config needs no restart: $STDOUT"
+ok "GET /api/config/serve reports defaults, the running port and which settings a command-line flag pins"
+
+api PUT /api/config/serve '{"port": 17786, "lan": true, "allow_host": [" Naru.Local "], "watch_cost": true}'
+[ "$CODE" = "200" ] || fail "PUT serve: expected 200, got $CODE: $STDOUT"
+[ "$(jq -r '.port.value' <<<"$STDOUT")" = "17786" ] || fail "PUT must echo the stored port: $STDOUT"
+[ "$(jq -r '.allow_host.value[0]' <<<"$STDOUT")" = "naru.local" ] || fail "host must be trimmed and lowercased: $STDOUT"
+[ "$(jq -r '.watch_cost.value, .watch_cost.effective' <<<"$STDOUT" | tr '\n' ' ')" = "true true " ] ||
+  fail "watch_cost wrong: $STDOUT"
+[ "$(jq -r '.restart_required' <<<"$STDOUT")" = "true" ] ||
+  fail "a config lan/hosts differing from the running process must need a restart: $STDOUT"
+[ "$(jq -r '.serve["allow-host"][0]' < "$CONFIG")" = "naru.local" ] || fail "kebab key not written: $(cat "$CONFIG")"
+[ "$(jq -r '.commands["todo-watcher"]' < "$CONFIG")" = "$STUB_DIR/mytool dispatch {id}" ] ||
+  fail "a serve write clobbered commands: $(cat "$CONFIG")"
+[ "$(jq -r '.watchers["todo-concurrency"]' < "$CONFIG")" = "3" ] || fail "a serve write clobbered watchers: $(cat "$CONFIG")"
+[ "$(jq -r '.other.x' < "$CONFIG")" = "1" ] || fail "a serve write dropped an unknown section: $(cat "$CONFIG")"
+ok "PUT /api/config/serve stores the kebab keys, normalizes hosts, flags a needed restart and leaves other sections alone"
+
+api PUT /api/config '{"commands": {"inbox-watcher": "mytool triage {id}"}}'
+[ "$CODE" = "200" ] || fail "PUT commands after serve: expected 200, got $CODE: $STDOUT"
+api PUT /api/config/watchers '{"todo_concurrency": 4}'
+[ "$CODE" = "200" ] || fail "PUT watchers after serve: expected 200, got $CODE: $STDOUT"
+[ "$(jq -r '.serve.port' < "$CONFIG")" = "17786" ] || fail "another section's write clobbered serve: $(cat "$CONFIG")"
+ok "saving commands or watchers preserves the serve section"
+
+api PUT /api/config/serve '{"lan": null, "allow_host": null, "watch_cost": null}'
+[ "$CODE" = "200" ] || fail "PUT serve null: expected 200, got $CODE: $STDOUT"
+[ "$(jq -r '.serve | has("lan"), has("allow-host"), has("watch-cost"), has("port")' < "$CONFIG" | tr '\n' ' ')" = "false false false true " ] ||
+  fail "null must remove exactly the named keys: $(cat "$CONFIG")"
+[ "$(jq -r .restart_required <<<"$STDOUT")" = "false" ] || fail "restart_required must clear once config matches the run: $STDOUT"
+ok "PUT null removes the key, restoring its default"
+
+BEFORE=$(cat "$CONFIG")
+for bad in '{"port": 0}' '{"port": 65536}' '{"port": "80"}' '{"port": 1.5}' '{"lan": "yes"}' \
+  '{"watch_todo": 1}' '{"allow_host": "naru.local"}' '{"allow_host": [""]}' '{"allow_host": ["a b"]}' \
+  '{"allow_host": ["http://x"]}' '{"allow_host": ["x:80"]}' '{"watch_cost": true, "port": -1}'; do
+  api PUT /api/config/serve "$bad"
+  [ "$CODE" = "422" ] || fail "serve $bad: expected 422, got $CODE: $STDOUT"
+  [ "$(jq -r .error.code <<<"$STDOUT")" = "validation" ] || fail "serve $bad: expected validation, got $STDOUT"
+  [ "$(cat "$CONFIG")" = "$BEFORE" ] || fail "a rejected serve PUT ($bad) must not touch the file: $(cat "$CONFIG")"
+done
+ok "PUT /api/config/serve rejects every bad value as 422 validation, writing nothing"
+
+CODE=$(curl -s -o "$TMP/body" -w '%{http_code}' -H 'Host: evil.example' \
+  "http://127.0.0.1:$PORT/api/config/serve")
+[ "$CODE" = "403" ] || fail "GET serve with a foreign Host: expected 403, got $CODE"
+CODE=$(curl -s -o "$TMP/body" -w '%{http_code}' -X PUT -H 'Host: evil.example' \
+  -H 'Content-Type: application/json' --data '{"port": 9}' "http://127.0.0.1:$PORT/api/config/serve")
+[ "$CODE" = "403" ] || fail "PUT serve with a foreign Host: expected 403, got $CODE"
+[ "$(cat "$CONFIG")" = "$BEFORE" ] || fail "a refused serve PUT must not touch the file"
+ok "both serve verbs sit behind the config routes' gate, writing nothing when refused"
+
+# A bare `serve` takes its port from the config; a --port flag beats it. These
+# run beside the first server (which keeps the watchers' state), with no
+# watcher keys set, so they dispatch nothing.
+trap 'rm -rf "$TMP"; for p in "${SERVER_PID:-}" "${SERVER2_PID:-}"; do [ -n "$p" ] && kill "$p" 2>/dev/null; done; true' EXIT
+api_up() { # api_up <port> -> waits for /api/projects
+  for _ in $(seq 1 100); do
+    curl -sf "http://127.0.0.1:$1/api/projects" >/dev/null 2>&1 && return 0
+    sleep 0.1
+  done
+  return 1
+}
+stop2() { kill "$SERVER2_PID" 2>/dev/null || true; wait "$SERVER2_PID" 2>/dev/null || true; SERVER2_PID=; }
+write_config <<EOF2
+{"serve": {"port": 17786}}
+EOF2
+HOME="$FAKE_HOME" "$MESA" serve >/dev/null 2>&1 &
+SERVER2_PID=$!
+api_up 17786 || fail "a bare serve with serve.port set did not answer on the configured port"
+PORT=17786 api GET /api/config/serve
+[ "$(jq -r '.port.effective, .port.flag' <<<"$STDOUT" | tr '\n' ' ')" = "17786 null " ] ||
+  fail "bare serve: port should come from the config with no flag: $STDOUT"
+stop2
+ok "a bare \`serve\` answers on the port the config names"
+
+HOME="$FAKE_HOME" "$MESA" serve --port 17787 >/dev/null 2>&1 &
+SERVER2_PID=$!
+api_up 17787 || fail "serve --port did not answer on the flag's port"
+curl -sf "http://127.0.0.1:17786/api/projects" >/dev/null 2>&1 && fail "the config port must not be bound when --port overrides it"
+PORT=17787 api GET /api/config/serve
+[ "$(jq -r '.port.effective, .port.flag, .port.value' <<<"$STDOUT" | tr '\n' ' ')" = "17787 17787 17786 " ] ||
+  fail "--port must beat the config and be reported as the pin: $STDOUT"
+stop2
+ok "--port on the command line beats the config's serve.port"
+
+# Put the config back to what the sections below expect.
+write_config <<EOF2
+{"other": {"x": 1}, "commands": {"todo-watcher": "$STUB_DIR/mytool dispatch {id}"}, "pricing": {"claude-opus": {"input": 1, "output": 2, "cache_read": 3, "cache_write": 4}}}
+EOF2
 
 # ---- the keymap section: GET/PUT /api/config/keymap (mesa task 1079) ----
 #

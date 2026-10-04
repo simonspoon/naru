@@ -36,7 +36,7 @@ export function WorkflowsPanel({ projectId }: { projectId: number | null }) {
           <button type="button" className="dock-workflows-back" onClick={() => setOpen(null)}>
             ← workflows
           </button>
-          <WorkflowBuilderView projectId={projectId} workflowId={showing} onDeleted={() => setOpen(null)} />
+          <WorkflowBuilderView key={showing} projectId={projectId} workflowId={showing} onDeleted={() => setOpen(null)} />
         </>
       ) : (
         <WorkflowListView projectId={projectId} />

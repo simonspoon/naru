@@ -563,6 +563,14 @@ pub fn execute_run<A: StoreAccess>(
             );
             continue;
         };
+        // Show the node as in flight; best-effort, the final `finish` is
+        // authoritative. One brief lock, released before the node's process.
+        steps.push(WorkflowStep {
+            status: WorkflowStepStatus::Running,
+            ..skipped(node)
+        });
+        let _ = access.with(|s| s.update_workflow_run_steps(run.id, &steps));
+        steps.pop();
         let started = Instant::now();
         let result = run_node(access, view, node, &input, &cwd, run.id, id == trigger_id);
         let duration_ms = started.elapsed().as_millis() as i64;
@@ -599,6 +607,7 @@ pub fn execute_run<A: StoreAccess>(
                 verdict,
             },
         );
+        let _ = access.with(|s| s.update_workflow_run_steps(run.id, &steps));
     }
     match failure {
         Some(message) => finish(WorkflowRunStatus::Failed, &steps, Some(&message)),
@@ -1697,12 +1706,38 @@ mod tests {
             );
             // Reconcile: ours (pid 1 here) and dead owners close; a live foreign one stays.
             s.force_run_owner_for_test(running.id, 424242);
+            let step = |status| WorkflowStep {
+                node_id: 1,
+                title: "n".into(),
+                kind: WorkflowNodeKind::Cli,
+                status,
+                output: String::new(),
+                error: None,
+                duration_ms: 0,
+            };
+            s.update_workflow_run_steps(
+                running.id,
+                &[
+                    step(WorkflowStepStatus::Ok),
+                    step(WorkflowStepStatus::Running),
+                ],
+            )
+            .unwrap();
             assert!(s.reconcile_workflow_runs(1, |_| true).unwrap().is_empty());
             let closed = s.reconcile_workflow_runs(1, |_| false).unwrap();
             assert_eq!(closed, vec![running.id]);
             let r = s.get_workflow_run(running.id).unwrap();
             assert_eq!(r.status, WorkflowRunStatus::Failed);
             assert!(r.error.unwrap().contains("server restarted"));
+            assert_eq!(r.steps[0].status, WorkflowStepStatus::Ok);
+            assert_eq!(r.steps[1].status, WorkflowStepStatus::Failed);
+            assert!(
+                r.steps[1]
+                    .error
+                    .as_deref()
+                    .unwrap()
+                    .contains("server restarted")
+            );
         });
     }
 

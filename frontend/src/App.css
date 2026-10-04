@@ -1521,6 +1521,23 @@ main {
   box-shadow: 0 0 0 2px var(--green);
 }
 
+.wf-node.step-running {
+  box-shadow: 0 0 0 2px var(--amber);
+  animation: wf-step-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes wf-step-pulse {
+  50% {
+    box-shadow: 0 0 0 4px var(--amber);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wf-node.step-running {
+    animation: none;
+  }
+}
+
 .wf-node.step-failed {
   box-shadow: 0 0 0 2px var(--red);
 }
@@ -1733,6 +1750,10 @@ main {
 
 .workflow-step.step-ok {
   border-left-color: var(--green);
+}
+
+.workflow-step.step-running {
+  border-left-color: var(--amber);
 }
 
 .workflow-step.step-failed {
@@ -4140,7 +4161,8 @@ body.live-panel-ratio-resizing {
   flex: 1;
   width: 100%;
   border: none;
-  background: #fff;
+  color-scheme: dark;
+  background: var(--bg);
 }
 
 .artifact-markdown-preview {
@@ -8745,9 +8767,9 @@ body.live-panel-ratio-resizing .live-panel-divider {
   background: var(--bg);
 }
 
-/* On white, always: an HTML mockup is written for a page, not for this app's
-   dark shell, and the frame is an opaque origin whose document mesa does not
-   style. Only an `html` board is framed — a diagram is an `<img>` since mesa
+/* Dark behind the document (mesa task 1615): the render route appends the
+   same canvas and text as zero-specificity defaults, so a mockup that sets its
+   own background still wins. Only an `html` board is framed — a diagram is an `<img>` since mesa
    task 1353. */
 .live-board-frame {
   flex: 1;

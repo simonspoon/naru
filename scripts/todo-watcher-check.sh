@@ -1130,4 +1130,59 @@ run_guard 0 "$GUARD_STUB" --status done
 [ "$(jqs .status)" = "done" ] || fail "no running work must allow the close"
 ok "once the shell child is gone the close is allowed"
 
+# ---- live toggle from the config's `serve` section (mesa task 1621) ----
+#
+# A server started WITHOUT --watch-todo has the loop running but idle. Setting
+# serve.watch-todo in the config turns it on, and clearing it turns it off
+# again, with no restart. Its own db, config and port, so the servers above
+# cannot dispatch for it.
+LIVE_DB="$TMP/live.db"
+LIVE_CFG="$TMP/live-config.json"
+mkdir -p "$TMP/projL"
+DIR_L=$(cd "$TMP/projL" && pwd -P)
+LIVE_PORT=17795
+live_mesa() { MESA_DB="$LIVE_DB" MESA_CONFIG_FILE="$LIVE_CFG" "$MESA" "$@"; }
+live_api() { # live_api <method> <path> <json>
+  curl -s -o "$TMP/live-body" -w '%{http_code}' -X "$1" -H 'Content-Type: application/json' \
+    --data "$3" "http://127.0.0.1:$LIVE_PORT$2"
+}
+echo '{"serve": {"watch-todo": true}}' > "$LIVE_CFG"
+STDOUT=$(live_mesa project create L --no-git); LP=$(jq -r .id <<<"$STDOUT")
+live_mesa project update "$LP" --path "$DIR_L" >/dev/null
+MESA_DB="$LIVE_DB" MESA_CONFIG_FILE="$LIVE_CFG" MESA_CLAUDE_BIN="$STUB_DIR/claude" \
+  MESA_WATCH_TODO_TICK_MS=150 "$MESA" serve --port "$LIVE_PORT" >/dev/null 2>&1 &
+SERVER_PID=$!
+wait_for_server "$LIVE_PORT"
+STDOUT=$(live_mesa task create "$LP" "live one"); LT1=$(jq -r .id <<<"$STDOUT")
+for _ in $(seq 1 50); do
+  [ "$(live_mesa task show "$LT1" | jq -r .status)" = "in_progress" ] && break
+  sleep 0.1
+done
+[ "$(live_mesa task show "$LT1" | jq -r .status)" = "in_progress" ] ||
+  fail "serve.watch-todo in the config must start dispatching with no flag"
+ok "a server started without --watch-todo dispatches once the config's serve.watch-todo is true"
+
+CODE=$(live_api PUT /api/config/serve '{"watch_todo": false}')
+[ "$CODE" = "200" ] || fail "PUT serve watch_todo false: expected 200, got $CODE: $(cat "$TMP/live-body")"
+sleep 0.5  # let any tick already in flight finish
+LIVE_LINES=$(wc -l < "$BG_LOG")
+live_mesa task update "$LT1" --status done >/dev/null
+STDOUT=$(live_mesa task create "$LP" "live two"); LT2=$(jq -r .id <<<"$STDOUT")
+sleep 1.5  # ten ticks
+[ "$(live_mesa task show "$LT2" | jq -r .status)" = "todo" ] ||
+  fail "after serve.watch-todo is turned off the task must stay todo"
+[ "$(wc -l < "$BG_LOG")" = "$LIVE_LINES" ] || fail "a disabled watcher must dispatch nothing"
+ok "turning serve.watch-todo off through PUT /api/config/serve stops dispatching within a tick, no restart"
+
+CODE=$(live_api PUT /api/config/serve '{"watch_todo": true}')
+[ "$CODE" = "200" ] || fail "PUT serve watch_todo true: expected 200, got $CODE"
+for _ in $(seq 1 50); do
+  [ "$(live_mesa task show "$LT2" | jq -r .status)" = "in_progress" ] && break
+  sleep 0.1
+done
+[ "$(live_mesa task show "$LT2" | jq -r .status)" = "in_progress" ] ||
+  fail "turning serve.watch-todo back on must resume dispatching"
+ok "turning it back on resumes dispatching"
+kill "$SERVER_PID" 2>/dev/null || true; SERVER_PID=
+
 echo "ALL OK ($CHECKS checks)"

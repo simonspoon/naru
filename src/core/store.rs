@@ -16,7 +16,7 @@ use super::types::{
     RetroFinding, RetroRun, RetroStatus, Script, ScriptArg, ScriptArgKind, ScriptRunRecord,
     ScriptRunStatus, Status, Task, TaskEvent, TaskReceipt, Workflow, WorkflowBranch, WorkflowEdge,
     WorkflowLogEntry, WorkflowNode, WorkflowNodeKind, WorkflowRun, WorkflowRunStatus, WorkflowStep,
-    WorkflowTrigger, WorkflowView, is_valid_artifact_content_type, task_name,
+    WorkflowStepStatus, WorkflowTrigger, WorkflowView, is_valid_artifact_content_type, task_name,
 };
 
 #[derive(Debug)]
@@ -5235,13 +5235,13 @@ impl Store {
     ) -> Result<Vec<i64>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, owner_pid FROM workflow_runs WHERE status = 'running'")?;
-        let rows: Vec<(i64, Option<i64>)> = stmt
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .prepare("SELECT id, owner_pid, steps FROM workflow_runs WHERE status = 'running'")?;
+        let rows: Vec<(i64, Option<i64>, String)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(stmt);
         let mut closed = Vec::new();
-        for (id, owner) in rows {
+        for (id, owner, steps) in rows {
             let abandoned = match owner {
                 None => true,
                 Some(pid) => pid == our_pid || !live(pid),
@@ -5249,10 +5249,25 @@ impl Store {
             if !abandoned {
                 continue;
             }
+            // A node that was in flight when the run was orphaned never ends;
+            // fail its step so nothing keeps showing it as running.
+            let steps = match serde_json::from_str::<Vec<WorkflowStep>>(&steps) {
+                Ok(mut v) => {
+                    for st in v
+                        .iter_mut()
+                        .filter(|st| st.status == WorkflowStepStatus::Running)
+                    {
+                        st.status = WorkflowStepStatus::Failed;
+                        st.error = Some(WORKFLOW_RUN_ABANDONED.into());
+                    }
+                    serde_json::to_string(&v).unwrap_or(steps)
+                }
+                Err(_) => steps,
+            };
             self.conn.execute(
-                "UPDATE workflow_runs SET status = 'failed', error = ?1, \
-                 finished_at = datetime('now') WHERE id = ?2 AND status = 'running'",
-                (WORKFLOW_RUN_ABANDONED, id),
+                "UPDATE workflow_runs SET status = 'failed', error = ?1, steps = ?2, \
+                 finished_at = datetime('now') WHERE id = ?3 AND status = 'running'",
+                (WORKFLOW_RUN_ABANDONED, steps, id),
             )?;
             closed.push(id);
         }
@@ -5287,6 +5302,19 @@ impl Store {
             )));
         }
         self.get_workflow_run(id)
+    }
+
+    /// Persists a still-running run's steps so far (the live run view). A run
+    /// already finished is left alone; the final `finish_workflow_run` write
+    /// stays authoritative.
+    pub fn update_workflow_run_steps(&mut self, id: i64, steps: &[WorkflowStep]) -> Result<()> {
+        let steps = serde_json::to_string(steps)
+            .map_err(|e| Error::Validation(format!("steps are not serializable: {e}")))?;
+        self.conn.execute(
+            "UPDATE workflow_runs SET steps = ?1 WHERE id = ?2 AND status = 'running'",
+            (steps, id),
+        )?;
+        Ok(())
     }
 
     pub fn get_workflow_run(&self, id: i64) -> Result<WorkflowRun> {
@@ -6090,6 +6118,22 @@ impl Store {
         self.conn.execute(
             "UPDATE live_sessions SET speaker_seen_at = datetime('now') \
              WHERE id = ?1 AND speaker = ?2",
+            (id, &client),
+        )?;
+        Ok(())
+    }
+
+    /// Lets go of a claim on purpose (mesa task 1622): a client that is the
+    /// speaker clears `speaker` and `speaker_seen_at`, so the voice is free at
+    /// once rather than after the ten seconds a closed client's claim takes
+    /// to go stale. A client that is not the speaker changes nothing, so a
+    /// device that already lost the voice cannot take it down with it. The
+    /// session itself is never touched beyond the claim.
+    pub fn release_live_speaker(&mut self, id: i64, client: &str) -> Result<()> {
+        let client = validate_live_client(client)?;
+        self.conn.execute(
+            "UPDATE live_sessions SET speaker = NULL, speaker_seen_at = NULL, \
+             updated_at = datetime('now') WHERE id = ?1 AND speaker = ?2",
             (id, &client),
         )?;
         Ok(())
@@ -14072,6 +14116,29 @@ mod tests {
             .claim_live_speaker(session.id, "the-tab-left")
             .unwrap();
         assert_eq!(taken.speaker.as_deref(), Some("the-tab-left"));
+    }
+
+    /// Leaving releases the voice at once (mesa task 1622) — but only the
+    /// leaver's own claim, and never the session.
+    #[test]
+    fn releasing_the_speaker_frees_only_the_claim_it_holds() {
+        let (mut store, _dir) = temp_store();
+        let session = store.start_live_session(None).unwrap();
+        store.claim_live_speaker(session.id, "tab-a").unwrap();
+
+        store.release_live_speaker(session.id, "tab-b").unwrap();
+        let kept = store.get_live_session(session.id).unwrap();
+        assert_eq!(kept.speaker.as_deref(), Some("tab-a"));
+
+        store.release_live_speaker(session.id, "tab-a").unwrap();
+        let freed = store.get_live_session(session.id).unwrap();
+        assert_eq!(freed.speaker, None);
+        assert_eq!(freed.status, LiveStatus::Live);
+        // Idempotent: a second release is still fine.
+        store.release_live_speaker(session.id, "tab-a").unwrap();
+        // And the voice is takeable straight away.
+        let taken = store.claim_live_speaker(session.id, "tab-b").unwrap();
+        assert_eq!(taken.speaker.as_deref(), Some("tab-b"));
     }
 
     /// Naru's turns are written as `naru` (mesa task 1319), but a row an

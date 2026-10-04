@@ -84,6 +84,15 @@ import { elapsedLabel, endsInHead } from '../liveHead'
 import { headMeta, quietHint, taskHash, taskSegments, turnClock } from '../liveChat'
 import { headerIndicator } from '../liveIndicator'
 import {
+  IDLE,
+  armedState,
+  MAX_ARMED_MS,
+  createThinkingCue,
+  nextThinking,
+  type ThinkingCue,
+  type ThinkingState,
+} from '../liveThinkingCue'
+import {
   buildVocabulary,
   correctVocabulary,
   isBlockingError,
@@ -192,6 +201,7 @@ import type { LiveWindow } from '../types/LiveWindow'
 import type { TranscribeStatus } from '../types/TranscribeStatus'
 import { isNearBottom, newSince } from '../liveScroll'
 import { useFetch } from '../useFetch'
+import { detectNativeHost, installNativeHost } from '../nativeHost'
 
 /**
  * Mesa Live, in the header (mesa tasks 855, 857): the whole conversation lives
@@ -982,6 +992,17 @@ export function LiveHub({
     mutedRef.current = next
     setMuted(next)
   }, [])
+  // The native host (mesa task 1628, `nativeHost.ts`): a WKWebView app that
+  // owns the microphone. Decided once; `null` in every plain browser, where
+  // every branch below on it is skipped and nothing changes. When present the
+  // page opens no `getUserMedia` anywhere and `muted` is what the host reports.
+  const [native] = useState(() => detectNativeHost(window as unknown as Record<string, unknown>))
+  useEffect(() => {
+    if (native === null) return
+    return installNativeHost(window as unknown as Record<string, unknown>, native, (state) => {
+      if (state.muted !== undefined) setMutedNow(state.muted)
+    })
+  }, [native, setMutedNow])
   // The engine still guessing. Shown, and sent only as the tail of a flush
   // (`liveRecognition.ts`). The ref is what the listen switch reads: it flips
   // from a press, outside the render that last set this.
@@ -1129,13 +1150,18 @@ export function LiveHub({
   // *answered* — because opening the wrong engine for the probe's one fetch
   // and tearing it down a beat later is a real cost (a flashed permission
   // prompt, a microphone opened and closed) that a render label is not.
-  const path: ListenPath = listenPath({
-    transcribes: transcribes === true,
-    captures,
-    recognizes: hasRecognizer,
-    audioEngine: audio?.engine ?? null,
-    listenEngine,
-  })
+  // A native host captures for the page, so the page is always capable of
+  // listening and the hints and controls read as the `auris` path would.
+  const path: ListenPath =
+    native !== null
+      ? 'auris'
+      : listenPath({
+          transcribes: transcribes === true,
+          captures,
+          recognizes: hasRecognizer,
+          audioEngine: audio?.engine ?? null,
+          listenEngine,
+        })
   // `'unavailable'` keeps the microphone shut exactly as `'none'` does; the
   // banner below is what tells the two apart.
   const supported = path !== 'none' && path !== 'unavailable'
@@ -1630,6 +1656,17 @@ export function LiveHub({
   // unlocked.
   const player = useRef<HTMLAudioElement | null>(null)
   const clock = useRef<AudioContext | null>(null)
+  // The audible "thinking" cue (mesa task 1620): a chime when a user turn is
+  // posted, then a quiet pulse until Naru's speech plays. Decisions in
+  // `liveThinkingCue.ts`; this is only its context and its state.
+  const thinkingCue = useRef<ThinkingCue | null>(null)
+  const [thinking, setThinking] = useState<ThinkingState>(IDLE)
+  const thinkingRef = useRef<ThinkingState>(IDLE)
+  const speakingRef = useRef(false)
+  useEffect(() => {
+    thinkingRef.current = thinking
+    speakingRef.current = speaking
+  }, [thinking, speaking])
   const decoded = useRef<SpeechStream | null>(null)
   // The request the audio is arriving on. Held outside the stream because the
   // route answers only once the synthesiser has audio: until then there is no
@@ -1889,10 +1926,16 @@ export function LiveHub({
   const micOpenedFor = useRef<number | null>(null)
   useEffect(() => {
     const id = session?.id ?? null
-    if (id === null || !unlocked || micOpenedFor.current === id) return
+    // The native host decides whether it is listening; the page never opens it.
+    if (native !== null || id === null || !unlocked || micOpenedFor.current === id) return
     micOpenedFor.current = id
     setMutedNow(false)
-  }, [session?.id, unlocked, setMutedNow])
+  }, [session?.id, unlocked, setMutedNow, native])
+  // Tell the native host which conversation to capture for.
+  const sessionId = session?.id ?? null
+  useEffect(() => {
+    native?.post({ type: 'state', session: sessionId, live, joined: unlocked })
+  }, [native, sessionId, live, unlocked])
 
   // The recognizer's handlers are set once per start and post sentences long
   // after the render that installed them, so they read through a ref rather
@@ -1920,7 +1963,7 @@ export function LiveHub({
    */
   const listInputs = useCallback(() => {
     const media = navigator.mediaDevices
-    if (!media?.enumerateDevices) return
+    if (native !== null || !media?.enumerateDevices) return
     media
       .enumerateDevices()
       .then((devices) => {
@@ -1931,7 +1974,7 @@ export function LiveHub({
       // what an empty list says, and there is nothing else worth reporting:
       // the conversation still listens through the default.
       .catch(() => setInputs([]))
-  }, [])
+  }, [native])
 
   useEffect(() => {
     if (!supported) return
@@ -1955,7 +1998,7 @@ export function LiveHub({
   // `getUserMedia` at all, so there is nothing to probe there — hence `true`
   // rather than the state below whenever `path !== 'browser'`.
   const choosesInput = offersInputChoice({
-    supported,
+    supported: supported && native === null,
     routes: path === 'browser' ? routes : true,
     inputs,
   })
@@ -2165,8 +2208,10 @@ export function LiveHub({
         setInterimNow('')
       }
       setMutedNow(next)
+      // The press is also the host's to hear; its `setMicState` is the last word.
+      native?.post({ type: 'mic', muted: next })
     },
-    [claimVoice, setRecordingNow, setInterimNow, setMutedNow],
+    [claimVoice, setRecordingNow, setInterimNow, setMutedNow, native],
   )
 
   // The chord that opens and shuts the microphone (mesa task 887). A window
@@ -2391,7 +2436,7 @@ export function LiveHub({
   // guess *would* otherwise open a real microphone a beat before tearing it
   // down once the probe corrected it.
   useEffect(() => {
-    if (!wantsMic || transcribes === null || path !== 'auris' || streams) return
+    if (native !== null || !wantsMic || transcribes === null || path !== 'auris' || streams) return
     let running = true
     // The stretch this run hears in (mesa task 1354): once the discard key
     // ends it, nothing this run heard is the person's to send.
@@ -2624,6 +2669,7 @@ export function LiveHub({
       if (cap.blobUrl) URL.revokeObjectURL(cap.blobUrl)
     }
   }, [
+    native,
     wantsMic,
     transcribes,
     path,
@@ -2669,7 +2715,7 @@ export function LiveHub({
   //   no dependency, so the person's listen switch is: off and on re-runs
   //   this effect and reconnects.
   useEffect(() => {
-    if (!wantsMic || transcribes === null || path !== 'auris' || !streams) return
+    if (native !== null || !wantsMic || transcribes === null || path !== 'auris' || !streams) return
     let running = true
     const stretch = discardsRef.current!.current
     const discarded = () => discardsRef.current!.isDiscarded(stretch)
@@ -2864,6 +2910,7 @@ export function LiveHub({
       if (cap.blobUrl) URL.revokeObjectURL(cap.blobUrl)
     }
   }, [
+    native,
     wantsMic,
     transcribes,
     path,
@@ -2916,7 +2963,7 @@ export function LiveHub({
   // `paused` keeps the main effect from reopening the microphone in its
   // place.
   useEffect(() => {
-    if (!wantsBargeIn || transcribes === null || path !== 'auris') return
+    if (native !== null || !wantsBargeIn || transcribes === null || path !== 'auris') return
     let running = true
     let stream: MediaStream | null = null
     let ctx: AudioContext | null = null
@@ -3016,7 +3063,7 @@ export function LiveHub({
       stream?.getTracks().forEach((t) => t.stop())
       if (blobUrl) URL.revokeObjectURL(blobUrl)
     }
-  }, [wantsBargeIn, transcribes, path, chosen])
+  }, [native, wantsBargeIn, transcribes, path, chosen])
 
   // The browser's own ears — this module's original path (mesa task 873),
   // restored rather than deleted by mesa task 956 and now the fallback for a
@@ -3041,7 +3088,7 @@ export function LiveHub({
   // on top of `path`, even though `path` alone would already have been
   // `'browser'`.
   useEffect(() => {
-    if (!wantsMic || transcribes === null || path !== 'browser') return
+    if (native !== null || !wantsMic || transcribes === null || path !== 'browser') return
     const Recognizer = recognitionCtor(window as unknown as Record<string, unknown>)
     if (Recognizer === null) return
     // This effect's own run. A recognizer stopped by the cleanup below still
@@ -3278,7 +3325,7 @@ export function LiveHub({
       current?.stop()
       stream?.getTracks().forEach((t) => t.stop())
     }
-  }, [wantsMic, transcribes, path, chosen, listInputs, markHeard, setInterimNow, setRecordingNow])
+  }, [native, wantsMic, transcribes, path, chosen, listInputs, markHeard, setInterimNow, setRecordingNow])
 
   // The run: the oldest mesa turn nobody has played, one at a time. A turn that
   // navigates moves the browser when it is *reached*, whether or not it also
@@ -3876,6 +3923,23 @@ export function LiveHub({
   }
 
   /**
+   * Chime and arm the thinking cue (mesa task 1620). Called from a promise
+   * callback, so it reads the live state through refs. Once per utterance: a
+   * recording flushed as several posts arms on its carrier piece, or on any
+   * piece while the cue is not yet armed. Not while Naru is speaking or the
+   * page is paused — the cue would start over speech or a silenced page.
+   */
+  function armThinking(carriesMedia: boolean) {
+    const ctx = clock.current
+    if (ctx === null || ctx.state !== 'running') return
+    if (speakingRef.current || pausedRef.current) return
+    if (thinkingRef.current.armed && !carriesMedia) return
+    thinkingCue.current ??= createThinkingCue(ctx)
+    thinkingCue.current.chime()
+    setThinking(armedState(held.current))
+  }
+
+  /**
    * The one way an utterance leaves this page — typed, or heard. Returns the
    * request so a flush of more than one turn can send them **in order**: a
    * recording that had to be split is still one thing the person said, and
@@ -3914,6 +3978,7 @@ export function LiveHub({
         png_base64: stagedImage!.png_base64,
       }).then(
         () => {
+          armThinking(carriesMedia)
           setPastedImage(null)
           refetch()
         },
@@ -3943,6 +4008,7 @@ export function LiveHub({
       })
       .then(
         ({ carried, dropped }) => {
+          armThinking(carriesMedia)
           if (carried !== null) {
             updateInk((book) => markInkSent(book, carried.boardId, carried.strokes, carried.images))
           }
@@ -4025,6 +4091,33 @@ export function LiveHub({
     // agent may have left on the row.
     resting: session?.resting_since != null,
   })
+
+  // The thinking cue (mesa task 1620): `nextThinking` decides when it is
+  // over (speech, pause, end, leaving, or work finished with nothing to say);
+  // the pulse follows `armed`, with a cap for a session nothing answers.
+  const working = session?.working_since != null
+  const thinkingNext = nextThinking(thinking, {
+    live,
+    joined: unlocked,
+    paused,
+    speaking,
+    working,
+    turns,
+    ownsVoice: (turn) =>
+      spokenTurnVerdict(turn, session?.speaker ?? null, client, speechMuted) === 'speak',
+  })
+  // Derived during render (the documented adjust-state pattern): `nextThinking`
+  // returns `thinking` itself when nothing changes, so this settles at once.
+  if (thinkingNext !== thinking) setThinking(thinkingNext)
+  useEffect(() => {
+    if (!thinking.armed) return undefined
+    thinkingCue.current?.startPulse()
+    const cap = window.setTimeout(() => setThinking(IDLE), MAX_ARMED_MS)
+    return () => {
+      window.clearTimeout(cap)
+      thinkingCue.current?.stop()
+    }
+  }, [thinking.armed])
 
   const groups = turnGroups(turns)
   const replayState = (turn: LiveTurn) =>

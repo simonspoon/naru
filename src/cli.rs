@@ -154,17 +154,25 @@ enum Command {
     /// ~/.mesa/workspace (the Terminal tab), i.e. run code on this machine.
     /// Only use it on networks you trust.
     ///
+    /// Every option below is also a key of the `serve` section of
+    /// ~/.mesa/config.json (`port`, `lan`, `allow-host`, `watch-todo`, …), so a
+    /// bare `naru serve` can run as a service. A flag given on the command
+    /// line wins over the config; `--lan=false` / `--watch-todo=false` turn a
+    /// config `true` off for that run. The port, --lan and --allow-host are
+    /// read once at start; the watchers are re-read every tick, so the
+    /// Settings page toggles them live.
+    ///
     /// ~/.mesa here is Naru's config dir: ~/.naru if that exists, else ~/.mesa if that exists, else ~/.naru.
     Serve {
-        /// Port to bind
-        #[arg(long, default_value_t = 7770)]
-        port: u16,
+        /// Port to bind (default 7770, or the config's `serve.port`)
+        #[arg(long)]
+        port: Option<u16>,
         /// Make the server reachable from other devices on your local network
         /// (binds 0.0.0.0 and skips the Host-header check). No authentication:
         /// anyone on the network gets full read/write access to your data and
         /// can run code via the Agents or Terminal tabs.
-        #[arg(long, default_value_t = false)]
-        lan: bool,
+        #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true", value_name = "BOOL")]
+        lan: Option<bool>,
         /// Under --lan, also trust this exact hostname in the Host header, so
         /// you can browse the UI by name (--allow-host naru.local) instead of
         /// by an IP your router keeps reassigning. Repeatable; only meaningful
@@ -186,8 +194,8 @@ enum Command {
         /// parking the project. Off by default: this spawns real agents (API
         /// cost, code execution) with no user request behind it. Preserved
         /// across the web UI's Restart Server action.
-        #[arg(long, default_value_t = false)]
-        watch_todo: bool,
+        #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true", value_name = "BOOL")]
+        watch_todo: Option<bool>,
         /// Periodically auto-start a background `claude` agent to triage each
         /// pending item in the global inbox (default: the `inbox-triage` agent
         /// definition, configurable in ~/.mesa/config.json; cwd
@@ -197,8 +205,8 @@ enum Command {
         /// request behind it. Independent of --watch-todo. Each item is
         /// dispatched at most once per server run. Preserved across the web
         /// UI's Restart Server action.
-        #[arg(long, default_value_t = false)]
-        watch_inbox: bool,
+        #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true", value_name = "BOOL")]
+        watch_inbox: Option<bool>,
         /// Periodically check the Claude Code sessions running right now and
         /// file an inbox alert for any that crosses a cost-guard threshold —
         /// dollars, tokens, or the cache-read share that marks a spin loop
@@ -213,8 +221,8 @@ enum Command {
         /// transcripts and writes inbox items with no user request behind it.
         /// Independent of --watch-todo and --watch-inbox. Preserved across the
         /// web UI's Restart Server action.
-        #[arg(long, default_value_t = false)]
-        watch_cost: bool,
+        #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true", value_name = "BOOL")]
+        watch_cost: Option<bool>,
         /// Every `watchers.retro-interval-hours` (default 72), auto-start a
         /// background `claude` agent that reviews the task sessions finished
         /// since the last retrospective for friction and files each NEW
@@ -225,16 +233,17 @@ enum Command {
         /// agents (API cost) with no user request behind it. Independent of
         /// the other three watchers. Preserved across the web UI's Restart
         /// Server action.
-        #[arg(long, default_value_t = false)]
-        watch_retro: bool,
+        #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true", value_name = "BOOL")]
+        watch_retro: Option<bool>,
         /// Every minute, run each workflow whose trigger is `time` and which
         /// is due (no time-triggered run started in the last
         /// `every_minutes`). A run executes the workflow's shell and model
-        /// nodes with no user request behind it. Off by default; independent
-        /// of the other watchers. Preserved across the web UI's Restart
+        /// nodes with no user request behind it. On by default (the
+        /// config's `serve.watch-workflows` or `--watch-workflows=false`
+        /// turns it off); independent of the other watchers. Preserved across the web UI's Restart
         /// Server action.
-        #[arg(long, default_value_t = false)]
-        watch_workflows: bool,
+        #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true", value_name = "BOOL")]
+        watch_workflows: Option<bool>,
     },
     /// Snapshot the database to a file (safe while the server runs)
 
@@ -4430,7 +4439,7 @@ fn execute(command: Command) -> Result<()> {
             watch_cost,
             watch_retro,
             watch_workflows,
-        } => crate::api::serve(
+        } => crate::api::serve(crate::api::ServeFlags {
             port,
             lan,
             allow_host,
@@ -4439,7 +4448,7 @@ fn execute(command: Command) -> Result<()> {
             watch_cost,
             watch_retro,
             watch_workflows,
-        ),
+        }),
 
         Command::System => {
             print_json(&system::snapshot());

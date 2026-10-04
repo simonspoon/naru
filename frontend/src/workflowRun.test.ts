@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatDuration, runSummary, stepClass, stepCounts, stepStatusByNode, triggerLabel } from './workflowRun'
+import { formatDuration, runPollMs, runSummary, runningRunId, stepClass, stepCounts, stepStatusByNode, triggerLabel } from './workflowRun'
 import type { WorkflowRun } from './types/WorkflowRun'
 import type { WorkflowStep } from './types/WorkflowStep'
 
@@ -47,7 +47,7 @@ describe('stepClass', () => {
 describe('runSummary', () => {
   it('counts steps and names the failure', () => {
     const r = run([step(1, 'ok'), step(2, 'failed'), step(3, 'skipped')], { status: 'failed', error: 'node "b" failed' })
-    expect(stepCounts(r)).toEqual({ ok: 1, skipped: 1, failed: 1 })
+    expect(stepCounts(r)).toEqual({ running: 0, ok: 1, skipped: 1, failed: 1 })
     expect(runSummary(r)).toBe('failed · 1 ok, 1 skipped, 1 failed — node "b" failed')
     expect(runSummary(run([step(1, 'ok')]))).toBe('succeeded · 1 ok')
   })
@@ -65,5 +65,28 @@ describe('triggerLabel', () => {
     expect(triggerLabel({ trigger: null, trigger_phrase: null })).toBe('no trigger')
     expect(triggerLabel({ trigger: 'time', trigger_phrase: null })).toBe('time')
     expect(triggerLabel({ trigger: 'voice', trigger_phrase: 'capture' })).toBe('voice · “capture”')
+  })
+})
+
+describe('live run', () => {
+  it('counts and classes a running step', () => {
+    const r = run([step(1, 'ok'), step(2, 'running')], { status: 'running' })
+    expect(stepCounts(r).running).toBe(1)
+    expect(stepClass('running')).toBe('step-running')
+    expect(runSummary(r)).toBe('running · 1 ok, 1 running')
+  })
+
+  it('picks the newest running run, or none', () => {
+    expect(runningRunId(null)).toBeNull()
+    expect(runningRunId([run([], { id: 3 }), run([], { id: 2 })])).toBeNull()
+    expect(
+      runningRunId([run([], { id: 4, status: 'running' }), run([], { id: 3, status: 'running' })]),
+    ).toBe(4)
+  })
+
+  it('polls fast only while something runs', () => {
+    expect(runPollMs(false, null)).toBe(5000)
+    expect(runPollMs(true, null)).toBe(1000)
+    expect(runPollMs(false, 7)).toBe(1000)
   })
 })

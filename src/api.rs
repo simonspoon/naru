@@ -39,7 +39,7 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::core::{
     AgentSession, AgentSpawned, ArchiveOutcome, Artifact, ArtifactPatch, ArtifactSummary,
-    CcDashboard, CcLiveSession, CcScorecard, CcUsage, Error, FileTreeEntry, GitCommit,
+    CcDashboard, CcLiveSession, CcScorecard, CcUsage, ConfigServe, Error, FileTreeEntry, GitCommit,
     GitCommitFile, GitFileDiff, GitRepo, GitRepoView, GitStatus, GitWorktree, InboxItem, InboxKind,
     LIVE_AUDIO_MAX, LIVE_BOARD_INK_STATE_MAX, LIVE_BOARD_KEEP, LIVE_INK_MAX, LibraryBuiltinAction,
     LibraryBundle, LibraryImportResult, LibraryKind, LibraryPatch, LibraryScope,
@@ -47,11 +47,12 @@ use crate::core::{
     LiveNotice, LiveState, LiveStatus, LiveTranscript, LiveWindow, ModelRates, NaruVersion,
     NextResult, Priority, ProjectAgents, ProjectFileTree, ProjectGitLog, ProjectGitRepos,
     ProjectGitStatus, ProjectGitView, ProjectPatch, ProjectVersion, ReceiptPatch,
-    STALE_CLAIM_MINUTES, Script, ScriptArg, ScriptPatch, ScriptRunEvent, Status, Store, SystemInfo,
-    Task, TaskPatch, TaskSummary, WorkflowBranch, WorkflowNodeKind, WorkflowNodeNew,
-    WorkflowNodePatch, WorkflowPatch, WorkflowTrigger, agents, attachments, audio, board, config,
-    files, git, guard, hooks, inbox_triage, library, listen, live, project_memory, receipt, retro,
-    script_runs, scripts, speech, supervisor, system, validate_live_client, version, workflow,
+    STALE_CLAIM_MINUTES, Script, ScriptArg, ScriptPatch, ScriptRunEvent, ServeBoolSetting,
+    ServeHostsSetting, ServeNumberSetting, Status, Store, SystemInfo, Task, TaskPatch, TaskSummary,
+    WorkflowBranch, WorkflowNodeKind, WorkflowNodeNew, WorkflowNodePatch, WorkflowPatch,
+    WorkflowTrigger, agents, attachments, audio, board, config, files, git, guard, hooks,
+    inbox_triage, library, listen, live, project_memory, receipt, retro, script_runs, scripts,
+    speech, supervisor, system, validate_live_client, version, workflow,
 };
 
 /// The Vite build output, embedded into the binary at compile time.
@@ -76,6 +77,11 @@ struct AppState {
     /// literals — an exact, opt-in widening of the rebinding defense, empty
     /// unless the person asked for it. Nothing in default mode reads it.
     allow_hosts: Arc<[String]>,
+    /// The `serve` flags the command line actually gave (mesa task 1621):
+    /// `None` means "not on the command line", so the config's `serve` section
+    /// (read fresh) decides. Pins a setting for this run and is what the
+    /// Restart Server relaunch is rebuilt from.
+    serve_flags: Arc<ServeFlags>,
     /// CC Dashboard cache, keyed by window. Each entry pairs the db-derived
     /// `cc_stamp` (persisted cc row counts) seen when it was built with the
     /// dashboard; a request re-aggregates only when the stamp moved — i.e.
@@ -2371,49 +2377,192 @@ fn forget_dispatch(state: &AppState, job_id: &str) {
     map.remove(job_id);
 }
 
+/// The `naru serve` flags exactly as given on the command line (mesa task
+/// 1621). `None` / empty means "not given": the config's `serve` section, then
+/// the built-in default, decides. A given flag always wins and pins the
+/// setting for this run.
+#[derive(Debug, Clone, Default)]
+pub struct ServeFlags {
+    pub port: Option<u16>,
+    pub lan: Option<bool>,
+    /// `--allow-host` names; non-empty replaces the config's list.
+    pub allow_host: Vec<String>,
+    pub watch_todo: Option<bool>,
+    pub watch_inbox: Option<bool>,
+    pub watch_cost: Option<bool>,
+    pub watch_retro: Option<bool>,
+    pub watch_workflows: Option<bool>,
+}
+
+/// The last enabled/disabled value read cleanly from the config, per watcher
+/// key, so an unreadable config keeps a watcher as it was rather than
+/// switching it off (a half-written file must not stop the cost guard).
+static WATCHER_LAST_GOOD: Mutex<Vec<(&'static str, bool)>> = Mutex::new(Vec::new());
+/// Whether the previous config read failed, so the error is logged once on
+/// the way in rather than on every tick.
+static SERVE_CONFIG_BROKEN: AtomicBool = AtomicBool::new(false);
+
+/// Whether one watcher is on right now: the command-line flag if given, else
+/// the `serve` config section read fresh (so the Settings page toggles it
+/// live, on that watcher's next tick), else the watcher's default (off, except the workflow timer). A config that
+/// can't be read keeps the watcher's last good value (the default if it never had one) and logs one
+/// line when the read starts failing.
+fn watcher_on(
+    flags: &ServeFlags,
+    key: &'static str,
+    pick_flag: fn(&ServeFlags) -> Option<bool>,
+    pick_config: fn(&config::ServeSettings) -> Option<bool>,
+    default: bool,
+) -> bool {
+    if let Some(on) = pick_flag(flags) {
+        return on;
+    }
+    let mut last = WATCHER_LAST_GOOD.lock().unwrap_or_else(|e| e.into_inner());
+    match config::serve_settings() {
+        Ok(cfg) => {
+            SERVE_CONFIG_BROKEN.store(false, Ordering::SeqCst);
+            let on = pick_config(&cfg).unwrap_or(default);
+            match last.iter_mut().find(|(k, _)| *k == key) {
+                Some(entry) => entry.1 = on,
+                None => last.push((key, on)),
+            }
+            on
+        }
+        Err(e) => {
+            if !SERVE_CONFIG_BROKEN.swap(true, Ordering::SeqCst) {
+                eprintln!(
+                    "naru: cannot read the serve config; watchers keep their last state: {e}"
+                );
+            }
+            last.iter()
+                .find(|(k, _)| *k == key)
+                .map_or(default, |(_, v)| *v)
+        }
+    }
+}
+
+/// The workflow timer is the one watcher on by default: a time-triggered
+/// workflow that never fires is a bug, and an idle tick costs nothing.
+const WATCH_WORKFLOWS_DEFAULT: bool = true;
+
+fn todo_on(flags: &ServeFlags) -> bool {
+    watcher_on(
+        flags,
+        "watch-todo",
+        |f| f.watch_todo,
+        |c| c.watch_todo,
+        false,
+    )
+}
+fn inbox_on(flags: &ServeFlags) -> bool {
+    watcher_on(
+        flags,
+        "watch-inbox",
+        |f| f.watch_inbox,
+        |c| c.watch_inbox,
+        false,
+    )
+}
+fn cost_on(flags: &ServeFlags) -> bool {
+    watcher_on(
+        flags,
+        "watch-cost",
+        |f| f.watch_cost,
+        |c| c.watch_cost,
+        false,
+    )
+}
+fn retro_on(flags: &ServeFlags) -> bool {
+    watcher_on(
+        flags,
+        "watch-retro",
+        |f| f.watch_retro,
+        |c| c.watch_retro,
+        false,
+    )
+}
+fn workflows_on(flags: &ServeFlags) -> bool {
+    watcher_on(
+        flags,
+        "watch-workflows",
+        |f| f.watch_workflows,
+        |c| c.watch_workflows,
+        WATCH_WORKFLOWS_DEFAULT,
+    )
+}
+
+/// The port, LAN switch and allowed hosts a start would use: flag, else
+/// config, else default. Also what `GET /api/config/serve` compares the
+/// running process against.
+fn resolve_startup(flags: &ServeFlags, cfg: &config::ServeSettings) -> (u16, bool, Vec<String>) {
+    let hosts = if flags.allow_host.is_empty() {
+        cfg.allow_host.clone().unwrap_or_default()
+    } else {
+        flags.allow_host.clone()
+    };
+    (
+        flags
+            .port
+            .or(cfg.port)
+            .unwrap_or(config::DEFAULT_SERVE_PORT),
+        flags.lan.or(cfg.lan).unwrap_or(false),
+        hosts,
+    )
+}
+
 /// Opens the default store and serves the API, blocking until the process is
 /// killed. Binds 127.0.0.1 by default; with `lan`, binds 0.0.0.0 so other
 /// devices on the local network can reach it (no auth — see `serve --help`),
-/// and `allow_hosts` (`--allow-host <name>`, repeatable, only meaningful with
+/// and `allow_host` (`--allow-host <name>`, repeatable, only meaningful with
 /// `lan`) names the exact DNS hostnames the agent gate's rebinding defense
 /// should accept besides `localhost` and the IP literals — see
-/// [`require_lan_agent_host`]. It is propagated across the web UI's Restart
-/// Server action like the flags below.
-/// `watch_todo` starts the periodic todo-watcher (see [`todo_watcher_tick`]),
-/// `watch_inbox` the periodic inbox-watcher (see [`inbox_watcher_tick`]) and
-/// `watch_retro` the scheduled retrospective (see [`retro_watcher_tick`]) and
-/// `watch_workflows` the time-triggered workflows (see
-/// [`workflow_watcher_tick`]); all off by default, all propagated across the web UI's Restart Server
-/// action. They are independent flags over independent queues — none implies
-/// another.
-#[allow(clippy::too_many_arguments)]
-pub fn serve(
-    port: u16,
-    lan: bool,
-    allow_hosts: Vec<String>,
-    watch_todo: bool,
-    watch_inbox: bool,
-    watch_cost: bool,
-    watch_retro: bool,
-    watch_workflows: bool,
-) -> crate::core::Result<()> {
+/// [`require_lan_agent_host`].
+///
+/// Every setting is a flag **or** a key of the config's `serve` section (mesa
+/// task 1621, `docs/config.md`): a flag given wins, else the config, else the
+/// default. The port, LAN switch and hosts are resolved once here. The five
+/// watchers always have their loops running; each tick asks [`watcher_on`]
+/// whether its watcher is enabled, so the Settings page toggles them live.
+/// The Restart Server relaunch carries only the flags that were given, so the
+/// config is re-read rather than frozen into argv. Watchers are independent
+/// queues — none implies another.
+pub fn serve(flags: ServeFlags) -> crate::core::Result<()> {
+    let cfg = match config::serve_settings() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("naru: ignoring the config's serve section: {e}");
+            config::ServeSettings::default()
+        }
+    };
+    // A given `--allow-host` that is not a bare hostname is a startup error,
+    // never dropped silently (which would let the config's list apply).
+    let mut allow_host = Vec::new();
+    for raw in &flags.allow_host {
+        match config::normalize_serve_host(raw) {
+            Some(h) => allow_host.push(h),
+            None => {
+                return Err(Error::Validation(format!(
+                    "--allow-host {raw:?} is not a bare hostname (no spaces, '/' or ':')"
+                )));
+            }
+        }
+    }
+    let flags = ServeFlags {
+        allow_host,
+        ..flags
+    };
+    let (port, lan, allow_hosts) = resolve_startup(&flags, &cfg);
+    let flags = Arc::new(flags);
     let store = Store::open_default()?;
     let restart_requested = Arc::new(AtomicBool::new(false));
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    // Normalize the `--allow-host` names once here rather than per request:
-    // DNS is case-insensitive, and a name that trims to nothing was never a
-    // name. The comparison stays case-insensitive anyway, so this is only to
-    // keep what the relaunched argv carries identical to what is matched.
-    let allow_hosts: Arc<[String]> = allow_hosts
-        .iter()
-        .map(|h| h.trim().to_ascii_lowercase())
-        .filter(|h| !h.is_empty())
-        .collect();
+    let allow_hosts: Arc<[String]> = allow_hosts.into();
     let state = AppState {
         store: Arc::new(Mutex::new(store)),
         port,
         lan,
         allow_hosts: allow_hosts.clone(),
+        serve_flags: flags.clone(),
         cc_cache: Arc::new(Mutex::new(HashMap::new())),
         project_cc_cache: Arc::new(Mutex::new(HashMap::new())),
         cc_scorecard_cache: Arc::new(Mutex::new(HashMap::new())),
@@ -2487,22 +2636,43 @@ pub fn serve(
         .enable_all()
         .build()?;
     rt.block_on(async {
-        if watch_todo {
+        {
+            let on = |f: fn(&ServeFlags) -> bool| f(&state.serve_flags);
+            eprintln!(
+                "naru: watchers on at start: todo={} inbox={} cost={} retro={} workflows={} \
+                 (each re-read from the config every tick)",
+                on(todo_on),
+                on(inbox_on),
+                on(cost_on),
+                on(retro_on),
+                on(workflows_on)
+            );
+        }
+        // Every loop always runs; a tick does nothing while its watcher is
+        // off (flag, else the config's `serve` section, read fresh).
+        {
             let watch_state = state.clone();
             tokio::spawn(async move {
                 let mut ticker = tokio::time::interval(watch_todo_tick());
                 loop {
                     ticker.tick().await;
                     let state = watch_state.clone();
-                    let _ = tokio::task::spawn_blocking(move || todo_watcher_tick(&state)).await;
+                    let _ = tokio::task::spawn_blocking(move || {
+                        if todo_on(&state.serve_flags) {
+                            todo_watcher_tick(&state)
+                        }
+                    })
+                    .await;
                 }
             });
         }
-        if watch_todo || watch_inbox {
+        {
             // The reaper is the dispatch loops' other end (mesa tasks 1057,
-            // 1192), so it lives and dies with their flags — but on its own
-            // shorter cadence, since a session that is finished with its task
-            // or item should not wait a whole dispatch tick to be stopped.
+            // 1192). It runs on every tick whatever the switches say: a session
+            // dispatched before a watcher was turned off must still be stopped
+            // once its task closes, and the tick returns at once when nothing
+            // was dispatched. It has its own shorter cadence, since a session that is finished with its task or item
+            // should not wait a whole dispatch tick to be stopped.
             let reap_state = state.clone();
             tokio::spawn(async move {
                 let mut ticker = tokio::time::interval(watch_todo_reap_tick());
@@ -2513,48 +2683,67 @@ pub fn serve(
                 }
             });
         }
-        if watch_inbox {
+        {
             let watch_state = state.clone();
             tokio::spawn(async move {
                 let mut ticker = tokio::time::interval(watch_inbox_tick());
                 loop {
                     ticker.tick().await;
                     let state = watch_state.clone();
-                    let _ = tokio::task::spawn_blocking(move || inbox_watcher_tick(&state)).await;
+                    let _ = tokio::task::spawn_blocking(move || {
+                        if inbox_on(&state.serve_flags) {
+                            inbox_watcher_tick(&state)
+                        }
+                    })
+                    .await;
                 }
             });
         }
-        if watch_cost {
+        {
             let watch_state = state.clone();
             tokio::spawn(async move {
                 let mut ticker = tokio::time::interval(watch_cost_tick());
                 loop {
                     ticker.tick().await;
                     let state = watch_state.clone();
-                    let _ = tokio::task::spawn_blocking(move || cost_watcher_tick(&state)).await;
+                    let _ = tokio::task::spawn_blocking(move || {
+                        if cost_on(&state.serve_flags) {
+                            cost_watcher_tick(&state)
+                        }
+                    })
+                    .await;
                 }
             });
         }
-        if watch_retro {
+        {
             let watch_state = state.clone();
             tokio::spawn(async move {
                 let mut ticker = tokio::time::interval(watch_retro_tick());
                 loop {
                     ticker.tick().await;
                     let state = watch_state.clone();
-                    let _ = tokio::task::spawn_blocking(move || retro_watcher_tick(&state)).await;
+                    let _ = tokio::task::spawn_blocking(move || {
+                        if retro_on(&state.serve_flags) {
+                            retro_watcher_tick(&state)
+                        }
+                    })
+                    .await;
                 }
             });
         }
-        if watch_workflows {
+        {
             let watch_state = state.clone();
             tokio::spawn(async move {
                 let mut ticker = tokio::time::interval(watch_workflows_tick());
                 loop {
                     ticker.tick().await;
                     let state = watch_state.clone();
-                    let _ =
-                        tokio::task::spawn_blocking(move || workflow_watcher_tick(&state)).await;
+                    let _ = tokio::task::spawn_blocking(move || {
+                        if workflows_on(&state.serve_flags) {
+                            workflow_watcher_tick(&state)
+                        }
+                    })
+                    .await;
                 }
             });
         }
@@ -2580,28 +2769,32 @@ pub fn serve(
     // then exit so the new process is free to bind the now-released port.
     if restart_requested.load(Ordering::SeqCst) {
         let exe = std::env::current_exe()?;
-        let mut args = vec!["serve".to_string(), "--port".to_string(), port.to_string()];
-        if lan {
-            args.push("--lan".to_string());
+        // Only what the command line gave is carried over: a setting that came
+        // from the config is re-read by the new process, not frozen here.
+        let mut args = vec!["serve".to_string()];
+        if let Some(port) = flags.port {
+            args.push("--port".to_string());
+            args.push(port.to_string());
         }
-        for host in allow_hosts.iter() {
+        for (name, given) in [
+            ("--lan", flags.lan),
+            ("--watch-todo", flags.watch_todo),
+            ("--watch-inbox", flags.watch_inbox),
+            ("--watch-cost", flags.watch_cost),
+            ("--watch-retro", flags.watch_retro),
+            ("--watch-workflows", flags.watch_workflows),
+        ] {
+            if let Some(on) = given {
+                args.push(if on {
+                    name.to_string()
+                } else {
+                    format!("{name}=false")
+                });
+            }
+        }
+        for host in flags.allow_host.iter() {
             args.push("--allow-host".to_string());
             args.push(host.clone());
-        }
-        if watch_todo {
-            args.push("--watch-todo".to_string());
-        }
-        if watch_inbox {
-            args.push("--watch-inbox".to_string());
-        }
-        if watch_cost {
-            args.push("--watch-cost".to_string());
-        }
-        if watch_retro {
-            args.push("--watch-retro".to_string());
-        }
-        if watch_workflows {
-            args.push("--watch-workflows".to_string());
         }
         std::process::Command::new(exe).args(args).spawn()?;
 
@@ -2788,6 +2981,7 @@ fn router(state: AppState) -> Router {
         // it relaxes rather than refuses under `--lan`, so a page this server
         // handed a phone can still ask to hear the conversation.
         .route("/api/live/speaker", post(claim_live_speaker))
+        .route("/api/live/leave", post(leave_live_speaker))
         .route("/api/live/turns/{id}/played", post(live_turn_played))
         // Speaking one turn: the same synthesiser, headers and gate pair as
         // the inbox's play button — see `speak_inbox` for why that pair, and
@@ -3128,6 +3322,12 @@ fn router(state: AppState) -> Router {
         .route(
             "/api/config/watchers",
             get(get_config_watchers).put(update_config_watchers),
+        )
+        // The same file's `serve` section — every `naru serve` flag as a
+        // config key (mesa task 1621). Same gates as `watchers`.
+        .route(
+            "/api/config/serve",
+            get(get_config_serve).put(update_config_serve),
         )
         // The same file's `speech` section — the voice the inbox's play button
         // speaks in. A fourth route for the same reason as the other two.
@@ -5382,6 +5582,27 @@ async fn claim_live_speaker(
     Ok(Json(store.claim_live_speaker(session.id, &body.client)?).into_response())
 }
 
+/// A device saying it is leaving (mesa task 1622): if it holds the voice, the
+/// claim is released now instead of lapsing ten seconds later. Never ends the
+/// session and never touches the agent. Idempotent to the point of answering
+/// **204** whatever it found — no session, someone else's claim, no claim —
+/// because the caller is on its way out and has nothing to do with the
+/// difference.
+async fn leave_live_speaker(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Result<Json<LiveSpeakerBody>, JsonRejection>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let Json(body) = body?;
+    let mut store = state.store.lock().unwrap();
+    if let Some(session) = store.current_live_session()? {
+        store.release_live_speaker(session.id, &body.client)?;
+    }
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
 /// Stamps one Naru turn as spoken, answering with the turn either way. The
 /// inbox's `read` route in every respect: idempotent, stamped only the first
 /// time and never cleared, which is what lets the page fire it as each turn
@@ -5505,12 +5726,19 @@ parent.postMessage({naru:'board-key',key:e.key,code:e.code,metaKey:e.metaKey,\
 ctrlKey:e.ctrlKey,altKey:e.altKey,shiftKey:e.shiftKey,repeat:e.repeat},'*')},true)})();\
 </script>\n";
 
+/// Appended to an `html` live board's body (mesa task 1615): the app's dark
+/// canvas and text as the document's defaults. `:where()` gives it zero
+/// specificity, so any background or colour the board's own styles set on
+/// `html` wins; a board that sets neither is dark like the rest of the app.
+const BOARD_DARK_DEFAULTS: &str =
+    "\n<style>:where(html){color-scheme:dark;background:#060a10;color:#b8dde8}</style>";
+
 /// A board's body as the render route serves it: an `html` board is its
-/// stored bytes followed by [`BOARD_KEY_RELAY`]; every other kind is
-/// untouched.
+/// stored bytes followed by [`BOARD_DARK_DEFAULTS`] and [`BOARD_KEY_RELAY`];
+/// every other kind is untouched.
 fn board_render_body(kind: LiveBoardKind, body: &str) -> String {
     match kind {
-        LiveBoardKind::Html => format!("{body}{BOARD_KEY_RELAY}"),
+        LiveBoardKind::Html => format!("{body}{BOARD_DARK_DEFAULTS}{BOARD_KEY_RELAY}"),
         _ => body.to_string(),
     }
 }
@@ -9310,6 +9538,127 @@ async fn update_config_watchers(
     get_config_watchers(State(state), ConnectInfo(addr), headers).await
 }
 
+/// `GET /api/config/serve` — every `naru serve` startup flag as the config
+/// holds it, with the default, the value this run is using and the command-line
+/// flag pinning it, if any (mesa task 1621, `docs/config.md`). Gated and
+/// failing exactly like `get_config_watchers`.
+async fn get_config_serve(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let cfg = config::serve_settings().map_err(|message| ApiError {
+        status: StatusCode::BAD_GATEWAY,
+        code: "unavailable",
+        message,
+    })?;
+    let flags = &state.serve_flags;
+    let (next_port, next_lan, next_hosts) = resolve_startup(flags, &cfg);
+    let boolean_or = |value: Option<bool>, flag: Option<bool>, default: bool| ServeBoolSetting {
+        value,
+        default,
+        effective: flag.or(value).unwrap_or(default),
+        flag,
+    };
+    let boolean = |value: Option<bool>, flag: Option<bool>| boolean_or(value, flag, false);
+    let body = ConfigServe {
+        port: ServeNumberSetting {
+            value: cfg.port.map(u32::from),
+            default: u32::from(config::DEFAULT_SERVE_PORT),
+            effective: u32::from(state.port),
+            flag: flags.port.map(u32::from),
+        },
+        // The three restart-required settings report what this process is
+        // running with, not what the config would give a new one.
+        lan: ServeBoolSetting {
+            effective: state.lan,
+            ..boolean(cfg.lan, flags.lan)
+        },
+        allow_host: ServeHostsSetting {
+            value: cfg.allow_host.clone(),
+            default: Vec::new(),
+            effective: state.allow_hosts.to_vec(),
+            flag: (!flags.allow_host.is_empty()).then(|| flags.allow_host.clone()),
+        },
+        watch_todo: boolean(cfg.watch_todo, flags.watch_todo),
+        watch_inbox: boolean(cfg.watch_inbox, flags.watch_inbox),
+        watch_cost: boolean(cfg.watch_cost, flags.watch_cost),
+        watch_retro: boolean(cfg.watch_retro, flags.watch_retro),
+        watch_workflows: boolean_or(
+            cfg.watch_workflows,
+            flags.watch_workflows,
+            WATCH_WORKFLOWS_DEFAULT,
+        ),
+        restart_required: next_port != state.port
+            || next_lan != state.lan
+            || next_hosts[..] != state.allow_hosts[..],
+    };
+    Ok(Json(body).into_response())
+}
+
+#[derive(Deserialize)]
+struct ServeUpdate {
+    /// Each key: absent leaves it, `null` removes it (restoring the default),
+    /// a value replaces it. Raw JSON so a bad value is the config layer's named
+    /// 422.
+    #[serde(default, deserialize_with = "deserialize_some")]
+    port: Option<Option<serde_json::Value>>,
+    #[serde(default, deserialize_with = "deserialize_some")]
+    lan: Option<Option<serde_json::Value>>,
+    #[serde(default, deserialize_with = "deserialize_some")]
+    allow_host: Option<Option<serde_json::Value>>,
+    #[serde(default, deserialize_with = "deserialize_some")]
+    watch_todo: Option<Option<serde_json::Value>>,
+    #[serde(default, deserialize_with = "deserialize_some")]
+    watch_inbox: Option<Option<serde_json::Value>>,
+    #[serde(default, deserialize_with = "deserialize_some")]
+    watch_cost: Option<Option<serde_json::Value>>,
+    #[serde(default, deserialize_with = "deserialize_some")]
+    watch_retro: Option<Option<serde_json::Value>>,
+    #[serde(default, deserialize_with = "deserialize_some")]
+    watch_workflows: Option<Option<serde_json::Value>>,
+}
+
+/// `PUT /api/config/serve` — writes the `serve` settings and echoes them, with
+/// `update_config_watchers`' gate and error shapes.
+async fn update_config_serve(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(body): Json<ServeUpdate>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let mut updates = HashMap::new();
+    for (key, value) in [
+        (config::SERVE_PORT, body.port),
+        (config::SERVE_LAN, body.lan),
+        (config::SERVE_ALLOW_HOST, body.allow_host),
+        (config::SERVE_WATCH_TODO, body.watch_todo),
+        (config::SERVE_WATCH_INBOX, body.watch_inbox),
+        (config::SERVE_WATCH_COST, body.watch_cost),
+        (config::SERVE_WATCH_RETRO, body.watch_retro),
+        (config::SERVE_WATCH_WORKFLOWS, body.watch_workflows),
+    ] {
+        if let Some(value) = value {
+            updates.insert(key.to_string(), value);
+        }
+    }
+    config::save_serve(&updates).map_err(|e| match e {
+        config::SaveError::Validation(message) => ApiError {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            code: "validation",
+            message,
+        },
+        config::SaveError::Unavailable(message) => ApiError {
+            status: StatusCode::BAD_GATEWAY,
+            code: "unavailable",
+            message,
+        },
+    })?;
+    get_config_serve(State(state), ConnectInfo(addr), headers).await
+}
+
 /// `GET /api/config/guard` — the cost-guard's six settings, each with the
 /// built-in behind it (`docs/cost-guard.md`, mesa task 1018).
 ///
@@ -11145,7 +11494,10 @@ mod tests {
     #[test]
     fn only_an_html_board_gets_the_key_relay() {
         let html = board_render_body(LiveBoardKind::Html, "<p>hi</p>");
-        assert_eq!(html, format!("<p>hi</p>{BOARD_KEY_RELAY}"));
+        assert_eq!(
+            html,
+            format!("<p>hi</p>{BOARD_DARK_DEFAULTS}{BOARD_KEY_RELAY}")
+        );
         assert!(html.contains("naru:'board-key'"));
         for kind in [LiveBoardKind::Markdown, LiveBoardKind::Diagram] {
             assert_eq!(board_render_body(kind, "body"), "body");
@@ -11305,6 +11657,7 @@ mod tests {
             port: 0,
             lan: false,
             allow_hosts: Arc::from(Vec::new()),
+            serve_flags: Arc::new(ServeFlags::default()),
             cc_cache: Arc::new(Mutex::new(HashMap::new())),
             project_cc_cache: Arc::new(Mutex::new(HashMap::new())),
             cc_scorecard_cache: Arc::new(Mutex::new(HashMap::new())),
@@ -18097,6 +18450,57 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
     use crate::core::LiveContextKind;
 
     /// The page reports route and context in one body (mesa task 888), and
+    /// `POST /api/live/leave` (mesa task 1622) answers 204 whatever it finds,
+    /// frees a matching speaker, leaves another's alone, and never ends the
+    /// session.
+    #[tokio::test]
+    async fn live_leave_releases_a_matching_speaker_and_keeps_the_session() {
+        let (_dir, state) = test_state();
+        let leave = |client: &str| {
+            leave_live_speaker(
+                State(state.clone()),
+                ConnectInfo(loopback()),
+                loopback_agent_headers(),
+                Ok(Json(LiveSpeakerBody {
+                    client: client.into(),
+                })),
+            )
+        };
+        // No session: still success.
+        assert_eq!(
+            leave("phone").await.unwrap().status(),
+            StatusCode::NO_CONTENT
+        );
+
+        let id = {
+            let mut store = state.store.lock().unwrap();
+            let session = store.start_live_session(None).unwrap();
+            store.claim_live_speaker(session.id, "phone").unwrap();
+            session.id
+        };
+        let speaker = || {
+            let store = state.store.lock().unwrap();
+            store.get_live_session(id).unwrap()
+        };
+
+        assert_eq!(leave("tab").await.unwrap().status(), StatusCode::NO_CONTENT);
+        assert_eq!(speaker().speaker.as_deref(), Some("phone"));
+
+        assert_eq!(
+            leave("phone").await.unwrap().status(),
+            StatusCode::NO_CONTENT
+        );
+        let after = speaker();
+        assert_eq!(after.speaker, None);
+        assert_eq!(after.status, LiveStatus::Live);
+
+        // Already cleared: still success.
+        assert_eq!(
+            leave("phone").await.unwrap().status(),
+            StatusCode::NO_CONTENT
+        );
+    }
+
     /// the context key is three-way (mesa task 1016): a page with nothing to
     /// say about it omits it and the stored one stands, while a page with
     /// nothing open sends an explicit `null` and clears it.

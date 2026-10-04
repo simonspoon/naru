@@ -650,6 +650,51 @@ The sections are siblings over one document: saving `watchers` preserves
 `commands`, `pricing`, `speech`, `guard`, `keymap` and any section Naru doesn't
 know about, and vice versa.
 
+## Serve (mesa task 1621)
+
+Every `naru serve` startup flag is also a key of the `serve` section, so a bare
+`naru serve` can run as a service. **A flag given on the command line wins**;
+otherwise the key; otherwise the default. Keys are kebab-case:
+
+| Key | Type | Default | Read |
+| --- | --- | --- | --- |
+| `port` | integer 1..=65535 | 7770 | once, at start |
+| `lan` | bool | false | once, at start |
+| `allow-host` | list of bare hostnames (trimmed, lowercased; no spaces, `/` or `:`) | `[]` | once, at start |
+| `watch-todo`, `watch-inbox`, `watch-cost`, `watch-retro` | bool | false | **every tick** |
+| `watch-workflows` | bool | **true** (mesa task 1630) | **every tick** |
+
+Absent or `null` is the default. A bad value on `PUT` is 422 writing nothing; a
+hand-edited bad value is ignored for that key alone. On the command line a
+bool is `--watch-todo` (true) or `--watch-todo=false` / `--lan=false`, which
+turns a config `true` off for that run; `--allow-host`, when given at all,
+replaces the config list.
+
+The five watcher loops always run; each tick first asks whether its watcher is
+enabled (the flag, else the config read fresh), so toggling one in Settings
+takes effect on that watcher's next tick (a minute; the retrospective's is an
+hour) with no restart. If the config can't be read a watcher keeps its last
+good state, with one stderr line. The todo reaper runs on every tick whatever
+the switches say, so a session dispatched before a watcher was turned off is
+still stopped. A `--allow-host` that is not a bare hostname is a startup error.
+The port, LAN switch and hosts need a restart.
+**Restart Server** relaunches with only the flags that were given, so the
+config is re-read rather than frozen into argv.
+
+### Routes
+
+- `GET /api/config/serve` → `ConfigServe`: per key `{value, default,
+  effective, flag}` (`value` the config's, `null` when unset; `effective` what
+  this run uses; `flag` what the command line pinned, `null` if nothing — a
+  pinned key's config value is ignored this run), plus `restart_required`:
+  the port, LAN switch or hosts the config would now give differ from what
+  this process runs with.
+- `PUT /api/config/serve`, body keys `port`, `lan`, `allow_host`,
+  `watch_todo`, `watch_inbox`, `watch_cost`, `watch_retro`, `watch_workflows`;
+  absent leaves the key, `null` removes it. Both verbs carry
+  `require_agent_access`, like `watchers`. The Settings page edits all of it
+  in a **Server** section on the System tab.
+
 ## Speech
 
 A fourth, independent section picks the **voice** the Inbox's play button
