@@ -2788,6 +2788,7 @@ fn router(state: AppState) -> Router {
         // it relaxes rather than refuses under `--lan`, so a page this server
         // handed a phone can still ask to hear the conversation.
         .route("/api/live/speaker", post(claim_live_speaker))
+        .route("/api/live/leave", post(leave_live_speaker))
         .route("/api/live/turns/{id}/played", post(live_turn_played))
         // Speaking one turn: the same synthesiser, headers and gate pair as
         // the inbox's play button — see `speak_inbox` for why that pair, and
@@ -5380,6 +5381,27 @@ async fn claim_live_speaker(
         return Err(no_live_session());
     };
     Ok(Json(store.claim_live_speaker(session.id, &body.client)?).into_response())
+}
+
+/// A device saying it is leaving (mesa task 1622): if it holds the voice, the
+/// claim is released now instead of lapsing ten seconds later. Never ends the
+/// session and never touches the agent. Idempotent to the point of answering
+/// **204** whatever it found — no session, someone else's claim, no claim —
+/// because the caller is on its way out and has nothing to do with the
+/// difference.
+async fn leave_live_speaker(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Result<Json<LiveSpeakerBody>, JsonRejection>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let Json(body) = body?;
+    let mut store = state.store.lock().unwrap();
+    if let Some(session) = store.current_live_session()? {
+        store.release_live_speaker(session.id, &body.client)?;
+    }
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 /// Stamps one Naru turn as spoken, answering with the turn either way. The
@@ -18107,6 +18129,57 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
     use crate::core::LiveContextKind;
 
     /// The page reports route and context in one body (mesa task 888), and
+    /// `POST /api/live/leave` (mesa task 1622) answers 204 whatever it finds,
+    /// frees a matching speaker, leaves another's alone, and never ends the
+    /// session.
+    #[tokio::test]
+    async fn live_leave_releases_a_matching_speaker_and_keeps_the_session() {
+        let (_dir, state) = test_state();
+        let leave = |client: &str| {
+            leave_live_speaker(
+                State(state.clone()),
+                ConnectInfo(loopback()),
+                loopback_agent_headers(),
+                Ok(Json(LiveSpeakerBody {
+                    client: client.into(),
+                })),
+            )
+        };
+        // No session: still success.
+        assert_eq!(
+            leave("phone").await.unwrap().status(),
+            StatusCode::NO_CONTENT
+        );
+
+        let id = {
+            let mut store = state.store.lock().unwrap();
+            let session = store.start_live_session(None).unwrap();
+            store.claim_live_speaker(session.id, "phone").unwrap();
+            session.id
+        };
+        let speaker = || {
+            let store = state.store.lock().unwrap();
+            store.get_live_session(id).unwrap()
+        };
+
+        assert_eq!(leave("tab").await.unwrap().status(), StatusCode::NO_CONTENT);
+        assert_eq!(speaker().speaker.as_deref(), Some("phone"));
+
+        assert_eq!(
+            leave("phone").await.unwrap().status(),
+            StatusCode::NO_CONTENT
+        );
+        let after = speaker();
+        assert_eq!(after.speaker, None);
+        assert_eq!(after.status, LiveStatus::Live);
+
+        // Already cleared: still success.
+        assert_eq!(
+            leave("phone").await.unwrap().status(),
+            StatusCode::NO_CONTENT
+        );
+    }
+
     /// the context key is three-way (mesa task 1016): a page with nothing to
     /// say about it omits it and the stored one stands, while a page with
     /// nothing open sends an explicit `null` and clears it.

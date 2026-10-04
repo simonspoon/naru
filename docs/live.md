@@ -2420,6 +2420,7 @@ takes exactly one value.
 | `POST /api/live/notice` `{kind}` | the notice turn, **200** created or existing (deduped per working span, mesa task 1157); an unknown `kind` is 422 | standard write |
 | `POST /api/live/route` `{route, context?, window?}` | the session, route, context **and window box** recorded — an omitted `context`/`window` leaves the stored one alone, an explicit `null` clears it | standard write |
 | `POST /api/live/speaker` `{client}` | the session, this client now its **speaker** (mesa task 1267) | `require_agent_access` |
+| `POST /api/live/leave` `{client}` | **204**, always — releases this client's claim on the voice if it holds it, so it is free at once; never ends the session or touches the agent (mesa task 1622) | `require_agent_access` |
 | `POST /api/live/turns/{id}/played` | the stamped turn | standard write |
 | `GET /api/live/turns/{id}/speak` | streaming `audio/wav` | `require_agent_access` **+** `require_same_site_fetch` |
 | `GET /api/live/boards/{id}/render` | one board's body, framed for the browser (task 1071) | standard read, headers identical in both modes |
