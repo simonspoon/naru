@@ -2404,14 +2404,15 @@ static SERVE_CONFIG_BROKEN: AtomicBool = AtomicBool::new(false);
 
 /// Whether one watcher is on right now: the command-line flag if given, else
 /// the `serve` config section read fresh (so the Settings page toggles it
-/// live, on that watcher's next tick), else off. A config that can't be read
-/// keeps the watcher's last good value (off if it never had one) and logs one
+/// live, on that watcher's next tick), else the watcher's default (off, except the workflow timer). A config that
+/// can't be read keeps the watcher's last good value (the default if it never had one) and logs one
 /// line when the read starts failing.
 fn watcher_on(
     flags: &ServeFlags,
     key: &'static str,
     pick_flag: fn(&ServeFlags) -> Option<bool>,
     pick_config: fn(&config::ServeSettings) -> Option<bool>,
+    default: bool,
 ) -> bool {
     if let Some(on) = pick_flag(flags) {
         return on;
@@ -2420,7 +2421,7 @@ fn watcher_on(
     match config::serve_settings() {
         Ok(cfg) => {
             SERVE_CONFIG_BROKEN.store(false, Ordering::SeqCst);
-            let on = pick_config(&cfg).unwrap_or(false);
+            let on = pick_config(&cfg).unwrap_or(default);
             match last.iter_mut().find(|(k, _)| *k == key) {
                 Some(entry) => entry.1 = on,
                 None => last.push((key, on)),
@@ -2435,22 +2436,50 @@ fn watcher_on(
             }
             last.iter()
                 .find(|(k, _)| *k == key)
-                .is_some_and(|(_, v)| *v)
+                .map_or(default, |(_, v)| *v)
         }
     }
 }
 
+/// The workflow timer is the one watcher on by default: a time-triggered
+/// workflow that never fires is a bug, and an idle tick costs nothing.
+const WATCH_WORKFLOWS_DEFAULT: bool = true;
+
 fn todo_on(flags: &ServeFlags) -> bool {
-    watcher_on(flags, "watch-todo", |f| f.watch_todo, |c| c.watch_todo)
+    watcher_on(
+        flags,
+        "watch-todo",
+        |f| f.watch_todo,
+        |c| c.watch_todo,
+        false,
+    )
 }
 fn inbox_on(flags: &ServeFlags) -> bool {
-    watcher_on(flags, "watch-inbox", |f| f.watch_inbox, |c| c.watch_inbox)
+    watcher_on(
+        flags,
+        "watch-inbox",
+        |f| f.watch_inbox,
+        |c| c.watch_inbox,
+        false,
+    )
 }
 fn cost_on(flags: &ServeFlags) -> bool {
-    watcher_on(flags, "watch-cost", |f| f.watch_cost, |c| c.watch_cost)
+    watcher_on(
+        flags,
+        "watch-cost",
+        |f| f.watch_cost,
+        |c| c.watch_cost,
+        false,
+    )
 }
 fn retro_on(flags: &ServeFlags) -> bool {
-    watcher_on(flags, "watch-retro", |f| f.watch_retro, |c| c.watch_retro)
+    watcher_on(
+        flags,
+        "watch-retro",
+        |f| f.watch_retro,
+        |c| c.watch_retro,
+        false,
+    )
 }
 fn workflows_on(flags: &ServeFlags) -> bool {
     watcher_on(
@@ -2458,6 +2487,7 @@ fn workflows_on(flags: &ServeFlags) -> bool {
         "watch-workflows",
         |f| f.watch_workflows,
         |c| c.watch_workflows,
+        WATCH_WORKFLOWS_DEFAULT,
     )
 }
 
@@ -9525,12 +9555,13 @@ async fn get_config_serve(
     })?;
     let flags = &state.serve_flags;
     let (next_port, next_lan, next_hosts) = resolve_startup(flags, &cfg);
-    let boolean = |value: Option<bool>, flag: Option<bool>| ServeBoolSetting {
+    let boolean_or = |value: Option<bool>, flag: Option<bool>, default: bool| ServeBoolSetting {
         value,
-        default: false,
-        effective: flag.or(value).unwrap_or(false),
+        default,
+        effective: flag.or(value).unwrap_or(default),
         flag,
     };
+    let boolean = |value: Option<bool>, flag: Option<bool>| boolean_or(value, flag, false);
     let body = ConfigServe {
         port: ServeNumberSetting {
             value: cfg.port.map(u32::from),
@@ -9554,7 +9585,11 @@ async fn get_config_serve(
         watch_inbox: boolean(cfg.watch_inbox, flags.watch_inbox),
         watch_cost: boolean(cfg.watch_cost, flags.watch_cost),
         watch_retro: boolean(cfg.watch_retro, flags.watch_retro),
-        watch_workflows: boolean(cfg.watch_workflows, flags.watch_workflows),
+        watch_workflows: boolean_or(
+            cfg.watch_workflows,
+            flags.watch_workflows,
+            WATCH_WORKFLOWS_DEFAULT,
+        ),
         restart_required: next_port != state.port
             || next_lan != state.lan
             || next_hosts[..] != state.allow_hosts[..],

@@ -238,8 +238,9 @@ enum Command {
         /// Every minute, run each workflow whose trigger is `time` and which
         /// is due (no time-triggered run started in the last
         /// `every_minutes`). A run executes the workflow's shell and model
-        /// nodes with no user request behind it. Off by default; independent
-        /// of the other watchers. Preserved across the web UI's Restart
+        /// nodes with no user request behind it. On by default (the
+        /// config's `serve.watch-workflows` or `--watch-workflows=false`
+        /// turns it off); independent of the other watchers. Preserved across the web UI's Restart
         /// Server action.
         #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true", value_name = "BOOL")]
         watch_workflows: Option<bool>,

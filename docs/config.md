@@ -661,7 +661,8 @@ otherwise the key; otherwise the default. Keys are kebab-case:
 | `port` | integer 1..=65535 | 7770 | once, at start |
 | `lan` | bool | false | once, at start |
 | `allow-host` | list of bare hostnames (trimmed, lowercased; no spaces, `/` or `:`) | `[]` | once, at start |
-| `watch-todo`, `watch-inbox`, `watch-cost`, `watch-retro`, `watch-workflows` | bool | false | **every tick** |
+| `watch-todo`, `watch-inbox`, `watch-cost`, `watch-retro` | bool | false | **every tick** |
+| `watch-workflows` | bool | **true** (mesa task 1630) | **every tick** |
 
 Absent or `null` is the default. A bad value on `PUT` is 422 writing nothing; a
 hand-edited bad value is ignored for that key alone. On the command line a

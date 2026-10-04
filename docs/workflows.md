@@ -266,7 +266,9 @@ being a tagged union that two crates would have to keep in step.
 
 ## The time watcher (`serve --watch-workflows`)
 
-Off by default, independent of the other watchers, preserved across Restart
+**On by default** (mesa task 1630: a timed workflow that never fires is a bug)
+unless `--watch-workflows=false` or `"watch-workflows": false` in the config's
+`serve` section turns it off; independent of the other watchers, preserved across Restart
 Server. Every **60 s** (`NARU_WATCH_WORKFLOWS_TICK_MS` / `MESA_…` overrides it)
 it asks `Store::due_time_workflows` for the workflows whose trigger is
 `mode: time` and for which **no run with `trigger = time` started within the
@@ -349,7 +351,7 @@ is never called and nothing is logged. To gate on an idea *score* instead,
 add a `prompt` node before a `score_above` branch — remembering that the
 branch then passes the score, not the text, downstream. To run it every ten
 minutes instead, give the trigger `{"mode":"time","every_minutes":10}` and
-start `naru serve --watch-workflows`. `scripts/workflow-check.sh` builds this
+run `naru serve` (the watcher is on by default). `scripts/workflow-check.sh` builds this
 exact graph over stub `sox`/`auris` and a stub model API.
 
 ## Web UI
