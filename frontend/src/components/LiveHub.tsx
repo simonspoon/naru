@@ -84,6 +84,15 @@ import { elapsedLabel, endsInHead } from '../liveHead'
 import { headMeta, quietHint, taskHash, taskSegments, turnClock } from '../liveChat'
 import { headerIndicator } from '../liveIndicator'
 import {
+  IDLE,
+  armedState,
+  MAX_ARMED_MS,
+  createThinkingCue,
+  nextThinking,
+  type ThinkingCue,
+  type ThinkingState,
+} from '../liveThinkingCue'
+import {
   buildVocabulary,
   correctVocabulary,
   isBlockingError,
@@ -1630,6 +1639,17 @@ export function LiveHub({
   // unlocked.
   const player = useRef<HTMLAudioElement | null>(null)
   const clock = useRef<AudioContext | null>(null)
+  // The audible "thinking" cue (mesa task 1620): a chime when a user turn is
+  // posted, then a quiet pulse until Naru's speech plays. Decisions in
+  // `liveThinkingCue.ts`; this is only its context and its state.
+  const thinkingCue = useRef<ThinkingCue | null>(null)
+  const [thinking, setThinking] = useState<ThinkingState>(IDLE)
+  const thinkingRef = useRef<ThinkingState>(IDLE)
+  const speakingRef = useRef(false)
+  useEffect(() => {
+    thinkingRef.current = thinking
+    speakingRef.current = speaking
+  }, [thinking, speaking])
   const decoded = useRef<SpeechStream | null>(null)
   // The request the audio is arriving on. Held outside the stream because the
   // route answers only once the synthesiser has audio: until then there is no
@@ -3876,6 +3896,23 @@ export function LiveHub({
   }
 
   /**
+   * Chime and arm the thinking cue (mesa task 1620). Called from a promise
+   * callback, so it reads the live state through refs. Once per utterance: a
+   * recording flushed as several posts arms on its carrier piece, or on any
+   * piece while the cue is not yet armed. Not while Naru is speaking or the
+   * page is paused — the cue would start over speech or a silenced page.
+   */
+  function armThinking(carriesMedia: boolean) {
+    const ctx = clock.current
+    if (ctx === null || ctx.state !== 'running') return
+    if (speakingRef.current || pausedRef.current) return
+    if (thinkingRef.current.armed && !carriesMedia) return
+    thinkingCue.current ??= createThinkingCue(ctx)
+    thinkingCue.current.chime()
+    setThinking(armedState(held.current))
+  }
+
+  /**
    * The one way an utterance leaves this page — typed, or heard. Returns the
    * request so a flush of more than one turn can send them **in order**: a
    * recording that had to be split is still one thing the person said, and
@@ -3914,6 +3951,7 @@ export function LiveHub({
         png_base64: stagedImage!.png_base64,
       }).then(
         () => {
+          armThinking(carriesMedia)
           setPastedImage(null)
           refetch()
         },
@@ -3943,6 +3981,7 @@ export function LiveHub({
       })
       .then(
         ({ carried, dropped }) => {
+          armThinking(carriesMedia)
           if (carried !== null) {
             updateInk((book) => markInkSent(book, carried.boardId, carried.strokes, carried.images))
           }
@@ -4025,6 +4064,33 @@ export function LiveHub({
     // agent may have left on the row.
     resting: session?.resting_since != null,
   })
+
+  // The thinking cue (mesa task 1620): `nextThinking` decides when it is
+  // over (speech, pause, end, leaving, or work finished with nothing to say);
+  // the pulse follows `armed`, with a cap for a session nothing answers.
+  const working = session?.working_since != null
+  const thinkingNext = nextThinking(thinking, {
+    live,
+    joined: unlocked,
+    paused,
+    speaking,
+    working,
+    turns,
+    ownsVoice: (turn) =>
+      spokenTurnVerdict(turn, session?.speaker ?? null, client, speechMuted) === 'speak',
+  })
+  // Derived during render (the documented adjust-state pattern): `nextThinking`
+  // returns `thinking` itself when nothing changes, so this settles at once.
+  if (thinkingNext !== thinking) setThinking(thinkingNext)
+  useEffect(() => {
+    if (!thinking.armed) return undefined
+    thinkingCue.current?.startPulse()
+    const cap = window.setTimeout(() => setThinking(IDLE), MAX_ARMED_MS)
+    return () => {
+      window.clearTimeout(cap)
+      thinkingCue.current?.stop()
+    }
+  }, [thinking.armed])
 
   const groups = turnGroups(turns)
   const replayState = (turn: LiveTurn) =>
