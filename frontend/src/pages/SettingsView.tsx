@@ -1203,7 +1203,7 @@ function ServeSection() {
             <code className="settings-command-key">{key}</code>
           </label>
           <p className="muted settings-command-blurb">
-            {SERVE_LABELS[key].blurb} Takes effect live, within one tick.
+            {SERVE_LABELS[key].blurb} Takes effect live, {key === 'watch_retro' ? 'within an hour (its tick)' : 'within a minute'}.
           </p>
           <input
             id={`serve-${key}`}

@@ -25,7 +25,7 @@ export const BOOL_KEYS = [
 ] as const
 export type BoolKey = (typeof BOOL_KEYS)[number]
 
-/** The watcher switches — the ones that take effect live, within a tick. */
+/** The watcher switches — the ones that take effect live, on that watcher's next tick. */
 export const WATCH_KEYS = [
   'watch_todo',
   'watch_inbox',

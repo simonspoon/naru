@@ -2394,37 +2394,71 @@ pub struct ServeFlags {
     pub watch_workflows: Option<bool>,
 }
 
+/// The last enabled/disabled value read cleanly from the config, per watcher
+/// key, so an unreadable config keeps a watcher as it was rather than
+/// switching it off (a half-written file must not stop the cost guard).
+static WATCHER_LAST_GOOD: Mutex<Vec<(&'static str, bool)>> = Mutex::new(Vec::new());
+/// Whether the previous config read failed, so the error is logged once on
+/// the way in rather than on every tick.
+static SERVE_CONFIG_BROKEN: AtomicBool = AtomicBool::new(false);
+
 /// Whether one watcher is on right now: the command-line flag if given, else
 /// the `serve` config section read fresh (so the Settings page toggles it
-/// live, within one tick), else off. A config that can't be read counts as
-/// off for that tick.
+/// live, on that watcher's next tick), else off. A config that can't be read
+/// keeps the watcher's last good value (off if it never had one) and logs one
+/// line when the read starts failing.
 fn watcher_on(
     flags: &ServeFlags,
+    key: &'static str,
     pick_flag: fn(&ServeFlags) -> Option<bool>,
     pick_config: fn(&config::ServeSettings) -> Option<bool>,
 ) -> bool {
-    pick_flag(flags).unwrap_or_else(|| {
-        config::serve_settings()
-            .ok()
-            .and_then(|c| pick_config(&c))
-            .unwrap_or(false)
-    })
+    if let Some(on) = pick_flag(flags) {
+        return on;
+    }
+    let mut last = WATCHER_LAST_GOOD.lock().unwrap_or_else(|e| e.into_inner());
+    match config::serve_settings() {
+        Ok(cfg) => {
+            SERVE_CONFIG_BROKEN.store(false, Ordering::SeqCst);
+            let on = pick_config(&cfg).unwrap_or(false);
+            match last.iter_mut().find(|(k, _)| *k == key) {
+                Some(entry) => entry.1 = on,
+                None => last.push((key, on)),
+            }
+            on
+        }
+        Err(e) => {
+            if !SERVE_CONFIG_BROKEN.swap(true, Ordering::SeqCst) {
+                eprintln!(
+                    "naru: cannot read the serve config; watchers keep their last state: {e}"
+                );
+            }
+            last.iter()
+                .find(|(k, _)| *k == key)
+                .is_some_and(|(_, v)| *v)
+        }
+    }
 }
 
 fn todo_on(flags: &ServeFlags) -> bool {
-    watcher_on(flags, |f| f.watch_todo, |c| c.watch_todo)
+    watcher_on(flags, "watch-todo", |f| f.watch_todo, |c| c.watch_todo)
 }
 fn inbox_on(flags: &ServeFlags) -> bool {
-    watcher_on(flags, |f| f.watch_inbox, |c| c.watch_inbox)
+    watcher_on(flags, "watch-inbox", |f| f.watch_inbox, |c| c.watch_inbox)
 }
 fn cost_on(flags: &ServeFlags) -> bool {
-    watcher_on(flags, |f| f.watch_cost, |c| c.watch_cost)
+    watcher_on(flags, "watch-cost", |f| f.watch_cost, |c| c.watch_cost)
 }
 fn retro_on(flags: &ServeFlags) -> bool {
-    watcher_on(flags, |f| f.watch_retro, |c| c.watch_retro)
+    watcher_on(flags, "watch-retro", |f| f.watch_retro, |c| c.watch_retro)
 }
 fn workflows_on(flags: &ServeFlags) -> bool {
-    watcher_on(flags, |f| f.watch_workflows, |c| c.watch_workflows)
+    watcher_on(
+        flags,
+        "watch-workflows",
+        |f| f.watch_workflows,
+        |c| c.watch_workflows,
+    )
 }
 
 /// The port, LAN switch and allowed hosts a start would use: flag, else
@@ -2470,12 +2504,21 @@ pub fn serve(flags: ServeFlags) -> crate::core::Result<()> {
             config::ServeSettings::default()
         }
     };
+    // A given `--allow-host` that is not a bare hostname is a startup error,
+    // never dropped silently (which would let the config's list apply).
+    let mut allow_host = Vec::new();
+    for raw in &flags.allow_host {
+        match config::normalize_serve_host(raw) {
+            Some(h) => allow_host.push(h),
+            None => {
+                return Err(Error::Validation(format!(
+                    "--allow-host {raw:?} is not a bare hostname (no spaces, '/' or ':')"
+                )));
+            }
+        }
+    }
     let flags = ServeFlags {
-        allow_host: flags
-            .allow_host
-            .iter()
-            .filter_map(|h| config::normalize_serve_host(h))
-            .collect(),
+        allow_host,
         ..flags
     };
     let (port, lan, allow_hosts) = resolve_startup(&flags, &cfg);
@@ -2595,8 +2638,10 @@ pub fn serve(flags: ServeFlags) -> crate::core::Result<()> {
         }
         {
             // The reaper is the dispatch loops' other end (mesa tasks 1057,
-            // 1192), so it runs while either is on — but on its own shorter
-            // cadence, since a session that is finished with its task or item
+            // 1192). It runs on every tick whatever the switches say: a session
+            // dispatched before a watcher was turned off must still be stopped
+            // once its task closes, and the tick returns at once when nothing
+            // was dispatched. It has its own shorter cadence, since a session that is finished with its task or item
             // should not wait a whole dispatch tick to be stopped.
             let reap_state = state.clone();
             tokio::spawn(async move {
@@ -2604,12 +2649,7 @@ pub fn serve(flags: ServeFlags) -> crate::core::Result<()> {
                 loop {
                     ticker.tick().await;
                     let state = reap_state.clone();
-                    let _ = tokio::task::spawn_blocking(move || {
-                        if todo_on(&state.serve_flags) || inbox_on(&state.serve_flags) {
-                            todo_reaper_tick(&state)
-                        }
-                    })
-                    .await;
+                    let _ = tokio::task::spawn_blocking(move || todo_reaper_tick(&state)).await;
                 }
             });
         }

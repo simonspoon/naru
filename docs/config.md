@@ -671,8 +671,12 @@ replaces the config list.
 
 The five watcher loops always run; each tick first asks whether its watcher is
 enabled (the flag, else the config read fresh), so toggling one in Settings
-takes effect within a tick with no restart. The reaper runs while the todo or
-inbox watcher is on. The port, LAN switch and hosts need a restart.
+takes effect on that watcher's next tick (a minute; the retrospective's is an
+hour) with no restart. If the config can't be read a watcher keeps its last
+good state, with one stderr line. The todo reaper runs on every tick whatever
+the switches say, so a session dispatched before a watcher was turned off is
+still stopped. A `--allow-host` that is not a bare hostname is a startup error.
+The port, LAN switch and hosts need a restart.
 **Restart Server** relaunches with only the flags that were given, so the
 config is re-read rather than frozen into argv.
 

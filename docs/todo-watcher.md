@@ -358,7 +358,7 @@ because someone ran `mesa serve`.
 - The flag can also be a config key (mesa task 1621): `serve.watch-todo` in
   `~/.mesa/config.json`. The loop always runs and each tick checks whether the
   watcher is enabled (the flag if given, else the config read fresh), so
-  Settings → System → Server toggles it live, within a tick; `--watch-todo=false`
+  Settings → System → Server toggles it live, within a minute (its tick; the reaper never stops running, so a session dispatched before the switch went off is still reaped); `--watch-todo=false`
   forces it off for a run. See `docs/config.md` "Serve".
 - Gate: `scripts/todo-watcher-check.sh` (flag on/off, dispatch + claim,
   at-the-limit skip, path-less/stale-path skip, spawn-failure revert, a
