@@ -201,6 +201,7 @@ import type { LiveWindow } from '../types/LiveWindow'
 import type { TranscribeStatus } from '../types/TranscribeStatus'
 import { isNearBottom, newSince } from '../liveScroll'
 import { useFetch } from '../useFetch'
+import { detectNativeHost, installNativeHost } from '../nativeHost'
 
 /**
  * Mesa Live, in the header (mesa tasks 855, 857): the whole conversation lives
@@ -991,6 +992,17 @@ export function LiveHub({
     mutedRef.current = next
     setMuted(next)
   }, [])
+  // The native host (mesa task 1628, `nativeHost.ts`): a WKWebView app that
+  // owns the microphone. Decided once; `null` in every plain browser, where
+  // every branch below on it is skipped and nothing changes. When present the
+  // page opens no `getUserMedia` anywhere and `muted` is what the host reports.
+  const [native] = useState(() => detectNativeHost(window as unknown as Record<string, unknown>))
+  useEffect(() => {
+    if (native === null) return
+    return installNativeHost(window as unknown as Record<string, unknown>, native, (state) => {
+      if (state.muted !== undefined) setMutedNow(state.muted)
+    })
+  }, [native, setMutedNow])
   // The engine still guessing. Shown, and sent only as the tail of a flush
   // (`liveRecognition.ts`). The ref is what the listen switch reads: it flips
   // from a press, outside the render that last set this.
@@ -1138,13 +1150,18 @@ export function LiveHub({
   // *answered* — because opening the wrong engine for the probe's one fetch
   // and tearing it down a beat later is a real cost (a flashed permission
   // prompt, a microphone opened and closed) that a render label is not.
-  const path: ListenPath = listenPath({
-    transcribes: transcribes === true,
-    captures,
-    recognizes: hasRecognizer,
-    audioEngine: audio?.engine ?? null,
-    listenEngine,
-  })
+  // A native host captures for the page, so the page is always capable of
+  // listening and the hints and controls read as the `auris` path would.
+  const path: ListenPath =
+    native !== null
+      ? 'auris'
+      : listenPath({
+          transcribes: transcribes === true,
+          captures,
+          recognizes: hasRecognizer,
+          audioEngine: audio?.engine ?? null,
+          listenEngine,
+        })
   // `'unavailable'` keeps the microphone shut exactly as `'none'` does; the
   // banner below is what tells the two apart.
   const supported = path !== 'none' && path !== 'unavailable'
@@ -1909,10 +1926,16 @@ export function LiveHub({
   const micOpenedFor = useRef<number | null>(null)
   useEffect(() => {
     const id = session?.id ?? null
-    if (id === null || !unlocked || micOpenedFor.current === id) return
+    // The native host decides whether it is listening; the page never opens it.
+    if (native !== null || id === null || !unlocked || micOpenedFor.current === id) return
     micOpenedFor.current = id
     setMutedNow(false)
-  }, [session?.id, unlocked, setMutedNow])
+  }, [session?.id, unlocked, setMutedNow, native])
+  // Tell the native host which conversation to capture for.
+  const sessionId = session?.id ?? null
+  useEffect(() => {
+    native?.post({ type: 'state', session: sessionId, live, joined: unlocked })
+  }, [native, sessionId, live, unlocked])
 
   // The recognizer's handlers are set once per start and post sentences long
   // after the render that installed them, so they read through a ref rather
@@ -1940,7 +1963,7 @@ export function LiveHub({
    */
   const listInputs = useCallback(() => {
     const media = navigator.mediaDevices
-    if (!media?.enumerateDevices) return
+    if (native !== null || !media?.enumerateDevices) return
     media
       .enumerateDevices()
       .then((devices) => {
@@ -1951,7 +1974,7 @@ export function LiveHub({
       // what an empty list says, and there is nothing else worth reporting:
       // the conversation still listens through the default.
       .catch(() => setInputs([]))
-  }, [])
+  }, [native])
 
   useEffect(() => {
     if (!supported) return
@@ -1975,7 +1998,7 @@ export function LiveHub({
   // `getUserMedia` at all, so there is nothing to probe there — hence `true`
   // rather than the state below whenever `path !== 'browser'`.
   const choosesInput = offersInputChoice({
-    supported,
+    supported: supported && native === null,
     routes: path === 'browser' ? routes : true,
     inputs,
   })
@@ -2185,8 +2208,10 @@ export function LiveHub({
         setInterimNow('')
       }
       setMutedNow(next)
+      // The press is also the host's to hear; its `setMicState` is the last word.
+      native?.post({ type: 'mic', muted: next })
     },
-    [claimVoice, setRecordingNow, setInterimNow, setMutedNow],
+    [claimVoice, setRecordingNow, setInterimNow, setMutedNow, native],
   )
 
   // The chord that opens and shuts the microphone (mesa task 887). A window
@@ -2411,7 +2436,7 @@ export function LiveHub({
   // guess *would* otherwise open a real microphone a beat before tearing it
   // down once the probe corrected it.
   useEffect(() => {
-    if (!wantsMic || transcribes === null || path !== 'auris' || streams) return
+    if (native !== null || !wantsMic || transcribes === null || path !== 'auris' || streams) return
     let running = true
     // The stretch this run hears in (mesa task 1354): once the discard key
     // ends it, nothing this run heard is the person's to send.
@@ -2644,6 +2669,7 @@ export function LiveHub({
       if (cap.blobUrl) URL.revokeObjectURL(cap.blobUrl)
     }
   }, [
+    native,
     wantsMic,
     transcribes,
     path,
@@ -2689,7 +2715,7 @@ export function LiveHub({
   //   no dependency, so the person's listen switch is: off and on re-runs
   //   this effect and reconnects.
   useEffect(() => {
-    if (!wantsMic || transcribes === null || path !== 'auris' || !streams) return
+    if (native !== null || !wantsMic || transcribes === null || path !== 'auris' || !streams) return
     let running = true
     const stretch = discardsRef.current!.current
     const discarded = () => discardsRef.current!.isDiscarded(stretch)
@@ -2884,6 +2910,7 @@ export function LiveHub({
       if (cap.blobUrl) URL.revokeObjectURL(cap.blobUrl)
     }
   }, [
+    native,
     wantsMic,
     transcribes,
     path,
@@ -2936,7 +2963,7 @@ export function LiveHub({
   // `paused` keeps the main effect from reopening the microphone in its
   // place.
   useEffect(() => {
-    if (!wantsBargeIn || transcribes === null || path !== 'auris') return
+    if (native !== null || !wantsBargeIn || transcribes === null || path !== 'auris') return
     let running = true
     let stream: MediaStream | null = null
     let ctx: AudioContext | null = null
@@ -3036,7 +3063,7 @@ export function LiveHub({
       stream?.getTracks().forEach((t) => t.stop())
       if (blobUrl) URL.revokeObjectURL(blobUrl)
     }
-  }, [wantsBargeIn, transcribes, path, chosen])
+  }, [native, wantsBargeIn, transcribes, path, chosen])
 
   // The browser's own ears — this module's original path (mesa task 873),
   // restored rather than deleted by mesa task 956 and now the fallback for a
@@ -3061,7 +3088,7 @@ export function LiveHub({
   // on top of `path`, even though `path` alone would already have been
   // `'browser'`.
   useEffect(() => {
-    if (!wantsMic || transcribes === null || path !== 'browser') return
+    if (native !== null || !wantsMic || transcribes === null || path !== 'browser') return
     const Recognizer = recognitionCtor(window as unknown as Record<string, unknown>)
     if (Recognizer === null) return
     // This effect's own run. A recognizer stopped by the cleanup below still
@@ -3298,7 +3325,7 @@ export function LiveHub({
       current?.stop()
       stream?.getTracks().forEach((t) => t.stop())
     }
-  }, [wantsMic, transcribes, path, chosen, listInputs, markHeard, setInterimNow, setRecordingNow])
+  }, [native, wantsMic, transcribes, path, chosen, listInputs, markHeard, setInterimNow, setRecordingNow])
 
   // The run: the oldest mesa turn nobody has played, one at a time. A turn that
   // navigates moves the browser when it is *reached*, whether or not it also

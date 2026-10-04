@@ -1961,7 +1961,38 @@ close button is browser-side, like the conversation panel's own: closing a
 picture is not a write. The one POST is `POST /api/live/boards` (mesa task
 1580, below), which reads no body and starts a fixed blank board.
 
-### What is deliberately absent
+### Native host bridge
+
+A native app that embeds the web UI in a WKWebView (naru-mac) can own the live
+microphone (mesa task 1628, `frontend/src/nativeHost.ts`).
+
+**Detection.** The host registers one script message handler named `naruLive`
+(`WKUserContentController.add(_:name:)`) before the page loads. The page checks
+`window.webkit.messageHandlers.naruLive.postMessage` once, at mount. A plain
+browser has no such handler and behaves exactly as before.
+
+**Page to host** — `window.webkit.messageHandlers.naruLive.postMessage(msg)`:
+
+| `msg` | When |
+| --- | --- |
+| `{"type":"ready"}` | The page installed its API below; answer with `setMicState`. |
+| `{"type":"state","session":<id or null>,"live":<bool>,"joined":<bool>}` | On mount and whenever the live session, `live` or this browser's `joined` changes. Capture only while `live && joined`. |
+| `{"type":"mic","muted":<bool>}` | The person pressed the listen button or chord. |
+
+**Host to page** — `window.naruNativeHost.setMicState({muted: <bool>})`
+(installed only when the host is detected; a missing key leaves that state
+alone, a non-boolean is ignored). It is the last word on `muted`: a press is
+applied locally at once and posted as `mic`, and the host's next `setMicState`
+overrides it.
+
+**What the page stops doing** when a host is present: no `getUserMedia`
+anywhere (main capture, barge-in, device probe), no `enumerateDevices`, the
+microphone `<select>` is not offered, and joining no longer unmutes on its own
+(the host reports `muted`). The page still counts itself capable of listening,
+so the listen controls show. Transcribing and posting what the host hears is
+the host's job (`POST /api/live/utterance`); the page does not send it.
+
+## What is deliberately absent
 
 - **No live pointing, and no ink the agent draws.** The person has a pen
   (mesa task 1353), but what they draw reaches the agent only on their next
