@@ -6074,6 +6074,22 @@ impl Store {
         Ok(())
     }
 
+    /// Lets go of a claim on purpose (mesa task 1622): a client that is the
+    /// speaker clears `speaker` and `speaker_seen_at`, so the voice is free at
+    /// once rather than after the ten seconds a closed client's claim takes
+    /// to go stale. A client that is not the speaker changes nothing, so a
+    /// device that already lost the voice cannot take it down with it. The
+    /// session itself is never touched beyond the claim.
+    pub fn release_live_speaker(&mut self, id: i64, client: &str) -> Result<()> {
+        let client = validate_live_client(client)?;
+        self.conn.execute(
+            "UPDATE live_sessions SET speaker = NULL, speaker_seen_at = NULL, \
+             updated_at = datetime('now') WHERE id = ?1 AND speaker = ?2",
+            (id, &client),
+        )?;
+        Ok(())
+    }
+
     /// Records one utterance. The single write path for turns, and where every
     /// shape rule lives:
     ///
@@ -14051,6 +14067,29 @@ mod tests {
             .claim_live_speaker(session.id, "the-tab-left")
             .unwrap();
         assert_eq!(taken.speaker.as_deref(), Some("the-tab-left"));
+    }
+
+    /// Leaving releases the voice at once (mesa task 1622) — but only the
+    /// leaver's own claim, and never the session.
+    #[test]
+    fn releasing_the_speaker_frees_only_the_claim_it_holds() {
+        let (mut store, _dir) = temp_store();
+        let session = store.start_live_session(None).unwrap();
+        store.claim_live_speaker(session.id, "tab-a").unwrap();
+
+        store.release_live_speaker(session.id, "tab-b").unwrap();
+        let kept = store.get_live_session(session.id).unwrap();
+        assert_eq!(kept.speaker.as_deref(), Some("tab-a"));
+
+        store.release_live_speaker(session.id, "tab-a").unwrap();
+        let freed = store.get_live_session(session.id).unwrap();
+        assert_eq!(freed.speaker, None);
+        assert_eq!(freed.status, LiveStatus::Live);
+        // Idempotent: a second release is still fine.
+        store.release_live_speaker(session.id, "tab-a").unwrap();
+        // And the voice is takeable straight away.
+        let taken = store.claim_live_speaker(session.id, "tab-b").unwrap();
+        assert_eq!(taken.speaker.as_deref(), Some("tab-b"));
     }
 
     /// Naru's turns are written as `naru` (mesa task 1319), but a row an
