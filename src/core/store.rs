@@ -2580,6 +2580,8 @@ fn row_to_attachment(row: &rusqlite::Row<'_>) -> rusqlite::Result<Attachment> {
     })
 }
 
+// `next_run_at` (the last subselect) mirrors `Store::due_time_workflows`' arithmetic and
+// relies on at most one trigger node per workflow.
 const WORKFLOW_COLUMNS: &str = "w.id, w.project_id, w.name, w.description, \
      (SELECT json_extract(n.config, '$.mode') FROM workflow_nodes n \
         WHERE n.workflow_id = w.id AND n.kind = 'trigger' ORDER BY n.id LIMIT 1), \

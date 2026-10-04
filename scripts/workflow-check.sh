@@ -209,7 +209,7 @@ ok "workflow update: clears and un-binds; no field is usage"
 run 0 "$NARU" workflow show "$W"
 [ "$(keys "$STDOUT")" = '["edges","nodes","workflow"]' ] || fail "show shape: $STDOUT"
 run 0 "$NARU" workflow get "gate demo" --quiet
-[ "$(jq -c '.workflow | keys' <<<"$STDOUT")" = '["created_at","id","name","project_id","trigger","trigger_phrase","updated_at"]' ] ||
+[ "$(jq -c '.workflow | keys' <<<"$STDOUT")" = '["created_at","id","last_failure_at","last_run_at","last_run_status","name","next_run_at","project_id","trigger","trigger_phrase","updated_at"]' ] ||
   fail "show --quiet drops description: $STDOUT"
 ok "workflow show/get: {workflow, nodes, edges}; --quiet drops the description"
 
