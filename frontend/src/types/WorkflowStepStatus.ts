@@ -2,6 +2,8 @@
 
 /**
  * How one node ended in a run. `skipped` is a node no active edge
- * reached, or one a failure upstream stopped from running.
+ * reached, or one a failure upstream stopped from running. `running` is
+ * a node in flight: it appears only on a run that is itself still
+ * `running`, and is replaced by the node's final step.
  */
-export type WorkflowStepStatus = "ok" | "skipped" | "failed";
+export type WorkflowStepStatus = "running" | "ok" | "skipped" | "failed";

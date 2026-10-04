@@ -20,9 +20,26 @@ export function stepClass(status: WorkflowStepStatus | undefined): string {
 }
 
 export function stepCounts(run: WorkflowRun): Record<WorkflowStepStatus, number> {
-  const counts: Record<WorkflowStepStatus, number> = { ok: 0, skipped: 0, failed: 0 }
+  const counts: Record<WorkflowStepStatus, number> = {
+    running: 0,
+    ok: 0,
+    skipped: 0,
+    failed: 0,
+  }
   for (const s of run.steps) counts[s.status] += 1
   return counts
+}
+
+/** The run to show live: the newest `running` one (runs come newest first),
+ *  or null when nothing is in progress. */
+export function runningRunId(runs: Pick<WorkflowRun, 'id' | 'status'>[] | null): number | null {
+  return runs?.find((r) => r.status === 'running')?.id ?? null
+}
+
+/** How often to poll the run list: fast while this page started a run or one
+ *  is `running` (CLI, watcher, voice), slow otherwise to notice a new one. */
+export function runPollMs(startedHere: boolean, runningId: number | null): number {
+  return startedHere || runningId !== null ? 1000 : 5000
 }
 
 /** A step's duration: whole milliseconds under a second, else seconds to one
@@ -36,6 +53,7 @@ export function formatDuration(ms: number): string {
 export function runSummary(run: WorkflowRun): string {
   const c = stepCounts(run)
   const parts = [`${c.ok} ok`]
+  if (c.running > 0) parts.push(`${c.running} running`)
   if (c.skipped > 0) parts.push(`${c.skipped} skipped`)
   if (c.failed > 0) parts.push(`${c.failed} failed`)
   const base = `${run.status} · ${parts.join(', ')}`

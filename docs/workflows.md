@@ -177,6 +177,13 @@ succeeds.
    `{node_id, title, kind, status: ok|skipped|failed, output, error, duration_ms}`,
    output capped at 64 KiB. The run row is written `running` first (the
    claim) and finished exactly once; a run records even when it fails.
+   **Live steps** (mesa task 1631): before a node's process starts the engine
+   persists the steps so far plus one with status `running` for that node
+   (`Store::update_workflow_run_steps`, only while the run is `running`), and
+   persists again when it ends, so `run-show` / `GET /api/workflow-runs/{id}`
+   on an in-progress run show where it is. `running` appears only on a
+   `running` run; a persist failure never fails the run, the final finish is
+   authoritative.
 
 **Locking.** The engine takes the store only through a `StoreAccess` closure,
 for the brief reads and writes around a node, and **never holds it while a
@@ -391,7 +398,11 @@ context kind `workflows`, with the workflow's id and name once one is open.
 - **Running**: the header's **▶ Run** (with an optional input) posts
   `/api/workflows/{id}/run`, then paints each node with its step's status (ring
   green for `ok`, red for `failed`, dimmed for `skipped`) and lists the steps
-  with duration, output and error in the run panel under the canvas. The panel's
+  with duration, output and error in the run panel under the canvas. While a
+  run is in progress — started here, or by the CLI, the watcher or voice — the
+  page polls it (1 s; the run list every 5 s when idle) and the running node
+  pulses amber (still under `prefers-reduced-motion`), repainting as each step
+  lands; the final record replaces the live one when it ends. The panel's
   other tabs are the recent runs (click one to repaint the canvas with it) and
   the logs (`GET /api/workflow-log`, one named log or all).
 - **Logic in pure modules** (`frontend/src/*.test.ts`): `workflowConfig.ts`

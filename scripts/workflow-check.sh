@@ -380,6 +380,41 @@ run 0 "$NARU" workflow run Failing
 grep -q "timed out" <<<"$(jqs '.steps[1].error')" || fail "timeout error: $STDOUT"
 ok "a cli node past its timeout_secs is killed and fails the run"
 
+# ================= a live run: a running step while a node runs =================
+
+run 0 "$NARU" workflow create "Live"
+run 0 "$NARU" workflow node create Live trigger Start
+LT=$(jqs .id)
+run 0 "$NARU" workflow node create Live cli Slow --config '{"command":"sleep 3; echo done"}'
+LS=$(jqs .id)
+run 0 "$NARU" workflow node create Live output After --config '{"target":"log","log":"live"}'
+LA=$(jqs .id)
+"$NARU" workflow edge create Live "$LT" "$LS" >/dev/null
+"$NARU" workflow edge create Live "$LS" "$LA" >/dev/null
+"$NARU" workflow run Live >"$TMP/live-run.json" &
+LIVE_PID=$!
+SEEN=""
+for _ in $(seq 1 40); do
+  RID=$("$NARU" workflow runs Live | jq -r '[.[] | select(.status == "running")][0].id // empty')
+  if [ -n "$RID" ]; then
+    SHOWN=$("$NARU" workflow run-show "$RID")
+    if [ "$(jq -r '[.steps[] | select(.status == "running")] | map(.title) | join(",")' <<<"$SHOWN")" = "Slow" ]; then
+      SEEN=$SHOWN
+      break
+    fi
+  fi
+  sleep 0.2
+done
+[ -n "$SEEN" ] || fail "no run-show with a running step for the slow node while it ran"
+[ "$(jq -r '.status' <<<"$SEEN")" = "running" ] || fail "the run is running while its node is: $SEEN"
+[ "$(jq -r '.steps | map(.status) | join(",")' <<<"$SEEN")" = "ok,running" ] || fail "steps so far: $SEEN"
+wait "$LIVE_PID"
+[ "$(jq -r .status "$TMP/live-run.json")" = "succeeded" ] || fail "live run finishes: $(cat "$TMP/live-run.json")"
+[ "$(jq -r '.steps | map(.status) | join(",")' "$TMP/live-run.json")" = "ok,ok,ok" ] || fail "final steps unchanged"
+run 0 "$NARU" workflow run-show "$RID"
+[ "$(jqs '.steps | map(.status) | join(",")')" = "ok,ok,ok" ] || fail "the stored run is final: $STDOUT"
+ok "a running run shows a running step for the node in flight, then the final steps"
+
 # ================= prompt node: a background agent through the stub claude =================
 
 run 0 "$NARU" workflow create "Prompting"

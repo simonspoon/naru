@@ -4581,8 +4581,11 @@ workflow_enum! {
 
 workflow_enum! {
     /// How one node ended in a run. `skipped` is a node no active edge
-    /// reached, or one a failure upstream stopped from running.
+    /// reached, or one a failure upstream stopped from running. `running` is
+    /// a node in flight: it appears only on a run that is itself still
+    /// `running`, and is replaced by the node's final step.
     WorkflowStepStatus {
+        Running => "running",
         Ok => "ok",
         Skipped => "skipped",
         Failed => "failed",

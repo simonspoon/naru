@@ -1,7 +1,8 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   deleteWorkflow,
   getWorkflow,
+  getWorkflowRun,
   listWorkflowLog,
   listWorkflowRuns,
   runWorkflow,
@@ -14,7 +15,7 @@ import { formatTimestamp, timeAgo } from '../time'
 import { useFetch } from '../useFetch'
 import { WorkflowCanvas } from '../WorkflowCanvas'
 import { PlayIcon } from '../components/WorkflowIcon'
-import { formatDuration, runSummary, stepClass } from '../workflowRun'
+import { formatDuration, runPollMs, runSummary, runningRunId, stepClass } from '../workflowRun'
 import type { WorkflowRun } from '../types/WorkflowRun'
 
 /** One finished run, step by step: status, timing and what each node produced
@@ -153,6 +154,35 @@ export function WorkflowBuilderView({
   const [tab, setTab] = useState<'steps' | 'runs' | 'log'>('steps')
   // Bumped on every run so the recent-runs and log lists refetch.
   const [runVersion, setRunVersion] = useState(0)
+  // Live run view (mesa task 1631): the run list is polled — fast while a run
+  // is in progress here or anywhere (CLI, watcher, voice), slow otherwise —
+  // and the running run is polled whole so its steps repaint the canvas.
+  const [liveSeen, setLiveSeen] = useState<number | null>(null)
+  const { data: recentRuns } = useFetch(
+    () => listWorkflowRuns(workflowId),
+    `workflow-live-runs-${workflowId}`,
+    { pollMs: runPollMs(running, liveSeen) },
+  )
+  const liveId = runningRunId(recentRuns)
+  const { data: liveRun } = useFetch(
+    () => (liveId === null ? Promise.resolve(null) : getWorkflowRun(liveId)),
+    `workflow-live-run-${liveId ?? 'none'}`,
+    { pollMs: liveId === null ? undefined : 1000 },
+  )
+  if (liveId !== null && liveSeen !== liveId) setLiveSeen(liveId)
+  // A followed run that is no longer running has ended: show its final
+  // record and refresh the recent-runs and log lists.
+  useEffect(() => {
+    if (!recentRuns || liveId !== null || liveSeen === null) return
+    getWorkflowRun(liveSeen).then(
+      (done) => {
+        setLiveSeen(null)
+        setShown(done)
+        setRunVersion((v) => v + 1)
+      },
+      () => setLiveSeen(null),
+    )
+  }, [recentRuns, liveId, liveSeen])
   // What the person is looking at (mesa task 888) — reported ahead of the
   // early returns below, per the rules of hooks, so a workflow still loading
   // says which one it is. The name is the sayable handle; the id the identity.
@@ -184,6 +214,8 @@ export function WorkflowBuilderView({
   if (!view) return <p className="muted">Loading…</p>
 
   const wf = view.workflow
+  const live = liveId !== null && liveRun?.id === liveId ? liveRun : null
+  const display = live ?? shown
 
   return (
     <div className="workflow-page">
@@ -206,8 +238,8 @@ export function WorkflowBuilderView({
             placeholder="run input (optional)"
             onChange={(e) => setInput(e.target.value)}
           />
-          <button type="button" className="workflow-run-btn" disabled={running} onClick={run}>
-            {running ? 'running…' : (
+          <button type="button" className="workflow-run-btn" disabled={running || liveId !== null} onClick={run}>
+            {running || liveId !== null ? 'running…' : (
               <>
                 <PlayIcon /> Run
               </>
@@ -243,7 +275,7 @@ export function WorkflowBuilderView({
       <WorkflowCanvas
         key={workflowId}
         view={view}
-        run={shown}
+        run={display}
         onChanged={refetch}
       />
 
@@ -261,7 +293,7 @@ export function WorkflowBuilderView({
           ))}
         </div>
         {tab === 'steps' &&
-          (shown ? <RunSteps run={shown} /> : <p className="muted">Run it to see each step here.</p>)}
+          (display ? <RunSteps run={display} /> : <p className="muted">Run it to see each step here.</p>)}
         {tab === 'runs' && (
           <RecentRuns
             workflowId={workflowId}

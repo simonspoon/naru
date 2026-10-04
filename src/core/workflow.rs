@@ -563,6 +563,14 @@ pub fn execute_run<A: StoreAccess>(
             );
             continue;
         };
+        // Show the node as in flight; best-effort, the final `finish` is
+        // authoritative. One brief lock, released before the node's process.
+        steps.push(WorkflowStep {
+            status: WorkflowStepStatus::Running,
+            ..skipped(node)
+        });
+        let _ = access.with(|s| s.update_workflow_run_steps(run.id, &steps));
+        steps.pop();
         let started = Instant::now();
         let result = run_node(access, view, node, &input, &cwd, run.id, id == trigger_id);
         let duration_ms = started.elapsed().as_millis() as i64;
@@ -599,6 +607,7 @@ pub fn execute_run<A: StoreAccess>(
                 verdict,
             },
         );
+        let _ = access.with(|s| s.update_workflow_run_steps(run.id, &steps));
     }
     match failure {
         Some(message) => finish(WorkflowRunStatus::Failed, &steps, Some(&message)),

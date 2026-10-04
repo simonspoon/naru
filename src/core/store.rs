@@ -5268,6 +5268,19 @@ impl Store {
         self.get_workflow_run(id)
     }
 
+    /// Persists a still-running run's steps so far (the live run view). A run
+    /// already finished is left alone; the final `finish_workflow_run` write
+    /// stays authoritative.
+    pub fn update_workflow_run_steps(&mut self, id: i64, steps: &[WorkflowStep]) -> Result<()> {
+        let steps = serde_json::to_string(steps)
+            .map_err(|e| Error::Validation(format!("steps are not serializable: {e}")))?;
+        self.conn.execute(
+            "UPDATE workflow_runs SET steps = ?1 WHERE id = ?2 AND status = 'running'",
+            (steps, id),
+        )?;
+        Ok(())
+    }
+
     pub fn get_workflow_run(&self, id: i64) -> Result<WorkflowRun> {
         self.conn
             .query_row(
