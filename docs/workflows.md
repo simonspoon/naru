@@ -24,7 +24,15 @@ Source of truth: `src/core/workflow.rs` (validation and engine),
 All writes go through `Store`. `Workflow` carries two **derived, never stored**
 fields read off its trigger node on every read — `trigger` (`manual|time|voice`
 or `null`) and `trigger_phrase` — so `naru workflow list` can say which workflow
-a spoken request could mean without loading every graph.
+a spoken request could mean without loading every graph. Four more are derived
+from `workflow_runs` the same way (mesa task 1632), so `workflow list` and
+`GET /api/workflows` carry list status: `last_run_at`/`last_run_status` (the
+newest run, any trigger), `last_failure_at` (start of the newest `failed` run
+still kept) and `next_run_at` (a `time` workflow only: the newest `trigger =
+time` run's start plus `every_minutes`, the instant `due_time_workflows` stops
+excluding it, so it may be past; `null` for any other trigger, or a time
+workflow never run by its timer, which is due at once). There is no stored
+enabled flag: a workflow is **on** exactly when its trigger is `time`.
 
 Graph rules (`Store`):
 
@@ -353,6 +361,12 @@ start `naru serve --watch-workflows`. `scripts/workflow-check.sh` builds this
 exact graph over stub `sox`/`auris` and a stub model API.
 
 ## Web UI
+
+`#/workflows` (left nav, beside Scripts; mesa task 1632) is the global overview:
+one table of every workflow across all projects with project, on/off, last run,
+last failure and next run, polled every 5s. A row opens the workflow in its
+owning project's view; a global (project-less) workflow has no project page, so
+its row is not a link. The label logic is `workflowOverview.ts`.
 
 The web UI replaced the diagrams tab with a **Workflows** tab (mesa task 1607,
 frontend only; the routes are the ones above). `#/projects/<id>/workflows` is the

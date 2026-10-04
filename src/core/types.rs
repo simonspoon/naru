@@ -4556,6 +4556,19 @@ pub struct Workflow {
     pub trigger_phrase: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// When the newest run started (any trigger), or null if it never ran.
+    /// Derived on every read from `workflow_runs`, never stored.
+    pub last_run_at: Option<String>,
+    /// The newest run's status, or null if it never ran.
+    pub last_run_status: Option<WorkflowRunStatus>,
+    /// When the newest *failed* run started, or null if none is kept.
+    pub last_failure_at: Option<String>,
+    /// For a `time` trigger: the newest `time` run's start plus
+    /// `every_minutes` — the instant `due_time_workflows` stops excluding it,
+    /// so it may be in the past (due on the next watcher tick). Null for any
+    /// other trigger and for a time workflow that has never run on its timer
+    /// (due at once).
+    pub next_run_at: Option<String>,
 }
 
 /// One step of a graph. `config` is JSON whose shape depends on `kind`

@@ -210,6 +210,7 @@ export function Sidebar({
   inboxFilter,
   settingsActive,
   scriptsActive,
+  workflowsActive,
   libraryActive,
   terminalActive,
   ccTab,
@@ -226,6 +227,7 @@ export function Sidebar({
   inboxFilter: InboxFilter | null
   settingsActive: boolean
   scriptsActive: boolean
+  workflowsActive: boolean
   libraryActive: boolean
   terminalActive: boolean
   ccTab: CcTab | null
@@ -593,6 +595,10 @@ export function Sidebar({
             deliberately untouched. */}
         <a className={`nav-item${scriptsActive ? ' active' : ''}`} href="#/scripts">
           <span className="nav-item-label">Scripts</span>
+        </a>
+        {/* Global like Scripts: every workflow across all projects. */}
+        <a className={`nav-item${workflowsActive ? ' active' : ''}`} href="#/workflows">
+          <span className="nav-item-label">Workflows</span>
         </a>
         {/* Same reasoning as Scripts above: Library is global, not a project
             subtree. */}

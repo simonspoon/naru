@@ -2585,7 +2585,19 @@ const WORKFLOW_COLUMNS: &str = "w.id, w.project_id, w.name, w.description, \
         WHERE n.workflow_id = w.id AND n.kind = 'trigger' ORDER BY n.id LIMIT 1), \
      (SELECT json_extract(n.config, '$.phrase') FROM workflow_nodes n \
         WHERE n.workflow_id = w.id AND n.kind = 'trigger' ORDER BY n.id LIMIT 1), \
-     w.created_at, w.updated_at";
+     w.created_at, w.updated_at, \
+     (SELECT r.started_at FROM workflow_runs r WHERE r.workflow_id = w.id \
+        ORDER BY r.id DESC LIMIT 1), \
+     (SELECT r.status FROM workflow_runs r WHERE r.workflow_id = w.id \
+        ORDER BY r.id DESC LIMIT 1), \
+     (SELECT r.started_at FROM workflow_runs r WHERE r.workflow_id = w.id \
+        AND r.status = 'failed' ORDER BY r.id DESC LIMIT 1), \
+     (SELECT datetime(MAX(r.started_at), '+' || json_extract(n.config, '$.every_minutes') \
+                      || ' minutes') \
+        FROM workflow_nodes n JOIN workflow_runs r \
+          ON r.workflow_id = w.id AND r.trigger = 'time' \
+        WHERE n.workflow_id = w.id AND n.kind = 'trigger' \
+          AND json_extract(n.config, '$.mode') = 'time')";
 const WORKFLOW_NODE_COLUMNS: &str =
     "id, workflow_id, kind, title, config, x, y, created_at, updated_at";
 const WORKFLOW_EDGE_COLUMNS: &str = "id, workflow_id, from_node, to_node, branch";
@@ -2615,6 +2627,7 @@ fn row_to_workflow(row: &rusqlite::Row<'_>) -> rusqlite::Result<Workflow> {
     // Parsed leniently: a trigger mode this build does not know reads as no
     // trigger rather than failing a whole list.
     let trigger: Option<String> = row.get(4)?;
+    let last_run_status: Option<String> = row.get(9)?;
     Ok(Workflow {
         id: row.get(0)?,
         project_id: row.get(1)?,
@@ -2624,6 +2637,12 @@ fn row_to_workflow(row: &rusqlite::Row<'_>) -> rusqlite::Result<Workflow> {
         trigger_phrase: row.get(5)?,
         created_at: row.get(6)?,
         updated_at: row.get(7)?,
+        last_run_at: row.get(8)?,
+        last_run_status: last_run_status
+            .as_deref()
+            .and_then(WorkflowRunStatus::parse),
+        last_failure_at: row.get(10)?,
+        next_run_at: row.get(11)?,
     })
 }
 

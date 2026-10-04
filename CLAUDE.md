@@ -138,7 +138,7 @@ The code is the source of truth. These are the invariants you must not break:
   `sessionTimeline`, `settingsDraft`, `settingsTab`, `speechDraft`,
   `speechPlayback`, `speechSpeed`,
   `syntaxHighlighter`, `systemMeter`,
-  `time`, `timeStretch`, `usageMeter`, `voiceClone`, `voiceDesign`, `voiceExport`, `watchersDraft`, `wavStream`, `wordWrap`, `workflowConfig`, `workflowRun`) —
+  `time`, `timeStretch`, `usageMeter`, `voiceClone`, `voiceDesign`, `voiceExport`, `watchersDraft`, `wavStream`, `wordWrap`, `workflowConfig`, `workflowOverview`, `workflowRun`) —
   predicates that historically shipped wrong.
   **Logic worth testing therefore belongs in one of those modules, not inline
   in a `.tsx`** (why `isRunningAgent` lives outside `AgentSidebar`).

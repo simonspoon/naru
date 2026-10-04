@@ -51,6 +51,12 @@ function buildCommands(projects: Project[]): Command[] {
       run: () => navigate('#/scripts'),
     },
     {
+      id: 'workflows',
+      label: 'Workflows',
+      search: 'workflows runs schedule overview',
+      run: () => navigate('#/workflows'),
+    },
+    {
       id: 'library',
       label: 'Library',
       search: 'library agents skills hooks prompts claude',

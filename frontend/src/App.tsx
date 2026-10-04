@@ -29,6 +29,7 @@ import { LibraryView } from './pages/LibraryView'
 import { LiveHub, type LiveDock } from './components/LiveHub'
 import { ProjectTasksPage } from './pages/ProjectTasksPage'
 import { ScriptsView } from './pages/ScriptsView'
+import { WorkflowsOverview } from './pages/WorkflowsOverview'
 import { SettingsView } from './pages/SettingsView'
 import { settingsTabFromPath } from './settingsTab'
 import { TerminalPage } from './pages/TerminalPage'
@@ -374,6 +375,9 @@ function App() {
   // component state: a detached run survives the tab, so reopening one has to
   // survive a reload too (mesa task 1224).
   const scriptsMatch = /^\/scripts(?:\/runs\/(\d+))?$/.exec(path)
+  // Workflows overview: every workflow across all projects, global like
+  // Scripts. Anchored, so `/projects/<id>/workflows` is never mistaken for it.
+  const workflowsOverviewMatch = /^\/workflows$/.exec(path)
   // Library: global too, same reasoning as Scripts — a project-scoped item
   // binds a project, but the page itself is not a project tab.
   const libraryMatch = /^\/library$/.exec(path)
@@ -468,6 +472,8 @@ function App() {
     // Stored shell scripts + their run forms: global, so no project frame and
     // no active project, exactly like the inbox below.
     page = <ScriptsView runId={scriptsMatch[1] ? Number(scriptsMatch[1]) : null} />
+  } else if (workflowsOverviewMatch) {
+    page = <WorkflowsOverview />
   } else if (libraryMatch) {
     // Agents/skills/hooks/commands/prompts/CLAUDE.md, synced against
     // .claude: global, same reasoning as Scripts above.
@@ -808,6 +814,7 @@ function App() {
           inboxFilter={inboxFilter}
           settingsActive={settingsMatch !== null}
           scriptsActive={scriptsMatch !== null}
+          workflowsActive={workflowsOverviewMatch !== null}
           libraryActive={libraryMatch !== null}
           terminalActive={terminalActive}
           ccTab={ccTab}

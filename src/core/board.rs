@@ -377,6 +377,10 @@ mod tests {
             trigger_phrase: None,
             created_at: "2026-01-01 00:00:00".into(),
             updated_at: "2026-01-01 00:00:00".into(),
+            last_run_at: None,
+            last_run_status: None,
+            last_failure_at: None,
+            next_run_at: None,
         }
     }
 

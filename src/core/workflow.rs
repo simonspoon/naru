@@ -1458,6 +1458,31 @@ mod tests {
         assert_eq!(st.with(|s| s.due_time_workflows()).unwrap(), vec![other]);
     }
     #[test]
+    fn list_carries_derived_run_status_and_next_run() {
+        let (st, _d) = store();
+        let wf = st.with(|s| {
+            let wf = s.create_workflow(None, "Tick", None).unwrap().id;
+            node(
+                s,
+                wf,
+                WorkflowNodeKind::Trigger,
+                "T",
+                json!({"mode": "time", "every_minutes": 5}),
+            );
+            wf
+        });
+        let row = |st: &Mutex<Store>| st.with(|s| s.list_workflows(None)).unwrap().remove(0);
+        let before = row(&st);
+        assert!(before.last_run_at.is_none() && before.next_run_at.is_none());
+        run_workflow(&st, wf, WorkflowTrigger::Time, "").unwrap();
+        let after = row(&st);
+        assert!(after.last_run_at.is_some());
+        assert!(after.last_run_status.is_some());
+        assert!(after.next_run_at.is_some());
+        assert!(after.last_failure_at.is_none());
+    }
+
+    #[test]
     fn local_model_names_cannot_start_with_a_dash_and_script_takes_a_timeout() {
         let bad = |c: Value| validate_config(WorkflowNodeKind::Prompt, &c).unwrap_err();
         assert!(bad(json!({"model": "local:-h", "prompt": "x"})).contains("model"));

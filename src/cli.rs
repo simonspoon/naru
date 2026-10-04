@@ -7669,6 +7669,10 @@ mod tests {
             trigger_phrase: Some("p".into()),
             created_at: "2026-01-01 00:00:00".into(),
             updated_at: "2026-01-02 00:00:00".into(),
+            last_run_at: None,
+            last_run_status: None,
+            last_failure_at: None,
+            next_run_at: None,
         }
     }
 
@@ -7969,6 +7973,10 @@ mod tests {
                 "trigger_phrase",
                 "created_at",
                 "updated_at",
+                "last_run_at",
+                "last_run_status",
+                "last_failure_at",
+                "next_run_at",
             ]),
             "Workflow gained/lost a field: decide whether it belongs in the \
              --quiet shape before updating this list",
