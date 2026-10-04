@@ -215,7 +215,10 @@ export function WorkflowBuilderView({
 
   const wf = view.workflow
   const live = liveId !== null && liveRun?.id === liveId ? liveRun : null
-  const display = live ?? shown
+  // Until the final record lands, keep the last live one on screen rather
+  // than flashing the previous run.
+  const lastLive = liveSeen !== null && liveRun?.id === liveSeen ? liveRun : null
+  const display = live ?? lastLive ?? shown
 
   return (
     <div className="workflow-page">

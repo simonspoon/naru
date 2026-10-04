@@ -16,7 +16,7 @@ use super::types::{
     RetroFinding, RetroRun, RetroStatus, Script, ScriptArg, ScriptArgKind, ScriptRunRecord,
     ScriptRunStatus, Status, Task, TaskEvent, TaskReceipt, Workflow, WorkflowBranch, WorkflowEdge,
     WorkflowLogEntry, WorkflowNode, WorkflowNodeKind, WorkflowRun, WorkflowRunStatus, WorkflowStep,
-    WorkflowTrigger, WorkflowView, is_valid_artifact_content_type, task_name,
+    WorkflowStepStatus, WorkflowTrigger, WorkflowView, is_valid_artifact_content_type, task_name,
 };
 
 #[derive(Debug)]
@@ -5214,13 +5214,13 @@ impl Store {
     ) -> Result<Vec<i64>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, owner_pid FROM workflow_runs WHERE status = 'running'")?;
-        let rows: Vec<(i64, Option<i64>)> = stmt
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .prepare("SELECT id, owner_pid, steps FROM workflow_runs WHERE status = 'running'")?;
+        let rows: Vec<(i64, Option<i64>, String)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(stmt);
         let mut closed = Vec::new();
-        for (id, owner) in rows {
+        for (id, owner, steps) in rows {
             let abandoned = match owner {
                 None => true,
                 Some(pid) => pid == our_pid || !live(pid),
@@ -5228,10 +5228,25 @@ impl Store {
             if !abandoned {
                 continue;
             }
+            // A node that was in flight when the run was orphaned never ends;
+            // fail its step so nothing keeps showing it as running.
+            let steps = match serde_json::from_str::<Vec<WorkflowStep>>(&steps) {
+                Ok(mut v) => {
+                    for st in v
+                        .iter_mut()
+                        .filter(|st| st.status == WorkflowStepStatus::Running)
+                    {
+                        st.status = WorkflowStepStatus::Failed;
+                        st.error = Some(WORKFLOW_RUN_ABANDONED.into());
+                    }
+                    serde_json::to_string(&v).unwrap_or(steps)
+                }
+                Err(_) => steps,
+            };
             self.conn.execute(
-                "UPDATE workflow_runs SET status = 'failed', error = ?1, \
-                 finished_at = datetime('now') WHERE id = ?2 AND status = 'running'",
-                (WORKFLOW_RUN_ABANDONED, id),
+                "UPDATE workflow_runs SET status = 'failed', error = ?1, steps = ?2, \
+                 finished_at = datetime('now') WHERE id = ?3 AND status = 'running'",
+                (WORKFLOW_RUN_ABANDONED, steps, id),
             )?;
             closed.push(id);
         }
