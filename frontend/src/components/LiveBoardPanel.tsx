@@ -589,6 +589,7 @@ export function LiveBoardPanel({
   boards,
   expanded,
   onHide,
+  micCapturing,
   ink,
   onInk,
   flattenRef,
@@ -607,6 +608,8 @@ export function LiveBoardPanel({
   /** Hides the section (Escape, once nothing is maximised) and nothing else:
    *  there is no route behind this. */
   onHide: () => void
+  /** The microphone is capturing: Escape belongs to `live-cancel` first. */
+  micCapturing: boolean
   /** Every board's ink, held by the hub so a turn it sends can carry it. */
   ink: InkBook
   /** The one write path for `ink`. */
@@ -685,6 +688,9 @@ export function LiveBoardPanel({
     if (!expanded || frozen) return
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
+      // A capturing microphone has the first Escape (`live-cancel`): leaving
+      // the key unmarked lets the hub discard and mute, and the board stays.
+      if (micCapturing) return
       // Marked, so the conversation's own Escape (discard and mute, mesa task
       // 1354) stands down while it is closing the board.
       e.preventDefault()
@@ -693,7 +699,7 @@ export function LiveBoardPanel({
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [expanded, frozen, maximized, onHide])
+  }, [expanded, frozen, maximized, onHide, micCapturing])
 
   // ---- the pen (mesa task 1353) ----
 
