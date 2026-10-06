@@ -1,11 +1,10 @@
 // Pure logic for the workflow builder (mesa task 1607, docs/workflows.md):
-// the six node kinds, the config each starts with, the one-line summary a
+// the seven node kinds, the config each starts with, the one-line summary a
 // card shows, and the editor's draft ⇄ config round trip with the shape
 // checks the backend's `core::workflow::validate_config` makes. The server
 // stays the authority (a rejected save comes back as an inline error), so the
 // checks here only exist to say *which field* is wrong before the round trip.
 
-import type { WorkflowBranch } from './types/WorkflowBranch'
 import type { WorkflowNodeKind } from './types/WorkflowNodeKind'
 import type { WorkflowTrigger } from './types/WorkflowTrigger'
 
@@ -25,6 +24,7 @@ export const NODE_KINDS: readonly KindInfo[] = [
   { kind: 'cli', label: 'CLI tool', title: 'Command' },
   { kind: 'script', label: 'Script', title: 'Script' },
   { kind: 'branch', label: 'Branch', title: 'Gate' },
+  { kind: 'decide', label: 'Decide', title: 'Decide' },
   { kind: 'output', label: 'Output', title: 'Output' },
 ]
 
@@ -40,6 +40,10 @@ export const PROMPT_MODELS = ['haiku', 'sonnet', 'opus'] as const
 export const BRANCH_OPS = ['contains', 'regex', 'score_above', 'score_below', 'equals'] as const
 export const OUTPUT_TARGETS = ['log', 'task', 'inbox', 'board'] as const
 export const TRIGGER_MODES: readonly WorkflowTrigger[] = ['manual', 'time', 'voice']
+/** The label of a decide node's catch-all edge; no option may be it. */
+export const DECIDE_FALLBACK = 'fallback'
+/** A decide node's confidence threshold when its config names none. */
+export const DEFAULT_DECIDE_THRESHOLD = 0.5
 export const INBOX_KINDS = ['task-summary', 'change-request'] as const
 
 /** The config a node of `kind` is created with — one the server accepts as it
@@ -59,6 +63,8 @@ export function defaultConfig(kind: WorkflowNodeKind, script?: string): NodeConf
       return { script: script ?? 'unset', values: {} }
     case 'branch':
       return { op: 'contains', value: 'yes' }
+    case 'decide':
+      return { question: 'Which one fits? {input}', options: ['yes', 'no'], threshold: DEFAULT_DECIDE_THRESHOLD }
     case 'output':
       return { target: 'log', log: 'default' }
   }
@@ -105,6 +111,11 @@ export function summarize(kind: WorkflowNodeKind, config: NodeConfig): string {
       const op = str(config, 'op') || 'contains'
       return `${OP_TEXT[op] ?? op} ${clip(str(config, 'value'), 24)}`.trim()
     }
+    case 'decide': {
+      const options = optionList(config.options)
+      const t = str(config, 'threshold') || String(DEFAULT_DECIDE_THRESHOLD)
+      return `${clip(options.join(' | '), 28) || 'no options'} · ≥ ${t}`
+    }
     case 'output': {
       const target = str(config, 'target') || 'log'
       if (target === 'log') return `log · ${str(config, 'log') || 'default'}`
@@ -115,20 +126,42 @@ export function summarize(kind: WorkflowNodeKind, config: NodeConfig): string {
   }
 }
 
-/** Which branch label an edge from a node of `kind` must carry: `null` for a
- *  plain edge, `'required'` for an edge leaving a branch node. */
+/** The strings in a config's `options`, whatever else it holds. */
+function optionList(raw: unknown): string[] {
+  return Array.isArray(raw) ? raw.filter((o): o is string => typeof o === 'string') : []
+}
+
+/** Whether an edge leaving a node of `kind` must carry a label: a branch's
+ *  `true`/`false`, a decide node's option or `fallback`. */
 export function edgeNeedsBranch(sourceKind: WorkflowNodeKind): boolean {
-  return sourceKind === 'branch'
+  return sourceKind === 'branch' || sourceKind === 'decide'
+}
+
+/** The labelled source handles a node offers, in the order they are drawn:
+ *  `true`/`false` on a branch, one per option plus `fallback` on a decide
+ *  node, none (one unlabelled handle) elsewhere. */
+export function sourceHandles(kind: WorkflowNodeKind, config: NodeConfig): string[] {
+  if (kind === 'branch') return ['true', 'false']
+  if (kind === 'decide') return [...optionList(config.options), DECIDE_FALLBACK]
+  return []
 }
 
 /** The `branch` an edge dragged from `handle` of a node of `sourceKind`
- *  carries: the handle's own id on a branch node, nothing anywhere else. */
+ *  carries: the handle's own id on a branch (default `true`) or decide
+ *  (default `fallback`) node, nothing anywhere else. */
 export function branchForHandle(
   sourceKind: WorkflowNodeKind,
   handle: string | null | undefined,
-): WorkflowBranch | undefined {
-  if (!edgeNeedsBranch(sourceKind)) return undefined
-  return handle === 'false' ? 'false' : 'true'
+): string | undefined {
+  if (sourceKind === 'branch') return handle === 'false' ? 'false' : 'true'
+  if (sourceKind === 'decide') return handle ? handle : DECIDE_FALLBACK
+  return undefined
+}
+
+/** The CSS class an edge's label colours it with: only the two branch
+ *  verdicts have one — a decide option is free text and never a class name. */
+export function edgeLabelClass(branch: string | null): string {
+  return branch === 'true' || branch === 'false' ? `wf-edge-${branch}` : ''
 }
 
 /** Whether a node of `kind` takes incoming / offers outgoing connections
@@ -155,6 +188,9 @@ export interface ConfigDraft {
   values: [string, string][]
   op: string
   value: string
+  question: string
+  options: string[]
+  threshold: string
   target: string
   log: string
   project: string
@@ -182,6 +218,9 @@ export function draftFromConfig(kind: WorkflowNodeKind, config: NodeConfig): Con
     values,
     op: str(config, 'op') || 'contains',
     value: str(config, 'value'),
+    question: str(config, 'question'),
+    options: kind === 'decide' ? optionList(config.options) : [],
+    threshold: str(config, 'threshold'),
     target: str(config, 'target') || 'log',
     log: str(config, 'log'),
     project: str(config, 'project'),
@@ -262,6 +301,17 @@ export function buildConfig(kind: WorkflowNodeKind, d: ConfigDraft): BuildResult
       if (d.value === '') return bad('the value cannot be empty')
       return ok({ op: d.op, value: d.value })
     }
+    case 'decide': {
+      if (d.question.trim() === '') return bad('the question cannot be empty')
+      const options = d.options.map((o) => o.trim()).filter((o) => o !== '')
+      if (options.length < 2) return bad('a decide node needs at least two options')
+      if (new Set(options).size !== options.length) return bad('options must be distinct')
+      if (options.includes(DECIDE_FALLBACK)) return bad(`an option cannot be "${DECIDE_FALLBACK}"; that is the catch-all edge`)
+      const t = d.threshold.trim()
+      const threshold = t === '' ? DEFAULT_DECIDE_THRESHOLD : Number(t)
+      if (!Number.isFinite(threshold) || threshold < 0 || threshold > 1) return bad('threshold must be a number from 0 to 1')
+      return ok({ question: d.question, options, threshold })
+    }
     case 'output': {
       switch (d.target) {
         case 'log':
@@ -283,9 +333,6 @@ export function buildConfig(kind: WorkflowNodeKind, d: ConfigDraft): BuildResult
     }
   }
 }
-
-/** The branch edges leaving a branch node, as the two labels the canvas shows. */
-export const BRANCH_LABELS: readonly WorkflowBranch[] = ['true', 'false']
 
 /** A script's declared argument names not yet given a value row, so picking a
  *  script can offer rows for exactly what it takes. */

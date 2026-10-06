@@ -2671,7 +2671,7 @@ fn row_to_workflow_edge(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowEdg
         workflow_id: row.get(1)?,
         from_node: row.get(2)?,
         to_node: row.get(3)?,
-        branch: branch.as_deref().and_then(WorkflowBranch::parse),
+        branch,
     })
 }
 
@@ -5004,15 +5004,16 @@ impl Store {
     /// Connects two nodes of one workflow. Refused: a node of another
     /// workflow (`validation`), a self-edge or any edge that would close a
     /// cycle (`cycle` — a workflow is a DAG, unlike a diagram), an edge into
-    /// the trigger (`validation`), a missing or unexpected `branch`
-    /// (`validation`: required on an edge leaving a branch node, refused on
-    /// every other), and an exact duplicate (`conflict`).
+    /// the trigger (`validation`), a missing or unexpected `branch` label
+    /// (`validation`: required on an edge leaving a branch node — `true` or
+    /// `false` — or a decide node — one of its options or `fallback` —
+    /// and refused on every other), and an exact duplicate (`conflict`).
     pub fn create_workflow_edge(
         &mut self,
         workflow_id: i64,
         from_node: i64,
         to_node: i64,
-        branch: Option<WorkflowBranch>,
+        branch: Option<String>,
     ) -> Result<WorkflowEdge> {
         self.immediate(|s| s.create_workflow_edge_checked(workflow_id, from_node, to_node, branch))
     }
@@ -5022,7 +5023,7 @@ impl Store {
         workflow_id: i64,
         from_node: i64,
         to_node: i64,
-        branch: Option<WorkflowBranch>,
+        branch: Option<String>,
     ) -> Result<WorkflowEdge> {
         self.get_workflow(workflow_id)?;
         let from = self.workflow_edge_end("from", workflow_id, from_node)?;
@@ -5037,20 +5038,47 @@ impl Store {
                 "node {to_node} is the trigger; a trigger has no incoming edges"
             )));
         }
-        match (from.kind == WorkflowNodeKind::Branch, branch) {
-            (true, None) => {
+        match (from.kind, branch.as_deref()) {
+            (WorkflowNodeKind::Branch, None) => {
                 return Err(Error::Validation(format!(
                     "node {from_node} is a branch; its edges need --branch true|false"
                 )));
             }
-            (false, Some(_)) => {
+            (WorkflowNodeKind::Branch, Some(label)) if WorkflowBranch::parse(label).is_none() => {
                 return Err(Error::Validation(format!(
-                    "node {from_node} is not a branch; only a branch node's edges carry a branch"
+                    "node {from_node} is a branch; --branch must be true or false, got {label:?}"
+                )));
+            }
+            (WorkflowNodeKind::Decide, None) => {
+                return Err(Error::Validation(format!(
+                    "node {from_node} is a decide node; its edges need --branch <option>|fallback"
+                )));
+            }
+            (WorkflowNodeKind::Decide, Some(label)) => {
+                let options: Vec<&str> = from
+                    .config
+                    .get("options")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|o| o.as_str()).collect())
+                    .unwrap_or_default();
+                if label != "fallback" && !options.contains(&label) {
+                    return Err(Error::Validation(format!(
+                        "node {from_node} is a decide node; --branch must be one of its options \
+                         ({}) or fallback, got {label:?}",
+                        options.join(", ")
+                    )));
+                }
+            }
+            (WorkflowNodeKind::Branch, _) => {}
+            (_, Some(_)) => {
+                return Err(Error::Validation(format!(
+                    "node {from_node} is not a branch or decide node; only those nodes' edges \
+                     carry a branch"
                 )));
             }
             _ => {}
         }
-        let branch_text = branch.map(WorkflowBranch::as_str);
+        let branch_text = branch.as_deref();
         let duplicate: Option<i64> = self
             .conn
             .query_row(

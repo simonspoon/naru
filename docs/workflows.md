@@ -47,7 +47,12 @@ Graph rules (`Store`):
 - A **self-edge** or an edge that would close a **cycle** is `cycle`.
 - An exact duplicate `(from, to, branch)` is `conflict`.
 - An edge leaving a `branch` node **needs** `branch` (`true`/`false`); an edge
-  leaving any other node **refuses** one (`validation`).
+  leaving a `decide` node **needs** one of that node's `options` or `fallback`
+  (`validation`, naming the options); an edge leaving any other node
+  **refuses** one. `branch` is free text in the db (a decide option), so
+  `WorkflowEdge.branch` is a string; editing a decide node's options later
+  leaves an edge with a stale label inert (it can never be active), not
+  invalid.
 - Deleting a node deletes its edges; the echo is `{node, edges}`. Deleting a
   workflow echoes the whole destroyed `{workflow, nodes, edges}` — the
   recovery transcript, there is no confirmation prompt — and keeps its log
@@ -69,6 +74,7 @@ Stored config is the validated, normalized form.
 | `cli` | `{"command": "…" (non-empty), "timeout_secs": 1..=86400 (default 600)}` | `bash -c <command>` **verbatim** (the author wrote it, as with scripts); output is stdout |
 | `script` | `{"script": "<id or name>", "values": {"name": "…"}, "timeout_secs": 1..=86400 (default 600)}` | runs a stored script (`docs/scripts.md`); output is stdout |
 | `branch` | `{"op": "contains"\|"regex"\|"score_above"\|"score_below"\|"equals", "value": "…" (a number for `score_*`)}` | evaluates its input to a verdict; output is its input, unchanged |
+| `decide` | `{"question": "…" (non-empty, may contain `{input}`), "options": ["a", "b", …] (2 or more, distinct, non-empty, none named `fallback`), "threshold": 0..=1 (default 0.5)}` | a local judgement (`core::decide`, `docs/decide.md`) that picks one option; routes like a `branch`, one edge per option plus an optional `fallback` edge |
 | `output` | `{"target": "log", "log": "<name>" (default `default`)}`, `{"target": "task", "project": "<id\|name>"}`, `{"target": "inbox", "task_id": N, "kind": "task-summary"\|"change-request" (default task-summary)}`, `{"target": "board", "title": "…"}` | delivers its input; output is a short receipt. A key that does not apply to the target is refused |
 
 **`prompt`.** One model call (`core::llm`) — **never print mode (`-p`), and no API
@@ -157,6 +163,33 @@ branch passes its input on **unchanged** — a gate like `score_above` over a
 model's score therefore hands the *score*, not the text it scored, to the nodes
 after it; gate on the thing you want to carry forward.
 
+**`decide`.** Like a `branch`, but it *judges* rather than matches (mesa task
+1655). The node calls `core::decide::decide` **in-process** — no process, no
+network, no model, no key; the backend is the `decide` config section (rules
+file or `off`, `docs/decide.md`) — with the `question` (every `{input}` replaced
+by the node's input text) and the node's input as the context the rules may
+read. Each option is its own outgoing edge, labelled with the **exact option
+text** (`workflow edge create <wf> <from> <to> --branch <option>`), plus an
+optional edge labelled `fallback`.
+
+- A choice that is not null **and** whose `confidence` is at least `threshold`
+  activates only its option's edges.
+- Otherwise — a null choice, a confidence below the threshold, the backend
+  `off` — the `fallback` edges are active. With **no** fallback edge nothing is
+  active and everything downstream is `skipped`; the run still succeeds (a
+  low-confidence verdict is an answer, not a failure).
+- A decide **error** (an unreadable or invalid rules file, an unknown backend)
+  takes the `fallback` edge too when the node has one, the message in the
+  output's `error` key; with no fallback edge the node **fails**, and so the
+  run, like any failing node (the `branch` regex error is the precedent).
+- The output is a JSON object, so downstream nodes read the verdict:
+  `{"choice": "<option>"|null, "confidence": n, "agreement": n, "threshold": n,
+  "backend": "rules"|"off", "rule": "<id>"|null, "fallback": bool}` (plus
+  `"error"` after a decide error). `choice` is the engine's pick even when the
+  threshold sent the run down `fallback`; `fallback` says which way it went.
+  Unlike a `branch`, the input is **not** passed on — a downstream node that
+  needs the original text takes it from a second edge off an earlier node.
+
 **`output`.** `log` appends a line to the named log (`workflow log <name>`);
 `task` creates a task (the input is its description) in the named project;
 `inbox` files an item of the given kind naming `task_id` (an inbox item always
@@ -173,7 +206,8 @@ succeeds.
    break by **node id**.
 2. The trigger runs first; its output is the run `--input` text (possibly empty).
 3. An **edge is active** when its source ran `ok` and — for an edge leaving a
-   `branch` — its `branch` equals the source's verdict.
+   `branch` — its `branch` equals the source's verdict (`true`/`false`) — or
+   `decide` — its `branch` equals the chosen option, or `fallback`.
 4. A node with at least one incoming edge runs iff **at least one incoming
    edge is active**; its **input** is the outputs of its active upstream nodes
    joined by `"\n"` in **edge-id order**. A node whose incoming edges are all
@@ -225,7 +259,7 @@ is named.
 | `workflow node create <WORKFLOW> <KIND> <TITLE> [--config JSON] [--x] [--y]` | the `WorkflowNode`; omitted coordinates place it in a row beside the others |
 | `workflow node update <id> [--title] [--config JSON] [--x] [--y]` | the node; `--config` **replaces** the whole config |
 | `workflow node delete <id>` | `{node, edges}` |
-| `workflow edge create <WORKFLOW> <FROM> <TO> [--branch true\|false]` | the `WorkflowEdge` |
+| `workflow edge create <WORKFLOW> <FROM> <TO> [--branch true\|false\|<option>\|fallback]` | the `WorkflowEdge` |
 | `workflow edge delete <id>` | the destroyed edge |
 
 **A failed run exits 0.** `workflow run` prints the recorded run
@@ -389,14 +423,17 @@ context kind `workflows`, with the workflow's id and name once one is open.
   shows the run's one-line summary on the row, delete (the usual two-step
   confirm, whose echo is the recovery transcript) and a create form (a name).
 - **Builder** (`WorkflowBuilderView` + `WorkflowCanvas`, on `@xyflow/react`). A
-  **NODES** palette down the left holds the six kinds as tinted pills (`--wf-*`
+  **NODES** palette down the left holds the seven kinds as tinted pills (`--wf-*`
   tokens): drag one onto the canvas, or click it to add one in a free spot; each
   is one `POST .../nodes` with a config the server accepts as it stands
   (`workflowConfig.ts::defaultConfig`). A node drag ends in one `PATCH` of x/y;
   dragging from a node's right handle to another's left handle is one
   `POST .../edges`. A **branch** node has two source handles, **true** (green)
   and **false** (red), and the edge takes its `branch` from the handle it was
-  dragged from; only a branch node's edges carry one. A trigger has no input
+  dragged from; a **decide** node has one source handle per option plus a
+  **fallback** handle (labels drawn on the card; the handles follow the saved
+  options), and an edge takes the handle's label as its `branch`; only those two
+  kinds' edges carry one. A trigger has no input
   handle and an output node no output handle. Click a node or an edge to select
   it: the **inspector** (bottom-right) edits a node's title and a real control
   per config key of its kind (trigger mode/every-minutes/phrase; prompt
@@ -433,7 +470,11 @@ context kind `workflows`, with the workflow's id and name once one is open.
 
 `scripts/workflow-check.sh` (throwaway `MESA_DB`, `HOME` and config; a free
 port): CRUD with the positional/flag create shapes and the `--quiet` key sets;
-every graph rule and its error code; a `cli → branch → output(log)` run taking
+every graph rule and its error code; a `decide` node over a pinned rules file
+(a confident choice activating only its option's edge, low confidence / no
+match / backend `off` taking the `fallback` edge or skipping everything
+downstream, a rules-file error absorbed by a fallback edge or failing the
+node); a `cli → branch → output(log)` run taking
 the true path (false output skipped) and the reverse; a failing node failing
 the run (exit 0, record printed, rest skipped) and a timeout killing a node; a
 `prompt` node on an Anthropic model through a stub `claude`

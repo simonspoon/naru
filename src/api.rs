@@ -49,10 +49,10 @@ use crate::core::{
     ProjectGitStatus, ProjectGitView, ProjectPatch, ProjectVersion, ReceiptPatch,
     STALE_CLAIM_MINUTES, Script, ScriptArg, ScriptPatch, ScriptRunEvent, ServeBoolSetting,
     ServeHostsSetting, ServeNumberSetting, Status, Store, SystemInfo, Task, TaskPatch, TaskSummary,
-    WorkflowBranch, WorkflowNodeKind, WorkflowNodeNew, WorkflowNodePatch, WorkflowPatch,
-    WorkflowTrigger, agents, attachments, audio, board, config, files, git, guard, hooks,
-    inbox_triage, library, listen, live, project_memory, receipt, retro, script_runs, scripts,
-    speech, supervisor, system, validate_live_client, version, workflow,
+    WorkflowNodeKind, WorkflowNodeNew, WorkflowNodePatch, WorkflowPatch, WorkflowTrigger, agents,
+    attachments, audio, board, config, files, git, guard, hooks, inbox_triage, library, listen,
+    live, project_memory, receipt, retro, script_runs, scripts, speech, supervisor, system,
+    validate_live_client, version, workflow,
 };
 
 /// The Vite build output, embedded into the binary at compile time.
@@ -4258,7 +4258,7 @@ struct WorkflowEdgeCreate {
     from_node: i64,
     to_node: i64,
     #[serde(default)]
-    branch: Option<WorkflowBranch>,
+    branch: Option<String>,
 }
 
 #[derive(Deserialize, Default)]

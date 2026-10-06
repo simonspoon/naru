@@ -226,6 +226,7 @@ fn kind_colour(kind: WorkflowNodeKind) -> &'static str {
         WorkflowNodeKind::Cli => "#00e5ff",
         WorkflowNodeKind::Script => "#4ade80",
         WorkflowNodeKind::Branch => "#fb7185",
+        WorkflowNodeKind::Decide => "#f472b6",
         WorkflowNodeKind::Output => "#94a3b8",
     }
 }
@@ -274,13 +275,13 @@ pub fn workflow_svg(view: &WorkflowView) -> String {
             "<line x1=\"{x1:.0}\" y1=\"{y1:.0}\" x2=\"{x2:.0}\" y2=\"{y2:.0}\" \
              stroke=\"#5b6b7f\" stroke-width=\"2\"/>\n"
         ));
-        if let Some(branch) = edge.branch {
+        if let Some(branch) = &edge.branch {
             out.push_str(&format!(
                 "<text x=\"{:.0}\" y=\"{:.0}\" fill=\"#9fb0c3\" font-family=\"sans-serif\" \
                  font-size=\"12\" text-anchor=\"middle\">{}</text>\n",
                 (x1 + x2) / 2.0,
                 (y1 + y2) / 2.0 - 4.0,
-                escape(branch.as_str()),
+                escape(branch),
             ));
         }
     }
@@ -348,9 +349,7 @@ fn escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::types::{
-        Workflow, WorkflowBranch, WorkflowEdge, WorkflowNode, WorkflowNodeKind,
-    };
+    use crate::core::types::{Workflow, WorkflowEdge, WorkflowNode, WorkflowNodeKind};
 
     /// The ink rides beside the board under the board's own stem, so a
     /// titled board and an untitled one both keep a recognisable pair.
@@ -398,13 +397,13 @@ mod tests {
         }
     }
 
-    fn edge(from: i64, to: i64, branch: Option<WorkflowBranch>) -> WorkflowEdge {
+    fn edge(from: i64, to: i64, branch: Option<&str>) -> WorkflowEdge {
         WorkflowEdge {
             id: 1,
             workflow_id: 1,
             from_node: from,
             to_node: to,
-            branch,
+            branch: branch.map(String::from),
         }
     }
 
@@ -458,7 +457,7 @@ mod tests {
         let view = WorkflowView {
             workflow: workflow(),
             nodes: vec![node(1, "Start", 100.0, 100.0), node(2, "End", 400.0, 300.0)],
-            edges: vec![edge(1, 2, Some(WorkflowBranch::True))],
+            edges: vec![edge(1, 2, Some("true"))],
         };
         let svg = workflow_svg(&view);
         assert!(

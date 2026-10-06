@@ -5,7 +5,11 @@
 #
 # Pinned here: CRUD with the CLI's positional-or-flag create shapes and the
 # `--quiet` key sets; the graph rules (cycle, self-edge, duplicate, branch
-# edges, one trigger, same-workflow endpoints) with their error codes; a run
+# edges, one trigger, same-workflow endpoints) with their error codes; a decide
+# node (mesa task 1655) over a pinned rules file: a confident choice activating
+# only its option's edge, low confidence / no match / backend off taking the
+# fallback edge (or skipping everything downstream with none), a rules-file
+# error absorbed by a fallback edge or failing the node without one; a run
 # over a cli -> branch -> output(log) graph taking the TRUE path with the
 # false one skipped, and the reverse; a failing cli node failing the run
 # while the command still exits 0 (the status is data) and the rest skipped;
@@ -280,8 +284,10 @@ run 0 "$NARU" workflow node create other cli Foreign --config '{"command":"true"
 FOREIGN=$(jqs .id)
 run 1 "$NARU" workflow edge create "$W" "$C" "$FOREIGN"
 [ "$(jqe .error.code)" = "validation" ] || fail "an edge to another workflow's node: validation"
-run 2 "$NARU" workflow edge create "$W" "$C" "$Q" --branch maybe
-[ "$(jqe .error.code)" = "usage" ] || fail "--branch maybe: usage"
+run 1 "$NARU" workflow edge create "$W" "$C" "$Q" --branch maybe
+[ "$(jqe .error.code)" = "validation" ] || fail "--branch maybe on a non-branch node: validation"
+run 1 "$NARU" workflow edge create "$W" "$B" "$Q" --branch maybe
+[ "$(jqe .error.code)" = "validation" ] || fail "--branch maybe on a branch node: validation"
 ok "edge rules: duplicate=conflict, self/closing edge=cycle, into trigger / branch mismatch / foreign node=validation"
 
 run 0 "$NARU" workflow edge delete "$E1" --quiet
@@ -641,6 +647,111 @@ PATH="$STUB_DIR:$PATH" run 0 "$NARU" workflow run ambient
 run 0 "$NARU" workflow log ambient
 [ "$(jqs length)" = "1" ] || fail "silence logged nothing"
 ok "ambient capture: silence fails the gate, so the model is never called and nothing is logged"
+
+# ================= decide node: a local judgement picks one edge =================
+
+# Deterministic rules, beside the pinned config (the implicit rules-file
+# location), so the built-in ruleset and the real home play no part.
+cat > "$TMP/decide-rules.json" <<'RULES'
+{"rules": [
+  {"id": "ship", "choice": "ship", "confidence": 0.9,
+   "all": [{"field": "input", "pattern": "green"}]},
+  {"id": "hold-weak", "choice": "hold", "confidence": 0.3,
+   "all": [{"field": "input", "pattern": "flaky"}]}
+]}
+RULES
+run 0 "$NARU" workflow create judge
+JW=$(jqs .id)
+run 0 "$NARU" workflow node create judge trigger Start
+JT=$(jqs .id)
+run 0 "$NARU" workflow node create judge decide Pick --config '{"question":"Ship {input}?","options":["ship","hold"]}'
+JD=$(jqs .id)
+[ "$(jqs .config.threshold)" = "0.5" ] || fail "decide default threshold 0.5: $STDOUT"
+run 0 "$NARU" workflow node create judge output Shipped --config '{"target":"log","log":"shipped"}'
+JS=$(jqs .id)
+run 0 "$NARU" workflow node create judge output Held --config '{"target":"log","log":"held"}'
+JH=$(jqs .id)
+run 0 "$NARU" workflow node create judge output Fell --config '{"target":"log","log":"fell"}'
+JF=$(jqs .id)
+run 0 "$NARU" workflow edge create judge "$JT" "$JD"
+run 0 "$NARU" workflow edge create judge "$JD" "$JS" --branch ship
+[ "$(jqs .branch)" = "ship" ] || fail "decide edge carries its option: $STDOUT"
+run 0 "$NARU" workflow edge create judge "$JD" "$JH" --branch hold
+ok "decide: node created with the default threshold, edges labelled with the option text"
+
+run 1 "$NARU" workflow node create judge decide Bad --config '{"question":"q","options":["only"]}'
+[ "$(jqe .error.code)" = "validation" ] || fail "decide with one option: validation"
+run 1 "$NARU" workflow node create judge decide Bad --config '{"question":"q","options":["a","fallback"]}'
+[ "$(jqe .error.code)" = "validation" ] || fail "an option named fallback: validation"
+run 1 "$NARU" workflow node create judge decide Bad --config '{"question":"q","options":["a","b"],"threshold":1.5}'
+[ "$(jqe .error.code)" = "validation" ] || fail "threshold 1.5: validation"
+run 1 "$NARU" workflow node create judge decide Bad --config '{"question":"q","options":["a","b"],"oops":1}'
+grep -q "unknown key" <<<"$STDERR" || fail "unknown decide key: $STDERR"
+run 1 "$NARU" workflow edge create judge "$JD" "$JF"
+[ "$(jqe .error.code)" = "validation" ] || fail "a decide edge with no --branch: validation"
+run 1 "$NARU" workflow edge create judge "$JD" "$JF" --branch maybe
+[ "$(jqe .error.code)" = "validation" ] || fail "a decide edge off its options: validation"
+run 1 "$NARU" workflow edge create judge "$JD" "$JF" --branch true
+[ "$(jqe .error.code)" = "validation" ] || fail "a decide edge labelled true: validation"
+run 1 "$NARU" workflow edge create judge "$JD" "$JS" --branch ship
+[ "$(jqe .error.code)" = "conflict" ] || fail "a duplicate decide edge: conflict"
+ok "decide: bad options/threshold/keys and mislabelled edges are validation, a duplicate is conflict"
+
+# Confident choice: only the chosen option's edge is active.
+run 0 "$NARU" workflow run judge --input "tests are green"
+[ "$(jqs .status)" = "succeeded" ] || fail "decide run: $STDOUT"
+[ "$(jqs '.steps | map(.title + "=" + .status) | join(",")')" = "Start=ok,Pick=ok,Shipped=ok,Held=skipped,Fell=skipped" ] ||
+  fail "decide chosen path: $(jqs '.steps | map(.title + "=" + .status) | join(",")')"
+[ "$(jqs '.steps[1].output | fromjson | .choice')" = "ship" ] || fail "decide output carries the choice: $STDOUT"
+[ "$(jqs '.steps[1].output | fromjson | .confidence')" = "0.9" ] || fail "decide output carries the confidence"
+[ "$(jqs '.steps[1].output | fromjson | .fallback')" = "false" ] || fail "decide output: fallback false"
+run 0 "$NARU" workflow log shipped
+[ "$(jqs length)" = "1" ] || fail "the chosen edge ran its output: $STDOUT"
+ok "decide: a confident choice activates only its option's edge; the output carries choice/confidence/fallback"
+
+# Below the threshold, with no fallback edge: not a failure, downstream skipped.
+run 0 "$NARU" workflow run judge --input "flaky build"
+[ "$(jqs .status)" = "succeeded" ] || fail "low confidence is not a failure: $STDOUT"
+[ "$(jqs '.steps | map(.status) | join(",")')" = "ok,ok,skipped,skipped,skipped" ] ||
+  fail "no fallback edge: everything downstream skipped: $STDOUT"
+[ "$(jqs '.steps[1].output | fromjson | .fallback')" = "true" ] || fail "decide output: fallback true"
+[ "$(jqs '.steps[1].output | fromjson | .choice')" = "hold" ] || fail "decide output still names the weak choice"
+run 0 "$NARU" workflow run judge --input "no idea"
+[ "$(jqs '.steps | map(.status) | join(",")')" = "ok,ok,skipped,skipped,skipped" ] || fail "null choice: skipped: $STDOUT"
+[ "$(jqs '.steps[1].output | fromjson | .choice')" = "null" ] || fail "null choice in the output"
+ok "decide: low confidence or no match with no fallback edge skips everything downstream (run still succeeds)"
+
+# A fallback edge takes both the low-confidence and the no-match cases.
+run 0 "$NARU" workflow edge create judge "$JD" "$JF" --branch fallback
+run 0 "$NARU" workflow run judge --input "flaky build"
+[ "$(jqs '.steps | map(.title + "=" + .status) | join(",")')" = "Start=ok,Pick=ok,Shipped=skipped,Held=skipped,Fell=ok" ] ||
+  fail "fallback path: $(jqs '.steps | map(.title + "=" + .status) | join(",")')"
+run 0 "$NARU" workflow run judge --input "no idea"
+[ "$(jqs '.steps[4].status')" = "ok" ] || fail "null choice takes the fallback: $STDOUT"
+# A lowered threshold lets the weak choice through.
+run 0 "$NARU" workflow node update "$JD" --config '{"question":"Ship {input}?","options":["ship","hold"],"threshold":0.3}'
+run 0 "$NARU" workflow run judge --input "flaky build"
+[ "$(jqs '.steps | map(.title + "=" + .status) | join(",")')" = "Start=ok,Pick=ok,Shipped=skipped,Held=ok,Fell=skipped" ] ||
+  fail "threshold 0.3 lets hold through: $(jqs '.steps | map(.title + "=" + .status) | join(",")')"
+ok "decide: the fallback edge takes low confidence and no match; a lower threshold activates the option"
+
+# Backend off: no decision, so the fallback edge.
+echo '{"decide": {"backend": "off"}}' > "$MESA_CONFIG_FILE"
+run 0 "$NARU" workflow run judge --input "tests are green"
+[ "$(jqs '.steps[4].status')" = "ok" ] && [ "$(jqs '.steps[2].status')" = "skipped" ] || fail "backend off takes the fallback: $STDOUT"
+[ "$(jqs '.steps[1].output | fromjson | .backend')" = "off" ] || fail "decide output names the off backend"
+# A broken rules file: the fallback edge absorbs the error ...
+echo '{"decide": {"backend": "rules"}}' > "$MESA_CONFIG_FILE"
+echo 'not json' > "$TMP/decide-rules.json"
+run 0 "$NARU" workflow run judge --input "tests are green"
+[ "$(jqs .status)" = "succeeded" ] && [ "$(jqs '.steps[4].status')" = "ok" ] || fail "a decide error with a fallback edge: $STDOUT"
+[ "$(jqs '.steps[1].output | fromjson | .error | length > 0')" = "true" ] || fail "the error rides in the output"
+# ... and without one the node fails like any failing node.
+run 0 "$NARU" workflow edge delete "$(jq -r --argjson d "$JD" --argjson f "$JF" '.edges[] | select(.from_node == $d and .to_node == $f) | .id' < <("$NARU" workflow show judge))"
+run 0 "$NARU" workflow run judge --input "tests are green"
+[ "$(jqs .status)" = "failed" ] && [ "$(jqs '.steps[1].status')" = "failed" ] || fail "a decide error with no fallback fails the node: $STDOUT"
+rm -f "$MESA_CONFIG_FILE" "$TMP/decide-rules.json"
+ok "decide: backend off takes the fallback; a rules-file error takes it too, or fails the node when there is none"
 
 # ================= delete =================
 

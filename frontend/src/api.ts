@@ -88,7 +88,6 @@ import type { TaskSummary } from './types/TaskSummary'
 import type { VoiceDesign } from './types/VoiceDesign'
 import type { VoiceExport } from './types/VoiceExport'
 import type { Workflow } from './types/Workflow'
-import type { WorkflowBranch } from './types/WorkflowBranch'
 import type { WorkflowEdge } from './types/WorkflowEdge'
 import type { WorkflowLogEntry } from './types/WorkflowLogEntry'
 import type { WorkflowNode } from './types/WorkflowNode'
@@ -816,8 +815,9 @@ export function deleteWorkflowNode(
 export interface WorkflowEdgeCreate {
   from_node: number
   to_node: number
-  /** Required on an edge leaving a branch node, refused on any other. */
-  branch?: WorkflowBranch
+  /** Required on an edge leaving a branch (`true`/`false`) or decide (an
+   *  option or `fallback`) node, refused on any other. */
+  branch?: string
 }
 
 export function createWorkflowEdge(

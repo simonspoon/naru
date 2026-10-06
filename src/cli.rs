@@ -31,8 +31,8 @@ use crate::core::{
     LibrarySyncStatus, LiveAction, LiveBoard, LiveBoardKind, LiveNotebookEntry, LiveNotice,
     LiveResult, LiveRole, LiveSession, LiveStatus, LiveSummary, LiveTurn, NextResult, Priority,
     Project, ProjectPatch, ReceiptPatch, Result, Script, ScriptArg, ScriptArgKind, ScriptPatch,
-    Status, Store, Task, TaskPatch, TaskReceipt, Workflow, WorkflowBranch, WorkflowEdge,
-    WorkflowNode, WorkflowNodeKind, WorkflowNodeNew, WorkflowNodePatch, WorkflowPatch, WorkflowRun,
+    Status, Store, Task, TaskPatch, TaskReceipt, Workflow, WorkflowEdge, WorkflowNode,
+    WorkflowNodeKind, WorkflowNodeNew, WorkflowNodePatch, WorkflowPatch, WorkflowRun,
     WorkflowTrigger, WorkflowView, agents, audio, board, cc, config, files, git, library, live,
     look, migrate, project_memory, receipt, retro, system,
 };
@@ -1508,8 +1508,8 @@ EXAMPLES
     /// The graph decides the order: a topological sort, ties broken by node
     /// id. The trigger hands `--input` (default empty) on as the run input;
     /// every other node takes the outputs of its active upstream nodes,
-    /// joined by a newline in edge order. A `branch` node activates only the
-    /// edges matching its verdict, and a node none of whose incoming edges is
+    /// joined by a newline in edge order. A `branch` or `decide` node activates
+    /// only the edges matching its verdict or choice, and a node none of whose incoming edges is
     /// active is `skipped`.
     ///
     /// A run that FAILED is still a recorded run: the command prints the
@@ -1578,7 +1578,7 @@ enum WorkflowNodeCmd {
     /// Add a node to a workflow; prints the created node (`--quiet`: without
     /// its `config`)
     ///
-    /// KIND is trigger|prompt|cli|script|branch|output and decides what
+    /// KIND is trigger|prompt|cli|script|branch|decide|output and decides what
     /// `--config` (a JSON object) may hold — unknown keys and bad values are
     /// `validation`, and a workflow has at most one trigger. Without
     /// `--config` a trigger is `{"mode":"manual"}`; every other kind needs
@@ -1591,6 +1591,7 @@ CONFIG BY KIND
   cli      {\"command\":\"...\",\"timeout_secs\":N}
   script   {\"script\":\"<id or name>\",\"values\":{\"name\":\"... {input} ...\"}}
   branch   {\"op\":\"contains|regex|score_above|score_below|equals\",\"value\":\"...\"}
+  decide   {\"question\":\"... {input} ...\",\"options\":[\"a\",\"b\"],\"threshold\":0.5}
   output   {\"target\":\"log\",\"log\":\"name\"} | {\"target\":\"task\",\"project\":\"...\"} |
            {\"target\":\"inbox\",\"task_id\":N,\"kind\":\"task-summary\"} | {\"target\":\"board\"}
 
@@ -1681,7 +1682,8 @@ enum WorkflowEdgeCmd {
     /// A workflow is a DAG: a self-edge or an edge that would close a cycle
     /// is `cycle`, an edge into the trigger is `validation`, and an exact
     /// duplicate is `conflict`. An edge leaving a `branch` node needs
-    /// `--branch true|false` (the verdict it is active on); any other edge
+    /// `--branch true|false` (the verdict it is active on), and one leaving a
+    /// `decide` node needs `--branch <option>|fallback`; any other edge
     /// refuses one.
     #[command(after_help = "\
 EXAMPLES
@@ -1706,9 +1708,10 @@ EXAMPLES
         /// Destination node id (flag form of TO)
         #[arg(long, conflicts_with = "to_pos")]
         to: Option<i64>,
-        /// The verdict this edge leaves a branch node on: true|false
-        #[arg(long, value_name = "VERDICT", value_parser = parse_workflow_branch)]
-        branch: Option<WorkflowBranch>,
+        /// The label this edge leaves a branch node (true|false) or a decide
+        /// node (one of its options, or fallback) on
+        #[arg(long, value_name = "LABEL")]
+        branch: Option<String>,
         /// Accepted for uniformity; an edge has no free text to drop
         #[arg(long)]
         quiet: bool,
@@ -3779,10 +3782,6 @@ fn parse_workflow_node_kind(s: &str) -> std::result::Result<WorkflowNodeKind, St
             alternation(WorkflowNodeKind::ALL.iter().map(|v| v.as_str()))
         )
     })
-}
-
-fn parse_workflow_branch(s: &str) -> std::result::Result<WorkflowBranch, String> {
-    WorkflowBranch::parse(s).ok_or_else(|| format!("'{s}' is not one of true|false"))
 }
 
 /// `run --trigger` names who started a run. `time` is the watcher's alone —
@@ -7766,7 +7765,7 @@ mod tests {
             workflow_id: 2,
             from_node: 3,
             to_node: 4,
-            branch: Some(WorkflowBranch::True),
+            branch: Some("true".into()),
         }
     }
 

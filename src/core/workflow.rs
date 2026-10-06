@@ -31,11 +31,10 @@ use serde_json::{Map, Value, json};
 
 use crate::core::store::{Error, Result, Store};
 use crate::core::types::{
-    InboxKind, LiveBoardKind, Priority, WorkflowBranch, WorkflowEdge, WorkflowNode,
-    WorkflowNodeKind, WorkflowRun, WorkflowRunStatus, WorkflowStep, WorkflowStepStatus,
-    WorkflowTrigger, WorkflowView,
+    InboxKind, LiveBoardKind, Priority, WorkflowEdge, WorkflowNode, WorkflowNodeKind, WorkflowRun,
+    WorkflowRunStatus, WorkflowStep, WorkflowStepStatus, WorkflowTrigger, WorkflowView,
 };
-use crate::core::{agents, config, library, llm, scripts};
+use crate::core::{agents, config, decide, library, llm, scripts};
 
 /// A step's `output` (and a `cli` node's captured stdout) is capped at 64 KiB,
 /// the scripts' own cap.
@@ -78,6 +77,10 @@ impl StoreAccess for Mutex<Store> {
 
 const PROMPT_MODELS: [&str; 3] = ["haiku", "sonnet", "opus"];
 const BRANCH_OPS: [&str; 5] = ["contains", "regex", "score_above", "score_below", "equals"];
+/// A decide node's confidence threshold when its config names none.
+pub const DEFAULT_DECIDE_THRESHOLD: f64 = 0.5;
+/// The label of a decide node's catch-all edge.
+pub const DECIDE_FALLBACK: &str = "fallback";
 const OUTPUT_TARGETS: [&str; 4] = ["log", "task", "inbox", "board"];
 
 fn object<'a>(
@@ -288,6 +291,45 @@ pub fn validate_config(
                 out.insert("value".into(), json!(value));
             }
         }
+        WorkflowNodeKind::Decide => {
+            only_keys(name, obj, &["question", "options", "threshold"])?;
+            let question = required_str(name, obj, "question")?;
+            out.insert("question".into(), json!(question));
+            let options: Vec<String> = match obj.get("options") {
+                Some(Value::Array(a)) => {
+                    a.iter()
+                        .map(|o| match o {
+                            Value::String(s) => Ok(s.clone()),
+                            _ => Err("decide config: \"options\" must be an array of strings"
+                                .to_string()),
+                        })
+                        .collect::<std::result::Result<_, _>>()?
+                }
+                _ => {
+                    return Err(
+                        "decide config: \"options\" must be an array of 2 or more strings".into(),
+                    );
+                }
+            };
+            decide::validate(question, &options).map_err(|e| format!("decide config: {e}"))?;
+            if options.iter().any(|o| o == DECIDE_FALLBACK) {
+                return Err(format!(
+                    "decide config: an option may not be {DECIDE_FALLBACK:?}; \
+                     that is the label of the catch-all edge"
+                ));
+            }
+            out.insert("options".into(), json!(options));
+            let bad_threshold = "decide config: \"threshold\" must be a number from 0 to 1";
+            let threshold = match obj.get("threshold") {
+                None | Some(Value::Null) => DEFAULT_DECIDE_THRESHOLD,
+                Some(Value::Number(n)) => n
+                    .as_f64()
+                    .filter(|t| (0.0..=1.0).contains(t))
+                    .ok_or(bad_threshold)?,
+                Some(_) => return Err(bad_threshold.into()),
+            };
+            out.insert("threshold".into(), json!(threshold));
+        }
         WorkflowNodeKind::Output => {
             only_keys(
                 name,
@@ -465,8 +507,10 @@ pub fn run_workflow<A: StoreAccess>(
 struct Done {
     status: WorkflowStepStatus,
     output: String,
-    /// A branch node's verdict.
-    verdict: Option<bool>,
+    /// The label of the one outgoing edge a branch (`true`/`false`) or
+    /// decide (an option, or `fallback`) node activates; `None` for every
+    /// other node, whose edges are all active.
+    route: Option<String>,
 }
 
 /// Node ids in execution order: Kahn's algorithm over every node, the ready
@@ -558,7 +602,7 @@ pub fn execute_run<A: StoreAccess>(
                 Done {
                     status: WorkflowStepStatus::Skipped,
                     output: String::new(),
-                    verdict: None,
+                    route: None,
                 },
             );
             continue;
@@ -574,8 +618,8 @@ pub fn execute_run<A: StoreAccess>(
         let started = Instant::now();
         let result = run_node(access, view, node, &input, &cwd, run.id, id == trigger_id);
         let duration_ms = started.elapsed().as_millis() as i64;
-        let (status, output, error, verdict) = match result {
-            Ok((output, verdict)) => (WorkflowStepStatus::Ok, output, None, verdict),
+        let (status, output, error, route) = match result {
+            Ok((output, route)) => (WorkflowStepStatus::Ok, output, None, route),
             Err(message) => {
                 failure = Some(format!(
                     "node {} ({}) failed: {message}",
@@ -604,7 +648,7 @@ pub fn execute_run<A: StoreAccess>(
             Done {
                 status,
                 output,
-                verdict,
+                route,
             },
         );
         let _ = access.with(|s| s.update_workflow_run_steps(run.id, &steps));
@@ -617,8 +661,8 @@ pub fn execute_run<A: StoreAccess>(
 
 /// The joined outputs of `node_id`'s active upstream nodes, or `None` when it
 /// has no active incoming edge (so it is skipped). An edge is active when its
-/// source ran `ok` and — for a branch source — its `branch` matches the
-/// source's verdict. A node with no incoming edges that is not the trigger
+/// source ran `ok` and — for a branch or decide source — its `branch` label
+/// matches the label the source routed to. A node with no incoming edges that is not the trigger
 /// is unreachable and is skipped too.
 fn active_input(view: &WorkflowView, done: &HashMap<i64, Done>, node_id: i64) -> Option<String> {
     let mut incoming: Vec<&WorkflowEdge> =
@@ -631,15 +675,8 @@ fn active_input(view: &WorkflowView, done: &HashMap<i64, Done>, node_id: i64) ->
                 return false;
             };
             up.status == WorkflowStepStatus::Ok
-                && match up.verdict {
-                    Some(v) => {
-                        e.branch
-                            == Some(if v {
-                                WorkflowBranch::True
-                            } else {
-                                WorkflowBranch::False
-                            })
-                    }
+                && match &up.route {
+                    Some(label) => e.branch.as_deref() == Some(label.as_str()),
                     None => true,
                 }
         })
@@ -661,7 +698,7 @@ fn cap(mut s: String) -> String {
     s
 }
 
-/// One node's execution: `Ok((output, verdict))` or the failure message.
+/// One node's execution: `Ok((output, route))` or the failure message.
 fn run_node<A: StoreAccess>(
     access: &A,
     view: &WorkflowView,
@@ -670,7 +707,7 @@ fn run_node<A: StoreAccess>(
     cwd: &str,
     run_id: i64,
     is_trigger: bool,
-) -> std::result::Result<(String, Option<bool>), String> {
+) -> std::result::Result<(String, Option<String>), String> {
     if is_trigger {
         return Ok((input.to_string(), None));
     }
@@ -780,8 +817,9 @@ fn run_node<A: StoreAccess>(
         }
         WorkflowNodeKind::Branch => {
             let verdict = branch_verdict(str_of("op"), cfg.get("value"), input)?;
-            Ok((input.to_string(), Some(verdict)))
+            Ok((input.to_string(), Some(verdict.to_string())))
         }
+        WorkflowNodeKind::Decide => run_decide(view, node, input, decide::decide),
         WorkflowNodeKind::Output => {
             // A silent run (an empty transcript, a filter that let nothing
             // through) has nothing to deliver, and that is not a failure: the
@@ -881,6 +919,77 @@ fn script_cwd<A: StoreAccess>(
         ));
     }
     Ok(path)
+}
+
+/// A decide node's run: asks `core::decide` in-process (no process, no
+/// network) and routes to the chosen option's edge when the choice is not
+/// null and its `confidence` reaches the node's threshold; otherwise — a null
+/// choice, too little confidence, backend `off` — to the `fallback` edge. A
+/// decide *error* (a bad rules file) also takes the fallback when the node
+/// has one, with the error in the output; with none the node fails, as any
+/// failing node does. No fallback edge and no decision is not a failure:
+/// nothing downstream is active, so it is skipped.
+fn run_decide(
+    view: &WorkflowView,
+    node: &WorkflowNode,
+    input: &str,
+    ask: impl FnOnce(&str, &str, &[String]) -> Result<decide::Decision>,
+) -> std::result::Result<(String, Option<String>), String> {
+    let cfg = &node.config;
+    let question = cfg
+        .get("question")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .replace("{input}", input);
+    let options: Vec<String> = cfg
+        .get("options")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|o| o.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let threshold = cfg
+        .get("threshold")
+        .and_then(Value::as_f64)
+        .unwrap_or(DEFAULT_DECIDE_THRESHOLD);
+    let fallback = || Some(DECIDE_FALLBACK.to_string());
+    match ask(&question, input, &options) {
+        Ok(d) => {
+            let chosen = d.choice.clone().filter(|_| d.confidence >= threshold);
+            let out = json!({
+                "choice": d.choice,
+                "confidence": d.confidence,
+                "agreement": d.agreement,
+                "threshold": threshold,
+                "backend": d.backend,
+                "rule": d.rule,
+                "fallback": chosen.is_none(),
+            });
+            Ok((out.to_string(), chosen.or_else(fallback)))
+        }
+        Err(e) => {
+            let has_fallback = view
+                .edges
+                .iter()
+                .any(|x| x.from_node == node.id && x.branch.as_deref() == Some(DECIDE_FALLBACK));
+            if !has_fallback {
+                return Err(e.to_string());
+            }
+            let out = json!({
+                "choice": null,
+                "confidence": 0.0,
+                "agreement": 0.0,
+                "threshold": threshold,
+                "backend": null,
+                "rule": null,
+                "fallback": true,
+                "error": e.to_string(),
+            });
+            Ok((out.to_string(), fallback()))
+        }
+    }
 }
 
 /// A branch node's verdict over `input`. `contains` and `regex` (POSIX ERE,
@@ -1106,11 +1215,11 @@ mod tests {
             Err(Error::Validation(_))
         ));
         assert!(matches!(
-            s.create_workflow_edge(wf, a, br, Some(WorkflowBranch::True)),
+            s.create_workflow_edge(wf, a, br, Some("true".into())),
             Err(Error::Validation(_))
         ));
         s.create_workflow_edge(wf, a, br, None).unwrap();
-        s.create_workflow_edge(wf, br, b, Some(WorkflowBranch::True))
+        s.create_workflow_edge(wf, br, b, Some("true".into()))
             .unwrap();
         // Another workflow's node.
         let wf2 = s.create_workflow(None, "Other", None).unwrap().id;
@@ -1189,9 +1298,9 @@ mod tests {
             );
             s.create_workflow_edge(wf, t, c, None).unwrap();
             s.create_workflow_edge(wf, c, b, None).unwrap();
-            s.create_workflow_edge(wf, b, yes, Some(WorkflowBranch::True))
+            s.create_workflow_edge(wf, b, yes, Some("true".into()))
                 .unwrap();
-            s.create_workflow_edge(wf, b, no, Some(WorkflowBranch::False))
+            s.create_workflow_edge(wf, b, no, Some("false".into()))
                 .unwrap();
             wf
         });
@@ -1751,5 +1860,238 @@ mod tests {
             ));
         }
         assert!(st.with(|s| s.list_workflow_log(None, 1000)).is_ok());
+    }
+
+    // ---- decide nodes -----------------------------------------------------
+
+    fn rules_ask(
+        rules: &'static str,
+    ) -> impl FnOnce(&str, &str, &[String]) -> Result<decide::Decision> {
+        move |question, input, options| {
+            use decide::DecideBackend;
+            decide::Rules::from_json(rules, "test")?.decide(&decide::Request {
+                question,
+                input,
+                options,
+            })
+        }
+    }
+
+    const PICK_RULES: &str = r#"{"rules": [
+        {"id": "ship", "choice": "ship", "confidence": 0.9,
+         "all": [{"field": "input", "pattern": "green"}]},
+        {"id": "maybe", "choice": "hold", "confidence": 0.3,
+         "all": [{"field": "input", "pattern": "flaky"}]}
+    ]}"#;
+
+    /// A trigger -> decide graph with an edge per option and, optionally, a
+    /// fallback; answers the view and the decide node's id.
+    fn decide_graph(st: &Mutex<Store>, fallback: bool, threshold: f64) -> (WorkflowView, i64) {
+        st.with(|s| {
+            let wf = s.create_workflow(None, "Judge", None).unwrap().id;
+            let t = node(
+                s,
+                wf,
+                WorkflowNodeKind::Trigger,
+                "T",
+                json!({"mode": "manual"}),
+            );
+            let d = node(
+                s,
+                wf,
+                WorkflowNodeKind::Decide,
+                "D",
+                json!({"question": "Ship {input}?", "options": ["ship", "hold"],
+                       "threshold": threshold}),
+            );
+            let ship = node(s, wf, WorkflowNodeKind::Cli, "Ship", cli("true"));
+            let hold = node(s, wf, WorkflowNodeKind::Cli, "Hold", cli("true"));
+            s.create_workflow_edge(wf, t, d, None).unwrap();
+            s.create_workflow_edge(wf, d, ship, Some("ship".into()))
+                .unwrap();
+            s.create_workflow_edge(wf, d, hold, Some("hold".into()))
+                .unwrap();
+            if fallback {
+                let fb = node(s, wf, WorkflowNodeKind::Cli, "Fallback", cli("true"));
+                s.create_workflow_edge(wf, d, fb, Some("fallback".into()))
+                    .unwrap();
+            }
+            (s.get_workflow_view(wf).unwrap(), d)
+        })
+    }
+
+    /// The titles of the nodes `active_input` lets run once decide node `d`
+    /// has routed to `route`.
+    fn reached(view: &WorkflowView, d: i64, route: Option<String>) -> Vec<String> {
+        let mut done = HashMap::new();
+        done.insert(
+            d,
+            Done {
+                status: WorkflowStepStatus::Ok,
+                output: "{}".into(),
+                route,
+            },
+        );
+        view.nodes
+            .iter()
+            .filter(|n| {
+                view.edges
+                    .iter()
+                    .any(|e| e.to_node == n.id && e.from_node == d)
+            })
+            .filter(|n| active_input(view, &done, n.id).is_some())
+            .map(|n| n.title.clone())
+            .collect()
+    }
+
+    #[test]
+    fn decide_activates_only_the_chosen_options_edge() {
+        let (st, _d) = store();
+        let (view, d) = decide_graph(&st, true, 0.5);
+        let node = view.nodes.iter().find(|n| n.id == d).unwrap();
+        let (out, route) =
+            run_decide(&view, node, "tests are green", rules_ask(PICK_RULES)).unwrap();
+        assert_eq!(route.as_deref(), Some("ship"));
+        let out: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(out["choice"], json!("ship"));
+        assert_eq!(out["confidence"], json!(0.9));
+        assert_eq!(out["fallback"], json!(false));
+        assert_eq!(reached(&view, d, route), vec!["Ship"]);
+    }
+
+    #[test]
+    fn decide_below_threshold_or_no_match_takes_the_fallback() {
+        let (st, _d) = store();
+        let (view, d) = decide_graph(&st, true, 0.5);
+        let node = view.nodes.iter().find(|n| n.id == d).unwrap();
+        // "hold" matches at 0.3, under the 0.5 threshold.
+        let (out, route) = run_decide(&view, node, "flaky", rules_ask(PICK_RULES)).unwrap();
+        assert_eq!(route.as_deref(), Some("fallback"));
+        let out: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(out["choice"], json!("hold"));
+        assert_eq!(out["fallback"], json!(true));
+        assert_eq!(reached(&view, d, route), vec!["Fallback"]);
+        // No rule matches at all: a null choice.
+        let (out, route) = run_decide(&view, node, "nothing", rules_ask(PICK_RULES)).unwrap();
+        assert_eq!(route.as_deref(), Some("fallback"));
+        let out: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(out["choice"], Value::Null);
+    }
+
+    #[test]
+    fn decide_with_the_backend_off_takes_the_fallback() {
+        use decide::DecideBackend;
+        let (st, _d) = store();
+        let (view, d) = decide_graph(&st, true, 0.5);
+        let node = view.nodes.iter().find(|n| n.id == d).unwrap();
+        let off = |question: &str, input: &str, options: &[String]| {
+            decide::Off.decide(&decide::Request {
+                question,
+                input,
+                options,
+            })
+        };
+        let (out, route) = run_decide(&view, node, "tests are green", off).unwrap();
+        assert_eq!(route.as_deref(), Some("fallback"));
+        let out: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(out["backend"], json!("off"));
+    }
+
+    #[test]
+    fn decide_without_a_fallback_edge_skips_downstream_or_fails_on_error() {
+        let boom = |_: &str, _: &str, _: &[String]| -> Result<decide::Decision> {
+            Err(Error::Validation("bad rules".into()))
+        };
+        let (st, _d) = store();
+        let (view, d) = decide_graph(&st, false, 0.5);
+        let node = view.nodes.iter().find(|n| n.id == d).unwrap();
+        // A low-confidence verdict is not a failure: nothing downstream runs.
+        let (_, route) = run_decide(&view, node, "flaky", rules_ask(PICK_RULES)).unwrap();
+        assert_eq!(route.as_deref(), Some("fallback"));
+        assert!(reached(&view, d, route).is_empty());
+        // A decide error with no fallback fails the node...
+        assert!(
+            run_decide(&view, node, "x", boom)
+                .unwrap_err()
+                .contains("bad rules")
+        );
+        // ...and with one it routes there, the error in the output.
+        let (st2, _d2) = store();
+        let (view, d) = decide_graph(&st2, true, 0.5);
+        let node = view.nodes.iter().find(|n| n.id == d).unwrap();
+        let (out, route) = run_decide(&view, node, "x", boom).unwrap();
+        assert_eq!(route.as_deref(), Some("fallback"));
+        assert!(out.contains("bad rules"));
+    }
+
+    #[test]
+    fn decide_config_and_edge_labels_are_validated() {
+        use WorkflowNodeKind as K;
+        let ok = |c: Value| validate_config(K::Decide, &c).unwrap();
+        let bad = |c: Value| validate_config(K::Decide, &c).unwrap_err();
+        assert_eq!(
+            ok(json!({"question": "q", "options": ["a", "b"]})),
+            json!({"question": "q", "options": ["a", "b"], "threshold": 0.5})
+        );
+        assert_eq!(
+            ok(json!({"question": "q", "options": ["a", "b"], "threshold": 1}))["threshold"],
+            json!(1.0)
+        );
+        assert!(bad(json!({"options": ["a", "b"]})).contains("question"));
+        assert!(bad(json!({"question": "q", "options": ["a"]})).contains("two"));
+        assert!(bad(json!({"question": "q"})).contains("options"));
+        assert!(bad(json!({"question": "q", "options": ["a", "a"]})).contains("duplicate"));
+        assert!(bad(json!({"question": "q", "options": ["a", "fallback"]})).contains("fallback"));
+        assert!(
+            bad(json!({"question": "q", "options": ["a", "b"], "threshold": 1.5}))
+                .contains("threshold")
+        );
+        assert!(
+            bad(json!({"question": "q", "options": ["a", "b"], "threshold": "x"}))
+                .contains("threshold")
+        );
+        assert!(
+            bad(json!({"question": "q", "options": ["a", "b"], "x": 1})).contains("unknown key")
+        );
+
+        let (st, _d) = store();
+        let mut s = st.lock().unwrap();
+        let wf = s.create_workflow(None, "G", None).unwrap().id;
+        let d = node(
+            &mut s,
+            wf,
+            K::Decide,
+            "D",
+            json!({"question": "q", "options": ["a", "b"]}),
+        );
+        let x = node(&mut s, wf, K::Cli, "X", cli("true"));
+        for label in [None, Some("c"), Some("true"), Some("")] {
+            assert!(
+                matches!(
+                    s.create_workflow_edge(wf, d, x, label.map(String::from)),
+                    Err(Error::Validation(_))
+                ),
+                "{label:?}"
+            );
+        }
+        s.create_workflow_edge(wf, d, x, Some("a".into())).unwrap();
+        s.create_workflow_edge(wf, d, x, Some("fallback".into()))
+            .unwrap();
+        assert!(matches!(
+            s.create_workflow_edge(wf, d, x, Some("a".into())),
+            Err(Error::Conflict(_))
+        ));
+        // A branch still takes only true/false.
+        let br = node(
+            &mut s,
+            wf,
+            K::Branch,
+            "Br",
+            json!({"op": "contains", "value": "x"}),
+        );
+        assert!(matches!(
+            s.create_workflow_edge(wf, br, x, Some("a".into())),
+            Err(Error::Validation(_))
+        ));
     }
 }

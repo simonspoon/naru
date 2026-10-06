@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 import {
   NODE_KINDS,
   branchForHandle,
+  edgeLabelClass,
+  sourceHandles,
   decodeKindDrag,
   buildConfig,
   defaultConfig,
@@ -36,6 +38,7 @@ describe('summarize', () => {
     expect(summarize('prompt', { model: 'haiku', thinking: false, prompt: 'x' })).toBe('Haiku · prompt')
     expect(summarize('prompt', { model: 'local:llama3', thinking: true, prompt: 'x' })).toBe('local:llama3 · thinking · prompt')
     expect(summarize('branch', { op: 'score_above', value: 0.8 })).toBe('score > 0.8')
+    expect(summarize('decide', { question: 'q', options: ['a', 'b'], threshold: 0.7 })).toBe('a | b · ≥ 0.7')
     expect(summarize('trigger', { mode: 'manual' })).toBe('manual')
     expect(summarize('trigger', { mode: 'time', every_minutes: 10 })).toBe('every 10 min')
     expect(summarize('trigger', { mode: 'voice', phrase: 'capture a thought' })).toBe('voice · “capture a thought”')
@@ -103,6 +106,20 @@ describe('buildConfig', () => {
     expect(buildConfig('branch', draft('branch', { op: 'regex', value: '' })).error).not.toBeNull()
   })
 
+  it("checks a decide node's question, options and threshold", () => {
+    const d = (over: Record<string, unknown>) =>
+      buildConfig('decide', draft('decide', { question: 'q', options: ['a', 'b'], ...over }))
+    expect(d({}).config).toEqual({ question: 'q', options: ['a', 'b'], threshold: 0.5 })
+    expect(d({ options: [' a ', '', 'b'], threshold: '0.8' }).config).toEqual({ question: 'q', options: ['a', 'b'], threshold: 0.8 })
+    expect(d({ question: ' ' }).error).toMatch(/question/)
+    expect(d({ options: ['a'] }).error).toMatch(/two options/)
+    expect(d({ options: ['a', 'a'] }).error).toMatch(/distinct/)
+    expect(d({ options: ['a', 'fallback'] }).error).toMatch(/fallback/)
+    expect(d({ threshold: '1.5' }).error).toMatch(/threshold/)
+    expect(d({ threshold: 'x' }).error).toMatch(/threshold/)
+    expect(d({ threshold: '0' }).config).toMatchObject({ threshold: 0 })
+  })
+
   it('sends only the keys of the chosen output target', () => {
     const stale = { log: 'old', project: 'p', task_id: '3', kind: 'task-summary', title: 't' }
     expect(buildConfig('output', draft('output', { ...stale, target: 'log' })).config).toEqual({ target: 'log', log: 'old' })
@@ -127,6 +144,24 @@ describe('graph rules', () => {
     expect(branchForHandle('branch', 'true')).toBe('true')
     expect(branchForHandle('branch', null)).toBe('true')
   })
+  it('a decide edge carries its handle, defaulting to fallback', () => {
+    expect(branchForHandle('decide', 'ship')).toBe('ship')
+    expect(branchForHandle('decide', 'fallback')).toBe('fallback')
+    expect(branchForHandle('decide', null)).toBe('fallback')
+    expect(branchForHandle('decide', '')).toBe('fallback')
+  })
+  it("lists a decide node's handles as its options plus fallback", () => {
+    expect(sourceHandles('decide', { options: ['a', 'b'] })).toEqual(['a', 'b', 'fallback'])
+    expect(sourceHandles('decide', {})).toEqual(['fallback'])
+    expect(sourceHandles('branch', {})).toEqual(['true', 'false'])
+    expect(sourceHandles('cli', {})).toEqual([])
+  })
+  it('classes only the two branch verdicts', () => {
+    expect(edgeLabelClass('true')).toBe('wf-edge-true')
+    expect(edgeLabelClass('false')).toBe('wf-edge-false')
+    expect(edgeLabelClass('a b"c')).toBe('')
+    expect(edgeLabelClass(null)).toBe('')
+  })
   it('a trigger takes no input and an output offers no output', () => {
     expect(hasInput('trigger')).toBe(false)
     expect(hasInput('cli')).toBe(true)
@@ -142,7 +177,7 @@ describe('missingValueRows', () => {
 })
 
 describe('decodeKindDrag', () => {
-  it('accepts exactly the six kinds', () => {
+  it('accepts exactly the seven kinds', () => {
     for (const kind of kinds) expect(decodeKindDrag(kind)).toBe(kind)
     expect(decodeKindDrag('')).toBeNull()
     expect(decodeKindDrag('diagram')).toBeNull()
