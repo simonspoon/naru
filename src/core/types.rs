@@ -4539,7 +4539,7 @@ macro_rules! workflow_enum {
 }
 
 workflow_enum! {
-    /// What a [`WorkflowNode`] does. Exactly six — the config of each is
+    /// What a [`WorkflowNode`] does. Exactly seven — the config of each is
     /// validated by `core::workflow::validate_config`, so a seventh kind is
     /// a change to the engine, the validator and the editor together.
     WorkflowNodeKind {
@@ -4548,6 +4548,7 @@ workflow_enum! {
         Cli => "cli",
         Script => "script",
         Branch => "branch",
+        Decide => "decide",
         Output => "output",
     }
 }
@@ -4667,9 +4668,11 @@ pub struct WorkflowEdge {
     pub from_node: i64,
     #[ts(type = "number")]
     pub to_node: i64,
-    /// `true`/`false` on an edge leaving a branch node (required there),
-    /// null on every other edge.
-    pub branch: Option<WorkflowBranch>,
+    /// The label an edge leaves its source on: `true`/`false` on an edge
+    /// leaving a branch node, one of the node's options or `fallback` on an
+    /// edge leaving a decide node (required on both), null on every other
+    /// edge.
+    pub branch: Option<String>,
 }
 
 /// A workflow with all its nodes and edges: `show`'s payload and `delete`'s

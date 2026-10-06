@@ -44,6 +44,31 @@ export function liveCancelVerdict(input: {
 }
 
 /**
+ * Whether the microphone is capturing in the sense the discard key acts on:
+ * the verdict would be `'discard'` were nothing else to claim the keystroke.
+ * The whiteboard reads this to leave Escape alone, so the first press cancels
+ * the microphone instead of only closing the board; with the microphone not
+ * capturing (muted, paused, not joined) the board keeps its Escape.
+ */
+export function micCapturing(input: {
+  live: boolean
+  joined: boolean
+  supported: boolean
+  blocked: boolean
+  paused: boolean
+  muted: boolean
+}): boolean {
+  return (
+    liveCancelVerdict({
+      ...input,
+      mutedByCancel: false,
+      defaultPrevented: false,
+      composing: false,
+    }) === 'discard'
+  )
+}
+
+/**
  * Which heard speech a discard drops (mesa task 1354). Listening is cut into
  * **stretches**, each ended by one press of the person's: the switch off,
  * which *commits* the stretch — its segments are sent, some of them perhaps

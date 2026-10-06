@@ -58,6 +58,14 @@ export function KindIcon({ kind }: { kind: WorkflowNodeKind }) {
           <path d="M8 1.5L14.5 8 8 14.5 1.5 8z" />
         </Glyph>
       )
+    case 'decide':
+      return (
+        <Glyph>
+          <path d="M8 2v5" />
+          <path d="M8 7L3.5 13" />
+          <path d="M8 7l4.5 6" />
+        </Glyph>
+      )
     case 'output':
       return (
         <Glyph>

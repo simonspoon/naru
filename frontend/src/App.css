@@ -1472,6 +1472,9 @@ main {
 .wf-kind-branch {
   background: var(--wf-branch);
 }
+.wf-kind-decide {
+  background: var(--wf-decide);
+}
 .wf-kind-output {
   background: var(--wf-output);
 }

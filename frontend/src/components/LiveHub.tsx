@@ -44,7 +44,7 @@ import { autoSendIdleMs } from '../liveCapture'
 import { currentContext, sameContext, subscribeContext } from '../liveContext'
 import { agentsLabel, openAgents, sectionFor, viewLine } from '../liveView'
 import { mayHold, SegmentChain } from '../liveDrain'
-import { DiscardLedger, liveCancelVerdict } from '../liveCancel'
+import { DiscardLedger, liveCancelVerdict, micCapturing } from '../liveCancel'
 import {
   deserializeInk,
   emptyInkBook,
@@ -4555,6 +4555,7 @@ export function LiveHub({
       boards={boards}
       expanded={boardExpanded}
       onHide={hideBoard}
+      micCapturing={micCapturing({ live, joined: unlocked, supported, blocked, paused, muted })}
       ink={ink}
       onInk={updateInk}
       flattenRef={flattenInk}

@@ -1,0 +1,189 @@
+{
+  "rules": [
+    {
+      "id": "diff-review",
+      "choice": "diff-reviewer",
+      "confidence": 0.8,
+      "all": [
+        {
+          "field": "input",
+          "pattern": "\\breview (the |this )?(uncommitted|branch|commit|diff|two commits)|\\baudit (the )?(already-)?committed"
+        }
+      ]
+    },
+    {
+      "id": "swift-implementer-title-owns",
+      "choice": "swift-implementer",
+      "confidence": 0.8,
+      "all": [
+        {
+          "field": "question",
+          "pattern": "^(implement|fix|add|apply|switch|extend|thread|rename|split|remove|build harness|write .*section)"
+        },
+        {
+          "field": "input",
+          "pattern": "you own the tree|you are (the )?implement|you implement|implementing (naru|mesa) task|do not commit"
+        },
+        {
+          "field": "input",
+          "pattern": "swift|\\bios\\b|xcode|macos app|mac app",
+          "max_chars": 1500
+        }
+      ],
+      "none": [
+        {
+          "field": "input",
+          "pattern": "do not edit|don't edit|never edit|read-only|read only|do not modify|edit nothing"
+        },
+        {
+          "field": "question",
+          "pattern": "research|design doc|survey|mockup"
+        }
+      ]
+    },
+    {
+      "id": "swift-implementer-you-implement",
+      "choice": "swift-implementer",
+      "confidence": 0.8,
+      "all": [
+        {
+          "field": "input",
+          "pattern": "you are (the )?implement|you implement"
+        },
+        {
+          "field": "input",
+          "pattern": "swift|\\bios\\b|xcode|macos app|mac app",
+          "max_chars": 1500
+        }
+      ],
+      "none": [
+        {
+          "field": "input",
+          "pattern": "do not edit|don't edit|never edit|read-only|read only|do not modify|edit nothing"
+        },
+        {
+          "field": "question",
+          "pattern": "research|design doc|survey|mockup"
+        }
+      ]
+    },
+    {
+      "id": "implementer-title-owns",
+      "choice": "implementer",
+      "confidence": 0.8,
+      "all": [
+        {
+          "field": "question",
+          "pattern": "^(implement|fix|add|apply|switch|extend|thread|rename|split|remove|build harness|write .*section)"
+        },
+        {
+          "field": "input",
+          "pattern": "you own the tree|you are (the )?implement|you implement|implementing (naru|mesa) task|do not commit"
+        }
+      ],
+      "none": [
+        {
+          "field": "input",
+          "pattern": "do not edit|don't edit|never edit|read-only|read only|do not modify|edit nothing"
+        },
+        {
+          "field": "question",
+          "pattern": "research|design doc|survey|mockup"
+        },
+        {
+          "field": "input",
+          "pattern": "swift|\\bios\\b|xcode|macos app|mac app",
+          "max_chars": 1500
+        }
+      ]
+    },
+    {
+      "id": "implementer-you-implement",
+      "choice": "implementer",
+      "confidence": 0.8,
+      "all": [
+        {
+          "field": "input",
+          "pattern": "you are (the )?implement|you implement"
+        }
+      ],
+      "none": [
+        {
+          "field": "input",
+          "pattern": "do not edit|don't edit|never edit|read-only|read only|do not modify|edit nothing"
+        },
+        {
+          "field": "question",
+          "pattern": "research|design doc|survey|mockup"
+        },
+        {
+          "field": "input",
+          "pattern": "swift|\\bios\\b|xcode|macos app|mac app",
+          "max_chars": 1500
+        }
+      ]
+    },
+    {
+      "id": "ui-verifier",
+      "choice": "ui-verifier",
+      "confidence": 0.8,
+      "all": [
+        {
+          "field": "question",
+          "pattern": "verif|\\bqa\\b|screenshot|re-shoot|visual|recheck|khora"
+        },
+        {
+          "field": "input",
+          "pattern": "\\b(khora|qorvex|loki)\\b|browser|simulator"
+        }
+      ]
+    },
+    {
+      "id": "explore-friction",
+      "choice": "Explore",
+      "confidence": 0.8,
+      "all": [
+        {
+          "field": "question",
+          "pattern": "friction"
+        },
+        {
+          "field": "question",
+          "pattern": "session"
+        }
+      ]
+    },
+    {
+      "id": "explore-recon",
+      "choice": "Explore",
+      "confidence": 0.8,
+      "all": [
+        {
+          "field": "input",
+          "pattern": "do not edit|don't edit|never edit|read-only|read only|do not modify|edit nothing"
+        },
+        {
+          "field": "input",
+          "pattern": "recon"
+        },
+        {
+          "field": "input",
+          "pattern": "line numbers|absolute (file )?paths"
+        }
+      ],
+      "none": [
+        {
+          "field": "input",
+          "pattern": "reproduc|root.cause"
+        }
+      ]
+    },
+    {
+      "id": "fallback",
+      "choice": "general-purpose",
+      "confidence": 0.5,
+      "all": [],
+      "fallback": true
+    }
+  ]
+}

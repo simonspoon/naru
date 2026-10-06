@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Background,
   BackgroundVariant,
@@ -39,12 +39,14 @@ import {
   buildConfig,
   decodeKindDrag,
   defaultConfig,
+  edgeLabelClass,
   draftFromConfig,
   hasInput,
   hasOutput,
   inspectorKey,
   kindInfo,
   missingValueRows,
+  sourceHandles,
   summarize,
   type ConfigDraft,
 } from './workflowConfig'
@@ -60,14 +62,22 @@ import { KindIcon, SpeakIcon } from './components/WorkflowIcon'
 type CardData = { node: WorkflowNode; status: WorkflowStepStatus | undefined }
 type CardNode = Node<CardData, 'card'>
 
+/** A decide card's handles sit in rows of their own below the title and
+ *  summary: the first row starts `DECIDE_ROWS_TOP` px down, one row each. */
+const DECIDE_ROWS_TOP = 58
+const DECIDE_ROW = 20
+
 /** One node as a card: icon, bold title, a muted one-line summary, handles for
  *  the connections it may take, and the last run's step state as a ring. A
  *  branch offers two labelled source handles so the edge's `true`/`false` is
- *  decided by where the line is dragged from. */
+ *  decided by where the line is dragged from, and a decide node one per option
+ *  plus `fallback`. */
 function NodeCard({ data, selected }: NodeProps<CardNode>) {
   const { node, status } = data
+  const decideHandles = node.kind === 'decide' ? sourceHandles(node.kind, node.config) : []
   return (
     <div
+      style={decideHandles.length > 0 ? { paddingBottom: DECIDE_ROW * decideHandles.length + 8 } : undefined}
       className={`wf-node wf-kind-${node.kind}${selected ? ' selected' : ''} ${stepClass(status)}`}
       title={status ? `last run: ${status}` : undefined}
     >
@@ -103,6 +113,18 @@ function NodeCard({ data, selected }: NodeProps<CardNode>) {
             false
           </span>
         </>
+      ) : node.kind === 'decide' ? (
+        decideHandles.map((label, i) => {
+          const top = DECIDE_ROWS_TOP + DECIDE_ROW * i + DECIDE_ROW / 2
+          return (
+            <Fragment key={label}>
+              <Handle id={label} type="source" position={Position.Right} style={{ top }} />
+              <span className="wf-branch-label" style={{ top }}>
+                {label}
+              </span>
+            </Fragment>
+          )
+        })
       ) : (
         hasOutput(node.kind) && <Handle type="source" position={Position.Right} />
       )}
@@ -378,6 +400,58 @@ function NodeInspector({
         </>
       )}
 
+      {node.kind === 'decide' && (
+        <>
+          <Field label="question" hint="may contain {input}, replaced by this node's input text">
+            <textarea rows={3} value={draft.question} onChange={(e) => set('question', e.target.value)} />
+          </Field>
+          <div className="wf-values">
+            <span className="wf-field-label">options</span>
+            {draft.options.map((o, i) => (
+              <div key={i} className="wf-value-row">
+                <input
+                  type="text"
+                  value={o}
+                  onChange={(e) =>
+                    set(
+                      'options',
+                      draft.options.map((x, j) => (j === i ? e.target.value : x)),
+                    )
+                  }
+                />
+                <button
+                  type="button"
+                  title="remove"
+                  onClick={() =>
+                    set(
+                      'options',
+                      draft.options.filter((_, j) => j !== i),
+                    )
+                  }
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+            <button type="button" onClick={() => set('options', [...draft.options, ''])}>
+              + option
+            </button>
+          </div>
+          <Field label="threshold" hint="0 to 1; below it the fallback edge is taken (default 0.5)">
+            <input
+              type="text"
+              inputMode="decimal"
+              value={draft.threshold}
+              onChange={(e) => set('threshold', e.target.value)}
+            />
+          </Field>
+          <p className="wf-field-hint muted">
+            Drag an option&apos;s handle to wire it; the <b>fallback</b> handle is taken on no decision,
+            low confidence or an error. Save the node first after changing its options.
+          </p>
+        </>
+      )}
+
       {node.kind === 'output' && (
         <>
           <Field label="target">
@@ -507,7 +581,7 @@ export function WorkflowCanvas({
         target: String(e.to_node),
         sourceHandle: e.branch ?? undefined,
         label: e.branch ?? undefined,
-        className: `${e.branch ? `wf-edge-${e.branch}` : ''}${
+        className: `${edgeLabelClass(e.branch)}${
           selection?.kind === 'edge' && selection.id === e.id ? ' selected' : ''
         }`,
         selected: selection?.kind === 'edge' && selection.id === e.id,

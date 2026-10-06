@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { DiscardLedger, liveCancelVerdict } from './liveCancel'
+import { DiscardLedger, liveCancelVerdict, micCapturing } from './liveCancel'
 
 const LISTENING = {
   live: true,
@@ -78,5 +78,17 @@ describe('DiscardLedger', () => {
   it('leaves a stretch no press has ended alone', () => {
     const ledger = new DiscardLedger()
     expect(ledger.isDiscarded(ledger.current)).toBe(false)
+  })
+})
+
+describe('micCapturing (the whiteboard yields its Escape)', () => {
+  const CAPTURING = LISTENING
+  it('is true while the discard key would discard', () => {
+    expect(micCapturing(CAPTURING)).toBe(true)
+  })
+  it('is false when not capturing, so the board closes on Escape', () => {
+    for (const off of [{ muted: true }, { paused: true }, { live: false }, { joined: false }, { supported: false }, { blocked: true }]) {
+      expect(micCapturing({ ...CAPTURING, ...off })).toBe(false)
+    }
   })
 })
