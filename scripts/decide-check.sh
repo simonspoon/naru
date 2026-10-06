@@ -12,6 +12,7 @@
 #   4. a custom rules file (beside config.json, then via `rules-file`)
 #      overrides the built-ins, and `none` vetoes;
 #   5. a bad rules file / bad regex is `validation` (exit 1) naming file + rule;
+#      an explicitly configured rules-file that is missing is `validation`;
 #   6. usage and validation: missing question / options -> exit 2, one option,
 #      duplicates, empty question -> exit 1;
 #   7. `--print-default-rules` is valid JSON that, saved as the rules file,
@@ -53,6 +54,7 @@ expect_code() {
 OUT=$("$MESA" decide "Implement the retry" "${AGENTS[@]}" --input "You are the implementer. Edit src/lib.rs.")
 [ "$(jq -r .choice <<<"$OUT")" = implementer ] || fail "implementer prompt: $OUT"
 [ "$(jq -r .backend <<<"$OUT")" = rules ] || fail "backend: $OUT"
+[ "$(jq .agreement <<<"$OUT")" = 1.0 ] || fail "built-in pick agreement is not 1: $OUT"
 [ "$(jq -r '.rule' <<<"$OUT")" != null ] || fail "rule id missing: $OUT"
 [ "$(jq -c 'keys' <<<"$OUT")" = '["agreement","backend","choice","confidence","rule"]' ] || fail "keys: $OUT"
 ok "default rules pick an implementer, printing the five keys"
@@ -124,6 +126,12 @@ grep -q elsewhere.json "$TMP/err" || fail "bad file not named: $(cat "$TMP/err")
 echo '{"rules":[{"id":"oops","choice":"implementer","all":[{"field":"input","pattern":"("}]}]}' > "$TMP/elsewhere.json"
 expect_code 1 "go" "${AGENTS[@]}"
 grep -q oops "$TMP/err" && grep -q elsewhere.json "$TMP/err" || fail "bad regex not named: $(cat "$TMP/err")"
+echo "{\"decide\": {\"rules-file\": \"$TMP/missing-rules.json\"}}" > "$MESA_CONFIG_FILE"
+expect_code 1 "go" "${AGENTS[@]}"
+[ "$(jq -r .error.code "$TMP/err")" = validation ] || fail "missing rules-file code: $(cat "$TMP/err")"
+grep -q missing-rules.json "$TMP/err" || fail "missing rules-file not named: $(cat "$TMP/err")"
+ok "an explicit rules-file that is missing is validation naming the path"
+
 ok "an unparseable file and a bad regex are validation naming file and rule"
 
 # --- 6. usage / validation ---

@@ -32,7 +32,8 @@ One JSON object:
   through; it is not an error).
 - `confidence` — the winning rule's confidence.
 - `agreement` — matching rules choosing the winner / all matching rules whose
-  choice was offered.
+  choice was offered. `fallback` rules (below) are left out of both counts;
+  a fallback that wins alone reports 1.0.
 - `backend` — `rules` or `off`; `rule` — the winning rule's id.
 
 `unavailable` is never used: nothing here depends on anything outside Naru.
@@ -49,7 +50,8 @@ saver preserves it):
 - `backend` — `"rules"` (default when absent) or `"off"` (always no decision,
   `backend: "off"`). Anything else is `validation` naming the value.
 - `rules-file` — default `decide-rules.json` beside `config.json`. A missing
-  file means the built-in ruleset; a present file that does not parse, or
+  file means the built-in ruleset **only for that implicit default**; a
+  `rules-file` you name that is missing is `validation` naming the path. A present file that does not parse, or
   holds a bad regex, is `validation` naming the file and the rule id.
 
 The code keeps the backend behind `core::decide::DecideBackend`, so a local
@@ -70,9 +72,13 @@ An ordered list; **first matching rule wins**:
 
 - `confidence` is optional (default 0.8); `all` conditions must all match,
   `none` conditions must all not match; no conditions always matches.
+- `"fallback": true` marks a catch-all: it never counts toward `agreement`
+  and wins only when no non-fallback rule matches (agreement then 1.0).
 - A condition is `field` (`question` or `input`), `pattern` (a Rust `regex`
   crate regex, searched not anchored — write `^` to anchor) and an optional
   `max_chars` (match only the first N characters of the normalised field).
+- Patterns compile case-insensitively (so `FOO` matches the lowercased text)
+  with a 1 MiB compiled-size limit.
 - Both fields are normalised first: lowercase, whitespace collapsed to single
   spaces, ends trimmed.
 - A rule whose `choice` is not among the offered options is skipped.
@@ -85,7 +91,7 @@ To edit: `naru decide --print-default-rules > <rules-file>`, change it, run
 The built-in set is a port of the agent-routing keyword rules from the
 system-1 survey (`kwrules.py`): the question is the task's description, the
 input its prompt. Each OR clause is its own rule; the fall-through is a final
-`general-purpose` rule at confidence 0.5. Over the survey's 276 rows the port
+`general-purpose` rule at confidence 0.5, marked `fallback`. Over the survey's 276 rows the port
 agrees with the Python original on every row. Its accuracy on the survey's
 test split was 33/43 with 2 false swaps — and that is **optimistic**, since the
 rules were written after seeing the test set. Treat the answer as advice:

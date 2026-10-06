@@ -182,7 +182,8 @@
       "id": "fallback",
       "choice": "general-purpose",
       "confidence": 0.5,
-      "all": []
+      "all": [],
+      "fallback": true
     }
   ]
 }

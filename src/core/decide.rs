@@ -10,7 +10,7 @@
 
 use std::path::Path;
 
-use regex::Regex;
+use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 
 use super::store::{Error, Result};
@@ -78,6 +78,8 @@ struct RuleDef {
     all: Vec<CondDef>,
     #[serde(default)]
     none: Vec<CondDef>,
+    #[serde(default)]
+    fallback: bool,
 }
 
 #[derive(Deserialize)]
@@ -108,6 +110,7 @@ struct Rule {
     confidence: f64,
     all: Vec<Cond>,
     none: Vec<Cond>,
+    fallback: bool,
 }
 
 /// Lowercase, whitespace runs collapsed to one space, ends trimmed.
@@ -153,12 +156,16 @@ impl Rules {
         let file: RulesFile = serde_json::from_str(text)
             .map_err(|e| Error::Validation(format!("invalid decide rules {label}: {e}")))?;
         let compile = |rule: &str, c: CondDef| -> Result<Cond> {
-            let re = Regex::new(&c.pattern).map_err(|e| {
-                Error::Validation(format!(
-                    "invalid decide rules {label}: rule '{rule}': bad regex '{}': {e}",
-                    c.pattern
-                ))
-            })?;
+            let re = RegexBuilder::new(&c.pattern)
+                .case_insensitive(true)
+                .size_limit(1 << 20)
+                .build()
+                .map_err(|e| {
+                    Error::Validation(format!(
+                        "invalid decide rules {label}: rule '{rule}': bad regex '{}': {e}",
+                        c.pattern
+                    ))
+                })?;
             Ok(Cond {
                 field: c.field,
                 re,
@@ -188,6 +195,7 @@ impl Rules {
                 confidence,
                 all,
                 none,
+                fallback: def.fallback,
             });
         }
         Ok(Rules { rules })
@@ -198,10 +206,12 @@ impl Rules {
     }
 
     /// The rules in `path`; a missing file is the built-in set.
-    pub fn load(path: &Path) -> Result<Rules> {
+    /// A file named explicitly (`explicit`) that is missing is `validation`;
+    /// the implicit default location falls back to the built-ins.
+    pub fn load(path: &Path, explicit: bool) -> Result<Rules> {
         match std::fs::read_to_string(path) {
             Ok(text) => Rules::from_json(&text, &path.display().to_string()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Rules::builtin()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && !explicit => Ok(Rules::builtin()),
             Err(e) => Err(Error::Validation(format!(
                 "cannot read decide rules {}: {e}",
                 path.display()
@@ -214,20 +224,25 @@ impl DecideBackend for Rules {
     fn decide(&self, req: &Request) -> Result<Decision> {
         let question = normalise(req.question);
         let input = normalise(req.input);
-        let mut matched = self
+        let matched = self
             .rules
             .iter()
             .filter(|r| req.options.contains(&r.choice))
             .filter(|r| r.matches(&question, &input));
-        let Some(winner) = matched.next() else {
+        // Fallback rules never vote: they win only when nothing else matches.
+        let (fallbacks, voters): (Vec<&Rule>, Vec<&Rule>) = matched.partition(|r| r.fallback);
+        let Some(winner) = voters.first().or(fallbacks.first()).copied() else {
             return Ok(Decision::none("rules"));
         };
-        let total = 1 + matched.clone().count();
-        let agreeing = 1 + matched.filter(|r| r.choice == winner.choice).count();
+        let agreement = if winner.fallback {
+            1.0
+        } else {
+            voters.iter().filter(|r| r.choice == winner.choice).count() as f64 / voters.len() as f64
+        };
         Ok(Decision {
             choice: Some(winner.choice.clone()),
             confidence: winner.confidence,
-            agreement: agreeing as f64 / total as f64,
+            agreement,
             backend: "rules",
             rule: Some(winner.id.clone()),
         })
@@ -243,13 +258,14 @@ fn backend_from_config_in(config: &Path) -> Result<Box<dyn DecideBackend>> {
     let section = super::config::decide_section_in(config).map_err(Error::Validation)?;
     match section.backend.as_deref().map(str::trim) {
         None | Some("") | Some("rules") => {
+            let explicit = section.rules_file.is_some();
             let path = section.rules_file.unwrap_or_else(|| {
                 config
                     .parent()
                     .unwrap_or_else(|| Path::new("."))
                     .join("decide-rules.json")
             });
-            Ok(Box::new(Rules::load(&path)?))
+            Ok(Box::new(Rules::load(&path, explicit)?))
         }
         Some("off") => Ok(Box::new(Off)),
         Some(other) => Err(Error::Validation(format!(
@@ -336,6 +352,50 @@ mod tests {
         let d = ask(&r, "q", "foo bar", &["y", "z"]);
         assert_eq!(d.rule.as_deref(), Some("c"));
         assert_eq!(d.agreement, 1.0);
+    }
+
+    #[test]
+    fn a_fallback_rule_never_votes_and_wins_only_alone() {
+        let r = rules(
+            r#"{"rules":[
+              {"id":"a","choice":"x","all":[{"field":"input","pattern":"foo"}]},
+              {"id":"fb","choice":"y","confidence":0.5,"fallback":true}
+            ]}"#,
+        );
+        let d = ask(&r, "q", "foo", &["x", "y"]);
+        assert_eq!((d.rule.as_deref(), d.agreement), (Some("a"), 1.0));
+        let d = ask(&r, "q", "nope", &["x", "y"]);
+        assert_eq!((d.rule.as_deref(), d.agreement), (Some("fb"), 1.0));
+        assert_eq!(d.confidence, 0.5);
+        // The built-in catch-all does not dilute a real pick.
+        let d = route_decision("Implement x", "You are the implementer");
+        assert_eq!(
+            (d.choice.as_deref(), d.agreement),
+            (Some("implementer"), 1.0)
+        );
+    }
+
+    #[test]
+    fn patterns_are_case_insensitive() {
+        let r = rules(
+            r#"{"rules":[{"id":"r","choice":"x","all":[{"field":"input","pattern":"FOO"}]}]}"#,
+        );
+        assert!(ask(&r, "q", "a foo b", &["x", "y"]).choice.is_some());
+    }
+
+    #[test]
+    fn an_explicit_missing_rules_file_is_validation_naming_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.json");
+        let missing = dir.path().join("nope.json");
+        std::fs::write(
+            &cfg,
+            format!(r#"{{"decide":{{"rules-file":"{}"}}}}"#, missing.display()),
+        )
+        .unwrap();
+        let e = backend_from_config_in(&cfg).err().unwrap();
+        assert!(matches!(e, Error::Validation(_)));
+        assert!(e.to_string().contains("nope.json"), "{e}");
     }
 
     #[test]
@@ -437,7 +497,7 @@ mod tests {
     }
 
     // Fixture rows from the routing set, run through the built-in ruleset.
-    fn route(q: &str, i: &str) -> String {
+    fn route_decision(q: &str, i: &str) -> Decision {
         let all = opts(&[
             "diff-reviewer",
             "implementer",
@@ -446,14 +506,17 @@ mod tests {
             "Explore",
             "general-purpose",
         ]);
-        let d = Rules::builtin()
+        Rules::builtin()
             .decide(&Request {
                 question: q,
                 input: i,
                 options: &all,
             })
-            .unwrap();
-        d.choice.unwrap()
+            .unwrap()
+    }
+
+    fn route(q: &str, i: &str) -> String {
+        route_decision(q, i).choice.unwrap()
     }
 
     #[test]
