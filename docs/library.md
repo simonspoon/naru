@@ -130,6 +130,10 @@ away from `skill` is `validation` while the row holds siblings.
   skill's siblings alone and the preview does not compare them. A carried
   map that differs makes `import --preview` say `conflict` (its `diff` shows
   it), never `identical`.
+  The web page's own bundle reader (`libraryBundle.ts::parseBundle`) carries
+  `files` through to the import and preview calls (mesa task 1673 — it used to
+  rebuild each item without the key, so a bundle imported from the page reduced
+  a skill to SKILL.md). The map is text-only (UTF-8 strings), as everywhere else.
 - **Editing** (mesa task 1605): `PATCH /api/library/{id}` takes an optional
   `files` map beside `name`/`body`/`export_command` — absent (or `null`)
   leaves the siblings alone, a map **replaces** the whole set, so a removed

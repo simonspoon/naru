@@ -37,6 +37,23 @@ describe('parseBundle', () => {
     }
   })
 
+  it('keeps a skill\'s sibling files (mesa task 1673) and omits the key when absent', () => {
+    const files = { 'notes/a.md': 'A', 'b.txt': 'B\n' }
+    const skill = { ...validItem, name: 's', kind: 'skill', files }
+    const result = parseBundle(bundleText({}, [skill, validItem]))
+    expect('bundle' in result).toBe(true)
+    if ('bundle' in result) {
+      expect(result.bundle.items[0].files).toEqual(files)
+      expect('files' in result.bundle.items[1]).toBe(false)
+    }
+  })
+
+  it('treats a malformed files value as absent rather than rejecting the bundle', () => {
+    const result = parseBundle(bundleText({}, [{ ...validItem, files: { a: 1 } }, { ...validItem, files: ['x'] }]))
+    expect('bundle' in result).toBe(true)
+    if ('bundle' in result) expect(result.bundle.items.every((i) => !('files' in i))).toBe(true)
+  })
+
   it('defaults a missing exported_at to an empty string rather than failing', () => {
     const result = parseBundle(JSON.stringify({ version: 1, items: [validItem] }))
     expect('bundle' in result).toBe(true)

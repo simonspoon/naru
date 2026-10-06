@@ -34,6 +34,21 @@ export type ParsedBundle = { bundle: LibraryBundle } | { error: string }
  * (`core::library::import`), so an old export still imports from the page. */
 const LEGACY_COMMAND_KIND = 'command'
 
+/** A skill's sibling files as the bundle carries them: a plain object of
+ * string contents keyed by relative path. Anything else (absent, wrong
+ * shape) is `undefined` — "says nothing about the siblings", the same as an
+ * old bundle — so a bundle is never silently reduced to SKILL.md by dropping
+ * a map the server would have imported (mesa task 1673). */
+function bundleFiles(value: unknown): Record<string, string> | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const out: Record<string, string> = {}
+  for (const [path, content] of Object.entries(value)) {
+    if (typeof content !== 'string') return undefined
+    out[path] = content
+  }
+  return out
+}
+
 /** One item's shape complaint, or `null` if it passes — checked against the
  * required fields `LibraryBundleItem` carries on the wire (`name`, `kind`,
  * `scope`, `body`); `project`/`builtin_id`/`export_command` are
@@ -107,6 +122,9 @@ export function parseBundle(text: string): ParsedBundle {
     body: it.body as string,
     builtin_id: typeof it.builtin_id === 'string' ? it.builtin_id : null,
     export_command: it.kind === LEGACY_COMMAND_KIND || it.export_command === true,
+    // Omitted (not `null`) when the file carried none, so a re-serialized
+    // old bundle stays byte-shaped as before.
+    ...(bundleFiles(it.files) !== undefined ? { files: bundleFiles(it.files) } : {}),
   }))
 
   return {
