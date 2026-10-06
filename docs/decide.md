@@ -96,3 +96,5 @@ agrees with the Python original on every row. Its accuracy on the survey's
 test split was 33/43 with 2 false swaps — and that is **optimistic**, since the
 rules were written after seeing the test set. Treat the answer as advice:
 gate on `agreement`/`confidence`, and keep a fallback for a null choice.
+
+The `agent-route` PreToolUse hook (`docs/agent-route.md`) is a caller: it swaps a general-purpose subagent spawn for the specialist these rules pick.

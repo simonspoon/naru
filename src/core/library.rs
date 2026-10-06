@@ -83,6 +83,10 @@ pub struct Builtin {
 /// hook that delivers what the person said mid-turn to the `naru-live` agent —
 /// body `core::barge_in::BARGE_IN_HOOK`, installed by `naru library hook enable
 /// live-barge-in.sh --event PreToolUse` (and again for `PostToolUse`).
+/// `agent-route` is the sixth (mesa task 1654): a `PreToolUse` hook that
+/// reroutes a misrouted general-purpose subagent spawn through `naru decide` —
+/// body `core::agent_route::AGENT_ROUTE_HOOK`, installed by `naru library hook
+/// enable agent-route.sh --event PreToolUse --matcher 'Agent|Task'`.
 pub const BUILTINS: &[Builtin] = &[
     Builtin {
         id: crate::core::live::LIVE_AGENT_BUILTIN,
@@ -173,6 +177,13 @@ echo \"Claude Code stopped in $(pwd)\"
         kind: LibraryKind::Hook,
         scope: LibraryScope::User,
         body: crate::core::barge_in::BARGE_IN_HOOK,
+    },
+    Builtin {
+        id: crate::core::agent_route::AGENT_ROUTE_HOOK_BUILTIN,
+        name: crate::core::agent_route::AGENT_ROUTE_HOOK_NAME,
+        kind: LibraryKind::Hook,
+        scope: LibraryScope::User,
+        body: crate::core::agent_route::AGENT_ROUTE_HOOK,
     },
 ];
 

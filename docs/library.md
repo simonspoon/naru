@@ -688,6 +688,18 @@ naru library hook enable alarm-disarm --event SubagentStop
 It pipes the payload to `naru alarm disarm`, discards the output and always
 exits 0, so it never wedges a session. See `docs/alarm.md`.
 
+### The agent-route hook
+
+`agent-route` (mesa task 1654, body `core::agent_route::AGENT_ROUTE_HOOK`) is a
+**PreToolUse** hook that reroutes a misrouted general-purpose subagent spawn
+through `naru decide`:
+
+```
+naru library hook enable agent-route.sh --event PreToolUse --matcher 'Agent|Task'
+```
+
+See `docs/agent-route.md`.
+
 ### The live-barge-in hook
 
 `live-barge-in` (mesa task 1595, body `core::barge_in::BARGE_IN_HOOK`) is a
