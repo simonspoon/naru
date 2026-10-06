@@ -62,6 +62,11 @@ import { KindIcon, SpeakIcon } from './components/WorkflowIcon'
 type CardData = { node: WorkflowNode; status: WorkflowStepStatus | undefined }
 type CardNode = Node<CardData, 'card'>
 
+/** A decide card's handles sit in rows of their own below the title and
+ *  summary: the first row starts `DECIDE_ROWS_TOP` px down, one row each. */
+const DECIDE_ROWS_TOP = 58
+const DECIDE_ROW = 20
+
 /** One node as a card: icon, bold title, a muted one-line summary, handles for
  *  the connections it may take, and the last run's step state as a ring. A
  *  branch offers two labelled source handles so the edge's `true`/`false` is
@@ -72,7 +77,7 @@ function NodeCard({ data, selected }: NodeProps<CardNode>) {
   const decideHandles = node.kind === 'decide' ? sourceHandles(node.kind, node.config) : []
   return (
     <div
-      style={decideHandles.length > 2 ? { minHeight: 36 + 22 * decideHandles.length } : undefined}
+      style={decideHandles.length > 0 ? { paddingBottom: DECIDE_ROW * decideHandles.length + 8 } : undefined}
       className={`wf-node wf-kind-${node.kind}${selected ? ' selected' : ''} ${stepClass(status)}`}
       title={status ? `last run: ${status}` : undefined}
     >
@@ -110,7 +115,7 @@ function NodeCard({ data, selected }: NodeProps<CardNode>) {
         </>
       ) : node.kind === 'decide' ? (
         decideHandles.map((label, i) => {
-          const top = `${Math.round(((i + 1) / (decideHandles.length + 1)) * 100)}%`
+          const top = DECIDE_ROWS_TOP + DECIDE_ROW * i + DECIDE_ROW / 2
           return (
             <Fragment key={label}>
               <Handle id={label} type="source" position={Position.Right} style={{ top }} />
