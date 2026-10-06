@@ -27,6 +27,7 @@ clap = { version = "4.6.1", features = ["derive"] }
 directories = "6.0.0"
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 portable-pty = "0.9"
+regex = "1.13.1"
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 rust-embed = "8"
 serde = { version = "1.0.228", features = ["derive"] }

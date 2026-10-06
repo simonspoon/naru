@@ -6,6 +6,7 @@ pub mod barge_in;
 pub mod board;
 pub mod cc;
 pub mod config;
+pub mod decide;
 pub mod env;
 pub mod files;
 pub mod git;

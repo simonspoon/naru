@@ -4027,6 +4027,37 @@ fn notify_base_url_in(path: &Path) -> Result<Option<String>, String> {
         .filter(|v| !v.is_empty()))
 }
 
+/// The read-only `decide` section (mesa task 1653, `docs/decide.md`):
+/// `{ "decide": { "backend": "rules"|"off", "rules-file": "<path>" } }`. No
+/// API route, no Settings UI, not ts-exported; every saver preserves it as it
+/// does any unknown section.
+#[derive(Debug, Default, Deserialize)]
+struct DecideConfig {
+    #[serde(default)]
+    decide: DecideSection,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct DecideSection {
+    #[serde(default)]
+    pub backend: Option<String>,
+    #[serde(default, rename = "rules-file")]
+    pub rules_file: Option<PathBuf>,
+}
+
+/// The `decide` section of the config at `path`; an absent file or section is
+/// all-default. A file that exists but can't be read or parsed is `Err`.
+pub fn decide_section_in(path: &Path) -> Result<DecideSection, String> {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(DecideSection::default()),
+        Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
+    };
+    let config: DecideConfig = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("malformed mesa config {}: {e}", path.display()))?;
+    Ok(config.decide)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6031,6 +6062,7 @@ mod tests {
                  "listen": {"model": "parakeet-tdt-0.6b-v2-int8"},
                  "audio": {"engine": "naru-audio"},
                  "notify": {"base-url": "http://192.168.1.5:7770"},
+                 "decide": {"backend": "off"},
                  "future": {"x": 1}
                }"#,
         );
@@ -6145,6 +6177,8 @@ mod tests {
             notify_base_url_in(&path).unwrap().as_deref(),
             Some("http://192.168.1.5:7770")
         );
+        // …nor the read-only decide section (task 1653).
+        assert_eq!(survives("decide")["decide"]["backend"], "off");
     }
 
     #[test]

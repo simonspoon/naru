@@ -302,6 +302,48 @@ EXAMPLES
         #[arg(long)]
         base_url: Option<String>,
     },
+    /// Pick one of several options with a small, fast, local rule set (mesa task 1653)
+    ///
+    /// A "System One" call for hooks and workflows: no network, no model, no
+    /// key. Prints `{choice, confidence, agreement, backend, rule}`; "no
+    /// decision" is `choice: null` with confidence 0 and exit 0, so callers
+    /// pass it through. The answer is advice, not a verdict — gate on
+    /// `agreement`/`confidence`. Backend and rules file come from the
+    /// `decide` section of ~/.mesa/config.json (default: built-in routing
+    /// rules); `--print-default-rules` prints them for editing. Takes no
+    /// `--quiet`. See docs/decide.md.
+    #[command(after_help = "\
+EXAMPLES
+  mesa decide \"Which agent?\" --option implementer --option general-purpose --input-file prompt.txt
+  mesa decide --question \"Ship it?\" --option yes --option no --input \"tests are green\"
+  mesa decide --print-default-rules > ~/.mesa/decide-rules.json")]
+    Decide {
+        /// The question being decided
+        #[arg(
+            value_name = "QUESTION",
+            required_unless_present_any = ["question", "print_default_rules"]
+        )]
+        question_pos: Option<String>,
+        /// The question (flag form of QUESTION)
+        #[arg(long, allow_hyphen_values = true, conflicts_with = "question_pos")]
+        question: Option<String>,
+        /// A candidate answer; repeat for each (at least two, distinct)
+        #[arg(
+            long = "option",
+            allow_hyphen_values = true,
+            required_unless_present = "print_default_rules"
+        )]
+        options: Vec<String>,
+        /// Context the rules may also read
+        #[arg(long, allow_hyphen_values = true)]
+        input: Option<String>,
+        /// Read the context from a file (`-` = stdin)
+        #[arg(long, conflicts_with = "input")]
+        input_file: Option<String>,
+        /// Print the built-in rules (JSON) and exit
+        #[arg(long)]
+        print_default_rules: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -4468,6 +4510,25 @@ fn execute(command: Command) -> Result<()> {
                 base_url.as_deref(),
             )?;
             print_json(&sent);
+            Ok(())
+        }
+        Command::Decide {
+            question_pos,
+            question,
+            options,
+            input,
+            input_file,
+            print_default_rules,
+        } => {
+            if print_default_rules {
+                print!("{}", crate::core::decide::DEFAULT_RULES);
+                return Ok(());
+            }
+            let question = question.or(question_pos).unwrap_or_default();
+            let mut stdin_used = false;
+            let input = resolve_field(input, input_file, &mut stdin_used)?.unwrap_or_default();
+            let decision = crate::core::decide::decide(&question, &input, &options)?;
+            print_json(&decision);
             Ok(())
         }
         Command::Backup { path } => {
