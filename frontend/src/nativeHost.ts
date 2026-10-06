@@ -8,7 +8,9 @@
  * so `detectNativeHost` answers `null` and nothing here is ever installed.
  *
  * Page to host: `window.webkit.messageHandlers.naruLive.postMessage(msg)`.
- * Host to page: `window.naruNativeHost.setMicState({ muted })`.
+ * Host to page: `window.naruNativeHost.setMicState({ muted?, level?, hearing? })`.
+ * `level` (RMS 0..1) and `hearing` (host's own speech verdict) carry the voice
+ * the page would otherwise meter itself, so the orb and glow follow it too.
  */
 
 export const NATIVE_HANDLER = 'naruLive'
@@ -23,7 +25,13 @@ export type NativeOut =
   | { type: 'mic'; muted: boolean }
 
 /** What the host hands the page. Absent keys leave the page's state alone. */
-export type NativeMicState = { muted?: boolean }
+export type NativeMicState = { muted?: boolean; level?: number; hearing?: boolean }
+
+/** Whether a host push means the person is audibly talking: the host says so,
+ *  or its level reaches the page's own capture onset. */
+export function hostVoiced(state: NativeMicState, onsetRms: number): boolean {
+  return state.hearing === true || (state.level !== undefined && state.level >= onsetRms)
+}
 
 export type NativeHost = { post: (msg: NativeOut) => void }
 
@@ -50,8 +58,18 @@ export function installNativeHost(
   const api = {
     setMicState(state: unknown) {
       if (typeof state !== 'object' || state === null) return
-      const { muted } = state as { muted?: unknown }
-      if (typeof muted === 'boolean') onState({ muted })
+      const { muted, level, hearing } = state as {
+        muted?: unknown
+        level?: unknown
+        hearing?: unknown
+      }
+      const out: NativeMicState = {}
+      if (typeof muted === 'boolean') out.muted = muted
+      if (typeof level === 'number' && Number.isFinite(level)) {
+        out.level = Math.min(1, Math.max(0, level))
+      }
+      if (typeof hearing === 'boolean') out.hearing = hearing
+      if (Object.keys(out).length > 0) onState(out)
     },
   }
   win.naruNativeHost = api

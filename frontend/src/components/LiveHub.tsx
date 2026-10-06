@@ -201,7 +201,7 @@ import type { LiveWindow } from '../types/LiveWindow'
 import type { TranscribeStatus } from '../types/TranscribeStatus'
 import { isNearBottom, newSince } from '../liveScroll'
 import { useFetch } from '../useFetch'
-import { detectNativeHost, installNativeHost } from '../nativeHost'
+import { detectNativeHost, hostVoiced, installNativeHost } from '../nativeHost'
 
 /**
  * Mesa Live, in the header (mesa tasks 855, 857): the whole conversation lives
@@ -997,12 +997,6 @@ export function LiveHub({
   // every branch below on it is skipped and nothing changes. When present the
   // page opens no `getUserMedia` anywhere and `muted` is what the host reports.
   const [native] = useState(() => detectNativeHost(window as unknown as Record<string, unknown>))
-  useEffect(() => {
-    if (native === null) return
-    return installNativeHost(window as unknown as Record<string, unknown>, native, (state) => {
-      if (state.muted !== undefined) setMutedNow(state.muted)
-    })
-  }, [native, setMutedNow])
   // The engine still guessing. Shown, and sent only as the tail of a flush
   // (`liveRecognition.ts`). The ref is what the listen switch reads: it flips
   // from a press, outside the render that last set this.
@@ -1221,6 +1215,18 @@ export function LiveHub({
     )
     return () => clearTimeout(timer)
   }, [voicedAt])
+  // The native host's push (declared here, after the setters it writes).
+  useEffect(() => {
+    if (native === null) return
+    return installNativeHost(window as unknown as Record<string, unknown>, native, (state) => {
+      if (state.muted !== undefined) setMutedNow(state.muted)
+      // The host owns the microphone, so the capture effects that normally
+      // write these never run: its level and speech verdict drive the orb and
+      // glow instead. The host's cadence is the throttle.
+      if (state.level !== undefined) setLevel(state.level)
+      if (hostVoiced(state, DEFAULT_VAD.onsetRms)) setVoicedAt(Date.now())
+    })
+  }, [native, setMutedNow])
 
   // ---- the watchdog (mesa task 1157) ----
 

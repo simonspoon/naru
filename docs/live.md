@@ -1979,9 +1979,13 @@ browser has no such handler and behaves exactly as before.
 | `{"type":"state","session":<id or null>,"live":<bool>,"joined":<bool>}` | On mount and whenever the live session, `live` or this browser's `joined` changes. Capture only while `live && joined`. |
 | `{"type":"mic","muted":<bool>}` | The person pressed the listen button or chord. |
 
-**Host to page** — `window.naruNativeHost.setMicState({muted: <bool>})`
-(installed only when the host is detected; a missing key leaves that state
-alone, a non-boolean is ignored). It is the last word on `muted`: a press is
+**Host to page** — `window.naruNativeHost.setMicState({muted?: <bool>,
+level?: <rms 0..1>, hearing?: <bool>})` (installed only when the host is
+detected; a missing key leaves that state alone, a wrongly typed one is
+ignored). `level` drives the orb and glow as the page's own meter would, and
+the person counts as heard while `hearing` is true or `level` reaches the
+capture onset (`DEFAULT_VAD.onsetRms`); a host sending only `muted` behaves
+as before. It is the last word on `muted`: a press is
 applied locally at once and posted as `mic`, and the host's next `setMicState`
 overrides it.
 
