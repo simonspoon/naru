@@ -299,7 +299,7 @@ pub fn validate_config(
                 Some(Value::Array(a)) => {
                     a.iter()
                         .map(|o| match o {
-                            Value::String(s) => Ok(s.clone()),
+                            Value::String(s) => Ok(s.trim().to_string()),
                             _ => Err("decide config: \"options\" must be an array of strings"
                                 .to_string()),
                         })
@@ -1049,7 +1049,7 @@ pub fn first_number(s: &str) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::store::{WorkflowNodeNew, WorkflowPatch};
+    use crate::core::store::{WorkflowNodeNew, WorkflowNodePatch, WorkflowPatch};
     use std::sync::Arc;
 
     fn store() -> (Mutex<Store>, tempfile::TempDir) {
@@ -2093,5 +2093,61 @@ mod tests {
             s.create_workflow_edge(wf, br, x, Some("a".into())),
             Err(Error::Validation(_))
         ));
+    }
+
+    #[test]
+    fn decide_options_are_trimmed_and_a_config_change_cannot_orphan_an_edge() {
+        let ok = |c: Value| validate_config(WorkflowNodeKind::Decide, &c);
+        assert_eq!(
+            ok(json!({"question": "q", "options": [" a ", "b\n"]})).unwrap()["options"],
+            json!(["a", "b"])
+        );
+        assert!(ok(json!({"question": "q", "options": ["a", "  "]})).is_err());
+        assert!(
+            ok(json!({"question": "q", "options": ["a", " a "]}))
+                .unwrap_err()
+                .contains("duplicate")
+        );
+        assert!(ok(json!({"question": "q", "options": ["a", " fallback "]})).is_err());
+
+        let (st, _d) = store();
+        let mut s = st.lock().unwrap();
+        let wf = s.create_workflow(None, "G", None).unwrap().id;
+        let d = node(
+            &mut s,
+            wf,
+            WorkflowNodeKind::Decide,
+            "D",
+            json!({"question": "q", "options": ["a", "b"]}),
+        );
+        let x = node(&mut s, wf, WorkflowNodeKind::Cli, "X", cli("true"));
+        let e = s
+            .create_workflow_edge(wf, d, x, Some("a".into()))
+            .unwrap()
+            .id;
+        s.create_workflow_edge(wf, d, x, Some("fallback".into()))
+            .unwrap();
+        let patch = |c: Value| WorkflowNodePatch {
+            config: Some(c),
+            ..Default::default()
+        };
+        let err = s
+            .update_workflow_node(d, patch(json!({"question": "q", "options": ["b", "c"]})))
+            .unwrap_err();
+        match err {
+            Error::Validation(m) => assert!(
+                m.contains(&format!("edge {e}")) && m.contains("\"a\""),
+                "{m}"
+            ),
+            other => panic!("{other:?}"),
+        }
+        // Nothing was written.
+        assert_eq!(
+            s.get_workflow_node(d).unwrap().config["options"],
+            json!(["a", "b"])
+        );
+        // Keeping the labelled option (and reordering/adding) is fine.
+        s.update_workflow_node(d, patch(json!({"question": "q2", "options": ["c", "a"]})))
+            .unwrap();
     }
 }

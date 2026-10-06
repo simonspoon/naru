@@ -50,9 +50,11 @@ Graph rules (`Store`):
   leaving a `decide` node **needs** one of that node's `options` or `fallback`
   (`validation`, naming the options); an edge leaving any other node
   **refuses** one. `branch` is free text in the db (a decide option), so
-  `WorkflowEdge.branch` is a string; editing a decide node's options later
-  leaves an edge with a stale label inert (it can never be active), not
-  invalid.
+  `WorkflowEdge.branch` is a string; changing a decide node's config
+  is refused (`validation`, naming the edge id and label, nothing written) while
+  an edge leaves it on a label that is neither `fallback` nor one of the new
+  options. Options are stored trimmed, so one that is empty or a duplicate after
+  trimming is `validation`.
 - Deleting a node deletes its edges; the echo is `{node, edges}`. Deleting a
   workflow echoes the whole destroyed `{workflow, nodes, edges}` — the
   recovery transcript, there is no confirmation prompt — and keeps its log

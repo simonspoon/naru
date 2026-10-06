@@ -4972,6 +4972,28 @@ impl Store {
             }
             None => current.config.clone(),
         };
+        if current.kind == WorkflowNodeKind::Decide && patch.config.is_some() {
+            // An edge labelled with an option the node no longer offers would
+            // never be active; refuse the change instead of orphaning it.
+            let options: Vec<&str> = config
+                .get("options")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|o| o.as_str()).collect())
+                .unwrap_or_default();
+            let edges = read_workflow_edges(&self.conn, current.workflow_id)?;
+            if let Some((e, label)) = edges.iter().find_map(|e| {
+                let label = e.branch.as_deref()?;
+                (e.from_node == id && label != "fallback" && !options.contains(&label))
+                    .then_some((e, label))
+            }) {
+                return Err(Error::Validation(format!(
+                    "edge {} leaves this decide node on {label:?}, which is not among the new \
+                     options ({}); delete or relabel the edge first",
+                    e.id,
+                    options.join(", ")
+                )));
+            }
+        }
         let x = patch.x.unwrap_or(current.x);
         let y = patch.y.unwrap_or(current.y);
         validate_workflow_position(x, y)?;

@@ -677,6 +677,11 @@ run 0 "$NARU" workflow edge create judge "$JT" "$JD"
 run 0 "$NARU" workflow edge create judge "$JD" "$JS" --branch ship
 [ "$(jqs .branch)" = "ship" ] || fail "decide edge carries its option: $STDOUT"
 run 0 "$NARU" workflow edge create judge "$JD" "$JH" --branch hold
+run 1 "$NARU" workflow node update "$JD" --config '{"question":"Ship {input}?","options":["ship","wait"]}'
+[ "$(jqe .error.code)" = "validation" ] || fail "dropping an option an edge uses: validation"
+grep -q 'on .*hold' <<<"$STDERR" || fail "the refusal names the label: $STDERR"
+run 0 "$NARU" workflow show judge
+[ "$(jqs '.nodes[] | select(.id == '"$JD"') | .config.options | join(",")')" = "ship,hold" ] || fail "the refused update changed the config: $STDOUT"
 ok "decide: node created with the default threshold, edges labelled with the option text"
 
 run 1 "$NARU" workflow node create judge decide Bad --config '{"question":"q","options":["only"]}'
