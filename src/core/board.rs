@@ -380,6 +380,7 @@ mod tests {
             last_run_status: None,
             last_failure_at: None,
             next_run_at: None,
+            trigger_events: vec![],
         }
     }
 

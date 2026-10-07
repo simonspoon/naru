@@ -41,6 +41,7 @@ describe('summarize', () => {
     expect(summarize('decide', { question: 'q', options: ['a', 'b'], threshold: 0.7 })).toBe('a | b · ≥ 0.7')
     expect(summarize('trigger', { mode: 'manual' })).toBe('manual')
     expect(summarize('trigger', { mode: 'time', every_minutes: 10 })).toBe('every 10 min')
+    expect(summarize('trigger', { mode: 'ambient', events: ['idea', 'wake'] })).toBe('ambient · idea, wake')
     expect(summarize('trigger', { mode: 'voice', phrase: 'capture a thought' })).toBe('voice · “capture a thought”')
     expect(summarize('output', { target: 'log', log: 'ambient' })).toBe('log · ambient')
     expect(summarize('output', { target: 'inbox', task_id: 7, kind: 'task-summary' })).toBe('inbox · task 7')
@@ -60,6 +61,18 @@ describe('buildConfig', () => {
   const draft = (kind: WorkflowNodeKind, over: Record<string, unknown>) => ({
     ...draftFromConfig(kind, {}),
     ...over,
+  })
+
+  it('requires at least one known event for an ambient trigger', () => {
+    const d = (over: object) => draft('trigger', { mode: 'ambient', ...over })
+    expect(buildConfig('trigger', d({})).error).toMatch(/at least one event/)
+    expect(buildConfig('trigger', d({ events: ['nope'] })).error).toMatch(/events must be/)
+    expect(buildConfig('trigger', d({ events: ['wake', 'idea'] })).config).toEqual({
+      mode: 'ambient',
+      events: ['idea', 'wake'],
+    })
+    // stale events left in the draft are not sent for another mode
+    expect(buildConfig('trigger', draft('trigger', { mode: 'manual', events: ['idea'] })).config).toEqual({ mode: 'manual' })
   })
 
   it('requires every_minutes for a time trigger only', () => {

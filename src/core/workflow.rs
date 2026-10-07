@@ -76,6 +76,11 @@ impl StoreAccess for Mutex<Store> {
 // ---- config validation ---------------------------------------------------
 
 const PROMPT_MODELS: [&str; 3] = ["haiku", "sonnet", "opus"];
+/// The ambient engine's event vocabulary: what an `ambient` trigger's
+/// `events` may list and what [`emit_ambient`] accepts.
+pub const AMBIENT_EVENTS: [&str; 3] = ["idea", "can-help", "wake"];
+/// Longest speaker label of an ambient event, in characters.
+pub const AMBIENT_SPEAKER_MAX: usize = 64;
 const BRANCH_OPS: [&str; 5] = ["contains", "regex", "score_above", "score_below", "equals"];
 /// A decide node's confidence threshold when its config names none.
 pub const DEFAULT_DECIDE_THRESHOLD: f64 = 0.5;
@@ -165,11 +170,11 @@ pub fn validate_config(
     let mut out = Map::new();
     match kind {
         WorkflowNodeKind::Trigger => {
-            only_keys(name, obj, &["mode", "every_minutes", "phrase"])?;
+            only_keys(name, obj, &["mode", "every_minutes", "phrase", "events"])?;
             let mode = required_str(name, obj, "mode")?;
-            if !["manual", "time", "voice"].contains(&mode) {
+            if !["manual", "time", "voice", "ambient"].contains(&mode) {
                 return Err(format!(
-                    "trigger config: \"mode\" must be manual, time or voice, got {mode:?}"
+                    "trigger config: \"mode\" must be manual, time, voice or ambient, got {mode:?}"
                 ));
             }
             out.insert("mode".into(), json!(mode));
@@ -190,6 +195,37 @@ pub fn validate_config(
                     );
                 }
                 _ => {}
+            }
+            match (mode, obj.get("events")) {
+                ("ambient", Some(Value::Array(items))) if !items.is_empty() => {
+                    let mut events: Vec<&str> = Vec::new();
+                    for item in items {
+                        let ev = item.as_str().filter(|e| AMBIENT_EVENTS.contains(e));
+                        let Some(ev) = ev else {
+                            return Err(format!(
+                                "trigger config: \"events\" entries must be one of {}, got {item}",
+                                AMBIENT_EVENTS.join(", ")
+                            ));
+                        };
+                        if events.contains(&ev) {
+                            return Err(format!("trigger config: \"events\" lists {ev:?} twice"));
+                        }
+                        events.push(ev);
+                    }
+                    out.insert("events".into(), json!(events));
+                }
+                ("ambient", _) => {
+                    return Err(format!(
+                        "trigger config: an ambient trigger needs \"events\", a non-empty list of {}",
+                        AMBIENT_EVENTS.join(", ")
+                    ));
+                }
+                (_, None) => {}
+                (_, Some(_)) => {
+                    return Err(
+                        "trigger config: \"events\" belongs to an ambient trigger only".into(),
+                    );
+                }
             }
             if let Some(p) = optional_str(name, obj, "phrase")? {
                 out.insert("phrase".into(), json!(p.trim()));
@@ -501,6 +537,60 @@ pub fn run_workflow<A: StoreAccess>(
 ) -> Result<WorkflowRun> {
     let (view, run) = access.with(|s| claim_run(s, workflow_id, trigger, input))?;
     execute_run(access, &view, run)
+}
+
+/// Validates one ambient-engine event and answers the workflows it fires
+/// (every `ambient` trigger listing `event`, id order) with the run input
+/// they all get: `{"event","speaker","text"}` as compact JSON. Nothing runs.
+pub fn plan_ambient<A: StoreAccess>(
+    access: &A,
+    event: &str,
+    speaker: &str,
+    text: &str,
+) -> Result<(Vec<i64>, String)> {
+    if !AMBIENT_EVENTS.contains(&event) {
+        return Err(Error::Validation(format!(
+            "event must be one of {}, got {event:?}",
+            AMBIENT_EVENTS.join(", ")
+        )));
+    }
+    if speaker.trim().is_empty() || speaker.chars().count() > AMBIENT_SPEAKER_MAX {
+        return Err(Error::Validation(format!(
+            "speaker must be a non-empty label of at most {AMBIENT_SPEAKER_MAX} characters"
+        )));
+    }
+    let input = json!({"event": event, "speaker": speaker, "text": text}).to_string();
+    if input.len() > crate::core::store::WORKFLOW_INPUT_MAX {
+        return Err(Error::Validation(format!(
+            "the event is over the {} KiB run input limit",
+            crate::core::store::WORKFLOW_INPUT_MAX / 1024
+        )));
+    }
+    let ids = access.with(|s| s.ambient_workflows(event))?;
+    Ok((ids, input))
+}
+
+/// Runs each of `ids` with trigger `ambient` and `input`, in order, and
+/// answers the finished runs. A failed run is data, as in [`run_workflow`].
+pub fn run_ambient<A: StoreAccess>(
+    access: &A,
+    ids: &[i64],
+    input: &str,
+) -> Result<Vec<WorkflowRun>> {
+    ids.iter()
+        .map(|id| run_workflow(access, *id, WorkflowTrigger::Ambient, input))
+        .collect()
+}
+
+/// [`plan_ambient`] then [`run_ambient`]: what `naru workflow emit` does.
+pub fn emit_ambient<A: StoreAccess>(
+    access: &A,
+    event: &str,
+    speaker: &str,
+    text: &str,
+) -> Result<Vec<WorkflowRun>> {
+    let (ids, input) = plan_ambient(access, event, speaker, text)?;
+    run_ambient(access, &ids, &input)
 }
 
 /// What a node left behind, for the nodes downstream of it.
@@ -1120,7 +1210,9 @@ mod tests {
         assert!(
             bad(K::Trigger, json!({"mode": "time", "every_minutes": 0})).contains("1 to 10080")
         );
-        assert!(bad(K::Trigger, json!({"mode": "weekly"})).contains("manual, time or voice"));
+        assert!(
+            bad(K::Trigger, json!({"mode": "weekly"})).contains("manual, time, voice or ambient")
+        );
         assert!(bad(K::Trigger, json!({"mode": "manual", "extra": 1})).contains("unknown key"));
         assert_eq!(
             ok(
@@ -2149,5 +2241,110 @@ mod tests {
         // Keeping the labelled option (and reordering/adding) is fine.
         s.update_workflow_node(d, patch(json!({"question": "q2", "options": ["c", "a"]})))
             .unwrap();
+    }
+
+    #[test]
+    fn ambient_trigger_config_validation() {
+        use WorkflowNodeKind as K;
+        let ok = |c: Value| validate_config(K::Trigger, &c).unwrap();
+        let bad = |c: Value| validate_config(K::Trigger, &c).unwrap_err();
+        assert_eq!(
+            ok(json!({"mode": "ambient", "events": ["idea", "wake"], "phrase": " p "})),
+            json!({"mode": "ambient", "events": ["idea", "wake"], "phrase": "p"})
+        );
+        assert!(bad(json!({"mode": "ambient"})).contains("events"));
+        assert!(bad(json!({"mode": "ambient", "events": []})).contains("events"));
+        assert!(bad(json!({"mode": "ambient", "events": "idea"})).contains("events"));
+        assert!(bad(json!({"mode": "ambient", "events": ["nope"]})).contains("idea, can-help"));
+        assert!(bad(json!({"mode": "ambient", "events": [1]})).contains("events"));
+        assert!(bad(json!({"mode": "ambient", "events": ["idea", "idea"]})).contains("twice"));
+        assert!(
+            bad(json!({"mode": "ambient", "events": ["idea"], "every_minutes": 5}))
+                .contains("time trigger")
+        );
+        assert!(bad(json!({"mode": "manual", "events": ["idea"]})).contains("ambient trigger"));
+    }
+
+    #[test]
+    fn emit_runs_only_matching_ambient_workflows_in_id_order() {
+        let (st, _d) = store();
+        let mk = |name: &str, config: Value| {
+            st.with(|s| {
+                let wf = s.create_workflow(None, name, None).unwrap().id;
+                let t = node(s, wf, WorkflowNodeKind::Trigger, "T", config);
+                let c = node(s, wf, WorkflowNodeKind::Cli, "Echo", cli("cat"));
+                s.create_workflow_edge(wf, t, c, None).unwrap();
+                wf
+            })
+        };
+        let a = mk("A", json!({"mode": "ambient", "events": ["idea"]}));
+        let _manual = mk("M", json!({"mode": "manual"}));
+        let b = mk("B", json!({"mode": "ambient", "events": ["wake", "idea"]}));
+        let c = mk("C", json!({"mode": "ambient", "events": ["can-help"]}));
+
+        let runs = emit_ambient(&st, "idea", "simon", "hi").unwrap();
+        let ids: Vec<_> = runs.iter().map(|r| r.workflow_id).collect();
+        assert_eq!(ids, vec![a, b]);
+        assert!(runs.iter().all(|r| r.trigger == WorkflowTrigger::Ambient));
+        assert!(
+            runs.iter()
+                .all(|r| r.status == WorkflowRunStatus::Succeeded)
+        );
+        assert_eq!(
+            runs[0].input,
+            r#"{"event":"idea","speaker":"simon","text":"hi"}"#
+        );
+        let ids: Vec<_> = emit_ambient(&st, "can-help", "x", "")
+            .unwrap()
+            .iter()
+            .map(|r| r.workflow_id)
+            .collect();
+        assert_eq!(ids, vec![c]);
+        assert!(emit_ambient(&st, "wake", "x", "").unwrap().len() == 1);
+    }
+
+    #[test]
+    fn emit_with_no_match_is_empty_and_bad_input_is_validation() {
+        let (st, _d) = store();
+        assert!(emit_ambient(&st, "idea", "s", "t").unwrap().is_empty());
+        for (ev, sp) in [("nope", "s"), ("idea", ""), ("idea", "  ")] {
+            assert!(matches!(
+                emit_ambient(&st, ev, sp, ""),
+                Err(Error::Validation(_))
+            ));
+        }
+        let long = "x".repeat(AMBIENT_SPEAKER_MAX + 1);
+        assert!(matches!(
+            emit_ambient(&st, "idea", &long, ""),
+            Err(Error::Validation(_))
+        ));
+        assert!(emit_ambient(&st, "idea", &"x".repeat(AMBIENT_SPEAKER_MAX), "").is_ok());
+        let big = "x".repeat(300 * 1024);
+        assert!(matches!(
+            emit_ambient(&st, "idea", "s", &big),
+            Err(Error::Validation(_))
+        ));
+    }
+
+    #[test]
+    fn emit_hands_hostile_text_over_byte_identical() {
+        let (st, _d) = store();
+        st.with(|s| {
+            let wf = s.create_workflow(None, "H", None).unwrap().id;
+            let t = node(
+                s,
+                wf,
+                WorkflowNodeKind::Trigger,
+                "T",
+                json!({"mode": "ambient", "events": ["idea"]}),
+            );
+            let c = node(s, wf, WorkflowNodeKind::Cli, "Echo", cli("cat"));
+            s.create_workflow_edge(wf, t, c, None).unwrap();
+        });
+        let text = "$(id) `x` 'q' \"d\" \\n \n end";
+        let runs = emit_ambient(&st, "idea", "a'b", text).unwrap();
+        let expect = json!({"event": "idea", "speaker": "a'b", "text": text}).to_string();
+        assert_eq!(runs[0].input, expect);
+        assert_eq!(runs[0].steps[1].output, expect);
     }
 }

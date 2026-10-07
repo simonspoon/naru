@@ -2875,6 +2875,7 @@ fn router(state: AppState) -> Router {
         )
         .route("/api/workflows/{id}/nodes", post(create_workflow_node))
         .route("/api/workflows/{id}/edges", post(create_workflow_edge))
+        .route("/api/workflows/events", post(emit_workflow_event))
         .route("/api/workflows/{id}/run", post(run_workflow_route))
         .route("/api/workflows/{id}/runs", get(list_workflow_runs))
         .route(
@@ -4261,6 +4262,14 @@ struct WorkflowEdgeCreate {
     branch: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct WorkflowEventBody {
+    event: String,
+    speaker: String,
+    #[serde(default)]
+    text: String,
+}
+
 #[derive(Deserialize, Default)]
 struct WorkflowRunBody {
     /// The run input the trigger node hands on; absent = empty.
@@ -4448,6 +4457,28 @@ async fn run_workflow_route(
     .await
     .map_err(|e| agents_unavailable(format!("workflow run panicked: {e}")))??;
     Ok(Json(run).into_response())
+}
+
+/// An ambient-engine event: validated here (422 on bad input), then the
+/// matching workflows run in the background in id order — the engine is
+/// real-time and must not wait on them. 202 `{"workflow_ids":[…]}`.
+async fn emit_workflow_event(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Result<Json<WorkflowEventBody>, JsonRejection>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let Json(body) = body?;
+    let store = state.store.clone();
+    let (ids, input) = workflow::plan_ambient(&*store, &body.event, &body.speaker, &body.text)?;
+    let ran = ids.clone();
+    tokio::task::spawn_blocking(move || {
+        if let Err(e) = workflow::run_ambient(&*store, &ran, &input) {
+            eprintln!("naru: ambient workflow run failed: {e}");
+        }
+    });
+    Ok((StatusCode::ACCEPTED, Json(json!({"workflow_ids": ids}))).into_response())
 }
 
 async fn list_workflow_runs(
