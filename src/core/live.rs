@@ -73,7 +73,7 @@ and say what happened when its result comes back through `listen`.
 `naru live navigate --lease <n> '#/projects/3' --say \"Opening that project.\"`. \
 The route \
 must be one of the app's hash routes: `#/`, `#/live`, `#/inbox`, `#/cc`, \
-`#/scripts`, `#/library`, `#/settings`, `#/settings/keyboard`, \
+`#/library`, `#/library/scripts`, `#/library/workflows`, `#/settings`, `#/settings/keyboard`, \
 `#/settings/voice`, `#/settings/memory`, `#/settings/pricing`, `#/settings/system`, \
 `#/terminal`, \
 `#/projects/<id>`, `#/projects/<id>/tasks/<task id>`, `#/projects/<id>/workflows`, \

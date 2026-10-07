@@ -245,9 +245,10 @@ that outlives the connection that started it. Three shapes, one executor.
   async worker. The captured route's payload and the CLI's `script run` output
   are unchanged by the stream route; the stream is an addition, not a
   replacement.
-- Web UI: **Scripts** is a flat left-nav entry at `#/scripts`, immediately after
-  Terminal (not part of the project subtree, so `navCollapse.ts` is untouched),
-  plus one Command Palette destination. `pages/ScriptsView.tsx` is the list and
+- Web UI: **Scripts** is the Library's Scripts tab at `#/library/scripts`
+  (mesa task 1676, `libraryTab.ts`; it is no longer a left-nav page, and
+  `#/scripts` and `#/scripts/runs/<id>` redirect into the tab), plus one Command
+  Palette destination. `pages/ScriptsView.tsx` is the list and
   editor; the body editor reuses the Files tab's overlay editor
   (`components/CodeEditor.tsx`, lifted out of `FilesView.tsx` rather than
   forked) with the already-registered `sh` grammar. Reuse means **everything**
@@ -284,7 +285,7 @@ that outlives the connection that started it. Three shapes, one executor.
   `.error`.
   Since mesa task 1224 **the pane does not own the run**. RUN posts to
   `…/run/detach`, and the run that comes back becomes the *address*
-  `#/scripts/runs/<id>` — a real hash route (`App.tsx`), which is what makes
+  `#/library/scripts/runs/<id>` (inside the Scripts tab) — a real hash route (`App.tsx`), which is what makes
   reopening a run survive a reload rather than merely a navigation. The pane
   then attaches to whatever `runId` the hash hands it, through
   `GET /api/script-runs/{id}/stream`: **one entry point into "a run is

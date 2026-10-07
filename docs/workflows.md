@@ -431,7 +431,7 @@ exact graph over stub `sox`/`auris` and a stub model API.
 
 ## Web UI
 
-`#/workflows` (left nav, beside Scripts; mesa task 1632) is the global overview:
+`#/workflows` (left nav; mesa task 1632) is the global overview, also shown as the Library's read-only Workflows tab at `#/library/workflows` (mesa task 1676):
 one table of every workflow across all projects with project, on/off, last run,
 last failure and next run, polled every 5s. A row opens the workflow in its
 owning project's view; a global (project-less) workflow has no project page, so
