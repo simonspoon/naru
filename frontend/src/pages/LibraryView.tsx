@@ -52,7 +52,7 @@ import {
   orphanScopesFor,
   registrationLabel,
 } from '../libraryHooks'
-import { diffLines, foldOverrides, itemKey } from '../libraryOverride'
+import { diffLines, foldOverrides, hunksOnly, itemKey } from '../libraryOverride'
 import {
   LIBRARY_KINDS,
   LIBRARY_SCOPES,
@@ -904,6 +904,7 @@ function LibraryDiffPick({
   choices,
   choice,
   onChoice,
+  hunks = false,
 }: {
   // A composite, never a path or an index: native HTML radio grouping is
   // keyed by `name` alone, so two rows sharing one would silently uncheck
@@ -918,6 +919,9 @@ function LibraryDiffPick({
   choices: readonly { value: string; label: string }[]
   choice: string
   onChoice: (choice: string) => void
+  // Sync shows only the changed hunks and never the whole bodies of a row
+  // that has a diff; Import keeps the full diff and the bodies toggle.
+  hunks?: boolean
 }) {
   // The diff is the default view for a row that has one; the whole bodies
   // stay one click away, since a diff hides the lines both sides agree on and
@@ -926,7 +930,7 @@ function LibraryDiffPick({
   return (
     <>
       {dates !== null && <p className="library-sync-dates muted">{dates}</p>}
-      {diff !== null && (
+      {diff !== null && !hunks && (
         <button
           type="button"
           className="library-sync-view-toggle"
@@ -935,7 +939,7 @@ function LibraryDiffPick({
           {showBodies ? 'show diff' : 'show both bodies'}
         </button>
       )}
-      {diff !== null && !showBodies ? (
+      {diff !== null && (hunks || !showBodies) ? (
         <>
           <p className="library-sync-direction muted">
             {sideLabels[orientation.from]} → {sideLabels[orientation.to]}
@@ -946,12 +950,18 @@ function LibraryDiffPick({
             <span className="library-diff-added">+</span> only in {sideLabels[orientation.to]}
           </p>
           <pre className="library-sync-difflines">
-            {diff.map((line, i) => (
-              <div key={i} className={diffLineClass(line, orientation)}>
-                <span className="library-diff-mark">{diffMark(line, orientation)}</span>
-                {line.text}
-              </div>
-            ))}
+            {(hunks ? hunksOnly(diff) : diff).map((line, i) =>
+              line === null ? (
+                <div key={i} className="library-diff-gap muted">
+                  ⋯
+                </div>
+              ) : (
+                <div key={i} className={diffLineClass(line, orientation)}>
+                  <span className="library-diff-mark">{diffMark(line, orientation)}</span>
+                  {line.text}
+                </div>
+              ),
+            )}
           </pre>
         </>
       ) : (
@@ -1032,6 +1042,7 @@ function LibrarySyncRowView({
         // at once.
         orientation={diffOrientation(row, choice)}
         dates={changeDatesLabel(row)}
+        hunks
         choices={SYNC_CHOICES}
         choice={choice}
         onChoice={(c) => onChoose(c as 'mesa' | 'disk' | 'skip')}
@@ -1093,7 +1104,14 @@ function LibrarySyncModal({
         className="create-task-modal library-sync-modal"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="panel-head">
+        <div className="panel-head library-sync-head">
+          {rows && attention.length > 0 ? (
+            <button type="button" disabled={applying} onClick={apply}>
+              {applying ? 'applying…' : 'apply'}
+            </button>
+          ) : (
+            <span />
+          )}
           <h2>Sync library</h2>
           <button type="button" onClick={onClose}>
             close
@@ -1134,11 +1152,6 @@ function LibrarySyncModal({
                 />
               ))}
             </ul>
-            <div className="inline-edit-actions">
-              <button type="button" disabled={applying} onClick={apply}>
-                {applying ? 'applying…' : 'apply'}
-              </button>
-            </div>
           </>
         )}
         {applyError !== null && <span className="error">{applyError}</span>}

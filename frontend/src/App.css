@@ -11834,3 +11834,19 @@ body.dock-resizing .dock-body {
   display: inline-block;
   vertical-align: -0.12em;
 }
+
+/* Sync modal head: apply left, title centred, close right (mesa task 1675). */
+.library-sync-head {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+}
+.library-sync-head > :first-child {
+  justify-self: start;
+}
+.library-sync-head > :last-child {
+  justify-self: end;
+}
+.library-diff-gap {
+  text-align: center;
+}
