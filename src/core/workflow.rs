@@ -334,7 +334,9 @@ pub fn validate_config(
             only_keys(
                 name,
                 obj,
-                &["target", "log", "project", "task_id", "kind", "title"],
+                &[
+                    "target", "log", "project", "task_id", "kind", "title", "status",
+                ],
             )?;
             let target = required_str(name, obj, "target")?;
             if !OUTPUT_TARGETS.contains(&target) {
@@ -346,7 +348,7 @@ pub fn validate_config(
             out.insert("target".into(), json!(target));
             let allowed: &[&str] = match target {
                 "log" => &["log"],
-                "task" => &["project"],
+                "task" => &["project", "status"],
                 "inbox" => &["task_id", "kind"],
                 _ => &["title"],
             };
@@ -363,19 +365,32 @@ pub fn validate_config(
                     let log = optional_str(name, obj, "log")?.unwrap_or("default");
                     out.insert("log".into(), json!(log.trim()));
                 }
-                "task" => match obj.get("project") {
-                    Some(Value::String(s)) if !s.trim().is_empty() => {
-                        out.insert("project".into(), json!(s.trim()));
+                "task" => {
+                    match obj.get("project") {
+                        Some(Value::String(s)) if !s.trim().is_empty() => {
+                            out.insert("project".into(), json!(s.trim()));
+                        }
+                        Some(Value::Number(n)) if n.as_i64().is_some_and(|n| n > 0) => {
+                            out.insert("project".into(), json!(n.as_i64().unwrap().to_string()));
+                        }
+                        _ => {
+                            return Err(
+                                "output config: a task target needs \"project\" (id or name)"
+                                    .into(),
+                            );
+                        }
                     }
-                    Some(Value::Number(n)) if n.as_i64().is_some_and(|n| n > 0) => {
-                        out.insert("project".into(), json!(n.as_i64().unwrap().to_string()));
+                    // Only backlog or todo: an output node never files a task
+                    // straight into in_progress/done.
+                    if let Some(st) = optional_str(name, obj, "status")? {
+                        if st != "backlog" && st != "todo" {
+                            return Err(format!(
+                                "output config: \"status\" must be backlog or todo, got {st:?}"
+                            ));
+                        }
+                        out.insert("status".into(), json!(st));
                     }
-                    _ => {
-                        return Err(
-                            "output config: a task target needs \"project\" (id or name)".into(),
-                        );
-                    }
-                },
+                }
                 "inbox" => {
                     match optional_int(name, obj, "task_id", 1..=i64::MAX)? {
                         Some(n) => out.insert("task_id".into(), json!(n)),
@@ -843,13 +858,23 @@ fn run_node<A: StoreAccess>(
                 }
                 "task" => {
                     let project = str_of("project");
+                    let status = Status::parse(str_of("status"));
                     let task = access
                         .with(|s| {
                             let id = match project.parse::<i64>() {
                                 Ok(id) => id,
                                 Err(_) => s.find_project_by_name(project)?.id,
                             };
-                            s.create_task(id, input, Priority::Medium, &[], None, None, None, None)
+                            s.create_task(
+                                id,
+                                input,
+                                Priority::Medium,
+                                &[],
+                                None,
+                                None,
+                                None,
+                                status,
+                            )
                         })
                         .map_err(|e| e.to_string())?;
                     format!("created task {}", task.id)
