@@ -570,16 +570,24 @@ pub fn plan_ambient<A: StoreAccess>(
     Ok((ids, input))
 }
 
-/// Runs each of `ids` with trigger `ambient` and `input`, in order, and
-/// answers the finished runs. A failed run is data, as in [`run_workflow`].
-pub fn run_ambient<A: StoreAccess>(
-    access: &A,
-    ids: &[i64],
-    input: &str,
-) -> Result<Vec<WorkflowRun>> {
-    ids.iter()
-        .map(|id| run_workflow(access, *id, WorkflowTrigger::Ambient, input))
-        .collect()
+/// What an ambient batch left behind: the runs that finished, and the
+/// workflows whose run hit a store error instead (id and error).
+pub type AmbientOutcome = (Vec<WorkflowRun>, Vec<(i64, Error)>);
+
+/// Runs each of `ids` with trigger `ambient` and `input`, in order. A failed
+/// run is data, as in [`run_workflow`]; a store error (a workflow deleted
+/// since [`plan_ambient`], a busy db) fails only that workflow, never the
+/// ones after it.
+pub fn run_ambient<A: StoreAccess>(access: &A, ids: &[i64], input: &str) -> AmbientOutcome {
+    let mut runs = Vec::new();
+    let mut errors = Vec::new();
+    for id in ids {
+        match run_workflow(access, *id, WorkflowTrigger::Ambient, input) {
+            Ok(run) => runs.push(run),
+            Err(e) => errors.push((*id, e)),
+        }
+    }
+    (runs, errors)
 }
 
 /// [`plan_ambient`] then [`run_ambient`]: what `naru workflow emit` does.
@@ -588,9 +596,9 @@ pub fn emit_ambient<A: StoreAccess>(
     event: &str,
     speaker: &str,
     text: &str,
-) -> Result<Vec<WorkflowRun>> {
+) -> Result<AmbientOutcome> {
     let (ids, input) = plan_ambient(access, event, speaker, text)?;
-    run_ambient(access, &ids, &input)
+    Ok(run_ambient(access, &ids, &input))
 }
 
 /// What a node left behind, for the nodes downstream of it.
@@ -2282,7 +2290,7 @@ mod tests {
         let b = mk("B", json!({"mode": "ambient", "events": ["wake", "idea"]}));
         let c = mk("C", json!({"mode": "ambient", "events": ["can-help"]}));
 
-        let runs = emit_ambient(&st, "idea", "simon", "hi").unwrap();
+        let runs = emit_ambient(&st, "idea", "simon", "hi").unwrap().0;
         let ids: Vec<_> = runs.iter().map(|r| r.workflow_id).collect();
         assert_eq!(ids, vec![a, b]);
         assert!(runs.iter().all(|r| r.trigger == WorkflowTrigger::Ambient));
@@ -2296,17 +2304,46 @@ mod tests {
         );
         let ids: Vec<_> = emit_ambient(&st, "can-help", "x", "")
             .unwrap()
+            .0
             .iter()
             .map(|r| r.workflow_id)
             .collect();
         assert_eq!(ids, vec![c]);
-        assert!(emit_ambient(&st, "wake", "x", "").unwrap().len() == 1);
+        assert!(emit_ambient(&st, "wake", "x", "").unwrap().0.len() == 1);
+    }
+
+    #[test]
+    fn a_vanished_workflow_in_a_batch_does_not_stop_the_others() {
+        let (st, _d) = store();
+        let mk = |name: &str| {
+            st.with(|s| {
+                let wf = s.create_workflow(None, name, None).unwrap().id;
+                let t = node(
+                    s,
+                    wf,
+                    WorkflowNodeKind::Trigger,
+                    "T",
+                    json!({"mode": "ambient", "events": ["idea"]}),
+                );
+                let c = node(s, wf, WorkflowNodeKind::Cli, "Echo", cli("cat"));
+                s.create_workflow_edge(wf, t, c, None).unwrap();
+                wf
+            })
+        };
+        let (a, b) = (mk("A"), mk("B"));
+        let gone = mk("G");
+        st.with(|s| s.delete_workflow(gone)).unwrap();
+        let (runs, errors) = run_ambient(&st, &[a, gone, b], "{}");
+        let ids: Vec<_> = runs.iter().map(|r| r.workflow_id).collect();
+        assert_eq!(ids, vec![a, b]);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].0, gone);
     }
 
     #[test]
     fn emit_with_no_match_is_empty_and_bad_input_is_validation() {
         let (st, _d) = store();
-        assert!(emit_ambient(&st, "idea", "s", "t").unwrap().is_empty());
+        assert!(emit_ambient(&st, "idea", "s", "t").unwrap().0.is_empty());
         for (ev, sp) in [("nope", "s"), ("idea", ""), ("idea", "  ")] {
             assert!(matches!(
                 emit_ambient(&st, ev, sp, ""),
@@ -2342,7 +2379,7 @@ mod tests {
             s.create_workflow_edge(wf, t, c, None).unwrap();
         });
         let text = "$(id) `x` 'q' \"d\" \\n \n end";
-        let runs = emit_ambient(&st, "idea", "a'b", text).unwrap();
+        let runs = emit_ambient(&st, "idea", "a'b", text).unwrap().0;
         let expect = json!({"event": "idea", "speaker": "a'b", "text": text}).to_string();
         assert_eq!(runs[0].input, expect);
         assert_eq!(runs[0].steps[1].output, expect);

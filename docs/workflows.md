@@ -373,6 +373,9 @@ one compact JSON object built with serde_json, never string-concatenated:
 
 `speaker` is a free-form label, 1 to 64 characters; `text` may be empty. The
 whole input is bounded by the 256 KiB run-input cap (over it is `validation`).
+A store error on one match (say the workflow was deleted after the plan) fails
+only that workflow: the rest still run, the API logs it and the CLI prints the
+finished runs plus one stderr warning per failed id, exit 0.
 Text is data: a script or cli node receives it byte-identical, never
 shell-parsed. A failed run is data, as for `workflow run`. The CLI waits for
 the runs and prints them; the API answers 202 first, because the engine is

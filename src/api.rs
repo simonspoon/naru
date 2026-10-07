@@ -4474,8 +4474,8 @@ async fn emit_workflow_event(
     let (ids, input) = workflow::plan_ambient(&*store, &body.event, &body.speaker, &body.text)?;
     let ran = ids.clone();
     tokio::task::spawn_blocking(move || {
-        if let Err(e) = workflow::run_ambient(&*store, &ran, &input) {
-            eprintln!("naru: ambient workflow run failed: {e}");
+        for (id, e) in workflow::run_ambient(&*store, &ran, &input).1 {
+            eprintln!("naru: ambient workflow {id} run failed: {e}");
         }
     });
     Ok((StatusCode::ACCEPTED, Json(json!({"workflow_ids": ids}))).into_response())

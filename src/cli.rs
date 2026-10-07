@@ -7150,7 +7150,11 @@ fn run_workflow_cmd(cmd: WorkflowCmd) -> Result<()> {
             let mut stdin_used = false;
             let text = resolve_field(text, text_file, &mut stdin_used)?.unwrap_or_default();
             let access = std::sync::Mutex::new(store);
-            print_json(&workflow::emit_ambient(&access, &event, &speaker, &text)?);
+            let (runs, errors) = workflow::emit_ambient(&access, &event, &speaker, &text)?;
+            for (id, e) in errors {
+                eprintln!("naru: warning: ambient workflow {id} did not run: {e}");
+            }
+            print_json(&runs);
         }
         WorkflowCmd::Runs { workflow } => {
             let id = resolve_workflow(&store, &workflow)?.id;
