@@ -24,7 +24,10 @@
 # inbox outputs; the ambient-capture example from docs/workflows.md with stub
 # `sox`/`auris`; the API routes, including `require_agent_access` refusing a
 # foreign Origin and Host; the ambient trigger, `workflow emit` and
-# `POST /api/workflows/events`; and `serve --watch-workflows` running a due
+# `POST /api/workflows/events`; `workflow defaults --project` (mesa task 1644:
+# both ambient workflows, a rerun skipping them, the task output's `status:
+# backlog`, the review filing exactly one backlog task or none on an empty log);
+# and `serve --watch-workflows` running a due
 # time-triggered workflow exactly once per interval.
 set -euo pipefail
 # Drop inherited NARU_* vars: Naru reads them before MESA_*, so one would escape this script's isolation.
@@ -958,6 +961,60 @@ api 422 POST /api/workflows/events '{"event":"nope","speaker":"api","text":""}'
 api 422 POST /api/workflows/events '{"event":"idea","speaker":"","text":""}'
 api 422 POST /api/workflows/events '{"event":"idea","text":""}'
 ok "API: POST /api/workflows/events is 202 with the matched ids and runs in the background (trigger=ambient); bad input is 422"
+
+# ---- default ambient workflows (mesa task 1644): `workflow defaults`, status backlog ----
+run 0 "$NARU" project create "Defaulted" --no-git
+DP=$(jqs .id)
+run 0 "$NARU" workflow defaults --project Defaulted
+[ "$(jqs '.created | map(.workflow.name) | sort | join("|")')" = "Ambient: end-of-day review|Ambient: label ideas" ] || fail "defaults created both: $STDOUT"
+[ "$(jqs '.skipped | length')" = "0" ] || fail "nothing skipped on the first call: $STDOUT"
+[ "$(jqs '.created | map(.workflow.project_id) | unique | join(",")')" = "$DP" ] || fail "both scoped to the project: $STDOUT"
+run 0 "$NARU" workflow defaults --project "$DP"
+[ "$(jqs '.created | length')" = "0" ] && [ "$(jqs '.skipped | length')" = "2" ] || fail "a rerun skips both: $STDOUT"
+run 0 "$NARU" workflow list "$DP"
+[ "$(jqs 'length')" = "2" ] || fail "a rerun created nothing: $STDOUT"
+run 1 "$NARU" workflow defaults --project nosuchproject
+[ "$(jqe .error.code)" = "not_found" ] || fail "defaults: unknown project is not_found"
+ok "workflow defaults --project: creates both ambient workflows scoped to the project; a rerun skips both (idempotent)"
+
+# A task output's status: backlog files a backlog task; todo/absent a todo one; done is refused.
+run 0 "$NARU" workflow create Backlogging
+run 0 "$NARU" workflow node create Backlogging trigger Go --config '{"mode":"manual"}'
+BT=$(jqs .id)
+run 0 "$NARU" workflow node create Backlogging output File --config "{\"target\":\"task\",\"project\":$DP,\"status\":\"backlog\"}"
+"$NARU" workflow edge create Backlogging "$BT" "$(jqs .id)" >/dev/null
+run 0 "$NARU" workflow run Backlogging --input "an idea for the backlog"
+[ "$(jqs .status)" = "succeeded" ] || fail "backlog run: $STDOUT"
+run 0 "$NARU" task list "$DP"
+[ "$(jqs '[.[] | select(.name == "an idea for the backlog" and .status == "backlog")] | length')" = "1" ] || fail "the task output filed a backlog task: $STDOUT"
+run 1 "$NARU" workflow node create Backlogging output Bad --config "{\"target\":\"task\",\"project\":$DP,\"status\":\"done\"}"
+[ "$(jqe .error.code)" = "validation" ] || fail "status done refused"
+ok "output task status: backlog files a backlog task; done is a validation error"
+
+# The review: seeded 'ambient' log -> haiku digest (stub claude) -> exactly one backlog task.
+reset_claude
+BEFORE_N=$("$NARU" task list "$DP" | jq length)
+PATH="$(dirname "$NARU"):$STUB_DIR:$PATH" run 0 "$NARU" workflow run "Ambient: end-of-day review"
+[ "$(jqs .status)" = "succeeded" ] || fail "review run: $STDOUT"
+[ "$(jqs '.steps | map(.status) | join(",")')" = "ok,ok,ok,ok,ok" ] || fail "every review step ran: $STDOUT"
+grep -q "idea: buy milk" <<<"$(jqs ".steps[1].output")" || fail "the cli node printed the ambient log lines: $STDOUT"
+grep -q "idea: buy milk" <<<"$(argv 11)" || fail "the digest prompt carried the day's lines"
+run 0 "$NARU" task list "$DP"
+[ "$(jqs 'length')" = "$((BEFORE_N + 1))" ] || fail "exactly one task filed: $STDOUT"
+[ "$(jqs '[.[] | select(.name == "idea: buy milk" and .status == "backlog")] | length')" = "1" ] || fail "the digest landed in backlog: $STDOUT"
+ok "end-of-day review: ambient log lines -> haiku digest -> exactly one backlog task"
+
+# Nothing logged: the branch is false, the prompt never runs, nothing is filed.
+reset_claude
+RV=$("$NARU" workflow show "Ambient: end-of-day review" | jq -r '.nodes[] | select(.kind == "cli") | .id')
+run 0 "$NARU" workflow node update "$RV" --config '{"command":"naru workflow log ambient-empty --limit 500 | jq -r \".[].text\""}'
+BEFORE_N=$("$NARU" task list "$DP" | jq length)
+PATH="$(dirname "$NARU"):$STUB_DIR:$PATH" run 0 "$NARU" workflow run "Ambient: end-of-day review"
+[ "$(jqs .status)" = "succeeded" ] || fail "empty review run: $STDOUT"
+[ ! -e "$STUB_DIR/argc" ] || fail "the prompt node ran on an empty log"
+run 0 "$NARU" task list "$DP"
+[ "$(jqs 'length')" = "$BEFORE_N" ] || fail "an empty log filed nothing: $STDOUT"
+ok "end-of-day review with an empty log: the prompt node is skipped and no task is filed"
 
 # ---- the gate: require_agent_access on every route, reads included ----
 raw() { # raw <method> <path> [extra curl args...]

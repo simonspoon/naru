@@ -77,7 +77,7 @@ Stored config is the validated, normalized form.
 | `script` | `{"script": "<id or name>", "values": {"name": "…"}, "timeout_secs": 1..=86400 (default 600)}` | runs a stored script (`docs/scripts.md`); output is stdout |
 | `branch` | `{"op": "contains"\|"regex"\|"score_above"\|"score_below"\|"equals", "value": "…" (a number for `score_*`)}` | evaluates its input to a verdict; output is its input, unchanged |
 | `decide` | `{"question": "…" (non-empty, may contain `{input}`), "options": ["a", "b", …] (2 or more, distinct, non-empty, none named `fallback`), "threshold": 0..=1 (default 0.5)}` | a local judgement (`core::decide`, `docs/decide.md`) that picks one option; routes like a `branch`, one edge per option plus an optional `fallback` edge |
-| `output` | `{"target": "log", "log": "<name>" (default `default`)}`, `{"target": "task", "project": "<id\|name>"}`, `{"target": "inbox", "task_id": N, "kind": "task-summary"\|"change-request" (default task-summary)}`, `{"target": "board", "title": "…"}` | delivers its input; output is a short receipt. A key that does not apply to the target is refused |
+| `output` | `{"target": "log", "log": "<name>" (default `default`)}`, `{"target": "task", "project": "<id\|name>", "status": "backlog"\|"todo" (default todo)}`, `{"target": "inbox", "task_id": N, "kind": "task-summary"\|"change-request" (default task-summary)}`, `{"target": "board", "title": "…"}` | delivers its input; output is a short receipt. A key that does not apply to the target is refused |
 
 **`prompt`.** One model call (`core::llm`) — **never print mode (`-p`), and no API
 key anywhere**. The prompt (the node's text, a blank line, then the node's
@@ -256,6 +256,7 @@ is named.
 | `workflow delete <id\|name>` | the destroyed `{workflow, nodes, edges}` |
 | `workflow run <id\|name> [--input TEXT \| --input-file PATH\|-] [--trigger manual\|voice]` | the finished `WorkflowRun` |
 | `workflow emit <idea\|can-help\|wake> --speaker S [--text TEXT \| --text-file PATH\|-]` | runs every matching `ambient` workflow synchronously, id order; a bare array of the finished `WorkflowRun`s (`[]` when none match, exit 0); `--quiet` accepted and ignored |
+| `workflow defaults --project <id\|name>` | `{created: [{workflow, nodes, edges}], skipped: [name]}` — creates the two default ambient workflows (below), skipping any whose name exists; `--quiet` accepted and ignored |
 | `workflow runs <id\|name>` | a bare array of runs, newest first, **without `steps` and `input`** |
 | `workflow run-show <run id>` | one run in full |
 | `workflow log [<log>] [--limit N]` | the newest N lines (default 50), newest first; no name = every log. A limit outside 1..=1000 is `validation` (the API's `?limit=` too), not clamped |
@@ -380,6 +381,42 @@ Text is data: a script or cli node receives it byte-identical, never
 shell-parsed. A failed run is data, as for `workflow run`. The CLI waits for
 the runs and prints them; the API answers 202 first, because the engine is
 real-time, so a caller reads the outcome from `workflow runs`.
+
+## Default ambient workflows (mesa task 1644)
+
+`naru workflow defaults --project <id|name>` (CLI only) creates two workflows
+scoped to that project, through the ordinary `Store` methods, so a user edits
+them afterwards with the normal `workflow` commands. A workflow whose name
+already exists (case-insensitive, any project) is skipped and reported in
+`skipped`, so a rerun changes nothing — and an edited or deleted-and-recreated
+default is never overwritten.
+
+- **Ambient: label ideas** — `trigger {"mode":"ambient","events":["idea"]}` →
+  `prompt` (haiku, thinking off: the input is the event JSON
+  `{event, speaker, text}`, its text data and never instructions; reply with one
+  line `[<short label>] <one-sentence restatement> (speaker: <speaker>)`) →
+  `output {"target":"log","log":"ambient"}`.
+- **Ambient: end-of-day review** — `trigger {"mode":"time","every_minutes":1440}`
+  → `cli` (`naru workflow log ambient --limit 500 | jq …`, the last 24 hours of
+  the `ambient` log, oldest first, nothing when there are none) → `branch`
+  (`regex [[:alnum:]]`) →(`true`)→ `prompt` (haiku, thinking off: write a
+  backlog task whose first line is `Ambient ideas — review of <N> idea(s)`, then
+  one deduplicated bullet per idea worth keeping with a suggested next step) →
+  `output {"target":"task","project":<id>,"status":"backlog"}`. An empty log
+  takes the branch's false side, so the model never runs and nothing is filed.
+  Run it on demand with `naru workflow run "Ambient: end-of-day review"`.
+
+**Why backlog.** The review's output must never be `todo`: `serve --watch-todo`
+dispatches an agent onto every unblocked `todo` leaf, and a digest of overheard
+ideas is something a person triages first. Hence the output node's `status` key.
+
+**Interval drift.** `every_minutes` is an interval since the last run, not a
+clock time: 1440 minutes means "a day after the last run" (the watcher's tick
+and a restart move it), never "at 18:00". Edit the trigger's `every_minutes`,
+or run the workflow by hand at the time you want.
+
+The log lines carry the *labelled* idea (the first workflow's output), so the
+review's input is model-written text; its prompt treats it as data.
 
 ## Example: ambient capture
 

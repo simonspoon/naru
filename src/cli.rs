@@ -1591,6 +1591,18 @@ EXAMPLES
         #[arg(long, default_value_t = 50)]
         limit: i64,
     },
+    /// Create the default ambient workflows in a project; skips existing ones
+    ///
+    /// "Ambient: label ideas" (an `idea` event, labelled by haiku, logged to
+    /// `ambient`) and "Ambient: end-of-day review" (daily; digests the last
+    /// 24 hours of that log into ONE backlog task). A workflow whose name
+    /// already exists (case-insensitive) is skipped, so a rerun is a no-op.
+    /// Prints {created: [{workflow, nodes, edges}], skipped: [name]}.
+    Defaults {
+        /// Project to scope both workflows (and the filed task) to, by id or name
+        #[arg(long)]
+        project: String,
+    },
     /// Create, update and delete the nodes of a workflow
     #[command(subcommand)]
     Node(WorkflowNodeCmd),
@@ -7165,6 +7177,11 @@ fn run_workflow_cmd(cmd: WorkflowCmd) -> Result<()> {
         }
         WorkflowCmd::RunShow { id, quiet } => {
             print_workflow_run(&store.get_workflow_run(id)?, quiet)
+        }
+        WorkflowCmd::Defaults { project } => {
+            let project = resolve_project(&store, &project)?;
+            let (created, skipped) = workflow::create_default_workflows(&mut store, project)?;
+            print_json(&json!({"created": created, "skipped": skipped}));
         }
         WorkflowCmd::Log { log, limit } => {
             print_json(&store.list_workflow_log(log.as_deref(), limit)?);
