@@ -26,6 +26,7 @@ import {
 import { activeRun, formatRunLabel, runState, runsForScript } from '../scriptRun'
 import type { Project } from '../types/Project'
 import type { Script } from '../types/Script'
+import { libraryRunHref, libraryTabHref } from '../libraryTab'
 import { useFetch } from '../useFetch'
 
 /** How many of a script's runs the list offers to reopen. The server keeps
@@ -35,7 +36,7 @@ const RUNS_SHOWN = 5
 /** The hash that *is* a run: a real address, so a reload, a back button and a
  * copied link all land on the same screen (mesa task 1224). */
 function runHref(runId: number): string {
-  return `#/scripts/runs/${runId}`
+  return libraryRunHref(runId)
 }
 
 /** Where a script runs, for display only — the server resolves the real one
@@ -331,7 +332,7 @@ export function ScriptsView({ runId }: { runId: number | null }) {
 
   function closeRun() {
     setOpening(null)
-    if (runId !== null) window.location.hash = '#/scripts'
+    if (runId !== null) window.location.hash = libraryTabHref('scripts')
   }
 
   if (openScript !== null) {
@@ -375,7 +376,7 @@ export function ScriptsView({ runId }: { runId: number | null }) {
 
   return (
     <div className="scripts-page">
-      <h1>Scripts</h1>
+      <h2>Scripts</h2>
       <p className="muted">
         Shell scripts you author here and run from a generated form. Each
         declares its own arguments; a script bound to a project runs in that

@@ -1447,7 +1447,7 @@ EXAMPLES
     },
     /// List workflows as a bare JSON array, by name
     ///
-    /// Each row carries its trigger mode (`trigger`: manual|time|voice, or
+    /// Each row carries its trigger mode (`trigger`: manual|time|voice|ambient, or
     /// null) and a voice trigger's `trigger_phrase`, so a caller can match a
     /// request to a workflow without loading every graph.
     List {
@@ -1538,6 +1538,32 @@ EXAMPLES
         #[arg(long)]
         quiet: bool,
     },
+    /// Fire an ambient-engine event: run every matching workflow, print the runs
+    ///
+    /// EVENT is idea|can-help|wake. Every workflow whose trigger is
+    /// `ambient` and lists the event runs synchronously, in workflow id
+    /// order, with the run input `{"event","speaker","text"}` as compact
+    /// JSON, and the finished runs print as a bare JSON array (`[]` when
+    /// nothing matches, exit 0). A failed run is data, as for `run`.
+    /// `validation` (exit 1) for an unknown event, an empty or over-64-char
+    /// speaker, or an event over 256 KiB.
+    #[command(after_help = "\
+EXAMPLES
+  naru workflow emit idea --speaker simon --text \"buy milk\"
+  naru workflow emit wake --speaker room --text-file -")]
+    Emit {
+        /// idea | can-help | wake
+        event: String,
+        /// Free-form label for who spoke (1 to 64 characters)
+        #[arg(long)]
+        speaker: String,
+        /// What was said (may be empty)
+        #[arg(long, allow_hyphen_values = true)]
+        text: Option<String>,
+        /// Read the text from a file (`-` = stdin); conflicts with --text
+        #[arg(long, value_name = "PATH", conflicts_with = "text")]
+        text_file: Option<String>,
+    },
     /// List a workflow's runs, newest first, as a bare JSON array
     ///
     /// The newest 50 are kept. Rows omit `steps` and `input` (a run's outputs
@@ -1586,7 +1612,7 @@ enum WorkflowNodeCmd {
     /// right of those already there.
     #[command(after_help = "\
 CONFIG BY KIND
-  trigger  {\"mode\":\"manual|time|voice\",\"every_minutes\":N (time),\"phrase\":\"...\"}
+  trigger  {\"mode\":\"manual|time|voice|ambient\",\"every_minutes\":N (time),\"events\":[idea|can-help|wake] (ambient),\"phrase\":\"...\"}
   prompt   {\"model\":\"haiku|sonnet|opus|local:<name>\",\"thinking\":false,\"prompt\":\"...\",\"timeout_secs\":N}
   cli      {\"command\":\"...\",\"timeout_secs\":N}
   script   {\"script\":\"<id or name>\",\"values\":{\"name\":\"... {input} ...\"}}
@@ -7115,6 +7141,21 @@ fn run_workflow_cmd(cmd: WorkflowCmd) -> Result<()> {
                 quiet,
             );
         }
+        WorkflowCmd::Emit {
+            event,
+            speaker,
+            text,
+            text_file,
+        } => {
+            let mut stdin_used = false;
+            let text = resolve_field(text, text_file, &mut stdin_used)?.unwrap_or_default();
+            let access = std::sync::Mutex::new(store);
+            let (runs, errors) = workflow::emit_ambient(&access, &event, &speaker, &text)?;
+            for (id, e) in errors {
+                eprintln!("naru: warning: ambient workflow {id} did not run: {e}");
+            }
+            print_json(&runs);
+        }
         WorkflowCmd::Runs { workflow } => {
             let id = resolve_workflow(&store, &workflow)?.id;
             print_json(&quiet_all(
@@ -7742,6 +7783,7 @@ mod tests {
             last_run_status: None,
             last_failure_at: None,
             next_run_at: None,
+            trigger_events: vec![],
         }
     }
 
@@ -8046,6 +8088,7 @@ mod tests {
                 "last_run_status",
                 "last_failure_at",
                 "next_run_at",
+                "trigger_events",
             ]),
             "Workflow gained/lost a field: decide whether it belongs in the \
              --quiet shape before updating this list",

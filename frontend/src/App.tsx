@@ -28,7 +28,7 @@ import { InboxView } from './pages/InboxView'
 import { LibraryView } from './pages/LibraryView'
 import { LiveHub, type LiveDock } from './components/LiveHub'
 import { ProjectTasksPage } from './pages/ProjectTasksPage'
-import { ScriptsView } from './pages/ScriptsView'
+import { legacyScriptsRedirect, libraryRouteFromPath } from './libraryTab'
 import { WorkflowsOverview } from './pages/WorkflowsOverview'
 import { SettingsView } from './pages/SettingsView'
 import { settingsTabFromPath } from './settingsTab'
@@ -54,9 +54,10 @@ import { useVisualViewportHeightVar } from './visualViewport'
 // closing/saving it returns to the plain project URL — see
 // ProjectTasksPage's `createTask` prop), #/terminal (global shell pane-tree;
 // TerminalPage is a permanent sibling mount, not resolved into `page` — see
-// the render below), #/scripts (the global store of user-authored shell
-// scripts and their generated run forms — global like #/inbox, since a script
-// may bind a project but does not have to), #/scripts/runs/:id (one stored
+// the render below), #/library/scripts (the Library's Scripts tab: the global
+// store of user-authored shell scripts and their generated run forms — a script
+// may bind a project but does not have to; #/scripts redirects there),
+// #/library/scripts/runs/:id (one stored
 // run, live or long finished — a run outlives the tab that started it since
 // mesa task 1224, so it needs an address a reload can land on). The spoken
 // conversation is no
@@ -69,8 +70,8 @@ import { useVisualViewportHeightVar } from './visualViewport'
 //
 // Every project-tab and #/cc route is *recorded* browser-local as the last
 // view (`lastView.ts`), so the nav's project and CC Dashboard links reopen it.
-// Links only — nothing here ever rewrites the hash, so these routes stay
-// refresh- and back-stable.
+// Links only, apart from the retired `#/scripts` addresses (`HashRedirect`,
+// mesa task 1676), so these routes stay refresh- and back-stable.
 function useHashPath(): string {
   // `rememberView` runs *before* the state update, not in an effect: the nav's
   // links read the remembered tab during render, and an effect would land a
@@ -102,6 +103,15 @@ function LegacyTaskRedirect({ taskId }: { taskId: number }) {
     }
   }, [task])
   if (error) return <p className="error">{error}</p>
+  return <p className="muted">Loading…</p>
+}
+
+// A retired address: rewrite the hash to where its content now lives (replace,
+// so Back does not bounce through the old one).
+function HashRedirect({ to }: { to: string }) {
+  useEffect(() => {
+    window.location.replace(to)
+  }, [to])
   return <p className="muted">Loading…</p>
 }
 
@@ -374,13 +384,16 @@ function App() {
   // `/runs/:id` is a sub-view of the same page, addressed rather than held in
   // component state: a detached run survives the tab, so reopening one has to
   // survive a reload too (mesa task 1224).
-  const scriptsMatch = /^\/scripts(?:\/runs\/(\d+))?$/.exec(path)
+  //
+  // Since mesa task 1676 it is no longer a page: the Library's Scripts tab
+  // holds it (`libraryTab.ts`), and the old addresses redirect there.
+  const scriptsRedirect = legacyScriptsRedirect(path)
   // Workflows overview: every workflow across all projects, global like
   // Scripts. Anchored, so `/projects/<id>/workflows` is never mistaken for it.
   const workflowsOverviewMatch = /^\/workflows$/.exec(path)
   // Library: global too, same reasoning as Scripts — a project-scoped item
   // binds a project, but the page itself is not a project tab.
-  const libraryMatch = /^\/library$/.exec(path)
+  const libraryRoute = libraryRouteFromPath(path)
   // Terminal is not resolved into `page` (see below) — it's a permanent
   // sibling mount alongside `main`/`AgentSidebar` (mesa task 396,
   // .scratch/arch.md §4.3), toggled via `visibility` so panes and their
@@ -468,16 +481,14 @@ function App() {
   if (settingsMatch) {
     // ~/.mesa/config.json editor: no project frame, no active project.
     page = <SettingsView tab={settingsTabFromPath(path)} />
-  } else if (scriptsMatch) {
-    // Stored shell scripts + their run forms: global, so no project frame and
-    // no active project, exactly like the inbox below.
-    page = <ScriptsView runId={scriptsMatch[1] ? Number(scriptsMatch[1]) : null} />
+  } else if (scriptsRedirect !== null) {
+    page = <HashRedirect to={scriptsRedirect} />
   } else if (workflowsOverviewMatch) {
     page = <WorkflowsOverview />
-  } else if (libraryMatch) {
-    // Agents/skills/hooks/commands/prompts/CLAUDE.md, synced against
-    // .claude: global, same reasoning as Scripts above.
-    page = <LibraryView />
+  } else if (libraryRoute) {
+    // Three tabs: Claude Code items (synced against .claude), Scripts and a
+    // read-only workflow list. Global: no project frame.
+    page = <LibraryView tab={libraryRoute.tab} runId={libraryRoute.runId} />
   } else if (inboxMatch) {
     // Global inbox: lives above projects, so it renders on its own (no project
     // frame) and carries no active project in the nav.
@@ -813,9 +824,8 @@ function App() {
           activeProjectId={activeProjectId}
           inboxFilter={inboxFilter}
           settingsActive={settingsMatch !== null}
-          scriptsActive={scriptsMatch !== null}
           workflowsActive={workflowsOverviewMatch !== null}
-          libraryActive={libraryMatch !== null}
+          libraryActive={libraryRoute !== null}
           terminalActive={terminalActive}
           ccTab={ccTab}
           version={navVersion}

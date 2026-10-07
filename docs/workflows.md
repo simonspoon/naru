@@ -22,8 +22,8 @@ Source of truth: `src/core/workflow.rs` (validation and engine),
 | `workflow_log` | `id`, `log`, `text`, `workflow_id` and `run_id` (both `ON DELETE SET NULL`), `created_at` | append-only; written by an `output` node with `target: log` |
 
 All writes go through `Store`. `Workflow` carries two **derived, never stored**
-fields read off its trigger node on every read — `trigger` (`manual|time|voice`
-or `null`) and `trigger_phrase` — so `naru workflow list` can say which workflow
+fields read off its trigger node on every read — `trigger` (`manual|time|voice|ambient`
+or `null`), `trigger_phrase` and `trigger_events` (an ambient trigger's `events`, else `[]`) — so `naru workflow list` can say which workflow
 a spoken request could mean without loading every graph. Four more are derived
 from `workflow_runs` the same way (mesa task 1632), so `workflow list` and
 `GET /api/workflows` carry list status: `last_run_at`/`last_run_status` (the
@@ -71,7 +71,7 @@ Stored config is the validated, normalized form.
 
 | Kind | Config | What it does |
 | --- | --- | --- |
-| `trigger` | `{"mode": "manual"\|"time"\|"voice", "every_minutes": 1..=10080 (required iff time), "phrase": "…" (optional, for voice)}` | the run's source; its output **is** the run input. Without `--config`, `{"mode":"manual"}` |
+| `trigger` | `{"mode": "manual"\|"time"\|"voice"\|"ambient", "every_minutes": 1..=10080 (required iff time), "events": ["idea"\|"can-help"\|"wake", …] (required iff ambient: non-empty, no duplicates, refused on any other mode), "phrase": "…" (optional, for voice)}` | the run's source; its output **is** the run input. Without `--config`, `{"mode":"manual"}` |
 | `prompt` | `{"model": "haiku"\|"sonnet"\|"opus"\|"local:<name>" (a name never starts with `-`), "thinking": bool (default false), "prompt": "…" (non-empty), "timeout_secs": 1..=3600 (default 600)}` | one synchronous model call; the node's output is the model's text answer, trimmed |
 | `cli` | `{"command": "…" (non-empty), "timeout_secs": 1..=86400 (default 600)}` | `bash -c <command>` **verbatim** (the author wrote it, as with scripts); output is stdout |
 | `script` | `{"script": "<id or name>", "values": {"name": "…"}, "timeout_secs": 1..=86400 (default 600)}` | runs a stored script (`docs/scripts.md`); output is stdout |
@@ -255,6 +255,7 @@ is named.
 | `workflow update <id\|name> [--name] [--description ""] [--project ""]` | the `Workflow`; `""` clears/unbinds; no field is `usage` |
 | `workflow delete <id\|name>` | the destroyed `{workflow, nodes, edges}` |
 | `workflow run <id\|name> [--input TEXT \| --input-file PATH\|-] [--trigger manual\|voice]` | the finished `WorkflowRun` |
+| `workflow emit <idea\|can-help\|wake> --speaker S [--text TEXT \| --text-file PATH\|-]` | runs every matching `ambient` workflow synchronously, id order; a bare array of the finished `WorkflowRun`s (`[]` when none match, exit 0); `--quiet` accepted and ignored |
 | `workflow runs <id\|name>` | a bare array of runs, newest first, **without `steps` and `input`** |
 | `workflow run-show <run id>` | one run in full |
 | `workflow log [<log>] [--limit N]` | the newest N lines (default 50), newest first; no name = every log. A limit outside 1..=1000 is `validation` (the API's `?limit=` too), not clamped |
@@ -300,6 +301,7 @@ applies as everywhere.
 | `PATCH /api/workflow-nodes/{id}` `{title?, config?, x?, y?}` / `DELETE` | update / echo `{node, edges}` |
 | `POST /api/workflows/{id}/edges` `{from_node, to_node, branch?}` (201) / `DELETE /api/workflow-edges/{id}` | add / delete |
 | `POST /api/workflows/{id}/run` `{input?}` | run **synchronously** (on `spawn_blocking`) and answer the finished run |
+| `POST /api/workflows/events` `{event, speaker, text?}` | an ambient-engine event: validated synchronously (422), then the matching workflows run in the background in id order; **202** `{"workflow_ids":[…]}` at once |
 | `GET /api/workflows/{id}/runs` / `GET /api/workflow-runs/{id}` | runs newest first / one run, steps included |
 | `GET /api/workflow-log?log=&limit=` | log lines, newest first |
 
@@ -354,6 +356,31 @@ sentence passed as a name it has not found in the list.
 > have rule 15 until the person re-syncs the definition from the Library page
 > (`naru library sync`, picking the Naru side).
 
+## Ambient engine events
+
+The ambient listening engine (NaruAudio, not part of this crate) reports what
+it heard through `naru workflow emit` or `POST /api/workflows/events`, and
+post-flag handling is whatever workflows listen for it. The vocabulary is
+exactly three events: `idea`, `can-help` and `wake`. A workflow listens by
+having an `ambient` trigger whose `events` lists the event. Every match runs
+(ambient workflows of an archived project do not), in workflow id order, as a
+run with `trigger: "ambient"`, and the trigger's output — the run input — is
+one compact JSON object built with serde_json, never string-concatenated:
+
+```json
+{"event":"idea","speaker":"simon","text":"buy milk"}
+```
+
+`speaker` is a free-form label, 1 to 64 characters; `text` may be empty. The
+whole input is bounded by the 256 KiB run-input cap (over it is `validation`).
+A store error on one match (say the workflow was deleted after the plan) fails
+only that workflow: the rest still run, the API logs it and the CLI prints the
+finished runs plus one stderr warning per failed id, exit 0.
+Text is data: a script or cli node receives it byte-identical, never
+shell-parsed. A failed run is data, as for `workflow run`. The CLI waits for
+the runs and prints them; the API answers 202 first, because the engine is
+real-time, so a caller reads the outcome from `workflow runs`.
+
 ## Example: ambient capture
 
 A spoken thought, recorded for ten seconds, transcribed locally, kept only if
@@ -407,7 +434,7 @@ exact graph over stub `sox`/`auris` and a stub model API.
 
 ## Web UI
 
-`#/workflows` (left nav, beside Scripts; mesa task 1632) is the global overview:
+`#/workflows` (left nav; mesa task 1632) is the global overview, also shown as the Library's read-only Workflows tab at `#/library/workflows` (mesa task 1676):
 one table of every workflow across all projects with project, on/off, last run,
 last failure and next run, polled every 5s. A row opens the workflow in its
 owning project's view; a global (project-less) workflow has no project page, so
@@ -421,7 +448,7 @@ dock layout's old `diagrams` id is renamed to on load). The page reports the liv
 context kind `workflows`, with the workflow's id and name once one is open.
 
 - **List** (`WorkflowListView`): the project's workflows, each with its trigger
-  (`manual`, `time`, `voice · "<phrase>"`, or `no trigger`), a **run** button that
+  (`manual`, `time`, `voice · "<phrase>"`, `ambient · idea, wake`, or `no trigger`), a **run** button that
   shows the run's one-line summary on the row, delete (the usual two-step
   confirm, whose echo is the recovery transcript) and a create form (a name).
 - **Builder** (`WorkflowBuilderView` + `WorkflowCanvas`, on `@xyflow/react`). A

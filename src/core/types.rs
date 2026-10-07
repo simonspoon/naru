@@ -4568,6 +4568,7 @@ workflow_enum! {
         Manual => "manual",
         Time => "time",
         Voice => "voice",
+        Ambient => "ambient",
     }
 }
 
@@ -4617,6 +4618,9 @@ pub struct Workflow {
     pub trigger: Option<WorkflowTrigger>,
     /// The trigger node's `phrase` (voice), or null.
     pub trigger_phrase: Option<String>,
+    /// An `ambient` trigger's `events`, in the order configured; empty for
+    /// every other trigger.
+    pub trigger_events: Vec<String>,
     pub created_at: String,
     pub updated_at: String,
     /// When the newest run started (any trigger), or null if it never ran.

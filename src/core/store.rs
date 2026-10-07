@@ -2599,7 +2599,9 @@ const WORKFLOW_COLUMNS: &str = "w.id, w.project_id, w.name, w.description, \
         FROM workflow_nodes n JOIN workflow_runs r \
           ON r.workflow_id = w.id AND r.trigger = 'time' \
         WHERE n.workflow_id = w.id AND n.kind = 'trigger' \
-          AND json_extract(n.config, '$.mode') = 'time')";
+          AND json_extract(n.config, '$.mode') = 'time'), \
+     (SELECT json_extract(n.config, '$.events') FROM workflow_nodes n \
+        WHERE n.workflow_id = w.id AND n.kind = 'trigger' ORDER BY n.id LIMIT 1)";
 const WORKFLOW_NODE_COLUMNS: &str =
     "id, workflow_id, kind, title, config, x, y, created_at, updated_at";
 const WORKFLOW_EDGE_COLUMNS: &str = "id, workflow_id, from_node, to_node, branch";
@@ -2645,6 +2647,10 @@ fn row_to_workflow(row: &rusqlite::Row<'_>) -> rusqlite::Result<Workflow> {
             .and_then(WorkflowRunStatus::parse),
         last_failure_at: row.get(10)?,
         next_run_at: row.get(11)?,
+        trigger_events: row
+            .get::<_, Option<String>>(12)?
+            .and_then(|j| serde_json::from_str(&j).ok())
+            .unwrap_or_default(),
     })
 }
 
@@ -5410,6 +5416,21 @@ impl Store {
              ORDER BY w.id"
         ))?;
         let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Ids of the workflows whose trigger is `ambient` and lists `event`,
+    /// oldest id first. A workflow of an archived project never matches.
+    pub fn ambient_workflows(&self, event: &str) -> Result<Vec<i64>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "{HIDDEN_PROJECTS_CTE}SELECT w.id FROM workflows w \
+             JOIN workflow_nodes n ON n.workflow_id = w.id AND n.kind = 'trigger' \
+             WHERE json_extract(n.config, '$.mode') = 'ambient' \
+               AND (w.project_id IS NULL OR w.project_id NOT IN (SELECT id FROM hidden_projects)) \
+               AND EXISTS (SELECT 1 FROM json_each(n.config, '$.events') e WHERE e.value = ?1) \
+             ORDER BY w.id"
+        ))?;
+        let rows = stmt.query_map([event], |r| r.get::<_, i64>(0))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 

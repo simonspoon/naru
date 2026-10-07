@@ -169,3 +169,26 @@ export function diffLines(mesa: string, disk: string): LibraryDiffLine[] {
   }
   return out
 }
+
+/**
+ * Collapses a diff to its changed hunks: every `context` line that carries a
+ * line number is dropped, and a `null` stands between two hunks that were not
+ * adjacent in the full diff. The truncation marker (a context line with
+ * neither number) is not content and is kept. Used by the Sync modal, which
+ * shows only what changed; the Import modal keeps the full diff.
+ */
+export function hunksOnly(diff: LibraryDiffLine[]): (LibraryDiffLine | null)[] {
+  const out: (LibraryDiffLine | null)[] = []
+  let gap = false
+  for (const line of diff) {
+    const isMarker = line.mesa_line === null && line.disk_line === null
+    if (line.kind === 'context' && !isMarker) {
+      gap = out.length > 0
+      continue
+    }
+    if (gap) out.push(null)
+    gap = false
+    out.push(line)
+  }
+  return out
+}

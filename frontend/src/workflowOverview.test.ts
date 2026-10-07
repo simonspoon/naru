@@ -20,6 +20,7 @@ function wf(over: Partial<Workflow> = {}): Workflow {
     description: null,
     trigger: 'manual',
     trigger_phrase: null,
+    trigger_events: [],
     created_at: '2026-01-01 00:00:00',
     updated_at: '2026-01-01 00:00:00',
     last_run_at: null,

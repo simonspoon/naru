@@ -26,7 +26,12 @@ trigger: WorkflowTrigger | null,
 /**
  * The trigger node's `phrase` (voice), or null.
  */
-trigger_phrase: string | null, created_at: string, updated_at: string, 
+trigger_phrase: string | null, 
+/**
+ * An `ambient` trigger's `events`, in the order configured; empty for
+ * every other trigger.
+ */
+trigger_events: Array<string>, created_at: string, updated_at: string, 
 /**
  * When the newest run started (any trigger), or null if it never ran.
  * Derived on every read from `workflow_runs`, never stored.
