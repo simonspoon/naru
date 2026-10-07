@@ -11,9 +11,11 @@ import {
 } from "../workflowOverview";
 
 /** `#/workflows`: every workflow across all projects in one table — project,
- * on/off, last run, last failure, next run. Global like Scripts; a row opens
- * the workflow in its owning project's view. */
-export function WorkflowsOverview() {
+ * on/off, last run, last failure, next run. Global, above projects; a row opens
+ * the workflow in its owning project's view. Mounted standalone at
+ * `#/workflows` (an h1) and as the Library's Workflows tab (`embedded`, an h2
+ * under the page's own h1). */
+export function WorkflowsOverview({ embedded = false }: { embedded?: boolean }) {
   const { data: workflows, error } = useFetch(
     () => listWorkflows(),
     "workflows-overview",
@@ -28,7 +30,7 @@ export function WorkflowsOverview() {
 
   return (
     <div className="workflows-overview">
-      <h2>Workflows</h2>
+      {embedded ? <h2>Workflows</h2> : <h1>Workflows</h1>}
       <p className="muted">
         Every workflow across all projects. A workflow is on when it has a time
         trigger, which the server runs on its own.

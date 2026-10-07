@@ -15,6 +15,12 @@ describe('libraryRouteFromPath', () => {
     expect(libraryRouteFromPath('/library/scripts')?.tab).toBe('scripts')
     expect(libraryRouteFromPath('/library/Workflows')?.tab).toBe('workflows')
   })
+  it('tolerates a trailing slash', () => {
+    expect(libraryRouteFromPath('/library/')).toEqual({ tab: 'claude-code', runId: null })
+    expect(libraryRouteFromPath('/library/scripts/')?.tab).toBe('scripts')
+    expect(libraryRouteFromPath('/library/scripts/runs/3/')).toEqual({ tab: 'scripts', runId: 3 })
+    expect(legacyScriptsRedirect('/scripts/')).toBe('#/library/scripts')
+  })
   it('reads a run inside the Scripts tab', () => {
     expect(libraryRouteFromPath('/library/scripts/runs/42')).toEqual({ tab: 'scripts', runId: 42 })
   })

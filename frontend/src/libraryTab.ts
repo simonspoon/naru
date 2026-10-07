@@ -37,9 +37,9 @@ export type LibraryRoute = { tab: LibraryTab; runId: number | null }
  *  An unknown segment is a stale link and lands on the first tab; the segment
  *  is matched case-insensitively, as a hand-typed hash produces it. */
 export function libraryRouteFromPath(path: string): LibraryRoute | null {
-  const run = /^\/library\/scripts\/runs\/(\d+)$/.exec(path)
+  const run = /^\/library\/scripts\/runs\/(\d+)\/?$/.exec(path)
   if (run) return { tab: 'scripts', runId: Number(run[1]) }
-  const m = /^\/library(?:\/([^/]+))?$/.exec(path)
+  const m = /^\/library(?:\/([^/]+))?\/?$/.exec(path)
   if (!m) return null
   const seg = m[1]?.toLowerCase()
   const tab =
@@ -53,7 +53,7 @@ export function libraryRouteFromPath(path: string): LibraryRoute | null {
  *  Scripts tab and `#/scripts/runs/<id>` the same run inside it. `null` for any
  *  other path. */
 export function legacyScriptsRedirect(path: string): string | null {
-  const m = /^\/scripts(?:\/runs\/(\d+))?$/.exec(path)
+  const m = /^\/scripts(?:\/runs\/(\d+))?\/?$/.exec(path)
   if (!m) return null
   return m[1] ? libraryRunHref(Number(m[1])) : libraryTabHref('scripts')
 }

@@ -1350,10 +1350,10 @@ function LibraryImportModal({
 }
 
 /**
- * The Library page: agents, skills, hooks, prompts and CLAUDE.md files,
- * stored in mesa and synced against `.claude` file by file (mesa task 919).
- * Global like Scripts — a project-scoped item binds a project, but the page
- * itself lives above projects.
+ * The Library's Claude Code tab: agents, skills, hooks, prompts and CLAUDE.md
+ * files, stored in mesa and synced against `.claude` file by file (mesa task
+ * 919). A project-scoped item binds a project, but the page itself lives above
+ * projects.
  */
 function LibraryItemsTab() {
   const { data: items, error, refetch } = useFetch(() => listLibrary(), 'library')
@@ -1823,7 +1823,7 @@ export function LibraryView({ tab, runId }: { tab: LibraryTab; runId: number | n
       ) : tab === 'scripts' ? (
         <ScriptsView runId={runId} />
       ) : (
-        <WorkflowsOverview />
+        <WorkflowsOverview embedded />
       )}
     </div>
   )
