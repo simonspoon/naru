@@ -1,5 +1,11 @@
 # Library (agents, skills, hooks, prompts, CLAUDE.md)
 
+The web page is three tabs (mesa task 1676, `libraryTab.ts`): **Claude Code**
+(`#/library`, everything below, Sync included), **Scripts** (`#/library/scripts`,
+the former Scripts page, `docs/scripts.md`) and **Workflows**
+(`#/library/workflows`, a read-only list of every project's workflows linking
+to the project; editing stays in the project).
+
 Naru stores Claude Code's agent definitions, skills, hooks and CLAUDE.md
 files as first-class records — the library — and syncs them file-by-file
 against `.claude` (and a project's root `CLAUDE.md`), with the user picking a

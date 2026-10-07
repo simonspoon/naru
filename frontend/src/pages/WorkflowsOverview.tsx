@@ -28,7 +28,7 @@ export function WorkflowsOverview() {
 
   return (
     <div className="workflows-overview">
-      <h1>Workflows</h1>
+      <h2>Workflows</h2>
       <p className="muted">
         Every workflow across all projects. A workflow is on when it has a time
         trigger, which the server runs on its own.

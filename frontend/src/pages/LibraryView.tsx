@@ -108,6 +108,14 @@ import type { LibrarySyncResult } from '../types/LibrarySyncResult'
 import type { LibrarySyncRow } from '../types/LibrarySyncRow'
 import type { Project } from '../types/Project'
 import { useFetch } from '../useFetch'
+import {
+  LIBRARY_TABS,
+  libraryTabHref,
+  libraryTabLabel,
+  type LibraryTab,
+} from '../libraryTab'
+import { ScriptsView } from './ScriptsView'
+import { WorkflowsOverview } from './WorkflowsOverview'
 
 /** Prism grammar for the body editor: a hook is shell, everything else on
  * this surface — agent/skill/prompt bodies and a CLAUDE.md — is markdown. */
@@ -1334,7 +1342,7 @@ function LibraryImportModal({
  * Global like Scripts — a project-scoped item binds a project, but the page
  * itself lives above projects.
  */
-export function LibraryView() {
+function LibraryItemsTab() {
   const { data: items, error, refetch } = useFetch(() => listLibrary(), 'library')
   const { data: projects } = useFetch(() => listProjects(), 'library-projects')
 
@@ -1488,7 +1496,6 @@ export function LibraryView() {
 
   return (
     <div className="library-page">
-      <h1>Library</h1>
       <p className="muted">
         Agents, skills, hooks, prompts and CLAUDE.md files, stored here and
         synced against your <code>.claude</code> directory file by file. Naru
@@ -1769,6 +1776,41 @@ export function LibraryView() {
           onClose={() => setSyncing(false)}
           onApplied={refetch}
         />
+      )}
+    </div>
+  )
+}
+
+/**
+ * The Library: three tabs on `#/library[/scripts|/workflows]` (mesa task 1676,
+ * `libraryTab.ts`). Claude Code is the original page; Scripts is the retired
+ * Scripts page, run panes included (`#/library/scripts/runs/<id>`); Workflows
+ * is the read-only cross-project list — editing a workflow stays in its
+ * project. Only the active tab is mounted.
+ */
+export function LibraryView({ tab, runId }: { tab: LibraryTab; runId: number | null }) {
+  return (
+    <div className="library-tabs-page">
+      <h1>Library</h1>
+      <div className="tabs">
+        {LIBRARY_TABS.map((t) => (
+          <button
+            key={t}
+            className={t === tab ? 'active' : ''}
+            onClick={() => {
+              if (t !== tab || runId !== null) window.location.hash = libraryTabHref(t)
+            }}
+          >
+            {libraryTabLabel(t)}
+          </button>
+        ))}
+      </div>
+      {tab === 'claude-code' ? (
+        <LibraryItemsTab />
+      ) : tab === 'scripts' ? (
+        <ScriptsView runId={runId} />
+      ) : (
+        <WorkflowsOverview />
       )}
     </div>
   )
