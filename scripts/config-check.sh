@@ -82,6 +82,13 @@ if [ "\$1" = "--bg" ]; then
   echo "backgrounded · deadbeef (idle — send a prompt to start)"
   exit 0
 fi
+# The inbox watcher's triage is a structured \`-p\` call now (naru task 1691):
+# log it whole (the leading \`-p\` kept) and answer nothing, so the job fails.
+if [ "\$1" = "-p" ]; then
+  LINE="\$(pwd)"; for a in "\$@"; do LINE="\$LINE|\$a"; done; echo "\$LINE" >> "$CLAUDE_LOG"
+  echo "stub claude: no answer" >&2
+  exit 1
+fi
 exit 2
 EOF
 # The synthesiser behind the `speech` section (mesa task 822). `--list-voices`
@@ -290,8 +297,10 @@ api GET /api/config
   fail "GET /api/config: configured value wrong: $STDOUT"
 [ "$(jq -r '.[1].value' <<<"$STDOUT")" = "null" ] ||
   fail "an unconfigured action must report value: null, got $STDOUT"
-[ "$(jq -r '.[1].default' <<<"$STDOUT")" = 'claude --bg --agent inbox-triage --name {name} -- "Triage mesa inbox item {id}."' ] ||
+[ "$(jq -r '.[1].default' <<<"$STDOUT")" = 'claude -p --model {model} --name {name} --tools "" --strict-mcp-config --output-format json --json-schema {schema} -- {prompt}' ] ||
   fail "GET /api/config: built-in default wrong: $STDOUT"
+[ "$(jq -r '.[1].placeholders | join(" ")' <<<"$STDOUT")" = "{id} {name} {prompt} {schema} {model}" ] ||
+  fail "GET /api/config: inbox-watcher's placeholder vocabulary wrong: $STDOUT"
 [ "$(jq -r '.[2].placeholders | join(" ")' <<<"$STDOUT")" = "{prompt}" ] ||
   fail "GET /api/config: agent-spawn's placeholder vocabulary wrong: $STDOUT"
 ok "GET /api/config reports each command's configured value (null when unset), its built-in default and the placeholders it offers"
@@ -333,6 +342,16 @@ grep -q "unknown command" <<<"$STDOUT" || fail "unknown key: message wrong: $STD
 [ "$(cat "$CONFIG")" = "$BEFORE" ] ||
   fail "a rejected PUT must not touch the file: $(cat "$CONFIG")"
 ok "PUT rejects a template the spawn path would later fail on (bad placeholder, unbalanced quote, unknown key) as 422 validation, writing nothing"
+
+# naru task 1691: the inbox watcher is a structured `claude -p` call now, so a
+# saved `--bg` template is refused (the file untouched).
+api PUT /api/config '{"commands": {"inbox-watcher": "claude --bg --agent inbox-triage --name {name} -- {prompt}"}}'
+[ "$CODE" = "422" ] || fail "a --bg inbox-watcher: expected 422, got $CODE: $STDOUT"
+[ "$(jq -r .error.code <<<"$STDOUT")" = "validation" ] || fail "a --bg inbox-watcher: expected validation, got $STDOUT"
+grep -q "1691" <<<"$STDOUT" || fail "the message must name naru task 1691: $STDOUT"
+[ "$(cat "$CONFIG")" = "$BEFORE" ] ||
+  fail "a refused --bg inbox-watcher must not touch the file: $(cat "$CONFIG")"
+ok "PUT refuses a --bg inbox-watcher template as 422 naming naru task 1691, writing nothing"
 
 # ---- multi-line hooks: every value is a bash script, values quoted in (mesa task 1143) ----
 
@@ -1670,9 +1689,9 @@ ok "the unconfigured todo-watcher keeps its built-in \`--agent supervisor --name
 run 0 "$MESA" inbox add --task "$TASK_B" --kind change-request "loki: find exits 0 on no match"
 ITEM_2=$(jqs .id)
 wait_lines "$CLAUDE_LOG" 3
-grep -qx "$WORKSPACE|--agent|inbox-triage|--name|inbox $ITEM_2: loki: find exits 0 on no match|--|Triage mesa inbox item $ITEM_2." "$CLAUDE_LOG" ||
+grep -Fq "$WORKSPACE|-p|--model|haiku|--name|inbox $ITEM_2: loki: find exits 0 on no match|--tools||--strict-mcp-config|--output-format|json|--json-schema|" "$CLAUDE_LOG" ||
   fail "the built-in inbox-watcher argv changed: $(cat "$CLAUDE_LOG")"
-ok "the unconfigured inbox-watcher keeps its built-in \`--agent inbox-triage --name inbox <id>: <body> -- Triage mesa inbox item <id>.\` argv"
+ok "the unconfigured inbox-watcher runs its built-in \`claude -p --model haiku --name inbox <id>: <body> --tools \"\" --strict-mcp-config --output-format json --json-schema <schema> -- <prompt>\` call (naru task 1691)"
 
 # ---- a saved template still holding the retired {bin}/{agent} (mesa task 1141) ----
 

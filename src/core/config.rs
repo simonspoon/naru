@@ -279,13 +279,15 @@ pub const ACTIONS: [&str; 9] = [
 /// arrive as two arguments and the id would be lost.
 pub const DEFAULT_TODO_WATCHER: &str =
     r#"claude --bg --agent supervisor --name {name} -- "/execute-mesa-task {id}""#;
-/// Built-in default for [`INBOX_WATCHER`]; see [`DEFAULT_TODO_WATCHER`]. The
-/// triage runs as the `inbox-triage` agent definition (mesa task 1168,
-/// `core::inbox_triage::INBOX_TRIAGE_DEFINITION`, seeded to
-/// `.claude/agents/inbox-triage.md` before the spawn), named literally; the
-/// prompt is one sentence, since the definition holds the whole procedure.
-pub const DEFAULT_INBOX_WATCHER: &str =
-    r#"claude --bg --agent inbox-triage --name {name} -- "Triage mesa inbox item {id}.""#;
+/// Built-in default for [`INBOX_WATCHER`] (naru task 1691): [`DEFAULT_LIVE_SUMMARY`]'s
+/// shape — one synchronous tool-less `claude -p --output-format json
+/// --json-schema {schema}` call, run inside a detached `naru __job
+/// inbox-triage` child (`core::inbox_triage`). `{id}` is the inbox item,
+/// `{model}` the pass's model (haiku to decide, sonnet to sharpen),
+/// `{prompt}` the context Naru gathered and `{schema}` the verdict schema;
+/// Naru applies the answer through `Store`. A saved template that still starts
+/// a `--bg` agent is retired ([`retired_bg_override`]).
+pub const DEFAULT_INBOX_WATCHER: &str = r#"claude -p --model {model} --name {name} --tools "" --strict-mcp-config --output-format json --json-schema {schema} -- {prompt}"#;
 /// Built-in default for [`AGENT_SPAWN`]. No `{id}`/`{name}`: this spawn is
 /// driven by a request body, not a mesa record, and the prompt is optional —
 /// absent, the `-- {prompt}` pair drops out and the session starts idle. The
@@ -487,7 +489,8 @@ fn command_in(path: &Path, action: &str) -> Result<Option<String>, String> {
             if retired && note_retired_once(action) {
                 eprintln!(
                     "ignoring the saved {action} template: it starts a --bg agent, which naru \
-                     task 1690 retired; using the built-in. Re-save it in Settings."
+                     task {} retired; using the built-in. Re-save it in Settings.",
+                    retired_task(action)
                 );
             }
             !retired
@@ -505,16 +508,23 @@ fn note_retired_once(action: &str) -> bool {
     true
 }
 
-/// Whether `template` is a saved `live-summary`/`live-dream` override that
-/// still starts a `--bg` agent (naru task 1690). Those two actions now run
+/// Whether `template` is a saved `live-summary`/`live-dream` (naru task 1690)
+/// or `inbox-watcher` (naru task 1691) override that still starts a `--bg`
+/// agent. Those actions now run
 /// synchronously (`claude -p --output-format json`) and Naru applies the
 /// answer itself, so a `--bg` template — which prints a receipt, not result
 /// JSON — can only fail. Judged on **read** (the template falls back to the
 /// built-in, the file is never rewritten, the [`migrate_retired_placeholders`]
 /// posture) and refused on **save** ([`validate`]).
 pub fn retired_bg_override(action: &str, template: &str) -> bool {
-    (action == LIVE_SUMMARY || action == LIVE_DREAM)
+    (action == LIVE_SUMMARY || action == LIVE_DREAM || action == INBOX_WATCHER)
         && template.split_whitespace().any(|w| w == "--bg")
+}
+
+/// The naru task that retired `action`'s `--bg` form (1691 moved
+/// `inbox-watcher`, 1690 the live memory jobs).
+fn retired_task(action: &str) -> u32 {
+    if action == INBOX_WATCHER { 1691 } else { 1690 }
 }
 
 /// Rewrites the two placeholders mesa task 1141 retired — `{bin}` and
@@ -741,7 +751,8 @@ pub fn validate(action: &str, template: &str, prompts: &Prompts) -> Result<(), S
         return Err(format!(
             "{action} no longer starts a --bg agent: it runs one synchronous `claude -p \
              --output-format json --json-schema {{schema}}` call and Naru applies the answer \
-             itself (naru task 1690); remove --bg"
+             itself (naru task {}); remove --bg",
+            retired_task(action)
         ));
     }
     check_script(action, script, prompts)?;
@@ -1691,6 +1702,8 @@ pub fn offered_placeholders(action: &str) -> &'static [&'static str] {
         LIVE_AGENT => &["{id}", "{name}", "{prompt}"],
         // Plus the schema Naru owns (naru task 1690).
         LIVE_SUMMARY | LIVE_DREAM => &["{id}", "{name}", "{prompt}", "{schema}"],
+        // Plus the pass's model (naru task 1691).
+        INBOX_WATCHER => &["{id}", "{name}", "{prompt}", "{schema}", "{model}"],
         WORKFLOW_PROMPT => &["{model}", "{thinking}", "{name}", "{prompt}"],
         RUNNER => &["{model}", "{name}", "{session_flag}", "{session_id}"],
         _ => &["{id}", "{name}"],
@@ -4688,6 +4701,10 @@ mod tests {
         assert_eq!(settings[1].default, DEFAULT_INBOX_WATCHER);
         // The placeholder vocabulary is per-action, matching `check_key`.
         assert_eq!(settings[0].placeholders, ["{id}", "{name}"]);
+        assert_eq!(
+            settings[1].placeholders,
+            ["{id}", "{name}", "{prompt}", "{schema}", "{model}"]
+        );
         assert_eq!(settings[2].action, AGENT_SPAWN);
         assert_eq!(settings[2].placeholders, ["{prompt}"]);
         // The live agent offers the union of the two shapes: it is a mesa
@@ -4755,6 +4772,26 @@ mod tests {
         assert!(!script.contains("--bare"), "{script}");
     }
 
+    /// naru task 1691: the inbox-watcher default is one synchronous `-p`
+    /// call with the pass's model, no tools, the schema and prompt quoted.
+    #[test]
+    fn inbox_watcher_default_is_a_structured_print_call() {
+        validate(INBOX_WATCHER, DEFAULT_INBOX_WATCHER, &Prompts::default()).unwrap();
+        let vars = Vars {
+            id: Some(7),
+            name: Some("inbox 7"),
+            model: Some("haiku"),
+            prompt: Some("a $(touch /tmp/x)"),
+            schema: Some("{}"),
+            ..Default::default()
+        };
+        let script = resolve(INBOX_WATCHER, DEFAULT_INBOX_WATCHER, &vars).unwrap();
+        assert_eq!(
+            script,
+            r#"claude -p --model 'haiku' --name 'inbox 7' --tools "" --strict-mcp-config --output-format json --json-schema '{}' -- 'a $(touch /tmp/x)'"#
+        );
+    }
+
     /// naru task 1690: the live-summary and live-dream defaults are one
     /// synchronous `-p` call with no tools, the prompt and the schema each
     /// one quoted word; never `--bg`.
@@ -4800,6 +4837,13 @@ mod tests {
         let err = validate_(LIVE_SUMMARY, "claude --bg --name {name} -- {prompt}").unwrap_err();
         assert!(err.contains("--bg") && err.contains("1690"), "{err}");
         assert!(validate_(LIVE_DREAM, "claude --bg -- {prompt}").is_err());
+        // The inbox watcher joined them in naru task 1691.
+        let err = validate_(INBOX_WATCHER, "claude --bg --name {name} -- {prompt}").unwrap_err();
+        assert!(err.contains("--bg") && err.contains("1691"), "{err}");
+        assert!(retired_bg_override(
+            INBOX_WATCHER,
+            "claude --bg -- {prompt}"
+        ));
         // Other actions still start --bg agents.
         validate_(LIVE_AGENT, "claude --bg --name {name} -- {prompt}").unwrap();
         // `--background` is not the flag.
@@ -5032,10 +5076,6 @@ mod tests {
             // Literal since mesa task 1075: the run is supervised by the
             // `supervisor` agent definition.
             r#"claude --bg --agent supervisor --name 'mesa: do the thing' -- "/execute-mesa-task 731""#
-        );
-        assert_eq!(
-            resolve(INBOX_WATCHER, DEFAULT_INBOX_WATCHER, &vars).unwrap(),
-            r#"claude --bg --agent inbox-triage --name 'mesa: do the thing' -- "Triage mesa inbox item 731.""#
         );
         let spawn = Vars {
             prompt: Some("look at the tests"),

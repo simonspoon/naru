@@ -302,12 +302,11 @@ because someone ran `mesa serve`.
     is not that case: its stdout is read exactly as an argv command's is, so
     a script whose last line is `claude --bg …` still hands Naru the id.)
   - The reaper runs on its own `WATCH_TODO_REAP_TICK` (20s) interval loop,
-    started alongside the dispatch loop under `--watch-todo` — and under
-    `--watch-inbox`, since mesa task 1192, because the inbox-watcher's triage
-    sessions are recorded in the same map (`DispatchTarget::InboxItem`) and
-    reaped by the same pass once their item is triaged
-    (`docs/inbox-watcher.md`) — so a closed task's session ends well inside a
-    minute. It shares `MESA_WATCH_TODO_TICK_MS` rather than adding a seam of
+    started alongside the dispatch loop under `--watch-todo` — so a closed
+    task's session ends well inside a minute. It served `--watch-inbox` too
+    from mesa task 1192 until naru task 1691 made the inbox triage a
+    self-exiting `naru __job` with no session to stop
+    (`docs/inbox-watcher.md`); `DispatchTarget` has only the task variant now. It shares `MESA_WATCH_TODO_TICK_MS` rather than adding a seam of
     its own — the two loops are one feature.
   - Regressions: `api::tests::todo_reaper_tick_stops_a_dispatched_session_once_its_task_closes`,
     `api::tests::todo_watcher_tick_stops_the_session_a_re_dispatch_supersedes`,

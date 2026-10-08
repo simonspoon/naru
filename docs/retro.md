@@ -37,7 +37,7 @@ a prompt**: it carries its own model, its own tool list and its own procedure,
 lives in the library as one source of truth (`docs/library.md`, the
 `naru-retro` built-in) and syncs to `.claude/agents/naru-retro.md`. It is
 seeded there by `core::retro::ensure_agent_definition` **before every spawn**
-— exactly as `inbox-triage`, `naru-live` and `supervisor` are — from the
+— exactly as `naru-live` and `supervisor` are — from the
 effective row (a fork if the user made one, else the built-in) and never
 overwriting an existing file; after the first seed the file belongs to the
 sync flow. A seed failure is a failed spawn. Edit it on `#/library` like any

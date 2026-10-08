@@ -441,6 +441,30 @@ pub fn log_between(dir: &str, since: &str, until: &str) -> Vec<GitCommit> {
     )
 }
 
+/// Commits made in `dir` since `since` (naru task 1691) — [`log_between`]
+/// with no upper bound, `since` being `Store`'s UTC text and pinned the same
+/// way (` UTC`). Same cap, same empty-vec-on-failure contract.
+pub fn log_since(dir: &str, since: &str) -> Vec<GitCommit> {
+    run_log(dir, None, &[format!("--since={since} UTC")])
+}
+
+/// The first `max` paths `git ls-files` lists in `dir` (naru task 1691), empty
+/// on any failure — not a repo and an empty repo read the same.
+pub fn tracked_files(dir: &str, max: usize) -> Vec<String> {
+    let out = Command::new("git")
+        .args(["-C", dir, "ls-files"])
+        .stdin(Stdio::null())
+        .output();
+    match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .take(max)
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// Shared body of `commit_log_of`/`file_log_of`/`log_between`. `extra` holds
 /// additional `git log` flags (currently just `log_between`'s `--since`/
 /// `--until` pair) passed as separate `Command::arg`s — never string-built —

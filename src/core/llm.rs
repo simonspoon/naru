@@ -69,7 +69,8 @@ pub fn complete(
 /// One structured-output call (naru task 1690): `action`'s template
 /// (`live-summary` or `live-dream`) resolved with `schema` as `--json-schema`,
 /// run to completion under `timeout`, answered with the result JSON's
-/// `structured_output` object. As a fallback — a hand-written template
+/// `structured_output` object. `model` fills `{model}` where the template
+/// offers it (`inbox-watcher`, naru task 1691). As a fallback — a hand-written template
 /// without `--json-schema` — a `result` text that is itself a JSON object is
 /// accepted. The model has no tools: Naru applies what comes back.
 #[allow(clippy::too_many_arguments)]
@@ -79,6 +80,7 @@ pub fn complete_structured(
     name: &str,
     prompt: &str,
     schema: &str,
+    model: Option<&str>,
     prompts: &config::Prompts,
     cwd: &str,
     timeout: Duration,
@@ -90,7 +92,7 @@ pub fn complete_structured(
             prompt.len()
         ));
     }
-    let script = agents::structured_script(action, id, name, prompt, schema, prompts)?;
+    let script = agents::structured_script(action, id, name, prompt, schema, model, prompts)?;
     let mut cmd = Command::new("bash");
     cmd.arg("-c").arg(&script).current_dir(cwd);
     let out = agents::capture(cmd, None, timeout)?;

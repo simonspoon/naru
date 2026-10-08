@@ -196,14 +196,14 @@ enum Command {
         /// across the web UI's Restart Server action.
         #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true", value_name = "BOOL")]
         watch_todo: Option<bool>,
-        /// Periodically auto-start a background `claude` agent to triage each
-        /// pending item in the global inbox (default: the `inbox-triage` agent
-        /// definition, configurable in ~/.mesa/config.json; cwd
-        /// `~/.mesa/workspace` — an inbox item belongs to no project). Off by
-        /// default:
-        /// this spawns real agents (API cost, code execution) with no user
-        /// request behind it. Independent of --watch-todo. Each item is
-        /// dispatched at most once per server run. Preserved across the web
+        /// Periodically triage each pending change request in the global inbox
+        /// with two tool-less `claude -p --json-schema` calls (haiku decides,
+        /// sonnet writes the task) in a detached `naru __job inbox-triage`
+        /// process; Naru applies the answer itself (template configurable in
+        /// ~/.mesa/config.json; cwd `~/.mesa/workspace` — an inbox item
+        /// belongs to no project). Off by default: this spends model calls
+        /// with no user request behind it. Independent of --watch-todo. Each
+        /// item is dispatched at most once per server run. Preserved across the web
         /// UI's Restart Server action.
         #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true", value_name = "BOOL")]
         watch_inbox: Option<bool>,
@@ -280,9 +280,11 @@ EXAMPLES
     /// works with no server. See docs/runner.md.
     #[command(subcommand)]
     Run(RunCmd),
-    /// A detached memory job (summary / dream); started by `live stop`, a
-    /// handoff and the dream verbs, not by hand. Its one-line JSON report goes
-    /// to `logs/memory-jobs.log` in Naru's home directory.
+    /// A detached memory or triage job (summary / dream / inbox-triage);
+    /// started by `live stop`, a handoff, the dream verbs and the inbox
+    /// watcher, not by hand. Its one-line JSON report goes to
+    /// `logs/memory-jobs.log` (`logs/inbox-triage.log` for a triage) in
+    /// Naru's home directory.
     #[command(name = "__job", subcommand, hide = true)]
     Job(JobCmd),
     /// Send a message to the person's phone through the external `vox` CLI
@@ -419,7 +421,7 @@ EXAMPLES
     },
 }
 
-/// The memory jobs of `core::memory_job` (naru task 1690).
+/// The jobs of `core::memory_job` (naru tasks 1690, 1691).
 #[derive(Subcommand)]
 enum JobCmd {
     /// Summarise an ended live session
@@ -445,6 +447,16 @@ enum JobCmd {
     ProjectDream {
         #[arg(long)]
         project: i64,
+        #[arg(long)]
+        dir: String,
+    },
+    /// Triage one inbox change request (the inbox watcher's job)
+    InboxTriage {
+        #[arg(long)]
+        item: i64,
+        /// The claude session name
+        #[arg(long)]
+        name: String,
         #[arg(long)]
         dir: String,
     },
@@ -4662,6 +4674,13 @@ fn execute(command: Command) -> Result<()> {
                 JobCmd::ProjectDream { project, dir } => (
                     memory_job::Job::ProjectDream {
                         project_id: project,
+                    },
+                    dir,
+                ),
+                JobCmd::InboxTriage { item, name, dir } => (
+                    memory_job::Job::InboxTriage {
+                        item_id: item,
+                        name,
                     },
                     dir,
                 ),

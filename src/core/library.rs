@@ -54,12 +54,11 @@ pub struct Builtin {
 /// `core::supervisor::SUPERVISOR_DEFINITION`, at
 /// `.claude/agents/supervisor.md`, seeded by
 /// `core::supervisor::ensure_agent_definition` on the first dispatch.
-/// `inbox-triage` is the third (mesa task 1168): the agent definition a
-/// `serve --watch-inbox` dispatch triages one item as, body
+/// `inbox-triage` is the third (mesa task 1168): an agent definition, body
 /// `core::inbox_triage::INBOX_TRIAGE_DEFINITION`, at
-/// `.claude/agents/inbox-triage.md`, seeded by
-/// `core::inbox_triage::ensure_agent_definition` before the `inbox-watcher`
-/// spawn. `naru-retro` is the fourth (mesa task 1158): the agent definition a
+/// `.claude/agents/inbox-triage.md`. Kept for manual `claude --agent
+/// inbox-triage` use; no longer spawned or seeded since naru task 1691 made
+/// the watcher's triage two `claude -p` calls. `naru-retro` is the fourth (mesa task 1158): the agent definition a
 /// `serve --watch-retro` pass reviews finished sessions as, body
 /// `core::retro::RETRO_DEFINITION`, at `.claude/agents/naru-retro.md`, seeded
 /// by `core::retro::ensure_agent_definition` before the `retro` spawn.

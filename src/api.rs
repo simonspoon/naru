@@ -207,7 +207,7 @@ struct AppState {
     /// panicking on a consumed oneshot.
     shutdown_tx: Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
     /// Inbox item ids the inbox-watcher (`watch_inbox`) has already dispatched
-    /// a triage agent for. The inbox-watcher's answer to the todo-watcher's
+    /// a triage job (`naru __job inbox-triage`) for. The inbox-watcher's answer to the todo-watcher's
     /// `in_progress` claim — but in memory, not in the db, because an inbox
     /// item has no status column to claim with (`docs/inbox.md`: an item *is*
     /// the record, and assignment converts + deletes it). Pruned each tick to
@@ -250,13 +250,13 @@ struct AppState {
     /// `todo_dispatched`, so no relay can happen then either.
     cost_relay_seeded: Arc<Mutex<HashMap<i64, String>>>,
     /// Background job id → what it was dispatched for, for every session
-    /// the todo-watcher or the inbox-watcher spawned in this server's
-    /// lifetime and has not yet reaped (mesa tasks 1057, 1192). The reaper's
-    /// whole memory: a dispatched session that has finished with its task —
-    /// or its inbox item — sits idle for hours holding a worktree, and
-    /// nothing in the db records which session was started for which, so
-    /// this map is what lets `todo_reaper_tick` stop exactly the sessions
-    /// mesa itself started.
+    /// the todo-watcher spawned in this server's lifetime and has not yet
+    /// reaped (mesa task 1057). The reaper's whole memory: a dispatched
+    /// session that has finished with its task sits idle for hours holding a
+    /// worktree, and nothing in the db records which session was started for
+    /// which, so this map is what lets `todo_reaper_tick` stop exactly the
+    /// sessions mesa itself started. (The inbox-watcher no longer appears
+    /// here: its triage is a self-exiting job, naru task 1691.)
     ///
     /// In memory, like `inbox_dispatched` and `cost_stopped`, and deliberately
     /// not persisted: a restart forgets the sessions spawned before it, which
@@ -560,37 +560,34 @@ fn inbox_session_name(item: &InboxItem) -> String {
     format!("inbox {}: {head}", item.id)
 }
 
-/// One inbox-watcher pass: dispatch a background `claude` agent (the
-/// `inbox-triage` agent definition, mesa task 1168) for every pending inbox
-/// item this process has not already dispatched. The inbox is one **global** queue that lives above
-/// projects, so — unlike the todo-watcher, which is naturally capped at one
-/// agent per project — every un-dispatched item goes out in the same tick.
+/// One inbox-watcher pass: start a detached `naru __job inbox-triage` (naru
+/// task 1691, `core::inbox_triage`) for every pending inbox item this process
+/// has not already dispatched. The job makes the two tool-less `claude -p
+/// --json-schema` calls and applies the answer through `Store` itself, then
+/// exits — no `--bg` session, so nothing to remember or reap. The inbox is one
+/// **global** queue that lives above projects, so — unlike the todo-watcher,
+/// which is naturally capped at one agent per project — every un-dispatched
+/// item goes out in the same tick.
 ///
 /// cwd is `~/.mesa/workspace`, not a project folder: an inbox item belongs to
-/// no project (`project_id` is null for its whole life) and the triage agent
-/// derives the project itself, reading each candidate repo by absolute
-/// `local_path`. Same folder the global Terminal page uses
+/// no project (`project_id` is null for its whole life) and the job derives
+/// the project itself from the context Naru gathers
 /// (`config::workspace_dir`).
 ///
 /// The dedup set (`AppState::inbox_dispatched`) stands in for the
 /// todo-watcher's `in_progress` claim, which has no inbox equivalent — an
-/// item has no status column. Two of the triage agent's three outcomes archive
-/// the item (a real request is converted into a backlog task by
-/// `assign_inbox_item`, which archives it as `converted-to-task`; a stale,
-/// duplicate or non-actionable one is archived with a reason), but the third
-/// leaves it **untouched** — no confident
-/// project match. Without the set, that third
-/// outcome would re-dispatch an agent for the same item every single tick,
-/// forever. Ids are claimed *before* the spawn (closing the window where a
-/// second tick fires while `claude --bg` is still starting) and released
-/// again only if the spawn failed, so a transient `claude` failure retries
-/// next tick instead of silently dropping the item — the same shape as the
-/// todo-watcher's revert-to-`todo`.
+/// item has no status column. Two of the triage's outcomes archive the item
+/// or convert it (a real request becomes a backlog task via
+/// `assign_inbox_item`, a stale, duplicate, shipped or non-actionable one is
+/// archived with a reason), but a **hold** — no confident answer — and a
+/// failed call leave it pending. Without the set, those would re-dispatch a
+/// job for the same item every single tick, forever. Ids are claimed *before*
+/// the spawn (closing the window where a second tick fires while the job is
+/// starting) and released again only if the job process failed to start, so a
+/// transient failure retries next tick instead of silently dropping the item.
 ///
-/// Two-phase, like [`todo_watcher_tick`] and `spawn_project_agent`: the store
-/// lock is dropped before the blocking `claude --bg` shell-outs. Holding it
-/// across a spawn would freeze every other API request for the duration of
-/// each spawn — a regression this codebase has shipped once already.
+/// Two-phase, like [`todo_watcher_tick`]: the store lock is dropped before the
+/// spawn.
 fn inbox_watcher_tick(state: &AppState) {
     let dispatch_dir = config::workspace_dir().to_string_lossy().into_owned();
 
@@ -631,82 +628,47 @@ fn inbox_watcher_tick(state: &AppState) {
             .collect()
     };
 
-    // The library's prompts, for any `{prompt:<name>}` the template names
-    // (mesa task 1138) — read once for the tick, off the store lock below.
-    let prompts = {
+    // The job works the same db this server does.
+    let db_path = {
         let store = match state.store.lock() {
             Ok(s) => s,
             Err(e) => e.into_inner(),
         };
-        library::prompts(&store).unwrap_or_default()
+        store.db_path()
     };
     for (id, session_name) in pending {
-        // The default template spawns `--agent inbox-triage`, so the
-        // definition has to be on disk before the spawn — `claude --agent`
-        // errors on an agent it has never seen (mesa task 1168, the
-        // todo-watcher's `supervisor` rule). A failure is a failed spawn: the
-        // claim is released below and the next tick retries.
-        let seeded = {
-            let store = match state.store.lock() {
-                Ok(s) => s,
+        // One detached `naru __job inbox-triage` per item (naru task 1691):
+        // it makes the two `claude -p` calls and applies the answer itself,
+        // then exits, so there is no session to remember or reap. Spawned off
+        // the store lock, which is not held here.
+        let job = memory_job::Job::InboxTriage {
+            item_id: id,
+            name: session_name,
+        };
+        if let Err(e) = memory_job::spawn(&job, &dispatch_dir, db_path.as_deref()) {
+            eprintln!("inbox-watcher: starting the triage job for inbox item {id} failed: {e}");
+            let mut dispatched = match state.inbox_dispatched.lock() {
+                Ok(d) => d,
                 Err(e) => e.into_inner(),
             };
-            inbox_triage::ensure_agent_definition(&store)
-        };
-        // The command — including which agent triages an item — comes from
-        // `~/.mesa/config.json`'s `inbox-watcher` entry, defaulting to
-        // `claude --bg --agent inbox-triage … -- "Triage mesa inbox item <id>."`.
-        match seeded.and_then(|_| {
-            agents::spawn_bg(
-                config::INBOX_WATCHER,
-                &dispatch_dir,
-                Some(id),
-                Some(&session_name),
-                None,
-                &prompts,
-            )
-        }) {
-            // The receipt's short job id is what the reaper stops the triage
-            // session with once the item is triaged (mesa task 1192) — the
-            // todo-watcher's own record, in the same map. No receipt, nothing
-            // to stop.
-            Ok(Some(job_id)) => {
-                let mut dispatched = match state.todo_dispatched.lock() {
-                    Ok(d) => d,
-                    Err(e) => e.into_inner(),
-                };
-                dispatched.insert(
-                    job_id,
-                    DispatchedSession::new(DispatchTarget::InboxItem(id), Instant::now()),
-                );
-            }
-            Ok(None) => {}
-            Err(e) => {
-                eprintln!("inbox-watcher: spawn failed for inbox item {id}: {e}");
-                let mut dispatched = match state.inbox_dispatched.lock() {
-                    Ok(d) => d,
-                    Err(e) => e.into_inner(),
-                };
-                dispatched.remove(&id);
-            }
+            dispatched.remove(&id);
         }
     }
 }
 
 /// Whether an inbox item is one the inbox-watcher should have triaged: a
 /// change request (mesa task 846) that is not archived (mesa task 1192). The
-/// one definition of "needs triage" — the dispatch reads it to pick items,
-/// and the reaper reads it to know when a triage session is finished with
-/// its item.
+/// one definition of "needs triage" (`inbox_triage::is_pending`, which the
+/// job re-reads before it writes) — the dispatch reads it to pick items.
 ///
-/// Archived is a state, not a kind: the triage agent's own verdict on a
+/// Archived is a state, not a kind: the triage's own verdict on a
 /// duplicate, shipped or non-actionable request is to archive it with a
 /// reason, and the item stays in the inbox listing. Before this predicate the
 /// dispatch read every listed change request as pending and relied on the
 /// in-memory dedup set alone to hold the archived ones back — which a server
 /// restart empties, so every restart re-triaged every archived request.
 fn inbox_item_pending(item: &InboxItem) -> bool {
-    item.kind == InboxKind::ChangeRequest && item.archived_at.is_none()
+    inbox_triage::is_pending(item)
 }
 
 /// One cost-guard pass: read the live Claude Code sessions, evaluate the
@@ -965,10 +927,10 @@ fn relay_context_sessions(
                 Err(e) => e.into_inner(),
             };
             match map.get(&old_job) {
-                Some(d) if !d.superseded => match d.target {
-                    DispatchTarget::Task(id) => Some(id),
-                    DispatchTarget::InboxItem(_) => None,
-                },
+                Some(d) if !d.superseded => {
+                    let DispatchTarget::Task(id) = d.target;
+                    Some(id)
+                }
                 _ => None,
             }
         };
@@ -1729,14 +1691,14 @@ fn spawn_failed_body(task_id: i64, local_path: &str, error: &str, base: Duration
     )
 }
 
-/// What a dispatched session was started for: the todo-watcher's task, or
-/// the inbox-watcher's item (mesa task 1192). The reaper asks each the same
-/// question — is the session still working on it? — through
-/// [`todo_reaper_tick`]'s one `still mine` reading per entry.
+/// What a dispatched session was started for: the todo-watcher's task. (The
+/// inbox-watcher's item was a second variant until naru task 1691 made its
+/// triage a self-exiting job.) The reaper asks the question — is the session
+/// still working on it? — through [`todo_reaper_tick`]'s one `still mine`
+/// reading per entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DispatchTarget {
     Task(i64),
-    InboxItem(i64),
 }
 
 impl DispatchTarget {
@@ -1744,7 +1706,6 @@ impl DispatchTarget {
     fn watcher(self) -> &'static str {
         match self {
             DispatchTarget::Task(_) => "todo-watcher",
-            DispatchTarget::InboxItem(_) => "inbox-watcher",
         }
     }
 }
@@ -1753,12 +1714,11 @@ impl std::fmt::Display for DispatchTarget {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DispatchTarget::Task(id) => write!(f, "task {id}"),
-            DispatchTarget::InboxItem(id) => write!(f, "inbox item {id}"),
         }
     }
 }
 
-/// One session the todo-watcher or the inbox-watcher spawned, as
+/// One session the todo-watcher spawned, as
 /// `AppState::todo_dispatched` remembers it: what it was dispatched onto,
 /// and whether a later dispatch onto that same task has since **superseded**
 /// it.
@@ -2072,8 +2032,7 @@ fn file_reaper_alert(
 }
 
 /// One reaper pass: stop the sessions the todo-watcher dispatched whose task
-/// has since closed (mesa task 1057), and the sessions the inbox-watcher
-/// dispatched whose item has since been triaged (mesa task 1192).
+/// has since closed (mesa task 1057).
 ///
 /// The watchers' dispatch is one-directional — it starts agents and never
 /// ends them — so a session whose task closed sits idle for hours holding a
@@ -2081,16 +2040,6 @@ fn file_reaper_alert(
 /// `AppState::todo_dispatched` remembers `(job id → target)` per spawn, and
 /// each pass asks the store what became of the target and `claude agents`
 /// what became of the session ([`reap_verdict`] decides).
-///
-/// An inbox item is read through the same verdict: it is "still mine" while
-/// it is still pending ([`inbox_item_pending`] — present and not archived)
-/// and finished once it is gone (assigned or deleted) or archived, exactly
-/// the triage agent's three outcomes. The verdict's three alerts are the
-/// todo-watcher's — each is filed against a task, which a triage session has
-/// none of — so for an inbox entry they are noted on stderr and otherwise
-/// read as the plain verdict under them: live work after triage waits out
-/// the grace and is then stopped, a session that is gone is forgotten, and a
-/// stalled one is kept.
 ///
 /// Cheap when idle: an empty map returns before any lock and before any
 /// subprocess, so a server whose watcher has dispatched nothing spawns no
@@ -2130,18 +2079,10 @@ fn todo_reaper_tick(state: &AppState) {
             // A superseded session is finished with its task whatever that
             // task now reads, and a task that no longer exists counts as
             // closed: either way, this is not that task's worker any more.
-            // An inbox item still pending is the one reading that means
-            // "still mine"; anything else is a triage that ended.
-            .map(|(_, d)| match d.target {
-                DispatchTarget::Task(task_id) => {
-                    let status = store.get_task(task_id).ok().map(|t| t.status);
-                    (status.is_some(), status.filter(|_| !d.superseded))
-                }
-                DispatchTarget::InboxItem(item_id) => {
-                    let item = store.get_inbox_item(item_id).ok();
-                    let pending = item.as_ref().is_some_and(inbox_item_pending);
-                    (item.is_some(), pending.then_some(Status::InProgress))
-                }
+            .map(|(_, d)| {
+                let DispatchTarget::Task(task_id) = d.target;
+                let status = store.get_task(task_id).ok().map(|t| t.status);
+                (status.is_some(), status.filter(|_| !d.superseded))
             })
             .collect()
     };
@@ -2154,44 +2095,12 @@ fn todo_reaper_tick(state: &AppState) {
             .find(|s| s.id.as_deref() == Some(job_id.as_str()));
         let mut memory = dispatch;
         let verdict = reap_verdict(status, listed, &mut memory, now);
-        // The alerts are filed against a task; a triage session has none, so
-        // an inbox entry takes the plain verdict, said once on stderr — the
-        // three alert arms below are then unreachable for it, and the task
-        // id they would file against is never read.
-        let (task_id, verdict) = match target {
-            DispatchTarget::Task(task_id) => (task_id, verdict),
-            DispatchTarget::InboxItem(_) => {
-                let verdict = match verdict {
-                    ReapVerdict::NoteLiveWork => {
-                        eprintln!(
-                            "{watcher}: {target} was triaged while its session {job_id} still \
-                             had work running; stopping it once the work ends"
-                        );
-                        memory.work_alerted = true;
-                        ReapVerdict::Keep
-                    }
-                    ReapVerdict::AlertAbandoned => {
-                        eprintln!("{watcher}: session {job_id} ended without triaging {target}");
-                        ReapVerdict::Forget
-                    }
-                    ReapVerdict::AlertStalled => {
-                        eprintln!(
-                            "{watcher}: session {job_id} on {target} looks stalled (claude \
-                             attach {job_id})"
-                        );
-                        memory.stalled_alerted = true;
-                        ReapVerdict::Keep
-                    }
-                    other => other,
-                };
-                (0, verdict)
-            }
-        };
+        let DispatchTarget::Task(task_id) = target;
         match verdict {
             ReapVerdict::Keep => {}
             ReapVerdict::Forget => {
                 // Its live work ended by the session going away with it.
-                if memory.work_alerted && matches!(target, DispatchTarget::Task(_)) {
+                if memory.work_alerted {
                     log_reaper_event(
                         task_id,
                         &job_id,
@@ -2205,7 +2114,7 @@ fn todo_reaper_tick(state: &AppState) {
             }
             ReapVerdict::Stop => match agents::stop(&job_id) {
                 Ok(()) => {
-                    if memory.work_alerted && matches!(target, DispatchTarget::Task(_)) {
+                    if memory.work_alerted {
                         // `work_since` is still set only when the grace ran
                         // out on work that had not ended.
                         let forced = memory.work_since.is_some();
@@ -2248,8 +2157,6 @@ fn todo_reaper_tick(state: &AppState) {
                         "was re-dispatched"
                     } else if memory.work_alerted {
                         "is closed and its live work outran the grace"
-                    } else if matches!(target, DispatchTarget::InboxItem(_)) {
-                        "is triaged"
                     } else {
                         "is closed"
                     };
@@ -14700,27 +14607,10 @@ exit 2
     }
 
     fn dispatched_task(state: &AppState, job_id: &str) -> Option<i64> {
-        state
-            .todo_dispatched
-            .lock()
-            .unwrap()
-            .get(job_id)
-            .and_then(|d| match d.target {
-                DispatchTarget::Task(id) => Some(id),
-                DispatchTarget::InboxItem(_) => None,
-            })
-    }
-
-    fn dispatched_item(state: &AppState, job_id: &str) -> Option<i64> {
-        state
-            .todo_dispatched
-            .lock()
-            .unwrap()
-            .get(job_id)
-            .and_then(|d| match d.target {
-                DispatchTarget::InboxItem(id) => Some(id),
-                DispatchTarget::Task(_) => None,
-            })
+        state.todo_dispatched.lock().unwrap().get(job_id).map(|d| {
+            let DispatchTarget::Task(id) = d.target;
+            id
+        })
     }
 
     fn superseded(state: &AppState, job_id: &str) -> Option<bool> {
@@ -15996,27 +15886,64 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         assert_eq!(inbox_session_name(&item("   \n\t\n")), "inbox 7");
     }
 
+    /// A stub `naru` for `NARU_SELF_BIN`: appends its argv (`|`-joined, one
+    /// line per run) to the returned log and exits 0. Returns `(stub, log)`.
+    fn inbox_job_stub(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let log = dir.join("jobs.log");
+        let stub = dir.join("naru-stub");
+        std::fs::write(
+            &stub,
+            format!(
+                "#!/bin/bash\n{{ printf '%s|' \"$@\"; echo \"db=$NARU_DB\"; }} >> '{}'\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (stub, log)
+    }
+
+    /// Waits for `log` to hold `n` lines (the jobs run on their own), then a
+    /// beat longer so a stray extra spawn would show; answers the lines.
+    fn job_lines(log: &std::path::Path, n: usize) -> Vec<String> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let lines: Vec<String> = std::fs::read_to_string(log)
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_string)
+                .collect();
+            if lines.len() >= n || std::time::Instant::now() > deadline {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                return std::fs::read_to_string(log)
+                    .unwrap_or_default()
+                    .lines()
+                    .map(str::to_string)
+                    .collect();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
     /// The dedup set is what stands in for the todo-watcher's `in_progress`
     /// claim: every pending item is dispatched once, and a second tick over
-    /// the same inbox dispatches nothing — the triage skill's "no confident
-    /// project match" outcome leaves the item in place, so without this the
-    /// watcher would respawn an agent for it every 60s forever.
+    /// the same inbox dispatches nothing — a hold or a failed call leaves the
+    /// item in place, so without this the watcher would start a job for it
+    /// every 60s forever. Each dispatch is one detached `naru __job
+    /// inbox-triage` (naru task 1691).
     #[test]
     fn inbox_watcher_tick_dispatches_each_item_once_then_picks_up_new_ones() {
         // SAFETY: ENV_LOCK (shared with attachments/cc tests) gives this test
-        // exclusive access to MESA_CLAUDE_BIN for its duration.
+        // exclusive access to NARU_SELF_BIN for its duration; the home lock
+        // keeps the job log off the real one.
         let _env = attachments::ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        // A dispatch seeds the `inbox-triage` agent definition under `$HOME`
-        // (mesa task 1168), so this runs against a throwaway one rather than
-        // writing into whoever is running the tests. Taken *after* ENV_LOCK,
-        // the order every other test that needs both uses.
-        crate::core::library::test_home::with_home_dir(|_| {
+        crate::core::library::test_home::with_home_dir(|home| {
             let stub_dir = tempfile::tempdir().unwrap();
-            let log_path = stub_dir.path().join("bg.log");
-            let bin = stub_claude_bg(stub_dir.path(), &log_path);
-            unsafe { std::env::set_var("MESA_CLAUDE_BIN", &bin) };
+            let (stub, log_path) = inbox_job_stub(stub_dir.path());
+            unsafe { std::env::set_var("NARU_SELF_BIN", &stub) };
 
             let (_dir, state) = test_state();
             let origin = inbox_origin(&state);
@@ -16046,30 +15973,44 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             // The whole pending inbox goes out in one tick — the inbox is one
             // global queue, with no per-project cap to pace it.
             inbox_watcher_tick(&state);
-            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+            let log = job_lines(&log_path, 2);
             assert_eq!(
-                log.lines().count(),
+                log.len(),
                 2,
                 "both pending items must dispatch in the first tick: {log:?}"
             );
+            let all = log.join("\n");
             assert!(
-                log.contains(&format!("Triage mesa inbox item {}.", first.id))
-                    && log.contains(&format!("Triage mesa inbox item {}.", second.id)),
-                "each dispatch's prompt must name its own item: {log:?}"
+                all.contains(&format!("__job|inbox-triage|--item|{}|", first.id))
+                    && all.contains(&format!("__job|inbox-triage|--item|{}|", second.id)),
+                "each dispatch must name its own item: {all:?}"
             );
             assert!(
-                log.contains(&format!(
-                    "inbox {}: khora: eval errors on undefined",
+                all.contains(&format!(
+                    "--name|inbox {}: khora: eval errors on undefined|",
                     first.id
                 )),
-                "session name must identify the item: {log:?}"
+                "session name must identify the item: {all:?}"
+            );
+            assert!(
+                all.contains("--dir|") && all.contains("workspace|"),
+                "the job runs in the workspace folder: {all:?}"
+            );
+            assert!(
+                state.todo_dispatched.lock().unwrap().is_empty(),
+                "a self-exiting job leaves nothing for the reaper"
+            );
+            assert!(
+                home.join(".naru/logs/inbox-triage.log").exists()
+                    || home.join(".mesa/logs/inbox-triage.log").exists(),
+                "the job's output goes to logs/inbox-triage.log"
             );
 
             // Second tick, same inbox: nothing re-dispatches.
             inbox_watcher_tick(&state);
-            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+            let log = job_lines(&log_path, 2);
             assert_eq!(
-                log.lines().count(),
+                log.len(),
                 2,
                 "an already-dispatched item must not dispatch again: {log:?}"
             );
@@ -16087,14 +16028,14 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                 )
                 .unwrap();
             inbox_watcher_tick(&state);
-            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+            let log = job_lines(&log_path, 3);
             assert_eq!(
-                log.lines().count(),
+                log.len(),
                 3,
                 "a new item must dispatch even though older ones are claimed: {log:?}"
             );
             assert!(
-                log.contains(&format!("Triage mesa inbox item {}.", third.id)),
+                log.join("\n").contains(&format!("--item|{}|", third.id)),
                 "the new item's own id must be dispatched: {log:?}"
             );
 
@@ -16112,13 +16053,13 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                 "an item that left the inbox must be pruned from the dedup set"
             );
 
-            unsafe { std::env::remove_var("MESA_CLAUDE_BIN") };
+            unsafe { std::env::remove_var("NARU_SELF_BIN") };
         });
     }
 
     /// Task 846: only a change request is triaged. A task summary is an agent
     /// reporting to a person — every `/execute-todo` close-out sends one — so
-    /// dispatching it would answer a report with an agent, and the kind never
+    /// dispatching it would answer a report with a job, and the kind never
     /// changes, so the skip is permanent rather than a wait.
     #[test]
     fn inbox_watcher_tick_dispatches_change_requests_only() {
@@ -16126,15 +16067,10 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         let _env = attachments::ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        // A dispatch seeds the `inbox-triage` agent definition under `$HOME`
-        // (mesa task 1168), so this runs against a throwaway one rather than
-        // writing into whoever is running the tests. Taken *after* ENV_LOCK,
-        // the order every other test that needs both uses.
         crate::core::library::test_home::with_home_dir(|_| {
             let stub_dir = tempfile::tempdir().unwrap();
-            let log_path = stub_dir.path().join("bg.log");
-            let bin = stub_claude_bg(stub_dir.path(), &log_path);
-            unsafe { std::env::set_var("MESA_CLAUDE_BIN", &bin) };
+            let (stub, log_path) = inbox_job_stub(stub_dir.path());
+            unsafe { std::env::set_var("NARU_SELF_BIN", &stub) };
 
             let (_dir, state) = test_state();
             let origin = inbox_origin(&state);
@@ -16162,14 +16098,14 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                 .unwrap();
 
             inbox_watcher_tick(&state);
-            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+            let log = job_lines(&log_path, 1);
             assert_eq!(
-                log.lines().count(),
+                log.len(),
                 1,
                 "only the change request may dispatch: {log:?}"
             );
             assert!(
-                log.contains(&format!("Triage mesa inbox item {}.", request.id)),
+                log[0].contains(&format!("--item|{}|", request.id)),
                 "{log:?}"
             );
             assert!(
@@ -16179,33 +16115,27 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
 
             // A second tick is not a delayed dispatch: the kind is fixed.
             inbox_watcher_tick(&state);
-            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
-            assert_eq!(log.lines().count(), 1, "{log:?}");
+            let log = job_lines(&log_path, 1);
+            assert_eq!(log.len(), 1, "{log:?}");
 
-            unsafe { std::env::remove_var("MESA_CLAUDE_BIN") };
+            unsafe { std::env::remove_var("NARU_SELF_BIN") };
         });
     }
 
-    /// A spawn failure must release the claim, so a transient `claude`
-    /// outage retries next tick instead of silently dropping the item —
-    /// the inbox equivalent of the todo-watcher's revert-to-`todo`.
+    /// A job that cannot start must release the claim, so a transient failure
+    /// retries next tick instead of silently dropping the item — the inbox
+    /// equivalent of the todo-watcher's revert-to-`todo`.
     #[test]
-    fn inbox_watcher_tick_releases_claim_when_spawn_fails() {
+    fn inbox_watcher_tick_releases_claim_when_the_job_cannot_start() {
         // SAFETY: see `inbox_watcher_tick_dispatches_each_item_once_...`.
         let _env = attachments::ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        // A dispatch seeds the `inbox-triage` agent definition under `$HOME`
-        // (mesa task 1168), so this runs against a throwaway one rather than
-        // writing into whoever is running the tests. Taken *after* ENV_LOCK,
-        // the order every other test that needs both uses.
         crate::core::library::test_home::with_home_dir(|_| {
             let stub_dir = tempfile::tempdir().unwrap();
-            let log_path = stub_dir.path().join("bg.log");
-            let bin = stub_claude_bg(stub_dir.path(), &log_path);
-            // `stub_claude_bg`'s `--bg` branch fails while this marker exists.
-            std::fs::write(stub_dir.path().join("fail"), "").unwrap();
-            unsafe { std::env::set_var("MESA_CLAUDE_BIN", &bin) };
+            let (stub, log_path) = inbox_job_stub(stub_dir.path());
+            // A binary that does not exist: the spawn itself fails.
+            unsafe { std::env::set_var("NARU_SELF_BIN", stub_dir.path().join("missing")) };
 
             let (_dir, state) = test_state();
             let origin = inbox_origin(&state);
@@ -16224,25 +16154,24 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             inbox_watcher_tick(&state);
             assert!(
                 !state.inbox_dispatched.lock().unwrap().contains(&item.id),
-                "a failed spawn must not leave the item claimed"
+                "a failed start must not leave the item claimed"
             );
 
-            // With the stub healthy again, the next tick dispatches it.
-            std::fs::remove_file(stub_dir.path().join("fail")).unwrap();
+            // With the binary healthy again, the next tick dispatches it.
+            unsafe { std::env::set_var("NARU_SELF_BIN", &stub) };
             inbox_watcher_tick(&state);
-            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+            let log = job_lines(&log_path, 1);
             assert!(
-                log.contains(&format!("Triage mesa inbox item {}.", item.id)),
-                "the item must dispatch once the spawn succeeds: {log:?}"
+                log.join("\n").contains(&format!("--item|{}|", item.id)),
+                "the item must dispatch once the job can start: {log:?}"
             );
 
-            unsafe { std::env::remove_var("MESA_CLAUDE_BIN") };
+            unsafe { std::env::remove_var("NARU_SELF_BIN") };
         });
     }
 
     /// The one definition of "needs triage" (mesa task 1192): a change
-    /// request that is not archived. Read by the dispatch to pick items and
-    /// by the reaper to know a triage session is finished.
+    /// request that is not archived. Read by the dispatch to pick items.
     #[test]
     fn inbox_item_pending_is_a_live_change_request() {
         let (_dir, state) = test_state();
@@ -16270,7 +16199,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
     }
 
     /// Mesa task 1192: an archived change request has been triaged — that is
-    /// the triage agent's own verdict — so it is never a dispatch candidate.
+    /// the triage's own verdict — so it is never a dispatch candidate.
     /// Before, only the in-memory dedup set held it back, and a server
     /// restart empties that set, so every restart re-triaged every archived
     /// request. Simulated here by clearing the set between ticks.
@@ -16282,9 +16211,8 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             .unwrap_or_else(|e| e.into_inner());
         crate::core::library::test_home::with_home_dir(|_| {
             let stub_dir = tempfile::tempdir().unwrap();
-            let log_path = stub_dir.path().join("bg.log");
-            let bin = stub_claude_bg(stub_dir.path(), &log_path);
-            unsafe { std::env::set_var("MESA_CLAUDE_BIN", &bin) };
+            let (stub, log_path) = inbox_job_stub(stub_dir.path());
+            unsafe { std::env::set_var("NARU_SELF_BIN", &stub) };
 
             let (_dir, state) = test_state();
             let origin = inbox_origin(&state);
@@ -16295,8 +16223,8 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                 .create_inbox_item(None, "mesa: a request", InboxKind::ChangeRequest, origin)
                 .unwrap();
             inbox_watcher_tick(&state);
-            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
-            assert_eq!(log.lines().count(), 1, "{log:?}");
+            let log = job_lines(&log_path, 1);
+            assert_eq!(log.len(), 1, "{log:?}");
 
             // Triaged: archived with a reason. A restart forgets the dedup
             // set, and the next tick must still not dispatch it.
@@ -16308,9 +16236,9 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                 .unwrap();
             state.inbox_dispatched.lock().unwrap().clear();
             inbox_watcher_tick(&state);
-            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+            let log = job_lines(&log_path, 1);
             assert_eq!(
-                log.lines().count(),
+                log.len(),
                 1,
                 "an archived request must not be re-triaged after a restart: {log:?}"
             );
@@ -16327,129 +16255,14 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                 .set_inbox_item_archived(item.id, false, None, None)
                 .unwrap();
             inbox_watcher_tick(&state);
-            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+            let log = job_lines(&log_path, 2);
             assert_eq!(
-                log.lines().count(),
+                log.len(),
                 2,
                 "an un-archived request is pending again: {log:?}"
             );
 
-            unsafe { std::env::remove_var("MESA_CLAUDE_BIN") };
-        });
-    }
-
-    /// Mesa task 1192: the inbox-watcher's dispatch records its receipt in
-    /// the same map the todo-watcher's does, and the reaper stops the triage
-    /// session once its item is triaged — archived, assigned or deleted — and
-    /// the session is not busy. Exactly once, then forgotten.
-    #[test]
-    fn todo_reaper_tick_stops_a_triage_session_once_its_item_is_triaged() {
-        // SAFETY: ENV_LOCK gives this test exclusive access to
-        // MESA_CLAUDE_BIN / MESA_CONFIG_FILE for its duration.
-        let _env = attachments::ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        // A dispatch seeds the `inbox-triage` agent definition under `$HOME`
-        // (mesa task 1168). Taken *after* ENV_LOCK, the usual order.
-        crate::core::library::test_home::with_home_dir(|_| {
-            let stub_dir = tempfile::tempdir().unwrap();
-            let agents_file = stub_dir.path().join("agents.json");
-            let stop_log = stub_dir.path().join("stops.log");
-            let bin = stub_claude_reaper(stub_dir.path(), &agents_file, &stop_log);
-            unsafe { std::env::set_var("MESA_CLAUDE_BIN", &bin) };
-
-            let (_dir, state) = test_state();
-            let origin = inbox_origin(&state);
-            let item = state
-                .store
-                .lock()
-                .unwrap()
-                .create_inbox_item(None, "mesa: a request", InboxKind::ChangeRequest, origin)
-                .unwrap();
-
-            // The dispatch records the receipt's job id against the item.
-            inbox_watcher_tick(&state);
-            assert_eq!(
-                dispatched_item(&state, "job0001"),
-                Some(item.id),
-                "a successful dispatch must record its job id against its item"
-            );
-
-            // Still pending: the session is left alone however idle it is.
-            std::fs::write(
-                &agents_file,
-                agents_listing("job0001", Some(4242), Some("idle")),
-            )
-            .unwrap();
-            todo_reaper_tick(&state);
-            assert!(
-                stops(&stop_log).is_empty(),
-                "a pending item's triage session must never be stopped"
-            );
-            assert_eq!(dispatched_item(&state, "job0001"), Some(item.id));
-
-            // Archived with a reason — triaged — but the session is still
-            // busy (writing its verdict): this pass stops nothing.
-            state
-                .store
-                .lock()
-                .unwrap()
-                .set_inbox_item_archived(item.id, true, Some("not actionable"), None)
-                .unwrap();
-            std::fs::write(
-                &agents_file,
-                agents_listing("job0001", Some(4242), Some("busy")),
-            )
-            .unwrap();
-            todo_reaper_tick(&state);
-            assert!(
-                stops(&stop_log).is_empty(),
-                "a busy session must be left for the next pass"
-            );
-            assert_eq!(dispatched_item(&state, "job0001"), Some(item.id));
-
-            // Idle now: stopped exactly once, and forgotten.
-            std::fs::write(
-                &agents_file,
-                agents_listing("job0001", Some(4242), Some("idle")),
-            )
-            .unwrap();
-            todo_reaper_tick(&state);
-            assert_eq!(stops(&stop_log), vec!["job0001".to_string()]);
-            assert_eq!(dispatched_item(&state, "job0001"), None);
-            todo_reaper_tick(&state);
-            assert_eq!(
-                stops(&stop_log),
-                vec!["job0001".to_string()],
-                "a stopped session must not be stopped again"
-            );
-
-            // The other terminal outcome: the item is gone (assigned or
-            // deleted). The stub hands out `job0001` again; the first entry
-            // is already forgotten, so the key is free.
-            let second = state
-                .store
-                .lock()
-                .unwrap()
-                .create_inbox_item(None, "mesa: another", InboxKind::ChangeRequest, origin)
-                .unwrap();
-            inbox_watcher_tick(&state);
-            assert_eq!(dispatched_item(&state, "job0001"), Some(second.id));
-            state
-                .store
-                .lock()
-                .unwrap()
-                .delete_inbox_item(second.id)
-                .unwrap();
-            todo_reaper_tick(&state);
-            assert_eq!(
-                stops(&stop_log),
-                vec!["job0001".to_string(), "job0001".to_string()],
-                "a deleted item's idle session is stopped"
-            );
-            assert_eq!(dispatched_item(&state, "job0001"), None);
-
-            unsafe { std::env::remove_var("MESA_CLAUDE_BIN") };
+            unsafe { std::env::remove_var("NARU_SELF_BIN") };
         });
     }
 

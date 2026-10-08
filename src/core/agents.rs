@@ -954,7 +954,8 @@ pub fn workflow_prompt_script(
 }
 
 /// The script for one structured-output `claude -p` call (naru task 1690):
-/// `live-summary` and `live-dream` resolved through the same
+/// `live-summary`, `live-dream` and `inbox-watcher` (which also takes the
+/// pass's `model`) resolved through the same
 /// [`spawn_for_vars`] every spawn uses, so `{id}`, `{name}`, `{prompt}` and
 /// `{schema}` reach it only as shell-quoted values and the `MESA_CLAUDE_BIN`
 /// seam applies. The caller runs it (`core::llm::complete_structured`) and
@@ -965,6 +966,7 @@ pub fn structured_script(
     name: &str,
     prompt: &str,
     schema: &str,
+    model: Option<&str>,
     prompts: &config::Prompts,
 ) -> Result<String, String> {
     spawn_for_vars(
@@ -974,6 +976,7 @@ pub fn structured_script(
             name: Some(name),
             prompt: Some(prompt),
             schema: Some(schema),
+            model,
             prompts: Some(prompts),
             ..Default::default()
         },
@@ -1803,9 +1806,10 @@ echo "backgrounded · 5we00000 · n""#,
             "dispatch\n--task\n42\n--label\nmesa: a name with spaces\n"
         );
         assert!(
-            fallback.contains("\"Triage mesa inbox item 7.\""),
+            fallback.contains(" -p ") && fallback.contains("--json-schema"),
             "{fallback:?}"
         );
+        assert!(!fallback.contains("--bg"), "{fallback:?}");
     }
 
     #[test]

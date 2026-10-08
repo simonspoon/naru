@@ -31,8 +31,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::core::{
-    Error, Priority, Result, Status, Store, agents, config, library, live, llm, project_memory,
-    runner, script_runs,
+    Error, Priority, Result, Status, Store, agents, config, inbox_triage, library, live, llm,
+    project_memory, runner, script_runs,
 };
 
 /// How long one job's `claude` call may run before it is killed.
@@ -51,6 +51,9 @@ pub enum Job {
     Dream { session_id: Option<i64> },
     /// Dream over one project's notebook.
     ProjectDream { project_id: i64 },
+    /// Triage one inbox change request (naru task 1691): two `-p` calls,
+    /// applied by `core::inbox_triage`; `name` is the claude session name.
+    InboxTriage { item_id: i64, name: String },
 }
 
 impl Job {
@@ -75,20 +78,30 @@ impl Job {
                     project_id.to_string(),
                 ]);
             }
+            Job::InboxTriage { item_id, name } => {
+                a.extend(["inbox-triage".into(), "--item".into(), item_id.to_string()]);
+                a.extend(["--name".into(), name.clone()]);
+            }
         }
         a.extend(["--dir".into(), dir.to_string()]);
         a
     }
+
+    /// The log this job's stdout and stderr are appended to.
+    fn log_name(&self) -> &'static str {
+        match self {
+            Job::InboxTriage { .. } => "inbox-triage.log",
+            _ => "memory-jobs.log",
+        }
+    }
 }
 
-/// `logs/memory-jobs.log` in Naru's home directory, beside the reaper's.
-fn log_path() -> PathBuf {
+/// `logs/<name>` in Naru's home directory, beside the reaper's.
+fn log_path(name: &str) -> PathBuf {
     let home = directories::BaseDirs::new()
         .map(|d| d.home_dir().to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
-    config::dot_dir_in(&home)
-        .join("logs")
-        .join("memory-jobs.log")
+    config::dot_dir_in(&home).join("logs").join(name)
 }
 
 /// The program a job re-runs: `NARU_SELF_BIN` (the test seam — inside `cargo
@@ -107,7 +120,7 @@ fn self_exe() -> std::io::Result<PathBuf> {
 /// so a long-lived server keeps no zombie (which `kill -0` would read as
 /// alive).
 pub fn spawn(job: &Job, dir: &str, db: Option<&Path>) -> std::result::Result<String, String> {
-    let log = log_path();
+    let log = log_path(job.log_name());
     if let Some(parent) = log.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
@@ -181,6 +194,7 @@ pub fn run_with(store: &mut Store, job: &Job, dir: &str, timeout: Duration) -> R
                 name,
                 &prompt,
                 live::SUMMARY_SCHEMA,
+                None,
                 &prompts,
                 dir,
                 timeout,
@@ -203,6 +217,7 @@ pub fn run_with(store: &mut Store, job: &Job, dir: &str, timeout: Duration) -> R
                 "live memory dream",
                 &prompt,
                 live::LIVE_DREAM_SCHEMA,
+                None,
                 &prompts,
                 dir,
                 timeout,
@@ -222,6 +237,7 @@ pub fn run_with(store: &mut Store, job: &Job, dir: &str, timeout: Duration) -> R
                 "project memory dream",
                 &prompt,
                 live::PROJECT_DREAM_SCHEMA,
+                None,
                 &prompts,
                 dir,
                 timeout,
@@ -231,6 +247,21 @@ pub fn run_with(store: &mut Store, job: &Job, dir: &str, timeout: Duration) -> R
             report["kind"] = json!("project-dream");
             report["project_id"] = json!(project_id);
             Ok(report)
+        }
+        Job::InboxTriage { item_id, name } => {
+            inbox_triage::run_with(store, *item_id, &mut |model, prompt, schema| {
+                llm::complete_structured(
+                    config::INBOX_WATCHER,
+                    Some(*item_id),
+                    name,
+                    prompt,
+                    schema,
+                    Some(model),
+                    &prompts,
+                    dir,
+                    timeout,
+                )
+            })
         }
     }
 }
@@ -451,6 +482,28 @@ mod tests {
         assert_eq!(
             Job::ProjectDream { project_id: 9 }.args("/w"),
             ["__job", "project-dream", "--project", "9", "--dir", "/w"]
+        );
+        let triage = Job::InboxTriage {
+            item_id: 5,
+            name: "inbox 5".into(),
+        };
+        assert_eq!(
+            triage.args("/w"),
+            [
+                "__job",
+                "inbox-triage",
+                "--item",
+                "5",
+                "--name",
+                "inbox 5",
+                "--dir",
+                "/w"
+            ]
+        );
+        assert_eq!(triage.log_name(), "inbox-triage.log");
+        assert_eq!(
+            Job::Dream { session_id: None }.log_name(),
+            "memory-jobs.log"
         );
     }
 
