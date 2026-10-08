@@ -94,7 +94,7 @@ export function draftFrom(prices: ConfigPrice[]): PricingDraft {
 export function isBlank(row: RateDraft): boolean {
   return (
     RATE_FIELDS.every((f) => (row[f] ?? '').trim() === '') &&
-    row.tiers === undefined
+    (row.tiers === undefined || row.tiers.length === 0)
   )
 }
 

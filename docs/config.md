@@ -599,7 +599,9 @@ estimated $0.
 - Naru ships defaults for `claude-fable`, `claude-mythos`, `claude-opus`,
   `claude-sonnet`, `claude-haiku` and `claude-haiku-5-5`
   (`config::DEFAULT_PRICES`). An **absent
-  key uses the built-in**; the config only ever overlays.
+  key uses the built-in**; the config only ever overlays. An override replaces
+  the whole entry, so overriding a tiered built-in without `tiers` makes it
+  flat.
 - **Longest matching prefix wins** over the merged table, so a variant can be
   priced beside its family. A model no prefix matches estimates **$0** — no
   cost rather than a wrong one.

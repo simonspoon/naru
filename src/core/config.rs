@@ -82,7 +82,7 @@
 //! ```
 //!
 //! Keys are model-family **prefixes** (`starts_with`), values USD per 1M
-//! tokens. [`DEFAULT_PRICES`] ships the families mesa knows; the config
+//! tokens. [`default_prices`] ships the families mesa knows; the config
 //! overlays them and may add prefixes the binary has never heard of, which is
 //! the point — a new model family gets priced without a rebuild. See
 //! [`PriceTable`].
@@ -1785,7 +1785,7 @@ struct PricingConfig {
     pricing: HashMap<String, ModelRates>,
 }
 
-/// The merged price table: [`DEFAULT_PRICES`] overlaid by the config's
+/// The merged price table: [`default_prices`] overlaid by the config's
 /// `pricing` section. Built **once per request** and passed down — `cc.rs`
 /// prices every message through it, so re-reading the file per message would
 /// be a per-row `stat`+parse in a hot loop.

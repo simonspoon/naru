@@ -307,9 +307,32 @@ describe('context tiers', () => {
   })
 
   it('removing the last tier sends the row flat', () => {
-    const row = removeTier(blankRates(), 0, HAIKU.default)
+    const row = removeTier(
+      { ...blankRates(), input: '0.1' },
+      0,
+      HAIKU.default,
+    )
     const sent = changedPricing([HAIKU], { [HAIKU.prefix]: row })
     expect(sent[HAIKU.prefix]).toEqual(rates(0.1, 0.5, 0.01, 0.125))
+  })
+
+  it('clearing every rate box of a flat override of a tiered built-in means reset', () => {
+    const configured: ConfigPrice = { ...HAIKU, value: rates(1, 2, 3, 4) }
+    const draft = draftFrom([configured])
+    expect(draft[HAIKU.prefix].tiers).toEqual([])
+    expect(isBlank(draft[HAIKU.prefix])).toBe(false)
+    const cleared = { ...draft[HAIKU.prefix], ...blankRates() }
+    expect(isBlank(cleared)).toBe(true)
+    expect(changedPricing([configured], { [HAIKU.prefix]: cleared })).toEqual({
+      [HAIKU.prefix]: null,
+    })
+  })
+
+  it('a configured flat row with its rates cleared is blank too', () => {
+    const flat: ConfigPrice = { ...ADDED }
+    const row = { ...draftFrom([flat]).newco, ...blankRates() }
+    expect(isBlank(row)).toBe(true)
+    expect(changedPricing([flat], { newco: row })).toEqual({ newco: null })
   })
 
   it('names a duplicate threshold and blocks the save', () => {
