@@ -1,4 +1,5 @@
 import type { ConfigPrice } from './types/ConfigPrice'
+import type { LongContextRates } from './types/LongContextRates'
 import type { ModelRates } from './types/ModelRates'
 
 /**
@@ -27,8 +28,24 @@ export const RATE_FIELDS = [
 
 export type RateField = (typeof RATE_FIELDS)[number]
 
-/** One row's four boxes as typed. */
-export type RateDraft = Record<RateField, string>
+/** The long-context tier's boxes: a token threshold plus the four rates. */
+export const TIER_FIELDS = ['above_tokens', ...RATE_FIELDS] as const
+
+export type TierField = (typeof TIER_FIELDS)[number]
+
+export type TierDraft = Record<TierField, string>
+
+/**
+ * One row's four boxes as typed, plus its optional context-size tier
+ * (`long_context`, the rates a request pays once its prompt is over the
+ * threshold). `tier` has three states, and the difference matters:
+ * `undefined` = not touched (inherits the built-in's tier, if any), `null` =
+ * explicitly no tier, an object = the tier as typed. A tier the user never
+ * touched is therefore carried through a save rather than dropped.
+ */
+export type RateDraft = Record<RateField, string> & {
+  tier?: TierDraft | null
+}
 
 /** Per-prefix draft state, keyed exactly as the server keys the config. */
 export type PricingDraft = Record<string, RateDraft>
@@ -45,9 +62,20 @@ export function blankRates(): RateDraft {
   return { ...BLANK }
 }
 
+function tierText(t: LongContextRates): TierDraft {
+  return {
+    above_tokens: String(t.above_tokens),
+    input: String(t.input),
+    output: String(t.output),
+    cache_read: String(t.cache_read),
+    cache_write: String(t.cache_write),
+  }
+}
+
 function textFor(value: ModelRates | null): RateDraft {
   if (!value) return blankRates()
   return {
+    tier: value.long_context ? tierText(value.long_context) : null,
     input: String(value.input),
     output: String(value.output),
     cache_read: String(value.cache_read),
@@ -64,7 +92,66 @@ export function draftFrom(prices: ConfigPrice[]): PricingDraft {
 
 /** True when every box in a row is blank — the "no override" state. */
 export function isBlank(row: RateDraft): boolean {
-  return RATE_FIELDS.every((f) => (row[f] ?? '').trim() === '')
+  return (
+    RATE_FIELDS.every((f) => (row[f] ?? '').trim() === '') &&
+    row.tier === undefined
+  )
+}
+
+/** The tier a row shows: the drafted one, else the built-in's, else none. */
+export function shownTier(
+  row: RateDraft,
+  defaults?: ModelRates | null,
+): TierDraft | null {
+  if (row.tier !== undefined) return row.tier
+  return defaults?.long_context ? tierText(defaults.long_context) : null
+}
+
+const BLANK_TIER: TierDraft = {
+  above_tokens: '',
+  input: '',
+  output: '',
+  cache_read: '',
+  cache_write: '',
+}
+
+/** Starts a tier on a row (blank boxes; the built-in's tier if it has one). */
+export function addTier(row: RateDraft, defaults?: ModelRates | null): RateDraft {
+  const t = defaults?.long_context
+  return { ...row, tier: t ? tierText(t) : { ...BLANK_TIER } }
+}
+
+/** Drops the tier: the row is then priced flat. */
+export function clearTier(row: RateDraft): RateDraft {
+  return { ...row, tier: null }
+}
+
+/** Edits one tier box, first adopting the built-in's tier if none is drafted. */
+export function editTier(
+  row: RateDraft,
+  field: TierField,
+  value: string,
+  defaults?: ModelRates | null,
+): RateDraft {
+  const base = shownTier(row, defaults) ?? BLANK_TIER
+  return { ...row, tier: { ...base, [field]: value } }
+}
+
+/** The complaints about a drafted tier; the server needs every box. */
+export function tierErrors(tier: TierDraft | null | undefined): string[] {
+  if (!tier) return []
+  const errors: string[] = []
+  const t = (tier.above_tokens ?? '').trim()
+  const n = Number(t)
+  if (t === '') errors.push('tier above_tokens: required')
+  else if (!Number.isInteger(n) || n < 1) {
+    errors.push('tier above_tokens: must be a whole number ≥ 1')
+  }
+  for (const f of RATE_FIELDS) {
+    const e = rateError(tier[f] ?? '')
+    if (e) errors.push(`tier ${f}: ${e}`)
+  }
+  return errors
 }
 
 /**
@@ -116,6 +203,7 @@ export function rowErrors(
       if (e) errors.push(`${f}: ${e}`)
     }
   }
+  errors.push(...tierErrors(row.tier))
   return errors
 }
 
@@ -133,12 +221,24 @@ export function resolveRates(
     if (text === '' && defaults) return defaults[f]
     return Number(text)
   }
-  return {
+  const out: ModelRates = {
     input: at('input'),
     output: at('output'),
     cache_read: at('cache_read'),
     cache_write: at('cache_write'),
   }
+  if (row.tier) {
+    out.long_context = {
+      above_tokens: Number(row.tier.above_tokens.trim()),
+      input: Number(row.tier.input.trim()),
+      output: Number(row.tier.output.trim()),
+      cache_read: Number(row.tier.cache_read.trim()),
+      cache_write: Number(row.tier.cache_write.trim()),
+    }
+  } else if (row.tier === undefined && defaults?.long_context) {
+    out.long_context = defaults.long_context
+  }
+  return out
 }
 
 /** What a row's cost will actually be computed from: the draft, else the default. */
@@ -156,7 +256,13 @@ export function effectiveRates(
 
 function sameRates(a: ModelRates | null, b: ModelRates | null): boolean {
   if (!a || !b) return a === b
-  return RATE_FIELDS.every((f) => a[f] === b[f])
+  if (!RATE_FIELDS.every((f) => a[f] === b[f])) return false
+  const x = a.long_context
+  const y = b.long_context
+  if (!x || !y) return !x && !y
+  return (
+    x.above_tokens === y.above_tokens && RATE_FIELDS.every((f) => x[f] === y[f])
+  )
 }
 
 /** True when this row's boxes differ from what the server last reported. */

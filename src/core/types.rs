@@ -360,6 +360,44 @@ pub struct ModelRates {
     pub output: f64,
     pub cache_read: f64,
     pub cache_write: f64,
+    /// An optional context-size tier: a request whose prompt is strictly over
+    /// `above_tokens` is priced wholly at the tier's rates. Absent = one flat
+    /// rate, and the key is then omitted so output is byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub long_context: Option<LongContextRates>,
+}
+
+/// The rates a request pays when its prompt (input + cache read + cache
+/// creation tokens) is strictly over `above_tokens`; every token kind of that
+/// request, output included, is priced at these. USD per **1M tokens**.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct LongContextRates {
+    #[ts(type = "number")]
+    pub above_tokens: u64,
+    pub input: f64,
+    pub output: f64,
+    pub cache_read: f64,
+    pub cache_write: f64,
+}
+
+impl ModelRates {
+    /// The one rate-selection rule: the flat rates, or the long-context tier
+    /// (returned as flat rates) when `prompt_tokens` is strictly over its
+    /// threshold. Every cost formula goes through this.
+    pub fn for_prompt(&self, prompt_tokens: i64) -> ModelRates {
+        match self.long_context {
+            Some(t) if prompt_tokens.max(0) as u64 > t.above_tokens => ModelRates {
+                input: t.input,
+                output: t.output,
+                cache_read: t.cache_read,
+                cache_write: t.cache_write,
+                long_context: None,
+            },
+            _ => *self,
+        }
+    }
 }
 
 /// One model-family price row as the Settings page sees it (`core::config`,

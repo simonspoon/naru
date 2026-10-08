@@ -1511,7 +1511,9 @@ fn load_prices() -> Result<PriceTable> {
 }
 
 fn estimate_cost(prices: &PriceTable, model: &str, u: &RawUsage) -> f64 {
-    let r = prices.for_model(model);
+    let r = prices
+        .for_model(model)
+        .for_prompt(u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens);
     (u.input_tokens as f64 * r.input
         + u.output_tokens as f64 * r.output
         + u.cache_read_input_tokens as f64 * r.cache_read
@@ -1522,7 +1524,9 @@ fn estimate_cost(prices: &PriceTable, model: &str, u: &RawUsage) -> f64 {
 /// The cost of one stored message row — the db-side twin of [`estimate_cost`],
 /// shared by the two per-session rollups so the formula exists once.
 fn row_cost(prices: &PriceTable, m: &CcMessageRow) -> f64 {
-    let r = prices.for_model(&m.model);
+    let r = prices
+        .for_model(&m.model)
+        .for_prompt(m.input_tokens + m.cache_read_tokens + m.cache_creation_tokens);
     (m.input_tokens as f64 * r.input
         + m.output_tokens as f64 * r.output
         + m.cache_read_tokens as f64 * r.cache_read
@@ -5160,6 +5164,16 @@ mod tests {
         let builtin = PriceTable::builtin();
         // Opus: $5 in + $25 out per Mtok = $30.
         assert!((estimate_cost(&builtin, "claude-opus-4-8", &u) - 30.0).abs() < 1e-9);
+        // Haiku 5.5 tiers on prompt length: 100000 is base, 100001 is the
+        // tier, with the output priced at the tier too.
+        let h = |prompt: i64| RawUsage {
+            input_tokens: prompt,
+            output_tokens: 1_000_000,
+            ..Default::default()
+        };
+        assert!((estimate_cost(&builtin, "claude-haiku-5-5", &h(100_000)) - 0.51).abs() < 1e-9);
+        let over = estimate_cost(&builtin, "claude-haiku-5-5", &h(100_001));
+        assert!((over - (100_001.0 * 0.50 / 1e6 + 2.50)).abs() < 1e-9);
         // Unknown / synthetic: zero.
         assert_eq!(estimate_cost(&builtin, "<synthetic>", &u), 0.0);
 

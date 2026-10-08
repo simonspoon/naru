@@ -501,7 +501,12 @@ comments — several entries are the bare `DELETE FROM cc_files;` cursor clear.
   (`docs/config.md`), so a price change or a new model family needs no rebuild.
   Matched on a model-family prefix, longest match winning, so point releases
   price correctly and a variant can be priced beside its family; an unmatched
-  model estimates $0. Because cost is derived on every read, an edit
+  model estimates $0. A row may carry a context-size tier (Claude Haiku 5.5
+  ships one): a message whose prompt — input + cache read + cache creation
+  tokens — is strictly over the threshold is priced wholly at the tier's
+  rates, output included (`ModelRates::for_prompt`, the one selector both
+  `estimate_cost` and `row_cost` call; `docs/config.md` "Pricing"). Because
+  cost is derived on every read, an edit
   retroactively restates every historical figure — intended. The table is
   loaded **once per request**, never per message. Labelled "estimated" in the
   UI.

@@ -604,7 +604,7 @@ write_config <<EOF
 EOF
 api GET /api/config/pricing
 [ "$CODE" = "200" ] || fail "GET pricing: expected 200, got $CODE: $STDOUT"
-[ "$(jq -r 'map(.prefix) | join(",")' <<<"$STDOUT")" = "claude-fable,claude-mythos,claude-opus,claude-sonnet,claude-haiku" ] ||
+[ "$(jq -r 'map(.prefix) | join(",")' <<<"$STDOUT")" = "claude-fable,claude-mythos,claude-opus,claude-sonnet,claude-haiku,claude-haiku-5-5" ] ||
   fail "GET pricing must list the built-in families in order: $STDOUT"
 [ "$(jq -r '.[] | select(.prefix=="claude-opus") | .value' <<<"$STDOUT")" = "null" ] ||
   fail "an unconfigured prefix must report value: null, got $STDOUT"
@@ -645,6 +645,29 @@ api PUT /api/config/pricing '{"pricing": {"claude-opus": null, "newco-x": null}}
 [ "$(jq -r '.pricing | has("claude-opus")' < "$CONFIG")" = "false" ] ||
   fail "null must remove the key, never store it zeroed: $(cat "$CONFIG")"
 ok "PUT null restores the built-in rate for a shipped family and deletes a user-added prefix"
+
+# A context-size tier (naru task 1713): Haiku 5.5 ships one; a user prefix can
+# carry its own, and it round-trips; a flat four-field row stays flat.
+api GET /api/config/pricing
+[ "$(jq -r '.[] | select(.prefix=="claude-haiku-5-5") | .default.long_context.above_tokens' <<<"$STDOUT")" = "100000" ] ||
+  fail "claude-haiku-5-5 must ship a 100000-token tier: $STDOUT"
+[ "$(jq -r '.[] | select(.prefix=="claude-opus") | .default | has("long_context")' <<<"$STDOUT")" = "false" ] ||
+  fail "a flat family must carry no long_context key: $STDOUT"
+api PUT /api/config/pricing '{"pricing": {"tiered-x": {"input": 1, "output": 2, "cache_read": 3, "cache_write": 4, "long_context": {"above_tokens": 50000, "input": 5, "output": 6, "cache_read": 7, "cache_write": 8}}, "flat-x": {"input": 1, "output": 2, "cache_read": 3, "cache_write": 4}}}'
+[ "$CODE" = "200" ] || fail "PUT tiered pricing: expected 200, got $CODE: $STDOUT"
+[ "$(jq -r '.[] | select(.prefix=="tiered-x") | .value.long_context | [.above_tokens, .input, .output, .cache_read, .cache_write] == [50000,5,6,7,8]' <<<"$STDOUT")" = "true" ] ||
+  fail "a tier must round-trip through PUT/GET: $STDOUT"
+[ "$(jq -r '.[] | select(.prefix=="flat-x") | .value | has("long_context")' <<<"$STDOUT")" = "false" ] ||
+  fail "a four-field row must stay flat: $STDOUT"
+[ "$(jq -r '.pricing["tiered-x"].long_context.above_tokens' < "$CONFIG")" = "50000" ] ||
+  fail "the tier must be stored in the config file: $(cat "$CONFIG")"
+BEFORE=$(cat "$CONFIG")
+api PUT /api/config/pricing '{"pricing": {"tiered-x": {"input": 1, "output": 2, "cache_read": 3, "cache_write": 4, "long_context": {"above_tokens": 0, "input": 5, "output": 6, "cache_read": 7, "cache_write": 8}}}}'
+[ "$CODE" = "422" ] || fail "zero tier threshold: expected 422, got $CODE: $STDOUT"
+[ "$(cat "$CONFIG")" = "$BEFORE" ] || fail "a rejected tier PUT must not touch the file"
+api PUT /api/config/pricing '{"pricing": {"tiered-x": null, "flat-x": null}}'
+[ "$CODE" = "200" ] || fail "PUT tiered cleanup: expected 200, got $CODE: $STDOUT"
+ok "a long-context tier round-trips through PUT/GET /api/config/pricing, a four-field row stays flat, and a zero threshold is a 422 writing nothing"
 
 BEFORE=$(cat "$CONFIG")
 api PUT /api/config/pricing '{"pricing": {"claude-opus": {"input": -1, "output": 2, "cache_read": 3, "cache_write": 4}}}'

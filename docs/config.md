@@ -526,8 +526,21 @@ estimated $0.
   release prices correctly with no edit. All four rates are USD per **1M
   tokens** and all four are required; Naru never derives a cache rate from the
   input rate.
+- A row may add an optional **context-size tier**, `long_context`
+  (`{"above_tokens", "input", "output", "cache_read", "cache_write"}`, naru
+  task 1713). A request's prompt is its input + cache read + cache creation
+  tokens; when that is **strictly over** `above_tokens` the whole request —
+  all four token kinds, output included — is priced at the tier's rates,
+  otherwise at the row's base rates. The threshold is a whole number ≥ 1 and
+  the rates are numbers ≥ 0 (else 422); absent, the key is omitted and the row
+  is flat, so existing files and four-field PUT bodies are unchanged. The
+  Settings editor shows, adds and clears it per row, and a row saved without
+  touching its tier keeps it. Example: `claude-haiku-5-5` ships base
+  0.10 / 0.50 / 0.01 / 0.125 with a tier above 100000 tokens of
+  0.50 / 2.50 / 0.05 / 0.625.
 - Naru ships defaults for `claude-fable`, `claude-mythos`, `claude-opus`,
-  `claude-sonnet` and `claude-haiku` (`config::DEFAULT_PRICES`). An **absent
+  `claude-sonnet`, `claude-haiku` and `claude-haiku-5-5`
+  (`config::DEFAULT_PRICES`). An **absent
   key uses the built-in**; the config only ever overlays.
 - **Longest matching prefix wins** over the merged table, so a variant can be
   priced beside its family. A model no prefix matches estimates **$0** — no

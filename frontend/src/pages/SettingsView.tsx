@@ -89,10 +89,14 @@ import {
 } from '../systemMeter'
 import {
   RATE_FIELDS,
+  TIER_FIELDS,
+  addTier,
   addedPricing,
   blankRates,
   changedPricing,
+  clearTier,
   draftFrom as pricingDraftFrom,
+  editTier,
   isBlank,
   isDirty as isPricingDirty,
   isNewRowStarted,
@@ -100,10 +104,14 @@ import {
   newRow,
   newRowErrors,
   rowErrors,
+  shownTier,
   type NewRow,
   type PricingDraft,
+  type RateDraft,
   type RateField,
+  type TierField,
 } from '../pricingDraft'
+import type { ModelRates } from '../types/ModelRates'
 import type { ConfigPrice } from '../types/ConfigPrice'
 import {
   changedCommands,
@@ -2701,6 +2709,11 @@ function PricingSection() {
     setSaved(false)
   }
 
+  function setRow(prefix: string, row: RateDraft) {
+    setDraft({ ...seeded, [prefix]: row })
+    setSaved(false)
+  }
+
   function editNew(index: number, next: NewRow) {
     setExtra(extra.map((row, i) => (i === index ? next : row)))
     setSaved(false)
@@ -2779,6 +2792,7 @@ function PricingSection() {
             draft={seeded}
             onEdit={(field, value) => editRate(p.prefix, field, value)}
             onClear={() => clearRow(p.prefix)}
+            onRow={(next) => setRow(p.prefix, next)}
           />
         ))}
         {extra.map((row, i) => (
@@ -2868,11 +2882,13 @@ function PriceRow({
   draft,
   onEdit,
   onClear,
+  onRow,
 }: {
   price: ConfigPrice
   draft: PricingDraft
   onEdit: (field: RateField, value: string) => void
   onClear: () => void
+  onRow: (next: RateDraft) => void
 }) {
   const row = draft[price.prefix] ?? blankRates()
   const overridden = !isBlank(row)
@@ -2911,12 +2927,79 @@ function PriceRow({
           <span className="muted settings-price-note">built-in</span>
         )}
       </div>
+      <TierRow
+        label={`${price.prefix} tier`}
+        row={row}
+        defaults={price.default}
+        onRow={onRow}
+      />
       {errors.map((e) => (
         <p className="error" key={e}>
           {price.prefix} — {e}
         </p>
       ))}
     </>
+  )
+}
+
+/**
+ * A row's optional context-size tier: the prompt-token threshold and the four
+ * rates a request over it pays. All logic lives in `pricingDraft.ts`.
+ */
+function TierRow({
+  label,
+  row,
+  defaults,
+  onRow,
+}: {
+  label: string
+  row: RateDraft
+  defaults?: ModelRates | null
+  onRow: (next: RateDraft) => void
+}) {
+  const tier = shownTier(row, defaults)
+  if (!tier) {
+    return (
+      <div className="settings-price-row">
+        <button
+          type="button"
+          className="settings-reset"
+          onClick={() => onRow(addTier(row, defaults))}
+        >
+          add context tier
+        </button>
+      </div>
+    )
+  }
+  return (
+    <div className="settings-price-row">
+      {TIER_FIELDS.map((field: TierField) => (
+        <input
+          key={field}
+          type="number"
+          min={field === 'above_tokens' ? '1' : '0'}
+          step={field === 'above_tokens' ? '1' : 'any'}
+          className="settings-price-input"
+          aria-label={`${label} ${field}`}
+          title={
+            field === 'above_tokens'
+              ? 'A prompt (input + cache read + cache write tokens) strictly over this many tokens pays the tier rates'
+              : undefined
+          }
+          placeholder={field === 'above_tokens' ? 'over tokens' : undefined}
+          value={tier[field]}
+          onChange={(e) => onRow(editTier(row, field, e.target.value, defaults))}
+        />
+      ))}
+      <button
+        type="button"
+        className="settings-reset"
+        title="Price this model at one flat rate"
+        onClick={() => onRow(clearTier(row))}
+      >
+        clear tier
+      </button>
+    </div>
   )
 }
 
@@ -2931,6 +3014,7 @@ function NewPriceRow({
   onRemove: () => void
 }) {
   return (
+    <>
     <div className="settings-price-row">
       <input
         type="text"
@@ -2964,6 +3048,12 @@ function NewPriceRow({
         remove
       </button>
     </div>
+    <TierRow
+      label="new prefix tier"
+      row={row.rates}
+      onRow={(rates) => onEdit({ ...row, rates })}
+    />
+    </>
   )
 }
 

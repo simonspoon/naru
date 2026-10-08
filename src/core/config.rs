@@ -199,7 +199,7 @@ use crate::core::listen;
 use crate::core::speech;
 use crate::core::types::{
     ConfigAudio, ConfigCommand, ConfigGuard, ConfigKeymap, ConfigKeymapAction, ConfigListen,
-    ConfigLive, ConfigPrice, ConfigSpeech, ConfigWatchers, ModelRates,
+    ConfigLive, ConfigPrice, ConfigSpeech, ConfigWatchers, LongContextRates, ModelRates,
 };
 
 /// The todo-watcher's dispatch command (`docs/todo-watcher.md`).
@@ -1618,12 +1618,29 @@ fn offered_list(action: &str) -> String {
 /// `cache_read` ≈ 0.1× input and `cache_write` (5-minute TTL) ≈ 1.25× input,
 /// but both are written out rather than derived — a pricing convention is not
 /// arithmetic mesa gets to assume on a family it has never seen.
-pub const DEFAULT_PRICES: [(&str, ModelRates); 5] = [
+pub const DEFAULT_PRICES: [(&str, ModelRates); 6] = [
     ("claude-fable", rates(10.0, 50.0, 1.0, 12.5)),
     ("claude-mythos", rates(10.0, 50.0, 1.0, 12.5)),
     ("claude-opus", rates(5.0, 25.0, 0.5, 6.25)),
     ("claude-sonnet", rates(3.0, 15.0, 0.3, 3.75)),
     ("claude-haiku", rates(1.0, 5.0, 0.1, 1.25)),
+    // Haiku 5.5 is priced by prompt length: over 100k tokens pays the tier.
+    (
+        "claude-haiku-5-5",
+        ModelRates {
+            input: 0.10,
+            output: 0.50,
+            cache_read: 0.01,
+            cache_write: 0.125,
+            long_context: Some(LongContextRates {
+                above_tokens: 100_000,
+                input: 0.50,
+                output: 2.50,
+                cache_read: 0.05,
+                cache_write: 0.625,
+            }),
+        },
+    ),
 ];
 
 const fn rates(input: f64, output: f64, cache_read: f64, cache_write: f64) -> ModelRates {
@@ -1632,6 +1649,7 @@ const fn rates(input: f64, output: f64, cache_read: f64, cache_write: f64) -> Mo
         output,
         cache_read,
         cache_write,
+        long_context: None,
     }
 }
 
@@ -1856,6 +1874,27 @@ fn validate_rates(prefix: &str, rates: &ModelRates) -> Result<(), String> {
                 "the {label} rate for {:?} must be a number ≥ 0, got {value}",
                 prefix.trim()
             ));
+        }
+    }
+    if let Some(t) = &rates.long_context {
+        if t.above_tokens < 1 {
+            return Err(format!(
+                "the long-context threshold for {:?} must be at least 1 token",
+                prefix.trim()
+            ));
+        }
+        for (label, value) in [
+            ("input", t.input),
+            ("output", t.output),
+            ("cache_read", t.cache_read),
+            ("cache_write", t.cache_write),
+        ] {
+            if !value.is_finite() || value < 0.0 {
+                return Err(format!(
+                    "the long-context {label} rate for {:?} must be a number ≥ 0, got {value}",
+                    prefix.trim()
+                ));
+            }
         }
     }
     Ok(())
@@ -5668,6 +5707,87 @@ mod tests {
     }
 
     #[test]
+    fn haiku_5_5_prices_the_whole_request_at_the_tier_strictly_over_100k() {
+        let table = PriceTable::builtin();
+        let r = table.for_model("claude-haiku-5-5-20260101");
+        // Exactly 100000 prompt tokens (input + cache read + cache write): base.
+        let at = r.for_prompt(60_000 + 30_000 + 10_000);
+        assert_eq!((at.input, at.output), (0.10, 0.50));
+        assert_eq!((at.cache_read, at.cache_write), (0.01, 0.125));
+        // One more token: every kind, output included, at the tier.
+        let over = r.for_prompt(100_001);
+        assert_eq!((over.input, over.output), (0.50, 2.50));
+        assert_eq!((over.cache_read, over.cache_write), (0.05, 0.625));
+        // The shorter family prefix is untouched and has no tier.
+        assert_eq!(
+            table.for_model("claude-haiku-4-5"),
+            rates(1.0, 5.0, 0.1, 1.25)
+        );
+        assert_eq!(
+            table.for_model("claude-haiku-4-5").for_prompt(10_000_000),
+            rates(1.0, 5.0, 0.1, 1.25)
+        );
+    }
+
+    #[test]
+    fn a_four_field_config_loads_and_a_tier_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(
+            dir.path(),
+            r#"{"pricing": {"old": {"input": 1, "output": 2, "cache_read": 3, "cache_write": 4}}}"#,
+        );
+        assert_eq!(
+            PriceTable::load_from(&path).unwrap().for_model("old-1"),
+            rates(1.0, 2.0, 3.0, 4.0)
+        );
+        let tier = ModelRates {
+            long_context: Some(LongContextRates {
+                above_tokens: 5,
+                input: 6.0,
+                output: 7.0,
+                cache_read: 8.0,
+                cache_write: 9.0,
+            }),
+            ..rates(1.0, 2.0, 3.0, 4.0)
+        };
+        save_pricing_in(&path, &price(&[("old", Some(tier))])).unwrap();
+        assert_eq!(read_pricing(&path).unwrap()["old"], tier);
+        // A flat row serializes without the key.
+        save_pricing_in(&path, &price(&[("old", Some(rates(1.0, 2.0, 3.0, 4.0)))])).unwrap();
+        assert!(
+            !std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("long_context")
+        );
+    }
+
+    #[test]
+    fn save_pricing_rejects_a_bad_tier_without_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let before = "{}";
+        let path = write_config(dir.path(), before);
+        let tier = |above_tokens, input| ModelRates {
+            long_context: Some(LongContextRates {
+                above_tokens,
+                input,
+                output: 1.0,
+                cache_read: 1.0,
+                cache_write: 1.0,
+            }),
+            ..rates(1.0, 1.0, 1.0, 1.0)
+        };
+        for (label, r) in [
+            ("zero threshold", tier(0, 1.0)),
+            ("negative rate", tier(10, -1.0)),
+            ("non-finite rate", tier(10, f64::INFINITY)),
+        ] {
+            let err = save_pricing_in(&path, &price(&[("x", Some(r))])).unwrap_err();
+            assert!(matches!(err, SaveError::Validation(_)), "{label}: {err:?}");
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+
+    #[test]
     fn config_overlays_the_built_ins_and_longest_prefix_wins() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_config(
@@ -5739,6 +5859,7 @@ mod tests {
                 "claude-opus",
                 "claude-sonnet",
                 "claude-haiku",
+                "claude-haiku-5-5",
                 "alpha",
                 "zeta"
             ]
@@ -5749,8 +5870,8 @@ mod tests {
         // An unconfigured one is "falling back", not "empty".
         assert_eq!(rows[3].value, None);
         // A user-added prefix has nothing behind it — clearing it deletes it.
-        assert_eq!(rows[5].default, None);
-        assert_eq!(rows[5].value, Some(rates(1.0, 1.0, 1.0, 1.0)));
+        assert_eq!(rows[6].default, None);
+        assert_eq!(rows[6].value, Some(rates(1.0, 1.0, 1.0, 1.0)));
     }
 
     #[test]
