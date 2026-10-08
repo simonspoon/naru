@@ -29,17 +29,17 @@ PORT=17811
 BASE="http://127.0.0.1:$PORT"
 SERVE_PID=
 cleanup() {
-  [ -n "$SERVE_PID" ] && kill "$SERVE_PID" 2>/dev/null
-  # Every runner and claude this gate started, by the pids their job files hold.
-  for f in "$TMP"/home/.naru/runs/*/job.json; do
-    [ -f "$f" ] || continue
-    for k in runner_pid claude_pid; do
-      pid=$(jq -r ".$k // empty" "$f")
-      [ -n "$pid" ] && { kill "$pid" 2>/dev/null; kill -- "-$pid" 2>/dev/null; }
+  # No `a && b` lists here: with errexit a failing `b` would turn a clean pass
+  # into exit 1 from inside the EXIT trap.
+  if [ -n "$SERVE_PID" ]; then kill "$SERVE_PID" 2>/dev/null || true; fi
+  # Every runner and claude this gate started, by the pids their files hold.
+  for d in "$TMP"/home/.naru/runs/*/; do
+    for pid in $(cat "$d/runner.pid" 2>/dev/null) $(jq -r '.runner_pid // empty, .claude_pid // empty' "$d/job.json" 2>/dev/null); do
+      kill "$pid" 2>/dev/null || true
+      kill -- "-$pid" 2>/dev/null || true
     done
   done
   rm -rf "$TMP"
-  true
 }
 trap cleanup EXIT
 
@@ -196,6 +196,27 @@ rm "$STUB/fail-resume"
 wait_for 10 "fallback run stopped" status_is "$J3" stopped
 ok "a resume of a never-saved session fell back to a fresh --session-id start and re-delivered the prompt"
 
+# ---- two racing reconciles start claude exactly once (runner.lock) ----
+: > "$STUB/argv.log"
+echo 6 > "$STUB/sleep-secs"
+J4=$("$NARU" run start --model haiku --cwd "$TMP/work" "race prompt" | jq -r .job_id)
+wait_for 10 "race prompt delivered" delivered_is "$J4" 1
+R4=$(cat "$RUNS/$J4/runner.pid")
+kill -9 "$R4"; kill -- "-$(job_field "$J4" claude_pid)" 2>/dev/null || true
+sleep 0.3
+echo 0 > "$STUB/sleep-secs"
+"$NARU" run reconcile >/dev/null &
+RC1=$!
+"$NARU" run reconcile >/dev/null &
+RC2=$!
+wait "$RC1" "$RC2"
+wait_for 20 "raced run idle" resumed_idle "$J4"
+sleep 1
+[ "$(wc -l < "$STUB/argv.log" | tr -d " ")" = 2 ] || fail "claude should have been invoked once more (2 lines total): $(cat "$STUB/argv.log")"
+"$NARU" run stop "$J4" >/dev/null
+wait_for 10 "raced run stopped" status_is "$J4" stopped
+ok "two concurrent reconciles of a dead run started claude exactly once more"
+
 # ---- idle timeout ----
 J2=$("$NARU" run start --model haiku --cwd "$TMP/work" --idle-timeout 2 "short lived" | jq -r .job_id)
 wait_for 10 "result" result_is "$J2" "echo: short lived"
@@ -203,7 +224,7 @@ wait_for 10 "idle timeout -> finished" status_is "$J2" finished
 ok "idle timeout wound the run down to finished"
 
 # ---- CLI shapes ----
-"$NARU" run list | jq -e 'length == 3' >/dev/null || fail "run list"
+"$NARU" run list | jq -e 'length == 4' >/dev/null || fail "run list"
 "$NARU" run show "$J2" --events | jq -e '.job.job_id and (.events | length) > 0' >/dev/null || fail "run show --events"
 "$NARU" run show "$J2" --tail 1 | jq -e '.events | length == 1' >/dev/null || fail "run show --tail"
 "$NARU" run show "$J2" --quiet | jq -e '.job_id' >/dev/null || fail "--quiet is accepted and ignored"

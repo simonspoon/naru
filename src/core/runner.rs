@@ -289,8 +289,32 @@ fn read_pid(dir: &Path) -> Option<i64> {
 /// file is not there yet counts as alive).
 fn runner_alive(dir: &Path, job: &Job) -> bool {
     match read_pid(dir) {
-        Some(pid) => script_runs::pid_is_live(pid),
+        // A recycled pid names some other program; only a `__runner` counts.
+        Some(pid) => {
+            script_runs::pid_is_live(pid)
+                && pid_command(pid).is_some_and(|c| c.contains("__runner"))
+        }
         None => now_secs() - job.updated_at <= SPAWN_GRACE_SECS,
+    }
+}
+
+/// The command line of `pid` (`ps -o command=`), `None` when it cannot be read
+/// -- which callers treat as "not ours".
+fn pid_command(pid: i64) -> Option<String> {
+    let out = Command::new("ps")
+        .args(["-o", "command=", "-p", &pid.to_string()])
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    let cmd = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (out.status.success() && !cmd.is_empty()).then_some(cmd)
+}
+
+/// Kills claude's process group only if `pid` still is that claude: its
+/// command line carries the run's session id. A recycled pid is left alone.
+fn kill_claude(pid: i64, session_id: &str, sig: &str) {
+    if pid_command(pid).is_some_and(|c| c.contains(session_id)) {
+        signal_group(pid, sig);
     }
 }
 
@@ -351,6 +375,13 @@ pub fn create_job(runs: &Path, opts: &StartOpts) -> Result<Job> {
     }
     if opts.prompt.trim().is_empty() {
         return Err(Error::Validation("prompt must not be empty".into()));
+    }
+    // Both land in claude's argv as a word; one starting with `-` would be
+    // read as a flag.
+    for (what, v) in [("model", Some(&opts.model)), ("name", opts.name.as_ref())] {
+        if v.is_some_and(|v| v.trim().starts_with('-')) {
+            return Err(Error::Validation(format!("{what} must not start with '-'")));
+        }
     }
     if opts.prompt.len() > MESSAGE_MAX {
         return Err(Error::Validation(format!(
@@ -521,7 +552,7 @@ pub fn stop_in(runs: &Path, id: &str) -> Result<Value> {
     atomic_write(&dir.join("stop"), b"stop\n")?;
     if !runner_alive(&dir, &job) {
         if let Some(pid) = job.claude_pid {
-            signal_group(pid, "KILL");
+            kill_claude(pid, &job.session_id, "KILL");
         }
         job.status = RunStatus::Stopped;
         job.finished_at = Some(now_secs());
@@ -595,6 +626,22 @@ enum Closing {
 /// `naru run __runner <dir>`: holds one claude session open until it is
 /// stopped, goes idle for too long, or dies.
 pub fn run_runner(dir: &Path) -> Result<()> {
+    // One runner per job for as long as it lives: a second (a racing
+    // reconcile, two serves) finds the lock taken and leaves quietly. The OS
+    // drops the lock when this process dies, however it dies.
+    let lock = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("runner.lock"))?;
+    if lock.try_lock().is_err() {
+        return Ok(());
+    }
+    let result = run_runner_locked(dir);
+    drop(lock);
+    result
+}
+
+fn run_runner_locked(dir: &Path) -> Result<()> {
     let mut job = load(dir)?;
     atomic_write(
         &dir.join("runner.pid"),
@@ -606,9 +653,9 @@ pub fn run_runner(dir: &Path) -> Result<()> {
         // A claude from the dead runner may still be finishing its turn; two
         // processes on one session would race, so it goes first.
         if let Some(pid) = job.claude_pid {
-            signal_group(pid, "TERM");
+            kill_claude(pid, &job.session_id, "TERM");
             std::thread::sleep(Duration::from_millis(300));
-            signal_group(pid, "KILL");
+            kill_claude(pid, &job.session_id, "KILL");
         }
         job.resumes += 1;
         runner_event(
@@ -777,7 +824,13 @@ pub fn run_runner(dir: &Path) -> Result<()> {
                 if fs::rename(&file, delivered.join(&name)).is_err() {
                     continue;
                 }
-                if deliver(&mut stdin, &text) {
+                if !deliver(&mut stdin, &text) {
+                    // claude is not reading: hand the message back rather than
+                    // lose it, and let the exit path below take over.
+                    let _ = fs::rename(delivered.join(&name), &file);
+                    break;
+                }
+                {
                     in_flight += 1;
                     job.status = RunStatus::Running;
                     save(dir, &mut job)?;
@@ -826,7 +879,7 @@ pub fn run_runner(dir: &Path) -> Result<()> {
             "resume_fallback",
             json!({"reason": "session was never saved", "exit_code": code}),
         );
-        return run_runner(dir);
+        return run_runner_locked(dir);
     }
     job.finished_at = Some(now_secs());
     job.status = match closing {
@@ -960,6 +1013,26 @@ mod tests {
             },
             opts("x", Path::new("/nonexistent-naru-dir")),
         ] {
+            assert!(matches!(
+                create_job(runs.path(), &bad),
+                Err(Error::Validation(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn model_and_name_cannot_look_like_flags() {
+        let runs = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let bad_model = StartOpts {
+            model: "--dangerously-skip-permissions".into(),
+            ..opts("x", cwd.path())
+        };
+        let bad_name = StartOpts {
+            name: Some(" -x".into()),
+            ..opts("x", cwd.path())
+        };
+        for bad in [bad_model, bad_name] {
             assert!(matches!(
                 create_job(runs.path(), &bad),
                 Err(Error::Validation(_))

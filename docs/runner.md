@@ -57,6 +57,18 @@ is first told to continue where it left off, then the undelivered inbox follows.
 `resumes` counts, and a `resumed` event is logged. A run whose runner is alive is
 left alone.
 
+If the resumed claude exits without a word and the run never completed a turn,
+the session was never saved (the old runner died first): the runner logs a
+`resume_fallback` event, puts the delivered messages back in the inbox and starts
+the same uuid fresh with `--session-id`. (If a `--resume` fails for another
+reason on a session that *was* saved, claude may refuse the reused id and the run
+ends `failed`.)
+
+One runner per job: it holds an exclusive `runner.lock`, so a second one exits
+quietly. Pids read from `runner.pid` / `job.json` are only acted on if `ps`
+shows `__runner` / the run's session id. `model` and `name` may not start with
+`-`.
+
 ## The `runner` config template
 
 The ninth template (`docs/config.md`):

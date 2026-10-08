@@ -6729,7 +6729,11 @@ async fn list_runs(
     headers: HeaderMap,
 ) -> ApiResult<Response> {
     require_agent_access(&state, &addr, &headers)?;
-    Ok(Json(runner::list()?).into_response())
+    // File reads (and a `ps` per run): off the async workers.
+    let runs = tokio::task::spawn_blocking(runner::list)
+        .await
+        .map_err(|e| Error::Unavailable(e.to_string()))??;
+    Ok(Json(runs).into_response())
 }
 
 #[derive(Deserialize)]
@@ -6746,7 +6750,11 @@ async fn show_run(
     Query(q): Query<RunQuery>,
 ) -> ApiResult<Response> {
     require_agent_access(&state, &addr, &headers)?;
-    Ok(Json(runner::show(&id, Some(q.tail.unwrap_or(500)))?).into_response())
+    let tail = q.tail.unwrap_or(500);
+    let shown = tokio::task::spawn_blocking(move || runner::show(&id, Some(tail)))
+        .await
+        .map_err(|e| Error::Unavailable(e.to_string()))??;
+    Ok(Json(shown).into_response())
 }
 
 async fn start_run(
