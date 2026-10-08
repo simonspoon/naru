@@ -34,6 +34,7 @@ import {
   NODE_KINDS,
   OUTPUT_TARGETS,
   PROMPT_MODELS,
+  AMBIENT_EVENTS,
   TRIGGER_MODES,
   branchForHandle,
   buildConfig,
@@ -229,6 +230,22 @@ function NodeInspector({
                 value={draft.every_minutes}
                 onChange={(e) => set('every_minutes', e.target.value)}
               />
+            </Field>
+          )}
+          {draft.mode === 'ambient' && (
+            <Field label="events" hint="which ambient-engine events run this workflow">
+              {AMBIENT_EVENTS.map((ev) => (
+                <label key={ev} className="wf-check">
+                  <input
+                    type="checkbox"
+                    checked={draft.events.includes(ev)}
+                    onChange={(e) =>
+                      set('events', e.target.checked ? [...draft.events, ev] : draft.events.filter((x) => x !== ev))
+                    }
+                  />{' '}
+                  {ev}
+                </label>
+              ))}
             </Field>
           )}
           <Field label="phrase" hint="what a spoken request says to run it (optional)">

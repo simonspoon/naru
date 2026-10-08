@@ -39,11 +39,13 @@ export function isNodeKind(value: unknown): value is WorkflowNodeKind {
 export const PROMPT_MODELS = ['haiku', 'sonnet', 'opus'] as const
 export const BRANCH_OPS = ['contains', 'regex', 'score_above', 'score_below', 'equals'] as const
 export const OUTPUT_TARGETS = ['log', 'task', 'inbox', 'board'] as const
-export const TRIGGER_MODES: readonly WorkflowTrigger[] = ['manual', 'time', 'voice']
+export const TRIGGER_MODES: readonly WorkflowTrigger[] = ['manual', 'time', 'voice', 'ambient']
 /** The label of a decide node's catch-all edge; no option may be it. */
 export const DECIDE_FALLBACK = 'fallback'
 /** A decide node's confidence threshold when its config names none. */
 export const DEFAULT_DECIDE_THRESHOLD = 0.5
+/** The ambient engine's event vocabulary (`core::workflow::AMBIENT_EVENTS`). */
+export const AMBIENT_EVENTS = ['idea', 'can-help', 'wake'] as const
 export const INBOX_KINDS = ['task-summary', 'change-request'] as const
 
 /** The config a node of `kind` is created with — one the server accepts as it
@@ -95,6 +97,10 @@ export function summarize(kind: WorkflowNodeKind, config: NodeConfig): string {
     case 'trigger': {
       const mode = str(config, 'mode') || 'manual'
       if (mode === 'time') return `every ${str(config, 'every_minutes') || '?'} min`
+      if (mode === 'ambient') {
+        const events = optionList(config.events)
+        return `ambient · ${events.length > 0 ? events.join(', ') : '?'}`
+      }
       const phrase = str(config, 'phrase')
       return phrase ? `${mode} · “${clip(phrase, 24)}”` : mode
     }
@@ -179,6 +185,7 @@ export interface ConfigDraft {
   mode: string
   every_minutes: string
   phrase: string
+  events: string[]
   model: string
   thinking: boolean
   prompt: string
@@ -209,6 +216,7 @@ export function draftFromConfig(kind: WorkflowNodeKind, config: NodeConfig): Con
     mode: str(config, 'mode') || 'manual',
     every_minutes: str(config, 'every_minutes'),
     phrase: str(config, 'phrase'),
+    events: kind === 'trigger' ? optionList(config.events) : [],
     model: str(config, 'model') || 'haiku',
     thinking: config.thinking === true,
     prompt: str(config, 'prompt'),
@@ -253,12 +261,19 @@ const LOCAL_MODEL = /^local:[A-Za-z0-9._:/-]+$/
 export function buildConfig(kind: WorkflowNodeKind, d: ConfigDraft): BuildResult {
   switch (kind) {
     case 'trigger': {
-      if (!TRIGGER_MODES.includes(d.mode as WorkflowTrigger)) return bad('mode must be manual, time or voice')
+      if (!TRIGGER_MODES.includes(d.mode as WorkflowTrigger)) return bad('mode must be manual, time, voice or ambient')
       const config: NodeConfig = { mode: d.mode }
       if (d.mode === 'time') {
         const n = intIn(d.every_minutes, 1, 10080)
         if (n === undefined || n === null) return bad('every minutes must be a whole number from 1 to 10080')
         config.every_minutes = n
+      }
+      if (d.mode === 'ambient') {
+        if (d.events.length === 0) return bad('an ambient trigger needs at least one event')
+        if (!d.events.every((e) => (AMBIENT_EVENTS as readonly string[]).includes(e)))
+          return bad('events must be idea, can-help or wake')
+        // Vocabulary order, whatever order the boxes were ticked in.
+        config.events = AMBIENT_EVENTS.filter((e) => d.events.includes(e))
       }
       if (d.phrase.trim() !== '') config.phrase = d.phrase.trim()
       return ok(config)

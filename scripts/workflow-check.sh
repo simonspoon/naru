@@ -23,7 +23,11 @@
 # arriving byte-identical for hostile text (never shell-parsed); the task and
 # inbox outputs; the ambient-capture example from docs/workflows.md with stub
 # `sox`/`auris`; the API routes, including `require_agent_access` refusing a
-# foreign Origin and Host; and `serve --watch-workflows` running a due
+# foreign Origin and Host; the ambient trigger, `workflow emit` and
+# `POST /api/workflows/events`; `workflow defaults --project` (mesa task 1644:
+# both ambient workflows, a rerun skipping them, the task output's `status:
+# backlog`, the review filing exactly one backlog task or none on an empty log);
+# and `serve --watch-workflows` running a due
 # time-triggered workflow exactly once per interval.
 set -euo pipefail
 # Drop inherited NARU_* vars: Naru reads them before MESA_*, so one would escape this script's isolation.
@@ -213,7 +217,7 @@ ok "workflow update: clears and un-binds; no field is usage"
 run 0 "$NARU" workflow show "$W"
 [ "$(keys "$STDOUT")" = '["edges","nodes","workflow"]' ] || fail "show shape: $STDOUT"
 run 0 "$NARU" workflow get "gate demo" --quiet
-[ "$(jq -c '.workflow | keys' <<<"$STDOUT")" = '["created_at","id","last_failure_at","last_run_at","last_run_status","name","next_run_at","project_id","trigger","trigger_phrase","updated_at"]' ] ||
+[ "$(jq -c '.workflow | keys' <<<"$STDOUT")" = '["created_at","id","last_failure_at","last_run_at","last_run_status","name","next_run_at","project_id","trigger","trigger_events","trigger_phrase","updated_at"]' ] ||
   fail "show --quiet drops description: $STDOUT"
 ok "workflow show/get: {workflow, nodes, edges}; --quiet drops the description"
 
@@ -779,6 +783,65 @@ run 1 "$NARU" workflow show Bound
 [ "$(jqe .error.code)" = "not_found" ] || fail "deleting a project deletes its workflows: $STDERR"
 ok "project delete cascades to the workflows bound to it"
 
+# ================= ambient trigger and `workflow emit` =================
+
+run 0 "$NARU" workflow create AmbIdea
+run 1 "$NARU" workflow node create AmbIdea trigger T --config '{"mode":"ambient"}'
+[ "$(jqe .error.code)" = "validation" ] || fail "ambient without events: validation"
+run 1 "$NARU" workflow node create AmbIdea trigger T --config '{"mode":"ambient","events":[]}'
+run 1 "$NARU" workflow node create AmbIdea trigger T --config '{"mode":"ambient","events":["nope"]}'
+run 1 "$NARU" workflow node create AmbIdea trigger T --config '{"mode":"ambient","events":["idea","idea"]}'
+run 1 "$NARU" workflow node create AmbIdea trigger T --config '{"mode":"ambient","events":["idea"],"every_minutes":5}'
+run 1 "$NARU" workflow node create AmbIdea trigger T --config '{"mode":"manual","events":["idea"]}'
+[ "$(jqe .error.code)" = "validation" ] || fail "events on a manual trigger: validation"
+ok "ambient trigger config: events required, non-empty, known, distinct; every_minutes and events on other modes refused"
+
+run 0 "$NARU" workflow node create AmbIdea trigger T --config '{"mode":"ambient","events":["idea","wake"]}'
+AMB_T1=$(jqs .id)
+run 0 "$NARU" workflow node create AmbIdea cli Echo --config '{"command":"cat"}'
+AMB_C1=$(jqs .id)
+"$NARU" workflow edge create AmbIdea "$AMB_T1" "$AMB_C1" >/dev/null
+run 0 "$NARU" workflow create AmbHelp
+run 0 "$NARU" workflow node create AmbHelp trigger T --config '{"mode":"ambient","events":["can-help"]}'
+AMB_T2=$(jqs .id)
+run 0 "$NARU" workflow node create AmbHelp cli Echo --config '{"command":"cat"}'
+AMB_C2=$(jqs .id)
+"$NARU" workflow edge create AmbHelp "$AMB_T2" "$AMB_C2" >/dev/null
+run 0 "$NARU" workflow list
+[ "$(jq -r '[.[] | select(.name == "AmbIdea")][0] | "\(.trigger) \(.trigger_events | join(","))"' <<<"$STDOUT")" = "ambient idea,wake" ] ||
+  fail "the list row reports trigger ambient and its events: $STDOUT"
+
+printf %s "from a file" > "$TMP/wake.txt"
+HOSTILE_AMB=$'$(touch '"$TMP"$'/PWNED3) `x` \'q\' "d" \\n end'
+run 0 "$NARU" workflow emit idea --speaker "sp'k" --text "$HOSTILE_AMB"
+[ "$(jqs length)" = "1" ] && [ "$(jqs '.[0].trigger')" = "ambient" ] && [ "$(jqs '.[0].status')" = "succeeded" ] ||
+  fail "emit idea runs exactly the one matching workflow as ambient: $STDOUT"
+EXPECT=$(jq -cn --arg s "sp'k" --arg t "$HOSTILE_AMB" '{event:"idea",speaker:$s,text:$t}')
+[ "$(jqs '.[0].input')" = "$EXPECT" ] || fail "run input is the compact event JSON: $(jqs '.[0].input')"
+[ "$(jqs '.[0].steps[1].output')" = "$EXPECT" ] || fail "the event JSON reaches the cli node byte-identical"
+[ ! -e "$TMP/PWNED3" ] || fail "hostile text was shell-parsed"
+run 0 "$NARU" workflow emit can-help --speaker room
+[ "$(jqs length)" = "1" ] && [ "$(jqs '.[0].input')" = '{"event":"can-help","speaker":"room","text":""}' ] || fail "emit can-help: $STDOUT"
+run 0 "$NARU" workflow emit wake --speaker room --text-file "$TMP/wake.txt" --quiet
+[ "$(jqs length)" = "1" ] || fail "wake matches only the workflow listing it: $STDOUT"
+ok "workflow emit: only matching ambient workflows run (trigger=ambient), the event JSON reaches a cli node byte-identical, --quiet is accepted"
+
+run 0 "$NARU" workflow node update "$AMB_T2" --config '{"mode":"ambient","events":["wake"]}'
+run 0 "$NARU" workflow emit wake --speaker room
+[ "$(jqs length)" = "2" ] && [ "$(jqs '.[0].workflow_id < .[1].workflow_id')" = "true" ] || fail "two matches run in id order: $STDOUT"
+run 0 "$NARU" workflow node update "$AMB_T2" --config '{"mode":"manual"}'
+run 0 "$NARU" workflow emit can-help --speaker room
+[ "$STDOUT" = "[]" ] || fail "no match prints [] and exits 0, got: $STDOUT"
+run 1 "$NARU" workflow emit nope --speaker room
+[ "$(jqe .error.code)" = "validation" ] || fail "unknown event: validation"
+run 1 "$NARU" workflow emit idea --speaker ""
+[ "$(jqe .error.code)" = "validation" ] || fail "empty speaker: validation"
+run 1 "$NARU" workflow emit idea --speaker "$(head -c 65 /dev/zero | tr '\0' s)"
+[ "$(jqe .error.code)" = "validation" ] || fail "65-char speaker: validation"
+run 2 "$NARU" workflow emit idea
+run 2 "$NARU" workflow emit idea --speaker s --text a --text-file "$TMP/wake.txt"
+ok "workflow emit: [] when nothing matches, id order, validation exit 1, usage exit 2"
+
 # ================= API =================
 
 PORT=17795
@@ -880,6 +943,79 @@ api 200 DELETE "/api/workflows/$FW"
 [ "$(jqb '.nodes | length')" = "2" ] || fail "API delete echoes the view"
 ok "API: a failed run is 200 with status failed"
 
+# ---- ambient events over HTTP: 202 after validating, runs in the background ----
+BEFORE=$("$NARU" workflow runs AmbIdea | jq length)
+api 202 POST /api/workflows/events '{"event":"idea","speaker":"api","text":"hello $(id)"}'
+[ "$(jqb '.workflow_ids | length')" = "1" ] || fail "events route answers the matched ids: $BODY"
+for _ in $(seq 1 50); do
+  [ "$("$NARU" workflow runs AmbIdea | jq length)" -gt "$BEFORE" ] && break
+  sleep 0.1
+done
+run 0 "$NARU" workflow runs AmbIdea
+[ "$(jqs '.[0].trigger')" = "ambient" ] || fail "the background run is trigger=ambient: $STDOUT"
+run 0 "$NARU" workflow run-show "$(jqs '.[0].id')"
+[ "$(jqs '.input')" = '{"event":"idea","speaker":"api","text":"hello $(id)"}' ] || fail "API event input: $STDOUT"
+api 202 POST /api/workflows/events '{"event":"can-help","speaker":"api"}'
+[ "$(jqb '.workflow_ids | length')" = "0" ] || fail "no match answers 202 with an empty list: $BODY"
+api 422 POST /api/workflows/events '{"event":"nope","speaker":"api","text":""}'
+api 422 POST /api/workflows/events '{"event":"idea","speaker":"","text":""}'
+api 422 POST /api/workflows/events '{"event":"idea","text":""}'
+ok "API: POST /api/workflows/events is 202 with the matched ids and runs in the background (trigger=ambient); bad input is 422"
+
+# ---- default ambient workflows (mesa task 1644): `workflow defaults`, status backlog ----
+run 0 "$NARU" project create "Defaulted" --no-git
+DP=$(jqs .id)
+run 0 "$NARU" workflow defaults --project Defaulted
+[ "$(jqs '.created | map(.workflow.name) | sort | join("|")')" = "Ambient: end-of-day review|Ambient: label ideas" ] || fail "defaults created both: $STDOUT"
+[ "$(jqs '.skipped | length')" = "0" ] || fail "nothing skipped on the first call: $STDOUT"
+[ "$(jqs '.created | map(.workflow.project_id) | unique | join(",")')" = "$DP" ] || fail "both scoped to the project: $STDOUT"
+run 0 "$NARU" workflow defaults --project "$DP"
+[ "$(jqs '.created | length')" = "0" ] && [ "$(jqs '.skipped | length')" = "2" ] || fail "a rerun skips both: $STDOUT"
+run 0 "$NARU" workflow list "$DP"
+[ "$(jqs 'length')" = "2" ] || fail "a rerun created nothing: $STDOUT"
+run 1 "$NARU" workflow defaults --project nosuchproject
+[ "$(jqe .error.code)" = "not_found" ] || fail "defaults: unknown project is not_found"
+ok "workflow defaults --project: creates both ambient workflows scoped to the project; a rerun skips both (idempotent)"
+
+# A task output's status: backlog files a backlog task; todo/absent a todo one; done is refused.
+run 0 "$NARU" workflow create Backlogging
+run 0 "$NARU" workflow node create Backlogging trigger Go --config '{"mode":"manual"}'
+BT=$(jqs .id)
+run 0 "$NARU" workflow node create Backlogging output File --config "{\"target\":\"task\",\"project\":$DP,\"status\":\"backlog\"}"
+"$NARU" workflow edge create Backlogging "$BT" "$(jqs .id)" >/dev/null
+run 0 "$NARU" workflow run Backlogging --input "an idea for the backlog"
+[ "$(jqs .status)" = "succeeded" ] || fail "backlog run: $STDOUT"
+run 0 "$NARU" task list "$DP"
+[ "$(jqs '[.[] | select(.name == "an idea for the backlog" and .status == "backlog")] | length')" = "1" ] || fail "the task output filed a backlog task: $STDOUT"
+run 1 "$NARU" workflow node create Backlogging output Bad --config "{\"target\":\"task\",\"project\":$DP,\"status\":\"done\"}"
+[ "$(jqe .error.code)" = "validation" ] || fail "status done refused"
+ok "output task status: backlog files a backlog task; done is a validation error"
+
+# The review: seeded 'ambient' log -> haiku digest (stub claude) -> exactly one backlog task.
+reset_claude
+BEFORE_N=$("$NARU" task list "$DP" | jq length)
+PATH="$(dirname "$NARU"):$STUB_DIR:$PATH" run 0 "$NARU" workflow run "Ambient: end-of-day review"
+[ "$(jqs .status)" = "succeeded" ] || fail "review run: $STDOUT"
+[ "$(jqs '.steps | map(.status) | join(",")')" = "ok,ok,ok,ok,ok" ] || fail "every review step ran: $STDOUT"
+grep -q "idea: buy milk" <<<"$(jqs ".steps[1].output")" || fail "the cli node printed the ambient log lines: $STDOUT"
+grep -q "idea: buy milk" <<<"$(argv 11)" || fail "the digest prompt carried the day's lines"
+run 0 "$NARU" task list "$DP"
+[ "$(jqs 'length')" = "$((BEFORE_N + 1))" ] || fail "exactly one task filed: $STDOUT"
+[ "$(jqs '[.[] | select(.name == "idea: buy milk" and .status == "backlog")] | length')" = "1" ] || fail "the digest landed in backlog: $STDOUT"
+ok "end-of-day review: ambient log lines -> haiku digest -> exactly one backlog task"
+
+# Nothing logged: the branch is false, the prompt never runs, nothing is filed.
+reset_claude
+RV=$("$NARU" workflow show "Ambient: end-of-day review" | jq -r '.nodes[] | select(.kind == "cli") | .id')
+run 0 "$NARU" workflow node update "$RV" --config '{"command":"naru workflow log ambient-empty --limit 500 | jq -r \".[].text\""}'
+BEFORE_N=$("$NARU" task list "$DP" | jq length)
+PATH="$(dirname "$NARU"):$STUB_DIR:$PATH" run 0 "$NARU" workflow run "Ambient: end-of-day review"
+[ "$(jqs .status)" = "succeeded" ] || fail "empty review run: $STDOUT"
+[ ! -e "$STUB_DIR/argc" ] || fail "the prompt node ran on an empty log"
+run 0 "$NARU" task list "$DP"
+[ "$(jqs 'length')" = "$BEFORE_N" ] || fail "an empty log filed nothing: $STDOUT"
+ok "end-of-day review with an empty log: the prompt node is skipped and no task is filed"
+
 # ---- the gate: require_agent_access on every route, reads included ----
 raw() { # raw <method> <path> [extra curl args...]
   local method=$1 path=$2; shift 2
@@ -896,7 +1032,8 @@ for route in "GET /api/workflows" "GET /api/workflows/$AW" "GET /api/workflows/$
 done
 for route in "POST /api/workflows" "PATCH /api/workflows/$AW" "DELETE /api/workflows/$AW" \
   "POST /api/workflows/$AW/nodes" "PATCH /api/workflow-nodes/$AC" "DELETE /api/workflow-nodes/$AC" \
-  "POST /api/workflows/$AW/edges" "DELETE /api/workflow-edges/1" "POST /api/workflows/$AW/run"; do
+  "POST /api/workflows/$AW/edges" "DELETE /api/workflow-edges/1" "POST /api/workflows/$AW/run" \
+  "POST /api/workflows/events"; do
   set -- $route
   raw "$1" "$2" "${EVIL[@]}" "${JSON[@]}"
   [ "$STATUS" = "403" ] || fail "default: $route with a foreign Origin must be 403, got $STATUS"

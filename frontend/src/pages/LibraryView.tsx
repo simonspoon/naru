@@ -52,7 +52,7 @@ import {
   orphanScopesFor,
   registrationLabel,
 } from '../libraryHooks'
-import { diffLines, foldOverrides, itemKey } from '../libraryOverride'
+import { diffLines, foldOverrides, hunksOnly, itemKey } from '../libraryOverride'
 import {
   LIBRARY_KINDS,
   LIBRARY_SCOPES,
@@ -108,6 +108,14 @@ import type { LibrarySyncResult } from '../types/LibrarySyncResult'
 import type { LibrarySyncRow } from '../types/LibrarySyncRow'
 import type { Project } from '../types/Project'
 import { useFetch } from '../useFetch'
+import {
+  LIBRARY_TABS,
+  libraryTabHref,
+  libraryTabLabel,
+  type LibraryTab,
+} from '../libraryTab'
+import { ScriptsView } from './ScriptsView'
+import { WorkflowsOverview } from './WorkflowsOverview'
 
 /** Prism grammar for the body editor: a hook is shell, everything else on
  * this surface — agent/skill/prompt bodies and a CLAUDE.md — is markdown. */
@@ -904,6 +912,7 @@ function LibraryDiffPick({
   choices,
   choice,
   onChoice,
+  hunks = false,
 }: {
   // A composite, never a path or an index: native HTML radio grouping is
   // keyed by `name` alone, so two rows sharing one would silently uncheck
@@ -918,6 +927,9 @@ function LibraryDiffPick({
   choices: readonly { value: string; label: string }[]
   choice: string
   onChoice: (choice: string) => void
+  // Sync shows only the changed hunks and never the whole bodies of a row
+  // that has a diff; Import keeps the full diff and the bodies toggle.
+  hunks?: boolean
 }) {
   // The diff is the default view for a row that has one; the whole bodies
   // stay one click away, since a diff hides the lines both sides agree on and
@@ -926,7 +938,7 @@ function LibraryDiffPick({
   return (
     <>
       {dates !== null && <p className="library-sync-dates muted">{dates}</p>}
-      {diff !== null && (
+      {diff !== null && !hunks && (
         <button
           type="button"
           className="library-sync-view-toggle"
@@ -935,7 +947,7 @@ function LibraryDiffPick({
           {showBodies ? 'show diff' : 'show both bodies'}
         </button>
       )}
-      {diff !== null && !showBodies ? (
+      {diff !== null && (hunks || !showBodies) ? (
         <>
           <p className="library-sync-direction muted">
             {sideLabels[orientation.from]} → {sideLabels[orientation.to]}
@@ -946,12 +958,18 @@ function LibraryDiffPick({
             <span className="library-diff-added">+</span> only in {sideLabels[orientation.to]}
           </p>
           <pre className="library-sync-difflines">
-            {diff.map((line, i) => (
-              <div key={i} className={diffLineClass(line, orientation)}>
-                <span className="library-diff-mark">{diffMark(line, orientation)}</span>
-                {line.text}
-              </div>
-            ))}
+            {(hunks ? hunksOnly(diff) : diff).map((line, i) =>
+              line === null ? (
+                <div key={i} className="library-diff-gap muted">
+                  ⋯
+                </div>
+              ) : (
+                <div key={i} className={diffLineClass(line, orientation)}>
+                  <span className="library-diff-mark">{diffMark(line, orientation)}</span>
+                  {line.text}
+                </div>
+              ),
+            )}
           </pre>
         </>
       ) : (
@@ -1032,6 +1050,7 @@ function LibrarySyncRowView({
         // at once.
         orientation={diffOrientation(row, choice)}
         dates={changeDatesLabel(row)}
+        hunks
         choices={SYNC_CHOICES}
         choice={choice}
         onChoice={(c) => onChoose(c as 'mesa' | 'disk' | 'skip')}
@@ -1093,7 +1112,14 @@ function LibrarySyncModal({
         className="create-task-modal library-sync-modal"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="panel-head">
+        <div className="panel-head library-sync-head">
+          {rows && attention.length > 0 ? (
+            <button type="button" disabled={applying} onClick={apply}>
+              {applying ? 'applying…' : 'apply'}
+            </button>
+          ) : (
+            <span />
+          )}
           <h2>Sync library</h2>
           <button type="button" onClick={onClose}>
             close
@@ -1134,11 +1160,6 @@ function LibrarySyncModal({
                 />
               ))}
             </ul>
-            <div className="inline-edit-actions">
-              <button type="button" disabled={applying} onClick={apply}>
-                {applying ? 'applying…' : 'apply'}
-              </button>
-            </div>
           </>
         )}
         {applyError !== null && <span className="error">{applyError}</span>}
@@ -1329,12 +1350,12 @@ function LibraryImportModal({
 }
 
 /**
- * The Library page: agents, skills, hooks, prompts and CLAUDE.md files,
- * stored in mesa and synced against `.claude` file by file (mesa task 919).
- * Global like Scripts — a project-scoped item binds a project, but the page
- * itself lives above projects.
+ * The Library's Claude Code tab: agents, skills, hooks, prompts and CLAUDE.md
+ * files, stored in mesa and synced against `.claude` file by file (mesa task
+ * 919). A project-scoped item binds a project, but the page itself lives above
+ * projects.
  */
-export function LibraryView() {
+function LibraryItemsTab() {
   const { data: items, error, refetch } = useFetch(() => listLibrary(), 'library')
   const { data: projects } = useFetch(() => listProjects(), 'library-projects')
 
@@ -1488,7 +1509,6 @@ export function LibraryView() {
 
   return (
     <div className="library-page">
-      <h1>Library</h1>
       <p className="muted">
         Agents, skills, hooks, prompts and CLAUDE.md files, stored here and
         synced against your <code>.claude</code> directory file by file. Naru
@@ -1769,6 +1789,41 @@ export function LibraryView() {
           onClose={() => setSyncing(false)}
           onApplied={refetch}
         />
+      )}
+    </div>
+  )
+}
+
+/**
+ * The Library: three tabs on `#/library[/scripts|/workflows]` (mesa task 1676,
+ * `libraryTab.ts`). Claude Code is the original page; Scripts is the retired
+ * Scripts page, run panes included (`#/library/scripts/runs/<id>`); Workflows
+ * is the read-only cross-project list — editing a workflow stays in its
+ * project. Only the active tab is mounted.
+ */
+export function LibraryView({ tab, runId }: { tab: LibraryTab; runId: number | null }) {
+  return (
+    <div className="library-tabs-page">
+      <h1>Library</h1>
+      <div className="tabs">
+        {LIBRARY_TABS.map((t) => (
+          <button
+            key={t}
+            className={t === tab ? 'active' : ''}
+            onClick={() => {
+              if (t !== tab || runId !== null) window.location.hash = libraryTabHref(t)
+            }}
+          >
+            {libraryTabLabel(t)}
+          </button>
+        ))}
+      </div>
+      {tab === 'claude-code' ? (
+        <LibraryItemsTab />
+      ) : tab === 'scripts' ? (
+        <ScriptsView runId={runId} />
+      ) : (
+        <WorkflowsOverview embedded />
       )}
     </div>
   )

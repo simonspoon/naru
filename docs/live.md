@@ -2083,7 +2083,7 @@ sensitive mic may produce an empty transcription, which is dropped.
 Three values, and they are all one idea: **what the person is looking at.**
 
 `navigate`'s target is one of the app's own hash routes — `#/`, `#/live`,
-`#/inbox`, `#/cc`, `#/scripts`, `#/library`, `#/settings`, `#/terminal`, `#/projects/<id>`
+`#/inbox`, `#/cc`, `#/library`, `#/library/scripts`, `#/library/workflows`, `#/settings`, `#/terminal`, `#/projects/<id>`
 and that project's `tasks/<id>`, `workflows`, `git`, `files`, `terminal`,
 `dashboard` and `settings`. The list is in `AGENT_PROMPT` so the agent knows
 what it may say; the *rule* Naru enforces is only the `#/` shape, since the
