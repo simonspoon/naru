@@ -266,6 +266,12 @@ struct AppState {
     /// receipt records nothing, since there is no id to stop with (the
     /// limitation the attach pane already has).
     todo_dispatched: Arc<Mutex<HashMap<String, DispatchedSession>>>,
+    /// Task id → how many times the reaper has put the task back to `todo`
+    /// because its dispatched session died (naru task 1697), capped at
+    /// [`REAP_REQUEUE_MAX`]. Dropped when the reaper next sees the task not
+    /// `in_progress` (closed, deleted or moved by hand) and when the task is
+    /// parked. In memory like `todo_dispatched`, so a restart forgives it.
+    todo_requeued: Arc<Mutex<HashMap<i64, u32>>>,
     /// Task id → the todo-watcher's last failed spawn for it (mesa task 1338):
     /// the task's `updated_at` as the watcher's own revert left it, and the
     /// error texts already filed as inbox alerts. The watcher skips a task
@@ -1774,6 +1780,11 @@ const REAP_LIVE_WORK_GRACE: Duration = Duration::from_secs(10 * 60);
 /// is still read as "not listed *yet*" rather than gone (mesa task 1191).
 const REAP_ABANDON_GRACE: Duration = Duration::from_secs(60);
 
+/// How many times the reaper puts a task back to `todo` after its dispatched
+/// session died before it parks the task in `backlog` and tells a person
+/// (naru task 1697).
+const REAP_REQUEUE_MAX: u32 = 2;
+
 /// How long an `in_progress` task's session must sit continuously idle before
 /// the reaper reports it stalled (mesa task 1191): the same hour
 /// `task next`'s stale-claim diagnostic uses, since both name one wedge.
@@ -1820,8 +1831,9 @@ enum ReapVerdict {
 /// or unlisted past [`REAP_ABANDON_GRACE`] — ended without closing its task,
 /// which parks that project's whole loop, and one sitting idle with nothing
 /// running for [`REAP_STALL_AFTER`] is probably waiting on something nobody
-/// will answer. Both are reported, neither is touched: the reaper stops only
-/// what has finished, and the task's status stays the person's to move.
+/// will answer. A gone session's task is put back to `todo` by
+/// [`todo_reaper_tick`] (naru task 1697, capped), a stalled one is only
+/// reported: the reaper stops only what has finished.
 ///
 /// A **busy** session is left for the next pass rather than stopped: an agent
 /// that has just closed its task is usually still writing its report or its
@@ -1945,6 +1957,25 @@ fn log_reaper_event(
             "closed"
         },
     );
+    append_reaper_log(&line);
+}
+
+/// The reaper log line for a task whose dead session was re-queued or parked
+/// (naru task 1697): same family as [`log_reaper_event`], reason
+/// `session-died`.
+fn log_reaper_requeue(task_id: i64, job_id: &str, outcome: &str) {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    append_reaper_log(&format!(
+        "{} task={task_id} session={job_id} reason=session-died outcome={outcome}\n",
+        crate::core::cc::fmt_store_ts(secs),
+    ));
+}
+
+/// Appends one line to the reaper log. Best effort.
+fn append_reaper_log(line: &str) {
     let Some(path) = reaper_log_path() else {
         return;
     };
@@ -1974,6 +2005,84 @@ fn reaper_abandoned_body(job_id: &str, task_id: i64) -> String {
          for example `mesa task update {task_id} --status todo` to have it dispatched \
          again, or `--status done` if the work landed."
     )
+}
+
+/// The alert for a task parked in `backlog` after its session died once too
+/// often (naru task 1697).
+fn reaper_parked_body(job_id: &str, task_id: i64, deaths: u32) -> String {
+    format!(
+        "Agent session {job_id} on task {task_id} died without closing it; its session has now \
+         died {deaths} times (it was put back to todo {} times first). The task was moved to \
+         backlog so the project's todo loop is not stalled or retried forever; move it \
+         back with `naru task update {task_id} --status todo` once the cause is fixed.",
+        deaths - 1
+    )
+}
+
+/// What [`requeue_abandoned`] did about a dead session's task.
+enum Abandoned {
+    /// Put back to `todo`; `1`-based attempt number.
+    Requeued(u32),
+    /// Moved to `backlog` after [`REAP_REQUEUE_MAX`] re-queues; the number of
+    /// deaths.
+    Parked(u32),
+    /// The task is no longer `in_progress`: nothing to do, nothing to report.
+    Moved,
+    /// A claim is held, or the task cannot be read or written: report it.
+    Report,
+}
+
+/// The reaper's answer to a dispatched session that is gone while its task is
+/// still `in_progress` (naru task 1697): with no claim held, put the task back
+/// to `todo` so the project's loop resumes — at most [`REAP_REQUEUE_MAX`]
+/// times, then park it in `backlog`. A claimed task or a failed write is
+/// [`Abandoned::Report`], the alert-only behaviour from before.
+fn requeue_abandoned(state: &AppState, task_id: i64, job_id: &str) -> Abandoned {
+    let mut store = match state.store.lock() {
+        Ok(s) => s,
+        Err(e) => e.into_inner(),
+    };
+    // The pass's snapshot may be stale: act only while the dead session's
+    // entry is still current (not superseded by a relay or re-dispatch). The
+    // store lock is held until the entry is removed below, so a dispatch
+    // cannot supersede and stop the dead job in between.
+    let mut dispatched = match state.todo_dispatched.lock() {
+        Ok(d) => d,
+        Err(e) => e.into_inner(),
+    };
+    if !dispatched.get(job_id).is_some_and(|d| !d.superseded) {
+        return Abandoned::Moved;
+    }
+    let Ok(task) = store.get_task(task_id) else {
+        return Abandoned::Report;
+    };
+    if task.status != Status::InProgress {
+        return Abandoned::Moved;
+    }
+    if task.owner.is_some() {
+        return Abandoned::Report;
+    }
+    let mut counts = match state.todo_requeued.lock() {
+        Ok(c) => c,
+        Err(e) => e.into_inner(),
+    };
+    let done = counts.get(&task_id).copied().unwrap_or(0);
+    let park = done >= REAP_REQUEUE_MAX;
+    let patch = TaskPatch {
+        status: Some(if park { Status::Backlog } else { Status::Todo }),
+        ..Default::default()
+    };
+    if store.update_task(task_id, &patch).is_err() {
+        return Abandoned::Report;
+    }
+    dispatched.remove(job_id);
+    if park {
+        counts.remove(&task_id);
+        Abandoned::Parked(done + 1)
+    } else {
+        counts.insert(task_id, done + 1);
+        Abandoned::Requeued(done + 1)
+    }
 }
 
 /// The alert for an `in_progress` task whose session has sat idle for an hour.
@@ -2074,6 +2183,20 @@ fn todo_reaper_tick(state: &AppState) {
             })
             .collect()
     };
+    // A task seen closed, deleted or moved by hand starts its re-queue count
+    // over (naru task 1697); `in_progress` here is the same task still dying.
+    {
+        let mut counts = match state.todo_requeued.lock() {
+            Ok(c) => c,
+            Err(e) => e.into_inner(),
+        };
+        for ((_, d), (_, status)) in dispatched.iter().zip(&statuses) {
+            let DispatchTarget::Task(task_id) = d.target;
+            if !d.superseded && *status != Some(Status::InProgress) {
+                counts.remove(&task_id);
+            }
+        }
+    }
     let now = Instant::now();
     for ((job_id, dispatch), (task_exists, status)) in dispatched.into_iter().zip(statuses) {
         let target = dispatch.target;
@@ -2170,6 +2293,44 @@ fn todo_reaper_tick(state: &AppState) {
                 memory.work_subagents = session.live_subagents;
             }
             ReapVerdict::AlertAbandoned => {
+                match requeue_abandoned(state, task_id, &job_id) {
+                    Abandoned::Requeued(n) => {
+                        log_reaper_requeue(
+                            task_id,
+                            &job_id,
+                            &format!("re-queued to todo (attempt {n}/{REAP_REQUEUE_MAX})"),
+                        );
+                        eprintln!(
+                            "todo-watcher: session {job_id} died with task {task_id} \
+                             in_progress; put it back to todo ({n}/{REAP_REQUEUE_MAX})"
+                        );
+                        forget_dispatch(state, &job_id);
+                        continue;
+                    }
+                    Abandoned::Parked(deaths) => {
+                        log_reaper_requeue(
+                            task_id,
+                            &job_id,
+                            &format!("parked in backlog after {deaths} deaths"),
+                        );
+                        let body = reaper_parked_body(&job_id, task_id, deaths);
+                        if let Err(e) =
+                            file_reaper_alert(state, task_exists, task_id, &job_id, &body)
+                        {
+                            eprintln!(
+                                "todo-watcher: filing the parked-task alert for session \
+                                 {job_id} failed: {e}"
+                            );
+                        }
+                        forget_dispatch(state, &job_id);
+                        continue;
+                    }
+                    Abandoned::Moved => {
+                        forget_dispatch(state, &job_id);
+                        continue;
+                    }
+                    Abandoned::Report => {}
+                }
                 let body = reaper_abandoned_body(&job_id, task_id);
                 match file_reaper_alert(state, task_exists, task_id, &job_id, &body) {
                     Ok(()) => {
@@ -2484,6 +2645,7 @@ pub fn serve(flags: ServeFlags) -> crate::core::Result<()> {
         cost_relayed: Arc::new(Mutex::new(std::collections::HashSet::new())),
         cost_relay_seeded: Arc::new(Mutex::new(HashMap::new())),
         todo_dispatched: Arc::new(Mutex::new(HashMap::new())),
+        todo_requeued: Arc::new(Mutex::new(HashMap::new())),
         todo_spawn_failed: Arc::new(Mutex::new(HashMap::new())),
         script_runs: Arc::new(script_runs::Registry::new()),
     };
@@ -11683,6 +11845,7 @@ mod tests {
             cost_relayed: Arc::new(Mutex::new(std::collections::HashSet::new())),
             cost_relay_seeded: Arc::new(Mutex::new(HashMap::new())),
             todo_dispatched: Arc::new(Mutex::new(HashMap::new())),
+            todo_requeued: Arc::new(Mutex::new(HashMap::new())),
             todo_spawn_failed: Arc::new(Mutex::new(HashMap::new())),
             script_runs: Arc::new(script_runs::Registry::new()),
         };
@@ -15170,7 +15333,7 @@ exit 2
     }
 
     #[test]
-    fn todo_reaper_tick_reports_an_in_progress_task_whose_session_died() {
+    fn todo_reaper_tick_reports_a_claimed_in_progress_task_whose_session_died() {
         // SAFETY: ENV_LOCK, as above.
         let _env = attachments::ENV_LOCK
             .lock()
@@ -15186,6 +15349,14 @@ exit 2
             let project = new_project(&state, None);
             let task = new_task(&state, project);
             set_status(&state, task, Status::InProgress);
+            // A claim held by someone: the reaper only reports (naru task
+            // 1697 re-queues an unclaimed task).
+            state
+                .store
+                .lock()
+                .unwrap()
+                .claim_task(task, "someone", false)
+                .unwrap();
 
             // Listed with no pid: the process exited without closing the task.
             seed_dispatch(&state, "job0001", task);
@@ -15212,7 +15383,7 @@ exit 2
             assert_eq!(
                 state.store.lock().unwrap().get_task(task).unwrap().status,
                 Status::InProgress,
-                "the reaper never moves the task"
+                "a claimed task is never moved"
             );
             assert!(stops(&stop_log).is_empty());
             todo_reaper_tick(&state);
@@ -15234,6 +15405,106 @@ exit 2
             todo_reaper_tick(&state);
             assert_eq!(inbox_rows(&state).len(), 2);
             assert_eq!(dispatched_task(&state, "job0002"), None);
+
+            unsafe { std::env::remove_var("MESA_CLAUDE_BIN") };
+        });
+    }
+
+    #[test]
+    fn todo_reaper_tick_requeues_an_unclaimed_task_whose_session_died_then_parks_it() {
+        // SAFETY: ENV_LOCK, as above.
+        let _env = attachments::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::core::library::test_home::with_home_dir(|home| {
+            let stub_dir = tempfile::tempdir().unwrap();
+            let agents_file = stub_dir.path().join("agents.json");
+            let stop_log = stub_dir.path().join("stops.log");
+            let bin = stub_claude_reaper(stub_dir.path(), &agents_file, &stop_log);
+            unsafe { std::env::set_var("MESA_CLAUDE_BIN", &bin) };
+
+            let (_dir, state) = test_state();
+            let project = new_project(&state, None);
+            let task = new_task(&state, project);
+            let status =
+                |state: &AppState| state.store.lock().unwrap().get_task(task).unwrap().status;
+
+            // Each death while the task is unclaimed and in_progress puts it
+            // back to todo, quietly, up to the cap.
+            for attempt in 1..=REAP_REQUEUE_MAX {
+                set_status(&state, task, Status::InProgress);
+                let job = format!("job000{attempt}");
+                seed_dispatch(&state, &job, task);
+                std::fs::write(&agents_file, agents_listing(&job, None, Some("idle"))).unwrap();
+                todo_reaper_tick(&state);
+                assert_eq!(status(&state), Status::Todo, "attempt {attempt} re-queues");
+                assert!(inbox_rows(&state).is_empty(), "a re-queue files no alert");
+                assert_eq!(dispatched_task(&state, &job), None);
+            }
+            let log =
+                std::fs::read_to_string(home.join(".naru").join("logs").join("todo-reaper.log"))
+                    .unwrap();
+            assert!(log.contains("reason=session-died outcome=re-queued to todo (attempt 2/2)"));
+
+            // One more death: parked in backlog, one alert.
+            set_status(&state, task, Status::InProgress);
+            seed_dispatch(&state, "job0009", task);
+            std::fs::write(&agents_file, agents_listing("job0009", None, Some("idle"))).unwrap();
+            todo_reaper_tick(&state);
+            assert_eq!(status(&state), Status::Backlog);
+            assert_eq!(
+                inbox_rows(&state),
+                vec![(
+                    Some(TODO_REAPER_AUTHOR.to_string()),
+                    InboxKind::TaskSummary,
+                    Some(task),
+                )]
+            );
+            assert!(state.todo_requeued.lock().unwrap().is_empty());
+            assert!(stops(&stop_log).is_empty());
+
+            // A superseded entry (relay, re-dispatch) is stale: no re-queue.
+            set_status(&state, task, Status::InProgress);
+            seed_dispatch(&state, "job0010", task);
+            supersede_dispatch(&state, task);
+            assert!(matches!(
+                requeue_abandoned(&state, task, "job0010"),
+                Abandoned::Moved
+            ));
+            assert_eq!(status(&state), Status::InProgress);
+
+            unsafe { std::env::remove_var("MESA_CLAUDE_BIN") };
+        });
+    }
+
+    #[test]
+    fn todo_reaper_tick_forgets_the_requeue_count_once_the_task_closes() {
+        // SAFETY: ENV_LOCK, as above.
+        let _env = attachments::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::core::library::test_home::with_home_dir(|_| {
+            let stub_dir = tempfile::tempdir().unwrap();
+            let agents_file = stub_dir.path().join("agents.json");
+            let stop_log = stub_dir.path().join("stops.log");
+            let bin = stub_claude_reaper(stub_dir.path(), &agents_file, &stop_log);
+            unsafe { std::env::set_var("MESA_CLAUDE_BIN", &bin) };
+
+            let (_dir, state) = test_state();
+            let project = new_project(&state, None);
+            let task = new_task(&state, project);
+            set_status(&state, task, Status::InProgress);
+            seed_dispatch(&state, "job0001", task);
+            std::fs::write(&agents_file, agents_listing("job0001", None, Some("idle"))).unwrap();
+            todo_reaper_tick(&state);
+            assert_eq!(state.todo_requeued.lock().unwrap().get(&task), Some(&1));
+
+            // Re-dispatched, then closed by its agent: the count starts over.
+            set_status(&state, task, Status::InProgress);
+            seed_dispatch(&state, "job0002", task);
+            set_status(&state, task, Status::Done);
+            todo_reaper_tick(&state);
+            assert!(state.todo_requeued.lock().unwrap().is_empty());
 
             unsafe { std::env::remove_var("MESA_CLAUDE_BIN") };
         });
