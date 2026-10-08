@@ -1610,7 +1610,25 @@ EXAMPLES
         /// Bind to this project (id or name); pass "" to un-bind
         #[arg(long, group = "fields")]
         project: Option<String>,
+        /// `true` or `false`: whether the workflow fires automatically (a
+        /// manual `run` always works)
+        #[arg(long, group = "fields")]
+        enabled: Option<bool>,
         /// Print the workflow without its `description` instead of in full
+        #[arg(long)]
+        quiet: bool,
+    },
+    /// Copy a workflow: its nodes and edges, not its runs. The copy is DISABLED
+    ///
+    /// The default name is "<name> (copy)", then "(copy 2)"…; an explicit
+    /// `--name` that is taken is `conflict`. Prints what `workflow show` does.
+    Duplicate {
+        /// Workflow id or name
+        workflow: String,
+        /// Name of the copy
+        #[arg(long)]
+        name: Option<String>,
+        /// Keep the {workflow, nodes, edges} keys but drop free text
         #[arg(long)]
         quiet: bool,
     },
@@ -7284,6 +7302,7 @@ fn run_workflow_cmd(cmd: WorkflowCmd) -> Result<()> {
             name,
             description,
             project,
+            enabled,
             quiet,
         } => {
             let id = resolve_workflow(&store, &workflow)?.id;
@@ -7296,8 +7315,17 @@ fn run_workflow_cmd(cmd: WorkflowCmd) -> Result<()> {
                 project_id,
                 name,
                 description: description.map(clear_if_empty),
+                enabled,
             };
             print_workflow(&store.update_workflow(id, patch)?, quiet);
+        }
+        WorkflowCmd::Duplicate {
+            workflow,
+            name,
+            quiet,
+        } => {
+            let id = resolve_workflow(&store, &workflow)?.id;
+            print_workflow_view(&store.duplicate_workflow(id, name.as_deref())?, quiet);
         }
         WorkflowCmd::Delete { workflow, quiet } => {
             let id = resolve_workflow(&store, &workflow)?.id;
@@ -7969,6 +7997,7 @@ mod tests {
             last_failure_at: None,
             next_run_at: None,
             trigger_events: vec![],
+            enabled: true,
         }
     }
 
@@ -8274,6 +8303,7 @@ mod tests {
                 "last_failure_at",
                 "next_run_at",
                 "trigger_events",
+                "enabled",
             ]),
             "Workflow gained/lost a field: decide whether it belongs in the \
              --quiet shape before updating this list",

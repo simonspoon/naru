@@ -27,7 +27,9 @@
 # `POST /api/workflows/events`; `workflow defaults --project` (mesa task 1644:
 # both ambient workflows, a rerun skipping them, the task output's `status:
 # backlog`, the review filing exactly one backlog task or none on an empty log);
-# and `serve --watch-workflows` running a due
+# the `enabled` switch (a disabled ambient workflow skipped by `emit`, still
+# run by hand) and `workflow duplicate` (CLI + API: remapped nodes/edges, a
+# disabled copy, naming and conflict); and `serve --watch-workflows` running a due
 # time-triggered workflow exactly once per interval.
 set -euo pipefail
 # Drop inherited NARU_* vars: Naru reads them before MESA_*, so one would escape this script's isolation.
@@ -195,7 +197,7 @@ ok "workflow update: clears and un-binds; no field is usage"
 run 0 "$NARU" workflow show "$W"
 [ "$(keys "$STDOUT")" = '["edges","nodes","workflow"]' ] || fail "show shape: $STDOUT"
 run 0 "$NARU" workflow get "gate demo" --quiet
-[ "$(jq -c '.workflow | keys' <<<"$STDOUT")" = '["created_at","id","last_failure_at","last_run_at","last_run_status","name","next_run_at","project_id","trigger","trigger_events","trigger_phrase","updated_at"]' ] ||
+[ "$(jq -c '.workflow | keys' <<<"$STDOUT")" = '["created_at","enabled","id","last_failure_at","last_run_at","last_run_status","name","next_run_at","project_id","trigger","trigger_events","trigger_phrase","updated_at"]' ] ||
   fail "show --quiet drops description: $STDOUT"
 ok "workflow show/get: {workflow, nodes, edges}; --quiet drops the description"
 
@@ -816,6 +818,48 @@ run 2 "$NARU" workflow emit idea
 run 2 "$NARU" workflow emit idea --speaker s --text a --text-file "$TMP/wake.txt"
 ok "workflow emit: [] when nothing matches, id order, validation exit 1, usage exit 2"
 
+# ================= enabled switch and duplicate (naru task 1633) =================
+
+run 0 "$NARU" workflow update AmbIdea --enabled false
+[ "$(jqs .enabled)" = "false" ] || fail "update --enabled false: $STDOUT"
+run 0 "$NARU" workflow emit idea --speaker room
+[ "$STDOUT" = "[]" ] || fail "a disabled ambient workflow is not run by emit: $STDOUT"
+run 0 "$NARU" workflow run AmbIdea --input hi
+[ "$(jqs .status)" = "succeeded" ] || fail "a disabled workflow still runs by hand: $STDOUT"
+run 0 "$NARU" workflow update AmbIdea --enabled true --quiet
+[ "$(jqs .enabled)" = "true" ] || fail "--enabled true (quiet keeps the bounded flag): $STDOUT"
+run 0 "$NARU" workflow emit idea --speaker room
+[ "$(jqs length)" = "1" ] || fail "re-enabled, emit runs it again: $STDOUT"
+run 2 "$NARU" workflow update AmbIdea --enabled maybe
+ok "workflow update --enabled: a disabled ambient workflow is skipped by emit but still runs by hand"
+
+run 0 "$NARU" workflow duplicate AmbIdea
+[ "$(jqs .workflow.name)" = "AmbIdea (copy)" ] && [ "$(jqs .workflow.enabled)" = "false" ] ||
+  fail "default name and disabled copy: $STDOUT"
+DUP1=$(jqs .workflow.id)
+[ "$(jqs '.nodes | length')" = "2" ] && [ "$(jqs '.edges | length')" = "1" ] || fail "copy has the nodes and edges: $STDOUT"
+[ "$(jqs '.nodes[0].config.events | join(",")')" = "idea,wake" ] || fail "node config copied: $STDOUT"
+[ "$(jqs '.edges[0].from_node == .nodes[0].id and .edges[0].to_node == .nodes[1].id')" = "true" ] ||
+  fail "edges remapped onto the copy's own nodes: $STDOUT"
+[ "$(jqs '.nodes[0].id != '"$AMB_T1")" = "true" ] || fail "copy has new node ids"
+run 0 "$NARU" workflow runs "$DUP1"
+[ "$(jqs length)" = "0" ] || fail "run history is not copied"
+run 0 "$NARU" workflow emit idea --speaker room
+[ "$(jqs length)" = "1" ] || fail "the disabled copy does not double-fire: $STDOUT"
+run 0 "$NARU" workflow duplicate AmbIdea --quiet
+[ "$(jqs .workflow.name)" = "AmbIdea (copy 2)" ] || fail "second default name: $STDOUT"
+DUP2=$(jqs .workflow.id)
+[ "$(jqs '.workflow | has("description")')" = "false" ] || fail "--quiet drops description"
+run 0 "$NARU" workflow duplicate AmbIdea --name "Named Copy"
+[ "$(jqs .workflow.name)" = "Named Copy" ] || fail "explicit name: $STDOUT"
+DUP3=$(jqs .workflow.id)
+run 1 "$NARU" workflow duplicate AmbIdea --name "named COPY"
+[ "$(jqe .error.code)" = "conflict" ] || fail "a taken explicit name is conflict: $STDERR"
+run 1 "$NARU" workflow duplicate nope-not-there
+[ "$(jqe .error.code)" = "not_found" ] || fail "unknown workflow: not_found"
+ok "workflow duplicate: nodes+edges remapped, disabled, no runs, (copy)/(copy 2) naming, explicit name, conflict on a taken one"
+for d in "$DUP1" "$DUP2" "$DUP3"; do "$NARU" workflow delete "$d" >/dev/null; done
+
 # ================= API =================
 
 PORT=17795
@@ -990,6 +1034,23 @@ run 0 "$NARU" task list "$DP"
 [ "$(jqs 'length')" = "$BEFORE_N" ] || fail "an empty log filed nothing: $STDOUT"
 ok "end-of-day review with an empty log: the prompt node is skipped and no task is filed"
 
+# ---- enabled + duplicate over HTTP (naru task 1633) ----
+curl -s -X PATCH -H 'Content-Type: application/json' -d '{"enabled":false}' "http://127.0.0.1:$PORT/api/workflows/$AW" >"$TMP/body"
+[ "$(jq -r .enabled "$TMP/body")" = "false" ] || fail "PATCH enabled false: $(cat "$TMP/body")"
+curl -s -X PATCH -H 'Content-Type: application/json' -d '{"enabled":true}' "http://127.0.0.1:$PORT/api/workflows/$AW" >"$TMP/body"
+[ "$(jq -r .enabled "$TMP/body")" = "true" ] || fail "PATCH enabled true: $(cat "$TMP/body")"
+STATUS=$(curl -s -o "$TMP/body" -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{}' "http://127.0.0.1:$PORT/api/workflows/$AW/duplicate")
+[ "$STATUS" = "201" ] || fail "duplicate answers 201, got $STATUS: $(cat "$TMP/body")"
+[ "$(jq -r .workflow.enabled "$TMP/body")" = "false" ] && [ "$(jq '.nodes | length' "$TMP/body")" -ge 1 ] || fail "API copy: $(cat "$TMP/body")"
+APIDUP=$(jq -r .workflow.id "$TMP/body")
+STATUS=$(curl -s -o "$TMP/body" -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d "{\"name\":\"$(jq -r .workflow.name "$TMP/body")\"}" "http://127.0.0.1:$PORT/api/workflows/$AW/duplicate")
+[ "$STATUS" = "409" ] || fail "a taken name on duplicate is 409, got $STATUS"
+STATUS=$(curl -s -o "$TMP/body" -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{"name":"ApiNamed"}' "http://127.0.0.1:$PORT/api/workflows/$AW/duplicate")
+[ "$STATUS" = "201" ] && [ "$(jq -r .workflow.name "$TMP/body")" = "ApiNamed" ] || fail "named duplicate: $STATUS $(cat "$TMP/body")"
+curl -s -X DELETE -H 'Content-Type: application/json' "http://127.0.0.1:$PORT/api/workflows/$APIDUP" >/dev/null
+curl -s -X DELETE -H 'Content-Type: application/json' "http://127.0.0.1:$PORT/api/workflows/$(jq -r .workflow.id "$TMP/body")" >/dev/null
+ok "API: PATCH enabled toggles, POST duplicate is 201 with a disabled copy, a taken name is 409"
+
 # ---- the gate: require_agent_access on every route, reads included ----
 raw() { # raw <method> <path> [extra curl args...]
   local method=$1 path=$2; shift 2
@@ -1007,7 +1068,7 @@ done
 for route in "POST /api/workflows" "PATCH /api/workflows/$AW" "DELETE /api/workflows/$AW" \
   "POST /api/workflows/$AW/nodes" "PATCH /api/workflow-nodes/$AC" "DELETE /api/workflow-nodes/$AC" \
   "POST /api/workflows/$AW/edges" "DELETE /api/workflow-edges/1" "POST /api/workflows/$AW/run" \
-  "POST /api/workflows/events"; do
+  "POST /api/workflows/events" "POST /api/workflows/$AW/duplicate"; do
   set -- $route
   raw "$1" "$2" "${EVIL[@]}" "${JSON[@]}"
   [ "$STATUS" = "403" ] || fail "default: $route with a foreign Origin must be 403, got $STATUS"

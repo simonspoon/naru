@@ -2513,6 +2513,119 @@ mod tests {
     }
 
     #[test]
+    fn a_disabled_workflow_is_skipped_by_the_timer_and_by_emit_but_runs_by_hand() {
+        let (st, _d) = store();
+        let mk = |name: &str, config: Value| {
+            st.with(|s| {
+                let wf = s.create_workflow(None, name, None).unwrap().id;
+                let t = node(s, wf, WorkflowNodeKind::Trigger, "T", config);
+                let c = node(s, wf, WorkflowNodeKind::Cli, "Echo", cli("cat"));
+                s.create_workflow_edge(wf, t, c, None).unwrap();
+                wf
+            })
+        };
+        let amb = mk("Amb", json!({"mode": "ambient", "events": ["idea"]}));
+        let tick = mk("Tick", json!({"mode": "time", "every_minutes": 5}));
+        let off = |id: i64, on: bool| {
+            st.with(|s| {
+                s.update_workflow(
+                    id,
+                    WorkflowPatch {
+                        enabled: Some(on),
+                        ..Default::default()
+                    },
+                )
+            })
+            .unwrap()
+        };
+        assert_eq!(st.with(|s| s.due_time_workflows()).unwrap(), vec![tick]);
+        off(amb, false);
+        off(tick, false);
+        assert!(!st.with(|s| s.get_workflow(amb)).unwrap().enabled);
+        assert!(st.with(|s| s.due_time_workflows()).unwrap().is_empty());
+        assert!(emit_ambient(&st, "idea", "x", "").unwrap().0.is_empty());
+        // A manual run still works.
+        let r = run_workflow(&st, amb, WorkflowTrigger::Manual, "hi").unwrap();
+        assert_eq!(r.status, WorkflowRunStatus::Succeeded);
+        off(amb, true);
+        off(tick, true);
+        assert_eq!(st.with(|s| s.due_time_workflows()).unwrap(), vec![tick]);
+        assert_eq!(emit_ambient(&st, "idea", "x", "").unwrap().0.len(), 1);
+    }
+
+    #[test]
+    fn duplicate_copies_nodes_and_edges_remapped_and_starts_disabled() {
+        let (st, _d) = store();
+        let (wf, a, b) = st.with(|s| {
+            let wf = s.create_workflow(None, "Flow", Some("d")).unwrap().id;
+            let t = node(
+                s,
+                wf,
+                WorkflowNodeKind::Trigger,
+                "T",
+                json!({"mode": "manual"}),
+            );
+            let br = node(
+                s,
+                wf,
+                WorkflowNodeKind::Branch,
+                "B",
+                json!({"op": "contains", "value": "x"}),
+            );
+            let c = node(s, wf, WorkflowNodeKind::Cli, "C", cli("true"));
+            s.create_workflow_edge(wf, t, br, None).unwrap();
+            s.create_workflow_edge(wf, br, c, Some("true".into()))
+                .unwrap();
+            // Leave a run behind: history is not copied.
+            (wf, t, c)
+        });
+        run_workflow(&st, wf, WorkflowTrigger::Manual, "").unwrap();
+        let (v1, v2, orig) = st.with(|s| {
+            let v1 = s.duplicate_workflow(wf, None).unwrap();
+            let v2 = s.duplicate_workflow(wf, None).unwrap();
+            (v1, v2, s.get_workflow_view(wf).unwrap())
+        });
+        assert_eq!(v1.workflow.name, "Flow (copy)");
+        assert_eq!(v2.workflow.name, "Flow (copy 2)");
+        assert!(!v1.workflow.enabled);
+        assert!(orig.workflow.enabled);
+        assert_eq!(v1.workflow.description.as_deref(), Some("d"));
+        assert_eq!(v1.nodes.len(), 3);
+        assert_eq!(v1.edges.len(), 2);
+        let ids: Vec<i64> = v1.nodes.iter().map(|n| n.id).collect();
+        assert!(ids.iter().all(|i| ![a, b].contains(i)));
+        for (n, o) in v1.nodes.iter().zip(&orig.nodes) {
+            assert_eq!(
+                (n.kind, &n.title, &n.config, n.x, n.y),
+                (o.kind, &o.title, &o.config, o.x, o.y)
+            );
+        }
+        for (e, o) in v1.edges.iter().zip(&orig.edges) {
+            assert_eq!(e.branch, o.branch);
+            assert!(ids.contains(&e.from_node) && ids.contains(&e.to_node));
+            assert_ne!(e.from_node, o.from_node);
+        }
+        assert!(
+            st.with(|s| s.list_workflow_runs(v1.workflow.id))
+                .unwrap()
+                .is_empty()
+        );
+        // Explicit names: taken is conflict, a free one is used.
+        assert!(matches!(
+            st.with(|s| s.duplicate_workflow(wf, Some("FLOW"))),
+            Err(Error::Conflict(_))
+        ));
+        let v3 = st
+            .with(|s| s.duplicate_workflow(wf, Some("Other")))
+            .unwrap();
+        assert_eq!(v3.workflow.name, "Other");
+        assert!(matches!(
+            st.with(|s| s.duplicate_workflow(9999, None)),
+            Err(Error::NotFound(_))
+        ));
+    }
+
+    #[test]
     fn a_vanished_workflow_in_a_batch_does_not_stop_the_others() {
         let (st, _d) = store();
         let mk = |name: &str| {

@@ -15,7 +15,7 @@ Source of truth: `src/core/workflow.rs` (validation and engine),
 
 | Table | Holds | Notes |
 | --- | --- | --- |
-| `workflows` | `id`, `project_id` (nullable, `ON DELETE CASCADE`), `name`, `description`, timestamps | `name` is unique **case-insensitively across all workflows** (so the CLI and the voice agent can run one by name) and never a plain number (`<id\|name>` tries the integer first) |
+| `workflows` | `id`, `project_id` (nullable, `ON DELETE CASCADE`), `name`, `description`, `enabled` (default 1, naru task 1633), timestamps | `name` is unique **case-insensitively across all workflows** (so the CLI and the voice agent can run one by name) and never a plain number (`<id\|name>` tries the integer first) |
 | `workflow_nodes` | `id`, `workflow_id` (cascade), `kind`, `title` (≤ 200), `config` (JSON), `x`, `y`, timestamps | `kind` is fixed at creation; `config` is validated per kind |
 | `workflow_edges` | `id`, `workflow_id` (cascade), `from_node`, `to_node` (both cascade), `branch` | a DAG: no self-edge, no cycle |
 | `workflow_runs` | `id`, `workflow_id` (cascade), `trigger`, `input`, `status`, `steps` (JSON), `error`, `started_at`, `finished_at`, plus a store-only `owner_pid` | the newest **50 finished** runs per workflow are kept (pruned on insert; a `running` row is never pruned — it is a live claim) |
@@ -188,6 +188,24 @@ output `nothing to deliver` and writes no record, so a silent run — an empty
 transcript, a filter that let nothing through — files nothing and still
 succeeds.
 
+## Enabled and duplicate (naru task 1633)
+
+`Workflow.enabled` is a stored switch (migration column `workflows.enabled`,
+default on). **Off means it never fires by itself**: `due_time_workflows`
+(the time watcher) and `ambient_workflows` (`workflow emit`,
+`POST /api/workflows/events`) skip it. A manual run (`workflow run`, the Run
+button, the run route) always works. Set with `workflow update --enabled
+true|false` or `PATCH {"enabled": bool}`; the overview's "On" column and the
+project list/builder show and toggle it.
+
+`Store::duplicate_workflow` copies the workflow's project and description, every
+node (kind, title, config, position) and every edge (remapped onto the new node
+ids, branch labels kept) in one `BEGIN IMMEDIATE` transaction. The copy is
+created **disabled**, so a duplicated time or ambient workflow never
+double-fires until switched on. Run history and log lines are not copied. The
+default name is `<name> (copy)`, then `(copy 2)`…, satisfying the
+case-insensitive unique-name rule; an explicit taken `--name` is `conflict`.
+
 ## Engine semantics
 
 1. **Order** is a topological sort (Kahn), the ready set a `BTreeSet`, so ties
@@ -238,7 +256,8 @@ is named.
 | `workflow create <NAME> [--project] [--description]` | the `Workflow` |
 | `workflow list [PROJECT]` | a bare array of `Workflow` rows (each with `trigger`, `trigger_phrase`) |
 | `workflow show\|get <id\|name>` | `{workflow, nodes, edges}` |
-| `workflow update <id\|name> [--name] [--description ""] [--project ""]` | the `Workflow`; `""` clears/unbinds; no field is `usage` |
+| `workflow update <id\|name> [--name] [--description ""] [--project ""] [--enabled true\|false]` | the `Workflow`; `""` clears/unbinds; no field is `usage` |
+| `workflow duplicate <id\|name> [--name NEW]` | the copy's `{workflow, nodes, edges}` (see below); `--quiet` accepted |
 | `workflow delete <id\|name>` | the destroyed `{workflow, nodes, edges}` |
 | `workflow run <id\|name> [--input TEXT \| --input-file PATH\|-] [--trigger manual\|voice]` | the finished `WorkflowRun` |
 | `workflow emit <idea\|can-help\|wake> --speaker S [--text TEXT \| --text-file PATH\|-]` | runs every matching `ambient` workflow synchronously, id order; a bare array of the finished `WorkflowRun`s (`[]` when none match, exit 0); `--quiet` accepted and ignored |
@@ -283,7 +302,8 @@ applies as everywhere.
 | Route | Does |
 | --- | --- |
 | `GET /api/workflows?project=<id>` / `POST /api/workflows` `{name, project_id?, description?}` | list / create (201) |
-| `GET /api/workflows/{id}` / `PATCH` / `DELETE` | the view / update (`description`, `project_id` three-state: omit, `null` clears) / echo the destroyed view |
+| `GET /api/workflows/{id}` / `PATCH` / `DELETE` | the view / update (`name`, `enabled`, `description`, `project_id` three-state: omit, `null` clears) / echo the destroyed view |
+| `POST /api/workflows/{id}/duplicate` `{name?}` (201) | copy a workflow; the body may be empty or `{}`; answers the copy's view; a taken `name` is 409 |
 | `POST /api/workflows/{id}/nodes` `{kind, title, config?, x?, y?}` (201) | add a node |
 | `PATCH /api/workflow-nodes/{id}` `{title?, config?, x?, y?}` / `DELETE` | update / echo `{node, edges}` |
 | `POST /api/workflows/{id}/edges` `{from_node, to_node, branch?}` (201) / `DELETE /api/workflow-edges/{id}` | add / delete |
@@ -313,7 +333,7 @@ Server. Every **60 s** (`NARU_WATCH_WORKFLOWS_TICK_MS` / `MESA_…` overrides it
 it asks `Store::due_time_workflows` for the workflows whose trigger is
 `mode: time` and for which **no run with `trigger = time` started within the
 last `every_minutes`**, judged on the store's own clock (the
-`stale_claim_minutes` posture); a workflow of an archived project is never due.
+`stale_claim_minutes` posture); a disabled workflow, or one of an archived project, is never due.
 That list is only a prefilter: the claim itself is
 `Store::claim_time_workflow_run`, **one `INSERT … SELECT … WHERE NOT EXISTS`
 (the same interval check) inside `BEGIN IMMEDIATE`**, so the due check and the
@@ -459,7 +479,7 @@ exact graph over stub `sox`/`auris` and a stub model API.
 
 `#/workflows` (left nav; mesa task 1632) is the global overview, also shown as the Library's read-only Workflows tab at `#/library/workflows` (mesa task 1676):
 one table of every workflow across all projects with project, on/off, last run,
-last failure and next run, polled every 5s. A row opens the workflow in its
+last failure and next run, polled every 5s (the On column is the workflow's `enabled` switch). A row opens the workflow in its
 owning project's view; a global (project-less) workflow has no project page, so
 its row is not a link. The label logic is `workflowOverview.ts`.
 

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import {
   deleteWorkflow,
+  duplicateWorkflow,
   getWorkflow,
   getWorkflowRun,
   listWorkflowLog,
@@ -15,6 +16,7 @@ import { formatTimestamp, timeAgo } from '../time'
 import { useFetch } from '../useFetch'
 import { WorkflowCanvas } from '../WorkflowCanvas'
 import { PlayIcon } from '../components/WorkflowIcon'
+import { toggleLabel } from '../workflowOverview'
 import { formatDuration, runPollMs, runSummary, runningRunId, stepClass } from '../workflowRun'
 import type { WorkflowRun } from '../types/WorkflowRun'
 
@@ -231,7 +233,7 @@ export function WorkflowBuilderView({
             value={wf.name}
             onSave={(name) => updateWorkflow(workflowId, { name }).then(() => refetch())}
           />
-          <span className="muted workflow-title-tag"> · workflow</span>
+          <span className="muted workflow-title-tag"> · workflow{wf.enabled ? '' : ' · disabled'}</span>
         </h2>
         <div className="workflow-head-actions">
           <input
@@ -247,6 +249,31 @@ export function WorkflowBuilderView({
                 <PlayIcon /> Run
               </>
             )}
+          </button>
+          <button
+            type="button"
+            title={wf.enabled ? 'Enabled: fires from its trigger' : 'Disabled: only runs when asked'}
+            onClick={() =>
+              updateWorkflow(workflowId, { enabled: !wf.enabled }).then(
+                () => refetch(),
+                (err: unknown) => setRunError(err instanceof Error ? err.message : String(err)),
+              )
+            }
+          >
+            {toggleLabel(wf)}
+          </button>
+          <button
+            type="button"
+            onClick={() =>
+              duplicateWorkflow(workflowId).then(
+                (v) => {
+                  window.location.hash = `#/projects/${v.workflow.project_id ?? projectId}/workflows/${v.workflow.id}`
+                },
+                (err: unknown) => setRunError(err instanceof Error ? err.message : String(err)),
+              )
+            }
+          >
+            duplicate
           </button>
           <ConfirmDelete
             label="delete workflow"

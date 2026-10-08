@@ -2940,6 +2940,7 @@ fn router(state: AppState) -> Router {
                 .patch(update_workflow)
                 .delete(delete_workflow),
         )
+        .route("/api/workflows/{id}/duplicate", post(duplicate_workflow))
         .route("/api/workflows/{id}/nodes", post(create_workflow_node))
         .route("/api/workflows/{id}/edges", post(create_workflow_edge))
         .route("/api/workflows/events", post(emit_workflow_event))
@@ -4303,6 +4304,14 @@ struct WorkflowUpdate {
     description: Option<Option<String>>,
     #[serde(default, deserialize_with = "double_option")]
     project_id: Option<Option<i64>>,
+    #[serde(default)]
+    enabled: Option<bool>,
+}
+
+#[derive(Deserialize, Default)]
+struct WorkflowDuplicate {
+    #[serde(default)]
+    name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -4410,9 +4419,33 @@ async fn update_workflow(
         project_id: body.project_id,
         name: body.name,
         description: body.description,
+        enabled: body.enabled,
     };
     let mut store = state.store.lock().unwrap();
     Ok(Json(store.update_workflow(id, patch)?).into_response())
+}
+
+/// Copies a workflow (disabled) and answers the new {workflow, nodes, edges}.
+/// The body is optional: `{"name"}` or nothing.
+async fn duplicate_workflow(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    body: axum::body::Bytes,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    // The body is optional: empty = the default name.
+    let name = if body.iter().all(u8::is_ascii_whitespace) {
+        None
+    } else {
+        serde_json::from_slice::<WorkflowDuplicate>(&body)
+            .map_err(|e| crate::core::Error::Validation(format!("invalid JSON body: {e}")))?
+            .name
+    };
+    let mut store = state.store.lock().unwrap();
+    let view = store.duplicate_workflow(id, name.as_deref())?;
+    Ok((StatusCode::CREATED, Json(view)).into_response())
 }
 
 /// Echoes the destroyed {workflow, nodes, edges}.

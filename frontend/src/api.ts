@@ -764,10 +764,17 @@ export function createWorkflow(body: WorkflowCreate): Promise<Workflow> {
 export interface WorkflowPatch {
   name?: string
   description?: string | null
+  enabled?: boolean
 }
 
 export function updateWorkflow(id: number, patch: WorkflowPatch): Promise<Workflow> {
   return request(`/api/workflows/${id}`, jsonInit('PATCH', patch))
+}
+
+/** Copies a workflow (nodes and edges, not runs). The copy is created
+ * disabled; the answer is its whole graph. */
+export function duplicateWorkflow(id: number, name?: string): Promise<WorkflowView> {
+  return request(`/api/workflows/${id}/duplicate`, jsonInit('POST', name === undefined ? {} : { name }))
 }
 
 /** Returns the destroyed graph: the workflow plus its cascaded nodes and edges. */

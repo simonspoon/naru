@@ -4644,6 +4644,9 @@ pub struct Workflow {
     /// other trigger and for a time workflow that has never run on its timer
     /// (due at once).
     pub next_run_at: Option<String>,
+    /// Off = never fires automatically (the time watcher and ambient events
+    /// skip it); a manual run still works. Stored; a duplicate starts off.
+    pub enabled: bool,
 }
 
 /// One step of a graph. `config` is JSON whose shape depends on `kind`

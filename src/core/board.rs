@@ -381,6 +381,7 @@ mod tests {
             last_failure_at: None,
             next_run_at: None,
             trigger_events: vec![],
+            enabled: true,
         }
     }
 

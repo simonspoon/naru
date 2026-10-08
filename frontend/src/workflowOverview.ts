@@ -2,12 +2,21 @@ import { parseTimestamp, timeAgo } from './time'
 import type { Project } from './types/Project'
 import type { Workflow } from './types/Workflow'
 
-/** On/off for a workflow: it runs by itself exactly when its trigger is a
- * `time` one (`serve --watch-workflows` is what fires it). Manual and voice
- * workflows run only when asked, so they read "off"; there is no stored
- * enabled flag. */
+/** A workflow's own on/off switch (`enabled`): off means it never fires by
+ * itself (the time watcher and ambient events skip it); a manual run works. */
+export function stateLabel(w: Workflow): 'on' | 'off' {
+  return w.enabled ? 'on' : 'off'
+}
+
+/** What the toggle button says: the action it will take. */
+export function toggleLabel(w: Workflow): string {
+  return w.enabled ? 'turn off' : 'turn on'
+}
+
+/** Whether the server's timer fires this workflow: a `time` trigger that is
+ * switched on. */
 export function isScheduled(w: Workflow): boolean {
-  return w.trigger === 'time'
+  return w.enabled && w.trigger === 'time'
 }
 
 /** The project's name, or `—` for a global workflow. */
@@ -28,7 +37,7 @@ export function lastFailureLabel(w: Workflow, now: number = Date.now()): string 
   return w.last_failure_at === null ? '—' : timeAgo(w.last_failure_at, now)
 }
 
-/** The next scheduled run. Only a scheduled workflow has one: a time workflow
+/** The next scheduled run. Only an enabled time workflow has one: a time workflow
  * that never ran on its timer (null) or whose stamp has passed is due on the
  * watcher's next tick. */
 export function nextRunLabel(w: Workflow, now: number = Date.now()): string {

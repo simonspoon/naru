@@ -52,4 +52,9 @@ last_failure_at: string | null,
  * other trigger and for a time workflow that has never run on its timer
  * (due at once).
  */
-next_run_at: string | null, };
+next_run_at: string | null, 
+/**
+ * Off = never fires automatically (the time watcher and ambient events
+ * skip it); a manual run still works. Stored; a duplicate starts off.
+ */
+enabled: boolean, };

@@ -1344,6 +1344,10 @@ const MIGRATIONS: &[&str] = &[
         created_at  TEXT NOT NULL
      );
      CREATE INDEX idx_workflow_log_log ON workflow_log(log, id);",
+    // Task 1633: a workflow can be switched off. `enabled = 0` stops every
+    // automatic firing (the time watcher, ambient events); a manual run still
+    // works. Existing workflows stay on.
+    "ALTER TABLE workflows ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;",
 ];
 
 /// Selects full task rows including the derived `blocked` flag.
@@ -2601,7 +2605,8 @@ const WORKFLOW_COLUMNS: &str = "w.id, w.project_id, w.name, w.description, \
         WHERE n.workflow_id = w.id AND n.kind = 'trigger' \
           AND json_extract(n.config, '$.mode') = 'time'), \
      (SELECT json_extract(n.config, '$.events') FROM workflow_nodes n \
-        WHERE n.workflow_id = w.id AND n.kind = 'trigger' ORDER BY n.id LIMIT 1)";
+        WHERE n.workflow_id = w.id AND n.kind = 'trigger' ORDER BY n.id LIMIT 1), \
+     w.enabled";
 const WORKFLOW_NODE_COLUMNS: &str =
     "id, workflow_id, kind, title, config, x, y, created_at, updated_at";
 const WORKFLOW_EDGE_COLUMNS: &str = "id, workflow_id, from_node, to_node, branch";
@@ -2651,6 +2656,7 @@ fn row_to_workflow(row: &rusqlite::Row<'_>) -> rusqlite::Result<Workflow> {
             .get::<_, Option<String>>(12)?
             .and_then(|j| serde_json::from_str(&j).ok())
             .unwrap_or_default(),
+        enabled: row.get(13)?,
     })
 }
 
@@ -2788,6 +2794,7 @@ pub struct WorkflowPatch {
     pub name: Option<String>,
     /// `Some(None)` clears the description.
     pub description: Option<Option<String>>,
+    pub enabled: Option<bool>,
 }
 
 /// A new node. `config` absent means the kind's default (`{"mode":
@@ -4835,6 +4842,7 @@ impl Store {
         let mut project_id = current.project_id;
         let mut name = current.name.clone();
         let mut description = current.description.clone();
+        let enabled = patch.enabled.unwrap_or(current.enabled);
         if let Some(p) = patch.project_id {
             self.ensure_script_project(p)?;
             project_id = p;
@@ -4848,10 +4856,74 @@ impl Store {
         }
         self.conn.execute(
             "UPDATE workflows SET project_id = ?1, name = ?2, description = ?3, \
-             updated_at = datetime('now') WHERE id = ?4",
-            (project_id, &name, &description, id),
+             enabled = ?4, updated_at = datetime('now') WHERE id = ?5",
+            (project_id, &name, &description, enabled, id),
         )?;
         self.get_workflow(id)
+    }
+
+    /// Copies a workflow — fields, every node (kind, title, config, position)
+    /// and every edge (remapped to the new node ids, branch labels kept) — in
+    /// one transaction. The copy is created **disabled** so a duplicated
+    /// time/ambient workflow never double-fires; run history and log lines
+    /// are not copied. `name` absent picks `"<name> (copy)"`, then
+    /// `"<name> (copy 2)"`…; an explicit taken name is `conflict`.
+    pub fn duplicate_workflow(&mut self, id: i64, name: Option<&str>) -> Result<WorkflowView> {
+        self.immediate(|s| {
+            let src = s.get_workflow_view(id)?;
+            let new_name = match name {
+                Some(n) => {
+                    let n = validate_workflow_name(n)?;
+                    s.ensure_workflow_name_free(&n, None)?;
+                    n
+                }
+                None => {
+                    let base = &src.workflow.name;
+                    let mut n = 1;
+                    loop {
+                        let cand = if n == 1 {
+                            format!("{base} (copy)")
+                        } else {
+                            format!("{base} (copy {n})")
+                        };
+                        let cand = if cand.chars().count() > WORKFLOW_NAME_MAX {
+                            let keep = WORKFLOW_NAME_MAX - (cand.chars().count() - base.chars().count());
+                            let head: String = base.chars().take(keep).collect();
+                            cand.replacen(base.as_str(), &head, 1)
+                        } else {
+                            cand
+                        };
+                        if s.ensure_workflow_name_free(&cand, None).is_ok() {
+                            break cand;
+                        }
+                        n += 1;
+                    }
+                }
+            };
+            s.conn.execute(
+                "INSERT INTO workflows (project_id, name, description, enabled, created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, 0, datetime('now'), datetime('now'))",
+                (src.workflow.project_id, &new_name, &src.workflow.description),
+            )?;
+            let new_id = s.conn.last_insert_rowid();
+            let mut map = std::collections::HashMap::new();
+            for n in &src.nodes {
+                s.conn.execute(
+                    "INSERT INTO workflow_nodes (workflow_id, kind, title, config, x, y, created_at, updated_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'), datetime('now'))",
+                    (new_id, n.kind.as_str(), &n.title, n.config.to_string(), n.x, n.y),
+                )?;
+                map.insert(n.id, s.conn.last_insert_rowid());
+            }
+            for e in &src.edges {
+                s.conn.execute(
+                    "INSERT INTO workflow_edges (workflow_id, from_node, to_node, branch) \
+                     VALUES (?1, ?2, ?3, ?4)",
+                    (new_id, map[&e.from_node], map[&e.to_node], &e.branch),
+                )?;
+            }
+            s.get_workflow_view(new_id)
+        })
     }
 
     /// Deletes a workflow with its nodes, edges and runs; echoes the whole
@@ -5417,7 +5489,7 @@ impl Store {
         let mut stmt = self.conn.prepare(&format!(
             "{HIDDEN_PROJECTS_CTE}SELECT w.id FROM workflows w \
              JOIN workflow_nodes n ON n.workflow_id = w.id AND n.kind = 'trigger' \
-             WHERE json_extract(n.config, '$.mode') = 'time' \
+             WHERE json_extract(n.config, '$.mode') = 'time' AND w.enabled = 1 \
                AND (w.project_id IS NULL OR w.project_id NOT IN (SELECT id FROM hidden_projects)) \
                AND NOT EXISTS (SELECT 1 FROM workflow_runs r \
                     WHERE r.workflow_id = w.id AND r.trigger = 'time' \
@@ -5430,12 +5502,12 @@ impl Store {
     }
 
     /// Ids of the workflows whose trigger is `ambient` and lists `event`,
-    /// oldest id first. A workflow of an archived project never matches.
+    /// oldest id first. A disabled workflow or one of an archived project never matches.
     pub fn ambient_workflows(&self, event: &str) -> Result<Vec<i64>> {
         let mut stmt = self.conn.prepare(&format!(
             "{HIDDEN_PROJECTS_CTE}SELECT w.id FROM workflows w \
              JOIN workflow_nodes n ON n.workflow_id = w.id AND n.kind = 'trigger' \
-             WHERE json_extract(n.config, '$.mode') = 'ambient' \
+             WHERE json_extract(n.config, '$.mode') = 'ambient' AND w.enabled = 1 \
                AND (w.project_id IS NULL OR w.project_id NOT IN (SELECT id FROM hidden_projects)) \
                AND EXISTS (SELECT 1 FROM json_each(n.config, '$.events') e WHERE e.value = ?1) \
              ORDER BY w.id"
@@ -14920,15 +14992,15 @@ mod tests {
         );
         assert_eq!(
             MIGRATIONS.len(),
-            84,
-            "a fresh db should report user_version 84"
+            85,
+            "a fresh db should report user_version 85"
         );
         let (store, _dir) = temp_store();
         let version: i64 = store
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 84);
+        assert_eq!(version, 85);
     }
 
     /// Workflows replace diagrams at migration 83 (mesa task 1607): a db that
