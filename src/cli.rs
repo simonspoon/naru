@@ -6265,7 +6265,13 @@ fn run_retro(cmd: RetroCmd) -> Result<()> {
                     "retro run {id} could not start its job, so it was deleted again: {e}"
                 )));
             }
-            let run = store.mark_retro_run_spawned(run.id)?;
+            // The job may already have finished and given its claim back
+            // (a gather failure): `not_found` here is that, not an error.
+            let run = match store.mark_retro_run_spawned(run.id) {
+                Ok(run) => run,
+                Err(Error::NotFound(_)) => run,
+                Err(e) => return Err(e),
+            };
             print_record(&run, quiet, &[]);
         }
         RetroCmd::Status { quiet } => {

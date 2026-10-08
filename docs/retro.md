@@ -52,7 +52,11 @@ job) runs `retro::run_with`:
    (`docs/receipts.md`) names it; else, by the session's `cwd` equalling a
    project's `local_path` or any entry of its `previous_paths` exactly, that
    project's newest task closed in the window. A session it cannot attribute
-   is **skipped** (`unattributed`): a finding must name a real task it was
+   is **skipped** (`unattributed`). The `local_path` fallback is best-effort:
+   it may attribute an interactive session that happened to run in that
+   folder to the project's newest closed task. A session spanning two runs'
+   windows (it ended after the previous run started) can be skimmed twice;
+   the finding log's dedup keeps that harmless. A finding must name a real task it was
    observed on, and nothing guesses one. A session with no failure is `clean`
    and costs no call. The rest — at most 15, most failures first, the others
    counted as `omitted` — each get a **failure digest** from
@@ -69,9 +73,12 @@ job) runs `retro::run_with`:
    it reuses a known finding's words). Skipped when no skim found anything.
 4. **Apply** (`retro::apply_rollup`) — every call has come first and no write
    happens before the roll-up answers, so **a failed call writes nothing**: a
-   failed roll-up is an `unavailable` error, and the job then **deletes its
-   run row** so the next tick retries rather than waiting out the interval on
-   a run that produced nothing. Each finding is then tried on its own:
+   failed roll-up (or every skim failing) is an `unavailable` error. The job
+   gives its claim back (**deletes the run row**) only when it failed *before
+   any model call* (a gather error); a failure *after* paid calls **keeps the
+   row**, so the interval backs off rather than re-running the whole skim set
+   every tick, and the log says so (`run <id>: failed after N model call(s)`;
+   `mesa retro run --force` retries on demand). Each finding is then tried on its own:
    - The fingerprint is Naru's: lowercase `<subject>/<kind>` of the model's
      words (whitespace and `/` folded to `-`); the same fingerprint twice in
      one answer is refused the second time. At most 10 findings are applied.
@@ -83,7 +90,9 @@ job) runs `retro::run_with`:
      `retro finding record` takes (first listed session as `--session-id`,
      the rest through `Store::add_retro_finding_session`, which bumps nothing;
      the evidence line is `run <id>: …`). A known fingerprint bumps `count`
-     and appends evidence and **nothing is filed**.
+     and appends evidence and **nothing is filed** — unless it is still
+     unlinked (an earlier filing failed), in which case it is filed and
+     linked now against a listed task.
    - A new one is filed with `Store::create_inbox_item` — kind
      `change-request`, author `retro`, against the task — and linked with
      `Store::link_retro_finding`. The body names the fingerprint, the run and
@@ -178,10 +187,12 @@ it, so triage's convert-to-task outcome no longer drops the pointer at all.) `me
   __job retro`, cwd **`~/.mesa/workspace`** — a retrospective spans every
   project, so there is no `local_path` to run in; the inbox-watcher's
   reasoning).
-- A job that cannot **start** deletes the run row and logs to stderr, so the
+- A job that cannot **start** (or that fails before any model call) deletes the run row and logs to stderr, so the
   next tick retries rather than waiting out a 72-hour interval on a run that
   never happened — the inbox-watcher's claim release, in the db. (A job that
-  starts and then fails gives the claim back itself, above.)
+  fails after model calls keeps its claim, above. The CLI treats
+  `not_found` when stamping `spawned_at` as "the job already finished and gave
+  its claim back".)
 - A successful start stamps the row's **`spawned_at`** (mesa task 1187,
   migration index 62). Only a stamped row holds the whole interval; an
   unstamped one counts for `RETRO_CLAIM_GRACE_MINUTES` (10) after
@@ -257,7 +268,7 @@ job's report (sessions skimmed / unattributed / clean), the calls themselves
 `--agent`), a hostile task name arriving byte-identical in the fenced prompt
 and running nothing, a new finding recorded, filed as a change-request and
 linked, a repeat bumping the count and filing nothing, a failed call writing
-nothing and deleting its run row, the config key over both CLI and
+nothing and keeping its run row (a session older than the previous run excluded), the config key over both CLI and
 `/api/config/watchers`, and the watcher starting exactly one job and not again
 inside the interval (and retrying a job that could not start). Rust unit tests
 cover the store's upsert, evidence trimming and validation, the apply step

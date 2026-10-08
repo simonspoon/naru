@@ -272,8 +272,10 @@ pub fn run_with(store: &mut Store, job: &Job, dir: &str, timeout: Duration) -> R
             })
         }
         Job::Retro { run_id } => {
+            let calls = std::cell::Cell::new(0u32);
             let report =
                 retro::run_with(store, *run_id, &mut |model, call_name, prompt, schema| {
+                    calls.set(calls.get() + 1);
                     llm::complete_structured(
                         config::RETRO,
                         Some(*run_id),
@@ -286,10 +288,19 @@ pub fn run_with(store: &mut Store, job: &Job, dir: &str, timeout: Duration) -> R
                         timeout,
                     )
                 });
-            // A retrospective that wrote nothing gives its claim back, so the
-            // next tick retries instead of waiting out the interval.
-            if report.is_err() {
-                let _ = store.delete_retro_run(*run_id);
+            // A failure before any model call (a gather error) gives the claim
+            // back so the next tick retries. One after calls were paid for
+            // keeps the row, so the interval backs off instead of re-running
+            // the whole skim set every tick; the error is logged.
+            if let Err(e) = &report {
+                if calls.get() == 0 {
+                    let _ = store.delete_retro_run(*run_id);
+                } else {
+                    eprintln!(
+                        "retro run {run_id}: failed after {} model call(s); the run row is kept, so the next run waits out the interval: {e}",
+                        calls.get()
+                    );
+                }
             }
             report
         }

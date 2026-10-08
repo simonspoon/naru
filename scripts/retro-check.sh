@@ -452,34 +452,51 @@ run 0 "$MESA" retro finding show "$(jq -r .id <<<"$GIT")"
 [ "$("$MESA" inbox list | jq length)" -eq $((INBOX_BEFORE + 2)) ] || fail "a repeat files nothing"
 ok "retro run inside the interval is conflict; --force runs; next_due_at is started_at + interval; a repeated finding bumps count + evidence and files nothing"
 
-# ---- a failed call leaves no half-applied state, and gives the claim back ----
+# ---- a failed call leaves no half-applied state, and keeps the claim ----
+#
+# A job failing AFTER paid model calls keeps its run row (spawned), so the
+# watcher backs off for the interval instead of re-running the whole skim set
+# every tick; the failure is logged. sess-old is a failing session that ended
+# BEFORE the previous run started: no later run may gather or skim it.
 
 FINDINGS_NOW=$("$MESA" retro finding list | jq length)
 INBOX_NOW=$("$MESA" inbox list | jq length)
 snapshot() { "$MESA" retro finding list | jq -c '[.[] | {id, count, evidence, inbox_item_id, session_ids}]'; }
 SNAP=$(snapshot)
-# (1) every skim fails (claude down): the job fails, the run row is deleted.
+TS=$(python3 -c 'import datetime; print((datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S.000Z"))')
+transcript "$TMP/tree/-proj-b/old.jsonl" sess-old "$DIR_B" 1
+# The folder fallback attributes to a task closed in THIS run's window, so close one.
+run 0 "$MESA" task create "$B" "second task"
+run 0 env -u CLAUDE_CODE_SESSION_ID "$MESA" task update "$(jqs .id)" --status done
+# (1) every skim fails (claude down): the job fails, the row is kept.
 touch "$STUB_DIR/fail"
 : > "$FAIL_LOG"
 run 0 "$MESA" retro run --force
 RUN3=$(jqs .id)
-wait_jobs 3
+wait_jobs 4
 tail -1 "$JOBLOG" | jq -e '.error.code == "unavailable"' >/dev/null || fail "every skim failing is an error line: $(tail -1 "$JOBLOG")"
+tail -2 "$JOBLOG" | head -1 | grep -q "run $RUN3: failed after 2 model call" || fail "the failure after calls is logged clearly: $(tail -2 "$JOBLOG")"
 [ "$(wc -l < "$FAIL_LOG" | tr -d ' ')" -ge 2 ] || fail "both skims were attempted: $(cat "$FAIL_LOG")"
 run 0 "$MESA" retro status
-[ "$(jqs .last_run.id)" = "$RUN2" ] || fail "a failed job deletes its claim, so the next tick retries: $STDOUT"
+[ "$(jqs .last_run.id)" = "$RUN3" ] || fail "a job failing after model calls keeps its claim, so the interval backs off: $STDOUT"
 rm -f "$STUB_DIR/fail"
 # (2) skims fine, the roll-up fails (nothing staged for it).
 rm -f "$STUB_DIR/rollup.json"
 run 0 "$MESA" retro run --force
-wait_jobs 4
+RUN4=$(jqs .id)
+wait_jobs 6
 tail -1 "$JOBLOG" | jq -e '.error.code == "unavailable"' >/dev/null || fail "a failed roll-up is an error line: $(tail -1 "$JOBLOG")"
 run 0 "$MESA" retro status
-[ "$(jqs .last_run.id)" = "$RUN2" ] || fail "a failed roll-up also gives the claim back: $STDOUT"
+[ "$(jqs .last_run.id)" = "$RUN4" ] || fail "a failed roll-up keeps its claim too: $STDOUT"
 [ "$("$MESA" retro finding list | jq length)" -eq "$FINDINGS_NOW" ] || fail "a failed call adds no finding"
 [ "$("$MESA" inbox list | jq length)" -eq "$INBOX_NOW" ] || fail "a failed call files nothing"
 [ "$(snapshot)" = "$SNAP" ] || fail "a failed call changes no finding (count, evidence, link, sessions)"
-ok "a failed call (every skim, or the roll-up) writes nothing — no finding, no bump, no inbox item — and deletes its run row"
+ok "a failed call (every skim, or the roll-up) writes nothing — no finding, no bump, no inbox item — logs the failure and keeps its run row"
+
+run 0 "$MESA" cc errors --window all --session sess-old
+[ "$(jqs .total.errors)" -gt 0 ] || fail "sess-old is ingested (so its absence below means something): $STDOUT"
+! grep -q 'sess-old' "$P_LOG" || fail "a session older than the previous run's start must not be gathered: $(cat "$P_LOG")"
+ok "a failing session that ended before the previous run started is excluded from the next run's gather"
 
 # ---- the interval is the config's `watchers.retro-interval-hours`, read fresh ----
 

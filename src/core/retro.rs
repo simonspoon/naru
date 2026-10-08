@@ -404,9 +404,14 @@ pub fn apply_rollup(
     out: &Value,
 ) -> Value {
     let tasks: HashSet<i64> = listed.values().copied().collect();
-    let mut known: HashSet<String> = store
+    // Known fingerprints and whether each already points at an inbox item.
+    let mut known: HashMap<String, bool> = store
         .list_retro_findings(RETRO_FINDINGS_LIST_MAX)
-        .map(|v| v.into_iter().map(|f| f.fingerprint).collect())
+        .map(|v| {
+            v.into_iter()
+                .map(|f| (f.fingerprint, f.inbox_item_id.is_some()))
+                .collect()
+        })
         .unwrap_or_default();
     let (mut applied, mut rejected) = (Vec::new(), Vec::new());
     let mut seen = HashSet::new();
@@ -440,16 +445,18 @@ pub fn apply_rollup(
                 sessions.push(s.to_string());
             }
         }
-        let is_known = known.contains(&fingerprint);
-        // The task a new finding is filed against: the one named, else the
+        // A finding never filed (new, or known but unlinked because an earlier
+        // filing failed) is filed now.
+        let linked = known.get(&fingerprint).copied().unwrap_or(false);
+        // The task a finding is filed against: the one named, else the
         // first listed session's. Never one the gather did not list.
         let task = raw["task_id"]
             .as_i64()
             .filter(|t| tasks.contains(t))
             .or_else(|| sessions.first().and_then(|s| listed.get(s).copied()));
-        if !is_known && task.is_none() {
+        if !linked && task.is_none() {
             rejected.push(reject(
-                "a new finding needs a listed task it was observed on",
+                "an unfiled finding needs a listed task it was observed on",
             ));
             continue;
         }
@@ -457,11 +464,12 @@ pub fn apply_rollup(
             "run {run_id}: {}",
             line(raw["evidence"].as_str().unwrap_or(""), EVIDENCE_MAX)
         );
+        let summary = cut_chars(summary, RETRO_SUMMARY_MAX);
         let (finding, is_new) = match store.record_retro_finding(
             &fingerprint,
             &subject,
             &kind,
-            &cut_chars(summary, RETRO_SUMMARY_MAX),
+            &summary,
             Some(&cut_chars(&evidence, RETRO_EVIDENCE_LINE_MAX)),
             sessions.first().map(String::as_str),
         ) {
@@ -471,7 +479,7 @@ pub fn apply_rollup(
                 continue;
             }
         };
-        known.insert(fingerprint.clone());
+        known.insert(fingerprint.clone(), finding.inbox_item_id.is_some());
         for s in sessions.iter().skip(1) {
             if let Err(e) = store.add_retro_finding_session(finding.id, s) {
                 rejected.push(reject(&e.to_string()));
@@ -481,7 +489,9 @@ pub fn apply_rollup(
             "fingerprint": fingerprint, "new": is_new, "count": finding.count,
             "finding_id": finding.id,
         });
-        if is_new && let Some(task) = task {
+        if finding.inbox_item_id.is_none()
+            && let Some(task) = task
+        {
             let body = format!(
                 "Session retrospective finding {fingerprint} (run {run_id}; sessions: {}).\n\n\
                  {summary}\n\nProposal: {}\n\nEvidence: {}",
@@ -915,6 +925,82 @@ mod tests {
             unix_second > unix_first,
             "the second run reviews since the first"
         );
+    }
+
+    #[test]
+    fn a_known_but_unlinked_finding_is_filed_and_linked_now() {
+        let (_d, mut store) = store();
+        let p = store.create_project("p", None, None, None, None).unwrap();
+        let t = task_in(&mut store, p.id, None);
+        let listed: HashMap<String, i64> = [("s1".to_string(), t.id)].into();
+        // An earlier run recorded the finding but never filed it.
+        let (f, _) = store
+            .record_retro_finding("git/denial", "git", "denial", "old", None, None)
+            .unwrap();
+        assert!(f.inbox_item_id.is_none());
+        let out = json!({"findings": [finding("git", "denial", json!(["s1"]), t.id)]});
+        let r = apply_rollup(&mut store, 2, &listed, &out);
+        assert_eq!(r["findings"][0]["new"], false, "{r}");
+        assert!(r["findings"][0]["inbox_item_id"].is_i64(), "{r}");
+        let f = store.get_retro_finding(f.id).unwrap();
+        assert_eq!(f.count, 2);
+        assert!(f.inbox_item_id.is_some());
+        assert_eq!(store.list_inbox_items(None).unwrap().len(), 1);
+        // Linked now: a further repeat files nothing.
+        apply_rollup(&mut store, 3, &listed, &out);
+        assert_eq!(store.list_inbox_items(None).unwrap().len(), 1);
+        // Unlinked and no listed task: rejected, nothing else changes.
+        store
+            .record_retro_finding("a/b", "a", "b", "x", None, None)
+            .unwrap();
+        let r = apply_rollup(
+            &mut store,
+            4,
+            &listed,
+            &json!({"findings": [finding("a", "b", json!([]), 9999)]}),
+        );
+        assert_eq!(r["rejected"].as_array().unwrap().len(), 1, "{r}");
+    }
+
+    #[test]
+    fn the_filed_body_carries_the_cut_summary() {
+        let (_d, mut store) = store();
+        let p = store.create_project("p", None, None, None, None).unwrap();
+        let t = task_in(&mut store, p.id, None);
+        let listed: HashMap<String, i64> = [("s1".to_string(), t.id)].into();
+        let mut f = finding("x", "y", json!(["s1"]), t.id);
+        f["summary"] = json!("z".repeat(RETRO_SUMMARY_MAX + 500));
+        apply_rollup(&mut store, 1, &listed, &json!({"findings": [f]}));
+        let body = store.list_inbox_items(None).unwrap().remove(0).body;
+        assert!(
+            body.matches('z').count() <= RETRO_SUMMARY_MAX,
+            "{}",
+            body.len()
+        );
+    }
+
+    #[test]
+    fn the_window_ignores_unspawned_and_deleted_earlier_runs() {
+        let (_d, mut store) = store();
+        let a = store.record_retro_run("watcher").unwrap();
+        store.mark_retro_run_spawned(a.id).unwrap();
+        let (unix_a, _) = store.retro_window(a.id + 1).unwrap();
+        // B is claimed but never spawned; C is spawned then deleted.
+        store.record_retro_run("manual").unwrap();
+        let c = store.record_retro_run("manual").unwrap();
+        store.mark_retro_run_spawned(c.id).unwrap();
+        store.delete_retro_run(c.id).unwrap();
+        let d = store.record_retro_run("manual").unwrap();
+        let (unix_d, _) = store.retro_window(d.id).unwrap();
+        assert_eq!(unix_d, unix_a, "only run A counts");
+        // The first run has no earlier one: seven days back.
+        let week = 7 * 86_400;
+        let (fallback, _) = store.retro_window(a.id).unwrap();
+        let sqlite_now: i64 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        assert!((sqlite_now - week - fallback).abs() < 120, "{fallback}");
     }
 
     #[test]
