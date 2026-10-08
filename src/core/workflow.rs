@@ -3,9 +3,9 @@
 //! [`WorkflowStep`] per node. **The graph decides what runs, never an
 //! agent** — order is a topological sort with ties broken by node id, a
 //! `branch` node's verdict picks which of its edges are active, and the only
-//! model call anywhere is a `prompt` node's one `llm::complete` (a background
-//! agent for an Anthropic model, an Ollama HTTP call for `local:<name>`; never
-//! print mode).
+//! model call anywhere is a `prompt` node's one `llm::complete` (one
+//! synchronous `claude -p --output-format json` call for an Anthropic model, an
+//! Ollama HTTP call for `local:<name>`).
 //!
 //! Storage lives in `Store`; this module is execution, so it follows
 //! `scripts.rs` and `hooks.rs`: it owns processes, `Store` owns rows. The
@@ -53,7 +53,7 @@ const ENV_INPUT_MAX: usize = 64 * 1024;
 /// refusing the exec with `Argument list too long`. A `cli` node has no such
 /// limit (its input rides on stdin). A `prompt` node on an Anthropic model has
 /// its own cap ([`llm::AGENT_PROMPT_MAX`]: the prompt is an argument of the
-/// spawn); a `local:` one sends its body on curl's stdin.
+/// claude command line); a `local:` one sends its body on curl's stdin.
 const ARG_INPUT_MAX: usize = 64 * 1024;
 
 /// How the engine reaches the store: lock, run `f`, unlock. Implemented for
@@ -958,8 +958,8 @@ fn run_node<A: StoreAccess>(
                 .get("timeout_secs")
                 .and_then(Value::as_u64)
                 .unwrap_or(DEFAULT_PROMPT_TIMEOUT_SECS);
-            // The library table is read under a brief lock; the agent is
-            // spawned and waited on with the store free.
+            // The library table is read under a brief lock; the call runs
+            // with the store free.
             let prompts = access
                 .with(|s| library::prompts(s))
                 .map_err(|e| e.to_string())?;

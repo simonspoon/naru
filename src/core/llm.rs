@@ -72,9 +72,15 @@ fn run_claude(script: &str, cwd: &str, timeout: Duration) -> Result<String, Stri
     let mut cmd = Command::new("bash");
     cmd.arg("-c").arg(script).current_dir(cwd);
     let out = agents::capture(cmd, None, timeout)?;
+    if out.stdout.len() > ANSWER_CAP {
+        return Err(format!(
+            "claude's output is {} bytes, over the {ANSWER_CAP}-byte cap",
+            out.stdout.len()
+        ));
+    }
     parse_result(
         out.code,
-        &String::from_utf8_lossy(&out.stdout[..out.stdout.len().min(ANSWER_CAP)]),
+        &String::from_utf8_lossy(&out.stdout),
         &String::from_utf8_lossy(&out.stderr),
     )
 }
