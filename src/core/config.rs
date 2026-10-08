@@ -225,16 +225,17 @@ pub const LIVE_DREAM: &str = "live-dream";
 /// run` on demand, to review finished task sessions for friction and file
 /// suggestions into the inbox. Proposes, never edits.
 pub const RETRO: &str = "retro";
-/// The background agent a workflow's `prompt` node runs on an Anthropic model
-/// (mesa task 1607, `docs/workflows.md`): spawned like every spawn above
-/// (`agents::spawn_workflow_prompt`, through this template), then waited on
-/// and read back off its transcript by `core::llm`, then stopped. `local:<name>`
-/// models never reach it — those are an Ollama HTTP call.
+/// The one synchronous `claude -p --output-format json` call a workflow's
+/// `prompt` node makes on an Anthropic model (mesa task 1607, naru task 1687,
+/// `docs/workflows.md`): resolved like every spawn above
+/// (`agents::workflow_prompt_script`, through this template), run to completion
+/// and its result JSON read off stdout by `core::llm`. `local:<name>` models
+/// never reach it — those are an Ollama HTTP call.
 pub const WORKFLOW_PROMPT: &str = "workflow-prompt";
 /// The detached `claude -p` the run runner holds open (naru task 1686,
 /// `docs/runner.md`): launched by `naru run __runner` through this template
 /// with stdin and stdout piped to the runner, so an agent run outlives the
-/// Naru server. Print mode on purpose, unlike every spawn above.
+/// Naru server. Print mode on purpose, like `workflow-prompt` and unlike every other spawn above.
 pub const RUNNER: &str = "runner";
 
 /// Every configurable command, in the order the docs and the Settings page
@@ -322,8 +323,10 @@ pub const DEFAULT_LIVE_DREAM: &str = "claude --bg --name {name} -- {prompt}";
 /// none.
 pub const DEFAULT_RETRO: &str =
     r#"claude --bg --agent naru-retro --name {name} -- "Run mesa session retrospective {id}.""#;
-/// Built-in default for [`WORKFLOW_PROMPT`] (mesa task 1607): a plain
-/// background session like the others — `claude --bg` — never print mode (`-p`).
+/// Built-in default for [`WORKFLOW_PROMPT`] (mesa task 1607, naru task 1687):
+/// one print-mode call — `claude -p --output-format json` — that exits with a
+/// single result object on stdout (`result` holds the answer), not a background
+/// session to poll.
 /// `{model}` is `haiku`/`sonnet`/`opus`; `{thinking}` is `true`/`false`, spliced
 /// into the `--settings` JSON (`alwaysThinkingEnabled`); `{name}` is the
 /// session name Naru derives (`workflow <workflow> · <node>`); `{prompt}` is
@@ -339,9 +342,8 @@ pub const DEFAULT_RETRO: &str =
 /// `touch` a file leaves none.
 ///
 /// The cwd is the workflow's project folder, or `~/.naru/workspace` (the one
-/// folder whose Claude Code trust prompt is answered once — `claude --bg`
-/// refuses an untrusted folder).
-pub const DEFAULT_WORKFLOW_PROMPT: &str = r#"claude --bg --model {model} --name {name} --tools "" --strict-mcp-config --settings "{\"alwaysThinkingEnabled\":{thinking}}" -- {prompt}"#;
+/// folder whose Claude Code trust prompt is answered once).
+pub const DEFAULT_WORKFLOW_PROMPT: &str = r#"claude -p --model {model} --name {name} --tools "" --strict-mcp-config --output-format json --settings "{\"alwaysThinkingEnabled\":{thinking}}" -- {prompt}"#;
 /// Built-in default for [`RUNNER`] (naru task 1686): `claude -p` reading
 /// stream-json user messages on a held-open stdin and writing stream-json
 /// events on stdout, one result line per message. `{session_flag}` is
@@ -4693,7 +4695,7 @@ mod tests {
 
     /// The workflow-prompt default passes the save-time validator and
     /// resolves with every value quoted as one word — a hostile prompt is a
-    /// string literal, never syntax — and never asks for `-p`.
+    /// string literal, never syntax — and asks for print mode, not `--bg`.
     #[test]
     fn workflow_prompt_default_validates_and_quotes_its_values() {
         validate(
@@ -4711,11 +4713,11 @@ mod tests {
         };
         let script = resolve(WORKFLOW_PROMPT, DEFAULT_WORKFLOW_PROMPT, &vars).unwrap();
         assert!(
-            script.starts_with("claude --bg --model 'haiku' --name 'workflow w · n' "),
+            script.starts_with("claude -p --model 'haiku' --name 'workflow w · n' "),
             "{script}"
         );
         assert!(
-            script.contains(r#"--tools "" --strict-mcp-config"#),
+            script.contains(r#"--tools "" --strict-mcp-config --output-format json "#),
             "{script}"
         );
         assert!(
@@ -4726,7 +4728,7 @@ mod tests {
             script.contains(r#"-- 'a $(touch /tmp/x) '\''q'\'' `b`'"#),
             "{script}"
         );
-        assert!(!script.contains(" -p "), "{script}");
+        assert!(!script.contains("--bg"), "{script}");
         // Not offered elsewhere.
         assert!(resolve(RETRO, "claude {model}", &vars).is_err());
     }

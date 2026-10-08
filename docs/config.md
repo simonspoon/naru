@@ -13,7 +13,7 @@ persona and the slash command can all change without rebuilding Naru:
 | `live-agent` | `mesa live start`, `POST /api/live` — the session that holds a spoken conversation (`docs/live.md`) | `claude --bg --agent naru-live --name {name} -- {prompt}` |
 | `live-summary` | `live stop`'s CLI handler and the API's stop route — the short-lived agent that writes a live conversation's memory once it ends (mesa task 921, `docs/live.md`) | `claude --bg --name {name} -- {prompt}` |
 | `live-dream` | The pass that tidies the live notebook — `mesa live memory dream` explicitly, and on its own at a handoff or when a conversation ends once `live::dream_wanted` says the notebook needs it (mesa task 1155): merges duplicate entries, deletes superseded ones, one guarded command at a time (mesa task 1152, `docs/live.md`) | `claude --bg --name {name} -- {prompt}` |
-| `workflow-prompt` | A workflow's **`prompt` node** on an Anthropic model (mesa task 1607, `docs/workflows.md`): a background agent spawned like every other (`agents::spawn_workflow_prompt`), which the engine then waits on, reads the answer of off its transcript and stops (`core::llm`). `local:<name>` models never use it — those are an Ollama HTTP call. Offers `{model}`, `{thinking}`, `{name}` and `{prompt}` | `claude --bg --model {model} --name {name} --tools "" --strict-mcp-config --settings "{\"alwaysThinkingEnabled\":{thinking}}" -- {prompt}` |
+| `workflow-prompt` | A workflow's **`prompt` node** on an Anthropic model (mesa task 1607, `docs/workflows.md`): one synchronous `claude -p --output-format json` call resolved like every other spawn (`agents::workflow_prompt_script`), whose answer the engine reads from the result JSON on stdout (`core::llm`). `local:<name>` models never use it — those are an Ollama HTTP call. Offers `{model}`, `{thinking}`, `{name}` and `{prompt}` | `claude -p --model {model} --name {name} --tools "" --strict-mcp-config --output-format json --settings "{\"alwaysThinkingEnabled\":{thinking}}" -- {prompt}` |
 | `runner` | The detached `claude -p` that `naru run __runner` holds open on stream-json stdin/stdout (naru task 1686, `docs/runner.md`): launched by the runner process itself with piped stdin/stdout, in its own process group, so the agent outlives the Naru server. Print mode on purpose. Offers `{model}`, `{name}`, `{session_flag}` (`--session-id` on a run's first start, `--resume` after a restart) and `{session_id}` (the run's uuid) | `claude -p --input-format stream-json --output-format stream-json --verbose --model {model} --name {name} {session_flag} {session_id}` |
 | `retro` | `serve --watch-retro` every `watchers.retro-interval-hours`, and `mesa retro run` — the session retrospective that reviews finished task sessions for friction and files suggestions into the inbox, proposing only (mesa task 1158, `docs/retro.md`) | `claude --bg --agent naru-retro --name {name} -- "Run mesa session retrospective {id}."` |
 
@@ -34,29 +34,29 @@ from the vocabulary (see *Retired placeholders* below).
     "live-summary":   "claude --bg --name {name} -- {prompt}",
     "live-dream":     "claude --bg --name {name} -- {prompt}",
     "retro":          "claude --bg --agent naru-retro --name {name} -- \"Run mesa session retrospective {id}.\"",
-    "workflow-prompt": "claude --bg --model {model} --name {name} -- {prompt}"
+    "workflow-prompt": "claude -p --model {model} --name {name} --output-format json -- {prompt}"
   }
 }
 ```
 
 `workflow-prompt` (mesa task 1607) is a spawn like the rest, resolved through
 the same `spawn_for_vars` and run by `bash -c` in the workflow's working folder
-(its project's `local_path`, else `~/.naru/workspace` — `claude --bg` refuses a
-folder whose trust prompt was never answered). **Never print mode (`-p`)**, and no API
-key is involved: the engine spawns the agent, polls `claude agents --json
---all` until its `state` is `done`, reads that session's transcript for the
-answer, and runs `claude stop` on the job on every outcome (`core::llm`,
-`docs/workflows.md`). The default:
+(its project's `local_path`, else `~/.naru/workspace`). It is **print mode on
+purpose** (naru task 1687), and no API key is involved: the engine runs
+one synchronous `claude -p --output-format json` under the node's timeout and
+reads the answer from the `result` field of the JSON on stdout — no polling, no
+`claude stop`, no transcript (`core::llm`, `docs/workflows.md`). A replacement
+template must therefore print that result object. The default:
 
 ```bash
-claude --bg --model {model} --name {name} --tools "" --strict-mcp-config --settings "{\"alwaysThinkingEnabled\":{thinking}}" -- {prompt}
+claude -p --model {model} --name {name} --tools "" --strict-mcp-config --output-format json --settings "{\"alwaysThinkingEnabled\":{thinking}}" -- {prompt}
 ```
 
 The agent has **no tools**: `--tools ""` disables every built-in tool and
 `--strict-mcp-config` (with no `--mcp-config`) every MCP server, because a
 prompt node is a pure text call over *untrusted* upstream text and a model that
 could act on it would be a prompt-injection path to the shell. Checked against
-the real `claude --bg`: with the flags the session still answers, and a request
+the real `claude`: with the flags the session still answers, and a request
 to `touch` a file leaves none (without them the file is created).
 
 `{model}` is `haiku`, `sonnet` or `opus`; `{thinking}` is `true` or `false`,

@@ -79,48 +79,34 @@ Stored config is the validated, normalized form.
 | `decide` | `{"question": "…" (non-empty, may contain `{input}`), "options": ["a", "b", …] (2 or more, distinct, non-empty, none named `fallback`), "threshold": 0..=1 (default 0.5)}` | a local judgement (`core::decide`, `docs/decide.md`) that picks one option; routes like a `branch`, one edge per option plus an optional `fallback` edge |
 | `output` | `{"target": "log", "log": "<name>" (default `default`)}`, `{"target": "task", "project": "<id\|name>", "status": "backlog"\|"todo" (default todo)}`, `{"target": "inbox", "task_id": N, "kind": "task-summary"\|"change-request" (default task-summary)}`, `{"target": "board", "title": "…"}` | delivers its input; output is a short receipt. A key that does not apply to the target is refused |
 
-**`prompt`.** One model call (`core::llm`) — **never print mode (`-p`), and no API
-key anywhere**. The prompt (the node's text, a blank line, then the node's
+**`prompt`.** One model call (`core::llm`) — **no API key anywhere**. The prompt (the node's text, a blank line, then the node's
 input; just the text when the input is empty) goes in as **one user message**,
 no tool is ever offered, and the answer is the model's text, trimmed.
 `thinking` is **off by default**.
 
 | `model` | Backend |
 | --- | --- |
-| `haiku`, `sonnet`, `opus` | a **Naru background agent**: the `workflow-prompt` config template (`docs/config.md`) resolved by `agents::spawn_workflow_prompt` — the same spawn path the todo-watcher and live use — i.e. `claude --bg --model <m> --name "workflow <workflow> · <node>" --tools "" --strict-mcp-config --settings '{"alwaysThinkingEnabled":<thinking>}' -- <prompt>` |
+| `haiku`, `sonnet`, `opus` | **one synchronous print-mode call**: the `workflow-prompt` config template (`docs/config.md`) resolved by `agents::workflow_prompt_script` — the same template path every spawn uses — i.e. `claude -p --model <m> --name "workflow <workflow> · <node>" --tools "" --strict-mcp-config --output-format json --settings '{"alwaysThinkingEnabled":<thinking>}' -- <prompt>` |
 | `local:<name>` (a name never starts with `-`) | Ollama's HTTP API: `POST {OLLAMA_HOST}/api/chat`, `{model, messages: [one user message], stream: false, think: <thinking>}`; the answer is `message.content`. `OLLAMA_HOST` defaults to `127.0.0.1:11434`, with or without a scheme (as Ollama reads it); Ollama not running is a node failure that says so. Plain HTTP over `curl` with the request on stdin, so the prompt is never on argv |
 
-**How the agent's answer comes back — deterministic, no agent deciding
-anything.**
+**How the answer comes back — deterministic, no agent deciding anything.**
+The engine runs the script with `agents::capture` (its own process group,
+killed whole on a timeout) and parses stdout as `claude -p`'s result object —
+`{"type":"result","subtype":"success","is_error":false,"result":"<text>",…}`
+(checked against the real CLI). The answer is `result`. A nonzero exit,
+output that is not that object, `is_error: true`, a non-`success` subtype or an
+empty `result` is a node failure naming it, with the stderr tail where there is
+one; **`timeout_secs` (default 600) bounds the whole call** and a timeout
+fails the node. There is nothing to poll, stop or read back from a
+transcript, and no session is left behind to clean up. (Telling the model to
+deliver its answer with a `naru workflow …` command was rejected: it needs the
+Bash tool this node must not have — its input is untrusted upstream text — and
+makes the engine's progress depend on a model obeying an instruction.)
 
-1. The engine spawns the agent (the receipt's job id; no receipt is a node
-   failure — there would be nothing to wait on or stop).
-2. It polls `claude agents --json --all` every 500 ms (`agents::job_state`)
-   until the job's `state` is `done` — a job that has answered its one prompt
-   goes `done` by itself (checked against the real CLI). `failed`/`stopped` is
-   a node failure; a job that never appears in 30 s is one too; up to 3 failed
-   probes in a row are tolerated; **`timeout_secs` (default 600) bounds the
-   whole wait** and a timeout fails the node.
-3. It reads that row's `sessionId` transcript with `cc::session_chat` — the
-   reader the Agents chat pane uses — and takes the assistant prose after the
-   last prompt. The transcript can lag the `done` row, so this read has its own
-   5 s window that starts when `done` is first seen (not at the spawn), and an
-   answer only counts once **two reads 250 ms apart agree** (a read can land
-   mid-flush). No settled answer is a node failure.
-4. It runs **`claude stop <job>` on every outcome** (answer, failure,
-   timeout, even a panic — a drop guard stops it exactly once), so a run never leaves an idle background session behind.
-
-Why the transcript and not "tell the agent to deliver its answer with a `naru
-workflow …` command": that needs the Bash tool this node must not have (its
-input is untrusted upstream text), and it makes the engine's progress depend on
-a model obeying an instruction; the transcript is Claude Code's own record of
-what the session said. The store lock is **never held** while the agent runs
-(only a brief read of the library's prompt table before the spawn). The agent
+The store lock is **never held** while the agent runs
+(only a brief read of the library's prompt table before the call). The call
 starts in the workflow's project `local_path` (else `~/.naru/workspace`, the
-one folder whose Claude Code trust prompt is answered once — `claude --bg`
-refuses an untrusted folder), so a workflow whose project folder was never
-trusted fails its prompt node with Claude's own "Workspace not trusted"
-message.
+one folder whose Claude Code trust prompt is answered once).
 
 **`cli`.** The input arrives on **stdin** *and* as `NARU_INPUT` (set only when
 the input is ≤ 64 KiB — a process environment has a hard limit; stdin always
@@ -424,8 +410,8 @@ A spoken thought, recorded for ten seconds, transcribed locally, kept only if
 words were heard, tagged by a small model with thinking off, and appended to a
 log. Needs `sox` (recording), `auris` (speech to text, `docs/listen.md`: reads
 audio on stdin, `--format json` prints JSON lines whose last `transcript` line
-is the text) and `jq`, and Claude Code logged in (the labelling step runs as a
-background agent).
+is the text) and `jq`, and Claude Code logged in (the labelling step is one
+`claude -p` call).
 
 ```bash
 naru workflow create ambient --description "Capture a spoken thought"
@@ -544,11 +530,10 @@ node); a `cli → branch → output(log)` run taking
 the true path (false output skipped) and the reverse; a failing node failing
 the run (exit 0, record printed, rest skipped) and a timeout killing a node; a
 `prompt` node on an Anthropic model through a stub `claude`
-(`MESA_CLAUDE_BIN`) that speaks `--bg`, `agents --json --all` and `stop` and
-writes a synthetic transcript (`MESA_CC_PROJECTS_DIR`) — asserting the argv
-(model, the thinking form, no tools, never `-p`), the answer arriving as the
-node output, and the job stopped exactly once on success, failed spawn,
-unanswered transcript and timeout alike — and a `local:<name>` node through a
+(`MESA_CLAUDE_BIN`) that speaks `-p --output-format json` and prints the
+result object — asserting the argv (model, the thinking form, no tools, `-p`,
+never `--bg`), the answer arriving as the node output, and a failing exit, an
+`is_error` result, unparseable output and a timeout each failing the node — and a `local:<name>` node through a
 stub Ollama HTTP server behind `OLLAMA_HOST`; the script
 node's `{input}` byte-identical for hostile text; the task, inbox and board
 outputs; `live board push --workflow`; the ambient capture example; the API
