@@ -65,6 +65,10 @@ describe('triggerLabel', () => {
     expect(triggerLabel({ trigger: null, trigger_phrase: null })).toBe('no trigger')
     expect(triggerLabel({ trigger: 'time', trigger_phrase: null })).toBe('time')
     expect(triggerLabel({ trigger: 'voice', trigger_phrase: 'capture' })).toBe('voice · “capture”')
+    expect(triggerLabel({ trigger: 'ambient', trigger_phrase: null, trigger_events: ['idea', 'wake'] })).toBe(
+      'ambient · idea, wake',
+    )
+    expect(triggerLabel({ trigger: 'ambient', trigger_phrase: null, trigger_events: [] })).toBe('ambient')
   })
 })
 

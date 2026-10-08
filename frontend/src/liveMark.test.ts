@@ -14,6 +14,16 @@ import {
 } from './liveMark'
 import type { LiveIndicator } from './liveIndicator'
 
+describe('offer mode', () => {
+  it('turns the idle mark gold only while nothing else is reported', () => {
+    expect(markMode(null, true)).toBe('offer')
+    expect(markMode('hearing', true)).toBe('hear')
+    expect(markMode(null)).toBe('idle')
+    expect(PALETTES.offer.bars[3]).toBe('#fff0c2')
+    expect(paletteFor('offer')).toBe(PALETTES.offer)
+  })
+})
+
 describe('markMode', () => {
   it('maps every ranked state to one of the mockup looks', () => {
     const want: Record<LiveIndicator, string> = {

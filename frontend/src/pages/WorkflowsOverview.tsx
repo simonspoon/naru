@@ -2,7 +2,7 @@ import { listProjects, listWorkflows } from "../api";
 import { formatTimestamp } from "../time";
 import { useFetch } from "../useFetch";
 import {
-  isScheduled,
+  stateLabel,
   lastFailureLabel,
   lastRunLabel,
   nextRunLabel,
@@ -11,9 +11,11 @@ import {
 } from "../workflowOverview";
 
 /** `#/workflows`: every workflow across all projects in one table — project,
- * on/off, last run, last failure, next run. Global like Scripts; a row opens
- * the workflow in its owning project's view. */
-export function WorkflowsOverview() {
+ * on/off, last run, last failure, next run. Global, above projects; a row opens
+ * the workflow in its owning project's view. Mounted standalone at
+ * `#/workflows` (an h1) and as the Library's Workflows tab (`embedded`, an h2
+ * under the page's own h1). */
+export function WorkflowsOverview({ embedded = false }: { embedded?: boolean }) {
   const { data: workflows, error } = useFetch(
     () => listWorkflows(),
     "workflows-overview",
@@ -28,10 +30,11 @@ export function WorkflowsOverview() {
 
   return (
     <div className="workflows-overview">
-      <h1>Workflows</h1>
+      {embedded ? <h2>Workflows</h2> : <h1>Workflows</h1>}
       <p className="muted">
-        Every workflow across all projects. A workflow is on when it has a time
-        trigger, which the server runs on its own.
+        Every workflow across all projects. A workflow that is on fires from its
+        trigger (a time one runs on the server's timer); off, it only runs when
+        asked.
       </p>
       {error ? (
         <p className="error">{error}</p>
@@ -59,7 +62,7 @@ export function WorkflowsOverview() {
                   <tr key={w.id}>
                     <td>{href ? <a href={href}>{w.name}</a> : w.name}</td>
                     <td>{projectLabel(w, projects)}</td>
-                    <td>{isScheduled(w) ? "on" : "off"}</td>
+                    <td>{stateLabel(w)}</td>
                     <td
                       className={
                         w.last_run_status === "failed" ? "error" : undefined

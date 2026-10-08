@@ -2280,6 +2280,9 @@ struct LiveAcc {
     models: BTreeSet<String>,
     messages: i64,
     tokens: Tok,
+    /// `tokens` restricted to main-thread (non-sidechain) lines — the spin
+    /// rule's input, so a subagent's cache reads never reach its parent's verdict.
+    main_tokens: Tok,
     cost: f64,
     cwd: Option<String>,
     git_branch: Option<String>,
@@ -2498,6 +2501,7 @@ pub fn live(window_minutes: i64) -> CcLive {
                 messages: s.messages,
                 total_tokens: total,
                 tokens: s.tokens.to_cc(),
+                main_tokens: s.main_tokens.to_cc(),
                 est_cost_usd: round4(s.cost),
                 used_subagent: s.sidechain,
                 subagents,
@@ -2638,6 +2642,9 @@ fn parse_live_file(
         s.models.insert(model.clone());
         s.messages += 1;
         s.tokens.add(usage);
+        if raw.is_sidechain != Some(true) {
+            s.main_tokens.add(usage);
+        }
         // The input side of the newest main-thread turn — `session_pulse`'s
         // measure. `>=` so a later line of equal timestamp wins.
         if raw.is_sidechain != Some(true) && s.context.is_none_or(|(t, _)| ts >= t) {
@@ -5914,6 +5921,65 @@ mod tests {
         let get = |id: &str| l.sessions.iter().find(|s| s.session_id == id).unwrap();
         assert_eq!(get("ctx").context_tokens, Some(5 + 1_000 + 200));
         assert_eq!(get("side").context_tokens, None);
+    }
+
+    #[test]
+    fn live_main_tokens_exclude_subagent_transcripts() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("-live-project");
+        let subs = proj.join("sup").join("subagents");
+        fs::create_dir_all(&subs).unwrap();
+        let turn = |sid: &str, id: &str, side: bool, read: i64| {
+            let agent = if side { r#""agentId":"a1","# } else { "" };
+            format!(
+                r#"{{"type":"assistant","isSidechain":{side},{agent}"sessionId":"{sid}","timestamp":"{ts}","cwd":"/home/me/work/widget","message":{{"id":"{id}","model":"claude-opus-4-8","usage":{{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":{read},"cache_creation_input_tokens":0}}}}}}"#,
+                ts = iso_at(30)
+            )
+        };
+        // Parent: tiny. Its subagent: 30M cache reads, ~100% of the total.
+        let p = turn("sup", "m1", false, 1_000);
+        let sub = turn("sup", "s1", true, 30_000_000);
+        write_jsonl(&proj, "sup.jsonl", &[p.as_str()]);
+        write_jsonl(&subs, "agent-a1.jsonl", &[sub.as_str()]);
+        // A genuine main-thread loop in another session.
+        let l1 = turn("loop", "m1", false, 30_000_000);
+        write_jsonl(&proj, "loop.jsonl", &[l1.as_str()]);
+        unsafe {
+            std::env::set_var("MESA_CC_PROJECTS_DIR", tmp.path());
+        }
+        let l = live(15);
+        unsafe {
+            std::env::remove_var("MESA_CC_PROJECTS_DIR");
+        }
+        let get = |id: &str| l.sessions.iter().find(|s| s.session_id == id).unwrap();
+        let sup = get("sup");
+        // Whole-session meter still counts the subagent (cost/tokens rules)…
+        assert_eq!(sup.tokens.cache_read, 30_001_000);
+        // …but the spin input is the parent's own transcript alone.
+        assert_eq!(sup.main_tokens.cache_read, 1_000);
+        assert_eq!(sup.main_tokens.input, 10);
+        let t = crate::core::guard::GuardThresholds {
+            cost_usd: 25.0,
+            total_tokens: 100_000_000,
+            cache_read_share: 0.98,
+            cache_read_min_tokens: 20_000_000,
+            repeat_count: 30,
+            context_tokens: 120_000,
+            action: crate::core::guard::GuardAction::Stop,
+        };
+        let kinds = |s: &CcLiveSession| -> Vec<&'static str> {
+            crate::core::guard::breaches(s, &t)
+                .into_iter()
+                .map(|b| b.threshold)
+                .collect()
+        };
+        assert!(!kinds(sup).contains(&"spin"), "{:?}", kinds(sup));
+        assert!(
+            kinds(get("loop")).contains(&"spin"),
+            "{:?}",
+            kinds(get("loop"))
+        );
     }
 
     #[test]

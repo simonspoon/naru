@@ -209,7 +209,6 @@ export function Sidebar({
   activeProjectId,
   inboxFilter,
   settingsActive,
-  scriptsActive,
   workflowsActive,
   libraryActive,
   terminalActive,
@@ -226,7 +225,6 @@ export function Sidebar({
   // 845) — the twin of `ccTab` above: it highlights the Inbox row.
   inboxFilter: InboxFilter | null
   settingsActive: boolean
-  scriptsActive: boolean
   workflowsActive: boolean
   libraryActive: boolean
   terminalActive: boolean
@@ -590,18 +588,15 @@ export function Sidebar({
         <a className={`nav-item${terminalActive ? ' active' : ''}`} href="#/terminal">
           <span className="nav-item-label">Terminal</span>
         </a>
-        {/* Flat, like Inbox and Terminal: Scripts is a global page, not a
-            project subtree, so `navCollapse.ts` (which is project-only) is
-            deliberately untouched. */}
-        <a className={`nav-item${scriptsActive ? ' active' : ''}`} href="#/scripts">
-          <span className="nav-item-label">Scripts</span>
-        </a>
-        {/* Global like Scripts: every workflow across all projects. */}
+        {/* Flat, like Inbox and Terminal: global pages, not a project
+            subtree, so `navCollapse.ts` (which is project-only) is
+            deliberately untouched. Scripts lives in the Library's Scripts tab
+            (mesa task 1676). */}
+        {/* Every workflow across all projects. */}
         <a className={`nav-item${workflowsActive ? ' active' : ''}`} href="#/workflows">
           <span className="nav-item-label">Workflows</span>
         </a>
-        {/* Same reasoning as Scripts above: Library is global, not a project
-            subtree. */}
+        {/* Library is global too, not a project subtree. */}
         <a className={`nav-item${libraryActive ? ' active' : ''}`} href="#/library">
           <span className="nav-item-label">Library</span>
         </a>

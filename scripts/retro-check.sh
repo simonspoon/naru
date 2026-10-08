@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
-# Retro gate (mesa task 1158): the session retrospective over the CLI and
-# `mesa serve --watch-retro`, against a stub `claude` binary (MESA_CLAUDE_BIN)
-# so no real Claude Code is involved. Uses MESA_WATCH_RETRO_TICK_MS (a
-# test-only seam, mirrors MESA_WATCH_INBOX_TICK_MS) to shrink the tick from an
-# hour down to test speed.
+# Retro gate (mesa task 1158, reworked by naru task 1692): the session
+# retrospective over the CLI and `mesa serve --watch-retro`. A run is a detached
+# `naru __job retro` making tool-less `claude -p --json-schema` calls (a stub
+# `claude`, MESA_CLAUDE_BIN, so no real Claude Code is involved) — a haiku skim
+# per session, one sonnet roll-up — and Naru records and files the findings
+# itself. The stub answers from `<key>.json` files this script stages and fails
+# the call when none is staged. Uses MESA_WATCH_RETRO_TICK_MS (a test-only
+# seam, mirrors MESA_WATCH_INBOX_TICK_MS) to shrink the tick from an hour down
+# to test speed.
 #
 # HOME is pointed at a throwaway dir for the server process: a retrospective
 # spans every project, so it runs in $HOME/.naru/workspace, and the stub logs
@@ -45,44 +49,80 @@ jqe() { jq -r "$1" <<<"$STDERR"; }
 # The sorted key set of a JSON object, one line, for the --quiet contract.
 keys() { jq -r 'keys | join(",")' <<<"$1"; }
 
-# ---- stub claude: logs every --bg invocation's (cwd, name, prompt) to BG_LOG ----
+# ---- stub claude: answers every `-p` call from a staged file, logs the rest ----
+#
+# A `-p` call logs (cwd, name, model) to P_LOG and its flags (everything before
+# the prompt, one per line), schema and prompt per key, then answers with the
+# result envelope around the staged `<key>.json` (exit 1 when none is staged,
+# or when the `fail` marker exists, which is also logged to FAIL_LOG). The key
+# is `skim-<session id>` for the haiku skims (the session name is `naru retro
+# <run> skim <session id>`) and `rollup` for the sonnet call. Anything else
+# (`--bg`, `agents`, `stop`) logs to BG_CALLS: the retrospective no longer uses
+# any of them, and the gate asserts that log stays empty. STUB_DIR comes from
+# the environment.
 
-STUB_DIR="$TMP/stub"
+export STUB_DIR="$TMP/stub"
 mkdir -p "$STUB_DIR"
-BG_LOG="$TMP/bg.log"
-# One line per --bg invocation refused while the `fail` marker exists: the
-# observable signal that the watcher retried, and therefore that the previous
-# attempt's run row was rolled back (a row left behind would make the next
-# tick "not due" for 72 hours, so a second refused call can only follow a
-# deleted row).
+P_LOG="$TMP/p.log"
+BG_CALLS="$TMP/bg-calls.log"
 FAIL_LOG="$TMP/fail.log"
-touch "$BG_LOG" "$FAIL_LOG"
-cat > "$STUB_DIR/claude" <<EOS
+touch "$P_LOG" "$BG_CALLS" "$FAIL_LOG"
+cat > "$STUB_DIR/claude" <<'EOF'
 #!/usr/bin/env bash
-if [ "\$1" = "--bg" ]; then
-  shift
-  [ -e "$STUB_DIR/fail" ] && { echo "stub claude is down" >&2; echo refused >> "$FAIL_LOG"; exit 1; }
-  AGENT=""
-  if [ "\$1" = "--agent" ]; then shift; AGENT="\$1"; shift; fi
-  echo "\$AGENT" > "$STUB_DIR/last-agent"
-  NAME=""
-  if [ "\$1" = "--name" ]; then shift; NAME="\$1"; shift; fi
+if [ "$1" = "-p" ]; then
+  MODEL=""; NAME=""; SCHEMA=""
+  for ((i = 1; i < $#; i++)); do
+    j=$((i + 1))
+    case "${!i}" in
+      --model) MODEL=${!j} ;;
+      --name) NAME=${!j} ;;
+      --json-schema) SCHEMA=${!j} ;;
+    esac
+  done
   PROMPT=""
-  if [ "\$1" = "--" ]; then shift; PROMPT="\$1"; fi
-  echo "\$(pwd)|\$NAME|\$PROMPT" >> "$BG_LOG"
-  echo "backgrounded · deadbeef (idle — send a prompt to start)"
+  for a in "$@"; do PROMPT=$a; done
+  case "$NAME" in
+    *" skim "*) KEY="skim-${NAME##* skim }" ;;
+    *) KEY="rollup" ;;
+  esac
+  echo "$(pwd)|$NAME|$MODEL" >> "$STUB_DIR/../p.log"
+  printf '%s\n' "${@:1:$# - 1}" > "$STUB_DIR/flags-$KEY"
+  printf '%s' "$SCHEMA" > "$STUB_DIR/schema-$KEY"
+  printf '%s' "$PROMPT" > "$STUB_DIR/prompt-$KEY"
+  if [ -e "$STUB_DIR/fail" ]; then
+    echo "stub claude is down" >&2
+    echo refused >> "$STUB_DIR/../fail.log"
+    exit 1
+  fi
+  if [ ! -e "$STUB_DIR/$KEY.json" ]; then
+    echo "stub claude: no $KEY.json staged" >&2
+    exit 1
+  fi
+  printf '{"type":"result","subtype":"success","is_error":false,"result":"","structured_output":%s}\n' "$(cat "$STUB_DIR/$KEY.json")"
   exit 0
 fi
-if [ "\$1" = "agents" ]; then echo '[]'; exit 0; fi
+echo "$*" >> "$STUB_DIR/../bg-calls.log"
 exit 2
-EOS
+EOF
 chmod +x "$STUB_DIR/claude"
 export MESA_CLAUDE_BIN="$STUB_DIR/claude"
+stage() { printf '%s' "$2" > "$STUB_DIR/$1.json"; } # stage <key> <json>
 
 mkdir -p "$TMP/home"
 FAKE_HOME=$(cd "$TMP/home" && pwd -P)
 export HOME="$FAKE_HOME"
 WORKSPACE="$FAKE_HOME/.naru/workspace"
+JOBLOG="$FAKE_HOME/.naru/logs/retro.log"
+job_count() { if [ -f "$JOBLOG" ]; then wc -l < "$JOBLOG" | tr -d ' '; else echo 0; fi; }
+wait_jobs() { # wait_jobs <n> -> blocks until the job log has >= n lines, or fails
+  local n=$1
+  for _ in $(seq 1 300); do
+    [ "$(job_count)" -ge "$n" ] && return 0
+    sleep 0.1
+  done
+  fail "timed out waiting for $n job report(s); log:
+$(cat "$JOBLOG" 2>/dev/null)"
+}
 
 # ---- fixtures: a task for the inbox item a finding links to ----
 
@@ -242,61 +282,221 @@ run 0 "$MESA" retro show
 [ "$(jqs .due)" = "true" ] || fail "show is an alias for status"
 ok "retro status on a fresh install: due, last_run null, next_due_at null, 72h, counts"
 
-# ---- a failed spawn leaves NO run row ----
+# ---- fixtures for the runs: a project with a folder, a done task, four sessions ----
+#
+# Session sess-one and sess-two ran in project B's folder (attributed to its
+# task closed in the window), sess-clean did too but failed nothing (costs no
+# call), sess-orphan ran elsewhere (unattributed, skipped). The task's name and
+# a tool error carry shell syntax: it must reach the prompt as data and run
+# nothing, anywhere.
 
-touch "$STUB_DIR/fail"
-run 1 "$MESA" retro run
-[ "$(jqe .error.code)" = "unavailable" ] || fail "a failed spawn is unavailable: $STDERR"
+mkdir -p "$TMP/projB" "$TMP/elsewhere" "$TMP/tree/-proj-b"
+DIR_B=$(cd "$TMP/projB" && pwd -P)
+DIR_X=$(cd "$TMP/elsewhere" && pwd -P)
+run 0 "$MESA" project create "B" --no-git
+B=$(jqs .id)
+run 0 "$MESA" project update "$B" --path "$DIR_B"
+HOSTILE_TASK='fix $(touch pwned) `touch pwned2` "q"'
+run 0 "$MESA" task create "$B" "$HOSTILE_TASK"
+TASK_B=$(jqs .id)
+# env -u: inside a Claude Code session the close guard (mesa task 1515) probes `claude agents`.
+run 0 env -u CLAUDE_CODE_SESSION_ID "$MESA" task update "$TASK_B" --status done
+# Timestamps an hour ahead, so they stay inside every run's window.
+TS=$(python3 -c 'import datetime; print((datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S.000Z"))')
+transcript() { # transcript <file> <session id> <cwd> <with errors: 1|0>
+  local f=$1 sid=$2 cwd=$3 errs=$4
+  {
+    if [ "$errs" = 1 ]; then
+      cat <<JSONL
+{"type":"assistant","uuid":"$sid-a","sessionId":"$sid","timestamp":"$TS","cwd":"$cwd","message":{"model":"claude-opus-4-8","content":[{"type":"tool_use","id":"$sid-1","name":"Bash","input":{"command":"git push origin main"}},{"type":"tool_use","id":"$sid-2","name":"Bash","input":{"command":"sed -n p gone.txt"}}],"usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}
+{"type":"user","uuid":"$sid-b","sessionId":"$sid","timestamp":"$TS","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"$sid-1","is_error":true,"content":"PreToolUse:Bash hook error: Blocked \`git push origin main\`: nothing is pushed unless the user asks"}]}}
+{"type":"user","uuid":"$sid-c","sessionId":"$sid","timestamp":"$TS","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"$sid-2","is_error":true,"content":"sed: \$(touch pwned3): No such file or directory"}]}}
+JSONL
+    else
+      cat <<JSONL
+{"type":"assistant","uuid":"$sid-a","sessionId":"$sid","timestamp":"$TS","cwd":"$cwd","message":{"model":"claude-opus-4-8","content":[{"type":"text","text":"all fine"}],"usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}
+JSONL
+    fi
+  } > "$f"
+}
+transcript "$TMP/tree/-proj-b/one.jsonl" sess-one "$DIR_B" 1
+transcript "$TMP/tree/-proj-b/two.jsonl" sess-two "$DIR_B" 1
+transcript "$TMP/tree/-proj-b/clean.jsonl" sess-clean "$DIR_B" 0
+transcript "$TMP/tree/-proj-b/orphan.jsonl" sess-orphan "$DIR_X" 1
+export MESA_CC_PROJECTS_DIR="$TMP/tree"
+ok "fixtures: project B with a done task and four sessions (two failing and attributed, one clean, one unattributed)"
+
+# ---- a job that cannot start leaves NO run row ----
+
+run 1 env NARU_SELF_BIN="$TMP/no-such-binary" "$MESA" retro run
+[ "$(jqe .error.code)" = "unavailable" ] || fail "a failed start is unavailable: $STDERR"
 [ -z "$STDOUT" ] || fail "a failed run prints nothing on stdout"
 run 0 "$MESA" retro status
-[ "$(jqs .last_run)" = "null" ] || fail "a failed spawn must delete its run row: $STDOUT"
+[ "$(jqs .last_run)" = "null" ] || fail "a failed start must delete its run row: $STDOUT"
 [ "$(jqs .due)" = "true" ] || fail "…so the next attempt is not a conflict: $STDOUT"
-[ "$(wc -l < "$BG_LOG")" -eq 0 ] || fail "a failing spawn must log nothing"
-rm -f "$STUB_DIR/fail"
-ok "retro run with a failing claude is unavailable and leaves no run row"
+[ "$(job_count)" -eq 0 ] || fail "a job that never started logs nothing"
+ok "retro run whose job cannot start is unavailable and leaves no run row"
 
-# ---- retro run: records a manual run, seeds the definition, spawns in the workspace ----
+# ---- retro run: a manual run, a detached job, findings recorded, filed and linked ----
 
+FINDINGS_BEFORE=$("$MESA" retro finding list | jq length)
+INBOX_BEFORE=$("$MESA" inbox list | jq length)
+stage skim-sess-one '{"friction":[{"subject":"git","kind":"denial","evidence":"git push refused 3 times"}]}'
+stage skim-sess-two '{"friction":[{"subject":"git","kind":"denial","evidence":"git push refused again"},{"subject":"sed","kind":"tool-failure","evidence":"sed on a missing file"}]}'
+stage rollup "$(jq -nc --argjson t "$TASK_B" '{findings: [
+  {subject: "Git", kind: "Denial", summary: "Agents keep trying git push and the hook refuses it", evidence: "sess-one and sess-two: push refused", proposal: "teach the agents not to push", session_ids: ["sess-one", "sess-two", "ghost"], task_id: $t},
+  {subject: "sed", kind: "tool-failure", summary: "sed on a missing file", evidence: "sess-two: sed failed", proposal: "check the path first", session_ids: ["sess-two"], task_id: 99999},
+  {subject: "made-up", kind: "thing", summary: "names nothing real", evidence: "none", proposal: "none", session_ids: ["ghost"], task_id: 99999}]}')"
 run 0 "$MESA" retro run
 RUN1=$(jqs .id)
 [ "$(jqs .trigger)" = "manual" ] || fail "a CLI run is trigger manual: $STDOUT"
 [ "$(keys "$STDOUT")" = "id,spawned_at,started_at,trigger" ] || fail "run key set: $(keys "$STDOUT")"
-[ "$(jqs .spawned_at)" != "null" ] || fail "a run that spawned prints spawned_at: $STDOUT"
-[ "$(wc -l < "$BG_LOG")" -eq 1 ] || fail "one spawn: $(cat "$BG_LOG")"
-LINE=$(head -1 "$BG_LOG")
-EXPECT="$WORKSPACE|naru retro $RUN1|Run mesa session retrospective $RUN1."
-[ "$LINE" = "$EXPECT" ] || fail "expected '$EXPECT', got '$LINE'"
-[ "$(cat "$STUB_DIR/last-agent")" = "naru-retro" ] ||
-  fail "the run must pass --agent naru-retro, got '$(cat "$STUB_DIR/last-agent")'"
-AGENT_FILE="$FAKE_HOME/.claude/agents/naru-retro.md"
-[ -f "$AGENT_FILE" ] || fail "the naru-retro agent definition must be seeded at $AGENT_FILE before the spawn"
-grep -q '^name: naru-retro$' "$AGENT_FILE" || fail "the seeded definition must name the agent: $(head -3 "$AGENT_FILE")"
-grep -q '^tools: ' "$AGENT_FILE" || fail "the seeded definition must carry a tool list"
-! grep -E '^tools: .*\b(Edit|Write)\b' "$AGENT_FILE" || fail "the retro agent must not be able to Edit/Write: $(grep '^tools:' "$AGENT_FILE")"
-grep -q 'haiku' "$AGENT_FILE" && grep -q 'opus' "$AGENT_FILE" && grep -q 'Never fable' "$AGENT_FILE" ||
-  fail "the definition must state the model-per-step rule"
-grep -q 'mesa retro finding record' "$AGENT_FILE" || fail "the definition must route findings through the log"
-grep -q -- '--kind change-request --author retro --task' "$AGENT_FILE" || fail "the definition must file through inbox add"
-ok "retro run records a manual run and spawns --agent naru-retro in ~/.naru/workspace, named 'naru retro <id>', with the definition seeded (no Edit/Write, model-per-step rule)"
+[ "$(jqs .spawned_at)" != "null" ] || fail "a run that started prints spawned_at: $STDOUT"
+wait_jobs 1
+REPORT=$(sed -n 1p "$JOBLOG")
+[ "$(jq -r .kind <<<"$REPORT")" = "retro" ] && [ "$(jq -r .run_id <<<"$REPORT")" = "$RUN1" ] ||
+  fail "the job's one-line report names the run: $REPORT"
+[ "$(jq -r .sessions <<<"$REPORT")" = "2" ] || fail "two sessions are skimmed: $REPORT"
+[ "$(jq -r .unattributed <<<"$REPORT")" = "1" ] || fail "the orphan session is skipped: $REPORT"
+[ "$(jq -r .clean <<<"$REPORT")" = "1" ] || fail "the clean session costs no call: $REPORT"
+[ "$(jq -r '.findings | length' <<<"$REPORT")" = "2" ] || fail "two findings applied: $REPORT"
+[ "$(jq -r '.rejected | length' <<<"$REPORT")" = "1" ] || fail "the made-up finding is rejected: $REPORT"
+ok "retro run records a manual run and its detached job logs one report: 2 sessions skimmed, 1 unattributed, 1 clean, 2 findings applied, 1 rejected"
+
+# The calls: two haiku skims and one sonnet roll-up, in the workspace, `-p`
+# with no tools and a schema, never --bg and never an agent.
+[ "$(grep -c '|haiku$' "$P_LOG")" -eq 2 ] || fail "two haiku skims: $(cat "$P_LOG")"
+[ "$(grep -c '|sonnet$' "$P_LOG")" -eq 1 ] || fail "one sonnet roll-up: $(cat "$P_LOG")"
+grep -qFx "$WORKSPACE|naru retro $RUN1 skim sess-one|haiku" "$P_LOG" || fail "a skim runs in the workspace named for its session: $(cat "$P_LOG")"
+grep -qFx "$WORKSPACE|naru retro $RUN1|sonnet" "$P_LOG" || fail "the roll-up is named for the run: $(cat "$P_LOG")"
+! grep -Eq 'sess-orphan|sess-clean' "$P_LOG" || fail "an unattributed or clean session is never skimmed: $(cat "$P_LOG")"
+[ ! -s "$BG_CALLS" ] || fail "no --bg, agents or stop call is ever made: $(cat "$BG_CALLS")"
+for key in skim-sess-one skim-sess-two rollup; do
+  FLAGS="$STUB_DIR/flags-$key"
+  grep -qx -- '-p' "$FLAGS" && grep -qx -- '--tools' "$FLAGS" && grep -qx -- '--strict-mcp-config' "$FLAGS" &&
+    grep -qx -- '--json-schema' "$FLAGS" && grep -qx -- '--output-format' "$FLAGS" ||
+    fail "$key: expected a tool-less -p structured call: $(tr '\n' ' ' < "$FLAGS")"
+  ! grep -Eqx -- '--bg|--agent' "$FLAGS" || fail "$key: must never start an agent: $(cat "$FLAGS")"
+  jq -e '.type == "object"' "$STUB_DIR/schema-$key" >/dev/null || fail "$key: the schema is JSON: $(cat "$STUB_DIR/schema-$key")"
+done
+ok "retro job: 2 haiku skims + 1 sonnet roll-up as tool-less 'claude -p --json-schema' calls in the workspace, never --bg or --agent, nothing skipped skimmed"
+
+# The skim prompt carries the hostile task name as DATA (byte-identical, in
+# its fence); nothing ran it.
+grep -qF "task: #$TASK_B $HOSTILE_TASK" "$STUB_DIR/prompt-skim-sess-one" ||
+  fail "the hostile task name must reach the skim prompt byte-identical: $(cat "$STUB_DIR/prompt-skim-sess-one")"
+grep -q 'DATA' "$STUB_DIR/prompt-skim-sess-one" && grep -q '<<<DATA' "$STUB_DIR/prompt-rollup" ||
+  fail "untrusted text must be fenced as data"
+grep -q 'failures: 2' "$STUB_DIR/prompt-skim-sess-one" || fail "the skim carries the session's failure digest: $(cat "$STUB_DIR/prompt-skim-sess-one")"
+grep -q 'git push' "$STUB_DIR/prompt-skim-sess-one" || fail "the digest names the refused command"
+grep -q 'git/denial' "$STUB_DIR/prompt-rollup" ||
+  fail "the roll-up carries the skims: $(cat "$STUB_DIR/prompt-rollup")"
+for f in pwned pwned2 pwned3; do
+  [ ! -e "$WORKSPACE/$f" ] && [ ! -e "$f" ] && [ ! -e "$TMP/$f" ] || fail "hostile text ran: $f exists"
+done
+ok "hostile session text (task name, tool error) reaches the prompts as fenced data and runs nothing"
+
+# The findings: recorded through the log's own path, filed as change requests
+# from author retro against the observed task, and linked.
+run 0 "$MESA" retro finding list
+[ "$(jqs 'length')" -eq $((FINDINGS_BEFORE + 2)) ] || fail "two findings recorded: $STDOUT"
+GIT=$(jq -c '.[] | select(.fingerprint == "git/denial")' <<<"$STDOUT")
+SED=$(jq -c '.[] | select(.fingerprint == "sed/tool-failure")' <<<"$STDOUT")
+[ -n "$GIT" ] && [ -n "$SED" ] || fail "fingerprints are Naru's own lowercase subject/kind: $STDOUT"
+[ "$(jq -r .count <<<"$GIT")" = "1" ] || fail "a new finding has count 1: $GIT"
+[ "$(jq -r '.session_ids | join(",")' <<<"$GIT")" = "sess-one,sess-two" ] || fail "only listed sessions are kept: $GIT"
+[ "$(jq -r '.evidence | startswith("run '"$RUN1"': ")' <<<"$GIT")" = "true" ] || fail "evidence names the run: $GIT"
+GIT_ITEM=$(jq -r .inbox_item_id <<<"$GIT")
+SED_ITEM=$(jq -r .inbox_item_id <<<"$SED")
+[ "$GIT_ITEM" != "null" ] && [ "$SED_ITEM" != "null" ] || fail "both new findings are linked to their inbox item: $GIT $SED"
+run 0 "$MESA" inbox show "$GIT_ITEM"
+[ "$(jqs .kind)" = "change-request" ] && [ "$(jqs .author)" = "retro" ] && [ "$(jqs .task_id)" = "$TASK_B" ] ||
+  fail "the item is a change-request from retro on the observed task: $STDOUT"
+jqs .body | grep -q 'git/denial' || fail "the item names its finding: $STDOUT"
+[ "$("$MESA" inbox list | jq length)" -eq $((INBOX_BEFORE + 2)) ] || fail "exactly two items filed"
+# The task a model invents is not one the finding can be filed against: sed's
+# fell back to its listed session's task.
+run 0 "$MESA" inbox show "$SED_ITEM"
+[ "$(jqs .task_id)" = "$TASK_B" ] || fail "an unlisted task falls back to the session's task: $STDOUT"
+ok "new findings: recorded as git/denial and sed/tool-failure (session ids kept, unlisted ones dropped), each filed as a change-request from retro on the observed task and linked"
 
 # ---- inside the interval: conflict; --force runs anyway ----
 
 run 1 "$MESA" retro run
 [ "$(jqe .error.code)" = "conflict" ] || fail "a second run inside the interval is conflict: $STDERR"
-[ "$(wc -l < "$BG_LOG")" -eq 1 ] || fail "a conflict spawns nothing"
+[ "$(job_count)" -eq 1 ] || fail "a conflict starts nothing"
 run 0 "$MESA" retro status
 [ "$(jqs .last_run.id)" = "$RUN1" ] || fail "status names the run: $STDOUT"
 [ "$(jqs .due)" = "false" ] || fail "just ran: not due: $STDOUT"
 # next_due_at = started_at + 72h, on the store's own clock.
 [ "$(jqs '((.last_run.started_at | strptime("%Y-%m-%d %H:%M:%S") | mktime) + 72 * 3600) == (.next_due_at | strptime("%Y-%m-%d %H:%M:%S") | mktime)')" = "true" ] ||
   fail "next_due_at must be started_at + 72h: $STDOUT"
+
+# A repeat: the roll-up names git/denial again. The count bumps and evidence
+# appends; NOTHING is filed.
+stage rollup "$(jq -nc --argjson t "$TASK_B" '{findings: [
+  {subject: "git", kind: "denial", summary: "a different summary, ignored", evidence: "sess-one: refused again", proposal: "again", session_ids: ["sess-one"], task_id: $t}]}')"
 run 0 "$MESA" retro run --force --quiet
 RUN2=$(jqs .id)
 [ "$RUN2" -gt "$RUN1" ] || fail "--force records a new run: $STDOUT"
 [ "$(keys "$STDOUT")" = "id,spawned_at,started_at,trigger" ] || fail "a run has nothing to drop under --quiet: $(keys "$STDOUT")"
-[ "$(wc -l < "$BG_LOG")" -eq 2 ] || fail "--force spawns: $(cat "$BG_LOG")"
-grep -q "|naru retro $RUN2|Run mesa session retrospective $RUN2." "$BG_LOG" || fail "the forced run carries its own id"
-ok "retro run inside the interval is conflict; --force runs and records a new run; next_due_at is started_at + interval"
+wait_jobs 2
+REPORT=$(sed -n 2p "$JOBLOG")
+[ "$(jq -r '.findings[0].new' <<<"$REPORT")" = "false" ] && [ "$(jq -r '.findings[0].count' <<<"$REPORT")" = "2" ] ||
+  fail "a repeat answers new: false, count 2: $REPORT"
+run 0 "$MESA" retro finding show "$(jq -r .id <<<"$GIT")"
+[ "$(jqs .count)" = "2" ] || fail "the repeat bumped the count: $STDOUT"
+[ "$(jqs .summary)" = "Agents keep trying git push and the hook refuses it" ] || fail "the summary stays as first recorded: $STDOUT"
+[ "$(jqs '.evidence | contains("run '"$RUN2"': ")')" = "true" ] || fail "the repeat appended its evidence: $STDOUT"
+[ "$(jqs .inbox_item_id)" = "$GIT_ITEM" ] || fail "the link is unchanged: $STDOUT"
+[ "$("$MESA" inbox list | jq length)" -eq $((INBOX_BEFORE + 2)) ] || fail "a repeat files nothing"
+ok "retro run inside the interval is conflict; --force runs; next_due_at is started_at + interval; a repeated finding bumps count + evidence and files nothing"
+
+# ---- a failed call leaves no half-applied state, and keeps the claim ----
+#
+# A job failing AFTER paid model calls keeps its run row (spawned), so the
+# watcher backs off for the interval instead of re-running the whole skim set
+# every tick; the failure is logged. sess-old is a failing session that ended
+# BEFORE the previous run started: no later run may gather or skim it.
+
+FINDINGS_NOW=$("$MESA" retro finding list | jq length)
+INBOX_NOW=$("$MESA" inbox list | jq length)
+snapshot() { "$MESA" retro finding list | jq -c '[.[] | {id, count, evidence, inbox_item_id, session_ids}]'; }
+SNAP=$(snapshot)
+TS=$(python3 -c 'import datetime; print((datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S.000Z"))')
+transcript "$TMP/tree/-proj-b/old.jsonl" sess-old "$DIR_B" 1
+# The folder fallback attributes to a task closed in THIS run's window, so close one.
+run 0 "$MESA" task create "$B" "second task"
+run 0 env -u CLAUDE_CODE_SESSION_ID "$MESA" task update "$(jqs .id)" --status done
+# (1) every skim fails (claude down): the job fails, the row is kept.
+touch "$STUB_DIR/fail"
+: > "$FAIL_LOG"
+run 0 "$MESA" retro run --force
+RUN3=$(jqs .id)
+wait_jobs 4
+tail -1 "$JOBLOG" | jq -e '.error.code == "unavailable"' >/dev/null || fail "every skim failing is an error line: $(tail -1 "$JOBLOG")"
+tail -2 "$JOBLOG" | head -1 | grep -q "run $RUN3: failed after 2 model call" || fail "the failure after calls is logged clearly: $(tail -2 "$JOBLOG")"
+[ "$(wc -l < "$FAIL_LOG" | tr -d ' ')" -ge 2 ] || fail "both skims were attempted: $(cat "$FAIL_LOG")"
+run 0 "$MESA" retro status
+[ "$(jqs .last_run.id)" = "$RUN3" ] || fail "a job failing after model calls keeps its claim, so the interval backs off: $STDOUT"
+rm -f "$STUB_DIR/fail"
+# (2) skims fine, the roll-up fails (nothing staged for it).
+rm -f "$STUB_DIR/rollup.json"
+run 0 "$MESA" retro run --force
+RUN4=$(jqs .id)
+wait_jobs 6
+tail -1 "$JOBLOG" | jq -e '.error.code == "unavailable"' >/dev/null || fail "a failed roll-up is an error line: $(tail -1 "$JOBLOG")"
+run 0 "$MESA" retro status
+[ "$(jqs .last_run.id)" = "$RUN4" ] || fail "a failed roll-up keeps its claim too: $STDOUT"
+[ "$("$MESA" retro finding list | jq length)" -eq "$FINDINGS_NOW" ] || fail "a failed call adds no finding"
+[ "$("$MESA" inbox list | jq length)" -eq "$INBOX_NOW" ] || fail "a failed call files nothing"
+[ "$(snapshot)" = "$SNAP" ] || fail "a failed call changes no finding (count, evidence, link, sessions)"
+ok "a failed call (every skim, or the roll-up) writes nothing — no finding, no bump, no inbox item — logs the failure and keeps its run row"
+
+run 0 "$MESA" cc errors --window all --session sess-old
+[ "$(jqs .total.errors)" -gt 0 ] || fail "sess-old is ingested (so its absence below means something): $STDOUT"
+! grep -q 'sess-old' "$P_LOG" || fail "a session older than the previous run's start must not be gathered: $(cat "$P_LOG")"
+ok "a failing session that ended before the previous run started is excluded from the next run's gather"
 
 # ---- the interval is the config's `watchers.retro-interval-hours`, read fresh ----
 
@@ -319,6 +519,8 @@ ok "retro-interval-hours governs status/run with no restart; a hand-edited bad v
 # ---- the watcher: serve --watch-retro ----
 
 PORT=17801
+SERVER_ERR="$TMP/server.err"
+: > "$SERVER_ERR"
 wait_for_server() {
   for _ in $(seq 1 50); do
     curl -sf "http://127.0.0.1:$PORT/api/projects" >/dev/null 2>&1 && return 0
@@ -326,24 +528,17 @@ wait_for_server() {
   done
   fail "server did not start on $PORT"
 }
-wait_bg_lines() { # wait_bg_lines <n> -> blocks until BG_LOG has >= n lines, or fails
-  local n=$1
-  for _ in $(seq 1 50); do
-    [ "$(wc -l < "$BG_LOG")" -ge "$n" ] && return 0
+wait_err_lines() { # wait_err_lines <n> <text> -> blocks until the server logged <text> >= n times
+  local n=$1 text=$2
+  for _ in $(seq 1 100); do
+    [ "$(grep -c "$text" "$SERVER_ERR")" -ge "$n" ] && return 0
     sleep 0.1
   done
-  fail "timed out waiting for $n bg dispatch(es); log:\n$(cat "$BG_LOG")"
-}
-wait_fail_lines() { # wait_fail_lines <n> -> blocks until the stub has refused >= n spawns, or fails
-  local n=$1
-  for _ in $(seq 1 50); do
-    [ "$(wc -l < "$FAIL_LOG")" -ge "$n" ] && return 0
-    sleep 0.1
-  done
-  fail "timed out waiting for $n refused spawn(s); got $(wc -l < "$FAIL_LOG")"
+  fail "timed out waiting for $n '$text' line(s); stderr:
+$(cat "$SERVER_ERR")"
 }
 start_server() { # start_server <flags...>
-  MESA_WATCH_RETRO_TICK_MS=150 "$MESA" serve --port "$PORT" "$@" >/dev/null 2>&1 &
+  MESA_WATCH_RETRO_TICK_MS=150 "$MESA" serve --port "$PORT" "$@" >/dev/null 2>>"$SERVER_ERR" &
   SERVER_PID=$!
   wait_for_server
 }
@@ -361,12 +556,12 @@ api() { # api <method> <path> [json-body] -> STDOUT=body, CODE=status
 
 # A fresh db, so the watcher's first tick finds nothing has run.
 export MESA_DB="$TMP/watcher.db"
-: > "$BG_LOG"
+JOBS0=$(job_count)
 
 # flag OFF: no dispatch, ever.
 start_server
 sleep 1
-[ "$(wc -l < "$BG_LOG")" -eq 0 ] || fail "flag off: watcher must not dispatch"
+[ "$(job_count)" -eq "$JOBS0" ] || fail "flag off: watcher must not dispatch"
 run 0 "$MESA" retro status
 [ "$(jqs .last_run)" = "null" ] || fail "flag off: no run row"
 
@@ -396,36 +591,37 @@ rm -f "$MESA_CONFIG_FILE"
 stop_server
 ok "watch_retro off: no dispatch; GET/PUT /api/config/watchers carry retro_interval_hours (422 on a bad value writing nothing, null restores 72, siblings preserved)"
 
-# spawn failure: the run row is rolled back, so a later tick retries. The
-# proof is the RETRY, not a point-in-time read of the row: each tick inserts
-# the row, spawns, and deletes it again on failure, so `retro status` sampled
-# at a random instant may land inside that window and see a row that is
-# about to go. A second refused spawn, on the other hand, can only happen
-# because the first attempt's row was deleted (a leftover row makes the next
-# tick "not due" for 72 hours).
-touch "$STUB_DIR/fail"
-start_server --watch-retro
-wait_fail_lines 2
-[ "$(wc -l < "$BG_LOG")" -eq 0 ] || fail "a failing spawn must log nothing"
-rm -f "$STUB_DIR/fail"
+# A job that cannot start: the run row is rolled back, so a later tick
+# retries. The proof is the RETRY, not a point-in-time read of the row: each
+# tick inserts the row, fails to start the job and deletes it again, so
+# `retro status` sampled at a random instant may land inside that window. A
+# second failure can only happen because the first attempt's row was deleted
+# (a leftover row makes the next tick "not due" for 72 hours).
+NARU_SELF_BIN="$TMP/no-such-binary" start_server --watch-retro
+wait_err_lines 2 'spawn failed for retro run'
+[ "$(job_count)" -eq "$JOBS0" ] || fail "a job that never started logs nothing"
+stop_server
+run 0 "$MESA" retro status
+[ "$(jqs .last_run)" = "null" ] || fail "a failed start leaves no row: $STDOUT"
 
-# flag ON: exactly one dispatch, trigger watcher, and not again inside the interval.
-wait_bg_lines 1
+# flag ON: exactly one job, trigger watcher, and not again inside the interval.
+start_server --watch-retro
+wait_jobs $((JOBS0 + 1))
 run 0 "$MESA" retro status
 RUN_W=$(jqs .last_run.id)
 [ "$(jqs .last_run.trigger)" = "watcher" ] || fail "a watcher run is trigger watcher: $STDOUT"
 [ "$(jqs .due)" = "false" ] || fail "just dispatched: not due: $STDOUT"
-LINE=$(head -1 "$BG_LOG")
-EXPECT="$WORKSPACE|naru retro $RUN_W|Run mesa session retrospective $RUN_W."
-[ "$LINE" = "$EXPECT" ] || fail "expected '$EXPECT', got '$LINE'"
-[ "$(cat "$STUB_DIR/last-agent")" = "naru-retro" ] || fail "the watcher spawns --agent naru-retro"
+REPORT=$(tail -1 "$JOBLOG")
+[ "$(jq -r .run_id <<<"$REPORT")" = "$RUN_W" ] && [ "$(jq -r .sessions <<<"$REPORT")" = "0" ] ||
+  fail "the watcher's job reports its run (no tasks here, so nothing to review): $REPORT"
 sleep 1
-[ "$(wc -l < "$BG_LOG")" -eq 1 ] || fail "inside the interval the watcher must not dispatch again: $(cat "$BG_LOG")"
+[ "$(job_count)" -eq $((JOBS0 + 1)) ] || fail "inside the interval the watcher must not dispatch again: $(tail -3 "$JOBLOG")"
+[ ! -s "$BG_CALLS" ] || fail "the watcher never uses --bg: $(cat "$BG_CALLS")"
 # The run row is the claim the CLI sees too.
 run 1 "$MESA" retro run
 [ "$(jqe .error.code)" = "conflict" ] || fail "a CLI run against the watcher's row is conflict: $STDERR"
 stop_server
-ok "watch_retro on: a failed spawn leaves no row and retries; then exactly one 'watcher' dispatch per interval, and the CLI sees its claim"
+ok "watch_retro on: a job that cannot start leaves no row and retries; then exactly one 'watcher' job per interval, and the CLI sees its claim"
 
 echo
 echo "retro check passed ($CHECKS checks)"

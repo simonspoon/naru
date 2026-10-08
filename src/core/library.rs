@@ -54,15 +54,14 @@ pub struct Builtin {
 /// `core::supervisor::SUPERVISOR_DEFINITION`, at
 /// `.claude/agents/supervisor.md`, seeded by
 /// `core::supervisor::ensure_agent_definition` on the first dispatch.
-/// `inbox-triage` is the third (mesa task 1168): the agent definition a
-/// `serve --watch-inbox` dispatch triages one item as, body
+/// `inbox-triage` is the third (mesa task 1168): an agent definition, body
 /// `core::inbox_triage::INBOX_TRIAGE_DEFINITION`, at
-/// `.claude/agents/inbox-triage.md`, seeded by
-/// `core::inbox_triage::ensure_agent_definition` before the `inbox-watcher`
-/// spawn. `naru-retro` is the fourth (mesa task 1158): the agent definition a
-/// `serve --watch-retro` pass reviews finished sessions as, body
-/// `core::retro::RETRO_DEFINITION`, at `.claude/agents/naru-retro.md`, seeded
-/// by `core::retro::ensure_agent_definition` before the `retro` spawn.
+/// `.claude/agents/inbox-triage.md`. Kept for manual `claude --agent
+/// inbox-triage` use; no longer spawned or seeded since naru task 1691 made
+/// the watcher's triage two `claude -p` calls. `naru-retro` is the fourth (mesa task 1158): an agent definition, body
+/// `core::retro::RETRO_DEFINITION`, at `.claude/agents/naru-retro.md`. Kept
+/// for manual `claude --agent naru-retro` use; no longer spawned or seeded
+/// since naru task 1692 made the retrospective `claude -p` calls in a job.
 /// `live-summary-prompt` is still a `prompt` (mesa task 921): the instructions
 /// for the short-lived agent that writes a live conversation's memory once it
 /// ends, body `core::live::SUMMARY_PROMPT`, spawned as a plain prompt rather

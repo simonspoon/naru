@@ -147,20 +147,30 @@ prints `id: null` for each would-be import.
 
 ### `dream`
 
-The live dream pass (`docs/live.md`, "Dreaming") for one project: the same
-`live-dream` config template through `agents::spawn_bg`, with
-`project_memory::dream_prompt` — the dream instructions naming `naru memory
-show|list|search|merge|delete|replace --project <id>` and `naru task create
-<id>` for a contradiction — plus the notebook's word count against its
-budget and the active entries, least recently used first. Since mesa task
-1337 it owns the notebook's 1000-word budget with the live dream's budget
-paragraph and step 3 (merge, delete, then shorten with `naru memory replace`,
-never deleting a standing norm to make room), minus the clauses about
-`unused`/`kept` marks a project notebook never carries. It runs in the project's
+The live dream pass (`docs/live.md`, "Dreaming") for one project. Since naru
+task 1690 it is no `--bg` agent: `naru memory dream` starts a detached,
+hidden `naru __job project-dream` (`core::memory_job`) and prints
+`{"spawned": true, "receipt": "pid:<n>"}` at once. The job makes **one
+synchronous, tool-less** `claude -p --output-format json --json-schema` call
+through the same `live-dream` config template (`{schema}` is
+`live::PROJECT_DREAM_SCHEMA`: the live dream's edit list without `keep`),
+with `project_memory::dream_prompt` — the dream instructions teaching the
+edit ops `merge`, `delete` and `replace` (the model has no `naru memory`
+command to run) — plus the notebook's word count against its budget and the
+active entries, least recently used first. Since mesa task 1337 it owns the
+notebook's 1000-word budget with the live dream's budget paragraph and step 3
+(merge, delete, then shorten with a `replace`, never deleting a standing norm
+to make room), minus the clauses about `unused`/`kept` marks a project
+notebook never carries. **Naru applies the answer itself**: each edit through
+its own guarded `Store::*_in(Some(project), …)` call, every edit tried
+whatever happened to the one before (a refused one is logged, never
+blocking), each listed contradiction as a **backlog** task in the project. The
+one-line JSON report (`applied`, `failed`, `tasks`, `report`) goes to
+`logs/memory-jobs.log` in Naru's home directory. It runs in the project's
 `local_path` when that folder exists, else the workspace, with no session
 `{id}`. Fewer than two active entries prints `{"spawned": false, "reason"}`
-and spawns nothing; a failed spawn is `unavailable`. There is no
-live-conversation `conflict`. A spawn is recorded as the project's last
+and starts nothing; a failed start is `unavailable`. There is no
+live-conversation `conflict`. A start is recorded as the project's last
 dream (below), so an automatic one waits for it.
 
 ### The automatic dream after a task closes (mesa task 1339)
@@ -168,7 +178,7 @@ dream (below), so an automatic one waits for it.
 Nothing trims a project notebook at write time, so the dream also runs on
 its own, from **one** trigger: a task closing into `done` (from any other
 status, claimed or not) through `naru task update` or `PATCH
-/api/tasks/{id}`. `core::project_memory::dream_after_close` spawns the same
+/api/tasks/{id}`. `core::project_memory::dream_after_close` starts the same
 dream — one `DreamSpawn`, shared with `naru memory dream` — when:
 
 - **the notebook is over its budget**: `project_memory::dream_wanted`, more
@@ -178,24 +188,24 @@ dream — one `DreamSpawn`, shared with `naru memory dream` — when:
 - **no earlier dream for the project is still running**: the
   `project_dreams` table (migration index 74, one row per project, `ON
   DELETE CASCADE`) holds the last dream's receipt and when it started. A
-  receipt that `claude agents --json --all` still lists as running, or no
-  receipt (a claim still spawning, or a template that printed none) younger
-  than 30 minutes on the store's clock, skips this close.
+  receipt that is still running — a `pid:<n>` marker whose process is alive
+  and is a `naru __job` (`memory_job::is_running`; a pre-1690 `--bg` job id is
+  still asked of `claude agents --json --all`) — or no receipt (a claim still
+  starting) younger than 30 minutes on the store's clock, skips this close.
 
 The claim is a compare-and-swap on the row judged finished, so two closes
-racing each other spawn one dream; a failed spawn drops the claim, so the
+racing each other start one dream; a failed start drops the claim, so the
 next close retries. It is **best-effort**: `task update` prints the task
 first and reports any failure on stderr only — stdout and the exit code are
-what they were — and the route answers before the dream is spawned, on a
+what they were — and the route answers before the dream is started, on a
 blocking thread that takes the store lock only for its reads and writes,
-never across a `claude` shell-out.
+never across the start of the job.
 
-Why a task close and not SessionStart: `agents::spawn_bg` waits on its
-`claude --bg` shell-out, which would delay every session start; it would
-judge on every session; and the dream agent's own session would re-trigger
-its SessionStart hook before its receipt is recorded. A close is rarer,
-follows the work that grows a notebook, and the dream agent closes no
-tasks.
+Why a task close and not SessionStart: a start would run on every session
+and judge every time, and a dream's own `claude` session would re-trigger its
+SessionStart hook before its receipt is recorded. A close is rarer, follows
+the work that grows a notebook, and the dream closes no tasks (a
+contradiction becomes a backlog task).
 
 ## The SessionStart hook
 

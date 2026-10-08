@@ -24,14 +24,18 @@
 #   * import: MEMORY.md skipped, frontmatter description + body, a long
 #     file cut to fit, --dry-run writing nothing, a re-import adding nothing,
 #     a missing folder not_found;
-#   * dream: under two entries nothing spawns; with two it spawns through
-#     the live-dream template (stub claude) in the project's folder with a
-#     prompt naming `naru memory merge --project <id>`.
+#   * dream (naru task 1690): under two entries nothing starts; with two a
+#     detached `naru __job project-dream` makes one `claude -p --json-schema`
+#     call (stub claude) through the live-dream template in the project's
+#     folder — the project schema without `keep`, a prompt carrying the
+#     notebook and the edit ops, receipt `pid:<n>` — and Naru applies the
+#     answer itself, each edit on its own (a refused one is logged, a
+#     contradiction becomes a backlog task).
 #   * the automatic dream (mesa task 1339): a task closing in a project whose
-#     notebook is over its 1000 words spawns that dream, `task update`'s
-#     stdout unchanged; not again while its job runs or, with no receipt,
-#     inside the grace window; not for a within-budget notebook; a failing
-#     spawn still closes the task with exit 0 and the next close retries.
+#     notebook is over its 1000 words starts that dream, `task update`'s
+#     stdout unchanged; not again while its job (the pid marker) runs; not
+#     for a within-budget notebook; a failing start still closes the task
+#     with exit 0 and the next close retries.
 set -euo pipefail
 # Drop inherited NARU_* vars: Naru reads them before MESA_*, so one would escape this script's isolation.
 unset $(env | sed -n 's/^\(NARU_[A-Za-z0-9_]*\)=.*/\1/p')
@@ -44,9 +48,13 @@ cargo build --quiet
 BIN="$PWD/target/debug"
 
 TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
 # Canonical, so the paths naru prints match the ones compared against.
 TMP=$(cd "$TMP" && pwd -P)
+# A detached memory job (`naru __job …`, naru task 1690) may outlive the last
+# check and write into $TMP: wait (bounded, ~10s) for any naming it first.
+trap 'rm -f "$TMP/stub/hold-p"
+      for _ in $(seq 1 100); do pgrep -f "__job.*$TMP" >/dev/null 2>&1 || break; sleep 0.1; done
+      rm -rf "$TMP"' EXIT
 export MESA_DB="$TMP/mesa.db"
 export HOME="$TMP/home"
 mkdir -p "$HOME"
@@ -299,43 +307,120 @@ grep -qF "The notebook holds 1750 of its 1000 words, over its budget; run \`naru
   fail "context over the budget names the dream (got $STDOUT)"
 ok "memory import: MEMORY.md skipped, description + body, long file cut with …, --dry-run writes nothing, re-import idempotent (past the budget too, nothing retired), missing folder not_found"
 
-# ---- dream: through the live-dream template, stub claude ----
+# ---- dream: a detached job through the live-dream template, stub claude ----
+#
+# Since naru task 1690 a project dream is one synchronous `claude -p
+# --json-schema` call with no tools, run inside a detached `naru __job
+# project-dream`, whose answer Naru applies itself — so the stub's `-p`
+# branch records each call (flags, schema, prompt, cwd, a counter), a
+# `hold-p` file keeps one running, and `dream-out.json` is the staged answer.
 STUB="$TMP/stub"
 mkdir -p "$STUB"
 cat >"$STUB/claude" <<EOF
 #!/usr/bin/env bash
 case "\$1" in
-  --bg)
+  -p)
     for a in "\$@"; do PROMPT=\$a; done
+    printf '%s\n' "\${@:1:\$# - 1}" >"$STUB/last-flags"
+    for ((i = 1; i < \$#; i++)); do
+      if [ "\${!i}" = "--json-schema" ]; then j=\$((i + 1)); printf '%s' "\${!j}" >"$STUB/last-schema"; fi
+    done
     printf '%s' "\$PROMPT" >"$STUB/last-prompt"
     pwd -P >"$STUB/last-cwd"
-    echo spawn >>"$STUB/spawns"
-    [ -e "$STUB/no-receipt" ] || echo "backgrounded · cafe01 (idle)"
+    echo call >>"$STUB/spawns"
+    while [ -e "$STUB/hold-p" ]; do sleep 0.1; done
+    [ -e "$STUB/dream-out.json" ] || { echo "stub claude: no dream-out.json staged" >&2; exit 1; }
+    printf '{"type":"result","subtype":"success","is_error":false,"result":"","structured_output":%s}\n' "\$(cat "$STUB/dream-out.json")"
     ;;
-  agents) [ -e "$STUB/agents.json" ] && cat "$STUB/agents.json" || exit 2 ;;
   *) exit 2 ;;
 esac
 EOF
 chmod +x "$STUB/claude"
 export MESA_CLAUDE_BIN="$STUB/claude"
+EMPTY_ANSWER='{"edits":[],"contradictions":[],"report":"nothing"}'
+printf '%s' "$EMPTY_ANSWER" >"$STUB/dream-out.json"
+spawns() { [ -e "$STUB/spawns" ] && wc -l <"$STUB/spawns" | tr -d ' ' || echo 0; }
+wait_spawns() { # <n> — blocks until the stub has recorded n calls
+  local i
+  for i in $(seq 1 100); do
+    [ "$(spawns)" -ge "$1" ] && return 0
+    sleep 0.1
+  done
+  fail "the stub never recorded $1 call(s) (got $(spawns))"
+}
+no_new_spawns() { # <base> <what> — nothing ran since <base>
+  sleep 1
+  [ "$(spawns)" = "$1" ] || fail "$2 (got $(( $(spawns) - $1 )) new call(s))"
+}
+wait_for() { # <what> <cmd...> — polls until the command succeeds
+  local what=$1 i
+  shift
+  for i in $(seq 1 100); do
+    "$@" && return 0
+    sleep 0.1
+  done
+  fail "timed out waiting for $what"
+}
+JOB_LOG="$HOME/.naru/logs/memory-jobs.log"
+
 run 0 "$NARU" project create "Lonely" --no-git
 R=$(jqs .id)
 run 0 "$NARU" memory add --project "$R" only one entry
+BASE=$(spawns)
 run 0 "$NARU" memory dream --project "$R"
 [ "$(jqs .spawned)" = "false" ] && grep -q "1 active entry" <<<"$(jqs .reason)" || fail "dream under two entries spawns nothing (got $STDOUT)"
-[ ! -e "$STUB/last-prompt" ] || fail "dream under two entries must not spawn"
+no_new_spawns "$BASE" "dream under two entries must not start"
 run 0 "$NARU" memory dream --project "$P"
-[ "$(jqs .spawned)" = "true" ] && [ "$(jqs .receipt)" = "cafe01" ] || fail "dream spawns and reports the receipt (got $STDOUT)"
+case "$(jqs .receipt)" in pid:[0-9]*) ;; *) fail "dream reports a pid:<n> receipt (got $STDOUT)" ;; esac
+[ "$(jqs .spawned)" = "true" ] || fail "dream starts (got $STDOUT)"
+wait_spawns $((BASE + 1))
 [ "$(cat "$STUB/last-cwd")" = "$REPO" ] || fail "dream runs in the project's folder (got $(cat "$STUB/last-cwd"))"
-grep -q "naru memory merge --project $P --ids" "$STUB/last-prompt" || fail "dream prompt names the project merge command"
+[ "$(head -11 "$STUB/last-flags" | tr '\n' ' ')" = '-p --model sonnet --name project memory dream --tools  --strict-mcp-config --output-format json --json-schema ' ] ||
+  fail "dream call argv (got $(head -11 "$STUB/last-flags" | tr '\n' ' '))"
+jq -e '[.properties.edits.items.anyOf[].properties.op.const] == ["merge","delete","replace"]' "$STUB/last-schema" >/dev/null ||
+  fail "the project dream schema offers merge, delete and replace, no keep (got $(cat "$STUB/last-schema"))"
+grep -q '"op":"merge"' "$STUB/last-prompt" || fail "dream prompt teaches the merge edit"
+grep -q "notebook of project $P" "$STUB/last-prompt" || fail "dream prompt names the project"
+! grep -q "naru memory" "$STUB/last-prompt" || fail "the tool-less dream prompt names no naru memory command"
 grep -q "Run cargo fmt before clippy" "$STUB/last-prompt" || fail "dream prompt carries the notebook"
 grep -q "of its 1000 words. Entries are listed least recently used first." "$STUB/last-prompt" ||
   fail "dream prompt opens its listing with the word count against the budget"
-grep -q "naru memory replace --project $P <entry id>" "$STUB/last-prompt" || fail "dream prompt names the project shorten command"
-ok "memory dream: nothing under two entries; otherwise the live-dream template in the project folder, prompt naming naru memory --project $P"
+grep -q '"op":"replace"' "$STUB/last-prompt" || fail "dream prompt names the shorten edit"
+wait_for "the dream's report in the job log" grep -q '"report":"nothing"' "$JOB_LOG"
+ok "memory dream: nothing under two entries; otherwise a detached job calling the live-dream template in the project folder with the project schema (no keep) and a prompt carrying the notebook and the edit ops, receipt pid:<n>"
+
+# ---- dream: Naru applies the answer, each edit on its own ----
+run 0 "$NARU" project create "Applied" --no-git
+AP=$(jqs .id)
+run 0 "$NARU" memory add --project "$AP" "prefers short replies"
+A1=$(jqs .id)
+run 0 "$NARU" memory add --project "$AP" "prefers brief replies"
+A2=$(jqs .id)
+run 0 "$NARU" memory add --project "$AP" "uses tabs"
+A3=$(jqs .id)
+printf '%s' "{\"edits\":[{\"op\":\"delete\",\"id\":999999},{\"op\":\"keep\",\"id\":$A3},{\"op\":\"merge\",\"ids\":[$A1,$A2],\"body\":\"prefers short replies\"}],\"contradictions\":[{\"ids\":[$A3,$A1],\"description\":\"tabs versus spaces\"}],\"report\":\"applied it\"}" >"$STUB/dream-out.json"
+BASE=$(spawns)
+run 0 "$NARU" memory dream --project "$AP"
+wait_spawns $((BASE + 1))
+wait_for "the merge to land" bash -c "'$NARU' memory list --project $AP | jq -e 'length == 2' >/dev/null"
+run 0 "$NARU" memory show --project "$AP" "$A1"
+[ "$(jqs .retired_reason)" = "merged" ] || fail "the merge retired its source (got $STDOUT)"
+run 0 "$NARU" memory show --project "$AP" "$A3"
+[ "$(jqs .retired_at)" = "null" ] || fail "the refused keep must not have touched the entry"
+wait_for "the contradiction task" bash -c "'$NARU' task list '$AP' | jq -e 'length == 1' >/dev/null"
+run 0 "$NARU" task list "$AP"
+TASK=$(jqs '.[0].id')
+run 0 "$NARU" task show "$TASK"
+[ "$(jqs .status)" = "backlog" ] || fail "a contradiction is a backlog task (got $STDOUT)"
+grep -q "tabs versus spaces" <<<"$(jqs .description)" || fail "the task carries the description (got $STDOUT)"
+wait_for "the job report" grep -q '"report":"applied it"' "$JOB_LOG"
+grep '"report":"applied it"' "$JOB_LOG" | tail -1 |
+  jq -e '(.failed | length) == 2 and (.applied | length) == 1 and (.tasks | length) == 1 and .kind == "project-dream"' >/dev/null ||
+  fail "the job log records a merge applied, a delete and a keep refused, one task (got $(tail -1 "$JOB_LOG"))"
+printf '%s' "$EMPTY_ANSWER" >"$STUB/dream-out.json"
+ok "project dream: Naru applies the answer — the merge lands, an unknown id and a keep (no such edit in a project notebook) fail alone and are logged, the contradiction becomes a backlog task"
 
 # ---- the automatic dream after a task closes (mesa task 1339) ----
-spawns() { [ -e "$STUB/spawns" ] && wc -l <"$STUB/spawns" | tr -d ' ' || echo 0; }
 words() { printf 'w%.0s ' $(seq "$1"); }
 over_budget() { # <name> — a project whose notebook holds 1001 words in four entries
   run 0 "$NARU" project create "$1" --no-git
@@ -355,50 +440,46 @@ close_task() { # <project> — creates a task and closes it, STDOUT the update's
 }
 over_budget Dreamy
 D=$OB
+touch "$STUB/hold-p"
 BEFORE=$(spawns)
 close_task "$D"
 UPDATE_OUT=$STDOUT
 [ "$(jqs .status)" = "done" ] || fail "the close still closes (got $STDOUT)"
 run 0 "$NARU" task show "$CLOSED"
 [ "$UPDATE_OUT" = "$STDOUT" ] || fail "task update stdout is the plain task JSON (got $UPDATE_OUT vs $STDOUT)"
-[ "$(spawns)" = "$((BEFORE + 1))" ] || fail "closing a task in an over-budget project spawns one dream"
+wait_spawns $((BEFORE + 1))
 [ "$(cat "$STUB/last-cwd")" = "$TMP/Dreamy" ] || fail "the automatic dream runs in the project's folder"
-grep -q "naru memory merge --project $D --ids" "$STUB/last-prompt" || fail "the automatic dream is this project's dream"
+grep -q "notebook of project $D" "$STUB/last-prompt" || fail "the automatic dream is this project's dream"
 grep -q "The notebook holds 1001 of its 1000 words." "$STUB/last-prompt" || fail "the automatic dream prompt carries the word count"
-# The receipt's job still running: a second close spawns nothing.
-echo '[{"id": "cafe01", "state": "working"}]' >"$STUB/agents.json"
+# The job (its pid marker) still running: a second close spawns nothing.
 close_task "$D"
-[ "$(spawns)" = "$((BEFORE + 1))" ] || fail "no second dream while the first one's job is running"
-# The job finished. Re-closing a done task is no close, so even now it
-# spawns nothing; the next real close spawns again — this time with no
-# receipt.
-echo '[{"id": "cafe01", "state": "done"}]' >"$STUB/agents.json"
+no_new_spawns $((BEFORE + 1)) "no second dream while the first one's job is running"
+# The job finishes. Re-closing a done task is no close, so even now it
+# spawns nothing; the next real close spawns again.
+rm -f "$STUB/hold-p"
+sleep 1.5
 run 0 "$NARU" task update "$CLOSED" --status done
-[ "$(spawns)" = "$((BEFORE + 1))" ] || fail "re-closing a done task spawns no dream"
-touch "$STUB/no-receipt"
+no_new_spawns $((BEFORE + 1)) "re-closing a done task spawns no dream"
 close_task "$D"
-[ "$(spawns)" = "$((BEFORE + 2))" ] || fail "a close after the dream finished spawns the next one"
-# No receipt to ask about: a close inside the grace window spawns nothing.
-rm "$STUB/agents.json" "$STUB/no-receipt"
-close_task "$D"
-[ "$(spawns)" = "$((BEFORE + 2))" ] || fail "no second dream inside the grace window of one with no receipt"
+wait_spawns $((BEFORE + 2))
 # Within budget (1000 words exactly): a close spawns nothing.
+sleep 1.5
 for _ in 1 2 3; do run 0 "$NARU" memory add --project "$R" "$(words 299)"; done
 run 0 "$NARU" memory add --project "$R" "$(words 100)"
 close_task "$R"
-[ "$(spawns)" = "$((BEFORE + 2))" ] || fail "a close in a within-budget project spawns nothing"
-# A spawn that fails: the close still exits 0 closed, stdout the task, the
+no_new_spawns $((BEFORE + 2)) "a close in a within-budget project spawns nothing"
+# A start that fails: the close still exits 0 closed, stdout the task, the
 # failure on stderr; the claim is dropped, so the next close retries.
 over_budget Broken
-run 0 env MESA_CLAUDE_BIN="$TMP/no-such-claude" "$NARU" task create "$OB" "doomed dream"
+run 0 env NARU_SELF_BIN="$TMP/no-such-naru" "$NARU" task create "$OB" "doomed dream"
 T=$(jqs .id)
-run 0 env MESA_CLAUDE_BIN="$TMP/no-such-claude" "$NARU" task update "$T" --status done
-[ "$(jqs .status)" = "done" ] && [ "$(jqs .id)" = "$T" ] || fail "a failed dream spawn leaves the close intact (got $STDOUT)"
-grep -q "no automatic dream pass" <<<"$STDERR" || fail "a failed dream spawn is reported on stderr (got $STDERR)"
-[ "$(spawns)" = "$((BEFORE + 2))" ] || fail "a failed spawn spawned nothing"
+run 0 env NARU_SELF_BIN="$TMP/no-such-naru" "$NARU" task update "$T" --status done
+[ "$(jqs .status)" = "done" ] && [ "$(jqs .id)" = "$T" ] || fail "a failed dream start leaves the close intact (got $STDOUT)"
+grep -q "no automatic dream pass" <<<"$STDERR" || fail "a failed dream start is reported on stderr (got $STDERR)"
+no_new_spawns $((BEFORE + 2)) "a failed start ran nothing"
 close_task "$OB"
-[ "$(spawns)" = "$((BEFORE + 3))" ] || fail "after a failed spawn the next close retries"
-ok "task close: an over-budget notebook's dream spawned once, stdout unchanged; none while its job runs or inside the grace window of one with no receipt; none within budget; a failed spawn exit 0 and retried"
+wait_spawns $((BEFORE + 3))
+ok "task close: an over-budget notebook's dream started once, stdout unchanged; none while its job runs; none within budget; a failed start exit 0 and retried"
 
 # ---- shared notebook (mesa task 1550): a parent folder owns everything under it ----
 SH="$TMP/product"

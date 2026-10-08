@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
   isScheduled,
+  stateLabel,
+  toggleLabel,
   lastFailureLabel,
   lastRunLabel,
   nextRunLabel,
@@ -20,19 +22,30 @@ function wf(over: Partial<Workflow> = {}): Workflow {
     description: null,
     trigger: 'manual',
     trigger_phrase: null,
+    trigger_events: [],
     created_at: '2026-01-01 00:00:00',
     updated_at: '2026-01-01 00:00:00',
     last_run_at: null,
     last_run_status: null,
     last_failure_at: null,
     next_run_at: null,
+    enabled: true,
     ...over,
   }
 }
 
 describe('workflowOverview', () => {
-  it('is on only for a time trigger', () => {
+  it('says on/off from the enabled flag and names the toggle action', () => {
+    expect(stateLabel(wf())).toBe('on')
+    expect(stateLabel(wf({ enabled: false }))).toBe('off')
+    expect(toggleLabel(wf())).toBe('turn off')
+    expect(toggleLabel(wf({ enabled: false }))).toBe('turn on')
+    expect(nextRunLabel(wf({ trigger: 'time', enabled: false }), NOW)).toBe('—')
+  })
+
+  it('is scheduled only for an enabled time trigger', () => {
     expect(isScheduled(wf({ trigger: 'time' }))).toBe(true)
+    expect(isScheduled(wf({ trigger: 'time', enabled: false }))).toBe(false)
     expect(isScheduled(wf({ trigger: 'voice' }))).toBe(false)
     expect(isScheduled(wf({ trigger: null }))).toBe(false)
   })

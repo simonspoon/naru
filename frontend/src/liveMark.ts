@@ -15,11 +15,14 @@ import type { LiveIndicator } from './liveIndicator'
  */
 
 /** The five looks the mark can take. `paused` is not in the mockup. */
-export type MarkMode = 'idle' | 'hear' | 'speak' | 'think' | 'paused'
+export type MarkMode = 'idle' | 'hear' | 'speak' | 'think' | 'paused' | 'offer'
 
 /** Which look each ranked indicator state wears. `null` (nothing to report)
  *  is idle: the mark is always there, it just rests. */
-export function markMode(state: LiveIndicator | null): MarkMode {
+export function markMode(state: LiveIndicator | null, offer = false): MarkMode {
+  // An overheard "can help" offer (naru task 1700): the resting mark turns
+  // gold, but only while nothing else has anything to report.
+  if (offer && state === null) return 'offer'
   if (state === 'speaking') return 'speak'
   if (state === 'hearing') return 'hear'
   if (state === 'working' || state === 'resting') return 'think'
@@ -34,11 +37,12 @@ export const BAR_SLOT = [0, 1, 2, 3, 2, 1, 0]
 
 /** Colours per look, from the mockup's `P`. `glow` is the drop-shadow colour
  *  (alpha applied separately, so it can be eased to nothing for idle). */
-export const PALETTES: Record<'idle' | 'hear' | 'speak' | 'think', { bars: string[]; glow: string }> = {
+export const PALETTES: Record<'idle' | 'hear' | 'speak' | 'think' | 'offer', { bars: string[]; glow: string }> = {
   idle: { bars: ['#3b3550', '#4a4366', '#5b537c', '#6d6592'], glow: '#6d6592' },
   hear: { bars: ['#1f7fff', '#1fb6ff', '#29e6ff', '#b8f6ff'], glow: '#29e6ff' },
   speak: { bars: ['#ff5a3c', '#ff8a2b', '#ffb02b', '#ffe2a8'], glow: '#ffa02b' },
   think: { bars: ['#6a2bff', '#8a4bff', '#b06bff', '#e6d1ff'], glow: '#b06bff' },
+  offer: { bars: ['#d98a14', '#f0a820', '#ffc23d', '#fff0c2'], glow: '#ffc23d' },
 }
 
 /** The mockup's glow alpha (`aa`). */
@@ -130,6 +134,16 @@ export function markFrame(mode: MarkMode, time: number, lv: number, reduced: boo
       bars: Array.from({ length: BAR_COUNT }, (_, i) =>
         0.55 + 0.45 * Math.min(1, level * (0.8 + 0.4 * Math.sin(t * 7 - i * 0.9))),
       ),
+      core: 1,
+      opacity: 1,
+    }
+  }
+  if (mode === 'offer') {
+    // A slow, unmistakable gold pulse; reduced motion halves the clock.
+    return {
+      scale: 1 + 0.08 * Math.sin(t * 4),
+      glow: 0.7 + 0.3 * Math.sin(t * 4),
+      bars: Array.from({ length: BAR_COUNT }, (_, i) => 0.75 + 0.25 * Math.sin(t * 4 - i * 0.5)),
       core: 1,
       opacity: 1,
     }

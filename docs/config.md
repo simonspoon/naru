@@ -1,20 +1,21 @@
 # Config (`~/.mesa/config.json`)
 
-Naru starts a coding agent from exactly eight places (the eighth is a workflow
-`prompt` node). Each one's command line
+Naru starts a coding agent from exactly nine places (the eighth is a workflow
+`prompt` node, the ninth the detached run `runner`). Each one's command line
 is a **template** in `~/.mesa/config.json`, so the program, its flags, the
 persona and the slash command can all change without rebuilding Naru:
 
 | Key | Used by | Built-in default |
 | --- | --- | --- |
 | `todo-watcher` | `serve --watch-todo` dispatch (`docs/todo-watcher.md`) | `claude --bg --agent supervisor --name {name} -- "/execute-mesa-task {id}"` |
-| `inbox-watcher` | `serve --watch-inbox` triage (`docs/inbox-watcher.md`) | `claude --bg --agent inbox-triage --name {name} -- "Triage mesa inbox item {id}."` |
+| `inbox-watcher` | `serve --watch-inbox` triage (`docs/inbox-watcher.md`): up to two synchronous, tool-less `claude -p --json-schema` calls (haiku decides, sonnet writes the task) per item, run in a detached `naru __job inbox-triage` whose verdict Naru validates and applies itself (naru task 1691). Offers `{id}`, `{name}`, `{prompt}`, `{schema}` and `{model}` | `claude -p --model {model} --name {name} --tools "" --strict-mcp-config --output-format json --json-schema {schema} -- {prompt}` |
 | `agent-spawn` | `POST /api/projects/{id}/agents`, the Agents sidebar's **add agent** (`docs/agents.md`) | `claude --bg --model opus --agent supervisor -- {prompt}` |
 | `live-agent` | `mesa live start`, `POST /api/live` — the session that holds a spoken conversation (`docs/live.md`) | `claude --bg --agent naru-live --name {name} -- {prompt}` |
-| `live-summary` | `live stop`'s CLI handler and the API's stop route — the short-lived agent that writes a live conversation's memory once it ends (mesa task 921, `docs/live.md`) | `claude --bg --name {name} -- {prompt}` |
-| `live-dream` | The pass that tidies the live notebook — `mesa live memory dream` explicitly, and on its own at a handoff or when a conversation ends once `live::dream_wanted` says the notebook needs it (mesa task 1155): merges duplicate entries, deletes superseded ones, one guarded command at a time (mesa task 1152, `docs/live.md`) | `claude --bg --name {name} -- {prompt}` |
-| `workflow-prompt` | A workflow's **`prompt` node** on an Anthropic model (mesa task 1607, `docs/workflows.md`): a background agent spawned like every other (`agents::spawn_workflow_prompt`), which the engine then waits on, reads the answer of off its transcript and stops (`core::llm`). `local:<name>` models never use it — those are an Ollama HTTP call. Offers `{model}`, `{thinking}`, `{name}` and `{prompt}` | `claude --bg --model {model} --name {name} --tools "" --strict-mcp-config --settings "{\"alwaysThinkingEnabled\":{thinking}}" -- {prompt}` |
-| `retro` | `serve --watch-retro` every `watchers.retro-interval-hours`, and `mesa retro run` — the session retrospective that reviews finished task sessions for friction and files suggestions into the inbox, proposing only (mesa task 1158, `docs/retro.md`) | `claude --bg --agent naru-retro --name {name} -- "Run mesa session retrospective {id}."` |
+| `live-summary` | `live stop`'s CLI handler and the API's stop route — the one synchronous, tool-less `claude -p --json-schema` call that writes a live conversation's memory once it ends, run in a detached `naru __job summary` whose answer Naru saves itself (mesa task 921, naru task 1690, `docs/live.md`). Offers `{id}`, `{name}`, `{prompt}` and `{schema}` | `claude -p --model sonnet --name {name} --tools "" --strict-mcp-config --output-format json --json-schema {schema} -- {prompt}` |
+| `live-dream` | The pass that tidies a notebook — `mesa live memory dream` explicitly, and on its own at a handoff or when a conversation ends once `live::dream_wanted` says the notebook needs it (mesa task 1155), and a project's notebook (`naru memory dream`, and after a task closes over budget): one synchronous, tool-less `claude -p --json-schema` call in a detached `naru __job dream` / `project-dream` whose edits (merge, delete, keep, replace) Naru applies itself, one guarded store call each (mesa task 1152, naru task 1690, `docs/live.md`). Offers `{id}`, `{name}`, `{prompt}` and `{schema}` | `claude -p --model sonnet --name {name} --tools "" --strict-mcp-config --output-format json --json-schema {schema} -- {prompt}` |
+| `workflow-prompt` | A workflow's **`prompt` node** on an Anthropic model (mesa task 1607, `docs/workflows.md`): one synchronous `claude -p --output-format json` call resolved like every other spawn (`agents::workflow_prompt_script`), whose answer the engine reads from the result JSON on stdout (`core::llm`). `local:<name>` models never use it — those are an Ollama HTTP call. Offers `{model}`, `{thinking}`, `{name}` and `{prompt}` | `claude -p --model {model} --name {name} --tools "" --strict-mcp-config --output-format json --settings "{\"alwaysThinkingEnabled\":{thinking}}" -- {prompt}` |
+| `runner` | The detached `claude -p` that `naru run __runner` holds open on stream-json stdin/stdout (naru task 1686, `docs/runner.md`): launched by the runner process itself with piped stdin/stdout, in its own process group, so the agent outlives the Naru server. Print mode on purpose. Offers `{model}`, `{name}`, `{session_flag}` (`--session-id` on a run's first start, `--resume` after a restart) and `{session_id}` (the run's uuid) | `claude -p --input-format stream-json --output-format stream-json --verbose --model {model} --name {name} {session_flag} {session_id}` |
+| `retro` | `serve --watch-retro` every `watchers.retro-interval-hours`, and `mesa retro run` — the session retrospective that reviews finished task sessions for friction and files suggestions into the inbox, proposing only (mesa task 1158, `docs/retro.md`): per session one synchronous, tool-less `claude -p --json-schema` skim (haiku) and one roll-up (sonnet), run in a detached `naru __job retro` whose answer Naru records and files itself (naru task 1692). Offers `{id}`, `{name}`, `{prompt}`, `{schema}` and `{model}` | `claude -p --model {model} --name {name} --tools "" --strict-mcp-config --output-format json --json-schema {schema} -- {prompt}` |
 
 The defaults are **plain, editable command lines** (mesa task 1141): the
 program and the agent are both spelled out, so a user who wants a different
@@ -27,35 +28,35 @@ from the vocabulary (see *Retired placeholders* below).
 {
   "commands": {
     "todo-watcher":   "claude --bg --agent supervisor --name {name} -- \"/execute-mesa-task {id}\"",
-    "inbox-watcher":  "codex exec --cd . \"triage mesa inbox item {id}\"",
+    "inbox-watcher":  "claude -p --model {model} --name {name} --tools \"\" --strict-mcp-config --output-format json --json-schema {schema} -- {prompt}",
     "agent-spawn":    "claude --bg -- {prompt}",
     "live-agent":     "claude --bg --agent naru-live --name {name} -- {prompt}",
-    "live-summary":   "claude --bg --name {name} -- {prompt}",
-    "live-dream":     "claude --bg --name {name} -- {prompt}",
-    "retro":          "claude --bg --agent naru-retro --name {name} -- \"Run mesa session retrospective {id}.\"",
-    "workflow-prompt": "claude --bg --model {model} --name {name} -- {prompt}"
+    "live-summary":   "claude -p --model sonnet --name {name} --tools \"\" --strict-mcp-config --output-format json --json-schema {schema} -- {prompt}",
+    "live-dream":     "claude -p --model sonnet --name {name} --tools \"\" --strict-mcp-config --output-format json --json-schema {schema} -- {prompt}",
+    "retro":          "claude -p --model {model} --name {name} --tools \"\" --strict-mcp-config --output-format json --json-schema {schema} -- {prompt}",
+    "workflow-prompt": "claude -p --model {model} --name {name} --output-format json -- {prompt}"
   }
 }
 ```
 
 `workflow-prompt` (mesa task 1607) is a spawn like the rest, resolved through
 the same `spawn_for_vars` and run by `bash -c` in the workflow's working folder
-(its project's `local_path`, else `~/.naru/workspace` — `claude --bg` refuses a
-folder whose trust prompt was never answered). **Never print mode (`-p`)**, and no API
-key is involved: the engine spawns the agent, polls `claude agents --json
---all` until its `state` is `done`, reads that session's transcript for the
-answer, and runs `claude stop` on the job on every outcome (`core::llm`,
-`docs/workflows.md`). The default:
+(its project's `local_path`, else `~/.naru/workspace`). It is **print mode on
+purpose** (naru task 1687), and no API key is involved: the engine runs
+one synchronous `claude -p --output-format json` under the node's timeout and
+reads the answer from the `result` field of the JSON on stdout — no polling, no
+`claude stop`, no transcript (`core::llm`, `docs/workflows.md`). A replacement
+template must therefore print that result object. The default:
 
 ```bash
-claude --bg --model {model} --name {name} --tools "" --strict-mcp-config --settings "{\"alwaysThinkingEnabled\":{thinking}}" -- {prompt}
+claude -p --model {model} --name {name} --tools "" --strict-mcp-config --output-format json --settings "{\"alwaysThinkingEnabled\":{thinking}}" -- {prompt}
 ```
 
 The agent has **no tools**: `--tools ""` disables every built-in tool and
 `--strict-mcp-config` (with no `--mcp-config`) every MCP server, because a
 prompt node is a pure text call over *untrusted* upstream text and a model that
 could act on it would be a prompt-injection path to the shell. Checked against
-the real `claude --bg`: with the flags the session still answers, and a request
+the real `claude`: with the flags the session still answers, and a request
 to `touch` a file leaves none (without them the file is created).
 
 `{model}` is `haiku`, `sonnet` or `opus`; `{thinking}` is `true` or `false`,
@@ -90,37 +91,71 @@ The agent was `mesa-live` until mesa task 1302, and `retro`'s was
 the retired placeholders; the file is never rewritten. Only the `--agent`
 value changes, so a `--name "mesa-live"` beside it is left alone.
 
-`live-summary`'s default is identical in shape (mesa task 921): the
-summariser is also a Naru record — a session id and a name — carrying a
-prompt Naru supplies, `core::live::summary_prompt`. It cannot be the
-`live-agent` spawn's own last act, because ending a session **stops** that
-agent (`claude stop <agent_id>`), so a separate short-lived agent is spawned
-once the conversation has already ended, to read it back and write down what
-it was about. Like `live-agent`'s, that prompt is a library item when forked
-— `live-summary-prompt`, which stays a `prompt` because nothing spawns the
-summariser by name (`docs/library.md`) — and a replacement template's job is the same as
-`live-agent`'s: start something that will read `{prompt}` and do what it
-says.
+`live-summary` (mesa task 921, reworked by naru task 1690) is no longer a
+`--bg` agent. The summariser is one **synchronous** `claude -p
+--output-format json --json-schema {schema}` call with **no tools** (`--tools
+""`, `--strict-mcp-config`; checked against the real `claude`, which keeps its
+synthetic `StructuredOutput` tool through `--tools ""`), run inside a
+detached, hidden `naru __job summary` process that `live stop` (CLI and
+`DELETE /api/live`) starts and does not wait for. `{prompt}` is
+`core::live::summary_prompt` — the instructions, the session line, the active
+notebook and the whole turn log, since the model can no longer read them with
+a command (the oldest turns are dropped, with a line saying so, to stay under
+`llm::AGENT_PROMPT_MAX`) — `{schema}` is `core::live::SUMMARY_SCHEMA` (a
+`summary` string and a `notebook_add` list), and Naru applies the answer
+itself: `Store::set_live_summary`, then at most two `add_notebook_entry`
+calls. It cannot be the `live-agent` spawn's own last act, because ending a
+session **stops** that agent (`claude stop <agent_id>`), so the job runs once
+the conversation has already ended. Like `live-agent`'s, that prompt is a
+library item when forked — `live-summary-prompt`, which stays a `prompt`
+(`docs/library.md`).
 
-`live-dream` (mesa task 1152) is the same shape once more, for the third
-short-lived job: `mesa live memory dream` spawns it between conversations,
-and since mesa task 1155 a handoff and both stop sites spawn it on their own
-when the notebook needs it (never from a start), to tidy the live notebook —
-merge entries that say the same thing, delete what a newer entry supersedes,
-one guarded command at a time (`docs/live.md`, "Dreaming"). `{prompt}` is
-`core::live::dream_prompt` (the instructions, the project a contradiction
-task should land in, then the active notebook), `{id}` is the newest
-conversation's id and `{name}` is the literal `live memory dream`. It runs in
-that newest conversation's project folder exactly as the summariser would.
+`live-dream` (mesa task 1152, naru task 1690) is the same shape for the
+notebook tidy: `mesa live memory dream` starts it between conversations, and
+since mesa task 1155 a handoff and both stop sites start it on their own when
+the notebook needs it (never from a start); a **project** notebook's dream
+(`naru memory dream`, and the automatic one after a task closes over budget,
+`docs/project-memory.md`) shares this template, passing the project schema in
+`{schema}` (no `keep`). `{prompt}` is `core::live::dream_prompt` (the
+instructions, the project a contradiction task should land in, then the active
+notebook) or `project_memory::dream_prompt`; `{schema}` is the edit-list
+schema — `edits` (`merge`, `delete`, `keep`, `replace`), `contradictions` and
+a one-line `report` — and Naru applies each edit through its own guarded
+`Store` call, a refused one (an unknown id, the removal guard) logged and
+never blocking the rest. `{id}` is the newest conversation's id (empty for a
+project dream) and `{name}` the literal `live memory dream` / `project memory
+dream`. It runs in that newest conversation's project folder (the project's
+`local_path` for a project dream) exactly as the summariser would. The job's
+one-line JSON report — what was applied, what failed, any contradiction
+tasks, created in the **backlog** — goes to `logs/memory-jobs.log` in Naru's
+home directory.
 
-`retro` (mesa task 1158) is `inbox-watcher`'s shape: the run is a Naru record
-(`retro_runs`, so `{id}` is the run id and `{name}` the session name `naru
-retro <id>`) and the prompt is one sentence, because the `naru-retro` agent
-definition holds the whole procedure — which is why the default names
-`--agent naru-retro`, seeded to `~/.claude/agents/naru-retro.md` before the
-spawn exactly as `inbox-triage` is (`docs/retro.md`). No `{prompt}`: Naru
-supplies none. It runs in `~/.mesa/workspace`, since a retrospective spans
-every project.
+`inbox-watcher` (mesa task 1168, reworked by naru task 1691) is
+`live-summary`'s shape: one synchronous `claude -p --output-format json
+--json-schema {schema}` call with **no tools**, run inside a detached `naru
+__job inbox-triage` that `serve --watch-inbox` starts per pending item. It is
+called up to twice per item — `{model}` is `haiku` for the verdict
+(`core::inbox_triage::TRIAGE_SCHEMA`) and `sonnet` for the task a `sharpen`
+verdict turns into (`SHARPEN_SCHEMA`) — `{prompt}` is the context Naru gathered
+(`inbox_triage::triage_prompt` / `sharpen_prompt`, bounded by
+`llm::AGENT_PROMPT_MAX`), and Naru validates and applies the answer itself.
+Its report goes to `logs/inbox-triage.log`. The `inbox-triage` agent definition
+is no longer spawned or seeded.
+
+`retro` (mesa task 1158, reworked by naru task 1692) is `inbox-watcher`'s
+shape again: synchronous `claude -p --output-format json --json-schema
+{schema}` calls with **no tools**, run inside a detached `naru __job retro`
+that `serve --watch-retro` and `naru retro run` start. `{id}` is the run id
+(`retro_runs`) and `{name}` the call's session name — `naru retro <id>` for
+the roll-up, `naru retro <id> skim <session id>` for a skim. `{model}` is
+`haiku` for a skim (`core::retro::SKIM_SCHEMA`: the friction one finished
+session shows, from the failure digest Naru read out of the cc tables) and
+`sonnet` for the one roll-up (`ROLLUP_SCHEMA`: the deduplicated findings);
+`{prompt}` is what Naru gathered, bounded by `llm::AGENT_PROMPT_MAX`, with
+transcript-derived text fenced as data. Naru applies the roll-up itself
+(`docs/retro.md`). The job's one-line JSON report goes to `logs/retro.log`; it
+runs in `~/.mesa/workspace`, since a retrospective spans every project. The
+`naru-retro` agent definition is no longer spawned or seeded.
 
 Everything lives in `src/core/config.rs`; `MESA_CONFIG_FILE` overrides the path
 for tests (mirroring `MESA_DB`/`MESA_HOOKS_FILE`; like every `MESA_*` variable
@@ -187,9 +222,12 @@ knows about:
 | --- | --- | --- |
 | `{id}` | watchers, `retro`, `live-agent`, `live-summary`, `live-dream` | the task id / inbox item id / retro run id / live session id (for `live-dream`, the newest session's; empty on an install that has never held one) |
 | `{name}` | watchers, `retro`, `live-agent`, `live-summary`, `live-dream`, `workflow-prompt` | the session name Naru derives — `workflow <workflow name> · <node title>` (`workflow-prompt`), `<project>: <task name>` (todo-watcher), `inbox <id>: <first body line>` (**untrusted text**), `naru retro <id>`, the live session's own name, or the literal `live memory dream` |
-| `{prompt}` | `agent-spawn`, `live-agent`, `live-summary`, `live-dream`, `workflow-prompt` | the POST body's `prompt` (`agent-spawn`; absent when omitted) / the live agent's, summariser's or dream pass's instruction block, always present / the workflow node's prompt, a blank line and its input (`workflow-prompt`) |
-| `{model}` | `workflow-prompt` | the node's `model`: `haiku`, `sonnet` or `opus` |
+| `{schema}` | `live-summary`, `live-dream`, `inbox-watcher`, `retro` | the JSON Schema Naru passes to `--json-schema` (`core::live::SUMMARY_SCHEMA`, `LIVE_DREAM_SCHEMA` or, for a project dream, `PROJECT_DREAM_SCHEMA`; `core::inbox_triage::TRIAGE_SCHEMA` or `SHARPEN_SCHEMA`) — Naru's own text, so a template edit cannot break the contract |
+| `{prompt}` | `agent-spawn`, `live-agent`, `live-summary`, `live-dream`, `inbox-watcher`, `retro`, `workflow-prompt` | the POST body's `prompt` (`agent-spawn`; absent when omitted) / the live agent's, summariser's, dream pass's or inbox triage's instruction block, always present / the workflow node's prompt, a blank line and its input (`workflow-prompt`) |
+| `{model}` | `workflow-prompt`, `inbox-watcher`, `retro` | the node's `model`: `haiku`, `sonnet` or `opus` (`workflow-prompt`) / the pass's: `haiku` for the verdict, `sonnet` for the sharpened task (`inbox-watcher`) / `haiku` for a session skim, `sonnet` for the roll-up (`retro`) |
 | `{thinking}` | `workflow-prompt` | `true` or `false`, the node's `thinking` flag |
+| `{session_flag}` | `runner` | `--session-id` (first start) or `--resume` (after a restart) — a placeholder of its own because a value is one quoted word, so it is passed as `'--resume'`, still a flag to `claude` |
+| `{session_id}` | `runner` | the run's v4 uuid |
 
 ### Quoted for where it sits
 
@@ -274,6 +312,17 @@ are what make the remaining lexer mistakes cheap.)
   `POST /api/projects/{id}/agents` runs `claude --bg --model opus --agent supervisor -- ''`, an
   empty prompt. There is no `MESA_*` variable to tell "absent" from "blank"
   any more; a hook that must tell them apart tests `[ -n {name} ]`.
+
+### Retired: `--bg` overrides of `live-summary`, `live-dream`, `inbox-watcher` and `retro`
+
+Since naru task 1690 (`live-summary`, `live-dream`), naru task 1691
+(`inbox-watcher`) and naru task 1692 (`retro`) these actions run synchronous calls and Naru applies the
+answer, so a template that starts a `--bg` agent — which prints a receipt, not
+result JSON — can only fail. A saved override containing the word `--bg` is
+therefore **ignored on read** (the built-in runs instead, with one stderr line
+saying so; the file is never rewritten, the posture of the retired
+placeholders below) and **refused on save** (422). Re-save a replacement in
+Settings.
 
 ### Retired placeholders: `{bin}` and `{agent}`
 
@@ -412,9 +461,16 @@ so `{prompt: see below}` in a script body is the literal prose it looks like.
 ## What a replacement command owes Naru
 
 Only its **exit code**. Nonzero is a failed spawn (the todo-watcher reverts the
-task to `todo`; the inbox-watcher drops the id from its
-in-memory dispatched set, so a later tick retries). The script runs with stdin
+task to `todo`; the inbox-watcher's is the job process failing to start, which
+drops the id from its in-memory dispatched set, so a later tick retries). The script runs with stdin
 closed and nothing set in its environment beyond what `mesa serve` inherited.
+
+`live-summary`, `live-dream`, `inbox-watcher` and `retro` owe more (naru tasks
+1690, 1691, 1692): they must print
+`claude -p --output-format json`'s result object on stdout, with the answer as
+its `structured_output` (a `result` text that is itself a JSON object is
+accepted as a fallback), because Naru reads and applies it — a template that
+only starts something and prints nothing makes the job fail (logged).
 
 Printing `backgrounded · <id>` is optional. Naru parses that line when it is
 there and `POST /api/projects/{id}/agents` returns the id; with no such line

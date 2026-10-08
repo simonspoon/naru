@@ -25,19 +25,22 @@ export function WorkflowsPanel({ projectId }: { projectId: number | null }) {
       className="dock-workflows"
       onClickCapture={(e) => {
         const a = (e.target as HTMLElement).closest('a')
-        const m = a && /#\/projects\/(\d+)\/workflows\/(\d+)$/.exec(a.getAttribute('href') ?? '')
-        if (!m || e.metaKey || e.ctrlKey || e.shiftKey) return
+        const href = a?.getAttribute('href') ?? ''
+        if (e.metaKey || e.ctrlKey || e.shiftKey) return
+        // The builder's own "← workflows" link goes back to the list here.
+        if (/#\/projects\/\d+\/workflows$/.test(href)) {
+          e.preventDefault()
+          setOpen(null)
+          return
+        }
+        const m = /#\/projects\/(\d+)\/workflows\/(\d+)$/.exec(href)
+        if (!m) return
         e.preventDefault()
         setOpen({ projectId: Number(m[1]), id: Number(m[2]) })
       }}
     >
       {showing !== null ? (
-        <>
-          <button type="button" className="dock-workflows-back" onClick={() => setOpen(null)}>
-            ← workflows
-          </button>
-          <WorkflowBuilderView key={showing} projectId={projectId} workflowId={showing} onDeleted={() => setOpen(null)} />
-        </>
+        <WorkflowBuilderView key={showing} projectId={projectId} workflowId={showing} onDeleted={() => setOpen(null)} />
       ) : (
         <WorkflowListView projectId={projectId} />
       )}

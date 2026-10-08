@@ -13,8 +13,9 @@ guard's `task-summary`). A task's completion summary does **not** belong
 here: the task's `result` is the record, and `mesa task show` and the board
 read it. `task-summary` stays as a kind — the cost guard files one, and every
 pre-1168 row is one — but it means "an alert or report addressed to a person",
-never a close-out summary, and the triage agent archives such a summary with
-a reason (copying it into the task's `result` first if that is still null).
+never a close-out summary, and a person (or the manual `inbox-triage` agent)
+archives such a summary with a reason (copying it into the task's `result`
+first if that is still null).
 The audit that fixed this found 263 items, every one a `task-summary`, so
 `serve --watch-inbox` had never once had anything to do.
 
@@ -97,7 +98,7 @@ The audit that fixed this found 263 items, every one a `task-summary`, so
   state the reader moves, so there is no `mesa inbox kind` and no PATCH key.
   It matters in two places.
   - **The inbox-watcher triages change requests only.** A summary has nothing
-    to route — answering a close-out report with a triage agent is what the
+    to route — answering a close-out report with a triage job is what the
     field exists to stop — and because the kind never changes, a skipped item
     is skipped for good rather than waiting for a state change
     (`inbox_watcher_tick` in `src/api.rs`, `docs/inbox-watcher.md`).
@@ -151,7 +152,7 @@ The audit that fixed this found 263 items, every one a `task-summary`, so
   nav's unread badge stops counting it (a badge archiving could not clear would
   be the same bug task 831 fixed by counting unread rather than everything).
   It is the third triage answer beside "assign" and "delete" — a person's
-  through the page, or the triage agent's for a duplicate, an already-shipped
+  through the page, or the triage's for a duplicate, an already-shipped
   request or a close-out summary. An archive may say **why** (mesa task 1168,
   migration index 60): `archive_reason` is one nullable text beside the stamp
   — `mesa inbox archive <id> --reason "<why>"`, `POST .../archive
@@ -456,11 +457,11 @@ The audit that fixed this found 263 items, every one a `task-summary`, so
     a tunnel domain) can browse the whole UI and gets a 403 on **play alone**.
     That is the DNS-rebinding defense working as designed; the answer is to
     browse by IP, which is what the refusal now says in the row.
-- Triage can also run itself: `mesa serve --watch-inbox` periodically spawns a
-  background `claude` agent per pending change request — the `inbox-triage`
-  agent definition, a library built-in seeded to
-  `~/.claude/agents/inbox-triage.md` before the spawn (mesa task 1168). Off by
-  default. It never mutates an item — everything it does is start the agent
-  that will. Because an item has no status column to claim with, its
-  re-dispatch guard lives in memory rather than in the db; the reasoning is in
-  `docs/inbox-watcher.md`.
+- Triage can also run itself: `mesa serve --watch-inbox` periodically starts a
+  detached `naru __job inbox-triage` per pending change request, which makes
+  two tool-less `claude -p --json-schema` calls (haiku decides, sonnet writes
+  the task) and applies the validated verdict through `Store` itself (naru
+  task 1691; the `inbox-triage` agent definition is no longer spawned). Off by
+  default. The watcher itself never mutates an item — the job does. Because an
+  item has no status column to claim with, its re-dispatch guard lives in
+  memory rather than in the db; the reasoning is in `docs/inbox-watcher.md`.

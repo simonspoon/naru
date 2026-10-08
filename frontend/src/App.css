@@ -1803,7 +1803,7 @@ main {
   background: var(--surface-hover);
 }
 
-.workflow-log input {
+.workflow-log input[type='text'] {
   width: min(24rem, 100%);
   margin-bottom: 0.4rem;
 }
@@ -10521,6 +10521,52 @@ body.live-panel-ratio-resizing .live-panel-divider {
 .live-orb.dragging .live-orb-body {
   cursor: grabbing;
 }
+/* Silent "can help" offer (naru task 1700): a strong pulsing gold halo and a
+   solid gold ring on the idle orb; the whole orb becomes a button. Slowed,
+   not removed, under prefers-reduced-motion. */
+.live-orb.can-help,
+.orb-panel.can-help {
+  cursor: pointer;
+}
+.live-orb-inline.can-help {
+  pointer-events: auto;
+}
+.live-orb.can-help .live-orb-body {
+  opacity: 1;
+  cursor: pointer;
+  border: 2px solid #ffc23d;
+  animation: can-help-pulse 1.6s ease-in-out infinite;
+}
+.orb-panel.can-help {
+  border: 2px solid #ffc23d;
+  border-radius: 12px;
+  animation: can-help-pulse 1.6s ease-in-out infinite;
+}
+.orb-panel-caption {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 6px;
+  text-align: center;
+  font-size: 0.7rem;
+  color: #ffc23d;
+  pointer-events: none;
+}
+@keyframes can-help-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 22px 4px rgba(245, 190, 80, 0.5);
+  }
+  50% {
+    box-shadow: 0 0 34px 10px rgba(255, 205, 90, 0.85);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .live-orb.can-help .live-orb-body,
+  .orb-panel.can-help {
+    animation-duration: 3.2s;
+  }
+}
 .live-orb-mark {
   position: absolute;
   inset: 22%;
@@ -11833,4 +11879,20 @@ body.dock-resizing .dock-body {
   height: 1em;
   display: inline-block;
   vertical-align: -0.12em;
+}
+
+/* Sync modal head: apply left, title centred, close right (mesa task 1675). */
+.library-sync-head {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+}
+.library-sync-head > :first-child {
+  justify-self: start;
+}
+.library-sync-head > :last-child {
+  justify-self: end;
+}
+.library-diff-gap {
+  text-align: center;
 }

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import {
   deleteWorkflow,
+  duplicateWorkflow,
   getWorkflow,
   getWorkflowRun,
   listWorkflowLog,
@@ -15,6 +16,7 @@ import { formatTimestamp, timeAgo } from '../time'
 import { useFetch } from '../useFetch'
 import { WorkflowCanvas } from '../WorkflowCanvas'
 import { PlayIcon } from '../components/WorkflowIcon'
+import { toggleLabel } from '../workflowOverview'
 import { formatDuration, runPollMs, runSummary, runningRunId, stepClass } from '../workflowRun'
 import type { WorkflowRun } from '../types/WorkflowRun'
 
@@ -89,13 +91,25 @@ function RecentRuns({
   )
 }
 
-/** What `output` nodes with `target: log` have written; one named log, or
- *  every log when the name is blank. */
-function LogPanel({ version }: { version: number }) {
+/** What `output` nodes with `target: log` have written; this workflow's
+ *  lines unless "every workflow" is ticked, one named log or every log. */
+function LogPanel({
+  version,
+  workflowId,
+}: {
+  version: number
+  workflowId: number
+}) {
   const [log, setLog] = useState('')
+  const [everyWorkflow, setEveryWorkflow] = useState(false)
   const { data: lines, error } = useFetch(
-    () => listWorkflowLog(log.trim() || undefined, 50),
-    `workflow-log-${log.trim()}-${version}`,
+    () =>
+      listWorkflowLog(
+        log.trim() || undefined,
+        50,
+        everyWorkflow ? undefined : workflowId,
+      ),
+    `workflow-log-${workflowId}-${everyWorkflow}-${log.trim()}-${version}`,
   )
   return (
     <div className="workflow-log">
@@ -105,6 +119,14 @@ function LogPanel({ version }: { version: number }) {
         placeholder="log name (blank = every log)"
         onChange={(e) => setLog(e.target.value)}
       />
+      <label className="muted">
+        <input
+          type="checkbox"
+          checked={everyWorkflow}
+          onChange={(e) => setEveryWorkflow(e.target.checked)}
+        />{' '}
+        every workflow
+      </label>
       {error ? (
         <p className="error">{error}</p>
       ) : !lines ? (
@@ -231,7 +253,7 @@ export function WorkflowBuilderView({
             value={wf.name}
             onSave={(name) => updateWorkflow(workflowId, { name }).then(() => refetch())}
           />
-          <span className="muted workflow-title-tag"> · workflow</span>
+          <span className="muted workflow-title-tag"> · workflow{wf.enabled ? '' : ' · disabled'}</span>
         </h2>
         <div className="workflow-head-actions">
           <input
@@ -248,9 +270,34 @@ export function WorkflowBuilderView({
               </>
             )}
           </button>
+          <button
+            type="button"
+            title={wf.enabled ? 'Enabled: fires from its trigger' : 'Disabled: only runs when asked'}
+            onClick={() =>
+              updateWorkflow(workflowId, { enabled: !wf.enabled }).then(
+                () => refetch(),
+                (err: unknown) => setRunError(err instanceof Error ? err.message : String(err)),
+              )
+            }
+          >
+            {toggleLabel(wf)}
+          </button>
+          <button
+            type="button"
+            onClick={() =>
+              duplicateWorkflow(workflowId).then(
+                (v) => {
+                  window.location.hash = `#/projects/${v.workflow.project_id ?? projectId}/workflows/${v.workflow.id}`
+                },
+                (err: unknown) => setRunError(err instanceof Error ? err.message : String(err)),
+              )
+            }
+          >
+            duplicate
+          </button>
           <ConfirmDelete
             label="delete workflow"
-            message={`Deletes this workflow, ${view.nodes.length} node(s) and ${view.edges.length} edge(s).`}
+            message={`Deletes this workflow with its ${view.nodes.length} node(s), ${view.edges.length} edge(s) and its run history. Entries it wrote to logs are kept.`}
             onDelete={() =>
               deleteWorkflow(workflowId).then(() => {
                 if (onDeleted) return onDeleted()
@@ -308,7 +355,7 @@ export function WorkflowBuilderView({
             }}
           />
         )}
-        {tab === 'log' && <LogPanel version={runVersion} />}
+        {tab === 'log' && <LogPanel version={runVersion} workflowId={workflowId} />}
       </div>
     </div>
   )

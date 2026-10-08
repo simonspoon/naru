@@ -764,10 +764,17 @@ export function createWorkflow(body: WorkflowCreate): Promise<Workflow> {
 export interface WorkflowPatch {
   name?: string
   description?: string | null
+  enabled?: boolean
 }
 
 export function updateWorkflow(id: number, patch: WorkflowPatch): Promise<Workflow> {
   return request(`/api/workflows/${id}`, jsonInit('PATCH', patch))
+}
+
+/** Copies a workflow (nodes and edges, not runs). The copy is created
+ * disabled; the answer is its whole graph. */
+export function duplicateWorkflow(id: number, name?: string): Promise<WorkflowView> {
+  return request(`/api/workflows/${id}/duplicate`, jsonInit('POST', name === undefined ? {} : { name }))
 }
 
 /** Returns the destroyed graph: the workflow plus its cascaded nodes and edges. */
@@ -849,13 +856,15 @@ export function getWorkflowRun(id: number): Promise<WorkflowRun> {
   return request(`/api/workflow-runs/${id}`)
 }
 
-/** Log lines, newest first; no `log` = every log. */
+/** Log lines, newest first; no `log` = every log, no `workflow` = every workflow. */
 export function listWorkflowLog(
   log?: string,
   limit?: number,
+  workflow?: number,
 ): Promise<WorkflowLogEntry[]> {
   const q = new URLSearchParams()
   if (log) q.set('log', log)
+  if (workflow !== undefined) q.set('workflow', String(workflow))
   if (limit !== undefined) q.set('limit', String(limit))
   const qs = q.toString()
   return request(`/api/workflow-log${qs ? `?${qs}` : ''}`)
@@ -985,8 +994,14 @@ export function getLive(after?: number): Promise<LiveState> {
  * be live, so a second start while one is running is a 409 `conflict` naming
  * the session already there.
  */
-export function startLive(projectId?: number): Promise<LiveSession> {
-  return request('/api/live', jsonInit('POST', { project_id: projectId ?? null }))
+export function startLive(projectId?: number, acceptOffer?: boolean): Promise<LiveSession> {
+  return request(
+    '/api/live',
+    jsonInit('POST', {
+      project_id: projectId ?? null,
+      ...(acceptOffer ? { accept_offer: true } : {}),
+    }),
+  )
 }
 
 /**

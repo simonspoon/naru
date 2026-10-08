@@ -810,17 +810,16 @@ grep -qx "$REAP_J2" "$REAP_STOPS" ||
   fail "a task set back to todo must stop its old session ($REAP_J2); got: $(cat "$REAP_STOPS")"
 ok "a dispatched task set back to todo has its old session stopped too"
 
-# A session that exits without closing its in_progress task (mesa task 1191):
-# the reaper files one todo-reaper alert against the task, forgets the
-# dispatch, and moves nothing — the task stays in_progress, and there is no
-# stop, since there is no process to stop. The task set back to todo above is
-# re-dispatched as the third job; the stub's pid then goes `null` for every
-# listed job, but the two earlier jobs are already stopped and forgotten, so
-# only that one can be reported. The stop count is captured once the earlier
+# A session that exits without closing its unclaimed in_progress task (mesa
+# task 1191, naru task 1697): the reaper puts the task back to todo (no alert,
+# no stop — there is no process to stop), and the watcher dispatches it again.
+# The task set back to todo above is re-dispatched as the third job; the stub's
+# pid then goes `null` for every listed job, so jobs 3 and 4 die and are
+# re-queued (the cap is 2) and task two's third death (the fifth dispatch) parks the task in backlog with
+# exactly one todo-reaper alert. The stop count is captured once the earlier
 # stops have settled rather than pinned at 2: the re-dispatch and a reaper
 # pass whose snapshot predates it may both stop $REAP_J2 (harmless — the
-# stop is idempotent and forgetting it twice removes nothing twice), so the
-# assertion is that the dead session adds no stop, not how many came before.
+# stop is idempotent), so the assertion is that the dead sessions add no stop.
 wait_reap_bg_lines 3
 REAP_J3=$(cut -d'|' -f4 < "$REAP_LOG" | sed -n '3p')
 [ "$(cut -d'|' -f3 < "$REAP_LOG" | sed -n '3p')" = "/execute-mesa-task $REAP_T2" ] ||
@@ -828,25 +827,26 @@ REAP_J3=$(cut -d'|' -f4 < "$REAP_LOG" | sed -n '3p')
 sleep 1
 REAP_STOPS_BEFORE=$(wc -l < "$REAP_STOPS")
 echo null > "$REAP_PID"
-for _ in $(seq 1 60); do
-  [ "$("$MESA" inbox list | jq 'length')" -ge 1 ] && break
+for _ in $(seq 1 300); do
+  [ "$("$MESA" task show "$REAP_T2" | jq -r .status)" = "backlog" ] && break
   sleep 0.1
 done
 sleep 1
+[ "$("$MESA" task show "$REAP_T2" | jq -r .status)" = "backlog" ] ||
+  fail "after two re-queues the next death must park the task in backlog; got $("$MESA" task show "$REAP_T2" | jq -r .status)"
+[ "$(wc -l < "$REAP_LOG")" -eq 5 ] ||
+  fail "expected 5 dispatches in all (two tasks, then two re-queues and the parked attempt); log:\n$(cat "$REAP_LOG")"
 run 0 "$MESA" inbox list
 [ "$(jqs 'length')" -eq 1 ] ||
-  fail "expected exactly one reaper alert, got $(jqs 'length'): $STDOUT"
+  fail "expected exactly one reaper alert (the park), got $(jqs 'length'): $STDOUT"
 [ "$(jqs '.[0].author')" = "todo-reaper" ] || fail "the alert must be authored todo-reaper: $STDOUT"
 [ "$(jqs '.[0].kind')" = "task-summary" ] || fail "the alert is a task summary: $STDOUT"
 [ "$(jqs '.[0].task_id')" = "$REAP_T2" ] || fail "the alert must name task $REAP_T2: $STDOUT"
-grep -q "$REAP_J3" <<<"$(jqs '.[0].body')" || fail "the alert must name session $REAP_J3: $STDOUT"
-[ "$("$MESA" task show "$REAP_T2" | jq -r .status)" = "in_progress" ] ||
-  fail "the reaper must never move the task; got $("$MESA" task show "$REAP_T2" | jq -r .status)"
 [ "$(wc -l < "$REAP_STOPS")" -eq "$REAP_STOPS_BEFORE" ] ||
   fail "a dead session has nothing to stop: $(cat "$REAP_STOPS")"
 grep -qx "$REAP_J3" "$REAP_STOPS" &&
   fail "a dead session must never be stopped ($REAP_J3); got: $(cat "$REAP_STOPS")"
-ok "a session that exits with its task still in_progress is reported once, and the task left alone"
+ok "a session that exits with its task in_progress is re-queued twice, then the task is parked in backlog with one alert"
 
 kill "$SERVER_PID" 2>/dev/null; wait "$SERVER_PID" 2>/dev/null || true; SERVER_PID=""
 

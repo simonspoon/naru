@@ -34,7 +34,7 @@ use crate::core::{
     Status, Store, Task, TaskPatch, TaskReceipt, Workflow, WorkflowEdge, WorkflowNode,
     WorkflowNodeKind, WorkflowNodeNew, WorkflowNodePatch, WorkflowPatch, WorkflowRun,
     WorkflowTrigger, WorkflowView, agents, audio, board, cc, config, files, git, library, live,
-    look, migrate, project_memory, receipt, retro, system,
+    look, memory_job, migrate, project_memory, receipt, system,
 };
 
 const TOP_AFTER_HELP: &str = "\
@@ -196,14 +196,14 @@ enum Command {
         /// across the web UI's Restart Server action.
         #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true", value_name = "BOOL")]
         watch_todo: Option<bool>,
-        /// Periodically auto-start a background `claude` agent to triage each
-        /// pending item in the global inbox (default: the `inbox-triage` agent
-        /// definition, configurable in ~/.mesa/config.json; cwd
-        /// `~/.mesa/workspace` — an inbox item belongs to no project). Off by
-        /// default:
-        /// this spawns real agents (API cost, code execution) with no user
-        /// request behind it. Independent of --watch-todo. Each item is
-        /// dispatched at most once per server run. Preserved across the web
+        /// Periodically triage each pending change request in the global inbox
+        /// with two tool-less `claude -p --json-schema` calls (haiku decides,
+        /// sonnet writes the task) in a detached `naru __job inbox-triage`
+        /// process; Naru applies the answer itself (template configurable in
+        /// ~/.mesa/config.json; cwd `~/.mesa/workspace` — an inbox item
+        /// belongs to no project). Off by default: this spends model calls
+        /// with no user request behind it. Independent of --watch-todo. Each
+        /// item is dispatched at most once per server run. Preserved across the web
         /// UI's Restart Server action.
         #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true", value_name = "BOOL")]
         watch_inbox: Option<bool>,
@@ -224,13 +224,14 @@ enum Command {
         #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true", value_name = "BOOL")]
         watch_cost: Option<bool>,
         /// Every `watchers.retro-interval-hours` (default 72), auto-start a
-        /// background `claude` agent that reviews the task sessions finished
-        /// since the last retrospective for friction and files each NEW
-        /// finding into the inbox as a change request (default: the
-        /// `naru-retro` agent definition, configurable in ~/.mesa/config.json;
-        /// cwd `~/.mesa/workspace`). It proposes only — it never edits an
-        /// agent, a skill or project code. Off by default: this spawns real
-        /// agents (API cost) with no user request behind it. Independent of
+        /// detached `naru __job retro` that reviews the task sessions finished
+        /// since the last retrospective for friction (a haiku `claude -p`
+        /// skim per session, one sonnet roll-up; the `retro` template in
+        /// ~/.mesa/config.json; cwd `~/.mesa/workspace`) and files each NEW
+        /// finding into the inbox as a change request itself. It proposes
+        /// only — it never edits an agent, a skill or project code. Off by
+        /// default: this makes real model calls (API cost) with no user
+        /// request behind it. Independent of
         /// the other three watchers. Preserved across the web UI's Restart
         /// Server action.
         #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true", value_name = "BOOL")]
@@ -273,6 +274,20 @@ EXAMPLES
     /// A self-disarming alarm for a supervisor's handoffs (mesa task 1512)
     #[command(subcommand)]
     Alarm(AlarmCmd),
+    /// Detached `claude -p` agent runs that outlive the server (naru task 1686)
+    ///
+    /// A run is a job directory under `~/.naru/runs/<id>/` held by a small
+    /// detached runner process; the files are the truth, so every command
+    /// works with no server. See docs/runner.md.
+    #[command(subcommand)]
+    Run(RunCmd),
+    /// A detached memory or triage job (summary / dream / inbox-triage);
+    /// started by `live stop`, a handoff, the dream verbs and the inbox
+    /// watcher, not by hand. Its one-line JSON report goes to
+    /// `logs/memory-jobs.log` (`logs/inbox-triage.log` for a triage) in
+    /// Naru's home directory.
+    #[command(name = "__job", subcommand, hide = true)]
+    Job(JobCmd),
     /// Send a message to the person's phone through the external `vox` CLI
     ///
     /// `--open <route>` adds a Telegram button that opens Naru's `/open/<route>`
@@ -343,6 +358,116 @@ EXAMPLES
         /// Print the built-in rules (JSON) and exit
         #[arg(long)]
         print_default_rules: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum RunCmd {
+    /// Start a run: create its job directory and spawn the detached runner
+    ///
+    /// Prints the job (`job_id`, `session_id`, `status`, …). The prompt is the
+    /// run's first message. Takes no `--quiet`.
+    #[command(after_help = "\
+EXAMPLES
+  naru run start --model haiku \"reply with the word pong\"
+  naru run start --model sonnet --cwd ~/code/app --name triage \"fix the failing test\"")]
+    Start {
+        /// Model alias or full name, passed to the `runner` template's `{model}`
+        #[arg(long)]
+        model: String,
+        /// Working folder for the agent; default is the current directory
+        #[arg(long)]
+        cwd: Option<String>,
+        /// A label for the run
+        #[arg(long)]
+        name: Option<String>,
+        /// Wind the run down after this many idle seconds (default 3600)
+        #[arg(long)]
+        idle_timeout: Option<u64>,
+        /// The first message
+        prompt: String,
+    },
+    /// Queue a message for a running or idle run
+    Send {
+        /// The run id
+        job: String,
+        /// The message
+        message: String,
+    },
+    /// Print a run; `--events` (or `--tail`) adds its event log
+    Show {
+        /// The run id
+        job: String,
+        /// Include the events (the last 100 unless `--tail` says otherwise)
+        #[arg(long)]
+        events: bool,
+        /// Include only the last N events
+        #[arg(long)]
+        tail: Option<usize>,
+    },
+    /// List every run, newest first
+    List,
+    /// Ask a run's runner to stop; a dead runner's run is closed here
+    Stop {
+        /// The run id
+        job: String,
+    },
+    /// Resume every unfinished run whose runner died (what `serve` does at start)
+    Reconcile,
+    /// The detached runner itself; started by `run start`, not by hand
+    #[command(name = "__runner", hide = true)]
+    Runner {
+        /// The job directory
+        dir: PathBuf,
+    },
+}
+
+/// The jobs of `core::memory_job` (naru tasks 1690, 1691).
+#[derive(Subcommand)]
+enum JobCmd {
+    /// Summarise an ended live session
+    Summary {
+        #[arg(long)]
+        session: i64,
+        /// The claude session name
+        #[arg(long)]
+        name: String,
+        /// The folder claude runs in
+        #[arg(long)]
+        dir: String,
+    },
+    /// Dream over the live notebook
+    Dream {
+        /// The newest conversation; its project is where a contradiction task lands
+        #[arg(long)]
+        session: Option<i64>,
+        #[arg(long)]
+        dir: String,
+    },
+    /// Dream over a project's notebook
+    ProjectDream {
+        #[arg(long)]
+        project: i64,
+        #[arg(long)]
+        dir: String,
+    },
+    /// Triage one inbox change request (the inbox watcher's job)
+    InboxTriage {
+        #[arg(long)]
+        item: i64,
+        /// The claude session name
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        dir: String,
+    },
+    /// Run one session retrospective (the retro watcher's job)
+    Retro {
+        /// The `retro_runs` row that claimed this run
+        #[arg(long)]
+        run: i64,
+        #[arg(long)]
+        dir: String,
     },
 }
 
@@ -1447,7 +1572,7 @@ EXAMPLES
     },
     /// List workflows as a bare JSON array, by name
     ///
-    /// Each row carries its trigger mode (`trigger`: manual|time|voice, or
+    /// Each row carries its trigger mode (`trigger`: manual|time|voice|ambient, or
     /// null) and a voice trigger's `trigger_phrase`, so a caller can match a
     /// request to a workflow without loading every graph.
     List {
@@ -1485,7 +1610,25 @@ EXAMPLES
         /// Bind to this project (id or name); pass "" to un-bind
         #[arg(long, group = "fields")]
         project: Option<String>,
+        /// `true` or `false`: whether the workflow fires automatically (a
+        /// manual `run` always works)
+        #[arg(long, group = "fields")]
+        enabled: Option<bool>,
         /// Print the workflow without its `description` instead of in full
+        #[arg(long)]
+        quiet: bool,
+    },
+    /// Copy a workflow: its nodes and edges, not its runs. The copy is DISABLED
+    ///
+    /// The default name is "<name> (copy)", then "(copy 2)"…; an explicit
+    /// `--name` that is taken is `conflict`. Prints what `workflow show` does.
+    Duplicate {
+        /// Workflow id or name
+        workflow: String,
+        /// Name of the copy
+        #[arg(long)]
+        name: Option<String>,
+        /// Keep the {workflow, nodes, edges} keys but drop free text
         #[arg(long)]
         quiet: bool,
     },
@@ -1538,6 +1681,32 @@ EXAMPLES
         #[arg(long)]
         quiet: bool,
     },
+    /// Fire an ambient-engine event: run every matching workflow, print the runs
+    ///
+    /// EVENT is idea|can-help|wake. Every workflow whose trigger is
+    /// `ambient` and lists the event runs synchronously, in workflow id
+    /// order, with the run input `{"event","speaker","text"}` as compact
+    /// JSON, and the finished runs print as a bare JSON array (`[]` when
+    /// nothing matches, exit 0). A failed run is data, as for `run`.
+    /// `validation` (exit 1) for an unknown event, an empty or over-64-char
+    /// speaker, or an event over 256 KiB.
+    #[command(after_help = "\
+EXAMPLES
+  naru workflow emit idea --speaker simon --text \"buy milk\"
+  naru workflow emit wake --speaker room --text-file -")]
+    Emit {
+        /// idea | can-help | wake
+        event: String,
+        /// Free-form label for who spoke (1 to 64 characters)
+        #[arg(long)]
+        speaker: String,
+        /// What was said (may be empty)
+        #[arg(long, allow_hyphen_values = true)]
+        text: Option<String>,
+        /// Read the text from a file (`-` = stdin); conflicts with --text
+        #[arg(long, value_name = "PATH", conflicts_with = "text")]
+        text_file: Option<String>,
+    },
     /// List a workflow's runs, newest first, as a bare JSON array
     ///
     /// The newest 50 are kept. Rows omit `steps` and `input` (a run's outputs
@@ -1561,9 +1730,24 @@ EXAMPLES
     Log {
         /// Log name (case-insensitive); omit for every log
         log: Option<String>,
+        /// Only the lines this workflow wrote (id or name)
+        #[arg(long)]
+        workflow: Option<String>,
         /// How many lines (1 to 1000)
         #[arg(long, default_value_t = 50)]
         limit: i64,
+    },
+    /// Create the default ambient workflows in a project; skips existing ones
+    ///
+    /// "Ambient: label ideas" (an `idea` event, labelled by haiku, logged to
+    /// `ambient`) and "Ambient: end-of-day review" (daily; digests the last
+    /// 24 hours of that log into ONE backlog task). A workflow whose name
+    /// already exists (case-insensitive) is skipped, so a rerun is a no-op.
+    /// Prints {created: [{workflow, nodes, edges}], skipped: [name]}.
+    Defaults {
+        /// Project to scope both workflows (and the filed task) to, by id or name
+        #[arg(long)]
+        project: String,
     },
     /// Create, update and delete the nodes of a workflow
     #[command(subcommand)]
@@ -1586,7 +1770,7 @@ enum WorkflowNodeCmd {
     /// right of those already there.
     #[command(after_help = "\
 CONFIG BY KIND
-  trigger  {\"mode\":\"manual|time|voice\",\"every_minutes\":N (time),\"phrase\":\"...\"}
+  trigger  {\"mode\":\"manual|time|voice|ambient\",\"every_minutes\":N (time),\"events\":[idea|can-help|wake] (ambient),\"phrase\":\"...\"}
   prompt   {\"model\":\"haiku|sonnet|opus|local:<name>\",\"thinking\":false,\"prompt\":\"...\",\"timeout_secs\":N}
   cli      {\"command\":\"...\",\"timeout_secs\":N}
   script   {\"script\":\"<id or name>\",\"values\":{\"name\":\"... {input} ...\"}}
@@ -2297,13 +2481,14 @@ EXAMPLES
 
 #[derive(Subcommand)]
 enum RetroCmd {
-    /// Start a retrospective now: records a `manual` run and spawns the agent
+    /// Start a retrospective now: records a `manual` run and starts its job
     ///
     /// Prints the run row. Inside the interval since the last run this is
     /// `conflict` naming when the next is due — `--force` runs it anyway. The
-    /// agent is spawned through `agents::spawn_bg` with the `retro` template
-    /// from ~/.mesa/config.json (default: `claude --bg --agent naru-retro …`),
-    /// in ~/.mesa/workspace. If the spawn fails the run row is deleted again
+    /// job is a detached `naru __job retro` making `claude -p --json-schema`
+    /// calls through the `retro` template from ~/.mesa/config.json, in
+    /// ~/.mesa/workspace, and Naru files the findings itself. If the job
+    /// cannot start the run row is deleted again
     /// and the command exits 1 with code "unavailable", so the next attempt
     /// is not a `conflict` against a run that never happened.
     ///
@@ -3152,16 +3337,19 @@ EXAMPLES
         #[arg(long)]
         quiet: bool,
     },
-    /// Spawn the dream pass: an agent that tidies the notebook between conversations
+    /// Start the dream pass: a detached job that tidies the notebook between conversations
     ///
-    /// Runs the `live-dream` config template (`docs/config.md`) with
-    /// `core::live::DREAM_PROMPT` and the active notebook, in the newest
-    /// conversation's folder. The agent merges duplicates and deletes what a
-    /// newer entry supersedes, one guarded command at a time; it never adds
-    /// a fact. `conflict` while a conversation is live — a dream pass runs
-    /// only between them. With fewer than two active entries nothing is
-    /// spawned and `{"spawned": false, "reason": ...}` is printed. CLI-only,
-    /// and takes no --quiet.
+    /// Starts a hidden `naru __job dream`, which makes one `claude -p
+    /// --json-schema` call through the `live-dream` config template
+    /// (`docs/config.md`) with `core::live::DREAM_PROMPT` and the active
+    /// notebook, in the newest conversation's folder, and applies the edits
+    /// the model answers with itself — merges, deletes, keeps, shortenings,
+    /// each through a guarded store call; it never adds a fact. Prints
+    /// `{"spawned": true, "receipt": "pid:<n>"}` at once; the job's report
+    /// goes to `logs/memory-jobs.log`. `conflict` while a conversation is
+    /// live — a dream pass runs only between them. With fewer than two active
+    /// entries nothing is started and `{"spawned": false, "reason": ...}` is
+    /// printed. CLI-only, and takes no --quiet.
     Dream,
 }
 
@@ -3303,15 +3491,17 @@ EXAMPLES
         #[arg(long, value_name = "N", default_value_t = 20)]
         limit: i64,
     },
-    /// Spawn a dream pass that tidies a project's notebook
+    /// Start a dream pass that tidies a project's notebook
     ///
-    /// Runs the `live-dream` config template with a project version of the
-    /// dream prompt, in the project's folder (the workspace when it has
-    /// none). The agent merges duplicates and deletes what a newer entry
-    /// supersedes, one guarded command at a time, and brings the notebook
-    /// back within its 1000-word budget. With fewer than two active
-    /// entries nothing is spawned and `{"spawned": false, "reason": ...}` is
-    /// printed. Takes no --quiet.
+    /// Starts a detached `naru __job project-dream`: one `claude -p
+    /// --json-schema` call through the `live-dream` config template with a
+    /// project version of the dream prompt, in the project's folder (the
+    /// workspace when it has none), whose edits Naru applies itself — merges
+    /// of duplicates, deletes of what a newer entry supersedes, shortenings
+    /// back within the 1000-word budget; a contradiction becomes a backlog
+    /// task. Prints `{"spawned": true, "receipt": "pid:<n>"}` at once. With
+    /// fewer than two active entries nothing is started and `{"spawned":
+    /// false, "reason": ...}` is printed. Takes no --quiet.
     Dream {
         #[arg(long, value_name = "PROJECT")]
         project: Option<String>,
@@ -4496,6 +4686,39 @@ fn execute(command: Command) -> Result<()> {
             Ok(())
         }
         Command::Alarm(cmd) => run_alarm(cmd),
+        Command::Run(cmd) => run_runs(cmd),
+        Command::Job(cmd) => {
+            let (job, dir) = match cmd {
+                JobCmd::Summary { session, name, dir } => (
+                    memory_job::Job::Summary {
+                        session_id: session,
+                        name,
+                    },
+                    dir,
+                ),
+                JobCmd::Dream { session, dir } => (
+                    memory_job::Job::Dream {
+                        session_id: session,
+                    },
+                    dir,
+                ),
+                JobCmd::ProjectDream { project, dir } => (
+                    memory_job::Job::ProjectDream {
+                        project_id: project,
+                    },
+                    dir,
+                ),
+                JobCmd::Retro { run, dir } => (memory_job::Job::Retro { run_id: run }, dir),
+                JobCmd::InboxTriage { item, name, dir } => (
+                    memory_job::Job::InboxTriage {
+                        item_id: item,
+                        name,
+                    },
+                    dir,
+                ),
+            };
+            memory_job::run(&job, &dir)
+        }
         Command::Notify {
             message,
             title,
@@ -4537,6 +4760,35 @@ fn execute(command: Command) -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn run_runs(cmd: RunCmd) -> Result<()> {
+    use crate::core::runner;
+    match cmd {
+        RunCmd::Start {
+            model,
+            cwd,
+            name,
+            idle_timeout,
+            prompt,
+        } => print_json(&runner::start(&runner::StartOpts {
+            model,
+            prompt,
+            cwd,
+            name,
+            idle_timeout_secs: idle_timeout,
+        })?),
+        RunCmd::Send { job, message } => print_json(&runner::send(&job, &message)?),
+        RunCmd::Show { job, events, tail } => {
+            let n = (events || tail.is_some()).then(|| tail.unwrap_or(100));
+            print_json(&runner::show(&job, n)?)
+        }
+        RunCmd::List => print_json(&runner::list()?),
+        RunCmd::Stop { job } => print_json(&runner::stop(&job)?),
+        RunCmd::Reconcile => print_json(&json!({"resumed": runner::reconcile()?})),
+        RunCmd::Runner { dir } => runner::run_runner(&dir)?,
+    }
+    Ok(())
 }
 
 fn run_alarm(cmd: AlarmCmd) -> Result<()> {
@@ -5366,14 +5618,14 @@ fn run_inbox(cmd: InboxCmd) -> Result<()> {
 /// audible pause, slow enough that a waiting agent is not a spinning CPU.
 const LISTEN_POLL: std::time::Duration = std::time::Duration::from_millis(500);
 
-/// How often a `live listen` on a **resting** session asks `claude agents`
-/// whether the dream agent has finished (mesa task 1155). A shell-out, not a
-/// store read, so every five seconds rather than every tick.
-const DREAM_POLL: std::time::Duration = std::time::Duration::from_secs(5);
+/// How often a `live listen` on a **resting** session asks whether the dream
+/// job has finished (mesa task 1155). Since naru task 1690 the probe is a
+/// `kill -0` and a `ps` on the job's `pid:<n>` marker, so every second.
+const DREAM_POLL: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// The longest a session rests, measured from `resting_since` on the store's
-/// own clock: a dream agent that wedges, or a `claude agents` that keeps
-/// listing a finished job, must not hold the conversation for ever.
+/// own clock: a dream job that wedges must not hold the conversation for
+/// ever.
 const LIVE_REST_MAX: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
 /// Seconds since the epoch, for naming the default screenshot file. Enough to
@@ -5476,17 +5728,17 @@ fn stop_live_agent(session: &LiveSession) {
     }
 }
 
-/// Spawns the short-lived agent that writes `session`'s memory, once it has
-/// just ended (mesa task 921). **Best-effort**, exactly like
-/// [`stop_live_agent`] beside it: the store write that ended the conversation
-/// is the truth, a failure here is a warning on stderr, and it never changes
-/// the exit code or the printed record.
+/// Starts the detached job that writes `session`'s memory, once it has just
+/// ended (mesa task 921, naru task 1690: a `naru __job summary` running one
+/// synchronous `claude -p --json-schema` call and saving the answer itself).
+/// **Best-effort**, exactly like [`stop_live_agent`] beside it: the store write
+/// that ended the conversation is the truth, a failure here is a warning on
+/// stderr, and it never changes the exit code or the printed record.
 ///
-/// A session with no turns spawns nothing — there is nothing to remember, and
-/// an empty conversation is not worth a background agent. Reuses
-/// [`live_agent_dir`] for the working directory, and names the session
-/// `"{name} summary"` so it reads, next to the conversation it is about, as
-/// what it is rather than as another `mesa live <id>`.
+/// A session with no turns starts nothing — there is nothing to remember.
+/// Reuses [`live_agent_dir`] for the working directory, and names the claude
+/// session `"{name} summary"` so it reads, next to the conversation it is
+/// about, as what it is rather than as another `naru live <id>`.
 fn spawn_live_summary(store: &mut Store, session: &LiveSession) {
     match store.list_live_turns(session.id, None, 1) {
         Ok(turns) if turns.is_empty() => return,
@@ -5503,34 +5755,19 @@ fn spawn_live_summary(store: &mut Store, session: &LiveSession) {
         Ok(v) => v,
         Err(e) => {
             eprintln!(
-                "live session {}: could not spawn its summariser: {e}",
+                "live session {}: could not start its summariser: {e}",
                 session.id
             );
             return;
         }
     };
-    let prompt = live::summary_prompt(store, session.id);
-    // The library's prompts, for any `{prompt:<name>}` the template names.
-    let prompts = match library::prompts(store) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!(
-                "live session {}: could not spawn its summariser: {e}",
-                session.id
-            );
-            return;
-        }
+    let job = memory_job::Job::Summary {
+        session_id: session.id,
+        name: format!("{name} summary"),
     };
-    if let Err(e) = agents::spawn_bg(
-        config::LIVE_SUMMARY,
-        &dir,
-        Some(session.id),
-        Some(&format!("{name} summary")),
-        Some(&prompt),
-        &prompts,
-    ) {
+    if let Err(e) = memory_job::spawn(&job, &dir, store.db_path().as_deref()) {
         eprintln!(
-            "live session {}: could not spawn its summariser: {e}",
+            "live session {}: could not start its summariser: {e}",
             session.id
         );
     }
@@ -5842,7 +6079,7 @@ fn run_live(cmd: LiveCmd) -> Result<()> {
             // receipt rests nothing either, since there would be no job to
             // wait for.
             let dream = dream_wanted.and_then(|reason| {
-                match spawn_dream_pass(&store, &dir, Some(session.id), session.project_id) {
+                match spawn_dream_pass(&store, &dir, Some(session.id)) {
                     Ok(receipt) => receipt,
                     Err(e) => {
                         eprintln!(
@@ -6032,31 +6269,30 @@ fn run_retro(cmd: RetroCmd) -> Result<()> {
                 )));
             }
             let run = store.record_retro_run("manual")?;
-            // The `naru-retro` definition is seeded first: the default
-            // template spawns `--agent naru-retro`, which errors on an agent
-            // Claude Code has never seen. cwd is ~/.mesa/workspace — a
-            // retrospective spans every project, so there is no local_path.
+            // A detached `naru __job retro` (naru task 1692) makes the
+            // `claude -p` calls and files the findings. cwd is
+            // ~/.mesa/workspace — a retrospective spans every project, so
+            // there is no local_path.
             let dir = config::workspace_dir().to_string_lossy().into_owned();
-            let name = retro::session_name(run.id);
-            let spawned = retro::ensure_agent_definition(&store).and_then(|_| {
-                let prompts = library::prompts(&store).map_err(|e| e.to_string())?;
-                agents::spawn_bg(
-                    config::RETRO,
-                    &dir,
-                    Some(run.id),
-                    Some(&name),
-                    None,
-                    &prompts,
-                )
-            });
+            let spawned = memory_job::spawn(
+                &memory_job::Job::Retro { run_id: run.id },
+                &dir,
+                store.db_path().as_deref(),
+            );
             if let Err(e) = spawned {
                 let id = run.id;
                 store.delete_retro_run(id)?;
                 return Err(Error::Unavailable(format!(
-                    "retro run {id} could not spawn its agent, so it was deleted again: {e}"
+                    "retro run {id} could not start its job, so it was deleted again: {e}"
                 )));
             }
-            let run = store.mark_retro_run_spawned(run.id)?;
+            // The job may already have finished and given its claim back
+            // (a gather failure): `not_found` here is that, not an error.
+            let run = match store.mark_retro_run_spawned(run.id) {
+                Ok(run) => run,
+                Err(Error::NotFound(_)) => run,
+                Err(e) => return Err(e),
+            };
             print_record(&run, quiet, &[]);
         }
         RetroCmd::Status { quiet } => {
@@ -6292,8 +6528,8 @@ fn memory_project(store: &Store, arg: Option<&str>) -> Result<i64> {
         })
 }
 
-/// `naru memory dream`: the live dream's spawn, for one project's notebook —
-/// `project_memory::DreamSpawn`, the one spawn the automatic dream after a
+/// `naru memory dream`: the live dream's detached job, for one project's
+/// notebook — `project_memory::DreamSpawn`, the one start the automatic dream after a
 /// task close makes too (mesa task 1339), recorded as that project's last
 /// dream so an automatic one waits for it. There is no live-conversation
 /// `conflict`: a project notebook is not a live prompt's input. A failed
@@ -6311,7 +6547,7 @@ fn spawn_memory_dream(store: &mut Store, project_id: i64) -> Result<()> {
         }));
         return Ok(());
     }
-    let receipt = project_memory::DreamSpawn::prepare(store, project_id, &entries)?.run()?;
+    let receipt = project_memory::DreamSpawn::prepare(store, project_id)?.run()?;
     // Best-effort: the dream is already running, and this only spares it a
     // twin from the next task close.
     let _ = store.record_project_dream(project_id, receipt.as_deref());
@@ -6414,18 +6650,21 @@ fn import_memory(
     Ok(())
 }
 
-/// `mesa live memory dream` (mesa task 1152): spawns the agent that tidies
-/// the notebook, through the `live-dream` template. The explicit verb — and
+/// `mesa live memory dream` (mesa task 1152): starts the detached job that
+/// tidies the notebook (naru task 1690: a `naru __job dream` making one
+/// `claude -p --json-schema` call through the `live-dream` template and
+/// applying the edits itself); the verb prints `{spawned, receipt}` with
+/// receipt `pid:<n>` and does not wait. The explicit verb — and
 /// only between conversations: with a session live it is `conflict`, since
 /// the notebook is that conversation's prompt input and the two would edit
 /// it under each other (a resting session is live too). Fewer than two
 /// active entries is nothing to merge, so nothing is spawned and the reason
 /// is printed rather than an error. The pass belongs to no conversation, so
 /// it borrows the newest one's folder (through [`live_agent_dir`], exactly as
-/// the summariser does) and passes its id as `{id}`; on an install that has
-/// never held one it runs in the workspace with `{id}` empty. Unlike the
-/// summariser this is not best-effort: the person asked for it, so a failed
-/// spawn is `unavailable`, exit 1. The two automatic triggers (mesa task
+/// the summariser does) and its project (where a contradiction becomes a
+/// task); on an install that has never held one it runs in the workspace.
+/// Unlike the summariser this is not best-effort: the person asked for it, so
+/// a failed start is `unavailable`, exit 1. The two automatic triggers (mesa task
 /// 1155) — a handoff and `live stop` — share [`spawn_dream_pass`] and make
 /// their own decision through `live::dream_wanted`.
 fn spawn_live_dream(store: &mut Store) -> Result<()> {
@@ -6447,44 +6686,31 @@ fn spawn_live_dream(store: &mut Store) -> Result<()> {
         return Ok(());
     }
     let latest = store.latest_live_session()?;
-    let (dir, session_id, project_id) = match &latest {
-        Some(s) => (
-            live_agent_dir(store, s.project_id, s.id)?.0,
-            Some(s.id),
-            s.project_id,
-        ),
-        None => (
-            config::workspace_dir().to_string_lossy().into_owned(),
-            None,
-            None,
-        ),
+    let (dir, session_id) = match &latest {
+        Some(s) => (live_agent_dir(store, s.project_id, s.id)?.0, Some(s.id)),
+        None => (config::workspace_dir().to_string_lossy().into_owned(), None),
     };
-    let receipt = spawn_dream_pass(store, &dir, session_id, project_id)
+    let receipt = spawn_dream_pass(store, &dir, session_id)
         .map_err(|e| Error::Unavailable(format!("could not spawn the dream pass: {e}")))?;
     print_json(&serde_json::json!({ "spawned": true, "receipt": receipt }));
     Ok(())
 }
 
-/// The spawn itself: the `live-dream` template in `dir`, `{id}` the given
-/// session's, the prompt `live::dream_prompt` for `project_id`. Answers the
-/// receipt (`None` when the template printed none); the caller decides what
-/// a failure means.
+/// The start itself: a detached `naru __job dream` in `dir` for the given
+/// session (whose project is where a contradiction task lands). Answers the
+/// `pid:<n>` marker the handoff rest and the caller print; the caller decides
+/// what a failure means.
 fn spawn_dream_pass(
     store: &Store,
     dir: &str,
     session_id: Option<i64>,
-    project_id: Option<i64>,
 ) -> std::result::Result<Option<String>, String> {
-    let prompt = live::dream_prompt(store, project_id);
-    let prompts = library::prompts(store).map_err(|e| e.to_string())?;
-    agents::spawn_bg(
-        config::LIVE_DREAM,
+    memory_job::spawn(
+        &memory_job::Job::Dream { session_id },
         dir,
-        session_id,
-        Some("live memory dream"),
-        Some(&prompt),
-        &prompts,
+        store.db_path().as_deref(),
     )
+    .map(Some)
 }
 
 /// The automatic dream at the end of a conversation (mesa task 1155): once
@@ -6528,7 +6754,7 @@ fn spawn_live_dream_after(store: &mut Store, session: &LiveSession) {
             return;
         }
     };
-    if let Err(e) = spawn_dream_pass(store, &dir, Some(session.id), session.project_id) {
+    if let Err(e) = spawn_dream_pass(store, &dir, Some(session.id)) {
         eprintln!(
             "live session {}: could not spawn the dream pass ({reason}): {e}",
             session.id
@@ -6537,8 +6763,9 @@ fn spawn_live_dream_after(store: &mut Store, session: &LiveSession) {
 }
 
 /// Waits out a session's rest (mesa task 1155) before a `listen` hands out
-/// turns: while `resting_since` is set, the dream agent is probed every
-/// [`DREAM_POLL`] until `claude agents` no longer lists it running, or the
+/// turns: while `resting_since` is set, the dream job (its `pid:<n>` marker,
+/// naru task 1690) is probed every [`DREAM_POLL`] until it is no longer
+/// running, or the
 /// rest reaches [`LIVE_REST_MAX`] — measured from the stamp on the store's
 /// own clock, so a listen killed and restarted mid-rest does not restart the
 /// budget — and then the session is woken. One code path for a lease-carrying
@@ -6555,7 +6782,7 @@ fn wait_out_live_rest(store: &mut Store, session_id: i64) -> Result<()> {
     let mut timed_out = false;
     if let Some(dream) = rest.dream_agent_id.as_deref() {
         loop {
-            if !agents::job_running(dream) {
+            if !memory_job::is_running(dream) {
                 break;
             }
             if elapsed >= LIVE_REST_MAX {
@@ -7078,6 +7305,7 @@ fn run_workflow_cmd(cmd: WorkflowCmd) -> Result<()> {
             name,
             description,
             project,
+            enabled,
             quiet,
         } => {
             let id = resolve_workflow(&store, &workflow)?.id;
@@ -7090,8 +7318,17 @@ fn run_workflow_cmd(cmd: WorkflowCmd) -> Result<()> {
                 project_id,
                 name,
                 description: description.map(clear_if_empty),
+                enabled,
             };
             print_workflow(&store.update_workflow(id, patch)?, quiet);
+        }
+        WorkflowCmd::Duplicate {
+            workflow,
+            name,
+            quiet,
+        } => {
+            let id = resolve_workflow(&store, &workflow)?.id;
+            print_workflow_view(&store.duplicate_workflow(id, name.as_deref())?, quiet);
         }
         WorkflowCmd::Delete { workflow, quiet } => {
             let id = resolve_workflow(&store, &workflow)?.id;
@@ -7115,6 +7352,21 @@ fn run_workflow_cmd(cmd: WorkflowCmd) -> Result<()> {
                 quiet,
             );
         }
+        WorkflowCmd::Emit {
+            event,
+            speaker,
+            text,
+            text_file,
+        } => {
+            let mut stdin_used = false;
+            let text = resolve_field(text, text_file, &mut stdin_used)?.unwrap_or_default();
+            let access = std::sync::Mutex::new(store);
+            let (runs, errors) = workflow::emit_ambient(&access, &event, &speaker, &text)?;
+            for (id, e) in errors {
+                eprintln!("naru: warning: ambient workflow {id} did not run: {e}");
+            }
+            print_json(&runs);
+        }
         WorkflowCmd::Runs { workflow } => {
             let id = resolve_workflow(&store, &workflow)?.id;
             print_json(&quiet_all(
@@ -7125,8 +7377,21 @@ fn run_workflow_cmd(cmd: WorkflowCmd) -> Result<()> {
         WorkflowCmd::RunShow { id, quiet } => {
             print_workflow_run(&store.get_workflow_run(id)?, quiet)
         }
-        WorkflowCmd::Log { log, limit } => {
-            print_json(&store.list_workflow_log(log.as_deref(), limit)?);
+        WorkflowCmd::Defaults { project } => {
+            let project = resolve_project(&store, &project)?;
+            let (created, skipped) = workflow::create_default_workflows(&mut store, project)?;
+            print_json(&json!({"created": created, "skipped": skipped}));
+        }
+        WorkflowCmd::Log {
+            log,
+            workflow,
+            limit,
+        } => {
+            let workflow_id = match workflow {
+                Some(w) => Some(resolve_workflow(&store, &w)?.id),
+                None => None,
+            };
+            print_json(&store.list_workflow_log(log.as_deref(), workflow_id, limit)?);
         }
         WorkflowCmd::Node(cmd) => match cmd {
             WorkflowNodeCmd::Create {
@@ -7742,6 +8007,8 @@ mod tests {
             last_run_status: None,
             last_failure_at: None,
             next_run_at: None,
+            trigger_events: vec![],
+            enabled: true,
         }
     }
 
@@ -8046,6 +8313,8 @@ mod tests {
                 "last_run_status",
                 "last_failure_at",
                 "next_run_at",
+                "trigger_events",
+                "enabled",
             ]),
             "Workflow gained/lost a field: decide whether it belongs in the \
              --quiet shape before updating this list",

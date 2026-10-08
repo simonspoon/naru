@@ -82,6 +82,13 @@ if [ "\$1" = "--bg" ]; then
   echo "backgrounded · deadbeef (idle — send a prompt to start)"
   exit 0
 fi
+# The inbox watcher's triage is a structured \`-p\` call now (naru task 1691):
+# log it whole (the leading \`-p\` kept) and answer nothing, so the job fails.
+if [ "\$1" = "-p" ]; then
+  LINE="\$(pwd)"; for a in "\$@"; do LINE="\$LINE|\$a"; done; echo "\$LINE" >> "$CLAUDE_LOG"
+  echo "stub claude: no answer" >&2
+  exit 1
+fi
 exit 2
 EOF
 # The synthesiser behind the `speech` section (mesa task 822). `--list-voices`
@@ -284,14 +291,16 @@ write_config <<EOF
 EOF
 api GET /api/config
 [ "$CODE" = "200" ] || fail "GET /api/config: expected 200, got $CODE: $STDOUT"
-[ "$(jq -r 'map(.action) | join(",")' <<<"$STDOUT")" = "todo-watcher,inbox-watcher,agent-spawn,live-agent,live-summary,live-dream,retro,workflow-prompt" ] ||
-  fail "GET /api/config must list all eight actions in order: $STDOUT"
+[ "$(jq -r 'map(.action) | join(",")' <<<"$STDOUT")" = "todo-watcher,inbox-watcher,agent-spawn,live-agent,live-summary,live-dream,retro,workflow-prompt,runner" ] ||
+  fail "GET /api/config must list all nine actions in order: $STDOUT"
 [ "$(jq -r '.[0].value' <<<"$STDOUT")" = "$STUB_DIR/mytool dispatch {id}" ] ||
   fail "GET /api/config: configured value wrong: $STDOUT"
 [ "$(jq -r '.[1].value' <<<"$STDOUT")" = "null" ] ||
   fail "an unconfigured action must report value: null, got $STDOUT"
-[ "$(jq -r '.[1].default' <<<"$STDOUT")" = 'claude --bg --agent inbox-triage --name {name} -- "Triage mesa inbox item {id}."' ] ||
+[ "$(jq -r '.[1].default' <<<"$STDOUT")" = 'claude -p --model {model} --name {name} --tools "" --strict-mcp-config --output-format json --json-schema {schema} -- {prompt}' ] ||
   fail "GET /api/config: built-in default wrong: $STDOUT"
+[ "$(jq -r '.[1].placeholders | join(" ")' <<<"$STDOUT")" = "{id} {name} {prompt} {schema} {model}" ] ||
+  fail "GET /api/config: inbox-watcher's placeholder vocabulary wrong: $STDOUT"
 [ "$(jq -r '.[2].placeholders | join(" ")' <<<"$STDOUT")" = "{prompt}" ] ||
   fail "GET /api/config: agent-spawn's placeholder vocabulary wrong: $STDOUT"
 ok "GET /api/config reports each command's configured value (null when unset), its built-in default and the placeholders it offers"
@@ -333,6 +342,30 @@ grep -q "unknown command" <<<"$STDOUT" || fail "unknown key: message wrong: $STD
 [ "$(cat "$CONFIG")" = "$BEFORE" ] ||
   fail "a rejected PUT must not touch the file: $(cat "$CONFIG")"
 ok "PUT rejects a template the spawn path would later fail on (bad placeholder, unbalanced quote, unknown key) as 422 validation, writing nothing"
+
+# naru task 1691: the inbox watcher is a structured `claude -p` call now, so a
+# saved `--bg` template is refused (the file untouched).
+api PUT /api/config '{"commands": {"inbox-watcher": "claude --bg --agent inbox-triage --name {name} -- {prompt}"}}'
+[ "$CODE" = "422" ] || fail "a --bg inbox-watcher: expected 422, got $CODE: $STDOUT"
+[ "$(jq -r .error.code <<<"$STDOUT")" = "validation" ] || fail "a --bg inbox-watcher: expected validation, got $STDOUT"
+grep -q "1691" <<<"$STDOUT" || fail "the message must name naru task 1691: $STDOUT"
+[ "$(cat "$CONFIG")" = "$BEFORE" ] ||
+  fail "a refused --bg inbox-watcher must not touch the file: $(cat "$CONFIG")"
+ok "PUT refuses a --bg inbox-watcher template as 422 naming naru task 1691, writing nothing"
+
+# naru task 1692: the retrospective is a structured `claude -p` call too.
+api PUT /api/config '{"commands": {"retro": "claude --bg --agent naru-retro --name {name} -- {prompt}"}}'
+[ "$CODE" = "422" ] || fail "a --bg retro: expected 422, got $CODE: $STDOUT"
+[ "$(jq -r .error.code <<<"$STDOUT")" = "validation" ] || fail "a --bg retro: expected validation, got $STDOUT"
+grep -q "1692" <<<"$STDOUT" || fail "the message must name naru task 1692: $STDOUT"
+[ "$(cat "$CONFIG")" = "$BEFORE" ] ||
+  fail "a refused --bg retro must not touch the file: $(cat "$CONFIG")"
+api GET /api/config
+[ "$(jq -r '.[] | select(.action == "retro") | .placeholders | join(" ")' <<<"$STDOUT")" = "{id} {name} {prompt} {schema} {model}" ] ||
+  fail "GET /api/config: retro's placeholder vocabulary wrong: $STDOUT"
+[ "$(jq -r '.[] | select(.action == "retro") | .default' <<<"$STDOUT")" = 'claude -p --model {model} --name {name} --tools "" --strict-mcp-config --output-format json --json-schema {schema} -- {prompt}' ] ||
+  fail "GET /api/config: retro's built-in default wrong: $STDOUT"
+ok "PUT refuses a --bg retro template as 422 naming naru task 1692, writing nothing; retro's default is the structured -p call and offers {schema} and {model}"
 
 # ---- multi-line hooks: every value is a bash script, values quoted in (mesa task 1143) ----
 
@@ -1693,9 +1726,32 @@ ok "the unconfigured todo-watcher keeps its built-in \`--agent supervisor --name
 run 0 "$MESA" inbox add --task "$TASK_B" --kind change-request "loki: find exits 0 on no match"
 ITEM_2=$(jqs .id)
 wait_lines "$CLAUDE_LOG" 3
-grep -qx "$WORKSPACE|--agent|inbox-triage|--name|inbox $ITEM_2: loki: find exits 0 on no match|--|Triage mesa inbox item $ITEM_2." "$CLAUDE_LOG" ||
+grep -Fq "$WORKSPACE|-p|--model|haiku|--name|inbox $ITEM_2: loki: find exits 0 on no match|--tools||--strict-mcp-config|--output-format|json|--json-schema|" "$CLAUDE_LOG" ||
   fail "the built-in inbox-watcher argv changed: $(cat "$CLAUDE_LOG")"
-ok "the unconfigured inbox-watcher keeps its built-in \`--agent inbox-triage --name inbox <id>: <body> -- Triage mesa inbox item <id>.\` argv"
+ok "the unconfigured inbox-watcher runs its built-in \`claude -p --model haiku --name inbox <id>: <body> --tools \"\" --strict-mcp-config --output-format json --json-schema <schema> -- <prompt>\` call (naru task 1691)"
+
+# A config saved before naru task 1691 still holds a `--bg` inbox-watcher
+# (the real-install case): it is ignored on read, so the built-in `-p` call
+# runs and no `--bg` ever starts; the file is left as written.
+write_config <<'EOF'
+{"commands": {"inbox-watcher": "claude --bg --agent \"inbox-triage\" --name {name} \"Triage inbox item {id}\""}}
+EOF
+LEGACY_CONFIG=$(cat "$CONFIG")
+run 0 "$MESA" inbox add --task "$TASK_B" --kind change-request "legacy: a saved --bg override"
+ITEM_3=$(jqs .id)
+# The -p call's prompt spans many lines, so wait for the call itself, not a count.
+for _ in $(seq 1 100); do
+  grep -Fq "$WORKSPACE|-p|--model|haiku|--name|inbox $ITEM_3: legacy: a saved --bg override|--tools||" "$CLAUDE_LOG" && break
+  sleep 0.1
+done
+grep -Fq "$WORKSPACE|-p|--model|haiku|--name|inbox $ITEM_3: legacy: a saved --bg override|--tools||" "$CLAUDE_LOG" ||
+  fail "a saved --bg inbox-watcher must fall back to the built-in -p call: $(cat "$CLAUDE_LOG")"
+! grep -q "inbox-triage" "$CLAUDE_LOG" || fail "the legacy --bg template must not run: $(cat "$CLAUDE_LOG")"
+[ "$(cat "$CONFIG")" = "$LEGACY_CONFIG" ] || fail "the legacy config must not be rewritten: $(cat "$CONFIG")"
+write_config <<'EOF'
+{"commands": {}}
+EOF
+ok "a saved legacy --bg inbox-watcher override is ignored: the built-in \`-p --model haiku\` call runs, no --bg, the file untouched"
 
 # ---- a saved template still holding the retired {bin}/{agent} (mesa task 1141) ----
 

@@ -254,14 +254,26 @@ because someone ran `mesa serve`.
   - **An `in_progress` task is not left alone blindly** (mesa task 1191).
     The watcher's dispatch reads task status, not the session, as the "in
     process" signal, so a dispatched agent that died or wedged used to leave
-    its project quiet until a person noticed. The reaper now reports both,
-    and moves nothing — the task's status stays the person's to change:
+    its project quiet until a person noticed. The reaper now acts on the
+    first and reports the second:
     - a session that is **gone** (listed with no `pid`, or unlisted for
       `REAP_ABANDON_GRACE` = 60s after the dispatch, since a job `claude
       --bg` has only just backgrounded may not be listed on the very next
-      pass) files one alert saying the session ended without closing the
-      task and the project's loop is stalled until it is moved (e.g. `mesa
-      task update <id> --status todo`), then forgets the dispatch;
+      pass) is **re-queued** (naru task 1697): a task still `in_progress` with
+      no claim (`owner` null) is set back to `todo` through the store, so
+      auto-dispatch resumes, and the dispatch is forgotten. No inbox alert —
+      one line goes to the reaper log instead, `<UTC time> task=<id>
+      session=<job id> reason=session-died outcome=re-queued to todo (attempt
+      n/2)`. The count is per task, in memory (`AppState::todo_requeued`),
+      capped at `REAP_REQUEUE_MAX` = 2: the next death **parks** the task in
+      `backlog` and files one `task-summary` alert (author `todo-reaper`) that
+      the session died that many times, so a task that kills every agent is not
+      retried forever (the park alert is best-effort: a failed filing is one stderr line, not retried, since the task already sits in backlog). The re-queue only happens while the dead session's entry is still current — not superseded by a relay or re-dispatch since the pass's snapshot — and removes that entry under the same lock. The count is dropped when the reaper next sees the task
+      not `in_progress` (closed, deleted, moved by hand) and when it parks. A
+      task with a claim held, a task that left `in_progress` meanwhile (just
+      forgotten), or a failed status write keeps the old behaviour: one alert
+      saying the loop is stalled until the task is moved (e.g. `mesa task
+      update <id> --status todo`), then the dispatch is forgotten;
     - a session that is listed, alive, not `busy`, with no live work, and has
       been so **continuously** for `REAP_STALL_AFTER` — the same
       `STALE_CLAIM_MINUTES` (60) hour `task next`'s stale-claim diagnostic
@@ -302,12 +314,11 @@ because someone ran `mesa serve`.
     is not that case: its stdout is read exactly as an argv command's is, so
     a script whose last line is `claude --bg …` still hands Naru the id.)
   - The reaper runs on its own `WATCH_TODO_REAP_TICK` (20s) interval loop,
-    started alongside the dispatch loop under `--watch-todo` — and under
-    `--watch-inbox`, since mesa task 1192, because the inbox-watcher's triage
-    sessions are recorded in the same map (`DispatchTarget::InboxItem`) and
-    reaped by the same pass once their item is triaged
-    (`docs/inbox-watcher.md`) — so a closed task's session ends well inside a
-    minute. It shares `MESA_WATCH_TODO_TICK_MS` rather than adding a seam of
+    started alongside the dispatch loop under `--watch-todo` — so a closed
+    task's session ends well inside a minute. It served `--watch-inbox` too
+    from mesa task 1192 until naru task 1691 made the inbox triage a
+    self-exiting `naru __job` with no session to stop
+    (`docs/inbox-watcher.md`); `DispatchTarget` has only the task variant now. It shares `MESA_WATCH_TODO_TICK_MS` rather than adding a seam of
     its own — the two loops are one feature.
   - Regressions: `api::tests::todo_reaper_tick_stops_a_dispatched_session_once_its_task_closes`,
     `api::tests::todo_watcher_tick_stops_the_session_a_re_dispatch_supersedes`,
@@ -373,6 +384,8 @@ because someone ran `mesa serve`.
   binary — plus the reaper (a dispatched session left alone while its task is
   in_progress and while it is still `busy`, stopped exactly once when its task
   closes, the old session stopped when a task goes back to `todo`, and a
-  session that dies with its task still `in_progress` reported once as a
-  `todo-reaper` inbox alert with the task left alone) — no CLI surface of its own beyond the `serve` flag, matching the
+  session that dies with its task still `in_progress` put back to `todo`
+  with a log line and no alert, parked in `backlog` with one `todo-reaper`
+  alert after two such re-queues, and only alerted when the task holds a
+  claim) — no CLI surface of its own beyond the `serve` flag, matching the
   agents surface's "no `mesa agent` CLI" precedent.

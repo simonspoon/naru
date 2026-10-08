@@ -82,12 +82,26 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// `naru.db` while it ran. The env branch is read fresh on every call, as
 /// before.
 pub fn default_db_path() -> PathBuf {
+    // Both dbs holding data is an error `Store::open_default` reports; the
+    // callers that only derive a sibling path get the new db's.
+    try_default_db_path().unwrap_or_else(|_| {
+        directories::ProjectDirs::from("", "", "naru")
+            .expect("could not determine application data directory")
+            .data_dir()
+            .join("naru.db")
+    })
+}
+
+/// [`default_db_path`], but a fresh install holding data in **both** the new
+/// and the old db is a `conflict` rather than a silent pick (naru task 1705).
+fn try_default_db_path() -> Result<PathBuf> {
     if let Some(p) = crate::core::env::var("DB")
         && !p.is_empty()
     {
-        return PathBuf::from(p);
+        return Ok(PathBuf::from(p));
     }
-    static CHOSEN: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    static CHOSEN: std::sync::OnceLock<std::result::Result<PathBuf, String>> =
+        std::sync::OnceLock::new();
     CHOSEN
         .get_or_init(|| {
             let data_dir = |app: &str| {
@@ -100,19 +114,53 @@ pub fn default_db_path() -> PathBuf {
                 data_dir("naru").join("naru.db"),
                 data_dir("mesa").join("mesa.db"),
             )
+            .map_err(|e| e.to_string())
         })
         .clone()
+        .map_err(Error::Conflict)
 }
 
-/// The rename's db rule (mesa task 1301): the new db when it exists, else the
-/// old one when *it* exists, else the new one (a fresh install). Nothing is
-/// ever moved or copied — a server still running the old binary may hold the
-/// old db's WAL open — so an existing install simply keeps its db where it is.
-fn choose_db_path(new: PathBuf, old: PathBuf) -> PathBuf {
-    if !new.exists() && old.exists() {
-        old
-    } else {
-        new
+/// Whether the db at `path` holds user data: it opens read-only (never
+/// created, migrated or written) and has a row in `projects` or `tasks`.
+/// A missing/0-byte file, one without those tables, or one that fails to
+/// open is empty.
+fn db_holds_data(path: &Path) -> bool {
+    let Ok(conn) = Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    ) else {
+        return false;
+    };
+    ["projects", "tasks"].iter().any(|t| {
+        conn.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {t})"), [], |r| {
+            r.get::<_, bool>(0)
+        })
+        .unwrap_or(false)
+    })
+}
+
+/// The rename's db rule (mesa task 1301, naru task 1705): only one exists →
+/// that one; neither → the new one (a fresh install); both → the one that
+/// holds data ([`db_holds_data`]), the old one when the new is empty, and a
+/// `conflict` naming both when both hold data. Nothing is ever moved, copied
+/// or deleted — a server still running the old binary may hold the old db's
+/// WAL open — so an existing install simply keeps its db where it is.
+fn choose_db_path(new: PathBuf, old: PathBuf) -> Result<PathBuf> {
+    if !old.exists() || !new.exists() {
+        return Ok(if !new.exists() && old.exists() {
+            old
+        } else {
+            new
+        });
+    }
+    match (db_holds_data(&new), db_holds_data(&old)) {
+        (false, _) => Ok(old),
+        (true, false) => Ok(new),
+        (true, true) => Err(Error::Conflict(format!(
+            "both {} and {} hold data; set NARU_DB to the one to use",
+            new.display(),
+            old.display()
+        ))),
     }
 }
 
@@ -947,7 +995,7 @@ const MIGRATIONS: &[&str] = &[
     // Task 1168: why an inbox item was set aside. Written only by an archive
     // (`set_inbox_item_archived`, optional, at most `INBOX_ARCHIVE_REASON_MAX`
     // chars) and cleared by the un-archive, so it is null exactly when
-    // `archived_at` is — the triage agent's verdict ("duplicate of task 12",
+    // `archived_at` is — the triage's verdict ("duplicate of task 12",
     // "shipped in abc123") kept beside the item it decided.
     "ALTER TABLE inbox ADD COLUMN archive_reason TEXT;",
     // Task 1158: the session retrospective. `retro_runs` is one row per pass
@@ -1344,6 +1392,10 @@ const MIGRATIONS: &[&str] = &[
         created_at  TEXT NOT NULL
      );
      CREATE INDEX idx_workflow_log_log ON workflow_log(log, id);",
+    // Task 1633: a workflow can be switched off. `enabled = 0` stops every
+    // automatic firing (the time watcher, ambient events); a manual run still
+    // works. Existing workflows stay on.
+    "ALTER TABLE workflows ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;",
 ];
 
 /// Selects full task rows including the derived `blocked` flag.
@@ -2599,7 +2651,10 @@ const WORKFLOW_COLUMNS: &str = "w.id, w.project_id, w.name, w.description, \
         FROM workflow_nodes n JOIN workflow_runs r \
           ON r.workflow_id = w.id AND r.trigger = 'time' \
         WHERE n.workflow_id = w.id AND n.kind = 'trigger' \
-          AND json_extract(n.config, '$.mode') = 'time')";
+          AND json_extract(n.config, '$.mode') = 'time' AND w.enabled = 1), \
+     (SELECT json_extract(n.config, '$.events') FROM workflow_nodes n \
+        WHERE n.workflow_id = w.id AND n.kind = 'trigger' ORDER BY n.id LIMIT 1), \
+     w.enabled";
 const WORKFLOW_NODE_COLUMNS: &str =
     "id, workflow_id, kind, title, config, x, y, created_at, updated_at";
 const WORKFLOW_EDGE_COLUMNS: &str = "id, workflow_id, from_node, to_node, branch";
@@ -2645,6 +2700,11 @@ fn row_to_workflow(row: &rusqlite::Row<'_>) -> rusqlite::Result<Workflow> {
             .and_then(WorkflowRunStatus::parse),
         last_failure_at: row.get(10)?,
         next_run_at: row.get(11)?,
+        trigger_events: row
+            .get::<_, Option<String>>(12)?
+            .and_then(|j| serde_json::from_str(&j).ok())
+            .unwrap_or_default(),
+        enabled: row.get(13)?,
     })
 }
 
@@ -2782,6 +2842,7 @@ pub struct WorkflowPatch {
     pub name: Option<String>,
     /// `Some(None)` clears the description.
     pub description: Option<Option<String>>,
+    pub enabled: Option<bool>,
 }
 
 /// A new node. `config` absent means the kind's default (`{"mode":
@@ -3315,7 +3376,17 @@ impl Store {
     }
 
     pub fn open_default() -> Result<Store> {
-        Store::open(&default_db_path())
+        Store::open(&try_default_db_path()?)
+    }
+
+    /// The file this store is open on — what a detached `naru __job` child is
+    /// told to open (`NARU_DB`), so it works the same db whoever started it.
+    /// `None` for an in-memory or temporary db.
+    pub fn db_path(&self) -> Option<PathBuf> {
+        self.conn
+            .path()
+            .filter(|p| !p.is_empty())
+            .map(PathBuf::from)
     }
 
     // ---- projects ----
@@ -4819,6 +4890,7 @@ impl Store {
         let mut project_id = current.project_id;
         let mut name = current.name.clone();
         let mut description = current.description.clone();
+        let enabled = patch.enabled.unwrap_or(current.enabled);
         if let Some(p) = patch.project_id {
             self.ensure_script_project(p)?;
             project_id = p;
@@ -4832,10 +4904,74 @@ impl Store {
         }
         self.conn.execute(
             "UPDATE workflows SET project_id = ?1, name = ?2, description = ?3, \
-             updated_at = datetime('now') WHERE id = ?4",
-            (project_id, &name, &description, id),
+             enabled = ?4, updated_at = datetime('now') WHERE id = ?5",
+            (project_id, &name, &description, enabled, id),
         )?;
         self.get_workflow(id)
+    }
+
+    /// Copies a workflow — fields, every node (kind, title, config, position)
+    /// and every edge (remapped to the new node ids, branch labels kept) — in
+    /// one transaction. The copy is created **disabled** so a duplicated
+    /// time/ambient workflow never double-fires; run history and log lines
+    /// are not copied. `name` absent picks `"<name> (copy)"`, then
+    /// `"<name> (copy 2)"`…; an explicit taken name is `conflict`.
+    pub fn duplicate_workflow(&mut self, id: i64, name: Option<&str>) -> Result<WorkflowView> {
+        self.immediate(|s| {
+            let src = s.get_workflow_view(id)?;
+            let new_name = match name {
+                Some(n) => {
+                    let n = validate_workflow_name(n)?;
+                    s.ensure_workflow_name_free(&n, None)?;
+                    n
+                }
+                None => {
+                    let base = &src.workflow.name;
+                    let mut n = 1;
+                    loop {
+                        let cand = if n == 1 {
+                            format!("{base} (copy)")
+                        } else {
+                            format!("{base} (copy {n})")
+                        };
+                        let cand = if cand.chars().count() > WORKFLOW_NAME_MAX {
+                            let keep = WORKFLOW_NAME_MAX - (cand.chars().count() - base.chars().count());
+                            let head: String = base.chars().take(keep).collect();
+                            cand.replacen(base.as_str(), &head, 1)
+                        } else {
+                            cand
+                        };
+                        if s.ensure_workflow_name_free(&cand, None).is_ok() {
+                            break cand;
+                        }
+                        n += 1;
+                    }
+                }
+            };
+            s.conn.execute(
+                "INSERT INTO workflows (project_id, name, description, enabled, created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, 0, datetime('now'), datetime('now'))",
+                (src.workflow.project_id, &new_name, &src.workflow.description),
+            )?;
+            let new_id = s.conn.last_insert_rowid();
+            let mut map = std::collections::HashMap::new();
+            for n in &src.nodes {
+                s.conn.execute(
+                    "INSERT INTO workflow_nodes (workflow_id, kind, title, config, x, y, created_at, updated_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'), datetime('now'))",
+                    (new_id, n.kind.as_str(), &n.title, n.config.to_string(), n.x, n.y),
+                )?;
+                map.insert(n.id, s.conn.last_insert_rowid());
+            }
+            for e in &src.edges {
+                s.conn.execute(
+                    "INSERT INTO workflow_edges (workflow_id, from_node, to_node, branch) \
+                     VALUES (?1, ?2, ?3, ?4)",
+                    (new_id, map[&e.from_node], map[&e.to_node], &e.branch),
+                )?;
+            }
+            s.get_workflow_view(new_id)
+        })
     }
 
     /// Deletes a workflow with its nodes, edges and runs; echoes the whole
@@ -5401,7 +5537,7 @@ impl Store {
         let mut stmt = self.conn.prepare(&format!(
             "{HIDDEN_PROJECTS_CTE}SELECT w.id FROM workflows w \
              JOIN workflow_nodes n ON n.workflow_id = w.id AND n.kind = 'trigger' \
-             WHERE json_extract(n.config, '$.mode') = 'time' \
+             WHERE json_extract(n.config, '$.mode') = 'time' AND w.enabled = 1 \
                AND (w.project_id IS NULL OR w.project_id NOT IN (SELECT id FROM hidden_projects)) \
                AND NOT EXISTS (SELECT 1 FROM workflow_runs r \
                     WHERE r.workflow_id = w.id AND r.trigger = 'time' \
@@ -5410,6 +5546,21 @@ impl Store {
              ORDER BY w.id"
         ))?;
         let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Ids of the workflows whose trigger is `ambient` and lists `event`,
+    /// oldest id first. A disabled workflow or one of an archived project never matches.
+    pub fn ambient_workflows(&self, event: &str) -> Result<Vec<i64>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "{HIDDEN_PROJECTS_CTE}SELECT w.id FROM workflows w \
+             JOIN workflow_nodes n ON n.workflow_id = w.id AND n.kind = 'trigger' \
+             WHERE json_extract(n.config, '$.mode') = 'ambient' AND w.enabled = 1 \
+               AND (w.project_id IS NULL OR w.project_id NOT IN (SELECT id FROM hidden_projects)) \
+               AND EXISTS (SELECT 1 FROM json_each(n.config, '$.events') e WHERE e.value = ?1) \
+             ORDER BY w.id"
+        ))?;
+        let rows = stmt.query_map([event], |r| r.get::<_, i64>(0))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
@@ -5443,10 +5594,12 @@ impl Store {
         )?)
     }
 
-    /// The newest `limit` lines of one log (or of every log), newest first.
+    /// The newest `limit` lines of one log (or of every log), newest first,
+    /// optionally only those one workflow wrote.
     pub fn list_workflow_log(
         &self,
         log: Option<&str>,
+        workflow_id: Option<i64>,
         limit: i64,
     ) -> Result<Vec<WorkflowLogEntry>> {
         if !(1..=1000).contains(&limit) {
@@ -5456,9 +5609,10 @@ impl Store {
         }
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {WORKFLOW_LOG_COLUMNS} FROM workflow_log \
-             WHERE (?1 IS NULL OR log = ?1 COLLATE NOCASE) ORDER BY id DESC LIMIT ?2"
+             WHERE (?1 IS NULL OR log = ?1 COLLATE NOCASE) \
+             AND (?2 IS NULL OR workflow_id = ?2) ORDER BY id DESC LIMIT ?3"
         ))?;
-        let rows = stmt.query_map((log, limit), row_to_workflow_log)?;
+        let rows = stmt.query_map((log, workflow_id, limit), row_to_workflow_log)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
@@ -7028,6 +7182,34 @@ impl Store {
         Ok(())
     }
 
+    /// The window run `run_id` reviews (naru task 1692): from the start of
+    /// the newest **earlier** run that counts (spawned), else seven days back,
+    /// to now. Answers `(unix seconds, "YYYY-MM-DD HH:MM:SS" UTC)` of that
+    /// start, both read off SQLite's own clock like [`Store::retro_status`].
+    pub fn retro_window(&self, run_id: i64) -> Result<(i64, String)> {
+        Ok(self.conn.query_row(
+            "SELECT CAST(strftime('%s', w) AS INTEGER), w FROM (SELECT COALESCE(\
+             (SELECT started_at FROM retro_runs WHERE id < ?1 AND spawned_at IS NOT NULL \
+              ORDER BY id DESC LIMIT 1), datetime('now', '-7 days')) AS w)",
+            [run_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?)
+    }
+
+    /// Notes one more session a known finding was seen in without touching its
+    /// count or evidence ([`Store::record_retro_finding`] bumps both and takes
+    /// one session id). `OR IGNORE`, so a repeat is idempotent.
+    pub fn add_retro_finding_session(&mut self, id: i64, session_id: &str) -> Result<RetroFinding> {
+        let session_id = Self::validate_retro_key("session id", session_id)?;
+        self.get_retro_finding(id)?;
+        self.conn.execute(
+            "INSERT OR IGNORE INTO retro_finding_sessions \
+             (finding_id, session_id, first_seen_at) VALUES (?1, ?2, datetime('now'))",
+            (id, session_id),
+        )?;
+        self.get_retro_finding(id)
+    }
+
     /// Whether a retrospective is due, judged on the store's own clock: due
     /// when no run counts ([`Store::last_retro_run`]), or when the last one
     /// that does started at least `interval_hours` ago. `next_due_at` is that deadline, for the CLI to
@@ -7711,6 +7893,17 @@ impl Store {
                 },
             )
             .optional()?)
+    }
+
+    /// Test seam: ages a project's dream row by `minutes`.
+    #[cfg(test)]
+    pub(crate) fn backdate_project_dream(&self, project_id: i64, minutes: u32) {
+        self.conn
+            .execute(
+                "UPDATE project_dreams SET started_at = datetime('now', ?2) WHERE project_id = ?1",
+                (project_id, format!("-{minutes} minutes")),
+            )
+            .unwrap();
     }
 
     /// Claims `project_id`'s next automatic dream: a row with no receipt,
@@ -10274,7 +10467,20 @@ mod tests {
         unsafe { std::env::remove_var("MESA_DB") };
     }
 
-    /// The rename's db rule: new if it exists, else old if it exists, else new.
+    fn sqlite_file(path: &Path, rows: bool) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let _ = std::fs::remove_file(path);
+        let c = Connection::open(path).unwrap();
+        c.execute_batch("CREATE TABLE projects (id INTEGER PRIMARY KEY); CREATE TABLE tasks (id INTEGER PRIMARY KEY);")
+            .unwrap();
+        if rows {
+            c.execute_batch("INSERT INTO projects (id) VALUES (1);")
+                .unwrap();
+        }
+    }
+
+    /// The rename's db rule: one file → it, neither → new, both → the one
+    /// holding data, and a conflict when both do.
     #[test]
     fn db_path_prefers_the_new_db_and_falls_back_to_the_old_one() {
         let dir = tempfile::tempdir().unwrap();
@@ -10282,21 +10488,48 @@ mod tests {
         let old = dir.path().join("mesa/mesa.db");
 
         // Neither exists: a fresh install gets the new path.
-        assert_eq!(choose_db_path(new.clone(), old.clone()), new);
+        assert_eq!(choose_db_path(new.clone(), old.clone()).unwrap(), new);
 
         // Only the old one: an existing install keeps its db.
         std::fs::create_dir_all(old.parent().unwrap()).unwrap();
         std::fs::write(&old, b"").unwrap();
-        assert_eq!(choose_db_path(new.clone(), old.clone()), old);
+        assert_eq!(choose_db_path(new.clone(), old.clone()).unwrap(), old);
 
-        // Both: the new one wins.
+        // Both, zero-byte files (neither holds data): the old one.
         std::fs::create_dir_all(new.parent().unwrap()).unwrap();
         std::fs::write(&new, b"").unwrap();
-        assert_eq!(choose_db_path(new.clone(), old.clone()), new);
+        assert_eq!(choose_db_path(new.clone(), old.clone()).unwrap(), old);
 
         // Only the new one.
         std::fs::remove_file(&old).unwrap();
-        assert_eq!(choose_db_path(new.clone(), old), new);
+        assert_eq!(choose_db_path(new.clone(), old).unwrap(), new);
+    }
+
+    #[test]
+    fn db_path_follows_the_db_that_holds_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let new = dir.path().join("naru/naru.db");
+        let old = dir.path().join("mesa/mesa.db");
+
+        // New empty (tables, no rows), old with data: old.
+        sqlite_file(&new, false);
+        sqlite_file(&old, true);
+        assert_eq!(choose_db_path(new.clone(), old.clone()).unwrap(), old);
+
+        // New with data, old empty: new.
+        sqlite_file(&new, true);
+        sqlite_file(&old, false);
+        assert_eq!(choose_db_path(new.clone(), old.clone()).unwrap(), new);
+
+        // Both with data: a loud conflict naming both and NARU_DB.
+        sqlite_file(&old, true);
+        let msg = match choose_db_path(new.clone(), old.clone()) {
+            Err(Error::Conflict(m)) => m,
+            other => panic!("expected conflict, got {other:?}"),
+        };
+        assert!(msg.contains(&new.display().to_string()));
+        assert!(msg.contains(&old.display().to_string()));
+        assert!(msg.contains("NARU_DB"));
     }
 
     fn add_task(store: &mut Store, project_id: i64, description: &str) -> Task {
@@ -14850,15 +15083,15 @@ mod tests {
         );
         assert_eq!(
             MIGRATIONS.len(),
-            84,
-            "a fresh db should report user_version 84"
+            85,
+            "a fresh db should report user_version 85"
         );
         let (store, _dir) = temp_store();
         let version: i64 = store
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 84);
+        assert_eq!(version, 85);
     }
 
     /// Workflows replace diagrams at migration 83 (mesa task 1607): a db that

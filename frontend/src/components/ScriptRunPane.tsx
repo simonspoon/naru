@@ -142,7 +142,7 @@ export function ScriptRunPane({
   cwd: string
   /** The run on screen, or `null` for the form with no run open yet. */
   runId: number | null
-  /** A run has started: the page makes `#/scripts/runs/{id}` the address,
+  /** A run has started: the page makes `#/library/scripts/runs/{id}` the address,
    * which comes back as `runId` and is what attaches the stream. */
   onRunStarted: (id: number) => void
   onClose: () => void

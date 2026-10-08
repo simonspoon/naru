@@ -61,8 +61,10 @@ export function runSummary(run: WorkflowRun): string {
 }
 
 /** What a workflow's trigger reads as in the list: its mode, plus the phrase a
- *  voice request would say; "no trigger" when the graph has none yet. */
-export function triggerLabel(w: Pick<Workflow, 'trigger' | 'trigger_phrase'>): string {
+ *  voice request would say or an ambient trigger's events; "no trigger" when the graph has none yet. */
+export function triggerLabel(w: Pick<Workflow, 'trigger' | 'trigger_phrase'> & Partial<Pick<Workflow, 'trigger_events'>>): string {
   if (w.trigger === null) return 'no trigger'
+  if (w.trigger === 'ambient' && w.trigger_events && w.trigger_events.length > 0)
+    return `ambient · ${w.trigger_events.join(', ')}`
   return w.trigger_phrase ? `${w.trigger} · “${w.trigger_phrase}”` : w.trigger
 }

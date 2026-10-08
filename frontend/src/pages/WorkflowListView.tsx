@@ -1,11 +1,19 @@
 import { useState } from 'react'
-import { createWorkflow, deleteWorkflow, listWorkflows, runWorkflow } from '../api'
+import {
+  createWorkflow,
+  deleteWorkflow,
+  duplicateWorkflow,
+  listWorkflows,
+  runWorkflow,
+  updateWorkflow,
+} from '../api'
 import { ConfirmDelete } from '../components/ConfirmDelete'
 import { PlayIcon } from '../components/WorkflowIcon'
 import { useLiveContext } from '../liveContext'
 import { formatTimestamp, timeAgo } from '../time'
 import { useFetch } from '../useFetch'
 import { runSummary, triggerLabel } from '../workflowRun'
+import { toggleLabel } from '../workflowOverview'
 import type { WorkflowRun } from '../types/WorkflowRun'
 
 /**
@@ -37,6 +45,24 @@ export function WorkflowListView({ projectId }: { projectId: number }) {
         setCreateError(null)
         refetch()
         window.location.hash = `#/projects/${projectId}/workflows/${w.id}`
+      },
+      (err: unknown) => setCreateError(err instanceof Error ? err.message : String(err)),
+    )
+  }
+
+  function toggle(id: number, enabled: boolean) {
+    updateWorkflow(id, { enabled: !enabled }).then(
+      () => refetch(),
+      (err: unknown) => setCreateError(err instanceof Error ? err.message : String(err)),
+    )
+  }
+
+  function duplicate(id: number) {
+    duplicateWorkflow(id).then(
+      (v) => {
+        setCreateError(null)
+        refetch()
+        window.location.hash = `#/projects/${projectId}/workflows/${v.workflow.id}`
       },
       (err: unknown) => setCreateError(err instanceof Error ? err.message : String(err)),
     )
@@ -88,6 +114,7 @@ export function WorkflowListView({ projectId }: { projectId: number }) {
                   >
                     {w.name}
                   </a>
+                  {!w.enabled && <span className="muted workflow-off-tag"> · disabled</span>}
                   {w.description && <p className="muted workflow-row-desc">{w.description}</p>}
                   <div className="muted meta-line">
                     <span className="workflow-trigger">{triggerLabel(w)}</span>
@@ -117,9 +144,15 @@ export function WorkflowListView({ projectId }: { projectId: number }) {
                   >
                     <PlayIcon /> run
                   </button>
+                  <button type="button" onClick={() => toggle(w.id, w.enabled)}>
+                    {toggleLabel(w)}
+                  </button>
+                  <button type="button" onClick={() => duplicate(w.id)}>
+                    duplicate
+                  </button>
                   <ConfirmDelete
                     label="delete"
-                    message="Deletes this workflow, its nodes and its edges."
+                    message="Deletes this workflow with its nodes, edges and run history. Entries it wrote to logs are kept."
                     onDelete={() => deleteWorkflow(w.id).then(refetch)}
                   />
                 </div>

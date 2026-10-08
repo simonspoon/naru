@@ -44,15 +44,15 @@ use crate::core::{
     LIVE_AUDIO_MAX, LIVE_BOARD_INK_STATE_MAX, LIVE_BOARD_KEEP, LIVE_INK_MAX, LibraryBuiltinAction,
     LibraryBundle, LibraryImportResult, LibraryKind, LibraryPatch, LibraryScope,
     LiveBoardHistoryEntry, LiveBoardInkEntry, LiveBoardKind, LiveContext, LiveNotebookEntry,
-    LiveNotice, LiveState, LiveStatus, LiveTranscript, LiveWindow, ModelRates, NaruVersion,
-    NextResult, Priority, ProjectAgents, ProjectFileTree, ProjectGitLog, ProjectGitRepos,
-    ProjectGitStatus, ProjectGitView, ProjectPatch, ProjectVersion, ReceiptPatch,
+    LiveNotice, LiveOffer, LiveState, LiveStatus, LiveTranscript, LiveWindow, ModelRates,
+    NaruVersion, NextResult, Priority, ProjectAgents, ProjectFileTree, ProjectGitLog,
+    ProjectGitRepos, ProjectGitStatus, ProjectGitView, ProjectPatch, ProjectVersion, ReceiptPatch,
     STALE_CLAIM_MINUTES, Script, ScriptArg, ScriptPatch, ScriptRunEvent, ServeBoolSetting,
     ServeHostsSetting, ServeNumberSetting, Status, Store, SystemInfo, Task, TaskPatch, TaskSummary,
     WorkflowNodeKind, WorkflowNodeNew, WorkflowNodePatch, WorkflowPatch, WorkflowTrigger, agents,
     attachments, audio, board, config, files, git, guard, hooks, inbox_triage, library, listen,
-    live, project_memory, receipt, retro, script_runs, scripts, speech, supervisor, system,
-    validate_live_client, version, workflow,
+    live, memory_job, project_memory, receipt, runner, script_runs, scripts, speech, supervisor,
+    system, validate_live_client, version, workflow,
 };
 
 /// The Vite build output, embedded into the binary at compile time.
@@ -135,6 +135,10 @@ struct AppState {
     /// old "permission prompt" (the page's rising-edge rule is the first line
     /// against that; this is the second), and a stale one is pruned on insert.
     live_blocked_cache: Arc<Mutex<HashMap<String, (Instant, Option<String>)>>>,
+    /// The newest ambient `can-help` offer: (text, speaker, when). In memory
+    /// only; newest wins; absent after [`LIVE_OFFER_TTL`] and cleared by any
+    /// live start (naru task 1700).
+    live_offer: Arc<Mutex<Option<(String, String, Instant)>>>,
     /// The live agent's occupied context, keyed by its short job id —
     /// `GET /api/live`'s derived `context_tokens` (mesa task 1478). Same
     /// shape and TTL as `live_blocked_cache`, but keyed on the job id alone:
@@ -207,7 +211,7 @@ struct AppState {
     /// panicking on a consumed oneshot.
     shutdown_tx: Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
     /// Inbox item ids the inbox-watcher (`watch_inbox`) has already dispatched
-    /// a triage agent for. The inbox-watcher's answer to the todo-watcher's
+    /// a triage job (`naru __job inbox-triage`) for. The inbox-watcher's answer to the todo-watcher's
     /// `in_progress` claim — but in memory, not in the db, because an inbox
     /// item has no status column to claim with (`docs/inbox.md`: an item *is*
     /// the record, and assignment converts + deletes it). Pruned each tick to
@@ -250,13 +254,13 @@ struct AppState {
     /// `todo_dispatched`, so no relay can happen then either.
     cost_relay_seeded: Arc<Mutex<HashMap<i64, String>>>,
     /// Background job id → what it was dispatched for, for every session
-    /// the todo-watcher or the inbox-watcher spawned in this server's
-    /// lifetime and has not yet reaped (mesa tasks 1057, 1192). The reaper's
-    /// whole memory: a dispatched session that has finished with its task —
-    /// or its inbox item — sits idle for hours holding a worktree, and
-    /// nothing in the db records which session was started for which, so
-    /// this map is what lets `todo_reaper_tick` stop exactly the sessions
-    /// mesa itself started.
+    /// the todo-watcher spawned in this server's lifetime and has not yet
+    /// reaped (mesa task 1057). The reaper's whole memory: a dispatched
+    /// session that has finished with its task sits idle for hours holding a
+    /// worktree, and nothing in the db records which session was started for
+    /// which, so this map is what lets `todo_reaper_tick` stop exactly the
+    /// sessions mesa itself started. (The inbox-watcher no longer appears
+    /// here: its triage is a self-exiting job, naru task 1691.)
     ///
     /// In memory, like `inbox_dispatched` and `cost_stopped`, and deliberately
     /// not persisted: a restart forgets the sessions spawned before it, which
@@ -266,6 +270,12 @@ struct AppState {
     /// receipt records nothing, since there is no id to stop with (the
     /// limitation the attach pane already has).
     todo_dispatched: Arc<Mutex<HashMap<String, DispatchedSession>>>,
+    /// Task id → how many times the reaper has put the task back to `todo`
+    /// because its dispatched session died (naru task 1697), capped at
+    /// [`REAP_REQUEUE_MAX`]. Dropped when the reaper next sees the task not
+    /// `in_progress` (closed, deleted or moved by hand) and when the task is
+    /// parked. In memory like `todo_dispatched`, so a restart forgives it.
+    todo_requeued: Arc<Mutex<HashMap<i64, u32>>>,
     /// Task id → the todo-watcher's last failed spawn for it (mesa task 1338):
     /// the task's `updated_at` as the watcher's own revert left it, and the
     /// error texts already filed as inbox alerts. The watcher skips a task
@@ -376,7 +386,7 @@ fn watch_retro_tick() -> Duration {
 
 /// One retro-watcher pass (mesa task 1158, `docs/retro.md`): if no
 /// retrospective has run in the last `watchers.retro-interval-hours`, claim a
-/// `watcher` run row and spawn the `naru-retro` agent on it.
+/// `watcher` run row and start the detached `naru __job retro` on it.
 ///
 /// The run row is the claim, written **before** the spawn — the
 /// inbox-watcher's dedup set, but in the db rather than memory, because the
@@ -389,8 +399,8 @@ fn watch_retro_tick() -> Duration {
 ///
 /// cwd is `~/.mesa/workspace`: a retrospective spans every project, so there
 /// is no `local_path` to run in — the inbox-watcher's reasoning. Two-phase
-/// like [`inbox_watcher_tick`]: the store lock is dropped before the blocking
-/// `claude --bg` shell-out.
+/// like [`inbox_watcher_tick`]: the store lock is dropped before the job is
+/// started.
 fn retro_watcher_tick(state: &AppState) {
     let interval = match config::retro_interval_hours() {
         Ok(n) => n,
@@ -420,28 +430,17 @@ fn retro_watcher_tick(state: &AppState) {
                 return;
             }
         };
-        // The default template spawns `--agent naru-retro`, so the definition
-        // has to be on disk before the spawn — `claude --agent` errors on an
-        // agent it has never seen. A failure is a failed spawn, rolled back
-        // below with the rest.
-        let seeded = retro::ensure_agent_definition(&store)
-            .and_then(|_| library::prompts(&store).map_err(|e| e.to_string()));
-        (run, seeded)
+        (run, store.db_path())
     };
-    let (run, seeded) = claimed;
-    // Phase two: the shell-out, off the lock.
+    let (run, db_path) = claimed;
+    // Phase two: the job start, off the lock. One detached `naru __job retro`
+    // (naru task 1692) makes the `claude -p` calls and files the findings.
     let dispatch_dir = config::workspace_dir().to_string_lossy().into_owned();
-    let session_name = retro::session_name(run.id);
-    let spawn = seeded.and_then(|prompts| {
-        agents::spawn_bg(
-            config::RETRO,
-            &dispatch_dir,
-            Some(run.id),
-            Some(&session_name),
-            None,
-            &prompts,
-        )
-    });
+    let spawn = memory_job::spawn(
+        &memory_job::Job::Retro { run_id: run.id },
+        &dispatch_dir,
+        db_path.as_deref(),
+    );
     let mut store = match state.store.lock() {
         Ok(s) => s,
         Err(e) => e.into_inner(),
@@ -530,19 +529,18 @@ fn workflow_watcher_tick(state: &AppState) {
     }
 }
 
-/// How much of an inbox body goes into an auto-dispatched session's name,
+/// How much of an inbox body goes into a triage call's session name,
 /// in `char`s (not bytes — bodies are free text and may be non-ASCII).
 const INBOX_SESSION_NAME_CHARS: usize = 60;
 
-/// Names an auto-dispatched triage session after the item it triages, so it
-/// is identifiable in the prompt box, `/resume` picker, terminal title and
-/// Agents sidebar — the same reason the todo-watcher names its sessions
-/// `<project>: <title>`. Uses the body's first non-empty line, truncated;
-/// inbox bodies are free-form markdown and may be long or multi-line.
+/// Names a triage job's `claude -p` calls after the item it triages, so they
+/// are identifiable in the `/resume` picker and transcript list. Uses the
+/// body's first non-empty line, truncated; inbox bodies are free-form
+/// markdown and may be long or multi-line.
 ///
-/// The body is **untrusted data**: it reaches `claude` as a single `--name`
-/// process argument (`Command::arg`, no shell), never interpolated into a
-/// shell string, and nothing here interprets it.
+/// The body is **untrusted data**: the name is the template's `{name}`
+/// placeholder, shell-quoted for its position by `config::substitute_script`
+/// before `bash -c` reads it, and nothing here interprets it.
 fn inbox_session_name(item: &InboxItem) -> String {
     let first = item
         .body
@@ -560,37 +558,34 @@ fn inbox_session_name(item: &InboxItem) -> String {
     format!("inbox {}: {head}", item.id)
 }
 
-/// One inbox-watcher pass: dispatch a background `claude` agent (the
-/// `inbox-triage` agent definition, mesa task 1168) for every pending inbox
-/// item this process has not already dispatched. The inbox is one **global** queue that lives above
-/// projects, so — unlike the todo-watcher, which is naturally capped at one
-/// agent per project — every un-dispatched item goes out in the same tick.
+/// One inbox-watcher pass: start a detached `naru __job inbox-triage` (naru
+/// task 1691, `core::inbox_triage`) for every pending inbox item this process
+/// has not already dispatched. The job makes the two tool-less `claude -p
+/// --json-schema` calls and applies the answer through `Store` itself, then
+/// exits — no `--bg` session, so nothing to remember or reap. The inbox is one
+/// **global** queue that lives above projects, so — unlike the todo-watcher,
+/// which is naturally capped at one agent per project — every un-dispatched
+/// item goes out in the same tick.
 ///
 /// cwd is `~/.mesa/workspace`, not a project folder: an inbox item belongs to
-/// no project (`project_id` is null for its whole life) and the triage agent
-/// derives the project itself, reading each candidate repo by absolute
-/// `local_path`. Same folder the global Terminal page uses
+/// no project (`project_id` is null for its whole life) and the job derives
+/// the project itself from the context Naru gathers
 /// (`config::workspace_dir`).
 ///
 /// The dedup set (`AppState::inbox_dispatched`) stands in for the
 /// todo-watcher's `in_progress` claim, which has no inbox equivalent — an
-/// item has no status column. Two of the triage agent's three outcomes archive
-/// the item (a real request is converted into a backlog task by
-/// `assign_inbox_item`, which archives it as `converted-to-task`; a stale,
-/// duplicate or non-actionable one is archived with a reason), but the third
-/// leaves it **untouched** — no confident
-/// project match. Without the set, that third
-/// outcome would re-dispatch an agent for the same item every single tick,
-/// forever. Ids are claimed *before* the spawn (closing the window where a
-/// second tick fires while `claude --bg` is still starting) and released
-/// again only if the spawn failed, so a transient `claude` failure retries
-/// next tick instead of silently dropping the item — the same shape as the
-/// todo-watcher's revert-to-`todo`.
+/// item has no status column. Two of the triage's outcomes archive the item
+/// or convert it (a real request becomes a backlog task via
+/// `assign_inbox_item`, a stale, duplicate, shipped or non-actionable one is
+/// archived with a reason), but a **hold** — no confident answer — and a
+/// failed call leave it pending. Without the set, those would re-dispatch a
+/// job for the same item every single tick, forever. Ids are claimed *before*
+/// the spawn (closing the window where a second tick fires while the job is
+/// starting) and released again only if the job process failed to start, so a
+/// transient failure retries next tick instead of silently dropping the item.
 ///
-/// Two-phase, like [`todo_watcher_tick`] and `spawn_project_agent`: the store
-/// lock is dropped before the blocking `claude --bg` shell-outs. Holding it
-/// across a spawn would freeze every other API request for the duration of
-/// each spawn — a regression this codebase has shipped once already.
+/// Two-phase, like [`todo_watcher_tick`]: the store lock is dropped before the
+/// spawn.
 fn inbox_watcher_tick(state: &AppState) {
     let dispatch_dir = config::workspace_dir().to_string_lossy().into_owned();
 
@@ -631,82 +626,47 @@ fn inbox_watcher_tick(state: &AppState) {
             .collect()
     };
 
-    // The library's prompts, for any `{prompt:<name>}` the template names
-    // (mesa task 1138) — read once for the tick, off the store lock below.
-    let prompts = {
+    // The job works the same db this server does.
+    let db_path = {
         let store = match state.store.lock() {
             Ok(s) => s,
             Err(e) => e.into_inner(),
         };
-        library::prompts(&store).unwrap_or_default()
+        store.db_path()
     };
     for (id, session_name) in pending {
-        // The default template spawns `--agent inbox-triage`, so the
-        // definition has to be on disk before the spawn — `claude --agent`
-        // errors on an agent it has never seen (mesa task 1168, the
-        // todo-watcher's `supervisor` rule). A failure is a failed spawn: the
-        // claim is released below and the next tick retries.
-        let seeded = {
-            let store = match state.store.lock() {
-                Ok(s) => s,
+        // One detached `naru __job inbox-triage` per item (naru task 1691):
+        // it makes the two `claude -p` calls and applies the answer itself,
+        // then exits, so there is no session to remember or reap. Spawned off
+        // the store lock, which is not held here.
+        let job = memory_job::Job::InboxTriage {
+            item_id: id,
+            name: session_name,
+        };
+        if let Err(e) = memory_job::spawn(&job, &dispatch_dir, db_path.as_deref()) {
+            eprintln!("inbox-watcher: starting the triage job for inbox item {id} failed: {e}");
+            let mut dispatched = match state.inbox_dispatched.lock() {
+                Ok(d) => d,
                 Err(e) => e.into_inner(),
             };
-            inbox_triage::ensure_agent_definition(&store)
-        };
-        // The command — including which agent triages an item — comes from
-        // `~/.mesa/config.json`'s `inbox-watcher` entry, defaulting to
-        // `claude --bg --agent inbox-triage … -- "Triage mesa inbox item <id>."`.
-        match seeded.and_then(|_| {
-            agents::spawn_bg(
-                config::INBOX_WATCHER,
-                &dispatch_dir,
-                Some(id),
-                Some(&session_name),
-                None,
-                &prompts,
-            )
-        }) {
-            // The receipt's short job id is what the reaper stops the triage
-            // session with once the item is triaged (mesa task 1192) — the
-            // todo-watcher's own record, in the same map. No receipt, nothing
-            // to stop.
-            Ok(Some(job_id)) => {
-                let mut dispatched = match state.todo_dispatched.lock() {
-                    Ok(d) => d,
-                    Err(e) => e.into_inner(),
-                };
-                dispatched.insert(
-                    job_id,
-                    DispatchedSession::new(DispatchTarget::InboxItem(id), Instant::now()),
-                );
-            }
-            Ok(None) => {}
-            Err(e) => {
-                eprintln!("inbox-watcher: spawn failed for inbox item {id}: {e}");
-                let mut dispatched = match state.inbox_dispatched.lock() {
-                    Ok(d) => d,
-                    Err(e) => e.into_inner(),
-                };
-                dispatched.remove(&id);
-            }
+            dispatched.remove(&id);
         }
     }
 }
 
 /// Whether an inbox item is one the inbox-watcher should have triaged: a
 /// change request (mesa task 846) that is not archived (mesa task 1192). The
-/// one definition of "needs triage" — the dispatch reads it to pick items,
-/// and the reaper reads it to know when a triage session is finished with
-/// its item.
+/// one definition of "needs triage" (`inbox_triage::is_pending`, which the
+/// job re-reads before it writes) — the dispatch reads it to pick items.
 ///
-/// Archived is a state, not a kind: the triage agent's own verdict on a
+/// Archived is a state, not a kind: the triage's own verdict on a
 /// duplicate, shipped or non-actionable request is to archive it with a
 /// reason, and the item stays in the inbox listing. Before this predicate the
 /// dispatch read every listed change request as pending and relied on the
 /// in-memory dedup set alone to hold the archived ones back — which a server
 /// restart empties, so every restart re-triaged every archived request.
 fn inbox_item_pending(item: &InboxItem) -> bool {
-    item.kind == InboxKind::ChangeRequest && item.archived_at.is_none()
+    inbox_triage::is_pending(item)
 }
 
 /// One cost-guard pass: read the live Claude Code sessions, evaluate the
@@ -965,10 +925,10 @@ fn relay_context_sessions(
                 Err(e) => e.into_inner(),
             };
             match map.get(&old_job) {
-                Some(d) if !d.superseded => match d.target {
-                    DispatchTarget::Task(id) => Some(id),
-                    DispatchTarget::InboxItem(_) => None,
-                },
+                Some(d) if !d.superseded => {
+                    let DispatchTarget::Task(id) = d.target;
+                    Some(id)
+                }
                 _ => None,
             }
         };
@@ -1729,14 +1689,14 @@ fn spawn_failed_body(task_id: i64, local_path: &str, error: &str, base: Duration
     )
 }
 
-/// What a dispatched session was started for: the todo-watcher's task, or
-/// the inbox-watcher's item (mesa task 1192). The reaper asks each the same
-/// question — is the session still working on it? — through
-/// [`todo_reaper_tick`]'s one `still mine` reading per entry.
+/// What a dispatched session was started for: the todo-watcher's task. (The
+/// inbox-watcher's item was a second variant until naru task 1691 made its
+/// triage a self-exiting job.) The reaper asks the question — is the session
+/// still working on it? — through [`todo_reaper_tick`]'s one `still mine`
+/// reading per entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DispatchTarget {
     Task(i64),
-    InboxItem(i64),
 }
 
 impl DispatchTarget {
@@ -1744,7 +1704,6 @@ impl DispatchTarget {
     fn watcher(self) -> &'static str {
         match self {
             DispatchTarget::Task(_) => "todo-watcher",
-            DispatchTarget::InboxItem(_) => "inbox-watcher",
         }
     }
 }
@@ -1753,12 +1712,11 @@ impl std::fmt::Display for DispatchTarget {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DispatchTarget::Task(id) => write!(f, "task {id}"),
-            DispatchTarget::InboxItem(id) => write!(f, "inbox item {id}"),
         }
     }
 }
 
-/// One session the todo-watcher or the inbox-watcher spawned, as
+/// One session the todo-watcher spawned, as
 /// `AppState::todo_dispatched` remembers it: what it was dispatched onto,
 /// and whether a later dispatch onto that same task has since **superseded**
 /// it.
@@ -1826,6 +1784,11 @@ const REAP_LIVE_WORK_GRACE: Duration = Duration::from_secs(10 * 60);
 /// is still read as "not listed *yet*" rather than gone (mesa task 1191).
 const REAP_ABANDON_GRACE: Duration = Duration::from_secs(60);
 
+/// How many times the reaper puts a task back to `todo` after its dispatched
+/// session died before it parks the task in `backlog` and tells a person
+/// (naru task 1697).
+const REAP_REQUEUE_MAX: u32 = 2;
+
 /// How long an `in_progress` task's session must sit continuously idle before
 /// the reaper reports it stalled (mesa task 1191): the same hour
 /// `task next`'s stale-claim diagnostic uses, since both name one wedge.
@@ -1872,8 +1835,9 @@ enum ReapVerdict {
 /// or unlisted past [`REAP_ABANDON_GRACE`] — ended without closing its task,
 /// which parks that project's whole loop, and one sitting idle with nothing
 /// running for [`REAP_STALL_AFTER`] is probably waiting on something nobody
-/// will answer. Both are reported, neither is touched: the reaper stops only
-/// what has finished, and the task's status stays the person's to move.
+/// will answer. A gone session's task is put back to `todo` by
+/// [`todo_reaper_tick`] (naru task 1697, capped), a stalled one is only
+/// reported: the reaper stops only what has finished.
 ///
 /// A **busy** session is left for the next pass rather than stopped: an agent
 /// that has just closed its task is usually still writing its report or its
@@ -1997,6 +1961,25 @@ fn log_reaper_event(
             "closed"
         },
     );
+    append_reaper_log(&line);
+}
+
+/// The reaper log line for a task whose dead session was re-queued or parked
+/// (naru task 1697): same family as [`log_reaper_event`], reason
+/// `session-died`.
+fn log_reaper_requeue(task_id: i64, job_id: &str, outcome: &str) {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    append_reaper_log(&format!(
+        "{} task={task_id} session={job_id} reason=session-died outcome={outcome}\n",
+        crate::core::cc::fmt_store_ts(secs),
+    ));
+}
+
+/// Appends one line to the reaper log. Best effort.
+fn append_reaper_log(line: &str) {
     let Some(path) = reaper_log_path() else {
         return;
     };
@@ -2026,6 +2009,84 @@ fn reaper_abandoned_body(job_id: &str, task_id: i64) -> String {
          for example `mesa task update {task_id} --status todo` to have it dispatched \
          again, or `--status done` if the work landed."
     )
+}
+
+/// The alert for a task parked in `backlog` after its session died once too
+/// often (naru task 1697).
+fn reaper_parked_body(job_id: &str, task_id: i64, deaths: u32) -> String {
+    format!(
+        "Agent session {job_id} on task {task_id} died without closing it; its session has now \
+         died {deaths} times (it was put back to todo {} times first). The task was moved to \
+         backlog so the project's todo loop is not stalled or retried forever; move it \
+         back with `naru task update {task_id} --status todo` once the cause is fixed.",
+        deaths - 1
+    )
+}
+
+/// What [`requeue_abandoned`] did about a dead session's task.
+enum Abandoned {
+    /// Put back to `todo`; `1`-based attempt number.
+    Requeued(u32),
+    /// Moved to `backlog` after [`REAP_REQUEUE_MAX`] re-queues; the number of
+    /// deaths.
+    Parked(u32),
+    /// The task is no longer `in_progress`: nothing to do, nothing to report.
+    Moved,
+    /// A claim is held, or the task cannot be read or written: report it.
+    Report,
+}
+
+/// The reaper's answer to a dispatched session that is gone while its task is
+/// still `in_progress` (naru task 1697): with no claim held, put the task back
+/// to `todo` so the project's loop resumes — at most [`REAP_REQUEUE_MAX`]
+/// times, then park it in `backlog`. A claimed task or a failed write is
+/// [`Abandoned::Report`], the alert-only behaviour from before.
+fn requeue_abandoned(state: &AppState, task_id: i64, job_id: &str) -> Abandoned {
+    let mut store = match state.store.lock() {
+        Ok(s) => s,
+        Err(e) => e.into_inner(),
+    };
+    // The pass's snapshot may be stale: act only while the dead session's
+    // entry is still current (not superseded by a relay or re-dispatch). The
+    // store lock is held until the entry is removed below, so a dispatch
+    // cannot supersede and stop the dead job in between.
+    let mut dispatched = match state.todo_dispatched.lock() {
+        Ok(d) => d,
+        Err(e) => e.into_inner(),
+    };
+    if !dispatched.get(job_id).is_some_and(|d| !d.superseded) {
+        return Abandoned::Moved;
+    }
+    let Ok(task) = store.get_task(task_id) else {
+        return Abandoned::Report;
+    };
+    if task.status != Status::InProgress {
+        return Abandoned::Moved;
+    }
+    if task.owner.is_some() {
+        return Abandoned::Report;
+    }
+    let mut counts = match state.todo_requeued.lock() {
+        Ok(c) => c,
+        Err(e) => e.into_inner(),
+    };
+    let done = counts.get(&task_id).copied().unwrap_or(0);
+    let park = done >= REAP_REQUEUE_MAX;
+    let patch = TaskPatch {
+        status: Some(if park { Status::Backlog } else { Status::Todo }),
+        ..Default::default()
+    };
+    if store.update_task(task_id, &patch).is_err() {
+        return Abandoned::Report;
+    }
+    dispatched.remove(job_id);
+    if park {
+        counts.remove(&task_id);
+        Abandoned::Parked(done + 1)
+    } else {
+        counts.insert(task_id, done + 1);
+        Abandoned::Requeued(done + 1)
+    }
 }
 
 /// The alert for an `in_progress` task whose session has sat idle for an hour.
@@ -2072,8 +2133,7 @@ fn file_reaper_alert(
 }
 
 /// One reaper pass: stop the sessions the todo-watcher dispatched whose task
-/// has since closed (mesa task 1057), and the sessions the inbox-watcher
-/// dispatched whose item has since been triaged (mesa task 1192).
+/// has since closed (mesa task 1057).
 ///
 /// The watchers' dispatch is one-directional — it starts agents and never
 /// ends them — so a session whose task closed sits idle for hours holding a
@@ -2081,16 +2141,6 @@ fn file_reaper_alert(
 /// `AppState::todo_dispatched` remembers `(job id → target)` per spawn, and
 /// each pass asks the store what became of the target and `claude agents`
 /// what became of the session ([`reap_verdict`] decides).
-///
-/// An inbox item is read through the same verdict: it is "still mine" while
-/// it is still pending ([`inbox_item_pending`] — present and not archived)
-/// and finished once it is gone (assigned or deleted) or archived, exactly
-/// the triage agent's three outcomes. The verdict's three alerts are the
-/// todo-watcher's — each is filed against a task, which a triage session has
-/// none of — so for an inbox entry they are noted on stderr and otherwise
-/// read as the plain verdict under them: live work after triage waits out
-/// the grace and is then stopped, a session that is gone is forgotten, and a
-/// stalled one is kept.
 ///
 /// Cheap when idle: an empty map returns before any lock and before any
 /// subprocess, so a server whose watcher has dispatched nothing spawns no
@@ -2130,21 +2180,27 @@ fn todo_reaper_tick(state: &AppState) {
             // A superseded session is finished with its task whatever that
             // task now reads, and a task that no longer exists counts as
             // closed: either way, this is not that task's worker any more.
-            // An inbox item still pending is the one reading that means
-            // "still mine"; anything else is a triage that ended.
-            .map(|(_, d)| match d.target {
-                DispatchTarget::Task(task_id) => {
-                    let status = store.get_task(task_id).ok().map(|t| t.status);
-                    (status.is_some(), status.filter(|_| !d.superseded))
-                }
-                DispatchTarget::InboxItem(item_id) => {
-                    let item = store.get_inbox_item(item_id).ok();
-                    let pending = item.as_ref().is_some_and(inbox_item_pending);
-                    (item.is_some(), pending.then_some(Status::InProgress))
-                }
+            .map(|(_, d)| {
+                let DispatchTarget::Task(task_id) = d.target;
+                let status = store.get_task(task_id).ok().map(|t| t.status);
+                (status.is_some(), status.filter(|_| !d.superseded))
             })
             .collect()
     };
+    // A task seen closed, deleted or moved by hand starts its re-queue count
+    // over (naru task 1697); `in_progress` here is the same task still dying.
+    {
+        let mut counts = match state.todo_requeued.lock() {
+            Ok(c) => c,
+            Err(e) => e.into_inner(),
+        };
+        for ((_, d), (_, status)) in dispatched.iter().zip(&statuses) {
+            let DispatchTarget::Task(task_id) = d.target;
+            if !d.superseded && *status != Some(Status::InProgress) {
+                counts.remove(&task_id);
+            }
+        }
+    }
     let now = Instant::now();
     for ((job_id, dispatch), (task_exists, status)) in dispatched.into_iter().zip(statuses) {
         let target = dispatch.target;
@@ -2154,44 +2210,12 @@ fn todo_reaper_tick(state: &AppState) {
             .find(|s| s.id.as_deref() == Some(job_id.as_str()));
         let mut memory = dispatch;
         let verdict = reap_verdict(status, listed, &mut memory, now);
-        // The alerts are filed against a task; a triage session has none, so
-        // an inbox entry takes the plain verdict, said once on stderr — the
-        // three alert arms below are then unreachable for it, and the task
-        // id they would file against is never read.
-        let (task_id, verdict) = match target {
-            DispatchTarget::Task(task_id) => (task_id, verdict),
-            DispatchTarget::InboxItem(_) => {
-                let verdict = match verdict {
-                    ReapVerdict::NoteLiveWork => {
-                        eprintln!(
-                            "{watcher}: {target} was triaged while its session {job_id} still \
-                             had work running; stopping it once the work ends"
-                        );
-                        memory.work_alerted = true;
-                        ReapVerdict::Keep
-                    }
-                    ReapVerdict::AlertAbandoned => {
-                        eprintln!("{watcher}: session {job_id} ended without triaging {target}");
-                        ReapVerdict::Forget
-                    }
-                    ReapVerdict::AlertStalled => {
-                        eprintln!(
-                            "{watcher}: session {job_id} on {target} looks stalled (claude \
-                             attach {job_id})"
-                        );
-                        memory.stalled_alerted = true;
-                        ReapVerdict::Keep
-                    }
-                    other => other,
-                };
-                (0, verdict)
-            }
-        };
+        let DispatchTarget::Task(task_id) = target;
         match verdict {
             ReapVerdict::Keep => {}
             ReapVerdict::Forget => {
                 // Its live work ended by the session going away with it.
-                if memory.work_alerted && matches!(target, DispatchTarget::Task(_)) {
+                if memory.work_alerted {
                     log_reaper_event(
                         task_id,
                         &job_id,
@@ -2205,7 +2229,7 @@ fn todo_reaper_tick(state: &AppState) {
             }
             ReapVerdict::Stop => match agents::stop(&job_id) {
                 Ok(()) => {
-                    if memory.work_alerted && matches!(target, DispatchTarget::Task(_)) {
+                    if memory.work_alerted {
                         // `work_since` is still set only when the grace ran
                         // out on work that had not ended.
                         let forced = memory.work_since.is_some();
@@ -2248,8 +2272,6 @@ fn todo_reaper_tick(state: &AppState) {
                         "was re-dispatched"
                     } else if memory.work_alerted {
                         "is closed and its live work outran the grace"
-                    } else if matches!(target, DispatchTarget::InboxItem(_)) {
-                        "is triaged"
                     } else {
                         "is closed"
                     };
@@ -2275,6 +2297,44 @@ fn todo_reaper_tick(state: &AppState) {
                 memory.work_subagents = session.live_subagents;
             }
             ReapVerdict::AlertAbandoned => {
+                match requeue_abandoned(state, task_id, &job_id) {
+                    Abandoned::Requeued(n) => {
+                        log_reaper_requeue(
+                            task_id,
+                            &job_id,
+                            &format!("re-queued to todo (attempt {n}/{REAP_REQUEUE_MAX})"),
+                        );
+                        eprintln!(
+                            "todo-watcher: session {job_id} died with task {task_id} \
+                             in_progress; put it back to todo ({n}/{REAP_REQUEUE_MAX})"
+                        );
+                        forget_dispatch(state, &job_id);
+                        continue;
+                    }
+                    Abandoned::Parked(deaths) => {
+                        log_reaper_requeue(
+                            task_id,
+                            &job_id,
+                            &format!("parked in backlog after {deaths} deaths"),
+                        );
+                        let body = reaper_parked_body(&job_id, task_id, deaths);
+                        if let Err(e) =
+                            file_reaper_alert(state, task_exists, task_id, &job_id, &body)
+                        {
+                            eprintln!(
+                                "todo-watcher: filing the parked-task alert for session \
+                                 {job_id} failed: {e}"
+                            );
+                        }
+                        forget_dispatch(state, &job_id);
+                        continue;
+                    }
+                    Abandoned::Moved => {
+                        forget_dispatch(state, &job_id);
+                        continue;
+                    }
+                    Abandoned::Report => {}
+                }
                 let body = reaper_abandoned_body(&job_id, task_id);
                 match file_reaper_alert(state, task_exists, task_id, &job_id, &body) {
                     Ok(()) => {
@@ -2571,6 +2631,7 @@ pub fn serve(flags: ServeFlags) -> crate::core::Result<()> {
         usage_refreshing: Arc::new(AtomicBool::new(false)),
         agents_cache: Arc::new(Mutex::new(HashMap::new())),
         live_blocked_cache: Arc::new(Mutex::new(HashMap::new())),
+        live_offer: Arc::new(Mutex::new(None)),
         live_context_cache: Arc::new(Mutex::new(HashMap::new())),
         agents_gen: Arc::new(AtomicU64::new(0)),
         git_cache: Arc::new(Mutex::new(HashMap::new())),
@@ -2589,6 +2650,7 @@ pub fn serve(flags: ServeFlags) -> crate::core::Result<()> {
         cost_relayed: Arc::new(Mutex::new(std::collections::HashSet::new())),
         cost_relay_seeded: Arc::new(Mutex::new(HashMap::new())),
         todo_dispatched: Arc::new(Mutex::new(HashMap::new())),
+        todo_requeued: Arc::new(Mutex::new(HashMap::new())),
         todo_spawn_failed: Arc::new(Mutex::new(HashMap::new())),
         script_runs: Arc::new(script_runs::Registry::new()),
     };
@@ -2630,6 +2692,16 @@ pub fn serve(flags: ServeFlags) -> crate::core::Result<()> {
             Ok(_) => {}
             Err(e) => eprintln!("naru: could not reconcile workflow runs: {e}"),
         }
+    }
+    // Agent runs outlive the server (naru task 1686): a run whose runner died
+    // is resumed on the same claude session; one whose runner is alive is
+    // left alone — the files are all `/api/runs` reads.
+    match runner::reconcile() {
+        Ok(ids) if !ids.is_empty() => {
+            eprintln!("naru: resumed {} agent run(s): {:?}", ids.len(), ids)
+        }
+        Ok(_) => {}
+        Err(e) => eprintln!("naru: could not reconcile agent runs: {e}"),
     }
     let host = if lan { "0.0.0.0" } else { "127.0.0.1" };
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -2873,8 +2945,10 @@ fn router(state: AppState) -> Router {
                 .patch(update_workflow)
                 .delete(delete_workflow),
         )
+        .route("/api/workflows/{id}/duplicate", post(duplicate_workflow))
         .route("/api/workflows/{id}/nodes", post(create_workflow_node))
         .route("/api/workflows/{id}/edges", post(create_workflow_edge))
+        .route("/api/workflows/events", post(emit_workflow_event))
         .route("/api/workflows/{id}/run", post(run_workflow_route))
         .route("/api/workflows/{id}/runs", get(list_workflow_runs))
         .route(
@@ -3070,6 +3144,14 @@ fn router(state: AppState) -> Router {
         // whole difference between this route and `/run/stream`.
         .route("/api/script-runs/{id}/stream", get(stream_script_run))
         .route("/api/script-runs/{id}/stop", post(stop_script_run))
+        // Detached agent runs (naru task 1686, `docs/runner.md`): thin
+        // handlers over `core::runner`, whose job directories are the truth.
+        // Starting one executes an agent, so — like every route that does —
+        // all five carry `require_agent_access`, reads included.
+        .route("/api/runs", get(list_runs).post(start_run))
+        .route("/api/runs/{id}", get(show_run))
+        .route("/api/runs/{id}/message", post(message_run))
+        .route("/api/runs/{id}/stop", post(stop_run))
         // Library: agent definitions, skills, hooks, prompts and CLAUDE.md
         // files, each (a prompt only when it exports) mirrored onto disk under
         // `.claude/`. A row becomes code mesa or Claude Code executes, so all
@@ -4227,6 +4309,14 @@ struct WorkflowUpdate {
     description: Option<Option<String>>,
     #[serde(default, deserialize_with = "double_option")]
     project_id: Option<Option<i64>>,
+    #[serde(default)]
+    enabled: Option<bool>,
+}
+
+#[derive(Deserialize, Default)]
+struct WorkflowDuplicate {
+    #[serde(default)]
+    name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -4261,6 +4351,14 @@ struct WorkflowEdgeCreate {
     branch: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct WorkflowEventBody {
+    event: String,
+    speaker: String,
+    #[serde(default)]
+    text: String,
+}
+
 #[derive(Deserialize, Default)]
 struct WorkflowRunBody {
     /// The run input the trigger node hands on; absent = empty.
@@ -4272,6 +4370,8 @@ struct WorkflowRunBody {
 struct WorkflowLogQuery {
     #[serde(default)]
     log: Option<String>,
+    #[serde(default)]
+    workflow: Option<i64>,
     #[serde(default)]
     limit: Option<i64>,
 }
@@ -4326,9 +4426,34 @@ async fn update_workflow(
         project_id: body.project_id,
         name: body.name,
         description: body.description,
+        enabled: body.enabled,
     };
     let mut store = state.store.lock().unwrap();
     Ok(Json(store.update_workflow(id, patch)?).into_response())
+}
+
+/// Copies a workflow (disabled) and answers the new {workflow, nodes, edges}.
+/// The body may be empty (or `{"name"}`), but `Content-Type: application/json`
+/// is still required: the CSRF gate answers 415 without it.
+async fn duplicate_workflow(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    body: axum::body::Bytes,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    // An empty body = the default name (the Content-Type gate has already run).
+    let name = if body.iter().all(u8::is_ascii_whitespace) {
+        None
+    } else {
+        serde_json::from_slice::<WorkflowDuplicate>(&body)
+            .map_err(|e| crate::core::Error::Validation(format!("invalid JSON body: {e}")))?
+            .name
+    };
+    let mut store = state.store.lock().unwrap();
+    let view = store.duplicate_workflow(id, name.as_deref())?;
+    Ok((StatusCode::CREATED, Json(view)).into_response())
 }
 
 /// Echoes the destroyed {workflow, nodes, edges}.
@@ -4450,6 +4575,39 @@ async fn run_workflow_route(
     Ok(Json(run).into_response())
 }
 
+/// An ambient-engine event: validated here (422 on bad input), then the
+/// matching workflows run in the background in id order — the engine is
+/// real-time and must not wait on them. 202 `{"workflow_ids":[…]}`.
+async fn emit_workflow_event(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Result<Json<WorkflowEventBody>, JsonRejection>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let Json(body) = body?;
+    let store = state.store.clone();
+    let (ids, input) = workflow::plan_ambient(&*store, &body.event, &body.speaker, &body.text)?;
+    if body.event == "can-help" {
+        // The glowing orb (naru task 1700): newest offer wins. Text is capped
+        // on a char boundary; the speaker is a one-line label.
+        let text: String = body.text.chars().take(LIVE_OFFER_TEXT_MAX).collect();
+        let speaker = body
+            .speaker
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        *state.live_offer.lock().unwrap() = Some((text, speaker, Instant::now()));
+    }
+    let ran = ids.clone();
+    tokio::task::spawn_blocking(move || {
+        for (id, e) in workflow::run_ambient(&*store, &ran, &input).1 {
+            eprintln!("naru: ambient workflow {id} run failed: {e}");
+        }
+    });
+    Ok((StatusCode::ACCEPTED, Json(json!({"workflow_ids": ids}))).into_response())
+}
+
 async fn list_workflow_runs(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -4480,7 +4638,10 @@ async fn list_workflow_log(
 ) -> ApiResult<Response> {
     require_agent_access(&state, &addr, &headers)?;
     let store = state.store.lock().unwrap();
-    Ok(Json(store.list_workflow_log(q.log.as_deref(), q.limit.unwrap_or(50))?).into_response())
+    Ok(
+        Json(store.list_workflow_log(q.log.as_deref(), q.workflow, q.limit.unwrap_or(50))?)
+            .into_response(),
+    )
 }
 
 // ---- inbox (global update requests) ----
@@ -4707,6 +4868,10 @@ struct LiveStart {
     /// `validation` error from `Store`.
     #[serde(default)]
     project_id: Option<i64>,
+    /// Accept the pending ambient "can help" offer: its overheard text seeds
+    /// the agent's prompt (naru task 1700). Any start clears the offer.
+    #[serde(default)]
+    accept_offer: bool,
 }
 
 #[derive(Deserialize)]
@@ -4849,15 +5014,30 @@ async fn get_live(
     let (session, turns, boards) = {
         let store = state.store.lock().unwrap();
         let Some(session) = store.current_live_session()? else {
+            let offer = state
+                .live_offer
+                .lock()
+                .unwrap()
+                .as_ref()
+                .filter(|(_, _, at)| at.elapsed() < LIVE_OFFER_TTL)
+                .map(|(text, speaker, at)| LiveOffer {
+                    text: text.clone(),
+                    speaker: speaker.clone(),
+                    age_ms: at.elapsed().as_millis() as u32,
+                });
             return Ok(Json(LiveState {
                 session: None,
                 turns: vec![],
                 boards: vec![],
                 blocked: None,
                 context_tokens: None,
+                offer,
             })
             .into_response());
         };
+        // A session started any other way (the CLI, another client) consumes
+        // the offer too, so a stale one never re-glows after it ends.
+        state.live_offer.lock().unwrap().take();
         let turns = store.list_live_turns(session.id, q.after, LIVE_TURNS_LIMIT)?;
         // The whole board history, bodiless (mesa task 1071) — every board
         // this conversation pushed, in the order the panel steps through
@@ -4883,6 +5063,7 @@ async fn get_live(
         boards,
         blocked,
         context_tokens,
+        offer: None,
     })
     .into_response())
 }
@@ -4986,7 +5167,12 @@ async fn start_live(
         .unwrap()
         .start_live_session(body.project_id)?
         .id;
-    let job = match spawn_live_agent(&state, session_id, body.project_id).await {
+    // Any start clears the pending offer; only an accepting one carries it.
+    let offer = state.live_offer.lock().unwrap().take();
+    let overheard = offer
+        .filter(|(_, _, at)| body.accept_offer && at.elapsed() < LIVE_OFFER_TTL)
+        .map(|(text, speaker, _)| (speaker, text));
+    let job = match spawn_live_agent(&state, session_id, body.project_id, overheard).await {
         Ok(job) => job,
         Err(err) => {
             let _ = state.store.lock().unwrap().end_live_session(session_id);
@@ -5124,10 +5310,16 @@ async fn spawn_live_agent(
     state: &AppState,
     session_id: i64,
     project_id: Option<i64>,
+    overheard: Option<(String, String)>,
 ) -> Result<Option<String>, ApiError> {
     let (dir, name) = live_agent_dir(&state.store.lock().unwrap(), project_id, session_id)?;
     let path = dir.clone();
-    let prompt = live::agent_prompt(&state.store.lock().unwrap(), session_id);
+    let prompt = match &overheard {
+        Some((speaker, text)) => {
+            live::agent_prompt_with_offer(&state.store.lock().unwrap(), session_id, speaker, text)
+        }
+        None => live::agent_prompt(&state.store.lock().unwrap(), session_id),
+    };
     // The `naru-live` agent definition is seeded to disk before the spawn
     // (mesa task 1068): the default template spawns `--agent naru-live`, which
     // errors on an agent Claude Code has never seen. A failure is treated
@@ -5161,60 +5353,51 @@ async fn spawn_live_agent(
     Ok(job)
 }
 
-/// Spawns the short-lived agent that writes a just-ended session's memory
-/// (mesa task 921), reusing [`live_agent_dir`] so it lands in the same folder
-/// and under the same name as the conversation it is about, suffixed
-/// `" summary"`. **Best-effort**, like `stop_live`'s `claude stop` call right
+/// Starts the detached `naru __job summary` that writes a just-ended session's
+/// memory (mesa task 921, naru task 1690), reusing [`live_agent_dir`] so its
+/// claude call runs in the same folder and under the same name as the
+/// conversation it is about, suffixed `" summary"`. **Best-effort**, like `stop_live`'s `claude stop` call right
 /// after it: the store write that ended the conversation is the truth, and a
 /// failure here is a log line, never this route's answer.
 async fn spawn_live_summary(state: &AppState, session_id: i64, project_id: Option<i64>) {
     let dir_and_name = {
         let store = state.store.lock().unwrap();
-        live_agent_dir(&store, project_id, session_id)
+        live_agent_dir(&store, project_id, session_id).map(|v| (v, store.db_path()))
     };
-    let (dir, name) = match dir_and_name {
+    let ((dir, name), db) = match dir_and_name {
         Ok(v) => v,
         Err(e) => {
             eprintln!(
-                "live session {session_id}: could not spawn its summariser: {}",
+                "live session {session_id}: could not start its summariser: {}",
                 e.message
             );
             return;
         }
     };
-    let prompt = live::summary_prompt(&state.store.lock().unwrap(), session_id);
-    let prompts = library::prompts(&state.store.lock().unwrap()).unwrap_or_default();
-    let result = tokio::task::spawn_blocking(move || {
-        agents::spawn_bg(
-            config::LIVE_SUMMARY,
-            &dir,
-            Some(session_id),
-            Some(&format!("{name} summary")),
-            Some(&prompt),
-            &prompts,
-        )
-    })
-    .await;
-    match result {
+    let job = memory_job::Job::Summary {
+        session_id,
+        name: format!("{name} summary"),
+    };
+    match tokio::task::spawn_blocking(move || memory_job::spawn(&job, &dir, db.as_deref())).await {
         Ok(Ok(_)) => {}
         Ok(Err(e)) => {
-            eprintln!("live session {session_id}: could not spawn its summariser: {e}")
+            eprintln!("live session {session_id}: could not start its summariser: {e}")
         }
         Err(e) => {
-            eprintln!("live session {session_id}: summariser spawn panicked: {e}")
+            eprintln!("live session {session_id}: summariser start panicked: {e}")
         }
     }
 }
 
 /// The automatic dream at the end of a conversation (mesa task 1155), the
 /// twin of the CLI's `spawn_live_dream_after`: once the session has ended,
-/// spawns the `live-dream` template when `live::dream_wanted` says the
+/// starts a detached `naru __job dream` when `live::dream_wanted` says the
 /// notebook needs it. **Best-effort** like [`spawn_live_summary`] — a log
 /// line, never this route's answer — off the store lock for the shell-out,
 /// and concurrent with the summariser, which every guarded `Store` notebook
 /// write makes safe (`docs/live.md`, "Dreaming").
 async fn spawn_live_dream_after(state: &AppState, session_id: i64, project_id: Option<i64>) {
-    let (reason, dir, prompt, prompts) = {
+    let (reason, dir, db) = {
         let store = state.store.lock().unwrap();
         // Only a stop passes the entries that just crossed the unused mark
         // (mesa task 1337), as the CLI's does: a kept norm stays a candidate
@@ -5240,34 +5423,26 @@ async fn spawn_live_dream_after(state: &AppState, session_id: i64, project_id: O
             Ok((dir, _)) => dir,
             Err(e) => {
                 eprintln!(
-                    "live session {session_id}: could not spawn the dream pass ({reason}): {}",
+                    "live session {session_id}: could not start the dream pass ({reason}): {}",
                     e.message
                 );
                 return;
             }
         };
-        let prompt = live::dream_prompt(&store, project_id);
-        let prompts = library::prompts(&store).unwrap_or_default();
-        (reason, dir, prompt, prompts)
+        (reason, dir, store.db_path())
     };
-    let result = tokio::task::spawn_blocking(move || {
-        agents::spawn_bg(
-            config::LIVE_DREAM,
-            &dir,
-            Some(session_id),
-            Some("live memory dream"),
-            Some(&prompt),
-            &prompts,
-        )
-    })
-    .await;
+    let job = memory_job::Job::Dream {
+        session_id: Some(session_id),
+    };
+    let result =
+        tokio::task::spawn_blocking(move || memory_job::spawn(&job, &dir, db.as_deref())).await;
     match result {
         Ok(Ok(_)) => {}
         Ok(Err(e)) => {
-            eprintln!("live session {session_id}: could not spawn the dream pass ({reason}): {e}")
+            eprintln!("live session {session_id}: could not start the dream pass ({reason}): {e}")
         }
         Err(e) => {
-            eprintln!("live session {session_id}: dream pass spawn panicked: {e}")
+            eprintln!("live session {session_id}: dream pass start panicked: {e}")
         }
     }
 }
@@ -6674,6 +6849,78 @@ async fn stream_script_run(
         .into_response())
 }
 
+async fn list_runs(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    // File reads (and a `ps` per run): off the async workers.
+    let runs = tokio::task::spawn_blocking(runner::list)
+        .await
+        .map_err(|e| Error::Unavailable(e.to_string()))??;
+    Ok(Json(runs).into_response())
+}
+
+#[derive(Deserialize)]
+struct RunQuery {
+    /// How many trailing events to include (default 500).
+    tail: Option<usize>,
+}
+
+async fn show_run(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Query(q): Query<RunQuery>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let tail = q.tail.unwrap_or(500);
+    let shown = tokio::task::spawn_blocking(move || runner::show(&id, Some(tail)))
+        .await
+        .map_err(|e| Error::Unavailable(e.to_string()))??;
+    Ok(Json(shown).into_response())
+}
+
+async fn start_run(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Result<Json<runner::StartOpts>, JsonRejection>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let Json(body) = body?;
+    Ok((StatusCode::CREATED, Json(runner::start(&body)?)).into_response())
+}
+
+#[derive(Deserialize)]
+struct RunMessage {
+    text: String,
+}
+
+async fn message_run(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: Result<Json<RunMessage>, JsonRejection>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let Json(body) = body?;
+    Ok((StatusCode::ACCEPTED, Json(runner::send(&id, &body.text)?)).into_response())
+}
+
+async fn stop_run(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    Ok(Json(runner::stop(&id)?).into_response())
+}
+
 /// Stops a detached run: sets the registry's stop flag, which the run's own
 /// 100ms cancel poll picks up and turns into a SIGKILL of the whole process
 /// group — the child a body started included.
@@ -7533,6 +7780,11 @@ const AGENTS_TTL: Duration = Duration::from_secs(2);
 /// since every miss is a ~0.5s `claude agents --json --all` and a permission
 /// prompt noticed three seconds late costs nothing.
 const LIVE_BLOCKED_TTL: Duration = Duration::from_secs(5);
+
+/// How long an ambient `can-help` offer stays acceptable, and the most of its
+/// text kept (naru task 1700).
+const LIVE_OFFER_TTL: Duration = Duration::from_secs(600);
+const LIVE_OFFER_TEXT_MAX: usize = 4000;
 
 /// Sentinel key the global agents list caches under in `agents_cache`
 /// (which is otherwise keyed by folder `local_path`). No real path can equal
@@ -11666,6 +11918,7 @@ mod tests {
             usage_refreshing: Arc::new(AtomicBool::new(false)),
             agents_cache: Arc::new(Mutex::new(HashMap::new())),
             live_blocked_cache: Arc::new(Mutex::new(HashMap::new())),
+            live_offer: Arc::new(Mutex::new(None)),
             live_context_cache: Arc::new(Mutex::new(HashMap::new())),
             agents_gen: Arc::new(AtomicU64::new(0)),
             git_cache: Arc::new(Mutex::new(HashMap::new())),
@@ -11684,6 +11937,7 @@ mod tests {
             cost_relayed: Arc::new(Mutex::new(std::collections::HashSet::new())),
             cost_relay_seeded: Arc::new(Mutex::new(HashMap::new())),
             todo_dispatched: Arc::new(Mutex::new(HashMap::new())),
+            todo_requeued: Arc::new(Mutex::new(HashMap::new())),
             todo_spawn_failed: Arc::new(Mutex::new(HashMap::new())),
             script_runs: Arc::new(script_runs::Registry::new()),
         };
@@ -14596,27 +14850,10 @@ exit 2
     }
 
     fn dispatched_task(state: &AppState, job_id: &str) -> Option<i64> {
-        state
-            .todo_dispatched
-            .lock()
-            .unwrap()
-            .get(job_id)
-            .and_then(|d| match d.target {
-                DispatchTarget::Task(id) => Some(id),
-                DispatchTarget::InboxItem(_) => None,
-            })
-    }
-
-    fn dispatched_item(state: &AppState, job_id: &str) -> Option<i64> {
-        state
-            .todo_dispatched
-            .lock()
-            .unwrap()
-            .get(job_id)
-            .and_then(|d| match d.target {
-                DispatchTarget::InboxItem(id) => Some(id),
-                DispatchTarget::Task(_) => None,
-            })
+        state.todo_dispatched.lock().unwrap().get(job_id).map(|d| {
+            let DispatchTarget::Task(id) = d.target;
+            id
+        })
     }
 
     fn superseded(state: &AppState, job_id: &str) -> Option<bool> {
@@ -15188,7 +15425,7 @@ exit 2
     }
 
     #[test]
-    fn todo_reaper_tick_reports_an_in_progress_task_whose_session_died() {
+    fn todo_reaper_tick_reports_a_claimed_in_progress_task_whose_session_died() {
         // SAFETY: ENV_LOCK, as above.
         let _env = attachments::ENV_LOCK
             .lock()
@@ -15204,6 +15441,14 @@ exit 2
             let project = new_project(&state, None);
             let task = new_task(&state, project);
             set_status(&state, task, Status::InProgress);
+            // A claim held by someone: the reaper only reports (naru task
+            // 1697 re-queues an unclaimed task).
+            state
+                .store
+                .lock()
+                .unwrap()
+                .claim_task(task, "someone", false)
+                .unwrap();
 
             // Listed with no pid: the process exited without closing the task.
             seed_dispatch(&state, "job0001", task);
@@ -15230,7 +15475,7 @@ exit 2
             assert_eq!(
                 state.store.lock().unwrap().get_task(task).unwrap().status,
                 Status::InProgress,
-                "the reaper never moves the task"
+                "a claimed task is never moved"
             );
             assert!(stops(&stop_log).is_empty());
             todo_reaper_tick(&state);
@@ -15252,6 +15497,106 @@ exit 2
             todo_reaper_tick(&state);
             assert_eq!(inbox_rows(&state).len(), 2);
             assert_eq!(dispatched_task(&state, "job0002"), None);
+
+            unsafe { std::env::remove_var("MESA_CLAUDE_BIN") };
+        });
+    }
+
+    #[test]
+    fn todo_reaper_tick_requeues_an_unclaimed_task_whose_session_died_then_parks_it() {
+        // SAFETY: ENV_LOCK, as above.
+        let _env = attachments::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::core::library::test_home::with_home_dir(|home| {
+            let stub_dir = tempfile::tempdir().unwrap();
+            let agents_file = stub_dir.path().join("agents.json");
+            let stop_log = stub_dir.path().join("stops.log");
+            let bin = stub_claude_reaper(stub_dir.path(), &agents_file, &stop_log);
+            unsafe { std::env::set_var("MESA_CLAUDE_BIN", &bin) };
+
+            let (_dir, state) = test_state();
+            let project = new_project(&state, None);
+            let task = new_task(&state, project);
+            let status =
+                |state: &AppState| state.store.lock().unwrap().get_task(task).unwrap().status;
+
+            // Each death while the task is unclaimed and in_progress puts it
+            // back to todo, quietly, up to the cap.
+            for attempt in 1..=REAP_REQUEUE_MAX {
+                set_status(&state, task, Status::InProgress);
+                let job = format!("job000{attempt}");
+                seed_dispatch(&state, &job, task);
+                std::fs::write(&agents_file, agents_listing(&job, None, Some("idle"))).unwrap();
+                todo_reaper_tick(&state);
+                assert_eq!(status(&state), Status::Todo, "attempt {attempt} re-queues");
+                assert!(inbox_rows(&state).is_empty(), "a re-queue files no alert");
+                assert_eq!(dispatched_task(&state, &job), None);
+            }
+            let log =
+                std::fs::read_to_string(home.join(".naru").join("logs").join("todo-reaper.log"))
+                    .unwrap();
+            assert!(log.contains("reason=session-died outcome=re-queued to todo (attempt 2/2)"));
+
+            // One more death: parked in backlog, one alert.
+            set_status(&state, task, Status::InProgress);
+            seed_dispatch(&state, "job0009", task);
+            std::fs::write(&agents_file, agents_listing("job0009", None, Some("idle"))).unwrap();
+            todo_reaper_tick(&state);
+            assert_eq!(status(&state), Status::Backlog);
+            assert_eq!(
+                inbox_rows(&state),
+                vec![(
+                    Some(TODO_REAPER_AUTHOR.to_string()),
+                    InboxKind::TaskSummary,
+                    Some(task),
+                )]
+            );
+            assert!(state.todo_requeued.lock().unwrap().is_empty());
+            assert!(stops(&stop_log).is_empty());
+
+            // A superseded entry (relay, re-dispatch) is stale: no re-queue.
+            set_status(&state, task, Status::InProgress);
+            seed_dispatch(&state, "job0010", task);
+            supersede_dispatch(&state, task);
+            assert!(matches!(
+                requeue_abandoned(&state, task, "job0010"),
+                Abandoned::Moved
+            ));
+            assert_eq!(status(&state), Status::InProgress);
+
+            unsafe { std::env::remove_var("MESA_CLAUDE_BIN") };
+        });
+    }
+
+    #[test]
+    fn todo_reaper_tick_forgets_the_requeue_count_once_the_task_closes() {
+        // SAFETY: ENV_LOCK, as above.
+        let _env = attachments::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::core::library::test_home::with_home_dir(|_| {
+            let stub_dir = tempfile::tempdir().unwrap();
+            let agents_file = stub_dir.path().join("agents.json");
+            let stop_log = stub_dir.path().join("stops.log");
+            let bin = stub_claude_reaper(stub_dir.path(), &agents_file, &stop_log);
+            unsafe { std::env::set_var("MESA_CLAUDE_BIN", &bin) };
+
+            let (_dir, state) = test_state();
+            let project = new_project(&state, None);
+            let task = new_task(&state, project);
+            set_status(&state, task, Status::InProgress);
+            seed_dispatch(&state, "job0001", task);
+            std::fs::write(&agents_file, agents_listing("job0001", None, Some("idle"))).unwrap();
+            todo_reaper_tick(&state);
+            assert_eq!(state.todo_requeued.lock().unwrap().get(&task), Some(&1));
+
+            // Re-dispatched, then closed by its agent: the count starts over.
+            set_status(&state, task, Status::InProgress);
+            seed_dispatch(&state, "job0002", task);
+            set_status(&state, task, Status::Done);
+            todo_reaper_tick(&state);
+            assert!(state.todo_requeued.lock().unwrap().is_empty());
 
             unsafe { std::env::remove_var("MESA_CLAUDE_BIN") };
         });
@@ -15892,27 +16237,64 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         assert_eq!(inbox_session_name(&item("   \n\t\n")), "inbox 7");
     }
 
+    /// A stub `naru` for `NARU_SELF_BIN`: appends its argv (`|`-joined, one
+    /// line per run) to the returned log and exits 0. Returns `(stub, log)`.
+    fn inbox_job_stub(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let log = dir.join("jobs.log");
+        let stub = dir.join("naru-stub");
+        std::fs::write(
+            &stub,
+            format!(
+                "#!/bin/bash\n{{ printf '%s|' \"$@\"; echo \"db=$NARU_DB\"; }} >> '{}'\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (stub, log)
+    }
+
+    /// Waits for `log` to hold `n` lines (the jobs run on their own), then a
+    /// beat longer so a stray extra spawn would show; answers the lines.
+    fn job_lines(log: &std::path::Path, n: usize) -> Vec<String> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let lines: Vec<String> = std::fs::read_to_string(log)
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_string)
+                .collect();
+            if lines.len() >= n || std::time::Instant::now() > deadline {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                return std::fs::read_to_string(log)
+                    .unwrap_or_default()
+                    .lines()
+                    .map(str::to_string)
+                    .collect();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
     /// The dedup set is what stands in for the todo-watcher's `in_progress`
     /// claim: every pending item is dispatched once, and a second tick over
-    /// the same inbox dispatches nothing — the triage skill's "no confident
-    /// project match" outcome leaves the item in place, so without this the
-    /// watcher would respawn an agent for it every 60s forever.
+    /// the same inbox dispatches nothing — a hold or a failed call leaves the
+    /// item in place, so without this the watcher would start a job for it
+    /// every 60s forever. Each dispatch is one detached `naru __job
+    /// inbox-triage` (naru task 1691).
     #[test]
     fn inbox_watcher_tick_dispatches_each_item_once_then_picks_up_new_ones() {
         // SAFETY: ENV_LOCK (shared with attachments/cc tests) gives this test
-        // exclusive access to MESA_CLAUDE_BIN for its duration.
+        // exclusive access to NARU_SELF_BIN for its duration; the home lock
+        // keeps the job log off the real one.
         let _env = attachments::ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        // A dispatch seeds the `inbox-triage` agent definition under `$HOME`
-        // (mesa task 1168), so this runs against a throwaway one rather than
-        // writing into whoever is running the tests. Taken *after* ENV_LOCK,
-        // the order every other test that needs both uses.
-        crate::core::library::test_home::with_home_dir(|_| {
+        crate::core::library::test_home::with_home_dir(|home| {
             let stub_dir = tempfile::tempdir().unwrap();
-            let log_path = stub_dir.path().join("bg.log");
-            let bin = stub_claude_bg(stub_dir.path(), &log_path);
-            unsafe { std::env::set_var("MESA_CLAUDE_BIN", &bin) };
+            let (stub, log_path) = inbox_job_stub(stub_dir.path());
+            unsafe { std::env::set_var("NARU_SELF_BIN", &stub) };
 
             let (_dir, state) = test_state();
             let origin = inbox_origin(&state);
@@ -15942,30 +16324,44 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             // The whole pending inbox goes out in one tick — the inbox is one
             // global queue, with no per-project cap to pace it.
             inbox_watcher_tick(&state);
-            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+            let log = job_lines(&log_path, 2);
             assert_eq!(
-                log.lines().count(),
+                log.len(),
                 2,
                 "both pending items must dispatch in the first tick: {log:?}"
             );
+            let all = log.join("\n");
             assert!(
-                log.contains(&format!("Triage mesa inbox item {}.", first.id))
-                    && log.contains(&format!("Triage mesa inbox item {}.", second.id)),
-                "each dispatch's prompt must name its own item: {log:?}"
+                all.contains(&format!("__job|inbox-triage|--item|{}|", first.id))
+                    && all.contains(&format!("__job|inbox-triage|--item|{}|", second.id)),
+                "each dispatch must name its own item: {all:?}"
             );
             assert!(
-                log.contains(&format!(
-                    "inbox {}: khora: eval errors on undefined",
+                all.contains(&format!(
+                    "--name|inbox {}: khora: eval errors on undefined|",
                     first.id
                 )),
-                "session name must identify the item: {log:?}"
+                "session name must identify the item: {all:?}"
+            );
+            assert!(
+                all.contains("--dir|") && all.contains("workspace|"),
+                "the job runs in the workspace folder: {all:?}"
+            );
+            assert!(
+                state.todo_dispatched.lock().unwrap().is_empty(),
+                "a self-exiting job leaves nothing for the reaper"
+            );
+            assert!(
+                home.join(".naru/logs/inbox-triage.log").exists()
+                    || home.join(".mesa/logs/inbox-triage.log").exists(),
+                "the job's output goes to logs/inbox-triage.log"
             );
 
             // Second tick, same inbox: nothing re-dispatches.
             inbox_watcher_tick(&state);
-            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+            let log = job_lines(&log_path, 2);
             assert_eq!(
-                log.lines().count(),
+                log.len(),
                 2,
                 "an already-dispatched item must not dispatch again: {log:?}"
             );
@@ -15983,14 +16379,14 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                 )
                 .unwrap();
             inbox_watcher_tick(&state);
-            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+            let log = job_lines(&log_path, 3);
             assert_eq!(
-                log.lines().count(),
+                log.len(),
                 3,
                 "a new item must dispatch even though older ones are claimed: {log:?}"
             );
             assert!(
-                log.contains(&format!("Triage mesa inbox item {}.", third.id)),
+                log.join("\n").contains(&format!("--item|{}|", third.id)),
                 "the new item's own id must be dispatched: {log:?}"
             );
 
@@ -16008,13 +16404,13 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                 "an item that left the inbox must be pruned from the dedup set"
             );
 
-            unsafe { std::env::remove_var("MESA_CLAUDE_BIN") };
+            unsafe { std::env::remove_var("NARU_SELF_BIN") };
         });
     }
 
     /// Task 846: only a change request is triaged. A task summary is an agent
     /// reporting to a person — every `/execute-todo` close-out sends one — so
-    /// dispatching it would answer a report with an agent, and the kind never
+    /// dispatching it would answer a report with a job, and the kind never
     /// changes, so the skip is permanent rather than a wait.
     #[test]
     fn inbox_watcher_tick_dispatches_change_requests_only() {
@@ -16022,15 +16418,10 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         let _env = attachments::ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        // A dispatch seeds the `inbox-triage` agent definition under `$HOME`
-        // (mesa task 1168), so this runs against a throwaway one rather than
-        // writing into whoever is running the tests. Taken *after* ENV_LOCK,
-        // the order every other test that needs both uses.
         crate::core::library::test_home::with_home_dir(|_| {
             let stub_dir = tempfile::tempdir().unwrap();
-            let log_path = stub_dir.path().join("bg.log");
-            let bin = stub_claude_bg(stub_dir.path(), &log_path);
-            unsafe { std::env::set_var("MESA_CLAUDE_BIN", &bin) };
+            let (stub, log_path) = inbox_job_stub(stub_dir.path());
+            unsafe { std::env::set_var("NARU_SELF_BIN", &stub) };
 
             let (_dir, state) = test_state();
             let origin = inbox_origin(&state);
@@ -16058,14 +16449,14 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                 .unwrap();
 
             inbox_watcher_tick(&state);
-            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+            let log = job_lines(&log_path, 1);
             assert_eq!(
-                log.lines().count(),
+                log.len(),
                 1,
                 "only the change request may dispatch: {log:?}"
             );
             assert!(
-                log.contains(&format!("Triage mesa inbox item {}.", request.id)),
+                log[0].contains(&format!("--item|{}|", request.id)),
                 "{log:?}"
             );
             assert!(
@@ -16075,33 +16466,27 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
 
             // A second tick is not a delayed dispatch: the kind is fixed.
             inbox_watcher_tick(&state);
-            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
-            assert_eq!(log.lines().count(), 1, "{log:?}");
+            let log = job_lines(&log_path, 1);
+            assert_eq!(log.len(), 1, "{log:?}");
 
-            unsafe { std::env::remove_var("MESA_CLAUDE_BIN") };
+            unsafe { std::env::remove_var("NARU_SELF_BIN") };
         });
     }
 
-    /// A spawn failure must release the claim, so a transient `claude`
-    /// outage retries next tick instead of silently dropping the item —
-    /// the inbox equivalent of the todo-watcher's revert-to-`todo`.
+    /// A job that cannot start must release the claim, so a transient failure
+    /// retries next tick instead of silently dropping the item — the inbox
+    /// equivalent of the todo-watcher's revert-to-`todo`.
     #[test]
-    fn inbox_watcher_tick_releases_claim_when_spawn_fails() {
+    fn inbox_watcher_tick_releases_claim_when_the_job_cannot_start() {
         // SAFETY: see `inbox_watcher_tick_dispatches_each_item_once_...`.
         let _env = attachments::ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        // A dispatch seeds the `inbox-triage` agent definition under `$HOME`
-        // (mesa task 1168), so this runs against a throwaway one rather than
-        // writing into whoever is running the tests. Taken *after* ENV_LOCK,
-        // the order every other test that needs both uses.
         crate::core::library::test_home::with_home_dir(|_| {
             let stub_dir = tempfile::tempdir().unwrap();
-            let log_path = stub_dir.path().join("bg.log");
-            let bin = stub_claude_bg(stub_dir.path(), &log_path);
-            // `stub_claude_bg`'s `--bg` branch fails while this marker exists.
-            std::fs::write(stub_dir.path().join("fail"), "").unwrap();
-            unsafe { std::env::set_var("MESA_CLAUDE_BIN", &bin) };
+            let (stub, log_path) = inbox_job_stub(stub_dir.path());
+            // A binary that does not exist: the spawn itself fails.
+            unsafe { std::env::set_var("NARU_SELF_BIN", stub_dir.path().join("missing")) };
 
             let (_dir, state) = test_state();
             let origin = inbox_origin(&state);
@@ -16120,25 +16505,24 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             inbox_watcher_tick(&state);
             assert!(
                 !state.inbox_dispatched.lock().unwrap().contains(&item.id),
-                "a failed spawn must not leave the item claimed"
+                "a failed start must not leave the item claimed"
             );
 
-            // With the stub healthy again, the next tick dispatches it.
-            std::fs::remove_file(stub_dir.path().join("fail")).unwrap();
+            // With the binary healthy again, the next tick dispatches it.
+            unsafe { std::env::set_var("NARU_SELF_BIN", &stub) };
             inbox_watcher_tick(&state);
-            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+            let log = job_lines(&log_path, 1);
             assert!(
-                log.contains(&format!("Triage mesa inbox item {}.", item.id)),
-                "the item must dispatch once the spawn succeeds: {log:?}"
+                log.join("\n").contains(&format!("--item|{}|", item.id)),
+                "the item must dispatch once the job can start: {log:?}"
             );
 
-            unsafe { std::env::remove_var("MESA_CLAUDE_BIN") };
+            unsafe { std::env::remove_var("NARU_SELF_BIN") };
         });
     }
 
     /// The one definition of "needs triage" (mesa task 1192): a change
-    /// request that is not archived. Read by the dispatch to pick items and
-    /// by the reaper to know a triage session is finished.
+    /// request that is not archived. Read by the dispatch to pick items.
     #[test]
     fn inbox_item_pending_is_a_live_change_request() {
         let (_dir, state) = test_state();
@@ -16166,7 +16550,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
     }
 
     /// Mesa task 1192: an archived change request has been triaged — that is
-    /// the triage agent's own verdict — so it is never a dispatch candidate.
+    /// the triage's own verdict — so it is never a dispatch candidate.
     /// Before, only the in-memory dedup set held it back, and a server
     /// restart empties that set, so every restart re-triaged every archived
     /// request. Simulated here by clearing the set between ticks.
@@ -16178,9 +16562,8 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             .unwrap_or_else(|e| e.into_inner());
         crate::core::library::test_home::with_home_dir(|_| {
             let stub_dir = tempfile::tempdir().unwrap();
-            let log_path = stub_dir.path().join("bg.log");
-            let bin = stub_claude_bg(stub_dir.path(), &log_path);
-            unsafe { std::env::set_var("MESA_CLAUDE_BIN", &bin) };
+            let (stub, log_path) = inbox_job_stub(stub_dir.path());
+            unsafe { std::env::set_var("NARU_SELF_BIN", &stub) };
 
             let (_dir, state) = test_state();
             let origin = inbox_origin(&state);
@@ -16191,8 +16574,8 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                 .create_inbox_item(None, "mesa: a request", InboxKind::ChangeRequest, origin)
                 .unwrap();
             inbox_watcher_tick(&state);
-            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
-            assert_eq!(log.lines().count(), 1, "{log:?}");
+            let log = job_lines(&log_path, 1);
+            assert_eq!(log.len(), 1, "{log:?}");
 
             // Triaged: archived with a reason. A restart forgets the dedup
             // set, and the next tick must still not dispatch it.
@@ -16204,9 +16587,9 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                 .unwrap();
             state.inbox_dispatched.lock().unwrap().clear();
             inbox_watcher_tick(&state);
-            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+            let log = job_lines(&log_path, 1);
             assert_eq!(
-                log.lines().count(),
+                log.len(),
                 1,
                 "an archived request must not be re-triaged after a restart: {log:?}"
             );
@@ -16223,137 +16606,22 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                 .set_inbox_item_archived(item.id, false, None, None)
                 .unwrap();
             inbox_watcher_tick(&state);
-            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+            let log = job_lines(&log_path, 2);
             assert_eq!(
-                log.lines().count(),
+                log.len(),
                 2,
                 "an un-archived request is pending again: {log:?}"
             );
 
-            unsafe { std::env::remove_var("MESA_CLAUDE_BIN") };
-        });
-    }
-
-    /// Mesa task 1192: the inbox-watcher's dispatch records its receipt in
-    /// the same map the todo-watcher's does, and the reaper stops the triage
-    /// session once its item is triaged — archived, assigned or deleted — and
-    /// the session is not busy. Exactly once, then forgotten.
-    #[test]
-    fn todo_reaper_tick_stops_a_triage_session_once_its_item_is_triaged() {
-        // SAFETY: ENV_LOCK gives this test exclusive access to
-        // MESA_CLAUDE_BIN / MESA_CONFIG_FILE for its duration.
-        let _env = attachments::ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        // A dispatch seeds the `inbox-triage` agent definition under `$HOME`
-        // (mesa task 1168). Taken *after* ENV_LOCK, the usual order.
-        crate::core::library::test_home::with_home_dir(|_| {
-            let stub_dir = tempfile::tempdir().unwrap();
-            let agents_file = stub_dir.path().join("agents.json");
-            let stop_log = stub_dir.path().join("stops.log");
-            let bin = stub_claude_reaper(stub_dir.path(), &agents_file, &stop_log);
-            unsafe { std::env::set_var("MESA_CLAUDE_BIN", &bin) };
-
-            let (_dir, state) = test_state();
-            let origin = inbox_origin(&state);
-            let item = state
-                .store
-                .lock()
-                .unwrap()
-                .create_inbox_item(None, "mesa: a request", InboxKind::ChangeRequest, origin)
-                .unwrap();
-
-            // The dispatch records the receipt's job id against the item.
-            inbox_watcher_tick(&state);
-            assert_eq!(
-                dispatched_item(&state, "job0001"),
-                Some(item.id),
-                "a successful dispatch must record its job id against its item"
-            );
-
-            // Still pending: the session is left alone however idle it is.
-            std::fs::write(
-                &agents_file,
-                agents_listing("job0001", Some(4242), Some("idle")),
-            )
-            .unwrap();
-            todo_reaper_tick(&state);
-            assert!(
-                stops(&stop_log).is_empty(),
-                "a pending item's triage session must never be stopped"
-            );
-            assert_eq!(dispatched_item(&state, "job0001"), Some(item.id));
-
-            // Archived with a reason — triaged — but the session is still
-            // busy (writing its verdict): this pass stops nothing.
-            state
-                .store
-                .lock()
-                .unwrap()
-                .set_inbox_item_archived(item.id, true, Some("not actionable"), None)
-                .unwrap();
-            std::fs::write(
-                &agents_file,
-                agents_listing("job0001", Some(4242), Some("busy")),
-            )
-            .unwrap();
-            todo_reaper_tick(&state);
-            assert!(
-                stops(&stop_log).is_empty(),
-                "a busy session must be left for the next pass"
-            );
-            assert_eq!(dispatched_item(&state, "job0001"), Some(item.id));
-
-            // Idle now: stopped exactly once, and forgotten.
-            std::fs::write(
-                &agents_file,
-                agents_listing("job0001", Some(4242), Some("idle")),
-            )
-            .unwrap();
-            todo_reaper_tick(&state);
-            assert_eq!(stops(&stop_log), vec!["job0001".to_string()]);
-            assert_eq!(dispatched_item(&state, "job0001"), None);
-            todo_reaper_tick(&state);
-            assert_eq!(
-                stops(&stop_log),
-                vec!["job0001".to_string()],
-                "a stopped session must not be stopped again"
-            );
-
-            // The other terminal outcome: the item is gone (assigned or
-            // deleted). The stub hands out `job0001` again; the first entry
-            // is already forgotten, so the key is free.
-            let second = state
-                .store
-                .lock()
-                .unwrap()
-                .create_inbox_item(None, "mesa: another", InboxKind::ChangeRequest, origin)
-                .unwrap();
-            inbox_watcher_tick(&state);
-            assert_eq!(dispatched_item(&state, "job0001"), Some(second.id));
-            state
-                .store
-                .lock()
-                .unwrap()
-                .delete_inbox_item(second.id)
-                .unwrap();
-            todo_reaper_tick(&state);
-            assert_eq!(
-                stops(&stop_log),
-                vec!["job0001".to_string(), "job0001".to_string()],
-                "a deleted item's idle session is stopped"
-            );
-            assert_eq!(dispatched_item(&state, "job0001"), None);
-
-            unsafe { std::env::remove_var("MESA_CLAUDE_BIN") };
+            unsafe { std::env::remove_var("NARU_SELF_BIN") };
         });
     }
 
     /// The retro-watcher (mesa task 1158) dispatches exactly once per
-    /// interval: the first tick over a fresh db spawns the `naru-retro`
-    /// agent under `~/.mesa/workspace` with the run id in its prompt, and a
-    /// second tick inside the interval spawns nothing, because the run row
-    /// it wrote is the claim.
+    /// interval: the first tick over a fresh db starts one detached `naru
+    /// __job retro` (naru task 1692) under `~/.mesa/workspace` naming the run
+    /// id, and a second tick inside the interval starts nothing, because the
+    /// run row it wrote is the claim.
     #[test]
     fn retro_watcher_tick_dispatches_once_per_interval() {
         // SAFETY: see `inbox_watcher_tick_dispatches_each_item_once_...`.
@@ -16362,14 +16630,13 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             .unwrap_or_else(|e| e.into_inner());
         crate::core::library::test_home::with_home_dir(|home| {
             let stub_dir = tempfile::tempdir().unwrap();
-            let log_path = stub_dir.path().join("bg.log");
-            let bin = stub_claude_bg(stub_dir.path(), &log_path);
-            unsafe { std::env::set_var("MESA_CLAUDE_BIN", &bin) };
+            let (stub, log_path) = inbox_job_stub(stub_dir.path());
+            unsafe { std::env::set_var("NARU_SELF_BIN", &stub) };
 
             let (_dir, state) = test_state();
             retro_watcher_tick(&state);
-            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
-            assert_eq!(log.lines().count(), 1, "a fresh db is due: {log:?}");
+            let log = job_lines(&log_path, 1);
+            assert_eq!(log.len(), 1, "a fresh db is due: {log:?}");
             let run = state
                 .store
                 .lock()
@@ -16380,52 +16647,47 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             assert_eq!(run.trigger, "watcher");
             assert!(
                 run.spawned_at.is_some(),
-                "a successful spawn stamps spawned_at: {run:?}"
+                "a successful start stamps spawned_at: {run:?}"
             );
             assert!(
-                log.contains(&format!(
-                    "|naru retro {}|Run mesa session retrospective {}.",
-                    run.id, run.id
-                )),
-                "the session name and prompt carry the run id: {log:?}"
-            );
-            assert_eq!(
-                std::fs::read_to_string(stub_dir.path().join("last-agent"))
-                    .unwrap()
-                    .trim(),
-                "naru-retro"
+                log[0].starts_with(&format!("__job|retro|--run|{}|--dir|", run.id))
+                    && log[0].contains("workspace|"),
+                "the job names the run id and runs in the workspace: {log:?}"
             );
             assert!(
-                home.join(".claude/agents/naru-retro.md").is_file(),
-                "the definition is seeded before the spawn"
+                !home.join(".claude/agents/naru-retro.md").exists(),
+                "the definition is no longer seeded"
+            );
+            assert!(
+                home.join(".naru/logs/retro.log").exists()
+                    || home.join(".mesa/logs/retro.log").exists(),
+                "the job's output goes to logs/retro.log"
             );
 
             retro_watcher_tick(&state);
-            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+            let log = job_lines(&log_path, 1);
             assert_eq!(
-                log.lines().count(),
+                log.len(),
                 1,
                 "inside the interval nothing dispatches: {log:?}"
             );
-            unsafe { std::env::remove_var("MESA_CLAUDE_BIN") };
+            unsafe { std::env::remove_var("NARU_SELF_BIN") };
         });
     }
 
-    /// A spawn failure rolls the run row back, so the next tick retries
-    /// rather than waiting out a 72-hour interval on a run that never
+    /// A job that cannot start rolls the run row back, so the next tick
+    /// retries rather than waiting out a 72-hour interval on a run that never
     /// happened — the inbox-watcher's claim release, in the db.
     #[test]
-    fn retro_watcher_tick_rolls_back_the_run_when_spawn_fails() {
+    fn retro_watcher_tick_rolls_back_the_run_when_the_job_cannot_start() {
         // SAFETY: see `inbox_watcher_tick_dispatches_each_item_once_...`.
         let _env = attachments::ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         crate::core::library::test_home::with_home_dir(|_| {
             let stub_dir = tempfile::tempdir().unwrap();
-            let log_path = stub_dir.path().join("bg.log");
-            let bin = stub_claude_bg(stub_dir.path(), &log_path);
-            std::fs::write(stub_dir.path().join("fail"), "").unwrap();
-            unsafe { std::env::set_var("MESA_CLAUDE_BIN", &bin) };
+            let (stub, log_path) = inbox_job_stub(stub_dir.path());
+            unsafe { std::env::set_var("NARU_SELF_BIN", stub_dir.path().join("missing")) };
 
             let (_dir, state) = test_state();
             retro_watcher_tick(&state);
@@ -16437,13 +16699,13 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                     .last_retro_run()
                     .unwrap()
                     .is_none(),
-                "a failed spawn must leave no run row"
+                "a failed start must leave no run row"
             );
 
-            std::fs::remove_file(stub_dir.path().join("fail")).unwrap();
+            unsafe { std::env::set_var("NARU_SELF_BIN", &stub) };
             retro_watcher_tick(&state);
-            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
-            assert_eq!(log.lines().count(), 1, "the retry dispatches: {log:?}");
+            let log = job_lines(&log_path, 1);
+            assert_eq!(log.len(), 1, "the retry dispatches: {log:?}");
             assert!(
                 state
                     .store
@@ -16453,7 +16715,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                     .unwrap()
                     .is_some()
             );
-            unsafe { std::env::remove_var("MESA_CLAUDE_BIN") };
+            unsafe { std::env::remove_var("NARU_SELF_BIN") };
         });
     }
 
@@ -17975,6 +18237,40 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         assert_eq!(body["turns"], serde_json::json!([]));
     }
 
+    /// A `can-help` event lights `offer` on the idle poll (naru task 1700); an
+    /// offer older than the TTL is absent.
+    #[tokio::test]
+    async fn can_help_event_surfaces_as_a_live_offer_until_it_goes_stale() {
+        let (_dir, state) = test_state();
+        let resp = emit_workflow_event(
+            State(state.clone()),
+            ConnectInfo(loopback()),
+            loopback_agent_headers(),
+            Ok(Json(WorkflowEventBody {
+                event: "can-help".into(),
+                speaker: "Simon".into(),
+                text: "how do I rebase?".into(),
+            })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let poll = |state: AppState| async move {
+            json_body(
+                get_live(State(state), Query(LiveQuery { after: None }))
+                    .await
+                    .unwrap(),
+            )
+            .await
+        };
+        let body = poll(state.clone()).await;
+        assert_eq!(body["offer"]["text"], "how do I rebase?");
+        assert_eq!(body["offer"]["speaker"], "Simon");
+        let old = Instant::now() - LIVE_OFFER_TTL - Duration::from_secs(1);
+        *state.live_offer.lock().unwrap() = Some(("old".into(), "Simon".into(), old));
+        assert!(poll(state).await["offer"].is_null());
+    }
+
     /// The whole start path: the session opens, the `live-agent` command runs
     /// in the project's folder with the session's name and mesa's own prompt,
     /// and the spawn receipt lands on the session.
@@ -18016,6 +18312,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                 loopback_agent_headers(),
                 Ok(Json(LiveStart {
                     project_id: Some(id),
+                    accept_offer: false,
                 })),
             ))
             .unwrap();
@@ -18046,7 +18343,10 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                 State(state.clone()),
                 ConnectInfo(loopback()),
                 loopback_agent_headers(),
-                Ok(Json(LiveStart { project_id: None })),
+                Ok(Json(LiveStart {
+                    project_id: None,
+                    accept_offer: false,
+                })),
             ))
             .unwrap_err();
             assert_eq!(err.status, StatusCode::CONFLICT);
@@ -18055,73 +18355,96 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         });
     }
 
-    /// mesa task 1339: a PATCH closing a task in a project whose notebook is
-    /// over its budget answers the closed task and then spawns that project's
-    /// dream off the store lock, recording its receipt in `project_dreams`.
+    /// mesa task 1339, naru task 1690: a PATCH closing a task in a project
+    /// whose notebook is over its budget answers the closed task and then
+    /// starts that project's dream — a detached `naru __job project-dream`,
+    /// here a stub logging its argv and `NARU_DB` — off the store lock,
+    /// recording its `pid:<n>` marker in `project_dreams`.
     #[test]
     fn closing_a_task_over_the_notebook_budget_spawns_the_project_dream() {
-        // SAFETY: ENV_LOCK gives this test exclusive access to
-        // MESA_CLAUDE_BIN/MESA_CONFIG_FILE for its duration.
+        // SAFETY: ENV_LOCK gives this test exclusive access to NARU_SELF_BIN
+        // for its duration; the home lock keeps the job log off the real one.
         let _env = attachments::ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let stub_dir = tempfile::tempdir().unwrap();
-        let log_path = stub_dir.path().join("bg.log");
-        let bin = stub_claude_bg(stub_dir.path(), &log_path);
-        unsafe { std::env::set_var("MESA_CLAUDE_BIN", &bin) };
-
-        let (_dir, state) = test_state();
-        let proj_dir = tempfile::tempdir().unwrap();
-        let root = proj_dir.path().canonicalize().unwrap();
-        let pid = new_project(&state, Some(root.to_str().unwrap()));
-        {
-            let mut store = state.store.lock().unwrap();
-            let words = |n: usize| vec!["w"; n].join(" ");
-            // An entry is capped at 600 characters: four of 251 words are
-            // 1004, one past the 1000-word budget.
-            for _ in 0..4 {
-                store.add_notebook_entry_in(Some(pid), &words(251)).unwrap();
-            }
-        }
-        let id = new_task(&state, pid);
-
-        // One blocking thread, so the blocking pool runs its queue in order:
-        // the no-op submitted after the PATCH returns only once the dream
-        // job the PATCH queued has finished — no sleep, no poll.
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .max_blocking_threads(1)
-            .enable_all()
-            .build()
+        crate::core::library::test_home::with_home_dir(|_| {
+            use std::os::unix::fs::PermissionsExt;
+            let stub_dir = tempfile::tempdir().unwrap();
+            let log_path = stub_dir.path().join("job.log");
+            let stub = stub_dir.path().join("naru-stub");
+            std::fs::write(
+                &stub,
+                format!(
+                    "#!/bin/bash\nprintf '%s\\n' \"$@\" \"db=$NARU_DB\" > '{}'\n",
+                    log_path.display()
+                ),
+            )
             .unwrap();
-        let body = rt.block_on(async {
-            let body = patch_task(&state, id, r#"{"status":"done"}"#).await;
-            tokio::task::spawn_blocking(|| ()).await.unwrap();
-            body
-        });
-        assert_eq!(body["status"], "done");
-        assert_eq!(body["id"], id);
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+            unsafe { std::env::set_var("NARU_SELF_BIN", &stub) };
 
-        let logged = std::fs::read_to_string(&log_path).unwrap();
-        // The prompt spans lines; the stub's `|<name>|` marks each spawn.
-        assert_eq!(
-            logged.matches("|project memory dream|").count(),
-            1,
-            "one dream spawned: {logged}"
-        );
-        let head = format!("{}|project memory dream|", root.display());
-        assert!(logged.starts_with(&head), "{logged}");
-        assert!(
-            logged.contains(&format!("naru memory merge --project {pid} --ids")),
-            "the project's own dream prompt: {logged}"
-        );
-        let dream = state
-            .store
-            .lock()
-            .unwrap()
-            .project_dream(pid)
-            .unwrap()
-            .expect("the spawn is recorded");
-        assert_eq!(dream.agent_id.as_deref(), Some("deadbeef"));
+            let (dir, state) = test_state();
+            let proj_dir = tempfile::tempdir().unwrap();
+            let root = proj_dir.path().canonicalize().unwrap();
+            let pid = new_project(&state, Some(root.to_str().unwrap()));
+            {
+                let mut store = state.store.lock().unwrap();
+                let words = |n: usize| vec!["w"; n].join(" ");
+                // An entry is capped at 600 characters: four of 251 words are
+                // 1004, one past the 1000-word budget.
+                for _ in 0..4 {
+                    store.add_notebook_entry_in(Some(pid), &words(251)).unwrap();
+                }
+            }
+            let id = new_task(&state, pid);
+
+            // One blocking thread, so the blocking pool runs its queue in
+            // order: the no-op submitted after the PATCH returns only once
+            // the start the PATCH queued has finished.
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .max_blocking_threads(1)
+                .enable_all()
+                .build()
+                .unwrap();
+            let body = rt.block_on(async {
+                let body = patch_task(&state, id, r#"{"status":"done"}"#).await;
+                tokio::task::spawn_blocking(|| ()).await.unwrap();
+                body
+            });
+            assert_eq!(body["status"], "done");
+            assert_eq!(body["id"], id);
+
+            // The child runs on its own; wait for its one log write.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let logged = loop {
+                match std::fs::read_to_string(&log_path) {
+                    Ok(t) if t.contains("db=") => break t,
+                    _ if std::time::Instant::now() > deadline => panic!("the job never ran"),
+                    _ => std::thread::sleep(std::time::Duration::from_millis(20)),
+                }
+            };
+            let want = format!(
+                "__job\nproject-dream\n--project\n{pid}\n--dir\n{}\ndb={}\n",
+                root.display(),
+                dir.path().canonicalize().unwrap().join("test.db").display()
+            );
+            assert_eq!(logged, want);
+            let dream = state
+                .store
+                .lock()
+                .unwrap()
+                .project_dream(pid)
+                .unwrap()
+                .expect("the spawn is recorded");
+            assert!(
+                dream
+                    .agent_id
+                    .as_deref()
+                    .is_some_and(|m| m.starts_with("pid:")),
+                "{dream:?}"
+            );
+            unsafe { std::env::remove_var("NARU_SELF_BIN") };
+        });
     }
 
     /// A spawn that fails must not strand a live session: nothing is listening
@@ -18145,7 +18468,10 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                 State(state.clone()),
                 ConnectInfo(loopback()),
                 loopback_agent_headers(),
-                Ok(Json(LiveStart { project_id: None })),
+                Ok(Json(LiveStart {
+                    project_id: None,
+                    accept_offer: false,
+                })),
             ))
             .unwrap_err();
             assert_eq!(err.code, "unavailable");
@@ -18202,7 +18528,10 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                         State(state.clone()),
                         ConnectInfo(loopback()),
                         loopback_agent_headers(),
-                        Ok(Json(LiveStart { project_id: None })),
+                        Ok(Json(LiveStart {
+                            project_id: None,
+                            accept_offer: false,
+                        })),
                     )
                     .await
                     .unwrap();

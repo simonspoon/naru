@@ -14,7 +14,7 @@
 //! {
 //!   "commands": {
 //!     "todo-watcher":   "claude --bg --agent supervisor --name {name} -- \"/execute-mesa-task {id}\"",
-//!     "inbox-watcher":  "claude --bg --agent inbox-triage --name {name} -- \"Triage mesa inbox item {id}.\"",
+//!     "inbox-watcher":  "claude -p --model {model} --name {name} --tools \"\" --strict-mcp-config --output-format json --json-schema {schema} -- {prompt}",
 //!     "agent-spawn":    "claude --bg --model opus --agent supervisor -- {prompt}",
 //!     "live-agent":     "claude --bg --agent naru-live --name {name} -- {prompt}",
 //!     "live-summary":   "claude --bg --name {name} -- {prompt}",
@@ -220,22 +220,30 @@ pub const LIVE_SUMMARY: &str = "live-summary";
 /// to merge duplicate entries and drop superseded ones one guarded command
 /// at a time.
 pub const LIVE_DREAM: &str = "live-dream";
-/// The session retrospective (mesa task 1158, `docs/retro.md`): spawned by
+/// The session retrospective (mesa task 1158, `docs/retro.md`): run by
 /// `serve --watch-retro` every `retro-interval-hours`, and by `mesa retro
 /// run` on demand, to review finished task sessions for friction and file
-/// suggestions into the inbox. Proposes, never edits.
+/// suggestions into the inbox. Since naru task 1692 its calls are structured
+/// `claude -p` ones inside a detached `naru __job retro`. Proposes, never
+/// edits.
 pub const RETRO: &str = "retro";
-/// The background agent a workflow's `prompt` node runs on an Anthropic model
-/// (mesa task 1607, `docs/workflows.md`): spawned like every spawn above
-/// (`agents::spawn_workflow_prompt`, through this template), then waited on
-/// and read back off its transcript by `core::llm`, then stopped. `local:<name>`
-/// models never reach it — those are an Ollama HTTP call.
+/// The one synchronous `claude -p --output-format json` call a workflow's
+/// `prompt` node makes on an Anthropic model (mesa task 1607, naru task 1687,
+/// `docs/workflows.md`): resolved like every spawn above
+/// (`agents::workflow_prompt_script`, through this template), run to completion
+/// and its result JSON read off stdout by `core::llm`. `local:<name>` models
+/// never reach it — those are an Ollama HTTP call.
 pub const WORKFLOW_PROMPT: &str = "workflow-prompt";
+/// The detached `claude -p` the run runner holds open (naru task 1686,
+/// `docs/runner.md`): launched by `naru run __runner` through this template
+/// with stdin and stdout piped to the runner, so an agent run outlives the
+/// Naru server. Print mode on purpose, like `workflow-prompt` and unlike every other spawn above.
+pub const RUNNER: &str = "runner";
 
 /// Every configurable command, in the order the docs and the Settings page
 /// list them. The single source of truth for "which keys mesa configures" —
 /// [`default_command`] answers the same question one key at a time.
-pub const ACTIONS: [&str; 8] = [
+pub const ACTIONS: [&str; 9] = [
     TODO_WATCHER,
     INBOX_WATCHER,
     AGENT_SPAWN,
@@ -244,6 +252,7 @@ pub const ACTIONS: [&str; 8] = [
     LIVE_DREAM,
     RETRO,
     WORKFLOW_PROMPT,
+    RUNNER,
 ];
 
 /// Built-in default for [`TODO_WATCHER`] — the argv mesa shipped before the
@@ -272,13 +281,15 @@ pub const ACTIONS: [&str; 8] = [
 /// arrive as two arguments and the id would be lost.
 pub const DEFAULT_TODO_WATCHER: &str =
     r#"claude --bg --agent supervisor --name {name} -- "/execute-mesa-task {id}""#;
-/// Built-in default for [`INBOX_WATCHER`]; see [`DEFAULT_TODO_WATCHER`]. The
-/// triage runs as the `inbox-triage` agent definition (mesa task 1168,
-/// `core::inbox_triage::INBOX_TRIAGE_DEFINITION`, seeded to
-/// `.claude/agents/inbox-triage.md` before the spawn), named literally; the
-/// prompt is one sentence, since the definition holds the whole procedure.
-pub const DEFAULT_INBOX_WATCHER: &str =
-    r#"claude --bg --agent inbox-triage --name {name} -- "Triage mesa inbox item {id}.""#;
+/// Built-in default for [`INBOX_WATCHER`] (naru task 1691): [`DEFAULT_LIVE_SUMMARY`]'s
+/// shape — one synchronous tool-less `claude -p --output-format json
+/// --json-schema {schema}` call, run inside a detached `naru __job
+/// inbox-triage` child (`core::inbox_triage`). `{id}` is the inbox item,
+/// `{model}` the pass's model (haiku to decide, sonnet to sharpen),
+/// `{prompt}` the context Naru gathered and `{schema}` the verdict schema;
+/// Naru applies the answer through `Store`. A saved template that still starts
+/// a `--bg` agent is retired ([`retired_bg_override`]).
+pub const DEFAULT_INBOX_WATCHER: &str = r#"claude -p --model {model} --name {name} --tools "" --strict-mcp-config --output-format json --json-schema {schema} -- {prompt}"#;
 /// Built-in default for [`AGENT_SPAWN`]. No `{id}`/`{name}`: this spawn is
 /// driven by a request body, not a mesa record, and the prompt is optional —
 /// absent, the `-- {prompt}` pair drops out and the session starts idle. The
@@ -295,29 +306,37 @@ pub const DEFAULT_AGENT_SPAWN: &str = "claude --bg --model opus --agent supervis
 /// which is where its instructions live; a user who wants another agent edits
 /// the name here.
 pub const DEFAULT_LIVE_AGENT: &str = "claude --bg --agent naru-live --name {name} -- {prompt}";
-/// Built-in default for [`LIVE_SUMMARY`] — identical in shape to
-/// [`DEFAULT_LIVE_AGENT`]: the summariser is also a mesa record (a session
-/// id and a name) carrying a prompt mesa supplies
-/// (`core::live::summary_prompt`), so it works with no user configuration.
-/// It names no agent — plain `claude` — since the prompt holds the whole
-/// job and an unseeded agent name makes `claude` fail at once.
-pub const DEFAULT_LIVE_SUMMARY: &str = "claude --bg --name {name} -- {prompt}";
+/// Built-in default for [`LIVE_SUMMARY`] (naru task 1690): one synchronous
+/// `claude -p --output-format json --json-schema {schema}` call, **no tools**
+/// (`--tools ""`, `--strict-mcp-config`), run inside a detached `naru __job`
+/// child (`core::memory_job`). The prompt (`core::live::summary_prompt`)
+/// carries the whole conversation and the notebook; `{schema}` is the JSON
+/// Schema Naru owns (`core::live::SUMMARY_SCHEMA`); the answer is the result
+/// JSON's `structured_output`, which Naru applies itself through `Store`.
+/// Checked against the real `claude`: `--tools ""` keeps the synthetic
+/// `StructuredOutput` tool. A saved template that still starts a `--bg`
+/// agent is retired ([`retired_bg_override`]).
+pub const DEFAULT_LIVE_SUMMARY: &str = r#"claude -p --model sonnet --name {name} --tools "" --strict-mcp-config --output-format json --json-schema {schema} -- {prompt}"#;
 /// Built-in default for [`LIVE_DREAM`] — [`DEFAULT_LIVE_SUMMARY`]'s shape
 /// again: `{id}` is the newest conversation's id, `{name}` a fixed
-/// `live memory dream`, and `{prompt}` is `core::live::dream_prompt`, the
-/// instructions plus the active notebook. Names no agent, as above.
-pub const DEFAULT_LIVE_DREAM: &str = "claude --bg --name {name} -- {prompt}";
-/// Built-in default for [`RETRO`] — [`DEFAULT_INBOX_WATCHER`]'s shape: the
-/// run is a mesa record (`retro_runs`, so `{id}` is the run id and `{name}`
-/// the `naru retro <id>` session name) and the prompt is one sentence, since
-/// the `naru-retro` agent definition (mesa task 1158,
-/// `core::retro::RETRO_DEFINITION`, seeded to `.claude/agents/naru-retro.md`
-/// before the spawn) holds the whole procedure. No `{prompt}`: mesa supplies
-/// none.
-pub const DEFAULT_RETRO: &str =
-    r#"claude --bg --agent naru-retro --name {name} -- "Run mesa session retrospective {id}.""#;
-/// Built-in default for [`WORKFLOW_PROMPT`] (mesa task 1607): a plain
-/// background session like the others — `claude --bg` — never print mode (`-p`).
+/// `live memory dream`, `{prompt}` is `core::live::dream_prompt`, the
+/// instructions plus the active notebook, and `{schema}` the edit-list schema
+/// (the live or the project one — the project notebook's dream shares this
+/// template).
+pub const DEFAULT_LIVE_DREAM: &str = r#"claude -p --model sonnet --name {name} --tools "" --strict-mcp-config --output-format json --json-schema {schema} -- {prompt}"#;
+/// Built-in default for [`RETRO`] (naru task 1692) — [`DEFAULT_INBOX_WATCHER`]'s
+/// shape: tool-less `claude -p --output-format json --json-schema {schema}`
+/// calls, run inside a detached `naru __job retro` child (`core::retro`).
+/// `{id}` is the run id, `{name}` the call's session name (`naru retro <id>`,
+/// plus ` skim <session>` for a skim), `{model}` the call's model (haiku to
+/// skim, sonnet to roll up), `{prompt}` what Naru gathered and `{schema}` the
+/// answer schema; Naru files the findings. A saved template that still starts
+/// a `--bg` agent is retired ([`retired_bg_override`]).
+pub const DEFAULT_RETRO: &str = DEFAULT_INBOX_WATCHER;
+/// Built-in default for [`WORKFLOW_PROMPT`] (mesa task 1607, naru task 1687):
+/// one print-mode call — `claude -p --output-format json` — that exits with a
+/// single result object on stdout (`result` holds the answer), not a background
+/// session to poll.
 /// `{model}` is `haiku`/`sonnet`/`opus`; `{thinking}` is `true`/`false`, spliced
 /// into the `--settings` JSON (`alwaysThinkingEnabled`); `{name}` is the
 /// session name Naru derives (`workflow <workflow> · <node>`); `{prompt}` is
@@ -333,9 +352,18 @@ pub const DEFAULT_RETRO: &str =
 /// `touch` a file leaves none.
 ///
 /// The cwd is the workflow's project folder, or `~/.naru/workspace` (the one
-/// folder whose Claude Code trust prompt is answered once — `claude --bg`
-/// refuses an untrusted folder).
-pub const DEFAULT_WORKFLOW_PROMPT: &str = r#"claude --bg --model {model} --name {name} --tools "" --strict-mcp-config --settings "{\"alwaysThinkingEnabled\":{thinking}}" -- {prompt}"#;
+/// folder whose Claude Code trust prompt is answered once).
+pub const DEFAULT_WORKFLOW_PROMPT: &str = r#"claude -p --model {model} --name {name} --tools "" --strict-mcp-config --output-format json --settings "{\"alwaysThinkingEnabled\":{thinking}}" -- {prompt}"#;
+/// Built-in default for [`RUNNER`] (naru task 1686): `claude -p` reading
+/// stream-json user messages on a held-open stdin and writing stream-json
+/// events on stdout, one result line per message. `{session_flag}` is
+/// `--session-id` on a job's first start and `--resume` after a restart, and
+/// `{session_id}` the job's uuid; a value is one quoted word, so the flag is
+/// a placeholder of its own rather than something a bash `if` could pick.
+/// `{model}` is the alias or full model name, `{name}` the job label. No
+/// `--bare`, no permission flag: edit the line (Settings) to add e.g.
+/// `--permission-mode acceptEdits` for a run that must write files.
+pub const DEFAULT_RUNNER: &str = "claude -p --input-format stream-json --output-format stream-json --verbose --model {model} --name {name} {session_flag} {session_id}";
 
 /// The built-in template for `action`, or `None` if `action` isn't one of
 /// [`ACTIONS`]. Public so the docs check and the API can report the shipped
@@ -350,6 +378,7 @@ pub fn default_command(action: &str) -> Option<&'static str> {
         LIVE_DREAM => Some(DEFAULT_LIVE_DREAM),
         RETRO => Some(DEFAULT_RETRO),
         WORKFLOW_PROMPT => Some(DEFAULT_WORKFLOW_PROMPT),
+        RUNNER => Some(DEFAULT_RUNNER),
         _ => None,
     }
 }
@@ -455,7 +484,53 @@ fn command_in(path: &Path, action: &str) -> Result<Option<String>, String> {
                 s.trim(),
             )))
         })
-        .filter(|s| !s.is_empty()))
+        .filter(|s| !s.is_empty())
+        .filter(|s| {
+            let retired = retired_bg_override(action, s);
+            // Once per process per action: reads happen on every spawn.
+            if retired && note_retired_once(action) {
+                eprintln!(
+                    "ignoring the saved {action} template: it starts a --bg agent, which naru \
+                     task {} retired; using the built-in. Re-save it in Settings.",
+                    retired_task(action)
+                );
+            }
+            !retired
+        }))
+}
+
+/// True the first time it is asked for `action` in this process.
+fn note_retired_once(action: &str) -> bool {
+    static SEEN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    if seen.iter().any(|a| a == action) {
+        return false;
+    }
+    seen.push(action.to_string());
+    true
+}
+
+/// Whether `template` is a saved `live-summary`/`live-dream` (naru task 1690)
+/// or `inbox-watcher` (naru task 1691) or `retro` (naru task 1692) override that still starts a `--bg`
+/// agent. Those actions now run
+/// synchronously (`claude -p --output-format json`) and Naru applies the
+/// answer itself, so a `--bg` template — which prints a receipt, not result
+/// JSON — can only fail. Judged on **read** (the template falls back to the
+/// built-in, the file is never rewritten, the [`migrate_retired_placeholders`]
+/// posture) and refused on **save** ([`validate`]).
+pub fn retired_bg_override(action: &str, template: &str) -> bool {
+    (action == LIVE_SUMMARY || action == LIVE_DREAM || action == INBOX_WATCHER || action == RETRO)
+        && template.split_whitespace().any(|w| w == "--bg")
+}
+
+/// The naru task that retired `action`'s `--bg` form (1692 moved `retro`,
+/// 1691 `inbox-watcher`, 1690 the live memory jobs).
+fn retired_task(action: &str) -> u32 {
+    match action {
+        RETRO => 1692,
+        INBOX_WATCHER => 1691,
+        _ => 1690,
+    }
 }
 
 /// Rewrites the two placeholders mesa task 1141 retired — `{bin}` and
@@ -678,6 +753,14 @@ fn write_atomically(path: &Path, body: &str) -> Result<(), SaveError> {
 pub fn validate(action: &str, template: &str, prompts: &Prompts) -> Result<(), String> {
     let script = template.trim();
     refuse_env_references(action, script)?;
+    if retired_bg_override(action, script) {
+        return Err(format!(
+            "{action} no longer starts a --bg agent: it runs one synchronous `claude -p \
+             --output-format json --json-schema {{schema}}` call and Naru applies the answer \
+             itself (naru task {}); remove --bg",
+            retired_task(action)
+        ));
+    }
     check_script(action, script, prompts)?;
     let vars = Vars {
         id: Some(1),
@@ -685,6 +768,9 @@ pub fn validate(action: &str, template: &str, prompts: &Prompts) -> Result<(), S
         prompt: Some("prompt"),
         model: Some("model"),
         thinking: Some("on"),
+        schema: Some("{}"),
+        session_flag: Some("--session-id"),
+        session_id: Some("session"),
         prompts: Some(prompts),
     };
     // Parse what `bash` will actually be handed — placeholders already
@@ -707,7 +793,16 @@ pub fn resolve(action: &str, template: &str, vars: &Vars) -> Result<String, Stri
 /// The three built-in placeholder names. Per-call data, so each is offered to
 /// a subset of the actions ([`offered_placeholders`]); the library's
 /// `{prompt:<name>}` form is orthogonal and offered everywhere.
-const BUILTIN_PLACEHOLDERS: [&str; 5] = ["id", "name", "prompt", "model", "thinking"];
+const BUILTIN_PLACEHOLDERS: [&str; 8] = [
+    "id",
+    "name",
+    "prompt",
+    "model",
+    "thinking",
+    "schema",
+    "session_flag",
+    "session_id",
+];
 
 /// The `{prompt:<name>}` form's prefix — the one thing that keeps it from
 /// colliding with the built-in `{prompt}`, which has no colon.
@@ -1546,6 +1641,14 @@ pub struct Vars<'a> {
     /// switch (`on`/`off`) — offered to that action alone.
     pub model: Option<&'a str>,
     pub thinking: Option<&'a str>,
+    /// The JSON Schema `live-summary`/`live-dream` pass to `--json-schema` —
+    /// Naru's own text (`core::live`), so a template edit cannot break the
+    /// contract; offered to those two actions alone.
+    pub schema: Option<&'a str>,
+    /// `runner`'s `--session-id`/`--resume` choice and the job's uuid —
+    /// offered to that action alone.
+    pub session_flag: Option<&'a str>,
+    pub session_id: Option<&'a str>,
     /// The library's prompts, for `{prompt:<name>}` (mesa task 1138). Unlike
     /// the three above this is not per-call data but static library text, so
     /// every action offers it — which is why it sits beside them rather than
@@ -1584,6 +1687,9 @@ impl Vars<'_> {
             "prompt" => self.prompt.map(str::to_string),
             "model" => self.model.map(str::to_string),
             "thinking" => self.thinking.map(str::to_string),
+            "schema" => self.schema.map(str::to_string),
+            "session_flag" => self.session_flag.map(str::to_string),
+            "session_id" => self.session_id.map(str::to_string),
             _ => None,
         })
     }
@@ -1599,8 +1705,13 @@ pub fn offered_placeholders(action: &str) -> &'static [&'static str] {
         // The union: a live session (and its summariser, and the dream pass
         // that borrows the newest session's id) is a mesa record *and*
         // carries a prompt.
-        LIVE_AGENT | LIVE_SUMMARY | LIVE_DREAM => &["{id}", "{name}", "{prompt}"],
+        LIVE_AGENT => &["{id}", "{name}", "{prompt}"],
+        // Plus the schema Naru owns (naru task 1690).
+        LIVE_SUMMARY | LIVE_DREAM => &["{id}", "{name}", "{prompt}", "{schema}"],
+        // Plus the pass's model (naru tasks 1691, 1692).
+        INBOX_WATCHER | RETRO => &["{id}", "{name}", "{prompt}", "{schema}", "{model}"],
         WORKFLOW_PROMPT => &["{model}", "{thinking}", "{name}", "{prompt}"],
+        RUNNER => &["{model}", "{name}", "{session_flag}", "{session_id}"],
         _ => &["{id}", "{name}"],
     }
 }
@@ -4649,6 +4760,10 @@ mod tests {
         assert_eq!(settings[1].default, DEFAULT_INBOX_WATCHER);
         // The placeholder vocabulary is per-action, matching `check_key`.
         assert_eq!(settings[0].placeholders, ["{id}", "{name}"]);
+        assert_eq!(
+            settings[1].placeholders,
+            ["{id}", "{name}", "{prompt}", "{schema}", "{model}"]
+        );
         assert_eq!(settings[2].action, AGENT_SPAWN);
         assert_eq!(settings[2].placeholders, ["{prompt}"]);
         // The live agent offers the union of the two shapes: it is a mesa
@@ -4659,16 +4774,25 @@ mod tests {
         // The summariser offers the same union, for the same reason.
         assert_eq!(settings[4].action, LIVE_SUMMARY);
         assert_eq!(settings[4].default, DEFAULT_LIVE_SUMMARY);
-        assert_eq!(settings[4].placeholders, ["{id}", "{name}", "{prompt}"]);
+        assert_eq!(
+            settings[4].placeholders,
+            ["{id}", "{name}", "{prompt}", "{schema}"]
+        );
         // The dream pass (mesa task 1152) is the sixth, same union.
         assert_eq!(settings[5].action, LIVE_DREAM);
         assert_eq!(settings[5].default, DEFAULT_LIVE_DREAM);
-        assert_eq!(settings[5].placeholders, ["{id}", "{name}", "{prompt}"]);
-        // The retrospective (mesa task 1158) is the seventh: a mesa record
-        // with no prompt of mesa's, the inbox-watcher's shape.
+        assert_eq!(
+            settings[5].placeholders,
+            ["{id}", "{name}", "{prompt}", "{schema}"]
+        );
+        // The retrospective (mesa task 1158) is the seventh: the
+        // inbox-watcher's structured shape since naru task 1692.
         assert_eq!(settings[6].action, RETRO);
         assert_eq!(settings[6].default, DEFAULT_RETRO);
-        assert_eq!(settings[6].placeholders, ["{id}", "{name}"]);
+        assert_eq!(
+            settings[6].placeholders,
+            ["{id}", "{name}", "{prompt}", "{schema}", "{model}"]
+        );
         // The workflow prompt node (mesa task 1607) is the eighth: a
         // background agent the engine waits on, with its own vocabulary.
         assert_eq!(settings[7].action, WORKFLOW_PROMPT);
@@ -4677,11 +4801,142 @@ mod tests {
             settings[7].placeholders,
             ["{model}", "{thinking}", "{name}", "{prompt}"]
         );
+        // The run runner (naru task 1686) is the ninth.
+        assert_eq!(settings[8].action, RUNNER);
+        assert_eq!(settings[8].default, DEFAULT_RUNNER);
+        assert_eq!(
+            settings[8].placeholders,
+            ["{model}", "{name}", "{session_flag}", "{session_id}"]
+        );
+    }
+
+    /// The runner default validates and quotes its values as single words,
+    /// the session flag included (`'--resume'` is still a flag to claude).
+    #[test]
+    fn runner_default_validates_and_quotes_its_values() {
+        validate(RUNNER, DEFAULT_RUNNER, &Prompts::default()).unwrap();
+        let vars = Vars {
+            model: Some("haiku"),
+            name: Some("a $(x) job"),
+            session_flag: Some("--resume"),
+            session_id: Some("abc"),
+            ..Default::default()
+        };
+        let script = resolve(RUNNER, DEFAULT_RUNNER, &vars).unwrap();
+        assert!(
+            script.starts_with("claude -p --input-format stream-json"),
+            "{script}"
+        );
+        assert!(
+            script.contains("--name 'a $(x) job' '--resume' 'abc'"),
+            "{script}"
+        );
+        assert!(!script.contains("--bare"), "{script}");
+    }
+
+    /// naru task 1691: the inbox-watcher default is one synchronous `-p`
+    /// call with the pass's model, no tools, the schema and prompt quoted.
+    #[test]
+    fn inbox_watcher_default_is_a_structured_print_call() {
+        validate(INBOX_WATCHER, DEFAULT_INBOX_WATCHER, &Prompts::default()).unwrap();
+        let vars = Vars {
+            id: Some(7),
+            name: Some("inbox 7"),
+            model: Some("haiku"),
+            prompt: Some("a $(touch /tmp/x)"),
+            schema: Some("{}"),
+            ..Default::default()
+        };
+        let script = resolve(INBOX_WATCHER, DEFAULT_INBOX_WATCHER, &vars).unwrap();
+        assert_eq!(
+            script,
+            r#"claude -p --model 'haiku' --name 'inbox 7' --tools "" --strict-mcp-config --output-format json --json-schema '{}' -- 'a $(touch /tmp/x)'"#
+        );
+    }
+
+    /// naru task 1690: the live-summary and live-dream defaults are one
+    /// synchronous `-p` call with no tools, the prompt and the schema each
+    /// one quoted word; never `--bg`.
+    #[test]
+    fn live_summary_and_dream_defaults_are_structured_print_calls() {
+        for (action, default) in [
+            (LIVE_SUMMARY, DEFAULT_LIVE_SUMMARY),
+            (LIVE_DREAM, DEFAULT_LIVE_DREAM),
+        ] {
+            validate(action, default, &Prompts::default()).unwrap();
+            let vars = Vars {
+                id: Some(3),
+                name: Some("naru live 3 summary"),
+                prompt: Some("a $(touch /tmp/x) 'q'"),
+                schema: Some(r#"{"type":"object","a":"it's"}"#),
+                ..Default::default()
+            };
+            let script = resolve(action, default, &vars).unwrap();
+            assert!(
+                script.starts_with("claude -p --model sonnet --name 'naru live 3 summary' "),
+                "{script}"
+            );
+            assert!(
+                script.contains(r#"--tools "" --strict-mcp-config --output-format json "#),
+                "{script}"
+            );
+            assert!(
+                script.contains(r#"--json-schema '{"type":"object","a":"it'\''s"}' "#),
+                "{script}"
+            );
+            assert!(
+                script.ends_with(r#"-- 'a $(touch /tmp/x) '\''q'\'''"#),
+                "{script}"
+            );
+            assert!(!script.contains("--bg"), "{script}");
+        }
+    }
+
+    /// A saved `--bg` override of either action is retired: refused on save,
+    /// ignored (falling back to the built-in) on read, the file untouched.
+    #[test]
+    fn a_saved_bg_override_of_live_summary_or_dream_is_retired() {
+        let err = validate_(LIVE_SUMMARY, "claude --bg --name {name} -- {prompt}").unwrap_err();
+        assert!(err.contains("--bg") && err.contains("1690"), "{err}");
+        assert!(validate_(LIVE_DREAM, "claude --bg -- {prompt}").is_err());
+        // The inbox watcher joined them in naru task 1691.
+        let err = validate_(INBOX_WATCHER, "claude --bg --name {name} -- {prompt}").unwrap_err();
+        assert!(err.contains("--bg") && err.contains("1691"), "{err}");
+        assert!(retired_bg_override(
+            INBOX_WATCHER,
+            "claude --bg -- {prompt}"
+        ));
+        // And the retrospective joined them in naru task 1692.
+        let err = validate_(RETRO, "claude --bg --agent naru-retro -- {id}").unwrap_err();
+        assert!(err.contains("--bg") && err.contains("1692"), "{err}");
+        assert!(retired_bg_override(RETRO, "claude --bg -- {prompt}"));
+        // Other actions still start --bg agents.
+        validate_(LIVE_AGENT, "claude --bg --name {name} -- {prompt}").unwrap();
+        // `--background` is not the flag.
+        assert!(!retired_bg_override(
+            LIVE_SUMMARY,
+            "tool --background {prompt}"
+        ));
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(
+            dir.path(),
+            r#"{"commands": {"live-summary": "claude --bg --name {name} -- {prompt}",
+                             "retro": "claude --bg --agent naru-retro --name {name} -- {id}",
+                             "live-dream": "mytool {prompt}"}}"#,
+        );
+        assert_eq!(command_in(&path, LIVE_SUMMARY).unwrap(), None);
+        assert_eq!(command_in(&path, RETRO).unwrap(), None);
+        assert_eq!(
+            command_in(&path, LIVE_DREAM).unwrap().as_deref(),
+            Some("mytool {prompt}")
+        );
+        // The file itself is never rewritten.
+        assert!(std::fs::read_to_string(&path).unwrap().contains("--bg"));
     }
 
     /// The workflow-prompt default passes the save-time validator and
     /// resolves with every value quoted as one word — a hostile prompt is a
-    /// string literal, never syntax — and never asks for `-p`.
+    /// string literal, never syntax — and asks for print mode, not `--bg`.
     #[test]
     fn workflow_prompt_default_validates_and_quotes_its_values() {
         validate(
@@ -4699,11 +4954,11 @@ mod tests {
         };
         let script = resolve(WORKFLOW_PROMPT, DEFAULT_WORKFLOW_PROMPT, &vars).unwrap();
         assert!(
-            script.starts_with("claude --bg --model 'haiku' --name 'workflow w · n' "),
+            script.starts_with("claude -p --model 'haiku' --name 'workflow w · n' "),
             "{script}"
         );
         assert!(
-            script.contains(r#"--tools "" --strict-mcp-config"#),
+            script.contains(r#"--tools "" --strict-mcp-config --output-format json "#),
             "{script}"
         );
         assert!(
@@ -4714,24 +4969,36 @@ mod tests {
             script.contains(r#"-- 'a $(touch /tmp/x) '\''q'\'' `b`'"#),
             "{script}"
         );
-        assert!(!script.contains(" -p "), "{script}");
+        assert!(!script.contains("--bg"), "{script}");
         // Not offered elsewhere.
-        assert!(resolve(RETRO, "claude {model}", &vars).is_err());
+        assert!(resolve(RETRO, "claude {thinking}", &vars).is_err());
     }
 
-    /// The retro default resolves like the inbox-watcher's: the run id lands
-    /// inside the quoted prompt and the session name in its own argument.
+    /// The retro default (naru task 1692) is the inbox-watcher's structured
+    /// print call: model, name, schema and prompt each one quoted word, never
+    /// `--bg`.
     #[test]
-    fn retro_default_resolves_with_the_run_id_and_name() {
+    fn retro_default_is_a_structured_print_call() {
+        validate(RETRO, DEFAULT_RETRO, &Prompts::default()).unwrap();
         let vars = Vars {
             id: Some(7),
-            name: Some("mesa retro 7"),
+            name: Some("naru retro 7 skim s'1"),
+            model: Some("haiku"),
+            schema: Some(r#"{"type":"object"}"#),
+            prompt: Some("a $(touch /tmp/x) `b`"),
             ..Default::default()
         };
-        assert_eq!(
-            resolve(RETRO, DEFAULT_RETRO, &vars).unwrap(),
-            r#"claude --bg --agent naru-retro --name 'mesa retro 7' -- "Run mesa session retrospective 7.""#
+        let script = resolve(RETRO, DEFAULT_RETRO, &vars).unwrap();
+        assert!(
+            script.starts_with(r#"claude -p --model 'haiku' --name 'naru retro 7 skim s'\''1' "#),
+            "{script}"
         );
+        assert!(
+            script.contains(r#"--tools "" --strict-mcp-config --output-format json --json-schema '{"type":"object"}' "#),
+            "{script}"
+        );
+        assert!(script.ends_with("-- 'a $(touch /tmp/x) `b`'"), "{script}");
+        assert!(!script.contains("--bg"), "{script}");
     }
 
     #[test]
@@ -4889,10 +5156,6 @@ mod tests {
             // Literal since mesa task 1075: the run is supervised by the
             // `supervisor` agent definition.
             r#"claude --bg --agent supervisor --name 'mesa: do the thing' -- "/execute-mesa-task 731""#
-        );
-        assert_eq!(
-            resolve(INBOX_WATCHER, DEFAULT_INBOX_WATCHER, &vars).unwrap(),
-            r#"claude --bg --agent inbox-triage --name 'mesa: do the thing' -- "Triage mesa inbox item 731.""#
         );
         let spawn = Vars {
             prompt: Some("look at the tests"),

@@ -3,6 +3,7 @@ import {
   DIFF_MAX_LINES,
   diffLines,
   foldOverrides,
+  hunksOnly,
   itemKey,
 } from './libraryOverride'
 import type { LibraryItem } from './types/LibraryItem'
@@ -130,5 +131,38 @@ describe('diffLines', () => {
     expect(out[0].mesa_line).toBeNull()
     expect(out[0].disk_line).toBeNull()
     expect(out[0].text).toContain('diff not computed')
+  })
+})
+
+describe('hunksOnly', () => {
+  const ctx = (n: number) => ({
+    kind: 'context' as const,
+    mesa_line: n,
+    disk_line: n,
+    text: `c${n}`,
+  })
+  const del = (n: number) => ({
+    kind: 'mesa-only' as const,
+    mesa_line: n,
+    disk_line: null,
+    text: `d${n}`,
+  })
+  const add = (n: number) => ({
+    kind: 'disk-only' as const,
+    mesa_line: null,
+    disk_line: n,
+    text: `a${n}`,
+  })
+
+  it('drops context and separates non-adjacent hunks', () => {
+    const out = hunksOnly([ctx(1), del(2), add(2), ctx(3), ctx(4), add(5), ctx(6)])
+    expect(out).toEqual([del(2), add(2), null, add(5)])
+  })
+
+  it('keeps a lone hunk without separators and keeps the marker', () => {
+    expect(hunksOnly([ctx(1), del(2), ctx(3)])).toEqual([del(2)])
+    const m = { kind: 'context' as const, mesa_line: null, disk_line: null, text: '…' }
+    expect(hunksOnly([m])).toEqual([m])
+    expect(hunksOnly([ctx(1)])).toEqual([])
   })
 })

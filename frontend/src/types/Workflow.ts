@@ -26,7 +26,12 @@ trigger: WorkflowTrigger | null,
 /**
  * The trigger node's `phrase` (voice), or null.
  */
-trigger_phrase: string | null, created_at: string, updated_at: string, 
+trigger_phrase: string | null, 
+/**
+ * An `ambient` trigger's `events`, in the order configured; empty for
+ * every other trigger.
+ */
+trigger_events: Array<string>, created_at: string, updated_at: string, 
 /**
  * When the newest run started (any trigger), or null if it never ran.
  * Derived on every read from `workflow_runs`, never stored.
@@ -47,4 +52,9 @@ last_failure_at: string | null,
  * other trigger and for a time workflow that has never run on its timer
  * (due at once).
  */
-next_run_at: string | null, };
+next_run_at: string | null, 
+/**
+ * Off = never fires automatically (the time watcher and ambient events
+ * skip it); a manual run still works. Stored; a duplicate starts off.
+ */
+enabled: boolean, };

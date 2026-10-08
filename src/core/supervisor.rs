@@ -54,7 +54,7 @@ Procedures live in `~/.claude/skills/supervising-agent-teams/`
 
 plan → execute → review → verify → on failure back to plan. Size the team to
 the task. Prefer the defined agents — `Explore`, `implementer`,
-`swift-implementer`, `diff-reviewer`, `ui-verifier`, `ui-verifier-runner` —
+`swift-implementer`, `diff-reviewer`, `ui-verifier` —
 over a bespoke prompt.
 
 - `Monitor`, `SendMessage` and `ListAgents` are deferred. Fetch them first by
