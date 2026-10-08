@@ -64,6 +64,9 @@ mkdir -p "$STUB"
 cat > "$STUB/claude" <<STUBEOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$STUB/argv.log"
+if [ -f "$STUB/fail-resume" ] && [[ " \$* " == *" --resume "* ]]; then
+  echo "No conversation found" >&2; exit 1
+fi
 while IFS= read -r line; do
   text=\$(jq -r '.message.content[0].text' <<<"\$line")
   s=0; [ -f "$STUB/sleep-secs" ] && s=\$(cat "$STUB/sleep-secs")
@@ -170,6 +173,29 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json
 [ "$code" = 409 ] || fail "message to a stopped run should be 409, got $code"
 ok "stop ended the runner and claude; a stopped run refuses messages (409)"
 
+# ---- resume of a session that was never saved falls back to a fresh start ----
+: > "$STUB/argv.log"
+echo 6 > "$STUB/sleep-secs"
+J3=$("$NARU" run start --model haiku --cwd "$TMP/work" "unsaved prompt" | jq -r .job_id)
+S3=$(job_field "$J3" session_id)
+wait_for 10 "prompt delivered" delivered_is "$J3" 1
+R3=$(cat "$RUNS/$J3/runner.pid")
+kill -9 "$R3"; kill -- "-$(job_field "$J3" claude_pid)" 2>/dev/null || true
+sleep 0.3
+touch "$STUB/fail-resume"
+echo 0 > "$STUB/sleep-secs"
+"$NARU" run reconcile | jq -e --arg j "$J3" '.resumed == [$j]' >/dev/null || fail "reconcile should resume $J3"
+wait_for 20 "fallback run idle" result_is "$J3" "echo: unsaved prompt"
+status_is "$J3" idle || fail "fallback run should be idle, got $(job_field "$J3" status)"
+[ "$(sed -n 1p "$STUB/argv.log" | grep -c -- "--session-id $S3")" = 1 ] || fail "first start: $(cat "$STUB/argv.log")"
+sed -n 2p "$STUB/argv.log" | grep -q -- "--resume $S3" || fail "second call should be the failed --resume: $(cat "$STUB/argv.log")"
+sed -n 3p "$STUB/argv.log" | grep -q -- "--session-id $S3" || fail "third call should be a fresh --session-id $S3: $(cat "$STUB/argv.log")"
+"$NARU" run show "$J3" --events | jq -e '[.events[] | select(.event == "resume_fallback")] | length == 1' >/dev/null || fail "no resume_fallback event"
+rm "$STUB/fail-resume"
+"$NARU" run stop "$J3" >/dev/null
+wait_for 10 "fallback run stopped" status_is "$J3" stopped
+ok "a resume of a never-saved session fell back to a fresh --session-id start and re-delivered the prompt"
+
 # ---- idle timeout ----
 J2=$("$NARU" run start --model haiku --cwd "$TMP/work" --idle-timeout 2 "short lived" | jq -r .job_id)
 wait_for 10 "result" result_is "$J2" "echo: short lived"
@@ -177,7 +203,7 @@ wait_for 10 "idle timeout -> finished" status_is "$J2" finished
 ok "idle timeout wound the run down to finished"
 
 # ---- CLI shapes ----
-"$NARU" run list | jq -e 'length == 2' >/dev/null || fail "run list"
+"$NARU" run list | jq -e 'length == 3' >/dev/null || fail "run list"
 "$NARU" run show "$J2" --events | jq -e '.job.job_id and (.events | length) > 0' >/dev/null || fail "run show --events"
 "$NARU" run show "$J2" --tail 1 | jq -e '.events | length == 1' >/dev/null || fail "run show --tail"
 "$NARU" run show "$J2" --quiet | jq -e '.job_id' >/dev/null || fail "--quiet is accepted and ignored"

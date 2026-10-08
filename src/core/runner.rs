@@ -553,6 +553,24 @@ pub fn reconcile_in(runs: &Path) -> Result<Vec<String>> {
     Ok(resumed)
 }
 
+/// Whether claude ever finished a turn on this run.
+fn events_have_result(dir: &Path) -> bool {
+    events_of(dir, None)
+        .iter()
+        .any(|e| e.get("type").and_then(Value::as_str) == Some("result"))
+}
+
+/// Moves every delivered message back into the inbox, oldest first.
+fn requeue_delivered(dir: &Path) -> Result<()> {
+    let delivered = dir.join("inbox").join("delivered");
+    for file in pending_inbox(&delivered) {
+        if let Some(name) = file.file_name() {
+            fs::rename(&file, dir.join("inbox").join(name))?;
+        }
+    }
+    Ok(())
+}
+
 // ---- the runner ---------------------------------------------------------
 
 fn signal_group(pgid: i64, sig: &str) {
@@ -673,6 +691,7 @@ pub fn run_runner(dir: &Path) -> Result<()> {
     let mut closing: Option<(Closing, Instant)> = None;
     let mut exited: Option<(Instant, Option<i32>)> = None;
     let mut eof = false;
+    let mut saw_output = false;
 
     // Writes one message to claude; the caller has already made it undeliverable
     // a second time.
@@ -697,6 +716,7 @@ pub fn run_runner(dir: &Path) -> Result<()> {
                 if line.trim().is_empty() {
                     continue;
                 }
+                saw_output = true;
                 append_event(dir, line);
                 if let Event::Result {
                     text,
@@ -793,6 +813,21 @@ pub fn run_runner(dir: &Path) -> Result<()> {
     // Anything claude's descendants left behind goes with the group.
     signal_group(pgid, "KILL");
     let code = exited.and_then(|(_, c)| c);
+    // A resume that died without a word, for a session that never completed a
+    // turn, means claude never persisted it (the old runner died first):
+    // start the same uuid fresh and hand the delivered prompts back.
+    if resume && closing.is_none() && !saw_output && !events_have_result(dir) {
+        requeue_delivered(dir)?;
+        job.claude_started = false;
+        job.status = RunStatus::Running;
+        save(dir, &mut job)?;
+        runner_event(
+            dir,
+            "resume_fallback",
+            json!({"reason": "session was never saved", "exit_code": code}),
+        );
+        return run_runner(dir);
+    }
     job.finished_at = Some(now_secs());
     job.status = match closing {
         Some((Closing::Stopped, _)) => RunStatus::Stopped,
