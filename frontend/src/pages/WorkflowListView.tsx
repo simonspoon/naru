@@ -152,7 +152,7 @@ export function WorkflowListView({ projectId }: { projectId: number }) {
                   </button>
                   <ConfirmDelete
                     label="delete"
-                    message="Deletes this workflow, its nodes and its edges."
+                    message="Deletes this workflow with its nodes, edges and run history. Entries it wrote to logs are kept."
                     onDelete={() => deleteWorkflow(w.id).then(refetch)}
                   />
                 </div>

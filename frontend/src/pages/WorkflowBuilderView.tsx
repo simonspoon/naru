@@ -297,7 +297,7 @@ export function WorkflowBuilderView({
           </button>
           <ConfirmDelete
             label="delete workflow"
-            message={`Deletes this workflow, ${view.nodes.length} node(s) and ${view.edges.length} edge(s).`}
+            message={`Deletes this workflow with its ${view.nodes.length} node(s), ${view.edges.length} edge(s) and its run history. Entries it wrote to logs are kept.`}
             onDelete={() =>
               deleteWorkflow(workflowId).then(() => {
                 if (onDeleted) return onDeleted()
