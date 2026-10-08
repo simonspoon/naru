@@ -300,7 +300,7 @@ fn runner_alive(dir: &Path, job: &Job) -> bool {
 
 /// The command line of `pid` (`ps -o command=`), `None` when it cannot be read
 /// -- which callers treat as "not ours".
-fn pid_command(pid: i64) -> Option<String> {
+pub(crate) fn pid_command(pid: i64) -> Option<String> {
     let out = Command::new("ps")
         .args(["-o", "command=", "-p", &pid.to_string()])
         .stderr(Stdio::null())

@@ -201,6 +201,18 @@
 #      `listen --lease` waking the session once the stub reports the dream
 #      job done (predecessor still stopped once), and `live stop` spawning
 #      a dream over threshold and none under it.
+#
+# Naru task 1690 moved the summariser and both dream passes off `claude --bg`
+# agents: each is one synchronous `claude -p --output-format json
+# --json-schema` call (no tools) inside a detached `naru __job`, and Naru
+# applies the answer itself. The stub's `-p` branch records each call per
+# kind (summary / dream), `hold-p` keeps one running, and a kind's
+# `<kind>-out.json` is its staged answer (none staged = the call fails, so a
+# job a section is not about writes nothing). The sections above assert the
+# argv, the schema, the prompt (it carries the turn log and the notebook, no
+# `mesa live` command), the cwd, that `live stop`/`handoff` do not wait for
+# the call, that a refused edit never blocks the others (and lands in
+# `logs/memory-jobs.log`), and that a saved `--bg` override is ignored.
 set -euo pipefail
 # Drop inherited NARU_* vars: Naru reads them before MESA_*, so one would escape this script's isolation.
 unset $(env | sed -n 's/^\(NARU_[A-Za-z0-9_]*\)=.*/\1/p')
@@ -212,9 +224,22 @@ cargo build --quiet
 MESA=target/debug/mesa
 
 TMP=$(mktemp -d)
-trap 'rm -rf "$TMP";
-      [ -n "${SERVER_PID:-}" ] && kill "$SERVER_PID" 2>/dev/null;
-      [ -n "${LAN_PID:-}" ] && kill "$LAN_PID" 2>/dev/null; true' EXIT
+# A detached memory job (`naru __job …`, naru task 1690) may still be running
+# when the gate ends and would write into $TMP while it is removed, so the trap
+# waits (bounded, ~10s) for any whose command line names the physical $TMP
+# (its --dir is under the throwaway HOME or project folder) before the rm.
+TMP_PHYS=$(cd "$TMP" && pwd -P)
+wait_jobs() {
+  local i
+  rm -f "$TMP/stub/hold-p"
+  for i in $(seq 1 100); do
+    pgrep -f "__job.*$TMP_PHYS" >/dev/null 2>&1 || return 0
+    sleep 0.1
+  done
+}
+trap '[ -n "${SERVER_PID:-}" ] && kill "$SERVER_PID" 2>/dev/null;
+      [ -n "${LAN_PID:-}" ] && kill "$LAN_PID" 2>/dev/null;
+      wait_jobs; rm -rf "$TMP"; true' EXIT
 export MESA_DB="$TMP/mesa.db"
 # Where a user turn's annotated board is written (mesa task 1353, section 13):
 # never beside the developer's own db.
@@ -235,6 +260,39 @@ export HOME
 CHECKS=0
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok() { CHECKS=$((CHECKS + 1)); echo "ok: $*"; }
+
+# wait_p <summary|dream> <n> — blocks until the stub has recorded <n> calls of
+# that kind (a memory job runs detached, so its effects are polled for).
+wait_p() {
+  local i
+  for i in $(seq 1 100); do
+    [ "$(cat "$STUB_DIR/p-$1-calls" 2>/dev/null || echo 0)" -ge "$2" ] && return 0
+    sleep 0.1
+  done
+  fail "the stub never recorded $2 $1 call(s) (got $(cat "$STUB_DIR/p-$1-calls" 2>/dev/null || echo 0))"
+}
+# pc <summary|dream> — how many calls of that kind the stub has recorded.
+pc() { cat "$STUB_DIR/p-$1-calls" 2>/dev/null || echo 0; }
+# p_base <kind> — the call count after letting a straggler from the step
+# before land, to compare against with no_new_p.
+p_base() { sleep 0.3; pc "$1"; }
+# no_new_p <kind> <base> <what> — no job of that kind ran since <base>: a job
+# is spawned before the command that started it returns, so a short wait is
+# enough to see one.
+no_new_p() {
+  sleep 1
+  [ "$(pc "$1")" = "$2" ] || fail "$3 (got $(( $(pc "$1") - $2 )) new $1 call(s))"
+}
+# wait_for <description> <command...> — polls the command until it succeeds.
+wait_for() {
+  local what=$1 i
+  shift
+  for i in $(seq 1 100); do
+    "$@" && return 0
+    sleep 0.1
+  done
+  fail "timed out waiting for $what"
+}
 
 # run <expected-exit> <cmd...> — captures STDOUT, STDERR, CODE.
 run() {
@@ -265,6 +323,37 @@ cat > "$STUB_DIR/claude" <<EOF
 #!/usr/bin/env bash
 [ -e "$STUB_DIR/fail" ] && { echo "stub claude is down" >&2; exit 1; }
 case "\$1" in
+  -p)
+    # A memory job (naru task 1690): the summariser and both dream passes are
+    # one synchronous \`claude -p --output-format json --json-schema\` call,
+    # run inside a detached \`naru __job\`. Recorded per kind (the name ends
+    # " summary" for the summariser), since a stop can run both at once: the
+    # flags before the prompt, the schema, the prompt, the cwd and a call
+    # counter. A \`hold-p\` file keeps the call running (so a gate can prove
+    # \`live stop\`/\`handoff\` do not wait for it); the answer is the kind's
+    # \`<kind>-out.json\`, and with none staged the call fails.
+    NAME=""
+    for ((i = 1; i < \$#; i++)); do
+      if [ "\${!i}" = "--name" ]; then j=\$((i + 1)); NAME=\${!j}; fi
+    done
+    case "\$NAME" in *" summary") K=summary ;; *) K=dream ;; esac
+    PROMPT=""
+    for a in "\$@"; do PROMPT=\$a; done
+    printf '%s\n' "\${@:1:\$# - 1}" > "$STUB_DIR/p-\$K-flags"
+    for ((i = 1; i < \$#; i++)); do
+      if [ "\${!i}" = "--json-schema" ]; then j=\$((i + 1)); printf '%s' "\${!j}" > "$STUB_DIR/p-\$K-schema"; fi
+    done
+    printf '%s' "\$PROMPT" > "$STUB_DIR/p-\$K-prompt"
+    pwd > "$STUB_DIR/p-\$K-cwd"
+    printf '%s\n' "\$(( \$(cat "$STUB_DIR/p-\$K-calls" 2>/dev/null || echo 0) + 1 ))" > "$STUB_DIR/p-\$K-calls"
+    while [ -e "$STUB_DIR/hold-p" ]; do sleep 0.1; done
+    # No answer staged: the call fails, so a job a section is not about
+    # writes nothing (no stray summary rows, no edits) — only the jobs a
+    # section stages an answer for have any effect.
+    if [ ! -e "$STUB_DIR/\$K-out.json" ]; then echo "stub claude: no \$K-out.json staged" >&2; exit 1; fi
+    OUT=\$(cat "$STUB_DIR/\$K-out.json")
+    printf '{"type":"result","subtype":"success","is_error":false,"result":"","structured_output":%s}\n' "\$OUT"
+    ;;
   --bg)
     printf '%s\n' "\$#" > "$STUB_DIR/last-argc"
     # The flags before the prompt, one per line: a name carrying shell syntax
@@ -1921,43 +2010,98 @@ run 1 "$MESA" live turns --session 999999
 [ "$(jqe .error.code)" = "not_found" ] || fail "live turns --session <unknown>: error.code"
 ok "live turns --session: reads an ended session's turns; an unknown session id is not_found"
 
-# ---- the spawn: `live stop` fires the live-summary template ----
+# ---- the spawn: `live stop` starts the live-summary job (naru task 1690) ----
 #
-# `--no-agent` throughout, so the only \`--bg\` invocation the stub can see
-# comes from the summariser, never from a live-agent spawn — isolating it
-# from section 4's spawn assertions.
+# `--no-agent` throughout, so the only job the stub can see comes from the
+# summariser, never from a live-agent spawn — isolating it from section 4's
+# spawn assertions. The job is one detached `naru __job summary` making one
+# synchronous `claude -p --json-schema` call, so the stub's `-p` branch is
+# what records it, and its effects are polled for.
 
-rm -f "$STUB_DIR/last-argc"
+printf '%s' '{"summary":"STUB SUMMARY","notebook_add":[]}' > "$STUB_DIR/summary-out.json"
+SP_BASE=$(p_base summary)
 run 0 "$MESA" live start --no-agent
 SUM4=$(jqs .id)
 run 0 "$MESA" live say "We renamed the project."
 run 0 "$MESA" live stop
-[ -e "$STUB_DIR/last-argc" ] ||
-  fail "live stop on a session with turns must spawn its summariser"
+wait_p summary $((SP_BASE + 1))
 # The argv the built-in `live-summary` template produces:
-#   claude --bg --name {name} -- {prompt}
-# No `--agent` since mesa task 1170: the summariser runs as a plain session.
-# That is five arguments, so the stub's six-line slice now also catches the
-# prompt — compare the flags alone, which is what this assertion is about.
-EXPECTED_SUMMARY_FLAGS="--bg
+#   claude -p --model sonnet --name {name} --tools "" --strict-mcp-config
+#     --output-format json --json-schema {schema} -- {prompt}
+EXPECTED_SUMMARY_FLAGS="-p
+--model
+sonnet
 --name
 naru live $SUM4 summary
---"
-[ "$(head -4 "$STUB_DIR/last-flags")" = "$EXPECTED_SUMMARY_FLAGS" ] ||
-  fail "live-summary spawn argv: expected
+--tools
+
+--strict-mcp-config
+--output-format
+json
+--json-schema"
+[ "$(head -11 "$STUB_DIR/p-summary-flags")" = "$EXPECTED_SUMMARY_FLAGS" ] ||
+  fail "live-summary call argv: expected
 $EXPECTED_SUMMARY_FLAGS
 got
-$(head -4 "$STUB_DIR/last-flags")"
-grep -q 'Your only job is to write down what it was about' "$STUB_DIR/last-prompt" ||
-  fail "live-summary spawn: the prompt argument must be core::live's summariser instructions"
-grep -q "summarising mesa live session $SUM4" "$STUB_DIR/last-prompt" ||
-  fail "live-summary spawn: the prompt must name the session it is summarising"
-# The summariser is an unbound agent too — this session has no project, so it
+$(head -11 "$STUB_DIR/p-summary-flags")"
+[ "$(sed -n 12,13p "$STUB_DIR/p-summary-flags" | tail -1)" = "--" ] ||
+  fail "live-summary call: the prompt follows --"
+jq -e '.required == ["summary","notebook_add"] and .additionalProperties == false' "$STUB_DIR/p-summary-schema" >/dev/null ||
+  fail "live-summary call: --json-schema must be core::live's summary schema (got $(cat "$STUB_DIR/p-summary-schema"))"
+grep -q 'Your only job is to write down what it was about' "$STUB_DIR/p-summary-prompt" ||
+  fail "live-summary call: the prompt argument must be core::live's summariser instructions"
+grep -q "summarising Naru live session $SUM4" "$STUB_DIR/p-summary-prompt" ||
+  fail "live-summary call: the prompt must name the session it is summarising"
+# The model has no tools, so the conversation rides in the prompt itself.
+grep -q "^#[0-9]* naru: We renamed the project\.$" "$STUB_DIR/p-summary-prompt" ||
+  fail "live-summary call: the prompt must carry the turn log (got: $(cat "$STUB_DIR/p-summary-prompt"))"
+! grep -q 'mesa live' "$STUB_DIR/p-summary-prompt" ||
+  fail "live-summary call: the tool-less prompt must name no mesa live command"
+# The summariser is an unbound job too — this session has no project, so it
 # must run in the workspace, never in $HOME (mesa task 1040: Claude Code never
 # persists folder trust for the home directory).
-[ "$(cat "$STUB_DIR/last-cwd")" = "$(workspace_path)" ] ||
-  fail "live-summary spawn: an unbound summariser must run in ~/.naru/workspace (got $(cat "$STUB_DIR/last-cwd"))"
-ok "live stop: spawns the live-summary template — the argv shape, the session name, one prompt argument, the workspace cwd"
+[ "$(cat "$STUB_DIR/p-summary-cwd")" = "$(workspace_path)" ] ||
+  fail "live-summary call: an unbound summariser must run in ~/.naru/workspace (got $(cat "$STUB_DIR/p-summary-cwd"))"
+# Naru applies the answer itself: the stub's fixed summary lands in the db.
+wait_for "the summariser's summary to land" bash -c "'$MESA' live summary show $SUM4 | jq -e '.body == \"STUB SUMMARY\"' >/dev/null"
+ok "live stop: starts the live-summary job — the -p argv, the schema, the session name, one prompt argument carrying the turn log, the workspace cwd — and Naru saves the answer"
+
+# ---- the job is detached: live stop returns while the call is still running ----
+touch "$STUB_DIR/hold-p"
+printf '%s' '{"summary":"STUB SUMMARY","notebook_add":[]}' > "$STUB_DIR/summary-out.json"
+SP_BASE=$(p_base summary)
+run 0 "$MESA" live start --no-agent
+SUM_HELD=$(jqs .id)
+run 0 "$MESA" live say "A turn for the held summariser."
+T0=$(date +%s)
+run 0 "$MESA" live stop
+[ $(( $(date +%s) - T0 )) -lt 3 ] || fail "live stop must not wait for the summariser's claude call"
+wait_p summary $((SP_BASE + 1))
+run 1 "$MESA" live summary show "$SUM_HELD"
+[ "$(jqe .error.code)" = "not_found" ] || fail "the held summariser must not have saved yet"
+rm -f "$STUB_DIR/hold-p"
+wait_for "the released summariser to save" bash -c "'$MESA' live summary show $SUM_HELD | jq -e '.body == \"STUB SUMMARY\"' >/dev/null"
+rm -f "$STUB_DIR/summary-out.json"
+ok "live stop is detached: it returns at once while the claude call is held, and the summary lands when the call ends"
+
+# ---- the summariser's answer is applied through the guarded store paths ----
+# Three bullets offered, two taken; and a refused write never blocks the rest.
+printf '%s' '{"summary":"Applied by Naru.","notebook_add":["SUMADD-1: one","SUMADD-2: two","SUMADD-3: three"]}' > "$STUB_DIR/summary-out.json"
+SP_BASE=$(p_base summary)
+run 0 "$MESA" live start --no-agent
+SUM_APPLY=$(jqs .id)
+run 0 "$MESA" live say "A turn for the bullet check."
+run 0 "$MESA" live stop
+wait_p summary $((SP_BASE + 1))
+wait_for "the applied summary" bash -c "'$MESA' live summary show $SUM_APPLY | jq -e '.body == \"Applied by Naru.\"' >/dev/null"
+run 0 "$MESA" live memory list
+[ "$(jqs '[.[] | select(.body | startswith("SUMADD-"))] | length')" = "2" ] ||
+  fail "a summary adds at most two notebook bullets (got $(jqs '[.[].body]'))"
+rm -f "$STUB_DIR/summary-out.json"
+for id in $(jq -r '.[] | select(.body | startswith("SUMADD-")) | .id' <<<"$STDOUT"); do
+  run 0 "$MESA" live memory delete "$id" >/dev/null
+done
+ok "the summariser's answer is applied by Naru: the summary saved, at most two notebook bullets added"
 
 # ---- the recall join: a stored summary reaches the NEXT conversation's
 #      spawned prompt (store -> prompt -> spawn_bg -> argv) ----
@@ -2009,19 +2153,17 @@ run 0 "$MESA" live stop >/dev/null
 ok "the notebook and the single most recent summary reach the next conversation's spawned prompt, in that order, after the session line"
 
 # ---- guard: a session with no turns spawns no summariser ----
-rm -f "$STUB_DIR/last-argc"
+SP_BASE=$(p_base summary)
 run 0 "$MESA" live start --no-agent
 run 0 "$MESA" live stop
-[ ! -e "$STUB_DIR/last-argc" ] ||
-  fail "live stop on a session with NO turns must not spawn a summariser"
+no_new_p summary "$SP_BASE" "live stop on a session with NO turns must not start a summariser"
 ok "live stop on a session with no turns: no summariser is spawned"
 
 # ---- guard: a second stop of an already-ended session spawns nothing ----
-rm -f "$STUB_DIR/last-argc"
+SP_BASE=$(p_base summary)
 run 1 "$MESA" live stop
 [ "$(jqe .error.code)" = "not_found" ] || fail "a second stop of an already-ended session: error.code"
-[ ! -e "$STUB_DIR/last-argc" ] ||
-  fail "a second stop of an already-ended session must not spawn another summariser"
+no_new_p summary "$SP_BASE" "a second stop of an already-ended session must not start another summariser"
 ok "a second stop of an already-ended session: not_found, and nothing is spawned"
 
 # ---- append-only: a write for an OLD session is readable back immediately,
@@ -2050,11 +2192,12 @@ run 0 "$MESA" live summary show "$OLD_SESSION"
 run 0 "$MESA" live summary show "$SUM1"
 [ "$(jqs '.body | length')" = "$SUMMARY_MAX" ] ||
   fail "the very first summary (last set to exactly $SUMMARY_MAX chars) must survive 25+ later ones: the archive is append-only"
-# SUM1, SUM2, SUM4's would-be (none — the stub summariser writes nothing),
-# RECALL_SESSION, OLD_SESSION and the 25 fillers: 29 distinct sessions.
+# SUM1, SUM2, the three the summariser job wrote above (SUM4, SUM_HELD,
+# SUM_APPLY), RECALL_SESSION, OLD_SESSION and the 25 fillers: 32 distinct
+# sessions.
 run 0 "$MESA" live summary list --limit 500
-[ "$(jqs length)" = "29" ] ||
-  fail "every summary written so far must still be listed: expected 29, got $(jqs length)"
+[ "$(jqs length)" = "32" ] ||
+  fail "every summary written so far must still be listed: expected 32, got $(jqs length)"
 ok "live summary: append-only — a late write for an old session lands, and no earlier row is pruned"
 
 # ---- cascade: deleting a session's project must not destroy its summary ----
@@ -3193,43 +3336,42 @@ run 0 "$MESA" live memory add "CAND-A: the old sandbox device is on the desk."
 C1=$(jqs .id)
 run 0 "$MESA" live memory add "CAND-B: prefers answers read out before the board."
 C2=$(jqs .id)
-rm -f "$STUB_DIR/last-argc"
+DP_BASE=$(p_base dream)
 for _ in $(seq 1 $((NB_DECAY - 1))); do
   run 0 "$MESA" live start --no-agent
   [ -z "$STDERR" ] || fail "live start must say nothing about the notebook (got: $STDERR)"
   run 0 "$MESA" live stop >/dev/null
 done
-[ ! -e "$STUB_DIR/last-argc" ] ||
-  fail "no stop before the ${NB_DECAY}th may spawn a dream pass for two small entries (got: $(cat "$STUB_DIR/last-prompt"))"
+no_new_p dream "$DP_BASE" "no stop before the ${NB_DECAY}th may start a dream pass for two small entries"
 # The Nth ended session is the one both entries cross the mark at: that stop
 # spawns the dream, and its prompt marks both unused.
 run 0 "$MESA" live start --no-agent
 run 0 "$MESA" live stop >/dev/null
-[ -e "$STUB_DIR/last-argc" ] || fail "the stop at which entries cross the $NB_DECAY-session mark must spawn a dream pass"
-grep -q "You are tidying mesa's notebook between conversations" "$STUB_DIR/last-prompt" ||
-  fail "the crossing stop must spawn the live-dream prompt (got: $(cat "$STUB_DIR/last-prompt"))"
-grep -q "Some entries are marked unused" "$STUB_DIR/last-prompt" ||
+wait_p dream $((DP_BASE + 1))
+grep -q "You are tidying Naru's notebook between conversations" "$STUB_DIR/p-dream-prompt" ||
+  fail "the crossing stop must run the live-dream prompt (got: $(cat "$STUB_DIR/p-dream-prompt"))"
+grep -q "Some entries are marked unused" "$STUB_DIR/p-dream-prompt" ||
   fail "the dream prompt must tell the dreamer what unused means"
 for id in "$C1" "$C2"; do
   grep -q -- "- \[#$id, added [0-9-]*, from session [0-9-]*, last used session [0-9-]*, unused\] CAND-" \
-    "$STUB_DIR/last-prompt" || fail "the dream prompt must mark #$id unused (got: $(cat "$STUB_DIR/last-prompt"))"
+    "$STUB_DIR/p-dream-prompt" || fail "the dream prompt must mark #$id unused (got: $(cat "$STUB_DIR/p-dream-prompt"))"
 done
 # Crossing happens once: the next stop, both entries still candidates, spawns
 # nothing — a norm the dream left in place without a `keep` must not
 # re-trigger a dream at every stop.
-rm -f "$STUB_DIR/last-argc"
+DP_BASE=$(p_base dream)
 run 0 "$MESA" live start --no-agent
 [ -z "$STDERR" ] || fail "live start past the mark must retire nothing and say nothing (got: $STDERR)"
 run 0 "$MESA" live stop >/dev/null
-[ ! -e "$STUB_DIR/last-argc" ] || fail "a stop past the mark must not spawn the dream again"
+no_new_p dream "$DP_BASE" "a stop past the mark must not start the dream again"
 run 0 "$MESA" live memory list
 [ "$(jqs 'map(.id) | join(",")')" = "$C1,$C2" ] ||
   fail "candidates stay active: both entries must still be listed (got $STDOUT)"
 [ "$(jqs 'map(.retired_at) | unique | join(",")')" = "" ] || fail "no candidate may be retired"
 # The dream keeps a standing norm (mesa task 1337): `keep` needs no live
 # session, stamps `kept_at` once, and is idempotent.
-grep -q 'mesa live memory keep <id>' "$STUB_DIR/last-prompt" ||
-  fail "the dream prompt must tell the dreamer to run live memory keep"
+grep -q '"op":"keep"' "$STUB_DIR/p-dream-prompt" ||
+  fail "the dream prompt must teach the keep edit"
 run 0 "$MESA" live memory keep "$C2"
 [ "$(jqs .id)" = "$C2" ] || fail "live memory keep: echoes the entry"
 [ "$(jqs 'has("body")')" = "true" ] || fail "live memory keep prints the full record"
@@ -3248,13 +3390,15 @@ run 0 "$MESA" live memory show "$C1"
 [ "$(jqs .kept_at)" = "null" ] || fail "an entry never kept carries kept_at null"
 # The manual dream marks the candidate that was not kept, and a kept entry
 # is no longer one; a live agent's prompt never marks anything.
+DP_BASE=$(p_base dream)
 run 0 "$MESA" live memory dream
 [ "$(jqs .spawned)" = "true" ] || fail "live memory dream over two entries must spawn (got $STDOUT)"
-[ "$(grep -c ', unused\] CAND-' "$STUB_DIR/last-prompt")" = "1" ] ||
+wait_p dream $((DP_BASE + 1))
+[ "$(grep -c ', unused\] CAND-' "$STUB_DIR/p-dream-prompt")" = "1" ] ||
   fail "the manual dream prompt must mark exactly the one unkept candidate unused"
-grep -q -- "- \[#$C1, .*, unused\] CAND-A" "$STUB_DIR/last-prompt" ||
+grep -q -- "- \[#$C1, .*, unused\] CAND-A" "$STUB_DIR/p-dream-prompt" ||
   fail "the unkept candidate #$C1 must still be marked unused"
-! grep -q -- "- \[#$C2, .*, unused\]" "$STUB_DIR/last-prompt" ||
+! grep -q -- "- \[#$C2, .*, unused\]" "$STUB_DIR/p-dream-prompt" ||
   fail "the kept entry #$C2 must no longer be marked unused"
 run 0 "$MESA" live start
 ! grep -q 'unused\]' "$STUB_DIR/last-prompt" || fail "the live agent's notebook lines carry no unused mark"
@@ -3419,18 +3563,18 @@ LAN_PID=
 # entries it spawns nothing and says so on stdout, exit 0.
 run 0 "$MESA" live memory dream --quiet
 [ "$(jqs .spawned)" = "false" ] || fail "live memory dream --quiet: accepted and ignored (mesa task 1513)"
-rm -f "$STUB_DIR/last-argc"
+DP_BASE=$(p_base dream)
 run 0 "$MESA" live memory dream
 [ "$(jqs .spawned)" = "false" ] || fail "dream over an empty notebook: spawned must be false (got $STDOUT)"
 grep -q "at least two" <<<"$(jqs .reason)" || fail "dream: the reason must name the two-entry floor (got $STDOUT)"
-[ ! -e "$STUB_DIR/last-argc" ] || fail "dream must not spawn anything with fewer than two entries"
+no_new_p dream "$DP_BASE" "dream must not start anything with fewer than two entries"
 run 0 "$MESA" live memory add "MERGE-A: prefers short spoken replies."
 MA=$(jqs .id)
 MA_SOURCE=$(jqs .source_session_id)
 run 0 "$MESA" live memory dream
 [ "$(jqs .spawned)" = "false" ] || fail "dream over one entry: spawned must be false"
 grep -q "1 active entry;" <<<"$(jqs .reason)" || fail "dream: the reason counts the entries (got $STDOUT)"
-[ ! -e "$STUB_DIR/last-argc" ] || fail "dream must not spawn anything with one entry"
+no_new_p dream "$DP_BASE" "dream must not start anything with one entry"
 ok "live memory dream: --quiet is a usage error; under two active entries prints {spawned: false, reason} and spawns nothing"
 
 # A newer session, so the second source is attributed to a different
@@ -3629,73 +3773,119 @@ run 0 "$MESA" live memory list
 [ "$(jqs 'map(.id) | join(",")')" = "$MC,$M2" ] || fail "dream setup: exactly the two survivors (got $(jqs 'map(.id)'))"
 
 # ---- dream: conflict while a conversation is live, and nothing spawned ----
-rm -f "$STUB_DIR/last-argc"
+DP_BASE=$(p_base dream)
 run 0 "$MESA" live start --no-agent
 NEWEST=$(jqs .id)
 run 1 "$MESA" live memory dream
 [ "$(jqe .error.code)" = "conflict" ] || fail "dream while a session is live: conflict (got $STDERR)"
 grep -q "between conversations" <<<"$STDERR" || fail "dream's conflict must say it runs between conversations (got $STDERR)"
-[ ! -e "$STUB_DIR/last-argc" ] || fail "dream must not spawn while a session is live"
+no_new_p dream "$DP_BASE" "dream must not start while a session is live"
 run 0 "$MESA" live stop >/dev/null
 ok "live memory dream: conflict while a conversation is live, and spawns nothing"
 
-# ---- dream: the spawn through the built-in live-dream template ----
-rm -f "$STUB_DIR/last-argc"
+# ---- dream: the detached job through the built-in live-dream template ----
+#
+# Naru applies the answer itself (naru task 1690): the staged answer holds a
+# delete of an id that does not exist ahead of a `keep`, so the job must
+# record the first as failed and still apply the second.
+printf '%s' "{\"edits\":[{\"op\":\"delete\",\"id\":999999},{\"op\":\"keep\",\"id\":$MC}],\"contradictions\":[],\"report\":\"kept the roadmap\"}" > "$STUB_DIR/dream-out.json"
+DP_BASE=$(p_base dream)
 run 0 "$MESA" live memory dream
 [ "$(jqs .spawned)" = "true" ] || fail "dream with two entries: spawned must be true (got $STDOUT)"
-[ "$(jqs .receipt)" = "$(cat "$STUB_DIR/last-id")" ] || fail "dream must print the spawn receipt (got $STDOUT)"
-[ -e "$STUB_DIR/last-argc" ] || fail "dream must spawn its agent"
+case "$(jqs .receipt)" in pid:[0-9]*) ;; *) fail "dream must print a pid:<n> receipt (got $STDOUT)" ;; esac
+wait_p dream $((DP_BASE + 1))
 # The built-in `live-dream` template's argv, the summariser's shape above:
-#   claude --bg --name {name} -- {prompt}
-EXPECTED_DREAM_FLAGS="--bg
+#   claude -p --model sonnet --name {name} --tools "" --strict-mcp-config
+#     --output-format json --json-schema {schema} -- {prompt}
+EXPECTED_DREAM_FLAGS="-p
+--model
+sonnet
 --name
 live memory dream
---"
-[ "$(head -4 "$STUB_DIR/last-flags")" = "$EXPECTED_DREAM_FLAGS" ] ||
-  fail "live-dream spawn argv: expected
+--tools
+
+--strict-mcp-config
+--output-format
+json
+--json-schema"
+[ "$(head -11 "$STUB_DIR/p-dream-flags")" = "$EXPECTED_DREAM_FLAGS" ] ||
+  fail "live-dream call argv: expected
 $EXPECTED_DREAM_FLAGS
 got
-$(head -4 "$STUB_DIR/last-flags")"
-grep -q "You are tidying mesa's notebook between conversations" "$STUB_DIR/last-prompt" ||
-  fail "live-dream spawn: the prompt argument must be core::live's DREAM_PROMPT"
-grep -q "mesa live memory merge --ids" "$STUB_DIR/last-prompt" ||
-  fail "live-dream spawn: the prompt must teach the merge verb"
+$(head -11 "$STUB_DIR/p-dream-flags")"
+jq -e '.required == ["edits","contradictions","report"]' "$STUB_DIR/p-dream-schema" >/dev/null ||
+  fail "live-dream call: --json-schema must be core::live's dream schema (got $(cat "$STUB_DIR/p-dream-schema"))"
+jq -e '[.properties.edits.items.anyOf[].properties.op.const] == ["merge","delete","keep","replace"]' "$STUB_DIR/p-dream-schema" >/dev/null ||
+  fail "live-dream call: the live schema offers merge, delete, keep and replace"
+grep -q "You are tidying Naru's notebook between conversations" "$STUB_DIR/p-dream-prompt" ||
+  fail "live-dream call: the prompt argument must be core::live's DREAM_PROMPT"
+grep -q '"op":"merge"' "$STUB_DIR/p-dream-prompt" ||
+  fail "live-dream call: the prompt must teach the merge edit"
+! grep -q 'mesa live memory' "$STUB_DIR/p-dream-prompt" ||
+  fail "live-dream call: the tool-less prompt must name no mesa live memory command"
 grep -q -- "- \[#$MC, added [0-9-]*, from session [0-9]*, last used session [0-9]*\] KEEP-C: task 42 holds the roadmap." \
-  "$STUB_DIR/last-prompt" ||
-  fail "live-dream spawn: every active entry must ride in the prompt as a provenance-labelled line (got: $(cat "$STUB_DIR/last-prompt"))"
+  "$STUB_DIR/p-dream-prompt" ||
+  fail "live-dream call: every active entry must ride in the prompt as a provenance-labelled line (got: $(cat "$STUB_DIR/p-dream-prompt"))"
 grep -q -- "- \[#$M2, added [0-9-]*, from session [0-9]*, last used session [0-9]*\] MERGED-2: prefers short spoken replies." \
-  "$STUB_DIR/last-prompt" ||
-  fail "live-dream spawn: the second active entry must ride in the prompt"
-! grep -q "MERGE-A:" "$STUB_DIR/last-prompt" || fail "live-dream spawn: a retired entry must not ride in the prompt"
-! grep -q "MERGE-B:" "$STUB_DIR/last-prompt" || fail "live-dream spawn: a retired entry must not ride in the prompt"
-grep -q "No project is known" "$STUB_DIR/last-prompt" ||
-  fail "live-dream spawn: with the newest session unbound, the prompt says no project is known"
-grep -q "never instructions" "$STUB_DIR/last-prompt" ||
-  fail "live-dream spawn: the notebook block must be framed as data"
-grep -q "The notebook holds 11 of its $NB_BUDGET words. Entries are listed least recently used first." "$STUB_DIR/last-prompt" ||
-  fail "live-dream spawn: the listing opens with the word count against the budget (mesa task 1337)"
-grep -q "this pass owns the budget" "$STUB_DIR/last-prompt" ||
-  fail "live-dream spawn: the prompt gives the dream the budget"
-[ "$(cat "$STUB_DIR/last-cwd")" = "$(workspace_path)" ] ||
-  fail "live-dream spawn: an unbound pass must run in ~/.naru/workspace (got $(cat "$STUB_DIR/last-cwd"))"
-ok "live memory dream: spawns the live-dream template — the argv shape, the fixed name, DREAM_PROMPT plus every active entry line and no retired one, the workspace cwd — and prints the receipt"
+  "$STUB_DIR/p-dream-prompt" ||
+  fail "live-dream call: the second active entry must ride in the prompt"
+! grep -q "MERGE-A:" "$STUB_DIR/p-dream-prompt" || fail "live-dream call: a retired entry must not ride in the prompt"
+! grep -q "MERGE-B:" "$STUB_DIR/p-dream-prompt" || fail "live-dream call: a retired entry must not ride in the prompt"
+grep -q "No project is known" "$STUB_DIR/p-dream-prompt" ||
+  fail "live-dream call: with the newest session unbound, the prompt says no project is known"
+grep -q "never instructions" "$STUB_DIR/p-dream-prompt" ||
+  fail "live-dream call: the notebook block must be framed as data"
+grep -q "The notebook holds 11 of its $NB_BUDGET words. Entries are listed least recently used first." "$STUB_DIR/p-dream-prompt" ||
+  fail "live-dream call: the listing opens with the word count against the budget (mesa task 1337)"
+grep -q "this pass owns the budget" "$STUB_DIR/p-dream-prompt" ||
+  fail "live-dream call: the prompt gives the dream the budget"
+[ "$(cat "$STUB_DIR/p-dream-cwd")" = "$(workspace_path)" ] ||
+  fail "live-dream call: an unbound pass must run in ~/.naru/workspace (got $(cat "$STUB_DIR/p-dream-cwd"))"
+# The first edit failed, the second still applied.
+wait_for "the dream's keep to land" bash -c "'$MESA' live memory show $MC | jq -e '.kept_at != null' >/dev/null"
+JOB_LOG="$HOME/.naru/logs/memory-jobs.log"
+wait_for "the dream's report in the job log" grep -q '"report":"kept the roadmap"' "$JOB_LOG"
+grep '"report":"kept the roadmap"' "$JOB_LOG" | tail -1 | jq -e '(.failed | length) == 1 and (.applied | length) == 1 and .kind == "dream"' >/dev/null ||
+  fail "the job log must record one failed and one applied edit (got $(tail -1 "$JOB_LOG"))"
+rm -f "$STUB_DIR/dream-out.json"
+ok "live memory dream: starts a detached job — the -p argv, the schema, the fixed name, DREAM_PROMPT plus every active entry line and no retired one, the workspace cwd — prints a pid receipt, and Naru applies each edit on its own (a refused one is logged, the rest land)"
 
-# ---- dream: a configured live-dream template, {id} and {prompt} ----
+# ---- dream: a configured live-dream template, {id}, {prompt} and {schema} ----
 #
-# The verb goes through the template like every other spawn: a configured
-# script sees the same prompt the stub just recorded, byte-identical, and
-# {id} is the newest session's.
+# The job goes through the template like every other spawn: a configured
+# script sees the same prompt the stub just recorded, byte-identical, the
+# newest session's {id} and the schema as one word. It answers in the shape
+# the real call does (result JSON with a structured_output), so the job
+# applies it like any other.
 cat > "$TMP/dream-config.json" <<EOF
-{"commands": {"live-dream": "printf '%s' {prompt} > '$TMP/dream-prompt'; printf '%s' {id} > '$TMP/dream-id'; echo 'backgrounded · feedface'"}}
+{"commands": {"live-dream": "printf '%s' {prompt} > '$TMP/dream-prompt'; printf '%s' {id} > '$TMP/dream-id'; printf '%s' {schema} > '$TMP/dream-schema'; echo '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"\",\"structured_output\":{\"edits\":[],\"contradictions\":[],\"report\":\"configured\"}}'"}}
 EOF
+DP_BASE=$(p_base dream)
 run 0 env MESA_CONFIG_FILE="$TMP/dream-config.json" "$MESA" live memory dream
-[ "$(jqs .spawned)" = "true" ] && [ "$(jqs .receipt)" = "feedface" ] ||
-  fail "dream through a configured template must print that template's receipt (got $STDOUT)"
-cmp -s "$TMP/dream-prompt" "$STUB_DIR/last-prompt" ||
+[ "$(jqs .spawned)" = "true" ] || fail "dream through a configured template must start (got $STDOUT)"
+wait_for "the configured dream's report" grep -q '"report":"configured"' "$JOB_LOG"
+# Byte-identical to the built-in call's prompt, except that the earlier dream
+# kept $MC, which the prompt now marks `, kept`.
+[ "$(sed 's/, kept\]/]/' "$TMP/dream-prompt")" = "$(cat "$STUB_DIR/p-dream-prompt")" ] ||
   fail "a configured live-dream template must receive the same prompt byte-identical"
+grep -q -- "- \[#$MC, .*, kept\] KEEP-C" "$TMP/dream-prompt" ||
+  fail "the entry the earlier dream kept must now be marked kept in the prompt"
 [ "$(cat "$TMP/dream-id")" = "$NEWEST" ] ||
   fail "live-dream's {id} must be the newest session's ($NEWEST), got $(cat "$TMP/dream-id")"
-ok "live memory dream: a configured live-dream template runs with {prompt} byte-identical and {id} the newest session's"
+cmp -s "$TMP/dream-schema" "$STUB_DIR/p-dream-schema" ||
+  fail "live-dream's {schema} must be the dream schema, byte-identical"
+[ "$(pc dream)" = "$DP_BASE" ] || fail "the configured template replaces the built-in: the stub must not have been called"
+# A saved `--bg` override is retired (naru task 1690): it falls back to the
+# built-in, so the stub's -p branch is called again.
+cat > "$TMP/dream-bg-config.json" <<EOF
+{"commands": {"live-dream": "claude --bg --name {name} -- {prompt}"}}
+EOF
+printf '%s' '{"edits":[],"contradictions":[],"report":"fell back"}' > "$STUB_DIR/dream-out.json"
+run 0 env MESA_CONFIG_FILE="$TMP/dream-bg-config.json" "$MESA" live memory dream
+wait_p dream $((DP_BASE + 1))
+wait_for "the fallback dream's report" grep -q '"report":"fell back"' "$JOB_LOG"
+rm -f "$STUB_DIR/dream-out.json"
+ok "live memory dream: a configured live-dream template runs with {prompt} byte-identical, {id} the newest session's and {schema} the dream schema; a saved --bg override is ignored for the built-in"
 
 # =====================================================================
 # 15. Handoff (mesa task 1150): a fresh agent takes over the same session
@@ -4253,10 +4443,12 @@ ok "live notice after the conversation ended: not_found"
 # pass now also runs on its own, gated by one deterministic check
 # (`live::dream_wanted`: 300 active words, or two entries whose token sets
 # overlap by half): at a handoff — the outgoing agent announces a rest, the
-# dream is spawned beside the successor, the session rests until the
+# dream is started beside the successor, the session rests until the
 # successor's first `listen` finds the dream job finished — and when a
-# conversation ends. The stub `claude agents` answers the dream job done from
-# a `done-ids` file, so the wait is one probe rather than ten minutes.
+# conversation ends. Since naru task 1690 the dream is a detached `naru __job
+# dream` whose receipt is `pid:<n>`, and the stub's `hold-p` file is what
+# keeps its claude call running (and the session resting) until the gate
+# releases it.
 
 # ---- (a) under threshold: context says no dream; a handoff rests nothing ----
 rm -f "$STUB_DIR/done-ids"
@@ -4289,24 +4481,30 @@ DD_B=$(jqs .id)
 run 0 "$MESA" live context
 [ "$(jqs .dream)" = "entries $DD_A and $DD_B look alike" ] ||
   fail "live context: two lookalike entries are a dream reason naming both ids (got $(jqs .dream))"
+# Held: the dream's claude call keeps running until the gate lets go, so the
+# session provably rests on the job (the pid marker), not on a timer.
+touch "$STUB_DIR/hold-p"
+printf '%s' '{"edits":[],"contradictions":[],"report":"nothing"}' > "$STUB_DIR/dream-out.json"
 SPAWNS_BEFORE=$(cat "$STUB_DIR/spawns")
+DP_BASE=$(p_base dream)
 run 0 "$MESA" live handoff "resting handoff"
 [ "$(jqs .lease)" = "3" ] || fail "dream handoff (b): lease 3"
 [ "$(jqs .status)" = "live" ] || fail "dream handoff (b): the session stays live"
 [ "$(jqs .resting_since)" != "null" ] || fail "a handoff that dreams must rest the session (got $STDOUT)"
-[ "$(cat "$STUB_DIR/spawns")" = "$((SPAWNS_BEFORE + 2))" ] ||
-  fail "a handoff that dreams spawns the successor AND the dream (got $(( $(cat "$STUB_DIR/spawns") - SPAWNS_BEFORE )) spawns)"
-DREAM_ID=$(cat "$STUB_DIR/last-id")
+[ "$(cat "$STUB_DIR/spawns")" = "$((SPAWNS_BEFORE + 1))" ] ||
+  fail "a handoff that dreams spawns the successor alone as a --bg agent (got $(( $(cat "$STUB_DIR/spawns") - SPAWNS_BEFORE )) spawns)"
+wait_p dream $((DP_BASE + 1))
 DA3=$(jqs .agent_id)
-[ "$DA3" = "deadbeef-$(( $(cat "$STUB_DIR/spawns") - 1 ))" ] ||
-  fail "dream handoff (b): agent_id is the successor's receipt, spawned before the dream (got $DA3)"
-[ "$DA3" != "$DREAM_ID" ] || fail "dream handoff (b): the dream's receipt must not be bound as the agent"
-[ "$(head -4 "$STUB_DIR/last-flags")" = "$EXPECTED_DREAM_FLAGS" ] ||
-  fail "the handoff's dream spawn must go through the live-dream template (got $(head -4 "$STUB_DIR/last-flags" | tr '\n' ' '))"
-grep -q "You are tidying mesa's notebook between conversations" "$STUB_DIR/last-prompt" ||
-  fail "the handoff's dream spawn must carry DREAM_PROMPT"
-grep -q "DREAM-DUP-A" "$STUB_DIR/last-prompt" && grep -q "DREAM-DUP-B" "$STUB_DIR/last-prompt" ||
-  fail "the handoff's dream spawn must carry the active notebook"
+[ "$DA3" = "$(cat "$STUB_DIR/last-id")" ] && [ "$DA3" != "$DA2" ] ||
+  fail "dream handoff (b): agent_id is the successor's receipt (got $DA3)"
+DREAM_MARKER=$(sqlite3 "$MESA_DB" "SELECT dream_agent_id FROM live_sessions WHERE id=$DS")
+case "$DREAM_MARKER" in pid:[0-9]*) ;; *) fail "the rest must wait on a pid:<n> marker (got $DREAM_MARKER)" ;; esac
+[ "$(head -11 "$STUB_DIR/p-dream-flags")" = "$EXPECTED_DREAM_FLAGS" ] ||
+  fail "the handoff's dream must go through the live-dream template (got $(head -11 "$STUB_DIR/p-dream-flags" | tr '\n' ' '))"
+grep -q "You are tidying Naru's notebook between conversations" "$STUB_DIR/p-dream-prompt" ||
+  fail "the handoff's dream must carry DREAM_PROMPT"
+grep -q "DREAM-DUP-A" "$STUB_DIR/p-dream-prompt" && grep -q "DREAM-DUP-B" "$STUB_DIR/p-dream-prompt" ||
+  fail "the handoff's dream must carry the active notebook"
 [ -z "$STDERR" ] || fail "dream handoff (b): nothing on stderr (got: $STDERR)"
 run 0 "$MESA" live status
 [ "$(jqs .resting_since)" != "null" ] || fail "live status: resting_since rides on the session"
@@ -4316,15 +4514,20 @@ api 200 GET "/api/live"
   fail "GET /api/live: the dream's receipt is store-only, never on the session"
 run 1 "$MESA" live memory dream
 [ "$(jqe .error.code)" = "conflict" ] || fail "the explicit dream verb is still conflict while a session rests"
-ok "the automatic dream: two lookalike entries make context report why, and the handoff spawns live-dream beside the successor and rests the session — on live status and GET /api/live"
+ok "the automatic dream: two lookalike entries make context report why, and the handoff starts the dream job beside the successor and rests the session on its pid marker — on live status and GET /api/live"
 
 # ---- (c) the successor's first listen waits out the rest, then wakes ----
-printf '%s\n' "$DREAM_ID" > "$STUB_DIR/done-ids"
 api 201 POST "/api/live/utterance" '{"text":"said while resting"}'
 rm -f "$STUB_DIR/last-stop"
+# The dream's call is released a moment after listen starts waiting on it:
+# the listen must hold the turn back until then, and hand it over once the
+# job has exited.
+( sleep 2; rm -f "$STUB_DIR/hold-p" ) &
+T0=$(date +%s)
 run 0 "$MESA" live listen --lease 3 --wait 0
 [ "$(jqs .text)" = "said while resting" ] ||
   fail "listen --lease 3: once the dream job is done the queued utterance is handed over (got $STDOUT)"
+[ $(( $(date +%s) - T0 )) -ge 1 ] || fail "listen must have waited for the held dream job"
 [ "$(cat "$STUB_DIR/last-stop" 2>/dev/null)" = "stop $DA2" ] ||
   fail "the woken successor's first listen still stops the predecessor (got $(cat "$STUB_DIR/last-stop" 2>/dev/null))"
 [ -z "$STDERR" ] || fail "a rest that ends before its cap warns about nothing (got: $STDERR)"
@@ -4333,32 +4536,37 @@ run 0 "$MESA" live status
 [ "$(jqs .lease)" = "3" ] || fail "a wake moves nothing but the rest"
 api 200 GET "/api/live"
 [ "$(jqb .session.resting_since)" = "null" ] || fail "GET /api/live: woken"
-rm -f "$STUB_DIR/done-ids"
-ok "the automatic dream: listen --lease wakes a resting session once claude agents reports the dream done, hands the queued turn over and stops the predecessor once"
+ok "the automatic dream: listen --lease waits while the dream job's pid is alive, wakes the session once it exits, hands the queued turn over and stops the predecessor once"
 
 # ---- (d) live stop: a dream over threshold, none under it ----
 run 0 "$MESA" live say --lease 3 "A turn, so the summariser has something to read."
 SPAWNS_BEFORE=$(cat "$STUB_DIR/spawns")
+DP_BASE=$(p_base dream)
+SP_BASE=$(p_base summary)
 run 0 "$MESA" live stop
 [ "$(jqs .status)" = "ended" ] || fail "live stop (over threshold): ended"
 [ "$(jqs .resting_since)" = "null" ] || fail "an ended session is never resting"
-[ "$(cat "$STUB_DIR/spawns")" = "$((SPAWNS_BEFORE + 2))" ] ||
-  fail "live stop over threshold spawns the summariser AND the dream (got $(( $(cat "$STUB_DIR/spawns") - SPAWNS_BEFORE )) spawns)"
-[ "$(head -4 "$STUB_DIR/last-flags")" = "$EXPECTED_DREAM_FLAGS" ] ||
-  fail "live stop's dream spawn must go through the live-dream template (got $(head -4 "$STUB_DIR/last-flags" | tr '\n' ' '))"
-[ "$(cat "$STUB_DIR/last-cwd")" = "$WORKDIR" ] ||
-  fail "live stop's dream runs in the conversation's project folder (got $(cat "$STUB_DIR/last-cwd"))"
+wait_p dream $((DP_BASE + 1))
+wait_p summary $((SP_BASE + 1))
+[ "$(cat "$STUB_DIR/spawns")" = "$SPAWNS_BEFORE" ] ||
+  fail "live stop starts jobs, never a --bg agent (got $(( $(cat "$STUB_DIR/spawns") - SPAWNS_BEFORE )) spawns)"
+[ "$(head -11 "$STUB_DIR/p-dream-flags")" = "$EXPECTED_DREAM_FLAGS" ] ||
+  fail "live stop's dream must go through the live-dream template (got $(head -11 "$STUB_DIR/p-dream-flags" | tr '\n' ' '))"
+[ "$(cat "$STUB_DIR/p-dream-cwd")" = "$WORKDIR" ] ||
+  fail "live stop's dream runs in the conversation's project folder (got $(cat "$STUB_DIR/p-dream-cwd"))"
 run 0 "$MESA" live memory delete "$DD_A"
 run 0 "$MESA" live memory delete "$DD_B"
 run 0 "$MESA" live start "live gate project"
 run 0 "$MESA" live say "One turn, under threshold."
-SPAWNS_BEFORE=$(cat "$STUB_DIR/spawns")
+DP_BASE=$(p_base dream)
+SP_BASE=$(p_base summary)
 run 0 "$MESA" live stop
-[ "$(cat "$STUB_DIR/spawns")" = "$((SPAWNS_BEFORE + 1))" ] ||
-  fail "live stop under threshold spawns the summariser alone (got $(( $(cat "$STUB_DIR/spawns") - SPAWNS_BEFORE )) spawns)"
-[ "$(sed -n 3p "$STUB_DIR/last-flags")" = "Live gate project: live $(jqs .id) summary" ] ||
-  fail "live stop under threshold: the one spawn is the summariser (got $(sed -n 3p "$STUB_DIR/last-flags"))"
-ok "the automatic dream: live stop spawns the dream beside the summariser over threshold and only the summariser under it"
+wait_p summary $((SP_BASE + 1))
+no_new_p dream "$DP_BASE" "live stop under threshold must start the summariser alone"
+[ "$(sed -n 5p "$STUB_DIR/p-summary-flags")" = "Live gate project: live $(jqs .id) summary" ] ||
+  fail "live stop under threshold: the one job is the summariser (got $(sed -n 5p "$STUB_DIR/p-summary-flags"))"
+rm -f "$STUB_DIR/dream-out.json" "$STUB_DIR/hold-p"
+ok "the automatic dream: live stop starts the dream job beside the summariser over threshold and only the summariser under it, neither as a --bg agent"
 
 # =====================================================================
 # 18. Barge-in (mesa task 1595): `mesa live hook` and the live-barge-in.sh

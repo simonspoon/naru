@@ -3324,6 +3324,16 @@ impl Store {
         Store::open(&default_db_path())
     }
 
+    /// The file this store is open on — what a detached `naru __job` child is
+    /// told to open (`NARU_DB`), so it works the same db whoever started it.
+    /// `None` for an in-memory or temporary db.
+    pub fn db_path(&self) -> Option<PathBuf> {
+        self.conn
+            .path()
+            .filter(|p| !p.is_empty())
+            .map(PathBuf::from)
+    }
+
     // ---- projects ----
 
     pub fn create_project(
@@ -7732,6 +7742,17 @@ impl Store {
                 },
             )
             .optional()?)
+    }
+
+    /// Test seam: ages a project's dream row by `minutes`.
+    #[cfg(test)]
+    pub(crate) fn backdate_project_dream(&self, project_id: i64, minutes: u32) {
+        self.conn
+            .execute(
+                "UPDATE project_dreams SET started_at = datetime('now', ?2) WHERE project_id = ?1",
+                (project_id, format!("-{minutes} minutes")),
+            )
+            .unwrap();
     }
 
     /// Claims `project_id`'s next automatic dream: a row with no receipt,

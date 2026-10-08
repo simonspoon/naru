@@ -19,6 +19,7 @@ pub mod listen;
 pub mod live;
 pub mod llm;
 pub mod look;
+pub mod memory_job;
 pub mod migrate;
 pub mod notify;
 pub mod project_memory;

@@ -302,18 +302,24 @@ pub const DEFAULT_AGENT_SPAWN: &str = "claude --bg --model opus --agent supervis
 /// which is where its instructions live; a user who wants another agent edits
 /// the name here.
 pub const DEFAULT_LIVE_AGENT: &str = "claude --bg --agent naru-live --name {name} -- {prompt}";
-/// Built-in default for [`LIVE_SUMMARY`] — identical in shape to
-/// [`DEFAULT_LIVE_AGENT`]: the summariser is also a mesa record (a session
-/// id and a name) carrying a prompt mesa supplies
-/// (`core::live::summary_prompt`), so it works with no user configuration.
-/// It names no agent — plain `claude` — since the prompt holds the whole
-/// job and an unseeded agent name makes `claude` fail at once.
-pub const DEFAULT_LIVE_SUMMARY: &str = "claude --bg --name {name} -- {prompt}";
+/// Built-in default for [`LIVE_SUMMARY`] (naru task 1690): one synchronous
+/// `claude -p --output-format json --json-schema {schema}` call, **no tools**
+/// (`--tools ""`, `--strict-mcp-config`), run inside a detached `naru __job`
+/// child (`core::memory_job`). The prompt (`core::live::summary_prompt`)
+/// carries the whole conversation and the notebook; `{schema}` is the JSON
+/// Schema Naru owns (`core::live::SUMMARY_SCHEMA`); the answer is the result
+/// JSON's `structured_output`, which Naru applies itself through `Store`.
+/// Checked against the real `claude`: `--tools ""` keeps the synthetic
+/// `StructuredOutput` tool. A saved template that still starts a `--bg`
+/// agent is retired ([`retired_bg_override`]).
+pub const DEFAULT_LIVE_SUMMARY: &str = r#"claude -p --model sonnet --name {name} --tools "" --strict-mcp-config --output-format json --json-schema {schema} -- {prompt}"#;
 /// Built-in default for [`LIVE_DREAM`] — [`DEFAULT_LIVE_SUMMARY`]'s shape
 /// again: `{id}` is the newest conversation's id, `{name}` a fixed
-/// `live memory dream`, and `{prompt}` is `core::live::dream_prompt`, the
-/// instructions plus the active notebook. Names no agent, as above.
-pub const DEFAULT_LIVE_DREAM: &str = "claude --bg --name {name} -- {prompt}";
+/// `live memory dream`, `{prompt}` is `core::live::dream_prompt`, the
+/// instructions plus the active notebook, and `{schema}` the edit-list schema
+/// (the live or the project one — the project notebook's dream shares this
+/// template).
+pub const DEFAULT_LIVE_DREAM: &str = r#"claude -p --model sonnet --name {name} --tools "" --strict-mcp-config --output-format json --json-schema {schema} -- {prompt}"#;
 /// Built-in default for [`RETRO`] — [`DEFAULT_INBOX_WATCHER`]'s shape: the
 /// run is a mesa record (`retro_runs`, so `{id}` is the run id and `{name}`
 /// the `naru retro <id>` session name) and the prompt is one sentence, since
@@ -474,7 +480,41 @@ fn command_in(path: &Path, action: &str) -> Result<Option<String>, String> {
                 s.trim(),
             )))
         })
-        .filter(|s| !s.is_empty()))
+        .filter(|s| !s.is_empty())
+        .filter(|s| {
+            let retired = retired_bg_override(action, s);
+            // Once per process per action: reads happen on every spawn.
+            if retired && note_retired_once(action) {
+                eprintln!(
+                    "ignoring the saved {action} template: it starts a --bg agent, which naru \
+                     task 1690 retired; using the built-in. Re-save it in Settings."
+                );
+            }
+            !retired
+        }))
+}
+
+/// True the first time it is asked for `action` in this process.
+fn note_retired_once(action: &str) -> bool {
+    static SEEN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    if seen.iter().any(|a| a == action) {
+        return false;
+    }
+    seen.push(action.to_string());
+    true
+}
+
+/// Whether `template` is a saved `live-summary`/`live-dream` override that
+/// still starts a `--bg` agent (naru task 1690). Those two actions now run
+/// synchronously (`claude -p --output-format json`) and Naru applies the
+/// answer itself, so a `--bg` template — which prints a receipt, not result
+/// JSON — can only fail. Judged on **read** (the template falls back to the
+/// built-in, the file is never rewritten, the [`migrate_retired_placeholders`]
+/// posture) and refused on **save** ([`validate`]).
+pub fn retired_bg_override(action: &str, template: &str) -> bool {
+    (action == LIVE_SUMMARY || action == LIVE_DREAM)
+        && template.split_whitespace().any(|w| w == "--bg")
 }
 
 /// Rewrites the two placeholders mesa task 1141 retired — `{bin}` and
@@ -697,6 +737,13 @@ fn write_atomically(path: &Path, body: &str) -> Result<(), SaveError> {
 pub fn validate(action: &str, template: &str, prompts: &Prompts) -> Result<(), String> {
     let script = template.trim();
     refuse_env_references(action, script)?;
+    if retired_bg_override(action, script) {
+        return Err(format!(
+            "{action} no longer starts a --bg agent: it runs one synchronous `claude -p \
+             --output-format json --json-schema {{schema}}` call and Naru applies the answer \
+             itself (naru task 1690); remove --bg"
+        ));
+    }
     check_script(action, script, prompts)?;
     let vars = Vars {
         id: Some(1),
@@ -704,6 +751,7 @@ pub fn validate(action: &str, template: &str, prompts: &Prompts) -> Result<(), S
         prompt: Some("prompt"),
         model: Some("model"),
         thinking: Some("on"),
+        schema: Some("{}"),
         session_flag: Some("--session-id"),
         session_id: Some("session"),
         prompts: Some(prompts),
@@ -728,12 +776,13 @@ pub fn resolve(action: &str, template: &str, vars: &Vars) -> Result<String, Stri
 /// The three built-in placeholder names. Per-call data, so each is offered to
 /// a subset of the actions ([`offered_placeholders`]); the library's
 /// `{prompt:<name>}` form is orthogonal and offered everywhere.
-const BUILTIN_PLACEHOLDERS: [&str; 7] = [
+const BUILTIN_PLACEHOLDERS: [&str; 8] = [
     "id",
     "name",
     "prompt",
     "model",
     "thinking",
+    "schema",
     "session_flag",
     "session_id",
 ];
@@ -1575,6 +1624,10 @@ pub struct Vars<'a> {
     /// switch (`on`/`off`) — offered to that action alone.
     pub model: Option<&'a str>,
     pub thinking: Option<&'a str>,
+    /// The JSON Schema `live-summary`/`live-dream` pass to `--json-schema` —
+    /// Naru's own text (`core::live`), so a template edit cannot break the
+    /// contract; offered to those two actions alone.
+    pub schema: Option<&'a str>,
     /// `runner`'s `--session-id`/`--resume` choice and the job's uuid —
     /// offered to that action alone.
     pub session_flag: Option<&'a str>,
@@ -1617,6 +1670,7 @@ impl Vars<'_> {
             "prompt" => self.prompt.map(str::to_string),
             "model" => self.model.map(str::to_string),
             "thinking" => self.thinking.map(str::to_string),
+            "schema" => self.schema.map(str::to_string),
             "session_flag" => self.session_flag.map(str::to_string),
             "session_id" => self.session_id.map(str::to_string),
             _ => None,
@@ -1634,7 +1688,9 @@ pub fn offered_placeholders(action: &str) -> &'static [&'static str] {
         // The union: a live session (and its summariser, and the dream pass
         // that borrows the newest session's id) is a mesa record *and*
         // carries a prompt.
-        LIVE_AGENT | LIVE_SUMMARY | LIVE_DREAM => &["{id}", "{name}", "{prompt}"],
+        LIVE_AGENT => &["{id}", "{name}", "{prompt}"],
+        // Plus the schema Naru owns (naru task 1690).
+        LIVE_SUMMARY | LIVE_DREAM => &["{id}", "{name}", "{prompt}", "{schema}"],
         WORKFLOW_PROMPT => &["{model}", "{thinking}", "{name}", "{prompt}"],
         RUNNER => &["{model}", "{name}", "{session_flag}", "{session_id}"],
         _ => &["{id}", "{name}"],
@@ -4642,11 +4698,17 @@ mod tests {
         // The summariser offers the same union, for the same reason.
         assert_eq!(settings[4].action, LIVE_SUMMARY);
         assert_eq!(settings[4].default, DEFAULT_LIVE_SUMMARY);
-        assert_eq!(settings[4].placeholders, ["{id}", "{name}", "{prompt}"]);
+        assert_eq!(
+            settings[4].placeholders,
+            ["{id}", "{name}", "{prompt}", "{schema}"]
+        );
         // The dream pass (mesa task 1152) is the sixth, same union.
         assert_eq!(settings[5].action, LIVE_DREAM);
         assert_eq!(settings[5].default, DEFAULT_LIVE_DREAM);
-        assert_eq!(settings[5].placeholders, ["{id}", "{name}", "{prompt}"]);
+        assert_eq!(
+            settings[5].placeholders,
+            ["{id}", "{name}", "{prompt}", "{schema}"]
+        );
         // The retrospective (mesa task 1158) is the seventh: a mesa record
         // with no prompt of mesa's, the inbox-watcher's shape.
         assert_eq!(settings[6].action, RETRO);
@@ -4691,6 +4753,73 @@ mod tests {
             "{script}"
         );
         assert!(!script.contains("--bare"), "{script}");
+    }
+
+    /// naru task 1690: the live-summary and live-dream defaults are one
+    /// synchronous `-p` call with no tools, the prompt and the schema each
+    /// one quoted word; never `--bg`.
+    #[test]
+    fn live_summary_and_dream_defaults_are_structured_print_calls() {
+        for (action, default) in [
+            (LIVE_SUMMARY, DEFAULT_LIVE_SUMMARY),
+            (LIVE_DREAM, DEFAULT_LIVE_DREAM),
+        ] {
+            validate(action, default, &Prompts::default()).unwrap();
+            let vars = Vars {
+                id: Some(3),
+                name: Some("naru live 3 summary"),
+                prompt: Some("a $(touch /tmp/x) 'q'"),
+                schema: Some(r#"{"type":"object","a":"it's"}"#),
+                ..Default::default()
+            };
+            let script = resolve(action, default, &vars).unwrap();
+            assert!(
+                script.starts_with("claude -p --model sonnet --name 'naru live 3 summary' "),
+                "{script}"
+            );
+            assert!(
+                script.contains(r#"--tools "" --strict-mcp-config --output-format json "#),
+                "{script}"
+            );
+            assert!(
+                script.contains(r#"--json-schema '{"type":"object","a":"it'\''s"}' "#),
+                "{script}"
+            );
+            assert!(
+                script.ends_with(r#"-- 'a $(touch /tmp/x) '\''q'\'''"#),
+                "{script}"
+            );
+            assert!(!script.contains("--bg"), "{script}");
+        }
+    }
+
+    /// A saved `--bg` override of either action is retired: refused on save,
+    /// ignored (falling back to the built-in) on read, the file untouched.
+    #[test]
+    fn a_saved_bg_override_of_live_summary_or_dream_is_retired() {
+        let err = validate_(LIVE_SUMMARY, "claude --bg --name {name} -- {prompt}").unwrap_err();
+        assert!(err.contains("--bg") && err.contains("1690"), "{err}");
+        assert!(validate_(LIVE_DREAM, "claude --bg -- {prompt}").is_err());
+        // Other actions still start --bg agents.
+        validate_(LIVE_AGENT, "claude --bg --name {name} -- {prompt}").unwrap();
+        // `--background` is not the flag.
+        assert!(!retired_bg_override(
+            LIVE_SUMMARY,
+            "tool --background {prompt}"
+        ));
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(
+            dir.path(),
+            r#"{"commands": {"live-summary": "claude --bg --name {name} -- {prompt}",
+                             "live-dream": "mytool {prompt}"}}"#,
+        );
+        assert_eq!(command_in(&path, LIVE_SUMMARY).unwrap(), None);
+        assert_eq!(
+            command_in(&path, LIVE_DREAM).unwrap().as_deref(),
+            Some("mytool {prompt}")
+        );
+        // The file itself is never rewritten.
+        assert!(std::fs::read_to_string(&path).unwrap().contains("--bg"));
     }
 
     /// The workflow-prompt default passes the save-time validator and

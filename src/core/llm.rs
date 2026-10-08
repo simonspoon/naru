@@ -66,6 +66,67 @@ pub fn complete(
     run_claude(&script, cwd, timeout)
 }
 
+/// One structured-output call (naru task 1690): `action`'s template
+/// (`live-summary` or `live-dream`) resolved with `schema` as `--json-schema`,
+/// run to completion under `timeout`, answered with the result JSON's
+/// `structured_output` object. As a fallback — a hand-written template
+/// without `--json-schema` — a `result` text that is itself a JSON object is
+/// accepted. The model has no tools: Naru applies what comes back.
+#[allow(clippy::too_many_arguments)]
+pub fn complete_structured(
+    action: &str,
+    id: Option<i64>,
+    name: &str,
+    prompt: &str,
+    schema: &str,
+    prompts: &config::Prompts,
+    cwd: &str,
+    timeout: Duration,
+) -> Result<Value, String> {
+    if prompt.len() > AGENT_PROMPT_MAX {
+        return Err(format!(
+            "the prompt is {} bytes, over the {AGENT_PROMPT_MAX}-byte limit (it travels as one \
+             argument to the spawn)",
+            prompt.len()
+        ));
+    }
+    let script = agents::structured_script(action, id, name, prompt, schema, prompts)?;
+    let mut cmd = Command::new("bash");
+    cmd.arg("-c").arg(&script).current_dir(cwd);
+    let out = agents::capture(cmd, None, timeout)?;
+    if out.stdout.len() > ANSWER_CAP {
+        return Err(format!(
+            "claude's output is {} bytes, over the {ANSWER_CAP}-byte cap",
+            out.stdout.len()
+        ));
+    }
+    parse_structured(
+        out.code,
+        &String::from_utf8_lossy(&out.stdout),
+        &String::from_utf8_lossy(&out.stderr),
+    )
+}
+
+/// [`parse_envelope`] then the `structured_output` object (or, failing that,
+/// a `result` that parses as a JSON object).
+fn parse_structured(code: i32, stdout: &str, stderr: &str) -> Result<Value, String> {
+    let parsed = parse_envelope(code, stdout, stderr)?;
+    if parsed["structured_output"].is_object() {
+        return Ok(parsed["structured_output"].clone());
+    }
+    if let Some(v) = parsed["result"]
+        .as_str()
+        .and_then(|r| serde_json::from_str::<Value>(r.trim()).ok())
+        .filter(Value::is_object)
+    {
+        return Ok(v);
+    }
+    Err(format!(
+        "claude's result JSON holds no structured_output object: {}",
+        truncate(stdout)
+    ))
+}
+
 /// Runs the resolved `workflow-prompt` script to completion and reads the
 /// answer off its stdout.
 fn run_claude(script: &str, cwd: &str, timeout: Duration) -> Result<String, String> {
@@ -91,6 +152,18 @@ fn run_claude(script: &str, cwd: &str, timeout: Duration) -> Result<String, Stri
 /// object, `is_error`, a non-`success` subtype, no `result` text — is an error
 /// naming what went wrong, with the stderr tail where there is one.
 fn parse_result(code: i32, stdout: &str, stderr: &str) -> Result<String, String> {
+    let parsed = parse_envelope(code, stdout, stderr)?;
+    parsed["result"]
+        .as_str()
+        .map(str::to_string)
+        .filter(|a| !a.trim().is_empty())
+        .ok_or_else(|| format!("claude's result JSON holds no answer: {}", truncate(stdout)))
+}
+
+/// The checks every result object owes before its payload is read: a zero
+/// exit, a JSON object, no `is_error`, subtype `success` (so
+/// `error_max_turns` and `error_max_structured_output_retries` are named).
+fn parse_envelope(code: i32, stdout: &str, stderr: &str) -> Result<Value, String> {
     let tail = |s: &str| {
         let s = s.trim();
         let start = s.len().saturating_sub(300);
@@ -128,11 +201,7 @@ fn parse_result(code: i32, stdout: &str, stderr: &str) -> Result<String, String>
             }
         ));
     }
-    parsed["result"]
-        .as_str()
-        .map(str::to_string)
-        .filter(|a| !a.trim().is_empty())
-        .ok_or_else(|| format!("claude's result JSON holds no answer: {}", truncate(stdout)))
+    Ok(parsed)
 }
 
 fn ollama(name: &str, thinking: bool, prompt: &str, timeout: Duration) -> Result<String, String> {
@@ -349,6 +418,25 @@ mod tests {
         );
         let err = parse_result(0, r#"{"subtype":"success","result":" "}"#, "").unwrap_err();
         assert!(err.contains("no answer"), "{err}");
+    }
+
+    #[test]
+    fn a_structured_result_is_the_object() {
+        let ok = r#"{"type":"result","subtype":"success","is_error":false,"result":"{\"a\":\"hi\"}","structured_output":{"a":"hi"}}"#;
+        assert_eq!(parse_structured(0, ok, "").unwrap()["a"], "hi");
+        // No structured_output: a `result` that is itself an object is taken.
+        let text = r#"{"type":"result","subtype":"success","is_error":false,"result":"{\"b\":1}"}"#;
+        assert_eq!(parse_structured(0, text, "").unwrap()["b"], 1);
+        // Neither: an error naming the missing object.
+        let err = parse_structured(0, OK, "").unwrap_err();
+        assert!(err.contains("no structured_output"), "{err}");
+        let err = parse_structured(
+            0,
+            r#"{"type":"result","subtype":"error_max_structured_output_retries","is_error":true}"#,
+            "",
+        )
+        .unwrap_err();
+        assert!(err.contains("error_max_structured_output_retries"), "{err}");
     }
 
     #[test]

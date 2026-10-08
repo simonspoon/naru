@@ -204,7 +204,7 @@ The starter set is deliberately tiny — nine rows:
 | `supervisor` | `agent` | `user` | The agent definition an auto-dispatched `/execute-todo` run is supervised as — literally `core::supervisor::SUPERVISOR_DEFINITION` (mesa task 1075), seeded to `~/.claude/agents/supervisor.md` by `core::supervisor::ensure_agent_definition` before the `todo-watcher` spawn |
 | `naru-retro` | `agent` | `user` | The agent definition the session retrospective runs as — literally `core::retro::RETRO_DEFINITION` (mesa task 1158, `docs/retro.md`), seeded to `~/.claude/agents/naru-retro.md` by `core::retro::ensure_agent_definition` before the `retro` spawn |
 | `inbox-triage` | `agent` | `user` | The agent definition a `serve --watch-inbox` dispatch triages one inbox item as — literally `core::inbox_triage::INBOX_TRIAGE_DEFINITION` (mesa task 1168, `docs/inbox-watcher.md`): `opus` at medium effort, no `Edit`/`Write`, seeded to `~/.claude/agents/inbox-triage.md` by `core::inbox_triage::ensure_agent_definition` before the `inbox-watcher` spawn |
-| `live-summary-prompt` | `prompt` | `user` | The instructions for the short-lived agent that writes a live conversation's memory once it ends (mesa task 921) — literally `core::live::SUMMARY_PROMPT`, placed immediately after the prompt it belongs beside |
+| `live-summary-prompt` | `prompt` | `user` | The instructions for the tool-less `claude -p --json-schema` call (a detached `naru __job summary`, naru task 1690) that writes a live conversation's memory once it ends (mesa task 921) — literally `core::live::SUMMARY_PROMPT`, placed immediately after the prompt it belongs beside |
 | `starter-claude-md` | `claude-md` | `user` | A short starting-point CLAUDE.md |
 | `stop-notify` | `hook` | `user` | A minimal shell hook that echoes when Claude Code stops — its *name* is `stop-notify.sh`, since a hook's name carries its own extension |
 | `task-stop-guard` | `hook` | `user` | A `Stop` hook that keeps a task agent from ending its turn before its Naru task is handled — literally `core::stop_guard::STOP_GUARD_HOOK` (mesa task 1190, "The task-stop-guard hook" below); name `task-stop-guard.sh` |
@@ -1308,12 +1308,17 @@ being mesa-internal — it has no on-disk path either (`relative_path` answers
 is). `core::live::summary_prompt(store,
 session_id)` resolves it the way the live agent's block used to be resolved: a
 fork of `live-summary-prompt` if one exists, else `core::live::SUMMARY_PROMPT`.
+Since naru task 1690 the built-in's body asks for the JSON object
+(`summary`, `notebook_add`) and names no `mesa live` command — the call has no
+tools — so an older fork is flagged `builtin_updated` like any other stale
+fork; a stale fork still works, because `summary_prompt` appends a Naru-owned
+tail after whatever block resolves (the session line, the notebook, the turn
+log and the closing ask for the JSON object).
 **A store error resolving the fork also falls back to the built-in** rather
 than failing the call: a database hiccup must not be what stops the short-lived
-summariser from being spawned, and the very next step is `agents::spawn_bg`
-reading the same store for the command template, which reports *that* failure
-as `unavailable` if the database is genuinely unreachable — so a real problem
-still surfaces once, not twice. It never existed as a config key in the first
+summariser from running, and the job opens the same store for the command
+template, which reports *that* failure if the database is genuinely
+unreachable — so a real problem still surfaces once, not twice. It never existed as a config key in the first
 place, so there is nothing here for an old `config.json` to leave behind.
 
 ## Gate

@@ -51,8 +51,8 @@ use crate::core::{
     ServeHostsSetting, ServeNumberSetting, Status, Store, SystemInfo, Task, TaskPatch, TaskSummary,
     WorkflowNodeKind, WorkflowNodeNew, WorkflowNodePatch, WorkflowPatch, WorkflowTrigger, agents,
     attachments, audio, board, config, files, git, guard, hooks, inbox_triage, library, listen,
-    live, project_memory, receipt, retro, runner, script_runs, scripts, speech, supervisor, system,
-    validate_live_client, version, workflow,
+    live, memory_job, project_memory, receipt, retro, runner, script_runs, scripts, speech,
+    supervisor, system, validate_live_client, version, workflow,
 };
 
 /// The Vite build output, embedded into the binary at compile time.
@@ -5210,60 +5210,51 @@ async fn spawn_live_agent(
     Ok(job)
 }
 
-/// Spawns the short-lived agent that writes a just-ended session's memory
-/// (mesa task 921), reusing [`live_agent_dir`] so it lands in the same folder
-/// and under the same name as the conversation it is about, suffixed
-/// `" summary"`. **Best-effort**, like `stop_live`'s `claude stop` call right
+/// Starts the detached `naru __job summary` that writes a just-ended session's
+/// memory (mesa task 921, naru task 1690), reusing [`live_agent_dir`] so its
+/// claude call runs in the same folder and under the same name as the
+/// conversation it is about, suffixed `" summary"`. **Best-effort**, like `stop_live`'s `claude stop` call right
 /// after it: the store write that ended the conversation is the truth, and a
 /// failure here is a log line, never this route's answer.
 async fn spawn_live_summary(state: &AppState, session_id: i64, project_id: Option<i64>) {
     let dir_and_name = {
         let store = state.store.lock().unwrap();
-        live_agent_dir(&store, project_id, session_id)
+        live_agent_dir(&store, project_id, session_id).map(|v| (v, store.db_path()))
     };
-    let (dir, name) = match dir_and_name {
+    let ((dir, name), db) = match dir_and_name {
         Ok(v) => v,
         Err(e) => {
             eprintln!(
-                "live session {session_id}: could not spawn its summariser: {}",
+                "live session {session_id}: could not start its summariser: {}",
                 e.message
             );
             return;
         }
     };
-    let prompt = live::summary_prompt(&state.store.lock().unwrap(), session_id);
-    let prompts = library::prompts(&state.store.lock().unwrap()).unwrap_or_default();
-    let result = tokio::task::spawn_blocking(move || {
-        agents::spawn_bg(
-            config::LIVE_SUMMARY,
-            &dir,
-            Some(session_id),
-            Some(&format!("{name} summary")),
-            Some(&prompt),
-            &prompts,
-        )
-    })
-    .await;
-    match result {
+    let job = memory_job::Job::Summary {
+        session_id,
+        name: format!("{name} summary"),
+    };
+    match tokio::task::spawn_blocking(move || memory_job::spawn(&job, &dir, db.as_deref())).await {
         Ok(Ok(_)) => {}
         Ok(Err(e)) => {
-            eprintln!("live session {session_id}: could not spawn its summariser: {e}")
+            eprintln!("live session {session_id}: could not start its summariser: {e}")
         }
         Err(e) => {
-            eprintln!("live session {session_id}: summariser spawn panicked: {e}")
+            eprintln!("live session {session_id}: summariser start panicked: {e}")
         }
     }
 }
 
 /// The automatic dream at the end of a conversation (mesa task 1155), the
 /// twin of the CLI's `spawn_live_dream_after`: once the session has ended,
-/// spawns the `live-dream` template when `live::dream_wanted` says the
+/// starts a detached `naru __job dream` when `live::dream_wanted` says the
 /// notebook needs it. **Best-effort** like [`spawn_live_summary`] — a log
 /// line, never this route's answer — off the store lock for the shell-out,
 /// and concurrent with the summariser, which every guarded `Store` notebook
 /// write makes safe (`docs/live.md`, "Dreaming").
 async fn spawn_live_dream_after(state: &AppState, session_id: i64, project_id: Option<i64>) {
-    let (reason, dir, prompt, prompts) = {
+    let (reason, dir, db) = {
         let store = state.store.lock().unwrap();
         // Only a stop passes the entries that just crossed the unused mark
         // (mesa task 1337), as the CLI's does: a kept norm stays a candidate
@@ -5289,34 +5280,26 @@ async fn spawn_live_dream_after(state: &AppState, session_id: i64, project_id: O
             Ok((dir, _)) => dir,
             Err(e) => {
                 eprintln!(
-                    "live session {session_id}: could not spawn the dream pass ({reason}): {}",
+                    "live session {session_id}: could not start the dream pass ({reason}): {}",
                     e.message
                 );
                 return;
             }
         };
-        let prompt = live::dream_prompt(&store, project_id);
-        let prompts = library::prompts(&store).unwrap_or_default();
-        (reason, dir, prompt, prompts)
+        (reason, dir, store.db_path())
     };
-    let result = tokio::task::spawn_blocking(move || {
-        agents::spawn_bg(
-            config::LIVE_DREAM,
-            &dir,
-            Some(session_id),
-            Some("live memory dream"),
-            Some(&prompt),
-            &prompts,
-        )
-    })
-    .await;
+    let job = memory_job::Job::Dream {
+        session_id: Some(session_id),
+    };
+    let result =
+        tokio::task::spawn_blocking(move || memory_job::spawn(&job, &dir, db.as_deref())).await;
     match result {
         Ok(Ok(_)) => {}
         Ok(Err(e)) => {
-            eprintln!("live session {session_id}: could not spawn the dream pass ({reason}): {e}")
+            eprintln!("live session {session_id}: could not start the dream pass ({reason}): {e}")
         }
         Err(e) => {
-            eprintln!("live session {session_id}: dream pass spawn panicked: {e}")
+            eprintln!("live session {session_id}: dream pass start panicked: {e}")
         }
     }
 }
@@ -18176,73 +18159,96 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         });
     }
 
-    /// mesa task 1339: a PATCH closing a task in a project whose notebook is
-    /// over its budget answers the closed task and then spawns that project's
-    /// dream off the store lock, recording its receipt in `project_dreams`.
+    /// mesa task 1339, naru task 1690: a PATCH closing a task in a project
+    /// whose notebook is over its budget answers the closed task and then
+    /// starts that project's dream — a detached `naru __job project-dream`,
+    /// here a stub logging its argv and `NARU_DB` — off the store lock,
+    /// recording its `pid:<n>` marker in `project_dreams`.
     #[test]
     fn closing_a_task_over_the_notebook_budget_spawns_the_project_dream() {
-        // SAFETY: ENV_LOCK gives this test exclusive access to
-        // MESA_CLAUDE_BIN/MESA_CONFIG_FILE for its duration.
+        // SAFETY: ENV_LOCK gives this test exclusive access to NARU_SELF_BIN
+        // for its duration; the home lock keeps the job log off the real one.
         let _env = attachments::ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let stub_dir = tempfile::tempdir().unwrap();
-        let log_path = stub_dir.path().join("bg.log");
-        let bin = stub_claude_bg(stub_dir.path(), &log_path);
-        unsafe { std::env::set_var("MESA_CLAUDE_BIN", &bin) };
-
-        let (_dir, state) = test_state();
-        let proj_dir = tempfile::tempdir().unwrap();
-        let root = proj_dir.path().canonicalize().unwrap();
-        let pid = new_project(&state, Some(root.to_str().unwrap()));
-        {
-            let mut store = state.store.lock().unwrap();
-            let words = |n: usize| vec!["w"; n].join(" ");
-            // An entry is capped at 600 characters: four of 251 words are
-            // 1004, one past the 1000-word budget.
-            for _ in 0..4 {
-                store.add_notebook_entry_in(Some(pid), &words(251)).unwrap();
-            }
-        }
-        let id = new_task(&state, pid);
-
-        // One blocking thread, so the blocking pool runs its queue in order:
-        // the no-op submitted after the PATCH returns only once the dream
-        // job the PATCH queued has finished — no sleep, no poll.
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .max_blocking_threads(1)
-            .enable_all()
-            .build()
+        crate::core::library::test_home::with_home_dir(|_| {
+            use std::os::unix::fs::PermissionsExt;
+            let stub_dir = tempfile::tempdir().unwrap();
+            let log_path = stub_dir.path().join("job.log");
+            let stub = stub_dir.path().join("naru-stub");
+            std::fs::write(
+                &stub,
+                format!(
+                    "#!/bin/bash\nprintf '%s\\n' \"$@\" \"db=$NARU_DB\" > '{}'\n",
+                    log_path.display()
+                ),
+            )
             .unwrap();
-        let body = rt.block_on(async {
-            let body = patch_task(&state, id, r#"{"status":"done"}"#).await;
-            tokio::task::spawn_blocking(|| ()).await.unwrap();
-            body
-        });
-        assert_eq!(body["status"], "done");
-        assert_eq!(body["id"], id);
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+            unsafe { std::env::set_var("NARU_SELF_BIN", &stub) };
 
-        let logged = std::fs::read_to_string(&log_path).unwrap();
-        // The prompt spans lines; the stub's `|<name>|` marks each spawn.
-        assert_eq!(
-            logged.matches("|project memory dream|").count(),
-            1,
-            "one dream spawned: {logged}"
-        );
-        let head = format!("{}|project memory dream|", root.display());
-        assert!(logged.starts_with(&head), "{logged}");
-        assert!(
-            logged.contains(&format!("naru memory merge --project {pid} --ids")),
-            "the project's own dream prompt: {logged}"
-        );
-        let dream = state
-            .store
-            .lock()
-            .unwrap()
-            .project_dream(pid)
-            .unwrap()
-            .expect("the spawn is recorded");
-        assert_eq!(dream.agent_id.as_deref(), Some("deadbeef"));
+            let (dir, state) = test_state();
+            let proj_dir = tempfile::tempdir().unwrap();
+            let root = proj_dir.path().canonicalize().unwrap();
+            let pid = new_project(&state, Some(root.to_str().unwrap()));
+            {
+                let mut store = state.store.lock().unwrap();
+                let words = |n: usize| vec!["w"; n].join(" ");
+                // An entry is capped at 600 characters: four of 251 words are
+                // 1004, one past the 1000-word budget.
+                for _ in 0..4 {
+                    store.add_notebook_entry_in(Some(pid), &words(251)).unwrap();
+                }
+            }
+            let id = new_task(&state, pid);
+
+            // One blocking thread, so the blocking pool runs its queue in
+            // order: the no-op submitted after the PATCH returns only once
+            // the start the PATCH queued has finished.
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .max_blocking_threads(1)
+                .enable_all()
+                .build()
+                .unwrap();
+            let body = rt.block_on(async {
+                let body = patch_task(&state, id, r#"{"status":"done"}"#).await;
+                tokio::task::spawn_blocking(|| ()).await.unwrap();
+                body
+            });
+            assert_eq!(body["status"], "done");
+            assert_eq!(body["id"], id);
+
+            // The child runs on its own; wait for its one log write.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let logged = loop {
+                match std::fs::read_to_string(&log_path) {
+                    Ok(t) if t.contains("db=") => break t,
+                    _ if std::time::Instant::now() > deadline => panic!("the job never ran"),
+                    _ => std::thread::sleep(std::time::Duration::from_millis(20)),
+                }
+            };
+            let want = format!(
+                "__job\nproject-dream\n--project\n{pid}\n--dir\n{}\ndb={}\n",
+                root.display(),
+                dir.path().canonicalize().unwrap().join("test.db").display()
+            );
+            assert_eq!(logged, want);
+            let dream = state
+                .store
+                .lock()
+                .unwrap()
+                .project_dream(pid)
+                .unwrap()
+                .expect("the spawn is recorded");
+            assert!(
+                dream
+                    .agent_id
+                    .as_deref()
+                    .is_some_and(|m| m.starts_with("pid:")),
+                "{dream:?}"
+            );
+            unsafe { std::env::remove_var("NARU_SELF_BIN") };
+        });
     }
 
     /// A spawn that fails must not strand a live session: nothing is listening

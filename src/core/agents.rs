@@ -953,6 +953,33 @@ pub fn workflow_prompt_script(
     )
 }
 
+/// The script for one structured-output `claude -p` call (naru task 1690):
+/// `live-summary` and `live-dream` resolved through the same
+/// [`spawn_for_vars`] every spawn uses, so `{id}`, `{name}`, `{prompt}` and
+/// `{schema}` reach it only as shell-quoted values and the `MESA_CLAUDE_BIN`
+/// seam applies. The caller runs it (`core::llm::complete_structured`) and
+/// reads the result JSON's `structured_output` off its stdout.
+pub fn structured_script(
+    action: &str,
+    id: Option<i64>,
+    name: &str,
+    prompt: &str,
+    schema: &str,
+    prompts: &config::Prompts,
+) -> Result<String, String> {
+    spawn_for_vars(
+        action,
+        &config::Vars {
+            id,
+            name: Some(name),
+            prompt: Some(prompt),
+            schema: Some(schema),
+            prompts: Some(prompts),
+            ..Default::default()
+        },
+    )
+}
+
 /// The script `naru run __runner` hands to `bash -c` to start the detached
 /// `claude -p` for one run (naru task 1686): the `runner` template resolved
 /// through the same [`spawn_for_vars`] every spawn uses, so the

@@ -444,9 +444,11 @@ then, in order:
 2. If the notebook wants a dream pass — `live::dream_wanted`, a cheap
    deterministic check decided *before* anything is spawned (mesa task
    1155, "Dreaming" below) — spawns one through the `live-dream` template,
-   **best-effort**: a failed dream spawn is one stderr line and the handoff
-   goes through un-resting. It is spawned only once the successor exists,
-   so step 4's "nothing" still holds.
+   **best-effort**: a failed dream start is one stderr line and the handoff
+   goes through un-resting. It is started only once the successor exists,
+   so step 4's "nothing" still holds. (Since naru task 1690 the "spawn" is a
+   detached `naru __job dream`, not a `--bg` agent; its receipt is the marker
+   `pid:<n>`.)
 3. On success, `Store::hand_off_live_session`: **one** `UPDATE` that moves
    the current `agent_id` into `predecessor_agent_id`, binds the
    successor's receipt as `agent_id`, bumps `lease` and — when a dream was
@@ -1049,12 +1051,27 @@ summariser's step 5 of the transcript it reads.
 
 ### Who writes the summary, and why it can't be the live agent
 
-Unchanged from 921: Naru has no LLM of its own, so the summary is written by
-a short-lived agent spawned through the fifth config template,
-`live-summary`, best-effort from both stop sites, only when the conversation
-had turns, and never able to fail the stop. It cannot be the live agent's own
-last act because stopping a session stops that agent (`claude stop
-<agent_id>`). The summary is still keyed on `session_id` in a sibling table
+Naru has no LLM of its own, so the summary is written by `claude`, but since
+naru task 1690 not by an agent: a **detached `naru __job summary`** (a hidden
+subcommand of the same binary, started by both stop sites like the old spawn —
+best-effort, only when the conversation had turns, never able to fail the stop
+or make it wait) makes **one synchronous, tool-less call** through the fifth
+config template, `live-summary` — `claude -p --model sonnet --tools ""
+--strict-mcp-config --output-format json --json-schema {schema}` — and
+**Naru applies the answer itself**. The prompt (`live::summary_prompt`)
+carries what the model can no longer fetch with a command: the instructions,
+the session line, the active notebook and the whole turn log (oldest turns
+dropped, with a line saying so, to stay under `llm::AGENT_PROMPT_MAX`), the
+notebook and the log both framed as data. The answer is `core::live::SUMMARY_SCHEMA`'s
+`{summary, notebook_add}` (read from the result JSON's `structured_output`):
+`Store::set_live_summary`, then the first two bullets through
+`add_notebook_entry` (a third is dropped, a refused one logged). Without
+`live memory search` the model cannot confirm a bullet held across
+conversations, so the rule became: only what the person said outright as a
+standing preference, norm or reason, and not already in the notebook shown. The
+job's one-line JSON report goes to `logs/memory-jobs.log`. It cannot be the
+live agent's own last act because stopping a session stops that agent (`claude
+stop <agent_id>`). The summary is still keyed on `session_id` in a sibling table
 rather than a `live_sessions` column, for the reason `task_receipts` made the
 same call: `LiveSession` is the hub's 2s poll payload, and an unbounded blob
 with no browser consumer must not ride it.
@@ -1260,28 +1277,31 @@ decided automatically at all.
 The two moments:
 
 1. **When a conversation ends.** Both stop sites (`mesa live stop`, `DELETE
-   /api/live`) spawn the pass after the summariser when the session was
+   /api/live`) start the pass after the summariser when the session was
    live and the check says so — **best-effort** exactly like the
-   summariser (a failed spawn is a stderr/log line, the printed record and
-   the response unchanged). The summariser and the dream then run
-   **concurrently**, and that is deliberate: every notebook edit either
-   makes goes through the guarded `Store` paths (the removal
-   share, a merge's net-words rule), so the worst case is one of the
-   summariser's two `add`s landing after the dream read the notebook — a
-   bullet the *next* pass sees — never a lost or half-written entry.
+   summariser (a failed start is a stderr/log line, the printed record and
+   the response unchanged). The two jobs then run **concurrently**, and that
+   is deliberate: every notebook edit either makes goes through the guarded
+   `Store` paths (the removal share, a merge's net-words rule), so the worst
+   case is one of the summariser's two `add`s landing after the dream read the
+   notebook — a bullet the *next* pass sees — never a lost or half-written
+   entry.
 2. **At a handoff.** Conversations now run indefinitely through handoffs,
    so "between conversations" alone would never come. The handoff runs
    the same check; when it wants a dream, the outgoing agent has already
    said aloud that it needs to rest for a few minutes (rule 11, via
-   `mesa live context`'s `dream` key), the pass is spawned beside the
+   `mesa live context`'s `dream` key), the pass is started beside the
    successor, and the session enters a **resting** state: `resting_since`
-   stamped and `dream_agent_id` holding the pass's receipt, in the same
+   stamped and `dream_agent_id` holding the job's `pid:<n>` marker (the column
+   kept its name; a pre-1690 row still holds a `--bg` job id, which
+   `memory_job::is_running` still answers through `claude agents`), in the same
    `UPDATE` that binds the successor (`live_sessions`, migration index 59).
    The successor's first `listen` is the **sync point**: while
-   `resting_since` is set it probes `agents::job_running(dream_agent_id)`
-   (`claude agents --json --all`; any failure — no binary, bad JSON, no
-   such row — reads as *not running*, so a probe that cannot answer never
-   strands the conversation) every `DREAM_POLL` (5s), until the job is gone
+   `resting_since` is set it probes `memory_job::is_running(dream_agent_id)`
+   (the pid is alive **and** its command line is a `__job` — a recycled pid
+   names some other program; any failure reads as *not running*, so a probe
+   that cannot answer never strands the conversation) every `DREAM_POLL`
+   (1s, a `kill -0` and a `ps`), until the job is gone
    or the rest reaches `LIVE_REST_MAX` (10 minutes, measured from
    `resting_since` on SQLite's own clock, so a listen killed and restarted
    mid-rest resumes the budget rather than restarting it), then
@@ -1305,15 +1325,25 @@ rule 9 tells a person who asks it to rest or tidy that the pass runs on its
 own at the next handoff or the end, and to hand off now if `context`
 reports a `dream`. With fewer than two active entries the explicit verb
 prints `{"spawned": false, "reason": …}` (exit 0) rather than spawning an
-agent to find that out. Otherwise it spawns through the **sixth** config
-template, `live-dream` (`docs/config.md`; `{id}` the newest session's,
-`{name}` the literal `live memory dream`, `{prompt}` the block above), in
-the newest conversation's project folder exactly as the summariser resolves
-it, and prints `{"spawned": true, "receipt": …}`. A failed spawn is
-`unavailable`, exit 1 — unlike the automatic passes this is not
-best-effort, since the person asked. The automatic passes share that spawn
-(`cli.rs::spawn_dream_pass`, and its API twin for the stop route) and make
-their own decision. There is still no idle timer, no watcher and no UI
+agent to find that out. Otherwise it starts a detached `naru __job dream`
+(naru task 1690) that makes one synchronous, tool-less call through the
+**sixth** config template, `live-dream` (`docs/config.md`; `{id}` the newest
+session's, `{name}` the literal `live memory dream`, `{prompt}` the block
+above, `{schema}` `core::live::LIVE_DREAM_SCHEMA`), in the newest
+conversation's project folder exactly as the summariser resolves it, and
+prints `{"spawned": true, "receipt": "pid:<n>"}` at once — it does not wait
+for the pass. The answer is `{edits, contradictions, report}`; Naru applies
+each edit (`merge`, `delete`, `keep`, `replace`) through its own guarded
+`Store` call, **every edit tried** whatever happened to the one before (a
+refused one — an unknown id, the removal guard — is logged and never blocks
+the rest; the old "stop when a command refuses" rule is gone), and turns each
+listed contradiction into a **backlog** task in the newest conversation's
+project when it had one (otherwise it is only named in the report). What
+happened goes, as one JSON line, to `logs/memory-jobs.log` in Naru's home
+directory. A failed start is `unavailable`, exit 1 — unlike the automatic
+passes this is not best-effort, since the person asked. The automatic passes share that spawn
+(`cli.rs::spawn_dream_pass`, and its API twin for the stop route, both
+`memory_job::spawn`) and make their own decision. There is still no idle timer, no watcher and no UI
 beyond the resting state: a pass that fires with no conversation to hear
 about it is a pass nobody reviews.
 
