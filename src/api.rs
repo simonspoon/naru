@@ -5035,6 +5035,9 @@ async fn get_live(
             })
             .into_response());
         };
+        // A session started any other way (the CLI, another client) consumes
+        // the offer too, so a stale one never re-glows after it ends.
+        state.live_offer.lock().unwrap().take();
         let turns = store.list_live_turns(session.id, q.after, LIVE_TURNS_LIMIT)?;
         // The whole board history, bodiless (mesa task 1071) — every board
         // this conversation pushed, in the order the panel steps through
@@ -18232,6 +18235,40 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         let body = json_body(resp).await;
         assert!(body["session"].is_null());
         assert_eq!(body["turns"], serde_json::json!([]));
+    }
+
+    /// A `can-help` event lights `offer` on the idle poll (naru task 1700); an
+    /// offer older than the TTL is absent.
+    #[tokio::test]
+    async fn can_help_event_surfaces_as_a_live_offer_until_it_goes_stale() {
+        let (_dir, state) = test_state();
+        let resp = emit_workflow_event(
+            State(state.clone()),
+            ConnectInfo(loopback()),
+            loopback_agent_headers(),
+            Ok(Json(WorkflowEventBody {
+                event: "can-help".into(),
+                speaker: "Simon".into(),
+                text: "how do I rebase?".into(),
+            })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let poll = |state: AppState| async move {
+            json_body(
+                get_live(State(state), Query(LiveQuery { after: None }))
+                    .await
+                    .unwrap(),
+            )
+            .await
+        };
+        let body = poll(state.clone()).await;
+        assert_eq!(body["offer"]["text"], "how do I rebase?");
+        assert_eq!(body["offer"]["speaker"], "Simon");
+        let old = Instant::now() - LIVE_OFFER_TTL - Duration::from_secs(1);
+        *state.live_offer.lock().unwrap() = Some(("old".into(), "Simon".into(), old));
+        assert!(poll(state).await["offer"].is_null());
     }
 
     /// The whole start path: the session opens, the `live-agent` command runs
