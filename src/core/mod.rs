@@ -24,6 +24,7 @@ pub mod notify;
 pub mod project_memory;
 pub mod receipt;
 pub mod retro;
+pub mod runner;
 
 pub mod script_runs;
 pub mod scripts;

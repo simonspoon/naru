@@ -956,6 +956,33 @@ pub fn spawn_workflow_prompt(
     run_script(&script, dir)
 }
 
+/// The script `naru run __runner` hands to `bash -c` to start the detached
+/// `claude -p` for one run (naru task 1686): the `runner` template resolved
+/// through the same [`spawn_for_vars`] every spawn uses, so the
+/// `MESA_CLAUDE_BIN` seam and the quoting rules apply unchanged. `resume`
+/// picks `--resume` over `--session-id` for `{session_flag}`. The caller owns
+/// the process — piped stdin/stdout, its own process group — which is why this
+/// returns the script rather than running it.
+pub fn runner_script(
+    model: &str,
+    name: &str,
+    session_id: &str,
+    resume: bool,
+    prompts: &config::Prompts,
+) -> Result<String, String> {
+    spawn_for_vars(
+        config::RUNNER,
+        &config::Vars {
+            name: Some(name),
+            model: Some(model),
+            session_flag: Some(if resume { "--resume" } else { "--session-id" }),
+            session_id: Some(session_id),
+            prompts: Some(prompts),
+            ..Default::default()
+        },
+    )
+}
+
 /// What `claude agents --json --all` says of the job `job_id`: its `state`
 /// (`working`, `blocked`, `done`, `failed`, `stopped`, …) and its `sessionId`,
 /// or `Ok(None)` when no row names it (a job not registered *yet* looks the

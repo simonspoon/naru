@@ -273,6 +273,13 @@ EXAMPLES
     /// A self-disarming alarm for a supervisor's handoffs (mesa task 1512)
     #[command(subcommand)]
     Alarm(AlarmCmd),
+    /// Detached `claude -p` agent runs that outlive the server (naru task 1686)
+    ///
+    /// A run is a job directory under `~/.naru/runs/<id>/` held by a small
+    /// detached runner process; the files are the truth, so every command
+    /// works with no server. See docs/runner.md.
+    #[command(subcommand)]
+    Run(RunCmd),
     /// Send a message to the person's phone through the external `vox` CLI
     ///
     /// `--open <route>` adds a Telegram button that opens Naru's `/open/<route>`
@@ -343,6 +350,67 @@ EXAMPLES
         /// Print the built-in rules (JSON) and exit
         #[arg(long)]
         print_default_rules: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum RunCmd {
+    /// Start a run: create its job directory and spawn the detached runner
+    ///
+    /// Prints the job (`job_id`, `session_id`, `status`, …). The prompt is the
+    /// run's first message. Takes no `--quiet`.
+    #[command(after_help = "\
+EXAMPLES
+  naru run start --model haiku \"reply with the word pong\"
+  naru run start --model sonnet --cwd ~/code/app --name triage \"fix the failing test\"")]
+    Start {
+        /// Model alias or full name, passed to the `runner` template's `{model}`
+        #[arg(long)]
+        model: String,
+        /// Working folder for the agent; default is the current directory
+        #[arg(long)]
+        cwd: Option<String>,
+        /// A label for the run
+        #[arg(long)]
+        name: Option<String>,
+        /// Wind the run down after this many idle seconds (default 3600)
+        #[arg(long)]
+        idle_timeout: Option<u64>,
+        /// The first message
+        prompt: String,
+    },
+    /// Queue a message for a running or idle run
+    Send {
+        /// The run id
+        job: String,
+        /// The message
+        message: String,
+    },
+    /// Print a run; `--events` (or `--tail`) adds its event log
+    Show {
+        /// The run id
+        job: String,
+        /// Include the events (the last 100 unless `--tail` says otherwise)
+        #[arg(long)]
+        events: bool,
+        /// Include only the last N events
+        #[arg(long)]
+        tail: Option<usize>,
+    },
+    /// List every run, newest first
+    List,
+    /// Ask a run's runner to stop; a dead runner's run is closed here
+    Stop {
+        /// The run id
+        job: String,
+    },
+    /// Resume every unfinished run whose runner died (what `serve` does at start)
+    Reconcile,
+    /// The detached runner itself; started by `run start`, not by hand
+    #[command(name = "__runner", hide = true)]
+    Runner {
+        /// The job directory
+        dir: PathBuf,
     },
 }
 
@@ -4496,6 +4564,7 @@ fn execute(command: Command) -> Result<()> {
             Ok(())
         }
         Command::Alarm(cmd) => run_alarm(cmd),
+        Command::Run(cmd) => run_runs(cmd),
         Command::Notify {
             message,
             title,
@@ -4537,6 +4606,35 @@ fn execute(command: Command) -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn run_runs(cmd: RunCmd) -> Result<()> {
+    use crate::core::runner;
+    match cmd {
+        RunCmd::Start {
+            model,
+            cwd,
+            name,
+            idle_timeout,
+            prompt,
+        } => print_json(&runner::start(&runner::StartOpts {
+            model,
+            prompt,
+            cwd,
+            name,
+            idle_timeout_secs: idle_timeout,
+        })?),
+        RunCmd::Send { job, message } => print_json(&runner::send(&job, &message)?),
+        RunCmd::Show { job, events, tail } => {
+            let n = (events || tail.is_some()).then(|| tail.unwrap_or(100));
+            print_json(&runner::show(&job, n)?)
+        }
+        RunCmd::List => print_json(&runner::list()?),
+        RunCmd::Stop { job } => print_json(&runner::stop(&job)?),
+        RunCmd::Reconcile => print_json(&json!({"resumed": runner::reconcile()?})),
+        RunCmd::Runner { dir } => runner::run_runner(&dir)?,
+    }
+    Ok(())
 }
 
 fn run_alarm(cmd: AlarmCmd) -> Result<()> {

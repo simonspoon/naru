@@ -1,7 +1,7 @@
 # Config (`~/.mesa/config.json`)
 
-Naru starts a coding agent from exactly eight places (the eighth is a workflow
-`prompt` node). Each one's command line
+Naru starts a coding agent from exactly nine places (the eighth is a workflow
+`prompt` node, the ninth the detached run `runner`). Each one's command line
 is a **template** in `~/.mesa/config.json`, so the program, its flags, the
 persona and the slash command can all change without rebuilding Naru:
 
@@ -14,6 +14,7 @@ persona and the slash command can all change without rebuilding Naru:
 | `live-summary` | `live stop`'s CLI handler and the API's stop route — the short-lived agent that writes a live conversation's memory once it ends (mesa task 921, `docs/live.md`) | `claude --bg --name {name} -- {prompt}` |
 | `live-dream` | The pass that tidies the live notebook — `mesa live memory dream` explicitly, and on its own at a handoff or when a conversation ends once `live::dream_wanted` says the notebook needs it (mesa task 1155): merges duplicate entries, deletes superseded ones, one guarded command at a time (mesa task 1152, `docs/live.md`) | `claude --bg --name {name} -- {prompt}` |
 | `workflow-prompt` | A workflow's **`prompt` node** on an Anthropic model (mesa task 1607, `docs/workflows.md`): a background agent spawned like every other (`agents::spawn_workflow_prompt`), which the engine then waits on, reads the answer of off its transcript and stops (`core::llm`). `local:<name>` models never use it — those are an Ollama HTTP call. Offers `{model}`, `{thinking}`, `{name}` and `{prompt}` | `claude --bg --model {model} --name {name} --tools "" --strict-mcp-config --settings "{\"alwaysThinkingEnabled\":{thinking}}" -- {prompt}` |
+| `runner` | The detached `claude -p` that `naru run __runner` holds open on stream-json stdin/stdout (naru task 1686, `docs/runner.md`): launched by the runner process itself with piped stdin/stdout, in its own process group, so the agent outlives the Naru server. Print mode on purpose. Offers `{model}`, `{name}`, `{session_flag}` (`--session-id` on a run's first start, `--resume` after a restart) and `{session_id}` (the run's uuid) | `claude -p --input-format stream-json --output-format stream-json --verbose --model {model} --name {name} {session_flag} {session_id}` |
 | `retro` | `serve --watch-retro` every `watchers.retro-interval-hours`, and `mesa retro run` — the session retrospective that reviews finished task sessions for friction and files suggestions into the inbox, proposing only (mesa task 1158, `docs/retro.md`) | `claude --bg --agent naru-retro --name {name} -- "Run mesa session retrospective {id}."` |
 
 The defaults are **plain, editable command lines** (mesa task 1141): the
@@ -190,6 +191,8 @@ knows about:
 | `{prompt}` | `agent-spawn`, `live-agent`, `live-summary`, `live-dream`, `workflow-prompt` | the POST body's `prompt` (`agent-spawn`; absent when omitted) / the live agent's, summariser's or dream pass's instruction block, always present / the workflow node's prompt, a blank line and its input (`workflow-prompt`) |
 | `{model}` | `workflow-prompt` | the node's `model`: `haiku`, `sonnet` or `opus` |
 | `{thinking}` | `workflow-prompt` | `true` or `false`, the node's `thinking` flag |
+| `{session_flag}` | `runner` | `--session-id` (first start) or `--resume` (after a restart) — a placeholder of its own because a value is one quoted word, so it is passed as `'--resume'`, still a flag to `claude` |
+| `{session_id}` | `runner` | the run's v4 uuid |
 
 ### Quoted for where it sits
 

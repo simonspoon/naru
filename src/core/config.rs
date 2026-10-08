@@ -231,11 +231,16 @@ pub const RETRO: &str = "retro";
 /// and read back off its transcript by `core::llm`, then stopped. `local:<name>`
 /// models never reach it — those are an Ollama HTTP call.
 pub const WORKFLOW_PROMPT: &str = "workflow-prompt";
+/// The detached `claude -p` the run runner holds open (naru task 1686,
+/// `docs/runner.md`): launched by `naru run __runner` through this template
+/// with stdin and stdout piped to the runner, so an agent run outlives the
+/// Naru server. Print mode on purpose, unlike every spawn above.
+pub const RUNNER: &str = "runner";
 
 /// Every configurable command, in the order the docs and the Settings page
 /// list them. The single source of truth for "which keys mesa configures" —
 /// [`default_command`] answers the same question one key at a time.
-pub const ACTIONS: [&str; 8] = [
+pub const ACTIONS: [&str; 9] = [
     TODO_WATCHER,
     INBOX_WATCHER,
     AGENT_SPAWN,
@@ -244,6 +249,7 @@ pub const ACTIONS: [&str; 8] = [
     LIVE_DREAM,
     RETRO,
     WORKFLOW_PROMPT,
+    RUNNER,
 ];
 
 /// Built-in default for [`TODO_WATCHER`] — the argv mesa shipped before the
@@ -336,6 +342,16 @@ pub const DEFAULT_RETRO: &str =
 /// folder whose Claude Code trust prompt is answered once — `claude --bg`
 /// refuses an untrusted folder).
 pub const DEFAULT_WORKFLOW_PROMPT: &str = r#"claude --bg --model {model} --name {name} --tools "" --strict-mcp-config --settings "{\"alwaysThinkingEnabled\":{thinking}}" -- {prompt}"#;
+/// Built-in default for [`RUNNER`] (naru task 1686): `claude -p` reading
+/// stream-json user messages on a held-open stdin and writing stream-json
+/// events on stdout, one result line per message. `{session_flag}` is
+/// `--session-id` on a job's first start and `--resume` after a restart, and
+/// `{session_id}` the job's uuid; a value is one quoted word, so the flag is
+/// a placeholder of its own rather than something a bash `if` could pick.
+/// `{model}` is the alias or full model name, `{name}` the job label. No
+/// `--bare`, no permission flag: edit the line (Settings) to add e.g.
+/// `--permission-mode acceptEdits` for a run that must write files.
+pub const DEFAULT_RUNNER: &str = "claude -p --input-format stream-json --output-format stream-json --verbose --model {model} --name {name} {session_flag} {session_id}";
 
 /// The built-in template for `action`, or `None` if `action` isn't one of
 /// [`ACTIONS`]. Public so the docs check and the API can report the shipped
@@ -350,6 +366,7 @@ pub fn default_command(action: &str) -> Option<&'static str> {
         LIVE_DREAM => Some(DEFAULT_LIVE_DREAM),
         RETRO => Some(DEFAULT_RETRO),
         WORKFLOW_PROMPT => Some(DEFAULT_WORKFLOW_PROMPT),
+        RUNNER => Some(DEFAULT_RUNNER),
         _ => None,
     }
 }
@@ -685,6 +702,8 @@ pub fn validate(action: &str, template: &str, prompts: &Prompts) -> Result<(), S
         prompt: Some("prompt"),
         model: Some("model"),
         thinking: Some("on"),
+        session_flag: Some("--session-id"),
+        session_id: Some("session"),
         prompts: Some(prompts),
     };
     // Parse what `bash` will actually be handed — placeholders already
@@ -707,7 +726,15 @@ pub fn resolve(action: &str, template: &str, vars: &Vars) -> Result<String, Stri
 /// The three built-in placeholder names. Per-call data, so each is offered to
 /// a subset of the actions ([`offered_placeholders`]); the library's
 /// `{prompt:<name>}` form is orthogonal and offered everywhere.
-const BUILTIN_PLACEHOLDERS: [&str; 5] = ["id", "name", "prompt", "model", "thinking"];
+const BUILTIN_PLACEHOLDERS: [&str; 7] = [
+    "id",
+    "name",
+    "prompt",
+    "model",
+    "thinking",
+    "session_flag",
+    "session_id",
+];
 
 /// The `{prompt:<name>}` form's prefix — the one thing that keeps it from
 /// colliding with the built-in `{prompt}`, which has no colon.
@@ -1546,6 +1573,10 @@ pub struct Vars<'a> {
     /// switch (`on`/`off`) — offered to that action alone.
     pub model: Option<&'a str>,
     pub thinking: Option<&'a str>,
+    /// `runner`'s `--session-id`/`--resume` choice and the job's uuid —
+    /// offered to that action alone.
+    pub session_flag: Option<&'a str>,
+    pub session_id: Option<&'a str>,
     /// The library's prompts, for `{prompt:<name>}` (mesa task 1138). Unlike
     /// the three above this is not per-call data but static library text, so
     /// every action offers it — which is why it sits beside them rather than
@@ -1584,6 +1615,8 @@ impl Vars<'_> {
             "prompt" => self.prompt.map(str::to_string),
             "model" => self.model.map(str::to_string),
             "thinking" => self.thinking.map(str::to_string),
+            "session_flag" => self.session_flag.map(str::to_string),
+            "session_id" => self.session_id.map(str::to_string),
             _ => None,
         })
     }
@@ -1601,6 +1634,7 @@ pub fn offered_placeholders(action: &str) -> &'static [&'static str] {
         // carries a prompt.
         LIVE_AGENT | LIVE_SUMMARY | LIVE_DREAM => &["{id}", "{name}", "{prompt}"],
         WORKFLOW_PROMPT => &["{model}", "{thinking}", "{name}", "{prompt}"],
+        RUNNER => &["{model}", "{name}", "{session_flag}", "{session_id}"],
         _ => &["{id}", "{name}"],
     }
 }
@@ -4624,6 +4658,37 @@ mod tests {
             settings[7].placeholders,
             ["{model}", "{thinking}", "{name}", "{prompt}"]
         );
+        // The run runner (naru task 1686) is the ninth.
+        assert_eq!(settings[8].action, RUNNER);
+        assert_eq!(settings[8].default, DEFAULT_RUNNER);
+        assert_eq!(
+            settings[8].placeholders,
+            ["{model}", "{name}", "{session_flag}", "{session_id}"]
+        );
+    }
+
+    /// The runner default validates and quotes its values as single words,
+    /// the session flag included (`'--resume'` is still a flag to claude).
+    #[test]
+    fn runner_default_validates_and_quotes_its_values() {
+        validate(RUNNER, DEFAULT_RUNNER, &Prompts::default()).unwrap();
+        let vars = Vars {
+            model: Some("haiku"),
+            name: Some("a $(x) job"),
+            session_flag: Some("--resume"),
+            session_id: Some("abc"),
+            ..Default::default()
+        };
+        let script = resolve(RUNNER, DEFAULT_RUNNER, &vars).unwrap();
+        assert!(
+            script.starts_with("claude -p --input-format stream-json"),
+            "{script}"
+        );
+        assert!(
+            script.contains("--name 'a $(x) job' '--resume' 'abc'"),
+            "{script}"
+        );
+        assert!(!script.contains("--bare"), "{script}");
     }
 
     /// The workflow-prompt default passes the save-time validator and

@@ -51,7 +51,7 @@ use crate::core::{
     ServeHostsSetting, ServeNumberSetting, Status, Store, SystemInfo, Task, TaskPatch, TaskSummary,
     WorkflowNodeKind, WorkflowNodeNew, WorkflowNodePatch, WorkflowPatch, WorkflowTrigger, agents,
     attachments, audio, board, config, files, git, guard, hooks, inbox_triage, library, listen,
-    live, project_memory, receipt, retro, script_runs, scripts, speech, supervisor, system,
+    live, project_memory, receipt, retro, runner, script_runs, scripts, speech, supervisor, system,
     validate_live_client, version, workflow,
 };
 
@@ -2631,6 +2631,16 @@ pub fn serve(flags: ServeFlags) -> crate::core::Result<()> {
             Err(e) => eprintln!("naru: could not reconcile workflow runs: {e}"),
         }
     }
+    // Agent runs outlive the server (naru task 1686): a run whose runner died
+    // is resumed on the same claude session; one whose runner is alive is
+    // left alone — the files are all `/api/runs` reads.
+    match runner::reconcile() {
+        Ok(ids) if !ids.is_empty() => {
+            eprintln!("naru: resumed {} agent run(s): {:?}", ids.len(), ids)
+        }
+        Ok(_) => {}
+        Err(e) => eprintln!("naru: could not reconcile agent runs: {e}"),
+    }
     let host = if lan { "0.0.0.0" } else { "127.0.0.1" };
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -3070,6 +3080,14 @@ fn router(state: AppState) -> Router {
         // whole difference between this route and `/run/stream`.
         .route("/api/script-runs/{id}/stream", get(stream_script_run))
         .route("/api/script-runs/{id}/stop", post(stop_script_run))
+        // Detached agent runs (naru task 1686, `docs/runner.md`): thin
+        // handlers over `core::runner`, whose job directories are the truth.
+        // Starting one executes an agent, so — like every route that does —
+        // all five carry `require_agent_access`, reads included.
+        .route("/api/runs", get(list_runs).post(start_run))
+        .route("/api/runs/{id}", get(show_run))
+        .route("/api/runs/{id}/message", post(message_run))
+        .route("/api/runs/{id}/stop", post(stop_run))
         // Library: agent definitions, skills, hooks, prompts and CLAUDE.md
         // files, each (a prompt only when it exports) mirrored onto disk under
         // `.claude/`. A row becomes code mesa or Claude Code executes, so all
@@ -6672,6 +6690,70 @@ async fn stream_script_run(
         Body::from_stream(ReceiverStream::new(rx)),
     )
         .into_response())
+}
+
+async fn list_runs(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    Ok(Json(runner::list()?).into_response())
+}
+
+#[derive(Deserialize)]
+struct RunQuery {
+    /// How many trailing events to include (default 500).
+    tail: Option<usize>,
+}
+
+async fn show_run(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Query(q): Query<RunQuery>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    Ok(Json(runner::show(&id, Some(q.tail.unwrap_or(500)))?).into_response())
+}
+
+async fn start_run(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Result<Json<runner::StartOpts>, JsonRejection>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let Json(body) = body?;
+    Ok((StatusCode::CREATED, Json(runner::start(&body)?)).into_response())
+}
+
+#[derive(Deserialize)]
+struct RunMessage {
+    text: String,
+}
+
+async fn message_run(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: Result<Json<RunMessage>, JsonRejection>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let Json(body) = body?;
+    Ok((StatusCode::ACCEPTED, Json(runner::send(&id, &body.text)?)).into_response())
+}
+
+async fn stop_run(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    Ok(Json(runner::stop(&id)?).into_response())
 }
 
 /// Stops a detached run: sets the registry's stop flag, which the run's own
