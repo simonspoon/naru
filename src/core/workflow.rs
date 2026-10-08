@@ -1566,11 +1566,13 @@ mod tests {
             ]
         );
         assert_eq!(run.steps[1].output, "an idea seen");
-        let lines = st.with(|s| s.list_workflow_log(Some("yes"), 10)).unwrap();
+        let lines = st
+            .with(|s| s.list_workflow_log(Some("yes"), None, 10))
+            .unwrap();
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].text, "an idea seen");
         assert!(
-            st.with(|s| s.list_workflow_log(Some("no"), 10))
+            st.with(|s| s.list_workflow_log(Some("no"), None, 10))
                 .unwrap()
                 .is_empty()
         );
@@ -1943,7 +1945,7 @@ mod tests {
         assert_eq!(run.status, WorkflowRunStatus::Succeeded, "{run:?}");
         assert_eq!(run.steps[1].output, "nothing to deliver");
         assert!(
-            st.with(|s| s.list_workflow_log(None, 10))
+            st.with(|s| s.list_workflow_log(None, None, 10))
                 .unwrap()
                 .is_empty()
         );
@@ -2095,15 +2097,39 @@ mod tests {
     }
 
     #[test]
+    fn log_filters_by_workflow() {
+        let (st, _d) = store();
+        let (a, b) = st.with(|s| {
+            let a = s.create_workflow(None, "A", None).unwrap().id;
+            let b = s.create_workflow(None, "B", None).unwrap().id;
+            s.append_workflow_log("shared", "from a", Some(a), None)
+                .unwrap();
+            s.append_workflow_log("shared", "from b", Some(b), None)
+                .unwrap();
+            (a, b)
+        });
+        let texts = |wf: Option<i64>| -> Vec<String> {
+            st.with(|s| s.list_workflow_log(Some("shared"), wf, 10))
+                .unwrap()
+                .into_iter()
+                .map(|l| l.text)
+                .collect()
+        };
+        assert_eq!(texts(Some(a)), vec!["from a"]);
+        assert_eq!(texts(Some(b)), vec!["from b"]);
+        assert_eq!(texts(None), vec!["from b", "from a"]);
+    }
+
+    #[test]
     fn log_limit_out_of_range_is_validation() {
         let (st, _d) = store();
         for bad in [0, -1, 1001] {
             assert!(matches!(
-                st.with(|s| s.list_workflow_log(None, bad)),
+                st.with(|s| s.list_workflow_log(None, None, bad)),
                 Err(Error::Validation(_))
             ));
         }
-        assert!(st.with(|s| s.list_workflow_log(None, 1000)).is_ok());
+        assert!(st.with(|s| s.list_workflow_log(None, None, 1000)).is_ok());
     }
 
     // ---- decide nodes -----------------------------------------------------

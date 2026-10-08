@@ -5546,10 +5546,12 @@ impl Store {
         )?)
     }
 
-    /// The newest `limit` lines of one log (or of every log), newest first.
+    /// The newest `limit` lines of one log (or of every log), newest first,
+    /// optionally only those one workflow wrote.
     pub fn list_workflow_log(
         &self,
         log: Option<&str>,
+        workflow_id: Option<i64>,
         limit: i64,
     ) -> Result<Vec<WorkflowLogEntry>> {
         if !(1..=1000).contains(&limit) {
@@ -5559,9 +5561,10 @@ impl Store {
         }
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {WORKFLOW_LOG_COLUMNS} FROM workflow_log \
-             WHERE (?1 IS NULL OR log = ?1 COLLATE NOCASE) ORDER BY id DESC LIMIT ?2"
+             WHERE (?1 IS NULL OR log = ?1 COLLATE NOCASE) \
+             AND (?2 IS NULL OR workflow_id = ?2) ORDER BY id DESC LIMIT ?3"
         ))?;
-        let rows = stmt.query_map((log, limit), row_to_workflow_log)?;
+        let rows = stmt.query_map((log, workflow_id, limit), row_to_workflow_log)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 

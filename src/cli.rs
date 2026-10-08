@@ -1730,6 +1730,9 @@ EXAMPLES
     Log {
         /// Log name (case-insensitive); omit for every log
         log: Option<String>,
+        /// Only the lines this workflow wrote (id or name)
+        #[arg(long)]
+        workflow: Option<String>,
         /// How many lines (1 to 1000)
         #[arg(long, default_value_t = 50)]
         limit: i64,
@@ -7379,8 +7382,16 @@ fn run_workflow_cmd(cmd: WorkflowCmd) -> Result<()> {
             let (created, skipped) = workflow::create_default_workflows(&mut store, project)?;
             print_json(&json!({"created": created, "skipped": skipped}));
         }
-        WorkflowCmd::Log { log, limit } => {
-            print_json(&store.list_workflow_log(log.as_deref(), limit)?);
+        WorkflowCmd::Log {
+            log,
+            workflow,
+            limit,
+        } => {
+            let workflow_id = match workflow {
+                Some(w) => Some(resolve_workflow(&store, &w)?.id),
+                None => None,
+            };
+            print_json(&store.list_workflow_log(log.as_deref(), workflow_id, limit)?);
         }
         WorkflowCmd::Node(cmd) => match cmd {
             WorkflowNodeCmd::Create {

@@ -4366,6 +4366,8 @@ struct WorkflowLogQuery {
     #[serde(default)]
     log: Option<String>,
     #[serde(default)]
+    workflow: Option<i64>,
+    #[serde(default)]
     limit: Option<i64>,
 }
 
@@ -4620,7 +4622,10 @@ async fn list_workflow_log(
 ) -> ApiResult<Response> {
     require_agent_access(&state, &addr, &headers)?;
     let store = state.store.lock().unwrap();
-    Ok(Json(store.list_workflow_log(q.log.as_deref(), q.limit.unwrap_or(50))?).into_response())
+    Ok(
+        Json(store.list_workflow_log(q.log.as_deref(), q.workflow, q.limit.unwrap_or(50))?)
+            .into_response(),
+    )
 }
 
 // ---- inbox (global update requests) ----

@@ -264,7 +264,7 @@ is named.
 | `workflow defaults --project <id\|name>` | `{created: [{workflow, nodes, edges}], skipped: [name]}` — creates the two default ambient workflows (below), skipping any whose name exists; `--quiet` accepted and ignored |
 | `workflow runs <id\|name>` | a bare array of runs, newest first, **without `steps` and `input`** |
 | `workflow run-show <run id>` | one run in full |
-| `workflow log [<log>] [--limit N]` | the newest N lines (default 50), newest first; no name = every log. A limit outside 1..=1000 is `validation` (the API's `?limit=` too), not clamped |
+| `workflow log [<log>] [--workflow <id\|name>] [--limit N]` | the newest N lines (default 50), newest first; no name = every log; `--workflow` keeps only the lines that workflow wrote (unknown = `not_found`). A limit outside 1..=1000 is `validation` (the API's `?limit=` too), not clamped |
 | `workflow node create <WORKFLOW> <KIND> <TITLE> [--config JSON] [--x] [--y]` | the `WorkflowNode`; omitted coordinates place it in a row beside the others |
 | `workflow node update <id> [--title] [--config JSON] [--x] [--y]` | the node; `--config` **replaces** the whole config |
 | `workflow node delete <id>` | `{node, edges}` |
@@ -310,7 +310,7 @@ applies as everywhere.
 | `POST /api/workflows/{id}/run` `{input?}` | run **synchronously** (on `spawn_blocking`) and answer the finished run |
 | `POST /api/workflows/events` `{event, speaker, text?}` | an ambient-engine event: validated synchronously (422), then the matching workflows run in the background in id order; **202** `{"workflow_ids":[…]}` at once |
 | `GET /api/workflows/{id}/runs` / `GET /api/workflow-runs/{id}` | runs newest first / one run, steps included |
-| `GET /api/workflow-log?log=&limit=` | log lines, newest first |
+| `GET /api/workflow-log?log=&workflow=&limit=` | log lines, newest first; `workflow` (an id) keeps one workflow's lines — the builder's log tab sends it unless "every workflow" is ticked |
 
 A *failed* run is **200** with `status: "failed"`; 422 is "could not run" (no or
 two triggers, input too large), 404 an unknown workflow, 409 `conflict`/`cycle`.

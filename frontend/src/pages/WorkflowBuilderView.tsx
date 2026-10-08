@@ -91,13 +91,25 @@ function RecentRuns({
   )
 }
 
-/** What `output` nodes with `target: log` have written; one named log, or
- *  every log when the name is blank. */
-function LogPanel({ version }: { version: number }) {
+/** What `output` nodes with `target: log` have written; this workflow's
+ *  lines unless "every workflow" is ticked, one named log or every log. */
+function LogPanel({
+  version,
+  workflowId,
+}: {
+  version: number
+  workflowId: number
+}) {
   const [log, setLog] = useState('')
+  const [everyWorkflow, setEveryWorkflow] = useState(false)
   const { data: lines, error } = useFetch(
-    () => listWorkflowLog(log.trim() || undefined, 50),
-    `workflow-log-${log.trim()}-${version}`,
+    () =>
+      listWorkflowLog(
+        log.trim() || undefined,
+        50,
+        everyWorkflow ? undefined : workflowId,
+      ),
+    `workflow-log-${workflowId}-${everyWorkflow}-${log.trim()}-${version}`,
   )
   return (
     <div className="workflow-log">
@@ -107,6 +119,14 @@ function LogPanel({ version }: { version: number }) {
         placeholder="log name (blank = every log)"
         onChange={(e) => setLog(e.target.value)}
       />
+      <label className="muted">
+        <input
+          type="checkbox"
+          checked={everyWorkflow}
+          onChange={(e) => setEveryWorkflow(e.target.checked)}
+        />{' '}
+        every workflow
+      </label>
       {error ? (
         <p className="error">{error}</p>
       ) : !lines ? (
@@ -335,7 +355,7 @@ export function WorkflowBuilderView({
             }}
           />
         )}
-        {tab === 'log' && <LogPanel version={runVersion} />}
+        {tab === 'log' && <LogPanel version={runVersion} workflowId={workflowId} />}
       </div>
     </div>
   )

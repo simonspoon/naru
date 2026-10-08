@@ -306,6 +306,10 @@ run 0 "$NARU" workflow log yes
 [ "$(jqs '.[0].text')" = "an idea seen" ] && [ "$(jqs length)" = "1" ] || fail "the true branch wrote the log: $STDOUT"
 run 0 "$NARU" workflow log no
 [ "$(jqs length)" = "0" ] || fail "the false branch wrote nothing: $STDOUT"
+run 0 "$NARU" workflow log yes --workflow "$W"
+[ "$(jqs length)" = "1" ] || fail "log --workflow keeps this workflow's line: $STDOUT"
+run 1 "$NARU" workflow log yes --workflow no-such-workflow
+[ "$(jqe .error.code)" = "not_found" ] || fail "log --workflow unknown: not_found"
 ok "run: the TRUE path runs, the false output is skipped, the log line is written"
 
 run 0 "$NARU" workflow run "$W" --input "nothing here" --trigger voice
@@ -936,6 +940,10 @@ api 200 GET "/api/workflow-runs/$AR"
 [ "$(jqb .input)" = "hello api" ] || fail "API run show"
 api 200 GET "/api/workflow-log?log=api&limit=5"
 [ "$(jqb '.[0].text')" = "HELLO API" ] || fail "API log: $BODY"
+api 200 GET "/api/workflow-log?log=api&workflow=$AW&limit=5"
+[ "$(jqb '.[0].text')" = "HELLO API" ] || fail "API log ?workflow=: $BODY"
+api 200 GET "/api/workflow-log?log=api&workflow=999999"
+[ "$(jqb length)" = "0" ] || fail "API log ?workflow= of another workflow: $BODY"
 # No input: the trigger hands on "", the log node has nothing to deliver and
 # says so — the run succeeds.
 api 200 POST "/api/workflows/$AW/run" '{}'

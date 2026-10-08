@@ -856,13 +856,15 @@ export function getWorkflowRun(id: number): Promise<WorkflowRun> {
   return request(`/api/workflow-runs/${id}`)
 }
 
-/** Log lines, newest first; no `log` = every log. */
+/** Log lines, newest first; no `log` = every log, no `workflow` = every workflow. */
 export function listWorkflowLog(
   log?: string,
   limit?: number,
+  workflow?: number,
 ): Promise<WorkflowLogEntry[]> {
   const q = new URLSearchParams()
   if (log) q.set('log', log)
+  if (workflow !== undefined) q.set('workflow', String(workflow))
   if (limit !== undefined) q.set('limit', String(limit))
   const qs = q.toString()
   return request(`/api/workflow-log${qs ? `?${qs}` : ''}`)
