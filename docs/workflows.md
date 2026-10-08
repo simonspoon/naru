@@ -388,6 +388,10 @@ shell-parsed. A failed run is data, as for `workflow run`. The CLI waits for
 the runs and prints them; the API answers 202 first, because the engine is
 real-time, so a caller reads the outcome from `workflow runs`.
 
+A `can-help` event also lights the live orb: see "The can-help offer" in
+`docs/live.md` (in memory, newest wins, 10 minute TTL, cleared by any live start,
+carried on `GET /api/live` as `offer`; the CLI's `workflow emit` cannot light it).
+
 ## Default ambient workflows (mesa task 1644)
 
 `naru workflow defaults --project <id|name>` (CLI only) creates two workflows

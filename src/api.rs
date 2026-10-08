@@ -44,9 +44,9 @@ use crate::core::{
     LIVE_AUDIO_MAX, LIVE_BOARD_INK_STATE_MAX, LIVE_BOARD_KEEP, LIVE_INK_MAX, LibraryBuiltinAction,
     LibraryBundle, LibraryImportResult, LibraryKind, LibraryPatch, LibraryScope,
     LiveBoardHistoryEntry, LiveBoardInkEntry, LiveBoardKind, LiveContext, LiveNotebookEntry,
-    LiveNotice, LiveState, LiveStatus, LiveTranscript, LiveWindow, ModelRates, NaruVersion,
-    NextResult, Priority, ProjectAgents, ProjectFileTree, ProjectGitLog, ProjectGitRepos,
-    ProjectGitStatus, ProjectGitView, ProjectPatch, ProjectVersion, ReceiptPatch,
+    LiveNotice, LiveOffer, LiveState, LiveStatus, LiveTranscript, LiveWindow, ModelRates,
+    NaruVersion, NextResult, Priority, ProjectAgents, ProjectFileTree, ProjectGitLog,
+    ProjectGitRepos, ProjectGitStatus, ProjectGitView, ProjectPatch, ProjectVersion, ReceiptPatch,
     STALE_CLAIM_MINUTES, Script, ScriptArg, ScriptPatch, ScriptRunEvent, ServeBoolSetting,
     ServeHostsSetting, ServeNumberSetting, Status, Store, SystemInfo, Task, TaskPatch, TaskSummary,
     WorkflowNodeKind, WorkflowNodeNew, WorkflowNodePatch, WorkflowPatch, WorkflowTrigger, agents,
@@ -135,6 +135,10 @@ struct AppState {
     /// old "permission prompt" (the page's rising-edge rule is the first line
     /// against that; this is the second), and a stale one is pruned on insert.
     live_blocked_cache: Arc<Mutex<HashMap<String, (Instant, Option<String>)>>>,
+    /// The newest ambient `can-help` offer: (text, speaker, when). In memory
+    /// only; newest wins; absent after [`LIVE_OFFER_TTL`] and cleared by any
+    /// live start (naru task 1700).
+    live_offer: Arc<Mutex<Option<(String, String, Instant)>>>,
     /// The live agent's occupied context, keyed by its short job id —
     /// `GET /api/live`'s derived `context_tokens` (mesa task 1478). Same
     /// shape and TTL as `live_blocked_cache`, but keyed on the job id alone:
@@ -2627,6 +2631,7 @@ pub fn serve(flags: ServeFlags) -> crate::core::Result<()> {
         usage_refreshing: Arc::new(AtomicBool::new(false)),
         agents_cache: Arc::new(Mutex::new(HashMap::new())),
         live_blocked_cache: Arc::new(Mutex::new(HashMap::new())),
+        live_offer: Arc::new(Mutex::new(None)),
         live_context_cache: Arc::new(Mutex::new(HashMap::new())),
         agents_gen: Arc::new(AtomicU64::new(0)),
         git_cache: Arc::new(Mutex::new(HashMap::new())),
@@ -4583,6 +4588,17 @@ async fn emit_workflow_event(
     let Json(body) = body?;
     let store = state.store.clone();
     let (ids, input) = workflow::plan_ambient(&*store, &body.event, &body.speaker, &body.text)?;
+    if body.event == "can-help" {
+        // The glowing orb (naru task 1700): newest offer wins. Text is capped
+        // on a char boundary; the speaker is a one-line label.
+        let text: String = body.text.chars().take(LIVE_OFFER_TEXT_MAX).collect();
+        let speaker = body
+            .speaker
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        *state.live_offer.lock().unwrap() = Some((text, speaker, Instant::now()));
+    }
     let ran = ids.clone();
     tokio::task::spawn_blocking(move || {
         for (id, e) in workflow::run_ambient(&*store, &ran, &input).1 {
@@ -4852,6 +4868,10 @@ struct LiveStart {
     /// `validation` error from `Store`.
     #[serde(default)]
     project_id: Option<i64>,
+    /// Accept the pending ambient "can help" offer: its overheard text seeds
+    /// the agent's prompt (naru task 1700). Any start clears the offer.
+    #[serde(default)]
+    accept_offer: bool,
 }
 
 #[derive(Deserialize)]
@@ -4994,12 +5014,24 @@ async fn get_live(
     let (session, turns, boards) = {
         let store = state.store.lock().unwrap();
         let Some(session) = store.current_live_session()? else {
+            let offer = state
+                .live_offer
+                .lock()
+                .unwrap()
+                .as_ref()
+                .filter(|(_, _, at)| at.elapsed() < LIVE_OFFER_TTL)
+                .map(|(text, speaker, at)| LiveOffer {
+                    text: text.clone(),
+                    speaker: speaker.clone(),
+                    age_ms: at.elapsed().as_millis() as u32,
+                });
             return Ok(Json(LiveState {
                 session: None,
                 turns: vec![],
                 boards: vec![],
                 blocked: None,
                 context_tokens: None,
+                offer,
             })
             .into_response());
         };
@@ -5028,6 +5060,7 @@ async fn get_live(
         boards,
         blocked,
         context_tokens,
+        offer: None,
     })
     .into_response())
 }
@@ -5131,7 +5164,12 @@ async fn start_live(
         .unwrap()
         .start_live_session(body.project_id)?
         .id;
-    let job = match spawn_live_agent(&state, session_id, body.project_id).await {
+    // Any start clears the pending offer; only an accepting one carries it.
+    let offer = state.live_offer.lock().unwrap().take();
+    let overheard = offer
+        .filter(|(_, _, at)| body.accept_offer && at.elapsed() < LIVE_OFFER_TTL)
+        .map(|(text, speaker, _)| (speaker, text));
+    let job = match spawn_live_agent(&state, session_id, body.project_id, overheard).await {
         Ok(job) => job,
         Err(err) => {
             let _ = state.store.lock().unwrap().end_live_session(session_id);
@@ -5269,10 +5307,16 @@ async fn spawn_live_agent(
     state: &AppState,
     session_id: i64,
     project_id: Option<i64>,
+    overheard: Option<(String, String)>,
 ) -> Result<Option<String>, ApiError> {
     let (dir, name) = live_agent_dir(&state.store.lock().unwrap(), project_id, session_id)?;
     let path = dir.clone();
-    let prompt = live::agent_prompt(&state.store.lock().unwrap(), session_id);
+    let prompt = match &overheard {
+        Some((speaker, text)) => {
+            live::agent_prompt_with_offer(&state.store.lock().unwrap(), session_id, speaker, text)
+        }
+        None => live::agent_prompt(&state.store.lock().unwrap(), session_id),
+    };
     // The `naru-live` agent definition is seeded to disk before the spawn
     // (mesa task 1068): the default template spawns `--agent naru-live`, which
     // errors on an agent Claude Code has never seen. A failure is treated
@@ -7733,6 +7777,11 @@ const AGENTS_TTL: Duration = Duration::from_secs(2);
 /// since every miss is a ~0.5s `claude agents --json --all` and a permission
 /// prompt noticed three seconds late costs nothing.
 const LIVE_BLOCKED_TTL: Duration = Duration::from_secs(5);
+
+/// How long an ambient `can-help` offer stays acceptable, and the most of its
+/// text kept (naru task 1700).
+const LIVE_OFFER_TTL: Duration = Duration::from_secs(600);
+const LIVE_OFFER_TEXT_MAX: usize = 4000;
 
 /// Sentinel key the global agents list caches under in `agents_cache`
 /// (which is otherwise keyed by folder `local_path`). No real path can equal
@@ -11866,6 +11915,7 @@ mod tests {
             usage_refreshing: Arc::new(AtomicBool::new(false)),
             agents_cache: Arc::new(Mutex::new(HashMap::new())),
             live_blocked_cache: Arc::new(Mutex::new(HashMap::new())),
+            live_offer: Arc::new(Mutex::new(None)),
             live_context_cache: Arc::new(Mutex::new(HashMap::new())),
             agents_gen: Arc::new(AtomicU64::new(0)),
             git_cache: Arc::new(Mutex::new(HashMap::new())),
@@ -18225,6 +18275,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                 loopback_agent_headers(),
                 Ok(Json(LiveStart {
                     project_id: Some(id),
+                    accept_offer: false,
                 })),
             ))
             .unwrap();
@@ -18255,7 +18306,10 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                 State(state.clone()),
                 ConnectInfo(loopback()),
                 loopback_agent_headers(),
-                Ok(Json(LiveStart { project_id: None })),
+                Ok(Json(LiveStart {
+                    project_id: None,
+                    accept_offer: false,
+                })),
             ))
             .unwrap_err();
             assert_eq!(err.status, StatusCode::CONFLICT);
@@ -18377,7 +18431,10 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                 State(state.clone()),
                 ConnectInfo(loopback()),
                 loopback_agent_headers(),
-                Ok(Json(LiveStart { project_id: None })),
+                Ok(Json(LiveStart {
+                    project_id: None,
+                    accept_offer: false,
+                })),
             ))
             .unwrap_err();
             assert_eq!(err.code, "unavailable");
@@ -18434,7 +18491,10 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                         State(state.clone()),
                         ConnectInfo(loopback()),
                         loopback_agent_headers(),
-                        Ok(Json(LiveStart { project_id: None })),
+                        Ok(Json(LiveStart {
+                            project_id: None,
+                            accept_offer: false,
+                        })),
                     )
                     .await
                     .unwrap();

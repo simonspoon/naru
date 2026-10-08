@@ -3610,6 +3610,20 @@ conversation") working with no backend change.
   `useLiveContext`, which is the whole of what a page has to call), each with a
   sibling vitest file.
 
+### The can-help offer (naru task 1700)
+
+An ambient `can-help` event POSTed to `/api/workflows/events` also lights the
+live orb, silently. The server keeps the **newest** such event in memory only
+(text capped at 4000 characters, newest wins, absent after 10 minutes, lost on a
+restart) and carries it on `GET /api/live` as `offer` (`{text, speaker, age_ms}`)
+while no session is live. The orb glows a warm gold pulse (slowed, not removed,
+under reduced motion) with the overheard text as its tooltip; pressing it starts
+a conversation with `POST /api/live {"accept_offer": true}`, which puts the
+overheard words last in the agent's spawn prompt, framed as data, never
+instructions. Any live start, accepted or not, clears the offer. No sound plays
+on the offer itself. `naru workflow emit can-help` from the CLI cannot light it:
+the CLI has no server to hold the offer.
+
 ## Config
 
 The spawn is the fourth configurable command: **`live-agent`**, defaulting to

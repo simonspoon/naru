@@ -160,6 +160,27 @@ export type OrbProps = {
   onToggleMic: () => void
   onTogglePause: () => void
   onToggleSpeech: () => void
+  /** An overheard "can help" offer is waiting (naru task 1700): the orb glows
+   *  silently and a press accepts it. Absent/null = no offer. */
+  offer?: { title: string; onAccept: () => void } | null
+}
+
+/** The props that make an orb element a button while an offer glows. */
+function offerButton(offer: OrbProps['offer']) {
+  if (!offer) return {}
+  return {
+    role: 'button' as const,
+    tabIndex: 0,
+    title: offer.title,
+    'aria-label': offer.title,
+    onClick: offer.onAccept,
+    onKeyDown: (e: React.KeyboardEvent) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault()
+        offer.onAccept()
+      }
+    },
+  }
 }
 
 /** The three-segment pie: mic left, pause right, sound below. */
@@ -232,7 +253,8 @@ export function InlineOrb({ size, ...p }: OrbProps & { size: number }) {
   const k = size / ORB_SIZE
   return (
     <div
-      className={`live-orb live-orb-inline ${orbClasses(p.state, mute)}`}
+      className={`live-orb live-orb-inline ${orbClasses(p.state, mute)}${p.offer ? ' can-help' : ''}`}
+      {...offerButton(p.offer)}
       // The box keeps the 116px geometry; `scale` shrinks it, and the negative
       // margin gives back the layout space it no longer takes.
       style={{ width: ORB_SIZE, height: ORB_SIZE, scale: k, margin: -((ORB_SIZE - size) / 2) }}
@@ -255,7 +277,11 @@ export function InlineOrb({ size, ...p }: OrbProps & { size: number }) {
  */
 export function OrbPanel(p: OrbProps) {
   return (
-    <div className={`orb-panel ${orbClasses(p.state, null)}`} aria-label="Naru">
+    <div
+      className={`orb-panel ${orbClasses(p.state, null)}${p.offer ? ' can-help' : ''}`}
+      aria-label="Naru"
+      {...offerButton(p.offer)}
+    >
       <div className="orb-panel-stage">
         <div className="orb-panel-mark">
           <div className="orb-panel-glow" />
@@ -420,7 +446,8 @@ export function LiveOrb(props: OrbProps) {
     if (p === null || p.id !== e.pointerId) return
     press.current = null
     if (!p.moved) {
-      setPinned((v) => !v)
+      if (props.offer) props.offer.onAccept()
+      else setPinned((v) => !v)
       return
     }
     const to = dragRef.current ?? rest
@@ -441,12 +468,26 @@ export function LiveOrb(props: OrbProps) {
     <div
       className={`live-orb ${orbClasses(state, mute)}${
         (drag !== null ? ' dragging' : '') + (rest.docked ? ' docked' : '')
-      }${pinned ? ' pinned' : ''}`}
+      }${pinned ? ' pinned' : ''}${props.offer ? ' can-help' : ''}`}
       style={{ left: pos.x, top: pos.y, width: ORB_SIZE, height: ORB_SIZE }}
     >
       <OrbPie {...props} />
       <div
         className="live-orb-body"
+        {...(props.offer
+          ? {
+              role: 'button',
+              tabIndex: 0,
+              title: props.offer.title,
+              'aria-label': props.offer.title,
+              onKeyDown: (e: React.KeyboardEvent) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault()
+                  props.offer?.onAccept()
+                }
+              },
+            }
+          : {})}
         onPointerDown={onDown}
         onPointerMove={onMove}
         onPointerUp={onUp}

@@ -83,6 +83,7 @@ import { parseBoardKey } from '../liveBoardKeys'
 import { elapsedLabel, endsInHead } from '../liveHead'
 import { headMeta, quietHint, taskHash, taskSegments, turnClock } from '../liveChat'
 import { headerIndicator } from '../liveIndicator'
+import { offerGlows, offerTitle } from '../liveOffer'
 import {
   IDLE,
   armedState,
@@ -750,6 +751,8 @@ export function LiveHub({
   )
   const session = data?.session ?? null
   const live = isLive(session)
+  const offer = data?.offer ?? null
+  const glowing = offerGlows(offer, live)
 
   // The live section of `~/.mesa/config.json`, for the one value this page
   // reads out of it: how long the person may fall silent before a
@@ -3753,7 +3756,7 @@ export function LiveHub({
     }
   }, [ratioResizing, effectiveArrangement])
 
-  function act(button: LiveButton) {
+  function act(button: LiveButton, acceptOffer = false) {
     if (button.disabled) return
     // Unlock the element and the clock from inside the gesture whether or not
     // this press turns out to need them: every turn after this one is spoken
@@ -3787,7 +3790,7 @@ export function LiveHub({
       // conversation surfaces it (mesa task 1144) rather than leaving it a
       // second click away behind the toggle. Joining, above, does the same.
       setOpen(true)
-      startLive()
+      startLive(undefined, acceptOffer)
         .then(() => {
           // There is a session to claim only now, and the press that starts a
           // conversation is also the one that says it should be heard here.
@@ -4279,6 +4282,14 @@ export function LiveHub({
       if (pauseButton) togglePause(pauseButton)
     },
     onToggleSpeech: toggleSpeechMuted,
+    // The ambient "can help" offer (naru task 1700): glows the idle orb, and
+    // a press on it is a start that carries the overheard text.
+    offer: glowing && offer
+      ? {
+          title: offerTitle(offer),
+          onAccept: () => act({ label: 'Go live', action: 'start', disabled: pending !== null }, true),
+        }
+      : null,
   }
 
   // The head (mesa task 1069): the Naru mark (no word; its accessible
@@ -4912,7 +4923,7 @@ export function LiveHub({
           conversation is live and this browser is in it — the same terms the
           head's Pause and mute buttons are offered on — wired to the very
           handlers those buttons call. */}
-      {live && unlocked && !dock && (
+      {((live && unlocked) || glowing) && !dock && (
         <LiveOrb {...orbProps} />
       )}
       {hasBoards && !boardShown && !dock && (

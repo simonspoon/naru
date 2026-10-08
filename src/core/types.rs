@@ -4505,6 +4505,21 @@ pub struct LiveState {
     /// number. Null for a session with no agent, a job `claude agents` does
     /// not list, or a transcript that cannot be read.
     pub context_tokens: Option<i64>,
+    /// An overheard "can help" offer waiting for the person to accept it
+    /// (naru task 1700) — present only while no session is live and the
+    /// offer is inside its TTL. **Derived per request** from the server's
+    /// in-memory state, never stored.
+    pub offer: Option<LiveOffer>,
+}
+
+/// What the ambient engine overheard and judged Naru could help with. The
+/// text is capped server-side; `age_ms` lets the page show how stale it is.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct LiveOffer {
+    pub text: String,
+    pub speaker: String,
+    pub age_ms: u32,
 }
 
 // ---- workflows (mesa task 1607) ----------------------------------------

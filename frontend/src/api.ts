@@ -994,8 +994,14 @@ export function getLive(after?: number): Promise<LiveState> {
  * be live, so a second start while one is running is a 409 `conflict` naming
  * the session already there.
  */
-export function startLive(projectId?: number): Promise<LiveSession> {
-  return request('/api/live', jsonInit('POST', { project_id: projectId ?? null }))
+export function startLive(projectId?: number, acceptOffer?: boolean): Promise<LiveSession> {
+  return request(
+    '/api/live',
+    jsonInit('POST', {
+      project_id: projectId ?? null,
+      ...(acceptOffer ? { accept_offer: true } : {}),
+    }),
+  )
 }
 
 /**
