@@ -353,19 +353,21 @@ pub struct ConfigCommand {
 /// One model family's rates, USD per **1M tokens**. All four are explicit —
 /// mesa never derives a cache rate from the input rate, because the
 /// relationship is a pricing convention, not arithmetic mesa gets to assume.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../frontend/src/types/")]
 pub struct ModelRates {
     pub input: f64,
     pub output: f64,
     pub cache_read: f64,
     pub cache_write: f64,
-    /// An optional context-size tier: a request whose prompt is strictly over
-    /// `above_tokens` is priced wholly at the tier's rates. Absent = one flat
-    /// rate, and the key is then omitted so output is byte-identical.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub long_context: Option<LongContextRates>,
+    /// Optional context-size tiers: a request whose prompt is strictly over a
+    /// tier's `above_tokens` is priced wholly at that tier's rates (the
+    /// tier with the largest threshold below the prompt wins). Stored
+    /// ascending by threshold, thresholds unique. Empty = one flat rate, and
+    /// the key is then omitted so output is byte-identical.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(as = "Option<Vec<ContextTier>>", optional)]
+    pub tiers: Vec<ContextTier>,
 }
 
 /// The rates a request pays when its prompt (input + cache read + cache
@@ -373,7 +375,7 @@ pub struct ModelRates {
 /// request, output included, is priced at these. USD per **1M tokens**.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../frontend/src/types/")]
-pub struct LongContextRates {
+pub struct ContextTier {
     #[ts(type = "number")]
     pub above_tokens: u64,
     pub input: f64,
@@ -383,19 +385,32 @@ pub struct LongContextRates {
 }
 
 impl ModelRates {
-    /// The one rate-selection rule: the flat rates, or the long-context tier
-    /// (returned as flat rates) when `prompt_tokens` is strictly over its
-    /// threshold. Every cost formula goes through this.
+    /// The one rate-selection rule: the flat rates, or the tier with the
+    /// largest threshold strictly below `prompt_tokens` (returned as flat
+    /// rates). Order of `tiers` does not matter. Every cost formula goes
+    /// through this.
     pub fn for_prompt(&self, prompt_tokens: i64) -> ModelRates {
-        match self.long_context {
-            Some(t) if prompt_tokens.max(0) as u64 > t.above_tokens => ModelRates {
+        let p = prompt_tokens.max(0) as u64;
+        match self
+            .tiers
+            .iter()
+            .filter(|t| p > t.above_tokens)
+            .max_by_key(|t| t.above_tokens)
+        {
+            Some(t) => ModelRates {
                 input: t.input,
                 output: t.output,
                 cache_read: t.cache_read,
                 cache_write: t.cache_write,
-                long_context: None,
+                tiers: Vec::new(),
             },
-            _ => *self,
+            None => ModelRates {
+                input: self.input,
+                output: self.output,
+                cache_read: self.cache_read,
+                cache_write: self.cache_write,
+                tiers: Vec::new(),
+            },
         }
     }
 }

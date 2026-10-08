@@ -646,28 +646,28 @@ api PUT /api/config/pricing '{"pricing": {"claude-opus": null, "newco-x": null}}
   fail "null must remove the key, never store it zeroed: $(cat "$CONFIG")"
 ok "PUT null restores the built-in rate for a shipped family and deletes a user-added prefix"
 
-# A context-size tier (naru task 1713): Haiku 5.5 ships one; a user prefix can
-# carry its own, and it round-trips; a flat four-field row stays flat.
+# Context-size tiers (naru task 1713): Haiku 5.5 ships one; a user prefix can
+# carry several, stored ascending, and they round-trip; a flat row stays flat.
 api GET /api/config/pricing
-[ "$(jq -r '.[] | select(.prefix=="claude-haiku-5-5") | .default.long_context.above_tokens' <<<"$STDOUT")" = "100000" ] ||
+[ "$(jq -r '.[] | select(.prefix=="claude-haiku-5-5") | .default.tiers[0].above_tokens' <<<"$STDOUT")" = "100000" ] ||
   fail "claude-haiku-5-5 must ship a 100000-token tier: $STDOUT"
-[ "$(jq -r '.[] | select(.prefix=="claude-opus") | .default | has("long_context")' <<<"$STDOUT")" = "false" ] ||
-  fail "a flat family must carry no long_context key: $STDOUT"
-api PUT /api/config/pricing '{"pricing": {"tiered-x": {"input": 1, "output": 2, "cache_read": 3, "cache_write": 4, "long_context": {"above_tokens": 50000, "input": 5, "output": 6, "cache_read": 7, "cache_write": 8}}, "flat-x": {"input": 1, "output": 2, "cache_read": 3, "cache_write": 4}}}'
+[ "$(jq -r '.[] | select(.prefix=="claude-opus") | .default | has("tiers")' <<<"$STDOUT")" = "false" ] ||
+  fail "a flat family must carry no tiers key: $STDOUT"
+api PUT /api/config/pricing '{"pricing": {"tiered-x": {"input": 1, "output": 2, "cache_read": 3, "cache_write": 4, "tiers": [{"above_tokens": 500000, "input": 9, "output": 10, "cache_read": 11, "cache_write": 12}, {"above_tokens": 50000, "input": 5, "output": 6, "cache_read": 7, "cache_write": 8}]}, "flat-x": {"input": 1, "output": 2, "cache_read": 3, "cache_write": 4}}}'
 [ "$CODE" = "200" ] || fail "PUT tiered pricing: expected 200, got $CODE: $STDOUT"
-[ "$(jq -r '.[] | select(.prefix=="tiered-x") | .value.long_context | [.above_tokens, .input, .output, .cache_read, .cache_write] == [50000,5,6,7,8]' <<<"$STDOUT")" = "true" ] ||
+[ "$(jq -r '.[] | select(.prefix=="tiered-x") | .value.tiers | map([.above_tokens, .input, .output, .cache_read, .cache_write]) == [[50000,5,6,7,8],[500000,9,10,11,12]]' <<<"$STDOUT")" = "true" ] ||
   fail "a tier must round-trip through PUT/GET: $STDOUT"
-[ "$(jq -r '.[] | select(.prefix=="flat-x") | .value | has("long_context")' <<<"$STDOUT")" = "false" ] ||
+[ "$(jq -r '.[] | select(.prefix=="flat-x") | .value | has("tiers")' <<<"$STDOUT")" = "false" ] ||
   fail "a four-field row must stay flat: $STDOUT"
-[ "$(jq -r '.pricing["tiered-x"].long_context.above_tokens' < "$CONFIG")" = "50000" ] ||
+[ "$(jq -r '.pricing["tiered-x"].tiers | map(.above_tokens) | join(",")' < "$CONFIG")" = "50000,500000" ] ||
   fail "the tier must be stored in the config file: $(cat "$CONFIG")"
 BEFORE=$(cat "$CONFIG")
-api PUT /api/config/pricing '{"pricing": {"tiered-x": {"input": 1, "output": 2, "cache_read": 3, "cache_write": 4, "long_context": {"above_tokens": 0, "input": 5, "output": 6, "cache_read": 7, "cache_write": 8}}}}'
-[ "$CODE" = "422" ] || fail "zero tier threshold: expected 422, got $CODE: $STDOUT"
+api PUT /api/config/pricing '{"pricing": {"tiered-x": {"input": 1, "output": 2, "cache_read": 3, "cache_write": 4, "tiers": [{"above_tokens": 7, "input": 5, "output": 6, "cache_read": 7, "cache_write": 8}, {"above_tokens": 7, "input": 1, "output": 1, "cache_read": 1, "cache_write": 1}]}}}'
+[ "$CODE" = "422" ] || fail "duplicate tier threshold: expected 422, got $CODE: $STDOUT"
 [ "$(cat "$CONFIG")" = "$BEFORE" ] || fail "a rejected tier PUT must not touch the file"
 api PUT /api/config/pricing '{"pricing": {"tiered-x": null, "flat-x": null}}'
 [ "$CODE" = "200" ] || fail "PUT tiered cleanup: expected 200, got $CODE: $STDOUT"
-ok "a long-context tier round-trips through PUT/GET /api/config/pricing, a four-field row stays flat, and a zero threshold is a 422 writing nothing"
+ok "context tiers round-trip through PUT/GET /api/config/pricing stored ascending, a four-field row stays flat, and a duplicate threshold is a 422 writing nothing"
 
 BEFORE=$(cat "$CONFIG")
 api PUT /api/config/pricing '{"pricing": {"claude-opus": {"input": -1, "output": 2, "cache_read": 3, "cache_write": 4}}}'

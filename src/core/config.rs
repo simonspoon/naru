@@ -199,7 +199,7 @@ use crate::core::listen;
 use crate::core::speech;
 use crate::core::types::{
     ConfigAudio, ConfigCommand, ConfigGuard, ConfigKeymap, ConfigKeymapAction, ConfigListen,
-    ConfigLive, ConfigPrice, ConfigSpeech, ConfigWatchers, LongContextRates, ModelRates,
+    ConfigLive, ConfigPrice, ConfigSpeech, ConfigWatchers, ContextTier, ModelRates,
 };
 
 /// The todo-watcher's dispatch command (`docs/todo-watcher.md`).
@@ -1618,30 +1618,32 @@ fn offered_list(action: &str) -> String {
 /// `cache_read` ≈ 0.1× input and `cache_write` (5-minute TTL) ≈ 1.25× input,
 /// but both are written out rather than derived — a pricing convention is not
 /// arithmetic mesa gets to assume on a family it has never seen.
-pub const DEFAULT_PRICES: [(&str, ModelRates); 6] = [
-    ("claude-fable", rates(10.0, 50.0, 1.0, 12.5)),
-    ("claude-mythos", rates(10.0, 50.0, 1.0, 12.5)),
-    ("claude-opus", rates(5.0, 25.0, 0.5, 6.25)),
-    ("claude-sonnet", rates(3.0, 15.0, 0.3, 3.75)),
-    ("claude-haiku", rates(1.0, 5.0, 0.1, 1.25)),
-    // Haiku 5.5 is priced by prompt length: over 100k tokens pays the tier.
-    (
-        "claude-haiku-5-5",
-        ModelRates {
-            input: 0.10,
-            output: 0.50,
-            cache_read: 0.01,
-            cache_write: 0.125,
-            long_context: Some(LongContextRates {
-                above_tokens: 100_000,
-                input: 0.50,
-                output: 2.50,
-                cache_read: 0.05,
-                cache_write: 0.625,
-            }),
-        },
-    ),
-];
+pub fn default_prices() -> Vec<(&'static str, ModelRates)> {
+    vec![
+        ("claude-fable", rates(10.0, 50.0, 1.0, 12.5)),
+        ("claude-mythos", rates(10.0, 50.0, 1.0, 12.5)),
+        ("claude-opus", rates(5.0, 25.0, 0.5, 6.25)),
+        ("claude-sonnet", rates(3.0, 15.0, 0.3, 3.75)),
+        ("claude-haiku", rates(1.0, 5.0, 0.1, 1.25)),
+        // Haiku 5.5 is priced by prompt length: over 100k tokens pays the tier.
+        (
+            "claude-haiku-5-5",
+            ModelRates {
+                input: 0.10,
+                output: 0.50,
+                cache_read: 0.01,
+                cache_write: 0.125,
+                tiers: vec![ContextTier {
+                    above_tokens: 100_000,
+                    input: 0.50,
+                    output: 2.50,
+                    cache_read: 0.05,
+                    cache_write: 0.625,
+                }],
+            },
+        ),
+    ]
+}
 
 const fn rates(input: f64, output: f64, cache_read: f64, cache_write: f64) -> ModelRates {
     ModelRates {
@@ -1649,7 +1651,7 @@ const fn rates(input: f64, output: f64, cache_read: f64, cache_write: f64) -> Mo
         output,
         cache_read,
         cache_write,
-        long_context: None,
+        tiers: Vec::new(),
     }
 }
 
@@ -1657,10 +1659,10 @@ const fn rates(input: f64, output: f64, cache_read: f64, cache_write: f64) -> Mo
 /// `None` for a prefix mesa doesn't ship — the pricing twin of
 /// [`default_command`].
 pub fn default_price(prefix: &str) -> Option<ModelRates> {
-    DEFAULT_PRICES
-        .iter()
+    default_prices()
+        .into_iter()
         .find(|(p, _)| *p == prefix)
-        .map(|(_, r)| *r)
+        .map(|(_, r)| r)
 }
 
 /// The `pricing` map, deserialized on its own so a broken price entry can
@@ -1685,9 +1687,9 @@ impl PriceTable {
     /// Just the shipped rates — what mesa costs with no config file.
     pub fn builtin() -> PriceTable {
         PriceTable {
-            entries: DEFAULT_PRICES
-                .iter()
-                .map(|(p, r)| ((*p).to_string(), *r))
+            entries: default_prices()
+                .into_iter()
+                .map(|(p, r)| (p.to_string(), r))
                 .collect(),
         }
     }
@@ -1716,7 +1718,7 @@ impl PriceTable {
             .iter()
             .filter(|(prefix, _)| model.starts_with(prefix.as_str()))
             .max_by_key(|(prefix, _)| prefix.len())
-            .map(|(_, r)| *r)
+            .map(|(_, r)| r.clone())
             .unwrap_or(rates(0.0, 0.0, 0.0, 0.0))
     }
 }
@@ -1742,12 +1744,12 @@ pub fn pricing() -> Result<Vec<ConfigPrice>, String> {
 
 fn pricing_in(path: &Path) -> Result<Vec<ConfigPrice>, String> {
     let configured = read_pricing(path)?;
-    let mut rows: Vec<ConfigPrice> = DEFAULT_PRICES
-        .iter()
+    let mut rows: Vec<ConfigPrice> = default_prices()
+        .into_iter()
         .map(|(prefix, default)| ConfigPrice {
-            prefix: (*prefix).to_string(),
-            value: configured.get(*prefix).copied(),
-            default: Some(*default),
+            prefix: prefix.to_string(),
+            value: configured.get(prefix).cloned(),
+            default: Some(default),
         })
         .collect();
     let mut extra: Vec<&String> = configured
@@ -1757,7 +1759,7 @@ fn pricing_in(path: &Path) -> Result<Vec<ConfigPrice>, String> {
     extra.sort();
     rows.extend(extra.into_iter().map(|prefix| ConfigPrice {
         prefix: prefix.clone(),
-        value: configured.get(prefix).copied(),
+        value: configured.get(prefix).cloned(),
         default: None,
     }));
     Ok(rows)
@@ -1812,7 +1814,9 @@ fn save_pricing_in(
                 section.remove(prefix.trim());
             }
             Some(rates) => {
-                let value = serde_json::to_value(rates).map_err(|e| {
+                let mut rates = rates.clone();
+                rates.tiers.sort_by_key(|t| t.above_tokens);
+                let value = serde_json::to_value(&rates).map_err(|e| {
                     SaveError::Unavailable(format!("cannot serialize the mesa config: {e}"))
                 })?;
                 section.insert(prefix.trim().to_string(), value);
@@ -1876,13 +1880,22 @@ fn validate_rates(prefix: &str, rates: &ModelRates) -> Result<(), String> {
             ));
         }
     }
-    if let Some(t) = &rates.long_context {
+    let mut seen = Vec::new();
+    for t in &rates.tiers {
         if t.above_tokens < 1 {
             return Err(format!(
-                "the long-context threshold for {:?} must be at least 1 token",
+                "a context tier threshold for {:?} must be at least 1 token",
                 prefix.trim()
             ));
         }
+        if seen.contains(&t.above_tokens) {
+            return Err(format!(
+                "{:?} has two context tiers above {} tokens; each threshold must be unique",
+                prefix.trim(),
+                t.above_tokens
+            ));
+        }
+        seen.push(t.above_tokens);
         for (label, value) in [
             ("input", t.input),
             ("output", t.output),
@@ -1891,7 +1904,8 @@ fn validate_rates(prefix: &str, rates: &ModelRates) -> Result<(), String> {
         ] {
             if !value.is_finite() || value < 0.0 {
                 return Err(format!(
-                    "the long-context {label} rate for {:?} must be a number ≥ 0, got {value}",
+                    "the context tier {label} rate above {} tokens for {:?} must be a number ≥ 0, got {value}",
+                    t.above_tokens,
                     prefix.trim()
                 ));
             }
@@ -5688,7 +5702,10 @@ mod tests {
     // ---- pricing (mesa task 692) ----------------------------------------
 
     fn price(pairs: &[(&str, Option<ModelRates>)]) -> HashMap<String, Option<ModelRates>> {
-        pairs.iter().map(|(k, v)| ((*k).to_string(), *v)).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), v.clone()))
+            .collect()
     }
 
     #[test]
@@ -5740,25 +5757,44 @@ mod tests {
             PriceTable::load_from(&path).unwrap().for_model("old-1"),
             rates(1.0, 2.0, 3.0, 4.0)
         );
-        let tier = ModelRates {
-            long_context: Some(LongContextRates {
-                above_tokens: 5,
-                input: 6.0,
-                output: 7.0,
-                cache_read: 8.0,
-                cache_write: 9.0,
-            }),
+        let t = |above_tokens: u64, x: f64| ContextTier {
+            above_tokens,
+            input: x,
+            output: x + 1.0,
+            cache_read: x + 2.0,
+            cache_write: x + 3.0,
+        };
+        // Given out of order, stored ascending.
+        let tiered = ModelRates {
+            tiers: vec![t(500, 7.0), t(100, 5.0)],
             ..rates(1.0, 2.0, 3.0, 4.0)
         };
-        save_pricing_in(&path, &price(&[("old", Some(tier))])).unwrap();
-        assert_eq!(read_pricing(&path).unwrap()["old"], tier);
+        save_pricing_in(&path, &price(&[("old", Some(tiered))])).unwrap();
+        let stored = read_pricing(&path).unwrap()["old"].tiers.clone();
+        assert_eq!(stored, vec![t(100, 5.0), t(500, 7.0)]);
         // A flat row serializes without the key.
         save_pricing_in(&path, &price(&[("old", Some(rates(1.0, 2.0, 3.0, 4.0)))])).unwrap();
-        assert!(
-            !std::fs::read_to_string(&path)
-                .unwrap()
-                .contains("long_context")
-        );
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("tiers"));
+    }
+
+    #[test]
+    fn the_largest_tier_strictly_below_the_prompt_wins() {
+        let t = |above_tokens: u64, x: f64| ContextTier {
+            above_tokens,
+            input: x,
+            output: x,
+            cache_read: x,
+            cache_write: x,
+        };
+        // Deliberately unsorted: selection must not depend on order.
+        let r = ModelRates {
+            tiers: vec![t(500_000, 3.0), t(100_000, 2.0)],
+            ..rates(1.0, 1.0, 1.0, 1.0)
+        };
+        assert_eq!(r.for_prompt(100_000), rates(1.0, 1.0, 1.0, 1.0));
+        assert_eq!(r.for_prompt(100_001), rates(2.0, 2.0, 2.0, 2.0));
+        assert_eq!(r.for_prompt(500_000), rates(2.0, 2.0, 2.0, 2.0));
+        assert_eq!(r.for_prompt(500_001), rates(3.0, 3.0, 3.0, 3.0));
     }
 
     #[test]
@@ -5766,23 +5802,31 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let before = "{}";
         let path = write_config(dir.path(), before);
-        let tier = |above_tokens, input| ModelRates {
-            long_context: Some(LongContextRates {
-                above_tokens,
-                input,
-                output: 1.0,
-                cache_read: 1.0,
-                cache_write: 1.0,
-            }),
+        let one = |above_tokens, input| ContextTier {
+            above_tokens,
+            input,
+            output: 1.0,
+            cache_read: 1.0,
+            cache_write: 1.0,
+        };
+        let tier = |tiers| ModelRates {
+            tiers,
             ..rates(1.0, 1.0, 1.0, 1.0)
         };
         for (label, r) in [
-            ("zero threshold", tier(0, 1.0)),
-            ("negative rate", tier(10, -1.0)),
-            ("non-finite rate", tier(10, f64::INFINITY)),
+            ("zero threshold", tier(vec![one(0, 1.0)])),
+            ("negative rate", tier(vec![one(10, -1.0)])),
+            ("non-finite rate", tier(vec![one(10, f64::INFINITY)])),
+            (
+                "duplicate threshold",
+                tier(vec![one(10, 1.0), one(10, 2.0)]),
+            ),
         ] {
             let err = save_pricing_in(&path, &price(&[("x", Some(r))])).unwrap_err();
             assert!(matches!(err, SaveError::Validation(_)), "{label}: {err:?}");
+            if label == "duplicate threshold" {
+                assert!(format!("{err:?}").contains("10 tokens"), "{err:?}");
+            }
         }
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
     }
@@ -5948,9 +5992,9 @@ mod tests {
         let path = write_config(dir.path(), before);
         let good = Some(rates(1.0, 1.0, 1.0, 1.0));
         for (label, updates) in [
-            ("empty prefix", price(&[("  ", good)])),
-            ("whitespace", price(&[("claude opus", good)])),
-            ("too long", price(&[(&"x".repeat(65), good)])),
+            ("empty prefix", price(&[("  ", good.clone())])),
+            ("whitespace", price(&[("claude opus", good.clone())])),
+            ("too long", price(&[(&"x".repeat(65), good.clone())])),
             (
                 "negative rate",
                 price(&[("claude-opus", Some(rates(1.0, -1.0, 1.0, 1.0)))]),

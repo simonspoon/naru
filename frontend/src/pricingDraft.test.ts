@@ -4,7 +4,7 @@ import {
   addedPricing,
   blankRates,
   changedPricing,
-  clearTier,
+  removeTier,
   draftFrom,
   editTier,
   effectiveRates,
@@ -243,91 +243,98 @@ describe('new rows', () => {
   })
 })
 
-describe('long-context tier', () => {
-  const tier = {
-    above_tokens: 100000,
-    input: 0.5,
-    output: 2.5,
-    cache_read: 0.05,
-    cache_write: 0.625,
-  }
+describe('context tiers', () => {
+  const tier = (above_tokens: number, x: number) => ({
+    above_tokens,
+    input: x,
+    output: x,
+    cache_read: x,
+    cache_write: x,
+  })
+  const text = (above_tokens: string, x: string) => ({
+    above_tokens,
+    input: x,
+    output: x,
+    cache_read: x,
+    cache_write: x,
+  })
   const HAIKU: ConfigPrice = {
     prefix: 'claude-haiku-5-5',
     value: null,
-    default: { ...rates(0.1, 0.5, 0.01, 0.125), long_context: tier },
+    default: { ...rates(0.1, 0.5, 0.01, 0.125), tiers: [tier(100000, 0.5)] },
+  }
+  const TWO: ConfigPrice = {
+    prefix: 'two',
+    value: { ...rates(1, 2, 3, 4), tiers: [tier(100, 5), tier(500, 6)] },
+    default: null,
   }
 
-  it('keeps a tier the user never touched when the base rates change', () => {
+  it('keeps the built-in tiers when only the base rates change', () => {
     const draft: PricingDraft = {
       [HAIKU.prefix]: { ...blankRates(), input: '0.2' },
     }
     const sent = changedPricing([HAIKU], draft)[HAIKU.prefix]
     expect(sent?.input).toBe(0.2)
-    expect(sent?.long_context).toEqual(tier)
+    expect(sent?.tiers).toEqual([tier(100000, 0.5)])
   })
 
-  it('loads a configured tier as text and reports it pristine', () => {
-    const configured: ConfigPrice = {
-      ...HAIKU,
-      value: { ...rates(1, 2, 3, 4), long_context: tier },
+  it('loads two configured tiers as text and reports them pristine', () => {
+    const draft = draftFrom([TWO])
+    expect(draft.two.tiers).toHaveLength(2)
+    expect(draft.two.tiers?.[1].above_tokens).toBe('500')
+    expect(isDirty([TWO], draft)).toBe(false)
+    expect(changedPricing([TWO], draft)).toEqual({})
+  })
+
+  it('adds a second tier after the built-in one and sends both ascending', () => {
+    let row = addTier(blankRates(), HAIKU.default)
+    expect(row.tiers).toHaveLength(2)
+    row = editTier(row, 1, 'above_tokens', '50000', HAIKU.default)
+    for (const f of ['input', 'output', 'cache_read', 'cache_write'] as const) {
+      row = editTier(row, 1, f, '0.3', HAIKU.default)
     }
-    const draft = draftFrom([configured])
-    expect(draft[HAIKU.prefix].tier?.above_tokens).toBe('100000')
-    expect(isDirty([configured], draft)).toBe(false)
-    expect(changedPricing([configured], draft)).toEqual({})
-  })
-
-  it('edits one tier box, adopting the built-in tier first', () => {
-    const row = editTier(blankRates(), 'output', '9', HAIKU.default)
-    expect(row.tier?.above_tokens).toBe('100000')
-    expect(row.tier?.output).toBe('9')
     const sent = changedPricing([HAIKU], { [HAIKU.prefix]: row })
-    expect(sent[HAIKU.prefix]?.long_context?.output).toBe(9)
-    expect(sent[HAIKU.prefix]?.long_context?.input).toBe(0.5)
+    expect(sent[HAIKU.prefix]?.tiers).toEqual([
+      tier(50000, 0.3),
+      tier(100000, 0.5),
+    ])
   })
 
-  it('clears a tier explicitly and sends the row flat', () => {
-    const row = clearTier(blankRates())
+  it('removes one tier and keeps the other', () => {
+    const row = removeTier(draftFrom([TWO]).two, 0)
+    const sent = changedPricing([TWO], { two: row })
+    expect(sent.two?.tiers).toEqual([tier(500, 6)])
+  })
+
+  it('removing the last tier sends the row flat', () => {
+    const row = removeTier(blankRates(), 0, HAIKU.default)
     const sent = changedPricing([HAIKU], { [HAIKU.prefix]: row })
     expect(sent[HAIKU.prefix]).toEqual(rates(0.1, 0.5, 0.01, 0.125))
   })
 
-  it('adds a blank tier to a flat row and demands every box', () => {
-    const row = addTier({ ...text(rates(1, 2, 3, 4)) })
-    expect(rowErrors('newco', row)).toContain('tier above_tokens: required')
-    const filled = {
-      ...row,
-      tier: {
-        above_tokens: '10',
-        input: '1',
-        output: '1',
-        cache_read: '1',
-        cache_write: '1',
-      },
+  it('names a duplicate threshold and blocks the save', () => {
+    const row = {
+      ...text0(),
+      tiers: [text('100', '1'), text('100', '2')],
     }
-    expect(rowErrors('newco', filled)).toEqual([])
-    expect(resolveRates(filled).long_context?.above_tokens).toBe(10)
+    const errors = rowErrors('newco', row)
+    expect(errors.some((e) => e.includes('already used'))).toBe(true)
+    expect(isSavable([ADDED], { newco: row })).toBe(false)
   })
 
-  it('rejects a fractional or zero threshold and a bad tier rate', () => {
-    const base = text(rates(1, 1, 1, 1))
-    const t = (above_tokens: string, input = '1') => ({
-      ...base,
-      tier: {
-        above_tokens,
-        input,
-        output: '1',
-        cache_read: '1',
-        cache_write: '1',
-      },
-    })
-    expect(tierErrors(t('0').tier)).not.toEqual([])
-    expect(tierErrors(t('1.5').tier)).not.toEqual([])
-    expect(tierErrors(t('5', '-1').tier)).not.toEqual([])
-    expect(isSavable([ADDED], { newco: t('0') })).toBe(false)
+  it('rejects a missing, fractional or zero threshold and a bad tier rate', () => {
+    expect(tierErrors([text('', '1')])).not.toEqual([])
+    expect(tierErrors([text('0', '1')])).not.toEqual([])
+    expect(tierErrors([text('1.5', '1')])).not.toEqual([])
+    expect(tierErrors([text('5', '-1')])).not.toEqual([])
+    expect(tierErrors([text('5', '1')])).toEqual([])
   })
 
   it('treats a lone tier add on an unconfigured row as non-blank', () => {
     expect(isBlank(addTier(blankRates()))).toBe(false)
   })
+
+  function text0() {
+    return { input: '1', output: '2', cache_read: '3', cache_write: '4' }
+  }
 })

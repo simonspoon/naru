@@ -94,7 +94,6 @@ import {
   addedPricing,
   blankRates,
   changedPricing,
-  clearTier,
   draftFrom as pricingDraftFrom,
   editTier,
   isBlank,
@@ -103,8 +102,9 @@ import {
   isSavable,
   newRow,
   newRowErrors,
+  removeTier,
   rowErrors,
-  shownTier,
+  shownTiers,
   type NewRow,
   type PricingDraft,
   type RateDraft,
@@ -2927,7 +2927,7 @@ function PriceRow({
           <span className="muted settings-price-note">built-in</span>
         )}
       </div>
-      <TierRow
+      <TierRows
         label={`${price.prefix} tier`}
         row={row}
         defaults={price.default}
@@ -2943,10 +2943,11 @@ function PriceRow({
 }
 
 /**
- * A row's optional context-size tier: the prompt-token threshold and the four
- * rates a request over it pays. All logic lives in `pricingDraft.ts`.
+ * A row's optional context-size tiers: for each, the prompt-token threshold
+ * and the four rates a request over it pays. All logic lives in
+ * `pricingDraft.ts`.
  */
-function TierRow({
+function TierRows({
   label,
   row,
   defaults,
@@ -2957,49 +2958,50 @@ function TierRow({
   defaults?: ModelRates | null
   onRow: (next: RateDraft) => void
 }) {
-  const tier = shownTier(row, defaults)
-  if (!tier) {
-    return (
+  return (
+    <>
+      {shownTiers(row, defaults).map((tier, index) => (
+        <div className="settings-price-row" key={index}>
+          {TIER_FIELDS.map((field: TierField) => (
+            <input
+              key={field}
+              type="number"
+              min={field === 'above_tokens' ? '1' : '0'}
+              step={field === 'above_tokens' ? '1' : 'any'}
+              className="settings-price-input"
+              aria-label={`${label} ${index + 1} ${field}`}
+              title={
+                field === 'above_tokens'
+                  ? 'A prompt (input + cache read + cache write tokens) strictly over this many tokens pays this tier'
+                  : undefined
+              }
+              placeholder={field === 'above_tokens' ? 'over tokens' : undefined}
+              value={tier[field]}
+              onChange={(e) =>
+                onRow(editTier(row, index, field, e.target.value, defaults))
+              }
+            />
+          ))}
+          <button
+            type="button"
+            className="settings-reset"
+            title="Remove this context tier"
+            onClick={() => onRow(removeTier(row, index, defaults))}
+          >
+            remove tier
+          </button>
+        </div>
+      ))}
       <div className="settings-price-row">
         <button
           type="button"
           className="settings-reset"
           onClick={() => onRow(addTier(row, defaults))}
         >
-          add context tier
+          add tier
         </button>
       </div>
-    )
-  }
-  return (
-    <div className="settings-price-row">
-      {TIER_FIELDS.map((field: TierField) => (
-        <input
-          key={field}
-          type="number"
-          min={field === 'above_tokens' ? '1' : '0'}
-          step={field === 'above_tokens' ? '1' : 'any'}
-          className="settings-price-input"
-          aria-label={`${label} ${field}`}
-          title={
-            field === 'above_tokens'
-              ? 'A prompt (input + cache read + cache write tokens) strictly over this many tokens pays the tier rates'
-              : undefined
-          }
-          placeholder={field === 'above_tokens' ? 'over tokens' : undefined}
-          value={tier[field]}
-          onChange={(e) => onRow(editTier(row, field, e.target.value, defaults))}
-        />
-      ))}
-      <button
-        type="button"
-        className="settings-reset"
-        title="Price this model at one flat rate"
-        onClick={() => onRow(clearTier(row))}
-      >
-        clear tier
-      </button>
-    </div>
+    </>
   )
 }
 
@@ -3015,44 +3017,47 @@ function NewPriceRow({
 }) {
   return (
     <>
-    <div className="settings-price-row">
-      <input
-        type="text"
-        className="settings-price-input"
-        aria-label="new model prefix"
-        placeholder="claude-opus-5-mini"
-        spellCheck={false}
-        value={row.prefix}
-        onChange={(e) => onEdit({ ...row, prefix: e.target.value })}
-      />
-      {RATE_FIELDS.map((field) => (
+      <div className="settings-price-row">
         <input
-          key={field}
-          type="number"
-          min="0"
-          step="any"
+          type="text"
           className="settings-price-input"
-          aria-label={`new prefix ${field}`}
-          value={row.rates[field]}
-          onChange={(e) =>
-            onEdit({ ...row, rates: { ...row.rates, [field]: e.target.value } })
-          }
+          aria-label="new model prefix"
+          placeholder="claude-opus-5-mini"
+          spellCheck={false}
+          value={row.prefix}
+          onChange={(e) => onEdit({ ...row, prefix: e.target.value })}
         />
-      ))}
-      <button
-        type="button"
-        className="settings-reset"
-        title="Drop this row"
-        onClick={onRemove}
-      >
-        remove
-      </button>
-    </div>
-    <TierRow
-      label="new prefix tier"
-      row={row.rates}
-      onRow={(rates) => onEdit({ ...row, rates })}
-    />
+        {RATE_FIELDS.map((field) => (
+          <input
+            key={field}
+            type="number"
+            min="0"
+            step="any"
+            className="settings-price-input"
+            aria-label={`new prefix ${field}`}
+            value={row.rates[field]}
+            onChange={(e) =>
+              onEdit({
+                ...row,
+                rates: { ...row.rates, [field]: e.target.value },
+              })
+            }
+          />
+        ))}
+        <button
+          type="button"
+          className="settings-reset"
+          title="Drop this row"
+          onClick={onRemove}
+        >
+          remove
+        </button>
+      </div>
+      <TierRows
+        label="new prefix tier"
+        row={row.rates}
+        onRow={(rates) => onEdit({ ...row, rates })}
+      />
     </>
   )
 }

@@ -5,4 +5,4 @@
  * creation tokens) is strictly over `above_tokens`; every token kind of that
  * request, output included, is priced at these. USD per **1M tokens**.
  */
-export type LongContextRates = { above_tokens: number, input: number, output: number, cache_read: number, cache_write: number, };
+export type ContextTier = { above_tokens: number, input: number, output: number, cache_read: number, cache_write: number, };
