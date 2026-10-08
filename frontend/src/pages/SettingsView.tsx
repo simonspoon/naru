@@ -89,7 +89,6 @@ import {
 } from '../systemMeter'
 import {
   RATE_FIELDS,
-  TIER_FIELDS,
   addTier,
   addedPricing,
   blankRates,
@@ -109,7 +108,6 @@ import {
   type PricingDraft,
   type RateDraft,
   type RateField,
-  type TierField,
 } from '../pricingDraft'
 import type { ModelRates } from '../types/ModelRates'
 import type { ConfigPrice } from '../types/ConfigPrice'
@@ -2962,20 +2960,35 @@ function TierRows({
     <>
       {shownTiers(row, defaults).map((tier, index) => (
         <div className="settings-price-row" key={index}>
-          {TIER_FIELDS.map((field: TierField) => (
+          <label
+            className="settings-price-threshold muted"
+            title="A prompt (input + cache read + cache write tokens) strictly over this many tokens pays this tier"
+          >
+            above
+            <input
+              type="number"
+              min="1"
+              step="1"
+              className="settings-price-input"
+              aria-label="context tier threshold (tokens)"
+              placeholder="100000"
+              value={tier.above_tokens}
+              onChange={(e) =>
+                onRow(
+                  editTier(row, index, 'above_tokens', e.target.value, defaults),
+                )
+              }
+            />
+            tokens
+          </label>
+          {RATE_FIELDS.map((field: RateField) => (
             <input
               key={field}
               type="number"
-              min={field === 'above_tokens' ? '1' : '0'}
-              step={field === 'above_tokens' ? '1' : 'any'}
+              min="0"
+              step="any"
               className="settings-price-input"
               aria-label={`${label} ${index + 1} ${field}`}
-              title={
-                field === 'above_tokens'
-                  ? 'A prompt (input + cache read + cache write tokens) strictly over this many tokens pays this tier'
-                  : undefined
-              }
-              placeholder={field === 'above_tokens' ? 'over tokens' : undefined}
               value={tier[field]}
               onChange={(e) =>
                 onRow(editTier(row, index, field, e.target.value, defaults))

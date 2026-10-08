@@ -7707,6 +7707,16 @@ button:focus-visible,
   font-size: 0.8rem;
 }
 
+/* A context tier's threshold sits in the prefix column; the words around the
+   box keep "200000" from reading as a model prefix. */
+.settings-price-threshold {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+
 .settings-price-note {
   font-size: 0.7rem;
 }
