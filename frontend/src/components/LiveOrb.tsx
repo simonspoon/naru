@@ -261,7 +261,7 @@ export function InlineOrb({ size, ...p }: OrbProps & { size: number }) {
     >
       <div className="live-orb-body">
         <div className="live-orb-mark">
-          <NaruMark state={p.state} level={p.level} speechRms={p.speechRms} decorative />
+          <NaruMark state={p.state} level={p.level} speechRms={p.speechRms} decorative offer={!!p.offer} />
         </div>
       </div>
     </div>
@@ -285,8 +285,9 @@ export function OrbPanel(p: OrbProps) {
       <div className="orb-panel-stage">
         <div className="orb-panel-mark">
           <div className="orb-panel-glow" />
-          <NaruMark state={p.state} level={p.level} speechRms={p.speechRms} decorative />
+          <NaruMark state={p.state} level={p.level} speechRms={p.speechRms} decorative offer={!!p.offer} />
         </div>
+        {p.offer && <div className="orb-panel-caption">Naru can help — click to talk</div>}
       </div>
     </div>
   )
@@ -498,7 +499,7 @@ export function LiveOrb(props: OrbProps) {
         }}
       >
         <div className="live-orb-mark">
-          <NaruMark state={state} level={level} speechRms={speechRms} decorative />
+          <NaruMark state={state} level={level} speechRms={speechRms} decorative offer={!!props.offer} />
         </div>
       </div>
       <OrbBadge show={mute === 'speaker' || mute === 'both'} />

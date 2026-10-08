@@ -50,6 +50,7 @@ export function NaruMark({
   speechRms,
   micReady = false,
   decorative = false,
+  offer = false,
 }: {
   state: LiveIndicator | null
   level: number
@@ -58,17 +59,21 @@ export function NaruMark({
   /** Hidden from assistive tech: a second mark (the floating orb) beside the
    *  head's, whose `role=status` already announces every state. */
   decorative?: boolean
+  /** An ambient "can help" offer is glowing: the idle mark turns gold. */
+  offer?: boolean
 }) {
   const svgRef = useRef<SVGSVGElement>(null)
   const stateRef = useRef(state)
   const levelRef = useRef(level)
   const rmsRef = useRef(speechRms)
+  const offerRef = useRef(offer)
 
   useEffect(() => {
+    offerRef.current = offer
     stateRef.current = state
     levelRef.current = level
     rmsRef.current = speechRms
-  }, [state, level, speechRms])
+  }, [state, level, speechRms, offer])
 
   useEffect(() => {
     const svg = svgRef.current
@@ -105,7 +110,7 @@ export function NaruMark({
       const dt = Math.min(0.05, (now - last) / 1000)
       last = now
       const t = (now - start) / 1000
-      const mode = markMode(stateRef.current)
+      const mode = markMode(stateRef.current, offerRef.current)
 
       // The real level of this mode's side of the conversation.
       let raw = 0
