@@ -947,7 +947,7 @@ const MIGRATIONS: &[&str] = &[
     // Task 1168: why an inbox item was set aside. Written only by an archive
     // (`set_inbox_item_archived`, optional, at most `INBOX_ARCHIVE_REASON_MAX`
     // chars) and cleared by the un-archive, so it is null exactly when
-    // `archived_at` is — the triage agent's verdict ("duplicate of task 12",
+    // `archived_at` is — the triage's verdict ("duplicate of task 12",
     // "shipped in abc123") kept beside the item it decided.
     "ALTER TABLE inbox ADD COLUMN archive_reason TEXT;",
     // Task 1158: the session retrospective. `retro_runs` is one row per pass

@@ -13,8 +13,9 @@ guard's `task-summary`). A task's completion summary does **not** belong
 here: the task's `result` is the record, and `mesa task show` and the board
 read it. `task-summary` stays as a kind — the cost guard files one, and every
 pre-1168 row is one — but it means "an alert or report addressed to a person",
-never a close-out summary, and the triage agent archives such a summary with
-a reason (copying it into the task's `result` first if that is still null).
+never a close-out summary, and a person (or the manual `inbox-triage` agent)
+archives such a summary with a reason (copying it into the task's `result`
+first if that is still null).
 The audit that fixed this found 263 items, every one a `task-summary`, so
 `serve --watch-inbox` had never once had anything to do.
 
@@ -151,7 +152,7 @@ The audit that fixed this found 263 items, every one a `task-summary`, so
   nav's unread badge stops counting it (a badge archiving could not clear would
   be the same bug task 831 fixed by counting unread rather than everything).
   It is the third triage answer beside "assign" and "delete" — a person's
-  through the page, or the triage agent's for a duplicate, an already-shipped
+  through the page, or the triage's for a duplicate, an already-shipped
   request or a close-out summary. An archive may say **why** (mesa task 1168,
   migration index 60): `archive_reason` is one nullable text beside the stamp
   — `mesa inbox archive <id> --reason "<why>"`, `POST .../archive

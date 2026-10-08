@@ -530,19 +530,18 @@ fn workflow_watcher_tick(state: &AppState) {
     }
 }
 
-/// How much of an inbox body goes into an auto-dispatched session's name,
+/// How much of an inbox body goes into a triage call's session name,
 /// in `char`s (not bytes — bodies are free text and may be non-ASCII).
 const INBOX_SESSION_NAME_CHARS: usize = 60;
 
-/// Names an auto-dispatched triage session after the item it triages, so it
-/// is identifiable in the prompt box, `/resume` picker, terminal title and
-/// Agents sidebar — the same reason the todo-watcher names its sessions
-/// `<project>: <title>`. Uses the body's first non-empty line, truncated;
-/// inbox bodies are free-form markdown and may be long or multi-line.
+/// Names a triage job's `claude -p` calls after the item it triages, so they
+/// are identifiable in the `/resume` picker and transcript list. Uses the
+/// body's first non-empty line, truncated; inbox bodies are free-form
+/// markdown and may be long or multi-line.
 ///
-/// The body is **untrusted data**: it reaches `claude` as a single `--name`
-/// process argument (`Command::arg`, no shell), never interpolated into a
-/// shell string, and nothing here interprets it.
+/// The body is **untrusted data**: the name is the template's `{name}`
+/// placeholder, shell-quoted for its position by `config::substitute_script`
+/// before `bash -c` reads it, and nothing here interprets it.
 fn inbox_session_name(item: &InboxItem) -> String {
     let first = item
         .body

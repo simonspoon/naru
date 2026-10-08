@@ -1693,6 +1693,29 @@ grep -Fq "$WORKSPACE|-p|--model|haiku|--name|inbox $ITEM_2: loki: find exits 0 o
   fail "the built-in inbox-watcher argv changed: $(cat "$CLAUDE_LOG")"
 ok "the unconfigured inbox-watcher runs its built-in \`claude -p --model haiku --name inbox <id>: <body> --tools \"\" --strict-mcp-config --output-format json --json-schema <schema> -- <prompt>\` call (naru task 1691)"
 
+# A config saved before naru task 1691 still holds a `--bg` inbox-watcher
+# (the real-install case): it is ignored on read, so the built-in `-p` call
+# runs and no `--bg` ever starts; the file is left as written.
+write_config <<'EOF'
+{"commands": {"inbox-watcher": "claude --bg --agent \"inbox-triage\" --name {name} \"Triage inbox item {id}\""}}
+EOF
+LEGACY_CONFIG=$(cat "$CONFIG")
+run 0 "$MESA" inbox add --task "$TASK_B" --kind change-request "legacy: a saved --bg override"
+ITEM_3=$(jqs .id)
+# The -p call's prompt spans many lines, so wait for the call itself, not a count.
+for _ in $(seq 1 100); do
+  grep -Fq "$WORKSPACE|-p|--model|haiku|--name|inbox $ITEM_3: legacy: a saved --bg override|--tools||" "$CLAUDE_LOG" && break
+  sleep 0.1
+done
+grep -Fq "$WORKSPACE|-p|--model|haiku|--name|inbox $ITEM_3: legacy: a saved --bg override|--tools||" "$CLAUDE_LOG" ||
+  fail "a saved --bg inbox-watcher must fall back to the built-in -p call: $(cat "$CLAUDE_LOG")"
+! grep -q "inbox-triage" "$CLAUDE_LOG" || fail "the legacy --bg template must not run: $(cat "$CLAUDE_LOG")"
+[ "$(cat "$CONFIG")" = "$LEGACY_CONFIG" ] || fail "the legacy config must not be rewritten: $(cat "$CONFIG")"
+write_config <<'EOF'
+{"commands": {}}
+EOF
+ok "a saved legacy --bg inbox-watcher override is ignored: the built-in \`-p --model haiku\` call runs, no --bg, the file untouched"
+
 # ---- a saved template still holding the retired {bin}/{agent} (mesa task 1141) ----
 
 # A config written before 1141 may carry `{bin}`/`{agent}`. They are migrated
