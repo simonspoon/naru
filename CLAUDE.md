@@ -42,8 +42,9 @@ MESA_DB=/tmp/t.db target/release/mesa task list
 ```
 
 `MESA_DB` (or `NARU_DB`, read first) overrides the default db
-(`~/Library/Application Support/naru/naru.db`, or `…/mesa/mesa.db` while only
-that one exists — nothing is moved) — used by every check below for
+(`~/Library/Application Support/naru/naru.db`, or `…/mesa/mesa.db` when only
+that one exists or the `naru` one holds no projects/tasks; both holding data is
+a `conflict` telling you to set `NARU_DB` — nothing is moved) — used by every check below for
 isolation.
 
 ### End-to-end gates (`scripts/*-check.sh`)

@@ -82,12 +82,26 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// `naru.db` while it ran. The env branch is read fresh on every call, as
 /// before.
 pub fn default_db_path() -> PathBuf {
+    // Both dbs holding data is an error `Store::open_default` reports; the
+    // callers that only derive a sibling path get the new db's.
+    try_default_db_path().unwrap_or_else(|_| {
+        directories::ProjectDirs::from("", "", "naru")
+            .expect("could not determine application data directory")
+            .data_dir()
+            .join("naru.db")
+    })
+}
+
+/// [`default_db_path`], but a fresh install holding data in **both** the new
+/// and the old db is a `conflict` rather than a silent pick (naru task 1705).
+fn try_default_db_path() -> Result<PathBuf> {
     if let Some(p) = crate::core::env::var("DB")
         && !p.is_empty()
     {
-        return PathBuf::from(p);
+        return Ok(PathBuf::from(p));
     }
-    static CHOSEN: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    static CHOSEN: std::sync::OnceLock<std::result::Result<PathBuf, String>> =
+        std::sync::OnceLock::new();
     CHOSEN
         .get_or_init(|| {
             let data_dir = |app: &str| {
@@ -100,19 +114,53 @@ pub fn default_db_path() -> PathBuf {
                 data_dir("naru").join("naru.db"),
                 data_dir("mesa").join("mesa.db"),
             )
+            .map_err(|e| e.to_string())
         })
         .clone()
+        .map_err(Error::Conflict)
 }
 
-/// The rename's db rule (mesa task 1301): the new db when it exists, else the
-/// old one when *it* exists, else the new one (a fresh install). Nothing is
-/// ever moved or copied — a server still running the old binary may hold the
-/// old db's WAL open — so an existing install simply keeps its db where it is.
-fn choose_db_path(new: PathBuf, old: PathBuf) -> PathBuf {
-    if !new.exists() && old.exists() {
-        old
-    } else {
-        new
+/// Whether the db at `path` holds user data: it opens read-only (never
+/// created, migrated or written) and has a row in `projects` or `tasks`.
+/// A missing/0-byte file, one without those tables, or one that fails to
+/// open is empty.
+fn db_holds_data(path: &Path) -> bool {
+    let Ok(conn) = Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    ) else {
+        return false;
+    };
+    ["projects", "tasks"].iter().any(|t| {
+        conn.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {t})"), [], |r| {
+            r.get::<_, bool>(0)
+        })
+        .unwrap_or(false)
+    })
+}
+
+/// The rename's db rule (mesa task 1301, naru task 1705): only one exists →
+/// that one; neither → the new one (a fresh install); both → the one that
+/// holds data ([`db_holds_data`]), the old one when the new is empty, and a
+/// `conflict` naming both when both hold data. Nothing is ever moved, copied
+/// or deleted — a server still running the old binary may hold the old db's
+/// WAL open — so an existing install simply keeps its db where it is.
+fn choose_db_path(new: PathBuf, old: PathBuf) -> Result<PathBuf> {
+    if !old.exists() || !new.exists() {
+        return Ok(if !new.exists() && old.exists() {
+            old
+        } else {
+            new
+        });
+    }
+    match (db_holds_data(&new), db_holds_data(&old)) {
+        (false, _) => Ok(old),
+        (true, false) => Ok(new),
+        (true, true) => Err(Error::Conflict(format!(
+            "both {} and {} hold data; set NARU_DB to the one to use",
+            new.display(),
+            old.display()
+        ))),
     }
 }
 
@@ -3328,7 +3376,7 @@ impl Store {
     }
 
     pub fn open_default() -> Result<Store> {
-        Store::open(&default_db_path())
+        Store::open(&try_default_db_path()?)
     }
 
     /// The file this store is open on — what a detached `naru __job` child is
@@ -10419,7 +10467,20 @@ mod tests {
         unsafe { std::env::remove_var("MESA_DB") };
     }
 
-    /// The rename's db rule: new if it exists, else old if it exists, else new.
+    fn sqlite_file(path: &Path, rows: bool) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let _ = std::fs::remove_file(path);
+        let c = Connection::open(path).unwrap();
+        c.execute_batch("CREATE TABLE projects (id INTEGER PRIMARY KEY); CREATE TABLE tasks (id INTEGER PRIMARY KEY);")
+            .unwrap();
+        if rows {
+            c.execute_batch("INSERT INTO projects (id) VALUES (1);")
+                .unwrap();
+        }
+    }
+
+    /// The rename's db rule: one file → it, neither → new, both → the one
+    /// holding data, and a conflict when both do.
     #[test]
     fn db_path_prefers_the_new_db_and_falls_back_to_the_old_one() {
         let dir = tempfile::tempdir().unwrap();
@@ -10427,21 +10488,48 @@ mod tests {
         let old = dir.path().join("mesa/mesa.db");
 
         // Neither exists: a fresh install gets the new path.
-        assert_eq!(choose_db_path(new.clone(), old.clone()), new);
+        assert_eq!(choose_db_path(new.clone(), old.clone()).unwrap(), new);
 
         // Only the old one: an existing install keeps its db.
         std::fs::create_dir_all(old.parent().unwrap()).unwrap();
         std::fs::write(&old, b"").unwrap();
-        assert_eq!(choose_db_path(new.clone(), old.clone()), old);
+        assert_eq!(choose_db_path(new.clone(), old.clone()).unwrap(), old);
 
-        // Both: the new one wins.
+        // Both, zero-byte files (neither holds data): the old one.
         std::fs::create_dir_all(new.parent().unwrap()).unwrap();
         std::fs::write(&new, b"").unwrap();
-        assert_eq!(choose_db_path(new.clone(), old.clone()), new);
+        assert_eq!(choose_db_path(new.clone(), old.clone()).unwrap(), old);
 
         // Only the new one.
         std::fs::remove_file(&old).unwrap();
-        assert_eq!(choose_db_path(new.clone(), old), new);
+        assert_eq!(choose_db_path(new.clone(), old).unwrap(), new);
+    }
+
+    #[test]
+    fn db_path_follows_the_db_that_holds_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let new = dir.path().join("naru/naru.db");
+        let old = dir.path().join("mesa/mesa.db");
+
+        // New empty (tables, no rows), old with data: old.
+        sqlite_file(&new, false);
+        sqlite_file(&old, true);
+        assert_eq!(choose_db_path(new.clone(), old.clone()).unwrap(), old);
+
+        // New with data, old empty: new.
+        sqlite_file(&new, true);
+        sqlite_file(&old, false);
+        assert_eq!(choose_db_path(new.clone(), old.clone()).unwrap(), new);
+
+        // Both with data: a loud conflict naming both and NARU_DB.
+        sqlite_file(&old, true);
+        let msg = match choose_db_path(new.clone(), old.clone()) {
+            Err(Error::Conflict(m)) => m,
+            other => panic!("expected conflict, got {other:?}"),
+        };
+        assert!(msg.contains(&new.display().to_string()));
+        assert!(msg.contains(&old.display().to_string()));
+        assert!(msg.contains("NARU_DB"));
     }
 
     fn add_task(store: &mut Store, project_id: i64, description: &str) -> Task {
