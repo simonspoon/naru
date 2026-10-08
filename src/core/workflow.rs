@@ -2554,6 +2554,40 @@ mod tests {
     }
 
     #[test]
+    fn a_disabled_time_workflow_reports_no_next_run() {
+        let (st, _d) = store();
+        let wf = st.with(|s| {
+            let wf = s.create_workflow(None, "Tick", None).unwrap().id;
+            node(
+                s,
+                wf,
+                WorkflowNodeKind::Trigger,
+                "T",
+                json!({"mode": "time", "every_minutes": 5}),
+            );
+            wf
+        });
+        run_workflow(&st, wf, WorkflowTrigger::Time, "").unwrap();
+        assert!(
+            st.with(|s| s.get_workflow(wf))
+                .unwrap()
+                .next_run_at
+                .is_some()
+        );
+        st.with(|s| {
+            s.update_workflow(
+                wf,
+                WorkflowPatch {
+                    enabled: Some(false),
+                    ..Default::default()
+                },
+            )
+        })
+        .unwrap();
+        assert_eq!(st.with(|s| s.get_workflow(wf)).unwrap().next_run_at, None);
+    }
+
+    #[test]
     fn duplicate_copies_nodes_and_edges_remapped_and_starts_disabled() {
         let (st, _d) = store();
         let (wf, a, b) = st.with(|s| {

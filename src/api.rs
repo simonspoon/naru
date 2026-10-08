@@ -4426,7 +4426,8 @@ async fn update_workflow(
 }
 
 /// Copies a workflow (disabled) and answers the new {workflow, nodes, edges}.
-/// The body is optional: `{"name"}` or nothing.
+/// The body may be empty (or `{"name"}`), but `Content-Type: application/json`
+/// is still required: the CSRF gate answers 415 without it.
 async fn duplicate_workflow(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -4435,7 +4436,7 @@ async fn duplicate_workflow(
     body: axum::body::Bytes,
 ) -> ApiResult<Response> {
     require_agent_access(&state, &addr, &headers)?;
-    // The body is optional: empty = the default name.
+    // An empty body = the default name (the Content-Type gate has already run).
     let name = if body.iter().all(u8::is_ascii_whitespace) {
         None
     } else {

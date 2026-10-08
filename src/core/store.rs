@@ -2603,7 +2603,7 @@ const WORKFLOW_COLUMNS: &str = "w.id, w.project_id, w.name, w.description, \
         FROM workflow_nodes n JOIN workflow_runs r \
           ON r.workflow_id = w.id AND r.trigger = 'time' \
         WHERE n.workflow_id = w.id AND n.kind = 'trigger' \
-          AND json_extract(n.config, '$.mode') = 'time'), \
+          AND json_extract(n.config, '$.mode') = 'time' AND w.enabled = 1), \
      (SELECT json_extract(n.config, '$.events') FROM workflow_nodes n \
         WHERE n.workflow_id = w.id AND n.kind = 'trigger' ORDER BY n.id LIMIT 1), \
      w.enabled";

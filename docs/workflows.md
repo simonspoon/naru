@@ -303,7 +303,7 @@ applies as everywhere.
 | --- | --- |
 | `GET /api/workflows?project=<id>` / `POST /api/workflows` `{name, project_id?, description?}` | list / create (201) |
 | `GET /api/workflows/{id}` / `PATCH` / `DELETE` | the view / update (`name`, `enabled`, `description`, `project_id` three-state: omit, `null` clears) / echo the destroyed view |
-| `POST /api/workflows/{id}/duplicate` `{name?}` (201) | copy a workflow; the body may be empty or `{}`; answers the copy's view; a taken `name` is 409 |
+| `POST /api/workflows/{id}/duplicate` `{name?}` (201) | copy a workflow; the body may be empty or `{}`, but `Content-Type: application/json` is still required (the CSRF gate answers 415 without it); answers the copy's view; a taken `name` is 409 |
 | `POST /api/workflows/{id}/nodes` `{kind, title, config?, x?, y?}` (201) | add a node |
 | `PATCH /api/workflow-nodes/{id}` `{title?, config?, x?, y?}` / `DELETE` | update / echo `{node, edges}` |
 | `POST /api/workflows/{id}/edges` `{from_node, to_node, branch?}` (201) / `DELETE /api/workflow-edges/{id}` | add / delete |
