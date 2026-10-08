@@ -353,6 +353,20 @@ grep -q "1691" <<<"$STDOUT" || fail "the message must name naru task 1691: $STDO
   fail "a refused --bg inbox-watcher must not touch the file: $(cat "$CONFIG")"
 ok "PUT refuses a --bg inbox-watcher template as 422 naming naru task 1691, writing nothing"
 
+# naru task 1692: the retrospective is a structured `claude -p` call too.
+api PUT /api/config '{"commands": {"retro": "claude --bg --agent naru-retro --name {name} -- {prompt}"}}'
+[ "$CODE" = "422" ] || fail "a --bg retro: expected 422, got $CODE: $STDOUT"
+[ "$(jq -r .error.code <<<"$STDOUT")" = "validation" ] || fail "a --bg retro: expected validation, got $STDOUT"
+grep -q "1692" <<<"$STDOUT" || fail "the message must name naru task 1692: $STDOUT"
+[ "$(cat "$CONFIG")" = "$BEFORE" ] ||
+  fail "a refused --bg retro must not touch the file: $(cat "$CONFIG")"
+api GET /api/config
+[ "$(jq -r '.[] | select(.action == "retro") | .placeholders | join(" ")' <<<"$STDOUT")" = "{id} {name} {prompt} {schema} {model}" ] ||
+  fail "GET /api/config: retro's placeholder vocabulary wrong: $STDOUT"
+[ "$(jq -r '.[] | select(.action == "retro") | .default' <<<"$STDOUT")" = 'claude -p --model {model} --name {name} --tools "" --strict-mcp-config --output-format json --json-schema {schema} -- {prompt}' ] ||
+  fail "GET /api/config: retro's built-in default wrong: $STDOUT"
+ok "PUT refuses a --bg retro template as 422 naming naru task 1692, writing nothing; retro's default is the structured -p call and offers {schema} and {model}"
+
 # ---- multi-line hooks: every value is a bash script, values quoted in (mesa task 1143) ----
 
 # One mode: a value is `bash -c <script>` whether it is one line or many, and

@@ -42,10 +42,10 @@ pub mod workflow;
 pub use store::{
     ArtifactPatch, Error, INBOX_ARCHIVE_REASON_MAX, ImportDoc, LIVE_AUDIO_MAX, LIVE_BOARD_BODY_MAX,
     LIVE_BOARD_INK_STATE_MAX, LIVE_BOARD_KEEP, LIVE_INK_MAX, LIVE_RESULT_MAX, LIVE_TEXT_MAX,
-    LIVE_TURNS_MAX, LibraryBuiltinAction, LibraryPatch, NextResult, ProjectPatch, ReceiptPatch,
-    Result, SCRIPT_RUN_ABANDONED, SCRIPT_RUN_KEEP, STALE_CLAIM_MINUTES, ScriptPatch, Store,
-    TaskPatch, WorkflowNodeNew, WorkflowNodePatch, WorkflowPatch, default_db_path,
-    validate_live_client,
+    LIVE_TURNS_MAX, LibraryBuiltinAction, LibraryPatch, NextResult, ProjectPatch,
+    RETRO_EVIDENCE_LINE_MAX, RETRO_FINDINGS_LIST_MAX, RETRO_SUMMARY_MAX, ReceiptPatch, Result,
+    SCRIPT_RUN_ABANDONED, SCRIPT_RUN_KEEP, STALE_CLAIM_MINUTES, ScriptPatch, Store, TaskPatch,
+    WorkflowNodeNew, WorkflowNodePatch, WorkflowPatch, default_db_path, validate_live_client,
 };
 pub use types::{
     ARTIFACT_CONTENT_TYPES, AgentSession, AgentSpawned, ArchiveOutcome, Artifact, ArtifactSummary,

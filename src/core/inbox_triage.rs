@@ -282,7 +282,7 @@ fn cut_bytes(s: &str, max: usize) -> String {
 }
 
 /// `s` cut to at most `max` chars.
-fn cut_chars(s: &str, max: usize) -> String {
+pub(crate) fn cut_chars(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
     }

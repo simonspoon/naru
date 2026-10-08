@@ -51,8 +51,8 @@ use crate::core::{
     ServeHostsSetting, ServeNumberSetting, Status, Store, SystemInfo, Task, TaskPatch, TaskSummary,
     WorkflowNodeKind, WorkflowNodeNew, WorkflowNodePatch, WorkflowPatch, WorkflowTrigger, agents,
     attachments, audio, board, config, files, git, guard, hooks, inbox_triage, library, listen,
-    live, memory_job, project_memory, receipt, retro, runner, script_runs, scripts, speech,
-    supervisor, system, validate_live_client, version, workflow,
+    live, memory_job, project_memory, receipt, runner, script_runs, scripts, speech, supervisor,
+    system, validate_live_client, version, workflow,
 };
 
 /// The Vite build output, embedded into the binary at compile time.
@@ -376,7 +376,7 @@ fn watch_retro_tick() -> Duration {
 
 /// One retro-watcher pass (mesa task 1158, `docs/retro.md`): if no
 /// retrospective has run in the last `watchers.retro-interval-hours`, claim a
-/// `watcher` run row and spawn the `naru-retro` agent on it.
+/// `watcher` run row and start the detached `naru __job retro` on it.
 ///
 /// The run row is the claim, written **before** the spawn — the
 /// inbox-watcher's dedup set, but in the db rather than memory, because the
@@ -389,8 +389,8 @@ fn watch_retro_tick() -> Duration {
 ///
 /// cwd is `~/.mesa/workspace`: a retrospective spans every project, so there
 /// is no `local_path` to run in — the inbox-watcher's reasoning. Two-phase
-/// like [`inbox_watcher_tick`]: the store lock is dropped before the blocking
-/// `claude --bg` shell-out.
+/// like [`inbox_watcher_tick`]: the store lock is dropped before the job is
+/// started.
 fn retro_watcher_tick(state: &AppState) {
     let interval = match config::retro_interval_hours() {
         Ok(n) => n,
@@ -420,28 +420,17 @@ fn retro_watcher_tick(state: &AppState) {
                 return;
             }
         };
-        // The default template spawns `--agent naru-retro`, so the definition
-        // has to be on disk before the spawn — `claude --agent` errors on an
-        // agent it has never seen. A failure is a failed spawn, rolled back
-        // below with the rest.
-        let seeded = retro::ensure_agent_definition(&store)
-            .and_then(|_| library::prompts(&store).map_err(|e| e.to_string()));
-        (run, seeded)
+        (run, store.db_path())
     };
-    let (run, seeded) = claimed;
-    // Phase two: the shell-out, off the lock.
+    let (run, db_path) = claimed;
+    // Phase two: the job start, off the lock. One detached `naru __job retro`
+    // (naru task 1692) makes the `claude -p` calls and files the findings.
     let dispatch_dir = config::workspace_dir().to_string_lossy().into_owned();
-    let session_name = retro::session_name(run.id);
-    let spawn = seeded.and_then(|prompts| {
-        agents::spawn_bg(
-            config::RETRO,
-            &dispatch_dir,
-            Some(run.id),
-            Some(&session_name),
-            None,
-            &prompts,
-        )
-    });
+    let spawn = memory_job::spawn(
+        &memory_job::Job::Retro { run_id: run.id },
+        &dispatch_dir,
+        db_path.as_deref(),
+    );
     let mut store = match state.store.lock() {
         Ok(s) => s,
         Err(e) => e.into_inner(),
@@ -16266,10 +16255,10 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
     }
 
     /// The retro-watcher (mesa task 1158) dispatches exactly once per
-    /// interval: the first tick over a fresh db spawns the `naru-retro`
-    /// agent under `~/.mesa/workspace` with the run id in its prompt, and a
-    /// second tick inside the interval spawns nothing, because the run row
-    /// it wrote is the claim.
+    /// interval: the first tick over a fresh db starts one detached `naru
+    /// __job retro` (naru task 1692) under `~/.mesa/workspace` naming the run
+    /// id, and a second tick inside the interval starts nothing, because the
+    /// run row it wrote is the claim.
     #[test]
     fn retro_watcher_tick_dispatches_once_per_interval() {
         // SAFETY: see `inbox_watcher_tick_dispatches_each_item_once_...`.
@@ -16278,14 +16267,13 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             .unwrap_or_else(|e| e.into_inner());
         crate::core::library::test_home::with_home_dir(|home| {
             let stub_dir = tempfile::tempdir().unwrap();
-            let log_path = stub_dir.path().join("bg.log");
-            let bin = stub_claude_bg(stub_dir.path(), &log_path);
-            unsafe { std::env::set_var("MESA_CLAUDE_BIN", &bin) };
+            let (stub, log_path) = inbox_job_stub(stub_dir.path());
+            unsafe { std::env::set_var("NARU_SELF_BIN", &stub) };
 
             let (_dir, state) = test_state();
             retro_watcher_tick(&state);
-            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
-            assert_eq!(log.lines().count(), 1, "a fresh db is due: {log:?}");
+            let log = job_lines(&log_path, 1);
+            assert_eq!(log.len(), 1, "a fresh db is due: {log:?}");
             let run = state
                 .store
                 .lock()
@@ -16296,52 +16284,47 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             assert_eq!(run.trigger, "watcher");
             assert!(
                 run.spawned_at.is_some(),
-                "a successful spawn stamps spawned_at: {run:?}"
+                "a successful start stamps spawned_at: {run:?}"
             );
             assert!(
-                log.contains(&format!(
-                    "|naru retro {}|Run mesa session retrospective {}.",
-                    run.id, run.id
-                )),
-                "the session name and prompt carry the run id: {log:?}"
-            );
-            assert_eq!(
-                std::fs::read_to_string(stub_dir.path().join("last-agent"))
-                    .unwrap()
-                    .trim(),
-                "naru-retro"
+                log[0].starts_with(&format!("__job|retro|--run|{}|--dir|", run.id))
+                    && log[0].contains("workspace|"),
+                "the job names the run id and runs in the workspace: {log:?}"
             );
             assert!(
-                home.join(".claude/agents/naru-retro.md").is_file(),
-                "the definition is seeded before the spawn"
+                !home.join(".claude/agents/naru-retro.md").exists(),
+                "the definition is no longer seeded"
+            );
+            assert!(
+                home.join(".naru/logs/retro.log").exists()
+                    || home.join(".mesa/logs/retro.log").exists(),
+                "the job's output goes to logs/retro.log"
             );
 
             retro_watcher_tick(&state);
-            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+            let log = job_lines(&log_path, 1);
             assert_eq!(
-                log.lines().count(),
+                log.len(),
                 1,
                 "inside the interval nothing dispatches: {log:?}"
             );
-            unsafe { std::env::remove_var("MESA_CLAUDE_BIN") };
+            unsafe { std::env::remove_var("NARU_SELF_BIN") };
         });
     }
 
-    /// A spawn failure rolls the run row back, so the next tick retries
-    /// rather than waiting out a 72-hour interval on a run that never
+    /// A job that cannot start rolls the run row back, so the next tick
+    /// retries rather than waiting out a 72-hour interval on a run that never
     /// happened — the inbox-watcher's claim release, in the db.
     #[test]
-    fn retro_watcher_tick_rolls_back_the_run_when_spawn_fails() {
+    fn retro_watcher_tick_rolls_back_the_run_when_the_job_cannot_start() {
         // SAFETY: see `inbox_watcher_tick_dispatches_each_item_once_...`.
         let _env = attachments::ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         crate::core::library::test_home::with_home_dir(|_| {
             let stub_dir = tempfile::tempdir().unwrap();
-            let log_path = stub_dir.path().join("bg.log");
-            let bin = stub_claude_bg(stub_dir.path(), &log_path);
-            std::fs::write(stub_dir.path().join("fail"), "").unwrap();
-            unsafe { std::env::set_var("MESA_CLAUDE_BIN", &bin) };
+            let (stub, log_path) = inbox_job_stub(stub_dir.path());
+            unsafe { std::env::set_var("NARU_SELF_BIN", stub_dir.path().join("missing")) };
 
             let (_dir, state) = test_state();
             retro_watcher_tick(&state);
@@ -16353,13 +16336,13 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                     .last_retro_run()
                     .unwrap()
                     .is_none(),
-                "a failed spawn must leave no run row"
+                "a failed start must leave no run row"
             );
 
-            std::fs::remove_file(stub_dir.path().join("fail")).unwrap();
+            unsafe { std::env::set_var("NARU_SELF_BIN", &stub) };
             retro_watcher_tick(&state);
-            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
-            assert_eq!(log.lines().count(), 1, "the retry dispatches: {log:?}");
+            let log = job_lines(&log_path, 1);
+            assert_eq!(log.len(), 1, "the retry dispatches: {log:?}");
             assert!(
                 state
                     .store
@@ -16369,7 +16352,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                     .unwrap()
                     .is_some()
             );
-            unsafe { std::env::remove_var("MESA_CLAUDE_BIN") };
+            unsafe { std::env::remove_var("NARU_SELF_BIN") };
         });
     }
 

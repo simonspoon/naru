@@ -32,7 +32,7 @@ use serde_json::{Value, json};
 
 use crate::core::{
     Error, Priority, Result, Status, Store, agents, config, inbox_triage, library, live, llm,
-    project_memory, runner, script_runs,
+    project_memory, retro, runner, script_runs,
 };
 
 /// How long one job's `claude` call may run before it is killed.
@@ -54,6 +54,10 @@ pub enum Job {
     /// Triage one inbox change request (naru task 1691): two `-p` calls,
     /// applied by `core::inbox_triage`; `name` is the claude session name.
     InboxTriage { item_id: i64, name: String },
+    /// Run one session retrospective (naru task 1692): a `haiku` skim per
+    /// session and one `sonnet` roll-up, applied by `core::retro`; `run_id`
+    /// is the `retro_runs` claim; the claude session names are derived from it.
+    Retro { run_id: i64 },
 }
 
 impl Job {
@@ -82,6 +86,9 @@ impl Job {
                 a.extend(["inbox-triage".into(), "--item".into(), item_id.to_string()]);
                 a.extend(["--name".into(), name.clone()]);
             }
+            Job::Retro { run_id } => {
+                a.extend(["retro".into(), "--run".into(), run_id.to_string()]);
+            }
         }
         a.extend(["--dir".into(), dir.to_string()]);
         a
@@ -91,6 +98,7 @@ impl Job {
     fn log_name(&self) -> &'static str {
         match self {
             Job::InboxTriage { .. } => "inbox-triage.log",
+            Job::Retro { .. } => "retro.log",
             _ => "memory-jobs.log",
         }
     }
@@ -262,6 +270,28 @@ pub fn run_with(store: &mut Store, job: &Job, dir: &str, timeout: Duration) -> R
                     timeout,
                 )
             })
+        }
+        Job::Retro { run_id } => {
+            let report =
+                retro::run_with(store, *run_id, &mut |model, call_name, prompt, schema| {
+                    llm::complete_structured(
+                        config::RETRO,
+                        Some(*run_id),
+                        call_name,
+                        prompt,
+                        schema,
+                        Some(model),
+                        &prompts,
+                        dir,
+                        timeout,
+                    )
+                });
+            // A retrospective that wrote nothing gives its claim back, so the
+            // next tick retries instead of waiting out the interval.
+            if report.is_err() {
+                let _ = store.delete_retro_run(*run_id);
+            }
+            report
         }
     }
 }
@@ -501,6 +531,12 @@ mod tests {
             ]
         );
         assert_eq!(triage.log_name(), "inbox-triage.log");
+        let retro = Job::Retro { run_id: 3 };
+        assert_eq!(
+            retro.args("/w"),
+            ["__job", "retro", "--run", "3", "--dir", "/w"]
+        );
+        assert_eq!(retro.log_name(), "retro.log");
         assert_eq!(
             Job::Dream { session_id: None }.log_name(),
             "memory-jobs.log"

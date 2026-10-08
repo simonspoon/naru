@@ -34,7 +34,7 @@ use crate::core::{
     Status, Store, Task, TaskPatch, TaskReceipt, Workflow, WorkflowEdge, WorkflowNode,
     WorkflowNodeKind, WorkflowNodeNew, WorkflowNodePatch, WorkflowPatch, WorkflowRun,
     WorkflowTrigger, WorkflowView, agents, audio, board, cc, config, files, git, library, live,
-    look, memory_job, migrate, project_memory, receipt, retro, system,
+    look, memory_job, migrate, project_memory, receipt, system,
 };
 
 const TOP_AFTER_HELP: &str = "\
@@ -224,13 +224,14 @@ enum Command {
         #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true", value_name = "BOOL")]
         watch_cost: Option<bool>,
         /// Every `watchers.retro-interval-hours` (default 72), auto-start a
-        /// background `claude` agent that reviews the task sessions finished
-        /// since the last retrospective for friction and files each NEW
-        /// finding into the inbox as a change request (default: the
-        /// `naru-retro` agent definition, configurable in ~/.mesa/config.json;
-        /// cwd `~/.mesa/workspace`). It proposes only — it never edits an
-        /// agent, a skill or project code. Off by default: this spawns real
-        /// agents (API cost) with no user request behind it. Independent of
+        /// detached `naru __job retro` that reviews the task sessions finished
+        /// since the last retrospective for friction (a haiku `claude -p`
+        /// skim per session, one sonnet roll-up; the `retro` template in
+        /// ~/.mesa/config.json; cwd `~/.mesa/workspace`) and files each NEW
+        /// finding into the inbox as a change request itself. It proposes
+        /// only — it never edits an agent, a skill or project code. Off by
+        /// default: this makes real model calls (API cost) with no user
+        /// request behind it. Independent of
         /// the other three watchers. Preserved across the web UI's Restart
         /// Server action.
         #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true", value_name = "BOOL")]
@@ -457,6 +458,14 @@ enum JobCmd {
         /// The claude session name
         #[arg(long)]
         name: String,
+        #[arg(long)]
+        dir: String,
+    },
+    /// Run one session retrospective (the retro watcher's job)
+    Retro {
+        /// The `retro_runs` row that claimed this run
+        #[arg(long)]
+        run: i64,
         #[arg(long)]
         dir: String,
     },
@@ -2451,13 +2460,14 @@ EXAMPLES
 
 #[derive(Subcommand)]
 enum RetroCmd {
-    /// Start a retrospective now: records a `manual` run and spawns the agent
+    /// Start a retrospective now: records a `manual` run and starts its job
     ///
     /// Prints the run row. Inside the interval since the last run this is
     /// `conflict` naming when the next is due — `--force` runs it anyway. The
-    /// agent is spawned through `agents::spawn_bg` with the `retro` template
-    /// from ~/.mesa/config.json (default: `claude --bg --agent naru-retro …`),
-    /// in ~/.mesa/workspace. If the spawn fails the run row is deleted again
+    /// job is a detached `naru __job retro` making `claude -p --json-schema`
+    /// calls through the `retro` template from ~/.mesa/config.json, in
+    /// ~/.mesa/workspace, and Naru files the findings itself. If the job
+    /// cannot start the run row is deleted again
     /// and the command exits 1 with code "unavailable", so the next attempt
     /// is not a `conflict` against a run that never happened.
     ///
@@ -4677,6 +4687,7 @@ fn execute(command: Command) -> Result<()> {
                     },
                     dir,
                 ),
+                JobCmd::Retro { run, dir } => (memory_job::Job::Retro { run_id: run }, dir),
                 JobCmd::InboxTriage { item, name, dir } => (
                     memory_job::Job::InboxTriage {
                         item_id: item,
@@ -6237,28 +6248,21 @@ fn run_retro(cmd: RetroCmd) -> Result<()> {
                 )));
             }
             let run = store.record_retro_run("manual")?;
-            // The `naru-retro` definition is seeded first: the default
-            // template spawns `--agent naru-retro`, which errors on an agent
-            // Claude Code has never seen. cwd is ~/.mesa/workspace — a
-            // retrospective spans every project, so there is no local_path.
+            // A detached `naru __job retro` (naru task 1692) makes the
+            // `claude -p` calls and files the findings. cwd is
+            // ~/.mesa/workspace — a retrospective spans every project, so
+            // there is no local_path.
             let dir = config::workspace_dir().to_string_lossy().into_owned();
-            let name = retro::session_name(run.id);
-            let spawned = retro::ensure_agent_definition(&store).and_then(|_| {
-                let prompts = library::prompts(&store).map_err(|e| e.to_string())?;
-                agents::spawn_bg(
-                    config::RETRO,
-                    &dir,
-                    Some(run.id),
-                    Some(&name),
-                    None,
-                    &prompts,
-                )
-            });
+            let spawned = memory_job::spawn(
+                &memory_job::Job::Retro { run_id: run.id },
+                &dir,
+                store.db_path().as_deref(),
+            );
             if let Err(e) = spawned {
                 let id = run.id;
                 store.delete_retro_run(id)?;
                 return Err(Error::Unavailable(format!(
-                    "retro run {id} could not spawn its agent, so it was deleted again: {e}"
+                    "retro run {id} could not start its job, so it was deleted again: {e}"
                 )));
             }
             let run = store.mark_retro_run_spawned(run.id)?;

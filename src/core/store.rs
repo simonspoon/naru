@@ -7059,6 +7059,34 @@ impl Store {
         Ok(())
     }
 
+    /// The window run `run_id` reviews (naru task 1692): from the start of
+    /// the newest **earlier** run that counts (spawned), else seven days back,
+    /// to now. Answers `(unix seconds, "YYYY-MM-DD HH:MM:SS" UTC)` of that
+    /// start, both read off SQLite's own clock like [`Store::retro_status`].
+    pub fn retro_window(&self, run_id: i64) -> Result<(i64, String)> {
+        Ok(self.conn.query_row(
+            "SELECT CAST(strftime('%s', w) AS INTEGER), w FROM (SELECT COALESCE(\
+             (SELECT started_at FROM retro_runs WHERE id < ?1 AND spawned_at IS NOT NULL \
+              ORDER BY id DESC LIMIT 1), datetime('now', '-7 days')) AS w)",
+            [run_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?)
+    }
+
+    /// Notes one more session a known finding was seen in without touching its
+    /// count or evidence ([`Store::record_retro_finding`] bumps both and takes
+    /// one session id). `OR IGNORE`, so a repeat is idempotent.
+    pub fn add_retro_finding_session(&mut self, id: i64, session_id: &str) -> Result<RetroFinding> {
+        let session_id = Self::validate_retro_key("session id", session_id)?;
+        self.get_retro_finding(id)?;
+        self.conn.execute(
+            "INSERT OR IGNORE INTO retro_finding_sessions \
+             (finding_id, session_id, first_seen_at) VALUES (?1, ?2, datetime('now'))",
+            (id, session_id),
+        )?;
+        self.get_retro_finding(id)
+    }
+
     /// Whether a retrospective is due, judged on the store's own clock: due
     /// when no run counts ([`Store::last_retro_run`]), or when the last one
     /// that does started at least `interval_hours` ago. `next_due_at` is that deadline, for the CLI to
