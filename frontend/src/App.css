@@ -1803,7 +1803,7 @@ main {
   background: var(--surface-hover);
 }
 
-.workflow-log input {
+.workflow-log input[type='text'] {
   width: min(24rem, 100%);
   margin-bottom: 0.4rem;
 }
