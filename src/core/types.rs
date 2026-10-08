@@ -2466,7 +2466,7 @@ pub struct LibraryImportResult {
 /// A four-way token split shared by every CC aggregate. `cache_read` is context
 /// served from the prompt cache (cheap); `cache_creation` is context written to
 /// it (a premium over plain input).
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../frontend/src/types/")]
 pub struct CcTokens {
     #[ts(type = "number")]
@@ -3392,6 +3392,14 @@ pub struct CcLiveSession {
     #[ts(type = "number")]
     pub messages: i64,
     pub tokens: CcTokens,
+    /// The part of `tokens` from this session's own **main-thread**
+    /// transcript — non-`isSidechain` lines only, so a subagent's turns
+    /// (`<session>/subagents/agent-*.jsonl`) are not in it. The cost guard's
+    /// `spin` rule judges this, not `tokens` (`docs/cost-guard.md`). `ts(skip)`:
+    /// no page reads it.
+    #[ts(skip)]
+    #[serde(default)]
+    pub main_tokens: CcTokens,
     #[ts(type = "number")]
     pub total_tokens: i64,
     pub est_cost_usd: f64,

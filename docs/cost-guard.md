@@ -88,7 +88,7 @@ exceed.
 | --- | --- | --- |
 | `cost` | `est_cost_usd >= cost-usd` | $25 |
 | `tokens` | `total_tokens >= total-tokens` | 100,000,000 |
-| `spin` | `total_tokens >= cache-read-min-tokens` **and** `cache_read / total_tokens >= cache-read-share` | 20,000,000 and 0.98 |
+| `spin` | the session's **main-thread** `total >= cache-read-min-tokens` **and** `cache_read / total >= cache-read-share` (subagent transcripts excluded, see below) | 20,000,000 and 0.98 |
 | `repeat` | the newest `repeat-count` tool calls are the same trivial `Bash` command | 30 |
 | `context` | the newest main-thread turn's input side `>= context-tokens` (alert-only, except the relay below) | 120,000 |
 
@@ -112,6 +112,18 @@ They are not five spellings of one rule:
   long-lived session re-reads its whole context on every turn, so one carrying
   a huge context dominates spend while tripping none of the window rules above.
   See below.
+
+`spin` is judged on `CcLiveSession::main_tokens`: the session's own
+transcript, non-`isSidechain` lines only. A subagent's transcript
+(`<session>/subagents/agent-*.jsonl`) carries the parent's `sessionId`, so
+`cc::live()` sums it into the parent's `tokens`; that sum still feeds `cost` and
+`tokens`, which are about the session's total spend, but a subagent's cache
+reads are its own working context and must not make a healthy supervisor look
+like it is spinning (a supervisor with 0.2M cache reads of its own was stopped
+for its implementer's 21M). The floor and the share are both computed on the
+main thread, the way `context` already is. A spin loop inside a subagent alone
+is therefore not a `spin` verdict; its volume still counts toward `cost` and
+`tokens`.
 
 The `cache-read-min-tokens` floor is what makes `spin` usable at all: a session
 three messages long is trivially 100% cache reads and perfectly healthy. The

@@ -267,8 +267,12 @@ pub fn breaches(session: &CcLiveSession, t: &GuardThresholds) -> Vec<GuardBreach
     // session that is trivially 100% cache-read from being called a runaway,
     // and — because it is at least 1 by construction — it is also what makes
     // the division below safe. A session with no tokens can never reach it.
-    if session.total_tokens >= t.cache_read_min_tokens && session.total_tokens > 0 {
-        let share = session.tokens.cache_read as f64 / session.total_tokens as f64;
+    // Judged on the session's own main-thread transcript: a subagent's cache
+    // reads are its own, and a healthy supervisor must not inherit them.
+    let main = &session.main_tokens;
+    let main_total = main.input + main.output + main.cache_read + main.cache_creation;
+    if main_total >= t.cache_read_min_tokens && main_total > 0 {
+        let share = main.cache_read as f64 / main_total as f64;
         if share >= t.cache_read_share {
             out.push(GuardBreach {
                 threshold: SPIN,
@@ -301,14 +305,16 @@ pub fn breaches(session: &CcLiveSession, t: &GuardThresholds) -> Vec<GuardBreach
     out
 }
 
-/// The share of `session`'s tokens that are cache reads, for reporting. `0.0`
-/// for a session with no tokens — there is no ratio to state, and a report is
-/// not the place to invent one.
+/// The share of `session`'s main-thread tokens that are cache reads — the
+/// measure `spin` judges, for reporting. `0.0` for a session with no tokens —
+/// there is no ratio to state, and a report is not the place to invent one.
 pub fn cache_read_share(session: &CcLiveSession) -> f64 {
-    if session.total_tokens <= 0 {
+    let m = &session.main_tokens;
+    let total = m.input + m.output + m.cache_read + m.cache_creation;
+    if total <= 0 {
         return 0.0;
     }
-    session.tokens.cache_read as f64 / session.total_tokens as f64
+    m.cache_read as f64 / total as f64
 }
 
 /// The alert an inbox item carries: **prose**, not a table.
@@ -681,6 +687,7 @@ mod tests {
             idle_seconds: 3,
             status: "active".into(),
             messages: 400,
+            main_tokens: tokens.clone(),
             tokens,
             total_tokens: total,
             est_cost_usd: cost,
@@ -882,6 +889,24 @@ mod tests {
         // 30M tokens: over the 20M spin floor, well under the 100M volume
         // ceiling, and cheap enough not to trip cost.
         let s = session(3.0, 40_000, 20_000, 29_940_000);
+        assert_eq!(kinds(&s), vec![SPIN]);
+    }
+
+    #[test]
+    fn a_subagents_cache_reads_do_not_trip_its_parents_spin() {
+        // The supervisor's own thread is small; its implementer subagent read
+        // 30M tokens of cache at 99%. Whole-session share is over the line,
+        // the main thread's is not.
+        let mut s = session(3.0, 40_000, 20_000, 29_940_000);
+        s.main_tokens = CcTokens {
+            input: 200_000,
+            output: 20_000,
+            cache_read: 400_000,
+            cache_creation: 0,
+        };
+        assert!(kinds(&s).is_empty(), "{:?}", kinds(&s));
+        // A true loop in the main thread still trips it, subagent or not.
+        s.main_tokens.cache_read = 29_940_000;
         assert_eq!(kinds(&s), vec![SPIN]);
     }
 
