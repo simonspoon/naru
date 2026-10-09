@@ -21,10 +21,14 @@ import {
   peakDb,
   promptAt,
   shouldAutoStop,
+  STOP_SECONDS,
   statusLine,
   TARGET_SECONDS,
 } from '../voiceEnroll'
 import { ConfirmDelete } from './ConfirmDelete'
+
+/** How long to keep asking whether the Mac app has built the enrollment. */
+const POLL_MAX_MS = 2 * 60 * 1000
 
 type Take = { wav: Uint8Array; seconds: number; peak: number }
 
@@ -54,7 +58,9 @@ export function VoiceEnrollSection() {
   const [take, setTake] = useState<Take | null>(null)
   const [busy, setBusy] = useState(false)
   const [problem, setProblem] = useState<string | null>(null)
+  const [starting, setStarting] = useState(false)
   const capture = useRef<Capture | null>(null)
+  const mounted = useRef(true)
 
   const release = useCallback(() => {
     const cap = capture.current
@@ -69,20 +75,29 @@ export function VoiceEnrollSection() {
   }, [])
 
   // The mic is released however the section goes away.
-  useEffect(() => release, [release])
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+      release()
+    }
+  }, [release])
 
   // Poll while a saved sample waits for the Mac app's enrollment file.
   const waiting = awaitingMacApp(status)
   useEffect(() => {
     if (!waiting) return
-    const id = window.setInterval(refetch, 3000)
+    const until = Date.now() + POLL_MAX_MS
+    const id = window.setInterval(() => {
+      if (Date.now() >= until) window.clearInterval(id)
+      else if (!document.hidden) refetch()
+    }, 3000)
     return () => window.clearInterval(id)
   }, [waiting, refetch])
 
   const stop = useCallback(() => {
     const cap = capture.current
     if (!cap) return
-    const seconds = (performance.now() - cap.startedAt) / 1000
     const samples = new Float32Array(cap.frames.reduce((n, f) => n + f.length, 0))
     let offset = 0
     for (const f of cap.frames) {
@@ -94,7 +109,12 @@ export function VoiceEnrollSection() {
     setRecording(false)
     setLevel(0)
     const pcm = toPcm16(downsample(samples, rate, TARGET_SAMPLE_RATE))
-    setTake({ wav: encodeWav(pcm, TARGET_SAMPLE_RATE), seconds, peak: peakDb(samples) })
+    // Length of what will be saved, not the wall clock: the server judges samples.
+    setTake({
+      wav: encodeWav(pcm, TARGET_SAMPLE_RATE),
+      seconds: pcm.length / TARGET_SAMPLE_RATE,
+      peak: peakDb(samples),
+    })
   }, [release])
 
   // The clock: elapsed, the meter, and the auto-stop at the target.
@@ -112,20 +132,24 @@ export function VoiceEnrollSection() {
   }, [recording, stop])
 
   async function start() {
+    if (starting || capture.current) return
+    setStarting(true)
     setProblem(null)
     setTake(null)
+    let stream: MediaStream | null = null
+    let ctx: AudioContext | null = null
+    let blobUrl: string | null = null
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
+      stream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
       })
-      let ctx: AudioContext
       try {
         ctx = new AudioContext({ sampleRate: TARGET_SAMPLE_RATE })
       } catch {
         ctx = new AudioContext()
       }
       await ctx.resume()
-      const blobUrl = URL.createObjectURL(new Blob([PCM_WORKLET_SOURCE], { type: 'text/javascript' }))
+      blobUrl = URL.createObjectURL(new Blob([PCM_WORKLET_SOURCE], { type: 'text/javascript' }))
       await ctx.audioWorklet.addModule(blobUrl)
       const node = new AudioWorkletNode(ctx, 'mesa-pcm')
       const source = ctx.createMediaStreamSource(stream)
@@ -147,15 +171,27 @@ export function VoiceEnrollSection() {
       // Not connected onward: that would play the microphone back.
       source.connect(node)
       capture.current = cap
+      if (!mounted.current) {
+        // Unmounted while the awaits ran: nothing will ever stop this capture.
+        release()
+        return
+      }
       setElapsed(0)
       setRecording(true)
     } catch (e) {
-      release()
-      setProblem(
-        e instanceof Error
-          ? `Could not open the microphone: ${e.message}`
-          : 'Could not open the microphone.',
-      )
+      // Whatever was opened before the failure must not outlive it.
+      stream?.getTracks().forEach((t) => t.stop())
+      void ctx?.close()
+      if (blobUrl) URL.revokeObjectURL(blobUrl)
+      if (mounted.current) {
+        setProblem(
+          e instanceof Error
+            ? `Could not open the microphone: ${e.message}`
+            : 'Could not open the microphone.',
+        )
+      }
+    } finally {
+      if (mounted.current) setStarting(false)
     }
   }
 
@@ -230,7 +266,7 @@ export function VoiceEnrollSection() {
         <div className="settings-actions">
           {recording ? (
             <button type="button" disabled={!canStop(elapsed)} onClick={stop}>
-              {canStop(elapsed) ? 'stop' : `stop (from ${MIN_SECONDS} s)`}
+              {canStop(elapsed) ? 'stop' : `stop (from ${STOP_SECONDS} s)`}
             </button>
           ) : take ? (
             <>
@@ -241,14 +277,18 @@ export function VoiceEnrollSection() {
               >
                 {busy ? 'saving…' : 'save'}
               </button>
-              <button type="button" disabled={busy} onClick={() => void start()}>
+              <button type="button" disabled={busy || starting} onClick={() => void start()}>
                 re-record
               </button>
             </>
           ) : (
             <>
-              <button type="button" onClick={() => void start()}>
-                {status?.sample ? 'Re-record' : 'Record your voice'}
+              <button type="button" disabled={starting} onClick={() => void start()}>
+                {starting
+                  ? 'opening microphone…'
+                  : status?.sample
+                    ? 'Re-record'
+                    : 'Record your voice'}
               </button>
               {(status?.sample || status?.enrolled_at) && (
                 <ConfirmDelete

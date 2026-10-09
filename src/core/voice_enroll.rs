@@ -5,7 +5,9 @@
 //! file from the WAV with its own FluidAudio code, so nothing here computes an
 //! embedding, loads a model or holds a key.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
 use super::store::{Error, Result};
@@ -19,6 +21,7 @@ pub const ENROLLMENT_FILE: &str = "ambient-enrollment.json";
 pub const MIN_SECONDS: f64 = 20.0;
 pub const MAX_SECONDS: f64 = 300.0;
 const SAMPLE_RATE: u32 = 16_000;
+static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// `NARU_VOICE_ENROLL_DIR` (the test seam), else the platform data dir +
 /// `Naru` — `~/Library/Application Support/Naru` on a Mac, where the app
@@ -35,6 +38,22 @@ pub fn enroll_dir() -> Result<PathBuf> {
 /// Checks a WAV is 16 kHz mono 16-bit PCM of 20..=300 s and returns its
 /// length in seconds.
 pub fn validate_wav(wav: &[u8]) -> Result<f64> {
+    let seconds = parse_wav(wav)?;
+    if seconds < MIN_SECONDS {
+        return Err(Error::Validation(format!(
+            "the recording is {seconds:.1} s; at least {MIN_SECONDS:.0} s is needed"
+        )));
+    }
+    if seconds > MAX_SECONDS {
+        return Err(Error::Validation(format!(
+            "the recording is {seconds:.1} s; at most {MAX_SECONDS:.0} s is allowed"
+        )));
+    }
+    Ok(seconds)
+}
+
+/// Format check and length of a 16 kHz mono 16-bit PCM WAV, any duration.
+fn parse_wav(wav: &[u8]) -> Result<f64> {
     let bad = |m: &str| Error::Validation(format!("the recording is not usable: {m}"));
     if wav.len() < 12 || &wav[0..4] != b"RIFF" || &wav[8..12] != b"WAVE" {
         return Err(bad("not a RIFF/WAVE file"));
@@ -77,18 +96,7 @@ pub fn validate_wav(wav: &[u8]) -> Result<f64> {
         return Err(bad("no fmt chunk"));
     }
     let data_len = data_len.ok_or_else(|| bad("no data chunk"))?;
-    let seconds = data_len as f64 / 2.0 / f64::from(SAMPLE_RATE);
-    if seconds < MIN_SECONDS {
-        return Err(Error::Validation(format!(
-            "the recording is {seconds:.1} s; at least {MIN_SECONDS:.0} s is needed"
-        )));
-    }
-    if seconds > MAX_SECONDS {
-        return Err(Error::Validation(format!(
-            "the recording is {seconds:.1} s; at most {MAX_SECONDS:.0} s is allowed"
-        )));
-    }
-    Ok(seconds)
+    Ok(data_len as f64 / 2.0 / f64::from(SAMPLE_RATE))
 }
 
 /// Validates and saves the recording (temp file + rename, so a reader never
@@ -100,9 +108,19 @@ pub fn save(wav: &[u8]) -> Result<VoiceEnrollment> {
 fn save_in(dir: &Path, wav: &[u8]) -> Result<VoiceEnrollment> {
     validate_wav(wav)?;
     std::fs::create_dir_all(dir)?;
-    let tmp = dir.join(format!("{SAMPLE_FILE}.tmp"));
-    std::fs::write(&tmp, wav)?;
-    if let Err(e) = std::fs::rename(&tmp, dir.join(SAMPLE_FILE)) {
+    // A name per call, so two concurrent saves never interleave in one file.
+    let tmp = dir.join(format!(
+        "{SAMPLE_FILE}.{}.{}.tmp",
+        std::process::id(),
+        TMP_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    let written = (|| {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(wav)?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, dir.join(SAMPLE_FILE))
+    })();
+    if let Err(e) = written {
         let _ = std::fs::remove_file(&tmp);
         return Err(e.into());
     }
@@ -120,13 +138,18 @@ fn status_in(dir: &Path) -> Result<VoiceEnrollment> {
     let enroll_time = std::fs::metadata(dir.join(ENROLLMENT_FILE))
         .and_then(|m| m.modified())
         .ok();
-    let sample = sample_meta
-        .zip(sample_time)
-        .map(|(m, at)| VoiceEnrollSample {
+    // Length from the file's own data chunk; a file that no longer parses
+    // (edited by hand) reports no sample rather than a guess.
+    let sample = sample_meta.zip(sample_time).and_then(|(m, at)| {
+        let seconds = std::fs::read(dir.join(SAMPLE_FILE))
+            .ok()
+            .and_then(|b| parse_wav(&b).ok())?;
+        Some(VoiceEnrollSample {
             bytes: m.len(),
-            seconds: m.len().saturating_sub(44) as f64 / 2.0 / f64::from(SAMPLE_RATE),
+            seconds,
             recorded_at: iso(at),
-        });
+        })
+    });
     let current = matches!((sample_time, enroll_time), (Some(s), Some(e)) if e >= s);
     Ok(VoiceEnrollment {
         sample,
@@ -209,7 +232,13 @@ mod tests {
         let sample = s.sample.unwrap();
         assert!((sample.seconds - 30.0).abs() < 0.01);
         assert!(s.enrolled_at.is_none() && !s.current);
-        assert!(!dir.path().join("voice-sample.wav.tmp").exists());
+        assert!(
+            std::fs::read_dir(dir.path()).unwrap().all(|e| !e
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp"))
+        );
     }
 
     #[test]

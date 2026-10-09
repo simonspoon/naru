@@ -4,14 +4,16 @@
 // component only wires this to the microphone.
 import type { VoiceEnrollment } from './types/VoiceEnrollment'
 
-/** The Mac app's `enroll(wavURLs:)` needs at least this much speech. */
+/** The Mac app's `enroll(wavURLs:)` and the server need at least this much audio. */
 export const MIN_SECONDS = 20
+/** Stop enables here: wall-clock runs ahead of captured samples, so keep a margin over MIN_SECONDS. */
+export const STOP_SECONDS = 22
 /** Recording stops by itself here. */
 export const TARGET_SECONDS = 90
 /** A take whose loudest sample is below this barely picked anything up. */
 export const NEAR_SILENT_DB = -40
 
-/** One natural paragraph at a normal pace (~50 s). */
+/** One natural paragraph, ~150 words: about 60 s at a normal pace. */
 export const READ_ALOUD =
   'Every morning I make a cup of coffee and look over the day ahead. Some days ' +
   'are quiet, with a few messages to answer and a walk around the block at lunch. ' +
@@ -25,7 +27,7 @@ export const READ_ALOUD =
   'I would not trade it for anything.'
 
 /** Seconds the paragraph is on screen before the one-word replies start. */
-export const SCRIPT_SECONDS = 48
+export const SCRIPT_SECONDS = 62
 /** Seconds each one-word reply prompt stays up. */
 export const PROMPT_SECONDS = 3.5
 
@@ -36,32 +38,28 @@ export const REPLY_PROMPTS: readonly string[] = [
   'Say: okay',
   'Say a number: forty-two',
   'Say: stop',
-  'Say: go ahead',
   'Say a number: three',
   'Say: not now',
-  'Say a number: nineteen',
-  'Say: sounds good',
-  'Say a number: zero',
 ]
 
 export type EnrollPrompt =
   | { kind: 'script'; text: string }
   | { kind: 'reply'; text: string; index: number }
-  | { kind: 'done'; text: string }
 
 /** What to show `elapsed` seconds into the recording. */
 export function promptAt(elapsed: number): EnrollPrompt {
   if (elapsed < SCRIPT_SECONDS) return { kind: 'script', text: READ_ALOUD }
-  const index = Math.floor((elapsed - SCRIPT_SECONDS) / PROMPT_SECONDS)
-  if (index < REPLY_PROMPTS.length) {
-    return { kind: 'reply', text: REPLY_PROMPTS[index], index }
-  }
-  return { kind: 'done', text: 'That is plenty — you can stop now.' }
+  // Recording auto-stops at TARGET_SECONDS, so past the last prompt just hold it.
+  const index = Math.min(
+    REPLY_PROMPTS.length - 1,
+    Math.floor((elapsed - SCRIPT_SECONDS) / PROMPT_SECONDS),
+  )
+  return { kind: 'reply', text: REPLY_PROMPTS[index], index }
 }
 
 /** Whether Stop is enabled yet. */
 export function canStop(elapsed: number): boolean {
-  return elapsed >= MIN_SECONDS
+  return elapsed >= STOP_SECONDS
 }
 
 /** Whether the recording should end by itself. */

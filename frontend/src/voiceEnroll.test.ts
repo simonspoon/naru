@@ -12,6 +12,7 @@ import {
   REPLY_PROMPTS,
   SCRIPT_SECONDS,
   shouldAutoStop,
+  STOP_SECONDS,
   statusLine,
   TARGET_SECONDS,
 } from './voiceEnroll'
@@ -23,8 +24,9 @@ describe('the schedule', () => {
   it('fills the target time', () => {
     expect(SCRIPT_SECONDS + REPLY_PROMPTS.length * PROMPT_SECONDS).toBe(TARGET_SECONDS)
     const words = READ_ALOUD.split(/\s+/).length
-    expect(words).toBeGreaterThan(110)
-    expect(words).toBeLessThan(160)
+    // ~150 wpm or slower over the script window
+    expect(words / (SCRIPT_SECONDS / 60)).toBeLessThanOrEqual(160)
+    expect(words / (SCRIPT_SECONDS / 60)).toBeGreaterThan(120)
   })
 
   it('shows the paragraph, then each reply in turn, then done', () => {
@@ -33,12 +35,13 @@ describe('the schedule', () => {
     expect(promptAt(SCRIPT_SECONDS)).toEqual({ kind: 'reply', text: REPLY_PROMPTS[0], index: 0 })
     expect(promptAt(SCRIPT_SECONDS + PROMPT_SECONDS).text).toBe(REPLY_PROMPTS[1])
     expect(promptAt(TARGET_SECONDS - 0.1).text).toBe(REPLY_PROMPTS[REPLY_PROMPTS.length - 1])
-    expect(promptAt(TARGET_SECONDS).kind).toBe('done')
+    expect(promptAt(TARGET_SECONDS + 5).text).toBe(REPLY_PROMPTS[REPLY_PROMPTS.length - 1])
   })
 
-  it('allows stop from 20 s and stops itself at 90 s', () => {
-    expect(canStop(19.9)).toBe(false)
-    expect(canStop(20)).toBe(true)
+  it('allows stop from 22 s (margin over the 20 s minimum) and stops itself at 90 s', () => {
+    expect(STOP_SECONDS).toBeGreaterThan(20)
+    expect(canStop(STOP_SECONDS - 0.1)).toBe(false)
+    expect(canStop(STOP_SECONDS)).toBe(true)
     expect(shouldAutoStop(89.9)).toBe(false)
     expect(shouldAutoStop(90)).toBe(true)
   })
