@@ -1236,6 +1236,20 @@ pub struct Task {
     pub blocked: bool,
 }
 
+/// One task that finished, was cancelled or went back to todo/backlog since
+/// some time (naru task 1725). Built by `Store::task_digest`; `status` is the
+/// task's current status. Not ts-exported.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TaskDigestEntry {
+    pub task_id: i64,
+    pub name: String,
+    pub project_id: i64,
+    pub project_name: String,
+    pub status: String,
+    /// When the qualifying event happened (SQLite `datetime` text, UTC).
+    pub at: String,
+}
+
 /// An append-only record of a task's status change. `from_status` is null for
 /// the row written when the task is created.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

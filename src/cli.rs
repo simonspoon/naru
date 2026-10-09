@@ -1219,6 +1219,31 @@ EXAMPLES
         /// Task id; omit for every task's events
         id: Option<i64>,
     },
+    /// Print the tasks that finished, were cancelled or went back to todo/backlog since a time
+    ///
+    /// The "while you were away" digest (naru task 1725): one entry per task
+    /// whose newest done/cancelled/requeued event is at or after `--since` and
+    /// whose current status still matches it, oldest first. Prints
+    /// `{since, entries, text, notify}`. `--since auto` is when the newest
+    /// ended live conversation ended. `--notify` sends `text` through vox when
+    /// there is at least one entry (never for an empty digest); its links are
+    /// web-hash links under the base URL, so a phone needs `serve --lan`.
+    #[command(after_help = "\
+EXAMPLES
+  mesa task digest --since auto
+  mesa task digest --since 2026-10-08T21:00:00Z
+  mesa task digest --since auto --notify --base-url http://192.168.1.5:7770")]
+    Digest {
+        /// UTC timestamp (`YYYY-MM-DD HH:MM:SS` or ISO 8601) or `auto`
+        #[arg(long)]
+        since: String,
+        /// Send the digest through vox (Telegram) when it has entries
+        #[arg(long)]
+        notify: bool,
+        /// Base URL for the task links (default: as `naru notify`)
+        #[arg(long, value_name = "URL")]
+        base_url: Option<String>,
+    },
     /// Fire the task-execute hook for a task; prints the run outcome
     ///
     /// Runs the shell command configured under "task-execute" in the hooks
@@ -5420,6 +5445,55 @@ fn run_task(cmd: TaskCmd) -> Result<()> {
             }));
         }
         TaskCmd::Events { id } => print_json(&store.list_events(id)?),
+        TaskCmd::Digest {
+            since,
+            notify,
+            base_url,
+        } => {
+            let since = if since == "auto" {
+                store.latest_ended_live_at()?.ok_or_else(|| {
+                    Error::Validation("no ended live conversation; pass --since <timestamp>".into())
+                })?
+            } else {
+                since
+            };
+            let since = store.normalise_since(&since)?;
+            let entries = store.task_digest(&since)?;
+            let web_base = if notify && !entries.is_empty() {
+                Some(
+                    crate::core::notify::resolve_base(base_url.as_deref())?
+                        .trim_end_matches('/')
+                        .to_string(),
+                )
+            } else {
+                None
+            };
+            let lines = crate::core::live::digest_lines(&since, &entries, |e| {
+                format!(
+                    "{}/#/projects/{}/tasks/{}",
+                    web_base.as_deref().unwrap_or(""),
+                    e.project_id,
+                    e.task_id
+                )
+            });
+            let text = lines.join("\n");
+            let notify_out = if web_base.is_some() {
+                Some(crate::core::notify::send(
+                    &text,
+                    Some("While you were away"),
+                    None,
+                    base_url.as_deref(),
+                )?)
+            } else {
+                None
+            };
+            print_json(&json!({
+                "since": since,
+                "entries": entries,
+                "text": text,
+                "notify": notify_out,
+            }));
+        }
         TaskCmd::Execute { id } => {
             let task = store.get_task(id)?;
             let project_dir = store.get_project(task.project_id)?.local_path;

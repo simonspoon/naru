@@ -14,9 +14,9 @@ use super::types::{
     LiveBoardSummary, LiveContext, LiveMemoryHit, LiveNotebookEntry, LiveNotice, LiveResult,
     LiveRole, LiveSession, LiveStatus, LiveSummary, LiveTurn, LiveWindow, Priority, Project,
     RetroFinding, RetroRun, RetroStatus, Script, ScriptArg, ScriptArgKind, ScriptRunRecord,
-    ScriptRunStatus, Status, Task, TaskEvent, TaskNote, TaskReceipt, Workflow, WorkflowBranch,
-    WorkflowEdge, WorkflowLogEntry, WorkflowNode, WorkflowNodeKind, WorkflowRun, WorkflowRunStatus,
-    WorkflowStep, WorkflowStepStatus, WorkflowTrigger, WorkflowView,
+    ScriptRunStatus, Status, Task, TaskDigestEntry, TaskEvent, TaskNote, TaskReceipt, Workflow,
+    WorkflowBranch, WorkflowEdge, WorkflowLogEntry, WorkflowNode, WorkflowNodeKind, WorkflowRun,
+    WorkflowRunStatus, WorkflowStep, WorkflowStepStatus, WorkflowTrigger, WorkflowView,
     is_valid_artifact_content_type, task_name,
 };
 
@@ -4479,6 +4479,57 @@ impl Store {
         }
     }
 
+    /// `since` as SQLite `datetime` text (UTC), or `validation` when it is
+    /// not a timestamp (naru task 1725).
+    pub fn normalise_since(&self, since: &str) -> Result<String> {
+        let normalised: Option<String> =
+            self.conn
+                .query_row("SELECT datetime(?1)", [since], |r| r.get(0))?;
+        normalised.ok_or_else(|| {
+            Error::Validation(format!(
+                "--since: `{since}` is not a timestamp (use e.g. 2026-10-08T21:00:00Z or \
+                 `YYYY-MM-DD HH:MM:SS` UTC)"
+            ))
+        })
+    }
+
+    /// Tasks that reached `done` or `cancelled`, or went back from
+    /// `in_progress` to `todo`/`backlog`, at or after `since` (naru task
+    /// 1725). One entry per task: its newest event at or after `since` (by
+    /// id), kept only if that event qualifies and the task's current status
+    /// is its `to_status`. Tasks in archived projects are left out; oldest
+    /// first. The event columns are read as text, never through
+    /// [`Status::parse`], since pre-retirement rows still hold `refine`.
+    pub fn task_digest(&self, since: &str) -> Result<Vec<TaskDigestEntry>> {
+        let since = self.normalise_since(since)?;
+        let mut stmt = self.conn.prepare(&format!(
+            "{HIDDEN_PROJECTS_CTE}SELECT t.id, t.description, t.project_id, p.name, t.status, \
+                    e.at \
+             FROM (SELECT task_id, MAX(id) AS mid FROM task_events \
+                   WHERE at >= ?1 GROUP BY task_id) latest \
+             JOIN task_events e ON e.id = latest.mid \
+             JOIN tasks t ON t.id = e.task_id \
+             JOIN projects p ON p.id = t.project_id \
+             WHERE e.to_status = t.status \
+               AND (e.to_status IN ('done', 'cancelled') \
+                    OR (e.from_status = 'in_progress' AND e.to_status IN ('todo', 'backlog'))) \
+               AND {NOT_HIDDEN_PROJECT} \
+             ORDER BY e.at, t.id"
+        ))?;
+        let rows = stmt.query_map([&since], |r| {
+            let id: i64 = r.get(0)?;
+            Ok(TaskDigestEntry {
+                task_id: id,
+                name: task_name(&r.get::<_, String>(1)?, id),
+                project_id: r.get(2)?,
+                project_name: r.get(3)?,
+                status: r.get(4)?,
+                at: r.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     fn check_parent(&self, parent_id: i64, project_id: i64) -> Result<()> {
         check_parent(&self.conn, parent_id, project_id)
     }
@@ -5711,6 +5762,11 @@ impl Store {
     }
 
     #[cfg(test)]
+    pub(crate) fn exec_sql_for_test(&mut self, sql: &str, params: &[&dyn rusqlite::ToSql]) {
+        self.conn.execute(sql, params).unwrap();
+    }
+
+    #[cfg(test)]
     pub(crate) fn force_run_owner_for_test(&mut self, run: i64, pid: i64) {
         self.conn
             .execute(
@@ -6058,6 +6114,20 @@ impl Store {
                 ),
                 (LiveStatus::Ended.as_str(), before),
                 row_to_live_session,
+            )
+            .optional()?)
+    }
+
+    /// When the newest **ended** conversation ended, or `None` (naru task
+    /// 1725's `--since auto`).
+    pub fn latest_ended_live_at(&self) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT ended_at FROM live_sessions WHERE status = ?1 AND ended_at IS NOT NULL \
+                 ORDER BY ended_at DESC, id DESC LIMIT 1",
+                [LiveStatus::Ended.as_str()],
+                |r| r.get::<_, String>(0),
             )
             .optional()?)
     }
@@ -10471,6 +10541,122 @@ mod tests {
         assert_eq!(p("/execute-todo ##Task Info no id here"), None);
         assert_eq!(p("/refine-mesa-task 12"), None);
         assert_eq!(p("Drive naru live session 4"), None);
+    }
+
+    #[test]
+    fn task_digest_lists_outcomes_since_t_and_survives_refine_rows() {
+        let (mut store, _dir) = temp_store();
+        let p = store.create_project("p", None, None, None, None).unwrap();
+        let gone = store
+            .create_project("gone", None, None, None, None)
+            .unwrap();
+        let mk = |s: &mut Store, project: i64, d: &str| add_task(s, project, d).id;
+        let done = mk(&mut store, p.id, "done one");
+        let cancelled = mk(&mut store, p.id, "cancelled one");
+        let to_todo = mk(&mut store, p.id, "requeued todo");
+        let to_backlog = mk(&mut store, p.id, "requeued backlog");
+        let backlog_todo = mk(&mut store, p.id, "backlog to todo");
+        let started = mk(&mut store, p.id, "started");
+        let then_started = mk(&mut store, p.id, "requeued then restarted");
+        let archived = mk(&mut store, gone.id, "in an archived project");
+        let early = mk(&mut store, p.id, "done before T");
+        let refine = mk(&mut store, p.id, "old refine row");
+        let flapped = mk(&mut store, p.id, "requeued then moved around");
+        let rows = [
+            (done, "in_progress", "done", "done", "2026-10-02 00:00:03"),
+            (
+                cancelled,
+                "todo",
+                "cancelled",
+                "cancelled",
+                "2026-10-02 00:00:01",
+            ),
+            (
+                to_todo,
+                "in_progress",
+                "todo",
+                "todo",
+                "2026-10-02 00:00:02",
+            ),
+            (
+                to_backlog,
+                "in_progress",
+                "backlog",
+                "backlog",
+                "2026-10-02 00:00:04",
+            ),
+            (
+                backlog_todo,
+                "backlog",
+                "todo",
+                "todo",
+                "2026-10-02 00:00:05",
+            ),
+            (
+                started,
+                "todo",
+                "in_progress",
+                "in_progress",
+                "2026-10-02 00:00:06",
+            ),
+            (
+                then_started,
+                "in_progress",
+                "todo",
+                "in_progress",
+                "2026-10-02 00:00:07",
+            ),
+            (
+                archived,
+                "in_progress",
+                "done",
+                "done",
+                "2026-10-02 00:00:08",
+            ),
+            (early, "in_progress", "done", "done", "2026-09-30 23:59:59"),
+            (refine, "refine", "todo", "todo", "2026-10-02 00:00:09"),
+            // Newest event (todo -> ... -> todo) is not a requeue: excluded.
+            (
+                flapped,
+                "in_progress",
+                "todo",
+                "todo",
+                "2026-10-02 00:00:10",
+            ),
+            (flapped, "todo", "backlog", "backlog", "2026-10-02 00:00:11"),
+            (flapped, "backlog", "todo", "todo", "2026-10-02 00:00:12"),
+        ];
+        for (id, from, to, current, at) in rows {
+            store
+                .conn
+                .execute(
+                    "UPDATE tasks SET status=?2 WHERE id=?1",
+                    rusqlite::params![id, current],
+                )
+                .unwrap();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO task_events (task_id, from_status, to_status, at) \
+                     VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![id, from, to, at],
+                )
+                .unwrap();
+        }
+        store.archive_project(gone.id).unwrap();
+        let got = store.task_digest("2026-10-01 00:00:00").unwrap();
+        let ids: Vec<i64> = got.iter().map(|e| e.task_id).collect();
+        assert_eq!(ids, vec![cancelled, to_todo, done, to_backlog], "{got:?}");
+        assert_eq!(got[0].status, "cancelled");
+        assert_eq!(got[0].project_name, "p");
+        assert_eq!(got[0].name, "cancelled one");
+        // An ISO timestamp normalises to the same answer.
+        assert_eq!(store.task_digest("2026-10-01T00:00:00Z").unwrap(), got);
+        assert!(store.task_digest("2099-01-01 00:00:00").unwrap().is_empty());
+        assert!(matches!(
+            store.task_digest("garbage"),
+            Err(Error::Validation(_))
+        ));
     }
 
     #[test]

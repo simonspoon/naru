@@ -65,7 +65,8 @@ pub use types::{
     ProjectGitStatus, ProjectGitView, ProjectVersion, RetroFinding, RetroRun, RetroStatus, Script,
     ScriptArg, ScriptArgKind, ScriptRun, ScriptRunEvent, ScriptRunRecord, ScriptRunStatus,
     ScriptStream, ServeBoolSetting, ServeHostsSetting, ServeNumberSetting, Status, SystemInfo,
-    Task, TaskNote, TaskReceipt, TaskSummary, Workflow, WorkflowBranch, WorkflowEdge,
-    WorkflowLogEntry, WorkflowNode, WorkflowNodeKind, WorkflowRun, WorkflowRunStatus, WorkflowStep,
-    WorkflowStepStatus, WorkflowTrigger, WorkflowView, is_valid_artifact_content_type, task_name,
+    Task, TaskDigestEntry, TaskNote, TaskReceipt, TaskSummary, Workflow, WorkflowBranch,
+    WorkflowEdge, WorkflowLogEntry, WorkflowNode, WorkflowNodeKind, WorkflowRun, WorkflowRunStatus,
+    WorkflowStep, WorkflowStepStatus, WorkflowTrigger, WorkflowView,
+    is_valid_artifact_content_type, task_name,
 };

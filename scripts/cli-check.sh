@@ -592,6 +592,19 @@ run 0 "$MESA" task events "$IA"
 [ "$(jqs '.[1].to_status')" = "done" ] || fail "events: change row to_status"
 ok "task events <id>: append-only rows, oldest first (create + change)"
 
+# ---- digest (naru task 1725) ----
+run 0 "$MESA" task digest --since "2000-01-01 00:00:00"
+[ "$(jqs 'keys | join(",")')" = "entries,notify,since,text" ] || fail "digest: object keys"
+[ "$(jqs '[.entries[] | select(.task_id == '"$IA"')] | length')" = "1" ] || fail "digest: a done task appears"
+[ "$(jqs '.entries[] | select(.task_id == '"$IA"') | .status')" = "done" ] || fail "digest: status done"
+[ "$(jqs .notify)" = "null" ] || fail "digest: notify null without --notify"
+run 0 "$MESA" task digest --since "2099-01-01 00:00:00"
+[ "$(jqs '.entries | length')" = "0" ] || fail "digest: a future --since is empty"
+[ "$(jqs .text)" = "" ] || fail "digest: empty text"
+run 1 "$MESA" task digest --since garbage
+run 1 "$MESA" task digest --since auto
+ok "task digest: object shape, a done task listed, future empty, garbage and auto-without-session validation"
+
 # ---- root-commit binding & resolve (source-to-project identity) ----
 # Isolated db + a throwaway git repo so this can't perturb the P/P2 counts the
 # delete/backup assertions below depend on.
