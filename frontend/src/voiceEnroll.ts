@@ -88,6 +88,16 @@ export function meterFraction(rms: number): number {
   return Math.min(1, Math.max(0, (db + 60) / 60))
 }
 
+/**
+ * The next meter value: jumps up to `target`, falls back gradually. A worklet
+ * frame is ~3-8 ms, so a tick that sampled just the newest frame read silence
+ * between the pulses of speech (or a test beep); `target` is the loudest frame
+ * since the last tick and the fall-off keeps a pulse visible.
+ */
+export function meterStep(prev: number, target: number): number {
+  return Math.max(target, prev * 0.8)
+}
+
 /** `m:ss`. */
 export function clock(seconds: number): string {
   const s = Math.max(0, Math.floor(seconds))

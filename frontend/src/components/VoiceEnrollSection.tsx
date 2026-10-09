@@ -16,6 +16,7 @@ import {
   canStop,
   clock,
   meterFraction,
+  meterStep,
   MIN_SECONDS,
   nearSilent,
   peakDb,
@@ -40,7 +41,8 @@ type Capture = {
   source: MediaStreamAudioSourceNode
   blobUrl: string
   frames: Float32Array[]
-  lastRms: number
+  /** Loudest frame RMS since the last meter tick. */
+  windowPeakRms: number
   startedAt: number
 }
 
@@ -125,7 +127,8 @@ export function VoiceEnrollSection() {
       if (!cap) return
       const t = (performance.now() - cap.startedAt) / 1000
       setElapsed(t)
-      setLevel(meterFraction(cap.lastRms))
+      setLevel((prev) => meterStep(prev, meterFraction(cap.windowPeakRms)))
+      cap.windowPeakRms = 0
       if (shouldAutoStop(t)) stop()
     }, 100)
     return () => window.clearInterval(id)
@@ -160,13 +163,13 @@ export function VoiceEnrollSection() {
         source,
         blobUrl,
         frames: [],
-        lastRms: 0,
+        windowPeakRms: 0,
         startedAt: performance.now(),
       }
       node.port.onmessage = (e) => {
         const frame = e.data as Float32Array
         cap.frames.push(frame)
-        cap.lastRms = frameRms(frame)
+        cap.windowPeakRms = Math.max(cap.windowPeakRms, frameRms(frame))
       }
       // Not connected onward: that would play the microphone back.
       source.connect(node)

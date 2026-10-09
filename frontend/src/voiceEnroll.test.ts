@@ -4,6 +4,7 @@ import {
   canStop,
   clock,
   meterFraction,
+  meterStep,
   nearSilent,
   peakDb,
   promptAt,
@@ -67,6 +68,19 @@ describe('levels', () => {
     expect(meterFraction(1)).toBe(1)
     expect(meterFraction(0.001)).toBeCloseTo(0, 5)
     expect(meterFraction(0.0316)).toBeCloseTo(0.5, 1)
+  })
+
+  it('holds a pulse across ticks and falls back gradually', () => {
+    let level = meterStep(0, meterFraction(0.3))
+    expect(level).toBeGreaterThan(0.5)
+    const peak = level
+    // Silent ticks after a beep: still visible, then decaying toward 0.
+    level = meterStep(level, 0)
+    expect(level).toBeCloseTo(peak * 0.8, 5)
+    for (let i = 0; i < 40; i++) level = meterStep(level, 0)
+    expect(level).toBeLessThan(0.01)
+    // A louder window jumps straight up.
+    expect(meterStep(0.2, 0.9)).toBe(0.9)
   })
 
   it('formats the clock', () => {
