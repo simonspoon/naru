@@ -4654,7 +4654,9 @@ async fn emit_workflow_event(
             .store
             .lock()
             .unwrap()
-            .current_live_session()?
+            .current_live_session()
+            .ok()
+            .flatten()
             .map(|s| s.id);
         *state.live_offer.lock().unwrap() = Some((text, speaker, Instant::now(), open));
     }
@@ -5078,7 +5080,9 @@ async fn get_live(
                 .lock()
                 .unwrap()
                 .as_ref()
-                .filter(|(_, _, at, _)| at.elapsed() < LIVE_OFFER_TTL)
+                // An offer tagged with a session belongs to that session
+                // alone; once it has ended it is neither shown nor carried.
+                .filter(|(_, _, at, tag)| tag.is_none() && at.elapsed() < LIVE_OFFER_TTL)
                 .map(|(text, speaker, at, _)| LiveOffer {
                     text: text.clone(),
                     speaker: speaker.clone(),
@@ -5245,7 +5249,9 @@ async fn start_live(
     // Any start clears the pending offer; only an accepting one carries it.
     let offer = state.live_offer.lock().unwrap().take();
     let overheard = offer
-        .filter(|(_, _, at, _)| body.accept_offer && at.elapsed() < LIVE_OFFER_TTL)
+        .filter(|(_, _, at, tag)| {
+            body.accept_offer && tag.is_none() && at.elapsed() < LIVE_OFFER_TTL
+        })
         .map(|(text, speaker, _, _)| (speaker, text));
     let job = match spawn_live_agent(&state, session_id, body.project_id, overheard).await {
         Ok(job) => job,
@@ -18526,6 +18532,15 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         )
         .await
         .unwrap();
+        assert!(poll(state.clone()).await["offer"].is_null());
+        // An offer tagged with a session does not outlive it.
+        emit(state.clone(), "tagged").await;
+        assert_eq!(poll(state.clone()).await["offer"]["text"], "tagged");
+        {
+            let mut store = state.store.lock().unwrap();
+            let id = store.current_live_session().unwrap().unwrap().id;
+            store.end_live_session(id).unwrap();
+        }
         assert!(poll(state).await["offer"].is_null());
     }
 

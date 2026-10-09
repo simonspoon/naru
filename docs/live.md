@@ -3694,7 +3694,7 @@ restart) and carries it on `GET /api/live` as `offer` (`{text, speaker, age_ms}`
 while no session is live **or while the session it was overheard during is the
 live one** (the server tags the offer with the session open when it was heard,
 so ambient mode, which keeps a session open, can still offer; an offer heard
-before that session opened is consumed as before). A user turn clears it. The
+before that session opened is consumed as before). A user turn clears it, and an offer tagged with a session never outlives it: once that session has ended it is neither shown on the idle poll nor carried by an accepting start. The
 orb glows a warm gold pulse (slowed, not removed,
 under reduced motion) with the overheard text as its tooltip; pressing it starts
 a conversation with `POST /api/live {"accept_offer": true}`, which puts the

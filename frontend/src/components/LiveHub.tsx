@@ -772,6 +772,8 @@ export function LiveHub({
   // the session is live.
   const [ambientState, setAmbientState] = useState(false)
   const ambientRef = useRef(false)
+  // An ambient offer-accept is in flight (a second press must not post twice).
+  const acceptingOffer = useRef(false)
   const setAmbientNow = useCallback((next: boolean) => {
     ambientRef.current = next
     setAmbientState(next)
@@ -1956,30 +1958,6 @@ export function LiveHub({
     pauseNowRef.current = pauseNow
   }, [pauseNow])
 
-  // The native host's push (declared here, after the setters it writes).
-  useEffect(() => {
-    if (native === null) return
-    return installNativeHost(window as unknown as Record<string, unknown>, native, (state) => {
-      if (state.muted !== undefined) setMutedNow(state.muted)
-      // Ambient vs live (naru task 1746): the host's word is final. Entering
-      // pauses this page's run; leaving waits for a fresh poll before the
-      // page may run again, so a stale poll cannot make it speak while the
-      // Mac reclaims the voice (nothing pumps the run on `paused` alone).
-      if (state.ambient === true && !ambientRef.current) {
-        setAmbientNow(true)
-        pauseNowRef.current()
-      } else if (state.ambient === false && ambientRef.current) {
-        setAmbientNow(false)
-        void refetch().then(() => setPausedNow(false))
-      }
-      // The host owns the microphone, so the capture effects that normally
-      // write these never run: its level and speech verdict drive the orb and
-      // glow instead. The host's cadence is the throttle.
-      if (state.level !== undefined) setLevel(state.level)
-      if (hostVoiced(state, DEFAULT_VAD.onsetRms)) setVoicedAt(Date.now())
-    })
-  }, [native, setMutedNow, setAmbientNow, setPausedNow, refetch])
-
   // The steady question — is the person talking to mesa through the microphone
   // — which is what the composer's hint and placeholder read. Deliberately not
   // `wantsMic` below: that one goes false for the length of every reply, and
@@ -2000,6 +1978,36 @@ export function LiveHub({
   useEffect(() => {
     armed.current = { live, unlocked }
   }, [live, unlocked])
+
+  // The native host's push (declared here, after the setters it writes).
+  useEffect(() => {
+    if (native === null) return
+    return installNativeHost(window as unknown as Record<string, unknown>, native, (state) => {
+      if (state.muted !== undefined) setMutedNow(state.muted)
+      // Ambient vs live (naru task 1746): the host's word is final. Entering
+      // pauses this page's run; leaving waits for a fresh poll before the
+      // page may run again, so a stale poll cannot make it speak while the
+      // Mac reclaims the voice (nothing pumps the run on `paused` alone).
+      if (state.ambient === true && !ambientRef.current && armed.current.live) {
+        setAmbientNow(true)
+        pauseNowRef.current()
+      } else if (state.ambient === false && ambientRef.current) {
+        setAmbientNow(false)
+        // Then mirror Resume (`togglePause`): claim the voice and run, since
+        // the run only advances on a turns change.
+        void refetch().then(() => {
+          setPausedNow(false)
+          claimVoice()
+          pump.current()
+        })
+      }
+      // The host owns the microphone, so the capture effects that normally
+      // write these never run: its level and speech verdict drive the orb and
+      // glow instead. The host's cadence is the throttle.
+      if (state.level !== undefined) setLevel(state.level)
+      if (hostVoiced(state, DEFAULT_VAD.onsetRms)) setVoicedAt(Date.now())
+    })
+  }, [native, setMutedNow, setAmbientNow, setPausedNow, refetch, claimVoice])
 
   // Joining opens the microphone (mesa task 917): a conversation this browser
   // has joined should be hands-free from the first word, not only after a
@@ -4385,6 +4393,8 @@ export function LiveHub({
               act({ label: 'Go live', action: 'start', disabled: pending !== null }, true)
               return
             }
+            if (pending !== null || acceptingOffer.current) return
+            acceptingOffer.current = true
             // Ambient: the session is already open, so the overheard line
             // becomes a user turn and the host is asked back to live.
             setActionError(null)
@@ -4398,7 +4408,9 @@ export function LiveHub({
                 setActionError(err instanceof Error ? err.message : String(err))
                 setOpen(true)
               },
-            )
+            ).finally(() => {
+              acceptingOffer.current = false
+            })
           },
         }
       : null,
