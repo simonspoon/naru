@@ -11906,3 +11906,38 @@ body.dock-resizing .dock-body {
 .library-diff-gap {
   text-align: center;
 }
+
+/* Settings > Voice > Voice guard enrollment (naru task 1744): status line,
+   live level meter, the script / one-word prompt being read. */
+.voice-enroll-status {
+  margin: 0.5rem 0;
+  font-weight: 600;
+}
+
+.voice-enroll-meter {
+  height: 0.5rem;
+  border-radius: var(--r-md);
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.voice-enroll-meter-fill {
+  height: 100%;
+  background: var(--cyan);
+  transition: width 80ms linear;
+}
+
+.voice-enroll-clock {
+  font-family: var(--font-mono);
+  margin: 0.5rem 0;
+}
+
+.voice-enroll-script {
+  font-size: 1.05rem;
+  line-height: 1.6;
+}
+
+.voice-enroll-reply {
+  font-size: 1.6rem;
+  font-weight: 600;
+}

@@ -594,6 +594,32 @@ pub struct AddedVoice {
     pub models: Vec<String>,
 }
 
+/// The saved speaker-enrollment recording (naru task 1744).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct VoiceEnrollSample {
+    /// File size in bytes.
+    #[ts(type = "number")]
+    pub bytes: u64,
+    /// Length in seconds.
+    pub seconds: f64,
+    /// When it was saved (UTC, ISO 8601).
+    pub recorded_at: String,
+}
+
+/// Speaker-enrollment status (naru task 1744, `docs/voice-enrollment.md`,
+/// `GET /api/config/voice-enrollment`): the recording the browser saved and
+/// the enrollment the Naru Mac app built from it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct VoiceEnrollment {
+    pub sample: Option<VoiceEnrollSample>,
+    /// When `ambient-enrollment.json` was last written, if it exists.
+    pub enrolled_at: Option<String>,
+    /// The enrollment exists and is not older than the sample.
+    pub current: bool,
+}
+
 /// A cloned voice as one file (mesa task 1430,
 /// `GET /api/config/speech/voices/{name}`, `docs/config.md`): what Settings'
 /// **export** downloads and **import** reads back, on this machine or

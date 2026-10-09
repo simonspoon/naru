@@ -31,6 +31,7 @@ import type { ConfigPrice } from './types/ConfigPrice'
 import type { ConfigSpeech } from './types/ConfigSpeech'
 import type { AddedVoice } from './types/AddedVoice'
 import type { ConfigListen } from './types/ConfigListen'
+import type { VoiceEnrollment } from './types/VoiceEnrollment'
 import type { ConfigAudio } from './types/ConfigAudio'
 import type { TranscribeStatus } from './types/TranscribeStatus'
 import type { ConfigLive } from './types/ConfigLive'
@@ -1506,6 +1507,25 @@ export async function designVoice(
  */
 export function getListen(): Promise<ConfigListen> {
   return request('/api/config/listen')
+}
+
+/**
+ * The speaker-enrollment status (naru task 1744, `docs/voice-enrollment.md`):
+ * the saved recording and whether the Naru Mac app has built its enrollment
+ * from it.
+ */
+export function getVoiceEnrollment(): Promise<VoiceEnrollment> {
+  return request('/api/config/voice-enrollment')
+}
+
+/** Saves the recorded WAV (16 kHz mono 16-bit, 20..300 s) as base64. 422 on a WAV the server refuses. */
+export function saveVoiceEnrollment(audioBase64: string): Promise<VoiceEnrollment> {
+  return request('/api/config/voice-enrollment', jsonInit('PUT', { audio_base64: audioBase64 }))
+}
+
+/** Removes the recording and the enrollment, turning the voice guard off. */
+export function deleteVoiceEnrollment(): Promise<VoiceEnrollment> {
+  return request('/api/config/voice-enrollment', { method: 'DELETE' })
 }
 
 /**

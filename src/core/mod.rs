@@ -37,6 +37,7 @@ pub mod system;
 mod types;
 pub mod usage;
 pub mod version;
+pub mod voice_enroll;
 pub mod workflow;
 
 pub use store::{
@@ -65,7 +66,8 @@ pub use types::{
     ProjectGitStatus, ProjectGitView, ProjectVersion, RetroFinding, RetroRun, RetroStatus, Script,
     ScriptArg, ScriptArgKind, ScriptRun, ScriptRunEvent, ScriptRunRecord, ScriptRunStatus,
     ScriptStream, ServeBoolSetting, ServeHostsSetting, ServeNumberSetting, Status, SystemInfo,
-    Task, TaskReceipt, TaskSummary, Workflow, WorkflowBranch, WorkflowEdge, WorkflowLogEntry,
-    WorkflowNode, WorkflowNodeKind, WorkflowRun, WorkflowRunStatus, WorkflowStep,
-    WorkflowStepStatus, WorkflowTrigger, WorkflowView, is_valid_artifact_content_type, task_name,
+    Task, TaskReceipt, TaskSummary, VoiceEnrollSample, VoiceEnrollment, Workflow, WorkflowBranch,
+    WorkflowEdge, WorkflowLogEntry, WorkflowNode, WorkflowNodeKind, WorkflowRun, WorkflowRunStatus,
+    WorkflowStep, WorkflowStepStatus, WorkflowTrigger, WorkflowView,
+    is_valid_artifact_content_type, task_name,
 };

@@ -49,10 +49,10 @@ use crate::core::{
     ProjectGitRepos, ProjectGitStatus, ProjectGitView, ProjectPatch, ProjectVersion, ReceiptPatch,
     STALE_CLAIM_MINUTES, Script, ScriptArg, ScriptPatch, ScriptRunEvent, ServeBoolSetting,
     ServeHostsSetting, ServeNumberSetting, Status, Store, SystemInfo, Task, TaskPatch, TaskSummary,
-    WorkflowNodeKind, WorkflowNodeNew, WorkflowNodePatch, WorkflowPatch, WorkflowTrigger, agents,
-    attachments, audio, board, config, files, git, guard, hooks, inbox_triage, library, listen,
-    live, memory_job, project_memory, receipt, runner, script_runs, scripts, speech, supervisor,
-    system, validate_live_client, version, workflow,
+    VoiceEnrollment, WorkflowNodeKind, WorkflowNodeNew, WorkflowNodePatch, WorkflowPatch,
+    WorkflowTrigger, agents, attachments, audio, board, config, files, git, guard, hooks,
+    inbox_triage, library, listen, live, memory_job, project_memory, receipt, runner, script_runs,
+    scripts, speech, supervisor, system, validate_live_client, version, voice_enroll, workflow,
 };
 
 /// The Vite build output, embedded into the binary at compile time.
@@ -3455,6 +3455,17 @@ fn router(state: AppState) -> Router {
         .route(
             "/api/config/listen",
             get(get_config_listen).put(update_config_listen),
+        )
+        // The speaker-enrollment recording (naru task 1744,
+        // `docs/voice-enrollment.md`): the browser's WAV as base64 in JSON,
+        // kept beside the Mac app's `ambient-enrollment.json`. The transcribe
+        // route's body limit; the server computes no embedding.
+        .route(
+            "/api/config/voice-enrollment",
+            get(get_voice_enrollment)
+                .put(put_voice_enrollment)
+                .delete(delete_voice_enrollment)
+                .layer(DefaultBodyLimit::max(TRANSCRIBE_BODY_LIMIT)),
         )
         // The same file's `audio` section — which engine the server runs
         // speech through and where the `naru-audio` daemon listens (mesa task
@@ -10274,6 +10285,68 @@ async fn add_speech_voice(
                 },
             })?;
     Ok((StatusCode::CREATED, Json(added)).into_response())
+}
+
+/// `GET /api/config/voice-enrollment` — the speaker-enrollment status
+/// (naru task 1744, [`voice_enroll::status`]): the saved recording, when the
+/// Mac app last wrote its enrollment, and whether that is current. Gated by
+/// [`require_agent_access`].
+async fn get_voice_enrollment(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> ApiResult<Json<VoiceEnrollment>> {
+    require_agent_access(&state, &addr, &headers)?;
+    Ok(Json(blocking(voice_enroll::status).await??))
+}
+
+/// `PUT /api/config/voice-enrollment` — saves the recording
+/// ([`voice_enroll::save`]). Gated like [`add_speech_voice`], with its base64
+/// rules: invalid or empty is 422, over [`LIVE_AUDIO_MAX`] 413; a WAV that is
+/// not 16 kHz mono 16-bit PCM of 20..=300 s is 422.
+async fn put_voice_enrollment(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Result<Json<TranscribeBody>, JsonRejection>,
+) -> ApiResult<Json<VoiceEnrollment>> {
+    require_agent_access(&state, &addr, &headers)?;
+    require_same_site_fetch(&headers)?;
+    let Json(body) = body?;
+    let validation = |message: String| ApiError {
+        status: StatusCode::UNPROCESSABLE_ENTITY,
+        code: "validation",
+        message,
+    };
+    let wav = base64::engine::general_purpose::STANDARD
+        .decode(body.audio_base64.as_bytes())
+        .map_err(|e| validation(format!("invalid base64 audio: {e}")))?;
+    if wav.is_empty() {
+        return Err(validation("audio must not be empty".to_string()));
+    }
+    if wav.len() > LIVE_AUDIO_MAX {
+        return Err(ApiError {
+            status: StatusCode::PAYLOAD_TOO_LARGE,
+            code: "validation",
+            message: format!(
+                "audio must be at most {LIVE_AUDIO_MAX} bytes, got {}",
+                wav.len()
+            ),
+        });
+    }
+    Ok(Json(blocking(move || voice_enroll::save(&wav)).await??))
+}
+
+/// `DELETE /api/config/voice-enrollment` — removes the recording and the
+/// enrollment (a missing file is fine), turning the voice guard off. Answers
+/// the now-empty status. Gated by [`require_agent_access`].
+async fn delete_voice_enrollment(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> ApiResult<Json<VoiceEnrollment>> {
+    require_agent_access(&state, &addr, &headers)?;
+    Ok(Json(blocking(voice_enroll::delete).await??))
 }
 
 /// `GET /api/config/speech/voices/{name}` — the cloned voice `name` as one
@@ -19607,6 +19680,96 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             })),
         )
         .await
+    }
+
+    fn enroll_wav(seconds: usize) -> Vec<u8> {
+        let data = (seconds * 16_000 * 2) as u32;
+        let mut b = Vec::new();
+        b.extend_from_slice(b"RIFF");
+        b.extend_from_slice(&(36 + data).to_le_bytes());
+        b.extend_from_slice(b"WAVEfmt ");
+        b.extend_from_slice(&16u32.to_le_bytes());
+        b.extend_from_slice(&1u16.to_le_bytes());
+        b.extend_from_slice(&1u16.to_le_bytes());
+        b.extend_from_slice(&16_000u32.to_le_bytes());
+        b.extend_from_slice(&32_000u32.to_le_bytes());
+        b.extend_from_slice(&2u16.to_le_bytes());
+        b.extend_from_slice(&16u16.to_le_bytes());
+        b.extend_from_slice(b"data");
+        b.extend_from_slice(&data.to_le_bytes());
+        b.resize(b.len() + data as usize, 0);
+        b
+    }
+
+    /// naru task 1744: `/api/config/voice-enrollment` saves a valid WAV
+    /// (sample present, not current), turns `current` on once the Mac app's
+    /// json is newer, refuses a bad format / too-short / bad base64 with 422,
+    /// refuses a foreign Host, and DELETE clears both files.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn voice_enrollment_routes_save_report_and_delete() {
+        let _env = attachments::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (_dir, state) = test_state();
+        let enroll = tempfile::tempdir().unwrap();
+        // SAFETY: ENV_LOCK gives this test exclusive access to the environment.
+        unsafe { std::env::set_var("NARU_VOICE_ENROLL_DIR", enroll.path()) };
+        let put = |audio: String| {
+            put_voice_enrollment(
+                State(state.clone()),
+                ConnectInfo(loopback()),
+                loopback_agent_headers(),
+                Ok(Json(TranscribeBody {
+                    audio_base64: audio,
+                })),
+            )
+        };
+        let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+
+        let Json(s) = put(b64(&enroll_wav(30))).await.unwrap();
+        assert!(s.sample.is_some() && !s.current);
+
+        std::fs::write(enroll.path().join("ambient-enrollment.json"), "[0.1]").unwrap();
+        let Json(s) = get_voice_enrollment(
+            State(state.clone()),
+            ConnectInfo(loopback()),
+            loopback_agent_headers(),
+        )
+        .await
+        .unwrap();
+        assert!(s.current && s.enrolled_at.is_some());
+
+        for bad in [
+            b64(&enroll_wav(5)),
+            b64(b"not a wav"),
+            "!!!".to_string(),
+            String::new(),
+        ] {
+            let err = put(bad).await.unwrap_err();
+            assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY);
+        }
+
+        let foreign = get_voice_enrollment(
+            State(state.clone()),
+            ConnectInfo(loopback()),
+            hdrs(Some("evil.example:0"), None),
+        )
+        .await;
+        assert!(foreign.is_err());
+
+        let Json(s) = delete_voice_enrollment(
+            State(state.clone()),
+            ConnectInfo(loopback()),
+            loopback_agent_headers(),
+        )
+        .await
+        .unwrap();
+        assert!(s.sample.is_none() && s.enrolled_at.is_none() && !s.current);
+        assert!(!enroll.path().join("voice-sample.wav").exists());
+        assert!(!enroll.path().join("ambient-enrollment.json").exists());
+        // SAFETY: as above.
+        unsafe { std::env::remove_var("NARU_VOICE_ENROLL_DIR") };
     }
 
     async fn post_voice(

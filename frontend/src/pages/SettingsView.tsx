@@ -36,6 +36,7 @@ import {
   type CcResetReport,
 } from '../api'
 import { ConfirmDelete } from '../components/ConfirmDelete'
+import { VoiceEnrollSection } from '../components/VoiceEnrollSection'
 import {
   ACTIONS,
   DEFAULT_KEYMAP,
@@ -451,6 +452,7 @@ export function SettingsView({ tab }: { tab: SettingsTab }) {
         <SpeechSection />
         <AudioSection />
         <ListenSection />
+        <VoiceEnrollSection />
       </div>
       <div hidden={tab !== 'memory'}>
         <MemorySection />

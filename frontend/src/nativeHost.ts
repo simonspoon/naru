@@ -23,6 +23,8 @@ export type NativeOut =
   | { type: 'state'; session: number | null; live: boolean; joined: boolean }
   /** The person pressed the listen switch (button or chord). */
   | { type: 'mic'; muted: boolean }
+  /** A speaker-enrollment recording was saved (naru task 1744): the host builds the enrollment from it. */
+  | { type: 'enroll' }
 
 /** What the host hands the page. Absent keys leave the page's state alone. */
 export type NativeMicState = { muted?: boolean; level?: number; hearing?: boolean }
