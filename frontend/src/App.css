@@ -8895,6 +8895,16 @@ body.live-panel-ratio-resizing .live-panel-divider {
   border-color: rgba(255, 180, 68, 0.5);
 }
 
+/* The ambient/live switch carries a word, not a glyph (naru task 1759): the
+   fixed square above would let "Ambient" spill over its neighbours, so it
+   takes the width its label needs and keeps the square's height. */
+.live-toolbar .live-icon.live-icon-ambient {
+  width: auto;
+  padding: 0 8px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 .live-toolbar .live-head-aperture {
   width: 28px;
   height: 28px;
