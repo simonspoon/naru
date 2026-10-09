@@ -56,3 +56,20 @@ jobs:
       - run: npm --prefix frontend run lint
       - run: npm --prefix frontend run test
       - run: npm --prefix frontend run build
+
+  # Compile-only: the library and binary build for Windows (naru task 1741).
+  # Tests stay unix-only; a runtime port is a separate piece of work.
+  windows-build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Stub frontend/dist
+        run: New-Item -ItemType Directory -Force frontend/dist
+      - name: Build
+        run: cargo build
+      - name: Clippy
+        run: cargo clippy -- -D warnings

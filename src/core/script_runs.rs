@@ -34,6 +34,7 @@
 //! the larger term; a change to the cap moves this ceiling with it.
 
 use std::collections::{BTreeMap, HashMap};
+#[cfg(not(windows))]
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -301,6 +302,9 @@ pub fn ndjson(events: &[ScriptRunEvent]) -> String {
 /// read as **alive**, so an unanswerable question never flips another
 /// server's live run to `failed`.
 pub fn pid_is_live(pid: i64) -> bool {
+    #[cfg(windows)]
+    return crate::core::proc::pid_alive(pid);
+    #[cfg(not(windows))]
     Command::new("kill")
         .args(["-0", &pid.to_string()])
         .stdout(Stdio::null())
