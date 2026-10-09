@@ -21,7 +21,7 @@ import type { ConfigListen } from './types/ConfigListen'
  */
 
 /** The section's boxes as typed. */
-export type ListenDraft = { model: string; engine: string }
+export type ListenDraft = { model: string; engine: string; vocabulary: string }
 
 /** The engines `PUT /api/config/listen` accepts, built-in first. */
 export const LISTEN_ENGINES = ['server', 'browser']
@@ -32,7 +32,11 @@ export const LISTEN_ENGINES = ['server', 'browser']
  */
 export function draftFrom(listen: ConfigListen): ListenDraft {
   const engine = (listen.engine ?? '').trim()
-  return { model: listen.model ?? '', engine: engine === '' ? listen.engine_default : engine }
+  return {
+    model: listen.model ?? '',
+    engine: engine === '' ? listen.engine_default : engine,
+    vocabulary: listen.vocabulary ?? '',
+  }
 }
 
 /** The engines to offer, keeping a hand-edited unknown one visible. */
@@ -94,7 +98,11 @@ function valueOf(draft: ListenDraft): string | null {
 
 /** True when either value differs from what the server last reported. */
 export function isDirty(listen: ConfigListen, draft: ListenDraft): boolean {
-  return valueOf(draft) !== (listen.model ?? null) || engineOf(listen, draft) !== undefined
+  return (
+    valueOf(draft) !== (listen.model ?? null) ||
+    engineOf(listen, draft) !== undefined ||
+    vocabularyOf(draft) !== (listen.vocabulary ?? null)
+  )
 }
 
 /**
@@ -104,7 +112,11 @@ export function isDirty(listen: ConfigListen, draft: ListenDraft): boolean {
  * hold back an engine-only save.
  */
 export function isSavable(listen: ConfigListen, draft: ListenDraft): boolean {
-  return valueOf(draft) === (listen.model ?? null) || valueError(draft.model ?? '') === null
+  return (
+    (valueOf(draft) === (listen.model ?? null) || valueError(draft.model ?? '') === null) &&
+    (vocabularyOf(draft) === (listen.vocabulary ?? null) ||
+      vocabularyError(draft.vocabulary) === null)
+  )
 }
 
 /**
@@ -123,5 +135,89 @@ export function changedListen(
   if (valueOf(draft) !== (listen.model ?? null)) changed.model = valueOf(draft)
   const engine = engineOf(listen, draft)
   if (engine !== undefined) changed.engine = engine
+  if (vocabularyOf(draft) !== (listen.vocabulary ?? null)) changed.vocabulary = vocabularyOf(draft)
   return changed
+}
+
+/** What the vocabulary box means: its text, or `null` for "none". */
+function vocabularyOf(draft: ListenDraft): string | null {
+  const trimmed = (draft.vocabulary ?? '').trim()
+  return trimmed === '' ? null : trimmed
+}
+
+/** The most terms naru-audio keeps; the server refuses more at save. */
+export const VOCABULARY_MAX_TERMS = 128
+const VOCABULARY_MAX_TERM_BYTES = 64
+const VOCABULARY_MAX_BOOST = 8
+
+/**
+ * The complaint about the vocabulary box, or `null` if it is fine — a mirror
+ * of `config::validate_vocabulary` (naru task 1754), which owns the rule and
+ * answers a 422 naming the line. One `term[ :boost]` per line, `#` starts a
+ * comment, blank lines are skipped, a boost is above 0 and at most 8, a term
+ * has no `/` or control character and is at most 64 bytes, and there are at
+ * most 128 terms.
+ */
+export function vocabularyError(text: string): string | null {
+  let terms = 0
+  const lines = (text ?? '').split(/\r?\n/)
+  for (let i = 0; i < lines.length; i++) {
+    const fail = (why: string) => `line ${i + 1}: ${why}`
+    const tokens = lines[i]
+      .split('#')[0]
+      .split(/\s+/)
+      .filter((t) => t !== '')
+    if (tokens.length === 0) continue
+    let boost: string | null = null
+    if (tokens.length > 1 && tokens[tokens.length - 1].startsWith(':')) {
+      boost = tokens.pop()!.slice(1)
+    }
+    for (const token of tokens) {
+      if (token.startsWith(':')) return fail('a stray ":" where the term should be')
+      if (token.includes(':')) {
+        return fail(`"${token}" has a ":" inside a word; write the boost as " :BOOST" after a space`)
+      }
+    }
+    if (boost !== null) {
+      // f32, like the daemon: 1e-50 underflows to 0 there.
+      const value = boost === '' ? NaN : Math.fround(Number(boost))
+      if (Number.isNaN(value)) return fail(`the boost "${boost}" is not a number`)
+      if (value <= 0 || value > VOCABULARY_MAX_BOOST) {
+        return fail(`the boost "${boost}" must be above 0 and at most ${VOCABULARY_MAX_BOOST}`)
+      }
+    }
+    const term = tokens.join(' ')
+    if (term.includes('/')) return fail('a term cannot contain "/"')
+    // eslint-disable-next-line no-control-regex
+    if (/[\u0000-\u001f\u007f-\u009f]/.test(term)) {
+      return fail('a term cannot contain a control character')
+    }
+    const bytes = new TextEncoder().encode(term).length
+    if (bytes > VOCABULARY_MAX_TERM_BYTES) {
+      return fail(`the term is ${bytes} bytes; at most ${VOCABULARY_MAX_TERM_BYTES}`)
+    }
+    terms++
+  }
+  if (terms > VOCABULARY_MAX_TERMS) {
+    return `${terms} terms; at most ${VOCABULARY_MAX_TERMS}`
+  }
+  return null
+}
+
+/**
+ * The line under the vocabulary box saying whether it is used, or `null` when
+ * nothing needs saying. `engine` is the server's engine in force
+ * (`audioDraft.savedEngine`), `null` while that is still loading. The model
+ * judged is the configured one, else the daemon's default; when neither is
+ * known the page claims nothing.
+ */
+export function vocabularyNote(listen: ConfigListen, engine: string | null): string | null {
+  if (engine === null) return null
+  if (engine !== 'naru-audio') return 'Vocabulary is used only with the Naru Audio engine.'
+  const model = (listen.model ?? '').trim() || listen.default_model
+  if (!model) return null
+  if (listen.hotword_models.includes(model)) return null
+  const alternative =
+    listen.hotword_models.length > 0 ? `; a model such as ${listen.hotword_models[0]} uses it` : ''
+  return `${model} ignores the vocabulary${alternative}.`
 }

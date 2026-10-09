@@ -2787,11 +2787,15 @@ pub const MODEL: &str = "model";
 /// section's key for what the **server** runs.
 pub const ENGINE: &str = "engine";
 
+/// The config key holding the speech vocabulary (naru task 1754): naru-audio's
+/// `hotwords` text, verbatim.
+pub const VOCABULARY: &str = "vocabulary";
+
 /// The words `listen.engine` accepts; the first is the built-in.
 const LISTEN_ENGINES: &[&str] = &["server", "browser"];
 
 /// Every key the `listen` section understands, for the unknown-key error.
-const LISTEN_KEYS: &[&str] = &[ENGINE, MODEL];
+const LISTEN_KEYS: &[&str] = &[ENGINE, MODEL, VOCABULARY];
 
 /// The `listen` map, deserialized on its own for the reason every other
 /// section is — the [`SpeechSection`] mirror, on the input side.
@@ -2809,6 +2813,8 @@ struct ListenSection {
     /// verbatim so the editor can fix it.
     #[serde(default)]
     engine: Option<String>,
+    #[serde(default)]
+    vocabulary: Option<String>,
 }
 
 fn read_listen(path: &Path) -> Result<ListenSection, String> {
@@ -2841,16 +2847,125 @@ fn listen_model_in(path: &Path) -> Result<Option<String>, String> {
         .filter(|v| listen::is_model_name(v)))
 }
 
+/// The stored speech vocabulary as it is **sent** to naru-audio (naru task
+/// 1754), or `None`. Read on every request like [`listen_model`]. Absent,
+/// blank and a hand-edited value that no longer passes
+/// [`validate_vocabulary`] all mean `None` (the last logged once), so a bad
+/// file never breaks transcription. A file that can't be read is `Err`.
+pub fn listen_vocabulary() -> Result<Option<String>, String> {
+    listen_vocabulary_in(&config_file())
+}
+
+fn listen_vocabulary_in(path: &Path) -> Result<Option<String>, String> {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let Some(text) = read_listen(path)?
+        .vocabulary
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+    else {
+        return Ok(None);
+    };
+    if let Err(message) = validate_vocabulary(&text) {
+        if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            eprintln!(
+                "naru: ignoring listen.vocabulary in {}: {message}",
+                path.display()
+            );
+        }
+        return Ok(None);
+    }
+    Ok(Some(text))
+}
+
+/// The most terms naru-audio keeps from one vocabulary; it truncates with a
+/// warning past this, Naru refuses at save.
+pub const VOCABULARY_MAX_TERMS: usize = 128;
+/// The longest one term may be, in bytes.
+const VOCABULARY_MAX_TERM_BYTES: usize = 64;
+/// The largest boost, inclusive; the smallest is anything above 0.
+const VOCABULARY_MAX_BOOST: f32 = 8.0;
+
+/// Checks a vocabulary against naru-audio's `hotwords` grammar and returns
+/// the number of terms. One `term[ :boost]` per line; `#` starts a comment
+/// to the end of the line; blank lines are skipped; the whitespace-separated
+/// tokens before an optional last `:BOOST` token joined by one space are the
+/// term. An error names the 1-based line.
+pub fn validate_vocabulary(text: &str) -> Result<usize, String> {
+    let mut terms = 0usize;
+    for (i, raw) in text.lines().enumerate() {
+        let line = i + 1;
+        let bad = |why: String| format!("vocabulary line {line}: {why}");
+        let content = raw.split('#').next().unwrap_or("");
+        let mut tokens: Vec<&str> = content.split_whitespace().collect();
+        if tokens.is_empty() {
+            continue;
+        }
+        let mut boost = None;
+        if tokens.len() > 1 && tokens[tokens.len() - 1].starts_with(':') {
+            boost = tokens.pop().map(|t| &t[1..]);
+        }
+        for token in &tokens {
+            if token.starts_with(':') {
+                return Err(bad("a stray \":\" where the term should be".to_string()));
+            }
+            if token.contains(':') {
+                return Err(bad(format!(
+                    "{token:?} has a \":\" inside a word; write the boost as a separate \
+                     \" :BOOST\" after a space"
+                )));
+            }
+        }
+        if let Some(boost) = boost {
+            let value: f32 = boost
+                .parse()
+                .map_err(|_| bad(format!("the boost {boost:?} is not a number")))?;
+            if value.is_nan() || value <= 0.0 || value > VOCABULARY_MAX_BOOST {
+                return Err(bad(format!(
+                    "the boost {boost:?} must be above 0 and at most {VOCABULARY_MAX_BOOST}"
+                )));
+            }
+        }
+        let term = tokens.join(" ");
+        if term.is_empty() {
+            return Err(bad("the term is empty".to_string()));
+        }
+        if term.contains('/') {
+            return Err(bad("a term cannot contain \"/\"".to_string()));
+        }
+        if term.chars().any(char::is_control) {
+            return Err(bad("a term cannot contain a control character".to_string()));
+        }
+        if term.len() > VOCABULARY_MAX_TERM_BYTES {
+            return Err(bad(format!(
+                "the term is {} bytes; at most {VOCABULARY_MAX_TERM_BYTES}",
+                term.len()
+            )));
+        }
+        terms += 1;
+    }
+    if terms > VOCABULARY_MAX_TERMS {
+        return Err(format!(
+            "vocabulary has {terms} terms; at most {VOCABULARY_MAX_TERMS}"
+        ));
+    }
+    Ok(terms)
+}
+
 /// The listen settings for the Settings page (`GET /api/config/listen`): the
 /// configured model (`null` when the file says nothing) plus the models the
 /// installed recognizer offers, so the editor can be a list rather than a
 /// magic string. An empty `models` is "mesa could not ask the binary" — the
 /// editor still has to accept a typed name then.
 pub fn listen() -> Result<ConfigListen, String> {
-    listen_in(&config_file())
+    let (hotword_models, default_model) = listen::hotword_support();
+    listen_in(&config_file(), hotword_models, default_model)
 }
 
-fn listen_in(path: &Path) -> Result<ConfigListen, String> {
+fn listen_in(
+    path: &Path,
+    hotword_models: Vec<String>,
+    default_model: Option<String>,
+) -> Result<ConfigListen, String> {
     let section = read_listen(path)?;
     Ok(ConfigListen {
         // The **raw** stored value, not the filtered one [`listen_model_in`]
@@ -2866,6 +2981,12 @@ fn listen_in(path: &Path) -> Result<ConfigListen, String> {
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty()),
         engine_default: LISTEN_ENGINES[0].to_string(),
+        vocabulary: section
+            .vocabulary
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty()),
+        hotword_models,
+        default_model,
     })
 }
 
@@ -2912,6 +3033,8 @@ fn save_listen_in(
         {
             if key.as_str() == ENGINE {
                 validate_word(key, value, LISTEN_ENGINES).map_err(SaveError::Validation)?;
+            } else if key.as_str() == VOCABULARY {
+                validate_vocabulary(value).map_err(SaveError::Validation)?;
             } else {
                 validate_model(value, offered).map_err(SaveError::Validation)?;
             }
@@ -6947,6 +7070,87 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn vocabulary_accepts_the_grammar_and_counts_terms() {
+        let text =
+            "# a comment\n\nNaru\nNaru :4\nhello world :0.5 # trailing\n  khora :8  \r\nLo-Fi :1e0";
+        assert_eq!(validate_vocabulary(text), Ok(5));
+        assert_eq!(validate_vocabulary(""), Ok(0));
+    }
+
+    #[test]
+    fn vocabulary_names_the_line_of_each_error() {
+        let cases: &[(&str, &str)] = &[
+            ("ok\na/b", "line 2: a term cannot contain \"/\""),
+            (
+                "ok\nNaru :fast",
+                "line 2: the boost \"fast\" is not a number",
+            ),
+            ("Naru:4", "line 1: \"Naru:4\" has a \":\" inside a word"),
+            ("\n\n:4", "line 3: a stray \":\""),
+            ("Naru :", "line 1: the boost \"\" is not a number"),
+            ("Naru :0", "line 1: the boost \"0\" must be above 0"),
+            ("Naru :-1", "must be above 0"),
+            ("Naru :8.5", "must be above 0 and at most 8"),
+            ("Naru :NaN", "must be above 0"),
+            ("Naru :1e-50", "must be above 0"),
+            ("Naru :inf", "must be above 0"),
+            (
+                "a\u{7}b",
+                "line 1: a term cannot contain a control character",
+            ),
+        ];
+        for (text, want) in cases {
+            let err = validate_vocabulary(text).unwrap_err();
+            assert!(err.contains(want), "{text:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn vocabulary_limits_a_term_to_64_bytes_and_the_list_to_128_terms() {
+        assert_eq!(validate_vocabulary(&"a".repeat(64)), Ok(1));
+        let err = validate_vocabulary(&format!("ok\n{}", "a".repeat(65))).unwrap_err();
+        assert!(err.contains("line 2: the term is 65 bytes"), "{err}");
+        // Multi-byte text counts bytes: 33 two-byte characters is 66.
+        assert!(validate_vocabulary(&"é".repeat(33)).is_err());
+        let many = |n: usize| {
+            (0..n)
+                .map(|i| format!("w{i}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert_eq!(validate_vocabulary(&many(128)), Ok(128));
+        let err = validate_vocabulary(&many(129)).unwrap_err();
+        assert!(err.contains("129 terms; at most 128"), "{err}");
+    }
+
+    #[test]
+    fn vocabulary_round_trips_clears_and_a_bad_save_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let text = "Naru :4\nkhora # tool";
+        save_listen_in(&path, &model_update(&[(VOCABULARY, Some(text))]), &[]).unwrap();
+        assert_eq!(listen_vocabulary_in(&path).unwrap().as_deref(), Some(text));
+        let before = std::fs::read_to_string(&path).unwrap();
+        let err = save_listen_in(&path, &model_update(&[(VOCABULARY, Some("ok\nx/y"))]), &[])
+            .unwrap_err();
+        assert!(
+            matches!(&err, SaveError::Validation(m) if m.contains("line 2")),
+            "{err:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        save_listen_in(&path, &model_update(&[(VOCABULARY, None)]), &[]).unwrap();
+        assert_eq!(listen_vocabulary_in(&path).unwrap(), None);
+    }
+
+    #[test]
+    fn a_hand_edited_vocabulary_that_fails_validation_is_not_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, r#"{"listen":{"vocabulary":"a/b"}}"#).unwrap();
+        assert_eq!(listen_vocabulary_in(&path).unwrap(), None);
+    }
+
     /// The models a save is checked against. A fixture, never
     /// `listen::models()`: what a real recognizer on this machine happens to
     /// offer is not something a config unit test may depend on.
@@ -6972,7 +7176,7 @@ mod tests {
             listen_model_in(&path).unwrap().as_deref(),
             Some("parakeet-tdt-0.6b-v2-int8")
         );
-        let view = listen_in(&path).unwrap();
+        let view = listen_in(&path, vec![], None).unwrap();
         assert_eq!(view.model.as_deref(), Some("parakeet-tdt-0.6b-v2-int8"));
 
         // `null` and blank both remove the key — the reset, expressed by
@@ -7066,7 +7270,7 @@ mod tests {
         let path = write_config(dir.path(), r#"{"listen": {"model": "--output /tmp/x"}}"#);
         assert_eq!(listen_model_in(&path).unwrap(), None);
         assert_eq!(
-            listen_in(&path).unwrap().model.as_deref(),
+            listen_in(&path, vec![], None).unwrap().model.as_deref(),
             Some("--output /tmp/x")
         );
     }
@@ -7077,7 +7281,7 @@ mod tests {
         let path = write_config(dir.path(), "not json");
         let err = listen_model_in(&path).unwrap_err();
         assert!(err.contains("malformed mesa config"), "{err}");
-        assert!(listen_in(&path).is_err());
+        assert!(listen_in(&path, vec![], None).is_err());
         let err = save_listen_in(
             &path,
             &model_update(&[(MODEL, Some("parakeet-tdt-0.6b-v2-int8"))]),
@@ -7095,12 +7299,15 @@ mod tests {
     fn listen_engine_round_trips_and_refuses_an_unknown_word_without_writing() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
-        let view = listen_in(&path).unwrap();
+        let view = listen_in(&path, vec![], None).unwrap();
         assert_eq!(view.engine, None);
         assert_eq!(view.engine_default, "server");
 
         save_listen_in(&path, &model_update(&[(ENGINE, Some("browser"))]), &[]).unwrap();
-        assert_eq!(listen_in(&path).unwrap().engine.as_deref(), Some("browser"));
+        assert_eq!(
+            listen_in(&path, vec![], None).unwrap().engine.as_deref(),
+            Some("browser")
+        );
 
         let before = std::fs::read_to_string(&path).unwrap();
         for bad in ["auris", "Server", "none"] {

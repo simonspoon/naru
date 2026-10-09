@@ -1609,6 +1609,32 @@ api PUT /api/config/listen '{"engine": "auris"}'
 [ "$(cat "$CONFIG")" = "$BEFORE" ] || fail "a rejected listen engine must write nothing"
 ok "listen.engine takes server|browser (default server), 422 writing nothing for anything else"
 
+# `listen.vocabulary` (naru task 1754) is naru-audio's `hotwords` text, kept verbatim.
+VOCAB=$'Naru :4\nkhora # the browser tool'
+api PUT /api/config/listen "$(jq -n --arg v "$VOCAB" '{vocabulary: $v}')"
+[ "$CODE" = "200" ] || fail "PUT listen vocabulary: expected 200, got $CODE: $STDOUT"
+[ "$(jq -r '.vocabulary' <<<"$STDOUT")" = "$VOCAB" ] ||
+  fail "PUT listen vocabulary must echo the text verbatim: $STDOUT"
+[ "$(jq -r '.listen.vocabulary' < "$CONFIG")" = "$VOCAB" ] ||
+  fail "PUT listen vocabulary did not write the key: $(cat "$CONFIG")"
+[ "$(jq -r '.listen.engine' < "$CONFIG")" = "browser" ] ||
+  fail "a vocabulary write clobbered listen.engine: $(cat "$CONFIG")"
+BEFORE=$(cat "$CONFIG")
+for BAD in $'ok\nbad/term' $'Naru :fast' $'Naru:4' $'Naru :9'; do
+  api PUT /api/config/listen "$(jq -n --arg v "$BAD" '{vocabulary: $v}')"
+  [ "$CODE" = "422" ] || fail "vocabulary $BAD: expected 422, got $CODE: $STDOUT"
+  [ "$(jq -r .error.code <<<"$STDOUT")" = "validation" ] || fail "vocabulary $BAD: expected validation, got $STDOUT"
+  [ "$(cat "$CONFIG")" = "$BEFORE" ] || fail "a rejected vocabulary must write nothing"
+done
+api PUT /api/config/listen "$(jq -n '{vocabulary: "ok\nbad/term"}')"
+[[ "$(jq -r .error.message <<<"$STDOUT")" == *"line 2"* ]] ||
+  fail "a vocabulary 422 must name the offending line: $STDOUT"
+api PUT /api/config/listen '{"vocabulary": null}'
+[ "$CODE" = "200" ] || fail "PUT listen vocabulary null: expected 200, got $CODE: $STDOUT"
+[ "$(jq -r '.vocabulary' <<<"$STDOUT")" = "null" ] && [ "$(jq 'has("vocabulary")' <<<"$(jq .listen < "$CONFIG")")" = "false" ] ||
+  fail "null must remove listen.vocabulary: $(cat "$CONFIG")"
+ok "listen.vocabulary round-trips verbatim, a bad line is 422 naming it and writing nothing, null removes it"
+
 api GET /api/config/audio
 [ "$CODE" = "200" ] || fail "GET audio: expected 200, got $CODE: $STDOUT"
 [ "$(jq -c '[.url, .url_default, .engine, .engine_default]' <<<"$STDOUT")" = '[null,"http://127.0.0.1:7870",null,"legacy"]' ] ||

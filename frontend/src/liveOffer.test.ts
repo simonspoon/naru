@@ -14,6 +14,10 @@ describe('offerGlows', () => {
   it('does not glow while a conversation is live', () => {
     expect(offerGlows(offer, true)).toBe(false)
   })
+  it('glows during a live session held in ambient mode', () => {
+    expect(offerGlows(offer, true, true)).toBe(true)
+    expect(offerGlows(null, true, true)).toBe(false)
+  })
 })
 
 describe('offerPreview', () => {

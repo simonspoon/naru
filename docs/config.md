@@ -1374,8 +1374,8 @@ mirror of Speech, above.
   own: with nothing configured the argv is byte-for-byte the one it ran
   before this key existed, and which model that means is `auris`'s business.
   There is deliberately **no `language` key** — `auris` has no `--language`
-  flag, so one would drive no argv — and vocabulary is **not** a config key
-  either: it is derived per request, not stored here.
+  flag, so one would drive no argv. The `vocabulary` key below is for
+  `naru-audio` only; `auris` has no vocabulary flag and is sent nothing.
 - **The list of models comes from the binary**, not from Naru:
   `auris --no-download --list-models`, filtered to bounded identifiers and
   cached with a TTL (`core::listen::models`, mesa task 1388: 10 s for a list,
@@ -1412,18 +1412,38 @@ mirror of Speech, above.
   — a deliberate opt-in, never a fallback). Absent/`null`/blank = `"server"`;
   any other word is **422**. The Settings page's Listen section edits it
   (mesa task 1391), but nothing on the page acts on it yet (naru-audio design task 18).
+- **`vocabulary`** (naru task 1754) is a string: the words and names the
+  recogniser should favour, in naru-audio's `hotwords` grammar, stored
+  verbatim (trimmed). One `term[ :boost]` per line; `#` starts a comment to
+  the end of the line; blank lines are skipped; the whitespace-separated
+  tokens before an optional last `:BOOST` token, joined by one space, are the
+  term; a boost is above 0 and at most 8. `core::config::validate_vocabulary`
+  refuses (**422 `validation`** naming the 1-based line, writing nothing) a
+  `/` in a term, a non-numeric or out-of-range boost, a `:` inside a word
+  or a stray `:` where the term belongs, an empty term, a term over 64
+  bytes, a control character, and more than 128 terms. `null` or blank
+  removes the key. On `audio.engine = "naru-audio"` the text is sent as
+  `hotwords` on every transcription (see `docs/listen.md`); on `legacy` it is
+  stored and unused. Read per request; a hand-edited value that no longer
+  validates is logged once and not sent. The Settings page (Voice tab) edits
+  it in a textarea and notes when the model in force ignores it.
 
 ### Routes
 
 - `GET /api/config/listen` → `ConfigListen`: `{model, models, engine,
-  engine_default}`, `model` being the override (`null` when unset) and
+  engine_default, vocabulary, hotword_models, default_model}` — `vocabulary`
+  the stored text or `null`; `hotword_models` the daemon's speech-to-text
+  models whose `/v1/models` row has `x_hotwords: true` (empty on `legacy` or
+  when the daemon can't be asked) and `default_model` its `x_default` one,
+  so the page can say whether the model in force uses the vocabulary;
+  `model` is the override (`null` when unset) and
   `models` what the installed binary offers (`[]` when Naru couldn't ask —
   **not** an error, since the setting must stay visible on a machine where
   `auris` isn't installed yet); `engine` verbatim or `null`, beside
   `engine_default` (`"server"`). Gated like the other config getters
   (`require_agent_access`); a malformed config is **502 `unavailable`**.
 - `PUT /api/config/listen`, body `{"model": "<name>" | null, "engine":
-  "server" | "browser" | null}` → echoes the getter. `null` **and** blank
+  "server" | "browser" | null, "vocabulary": "<text>" | null}` → echoes the getter. `null` **and** blank
   both remove the key. A name that isn't a model — or, when Naru has a list,
   isn't on it — or an unknown engine is **422 `validation`**, writing
   nothing. Gated with `require_agent_access`, the same posture as every other

@@ -679,12 +679,15 @@ fn quoted(message: &str) -> Option<&str> {
 }
 
 /// A `multipart/form-data` body for `POST /v1/audio/transcriptions`: the
-/// recording as `file`, then `model` and `response_format=json` (§2.2).
-fn multipart(wav: &[u8], model: &str) -> (String, Vec<u8>) {
-    form_data(
-        ("audio.wav", "audio/wav", wav),
-        &[("model", model), ("response_format", "json")],
-    )
+/// recording as `file`, then `model` and `response_format=json` (§2.2), and
+/// `hotwords` — the person's vocabulary, verbatim — only when there is one
+/// (naru task 1754), so a request without it is byte-identical to before.
+fn multipart(wav: &[u8], model: &str, hotwords: Option<&str>) -> (String, Vec<u8>) {
+    let mut fields = vec![("model", model), ("response_format", "json")];
+    if let Some(hotwords) = hotwords {
+        fields.push(("hotwords", hotwords));
+    }
+    form_data(("audio.wav", "audio/wav", wav), &fields)
 }
 
 /// A `multipart/form-data` body: `file` as the part named `file` (its
@@ -732,8 +735,15 @@ fn form_data(file: (&str, &str, &[u8]), fields: &[(&str, &str)]) -> (String, Vec
 /// or `default`). Nothing transcribed — silence — is the daemon's 200
 /// `{"text":""}` (§2.2), so `Ok("")`: an empty transcript is a success. Every
 /// failure is `Err` with the §4.4 sentence, and drops the cached probe.
+/// `hotwords`, when `Some`, rides as the multipart `hotwords` field (naru
+/// task 1754); the daemon ignores it on a model that cannot use it.
 /// Blocking.
-pub fn transcribe(url: &str, wav: &[u8], model: &str) -> Result<String, String> {
+pub fn transcribe(
+    url: &str,
+    wav: &[u8],
+    model: &str,
+    hotwords: Option<&str>,
+) -> Result<String, String> {
     let fail = |failure| failed(Side::Listen, url, TRANSCRIPTIONS_PATH, model, failure);
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(TRANSCRIBE_TIMEOUT))
@@ -742,7 +752,7 @@ pub fn transcribe(url: &str, wav: &[u8], model: &str) -> Result<String, String> 
         .max_redirects(0)
         .build()
         .into();
-    let (content_type, body) = multipart(wav, model);
+    let (content_type, body) = multipart(wav, model, hotwords);
     let answer = agent
         .post(format!(
             "{}{TRANSCRIPTIONS_PATH}",
@@ -931,6 +941,50 @@ fn models_of_kind(url: &str, path: &str, kind: &str) -> Vec<String> {
                 .into_iter()
                 .filter(|m| m.x_kind.as_deref() == Some(kind))
                 .map(|m| m.id)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// One speech-to-text model as the daemon lists it (`GET /v1/models`,
+/// `x_kind == "stt"`, naru task 1754): whether it is the daemon's default
+/// one (`x_default`) and whether its backend decodes `hotwords`
+/// (`x_hotwords`). A row without a key reads as `false`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SttCaps {
+    pub id: String,
+    pub default: bool,
+    pub hotwords: bool,
+}
+
+/// The speech-to-text models the daemon at `url` lists, with their
+/// [`SttCaps`]. Empty on any failure. Cached by the caller. Blocking.
+pub fn stt_model_caps(url: &str) -> Vec<SttCaps> {
+    #[derive(Deserialize)]
+    struct List {
+        data: Vec<Model>,
+    }
+    #[derive(Deserialize)]
+    struct Model {
+        id: String,
+        #[serde(default)]
+        x_kind: Option<String>,
+        #[serde(default)]
+        x_default: bool,
+        #[serde(default)]
+        x_hotwords: bool,
+    }
+    list(url, MODELS_PATH)
+        .and_then(|body| serde_json::from_str::<List>(&body).ok())
+        .map(|l| {
+            l.data
+                .into_iter()
+                .filter(|m| m.x_kind.as_deref() == Some("stt"))
+                .map(|m| SttCaps {
+                    id: m.id,
+                    default: m.x_default,
+                    hotwords: m.x_hotwords,
+                })
                 .collect()
         })
         .unwrap_or_default()
@@ -1872,7 +1926,7 @@ mod tests {
         let _prober = prober_lock();
         let stub = transcriber(200, r#"{"text":"Add a task to the naru board."}"#);
         let wav = b"RIFF\x00\x01binary\r\n--not-a-boundary";
-        let text = transcribe(&stub.url(), wav, "parakeet-tdt-0.6b-v2-int8");
+        let text = transcribe(&stub.url(), wav, "parakeet-tdt-0.6b-v2-int8", None);
         assert_eq!(text, Ok("Add a task to the naru board.".to_string()));
         let requests = stub.requests.lock().unwrap();
         let sent = &requests[0];
@@ -1890,14 +1944,62 @@ mod tests {
         }
     }
 
+    /// naru task 1754: the vocabulary is the multipart `hotwords` part,
+    /// verbatim, and a request with none carries no such part.
+    #[test]
+    fn transcribe_sends_hotwords_only_when_given() {
+        let _prober = prober_lock();
+        let stub = transcriber(200, r#"{"text":"ok"}"#);
+        let vocabulary = "Naru :4\nkhora # tool";
+        let url = stub.url();
+        assert!(transcribe(&url, b"RIFF", "default", Some(vocabulary)).is_ok());
+        assert!(transcribe(&url, b"RIFF", "default", None).is_ok());
+        let requests = stub.requests.lock().unwrap();
+        assert!(
+            requests[0].contains(&format!("name=\"hotwords\"\r\n\r\n{vocabulary}\r\n")),
+            "{:?}",
+            requests[0]
+        );
+        assert!(!requests[1].contains("hotwords"), "{:?}", requests[1]);
+    }
+
+    /// naru task 1754: `x_hotwords` and `x_default` read off the stt rows; a
+    /// row without the keys supports nothing.
+    #[test]
+    fn stt_model_caps_reads_the_hotwords_flag() {
+        let _prober = prober_lock();
+        let stub = Stub::start(
+            0,
+            r#"{"data":[
+              {"id":"parakeet-tdt-0.6b-v2-int8","x_kind":"stt","x_default":true,"x_hotwords":true},
+              {"id":"whisper-mlx","x_kind":"stt"},
+              {"id":"breeze-tts-2-mlx","x_kind":"tts","x_hotwords":true}]}"#,
+        );
+        assert_eq!(
+            stt_model_caps(&stub.url()),
+            vec![
+                SttCaps {
+                    id: "parakeet-tdt-0.6b-v2-int8".into(),
+                    default: true,
+                    hotwords: true
+                },
+                SttCaps {
+                    id: "whisper-mlx".into(),
+                    default: false,
+                    hotwords: false
+                },
+            ]
+        );
+    }
+
     /// The boundary never occurs in the recording it frames.
     #[test]
     fn the_multipart_boundary_is_lengthened_past_the_recording() {
-        let (_, probe) = multipart(b"", "default");
+        let (_, probe) = multipart(b"", "default", None);
         let head = String::from_utf8(probe).unwrap();
         let boundary = head[2..head.find('\r').unwrap()].to_string();
         let wav = format!("xx{boundary}xx{boundary}x");
-        let (content_type, body) = multipart(wav.as_bytes(), "default");
+        let (content_type, body) = multipart(wav.as_bytes(), "default", None);
         let used = content_type
             .strip_prefix("multipart/form-data; boundary=")
             .unwrap();
@@ -2136,7 +2238,7 @@ mod tests {
         let _prober = prober_lock();
         let stub = transcriber(200, r#"{"text":"","segments":[]}"#);
         assert_eq!(
-            transcribe(&stub.url(), b"RIFF", "default"),
+            transcribe(&stub.url(), b"RIFF", "default", None),
             Ok(String::new())
         );
     }
@@ -2148,7 +2250,7 @@ mod tests {
         let url = format!("http://127.0.0.1:{}", other.local_addr().unwrap().port());
         drop(other);
         assert_eq!(
-            transcribe(&url, b"RIFF", "default"),
+            transcribe(&url, b"RIFF", "default", None),
             Err(down_message(&url))
         );
         assert_eq!(
@@ -2173,7 +2275,7 @@ mod tests {
                 "type":"invalid_request_error","code":"model_not_pulled","param":"model"}}"#,
         );
         assert_eq!(
-            transcribe(&stub.url(), b"RIFF", "default"),
+            transcribe(&stub.url(), b"RIFF", "default", None),
             Err(
                 "Speech isn't available: the model parakeet-tdt-0.6b-v2-int8 isn't \
                  downloaded. Run `naru-audio pull parakeet-tdt-0.6b-v2-int8`."
@@ -2185,7 +2287,7 @@ mod tests {
             r#"{"error":{"message":"the model \"zz-nobody\" is not in the catalog; see GET /v1/models","code":"model_not_found"}}"#,
         );
         assert_eq!(
-            transcribe(&stub.url(), b"RIFF", "zz-nobody"),
+            transcribe(&stub.url(), b"RIFF", "zz-nobody", None),
             Err(
                 "Speech isn't available: naru-audio reported: the model \"zz-nobody\" \
                  is not in the catalog; see GET /v1/models"
@@ -2204,12 +2306,12 @@ mod tests {
             r#"{"error":{"message":"the audio is not WAV","code":"unsupported_media_type"}}"#,
         );
         assert_eq!(
-            transcribe(&stub.url(), b"OggS", "default"),
+            transcribe(&stub.url(), b"OggS", "default", None),
             Err("Speech isn't available: naru-audio reported: the audio is not WAV".to_string())
         );
         let stub = transcriber(502, "<html>bad gateway</html>");
         assert_eq!(
-            transcribe(&stub.url(), b"RIFF", "default"),
+            transcribe(&stub.url(), b"RIFF", "default", None),
             Err("Speech isn't available: naru-audio reported: \
                  /v1/audio/transcriptions answered HTTP 502"
                 .to_string())
@@ -2266,7 +2368,7 @@ mod tests {
         assert_eq!(cached(AudioState::Ready), AudioState::Ready);
         // Control: inside its TTL the entry stands, nothing refetched.
         assert_eq!(cached(AudioState::Error), AudioState::Ready);
-        let _ = transcribe(&stub.url(), b"RIFF", "default");
+        let _ = transcribe(&stub.url(), b"RIFF", "default", None);
         assert_eq!(
             cached(AudioState::Error),
             AudioState::Error,

@@ -37,6 +37,7 @@ function board(id: number, patch: Partial<LiveBoardSummary> = {}): LiveBoardSumm
     kind: 'markdown',
     title: 'the plan',
     created_at: '2026-01-01 00:00:00',
+    pinned_at: null,
     ...patch,
   }
 }

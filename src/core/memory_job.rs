@@ -22,7 +22,6 @@
 
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -143,8 +142,8 @@ pub fn spawn(job: &Job, dir: &str, db: Option<&Path>) -> std::result::Result<Str
     cmd.args(job.args(dir))
         .stdin(Stdio::null())
         .stdout(out.try_clone().map_err(|e| e.to_string())?)
-        .stderr(out)
-        .process_group(0);
+        .stderr(out);
+    crate::core::proc::isolate(&mut cmd);
     if let Some(db) = db {
         cmd.env("NARU_DB", db);
     }

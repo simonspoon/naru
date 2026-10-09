@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { detectNativeHost, hostVoiced, installNativeHost, type NativeOut } from './nativeHost'
+import { ambientControl, detectNativeHost, hostVoiced, installNativeHost, type NativeOut } from './nativeHost'
 
 function stubWindow() {
   const posted: unknown[] = []
@@ -60,5 +60,24 @@ describe('nativeHost', () => {
     expect(hostVoiced({ level: 0.02 }, 0.02)).toBe(true)
     expect(hostVoiced({ hearing: true }, 0.02)).toBe(true)
     expect(hostVoiced({ hearing: false, level: 0 }, 0.02)).toBe(false)
+  })
+
+  it('delivers ambient, ignoring a wrong type', () => {
+    const { win } = stubWindow()
+    const got: unknown[] = []
+    installNativeHost(win, detectNativeHost(win)!, (s) => got.push(s))
+    const api = win.naruNativeHost as { setMicState: (s: unknown) => void }
+    api.setMicState({ ambient: true })
+    api.setMicState({ ambient: false, muted: true })
+    api.setMicState({ ambient: 'yes' })
+    expect(got).toEqual([{ ambient: true }, { muted: true, ambient: false }])
+  })
+
+  it('offers the ambient switch only with a host in a joined live session', () => {
+    expect(ambientControl(false, true, true, false)).toBeNull()
+    expect(ambientControl(true, false, true, false)).toBeNull()
+    expect(ambientControl(true, true, false, false)).toBeNull()
+    expect(ambientControl(true, true, true, false)).toEqual({ label: 'Ambient', next: true })
+    expect(ambientControl(true, true, true, true)).toEqual({ label: 'Live', next: false })
   })
 })

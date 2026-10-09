@@ -21,7 +21,6 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -820,6 +819,55 @@ pub struct ImportOptions {
     pub force: bool,
 }
 
+/// The permission bits of a file; off unix a plain file mode, there being none.
+fn file_mode(meta: &fs::Metadata) -> u32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.permissions().mode() & 0o7777
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        0o644
+    }
+}
+
+/// Sets the permission bits; a no-op off unix.
+fn set_file_mode(path: &Path, mode: u32) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, mode);
+        Ok(())
+    }
+}
+
+/// Creates the symlink `link` -> `to`. On Windows the kind follows what `to`
+/// names (resolved against the link's folder when relative); creating one may
+/// need Developer Mode or elevation, and that io error is returned as is.
+fn make_symlink(to: &Path, link: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(to, link)
+    }
+    #[cfg(windows)]
+    {
+        let resolved = link
+            .parent()
+            .map_or_else(|| to.to_path_buf(), |p| p.join(to));
+        if resolved.is_dir() {
+            std::os::windows::fs::symlink_dir(to, link)
+        } else {
+            std::os::windows::fs::symlink_file(to, link)
+        }
+    }
+}
+
 /// One file import would write.
 enum Content {
     File { bytes: Vec<u8>, mode: u32 },
@@ -1105,7 +1153,7 @@ pub fn import(
             }
             Content::File {
                 bytes,
-                mode: meta.permissions().mode() & 0o7777,
+                mode: file_mode(&meta),
             }
         };
         let target = home.join(&target_rel);
@@ -1160,7 +1208,7 @@ pub fn import(
             }
             let content = Content::File {
                 bytes: fs::read(&src)?,
-                mode: meta.permissions().mode() & 0o7777,
+                mode: file_mode(&meta),
             };
             let rel = format!("{DATA_PREFIX}/{}/{f}", d.name);
             let target = d.path.join(&f);
@@ -1270,9 +1318,9 @@ pub fn import(
         match &p.content {
             Content::File { bytes, mode } => {
                 fs::write(&p.target, bytes)?;
-                fs::set_permissions(&p.target, fs::Permissions::from_mode(*mode))?;
+                set_file_mode(&p.target, *mode)?;
             }
-            Content::Link(to) => std::os::unix::fs::symlink(to, &p.target)?,
+            Content::Link(to) => make_symlink(to, &p.target)?,
         }
         if p.rewritten {
             rewritten.push(p.rel.clone());
@@ -2092,6 +2140,7 @@ mod tests {
     /// there — and a symlink *inside* a data dir is neither exported nor
     /// restored.
     #[test]
+    #[cfg(unix)]
     fn symlinks_in_the_data_dirs_are_never_restored() {
         let tmp = tempfile::tempdir().unwrap();
         let archive = exported(tmp.path());

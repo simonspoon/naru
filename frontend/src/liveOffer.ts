@@ -4,9 +4,14 @@
 
 import type { LiveOffer } from './types/LiveOffer'
 
-/** The orb glows iff an offer is waiting and no conversation is live. */
-export function offerGlows(offer: LiveOffer | null | undefined, live: boolean): boolean {
-  return offer != null && !live
+/** The orb glows iff an offer is waiting and no conversation is live, or the
+ *  host holds the live session in ambient mode (naru task 1746). */
+export function offerGlows(
+  offer: LiveOffer | null | undefined,
+  live: boolean,
+  ambient = false,
+): boolean {
+  return offer != null && (!live || ambient)
 }
 
 /** The first `max` characters of the overheard text, one line, ellipsised. */

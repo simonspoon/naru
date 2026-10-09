@@ -13,6 +13,7 @@ import {
   elapsedSince,
   ENTER_MS,
   isEntering,
+  modelTag,
   markSeen,
   nextExpiry,
   reconcileLingering,
@@ -198,5 +199,23 @@ describe('child lingering', () => {
       ['p|cmd:sleep 9', true],
     ])
     expect(cardChildren('other', [], l)).toEqual([])
+  })
+})
+
+describe('modelTag', () => {
+  it('names the family', () => {
+    expect(modelTag('claude-opus-4-5')).toBe('opus')
+    expect(modelTag('claude-sonnet-4-5-20250929')).toBe('sonnet')
+    expect(modelTag('claude-haiku-4-5-20251001')).toBe('haiku')
+    expect(modelTag('claude-opus-5[1m]')).toBe('opus')
+  })
+  it('shortens an unrecognised id', () => {
+    expect(modelTag('claude-foo-9-20260101')).toBe('foo-9')
+    expect(modelTag('gpt-x[1m]')).toBe('gpt-x')
+  })
+  it('is null when unknown', () => {
+    expect(modelTag(null)).toBeNull()
+    expect(modelTag('')).toBeNull()
+    expect(modelTag('claude-')).toBeNull()
   })
 })

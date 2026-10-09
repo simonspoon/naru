@@ -28,4 +28,20 @@ engine: string | null,
 /**
  * The built-in page engine (`"server"`).
  */
-engine_default: string, };
+engine_default: string, 
+/**
+ * The speech vocabulary (naru task 1754), verbatim — naru-audio's
+ * `hotwords` text — or `null` when none is configured.
+ */
+vocabulary: string | null, 
+/**
+ * The speech-to-text models whose backend uses the vocabulary
+ * (`x_hotwords` on the daemon's model list). Empty on the legacy engine
+ * and when the daemon could not be asked.
+ */
+hotword_models: Array<string>, 
+/**
+ * The daemon's default speech-to-text model, so the page can judge the
+ * vocabulary for a model nobody configured; `null` when unknown.
+ */
+default_model: string | null, };

@@ -88,6 +88,9 @@ jobs:
           }
 
           $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+          }
           if (-not (Test-Path $iscc)) { throw "Inno Setup 6 not found at $iscc" }
 
           $dist = Join-Path $PWD 'dist'

@@ -865,23 +865,16 @@ pub fn capture(
     timeout: std::time::Duration,
 ) -> Result<Captured, String> {
     use std::io::{Read, Write};
-    use std::os::unix::process::CommandExt;
 
+    crate::core::proc::isolate(&mut cmd);
     let mut child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .process_group(0)
         .spawn()
         .map_err(|e| format!("failed to start {:?}: {e}", cmd.get_program()))?;
     let pgid = child.id();
-    let kill_group = || {
-        let _ = Command::new("kill")
-            .args(["-KILL", "--", &format!("-{pgid}")])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-    };
+    let kill_group = || crate::core::proc::signal_group(i64::from(pgid), "KILL");
     let mut pipe_in = child.stdin.take().expect("stdin was piped");
     std::thread::spawn(move || {
         // A child that exits without reading is not an error.
@@ -1329,6 +1322,7 @@ mod tests {
     use super::*;
 
     use std::io::Write;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     // Captured from `claude agents --json`: one interactive session (no short
@@ -1556,6 +1550,7 @@ mod tests {
         let path = dir.join("claude");
         let mut f = std::fs::File::create(&path).unwrap();
         writeln!(f, "#!/bin/sh\n{script}").unwrap();
+        #[cfg(unix)]
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         path.to_string_lossy().into_owned()
     }
