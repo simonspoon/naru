@@ -1322,6 +1322,7 @@ mod tests {
     use super::*;
 
     use std::io::Write;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     // Captured from `claude agents --json`: one interactive session (no short
@@ -1549,6 +1550,7 @@ mod tests {
         let path = dir.join("claude");
         let mut f = std::fs::File::create(&path).unwrap();
         writeln!(f, "#!/bin/sh\n{script}").unwrap();
+        #[cfg(unix)]
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         path.to_string_lossy().into_owned()
     }

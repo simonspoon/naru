@@ -14281,6 +14281,7 @@ mod tests {
     /// `ENV_LOCK`; the value is left set on purpose — "no config file" is the
     /// state every other test wants too.
     fn stub_claude_bg(dir: &std::path::Path, log_path: &std::path::Path) -> String {
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         unsafe { std::env::set_var("MESA_CONFIG_FILE", dir.join("no-such-config.json")) };
         let path = dir.join("claude");
@@ -14307,6 +14308,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             ),
         )
         .unwrap();
+        #[cfg(unix)]
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         path.to_string_lossy().into_owned()
     }
@@ -14996,6 +14998,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         agents_file: &std::path::Path,
         stop_log: &std::path::Path,
     ) -> String {
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         unsafe { std::env::set_var("MESA_CONFIG_FILE", dir.join("no-such-config.json")) };
         std::fs::write(agents_file, "[]").unwrap();
@@ -15020,6 +15023,7 @@ exit 2
             ),
         )
         .unwrap();
+        #[cfg(unix)]
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         path.to_string_lossy().into_owned()
     }
@@ -16129,6 +16133,7 @@ exit 2
         sessions: &std::path::Path,
         log_path: &std::path::Path,
     ) -> String {
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         unsafe { std::env::set_var("MESA_CONFIG_FILE", dir.join("no-such-config.json")) };
         let path = dir.join("claude");
@@ -16150,6 +16155,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             ),
         )
         .unwrap();
+        #[cfg(unix)]
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         path.to_string_lossy().into_owned()
     }
@@ -16445,6 +16451,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
     /// A stub `naru` for `NARU_SELF_BIN`: appends its argv (`|`-joined, one
     /// line per run) to the returned log and exits 0. Returns `(stub, log)`.
     fn inbox_job_stub(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         let log = dir.join("jobs.log");
         let stub = dir.join("naru-stub");
@@ -16456,6 +16463,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             ),
         )
         .unwrap();
+        #[cfg(unix)]
         std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
         (stub, log)
     }
@@ -18641,6 +18649,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         crate::core::library::test_home::with_home_dir(|_| {
+            #[cfg(unix)]
             use std::os::unix::fs::PermissionsExt;
             let stub_dir = tempfile::tempdir().unwrap();
             let log_path = stub_dir.path().join("job.log");
@@ -18653,6 +18662,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                 ),
             )
             .unwrap();
+            #[cfg(unix)]
             std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
             unsafe { std::env::set_var("NARU_SELF_BIN", &stub) };
 
@@ -19929,6 +19939,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         name: &str,
         ran: &std::path::Path,
     ) -> std::path::PathBuf {
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         let path = dir.join(name);
         std::fs::write(
@@ -19936,6 +19947,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             format!("#!/bin/sh\ntouch '{}'\nexit 1\n", ran.display()),
         )
         .unwrap();
+        #[cfg(unix)]
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         path
     }

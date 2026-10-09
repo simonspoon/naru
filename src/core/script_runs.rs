@@ -458,6 +458,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn stop_kills_the_process_group_and_the_row_lands_stopped() {
         let dir = tempfile::tempdir().unwrap();
         let marker = dir.path().join("pid");

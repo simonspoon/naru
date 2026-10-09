@@ -2140,6 +2140,7 @@ mod tests {
     /// there — and a symlink *inside* a data dir is neither exported nor
     /// restored.
     #[test]
+    #[cfg(unix)]
     fn symlinks_in_the_data_dirs_are_never_restored() {
         let tmp = tempfile::tempdir().unwrap();
         let archive = exported(tmp.path());

@@ -884,6 +884,7 @@ fn fix_wav_sizes(bytes: &mut [u8]) {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::sync::Mutex;
 
@@ -1064,6 +1065,7 @@ mod tests {
     fn write_stub(dir: &std::path::Path, name: &str, script: &str) -> std::path::PathBuf {
         let path = dir.join(name);
         std::fs::write(&path, script).expect("write stub");
+        #[cfg(unix)]
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
         path
     }

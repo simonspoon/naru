@@ -463,6 +463,7 @@ fn transcribe_auris(audio: &[u8], model: Option<&str>) -> Result<String, String>
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::sync::Mutex;
 
@@ -563,6 +564,7 @@ mod tests {
              printf '%s\\n' '{\"type\":\"transcript\",\"text\":\"ok\"}'\n",
         )
         .expect("write stub");
+        #[cfg(unix)]
         std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).expect("chmod");
 
         unsafe { std::env::set_var("MESA_AURIS_BIN", &stub) };
@@ -590,6 +592,7 @@ mod tests {
              head -c 8388608 /dev/zero | tr '\\0' 'x'\n",
         )
         .expect("write stub");
+        #[cfg(unix)]
         std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).expect("chmod");
 
         let names = list_names(
@@ -615,6 +618,7 @@ mod tests {
     fn write_stub(dir: &std::path::Path, name: &str, script: &str) -> std::path::PathBuf {
         let path = dir.join(name);
         std::fs::write(&path, script).expect("write stub");
+        #[cfg(unix)]
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
         path
     }
