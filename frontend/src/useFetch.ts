@@ -17,7 +17,7 @@ export function useFetch<T>(
   load: () => Promise<T>,
   key: string,
   options?: { pollMs?: number },
-): { data: T | null; error: string | null; refetch: () => void } {
+): { data: T | null; error: string | null; refetch: () => Promise<void> } {
   const pollMs = options?.pollMs
   const [data, setData] = useState<T | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -37,7 +37,7 @@ export function useFetch<T>(
     loadRef.current = load
   })
   // Points at the current effect's `run` so `refetch` respects cancellation.
-  const runRef = useRef<() => void>(() => {})
+  const runRef = useRef<() => Promise<void>>(() => Promise.resolve())
 
   useEffect(() => {
     let cancelled = false
@@ -45,7 +45,7 @@ export function useFetch<T>(
     // Local to the effect so it resets whenever `key` changes (new effect).
     let lastJson: string | null = null
     const run = () => {
-      loadRef.current().then(
+      return loadRef.current().then(
         (d) => {
           if (cancelled) return
           // Drop polls that changed nothing so an idle view never re-renders.

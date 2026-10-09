@@ -157,6 +157,8 @@ export type OrbProps = {
   pauseDisabled: boolean
   /** Pause and sound mute are offered (the head's `pauseButton` predicate). */
   canPause: boolean
+  /** The ambient/live switch (naru task 1746): null/absent = not offered. */
+  ambient?: { label: 'Ambient' | 'Live'; onPress: () => void } | null
   onToggleMic: () => void
   onTogglePause: () => void
   onToggleSpeech: () => void
@@ -200,7 +202,7 @@ function OrbPie(p: OrbProps) {
           <MicGlyph />
         </Segment>
       )}
-      {p.canPause && (
+      {p.canPause && p.ambient?.label !== 'Live' && (
         <Segment
           d={sector(-40, 40)}
           at={mid(0)}
@@ -332,7 +334,7 @@ function HeaderButton({
  * collapsed nav; the muted mic is red and slashed.
  */
 export function OrbHeaderControls(p: OrbProps) {
-  if (!p.micAvailable && !p.canPause) return null
+  if (!p.micAvailable && !p.canPause && !p.ambient) return null
   return (
     <>
       <div className="header-orb-ctrls">
@@ -345,7 +347,12 @@ export function OrbHeaderControls(p: OrbProps) {
             <MicGlyph slashed={p.micMuted} />
           </HeaderButton>
         )}
-        {p.canPause && (
+        {p.ambient && (
+          <HeaderButton label={p.ambient.label} off={false} onPress={p.ambient.onPress}>
+            <span>{p.ambient.label}</span>
+          </HeaderButton>
+        )}
+        {p.canPause && p.ambient?.label !== 'Live' && (
           <HeaderButton label={p.pauseLabel} off={p.paused} disabled={p.pauseDisabled} onPress={p.onTogglePause}>
             <PauseGlyph paused={p.paused} />
           </HeaderButton>

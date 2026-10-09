@@ -8,7 +8,7 @@
  * so `detectNativeHost` answers `null` and nothing here is ever installed.
  *
  * Page to host: `window.webkit.messageHandlers.naruLive.postMessage(msg)`.
- * Host to page: `window.naruNativeHost.setMicState({ muted?, level?, hearing? })`.
+ * Host to page: `window.naruNativeHost.setMicState({ muted?, level?, hearing?, ambient? })`.
  * `level` (RMS 0..1) and `hearing` (host's own speech verdict) carry the voice
  * the page would otherwise meter itself, so the orb and glow follow it too.
  */
@@ -23,9 +23,32 @@ export type NativeOut =
   | { type: 'state'; session: number | null; live: boolean; joined: boolean }
   /** The person pressed the listen switch (button or chord). */
   | { type: 'mic'; muted: boolean }
+  /** The person asked to switch the host between ambient (live session open,
+   *  page paused) and live. The host's `setMicState.ambient` answers. */
+  | { type: 'ambient'; on: boolean }
+  /** A speaker-enrollment recording was saved (naru task 1744): the host builds the enrollment from it. */
+  | { type: 'enroll' }
 
 /** What the host hands the page. Absent keys leave the page's state alone. */
-export type NativeMicState = { muted?: boolean; level?: number; hearing?: boolean }
+export type NativeMicState = {
+  muted?: boolean
+  level?: number
+  hearing?: boolean
+  /** The host's verdict on ambient vs live; authoritative. */
+  ambient?: boolean
+}
+
+/** The ambient/live switch button: only with a host, in a live session this
+ *  browser joined. `next` is the mode a press asks for. */
+export function ambientControl(
+  hostPresent: boolean,
+  live: boolean,
+  joined: boolean,
+  ambient: boolean,
+): { label: 'Ambient' | 'Live'; next: boolean } | null {
+  if (!hostPresent || !live || !joined) return null
+  return ambient ? { label: 'Live', next: false } : { label: 'Ambient', next: true }
+}
 
 /** Whether a host push means the person is audibly talking: the host says so,
  *  or its level reaches the page's own capture onset. */
@@ -58,7 +81,8 @@ export function installNativeHost(
   const api = {
     setMicState(state: unknown) {
       if (typeof state !== 'object' || state === null) return
-      const { muted, level, hearing } = state as {
+      const { muted, level, hearing, ambient } = state as {
+        ambient?: unknown
         muted?: unknown
         level?: unknown
         hearing?: unknown
@@ -69,6 +93,7 @@ export function installNativeHost(
         out.level = Math.min(1, Math.max(0, level))
       }
       if (typeof hearing === 'boolean') out.hearing = hearing
+      if (typeof ambient === 'boolean') out.ambient = ambient
       if (Object.keys(out).length > 0) onState(out)
     },
   }

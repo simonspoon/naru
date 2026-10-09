@@ -22,6 +22,7 @@ pub mod look;
 pub mod memory_job;
 pub mod migrate;
 pub mod notify;
+pub mod proc;
 pub mod project_memory;
 pub mod receipt;
 pub mod retro;
@@ -37,6 +38,7 @@ pub mod system;
 mod types;
 pub mod usage;
 pub mod version;
+pub mod voice_enroll;
 pub mod workflow;
 
 pub use store::{
@@ -58,14 +60,15 @@ pub use types::{
     GitStatus, GitWorktree, GpuInfo, HookRun, InboxItem, InboxKind, LibraryBundle,
     LibraryImportResult, LibraryItem, LibraryKind, LibraryScope, LibrarySyncResult, LibrarySyncRow,
     LibrarySyncStatus, LibraryVersion, LiveAction, LiveBoard, LiveBoardHistoryEntry,
-    LiveBoardInkEntry, LiveBoardKind, LiveBoardSummary, LiveContext, LiveContextKind,
-    LiveMemoryHit, LiveNotebookEntry, LiveNotice, LiveOffer, LiveResult, LiveRole, LiveSession,
-    LiveState, LiveStatus, LiveSummary, LiveTranscript, LiveTurn, LiveWindow, ModelRates,
-    NaruVersion, Priority, Project, ProjectAgents, ProjectFileTree, ProjectGitLog, ProjectGitRepos,
-    ProjectGitStatus, ProjectGitView, ProjectVersion, RetroFinding, RetroRun, RetroStatus, Script,
-    ScriptArg, ScriptArgKind, ScriptRun, ScriptRunEvent, ScriptRunRecord, ScriptRunStatus,
-    ScriptStream, ServeBoolSetting, ServeHostsSetting, ServeNumberSetting, Status, SystemInfo,
-    Task, TaskReceipt, TaskSummary, Workflow, WorkflowBranch, WorkflowEdge, WorkflowLogEntry,
-    WorkflowNode, WorkflowNodeKind, WorkflowRun, WorkflowRunStatus, WorkflowStep,
-    WorkflowStepStatus, WorkflowTrigger, WorkflowView, is_valid_artifact_content_type, task_name,
+    LiveBoardHistoryPage, LiveBoardInkEntry, LiveBoardKind, LiveBoardSummary, LiveContext,
+    LiveContextKind, LiveMemoryHit, LiveNotebookEntry, LiveNotice, LiveOffer, LiveResult, LiveRole,
+    LiveSession, LiveState, LiveStatus, LiveSummary, LiveTranscript, LiveTurn, LiveWindow,
+    ModelRates, NaruVersion, Priority, Project, ProjectAgents, ProjectFileTree, ProjectGitLog,
+    ProjectGitRepos, ProjectGitStatus, ProjectGitView, ProjectVersion, RetroFinding, RetroRun,
+    RetroStatus, Script, ScriptArg, ScriptArgKind, ScriptRun, ScriptRunEvent, ScriptRunRecord,
+    ScriptRunStatus, ScriptStream, ServeBoolSetting, ServeHostsSetting, ServeNumberSetting, Status,
+    SystemInfo, Task, TaskDigestEntry, TaskNote, TaskReceipt, TaskSummary, VoiceEnrollSample,
+    VoiceEnrollment, Workflow, WorkflowBranch, WorkflowEdge, WorkflowLogEntry, WorkflowNode,
+    WorkflowNodeKind, WorkflowRun, WorkflowRunStatus, WorkflowStep, WorkflowStepStatus,
+    WorkflowTrigger, WorkflowView, is_valid_artifact_content_type, task_name,
 };

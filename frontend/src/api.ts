@@ -31,6 +31,7 @@ import type { ConfigPrice } from './types/ConfigPrice'
 import type { ConfigSpeech } from './types/ConfigSpeech'
 import type { AddedVoice } from './types/AddedVoice'
 import type { ConfigListen } from './types/ConfigListen'
+import type { VoiceEnrollment } from './types/VoiceEnrollment'
 import type { ConfigAudio } from './types/ConfigAudio'
 import type { TranscribeStatus } from './types/TranscribeStatus'
 import type { ConfigLive } from './types/ConfigLive'
@@ -58,6 +59,8 @@ import type { LibrarySyncRow } from './types/LibrarySyncRow'
 import type { LibraryVersion } from './types/LibraryVersion'
 import type { LiveBoard } from './types/LiveBoard'
 import type { LiveBoardHistoryEntry } from './types/LiveBoardHistoryEntry'
+import type { LiveBoardHistoryPage } from './types/LiveBoardHistoryPage'
+import type { LiveBoardSummary } from './types/LiveBoardSummary'
 import type { LiveContext } from './types/LiveContext'
 import type { LiveNotice } from './types/LiveNotice'
 import type { LiveSession } from './types/LiveSession'
@@ -83,6 +86,7 @@ import type { ScriptRunRecord } from './types/ScriptRunRecord'
 import type { Status } from './types/Status'
 import type { SystemInfo } from './types/SystemInfo'
 import type { Task } from './types/Task'
+import type { TaskNote } from './types/TaskNote'
 import type { TaskReceipt } from './types/TaskReceipt'
 import type { TaskSummary } from './types/TaskSummary'
 import type { VoiceDesign } from './types/VoiceDesign'
@@ -308,6 +312,16 @@ export function deleteTask(id: number): Promise<Task[]> {
     method: 'DELETE',
     headers: { 'Content-Type': 'application/json' },
   })
+}
+
+// ---- notes (a task's append-only notes, naru task 1724) ----
+
+export function listTaskNotes(id: number): Promise<TaskNote[]> {
+  return request(`/api/tasks/${id}/notes`)
+}
+
+export function addTaskNote(id: number, body: string): Promise<TaskNote> {
+  return request(`/api/tasks/${id}/notes`, jsonInit('POST', { body }))
 }
 
 // ---- receipt (a task's frozen work record, task 920) ----
@@ -1012,6 +1026,22 @@ export function createLiveBoard(): Promise<LiveBoard> {
   return request('/api/live/boards', jsonInit('POST', {}))
 }
 
+/**
+ * One page of the global whiteboard history (naru task 1735): boards from
+ * every session, newest first, plus every pinned board. `before` is the id
+ * of the oldest board already loaded.
+ */
+export function getLiveBoardHistory(before?: number, limit = 10): Promise<LiveBoardHistoryPage> {
+  const q = new URLSearchParams({ limit: String(limit) })
+  if (before !== undefined) q.set('before', String(before))
+  return request(`/api/live/boards?${q}`)
+}
+
+/** Pins or unpins a board of any session. */
+export function pinLiveBoard(id: number, pinned: boolean): Promise<LiveBoardSummary> {
+  return request(`/api/live/boards/${id}/pin`, jsonInit('POST', { pinned }))
+}
+
 /** Ends the conversation. Idempotent: ending an ended one returns it unchanged. */
 export function stopLive(): Promise<LiveSession> {
   return request('/api/live', jsonDelete())
@@ -1506,6 +1536,29 @@ export async function designVoice(
  */
 export function getListen(): Promise<ConfigListen> {
   return request('/api/config/listen')
+}
+
+/**
+ * The speaker-enrollment status (naru task 1744, `docs/voice-enrollment.md`):
+ * the saved recording and whether the Naru Mac app has built its enrollment
+ * from it.
+ */
+export function getVoiceEnrollment(): Promise<VoiceEnrollment> {
+  return request('/api/config/voice-enrollment')
+}
+
+/** Saves the recorded WAV (16 kHz mono 16-bit, 20..300 s) as base64. 422 on a WAV the server refuses. */
+export function saveVoiceEnrollment(audioBase64: string): Promise<VoiceEnrollment> {
+  return request('/api/config/voice-enrollment', jsonInit('PUT', { audio_base64: audioBase64 }))
+}
+
+/** Removes the recording and the enrollment, turning the voice guard off. */
+export function deleteVoiceEnrollment(): Promise<VoiceEnrollment> {
+  // The server's mutating-request gate wants a JSON Content-Type even with no body.
+  return request('/api/config/voice-enrollment', {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+  })
 }
 
 /**

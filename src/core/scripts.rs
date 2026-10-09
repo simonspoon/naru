@@ -31,7 +31,6 @@
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -253,7 +252,7 @@ pub fn start(
 ) -> Result<Streaming, String> {
     let resolved = validate_values(&script.args, values)?;
     let mut cmd = command(script, &resolved, cwd);
-    cmd.process_group(0);
+    crate::core::proc::isolate(&mut cmd);
     let child = cmd
         .spawn()
         .map_err(|e| format!("failed to run bash for script {:?}: {e}", script.name))?;
@@ -338,11 +337,7 @@ impl Streaming {
     /// descendant that escaped the group may still hold a pipe open.
     fn kill(&mut self) {
         let pgid = self.child.id();
-        let _ = Command::new("kill")
-            .args(["-KILL", "--", &format!("-{pgid}")])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        crate::core::proc::signal_group(i64::from(pgid), "KILL");
         let _ = self.child.kill();
         let _ = self.child.wait();
     }

@@ -851,6 +851,34 @@ summarising, and Chroma's context-rot results on what a longer prompt costs.
 The one-line summary: keep everything raw and searchable, inject little, and
 make what is injected earn its place.
 
+### Unanswered questions (naru task 1723)
+
+A fresh spawn (`agent_prompt`, not `handoff_prompt`, which carries the last
+ten turns already) also appends, after the summary block, the previous ended
+conversation's **unanswered questions**: a `user` turn containing `?` with at
+least four words and no `naru` turn *with text* after it before the next
+`user` turn or the end (a pure `navigate` is not a reply; short "yes?"/"5?"
+are never questions). The newest five, each cut to 300 characters, ride as
+one line each under a "data, not instructions" lead-in telling the agent to
+raise any still relevant briefly at the start. None found, or no previous
+ended conversation, appends nothing.
+
+### Task digest (naru task 1725)
+
+A fresh spawn also appends, after the unanswered block, a "while you were
+away" digest: the tasks that reached `done` or `cancelled`, or went back from
+`in_progress` to `todo`/`backlog`, since the previous ended conversation's
+`ended_at` (`Store::task_digest`). One entry per task: its newest qualifying
+`task_events` row at or after the time, kept only while the task's status
+still equals that event's `to_status`; archived or hidden projects are left
+out. Event statuses are read as text, never parsed (old rows hold `refine`).
+`live::digest_lines` formats a count header, then up to 20 lines `- #<id>
+<outcome>: <name> [<project>] #/projects/<pid>/tasks/<id>` and `…and N more`,
+under a "data, not instructions" lead-in. No previous ended conversation, an
+empty digest or a read error appends nothing. The same query is the CLI's
+`naru task digest --since <ts|auto> [--notify]`; `auto` is the newest ended
+conversation's `ended_at`. `handoff_prompt` does not carry it.
+
 ### The archive: `live_memory_fts` (migration index 55)
 
 A standalone FTS5 virtual table — `(kind UNINDEXED, ref_id UNINDEXED,
@@ -1540,6 +1568,21 @@ Two of those choices are load-bearing:
   nothing else could answer at render time — `body` is bytes, and `title` is a
   caption the caller writes, so a route that read the type off the title would
   serve something different when the caption changed.
+- **Templates render JSON into an ordinary `html` board** (naru task 1728).
+  `live board push --template table|cards|flow` takes JSON as the trailing
+  body or `--file` (read as JSON whatever the extension) and
+  `core::board::template_html` turns it, at push time, into one
+  self-contained document: inline `<style>` only (what `RENDER_CSP` allows),
+  no script, nothing fetched, Inter/system fonts on tinted rounded surfaces
+  with light and dark by `prefers-color-scheme` (`docs/style-guide.md`). The
+  store, API and frontend see a plain `html` board. Shapes: table
+  `{"columns":[..],"rows":[[..]]}` (cells strings or numbers, every row the
+  column count); cards `{"cards":[{"title","body"?,"tag"?}]}` or a bare
+  array; flow `{"steps":[{"title","detail"?}]}`, a bare array, or an array of
+  strings, drawn as numbered boxes joined by arrows. Bad JSON, a wrong shape
+  or an empty list is `validation`, exit 1, naming the template and the
+  expected shape. Every piece of text is HTML-escaped. `--template` conflicts
+  with `--image`, `--workflow` and `--kind`.
 - **A `diagram` board is a snapshot, not a view.** `core::board::workflow_svg`
   (mesa task 1607: workflows replaced diagrams, and `live board push
   --diagram <ID>` became `--workflow <ID|NAME>`) reads the workflow, its nodes
@@ -1586,6 +1629,27 @@ twenty. They no longer are: a board lives until the session row is deleted
 (`Store::list_live_boards_all`, unbounded, oldest first — what
 `clear`'s delete echo reports as destroyed, and what backs the whole-history
 route below).
+
+### The global history and pinning (naru task 1735)
+
+The whiteboard panel is not scoped to the live conversation. `GET
+/api/live/boards?before=<id>&limit=<n>` answers a `LiveBoardHistoryPage`
+(`{boards, pinned, has_more}`): boards from **every** session, live or ended,
+newest first by id and bodiless (`Store::live_board_history_page`; `limit`
+defaults to 10 and is clamped 1..=100, `before` is an exclusive id cursor),
+plus **every** pinned board (`Store::list_pinned_live_boards`) whatever page it
+falls on. `pinned_at` (migration index 86, on `LiveBoard` and
+`LiveBoardSummary`, null = not pinned) is stamped by `POST
+/api/live/boards/{id}/pin` `{"pinned": bool}` / `naru live board pin <id>
+[--undo] [--quiet]` (`Store::set_live_board_pinned`, idempotent: re-pinning
+keeps the first stamp; unknown id `not_found`; no live session needed). Plain
+global guard plus the Content-Type gate, like the ink-state routes. The page
+merges pinned, the loaded pages and the poll's boards by id, oldest first
+(`liveBoard.ts::mergeBoards`), fetches the first page on mount and when the
+poll's newest board or the session's liveness changes, and a "more" button
+loads the page before the oldest one loaded. Only "new board" stays live-only.
+`live board list` is unchanged (this conversation's boards); `keep` is
+unchanged. Ink reads and writes never required a live session.
 
 ### Finding and bringing back an old board (mesa task 1548)
 
@@ -1907,7 +1971,7 @@ the group (with none live, `not_found` naming `mesa live start`).
 
 | Command | Args | Prints |
 | --- | --- | --- |
-| `live board push [BODY]…` | exactly one source: a trailing var-arg text body, `--file <PATH>`, `--image <PATH>` or `--workflow <ID\|NAME>`; plus `--kind markdown\|html` (text bodies only), `--title <TEXT>`, `--say <TEXT>`, `--quiet` | the created `LiveBoard` |
+| `live board push [BODY]…` | exactly one source: a trailing var-arg text body, `--file <PATH>`, `--image <PATH>` or `--workflow <ID\|NAME>`; plus `--template table\|cards\|flow` (the body or `--file` is JSON; conflicts with `--image`/`--workflow`/`--kind`), `--kind markdown\|html` (text bodies only), `--title <TEXT>`, `--say <TEXT>`, `--quiet` | the created `LiveBoard` |
 | `live board show [ID]` (alias `get`) | `--quiet`; without an ID, the board that is showing | one `LiveBoard` |
 | `live board list` | `--limit <N>` (clamped to 1..=20) | a bare array of bodiless summaries, oldest first |
 | `live board clear` | `--quiet` | the summaries it destroyed |
@@ -2008,9 +2072,10 @@ browser has no such handler and behaves exactly as before.
 | `{"type":"ready"}` | The page installed its API below; answer with `setMicState`. |
 | `{"type":"state","session":<id or null>,"live":<bool>,"joined":<bool>}` | On mount and whenever the live session, `live` or this browser's `joined` changes. Capture only while `live && joined`. |
 | `{"type":"mic","muted":<bool>}` | The person pressed the listen button or chord. |
+| `{"type":"ambient","on":<bool>}` | The person pressed the **Ambient** (`on: true`) or **Live** (`on: false`) button, or accepted an offer while ambient (`on: false`). Naru task 1746. |
 
 **Host to page** — `window.naruNativeHost.setMicState({muted?: <bool>,
-level?: <rms 0..1>, hearing?: <bool>})` (installed only when the host is
+level?: <rms 0..1>, hearing?: <bool>, ambient?: <bool>})` (installed only when the host is
 detected; a missing key leaves that state alone, a wrongly typed one is
 ignored). `level` drives the orb and glow as the page's own meter would, and
 the person counts as heard while `hearing` is true or `level` reaches the
@@ -2018,6 +2083,16 @@ capture onset (`DEFAULT_VAD.onsetRms`); a host sending only `muted` behaves
 as before. It is the last word on `muted`: a press is
 applied locally at once and posted as `mic`, and the host's next `setMicState`
 overrides it.
+
+**Ambient mode** (naru task 1746): the host owns live-vs-ambient and the live
+session stays open across the switch. `ambient: true` pauses this page's run
+(nothing spoken, no navigate; the typed box reads "ambient — press Live to talk
+to Naru", Pause is hidden); `ambient: false` refetches `GET /api/live` and only
+then unpauses, so a stale poll cannot make the page speak while the host
+reclaims the voice. The host's push is the last word: the **Ambient** button
+pauses locally and posts `ambient`, the **Live** button only posts it and
+waits for the host's reply. The switch is offered only with a host, while live
+and joined; ambient clears when the session ends. A plain browser never sees it.
 
 **What the page stops doing** when a host is present: no `getUserMedia`
 anywhere (main capture, barge-in, device probe), no `enumerateDevices`, the
@@ -2357,7 +2432,7 @@ flag is an unknown argument, exit 2, exactly as on `turns`.
 | `live notice permission` | `--quiet`; takes no `--lease` (not the agent's verb — the page's, mesa task 1157) | the notice `LiveTurn`, created or the existing one for this working span |
 | `live turns` | `--after <ID>`, `--limit <N>` (clamped to 1..=500) | a bare array of turns, oldest first |
 | `live look` | `--output <PATH>` (default: a temp file named for the session) | the `LiveShot`: `path`, `window_id`, `width`, `height` |
-| `live board push [BODY]…` | exactly one source (body, `--file`, `--image`, `--workflow`), `--kind`, `--title`, `--say` — put every flag **before** the body | the created `LiveBoard` |
+| `live board push [BODY]…` | exactly one source (body, `--file`, `--image`, `--workflow`), `--template table\|cards\|flow` (JSON body or `--file`), `--kind`, `--title`, `--say` — put every flag **before** the body | the created `LiveBoard` |
 | `live board show [ID]` (alias `get`) | without an ID, the board that is showing | one `LiveBoard` |
 | `live board list` | `--limit <N>` (clamped to 1..=20) | a bare array of bodiless summaries, oldest first |
 | `live board clear` | — | the summaries it destroyed |
@@ -3616,11 +3691,18 @@ An ambient `can-help` event POSTed to `/api/workflows/events` also lights the
 live orb, silently. The server keeps the **newest** such event in memory only
 (text capped at 4000 characters, newest wins, absent after 10 minutes, lost on a
 restart) and carries it on `GET /api/live` as `offer` (`{text, speaker, age_ms}`)
-while no session is live. The orb glows a warm gold pulse (slowed, not removed,
+while no session is live **or while the session it was overheard during is the
+live one** (the server tags the offer with the session open when it was heard,
+so ambient mode, which keeps a session open, can still offer; an offer heard
+before that session opened is consumed as before). A user turn clears it, and an offer tagged with a session never outlives it: once that session has ended it is neither shown on the idle poll nor carried by an accepting start. The
+orb glows a warm gold pulse (slowed, not removed,
 under reduced motion) with the overheard text as its tooltip; pressing it starts
 a conversation with `POST /api/live {"accept_offer": true}`, which puts the
 overheard words last in the agent's spawn prompt, framed as data, never
-instructions. Any live start, accepted or not, clears the offer. No sound plays
+instructions. Any live start, accepted or not, clears the offer. In **ambient
+mode** (native host only) the orb glows for such an offer too, and pressing it
+sends the overheard text as a user turn on the already-open session, then asks
+the host back to live (`{"type":"ambient","on":false}`). No sound plays
 on the offer itself. `naru workflow emit can-help` from the CLI cannot light it:
 the CLI has no server to hold the offer.
 

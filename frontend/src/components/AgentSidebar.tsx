@@ -49,6 +49,7 @@ import {
   isEntering,
   markSeen,
   markSeenKeys,
+  modelTag,
   nextExpiry,
   reconcileChildLingering,
   reconcileLingering,
@@ -756,6 +757,7 @@ function AgentListContent({
     // Absent on a session with no transcript yet, and then
     // rendered as nothing at all rather than an empty pill.
     const model = shortModel(a.model)
+    const modelLabel = modelTag(a.model)
     const headline = agentHeadline(a)
     const label = agentLabel(a)
     const tint = pinned ? null : agentTint(a)
@@ -900,6 +902,12 @@ function AgentListContent({
           <div className="muted agent-card-meta">
             {a.id === null && <span>external terminal — not attachable</span>}
             {wait && <span className="badge blocked">{wait}</span>}
+          </div>
+        )}
+        {/* Nothing when the model is unknown. */}
+        {modelLabel && (
+          <div className="agent-card-model" title={model ?? undefined}>
+            {modelLabel}
           </div>
         )}
       </li>

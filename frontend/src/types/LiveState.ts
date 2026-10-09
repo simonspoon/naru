@@ -47,8 +47,10 @@ blocked: string | null,
 context_tokens: bigint | null, 
 /**
  * An overheard "can help" offer waiting for the person to accept it
- * (naru task 1700) — present only while no session is live and the
- * offer is inside its TTL. **Derived per request** from the server's
+ * (naru task 1700) — present only while no session is live, or while
+ * the session it was overheard during is live (ambient mode, naru task
+ * 1746), and the offer is inside its TTL; a user turn clears it.
+ * **Derived per request** from the server's
  * in-memory state, never stored.
  */
 offer: LiveOffer | null, };

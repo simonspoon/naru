@@ -8,4 +8,8 @@ import type { LiveBoardKind } from "./LiveBoardKind";
  * `<iframe>` or an `<img>`), so the poll carries the history as pointers and
  * nothing else.
  */
-export type LiveBoardSummary = { id: number, session_id: number, kind: LiveBoardKind, title: string | null, created_at: string, };
+export type LiveBoardSummary = { id: number, session_id: number, kind: LiveBoardKind, title: string | null, created_at: string, 
+/**
+ * When it was first pinned (naru task 1735); null = not pinned.
+ */
+pinned_at: string | null, };
