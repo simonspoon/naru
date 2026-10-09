@@ -148,6 +148,21 @@ ok "a non-http --base-url is validation"
 run_err validation "   "
 ok "an empty message is validation"
 
+# ---- task digest --notify (naru task 1725) ----
+DP=$("$MESA" project create "Digest" --no-git | jq -r .id)
+DT=$("$MESA" task create "$DP" "digest me" | jq -r .id)
+"$MESA" task update "$DT" --status done >/dev/null
+rm -f "$STUB_DIR/last-argv"
+OUT=$("$MESA" task digest --since "2000-01-01 00:00:00" --notify --base-url http://h:1) || fail "digest --notify failed"
+[ "$(jq -r '.notify.sent' <<<"$OUT")" = "true" ] || fail "digest notify result: $OUT"
+argv | grep -qx -- '--title=While you were away' || fail "digest title: $(argv)"
+argv | grep -qF "http://h:1/#/projects/$DP/tasks/$DT" || fail "digest link: $(argv)"
+rm -f "$STUB_DIR/last-argv"
+OUT=$("$MESA" task digest --since "2099-01-01 00:00:00" --notify --base-url http://h:1) || fail "empty digest failed"
+[ "$(jq -r '.notify' <<<"$OUT")" = "null" ] || fail "empty digest must not notify: $OUT"
+[ ! -e "$STUB_DIR/last-argv" ] || fail "an empty digest reached vox"
+ok "task digest --notify: title, web-hash link; an empty digest sends nothing"
+
 # =====================================================================
 # 4. GET /open/<route>, default mode
 # =====================================================================

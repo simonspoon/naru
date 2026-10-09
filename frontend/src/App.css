@@ -8679,6 +8679,22 @@ body.live-panel-ratio-resizing .live-panel-divider {
   opacity: 0.4;
 }
 
+/* "more": loads the next page of older boards (naru task 1735). */
+.live-board-more {
+  height: 28px;
+  padding: 0 0.6rem;
+  border-radius: var(--r-sm);
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+/* The pinned marker: the pin fills and takes the accent. */
+.live-board-pin.pinned {
+  color: var(--amber);
+}
+
 .live-board-count {
   color: var(--muted);
   font-size: 0.75rem;

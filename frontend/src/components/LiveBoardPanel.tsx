@@ -19,6 +19,7 @@ import {
   boardTitle,
   clampBoardIndex,
   emptyBoardView,
+  retargetBoardView,
   stepBoard,
   type BoardView,
 } from '../liveBoard'
@@ -233,6 +234,23 @@ function PenMark() {
     >
       <path d="M4 20l1-5L16 4l4 4L9 19z" />
       <path d="M14 6l4 4" />
+    </svg>
+  )
+}
+
+function PinMark({ filled }: { filled: boolean }) {
+  return (
+    <svg
+      className="live-icon-mark"
+      viewBox="0 0 24 24"
+      width="14"
+      height="14"
+      aria-hidden="true"
+      focusable="false"
+      fill={filled ? 'currentColor' : 'none'}
+    >
+      <path d="M9 4h6l-1 6 3 3H7l3-3z" />
+      <path d="M12 13v7" />
     </svg>
   )
 }
@@ -596,6 +614,9 @@ export function LiveBoardPanel({
   showingRef,
   onNewBoard,
   onShowBoard,
+  hasMore,
+  onMore,
+  onPin,
 }: {
   /** The conversation's whole board history, oldest first and bodiless — the
    *  `boards` array of the poll `LiveHub` already makes, never a second one. */
@@ -625,6 +646,12 @@ export function LiveBoardPanel({
   onNewBoard?: () => Promise<number | null>
   /** A board came on screen: the hub restores its saved ink (mesa task 1582). */
   onShowBoard?: (boardId: number) => void
+  /** Older boards remain beyond the ones loaded (naru task 1735). */
+  hasMore?: boolean
+  /** Loads the next page of older boards. */
+  onMore?: () => void
+  /** Pins or unpins a board of any session. */
+  onPin?: (boardId: number, pinned: boolean) => void
 }) {
   // The board the layout is frozen for, while it carries unsent ink (mesa
   // task 1353): a new push does not take the panel away from it
@@ -653,7 +680,7 @@ export function LiveBoardPanel({
   if (boards !== prevBoards || held !== prevHeld) {
     setPrevBoards(boards)
     setPrevHeld(held)
-    setView(heldBoardView(view, boards, held))
+    setView(heldBoardView(retargetBoardView(view, prevBoards, boards), boards, held))
   }
 
   // The index the panel is actually on: `null` means the newest, so the head's
@@ -1008,6 +1035,32 @@ export function LiveBoardPanel({
                 ›
               </button>
             </div>
+          )}
+          {/* Older boards than the ones loaded (naru task 1735). */}
+          {hasMore === true && onMore !== undefined && (
+            <button
+              type="button"
+              className="live-board-more"
+              aria-label="load older boards"
+              title="Load older boards"
+              onClick={onMore}
+            >
+              more
+            </button>
+          )}
+          {/* Pin the board on screen so it stays listed whatever page it
+              falls on (naru task 1735). */}
+          {showing !== null && onPin !== undefined && (
+            <button
+              type="button"
+              className={`live-icon live-board-pin${showing.pinned_at !== null ? ' pinned' : ''}`}
+              aria-label={showing.pinned_at !== null ? 'unpin this board' : 'pin this board'}
+              aria-pressed={showing.pinned_at !== null}
+              title={showing.pinned_at !== null ? 'Pinned — click to unpin' : 'Pin this board'}
+              onClick={() => onPin(showing.id, showing.pinned_at === null)}
+            >
+              <PinMark filled={showing.pinned_at !== null} />
+            </button>
           )}
           {/* A fresh blank board to draw on (mesa task 1580). */}
           {onNewBoard !== undefined && (
