@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import {
+  addTaskNote,
   attachmentDownloadUrl,
   createAttachment,
   createTask,
@@ -10,11 +11,13 @@ import {
   getTaskReceipt,
   listAttachments,
   listDependencies,
+  listTaskNotes,
   listTasks,
   regenerateTaskReceipt,
   updateTask,
   updateTaskReceipt,
 } from '../api'
+import { noteToSubmit, sessionLabel } from '../taskNotes'
 import { receiptIsEmpty, summarizeStat, transcriptLabel } from '../receiptView'
 import { parseTags } from '../tags'
 import { formatTimestamp, timeAgo } from '../time'
@@ -22,6 +25,7 @@ import type { Attachment } from '../types/Attachment'
 import type { GitCommit } from '../types/GitCommit'
 import type { Priority } from '../types/Priority'
 import type { Status } from '../types/Status'
+import type { TaskNote } from '../types/TaskNote'
 import type { TaskReceipt } from '../types/TaskReceipt'
 import { useFetch } from '../useFetch'
 import { ConfirmDelete } from './ConfirmDelete'
@@ -187,6 +191,73 @@ function ReceiptCommitRow({ commit }: { commit: GitCommit }) {
 }
 
 /**
+ * A task's append-only notes (naru task 1724), oldest first, with a small form
+ * to add one. There is deliberately no edit or delete.
+ */
+function NotesSection({
+  taskId,
+  notes,
+  onChanged,
+}: {
+  taskId: number
+  notes: TaskNote[]
+  onChanged: () => void
+}) {
+  const [draft, setDraft] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const body = noteToSubmit(draft)
+
+  function add() {
+    if (body === null) return
+    setBusy(true)
+    setError(null)
+    addTaskNote(taskId, body).then(
+      () => {
+        setBusy(false)
+        setDraft('')
+        onChanged()
+      },
+      (e: unknown) => {
+        setBusy(false)
+        setError(e instanceof Error ? e.message : String(e))
+      },
+    )
+  }
+
+  return (
+    <>
+      <h2>Notes</h2>
+      {notes.length === 0 && <p className="muted">no notes</p>}
+      {notes.map((n) => {
+        const session = sessionLabel(n.session)
+        return (
+          <div key={n.id} className="task-note">
+            <p className="muted" title={formatTimestamp(n.created_at)}>
+              {timeAgo(n.created_at)}
+              {session !== null && <> · session {session}</>}
+            </p>
+            <p style={{ whiteSpace: 'pre-wrap' }}>{n.body}</p>
+          </div>
+        )
+      })}
+      <textarea
+        value={draft}
+        placeholder="add a note — notes are append-only"
+        rows={2}
+        onChange={(e) => setDraft(e.target.value)}
+      />
+      <p>
+        <button onClick={add} disabled={body === null || busy}>
+          add note
+        </button>
+        {error !== null && <span className="error"> {error}</span>}
+      </p>
+    </>
+  )
+}
+
+/**
  * A task's frozen work receipt (task 920, spec D1–D6) — commits made during
  * the claim window, a diff summary, and a best-effort transcript link.
  * Renders nothing when `receipt` is `null`: most tasks have none (never
@@ -287,15 +358,16 @@ export function TaskPanel({
   const [selectError, setSelectError] = useState<string | null>(null)
   const { data, error, refetch } = useFetch(async () => {
     const task = await getTask(taskId)
-    const [siblings, blockers, attachments, receipt] = await Promise.all([
+    const [siblings, blockers, attachments, receipt, notes] = await Promise.all([
       listTasks({ project: task.project_id }),
       listDependencies(taskId),
       listAttachments(taskId),
       getTaskReceipt(taskId),
+      listTaskNotes(taskId),
     ])
     // One level of nesting only (spec Assumption 6).
     const subtasks = siblings.filter((t) => t.parent_id === taskId)
-    return { task, subtasks, blockers, attachments, receipt }
+    return { task, subtasks, blockers, attachments, receipt, notes }
   }, `task-${taskId}`)
 
   const head = (
@@ -321,7 +393,7 @@ export function TaskPanel({
       </>
     )
 
-  const { task, subtasks, blockers, attachments, receipt } = data
+  const { task, subtasks, blockers, attachments, receipt, notes } = data
 
   function changed() {
     refetch()
@@ -463,6 +535,8 @@ export function TaskPanel({
           }
         />
       </div>
+
+      <NotesSection taskId={taskId} notes={notes} onChanged={changed} />
 
       <ReceiptSection taskId={taskId} receipt={receipt} onChanged={changed} />
 

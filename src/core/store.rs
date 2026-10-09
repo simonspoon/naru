@@ -14,9 +14,10 @@ use super::types::{
     LiveBoardSummary, LiveContext, LiveMemoryHit, LiveNotebookEntry, LiveNotice, LiveResult,
     LiveRole, LiveSession, LiveStatus, LiveSummary, LiveTurn, LiveWindow, Priority, Project,
     RetroFinding, RetroRun, RetroStatus, Script, ScriptArg, ScriptArgKind, ScriptRunRecord,
-    ScriptRunStatus, Status, Task, TaskEvent, TaskReceipt, Workflow, WorkflowBranch, WorkflowEdge,
-    WorkflowLogEntry, WorkflowNode, WorkflowNodeKind, WorkflowRun, WorkflowRunStatus, WorkflowStep,
-    WorkflowStepStatus, WorkflowTrigger, WorkflowView, is_valid_artifact_content_type, task_name,
+    ScriptRunStatus, Status, Task, TaskEvent, TaskNote, TaskReceipt, Workflow, WorkflowBranch,
+    WorkflowEdge, WorkflowLogEntry, WorkflowNode, WorkflowNodeKind, WorkflowRun, WorkflowRunStatus,
+    WorkflowStep, WorkflowStepStatus, WorkflowTrigger, WorkflowView,
+    is_valid_artifact_content_type, task_name,
 };
 
 #[derive(Debug)]
@@ -1396,6 +1397,18 @@ const MIGRATIONS: &[&str] = &[
     // automatic firing (the time watcher, ambient events); a manual run still
     // works. Existing workflows stay on.
     "ALTER TABLE workflows ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;",
+    // Task 1724: append-only notes on a task. A sibling table (the
+    // `task_receipts` precedent) so `Task`, `compact()` and `--quiet` key
+    // parity stay untouched. `ON DELETE CASCADE`: a note describes its task
+    // and has nowhere to live without it. No update or delete path exists.
+    "CREATE TABLE task_notes (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id     INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        body        TEXT NOT NULL,
+        session     TEXT,
+        created_at  TEXT NOT NULL
+     );
+     CREATE INDEX idx_task_notes_task ON task_notes(task_id, id);",
 ];
 
 /// Selects full task rows including the derived `blocked` flag.
@@ -1468,6 +1481,16 @@ fn row_to_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskEvent> {
 /// Malformed stored `commits` JSON (a hand-edited db) reads back as an empty
 /// list rather than failing the whole receipt read — the same posture
 /// `row_to_task` takes on a NULL description: the row still has to render.
+fn row_to_task_note(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskNote> {
+    Ok(TaskNote {
+        id: row.get(0)?,
+        task_id: row.get(1)?,
+        body: row.get(2)?,
+        session: row.get(3)?,
+        created_at: row.get(4)?,
+    })
+}
+
 fn row_to_receipt(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskReceipt> {
     let commits_json: String = row.get(7)?;
     let commits: Vec<GitCommit> = serde_json::from_str(&commits_json).unwrap_or_default();
@@ -4533,6 +4556,56 @@ impl Store {
             )
             .optional()?;
         Ok(row)
+    }
+
+    // ---- task notes (task 1724) ----
+
+    /// Longest note body, in bytes. Notes are context for the next reader,
+    /// not documents; an artifact or attachment is the place for those.
+    pub const TASK_NOTE_MAX: usize = 8192;
+
+    /// Appends one note to a task. `body` must be non-blank and at most
+    /// [`Self::TASK_NOTE_MAX`] bytes (`Validation`); an unknown task is
+    /// `NotFound`. A blank `session` is stored as none.
+    pub fn add_task_note(
+        &mut self,
+        task_id: i64,
+        body: &str,
+        session: Option<&str>,
+    ) -> Result<TaskNote> {
+        if body.trim().is_empty() {
+            return Err(Error::Validation("note body must not be empty".into()));
+        }
+        if body.len() > Self::TASK_NOTE_MAX {
+            return Err(Error::Validation(format!(
+                "note body must be at most {} bytes",
+                Self::TASK_NOTE_MAX
+            )));
+        }
+        self.get_task(task_id)?;
+        let session = session.map(str::trim).filter(|s| !s.is_empty());
+        self.conn.execute(
+            "INSERT INTO task_notes (task_id, body, session, created_at) \
+             VALUES (?1, ?2, ?3, datetime('now'))",
+            (task_id, body, session),
+        )?;
+        let id = self.conn.last_insert_rowid();
+        Ok(self.conn.query_row(
+            "SELECT id, task_id, body, session, created_at FROM task_notes WHERE id = ?1",
+            [id],
+            row_to_task_note,
+        )?)
+    }
+
+    /// A task's notes, oldest first. `NotFound` for an unknown task.
+    pub fn list_task_notes(&self, task_id: i64) -> Result<Vec<TaskNote>> {
+        self.get_task(task_id)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, task_id, body, session, created_at FROM task_notes \
+             WHERE task_id = ?1 ORDER BY id",
+        )?;
+        let rows = stmt.query_map([task_id], row_to_task_note)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Writes the whole receipt for `r.task_id`, replacing any existing one
@@ -12001,6 +12074,56 @@ mod tests {
     }
 
     #[test]
+    fn task_notes_append_in_order_and_cascade() {
+        let (mut store, _dir) = temp_store();
+        let p = store.create_project("p", None, None, None, None).unwrap();
+        let t = add_task(&mut store, p.id, "task");
+        assert!(store.list_task_notes(t.id).unwrap().is_empty());
+        let a = store.add_task_note(t.id, "first", Some("sess-1")).unwrap();
+        let b = store.add_task_note(t.id, "second", Some("  ")).unwrap();
+        assert_eq!(a.session.as_deref(), Some("sess-1"));
+        assert_eq!(b.session, None);
+        let notes = store.list_task_notes(t.id).unwrap();
+        assert_eq!(notes, vec![a, b]);
+        assert_eq!(notes[1].body, "second");
+        store.delete_task(t.id).unwrap();
+        let left: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM task_notes", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 0);
+    }
+
+    #[test]
+    fn task_notes_validate_and_need_a_task() {
+        let (mut store, _dir) = temp_store();
+        let p = store.create_project("p", None, None, None, None).unwrap();
+        let t = add_task(&mut store, p.id, "task");
+        assert!(matches!(
+            store.add_task_note(t.id, "  \n", None),
+            Err(Error::Validation(_))
+        ));
+        let long = "x".repeat(Store::TASK_NOTE_MAX + 1);
+        assert!(matches!(
+            store.add_task_note(t.id, &long, None),
+            Err(Error::Validation(_))
+        ));
+        assert!(
+            store
+                .add_task_note(t.id, &"x".repeat(Store::TASK_NOTE_MAX), None)
+                .is_ok()
+        );
+        assert!(matches!(
+            store.add_task_note(999, "hi", None),
+            Err(Error::NotFound(_))
+        ));
+        assert!(matches!(
+            store.list_task_notes(999),
+            Err(Error::NotFound(_))
+        ));
+    }
+
+    #[test]
     fn get_task_receipt_is_not_found_for_a_missing_task() {
         let (store, _dir) = temp_store();
         assert!(matches!(
@@ -15083,15 +15206,15 @@ mod tests {
         );
         assert_eq!(
             MIGRATIONS.len(),
-            85,
-            "a fresh db should report user_version 85"
+            86,
+            "a fresh db should report user_version 86"
         );
         let (store, _dir) = temp_store();
         let version: i64 = store
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 85);
+        assert_eq!(version, 86);
     }
 
     /// Workflows replace diagrams at migration 83 (mesa task 1607): a db that
@@ -15113,7 +15236,7 @@ mod tests {
         store
             .conn
             .execute_batch(
-                "DROP TABLE workflow_log; DROP TABLE workflow_runs; DROP TABLE workflow_edges; \
+                "DROP TABLE task_notes; DROP TABLE workflow_log; DROP TABLE workflow_runs; DROP TABLE workflow_edges; \
                  DROP TABLE workflow_nodes; DROP TABLE workflows; \
                  CREATE TABLE diagrams (id INTEGER PRIMARY KEY, title TEXT); \
                  INSERT INTO diagrams (title) VALUES ('stale'); \

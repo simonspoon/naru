@@ -83,6 +83,7 @@ import type { ScriptRunRecord } from './types/ScriptRunRecord'
 import type { Status } from './types/Status'
 import type { SystemInfo } from './types/SystemInfo'
 import type { Task } from './types/Task'
+import type { TaskNote } from './types/TaskNote'
 import type { TaskReceipt } from './types/TaskReceipt'
 import type { TaskSummary } from './types/TaskSummary'
 import type { VoiceDesign } from './types/VoiceDesign'
@@ -308,6 +309,16 @@ export function deleteTask(id: number): Promise<Task[]> {
     method: 'DELETE',
     headers: { 'Content-Type': 'application/json' },
   })
+}
+
+// ---- notes (a task's append-only notes, naru task 1724) ----
+
+export function listTaskNotes(id: number): Promise<TaskNote[]> {
+  return request(`/api/tasks/${id}/notes`)
+}
+
+export function addTaskNote(id: number, body: string): Promise<TaskNote> {
+  return request(`/api/tasks/${id}/notes`, jsonInit('POST', { body }))
 }
 
 // ---- receipt (a task's frozen work record, task 920) ----

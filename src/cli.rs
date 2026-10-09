@@ -31,7 +31,7 @@ use crate::core::{
     LibrarySyncStatus, LiveAction, LiveBoard, LiveBoardKind, LiveNotebookEntry, LiveNotice,
     LiveResult, LiveRole, LiveSession, LiveStatus, LiveSummary, LiveTurn, NextResult, Priority,
     Project, ProjectPatch, ReceiptPatch, Result, Script, ScriptArg, ScriptArgKind, ScriptPatch,
-    Status, Store, Task, TaskPatch, TaskReceipt, Workflow, WorkflowEdge, WorkflowNode,
+    Status, Store, Task, TaskNote, TaskPatch, TaskReceipt, Workflow, WorkflowEdge, WorkflowNode,
     WorkflowNodeKind, WorkflowNodeNew, WorkflowNodePatch, WorkflowPatch, WorkflowRun,
     WorkflowTrigger, WorkflowView, agents, audio, board, cc, config, files, git, library, live,
     look, memory_job, migrate, project_memory, receipt, system,
@@ -902,6 +902,9 @@ EXAMPLES
     /// compact `task list` shape)
     ///
     /// Only the flags you pass change; at least one is required.
+    /// `--description` REPLACES the whole description: to add context to a
+    /// task, agents should prefer `task note <ID> <TEXT>` (append-only) over
+    /// rewriting the description.
     /// `--tags` REPLACES the full tag set (`--tags ""` clears it). The task's
     /// project cannot change, and neither its description can be cleared —
     /// it is the task's identity, so `--description ""` is a validation error.
@@ -923,10 +926,12 @@ EXAMPLES
     Update {
         /// Task id
         id: i64,
-        /// New description (replaces the body; cannot be emptied)
+        /// New description (REPLACES the whole body; cannot be emptied). To add
+        /// context, prefer `task note` — rewriting loses what you did not retype
         #[arg(long, group = "fields", allow_hyphen_values = true)]
         description: Option<String>,
         /// Read the new description from a file (`-` = stdin); conflicts with --description
+        /// (replaces the whole body; prefer `task note` to add context)
         #[arg(
             long,
             value_name = "PATH",
@@ -1007,6 +1012,36 @@ EXAMPLES
         ///
         /// The full echo is the recovery transcript that stands in for a
         /// confirmation prompt; `--quiet` waives it for this call.
+        #[arg(long)]
+        quiet: bool,
+    },
+    /// Append a note to a task (append-only; prints the created note)
+    ///
+    /// AGENTS: prefer this to `task update --description` when you want to
+    /// add context, a finding or a decision to a task. Rewriting the
+    /// description replaces it whole and loses whatever you did not retype;
+    /// a note is appended beside it and can never overwrite anything. Notes
+    /// cannot be edited or deleted. `task show` lists them, oldest first.
+    /// The session is taken from CLAUDE_CODE_SESSION_ID when set. Put flags
+    /// before the text. `--quiet` drops `body`.
+    #[command(after_help = "\
+EXAMPLES
+  mesa task note 3 the failing test is flaky, see run 12
+  mesa task note 3 --file notes.md      # `-` reads stdin
+  mesa task note 3 --quiet \"short ack\"")]
+    Note {
+        /// Task id
+        id: i64,
+        /// The note text (everything after the id); quoting is optional
+        #[arg(num_args = 0.., trailing_var_arg = true)]
+        text: Vec<String>,
+        /// Read the note from a file (`-` = stdin) instead of the text
+        #[arg(long, value_name = "PATH", conflicts_with = "text")]
+        file: Option<String>,
+        /// Session id to record; default is CLAUDE_CODE_SESSION_ID
+        #[arg(long)]
+        session: Option<String>,
+        /// Print the note without its `body`
         #[arg(long)]
         quiet: bool,
     },
@@ -4178,6 +4213,15 @@ struct TaskOut<'a> {
     title: &'a str,
 }
 
+/// `task show`'s full output: the task as [`TaskOut`] plus its notes, oldest
+/// first (naru task 1724). Only `show` carries `notes`; `Task` never does.
+#[derive(serde::Serialize)]
+struct TaskShowOut<'a> {
+    #[serde(flatten)]
+    task: TaskOut<'a>,
+    notes: Vec<TaskNote>,
+}
+
 fn task_out(t: &Task) -> TaskOut<'_> {
     TaskOut {
         task: t,
@@ -4281,6 +4325,10 @@ const QUIET_DROP_LIVE_BOARD: &[&str] = &["body"];
 /// the branch/repo path, the summed `stat`, and the session link — is
 /// already bounded.
 const QUIET_DROP_RECEIPT: &[&str] = &["commits", "note"];
+
+/// A `TaskNote`'s one unbounded field is its `body` (naru task 1724); the
+/// id, task id, session and timestamp are bounded and stay.
+const QUIET_DROP_TASK_NOTE: &[&str] = &["body"];
 
 /// Quiet projection of one record: the serialized record minus `drop`ped keys.
 ///
@@ -5203,7 +5251,35 @@ fn run_task(cmd: TaskCmd) -> Result<()> {
             };
             print_tasks(&store.import_tasks(&doc)?, quiet);
         }
-        TaskCmd::Show { id, quiet } => print_task(&store.get_task(id)?, quiet),
+        TaskCmd::Show { id, quiet } => {
+            let task = store.get_task(id)?;
+            if quiet {
+                // The compact shape is `task list`'s; notes are free text, so
+                // `--quiet` omits them (read them with `task show` plain).
+                print_task(&task, true);
+            } else {
+                print_json(&TaskShowOut {
+                    task: task_out(&task),
+                    notes: store.list_task_notes(id)?,
+                });
+            }
+        }
+        TaskCmd::Note {
+            id,
+            text,
+            file,
+            session,
+            quiet,
+        } => {
+            let body = if let Some(path) = file {
+                resolve_field(None, Some(path), &mut false)?.unwrap_or_default()
+            } else {
+                text.join(" ")
+            };
+            let session = session.or_else(|| std::env::var("CLAUDE_CODE_SESSION_ID").ok());
+            let note = store.add_task_note(id, &body, session.as_deref())?;
+            print_record(&note, quiet, QUIET_DROP_TASK_NOTE);
+        }
         TaskCmd::Update {
             id,
             description,
@@ -9008,6 +9084,42 @@ mod tests {
             ))),
             minus(&full, QUIET_DROP_LIVE_NOTEBOOK),
         );
+    }
+
+    #[test]
+    fn task_note_quiet_drops_body_only() {
+        let note = TaskNote {
+            id: 1,
+            task_id: 2,
+            body: "b".into(),
+            session: None,
+            created_at: "t".into(),
+        };
+        let full = keys(&note);
+        assert_eq!(
+            sorted_owned(full.clone()),
+            sorted(&["id", "task_id", "body", "session", "created_at"]),
+            "TaskNote gained/lost a field: decide whether it belongs in the \
+             --quiet shape before updating this list",
+        );
+        assert_eq!(
+            sorted_owned(value_keys(&quiet(&note, QUIET_DROP_TASK_NOTE))),
+            minus(&full, QUIET_DROP_TASK_NOTE),
+        );
+    }
+
+    #[test]
+    fn task_note_parses_trailing_text_and_file() {
+        let cli = Cli::try_parse_from(["naru", "task", "note", "3", "a", "b", "--c"]).unwrap();
+        let Command::Task(cmd) = cli.command else {
+            panic!("not task")
+        };
+        let TaskCmd::Note { id, text, .. } = cmd else {
+            panic!("not note")
+        };
+        assert_eq!((id, text.join(" ")), (3, "a b --c".to_string()));
+        assert!(Cli::try_parse_from(["naru", "task", "note", "3", "--file", "-"]).is_ok());
+        assert!(Cli::try_parse_from(["naru", "task", "note", "3", "--file", "-", "x"]).is_err());
     }
 
     #[test]

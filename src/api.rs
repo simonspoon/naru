@@ -48,11 +48,11 @@ use crate::core::{
     NaruVersion, NextResult, Priority, ProjectAgents, ProjectFileTree, ProjectGitLog,
     ProjectGitRepos, ProjectGitStatus, ProjectGitView, ProjectPatch, ProjectVersion, ReceiptPatch,
     STALE_CLAIM_MINUTES, Script, ScriptArg, ScriptPatch, ScriptRunEvent, ServeBoolSetting,
-    ServeHostsSetting, ServeNumberSetting, Status, Store, SystemInfo, Task, TaskPatch, TaskSummary,
-    WorkflowNodeKind, WorkflowNodeNew, WorkflowNodePatch, WorkflowPatch, WorkflowTrigger, agents,
-    attachments, audio, board, config, files, git, guard, hooks, inbox_triage, library, listen,
-    live, memory_job, project_memory, receipt, runner, script_runs, scripts, speech, supervisor,
-    system, validate_live_client, version, workflow,
+    ServeHostsSetting, ServeNumberSetting, Status, Store, SystemInfo, Task, TaskNote, TaskPatch,
+    TaskSummary, WorkflowNodeKind, WorkflowNodeNew, WorkflowNodePatch, WorkflowPatch,
+    WorkflowTrigger, agents, attachments, audio, board, config, files, git, guard, hooks,
+    inbox_triage, library, listen, live, memory_job, project_memory, receipt, runner, script_runs,
+    scripts, speech, supervisor, system, validate_live_client, version, workflow,
 };
 
 /// The Vite build output, embedded into the binary at compile time.
@@ -2912,6 +2912,12 @@ fn router(state: AppState) -> Router {
             "/api/tasks/{id}/receipt/regenerate",
             post(regenerate_receipt),
         )
+        // Task notes (naru task 1724) — append-only, NO per-route gate, like
+        // the receipt routes above and plain task CRUD.
+        .route(
+            "/api/tasks/{id}/notes",
+            get(list_task_notes).post(add_task_note),
+        )
         .route("/api/tasks/{id}/dependencies", get(list_dependencies))
         .route("/api/tasks/{id}/dependents", get(list_dependents))
         // Attachments: file uploads/downloads scoped to a task. Upload is
@@ -3992,6 +3998,32 @@ struct ReceiptUpdate {
     /// clearable fields. Either `Some` variant sets `edited = true` (spec D6).
     #[serde(default, deserialize_with = "double_option")]
     note: Option<Option<String>>,
+}
+
+// ---- task notes (naru task 1724) ----
+
+#[derive(Deserialize)]
+struct TaskNoteNew {
+    body: String,
+}
+
+async fn list_task_notes(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<Vec<TaskNote>>> {
+    let store = state.store.lock().unwrap();
+    Ok(Json(store.list_task_notes(id)?))
+}
+
+/// The web carries no session, so the note's `session` is null.
+async fn add_task_note(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(input): Json<TaskNoteNew>,
+) -> ApiResult<Response> {
+    let mut store = state.store.lock().unwrap();
+    let note = store.add_task_note(id, &input.body, None)?;
+    Ok((StatusCode::CREATED, Json(note)).into_response())
 }
 
 async fn show_receipt(State(state): State<AppState>, Path(id): Path<i64>) -> ApiResult<Response> {
