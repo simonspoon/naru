@@ -181,6 +181,14 @@ paths for a new username or a new repo location
 brew install simonspoon/tap/naru
 ```
 
+### Windows
+
+Download `naru-windows-amd64-setup.exe` from the
+[GitHub releases page](https://github.com/simonspoon/naru/releases) and run
+it. It installs per user, with no admin rights, and adds `naru` to your PATH.
+Naru needs Git for Windows (for `bash`) and Claude Code; the installer's
+closing page says how to set them up.
+
 ### Build from source
 
 Naru is a Rust binary with an embedded React frontend. You need Rust

@@ -1,0 +1,15 @@
+Naru is installed. Before you use it, install two prerequisites:
+
+1. Git for Windows (https://gitforwindows.org). Naru runs `bash` for agents,
+   scripts and workflows. Git Bash must come before WSL's
+   C:\Windows\System32\bash.exe on your PATH.
+
+2. Claude Code. In PowerShell run:
+     irm https://claude.ai/install.ps1 | iex
+   then run `claude` once to sign in.
+
+Then open a NEW terminal (so the updated PATH is picked up), run:
+     naru serve
+and browse to http://localhost:7770
+
+Voice (naru-audio) is not included in this installer yet.
