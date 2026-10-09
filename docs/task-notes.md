@@ -17,16 +17,22 @@ is `--session`, else `CLAUDE_CODE_SESSION_ID`, else `null`. `--quiet` drops
 `body` (the one unbounded field; key-parity test in `cli.rs`).
 
 `naru task show <id>` adds a `notes` array (oldest first) to the full output.
+Notes appear only in plain (non-`--quiet`) `show` output, and in full.
 `task show --quiet`, `task list` and every other command are unchanged: `notes`
 is not a `Task` field. The help for `task note` and for `task update
 --description` tells agents to prefer a note over rewriting the description.
+
+`task delete` removes a task's notes with it (the FK cascade) and its echo does
+not carry them: the echo is the destroyed tasks only, which is also true of
+attachments and receipts, whose rows are cascaded away without being echoed.
 
 ## Storage
 
 Sibling table `task_notes` (migration index 85): `id`, `task_id` (`ON DELETE
 CASCADE`), `body`, `session` (nullable), `created_at`. Written only through
 `Store::add_task_note` (body non-blank, at most `Store::TASK_NOTE_MAX` = 8192
-bytes, else `validation`; unknown task `not_found`) and read through
+bytes, and a `session` at most 200 characters, else `validation`; unknown task
+`not_found`) and read through
 `Store::list_task_notes`. There is deliberately no update or delete.
 
 ## API and web

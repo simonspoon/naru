@@ -890,6 +890,10 @@ EXAMPLES
         quiet: bool,
     },
     /// Print one task as a full JSON object (includes description)
+    ///
+    /// Plain `show` also carries the task's `notes` (oldest first, in full);
+    /// `--quiet` omits them. `task delete` cascades the notes away and its
+    /// echo does not carry them.
     #[command(visible_alias = "get")]
     Show {
         /// Task id

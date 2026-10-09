@@ -1478,9 +1478,6 @@ fn row_to_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskEvent> {
     })
 }
 
-/// Malformed stored `commits` JSON (a hand-edited db) reads back as an empty
-/// list rather than failing the whole receipt read — the same posture
-/// `row_to_task` takes on a NULL description: the row still has to render.
 fn row_to_task_note(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskNote> {
     Ok(TaskNote {
         id: row.get(0)?,
@@ -1491,6 +1488,9 @@ fn row_to_task_note(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskNote> {
     })
 }
 
+/// Malformed stored `commits` JSON (a hand-edited db) reads back as an empty
+/// list rather than failing the whole receipt read — the same posture
+/// `row_to_task` takes on a NULL description: the row still has to render.
 fn row_to_receipt(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskReceipt> {
     let commits_json: String = row.get(7)?;
     let commits: Vec<GitCommit> = serde_json::from_str(&commits_json).unwrap_or_default();
@@ -4564,6 +4564,9 @@ impl Store {
     /// not documents; an artifact or attachment is the place for those.
     pub const TASK_NOTE_MAX: usize = 8192;
 
+    /// Longest note `session`, in characters.
+    pub const TASK_NOTE_SESSION_MAX: usize = 200;
+
     /// Appends one note to a task. `body` must be non-blank and at most
     /// [`Self::TASK_NOTE_MAX`] bytes (`Validation`); an unknown task is
     /// `NotFound`. A blank `session` is stored as none.
@@ -4582,8 +4585,14 @@ impl Store {
                 Self::TASK_NOTE_MAX
             )));
         }
-        self.get_task(task_id)?;
         let session = session.map(str::trim).filter(|s| !s.is_empty());
+        if session.is_some_and(|s| s.chars().count() > Self::TASK_NOTE_SESSION_MAX) {
+            return Err(Error::Validation(format!(
+                "note session must be at most {} characters",
+                Self::TASK_NOTE_SESSION_MAX
+            )));
+        }
+        self.get_task(task_id)?;
         self.conn.execute(
             "INSERT INTO task_notes (task_id, body, session, created_at) \
              VALUES (?1, ?2, ?3, datetime('now'))",
@@ -12092,6 +12101,20 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM task_notes", [], |r| r.get(0))
             .unwrap();
         assert_eq!(left, 0);
+    }
+
+    #[test]
+    fn task_note_session_is_capped() {
+        let (mut store, _dir) = temp_store();
+        let p = store.create_project("p", None, None, None, None).unwrap();
+        let t = add_task(&mut store, p.id, "task");
+        let ok = "s".repeat(Store::TASK_NOTE_SESSION_MAX);
+        assert!(store.add_task_note(t.id, "hi", Some(&ok)).is_ok());
+        let long = "s".repeat(Store::TASK_NOTE_SESSION_MAX + 1);
+        assert!(matches!(
+            store.add_task_note(t.id, "hi", Some(&long)),
+            Err(Error::Validation(_))
+        ));
     }
 
     #[test]
