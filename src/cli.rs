@@ -2972,6 +2972,14 @@ enum LiveBoardCmd {
     /// as it was at the push, so a graph edited afterwards does not change
     /// what the person was shown. Each push replaces what is showing.
     ///
+    /// `--template table|cards|flow` renders JSON (the trailing BODY, or
+    /// `--file` read as JSON whatever its extension) into a styled, self-
+    /// contained html board, so nobody hand-writes markup. Shapes: table
+    /// `{"columns":[..],"rows":[[..]]}`; cards `{"cards":[{"title","body"?,
+    /// "tag"?}]}`; flow `{"steps":[{"title","detail"?}]}` (bare arrays work
+    /// for cards and flow; flow also takes an array of strings). Bad JSON, a
+    /// wrong shape or nothing to show is `validation`. All text is escaped.
+    ///
     /// `--say` speaks a sentence alongside it, exactly like `navigate --say`.
     /// Put every flag BEFORE the body text: everything after `push` that is
     /// not a leading flag is swallowed as the body (the `live say` trap).
@@ -2980,7 +2988,10 @@ EXAMPLES
   mesa live board push --title Plan '## Plan' 'Three steps, in order.'
   mesa live board push --kind html --file /tmp/mockup.html --say \"Here is the mockup.\"
   mesa live board push --image /tmp/screenshot.png --title \"The overlap\"
-  mesa live board push --workflow ambient --say \"This is the flow we discussed.\"")]
+  mesa live board push --workflow ambient --say \"This is the flow we discussed.\"
+  mesa live board push --template table '{\"columns\":[\"Option\",\"Cost\"],\"rows\":[[\"A\",1],[\"B\",2]]}'
+  mesa live board push --template cards '{\"cards\":[{\"title\":\"Fast\",\"body\":\"Ships today\",\"tag\":\"safe\"}]}'
+  mesa live board push --template flow --file /tmp/steps.json --title Rollout")]
     #[command(group(ArgGroup::new("source").required(true).args(["body", "file", "image", "workflow"])))]
     Push {
         /// The board body as text (everything after `push`); quoting optional
@@ -3003,9 +3014,17 @@ EXAMPLES
             long,
             value_name = "KIND",
             value_parser = parse_text_board_kind,
-            conflicts_with_all = ["image", "workflow"],
+            conflicts_with_all = ["image", "workflow", "template"],
         )]
         kind: Option<LiveBoardKind>,
+        /// Render JSON as a styled html board: `table`, `cards` or `flow`
+        #[arg(
+            long,
+            value_name = "NAME",
+            value_parser = ["table", "cards", "flow"],
+            conflicts_with_all = ["image", "workflow", "kind"],
+        )]
+        template: Option<String>,
         /// Caption for the panel's head row (≤ 200 characters)
         #[arg(long, value_name = "TEXT")]
         title: Option<String>,
@@ -6843,13 +6862,28 @@ fn run_live_board(store: &mut Store, cmd: LiveBoardCmd) -> Result<()> {
             image,
             workflow,
             kind,
+            template,
             title,
             say,
             quiet,
         } => {
             // Exactly one source — clap's required ArgGroup has already
             // refused none and both, so this only has to say which it was.
-            let (kind, content, content_type) = if let Some(path) = image {
+            let (kind, content, content_type) = if let Some(name) = template {
+                // The input is JSON from the body or `--file` (whatever the
+                // extension); the board is the rendered html, stored like
+                // any other html board.
+                let input = match file {
+                    Some(path) => std::fs::read_to_string(&path)
+                        .map_err(|e| Error::Validation(format!("could not read {path}: {e}")))?,
+                    None => body.join(" "),
+                };
+                (
+                    LiveBoardKind::Html,
+                    board::template_html(&name, &input)?,
+                    None,
+                )
+            } else if let Some(path) = image {
                 // The content type comes from the extension, through the SAME
                 // allowlist `/files/raw` uses: an allowlist, never a sniff of
                 // the bytes, and never the caption. Anything not on it is a

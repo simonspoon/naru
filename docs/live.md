@@ -1540,6 +1540,21 @@ Two of those choices are load-bearing:
   nothing else could answer at render time — `body` is bytes, and `title` is a
   caption the caller writes, so a route that read the type off the title would
   serve something different when the caption changed.
+- **Templates render JSON into an ordinary `html` board** (naru task 1728).
+  `live board push --template table|cards|flow` takes JSON as the trailing
+  body or `--file` (read as JSON whatever the extension) and
+  `core::board::template_html` turns it, at push time, into one
+  self-contained document: inline `<style>` only (what `RENDER_CSP` allows),
+  no script, nothing fetched, Inter/system fonts on tinted rounded surfaces
+  with light and dark by `prefers-color-scheme` (`docs/style-guide.md`). The
+  store, API and frontend see a plain `html` board. Shapes: table
+  `{"columns":[..],"rows":[[..]]}` (cells strings or numbers, every row the
+  column count); cards `{"cards":[{"title","body"?,"tag"?}]}` or a bare
+  array; flow `{"steps":[{"title","detail"?}]}`, a bare array, or an array of
+  strings, drawn as numbered boxes joined by arrows. Bad JSON, a wrong shape
+  or an empty list is `validation`, exit 1, naming the template and the
+  expected shape. Every piece of text is HTML-escaped. `--template` conflicts
+  with `--image`, `--workflow` and `--kind`.
 - **A `diagram` board is a snapshot, not a view.** `core::board::workflow_svg`
   (mesa task 1607: workflows replaced diagrams, and `live board push
   --diagram <ID>` became `--workflow <ID|NAME>`) reads the workflow, its nodes
@@ -1907,7 +1922,7 @@ the group (with none live, `not_found` naming `mesa live start`).
 
 | Command | Args | Prints |
 | --- | --- | --- |
-| `live board push [BODY]…` | exactly one source: a trailing var-arg text body, `--file <PATH>`, `--image <PATH>` or `--workflow <ID\|NAME>`; plus `--kind markdown\|html` (text bodies only), `--title <TEXT>`, `--say <TEXT>`, `--quiet` | the created `LiveBoard` |
+| `live board push [BODY]…` | exactly one source: a trailing var-arg text body, `--file <PATH>`, `--image <PATH>` or `--workflow <ID\|NAME>`; plus `--template table\|cards\|flow` (the body or `--file` is JSON; conflicts with `--image`/`--workflow`/`--kind`), `--kind markdown\|html` (text bodies only), `--title <TEXT>`, `--say <TEXT>`, `--quiet` | the created `LiveBoard` |
 | `live board show [ID]` (alias `get`) | `--quiet`; without an ID, the board that is showing | one `LiveBoard` |
 | `live board list` | `--limit <N>` (clamped to 1..=20) | a bare array of bodiless summaries, oldest first |
 | `live board clear` | `--quiet` | the summaries it destroyed |
@@ -2357,7 +2372,7 @@ flag is an unknown argument, exit 2, exactly as on `turns`.
 | `live notice permission` | `--quiet`; takes no `--lease` (not the agent's verb — the page's, mesa task 1157) | the notice `LiveTurn`, created or the existing one for this working span |
 | `live turns` | `--after <ID>`, `--limit <N>` (clamped to 1..=500) | a bare array of turns, oldest first |
 | `live look` | `--output <PATH>` (default: a temp file named for the session) | the `LiveShot`: `path`, `window_id`, `width`, `height` |
-| `live board push [BODY]…` | exactly one source (body, `--file`, `--image`, `--workflow`), `--kind`, `--title`, `--say` — put every flag **before** the body | the created `LiveBoard` |
+| `live board push [BODY]…` | exactly one source (body, `--file`, `--image`, `--workflow`), `--template table|cards|flow` (JSON body or `--file`), `--kind`, `--title`, `--say` — put every flag **before** the body | the created `LiveBoard` |
 | `live board show [ID]` (alias `get`) | without an ID, the board that is showing | one `LiveBoard` |
 | `live board list` | `--limit <N>` (clamped to 1..=20) | a bare array of bodiless summaries, oldest first |
 | `live board clear` | — | the summaries it destroyed |

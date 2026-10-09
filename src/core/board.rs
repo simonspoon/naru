@@ -20,6 +20,7 @@
 
 use std::path::{Path, PathBuf};
 
+use super::store::{Error, Result};
 use super::types::WorkflowNodeKind;
 use super::types::{LiveBoard, LiveBoardKind, WorkflowView};
 
@@ -346,6 +347,228 @@ fn escape(s: &str) -> String {
     out
 }
 
+/// Board templates (naru task 1728): `naru live board push --template
+/// table|cards|flow` turns a small JSON document into a self-contained `html`
+/// board, so the live agent gets a consistent, styled picture without
+/// hand-writing markup. The result is stored like any html board — inline
+/// `<style>` only (what `RENDER_CSP` allows), no script, nothing fetched.
+/// Every piece of the JSON's text goes through [`escape`].
+pub fn template_html(template: &str, input: &str) -> Result<String> {
+    if !matches!(template, "table" | "cards" | "flow") {
+        return Err(Error::Validation(format!(
+            "unknown template {template:?}: expected table, cards or flow"
+        )));
+    }
+    let value: serde_json::Value = serde_json::from_str(input).map_err(|e| {
+        Error::Validation(format!(
+            "--template {template} takes JSON like {}, but this is not valid JSON: {e}",
+            template_shape(template)
+        ))
+    })?;
+    let body = match template {
+        "table" => table_body(&value)?,
+        "cards" => cards_body(&value)?,
+        _ => flow_body(&value)?,
+    };
+    Ok(format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><style>{TEMPLATE_CSS}</style></head>\
+         <body>{body}</body></html>"
+    ))
+}
+
+fn template_shape(template: &str) -> &'static str {
+    match template {
+        "table" => r#"{"columns": ["A","B"], "rows": [["1","2"]]}"#,
+        "cards" => r#"{"cards": [{"title": "...", "body": "...", "tag": "..."}]}"#,
+        _ => r#"{"steps": [{"title": "...", "detail": "..."}]}"#,
+    }
+}
+
+fn bad(template: &str, what: &str) -> Error {
+    Error::Validation(format!(
+        "--template {template}: {what}; expected {}",
+        template_shape(template)
+    ))
+}
+
+/// A string or number as text; anything else is not text.
+fn text_of(v: &serde_json::Value) -> Option<String> {
+    match v {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+fn opt_text(obj: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<String> {
+    obj.get(key).and_then(text_of).filter(|s| !s.is_empty())
+}
+
+fn table_body(v: &serde_json::Value) -> Result<String> {
+    let obj = v
+        .as_object()
+        .ok_or_else(|| bad("table", "the JSON is not an object"))?;
+    let cols = obj
+        .get("columns")
+        .and_then(|c| c.as_array())
+        .ok_or_else(|| bad("table", "\"columns\" must be an array"))?;
+    let cols: Vec<String> = cols
+        .iter()
+        .map(text_of)
+        .collect::<Option<_>>()
+        .ok_or_else(|| bad("table", "every column must be a string or number"))?;
+    if cols.is_empty() {
+        return Err(bad("table", "\"columns\" is empty"));
+    }
+    let rows = obj
+        .get("rows")
+        .and_then(|r| r.as_array())
+        .ok_or_else(|| bad("table", "\"rows\" must be an array"))?;
+    if rows.is_empty() {
+        return Err(bad("table", "\"rows\" is empty"));
+    }
+    let mut out = String::from("<div class=\"wrap\"><table><thead><tr>");
+    for c in &cols {
+        out.push_str(&format!("<th>{}</th>", escape(c)));
+    }
+    out.push_str("</tr></thead><tbody>");
+    for (i, row) in rows.iter().enumerate() {
+        let cells = row
+            .as_array()
+            .ok_or_else(|| bad("table", &format!("row {} is not an array", i + 1)))?;
+        if cells.len() != cols.len() {
+            return Err(bad(
+                "table",
+                &format!(
+                    "row {} has {} cells but there are {} columns",
+                    i + 1,
+                    cells.len(),
+                    cols.len()
+                ),
+            ));
+        }
+        out.push_str("<tr>");
+        for c in cells {
+            let t = text_of(c).ok_or_else(|| {
+                bad(
+                    "table",
+                    &format!("row {} has a cell that is not a string or number", i + 1),
+                )
+            })?;
+            out.push_str(&format!("<td>{}</td>", escape(&t)));
+        }
+        out.push_str("</tr>");
+    }
+    out.push_str("</tbody></table></div>");
+    Ok(out)
+}
+
+/// The array a template reads: the value itself, or the one under `key`.
+fn items<'a>(
+    template: &str,
+    v: &'a serde_json::Value,
+    key: &str,
+) -> Result<&'a Vec<serde_json::Value>> {
+    let arr = match v {
+        serde_json::Value::Array(a) => a,
+        serde_json::Value::Object(o) => o
+            .get(key)
+            .and_then(|a| a.as_array())
+            .ok_or_else(|| bad(template, &format!("\"{key}\" must be an array")))?,
+        _ => return Err(bad(template, "the JSON is neither an object nor an array")),
+    };
+    if arr.is_empty() {
+        return Err(bad(template, &format!("\"{key}\" is empty")));
+    }
+    Ok(arr)
+}
+
+fn cards_body(v: &serde_json::Value) -> Result<String> {
+    let mut out = String::from("<div class=\"cards\">");
+    for (i, c) in items("cards", v, "cards")?.iter().enumerate() {
+        let obj = c
+            .as_object()
+            .ok_or_else(|| bad("cards", &format!("card {} is not an object", i + 1)))?;
+        let title = opt_text(obj, "title")
+            .ok_or_else(|| bad("cards", &format!("card {} has no \"title\"", i + 1)))?;
+        out.push_str("<div class=\"card\">");
+        if let Some(tag) = opt_text(obj, "tag") {
+            out.push_str(&format!("<span class=\"tag\">{}</span>", escape(&tag)));
+        }
+        out.push_str(&format!("<h2>{}</h2>", escape(&title)));
+        if let Some(body) = opt_text(obj, "body") {
+            out.push_str(&format!("<p>{}</p>", escape(&body)));
+        }
+        out.push_str("</div>");
+    }
+    out.push_str("</div>");
+    Ok(out)
+}
+
+fn flow_body(v: &serde_json::Value) -> Result<String> {
+    let mut out = String::from("<div class=\"flow\">");
+    for (i, s) in items("flow", v, "steps")?.iter().enumerate() {
+        let (title, detail) = match s {
+            serde_json::Value::String(t) if !t.is_empty() => (t.clone(), None),
+            serde_json::Value::Object(o) => (
+                opt_text(o, "title")
+                    .ok_or_else(|| bad("flow", &format!("step {} has no \"title\"", i + 1)))?,
+                opt_text(o, "detail"),
+            ),
+            _ => {
+                return Err(bad(
+                    "flow",
+                    &format!("step {} is neither a string nor an object", i + 1),
+                ));
+            }
+        };
+        if i > 0 {
+            out.push_str("<span class=\"arrow\">\u{2192}</span>");
+        }
+        out.push_str(&format!(
+            "<div class=\"step\"><span class=\"num\">{}</span><h2>{}</h2>",
+            i + 1,
+            escape(&title)
+        ));
+        if let Some(d) = detail {
+            out.push_str(&format!("<p>{}</p>", escape(&d)));
+        }
+        out.push_str("</div>");
+    }
+    out.push_str("</div>");
+    Ok(out)
+}
+
+/// The look follows docs/style-guide.md: Inter first, tinted rounded
+/// surfaces, a hairline ring rather than an outline; light and dark by the
+/// viewer's colour scheme.
+const TEMPLATE_CSS: &str = "\
+:root{color-scheme:light dark;--bg:#f6f8fb;--fg:#14202e;--muted:#5b6b7e;--surface:#e9f2f8;\
+--raised:#fff;--ring:rgba(20,60,100,.14);--accent:#0a8fb0}\
+@media(prefers-color-scheme:dark){:root{--bg:#0b1220;--fg:#e6edf5;--muted:#93a3b8;\
+--surface:#111d2f;--raised:#16253b;--ring:rgba(120,190,230,.2);--accent:#4cc9f0}}\
+*{box-sizing:border-box}\
+body{margin:0;padding:20px;background:var(--bg);color:var(--fg);\
+font:15px/1.45 Inter,system-ui,-apple-system,'Segoe UI',sans-serif}\
+h2{margin:0 0 6px;font-size:16px;font-weight:600}p{margin:0;color:var(--muted)}\
+.wrap{overflow-x:auto;border-radius:12px;background:var(--surface);box-shadow:0 0 0 1px var(--ring)}\
+table{border-collapse:collapse;width:100%}\
+th,td{padding:10px 14px;text-align:left;vertical-align:top}\
+th{font-weight:600;color:var(--accent);border-bottom:1px solid var(--ring)}\
+tbody tr:nth-child(even){background:var(--raised)}\
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px}\
+.card,.step{background:var(--surface);border-radius:12px;padding:14px 16px;\
+box-shadow:0 0 0 1px var(--ring)}\
+.tag{display:inline-block;margin-bottom:8px;padding:2px 9px;border-radius:999px;\
+background:var(--raised);color:var(--accent);font-size:12px;font-weight:600;\
+box-shadow:0 0 0 1px var(--ring)}\
+.flow{display:flex;flex-wrap:wrap;align-items:stretch;gap:10px}\
+.step{flex:0 1 220px}\
+.num{display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;\
+margin-bottom:8px;border-radius:50%;background:var(--accent);color:var(--bg);\
+font-size:13px;font-weight:700}\
+.arrow{align-self:center;color:var(--accent);font-size:22px}";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -522,5 +745,119 @@ mod tests {
         let svg = workflow_svg(&empty);
         assert!(svg.contains("<svg"), "{svg}");
         assert!(svg.contains("viewBox=\"-24 -24 368 228\""), "{svg}");
+    }
+
+    #[test]
+    fn table_template_renders_strings_and_numbers() {
+        let html = template_html(
+            "table",
+            r#"{"columns":["Name","Qty"],"rows":[["a",1],["b",2.5]]}"#,
+        )
+        .unwrap();
+        assert!(html.contains("<th>Name</th><th>Qty</th>"), "{html}");
+        assert!(html.contains("<td>a</td><td>1</td>"), "{html}");
+        assert!(html.contains("<td>2.5</td>"), "{html}");
+        assert!(!html.contains("<script"), "{html}");
+    }
+
+    #[test]
+    fn cards_template_renders_both_shapes() {
+        let obj = template_html(
+            "cards",
+            r#"{"cards":[{"title":"One","body":"b","tag":"new"},{"title":"Two"}]}"#,
+        )
+        .unwrap();
+        assert!(obj.contains("<span class=\"tag\">new</span>"), "{obj}");
+        assert!(obj.contains("<h2>Two</h2></div>"), "{obj}");
+        let bare = template_html("cards", r#"[{"title":"Solo"}]"#).unwrap();
+        assert!(bare.contains("<h2>Solo</h2>"), "{bare}");
+    }
+
+    #[test]
+    fn flow_template_numbers_steps_and_joins_them_with_arrows() {
+        for input in [
+            r#"{"steps":[{"title":"A","detail":"d"},{"title":"B"}]}"#,
+            r#"[{"title":"A","detail":"d"},{"title":"B"}]"#,
+            r#"["A","B"]"#,
+        ] {
+            let html = template_html("flow", input).unwrap();
+            assert!(
+                html.contains("<span class=\"num\">1</span><h2>A</h2>"),
+                "{html}"
+            );
+            assert!(
+                html.contains("<span class=\"num\">2</span><h2>B</h2>"),
+                "{html}"
+            );
+            assert_eq!(html.matches("class=\"arrow\"").count(), 1, "{html}");
+        }
+    }
+
+    #[test]
+    fn templates_escape_every_piece_of_text() {
+        let evil = "<script>alert(\"x\")</script> & 'y'";
+        let cases = [
+            (
+                "table",
+                format!(
+                    r#"{{"columns":["{0}"],"rows":[["{0}"]]}}"#,
+                    evil.replace('"', "\\\"")
+                ),
+            ),
+            (
+                "cards",
+                format!(
+                    r#"{{"cards":[{{"title":"{0}","body":"{0}","tag":"{0}"}}]}}"#,
+                    evil.replace('"', "\\\"")
+                ),
+            ),
+            (
+                "flow",
+                format!(
+                    r#"{{"steps":[{{"title":"{0}","detail":"{0}"}}]}}"#,
+                    evil.replace('"', "\\\"")
+                ),
+            ),
+        ];
+        for (t, input) in cases {
+            let html = template_html(t, &input).unwrap();
+            assert!(!html.contains("<script"), "{t}: {html}");
+            assert!(
+                html.contains(
+                    "&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt; &amp; &apos;y&apos;"
+                ),
+                "{t}: {html}"
+            );
+        }
+    }
+
+    #[test]
+    fn templates_refuse_bad_input_naming_the_template() {
+        let cases = [
+            ("table", "not json"),
+            ("table", r#"{"columns":["a","b"],"rows":[["1"]]}"#),
+            ("table", r#"{"columns":["a"],"rows":[]}"#),
+            ("table", r#"{"columns":["a"],"rows":[[{"x":1}]]}"#),
+            ("table", r#"[1,2]"#),
+            ("cards", r#"{"cards":[]}"#),
+            ("cards", r#"{"cards":[{"body":"no title"}]}"#),
+            ("cards", r#"{"cards":["x"]}"#),
+            ("flow", r#"{"steps":[]}"#),
+            ("flow", r#"{"steps":[{"detail":"no title"}]}"#),
+            ("flow", r#"{"steps":[3]}"#),
+            ("flow", r#"{"nope":1}"#),
+        ];
+        for (t, input) in cases {
+            match template_html(t, input) {
+                Err(Error::Validation(m)) => {
+                    assert!(m.contains(&format!("--template {t}")), "{m}");
+                }
+                other => panic!("{t} {input}: {other:?}"),
+            }
+        }
+        assert!(matches!(
+            template_html("grid", "{}"),
+            Err(Error::Validation(_))
+        ));
     }
 }
