@@ -70,6 +70,12 @@ describe('levels', () => {
     expect(meterFraction(0.0316)).toBeCloseTo(0.5, 1)
   })
 
+  it('gives a visible width for quiet speech through a loud beep', () => {
+    expect(meterFraction(0.05)).toBeGreaterThan(0.5)
+    expect(meterFraction(0.01)).toBeGreaterThan(0.3)
+    expect(meterFraction(0.7)).toBeGreaterThan(0.9)
+  })
+
   it('holds a pulse across ticks and falls back gradually', () => {
     let level = meterStep(0, meterFraction(0.3))
     expect(level).toBeGreaterThan(0.5)

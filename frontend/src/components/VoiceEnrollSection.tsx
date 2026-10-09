@@ -127,8 +127,10 @@ export function VoiceEnrollSection() {
       if (!cap) return
       const t = (performance.now() - cap.startedAt) / 1000
       setElapsed(t)
-      setLevel((prev) => meterStep(prev, meterFraction(cap.windowPeakRms)))
+      // Read before the reset: React runs the updater later, after it.
+      const target = meterFraction(cap.windowPeakRms)
       cap.windowPeakRms = 0
+      setLevel((prev) => meterStep(prev, target))
       if (shouldAutoStop(t)) stop()
     }, 100)
     return () => window.clearInterval(id)
