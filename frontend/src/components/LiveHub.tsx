@@ -202,7 +202,7 @@ import type { LiveWindow } from '../types/LiveWindow'
 import type { TranscribeStatus } from '../types/TranscribeStatus'
 import { isNearBottom, newSince } from '../liveScroll'
 import { useFetch } from '../useFetch'
-import { detectNativeHost, hostVoiced, installNativeHost } from '../nativeHost'
+import { ambientControl, detectNativeHost, hostVoiced, installNativeHost } from '../nativeHost'
 
 /**
  * Mesa Live, in the header (mesa tasks 855, 857): the whole conversation lives
@@ -752,7 +752,18 @@ export function LiveHub({
   const session = data?.session ?? null
   const live = isLive(session)
   const offer = data?.offer ?? null
-  const glowing = offerGlows(offer, live)
+  // Ambient mode (naru task 1746): a native host keeps the live session open
+  // while this page's run is paused. The host's push is authoritative; the
+  // ref is what the receiver reads, and the flag only means anything while
+  // the session is live.
+  const [ambientState, setAmbientState] = useState(false)
+  const ambientRef = useRef(false)
+  const setAmbientNow = useCallback((next: boolean) => {
+    ambientRef.current = next
+    setAmbientState(next)
+  }, [])
+  const ambient = ambientState && live
+  const glowing = offerGlows(offer, live, ambient)
 
   // The live section of `~/.mesa/config.json`, for the one value this page
   // reads out of it: how long the person may fall silent before a
@@ -1218,19 +1229,6 @@ export function LiveHub({
     )
     return () => clearTimeout(timer)
   }, [voicedAt])
-  // The native host's push (declared here, after the setters it writes).
-  useEffect(() => {
-    if (native === null) return
-    return installNativeHost(window as unknown as Record<string, unknown>, native, (state) => {
-      if (state.muted !== undefined) setMutedNow(state.muted)
-      // The host owns the microphone, so the capture effects that normally
-      // write these never run: its level and speech verdict drive the orb and
-      // glow instead. The host's cadence is the throttle.
-      if (state.level !== undefined) setLevel(state.level)
-      if (hostVoiced(state, DEFAULT_VAD.onsetRms)) setVoicedAt(Date.now())
-    })
-  }, [native, setMutedNow])
-
   // ---- the watchdog (mesa task 1157) ----
 
   // What the page remembers of the agent between polls (`liveWatchdog.ts`),
@@ -1901,6 +1899,30 @@ export function LiveHub({
   useEffect(() => {
     pauseNowRef.current = pauseNow
   }, [pauseNow])
+
+  // The native host's push (declared here, after the setters it writes).
+  useEffect(() => {
+    if (native === null) return
+    return installNativeHost(window as unknown as Record<string, unknown>, native, (state) => {
+      if (state.muted !== undefined) setMutedNow(state.muted)
+      // Ambient vs live (naru task 1746): the host's word is final. Entering
+      // pauses this page's run; leaving waits for a fresh poll before the
+      // page may run again, so a stale poll cannot make it speak while the
+      // Mac reclaims the voice (nothing pumps the run on `paused` alone).
+      if (state.ambient === true && !ambientRef.current) {
+        setAmbientNow(true)
+        pauseNowRef.current()
+      } else if (state.ambient === false && ambientRef.current) {
+        setAmbientNow(false)
+        void refetch().then(() => setPausedNow(false))
+      }
+      // The host owns the microphone, so the capture effects that normally
+      // write these never run: its level and speech verdict drive the orb and
+      // glow instead. The host's cadence is the throttle.
+      if (state.level !== undefined) setLevel(state.level)
+      if (hostVoiced(state, DEFAULT_VAD.onsetRms)) setVoicedAt(Date.now())
+    })
+  }, [native, setMutedNow, setAmbientNow, setPausedNow, refetch])
 
   // The steady question — is the person talking to mesa through the microphone
   // — which is what the composer's hint and placeholder read. Deliberately not
@@ -3471,6 +3493,7 @@ export function LiveHub({
       // outlive one: the next `Go live` starts talking rather than starting
       // paused with no control on screen to say why.
       setPausedNow(false)
+      setAmbientNow(false)
       // Nor does a muted voice (mesa task 1327), for the same reason.
       setSpeechMutedNow(false)
       // Nor a replay (mesa task 1449) — `silence()` above already stopped the
@@ -3486,6 +3509,7 @@ export function LiveHub({
     live,
     silence,
     setPausedNow,
+    setAmbientNow,
     setSpeechMutedNow,
     setReplaying,
     setRecordingNow,
@@ -4205,6 +4229,18 @@ export function LiveHub({
   // Pulled out of the object so its narrowing survives into the handler below.
   const secondary = controls.secondary
   const pauseButton = controls.pause
+  // The ambient/live switch (naru task 1746): only with a native host, in a
+  // live session this browser joined. Ambient pauses the run here and asks
+  // the host; Live only asks — the host's reply changes the page.
+  const ambientCtl = ambientControl(native !== null, live, unlocked, ambient)
+  function pressAmbient() {
+    if (!ambientCtl) return
+    if (ambientCtl.next) {
+      setAmbientNow(true)
+      pauseNow()
+    }
+    native?.post({ type: 'ambient', on: ambientCtl.next })
+  }
   // The press that ends the conversation, wherever `liveControls` put it
   // (mesa task 1069): the primary while this browser has joined, the secondary
   // while it has not and `Listen` leads instead. At most one of the two is
@@ -4276,7 +4312,8 @@ export function LiveHub({
     paused,
     pauseLabel: pauseButton?.label ?? '',
     pauseDisabled: pauseButton?.disabled ?? true,
-    canPause: pauseButton !== undefined && pauseButton !== null,
+    canPause: pauseButton !== undefined && pauseButton !== null && !ambient,
+    ambient: ambientCtl ? { label: ambientCtl.label, onPress: pressAmbient } : null,
     onToggleMic: () => toggleListening(!muted),
     onTogglePause: () => {
       if (pauseButton) togglePause(pauseButton)
@@ -4287,7 +4324,26 @@ export function LiveHub({
     offer: glowing && offer
       ? {
           title: offerTitle(offer),
-          onAccept: () => act({ label: 'Go live', action: 'start', disabled: pending !== null }, true),
+          onAccept: () => {
+            if (!ambient) {
+              act({ label: 'Go live', action: 'start', disabled: pending !== null }, true)
+              return
+            }
+            // Ambient: the session is already open, so the overheard line
+            // becomes a user turn and the host is asked back to live.
+            setActionError(null)
+            sendLiveUtterance(offer.text, undefined, viewNow.current()).then(
+              () => {
+                armThinking(false)
+                refetch()
+                native?.post({ type: 'ambient', on: false })
+              },
+              (err: unknown) => {
+                setActionError(err instanceof Error ? err.message : String(err))
+                setOpen(true)
+              },
+            )
+          },
         }
       : null,
   }
@@ -4452,7 +4508,21 @@ export function LiveHub({
               only while the conversation is live and this browser is
               in it. Sits before End so the press that destroys the
               conversation stays last. */}
-          {pauseButton && (
+          {ambientCtl && (
+            <button
+              type="button"
+              className="live-icon live-icon-ambient"
+              aria-label={
+                ambientCtl.label === 'Ambient' ? 'switch to ambient mode' : 'switch to live mode'
+              }
+              title={ambientCtl.label}
+              tabIndex={open ? undefined : -1}
+              onClick={() => pressAmbient()}
+            >
+              {ambientCtl.label}
+            </button>
+          )}
+          {pauseButton && !ambient && (
             <button
               type="button"
               className="live-icon live-icon-pause"
@@ -4752,7 +4822,9 @@ export function LiveHub({
             placeholder={
               !live
                 ? 'go live to start the conversation'
-                : paused
+                : ambient
+                  ? 'ambient — press Live to talk to Naru'
+                  : paused
                   ? 'paused — press Resume to talk to Naru'
                   : recognizes
                     ? 'listening — or type here'

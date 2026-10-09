@@ -135,10 +135,12 @@ struct AppState {
     /// old "permission prompt" (the page's rising-edge rule is the first line
     /// against that; this is the second), and a stale one is pruned on insert.
     live_blocked_cache: Arc<Mutex<HashMap<String, (Instant, Option<String>)>>>,
-    /// The newest ambient `can-help` offer: (text, speaker, when). In memory
-    /// only; newest wins; absent after [`LIVE_OFFER_TTL`] and cleared by any
-    /// live start (naru task 1700).
-    live_offer: Arc<Mutex<Option<(String, String, Instant)>>>,
+    /// The newest ambient `can-help` offer: (text, speaker, when, the id of
+    /// the live session open when it was heard). In memory only; newest wins;
+    /// absent after [`LIVE_OFFER_TTL`], cleared by any live start (naru task
+    /// 1700) and by a user turn; carried (not consumed) by a poll while the
+    /// session it was overheard during is still the live one (naru task 1746).
+    live_offer: Arc<Mutex<Option<(String, String, Instant, Option<i64>)>>>,
     /// The live agent's occupied context, keyed by its short job id —
     /// `GET /api/live`'s derived `context_tokens` (mesa task 1478). Same
     /// shape and TTL as `live_blocked_cache`, but keyed on the job id alone:
@@ -4597,7 +4599,14 @@ async fn emit_workflow_event(
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ");
-        *state.live_offer.lock().unwrap() = Some((text, speaker, Instant::now()));
+        // The open session's id (read before the offer lock; never two held).
+        let open = state
+            .store
+            .lock()
+            .unwrap()
+            .current_live_session()?
+            .map(|s| s.id);
+        *state.live_offer.lock().unwrap() = Some((text, speaker, Instant::now(), open));
     }
     let ran = ids.clone();
     tokio::task::spawn_blocking(move || {
@@ -5011,7 +5020,7 @@ async fn get_live(
     State(state): State<AppState>,
     Query(q): Query<LiveQuery>,
 ) -> ApiResult<Response> {
-    let (session, turns, boards) = {
+    let (session, turns, boards, offer) = {
         let store = state.store.lock().unwrap();
         let Some(session) = store.current_live_session()? else {
             let offer = state
@@ -5019,8 +5028,8 @@ async fn get_live(
                 .lock()
                 .unwrap()
                 .as_ref()
-                .filter(|(_, _, at)| at.elapsed() < LIVE_OFFER_TTL)
-                .map(|(text, speaker, at)| LiveOffer {
+                .filter(|(_, _, at, _)| at.elapsed() < LIVE_OFFER_TTL)
+                .map(|(text, speaker, at, _)| LiveOffer {
                     text: text.clone(),
                     speaker: speaker.clone(),
                     age_ms: at.elapsed().as_millis() as u32,
@@ -5035,9 +5044,24 @@ async fn get_live(
             })
             .into_response());
         };
-        // A session started any other way (the CLI, another client) consumes
-        // the offer too, so a stale one never re-glows after it ends.
-        state.live_offer.lock().unwrap().take();
+        // An offer heard during THIS session rides along (ambient mode keeps
+        // the session open, naru task 1746); any other is consumed, so a stale
+        // one never re-glows after the session ends.
+        let offer = {
+            let mut slot = state.live_offer.lock().unwrap();
+            let mine = slot
+                .as_ref()
+                .filter(|(_, _, at, tag)| *tag == Some(session.id) && at.elapsed() < LIVE_OFFER_TTL)
+                .map(|(text, speaker, at, _)| LiveOffer {
+                    text: text.clone(),
+                    speaker: speaker.clone(),
+                    age_ms: at.elapsed().as_millis() as u32,
+                });
+            if mine.is_none() {
+                slot.take();
+            }
+            mine
+        };
         let turns = store.list_live_turns(session.id, q.after, LIVE_TURNS_LIMIT)?;
         // The whole board history, bodiless (mesa task 1071) — every board
         // this conversation pushed, in the order the panel steps through
@@ -5045,7 +5069,7 @@ async fn get_live(
         // consistent view. `LIVE_BOARD_KEEP` is all there is: the store
         // prunes to it on every push.
         let boards = store.list_live_boards(session.id, LIVE_BOARD_KEEP)?;
-        (session, turns, boards)
+        (session, turns, boards, offer)
     };
     // Whether the agent's job is stuck (mesa task 1157), derived here and
     // never stored — off the store lock, since it may be a shell-out.
@@ -5063,7 +5087,7 @@ async fn get_live(
         boards,
         blocked,
         context_tokens,
-        offer: None,
+        offer,
     })
     .into_response())
 }
@@ -5170,8 +5194,8 @@ async fn start_live(
     // Any start clears the pending offer; only an accepting one carries it.
     let offer = state.live_offer.lock().unwrap().take();
     let overheard = offer
-        .filter(|(_, _, at)| body.accept_offer && at.elapsed() < LIVE_OFFER_TTL)
-        .map(|(text, speaker, _)| (speaker, text));
+        .filter(|(_, _, at, _)| body.accept_offer && at.elapsed() < LIVE_OFFER_TTL)
+        .map(|(text, speaker, _, _)| (speaker, text));
     let job = match spawn_live_agent(&state, session_id, body.project_id, overheard).await {
         Ok(job) => job,
         Err(err) => {
@@ -5584,20 +5608,31 @@ async fn live_utterance(
         .as_ref()
         .map(|image| decode(&image.png_base64, "image"))
         .transpose()?;
-    let mut store = state.store.lock().unwrap();
-    let Some(session) = store.current_live_session()? else {
-        return Err(no_live_session());
-    };
-    let turn = match (ink, image) {
-        (Some((board_id, png)), None) => {
-            store.add_live_ink_turn(session.id, &body.text, board_id, &png, body.view.as_deref())?
+    let turn = {
+        let mut store = state.store.lock().unwrap();
+        let Some(session) = store.current_live_session()? else {
+            return Err(no_live_session());
+        };
+        match (ink, image) {
+            (Some((board_id, png)), None) => store.add_live_ink_turn(
+                session.id,
+                &body.text,
+                board_id,
+                &png,
+                body.view.as_deref(),
+            )?,
+            (None, Some(png)) => {
+                store.add_live_image_turn(session.id, &body.text, &png, body.view.as_deref())?
+            }
+            (None, None) => {
+                store.add_live_user_turn(session.id, &body.text, body.view.as_deref())?
+            }
+            (Some(_), Some(_)) => unreachable!("checked above"),
         }
-        (None, Some(png)) => {
-            store.add_live_image_turn(session.id, &body.text, &png, body.view.as_deref())?
-        }
-        (None, None) => store.add_live_user_turn(session.id, &body.text, body.view.as_deref())?,
-        (Some(_), Some(_)) => unreachable!("checked above"),
     };
+    // A user turn answers whatever was offered (naru task 1746); the store
+    // lock is dropped first so two locks are never held.
+    state.live_offer.lock().unwrap().take();
     Ok((StatusCode::CREATED, Json(turn)).into_response())
 }
 
@@ -18267,7 +18302,66 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         assert_eq!(body["offer"]["text"], "how do I rebase?");
         assert_eq!(body["offer"]["speaker"], "Simon");
         let old = Instant::now() - LIVE_OFFER_TTL - Duration::from_secs(1);
-        *state.live_offer.lock().unwrap() = Some(("old".into(), "Simon".into(), old));
+        *state.live_offer.lock().unwrap() = Some(("old".into(), "Simon".into(), old, None));
+        assert!(poll(state).await["offer"].is_null());
+    }
+
+    /// An offer heard during an open session rides its polls until a user turn
+    /// clears it; one heard before the session opened never shows once a
+    /// session exists (naru task 1746).
+    #[tokio::test]
+    async fn can_help_offer_rides_its_own_open_session_until_a_user_turn() {
+        let (_dir, state) = test_state();
+        let emit = |state: AppState, text: &str| {
+            let text = text.to_string();
+            async move {
+                emit_workflow_event(
+                    State(state),
+                    ConnectInfo(loopback()),
+                    loopback_agent_headers(),
+                    Ok(Json(WorkflowEventBody {
+                        event: "can-help".into(),
+                        speaker: "Simon".into(),
+                        text,
+                    })),
+                )
+                .await
+                .unwrap()
+            }
+        };
+        let poll = |state: AppState| async move {
+            json_body(
+                get_live(State(state), Query(LiveQuery { after: None }))
+                    .await
+                    .unwrap(),
+            )
+            .await
+        };
+        // Heard before any session: gone once one exists.
+        emit(state.clone(), "before").await;
+        state
+            .store
+            .lock()
+            .unwrap()
+            .start_live_session(None)
+            .unwrap();
+        assert!(poll(state.clone()).await["offer"].is_null());
+        // Heard during the open session: carried across polls.
+        emit(state.clone(), "during").await;
+        assert_eq!(poll(state.clone()).await["offer"]["text"], "during");
+        assert_eq!(poll(state.clone()).await["offer"]["text"], "during");
+        // A user turn clears it.
+        live_utterance(
+            State(state.clone()),
+            Ok(Json(LiveUtterance {
+                text: "hello".into(),
+                ink: None,
+                image: None,
+                view: None,
+            })),
+        )
+        .await
+        .unwrap();
         assert!(poll(state).await["offer"].is_null());
     }
 

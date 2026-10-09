@@ -2008,9 +2008,10 @@ browser has no such handler and behaves exactly as before.
 | `{"type":"ready"}` | The page installed its API below; answer with `setMicState`. |
 | `{"type":"state","session":<id or null>,"live":<bool>,"joined":<bool>}` | On mount and whenever the live session, `live` or this browser's `joined` changes. Capture only while `live && joined`. |
 | `{"type":"mic","muted":<bool>}` | The person pressed the listen button or chord. |
+| `{"type":"ambient","on":<bool>}` | The person pressed the **Ambient** (`on: true`) or **Live** (`on: false`) button, or accepted an offer while ambient (`on: false`). Naru task 1746. |
 
 **Host to page** — `window.naruNativeHost.setMicState({muted?: <bool>,
-level?: <rms 0..1>, hearing?: <bool>})` (installed only when the host is
+level?: <rms 0..1>, hearing?: <bool>, ambient?: <bool>})` (installed only when the host is
 detected; a missing key leaves that state alone, a wrongly typed one is
 ignored). `level` drives the orb and glow as the page's own meter would, and
 the person counts as heard while `hearing` is true or `level` reaches the
@@ -2018,6 +2019,16 @@ capture onset (`DEFAULT_VAD.onsetRms`); a host sending only `muted` behaves
 as before. It is the last word on `muted`: a press is
 applied locally at once and posted as `mic`, and the host's next `setMicState`
 overrides it.
+
+**Ambient mode** (naru task 1746): the host owns live-vs-ambient and the live
+session stays open across the switch. `ambient: true` pauses this page's run
+(nothing spoken, no navigate; the typed box reads "ambient — press Live to talk
+to Naru", Pause is hidden); `ambient: false` refetches `GET /api/live` and only
+then unpauses, so a stale poll cannot make the page speak while the host
+reclaims the voice. The host's push is the last word: the **Ambient** button
+pauses locally and posts `ambient`, the **Live** button only posts it and
+waits for the host's reply. The switch is offered only with a host, while live
+and joined; ambient clears when the session ends. A plain browser never sees it.
 
 **What the page stops doing** when a host is present: no `getUserMedia`
 anywhere (main capture, barge-in, device probe), no `enumerateDevices`, the
@@ -3616,11 +3627,18 @@ An ambient `can-help` event POSTed to `/api/workflows/events` also lights the
 live orb, silently. The server keeps the **newest** such event in memory only
 (text capped at 4000 characters, newest wins, absent after 10 minutes, lost on a
 restart) and carries it on `GET /api/live` as `offer` (`{text, speaker, age_ms}`)
-while no session is live. The orb glows a warm gold pulse (slowed, not removed,
+while no session is live **or while the session it was overheard during is the
+live one** (the server tags the offer with the session open when it was heard,
+so ambient mode, which keeps a session open, can still offer; an offer heard
+before that session opened is consumed as before). A user turn clears it. The
+orb glows a warm gold pulse (slowed, not removed,
 under reduced motion) with the overheard text as its tooltip; pressing it starts
 a conversation with `POST /api/live {"accept_offer": true}`, which puts the
 overheard words last in the agent's spawn prompt, framed as data, never
-instructions. Any live start, accepted or not, clears the offer. No sound plays
+instructions. Any live start, accepted or not, clears the offer. In **ambient
+mode** (native host only) the orb glows for such an offer too, and pressing it
+sends the overheard text as a user turn on the already-open session, then asks
+the host back to live (`{"type":"ambient","on":false}`). No sound plays
 on the offer itself. `naru workflow emit can-help` from the CLI cannot light it:
 the CLI has no server to hold the offer.
 
