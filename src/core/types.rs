@@ -1236,6 +1236,20 @@ pub struct Task {
     pub blocked: bool,
 }
 
+/// One task that finished, was cancelled or went back to todo/backlog since
+/// some time (naru task 1725). Built by `Store::task_digest`; `status` is the
+/// task's current status. Not ts-exported.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TaskDigestEntry {
+    pub task_id: i64,
+    pub name: String,
+    pub project_id: i64,
+    pub project_name: String,
+    pub status: String,
+    /// When the qualifying event happened (SQLite `datetime` text, UTC).
+    pub at: String,
+}
+
 /// An append-only record of a task's status change. `from_status` is null for
 /// the row written when the task is created.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -1245,8 +1259,10 @@ pub struct TaskEvent {
     pub id: i64,
     #[ts(type = "number")]
     pub task_id: i64,
-    pub from_status: Option<Status>,
-    pub to_status: Status,
+    /// Raw status text, not `Status`: old rows hold retired statuses (`refine`)
+    /// that no longer parse, and an event must still list them as written.
+    pub from_status: Option<String>,
+    pub to_status: String,
     /// When the change happened (SQLite `datetime` text, UTC).
     pub at: String,
 }
@@ -4467,6 +4483,8 @@ pub struct LiveBoard {
     pub content_type: Option<String>,
     /// When it was pushed (SQLite `datetime` text, UTC).
     pub created_at: String,
+    /// When it was first pinned (naru task 1735); null = not pinned.
+    pub pinned_at: Option<String>,
 }
 
 /// A board without its body — what rides in [`LiveState`], which the page
@@ -4484,6 +4502,20 @@ pub struct LiveBoardSummary {
     pub kind: LiveBoardKind,
     pub title: Option<String>,
     pub created_at: String,
+    /// When it was first pinned (naru task 1735); null = not pinned.
+    pub pinned_at: Option<String>,
+}
+
+/// One page of the global whiteboard history (`GET /api/live/boards`, naru
+/// task 1735): boards from every session, newest first, plus every pinned
+/// board whatever page it falls on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct LiveBoardHistoryPage {
+    pub boards: Vec<LiveBoardSummary>,
+    pub pinned: Vec<LiveBoardSummary>,
+    /// Whether boards older than the last one in `boards` exist.
+    pub has_more: bool,
 }
 
 /// One entry of a live session's **whole** whiteboard history (`GET
@@ -4817,5 +4849,25 @@ pub struct WorkflowLogEntry {
     pub workflow_id: Option<i64>,
     #[ts(type = "number | null")]
     pub run_id: Option<i64>,
+    pub created_at: String,
+}
+
+/// One append-only note on a task (naru task 1724). A sibling record, not a
+/// `Task` field (the receipt precedent): the task's JSON, `compact()` and
+/// `--quiet` key parity stay untouched. There is no update or delete — a
+/// note is context added, never a rewrite of what was there.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct TaskNote {
+    #[ts(type = "number")]
+    pub id: i64,
+    #[ts(type = "number")]
+    pub task_id: i64,
+    /// Non-empty, at most `Store::TASK_NOTE_MAX` bytes.
+    pub body: String,
+    /// The Claude Code session that wrote it, when known (the CLI reads
+    /// `CLAUDE_CODE_SESSION_ID`); `null` from the web UI.
+    pub session: Option<String>,
+    /// SQLite `datetime` text, UTC.
     pub created_at: String,
 }

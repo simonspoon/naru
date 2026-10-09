@@ -4,20 +4,226 @@
 
 **A local-first workspace where you and your Claude Code agents plan the work, run it, and talk it through.**
 
-Naru is one binary and one SQLite file. Your agents drive it through a
-JSON-only CLI. You use a web UI, or just talk to it. Both work on the same
-store: projects, tasks and dependencies, workflows, an inbox, memory, and your
-whole Claude Code setup. Naru can hand work to background agents, watch what
-they spend, and review how it went. It has no cloud service and no account,
+Naru is one binary and one SQLite file. You use it through a web UI (or just
+talk to it); your agents drive the same store through a JSON-only CLI.
+Projects, tasks and dependencies, workflows, an inbox, memory and your whole
+Claude Code setup live in one place. Naru can hand work to background
+agents, watch what they spend, and review how it went. It has no cloud service and no account,
 and Naru itself collects no telemetry. The Claude Code agents it starts talk
 to Anthropic as they always do.
 
 > Naru was formerly called **mesa**. The binary is `naru`, and `mesa` is
-> still installed beside it as the same program. Every `NARU_*` environment
-> variable is also read under its old `MESA_*` name. An existing install
-> keeps its `mesa` data paths, and nothing is moved.
+> still installed beside it as the same program when you build from source.
+> Every `NARU_*` environment variable is also read under its old `MESA_*`
+> name. An existing install keeps its `mesa` data paths, and nothing is moved.
 
-## What it does
+## Quick start
+
+### 1. Install
+
+With Homebrew (macOS and Linux, from the
+[`simonspoon/tap`](https://github.com/simonspoon/homebrew-tap) tap):
+
+```bash
+brew tap simonspoon/tap
+brew install naru
+```
+
+The formula installs the `naru` binary only (no `mesa` alias).
+
+Or build from source. You need Rust (edition 2024), Node.js and npm:
+
+```bash
+git clone https://github.com/simonspoon/naru.git
+cd naru
+scripts/install.sh        # tests, frontend build, compile, then copy onto your PATH
+```
+
+`scripts/install.sh` installs `naru` to `~/.local/bin` (override with
+`PREFIX=/usr/local`) and adds `mesa` as a symlink to it. To build without
+installing, run `scripts/build.sh`, which produces `target/release/naru`.
+
+### 2. Open the web UI
+
+```bash
+naru serve
+```
+
+Then open <http://127.0.0.1:7770>. The server binds to your machine only by
+default; `--port <PORT>` changes the port.
+
+```bash
+naru serve --lan                           # also reachable from other devices on your network
+naru serve --lan --allow-host naru.local   # ...and by that hostname
+```
+
+**`--lan` has no authentication.** It gives every device on your network full
+access to your data and a shell on your machine; use it only on networks you
+trust (see [Security](#web-ui-http-api-and-security)).
+
+To run Naru as a service, put the same options in the `serve` section of
+`~/.naru/config.json` (`port`, `lan`, `allow-host`, `watch-todo`, ...) so a
+bare `naru serve` is enough; a flag you pass wins over the config. The same
+switches are on **Settings -> System**. See [`docs/config.md`](docs/config.md).
+
+### 3. Create something
+
+Create a project and a task from the UI, or from a terminal:
+
+```bash
+naru project create "Website redesign" --description "Q3 marketing site"
+naru task create "Website redesign" "Draft homepage copy" --tags writing,web
+naru task list "Website redesign" --status todo --unblocked
+```
+
+`project create` binds the git repo of the current directory unless you pass
+`--no-git`.
+
+## The web UI
+
+Everything below is a page or panel of the UI you opened with `naru serve`.
+Pages are addressed by `#/...` hashes, so each one is bookmarkable and
+survives a reload. `Cmd/Ctrl+Shift+P` opens the command palette; the other
+global shortcuts can be rebound in Settings. Move around with `hjkl` or the
+arrow keys, and press `a` to create a task
+([`docs/keyboard.md`](docs/keyboard.md)). The layout adapts to phone widths
+([`docs/mobile.md`](docs/mobile.md)). The UI does not live-sync; it refetches
+when the window regains focus.
+
+### Layout
+
+- **Left nav**: the CC Dashboard (the landing page), the global pages below,
+  and your projects as a tree. Drag a project to reorder or nest it.
+- **Dock**: on desktop widths every panel (main page, conversation,
+  whiteboard, agents, terminal) is a dockable tab group you can drag into
+  splits. Talk/Review/Build presets and your own saved layouts are in the
+  header `...` menu ([`docs/dock.md`](docs/dock.md)).
+- **Header**: the live conversation, and chips showing how much of your Claude
+  plan's 5-hour and 7-day limits you have used.
+
+### Per project
+
+Open a project to get its **Board** (a kanban of tasks) and these tabs:
+
+- **Board / tasks**: statuses `backlog | todo | in_progress | done |
+  cancelled`, priorities, tags, subtasks, dependencies (a task is *blocked*
+  while anything it depends on is unfinished), a definition of done, a final
+  result, append-only notes, attachments and a work receipt when a claimed
+  task closes. Press `a` on a board to create a task
+  ([`docs/receipts.md`](docs/receipts.md),
+  [`docs/task-notes.md`](docs/task-notes.md),
+  [`docs/attachments.md`](docs/attachments.md)).
+- **Dashboard**: Claude Code usage for this project (tokens, estimated cost,
+  sessions).
+- **Files**: a file browser, editor and project-wide search
+  ([`docs/files-tab.md`](docs/files-tab.md)).
+- **Git**: the working tree, diffs and history, read-only
+  ([`docs/git-tab.md`](docs/git-tab.md)).
+- **Terminal**: a real shell in the project folder
+  ([`docs/terminal.md`](docs/terminal.md)).
+- **Workflows**: this project's workflows, with a graph builder.
+- **Artifacts**: HTML mockups, SVGs and markdown reports written by agents,
+  rendered in a sandbox ([`docs/artifacts.md`](docs/artifacts.md)).
+- **Custom**: your own split-pane layout of the other tabs
+  ([`docs/project-panes.md`](docs/project-panes.md)).
+- **Settings**: the project's folder, parent and archive switch
+  ([`docs/archiving.md`](docs/archiving.md)).
+
+The project name also shows the app version read from its manifest
+([`docs/project-version.md`](docs/project-version.md)).
+
+### Global pages
+
+- **CC Dashboard** (`#/`): analytics over Claude Code's own transcripts:
+  tokens, estimated cost, models, skills, agents, tools and errors, your live
+  plan-limit usage, a per-session detail page with the full call tree, and a
+  timeline. History is kept in Naru's database, so it outlives Claude Code's
+  own cleanup ([`docs/cc-dashboard.md`](docs/cc-dashboard.md)).
+- **Inbox** (`#/inbox`): the queue of things that need a decision: change
+  requests and alerts addressed to you. Tabs for New, Read and Archived. Turn
+  an item into a task, archive it with a reason, or have it read aloud
+  ([`docs/inbox.md`](docs/inbox.md)).
+- **Workflows** (`#/workflows`): every workflow across all projects. A
+  workflow is a saved graph of typed steps (trigger, model prompt, shell
+  command, branch, output...) that Naru runs in a fixed order; the graph
+  decides what runs, never an agent. Run one by hand, on a schedule, or by
+  asking the live agent for it by name
+  ([`docs/workflows.md`](docs/workflows.md)).
+- **Library** (`#/library`): three tabs. *Claude Code* holds agent
+  definitions, skills, hooks, prompts and `CLAUDE.md` files as versioned
+  records, synced file by file with `.claude/` (you pick the winner of any
+  conflict; nothing is merged behind your back) and exportable as a bundle
+  ([`docs/library.md`](docs/library.md)). *Scripts* are your own shell
+  snippets with declared, typed arguments: the form is generated from the
+  arguments, a run can be detached and replayed, and values are never spliced
+  into the script text ([`docs/scripts.md`](docs/scripts.md)). *Workflows* is
+  a read-only list of every project's workflows.
+- **Terminal** (`#/terminal`): a shell in Naru's workspace folder.
+- **Settings** (`#/settings`): tabs for Hooks (the command templates Naru
+  uses to start agents, [`docs/config.md`](docs/config.md)), Keyboard, Voice,
+  Memory (the live notebook), Pricing and System (the host monitor and the
+  `serve` options; [`docs/system.md`](docs/system.md)).
+
+### Agents sidebar
+
+A right-hand panel listing every live Claude Code session across your
+projects. Open one to chat with it or attach a terminal, see its subagents and
+shell calls as cards, and start a new background agent in any project
+([`docs/agents.md`](docs/agents.md)).
+
+### Live voice conversation
+
+Naru live is a spoken conversation with a dedicated Claude Code agent. It
+lives in the header: press **Go live**, then speak or type. The agent works
+with the ordinary Naru CLI and answers out loud. It can move your browser to
+the page it is talking about and put a **whiteboard** in front of you
+(markdown, HTML, an image, or a snapshot of a workflow); you can draw on the
+whiteboard and your drawing reaches the agent. Long jobs go to delegate
+agents so it keeps listening, and a long call can be handed to a fresh agent
+mid-conversation. On macOS, `naru live look` lets the agent see your browser
+window (needs the external `loki` tool). Conversations leave a summary and a
+notebook of what you said outright ([`docs/live.md`](docs/live.md)).
+
+It needs:
+
+- the `claude` CLI on your PATH, because the conversation is a Claude Code
+  agent;
+- a speech engine, all running locally after a one-time model download:
+  - **naru-audio** (a separate daemon, speech-to-text and text-to-speech):
+    `brew install naru-audio`, then `naru-audio pull default` (downloads the
+    models) and `brew services start naru-audio`, and select the `naru-audio`
+    engine in the Audio section of Settings -> Voice. Voices can be picked,
+    cloned from a short recording, or designed from a description; a cloned
+    voice exports to a single `<name>.naru-voice.json` file you can import on
+    another machine; or
+  - the older **`auris`** (speech-to-text) and **`kokoro-rs`**
+    (text-to-speech) binaries, also in the tap;
+- with neither, the browser's own speech recognition or the typed box still
+  works ([`docs/listen.md`](docs/listen.md)).
+
+You can also start it from a terminal with `naru live start` and end it with
+`naru live stop`.
+
+### Also in the UI
+
+- **Project notebooks**: each project keeps its own memory (build quirks,
+  conventions, reasons behind decisions), printed into every new Claude Code
+  session in it ([`docs/project-memory.md`](docs/project-memory.md)).
+- **Settings -> System**: RAM, CPU, disk, GPU and uptime for the host.
+- A native iPhone companion, **naru-ios**, connects to a `naru serve --lan`
+  server (task board, inbox, live conversations, files, git, artifacts,
+  memory).
+
+---
+
+# For agents and the command line
+
+Everything above is also available from the CLI, which is what your agents
+use. It talks to SQLite directly and never needs the server to be running.
+Run `naru --help` and `naru <command> --help` for the full reference; each
+command documents itself, with examples.
+
+## What agents can do
 
 ### Plan and track work, for people and agents alike
 
@@ -55,6 +261,9 @@ Each of these is off by default. You turn them on with a `naru serve` flag.
 - **Work receipts.** When a claimed task closes, Naru records a receipt: the
   commits made during the claim, a diff summary, and a link to the session
   transcript ([`docs/receipts.md`](docs/receipts.md)).
+- **Task notes.** `naru task note <id> <text>` appends context to a task
+  without rewriting its description; notes are append-only and `task show`
+  lists them ([`docs/task-notes.md`](docs/task-notes.md)).
 - **Cost guard** (`--watch-cost`) catches a runaway session: one over its
   dollar or token limit, stuck re-reading its cache, or repeating the same
   command. By default it stops that session (you can resume it) and files an
@@ -69,39 +278,6 @@ Each of these is off by default. You turn them on with a `naru serve` flag.
   run as code ([`docs/config.md`](docs/config.md)).
 - **Hooks** run your own shell command on `task-execute`, with the task JSON
   on stdin ([`docs/hooks.md`](docs/hooks.md)).
-
-### Talk to it
-
-- **Naru live** is a spoken conversation with a dedicated Claude Code agent,
-  started from the web UI's header or with `naru live start`. You speak or
-  type, and the agent works with the ordinary Naru CLI and answers out loud.
-  It can move your browser to the page it is talking about and put a
-  **whiteboard** in front of you: markdown, HTML, an image, or a snapshot of
-  a workflow's graph. You can draw on the whiteboard, and your drawing reaches the
-  agent. Long jobs go to delegate agents, so the agent keeps listening while
-  they run, and a long call can be handed to a fresh agent midway. On macOS,
-  `naru live look` lets the agent see your browser window
-  ([`docs/live.md`](docs/live.md)).
-- **Speech runs on your machine**, after a one-time model download. You can
-  use the **naru-audio** daemon, a separate companion project that downloads
-  its models once and then serves local speech-to-text and text-to-speech
-  over HTTP. Or you can use the older
-  engine, the `auris` and `kokoro-rs` binaries. If neither is installed, the
-  browser's own speech recognition or the typed box still works
-  ([`docs/listen.md`](docs/listen.md)).
-- **Voices.** With naru-audio you can pick a voice, clone one from a short
-  recording, or design one from a written description. A cloned voice
-  exports to a single `naru-voice` file that you can import on another
-  machine ([`docs/config.md`](docs/config.md)).
-
-### Automate
-
-- **Workflows** are saved graphs of typed steps — a trigger, model prompts,
-  shell commands, stored scripts, branches and outputs — that Naru runs in a
-  fixed, deterministic order: the graph decides what runs, never an agent.
-  Run one by hand, on a schedule, or by asking the live agent for it by name.
-  Each run is recorded step by step
-  ([`docs/workflows.md`](docs/workflows.md)).
 
 ### Remember
 
@@ -145,29 +321,6 @@ Each of these is off by default. You turn them on with a `naru serve` flag.
 - **System monitor**: RAM, CPU, disk, GPU and uptime for the host
   ([`docs/system.md`](docs/system.md)).
 
-### A web UI that fits the work
-
-Each project has a kanban **Board** and these tabs:
-
-- **Files**: a browser, an editor and project-wide search
-  ([`docs/files-tab.md`](docs/files-tab.md)).
-- **Git**: the working tree, diffs and history, read-only
-  ([`docs/git-tab.md`](docs/git-tab.md)).
-- **Terminal**: real shells in the project folder
-  ([`docs/terminal.md`](docs/terminal.md)).
-- **Custom**: your own split-pane layout of the other tabs
-  ([`docs/project-panes.md`](docs/project-panes.md)).
-
-Each project name also shows the app version read from that project's
-manifest ([`docs/project-version.md`](docs/project-version.md)).
-
-Global keyboard shortcuts can be rebound, and you can move around with
-`hjkl` ([`docs/keyboard.md`](docs/keyboard.md)). The layout adapts to phone
-widths ([`docs/mobile.md`](docs/mobile.md)). A separate native iPhone
-companion app, **naru-ios**, connects to a `naru serve --lan` server. It
-covers the task board, inbox, live conversations, files, git, artifacts and
-memory.
-
 ### Move to a new machine
 
 `naru migrate` packs the database, the config and your hand-built `~/.claude`
@@ -175,40 +328,7 @@ into one archive. On the new machine it restores them and rewrites absolute
 paths for a new username or a new repo location
 ([`docs/migrate.md`](docs/migrate.md)).
 
-## Install
-
-```bash
-brew install simonspoon/tap/naru
-```
-
-### Build from source
-
-Naru is a Rust binary with an embedded React frontend. You need Rust
-(edition 2024), Node.js and npm.
-
-```bash
-git clone https://github.com/simonspoon/naru.git
-cd naru
-scripts/build.sh          # tests, builds the frontend, embeds it, compiles
-./target/release/naru --help
-```
-
-`scripts/build.sh` is the only supported release build. It runs these steps
-in order:
-
-1. `cargo test`, which also re-exports the TypeScript types.
-2. A check that fails the build if `frontend/src/types/` has uncommitted
-   changes.
-3. The frontend unit tests.
-4. The frontend build.
-5. The compile, with the frontend embedded.
-
-It produces `target/release/naru` and `target/release/mesa`, which is the
-same program. `scripts/install.sh` runs the same build, copies `naru` onto
-your PATH and adds `mesa` as a symlink to it. The default location is
-`~/.local/bin`; override it with `PREFIX=/usr/local`.
-
-## Quick start
+## CLI quick tour
 
 ```bash
 # A project and a task in it (a project is named by id or by name)
@@ -217,6 +337,10 @@ naru task create "Website redesign" "Draft homepage copy" --tags writing,web
 
 # Open, unblocked tasks
 naru task list "Website redesign" --status todo --unblocked
+
+# Find tasks by words in their description (all words, case-insensitive,
+# literal substrings); same compact array as `task list`
+naru task search homepage copy --status todo --project "Website redesign"
 
 # Task 2 is blocked by task 1, and "why is it blocked?"
 naru task block 2 --by 1
@@ -229,14 +353,14 @@ naru task next "Website redesign"
 naru task claim 1 --owner 5b043350
 naru task release 1
 
+# Append context to a task without rewriting it (put flags before the text)
+naru task note 1 Waiting on the copy review.
+
 # Leave a note for the next agent that works in this project
 naru memory add --project "Website redesign" Run the linter before pushing.
 
 # Snapshot the database (safe while the server runs)
 naru backup /tmp/naru-snap.db
-
-# The web UI and HTTP API on http://127.0.0.1:7770
-naru serve
 ```
 
 ### Bulk import

@@ -2570,7 +2570,7 @@ run 0 "$MESA" live board show
 [ "$(jqs .id)" = "$B_SVG" ] || fail "live board show with no id: the board that is showing"
 FULL=$("$MESA" live board show "$B_MD" | jq -S 'keys')
 QUIET=$("$MESA" live board show --quiet "$B_MD" | jq -S 'keys')
-[ "$(jq -r 'length' <<<"$FULL")" = "7" ] || fail "LiveBoard key count changed: $FULL"
+[ "$(jq -r 'length' <<<"$FULL")" = "8" ] || fail "LiveBoard key count changed: $FULL"
 [ "$(jq -c 'map(select(. != "body"))' <<<"$FULL")" = "$(jq -c '.' <<<"$QUIET")" ] ||
   fail "live board show --quiet must drop exactly \`body\`: $FULL vs $QUIET"
 ok "live board list/show: oldest-first, bodiless history; --quiet drops exactly \`body\`"
@@ -3052,6 +3052,60 @@ STATUS=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/live/turns/$PLAIN_TUR
 STATUS=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/live/turns/999999/ink")
 [ "$STATUS" = "404" ] || fail "GET /api/live/turns/{id}/ink: an unknown turn must be 404, got $STATUS"
 ok "GET /api/live/turns/{id}/ink: the ink PNG byte-identical to what was pushed; 404 for a turn with no ink or an unknown one"
+
+# ---- the global history (naru task 1735) ----
+#
+# Boards outlive their session in one global, paged history. The previous
+# session has ended (so its boards must still list); a fresh one adds twelve
+# more so the default page of 10 has something older to say `has_more` about.
+api 200 GET "/api/live/boards?limit=100"
+OLD_COUNT=$(jqb '.boards | length')
+[ "$OLD_COUNT" -ge 4 ] || fail "GET /api/live/boards: the ended session's boards must still list, got $OLD_COUNT"
+[ "$(jqb '.boards | map(.id) | index('"$R_MD"') != null')" = "true" ] ||
+  fail "GET /api/live/boards: the ended session's board $R_MD must be listed"
+jq -e '.boards | map(has("body")) | any | not' <<<"$BODY" >/dev/null || fail "GET /api/live/boards: bodiless"
+run 0 "$MESA" live start --no-agent
+for i in $(seq 1 12); do
+  run 0 "$MESA" live board push --quiet --title "hist $i" "history board $i"
+done
+HIST_NEWEST=$(jqs .id)
+api 200 GET "/api/live/boards"
+[ "$(jqb '.boards | length')" = "10" ] || fail "GET /api/live/boards: the default page is the 10 newest, got $(jqb '.boards | length')"
+[ "$(jqb .has_more)" = "true" ] || fail "GET /api/live/boards: has_more must be true with older boards beyond the page"
+[ "$(jqb '.boards[0].id')" = "$HIST_NEWEST" ] || fail "GET /api/live/boards: newest first"
+jq -e '.boards | [.[].id] == ([.[].id] | sort | reverse)' <<<"$BODY" >/dev/null || fail "GET /api/live/boards: ids strictly descending"
+CURSOR=$(jqb '.boards[-1].id')
+api 200 GET "/api/live/boards?before=$CURSOR&limit=3"
+[ "$(jqb '.boards | length')" = "3" ] || fail "GET /api/live/boards?before: limit 3"
+[ "$(jqb '.boards | map(.id < '"$CURSOR"') | all')" = "true" ] || fail "GET /api/live/boards?before: only older boards"
+api 200 GET "/api/live/boards?limit=1000"
+[ "$(jqb '.has_more')" = "false" ] || fail "GET /api/live/boards: limit clamps to 100 and reaches the oldest"
+# Pin the oldest board, which falls outside the default page.
+OLDEST=$(jqb '.boards[-1].id')
+api 200 POST "/api/live/boards/$OLDEST/pin" '{"pinned":true}'
+STAMP=$(jqb .pinned_at)
+[ "$STAMP" != "null" ] || fail "pin: pinned_at must be stamped"
+api 200 POST "/api/live/boards/$OLDEST/pin" '{"pinned":true}'
+[ "$(jqb .pinned_at)" = "$STAMP" ] || fail "pin: re-pinning keeps the original stamp"
+api 200 GET "/api/live/boards"
+[ "$(jqb '.pinned | map(.id) | index('"$OLDEST"') != null')" = "true" ] ||
+  fail "pinned board $OLDEST must be listed though outside the page"
+[ "$(jqb '.boards | map(.id) | index('"$OLDEST"') == null')" = "true" ] || fail "the pinned board is outside the default page"
+run 0 "$MESA" live board pin "$OLDEST" --undo --quiet
+[ "$(jqs .pinned_at)" = "null" ] || fail "live board pin --undo: pinned_at must clear"
+api 200 GET "/api/live/boards"
+[ "$(jqb '.pinned | length')" = "0" ] || fail "unpinned: nothing pinned"
+api 404 POST "/api/live/boards/999999/pin" '{"pinned":true}'
+run 0 "$MESA" live board pin "$OLDEST" --quiet
+[ "$(jqs 'has("body")')" = "false" ] || fail "live board pin --quiet drops the body"
+[ "$(jqs .pinned_at)" != "null" ] || fail "live board pin: stamps"
+run 0 "$MESA" live board pin "$OLDEST" --undo --quiet
+STATUS=$(curl -s -o /dev/null -w '%{http_code}' -d '{"pinned":true}' "$BASE/api/live/boards/$OLDEST/pin")
+[ "$STATUS" = "415" ] || [ "$STATUS" = "403" ] || [ "$STATUS" = "400" ] || fail "pin without a JSON Content-Type must be refused, got $STATUS"
+run 0 "$MESA" live stop
+api 200 GET "/api/live/boards"
+[ "$(jqb '.boards | length')" = "10" ] || fail "the history survives the session ending"
+ok "GET /api/live/boards: global history across ended and live sessions, 10 newest by default with has_more, a before cursor, a pinned board listed outside the page, idempotent pin/unpin over HTTP and CLI, 404 unknown, Content-Type gate"
 
 kill "$SERVER_PID" 2>/dev/null || true
 wait "$SERVER_PID" 2>/dev/null || true
