@@ -214,7 +214,9 @@ export function vocabularyNote(listen: ConfigListen, engine: string | null): str
   if (engine === null) return null
   if (engine !== 'naru-audio') return 'Vocabulary is used only with the Naru Audio engine.'
   const model = (listen.model ?? '').trim() || listen.default_model
-  if (model === null || listen.hotword_models.length === 0) return null
+  if (!model) return null
   if (listen.hotword_models.includes(model)) return null
-  return `${model} ignores the vocabulary; a model such as ${listen.hotword_models[0]} uses it.`
+  const alternative =
+    listen.hotword_models.length > 0 ? `; a model such as ${listen.hotword_models[0]} uses it` : ''
+  return `${model} ignores the vocabulary${alternative}.`
 }

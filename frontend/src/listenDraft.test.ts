@@ -204,8 +204,14 @@ describe('vocabulary', () => {
       'whisper-base ignores the vocabulary; a model such as parakeet-tdt-0.6b-v2-int8 uses it.',
     )
     expect(vocabularyNote({ ...daemon, model: 'parakeet-tdt-0.6b-v2-int8' }, 'naru-audio')).toBeNull()
-    // Nothing known about the daemon: claim nothing.
-    expect(vocabularyNote({ ...daemon, hotword_models: [] }, 'naru-audio')).toBeNull()
+    // An MLX-only daemon: no alternative to name, but the model still ignores it.
+    expect(vocabularyNote({ ...daemon, hotword_models: [] }, 'naru-audio')).toBe(
+      'whisper-base ignores the vocabulary.',
+    )
+    expect(
+      vocabularyNote({ ...daemon, model: 'whisper-large-v3', hotword_models: [] }, 'naru-audio'),
+    ).toBe('whisper-large-v3 ignores the vocabulary.')
+    // Effective model unknown: claim nothing.
     expect(vocabularyNote({ ...daemon, default_model: null }, 'naru-audio')).toBeNull()
   })
 })
