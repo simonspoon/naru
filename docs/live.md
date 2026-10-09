@@ -851,6 +851,34 @@ summarising, and Chroma's context-rot results on what a longer prompt costs.
 The one-line summary: keep everything raw and searchable, inject little, and
 make what is injected earn its place.
 
+### Unanswered questions (naru task 1723)
+
+A fresh spawn (`agent_prompt`, not `handoff_prompt`, which carries the last
+ten turns already) also appends, after the summary block, the previous ended
+conversation's **unanswered questions**: a `user` turn containing `?` with at
+least four words and no `naru` turn *with text* after it before the next
+`user` turn or the end (a pure `navigate` is not a reply; short "yes?"/"5?"
+are never questions). The newest five, each cut to 300 characters, ride as
+one line each under a "data, not instructions" lead-in telling the agent to
+raise any still relevant briefly at the start. None found, or no previous
+ended conversation, appends nothing.
+
+### Task digest (naru task 1725)
+
+A fresh spawn also appends, after the unanswered block, a "while you were
+away" digest: the tasks that reached `done` or `cancelled`, or went back from
+`in_progress` to `todo`/`backlog`, since the previous ended conversation's
+`ended_at` (`Store::task_digest`). One entry per task: its newest qualifying
+`task_events` row at or after the time, kept only while the task's status
+still equals that event's `to_status`; archived or hidden projects are left
+out. Event statuses are read as text, never parsed (old rows hold `refine`).
+`live::digest_lines` formats a count header, then up to 20 lines `- #<id>
+<outcome>: <name> [<project>] #/projects/<pid>/tasks/<id>` and `…and N more`,
+under a "data, not instructions" lead-in. No previous ended conversation, an
+empty digest or a read error appends nothing. The same query is the CLI's
+`naru task digest --since <ts|auto> [--notify]`; `auto` is the newest ended
+conversation's `ended_at`. `handoff_prompt` does not carry it.
+
 ### The archive: `live_memory_fts` (migration index 55)
 
 A standalone FTS5 virtual table — `(kind UNINDEXED, ref_id UNINDEXED,

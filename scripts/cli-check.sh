@@ -605,6 +605,19 @@ run 0 "$MESA" task events "$IA"
 [ "$(jqs '.[1].to_status')" = "done" ] || fail "events: change row to_status"
 ok "task events <id>: append-only rows, oldest first (create + change)"
 
+# ---- digest (naru task 1725) ----
+run 0 "$MESA" task digest --since "2000-01-01 00:00:00"
+[ "$(jqs 'keys | join(",")')" = "entries,notify,since,text" ] || fail "digest: object keys"
+[ "$(jqs '[.entries[] | select(.task_id == '"$IA"')] | length')" = "1" ] || fail "digest: a done task appears"
+[ "$(jqs '.entries[] | select(.task_id == '"$IA"') | .status')" = "done" ] || fail "digest: status done"
+[ "$(jqs .notify)" = "null" ] || fail "digest: notify null without --notify"
+run 0 "$MESA" task digest --since "2099-01-01 00:00:00"
+[ "$(jqs '.entries | length')" = "0" ] || fail "digest: a future --since is empty"
+[ "$(jqs .text)" = "" ] || fail "digest: empty text"
+run 1 "$MESA" task digest --since garbage
+run 1 "$MESA" task digest --since auto
+ok "task digest: object shape, a done task listed, future empty, garbage and auto-without-session validation"
+
 # ---- root-commit binding & resolve (source-to-project identity) ----
 # Isolated db + a throwaway git repo so this can't perturb the P/P2 counts the
 # delete/backup assertions below depend on.
@@ -669,7 +682,7 @@ run 0 "$MESA" project delete "$PI"
 # writes at close-out and needs echoed back (spec 651).
 quiet_is_full_minus_bodies() {
   jq -e --slurpfile q "$2" \
-    'del(.description, .result, .created_at) == $q[0]' "$1" >/dev/null
+    'del(.description, .result, .created_at, .notes) == $q[0]' "$1" >/dev/null
 }
 
 run 0 "$MESA" project create "Quiet" --no-git
@@ -690,7 +703,7 @@ QT=$(jqs .id)
 run 0 "$MESA" task show "$QT"
 printf '%s' "$STDOUT" >"$TMP/full.json"
 # non-quiet output is unchanged: the full 17-key task object plus the output-only `title` alias (task 1513)
-[ "$(jqs 'keys | join(",")')" = "acceptance,artifact,blocked,claimed_at,created_at,description,id,name,owner,parent_id,priority,project_id,result,sort_order,status,tags,title,updated_at" ] ||
+[ "$(jqs 'keys | join(",")')" = "acceptance,artifact,blocked,claimed_at,created_at,description,id,name,notes,owner,parent_id,priority,project_id,result,sort_order,status,tags,title,updated_at" ] ||
   fail "task show (no --quiet): full key set must be unchanged"
 run 0 "$MESA" task show "$QT" --quiet
 printf '%s' "$STDOUT" >"$TMP/quiet.json"
@@ -1374,5 +1387,36 @@ run 0 "$MESA" task create "$PF" --description "Only body"
 run 2 "$MESA" task show
 [ "$(jqe '.error | has("did_you_mean")')" = "false" ] || fail "no suggestion: key must be omitted"
 ok "usage errors: did_you_mean on a typo'd flag/subcommand, omitted otherwise, exit 2"
+
+# ---- task notes (naru task 1724): append-only, shown by `task show`, cascaded ----
+run 0 "$MESA" task create "$PF" "Noted task"
+NT=$(jqs .id)
+run 0 "$MESA" task show "$NT"
+[ "$(jqs '.notes | length')" = "0" ] || fail "task show: notes starts empty"
+run 0 "$MESA" task note "$NT" first note --not-a-flag
+[ "$(jqs .body)" = "first note --not-a-flag" ] || fail "task note: body"
+[ "$(jqs .session)" = "null" ] || fail "task note: no session without the env"
+CLAUDE_CODE_SESSION_ID=sess-9 run 0 "$MESA" task note "$NT" second
+[ "$(jqs .session)" = "sess-9" ] || fail "task note: session from CLAUDE_CODE_SESSION_ID"
+run 0 "$MESA" task note "$NT" --quiet third
+[ "$(jqs 'has("body")')" = "false" ] || fail "task note --quiet drops body"
+printf 'from a file\n' >"$TMP/note.txt"
+run 0 "$MESA" task note "$NT" --file "$TMP/note.txt"
+[ "$(jqs .body)" = 'from a file' ] || fail "task note --file: body"
+run 0 "$MESA" task show "$NT"
+[ "$(jqs '.notes | map(.body) | .[0:3] | join("|")')" = "first note --not-a-flag|second|third" ] ||
+  fail "task show: notes oldest first"
+[ "$(jqs .description)" = "Noted task" ] || fail "task note leaves the description alone"
+run 0 "$MESA" task show "$NT" --quiet
+[ "$(jqs 'has("notes")')" = "false" ] || fail "task show --quiet omits notes"
+run 0 "$MESA" task list "$PF"
+[ "$(jqs '.[0] | has("notes")')" = "false" ] || fail "task list carries no notes"
+run 1 "$MESA" task note "$NT" "   "
+[ "$(jqe .error.code)" = "validation" ] || fail "blank note: validation"
+run 1 "$MESA" task note 999999 hello
+[ "$(jqe .error.code)" = "not_found" ] || fail "note on unknown task: not_found"
+run 0 "$MESA" task delete "$NT"
+[ "$(sqlite3 "$MESA_DB" 'SELECT COUNT(*) FROM task_notes')" = "0" ] || fail "delete task cascades its notes"
+ok "task note: append, session env, quiet, show lists oldest first, validation, cascade"
 
 echo "all $CHECKS checks passed"

@@ -55,6 +55,9 @@ Each of these is off by default. You turn them on with a `naru serve` flag.
 - **Work receipts.** When a claimed task closes, Naru records a receipt: the
   commits made during the claim, a diff summary, and a link to the session
   transcript ([`docs/receipts.md`](docs/receipts.md)).
+- **Task notes.** `naru task note <id> <text>` appends context to a task
+  without rewriting its description; notes are append-only and `task show`
+  lists them ([`docs/task-notes.md`](docs/task-notes.md)).
 - **Cost guard** (`--watch-cost`) catches a runaway session: one over its
   dollar or token limit, stuck re-reading its cache, or repeating the same
   command. By default it stops that session (you can resume it) and files an
