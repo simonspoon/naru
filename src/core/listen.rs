@@ -106,6 +106,30 @@ fn models_checked() -> (Vec<String>, SystemTime) {
     )
 }
 
+/// What the Settings page needs to say whether the vocabulary is used (naru
+/// task 1754): the daemon's speech-to-text models whose backend decodes
+/// hotwords, and its default speech-to-text model. Empty/`None` on the
+/// legacy engine and when the daemon cannot be asked. Cached like [`models`].
+pub fn hotword_support() -> (Vec<String>, Option<String>) {
+    static CAPS: TtlCache<Vec<audio::SttCaps>> = TtlCache::new();
+    let Some(url) = audio::daemon_url() else {
+        return (Vec::new(), None);
+    };
+    let (caps, _) = CAPS.get(
+        &url,
+        Instant::now(),
+        |v| audio::list_ttl(v),
+        || audio::stt_model_caps(&url),
+    );
+    let default = caps.iter().find(|c| c.default).map(|c| c.id.clone());
+    let hot = caps
+        .into_iter()
+        .filter(|c| c.hotwords)
+        .map(|c| c.id)
+        .collect();
+    (hot, default)
+}
+
 /// Who offers the names [`models`] lists, for a sentence naming it: the
 /// daemon on `naru-audio`, else the recognizer binary.
 pub fn models_offered_by() -> String {
@@ -334,9 +358,13 @@ fn drain_overlong<R: BufRead>(reader: &mut R) -> std::io::Result<bool> {
 /// read `listen.model` from the same file, and answers 503 for that).
 ///
 /// Blocking: call it from `spawn_blocking`, not an async worker.
-pub fn transcribe(audio: &[u8], model: Option<&str>) -> Result<String, String> {
+pub fn transcribe(
+    audio: &[u8],
+    model: Option<&str>,
+    hotwords: Option<&str>,
+) -> Result<String, String> {
     match audio::daemon_url() {
-        Some(url) => audio::transcribe(&url, audio, model.unwrap_or("default")),
+        Some(url) => audio::transcribe(&url, audio, model.unwrap_or("default"), hotwords),
         None => transcribe_auris(audio, model),
     }
 }
@@ -393,9 +421,8 @@ pub fn transcribe(audio: &[u8], model: Option<&str>) -> Result<String, String> {
 ///
 /// Blocking: call it from `spawn_blocking`, not an async worker.
 fn transcribe_auris(audio: &[u8], model: Option<&str>) -> Result<String, String> {
-    // Per-request vocabulary (hotword biasing / correction) is a later task;
-    // `--vocabulary-file` is documented but not yet implemented by auris, so
-    // this call passes nothing for it.
+    // The Settings vocabulary (naru task 1754) is naru-audio's `hotwords`;
+    // auris has no vocabulary flag, so the legacy engine sends nothing for it.
     let bin = auris_bin();
     let mut command = Command::new(&bin);
     command.args(["-q", "--format", "json"]);
@@ -536,7 +563,7 @@ mod tests {
         // A binary that cannot exist: the spawn error path, no stub needed —
         // mirrors `speech::tests::start_reports_a_failing_binary`.
         unsafe { std::env::set_var("MESA_AURIS_BIN", "mesa-no-such-auris-binary") };
-        let err = transcribe(b"not real audio", None).expect_err("no binary, no transcript");
+        let err = transcribe(b"not real audio", None, None).expect_err("no binary, no transcript");
         unsafe { std::env::remove_var("MESA_AURIS_BIN") };
         assert!(err.contains("mesa-no-such-auris-binary"), "{err}");
     }
@@ -567,7 +594,7 @@ mod tests {
 
         unsafe { std::env::set_var("MESA_AURIS_BIN", &stub) };
         let payload = vec![0u8; 1024 * 1024];
-        let result = transcribe(&payload, None);
+        let result = transcribe(&payload, None, None);
         unsafe { std::env::remove_var("MESA_AURIS_BIN") };
 
         assert_eq!(result, Ok("ok".to_string()));
@@ -637,7 +664,8 @@ mod tests {
         );
 
         unsafe { std::env::set_var("MESA_AURIS_BIN", &stub) };
-        let err = transcribe(b"not real audio", None).expect_err("failing binary, no transcript");
+        let err =
+            transcribe(b"not real audio", None, None).expect_err("failing binary, no transcript");
         unsafe { std::env::remove_var("MESA_AURIS_BIN") };
 
         assert!(
@@ -665,7 +693,7 @@ mod tests {
                 ),
             );
             unsafe { std::env::set_var("MESA_AURIS_BIN", &stub) };
-            let result = transcribe(b"not real audio", None);
+            let result = transcribe(b"not real audio", None, None);
             unsafe { std::env::remove_var("MESA_AURIS_BIN") };
             result
         };
@@ -702,7 +730,7 @@ mod tests {
         );
 
         unsafe { std::env::set_var("MESA_AURIS_BIN", &stub) };
-        let result = transcribe(b"not real audio", None);
+        let result = transcribe(b"not real audio", None, None);
         unsafe { std::env::remove_var("MESA_AURIS_BIN") };
 
         assert_eq!(result, Ok("the real answer".to_string()));
@@ -726,8 +754,8 @@ mod tests {
         );
 
         unsafe { std::env::set_var("MESA_AURIS_BIN", &stub) };
-        let without = transcribe(b"not real audio", None);
-        let with = transcribe(b"not real audio", Some("parakeet-tdt-0.6b-v2-int8"));
+        let without = transcribe(b"not real audio", None, None);
+        let with = transcribe(b"not real audio", Some("parakeet-tdt-0.6b-v2-int8"), None);
         unsafe { std::env::remove_var("MESA_AURIS_BIN") };
 
         assert_eq!(without, Ok("-q --format json".to_string()));
@@ -797,7 +825,7 @@ mod tests {
         engine(&daemon.url());
         let ready = status(false).unwrap();
         let listed = models();
-        let heard = transcribe(b"RIFF", None);
+        let heard = transcribe(b"RIFF", None, None);
         unsafe { std::env::remove_var("MESA_AURIS_BIN") };
 
         assert_eq!(stopped.state, AudioState::DaemonDown);

@@ -145,6 +145,8 @@ import {
   isSavable as isListenSavable,
   options as modelOptions,
   valueError as modelError,
+  vocabularyError,
+  vocabularyNote,
   type ListenDraft,
 } from '../listenDraft'
 import {
@@ -2422,16 +2424,23 @@ function AudioSection() {
  */
 function ListenSection() {
   const { data: listen, error, refetch } = useFetch(() => getListen(), 'listen')
+  // The server's engine in force, for the vocabulary note (naru task 1754).
+  const { data: audio } = useFetch(() => getAudio(), 'listen-audio')
   const [draft, setDraft] = useState<ListenDraft | null>(null)
   const [saveError, setSaveError] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
   const [saving, setSaving] = useState(false)
 
   const seeded: ListenDraft =
-    draft ?? (listen ? listenDraftFrom(listen) : { model: '', engine: 'server' })
+    draft ?? (listen ? listenDraftFrom(listen) : { model: '', engine: 'server', vocabulary: '' })
 
   function edit(value: string) {
     setDraft({ ...seeded, model: value })
+    setSaved(false)
+  }
+
+  function editVocabulary(value: string) {
+    setDraft({ ...seeded, vocabulary: value })
     setSaved(false)
   }
 
@@ -2479,6 +2488,8 @@ function ListenSection() {
   const dirty = isListenDirty(listen, seeded)
   const savable = isListenSavable(listen, seeded)
   const fieldError = modelError(seeded.model)
+  const vocabError = vocabularyError(seeded.vocabulary)
+  const vocabNote = vocabularyNote(listen, audio ? savedAudioEngine(audio) : null)
 
   return (
     <>
@@ -2532,6 +2543,29 @@ function ListenSection() {
           </p>
         )}
         {fieldError && <p className="error">{fieldError}</p>}
+      </section>
+      <section className="settings-command">
+        <label htmlFor="listen-vocabulary">
+          <span className="settings-command-title">Vocabulary</span>
+          <code className="settings-command-key">vocabulary</code>
+        </label>
+        <p className="muted settings-command-blurb">
+          Words and names the recognizer should favour, one per line, with an
+          optional boost: <code>Naru :4</code>. <code>#</code> starts a
+          comment. Sent with every transcription; a change applies to the
+          next one.
+        </p>
+        <textarea
+          id="listen-vocabulary"
+          className="settings-voice-input"
+          rows={6}
+          spellCheck={false}
+          value={seeded.vocabulary}
+          placeholder={'Naru :4\nkhora'}
+          onChange={(e) => editVocabulary(e.target.value)}
+        />
+        {vocabNote && <p className="muted settings-command-blurb">{vocabNote}</p>}
+        {vocabError && <p className="error">{vocabError}</p>}
       </section>
       <section className="settings-command">
         <label htmlFor="listen-engine">

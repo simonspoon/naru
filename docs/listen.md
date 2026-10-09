@@ -229,7 +229,9 @@ With the daemon engine (mesa task 1389, `docs/config.md` "Audio"),
 `core::audio::transcribe` posts the recording to
 `{audio.url}/v1/audio/transcriptions` as `multipart/form-data` (built by
 hand: `file` = the WAV byte-identical, `model` = `config::listen_model()` or
-`default`, `response_format=json`), waits up to 300 s, and returns the
+`default`, `response_format=json`, and — only when `listen.vocabulary` is
+configured and valid (naru task 1754) — `hotwords` = that text verbatim),
+waits up to 300 s, and returns the
 daemon's `text`. Silence is the daemon's 200 `{"text":""}`, so the route's
 answer is the same 200 `{"text":""}` as on `legacy`. Every failure is 503
 `unavailable` carrying §4.4's sentence: no answer at all is the
@@ -243,6 +245,21 @@ cached probe, so the page's next `GET` asks the daemon afresh.
 `listen::models()` on this engine is the daemon's speech-to-text models
 (`GET /v1/models`, `x_kind == "stt"`, pulled or not) — the list the
 Settings page offers and a saved model is checked against.
+
+### The vocabulary (`listen.vocabulary`, naru task 1754)
+
+The Settings vocabulary is naru-audio's `hotwords` (grammar and limits in
+`docs/config.md`). It is read per request like the model and sent on
+`naru-audio` only: as the multipart `hotwords` part of every one-shot
+transcription, and as `hotwords` added to the page's `start` message on the
+streaming route (the proxy rewrites that one frame; every other frame, and
+every frame when no vocabulary is set, passes through untouched). It is sent
+whenever configured, whatever the model — the daemon ignores it on a model
+whose backend cannot decode hotwords (`x_hotwords: false` in `GET
+/v1/models`, which the Settings page reads to say so). A stored value that no
+longer validates is logged once and not sent, so a hand-edited file never
+breaks transcription. The legacy `auris` path sends nothing: it has no
+vocabulary flag.
 
 ## Ordering: segments are transcribed in order
 

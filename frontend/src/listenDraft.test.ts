@@ -8,19 +8,22 @@ import {
   isSavable,
   options,
   valueError,
+  vocabularyError,
+  vocabularyNote,
 } from './listenDraft'
 import type { ConfigListen } from './types/ConfigListen'
 
+const NO_VOCAB = { vocabulary: null, hotword_models: [], default_model: null }
 const MODELS = ['parakeet-tdt-0.6b-v2-int8', 'whisper-base', 'whisper-large-v3']
-const DEFAULTED: ConfigListen = { model: null, models: MODELS, engine: null, engine_default: 'server' }
-const SET: ConfigListen = { model: 'whisper-base', models: MODELS, engine: null, engine_default: 'server' }
+const DEFAULTED: ConfigListen = { model: null, models: MODELS, engine: null, engine_default: 'server', ...NO_VOCAB }
+const SET: ConfigListen = { model: 'whisper-base', models: MODELS, engine: null, engine_default: 'server', ...NO_VOCAB }
 /** What a machine with no `auris` installed reports. */
-const NO_BINARY: ConfigListen = { model: 'whisper-base', models: [], engine: null, engine_default: 'server' }
+const NO_BINARY: ConfigListen = { model: 'whisper-base', models: [], engine: null, engine_default: 'server', ...NO_VOCAB }
 
 describe('draftFrom', () => {
   it('renders an unconfigured model blank and a configured one as text', () => {
-    expect(draftFrom(DEFAULTED)).toEqual({ model: '', engine: 'server' })
-    expect(draftFrom(SET)).toEqual({ model: 'whisper-base', engine: 'server' })
+    expect(draftFrom(DEFAULTED)).toEqual({ model: '', engine: 'server', vocabulary: '' })
+    expect(draftFrom(SET)).toEqual({ model: 'whisper-base', engine: 'server', vocabulary: '' })
   })
 
   it('reports a freshly loaded section as pristine', () => {
@@ -42,7 +45,7 @@ describe('options', () => {
 
   it('keeps a configured model the binary no longer lists', () => {
     // Otherwise opening the list would silently rewrite a value nobody touched.
-    const retired: ConfigListen = { model: 'am-gone', models: MODELS, engine: null, engine_default: 'server' }
+    const retired: ConfigListen = { model: 'am-gone', models: MODELS, engine: null, engine_default: 'server', ...NO_VOCAB }
     expect(options(retired)).toEqual([...MODELS, 'am-gone'])
   })
 })
@@ -51,7 +54,7 @@ describe('valueError', () => {
   it('accepts blank — that is the default, not a mistake', () => {
     expect(valueError('')).toBeNull()
     expect(valueError('   ')).toBeNull()
-    expect(isSavable(SET, { model: '', engine: 'server' })).toBe(true)
+    expect(isSavable(SET, { model: '', engine: 'server', vocabulary: '' })).toBe(true)
   })
 
   it('accepts a model name, trimmed', () => {
@@ -75,7 +78,7 @@ describe('valueError', () => {
     expect(valueError('whisper/base')).not.toBeNull()
     expect(valueError('whisper-base; rm -rf /')).not.toBeNull()
     expect(valueError('a'.repeat(65))).not.toBeNull()
-    expect(isSavable(SET, { model: '-o', engine: 'server' })).toBe(false)
+    expect(isSavable(SET, { model: '-o', engine: 'server', vocabulary: '' })).toBe(false)
   })
 })
 
@@ -85,17 +88,17 @@ describe('changedListen', () => {
   })
 
   it('sends the new model, trimmed', () => {
-    expect(changedListen(SET, { model: ' parakeet-tdt-0.6b-v2-int8 ', engine: 'server' })).toEqual(
+    expect(changedListen(SET, { model: ' parakeet-tdt-0.6b-v2-int8 ', engine: 'server', vocabulary: '' })).toEqual(
       { model: 'parakeet-tdt-0.6b-v2-int8' },
     )
   })
 
   it('sends null when the box is cleared — the reset', () => {
-    expect(changedListen(SET, { model: '', engine: 'server' })).toEqual({ model: null })
+    expect(changedListen(SET, { model: '', engine: 'server', vocabulary: '' })).toEqual({ model: null })
   })
 
   it('sends nothing the server would reject', () => {
-    expect(changedListen(SET, { model: '-o', engine: 'server' })).toEqual({})
+    expect(changedListen(SET, { model: '-o', engine: 'server', vocabulary: '' })).toEqual({})
   })
 })
 
@@ -120,11 +123,11 @@ describe('engine', () => {
   })
 
   it('sends both keys when both changed', () => {
-    expect(changedListen(SET, { model: '', engine: 'browser' })).toEqual({ model: null, engine: 'browser' })
+    expect(changedListen(SET, { model: '', engine: 'browser', vocabulary: '' })).toEqual({ model: null, engine: 'browser' })
   })
 
   it('holds the engine back when the user typed a model the server would reject', () => {
-    expect(changedListen(SET, { model: '-o', engine: 'browser' })).toEqual({})
+    expect(changedListen(SET, { model: '-o', engine: 'browser', vocabulary: '' })).toEqual({})
   })
 
   it('saves the engine alone past a bad model already in the file', () => {
@@ -132,5 +135,77 @@ describe('engine', () => {
     const draft = { ...draftFrom(HAND_EDITED), engine: 'browser' }
     expect(isSavable(HAND_EDITED, draft)).toBe(true)
     expect(changedListen(HAND_EDITED, draft)).toEqual({ engine: 'browser' })
+  })
+})
+
+describe('vocabulary', () => {
+  const WITH: ConfigListen = { ...SET, vocabulary: 'Naru :4\nkhora' }
+
+  it('drafts the stored text and is pristine until edited', () => {
+    expect(draftFrom(WITH).vocabulary).toBe('Naru :4\nkhora')
+    expect(isDirty(WITH, draftFrom(WITH))).toBe(false)
+    expect(changedListen(WITH, draftFrom(WITH))).toEqual({})
+  })
+
+  it('sends the trimmed text when changed and null when cleared', () => {
+    expect(changedListen(SET, { ...draftFrom(SET), vocabulary: ' Naru :4\n' })).toEqual({
+      vocabulary: 'Naru :4',
+    })
+    expect(changedListen(WITH, { ...draftFrom(WITH), vocabulary: '  \n' })).toEqual({
+      vocabulary: null,
+    })
+  })
+
+  it('holds back a save the server would refuse, but not past a bad stored one', () => {
+    const bad = { ...draftFrom(SET), vocabulary: 'a/b' }
+    expect(isSavable(SET, bad)).toBe(false)
+    expect(changedListen(SET, bad)).toEqual({})
+    const HAND_EDITED: ConfigListen = { ...SET, vocabulary: 'a/b' }
+    const draft = { ...draftFrom(HAND_EDITED), engine: 'browser' }
+    expect(isSavable(HAND_EDITED, draft)).toBe(true)
+  })
+
+  it('accepts the grammar', () => {
+    expect(vocabularyError('')).toBeNull()
+    expect(vocabularyError('# note\n\nNaru\nhello world :0.5 # x\nkhora :8')).toBeNull()
+  })
+
+  it('names the line of each error', () => {
+    expect(vocabularyError('ok\na/b')).toBe('line 2: a term cannot contain "/"')
+    expect(vocabularyError('Naru :fast')).toContain('line 1: the boost "fast" is not a number')
+    expect(vocabularyError('Naru:4')).toContain('line 1: "Naru:4" has a ":" inside a word')
+    expect(vocabularyError('\n:4')).toBe('line 2: a stray ":" where the term should be')
+    expect(vocabularyError('Naru :0')).toContain('must be above 0 and at most 8')
+    expect(vocabularyError('Naru :8.5')).toContain('must be above 0 and at most 8')
+    expect(vocabularyError('Naru :')).toContain('is not a number')
+    expect(vocabularyError('a\u0007b')).toContain('control character')
+  })
+
+  it('limits a term to 64 bytes and the list to 128 terms', () => {
+    expect(vocabularyError('a'.repeat(64))).toBeNull()
+    expect(vocabularyError('a'.repeat(65))).toContain('line 1: the term is 65 bytes')
+    expect(vocabularyError('é'.repeat(33))).toContain('66 bytes')
+    const many = (n: number) => Array.from({ length: n }, (_, i) => `w${i}`).join('\n')
+    expect(vocabularyError(many(128))).toBeNull()
+    expect(vocabularyError(many(129))).toBe('129 terms; at most 128')
+  })
+
+  it('says whether the engine and model use the vocabulary', () => {
+    const daemon: ConfigListen = {
+      ...SET,
+      model: null,
+      hotword_models: ['parakeet-tdt-0.6b-v2-int8'],
+      default_model: 'whisper-base',
+    }
+    expect(vocabularyNote(daemon, null)).toBeNull()
+    expect(vocabularyNote(daemon, 'legacy')).toBe('Vocabulary is used only with the Naru Audio engine.')
+    // No configured model: the daemon's default is judged.
+    expect(vocabularyNote(daemon, 'naru-audio')).toBe(
+      'whisper-base ignores the vocabulary; a model such as parakeet-tdt-0.6b-v2-int8 uses it.',
+    )
+    expect(vocabularyNote({ ...daemon, model: 'parakeet-tdt-0.6b-v2-int8' }, 'naru-audio')).toBeNull()
+    // Nothing known about the daemon: claim nothing.
+    expect(vocabularyNote({ ...daemon, hotword_models: [] }, 'naru-audio')).toBeNull()
+    expect(vocabularyNote({ ...daemon, default_model: null }, 'naru-audio')).toBeNull()
   })
 })

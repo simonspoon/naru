@@ -662,6 +662,16 @@ pub struct ConfigListen {
     pub engine: Option<String>,
     /// The built-in page engine (`"server"`).
     pub engine_default: String,
+    /// The speech vocabulary (naru task 1754), verbatim — naru-audio's
+    /// `hotwords` text — or `null` when none is configured.
+    pub vocabulary: Option<String>,
+    /// The speech-to-text models whose backend uses the vocabulary
+    /// (`x_hotwords` on the daemon's model list). Empty on the legacy engine
+    /// and when the daemon could not be asked.
+    pub hotword_models: Vec<String>,
+    /// The daemon's default speech-to-text model, so the page can judge the
+    /// vocabulary for a model nobody configured; `null` when unknown.
+    pub default_model: Option<String>,
 }
 
 /// The `naru-audio` settings as the Settings page sees them (`core::config`,

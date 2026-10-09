@@ -6206,7 +6206,8 @@ async fn transcribe_live(
     // this closure's own `Result<_, String>`.
     let text = tokio::task::spawn_blocking(move || {
         let model = config::listen_model()?;
-        listen::transcribe(&bytes, model.as_deref())
+        let hotwords = config::listen_vocabulary()?;
+        listen::transcribe(&bytes, model.as_deref(), hotwords.as_deref())
     })
     .await
     .map_err(|e| ApiError {
@@ -6302,8 +6303,12 @@ async fn live_listen(
         code: "unavailable",
         message,
     };
-    let url = blocking(|| match config::audio_engine()? {
-        audio::AudioEngine::NaruAudio => config::audio_url(),
+    let (url, hotwords) = blocking(|| match config::audio_engine()? {
+        audio::AudioEngine::NaruAudio => {
+            let url = config::audio_url()?;
+            // Read per connection, like the model; a bad file is no vocabulary.
+            Ok((url, config::listen_vocabulary().ok().flatten()))
+        }
         audio::AudioEngine::Legacy => {
             Err("streaming dictation needs audio.engine = \"naru-audio\"; \
              this server runs the legacy engine"
@@ -6312,7 +6317,23 @@ async fn live_listen(
     })
     .await?
     .map_err(unavailable)?;
-    Ok(ws.on_upgrade(move |socket| proxy_listen(socket, url)))
+    Ok(ws.on_upgrade(move |socket| proxy_listen(socket, url, hotwords)))
+}
+
+/// The page's `start` message with the configured vocabulary added as the
+/// daemon's `hotwords` field (naru task 1754); any other frame, and every
+/// frame when no vocabulary is configured, passes through byte-identical.
+fn with_hotwords(frame: &str, hotwords: Option<&str>) -> String {
+    let Some(hotwords) = hotwords else {
+        return frame.to_string();
+    };
+    match serde_json::from_str::<serde_json::Value>(frame) {
+        Ok(serde_json::Value::Object(mut start)) if start.get("type") == Some(&json!("start")) => {
+            start.insert("hotwords".to_string(), json!(hotwords));
+            serde_json::Value::Object(start).to_string()
+        }
+        _ => frame.to_string(),
+    }
 }
 
 /// Pumps one [`live_listen`] session until either side closes. Text and
@@ -6321,7 +6342,7 @@ async fn live_listen(
 /// without a close closes the other — the page with `error` + 1011, since an
 /// error always precedes a non-1000 close (§2.4). Nothing is spawned: the
 /// session is this one future, so it ends with the upgrade task.
-async fn proxy_listen(mut browser: WebSocket, url: String) {
+async fn proxy_listen(mut browser: WebSocket, url: String, hotwords: Option<String>) {
     use axum::extract::ws::CloseFrame;
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::{self, protocol::frame::coding::CloseCode};
@@ -6351,7 +6372,7 @@ async fn proxy_listen(mut browser: WebSocket, url: String) {
         tokio::select! {
             from_browser = browser.recv() => {
                 let out = match from_browser {
-                    Some(Ok(Message::Text(t))) => tungstenite::Message::Text(t.as_str().into()),
+                    Some(Ok(Message::Text(t))) => tungstenite::Message::Text(with_hotwords(t.as_str(), hotwords.as_deref()).into()),
                     Some(Ok(Message::Binary(b))) => tungstenite::Message::Binary(b),
                     Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
                     Some(Ok(Message::Close(frame))) => {
@@ -10525,6 +10546,9 @@ struct ListenUpdate {
     /// `"server"` or `"browser"`; `null` (or blank) restores `"server"`.
     #[serde(default, deserialize_with = "deserialize_some")]
     engine: Option<Option<String>>,
+    /// The speech vocabulary text; `null` (or blank) removes it.
+    #[serde(default, deserialize_with = "deserialize_some")]
+    vocabulary: Option<Option<String>>,
 }
 
 /// `PUT /api/config/listen` — writes the model and echoes the settings.
@@ -10545,6 +10569,9 @@ async fn update_config_listen(
     }
     if let Some(value) = body.engine {
         updates.insert(config::ENGINE.to_string(), value);
+    }
+    if let Some(value) = body.vocabulary {
+        updates.insert(config::VOCABULARY.to_string(), value);
     }
     // Validating a model consults the same (possibly uncached) model list the
     // getter does, so the save is a blocking call too.
@@ -13614,6 +13641,7 @@ mod tests {
                         Json(ListenUpdate {
                             model: None,
                             engine: None,
+                            vocabulary: None,
                         }),
                     )
                     .await
@@ -19216,6 +19244,8 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         url: String,
         /// One entry per handshake: the `Origin` it carried, if any.
         origins: Arc<Mutex<Vec<Option<String>>>>,
+        /// Every `start` message the daemon received, as the JSON it got.
+        starts: Arc<Mutex<Vec<serde_json::Value>>>,
     }
 
     /// Serves a stub `/v1/audio/transcriptions/stream`: `ready` to `start`,
@@ -19225,6 +19255,8 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
     async fn stream_stub(backlog: bool) -> StreamStub {
         let origins: Arc<Mutex<Vec<Option<String>>>> = Arc::default();
         let seen = origins.clone();
+        let starts: Arc<Mutex<Vec<serde_json::Value>>> = Arc::default();
+        let started = starts.clone();
         let app = Router::new().route(
             "/v1/audio/transcriptions/stream",
             get(move |headers: HeaderMap, ws: WebSocketUpgrade| {
@@ -19232,6 +19264,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                     .get(header::ORIGIN)
                     .map(|v| v.to_str().unwrap().to_string());
                 seen.lock().unwrap().push(origin);
+                let started = started.clone();
                 async move {
                     ws.on_upgrade(move |mut socket| async move {
                         use axum::extract::ws::CloseFrame;
@@ -19251,6 +19284,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                                         serde_json::from_str(t.as_str()).unwrap();
                                     match event["type"].as_str() {
                                         Some("start") => {
+                                            started.lock().unwrap().push(event.clone());
                                             let ready = json!({"type": "ready", "session": "s1"});
                                             socket.send(text(ready)).await.unwrap();
                                             if backlog {
@@ -19283,7 +19317,11 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
-        StreamStub { url, origins }
+        StreamStub {
+            url,
+            origins,
+            starts,
+        }
     }
 
     /// Clears `MESA_CONFIG_FILE` when dropped, a panicking test included.
@@ -19448,6 +19486,44 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             vec![None],
             "no Origin reaches the daemon"
         );
+    }
+
+    /// naru task 1754: a configured vocabulary rides in the `start` message
+    /// as `hotwords`; with none, the page's `start` reaches the daemon
+    /// unchanged. Any other field of the page's message is kept.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn live_listen_adds_the_vocabulary_to_the_start_message() {
+        use futures_util::SinkExt;
+        use tokio_tungstenite::tungstenite::Message as Tm;
+        let _env = attachments::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let stub = stream_stub(false).await;
+        let cfg = tempfile::tempdir().unwrap();
+        let start =
+            json!({"type": "start", "model": "default", "format": "s16le", "sample_rate": 16000});
+        for vocabulary in [Some("Naru :4\nkhora # tool"), None] {
+            let mut config = json!({"audio": {"engine": "naru-audio", "url": stub.url}});
+            if let Some(v) = vocabulary {
+                config["listen"] = json!({"vocabulary": v});
+            }
+            std::fs::write(cfg.path().join("config.json"), config.to_string()).unwrap();
+            let _config = listen_config(cfg.path(), None);
+            let (_dir, opened) = open_listen(LISTEN_ORIGIN).await;
+            let mut ws = opened.expect("the upgrade");
+            ws.send(Tm::Text(start.to_string().into())).await.unwrap();
+            ws.send(Tm::Text(json!({"type": "stop"}).to_string().into()))
+                .await
+                .unwrap();
+            let _ = listen_until_close(&mut ws).await;
+        }
+        let starts = stub.starts.lock().unwrap();
+        assert_eq!(starts.len(), 2);
+        let mut with = start.clone();
+        with["hotwords"] = json!("Naru :4\nkhora # tool");
+        assert_eq!(starts[0], with);
+        assert_eq!(starts[1], start, "no vocabulary, no hotwords");
     }
 
     /// A non-1000 close is passed through with the error before it.
@@ -20134,6 +20210,51 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             std::env::remove_var("MESA_CONFIG_FILE");
         }
         assert!(!ran.exists(), "auris was run on the naru-audio engine");
+    }
+
+    /// naru task 1754: `POST /api/live/transcribe` on naru-audio carries the
+    /// configured vocabulary verbatim as the `hotwords` part, and no such
+    /// part when none is configured (or a hand-edited one no longer passes).
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn transcribe_live_sends_the_vocabulary_as_hotwords_only_when_configured() {
+        let _env = attachments::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (_dir, state) = test_state();
+        let cfg = tempfile::tempdir().unwrap();
+        let daemon = audio::stub::Stub::serve(0, |_, _| {
+            audio::stub::Reply::Json(200, r#"{"text":"ok"}"#.to_string())
+        });
+        let audio = json!({"engine": "naru-audio", "url": daemon.url()});
+        let vocabulary = "Naru :4\nkhora # the browser tool";
+        let path = cfg.path().join("config.json");
+        std::fs::write(
+            &path,
+            json!({"audio": audio, "listen": {"vocabulary": vocabulary}}).to_string(),
+        )
+        .unwrap();
+        let _config = listen_config(cfg.path(), None);
+        post_transcribe(&state).await.unwrap();
+        std::fs::write(
+            &path,
+            json!({"audio": audio, "listen": {"vocabulary": "a/b"}}).to_string(),
+        )
+        .unwrap();
+        post_transcribe(&state).await.unwrap();
+        std::fs::write(&path, json!({"audio": audio}).to_string()).unwrap();
+        post_transcribe(&state).await.unwrap();
+        unsafe { std::env::remove_var("MESA_CONFIG_FILE") };
+        let requests = daemon.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(
+            requests[0].contains(&format!("name=\"hotwords\"\r\n\r\n{vocabulary}\r\n")),
+            "{:?}",
+            requests[0]
+        );
+        for sent in &requests[1..] {
+            assert!(!sent.contains("hotwords"), "{sent:?}");
+        }
     }
 
     /// The silence contract on the legacy engine: `auris` exiting 1 with no
