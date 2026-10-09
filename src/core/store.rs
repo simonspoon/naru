@@ -6045,6 +6045,23 @@ impl Store {
             .optional()?)
     }
 
+    /// The newest **ended** conversation with an id below `before`, or `None`
+    /// — the one a fresh spawn recalls the unanswered questions of (naru task
+    /// 1723).
+    pub fn previous_ended_live_session(&self, before: i64) -> Result<Option<LiveSession>> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT {LIVE_SESSION_COLUMNS} FROM live_sessions \
+                     WHERE status = ?1 AND id < ?2 ORDER BY id DESC LIMIT 1"
+                ),
+                (LiveStatus::Ended.as_str(), before),
+                row_to_live_session,
+            )
+            .optional()?)
+    }
+
     pub fn get_live_session(&self, id: i64) -> Result<LiveSession> {
         self.conn
             .query_row(
