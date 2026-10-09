@@ -1630,6 +1630,27 @@ twenty. They no longer are: a board lives until the session row is deleted
 `clear`'s delete echo reports as destroyed, and what backs the whole-history
 route below).
 
+### The global history and pinning (naru task 1735)
+
+The whiteboard panel is not scoped to the live conversation. `GET
+/api/live/boards?before=<id>&limit=<n>` answers a `LiveBoardHistoryPage`
+(`{boards, pinned, has_more}`): boards from **every** session, live or ended,
+newest first by id and bodiless (`Store::live_board_history_page`; `limit`
+defaults to 10 and is clamped 1..=100, `before` is an exclusive id cursor),
+plus **every** pinned board (`Store::list_pinned_live_boards`) whatever page it
+falls on. `pinned_at` (migration index 86, on `LiveBoard` and
+`LiveBoardSummary`, null = not pinned) is stamped by `POST
+/api/live/boards/{id}/pin` `{"pinned": bool}` / `naru live board pin <id>
+[--undo] [--quiet]` (`Store::set_live_board_pinned`, idempotent: re-pinning
+keeps the first stamp; unknown id `not_found`; no live session needed). Plain
+global guard plus the Content-Type gate, like the ink-state routes. The page
+merges pinned, the loaded pages and the poll's boards by id, oldest first
+(`liveBoard.ts::mergeBoards`), fetches the first page on mount and when the
+poll's newest board or the session's liveness changes, and a "more" button
+loads the page before the oldest one loaded. Only "new board" stays live-only.
+`live board list` is unchanged (this conversation's boards); `keep` is
+unchanged. Ink reads and writes never required a live session.
+
 ### Finding and bringing back an old board (mesa task 1548)
 
 Boards are part of the live-memory archive: `Store::add_live_board` writes a

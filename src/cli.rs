@@ -3188,6 +3188,21 @@ EXAMPLES
         #[arg(long)]
         quiet: bool,
     },
+    /// Pin a board (any conversation's) so it stays listed in the whiteboard
+    /// history whatever page it falls on; `--undo` unpins
+    ///
+    /// Needs no live session. Idempotent: re-pinning keeps the first stamp.
+    Pin {
+        /// The board to pin
+        #[arg(value_name = "ID")]
+        id: i64,
+        /// Unpin instead
+        #[arg(long)]
+        undo: bool,
+        /// Print the board without its `body` instead of in full
+        #[arg(long)]
+        quiet: bool,
+    },
     /// Print one board in full; without an ID, the one showing
     ///
     /// With an ID this works for a board of ANY conversation, live or ended,
@@ -7042,6 +7057,11 @@ fn run_live_board(store: &mut Store, cmd: LiveBoardCmd) -> Result<()> {
         print_live_board(&board, quiet);
         return Ok(());
     }
+    if let LiveBoardCmd::Pin { id, undo, quiet } = cmd {
+        let board = store.set_live_board_pinned(id, !undo)?;
+        print_live_board(&board, quiet);
+        return Ok(());
+    }
     let session = current_live_session(store)?;
     match cmd {
         LiveBoardCmd::Push {
@@ -7242,6 +7262,7 @@ fn run_live_board(store: &mut Store, cmd: LiveBoardCmd) -> Result<()> {
         LiveBoardCmd::List { limit } => {
             print_json(&store.list_live_boards(session.id, limit)?);
         }
+        LiveBoardCmd::Pin { .. } => unreachable!("handled above"),
         LiveBoardCmd::Show { id, quiet } => {
             let board = resolve_live_board(store, &session, id)?;
             print_live_board(&board, quiet);
@@ -8976,6 +8997,7 @@ mod tests {
             body: "## Plan\n\nThree steps, in order.".into(),
             content_type: None,
             created_at: "2026-01-01 00:00:00".into(),
+            pinned_at: None,
         }
     }
 
@@ -9001,6 +9023,8 @@ mod tests {
                 // `Attachment` and `Artifact` already use for it.
                 "content_type",
                 "created_at",
+                // Null or the first-pin stamp: bounded, and what `pin` reports.
+                "pinned_at",
             ]),
             "LiveBoard gained/lost a field: decide whether it belongs in the \
              --quiet shape before updating this list",

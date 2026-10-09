@@ -58,6 +58,8 @@ import type { LibrarySyncRow } from './types/LibrarySyncRow'
 import type { LibraryVersion } from './types/LibraryVersion'
 import type { LiveBoard } from './types/LiveBoard'
 import type { LiveBoardHistoryEntry } from './types/LiveBoardHistoryEntry'
+import type { LiveBoardHistoryPage } from './types/LiveBoardHistoryPage'
+import type { LiveBoardSummary } from './types/LiveBoardSummary'
 import type { LiveContext } from './types/LiveContext'
 import type { LiveNotice } from './types/LiveNotice'
 import type { LiveSession } from './types/LiveSession'
@@ -1021,6 +1023,22 @@ export function startLive(projectId?: number, acceptOffer?: boolean): Promise<Li
  */
 export function createLiveBoard(): Promise<LiveBoard> {
   return request('/api/live/boards', jsonInit('POST', {}))
+}
+
+/**
+ * One page of the global whiteboard history (naru task 1735): boards from
+ * every session, newest first, plus every pinned board. `before` is the id
+ * of the oldest board already loaded.
+ */
+export function getLiveBoardHistory(before?: number, limit = 10): Promise<LiveBoardHistoryPage> {
+  const q = new URLSearchParams({ limit: String(limit) })
+  if (before !== undefined) q.set('before', String(before))
+  return request(`/api/live/boards?${q}`)
+}
+
+/** Pins or unpins a board of any session. */
+export function pinLiveBoard(id: number, pinned: boolean): Promise<LiveBoardSummary> {
+  return request(`/api/live/boards/${id}/pin`, jsonInit('POST', { pinned }))
 }
 
 /** Ends the conversation. Idempotent: ending an ended one returns it unchanged. */

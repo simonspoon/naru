@@ -1,4 +1,5 @@
 import type { LiveBoardKind } from './types/LiveBoardKind'
+import type { LiveBoardHistoryPage } from './types/LiveBoardHistoryPage'
 import type { LiveBoardSummary } from './types/LiveBoardSummary'
 
 /**
@@ -221,3 +222,98 @@ export function boardCountBadge(count: number | null): string | null {
   return count === 1 ? '1 board' : `${count} boards`
 }
 
+
+// ---- the global history (naru task 1735) ----
+
+/**
+ * The whiteboard's loaded history: the pages fetched from `GET
+ * /api/live/boards` so far (newest first as they arrive, held here in no
+ * promised order), every pinned board, and whether older boards remain.
+ */
+export interface BoardHistory {
+  boards: LiveBoardSummary[]
+  pinned: LiveBoardSummary[]
+  hasMore: boolean
+}
+
+/** Nothing loaded yet. */
+export function emptyBoardHistory(): BoardHistory {
+  return { boards: [], pinned: [], hasMore: false }
+}
+
+/**
+ * Every board the panel can step through: the loaded history pages, every
+ * pinned board (which may be older than any loaded page) and the live poll's
+ * boards, deduped by id and ordered oldest to newest by id — so the index
+ * and "null = newest" semantics of the stepper hold unchanged.
+ *
+ * On a duplicate id the history/pinned row wins over the poll's: those are
+ * refetched on a pin, while the poll's copy can lag it by a tick.
+ */
+export function mergeBoards(
+  history: Pick<BoardHistory, 'boards' | 'pinned'>,
+  poll: readonly LiveBoardSummary[],
+): LiveBoardSummary[] {
+  const byId = new Map<number, LiveBoardSummary>()
+  for (const board of poll) byId.set(board.id, board)
+  for (const board of history.pinned) byId.set(board.id, board)
+  for (const board of history.boards) byId.set(board.id, board)
+  return [...byId.values()].sort((a, b) => a.id - b.id)
+}
+
+/** The oldest loaded history board's id: the `before` cursor for the next page. */
+export function olderCursor(history: BoardHistory): number | null {
+  let oldest: number | null = null
+  for (const board of history.boards) {
+    if (oldest === null || board.id < oldest) oldest = board.id
+  }
+  return oldest
+}
+
+/**
+ * The history after the first page is (re)fetched. Older pages already
+ * loaded are kept; a loaded board inside the first page's range that the
+ * page no longer lists was cleared and is dropped. `hasMore` follows the
+ * older end only when nothing older than the page was loaded.
+ */
+export function foldFirstPage(prev: BoardHistory, page: LiveBoardHistoryPage): BoardHistory {
+  const pageOldest = page.boards.reduce<number | null>(
+    (min, b) => (min === null || b.id < min ? b.id : min),
+    null,
+  )
+  const kept =
+    pageOldest === null ? [] : prev.boards.filter((b) => b.id < pageOldest)
+  return {
+    boards: [...kept, ...page.boards],
+    pinned: page.pinned,
+    hasMore: kept.length > 0 ? prev.hasMore : page.has_more,
+  }
+}
+
+/** The history after an older page (`before=` the cursor) arrives. */
+export function foldOlderPage(prev: BoardHistory, page: LiveBoardHistoryPage): BoardHistory {
+  const known = new Set(prev.boards.map((b) => b.id))
+  return {
+    boards: [...prev.boards, ...page.boards.filter((b) => !known.has(b.id))],
+    pinned: page.pinned,
+    hasMore: page.has_more,
+  }
+}
+
+/**
+ * Keeps the view on the same board when the list changes under it — older
+ * pages prepend rows, which would otherwise shift an index onto a different
+ * picture. Applied before `boardViewFor`/`heldBoardView`, whose
+ * push-replaces-showing rule still wins when a newer board arrives.
+ */
+export function retargetBoardView(
+  view: BoardView,
+  prev: readonly LiveBoardSummary[],
+  next: readonly LiveBoardSummary[],
+): BoardView {
+  const showing = boardAt(prev, view.index)
+  if (showing === null) return view
+  const index = next.findIndex((board) => board.id === showing.id)
+  if (index < 0 || index === view.index) return view
+  return { ...view, index }
+}

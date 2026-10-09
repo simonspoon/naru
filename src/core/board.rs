@@ -659,6 +659,7 @@ mod tests {
             body: "x".into(),
             content_type: content_type.map(str::to_string),
             created_at: "2026-01-01 00:00:00".into(),
+            pinned_at: None,
         }
     }
 

@@ -7,8 +7,14 @@ import {
   boardTitle,
   boardViewFor,
   clampBoardIndex,
+  emptyBoardHistory,
   emptyBoardView,
+  foldFirstPage,
+  foldOlderPage,
+  mergeBoards,
   newestBoardId,
+  olderCursor,
+  retargetBoardView,
   stepBoard,
 } from './liveBoard'
 import type { LiveBoardSummary } from './types/LiveBoardSummary'
@@ -20,6 +26,7 @@ function board(id: number, patch: Partial<LiveBoardSummary> = {}): LiveBoardSumm
     kind: 'markdown',
     title: 'the plan',
     created_at: '2026-01-01 00:00:00',
+    pinned_at: null,
     ...patch,
   }
 }
@@ -230,5 +237,56 @@ describe('boardCountBadge', () => {
   it('pluralizes more than one', () => {
     expect(boardCountBadge(2)).toBe('2 boards')
     expect(boardCountBadge(22)).toBe('22 boards')
+  })
+})
+
+describe('the global history', () => {
+  it('merges pinned, history and the poll, deduped and oldest first', () => {
+    const history = {
+      boards: [board(9), board(8), board(7)],
+      pinned: [board(2, { pinned_at: 'x' }), board(8)],
+    }
+    const merged = mergeBoards(history, [board(9), board(10)])
+    expect(merged.map((b) => b.id)).toEqual([2, 7, 8, 9, 10])
+  })
+
+  it('prefers the history row over a lagging poll row', () => {
+    const merged = mergeBoards(
+      { boards: [board(5, { pinned_at: 'now' })], pinned: [] },
+      [board(5)],
+    )
+    expect(merged[0].pinned_at).toBe('now')
+  })
+
+  it('works with no poll at all (an ended session)', () => {
+    expect(mergeBoards({ boards: [board(3), board(4)], pinned: [] }, []).map((b) => b.id)).toEqual([3, 4])
+  })
+
+  it('folds pages: older pages append, a refetched first page keeps them', () => {
+    let h = foldFirstPage(emptyBoardHistory(), { boards: [board(10), board(9)], pinned: [], has_more: true })
+    expect(h.hasMore).toBe(true)
+    expect(olderCursor(h)).toBe(9)
+    h = foldOlderPage(h, { boards: [board(8), board(7)], pinned: [board(2)], has_more: false })
+    expect(h.boards.map((b) => b.id)).toEqual([10, 9, 8, 7])
+    expect(h.hasMore).toBe(false)
+    expect(h.pinned.map((b) => b.id)).toEqual([2])
+    // A new board lands; the first page is refetched and the older rows stay.
+    h = foldFirstPage(h, { boards: [board(11), board(10)], pinned: [board(2)], has_more: true })
+    expect(h.boards.map((b) => b.id).sort((a, b) => a - b)).toEqual([7, 8, 9, 10, 11])
+    expect(h.hasMore).toBe(false)
+  })
+
+  it('drops loaded boards a refetched first page no longer lists (cleared)', () => {
+    const prev = { boards: [board(10), board(9)], pinned: [], hasMore: false }
+    const h = foldFirstPage(prev, { boards: [], pinned: [], has_more: false })
+    expect(h.boards).toEqual([])
+  })
+
+  it('keeps the view on the same board when older rows are prepended', () => {
+    const prev = [board(9), board(10)]
+    const next = [board(7), board(8), board(9), board(10)]
+    expect(retargetBoardView({ index: 0, seen: 10 }, prev, next)).toEqual({ index: 2, seen: 10 })
+    expect(retargetBoardView({ index: 1, seen: 10 }, prev, next).index).toBe(3)
+    expect(retargetBoardView({ index: null, seen: null }, [], next).index).toBeNull()
   })
 })

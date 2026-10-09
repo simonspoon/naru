@@ -4483,6 +4483,8 @@ pub struct LiveBoard {
     pub content_type: Option<String>,
     /// When it was pushed (SQLite `datetime` text, UTC).
     pub created_at: String,
+    /// When it was first pinned (naru task 1735); null = not pinned.
+    pub pinned_at: Option<String>,
 }
 
 /// A board without its body — what rides in [`LiveState`], which the page
@@ -4500,6 +4502,20 @@ pub struct LiveBoardSummary {
     pub kind: LiveBoardKind,
     pub title: Option<String>,
     pub created_at: String,
+    /// When it was first pinned (naru task 1735); null = not pinned.
+    pub pinned_at: Option<String>,
+}
+
+/// One page of the global whiteboard history (`GET /api/live/boards`, naru
+/// task 1735): boards from every session, newest first, plus every pinned
+/// board whatever page it falls on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct LiveBoardHistoryPage {
+    pub boards: Vec<LiveBoardSummary>,
+    pub pinned: Vec<LiveBoardSummary>,
+    /// Whether boards older than the last one in `boards` exist.
+    pub has_more: bool,
 }
 
 /// One entry of a live session's **whole** whiteboard history (`GET

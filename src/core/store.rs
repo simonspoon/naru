@@ -1409,6 +1409,10 @@ const MIGRATIONS: &[&str] = &[
         created_at  TEXT NOT NULL
      );
      CREATE INDEX idx_task_notes_task ON task_notes(task_id, id);",
+    // Task 1735: a board can be pinned. NULL = not pinned; the stamp is when
+    // it was first pinned. Pinned boards are listed beside the global board
+    // history whatever page they fall on.
+    "ALTER TABLE live_boards ADD COLUMN pinned_at TEXT;",
 ];
 
 /// Selects full task rows including the derived `blocked` flag.
@@ -1813,13 +1817,14 @@ fn row_to_live_turn(row: &rusqlite::Row<'_>) -> rusqlite::Result<LiveTurn> {
     })
 }
 
-const LIVE_BOARD_COLUMNS: &str = "id, session_id, kind, title, body, content_type, created_at";
+const LIVE_BOARD_COLUMNS: &str =
+    "id, session_id, kind, title, body, content_type, created_at, pinned_at";
 
 /// The same list without the body — what [`Store::list_live_boards`] and
 /// [`Store::clear_live_boards`] read, since the page's 2s poll carries the
 /// history as pointers and fetches one body at a time through the render
 /// route.
-const LIVE_BOARD_SUMMARY_COLUMNS: &str = "id, session_id, kind, title, created_at";
+const LIVE_BOARD_SUMMARY_COLUMNS: &str = "id, session_id, kind, title, created_at, pinned_at";
 
 /// Largest board body, in bytes — the artifact cap, and for the artifact
 /// reason: this is an agent-written document (or one image file) held in the
@@ -1925,6 +1930,7 @@ fn row_to_live_board(row: &rusqlite::Row<'_>) -> rusqlite::Result<LiveBoard> {
         body: row.get(4)?,
         content_type: row.get(5)?,
         created_at: row.get(6)?,
+        pinned_at: row.get(7)?,
     })
 }
 
@@ -1936,6 +1942,7 @@ fn row_to_live_board_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<LiveBo
         kind: LiveBoardKind::parse(&kind).expect("invalid live board kind in db"),
         title: row.get(3)?,
         created_at: row.get(4)?,
+        pinned_at: row.get(5)?,
     })
 }
 
@@ -8471,6 +8478,67 @@ impl Store {
         ))?;
         let rows = stmt.query_map([session_id], row_to_live_board_summary)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// The **global** board history (naru task 1735): boards from every
+    /// session, live or ended, newest first by id, bodiless. `before` is the
+    /// cursor (`id < before`); `limit` is clamped into `1..=100`.
+    /// [`Store::live_board_history_page`] adds `has_more`.
+    pub fn list_live_board_history(
+        &self,
+        before: Option<i64>,
+        limit: i64,
+    ) -> Result<Vec<LiveBoardSummary>> {
+        let limit = limit.clamp(1, 100);
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {LIVE_BOARD_SUMMARY_COLUMNS} FROM live_boards \
+             WHERE (?1 IS NULL OR id < ?1) ORDER BY id DESC LIMIT ?2"
+        ))?;
+        let rows = stmt.query_map((before, limit), row_to_live_board_summary)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// One page of [`Store::list_live_board_history`] plus whether older
+    /// boards remain beyond it.
+    pub fn live_board_history_page(
+        &self,
+        before: Option<i64>,
+        limit: i64,
+    ) -> Result<(Vec<LiveBoardSummary>, bool)> {
+        let limit = limit.clamp(1, 100);
+        let mut rows = self.list_live_board_history(before, limit + 1)?;
+        let has_more = rows.len() as i64 > limit;
+        rows.truncate(limit as usize);
+        Ok((rows, has_more))
+    }
+
+    /// Every pinned board, newest first and bodiless, regardless of session.
+    pub fn list_pinned_live_boards(&self) -> Result<Vec<LiveBoardSummary>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {LIVE_BOARD_SUMMARY_COLUMNS} FROM live_boards \
+             WHERE pinned_at IS NOT NULL ORDER BY id DESC"
+        ))?;
+        let rows = stmt.query_map([], row_to_live_board_summary)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Pins or unpins a board of any session. Idempotent: re-pinning keeps the
+    /// original stamp. An unknown board is `not_found`.
+    pub fn set_live_board_pinned(&mut self, id: i64, pinned: bool) -> Result<LiveBoard> {
+        self.require_live_board(id)?;
+        if pinned {
+            self.conn.execute(
+                "UPDATE live_boards SET pinned_at = datetime('now') \
+                 WHERE id = ?1 AND pinned_at IS NULL",
+                [id],
+            )?;
+        } else {
+            self.conn.execute(
+                "UPDATE live_boards SET pinned_at = NULL WHERE id = ?1",
+                [id],
+            )?;
+        }
+        self.get_live_board(id)
     }
 
     /// Wipes a session's boards, echoing what it destroyed — the delete-echo
@@ -15565,15 +15633,15 @@ mod tests {
         );
         assert_eq!(
             MIGRATIONS.len(),
-            86,
-            "a fresh db should report user_version 86"
+            87,
+            "a fresh db should report user_version 87"
         );
         let (store, _dir) = temp_store();
         let version: i64 = store
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 86);
+        assert_eq!(version, 87);
     }
 
     /// Workflows replace diagrams at migration 83 (mesa task 1607): a db that
@@ -17071,6 +17139,93 @@ mod tests {
         let current = store.current_live_board(session.id).unwrap().unwrap();
         assert_eq!(current.id, all.last().unwrap().id, "newest is current");
         assert_eq!(current.body, format!("body {}", total - 1));
+    }
+
+    /// The global history spans live and ended sessions, pages newest first
+    /// with a `before` cursor and `has_more`, and pins are idempotent (naru
+    /// task 1735).
+    #[test]
+    fn live_board_history_is_global_paged_and_pinnable() {
+        let (mut store, _dir) = temp_store();
+        let first = store.start_live_session(None).unwrap();
+        let mut ids = vec![];
+        for i in 0..3 {
+            ids.push(
+                store
+                    .add_live_board(
+                        first.id,
+                        LiveBoardKind::Markdown,
+                        Some(&format!("a{i}")),
+                        "x",
+                        None,
+                    )
+                    .unwrap()
+                    .id,
+            );
+        }
+        store.end_live_session(first.id).unwrap();
+        let second = store.start_live_session(None).unwrap();
+        for i in 0..2 {
+            ids.push(
+                store
+                    .add_live_board(
+                        second.id,
+                        LiveBoardKind::Markdown,
+                        Some(&format!("b{i}")),
+                        "x",
+                        None,
+                    )
+                    .unwrap()
+                    .id,
+            );
+        }
+        // Across both sessions, newest first.
+        let (page, more) = store.live_board_history_page(None, 3).unwrap();
+        assert_eq!(
+            page.iter().map(|b| b.id).collect::<Vec<_>>(),
+            [ids[4], ids[3], ids[2]]
+        );
+        assert!(more);
+        let (rest, more) = store.live_board_history_page(Some(ids[2]), 3).unwrap();
+        assert_eq!(
+            rest.iter().map(|b| b.id).collect::<Vec<_>>(),
+            [ids[1], ids[0]]
+        );
+        assert!(!more, "exactly the remainder is not more");
+        let (exact, more) = store.live_board_history_page(None, 5).unwrap();
+        assert_eq!(exact.len(), 5);
+        assert!(!more);
+
+        // Pinning: stamp, idempotent, unpin, not_found.
+        assert!(store.list_pinned_live_boards().unwrap().is_empty());
+        let pinned = store.set_live_board_pinned(ids[0], true).unwrap();
+        let stamp = pinned.pinned_at.clone().expect("stamped");
+        assert_eq!(
+            store.set_live_board_pinned(ids[0], true).unwrap().pinned_at,
+            Some(stamp)
+        );
+        store.set_live_board_pinned(ids[3], true).unwrap();
+        assert_eq!(
+            store
+                .list_pinned_live_boards()
+                .unwrap()
+                .iter()
+                .map(|b| b.id)
+                .collect::<Vec<_>>(),
+            [ids[3], ids[0]]
+        );
+        assert!(
+            store
+                .set_live_board_pinned(ids[0], false)
+                .unwrap()
+                .pinned_at
+                .is_none()
+        );
+        assert_eq!(store.list_pinned_live_boards().unwrap().len(), 1);
+        assert!(matches!(
+            store.set_live_board_pinned(9999, true),
+            Err(Error::NotFound(_))
+        ));
     }
 
     /// `clear` echoes what it destroyed — the delete-echo safety floor — and a
