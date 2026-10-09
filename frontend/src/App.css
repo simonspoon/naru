@@ -10797,6 +10797,14 @@ body.live-panel-ratio-resizing .live-panel-divider {
   color: var(--muted);
 }
 
+.agent-card-model {
+  margin-top: 0.2rem;
+  text-align: right;
+  font-size: 0.65rem;
+  font-family: var(--font-mono);
+  color: var(--muted);
+}
+
 .agent-card-doing {
   margin-top: 0.2rem;
   font-size: 0.78rem;

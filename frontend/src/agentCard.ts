@@ -27,6 +27,22 @@ export function agentChips(
   }
 }
 
+/** The small model tag at a card's bottom right: the family (`opus`,
+ * `sonnet`, `haiku`) when the id names one, else the id with `claude-`, a
+ * date suffix and a `[1m]` tail dropped. `null` when unknown — no tag. */
+export function modelTag(model: string | null): string | null {
+  if (!model) return null
+  const m = model.toLowerCase()
+  for (const family of ['opus', 'sonnet', 'haiku']) {
+    if (m.includes(family)) return family
+  }
+  const short = m
+    .replace(/^claude-/, '')
+    .replace(/\[.*\]$/, '')
+    .replace(/-\d{8}$/, '')
+  return short === '' ? null : short
+}
+
 const PALETTE = ['#2bd4ff', '#5dffa8', '#ffb347', '#ff6b9a', '#7aa2ff', '#e6d95a']
 
 /** A card's accent — its left edge and its sub-agents' rail. Hashed off the
