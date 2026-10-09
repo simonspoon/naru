@@ -1,6 +1,6 @@
 [package]
 name = "naru"
-version = "2.7.0"
+version = "2.8.0"
 edition = "2024"
 description = "Local-first workspace where you and your Claude Code agents plan, run and talk through work"
 license = "MIT"
