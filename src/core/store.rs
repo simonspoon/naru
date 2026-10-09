@@ -14,9 +14,10 @@ use super::types::{
     LiveBoardSummary, LiveContext, LiveMemoryHit, LiveNotebookEntry, LiveNotice, LiveResult,
     LiveRole, LiveSession, LiveStatus, LiveSummary, LiveTurn, LiveWindow, Priority, Project,
     RetroFinding, RetroRun, RetroStatus, Script, ScriptArg, ScriptArgKind, ScriptRunRecord,
-    ScriptRunStatus, Status, Task, TaskEvent, TaskReceipt, Workflow, WorkflowBranch, WorkflowEdge,
-    WorkflowLogEntry, WorkflowNode, WorkflowNodeKind, WorkflowRun, WorkflowRunStatus, WorkflowStep,
-    WorkflowStepStatus, WorkflowTrigger, WorkflowView, is_valid_artifact_content_type, task_name,
+    ScriptRunStatus, Status, Task, TaskDigestEntry, TaskEvent, TaskNote, TaskReceipt, Workflow,
+    WorkflowBranch, WorkflowEdge, WorkflowLogEntry, WorkflowNode, WorkflowNodeKind, WorkflowRun,
+    WorkflowRunStatus, WorkflowStep, WorkflowStepStatus, WorkflowTrigger, WorkflowView,
+    is_valid_artifact_content_type, task_name,
 };
 
 #[derive(Debug)]
@@ -1396,6 +1397,18 @@ const MIGRATIONS: &[&str] = &[
     // automatic firing (the time watcher, ambient events); a manual run still
     // works. Existing workflows stay on.
     "ALTER TABLE workflows ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;",
+    // Task 1724: append-only notes on a task. A sibling table (the
+    // `task_receipts` precedent) so `Task`, `compact()` and `--quiet` key
+    // parity stay untouched. `ON DELETE CASCADE`: a note describes its task
+    // and has nowhere to live without it. No update or delete path exists.
+    "CREATE TABLE task_notes (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id     INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        body        TEXT NOT NULL,
+        session     TEXT,
+        created_at  TEXT NOT NULL
+     );
+     CREATE INDEX idx_task_notes_task ON task_notes(task_id, id);",
 ];
 
 /// Selects full task rows including the derived `blocked` flag.
@@ -1462,6 +1475,16 @@ fn row_to_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskEvent> {
         from_status: from_status.map(|s| Status::parse(&s).expect("invalid status in db")),
         to_status: Status::parse(&to_status).expect("invalid status in db"),
         at: row.get(4)?,
+    })
+}
+
+fn row_to_task_note(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskNote> {
+    Ok(TaskNote {
+        id: row.get(0)?,
+        task_id: row.get(1)?,
+        body: row.get(2)?,
+        session: row.get(3)?,
+        created_at: row.get(4)?,
     })
 }
 
@@ -3962,6 +3985,47 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Tasks whose description contains every one of `words` as a literal,
+    /// case-insensitive substring (a task's `name` is the first line of its
+    /// description, so the description covers both). `instr(lower(..))`, not
+    /// `LIKE`, so `%` and `_` in a word are plain characters. Scoping and the
+    /// archived-project rule are `list_tasks`'s; `statuses` empty = any.
+    pub fn search_tasks(
+        &self,
+        words: &[String],
+        project: Option<i64>,
+        statuses: &[Status],
+    ) -> Result<Vec<Task>> {
+        let mut sql = format!(
+            "{HIDDEN_PROJECTS_CTE}SELECT {TASK_COLUMNS} FROM tasks t \
+             JOIN projects p ON p.id = t.project_id \
+             WHERE (?1 IS NULL OR t.project_id = ?1) \
+             AND (?1 IS NOT NULL OR {NOT_HIDDEN_PROJECT})"
+        );
+        let mut params: Vec<rusqlite::types::Value> = vec![project.into()];
+        for word in words {
+            params.push(word.to_lowercase().into());
+            sql.push_str(&format!(
+                " AND instr(lower(t.description), ?{}) > 0",
+                params.len()
+            ));
+        }
+        if !statuses.is_empty() {
+            let marks: Vec<String> = statuses
+                .iter()
+                .map(|s| {
+                    params.push(s.as_str().to_string().into());
+                    format!("?{}", params.len())
+                })
+                .collect();
+            sql.push_str(&format!(" AND t.status IN ({})", marks.join(",")));
+        }
+        sql.push_str(" ORDER BY t.sort_order, t.id");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params), row_to_task)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     pub fn update_task(&mut self, id: i64, patch: &TaskPatch) -> Result<Task> {
         let mut task = self.get_task(id)?;
         let old_status = task.status;
@@ -4456,6 +4520,57 @@ impl Store {
         }
     }
 
+    /// `since` as SQLite `datetime` text (UTC), or `validation` when it is
+    /// not a timestamp (naru task 1725).
+    pub fn normalise_since(&self, since: &str) -> Result<String> {
+        let normalised: Option<String> =
+            self.conn
+                .query_row("SELECT datetime(?1)", [since], |r| r.get(0))?;
+        normalised.ok_or_else(|| {
+            Error::Validation(format!(
+                "--since: `{since}` is not a timestamp (use e.g. 2026-10-08T21:00:00Z or \
+                 `YYYY-MM-DD HH:MM:SS` UTC)"
+            ))
+        })
+    }
+
+    /// Tasks that reached `done` or `cancelled`, or went back from
+    /// `in_progress` to `todo`/`backlog`, at or after `since` (naru task
+    /// 1725). One entry per task: its newest event at or after `since` (by
+    /// id), kept only if that event qualifies and the task's current status
+    /// is its `to_status`. Tasks in archived projects are left out; oldest
+    /// first. The event columns are read as text, never through
+    /// [`Status::parse`], since pre-retirement rows still hold `refine`.
+    pub fn task_digest(&self, since: &str) -> Result<Vec<TaskDigestEntry>> {
+        let since = self.normalise_since(since)?;
+        let mut stmt = self.conn.prepare(&format!(
+            "{HIDDEN_PROJECTS_CTE}SELECT t.id, t.description, t.project_id, p.name, t.status, \
+                    e.at \
+             FROM (SELECT task_id, MAX(id) AS mid FROM task_events \
+                   WHERE at >= ?1 GROUP BY task_id) latest \
+             JOIN task_events e ON e.id = latest.mid \
+             JOIN tasks t ON t.id = e.task_id \
+             JOIN projects p ON p.id = t.project_id \
+             WHERE e.to_status = t.status \
+               AND (e.to_status IN ('done', 'cancelled') \
+                    OR (e.from_status = 'in_progress' AND e.to_status IN ('todo', 'backlog'))) \
+               AND {NOT_HIDDEN_PROJECT} \
+             ORDER BY e.at, t.id"
+        ))?;
+        let rows = stmt.query_map([&since], |r| {
+            let id: i64 = r.get(0)?;
+            Ok(TaskDigestEntry {
+                task_id: id,
+                name: task_name(&r.get::<_, String>(1)?, id),
+                project_id: r.get(2)?,
+                project_name: r.get(3)?,
+                status: r.get(4)?,
+                at: r.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     fn check_parent(&self, parent_id: i64, project_id: i64) -> Result<()> {
         check_parent(&self.conn, parent_id, project_id)
     }
@@ -4533,6 +4648,65 @@ impl Store {
             )
             .optional()?;
         Ok(row)
+    }
+
+    // ---- task notes (task 1724) ----
+
+    /// Longest note body, in bytes. Notes are context for the next reader,
+    /// not documents; an artifact or attachment is the place for those.
+    pub const TASK_NOTE_MAX: usize = 8192;
+
+    /// Longest note `session`, in characters.
+    pub const TASK_NOTE_SESSION_MAX: usize = 200;
+
+    /// Appends one note to a task. `body` must be non-blank and at most
+    /// [`Self::TASK_NOTE_MAX`] bytes (`Validation`); an unknown task is
+    /// `NotFound`. A blank `session` is stored as none.
+    pub fn add_task_note(
+        &mut self,
+        task_id: i64,
+        body: &str,
+        session: Option<&str>,
+    ) -> Result<TaskNote> {
+        if body.trim().is_empty() {
+            return Err(Error::Validation("note body must not be empty".into()));
+        }
+        if body.len() > Self::TASK_NOTE_MAX {
+            return Err(Error::Validation(format!(
+                "note body must be at most {} bytes",
+                Self::TASK_NOTE_MAX
+            )));
+        }
+        let session = session.map(str::trim).filter(|s| !s.is_empty());
+        if session.is_some_and(|s| s.chars().count() > Self::TASK_NOTE_SESSION_MAX) {
+            return Err(Error::Validation(format!(
+                "note session must be at most {} characters",
+                Self::TASK_NOTE_SESSION_MAX
+            )));
+        }
+        self.get_task(task_id)?;
+        self.conn.execute(
+            "INSERT INTO task_notes (task_id, body, session, created_at) \
+             VALUES (?1, ?2, ?3, datetime('now'))",
+            (task_id, body, session),
+        )?;
+        let id = self.conn.last_insert_rowid();
+        Ok(self.conn.query_row(
+            "SELECT id, task_id, body, session, created_at FROM task_notes WHERE id = ?1",
+            [id],
+            row_to_task_note,
+        )?)
+    }
+
+    /// A task's notes, oldest first. `NotFound` for an unknown task.
+    pub fn list_task_notes(&self, task_id: i64) -> Result<Vec<TaskNote>> {
+        self.get_task(task_id)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, task_id, body, session, created_at FROM task_notes \
+             WHERE task_id = ?1 ORDER BY id",
+        )?;
+        let rows = stmt.query_map([task_id], row_to_task_note)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Writes the whole receipt for `r.task_id`, replacing any existing one
@@ -5629,6 +5803,11 @@ impl Store {
     }
 
     #[cfg(test)]
+    pub(crate) fn exec_sql_for_test(&mut self, sql: &str, params: &[&dyn rusqlite::ToSql]) {
+        self.conn.execute(sql, params).unwrap();
+    }
+
+    #[cfg(test)]
     pub(crate) fn force_run_owner_for_test(&mut self, run: i64, pid: i64) {
         self.conn
             .execute(
@@ -5959,6 +6138,37 @@ impl Store {
                 ),
                 [],
                 row_to_live_session,
+            )
+            .optional()?)
+    }
+
+    /// The newest **ended** conversation with an id below `before`, or `None`
+    /// — the one a fresh spawn recalls the unanswered questions of (naru task
+    /// 1723).
+    pub fn previous_ended_live_session(&self, before: i64) -> Result<Option<LiveSession>> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT {LIVE_SESSION_COLUMNS} FROM live_sessions \
+                     WHERE status = ?1 AND id < ?2 ORDER BY id DESC LIMIT 1"
+                ),
+                (LiveStatus::Ended.as_str(), before),
+                row_to_live_session,
+            )
+            .optional()?)
+    }
+
+    /// When the newest **ended** conversation ended, or `None` (naru task
+    /// 1725's `--since auto`).
+    pub fn latest_ended_live_at(&self) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT ended_at FROM live_sessions WHERE status = ?1 AND ended_at IS NOT NULL \
+                 ORDER BY ended_at DESC, id DESC LIMIT 1",
+                [LiveStatus::Ended.as_str()],
+                |r| r.get::<_, String>(0),
             )
             .optional()?)
     }
@@ -10375,6 +10585,122 @@ mod tests {
     }
 
     #[test]
+    fn task_digest_lists_outcomes_since_t_and_survives_refine_rows() {
+        let (mut store, _dir) = temp_store();
+        let p = store.create_project("p", None, None, None, None).unwrap();
+        let gone = store
+            .create_project("gone", None, None, None, None)
+            .unwrap();
+        let mk = |s: &mut Store, project: i64, d: &str| add_task(s, project, d).id;
+        let done = mk(&mut store, p.id, "done one");
+        let cancelled = mk(&mut store, p.id, "cancelled one");
+        let to_todo = mk(&mut store, p.id, "requeued todo");
+        let to_backlog = mk(&mut store, p.id, "requeued backlog");
+        let backlog_todo = mk(&mut store, p.id, "backlog to todo");
+        let started = mk(&mut store, p.id, "started");
+        let then_started = mk(&mut store, p.id, "requeued then restarted");
+        let archived = mk(&mut store, gone.id, "in an archived project");
+        let early = mk(&mut store, p.id, "done before T");
+        let refine = mk(&mut store, p.id, "old refine row");
+        let flapped = mk(&mut store, p.id, "requeued then moved around");
+        let rows = [
+            (done, "in_progress", "done", "done", "2026-10-02 00:00:03"),
+            (
+                cancelled,
+                "todo",
+                "cancelled",
+                "cancelled",
+                "2026-10-02 00:00:01",
+            ),
+            (
+                to_todo,
+                "in_progress",
+                "todo",
+                "todo",
+                "2026-10-02 00:00:02",
+            ),
+            (
+                to_backlog,
+                "in_progress",
+                "backlog",
+                "backlog",
+                "2026-10-02 00:00:04",
+            ),
+            (
+                backlog_todo,
+                "backlog",
+                "todo",
+                "todo",
+                "2026-10-02 00:00:05",
+            ),
+            (
+                started,
+                "todo",
+                "in_progress",
+                "in_progress",
+                "2026-10-02 00:00:06",
+            ),
+            (
+                then_started,
+                "in_progress",
+                "todo",
+                "in_progress",
+                "2026-10-02 00:00:07",
+            ),
+            (
+                archived,
+                "in_progress",
+                "done",
+                "done",
+                "2026-10-02 00:00:08",
+            ),
+            (early, "in_progress", "done", "done", "2026-09-30 23:59:59"),
+            (refine, "refine", "todo", "todo", "2026-10-02 00:00:09"),
+            // Newest event (todo -> ... -> todo) is not a requeue: excluded.
+            (
+                flapped,
+                "in_progress",
+                "todo",
+                "todo",
+                "2026-10-02 00:00:10",
+            ),
+            (flapped, "todo", "backlog", "backlog", "2026-10-02 00:00:11"),
+            (flapped, "backlog", "todo", "todo", "2026-10-02 00:00:12"),
+        ];
+        for (id, from, to, current, at) in rows {
+            store
+                .conn
+                .execute(
+                    "UPDATE tasks SET status=?2 WHERE id=?1",
+                    rusqlite::params![id, current],
+                )
+                .unwrap();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO task_events (task_id, from_status, to_status, at) \
+                     VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![id, from, to, at],
+                )
+                .unwrap();
+        }
+        store.archive_project(gone.id).unwrap();
+        let got = store.task_digest("2026-10-01 00:00:00").unwrap();
+        let ids: Vec<i64> = got.iter().map(|e| e.task_id).collect();
+        assert_eq!(ids, vec![cancelled, to_todo, done, to_backlog], "{got:?}");
+        assert_eq!(got[0].status, "cancelled");
+        assert_eq!(got[0].project_name, "p");
+        assert_eq!(got[0].name, "cancelled one");
+        // An ISO timestamp normalises to the same answer.
+        assert_eq!(store.task_digest("2026-10-01T00:00:00Z").unwrap(), got);
+        assert!(store.task_digest("2099-01-01 00:00:00").unwrap().is_empty());
+        assert!(matches!(
+            store.task_digest("garbage"),
+            Err(Error::Validation(_))
+        ));
+    }
+
+    #[test]
     fn cc_task_links_joins_existing_tasks_and_reads_outcomes() {
         let (mut store, _dir) = temp_store();
         let p = store.create_project("p", None, None, None, None).unwrap();
@@ -12001,6 +12327,70 @@ mod tests {
     }
 
     #[test]
+    fn task_notes_append_in_order_and_cascade() {
+        let (mut store, _dir) = temp_store();
+        let p = store.create_project("p", None, None, None, None).unwrap();
+        let t = add_task(&mut store, p.id, "task");
+        assert!(store.list_task_notes(t.id).unwrap().is_empty());
+        let a = store.add_task_note(t.id, "first", Some("sess-1")).unwrap();
+        let b = store.add_task_note(t.id, "second", Some("  ")).unwrap();
+        assert_eq!(a.session.as_deref(), Some("sess-1"));
+        assert_eq!(b.session, None);
+        let notes = store.list_task_notes(t.id).unwrap();
+        assert_eq!(notes, vec![a, b]);
+        assert_eq!(notes[1].body, "second");
+        store.delete_task(t.id).unwrap();
+        let left: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM task_notes", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 0);
+    }
+
+    #[test]
+    fn task_note_session_is_capped() {
+        let (mut store, _dir) = temp_store();
+        let p = store.create_project("p", None, None, None, None).unwrap();
+        let t = add_task(&mut store, p.id, "task");
+        let ok = "s".repeat(Store::TASK_NOTE_SESSION_MAX);
+        assert!(store.add_task_note(t.id, "hi", Some(&ok)).is_ok());
+        let long = "s".repeat(Store::TASK_NOTE_SESSION_MAX + 1);
+        assert!(matches!(
+            store.add_task_note(t.id, "hi", Some(&long)),
+            Err(Error::Validation(_))
+        ));
+    }
+
+    #[test]
+    fn task_notes_validate_and_need_a_task() {
+        let (mut store, _dir) = temp_store();
+        let p = store.create_project("p", None, None, None, None).unwrap();
+        let t = add_task(&mut store, p.id, "task");
+        assert!(matches!(
+            store.add_task_note(t.id, "  \n", None),
+            Err(Error::Validation(_))
+        ));
+        let long = "x".repeat(Store::TASK_NOTE_MAX + 1);
+        assert!(matches!(
+            store.add_task_note(t.id, &long, None),
+            Err(Error::Validation(_))
+        ));
+        assert!(
+            store
+                .add_task_note(t.id, &"x".repeat(Store::TASK_NOTE_MAX), None)
+                .is_ok()
+        );
+        assert!(matches!(
+            store.add_task_note(999, "hi", None),
+            Err(Error::NotFound(_))
+        ));
+        assert!(matches!(
+            store.list_task_notes(999),
+            Err(Error::NotFound(_))
+        ));
+    }
+
+    #[test]
     fn get_task_receipt_is_not_found_for_a_missing_task() {
         let (store, _dir) = temp_store();
         assert!(matches!(
@@ -12861,6 +13251,66 @@ mod tests {
             .map(|t| t.id)
             .collect();
         assert_eq!(ids, vec![t1.id, t2.id]);
+    }
+
+    #[test]
+    fn search_tasks_words_and_case_status_project_and_literal_percent() {
+        let (mut store, _dir) = temp_store();
+        let p1 = store.create_project("p1", None, None, None, None).unwrap();
+        let p2 = store.create_project("p2", None, None, None, None).unwrap();
+        let a = add_task(&mut store, p1.id, "Fix Login redirect bug");
+        let b = add_task(&mut store, p1.id, "Login page\nmentions 100% coverage");
+        let c = add_task(&mut store, p2.id, "Fix login timeout");
+        let w = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let ids = |v: Vec<Task>| v.iter().map(|t| t.id).collect::<Vec<_>>();
+
+        // Case-insensitive, every word must match (any order, any line).
+        let r = store.search_tasks(&w(&["LOGIN"]), None, &[]).unwrap();
+        assert_eq!(ids(r), vec![a.id, b.id, c.id]);
+        let r = store.search_tasks(&w(&["bug", "fix"]), None, &[]).unwrap();
+        assert_eq!(ids(r), vec![a.id]);
+        let r = store.search_tasks(&w(&["fix", "nope"]), None, &[]).unwrap();
+        assert!(r.is_empty());
+
+        // Project filter.
+        let r = store.search_tasks(&w(&["fix"]), Some(p2.id), &[]).unwrap();
+        assert_eq!(ids(r), vec![c.id]);
+
+        // Status filter.
+        store
+            .update_task(
+                a.id,
+                &TaskPatch {
+                    status: Some(Status::Done),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let r = store
+            .search_tasks(&w(&["login"]), None, &[Status::Done])
+            .unwrap();
+        assert_eq!(ids(r), vec![a.id]);
+        let r = store
+            .search_tasks(&w(&["login"]), None, &[Status::Done, Status::Todo])
+            .unwrap();
+        assert_eq!(ids(r), vec![a.id, b.id, c.id]);
+
+        // `%` and `_` are literal, not wildcards.
+        let r = store.search_tasks(&w(&["%"]), None, &[]).unwrap();
+        assert_eq!(ids(r), vec![b.id]);
+        assert!(
+            store
+                .search_tasks(&w(&["_"]), None, &[])
+                .unwrap()
+                .is_empty()
+        );
+
+        // Unscoped hides an archived project; scoped still sees it.
+        store.archive_project(p2.id).unwrap();
+        let r = store.search_tasks(&w(&["fix"]), None, &[]).unwrap();
+        assert_eq!(ids(r), vec![a.id]);
+        let r = store.search_tasks(&w(&["fix"]), Some(p2.id), &[]).unwrap();
+        assert_eq!(ids(r), vec![c.id]);
     }
 
     #[test]
@@ -15083,15 +15533,15 @@ mod tests {
         );
         assert_eq!(
             MIGRATIONS.len(),
-            85,
-            "a fresh db should report user_version 85"
+            86,
+            "a fresh db should report user_version 86"
         );
         let (store, _dir) = temp_store();
         let version: i64 = store
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 85);
+        assert_eq!(version, 86);
     }
 
     /// Workflows replace diagrams at migration 83 (mesa task 1607): a db that
@@ -15113,7 +15563,7 @@ mod tests {
         store
             .conn
             .execute_batch(
-                "DROP TABLE workflow_log; DROP TABLE workflow_runs; DROP TABLE workflow_edges; \
+                "DROP TABLE task_notes; DROP TABLE workflow_log; DROP TABLE workflow_runs; DROP TABLE workflow_edges; \
                  DROP TABLE workflow_nodes; DROP TABLE workflows; \
                  CREATE TABLE diagrams (id INTEGER PRIMARY KEY, title TEXT); \
                  INSERT INTO diagrams (title) VALUES ('stale'); \

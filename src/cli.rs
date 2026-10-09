@@ -31,7 +31,7 @@ use crate::core::{
     LibrarySyncStatus, LiveAction, LiveBoard, LiveBoardKind, LiveNotebookEntry, LiveNotice,
     LiveResult, LiveRole, LiveSession, LiveStatus, LiveSummary, LiveTurn, NextResult, Priority,
     Project, ProjectPatch, ReceiptPatch, Result, Script, ScriptArg, ScriptArgKind, ScriptPatch,
-    Status, Store, Task, TaskPatch, TaskReceipt, Workflow, WorkflowEdge, WorkflowNode,
+    Status, Store, Task, TaskNote, TaskPatch, TaskReceipt, Workflow, WorkflowEdge, WorkflowNode,
     WorkflowNodeKind, WorkflowNodeNew, WorkflowNodePatch, WorkflowPatch, WorkflowRun,
     WorkflowTrigger, WorkflowView, agents, audio, board, cc, config, files, git, library, live,
     look, memory_job, migrate, project_memory, receipt, system,
@@ -844,6 +844,27 @@ EXAMPLES
         #[arg(long, value_name = "TIMESTAMP")]
         updated_since: Option<String>,
     },
+    /// Find tasks whose description contains every WORD (case-insensitive)
+    ///
+    /// Each word is a literal substring of the task's description (its first
+    /// line is the name), so `%` and `_` match themselves. Prints a bare array
+    /// of compact objects, like `task list`; unscoped, an archived project's
+    /// tasks are hidden, `--project` still sees them.
+    #[command(after_help = "\
+EXAMPLES
+  mesa task search login redirect
+  mesa task search login --status todo --status in_progress --project mesa")]
+    Search {
+        /// Words that must all appear in the description
+        #[arg(value_name = "WORDS", required = true, num_args = 1..)]
+        words: Vec<String>,
+        /// Only tasks in this project (id or name)
+        #[arg(long)]
+        project: Option<String>,
+        /// Only tasks with this status (repeatable): backlog|todo|in_progress|done|cancelled
+        #[arg(long, value_parser = parse_status)]
+        status: Vec<Status>,
+    },
     /// Print the next actionable task (todo + unblocked) as a full JSON object
     ///
     /// Selection is deterministic: among actionable tasks (optionally scoped to
@@ -890,6 +911,10 @@ EXAMPLES
         quiet: bool,
     },
     /// Print one task as a full JSON object (includes description)
+    ///
+    /// Plain `show` also carries the task's `notes` (oldest first, in full);
+    /// `--quiet` omits them. `task delete` cascades the notes away and its
+    /// echo does not carry them.
     #[command(visible_alias = "get")]
     Show {
         /// Task id
@@ -902,6 +927,9 @@ EXAMPLES
     /// compact `task list` shape)
     ///
     /// Only the flags you pass change; at least one is required.
+    /// `--description` REPLACES the whole description: to add context to a
+    /// task, agents should prefer `task note <ID> <TEXT>` (append-only) over
+    /// rewriting the description.
     /// `--tags` REPLACES the full tag set (`--tags ""` clears it). The task's
     /// project cannot change, and neither its description can be cleared —
     /// it is the task's identity, so `--description ""` is a validation error.
@@ -923,10 +951,12 @@ EXAMPLES
     Update {
         /// Task id
         id: i64,
-        /// New description (replaces the body; cannot be emptied)
+        /// New description (REPLACES the whole body; cannot be emptied). To add
+        /// context, prefer `task note` — rewriting loses what you did not retype
         #[arg(long, group = "fields", allow_hyphen_values = true)]
         description: Option<String>,
         /// Read the new description from a file (`-` = stdin); conflicts with --description
+        /// (replaces the whole body; prefer `task note` to add context)
         #[arg(
             long,
             value_name = "PATH",
@@ -1007,6 +1037,36 @@ EXAMPLES
         ///
         /// The full echo is the recovery transcript that stands in for a
         /// confirmation prompt; `--quiet` waives it for this call.
+        #[arg(long)]
+        quiet: bool,
+    },
+    /// Append a note to a task (append-only; prints the created note)
+    ///
+    /// AGENTS: prefer this to `task update --description` when you want to
+    /// add context, a finding or a decision to a task. Rewriting the
+    /// description replaces it whole and loses whatever you did not retype;
+    /// a note is appended beside it and can never overwrite anything. Notes
+    /// cannot be edited or deleted. `task show` lists them, oldest first.
+    /// The session is taken from CLAUDE_CODE_SESSION_ID when set. Put flags
+    /// before the text. `--quiet` drops `body`.
+    #[command(after_help = "\
+EXAMPLES
+  mesa task note 3 the failing test is flaky, see run 12
+  mesa task note 3 --file notes.md      # `-` reads stdin
+  mesa task note 3 --quiet \"short ack\"")]
+    Note {
+        /// Task id
+        id: i64,
+        /// The note text (everything after the id); quoting is optional
+        #[arg(num_args = 0.., trailing_var_arg = true)]
+        text: Vec<String>,
+        /// Read the note from a file (`-` = stdin) instead of the text
+        #[arg(long, value_name = "PATH", conflicts_with = "text")]
+        file: Option<String>,
+        /// Session id to record; default is CLAUDE_CODE_SESSION_ID
+        #[arg(long)]
+        session: Option<String>,
+        /// Print the note without its `body`
         #[arg(long)]
         quiet: bool,
     },
@@ -1179,6 +1239,31 @@ EXAMPLES
     Events {
         /// Task id; omit for every task's events
         id: Option<i64>,
+    },
+    /// Print the tasks that finished, were cancelled or went back to todo/backlog since a time
+    ///
+    /// The "while you were away" digest (naru task 1725): one entry per task
+    /// whose newest done/cancelled/requeued event is at or after `--since` and
+    /// whose current status still matches it, oldest first. Prints
+    /// `{since, entries, text, notify}`. `--since auto` is when the newest
+    /// ended live conversation ended. `--notify` sends `text` through vox when
+    /// there is at least one entry (never for an empty digest); its links are
+    /// web-hash links under the base URL, so a phone needs `serve --lan`.
+    #[command(after_help = "\
+EXAMPLES
+  mesa task digest --since auto
+  mesa task digest --since 2026-10-08T21:00:00Z
+  mesa task digest --since auto --notify --base-url http://192.168.1.5:7770")]
+    Digest {
+        /// UTC timestamp (`YYYY-MM-DD HH:MM:SS` or ISO 8601) or `auto`
+        #[arg(long)]
+        since: String,
+        /// Send the digest through vox (Telegram) when it has entries
+        #[arg(long)]
+        notify: bool,
+        /// Base URL for the task links (default: as `naru notify`)
+        #[arg(long, value_name = "URL")]
+        base_url: Option<String>,
     },
     /// Fire the task-execute hook for a task; prints the run outcome
     ///
@@ -4197,6 +4282,15 @@ struct TaskOut<'a> {
     title: &'a str,
 }
 
+/// `task show`'s full output: the task as [`TaskOut`] plus its notes, oldest
+/// first (naru task 1724). Only `show` carries `notes`; `Task` never does.
+#[derive(serde::Serialize)]
+struct TaskShowOut<'a> {
+    #[serde(flatten)]
+    task: TaskOut<'a>,
+    notes: Vec<TaskNote>,
+}
+
 fn task_out(t: &Task) -> TaskOut<'_> {
     TaskOut {
         task: t,
@@ -4300,6 +4394,10 @@ const QUIET_DROP_LIVE_BOARD: &[&str] = &["body"];
 /// the branch/repo path, the summed `stat`, and the session link — is
 /// already bounded.
 const QUIET_DROP_RECEIPT: &[&str] = &["commits", "note"];
+
+/// A `TaskNote`'s one unbounded field is its `body` (naru task 1724); the
+/// id, task id, session and timestamp are bounded and stay.
+const QUIET_DROP_TASK_NOTE: &[&str] = &["body"];
 
 /// Quiet projection of one record: the serialized record minus `drop`ped keys.
 ///
@@ -5187,6 +5285,19 @@ fn run_task(cmd: TaskCmd) -> Result<()> {
                 .collect();
             print_json(&tasks);
         }
+        TaskCmd::Search {
+            words,
+            project,
+            status,
+        } => {
+            let project = resolve_project_opt(&store, project.as_deref())?;
+            let tasks: Vec<_> = store
+                .search_tasks(&words, project, &status)?
+                .iter()
+                .map(compact)
+                .collect();
+            print_json(&tasks);
+        }
         TaskCmd::Next {
             project_pos,
             project,
@@ -5222,7 +5333,35 @@ fn run_task(cmd: TaskCmd) -> Result<()> {
             };
             print_tasks(&store.import_tasks(&doc)?, quiet);
         }
-        TaskCmd::Show { id, quiet } => print_task(&store.get_task(id)?, quiet),
+        TaskCmd::Show { id, quiet } => {
+            let task = store.get_task(id)?;
+            if quiet {
+                // The compact shape is `task list`'s; notes are free text, so
+                // `--quiet` omits them (read them with `task show` plain).
+                print_task(&task, true);
+            } else {
+                print_json(&TaskShowOut {
+                    task: task_out(&task),
+                    notes: store.list_task_notes(id)?,
+                });
+            }
+        }
+        TaskCmd::Note {
+            id,
+            text,
+            file,
+            session,
+            quiet,
+        } => {
+            let body = if let Some(path) = file {
+                resolve_field(None, Some(path), &mut false)?.unwrap_or_default()
+            } else {
+                text.join(" ")
+            };
+            let session = session.or_else(|| std::env::var("CLAUDE_CODE_SESSION_ID").ok());
+            let note = store.add_task_note(id, &body, session.as_deref())?;
+            print_record(&note, quiet, QUIET_DROP_TASK_NOTE);
+        }
         TaskCmd::Update {
             id,
             description,
@@ -5359,6 +5498,55 @@ fn run_task(cmd: TaskCmd) -> Result<()> {
             }));
         }
         TaskCmd::Events { id } => print_json(&store.list_events(id)?),
+        TaskCmd::Digest {
+            since,
+            notify,
+            base_url,
+        } => {
+            let since = if since == "auto" {
+                store.latest_ended_live_at()?.ok_or_else(|| {
+                    Error::Validation("no ended live conversation; pass --since <timestamp>".into())
+                })?
+            } else {
+                since
+            };
+            let since = store.normalise_since(&since)?;
+            let entries = store.task_digest(&since)?;
+            let web_base = if notify && !entries.is_empty() {
+                Some(
+                    crate::core::notify::resolve_base(base_url.as_deref())?
+                        .trim_end_matches('/')
+                        .to_string(),
+                )
+            } else {
+                None
+            };
+            let lines = crate::core::live::digest_lines(&since, &entries, |e| {
+                format!(
+                    "{}/#/projects/{}/tasks/{}",
+                    web_base.as_deref().unwrap_or(""),
+                    e.project_id,
+                    e.task_id
+                )
+            });
+            let text = lines.join("\n");
+            let notify_out = if web_base.is_some() {
+                Some(crate::core::notify::send(
+                    &text,
+                    Some("While you were away"),
+                    None,
+                    base_url.as_deref(),
+                )?)
+            } else {
+                None
+            };
+            print_json(&json!({
+                "since": since,
+                "entries": entries,
+                "text": text,
+                "notify": notify_out,
+            }));
+        }
         TaskCmd::Execute { id } => {
             let task = store.get_task(id)?;
             let project_dir = store.get_project(task.project_id)?.local_path;
@@ -9042,6 +9230,42 @@ mod tests {
             ))),
             minus(&full, QUIET_DROP_LIVE_NOTEBOOK),
         );
+    }
+
+    #[test]
+    fn task_note_quiet_drops_body_only() {
+        let note = TaskNote {
+            id: 1,
+            task_id: 2,
+            body: "b".into(),
+            session: None,
+            created_at: "t".into(),
+        };
+        let full = keys(&note);
+        assert_eq!(
+            sorted_owned(full.clone()),
+            sorted(&["id", "task_id", "body", "session", "created_at"]),
+            "TaskNote gained/lost a field: decide whether it belongs in the \
+             --quiet shape before updating this list",
+        );
+        assert_eq!(
+            sorted_owned(value_keys(&quiet(&note, QUIET_DROP_TASK_NOTE))),
+            minus(&full, QUIET_DROP_TASK_NOTE),
+        );
+    }
+
+    #[test]
+    fn task_note_parses_trailing_text_and_file() {
+        let cli = Cli::try_parse_from(["naru", "task", "note", "3", "a", "b", "--c"]).unwrap();
+        let Command::Task(cmd) = cli.command else {
+            panic!("not task")
+        };
+        let TaskCmd::Note { id, text, .. } = cmd else {
+            panic!("not note")
+        };
+        assert_eq!((id, text.join(" ")), (3, "a b --c".to_string()));
+        assert!(Cli::try_parse_from(["naru", "task", "note", "3", "--file", "-"]).is_ok());
+        assert!(Cli::try_parse_from(["naru", "task", "note", "3", "--file", "-", "x"]).is_err());
     }
 
     #[test]
