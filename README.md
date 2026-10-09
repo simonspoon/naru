@@ -52,6 +52,9 @@ naru serve
 Then open <http://127.0.0.1:7770>. The server binds to your machine only by
 default; `--port <PORT>` changes the port.
 
+With the Homebrew install, you can run the server in the background instead:
+`brew services start naru`, then open <http://127.0.0.1:7770>.
+
 ```bash
 naru serve --lan                           # also reachable from other devices on your network
 naru serve --lan --allow-host naru.local   # ...and by that hostname
