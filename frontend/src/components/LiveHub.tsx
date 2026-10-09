@@ -763,7 +763,10 @@ export function LiveHub({
   const session = data?.session ?? null
   const live = isLive(session)
   const offer = data?.offer ?? null
-  const glowing = offerGlows(offer, live)
+  // The native host, decided once (see below where it matters most). The
+  // ambient "can help" offer is the Mac app's: a plain browser never glows.
+  const [native] = useState(() => detectNativeHost(window as unknown as Record<string, unknown>))
+  const glowing = native !== null && offerGlows(offer, live)
 
   // The live section of `~/.mesa/config.json`, for the one value this page
   // reads out of it: how long the person may fall silent before a
@@ -1010,7 +1013,6 @@ export function LiveHub({
   // owns the microphone. Decided once; `null` in every plain browser, where
   // every branch below on it is skipped and nothing changes. When present the
   // page opens no `getUserMedia` anywhere and `muted` is what the host reports.
-  const [native] = useState(() => detectNativeHost(window as unknown as Record<string, unknown>))
   // The engine still guessing. Shown, and sent only as the tail of a flush
   // (`liveRecognition.ts`). The ref is what the listen switch reads: it flips
   // from a press, outside the render that last set this.
