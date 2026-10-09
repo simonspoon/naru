@@ -2400,7 +2400,7 @@ flag is an unknown argument, exit 2, exactly as on `turns`.
 | `live notice permission` | `--quiet`; takes no `--lease` (not the agent's verb — the page's, mesa task 1157) | the notice `LiveTurn`, created or the existing one for this working span |
 | `live turns` | `--after <ID>`, `--limit <N>` (clamped to 1..=500) | a bare array of turns, oldest first |
 | `live look` | `--output <PATH>` (default: a temp file named for the session) | the `LiveShot`: `path`, `window_id`, `width`, `height` |
-| `live board push [BODY]…` | exactly one source (body, `--file`, `--image`, `--workflow`), `--template table|cards|flow` (JSON body or `--file`), `--kind`, `--title`, `--say` — put every flag **before** the body | the created `LiveBoard` |
+| `live board push [BODY]…` | exactly one source (body, `--file`, `--image`, `--workflow`), `--template table\|cards\|flow` (JSON body or `--file`), `--kind`, `--title`, `--say` — put every flag **before** the body | the created `LiveBoard` |
 | `live board show [ID]` (alias `get`) | without an ID, the board that is showing | one `LiveBoard` |
 | `live board list` | `--limit <N>` (clamped to 1..=20) | a bare array of bodiless summaries, oldest first |
 | `live board clear` | — | the summaries it destroyed |

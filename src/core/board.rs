@@ -400,8 +400,23 @@ fn text_of(v: &serde_json::Value) -> Option<String> {
     }
 }
 
-fn opt_text(obj: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<String> {
-    obj.get(key).and_then(text_of).filter(|s| !s.is_empty())
+/// An optional text field: absent, `null` and `""` are none; a string or
+/// number is text; anything else is refused rather than silently dropped.
+fn opt_text(
+    template: &str,
+    obj: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Result<Option<String>> {
+    match obj.get(key) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(v) => match text_of(v) {
+            Some(s) => Ok(Some(s).filter(|s| !s.is_empty())),
+            None => Err(bad(
+                template,
+                &format!("\"{key}\" must be a string or number"),
+            )),
+        },
+    }
 }
 
 fn table_body(v: &serde_json::Value) -> Result<String> {
@@ -489,14 +504,14 @@ fn cards_body(v: &serde_json::Value) -> Result<String> {
         let obj = c
             .as_object()
             .ok_or_else(|| bad("cards", &format!("card {} is not an object", i + 1)))?;
-        let title = opt_text(obj, "title")
+        let title = opt_text("cards", obj, "title")?
             .ok_or_else(|| bad("cards", &format!("card {} has no \"title\"", i + 1)))?;
         out.push_str("<div class=\"card\">");
-        if let Some(tag) = opt_text(obj, "tag") {
+        if let Some(tag) = opt_text("cards", obj, "tag")? {
             out.push_str(&format!("<span class=\"tag\">{}</span>", escape(&tag)));
         }
         out.push_str(&format!("<h2>{}</h2>", escape(&title)));
-        if let Some(body) = opt_text(obj, "body") {
+        if let Some(body) = opt_text("cards", obj, "body")? {
             out.push_str(&format!("<p>{}</p>", escape(&body)));
         }
         out.push_str("</div>");
@@ -509,11 +524,14 @@ fn flow_body(v: &serde_json::Value) -> Result<String> {
     let mut out = String::from("<div class=\"flow\">");
     for (i, s) in items("flow", v, "steps")?.iter().enumerate() {
         let (title, detail) = match s {
-            serde_json::Value::String(t) if !t.is_empty() => (t.clone(), None),
+            serde_json::Value::String(t) if t.is_empty() => {
+                return Err(bad("flow", &format!("step {} is empty", i + 1)));
+            }
+            serde_json::Value::String(t) => (t.clone(), None),
             serde_json::Value::Object(o) => (
-                opt_text(o, "title")
+                opt_text("flow", o, "title")?
                     .ok_or_else(|| bad("flow", &format!("step {} has no \"title\"", i + 1)))?,
-                opt_text(o, "detail"),
+                opt_text("flow", o, "detail")?,
             ),
             _ => {
                 return Err(bad(
@@ -832,6 +850,23 @@ mod tests {
     }
 
     #[test]
+    fn optional_fields_refuse_non_text_but_allow_null() {
+        let Err(Error::Validation(m)) = template_html("cards", r#"[{"title":"x","body":["a"]}]"#)
+        else {
+            panic!("expected validation");
+        };
+        assert!(
+            m.contains("--template cards") && m.contains("\"body\""),
+            "{m}"
+        );
+        let Err(Error::Validation(m)) = template_html("flow", r#"["A",""]"#) else {
+            panic!("expected validation");
+        };
+        assert!(m.contains("step 2 is empty"), "{m}");
+        assert!(template_html("cards", r#"[{"title":"x","body":null,"tag":null}]"#).is_ok());
+    }
+
+    #[test]
     fn templates_refuse_bad_input_naming_the_template() {
         let cases = [
             ("table", "not json"),
@@ -845,6 +880,10 @@ mod tests {
             ("flow", r#"{"steps":[]}"#),
             ("flow", r#"{"steps":[{"detail":"no title"}]}"#),
             ("flow", r#"{"steps":[3]}"#),
+            ("flow", r#"["A",""]"#),
+            ("flow", r#"[{"title":"x","detail":["a"]}]"#),
+            ("cards", r#"[{"title":"x","body":["a"]}]"#),
+            ("cards", r#"[{"title":"x","tag":{"a":1}}]"#),
             ("flow", r#"{"nope":1}"#),
         ];
         for (t, input) in cases {
