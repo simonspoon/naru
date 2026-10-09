@@ -2883,7 +2883,7 @@ pub const VOCABULARY_MAX_TERMS: usize = 128;
 /// The longest one term may be, in bytes.
 const VOCABULARY_MAX_TERM_BYTES: usize = 64;
 /// The largest boost, inclusive; the smallest is anything above 0.
-const VOCABULARY_MAX_BOOST: f64 = 8.0;
+const VOCABULARY_MAX_BOOST: f32 = 8.0;
 
 /// Checks a vocabulary against naru-audio's `hotwords` grammar and returns
 /// the number of terms. One `term[ :boost]` per line; `#` starts a comment
@@ -2916,7 +2916,7 @@ pub fn validate_vocabulary(text: &str) -> Result<usize, String> {
             }
         }
         if let Some(boost) = boost {
-            let value: f64 = boost
+            let value: f32 = boost
                 .parse()
                 .map_err(|_| bad(format!("the boost {boost:?} is not a number")))?;
             if value.is_nan() || value <= 0.0 || value > VOCABULARY_MAX_BOOST {
@@ -2957,12 +2957,16 @@ pub fn validate_vocabulary(text: &str) -> Result<usize, String> {
 /// magic string. An empty `models` is "mesa could not ask the binary" — the
 /// editor still has to accept a typed name then.
 pub fn listen() -> Result<ConfigListen, String> {
-    listen_in(&config_file())
+    let (hotword_models, default_model) = listen::hotword_support();
+    listen_in(&config_file(), hotword_models, default_model)
 }
 
-fn listen_in(path: &Path) -> Result<ConfigListen, String> {
+fn listen_in(
+    path: &Path,
+    hotword_models: Vec<String>,
+    default_model: Option<String>,
+) -> Result<ConfigListen, String> {
     let section = read_listen(path)?;
-    let (hotword_models, default_model) = listen::hotword_support();
     Ok(ConfigListen {
         // The **raw** stored value, not the filtered one [`listen_model_in`]
         // hands the recognizer: a hand-edited nonsense model must reach the
@@ -7089,6 +7093,7 @@ mod tests {
             ("Naru :-1", "must be above 0"),
             ("Naru :8.5", "must be above 0 and at most 8"),
             ("Naru :NaN", "must be above 0"),
+            ("Naru :1e-50", "must be above 0"),
             ("Naru :inf", "must be above 0"),
             (
                 "a\u{7}b",
@@ -7171,7 +7176,7 @@ mod tests {
             listen_model_in(&path).unwrap().as_deref(),
             Some("parakeet-tdt-0.6b-v2-int8")
         );
-        let view = listen_in(&path).unwrap();
+        let view = listen_in(&path, vec![], None).unwrap();
         assert_eq!(view.model.as_deref(), Some("parakeet-tdt-0.6b-v2-int8"));
 
         // `null` and blank both remove the key — the reset, expressed by
@@ -7265,7 +7270,7 @@ mod tests {
         let path = write_config(dir.path(), r#"{"listen": {"model": "--output /tmp/x"}}"#);
         assert_eq!(listen_model_in(&path).unwrap(), None);
         assert_eq!(
-            listen_in(&path).unwrap().model.as_deref(),
+            listen_in(&path, vec![], None).unwrap().model.as_deref(),
             Some("--output /tmp/x")
         );
     }
@@ -7276,7 +7281,7 @@ mod tests {
         let path = write_config(dir.path(), "not json");
         let err = listen_model_in(&path).unwrap_err();
         assert!(err.contains("malformed mesa config"), "{err}");
-        assert!(listen_in(&path).is_err());
+        assert!(listen_in(&path, vec![], None).is_err());
         let err = save_listen_in(
             &path,
             &model_update(&[(MODEL, Some("parakeet-tdt-0.6b-v2-int8"))]),
@@ -7294,12 +7299,15 @@ mod tests {
     fn listen_engine_round_trips_and_refuses_an_unknown_word_without_writing() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
-        let view = listen_in(&path).unwrap();
+        let view = listen_in(&path, vec![], None).unwrap();
         assert_eq!(view.engine, None);
         assert_eq!(view.engine_default, "server");
 
         save_listen_in(&path, &model_update(&[(ENGINE, Some("browser"))]), &[]).unwrap();
-        assert_eq!(listen_in(&path).unwrap().engine.as_deref(), Some("browser"));
+        assert_eq!(
+            listen_in(&path, vec![], None).unwrap().engine.as_deref(),
+            Some("browser")
+        );
 
         let before = std::fs::read_to_string(&path).unwrap();
         for bad in ["auris", "Server", "none"] {

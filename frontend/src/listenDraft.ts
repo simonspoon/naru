@@ -179,7 +179,8 @@ export function vocabularyError(text: string): string | null {
       }
     }
     if (boost !== null) {
-      const value = boost === '' ? NaN : Number(boost)
+      // f32, like the daemon: 1e-50 underflows to 0 there.
+      const value = boost === '' ? NaN : Math.fround(Number(boost))
       if (Number.isNaN(value)) return fail(`the boost "${boost}" is not a number`)
       if (value <= 0 || value > VOCABULARY_MAX_BOOST) {
         return fail(`the boost "${boost}" must be above 0 and at most ${VOCABULARY_MAX_BOOST}`)

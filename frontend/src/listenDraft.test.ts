@@ -177,6 +177,7 @@ describe('vocabulary', () => {
     expect(vocabularyError('\n:4')).toBe('line 2: a stray ":" where the term should be')
     expect(vocabularyError('Naru :0')).toContain('must be above 0 and at most 8')
     expect(vocabularyError('Naru :8.5')).toContain('must be above 0 and at most 8')
+    expect(vocabularyError('Naru :1e-50')).toContain('must be above 0')
     expect(vocabularyError('Naru :')).toContain('is not a number')
     expect(vocabularyError('a\u0007b')).toContain('control character')
   })
