@@ -208,6 +208,19 @@ run 0 "$MESA" task list --project "$P" --tags design
 [ "$(jqs '.[0].id')" = "$T1" ] || fail "list --tags alias: wrong task"
 ok "task list --tags is an alias for --tag"
 
+run 0 "$MESA" task search DESIGN LAYOUT --project "$P"
+[ "$(jqs type)" = "array" ] || fail "search: must be a bare array"
+[ "$(jqs length)" = "1" ] || fail "search: expected 1 match for DESIGN LAYOUT"
+[ "$(jqs '.[0].id')" = "$T1" ] || fail "search: wrong task"
+[ "$(jqs 'any(.[]; has("description"))')" = "false" ] || fail "search: compact objects must omit description"
+run 0 "$MESA" task search design nonexistentword --project "$P"
+[ "$(jqs length)" = "0" ] || fail "search: every word must match"
+run 0 "$MESA" task search design --project "$P" --status done
+[ "$(jqs length)" = "0" ] || fail "search --status: expected 0 done"
+run 0 "$MESA" task search '%' --project "$P"
+[ "$(jqs length)" = "0" ] || fail "search: % must be literal"
+ok "task search: AND words, case-insensitive, --status/--project, literal %"
+
 run 0 "$MESA" task list --parent "$T3"
 [ "$(jqs length)" = "1" ] || fail "list --parent: expected 1"
 [ "$(jqs '.[0].parent_id')" = "$T3" ] || fail "list --parent: wrong task"

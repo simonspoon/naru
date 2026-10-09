@@ -3962,6 +3962,47 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Tasks whose description contains every one of `words` as a literal,
+    /// case-insensitive substring (a task's `name` is the first line of its
+    /// description, so the description covers both). `instr(lower(..))`, not
+    /// `LIKE`, so `%` and `_` in a word are plain characters. Scoping and the
+    /// archived-project rule are `list_tasks`'s; `statuses` empty = any.
+    pub fn search_tasks(
+        &self,
+        words: &[String],
+        project: Option<i64>,
+        statuses: &[Status],
+    ) -> Result<Vec<Task>> {
+        let mut sql = format!(
+            "{HIDDEN_PROJECTS_CTE}SELECT {TASK_COLUMNS} FROM tasks t \
+             JOIN projects p ON p.id = t.project_id \
+             WHERE (?1 IS NULL OR t.project_id = ?1) \
+             AND (?1 IS NOT NULL OR {NOT_HIDDEN_PROJECT})"
+        );
+        let mut params: Vec<rusqlite::types::Value> = vec![project.into()];
+        for word in words {
+            params.push(word.to_lowercase().into());
+            sql.push_str(&format!(
+                " AND instr(lower(t.description), ?{}) > 0",
+                params.len()
+            ));
+        }
+        if !statuses.is_empty() {
+            let marks: Vec<String> = statuses
+                .iter()
+                .map(|s| {
+                    params.push(s.as_str().to_string().into());
+                    format!("?{}", params.len())
+                })
+                .collect();
+            sql.push_str(&format!(" AND t.status IN ({})", marks.join(",")));
+        }
+        sql.push_str(" ORDER BY t.sort_order, t.id");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params), row_to_task)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     pub fn update_task(&mut self, id: i64, patch: &TaskPatch) -> Result<Task> {
         let mut task = self.get_task(id)?;
         let old_status = task.status;
@@ -12861,6 +12902,66 @@ mod tests {
             .map(|t| t.id)
             .collect();
         assert_eq!(ids, vec![t1.id, t2.id]);
+    }
+
+    #[test]
+    fn search_tasks_words_and_case_status_project_and_literal_percent() {
+        let (mut store, _dir) = temp_store();
+        let p1 = store.create_project("p1", None, None, None, None).unwrap();
+        let p2 = store.create_project("p2", None, None, None, None).unwrap();
+        let a = add_task(&mut store, p1.id, "Fix Login redirect bug");
+        let b = add_task(&mut store, p1.id, "Login page\nmentions 100% coverage");
+        let c = add_task(&mut store, p2.id, "Fix login timeout");
+        let w = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let ids = |v: Vec<Task>| v.iter().map(|t| t.id).collect::<Vec<_>>();
+
+        // Case-insensitive, every word must match (any order, any line).
+        let r = store.search_tasks(&w(&["LOGIN"]), None, &[]).unwrap();
+        assert_eq!(ids(r), vec![a.id, b.id, c.id]);
+        let r = store.search_tasks(&w(&["bug", "fix"]), None, &[]).unwrap();
+        assert_eq!(ids(r), vec![a.id]);
+        let r = store.search_tasks(&w(&["fix", "nope"]), None, &[]).unwrap();
+        assert!(r.is_empty());
+
+        // Project filter.
+        let r = store.search_tasks(&w(&["fix"]), Some(p2.id), &[]).unwrap();
+        assert_eq!(ids(r), vec![c.id]);
+
+        // Status filter.
+        store
+            .update_task(
+                a.id,
+                &TaskPatch {
+                    status: Some(Status::Done),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let r = store
+            .search_tasks(&w(&["login"]), None, &[Status::Done])
+            .unwrap();
+        assert_eq!(ids(r), vec![a.id]);
+        let r = store
+            .search_tasks(&w(&["login"]), None, &[Status::Done, Status::Todo])
+            .unwrap();
+        assert_eq!(ids(r), vec![a.id, b.id, c.id]);
+
+        // `%` and `_` are literal, not wildcards.
+        let r = store.search_tasks(&w(&["%"]), None, &[]).unwrap();
+        assert_eq!(ids(r), vec![b.id]);
+        assert!(
+            store
+                .search_tasks(&w(&["_"]), None, &[])
+                .unwrap()
+                .is_empty()
+        );
+
+        // Unscoped hides an archived project; scoped still sees it.
+        store.archive_project(p2.id).unwrap();
+        let r = store.search_tasks(&w(&["fix"]), None, &[]).unwrap();
+        assert_eq!(ids(r), vec![a.id]);
+        let r = store.search_tasks(&w(&["fix"]), Some(p2.id), &[]).unwrap();
+        assert_eq!(ids(r), vec![c.id]);
     }
 
     #[test]

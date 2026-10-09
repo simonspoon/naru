@@ -844,6 +844,27 @@ EXAMPLES
         #[arg(long, value_name = "TIMESTAMP")]
         updated_since: Option<String>,
     },
+    /// Find tasks whose description contains every WORD (case-insensitive)
+    ///
+    /// Each word is a literal substring of the task's description (its first
+    /// line is the name), so `%` and `_` match themselves. Prints a bare array
+    /// of compact objects, like `task list`; unscoped, an archived project's
+    /// tasks are hidden, `--project` still sees them.
+    #[command(after_help = "\
+EXAMPLES
+  mesa task search login redirect
+  mesa task search login --status todo --status in_progress --project mesa")]
+    Search {
+        /// Words that must all appear in the description
+        #[arg(value_name = "WORDS", required = true, num_args = 1..)]
+        words: Vec<String>,
+        /// Only tasks in this project (id or name)
+        #[arg(long)]
+        project: Option<String>,
+        /// Only tasks with this status (repeatable): backlog|todo|in_progress|done|cancelled
+        #[arg(long, value_parser = parse_status)]
+        status: Vec<Status>,
+    },
     /// Print the next actionable task (todo + unblocked) as a full JSON object
     ///
     /// Selection is deterministic: among actionable tasks (optionally scoped to
@@ -5164,6 +5185,19 @@ fn run_task(cmd: TaskCmd) -> Result<()> {
                         .is_none_or(|cutoff| t.claimed_at.as_ref().is_some_and(|at| at <= cutoff))
                 })
                 .filter(|t| updated_since.as_ref().is_none_or(|b| t.updated_at >= *b))
+                .map(compact)
+                .collect();
+            print_json(&tasks);
+        }
+        TaskCmd::Search {
+            words,
+            project,
+            status,
+        } => {
+            let project = resolve_project_opt(&store, project.as_deref())?;
+            let tasks: Vec<_> = store
+                .search_tasks(&words, project, &status)?
+                .iter()
                 .map(compact)
                 .collect();
             print_json(&tasks);

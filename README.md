@@ -218,6 +218,10 @@ naru task create "Website redesign" "Draft homepage copy" --tags writing,web
 # Open, unblocked tasks
 naru task list "Website redesign" --status todo --unblocked
 
+# Find tasks by words in their description (all words, case-insensitive,
+# literal substrings); same compact array as `task list`
+naru task search homepage copy --status todo --project "Website redesign"
+
 # Task 2 is blocked by task 1, and "why is it blocked?"
 naru task block 2 --by 1
 naru task deps 2
