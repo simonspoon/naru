@@ -15659,11 +15659,13 @@ mod tests {
         );
         let (store, dir) = temp_store();
         let path = dir.path().join("test.db");
-        // Rewind to user_version 83: workflow tables gone, a diagram present.
+        // Rewind to user_version 83: workflow tables gone, a diagram present,
+        // and everything a later migration added undone (task_notes, and the
+        // pinned_at column — replaying 84+ would otherwise collide with it).
         store
             .conn
             .execute_batch(
-                "DROP TABLE task_notes; DROP TABLE workflow_log; DROP TABLE workflow_runs; DROP TABLE workflow_edges; \
+                "DROP TABLE task_notes; ALTER TABLE live_boards DROP COLUMN pinned_at; DROP TABLE workflow_log; DROP TABLE workflow_runs; DROP TABLE workflow_edges; \
                  DROP TABLE workflow_nodes; DROP TABLE workflows; \
                  CREATE TABLE diagrams (id INTEGER PRIMARY KEY, title TEXT); \
                  INSERT INTO diagrams (title) VALUES ('stale'); \

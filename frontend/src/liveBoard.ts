@@ -258,13 +258,30 @@ export function mergeBoards(
   for (const board of poll) byId.set(board.id, board)
   for (const board of history.pinned) byId.set(board.id, board)
   for (const board of history.boards) byId.set(board.id, board)
-  return [...byId.values()].sort((a, b) => a.id - b.id)
+  // The freshly fetched pinned list is authoritative for pin state: rows on
+  // older loaded pages (and the poll's copies) are only as fresh as the page
+  // they came from.
+  const pinnedAt = new Map(history.pinned.map((b) => [b.id, b.pinned_at]))
+  return [...byId.values()]
+    .map((b) => {
+      const at = pinnedAt.get(b.id) ?? null
+      return b.pinned_at === at ? b : { ...b, pinned_at: at }
+    })
+    .sort((a, b) => a.id - b.id)
 }
 
-/** The oldest loaded history board's id: the `before` cursor for the next page. */
-export function olderCursor(history: BoardHistory): number | null {
+/**
+ * The `before` cursor for the next page: the oldest board id the panel is
+ * showing, ignoring pinned-only rows (a pin can be far older than anything
+ * loaded and would skip every board between). The poll's boards count, so
+ * "more" never re-fetches what is already visible.
+ */
+export function olderCursor(
+  history: BoardHistory,
+  poll: readonly LiveBoardSummary[] = [],
+): number | null {
   let oldest: number | null = null
-  for (const board of history.boards) {
+  for (const board of [...history.boards, ...poll]) {
     if (oldest === null || board.id < oldest) oldest = board.id
   }
   return oldest
@@ -281,8 +298,12 @@ export function foldFirstPage(prev: BoardHistory, page: LiveBoardHistoryPage): B
     (min, b) => (min === null || b.id < min ? b.id : min),
     null,
   )
+  // A page that says nothing older exists is the whole history: whatever
+  // older rows were loaded before were cleared since, and their render 404s.
   const kept =
-    pageOldest === null ? [] : prev.boards.filter((b) => b.id < pageOldest)
+    pageOldest === null || !page.has_more
+      ? []
+      : prev.boards.filter((b) => b.id < pageOldest)
   return {
     boards: [...kept, ...page.boards],
     pinned: page.pinned,

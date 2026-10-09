@@ -1376,11 +1376,13 @@ export function LiveHub({
     loadFirstBoardPage()
   }, [loadFirstBoardPage, pollNewest, live])
   const boardHistoryRef = useRef(boardHistory)
+  const pollBoardsRef = useRef(boards)
   useEffect(() => {
     boardHistoryRef.current = boardHistory
-  }, [boardHistory])
+    pollBoardsRef.current = boards
+  }, [boardHistory, boards])
   const moreBoards = useCallback(() => {
-    const before = olderCursor(boardHistoryRef.current)
+    const before = olderCursor(boardHistoryRef.current, pollBoardsRef.current)
     if (before === null) return
     getLiveBoardHistory(before).then(
       (page) => setBoardHistory((prev) => foldOlderPage(prev, page)),

@@ -250,9 +250,9 @@ describe('the global history', () => {
     expect(merged.map((b) => b.id)).toEqual([2, 7, 8, 9, 10])
   })
 
-  it('prefers the history row over a lagging poll row', () => {
+  it('takes pin state from the fresh pinned list over a lagging poll row', () => {
     const merged = mergeBoards(
-      { boards: [board(5, { pinned_at: 'now' })], pinned: [] },
+      { boards: [board(5)], pinned: [board(5, { pinned_at: 'now' })] },
       [board(5)],
     )
     expect(merged[0].pinned_at).toBe('now')
@@ -288,5 +288,26 @@ describe('the global history', () => {
     expect(retargetBoardView({ index: 0, seen: 10 }, prev, next)).toEqual({ index: 2, seen: 10 })
     expect(retargetBoardView({ index: 1, seen: 10 }, prev, next).index).toBe(3)
     expect(retargetBoardView({ index: null, seen: null }, [], next).index).toBeNull()
+  })
+
+  it('pin and unpin of an older-page board show through the merge', () => {
+    const older = { boards: [board(10), board(5)], pinned: [], hasMore: true }
+    const pinned = mergeBoards({ ...older, pinned: [board(5, { pinned_at: 'now' })] }, [])
+    expect(pinned.find((b) => b.id === 5)?.pinned_at).toBe('now')
+    const unpinned = mergeBoards({ ...older, boards: [board(10), board(5, { pinned_at: 'now' })], pinned: [] }, [])
+    expect(unpinned.find((b) => b.id === 5)?.pinned_at).toBeNull()
+  })
+
+  it('the older cursor counts the poll and ignores pinned-only rows', () => {
+    const h = { boards: [board(30), board(25)], pinned: [board(2)], hasMore: true }
+    expect(olderCursor(h)).toBe(25)
+    expect(olderCursor(h, [board(18), board(19)])).toBe(18)
+    expect(olderCursor({ ...h, boards: [] }, [])).toBeNull()
+  })
+
+  it('a first page that is the whole history drops cleared older rows', () => {
+    const prev = { boards: [board(10), board(9), board(5)], pinned: [], hasMore: true }
+    const h = foldFirstPage(prev, { boards: [board(11)], pinned: [], has_more: false })
+    expect(h.boards.map((b) => b.id)).toEqual([11])
   })
 })
