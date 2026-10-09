@@ -1525,7 +1525,11 @@ export function saveVoiceEnrollment(audioBase64: string): Promise<VoiceEnrollmen
 
 /** Removes the recording and the enrollment, turning the voice guard off. */
 export function deleteVoiceEnrollment(): Promise<VoiceEnrollment> {
-  return request('/api/config/voice-enrollment', { method: 'DELETE' })
+  // The server's mutating-request gate wants a JSON Content-Type even with no body.
+  return request('/api/config/voice-enrollment', {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+  })
 }
 
 /**
