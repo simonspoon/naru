@@ -1259,8 +1259,10 @@ pub struct TaskEvent {
     pub id: i64,
     #[ts(type = "number")]
     pub task_id: i64,
-    pub from_status: Option<Status>,
-    pub to_status: Status,
+    /// Raw status text, not `Status`: old rows hold retired statuses (`refine`)
+    /// that no longer parse, and an event must still list them as written.
+    pub from_status: Option<String>,
+    pub to_status: String,
     /// When the change happened (SQLite `datetime` text, UTC).
     pub at: String,
 }

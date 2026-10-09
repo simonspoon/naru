@@ -1472,8 +1472,8 @@ fn row_to_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskEvent> {
     Ok(TaskEvent {
         id: row.get(0)?,
         task_id: row.get(1)?,
-        from_status: from_status.map(|s| Status::parse(&s).expect("invalid status in db")),
-        to_status: Status::parse(&to_status).expect("invalid status in db"),
+        from_status,
+        to_status,
         at: row.get(4)?,
     })
 }
@@ -11646,7 +11646,10 @@ mod tests {
         );
         // The status move is recorded like any other.
         let events = store.list_events(Some(t.id)).unwrap();
-        assert_eq!(events.last().unwrap().to_status, Status::InProgress);
+        assert_eq!(
+            events.last().unwrap().to_status,
+            Status::InProgress.as_str()
+        );
     }
 
     #[test]
@@ -12175,7 +12178,7 @@ mod tests {
         let events = store.list_events(Some(t.id)).unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].from_status, None);
-        assert_eq!(events[0].to_status, Status::InProgress);
+        assert_eq!(events[0].to_status, Status::InProgress.as_str());
 
         // None preserves the schema default (todo).
         let d = store
@@ -12877,7 +12880,7 @@ mod tests {
         let events = store.list_events(Some(t.id)).unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].from_status, None);
-        assert_eq!(events[0].to_status, Status::Todo);
+        assert_eq!(events[0].to_status, Status::Todo.as_str());
 
         // Two real status changes -> two more events.
         store
@@ -12901,10 +12904,39 @@ mod tests {
 
         let events = store.list_events(Some(t.id)).unwrap();
         assert_eq!(events.len(), 3);
-        assert_eq!(events[1].from_status, Some(Status::Todo));
-        assert_eq!(events[1].to_status, Status::InProgress);
-        assert_eq!(events[2].from_status, Some(Status::InProgress));
-        assert_eq!(events[2].to_status, Status::Done);
+        assert_eq!(
+            events[1].from_status.as_deref(),
+            Some(Status::Todo.as_str())
+        );
+        assert_eq!(events[1].to_status, Status::InProgress.as_str());
+        assert_eq!(
+            events[2].from_status.as_deref(),
+            Some(Status::InProgress.as_str())
+        );
+        assert_eq!(events[2].to_status, Status::Done.as_str());
+    }
+
+    #[test]
+    fn list_events_keeps_a_retired_status_as_written() {
+        let (mut store, _dir) = temp_store();
+        let p = store.create_project("p", None, None, None, None).unwrap();
+        let t = add_task(&mut store, p.id, "t");
+        store
+            .conn
+            .execute(
+                "INSERT INTO task_events (task_id, from_status, to_status, at) \
+                 VALUES (?1, 'refine', 'refine', datetime('now'))",
+                [t.id],
+            )
+            .unwrap();
+        for events in [
+            store.list_events(None).unwrap(),
+            store.list_events(Some(t.id)).unwrap(),
+        ] {
+            let last = events.last().unwrap();
+            assert_eq!(last.from_status.as_deref(), Some("refine"));
+            assert_eq!(last.to_status, "refine");
+        }
     }
 
     #[test]
