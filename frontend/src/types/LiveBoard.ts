@@ -47,4 +47,8 @@ content_type: string | null,
 /**
  * When it was pushed (SQLite `datetime` text, UTC).
  */
-created_at: string, };
+created_at: string, 
+/**
+ * When it was first pinned (naru task 1735); null = not pinned.
+ */
+pinned_at: string | null, };

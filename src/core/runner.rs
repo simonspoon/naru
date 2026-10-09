@@ -26,7 +26,6 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
@@ -301,6 +300,14 @@ fn runner_alive(dir: &Path, job: &Job) -> bool {
 /// The command line of `pid` (`ps -o command=`), `None` when it cannot be read
 /// -- which callers treat as "not ours".
 pub(crate) fn pid_command(pid: i64) -> Option<String> {
+    #[cfg(windows)]
+    return crate::core::proc::pid_command(pid);
+    #[cfg(not(windows))]
+    pid_command_ps(pid)
+}
+
+#[cfg(not(windows))]
+fn pid_command_ps(pid: i64) -> Option<String> {
     let out = Command::new("ps")
         .args(["-o", "command=", "-p", &pid.to_string()])
         .stderr(Stdio::null())
@@ -451,13 +458,14 @@ pub fn spawn_runner(dir: &Path) -> Result<()> {
         .create(true)
         .append(true)
         .open(dir.join("runner.log"))?;
-    let child = Command::new(exe)
-        .args(["run", "__runner"])
+    let mut cmd = Command::new(exe);
+    cmd.args(["run", "__runner"])
         .arg(dir)
         .stdin(Stdio::null())
         .stdout(log.try_clone()?)
-        .stderr(log)
-        .process_group(0)
+        .stderr(log);
+    crate::core::proc::isolate(&mut cmd);
+    let child = cmd
         .spawn()
         .map_err(|e| Error::Unavailable(format!("cannot start the runner: {e}")))?;
     atomic_write(&dir.join("runner.pid"), child.id().to_string().as_bytes())?;
@@ -605,11 +613,7 @@ fn requeue_delivered(dir: &Path) -> Result<()> {
 // ---- the runner ---------------------------------------------------------
 
 fn signal_group(pgid: i64, sig: &str) {
-    let _ = Command::new("kill")
-        .args([&format!("-{sig}"), "--", &format!("-{pgid}")])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    crate::core::proc::signal_group(pgid, sig);
 }
 
 enum Msg {
@@ -683,15 +687,15 @@ fn run_runner_locked(dir: &Path) -> Result<()> {
             .create(true)
             .append(true)
             .open(dir.join("claude.log"))?;
-        Command::new("bash")
-            .arg("-c")
+        let mut cmd = Command::new("bash");
+        cmd.arg("-c")
             .arg(script)
             .current_dir(&job.cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(log)
-            .process_group(0)
-            .spawn()
+            .stderr(log);
+        crate::core::proc::isolate(&mut cmd);
+        cmd.spawn()
             .map_err(|e| Error::Unavailable(format!("cannot start claude: {e}")))
     });
     let mut child = match spawned {

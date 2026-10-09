@@ -9,6 +9,8 @@ import { LiveBoardPanel, type InkFlatten } from './LiveBoardPanel'
 import {
   claimLiveSpeaker,
   createLiveBoard,
+  getLiveBoardHistory,
+  pinLiveBoard,
   getListen,
   getLive,
   getLiveConfig,
@@ -39,7 +41,16 @@ import {
   wavFromFrames,
   type CapturedFrame,
 } from '../liveAudio'
-import { boardSeenFor } from '../liveBoard'
+import {
+  boardSeenFor,
+  emptyBoardHistory,
+  foldFirstPage,
+  foldOlderPage,
+  mergeBoards,
+  newestBoardId,
+  olderCursor,
+  type BoardHistory,
+} from '../liveBoard'
 import { autoSendIdleMs } from '../liveCapture'
 import { currentContext, sameContext, subscribeContext } from '../liveContext'
 import { agentsLabel, openAgents, sectionFor, viewLine } from '../liveView'
@@ -752,6 +763,9 @@ export function LiveHub({
   const session = data?.session ?? null
   const live = isLive(session)
   const offer = data?.offer ?? null
+  // The native host, decided once (see below where it matters most). The
+  // ambient "can help" offer is the Mac app's: a plain browser never glows.
+  const [native] = useState(() => detectNativeHost(window as unknown as Record<string, unknown>))
   // Ambient mode (naru task 1746): a native host keeps the live session open
   // while this page's run is paused. The host's push is authoritative; the
   // ref is what the receiver reads, and the flag only means anything while
@@ -763,7 +777,7 @@ export function LiveHub({
     setAmbientState(next)
   }, [])
   const ambient = ambientState && live
-  const glowing = offerGlows(offer, live, ambient)
+  const glowing = native !== null && offerGlows(offer, live, ambient)
 
   // The live section of `~/.mesa/config.json`, for the one value this page
   // reads out of it: how long the person may fall silent before a
@@ -1010,7 +1024,6 @@ export function LiveHub({
   // owns the microphone. Decided once; `null` in every plain browser, where
   // every branch below on it is skipped and nothing changes. When present the
   // page opens no `getUserMedia` anywhere and `muted` is what the host reports.
-  const [native] = useState(() => detectNativeHost(window as unknown as Record<string, unknown>))
   // The engine still guessing. Shown, and sent only as the tail of a flush
   // (`liveRecognition.ts`). The ref is what the listen switch reads: it flips
   // from a press, outside the render that last set this.
@@ -1347,6 +1360,49 @@ export function LiveHub({
   // Memoised so the panel's own view is not recomputed on every render of
   // this component — only when a poll actually changed the history.
   const boards = useMemo(() => data?.boards ?? [], [data])
+  // The global history (naru task 1735): boards from every session, so the
+  // panel survives a conversation ending. The first page (10 newest, plus
+  // every pinned board) is fetched on mount and again when the poll's newest
+  // board changes or the conversation starts/ends; "more" adds older pages.
+  const [boardHistory, setBoardHistory] = useState<BoardHistory>(emptyBoardHistory)
+  const pollNewest = newestBoardId(boards)
+  const loadFirstBoardPage = useCallback(() => {
+    getLiveBoardHistory().then(
+      (page) => setBoardHistory((prev) => foldFirstPage(prev, page)),
+      () => {},
+    )
+  }, [])
+  useEffect(() => {
+    loadFirstBoardPage()
+  }, [loadFirstBoardPage, pollNewest, live])
+  const boardHistoryRef = useRef(boardHistory)
+  const pollBoardsRef = useRef(boards)
+  useEffect(() => {
+    boardHistoryRef.current = boardHistory
+    pollBoardsRef.current = boards
+  }, [boardHistory, boards])
+  const moreBoards = useCallback(() => {
+    const before = olderCursor(boardHistoryRef.current, pollBoardsRef.current)
+    if (before === null) return
+    getLiveBoardHistory(before).then(
+      (page) => setBoardHistory((prev) => foldOlderPage(prev, page)),
+      () => {},
+    )
+  }, [])
+  const pinBoard = useCallback(
+    (id: number, pinned: boolean) => {
+      pinLiveBoard(id, pinned).then(
+        () => {
+          loadFirstBoardPage()
+          refetch()
+        },
+        () => {},
+      )
+    },
+    [loadFirstBoardPage, refetch],
+  )
+  // What the panel steps through: history, pins and the poll, one list.
+  const panelBoards = useMemo(() => mergeBoards(boardHistory, boards), [boardHistory, boards])
   // The newest board this component has already accounted for
   // (`liveBoard.ts::boardSeenFor`) — `null` until the first poll that carries
   // any boards at all. Applied during render rather than in an effect,
@@ -1402,7 +1458,7 @@ export function LiveHub({
     }
     settle()
   }, [boardSeen, showBoard, setOpen])
-  const hasBoards = boards.length > 0
+  const hasBoards = panelBoards.length > 0
   useEffect(() => {
     hasBoardsRef.current = hasBoards
   }, [hasBoards])
@@ -1425,7 +1481,7 @@ export function LiveHub({
   // `boards` is empty before that and would read as every board gone.
   const [ink, setInk] = useState<InkBook>(emptyInkBook)
   if (data) {
-    const prunedInk = pruneInk(ink, boards)
+    const prunedInk = pruneInk(ink, panelBoards)
     if (prunedInk !== ink) setInk(prunedInk)
   }
   const inkRef = useRef(ink)
@@ -4312,7 +4368,7 @@ export function LiveHub({
     paused,
     pauseLabel: pauseButton?.label ?? '',
     pauseDisabled: pauseButton?.disabled ?? true,
-    canPause: pauseButton !== undefined && pauseButton !== null && !ambient,
+    canPause: pauseButton !== undefined && pauseButton !== null,
     ambient: ambientCtl ? { label: ambientCtl.label, onPress: pressAmbient } : null,
     onToggleMic: () => toggleListening(!muted),
     onTogglePause: () => {
@@ -4633,7 +4689,10 @@ export function LiveHub({
   }
   const renderBoardPanel = () => (
     <LiveBoardPanel
-      boards={boards}
+      boards={panelBoards}
+      hasMore={boardHistory.hasMore}
+      onMore={moreBoards}
+      onPin={pinBoard}
       expanded={boardExpanded}
       onHide={hideBoard}
       micCapturing={micCapturing({ live, joined: unlocked, supported, blocked, paused, muted })}

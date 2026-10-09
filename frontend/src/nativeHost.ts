@@ -26,6 +26,8 @@ export type NativeOut =
   /** The person asked to switch the host between ambient (live session open,
    *  page paused) and live. The host's `setMicState.ambient` answers. */
   | { type: 'ambient'; on: boolean }
+  /** A speaker-enrollment recording was saved (naru task 1744): the host builds the enrollment from it. */
+  | { type: 'enroll' }
 
 /** What the host hands the page. Absent keys leave the page's state alone. */
 export type NativeMicState = {

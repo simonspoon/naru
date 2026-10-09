@@ -164,6 +164,7 @@ fn token() -> Option<String> {
         return Some(t);
     }
     // macOS Keychain — where Claude Code stores the token on darwin.
+    #[cfg(target_os = "macos")]
     if let Ok(out) = Command::new("security")
         .args([
             "find-generic-password",

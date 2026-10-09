@@ -84,7 +84,7 @@ fn lan_ip() -> Option<IpAddr> {
 
 /// The base URL for the button: `flag`, else the `notify.base-url` config
 /// key, else `http://<LAN IPv4>:7770`.
-fn resolve_base(flag: Option<&str>) -> Result<String> {
+pub(crate) fn resolve_base(flag: Option<&str>) -> Result<String> {
     if let Some(flag) = flag {
         return validate_base_url(flag);
     }

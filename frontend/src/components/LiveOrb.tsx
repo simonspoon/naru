@@ -202,7 +202,7 @@ function OrbPie(p: OrbProps) {
           <MicGlyph />
         </Segment>
       )}
-      {p.canPause && (
+      {p.canPause && p.ambient?.label !== 'Live' && (
         <Segment
           d={sector(-40, 40)}
           at={mid(0)}
@@ -352,7 +352,7 @@ export function OrbHeaderControls(p: OrbProps) {
             <span>{p.ambient.label}</span>
           </HeaderButton>
         )}
-        {p.canPause && (
+        {p.canPause && p.ambient?.label !== 'Live' && (
           <HeaderButton label={p.pauseLabel} off={p.paused} disabled={p.pauseDisabled} onPress={p.onTogglePause}>
             <PauseGlyph paused={p.paused} />
           </HeaderButton>

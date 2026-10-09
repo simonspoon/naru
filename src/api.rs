@@ -43,16 +43,17 @@ use crate::core::{
     GitCommitFile, GitFileDiff, GitRepo, GitRepoView, GitStatus, GitWorktree, InboxItem, InboxKind,
     LIVE_AUDIO_MAX, LIVE_BOARD_INK_STATE_MAX, LIVE_BOARD_KEEP, LIVE_INK_MAX, LibraryBuiltinAction,
     LibraryBundle, LibraryImportResult, LibraryKind, LibraryPatch, LibraryScope,
-    LiveBoardHistoryEntry, LiveBoardInkEntry, LiveBoardKind, LiveContext, LiveNotebookEntry,
-    LiveNotice, LiveOffer, LiveState, LiveStatus, LiveTranscript, LiveWindow, ModelRates,
-    NaruVersion, NextResult, Priority, ProjectAgents, ProjectFileTree, ProjectGitLog,
-    ProjectGitRepos, ProjectGitStatus, ProjectGitView, ProjectPatch, ProjectVersion, ReceiptPatch,
-    STALE_CLAIM_MINUTES, Script, ScriptArg, ScriptPatch, ScriptRunEvent, ServeBoolSetting,
-    ServeHostsSetting, ServeNumberSetting, Status, Store, SystemInfo, Task, TaskPatch, TaskSummary,
-    WorkflowNodeKind, WorkflowNodeNew, WorkflowNodePatch, WorkflowPatch, WorkflowTrigger, agents,
-    attachments, audio, board, config, files, git, guard, hooks, inbox_triage, library, listen,
-    live, memory_job, project_memory, receipt, runner, script_runs, scripts, speech, supervisor,
-    system, validate_live_client, version, workflow,
+    LiveBoardHistoryEntry, LiveBoardHistoryPage, LiveBoardInkEntry, LiveBoardKind,
+    LiveBoardSummary, LiveContext, LiveNotebookEntry, LiveNotice, LiveOffer, LiveState, LiveStatus,
+    LiveTranscript, LiveWindow, ModelRates, NaruVersion, NextResult, Priority, ProjectAgents,
+    ProjectFileTree, ProjectGitLog, ProjectGitRepos, ProjectGitStatus, ProjectGitView,
+    ProjectPatch, ProjectVersion, ReceiptPatch, STALE_CLAIM_MINUTES, Script, ScriptArg,
+    ScriptPatch, ScriptRunEvent, ServeBoolSetting, ServeHostsSetting, ServeNumberSetting, Status,
+    Store, SystemInfo, Task, TaskNote, TaskPatch, TaskSummary, VoiceEnrollment, WorkflowNodeKind,
+    WorkflowNodeNew, WorkflowNodePatch, WorkflowPatch, WorkflowTrigger, agents, attachments, audio,
+    board, config, files, git, guard, hooks, inbox_triage, library, listen, live, memory_job,
+    project_memory, receipt, runner, script_runs, scripts, speech, supervisor, system,
+    validate_live_client, version, voice_enroll, workflow,
 };
 
 /// The Vite build output, embedded into the binary at compile time.
@@ -2914,6 +2915,12 @@ fn router(state: AppState) -> Router {
             "/api/tasks/{id}/receipt/regenerate",
             post(regenerate_receipt),
         )
+        // Task notes (naru task 1724) — append-only, NO per-route gate, like
+        // the receipt routes above and plain task CRUD.
+        .route(
+            "/api/tasks/{id}/notes",
+            get(list_task_notes).post(add_task_note),
+        )
         .route("/api/tasks/{id}/dependencies", get(list_dependencies))
         .route("/api/tasks/{id}/dependents", get(list_dependents))
         // Attachments: file uploads/downloads scoped to a task. Upload is
@@ -3031,7 +3038,13 @@ fn router(state: AppState) -> Router {
         .route("/api/live/notice", post(live_notice))
         // A blank board the person starts from the whiteboard (mesa task
         // 1580): an ordinary write like the utterance, fixed content.
-        .route("/api/live/boards", post(live_blank_board))
+        .route(
+            "/api/live/boards",
+            post(live_blank_board).get(live_board_history),
+        )
+        // Pinning a board of any session (naru task 1735): an ordinary write
+        // like the ink state below.
+        .route("/api/live/boards/{id}/pin", post(pin_live_board))
         // The person's ink on one board, kept server-side (mesa task 1582) so
         // it outlives a send and a reload: the page's own JSON, stored and
         // handed back as received (parsed only to check it is an object). Ordinary live writes like the utterance; the
@@ -3457,6 +3470,17 @@ fn router(state: AppState) -> Router {
         .route(
             "/api/config/listen",
             get(get_config_listen).put(update_config_listen),
+        )
+        // The speaker-enrollment recording (naru task 1744,
+        // `docs/voice-enrollment.md`): the browser's WAV as base64 in JSON,
+        // kept beside the Mac app's `ambient-enrollment.json`. The transcribe
+        // route's body limit; the server computes no embedding.
+        .route(
+            "/api/config/voice-enrollment",
+            get(get_voice_enrollment)
+                .put(put_voice_enrollment)
+                .delete(delete_voice_enrollment)
+                .layer(DefaultBodyLimit::max(TRANSCRIBE_BODY_LIMIT)),
         )
         // The same file's `audio` section — which engine the server runs
         // speech through and where the `naru-audio` daemon listens (mesa task
@@ -3994,6 +4018,32 @@ struct ReceiptUpdate {
     /// clearable fields. Either `Some` variant sets `edited = true` (spec D6).
     #[serde(default, deserialize_with = "double_option")]
     note: Option<Option<String>>,
+}
+
+// ---- task notes (naru task 1724) ----
+
+#[derive(Deserialize)]
+struct TaskNoteNew {
+    body: String,
+}
+
+async fn list_task_notes(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<Vec<TaskNote>>> {
+    let store = state.store.lock().unwrap();
+    Ok(Json(store.list_task_notes(id)?))
+}
+
+/// The web carries no session, so the note's `session` is null.
+async fn add_task_note(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(input): Json<TaskNoteNew>,
+) -> ApiResult<Response> {
+    let mut store = state.store.lock().unwrap();
+    let note = store.add_task_note(id, &input.body, None)?;
+    Ok((StatusCode::CREATED, Json(note)).into_response())
 }
 
 async fn show_receipt(State(state): State<AppState>, Path(id): Path<i64>) -> ApiResult<Response> {
@@ -5066,8 +5116,9 @@ async fn get_live(
         // The whole board history, bodiless (mesa task 1071) — every board
         // this conversation pushed, in the order the panel steps through
         // them, read in the same lock scope as the turns so one poll is one
-        // consistent view. `LIVE_BOARD_KEEP` is all there is: the store
-        // prunes to it on every push.
+        // consistent view. The poll is capped at the newest `LIVE_BOARD_KEEP`
+        // (boards are never pruned, mesa task 1448; the page's global history,
+        // `GET /api/live/boards`, reaches the rest).
         let boards = store.list_live_boards(session.id, LIVE_BOARD_KEEP)?;
         (session, turns, boards, offer)
     };
@@ -5676,6 +5727,57 @@ async fn live_blank_board(State(state): State<AppState>) -> ApiResult<Response> 
     };
     let board = store.add_blank_live_board(session.id)?;
     Ok((StatusCode::CREATED, Json(board)).into_response())
+}
+
+/// Query of `GET /api/live/boards`.
+#[derive(Deserialize)]
+struct LiveBoardHistoryQuery {
+    before: Option<i64>,
+    limit: Option<i64>,
+}
+
+/// `GET /api/live/boards?before=<id>&limit=<n>` — the global whiteboard
+/// history (naru task 1735): boards from every session, live or ended, newest
+/// first, `limit` (default 10, clamped 1..=100) of them below the `before`
+/// cursor, plus every pinned board regardless of page and whether older ones
+/// remain. Bodiless; a body is fetched through the render route.
+async fn live_board_history(
+    State(state): State<AppState>,
+    Query(q): Query<LiveBoardHistoryQuery>,
+) -> ApiResult<Json<LiveBoardHistoryPage>> {
+    let store = state.store.lock().unwrap();
+    let (boards, has_more) = store.live_board_history_page(q.before, q.limit.unwrap_or(10))?;
+    let pinned = store.list_pinned_live_boards()?;
+    Ok(Json(LiveBoardHistoryPage {
+        boards,
+        pinned,
+        has_more,
+    }))
+}
+
+#[derive(Deserialize)]
+struct PinLiveBoardBody {
+    pinned: bool,
+}
+
+/// `POST /api/live/boards/{id}/pin` `{"pinned": bool}` — pins or unpins a
+/// board of any session; answers the board's summary. 404 for an unknown id.
+async fn pin_live_board(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    body: Result<Json<PinLiveBoardBody>, JsonRejection>,
+) -> ApiResult<Json<LiveBoardSummary>> {
+    let Json(body) = body?;
+    let mut store = state.store.lock().unwrap();
+    let b = store.set_live_board_pinned(id, body.pinned)?;
+    Ok(Json(LiveBoardSummary {
+        id: b.id,
+        session_id: b.session_id,
+        kind: b.kind,
+        title: b.title,
+        created_at: b.created_at,
+        pinned_at: b.pinned_at,
+    }))
 }
 
 /// `GET /api/live/boards/{id}/ink-state` — the board's saved ink (mesa task
@@ -10309,6 +10411,68 @@ async fn add_speech_voice(
                 },
             })?;
     Ok((StatusCode::CREATED, Json(added)).into_response())
+}
+
+/// `GET /api/config/voice-enrollment` — the speaker-enrollment status
+/// (naru task 1744, [`voice_enroll::status`]): the saved recording, when the
+/// Mac app last wrote its enrollment, and whether that is current. Gated by
+/// [`require_agent_access`].
+async fn get_voice_enrollment(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> ApiResult<Json<VoiceEnrollment>> {
+    require_agent_access(&state, &addr, &headers)?;
+    Ok(Json(blocking(voice_enroll::status).await??))
+}
+
+/// `PUT /api/config/voice-enrollment` — saves the recording
+/// ([`voice_enroll::save`]). Gated like [`add_speech_voice`], with its base64
+/// rules: invalid or empty is 422, over [`LIVE_AUDIO_MAX`] 413; a WAV that is
+/// not 16 kHz mono 16-bit PCM of 20..=300 s is 422.
+async fn put_voice_enrollment(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Result<Json<TranscribeBody>, JsonRejection>,
+) -> ApiResult<Json<VoiceEnrollment>> {
+    require_agent_access(&state, &addr, &headers)?;
+    require_same_site_fetch(&headers)?;
+    let Json(body) = body?;
+    let validation = |message: String| ApiError {
+        status: StatusCode::UNPROCESSABLE_ENTITY,
+        code: "validation",
+        message,
+    };
+    let wav = base64::engine::general_purpose::STANDARD
+        .decode(body.audio_base64.as_bytes())
+        .map_err(|e| validation(format!("invalid base64 audio: {e}")))?;
+    if wav.is_empty() {
+        return Err(validation("audio must not be empty".to_string()));
+    }
+    if wav.len() > LIVE_AUDIO_MAX {
+        return Err(ApiError {
+            status: StatusCode::PAYLOAD_TOO_LARGE,
+            code: "validation",
+            message: format!(
+                "audio must be at most {LIVE_AUDIO_MAX} bytes, got {}",
+                wav.len()
+            ),
+        });
+    }
+    Ok(Json(blocking(move || voice_enroll::save(&wav)).await??))
+}
+
+/// `DELETE /api/config/voice-enrollment` — removes the recording and the
+/// enrollment (a missing file is fine), turning the voice guard off. Answers
+/// the now-empty status. Gated by [`require_agent_access`].
+async fn delete_voice_enrollment(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> ApiResult<Json<VoiceEnrollment>> {
+    require_agent_access(&state, &addr, &headers)?;
+    Ok(Json(blocking(voice_enroll::delete).await??))
 }
 
 /// `GET /api/config/speech/voices/{name}` — the cloned voice `name` as one
@@ -18689,6 +18853,77 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         assert_eq!(err.code, "validation");
     }
 
+    /// The global board history lists boards of an ended session, pages with
+    /// `before`, and carries pinned boards outside the page (naru task 1735).
+    #[tokio::test]
+    async fn live_board_history_and_pin_routes() {
+        let (_dir, state) = test_state();
+        let ids: Vec<i64> = {
+            let mut store = state.store.lock().unwrap();
+            let s = store.start_live_session(None).unwrap();
+            let ids = (0..3)
+                .map(|i| {
+                    store
+                        .add_live_board(
+                            s.id,
+                            LiveBoardKind::Markdown,
+                            Some(&format!("b{i}")),
+                            "x",
+                            None,
+                        )
+                        .unwrap()
+                        .id
+                })
+                .collect();
+            store.end_live_session(s.id).unwrap();
+            ids
+        };
+        let Json(page) = live_board_history(
+            State(state.clone()),
+            Query(LiveBoardHistoryQuery {
+                before: None,
+                limit: Some(2),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            page.boards.iter().map(|b| b.id).collect::<Vec<_>>(),
+            [ids[2], ids[1]]
+        );
+        assert!(page.has_more && page.pinned.is_empty());
+
+        let Json(pinned) = pin_live_board(
+            State(state.clone()),
+            Path(ids[0]),
+            Ok(Json(PinLiveBoardBody { pinned: true })),
+        )
+        .await
+        .unwrap();
+        assert!(pinned.pinned_at.is_some());
+        let Json(page) = live_board_history(
+            State(state.clone()),
+            Query(LiveBoardHistoryQuery {
+                before: Some(ids[1]),
+                limit: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(page.boards.len(), 1);
+        assert!(!page.has_more);
+        assert_eq!(page.pinned.len(), 1);
+
+        let err = pin_live_board(
+            State(state),
+            Path(9999),
+            Ok(Json(PinLiveBoardBody { pinned: true })),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.status, StatusCode::NOT_FOUND);
+    }
+
     /// The four session-scoped writes address "the" conversation, so with none
     /// running they are `not_found` with the hint that names how to get one —
     /// not a silent no-op, and not a 500 from an unwrap.
@@ -19701,6 +19936,96 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             })),
         )
         .await
+    }
+
+    fn enroll_wav(seconds: usize) -> Vec<u8> {
+        let data = (seconds * 16_000 * 2) as u32;
+        let mut b = Vec::new();
+        b.extend_from_slice(b"RIFF");
+        b.extend_from_slice(&(36 + data).to_le_bytes());
+        b.extend_from_slice(b"WAVEfmt ");
+        b.extend_from_slice(&16u32.to_le_bytes());
+        b.extend_from_slice(&1u16.to_le_bytes());
+        b.extend_from_slice(&1u16.to_le_bytes());
+        b.extend_from_slice(&16_000u32.to_le_bytes());
+        b.extend_from_slice(&32_000u32.to_le_bytes());
+        b.extend_from_slice(&2u16.to_le_bytes());
+        b.extend_from_slice(&16u16.to_le_bytes());
+        b.extend_from_slice(b"data");
+        b.extend_from_slice(&data.to_le_bytes());
+        b.resize(b.len() + data as usize, 0);
+        b
+    }
+
+    /// naru task 1744: `/api/config/voice-enrollment` saves a valid WAV
+    /// (sample present, not current), turns `current` on once the Mac app's
+    /// json is newer, refuses a bad format / too-short / bad base64 with 422,
+    /// refuses a foreign Host, and DELETE clears both files.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn voice_enrollment_routes_save_report_and_delete() {
+        let _env = attachments::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (_dir, state) = test_state();
+        let enroll = tempfile::tempdir().unwrap();
+        // SAFETY: ENV_LOCK gives this test exclusive access to the environment.
+        unsafe { std::env::set_var("NARU_VOICE_ENROLL_DIR", enroll.path()) };
+        let put = |audio: String| {
+            put_voice_enrollment(
+                State(state.clone()),
+                ConnectInfo(loopback()),
+                loopback_agent_headers(),
+                Ok(Json(TranscribeBody {
+                    audio_base64: audio,
+                })),
+            )
+        };
+        let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+
+        let Json(s) = put(b64(&enroll_wav(30))).await.unwrap();
+        assert!(s.sample.is_some() && !s.current);
+
+        std::fs::write(enroll.path().join("ambient-enrollment.json"), "[0.1]").unwrap();
+        let Json(s) = get_voice_enrollment(
+            State(state.clone()),
+            ConnectInfo(loopback()),
+            loopback_agent_headers(),
+        )
+        .await
+        .unwrap();
+        assert!(s.current && s.enrolled_at.is_some());
+
+        for bad in [
+            b64(&enroll_wav(5)),
+            b64(b"not a wav"),
+            "!!!".to_string(),
+            String::new(),
+        ] {
+            let err = put(bad).await.unwrap_err();
+            assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY);
+        }
+
+        let foreign = get_voice_enrollment(
+            State(state.clone()),
+            ConnectInfo(loopback()),
+            hdrs(Some("evil.example:0"), None),
+        )
+        .await;
+        assert!(foreign.is_err());
+
+        let Json(s) = delete_voice_enrollment(
+            State(state.clone()),
+            ConnectInfo(loopback()),
+            loopback_agent_headers(),
+        )
+        .await
+        .unwrap();
+        assert!(s.sample.is_none() && s.enrolled_at.is_none() && !s.current);
+        assert!(!enroll.path().join("voice-sample.wav").exists());
+        assert!(!enroll.path().join("ambient-enrollment.json").exists());
+        // SAFETY: as above.
+        unsafe { std::env::remove_var("NARU_VOICE_ENROLL_DIR") };
     }
 
     async fn post_voice(

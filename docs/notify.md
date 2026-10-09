@@ -62,4 +62,13 @@ The `naru-live` definition's rule 13 lets the agent run `naru notify
 delegate finished with nobody listening on the page. Sparingly, never for an
 ordinary reply.
 
+## `naru task digest --notify`
+
+`naru task digest --since <ts|auto> --notify [--base-url <url>]` (naru task
+1725) sends the "while you were away" digest of task outcomes (see
+`docs/live.md`) as one message titled "While you were away". Each line links
+to the web UI as `<base>/#/projects/<pid>/tasks/<id>` (base resolved as
+above), so a phone needs `serve --lan`; there is no per-task button. An empty
+digest sends nothing and calls no `vox`.
+
 Gate: `scripts/notify-check.sh`.
