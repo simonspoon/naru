@@ -1005,12 +1005,25 @@ mod tests {
 
     #[test]
     fn a_run_with_nothing_to_review_makes_no_call() {
+        let _env = crate::core::attachments::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let empty = tempfile::tempdir().unwrap();
+        // SAFETY: ENV_LOCK gives this test exclusive access to the env vars.
+        unsafe {
+            std::env::set_var("MESA_CC_PROJECTS_DIR", empty.path());
+            std::env::set_var("MESA_CC_LEDGER", "/nonexistent/headless.jsonl");
+        }
         let (_d, mut store) = store();
         let run = store.record_retro_run("manual").unwrap();
         let report = run_with(&mut store, run.id, &mut |_, _, _, _| {
             panic!("no session, no call")
         })
         .unwrap();
+        unsafe {
+            std::env::remove_var("MESA_CC_PROJECTS_DIR");
+            std::env::remove_var("MESA_CC_LEDGER");
+        }
         assert_eq!(report["sessions"], 0);
         assert_eq!(report["findings"], json!([]));
     }

@@ -2602,6 +2602,9 @@ pub struct CcOverview {
     pub total_tokens: i64,
     /// Estimated spend in USD (static price table; see `core::cc`).
     pub est_cost_usd: f64,
+    /// The part of `est_cost_usd` that came from headless `claude -p` calls
+    /// (the usage ledger; Claude's reported cost, not an estimate).
+    pub headless_cost_usd: f64,
     pub avg_session_minutes: f64,
     pub median_session_minutes: f64,
     pub avg_tokens_per_session: f64,
@@ -2625,6 +2628,8 @@ pub struct CcDayPoint {
     #[ts(type = "number")]
     pub total_tokens: i64,
     pub est_cost_usd: f64,
+    /// The headless share of `est_cost_usd` (see [`CcOverview`]).
+    pub headless_cost_usd: f64,
 }
 
 /// Usage rolled up by model id.
@@ -2792,6 +2797,9 @@ pub struct CcSessionRow {
     pub project: Option<String>,
     pub git_branch: Option<String>,
     pub entrypoint: Option<String>,
+    /// The top-level agent the session was launched as (`claude --agent
+    /// <name>`, the transcript's `agent-setting` line); null when none.
+    pub main_agent: Option<String>,
     /// True if any of the session's events came from a subagent (`isSidechain`).
     /// Subagent transcripts reuse the parent's `sessionId`, so this is "the
     /// session used a subagent", not "the session *is* a sidechain".

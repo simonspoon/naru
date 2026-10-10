@@ -6,6 +6,7 @@ pub mod audio;
 pub mod barge_in;
 pub mod board;
 pub mod cc;
+pub mod cc_ledger;
 pub mod config;
 pub mod decide;
 pub mod env;

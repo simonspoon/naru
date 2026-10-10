@@ -1,7 +1,7 @@
 # Voice guard enrollment
 
 Settings > Voice has a **Voice guard enrollment** section (naru task 1744). The
-browser records about 90 seconds of the person's voice, the server saves it as
+browser records about 10 seconds of the person's voice (auto-stopping at 12 s), the server saves it as
 a WAV, and the Naru Mac app builds the speaker enrollment from that WAV.
 
 ## Files
@@ -12,7 +12,7 @@ Both live in the enrollment directory: the platform data dir plus `Naru`
 
 | File | Written by | Notes |
 | --- | --- | --- |
-| `voice-sample.wav` | the server (`core::voice_enroll`) | 16 kHz mono 16-bit PCM, 20..=300 s, written temp + rename |
+| `voice-sample.wav` | the server (`core::voice_enroll`) | 16 kHz mono 16-bit PCM, 8..=300 s, written temp + rename |
 | `ambient-enrollment.json` | the Naru Mac app | a JSON `[Float]`; the server only reads its mtime, and deletes it on `DELETE` |
 
 ## Routes
@@ -23,7 +23,7 @@ Both live in the enrollment directory: the platform data dir plus `Naru`
 - `GET` and `DELETE` carry `require_agent_access`; `PUT` adds
   `require_same_site_fetch`, exactly `add_speech_voice`'s pair.
 - Invalid or empty base64 is 422, a body over `LIVE_AUDIO_MAX` is 413, a WAV
-  that is not RIFF/WAVE 16 kHz mono 16-bit PCM of 20..=300 s is 422.
+  that is not RIFF/WAVE 16 kHz mono 16-bit PCM of 8..=300 s is 422.
 - All three answer `VoiceEnrollment`: `sample` (`bytes`, `seconds`,
   `recorded_at`) or `null`, `enrolled_at` or `null`, and `current` = the
   enrollment exists and is not older than the sample.
@@ -40,6 +40,9 @@ has no current enrollment, so "waiting for the Naru Mac app" flips to
 "Enrolled" by itself. A browser outside the app saves the WAV and waits; the
 app builds the enrollment the next time it runs that step.
 
+One short recording is enough: the Mac app builds a single enrollment from it
+and it works for every mic, so there is no re-enrollment per mic.
+
 ## Why the server computes nothing
 
 An embedding needs the speaker model, and the Mac app already has it. A second
@@ -48,8 +51,8 @@ way for the two to disagree, so the server only keeps the audio.
 
 ## The page
 
-`frontend/src/voiceEnroll.ts` holds the logic (the read-aloud paragraph and
-timed one-word prompts, peak dBFS, the near-silent test at -40 dBFS, the
-20 s minimum / 90 s target, the status line); `VoiceEnrollSection.tsx` wires it
+`frontend/src/voiceEnroll.ts` holds the logic (a two-sentence read-aloud text,
+peak dBFS, the near-silent test at -40 dBFS, the 8 s minimum / 12 s target,
+the status line); `VoiceEnrollSection.tsx` wires it
 to `getUserMedia` (echo cancellation, noise suppression and auto gain all off)
 and `liveAudio.ts`'s `mesa-pcm` worklet and `encodeWav`.
