@@ -2070,7 +2070,7 @@ browser has no such handler and behaves exactly as before.
 | `msg` | When |
 | --- | --- |
 | `{"type":"ready"}` | The page installed its API below; answer with `setMicState`. |
-| `{"type":"state","session":<id or null>,"live":<bool>,"joined":<bool>}` | On mount and whenever the live session, `live` or this browser's `joined` changes. Capture only while `live && joined`. |
+| `{"type":"state","session":<id or null>,"live":<bool>,"joined":<bool>,"paused":<bool>}` | On mount and whenever the live session, `live`, this browser's `joined` or the page's Pause changes. Capture only while `live && joined`, and while `paused` capture nothing, submit no utterance and speak no reply (naru task 1786). |
 | `{"type":"mic","muted":<bool>}` | The person pressed the listen button or chord. |
 | `{"type":"ambient","on":<bool>}` | The person pressed the **Ambient** (`on: true`) or **Live** (`on: false`) button, or accepted an offer while ambient (`on: false`). Naru task 1746. |
 | `{"type":"wakeWords"}` | The custom wake words were saved in Settings > Voice (naru task 1769). No payload: refetch `GET /api/config/ambient`. |

@@ -1,5 +1,20 @@
 import { describe, expect, it } from 'vitest'
-import { ambientControl, detectNativeHost, hostVoiced, installNativeHost, type NativeOut } from './nativeHost'
+import {
+  ambientControl,
+  detectNativeHost,
+  hostVoiced,
+  installNativeHost,
+  stateMessage,
+  type NativeOut,
+} from './nativeHost'
+
+describe('stateMessage', () => {
+  it('carries the page Pause to the host', () => {
+    const base = { session: 7, live: true, joined: true }
+    expect(stateMessage({ ...base, paused: true })).toEqual({ type: 'state', ...base, paused: true })
+    expect(stateMessage({ ...base, paused: false })).toEqual({ type: 'state', ...base, paused: false })
+  })
+})
 
 function stubWindow() {
   const posted: unknown[] = []
@@ -20,7 +35,7 @@ describe('nativeHost', () => {
     const { win, posted } = stubWindow()
     const host = detectNativeHost(win)!
     const msgs: NativeOut[] = [
-      { type: 'state', session: 3, live: true, joined: true },
+      { type: 'state', session: 3, live: true, joined: true, paused: false },
       { type: 'mic', muted: true },
     ]
     msgs.forEach((m) => host.post(m))

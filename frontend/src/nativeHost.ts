@@ -20,7 +20,15 @@ export type NativeOut =
   /** The page subscribed: the host should answer with `setMicState`. */
   | { type: 'ready' }
   /** The conversation the host captures for. `joined` = this browser took part. */
-  | { type: 'state'; session: number | null; live: boolean; joined: boolean }
+  | {
+      type: 'state'
+      session: number | null
+      live: boolean
+      joined: boolean
+      /** The page's Pause: the host must capture nothing, submit no utterance
+       *  and speak no reply until this reads false again. */
+      paused: boolean
+    }
   /** The person pressed the listen switch (button or chord). */
   | { type: 'mic'; muted: boolean }
   /** The person asked to switch the host between ambient (live session open,
@@ -38,6 +46,16 @@ export type NativeMicState = {
   hearing?: boolean
   /** The host's verdict on ambient vs live; authoritative. */
   ambient?: boolean
+}
+
+/** The `state` message the page posts whenever the conversation or Pause changes. */
+export function stateMessage(s: {
+  session: number | null
+  live: boolean
+  joined: boolean
+  paused: boolean
+}): NativeOut {
+  return { type: 'state', session: s.session, live: s.live, joined: s.joined, paused: s.paused }
 }
 
 /** The ambient/live switch button: only with a host, in a live session this

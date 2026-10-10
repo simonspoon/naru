@@ -213,7 +213,7 @@ import type { LiveWindow } from '../types/LiveWindow'
 import type { TranscribeStatus } from '../types/TranscribeStatus'
 import { isNearBottom, newSince } from '../liveScroll'
 import { useFetch } from '../useFetch'
-import { ambientControl, detectNativeHost, hostVoiced, installNativeHost } from '../nativeHost'
+import { ambientControl, detectNativeHost, hostVoiced, installNativeHost, stateMessage } from '../nativeHost'
 
 /**
  * Mesa Live, in the header (mesa tasks 855, 857): the whole conversation lives
@@ -2029,8 +2029,8 @@ export function LiveHub({
   // Tell the native host which conversation to capture for.
   const sessionId = session?.id ?? null
   useEffect(() => {
-    native?.post({ type: 'state', session: sessionId, live, joined: unlocked })
-  }, [native, sessionId, live, unlocked])
+    native?.post(stateMessage({ session: sessionId, live, joined: unlocked, paused }))
+  }, [native, sessionId, live, unlocked, paused])
 
   // The recognizer's handlers are set once per start and post sentences long
   // after the render that installed them, so they read through a ref rather
