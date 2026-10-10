@@ -8,6 +8,7 @@ import {
   nextRunLabel,
   projectLabel,
   workflowHref,
+  workflowsListHref,
 } from './workflowOverview'
 import type { Project } from './types/Project'
 import type { Workflow } from './types/Workflow'
@@ -77,6 +78,8 @@ describe('workflowOverview', () => {
 
   it('links to the owning project only', () => {
     expect(workflowHref(wf())).toBe('#/projects/3/workflows/7')
-    expect(workflowHref(wf({ project_id: null }))).toBeNull()
+    expect(workflowHref(wf({ project_id: null }))).toBe('#/workflows/7')
+    expect(workflowsListHref(null)).toBe('#/workflows')
+    expect(workflowsListHref(3)).toBe('#/projects/3/workflows')
   })
 })

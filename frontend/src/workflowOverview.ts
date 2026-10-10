@@ -52,8 +52,13 @@ export function nextRunLabel(w: Workflow, now: number = Date.now()): string {
   return `in ${Math.floor(hours / 24)}d`
 }
 
-/** Where a row opens: the owning project's workflow view. A global workflow
- * has no project page to open in, so it has no link. */
-export function workflowHref(w: Workflow): string | null {
-  return w.project_id === null ? null : `#/projects/${w.project_id}/workflows/${w.id}`
+/** Where a row opens: the owning project's workflow view, or the global
+ * `#/workflows/<id>` page for a workflow with no project. */
+export function workflowHref(w: Workflow): string {
+  return w.project_id === null ? `#/workflows/${w.id}` : `#/projects/${w.project_id}/workflows/${w.id}`
+}
+
+/** The list a builder's "← workflows" returns to: the project's, or the global overview. */
+export function workflowsListHref(projectId: number | null): string {
+  return projectId === null ? '#/workflows' : `#/projects/${projectId}/workflows`
 }

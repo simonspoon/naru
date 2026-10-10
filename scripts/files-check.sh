@@ -87,6 +87,10 @@ HTML
 printf 'plain notes\n' > "$REPO/notes.md"
 printf 'no extension here\n' > "$REPO/LICENSE"
 
+# Media fixture (naru task 1751): arbitrary bytes under a media extension —
+# only the extension decides, the route never opens the file as video.
+head -c 4096 /dev/urandom > "$REPO/clip.mp4"
+
 # Search fixtures (task 813): one hit in a nested source file, one in an
 # EXCLUDED directory, and one inside a binary — the last two must never come
 # back, and neither can be told apart from the first by the query alone.
@@ -227,6 +231,46 @@ for BAD in page.html notes.md LICENSE; do
     fail "raw $BAD: error.code must be validation, got $(jqb .error.code)"
   ok "GET .../files/raw on $BAD: 422 validation (not an image extension)"
 done
+
+# Media (naru task 1751): an allowlisted video/audio extension is served
+# inline with its real mime, the same hardening headers, and byte ranges.
+fetch "/api/projects/$PROJ/files/raw?path=clip.mp4"
+[ "$STATUS" = "200" ] || fail "raw mp4: expected 200, got $STATUS"
+[ "$(hdr content-type)" = "video/mp4" ] || fail "raw mp4: content-type, got '$(hdr content-type)'"
+case "$(hdr content-disposition)" in
+  inline*) ;;
+  *) fail "raw mp4: content-disposition must start with inline" ;;
+esac
+[ "$(hdr x-content-type-options)" = "nosniff" ] || fail "raw mp4: nosniff"
+grep -q "default-src 'none'" <<<"$(hdr content-security-policy)" || fail "raw mp4: CSP"
+[ "$(hdr accept-ranges)" = "bytes" ] || fail "raw mp4: accept-ranges must be bytes"
+cmp -s "$TMP/out" "$REPO/clip.mp4" || fail "raw mp4: body must be byte-identical"
+ok "GET .../files/raw on an MP4: 200, video/mp4, inline, nosniff, CSP, Accept-Ranges"
+
+STATUS=$(curl -s -o "$TMP/out" -D "$TMP/headers" -w '%{http_code}' -H 'Range: bytes=100-199' \
+  "$BASE/api/projects/$PROJ/files/raw?path=clip.mp4")
+[ "$STATUS" = "206" ] || fail "raw mp4 range: expected 206, got $STATUS"
+[ "$(hdr content-range)" = "bytes 100-199/4096" ] || fail "raw mp4 range: content-range, got '$(hdr content-range)'"
+[ "$(hdr content-length)" = "100" ] || fail "raw mp4 range: content-length, got '$(hdr content-length)'"
+[ "$(hdr content-type)" = "video/mp4" ] || fail "raw mp4 range: content-type"
+tail -c +101 "$REPO/clip.mp4" | head -c 100 | cmp -s - "$TMP/out" || fail "raw mp4 range: body must equal the slice"
+ok "GET .../files/raw Range 100-199: 206, Content-Range bytes 100-199/4096, byte-identical slice"
+
+STATUS=$(curl -s -o "$TMP/out" -D "$TMP/headers" -w '%{http_code}' -H 'Range: bytes=-10' \
+  "$BASE/api/projects/$PROJ/files/raw?path=clip.mp4")
+[ "$STATUS" = "206" ] || fail "raw mp4 suffix range: expected 206, got $STATUS"
+[ "$(hdr content-range)" = "bytes 4086-4095/4096" ] || fail "raw mp4 suffix range: content-range"
+tail -c 10 "$REPO/clip.mp4" | cmp -s - "$TMP/out" || fail "raw mp4 suffix range: body"
+ok "GET .../files/raw Range -10: 206, the last ten bytes"
+
+STATUS=$(curl -s -o "$TMP/out" -D "$TMP/headers" -w '%{http_code}' -H 'Range: bytes=5000-' \
+  "$BASE/api/projects/$PROJ/files/raw?path=clip.mp4")
+[ "$STATUS" = "416" ] || fail "raw mp4 unsatisfiable: expected 416, got $STATUS"
+[ "$(hdr content-range)" = "bytes */4096" ] || fail "raw mp4 unsatisfiable: content-range"
+ok "GET .../files/raw Range 5000-: 416 with Content-Range bytes */4096"
+
+api 404 GET "/api/projects/$PROJ/files/raw?path=../clip.mp4"
+ok "GET .../files/raw?path=../clip.mp4: 404 (safe_path still first for media)"
 
 # =====================================================================
 # 3. traversal + the missing query parameter

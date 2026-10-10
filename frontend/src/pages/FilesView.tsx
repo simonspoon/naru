@@ -78,6 +78,7 @@ import { splitFrontmatter } from '../frontmatter'
 import { delimiterFor, parseDelimited, type DelimitedTable } from '../fileCsv'
 import { isHtmlDocumentPath } from '../fileHtml'
 import { isImagePath } from '../fileImage'
+import { mediaKindForPath } from '../fileMedia'
 import { resolveMarkdownImageSrc } from '../markdownAssets'
 import { newFilePath } from '../newFile'
 import { loadOpenFiles, saveOpenFiles } from '../openFiles'
@@ -1136,6 +1137,15 @@ function ContentPane({
     // its bytes; both are displayable as an image. Keyed on the path so the
     // load-error state below can't leak from one file into the next.
     <FileImageBody key={data.path} projectId={projectId} path={data.path} />
+  ) : mediaKindForPath(data.path) !== null ? (
+    // Video/audio (naru task 1751): same raw route, native controls. Keyed on
+    // the path so the error fallback can't leak into the next file.
+    <FileMediaBody
+      key={data.path}
+      projectId={projectId}
+      path={data.path}
+      kind={mediaKindForPath(data.path) ?? 'video'}
+    />
   ) : data.is_binary ? (
     <p className="muted">Binary file — cannot display.</p>
   ) : data.language === 'markdown' ? (
@@ -1704,6 +1714,47 @@ function FileImageBody({
         alt={basename(path)}
         onError={() => setFailed(true)}
       />
+    </div>
+  )
+}
+
+/** A video or audio file played inline with the browser's native controls
+ * (naru task 1751). `mov`/`m4a` depend on codec, so the element's `error`
+ * event swaps in a short note with a download link rather than a dead player. */
+function FileMediaBody({
+  projectId,
+  path,
+  kind,
+}: {
+  projectId: number
+  path: string
+  kind: 'video' | 'audio'
+}) {
+  const [failed, setFailed] = useState(false)
+  const src = projectFileRawUrl(projectId, path)
+  if (failed) {
+    return (
+      <p className="muted">
+        This browser cannot play this file.{' '}
+        <a href={projectFileDownloadUrl(projectId, path)} download={basename(path)}>
+          Download {basename(path)}
+        </a>
+      </p>
+    )
+  }
+  return (
+    <div className="files-content-image-wrap">
+      {kind === 'video' ? (
+        <video
+          className="files-content-image"
+          src={src}
+          controls
+          preload="metadata"
+          onError={() => setFailed(true)}
+        />
+      ) : (
+        <audio src={src} controls preload="metadata" onError={() => setFailed(true)} />
+      )}
     </div>
   )
 }

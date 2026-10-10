@@ -93,7 +93,7 @@ pub fn complete_structured(
         ));
     }
     let script = agents::structured_script(action, id, name, prompt, schema, model, prompts)?;
-    let mut cmd = Command::new("bash");
+    let mut cmd = crate::core::proc::bash();
     cmd.arg("-c").arg(&script).current_dir(cwd);
     let out = agents::capture(cmd, None, timeout)?;
     if out.stdout.len() > ANSWER_CAP {
@@ -132,7 +132,7 @@ fn parse_structured(code: i32, stdout: &str, stderr: &str) -> Result<Value, Stri
 /// Runs the resolved `workflow-prompt` script to completion and reads the
 /// answer off its stdout.
 fn run_claude(script: &str, cwd: &str, timeout: Duration) -> Result<String, String> {
-    let mut cmd = Command::new("bash");
+    let mut cmd = crate::core::proc::bash();
     cmd.arg("-c").arg(script).current_dir(cwd);
     let out = agents::capture(cmd, None, timeout)?;
     if out.stdout.len() > ANSWER_CAP {

@@ -130,7 +130,7 @@ pub fn validate_values(
 /// positionally and by environment, the unset sweep, the working directory.
 /// `values` must already be resolved by [`validate_values`].
 fn command(script: &Script, resolved: &BTreeMap<String, String>, cwd: Option<&str>) -> Command {
-    let mut cmd = Command::new("bash");
+    let mut cmd = crate::core::proc::bash();
     // The body is one argument, never a fragment of a command line. `$0` is
     // the script's name so `set -u` diagnostics and `basename $0` read right.
     cmd.arg("-c").arg(&script.body).arg(&script.name);

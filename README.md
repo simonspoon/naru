@@ -35,7 +35,8 @@ On Windows, download `naru-windows-amd64-setup.exe` from the
 [GitHub releases page](https://github.com/simonspoon/naru/releases) and run
 it. It installs per user, with no admin rights, and adds `naru` to your PATH.
 Naru needs Git for Windows (for `bash`) and Claude Code; the installer's
-closing page says how to set them up.
+closing page says how to set them up. Naru finds Git's `bash` itself (never
+WSL's); set `NARU_BASH` to a `bash.exe` path to override.
 
 Or build from source. You need Rust (edition 2024), Node.js and npm:
 

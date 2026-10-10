@@ -5,13 +5,10 @@ import {
   clock,
   meterFraction,
   meterStep,
+  MIN_SECONDS,
   nearSilent,
   peakDb,
-  promptAt,
-  PROMPT_SECONDS,
   READ_ALOUD,
-  REPLY_PROMPTS,
-  SCRIPT_SECONDS,
   shouldAutoStop,
   STOP_SECONDS,
   statusLine,
@@ -19,32 +16,23 @@ import {
 } from './voiceEnroll'
 import type { VoiceEnrollment } from './types/VoiceEnrollment'
 
-const sample = { bytes: 100, seconds: 90, recorded_at: '2026-10-09T10:00:00Z' }
+const sample = { bytes: 100, seconds: 12, recorded_at: '2026-10-09T10:00:00Z' }
 
 describe('the schedule', () => {
-  it('fills the target time', () => {
-    expect(SCRIPT_SECONDS + REPLY_PROMPTS.length * PROMPT_SECONDS).toBe(TARGET_SECONDS)
+  it('has a read-aloud text that fits the target time', () => {
     const words = READ_ALOUD.split(/\s+/).length
-    // ~150 wpm or slower over the script window
-    expect(words / (SCRIPT_SECONDS / 60)).toBeLessThanOrEqual(160)
-    expect(words / (SCRIPT_SECONDS / 60)).toBeGreaterThan(120)
+    // a 150 wpm reading finishes with at least 1.5 s to spare before the auto-stop
+    const readingSeconds = (words / 150) * 60
+    expect(readingSeconds).toBeLessThanOrEqual(TARGET_SECONDS - 1.5)
+    expect(readingSeconds).toBeGreaterThanOrEqual(9)
   })
 
-  it('shows the paragraph, then each reply in turn, then done', () => {
-    expect(promptAt(0)).toEqual({ kind: 'script', text: READ_ALOUD })
-    expect(promptAt(SCRIPT_SECONDS - 0.1).kind).toBe('script')
-    expect(promptAt(SCRIPT_SECONDS)).toEqual({ kind: 'reply', text: REPLY_PROMPTS[0], index: 0 })
-    expect(promptAt(SCRIPT_SECONDS + PROMPT_SECONDS).text).toBe(REPLY_PROMPTS[1])
-    expect(promptAt(TARGET_SECONDS - 0.1).text).toBe(REPLY_PROMPTS[REPLY_PROMPTS.length - 1])
-    expect(promptAt(TARGET_SECONDS + 5).text).toBe(REPLY_PROMPTS[REPLY_PROMPTS.length - 1])
-  })
-
-  it('allows stop from 22 s (margin over the 20 s minimum) and stops itself at 90 s', () => {
-    expect(STOP_SECONDS).toBeGreaterThan(20)
+  it('allows stop from 9 s (margin over the 8 s minimum) and stops itself at 12 s', () => {
+    expect(STOP_SECONDS).toBeGreaterThan(MIN_SECONDS)
     expect(canStop(STOP_SECONDS - 0.1)).toBe(false)
     expect(canStop(STOP_SECONDS)).toBe(true)
-    expect(shouldAutoStop(89.9)).toBe(false)
-    expect(shouldAutoStop(90)).toBe(true)
+    expect(shouldAutoStop(11.9)).toBe(false)
+    expect(shouldAutoStop(12)).toBe(true)
   })
 })
 

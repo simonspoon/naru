@@ -1413,6 +1413,21 @@ const MIGRATIONS: &[&str] = &[
     // it was first pinned. Pinned boards are listed beside the global board
     // history whatever page they fall on.
     "ALTER TABLE live_boards ADD COLUMN pinned_at TEXT;",
+    // Naru task 1773: the top-level agent a session ran as (`claude --agent
+    // supervisor`), from the transcript's `agent-setting` line, so the
+    // scorecard can count a session as a run of it. Ingest is cursor-driven,
+    // so the cursor clear below makes the next ordinary `cc::sync` re-walk
+    // once and fill the column on sessions that predate it (the
+    // `COALESCE(existing, new)` upsert); it ships in the same binary that
+    // extracts the value. Additive-only: `cc_files` holds cursors, not data.
+    "ALTER TABLE cc_sessions ADD COLUMN main_agent TEXT;
+     DELETE FROM cc_files;",
+    // Naru task 1774: headless `claude -p` calls write no transcript, so they
+    // reach the dashboard through the usage ledger (`core::cc`). Claude's own
+    // reported cost is authoritative for them, so a message row may carry it
+    // (micro-USD); NULL = price the tokens at read time, as for every
+    // transcript row.
+    "ALTER TABLE cc_messages ADD COLUMN cost_micro_usd INTEGER;",
 ];
 
 /// Selects full task rows including the derived `blocked` flag.
@@ -3179,6 +3194,9 @@ pub struct CcSessionUpsert {
     pub start_ts: Option<i64>,
     /// Max over ALL timestamped lines seen (unix seconds).
     pub end_ts: Option<i64>,
+    /// The transcript's `agent-setting` line (`claude --agent <name>`): the
+    /// top-level agent the session ran as. Keep-first on conflict.
+    pub main_agent: Option<String>,
 }
 
 /// One subagent run under a parent session. Keyed `(session_id, agent_id)`;
@@ -3207,7 +3225,8 @@ pub struct CcAgentRunUpsert {
 
 /// One assistant usage event. Keyed by the event `uuid`; re-inserting is a
 /// no-op. Tokens only — cost is derived from the price table at read time,
-/// never stored.
+/// and stored (`cost_micro_usd`) only for headless ledger rows, where the cost
+/// Claude reported is authoritative (naru's estimate overstates those calls).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CcMessageRow {
     pub uuid: String,
@@ -3234,6 +3253,8 @@ pub struct CcMessageRow {
     /// no prose (tool-use only, or text that sanitized to empty), which is
     /// also how every row ingested before migration 24 reads.
     pub preview: Option<String>,
+    /// Reported cost in micro-USD; `None` = price the tokens at read time.
+    pub cost_micro_usd: Option<i64>,
 }
 
 /// One human turn on a session's main thread. Keyed by the transcript line
@@ -3357,6 +3378,7 @@ pub struct CcSessionRecord {
     pub used_subagent: bool,
     pub start_ts: Option<i64>,
     pub end_ts: Option<i64>,
+    pub main_agent: Option<String>,
 }
 
 /// Rows actually inserted by one `cc_ingest_file` call (conflict-no-ops
@@ -9861,8 +9883,8 @@ impl Store {
         {
             let mut sess = tx.prepare(
                 "INSERT INTO cc_sessions \
-                     (session_id, cwd, git_branch, entrypoint, used_subagent, start_ts, end_ts) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+                     (session_id, cwd, git_branch, entrypoint, used_subagent, start_ts, end_ts, main_agent) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
                  ON CONFLICT(session_id) DO UPDATE SET \
                      cwd           = COALESCE(cc_sessions.cwd, excluded.cwd), \
                      git_branch    = COALESCE(cc_sessions.git_branch, excluded.git_branch), \
@@ -9871,7 +9893,8 @@ impl Store {
                      start_ts      = MIN(COALESCE(cc_sessions.start_ts, excluded.start_ts), \
                                          COALESCE(excluded.start_ts, cc_sessions.start_ts)), \
                      end_ts        = MAX(COALESCE(cc_sessions.end_ts, excluded.end_ts), \
-                                         COALESCE(excluded.end_ts, cc_sessions.end_ts))",
+                                         COALESCE(excluded.end_ts, cc_sessions.end_ts)), \
+                     main_agent    = COALESCE(cc_sessions.main_agent, excluded.main_agent)",
             )?;
             for s in &batch.sessions {
                 sess.execute((
@@ -9882,6 +9905,7 @@ impl Store {
                     s.used_subagent,
                     s.start_ts,
                     s.end_ts,
+                    &s.main_agent,
                 ))?;
             }
 
@@ -9920,8 +9944,8 @@ impl Store {
                 "INSERT INTO cc_messages \
                      (uuid, session_id, agent_id, ts, model, input_tokens, output_tokens, \
                       cache_read_tokens, cache_creation_tokens, skill, agent, preview, \
-                      message_id) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) \
+                      message_id, cost_micro_usd) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
                  ON CONFLICT(uuid) DO NOTHING",
             )?;
             // `preview` arrived after these rows did (migration 24), so it needs
@@ -9959,6 +9983,7 @@ impl Store {
                     &m.agent,
                     &m.preview,
                     &m.message_id,
+                    m.cost_micro_usd,
                 ))? as i64;
                 counts.messages_added += added;
                 if added == 0 && m.preview.is_some() {
@@ -10083,7 +10108,7 @@ impl Store {
     /// needed). `cutoff = None` returns everything.
     pub fn cc_read_sessions(&self, cutoff: Option<i64>) -> Result<Vec<CcSessionRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT session_id, cwd, git_branch, entrypoint, used_subagent, start_ts, end_ts \
+            "SELECT session_id, cwd, git_branch, entrypoint, used_subagent, start_ts, end_ts, main_agent \
              FROM cc_sessions WHERE ?1 IS NULL OR end_ts >= ?1",
         )?;
         let rows = stmt.query_map([cutoff], |r| {
@@ -10095,9 +10120,20 @@ impl Store {
                 used_subagent: r.get::<_, i64>(4)? != 0,
                 start_ts: r.get(5)?,
                 end_ts: r.get(6)?,
+                main_agent: r.get(7)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// The stored `entrypoint` of a session: `None` = no such session,
+    /// `Some(None)` = a session with no entrypoint recorded.
+    pub fn cc_session_entrypoint(&self, session_id: &str) -> Result<Option<Option<String>>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT entrypoint FROM cc_sessions WHERE session_id = ?1")?;
+        let mut rows = stmt.query_map([session_id], |r| r.get::<_, Option<String>>(0))?;
+        Ok(rows.next().transpose()?)
     }
 
     /// Message rows with `ts >= cutoff` (`None` = all), oldest first —
@@ -10108,7 +10144,7 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT uuid, session_id, agent_id, ts, model, input_tokens, output_tokens, \
                     cache_read_tokens, cache_creation_tokens, skill, agent, preview, \
-                    message_id \
+                    message_id, cost_micro_usd \
              FROM cc_messages WHERE ?1 IS NULL OR ts >= ?1 ORDER BY ts, uuid",
         )?;
         let rows = stmt.query_map([cutoff], |r| {
@@ -10126,6 +10162,7 @@ impl Store {
                 agent: r.get(10)?,
                 preview: r.get(11)?,
                 message_id: r.get(12)?,
+                cost_micro_usd: r.get(13)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -10184,6 +10221,7 @@ impl Store {
                 agent: None,
                 preview: None,
                 message_id: r.get(9)?,
+                cost_micro_usd: None,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -10205,6 +10243,64 @@ impl Store {
                    AND r.agent IS NOT NULL AND (?1 IS NULL OR r.agent = ?1))",
         )?;
         let rows = stmt.query_map([name], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Sessions that ran as a top-level agent (`cc_sessions.main_agent`, naru
+    /// task 1773), `(session_id, agent)`; `name` narrows to one agent.
+    pub fn cc_read_main_agent_sessions(&self, name: Option<&str>) -> Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT session_id, main_agent FROM cc_sessions \
+             WHERE main_agent IS NOT NULL AND (?1 IS NULL OR main_agent = ?1)",
+        )?;
+        let rows = stmt.query_map([name], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Main-thread message rows (`agent_id IS NULL`) of the sessions
+    /// [`Store::cc_read_main_agent_sessions`] lists — the scorecard's cost and
+    /// token source for a session counted as one run of its main agent.
+    pub fn cc_read_main_agent_messages(&self, name: Option<&str>) -> Result<Vec<CcMessageRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT m.uuid, m.session_id, m.agent_id, m.ts, m.model, m.input_tokens, \
+                    m.output_tokens, m.cache_read_tokens, m.cache_creation_tokens, \
+                    m.message_id \
+             FROM cc_messages m JOIN cc_sessions s ON s.session_id = m.session_id \
+             WHERE m.agent_id IS NULL AND s.main_agent IS NOT NULL \
+               AND (?1 IS NULL OR s.main_agent = ?1) \
+             ORDER BY m.ts, m.uuid",
+        )?;
+        let rows = stmt.query_map([name], |r| {
+            Ok(CcMessageRow {
+                uuid: r.get(0)?,
+                session_id: r.get(1)?,
+                agent_id: r.get(2)?,
+                ts: r.get(3)?,
+                model: r.get(4)?,
+                input_tokens: r.get(5)?,
+                output_tokens: r.get(6)?,
+                cache_read_tokens: r.get(7)?,
+                cache_creation_tokens: r.get(8)?,
+                skill: None,
+                agent: None,
+                preview: None,
+                message_id: r.get(9)?,
+                cost_micro_usd: None,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// `(session_id, ts)` of the main-thread tool calls of those sessions —
+    /// stretches the run's wall time like [`Store::cc_read_scorecard_tool_ts`].
+    pub fn cc_read_main_agent_tool_ts(&self, name: Option<&str>) -> Result<Vec<(String, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT t.session_id, t.ts FROM cc_tool_calls t \
+             JOIN cc_sessions s ON s.session_id = t.session_id \
+             WHERE t.agent_id IS NULL AND s.main_agent IS NOT NULL \
+               AND (?1 IS NULL OR s.main_agent = ?1)",
+        )?;
+        let rows = stmt.query_map([name], |r| Ok((r.get(0)?, r.get(1)?)))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
@@ -10279,7 +10375,7 @@ impl Store {
     /// ingested.
     pub fn cc_session(&self, session_id: &str) -> Result<Option<CcSessionRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT session_id, cwd, git_branch, entrypoint, used_subagent, start_ts, end_ts \
+            "SELECT session_id, cwd, git_branch, entrypoint, used_subagent, start_ts, end_ts, main_agent \
              FROM cc_sessions WHERE session_id = ?1",
         )?;
         let mut rows = stmt.query_map([session_id], |r| {
@@ -10291,6 +10387,7 @@ impl Store {
                 used_subagent: r.get::<_, i64>(4)? != 0,
                 start_ts: r.get(5)?,
                 end_ts: r.get(6)?,
+                main_agent: r.get(7)?,
             })
         })?;
         Ok(rows.next().transpose()?)
@@ -10301,7 +10398,7 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT uuid, session_id, agent_id, ts, model, input_tokens, output_tokens, \
                     cache_read_tokens, cache_creation_tokens, skill, agent, preview, \
-                    message_id \
+                    message_id, cost_micro_usd \
              FROM cc_messages WHERE session_id = ?1 ORDER BY ts, uuid",
         )?;
         let rows = stmt.query_map([session_id], |r| {
@@ -10319,6 +10416,7 @@ impl Store {
                 agent: r.get(10)?,
                 preview: r.get(11)?,
                 message_id: r.get(12)?,
+                cost_micro_usd: r.get(13)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -15633,15 +15731,15 @@ mod tests {
         );
         assert_eq!(
             MIGRATIONS.len(),
-            87,
-            "a fresh db should report user_version 87"
+            89,
+            "a fresh db should report user_version 89"
         );
         let (store, _dir) = temp_store();
         let version: i64 = store
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 87);
+        assert_eq!(version, 89);
     }
 
     /// Workflows replace diagrams at migration 83 (mesa task 1607): a db that
@@ -15665,7 +15763,7 @@ mod tests {
         store
             .conn
             .execute_batch(
-                "DROP TABLE task_notes; ALTER TABLE live_boards DROP COLUMN pinned_at; DROP TABLE workflow_log; DROP TABLE workflow_runs; DROP TABLE workflow_edges; \
+                "DROP TABLE task_notes; ALTER TABLE cc_messages DROP COLUMN cost_micro_usd; ALTER TABLE cc_sessions DROP COLUMN main_agent; ALTER TABLE live_boards DROP COLUMN pinned_at; DROP TABLE workflow_log; DROP TABLE workflow_runs; DROP TABLE workflow_edges; \
                  DROP TABLE workflow_nodes; DROP TABLE workflows; \
                  CREATE TABLE diagrams (id INTEGER PRIMARY KEY, title TEXT); \
                  INSERT INTO diagrams (title) VALUES ('stale'); \
@@ -20460,6 +20558,7 @@ mod tests {
                 used_subagent: false,
                 start_ts: Some(1000),
                 end_ts: Some(2000),
+                main_agent: None,
             }],
             agent_runs: vec![CcAgentRunUpsert {
                 session_id: "sess-1".into(),
@@ -20475,6 +20574,7 @@ mod tests {
                 CcMessageRow {
                     uuid: "uuid-1".into(),
                     message_id: None,
+                    cost_micro_usd: None,
                     session_id: "sess-1".into(),
                     agent_id: None,
                     ts: 1500,
@@ -20490,6 +20590,7 @@ mod tests {
                 CcMessageRow {
                     uuid: "uuid-2".into(),
                     message_id: None,
+                    cost_micro_usd: None,
                     session_id: "sess-1".into(),
                     agent_id: Some("agent-1".into()),
                     ts: 1600,
@@ -20838,6 +20939,7 @@ mod tests {
                 used_subagent: false,
                 start_ts: Some(1500),
                 end_ts: Some(1600),
+                main_agent: None,
             }],
             ..Default::default()
         };
@@ -20854,6 +20956,7 @@ mod tests {
                 used_subagent: true,
                 start_ts: Some(1000),
                 end_ts: Some(2000),
+                main_agent: None,
             }],
             ..Default::default()
         };
@@ -20895,6 +20998,7 @@ mod tests {
                 used_subagent: false,
                 start_ts: Some(1200),
                 end_ts: Some(1300),
+                main_agent: None,
             }],
             ..Default::default()
         };
@@ -21052,6 +21156,7 @@ mod tests {
             messages: vec![CcMessageRow {
                 uuid: "u1".into(),
                 message_id: None,
+                cost_micro_usd: None,
                 session_id: "s".into(),
                 agent_id: None,
                 ts: 10,

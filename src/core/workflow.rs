@@ -979,7 +979,7 @@ fn run_node<A: StoreAccess>(
                 .get("timeout_secs")
                 .and_then(Value::as_u64)
                 .unwrap_or(DEFAULT_CLI_TIMEOUT_SECS);
-            let mut cmd = Command::new("bash");
+            let mut cmd = crate::core::proc::bash();
             cmd.arg("-c").arg(str_of("command")).current_dir(cwd);
             if input.len() <= ENV_INPUT_MAX {
                 cmd.env("NARU_INPUT", input);

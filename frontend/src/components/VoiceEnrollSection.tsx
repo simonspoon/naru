@@ -20,7 +20,7 @@ import {
   MIN_SECONDS,
   nearSilent,
   peakDb,
-  promptAt,
+  READ_ALOUD,
   shouldAutoStop,
   STOP_SECONDS,
   statusLine,
@@ -47,7 +47,7 @@ type Capture = {
 }
 
 /**
- * Settings > Voice: record ~90 s of the person's voice for the voice guard
+ * Settings > Voice: record ~10 s of the person's voice for the voice guard
  * (naru task 1744, `docs/voice-enrollment.md`). The server only keeps the WAV;
  * the Naru Mac app builds `ambient-enrollment.json` from it. Logic lives in
  * `voiceEnroll.ts`.
@@ -219,7 +219,6 @@ export function VoiceEnrollSection() {
     )
   }
 
-  const prompt = promptAt(elapsed)
   const silent = take ? nearSilent(take.peak) : false
 
   return (
@@ -227,9 +226,10 @@ export function VoiceEnrollSection() {
       <h2>Voice guard enrollment</h2>
       <section className="settings-command">
         <p className="muted settings-command-blurb">
-          Record about {TARGET_SECONDS} seconds of your voice so the voice guard can tell you from
-          everyone else. Read the paragraph, then answer the short prompts. The Naru Mac app
-          builds the enrollment from the recording.
+          Record about 10 seconds of your voice (it stops by itself at 12) so the voice guard can tell you from everyone
+          else. Read the text aloud at a normal pace. One recording works for every mic, so there
+          is no need to re-enroll per mic. The Naru Mac app builds the enrollment from the
+          recording.
         </p>
         {error && <p className="error">{error}</p>}
         <p className="voice-enroll-status">{statusLine(status)}</p>
@@ -242,9 +242,7 @@ export function VoiceEnrollSection() {
             <p className="voice-enroll-clock">
               {clock(elapsed)} / {clock(TARGET_SECONDS)}
             </p>
-            <p className={prompt.kind === 'script' ? 'voice-enroll-script' : 'voice-enroll-reply'}>
-              {prompt.text}
-            </p>
+            <p className="voice-enroll-script">{READ_ALOUD}</p>
           </div>
         )}
 

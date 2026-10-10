@@ -3471,6 +3471,12 @@ fn router(state: AppState) -> Router {
             "/api/config/listen",
             get(get_config_listen).put(update_config_listen),
         )
+        // The same file's `ambient` section — the custom wake words the Mac
+        // app's ambient listener wakes on (naru task 1769).
+        .route(
+            "/api/config/ambient",
+            get(get_config_ambient).put(update_config_ambient),
+        )
         // The speaker-enrollment recording (naru task 1744,
         // `docs/voice-enrollment.md`): the browser's WAV as base64 in JSON,
         // kept beside the Mac app's `ambient-enrollment.json`. The transcribe
@@ -8970,6 +8976,7 @@ async fn raw_project_file(
     State(state): State<AppState>,
     Path(id): Path<i64>,
     Query(q): Query<FilesContentQuery>,
+    headers: HeaderMap,
 ) -> ApiResult<Response> {
     let wanted = q.path.ok_or(ApiError {
         status: StatusCode::UNPROCESSABLE_ENTITY,
@@ -8992,6 +8999,11 @@ async fn raw_project_file(
     // rejects a non-image before a single byte is loaded.
     if files::safe_path(&root, &wanted).is_none() {
         return Err(not_found());
+    }
+    // The two allowlists are disjoint, so media is tried first without
+    // touching the image path.
+    if let Some(mime) = files::media_mime(&wanted) {
+        return raw_media(root, wanted, mime, &headers).await;
     }
     let mime = files::image_mime(&wanted).ok_or_else(|| ApiError {
         status: StatusCode::UNPROCESSABLE_ENTITY,
@@ -9032,6 +9044,104 @@ async fn raw_project_file(
         bytes,
     )
         .into_response())
+}
+
+/// The media half of [`raw_project_file`] (naru task 1751): a video/audio
+/// extension from `files::media_mime`, served with the same headers as an
+/// image (`inline`, `nosniff`, the same CSP) plus `Accept-Ranges: bytes` and
+/// single-range support (206 / 416) — Safari will not play media without it.
+/// Only the requested slice is read (seek + take, at most
+/// `files::MEDIA_RANGE_CHUNK` per response); a request with no usable `Range`
+/// gets the whole file under the download cap, like an image.
+async fn raw_media(
+    root: String,
+    rel: String,
+    mime: &'static str,
+    headers: &HeaderMap,
+) -> ApiResult<Response> {
+    let range_header = headers
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let not_found = ApiError {
+        status: StatusCode::NOT_FOUND,
+        code: "not_found",
+        message: format!("file not found: {rel}"),
+    };
+    let rel2 = rel.clone();
+    let out = tokio::task::spawn_blocking(move || {
+        let path = files::safe_path(&root, &rel2).ok_or(files::DownloadFileError::NotFound)?;
+        let meta = std::fs::metadata(&path).map_err(|_| files::DownloadFileError::NotFound)?;
+        if meta.is_dir() {
+            return Err(files::DownloadFileError::NotFound);
+        }
+        let total = meta.len();
+        match files::parse_byte_range(range_header.as_deref(), total) {
+            files::ByteRange::Full => {
+                let (name, bytes) = files::read_file_download(&root, &rel2)?;
+                Ok((name, total, None, bytes))
+            }
+            files::ByteRange::Unsatisfiable => {
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| rel2.clone());
+                Ok((name, total, Some((1, 0)), Vec::new()))
+            }
+            files::ByteRange::Partial(a, b) => {
+                let (name, total, bytes) = files::read_file_range(&root, &rel2, a, b)?;
+                Ok((name, total, Some((a, b)), bytes))
+            }
+        }
+    })
+    .await
+    .unwrap_or(Err(files::DownloadFileError::NotFound));
+    let (filename, total, range, bytes) = match out {
+        Ok(v) => v,
+        Err(files::DownloadFileError::NotFound) => return Err(not_found),
+        Err(files::DownloadFileError::TooLarge) => {
+            return Err(ApiError {
+                status: StatusCode::UNPROCESSABLE_ENTITY,
+                code: "validation",
+                message: "file is larger than mesa can download".into(),
+            });
+        }
+    };
+    // `(1, 0)` marks the unsatisfiable range: an empty, 416 answer.
+    let (status, content_range) = match range {
+        None => (StatusCode::OK, None),
+        Some((1, 0)) => (
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            Some(format!("bytes */{total}")),
+        ),
+        Some((a, b)) => (
+            StatusCode::PARTIAL_CONTENT,
+            Some(format!("bytes {a}-{b}/{total}")),
+        ),
+    };
+    let mut resp = (
+        status,
+        [
+            (header::CONTENT_TYPE, mime.to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                disposition("inline", &filename),
+            ),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
+            (
+                header::CONTENT_SECURITY_POLICY,
+                "default-src 'none'; style-src 'unsafe-inline'; sandbox".to_string(),
+            ),
+            (header::ACCEPT_RANGES, "bytes".to_string()),
+        ],
+        bytes,
+    )
+        .into_response();
+    if let Some(cr) = content_range {
+        resp.headers_mut()
+            .insert(header::CONTENT_RANGE, cr.parse().expect("ascii header"));
+    }
+    Ok(resp)
 }
 
 #[derive(Deserialize)]
@@ -10217,6 +10327,59 @@ async fn update_config_keymap(
         },
     })?;
     get_config_keymap(State(state), ConnectInfo(addr), headers).await
+}
+
+/// `GET /api/config/ambient` — the custom wake words the ambient listener
+/// wakes on besides the built-in "Naru" (`docs/config.md`, naru task 1769).
+///
+/// Gated like `get_config_keymap` — same file, same class of secret — and a
+/// malformed config is the same 502 `unavailable`.
+async fn get_config_ambient(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    match config::ambient() {
+        Ok(ambient) => Ok(Json(ambient).into_response()),
+        Err(message) => Err(ApiError {
+            status: StatusCode::BAD_GATEWAY,
+            code: "unavailable",
+            message,
+        }),
+    }
+}
+
+#[derive(Deserialize)]
+struct AmbientUpdate {
+    wake_words: Vec<String>,
+}
+
+/// `PUT /api/config/ambient` — replaces the wake-word list and echoes it.
+/// Entries are trimmed and case-insensitive duplicates dropped; a blank entry
+/// or one with fewer than 3 letters and digits is a 422 `validation`; `[]` removes the key.
+///
+/// `require_agent_access`, like every other config write (mesa task 1021).
+async fn update_config_ambient(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(body): Json<AmbientUpdate>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    config::save_ambient(&body.wake_words).map_err(|e| match e {
+        config::SaveError::Validation(message) => ApiError {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            code: "validation",
+            message,
+        },
+        config::SaveError::Unavailable(message) => ApiError {
+            status: StatusCode::BAD_GATEWAY,
+            code: "unavailable",
+            message,
+        },
+    })?;
+    get_config_ambient(State(state), ConnectInfo(addr), headers).await
 }
 
 /// `GET /api/config/speech` — the voice the inbox's play button speaks in, plus
@@ -12683,6 +12846,7 @@ mod tests {
             Query(FilesContentQuery {
                 path: Some("src/img.png".to_string()),
             }),
+            HeaderMap::new(),
         )
         .await
         .unwrap();
@@ -12698,6 +12862,91 @@ mod tests {
             "default-src 'none'; style-src 'unsafe-inline'; sandbox"
         );
         assert_eq!(body_bytes(resp).await, raw);
+    }
+
+    async fn raw_media_get(
+        state: &AppState,
+        id: i64,
+        path: &str,
+        range: Option<&str>,
+    ) -> ApiResult<Response> {
+        let mut h = HeaderMap::new();
+        if let Some(r) = range {
+            h.insert(header::RANGE, r.parse().unwrap());
+        }
+        raw_project_file(
+            State(state.clone()),
+            Path(id),
+            Query(FilesContentQuery {
+                path: Some(path.to_string()),
+            }),
+            h,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn files_raw_serves_media_with_range_support() {
+        let (dir, state) = test_state();
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let data: Vec<u8> = (0u8..100).collect();
+        std::fs::write(root.join("clip.mp4"), &data).unwrap();
+        std::fs::write(root.join("song.MP3"), &data).unwrap();
+        let id = new_project(&state, Some(root.to_str().unwrap()));
+
+        let resp = raw_media_get(&state, id, "clip.mp4", None).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(header_str(&resp, header::CONTENT_TYPE), "video/mp4");
+        assert_eq!(header_str(&resp, header::ACCEPT_RANGES), "bytes");
+        assert!(header_str(&resp, header::CONTENT_DISPOSITION).starts_with("inline; "));
+        assert_eq!(header_str(&resp, header::X_CONTENT_TYPE_OPTIONS), "nosniff");
+        assert_eq!(body_bytes(resp).await, data);
+
+        let resp = raw_media_get(&state, id, "song.MP3", None).await.unwrap();
+        assert_eq!(header_str(&resp, header::CONTENT_TYPE), "audio/mpeg");
+
+        let resp = raw_media_get(&state, id, "clip.mp4", Some("bytes=10-19"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(header_str(&resp, header::CONTENT_RANGE), "bytes 10-19/100");
+        assert_eq!(body_bytes(resp).await, data[10..20].to_vec());
+
+        let resp = raw_media_get(&state, id, "clip.mp4", Some("bytes=90-"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(header_str(&resp, header::CONTENT_RANGE), "bytes 90-99/100");
+        assert_eq!(body_bytes(resp).await, data[90..].to_vec());
+
+        let resp = raw_media_get(&state, id, "clip.mp4", Some("bytes=-5"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(header_str(&resp, header::CONTENT_RANGE), "bytes 95-99/100");
+        assert_eq!(body_bytes(resp).await, data[95..].to_vec());
+
+        let resp = raw_media_get(&state, id, "clip.mp4", Some("bytes=100-120"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(header_str(&resp, header::CONTENT_RANGE), "bytes */100");
+        assert!(body_bytes(resp).await.is_empty());
+
+        // An image never advertises ranges.
+        std::fs::write(root.join("a.png"), [1u8, 2, 3]).unwrap();
+        let resp = raw_media_get(&state, id, "a.png", Some("bytes=0-1"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(resp.headers().get(header::ACCEPT_RANGES).is_none());
+
+        // Traversal is still 404, a non-media non-image still 422.
+        let err = raw_media_get(&state, id, "../clip.mp4", None)
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -12718,6 +12967,7 @@ mod tests {
                 Query(FilesContentQuery {
                     path: Some(bad.to_string()),
                 }),
+                HeaderMap::new(),
             )
             .await
             .unwrap_err();
@@ -12750,6 +13000,7 @@ mod tests {
                 Query(FilesContentQuery {
                     path: Some(bad.to_string()),
                 }),
+                HeaderMap::new(),
             )
             .await
             .unwrap_err();
@@ -12770,6 +13021,7 @@ mod tests {
             State(state),
             Path(id),
             Query(FilesContentQuery { path: None }),
+            HeaderMap::new(),
         )
         .await
         .unwrap_err();
@@ -20058,6 +20310,82 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         b.extend_from_slice(&data.to_le_bytes());
         b.resize(b.len() + data as usize, 0);
         b
+    }
+
+    /// naru task 1769: `/api/config/ambient` stores trimmed, case-deduped wake
+    /// words and echoes them, refuses a blank / symbol-only entry with 422
+    /// without writing, clears with `[]`, and refuses a foreign Host.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn ambient_routes_save_echo_and_clear() {
+        let _env = attachments::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (_dir, state) = test_state();
+        let cfg = tempfile::tempdir().unwrap();
+        // SAFETY: ENV_LOCK gives this test exclusive access to the environment.
+        unsafe { std::env::set_var("MESA_CONFIG_FILE", cfg.path().join("config.json")) };
+        let put = |words: &[&str]| {
+            update_config_ambient(
+                State(state.clone()),
+                ConnectInfo(loopback()),
+                loopback_agent_headers(),
+                Json(AmbientUpdate {
+                    wake_words: words.iter().map(|w| w.to_string()).collect(),
+                }),
+            )
+        };
+        let body = |resp: Response| async move {
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
+        };
+
+        let resp = get_config_ambient(
+            State(state.clone()),
+            ConnectInfo(loopback()),
+            loopback_agent_headers(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(body(resp).await, serde_json::json!({"wake_words": []}));
+
+        let resp = put(&[" Computer ", "computer", "Jarvis"]).await.unwrap();
+        assert_eq!(
+            body(resp).await,
+            serde_json::json!({"wake_words": ["Computer", "Jarvis"]})
+        );
+
+        for bad in ["", "  ", "..."] {
+            let err = put(&["Hal", bad]).await.unwrap_err();
+            assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY);
+            assert_eq!(err.code, "validation");
+        }
+        let resp = get_config_ambient(
+            State(state.clone()),
+            ConnectInfo(loopback()),
+            loopback_agent_headers(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            body(resp).await,
+            serde_json::json!({"wake_words": ["Computer", "Jarvis"]})
+        );
+
+        let resp = put(&[]).await.unwrap();
+        assert_eq!(body(resp).await, serde_json::json!({"wake_words": []}));
+
+        let foreign = get_config_ambient(
+            State(state.clone()),
+            ConnectInfo(loopback()),
+            hdrs(Some("evil.example:0"), None),
+        )
+        .await;
+        assert!(foreign.is_err());
+        // SAFETY: as above.
+        unsafe { std::env::remove_var("MESA_CONFIG_FILE") };
     }
 
     /// naru task 1744: `/api/config/voice-enrollment` saves a valid WAV
