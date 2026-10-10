@@ -2827,7 +2827,10 @@ EXAMPLES
     /// Say something to the person; prints the created turn
     ///
     /// This is SPEECH: the text is read aloud by a synthesiser, so write
-    /// plain spoken prose — no markdown, no bullet lists, no code. Type the
+    /// plain spoken prose — no markdown, no bullet lists, no code. Voice
+    /// style: no parentheses or emojis, short real questions, pauses by
+    /// comma and full stop only, sentences under about 25 words, numbers and
+    /// symbols spelled out, no ALL CAPS. Type the
     /// message after `say` (quoting is optional; multiple words are joined).
     /// Put every flag BEFORE the message text.
     #[command(after_help = "\
