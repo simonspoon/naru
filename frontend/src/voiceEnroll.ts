@@ -5,57 +5,18 @@
 import type { VoiceEnrollment } from './types/VoiceEnrollment'
 
 /** The Mac app's `enroll(wavURLs:)` and the server need at least this much audio. */
-export const MIN_SECONDS = 20
+export const MIN_SECONDS = 8
 /** Stop enables here: wall-clock runs ahead of captured samples, so keep a margin over MIN_SECONDS. */
-export const STOP_SECONDS = 22
+export const STOP_SECONDS = 9
 /** Recording stops by itself here. */
-export const TARGET_SECONDS = 90
+export const TARGET_SECONDS = 12
 /** A take whose loudest sample is below this barely picked anything up. */
 export const NEAR_SILENT_DB = -40
 
-/** One natural paragraph, ~150 words: about 60 s at a normal pace. */
+/** Two natural sentences, 24 words: about 9.6 s at 150 wpm, inside the 12 s auto-stop. */
 export const READ_ALOUD =
-  'Every morning I make a cup of coffee and look over the day ahead. Some days ' +
-  'are quiet, with a few messages to answer and a walk around the block at lunch. ' +
-  'Other days the calendar fills up before I have even sat down, and I have to ' +
-  'decide what really matters. I like to keep a notebook nearby, because ideas ' +
-  'arrive at odd moments, usually when my hands are full. When the weather is ' +
-  'good I open the window and listen to the street: a bicycle bell, a neighbour ' +
-  'calling to a dog, the soft rattle of a delivery truck turning the corner. By ' +
-  'evening the house settles down, the lights come on one by one, and I read ' +
-  'until my eyes get heavy. It is not a remarkable routine, but it is mine, and ' +
-  'I would not trade it for anything.'
-
-/** Seconds the paragraph is on screen before the one-word replies start. */
-export const SCRIPT_SECONDS = 62
-/** Seconds each one-word reply prompt stays up. */
-export const PROMPT_SECONDS = 3.5
-
-export const REPLY_PROMPTS: readonly string[] = [
-  'Say: yes',
-  'Say: no',
-  'Say a number: seven',
-  'Say: okay',
-  'Say a number: forty-two',
-  'Say: stop',
-  'Say a number: three',
-  'Say: not now',
-]
-
-export type EnrollPrompt =
-  | { kind: 'script'; text: string }
-  | { kind: 'reply'; text: string; index: number }
-
-/** What to show `elapsed` seconds into the recording. */
-export function promptAt(elapsed: number): EnrollPrompt {
-  if (elapsed < SCRIPT_SECONDS) return { kind: 'script', text: READ_ALOUD }
-  // Recording auto-stops at TARGET_SECONDS, so past the last prompt just hold it.
-  const index = Math.min(
-    REPLY_PROMPTS.length - 1,
-    Math.floor((elapsed - SCRIPT_SECONDS) / PROMPT_SECONDS),
-  )
-  return { kind: 'reply', text: REPLY_PROMPTS[index], index }
-}
+  'Every morning I make coffee and look over the day ahead. Some days are quiet, ' +
+  'with a few messages and a walk at lunch.'
 
 /** Whether Stop is enabled yet. */
 export function canStop(elapsed: number): boolean {

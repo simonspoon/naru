@@ -30,6 +30,7 @@ import { LiveHub, type LiveDock } from './components/LiveHub'
 import { ProjectTasksPage } from './pages/ProjectTasksPage'
 import { legacyScriptsRedirect, libraryRouteFromPath } from './libraryTab'
 import { WorkflowsOverview } from './pages/WorkflowsOverview'
+import { WorkflowBuilderView } from './pages/WorkflowBuilderView'
 import { SettingsView } from './pages/SettingsView'
 import { settingsTabFromPath } from './settingsTab'
 import { TerminalPage } from './pages/TerminalPage'
@@ -391,6 +392,8 @@ function App() {
   // Workflows overview: every workflow across all projects, global like
   // Scripts. Anchored, so `/projects/<id>/workflows` is never mistaken for it.
   const workflowsOverviewMatch = /^\/workflows$/.exec(path)
+  // One global (project-less) workflow, opened from the overview or Library.
+  const globalWorkflowMatch = /^\/workflows\/(\d+)$/.exec(path)
   // Library: global too, same reasoning as Scripts — a project-scoped item
   // binds a project, but the page itself is not a project tab.
   const libraryRoute = libraryRouteFromPath(path)
@@ -485,6 +488,8 @@ function App() {
     page = <HashRedirect to={scriptsRedirect} />
   } else if (workflowsOverviewMatch) {
     page = <WorkflowsOverview />
+  } else if (globalWorkflowMatch) {
+    page = <WorkflowBuilderView projectId={null} workflowId={Number(globalWorkflowMatch[1])} />
   } else if (libraryRoute) {
     // Three tabs: Claude Code items (synced against .claude), Scripts and a
     // read-only workflow list. Global: no project frame.
@@ -824,7 +829,7 @@ function App() {
           activeProjectId={activeProjectId}
           inboxFilter={inboxFilter}
           settingsActive={settingsMatch !== null}
-          workflowsActive={workflowsOverviewMatch !== null}
+          workflowsActive={workflowsOverviewMatch !== null || globalWorkflowMatch !== null}
           libraryActive={libraryRoute !== null}
           terminalActive={terminalActive}
           ccTab={ccTab}

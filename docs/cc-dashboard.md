@@ -1166,6 +1166,19 @@ model", from the db alone (mesa task 1514). No migration: it reads
   **start** = the min `ts`. A run with no billed response has no model and is
   left out. A run that used several models is counted wholly under its
   most-used model, and a run with a single response has wall time 0.
+- **Top-level agent sessions** (naru task 1773): a session launched as
+  `claude --bg --agent supervisor` has no `cc_agent_runs` row, but its
+  transcript carries a timestamp-less `{"type":"agent-setting","agentSetting":
+  "<name>"}` line. Ingest stores it as `cc_sessions.main_agent` (migration
+  index 87, keep-first; applied only to a session the file's other lines
+  made), and the scorecard counts each such session as **one run** of that
+  agent: its main-thread messages (`agent_id IS NULL`) give cost, tokens,
+  turns and model, grouped in the same `(agent, model)` rows as subagent runs.
+  Subagent runs are keyed separately, so their counts do not change. The
+  migration also clears the `cc_files` cursors, so the next ordinary sync
+  re-walks once and backfills existing sessions (no `cc reset` needed).
+  `cc sessions` / `GET /api/cc/sessions` rows carry `main_agent` (null when
+  none), shown as the **Agent** column of the sessions table.
 - **`since`/`until`** bound a run's **start** (`since` inclusive, `until`
   exclusive), `YYYY-MM-DD` (midnight UTC) or a full `YYYY-MM-DDTHH:MM:SSZ` (UTC only: any other offset is
   `validation`).
@@ -1216,3 +1229,47 @@ model", from the db alone (mesa task 1514). No migration: it reads
 
 The grouping and formatting logic of the page lives in
 `frontend/src/ccScorecard.ts` (vitest: `ccScorecard.test.ts`).
+
+## Headless calls (the usage ledger)
+
+A `claude -p --no-session-persistence` call writes no transcript, so
+transcript ingest never sees it. The **ledger** (naru task 1774) is how such
+calls reach the dashboard.
+
+- **Writing.** Pipe the call's `--output-format json` result into
+  `naru cc ledger add --source <label> [--at <RFC3339>] [--model <m>]` (CLI
+  only, no route). It appends one JSON line per `modelUsage` entry (its
+  `costUSD` kept) — or, for a result with no `modelUsage`, one line from
+  `usage` + `--model` + `total_cost_usd` — to `<naru home>/usage/headless.jsonl`
+  (`NARU_CC_LEDGER` / `MESA_CC_LEDGER` override the path), in one `O_APPEND`
+  write. Line: `{v, id, at, source, session_id, model, input_tokens,
+  output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd}`, `id` =
+  `<result uuid>:<model>`. A result with no `uuid`, garbage on stdin, or a
+  session that already has a transcript (it would count twice) is `validation`.
+- **Why a file.** `cc reset` purges the `cc_*` tables; a file next to the
+  transcripts' equivalent survives it and is re-ingested.
+- **Ingest.** `cc::sync` (via `core::cc_ledger::ingest`) reads the ledger
+  against a `cc_files` cursor like a transcript, even when there is no
+  transcript root. Each line becomes one `cc_messages` row (`uuid =
+  headless:<id>`, insert-or-ignore, so a duplicate line or a reset never double
+  counts) and a `cc_sessions` row with `entrypoint = "headless"`, start = end =
+  `at`, session id = the result's `session_id` (else `headless:<id>`) and the
+  source label in `git_branch` as `headless:<source>`. A malformed line is
+  skipped.
+- **Stored cost.** Migration `cc_messages.cost_micro_usd`: for these rows only,
+  Claude's reported cost is stored and read back (`row_cost` and `collect_inner`
+  prefer it over the price-table estimate, which overstates these calls). Every
+  transcript row keeps `NULL` and is priced at read time.
+- **Labelling.** `CcOverview.headless_cost_usd` and `CcDayPoint.headless_cost_usd`
+  carry the headless share of `est_cost_usd`; the Est. cost KPI shows
+  "incl. $X headless" and the sessions table a `headless` badge. Headless
+  sessions are left out of the average/median session minutes.
+- **Double counting.** A session that already has a transcript is refused at
+  `add` time and its entries are dropped again at ingest (a session already in
+  `cc_sessions` with a non-headless entrypoint). One gap remains: if the ledger
+  entry is ingested *first* and the transcript arrives later, both are counted;
+  `add` refuses that case unless the transcript did not yet exist.
+- **Unknown cost.** An entry with no `costUSD` / `total_cost_usd` stores no
+  cost (`cost_usd` null), so the dashboard prices its tokens from the table.
+- **Session key.** A result without a `session_id` is session
+  `headless:<uuid>`, so a multi-model call is one session.
