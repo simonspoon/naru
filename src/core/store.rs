@@ -1422,6 +1422,12 @@ const MIGRATIONS: &[&str] = &[
     // extracts the value. Additive-only: `cc_files` holds cursors, not data.
     "ALTER TABLE cc_sessions ADD COLUMN main_agent TEXT;
      DELETE FROM cc_files;",
+    // Naru task 1774: headless `claude -p` calls write no transcript, so they
+    // reach the dashboard through the usage ledger (`core::cc`). Claude's own
+    // reported cost is authoritative for them, so a message row may carry it
+    // (micro-USD); NULL = price the tokens at read time, as for every
+    // transcript row.
+    "ALTER TABLE cc_messages ADD COLUMN cost_micro_usd INTEGER;",
 ];
 
 /// Selects full task rows including the derived `blocked` flag.
@@ -3219,7 +3225,8 @@ pub struct CcAgentRunUpsert {
 
 /// One assistant usage event. Keyed by the event `uuid`; re-inserting is a
 /// no-op. Tokens only — cost is derived from the price table at read time,
-/// never stored.
+/// and stored (`cost_micro_usd`) only for headless ledger rows, where the cost
+/// Claude reported is authoritative (naru's estimate overstates those calls).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CcMessageRow {
     pub uuid: String,
@@ -3246,6 +3253,8 @@ pub struct CcMessageRow {
     /// no prose (tool-use only, or text that sanitized to empty), which is
     /// also how every row ingested before migration 24 reads.
     pub preview: Option<String>,
+    /// Reported cost in micro-USD; `None` = price the tokens at read time.
+    pub cost_micro_usd: Option<i64>,
 }
 
 /// One human turn on a session's main thread. Keyed by the transcript line
@@ -9935,8 +9944,8 @@ impl Store {
                 "INSERT INTO cc_messages \
                      (uuid, session_id, agent_id, ts, model, input_tokens, output_tokens, \
                       cache_read_tokens, cache_creation_tokens, skill, agent, preview, \
-                      message_id) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) \
+                      message_id, cost_micro_usd) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
                  ON CONFLICT(uuid) DO NOTHING",
             )?;
             // `preview` arrived after these rows did (migration 24), so it needs
@@ -9974,6 +9983,7 @@ impl Store {
                     &m.agent,
                     &m.preview,
                     &m.message_id,
+                    m.cost_micro_usd,
                 ))? as i64;
                 counts.messages_added += added;
                 if added == 0 && m.preview.is_some() {
@@ -10124,7 +10134,7 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT uuid, session_id, agent_id, ts, model, input_tokens, output_tokens, \
                     cache_read_tokens, cache_creation_tokens, skill, agent, preview, \
-                    message_id \
+                    message_id, cost_micro_usd \
              FROM cc_messages WHERE ?1 IS NULL OR ts >= ?1 ORDER BY ts, uuid",
         )?;
         let rows = stmt.query_map([cutoff], |r| {
@@ -10142,6 +10152,7 @@ impl Store {
                 agent: r.get(10)?,
                 preview: r.get(11)?,
                 message_id: r.get(12)?,
+                cost_micro_usd: r.get(13)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -10200,6 +10211,7 @@ impl Store {
                 agent: None,
                 preview: None,
                 message_id: r.get(9)?,
+                cost_micro_usd: None,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -10263,6 +10275,7 @@ impl Store {
                 agent: None,
                 preview: None,
                 message_id: r.get(9)?,
+                cost_micro_usd: None,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -10375,7 +10388,7 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT uuid, session_id, agent_id, ts, model, input_tokens, output_tokens, \
                     cache_read_tokens, cache_creation_tokens, skill, agent, preview, \
-                    message_id \
+                    message_id, cost_micro_usd \
              FROM cc_messages WHERE session_id = ?1 ORDER BY ts, uuid",
         )?;
         let rows = stmt.query_map([session_id], |r| {
@@ -10393,6 +10406,7 @@ impl Store {
                 agent: r.get(10)?,
                 preview: r.get(11)?,
                 message_id: r.get(12)?,
+                cost_micro_usd: r.get(13)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -15707,15 +15721,15 @@ mod tests {
         );
         assert_eq!(
             MIGRATIONS.len(),
-            88,
-            "a fresh db should report user_version 88"
+            89,
+            "a fresh db should report user_version 89"
         );
         let (store, _dir) = temp_store();
         let version: i64 = store
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 88);
+        assert_eq!(version, 89);
     }
 
     /// Workflows replace diagrams at migration 83 (mesa task 1607): a db that
@@ -15739,7 +15753,7 @@ mod tests {
         store
             .conn
             .execute_batch(
-                "DROP TABLE task_notes; ALTER TABLE cc_sessions DROP COLUMN main_agent; ALTER TABLE live_boards DROP COLUMN pinned_at; DROP TABLE workflow_log; DROP TABLE workflow_runs; DROP TABLE workflow_edges; \
+                "DROP TABLE task_notes; ALTER TABLE cc_messages DROP COLUMN cost_micro_usd; ALTER TABLE cc_sessions DROP COLUMN main_agent; ALTER TABLE live_boards DROP COLUMN pinned_at; DROP TABLE workflow_log; DROP TABLE workflow_runs; DROP TABLE workflow_edges; \
                  DROP TABLE workflow_nodes; DROP TABLE workflows; \
                  CREATE TABLE diagrams (id INTEGER PRIMARY KEY, title TEXT); \
                  INSERT INTO diagrams (title) VALUES ('stale'); \
@@ -20550,6 +20564,7 @@ mod tests {
                 CcMessageRow {
                     uuid: "uuid-1".into(),
                     message_id: None,
+                    cost_micro_usd: None,
                     session_id: "sess-1".into(),
                     agent_id: None,
                     ts: 1500,
@@ -20565,6 +20580,7 @@ mod tests {
                 CcMessageRow {
                     uuid: "uuid-2".into(),
                     message_id: None,
+                    cost_micro_usd: None,
                     session_id: "sess-1".into(),
                     agent_id: Some("agent-1".into()),
                     ts: 1600,
@@ -21130,6 +21146,7 @@ mod tests {
             messages: vec![CcMessageRow {
                 uuid: "u1".into(),
                 message_id: None,
+                cost_micro_usd: None,
                 session_id: "s".into(),
                 agent_id: None,
                 ts: 10,

@@ -52,6 +52,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use super::cc_ledger::HEADLESS_ENTRYPOINT;
 use super::config::PriceTable;
 use super::store::{
     CcAgentRunUpsert, CcFileBatch, CcFileCursor, CcMessageRow, CcNodeFilePair, CcPromptRow,
@@ -1528,6 +1529,10 @@ fn estimate_cost(prices: &PriceTable, model: &str, u: &RawUsage) -> f64 {
 /// The cost of one stored message row — the db-side twin of [`estimate_cost`],
 /// shared by the two per-session rollups so the formula exists once.
 fn row_cost(prices: &PriceTable, m: &CcMessageRow) -> f64 {
+    // A headless ledger row stores the cost Claude reported; it is authoritative.
+    if let Some(c) = m.cost_micro_usd {
+        return c as f64 / 1e6;
+    }
     let r = prices
         .for_model(&m.model)
         .for_prompt(m.input_tokens + m.cache_read_tokens + m.cache_creation_tokens);
@@ -1592,6 +1597,7 @@ struct DayAcc {
     messages: i64,
     tokens: Tok,
     cost: f64,
+    headless_cost: f64,
 }
 
 /// Generic "rolled up by some key" bucket (models, skills, agents).
@@ -1789,7 +1795,7 @@ fn collect_inner(
             cache_creation_input_tokens: m.cache_creation_tokens,
             ..Default::default()
         };
-        let cost = estimate_cost(&prices, &m.model, &usage);
+        let cost = row_cost(&prices, &m);
         // The message's session is always present above (its ts bounds the
         // session span) unless the sessions loop filtered it out for cwd —
         // so a missing session here means either a corrupt db (unfiltered
@@ -1806,12 +1812,16 @@ fn collect_inner(
         s.tokens.add(&usage);
         s.cost += cost;
         let cwd = s.cwd.clone();
+        let headless = s.entrypoint.as_deref() == Some(HEADLESS_ENTRYPOINT);
 
         let d = agg.days.entry(fmt_date(m.ts)).or_default();
         d.sessions.insert(m.session_id.clone());
         d.messages += 1;
         d.tokens.add(&usage);
         d.cost += cost;
+        if headless {
+            d.headless_cost += cost;
+        }
 
         let g = agg.models.entry(m.model).or_default();
         g.messages += 1;
@@ -1919,14 +1929,18 @@ pub struct CcSyncReport {
 /// by hand first.
 pub fn sync(store: &mut Store, rebuild: bool) -> Result<CcSyncReport> {
     let mut report = CcSyncReport::default();
-    let Some(root) = projects_dir() else {
-        return Ok(report);
-    };
     if rebuild {
         store.cc_clear_cursors()?;
     }
     let cursors = store.cc_cursors()?;
     let mut sessions_touched: HashSet<String> = HashSet::new();
+    // The headless usage ledger needs no transcript root, so it is folded in
+    // before the early return below.
+    super::cc_ledger::ingest(store, &cursors, &mut report, &mut sessions_touched)?;
+    let Some(root) = projects_dir() else {
+        report.sessions = sessions_touched.len() as i64;
+        return Ok(report);
+    };
     for f in collect_files(&root) {
         report.files_scanned += 1;
         let path = f.to_string_lossy().to_string();
@@ -2231,6 +2245,7 @@ fn fold_line(
         batch.messages.push(CcMessageRow {
             uuid: uuid.clone(),
             message_id: msg.id.clone(),
+            cost_micro_usd: None,
             session_id: sid.clone(),
             agent_id: raw.agent_id.clone(),
             ts,
@@ -2275,6 +2290,7 @@ fn fold_line(
                     "{}:advisor:{i}",
                     msg.id.as_deref().unwrap_or(uuid.as_str())
                 )),
+                cost_micro_usd: None,
                 session_id: sid.clone(),
                 agent_id: None,
                 ts,
@@ -2704,6 +2720,7 @@ impl Agg {
         let total_sessions = self.sessions.len() as i64;
         let mut tok = Tok::default();
         let mut total_cost = 0.0;
+        let mut headless_cost = 0.0;
         let mut total_messages = 0i64;
         let mut durations: Vec<f64> = Vec::new();
         let mut first: Option<String> = None;
@@ -2715,10 +2732,15 @@ impl Agg {
             tok.cache_creation += s.tokens.cache_creation;
             total_cost += s.cost;
             total_messages += s.messages;
+            let headless = s.entrypoint.as_deref() == Some(HEADLESS_ENTRYPOINT);
+            if headless {
+                headless_cost += s.cost;
+            }
             // Every session contributes a duration (0 for a single-event
             // session) so the average/median denominator equals the session
-            // count reported in the overview.
-            if s.has_ts {
+            // count reported in the overview — except headless calls, which
+            // have no span and would only drag the average toward zero.
+            if s.has_ts && !headless {
                 durations.push(((s.end_ts - s.start_ts).max(0)) as f64 / 60.0);
             }
             if s.has_ts {
@@ -2742,6 +2764,7 @@ impl Agg {
             messages: total_messages,
             total_tokens,
             est_cost_usd: round4(total_cost),
+            headless_cost_usd: round4(headless_cost),
             avg_session_minutes: round2(avg_minutes),
             median_session_minutes: round2(median(&mut durations)),
             avg_tokens_per_session: if total_sessions > 0 {
@@ -2770,6 +2793,7 @@ impl Agg {
                 total_tokens: d.tokens.total(),
                 tokens: d.tokens.to_cc(),
                 est_cost_usd: round4(d.cost),
+                headless_cost_usd: round4(d.headless_cost),
             })
             .collect();
 
@@ -4843,7 +4867,7 @@ fn subagent_started_at(path: &Path) -> Option<String> {
 /// caller does not hold — so every slug directory is probed for the file, the
 /// same shape `agents::live_subagents` uses for the same reason. It is one
 /// `stat` per slug directory (98 on the real corpus), not a tree walk.
-fn find_transcript(session_id: &str) -> Option<PathBuf> {
+pub(crate) fn find_transcript(session_id: &str) -> Option<PathBuf> {
     let root = projects_dir()?;
     let file = format!("{session_id}.jsonl");
     for entry in fs::read_dir(&root).ok()?.flatten() {
@@ -5041,7 +5065,7 @@ fn round4(x: f64) -> f64 {
     (x * 10_000.0).round() / 10_000.0
 }
 
-fn now_unix() -> i64 {
+pub(crate) fn now_unix() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -7323,6 +7347,7 @@ mod tests {
         });
         let msg = |uuid: &str, agent: Option<&str>, ts: i64, out: i64| CcMessageRow {
             message_id: None,
+            cost_micro_usd: None,
             uuid: uuid.into(),
             session_id: "big".into(),
             agent_id: agent.map(str::to_string),
@@ -7384,6 +7409,7 @@ mod tests {
         let t0 = parse_ts("2026-09-01T00:00:00Z").unwrap();
         let msg = |uuid: &str, mid: Option<&str>, run: &str, ts: i64, model: &str| CcMessageRow {
             message_id: mid.map(str::to_string),
+            cost_micro_usd: None,
             uuid: uuid.into(),
             session_id: "s".into(),
             agent_id: Some(run.into()),
@@ -7577,6 +7603,7 @@ mod tests {
                         messages: run
                             .map(|id| CcMessageRow {
                                 message_id: Some(format!("m-{id}")),
+                                cost_micro_usd: None,
                                 uuid: format!("u-{id}"),
                                 session_id: sess.into(),
                                 agent_id: Some(id.into()),
@@ -7927,6 +7954,7 @@ mod tests {
                     messages: vec![CcMessageRow {
                         uuid: "m1".into(),
                         message_id: None,
+                        cost_micro_usd: None,
                         session_id: "flat".into(),
                         agent_id: None,
                         ts: 500,
@@ -7970,6 +7998,7 @@ mod tests {
         let msg = |uuid: &str, agent: Option<&str>, ts: i64| CcMessageRow {
             uuid: uuid.into(),
             message_id: None,
+            cost_micro_usd: None,
             session_id: "gappy".into(),
             agent_id: agent.map(str::to_string),
             ts,

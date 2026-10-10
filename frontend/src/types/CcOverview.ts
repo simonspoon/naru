@@ -20,7 +20,12 @@ messages: number, tokens: CcTokens, total_tokens: number,
 /**
  * Estimated spend in USD (static price table; see `core::cc`).
  */
-est_cost_usd: number, avg_session_minutes: number, median_session_minutes: number, avg_tokens_per_session: number, 
+est_cost_usd: number, 
+/**
+ * The part of `est_cost_usd` that came from headless `claude -p` calls
+ * (the usage ledger; Claude's reported cost, not an estimate).
+ */
+headless_cost_usd: number, avg_session_minutes: number, median_session_minutes: number, avg_tokens_per_session: number, 
 /**
  * cache_read / (cache_read + input): how much input was served from cache.
  */

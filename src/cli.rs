@@ -3722,6 +3722,33 @@ EXAMPLES
 }
 
 #[derive(Subcommand)]
+enum LedgerCmd {
+    /// Record one headless `claude -p --output-format json` result from stdin
+    ///
+    /// Appends one ledger line per model in the result's `modelUsage` (its
+    /// reported cost is kept as-is), which `cc sync` folds into the dashboard
+    /// as a `headless` session. A result whose session already has a
+    /// transcript is `validation` (it would count twice), as is garbage on
+    /// stdin, a result with no `uuid`, or one with no `modelUsage` and no
+    /// `--model`. Prints the written entries as a JSON array. The ledger file
+    /// is `<naru home>/usage/headless.jsonl` (`NARU_CC_LEDGER` overrides).
+    #[command(after_help = "\
+EXAMPLES
+  claude -p --no-session-persistence --output-format json \"hi\" | mesa cc ledger add --source my-script")]
+    Add {
+        /// What made the call (a script or tool name), shown on the session
+        #[arg(long)]
+        source: String,
+        /// When the call happened, RFC 3339 (default: now)
+        #[arg(long)]
+        at: Option<String>,
+        /// Model, used only when the result carries no `modelUsage`
+        #[arg(long)]
+        model: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum CcCmd {
     /// Print the full dashboard as one JSON object (overview + breakdowns)
     ///
@@ -3940,6 +3967,12 @@ EXAMPLES
     /// Destructive: a session whose transcript file Claude Code has since
     /// deleted cannot be re-read and is lost permanently.
     Reset,
+    /// The headless usage ledger: calls that wrote no transcript
+    ///
+    /// A `claude -p --no-session-persistence` call leaves no transcript, so
+    /// the dashboard cannot see it; the ledger is how it gets counted.
+    #[command(subcommand)]
+    Ledger(LedgerCmd),
     /// Print currently-running sessions (the live-sessions object)
     ///
     /// Sessions whose newest transcript event lands inside the last `--minutes`,
@@ -5726,6 +5759,16 @@ fn run_cc(cmd: CcCmd) -> Result<()> {
         CcCmd::Reset => {
             let mut store = Store::open_default()?;
             print_json(&crate::core::cc::reset_and_sync(&mut store)?)
+        }
+        CcCmd::Ledger(LedgerCmd::Add { source, at, model }) => {
+            let mut input = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut input)?;
+            print_json(&crate::core::cc_ledger::add(
+                &input,
+                &source,
+                at.as_deref(),
+                model.as_deref(),
+            )?)
         }
         CcCmd::Live { minutes } => print_json(&crate::core::cc::live(minutes)),
         CcCmd::Guard { minutes } => {

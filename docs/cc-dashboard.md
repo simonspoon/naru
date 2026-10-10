@@ -1229,3 +1229,38 @@ model", from the db alone (mesa task 1514). No migration: it reads
 
 The grouping and formatting logic of the page lives in
 `frontend/src/ccScorecard.ts` (vitest: `ccScorecard.test.ts`).
+
+## Headless calls (the usage ledger)
+
+A `claude -p --no-session-persistence` call writes no transcript, so
+transcript ingest never sees it. The **ledger** (naru task 1774) is how such
+calls reach the dashboard.
+
+- **Writing.** Pipe the call's `--output-format json` result into
+  `naru cc ledger add --source <label> [--at <RFC3339>] [--model <m>]` (CLI
+  only, no route). It appends one JSON line per `modelUsage` entry (its
+  `costUSD` kept) — or, for a result with no `modelUsage`, one line from
+  `usage` + `--model` + `total_cost_usd` — to `<naru home>/usage/headless.jsonl`
+  (`NARU_CC_LEDGER` / `MESA_CC_LEDGER` override the path), in one `O_APPEND`
+  write. Line: `{v, id, at, source, session_id, model, input_tokens,
+  output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd}`, `id` =
+  `<result uuid>:<model>`. A result with no `uuid`, garbage on stdin, or a
+  session that already has a transcript (it would count twice) is `validation`.
+- **Why a file.** `cc reset` purges the `cc_*` tables; a file next to the
+  transcripts' equivalent survives it and is re-ingested.
+- **Ingest.** `cc::sync` (via `core::cc_ledger::ingest`) reads the ledger
+  against a `cc_files` cursor like a transcript, even when there is no
+  transcript root. Each line becomes one `cc_messages` row (`uuid =
+  headless:<id>`, insert-or-ignore, so a duplicate line or a reset never double
+  counts) and a `cc_sessions` row with `entrypoint = "headless"`, start = end =
+  `at`, session id = the result's `session_id` (else `headless:<id>`) and the
+  source label in `git_branch` as `headless:<source>`. A malformed line is
+  skipped.
+- **Stored cost.** Migration `cc_messages.cost_micro_usd`: for these rows only,
+  Claude's reported cost is stored and read back (`row_cost` and `collect_inner`
+  prefer it over the price-table estimate, which overstates these calls). Every
+  transcript row keeps `NULL` and is priced at read time.
+- **Labelling.** `CcOverview.headless_cost_usd` and `CcDayPoint.headless_cost_usd`
+  carry the headless share of `est_cost_usd`; the Est. cost KPI shows
+  "incl. $X headless" and the sessions table a `headless` badge. Headless
+  sessions are left out of the average/median session minutes.

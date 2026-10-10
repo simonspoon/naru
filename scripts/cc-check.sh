@@ -1619,4 +1619,60 @@ assert len(d["by_command"])==2, d["by_command"]
 print("cc errors --cli ok")
 ' || fail "cc errors --cli did not keep only naru/mesa Bash failures"
 
+# ---- headless usage ledger (naru task 1774) ----
+# A `claude -p --no-session-persistence` call writes no transcript, so it is
+# counted through `cc ledger add` -> the ledger file -> `cc sync`. Own db and
+# ledger, so the main tree's pinned counts above are untouched.
+cat > "$TMP/claude-stub" <<'STUB'
+#!/usr/bin/env bash
+# Stub claude: with --no-session-persistence it prints a fixed -p json result
+# and writes nothing (no transcript) — the shape the ledger exists for.
+case " $* " in *" --no-session-persistence "*) ;; *) echo "stub: expected --no-session-persistence" >&2; exit 3 ;; esac
+cat <<'JSON'
+{"type":"result","uuid":"hl-uuid-1","session_id":"hl-sess-1","total_cost_usd":0.5,"usage":{"input_tokens":1000,"output_tokens":2000,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"modelUsage":{"claude-haiku-4-5":{"inputTokens":1000,"outputTokens":2000,"cacheReadInputTokens":0,"cacheCreationInputTokens":0,"costUSD":0.5}}}
+JSON
+STUB
+chmod +x "$TMP/claude-stub"
+export MESA_CC_LEDGER="$TMP/usage/headless.jsonl"
+HL_DB="$TMP/hl.db"
+"$TMP/claude-stub" -p --no-session-persistence --output-format json hi > "$TMP/hl-result.json"
+MESA_DB="$HL_DB" "$BIN" cc ledger add --source stub --at 2026-06-15T02:00:00Z < "$TMP/hl-result.json" | python3 -c '
+import json,sys
+e=json.load(sys.stdin)
+assert len(e)==1 and e[0]["id"]=="hl-uuid-1:claude-haiku-4-5" and e[0]["source"]=="stub", e
+' || fail "cc ledger add output"
+mkdir -p "$TMP/hl-empty"
+hl_check() {
+  MESA_CC_PROJECTS_DIR="$TMP/hl-empty" MESA_DB="$HL_DB" "$BIN" cc summary --window all | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+days={x["date"]:x for x in d["daily"]}
+assert abs(days["2026-06-15"]["headless_cost_usd"]-0.5)<1e-9, d["daily"]
+assert abs(d["overview"]["headless_cost_usd"]-0.5)<1e-9, d["overview"]
+assert abs(d["overview"]["est_cost_usd"]-0.5)<1e-9, d["overview"]
+h=[s for s in d["sessions"] if s["entrypoint"]=="headless"]
+assert len(h)==1 and h[0]["session_id"]=="hl-sess-1" and h[0]["git_branch"]=="headless:stub", d["sessions"]
+assert [m["model"] for m in d["models"]]==["claude-haiku-4-5"], d["models"]
+'
+}
+hl_check || fail "headless cost / session / model not in the dashboard"
+# Re-adding the same output must not change any total.
+MESA_DB="$HL_DB" "$BIN" cc ledger add --source stub --at 2026-06-15T02:00:00Z < "$TMP/hl-result.json" >/dev/null
+hl_check || fail "a re-added result changed the totals"
+# A result whose session already has a transcript is refused.
+mkdir -p "$TMP/hl-tree/-hl"
+echo '{}' > "$TMP/hl-tree/-hl/hl-sess-2.jsonl"
+RC=0
+sed 's/hl-sess-1/hl-sess-2/' "$TMP/hl-result.json" | MESA_CC_PROJECTS_DIR="$TMP/hl-tree" MESA_DB="$HL_DB" "$BIN" cc ledger add --source stub >/dev/null 2>"$TMP/hl.err" || RC=$?
+[ "$RC" = "1" ] || fail "ledger add of a transcribed session expected exit 1, got $RC"
+grep -q '"validation"' "$TMP/hl.err" || fail "transcribed session was not a validation error"
+# Garbage stdin is validation.
+RC=0
+echo 'not json' | MESA_DB="$HL_DB" "$BIN" cc ledger add --source stub >/dev/null 2>"$TMP/hl.err" || RC=$?
+[ "$RC" = "1" ] && grep -q '"validation"' "$TMP/hl.err" || fail "garbage stdin expected validation exit 1"
+# cc reset purges cc_* but the ledger file brings the headless rows back.
+MESA_CC_PROJECTS_DIR="$TMP/hl-empty" MESA_DB="$HL_DB" "$BIN" cc reset >/dev/null
+hl_check || fail "headless totals changed across cc reset"
+echo "cc ledger ok"
+
 echo "ok: cc-check passed"
