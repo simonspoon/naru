@@ -2029,8 +2029,8 @@ export function LiveHub({
   // Tell the native host which conversation to capture for.
   const sessionId = session?.id ?? null
   useEffect(() => {
-    native?.post(stateMessage({ session: sessionId, live, joined: unlocked, paused }))
-  }, [native, sessionId, live, unlocked, paused])
+    native?.post(stateMessage({ session: sessionId, live, joined: unlocked, paused, speechMuted }))
+  }, [native, sessionId, live, unlocked, paused, speechMuted])
 
   // The recognizer's handlers are set once per start and post sentences long
   // after the render that installed them, so they read through a ref rather

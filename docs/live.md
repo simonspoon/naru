@@ -2070,7 +2070,7 @@ browser has no such handler and behaves exactly as before.
 | `msg` | When |
 | --- | --- |
 | `{"type":"ready"}` | The page installed its API below; answer with `setMicState`. |
-| `{"type":"state","session":<id or null>,"live":<bool>,"joined":<bool>,"paused":<bool>}` | On mount and whenever the live session, `live`, this browser's `joined` or the page's Pause changes. Capture only while `live && joined`, and while `paused` capture nothing, submit no utterance and speak no reply (naru task 1786). |
+| `{"type":"state","session":<id or null>,"live":<bool>,"joined":<bool>,"paused":<bool>,"speechMuted":<bool>}` | On mount and whenever the live session, `live`, this browser's `joined`, the page's Pause or its speaker mute changes. Capture only while `live && joined`, and while `paused` capture nothing, submit no utterance and speak no reply (naru task 1786); while `speechMuted` speak no reply (naru task 1787). |
 | `{"type":"mic","muted":<bool>}` | The person pressed the listen button or chord. |
 | `{"type":"ambient","on":<bool>}` | The person pressed the **Ambient** (`on: true`) or **Live** (`on: false`) button, or accepted an offer while ambient (`on: false`). Naru task 1746. |
 | `{"type":"wakeWords"}` | The custom wake words were saved in Settings > Voice (naru task 1769). No payload: refetch `GET /api/config/ambient`. |
@@ -2822,7 +2822,8 @@ working, actions are still performed in order, and every reply still lands in
 the transcript as text. It is a separate state from the listen switch's
 `muted`, which is the microphone — the voice's is `speechMuted` in `LiveHub`.
 Browser-side and route-free like pause, never persisted, and cleared when the
-conversation ends.
+conversation ends. A native host is told through the `state` message's
+`speechMuted` and must speak no reply while it reads true (naru task 1787).
 
 While muted, a turn this page would have spoken is **read** instead
 (`liveSpeaker.ts::spokenTurnVerdict`): taken in hand and stamped `played_at`

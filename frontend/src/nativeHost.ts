@@ -28,6 +28,9 @@ export type NativeOut =
       /** The page's Pause: the host must capture nothing, submit no utterance
        *  and speak no reply until this reads false again. */
       paused: boolean
+      /** The page's speaker mute: the host must speak no reply until this
+       *  reads false again. */
+      speechMuted: boolean
     }
   /** The person pressed the listen switch (button or chord). */
   | { type: 'mic'; muted: boolean }
@@ -54,8 +57,16 @@ export function stateMessage(s: {
   live: boolean
   joined: boolean
   paused: boolean
+  speechMuted: boolean
 }): NativeOut {
-  return { type: 'state', session: s.session, live: s.live, joined: s.joined, paused: s.paused }
+  return {
+    type: 'state',
+    session: s.session,
+    live: s.live,
+    joined: s.joined,
+    paused: s.paused,
+    speechMuted: s.speechMuted,
+  }
 }
 
 /** The ambient/live switch button: only with a host, in a live session this
