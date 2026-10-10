@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { getAppearance, updateAppearance } from '../api'
 import { applyTheme, parseSetting, THEMES } from '../theme'
 import type { ThemeSetting } from '../theme'
@@ -14,6 +14,8 @@ export function AppearanceSection() {
   const { data, error } = useFetch(() => getAppearance(), 'appearance')
   const [picked, setPicked] = useState<ThemeSetting | null>(null)
   const [saveError, setSaveError] = useState<string | null>(null)
+  // Only the newest pick may revert on failure (out-of-order rejections).
+  const latest = useRef(0)
 
   if (error) {
     return (
@@ -37,10 +39,12 @@ export function AppearanceSection() {
   function pick(next: ThemeSetting) {
     if (next === current) return
     const previous = current
+    const id = ++latest.current
     setPicked(next)
     setSaveError(null)
     applyTheme(next)
     updateAppearance(next === 'system' ? null : next).catch((e: unknown) => {
+      if (id !== latest.current) return
       setPicked(previous)
       applyTheme(previous)
       setSaveError(e instanceof Error ? e.message : String(e))

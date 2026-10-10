@@ -42,6 +42,9 @@ import tsx from 'react-syntax-highlighter/dist/esm/languages/prism/tsx'
 import typescript from 'react-syntax-highlighter/dist/esm/languages/prism/typescript'
 import yaml from 'react-syntax-highlighter/dist/esm/languages/prism/yaml'
 import vscDarkPlus from 'react-syntax-highlighter/dist/esm/styles/prism/vsc-dark-plus'
+import vsLight from 'react-syntax-highlighter/dist/esm/styles/prism/vs'
+import { useSyncExternalStore } from 'react'
+import { onThemeChange } from './theme'
 
 // Registered once at module load, shared by every code-colouring surface
 // (the Files content pane and markdown fenced code blocks — task 521).
@@ -95,6 +98,21 @@ SyntaxHighlighter.registerLanguage('typescript', typescript)
 SyntaxHighlighter.registerLanguage('yaml', yaml)
 
 export { SyntaxHighlighter, vscDarkPlus }
+
+/** The Prism token palette for a resolved theme: the light theme gets `vs`,
+ *  the dark ones keep `vscDarkPlus` (naru task 1784). */
+export function prismStyleFor(theme: string | undefined) {
+  return theme === 'light' ? vsLight : vscDarkPlus
+}
+
+/** The Prism style for the active theme, re-rendering on a theme switch. */
+export function usePrismStyle() {
+  const theme = useSyncExternalStore(
+    onThemeChange,
+    () => document.documentElement.dataset.theme,
+  )
+  return prismStyleFor(theme)
+}
 
 // A language token -> the registered Prism grammar name it should render with.
 // Covers both the Files CONTENT endpoint's `language` values (server-side

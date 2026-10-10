@@ -4,7 +4,7 @@ import type {
   DragEvent as ReactDragEvent,
   RefObject,
 } from 'react'
-import { SyntaxHighlighter, vscDarkPlus, prismGrammar } from '../syntaxHighlighter'
+import { SyntaxHighlighter, usePrismStyle, prismGrammar } from '../syntaxHighlighter'
 import {
   activateTab,
   closeSubtree,
@@ -1862,6 +1862,7 @@ function FileCode({
   /** Which of them is the one being stepped to, or -1. */
   current?: number
 }) {
+  const prismStyle = usePrismStyle()
   const prismLanguage = prismGrammar(language)
   const code =
     prismLanguage === undefined ? (
@@ -1869,7 +1870,7 @@ function FileCode({
     ) : (
       <SyntaxHighlighter
         language={prismLanguage}
-        style={vscDarkPlus}
+        style={prismStyle}
         customStyle={{
           margin: 0,
           padding: 0,

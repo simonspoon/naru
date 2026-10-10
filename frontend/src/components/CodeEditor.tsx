@@ -9,7 +9,7 @@ import {
 import type { CSSProperties, Ref } from 'react'
 import {
   SyntaxHighlighter,
-  vscDarkPlus,
+  usePrismStyle,
   highlightOverlaySource,
   prismGrammar,
 } from '../syntaxHighlighter'
@@ -188,6 +188,7 @@ export function CodeEditor({
   // recolour behind it, so the colours can lag a frame but the caret never
   // does.
   const deferred = useDeferredValue(value)
+  const prismStyle = usePrismStyle()
   const prismLanguage = prismGrammar(language)
   // The gutter, unlike the colours, is NOT deferred: it is the ruler the text
   // is read against, and one that lagged a frame would show the wrong count for
@@ -499,7 +500,7 @@ export function CodeEditor({
         <div className="files-editor-highlight" ref={highlightRef} aria-hidden="true">
           <SyntaxHighlighter
             language={prismLanguage}
-            style={vscDarkPlus}
+            style={prismStyle}
             customStyle={{
               margin: 0,
               padding: 0,

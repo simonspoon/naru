@@ -4,7 +4,7 @@ import remarkBreaks from 'remark-breaks'
 import remarkGfm from 'remark-gfm'
 import {
   SyntaxHighlighter,
-  vscDarkPlus,
+  usePrismStyle,
   prismGrammar,
 } from '../syntaxHighlighter'
 
@@ -135,6 +135,7 @@ const CODE_SLAB = {
  * lone `<code>` element — we read its class + text rather than re-parsing.
  */
 function CodeBlock({ children }: { children?: ReactNode }) {
+  const prismStyle = usePrismStyle()
   const code = children as ReactElement<ComponentPropsWithoutRef<'code'>>
   const className = code?.props?.className ?? ''
   const grammar = prismGrammar(/language-([\w-]+)/.exec(className)?.[1])
@@ -151,7 +152,7 @@ function CodeBlock({ children }: { children?: ReactNode }) {
   return (
     <SyntaxHighlighter
       language={grammar}
-      style={vscDarkPlus}
+      style={prismStyle}
       customStyle={CODE_SLAB}
       codeTagProps={{ className: CODE_TAG_CLASS }}
     >

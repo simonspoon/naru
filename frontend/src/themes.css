@@ -2,7 +2,10 @@
    block in index.css is the `dark` theme and the fallback; each block here
    overrides the same variables for `<html data-theme="<id>">`, set by
    `theme.ts`. Adding a variable to :root means adding it to every block
-   below (or deciding it is theme-independent). Imported after index.css; the
+   below (or deciding it is theme-independent). Deliberately not themed: the
+   orb chrome (--orb-*, a dark sphere in every theme) and the artifact preview
+   frame / HTML board white (agent-written documents keep their own page).
+   Imported after index.css; the
    attribute selector out-ranks plain :root, so order does not matter. */
 
 :root[data-theme='dark'] {

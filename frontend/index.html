@@ -4,7 +4,20 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="color-scheme" content="dark" />
+    <meta name="color-scheme" content="dark light" />
+    <script>
+      // Apply the saved theme before first paint (naru task 1784); mirrors
+      // theme.ts (`naru-theme`, system -> prefers-color-scheme). The module
+      // bundle re-applies it and reconciles with the config.
+      ;(function () {
+        try {
+          var s = localStorage.getItem('naru-theme')
+          var known = { dark: 1, light: 1, contrast: 1 }
+          var t = known[s] ? s : window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+          document.documentElement.dataset.theme = t
+        } catch (e) {}
+      })()
+    </script>
     <title>Naru</title>
   </head>
   <body>

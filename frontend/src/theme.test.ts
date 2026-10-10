@@ -1,3 +1,5 @@
+/// <reference types="node" />
+import { readFileSync } from 'node:fs'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   THEMES,
@@ -96,5 +98,14 @@ describe('applyTheme', () => {
     expect(storedSetting()).toBe('system')
     localStorage.setItem(THEME_STORAGE_KEY, 'bogus')
     expect(storedSetting()).toBe('system')
+  })
+})
+
+describe('themes.css', () => {
+  it('has exactly one [data-theme] block per theme id', () => {
+    // vitest runs from frontend/
+    const css = readFileSync('src/themes.css', 'utf8')
+    const blocks = [...css.matchAll(/\[data-theme='([\w-]+)'\]/g)].map((m) => m[1])
+    expect([...blocks].sort()).toEqual(THEMES.map((t) => t.id).sort())
   })
 })
