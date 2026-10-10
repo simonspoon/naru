@@ -8970,6 +8970,7 @@ async fn raw_project_file(
     State(state): State<AppState>,
     Path(id): Path<i64>,
     Query(q): Query<FilesContentQuery>,
+    headers: HeaderMap,
 ) -> ApiResult<Response> {
     let wanted = q.path.ok_or(ApiError {
         status: StatusCode::UNPROCESSABLE_ENTITY,
@@ -8992,6 +8993,11 @@ async fn raw_project_file(
     // rejects a non-image before a single byte is loaded.
     if files::safe_path(&root, &wanted).is_none() {
         return Err(not_found());
+    }
+    // The two allowlists are disjoint, so media is tried first without
+    // touching the image path.
+    if let Some(mime) = files::media_mime(&wanted) {
+        return raw_media(root, wanted, mime, &headers).await;
     }
     let mime = files::image_mime(&wanted).ok_or_else(|| ApiError {
         status: StatusCode::UNPROCESSABLE_ENTITY,
@@ -9032,6 +9038,104 @@ async fn raw_project_file(
         bytes,
     )
         .into_response())
+}
+
+/// The media half of [`raw_project_file`] (naru task 1751): a video/audio
+/// extension from `files::media_mime`, served with the same headers as an
+/// image (`inline`, `nosniff`, the same CSP) plus `Accept-Ranges: bytes` and
+/// single-range support (206 / 416) — Safari will not play media without it.
+/// Only the requested slice is read (seek + take, at most
+/// `files::MEDIA_RANGE_CHUNK` per response); a request with no usable `Range`
+/// gets the whole file under the download cap, like an image.
+async fn raw_media(
+    root: String,
+    rel: String,
+    mime: &'static str,
+    headers: &HeaderMap,
+) -> ApiResult<Response> {
+    let range_header = headers
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let not_found = ApiError {
+        status: StatusCode::NOT_FOUND,
+        code: "not_found",
+        message: format!("file not found: {rel}"),
+    };
+    let rel2 = rel.clone();
+    let out = tokio::task::spawn_blocking(move || {
+        let path = files::safe_path(&root, &rel2).ok_or(files::DownloadFileError::NotFound)?;
+        let meta = std::fs::metadata(&path).map_err(|_| files::DownloadFileError::NotFound)?;
+        if meta.is_dir() {
+            return Err(files::DownloadFileError::NotFound);
+        }
+        let total = meta.len();
+        match files::parse_byte_range(range_header.as_deref(), total) {
+            files::ByteRange::Full => {
+                let (name, bytes) = files::read_file_download(&root, &rel2)?;
+                Ok((name, total, None, bytes))
+            }
+            files::ByteRange::Unsatisfiable => {
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| rel2.clone());
+                Ok((name, total, Some((1, 0)), Vec::new()))
+            }
+            files::ByteRange::Partial(a, b) => {
+                let (name, total, bytes) = files::read_file_range(&root, &rel2, a, b)?;
+                Ok((name, total, Some((a, b)), bytes))
+            }
+        }
+    })
+    .await
+    .unwrap_or(Err(files::DownloadFileError::NotFound));
+    let (filename, total, range, bytes) = match out {
+        Ok(v) => v,
+        Err(files::DownloadFileError::NotFound) => return Err(not_found),
+        Err(files::DownloadFileError::TooLarge) => {
+            return Err(ApiError {
+                status: StatusCode::UNPROCESSABLE_ENTITY,
+                code: "validation",
+                message: "file is larger than mesa can download".into(),
+            });
+        }
+    };
+    // `(1, 0)` marks the unsatisfiable range: an empty, 416 answer.
+    let (status, content_range) = match range {
+        None => (StatusCode::OK, None),
+        Some((1, 0)) => (
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            Some(format!("bytes */{total}")),
+        ),
+        Some((a, b)) => (
+            StatusCode::PARTIAL_CONTENT,
+            Some(format!("bytes {a}-{b}/{total}")),
+        ),
+    };
+    let mut resp = (
+        status,
+        [
+            (header::CONTENT_TYPE, mime.to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                disposition("inline", &filename),
+            ),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
+            (
+                header::CONTENT_SECURITY_POLICY,
+                "default-src 'none'; style-src 'unsafe-inline'; sandbox".to_string(),
+            ),
+            (header::ACCEPT_RANGES, "bytes".to_string()),
+        ],
+        bytes,
+    )
+        .into_response();
+    if let Some(cr) = content_range {
+        resp.headers_mut()
+            .insert(header::CONTENT_RANGE, cr.parse().expect("ascii header"));
+    }
+    Ok(resp)
 }
 
 #[derive(Deserialize)]
@@ -12683,6 +12787,7 @@ mod tests {
             Query(FilesContentQuery {
                 path: Some("src/img.png".to_string()),
             }),
+            HeaderMap::new(),
         )
         .await
         .unwrap();
@@ -12698,6 +12803,91 @@ mod tests {
             "default-src 'none'; style-src 'unsafe-inline'; sandbox"
         );
         assert_eq!(body_bytes(resp).await, raw);
+    }
+
+    async fn raw_media_get(
+        state: &AppState,
+        id: i64,
+        path: &str,
+        range: Option<&str>,
+    ) -> ApiResult<Response> {
+        let mut h = HeaderMap::new();
+        if let Some(r) = range {
+            h.insert(header::RANGE, r.parse().unwrap());
+        }
+        raw_project_file(
+            State(state.clone()),
+            Path(id),
+            Query(FilesContentQuery {
+                path: Some(path.to_string()),
+            }),
+            h,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn files_raw_serves_media_with_range_support() {
+        let (dir, state) = test_state();
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let data: Vec<u8> = (0u8..100).collect();
+        std::fs::write(root.join("clip.mp4"), &data).unwrap();
+        std::fs::write(root.join("song.MP3"), &data).unwrap();
+        let id = new_project(&state, Some(root.to_str().unwrap()));
+
+        let resp = raw_media_get(&state, id, "clip.mp4", None).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(header_str(&resp, header::CONTENT_TYPE), "video/mp4");
+        assert_eq!(header_str(&resp, header::ACCEPT_RANGES), "bytes");
+        assert!(header_str(&resp, header::CONTENT_DISPOSITION).starts_with("inline; "));
+        assert_eq!(header_str(&resp, header::X_CONTENT_TYPE_OPTIONS), "nosniff");
+        assert_eq!(body_bytes(resp).await, data);
+
+        let resp = raw_media_get(&state, id, "song.MP3", None).await.unwrap();
+        assert_eq!(header_str(&resp, header::CONTENT_TYPE), "audio/mpeg");
+
+        let resp = raw_media_get(&state, id, "clip.mp4", Some("bytes=10-19"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(header_str(&resp, header::CONTENT_RANGE), "bytes 10-19/100");
+        assert_eq!(body_bytes(resp).await, data[10..20].to_vec());
+
+        let resp = raw_media_get(&state, id, "clip.mp4", Some("bytes=90-"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(header_str(&resp, header::CONTENT_RANGE), "bytes 90-99/100");
+        assert_eq!(body_bytes(resp).await, data[90..].to_vec());
+
+        let resp = raw_media_get(&state, id, "clip.mp4", Some("bytes=-5"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(header_str(&resp, header::CONTENT_RANGE), "bytes 95-99/100");
+        assert_eq!(body_bytes(resp).await, data[95..].to_vec());
+
+        let resp = raw_media_get(&state, id, "clip.mp4", Some("bytes=100-120"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(header_str(&resp, header::CONTENT_RANGE), "bytes */100");
+        assert!(body_bytes(resp).await.is_empty());
+
+        // An image never advertises ranges.
+        std::fs::write(root.join("a.png"), [1u8, 2, 3]).unwrap();
+        let resp = raw_media_get(&state, id, "a.png", Some("bytes=0-1"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(resp.headers().get(header::ACCEPT_RANGES).is_none());
+
+        // Traversal is still 404, a non-media non-image still 422.
+        let err = raw_media_get(&state, id, "../clip.mp4", None)
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -12718,6 +12908,7 @@ mod tests {
                 Query(FilesContentQuery {
                     path: Some(bad.to_string()),
                 }),
+                HeaderMap::new(),
             )
             .await
             .unwrap_err();
@@ -12750,6 +12941,7 @@ mod tests {
                 Query(FilesContentQuery {
                     path: Some(bad.to_string()),
                 }),
+                HeaderMap::new(),
             )
             .await
             .unwrap_err();
@@ -12770,6 +12962,7 @@ mod tests {
             State(state),
             Path(id),
             Query(FilesContentQuery { path: None }),
+            HeaderMap::new(),
         )
         .await
         .unwrap_err();

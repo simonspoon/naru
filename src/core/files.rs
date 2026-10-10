@@ -194,6 +194,125 @@ pub fn image_mime(path: &str) -> Option<&'static str> {
     })
 }
 
+/// Extension allowlist for the playable-media side of the same route
+/// (`/files/raw`, naru task 1751): video and audio a browser can play inline.
+/// Same posture as [`image_mime`] — final lowercased extension only, no sniff,
+/// no fallback, never `text/html`. `mov`/`m4a` play only when the codec is
+/// one the browser has; the page falls back to a download link on `error`.
+pub fn media_mime(path: &str) -> Option<&'static str> {
+    let ext = extension_of(Path::new(path))?;
+    Some(match ext.as_str() {
+        "mp4" | "m4v" => "video/mp4",
+        "mov" => "video/quicktime",
+        "webm" => "video/webm",
+        "m4a" => "audio/mp4",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "ogg" | "oga" => "audio/ogg",
+        "aac" => "audio/aac",
+        "flac" => "audio/flac",
+        _ => return None,
+    })
+}
+
+/// Most bytes one `206` answers with, however much the range asked for: a
+/// player asking `bytes=0-` of a multi-GB video gets the first chunk and a
+/// truthful `Content-Range`, then asks again. Keeps a response's memory
+/// bounded without a streaming-body dependency.
+pub const MEDIA_RANGE_CHUNK: u64 = 8 * 1024 * 1024;
+
+/// What a request's `Range` header asks of a file `total` bytes long.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ByteRange {
+    /// No usable `Range` (absent, malformed, a unit other than `bytes`, or
+    /// several ranges): answer 200 with the whole file, which RFC 9110
+    /// permits for any range the server declines.
+    Full,
+    /// Inclusive `start..=end`, already clamped to the file and to
+    /// [`MEDIA_RANGE_CHUNK`].
+    Partial(u64, u64),
+    /// Syntactically valid but outside the file: 416.
+    Unsatisfiable,
+}
+
+/// Parses a single `bytes=a-b` / `a-` / `-n` range against `total`.
+pub fn parse_byte_range(header: Option<&str>, total: u64) -> ByteRange {
+    let Some(spec) = header.and_then(|h| h.trim().strip_prefix("bytes=")) else {
+        return ByteRange::Full;
+    };
+    if spec.contains(',') {
+        return ByteRange::Full;
+    }
+    let Some((a, b)) = spec.trim().split_once('-') else {
+        return ByteRange::Full;
+    };
+    let (a, b) = (a.trim(), b.trim());
+    let (start, end) = if a.is_empty() {
+        // Suffix: the last `n` bytes.
+        let Ok(n) = b.parse::<u64>() else {
+            return ByteRange::Full;
+        };
+        if n == 0 || total == 0 {
+            return ByteRange::Unsatisfiable;
+        }
+        (total.saturating_sub(n), total - 1)
+    } else {
+        let Ok(start) = a.parse::<u64>() else {
+            return ByteRange::Full;
+        };
+        let end = if b.is_empty() {
+            u64::MAX
+        } else {
+            match b.parse::<u64>() {
+                Ok(e) => e,
+                Err(_) => return ByteRange::Full,
+            }
+        };
+        if end < start {
+            return ByteRange::Full;
+        }
+        if start >= total {
+            return ByteRange::Unsatisfiable;
+        }
+        (start, end.min(total - 1))
+    };
+    ByteRange::Partial(start, end.min(start + MEDIA_RANGE_CHUNK - 1))
+}
+
+/// Reads bytes `start..=end` of the file at `rel`, returning
+/// `(basename, total size, bytes)`. Resolved through [`safe_path`]; seeks
+/// rather than reading the file, so no whole-file cap applies.
+pub fn read_file_range(
+    root: &str,
+    rel: &str,
+    start: u64,
+    end: u64,
+) -> Result<(String, u64, Vec<u8>), DownloadFileError> {
+    use std::io::{Seek, SeekFrom};
+    let path = safe_path(root, rel).ok_or(DownloadFileError::NotFound)?;
+    let mut f = fs::File::open(&path).map_err(|_| DownloadFileError::NotFound)?;
+    let meta = f.metadata().map_err(|_| DownloadFileError::NotFound)?;
+    if meta.is_dir() {
+        return Err(DownloadFileError::NotFound);
+    }
+    let total = meta.len();
+    if total == 0 || start >= total {
+        return Err(DownloadFileError::NotFound);
+    }
+    let end = end.min(total - 1);
+    f.seek(SeekFrom::Start(start))
+        .map_err(|_| DownloadFileError::NotFound)?;
+    let mut bytes = Vec::with_capacity((end - start + 1) as usize);
+    f.take(end - start + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| DownloadFileError::NotFound)?;
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| rel.to_string());
+    Ok((name, total, bytes))
+}
+
 /// Every mime [`image_mime`] can answer with — the same allowlist read the
 /// other way round, for a caller holding a stored content type rather than a
 /// path (`Store::add_live_board`, mesa task 1071). One list rather than a
@@ -1754,6 +1873,49 @@ mod tests {
         ] {
             assert_eq!(image_mime(name), None, "{name}");
         }
+    }
+
+    #[test]
+    fn media_mime_maps_the_allowlist_and_nothing_else() {
+        for (name, mime) in [
+            ("a.mp4", "video/mp4"),
+            ("a.M4V", "video/mp4"),
+            ("a.mov", "video/quicktime"),
+            ("a.webm", "video/webm"),
+            ("a.m4a", "audio/mp4"),
+            ("a.mp3", "audio/mpeg"),
+            ("a.wav", "audio/wav"),
+            ("a.ogg", "audio/ogg"),
+            ("a.oga", "audio/ogg"),
+            ("a.aac", "audio/aac"),
+            ("a.flac", "audio/flac"),
+        ] {
+            assert_eq!(media_mime(name), Some(mime), "{name}");
+        }
+        for name in ["a.html", "a.png", "noext", "foo.mp4.html", ".mp4", "a.mkv"] {
+            assert_eq!(media_mime(name), None, "{name}");
+        }
+    }
+
+    #[test]
+    fn parse_byte_range_handles_each_form() {
+        use ByteRange::*;
+        let p = |h: &str, t| parse_byte_range(Some(h), t);
+        assert_eq!(parse_byte_range(None, 100), Full);
+        assert_eq!(p("bytes=0-9", 100), Partial(0, 9));
+        assert_eq!(p("bytes=90-", 100), Partial(90, 99));
+        assert_eq!(p("bytes=-10", 100), Partial(90, 99));
+        assert_eq!(p("bytes=-500", 100), Partial(0, 99));
+        assert_eq!(p("bytes=50-500", 100), Partial(50, 99));
+        assert_eq!(p("bytes=100-", 100), Unsatisfiable);
+        assert_eq!(p("bytes=-0", 100), Unsatisfiable);
+        assert_eq!(p("bytes=0-", 0), Unsatisfiable);
+        assert_eq!(p("bytes=0-1,5-6", 100), Full);
+        assert_eq!(p("bytes=9-3", 100), Full);
+        assert_eq!(p("items=0-3", 100), Full);
+        assert_eq!(p("bytes=x-3", 100), Full);
+        let big = 10 * MEDIA_RANGE_CHUNK;
+        assert_eq!(p("bytes=0-", big), Partial(0, MEDIA_RANGE_CHUNK - 1));
     }
 
     #[test]

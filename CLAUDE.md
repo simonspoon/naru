@@ -125,7 +125,7 @@ The code is the source of truth. These are the invariants you must not break:
   (jsdom) over `frontend/src/*.test.ts` — no React testing library, no component
   rendering. The subject is the side-effect-free modules the components import
   (`agentAlarm`, `agentCard`, `agentChat`, `agentChild`, `agentProject`, `agentRow`, `agentSidebarWidth`, `artifactDraft`, `audioDraft`, `boardView`, `ccOrigin`, `ccScorecard`, `ccTab`, `clipboardFiles`, `doneToast`, `dockLayout`,
-  `editorInput`, `editorStatus`, `fileCsv`, `fileDirty`, `fileFind`, `fileHtml`, `fileImage`,
+  `editorInput`, `editorStatus`, `fileCsv`, `fileDirty`, `fileFind`, `fileHtml`, `fileImage`, `fileMedia`,
   `fileSearch`, `fileTabs`, `gitRepos`, `filesTreeWidth`, `inboxArchive`, `inboxFilter`, `inboxKind`, `inboxOrigin`, `inboxQueue`, `inboxRead`,
   `keyboardScope`, `keymap`, `keymapDraft`,
   `lastView`, `layout`, `libraryBuiltinUpdate`, `libraryBundle`, `libraryDraft`, `libraryHistory`, `libraryImport`, `libraryOverride`, `librarySkillFiles`, `librarySync`, `listenDraft`, `liveAudio`, `liveBand`, `liveBoard`, `liveBoardImages`, `liveBoardKeys`, `liveBoardWidth`, `liveCancel`, `liveCaption`, `liveCapture`, `liveContext`, `liveDevices`, `liveDrain`, `liveGlow`, `liveHead`, `liveInk`, `liveIndicator`, `liveLayout`, `liveMark`, `liveOrb`, `livePastedImage`, `livePausePhrase`, `livePromptDraft`,
