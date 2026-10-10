@@ -43,7 +43,8 @@ pub struct LedgerEntry {
     pub output_tokens: i64,
     pub cache_read_tokens: i64,
     pub cache_creation_tokens: i64,
-    pub cost_usd: f64,
+    /// Claude's reported cost; `None` = unknown, so the dashboard estimates.
+    pub cost_usd: Option<f64>,
 }
 
 /// `NARU_CC_LEDGER` / `MESA_CC_LEDGER`, else `<dot dir>/usage/headless.jsonl`.
@@ -87,7 +88,7 @@ pub fn entries_from_result(
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
-    let entry = |model: &str, i, o, cr, cc, cost: f64| LedgerEntry {
+    let entry = |model: &str, i, o, cr, cc, cost: Option<f64>| LedgerEntry {
         v: 1,
         id: format!("{uuid}:{model}"),
         at: at.to_string(),
@@ -114,7 +115,7 @@ pub fn entries_from_result(
                     int(u, "outputTokens"),
                     int(u, "cacheReadInputTokens"),
                     int(u, "cacheCreationInputTokens"),
-                    u.get("costUSD").and_then(Value::as_f64).unwrap_or(0.0),
+                    u.get("costUSD").and_then(Value::as_f64),
                 )
             })
             .collect());
@@ -129,9 +130,7 @@ pub fn entries_from_result(
         int(&u, "output_tokens"),
         int(&u, "cache_read_input_tokens"),
         int(&u, "cache_creation_input_tokens"),
-        v.get("total_cost_usd")
-            .and_then(Value::as_f64)
-            .unwrap_or(0.0),
+        v.get("total_cost_usd").and_then(Value::as_f64),
     )])
 }
 
@@ -183,10 +182,13 @@ pub fn add(
 }
 
 /// The session id a ledger entry is counted under.
+/// With no `session_id` the bare result uuid keys it (the `id` minus its
+/// `:<model>` suffix), so one multi-model call is one session.
 fn session_of(e: &LedgerEntry) -> String {
-    e.session_id
-        .clone()
-        .unwrap_or_else(|| format!("headless:{}", e.id))
+    e.session_id.clone().unwrap_or_else(|| {
+        let uuid = e.id.strip_suffix(&format!(":{}", e.model)).unwrap_or(&e.id);
+        format!("headless:{uuid}")
+    })
 }
 
 /// Fold the complete lines of `bytes` into a batch, skipping malformed ones.
@@ -230,7 +232,7 @@ fn parse_batch(bytes: &[u8]) -> (CcFileBatch, usize) {
             skill: None,
             agent: None,
             preview: None,
-            cost_micro_usd: Some((e.cost_usd * 1e6).round() as i64),
+            cost_micro_usd: e.cost_usd.map(|c| (c * 1e6).round() as i64),
         });
     }
     batch.sessions = sessions.into_values().collect();
@@ -266,7 +268,20 @@ pub fn ingest(
         return Ok(());
     };
     let start = start.min(bytes.len());
-    let (batch, consumed) = parse_batch(&bytes[start..]);
+    let (mut batch, consumed) = parse_batch(&bytes[start..]);
+    // Double-count guard: a session that already has a transcript is counted
+    // from it, so its ledger entries are dropped.
+    let mut skip: HashSet<String> = HashSet::new();
+    for s in &batch.sessions {
+        if store
+            .cc_session_entrypoint(&s.session_id)?
+            .is_some_and(|ep| ep.as_deref() != Some(HEADLESS_ENTRYPOINT))
+        {
+            skip.insert(s.session_id.clone());
+        }
+    }
+    batch.sessions.retain(|s| !skip.contains(&s.session_id));
+    batch.messages.retain(|m| !skip.contains(&m.session_id));
     for s in &batch.sessions {
         touched.insert(s.session_id.clone());
     }
@@ -297,7 +312,7 @@ mod tests {
         assert_eq!(es.len(), 2);
         assert_eq!(es[0].id, "u-1:claude-haiku-4-5");
         assert_eq!(es[0].cache_creation_tokens, 4);
-        assert!((es.iter().map(|e| e.cost_usd).sum::<f64>() - 0.375).abs() < 1e-9);
+        assert!((es.iter().filter_map(|e| e.cost_usd).sum::<f64>() - 0.375).abs() < 1e-9);
     }
 
     #[test]
@@ -308,8 +323,24 @@ mod tests {
             Err(Error::Validation(_))
         ));
         let es = entries_from_result(raw, "t", "x", Some("m")).unwrap();
-        assert_eq!((es[0].input_tokens, es[0].cost_usd), (10, 0.5));
+        assert_eq!((es[0].input_tokens, es[0].cost_usd), (10, Some(0.5)));
         assert_eq!(es[0].session_id, None);
+    }
+
+    #[test]
+    fn unknown_cost_stays_none_and_uuid_keys_one_session() {
+        let raw = r#"{"uuid":"u9","modelUsage":{"a":{"inputTokens":1},"b":{"inputTokens":2,"costUSD":0.5}}}"#;
+        let es = entries_from_result(raw, "t", "2026-01-02T03:04:05Z", None).unwrap();
+        assert_eq!(es[0].cost_usd, None);
+        let line: String = es
+            .iter()
+            .map(|e| serde_json::to_string(e).unwrap() + "\n")
+            .collect();
+        let (batch, _) = parse_batch(line.as_bytes());
+        assert_eq!(batch.sessions.len(), 1);
+        assert_eq!(batch.sessions[0].session_id, "headless:u9");
+        let costs: Vec<_> = batch.messages.iter().map(|m| m.cost_micro_usd).collect();
+        assert_eq!(costs, vec![None, Some(500_000)]);
     }
 
     #[test]
@@ -338,6 +369,40 @@ mod tests {
         assert_eq!(written.len(), 2);
         add(RESULT, "t", Some("2026-01-02T03:04:05Z"), None).unwrap();
         assert_eq!(fs::read_to_string(&ledger).unwrap().lines().count(), 4);
+
+        // Ledger entries for a session that already has an ingested
+        // transcript are dropped at ingest.
+        let mut store = Store::open(&dir.path().join("t.db")).unwrap();
+        let batch = CcFileBatch {
+            sessions: vec![CcSessionUpsert {
+                session_id: "s-1".into(),
+                cwd: None,
+                git_branch: None,
+                entrypoint: Some("cli".into()),
+                used_subagent: false,
+                start_ts: Some(1),
+                end_ts: Some(1),
+                main_agent: None,
+            }],
+            ..Default::default()
+        };
+        let cur = CcFileCursor {
+            mtime: 1,
+            size: 1,
+            byte_offset: 1,
+        };
+        store.cc_ingest_file("/x.jsonl", &cur, &batch).unwrap();
+        let mut report = CcSyncReport::default();
+        ingest(
+            &mut store,
+            &HashMap::new(),
+            &mut report,
+            &mut HashSet::new(),
+        )
+        .unwrap();
+        assert_eq!(report.messages_added, 0);
+        drop(store);
+        let _ = fs::remove_file(dir.path().join("t.db"));
 
         // A malformed line is skipped, not fatal.
         let mut f = fs::OpenOptions::new().append(true).open(&ledger).unwrap();

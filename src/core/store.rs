@@ -10126,6 +10126,16 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// The stored `entrypoint` of a session: `None` = no such session,
+    /// `Some(None)` = a session with no entrypoint recorded.
+    pub fn cc_session_entrypoint(&self, session_id: &str) -> Result<Option<Option<String>>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT entrypoint FROM cc_sessions WHERE session_id = ?1")?;
+        let mut rows = stmt.query_map([session_id], |r| r.get::<_, Option<String>>(0))?;
+        Ok(rows.next().transpose()?)
+    }
+
     /// Message rows with `ts >= cutoff` (`None` = all), oldest first —
     /// deterministic order so the row a read-time dedupe keeps is stable
     /// (`core::cc::dedupe_key`), the same guarantee `cc_session_messages`

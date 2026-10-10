@@ -1264,3 +1264,12 @@ calls reach the dashboard.
   carry the headless share of `est_cost_usd`; the Est. cost KPI shows
   "incl. $X headless" and the sessions table a `headless` badge. Headless
   sessions are left out of the average/median session minutes.
+- **Double counting.** A session that already has a transcript is refused at
+  `add` time and its entries are dropped again at ingest (a session already in
+  `cc_sessions` with a non-headless entrypoint). One gap remains: if the ledger
+  entry is ingested *first* and the transcript arrives later, both are counted;
+  `add` refuses that case unless the transcript did not yet exist.
+- **Unknown cost.** An entry with no `costUSD` / `total_cost_usd` stores no
+  cost (`cost_usd` null), so the dashboard prices its tokens from the table.
+- **Session key.** A result without a `session_id` is session
+  `headless:<uuid>`, so a multi-model call is one session.
