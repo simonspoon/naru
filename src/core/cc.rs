@@ -5293,10 +5293,12 @@ mod tests {
         // SAFETY: ENV_LOCK gives this test exclusive access to the env var.
         unsafe {
             std::env::set_var("MESA_CC_PROJECTS_DIR", tmp.path().join("projects"));
+            std::env::set_var("MESA_CC_LEDGER", "/nonexistent/headless.jsonl");
         }
         sync(&mut store, false).unwrap();
         unsafe {
             std::env::remove_var("MESA_CC_PROJECTS_DIR");
+            std::env::remove_var("MESA_CC_LEDGER");
         }
         let d = collect(&store, "all").unwrap();
 
@@ -5363,10 +5365,12 @@ mod tests {
         // SAFETY: ENV_LOCK gives this test exclusive access to the env var.
         unsafe {
             std::env::set_var("MESA_CC_PROJECTS_DIR", tmp.path().join("projects"));
+            std::env::set_var("MESA_CC_LEDGER", "/nonexistent/headless.jsonl");
         }
         sync(&mut store, false).unwrap();
         unsafe {
             std::env::remove_var("MESA_CC_PROJECTS_DIR");
+            std::env::remove_var("MESA_CC_LEDGER");
         }
 
         // Sanity: the unscoped dashboard sees both sessions.
@@ -5452,10 +5456,12 @@ mod tests {
         // SAFETY: ENV_LOCK gives this test exclusive access to the env var.
         unsafe {
             std::env::set_var("MESA_CC_PROJECTS_DIR", tmp.path().join("projects"));
+            std::env::set_var("MESA_CC_LEDGER", "/nonexistent/headless.jsonl");
         }
         sync(&mut store, false).unwrap();
         unsafe {
             std::env::remove_var("MESA_CC_PROJECTS_DIR");
+            std::env::remove_var("MESA_CC_LEDGER");
         }
 
         // Current path alone: the pre-move session is invisible, which is the
@@ -5540,6 +5546,7 @@ mod tests {
         let mut store = Store::open(&tmp.path().join("mesa.db")).unwrap();
         unsafe {
             std::env::set_var("MESA_CC_PROJECTS_DIR", &root);
+            std::env::set_var("MESA_CC_LEDGER", "/nonexistent/headless.jsonl");
         }
         sync(&mut store, false).unwrap();
         let before = collect(&store, "all").unwrap();
@@ -5549,6 +5556,7 @@ mod tests {
         let after = collect(&store, "all").unwrap();
         unsafe {
             std::env::remove_var("MESA_CC_PROJECTS_DIR");
+            std::env::remove_var("MESA_CC_LEDGER");
         }
 
         // Totals are identical before and after the deletion (only the
@@ -5625,10 +5633,12 @@ mod tests {
         write_jsonl(&proj, "old.jsonl", &[stale.as_str()]);
         unsafe {
             std::env::set_var("MESA_CC_PROJECTS_DIR", tmp.path());
+            std::env::set_var("MESA_CC_LEDGER", "/nonexistent/headless.jsonl");
         }
         let l = live(15);
         unsafe {
             std::env::remove_var("MESA_CC_PROJECTS_DIR");
+            std::env::remove_var("MESA_CC_LEDGER");
         }
         // Only the 30-s-old session is inside the 15-minute window.
         assert_eq!(l.live_count, 1);
@@ -5750,10 +5760,12 @@ mod tests {
         write_jsonl(&proj, "repeat.jsonl", &refs);
         unsafe {
             std::env::set_var("MESA_CC_PROJECTS_DIR", tmp.path());
+            std::env::set_var("MESA_CC_LEDGER", "/nonexistent/headless.jsonl");
         }
         let l = live(15);
         unsafe {
             std::env::remove_var("MESA_CC_PROJECTS_DIR");
+            std::env::remove_var("MESA_CC_LEDGER");
         }
         let repeat = |id: &str| {
             l.sessions
@@ -5879,10 +5891,12 @@ mod tests {
         write_jsonl(&proj, "parallel.jsonl", &refs);
         unsafe {
             std::env::set_var("MESA_CC_PROJECTS_DIR", tmp.path());
+            std::env::set_var("MESA_CC_LEDGER", "/nonexistent/headless.jsonl");
         }
         let l = live(15);
         unsafe {
             std::env::remove_var("MESA_CC_PROJECTS_DIR");
+            std::env::remove_var("MESA_CC_LEDGER");
         }
         let repeat = |id: &str| {
             l.sessions
@@ -5937,10 +5951,12 @@ mod tests {
         write_jsonl(&subs, "agent-bbb.jsonl", &[stale.as_str()]);
         unsafe {
             std::env::set_var("MESA_CC_PROJECTS_DIR", tmp.path());
+            std::env::set_var("MESA_CC_LEDGER", "/nonexistent/headless.jsonl");
         }
         let l = live(15);
         unsafe {
             std::env::remove_var("MESA_CC_PROJECTS_DIR");
+            std::env::remove_var("MESA_CC_LEDGER");
         }
         let s = l.sessions.iter().find(|s| s.session_id == "sess").unwrap();
         assert!(s.used_subagent);
@@ -5982,10 +5998,12 @@ mod tests {
         write_jsonl(&proj, "side.jsonl", &[only_side.as_str()]);
         unsafe {
             std::env::set_var("MESA_CC_PROJECTS_DIR", tmp.path());
+            std::env::set_var("MESA_CC_LEDGER", "/nonexistent/headless.jsonl");
         }
         let l = live(15);
         unsafe {
             std::env::remove_var("MESA_CC_PROJECTS_DIR");
+            std::env::remove_var("MESA_CC_LEDGER");
         }
         let get = |id: &str| l.sessions.iter().find(|s| s.session_id == id).unwrap();
         assert_eq!(get("ctx").context_tokens, Some(5 + 1_000 + 200));
@@ -6016,10 +6034,12 @@ mod tests {
         write_jsonl(&proj, "loop.jsonl", &[l1.as_str()]);
         unsafe {
             std::env::set_var("MESA_CC_PROJECTS_DIR", tmp.path());
+            std::env::set_var("MESA_CC_LEDGER", "/nonexistent/headless.jsonl");
         }
         let l = live(15);
         unsafe {
             std::env::remove_var("MESA_CC_PROJECTS_DIR");
+            std::env::remove_var("MESA_CC_LEDGER");
         }
         let get = |id: &str| l.sessions.iter().find(|s| s.session_id == id).unwrap();
         let sup = get("sup");
@@ -6123,10 +6143,12 @@ mod tests {
         let mut store = Store::open(&db).unwrap();
         unsafe {
             std::env::set_var("MESA_CC_PROJECTS_DIR", tmp.path().join("projects"));
+            std::env::set_var("MESA_CC_LEDGER", "/nonexistent/headless.jsonl");
         }
         let rep = sync(&mut store, false).unwrap();
         unsafe {
             std::env::remove_var("MESA_CC_PROJECTS_DIR");
+            std::env::remove_var("MESA_CC_LEDGER");
         }
 
         assert_eq!(rep.files_scanned, 2);
@@ -6209,10 +6231,12 @@ mod tests {
         let mut store = Store::open(&db).unwrap();
         unsafe {
             std::env::set_var("MESA_CC_PROJECTS_DIR", tmp.path().join("projects"));
+            std::env::set_var("MESA_CC_LEDGER", "/nonexistent/headless.jsonl");
         }
         sync(&mut store, false).unwrap();
         unsafe {
             std::env::remove_var("MESA_CC_PROJECTS_DIR");
+            std::env::remove_var("MESA_CC_LEDGER");
         }
 
         // Rows are per line and untouched: 3 events + 2 advisor rows.
@@ -6301,10 +6325,12 @@ mod tests {
         let mut store = Store::open(&db).unwrap();
         unsafe {
             std::env::set_var("MESA_CC_PROJECTS_DIR", tmp.path().join("projects"));
+            std::env::set_var("MESA_CC_LEDGER", "/nonexistent/headless.jsonl");
         }
         let rep = sync(&mut store, false).unwrap();
         unsafe {
             std::env::remove_var("MESA_CC_PROJECTS_DIR");
+            std::env::remove_var("MESA_CC_LEDGER");
         }
 
         assert_eq!(rep.files_ingested, 1);
@@ -6366,6 +6392,7 @@ mod tests {
         let mut store = Store::open(&db).unwrap();
         unsafe {
             std::env::set_var("MESA_CC_PROJECTS_DIR", tmp.path().join("projects"));
+            std::env::set_var("MESA_CC_LEDGER", "/nonexistent/headless.jsonl");
         }
         let first = sync(&mut store, false).unwrap();
         assert_eq!(first.files_ingested, 1);
@@ -6401,6 +6428,7 @@ mod tests {
         let fourth = sync(&mut store, false).unwrap();
         unsafe {
             std::env::remove_var("MESA_CC_PROJECTS_DIR");
+            std::env::remove_var("MESA_CC_LEDGER");
         }
         assert_eq!(fourth.files_ingested, 1);
         assert_eq!(fourth.messages_added, 0);
@@ -6421,6 +6449,7 @@ mod tests {
         let mut store = Store::open(&db).unwrap();
         unsafe {
             std::env::set_var("MESA_CC_PROJECTS_DIR", tmp.path().join("projects"));
+            std::env::set_var("MESA_CC_LEDGER", "/nonexistent/headless.jsonl");
         }
         let first = sync(&mut store, false).unwrap();
         assert_eq!(first.files_ingested, 1);
@@ -6460,6 +6489,7 @@ mod tests {
         let rebuilt = sync(&mut store, true).unwrap();
         unsafe {
             std::env::remove_var("MESA_CC_PROJECTS_DIR");
+            std::env::remove_var("MESA_CC_LEDGER");
         }
         assert_eq!(rebuilt.files_scanned, 1);
         assert_eq!(rebuilt.files_ingested, 1);
@@ -6510,10 +6540,12 @@ mod tests {
         let mut store = Store::open(&tmp.path().join("mesa.db")).unwrap();
         unsafe {
             std::env::set_var("MESA_CC_PROJECTS_DIR", tmp.path().join("projects"));
+            std::env::set_var("MESA_CC_LEDGER", "/nonexistent/headless.jsonl");
         }
         sync(&mut store, false).unwrap();
         unsafe {
             std::env::remove_var("MESA_CC_PROJECTS_DIR");
+            std::env::remove_var("MESA_CC_LEDGER");
         }
 
         // `all`: everything persisted is reported.
@@ -6840,10 +6872,12 @@ mod tests {
         let mut store = Store::open(&db).unwrap();
         unsafe {
             std::env::set_var("MESA_CC_PROJECTS_DIR", tmp.path().join("projects"));
+            std::env::set_var("MESA_CC_LEDGER", "/nonexistent/headless.jsonl");
         }
         sync(&mut store, false).unwrap();
         unsafe {
             std::env::remove_var("MESA_CC_PROJECTS_DIR");
+            std::env::remove_var("MESA_CC_LEDGER");
         }
 
         let msgs = store.cc_session_messages("s1").unwrap();
@@ -7082,12 +7116,14 @@ mod tests {
         let mut store = Store::open(&db).unwrap();
         unsafe {
             std::env::set_var("MESA_CC_PROJECTS_DIR", tmp.path().join("projects"));
+            std::env::set_var("MESA_CC_LEDGER", "/nonexistent/headless.jsonl");
         }
         sync(&mut store, false).unwrap();
         // A second walk from byte 0 must change nothing.
         sync(&mut store, true).unwrap();
         unsafe {
             std::env::remove_var("MESA_CC_PROJECTS_DIR");
+            std::env::remove_var("MESA_CC_LEDGER");
         }
 
         let rows = store.cc_session_prompts("s1").unwrap();
@@ -7124,10 +7160,12 @@ mod tests {
         let mut store = Store::open(&db).unwrap();
         unsafe {
             std::env::set_var("MESA_CC_PROJECTS_DIR", tmp.path().join("projects"));
+            std::env::set_var("MESA_CC_LEDGER", "/nonexistent/headless.jsonl");
         }
         sync(&mut store, false).unwrap();
         unsafe {
             std::env::remove_var("MESA_CC_PROJECTS_DIR");
+            std::env::remove_var("MESA_CC_LEDGER");
         }
 
         let g = session_graph(&store, "s1", GRAPH_NODE_LIMIT)
@@ -7193,10 +7231,12 @@ mod tests {
         let mut store = Store::open(&db).unwrap();
         unsafe {
             std::env::set_var("MESA_CC_PROJECTS_DIR", tmp.path().join("projects"));
+            std::env::set_var("MESA_CC_LEDGER", "/nonexistent/headless.jsonl");
         }
         sync(&mut store, false).unwrap();
         unsafe {
             std::env::remove_var("MESA_CC_PROJECTS_DIR");
+            std::env::remove_var("MESA_CC_LEDGER");
         }
 
         let g = session_graph(&store, "s1", GRAPH_NODE_LIMIT)
@@ -7251,10 +7291,12 @@ mod tests {
         let mut store = Store::open(&db).unwrap();
         unsafe {
             std::env::set_var("MESA_CC_PROJECTS_DIR", tmp.path().join("projects"));
+            std::env::set_var("MESA_CC_LEDGER", "/nonexistent/headless.jsonl");
         }
         sync(&mut store, false).unwrap();
         unsafe {
             std::env::remove_var("MESA_CC_PROJECTS_DIR");
+            std::env::remove_var("MESA_CC_LEDGER");
         }
 
         let g = session_graph(&store, "s1", GRAPH_NODE_LIMIT)
@@ -9225,10 +9267,12 @@ mod tests {
         // SAFETY: ENV_LOCK gives this test exclusive access to the env var.
         unsafe {
             std::env::set_var("MESA_CC_PROJECTS_DIR", tmp.path().join("projects"));
+            std::env::set_var("MESA_CC_LEDGER", "/nonexistent/headless.jsonl");
         }
         sync(&mut store, false).unwrap();
         unsafe {
             std::env::remove_var("MESA_CC_PROJECTS_DIR");
+            std::env::remove_var("MESA_CC_LEDGER");
         }
         let e = errors(&store, "all", None, false).unwrap();
 
@@ -9316,10 +9360,12 @@ mod tests {
         // SAFETY: ENV_LOCK gives this test exclusive access to the env var.
         unsafe {
             std::env::set_var("MESA_CC_PROJECTS_DIR", tmp.path().join("projects"));
+            std::env::set_var("MESA_CC_LEDGER", "/nonexistent/headless.jsonl");
         }
         sync(&mut store, false).unwrap();
         unsafe {
             std::env::remove_var("MESA_CC_PROJECTS_DIR");
+            std::env::remove_var("MESA_CC_LEDGER");
         }
 
         let e = errors(&store, "all", None, false).unwrap();
