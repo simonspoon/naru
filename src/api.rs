@@ -1684,7 +1684,7 @@ fn spawn_failed_body(task_id: i64, local_path: &str, error: &str, base: Duration
     let minutes = spawn_backoff_window(base, 1).as_secs().div_ceil(60).max(1);
     format!(
         "The todo watcher could not start an agent for task {task_id} in {local_path}. \
-         The spawn failed with: {error}. The task is back in queued, and the watcher will \
+         The spawn failed with: {error}. The task is back in the queue, and the watcher will \
          try it again automatically in about {minutes} minutes, waiting longer after each \
          further failure. Once the cause is fixed you can also touch the task — for \
          example `mesa task update {task_id} --status todo` — and the next tick \
@@ -2019,7 +2019,7 @@ fn reaper_abandoned_body(job_id: &str, task_id: i64) -> String {
 fn reaper_parked_body(job_id: &str, task_id: i64, deaths: u32) -> String {
     format!(
         "Agent session {job_id} on task {task_id} died without closing it; its session has now \
-         died {deaths} times (it was put back to queued {} times first). The task was moved to \
+         died {deaths} times (it was put back in the queue {} times first). The task was moved to \
          backlog so the project queue is not stalled or retried forever; move it \
          back with `naru task update {task_id} --status todo` once the cause is fixed.",
         deaths - 1

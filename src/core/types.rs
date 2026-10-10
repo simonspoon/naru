@@ -1283,7 +1283,7 @@ pub struct Task {
     pub blocked: bool,
 }
 
-/// One task that finished, was cancelled or went back to todo/backlog since
+/// One task that finished, was cancelled or went back to queued/backlog since
 /// some time (naru task 1725). Built by `Store::task_digest`; `status` is the
 /// task's current status. Not ts-exported.
 #[derive(Debug, Clone, PartialEq, Serialize)]

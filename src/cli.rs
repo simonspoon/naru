@@ -4019,7 +4019,7 @@ EXAMPLES
 
 fn parse_status(s: &str) -> std::result::Result<Status, String> {
     Status::parse(s).ok_or_else(|| {
-        format!("'{s}' is not one of backlog|todo|queued|in_progress|done|cancelled")
+        format!("'{s}' is not one of backlog|todo (or queued|q)|in_progress|done|cancelled")
     })
 }
 

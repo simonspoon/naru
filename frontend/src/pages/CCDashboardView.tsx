@@ -506,7 +506,7 @@ function Scorecard() {
         started on a task: done counts tasks done now, not whether that run
         finished them, and a retried task credits every session that worked on
         it, so it is not a per-model success rate; requeued counts moves back
-        to todo/backlog since the run started. Model changes are not date-filtered.
+        to queued/backlog since the run started. Model changes are not date-filtered.
       </p>
       <p className="cc-hint">
         <label>
