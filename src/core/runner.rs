@@ -687,7 +687,7 @@ fn run_runner_locked(dir: &Path) -> Result<()> {
             .create(true)
             .append(true)
             .open(dir.join("claude.log"))?;
-        let mut cmd = Command::new("bash");
+        let mut cmd = crate::core::proc::bash();
         cmd.arg("-c")
             .arg(script)
             .current_dir(&job.cwd)

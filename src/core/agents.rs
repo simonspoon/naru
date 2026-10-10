@@ -1262,7 +1262,7 @@ fn stop_session(bin: &str, job_id: &str) -> Result<(), String> {
 /// in rather than resolved here so tests pin a whole command line without
 /// mutating process-global env state.
 fn run_script(script: &str, dir: &str) -> Result<Option<String>, String> {
-    let out = Command::new("bash")
+    let out = crate::core::proc::bash()
         .arg("-c")
         .arg(script)
         .current_dir(dir)

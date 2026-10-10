@@ -189,7 +189,9 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+#[cfg(test)]
+use std::process::Command;
+use std::process::Stdio;
 
 use serde::Deserialize;
 
@@ -1606,7 +1608,7 @@ fn substitute_script(action: &str, script: &str, vars: &Vars) -> Result<String, 
 /// value it merely can't inspect would be the worse answer. (Such a machine
 /// can't run the script either — that failure belongs at dispatch.)
 fn bash_syntax_check(action: &str, script: &str) -> Result<(), String> {
-    let out = Command::new("bash")
+    let out = crate::core::proc::bash()
         .arg("-n")
         .arg("-c")
         .arg(script)

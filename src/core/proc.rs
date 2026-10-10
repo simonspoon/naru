@@ -25,6 +25,64 @@ pub fn isolate(cmd: &mut Command) -> &mut Command {
     }
 }
 
+/// A `bash` command. Unix: plain `bash`, found on `PATH`. Windows: `bash` on
+/// `PATH` is usually WSL's `C:\Windows\System32\bash.exe`, which runs inside
+/// a Linux VM, so Git for Windows' bash is resolved explicitly, once:
+/// `NARU_BASH` (or `MESA_BASH`), the bash beside `git.exe` on `PATH`, a
+/// standard Git for Windows install, and last plain `bash`.
+pub fn bash() -> Command {
+    #[cfg(unix)]
+    {
+        Command::new("bash")
+    }
+    #[cfg(windows)]
+    {
+        static BASH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+        Command::new(BASH.get_or_init(windows_bash))
+    }
+}
+
+#[cfg(windows)]
+fn windows_bash() -> std::path::PathBuf {
+    use std::path::PathBuf;
+    if let Some(p) = crate::core::env::var("BASH").filter(|v| !v.is_empty()) {
+        return PathBuf::from(p);
+    }
+    let from_git = std::env::var_os("PATH").and_then(|path| {
+        std::env::split_paths(&path)
+            .map(|dir| dir.join("git.exe"))
+            .filter(|git| git.is_file())
+            .find_map(|git| git_bash_for(&git))
+    });
+    if let Some(p) = from_git {
+        return p;
+    }
+    let program_files = std::env::var_os("ProgramFiles").map(PathBuf::from);
+    let local = std::env::var_os("LOCALAPPDATA").map(|p| PathBuf::from(p).join("Programs"));
+    [program_files, local]
+        .into_iter()
+        .flatten()
+        .map(|base| base.join("Git").join("bin").join("bash.exe"))
+        .find(|p| p.is_file())
+        .unwrap_or_else(|| PathBuf::from("bash"))
+}
+
+/// Git for Windows' `<root>\bin\bash.exe` for a `git.exe` at `<root>\cmd`,
+/// `<root>\bin` or `<root>\mingw64\bin`, when it exists.
+#[cfg(windows)]
+fn git_bash_for(git: &std::path::Path) -> Option<std::path::PathBuf> {
+    let name = |p: &std::path::Path| p.file_name()?.to_str().map(str::to_ascii_lowercase);
+    let mut root = git.parent()?;
+    if name(root)? == "bin" && name(root.parent()?).as_deref() == Some("mingw64") {
+        root = root.parent()?;
+    }
+    if !matches!(name(root)?.as_str(), "cmd" | "bin" | "mingw64") {
+        return None;
+    }
+    let bash = root.parent()?.join("bin").join("bash.exe");
+    bash.is_file().then_some(bash)
+}
+
 /// Signals the whole group `pgid` leads (`sig` is a `kill` signal name such as
 /// `KILL` or `TERM`). On Windows there is no signal choice: the tree is ended.
 pub fn signal_group(pgid: i64, sig: &str) {
@@ -84,4 +142,31 @@ pub fn pid_alive(pid: i64) -> bool {
         ProcessRefreshKind::nothing(),
     );
     sys.process(pid).is_some()
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn git_bash_is_found_from_each_git_exe_location() {
+        let root = std::env::temp_dir().join(format!("naru-gitroot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for d in ["bin", "cmd", "mingw64/bin"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        let bash = root.join("bin").join("bash.exe");
+        for d in ["cmd", "bin", "mingw64/bin"] {
+            assert_eq!(git_bash_for(&root.join(d).join("git.exe")), None);
+        }
+        std::fs::write(&bash, b"").unwrap();
+        for d in ["cmd", "bin", "mingw64/bin"] {
+            assert_eq!(
+                git_bash_for(&root.join(d).join("git.exe")),
+                Some(bash.clone())
+            );
+        }
+        assert_eq!(git_bash_for(&root.join("other").join("git.exe")), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
