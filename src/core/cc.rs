@@ -8223,7 +8223,10 @@ mod tests {
         .unwrap();
 
         // SAFETY: every caller holds ENV_LOCK for this window.
-        unsafe { std::env::set_var("MESA_CC_PROJECTS_DIR", &root) };
+        unsafe {
+            std::env::set_var("MESA_CC_PROJECTS_DIR", &root);
+            std::env::set_var("MESA_CC_LEDGER", "/nonexistent/headless.jsonl");
+        }
         let mut store = Store::open(&tmp.path().join("mesa.db")).unwrap();
         sync(&mut store, false).unwrap();
         (tmp, root, store)
@@ -8377,7 +8380,10 @@ mod tests {
         unsafe { std::env::set_var("MESA_CC_PROJECTS_DIR", &elsewhere) };
         let refused = node_text(&store, "s1", "msg:u1");
         // SAFETY: same window, same lock.
-        unsafe { std::env::remove_var("MESA_CC_PROJECTS_DIR") };
+        unsafe {
+            std::env::remove_var("MESA_CC_PROJECTS_DIR");
+            std::env::remove_var("MESA_CC_LEDGER");
+        }
         assert!(
             matches!(refused, Err(Error::Validation(_))),
             "a path outside the transcript root must be refused, not read"
