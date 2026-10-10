@@ -14,7 +14,18 @@ import '@fontsource/inter/600.css'
 // Icons-only Nerd Font: the PUA-glyph fallback layer for terminal panes.
 import '@azurity/pure-nerd-font/pure-nerd-font.css'
 import './index.css'
+import './themes.css'
+import { getAppearance } from './api'
+import { applyTheme, parseSetting, storedSetting } from './theme'
 import App from './App.tsx'
+
+// Apply the last-known theme before first render so a reload does not flash the
+// wrong one; the saved config then reconciles it (naru task 1784).
+applyTheme(storedSetting())
+getAppearance().then(
+  (a) => applyTheme(parseSetting(a.theme)),
+  () => {},
+)
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

@@ -1676,6 +1676,52 @@ CODE=$(curl -s -o "$TMP/body" -w '%{http_code}' -H 'Host: evil.example' \
 [ "$CODE" = "403" ] || fail "GET audio with a foreign Host: expected 403, got $CODE: $(cat "$TMP/body")"
 ok "the audio verbs sit behind the config routes' gate"
 
+# ---- the appearance section: GET/PUT /api/config/appearance (naru task 1784) ----
+api GET /api/config/appearance
+[ "$CODE" = "200" ] || fail "GET appearance: expected 200, got $CODE: $STDOUT"
+[ "$(jq -c '[.theme, .theme_default]' <<<"$STDOUT")" = '[null,"system"]' ] ||
+  fail "GET appearance on an unconfigured section: $STDOUT"
+api PUT /api/config/appearance '{"theme": "light"}'
+[ "$CODE" = "200" ] || fail "PUT appearance: expected 200, got $CODE: $STDOUT"
+[ "$(jq -r .theme <<<"$STDOUT")" = "light" ] || fail "PUT appearance must echo the theme: $STDOUT"
+[ "$(jq -c '.appearance' < "$CONFIG")" = '{"theme":"light"}' ] ||
+  fail "PUT appearance did not write the section: $(cat "$CONFIG")"
+[ "$(jq -r '.listen.engine' < "$CONFIG")" = "browser" ] &&
+  [ "$(jq -r '.speech.voice' < "$CONFIG")" = "af_bella" ] &&
+  [ "$(jq -r '.commands["inbox-watcher"]' < "$CONFIG")" = "mytool triage {id}" ] &&
+  [ "$(jq -r '.other.x' < "$CONFIG")" = "1" ] ||
+  fail "an appearance write clobbered another section: $(cat "$CONFIG")"
+api PUT /api/config/live '{"auto_send_ms": 2700}'
+[ "$CODE" = "200" ] || fail "PUT live after appearance: expected 200, got $CODE: $STDOUT"
+api PUT /api/config/audio '{"engine": "legacy"}'
+[ "$CODE" = "200" ] || fail "PUT audio after appearance: expected 200, got $CODE: $STDOUT"
+[ "$(jq -c '.appearance' < "$CONFIG")" = '{"theme":"light"}' ] ||
+  fail "a live or audio write clobbered the appearance section: $(cat "$CONFIG")"
+api PUT /api/config/audio '{"engine": null}'
+ok "PUT /api/config/appearance writes the theme and leaves every other section alone, and they leave it alone"
+
+BEFORE=$(cat "$CONFIG")
+for BODY in '{"theme": "neon"}' '{"theme": "Light"}' '{"theme": 3}'; do
+  api PUT /api/config/appearance "$BODY"
+  [ "$CODE" = "422" ] || fail "appearance $BODY: expected 422, got $CODE: $STDOUT"
+done
+api PUT /api/config/appearance '{"theme": "neon"}'
+[ "$(jq -r .error.code <<<"$STDOUT")" = "validation" ] || fail "appearance neon: expected validation, got $STDOUT"
+[ "$(cat "$CONFIG")" = "$BEFORE" ] || fail "a rejected appearance PUT must not touch the file: $(cat "$CONFIG")"
+for T in dark contrast system; do
+  api PUT /api/config/appearance "{\"theme\": \"$T\"}"
+  [ "$CODE" = "200" ] && [ "$(jq -r .theme <<<"$STDOUT")" = "$T" ] || fail "appearance $T: expected 200 echo, got $CODE: $STDOUT"
+done
+api PUT /api/config/appearance '{"theme": null}'
+[ "$CODE" = "200" ] || fail "PUT appearance reset: expected 200, got $CODE: $STDOUT"
+[ "$(jq -c '.appearance' < "$CONFIG")" = '{}' ] || fail "null must remove the theme: $(cat "$CONFIG")"
+ok "PUT /api/config/appearance: an unknown theme is 422 writing nothing; every shipped id and system are accepted; null restores the default"
+
+CODE=$(curl -s -o "$TMP/body" -w '%{http_code}' -H 'Host: evil.example' \
+  "http://127.0.0.1:$PORT/api/config/appearance")
+[ "$CODE" = "403" ] || fail "GET appearance with a foreign Host: expected 403, got $CODE: $(cat "$TMP/body")"
+ok "the appearance verbs sit behind the config routes' gate"
+
 printf '{ not json' > "$CONFIG"
 api GET /api/config
 [ "$CODE" = "502" ] || fail "malformed config GET: expected 502, got $CODE: $STDOUT"

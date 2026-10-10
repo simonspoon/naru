@@ -729,6 +729,18 @@ pub struct ConfigAudio {
     pub engine_default: String,
 }
 
+/// The `appearance` settings as the Settings page sees them (`core::config`,
+/// `docs/config.md`, naru task 1784): the saved colour theme, verbatim (`null`
+/// when the config says nothing) beside its built-in.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct ConfigAppearance {
+    /// `"system"`, a theme id (`dark`, `light`, `contrast`), or `null`.
+    pub theme: Option<String>,
+    /// The built-in setting (`"system"`).
+    pub theme_default: String,
+}
+
 /// The live-conversation settings as the Settings page sees them
 /// (`core::config`, `docs/config.md`, mesa task 867) — a fifth view of
 /// `~/.mesa/config.json`, with the same null-means-fallback rule as

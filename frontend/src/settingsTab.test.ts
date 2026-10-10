@@ -14,6 +14,7 @@ describe('settingsTabFromPath', () => {
   it('maps each known segment to its tab', () => {
     expect(settingsTabFromPath('/settings/hooks')).toBe('hooks')
     expect(settingsTabFromPath('/settings/keyboard')).toBe('keyboard')
+    expect(settingsTabFromPath('/settings/appearance')).toBe('appearance')
     expect(settingsTabFromPath('/settings/voice')).toBe('voice')
     expect(settingsTabFromPath('/settings/memory')).toBe('memory')
     expect(settingsTabFromPath('/settings/pricing')).toBe('pricing')
@@ -36,10 +37,11 @@ describe('settingsTabFromPath', () => {
 })
 
 describe('strip', () => {
-  it('lists the six tabs in order, hooks first', () => {
+  it('lists the seven tabs in order, hooks first', () => {
     expect(SETTINGS_TABS).toEqual([
       'hooks',
       'keyboard',
+      'appearance',
       'voice',
       'memory',
       'pricing',

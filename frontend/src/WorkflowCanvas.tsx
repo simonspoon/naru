@@ -27,6 +27,7 @@ import {
 import { loadBoardView, saveBoardView } from './boardView'
 import { layoutNodes } from './layout'
 import { useFetch } from './useFetch'
+import { cssVar, onThemeChange } from './theme'
 import {
   BRANCH_OPS,
   INBOX_KINDS,
@@ -550,6 +551,10 @@ export function WorkflowCanvas({
   onChanged: () => void
 }) {
   const workflowId = view.workflow.id
+  // The background dots follow the theme (naru task 1784).
+  const [, setThemeTick] = useState(0)
+  useEffect(() => onThemeChange(() => setThemeTick((n) => n + 1)), [])
+  const dotColor = `rgba(${cssVar('--cyan-rgb', '0, 229, 255')}, 0.12)`
   const [error, setError] = useState<string | null>(null)
   const [selection, setSelection] = useState<Selection>(null)
   const { data: scripts } = useFetch(() => listScripts(), 'workflow-scripts')
@@ -765,7 +770,7 @@ export function WorkflowCanvas({
           nodesFocusable={false}
           edgesFocusable={false}
         >
-          <Background variant={BackgroundVariant.Dots} gap={24} color="rgba(0, 229, 255, 0.12)" />
+          <Background variant={BackgroundVariant.Dots} gap={24} color={dotColor} />
           <Controls showInteractive={false} position="top-right" />
           <Panel position="top-left" className="wf-controls">
             <button type="button" onClick={autoLayout} title="Arrange the nodes left to right by flow">

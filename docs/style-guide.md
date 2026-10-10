@@ -35,6 +35,26 @@ the rules below are applied across `frontend/src/App.css`.
 | `--ring`, `--ring-focus`, `--edge-cyan`, `--hairline`, `--border(-bright)` | separation |
 | `--wf-trigger` … `--wf-output`, `--wf-run` | the workflow builder's per-kind node tints and its Run pill |
 
+## Themes
+
+Every colour in `index.css` / `App.css` flows through `:root` variables
+(channel triplets such as `--cyan-rgb` so `rgba(var(--cyan-rgb), a)` retints).
+`:root` is the `dark` theme; `frontend/src/themes.css` holds one
+`:root[data-theme='<id>']` block per other theme (`light`, `contrast`) that
+overrides the same variables and sets `color-scheme`. `theme.ts` picks the id
+(Settings → Appearance, `docs/config.md` "Appearance") and sets `data-theme` on
+`<html>`.
+
+- **Adding a variable to `:root` means adding it to every theme block**, or
+  deciding it is theme-independent. Never put a colour literal in a rule.
+- Script-painted chrome (xterm, canvas export, the workflow dots) reads the
+  variables with `theme.ts::cssVar` at use time and repaints on
+  `onThemeChange`.
+- Theme-independent on purpose: the live orb/mark state colours, timeline kind
+  colours, chart/agent palettes, iframe/board white, the image checkerboard.
+- Light accents are the dark hues darkened for >= 4.5:1 on `--bg`/`--panel`;
+  check that when adding a theme.
+
 ## When to use mono
 
 Only for small meta (ids, times, counts, chips, kbd) and for code: terminal and

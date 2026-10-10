@@ -34,6 +34,7 @@ import type { ConfigListen } from './types/ConfigListen'
 import type { ConfigAmbient } from './types/ConfigAmbient'
 import type { VoiceEnrollment } from './types/VoiceEnrollment'
 import type { ConfigAudio } from './types/ConfigAudio'
+import type { ConfigAppearance } from './types/ConfigAppearance'
 import type { TranscribeStatus } from './types/TranscribeStatus'
 import type { ConfigLive } from './types/ConfigLive'
 import type { LiveNotebookEntry } from './types/LiveNotebookEntry'
@@ -1609,6 +1610,19 @@ export function updateAudio(
   audio: Record<string, string | null>,
 ): Promise<ConfigAudio> {
   return request('/api/config/audio', jsonInit('PUT', audio))
+}
+
+/** The saved colour theme (naru task 1784): `system`, a theme id, or `null`. */
+export function getAppearance(): Promise<ConfigAppearance> {
+  return request('/api/config/appearance')
+}
+
+/**
+ * Saves the colour theme and echoes the section as re-read from disk. `null`
+ * restores `system`; an unknown theme is 422 `validation`, nothing written.
+ */
+export function updateAppearance(theme: string | null): Promise<ConfigAppearance> {
+  return request('/api/config/appearance', jsonInit('PUT', { theme }))
 }
 
 /**

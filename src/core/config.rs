@@ -213,8 +213,9 @@ use crate::core::guard::{GuardAction, GuardThresholds};
 use crate::core::listen;
 use crate::core::speech;
 use crate::core::types::{
-    ConfigAmbient, ConfigAudio, ConfigCommand, ConfigGuard, ConfigKeymap, ConfigKeymapAction,
-    ConfigListen, ConfigLive, ConfigPrice, ConfigSpeech, ConfigWatchers, ContextTier, ModelRates,
+    ConfigAmbient, ConfigAppearance, ConfigAudio, ConfigCommand, ConfigGuard, ConfigKeymap,
+    ConfigKeymapAction, ConfigListen, ConfigLive, ConfigPrice, ConfigSpeech, ConfigWatchers,
+    ContextTier, ModelRates,
 };
 
 /// The todo-watcher's dispatch command (`docs/todo-watcher.md`).
@@ -3234,6 +3235,125 @@ fn validate_word(key: &str, value: &str, words: &[&str]) -> Result<(), String> {
         "{key} must be one of {}, got {value:?}",
         quoted.join(", ")
     ))
+}
+
+// ---------------------------------------------------------------------------
+// Appearance (naru task 1784)
+// ---------------------------------------------------------------------------
+
+/// The config key holding the colour theme.
+pub const THEME: &str = "theme";
+
+/// The settings the `theme` key accepts: `system` (follow the OS) plus one id
+/// per theme block in `frontend/src/themes.css` — keep in step with
+/// `frontend/src/theme.ts`.
+pub const APPEARANCE_THEMES: &[&str] = &["system", "dark", "light", "contrast"];
+
+/// The theme setting when the config says nothing.
+pub const DEFAULT_THEME: &str = "system";
+
+#[derive(Debug, Default, Deserialize)]
+struct AppearanceConfig {
+    #[serde(default)]
+    appearance: AppearanceSection,
+}
+
+/// Kept raw like [`AudioSection`]: a bad hand-edited value is shown verbatim
+/// and the page falls back to `system`.
+#[derive(Debug, Default, Deserialize)]
+struct AppearanceSection {
+    #[serde(default)]
+    theme: Option<String>,
+}
+
+/// The appearance settings (`GET /api/config/appearance`).
+pub fn appearance() -> Result<ConfigAppearance, String> {
+    appearance_in(&config_file())
+}
+
+fn appearance_in(path: &Path) -> Result<ConfigAppearance, String> {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
+    };
+    let section = if bytes.is_empty() {
+        AppearanceSection::default()
+    } else {
+        serde_json::from_slice::<AppearanceConfig>(&bytes)
+            .map_err(|e| format!("malformed mesa config {}: {e}", path.display()))?
+            .appearance
+    };
+    Ok(ConfigAppearance {
+        theme: section
+            .theme
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty()),
+        theme_default: DEFAULT_THEME.to_string(),
+    })
+}
+
+/// Writes the `appearance` entries named in `updates` into the config file.
+/// `None` (or blank) removes the key (= `system`); everything is validated
+/// before anything is written; one read-modify-write over the whole document
+/// so every other section survives.
+pub fn save_appearance(updates: &HashMap<String, Option<String>>) -> Result<(), SaveError> {
+    save_appearance_in(&config_file(), updates)
+}
+
+fn save_appearance_in(
+    path: &Path,
+    updates: &HashMap<String, Option<String>>,
+) -> Result<(), SaveError> {
+    if updates.is_empty() {
+        return Ok(());
+    }
+    let mut keys: Vec<&String> = updates.keys().collect();
+    keys.sort();
+    for key in &keys {
+        if key.as_str() != THEME {
+            return Err(SaveError::Validation(format!(
+                "unknown appearance setting {key:?}; mesa configures {THEME}"
+            )));
+        }
+        if let Some(value) = updates[*key].as_deref().map(str::trim)
+            && !value.is_empty()
+        {
+            validate_word(key, value, APPEARANCE_THEMES).map_err(SaveError::Validation)?;
+        }
+    }
+
+    let mut root = read_config_document(path)?;
+    let Some(object) = root.as_object_mut() else {
+        return Err(SaveError::Unavailable(format!(
+            "malformed mesa config {}: the file is not a JSON object",
+            path.display()
+        )));
+    };
+    let section = object
+        .entry("appearance")
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(section) = section.as_object_mut() else {
+        return Err(SaveError::Unavailable(format!(
+            "malformed mesa config {}: \"appearance\" is not a JSON object",
+            path.display()
+        )));
+    };
+    for key in keys {
+        match updates[key].as_deref().map(str::trim) {
+            None | Some("") => {
+                section.remove(key);
+            }
+            Some(value) => {
+                section.insert(key.clone(), serde_json::Value::String(value.to_string()));
+            }
+        }
+    }
+
+    let mut body = serde_json::to_string_pretty(&root)
+        .map_err(|e| SaveError::Unavailable(format!("cannot serialize the mesa config: {e}")))?;
+    body.push('\n');
+    write_atomically(path, &body)
 }
 
 // ---------------------------------------------------------------------------
@@ -7491,6 +7611,49 @@ mod tests {
         let err = save_ambient_in(&path, &["xyz".to_string()]).unwrap_err();
         assert!(matches!(err, SaveError::Unavailable(_)), "{err:?}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "not json");
+    }
+
+    #[test]
+    fn appearance_defaults_saves_validates_and_preserves_siblings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(
+            dir.path(),
+            r#"{"audio": {"engine": "naru-audio"}, "future": {"x": 1}}"#,
+        );
+        assert_eq!(appearance_in(&path).unwrap().theme, None);
+        assert_eq!(appearance_in(&path).unwrap().theme_default, "system");
+        save_appearance_in(&path, &audio_update(&[(THEME, Some("light"))])).unwrap();
+        assert_eq!(
+            appearance_in(&path).unwrap().theme.as_deref(),
+            Some("light")
+        );
+        let root: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(root["audio"][ENGINE], "naru-audio");
+        assert_eq!(root["future"]["x"], 1);
+        // Another section's save leaves the theme alone.
+        save_audio_in(
+            &path,
+            &audio_update(&[(URL, Some("http://127.0.0.1:7871"))]),
+        )
+        .unwrap();
+        assert_eq!(
+            appearance_in(&path).unwrap().theme.as_deref(),
+            Some("light")
+        );
+        // A bad theme and an unknown key are validation errors writing nothing.
+        let before = std::fs::read(&path).unwrap();
+        for bad in [
+            audio_update(&[(THEME, Some("neon"))]),
+            audio_update(&[("nope", Some("x"))]),
+        ] {
+            let err = save_appearance_in(&path, &bad).unwrap_err();
+            assert!(matches!(err, SaveError::Validation(_)), "{err:?}");
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        // null restores the default.
+        save_appearance_in(&path, &audio_update(&[(THEME, None)])).unwrap();
+        assert_eq!(appearance_in(&path).unwrap().theme, None);
     }
 
     fn audio_update(pairs: &[(&str, Option<&str>)]) -> HashMap<String, Option<String>> {

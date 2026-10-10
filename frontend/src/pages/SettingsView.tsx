@@ -36,6 +36,7 @@ import {
   type CcResetReport,
 } from '../api'
 import { ConfirmDelete } from '../components/ConfirmDelete'
+import { AppearanceSection } from '../components/AppearanceSection'
 import { WakeWordsSection } from '../components/WakeWordsSection'
 import { VoiceEnrollSection } from '../components/VoiceEnrollSection'
 import { detectNativeHost } from '../nativeHost'
@@ -450,6 +451,9 @@ export function SettingsView({ tab }: { tab: SettingsTab }) {
       </div>
       <div hidden={tab !== 'keyboard'}>
         <KeymapSection />
+      </div>
+      <div hidden={tab !== 'appearance'}>
+        <AppearanceSection />
       </div>
       <div hidden={tab !== 'voice'}>
         <LivePromptSection />

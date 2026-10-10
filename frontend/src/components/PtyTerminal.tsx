@@ -5,6 +5,7 @@ import { Terminal } from '@xterm/xterm'
 import '@xterm/xterm/css/xterm.css'
 import { usePhoneTier } from '../phoneTier'
 import { nextResizeFrame } from '../ptyResize'
+import { cssVar, onThemeChange } from '../theme'
 import type { PtyGeometry } from '../ptyResize'
 
 // xterm's font size is a JS option, not a stylesheet property — but the
@@ -22,6 +23,17 @@ import type { PtyGeometry } from '../ptyResize'
 // *stops* is a size anybody meant. Long enough to swallow a drag, short enough
 // that a settled pane is the right size before the next keystroke.
 const RESIZE_DEBOUNCE_MS = 150
+
+/** xterm paints its own canvas, so the theme's colours are read off the CSS
+ *  variables at use time (naru task 1784); the literals are the dark theme. */
+function xtermTheme() {
+  return {
+    background: cssVar('--bg', '#060a10'),
+    foreground: cssVar('--text', '#b8dde8'),
+    cursor: cssVar('--cyan', '#00e5ff'),
+    selectionBackground: `rgba(${cssVar('--cyan-rgb', '0, 229, 255')}, 0.3)`,
+  }
+}
 
 function ptyFontSize(): number {
   const v = getComputedStyle(document.documentElement).getPropertyValue('--pty-font-size')
@@ -111,12 +123,11 @@ export function PtyTerminal({
       fontFamily: '"Share Tech Mono", "Pure Nerd Font", Menlo, monospace',
       fontSize: ptyFontSize(),
       scrollback: 5000,
-      theme: {
-        background: '#060a10',
-        foreground: '#b8dde8',
-        cursor: '#00e5ff',
-        selectionBackground: 'rgba(0, 229, 255, 0.3)',
-      },
+      theme: xtermTheme(),
+    })
+    // A theme switch repaints the terminal too (naru task 1784).
+    const stopTheme = onThemeChange(() => {
+      term.options.theme = xtermTheme()
     })
     const fit = new FitAddon()
     term.loadAddon(fit)
@@ -209,6 +220,7 @@ export function PtyTerminal({
       disposed = true
       registerRef.current?.(null)
       reconnectRef.current?.(null)
+      stopTheme()
       observer.disconnect()
       if (resizeTimer.current !== null) {
         clearTimeout(resizeTimer.current)

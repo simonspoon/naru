@@ -3495,6 +3495,12 @@ fn router(state: AppState) -> Router {
             "/api/config/audio",
             get(get_config_audio).put(update_config_audio),
         )
+        // The same file's `appearance` section — the web UI's colour theme
+        // (naru task 1784). Same pair of gates as its siblings.
+        .route(
+            "/api/config/appearance",
+            get(get_config_appearance).put(update_config_appearance),
+        )
         // The same file's `guard` section — the cost-guard's thresholds
         // (mesa task 1018). A seventh route for the same reason as the other
         // five.
@@ -11020,6 +11026,60 @@ async fn update_config_audio(
     get_config_audio(State(state), ConnectInfo(addr), headers).await
 }
 
+/// `GET /api/config/appearance` — the saved colour theme (`docs/config.md`,
+/// naru task 1784). Gated like `get_config_audio`; a malformed config is the
+/// same 502.
+async fn get_config_appearance(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    match config::appearance() {
+        Ok(appearance) => Ok(Json(appearance).into_response()),
+        Err(message) => Err(ApiError {
+            status: StatusCode::BAD_GATEWAY,
+            code: "unavailable",
+            message,
+        }),
+    }
+}
+
+#[derive(Deserialize)]
+struct AppearanceUpdate {
+    /// Absent leaves the theme alone; `null` (or blank) restores `system`.
+    #[serde(default, deserialize_with = "deserialize_some")]
+    theme: Option<Option<String>>,
+}
+
+/// `PUT /api/config/appearance` — writes the section and echoes it. An
+/// unknown theme is 422 writing nothing; gated like every other config write.
+async fn update_config_appearance(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(body): Json<AppearanceUpdate>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let mut updates = HashMap::new();
+    if let Some(value) = body.theme {
+        updates.insert(config::THEME.to_string(), value);
+    }
+    config::save_appearance(&updates).map_err(|e| match e {
+        config::SaveError::Validation(message) => ApiError {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            code: "validation",
+            message,
+        },
+        config::SaveError::Unavailable(message) => ApiError {
+            status: StatusCode::BAD_GATEWAY,
+            code: "unavailable",
+            message,
+        },
+    })?;
+    get_config_appearance(State(state), ConnectInfo(addr), headers).await
+}
+
 #[derive(Deserialize)]
 struct PreviewQuery {
     /// The voice to sample. Absent or blank is "the synthesiser's own default"
@@ -14114,6 +14174,17 @@ mod tests {
                             url: None,
                             engine: None,
                         }),
+                    )
+                    .await
+                    .is_ok(),
+                ));
+                got.push((
+                    "/appearance",
+                    update_config_appearance(
+                        State($state.clone()),
+                        ConnectInfo($peer),
+                        $headers.clone(),
+                        Json(AppearanceUpdate { theme: None }),
                     )
                     .await
                     .is_ok(),

@@ -1549,6 +1549,41 @@ through and where the `naru-audio` daemon listens (mesa task 1388):
   `validation`**, writing nothing. Both verbs carry `require_agent_access`,
   like every other config route.
 
+## Appearance
+
+A twelfth, independent section holds the web UI's colour theme (naru task
+1784):
+
+```json
+{ "appearance": { "theme": "light" } }
+```
+
+- **`theme`**: `"system"` (the built-in, absent/`null`), or one of the shipped
+  theme ids — `"dark"`, `"light"`, `"contrast"` (high-contrast dark). Anything
+  else is **422 `validation`**, writing nothing. `system` follows the
+  operating system's `prefers-color-scheme` live (dark → `dark`, otherwise
+  `light`).
+- **Nothing in Rust reads it** beyond the getter and saver: the theme is the
+  page's. `frontend/src/theme.ts` resolves the setting to one concrete theme
+  and sets `data-theme` on `<html>`; the palettes are `:root[data-theme=…]`
+  blocks in `frontend/src/themes.css` (`docs/style-guide.md` "Themes"). The
+  allowed ids live in `config::APPEARANCE_THEMES` and `theme.ts::THEMES` —
+  keep them in step.
+- The page mirrors the last-applied *setting* in `localStorage`
+  (`naru-theme`) and applies it in `main.tsx` before first render, so a reload
+  does not flash the wrong theme; the config `GET` then reconciles it.
+- Edited from Settings → **Appearance**: a radio of System plus each theme
+  with palette swatches. A pick applies at once and is saved immediately (no
+  save button); a refused save restores the previous theme and shows the error.
+
+### Routes
+
+- `GET /api/config/appearance` → `ConfigAppearance`: `{theme,
+  theme_default}`, the theme verbatim or `null` beside the built-in `"system"`.
+- `PUT /api/config/appearance`, body `{"theme": … | null}` → echoes the getter.
+  `null` and blank remove the key; an unknown theme is **422 `validation`**.
+  Both verbs carry `require_agent_access`, like every other config route.
+
 ## Guard
 
 A seventh, independent section holds the **cost-guard** settings — the numbers

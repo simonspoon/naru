@@ -11970,3 +11970,53 @@ body.dock-resizing .dock-body {
   font-size: 1.05rem;
   line-height: 1.6;
 }
+
+/* Settings > Appearance theme picker (naru task 1784). The swatches are the
+   themes' own literal colours (theme.ts), deliberately not variables — each
+   shows a palette other than the active one. */
+.theme-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 1rem;
+}
+
+.theme-option {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.4rem;
+  padding: 0.6rem;
+  border-radius: var(--r-md);
+  background: var(--surface);
+  box-shadow: var(--ring);
+  cursor: pointer;
+}
+
+.theme-option.selected {
+  box-shadow: var(--ring-focus);
+  background: var(--surface-raised);
+}
+
+.theme-option input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.theme-option:focus-within {
+  box-shadow: var(--ring-focus);
+}
+
+.theme-swatch {
+  display: flex;
+  width: 7rem;
+  height: 2.2rem;
+  border-radius: var(--r-sm);
+  overflow: hidden;
+  box-shadow: 0 0 0 1px rgba(128, 128, 128, 0.4);
+}
+
+.theme-swatch > span {
+  flex: 1;
+}

@@ -1,0 +1,72 @@
+/* Colour themes (naru task 1784, docs/style-guide.md "Themes"). The :root
+   block in index.css is the `dark` theme and the fallback; each block here
+   overrides the same variables for `<html data-theme="<id>">`, set by
+   `theme.ts`. Adding a variable to :root means adding it to every block
+   below (or deciding it is theme-independent). Imported after index.css; the
+   attribute selector out-ranks plain :root, so order does not matter. */
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+}
+
+/* Light: pale cool-grey surfaces, near-black text. Accents are the dark
+   theme's hues darkened so body text and accent text both clear 4.5:1 on
+   --bg and --panel (cyan 6.0, magenta 6.2, violet 7.4, amber 5.4, green 5.5,
+   red 5.8, muted 5.3). */
+:root[data-theme='light'] {
+  color-scheme: light;
+  --bg-rgb: 244, 247, 250;
+  --edge-rgb: 96, 130, 156;
+  --text-rgb: 22, 38, 52;
+  --muted-rgb: 84, 106, 122;
+  --cyan-rgb: 0, 102, 138;
+  --magenta-rgb: 168, 16, 132;
+  --violet-rgb: 98, 52, 200;
+  --violet-deep-rgb: 80, 40, 170;
+  --amber-rgb: 150, 86, 0;
+  --green-rgb: 14, 116, 64;
+  --red-rgb: 190, 28, 56;
+  --shadow-rgb: 30, 50, 70;
+  --white-rgb: 20, 30, 50;
+  --panel: #ffffff;
+  --panel-raised: #eaf0f5;
+  --text-h: #0a1a26;
+  --surface-field: rgba(255, 255, 255, 0.92);
+  --wf-trigger: #d6dcf0;
+  --wf-prompt: #e2dbf3;
+  --wf-cli: #d2e8ee;
+  --wf-script: #ebe6cf;
+  --wf-branch: #f0d9e3;
+  --wf-decide: #efd9f0;
+  --wf-output: #d9ebd9;
+  --wf-run: #b8aef8;
+  --on-accent: #ffffff;
+  --on-accent-alt: #ffffff;
+  --magenta-soft: #9c1a7e;
+  --stderr-text: #b0401a;
+}
+
+/* Contrast: a true-black, white-text dark theme with brighter accents and
+   firmer edges, for low-vision use (text 21:1, muted 11:1 on --bg). */
+:root[data-theme='contrast'] {
+  color-scheme: dark;
+  --bg-rgb: 0, 0, 0;
+  --edge-rgb: 140, 190, 215;
+  --text-rgb: 255, 255, 255;
+  --muted-rgb: 190, 205, 215;
+  --cyan-rgb: 64, 240, 255;
+  --magenta-rgb: 255, 110, 230;
+  --violet-rgb: 200, 150, 255;
+  --violet-deep-rgb: 150, 100, 240;
+  --amber-rgb: 255, 200, 90;
+  --green-rgb: 80, 255, 170;
+  --red-rgb: 255, 100, 120;
+  --panel: #000000;
+  --panel-raised: #101820;
+  --text-h: #ffffff;
+  --border: rgba(var(--edge-rgb), 0.7);
+  --border-bright: rgba(var(--edge-rgb), 0.95);
+  --hairline: rgba(var(--edge-rgb), 0.4);
+  --ring: 0 0 0 1px rgba(var(--edge-rgb), 0.8);
+  --surface-field: rgba(0, 0, 0, 0.9);
+}

@@ -56,6 +56,7 @@ import {
 } from '../liveInk'
 import type { LiveBoardSummary } from '../types/LiveBoardSummary'
 import { useFetch } from '../useFetch'
+import { cssVar } from '../theme'
 import { Markdown } from './Markdown'
 
 /**
@@ -548,11 +549,11 @@ function drawCaptionBackground(
   board: LiveBoardSummary | null,
   frame: InkFrame,
 ) {
-  ctx.fillStyle = '#060a10'
+  ctx.fillStyle = cssVar('--bg', '#060a10')
   ctx.fillRect(0, 0, frame.width, frame.height)
-  ctx.fillStyle = '#0e1722'
+  ctx.fillStyle = cssVar('--panel-raised', '#0e1722')
   ctx.fillRect(0, 0, frame.width, 32)
-  ctx.fillStyle = '#b8dde8'
+  ctx.fillStyle = cssVar('--text', '#b8dde8')
   ctx.font = '14px sans-serif'
   ctx.textBaseline = 'middle'
   ctx.fillText(board === null ? 'Whiteboard' : inkCaption(board), 10, 16, frame.width - 20)
