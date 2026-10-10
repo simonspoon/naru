@@ -47,6 +47,12 @@
   --on-accent-alt: #ffffff;
   --magenta-soft: #9c1a7e;
   --stderr-text: #b0401a;
+  /* Neon glows read as smudges on white. */
+  --text-glow: none;
+  --text-glow-wide: none;
+  --text-glow-dim: none;
+  --text-glow-red: none;
+  --text-glow-magenta: none;
 }
 
 /* Contrast: a true-black, white-text dark theme with brighter accents and

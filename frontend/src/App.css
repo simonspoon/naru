@@ -76,7 +76,7 @@ header {
   text-transform: uppercase;
   letter-spacing: 0.35em;
   color: var(--text-h);
-  text-shadow: 0 0 10px var(--cyan);
+  text-shadow: var(--text-glow-wide);
 }
 
 .brand-mark {
@@ -237,7 +237,7 @@ header {
 .nav-item.active {
   border-left-color: var(--cyan);
   background: rgba(var(--cyan-rgb), 0.06);
-  text-shadow: 0 0 8px var(--cyan);
+  text-shadow: var(--text-glow);
 }
 
 /* Projects header: spacing above the simple links, with its disclosure caret. */
@@ -610,7 +610,7 @@ button.nav-subtree-caret:hover:not(:disabled) {
 .nav-projects a.active {
   border-left-color: var(--cyan);
   background: rgba(var(--cyan-rgb), 0.06);
-  text-shadow: 0 0 8px var(--cyan);
+  text-shadow: var(--text-glow);
 }
 
 /* Archived-projects disclosure, nested under the Projects section: same
@@ -819,7 +819,7 @@ main {
 
 .error {
   color: var(--red);
-  text-shadow: 0 0 8px rgba(var(--red-rgb), 0.5);
+  text-shadow: var(--text-glow-red);
 }
 
 .card-list {
@@ -1009,7 +1009,7 @@ main {
 .badge.blocked {
   color: var(--magenta);
   border-color: rgba(var(--magenta-rgb), 0.6);
-  text-shadow: 0 0 6px rgba(var(--magenta-rgb), 0.6);
+  text-shadow: var(--text-glow-magenta);
 }
 
 .badge.priority-high {
@@ -1298,7 +1298,7 @@ main {
 }
 
 .inline-edit:hover {
-  text-shadow: 0 0 8px var(--cyan-dim);
+  text-shadow: var(--text-glow-dim);
 }
 
 .inline-edit.editing {
@@ -6169,7 +6169,7 @@ body.live-panel-ratio-resizing {
 .command-palette-item.active {
   background: rgba(var(--cyan-rgb), 0.08);
   color: var(--cyan);
-  text-shadow: 0 0 8px var(--cyan-dim);
+  text-shadow: var(--text-glow-dim);
 }
 
 .command-palette-empty {
