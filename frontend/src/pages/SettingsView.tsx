@@ -36,6 +36,7 @@ import {
   type CcResetReport,
 } from '../api'
 import { ConfirmDelete } from '../components/ConfirmDelete'
+import { WakeWordsSection } from '../components/WakeWordsSection'
 import { VoiceEnrollSection } from '../components/VoiceEnrollSection'
 import { detectNativeHost } from '../nativeHost'
 import {
@@ -456,7 +457,12 @@ export function SettingsView({ tab }: { tab: SettingsTab }) {
         <AudioSection />
         <ListenSection />
         {/* Ambient is the Mac app's: hidden in a plain browser (naru task 1748). */}
-        {detectNativeHost(window as unknown as Record<string, unknown>) && <VoiceEnrollSection />}
+        {detectNativeHost(window as unknown as Record<string, unknown>) && (
+          <>
+            <WakeWordsSection />
+            <VoiceEnrollSection />
+          </>
+        )}
       </div>
       <div hidden={tab !== 'memory'}>
         <MemorySection />

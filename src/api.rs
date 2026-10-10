@@ -3471,6 +3471,12 @@ fn router(state: AppState) -> Router {
             "/api/config/listen",
             get(get_config_listen).put(update_config_listen),
         )
+        // The same file's `ambient` section — the custom wake words the Mac
+        // app's ambient listener wakes on (naru task 1769).
+        .route(
+            "/api/config/ambient",
+            get(get_config_ambient).put(update_config_ambient),
+        )
         // The speaker-enrollment recording (naru task 1744,
         // `docs/voice-enrollment.md`): the browser's WAV as base64 in JSON,
         // kept beside the Mac app's `ambient-enrollment.json`. The transcribe
@@ -10217,6 +10223,59 @@ async fn update_config_keymap(
         },
     })?;
     get_config_keymap(State(state), ConnectInfo(addr), headers).await
+}
+
+/// `GET /api/config/ambient` — the custom wake words the ambient listener
+/// wakes on besides the built-in "Naru" (`docs/config.md`, naru task 1769).
+///
+/// Gated like `get_config_keymap` — same file, same class of secret — and a
+/// malformed config is the same 502 `unavailable`.
+async fn get_config_ambient(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    match config::ambient() {
+        Ok(ambient) => Ok(Json(ambient).into_response()),
+        Err(message) => Err(ApiError {
+            status: StatusCode::BAD_GATEWAY,
+            code: "unavailable",
+            message,
+        }),
+    }
+}
+
+#[derive(Deserialize)]
+struct AmbientUpdate {
+    wake_words: Vec<String>,
+}
+
+/// `PUT /api/config/ambient` — replaces the wake-word list and echoes it.
+/// Entries are trimmed and case-insensitive duplicates dropped; a blank entry
+/// or one with fewer than 3 letters and digits is a 422 `validation`; `[]` removes the key.
+///
+/// `require_agent_access`, like every other config write (mesa task 1021).
+async fn update_config_ambient(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(body): Json<AmbientUpdate>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    config::save_ambient(&body.wake_words).map_err(|e| match e {
+        config::SaveError::Validation(message) => ApiError {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            code: "validation",
+            message,
+        },
+        config::SaveError::Unavailable(message) => ApiError {
+            status: StatusCode::BAD_GATEWAY,
+            code: "unavailable",
+            message,
+        },
+    })?;
+    get_config_ambient(State(state), ConnectInfo(addr), headers).await
 }
 
 /// `GET /api/config/speech` — the voice the inbox's play button speaks in, plus
@@ -20058,6 +20117,82 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         b.extend_from_slice(&data.to_le_bytes());
         b.resize(b.len() + data as usize, 0);
         b
+    }
+
+    /// naru task 1769: `/api/config/ambient` stores trimmed, case-deduped wake
+    /// words and echoes them, refuses a blank / symbol-only entry with 422
+    /// without writing, clears with `[]`, and refuses a foreign Host.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn ambient_routes_save_echo_and_clear() {
+        let _env = attachments::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (_dir, state) = test_state();
+        let cfg = tempfile::tempdir().unwrap();
+        // SAFETY: ENV_LOCK gives this test exclusive access to the environment.
+        unsafe { std::env::set_var("MESA_CONFIG_FILE", cfg.path().join("config.json")) };
+        let put = |words: &[&str]| {
+            update_config_ambient(
+                State(state.clone()),
+                ConnectInfo(loopback()),
+                loopback_agent_headers(),
+                Json(AmbientUpdate {
+                    wake_words: words.iter().map(|w| w.to_string()).collect(),
+                }),
+            )
+        };
+        let body = |resp: Response| async move {
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
+        };
+
+        let resp = get_config_ambient(
+            State(state.clone()),
+            ConnectInfo(loopback()),
+            loopback_agent_headers(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(body(resp).await, serde_json::json!({"wake_words": []}));
+
+        let resp = put(&[" Computer ", "computer", "Jarvis"]).await.unwrap();
+        assert_eq!(
+            body(resp).await,
+            serde_json::json!({"wake_words": ["Computer", "Jarvis"]})
+        );
+
+        for bad in ["", "  ", "..."] {
+            let err = put(&["Hal", bad]).await.unwrap_err();
+            assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY);
+            assert_eq!(err.code, "validation");
+        }
+        let resp = get_config_ambient(
+            State(state.clone()),
+            ConnectInfo(loopback()),
+            loopback_agent_headers(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            body(resp).await,
+            serde_json::json!({"wake_words": ["Computer", "Jarvis"]})
+        );
+
+        let resp = put(&[]).await.unwrap();
+        assert_eq!(body(resp).await, serde_json::json!({"wake_words": []}));
+
+        let foreign = get_config_ambient(
+            State(state.clone()),
+            ConnectInfo(loopback()),
+            hdrs(Some("evil.example:0"), None),
+        )
+        .await;
+        assert!(foreign.is_err());
+        // SAFETY: as above.
+        unsafe { std::env::remove_var("MESA_CONFIG_FILE") };
     }
 
     /// naru task 1744: `/api/config/voice-enrollment` saves a valid WAV
