@@ -28,6 +28,8 @@ export type NativeOut =
   | { type: 'ambient'; on: boolean }
   /** A speaker-enrollment recording was saved (naru task 1744): the host builds the enrollment from it. */
   | { type: 'enroll' }
+  /** The custom wake words were saved (naru task 1769): no payload, the host refetches them from the server. */
+  | { type: 'wakeWords' }
 
 /** What the host hands the page. Absent keys leave the page's state alone. */
 export type NativeMicState = {
