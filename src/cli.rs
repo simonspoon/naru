@@ -784,7 +784,7 @@ EXAMPLES
         /// Priority: low|medium|high
         #[arg(long, value_parser = parse_priority, default_value = "medium")]
         priority: Priority,
-        /// Initial status: backlog|todo|in_progress|done|cancelled (default todo)
+        /// Initial status: backlog|todo|in_progress|done|cancelled (default todo; `queued` or `q` is accepted as `todo`, which is shown as "queued")
         #[arg(long, value_parser = parse_status, default_value = "todo")]
         status: Status,
         /// Comma-separated tags, e.g. --tags writing,web (alias --tag)
@@ -825,7 +825,7 @@ EXAMPLES
         /// Only tasks in this project (id or name); flag form of [PROJECT]
         #[arg(long, conflicts_with = "project_pos")]
         project: Option<String>,
-        /// Only tasks with this status: backlog|todo|in_progress|done|cancelled
+        /// Only tasks with this status: backlog|todo|in_progress|done|cancelled (`queued`/`q` = todo)
         #[arg(long, value_parser = parse_status)]
         status: Option<Status>,
         /// Only tasks carrying this tag (alias --tags; still a single tag)
@@ -861,11 +861,11 @@ EXAMPLES
         /// Only tasks in this project (id or name)
         #[arg(long)]
         project: Option<String>,
-        /// Only tasks with this status (repeatable): backlog|todo|in_progress|done|cancelled
+        /// Only tasks with this status (repeatable): backlog|todo|in_progress|done|cancelled (`queued`/`q` = todo)
         #[arg(long, value_parser = parse_status)]
         status: Vec<Status>,
     },
-    /// Print the next actionable task (todo + unblocked) as a full JSON object
+    /// Print the next actionable task (todo, shown as queued, + unblocked) as a full JSON object
     ///
     /// Selection is deterministic: among actionable tasks (optionally scoped to
     /// --project), order by priority (high>medium>low) then ascending id, and
@@ -964,7 +964,7 @@ EXAMPLES
             conflicts_with = "description"
         )]
         description_file: Option<String>,
-        /// New status: backlog|todo|in_progress|done|cancelled
+        /// New status: backlog|todo|in_progress|done|cancelled (`queued`/`q` = todo)
         #[arg(long, value_parser = parse_status, group = "fields")]
         status: Option<Status>,
         /// New priority: low|medium|high
@@ -1240,7 +1240,7 @@ EXAMPLES
         /// Task id; omit for every task's events
         id: Option<i64>,
     },
-    /// Print the tasks that finished, were cancelled or went back to todo/backlog since a time
+    /// Print the tasks that finished, were cancelled or went back to queued/backlog since a time
     ///
     /// The "while you were away" digest (naru task 1725): one entry per task
     /// whose newest done/cancelled/requeued event is at or after `--since` and
@@ -3982,8 +3982,9 @@ EXAMPLES
 }
 
 fn parse_status(s: &str) -> std::result::Result<Status, String> {
-    Status::parse(s)
-        .ok_or_else(|| format!("'{s}' is not one of backlog|todo|in_progress|done|cancelled"))
+    Status::parse(s).ok_or_else(|| {
+        format!("'{s}' is not one of backlog|todo|queued|in_progress|done|cancelled")
+    })
 }
 
 fn parse_priority(s: &str) -> std::result::Result<Priority, String> {
@@ -8147,6 +8148,16 @@ mod tests {
     };
     use crate::core::{DiffStat, GitCommit, LiveContext, LiveContextKind, LiveWindow};
     use crate::core::{RetroFinding, RetroRun, RetroStatus};
+
+    #[test]
+    fn status_aliases_queued_and_q_mean_todo() {
+        for s in ["todo", "queued", "q"] {
+            assert_eq!(parse_status(s), Ok(Status::Todo), "{s}");
+        }
+        assert_eq!(parse_status("done"), Ok(Status::Done));
+        let err = parse_status("nope").unwrap_err();
+        assert!(err.contains("queued"), "{err}");
+    }
 
     /// Serialized top-level key set of any record, sorted.
     fn keys(value: &impl serde::Serialize) -> Vec<String> {

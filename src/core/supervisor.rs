@@ -84,7 +84,7 @@ Once every agent has reported and the task is verified complete:
 
 ## Never leave the task `in_progress`
 
-A cancel or a stall still needs a terminal state — `--status todo` when a retry
+A cancel or a stall still needs a terminal state — queued (`--status todo`) when a retry
 could work, `backlog` when it needs a human — with a `--result` naming exactly
 what stopped you. An `in_progress` leaf blocks auto-dispatch for the whole
 project and keeps this session alive.

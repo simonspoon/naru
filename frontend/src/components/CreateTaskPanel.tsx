@@ -208,7 +208,7 @@ export function CreateTaskPanel({
               disabled={submitting || description.trim() === ''}
               onClick={() => submit('todo')}
             >
-              create + send to todo
+              create + send to queued
             </button>
           )}
         </div>

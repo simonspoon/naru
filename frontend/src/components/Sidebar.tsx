@@ -685,8 +685,8 @@ export function Sidebar({
                                 className="inbox-badge todo-badge"
                                 title={
                                   collapsed
-                                    ? 'todo tasks in this project and its subprojects'
-                                    : 'todo tasks in this project'
+                                    ? 'queued tasks in this project and its subprojects'
+                                    : 'queued tasks in this project'
                                 }
                               >
                                 {todo}

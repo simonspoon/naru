@@ -141,7 +141,7 @@ if [ "$status" = "in_progress" ]; then
       'any(.[]; .task_id == $id and .created_at >= $since)') || exit 0
   fi
   [ "$filed" = "true" ] && exit 0
-  block "mesa task $task_id is still in_progress and nothing is running in the background. Keep working on it; or close it (mesa task update $task_id --status done|cancelled --result '...'); or move it back to todo/backlog with a result saying why (mesa task update $task_id --status todo --result '...'); or file the question you are stuck on (mesa inbox add --task $task_id --kind change-request '...') and then end."
+  block "mesa task $task_id is still in_progress and nothing is running in the background. Keep working on it; or close it (mesa task update $task_id --status done|cancelled --result '...'); or move it back to queued (--status todo) or backlog with a result saying why (mesa task update $task_id --status todo --result '...'); or file the question you are stuck on (mesa inbox add --task $task_id --kind change-request '...') and then end."
 fi
 
 [ -n "$pending" ] && block "mesa task $task_id is $status but this session still has background work running: $pending. Stop each of them (KillShell for a shell, TaskStop for an agent) or wait for their notifications before ending."

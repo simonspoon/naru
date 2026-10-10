@@ -1,3 +1,4 @@
+import { statusLabel } from '../taskStatus'
 import type { TaskSummary } from '../types/TaskSummary'
 
 export function TaskRow({
@@ -12,7 +13,7 @@ export function TaskRow({
       <a href={`#/projects/${task.project_id}/tasks/${task.id}`}>
         {task.name}
       </a>{' '}
-      <span className={`badge status-${task.status}`}>{task.status}</span>{' '}
+      <span className={`badge status-${task.status}`}>{statusLabel(task.status)}</span>{' '}
       <span className={`badge priority-${task.priority}`}>{task.priority}</span>
       {task.blocked && <span className="badge blocked"> blocked</span>}
       {task.tags.map((t) => (

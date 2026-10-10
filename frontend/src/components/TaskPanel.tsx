@@ -20,6 +20,7 @@ import {
 import { noteToSubmit, sessionLabel } from '../taskNotes'
 import { receiptIsEmpty, summarizeStat, transcriptLabel } from '../receiptView'
 import { parseTags } from '../tags'
+import { statusLabel } from '../taskStatus'
 import { formatTimestamp, timeAgo } from '../time'
 import type { Attachment } from '../types/Attachment'
 import type { GitCommit } from '../types/GitCommit'
@@ -429,7 +430,7 @@ export function TaskPanel({
         >
           {STATUSES.map((s) => (
             <option key={s} value={s}>
-              {s}
+              {statusLabel(s)}
             </option>
           ))}
         </select>{' '}
@@ -579,7 +580,7 @@ export function TaskPanel({
               <a href={`#/projects/${b.project_id}/tasks/${b.id}`}>
                 #{b.id} {b.name}
               </a>{' '}
-              <span className={`badge status-${b.status}`}>{b.status}</span>
+              <span className={`badge status-${b.status}`}>{statusLabel(b.status)}</span>
             </li>
           ))}
         </ul>

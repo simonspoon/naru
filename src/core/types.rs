@@ -26,7 +26,7 @@ impl Status {
     pub fn parse(s: &str) -> Option<Status> {
         match s {
             "backlog" => Some(Status::Backlog),
-            "todo" => Some(Status::Todo),
+            "todo" | "queued" | "q" => Some(Status::Todo),
             "in_progress" => Some(Status::InProgress),
             "done" => Some(Status::Done),
             "cancelled" => Some(Status::Cancelled),

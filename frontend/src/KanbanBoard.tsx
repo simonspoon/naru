@@ -15,6 +15,7 @@ import { CSS } from '@dnd-kit/utilities'
 import { updateTaskPosition } from './api'
 import { capColumn, liveAgentCount, DONE_INITIAL, DONE_PAGE } from './boardView'
 import { taskHrefFrom } from './projectPanes'
+import { statusLabel } from './taskStatus'
 import { formatTimestamp, timeAgo } from './time'
 import type { AgentSession } from './types/AgentSession'
 import type { Status } from './types/Status'
@@ -173,7 +174,7 @@ function Column({
       <h2>
         {/* The *total*, not the shown count: a capped column must not read as
             missing data. */}
-        {status} <span className="muted">{tasks.length}</span>
+        {statusLabel(status)} <span className="muted">{tasks.length}</span>
       </h2>
       <SortableContext
         items={ordered.map(({ task }) => task.id)}

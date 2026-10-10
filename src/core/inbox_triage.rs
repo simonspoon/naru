@@ -956,7 +956,7 @@ decides where a request goes, it never does the work.
 5. Real work: `mesa inbox assign <id> <project>` (a backlog task; the item is
    removed atomically), then sharpen the task:
    `mesa task update <new id> --description "<crisp first line = task name>\n\n<the request restated with concrete files, commands, constraints>\n\nFrom inbox item <id> (<author>, <created_at>), originating task <task_id>." --acceptance "<verifiable checklist>"`.
-   Leave it in `backlog` — that is the review queue. Promote it to `todo` only
+   Leave it in `backlog` — that is the review queue. Promote it to queued (`--status todo`) only
    if it is ready to pick up exactly as written.
 
 6. No confident project, or it needs a person: `mesa inbox read <id>` and
