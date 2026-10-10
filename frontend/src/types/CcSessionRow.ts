@@ -19,6 +19,11 @@ tool_calls: number,
  */
 agent_runs: number, cwd: string | null, project: string | null, git_branch: string | null, entrypoint: string | null, 
 /**
+ * The top-level agent the session was launched as (`claude --agent
+ * <name>`, the transcript's `agent-setting` line); null when none.
+ */
+main_agent: string | null, 
+/**
  * True if any of the session's events came from a subagent (`isSidechain`).
  * Subagent transcripts reuse the parent's `sessionId`, so this is "the
  * session used a subagent", not "the session *is* a sidechain".

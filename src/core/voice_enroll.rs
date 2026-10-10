@@ -18,7 +18,7 @@ pub const SAMPLE_FILE: &str = "voice-sample.wav";
 /// The Mac app's enrollment — a JSON `[Float]`. Read here for its mtime only.
 pub const ENROLLMENT_FILE: &str = "ambient-enrollment.json";
 /// Shortest and longest accepted recording, in seconds.
-pub const MIN_SECONDS: f64 = 20.0;
+pub const MIN_SECONDS: f64 = 8.0;
 pub const MAX_SECONDS: f64 = 300.0;
 const SAMPLE_RATE: u32 = 16_000;
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -35,7 +35,7 @@ pub fn enroll_dir() -> Result<PathBuf> {
         .ok_or_else(|| Error::Unavailable("could not find this machine's data directory".into()))
 }
 
-/// Checks a WAV is 16 kHz mono 16-bit PCM of 20..=300 s and returns its
+/// Checks a WAV is 16 kHz mono 16-bit PCM of 8..=300 s and returns its
 /// length in seconds.
 pub fn validate_wav(wav: &[u8]) -> Result<f64> {
     let seconds = parse_wav(wav)?;
@@ -265,7 +265,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         for bad in [
             b"not a wav at all".to_vec(),
-            wav(10.0, 16_000, 1),
+            wav(5.0, 16_000, 1),
             wav(400.0, 16_000, 1),
             wav(30.0, 44_100, 1),
             wav(25.0, 16_000, 2),

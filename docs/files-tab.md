@@ -704,6 +704,37 @@ missing-`?path=` cases, the download route's unchanged headers, and — in
 **both** serve modes — that raw is reachable while the PATCH write keeps its
 `require_agent_access` + Content-Type gate.
 
+## Inline video and audio (naru task 1751)
+
+`GET .../files/raw` also plays media. `files::media_mime` is a second
+extension allowlist beside `image_mime` (final lowercased extension, no sniff,
+disjoint from the images): `mp4`/`m4v` `video/mp4`, `mov` `video/quicktime`,
+`webm` `video/webm`, `m4a` `audio/mp4`, `mp3` `audio/mpeg`, `wav` `audio/wav`,
+`ogg`/`oga` `audio/ogg`, `aac` `audio/aac`, `flac` `audio/flac`. The order is
+unchanged: `safe_path` first (404), then the allowlists (422 for anything on
+neither), so the route is no oracle. A media response carries the same
+`inline` + `nosniff` + sandboxing CSP as an image, plus `Accept-Ranges: bytes`;
+an image response is byte-identical to before (no `Accept-Ranges`).
+
+**Range support is required, not a nicety** — Safari refuses media without it,
+and seeking needs it everywhere. `files::parse_byte_range` handles one
+`bytes=a-b`, `a-` or `-n`: 206 with `Content-Range: bytes a-b/total`, 416 with
+`Content-Range: bytes */total` when the start is past the end (or `-0`, or an
+empty file). A malformed header, another unit or several ranges are ignored
+(200, whole file, which RFC 9110 allows). A partial read seeks and takes only
+the slice (`files::read_file_range`, no whole-file read), and one 206 is
+capped at `MEDIA_RANGE_CHUNK` (8 MiB) — `bytes=0-` of a huge video answers with
+the first chunk and an honest `Content-Range`, and the player asks again. The
+crate has no streaming-body dependency, so a request with no usable `Range`
+still reads the file whole under the 100 MiB download cap (422 above it).
+
+The client mirror is `frontend/src/fileMedia.ts` (`mediaKindForPath`), and
+`ContentPane` renders `<video controls>` / `<audio controls>` at
+`projectFileRawUrl`. `mov` and `m4a` depend on codec: the element's `error`
+event swaps the player for a short note with a link to `/files/download`.
+`scripts/files-check.sh` pins the headers, a 206 slice byte-identical to the
+file, a suffix range, 416 and the traversal 404.
+
 ## Editor affordances: gutter, status bar, indentation, find, dirty tabs (task 809)
 
 Four slices that make the pane behave like an editor rather than a textarea.

@@ -16,7 +16,7 @@ import { formatTimestamp, timeAgo } from '../time'
 import { useFetch } from '../useFetch'
 import { WorkflowCanvas } from '../WorkflowCanvas'
 import { PlayIcon } from '../components/WorkflowIcon'
-import { toggleLabel } from '../workflowOverview'
+import { toggleLabel, workflowHref, workflowsListHref } from '../workflowOverview'
 import { formatDuration, runPollMs, runSummary, runningRunId, stepClass } from '../workflowRun'
 import type { WorkflowRun } from '../types/WorkflowRun'
 
@@ -160,7 +160,8 @@ export function WorkflowBuilderView({
   workflowId,
   onDeleted,
 }: {
-  projectId: number
+  /** null = a global workflow (no project). */
+  projectId: number | null
   workflowId: number
   /** Called after a delete instead of leaving for the list route (the dock panel has no route to leave). */
   onDeleted?: () => void
@@ -245,7 +246,7 @@ export function WorkflowBuilderView({
   return (
     <div className="workflow-page">
       <p>
-        <a href={`#/projects/${projectId}/workflows`}>← workflows</a>
+        <a href={workflowsListHref(projectId)}>← workflows</a>
       </p>
       <div className="workflow-head">
         <h2 className="workflow-title">
@@ -287,7 +288,7 @@ export function WorkflowBuilderView({
             onClick={() =>
               duplicateWorkflow(workflowId).then(
                 (v) => {
-                  window.location.hash = `#/projects/${v.workflow.project_id ?? projectId}/workflows/${v.workflow.id}`
+                  window.location.hash = workflowHref(v.workflow)
                 },
                 (err: unknown) => setRunError(err instanceof Error ? err.message : String(err)),
               )
@@ -301,7 +302,7 @@ export function WorkflowBuilderView({
             onDelete={() =>
               deleteWorkflow(workflowId).then(() => {
                 if (onDeleted) return onDeleted()
-                window.location.hash = `#/projects/${projectId}/workflows`
+                window.location.hash = workflowsListHref(projectId)
               })
             }
           />

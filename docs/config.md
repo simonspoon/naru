@@ -1449,6 +1449,43 @@ mirror of Speech, above.
   nothing. Gated with `require_agent_access`, the same posture as every other
   config write (mesa task 1021).
 
+## Ambient
+
+A tenth, independent section holds the **custom wake words** the Naru Mac app's
+ambient listener wakes on, besides the built-in "Naru" (naru task 1769).
+
+```json
+{
+  "ambient": {
+    "wake_words": ["Computer", "Jarvis"]
+  }
+}
+```
+
+- **Absent or `[]` ⇒ only "Naru".** "Naru" is built in and always on; it is
+  not stored here and cannot be removed.
+- **A list of strings.** Each entry is trimmed and a duplicate that differs
+  only in case is dropped (the first spelling is kept). A blank entry, or one
+  with fewer than 3 letters and digits in total (`a`, `it`, `OK`), is refused
+  at save (`422`, nothing written).
+- **Matching is the Mac app's business.** Punctuation and hyphens count as
+  spaces, so `Big-Bird` is the phrase "big bird" and `ok-computer` registers
+  `computer` (the lead-in is stripped). A leading Hey/Hi/OK is optional, and
+  sound-alike spellings are accepted for words of 4 or more letters.
+- **Nothing in the server reads it.** The Mac app refetches the list when the
+  page posts `{"type":"wakeWords"}` after a save (`docs/live.md`, "Native host
+  bridge"). The Settings page shows the editor only inside the Mac app.
+
+### Routes
+
+- `GET /api/config/ambient` → `ConfigAmbient`: `{"wake_words": [...]}`, `[]`
+  when unset. Gated like the other config getters (`require_agent_access`); a
+  malformed config is **502 `unavailable`**.
+- `PUT /api/config/ambient`, body `{"wake_words": [...]}` → replaces the list
+  and echoes the getter. `[]` removes the key. A blank entry or one with
+  fewer than 3 letters and digits is **422 `validation`**, writing nothing. Gated with
+  `require_agent_access`, the same posture as every other config write.
+
 ## Audio
 
 A ninth, independent section picks the engine the **server** runs speech

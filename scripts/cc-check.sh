@@ -197,6 +197,52 @@ assert (r["task_runs"],r["task_done"],r["task_requeued"])==(1,1,1), r
 print("cc scorecard task outcomes ok")
 ' || fail "cc scorecard task-outcome signals"
 
+# Top-level agent sessions (naru task 1773): a transcript's `agent-setting`
+# line (no timestamp, no uuid) names the `--agent` the session ran as, and the
+# scorecard counts the session as one run of it. Tree and db of their own: one
+# supervisor session (with a subagent, whose Explore run must stay a separate
+# row) beside one plain session that must not be counted.
+MT="$TMP/mtree"
+mkdir -p "$MT/-m/ma/subagents"
+cat > "$MT/-m/ma.jsonl" <<'JSONL'
+{"type":"agent-setting","agentSetting":"supervisor","sessionId":"ma"}
+{"type":"user","uuid":"pma","sessionId":"ma","timestamp":"2026-06-15T01:00:00.000Z","cwd":"/home/me/m","message":{"role":"user","content":"go"}}
+{"type":"assistant","uuid":"mma","sessionId":"ma","timestamp":"2026-06-15T01:05:00.000Z","cwd":"/home/me/m","message":{"model":"claude-opus-4-8","usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"content":[]}}
+{"type":"agent-setting","agentSetting":"supervisor","sessionId":"ma"}
+JSONL
+cat > "$MT/-m/ma/subagents/x.jsonl" <<'JSONL'
+{"type":"assistant","uuid":"ama","isSidechain":true,"sessionId":"ma","agentId":"xma","timestamp":"2026-06-15T01:10:00.000Z","attributionAgent":"Explore","message":{"model":"claude-haiku-4-5","usage":{"input_tokens":10,"output_tokens":20,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}
+JSONL
+echo '{"agentType":"Explore","description":"d","spawnDepth":1}' > "$MT/-m/ma/subagents/x.meta.json"
+cat > "$MT/-m/mb.jsonl" <<'JSONL'
+{"type":"assistant","uuid":"mmb","sessionId":"mb","timestamp":"2026-06-15T02:00:00.000Z","cwd":"/home/me/m","message":{"model":"claude-opus-4-8","usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"content":[]}}
+JSONL
+MESA_DB="$TMP/main-agent.db" MESA_CC_PROJECTS_DIR="$MT" "$BIN" cc scorecard | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+rows={(r["agent"],r["model"]):r for r in d["rows"]}
+assert set(rows)=={("supervisor","claude-opus-4-8"),("Explore","claude-haiku-4-5")}, list(rows)
+sup=rows[("supervisor","claude-opus-4-8")]
+assert sup["runs"]==1, sup
+assert abs(sup["tokens_per_run"]-150)<1e-9, sup
+ex=rows[("Explore","claude-haiku-4-5")]
+assert ex["runs"]==1 and abs(ex["tokens_per_run"]-30)<1e-9, ex
+print("cc scorecard main agent ok")
+' || fail "cc scorecard main-agent session run"
+MESA_DB="$TMP/main-agent.db" MESA_CC_PROJECTS_DIR="$MT" "$BIN" cc scorecard --agent supervisor | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+assert [(r["agent"],r["runs"]) for r in d["rows"]]==[("supervisor",1)], d["rows"]
+' || fail "cc scorecard --agent supervisor"
+MESA_DB="$TMP/main-agent.db" MESA_CC_PROJECTS_DIR="$MT" "$BIN" cc sessions --window all | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+rows=d if isinstance(d,list) else d["sessions"]
+m={r["session_id"]:r.get("main_agent","MISSING") for r in rows}
+assert m=={"ma":"supervisor","mb":None}, m
+print("cc sessions main_agent ok")
+' || fail "cc sessions main_agent"
+
 # cc reset: purges every cc_* row, then re-ingests. Unlike the rebuild above it
 # is corrective, so the rows really are re-ADDED (messages_added > 0 where the
 # rebuild added zero) — and because every transcript is still on disk, the
@@ -1572,5 +1618,61 @@ assert [x["name"] for x in d["by_tool"]]==["Bash"], d["by_tool"]
 assert len(d["by_command"])==2, d["by_command"]
 print("cc errors --cli ok")
 ' || fail "cc errors --cli did not keep only naru/mesa Bash failures"
+
+# ---- headless usage ledger (naru task 1774) ----
+# A `claude -p --no-session-persistence` call writes no transcript, so it is
+# counted through `cc ledger add` -> the ledger file -> `cc sync`. Own db and
+# ledger, so the main tree's pinned counts above are untouched.
+cat > "$TMP/claude-stub" <<'STUB'
+#!/usr/bin/env bash
+# Stub claude: with --no-session-persistence it prints a fixed -p json result
+# and writes nothing (no transcript) — the shape the ledger exists for.
+case " $* " in *" --no-session-persistence "*) ;; *) echo "stub: expected --no-session-persistence" >&2; exit 3 ;; esac
+cat <<'JSON'
+{"type":"result","uuid":"hl-uuid-1","session_id":"hl-sess-1","total_cost_usd":0.5,"usage":{"input_tokens":1000,"output_tokens":2000,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"modelUsage":{"claude-haiku-4-5":{"inputTokens":1000,"outputTokens":2000,"cacheReadInputTokens":0,"cacheCreationInputTokens":0,"costUSD":0.5}}}
+JSON
+STUB
+chmod +x "$TMP/claude-stub"
+export MESA_CC_LEDGER="$TMP/usage/headless.jsonl"
+HL_DB="$TMP/hl.db"
+"$TMP/claude-stub" -p --no-session-persistence --output-format json hi > "$TMP/hl-result.json"
+MESA_DB="$HL_DB" "$BIN" cc ledger add --source stub --at 2026-06-15T02:00:00Z < "$TMP/hl-result.json" | python3 -c '
+import json,sys
+e=json.load(sys.stdin)
+assert len(e)==1 and e[0]["id"]=="hl-uuid-1:claude-haiku-4-5" and e[0]["source"]=="stub", e
+' || fail "cc ledger add output"
+mkdir -p "$TMP/hl-empty"
+hl_check() {
+  MESA_CC_PROJECTS_DIR="$TMP/hl-empty" MESA_DB="$HL_DB" "$BIN" cc summary --window all | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+days={x["date"]:x for x in d["daily"]}
+assert abs(days["2026-06-15"]["headless_cost_usd"]-0.5)<1e-9, d["daily"]
+assert abs(d["overview"]["headless_cost_usd"]-0.5)<1e-9, d["overview"]
+assert abs(d["overview"]["est_cost_usd"]-0.5)<1e-9, d["overview"]
+h=[s for s in d["sessions"] if s["entrypoint"]=="headless"]
+assert len(h)==1 and h[0]["session_id"]=="hl-sess-1" and h[0]["git_branch"]=="headless:stub", d["sessions"]
+assert [m["model"] for m in d["models"]]==["claude-haiku-4-5"], d["models"]
+'
+}
+hl_check || fail "headless cost / session / model not in the dashboard"
+# Re-adding the same output must not change any total.
+MESA_DB="$HL_DB" "$BIN" cc ledger add --source stub --at 2026-06-15T02:00:00Z < "$TMP/hl-result.json" >/dev/null
+hl_check || fail "a re-added result changed the totals"
+# A result whose session already has a transcript is refused.
+mkdir -p "$TMP/hl-tree/-hl"
+echo '{}' > "$TMP/hl-tree/-hl/hl-sess-2.jsonl"
+RC=0
+sed 's/hl-sess-1/hl-sess-2/' "$TMP/hl-result.json" | MESA_CC_PROJECTS_DIR="$TMP/hl-tree" MESA_DB="$HL_DB" "$BIN" cc ledger add --source stub >/dev/null 2>"$TMP/hl.err" || RC=$?
+[ "$RC" = "1" ] || fail "ledger add of a transcribed session expected exit 1, got $RC"
+grep -q '"validation"' "$TMP/hl.err" || fail "transcribed session was not a validation error"
+# Garbage stdin is validation.
+RC=0
+echo 'not json' | MESA_DB="$HL_DB" "$BIN" cc ledger add --source stub >/dev/null 2>"$TMP/hl.err" || RC=$?
+[ "$RC" = "1" ] && grep -q '"validation"' "$TMP/hl.err" || fail "garbage stdin expected validation exit 1"
+# cc reset purges cc_* but the ledger file brings the headless rows back.
+MESA_CC_PROJECTS_DIR="$TMP/hl-empty" MESA_DB="$HL_DB" "$BIN" cc reset >/dev/null
+hl_check || fail "headless totals changed across cc reset"
+echo "cc ledger ok"
 
 echo "ok: cc-check passed"

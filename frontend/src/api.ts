@@ -31,6 +31,7 @@ import type { ConfigPrice } from './types/ConfigPrice'
 import type { ConfigSpeech } from './types/ConfigSpeech'
 import type { AddedVoice } from './types/AddedVoice'
 import type { ConfigListen } from './types/ConfigListen'
+import type { ConfigAmbient } from './types/ConfigAmbient'
 import type { VoiceEnrollment } from './types/VoiceEnrollment'
 import type { ConfigAudio } from './types/ConfigAudio'
 import type { TranscribeStatus } from './types/TranscribeStatus'
@@ -1536,6 +1537,20 @@ export async function designVoice(
  */
 export function getListen(): Promise<ConfigListen> {
   return request('/api/config/listen')
+}
+
+/** The custom ambient wake words (naru task 1769); `wake_words` is `[]` when none are configured. */
+export function getAmbient(): Promise<ConfigAmbient> {
+  return request('/api/config/ambient')
+}
+
+/**
+ * Replaces the custom wake words and echoes them as stored (trimmed, case-insensitive
+ * duplicates dropped); `[]` removes them. 422 `validation` is an entry with no letter
+ * or digit, and nothing is written in that case.
+ */
+export function updateAmbient(wakeWords: string[]): Promise<ConfigAmbient> {
+  return request('/api/config/ambient', jsonInit('PUT', { wake_words: wakeWords }))
 }
 
 /**

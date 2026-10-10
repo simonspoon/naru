@@ -168,6 +168,19 @@
 //! `NARU_AUDIO_URL` overrides it. See [`audio_engine`], [`audio_url`] and
 //! `docs/config.md`.
 //!
+//! ## Ambient
+//!
+//! A tenth section holds the ambient listener's custom wake words (naru task
+//! 1769) — the phrases the Mac app wakes on besides the built-in "Naru":
+//!
+//! ```json
+//! { "ambient": { "wake_words": ["Computer", "Jarvis"] } }
+//! ```
+//!
+//! One key, a list of strings. Absent is none. Nothing in Rust reads it but
+//! the editor: the Mac app refetches it from the server. See [`ambient`] and
+//! [`save_ambient`].
+//!
 //! ## Keymap
 //!
 //! An eighth section rebinds the web UI's **global** keyboard shortcuts (mesa
@@ -200,8 +213,8 @@ use crate::core::guard::{GuardAction, GuardThresholds};
 use crate::core::listen;
 use crate::core::speech;
 use crate::core::types::{
-    ConfigAudio, ConfigCommand, ConfigGuard, ConfigKeymap, ConfigKeymapAction, ConfigListen,
-    ConfigLive, ConfigPrice, ConfigSpeech, ConfigWatchers, ContextTier, ModelRates,
+    ConfigAmbient, ConfigAudio, ConfigCommand, ConfigGuard, ConfigKeymap, ConfigKeymapAction,
+    ConfigListen, ConfigLive, ConfigPrice, ConfigSpeech, ConfigWatchers, ContextTier, ModelRates,
 };
 
 /// The todo-watcher's dispatch command (`docs/todo-watcher.md`).
@@ -3070,6 +3083,111 @@ fn save_listen_in(
                 section.insert(key.clone(), serde_json::Value::String(value.to_string()));
             }
         }
+    }
+
+    let mut body = serde_json::to_string_pretty(&root)
+        .map_err(|e| SaveError::Unavailable(format!("cannot serialize the mesa config: {e}")))?;
+    body.push('\n');
+    write_atomically(path, &body)
+}
+
+/// The `ambient` map, deserialized on its own like every other section.
+#[derive(Debug, Default, Deserialize)]
+struct AmbientConfig {
+    #[serde(default)]
+    ambient: AmbientSection,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct AmbientSection {
+    #[serde(default)]
+    wake_words: Vec<String>,
+}
+
+fn read_ambient(path: &Path) -> Result<AmbientSection, String> {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(AmbientSection::default()),
+        Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
+    };
+    let config: AmbientConfig = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("malformed mesa config {}: {e}", path.display()))?;
+    Ok(config.ambient)
+}
+
+/// The ambient settings for the Settings page (`GET /api/config/ambient`):
+/// the stored wake words, `[]` when the file says nothing. A file that can't
+/// be read or parsed is `Err`, never a silent empty list.
+pub fn ambient() -> Result<ConfigAmbient, String> {
+    ambient_in(&config_file())
+}
+
+fn ambient_in(path: &Path) -> Result<ConfigAmbient, String> {
+    Ok(ConfigAmbient {
+        wake_words: read_ambient(path)?.wake_words,
+    })
+}
+
+/// Replaces `ambient.wake_words` in the config file.
+///
+/// - Each entry is trimmed and a case-insensitive duplicate is dropped (the
+///   first spelling wins). A blank entry, or one with fewer than 3 letters and
+///   digits in total ("a", "it"), is
+///   a [`SaveError::Validation`] and nothing is written.
+/// - An empty list **removes** the key.
+/// - Sibling of [`save_listen`] and the other savers: one read-modify-write
+///   over the whole document, so every other section survives.
+pub fn save_ambient(wake_words: &[String]) -> Result<(), SaveError> {
+    save_ambient_in(&config_file(), wake_words)
+}
+
+fn save_ambient_in(path: &Path, wake_words: &[String]) -> Result<(), SaveError> {
+    let mut words: Vec<String> = Vec::new();
+    for raw in wake_words {
+        let word = raw.trim();
+        if word.chars().filter(|c| c.is_alphanumeric()).count() < 3 {
+            return Err(SaveError::Validation(format!(
+                "wake word {raw:?} needs at least 3 letters or digits"
+            )));
+        }
+        if !words
+            .iter()
+            .any(|w| w.to_lowercase() == word.to_lowercase())
+        {
+            words.push(word.to_string());
+        }
+    }
+
+    let mut root = read_config_document(path)?;
+    let Some(object) = root.as_object_mut() else {
+        return Err(SaveError::Unavailable(format!(
+            "malformed mesa config {}: the file is not a JSON object",
+            path.display()
+        )));
+    };
+    if words.is_empty() {
+        // Nothing to remove and nothing to write for an unconfigured file.
+        let Some(section) = object.get_mut("ambient") else {
+            return Ok(());
+        };
+        let Some(section) = section.as_object_mut() else {
+            return Err(SaveError::Unavailable(format!(
+                "malformed mesa config {}: \"ambient\" is not a JSON object",
+                path.display()
+            )));
+        };
+        section.remove("wake_words");
+    } else {
+        let section = object
+            .entry("ambient")
+            .or_insert_with(|| serde_json::json!({}));
+        let Some(section) = section.as_object_mut() else {
+            return Err(SaveError::Unavailable(format!(
+                "malformed mesa config {}: \"ambient\" is not a JSON object",
+                path.display()
+            )));
+        };
+        section.insert("wake_words".to_string(), serde_json::json!(words));
     }
 
     let mut body = serde_json::to_string_pretty(&root)
@@ -7326,6 +7444,53 @@ mod tests {
         let written: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert!(written["listen"].get(ENGINE).is_none());
+    }
+
+    #[test]
+    fn ambient_round_trips_trims_and_dedupes_ignoring_case() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(dir.path(), r#"{"listen": {"model": "m"}}"#);
+        assert!(ambient_in(&path).unwrap().wake_words.is_empty());
+        let words = ["  Computer ", "jarvis", "COMPUTER", "Jarvis"].map(String::from);
+        save_ambient_in(&path, &words).unwrap();
+        assert_eq!(
+            ambient_in(&path).unwrap().wake_words,
+            vec!["Computer".to_string(), "jarvis".to_string()]
+        );
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(written["listen"]["model"], "m");
+        save_ambient_in(&path, &[]).unwrap();
+        assert!(ambient_in(&path).unwrap().wake_words.is_empty());
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(written["ambient"].get("wake_words").is_none());
+        assert_eq!(written["listen"]["model"], "m");
+    }
+
+    #[test]
+    fn save_ambient_rejects_a_blank_or_symbol_only_entry_without_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(dir.path(), "{}");
+        let before = std::fs::read_to_string(&path).unwrap();
+        for bad in ["", "   ", "-- !", "a", "it", "OK", "o-k"] {
+            let err = save_ambient_in(&path, &["okay".to_string(), bad.to_string()]).unwrap_err();
+            assert!(matches!(err, SaveError::Validation(_)), "{err:?}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        }
+        // An empty list on an unconfigured file writes nothing either.
+        save_ambient_in(&path, &[]).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn ambient_refuses_a_malformed_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(dir.path(), "not json");
+        assert!(ambient_in(&path).is_err());
+        let err = save_ambient_in(&path, &["xyz".to_string()]).unwrap_err();
+        assert!(matches!(err, SaveError::Unavailable(_)), "{err:?}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "not json");
     }
 
     fn audio_update(pairs: &[(&str, Option<&str>)]) -> HashMap<String, Option<String>> {

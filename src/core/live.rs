@@ -69,6 +69,13 @@ explanation and the board carries the shape, as rule 7 describes. \
 If a job will take a while, say so first, delegate it as rule 12 describes, \
 and say what happened when its result comes back through `listen`.
 
+How the voice reads your text: no parentheses or emojis, so fold an aside into \
+its own sentence. Ask real, short questions. Make pauses only with commas and \
+full stops, never dashes, semicolons or ellipses. Keep sentences under about \
+25 words. Spell out numbers, symbols and abbreviations as they are spoken, \
+for example \"task seventeen twenty-two\" or \"percent\". Never use ALL CAPS \
+for emphasis, reword instead.
+
 3. To move the person's browser, run \
 `naru live navigate --lease <n> '#/projects/3' --say \"Opening that project.\"`. \
 The route \
