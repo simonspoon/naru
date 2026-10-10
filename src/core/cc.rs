@@ -367,7 +367,10 @@ impl RawMessage {
             .filter(|b| b.get("is_error").and_then(|e| e.as_bool()) == Some(true))
             .filter_map(|b| {
                 let id = b.get("tool_use_id")?.as_str()?;
-                Some((id.to_string(), result_text(b.get("content"))))
+                let text = result_text(b.get("content"));
+                // A wrapper's nonzero exit (a trailing `pgrep`, a killed
+                // background server) does not make a passing run a failure.
+                (!is_passing_test_run(&text)).then(|| (id.to_string(), text))
             })
             .collect()
     }
@@ -608,6 +611,18 @@ fn result_text(content: Option<&serde_json::Value>) -> String {
             .join("\n"),
         Some(other) => other.to_string(),
     }
+}
+
+/// Whether a flagged `tool_result` is really a passing `cargo test` run: it
+/// printed at least one `test result: ok` and nothing that says the build or a
+/// test failed (naru task 1762). Claude Code sets `is_error` from the whole
+/// command's exit status, so `cargo test … ; scripts/x-check.sh; pgrep …` comes
+/// back flagged on the last command's status even though every test passed.
+fn is_passing_test_run(text: &str) -> bool {
+    text.contains("test result: ok")
+        && !text.contains("test result: FAILED")
+        && !text.contains("error[E")
+        && !text.contains("could not compile")
 }
 
 /// How many bytes of output a `tool_result` block's `content` carries. `0` for
@@ -9188,6 +9203,47 @@ mod tests {
         // `tool_use_id`, like every other cc row.
         let again = errors(&store, "all", None, false).unwrap();
         assert_eq!(again.total.errors, e.total.errors);
+    }
+
+    /// naru task 1762: an `is_error` result whose output holds a passing
+    /// `cargo test` is the wrapper's exit status, not a tool failure.
+    #[test]
+    fn a_passing_cargo_test_is_not_a_tool_failure() {
+        let flagged = |text: &str| -> usize {
+            let msg: RawMessage = serde_json::from_value(serde_json::json!({
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "tu1",
+                    "is_error": true,
+                    "content": text,
+                }]
+            }))
+            .unwrap();
+            msg.tool_errors().len()
+        };
+        // Passing, with warnings and a nonzero wrapper exit.
+        assert_eq!(
+            flagged(
+                "Exit code 1\nwarning: unused variable: `x`\ntest result: ok. 8 passed; 0 failed; 0 ignored\nrunner-check: 10 checks passed"
+            ),
+            0
+        );
+        // A genuine test failure, even beside an ok result from another binary.
+        assert_eq!(
+            flagged(
+                "Exit code 101\ntest result: ok. 8 passed\ntest result: FAILED. 1 passed; 1 failed"
+            ),
+            1
+        );
+        // A compile error.
+        assert_eq!(
+            flagged(
+                "Exit code 101\nerror[E0425]: cannot find value `y`\nerror: could not compile `naru`"
+            ),
+            1
+        );
+        // A nonzero exit with no ok result at all.
+        assert_eq!(flagged("Exit code 1\nsed: missing: No such file"), 1);
     }
 
     /// mesa task 1255: which sessions a row's failures came from, and the
