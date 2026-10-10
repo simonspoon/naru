@@ -6,27 +6,45 @@
    outlines everywhere; rounded inputs with their controls inside. */
 
 :root {
-  --bg: #060a10;
+  /* Channel triplets (task 1784): every translucent use of a palette colour
+     is rgba(var(--<name>-rgb), alpha), so a theme overriding one triplet
+     retints every shade of it. The solid colours below are built from them. */
+  --bg-rgb: 6, 10, 16;
+  --edge-rgb: 42, 106, 138;
+  --text-rgb: 184, 221, 232;
+  --muted-rgb: 93, 127, 143;
+  --cyan-rgb: 0, 229, 255;
+  --magenta-rgb: 255, 43, 214;
+  --violet-rgb: 176, 107, 255;
+  --violet-deep-rgb: 120, 70, 220;
+  --amber-rgb: 255, 180, 68;
+  --green-rgb: 43, 255, 156;
+  --red-rgb: 255, 59, 92;
+  /* Neutral overlays: black shadows/scrims and white hairlines. */
+  --shadow-rgb: 0, 0, 0;
+  --white-rgb: 255, 255, 255;
+  --white: #fff;
+  --bg: rgb(var(--bg-rgb));
   --panel: #0b1119;
   --panel-raised: #0e1722;
-  --border: rgba(42, 106, 138, 0.28);
-  --border-bright: rgba(42, 106, 138, 0.55);
-  --grid-line: rgba(0, 229, 255, 0.05);
-  --text: #b8dde8;
+  --border: rgba(var(--edge-rgb), 0.28);
+  --border-bright: rgba(var(--edge-rgb), 0.55);
+  --grid-line: rgba(var(--cyan-rgb), 0.05);
+  --text: rgb(var(--text-rgb));
   --text-h: #e8fbff;
-  --muted: #5d7f8f;
-  --cyan: #00e5ff;
-  --cyan-dim: rgba(0, 229, 255, 0.35);
-  --magenta: #ff2bd6;
+  --muted: rgb(var(--muted-rgb));
+  --cyan: rgb(var(--cyan-rgb));
+  --cyan-dim: rgba(var(--cyan-rgb), 0.35);
+  --magenta: rgb(var(--magenta-rgb));
   /* A third neon, sitting between cyan and magenta on the wheel (task 819):
      the agent sidebar's pane headers use it so an agent pane reads as its
      own surface without leaving the palette. */
-  --violet: #b06bff;
-  --violet-dim: rgba(176, 107, 255, 0.12);
-  --violet-edge: rgba(176, 107, 255, 0.4);
-  --amber: #ffb444;
-  --green: #2bff9c;
-  --red: #ff3b5c;
+  --violet: rgb(var(--violet-rgb));
+  --violet-dim: rgba(var(--violet-rgb), 0.12);
+  --violet-edge: rgba(var(--violet-rgb), 0.4);
+  --amber: rgb(var(--amber-rgb));
+  --green: rgb(var(--green-rgb));
+  --red: rgb(var(--red-rgb));
   --font-sans: 'Inter', -apple-system, 'SF Pro Text', system-ui, sans-serif;
   --font-brand: 'Orbitron', sans-serif;
   --font-mono: 'Share Tech Mono', monospace;
@@ -38,13 +56,13 @@
   --r-pill: 999px;
   /* Soft tinted surfaces (translucent, so the grid shows through faintly)
      and the rings/glows that separate them without a border. */
-  --surface: rgba(0, 229, 255, 0.04);
-  --surface-raised: rgba(0, 229, 255, 0.07);
-  --surface-hover: rgba(0, 229, 255, 0.11);
-  --surface-field: rgba(6, 10, 16, 0.8);
-  --hairline: rgba(42, 106, 138, 0.16);
-  --ring: 0 0 0 1px rgba(42, 106, 138, 0.45);
-  --ring-focus: 0 0 0 1px rgba(0, 229, 255, 0.6), 0 0 18px rgba(0, 229, 255, 0.08);
+  --surface: rgba(var(--cyan-rgb), 0.04);
+  --surface-raised: rgba(var(--cyan-rgb), 0.07);
+  --surface-hover: rgba(var(--cyan-rgb), 0.11);
+  --surface-field: rgba(var(--bg-rgb), 0.8);
+  --hairline: rgba(var(--edge-rgb), 0.16);
+  --ring: 0 0 0 1px rgba(var(--edge-rgb), 0.45);
+  --ring-focus: 0 0 0 1px rgba(var(--cyan-rgb), 0.6), 0 0 18px rgba(var(--cyan-rgb), 0.08);
   /* Workflow node kinds (mesa task 1607): one tint per kind, shared by the
      builder's palette and its cards, and the Run pill. */
   --wf-trigger: #2a3355;
@@ -55,11 +73,29 @@
   --wf-decide: #4a2f4f;
   --wf-output: #2e3a2e;
   --wf-run: #7c6cf0;
-  --edge-cyan: inset 2px 0 0 rgba(0, 229, 255, 0.55);
+  --edge-cyan: inset 2px 0 0 rgba(var(--cyan-rgb), 0.55);
   /* xterm's own font size (mesa task 560). Lives here rather than as a
      literal in `PtyTerminal.tsx` so the phone tier can override it in CSS
      like every other breakpoint-dependent value — xterm reads it as a JS
      option, but the media query stays in one place. */
+  /* Ink on a solid accent fill (badges, the live send button). */
+  --on-accent: #04121a;
+  --on-accent-alt: #04131a;
+  /* One-off text tints. */
+  --magenta-soft: #ff9be9;
+  --stderr-text: #ff9b7a;
+  /* The live orb's chrome (its state colours stay literal, see the orb rules
+     in App.css) and the header orb controls. */
+  --orb-body-from: rgba(24, 28, 48, 0.92);
+  --orb-body-to: rgba(8, 10, 20, 0.92);
+  --orb-edge: rgba(120, 130, 170, 0.28);
+  --orb-badge-bg: rgba(40, 16, 22, 0.85);
+  --orb-badge-fg: rgba(225, 120, 130, 0.85);
+  --orb-seg-bg: rgba(10, 16, 30, 0.88);
+  --orb-seg-bg-hover: rgba(20, 50, 70, 0.95);
+  --orb-btn-bg: rgba(20, 30, 50, 0.75);
+  --orb-btn-bg-hover: rgba(30, 50, 80, 0.9);
+  --orb-btn-off-bg: rgba(60, 18, 26, 0.55);
   --pty-font-size: 13px;
   /* A project-tab body pane that fills the viewport below the header/tabs/
      chrome and scrolls internally (workflow canvas, agents terminal). */
@@ -156,7 +192,7 @@ button {
   font-size: 0.9rem;
   font-weight: 500;
   color: var(--cyan);
-  background: rgba(0, 229, 255, 0.08);
+  background: rgba(var(--cyan-rgb), 0.08);
   border: 1px solid transparent;
   border-radius: var(--r-sm);
   padding: 0.3rem 0.9rem;
@@ -165,24 +201,24 @@ button {
 }
 
 button:hover:not(:disabled) {
-  background: rgba(0, 229, 255, 0.16);
-  box-shadow: 0 0 12px rgba(0, 229, 255, 0.15);
+  background: rgba(var(--cyan-rgb), 0.16);
+  box-shadow: 0 0 12px rgba(var(--cyan-rgb), 0.15);
 }
 
 button:disabled {
   color: var(--muted);
-  background: rgba(93, 127, 143, 0.1);
+  background: rgba(var(--muted-rgb), 0.1);
   cursor: default;
 }
 
 button.danger {
   color: var(--red);
-  background: rgba(255, 59, 92, 0.1);
+  background: rgba(var(--red-rgb), 0.1);
 }
 
 button.danger:hover:not(:disabled) {
-  background: rgba(255, 59, 92, 0.18);
-  box-shadow: 0 0 12px rgba(255, 59, 92, 0.25);
+  background: rgba(var(--red-rgb), 0.18);
+  box-shadow: 0 0 12px rgba(var(--red-rgb), 0.25);
 }
 
 input,
