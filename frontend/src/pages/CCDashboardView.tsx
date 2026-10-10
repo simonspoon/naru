@@ -468,7 +468,7 @@ function Overview({ data }: { data: CcDashboard }) {
         <Kpi label="Sessions" value={fmtInt(o.sessions)} sub={`${o.active_days} active days`} />
         <Kpi label="Messages" value={fmtInt(o.messages)} sub={`${fmtInt(Math.round(o.avg_tokens_per_session))} tok/session`} />
         <Kpi label="Tokens" value={fmtTok(o.total_tokens)} sub={`${fmtTok(o.tokens.input)} in · ${fmtTok(o.tokens.output)} out`} />
-        <Kpi label="Est. cost" value={fmtUsd(o.est_cost_usd)} sub="estimated" />
+        <Kpi label="Est. cost" value={fmtUsd(o.est_cost_usd)} sub={o.headless_cost_usd > 0 ? `incl. ${fmtUsd(o.headless_cost_usd)} headless` : 'estimated'} />
         <Kpi label="Cache hit" value={fmtPct(o.cache_hit_ratio)} sub={`${fmtTok(o.tokens.cache_read)} cached`} />
         <Kpi label="Avg session" value={fmtMin(o.avg_session_minutes)} sub={`median ${fmtMin(o.median_session_minutes)}`} />
       </div>
@@ -645,7 +645,22 @@ function SessionsPanel({ data, origin }: { data: CcDashboard; origin: CcOrigin }
         empty="No sessions in this window."
         cols={[
           { key: 'start', label: 'Started', render: (s) => s.start.replace('T', ' ').slice(0, 16), sort: (s) => s.start },
-          { key: 'project', label: 'Project', render: (s) => s.project ?? '—', sort: (s) => s.project ?? '' },
+          {
+            key: 'project',
+            label: 'Project',
+            // A headless `claude -p` call (naru task 1774) has no project;
+            // its ledger source rides in git_branch as `headless:<source>`.
+            render: (s) =>
+              s.entrypoint === 'headless' ? (
+                <>
+                  <span className="cc-badge">headless</span> {(s.git_branch ?? '').replace(/^headless:/, '')}
+                </>
+              ) : (
+                (s.project ?? '—')
+              ),
+            sort: (s) => s.project ?? '',
+          },
+          { key: 'agent', label: 'Agent', render: (s) => s.main_agent ?? '—', sort: (s) => s.main_agent ?? '' },
           { key: 'models', label: 'Model(s)', render: (s) => s.models.map(modelLabel).join(', ') },
           { key: 'dur', label: 'Duration', numeric: true, render: (s) => fmtMin(s.duration_minutes), sort: (s) => s.duration_minutes },
           { key: 'msgs', label: 'Msgs', numeric: true, render: (s) => fmtInt(s.messages), sort: (s) => s.messages },

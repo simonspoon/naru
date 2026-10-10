@@ -8,4 +8,8 @@ export type CcDayPoint = {
 /**
  * `YYYY-MM-DD` (UTC).
  */
-date: string, sessions: number, messages: number, tokens: CcTokens, total_tokens: number, est_cost_usd: number, };
+date: string, sessions: number, messages: number, tokens: CcTokens, total_tokens: number, est_cost_usd: number, 
+/**
+ * The headless share of `est_cost_usd` (see [`CcOverview`]).
+ */
+headless_cost_usd: number, };
