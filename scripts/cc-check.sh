@@ -197,6 +197,52 @@ assert (r["task_runs"],r["task_done"],r["task_requeued"])==(1,1,1), r
 print("cc scorecard task outcomes ok")
 ' || fail "cc scorecard task-outcome signals"
 
+# Top-level agent sessions (naru task 1773): a transcript's `agent-setting`
+# line (no timestamp, no uuid) names the `--agent` the session ran as, and the
+# scorecard counts the session as one run of it. Tree and db of their own: one
+# supervisor session (with a subagent, whose Explore run must stay a separate
+# row) beside one plain session that must not be counted.
+MT="$TMP/mtree"
+mkdir -p "$MT/-m/ma/subagents"
+cat > "$MT/-m/ma.jsonl" <<'JSONL'
+{"type":"agent-setting","agentSetting":"supervisor","sessionId":"ma"}
+{"type":"user","uuid":"pma","sessionId":"ma","timestamp":"2026-06-15T01:00:00.000Z","cwd":"/home/me/m","message":{"role":"user","content":"go"}}
+{"type":"assistant","uuid":"mma","sessionId":"ma","timestamp":"2026-06-15T01:05:00.000Z","cwd":"/home/me/m","message":{"model":"claude-opus-4-8","usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"content":[]}}
+{"type":"agent-setting","agentSetting":"supervisor","sessionId":"ma"}
+JSONL
+cat > "$MT/-m/ma/subagents/x.jsonl" <<'JSONL'
+{"type":"assistant","uuid":"ama","isSidechain":true,"sessionId":"ma","agentId":"xma","timestamp":"2026-06-15T01:10:00.000Z","attributionAgent":"Explore","message":{"model":"claude-haiku-4-5","usage":{"input_tokens":10,"output_tokens":20,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}
+JSONL
+echo '{"agentType":"Explore","description":"d","spawnDepth":1}' > "$MT/-m/ma/subagents/x.meta.json"
+cat > "$MT/-m/mb.jsonl" <<'JSONL'
+{"type":"assistant","uuid":"mmb","sessionId":"mb","timestamp":"2026-06-15T02:00:00.000Z","cwd":"/home/me/m","message":{"model":"claude-opus-4-8","usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"content":[]}}
+JSONL
+MESA_DB="$TMP/main-agent.db" MESA_CC_PROJECTS_DIR="$MT" "$BIN" cc scorecard | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+rows={(r["agent"],r["model"]):r for r in d["rows"]}
+assert set(rows)=={("supervisor","claude-opus-4-8"),("Explore","claude-haiku-4-5")}, list(rows)
+sup=rows[("supervisor","claude-opus-4-8")]
+assert sup["runs"]==1, sup
+assert abs(sup["tokens_per_run"]-150)<1e-9, sup
+ex=rows[("Explore","claude-haiku-4-5")]
+assert ex["runs"]==1 and abs(ex["tokens_per_run"]-30)<1e-9, ex
+print("cc scorecard main agent ok")
+' || fail "cc scorecard main-agent session run"
+MESA_DB="$TMP/main-agent.db" MESA_CC_PROJECTS_DIR="$MT" "$BIN" cc scorecard --agent supervisor | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+assert [(r["agent"],r["runs"]) for r in d["rows"]]==[("supervisor",1)], d["rows"]
+' || fail "cc scorecard --agent supervisor"
+MESA_DB="$TMP/main-agent.db" MESA_CC_PROJECTS_DIR="$MT" "$BIN" cc sessions --window all | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+rows=d if isinstance(d,list) else d["sessions"]
+m={r["session_id"]:r.get("main_agent","MISSING") for r in rows}
+assert m=={"ma":"supervisor","mb":None}, m
+print("cc sessions main_agent ok")
+' || fail "cc sessions main_agent"
+
 # cc reset: purges every cc_* row, then re-ingests. Unlike the rebuild above it
 # is corrective, so the rows really are re-ADDED (messages_added > 0 where the
 # rebuild added zero) — and because every transcript is still on disk, the

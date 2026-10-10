@@ -1166,6 +1166,19 @@ model", from the db alone (mesa task 1514). No migration: it reads
   **start** = the min `ts`. A run with no billed response has no model and is
   left out. A run that used several models is counted wholly under its
   most-used model, and a run with a single response has wall time 0.
+- **Top-level agent sessions** (naru task 1773): a session launched as
+  `claude --bg --agent supervisor` has no `cc_agent_runs` row, but its
+  transcript carries a timestamp-less `{"type":"agent-setting","agentSetting":
+  "<name>"}` line. Ingest stores it as `cc_sessions.main_agent` (migration
+  index 87, keep-first; applied only to a session the file's other lines
+  made), and the scorecard counts each such session as **one run** of that
+  agent: its main-thread messages (`agent_id IS NULL`) give cost, tokens,
+  turns and model, grouped in the same `(agent, model)` rows as subagent runs.
+  Subagent runs are keyed separately, so their counts do not change. The
+  migration also clears the `cc_files` cursors, so the next ordinary sync
+  re-walks once and backfills existing sessions (no `cc reset` needed).
+  `cc sessions` / `GET /api/cc/sessions` rows carry `main_agent` (null when
+  none), shown as the **Agent** column of the sessions table.
 - **`since`/`until`** bound a run's **start** (`since` inclusive, `until`
   exclusive), `YYYY-MM-DD` (midnight UTC) or a full `YYYY-MM-DDTHH:MM:SSZ` (UTC only: any other offset is
   `validation`).

@@ -646,6 +646,7 @@ function SessionsPanel({ data, origin }: { data: CcDashboard; origin: CcOrigin }
         cols={[
           { key: 'start', label: 'Started', render: (s) => s.start.replace('T', ' ').slice(0, 16), sort: (s) => s.start },
           { key: 'project', label: 'Project', render: (s) => s.project ?? '—', sort: (s) => s.project ?? '' },
+          { key: 'agent', label: 'Agent', render: (s) => s.main_agent ?? '—', sort: (s) => s.main_agent ?? '' },
           { key: 'models', label: 'Model(s)', render: (s) => s.models.map(modelLabel).join(', ') },
           { key: 'dur', label: 'Duration', numeric: true, render: (s) => fmtMin(s.duration_minutes), sort: (s) => s.duration_minutes },
           { key: 'msgs', label: 'Msgs', numeric: true, render: (s) => fmtInt(s.messages), sort: (s) => s.messages },

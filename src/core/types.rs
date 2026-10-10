@@ -2792,6 +2792,9 @@ pub struct CcSessionRow {
     pub project: Option<String>,
     pub git_branch: Option<String>,
     pub entrypoint: Option<String>,
+    /// The top-level agent the session was launched as (`claude --agent
+    /// <name>`, the transcript's `agent-setting` line); null when none.
+    pub main_agent: Option<String>,
     /// True if any of the session's events came from a subagent (`isSidechain`).
     /// Subagent transcripts reuse the parent's `sessionId`, so this is "the
     /// session used a subagent", not "the session *is* a sidechain".

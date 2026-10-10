@@ -96,6 +96,10 @@ struct RawLine {
     attribution_skill: Option<String>,
     #[serde(default)]
     attribution_agent: Option<String>,
+    /// On the `agent-setting` line (no timestamp): the `--agent` the session
+    /// was launched as.
+    #[serde(default)]
+    agent_setting: Option<String>,
     #[serde(default)]
     message: Option<RawMessage>,
     /// The line's own type tag (`"user"`, `"assistant"`, `"system"`, …). Only
@@ -1578,6 +1582,7 @@ struct SessionAcc {
     cwd: Option<String>,
     git_branch: Option<String>,
     entrypoint: Option<String>,
+    main_agent: Option<String>,
     sidechain: bool,
 }
 
@@ -1753,6 +1758,7 @@ fn collect_inner(
         s.cwd = rec.cwd;
         s.git_branch = rec.git_branch;
         s.entrypoint = rec.entrypoint;
+        s.main_agent = rec.main_agent;
         s.sidechain = rec.used_subagent;
         if let (Some(start), Some(end)) = (rec.start_ts, rec.end_ts) {
             // Windowed duration = the stored span clamped to the window
@@ -2035,6 +2041,9 @@ fn parse_batch(bytes: &[u8]) -> (CcFileBatch, usize) {
     // deterministic like the two maps above.
     let mut node_files: BTreeSet<(String, String)> = BTreeSet::new();
     let mut batch = CcFileBatch::default();
+    // `agent-setting` lines carry no timestamp, so they cannot open a session
+    // entry; they are applied to the sessions the file's other lines made.
+    let mut settings: BTreeMap<String, String> = BTreeMap::new();
     let mut pos = 0usize;
     let mut consumed = 0usize;
     while let Some(nl) = bytes[pos..].iter().position(|&b| b == b'\n') {
@@ -2048,7 +2057,13 @@ fn parse_batch(bytes: &[u8]) -> (CcFileBatch, usize) {
                 &mut agent_runs,
                 &mut node_files,
                 &mut batch,
+                &mut settings,
             );
+        }
+    }
+    for (sid, agent) in settings {
+        if let Some(s) = sessions.get_mut(&sid) {
+            s.main_agent.get_or_insert(agent);
         }
     }
     batch.sessions = sessions.into_values().collect();
@@ -2081,6 +2096,7 @@ fn fold_line(
     agent_runs: &mut BTreeMap<(String, String), CcAgentRunUpsert>,
     node_files: &mut BTreeSet<(String, String)>,
     batch: &mut CcFileBatch,
+    settings: &mut BTreeMap<String, String>,
 ) {
     let line = line.trim();
     if line.is_empty() {
@@ -2090,6 +2106,14 @@ fn fold_line(
         Ok(r) => r,
         Err(_) => return,
     };
+    if let (Some(sid), Some(agent)) = (raw.session_id.as_ref(), raw.agent_setting.as_ref()) {
+        let agent = agent.trim();
+        if !agent.is_empty() {
+            settings
+                .entry(sid.clone())
+                .or_insert_with(|| agent.to_string());
+        }
+    }
     let (Some(sid), Some(ts_str)) = (raw.session_id.as_ref(), raw.timestamp.as_ref()) else {
         return;
     };
@@ -2113,6 +2137,7 @@ fn fold_line(
             used_subagent: false,
             start_ts: None,
             end_ts: None,
+            main_agent: None,
         });
     if s.cwd.is_none() {
         s.cwd = raw.cwd.clone();
@@ -2847,6 +2872,7 @@ impl Agg {
                     cwd: s.cwd,
                     git_branch: s.git_branch,
                     entrypoint: s.entrypoint,
+                    main_agent: s.main_agent,
                     used_subagent: s.sidechain,
                     start: s.start_str,
                     end: s.end_str,
@@ -3672,7 +3698,8 @@ fn frontmatter_model_effort(body: &str) -> Option<(Option<String>, Option<String
 }
 
 /// The model scorecard (mesa task 1514): every subagent run with an
-/// attributed agent, costed and timed from its own messages, grouped by
+/// attributed agent, plus every session launched as a top-level agent
+/// (`cc_sessions.main_agent`, naru task 1773) counted as one run of it, costed and timed from its own messages, grouped by
 /// `(agent, model)`, plus the points where an agent definition's `model:` /
 /// `effort:` changed. `since`/`until` bound a run's **start** (inclusive /
 /// exclusive). Reasoning effort is in no transcript, so it appears only on the
@@ -3720,13 +3747,25 @@ pub fn scorecard(
         };
         runs.insert((session, agent_id), (name, r));
     }
+    // A session launched as a top-level agent (`--agent <name>`, naru task
+    // 1773) is one run of that agent: keyed with an empty agent id, which no
+    // subagent run has, so the subagent counts above are untouched.
+    for (session, name) in store.cc_read_main_agent_sessions(agent)? {
+        let r = Run {
+            link: task_links.get(&session).copied(),
+            ..Run::default()
+        };
+        runs.insert((session, String::new()), (name, r));
+    }
 
     // Billed responses deduped exactly as `collect_inner` does.
     let mut seen: HashSet<String> = HashSet::new();
-    for m in store.cc_read_scorecard_messages(agent)? {
-        let Some(agent_id) = m.agent_id.clone() else {
-            continue;
-        };
+    let all_messages = store
+        .cc_read_scorecard_messages(agent)?
+        .into_iter()
+        .chain(store.cc_read_main_agent_messages(agent)?);
+    for m in all_messages {
+        let agent_id = m.agent_id.clone().unwrap_or_default();
         let Some((_, r)) = runs.get_mut(&(m.session_id.clone(), agent_id)) else {
             continue;
         };
@@ -3740,7 +3779,13 @@ pub fn scorecard(
             m.input_tokens + m.output_tokens + m.cache_read_tokens + m.cache_creation_tokens;
         r.cost += row_cost(&prices, &m);
     }
-    for (session, agent_id, ts) in store.cc_read_scorecard_tool_ts(agent)? {
+    let all_tool_ts = store.cc_read_scorecard_tool_ts(agent)?.into_iter().chain(
+        store
+            .cc_read_main_agent_tool_ts(agent)?
+            .into_iter()
+            .map(|(session, ts)| (session, String::new(), ts)),
+    );
+    for (session, agent_id, ts) in all_tool_ts {
         if let Some((_, r)) = runs.get_mut(&(session, agent_id)) {
             r.touch(ts);
         }
@@ -7308,6 +7353,7 @@ mod tests {
                         used_subagent: true,
                         start_ts: Some(1000),
                         end_ts: Some(1699),
+                        main_agent: None,
                     }],
                     agent_runs: vec![CcAgentRunUpsert {
                         session_id: "big".into(),
@@ -7379,6 +7425,7 @@ mod tests {
                         used_subagent: true,
                         start_ts: Some(t0),
                         end_ts: Some(t0 + 3 * day),
+                        main_agent: None,
                     }],
                     agent_runs: vec![
                         run("a1", Some("Explore")),
@@ -7415,6 +7462,21 @@ mod tests {
             )
             .unwrap();
         t0
+    }
+
+    #[test]
+    fn agent_setting_line_sets_main_agent_only_on_sessions_with_lines() {
+        let bytes = concat!(
+            r#"{"type":"agent-setting","agentSetting":"supervisor","sessionId":"s1"}"#,
+            "\n",
+            r#"{"type":"user","sessionId":"s1","timestamp":"2026-06-15T01:00:00.000Z"}"#,
+            "\n",
+            r#"{"type":"agent-setting","agentSetting":"ghost","sessionId":"s2"}"#,
+            "\n",
+        );
+        let (batch, _) = parse_batch(bytes.as_bytes());
+        assert_eq!(batch.sessions.len(), 1);
+        assert_eq!(batch.sessions[0].main_agent.as_deref(), Some("supervisor"));
     }
 
     #[test]
@@ -7497,6 +7559,7 @@ mod tests {
                             used_subagent: true,
                             start_ts: Some(t0),
                             end_ts: Some(t0 + 100),
+                            main_agent: None,
                         }],
                         agent_runs: run
                             .map(|id| CcAgentRunUpsert {
@@ -7859,6 +7922,7 @@ mod tests {
                         used_subagent: false,
                         start_ts: Some(500),
                         end_ts: Some(500),
+                        main_agent: None,
                     }],
                     messages: vec![CcMessageRow {
                         uuid: "m1".into(),
@@ -7935,6 +7999,7 @@ mod tests {
                         used_subagent: true,
                         start_ts: Some(0),
                         end_ts: Some(700),
+                        main_agent: None,
                     }],
                     messages: vec![
                         // Main: 0, 30 (a 30s gap — still working), then a 570s
@@ -7997,6 +8062,7 @@ mod tests {
                         used_subagent: false,
                         start_ts: Some(10),
                         end_ts: Some(20),
+                        main_agent: None,
                     }],
                     tool_calls: vec![CcToolCallRow {
                         tool_use_id: "tu1".into(),
