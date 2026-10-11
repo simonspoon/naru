@@ -3167,6 +3167,7 @@ fn router(state: AppState) -> Router {
         .route("/api/runs/{id}", get(show_run))
         .route("/api/runs/{id}/message", post(message_run))
         .route("/api/runs/{id}/stop", post(stop_run))
+        .route("/api/runs/{id}/interrupt", post(interrupt_run))
         // Library: agent definitions, skills, hooks, prompts and CLAUDE.md
         // files, each (a prompt only when it exports) mirrored onto disk under
         // `.claude/`. A row becomes code mesa or Claude Code executes, so all
@@ -7148,6 +7149,16 @@ async fn stop_run(
 ) -> ApiResult<Response> {
     require_agent_access(&state, &addr, &headers)?;
     Ok(Json(runner::stop(&id)?).into_response())
+}
+
+async fn interrupt_run(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    Ok(Json(runner::interrupt(&id)?).into_response())
 }
 
 /// Stops a detached run: sets the registry's stop flag, which the run's own

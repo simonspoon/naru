@@ -412,6 +412,11 @@ EXAMPLES
         /// The run id
         job: String,
     },
+    /// Interrupt the turn a run is in the middle of; the run stays open
+    Interrupt {
+        /// The run id
+        job: String,
+    },
     /// Resume every unfinished run whose runner died (what `serve` does at start)
     Reconcile,
     /// The detached runner itself; started by `run start`, not by hand
@@ -5039,6 +5044,7 @@ fn run_runs(cmd: RunCmd) -> Result<()> {
         }
         RunCmd::List => print_json(&runner::list()?),
         RunCmd::Stop { job } => print_json(&runner::stop(&job)?),
+        RunCmd::Interrupt { job } => print_json(&runner::interrupt(&job)?),
         RunCmd::Reconcile => print_json(&json!({"resumed": runner::reconcile()?})),
         RunCmd::Runner { dir } => runner::run_runner(&dir)?,
     }

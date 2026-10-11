@@ -57,7 +57,8 @@ ok() { CHECKS=$((CHECKS + 1)); echo "ok: $*"; }
 #
 # Logs one argv line per invocation. Reads stream-json user messages, one per
 # line; for each answers with an assistant line and a result line echoing the
-# text. A file `sleep-secs` in the stub dir makes each turn take that long, so
+# text; a control_request is logged to control.log and, mid-turn, aborts the turn
+# (control_response + an error result). A file `sleep-secs` in the stub dir makes each turn take that long, so
 # a gate can kill things mid-turn. EOF on stdin ends it, like the real one.
 STUB="$TMP/stub"
 mkdir -p "$STUB"
@@ -67,13 +68,29 @@ printf '%s\n' "\$*" >> "$STUB/argv.log"
 if [ -f "$STUB/fail-resume" ] && [[ " \$* " == *" --resume "* ]]; then
   echo "No conversation found" >&2; exit 1
 fi
+turn_pid=
 while IFS= read -r line; do
+  if [ "\$(jq -r '.type' <<<"\$line")" = control_request ]; then
+    printf '%s\n' "\$line" >> "$STUB/control.log"
+    if [ -n "\$turn_pid" ] && kill -0 "\$turn_pid" 2>/dev/null; then
+      kill "\$turn_pid" 2>/dev/null; wait "\$turn_pid" 2>/dev/null
+      turn_pid=
+      printf '{"type":"control_response","response":{"subtype":"success","request_id":%s}}\n' "\$(jq '.request_id' <<<"\$line")"
+      printf '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"interrupted"}\n'
+    fi
+    continue
+  fi
   text=\$(jq -r '.message.content[0].text' <<<"\$line")
   s=0; [ -f "$STUB/sleep-secs" ] && s=\$(cat "$STUB/sleep-secs")
-  [ "\$s" != 0 ] && sleep "\$s"
-  printf '{"type":"assistant","message":{"content":[{"type":"text","text":%s}]}}\n' "\$(jq -Rn --arg t "\$text" '\$t')"
-  printf '{"type":"result","subtype":"success","is_error":false,"result":%s}\n' "\$(jq -Rn --arg t "echo: \$text" '\$t')"
+  # The turn runs in the background so the loop can still read a control_request.
+  (
+    [ "\$s" != 0 ] && sleep "\$s"
+    printf '{"type":"assistant","message":{"content":[{"type":"text","text":%s}]}}\n' "\$(jq -Rn --arg t "\$text" '\$t')"
+    printf '{"type":"result","subtype":"success","is_error":false,"result":%s}\n' "\$(jq -Rn --arg t "echo: \$text" '\$t')"
+  ) &
+  turn_pid=\$!
 done
+wait
 STUBEOF
 chmod +x "$STUB/claude"
 export MESA_CLAUDE_BIN="$STUB/claude"
@@ -217,6 +234,33 @@ sleep 1
 wait_for 10 "raced run stopped" status_is "$J4" stopped
 ok "two concurrent reconciles of a dead run started claude exactly once more"
 
+# ---- interrupt: a control_request ends the turn, the run stays open ----
+: > "$STUB/control.log"
+echo 4 > "$STUB/sleep-secs"
+J5=$("$NARU" run start --model haiku --cwd "$TMP/work" "long turn" | jq -r .job_id)
+wait_for 10 "long turn delivered" delivered_is "$J5" 1
+status_is "$J5" running || fail "should be mid-turn"
+"$NARU" run interrupt "$J5" | jq -e '.job_id' >/dev/null || fail "run interrupt output"
+wait_for 10 "interrupt delivered to claude" grep -q interrupt "$STUB/control.log"
+[ "$(wc -l < "$STUB/control.log" | tr -d " ")" = 1 ] || fail "one control_request expected: $(cat "$STUB/control.log")"
+jq -e '.type == "control_request" and .request.subtype == "interrupt"' "$STUB/control.log" >/dev/null || fail "control line: $(cat "$STUB/control.log")"
+wait_for 10 "interrupted run idle" status_is "$J5" idle
+grep -q interrupt_requested "$RUNS/$J5/events.jsonl" || fail "no interrupt_requested event"
+[ ! -e "$RUNS/$J5/interrupt" ] || fail "interrupt marker should be consumed"
+echo 0 > "$STUB/sleep-secs"
+"$NARU" run send "$J5" "after interrupt" >/dev/null
+wait_for 10 "send after interrupt answered" result_is "$J5" "echo: after interrupt"
+"$NARU" run interrupt "$J5" >/dev/null
+sleep 1
+[ "$(wc -l < "$STUB/control.log" | tr -d " ")" = 1 ] || fail "interrupting an idle run must send nothing"
+"$NARU" run stop "$J5" >/dev/null
+wait_for 10 "interrupt run stopped" status_is "$J5" stopped
+set +e
+err=$("$NARU" run interrupt "$J5" 2>&1 >/dev/null); rc=$?
+set -e
+[ "$rc" = 1 ] && [ "$(jq -r .error.code <<<"$err")" = conflict ] || fail "interrupt of a stopped run: rc=$rc $err"
+ok "interrupt ended the turn mid-flight, the run stayed open and answered the next send; idle/terminal runs refused or ignored"
+
 # ---- idle timeout ----
 J2=$("$NARU" run start --model haiku --cwd "$TMP/work" --idle-timeout 2 "short lived" | jq -r .job_id)
 wait_for 10 "result" result_is "$J2" "echo: short lived"
@@ -224,7 +268,7 @@ wait_for 10 "idle timeout -> finished" status_is "$J2" finished
 ok "idle timeout wound the run down to finished"
 
 # ---- CLI shapes ----
-"$NARU" run list | jq -e 'length == 4' >/dev/null || fail "run list"
+"$NARU" run list | jq -e 'length == 5' >/dev/null || fail "run list"
 "$NARU" run show "$J2" --events | jq -e '.job.job_id and (.events | length) > 0' >/dev/null || fail "run show --events"
 "$NARU" run show "$J2" --tail 1 | jq -e '.events | length == 1' >/dev/null || fail "run show --tail"
 "$NARU" run show "$J2" --quiet | jq -e '.job_id' >/dev/null || fail "--quiet is accepted and ignored"
@@ -244,10 +288,10 @@ set -e
 ok "CLI: list/show/tail/quiet, not_found, validation, usage exit codes, empty reconcile"
 
 # ---- the gate: every route refuses a foreign Host ----
-for route in "GET /api/runs" "GET /api/runs/$ID" "POST /api/runs" "POST /api/runs/$ID/message" "POST /api/runs/$ID/stop"; do
+for route in "GET /api/runs" "GET /api/runs/$ID" "POST /api/runs" "POST /api/runs/$ID/message" "POST /api/runs/$ID/stop" "POST /api/runs/$ID/interrupt"; do
   code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: evil.example:80' -H 'Content-Type: application/json' -X "${route%% *}" -d '{}' "$BASE${route#* }")
   [ "$code" = 403 ] || fail "$route with a foreign Host answered $code, expected 403"
 done
-ok "all five routes refuse a foreign Host"
+ok "all six routes refuse a foreign Host"
 
 echo "runner-check: $CHECKS checks passed"

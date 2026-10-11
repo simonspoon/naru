@@ -136,6 +136,12 @@ pub fn encode_user_message(text: &str) -> String {
         .to_string()
 }
 
+/// One stream-json control request asking claude to interrupt its current turn.
+pub fn encode_interrupt(request_id: &str) -> String {
+    json!({"type": "control_request", "request_id": request_id, "request": {"subtype": "interrupt"}})
+        .to_string()
+}
+
 /// A v4 UUID string from 16 random bytes.
 pub fn uuid_from_bytes(mut b: [u8; 16]) -> String {
     b[6] = (b[6] & 0x0f) | 0x40;
@@ -570,6 +576,28 @@ pub fn stop_in(runs: &Path, id: &str) -> Result<Value> {
     Ok(view(&dir, &job))
 }
 
+pub fn interrupt(id: &str) -> Result<Value> {
+    interrupt_in(&runs_dir(), id)
+}
+
+/// Asks the runner to interrupt the turn in flight. The runner is the only
+/// writer to claude's stdin, so this only drops a marker; the turn still ends
+/// on claude's own `result` line. A run that is not mid-turn is a no-op.
+pub fn interrupt_in(runs: &Path, id: &str) -> Result<Value> {
+    let dir = job_dir_of(runs, id)?;
+    let job = load(&dir)?;
+    if job.status.is_terminal() {
+        return Err(Error::Conflict(format!(
+            "run {id} is {:?}; nothing to interrupt",
+            job.status
+        )));
+    }
+    if job.status == RunStatus::Running {
+        atomic_write(&dir.join("interrupt"), b"interrupt\n")?;
+    }
+    Ok(view(&dir, &job))
+}
+
 /// Resumes every non-terminal run whose runner is dead; returns their ids.
 pub fn reconcile() -> Result<Vec<String>> {
     reconcile_in(&runs_dir())
@@ -651,6 +679,8 @@ fn run_runner_locked(dir: &Path) -> Result<()> {
         &dir.join("runner.pid"),
         std::process::id().to_string().as_bytes(),
     )?;
+    // A leftover request must not interrupt the CONTINUE message of a resume.
+    let _ = fs::remove_file(dir.join("interrupt"));
     let resume = job.claude_started;
     let interrupted = resume && job.status == RunStatus::Running;
     if resume {
@@ -809,6 +839,23 @@ fn run_runner_locked(dir: &Path) -> Result<()> {
             stdin = None;
             runner_event(dir, "stop_requested", json!({}));
         }
+        if closing.is_none() && dir.join("interrupt").exists() {
+            let _ = fs::remove_file(dir.join("interrupt"));
+            if in_flight > 0 {
+                let request_id = uuid_from_bytes(random_bytes::<16>().unwrap_or([7; 16]));
+                if let Some(w) = stdin.as_mut()
+                    && writeln!(w, "{}", encode_interrupt(&request_id))
+                        .and_then(|()| w.flush())
+                        .is_ok()
+                {
+                    runner_event(
+                        dir,
+                        "interrupt_requested",
+                        json!({"request_id": request_id}),
+                    );
+                }
+            }
+        }
         if closing.is_none() {
             for file in pending_inbox(&dir.join("inbox")) {
                 let Some(text) = fs::read_to_string(&file)
@@ -917,6 +964,38 @@ mod tests {
         assert_eq!(v["message"]["role"], "user");
         assert_eq!(v["message"]["content"][0]["type"], "text");
         assert_eq!(v["message"]["content"][0]["text"], "hi \"there\"\nsecond");
+    }
+
+    #[test]
+    fn interrupt_request_is_one_stream_json_control_line() {
+        let line = encode_interrupt("req-1");
+        assert!(!line.contains('\n'));
+        let v: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["type"], "control_request");
+        assert_eq!(v["request_id"], "req-1");
+        assert_eq!(v["request"]["subtype"], "interrupt");
+    }
+
+    #[test]
+    fn interrupt_marks_a_running_run_and_refuses_a_terminal_one() {
+        let runs = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let job = create_job(runs.path(), &opts("do it", cwd.path())).unwrap();
+        let dir = runs.path().join(&job.job_id);
+        interrupt_in(runs.path(), &job.job_id).unwrap();
+        assert!(dir.join("interrupt").exists());
+        let _ = fs::remove_file(dir.join("interrupt"));
+        let mut idle = load(&dir).unwrap();
+        idle.status = RunStatus::Idle;
+        save(&dir, &mut idle).unwrap();
+        interrupt_in(runs.path(), &job.job_id).unwrap();
+        assert!(!dir.join("interrupt").exists());
+        idle.status = RunStatus::Stopped;
+        save(&dir, &mut idle).unwrap();
+        assert!(matches!(
+            interrupt_in(runs.path(), &job.job_id),
+            Err(Error::Conflict(_))
+        ));
     }
 
     #[test]
