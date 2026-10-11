@@ -103,6 +103,28 @@ enum Command {
     /// Build and run deterministic workflows (a DAG of typed nodes)
     #[command(subcommand)]
     Workflow(WorkflowCmd),
+    /// List, inspect, create and edit colour themes for the web UI
+    ///
+    ///
+    /// A theme is nine colour SLOTS (listed below); everything else (borders,
+    /// glows, hovers, the light/dark scheme) is derived from them. A colour is
+    /// `#rgb` or `#rrggbb` (quote it in a shell: '#2fa8ff').
+    ///
+    /// THEME is a built-in id (dark, light, contrast, crimson), a custom id
+    /// (custom-<n>) or a name, case-insensitive. Built-ins are read-only: copy
+    /// one with `create --from`, then `set` slots on the copy. Text and muted
+    /// against bg and panel should reach 4.5:1 contrast; a pair below it is a
+    /// warning in the output (and on stderr), never a refusal. `use` makes a
+    /// theme the one the web UI shows (`system` follows the OS).
+    #[command(
+        subcommand,
+        after_help = "\
+EXAMPLES
+  naru theme create --from crimson --name Ocean
+  naru theme set Ocean accent '#2fa8ff'
+  naru theme use Ocean"
+    )]
+    Theme(ThemeCmd),
     /// Send and triage global inbox items (project-update requests)
     #[command(subcommand)]
     Inbox(InboxCmd),
@@ -1617,6 +1639,72 @@ EXAMPLES
         /// Supply one declared argument: NAME=VALUE (repeatable)
         #[arg(long = "set", value_name = "NAME=VALUE", allow_hyphen_values = true)]
         set: Vec<String>,
+    },
+}
+
+/// Subcommands of `naru theme`; the long help lives on `Command::Theme`.
+#[derive(Subcommand)]
+enum ThemeCmd {
+    /// List every theme as a bare array of {id, name, builtin, scheme, slots}
+    List,
+    /// Show one theme in full, with its derived vars and contrast warnings
+    #[command(visible_alias = "get")]
+    Show {
+        /// Built-in id, custom-<n> or name
+        theme: String,
+        /// Print the theme without its derived `vars`
+        #[arg(long)]
+        quiet: bool,
+    },
+    /// Copy a theme into a new custom theme; prints it
+    Create {
+        /// The theme to copy (a built-in, custom id or name)
+        #[arg(long)]
+        from: String,
+        /// Name of the copy (default: "<source name> copy")
+        #[arg(long)]
+        name: Option<String>,
+        /// Print the theme without its derived `vars`
+        #[arg(long)]
+        quiet: bool,
+    },
+    /// Set one slot of a custom theme; prints it, contrast failures included
+    Set {
+        /// Custom id or name (built-ins are read-only)
+        theme: String,
+        /// bg, panel, text, muted, accent, accent2, good, warn or bad
+        slot: String,
+        /// #rgb or #rrggbb
+        colour: String,
+        /// Print the theme without its derived `vars`
+        #[arg(long)]
+        quiet: bool,
+    },
+    /// Rename a custom theme; prints it
+    Rename {
+        /// Custom id or name
+        theme: String,
+        /// The new name
+        name: String,
+        /// Print the theme without its derived `vars`
+        #[arg(long)]
+        quiet: bool,
+    },
+    /// Delete a custom theme; prints the deleted record
+    Delete {
+        /// Custom id or name
+        theme: String,
+        /// Print the theme without its derived `vars`
+        #[arg(long)]
+        quiet: bool,
+    },
+    /// Make a theme (or `system`) the web UI's theme; prints the appearance setting
+    Use {
+        /// Built-in id, custom-<n>, name, or `system`
+        theme: String,
+        /// Print the setting without the active custom theme's `vars`
+        #[arg(long)]
+        quiet: bool,
     },
 }
 
@@ -4910,6 +4998,7 @@ fn execute(command: Command) -> Result<()> {
         Command::Project(cmd) => run_project(cmd),
         Command::Task(cmd) => run_task(cmd),
         Command::Workflow(cmd) => run_workflow_cmd(cmd),
+        Command::Theme(cmd) => run_theme_cmd(cmd),
         Command::Inbox(cmd) => run_inbox(cmd),
         Command::Script(cmd) => run_script_cmd(cmd),
         Command::Artifact(cmd) => run_artifact_cmd(cmd),
@@ -7723,6 +7812,75 @@ fn parse_config_json(s: &str) -> Result<serde_json::Value> {
         .map_err(|e| Error::Validation(format!("--config is not valid JSON: {e}")))
 }
 
+/// Keys dropped from a `Theme` under `--quiet`: the derived variable map.
+const QUIET_DROP_THEME: &[&str] = &["vars"];
+/// Keys a theme `list` row drops: everything but id, name, builtin, scheme, slots.
+const COMPACT_DROP_THEME: &[&str] = &["vars", "warnings", "created_at", "updated_at"];
+
+/// Print a theme, warning on stderr for each contrast failure it carries.
+fn print_theme(theme: &crate::core::Theme, is_quiet: bool) {
+    print_record(theme, is_quiet, QUIET_DROP_THEME);
+}
+
+fn run_theme_cmd(cmd: ThemeCmd) -> Result<()> {
+    use crate::core::theme;
+    let mut store = Store::open_default()?;
+    match cmd {
+        ThemeCmd::List => {
+            print_json(&quiet_all(&theme::list(&store)?, COMPACT_DROP_THEME));
+        }
+        ThemeCmd::Show { theme: arg, quiet } => {
+            print_theme(&theme::show(&store, &arg)?, quiet);
+        }
+        ThemeCmd::Create { from, name, quiet } => {
+            print_theme(
+                &theme::create_from(&mut store, &from, name.as_deref())?,
+                quiet,
+            );
+        }
+        ThemeCmd::Set {
+            theme: arg,
+            slot,
+            colour,
+            quiet,
+        } => {
+            let t = theme::set_slot(&mut store, &arg, &slot, &colour)?;
+            for w in &t.warnings {
+                eprintln!(
+                    "warning: {} contrast {}:1 is below {}:1",
+                    w.pair, w.ratio, w.min
+                );
+            }
+            print_theme(&t, quiet);
+        }
+        ThemeCmd::Rename {
+            theme: arg,
+            name,
+            quiet,
+        } => {
+            print_theme(&theme::rename(&mut store, &arg, &name)?, quiet);
+        }
+        ThemeCmd::Delete { theme: arg, quiet } => {
+            print_theme(&theme::delete(&mut store, &arg)?, quiet);
+        }
+        ThemeCmd::Use { theme: arg, quiet } => {
+            theme::use_theme(&store, &arg)?;
+            let appearance = theme::appearance(&store).map_err(Error::Unavailable)?;
+            if quiet {
+                // The active custom theme's `vars` are the one unbounded part.
+                let mut v = serde_json::to_value(&appearance).expect("json serialize");
+                if let Some(custom) = v.get_mut("custom").and_then(|c| c.as_object_mut()) {
+                    custom.remove("vars");
+                }
+                print_json(&v);
+            } else {
+                print_json(&appearance);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn run_workflow_cmd(cmd: WorkflowCmd) -> Result<()> {
     let mut store = Store::open_default()?;
     match cmd {
@@ -8349,6 +8507,7 @@ mod tests {
     //! (derived projections) or silently vanishing (`compact`'s literal).
 
     use super::*;
+    use crate::core::Theme;
     use crate::core::{
         ArtifactSummary, InboxItem, Project, TaskSummary, WorkflowRunStatus, WorkflowStep,
         WorkflowStepStatus,
@@ -8786,6 +8945,44 @@ mod tests {
         assert_eq!(
             sorted_owned(value_keys(&quiet(&sample_workflow(), QUIET_DROP_WORKFLOW))),
             minus(&full, QUIET_DROP_WORKFLOW),
+        );
+    }
+
+    #[test]
+    fn theme_quiet_drops_vars() {
+        let theme = Theme::builtin("crimson").expect("built-in");
+        let full = keys(&theme);
+        assert_eq!(
+            sorted_owned(full.clone()),
+            sorted_owned(
+                [
+                    "id",
+                    "name",
+                    "builtin",
+                    "scheme",
+                    "slots",
+                    "vars",
+                    "warnings",
+                    "created_at",
+                    "updated_at",
+                ]
+                .map(String::from)
+                .to_vec()
+            ),
+            "Theme gained/lost a field: decide whether it belongs in the \
+             --quiet shape before updating this list",
+        );
+        assert_eq!(
+            sorted_owned(value_keys(&quiet(&theme, QUIET_DROP_THEME))),
+            minus(&full, QUIET_DROP_THEME),
+        );
+        assert_eq!(
+            sorted_owned(value_keys(&quiet(&theme, COMPACT_DROP_THEME))),
+            sorted_owned(
+                ["id", "name", "builtin", "scheme", "slots"]
+                    .map(String::from)
+                    .to_vec()
+            ),
         );
     }
 
