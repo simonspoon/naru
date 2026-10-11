@@ -16,7 +16,7 @@ import '@azurity/pure-nerd-font/pure-nerd-font.css'
 import './index.css'
 import './themes.css'
 import { getAppearance } from './api'
-import { applyTheme, parseSetting, storedSetting } from './theme'
+import { applyTheme, isEditorDirty, parseSetting, storedSetting } from './theme'
 import App from './App.tsx'
 
 // Apply the last-known theme before first render so a reload does not flash the
@@ -27,6 +27,7 @@ applyTheme(storedSetting())
 // when the answer changed.
 let lastAppearance = ''
 function syncAppearance() {
+  if (isEditorDirty()) return
   getAppearance().then(
     (a) => {
       const key = JSON.stringify({ theme: a.theme, custom: a.custom })

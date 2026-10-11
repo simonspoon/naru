@@ -547,6 +547,15 @@ pub fn save_appearance_in(
 ) -> std::result::Result<(), SaveError> {
     if let Some(Some(v)) = updates.get(config::THEME) {
         let v = v.trim();
+        // `custom-<digits>` whose number overflows an id can name no theme.
+        if custom_id(v).is_none()
+            && v.strip_prefix("custom-")
+                .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
+        {
+            return Err(SaveError::Validation(format!(
+                "theme {v:?} does not exist; run `naru theme list`"
+            )));
+        }
         if let Some(n) = custom_id(v) {
             match store.get_custom_theme(n) {
                 Ok(_) => {}
@@ -722,6 +731,20 @@ mod tests {
         let store = Store::open(&dir.path().join("t.db")).unwrap();
         let cfg = dir.path().join("config.json");
         (store, cfg, dir)
+    }
+
+    #[test]
+    fn save_appearance_rejects_overflowing_custom_id() {
+        let (store, cfg, _d) = temp();
+        let updates = HashMap::from([(
+            config::THEME.to_string(),
+            Some("custom-99999999999999999999".to_string()),
+        )]);
+        assert!(matches!(
+            save_appearance_in(&store, &cfg, &updates),
+            Err(SaveError::Validation(_))
+        ));
+        assert!(!cfg.exists());
     }
 
     fn is_validation<T: std::fmt::Debug>(r: Result<T>) -> String {

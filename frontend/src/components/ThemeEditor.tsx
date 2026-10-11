@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { deleteTheme, previewTheme, updateTheme } from '../api'
-import { applyTheme, normalizeHex, SLOT_ROWS, warningText } from '../theme'
+import { applyTheme, normalizeHex, setEditorDirty, SLOT_ROWS, warningText } from '../theme'
 import type { ContrastWarning } from '../types/ContrastWarning'
 import type { Theme } from '../types/Theme'
 import type { ThemeSlots } from '../types/ThemeSlots'
@@ -37,6 +37,7 @@ export function ThemeEditor({
   const previewTimer = useRef<number | undefined>(undefined)
   const saveTimer = useRef<number | undefined>(undefined)
   const previewSeq = useRef(0)
+  const inflight = useRef(0)
   const themeRef = useRef(theme)
   const onSavedRef = useRef(onSaved)
   useEffect(() => {
@@ -49,15 +50,27 @@ export function ThemeEditor({
     const patch = pending.current
     if (Object.keys(patch).length === 0) return
     pending.current = {}
+    inflight.current++
+    const settle = () => {
+      inflight.current--
+      if (inflight.current === 0 && Object.keys(pending.current).length === 0) setEditorDirty(false)
+    }
     updateTheme(themeRef.current.id, { slots: patch }).then(
-      (t) => onSavedRef.current(t),
-      (e: unknown) => setError(msg(e)),
+      (t) => {
+        onSavedRef.current(t)
+        settle()
+      },
+      (e: unknown) => {
+        setError(msg(e))
+        settle()
+      },
     )
   }
   // Save what is still pending when the editor goes away.
   useEffect(
     () => () => {
       window.clearTimeout(previewTimer.current)
+      previewSeq.current++
       flush()
     },
     [],
@@ -69,6 +82,7 @@ export function ThemeEditor({
     setSlots(next)
     setError(null)
     pending.current = { ...pending.current, [key]: value }
+    setEditorDirty(true)
     window.clearTimeout(previewTimer.current)
     previewTimer.current = window.setTimeout(() => {
       const seq = ++previewSeq.current
@@ -109,7 +123,9 @@ export function ThemeEditor({
   function remove() {
     window.clearTimeout(previewTimer.current)
     window.clearTimeout(saveTimer.current)
+    previewSeq.current++
     pending.current = {}
+    setEditorDirty(false)
     deleteTheme(theme.id).then(
       (t) => onDeleted(t),
       (e: unknown) => setError(msg(e)),

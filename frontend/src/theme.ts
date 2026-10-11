@@ -186,6 +186,15 @@ export function onThemeChange(fn: () => void): () => void {
   return () => mo.disconnect()
 }
 
+let editorDirty = false
+/** The theme editor has edits not yet saved: the appearance poll must not re-apply the server's theme over its preview. */
+export function setEditorDirty(dirty: boolean): void {
+  editorDirty = dirty
+}
+export function isEditorDirty(): boolean {
+  return editorDirty
+}
+
 /** The editor's nine rows, in display order. */
 export const SLOT_ROWS: readonly { key: keyof ThemeSlots; label: string }[] = [
   { key: 'bg', label: 'Background' },

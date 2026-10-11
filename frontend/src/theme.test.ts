@@ -9,7 +9,9 @@ import {
   customThemeCss,
   THEME_CSS_STORAGE_KEY,
   migrateLegacyTheme,
+  isEditorDirty,
   normalizeHex,
+  setEditorDirty,
   warningText,
   parseSetting,
   resolveTheme,
@@ -208,6 +210,14 @@ describe('editor helpers', () => {
     expect(normalizeHex('#12')).toBeNull()
     expect(normalizeHex('#12345g')).toBeNull()
     expect(normalizeHex('')).toBeNull()
+  })
+
+  it('editor dirty flag round-trips', () => {
+    expect(isEditorDirty()).toBe(false)
+    setEditorDirty(true)
+    expect(isEditorDirty()).toBe(true)
+    setEditorDirty(false)
+    expect(isEditorDirty()).toBe(false)
   })
 
   it('warningText reads as a sentence', () => {
