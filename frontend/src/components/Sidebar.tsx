@@ -217,6 +217,7 @@ export function Sidebar({
   unread,
   collapsed,
   onCollapsedChange,
+  orb,
   dockZone,
   rail,
 }: {
@@ -243,6 +244,9 @@ export function Sidebar({
   // The dock's pieces (mesa task 1574, desktop tiers only): the zone panels
   // dock into above the nav items, the Panels list among them, and what the
   // collapsed nav shows in place of the bare expand handle.
+  // The live orb (naru task 1805): rendered with the collapse handle in a
+  // header that stays pinned above the nav's own scrolling.
+  orb?: ReactNode
   dockZone?: ReactNode
   rail?: ReactNode
 }) {
@@ -564,15 +568,27 @@ export function Sidebar({
         ref={navRef}
         style={{ '--nav-width': `${navWidth}px` } as CSSProperties}
       >
-        <button
-          type="button"
-          className="sidebar-toggle"
-          aria-label="Collapse sidebar"
-          title="Collapse sidebar"
-          onClick={() => setCollapsed(true)}
-        >
-          «
-        </button>
+        {(() => {
+          const toggle = (
+            <button
+              type="button"
+              className="sidebar-toggle"
+              aria-label="Collapse sidebar"
+              title="Collapse sidebar"
+              onClick={() => setCollapsed(true)}
+            >
+              «
+            </button>
+          )
+          return orb ? (
+            <div className="nav-top">
+              {toggle}
+              {orb}
+            </div>
+          ) : (
+            toggle
+          )
+        })()}
         {dockZone}
         {/* The href is the user's remembered CC tab (task 694); the tabs
             themselves live on the page (mesa task 1159). */}

@@ -837,13 +837,9 @@ function App() {
           unread={unread}
           collapsed={navCollapsed}
           onCollapsedChange={setNavCollapsed}
+          orb={docked ? <NavOrb /> : undefined}
           dockZone={
-            docked ? (
-              <>
-                <NavOrb />
-                <NavZone state={dock.state} update={dock.update} locked={locked} />
-              </>
-            ) : undefined
+            docked ? <NavZone state={dock.state} update={dock.update} locked={locked} /> : undefined
           }
           rail={
             docked ? (

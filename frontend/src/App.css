@@ -11730,10 +11730,29 @@ body.dock-resizing .dock-body {
   inset: 0;
 }
 
+/* The collapse handle and the orb, pinned above the nav's scrolling (naru task
+   1805). Sticky inside .sidebar's scroll box; the negative margins undo its
+   padding so it starts at the box edge (sticky `top` is measured from inside
+   that padding, hence -1rem) and never moves, and the solid background hides
+   the links scrolling beneath. */
+.nav-top {
+  position: sticky;
+  top: -1rem;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  flex: none;
+  margin: -1rem -1rem 0;
+  padding: 1rem 1rem 0.75rem;
+  background: var(--bg);
+}
+
 .nav-orb {
   position: relative;
+  /* Never shrunk by the nav's tree (naru task 1805). */
+  flex: none;
   height: 170px;
-  margin: 0.25rem 0 0.75rem;
+  margin: 0.25rem 0 0;
   background: var(--panel);
   border-radius: var(--r-md);
   box-shadow: var(--ring);
