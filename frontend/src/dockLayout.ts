@@ -30,9 +30,9 @@ import {
   type SplitNode,
 } from './lib/paneTree'
 
-export type PanelId = 'main' | 'chat' | 'board' | 'agents' | 'terminal' | 'workflows' | 'orb'
+export type PanelId = 'main' | 'chat' | 'board' | 'agents' | 'terminal' | 'workflows'
 
-export const PANEL_IDS: readonly PanelId[] = ['main', 'chat', 'board', 'agents', 'terminal', 'workflows', 'orb']
+export const PANEL_IDS: readonly PanelId[] = ['main', 'chat', 'board', 'agents', 'terminal', 'workflows']
 
 const LABELS: Record<PanelId, string> = {
   main: 'Main',
@@ -41,7 +41,6 @@ const LABELS: Record<PanelId, string> = {
   agents: 'Agents',
   terminal: 'Terminal',
   workflows: 'Workflows',
-  orb: 'Naru',
 }
 
 export function panelLabel(id: PanelId): string {
@@ -114,10 +113,10 @@ export function inNav(state: DockState, panel: PanelId): boolean {
 }
 
 /** In the nav zone, or the front tab of its group — what the user can see.
- *  A collapsed nav mounts nothing but the orb's rail, so a panel docked in it
- *  is visible only while the nav is expanded (the orb always: the rail shows it). */
+ *  A collapsed nav mounts nothing but its rail, so a panel docked in it
+ *  is visible only while the nav is expanded. */
 export function isVisible(state: DockState, panel: PanelId, navCollapsed = false): boolean {
-  if (inNav(state, panel)) return panel === 'orb' || !navCollapsed
+  if (inNav(state, panel)) return !navCollapsed
   const g = groupOf(state, panel)
   return g !== null && state.groups[g].active === panel
 }
@@ -288,12 +287,12 @@ export function revealLandsInNav(state: DockState, panel: PanelId): boolean {
 }
 
 /** Whether revealing `panel` must expand a collapsed nav: only when it would
- *  otherwise stay hidden there — a non-orb panel docked in the nav, or closed
+ *  otherwise stay hidden there — a panel docked in the nav, or closed
  *  with the nav as its last spot. Any other reveal (a board push, a route
  *  change) leaves the person's collapse alone; once expanded, later reveals
  *  find the panel visible and change nothing. */
 export function revealNeedsNav(state: DockState, panel: PanelId, navCollapsed: boolean): boolean {
-  return navCollapsed && panel !== 'orb' && (inNav(state, panel) || revealLandsInNav(state, panel))
+  return navCollapsed && (inNav(state, panel) || revealLandsInNav(state, panel))
 }
 
 /** Where a dragged panel lands in the nav zone: the index of the first item
@@ -320,7 +319,7 @@ function group(...tabs: PanelId[]): DockGroup {
   return { tabs, active: tabs[0] }
 }
 
-function make(tree: DockRoot, groups: Record<string, DockGroup>, nav: PanelId[] = ['orb']): DockState {
+function make(tree: DockRoot, groups: Record<string, DockGroup>, nav: PanelId[] = []): DockState {
   return { tree, groups, nav, lastSpot: {} }
 }
 
@@ -458,9 +457,9 @@ export function parseState(raw0: unknown): DockState | null {
   for (const id of leaves) if (groups[id] === undefined) tree = removeLeaf(tree, id)
   const inTree = new Set(collectLeafIds(tree))
   for (const gid of Object.keys(groups)) if (!inTree.has(gid)) delete groups[gid]
-  // The nav zone (mesa task 1574). A layout saved before it has no `nav` key
-  // and never heard of the orb: the orb lands at the top of the nav for it.
-  // One that has the key keeps exactly what it says (an empty list = closed).
+  // The nav zone (mesa task 1574). A missing `nav` key is an empty zone. The
+  // orb is no panel any more (naru task 1798): a saved `orb` is an unknown id
+  // and dropped here, wherever it sat (a group tab, the nav list, a lastSpot).
   const nav: PanelId[] = []
   if (Array.isArray(raw.nav)) {
     for (const p of raw.nav) {
@@ -468,8 +467,6 @@ export function parseState(raw0: unknown): DockState | null {
       if (seen.has(p)) return null
       nav.push(p)
     }
-  } else if (!seen.has('orb')) {
-    nav.push('orb')
   }
   // Nothing docked is no layout (a preset takes over) — unless the nav zone
   // holds panels the layout itself named: docking the last group panel into

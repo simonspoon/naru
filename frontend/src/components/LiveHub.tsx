@@ -4,7 +4,7 @@ import { createPortal } from 'react-dom'
 import * as dockHosts from '../lib/dockHosts'
 import { NaruMark } from './NaruMark'
 import { LiveGlow } from './LiveGlow'
-import { InlineOrb, LiveOrb, OrbHeaderControls, OrbPanel } from './LiveOrb'
+import { LiveOrb, OrbHeaderControls, OrbPanel } from './LiveOrb'
 import { LiveBoardPanel, type InkFlatten } from './LiveBoardPanel'
 import {
   claimLiveSpeaker,
@@ -712,8 +712,7 @@ async function openPcmCapture(
 export type LiveDock = {
   chatVisible: boolean
   boardVisible: boolean
-  /** The orb panel is mounted on screen (not parked: a nav panel in a
-   *  collapsed nav, or a background tab), so only then does it render. */
+  /** The nav's orb is on screen (an expanded nav), so only then does it render. */
   orbPanelShown: boolean
   reveal: (panel: 'chat' | 'board' | 'main') => void
   hide: (panel: 'chat' | 'board') => void
@@ -5143,12 +5142,7 @@ export function LiveHub({
           </div>,
           dockHosts.hostFor('chat'),
         )}
-      {dock?.orbPanelShown &&
-        createPortal(
-          <OrbPanel {...orbProps} />,
-          dockHosts.hostFor('orb'),
-        )}
-      {dock && navCollapsed && createPortal(<InlineOrb {...orbProps} size={30} />, dockHosts.hostFor('rail-orb'))}
+      {dock?.orbPanelShown && createPortal(<OrbPanel {...orbProps} />, dockHosts.hostFor('nav-orb'))}
       {dock &&
         createPortal(
           hasBoards || live ? (

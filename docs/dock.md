@@ -13,22 +13,20 @@ or Rust surface.
 | `agents` | `AgentSidebar` with its `docked` prop |
 | `terminal` | the global `TerminalPage` |
 | `workflows` | `WorkflowsPanel`: the workflows of the project the route is on, opened in place (a saved layout naming the old `diagrams` id is renamed on load) |
-| `orb` (labelled **Naru**; the id is unchanged so saved layouts load, mesa task 1579) | the animated mark (`LiveOrb.tsx`'s `OrbPanel`, mesa tasks 1574/1577) filling its panel over a soft state-coloured glow — pure orb, no sphere, ring, words or controls. Its mic / pause / sound icon buttons (the mic red and slashed when muted) live in the page header, left of the usage chips behind a thin divider (`OrbHeaderControls`, rendered by `LiveHub` on the dock tiers), so they work with the panel open, closed or docked in the collapsed nav |
 
-Each panel appears at most once. The phone tier (`usePhoneTier()`) is **not**
+The live orb is **not** a panel (naru task 1798; it was one, `orb`, from mesa
+task 1574): see "The nav's orb" below. Each panel appears at most once. The phone tier (`usePhoneTier()`) is **not**
 docked and keeps its drawers, tab bar and the old live aside unchanged.
 
 ## The nav zone and the rail (mesa task 1574)
 
 `DockState.nav` is an ordered stack of panels docked into the left nav, above
 its links, outside the split tree; a panel is in a group **or** in `nav`.
-Presets put `orb` there, so a fresh layout shows the orb at the top of the nav.
-Each nav item has a grip (drag it out), a label and a close; dropping a dragged
+Presets leave it empty. Each nav item has a grip (drag it out), a label and a close; dropping a dragged
 panel on the zone (`NavZone`, `components/NavDock.tsx`) inserts it where the
 cyan line shows (`dockToNav`); an empty zone takes no room until a drag starts.
 Any panel may be docked there. A panel in a collapsed nav is not mounted, so it
-counts as hidden (`isVisible(state, panel, navCollapsed)`; the orb always shows,
-as the rail's mini orb), and revealing one expands the nav — only then
+counts as hidden (`isVisible(state, panel, navCollapsed)`), and revealing one expands the nav — only then
 (`revealNeedsNav`): a board push or route change on any other panel never
 re-expands a nav the person collapsed.
 
@@ -37,18 +35,25 @@ is the one place that lists panels. It replaces the old top-right chat and
 whiteboard toggles, which are no longer rendered when docked (the phone tier
 keeps them).
 
-Collapsing the nav leaves a slim **rail**: the expand handle, a mini orb (a small
-`InlineOrb` sphere, no controls) that reacts exactly as the orb panel does, a
-separator, the dashboard (⌂) and inbox (✉, with its unread count) links, a
-separator, and one icon per other panel (dotted when open; a click reveals it). Panels docked in a collapsed nav are parked, not shown.
+Collapsing the nav leaves a slim **rail**: the expand handle, the dashboard (⌂)
+and inbox (✉, with its unread count) links, a separator, and one icon per
+panel (dotted when open; a click reveals it). Panels docked in a collapsed nav
+are parked, not shown. The orb is hidden in the rail (no mini variant).
 
-The orb panel's state is not a second copy: `LiveHub` (mounted once, in the
-header) owns the mic level, playback level and indicator state and portals the
-orb panel and the rail's mini orb (`dockHosts` host `rail-orb`) from them, so
-closing Chat, moving the orb or collapsing the nav stops nothing — listening and
-the orb's reaction need no chat panel. On the dock tiers the free-floating orb
-is retired outright, panel open or closed (reopen it from the header `⋯` menu); the
-phone tier, which has no dock, keeps the floating orb.
+## The nav's orb (naru task 1798)
+
+A permanent, fixed element at the top of the expanded nav, under the collapse
+arrow and above the nav links: the animated mark over its state-coloured glow
+(`LiveOrb.tsx`'s `OrbPanel`), with no title bar, grip or close, and no part of
+the dock state — it cannot be moved, closed or listed in the `⋯` menu. Its
+mic / pause / sound buttons stay in the page header (`OrbHeaderControls`).
+`NavOrb` (`components/NavDock.tsx`) is only a mount point for the stable
+`nav-orb` host (`dockHosts`); `LiveHub` (mounted once, in the header) owns the
+mic level, playback level and indicator state and portals the orb into that
+host while the nav is expanded, so closing Chat stops nothing. Collapsing the
+nav unmounts the orb's view (only the host stays stable) and expanding mounts
+it afresh; the state is LiveHub's, so nothing of the conversation restarts. The phone tier has no dock, no nav
+orb, and keeps its floating orb.
 
 ## Gestures
 
@@ -124,9 +129,10 @@ One `localStorage` key, `naru-dock-layouts` = `{v: 2, active, layouts: [{id,
 name, builtin, state}]}`; machine-local. A v1 store (before a built-in could be
 deleted) loads with any missing built-in put back and is rewritten as v2; in v2
 a deleted built-in stays deleted, and an empty store is the default one. A state carries `nav` (the zone's
-panels); a layout saved before task 1574 has no `nav` key and loads with the
-orb at the top of the nav, while an explicit empty `nav` is the orb closed. Parsing is total: unknown panel ids
-are dropped, a panel in two groups (or a group named twice) rejects that
+panels); a layout saved before task 1574 has no `nav` key and loads with an
+empty one. Parsing is total: unknown panel ids are dropped — which is how a
+layout saved while the orb was a panel (`orb` in a group, the nav list or a
+`lastSpot`) loads without it, leaving no duplicate and no empty group — a panel in two groups (or a group named twice) rejects that
 layout, and a layout with nothing docked falls back to its preset (a built-in)
 or is dropped (a user one) — never an empty layout. (So a user layout with
 every panel closed is dropped on the next reload; one whose only docked panels

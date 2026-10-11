@@ -14,9 +14,9 @@ import type { PanelId } from '../dockLayout'
 // A panel with no slot (closed, or a background tab) is parked in a hidden div
 // rather than detached, so its content keeps a parent either way.
 
-// `rail-orb` is not a panel: it is the second view of the orb the collapsed
-// nav's rail shows (mesa task 1574), hosted the same way.
-export type HostId = PanelId | 'rail-orb'
+// `nav-orb` is not a panel: it is the permanent orb at the top of the
+// expanded nav (naru task 1798), hosted the same way.
+export type HostId = PanelId | 'nav-orb'
 
 const hosts = new Map<HostId, HTMLDivElement>()
 let parkEl: HTMLDivElement | null = null

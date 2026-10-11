@@ -110,11 +110,23 @@ const RAIL_GLYPH: Record<PanelId, string> = {
   agents: '◎',
   terminal: '›_',
   workflows: '◇',
-  orb: '●',
 }
 
-/** The collapsed nav: the expand handle, a mini orb (the orb's second view,
- *  hosted by LiveHub, so it reacts exactly as the orb panel does), icons for the
+/** The permanent orb at the top of the expanded nav (naru task 1798): no panel
+ *  chrome, not dockable. Only a mount point: LiveHub portals the orb into the
+ *  stable `nav-orb` host, so collapsing or expanding the nav never remounts it. */
+export function NavOrb() {
+  const ref = useRef<HTMLDivElement>(null)
+  useLayoutEffect(() => {
+    const slot = ref.current
+    if (slot === null) return
+    dockHosts.attach('nav-orb', slot)
+    return () => dockHosts.release('nav-orb', slot)
+  }, [])
+  return <div className="nav-orb" ref={ref} />
+}
+
+/** The collapsed nav: the expand handle (the orb is hidden here), icons for the
  *  two nav links that matter most (the dashboard, the inbox with its unread
  *  count) and one small icon per other panel, dotted when open. */
 export function NavRail({
@@ -130,13 +142,6 @@ export function NavRail({
   onReveal: (p: PanelId) => void
   onExpand: () => void
 }) {
-  const miniRef = useRef<HTMLDivElement>(null)
-  useLayoutEffect(() => {
-    const slot = miniRef.current
-    if (slot === null) return
-    dockHosts.attach('rail-orb', slot)
-    return () => dockHosts.release('rail-orb', slot)
-  }, [])
   return (
     <>
       <button
@@ -149,8 +154,6 @@ export function NavRail({
         »
       </button>
       <div className="nav-rail">
-        <div className="nav-rail-orb" ref={miniRef} />
-        <div className="nav-rail-sep" />
         <a className="nav-rail-icon" href={ccHref()} aria-label="CC Dashboard" title="CC Dashboard">
           ⌂
         </a>
@@ -159,20 +162,18 @@ export function NavRail({
           {unread > 0 && <span className="nav-rail-badge">{unread}</span>}
         </a>
         <div className="nav-rail-sep" />
-        {panelEntries(state, navCollapsed)
-          .filter((e) => e.id !== 'orb')
-          .map((e) => (
-            <button
-              key={e.id}
-              type="button"
-              className={`nav-rail-icon${e.open ? ' open' : ''}`}
-              aria-label={`${e.open ? 'Show' : 'Open'} ${e.label}`}
-              title={`${e.label}${e.open ? '' : ' (closed)'}`}
-              onClick={() => onReveal(e.id)}
-            >
-              {RAIL_GLYPH[e.id]}
-            </button>
-          ))}
+        {panelEntries(state, navCollapsed).map((e) => (
+          <button
+            key={e.id}
+            type="button"
+            className={`nav-rail-icon${e.open ? ' open' : ''}`}
+            aria-label={`${e.open ? 'Show' : 'Open'} ${e.label}`}
+            title={`${e.label}${e.open ? '' : ' (closed)'}`}
+            onClick={() => onReveal(e.id)}
+          >
+            {RAIL_GLYPH[e.id]}
+          </button>
+        ))}
       </div>
     </>
   )

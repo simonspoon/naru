@@ -10567,9 +10567,6 @@ body.live-panel-ratio-resizing .live-panel-divider {
 .orb-panel.can-help {
   cursor: pointer;
 }
-.live-orb-inline.can-help {
-  pointer-events: auto;
-}
 .live-orb.can-help .live-orb-body {
   opacity: 1;
   cursor: pointer;
@@ -11638,8 +11635,8 @@ body.dock-resizing .dock-body {
   color: var(--cyan);
 }
 
-/* The nav as a dock zone, the Panels list, the rail and the orb panel (mesa
-   task 1574, docs/dock.md). Desktop tiers only: the phone tier never renders
+/* The nav as a dock zone, the rail and the nav's orb (mesa task 1574, naru
+   task 1798, docs/dock.md). Desktop tiers only: the phone tier never renders
    any of these. */
 .nav-dock {
   display: flex;
@@ -11699,10 +11696,6 @@ body.dock-resizing .dock-body {
   height: 230px;
 }
 
-.nav-dock-item[data-panel='orb'] .nav-dock-body {
-  height: 170px;
-}
-
 .nav-dock-line {
   position: absolute;
   left: 0;
@@ -11726,7 +11719,7 @@ body.dock-resizing .dock-body {
   border-radius: var(--r-md);
 }
 
-/* The collapsed nav as a rail: expand handle, mini orb, one icon per panel. */
+/* The collapsed nav as a rail: expand handle, links, one icon per panel. */
 .sidebar.collapsed.has-rail {
   align-items: center;
   padding: 0.5rem 0.4rem;
@@ -11740,19 +11733,21 @@ body.dock-resizing .dock-body {
   margin-top: 0.4rem;
 }
 
-.nav-rail-orb {
-  width: 36px;
-  height: 36px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+/* The permanent orb at the top of the expanded nav (naru task 1798): the old
+   orb panel's body (170px, card look), without any panel chrome. */
+.nav-orb > .dock-host {
+  position: absolute;
+  inset: 0;
 }
 
-.nav-rail-orb > .dock-host {
-  flex: 1;
-  min-width: 0;
-  align-items: center;
-  justify-content: center;
+.nav-orb {
+  position: relative;
+  height: 170px;
+  margin: 0.25rem 0 0.75rem;
+  background: var(--panel);
+  border-radius: var(--r-md);
+  box-shadow: var(--ring);
+  overflow: hidden;
 }
 
 .sidebar .nav-rail-icon {
@@ -11812,7 +11807,7 @@ body.dock-resizing .dock-body {
   box-shadow: 0 0 6px var(--cyan);
 }
 
-/* The orb panel (mesa task 1577): the animated mark filling the panel over a
+/* The nav's orb (mesa task 1577, naru task 1798): the animated mark filling its box over a
    soft glow. Its mic / pause / sound buttons moved to the header (task 1579). No sphere, ring or
    words. The mark's box is a square from container units: height-bound in a
    short wide panel, width-bound in a tall narrow one. */
@@ -11904,19 +11899,6 @@ body.dock-resizing .dock-body {
 
 .header-orb-btn:disabled {
   opacity: 0.4;
-  cursor: default;
-}
-
-.live-orb.live-orb-inline {
-  position: relative;
-  z-index: auto;
-  flex: none;
-  transition:
-    box-shadow 0.4s ease,
-    opacity 0.4s ease;
-}
-
-.live-orb-inline .live-orb-body {
   cursor: default;
 }
 

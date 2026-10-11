@@ -70,12 +70,9 @@ describe('presets', () => {
 })
 
 describe('nav zone', () => {
-  it('presets dock the orb at the top of the nav', () => {
-    for (const p of Object.values(PRESETS)) {
-      const s = p.make()
-      expect(s.nav).toEqual(['orb'])
-      expect(isVisible(s, 'orb')).toBe(true)
-    }
+  it('presets leave the nav zone empty (the orb is no panel)', () => {
+    for (const p of Object.values(PRESETS)) expect(p.make().nav).toEqual([])
+    expect(PANEL_IDS).not.toContain('orb')
   })
   it('moves a panel out of its group into the nav and back', () => {
     const into = dockToNav(talk(), 'chat')
@@ -89,31 +86,15 @@ describe('nav zone', () => {
     expect(groupOf(out, 'chat')).not.toBeNull()
   })
   it('reorders within the zone', () => {
-    let s = dockToNav(talk(), 'chat')
+    let s = dockToNav(dockToNav(talk(), 'agents'), 'chat')
+    expect(s.nav).toEqual(['agents', 'chat'])
     s = dockToNav(s, 'chat', 0)
-    expect(s.nav).toEqual(['chat', 'orb'])
+    expect(s.nav).toEqual(['chat', 'agents'])
     s = dockToNav(s, 'chat')
-    expect(s.nav).toEqual(['orb', 'chat'])
+    expect(s.nav).toEqual(['agents', 'chat'])
     // Dropped below itself: the index is the list the person saw.
-    expect(dockToNav(s, 'orb', 2).nav).toEqual(['chat', 'orb'])
-    expect(dockToNav(s, 'orb', 1).nav).toEqual(['orb', 'chat'])
-  })
-  it('closes and reopens the orb into the nav', () => {
-    const closed = closePanel(talk(), 'orb')
-    expect(closed.nav).toEqual([])
-    expect(closedPanels(closed)).toContain('orb')
-    const back = revealPanel(closed, 'orb')
-    expect(back.nav).toEqual(['orb'])
-    expect(revealPanel(back, 'orb')).toBe(back)
-  })
-  it('an orb dragged into a group reopens in the nav only if it left the nav closed', () => {
-    const s = dropPanel(talk(), 'orb', 'g-main', 'bottom')
-    consistent(s)
-    expect(inNav(s, 'orb')).toBe(false)
-    const closed = closePanel(s, 'orb')
-    expect(revealPanel(closed, 'orb').nav).toEqual([])
-    const fromNav = revealPanel(closePanel(dockToNav(talk(), 'orb', 0), 'orb'), 'orb')
-    expect(fromNav.nav).toEqual(['orb'])
+    expect(dockToNav(s, 'agents', 2).nav).toEqual(['chat', 'agents'])
+    expect(dockToNav(s, 'agents', 1).nav).toEqual(['agents', 'chat'])
   })
   it('a reveal lands in the nav only for a closed panel whose last spot is the nav', () => {
     const s = dockToNav(talk(), 'chat')
@@ -131,15 +112,12 @@ describe('nav zone', () => {
     expect(revealNeedsNav(s, 'board', true)).toBe(false)
     expect(revealNeedsNav(s, 'main', true)).toBe(false)
     expect(revealNeedsNav(closePanel(talk(), 'board'), 'board', true)).toBe(false)
-    // The orb's rail is always shown.
-    expect(revealNeedsNav(talk(), 'orb', true)).toBe(false)
   })
-  it('a panel in a collapsed nav is not visible, except the orb', () => {
+  it('a panel in a collapsed nav is not visible', () => {
     const s = dockToNav(talk(), 'chat')
     expect(isVisible(s, 'chat')).toBe(true)
     expect(isVisible(s, 'chat', false)).toBe(true)
     expect(isVisible(s, 'chat', true)).toBe(false)
-    expect(isVisible(s, 'orb', true)).toBe(true)
     expect(isVisible(s, 'main', true)).toBe(true)
     expect(panelEntries(s, true).find((e) => e.id === 'chat')?.open).toBe(false)
   })
@@ -150,7 +128,7 @@ describe('nav zone', () => {
     expect(Object.keys(s.groups)).toHaveLength(0)
     const back = parseState(JSON.parse(JSON.stringify(s)))
     expect(back).not.toBeNull()
-    expect(back!.nav).toEqual(['orb', 'main', 'chat', 'board', 'agents', 'terminal'])
+    expect(back!.nav).toEqual(['main', 'chat', 'board', 'agents', 'terminal'])
     // The same emptiness with nothing in the nav is still no layout.
     const raw = JSON.parse(JSON.stringify(s))
     raw.nav = []
@@ -171,20 +149,40 @@ describe('nav zone', () => {
     const e = panelEntries(talk())
     expect(e.map((x) => x.id)).toEqual([...PANEL_IDS])
     const by = Object.fromEntries(e.map((x) => [x.id, x]))
-    expect(by.orb).toMatchObject({ where: 'nav', open: true })
     expect(by.chat).toMatchObject({ where: 'dock', open: true })
     expect(by.terminal).toMatchObject({ where: 'dock', open: false })
     expect(by.workflows).toMatchObject({ where: 'closed', open: false })
   })
-  it('a layout saved before the nav zone loads, with the orb at the top of the nav', () => {
+  it('a layout saved before the nav zone has an empty nav', () => {
     const raw = JSON.parse(JSON.stringify(talk()))
     delete raw.nav
     const s = parseState(raw)!
     consistent(s)
-    expect(s.nav).toEqual(['orb'])
-    // An explicit empty nav is the orb closed, kept.
-    raw.nav = []
-    expect(parseState(raw)!.nav).toEqual([])
+    expect(s.nav).toEqual([])
+  })
+  it('a saved layout holding the retired orb panel loads without it (naru task 1798)', () => {
+    // As the previous build saved it: orb in the nav, in a group, and a lastSpot.
+    const inNavRaw = JSON.parse(JSON.stringify(dockToNav(talk(), 'chat')))
+    inNavRaw.nav = ['orb', 'chat']
+    const a = parseState(inNavRaw)!
+    consistent(a)
+    expect(a.nav).toEqual(['chat'])
+
+    const grouped = JSON.parse(JSON.stringify(talk()))
+    grouped.groups['g-orb'] = { tabs: ['orb'], active: 'orb' }
+    grouped.groups['g-main'].tabs.push('orb')
+    grouped.lastSpot = { orb: { nav: true }, chat: { anchor: 'orb', edge: 'left' } }
+    const b = parseState(grouped)!
+    consistent(b)
+    expect(JSON.stringify(b)).not.toContain('orb')
+
+    // Through the whole store: every layout of the old shape loses it.
+    const old = JSON.parse(JSON.stringify(defaultStore()))
+    for (const l of old.layouts) l.state.nav = ['orb']
+    for (const l of parseStore(old).layouts) {
+      expect(l.state.nav).toEqual([])
+      expect(JSON.stringify(l.state)).not.toContain('orb')
+    }
   })
   it('a layout saved with the Diagrams panel keeps it as Workflows, wherever it sat', () => {
     const grouped = dropPanel(talk(), 'workflows', 'g-board', 'top')

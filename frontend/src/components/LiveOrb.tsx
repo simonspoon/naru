@@ -142,7 +142,7 @@ function loadPlacement(): Placement {
 }
 
 /** What an orb shows and the three presses its pie offers — the hub's own
- *  state and handlers, so every orb (floating, docked panel, rail) agrees. */
+ *  state and handlers, so every orb (floating, nav) agrees. */
 export type OrbProps = {
   state: LiveIndicator | null
   level: number
@@ -247,31 +247,7 @@ function orbClasses(state: LiveIndicator | null, mute: ReturnType<typeof muteIco
 }
 
 /**
- * The rail's mini orb (mesa task 1574, docs/dock.md): the floating orb's sphere,
- * in flow, scaled to `size` px, that only reacts — no pie, no dragging.
- */
-export function InlineOrb({ size, ...p }: OrbProps & { size: number }) {
-  const mute = muteIcon(p.micAvailable && p.micMuted, p.speechMuted)
-  const k = size / ORB_SIZE
-  return (
-    <div
-      className={`live-orb live-orb-inline ${orbClasses(p.state, mute)}${p.offer ? ' can-help' : ''}`}
-      {...offerButton(p.offer)}
-      // The box keeps the 116px geometry; `scale` shrinks it, and the negative
-      // margin gives back the layout space it no longer takes.
-      style={{ width: ORB_SIZE, height: ORB_SIZE, scale: k, margin: -((ORB_SIZE - size) / 2) }}
-    >
-      <div className="live-orb-body">
-        <div className="live-orb-mark">
-          <NaruMark state={p.state} level={p.level} speechRms={p.speechRms} decorative offer={!!p.offer} />
-        </div>
-      </div>
-    </div>
-  )
-}
-
-/**
- * The `orb` dock panel's body (mesa task 1577): the animated mark filling the
+ * The nav's orb (mesa task 1577, naru task 1798): the animated mark filling the
  * panel over a soft glow in the state's colour — no sphere, no ring, no words,
  * no controls (those are `OrbHeaderControls`, in the page header).
  * The mark's box is a square fitted by container units, so it takes the height

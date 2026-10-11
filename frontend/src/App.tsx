@@ -7,8 +7,8 @@ import { CommandPalette } from './components/CommandPalette'
 import { WorkflowsPanel } from './components/WorkflowsPanel'
 import { DockBar, DockLayout } from './components/DockLayout'
 import { useDockStore } from './useDockStore'
-import { inNav, isVisible, revealNeedsNav, type PanelId } from './dockLayout'
-import { NavRail, NavZone } from './components/NavDock'
+import { isVisible, revealNeedsNav, type PanelId } from './dockLayout'
+import { NavOrb, NavRail, NavZone } from './components/NavDock'
 import { hostFor } from './lib/dockHosts'
 import { DoneToasts } from './components/DoneToasts'
 import { PhoneTabBar } from './components/PhoneTabBar'
@@ -225,9 +225,9 @@ function App() {
   const terminalVisible = isVisible(dock.state, 'terminal', navCollapsed)
   const chatVisible = isVisible(dock.state, 'chat', navCollapsed)
   const boardVisible = isVisible(dock.state, 'board', navCollapsed)
-  // The orb panel itself is shown only in an expanded nav (the rail's mini orb
-  // is the other view), or as the front tab of a group.
-  const orbPanelShown = inNav(dock.state, 'orb') ? !navCollapsed : isVisible(dock.state, 'orb')
+  // The nav's permanent orb (naru task 1798) shows in an expanded nav on the
+  // dock tiers only; the phone tier keeps its floating orb.
+  const orbPanelShown = docked && !navCollapsed
   // Revealing a panel that would stay hidden in a collapsed nav expands it —
   // and only then (`revealNeedsNav`), so a board push or a route change never
   // re-expands a nav the person collapsed. The refs are the latest dock state
@@ -837,7 +837,14 @@ function App() {
           unread={unread}
           collapsed={navCollapsed}
           onCollapsedChange={setNavCollapsed}
-          dockZone={docked ? <NavZone state={dock.state} update={dock.update} locked={locked} /> : undefined}
+          dockZone={
+            docked ? (
+              <>
+                <NavOrb />
+                <NavZone state={dock.state} update={dock.update} locked={locked} />
+              </>
+            ) : undefined
+          }
           rail={
             docked ? (
               <NavRail state={dock.state} navCollapsed={navCollapsed} unread={unread} onReveal={reveal} onExpand={() => setNavCollapsed(false)} />

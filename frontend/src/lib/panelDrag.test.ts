@@ -27,7 +27,7 @@ describe('panelDrag', () => {
   })
 
   it('a drag that ends inside the tick never raises the shield', () => {
-    beginPanelDrag(fakeDrag().e, 'orb')
+    beginPanelDrag(fakeDrag().e, 'terminal')
     endPanelDrag()
     vi.advanceTimersByTime(10)
     expect(currentPanelDrag()).toBeNull()
