@@ -11155,7 +11155,14 @@ async fn get_config_appearance(
     headers: HeaderMap,
 ) -> ApiResult<Response> {
     require_agent_access(&state, &addr, &headers)?;
-    match config::appearance() {
+    let result = {
+        let store = match state.store.lock() {
+            Ok(s) => s,
+            Err(e) => e.into_inner(),
+        };
+        crate::core::theme::appearance(&store)
+    };
+    match result {
         Ok(appearance) => Ok(Json(appearance).into_response()),
         Err(message) => Err(ApiError {
             status: StatusCode::BAD_GATEWAY,
@@ -11185,7 +11192,14 @@ async fn update_config_appearance(
     if let Some(value) = body.theme {
         updates.insert(config::THEME.to_string(), value);
     }
-    config::save_appearance(&updates).map_err(|e| match e {
+    let saved = {
+        let store = match state.store.lock() {
+            Ok(s) => s,
+            Err(e) => e.into_inner(),
+        };
+        crate::core::theme::save_appearance(&store, &updates)
+    };
+    saved.map_err(|e| match e {
         config::SaveError::Validation(message) => ApiError {
             status: StatusCode::UNPROCESSABLE_ENTITY,
             code: "validation",

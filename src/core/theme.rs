@@ -2,10 +2,12 @@
 //! CSS variable is derived here. Derivation and the WCAG contrast check live
 //! only in this file; the frontend never re-derives. Pure: no store, no I/O.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::path::Path;
 
-use super::store::{Error, Result};
-use super::types::{ContrastWarning, Theme, ThemePreview, ThemeSlots};
+use super::config::{self, SaveError};
+use super::store::{CustomThemeRow, CustomThemeSlotsPatch, Error, Result, Store};
+use super::types::{ConfigAppearance, ContrastWarning, Theme, ThemePreview, ThemeSlots};
 
 /// A built-in theme: id, label and its nine slots.
 pub struct BuiltinTheme {
@@ -338,6 +340,231 @@ impl Theme {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Service (naru task 1842): themes by id or name over the store and config
+// ---------------------------------------------------------------------------
+
+fn custom_id(arg: &str) -> Option<i64> {
+    let d = arg.strip_prefix("custom-")?;
+    if d.is_empty() || !d.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    d.parse().ok()
+}
+
+fn custom_theme(row: CustomThemeRow) -> Result<Theme> {
+    Theme::from_slots(
+        &format!("custom-{}", row.id),
+        &row.name,
+        false,
+        &row.slots,
+        Some(row.created_at),
+        Some(row.updated_at),
+    )
+}
+
+fn not_found(arg: &str) -> Error {
+    Error::NotFound(format!(
+        "no theme {arg:?}; run `naru theme list` to see the ids and names"
+    ))
+}
+
+fn read_only(id: &str) -> Error {
+    Error::Validation(format!(
+        "{id} is a built-in theme and read-only; copy it with `naru theme create --from {id}`"
+    ))
+}
+
+fn save_err(e: SaveError) -> Error {
+    match e {
+        SaveError::Validation(m) => Error::Validation(m),
+        SaveError::Unavailable(m) => Error::Unavailable(m),
+    }
+}
+
+/// Every theme: built-ins in table order, then custom ones by id.
+pub fn list(store: &Store) -> Result<Vec<Theme>> {
+    let mut out: Vec<Theme> = BUILTIN_THEMES
+        .iter()
+        .filter_map(|b| Theme::builtin(b.id))
+        .collect();
+    for row in store.list_custom_themes()? {
+        out.push(custom_theme(row)?);
+    }
+    Ok(out)
+}
+
+/// Resolve a built-in id, a `custom-<n>` id, else a name (case-insensitive
+/// exact, built-in labels included).
+pub fn show(store: &Store, arg: &str) -> Result<Theme> {
+    let arg = arg.trim();
+    if let Some(t) = Theme::builtin(arg) {
+        return Ok(t);
+    }
+    if let Some(n) = custom_id(arg) {
+        return match store.get_custom_theme(n) {
+            Ok(row) => custom_theme(row),
+            Err(Error::NotFound(_)) => Err(not_found(arg)),
+            Err(e) => Err(e),
+        };
+    }
+    let lower = arg.to_lowercase();
+    if let Some(b) = BUILTIN_THEMES
+        .iter()
+        .find(|b| b.label.to_lowercase() == lower)
+    {
+        return Theme::builtin(b.id).ok_or_else(|| not_found(arg));
+    }
+    match store.find_custom_theme_by_name(arg)? {
+        Some(row) => custom_theme(row),
+        None => Err(not_found(arg)),
+    }
+}
+
+/// Copy a theme's slots into a new custom theme. The default name is
+/// `<source name> copy`, then `copy 2`, `copy 3`...
+pub fn create_from(store: &mut Store, from_arg: &str, name: Option<&str>) -> Result<Theme> {
+    let src = show(store, from_arg)?;
+    let name = match name {
+        Some(n) => n.to_string(),
+        None => {
+            let base = format!("{} copy", src.name);
+            let mut candidate = base.clone();
+            let mut n = 2;
+            while store.find_custom_theme_by_name(&candidate)?.is_some() {
+                candidate = format!("{base} {n}");
+                n += 1;
+            }
+            candidate
+        }
+    };
+    custom_theme(store.create_custom_theme(&name, &src.slots)?)
+}
+
+/// The custom theme `arg` names, or the read-only error for a built-in.
+fn editable(store: &Store, arg: &str) -> Result<(i64, Theme)> {
+    let t = show(store, arg)?;
+    if t.builtin {
+        return Err(read_only(&t.id));
+    }
+    let id = custom_id(&t.id).ok_or_else(|| not_found(arg))?;
+    Ok((id, t))
+}
+
+pub fn set_slot(store: &mut Store, arg: &str, slot: &str, colour: &str) -> Result<Theme> {
+    let (id, _) = editable(store, arg)?;
+    let c = Some(colour.to_string());
+    let mut patch = CustomThemeSlotsPatch::default();
+    match slot {
+        "bg" => patch.bg = c,
+        "panel" => patch.panel = c,
+        "text" => patch.text = c,
+        "muted" => patch.muted = c,
+        "accent" => patch.accent = c,
+        "accent2" => patch.accent2 = c,
+        "good" => patch.good = c,
+        "warn" => patch.warn = c,
+        "bad" => patch.bad = c,
+        _ => {
+            return Err(Error::Validation(format!(
+                "unknown slot {slot:?}; the slots are {}",
+                SLOT_NAMES.join(", ")
+            )));
+        }
+    }
+    custom_theme(store.update_custom_theme(id, None, &patch)?)
+}
+
+pub fn rename(store: &mut Store, arg: &str, name: &str) -> Result<Theme> {
+    let (id, _) = editable(store, arg)?;
+    custom_theme(store.update_custom_theme(id, Some(name), &CustomThemeSlotsPatch::default())?)
+}
+
+/// Delete a custom theme; if it is the saved appearance, the setting falls
+/// back to `system`.
+pub fn delete(store: &mut Store, arg: &str) -> Result<Theme> {
+    delete_in(store, &config::config_file(), arg)
+}
+
+pub fn delete_in(store: &mut Store, path: &Path, arg: &str) -> Result<Theme> {
+    let (id, theme) = editable(store, arg)?;
+    store.delete_custom_theme(id)?;
+    let saved = config::appearance_in(path).map_err(Error::Unavailable)?;
+    if saved.theme.as_deref() == Some(theme.id.as_str()) {
+        let clear = HashMap::from([(config::THEME.to_string(), None)]);
+        config::save_appearance_in(path, &clear).map_err(save_err)?;
+    }
+    Ok(theme)
+}
+
+/// Make `arg` (`system`, a built-in or a custom theme) the saved appearance;
+/// returns the setting written.
+pub fn use_theme(store: &Store, arg: &str) -> Result<String> {
+    use_theme_in(store, &config::config_file(), arg)
+}
+
+pub fn use_theme_in(store: &Store, path: &Path, arg: &str) -> Result<String> {
+    let arg = arg.trim();
+    let setting = if arg.eq_ignore_ascii_case("system") {
+        "system".to_string()
+    } else {
+        // An unknown theme here is a bad setting, not a missing record.
+        match show(store, arg) {
+            Ok(t) => t.id,
+            Err(Error::NotFound(m)) => return Err(Error::Validation(m)),
+            Err(e) => return Err(e),
+        }
+    };
+    let updates = HashMap::from([(config::THEME.to_string(), Some(setting.clone()))]);
+    save_appearance_in(store, path, &updates).map_err(save_err)?;
+    Ok(setting)
+}
+
+/// `config::save_appearance` plus the existence check for a `custom-<n>` id.
+pub fn save_appearance(
+    store: &Store,
+    updates: &HashMap<String, Option<String>>,
+) -> std::result::Result<(), SaveError> {
+    save_appearance_in(store, &config::config_file(), updates)
+}
+
+pub fn save_appearance_in(
+    store: &Store,
+    path: &Path,
+    updates: &HashMap<String, Option<String>>,
+) -> std::result::Result<(), SaveError> {
+    if let Some(Some(v)) = updates.get(config::THEME) {
+        let v = v.trim();
+        if let Some(n) = custom_id(v) {
+            match store.get_custom_theme(n) {
+                Ok(_) => {}
+                Err(Error::NotFound(_)) => {
+                    return Err(SaveError::Validation(format!(
+                        "theme {v:?} does not exist; run `naru theme list`"
+                    )));
+                }
+                Err(e) => return Err(SaveError::Unavailable(e.to_string())),
+            }
+        }
+    }
+    config::save_appearance_in(path, updates)
+}
+
+/// The appearance settings with the active custom theme filled in.
+pub fn appearance(store: &Store) -> std::result::Result<ConfigAppearance, String> {
+    appearance_in(store, &config::config_file())
+}
+
+pub fn appearance_in(store: &Store, path: &Path) -> std::result::Result<ConfigAppearance, String> {
+    let mut a = config::appearance_in(path)?;
+    if let Some(n) = a.theme.as_deref().and_then(custom_id)
+        && let Ok(row) = store.get_custom_theme(n)
+    {
+        a.custom = custom_theme(row).ok();
+    }
+    Ok(a)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -474,5 +701,91 @@ mod tests {
         let t = Theme::builtin("crimson").unwrap();
         assert!(t.builtin && t.scheme == "dark" && t.name == "Crimson");
         assert!(Theme::builtin("custom-1").is_none());
+    }
+
+    // ---- service (naru task 1842) ----
+
+    fn temp() -> (Store, std::path::PathBuf, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db")).unwrap();
+        let cfg = dir.path().join("config.json");
+        (store, cfg, dir)
+    }
+
+    fn is_validation<T: std::fmt::Debug>(r: Result<T>) -> String {
+        match r {
+            Err(Error::Validation(m)) => m,
+            other => panic!("expected validation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_from_names_and_copies_slots() {
+        let (mut store, _cfg, _d) = temp();
+        let a = create_from(&mut store, "crimson", None).unwrap();
+        assert_eq!(a.name, "Crimson copy");
+        assert_eq!(a.slots, Theme::builtin("crimson").unwrap().slots);
+        assert!(!a.builtin && a.id.starts_with("custom-"));
+        let b = create_from(&mut store, "crimson", None).unwrap();
+        assert_eq!(b.name, "Crimson copy 2");
+        let c = create_from(&mut store, "crimson copy", Some("Third")).unwrap();
+        assert_eq!(c.name, "Third");
+        assert_eq!(c.slots, a.slots);
+        assert_eq!(show(&store, &a.id).unwrap().id, a.id);
+        assert_eq!(list(&store).unwrap().len(), 4 + 3);
+        assert!(matches!(show(&store, "nope"), Err(Error::NotFound(_))));
+        assert!(matches!(
+            show(&store, "custom-999"),
+            Err(Error::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn builtins_are_read_only_and_slots_validated() {
+        let (mut store, _cfg, _d) = temp();
+        for e in [
+            is_validation(set_slot(&mut store, "crimson", "bg", "#000000")),
+            is_validation(rename(&mut store, "crimson", "x")),
+            is_validation(delete(&mut store, "crimson")),
+        ] {
+            assert!(e.contains("naru theme create --from crimson"), "{e}");
+        }
+        let t = create_from(&mut store, "dark", None).unwrap();
+        let e = is_validation(set_slot(&mut store, &t.id, "nope", "#000000"));
+        assert!(e.contains("accent2"), "{e}");
+        is_validation(set_slot(&mut store, &t.id, "bg", "red"));
+        let u = set_slot(&mut store, &t.id, "bg", "#ABC").unwrap();
+        assert_eq!(u.slots.bg, "#aabbcc");
+        assert_eq!(
+            rename(&mut store, &t.id, "Renamed").unwrap().name,
+            "Renamed"
+        );
+    }
+
+    #[test]
+    fn use_and_delete_drive_the_saved_appearance() {
+        let (mut store, cfg, _d) = temp();
+        let t = create_from(&mut store, "light", None).unwrap();
+        assert_eq!(use_theme_in(&store, &cfg, &t.id).unwrap(), t.id);
+        let a = appearance_in(&store, &cfg).unwrap();
+        assert_eq!(a.theme.as_deref(), Some(t.id.as_str()));
+        assert_eq!(a.custom.unwrap().id, t.id);
+
+        let before = std::fs::read(&cfg).unwrap();
+        is_validation(use_theme_in(&store, &cfg, "custom-999"));
+        assert_eq!(std::fs::read(&cfg).unwrap(), before);
+
+        assert_eq!(delete_in(&mut store, &cfg, &t.id).unwrap().id, t.id);
+        let a = appearance_in(&store, &cfg).unwrap();
+        assert_eq!(a.theme, None);
+        assert!(a.custom.is_none());
+
+        assert_eq!(use_theme_in(&store, &cfg, "system").unwrap(), "system");
+        assert_eq!(use_theme_in(&store, &cfg, "Crimson").unwrap(), "crimson");
+        // A dangling id reads back verbatim with no custom theme.
+        std::fs::write(&cfg, r#"{"appearance": {"theme": "custom-7"}}"#).unwrap();
+        let a = appearance_in(&store, &cfg).unwrap();
+        assert_eq!(a.theme.as_deref(), Some("custom-7"));
+        assert!(a.custom.is_none());
     }
 }

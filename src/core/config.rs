@@ -3271,7 +3271,7 @@ pub fn appearance() -> Result<ConfigAppearance, String> {
     appearance_in(&config_file())
 }
 
-fn appearance_in(path: &Path) -> Result<ConfigAppearance, String> {
+pub(crate) fn appearance_in(path: &Path) -> Result<ConfigAppearance, String> {
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
@@ -3292,6 +3292,7 @@ fn appearance_in(path: &Path) -> Result<ConfigAppearance, String> {
             .filter(|v| !v.is_empty())
             .map(|v| if v == "red" { "crimson".to_string() } else { v }),
         theme_default: DEFAULT_THEME.to_string(),
+        custom: None,
     })
 }
 
@@ -3303,7 +3304,7 @@ pub fn save_appearance(updates: &HashMap<String, Option<String>>) -> Result<(), 
     save_appearance_in(&config_file(), updates)
 }
 
-fn save_appearance_in(
+pub(crate) fn save_appearance_in(
     path: &Path,
     updates: &HashMap<String, Option<String>>,
 ) -> Result<(), SaveError> {
@@ -3321,7 +3322,14 @@ fn save_appearance_in(
         if let Some(value) = updates[*key].as_deref().map(str::trim)
             && !value.is_empty()
         {
-            validate_word(key, value, APPEARANCE_THEMES).map_err(SaveError::Validation)?;
+            // A custom id is checked for syntax only; `core::theme` checks
+            // that the theme exists.
+            let custom = value
+                .strip_prefix("custom-")
+                .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()));
+            if !custom {
+                validate_word(key, value, APPEARANCE_THEMES).map_err(SaveError::Validation)?;
+            }
         }
     }
 

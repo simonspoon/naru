@@ -757,10 +757,14 @@ pub struct AudioTestResult {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../frontend/src/types/")]
 pub struct ConfigAppearance {
-    /// `"system"`, a theme id (`dark`, `light`, `contrast`, `crimson`), or `null`.
+    /// `"system"`, a theme id (`dark`, `light`, `contrast`, `crimson`, `custom-<n>`), or `null`.
     pub theme: Option<String>,
     /// The built-in setting (`"system"`).
     pub theme_default: String,
+    /// The active custom theme with its derived vars when `theme` is an
+    /// existing `custom-<n>` id; `null` otherwise (a dangling id reads back
+    /// verbatim and the page treats it as `system`).
+    pub custom: Option<Theme>,
 }
 
 /// The live-conversation settings as the Settings page sees them
