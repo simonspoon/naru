@@ -7211,10 +7211,10 @@ struct LibraryUpdate {
 #[derive(Deserialize)]
 struct LibraryForkBody {
     body: String,
-    /// The fork's `export_command` (mesa task 1139) — a built-in carries none,
-    /// so this is the first chance to set it.
+    /// The fork's `export_command` (mesa task 1139). Absent means the
+    /// built-in's own flag, so forking `execute-todo` keeps its command path.
     #[serde(default)]
-    export_command: bool,
+    export_command: Option<bool>,
 }
 
 /// `POST /api/library/{id}/builtin` (mesa task 1349): how a fork answers a
@@ -7591,7 +7591,7 @@ async fn fork_library_builtin(
         builtin.name,
         &body.body,
         Some(&builtin_id),
-        body.export_command,
+        body.export_command.unwrap_or(builtin.export_command),
     )?;
     Ok((StatusCode::CREATED, Json(item)).into_response())
 }
@@ -18114,7 +18114,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             Path("no-such-builtin".to_string()),
             Ok(Json(LibraryForkBody {
                 body: "whatever".into(),
-                export_command: false,
+                export_command: Some(false),
             })),
         )
         .await
@@ -18136,7 +18136,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             Path(builtin_id.to_string()),
             Ok(Json(LibraryForkBody {
                 body: "custom body".into(),
-                export_command: false,
+                export_command: Some(false),
             })),
         )
         .await
@@ -18150,7 +18150,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             Path(builtin_id.to_string()),
             Ok(Json(LibraryForkBody {
                 body: "second attempt".into(),
-                export_command: false,
+                export_command: Some(false),
             })),
         )
         .await
@@ -18440,7 +18440,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             Path(crate::core::library::BUILTINS[0].id.to_string()),
             Ok(Json(LibraryForkBody {
                 body: "forked from a phone".to_string(),
-                export_command: false,
+                export_command: Some(false),
             })),
         )
         .await
@@ -18602,7 +18602,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                     Path(crate::core::library::BUILTINS[1].id.to_string()),
                     Ok(Json(LibraryForkBody {
                         body: "hostile".to_string(),
-                        export_command: false,
+                        export_command: Some(false),
                     })),
                 )
                 .await,

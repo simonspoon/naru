@@ -9436,6 +9436,18 @@ impl Store {
         )?;
         let id = self.conn.last_insert_rowid();
         self.append_library_version(id, &body, "edit")?;
+        // A built-in skill's sibling files come with its fork, so the fork is
+        // the whole folder and not a bare `SKILL.md`.
+        if let Some(builtin) = builtin_id.and_then(crate::core::library::builtin)
+            && !builtin.files.is_empty()
+        {
+            let files = builtin
+                .files
+                .iter()
+                .map(|(path, body)| (path.to_string(), body.to_string()))
+                .collect();
+            return self.set_library_files(id, &files);
+        }
         self.get_library_item(id)
     }
 

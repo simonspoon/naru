@@ -1692,7 +1692,7 @@ run 0 env MESA_DB="$MESA_DB_OLD" "$MESA" library show execute-todo
 run 0 env MESA_DB="$MESA_DB_OLD" "$MESA" library versions execute-todo
 [ "$(jqs length)" = "2" ] || fail "migration: history must survive (keyed by item id), got $STDOUT"
 run 0 env MESA_DB="$MESA_DB_OLD" "$MESA" library list --kind prompt
-[ "$(jqs '[.[] | select(.name=="execute-todo")] | length')" = "1" ] ||
+[ "$(jqs '[.[] | select(.name=="execute-todo" and .builtin==false)] | length')" = "1" ] ||
   fail "migration: the migrated row must list as a prompt (the view {prompt:<name>} resolves against), got $STDOUT"
 [ "$(sqlite3 "$MESA_DB_OLD" "SELECT count(*) FROM library_items WHERE kind = 'command'")" = "0" ] ||
   fail "migration: no command row may survive"

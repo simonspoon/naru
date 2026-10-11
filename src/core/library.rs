@@ -40,9 +40,18 @@ pub struct Builtin {
     pub kind: LibraryKind,
     pub scope: LibraryScope,
     pub body: &'static str,
+    /// A prompt's "also a slash command" flag (mesa task 1139): on, the
+    /// unshadowed built-in has the path `.claude/commands/<name>.md`. Always
+    /// `false` for any other kind.
+    pub export_command: bool,
+    /// A skill's sibling files beside `SKILL.md`, `(path relative to the skill
+    /// folder, body)`. Empty for every other kind. They reach disk with the
+    /// skill on a sync, and a fork of the built-in starts with them.
+    pub files: &'static [(&'static str, &'static str)],
 }
 
-/// The starter set — deliberately tiny. `naru-live` is the agent definition
+/// The starter set — the stock agents and the supervising skill, a few
+/// prompts and a few hooks. `naru-live` is the agent definition
 /// the live conversation runs as (mesa task 1068, replacing the old
 /// `live-agent-prompt` *prompt*): its body is `core::live::AGENT_DEFINITION`,
 /// frontmatter plus the loop `core::live::AGENT_PROMPT` states, and because it
@@ -92,6 +101,8 @@ pub const BUILTINS: &[Builtin] = &[
         name: crate::core::live::LIVE_AGENT_BUILTIN,
         kind: LibraryKind::Agent,
         scope: LibraryScope::User,
+        export_command: false,
+        files: &[],
         body: crate::core::live::AGENT_DEFINITION,
     },
     Builtin {
@@ -99,6 +110,8 @@ pub const BUILTINS: &[Builtin] = &[
         name: crate::core::supervisor::SUPERVISOR_AGENT_BUILTIN,
         kind: LibraryKind::Agent,
         scope: LibraryScope::User,
+        export_command: false,
+        files: &[],
         body: crate::core::supervisor::SUPERVISOR_DEFINITION,
     },
     Builtin {
@@ -106,6 +119,8 @@ pub const BUILTINS: &[Builtin] = &[
         name: crate::core::inbox_triage::INBOX_TRIAGE_AGENT_BUILTIN,
         kind: LibraryKind::Agent,
         scope: LibraryScope::User,
+        export_command: false,
+        files: &[],
         body: crate::core::inbox_triage::INBOX_TRIAGE_DEFINITION,
     },
     Builtin {
@@ -113,6 +128,8 @@ pub const BUILTINS: &[Builtin] = &[
         name: crate::core::retro::RETRO_AGENT_BUILTIN,
         kind: LibraryKind::Agent,
         scope: LibraryScope::User,
+        export_command: false,
+        files: &[],
         body: crate::core::retro::RETRO_DEFINITION,
     },
     Builtin {
@@ -120,6 +137,8 @@ pub const BUILTINS: &[Builtin] = &[
         name: "live-summary-prompt",
         kind: LibraryKind::Prompt,
         scope: LibraryScope::User,
+        export_command: false,
+        files: &[],
         body: crate::core::live::SUMMARY_PROMPT,
     },
     Builtin {
@@ -127,6 +146,8 @@ pub const BUILTINS: &[Builtin] = &[
         name: "starter-claude-md",
         kind: LibraryKind::ClaudeMd,
         scope: LibraryScope::User,
+        export_command: false,
+        files: &[],
         body: "\
 # CLAUDE.md
 
@@ -142,6 +163,8 @@ following on purpose.
         name: "stop-notify.sh",
         kind: LibraryKind::Hook,
         scope: LibraryScope::User,
+        export_command: false,
+        files: &[],
         body: "\
 #!/bin/sh
 # Runs when Claude Code stops responding. Replace with a real notifier
@@ -154,6 +177,8 @@ echo \"Claude Code stopped in $(pwd)\"
         name: crate::core::stop_guard::STOP_GUARD_HOOK_NAME,
         kind: LibraryKind::Hook,
         scope: LibraryScope::User,
+        export_command: false,
+        files: &[],
         body: crate::core::stop_guard::STOP_GUARD_HOOK,
     },
     Builtin {
@@ -161,6 +186,8 @@ echo \"Claude Code stopped in $(pwd)\"
         name: crate::core::alarm::ALARM_HOOK_NAME,
         kind: LibraryKind::Hook,
         scope: LibraryScope::User,
+        export_command: false,
+        files: &[],
         body: crate::core::alarm::ALARM_HOOK,
     },
     Builtin {
@@ -168,6 +195,8 @@ echo \"Claude Code stopped in $(pwd)\"
         name: crate::core::project_memory::PROJECT_MEMORY_HOOK_NAME,
         kind: LibraryKind::Hook,
         scope: LibraryScope::User,
+        export_command: false,
+        files: &[],
         body: crate::core::project_memory::PROJECT_MEMORY_HOOK,
     },
     Builtin {
@@ -175,6 +204,8 @@ echo \"Claude Code stopped in $(pwd)\"
         name: crate::core::barge_in::BARGE_IN_HOOK_NAME,
         kind: LibraryKind::Hook,
         scope: LibraryScope::User,
+        export_command: false,
+        files: &[],
         body: crate::core::barge_in::BARGE_IN_HOOK,
     },
     Builtin {
@@ -182,7 +213,138 @@ echo \"Claude Code stopped in $(pwd)\"
         name: crate::core::agent_route::AGENT_ROUTE_HOOK_NAME,
         kind: LibraryKind::Hook,
         scope: LibraryScope::User,
+        export_command: false,
+        files: &[],
         body: crate::core::agent_route::AGENT_ROUTE_HOOK,
+    },
+    Builtin {
+        id: "implementer",
+        name: "implementer",
+        kind: LibraryKind::Agent,
+        scope: LibraryScope::User,
+        body: include_str!("builtins/implementer.md"),
+        export_command: false,
+        files: &[],
+    },
+    Builtin {
+        id: "verifier",
+        name: "verifier",
+        kind: LibraryKind::Agent,
+        scope: LibraryScope::User,
+        body: include_str!("builtins/verifier.md"),
+        export_command: false,
+        files: &[],
+    },
+    Builtin {
+        id: "recon",
+        name: "recon",
+        kind: LibraryKind::Agent,
+        scope: LibraryScope::User,
+        body: include_str!("builtins/recon.md"),
+        export_command: false,
+        files: &[],
+    },
+    Builtin {
+        id: "planner",
+        name: "planner",
+        kind: LibraryKind::Agent,
+        scope: LibraryScope::User,
+        body: include_str!("builtins/planner.md"),
+        export_command: false,
+        files: &[],
+    },
+    Builtin {
+        id: "researcher",
+        name: "researcher",
+        kind: LibraryKind::Agent,
+        scope: LibraryScope::User,
+        body: include_str!("builtins/researcher.md"),
+        export_command: false,
+        files: &[],
+    },
+    Builtin {
+        id: "diff-reviewer",
+        name: "diff-reviewer",
+        kind: LibraryKind::Agent,
+        scope: LibraryScope::User,
+        body: include_str!("builtins/diff-reviewer.md"),
+        export_command: false,
+        files: &[],
+    },
+    Builtin {
+        id: "ui-verifier",
+        name: "ui-verifier",
+        kind: LibraryKind::Agent,
+        scope: LibraryScope::User,
+        body: include_str!("builtins/ui-verifier.md"),
+        export_command: false,
+        files: &[],
+    },
+    Builtin {
+        id: "swift-implementer",
+        name: "swift-implementer",
+        kind: LibraryKind::Agent,
+        scope: LibraryScope::User,
+        body: include_str!("builtins/swift-implementer.md"),
+        export_command: false,
+        files: &[],
+    },
+    Builtin {
+        id: "naru-live-split",
+        name: "naru-live-split",
+        kind: LibraryKind::Agent,
+        scope: LibraryScope::User,
+        body: include_str!("builtins/naru-live-split.md"),
+        export_command: false,
+        files: &[],
+    },
+    Builtin {
+        id: "supervising-agent-teams",
+        name: "supervising-agent-teams",
+        kind: LibraryKind::Skill,
+        scope: LibraryScope::User,
+        body: include_str!("builtins/supervising-agent-teams/SKILL.md"),
+        export_command: false,
+        files: &[
+            (
+                "briefs.md",
+                include_str!("builtins/supervising-agent-teams/briefs.md"),
+            ),
+            (
+                "intervening.md",
+                include_str!("builtins/supervising-agent-teams/intervening.md"),
+            ),
+            (
+                "resources.md",
+                include_str!("builtins/supervising-agent-teams/resources.md"),
+            ),
+            (
+                "verifying.md",
+                include_str!("builtins/supervising-agent-teams/verifying.md"),
+            ),
+            (
+                "waiting.md",
+                include_str!("builtins/supervising-agent-teams/waiting.md"),
+            ),
+        ],
+    },
+    Builtin {
+        id: "execute-todo",
+        name: "execute-todo",
+        kind: LibraryKind::Prompt,
+        scope: LibraryScope::User,
+        body: include_str!("builtins/execute-todo.md"),
+        export_command: true,
+        files: &[],
+    },
+    Builtin {
+        id: "execute-refine",
+        name: "execute-refine",
+        kind: LibraryKind::Prompt,
+        scope: LibraryScope::User,
+        body: include_str!("builtins/execute-refine.md"),
+        export_command: true,
+        files: &[],
     },
 ];
 
@@ -725,11 +887,12 @@ pub fn effective_items(store: &Store, project: Option<i64>) -> StoreResult<Vec<L
         if shadowed.contains(b.id) {
             continue;
         }
-        // A built-in is code and carries no flag: `live-summary-prompt` is
-        // mesa's own and has no business in `.claude/commands`. Forking it
-        // gives it a row, and the row may set the flag like any other.
-        let path =
-            relative_path(b.kind, b.scope, b.name, false).map(|p| p.to_string_lossy().into_owned());
+        // A built-in carries a flag only where it ships as a slash command
+        // (`execute-todo`, `execute-refine`); `live-summary-prompt` is mesa's
+        // own and has no business in `.claude/commands`. Forking one gives it
+        // a row, and the row may set the flag like any other.
+        let path = relative_path(b.kind, b.scope, b.name, b.export_command)
+            .map(|p| p.to_string_lossy().into_owned());
         items.push(LibraryItem {
             id: None,
             name: b.name.to_string(),
@@ -739,7 +902,7 @@ pub fn effective_items(store: &Store, project: Option<i64>) -> StoreResult<Vec<L
             body: b.body.to_string(),
             builtin_id: Some(b.id.to_string()),
             builtin: true,
-            export_command: false,
+            export_command: b.export_command,
             path,
             synced_body: None,
             synced_at: None,
@@ -747,7 +910,11 @@ pub fn effective_items(store: &Store, project: Option<i64>) -> StoreResult<Vec<L
             updated_at: None,
             builtin_updated: false,
             builtin_body: None,
-            files: BTreeMap::new(),
+            files: b
+                .files
+                .iter()
+                .map(|(path, body)| (path.to_string(), body.to_string()))
+                .collect(),
             synced_files: BTreeMap::new(),
         });
     }
@@ -1322,7 +1489,9 @@ fn apply_disk(store: &mut Store, row: &LibrarySyncRow) -> StoreResult<()> {
                         &row.name,
                         body,
                         Some(builtin_id),
-                        false,
+                        // The fork keeps the built-in's own flag, or the
+                        // pull would drop the command path it was read from.
+                        builtin(builtin_id).is_some_and(|b| b.export_command),
                     )?;
                     created.id.expect("a created item always has an id")
                 }
@@ -3856,6 +4025,168 @@ mod tests {
         assert!(builtin("no-such-builtin").is_none());
     }
 
+    /// The built-ins ship to every install, so none of them may carry the
+    /// author's own paths or tools, and no agent, skill or prompt a task number.
+    /// The task-number rule skips hooks: the pre-existing hook scripts name the
+    /// task that added them in a header comment, and rewording a shipped hook
+    /// body would flag every fork of it as `builtin_updated`.
+    #[test]
+    fn no_builtin_body_carries_a_personal_reference() {
+        let task_ref = regex::Regex::new(r"\b(naru|mesa) task \d+").unwrap();
+        let mut texts: Vec<(String, &str, bool)> = Vec::new();
+        for b in BUILTINS {
+            let numbered = b.kind != LibraryKind::Hook;
+            texts.push((b.id.to_string(), b.body, numbered));
+            for (path, body) in b.files {
+                texts.push((format!("{}/{path}", b.id), body, numbered));
+            }
+        }
+        for (what, text, numbered) in texts {
+            for needle in ["/Users/", "simonspoon", "merge-to-main"] {
+                assert!(!text.contains(needle), "{what} contains {needle:?}");
+            }
+            assert!(
+                !numbered || !task_ref.is_match(text),
+                "{what} names a task number"
+            );
+        }
+    }
+
+    #[test]
+    fn the_supervising_skill_builtin_carries_its_five_sibling_files() {
+        let (store, _dir) = temp_store();
+        let items = effective_items(&store, None).unwrap();
+        let skill = items
+            .iter()
+            .find(|i| i.builtin_id.as_deref() == Some("supervising-agent-teams"))
+            .expect("the skill is offered");
+        assert_eq!(skill.kind, LibraryKind::Skill);
+        assert_eq!(
+            skill.path.as_deref(),
+            Some(".claude/skills/supervising-agent-teams/SKILL.md")
+        );
+        let names: Vec<&str> = skill.files.keys().map(String::as_str).collect();
+        assert_eq!(
+            names,
+            [
+                "briefs.md",
+                "intervening.md",
+                "resources.md",
+                "verifying.md",
+                "waiting.md"
+            ]
+        );
+        assert!(skill.files.values().all(|body| !body.trim().is_empty()));
+    }
+
+    #[test]
+    fn a_fresh_install_sync_writes_the_skill_with_its_siblings() {
+        let (mut store, _dir) = temp_store();
+        with_home_dir(|home| {
+            let rows = sync_status(&store, None).unwrap();
+            let row = rows
+                .iter()
+                .find(|r| r.builtin_id.as_deref() == Some("supervising-agent-teams"))
+                .expect("the skill has a sync row");
+            assert_eq!(row.status, LibrarySyncStatus::MesaNew);
+            apply_naru(&mut store, None, row).unwrap();
+            let dir = home.join(".claude/skills/supervising-agent-teams");
+            assert!(dir.join("SKILL.md").is_file());
+            for name in [
+                "briefs.md",
+                "intervening.md",
+                "resources.md",
+                "verifying.md",
+                "waiting.md",
+            ] {
+                assert!(dir.join(name).is_file(), "{name} was not written");
+            }
+        });
+    }
+
+    #[test]
+    fn a_fork_of_the_skill_builtin_keeps_its_sibling_files() {
+        let (mut store, _dir) = temp_store();
+        let fork = store
+            .create_library_item(
+                LibraryKind::Skill,
+                LibraryScope::User,
+                None,
+                "supervising-agent-teams",
+                "# my edit",
+                Some("supervising-agent-teams"),
+                false,
+            )
+            .unwrap();
+        assert_eq!(fork.files.len(), 5);
+        assert!(fork.files.contains_key("waiting.md"));
+    }
+
+    #[test]
+    fn pulling_the_disk_side_of_an_execute_prompt_keeps_its_command_path() {
+        let (mut store, _dir) = temp_store();
+        with_home_dir(|home| {
+            let commands = home.join(".claude/commands");
+            fs::create_dir_all(&commands).unwrap();
+            fs::write(commands.join("execute-todo.md"), "my own version").unwrap();
+            let results = sync_apply(
+                &mut store,
+                None,
+                &[(
+                    ".claude/commands/execute-todo.md".to_string(),
+                    "disk".to_string(),
+                )],
+            )
+            .unwrap();
+            assert!(results[0].applied, "{:?}", results[0].error);
+            let fork = store.find_library_fork("execute-todo").unwrap().unwrap();
+            assert!(fork.export_command);
+            assert_eq!(fork.body, "my own version");
+            assert_eq!(
+                fork.path.as_deref(),
+                Some(".claude/commands/execute-todo.md")
+            );
+        });
+    }
+
+    #[test]
+    fn a_same_name_row_wins_the_prompt_table_over_the_builtin() {
+        let (mut store, _dir) = temp_store();
+        store
+            .create_library_item(
+                LibraryKind::Prompt,
+                LibraryScope::User,
+                None,
+                "execute-todo",
+                "my own todo",
+                None,
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            prompts(&store).unwrap().body("execute-todo"),
+            Some("my own todo")
+        );
+    }
+
+    #[test]
+    fn the_execute_prompts_ship_as_slash_commands() {
+        let (store, _dir) = temp_store();
+        let items = effective_items(&store, None).unwrap();
+        for name in ["execute-todo", "execute-refine"] {
+            let item = items
+                .iter()
+                .find(|i| i.builtin_id.as_deref() == Some(name))
+                .unwrap();
+            assert_eq!(item.kind, LibraryKind::Prompt);
+            assert!(item.export_command);
+            assert_eq!(
+                item.path.as_deref(),
+                Some(format!(".claude/commands/{name}.md").as_str())
+            );
+        }
+    }
+
     // ---- effective_items / sync_status / sync_apply ----
 
     fn temp_store() -> (Store, tempfile::TempDir) {
@@ -5261,7 +5592,9 @@ mod tests {
                     row.path
                 );
             }
-            assert!(rows.iter().all(|r| r.kind != LibraryKind::Prompt));
+            // `live-summary-prompt` exports no command, so it has no row; the
+            // `execute-*` prompts do.
+            assert!(rows.iter().all(|r| r.name != "live-summary-prompt"));
         });
     }
 

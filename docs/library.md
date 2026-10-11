@@ -159,16 +159,22 @@ away from `skill` is `validation` while the row holds siblings.
   rules above (the server stays the authority). One save sends the body and
   the whole map in one PATCH. The draft logic is
   `frontend/src/librarySkillFiles.ts` (pinned by `librarySkillFiles.test.ts`).
-  Create and a built-in's fork show no file list, since neither has siblings
-  yet.
+  Create shows no file list, since a new skill has no siblings yet; a fork of
+  a built-in skill starts with the built-in's.
 
-There is no built-in skill; the first one you sync from disk is the first
-with siblings.
+The one built-in skill, `supervising-agent-teams`, carries its folder too:
+`Builtin.files` is a static slice of `(path relative to the skill folder,
+body)` pairs, and `effective_items` reports them as the unshadowed built-in's
+`files`. A fresh-install sync therefore reads `mesa-new` and applying it
+writes `SKILL.md` and every sibling (`apply_naru` writes `mesa_files`), and
+`Store::create_library_item` copies them onto a fork. A built-in's text lives
+in `src/core/builtins/` (`include_str!`), not in a Rust string.
 
 ## Built-ins are code, not rows
 
 `core::library::BUILTINS` is a `&[Builtin]` static — `id`, `name`, `kind`,
-`scope`, `body` — the same shape `config.rs` already used for "blank means
+`scope`, `body`, plus `export_command` (a prompt's slash-command flag) and
+`files` (a skill's siblings) — the same shape `config.rs` already used for "blank means
 the block Naru ships." A built-in is **never inserted at migration time**.
 `core::library::effective_items` (what `list`/`GET /api/library` actually
 return) is `Store::list_library_items` plus every `BUILTINS` entry **not**
@@ -196,19 +202,34 @@ That split is the whole point:
   `Store::create_library_item`/the fork route both check
   `Store::find_library_fork` first and answer `conflict` on a second attempt.
 
-The starter set is deliberately tiny — nine rows:
+The starter set — twenty-four rows:
 
 | `id` | kind | scope | what it is |
 | --- | --- | --- | --- |
 | `naru-live` | `agent` | `user` | The agent definition the live conversation runs as — literally `core::live::AGENT_DEFINITION`, YAML frontmatter plus `core::live::AGENT_PROMPT`, moved here rather than duplicated (mesa task 1068) |
 | `supervisor` | `agent` | `user` | The agent definition an auto-dispatched `/execute-todo` run is supervised as — literally `core::supervisor::SUPERVISOR_DEFINITION` (mesa task 1075), seeded to `~/.claude/agents/supervisor.md` by `core::supervisor::ensure_agent_definition` before the `todo-watcher` spawn |
 | `naru-retro` | `agent` | `user` | The agent definition the session retrospective used to run as — literally `core::retro::RETRO_DEFINITION` (mesa task 1158, `docs/retro.md`). Kept for manual `claude --agent naru-retro` use (seeded to `~/.claude/agents/naru-retro.md` by `core::retro::ensure_agent_definition` only if something calls it); since naru task 1692 the watcher and `retro run` no longer spawn or seed it — the retrospective is `claude -p` calls in a detached `naru __job retro` |
-| `inbox-triage` | `agent` | `user` | An agent definition — literally `core::inbox_triage::INBOX_TRIAGE_DEFINITION` (mesa task 1168): `opus` at medium effort, no `Edit`/`Write`. Kept for manual `claude --agent inbox-triage` use; no longer spawned or seeded since naru task 1691 (`docs/inbox-watcher.md`) |
+| `inbox-triage` | `agent` | `user` | An agent definition — literally `core::inbox_triage::INBOX_TRIAGE_DEFINITION` (mesa task 1168): `haiku` at medium effort, no `Edit`/`Write`. Kept for manual `claude --agent inbox-triage` use; no longer spawned or seeded since naru task 1691 (`docs/inbox-watcher.md`) |
 | `live-summary-prompt` | `prompt` | `user` | The instructions for the tool-less `claude -p --json-schema` call (a detached `naru __job summary`, naru task 1690) that writes a live conversation's memory once it ends (mesa task 921) — literally `core::live::SUMMARY_PROMPT`, placed immediately after the prompt it belongs beside |
 | `starter-claude-md` | `claude-md` | `user` | A short starting-point CLAUDE.md |
 | `stop-notify` | `hook` | `user` | A minimal shell hook that echoes when Claude Code stops — its *name* is `stop-notify.sh`, since a hook's name carries its own extension |
 | `task-stop-guard` | `hook` | `user` | A `Stop` hook that keeps a task agent from ending its turn before its Naru task is handled — literally `core::stop_guard::STOP_GUARD_HOOK` (mesa task 1190, "The task-stop-guard hook" below); name `task-stop-guard.sh` |
 | `project-memory` | `hook` | `user` | A `SessionStart` hook that prints the session folder's project notebook into its context — literally `core::project_memory::PROJECT_MEMORY_HOOK` (mesa task 1333, `docs/project-memory.md`); name `project-memory.sh` |
+| `alarm-disarm` | `hook` | `user` | A `SubagentStop` hook that disarms the supervisor's `naru alarm arm` — literally `core::alarm::ALARM_HOOK` (`docs/alarm.md`); name `alarm-disarm.sh` |
+| `live-barge-in` | `hook` | `user` | A `PreToolUse`/`PostToolUse` hook that delivers what the person said mid-turn to the `naru-live` agent — literally `core::barge_in::BARGE_IN_HOOK`; name `live-barge-in.sh` |
+| `agent-route` | `hook` | `user` | A `PreToolUse` hook that reroutes a misrouted general-purpose subagent spawn through `naru decide` — literally `core::agent_route::AGENT_ROUTE_HOOK` (`docs/agent-route.md`); name `agent-route.sh` |
+| `implementer` | `agent` | `user` | Implements one scoped change in any non-Swift project, runs the fast gate tier from the repo's own docs and reports per finding (`sonnet`) |
+| `verifier` | `agent` | `user` | Verification of non-UI work against a named metric with provenance, baseline vs fix and variance; never edits source (`sonnet`, read-only tools) |
+| `recon` | `agent` | `user` | Read-only code reconnaissance, helios first (`haiku`, read-only tools) |
+| `planner` | `agent` | `user` | Turns intent into an executable brief or a Naru task; never edits code (`opus`, read-only tools) |
+| `researcher` | `agent` | `user` | Web and documentation research returning a sourced report (`sonnet`, web and read tools only) |
+| `diff-reviewer` | `agent` | `user` | Independent review of an uncommitted diff or a branch; never edits the tree (`sonnet`, read-only tools) |
+| `ui-verifier` | `agent` | `user` | Live UI verification end to end with qorvex, khora or loki, calibrated against HEAD and the fix (`sonnet`) |
+| `swift-implementer` | `agent` | `user` | Implements one scoped Swift/SwiftUI change in an iOS or macOS project (`sonnet`) |
+| `naru-live-split` | `agent` | `user` | The opt-in fast-voice/slow-brain variant of `naru-live`: routes each turn with `naru decide` and delegates deciding and task changes to read-only workers; not spawned by Naru, a person points `live-agent` at it |
+| `supervising-agent-teams` | `skill` | `user` | The supervisor's procedures — waiting, verifying, briefs, resources, intervening — as `SKILL.md` plus five sibling files (`briefs.md`, `intervening.md`, `resources.md`, `verifying.md`, `waiting.md`); the `supervisor` agent loads it with the `Skill` tool |
+| `execute-todo` | `prompt` | `user` | The slash command a task is executed with; ships with `export_command` on, so it has the path `.claude/commands/execute-todo.md` |
+| `execute-refine` | `prompt` | `user` | The slash command that sharpens a task so another agent can execute it; `export_command` on, `.claude/commands/execute-refine.md` |
 
 `naru-live`'s body being the literal `AGENT_DEFINITION` constant (and
 `live-summary-prompt`'s the literal `SUMMARY_PROMPT`) is what lets
@@ -399,9 +420,11 @@ diff. The migrated items already carry `$ARGS`/`$ARGUMENTS` prose and keep
 working as slash commands unchanged; a prompt that wants frontmatter writes
 it into its body. The flag is a prompt's alone — `Store` answers
 `validation` for `export_command: true` on any other kind, since every other
-kind already owns a path — and a **built-in** carries no flag (a built-in is
-code, and `live-summary-prompt` has no business in `.claude/commands`);
-forking one gives it a row, and the row may set the flag like any other.
+kind already owns a path — and a **built-in** carries the flag only where it
+ships as a slash command (`Builtin.export_command`: `execute-todo` and
+`execute-refine`; `live-summary-prompt` has no business in
+`.claude/commands`); forking one gives it a row, and the row may set the flag
+like any other.
 
 **Turning the flag off removes the file** — the one write to disk outside
 the sync flow, made by `core::library::update_item`, the wrapper both `mesa

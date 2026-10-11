@@ -7415,6 +7415,22 @@ fn resolve_library(store: &Store, arg: &str) -> Result<LibraryItem> {
         .iter()
         .filter(|i| i.name.eq_ignore_ascii_case(arg) || i.builtin_id.as_deref() == Some(arg))
         .collect();
+    // A db row that shares a built-in's kind and name shadows it (the page's
+    // "overrides built-in" fold), so the pair is one item, the row. Two rows,
+    // or two built-ins, are still a conflict.
+    if let [a, b] = matches[..] {
+        let shadowing = match (a.id, b.id) {
+            (Some(_), None) => Some(a),
+            (None, Some(_)) => Some(b),
+            _ => None,
+        };
+        if let Some(row) = shadowing
+            && a.kind == b.kind
+            && a.name.eq_ignore_ascii_case(&b.name)
+        {
+            return Ok(row.clone());
+        }
+    }
     match matches.len() {
         0 => Err(Error::NotFound(format!(
             "no library item named {arg:?}; pass a library item id or an existing name \
@@ -7986,7 +8002,7 @@ fn run_library_cmd(cmd: LibraryCmd) -> Result<()> {
                         &name,
                         &body,
                         Some(&builtin_id),
-                        export_command.unwrap_or(false),
+                        export_command.unwrap_or(current.export_command),
                     )?
                 }
             };
@@ -9407,6 +9423,30 @@ mod tests {
             sorted_owned(value_keys(&quiet(&sample_receipt(), QUIET_DROP_RECEIPT))),
             minus(&full, QUIET_DROP_RECEIPT),
         );
+    }
+
+    /// A db row that shares an unshadowed built-in's kind and name is that
+    /// built-in's override: a name lookup answers the row, not a conflict.
+    #[test]
+    fn a_library_name_resolves_to_the_row_that_shadows_a_builtin() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("test.db")).unwrap();
+        let builtin = resolve_library(&store, "implementer").unwrap();
+        assert_eq!(builtin.id, None);
+        let row = store
+            .create_library_item(
+                crate::core::LibraryKind::Agent,
+                crate::core::LibraryScope::User,
+                None,
+                "implementer",
+                "my implementer",
+                None,
+                false,
+            )
+            .unwrap();
+        let found = resolve_library(&store, "implementer").unwrap();
+        assert_eq!(found.id, row.id);
+        assert_eq!(found.body, "my implementer");
     }
 
     /// A failed spawn must not strand a live session: the session is ended
