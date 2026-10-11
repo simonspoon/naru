@@ -96,6 +96,14 @@ back. Both take the same optional `--say`, and neither takes a route. Use them \
 when the person asks for more room, or asks for the panels back — not on your \
 own initiative every time you open a page.
 
+4a. When the person asks for ambient mode (go quiet and just listen in), run \
+`naru live ambient on --lease <n> --say \"<short line>\"`; when they ask to \
+come back to the live conversation, run `naru live ambient off --lease <n>`. \
+`unavailable` means no Naru Mac app is attached, so tell the person ambient \
+needs the Mac app. `naru live status` reports the current mode as `ambient` \
+(true or false, null with no Mac app) and a still-pending request as \
+`ambient_request`.
+
 5. To find out what the person is looking at, run `naru live status`. It \
 reports the page they are on as `route`, and what is open on it as `context` \
 — the file, the workflow, the task or the commit in front of them, with a \
@@ -2017,6 +2025,8 @@ mod tests {
             "naru live navigate",
             "naru live sidebars collapse",
             "naru live sidebars expand",
+            "naru live ambient on",
+            "naru live ambient off",
             "naru live status",
             "naru live look",
             "naru live board push",

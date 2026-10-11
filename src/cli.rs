@@ -2906,6 +2906,34 @@ EXAMPLES
         #[arg(long)]
         quiet: bool,
     },
+    /// Ask the Naru Mac app to enter or leave ambient mode; prints the session
+    ///
+    /// STATE is `on` (go quiet and just listen in) or `off` (back to the live
+    /// conversation). The request is written to the session and the page
+    /// passes it to the Mac app on its next poll; the app has the last word,
+    /// so read `ambient` and `ambient_request` from `live status`. `--say` is
+    /// a sentence spoken as the mode changes. With no Mac app attached this is
+    /// `unavailable` and nothing is written.
+    #[command(after_help = "\
+EXAMPLES
+  naru live ambient on --lease 3 --say \"Going quiet, say Naru when you need me.\"
+  naru live ambient off --lease 3")]
+    Ambient {
+        /// `on` to go ambient, `off` to return to the live conversation
+        #[arg(value_name = "STATE", value_parser = parse_ambient_state, action = clap::ArgAction::Set)]
+        state: bool,
+        /// What to say as the mode changes
+        #[arg(long, value_name = "TEXT")]
+        say: Option<String>,
+        /// The lease from the first line of your prompt (mesa task 1150)
+        ///
+        /// A stale lease is `conflict` and nothing is written.
+        #[arg(long, value_name = "N")]
+        lease: Option<i64>,
+        /// Accepted for symmetry; the session has nothing to drop
+        #[arg(long)]
+        quiet: bool,
+    },
     /// Hand the conversation to a fresh agent; prints the session with its new lease
     ///
     /// For the agent driving a long call (mesa task 1150): its context grows
@@ -4143,6 +4171,14 @@ fn parse_sidebars_action(s: &str) -> std::result::Result<LiveAction, String> {
         "collapse" => Ok(LiveAction::CollapseSidebars),
         "expand" => Ok(LiveAction::ExpandSidebars),
         _ => Err(format!("'{s}' is not one of collapse|expand")),
+    }
+}
+
+fn parse_ambient_state(s: &str) -> std::result::Result<bool, String> {
+    match s {
+        "on" => Ok(true),
+        "off" => Ok(false),
+        _ => Err(format!("'{s}' is not one of on|off")),
     }
 }
 
@@ -6309,6 +6345,19 @@ fn run_live(cmd: LiveCmd) -> Result<()> {
                 None,
             )?;
             print_live_turn(&turn, quiet);
+        }
+        LiveCmd::Ambient {
+            state,
+            say,
+            lease,
+            quiet,
+        } => {
+            let session = current_live_session(&store)?;
+            if let Some(lease) = lease {
+                store.check_live_lease(session.id, lease)?;
+            }
+            let (session, _turn) = store.request_live_ambient(session.id, state, say.as_deref())?;
+            print_live_session(&session, quiet);
         }
         LiveCmd::Notice { kind, quiet } => {
             let session = current_live_session(&store)?;
