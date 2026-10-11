@@ -6,8 +6,11 @@
 // The ids must match `config::APPEARANCE_THEMES` in Rust, which validates the
 // saved setting.
 
+import type { Theme } from './types/Theme'
+
 export type ThemeId = 'dark' | 'light' | 'contrast' | 'crimson'
-export type ThemeSetting = 'system' | ThemeId
+export type CustomThemeId = `custom-${number}`
+export type ThemeSetting = 'system' | ThemeId | CustomThemeId
 
 export interface ThemeInfo {
   id: ThemeId
@@ -25,6 +28,12 @@ export const THEMES: readonly ThemeInfo[] = [
 
 export const THEME_SETTINGS: readonly ThemeSetting[] = ['system', ...THEMES.map((t) => t.id)]
 
+const CUSTOM_ID = /^custom-\d+$/
+
+export function isCustomId(value: unknown): value is CustomThemeId {
+  return typeof value === 'string' && CUSTOM_ID.test(value)
+}
+
 /** localStorage key mirroring the last-applied *setting*, read before first
  *  render so a reload does not flash the wrong theme. */
 export const THEME_STORAGE_KEY = 'naru-theme'
@@ -38,13 +47,14 @@ export function migrateLegacyTheme(value: unknown): unknown {
 /** A stored or configured value as a setting; anything unknown is `system`. */
 export function parseSetting(value: unknown): ThemeSetting {
   const v = migrateLegacyTheme(value)
+  if (isCustomId(v)) return v
   return typeof v === 'string' && (THEME_SETTINGS as readonly string[]).includes(v)
     ? (v as ThemeSetting)
     : 'system'
 }
 
-/** The concrete theme a setting means right now. */
-export function resolveTheme(setting: unknown, prefersDark: boolean): ThemeId {
+/** The concrete theme a setting means right now (a built-in or custom id). */
+export function resolveTheme(setting: unknown, prefersDark: boolean): ThemeId | CustomThemeId {
   const s = parseSetting(setting)
   if (s === 'system') return prefersDark ? 'dark' : 'light'
   return s
@@ -58,13 +68,73 @@ function prefersDark(): boolean {
 
 let stopWatching: (() => void) | null = null
 
+/** localStorage key mirroring the active custom theme's css text, so a reload
+ *  paints it before the config fetch answers. */
+export const THEME_CSS_STORAGE_KEY = 'naru-theme-css'
+const STYLE_ID = 'naru-custom-theme'
+
+const VAR_KEY = /^(--[a-z0-9-]+|color-scheme)$/
+const VAR_VALUE = /^[#a-z0-9(),.%\s-]+$/i
+
+/** The rule that makes a custom theme's server-derived `vars` live under
+ *  `:root[data-theme='custom-N']`. The frontend never derives colours. Keys and
+ *  values outside a strict charset are dropped and the id must be a custom id,
+ *  so no data can break out of the rule. */
+export function customThemeCss(theme: Theme): string {
+  if (!isCustomId(theme.id)) return ''
+  const lines: string[] = []
+  for (const [k, v] of Object.entries(theme.vars ?? {})) {
+    if (typeof v !== 'string' || !VAR_KEY.test(k) || !VAR_VALUE.test(v)) continue
+    lines.push(`  ${k}: ${v.trim()};`)
+  }
+  return `:root[data-theme='${theme.id}'] {\n${lines.join('\n')}\n}`
+}
+
+/** Installs (or removes, for empty text) the single custom <style>, bumping
+ *  `data-theme-rev` on <html> when the text changed so observers repaint. */
+function installCss(css: string) {
+  let el = document.getElementById(STYLE_ID)
+  const before = el?.textContent ?? ''
+  if (before === css) return
+  if (css === '') {
+    el?.remove()
+  } else {
+    if (!el) {
+      el = document.createElement('style')
+      el.id = STYLE_ID
+      document.head.appendChild(el)
+    }
+    el.textContent = css
+  }
+  const root = document.documentElement
+  root.dataset.themeRev = String((Number(root.dataset.themeRev) || 0) + 1)
+}
+
+function storedCss(setting: string): string {
+  try {
+    const css = localStorage.getItem(THEME_CSS_STORAGE_KEY) ?? ''
+    return css.startsWith(`:root[data-theme='${setting}']`) ? css : ''
+  } catch {
+    return ''
+  }
+}
+
 /** Applies a setting: sets `data-theme` on <html>, mirrors the setting into
  *  localStorage, and (re)installs the prefers-color-scheme listener while the
- *  setting is `system`. Returns the theme applied. */
-export function applyTheme(setting: unknown): ThemeId {
-  const s = parseSetting(setting)
+ *  setting is `system`. A custom setting needs its `custom` theme: `undefined`
+ *  reuses the css mirrored in localStorage (first paint), `null` or a theme of
+ *  another id means it is gone and falls back to `system`. Returns the theme
+ *  applied. */
+export function applyTheme(setting: unknown, custom?: Theme | null): ThemeId | CustomThemeId {
+  let s = parseSetting(setting)
+  let css = ''
+  if (isCustomId(s)) {
+    css = custom === undefined ? storedCss(s) : custom && custom.id === s ? customThemeCss(custom) : ''
+    if (css === '') s = 'system'
+  }
   stopWatching?.()
   stopWatching = null
+  installCss(css)
   const apply = () => {
     const id = resolveTheme(s, prefersDark())
     document.documentElement.dataset.theme = id
@@ -73,6 +143,8 @@ export function applyTheme(setting: unknown): ThemeId {
   const id = apply()
   try {
     localStorage.setItem(THEME_STORAGE_KEY, s)
+    if (css) localStorage.setItem(THEME_CSS_STORAGE_KEY, css)
+    else localStorage.removeItem(THEME_CSS_STORAGE_KEY)
   } catch {
     // storage blocked: the config GET still reconciles on load
   }
@@ -104,9 +176,10 @@ export function cssVar(name: string, fallback: string): string {
   return v || fallback
 }
 
-/** Calls `fn` whenever <html>'s `data-theme` changes; returns the disposer. */
+/** Calls `fn` whenever <html>'s `data-theme` changes, or `data-theme-rev` does
+ *  (the active custom theme's css was edited); returns the disposer. */
 export function onThemeChange(fn: () => void): () => void {
   const mo = new MutationObserver(fn)
-  mo.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] })
+  mo.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme', 'data-theme-rev'] })
   return () => mo.disconnect()
 }

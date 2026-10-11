@@ -6,11 +6,14 @@ import {
   THEME_SETTINGS,
   THEME_STORAGE_KEY,
   applyTheme,
+  customThemeCss,
+  THEME_CSS_STORAGE_KEY,
   migrateLegacyTheme,
   parseSetting,
   resolveTheme,
   storedSetting,
 } from './theme'
+import type { Theme } from './types/Theme'
 
 describe('resolveTheme', () => {
   it('maps system to the OS preference', () => {
@@ -115,5 +118,82 @@ describe('themes.css', () => {
     const css = readFileSync('src/themes.css', 'utf8')
     const blocks = [...css.matchAll(/\[data-theme='([\w-]+)'\]/g)].map((m) => m[1])
     expect([...blocks].sort()).toEqual(THEMES.map((t) => t.id).sort())
+  })
+})
+
+function customTheme(vars: Record<string, string>, id = 'custom-3'): Theme {
+  return {
+    id,
+    name: 'T',
+    builtin: false,
+    scheme: 'dark',
+    slots: {} as Theme['slots'],
+    vars,
+    warnings: [],
+    created_at: null,
+    updated_at: null,
+  }
+}
+
+describe('custom themes', () => {
+  afterEach(() => {
+    delete document.documentElement.dataset.theme
+    delete document.documentElement.dataset.themeRev
+    document.getElementById('naru-custom-theme')?.remove()
+    localStorage.clear()
+  })
+
+  it('parseSetting keeps custom-N only', () => {
+    expect(parseSetting('custom-3')).toBe('custom-3')
+    expect(parseSetting('custom-x')).toBe('system')
+    expect(parseSetting('custom-')).toBe('system')
+  })
+
+  it('customThemeCss emits good vars and drops unsafe ones', () => {
+    const css = customThemeCss(
+      customTheme({
+        '--bg-rgb': '15, 6, 8',
+        'color-scheme': 'dark',
+        '--evil': 'red; } body { x: y',
+        '--evil2': 'a}',
+        background: 'red',
+      }),
+    )
+    expect(css).toContain(":root[data-theme='custom-3'] {")
+    expect(css).toContain('--bg-rgb: 15, 6, 8;')
+    expect(css).toContain('color-scheme: dark;')
+    expect(css).not.toContain('evil')
+    expect(css).not.toContain('background')
+  })
+
+  it('customThemeCss refuses a non-custom id', () => {
+    expect(customThemeCss(customTheme({ '--a': '1' }, "x'] {}"))).toBe('')
+  })
+
+  it('a custom setting with no theme falls back to system', () => {
+    vi.stubGlobal('matchMedia', () => ({ matches: false, addEventListener() {}, removeEventListener() {} }))
+    expect(applyTheme('custom-3', null)).toBe('light')
+    expect(localStorage.getItem(THEME_STORAGE_KEY)).toBe('system')
+    vi.unstubAllGlobals()
+  })
+
+  it('injects one style, bumps the rev on change, and mirrors the css', () => {
+    expect(applyTheme('custom-3', customTheme({ '--cyan-rgb': '1, 2, 3' }))).toBe('custom-3')
+    expect(document.documentElement.dataset.theme).toBe('custom-3')
+    expect(document.querySelectorAll('#naru-custom-theme')).toHaveLength(1)
+    expect(document.documentElement.dataset.themeRev).toBe('1')
+    applyTheme('custom-3', customTheme({ '--cyan-rgb': '1, 2, 3' }))
+    expect(document.documentElement.dataset.themeRev).toBe('1')
+    applyTheme('custom-3', customTheme({ '--cyan-rgb': '4, 5, 6' }))
+    expect(document.documentElement.dataset.themeRev).toBe('2')
+    expect(document.querySelectorAll('#naru-custom-theme')).toHaveLength(1)
+    expect(localStorage.getItem(THEME_CSS_STORAGE_KEY)).toContain('4, 5, 6')
+  })
+
+  it('first paint reuses the mirrored css', () => {
+    applyTheme('custom-3', customTheme({ '--cyan-rgb': '1, 2, 3' }))
+    document.getElementById('naru-custom-theme')?.remove()
+    expect(applyTheme('custom-3')).toBe('custom-3')
+    expect(document.getElementById('naru-custom-theme')?.textContent).toContain('1, 2, 3')
   })
 })

@@ -22,10 +22,26 @@ import App from './App.tsx'
 // Apply the last-known theme before first render so a reload does not flash the
 // wrong one; the saved config then reconciles it (naru task 1784).
 applyTheme(storedSetting())
-getAppearance().then(
-  (a) => applyTheme(parseSetting(a.theme)),
-  () => {},
-)
+// A CLI `naru theme use/set` (or the live agent) changes the saved appearance
+// behind an open page: re-poll while visible and on focus, re-applying only
+// when the answer changed.
+let lastAppearance = ''
+function syncAppearance() {
+  getAppearance().then(
+    (a) => {
+      const key = JSON.stringify({ theme: a.theme, custom: a.custom })
+      if (key === lastAppearance) return
+      lastAppearance = key
+      applyTheme(parseSetting(a.theme), a.custom ?? null)
+    },
+    () => {},
+  )
+}
+syncAppearance()
+setInterval(() => {
+  if (document.visibilityState === 'visible') syncAppearance()
+}, 5000)
+window.addEventListener('focus', syncAppearance)
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

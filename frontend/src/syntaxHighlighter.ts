@@ -105,12 +105,20 @@ export function prismStyleFor(theme: string | undefined) {
   return theme === 'light' ? vsLight : vscDarkPlus
 }
 
+/** Prism follows the colour scheme, not the id: `light` for the light theme or
+ *  a custom theme whose computed `color-scheme` is light. */
+function activeScheme(): string {
+  const theme = document.documentElement.dataset.theme
+  if (theme === 'light') return 'light'
+  if (theme?.startsWith('custom-')) {
+    return getComputedStyle(document.documentElement).colorScheme.trim() === 'light' ? 'light' : 'dark'
+  }
+  return theme ?? 'dark'
+}
+
 /** The Prism style for the active theme, re-rendering on a theme switch. */
 export function usePrismStyle() {
-  const theme = useSyncExternalStore(
-    onThemeChange,
-    () => document.documentElement.dataset.theme,
-  )
+  const theme = useSyncExternalStore(onThemeChange, activeScheme)
   return prismStyleFor(theme)
 }
 
