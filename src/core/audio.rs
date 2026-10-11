@@ -304,6 +304,14 @@ pub fn probe(url: &str) -> Probe {
     probe
 }
 
+/// One uncached `/health` check of `url` (naru task 1793, the Settings page's
+/// "test connection"): the same fetch and classification as [`probe`], but it
+/// neither reads nor writes the cache or the state-change log, so testing an
+/// address that is not in use disturbs nothing. Blocking.
+pub fn check(url: &str) -> Probe {
+    fetch_health(url)
+}
+
 /// Drops the cached probe, so the next [`probe`] asks the daemon again. For
 /// a real request that failed (task 17): the failure is fresher news than a
 /// ten-second-old `ready`.
@@ -1541,6 +1549,19 @@ mod tests {
 
     const READY: &str = r#"{"status":"ok","version":"0.1.0","api":1,"pid":1,"uptime_s":4,
         "stt":{"default":"parakeet-tdt-0.6b-v2-int8","ready":true,"problem":null}}"#;
+
+    #[test]
+    fn check_reports_a_port_nothing_listens_on_as_daemon_down_uncached() {
+        let port = {
+            let l = TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let url = format!("http://127.0.0.1:{port}");
+        let probe = check(&url);
+        assert_eq!(probe.state, AudioState::DaemonDown);
+        assert_eq!(probe.url, url);
+        assert!(probe.message.is_some());
+    }
 
     fn state_of(body: &str) -> (AudioState, Option<String>) {
         classify(200, body)

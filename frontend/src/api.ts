@@ -33,6 +33,7 @@ import type { AddedVoice } from './types/AddedVoice'
 import type { ConfigListen } from './types/ConfigListen'
 import type { ConfigAmbient } from './types/ConfigAmbient'
 import type { VoiceEnrollment } from './types/VoiceEnrollment'
+import type { AudioTestResult } from './types/AudioTestResult'
 import type { ConfigAudio } from './types/ConfigAudio'
 import type { ConfigAppearance } from './types/ConfigAppearance'
 import type { TranscribeStatus } from './types/TranscribeStatus'
@@ -1610,6 +1611,15 @@ export function updateAudio(
   audio: Record<string, string | null>,
 ): Promise<ConfigAudio> {
   return request('/api/config/audio', jsonInit('PUT', audio))
+}
+
+/**
+ * One uncached health check of a daemon address without saving it (naru task
+ * 1793). `null` checks the address in force. An unreachable daemon is a
+ * normal answer (`state: 'daemon_down'`); a malformed URL is 422.
+ */
+export function testAudio(url: string | null): Promise<AudioTestResult> {
+  return request('/api/config/audio/test', jsonInit('POST', { url }))
 }
 
 /** The saved colour theme (naru task 1784): `system`, a theme id, or `null`. */

@@ -1,4 +1,5 @@
 import type { ConfigAudio } from './types/ConfigAudio'
+import type { AudioTestResult } from './types/AudioTestResult'
 import type { TranscribeStatus } from './types/TranscribeStatus'
 
 /**
@@ -11,14 +12,16 @@ import type { TranscribeStatus } from './types/TranscribeStatus'
  * An engine is picked from a fixed list, so the draft holds the **effective**
  * engine — the configured one, else the built-in — and a save follows the
  * route's rule that `null` removes the key: picking the built-in sends
- * `null` rather than writing the default into the file. The daemon URL is
- * deliberately not edited here.
+ * `null` rather than writing the default into the file. The daemon URL
+ * (naru task 1793) is free text: blank is the built-in (`null`), a bare
+ * `host[:port]` gets `http://` put in front, and the server's validation
+ * stays the authority on anything else.
  */
 
 /** The engines `PUT /api/config/audio` accepts, built-in first. */
 export const AUDIO_ENGINES = ['legacy', 'naru-audio']
 
-export type AudioDraft = { engine: string }
+export type AudioDraft = { engine: string; url: string }
 
 /** The engine in force: the configured one, else the built-in. */
 function effective(configured: string | null, fallback: string): string {
@@ -51,9 +54,29 @@ export function engineChange(
   return drafted === fallback ? null : drafted
 }
 
-/** The select as loaded: the engine in force. */
+/**
+ * The URL to send for typed text: `null` for blank (the built-in), else the
+ * trimmed text with `http://` prefixed when it names no scheme.
+ */
+export function normalizeUrl(text: string): string | null {
+  const trimmed = text.trim()
+  if (trimmed === '') return null
+  return trimmed.includes('://') ? trimmed : `http://${trimmed}`
+}
+
+/** `undefined` when the typed URL is already the saved one, else what to PUT. */
+export function urlChange(configured: string | null, drafted: string): string | null | undefined {
+  const saved = (configured ?? '').trim() || null
+  const next = normalizeUrl(drafted)
+  return next === saved ? undefined : next
+}
+
+/** The form as loaded: the engine in force and the saved URL (blank = built-in). */
 export function draftFrom(audio: ConfigAudio): AudioDraft {
-  return { engine: effective(audio.engine, audio.engine_default) }
+  return {
+    engine: effective(audio.engine, audio.engine_default),
+    url: (audio.url ?? '').trim(),
+  }
 }
 
 /** The engines to offer for `audio.engine`. */
@@ -63,16 +86,47 @@ export function options(audio: ConfigAudio): string[] {
 
 /** True when the select differs from what the server last reported. */
 export function isDirty(audio: ConfigAudio, draft: AudioDraft): boolean {
-  return engineChange(audio.engine, audio.engine_default, draft.engine) !== undefined
+  return (
+    engineChange(audio.engine, audio.engine_default, draft.engine) !== undefined ||
+    urlChange(audio.url, draft.url) !== undefined
+  )
 }
 
-/** The subset to PUT: `engine` only, and only when it changed. */
+/** The subset to PUT: `engine` and `url`, each only when it changed. */
 export function changedAudio(
   audio: ConfigAudio,
   draft: AudioDraft,
 ): Record<string, string | null> {
+  const out: Record<string, string | null> = {}
   const engine = engineChange(audio.engine, audio.engine_default, draft.engine)
-  return engine === undefined ? {} : { engine }
+  if (engine !== undefined) out.engine = engine
+  const url = urlChange(audio.url, draft.url)
+  if (url !== undefined) out.url = url
+  return out
+}
+
+/** The note shown when an environment variable overrides the saved URL, else `null`. */
+export function envNote(audio: ConfigAudio): string | null {
+  return audio.url_env
+    ? `NARU_AUDIO_URL=${audio.url_env} overrides this setting on this server. The saved value applies when the variable is removed.`
+    : null
+}
+
+/** The sentence for a "test connection" answer. */
+export function testResultLine(result: AudioTestResult): string {
+  const where = result.url
+  switch (result.state) {
+    case 'ready':
+      return `Reachable and ready at ${where}`
+    case 'daemon_down':
+      return `Not reachable at ${where}`
+    case 'model_missing':
+      return `Reachable at ${where}, but its speech-to-text model is missing`
+    case 'incompatible':
+      return `Reachable at ${where}, but it speaks an incompatible API version`
+    default:
+      return `Error from ${where}`
+  }
 }
 
 /**

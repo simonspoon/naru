@@ -23,4 +23,9 @@ engine: string | null,
 /**
  * The built-in engine (`"legacy"`).
  */
-engine_default: string, };
+engine_default: string, 
+/**
+ * The `NARU_AUDIO_URL` (or `MESA_AUDIO_URL`) value when it is set and
+ * valid — the address actually in force, overriding `url`; else `null`.
+ */
+url_env: string | null, };

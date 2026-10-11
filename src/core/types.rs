@@ -727,6 +727,22 @@ pub struct ConfigAudio {
     pub engine: Option<String>,
     /// The built-in engine (`"legacy"`).
     pub engine_default: String,
+    /// The `NARU_AUDIO_URL` (or `MESA_AUDIO_URL`) value when it is set and
+    /// valid — the address actually in force, overriding `url`; else `null`.
+    pub url_env: Option<String>,
+}
+
+/// What `POST /api/config/audio/test` answers (naru task 1793): one
+/// uncached `/health` check of a daemon address, never an error for an
+/// unreachable one (that is `state: "daemon_down"`).
+#[derive(Debug, Clone, PartialEq, Serialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct AudioTestResult {
+    /// The address that was asked.
+    pub url: String,
+    pub state: crate::core::audio::AudioState,
+    /// The sentence to show the person; `null` when ready.
+    pub message: Option<String>,
 }
 
 /// The `appearance` settings as the Settings page sees them (`core::config`,

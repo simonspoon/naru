@@ -5,14 +5,23 @@ import {
   engineChange,
   engineChoices,
   engineStatus,
+  envNote,
   isDirty,
+  normalizeUrl,
   options,
   savedEngine,
+  testResultLine,
+  urlChange,
 } from './audioDraft'
 import type { ConfigAudio } from './types/ConfigAudio'
 import type { TranscribeStatus } from './types/TranscribeStatus'
 
-const base = { url: null, url_default: 'http://127.0.0.1:7870', engine_default: 'legacy' }
+const base = {
+  url: null,
+  url_default: 'http://127.0.0.1:7870',
+  engine_default: 'legacy',
+  url_env: null,
+}
 const UNSET: ConfigAudio = { ...base, engine: null }
 const DAEMON: ConfigAudio = { ...base, engine: 'naru-audio' }
 const EXPLICIT_LEGACY: ConfigAudio = { ...base, engine: 'legacy' }
@@ -21,9 +30,12 @@ const HAND_EDITED: ConfigAudio = { ...base, engine: 'whisper' }
 
 describe('draftFrom', () => {
   it('shows the engine in force: the configured one, else the built-in', () => {
-    expect(draftFrom(UNSET)).toEqual({ engine: 'legacy' })
-    expect(draftFrom(DAEMON)).toEqual({ engine: 'naru-audio' })
-    expect(draftFrom({ ...base, engine: '  ' })).toEqual({ engine: 'legacy' })
+    expect(draftFrom(UNSET)).toEqual({ engine: 'legacy', url: '' })
+    expect(draftFrom(DAEMON)).toEqual({ engine: 'naru-audio', url: '' })
+    expect(draftFrom({ ...base, engine: '  ' })).toEqual({
+      engine: 'legacy',
+      url: '',
+    })
   })
 
   it('reports a freshly loaded section as pristine', () => {
@@ -48,22 +60,30 @@ describe('options', () => {
 
 describe('changedAudio', () => {
   it('sends the daemon engine when picked', () => {
-    expect(isDirty(UNSET, { engine: 'naru-audio' })).toBe(true)
-    expect(changedAudio(UNSET, { engine: 'naru-audio' })).toEqual({ engine: 'naru-audio' })
+    expect(isDirty(UNSET, { engine: 'naru-audio', url: '' })).toBe(true)
+    expect(changedAudio(UNSET, { engine: 'naru-audio', url: '' })).toEqual({
+      engine: 'naru-audio',
+    })
   })
 
   it('sends null to go back to the built-in — the route removes the key', () => {
-    expect(changedAudio(DAEMON, { engine: 'legacy' })).toEqual({ engine: null })
-    expect(changedAudio(HAND_EDITED, { engine: 'legacy' })).toEqual({ engine: null })
+    expect(changedAudio(DAEMON, { engine: 'legacy', url: '' })).toEqual({
+      engine: null,
+    })
+    expect(changedAudio(HAND_EDITED, { engine: 'legacy', url: '' })).toEqual({
+      engine: null,
+    })
   })
 
   it('sends nothing when an explicit built-in is picked again', () => {
-    expect(changedAudio(EXPLICIT_LEGACY, { engine: 'legacy' })).toEqual({})
+    expect(changedAudio(EXPLICIT_LEGACY, { engine: 'legacy', url: '' })).toEqual({})
   })
 
-  it('never sends a url', () => {
+  it('leaves a saved url alone when the draft keeps it', () => {
     const withUrl: ConfigAudio = { ...DAEMON, url: 'http://127.0.0.1:9999' }
-    expect(changedAudio(withUrl, { engine: 'legacy' })).toEqual({ engine: null })
+    expect(changedAudio(withUrl, { engine: 'legacy', url: 'http://127.0.0.1:9999' })).toEqual({
+      engine: null,
+    })
   })
 })
 
@@ -139,5 +159,61 @@ describe('engineStatus', () => {
       headline: 'In effect: naru-audio — speech and transcription through the daemon',
       details: ['Probing…'],
     })
+  })
+})
+
+describe('audio url (naru task 1793)', () => {
+  it('normalizes: blank is null, a bare host gets http://, a scheme is kept', () => {
+    expect(normalizeUrl('  ')).toBeNull()
+    expect(normalizeUrl(' 10.0.0.5:7870 ')).toBe('http://10.0.0.5:7870')
+    expect(normalizeUrl('studio.local')).toBe('http://studio.local')
+    expect(normalizeUrl('http://a:1')).toBe('http://a:1')
+    expect(normalizeUrl('https://a:1')).toBe('https://a:1')
+  })
+
+  it('seeds the draft from the saved url and is pristine', () => {
+    const saved: ConfigAudio = { ...DAEMON, url: 'http://10.0.0.5:7870' }
+    expect(draftFrom(saved)).toEqual({
+      engine: 'naru-audio',
+      url: 'http://10.0.0.5:7870',
+    })
+    expect(isDirty(saved, draftFrom(saved))).toBe(false)
+    expect(changedAudio(saved, draftFrom(saved))).toEqual({})
+  })
+
+  it('sends the normalized url when changed and null when cleared', () => {
+    expect(changedAudio(DAEMON, { engine: 'naru-audio', url: '10.0.0.5' })).toEqual({
+      url: 'http://10.0.0.5',
+    })
+    const saved: ConfigAudio = { ...DAEMON, url: 'http://10.0.0.5:7870' }
+    expect(changedAudio(saved, { engine: 'naru-audio', url: ' ' })).toEqual({
+      url: null,
+    })
+    expect(isDirty(saved, { engine: 'naru-audio', url: '10.0.0.5:7870' })).toBe(false)
+    expect(urlChange(null, '')).toBeUndefined()
+  })
+
+  it('sends engine and url together', () => {
+    expect(changedAudio(UNSET, { engine: 'naru-audio', url: 'h:1' })).toEqual({
+      engine: 'naru-audio',
+      url: 'http://h:1',
+    })
+  })
+
+  it('notes an environment override only when one is in force', () => {
+    expect(envNote(DAEMON)).toBeNull()
+    expect(envNote({ ...DAEMON, url_env: 'http://x:1' })).toContain(
+      'NARU_AUDIO_URL=http://x:1 overrides',
+    )
+  })
+
+  it('words each test answer', () => {
+    const r = (state: 'ready' | 'daemon_down' | 'model_missing' | 'incompatible' | 'error') =>
+      testResultLine({ url: 'http://h:1', state, message: null })
+    expect(r('ready')).toBe('Reachable and ready at http://h:1')
+    expect(r('daemon_down')).toBe('Not reachable at http://h:1')
+    expect(r('model_missing')).toContain('model is missing')
+    expect(r('incompatible')).toContain('incompatible')
+    expect(r('error')).toBe('Error from http://h:1')
   })
 })

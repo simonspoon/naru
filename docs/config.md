@@ -1521,11 +1521,22 @@ through and where the `naru-audio` daemon listens (mesa task 1388):
   16384" on that engine.
 - **`url`**: a plain `http://host[:port]` (no TLS, path or query), default
   `http://127.0.0.1:7870`. **`NARU_AUDIO_URL`** (or `MESA_AUDIO_URL`), when
-  set and non-empty, overrides the file.
+  set and non-empty, overrides the file. It may point at a daemon on another
+  computer (naru task 1793): start that one with `naru-audio serve --listen
+  0.0.0.0:7870 --allow-remote`. The daemon is loopback-only by default;
+  `--allow-remote` exposes it to the network and turns off its Host check, and
+  it has no authentication, so only do this on a network you trust. Naru calls
+  the daemon from the server, so no browser `Origin` is involved.
 - Read on every request. A hand-edited unusable value falls back to the
   built-in where it is used and is shown verbatim by the getter.
 - Edited from the Settings page's **Audio** section (mesa task 1391): an
-  engine `<select>` (the URL is file-only) beside a status block (mesa task
+  engine `<select>` and, while the draft engine is `naru-audio`, a daemon
+  address field (naru task 1793: a full `http://host:port` or a bare
+  `host[:port]`, which gets `http://` put in front; blank sends `null` for
+  the built-in; the server's 422 is shown on save), a **test connection**
+  button that checks the typed address without saving it, a note when
+  `NARU_AUDIO_URL` is overriding the setting, and the remote-daemon hint
+  above, beside a status block (mesa task
   1411, `audioDraft.ts::engineStatus`) naming the engine **in effect** — the
   saved one, never the unsaved draft, read as the server reads it (a value
   it does not parse is the built-in `legacy`) — and what it runs speech and
@@ -1543,11 +1554,21 @@ through and where the `naru-audio` daemon listens (mesa task 1388):
 ### Routes
 
 - `GET /api/config/audio` → `ConfigAudio`: `{url, url_default, engine,
-  engine_default}`, each value verbatim or `null` beside its built-in.
+  engine_default, url_env}`, each value verbatim or `null` beside its
+  built-in; `url_env` is the `NARU_AUDIO_URL`/`MESA_AUDIO_URL` value when it
+  is set and valid (so actually overriding `url`), else `null`.
 - `PUT /api/config/audio`, body `{"url": … | null, "engine": … | null}` →
   echoes the getter. `null` and blank remove the key; a bad value is **422
   `validation`**, writing nothing. Both verbs carry `require_agent_access`,
   like every other config route.
+- `POST /api/config/audio/test`, body `{"url": … | null}` → `{url, state,
+  message}` (naru task 1793): one **uncached** `GET {url}/health` through the
+  same classification as the probe (`audio::check`; the TTL cache and the
+  state-change log are untouched), `state` one of `ready`, `daemon_down`,
+  `model_missing`, `incompatible`, `error`. `null`/blank checks the address
+  in force. A malformed URL is **422 `validation`**; an unreachable daemon is
+  a 200 with `daemon_down`, never a 5xx. `require_agent_access`, like the
+  rest.
 
 ## Appearance
 

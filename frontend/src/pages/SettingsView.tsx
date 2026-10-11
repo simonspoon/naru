@@ -26,6 +26,7 @@ import {
   updateKeymap,
   transcribeStatus,
   updateAudio,
+  testAudio,
   updateListen,
   updateLiveConfig,
   updateLiveMemory,
@@ -159,7 +160,10 @@ import {
   isDirty as isAudioDirty,
   options as audioEngineOptions,
   engineStatus,
+  envNote,
+  normalizeUrl,
   savedEngine as savedAudioEngine,
+  testResultLine,
   type AudioDraft,
 } from '../audioDraft'
 import { toBase64 } from '../liveAudio'
@@ -2295,8 +2299,9 @@ function VoiceDesignPanel({
  * `naru-audio` (the daemon) — with the engine in effect (the saved one) and
  * its live probe beside it, from `GET /api/live/transcribe` (`engineStatus`,
  * mesa task 1411). The save drops the server's cached probe, and the probe is
- * refetched after it, so the new engine's state shows with no reload. The
- * daemon URL is not edited here.
+ * refetched after it, so the new engine's state shows with no reload. On
+ * `naru-audio` the daemon's address (`audio.url`, naru task 1793) is edited
+ * too, with a test button that checks the typed address without saving it.
  */
 function AudioSection() {
   const { data: audio, error, refetch } = useFetch(() => getAudio(), 'audio')
@@ -2307,7 +2312,27 @@ function AudioSection() {
   const [saving, setSaving] = useState(false)
 
   const seeded: AudioDraft =
-    draft ?? (audio ? audioDraftFrom(audio) : { engine: 'legacy' })
+    draft ?? (audio ? audioDraftFrom(audio) : { engine: 'legacy', url: '' })
+  const [testing, setTesting] = useState(false)
+  const [testLine, setTestLine] = useState<string | null>(null)
+  const [testDetail, setTestDetail] = useState<string | null>(null)
+
+  function testConnection() {
+    setTesting(true)
+    setTestLine(null)
+    setTestDetail(null)
+    testAudio(normalizeUrl(seeded.url) ?? audio?.url_default ?? null).then(
+      (r) => {
+        setTesting(false)
+        setTestLine(testResultLine(r))
+        setTestDetail(r.message)
+      },
+      (e: unknown) => {
+        setTesting(false)
+        setTestLine(e instanceof Error ? e.message : String(e))
+      },
+    )
+  }
 
   function save() {
     if (!audio) return
@@ -2318,6 +2343,8 @@ function AudioSection() {
         setDraft(audioDraftFrom(fresh))
         setSaving(false)
         setSaved(true)
+        setTestLine(null)
+        setTestDetail(null)
         refetch()
         probe.refetch()
       },
@@ -2372,7 +2399,7 @@ function AudioSection() {
             className="settings-voice-input"
             value={seeded.engine}
             onChange={(e) => {
-              setDraft({ engine: e.target.value })
+              setDraft({ ...seeded, engine: e.target.value })
               setSaved(false)
             }}
           >
@@ -2403,6 +2430,50 @@ function AudioSection() {
                 {probe.data.message}
               </p>
             )}
+          </>
+        )}
+        {seeded.engine === 'naru-audio' && (
+          <>
+            <label htmlFor="audio-url">
+              <span className="settings-command-title">Daemon address</span>
+              <code className="settings-command-key">url</code>
+            </label>
+            <p className="muted settings-command-blurb">
+              Where the naru-audio daemon listens: <code>http://host:port</code>{' '}
+              or just <code>host:port</code>. Blank uses the built-in address.
+            </p>
+            <div className="settings-voice-row">
+              <input
+                id="audio-url"
+                className="settings-voice-input"
+                type="text"
+                value={seeded.url}
+                placeholder={audio.url_default}
+                onChange={(e) => {
+                  setDraft({ ...seeded, url: e.target.value })
+                  setSaved(false)
+                  setTestLine(null)
+                  setTestDetail(null)
+                }}
+              />
+              <button type="button" disabled={testing} onClick={testConnection}>
+                {testing ? 'testing…' : 'test connection'}
+              </button>
+            </div>
+            {envNote(audio) && (
+              <p className="settings-command-blurb">{envNote(audio)}</p>
+            )}
+            {testLine && <p className="settings-command-blurb">{testLine}</p>}
+            {testDetail && (
+              <p className="muted settings-command-blurb">{testDetail}</p>
+            )}
+            <p className="muted settings-command-blurb">
+              To use a daemon on another computer, start it there with{' '}
+              <code>naru-audio serve --listen 0.0.0.0:7870 --allow-remote</code>.
+              The daemon is loopback-only by default; <code>--allow-remote</code>{' '}
+              exposes it to the network and turns off its Host check. There is
+              no authentication, so only do this on a network you trust.
+            </p>
           </>
         )}
       </section>

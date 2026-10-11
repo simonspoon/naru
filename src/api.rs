@@ -39,21 +39,21 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::core::{
     AgentSession, AgentSpawned, ArchiveOutcome, Artifact, ArtifactPatch, ArtifactSummary,
-    CcDashboard, CcLiveSession, CcScorecard, CcUsage, ConfigServe, Error, FileTreeEntry, GitCommit,
-    GitCommitFile, GitFileDiff, GitRepo, GitRepoView, GitStatus, GitWorktree, InboxItem, InboxKind,
-    LIVE_AUDIO_MAX, LIVE_BOARD_INK_STATE_MAX, LIVE_BOARD_KEEP, LIVE_INK_MAX, LibraryBuiltinAction,
-    LibraryBundle, LibraryImportResult, LibraryKind, LibraryPatch, LibraryScope,
-    LiveBoardHistoryEntry, LiveBoardHistoryPage, LiveBoardInkEntry, LiveBoardKind,
-    LiveBoardSummary, LiveContext, LiveNotebookEntry, LiveNotice, LiveOffer, LiveState, LiveStatus,
-    LiveTranscript, LiveWindow, ModelRates, NaruVersion, NextResult, Priority, ProjectAgents,
-    ProjectFileTree, ProjectGitLog, ProjectGitRepos, ProjectGitStatus, ProjectGitView,
-    ProjectPatch, ProjectVersion, ReceiptPatch, STALE_CLAIM_MINUTES, Script, ScriptArg,
-    ScriptPatch, ScriptRunEvent, ServeBoolSetting, ServeHostsSetting, ServeNumberSetting, Status,
-    Store, SystemInfo, Task, TaskNote, TaskPatch, TaskSummary, VoiceEnrollment, WorkflowNodeKind,
-    WorkflowNodeNew, WorkflowNodePatch, WorkflowPatch, WorkflowTrigger, agents, attachments, audio,
-    board, config, files, git, guard, hooks, inbox_triage, library, listen, live, memory_job,
-    project_memory, receipt, runner, script_runs, scripts, speech, supervisor, system,
-    validate_live_client, version, voice_enroll, workflow,
+    AudioTestResult, CcDashboard, CcLiveSession, CcScorecard, CcUsage, ConfigServe, Error,
+    FileTreeEntry, GitCommit, GitCommitFile, GitFileDiff, GitRepo, GitRepoView, GitStatus,
+    GitWorktree, InboxItem, InboxKind, LIVE_AUDIO_MAX, LIVE_BOARD_INK_STATE_MAX, LIVE_BOARD_KEEP,
+    LIVE_INK_MAX, LibraryBuiltinAction, LibraryBundle, LibraryImportResult, LibraryKind,
+    LibraryPatch, LibraryScope, LiveBoardHistoryEntry, LiveBoardHistoryPage, LiveBoardInkEntry,
+    LiveBoardKind, LiveBoardSummary, LiveContext, LiveNotebookEntry, LiveNotice, LiveOffer,
+    LiveState, LiveStatus, LiveTranscript, LiveWindow, ModelRates, NaruVersion, NextResult,
+    Priority, ProjectAgents, ProjectFileTree, ProjectGitLog, ProjectGitRepos, ProjectGitStatus,
+    ProjectGitView, ProjectPatch, ProjectVersion, ReceiptPatch, STALE_CLAIM_MINUTES, Script,
+    ScriptArg, ScriptPatch, ScriptRunEvent, ServeBoolSetting, ServeHostsSetting,
+    ServeNumberSetting, Status, Store, SystemInfo, Task, TaskNote, TaskPatch, TaskSummary,
+    VoiceEnrollment, WorkflowNodeKind, WorkflowNodeNew, WorkflowNodePatch, WorkflowPatch,
+    WorkflowTrigger, agents, attachments, audio, board, config, files, git, guard, hooks,
+    inbox_triage, library, listen, live, memory_job, project_memory, receipt, runner, script_runs,
+    scripts, speech, supervisor, system, validate_live_client, version, voice_enroll, workflow,
 };
 
 /// The Vite build output, embedded into the binary at compile time.
@@ -3495,6 +3495,9 @@ fn router(state: AppState) -> Router {
             "/api/config/audio",
             get(get_config_audio).put(update_config_audio),
         )
+        // One uncached health check of a typed-in daemon address (naru task
+        // 1793); mutating method, so the Content-Type gate applies.
+        .route("/api/config/audio/test", post(test_config_audio))
         // The same file's `appearance` section — the web UI's colour theme
         // (naru task 1784). Same pair of gates as its siblings.
         .route(
@@ -11047,6 +11050,49 @@ async fn update_config_audio(
         },
     })?;
     get_config_audio(State(state), ConnectInfo(addr), headers).await
+}
+
+#[derive(Deserialize)]
+struct AudioTest {
+    /// The address to check; `null`, blank or absent is the one in force.
+    #[serde(default)]
+    url: Option<String>,
+}
+
+/// `POST /api/config/audio/test` — asks the daemon at the given address (else
+/// the one in force) for `/health`, uncached and without saving anything
+/// (naru task 1793). A malformed URL is 422; an unreachable daemon is a 200
+/// with `state: "daemon_down"`. Gated like every other config route.
+async fn test_config_audio(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(body): Json<AudioTest>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let result = blocking(move || {
+        let url = config::resolve_audio_test_url(body.url.as_deref())?;
+        let probe = audio::check(&url);
+        Ok::<_, config::SaveError>(AudioTestResult {
+            url: probe.url,
+            state: probe.state,
+            message: probe.message,
+        })
+    })
+    .await?
+    .map_err(|e| match e {
+        config::SaveError::Validation(message) => ApiError {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            code: "validation",
+            message,
+        },
+        config::SaveError::Unavailable(message) => ApiError {
+            status: StatusCode::BAD_GATEWAY,
+            code: "unavailable",
+            message,
+        },
+    })?;
+    Ok(Json(result).into_response())
 }
 
 /// `GET /api/config/appearance` — the saved colour theme (`docs/config.md`,

@@ -3474,7 +3474,28 @@ fn audio_in(path: &Path) -> Result<ConfigAudio, String> {
         url_default: audio::DEFAULT_URL.to_string(),
         engine: raw(section.engine),
         engine_default: DEFAULT_AUDIO_ENGINE.as_str().to_string(),
+        url_env: audio_url_env(),
     })
+}
+
+/// The `NARU_AUDIO_URL` (or `MESA_AUDIO_URL`) value when it is set, non-empty
+/// and valid — i.e. when [`pick_audio_url`] lets it override the file. A
+/// refused value is not in force, so it is not reported.
+fn audio_url_env() -> Option<String> {
+    crate::core::env::var("AUDIO_URL")
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty() && validate_audio_url(v).is_ok())
+}
+
+/// The URL `POST /api/config/audio/test` checks: the requested one when
+/// non-blank (held to [`validate_audio_url`]), else the address in force.
+pub fn resolve_audio_test_url(requested: Option<&str>) -> Result<String, SaveError> {
+    match requested.map(str::trim).filter(|v| !v.is_empty()) {
+        Some(v) => validate_audio_url(v)
+            .map(|()| v.to_string())
+            .map_err(SaveError::Validation),
+        None => audio_url().map_err(SaveError::Unavailable),
+    }
 }
 
 /// Writes the `audio` entries named in `updates` into the config file.
@@ -7721,6 +7742,46 @@ mod tests {
         unsafe { std::env::set_var("NARU_AUDIO_URL", "https://127.0.0.1:9003") };
         assert_eq!(audio_url_in(&path).unwrap(), "http://127.0.0.1:9000");
         unsafe { std::env::remove_var("NARU_AUDIO_URL") };
+    }
+
+    #[test]
+    fn url_env_is_reported_only_when_set_and_valid() {
+        let _env = crate::core::attachments::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(dir.path(), r#"{"audio": {"url": "http://127.0.0.1:9000"}}"#);
+        // SAFETY: ENV_LOCK serializes every test touching the environment.
+        unsafe {
+            std::env::remove_var("NARU_AUDIO_URL");
+            std::env::remove_var("MESA_AUDIO_URL");
+        }
+        assert_eq!(audio_in(&path).unwrap().url_env, None);
+        unsafe { std::env::set_var("NARU_AUDIO_URL", "") };
+        assert_eq!(audio_in(&path).unwrap().url_env, None);
+        unsafe { std::env::set_var("NARU_AUDIO_URL", "https://nope:1") };
+        assert_eq!(audio_in(&path).unwrap().url_env, None);
+        unsafe { std::env::set_var("NARU_AUDIO_URL", "http://10.0.0.5:7870") };
+        let audio = audio_in(&path).unwrap();
+        assert_eq!(audio.url_env.as_deref(), Some("http://10.0.0.5:7870"));
+        assert_eq!(audio.url.as_deref(), Some("http://127.0.0.1:9000"));
+        unsafe { std::env::remove_var("NARU_AUDIO_URL") };
+    }
+
+    #[test]
+    fn audio_test_url_is_validated_and_blank_means_in_force() {
+        assert!(matches!(
+            resolve_audio_test_url(Some("https://x:1")),
+            Err(SaveError::Validation(_))
+        ));
+        assert!(matches!(
+            resolve_audio_test_url(Some("127.0.0.1:7870")),
+            Err(SaveError::Validation(_))
+        ));
+        assert_eq!(
+            resolve_audio_test_url(Some(" http://10.0.0.5:7870 ")).unwrap(),
+            "http://10.0.0.5:7870"
+        );
     }
 
     #[test]

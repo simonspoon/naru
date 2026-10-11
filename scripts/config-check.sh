@@ -21,6 +21,8 @@
 set -euo pipefail
 # Drop inherited NARU_* vars: Naru reads them before MESA_*, so one would escape this script's isolation.
 unset $(env | sed -n 's/^\(NARU_[A-Za-z0-9_]*\)=.*/\1/p')
+# url_env must read null below, so a developer's exported audio override cannot leak in.
+unset NARU_AUDIO_URL MESA_AUDIO_URL
 
 cd "$(dirname "$0")/.."
 command -v jq >/dev/null || { echo "jq is required" >&2; exit 1; }
@@ -1675,6 +1677,23 @@ CODE=$(curl -s -o "$TMP/body" -w '%{http_code}' -H 'Host: evil.example' \
   "http://127.0.0.1:$PORT/api/config/audio")
 [ "$CODE" = "403" ] || fail "GET audio with a foreign Host: expected 403, got $CODE: $(cat "$TMP/body")"
 ok "the audio verbs sit behind the config routes' gate"
+
+# naru task 1793: `url_env` is null with no override; the test route answers a
+# dead port as data (200 daemon_down), refuses a bad URL (422), and is gated.
+api GET /api/config/audio
+[ "$(jq -c '.url_env' <<<"$STDOUT")" = "null" ] || fail "GET audio url_env with no override: $STDOUT"
+DEAD_PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')
+api POST /api/config/audio/test "{\"url\": \"http://127.0.0.1:$DEAD_PORT\"}"
+[ "$CODE" = "200" ] || fail "audio test on a dead port: expected 200, got $CODE: $STDOUT"
+[ "$(jq -r .state <<<"$STDOUT")" = "daemon_down" ] || fail "audio test on a dead port: expected daemon_down, got $STDOUT"
+[ "$(jq -r .url <<<"$STDOUT")" = "http://127.0.0.1:$DEAD_PORT" ] || fail "audio test must echo the asked url: $STDOUT"
+api POST /api/config/audio/test '{"url": "https://127.0.0.1:7870"}'
+[ "$CODE" = "422" ] || fail "audio test with a bad url: expected 422, got $CODE: $STDOUT"
+[ "$(jq -r .error.code <<<"$STDOUT")" = "validation" ] || fail "audio test with a bad url: expected validation, got $STDOUT"
+CODE=$(curl -s -o "$TMP/body" -w '%{http_code}' -X POST -H 'Host: evil.example' -H 'Content-Type: application/json' \
+  -d '{"url": null}' "http://127.0.0.1:$PORT/api/config/audio/test")
+[ "$CODE" = "403" ] || fail "audio test with a foreign Host: expected 403, got $CODE: $(cat "$TMP/body")"
+ok "url_env is null by default; POST /api/config/audio/test: dead port is 200 daemon_down, a bad url 422, a foreign Host 403"
 
 # ---- the appearance section: GET/PUT /api/config/appearance (naru task 1784) ----
 api GET /api/config/appearance
