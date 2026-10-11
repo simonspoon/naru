@@ -10,7 +10,7 @@
 # The decision table it pins (docs/library.md "The task-stop-guard hook"):
 #   * a session whose first user message names no task -> allow;
 #   * in_progress + nothing pending + no inbox item    -> block, the reason
-#     naming the task, `mesa task update` and `mesa inbox add`;
+#     naming the task, `naru task update` and `naru inbox add`;
 #   * in_progress + a pending background shell         -> allow;
 #   * done + a pending background agent                -> block, listing it;
 #   * done + nothing pending                           -> allow;
@@ -145,7 +145,7 @@ hook "$TMP/plain.jsonl"; allowed "a session whose first message names no task"
 # ================= in_progress, nothing pending =================
 transcript "$TMP/prog.jsonl" "/execute-mesa-task $T_PROG"
 hook "$TMP/prog.jsonl"
-blocked "in_progress + nothing pending" "task $T_PROG" "in_progress" "mesa task update $T_PROG" "mesa inbox add --task $T_PROG"
+blocked "in_progress + nothing pending" "task $T_PROG" "in_progress" "naru task update $T_PROG" "naru inbox add --task $T_PROG"
 
 # the slash-command record shape and a customised one-line template too
 transcript "$TMP/slash.jsonl" "<command-message>execute-mesa-task</command-message>
@@ -162,6 +162,13 @@ hook "$TMP/custom-plain.jsonl"; allowed "the customised template form without th
 # the exact forms need no header
 transcript "$TMP/slash-plain.jsonl" "/execute-mesa-task $T_PROG" "$(agent_setting)"
 hook "$TMP/slash-plain.jsonl"; blocked "/execute-mesa-task with the --agent header too" "task $T_PROG"
+# the naru spelling is the primary one; the mesa one above is its alias
+transcript "$TMP/naru-prog.jsonl" "/execute-naru-task $T_PROG"
+hook "$TMP/naru-prog.jsonl"; blocked "/execute-naru-task, in_progress + nothing pending" "task $T_PROG" "naru task update $T_PROG"
+transcript "$TMP/naru-slash.jsonl" "<command-message>execute-naru-task</command-message>
+<command-name>/execute-naru-task</command-name>
+<command-args>$T_PROG</command-args>"
+hook "$TMP/naru-slash.jsonl"; blocked "the <command-name> record shape with execute-naru-task" "task $T_PROG"
 
 # ================= in_progress, pending shell =================
 transcript "$TMP/prog-shell.jsonl" "/execute-mesa-task $T_PROG" "$(shell_launch bq1w2e3r4)"

@@ -25,7 +25,7 @@ pub const BARGE_IN_HOOK_NAME: &str = "live-barge-in.sh";
 /// to `naru live hook` (falling back to `mesa`) and passes its stdout
 /// through. It **always exits 0**. `scripts/live-check.sh` is its gate.
 pub const BARGE_IN_HOOK: &str = r##"#!/usr/bin/env bash
-# live-barge-in.sh — a Claude Code PreToolUse/PostToolUse hook (mesa task 1595).
+# live-barge-in.sh — a Claude Code PreToolUse/PostToolUse hook (naru task 1595).
 # Installed with:
 #   naru library hook enable live-barge-in.sh --event PreToolUse
 #   naru library hook enable live-barge-in.sh --event PostToolUse

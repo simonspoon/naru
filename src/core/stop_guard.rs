@@ -23,19 +23,19 @@ pub const STOP_GUARD_HOOK_BUILTIN: &str = "task-stop-guard";
 pub const STOP_GUARD_HOOK_NAME: &str = "task-stop-guard.sh";
 
 /// The hook script. Reads Claude Code's `Stop` payload on stdin and decides
-/// from the session transcript plus `mesa task show`/`mesa inbox list`
-/// whether the agent may end its turn. It needs only `bash`, `jq` and `mesa`
+/// from the session transcript plus `naru task show`/`naru inbox list`
+/// whether the agent may end its turn. It needs only `bash`, `jq` and `naru`
 /// and it **never wedges a session**: a missing tool, an unreadable
-/// transcript, a session that is not a task agent's, or any mesa error is an
+/// transcript, a session that is not a task agent's, or any naru error is an
 /// allow (exit 0, nothing printed). A block is `{"decision":"block",
 /// "reason":…}` on stdout, still exit 0.
 ///
 /// The transcript records it reads (verified against real transcripts under
 /// `~/.claude/projects/`):
 ///
-/// * the task id — the FIRST user message, as `/execute-mesa-task <id>`
+/// * the task id — the FIRST user message, as `/execute-naru-task <id>`
 ///   (`DEFAULT_TASK_EXECUTE`), a slash command recorded as
-///   `<command-name>/execute-mesa-task</command-name>` +
+///   `<command-name>/execute-naru-task</command-name>` +
 ///   `<command-args><id></command-args>`, or — only in a session launched
 ///   with `--agent`, marked by a `{"type":"agent-setting","agentSetting":…}`
 ///   header record no interactive session carries — a one-line prompt
@@ -50,14 +50,14 @@ pub const STOP_GUARD_HOOK_NAME: &str = "task-stop-guard.sh";
 ///   `KillShell`/`TaskStop` tool call naming it, or a `[Subagent hand-back]`
 ///   `<agent-message from="<id>">`.
 pub const STOP_GUARD_HOOK: &str = r##"#!/usr/bin/env bash
-# task-stop-guard.sh — a Claude Code Stop hook for mesa task agents
-# (mesa task 1190). Installed with:
-#   mesa library hook enable task-stop-guard --event Stop
+# task-stop-guard.sh — a Claude Code Stop hook for naru task agents
+# (naru task 1190). Installed with:
+#   naru library hook enable task-stop-guard --event Stop
 #
 # Reads the Stop payload on stdin and fires only in a session whose FIRST
-# user message names a mesa task (the task-execute prompt); every other
-# session is left alone. It never wedges: jq or mesa missing, an unreadable
-# transcript, or any mesa error is an allow (exit 0, nothing printed).
+# user message names a naru task (the task-execute prompt); every other
+# session is left alone. It never wedges: jq or naru missing, an unreadable
+# transcript, or any naru error is an allow (exit 0, nothing printed).
 #
 # Decision — task status x pending background work x question filed:
 #   in_progress, background work pending        -> allow (the harness wakes it)
@@ -70,7 +70,13 @@ pub const STOP_GUARD_HOOK: &str = r##"#!/usr/bin/env bash
 # is why pending work allows rather than blocks — blocking would force polling.
 set -u
 command -v jq >/dev/null 2>&1 || exit 0
-command -v mesa >/dev/null 2>&1 || exit 0
+if command -v naru >/dev/null 2>&1; then
+  bin=naru
+elif command -v mesa >/dev/null 2>&1; then
+  bin=mesa
+else
+  exit 0
+fi
 
 payload=$(cat) || exit 0
 [ "$(jq -r '.stop_hook_active // false' <<<"$payload" 2>/dev/null)" = "true" ] && exit 0
@@ -94,9 +100,9 @@ facts=$(jq -Rs '
     elif type == "object" then (.text // (.content | text))
     else "" end;
   def task_id($dispatched):
-    [ (capture("(?:^|\\s)/execute-mesa-task\\s+(?<id>[0-9]+)") | .id),
-      (capture("<command-name>/execute-(?:mesa-task|todo)</command-name>\\s*<command-args>\\s*(?<id>[0-9]+)") | .id),
-      (capture("<command-name>/execute-(?:mesa-task|todo)</command-name>\\s*<command-args>.{0,200}?\"id\":\\s*(?<id>[0-9]+)"; "s") | .id),
+    [ (capture("(?:^|\\s)/execute-(?:naru|mesa)-task\\s+(?<id>[0-9]+)") | .id),
+      (capture("<command-name>/execute-(?:naru-task|mesa-task|todo)</command-name>\\s*<command-args>\\s*(?<id>[0-9]+)") | .id),
+      (capture("<command-name>/execute-(?:naru-task|mesa-task|todo)</command-name>\\s*<command-args>.{0,200}?\"id\":\\s*(?<id>[0-9]+)"; "s") | .id),
       (select($dispatched and length <= 200 and (test("\n") | not)) | capture("\\btask:?\\s*#?(?<id>[0-9]+)\\W*$") | .id)
     ] | .[0];
   [ split("\n")[] | fromjson? | select(type == "object" and ((.isSidechain // false) | not)) ] as $rows
@@ -124,7 +130,7 @@ facts=$(jq -Rs '
 
 task_id=$(jq -r '.task_id // empty' <<<"$facts")
 [ -n "$task_id" ] || exit 0
-status=$(mesa task show "$task_id" 2>/dev/null | jq -r '.status // empty') || exit 0
+status=$("$bin" task show "$task_id" 2>/dev/null | jq -r '.status // empty') || exit 0
 [ -n "$status" ] || exit 0
 pending=$(jq -r '(.shells | map("shell " + .)) + (.agents | map("agent " + .)) | join(", ")' <<<"$facts")
 
@@ -137,14 +143,14 @@ if [ "$status" = "in_progress" ]; then
   started=$(jq -r '.started' <<<"$facts")
   filed=false
   if [ -n "$started" ]; then
-    filed=$(mesa inbox list 2>/dev/null | jq -r --argjson id "$task_id" --arg since "$started" \
+    filed=$("$bin" inbox list 2>/dev/null | jq -r --argjson id "$task_id" --arg since "$started" \
       'any(.[]; .task_id == $id and .created_at >= $since)') || exit 0
   fi
   [ "$filed" = "true" ] && exit 0
-  block "mesa task $task_id is still in_progress and nothing is running in the background. Keep working on it; or close it (mesa task update $task_id --status done|cancelled --result '...'); or move it back to queued (--status todo) or backlog with a result saying why (mesa task update $task_id --status todo --result '...'); or file the question you are stuck on (mesa inbox add --task $task_id --kind change-request '...') and then end."
+  block "naru task $task_id is still in_progress and nothing is running in the background. Keep working on it; or close it (naru task update $task_id --status done|cancelled --result '...'); or move it back to queued (--status todo) or backlog with a result saying why (naru task update $task_id --status todo --result '...'); or file the question you are stuck on (naru inbox add --task $task_id --kind change-request '...') and then end."
 fi
 
-[ -n "$pending" ] && block "mesa task $task_id is $status but this session still has background work running: $pending. Stop each of them (KillShell for a shell, TaskStop for an agent) or wait for their notifications before ending."
+[ -n "$pending" ] && block "naru task $task_id is $status but this session still has background work running: $pending. Stop each of them (KillShell for a shell, TaskStop for an agent) or wait for their notifications before ending."
 exit 0
 "##;
 

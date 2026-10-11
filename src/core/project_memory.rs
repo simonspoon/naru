@@ -36,7 +36,7 @@ pub const PROJECT_MEMORY_HOOK_NAME: &str = "project-memory.sh";
 /// `cwd`, no `naru`/`mesa` on PATH, an unknown folder, a Naru error), so it
 /// can never stop a session from starting.
 pub const PROJECT_MEMORY_HOOK: &str = r##"#!/usr/bin/env bash
-# project-memory.sh — a Claude Code SessionStart hook (mesa task 1333).
+# project-memory.sh — a Claude Code SessionStart hook (naru task 1333).
 # Installed with:
 #   naru library hook enable project-memory.sh --event SessionStart \
 #     --matcher 'startup|resume|clear|compact'
