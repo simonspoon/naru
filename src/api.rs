@@ -5038,6 +5038,12 @@ struct LiveRouteBody {
     /// is the press that can.
     #[serde(default)]
     client: Option<String>,
+    /// The native host's ambient verdict (naru task 1820): the same three-way
+    /// key as `context` — omitted leaves it alone (a plain browser always
+    /// omits it), `true`/`false` is the verdict and a freshness stamp, an
+    /// explicit `null` clears it.
+    #[serde(default, deserialize_with = "double_option")]
+    ambient: Option<Option<bool>>,
 }
 
 /// The press that claims the voice (mesa task 1267).
@@ -5890,6 +5896,13 @@ async fn live_route(
         body.window.as_ref().map(Option::as_ref),
         body.view.as_ref().map(|v| v.as_deref()),
     )?;
+    let session = match body.ambient {
+        Some(ambient) => {
+            store.report_live_host_ambient(session.id, ambient)?;
+            store.get_live_session(session.id)?
+        }
+        None => session,
+    };
     let Some(client) = client else {
         return Ok(Json(session).into_response());
     };
@@ -19422,6 +19435,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                 window: None,
                 view: None,
                 client: None,
+                ambient: None,
             })),
         )
         .await
@@ -19629,6 +19643,42 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
     /// say about it omits it and the stored one stands, while a page with
     /// nothing open sends an explicit `null` and clears it.
     #[tokio::test]
+    async fn live_route_reports_the_host_ambient_verdict_three_ways() {
+        let (_dir, state) = test_state();
+        state
+            .store
+            .lock()
+            .unwrap()
+            .start_live_session(None)
+            .unwrap();
+        let report = |ambient: Option<Option<bool>>| {
+            let state = state.clone();
+            async move {
+                let resp = live_route(
+                    State(state),
+                    Ok(Json(LiveRouteBody {
+                        route: "#/live".into(),
+                        context: None,
+                        window: None,
+                        view: None,
+                        client: None,
+                        ambient,
+                    })),
+                )
+                .await
+                .unwrap();
+                let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                serde_json::from_slice::<crate::core::LiveSession>(&bytes).unwrap()
+            }
+        };
+        assert_eq!(report(Some(Some(false))).await.ambient, Some(false));
+        assert_eq!(report(None).await.ambient, Some(false));
+        assert_eq!(report(Some(None)).await.ambient, None);
+    }
+
+    #[tokio::test]
     async fn live_route_records_the_context_the_page_reports_with_it() {
         let (_dir, state) = test_state();
         state
@@ -19658,6 +19708,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                 })),
                 view: None,
                 client: None,
+                ambient: None,
             })),
         )
         .await
@@ -19685,6 +19736,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                 window: None,
                 view: None,
                 client: None,
+                ambient: None,
             })),
         )
         .await
@@ -19710,6 +19762,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                 window: Some(None),
                 view: None,
                 client: None,
+                ambient: None,
             })),
         )
         .await

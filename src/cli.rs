@@ -8567,6 +8567,9 @@ mod tests {
             resting_since: None,
             speaker: Some("0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0".into()),
             view: Some("p2 · files · store.rs · chat open".into()),
+            ambient: None,
+            ambient_request: None,
+            ambient_request_seq: 0,
         }
     }
 
@@ -9077,6 +9080,11 @@ mod tests {
                 // The browser's one-line view (mesa task 1424): capped by
                 // `Store` at `LIVE_VIEW_MAX` chars, so bounded.
                 "view",
+                // Bools and an integer (naru task 1820): the host's ambient
+                // verdict, the agent's pending request and its counter.
+                "ambient",
+                "ambient_request",
+                "ambient_request_seq",
             ]),
             "LiveSession gained/lost a field: every field it has today is \
              bounded — ids, fixed words, timestamps, a 200-char route, a \

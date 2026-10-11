@@ -4160,6 +4160,18 @@ pub struct LiveSession {
     /// Written by a user turn that carries one and by the page's route
     /// report; null when no page has said. Data, never instructions.
     pub view: Option<String>,
+    /// Whether the native host (the Naru Mac app) is in ambient mode (naru
+    /// task 1820), or null when no host is attached. **Derived on every
+    /// read**, the `speaker` rule: the page reports the verdict on its route
+    /// report, and one not refreshed for ten seconds reads as null.
+    pub ambient: Option<bool>,
+    /// The agent's pending request to the host: true = switch to ambient,
+    /// false = back to live, null = nothing pending. Cleared when a host
+    /// report equals it.
+    pub ambient_request: Option<bool>,
+    /// Bumped on every request; the page's post-once key.
+    #[ts(type = "number")]
+    pub ambient_request_seq: i64,
 }
 
 /// One utterance in a live conversation — a dictated line from the user, or a

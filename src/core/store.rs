@@ -1433,6 +1433,14 @@ const MIGRATIONS: &[&str] = &[
     // The agent-wide ones reach every agent session through `naru memory
     // context`. NULL = uncategorized; always NULL on a project notebook row.
     "ALTER TABLE live_notebook ADD COLUMN category TEXT;",
+    // Naru task 1820 (live ambient, 1813): the native host's ambient verdict
+    // and when the page last reported it (read back only while fresh, the
+    // speaker rule), plus the agent's pending request for a mode change and a
+    // counter bumped on every request (the page's post-once key).
+    "ALTER TABLE live_sessions ADD COLUMN host_ambient INTEGER; \
+     ALTER TABLE live_sessions ADD COLUMN host_seen_at TEXT; \
+     ALTER TABLE live_sessions ADD COLUMN ambient_request INTEGER; \
+     ALTER TABLE live_sessions ADD COLUMN ambient_request_seq INTEGER NOT NULL DEFAULT 0;",
 ];
 
 /// Selects full task rows including the derived `blocked` flag.
@@ -1669,7 +1677,9 @@ fn row_to_inbox_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<InboxItem> {
 /// decide it is still the one speaking.
 const LIVE_SESSION_COLUMNS: &str = "id, project_id, agent_id, status, route, started_at, \
      updated_at, ended_at, context, working_since, window_box, lease, resting_since, \
-     CASE WHEN speaker_seen_at >= datetime('now', '-10 seconds') THEN speaker END, view";
+     CASE WHEN speaker_seen_at >= datetime('now', '-10 seconds') THEN speaker END, view, \
+     CASE WHEN host_seen_at >= datetime('now', '-10 seconds') THEN host_ambient END, \
+     ambient_request, ambient_request_seq";
 
 /// What [`Store::live_rest`] answers for a resting session (mesa task 1155).
 #[derive(Debug, Clone, PartialEq)]
@@ -1810,6 +1820,9 @@ fn row_to_live_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<LiveSession>
         resting_since: row.get(12)?,
         speaker: row.get(13)?,
         view: row.get(14)?,
+        ambient: row.get::<_, Option<i64>>(15)?.map(|v| v != 0),
+        ambient_request: row.get::<_, Option<i64>>(16)?.map(|v| v != 0),
+        ambient_request_seq: row.get(17)?,
     })
 }
 
@@ -6523,6 +6536,75 @@ impl Store {
             ),
         )?;
         self.get_live_session(id)
+    }
+
+    /// Records the native host's ambient verdict as the page reports it
+    /// (naru task 1820). `Some(b)` stamps `host_ambient`/`host_seen_at` and,
+    /// in the same statement, clears a pending request that asked for exactly
+    /// `b` — the host did it, which is the acknowledgement. `None` clears the
+    /// verdict, so `ambient` reads null: no host attached.
+    pub fn report_live_host_ambient(&mut self, id: i64, ambient: Option<bool>) -> Result<()> {
+        self.get_live_session(id)?;
+        match ambient {
+            Some(b) => self.conn.execute(
+                "UPDATE live_sessions SET host_ambient = ?2, host_seen_at = datetime('now'), \
+                 ambient_request = CASE WHEN ambient_request = ?2 THEN NULL \
+                 ELSE ambient_request END WHERE id = ?1",
+                (id, b),
+            )?,
+            None => self.conn.execute(
+                "UPDATE live_sessions SET host_ambient = NULL, host_seen_at = NULL \
+                 WHERE id = ?1",
+                [id],
+            )?,
+        };
+        Ok(())
+    }
+
+    /// The agent's request that the page's native host switch ambient mode
+    /// `on` or off (naru task 1820). Stored as a pending request on the
+    /// session, never a turn the run would have to reach. Without a fresh
+    /// host report (`ambient` null) it is `unavailable` and writes nothing.
+    /// A host already in the asked state just clears any pending request.
+    /// `say` is a Naru turn written before an `on` request and after an
+    /// `off` one. Lease checking is the caller's.
+    pub fn request_live_ambient(
+        &mut self,
+        id: i64,
+        on: bool,
+        say: Option<&str>,
+    ) -> Result<(LiveSession, Option<LiveTurn>)> {
+        let session = self.get_live_session(id)?;
+        if session.status != LiveStatus::Live {
+            return Err(Error::Validation(format!("live session {id} has ended")));
+        }
+        let Some(current) = session.ambient else {
+            return Err(Error::Unavailable(format!(
+                "no native host is attached to live session {id}; ambient mode needs the Naru Mac app"
+            )));
+        };
+        let say = say.map(str::trim).filter(|t| !t.is_empty());
+        let mut turn = None;
+        if let Some(text) = say.filter(|_| on) {
+            turn = Some(self.add_live_turn(id, LiveRole::Naru, text, None, None)?);
+        }
+        if current == on {
+            self.conn.execute(
+                "UPDATE live_sessions SET ambient_request = NULL WHERE id = ?1",
+                [id],
+            )?;
+        } else {
+            self.conn.execute(
+                "UPDATE live_sessions SET ambient_request = ?2, \
+                 ambient_request_seq = ambient_request_seq + 1, \
+                 updated_at = datetime('now') WHERE id = ?1",
+                (id, on),
+            )?;
+        }
+        if let Some(text) = say.filter(|_| !on) {
+            turn = Some(self.add_live_turn(id, LiveRole::Naru, text, None, None)?);
+        }
+        Ok((self.get_live_session(id)?, turn))
     }
 
     /// Claims this browser as the session's **speaker** (mesa task 1267) — the
@@ -14666,6 +14748,47 @@ mod tests {
     /// A route is a hash path the page already renders, not free text — the
     /// one rule `set_live_route` and a `navigate` turn's target share.
     #[test]
+    fn live_ambient_request_needs_a_host_and_is_acknowledged_by_its_report() {
+        let (mut store, _dir) = temp_store();
+        let session = store.start_live_session(None).unwrap();
+        let id = session.id;
+        // (a) no host report: unavailable, nothing written.
+        let err = store
+            .request_live_ambient(id, true, Some("going quiet"))
+            .unwrap_err();
+        assert!(matches!(err, Error::Unavailable(_)));
+        assert!(store.list_live_turns(id, None, 100).unwrap().is_empty());
+        assert_eq!(store.get_live_session(id).unwrap().ambient_request_seq, 0);
+        // (b) host reports live; the request is stored and the say written.
+        store.report_live_host_ambient(id, Some(false)).unwrap();
+        let (s, turn) = store
+            .request_live_ambient(id, true, Some("going quiet"))
+            .unwrap();
+        assert_eq!(s.ambient, Some(false));
+        assert_eq!(s.ambient_request, Some(true));
+        assert_eq!(s.ambient_request_seq, 1);
+        assert_eq!(turn.unwrap().text, "going quiet");
+        // (c) the host's matching report clears it.
+        store.report_live_host_ambient(id, Some(true)).unwrap();
+        let s = store.get_live_session(id).unwrap();
+        assert_eq!(s.ambient, Some(true));
+        assert_eq!(s.ambient_request, None);
+        // already in the asked state: nothing pending, seq unchanged.
+        let (s, _) = store.request_live_ambient(id, true, None).unwrap();
+        assert_eq!(s.ambient_request, None);
+        assert_eq!(s.ambient_request_seq, 1);
+        // (d) a stale report reads as no host.
+        store
+            .conn
+            .execute(
+                "UPDATE live_sessions SET host_seen_at = datetime('now', '-30 seconds')",
+                [],
+            )
+            .unwrap();
+        assert_eq!(store.get_live_session(id).unwrap().ambient, None);
+    }
+
+    #[test]
     fn set_live_route_takes_a_hash_route_and_nothing_else() {
         let (mut store, _dir) = temp_store();
         let session = store.start_live_session(None).unwrap();
@@ -15775,15 +15898,15 @@ mod tests {
         );
         assert_eq!(
             MIGRATIONS.len(),
-            90,
-            "a fresh db should report user_version 90"
+            91,
+            "a fresh db should report user_version 91"
         );
         let (store, _dir) = temp_store();
         let version: i64 = store
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 90);
+        assert_eq!(version, 91);
     }
 
     /// Workflows replace diagrams at migration 83 (mesa task 1607): a db that
@@ -15807,7 +15930,7 @@ mod tests {
         store
             .conn
             .execute_batch(
-                "DROP TABLE task_notes; ALTER TABLE live_notebook DROP COLUMN category; ALTER TABLE cc_messages DROP COLUMN cost_micro_usd; ALTER TABLE cc_sessions DROP COLUMN main_agent; ALTER TABLE live_boards DROP COLUMN pinned_at; DROP TABLE workflow_log; DROP TABLE workflow_runs; DROP TABLE workflow_edges; \
+                "DROP TABLE task_notes; ALTER TABLE live_sessions DROP COLUMN ambient_request_seq; ALTER TABLE live_sessions DROP COLUMN ambient_request; ALTER TABLE live_sessions DROP COLUMN host_seen_at; ALTER TABLE live_sessions DROP COLUMN host_ambient; ALTER TABLE live_notebook DROP COLUMN category; ALTER TABLE cc_messages DROP COLUMN cost_micro_usd; ALTER TABLE cc_sessions DROP COLUMN main_agent; ALTER TABLE live_boards DROP COLUMN pinned_at; DROP TABLE workflow_log; DROP TABLE workflow_runs; DROP TABLE workflow_edges; \
                  DROP TABLE workflow_nodes; DROP TABLE workflows; \
                  CREATE TABLE diagrams (id INTEGER PRIMARY KEY, title TEXT); \
                  INSERT INTO diagrams (title) VALUES ('stale'); \
