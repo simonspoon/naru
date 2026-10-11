@@ -15,6 +15,7 @@ function session(over: Partial<AgentSession> = {}): AgentSession {
     id: 'abcd1234',
     cwd: '/repo',
     kind: 'background',
+    runId: null,
     startedAt: 0,
     sessionId: 'abcd1234-0000-0000-0000-000000000000',
     name: null,

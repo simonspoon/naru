@@ -750,6 +750,10 @@ export function stopAgent(id: string): Promise<{ id: string }> {
   return request(`/api/agents/${encodeURIComponent(id)}/stop`, jsonInit('POST', {}))
 }
 
+export function stopRun(id: string): Promise<unknown> {
+  return request(`/api/runs/${encodeURIComponent(id)}/stop`, jsonInit('POST', {}))
+}
+
 // ---- workflows (mesa task 1607) ----
 // The guard middleware requires a JSON Content-Type on every mutating method,
 // so even body-less DELETEs send the header (src/api.rs Requirement 7).

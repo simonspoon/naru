@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { agentHeadline, agentTint, formatContextTokens, responsePreview } from './agentRow'
+import { agentHeadline, agentKindOf, agentRowActions, agentTint, formatContextTokens, responsePreview } from './agentRow'
 
 describe('formatContextTokens', () => {
   it('shows a sub-1k count exactly', () => {
@@ -87,5 +87,48 @@ describe('agentTint', () => {
     expect(agentTint({ state: 'blocked', status: 'busy' })).toBeNull()
     expect(agentTint({ state: 'failed', status: null })).toBeNull()
     expect(agentTint({ state: null, status: 'idle' })).toBeNull()
+  })
+})
+
+describe('agent row kinds', () => {
+  const bg = { id: 'ab12', kind: 'background', runId: null, state: 'working' }
+  const inter = { id: null, kind: 'interactive', runId: null, state: 'working' }
+  const run = { id: null, kind: 'runner', runId: 'r1', state: 'working' }
+
+  it('classifies the three kinds', () => {
+    expect(agentKindOf(bg)).toBe('background')
+    expect(agentKindOf(inter)).toBe('interactive')
+    expect(agentKindOf(run)).toBe('runner')
+    expect(agentKindOf({ ...run, runId: null })).toBe('interactive')
+  })
+
+  it('background rows attach and stop through claude', () => {
+    expect(agentRowActions(bg)).toEqual({
+      attachable: true,
+      stop: { route: 'agent', id: 'ab12' },
+      note: null,
+    })
+  })
+
+  it('interactive rows get only the external-terminal note', () => {
+    expect(agentRowActions(inter)).toEqual({
+      attachable: false,
+      stop: null,
+      note: 'external terminal — not attachable',
+    })
+  })
+
+  it('runner rows stop through the run route, never attach, no note', () => {
+    expect(agentRowActions(run)).toEqual({
+      attachable: false,
+      stop: { route: 'run', id: 'r1' },
+      note: null,
+    })
+  })
+
+  it('a runner row in a terminal state has no stop', () => {
+    for (const state of ['done', 'failed', 'stopped']) {
+      expect(agentRowActions({ ...run, state }).stop).toBeNull()
+    }
   })
 })

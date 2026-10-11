@@ -19,7 +19,7 @@ import {
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { getLive, listAllAgents, listProjects, spawnProjectAgent, stopAgent } from '../api'
+import { getLive, listAllAgents, listProjects, spawnProjectAgent, stopAgent, stopRun } from '../api'
 import { attributeAlarms, formatCountdown, remainingMs } from '../agentAlarm'
 import { projectForCwd } from '../agentProject'
 import {
@@ -39,7 +39,15 @@ import {
   pinLiveAgent,
   withoutListen,
 } from '../agentLive'
-import { agentHeadline, agentTint, formatContextTokens } from '../agentRow'
+import {
+  agentHeadline,
+  agentKindOf,
+  agentRowActions,
+  agentTint,
+  formatContextTokens,
+  stopKeyOf,
+  type AgentRowActions,
+} from '../agentRow'
 import {
   agentChips,
   agentColor,
@@ -714,7 +722,7 @@ type ListPaneProps = {
   onToggleChildPane: (parentId: string, child: AgentChild) => void
   /** `claude stop` on one row's session — the only way a finished session
    * mesa has misclassified can leave the list (mesa task 1289). */
-  onStop: (agentId: string) => void
+  onStop: (stop: NonNullable<AgentRowActions['stop']>) => void
   /** Job ids with a stop in flight; their buttons stand down until it lands. */
   stoppingIds: string[]
   /** A failed stop, shown above the list — the one outcome the next poll
@@ -777,6 +785,8 @@ function AgentListContent({
     const subs = cardChildren(a.sessionId, pinned ? withoutListen(shown) : shown, childLingering)
     const activity = pinned ? liveActivity(a.children) : null
     const alarmEnds = attributeAlarms(a.children).endsAt
+    const actions = agentRowActions(a)
+    const stopKey = actions.stop === null ? null : stopKeyOf(actions.stop)
     return (
       <Fragment key={a.sessionId}>
       <li
@@ -790,11 +800,11 @@ function AgentListContent({
           (enteringNow(seen, a.sessionId) ? 'agent-card-enter ' : '') +
           (finished ? 'agent-card-finished ' : '') +
           (leavingNow ? 'agent-card-leaving ' : '') +
-          (a.id !== null ? 'attachable' : '') +
+          (actions.attachable ? 'attachable' : '') +
           (a.id !== null && openIds.includes(a.id) ? ' selected' : '')
         }
         onClick={() => {
-          if (a.id !== null) onTogglePane(a.id)
+          if (actions.attachable && a.id !== null) onTogglePane(a.id)
         }}
       >
         <div className="agent-row-title">
@@ -832,6 +842,11 @@ function AgentListContent({
           <span className="agent-card-name" title={model ? `${label} · ${model}` : label}>
             {label}
           </span>
+          {agentKindOf(a) === 'runner' && (
+            <span className="agent-child-tag" title="A naru run job, not a claude --bg session">
+              run
+            </span>
+          )}
           {chips.project && (
             <span className="agent-chip" title={proj ? proj.name : a.cwd}>
               {chips.project}
@@ -872,19 +887,23 @@ function AgentListContent({
               and `claude attach` resumes it, which is the
               reversibility mesa uses instead of a prompt.
               Revealed on hover/focus in the corner. */}
-          {a.id !== null && (
+          {actions.stop !== null && stopKey !== null && (
             <button
               type="button"
               className="agent-row-stop"
               aria-label="Stop this session"
-              title={`Stop this session (claude stop ${a.id}). The conversation is kept — claude attach ${a.id} resumes it.`}
+              title={
+                actions.stop.route === 'run'
+                  ? `Stop this run (naru run stop ${actions.stop.id}).`
+                  : `Stop this session (claude stop ${actions.stop.id}). The conversation is kept — claude attach ${actions.stop.id} resumes it.`
+              }
               // The row underneath toggles the attach pane;
               // a press on the button is about the button.
               onClick={(e) => {
                 e.stopPropagation()
-                if (a.id !== null) onStop(a.id)
+                if (actions.stop !== null) onStop(actions.stop)
               }}
-              disabled={stoppingIds.includes(a.id)}
+              disabled={stoppingIds.includes(stopKey)}
             >
               ■
             </button>
@@ -898,9 +917,9 @@ function AgentListContent({
             {headline}
           </div>
         )}
-        {(wait || a.id === null) && (
+        {(wait || actions.note !== null) && (
           <div className="muted agent-card-meta">
-            {a.id === null && <span>external terminal — not attachable</span>}
+            {actions.note !== null && <span>{actions.note}</span>}
             {wait && <span className="badge blocked">{wait}</span>}
           </div>
         )}
@@ -1751,11 +1770,12 @@ export function AgentSidebar({
    * feed this list polls, so the refetch is what removes the row rather than
    * any local edit.
    */
-  function stopSession(id: string) {
+  function stopSession(stop: NonNullable<AgentRowActions['stop']>) {
+    const id = stopKeyOf(stop)
     if (stoppingIds.includes(id)) return
     setStopError(null)
     setStoppingIds((ids) => [...ids, id])
-    stopAgent(id).then(
+    ;(stop.route === 'run' ? stopRun(stop.id) : stopAgent(stop.id)).then(
       () => {
         setStoppingIds((ids) => ids.filter((x) => x !== id))
         refetch()

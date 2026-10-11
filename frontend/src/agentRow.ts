@@ -76,3 +76,55 @@ export function agentTint(a: Pick<AgentSession, 'state' | 'status'>): 'active' |
   if (!working) return null
   return a.status === 'idle' ? 'stale' : 'active'
 }
+
+export type AgentKind = 'background' | 'interactive' | 'runner'
+
+/**
+ * Which of the three row kinds the Agents panel lists (naru task 1830): a
+ * `naru run` job (`kind: 'runner'` with its run job id), a `--bg` session
+ * (has the short job id `claude attach`/`claude stop` take), or an
+ * interactive terminal session (neither).
+ */
+export function agentKindOf(a: Pick<AgentSession, 'id' | 'kind' | 'runId'>): AgentKind {
+  if (a.kind === 'runner' && a.runId !== null) return 'runner'
+  return a.id !== null ? 'background' : 'interactive'
+}
+
+export interface AgentRowActions {
+  /** Only a background session has a pty to attach to. */
+  attachable: boolean
+  /** What the stop button calls; `null` hides it. */
+  stop: { route: 'agent' | 'run'; id: string } | null
+  /** The muted line under the row, `null` for none. */
+  note: string | null
+}
+
+const RUN_TERMINAL = ['done', 'failed', 'stopped']
+
+/**
+ * What a row may do. A runner row is never attachable (it is not a claude
+ * job) and stops through `/api/runs/{id}/stop`, but only while its run is
+ * not already over; the "external terminal" note belongs to interactive
+ * rows alone.
+ */
+export function agentRowActions(
+  a: Pick<AgentSession, 'id' | 'kind' | 'runId' | 'state'>,
+): AgentRowActions {
+  switch (agentKindOf(a)) {
+    case 'background':
+      return { attachable: true, stop: { route: 'agent', id: a.id as string }, note: null }
+    case 'runner':
+      return {
+        attachable: false,
+        stop: RUN_TERMINAL.includes(a.state ?? '') ? null : { route: 'run', id: a.runId as string },
+        note: null,
+      }
+    case 'interactive':
+      return { attachable: false, stop: null, note: 'external terminal — not attachable' }
+  }
+}
+
+/** The in-flight key for a stop: a run id never collides with a job id. */
+export function stopKeyOf(stop: { route: 'agent' | 'run'; id: string }): string {
+  return stop.route === 'run' ? `run:${stop.id}` : stop.id
+}
