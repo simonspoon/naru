@@ -9691,6 +9691,78 @@ mod tests {
         assert_eq!(scoped.overview.total_tokens, 1000);
     }
 
+    /// A ledger line with `output` tokens and no `cost_usd` key at all.
+    fn ledger_line_uncosted(id: &str, session: &str, input: i64, output: i64) -> String {
+        format!(
+            r#"{{"v":1,"id":"{id}","at":"2026-06-15T01:00:00Z","source":"model-rubric","session_id":"{session}","model":"claude-haiku-5-5","input_tokens":{input},"output_tokens":{output},"cache_read_tokens":0,"cache_creation_tokens":0}}"#
+        )
+    }
+
+    #[test]
+    fn cc_headless_reported_cost_beats_price_table() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        fs::create_dir_all(&projects).unwrap();
+        let ledger = tmp.path().join("headless.jsonl");
+        // 1M output tokens of haiku 5.5 would price at $2.50 from the table;
+        // Claude reported $0.123456, which must be counted exactly.
+        let line = ledger_line("a:m", "model-rubric", "h1", 1000, 0.123456)
+            .replace(r#""output_tokens":0"#, r#""output_tokens":1000000"#);
+        fs::write(&ledger, line + "\n").unwrap();
+        let mut store = Store::open(&tmp.path().join("mesa.db")).unwrap();
+        store
+            .create_project("model-rubric", None, None, Some("/work/model-rubric"), None)
+            .unwrap();
+        sync_with(&mut store, &projects, &ledger);
+        let d = collect(&store, "all").unwrap();
+
+        assert_eq!(d.overview.est_cost_usd, 0.1235);
+        assert_eq!(d.overview.headless_cost_usd, 0.1235);
+        assert_eq!(d.daily.len(), 1);
+        assert_eq!(d.daily[0].est_cost_usd, 0.1235);
+        assert_eq!(d.daily[0].headless_cost_usd, 0.1235);
+        assert_eq!(d.models.len(), 1);
+        assert_eq!(d.models[0].est_cost_usd, 0.1235);
+        assert_eq!(d.projects.len(), 1);
+        assert_eq!(d.projects[0].est_cost_usd, 0.1235);
+        let scoped = collect_for_project(&store, "all", &["/work/model-rubric"]).unwrap();
+        assert_eq!(scoped.overview.est_cost_usd, 0.1235);
+    }
+
+    #[test]
+    fn cc_headless_unreported_cost_uses_price_table_with_tiers() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        fs::create_dir_all(&projects).unwrap();
+        let ledger = tmp.path().join("headless.jsonl");
+        // Haiku 5.5: a 100000-token prompt is the base tier ($0.51 with 1M
+        // output), 100001 the long-prompt tier. One row has a reported cost.
+        fs::write(
+            &ledger,
+            [
+                ledger_line_uncosted("a:m", "h1", 100_000, 1_000_000),
+                ledger_line_uncosted("b:m", "h2", 100_001, 1_000_000),
+                ledger_line("c:m", "model-rubric", "h3", 100_001, 0.01),
+            ]
+            .join("\n")
+                + "\n",
+        )
+        .unwrap();
+        let mut store = Store::open(&tmp.path().join("mesa.db")).unwrap();
+        sync_with(&mut store, &projects, &ledger);
+        let d = collect(&store, "all").unwrap();
+
+        let tier = 100_001.0 * 0.50 / 1e6 + 2.50;
+        let want = round4(0.51 + tier + 0.01);
+        assert_eq!(d.overview.est_cost_usd, want);
+        assert_eq!(d.overview.headless_cost_usd, want);
+        assert_eq!(d.daily[0].est_cost_usd, want);
+        assert_eq!(d.models[0].est_cost_usd, want);
+        assert_eq!(d.projects[0].est_cost_usd, want);
+    }
+
     #[test]
     fn cc_transcript_only_unchanged() {
         let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
