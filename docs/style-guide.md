@@ -40,7 +40,7 @@ the rules below are applied across `frontend/src/App.css`.
 Every colour in `index.css` / `App.css` flows through `:root` variables
 (channel triplets such as `--cyan-rgb` so `rgba(var(--cyan-rgb), a)` retints).
 `:root` is the `dark` theme; `frontend/src/themes.css` holds one
-`:root[data-theme='<id>']` block per other theme (`light`, `contrast`) that
+`:root[data-theme='<id>']` block per other theme (`light`, `contrast`, `red`) that
 overrides the same variables and sets `color-scheme`. `theme.ts` picks the id
 (Settings → Appearance, `docs/config.md` "Appearance") and sets `data-theme` on
 `<html>`.

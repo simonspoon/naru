@@ -35,7 +35,7 @@ describe('theme list', () => {
   it('offers system plus every theme, ids unique, with four swatches', () => {
     expect(THEME_SETTINGS[0]).toBe('system')
     expect(new Set(THEME_SETTINGS).size).toBe(THEME_SETTINGS.length)
-    expect(THEME_SETTINGS).toEqual(['system', 'dark', 'light', 'contrast'])
+    expect(THEME_SETTINGS).toEqual(['system', 'dark', 'light', 'contrast', 'red'])
     for (const t of THEMES) {
       expect(t.label).not.toBe('')
       expect(t.swatch).toHaveLength(4)

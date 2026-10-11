@@ -7,7 +7,7 @@
  */
 export type ConfigAppearance = { 
 /**
- * `"system"`, a theme id (`dark`, `light`, `contrast`), or `null`.
+ * `"system"`, a theme id (`dark`, `light`, `contrast`, `red`), or `null`.
  */
 theme: string | null, 
 /**

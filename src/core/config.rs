@@ -3247,7 +3247,7 @@ pub const THEME: &str = "theme";
 /// The settings the `theme` key accepts: `system` (follow the OS) plus one id
 /// per theme block in `frontend/src/themes.css` — keep in step with
 /// `frontend/src/theme.ts`.
-pub const APPEARANCE_THEMES: &[&str] = &["system", "dark", "light", "contrast"];
+pub const APPEARANCE_THEMES: &[&str] = &["system", "dark", "light", "contrast", "red"];
 
 /// The theme setting when the config says nothing.
 pub const DEFAULT_THEME: &str = "system";
