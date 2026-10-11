@@ -37,6 +37,9 @@ import type { VoiceEnrollment } from './types/VoiceEnrollment'
 import type { AudioTestResult } from './types/AudioTestResult'
 import type { ConfigAudio } from './types/ConfigAudio'
 import type { ConfigAppearance } from './types/ConfigAppearance'
+import type { Theme } from './types/Theme'
+import type { ThemePreview } from './types/ThemePreview'
+import type { ThemeSlots } from './types/ThemeSlots'
 import type { TranscribeStatus } from './types/TranscribeStatus'
 import type { ConfigLive } from './types/ConfigLive'
 import type { LiveNotebookEntry } from './types/LiveNotebookEntry'
@@ -1661,6 +1664,38 @@ export function getAppearance(): Promise<ConfigAppearance> {
  */
 export function updateAppearance(theme: string | null): Promise<ConfigAppearance> {
   return request('/api/config/appearance', jsonInit('PUT', { theme }))
+}
+
+/** Every theme, built-ins first (naru task 1843). */
+export function listThemes(): Promise<Theme[]> {
+  return request('/api/themes')
+}
+
+export function getTheme(id: string): Promise<Theme> {
+  return request(`/api/themes/${encodeURIComponent(id)}`)
+}
+
+/** Copies a theme (built-in or custom) into a new custom one. */
+export function createTheme(body: { from: string; name?: string }): Promise<Theme> {
+  return request('/api/themes', jsonInit('POST', body))
+}
+
+/** Renames and/or changes any subset of the nine slots of a custom theme. */
+export function updateTheme(
+  id: string,
+  patch: { name?: string; slots?: Partial<ThemeSlots> },
+): Promise<Theme> {
+  return request(`/api/themes/${encodeURIComponent(id)}`, jsonInit('PATCH', patch))
+}
+
+/** Deletes a custom theme; the server clears the saved setting if it was active. */
+export function deleteTheme(id: string): Promise<Theme> {
+  return request(`/api/themes/${encodeURIComponent(id)}`, jsonDelete())
+}
+
+/** Server-derived vars and contrast warnings for nine slots; writes nothing. */
+export function previewTheme(slots: ThemeSlots): Promise<ThemePreview> {
+  return request('/api/themes/preview', jsonInit('POST', { slots }))
 }
 
 /**

@@ -7,6 +7,8 @@
 // saved setting.
 
 import type { Theme } from './types/Theme'
+import type { ThemeSlots } from './types/ThemeSlots'
+import type { ContrastWarning } from './types/ContrastWarning'
 
 export type ThemeId = 'dark' | 'light' | 'contrast' | 'crimson'
 export type CustomThemeId = `custom-${number}`
@@ -182,4 +184,42 @@ export function onThemeChange(fn: () => void): () => void {
   const mo = new MutationObserver(fn)
   mo.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme', 'data-theme-rev'] })
   return () => mo.disconnect()
+}
+
+/** The editor's nine rows, in display order. */
+export const SLOT_ROWS: readonly { key: keyof ThemeSlots; label: string }[] = [
+  { key: 'bg', label: 'Background' },
+  { key: 'panel', label: 'Panel' },
+  { key: 'text', label: 'Text' },
+  { key: 'muted', label: 'Muted text' },
+  { key: 'accent', label: 'Accent' },
+  { key: 'accent2', label: 'Second accent' },
+  { key: 'good', label: 'Good' },
+  { key: 'warn', label: 'Warning' },
+  { key: 'bad', label: 'Bad' },
+]
+
+/** A typed colour as the server's `#rrggbb` (lowercase), or null when it is
+ *  not a complete hex colour. Accepts `#rgb` / `rgb` shorthand and a missing
+ *  `#`. */
+export function normalizeHex(input: string): string | null {
+  const m = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(input.trim())
+  if (!m) return null
+  const h = m[1].toLowerCase()
+  return '#' + (h.length === 3 ? [...h].map((c) => c + c).join('') : h)
+}
+
+const PAIR_NAMES: Record<string, string> = { bg: 'background', panel: 'panel', text: 'text', muted: 'muted text' }
+
+/** One contrast warning as a sentence, e.g. "Text on panel 3.9:1 — below 4.5:1". */
+export function warningText(w: ContrastWarning): string {
+  const [fg, bg] = w.pair.split('/')
+  const name = (k: string) => PAIR_NAMES[k] ?? k
+  const head = name(fg)
+  return `${head.charAt(0).toUpperCase()}${head.slice(1)} on ${name(bg ?? '')} ${w.ratio.toFixed(1)}:1 — below ${w.min}:1`
+}
+
+/** The four swatch colours a picker row draws for a theme. */
+export function themeSwatch(t: Theme): [string, string, string, string] {
+  return [t.slots.bg, t.slots.panel, t.slots.text, t.slots.accent]
 }

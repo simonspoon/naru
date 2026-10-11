@@ -12054,3 +12054,56 @@ body.dock-resizing .dock-body {
 .run-pane-error {
   color: var(--red, #e5484d);
 }
+
+/* Settings > Appearance theme editor (naru task 1847). */
+.theme-option-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  align-items: stretch;
+}
+
+.theme-duplicate {
+  font-size: 0.75rem;
+}
+
+.theme-editor {
+  margin-top: 1.25rem;
+  max-width: 28rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.theme-editor-name {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.theme-editor-name input {
+  flex: 1;
+}
+
+.theme-editor-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.theme-editor-row {
+  display: grid;
+  grid-template-columns: 9rem 3rem 7rem;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.theme-editor-row input[type='text'][aria-invalid='true'] {
+  box-shadow: 0 0 0 1px var(--red, #f55);
+}
+
+.theme-editor-warnings {
+  margin: 0;
+  padding-left: 1.1rem;
+  font-size: 0.82rem;
+  color: var(--amber);
+}

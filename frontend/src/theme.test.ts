@@ -9,6 +9,8 @@ import {
   customThemeCss,
   THEME_CSS_STORAGE_KEY,
   migrateLegacyTheme,
+  normalizeHex,
+  warningText,
   parseSetting,
   resolveTheme,
   storedSetting,
@@ -195,5 +197,23 @@ describe('custom themes', () => {
     document.getElementById('naru-custom-theme')?.remove()
     expect(applyTheme('custom-3')).toBe('custom-3')
     expect(document.getElementById('naru-custom-theme')?.textContent).toContain('1, 2, 3')
+  })
+})
+
+describe('editor helpers', () => {
+  it('normalizeHex accepts full and short hex, rejects the rest', () => {
+    expect(normalizeHex('#AABBCC')).toBe('#aabbcc')
+    expect(normalizeHex('abc')).toBe('#aabbcc')
+    expect(normalizeHex(' #0f0 ')).toBe('#00ff00')
+    expect(normalizeHex('#12')).toBeNull()
+    expect(normalizeHex('#12345g')).toBeNull()
+    expect(normalizeHex('')).toBeNull()
+  })
+
+  it('warningText reads as a sentence', () => {
+    expect(warningText({ pair: 'text/panel', ratio: 3.94, min: 4.5 })).toBe(
+      'Text on panel 3.9:1 — below 4.5:1',
+    )
+    expect(warningText({ pair: 'muted/bg', ratio: 2, min: 4.5 })).toBe('Muted text on background 2.0:1 — below 4.5:1')
   })
 })
