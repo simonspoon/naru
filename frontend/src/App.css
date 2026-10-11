@@ -9381,7 +9381,10 @@ body.live-panel-ratio-resizing .live-panel-divider {
   box-shadow: 0 0 0 1px rgba(var(--cyan-rgb), 0.6), 0 0 18px rgba(var(--cyan-rgb), 0.08);
 }
 
-.live-input {
+/* `:focus` is listed so the global `textarea:focus` ring (index.css) cannot
+   draw a second box inside the row's own focus ring. */
+.live-input,
+.live-input:focus {
   flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
