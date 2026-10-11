@@ -45,6 +45,9 @@ import {
   agentRowActions,
   agentTint,
   formatContextTokens,
+  isRunPaneId,
+  parseRunPaneId,
+  rowPaneId,
   stopKeyOf,
   type AgentRowActions,
 } from '../agentRow'
@@ -75,6 +78,7 @@ import {
 import { shortModel } from '../sessionGraph'
 import { AgentChat } from './AgentChat'
 import { ChildPane } from './ChildPane'
+import { RunPane } from './RunPane'
 import * as ptyPool from '../lib/ptyPool'
 import {
   axisPos,
@@ -131,7 +135,10 @@ const MIN_TILE_WIDTH = 160
 // its card in the list rail. It owns no PTY and no session of its own — its
 // id names its parent and which child it is (`agentChild.ts`), and everything
 // it renders is read back through that parent.
-type AgentLeafKind = 'agent' | 'child'
+//
+// `run` is the third (naru task 1832): the live event view of one `naru run`
+// job, keyed `run:<job id>`. Like a child it owns no PTY.
+type AgentLeafKind = 'agent' | 'child' | 'run'
 type LeafNode = PTLeafNode<AgentLeafKind>
 type SplitNode = PTSplitNode<AgentLeafKind>
 
@@ -140,7 +147,8 @@ type SplitNode = PTSplitNode<AgentLeafKind>
  *  than deciding again — `insertLeaf`, `addPane` and Auto Tile's rebuild all
  *  hand out ids and none of them should have to know what they name. */
 function leafFor(id: string): LeafNode {
-  return { kind: 'leaf', contentKind: isChildPaneId(id) ? 'child' : 'agent', id }
+  const contentKind: AgentLeafKind = isChildPaneId(id) ? 'child' : isRunPaneId(id) ? 'run' : 'agent'
+  return { kind: 'leaf', contentKind, id }
 }
 
 // Always appended to root's own children, regardless of how deep/mixed the
@@ -159,7 +167,7 @@ function insertLeaf(root: SplitNode, agentId: string): SplitNode {
  *  1278). Every close path goes through here rather than calling the pool
  *  directly, so there is one place that knows which panes hold one. */
 function releasePane(paneId: string) {
-  if (!isChildPaneId(paneId)) ptyPool.remove(paneId)
+  if (!isChildPaneId(paneId) && !isRunPaneId(paneId)) ptyPool.remove(paneId)
 }
 
 function agentLabel(a: AgentSession): string {
@@ -491,6 +499,76 @@ function AgentPane({
  * No `PaneViewToggle`: there is no terminal to switch to. A subagent runs
  * in-process with no PTY, and a shell is one Bash call.
  */
+function RunPaneTile({
+  paneId,
+  agents,
+  ratio,
+  paused,
+  onClose,
+  dropEdge,
+}: {
+  paneId: string
+  agents: AgentSession[]
+  ratio: number
+  paused: boolean
+  onClose: () => void
+  dropEdge?: DropEdge | null
+}) {
+  const runId = parseRunPaneId(paneId)
+  return (
+    <PaneShell
+      dragId={paneId}
+      label={runPaneLabel(agents, runId, paneId)}
+      ratio={ratio}
+      onClose={onClose}
+      dropEdge={dropEdge}
+    >
+      {runId === null ? (
+        <div className="agent-chat agent-chat-empty">Not a run pane.</div>
+      ) : (
+        <RunPane runId={runId} paused={paused} />
+      )}
+    </PaneShell>
+  )
+}
+
+/** A run pane's title: the run's name from the session list, else its id. */
+function runPaneLabel(agents: AgentSession[], runId: string | null, paneId: string): string {
+  const row = agents.find((a) => runId !== null && a.runId === runId)
+  return `run · ${row ? agentLabel(row) : (runId ?? paneId)}`
+}
+
+/** The phone tier's run pane — `SoloChildPane`'s sibling, no `DndContext`. */
+function SoloRunPane({
+  paneId,
+  agents,
+  paused,
+  onClose,
+}: {
+  paneId: string
+  agents: AgentSession[]
+  paused: boolean
+  onClose: () => void
+}) {
+  const runId = parseRunPaneId(paneId)
+  const label = runPaneLabel(agents, runId, paneId)
+  return (
+    <div className="agent-sidebar-pane">
+      <div className="agent-terminal-header">
+        <span className="agent-sidebar-pane-title">
+          <span className="agent-sidebar-pane-label" title={label}>
+            {label}
+          </span>
+        </span>
+        <span className="agent-sidebar-pane-actions">
+          <button onClick={onClose}>close</button>
+        </span>
+      </div>
+      {runId !== null && <RunPane runId={runId} paused={paused} />}
+    </div>
+  )
+}
+
 function ChildPaneTile({
   paneId,
   agents,
@@ -801,10 +879,12 @@ function AgentListContent({
           (finished ? 'agent-card-finished ' : '') +
           (leavingNow ? 'agent-card-leaving ' : '') +
           (actions.attachable ? 'attachable' : '') +
-          (a.id !== null && openIds.includes(a.id) ? ' selected' : '')
+          (agentKindOf(a) === 'runner' ? ' attachable' : '') +
+          (rowPaneId(a) !== null && openIds.includes(rowPaneId(a) as string) ? ' selected' : '')
         }
         onClick={() => {
-          if (actions.attachable && a.id !== null) onTogglePane(a.id)
+          const paneId = rowPaneId(a)
+          if (paneId !== null && (actions.attachable || agentKindOf(a) === 'runner')) onTogglePane(paneId)
         }}
       >
         <div className="agent-row-title">
@@ -1103,7 +1183,16 @@ function SplitNodeView({
       <div ref={containerRef} className={`agent-sidebar-panes agent-sidebar-panes-${node.orientation}`}>
         {node.children.map((child, i) => (
           <Fragment key={child.node.id}>
-            {child.node.kind === 'leaf' && child.node.contentKind === 'child' ? (
+            {child.node.kind === 'leaf' && child.node.contentKind === 'run' ? (
+              <RunPaneTile
+                paneId={child.node.id}
+                agents={agents}
+                ratio={child.ratio}
+                paused={paused}
+                onClose={() => onClose((child.node as LeafNode).id)}
+                dropEdge={dropZone && dropZone.id === child.node.id ? dropZone.edge : null}
+              />
+            ) : child.node.kind === 'leaf' && child.node.contentKind === 'child' ? (
               <ChildPaneTile
                 paneId={child.node.id}
                 agents={agents}
@@ -1642,7 +1731,7 @@ export function AgentSidebar({
       // which means a rebuild that dropped them would close every open child
       // pane on the next poll — so they are carried through, after the
       // agents, and only an explicit close removes one.
-      const ids = [...wanted, ...open.filter(isChildPaneId)]
+      const ids = [...wanted, ...open.filter((id) => isChildPaneId(id) || isRunPaneId(id))]
       // Computed inside the updater because it depends on the open panes, and
       // reading `root` in the effect body would mean depending on it.
       const cols = gridColumns(ids.length, tileSize.width, tileSize.height)
@@ -1709,7 +1798,7 @@ export function AgentSidebar({
   const openIds = collectLeafIds(root)
   // The open agent panes, for the live conversation's view line (mesa task
   // 1424, `liveView.ts`) — agent panes only, not their child panes.
-  const openAgentKey = openIds.filter((id) => !isChildPaneId(id)).join(' ')
+  const openAgentKey = openIds.filter((id) => !isChildPaneId(id) && !isRunPaneId(id)).join(' ')
   useEffect(() => {
     publishOpenAgents(openAgentKey === '' ? [] : openAgentKey.split(' '))
   }, [openAgentKey])
@@ -2129,7 +2218,14 @@ export function AgentSidebar({
           <div className="agent-sidebar-tile-area" ref={tileAreaRef}>
             {phone ? (
               <div className="agent-sidebar-panes agent-sidebar-panes-column">
-                {soloId !== null && isChildPaneId(soloId) ? (
+                {soloId !== null && isRunPaneId(soloId) ? (
+                  <SoloRunPane
+                    paneId={soloId}
+                    agents={agents}
+                    paused={collapsed}
+                    onClose={() => closePane(soloId)}
+                  />
+                ) : soloId !== null && isChildPaneId(soloId) ? (
                   <SoloChildPane
                     paneId={soloId}
                     agents={agents}

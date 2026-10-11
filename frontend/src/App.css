@@ -12014,3 +12014,43 @@ body.dock-resizing .dock-body {
 .theme-swatch > span {
   flex: 1;
 }
+
+/* Run pane (naru task 1832): the chat transcript look over `naru run` events. */
+.run-pane-controls {
+  margin-left: auto;
+  display: flex;
+  gap: 0.3rem;
+}
+
+.run-pane-log {
+  gap: 0.35rem;
+}
+
+.run-pane-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 0.82rem;
+}
+
+.run-pane-result {
+  align-items: flex-start;
+}
+
+.run-pane-result-text {
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 6rem;
+  overflow: hidden;
+}
+
+.run-pane-note {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.run-pane-error {
+  color: var(--red, #e5484d);
+}

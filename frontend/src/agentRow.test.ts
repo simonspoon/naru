@@ -1,5 +1,16 @@
 import { describe, expect, it } from 'vitest'
-import { agentHeadline, agentKindOf, agentRowActions, agentTint, formatContextTokens, responsePreview } from './agentRow'
+import {
+  agentHeadline,
+  agentKindOf,
+  agentRowActions,
+  agentTint,
+  formatContextTokens,
+  isRunPaneId,
+  parseRunPaneId,
+  responsePreview,
+  rowPaneId,
+  runPaneId,
+} from './agentRow'
 
 describe('formatContextTokens', () => {
   it('shows a sub-1k count exactly', () => {
@@ -130,5 +141,23 @@ describe('agent row kinds', () => {
     for (const state of ['done', 'failed', 'stopped']) {
       expect(agentRowActions({ ...run, state }).stop).toBeNull()
     }
+  })
+})
+
+describe('run pane ids', () => {
+  const run = { id: null, kind: 'runner', runId: 'r1' } as const
+  it('prefix the run id so it never collides with a job id', () => {
+    expect(runPaneId('r1')).toBe('run:r1')
+    expect(isRunPaneId('run:r1')).toBe(true)
+    expect(isRunPaneId('child:a:sub:b')).toBe(false)
+    expect(isRunPaneId('abc123')).toBe(false)
+    expect(parseRunPaneId('run:r1')).toBe('r1')
+    expect(parseRunPaneId('run:')).toBeNull()
+    expect(parseRunPaneId('abc123')).toBeNull()
+  })
+  it('rowPaneId picks the pane a row opens', () => {
+    expect(rowPaneId(run)).toBe('run:r1')
+    expect(rowPaneId({ id: 'j1', kind: 'background', runId: null })).toBe('j1')
+    expect(rowPaneId({ id: null, kind: 'interactive', runId: null })).toBeNull()
   })
 })

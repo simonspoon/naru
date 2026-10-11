@@ -128,3 +128,38 @@ export function agentRowActions(
 export function stopKeyOf(stop: { route: 'agent' | 'run'; id: string }): string {
   return stop.route === 'run' ? `run:${stop.id}` : stop.id
 }
+
+const RUN_PANE_PREFIX = 'run:'
+
+/**
+ * The pane-tree id of a run's pane (naru task 1832). Prefixed so it can never
+ * collide with a `--bg` job id (the other leaf ids are bare job ids or
+ * `child:`-prefixed).
+ */
+export function runPaneId(runId: string): string {
+  return `${RUN_PANE_PREFIX}${runId}`
+}
+
+export function isRunPaneId(paneId: string): boolean {
+  return paneId.startsWith(RUN_PANE_PREFIX)
+}
+
+/** The run job id a run pane id names, `null` for any other id. */
+export function parseRunPaneId(paneId: string): string | null {
+  if (!isRunPaneId(paneId)) return null
+  const id = paneId.slice(RUN_PANE_PREFIX.length)
+  return id === '' ? null : id
+}
+
+/** The pane id a row opens on click: a runner row its run pane, a background
+ *  row its attach pane, an interactive row none. */
+export function rowPaneId(a: Pick<AgentSession, 'id' | 'kind' | 'runId'>): string | null {
+  switch (agentKindOf(a)) {
+    case 'runner':
+      return runPaneId(a.runId as string)
+    case 'background':
+      return a.id
+    case 'interactive':
+      return null
+  }
+}
