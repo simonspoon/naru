@@ -4978,3 +4978,56 @@ pub struct TaskNote {
     /// SQLite `datetime` text, UTC.
     pub created_at: String,
 }
+
+/// The nine key colours of a theme (naru task 1840), each `#rrggbb`. Every
+/// other CSS variable is derived from them by `core::theme::derive`.
+/// `accent` is the CSS `--cyan` slot, `accent2` `--violet`, `good` `--green`,
+/// `warn` `--amber`, `bad` `--red`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct ThemeSlots {
+    pub bg: String,
+    pub panel: String,
+    pub text: String,
+    pub muted: String,
+    pub accent: String,
+    pub accent2: String,
+    pub good: String,
+    pub warn: String,
+    pub bad: String,
+}
+
+/// One text/surface pair under the WCAG 2.x minimum. Advisory only.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct ContrastWarning {
+    pub pair: String,
+    pub ratio: f64,
+    pub min: f64,
+}
+
+/// A theme as read: `vars` and `warnings` are derived on every read, never
+/// stored.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct Theme {
+    pub id: String,
+    pub name: String,
+    pub builtin: bool,
+    pub scheme: String,
+    pub slots: ThemeSlots,
+    pub vars: std::collections::BTreeMap<String, String>,
+    pub warnings: Vec<ContrastWarning>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+/// The derivation of a set of slots without a stored theme (the editor's
+/// live preview).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct ThemePreview {
+    pub scheme: String,
+    pub vars: std::collections::BTreeMap<String, String>,
+    pub warnings: Vec<ContrastWarning>,
+}
