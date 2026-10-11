@@ -12,8 +12,10 @@ import {
   modelOptions,
   options,
   sampleButton,
+  sampleFailure,
   valueError,
   voiceForModel,
+  voicesForDraft,
 } from './speechDraft'
 import type { ConfigSpeech } from './types/ConfigSpeech'
 import type { SpeechModelCaps } from './types/SpeechModelCaps'
@@ -277,5 +279,51 @@ describe('sampleButton', () => {
       expect(sampleButton(true, playing).title).toContain('stop')
     }
     expect(sampleButton(false, true)).toEqual(sampleButton(false, false))
+  })
+})
+
+describe('voicesForDraft', () => {
+  const speech = {
+    voice: null,
+    model: 'qwen3-tts-0.6b-base-mlx',
+    voices: ['Her', 'Her2'],
+    cloned: ['Her'],
+  } as unknown as ConfigSpeech
+  const unset = { ...speech, model: null } as unknown as ConfigSpeech
+
+  it('uses the saved model list while the draft names the saved model', () => {
+    expect(voicesForDraft(speech, null, 'qwen3-tts-0.6b-base-mlx ')).toEqual({
+      voices: ['Her', 'Her2'],
+      cloned: ['Her'],
+      ready: true,
+    })
+    expect(voicesForDraft(unset, null, '').ready).toBe(true)
+  })
+
+  it('offers nothing for another model until its list arrives', () => {
+    expect(voicesForDraft(speech, null, '')).toEqual({
+      voices: [],
+      cloned: [],
+      ready: false,
+    })
+    const stale = { model: 'kokoro-v1.0', voices: ['af_bella'], cloned: [] }
+    expect(voicesForDraft(speech, stale, '').ready).toBe(false)
+  })
+
+  it('uses the refetched list once it matches the draft', () => {
+    const jarvis = { model: '', voices: ['Jarvis'], cloned: ['Jarvis'] }
+    expect(voicesForDraft(speech, jarvis, '')).toEqual({
+      voices: ['Jarvis'],
+      cloned: ['Jarvis'],
+      ready: true,
+    })
+  })
+})
+
+describe('sampleFailure', () => {
+  it('shows the server message, else the generic line', () => {
+    expect(sampleFailure(' no voice af_bella ')).toBe('no voice af_bella')
+    expect(sampleFailure(null)).toBe('could not play a sample in this voice')
+    expect(sampleFailure('  ')).toBe('could not play a sample in this voice')
   })
 })

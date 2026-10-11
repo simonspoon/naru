@@ -21,6 +21,7 @@ import {
   listProjects,
   resetCcIndex,
   restartServer,
+  speechPreviewError,
   speechPreviewUrl,
   updateConfig,
   updateKeymap,
@@ -137,7 +138,9 @@ import {
   modelOptions as speechModelOptions,
   options as voiceOptions,
   sampleButton,
+  sampleFailure,
   valueError as voiceError,
+  voicesForDraft,
   voiceForModel,
   type SpeechDraft,
 } from '../speechDraft'
@@ -1459,7 +1462,7 @@ function SpeechSection() {
   // so "asked for it" and "hearing it" are different states, exactly as on the
   // Inbox page's play button.
   const [playing, setPlaying] = useState(false)
-  const [sampleError, setSampleError] = useState(false)
+  const [sampleError, setSampleError] = useState<string | null>(null)
   // Adding a cloned voice (mesa task 1418) — offered only when the saved
   // audio engine is naru-audio; the legacy synthesiser clones nothing.
   const audio = useFetch(() => getAudio(), 'speech-audio')
@@ -1489,11 +1492,15 @@ function SpeechSection() {
     draft ?? (speech
         ? speechDraftFrom(speech)
         : { voice: '', model: '', speed: SPEED_DEFAULT })
-  const listed =
-    voicesFor && voicesFor.model === seeded.model.trim() ? voicesFor : null
-  const voices = listed ? listed.voices : (speech?.voices ?? [])
-  // The listed voices naru-audio can export: only a cloning model lists them.
-  const cloned = listed ? listed.cloned : (speech?.cloned ?? [])
+  // The drafted model's voices; until its list arrives there are none to
+  // offer (`voicesReady` false), never the saved model's.
+  const {
+    voices,
+    cloned,
+    ready: voicesReady,
+  } = speech
+    ? voicesForDraft(speech, voicesFor, seeded.model)
+    : { voices: [], cloned: [], ready: false }
 
   function edit(value: string) {
     setDraft({ ...seeded, voice: value })
@@ -1502,7 +1509,7 @@ function SpeechSection() {
     // leave the previous voice playing under a changed selection.
     setSample(null)
     setPlaying(false)
-    setSampleError(false)
+    setSampleError(null)
   }
 
   // A different model has different voices: ask for that model's list, and
@@ -1512,7 +1519,7 @@ function SpeechSection() {
     setSaved(false)
     setSample(null)
     setPlaying(false)
-    setSampleError(false)
+    setSampleError(null)
     const asked = value.trim()
     getSpeech(asked).then(
       (fresh) => {
@@ -1531,13 +1538,25 @@ function SpeechSection() {
   // Stops the sample if one is playing, starts one for the drafted voice
   // otherwise — the drafted one, not the saved one, which is the whole point.
   function toggleSample() {
-    setSampleError(false)
+    setSampleError(null)
     setPlaying(false)
     setSample((current) =>
       current
         ? null
         : { voice: seeded.voice, model: seeded.model, nonce: Date.now() },
     )
+  }
+
+  // A sample that would not play: stop it and say why, in the server's words
+  // (an `<audio>` error carries none, so the same request is asked again).
+  function failSample() {
+    const { voice, model } = sample ?? seeded
+    setSample(null)
+    setPlaying(false)
+    setSampleError(sampleFailure(null))
+    void speechPreviewError(voice, model).then((message) => {
+      if (message) setSampleError(sampleFailure(message))
+    })
   }
 
   // Refetches the drafted model's voices so a just-added voice shows — the
@@ -1790,7 +1809,7 @@ function SpeechSection() {
               save would reject: there is nothing to audition then. */}
           <button
             type="button"
-            disabled={!!fieldError}
+            disabled={!!fieldError || !voicesReady}
             title={sampleButton(!!sample, playing).title}
             onClick={toggleSample}
           >
@@ -1810,9 +1829,7 @@ function SpeechSection() {
             </p>
           ))}
         {fieldError && <p className="error">{fieldError}</p>}
-        {sampleError && (
-          <p className="error">could not play a sample in this voice</p>
-        )}
+        {sampleError && <p className="error">{sampleError}</p>}
       </section>
 
       <section className="settings-command">
@@ -2026,9 +2043,7 @@ function SpeechSection() {
             if (el) applyElementSpeed(el, seeded.speed)
             el?.play().catch((err: DOMException) => {
               if (err.name === 'AbortError' || !live) return
-              setSampleError(true)
-              setSample(null)
-              setPlaying(false)
+              failSample()
             })
             return () => {
               live = false
@@ -2039,11 +2054,7 @@ function SpeechSection() {
             setSample(null)
             setPlaying(false)
           }}
-          onError={() => {
-            setSampleError(true)
-            setSample(null)
-            setPlaying(false)
-          }}
+          onError={failSample}
         />
       )}
 

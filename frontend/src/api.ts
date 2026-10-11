@@ -1651,6 +1651,32 @@ export function speechPreviewUrl(voice: string, model = ''): string {
 }
 
 /**
+ * Why a sample would not play: the server's own error message for the same
+ * preview request (a refused voice or model, a daemon that is down), or `null`
+ * when the server answered it fine — the failure was the browser's. An
+ * `<audio>` element reports no reason, so this asks again; a good answer is
+ * dropped unread rather than synthesised to the end.
+ */
+export async function speechPreviewError(
+  voice: string,
+  model = '',
+): Promise<string | null> {
+  const controller = new AbortController()
+  try {
+    const res = await fetch(speechPreviewUrl(voice, model), {
+      headers: { Accept: 'application/json' },
+      signal: controller.signal,
+    })
+    if (res.ok) return null
+    return (await apiErrorFrom(res)).message
+  } catch {
+    return null
+  } finally {
+    controller.abort()
+  }
+}
+
+/**
  * The live settings in `~/.mesa/config.json`: the instruction block a live
  * conversation's agent is spawned with (mesa task 867), plus the block mesa
  * ships. `prompt: null` means the config says nothing, so `default_prompt` is

@@ -225,3 +225,32 @@ export function capsFor(
 ): SpeechModelCaps | null {
   return capabilities.find((m) => m.model === model) ?? null
 }
+
+/**
+ * The voices to offer for the drafted model, and whether they are really that
+ * model's. `listed` is the refetched list for some model (or `null`). The
+ * saved model's own list (`speech.voices`) is the answer only while the draft
+ * still names the saved model; for any other draft the list is still on its
+ * way, and showing the saved model's voices meanwhile would let a voice be
+ * auditioned in a model it does not belong to (a 503 from the daemon).
+ */
+export function voicesForDraft(
+  speech: ConfigSpeech,
+  listed: { model: string; voices: string[]; cloned: string[] } | null,
+  draftModel: string,
+): { voices: string[]; cloned: string[]; ready: boolean } {
+  const drafted = (draftModel ?? '').trim()
+  if (listed && listed.model === drafted) {
+    return { voices: listed.voices, cloned: listed.cloned, ready: true }
+  }
+  if (drafted === (speech.model ?? '').trim()) {
+    return { voices: speech.voices, cloned: speech.cloned, ready: true }
+  }
+  return { voices: [], cloned: [], ready: false }
+}
+
+/** What a failed sample shows: the server's own sentence when it gave one. */
+export function sampleFailure(message: string | null | undefined): string {
+  const text = (message ?? '').trim()
+  return text === '' ? 'could not play a sample in this voice' : text
+}
