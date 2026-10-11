@@ -17,8 +17,10 @@ pid: number | null,
  */
 id: string | null, cwd: string, 
 /**
- * `background` (started with `--bg`, attachable) or `interactive`
- * (someone's own terminal — listed, but not attachable).
+ * `background` (started with `--bg`, attachable), `interactive`
+ * (someone's own terminal — listed, but not attachable) or `runner` (a
+ * `naru run` job, naru task 1829 — listed from the runs directory, not
+ * attachable: `id` stays `null`).
  */
 kind: string, 
 /**
@@ -108,4 +110,9 @@ taskId: number | null,
 /**
  * The `task_id` task's derived name, so the card can label the link.
  */
-taskName: string | null, };
+taskName: string | null, 
+/**
+ * **naru-derived** (task 1829): the run's job id, set only on a `runner`
+ * row (`naru run show <id>`); `null` for every `claude agents` row.
+ */
+runId: string | null, };

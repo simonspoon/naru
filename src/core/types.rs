@@ -146,8 +146,10 @@ pub struct AgentSession {
     #[serde(default)]
     pub id: Option<String>,
     pub cwd: String,
-    /// `background` (started with `--bg`, attachable) or `interactive`
-    /// (someone's own terminal — listed, but not attachable).
+    /// `background` (started with `--bg`, attachable), `interactive`
+    /// (someone's own terminal — listed, but not attachable) or `runner` (a
+    /// `naru run` job, naru task 1829 — listed from the runs directory, not
+    /// attachable: `id` stays `null`).
     pub kind: String,
     /// Session start, milliseconds since epoch.
     #[ts(type = "number")]
@@ -229,6 +231,10 @@ pub struct AgentSession {
     /// The `task_id` task's derived name, so the card can label the link.
     #[serde(default)]
     pub task_name: Option<String>,
+    /// **naru-derived** (task 1829): the run's job id, set only on a `runner`
+    /// row (`naru run show <id>`); `null` for every `claude agents` row.
+    #[serde(default)]
+    pub run_id: Option<String>,
 }
 
 /// Which of the two kinds of work an [`AgentChild`] is. Exactly two: a

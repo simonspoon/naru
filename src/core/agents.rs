@@ -12,6 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::core::cc;
 use crate::core::config;
+use crate::core::runner;
 use crate::core::types::{AgentChild, AgentChildKind, AgentChildState, AgentSession};
 
 /// The `claude` binary to drive; `MESA_CLAUDE_BIN` overrides it for tests
@@ -67,7 +68,94 @@ pub fn list_all() -> Result<Vec<AgentSession>, String> {
     list_sessions(&claude_bin())
 }
 
-fn list_sessions(bin: &str) -> Result<Vec<AgentSession>, String> {
+/// The Agents panel's list (naru task 1829): `claude agents` rows plus the
+/// `naru run` jobs as `runner` rows, a claude row for a run's own session
+/// dropped. Only the panel routes call this; the watchers and the close guard
+/// keep [`list_all`], so a run is never a busy session or a close blocker.
+pub fn list_panel() -> Result<Vec<AgentSession>, String> {
+    list_panel_with(&claude_bin(), None)
+}
+
+/// [`list_panel`] narrowed to the sessions under `dir`.
+pub fn list_panel_under(dir: &str) -> Result<Vec<AgentSession>, String> {
+    list_panel_with(&claude_bin(), Some(dir))
+}
+
+fn list_panel_with(bin: &str, dir: Option<&str>) -> Result<Vec<AgentSession>, String> {
+    let bg = claude_rows(bin)?;
+    let jobs = runner::panel_jobs();
+    let runs = jobs
+        .iter()
+        .map(|(job, alive)| runner_row(job, *alive))
+        .collect();
+    let mut sessions = merge_runs(bg, runs);
+    if let Some(dir) = dir {
+        sessions.retain(|s| is_under(&s.cwd, dir));
+    }
+    let pending = enrich_pulse(&mut sessions);
+    enrich_liveness(&mut sessions, &pending);
+    // The transcript names the model once it has an assistant turn; until then
+    // (or when it is gone) the run's own `--model` stands.
+    for s in sessions.iter_mut().filter(|s| s.model.is_none()) {
+        if let Some((job, _)) = jobs
+            .iter()
+            .find(|(j, _)| s.run_id.as_deref() == Some(&j.job_id))
+        {
+            s.model = Some(job.model.clone());
+        }
+    }
+    Ok(sessions)
+}
+
+/// One run as a panel row. `id` stays `None`: it is the "attachable via
+/// `claude attach` / `claude stop`" marker, true only for `--bg` jobs.
+fn runner_row(job: &runner::Job, alive: bool) -> AgentSession {
+    use runner::RunStatus::*;
+    let (status, state) = match job.status {
+        Running => (Some("busy"), "working"),
+        Idle => (Some("idle"), "done"),
+        Finished => (None, "done"),
+        Failed => (None, "failed"),
+        Stopped => (None, "stopped"),
+    };
+    AgentSession {
+        pid: if alive { job.claude_pid } else { None },
+        id: None,
+        cwd: job.cwd.clone(),
+        kind: "runner".to_string(),
+        started_at: job.started_at * 1000,
+        session_id: job.session_id.clone(),
+        name: Some(job.name.clone()),
+        status: status.map(str::to_string),
+        state: Some(state.to_string()),
+        waiting_for: None,
+        live_shells: 0,
+        live_subagents: 0,
+        last_response: None,
+        context_tokens: None,
+        model: Some(job.model.clone()),
+        children: vec![],
+        activity: None,
+        task_id: None,
+        task_name: None,
+        run_id: Some(job.job_id.clone()),
+    }
+}
+
+/// `bg` minus any row whose session a runner row already names (`claude
+/// agents` lists a run's own `claude -p` session as `interactive`), then the
+/// runner rows.
+fn merge_runs(bg: Vec<AgentSession>, runs: Vec<AgentSession>) -> Vec<AgentSession> {
+    let mut merged: Vec<AgentSession> = bg
+        .into_iter()
+        .filter(|s| !runs.iter().any(|r| r.session_id == s.session_id))
+        .collect();
+    merged.extend(runs);
+    merged
+}
+
+/// `claude agents --json`, parsed, not yet enriched.
+fn claude_rows(bin: &str) -> Result<Vec<AgentSession>, String> {
     let out = Command::new(bin)
         .args(["agents", "--json"])
         .stdin(Stdio::null())
@@ -79,7 +167,11 @@ fn list_sessions(bin: &str) -> Result<Vec<AgentSession>, String> {
             String::from_utf8_lossy(&out.stderr).trim()
         ));
     }
-    let mut sessions = parse_sessions(&out.stdout)?;
+    parse_sessions(&out.stdout)
+}
+
+fn list_sessions(bin: &str) -> Result<Vec<AgentSession>, String> {
+    let mut sessions = claude_rows(bin)?;
     // Enrichment is a separate step from parsing, and happens here rather than
     // in `list_under` so a project-scoped read costs the same one `ps` as the
     // global one — and so both surfaces (and the `agents_cache` TTL in
@@ -1320,6 +1412,82 @@ pub fn strip_ansi(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_job(status: runner::RunStatus) -> runner::Job {
+        runner::Job {
+            job_id: "0a1b2c3d".into(),
+            session_id: "sess-1".into(),
+            cwd: "/w".into(),
+            model: "haiku".into(),
+            name: "r".into(),
+            status,
+            runner_pid: Some(1),
+            claude_pid: Some(42),
+            claude_started: true,
+            started_at: 1700,
+            updated_at: 1700,
+            finished_at: None,
+            last_result: None,
+            last_subtype: None,
+            last_is_error: None,
+            resumes: 0,
+            idle_timeout_secs: 60,
+        }
+    }
+
+    #[test]
+    fn runner_job_maps_to_a_runner_row() {
+        use runner::RunStatus::*;
+        for (st, alive, status, state, pid) in [
+            (Running, true, Some("busy"), "working", Some(42)),
+            (Idle, true, Some("idle"), "done", Some(42)),
+            (Running, false, Some("busy"), "working", None),
+            (Finished, false, None, "done", None),
+            (Failed, false, None, "failed", None),
+            (Stopped, false, None, "stopped", None),
+        ] {
+            let r = runner_row(&test_job(st), alive);
+            assert_eq!(r.kind, "runner");
+            assert_eq!(r.id, None);
+            assert_eq!(r.run_id.as_deref(), Some("0a1b2c3d"));
+            assert_eq!(r.session_id, "sess-1");
+            assert_eq!(r.started_at, 1_700_000);
+            assert_eq!(r.model.as_deref(), Some("haiku"));
+            assert_eq!(r.status.as_deref(), status);
+            assert_eq!(r.state.as_deref(), Some(state));
+            assert_eq!(r.pid, pid);
+        }
+    }
+
+    #[test]
+    fn merge_drops_a_claude_row_sharing_a_runner_session_id() {
+        let mut bg = parse_sessions(SESSIONS_JSON.as_bytes()).unwrap();
+        bg[0].session_id = "sess-1".into();
+        let other = bg[1].session_id.clone();
+        let run = runner_row(&test_job(runner::RunStatus::Running), true);
+        let merged = merge_runs(bg, vec![run]);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(
+            merged.iter().filter(|s| s.session_id == "sess-1").count(),
+            1
+        );
+        assert!(merged.iter().any(|s| s.session_id == other));
+        assert!(merged.iter().any(|s| s.kind == "runner"));
+        assert!(!merged.iter().any(|s| s.kind == "interactive"));
+    }
+
+    #[test]
+    fn merge_leaves_bg_rows_unchanged() {
+        let bg = parse_sessions(SESSIONS_JSON.as_bytes()).unwrap();
+        let merged = merge_runs(bg.clone(), vec![]);
+        assert_eq!(merged, bg);
+        let mut v = serde_json::to_value(&merged[1]).unwrap();
+        assert!(v["runId"].is_null());
+        v.as_object_mut().unwrap().remove("runId");
+        let mut old = serde_json::to_value(&bg[1]).unwrap();
+        old.as_object_mut().unwrap().remove("runId");
+        assert_eq!(v, old);
+    }
 
     use std::io::Write;
     #[cfg(unix)]

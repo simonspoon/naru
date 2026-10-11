@@ -7121,7 +7121,9 @@ async fn start_run(
 ) -> ApiResult<Response> {
     require_agent_access(&state, &addr, &headers)?;
     let Json(body) = body?;
-    Ok((StatusCode::CREATED, Json(runner::start(&body)?)).into_response())
+    let started = runner::start(&body)?;
+    clear_agents_cache(&state);
+    Ok((StatusCode::CREATED, Json(started)).into_response())
 }
 
 #[derive(Deserialize)]
@@ -7148,7 +7150,16 @@ async fn stop_run(
     Path(id): Path<String>,
 ) -> ApiResult<Response> {
     require_agent_access(&state, &addr, &headers)?;
-    Ok(Json(runner::stop(&id)?).into_response())
+    let stopped = runner::stop(&id)?;
+    clear_agents_cache(&state);
+    Ok(Json(stopped).into_response())
+}
+
+/// A run appearing, stopping or being interrupted changes the Agents list
+/// (naru task 1829); drop the cache so the next poll shows it.
+fn clear_agents_cache(state: &AppState) {
+    state.agents_cache.lock().unwrap().clear();
+    state.agents_gen.fetch_add(1, Ordering::SeqCst);
 }
 
 async fn interrupt_run(
@@ -7158,7 +7169,9 @@ async fn interrupt_run(
     Path(id): Path<String>,
 ) -> ApiResult<Response> {
     require_agent_access(&state, &addr, &headers)?;
-    Ok(Json(runner::interrupt(&id)?).into_response())
+    let interrupted = runner::interrupt(&id)?;
+    clear_agents_cache(&state);
+    Ok(Json(interrupted).into_response())
 }
 
 /// Stops a detached run: sets the registry's stop flag, which the run's own
@@ -11340,7 +11353,7 @@ async fn list_project_agents(
     // new session, so we skip caching (serve it, but don't poison the cache).
     let gen0 = state.agents_gen.load(Ordering::SeqCst);
     let dir = path.clone();
-    let mut sessions = tokio::task::spawn_blocking(move || agents::list_under(&dir))
+    let mut sessions = tokio::task::spawn_blocking(move || agents::list_panel_under(&dir))
         .await
         .map_err(|e| agents_unavailable(format!("agents list panicked: {e}")))?
         .map_err(agents_unavailable)?;
@@ -11391,7 +11404,7 @@ async fn list_all_agents(
         }
     }
     let gen0 = state.agents_gen.load(Ordering::SeqCst);
-    let mut sessions = tokio::task::spawn_blocking(agents::list_all)
+    let mut sessions = tokio::task::spawn_blocking(agents::list_panel)
         .await
         .map_err(|e| agents_unavailable(format!("agents list panicked: {e}")))?
         .map_err(agents_unavailable)?;

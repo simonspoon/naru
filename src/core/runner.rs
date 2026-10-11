@@ -551,6 +551,38 @@ pub fn list_in(runs: &Path) -> Result<Vec<Value>> {
     Ok(jobs.into_iter().map(|j| j.2).collect())
 }
 
+/// How long a finished, failed or stopped run stays in the Agents panel.
+pub const RUN_LINGER_SECS: i64 = 3600;
+
+/// The runs the Agents panel lists (naru task 1829): every non-terminal run,
+/// plus terminal ones that finished within [`RUN_LINGER_SECS`], each with
+/// whether its runner process is still alive. Newest first.
+pub fn panel_jobs() -> Vec<(Job, bool)> {
+    panel_jobs_in(&runs_dir())
+}
+
+pub fn panel_jobs_in(runs: &Path) -> Vec<(Job, bool)> {
+    let now = now_secs();
+    let mut jobs: Vec<(Job, bool)> = vec![];
+    for entry in fs::read_dir(runs).into_iter().flatten().flatten() {
+        let dir = entry.path();
+        let Ok(job) = load(&dir) else { continue };
+        if job.status.is_terminal()
+            && now - job.finished_at.unwrap_or(job.updated_at) > RUN_LINGER_SECS
+        {
+            continue;
+        }
+        let alive = !job.status.is_terminal() && runner_alive(&dir, &job);
+        jobs.push((job, alive));
+    }
+    jobs.sort_by(|a, b| {
+        b.0.started_at
+            .cmp(&a.0.started_at)
+            .then_with(|| b.0.job_id.cmp(&a.0.job_id))
+    });
+    jobs
+}
+
 pub fn stop(id: &str) -> Result<Value> {
     stop_in(&runs_dir(), id)
 }
@@ -964,6 +996,30 @@ mod tests {
         assert_eq!(v["message"]["role"], "user");
         assert_eq!(v["message"]["content"][0]["type"], "text");
         assert_eq!(v["message"]["content"][0]["text"], "hi \"there\"\nsecond");
+    }
+
+    #[test]
+    fn panel_jobs_skip_a_terminal_run_older_than_the_linger() {
+        let runs = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let live = create_job(runs.path(), &opts("a", cwd.path())).unwrap();
+        let fresh = create_job(runs.path(), &opts("b", cwd.path())).unwrap();
+        let old = create_job(runs.path(), &opts("c", cwd.path())).unwrap();
+        let now = now_secs();
+        for (job, finished) in [(&fresh, now - 60), (&old, now - RUN_LINGER_SECS - 60)] {
+            let dir = runs.path().join(&job.job_id);
+            let mut j = load(&dir).unwrap();
+            j.status = RunStatus::Finished;
+            j.finished_at = Some(finished);
+            save(&dir, &mut j).unwrap();
+        }
+        let ids: Vec<String> = panel_jobs_in(runs.path())
+            .into_iter()
+            .map(|(j, _)| j.job_id)
+            .collect();
+        assert!(ids.contains(&live.job_id));
+        assert!(ids.contains(&fresh.job_id));
+        assert!(!ids.contains(&old.job_id));
     }
 
     #[test]
