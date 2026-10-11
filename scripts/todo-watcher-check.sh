@@ -158,10 +158,10 @@ wait_for_server "$PORT"
 
 wait_bg_lines 1
 LINE=$(head -1 "$BG_LOG")
-[ "$LINE" = "$DIR_A|A: task a|/execute-mesa-task $TASK_A" ] ||
-  fail "expected '$DIR_A|A: task a|/execute-mesa-task $TASK_A', got '$LINE'"
+[ "$LINE" = "$DIR_A|A: task a|/execute-naru-task $TASK_A" ] ||
+  fail "expected '$DIR_A|A: task a|/execute-naru-task $TASK_A', got '$LINE'"
 [ "$(task_status "$TASK_A")" = "in_progress" ] || fail "dispatched task must be claimed in_progress"
-ok "watch_todo on: dispatches next actionable task, prompt is /execute-mesa-task <id>, session named '<project>: <name>', claims in_progress"
+ok "watch_todo on: dispatches next actionable task, prompt is /execute-naru-task <id>, session named '<project>: <name>', claims in_progress"
 
 # Auto-dispatched sessions run as the `supervisor` agent definition (mesa task
 # 1075) — named literally in the todo-watcher default, so this is not the
@@ -291,8 +291,8 @@ wait_arch_bg_lines 1
 sleep 1
 [ "$(wc -l < "$ARCH_LOG")" -eq 1 ] || fail "archived project must never be dispatched, even across several ticks"
 LINE=$(head -1 "$ARCH_LOG")
-[ "$LINE" = "$NORM_DIR|Norm: task norm|/execute-mesa-task $TASK_NORM" ] ||
-  fail "expected '$NORM_DIR|Norm: task norm|/execute-mesa-task $TASK_NORM', got '$LINE'"
+[ "$LINE" = "$NORM_DIR|Norm: task norm|/execute-naru-task $TASK_NORM" ] ||
+  fail "expected '$NORM_DIR|Norm: task norm|/execute-naru-task $TASK_NORM', got '$LINE'"
 [ "$(arch_task_status "$TASK_NORM")" = "in_progress" ] || fail "unarchived project's task must be claimed in_progress"
 [ "$(arch_task_status "$TASK_ARCH")" = "todo" ] || fail "archived project's task must stay todo, never claimed"
 ok "archived project is never auto-dispatched onto while its unarchived sibling is, across several ticks"
@@ -300,8 +300,8 @@ ok "archived project is never auto-dispatched onto while its unarchived sibling 
 run 0 "$MESA" project unarchive "$ARCH"
 wait_arch_bg_lines 2
 LINE=$(sed -n '2p' "$ARCH_LOG")
-[ "$LINE" = "$ARCH_DIR|Arch: task arch|/execute-mesa-task $TASK_ARCH" ] ||
-  fail "expected '$ARCH_DIR|Arch: task arch|/execute-mesa-task $TASK_ARCH', got '$LINE'"
+[ "$LINE" = "$ARCH_DIR|Arch: task arch|/execute-naru-task $TASK_ARCH" ] ||
+  fail "expected '$ARCH_DIR|Arch: task arch|/execute-naru-task $TASK_ARCH', got '$LINE'"
 [ "$(arch_task_status "$TASK_ARCH")" = "in_progress" ] || fail "unarchiving must let the next tick dispatch its actionable todo task"
 ok "unarchiving a project lets the next tick dispatch its actionable todo task"
 
@@ -358,8 +358,8 @@ wait_umb_bg_lines 1
 sleep 1
 [ "$(wc -l < "$UMB_LOG")" -eq 1 ] || fail "the dispatched child is a leaf: it must wedge the project again"
 LINE=$(head -1 "$UMB_LOG")
-[ "$LINE" = "$UMB_DIR|Umb: child one|/execute-mesa-task $TASK_C1" ] ||
-  fail "expected '$UMB_DIR|Umb: child one|/execute-mesa-task $TASK_C1', got '$LINE'"
+[ "$LINE" = "$UMB_DIR|Umb: child one|/execute-naru-task $TASK_C1" ] ||
+  fail "expected '$UMB_DIR|Umb: child one|/execute-naru-task $TASK_C1', got '$LINE'"
 [ "$(umb_task_status "$TASK_EPIC")" = "in_progress" ] || fail "the umbrella itself must be left alone"
 [ "$(umb_task_status "$TASK_OUT")" = "todo" ] || fail "an open umbrella unblocks only its own children"
 [ "$(umb_task_status "$TASK_C2")" = "todo" ] || fail "children must not fan out concurrently"
@@ -368,8 +368,8 @@ ok "an in_progress task with subtasks does not wedge its project: its first chil
 run 0 "$MESA" task update "$TASK_C1" --status done
 wait_umb_bg_lines 2
 LINE=$(sed -n '2p' "$UMB_LOG")
-[ "$LINE" = "$UMB_DIR|Umb: child two|/execute-mesa-task $TASK_C2" ] ||
-  fail "expected '$UMB_DIR|Umb: child two|/execute-mesa-task $TASK_C2', got '$LINE'"
+[ "$LINE" = "$UMB_DIR|Umb: child two|/execute-naru-task $TASK_C2" ] ||
+  fail "expected '$UMB_DIR|Umb: child two|/execute-naru-task $TASK_C2', got '$LINE'"
 ok "a finished child lets the next tick take the umbrella's next subtask"
 
 run 0 "$MESA" task update "$TASK_C2" --status done
@@ -381,8 +381,8 @@ ok "an open umbrella with no actionable subtasks left keeps the rest of the proj
 run 0 "$MESA" task update "$TASK_EPIC" --status done
 wait_umb_bg_lines 3
 LINE=$(sed -n '3p' "$UMB_LOG")
-[ "$LINE" = "$UMB_DIR|Umb: outsider|/execute-mesa-task $TASK_OUT" ] ||
-  fail "expected '$UMB_DIR|Umb: outsider|/execute-mesa-task $TASK_OUT', got '$LINE'"
+[ "$LINE" = "$UMB_DIR|Umb: outsider|/execute-naru-task $TASK_OUT" ] ||
+  fail "expected '$UMB_DIR|Umb: outsider|/execute-naru-task $TASK_OUT', got '$LINE'"
 ok "closing the umbrella returns the project to plain whole-backlog dispatch"
 
 kill "$SERVER_PID" 2>/dev/null; wait "$SERVER_PID" 2>/dev/null || true; SERVER_PID=""
@@ -432,16 +432,16 @@ wait_epic_bg_lines 1
 sleep 1
 [ "$(wc -l < "$EPIC_LOG")" -eq 1 ] || fail "claiming an epic would let the next tick spawn a second agent on its own child"
 LINE=$(head -1 "$EPIC_LOG")
-[ "$LINE" = "$EPIC_DIR|Epic: story|/execute-mesa-task $T_STORY" ] ||
-  fail "expected '$EPIC_DIR|Epic: story|/execute-mesa-task $T_STORY', got '$LINE'"
+[ "$LINE" = "$EPIC_DIR|Epic: story|/execute-naru-task $T_STORY" ] ||
+  fail "expected '$EPIC_DIR|Epic: story|/execute-naru-task $T_STORY', got '$LINE'"
 [ "$(epic_task_status "$T_EPIC")" = "todo" ] || fail "a task with actionable subtasks must never be claimed by the watcher"
 ok "the watcher claims an actionable leaf, never a task that still has actionable subtasks"
 
 run 0 "$MESA" task update "$T_STORY" --status done
 wait_epic_bg_lines 2
 LINE=$(sed -n '2p' "$EPIC_LOG")
-[ "$LINE" = "$EPIC_DIR|Epic: epic|/execute-mesa-task $T_EPIC" ] ||
-  fail "expected '$EPIC_DIR|Epic: epic|/execute-mesa-task $T_EPIC', got '$LINE'"
+[ "$LINE" = "$EPIC_DIR|Epic: epic|/execute-naru-task $T_EPIC" ] ||
+  fail "expected '$EPIC_DIR|Epic: epic|/execute-naru-task $T_EPIC', got '$LINE'"
 sleep 1
 [ "$(wc -l < "$EPIC_LOG")" -eq 2 ] || fail "an epic holding its own claim must park the project"
 ok "an exhausted epic is dispatched last (its roll-up) and parks the project while it holds the claim"
@@ -509,8 +509,8 @@ ok "a configured todo-concurrency of 2 fills the project to the limit in one tic
 run 0 "$MESA" task update "$CONC_T1" --status done
 wait_conc_bg_lines 3
 LINE=$(sed -n '3p' "$CONC_LOG")
-[ "$LINE" = "$CONC_DIR|Conc: task three|/execute-mesa-task $CONC_T3" ] ||
-  fail "expected '$CONC_DIR|Conc: task three|/execute-mesa-task $CONC_T3', got '$LINE'"
+[ "$LINE" = "$CONC_DIR|Conc: task three|/execute-naru-task $CONC_T3" ] ||
+  fail "expected '$CONC_DIR|Conc: task three|/execute-naru-task $CONC_T3', got '$LINE'"
 [ "$(conc_task_status "$CONC_T3")" = "in_progress" ] ||
   fail "finishing task one must free a slot under the limit for task three"
 ok "finishing one in-progress leaf frees a slot and the next tick dispatches the task that was waiting"
@@ -641,8 +641,8 @@ ok "a 'done' session that still holds a live shell child occupies its project's 
 stop_holder
 wait_live_bg_lines 1
 LINE=$(head -1 "$LIVE_LOG")
-[ "$LINE" = "$LIVE_DIR|Live: task live|/execute-mesa-task $LIVE_T1" ] ||
-  fail "expected '$LIVE_DIR|Live: task live|/execute-mesa-task $LIVE_T1', got '$LINE'"
+[ "$LINE" = "$LIVE_DIR|Live: task live|/execute-naru-task $LIVE_T1" ] ||
+  fail "expected '$LIVE_DIR|Live: task live|/execute-naru-task $LIVE_T1', got '$LINE'"
 [ "$(live_task_status "$LIVE_T1")" = "in_progress" ] ||
   fail "the freed slot must be dispatched into and the task claimed"
 ok "the shell child exiting frees the slot and the next tick dispatches normally"
@@ -665,8 +665,8 @@ wait_for_server "$LIVE_PORT"
 
 wait_live_bg_lines 2
 LINE=$(sed -n '2p' "$LIVE_LOG")
-[ "$LINE" = "$LIVE_DIR|Live: task live two|/execute-mesa-task $LIVE_T2" ] ||
-  fail "expected '$LIVE_DIR|Live: task live two|/execute-mesa-task $LIVE_T2', got '$LINE'"
+[ "$LINE" = "$LIVE_DIR|Live: task live two|/execute-naru-task $LIVE_T2" ] ||
+  fail "expected '$LIVE_DIR|Live: task live two|/execute-naru-task $LIVE_T2', got '$LINE'"
 [ "$(live_task_status "$LIVE_T2")" = "in_progress" ] ||
   fail "a failing agents probe must not stop the claim"
 ok "a failing 'claude agents' counts as zero live sessions and dispatch still happens (fails open)"
@@ -822,7 +822,7 @@ ok "a dispatched task set back to todo has its old session stopped too"
 # stop is idempotent), so the assertion is that the dead sessions add no stop.
 wait_reap_bg_lines 3
 REAP_J3=$(cut -d'|' -f4 < "$REAP_LOG" | sed -n '3p')
-[ "$(cut -d'|' -f3 < "$REAP_LOG" | sed -n '3p')" = "/execute-mesa-task $REAP_T2" ] ||
+[ "$(cut -d'|' -f3 < "$REAP_LOG" | sed -n '3p')" = "/execute-naru-task $REAP_T2" ] ||
   fail "expected the third dispatch to be task $REAP_T2 picked up again; log:\n$(cat "$REAP_LOG")"
 sleep 1
 REAP_STOPS_BEFORE=$(wc -l < "$REAP_STOPS")
@@ -920,7 +920,7 @@ wait_sf_lines "$SF_FAIL_LOG" 2
 sleep 1.5
 [ "$(wc -l < "$SF_FAIL_LOG")" -eq 2 ] ||
   fail "each failed task must be tried once, not every tick: $(cat "$SF_FAIL_LOG")"
-[ "$(sort "$SF_FAIL_LOG" | tr '\n' ' ')" = "$(printf '/execute-mesa-task %s\n' "$SF_T1" "$SF_T2" | sort | tr '\n' ' ')" ] ||
+[ "$(sort "$SF_FAIL_LOG" | tr '\n' ' ')" = "$(printf '/execute-naru-task %s\n' "$SF_T1" "$SF_T2" | sort | tr '\n' ' ')" ] ||
   fail "a backed-off task must not wedge the project, the pick moves on: $(cat "$SF_FAIL_LOG")"
 [ "$("$MESA" task show "$SF_T1" | jq -r .status)" = "todo" ] || fail "a failed spawn leaves the task todo"
 [ "$("$MESA" task show "$SF_T2" | jq -r .status)" = "todo" ] || fail "a failed spawn leaves the task todo"
@@ -970,7 +970,7 @@ rm "$STUB_DIR/spawnfail"
 sleep 1.1
 run 0 "$MESA" task update "$SF_T1" --status todo
 wait_sf_lines "$SF_LOG" 1
-[ "$(head -1 "$SF_LOG")" = "$SF_DIR|SF: task sf one|/execute-mesa-task $SF_T1" ] ||
+[ "$(head -1 "$SF_LOG")" = "$SF_DIR|SF: task sf one|/execute-naru-task $SF_T1" ] ||
   fail "a touched task must dispatch once the spawn works; log: $(cat "$SF_LOG")"
 [ "$("$MESA" task show "$SF_T1" | jq -r .status)" = "in_progress" ] || fail "the dispatched task is claimed"
 [ "$("$MESA" inbox list | jq 'length')" -eq 3 ] || fail "a successful spawn files nothing"

@@ -1103,7 +1103,7 @@ fn dispatch_task_session(
     }
     // The command — including which slash command executes a task — comes
     // from `~/.mesa/config.json`'s `todo-watcher` entry, defaulting to
-    // `claude --bg --agent supervisor … -- /execute-mesa-task <id>`.
+    // `claude --bg --agent supervisor … -- /execute-naru-task <id>`.
     // The library's prompts, for any `{prompt:<name>}` the template names
     // (mesa task 1138).
     let prompts = {
@@ -1246,7 +1246,7 @@ fn deepest_actionable(store: &Store, mut task: Task, exclude: &[i64]) -> Result<
 /// free dispatch slot, pick the next actionable task and dispatch a
 /// background `claude` agent on it. Marks the task `in_progress`
 /// itself *before* spawning — closing the race window between dispatch and
-/// the agent's own `/execute-mesa-task` pickup step, so a second tick can't
+/// the agent's own `/execute-naru-task` pickup step, so a second tick can't
 /// double-dispatch the same task while the agent is still starting up. A
 /// spawn failure reverts the task back to `todo` so the project isn't
 /// wedged, files one inbox alert per (task, error text) and backs the task
@@ -14910,7 +14910,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                 "an open umbrella must not wedge its project: {log:?}"
             );
             assert!(
-                log.contains(&format!("/execute-mesa-task {child_a}")),
+                log.contains(&format!("/execute-naru-task {child_a}")),
                 "the umbrella's first child must be the dispatched task: {log:?}"
             );
             let get = |id| state.store.lock().unwrap().get_task(id).unwrap().status;
@@ -14939,7 +14939,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             assert_eq!(log.lines().count(), 2, "second child dispatched: {log:?}");
             assert!(
-                log.contains(&format!("/execute-mesa-task {child_b}")),
+                log.contains(&format!("/execute-naru-task {child_b}")),
                 "{log:?}"
             );
 
@@ -14961,7 +14961,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             assert_eq!(log.lines().count(), 3, "idle project resumes: {log:?}");
             assert!(
-                log.contains(&format!("/execute-mesa-task {outsider}")),
+                log.contains(&format!("/execute-naru-task {outsider}")),
                 "{log:?}"
             );
 
@@ -15034,7 +15034,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             todo_watcher_tick(&state);
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             assert!(
-                log.contains(&format!("/execute-mesa-task {child}")),
+                log.contains(&format!("/execute-naru-task {child}")),
                 "a released child must dispatch normally: {log:?}"
             );
             assert_eq!(get(child), Status::InProgress);
@@ -15228,7 +15228,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             todo_watcher_tick(&state);
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             assert!(
-                log.contains(&format!("/execute-mesa-task {first}")),
+                log.contains(&format!("/execute-naru-task {first}")),
                 "a touched task dispatches once the spawn works: {log:?}"
             );
             assert_eq!(status(first), Status::InProgress);
@@ -15381,7 +15381,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             assert_eq!(log.lines().count(), 1, "one dispatch: {log:?}");
             assert!(
-                log.contains(&format!("/execute-mesa-task {grandchild}")),
+                log.contains(&format!("/execute-naru-task {grandchild}")),
                 "the deepest actionable descendant is the unit of work, not the epic: {log:?}"
             );
             assert_eq!(get(epic), Status::Todo, "the epic must not be claimed");
@@ -15406,7 +15406,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             assert_eq!(log.lines().count(), 2, "roll-up dispatched: {log:?}");
             assert!(
-                log.contains(&format!("/execute-mesa-task {epic}")),
+                log.contains(&format!("/execute-naru-task {epic}")),
                 "{log:?}"
             );
             assert_eq!(get(epic), Status::InProgress);

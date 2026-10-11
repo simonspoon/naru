@@ -13,7 +13,7 @@
 //! ```json
 //! {
 //!   "commands": {
-//!     "todo-watcher":   "claude --bg --agent supervisor --name {name} -- \"/execute-mesa-task {id}\"",
+//!     "todo-watcher":   "claude --bg --agent supervisor --name {name} -- \"/execute-naru-task {id}\"",
 //!     "inbox-watcher":  "claude -p --model {model} --name {name} --tools \"\" --strict-mcp-config --output-format json --json-schema {schema} -- {prompt}",
 //!     "agent-spawn":    "claude --bg --model opus --agent supervisor -- {prompt}",
 //!     "live-agent":     "claude --bg --agent naru-live --name {name} -- {prompt}",
@@ -293,10 +293,10 @@ pub const ACTIONS: [&str; 9] = [
 ///
 /// Note the quotes around the prompt: a slash command and its argument are
 /// **one** argv entry (`claude` takes the prompt as a single positional), and
-/// tokenization is by whitespace. Unquoted, `/execute-mesa-task {id}` would
+/// tokenization is by whitespace. Unquoted, `/execute-naru-task {id}` would
 /// arrive as two arguments and the id would be lost.
 pub const DEFAULT_TODO_WATCHER: &str =
-    r#"claude --bg --agent supervisor --name {name} -- "/execute-mesa-task {id}""#;
+    r#"claude --bg --agent supervisor --name {name} -- "/execute-naru-task {id}""#;
 /// Built-in default for [`INBOX_WATCHER`] (naru task 1691): [`DEFAULT_LIVE_SUMMARY`]'s
 /// shape — one synchronous tool-less `claude -p --output-format json
 /// --json-schema {schema}` call, run inside a detached `naru __job
@@ -5541,7 +5541,7 @@ mod tests {
             resolve(TODO_WATCHER, DEFAULT_TODO_WATCHER, &vars).unwrap(),
             // Literal since mesa task 1075: the run is supervised by the
             // `supervisor` agent definition.
-            r#"claude --bg --agent supervisor --name 'mesa: do the thing' -- "/execute-mesa-task 731""#
+            r#"claude --bg --agent supervisor --name 'mesa: do the thing' -- "/execute-naru-task 731""#
         );
         let spawn = Vars {
             prompt: Some("look at the tests"),
@@ -5577,7 +5577,7 @@ mod tests {
                 "--name",
                 "mesa: do the thing",
                 "--",
-                "/execute-mesa-task 731",
+                "/execute-naru-task 731",
             ]
         );
         assert_eq!(
@@ -5646,7 +5646,7 @@ mod tests {
         };
         assert_eq!(
             resolve(TODO_WATCHER, DEFAULT_TODO_WATCHER, &named).unwrap(),
-            r#"claude --bg --agent supervisor --name '' -- "/execute-mesa-task 7""#
+            r#"claude --bg --agent supervisor --name '' -- "/execute-naru-task 7""#
         );
         assert_eq!(resolved("t run \"{name}\" {id}", &named), "t run \"\" '7'");
     }

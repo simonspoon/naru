@@ -187,7 +187,7 @@ enum Command {
         allow_host: Vec<String>,
         /// Periodically check every project for an actionable todo task and
         /// auto-start a background `claude` agent on it (default prompt:
-        /// `/execute-mesa-task <task-id>`, configurable in
+        /// `/execute-naru-task <task-id>`, configurable in
         /// ~/.mesa/config.json). A project is busy only while an in_progress
         /// *leaf* holds it; an in_progress task that has subtasks is an
         /// umbrella, which narrows the tick to its own descendants instead of
