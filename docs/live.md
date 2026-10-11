@@ -2166,6 +2166,24 @@ pauses locally and posts `ambient`, the **Live** button only posts it and
 waits for the host's reply. The switch is offered only with a host, while live
 and joined; ambient clears when the session ends. A plain browser never sees it.
 
+**The agent can ask for the switch** (naru task 1813): `naru live ambient
+<on|off> [--say <TEXT>] [--lease <N>]` writes a pending request on the session
+(`ambient_request`, a bool, and `ambient_request_seq`, bumped on every new
+request) rather than switching anything itself, since only the host owns the
+mode. The host page acts on a request once per `ambient_request_seq`, on the
+poll it already makes; an `on` waits for the run to finish speaking (15s
+grace) so the agent's `--say` is heard first. The host's verdict is still the
+last word: the page reports its state in the route report's `ambient` key
+(sent only while a host is attached), `live status` carries it as `ambient`
+(`null` until a host has reported), and a report matching the request clears
+`ambient_request`. With no host report fresher than 10s — derived on the
+store's clock, the speaker claim's rule — the command is `unavailable`,
+exit 1, and writes nothing, not even the `--say` turn; asking for the state the
+host already reports clears the request without bumping the seq. `--say` is
+trimmed and an empty one writes no turn. It is not a `LiveAction` turn
+because an ambient page's run is halted whole: a turn carrying the action
+would sit unperformed in exactly the state the agent wants to leave.
+
 **What the page stops doing** when a host is present: no `getUserMedia`
 anywhere (main capture, barge-in, device probe), no `enumerateDevices`, the
 microphone `<select>` is not offered, and joining no longer unmutes on its own
@@ -2493,11 +2511,12 @@ flag is an unknown argument, exit 2, exactly as on `turns`.
 | --- | --- | --- |
 | `live start [PROJECT]` | `--project P` (id **or** name), `--no-agent` to skip the spawn | the started `LiveSession` |
 | `live stop` | — | the ended `LiveSession` |
-| `live status` (alias `get`, `show`) | — | the live `LiveSession`, or `null` |
+| `live status` (alias `get`, `show`) | — | the live `LiveSession` (with `ambient`, the host's last report, and `ambient_request`, the pending ask), or `null` |
 | `live listen` | `--wait <SECONDS>` (default 3000, `0` = poll once), `--lease <N>` (a stale lease is `conflict`; a matching one also stops the predecessor, once) | the next undelivered user `LiveTurn`, or `null` |
 | `live say <TEXT>…` | trailing var arg, like `inbox add` — put every flag **before** the message; `--lease <N>` | the `LiveTurn` |
 | `live navigate <ROUTE>` | `--say <TEXT>`; without it the turn is a pure action and says nothing; `--lease <N>` | the `LiveTurn` |
 | `live sidebars <collapse\|expand>` | `--say <TEXT>`, same rule; takes no route; `--lease <N>` | the `LiveTurn` |
+| `live ambient <on\|off>` | `--say <TEXT>`, trimmed, empty = no turn; `--lease <N>`; `--quiet` | the `LiveSession` carrying `ambient_request`/`ambient_request_seq`; `unavailable` when no host reported within 10s, `not_found` with no session |
 | `live hook` | reads a PreToolUse/PostToolUse payload on stdin; run by `live-barge-in.sh`, not by hand; no `--quiet` | the hook JSON (deny / additionalContext), or nothing |
 | `live handoff <NOTE>…` | trailing var arg, `--quiet` **before** the note; takes no `--lease` | the `LiveSession` with its bumped `lease` and the successor's `agent_id` |
 | `live context` | — (no `--quiet`) | `{session_id, agent_id, lease, context_tokens}` |
@@ -2630,7 +2649,7 @@ takes exactly one value.
 | `DELETE /api/live` | the ended session | `require_agent_access` |
 | `POST /api/live/utterance` `{text, ink?: {board_id, png_base64}}` | the dictated user turn, carrying the person's annotated board when `ink` is sent (mesa task 1353; body limit raised above `LIVE_INK_MAX`, so an over-cap PNG is 422 JSON) | standard write |
 | `POST /api/live/notice` `{kind}` | the notice turn, **200** created or existing (deduped per working span, mesa task 1157); an unknown `kind` is 422 | standard write |
-| `POST /api/live/route` `{route, context?, window?}` | the session, route, context **and window box** recorded — an omitted `context`/`window` leaves the stored one alone, an explicit `null` clears it | standard write |
+| `POST /api/live/route` `{route, context?, window?, ambient?}` | the session, route, context **and window box** recorded — an omitted `context`/`window` leaves the stored one alone, an explicit `null` clears it; `ambient` (a host's report, naru task 1813) is stored, stamps the report time and clears a matching `ambient_request` | standard write |
 | `POST /api/live/speaker` `{client}` | the session, this client now its **speaker** (mesa task 1267) | `require_agent_access` |
 | `POST /api/live/leave` `{client}` | **204**, always — releases this client's claim on the voice if it holds it, so it is free at once; never ends the session or touches the agent (mesa task 1622) | `require_agent_access` |
 | `POST /api/live/turns/{id}/played` | the stamped turn | standard write |
@@ -2659,7 +2678,7 @@ which is what `?after=` is for.
 and never a claim**: it keeps [the speaker
 claim](#which-browser-speaks-mesa-task-1267) alive when this client already
 holds it and does nothing whatever when it does not. Its `route` is required
-and always written. Its `context` and `window` are **three-way keys** (mesa task 1016), the same
+and always written. Its `context` and `window` are **three-way keys** (mesa task 1016; `ambient` is a fourth key, omit-or-value only), the same
 `double_option` shape `PATCH /api/tasks/{id}`'s clearable fields use:
 
 | the key is… | what it means | what is stored |

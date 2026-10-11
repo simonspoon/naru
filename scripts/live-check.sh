@@ -579,6 +579,15 @@ run 2 "$MESA" live sidebars sideways
   fail "live sidebars <not collapse|expand>: a closed vocabulary, refused by clap"
 ok "usage errors are exit 2: bad --wait, both project forms, a missing required arg"
 
+run 1 "$MESA" live ambient on
+[ "$(jqe .error.code)" = "not_found" ] || fail "live ambient with no session: error.code"
+run 2 "$MESA" live ambient
+[ "$(jqe .error.code)" = "usage" ] || fail "live ambient with no state: error.code"
+run 2 "$MESA" live ambient sideways
+[ "$(jqe .error.code)" = "usage" ] ||
+  fail "live ambient <not on|off>: a closed vocabulary, refused by clap"
+ok "live ambient: not_found with no session, usage (exit 2) for a missing or unknown state"
+
 # =====================================================================
 # 2. The CLI happy path (start -> say -> navigate -> turns -> sidebars -> stop)
 # =====================================================================
@@ -4838,6 +4847,74 @@ run 0 "$MESA" live listen --wait 0
 [ "$(jqs .text)" = "not for the script" ] || fail "barge-in: the non-naru-live payload left its turn (got $STDOUT)"
 run 0 "$MESA" live stop
 ok "barge-in: live-barge-in.sh parses, passes the deny through, ignores ordinary sessions"
+
+# =====================================================================
+# 19. Ambient request (naru task 1813): `naru live ambient` asks the host
+# =====================================================================
+#
+# The agent cannot switch the native host's ambient mode itself, so the CLI
+# writes a pending request on the session; the host page reports its state in
+# the route report's `ambient` key and acts on the request once. Unavailable
+# unless a host reported within 10s (the store's clock); a report matching the
+# request clears it.
+
+api 201 POST "/api/live" "{\"project_id\":$PROJ}"
+AMB_LEASE=$(jqb .lease)
+run 0 "$MESA" live status
+[ "$(jqs .ambient)" = "null" ] || fail "ambient: no host report reads null (got $(jqs .ambient))"
+[ "$(jqs .ambient_request)" = "null" ] || fail "ambient: no request reads null"
+run 1 "$MESA" live ambient on --lease "$AMB_LEASE" --say "x"
+[ "$(jqe .error.code)" = "unavailable" ] || fail "live ambient with no host report: unavailable (got $STDERR)"
+run 0 "$MESA" live turns
+[ "$(jqs length)" = "0" ] || fail "ambient unavailable: the --say turn must not be written"
+run 0 "$MESA" live status
+[ "$(jqs .ambient_request)" = "null" ] || fail "ambient unavailable: nothing written"
+ok "live ambient with no host report: unavailable, no turn, ambient and ambient_request stay null"
+
+api 200 POST "/api/live/route" '{"route":"#/","ambient":false}'
+run 0 "$MESA" live status
+[ "$(jqs .ambient)" = "false" ] || fail "route report ambient:false (got $(jqs .ambient))"
+api 200 POST "/api/live/route" '{"route":"#/"}'
+run 0 "$MESA" live status
+[ "$(jqs .ambient)" = "false" ] || fail "a report omitting ambient leaves it false (got $(jqs .ambient))"
+AMB_SEQ=$(jqs .ambient_request_seq)
+ok "POST /api/live/route: ambient is reported, and omitting it leaves the stored value"
+
+run 0 "$MESA" live ambient on --lease "$AMB_LEASE" --say "  Going quiet.  "
+[ "$(jqs .ambient_request)" = "true" ] || fail "live ambient on: ambient_request (got $(jqs .ambient_request))"
+[ "$(jqs .ambient_request_seq)" = "$((AMB_SEQ + 1))" ] || fail "live ambient on: seq bumped (got $(jqs .ambient_request_seq), was $AMB_SEQ)"
+run 0 "$MESA" live turns
+[ "$(jqs 'map(select(.text == "Going quiet.")) | length')" = "1" ] || fail "live ambient --say: the trimmed turn is in live turns"
+ok "live ambient on --say: ambient_request true, seq bumped, the trimmed spoken turn written"
+
+run 0 "$MESA" live ambient off --quiet
+AMB_QUIET=$STDOUT
+run 0 "$MESA" live status
+[ "$(jq -S . <<<"$AMB_QUIET")" = "$(jq -S . <<<"$STDOUT")" ] ||
+  fail "live ambient --quiet: must equal the full session"
+ok "live ambient --quiet: nothing to drop, equals the full session"
+
+AMB_SEQ2=$(jqs .ambient_request_seq)
+AMB_REQ2=$(jqs .ambient_request)
+run 1 "$MESA" live ambient on --lease 99 --say "stale"
+[ "$(jqe .error.code)" = "conflict" ] || fail "live ambient with a stale lease: conflict (got $STDERR)"
+run 0 "$MESA" live status
+[ "$(jqs .ambient_request_seq)" = "$AMB_SEQ2" ] && [ "$(jqs .ambient_request)" = "$AMB_REQ2" ] ||
+  fail "a stale lease must write nothing"
+run 0 "$MESA" live turns
+[ "$(jqs 'map(select(.text == "stale")) | length')" = "0" ] || fail "a stale lease must write no turn"
+ok "live ambient --lease 99: conflict, nothing written"
+
+api 200 POST "/api/live/route" '{"route":"#/","ambient":true}'
+run 0 "$MESA" live status
+[ "$(jqs .ambient)" = "true" ] || fail "host report ambient:true (got $(jqs .ambient))"
+[ "$(jqs .ambient_request)" = "null" ] || fail "a matching report clears the request (got $(jqs .ambient_request))"
+AMB_SEQ3=$(jqs .ambient_request_seq)
+run 0 "$MESA" live ambient on
+[ "$(jqs .ambient_request)" = "null" ] && [ "$(jqs .ambient_request_seq)" = "$AMB_SEQ3" ] ||
+  fail "asking for the state the host already reports clears the request and does not bump seq"
+ok "a matching host report clears the request; an already-satisfied ask bumps nothing"
+run 0 "$MESA" live stop
 
 kill "$SERVER_PID" 2>/dev/null || true
 wait "$SERVER_PID" 2>/dev/null || true
