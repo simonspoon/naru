@@ -1145,8 +1145,14 @@ export function reportLiveRoute(
   window: LiveWindow | null,
   client: string,
   view: string | null,
+  ambient?: boolean,
 ): Promise<LiveSession> {
-  return request('/api/live/route', jsonInit('POST', { route, context, window, client, view }))
+  // `ambient` is the native host's verdict; a plain browser omits the key.
+  const body =
+    typeof ambient === 'boolean'
+      ? { route, context, window, client, view, ambient }
+      : { route, context, window, client, view }
+  return request('/api/live/route', jsonInit('POST', body))
 }
 
 /**

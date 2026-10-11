@@ -213,7 +213,16 @@ import type { LiveWindow } from '../types/LiveWindow'
 import type { TranscribeStatus } from '../types/TranscribeStatus'
 import { isNearBottom, newSince } from '../liveScroll'
 import { useFetch } from '../useFetch'
-import { ambientControl, detectNativeHost, hostVoiced, installNativeHost, stateMessage } from '../nativeHost'
+import {
+  ambientControl,
+  ambientRequestStep,
+  detectNativeHost,
+  hostVoiced,
+  installNativeHost,
+  needsHostRefresh,
+  reportedAmbient,
+  stateMessage,
+} from '../nativeHost'
 
 /**
  * Mesa Live, in the header (mesa tasks 855, 857): the whole conversation lives
@@ -3647,6 +3656,7 @@ export function LiveHub({
     context: LiveContext | null
     window: LiveWindow | null
     view: string
+    ambient: boolean | undefined
     at: number
   } | null>(null)
   // The claim as the last poll read it, for the dedupe below to consult
@@ -3656,6 +3666,12 @@ export function LiveHub({
   useEffect(() => {
     speakerRef.current = session?.speaker ?? null
   }, [session?.speaker])
+  // The host's verdict for the report, read at send time through a ref for the
+  // same reason (`undefined` = a plain browser, key omitted).
+  const ambientReportRef = useRef<boolean | undefined>(undefined)
+  useEffect(() => {
+    ambientReportRef.current = reportedAmbient(native !== null, live, unlocked, ambientState)
+  }, [native, live, unlocked, ambientState])
   const reportRoute = useCallback(() => {
     if (reportTimer.current !== null) window.clearTimeout(reportTimer.current)
     reportTimer.current = window.setTimeout(() => {
@@ -3671,9 +3687,12 @@ export function LiveHub({
       const context = currentContext()
       const box = windowBox(window)
       const view = viewNow.current()
+      const ambientReport = ambientReportRef.current
       const last = reported.current
       if (
         last !== null &&
+        last.ambient === ambientReport &&
+        !needsHostRefresh(ambientReport !== undefined, last.at, Date.now()) &&
         last.route === route &&
         sameContext(last.context, context) &&
         sameBox(last.window, box) &&
@@ -3686,13 +3705,14 @@ export function LiveHub({
       }
       // Remembered only once it landed, so a failed report is retried by the
       // next trigger rather than being treated as already told.
-      reportLiveRoute(route, context, box, client, view === '' ? null : view)
+      reportLiveRoute(route, context, box, client, view === '' ? null : view, ambientReport)
         .then(() => {
           reported.current = {
             route,
             context,
             window: box,
             view,
+            ambient: ambientReport,
             at: Date.now(),
           }
         })
@@ -3729,6 +3749,56 @@ export function LiveHub({
     const timer = window.setInterval(reportRoute, POLL_MS)
     return () => window.clearInterval(timer)
   }, [live, reportRoute])
+  // The host's ambient verdict changing is a trigger too: `naru live status`
+  // and the request's clearing should see the switch promptly.
+  const ambientReportKey = reportedAmbient(native !== null, live, unlocked, ambientState)
+  useEffect(() => {
+    if (ambientReportKey !== undefined) reportRoute()
+  }, [ambientReportKey, reportRoute])
+
+  // The agent's pending ambient request (`naru live ambient on|off`): acted on
+  // once per seq. An `on` waits until the run has nothing sounding or pending
+  // (so a `--say` line is heard first), or `AMBIENT_SAY_GRACE_MS` after this
+  // page first saw it.
+  const ambientSeen = useRef<{ key: string; at: number } | null>(null)
+  const ambientActed = useRef<{ sid: number; seq: number } | null>(null)
+  const ambientReq = session?.ambient_request ?? null
+  const ambientSeq = session?.ambient_request_seq ?? 0
+  const ambientSid = session?.id ?? null
+  useEffect(() => {
+    if (ambientSid === null || ambientReq === null) return
+    const key = `${ambientSid}:${ambientSeq}`
+    if (ambientSeen.current?.key !== key) ambientSeen.current = { key, at: Date.now() }
+    const tick = () => {
+      const acted = ambientActed.current
+      const step = ambientRequestStep({
+        hostPresent: native !== null,
+        live,
+        joined: unlocked,
+        ambient: ambientRef.current,
+        request: ambientReq,
+        seq: ambientSeq,
+        actedSeq: acted !== null && acted.sid === ambientSid ? acted.seq : null,
+        runIdle:
+          sounding.current === null && pendingTurns(held.current, handled.current).length === 0,
+        firstSeenAt: ambientSeen.current?.at ?? null,
+        now: Date.now(),
+      })
+      if (step === null) return false
+      ambientActed.current = { sid: ambientSid, seq: ambientSeq }
+      if (step.on) {
+        setAmbientNow(true)
+        pauseNowRef.current()
+      }
+      native?.post({ type: 'ambient', on: step.on })
+      return true
+    }
+    if (tick()) return
+    const timer = window.setInterval(() => {
+      if (tick()) window.clearInterval(timer)
+    }, 500)
+    return () => window.clearInterval(timer)
+  }, [ambientSid, ambientReq, ambientSeq, native, live, unlocked, ambientState, setAmbientNow])
 
   // The driver's model for the head (mesa task 1565): the agents endpoint's
   // session for this conversation's job, polled on the same cadence while live.
