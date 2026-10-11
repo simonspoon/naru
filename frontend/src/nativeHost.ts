@@ -13,6 +13,8 @@
  * the page would otherwise meter itself, so the orb and glow follow it too.
  */
 
+import { SPEAKER_REFRESH_MS } from './liveSpeaker'
+
 export const NATIVE_HANDLER = 'naruLive'
 
 /** What the page posts to the host. */
@@ -81,6 +83,53 @@ export function ambientControl(
   return ambient
     ? { label: 'Live', next: false, icon: 'live' }
     : { label: 'Ambient', next: true, icon: 'ambient' }
+}
+
+/** The value for the route report's `ambient` key: the host's verdict exactly
+ *  when the switch would be offered (host + live + joined), else `undefined`
+ *  (omit the key; a plain browser never sends `null`). */
+export function reportedAmbient(
+  hostPresent: boolean,
+  live: boolean,
+  joined: boolean,
+  ambient: boolean,
+): boolean | undefined {
+  return ambientControl(hostPresent, live, joined, ambient) === null ? undefined : ambient
+}
+
+/** Whether a page that reports `ambient` is due to report again, to stay inside
+ *  the server's freshness window (`needsSpeakerRefresh`'s reasoning). */
+export function needsHostRefresh(reporting: boolean, lastReportedAt: number, now: number): boolean {
+  return reporting && now - lastReportedAt >= SPEAKER_REFRESH_MS
+}
+
+/** How long an `on` request waits for the run to finish speaking before the
+ *  page acts anyway (a muted or non-speaking page must not wedge it). */
+export const AMBIENT_SAY_GRACE_MS = 15000
+
+/** What to do about the session's pending ambient request: `null` = nothing
+ *  (or wait), else the `ambient` message to post. `firstSeenAt` is when this
+ *  page first saw `seq`. */
+export function ambientRequestStep(input: {
+  hostPresent: boolean
+  live: boolean
+  joined: boolean
+  ambient: boolean
+  request: boolean | null
+  seq: number
+  actedSeq: number | null
+  runIdle: boolean
+  firstSeenAt: number | null
+  now: number
+}): { post: boolean; on: boolean } | null {
+  const { hostPresent, live, joined, ambient, request, seq, actedSeq, runIdle, firstSeenAt, now } = input
+  if (!hostPresent || !live || !joined || request === null) return null
+  if (seq === actedSeq || request === ambient) return null
+  if (!request) return { post: true, on: false }
+  if (runIdle || (firstSeenAt !== null && now - firstSeenAt >= AMBIENT_SAY_GRACE_MS)) {
+    return { post: true, on: true }
+  }
+  return null
 }
 
 /** Whether a host push means the person is audibly talking: the host says so,

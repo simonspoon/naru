@@ -1,9 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import {
+  AMBIENT_SAY_GRACE_MS,
   ambientControl,
+  ambientRequestStep,
   detectNativeHost,
   hostVoiced,
   installNativeHost,
+  needsHostRefresh,
+  reportedAmbient,
   stateMessage,
   type NativeOut,
 } from './nativeHost'
@@ -107,6 +111,72 @@ describe('nativeHost', () => {
       label: 'Live',
       next: false,
       icon: 'live',
+    })
+  })
+})
+
+describe('reportedAmbient', () => {
+  it('reports the verdict only where the switch is offered', () => {
+    expect(reportedAmbient(true, true, true, true)).toBe(true)
+    expect(reportedAmbient(true, true, true, false)).toBe(false)
+    expect(reportedAmbient(false, true, true, false)).toBeUndefined()
+    expect(reportedAmbient(true, false, true, true)).toBeUndefined()
+    expect(reportedAmbient(true, true, false, true)).toBeUndefined()
+  })
+})
+
+describe('needsHostRefresh', () => {
+  it('refreshes a reporting page after the interval only', () => {
+    expect(needsHostRefresh(true, 1000, 4999)).toBe(false)
+    expect(needsHostRefresh(true, 1000, 5000)).toBe(true)
+    expect(needsHostRefresh(false, 0, 100000)).toBe(false)
+  })
+})
+
+describe('ambientRequestStep', () => {
+  const base = {
+    hostPresent: true,
+    live: true,
+    joined: true,
+    ambient: false,
+    request: true as boolean | null,
+    seq: 3,
+    actedSeq: 2 as number | null,
+    runIdle: true,
+    firstSeenAt: 1000 as number | null,
+    now: 1000,
+  }
+
+  it('does nothing in a plain browser or outside a joined live session', () => {
+    expect(ambientRequestStep({ ...base, hostPresent: false })).toBeNull()
+    expect(ambientRequestStep({ ...base, live: false })).toBeNull()
+    expect(ambientRequestStep({ ...base, joined: false })).toBeNull()
+  })
+
+  it('does nothing without a request, for an acted seq, or already in mode', () => {
+    expect(ambientRequestStep({ ...base, request: null })).toBeNull()
+    expect(ambientRequestStep({ ...base, actedSeq: 3 })).toBeNull()
+    expect(ambientRequestStep({ ...base, request: true, ambient: true })).toBeNull()
+    expect(ambientRequestStep({ ...base, request: false, ambient: false })).toBeNull()
+  })
+
+  it('posts an on request at once when the run is idle', () => {
+    expect(ambientRequestStep(base)).toEqual({ post: true, on: true })
+    expect(ambientRequestStep({ ...base, actedSeq: null })).toEqual({ post: true, on: true })
+  })
+
+  it('makes an on request wait while busy, then fire after the grace', () => {
+    const busy = { ...base, runIdle: false }
+    expect(ambientRequestStep(busy)).toBeNull()
+    expect(ambientRequestStep({ ...busy, now: 1000 + AMBIENT_SAY_GRACE_MS - 1 })).toBeNull()
+    expect(ambientRequestStep({ ...busy, now: 1000 + AMBIENT_SAY_GRACE_MS })).toEqual({ post: true, on: true })
+    expect(ambientRequestStep({ ...busy, firstSeenAt: null, now: 10 ** 9 })).toBeNull()
+  })
+
+  it('posts an off request at once, even while ambient and busy', () => {
+    expect(ambientRequestStep({ ...base, request: false, ambient: true, runIdle: false })).toEqual({
+      post: true,
+      on: false,
     })
   })
 })
