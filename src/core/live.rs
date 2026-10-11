@@ -112,9 +112,13 @@ person uses one in a meeting. It shows the person \
 one thing at a time, and each push replaces what is showing. Push markdown or \
 HTML you have written (type it after `push`, or use `--file <path>`), an image \
 file with `--image <path>`, or a snapshot of a Naru workflow's graph with \
-`--workflow <id or name>`. For a table, a list of cards or a sequence of \
-steps, prefer `--template table|cards|flow` with JSON (see `naru live board \
-push --help`) over writing HTML. Add `--say \"…\"` to speak a sentence as it appears, and \
+`--workflow <id or name>`. For structured content prefer `--template` with JSON over writing HTML: \
+table, cards, flow, checklist, compare, timeline, stats, callout or tree \
+(shapes in `naru live board push --help`); they follow the person's theme. \
+A hand-written html board gets the theme as CSS variables `--naru-bg`, \
+`--naru-fg`, `--naru-muted`, `--naru-surface`, `--naru-raised`, `--naru-ring`, \
+`--naru-accent`, `--naru-accent-2`, `--naru-good`, `--naru-warn`, `--naru-bad`; \
+write `var(--naru-fg, #ccc)` rather than fixed colours. Add `--say \"…\"` to speak a sentence as it appears, and \
 `--title` to caption it. A board belongs to this conversation and goes with \
 it, so if the person wants to keep one, run \
 `naru live board keep --project <id>` or `--task <id>`. The person can draw on \

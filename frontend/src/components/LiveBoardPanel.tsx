@@ -12,6 +12,7 @@ import {
 import { liveBoardRenderUrl } from '../api'
 import { useKeymap } from '../keymapStore'
 import { boundFunctionKeys } from '../liveBoardKeys'
+import { boardThemeMessage } from '../boardTheme'
 import { imageFilesFromClipboard } from '../clipboardFiles'
 import {
   boardAt,
@@ -56,7 +57,7 @@ import {
 } from '../liveInk'
 import type { LiveBoardSummary } from '../types/LiveBoardSummary'
 import { useFetch } from '../useFetch'
-import { cssVar } from '../theme'
+import { cssVar, onThemeChange } from '../theme'
 import { Markdown } from './Markdown'
 
 /**
@@ -150,6 +151,31 @@ function BoardFrame({ url, title }: { url: string; title: string }) {
     )
   }, [keymap])
   useEffect(send, [send])
+  // The active theme's colours as `--naru-*` variables (naru task 1792), on
+  // load and on every theme switch, so an open board re-themes live.
+  const sendTheme = useCallback(() => {
+    ref.current?.contentWindow?.postMessage(
+      boardThemeMessage((name) => cssVar(name, '')),
+      '*',
+    )
+  }, [])
+  useEffect(() => onThemeChange(sendTheme), [sendTheme])
+  // The frame announces itself once its listeners exist (`board-ready`), so
+  // the theme lands before first paint; `onLoad` stays as the fallback.
+  useEffect(() => {
+    const onMessage = (e: MessageEvent) => {
+      const win = ref.current?.contentWindow
+      if (!win || e.source !== win || e.data?.naru !== 'board-ready') return
+      send()
+      sendTheme()
+    }
+    window.addEventListener('message', onMessage)
+    return () => window.removeEventListener('message', onMessage)
+  }, [send, sendTheme])
+  const onLoad = useCallback(() => {
+    send()
+    sendTheme()
+  }, [send, sendTheme])
   return (
     <iframe
       ref={ref}
@@ -157,7 +183,7 @@ function BoardFrame({ url, title }: { url: string; title: string }) {
       title={title}
       src={url}
       sandbox="allow-scripts"
-      onLoad={send}
+      onLoad={onLoad}
     />
   )
 }

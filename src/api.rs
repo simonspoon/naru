@@ -6060,15 +6060,38 @@ ctrlKey:e.ctrlKey,altKey:e.altKey,shiftKey:e.shiftKey,repeat:e.repeat},'*')},tru
 /// canvas and text as the document's defaults. `:where()` gives it zero
 /// specificity, so any background or colour the board's own styles set on
 /// `html` wins; a board that sets neither is dark like the rest of the app.
-const BOARD_DARK_DEFAULTS: &str =
-    "\n<style>:where(html){color-scheme:dark;background:#060a10;color:#b8dde8}</style>";
+/// The colours are the `--naru-*` theme variables (naru task 1792) with the
+/// dark values as the fallback for a frame that never receives a theme.
+const BOARD_DARK_DEFAULTS: &str = "\n<style>:where(html){color-scheme:var(--naru-color-scheme,dark);\
+background:var(--naru-bg,#060a10);color:var(--naru-fg,#b8dde8)}</style>";
+
+/// Appended to an `html` live board's body beside [`BOARD_KEY_RELAY`] (naru
+/// task 1792): the page posts `{naru:'board-theme', vars}` into the frame on
+/// load and on every theme switch, and this applies it. Only a message from
+/// the parent counts, and only keys shaped `--naru-[a-z0-9-]+` with string
+/// values are set (as inline custom properties on `<html>`, so they out-rank
+/// any stylesheet default); `--naru-color-scheme` is just another variable,
+/// which [`BOARD_DARK_DEFAULTS`] and the templates feed to `color-scheme`.
+/// Once its listener is in place it posts `{naru:'board-ready'}` to the parent,
+/// which answers with the theme, so the first paint is not left unthemed.
+const BOARD_THEME_RELAY: &str = "\n<script>(function(){\
+addEventListener('message',function(e){var d=e.data;\
+if(e.source!==parent||!d||d.naru!=='board-theme'||!d.vars||typeof d.vars!=='object')return;\
+var s=document.documentElement.style;\
+Object.keys(d.vars).forEach(function(k){var v=d.vars[k];\
+if(!/^--naru-[a-z0-9-]+$/.test(k)||typeof v!=='string')return;\
+s.setProperty(k,v)})});\
+parent.postMessage({naru:'board-ready'},'*')})();\
+</script>\n";
 
 /// A board's body as the render route serves it: an `html` board is its
-/// stored bytes followed by [`BOARD_DARK_DEFAULTS`] and [`BOARD_KEY_RELAY`];
-/// every other kind is untouched.
+/// stored bytes followed by [`BOARD_DARK_DEFAULTS`], [`BOARD_KEY_RELAY`] and
+/// [`BOARD_THEME_RELAY`]; every other kind is untouched.
 fn board_render_body(kind: LiveBoardKind, body: &str) -> String {
     match kind {
-        LiveBoardKind::Html => format!("{body}{BOARD_DARK_DEFAULTS}{BOARD_KEY_RELAY}"),
+        LiveBoardKind::Html => {
+            format!("{body}{BOARD_DARK_DEFAULTS}{BOARD_KEY_RELAY}{BOARD_THEME_RELAY}")
+        }
         _ => body.to_string(),
     }
 }
@@ -12203,9 +12226,16 @@ mod tests {
         let html = board_render_body(LiveBoardKind::Html, "<p>hi</p>");
         assert_eq!(
             html,
-            format!("<p>hi</p>{BOARD_DARK_DEFAULTS}{BOARD_KEY_RELAY}")
+            format!("<p>hi</p>{BOARD_DARK_DEFAULTS}{BOARD_KEY_RELAY}{BOARD_THEME_RELAY}")
         );
         assert!(html.contains("naru:'board-key'"));
+        assert!(html.contains("d.naru!=='board-theme'"));
+        assert!(html.contains("e.source!==parent"));
+        assert!(html.contains("/^--naru-[a-z0-9-]+$/"));
+        assert!(html.contains("var(--naru-bg,#060a10)"));
+        assert!(html.contains("color-scheme:var(--naru-color-scheme,dark)"));
+        assert!(html.contains("parent.postMessage({naru:'board-ready'},'*')"));
+        assert!(!html.contains("setProperty('color-scheme'"));
         for kind in [LiveBoardKind::Markdown, LiveBoardKind::Diagram] {
             assert_eq!(board_render_body(kind, "body"), "body");
         }

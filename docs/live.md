@@ -1568,21 +1568,63 @@ Two of those choices are load-bearing:
   nothing else could answer at render time — `body` is bytes, and `title` is a
   caption the caller writes, so a route that read the type off the title would
   serve something different when the caption changed.
-- **Templates render JSON into an ordinary `html` board** (naru task 1728).
-  `live board push --template table|cards|flow` takes JSON as the trailing
-  body or `--file` (read as JSON whatever the extension) and
-  `core::board::template_html` turns it, at push time, into one
+- **Templates render JSON into an ordinary `html` board** (naru task 1728,
+  extended and themed by task 1792).
+  `live board push --template table|cards|flow|checklist|compare|timeline|stats|callout|tree`
+  takes JSON as the trailing body or `--file` (read as JSON whatever the
+  extension) and `core::board::template_html` turns it, at push time, into one
   self-contained document: inline `<style>` only (what `RENDER_CSP` allows),
   no script, nothing fetched, Inter/system fonts on tinted rounded surfaces
-  with light and dark by `prefers-color-scheme` (`docs/style-guide.md`). The
-  store, API and frontend see a plain `html` board. Shapes: table
+  (`docs/style-guide.md`). Every colour is a `--naru-*` variable (below) with a
+  `prefers-color-scheme` palette as its fallback, so a template follows the
+  active Naru theme live and still looks right opened directly. The store, API
+  and frontend see a plain `html` board. Shapes: table
   `{"columns":[..],"rows":[[..]]}` (cells strings or numbers, every row the
   column count); cards `{"cards":[{"title","body"?,"tag"?}]}` or a bare
   array; flow `{"steps":[{"title","detail"?}]}`, a bare array, or an array of
-  strings, drawn as numbered boxes joined by arrows. Bad JSON, a wrong shape
-  or an empty list is `validation`, exit 1, naming the template and the
-  expected shape. Every piece of text is HTML-escaped. `--template` conflicts
-  with `--image`, `--workflow` and `--kind`.
+  strings, drawn as numbered boxes joined by arrows; checklist
+  `{"items":[{"text","done"?:bool,"note"?}]}`, a bare array, or strings;
+  compare `{"columns":[{"title","points"?:[..]}]}` side by side; timeline
+  `{"events":[{"when","title","detail"?}]}`; stats
+  `{"stats":[{"label","value" (string|number),"note"?}]}` as tiles; callout
+  `{"text","by"?,"tone"?:"info|good|warn|bad"}` (a quote when `by` is set);
+  tree `{"root":{"title","children"?:[node|string…]}}`, an outline. Bad JSON,
+  a wrong shape or an empty list is `validation`, exit 1, naming the template
+  and the expected shape. Every piece of text is HTML-escaped. `--template`
+  conflicts with `--image`, `--workflow` and `--kind`.
+- **Boards follow the Naru theme** (naru task 1792). The page
+  (`frontend/src/boardTheme.ts`, `LiveBoardPanel.tsx::BoardFrame`) reads the
+  active theme's computed variables and posts `{naru:'board-theme', vars}`
+  into an html board's frame on load and on every theme switch; the render
+  route's injected script (`api.rs::BOARD_THEME_RELAY`, beside the key relay)
+  accepts it only from the parent and sets just keys matching
+  `^--naru-[a-z0-9-]+$` with string values as custom properties on `<html>`
+  (`--naru-color-scheme` `light|dark` also sets `color-scheme`). A new theme
+  in `themes.css` needs no board or template edit beyond defining
+  `--panel`, `--panel-raised` and the `*-rgb` variables it reads. The frame
+  announces `{naru:'board-ready'}` once its listener exists and the page
+  answers with the theme, so there is no unthemed first paint (`onLoad` is
+  the fallback). `--naru-color-scheme` is only a variable: the injected
+  default and the templates feed it to `color-scheme`. Hand-written html boards
+  may use them, ideally with a fallback, `var(--naru-fg, #b8dde8)`; the
+  injected zero-specificity `:where(html)` default already paints the canvas
+  with `--naru-bg`/`--naru-fg`, so a board setting neither is themed and one
+  setting its own colours keeps them. A board that sets its own `background`
+  should set `color` too (or neither), since the default text colour follows
+  the theme and would otherwise be unreadable on it.
+
+  | Variable | Meaning |
+  | --- | --- |
+  | `--naru-bg` | page background |
+  | `--naru-fg` | body text |
+  | `--naru-muted` | secondary text |
+  | `--naru-surface` | panel / card surface |
+  | `--naru-raised` | raised surface (zebra rows, chips) |
+  | `--naru-ring` | hairline edge colour (translucent) |
+  | `--naru-accent` | primary accent (cyan) |
+  | `--naru-accent-2` | second accent (violet) |
+  | `--naru-good` / `--naru-warn` / `--naru-bad` | green / amber / red status |
+  | `--naru-color-scheme` | `light` or `dark` |
 - **A `diagram` board is a snapshot, not a view.** `core::board::workflow_svg`
   (mesa task 1607: workflows replaced diagrams, and `live board push
   --diagram <ID>` became `--workflow <ID|NAME>`) reads the workflow, its nodes

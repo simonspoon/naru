@@ -4,8 +4,11 @@
    `theme.ts`. Adding a variable to :root means adding it to every block
    below (or deciding it is theme-independent). Deliberately not themed: the
    orb chrome (--orb-*, a dark sphere in every theme) and the artifact preview
-   frame / HTML board white (agent-written documents keep their own page).
-   Imported after index.css; the
+   frame (agent-written documents keep their own page). HTML live boards follow
+   the theme through `boardTheme.ts`, which reads this file's computed values
+   into `--naru-*` variables posted to the frame (docs/live.md); a new theme
+   needs nothing extra there beyond defining --panel, --panel-raised and the
+   *-rgb variables it reads. Imported after index.css; the
    attribute selector out-ranks plain :root, so order does not matter. */
 
 :root[data-theme='dark'] {

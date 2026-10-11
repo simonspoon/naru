@@ -3060,13 +3060,19 @@ enum LiveBoardCmd {
     /// as it was at the push, so a graph edited afterwards does not change
     /// what the person was shown. Each push replaces what is showing.
     ///
-    /// `--template table|cards|flow` renders JSON (the trailing BODY, or
-    /// `--file` read as JSON whatever its extension) into a styled, self-
-    /// contained html board, so nobody hand-writes markup. Shapes: table
+    /// `--template table|cards|flow|checklist|compare|timeline|stats|callout|
+    /// tree` renders JSON (the trailing BODY, or `--file` read as JSON whatever
+    /// its extension) into a styled, self-contained html board that follows
+    /// the active Naru theme, so nobody hand-writes markup. Shapes: table
     /// `{"columns":[..],"rows":[[..]]}`; cards `{"cards":[{"title","body"?,
-    /// "tag"?}]}`; flow `{"steps":[{"title","detail"?}]}` (bare arrays work
-    /// for cards and flow; flow also takes an array of strings). Bad JSON, a
-    /// wrong shape or nothing to show is `validation`. All text is escaped.
+    /// "tag"?}]}`; flow `{"steps":[{"title","detail"?}]}`; checklist
+    /// `{"items":[{"text","done"?,"note"?}]}`; compare `{"columns":[{"title",
+    /// "points"?:[..]}]}`; timeline `{"events":[{"when","title","detail"?}]}`;
+    /// stats `{"stats":[{"label","value","note"?}]}`; callout `{"text","by"?,
+    /// "tone"?:"info|good|warn|bad"}`; tree `{"root":{"title","children"?:[..]}}`
+    /// (bare arrays work for the list templates; flow and checklist also take
+    /// an array of strings). Bad JSON, a wrong shape or nothing to show is
+    /// `validation`. All text is escaped.
     ///
     /// `--say` speaks a sentence alongside it, exactly like `navigate --say`.
     /// Put every flag BEFORE the body text: everything after `push` that is
@@ -3079,7 +3085,10 @@ EXAMPLES
   mesa live board push --workflow ambient --say \"This is the flow we discussed.\"
   mesa live board push --template table '{\"columns\":[\"Option\",\"Cost\"],\"rows\":[[\"A\",1],[\"B\",2]]}'
   mesa live board push --template cards '{\"cards\":[{\"title\":\"Fast\",\"body\":\"Ships today\",\"tag\":\"safe\"}]}'
-  mesa live board push --template flow --file /tmp/steps.json --title Rollout")]
+  mesa live board push --template flow --file /tmp/steps.json --title Rollout
+  mesa live board push --template checklist '{\"items\":[{\"text\":\"Write tests\",\"done\":true},{\"text\":\"Ship\"}]}'
+  mesa live board push --template stats '{\"stats\":[{\"label\":\"Tests\",\"value\":412,\"note\":\"all green\"}]}'
+  mesa live board push --template callout '{\"text\":\"Ship it\",\"by\":\"Ada\",\"tone\":\"good\"}'")]
     #[command(group(ArgGroup::new("source").required(true).args(["body", "file", "image", "workflow"])))]
     Push {
         /// The board body as text (everything after `push`); quoting optional
@@ -3105,11 +3114,21 @@ EXAMPLES
             conflicts_with_all = ["image", "workflow", "template"],
         )]
         kind: Option<LiveBoardKind>,
-        /// Render JSON as a styled html board: `table`, `cards` or `flow`
+        /// Render JSON as a themed html board: `table`, `cards`, `flow`, `checklist`, `compare`, `timeline`, `stats`, `callout` or `tree`
         #[arg(
             long,
             value_name = "NAME",
-            value_parser = ["table", "cards", "flow"],
+            value_parser = [
+                "table",
+                "cards",
+                "flow",
+                "checklist",
+                "compare",
+                "timeline",
+                "stats",
+                "callout",
+                "tree"
+            ],
             conflicts_with_all = ["image", "workflow", "kind"],
         )]
         template: Option<String>,
