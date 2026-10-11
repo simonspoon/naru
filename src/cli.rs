@@ -3336,11 +3336,20 @@ EXAMPLES
     #[command(after_help = "\
 EXAMPLES
   mesa live memory add Prefers short spoken replies; no lists read aloud.
-  mesa live memory add --quiet \"Task 42 holds the roadmap decisions.\"")]
+  mesa live memory add --quiet \"Task 42 holds the roadmap decisions.\"
+  mesa live memory add --category working-rules Never force-push main.")]
     Add {
         /// The entry text (everything after `add`); quoting is optional
         #[arg(required = true, num_args = 1.., trailing_var_arg = true)]
         text: Vec<String>,
+        /// Tag the entry with a category: how-we-talk, working-rules,
+        /// machines-and-devices, decisions or memory-design (BEFORE the text)
+        ///
+        /// working-rules, machines-and-devices and decisions entries reach
+        /// every agent session's start context (`naru memory context`).
+        /// Checked before anything is written.
+        #[arg(long, value_name = "CATEGORY")]
+        category: Option<String>,
         /// Print the record without its `body` instead of in full
         ///
         /// Must come BEFORE the text: everything after `add` that is not a
@@ -3363,6 +3372,9 @@ EXAMPLES
         /// The new text (everything after ID); quoting is optional
         #[arg(required = true, num_args = 1.., trailing_var_arg = true)]
         text: Vec<String>,
+        /// Also set the entry's category (BEFORE the text); see `add`
+        #[arg(long, value_name = "CATEGORY")]
+        category: Option<String>,
         /// Print the record without its `body` instead of in full (BEFORE the text)
         #[arg(long)]
         quiet: bool,
@@ -3398,6 +3410,24 @@ EXAMPLES
     Keep {
         #[arg(value_name = "ID")]
         id: i64,
+        /// Print the record without its `body` instead of in full
+        #[arg(long)]
+        quiet: bool,
+    },
+    /// Tag one entry with a category; prints the record
+    ///
+    /// The categories are how-we-talk, working-rules, machines-and-devices,
+    /// decisions and memory-design (naru task 1802). The first one a voice
+    /// agent needs; working-rules, machines-and-devices and decisions also
+    /// reach every agent session's start context through `naru memory
+    /// context`. Changes the category only — not the text, not the entry's
+    /// use. `validation` for an unknown category; `not_found` for a retired
+    /// id. Needs no live session.
+    Categorize {
+        #[arg(value_name = "ID")]
+        id: i64,
+        #[arg(value_name = "CATEGORY")]
+        category: String,
         /// Print the record without its `body` instead of in full
         #[arg(long)]
         quiet: bool,
@@ -6666,11 +6696,42 @@ fn run_live_memory(store: &mut Store, cmd: LiveMemoryCmd) -> Result<()> {
         LiveMemoryCmd::Show { id, quiet } => {
             print_notebook_entry(&store.get_notebook_entry_in(None, id)?, quiet);
         }
-        LiveMemoryCmd::Add { text, quiet } => {
-            print_notebook_entry(&store.add_notebook_entry(&text.join(" "))?, quiet);
+        LiveMemoryCmd::Add {
+            text,
+            category,
+            quiet,
+        } => {
+            // Validate first, so a bad category writes nothing.
+            if let Some(c) = &category {
+                live::validate_category(c)?;
+            }
+            let mut entry = store.add_notebook_entry(&text.join(" "))?;
+            if let Some(c) = &category {
+                entry = store.set_notebook_category(entry.id, c)?;
+            }
+            print_notebook_entry(&entry, quiet);
         }
-        LiveMemoryCmd::Replace { id, text, quiet } => {
-            print_notebook_entry(&store.replace_notebook_entry(id, &text.join(" "))?, quiet);
+        LiveMemoryCmd::Replace {
+            id,
+            text,
+            category,
+            quiet,
+        } => {
+            if let Some(c) = &category {
+                live::validate_category(c)?;
+            }
+            let mut entry = store.replace_notebook_entry(id, &text.join(" "))?;
+            if let Some(c) = &category {
+                entry = store.set_notebook_category(id, c)?;
+            }
+            print_notebook_entry(&entry, quiet);
+        }
+        LiveMemoryCmd::Categorize {
+            id,
+            category,
+            quiet,
+        } => {
+            print_notebook_entry(&store.set_notebook_category(id, &category)?, quiet);
         }
         LiveMemoryCmd::Delete { id, quiet } => {
             print_notebook_entry(&store.delete_notebook_entry(id)?, quiet);
@@ -6786,9 +6847,19 @@ fn run_memory(cmd: MemoryCmd) -> Result<()> {
                 Some(dir) => dir,
                 None => std::env::current_dir()?,
             };
+            // The global block first (naru task 1802): the agent-wide
+            // categories of the live notebook, printed for any folder.
+            let global = project_memory::agent_context_text(&store.list_notebook(false)?);
+            print!("{global}");
             if let Some(project) = project_memory::resolve_project_for_path(store, &dir)? {
                 let entries = store.list_notebook_in(Some(project.id), false)?;
-                print!("{}", project_memory::context_text(&project, &entries));
+                let separator = if global.is_empty() { "" } else { "\n" };
+                let room = project_memory::CONTEXT_MAX_CHARS
+                    .saturating_sub(global.chars().count() + separator.len());
+                print!(
+                    "{separator}{}",
+                    project_memory::context_text_within(&project, &entries, room)
+                );
             }
         }
     }
@@ -9308,6 +9379,7 @@ mod tests {
             project_id: None,
             last_used_at: None,
             kept_at: None,
+            category: None,
         }
     }
 
@@ -9335,6 +9407,8 @@ mod tests {
                 "last_used_at",
                 // A timestamp (mesa task 1337): bounded, kept.
                 "kept_at",
+                // One of five fixed names (naru task 1802): bounded, kept.
+                "category",
             ]),
             "LiveNotebookEntry gained/lost a field: decide whether it belongs in \
              the --quiet shape before updating this list",

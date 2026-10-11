@@ -3411,7 +3411,7 @@ grep -q "You are tidying Naru's notebook between conversations" "$STUB_DIR/p-dre
 grep -q "Some entries are marked unused" "$STUB_DIR/p-dream-prompt" ||
   fail "the dream prompt must tell the dreamer what unused means"
 for id in "$C1" "$C2"; do
-  grep -q -- "- \[#$id, added [0-9-]*, from session [0-9-]*, last used session [0-9-]*, unused\] CAND-" \
+  grep -q -- "- \[#$id, added [0-9-]*, from session [0-9-]*, last used session [0-9-]*, uncategorized, unused\] CAND-" \
     "$STUB_DIR/p-dream-prompt" || fail "the dream prompt must mark #$id unused (got: $(cat "$STUB_DIR/p-dream-prompt"))"
 done
 # Crossing happens once: the next stop, both entries still candidates, spawns
@@ -3470,6 +3470,61 @@ run 1 "$MESA" live memory keep "$C1"
 [ "$(jqe .error.code)" = "not_found" ] || fail "live memory keep on a retired entry: not_found"
 ok "live memory candidates: an entry unused for $NB_DECAY ended sessions stays active — live start retires nothing and says nothing, the stop it crosses the mark at spawns a dream whose prompt marks it \`, unused\`, the next stop does not, and the live agent's lines carry no mark; \`keep\` stamps kept_at once (no live session, --quiet drops body alone, unknown/retired not_found) and a kept entry is no longer marked unused"
 
+# ---- categories (naru task 1802): a tag on a global entry ----
+run 0 "$MESA" live memory add --category working-rules "CAT-A never force-push main"
+CATA=$(jqs .id)
+[ "$(jqs .category)" = "working-rules" ] || fail "add --category must store it (got $STDOUT)"
+run 0 "$MESA" live memory add "CAT-B the test iPad lives in the drawer"
+CATB=$(jqs .id)
+[ "$(jqs .category)" = "null" ] || fail "an entry added without --category is uncategorized (got $STDOUT)"
+run 1 "$MESA" live memory add --category bogus "CAT-X never stored"
+[ "$(jqe .error.code)" = "validation" ] || fail "add --category bogus: validation (got $STDERR)"
+grep -q "how-we-talk" <<<"$STDERR" || fail "the validation names the category set (got $STDERR)"
+run 0 "$MESA" live memory list
+[ "$(jqs 'length')" = "2" ] && [ "$(jqs 'map(.body) | any(test("CAT-X"))')" = "false" ] ||
+  fail "a bad --category must write nothing (got $STDOUT)"
+# categorize: --quiet keeps category and drops body; updated_at does not move.
+run 0 "$MESA" live memory show "$CATB"
+CATB_UPDATED=$(jqs .updated_at)
+run 0 "$MESA" live memory categorize --quiet "$CATB" machines-and-devices
+[ "$(jqs 'has("body")')" = "false" ] && [ "$(jqs .category)" = "machines-and-devices" ] ||
+  fail "categorize --quiet: category kept, body dropped (got $STDOUT)"
+run 0 "$MESA" live memory show "$CATB"
+[ "$(jqs .updated_at)" = "$CATB_UPDATED" ] || fail "categorize must leave updated_at unchanged"
+run 1 "$MESA" live memory categorize "$CATB" bogus
+[ "$(jqe .error.code)" = "validation" ] || fail "categorize bogus: validation"
+run 0 "$MESA" live memory show "$CATB"
+[ "$(jqs .category)" = "machines-and-devices" ] || fail "a refused categorize changes nothing"
+run 0 "$MESA" live memory add "CAT-C a throwaway"
+CATC=$(jqs .id)
+run 0 "$MESA" live memory delete "$CATC"
+run 1 "$MESA" live memory categorize "$CATC" decisions
+[ "$(jqe .error.code)" = "not_found" ] || fail "categorize on a retired id: not_found"
+run 0 "$MESA" live memory categorize "$CATB" "decisions"
+run 0 "$MESA" live memory replace --category working-rules "$CATB" "CAT-B the test iPad lives in the drawer."
+[ "$(jqs .category)" = "working-rules" ] || fail "replace --category sets it (got $STDOUT)"
+# Back to uncategorized for the dream, which must see CAT-B as such.
+sqlite3 "$MESA_DB" "UPDATE live_notebook SET category=NULL WHERE id=$CATB"
+# The dream prompt teaches the edit and shows each entry's category; a staged
+# answer's categorize lands, and a bad one fails alone.
+printf '%s' "{\"edits\":[{\"op\":\"categorize\",\"id\":999999,\"category\":\"decisions\"},{\"op\":\"categorize\",\"id\":$CATB,\"category\":\"machines-and-devices\"}],\"contradictions\":[],\"report\":\"categorized\"}" > "$STUB_DIR/dream-out.json"
+DP_BASE=$(p_base dream)
+run 0 "$MESA" live memory dream
+[ "$(jqs .spawned)" = "true" ] || fail "dream over two entries must spawn (got $STDOUT)"
+wait_p dream $((DP_BASE + 1))
+grep -q '"op":"categorize"' "$STUB_DIR/p-dream-prompt" || fail "the dream prompt must teach the categorize edit"
+grep -q -- "- \[#$CATA, .*, category working-rules\] CAT-A" "$STUB_DIR/p-dream-prompt" ||
+  fail "the dream prompt must show #$CATA's category"
+grep -q -- "- \[#$CATB, .*, uncategorized\] CAT-B" "$STUB_DIR/p-dream-prompt" ||
+  fail "the dream prompt must mark #$CATB uncategorized"
+wait_for "the dream's categorize to land" bash -c "'$MESA' live memory show $CATB | jq -e '.category == \"machines-and-devices\"' >/dev/null"
+run 0 "$MESA" live memory show "$CATB"
+[ "$(jqs .body)" = "CAT-B the test iPad lives in the drawer." ] || fail "a dream categorize changes no words"
+rm -f "$STUB_DIR/dream-out.json"
+run 0 "$MESA" live memory delete "$CATA"
+run 0 "$MESA" live memory delete "$CATB"
+ok "live memory categories: --category on add/replace stores it, a bad one is validation writing nothing, categorize (--quiet keeps category, drops body; updated_at unmoved; retired id not_found), and the dream prompt shows each category and teaches categorize whose staged answer lands"
+
 # ---- the API: four routes on require_agent_access, default mode ----
 PORT=17781
 BASE="http://127.0.0.1:$PORT"
@@ -3504,6 +3559,16 @@ api 404 PATCH "/api/live/memory/999999" '{"body":"nothing here"}'
 [ "$(jqb .error.code)" = "not_found" ] || fail "PATCH an unknown id: not_found"
 api 404 DELETE "/api/live/memory/999999"
 [ "$(jqb .error.code)" = "not_found" ] || fail "DELETE an unknown id: not_found"
+api 201 POST "/api/live/memory" '{"body":"API-CAT never force-push","category":"working-rules"}'
+AC=$(jqb .id)
+[ "$(jqb .category)" = "working-rules" ] || fail "POST with a category stores it (got $BODY)"
+api 422 POST "/api/live/memory" '{"body":"API-CATBAD","category":"bogus"}'
+[ "$(jqb .error.code)" = "validation" ] || fail "POST with a bad category: validation"
+api 200 PATCH "/api/live/memory/$AC" '{"body":"API-CAT never force-push main","category":"decisions"}'
+[ "$(jqb .category)" = "decisions" ] || fail "PATCH with a category sets it (got $BODY)"
+api 200 GET "/api/live/memory"
+[ "$(jqb 'map(.body) | any(test("API-CATBAD"))')" = "false" ] || fail "a bad category must write nothing"
+api 200 DELETE "/api/live/memory/$AC"
 api 200 DELETE "/api/live/memory/$M1"
 [ "$(jqb .id)" = "$M1" ] && [ "$(jqb .retired_reason)" = "deleted" ] || fail "DELETE echoes the retired row"
 api 200 GET "/api/live/memory"
@@ -3873,18 +3938,18 @@ got
 $(head -11 "$STUB_DIR/p-dream-flags")"
 jq -e '.required == ["edits","contradictions","report"]' "$STUB_DIR/p-dream-schema" >/dev/null ||
   fail "live-dream call: --json-schema must be core::live's dream schema (got $(cat "$STUB_DIR/p-dream-schema"))"
-jq -e '[.properties.edits.items.anyOf[].properties.op.const] == ["merge","delete","keep","replace"]' "$STUB_DIR/p-dream-schema" >/dev/null ||
-  fail "live-dream call: the live schema offers merge, delete, keep and replace"
+jq -e '[.properties.edits.items.anyOf[].properties.op.const] == ["merge","delete","keep","categorize","replace"]' "$STUB_DIR/p-dream-schema" >/dev/null ||
+  fail "live-dream call: the live schema offers merge, delete, keep, categorize and replace"
 grep -q "You are tidying Naru's notebook between conversations" "$STUB_DIR/p-dream-prompt" ||
   fail "live-dream call: the prompt argument must be core::live's DREAM_PROMPT"
 grep -q '"op":"merge"' "$STUB_DIR/p-dream-prompt" ||
   fail "live-dream call: the prompt must teach the merge edit"
 ! grep -q 'mesa live memory' "$STUB_DIR/p-dream-prompt" ||
   fail "live-dream call: the tool-less prompt must name no mesa live memory command"
-grep -q -- "- \[#$MC, added [0-9-]*, from session [0-9]*, last used session [0-9]*\] KEEP-C: task 42 holds the roadmap." \
+grep -q -- "- \[#$MC, added [0-9-]*, from session [0-9]*, last used session [0-9]*, uncategorized\] KEEP-C: task 42 holds the roadmap." \
   "$STUB_DIR/p-dream-prompt" ||
   fail "live-dream call: every active entry must ride in the prompt as a provenance-labelled line (got: $(cat "$STUB_DIR/p-dream-prompt"))"
-grep -q -- "- \[#$M2, added [0-9-]*, from session [0-9]*, last used session [0-9]*\] MERGED-2: prefers short spoken replies." \
+grep -q -- "- \[#$M2, added [0-9-]*, from session [0-9]*, last used session [0-9]*, uncategorized\] MERGED-2: prefers short spoken replies." \
   "$STUB_DIR/p-dream-prompt" ||
   fail "live-dream call: the second active entry must ride in the prompt"
 ! grep -q "MERGE-A:" "$STUB_DIR/p-dream-prompt" || fail "live-dream call: a retired entry must not ride in the prompt"

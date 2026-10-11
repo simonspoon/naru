@@ -4331,6 +4331,10 @@ pub struct LiveNotebookEntry {
     /// is not a retirement candidate, and the dream pass never deletes it to
     /// make room. Bounded, kept by `--quiet`.
     pub kept_at: Option<String>,
+    /// The entry's category tag (naru task 1802, one of
+    /// `live::NOTEBOOK_CATEGORIES`); null when uncategorized. Bounded, kept
+    /// by `--quiet`, always null in a project notebook.
+    pub category: Option<String>,
 }
 
 /// One match from `mesa live memory search` (mesa task 1147): a row of the

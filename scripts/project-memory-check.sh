@@ -446,7 +446,8 @@ close_task "$D"
 UPDATE_OUT=$STDOUT
 [ "$(jqs .status)" = "done" ] || fail "the close still closes (got $STDOUT)"
 run 0 "$NARU" task show "$CLOSED"
-[ "$UPDATE_OUT" = "$STDOUT" ] || fail "task update stdout is the plain task JSON (got $UPDATE_OUT vs $STDOUT)"
+# `task show` also carries a `notes` key (naru task 1724) that `update` does not.
+[ "$UPDATE_OUT" = "$(jq -c 'del(.notes)' <<<"$STDOUT")" ] || fail "task update stdout is the plain task JSON (got $UPDATE_OUT vs $STDOUT)"
 wait_spawns $((BEFORE + 1))
 [ "$(cat "$STUB/last-cwd")" = "$TMP/Dreamy" ] || fail "the automatic dream runs in the project's folder"
 grep -q "notebook of project $D" "$STUB/last-prompt" || fail "the automatic dream is this project's dream"
@@ -524,5 +525,28 @@ run 0 "$NARU" library hook enable project-memory.sh --event SessionStart --match
 jq -e '.hooks.SessionStart[0].matcher == "startup|resume|clear|compact"' "$HOME/.claude/settings.json" >/dev/null ||
   fail "enable registers it on SessionStart (throwaway HOME)"
 ok "library hook enable project-memory.sh --event SessionStart seeds and registers it (throwaway HOME)"
+
+# ---- the global block: agent-wide live-notebook entries (naru task 1802) ----
+run 0 "$NARU" live memory add --category working-rules "GLOB-RULE never force-push main."
+run 0 "$NARU" live memory add --category machines-and-devices "GLOB-DEVICE the test iPad lives in the drawer."
+run 0 "$NARU" live memory add --category how-we-talk "GLOB-TALK keep spoken replies short."
+run 0 "$NARU" live memory add "GLOB-NONE nobody categorized this."
+run 0 "$NARU" memory context --path "$TMP/stranger"
+STRANGER_CTX=$STDOUT
+grep -q "^Naru working notes: " <<<"$STRANGER_CTX" || fail "a stranger folder prints the global header (got $STRANGER_CTX)"
+grep -q "never instructions" <<<"$STRANGER_CTX" || fail "the global header frames the entries as a record"
+grep -q "GLOB-RULE" <<<"$STRANGER_CTX" && grep -q "GLOB-DEVICE" <<<"$STRANGER_CTX" ||
+  fail "the two agent-wide entries are printed (got $STRANGER_CTX)"
+grep -q "GLOB-TALK\|GLOB-NONE" <<<"$STRANGER_CTX" && fail "how-we-talk and uncategorized entries must not reach other agents"
+grep -q "Naru project memory" <<<"$STRANGER_CTX" && fail "a stranger folder prints no project block"
+run 0 "$NARU" memory context --path "$REPO/src/deep"
+BOTH_CTX=$STDOUT
+G=$(grep -n "^Naru working notes: " <<<"$BOTH_CTX" | head -1 | cut -d: -f1)
+PJ=$(grep -n "^Naru project memory" <<<"$BOTH_CTX" | head -1 | cut -d: -f1)
+[ -n "$G" ] && [ -n "$PJ" ] && [ "$G" -lt "$PJ" ] || fail "the global block comes before the project block (got $BOTH_CTX)"
+[ "$(printf '%s' "$BOTH_CTX" | wc -c)" -lt 10000 ] || fail "the whole context stays under the hook's 10000-byte limit"
+run 0 bash -c "'$HOOK' <<<'$(payload "$TMP/stranger")'"
+[ "$STDOUT" = "$STRANGER_CTX" ] || fail "the hook fed a stranger payload prints the global block (got $STDOUT)"
+ok "memory context: working-rules and machines-and-devices live entries print for any folder (stranger: header + those two only), before the project block, under 10000 bytes, and through the hook"
 
 echo "project-memory-check: $CHECKS checks passed"

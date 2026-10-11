@@ -5300,6 +5300,10 @@ async fn start_live(
 #[derive(Deserialize)]
 struct NotebookWrite {
     body: String,
+    /// Optional category tag (naru task 1802); validated before anything is
+    /// written, so a bad one is a 422 that stores nothing.
+    #[serde(default)]
+    category: Option<String>,
 }
 
 /// `GET /api/live/memory` — the active notebook, oldest first (mesa task
@@ -5325,7 +5329,15 @@ async fn add_live_memory(
 ) -> ApiResult<Response> {
     require_agent_access(&state, &addr, &headers)?;
     let Json(body) = body?;
-    let entry = state.store.lock().unwrap().add_notebook_entry(&body.body)?;
+    if let Some(category) = &body.category {
+        live::validate_category(category)?;
+    }
+    let mut store = state.store.lock().unwrap();
+    let mut entry = store.add_notebook_entry(&body.body)?;
+    if let Some(category) = &body.category {
+        entry = store.set_notebook_category(entry.id, category)?;
+    }
+    drop(store);
     Ok((StatusCode::CREATED, Json(entry)).into_response())
 }
 
@@ -5341,13 +5353,15 @@ async fn replace_live_memory(
 ) -> ApiResult<Json<LiveNotebookEntry>> {
     require_agent_access(&state, &addr, &headers)?;
     let Json(body) = body?;
-    Ok(Json(
-        state
-            .store
-            .lock()
-            .unwrap()
-            .replace_notebook_entry(id, &body.body)?,
-    ))
+    if let Some(category) = &body.category {
+        live::validate_category(category)?;
+    }
+    let mut store = state.store.lock().unwrap();
+    let mut entry = store.replace_notebook_entry(id, &body.body)?;
+    if let Some(category) = &body.category {
+        entry = store.set_notebook_category(id, category)?;
+    }
+    Ok(Json(entry))
 }
 
 /// `DELETE /api/live/memory/{id}` — retires one entry (it stays in the

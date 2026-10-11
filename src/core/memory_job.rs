@@ -346,6 +346,7 @@ enum DreamEdit {
     Merge { ids: Vec<i64>, body: String },
     Delete { id: i64 },
     Keep { id: i64 },
+    Categorize { id: i64, category: String },
     Replace { id: i64, body: String },
 }
 
@@ -386,6 +387,12 @@ pub fn apply_dream(
                 .map(|e| json!({"op": "keep", "entry_id": e.id})),
             DreamEdit::Keep { .. } => Err(Error::Validation(
                 "a project notebook has no kept entries".into(),
+            )),
+            DreamEdit::Categorize { id, category } if scope.is_none() => store
+                .set_notebook_category(*id, category)
+                .map(|e| json!({"op": "categorize", "entry_id": e.id})),
+            DreamEdit::Categorize { .. } => Err(Error::Validation(
+                "a project notebook has no categories".into(),
             )),
         };
         match result {
@@ -488,7 +495,7 @@ mod tests {
         };
         assert_eq!(
             any(live::LIVE_DREAM_SCHEMA),
-            ["merge", "delete", "keep", "replace"]
+            ["merge", "delete", "keep", "categorize", "replace"]
         );
         assert_eq!(
             any(live::PROJECT_DREAM_SCHEMA),
@@ -595,6 +602,57 @@ mod tests {
         assert_eq!(report["failed"].as_array().unwrap().len(), 2, "{report}");
         assert_eq!(store.list_notebook(false).unwrap().len(), 2);
         assert!(store.get_notebook_entry(c.id).unwrap().kept_at.is_some());
+    }
+
+    #[test]
+    fn a_categorize_edit_tags_a_live_entry_and_a_bad_one_fails_alone() {
+        let (_d, mut store) = store();
+        let a = store.add_notebook_entry("never force-push main").unwrap();
+        let b = store
+            .add_notebook_entry("the test iPad is in the drawer")
+            .unwrap();
+        let out = json!({
+            "edits": [
+                {"op": "categorize", "id": a.id, "category": "bogus"},
+                {"op": "categorize", "id": b.id, "category": "machines-and-devices"},
+                {"op": "categorize", "id": a.id, "category": "working-rules"},
+            ],
+            "contradictions": [],
+            "report": "tagged"
+        });
+        let report = apply_dream(&mut store, None, None, &out);
+        assert_eq!(report["applied"].as_array().unwrap().len(), 2, "{report}");
+        assert_eq!(report["applied"][0]["op"], "categorize");
+        assert_eq!(report["applied"][0]["entry_id"], b.id);
+        assert_eq!(report["failed"].as_array().unwrap().len(), 1, "{report}");
+        let a = store.get_notebook_entry(a.id).unwrap();
+        assert_eq!(a.category.as_deref(), Some("working-rules"));
+        assert_eq!(a.body, "never force-push main");
+    }
+
+    #[test]
+    fn a_project_notebook_refuses_categorize_and_its_schema_omits_it() {
+        let (_d, mut store) = store();
+        let p = store.create_project("p", None, None, None, None).unwrap();
+        let e = store
+            .add_notebook_entry_in(Some(p.id), "a project bullet")
+            .unwrap();
+        let out = json!({
+            "edits": [{"op": "categorize", "id": e.id, "category": "decisions"}],
+            "contradictions": [],
+            "report": "x"
+        });
+        let report = apply_dream(&mut store, Some(p.id), None, &out);
+        assert_eq!(report["failed"].as_array().unwrap().len(), 1, "{report}");
+        assert!(
+            report["failed"][0]["error"]
+                .as_str()
+                .unwrap()
+                .contains("no categories")
+        );
+        assert_eq!(store.get_notebook_entry(e.id).unwrap().category, None);
+        assert!(crate::core::live::LIVE_DREAM_SCHEMA.contains("categorize"));
+        assert!(!crate::core::live::PROJECT_DREAM_SCHEMA.contains("categorize"));
     }
 
     #[test]

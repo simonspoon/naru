@@ -1023,6 +1023,26 @@ is usually kept long before it could become one. A `replace` leaves
 `kept_at` as it is, a merge result starts unkept (the dream may keep it),
 and a `restore` leaves the column as it was.
 
+**Categories** (naru task 1802). A global entry may carry one of five tags,
+`live_notebook.category` (migration index 89, NULL = uncategorized, enforced
+in `Store` against `live::NOTEBOOK_CATEGORIES`): `how-we-talk` (how the voice
+converses with the person), `working-rules` (rules every agent must follow
+when working), `machines-and-devices` (the person's machines and test
+hardware), `decisions` (product or architecture decisions already made) and
+`memory-design` (how memory itself should work). The first and last are about
+the voice and the notebook, so they stay with the live agent; the other three
+(`live::AGENT_WIDE_CATEGORIES`) also reach **every** agent session: `naru
+memory context` prints them as a global block (`docs/project-memory.md`).
+The live voice's own prompt is unchanged — `notebook_line` and `prompt_with`
+still show it every entry, tag or not. Set with `mesa live memory add|replace
+--category <c>` (validated before anything is written), `mesa live memory
+categorize <ID> <c>` (writes the category alone: no `updated_at`, no use), or
+`category` on `POST`/`PATCH /api/live/memory` (422 writing nothing). A
+`replace` keeps the tag, a merge result inherits the sources' category when
+they all share one and is otherwise uncategorized, a `move` into a project
+clears it (a project notebook has none), a `restore` leaves it as it was.
+`--quiet` keeps `category`.
+
 ### What goes in it, and who writes it
 
 The `naru-live` agent definition (`core::live::AGENT_DEFINITION`) gained a
@@ -1177,6 +1197,15 @@ single draft and no single save button — and no poll.
 
 ### Dreaming: consolidation between conversations (mesa task 1152)
 
+*Categorize (naru task 1802).* Each entry's bracket in the dream prompt reads
+`, category <c>` or `, uncategorized` (before the `unused`/`kept` marks:
+`…, uncategorized, unused]`), and the prompt asks for
+`{"op":"categorize","id":<id>,"category":"<name>"}` for each uncategorized
+entry or one whose category plainly does not fit. It changes no words and,
+like `keep`, never counts toward the one-third limit; the live dream schema
+carries the op, the project one does not (a project notebook has no
+categories, so applying one there is a refused edit).
+
 A notebook edited one bullet at a time by many conversations drifts the way
 any append-mostly list does: two conversations write the same preference in
 two wordings, an older entry is quietly superseded by a newer one, and every
@@ -1185,9 +1214,9 @@ research above warns against is the obvious one — hand the whole notebook to
 a model and ask for a tidy version — because that is exactly ACE's *context
 collapse*: a rewrite shrinks toward whatever the rewriter found salient, and
 after a few passes what is left is the rewriter's notebook, not the
-person's. So the dream pass is **not** a rewrite. It is an agent with four
-verbs (`merge`, `delete`, `keep` and, to fit the budget, `replace` to
-shorten), each a single guarded edit through the same `Store` path every other
+person's. So the dream pass is **not** a rewrite. It is an agent with five
+verbs (`merge`, `delete`, `keep`, `categorize` and, to fit the budget,
+`replace` to shorten), each a single guarded edit through the same `Store` path every other
 notebook write takes, and it is told to prefer doing nothing.
 
 **What it may do.** Merge entries that say the same thing

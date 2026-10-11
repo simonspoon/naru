@@ -26,6 +26,7 @@ function entry(over: Partial<LiveNotebookEntry> = {}): LiveNotebookEntry {
     project_id: null,
     last_used_at: null,
     kept_at: null,
+    category: null,
     ...over,
   }
 }

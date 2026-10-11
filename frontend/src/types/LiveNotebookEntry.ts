@@ -74,4 +74,10 @@ last_used_at: string | null,
  * is not a retirement candidate, and the dream pass never deletes it to
  * make room. Bounded, kept by `--quiet`.
  */
-kept_at: string | null, };
+kept_at: string | null, 
+/**
+ * The entry's category tag (naru task 1802, one of
+ * `live::NOTEBOOK_CATEGORIES`); null when uncategorized. Bounded, kept
+ * by `--quiet`, always null in a project notebook.
+ */
+category: string | null, };

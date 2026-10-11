@@ -1428,6 +1428,11 @@ const MIGRATIONS: &[&str] = &[
     // (micro-USD); NULL = price the tokens at read time, as for every
     // transcript row.
     "ALTER TABLE cc_messages ADD COLUMN cost_micro_usd INTEGER;",
+    // Naru task 1802: a global live-notebook entry may carry a category tag
+    // (one of `live::NOTEBOOK_CATEGORIES`, enforced in `Store`, not the schema).
+    // The agent-wide ones reach every agent session through `naru memory
+    // context`. NULL = uncategorized; always NULL on a project notebook row.
+    "ALTER TABLE live_notebook ADD COLUMN category TEXT;",
 ];
 
 /// Selects full task rows including the derived `blocked` flag.
@@ -1761,7 +1766,7 @@ const LIVE_SUMMARY_LIST_MAX: i64 = 500;
 
 const LIVE_NOTEBOOK_COLUMNS: &str = "id, body, created_at, updated_at, source_session_id, \
                                       last_used_session_id, retired_at, retired_reason, \
-                                      merged_into, project_id, last_used_at, kept_at";
+                                      merged_into, project_id, last_used_at, kept_at, category";
 
 /// The clock a project notebook entry's `last_used_at` is stamped on
 /// (mesa task 1333): `datetime('now')` plus milliseconds, so an entry
@@ -1975,6 +1980,7 @@ fn row_to_notebook_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<LiveNotebo
         project_id: row.get(9)?,
         last_used_at: row.get(10)?,
         kept_at: row.get(11)?,
+        category: row.get(12)?,
     })
 }
 
@@ -7913,13 +7919,19 @@ impl Store {
             .iter()
             .min_by_key(|e| (&e.created_at, e.id))
             .and_then(|e| e.source_session_id);
+        // Naru task 1802: the merged bullet inherits the sources' category
+        // when they all share one, else it starts uncategorized.
+        let category = sources[0]
+            .category
+            .clone()
+            .filter(|c| sources.iter().all(|e| e.category.as_deref() == Some(c)));
         let session = self.notebook_session_for(scope)?;
         let tx = self.conn.transaction()?;
         tx.execute(
             "INSERT INTO live_notebook (body, created_at, updated_at, source_session_id, \
-                                        last_used_session_id, project_id) \
-             VALUES (?1, datetime('now'), datetime('now'), ?2, ?3, ?4)",
-            (body, source_session, session, scope),
+                                        last_used_session_id, project_id, category) \
+             VALUES (?1, datetime('now'), datetime('now'), ?2, ?3, ?4, ?5)",
+            (body, source_session, session, scope, category),
         )?;
         let id = tx.last_insert_rowid();
         tx.execute(
@@ -8007,6 +8019,22 @@ impl Store {
         self.get_notebook_entry(id)
     }
 
+    /// Tags one active **global** live-notebook entry with a category
+    /// (naru task 1802, `naru live memory categorize`). An unknown category
+    /// is `Validation` naming the set; an unknown, retired or project-notebook
+    /// id is `NotFound`. Writes `category` and nothing else — not
+    /// `updated_at`, not `last_used_session_id` — so tagging an entry is not
+    /// using it, and needs no live session.
+    pub fn set_notebook_category(&mut self, id: i64, category: &str) -> Result<LiveNotebookEntry> {
+        let category = live::validate_category(category)?;
+        self.get_active_notebook_entry_in(None, id)?;
+        self.conn.execute(
+            "UPDATE live_notebook SET category = ?2 WHERE id = ?1",
+            (id, category),
+        )?;
+        self.get_notebook_entry(id)
+    }
+
     /// Marks one active entry as used: the live notebook's rule is
     /// [`Self::touch_notebook_entry`]; a project entry (mesa task 1333) needs
     /// no session and stamps `last_used_at`, the clock its recency reads.
@@ -8038,7 +8066,7 @@ impl Store {
         self.conn.execute(
             &format!(
                 "UPDATE live_notebook SET project_id = ?2, last_used_at = {NOTEBOOK_USED_NOW}, \
-                 kept_at = NULL WHERE id = ?1"
+                 kept_at = NULL, category = NULL WHERE id = ?1"
             ),
             (id, project_id),
         )?;
@@ -15743,15 +15771,15 @@ mod tests {
         );
         assert_eq!(
             MIGRATIONS.len(),
-            89,
-            "a fresh db should report user_version 89"
+            90,
+            "a fresh db should report user_version 90"
         );
         let (store, _dir) = temp_store();
         let version: i64 = store
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 89);
+        assert_eq!(version, 90);
     }
 
     /// Workflows replace diagrams at migration 83 (mesa task 1607): a db that
@@ -15771,11 +15799,11 @@ mod tests {
         let path = dir.path().join("test.db");
         // Rewind to user_version 83: workflow tables gone, a diagram present,
         // and everything a later migration added undone (task_notes, and the
-        // pinned_at column — replaying 84+ would otherwise collide with it).
+        // pinned_at and category columns — replaying 84+ would otherwise collide with it).
         store
             .conn
             .execute_batch(
-                "DROP TABLE task_notes; ALTER TABLE cc_messages DROP COLUMN cost_micro_usd; ALTER TABLE cc_sessions DROP COLUMN main_agent; ALTER TABLE live_boards DROP COLUMN pinned_at; DROP TABLE workflow_log; DROP TABLE workflow_runs; DROP TABLE workflow_edges; \
+                "DROP TABLE task_notes; ALTER TABLE live_notebook DROP COLUMN category; ALTER TABLE cc_messages DROP COLUMN cost_micro_usd; ALTER TABLE cc_sessions DROP COLUMN main_agent; ALTER TABLE live_boards DROP COLUMN pinned_at; DROP TABLE workflow_log; DROP TABLE workflow_runs; DROP TABLE workflow_edges; \
                  DROP TABLE workflow_nodes; DROP TABLE workflows; \
                  CREATE TABLE diagrams (id INTEGER PRIMARY KEY, title TEXT); \
                  INSERT INTO diagrams (title) VALUES ('stale'); \
@@ -18670,6 +18698,88 @@ mod tests {
             Some("2026-01-01 00:00:00"),
             "a restore leaves the mark as it was"
         );
+    }
+
+    /// Pins the notebook's `category` column (naru task 1802) at index 89
+    /// (`user_version` 90), for the reason
+    /// [`the_live_summaries_table_arrives_at_migration_49`] gives.
+    #[test]
+    fn the_notebook_category_column_arrives_at_migration_89() {
+        const CATEGORY: usize = 89;
+        assert!(
+            MIGRATIONS[CATEGORY].contains("ALTER TABLE live_notebook ADD COLUMN category"),
+            "migration {CATEGORY} is no longer the notebook category migration — a \
+             shipped migration was edited or reordered, which is never allowed"
+        );
+    }
+
+    /// naru task 1802: `set_notebook_category` validates, refuses retired and
+    /// project entries, moves nothing but `category`; a replace keeps the tag,
+    /// a merge inherits a shared one (else none), a move clears it.
+    #[test]
+    fn categorizing_a_notebook_entry_touches_only_the_category() {
+        let (mut store, _dir) = temp_store();
+        let a = store.add_notebook_entry("alpha rule").unwrap();
+        assert_eq!(a.category, None);
+        store
+            .conn
+            .execute(
+                "UPDATE live_notebook SET updated_at = '2026-01-01 00:00:00' WHERE id = ?1",
+                [a.id],
+            )
+            .unwrap();
+        let tagged = store.set_notebook_category(a.id, "working-rules").unwrap();
+        assert_eq!(tagged.category.as_deref(), Some("working-rules"));
+        assert_eq!(tagged.updated_at, "2026-01-01 00:00:00");
+        assert_eq!(tagged.last_used_session_id, a.last_used_session_id);
+
+        let err = store.set_notebook_category(a.id, "bogus").unwrap_err();
+        assert!(matches!(err, Error::Validation(_)));
+        assert!(err.to_string().contains("how-we-talk"), "{err}");
+        assert_eq!(
+            store.get_notebook_entry(a.id).unwrap().category.as_deref(),
+            Some("working-rules"),
+            "a bad category writes nothing"
+        );
+        assert!(matches!(
+            store.set_notebook_category(999, "decisions"),
+            Err(Error::NotFound(_))
+        ));
+        let p = project(&mut store, "cat-scope");
+        let theirs = store
+            .add_notebook_entry_in(Some(p), "project bullet")
+            .unwrap();
+        assert!(matches!(
+            store.set_notebook_category(theirs.id, "decisions"),
+            Err(Error::NotFound(_))
+        ));
+
+        let replaced = store.replace_notebook_entry(a.id, "alpha rule v2").unwrap();
+        assert_eq!(replaced.category.as_deref(), Some("working-rules"));
+
+        let b = store.add_notebook_entry("beta rule").unwrap();
+        store.set_notebook_category(b.id, "working-rules").unwrap();
+        let merged = store
+            .merge_notebook_entries(&[a.id, b.id], "alpha and beta rules")
+            .unwrap();
+        assert_eq!(merged.category.as_deref(), Some("working-rules"));
+
+        let c = store.add_notebook_entry("gamma device").unwrap();
+        store
+            .set_notebook_category(c.id, "machines-and-devices")
+            .unwrap();
+        let mixed = store
+            .merge_notebook_entries(&[merged.id, c.id], "rules and a device")
+            .unwrap();
+        assert_eq!(mixed.category, None, "mixed categories start uncategorized");
+
+        store.set_notebook_category(mixed.id, "decisions").unwrap();
+        let moved = store.move_notebook_entry(mixed.id, p).unwrap();
+        assert_eq!(moved.category, None, "a move clears the category");
+        assert!(matches!(
+            store.set_notebook_category(a.id, "decisions"),
+            Err(Error::NotFound(_))
+        ));
     }
 
     /// The removal guard holds above the floor and stands down below it.
