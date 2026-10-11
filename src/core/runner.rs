@@ -799,7 +799,9 @@ fn run_runner_locked(dir: &Path) -> Result<()> {
         let _ = tx.send(Msg::Eof);
     });
 
-    let mut in_flight: u32 = 0;
+    // claude folds messages that arrive mid-turn into the running turn, so N
+    // deliveries can yield one result: track an open turn, not a count.
+    let mut in_flight = false;
     let mut last_activity = Instant::now();
     let mut closing: Option<(Closing, Instant)> = None;
     let mut exited: Option<(Instant, Option<i32>)> = None;
@@ -818,7 +820,7 @@ fn run_runner_locked(dir: &Path) -> Result<()> {
     };
 
     if interrupted && deliver(&mut stdin, CONTINUE_MESSAGE) {
-        in_flight += 1;
+        in_flight = true;
         runner_event(dir, "message_delivered", json!({"source": "resume"}));
     }
 
@@ -837,14 +839,12 @@ fn run_runner_locked(dir: &Path) -> Result<()> {
                     is_error,
                 } = parse_event(line)
                 {
-                    in_flight = in_flight.saturating_sub(1);
+                    in_flight = false;
                     last_activity = Instant::now();
                     job.last_result = text;
                     job.last_subtype = subtype;
                     job.last_is_error = Some(is_error);
-                    if in_flight == 0 {
-                        job.status = RunStatus::Idle;
-                    }
+                    job.status = RunStatus::Idle;
                     save(dir, &mut job)?;
                 }
                 // Drain whatever else is ready before polling the files.
@@ -873,7 +873,7 @@ fn run_runner_locked(dir: &Path) -> Result<()> {
         }
         if closing.is_none() && dir.join("interrupt").exists() {
             let _ = fs::remove_file(dir.join("interrupt"));
-            if in_flight > 0 {
+            if in_flight {
                 let request_id = uuid_from_bytes(random_bytes::<16>().unwrap_or([7; 16]));
                 if let Some(w) = stdin.as_mut()
                     && writeln!(w, "{}", encode_interrupt(&request_id))
@@ -914,7 +914,7 @@ fn run_runner_locked(dir: &Path) -> Result<()> {
                     break;
                 }
                 {
-                    in_flight += 1;
+                    in_flight = true;
                     job.status = RunStatus::Running;
                     save(dir, &mut job)?;
                     runner_event(
@@ -926,7 +926,7 @@ fn run_runner_locked(dir: &Path) -> Result<()> {
             }
         }
         if closing.is_none()
-            && in_flight == 0
+            && !in_flight
             && last_activity.elapsed().as_secs() >= job.idle_timeout_secs
         {
             closing = Some((Closing::Finished, Instant::now()));

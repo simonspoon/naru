@@ -80,6 +80,8 @@ while IFS= read -r line; do
     fi
     continue
   fi
+  # A file `coalesce` folds a message that arrives mid-turn into the running turn, as the real claude does: no second turn, no second result.
+  if [ -f "$STUB/coalesce" ] && [ -n "\$turn_pid" ] && kill -0 "\$turn_pid" 2>/dev/null; then continue; fi
   text=\$(jq -r '.message.content[0].text' <<<"\$line")
   s=0; [ -f "$STUB/sleep-secs" ] && s=\$(cat "$STUB/sleep-secs")
   # The turn runs in the background so the loop can still read a control_request.
@@ -261,6 +263,23 @@ set -e
 [ "$rc" = 1 ] && [ "$(jq -r .error.code <<<"$err")" = conflict ] || fail "interrupt of a stopped run: rc=$rc $err"
 ok "interrupt ended the turn mid-flight, the run stayed open and answered the next send; idle/terminal runs refused or ignored"
 
+# ---- messages folded into one turn: three deliveries, one result, run goes idle ----
+touch "$STUB/coalesce"
+echo 3 > "$STUB/sleep-secs"
+J6=$("$NARU" run start --model haiku --cwd "$TMP/work" "fold one" | jq -r .job_id)
+wait_for 10 "fold: first delivered" delivered_is "$J6" 1
+"$NARU" run send "$J6" "fold two" >/dev/null
+"$NARU" run send "$J6" "fold three" >/dev/null
+wait_for 10 "fold: all three delivered" delivered_is "$J6" 3
+status_is "$J6" running || fail "fold: should still be mid-turn"
+wait_for 15 "fold: idle after the single result" status_is "$J6" idle
+[ "$(grep -c '"type":"result"' "$RUNS/$J6/events.jsonl")" = 1 ] || fail "fold: expected exactly one result"
+rm -f "$STUB/coalesce"
+echo 0 > "$STUB/sleep-secs"
+"$NARU" run stop "$J6" >/dev/null
+wait_for 10 "fold run stopped" status_is "$J6" stopped
+ok "three messages folded into one turn gave one result and the run went idle"
+
 # ---- idle timeout ----
 J2=$("$NARU" run start --model haiku --cwd "$TMP/work" --idle-timeout 2 "short lived" | jq -r .job_id)
 wait_for 10 "result" result_is "$J2" "echo: short lived"
@@ -268,7 +287,7 @@ wait_for 10 "idle timeout -> finished" status_is "$J2" finished
 ok "idle timeout wound the run down to finished"
 
 # ---- CLI shapes ----
-"$NARU" run list | jq -e 'length == 5' >/dev/null || fail "run list"
+"$NARU" run list | jq -e 'length == 6' >/dev/null || fail "run list"
 "$NARU" run show "$J2" --events | jq -e '.job.job_id and (.events | length) > 0' >/dev/null || fail "run show --events"
 "$NARU" run show "$J2" --tail 1 | jq -e '.events | length == 1' >/dev/null || fail "run show --tail"
 "$NARU" run show "$J2" --quiet | jq -e '.job_id' >/dev/null || fail "--quiet is accepted and ignored"
