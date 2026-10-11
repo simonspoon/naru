@@ -1441,6 +1441,18 @@ const MIGRATIONS: &[&str] = &[
      ALTER TABLE live_sessions ADD COLUMN host_seen_at TEXT; \
      ALTER TABLE live_sessions ADD COLUMN ambient_request INTEGER; \
      ALTER TABLE live_sessions ADD COLUMN ambient_request_seq INTEGER NOT NULL DEFAULT 0;",
+    // Naru task 1841 (themes 2/10): user-authored colour themes, nine slots
+    // each (`core::theme`). AUTOINCREMENT so a deleted `custom-<id>` is never
+    // reissued to a later theme that a stale config/localStorage would pick up.
+    "CREATE TABLE custom_themes ( \
+        id INTEGER PRIMARY KEY AUTOINCREMENT, \
+        name TEXT NOT NULL UNIQUE COLLATE NOCASE, \
+        bg TEXT NOT NULL, panel TEXT NOT NULL, text TEXT NOT NULL, \
+        muted TEXT NOT NULL, accent TEXT NOT NULL, accent2 TEXT NOT NULL, \
+        good TEXT NOT NULL, warn TEXT NOT NULL, bad TEXT NOT NULL, \
+        created_at TEXT NOT NULL DEFAULT (datetime('now')), \
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')) \
+     );",
 ];
 
 /// Selects full task rows including the derived `blocked` flag.
@@ -10772,6 +10784,211 @@ fn would_cycle(conn: &Connection, task_id: i64, blocker_id: i64) -> Result<bool>
     Ok(false)
 }
 
+/// A stored custom theme (naru task 1841). Not ts-exported; `core::theme`
+/// turns it into a `Theme`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CustomThemeRow {
+    pub id: i64,
+    pub name: String,
+    pub slots: super::types::ThemeSlots,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// A partial slot update for [`Store::update_custom_theme`]; `None` keeps the
+/// stored colour.
+#[derive(Debug, Clone, Default)]
+pub struct CustomThemeSlotsPatch {
+    pub bg: Option<String>,
+    pub panel: Option<String>,
+    pub text: Option<String>,
+    pub muted: Option<String>,
+    pub accent: Option<String>,
+    pub accent2: Option<String>,
+    pub good: Option<String>,
+    pub warn: Option<String>,
+    pub bad: Option<String>,
+}
+
+const CUSTOM_THEME_COLUMNS: &str =
+    "id, name, bg, panel, text, muted, accent, accent2, good, warn, bad, created_at, updated_at";
+
+fn row_to_custom_theme(r: &rusqlite::Row) -> rusqlite::Result<CustomThemeRow> {
+    Ok(CustomThemeRow {
+        id: r.get(0)?,
+        name: r.get(1)?,
+        slots: super::types::ThemeSlots {
+            bg: r.get(2)?,
+            panel: r.get(3)?,
+            text: r.get(4)?,
+            muted: r.get(5)?,
+            accent: r.get(6)?,
+            accent2: r.get(7)?,
+            good: r.get(8)?,
+            warn: r.get(9)?,
+            bad: r.get(10)?,
+        },
+        created_at: r.get(11)?,
+        updated_at: r.get(12)?,
+    })
+}
+
+/// Trimmed name, 1..=40 chars, no control characters, and not a built-in
+/// theme's id or label, `system`, or `custom-<digits>` (those are selectors).
+fn validate_custom_theme_name(name: &str) -> Result<String> {
+    let name = name.trim();
+    let len = name.chars().count();
+    if len == 0 || len > 40 {
+        return Err(Error::Validation(
+            "theme name must be 1 to 40 characters".into(),
+        ));
+    }
+    if name.chars().any(char::is_control) {
+        return Err(Error::Validation(
+            "theme name must not contain control characters".into(),
+        ));
+    }
+    let lower = name.to_lowercase();
+    let reserved = lower == "system"
+        || super::theme::BUILTIN_THEMES
+            .iter()
+            .any(|t| t.id.to_lowercase() == lower || t.label.to_lowercase() == lower);
+    let custom_id = lower
+        .strip_prefix("custom-")
+        .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()));
+    if reserved || custom_id {
+        return Err(Error::Validation(format!(
+            "theme name \"{name}\" is reserved"
+        )));
+    }
+    Ok(name.to_string())
+}
+
+impl Store {
+    fn ensure_custom_theme_name_free(&self, name: &str, except: Option<i64>) -> Result<()> {
+        let clash: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM custom_themes \
+             WHERE name = ?1 COLLATE NOCASE AND (?2 IS NULL OR id != ?2))",
+            (name, except),
+            |r| r.get(0),
+        )?;
+        if clash {
+            return Err(Error::Conflict(format!(
+                "a theme named \"{name}\" already exists"
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn create_custom_theme(
+        &mut self,
+        name: &str,
+        slots: &super::types::ThemeSlots,
+    ) -> Result<CustomThemeRow> {
+        let name = validate_custom_theme_name(name)?;
+        let s = slots.normalized()?;
+        self.ensure_custom_theme_name_free(&name, None)?;
+        self.conn.execute(
+            "INSERT INTO custom_themes \
+             (name, bg, panel, text, muted, accent, accent2, good, warn, bad) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            (
+                &name, &s.bg, &s.panel, &s.text, &s.muted, &s.accent, &s.accent2, &s.good, &s.warn,
+                &s.bad,
+            ),
+        )?;
+        self.get_custom_theme(self.conn.last_insert_rowid())
+    }
+
+    pub fn get_custom_theme(&self, id: i64) -> Result<CustomThemeRow> {
+        self.conn
+            .query_row(
+                &format!("SELECT {CUSTOM_THEME_COLUMNS} FROM custom_themes WHERE id = ?1"),
+                [id],
+                row_to_custom_theme,
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    Error::NotFound(format!("theme {id} not found"))
+                }
+                e => Error::Db(e),
+            })
+    }
+
+    /// Case-insensitive exact match on the name.
+    pub fn find_custom_theme_by_name(&self, name: &str) -> Result<Option<CustomThemeRow>> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT {CUSTOM_THEME_COLUMNS} FROM custom_themes \
+                     WHERE name = ?1 COLLATE NOCASE"
+                ),
+                [name.trim()],
+                row_to_custom_theme,
+            )
+            .optional()?)
+    }
+
+    pub fn list_custom_themes(&self) -> Result<Vec<CustomThemeRow>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {CUSTOM_THEME_COLUMNS} FROM custom_themes ORDER BY id"
+        ))?;
+        let rows = stmt.query_map([], row_to_custom_theme)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Applies a partial update; everything is validated before the write, and
+    /// `updated_at` moves.
+    pub fn update_custom_theme(
+        &mut self,
+        id: i64,
+        name: Option<&str>,
+        patch: &CustomThemeSlotsPatch,
+    ) -> Result<CustomThemeRow> {
+        let current = self.get_custom_theme(id)?;
+        let name = match name {
+            Some(n) => {
+                let n = validate_custom_theme_name(n)?;
+                self.ensure_custom_theme_name_free(&n, Some(id))?;
+                n
+            }
+            None => current.name.clone(),
+        };
+        let pick = |new: &Option<String>, old: &String| new.clone().unwrap_or_else(|| old.clone());
+        let s = super::types::ThemeSlots {
+            bg: pick(&patch.bg, &current.slots.bg),
+            panel: pick(&patch.panel, &current.slots.panel),
+            text: pick(&patch.text, &current.slots.text),
+            muted: pick(&patch.muted, &current.slots.muted),
+            accent: pick(&patch.accent, &current.slots.accent),
+            accent2: pick(&patch.accent2, &current.slots.accent2),
+            good: pick(&patch.good, &current.slots.good),
+            warn: pick(&patch.warn, &current.slots.warn),
+            bad: pick(&patch.bad, &current.slots.bad),
+        }
+        .normalized()?;
+        self.conn.execute(
+            "UPDATE custom_themes SET name = ?1, bg = ?2, panel = ?3, text = ?4, muted = ?5, \
+             accent = ?6, accent2 = ?7, good = ?8, warn = ?9, bad = ?10, \
+             updated_at = datetime('now') WHERE id = ?11",
+            (
+                &name, &s.bg, &s.panel, &s.text, &s.muted, &s.accent, &s.accent2, &s.good, &s.warn,
+                &s.bad, id,
+            ),
+        )?;
+        self.get_custom_theme(id)
+    }
+
+    /// Deletes a theme; returns the destroyed row.
+    pub fn delete_custom_theme(&mut self, id: i64) -> Result<CustomThemeRow> {
+        let row = self.get_custom_theme(id)?;
+        self.conn
+            .execute("DELETE FROM custom_themes WHERE id = ?1", [id])?;
+        Ok(row)
+    }
+}
+
 /// The `MIGRATIONS` index that indexes existing whiteboards (mesa task 1548).
 const BOARD_INDEX_MIGRATION: usize = 79;
 
@@ -15898,15 +16115,15 @@ mod tests {
         );
         assert_eq!(
             MIGRATIONS.len(),
-            91,
-            "a fresh db should report user_version 91"
+            92,
+            "a fresh db should report user_version 92"
         );
         let (store, _dir) = temp_store();
         let version: i64 = store
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 91);
+        assert_eq!(version, 92);
     }
 
     /// Workflows replace diagrams at migration 83 (mesa task 1607): a db that
@@ -15930,7 +16147,7 @@ mod tests {
         store
             .conn
             .execute_batch(
-                "DROP TABLE task_notes; ALTER TABLE live_sessions DROP COLUMN ambient_request_seq; ALTER TABLE live_sessions DROP COLUMN ambient_request; ALTER TABLE live_sessions DROP COLUMN host_seen_at; ALTER TABLE live_sessions DROP COLUMN host_ambient; ALTER TABLE live_notebook DROP COLUMN category; ALTER TABLE cc_messages DROP COLUMN cost_micro_usd; ALTER TABLE cc_sessions DROP COLUMN main_agent; ALTER TABLE live_boards DROP COLUMN pinned_at; DROP TABLE workflow_log; DROP TABLE workflow_runs; DROP TABLE workflow_edges; \
+                "DROP TABLE custom_themes; DROP TABLE task_notes; ALTER TABLE live_sessions DROP COLUMN ambient_request_seq; ALTER TABLE live_sessions DROP COLUMN ambient_request; ALTER TABLE live_sessions DROP COLUMN host_seen_at; ALTER TABLE live_sessions DROP COLUMN host_ambient; ALTER TABLE live_notebook DROP COLUMN category; ALTER TABLE cc_messages DROP COLUMN cost_micro_usd; ALTER TABLE cc_sessions DROP COLUMN main_agent; ALTER TABLE live_boards DROP COLUMN pinned_at; DROP TABLE workflow_log; DROP TABLE workflow_runs; DROP TABLE workflow_edges; \
                  DROP TABLE workflow_nodes; DROP TABLE workflows; \
                  CREATE TABLE diagrams (id INTEGER PRIMARY KEY, title TEXT); \
                  INSERT INTO diagrams (title) VALUES ('stale'); \
@@ -21492,6 +21709,111 @@ mod tests {
         let cursors = store.cc_cursors().unwrap();
         assert_eq!(cursors.len(), 1);
         assert_eq!(cursors["/t/a.jsonl"], c2);
+    }
+
+    // ---- custom themes (naru task 1841) ------------------------------
+
+    fn theme_slots() -> crate::core::types::ThemeSlots {
+        crate::core::types::ThemeSlots {
+            bg: "#101010".into(),
+            panel: "#202020".into(),
+            text: "#EEEEEE".into(),
+            muted: "#999999".into(),
+            accent: "#3366ff".into(),
+            accent2: "#ff6633".into(),
+            good: "#33cc66".into(),
+            warn: "#ffcc00".into(),
+            bad: "#ff3333".into(),
+        }
+    }
+
+    #[test]
+    fn custom_theme_round_trip_and_ids_never_reused() {
+        let (mut store, _d) = temp_store();
+        let a = store
+            .create_custom_theme("  Mine ", &theme_slots())
+            .unwrap();
+        assert_eq!(a.name, "Mine");
+        assert_eq!(a.slots.text, "#eeeeee");
+        assert_eq!(store.get_custom_theme(a.id).unwrap(), a);
+        assert_eq!(
+            store.find_custom_theme_by_name("mINE").unwrap().unwrap().id,
+            a.id
+        );
+        assert_eq!(store.list_custom_themes().unwrap().len(), 1);
+        let patch = CustomThemeSlotsPatch {
+            accent: Some("#ABCDEF".into()),
+            ..Default::default()
+        };
+        let u = store
+            .update_custom_theme(a.id, Some("Other"), &patch)
+            .unwrap();
+        assert_eq!(
+            (u.name.as_str(), u.slots.accent.as_str()),
+            ("Other", "#abcdef")
+        );
+        assert_eq!(u.slots.bg, "#101010");
+        let d = store.delete_custom_theme(a.id).unwrap();
+        assert_eq!(d.id, a.id);
+        assert!(matches!(
+            store.get_custom_theme(a.id),
+            Err(Error::NotFound(_))
+        ));
+        let b = store.create_custom_theme("Again", &theme_slots()).unwrap();
+        assert!(b.id > a.id);
+    }
+
+    #[test]
+    fn custom_theme_name_rules() {
+        let (mut store, _d) = temp_store();
+        let long = "x".repeat(41);
+        for bad in [
+            "Dark",
+            "high contrast",
+            "system",
+            "custom-7",
+            "",
+            long.as_str(),
+        ] {
+            assert!(
+                matches!(
+                    store.create_custom_theme(bad, &theme_slots()),
+                    Err(Error::Validation(_))
+                ),
+                "{bad:?}"
+            );
+        }
+        store.create_custom_theme("Mine", &theme_slots()).unwrap();
+        assert!(matches!(
+            store.create_custom_theme("MINE", &theme_slots()),
+            Err(Error::Conflict(_))
+        ));
+        assert!(matches!(
+            store.get_custom_theme(99),
+            Err(Error::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn custom_theme_bad_colour_writes_nothing() {
+        let (mut store, _d) = temp_store();
+        let mut bad = theme_slots();
+        bad.warn = "nope".into();
+        assert!(matches!(
+            store.create_custom_theme("Bad", &bad),
+            Err(Error::Validation(_))
+        ));
+        assert!(store.list_custom_themes().unwrap().is_empty());
+        let a = store.create_custom_theme("Good", &theme_slots()).unwrap();
+        let patch = CustomThemeSlotsPatch {
+            bad: Some("zzz".into()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            store.update_custom_theme(a.id, Some("Renamed"), &patch),
+            Err(Error::Validation(_))
+        ));
+        assert_eq!(store.get_custom_theme(a.id).unwrap(), a);
     }
 
     // ---- artifacts (mesa task 974) -----------------------------------
