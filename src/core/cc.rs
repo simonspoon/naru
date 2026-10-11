@@ -1604,6 +1604,9 @@ struct SessionAcc {
     entrypoint: Option<String>,
     main_agent: Option<String>,
     sidechain: bool,
+    /// A ledger-only headless session: headless entrypoint and no transcript
+    /// message. A session with transcript messages is counted from them.
+    headless: bool,
 }
 
 #[derive(Default)]
@@ -1769,13 +1772,59 @@ fn collect_inner(
     // below: a filtered-out session's id is simply never inserted into
     // `agg.sessions`, so the messages/tool_calls loops can key off its
     // presence there instead of maintaining a separate set.
-    for rec in store.cc_read_sessions(cutoff)? {
+    //
+    // Messages are read first: a session with any transcript message (a uuid
+    // that is not a ledger `headless:` one) is counted from the transcript, so
+    // its ledger rows are skipped below and it is not a headless session.
+    let messages = store.cc_read_messages(cutoff)?;
+    let transcript_sessions: HashSet<String> = messages
+        .iter()
+        .filter(|m| !m.uuid.starts_with("headless:"))
+        .map(|m| m.session_id.clone())
+        .collect();
+    // Ledger sessions have no cwd; the source label (`headless:<source>` in
+    // git_branch) names a project, whose local_path they are attributed to.
+    let mut source_paths: HashMap<String, String> = HashMap::new();
+    for mut rec in store.cc_read_sessions(cutoff)? {
+        let ledger = rec.entrypoint.as_deref() == Some(HEADLESS_ENTRYPOINT);
+        if ledger && rec.cwd.is_none() {
+            let source = rec
+                .git_branch
+                .as_deref()
+                .and_then(|b| b.strip_prefix("headless:"))
+                .unwrap_or("")
+                .to_string();
+            let path = source_paths.entry(source).or_insert_with_key(|source| {
+                // By project name first; failing that, the one project whose
+                // local_path ends in the source (a source is usually a repo
+                // folder name, a project name often is not). Two such
+                // projects is ambiguous, so unresolved.
+                store
+                    .find_project_by_name(source)
+                    .ok()
+                    .and_then(|p| p.local_path)
+                    .or_else(|| {
+                        let mut hits =
+                            store.list_projects_all().ok()?.into_iter().filter_map(|p| {
+                                let path = p.local_path?;
+                                let last = path.rsplit(['/', '\\']).find(|c| !c.is_empty())?;
+                                last.eq_ignore_ascii_case(source).then(|| path.clone())
+                            });
+                        let first = hits.next()?;
+                        hits.next().is_none().then_some(first)
+                    })
+                    .unwrap_or_else(|| HEADLESS_ENTRYPOINT.to_string())
+            });
+            rec.cwd = Some(path.clone());
+        }
         if cwd_filter
             .is_some_and(|paths| !rec.cwd.as_deref().is_some_and(|cwd| paths.contains(&cwd)))
         {
             continue;
         }
+        let headless = ledger && !transcript_sessions.contains(&rec.session_id);
         let s = agg.sessions.entry(rec.session_id).or_default();
+        s.headless = headless;
         s.cwd = rec.cwd;
         s.git_branch = rec.git_branch;
         s.entrypoint = rec.entrypoint;
@@ -1799,7 +1848,10 @@ fn collect_inner(
     // first line of a response contributes everything and its repeats nothing
     // — including the `messages` counts, which count responses, not lines.
     let mut seen: HashSet<String> = HashSet::new();
-    for m in store.cc_read_messages(cutoff)? {
+    for m in messages {
+        if m.uuid.starts_with("headless:") && transcript_sessions.contains(&m.session_id) {
+            continue;
+        }
         if !seen.insert(dedupe_key(&m).to_string()) {
             continue;
         }
@@ -1827,7 +1879,7 @@ fn collect_inner(
         s.tokens.add(&usage);
         s.cost += cost;
         let cwd = s.cwd.clone();
-        let headless = s.entrypoint.as_deref() == Some(HEADLESS_ENTRYPOINT);
+        let headless = s.headless;
 
         let d = agg.days.entry(fmt_date(m.ts)).or_default();
         d.sessions.insert(m.session_id.clone());
@@ -2747,7 +2799,7 @@ impl Agg {
             tok.cache_creation += s.tokens.cache_creation;
             total_cost += s.cost;
             total_messages += s.messages;
-            let headless = s.entrypoint.as_deref() == Some(HEADLESS_ENTRYPOINT);
+            let headless = s.headless;
             if headless {
                 headless_cost += s.cost;
             }
@@ -9562,5 +9614,138 @@ mod tests {
             e.by_command.is_empty(),
             "no call row means no command to group on"
         );
+    }
+
+    fn ledger_line(id: &str, source: &str, session: &str, input: i64, cost: f64) -> String {
+        format!(
+            r#"{{"v":1,"id":"{id}","at":"2026-06-15T01:00:00Z","source":"{source}","session_id":"{session}","model":"claude-haiku-5-5","input_tokens":{input},"output_tokens":0,"cache_read_tokens":0,"cache_creation_tokens":0,"cost_usd":{cost}}}"#
+        )
+    }
+
+    const TRANSCRIPT_LINE: &str = r#"{"type":"assistant","uuid":"t1","sessionId":"s1","timestamp":"2026-06-15T01:05:00.000Z","cwd":"/home/me/work/widget","entrypoint":"cli","message":{"model":"claude-opus-4-8","usage":{"input_tokens":100,"output_tokens":200,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}"#;
+
+    /// Sync the ledger at `ledger` and the transcripts under `projects`.
+    fn sync_with(store: &mut Store, projects: &Path, ledger: &Path) {
+        // SAFETY: callers hold ENV_LOCK.
+        unsafe {
+            std::env::set_var("MESA_CC_PROJECTS_DIR", projects);
+            std::env::set_var("MESA_CC_LEDGER", ledger);
+        }
+        sync(store, false).unwrap();
+        unsafe {
+            std::env::remove_var("MESA_CC_PROJECTS_DIR");
+            std::env::remove_var("MESA_CC_LEDGER");
+        }
+    }
+
+    #[test]
+    fn cc_headless_ledger_only_attributed_by_source() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        fs::create_dir_all(&projects).unwrap();
+        let ledger = tmp.path().join("headless.jsonl");
+        fs::write(
+            &ledger,
+            [
+                ledger_line("a:m", "model-rubric", "h1", 1000, 0.5),
+                ledger_line("b:m", "mystery", "h2", 400, 0.25),
+                ledger_line("c:m", "rubric-two", "h3", 200, 0.1),
+            ]
+            .join("\n")
+                + "\n",
+        )
+        .unwrap();
+        let mut store = Store::open(&tmp.path().join("mesa.db")).unwrap();
+        store
+            .create_project("model-rubric", None, None, Some("/work/model-rubric"), None)
+            .unwrap();
+        // Name differs from the source: matched by the path's last component.
+        store
+            .create_project("Other Name", None, None, Some("/work/Rubric-Two"), None)
+            .unwrap();
+        sync_with(&mut store, &projects, &ledger);
+        let d = collect(&store, "all").unwrap();
+
+        assert_eq!(d.overview.total_tokens, 1600);
+        assert_eq!(d.overview.headless_cost_usd, 0.85);
+        assert_eq!(
+            d.projects
+                .iter()
+                .find(|s| s.path == "/work/Rubric-Two")
+                .map(|s| s.total_tokens),
+            Some(200)
+        );
+        let by_path = |p: &str| d.projects.iter().find(|s| s.path == p).unwrap();
+        let rubric = by_path("/work/model-rubric");
+        assert_eq!((rubric.total_tokens, rubric.est_cost_usd), (1000, 0.5));
+        assert_eq!(rubric.project, "model-rubric");
+        let bucket = by_path("headless");
+        assert_eq!((bucket.total_tokens, bucket.est_cost_usd), (400, 0.25));
+        assert_eq!(
+            d.projects.iter().map(|s| s.total_tokens).sum::<i64>(),
+            d.overview.total_tokens
+        );
+        // A project-scoped dashboard picks up its own ledger rows.
+        let scoped = collect_for_project(&store, "all", &["/work/model-rubric"]).unwrap();
+        assert_eq!(scoped.overview.total_tokens, 1000);
+    }
+
+    #[test]
+    fn cc_transcript_only_unchanged() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("projects").join("-p");
+        fs::create_dir_all(&proj).unwrap();
+        write_jsonl(&proj, "s.jsonl", &[TRANSCRIPT_LINE]);
+        let mut store = Store::open(&tmp.path().join("mesa.db")).unwrap();
+        sync_with(
+            &mut store,
+            &tmp.path().join("projects"),
+            Path::new("/nonexistent/headless.jsonl"),
+        );
+        let d = collect(&store, "all").unwrap();
+
+        assert_eq!(d.overview.sessions, 1);
+        assert_eq!(d.overview.total_tokens, 300);
+        assert_eq!(d.overview.headless_cost_usd, 0.0);
+        assert_eq!(d.daily.len(), 1);
+        assert_eq!(d.daily[0].headless_cost_usd, 0.0);
+        assert_eq!(d.models.len(), 1);
+        assert_eq!(d.models[0].total_tokens, 300);
+        assert_eq!(d.projects.len(), 1);
+        assert_eq!(d.projects[0].path, "/home/me/work/widget");
+        assert_eq!(d.projects[0].total_tokens, 300);
+    }
+
+    #[test]
+    fn cc_headless_overlap_counts_once() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let proj = projects.join("-p");
+        fs::create_dir_all(&proj).unwrap();
+        let ledger = tmp.path().join("headless.jsonl");
+        fs::write(
+            &ledger,
+            ledger_line("a:m", "model-rubric", "s1", 1000, 0.5) + "\n",
+        )
+        .unwrap();
+        let mut store = Store::open(&tmp.path().join("mesa.db")).unwrap();
+        // The ledger row lands first, the transcript for the same session after.
+        sync_with(&mut store, &projects, &ledger);
+        write_jsonl(&proj, "s.jsonl", &[TRANSCRIPT_LINE]);
+        sync_with(&mut store, &projects, &ledger);
+        let d = collect(&store, "all").unwrap();
+
+        assert_eq!(d.overview.sessions, 1);
+        assert_eq!(d.overview.total_tokens, 300);
+        assert_eq!(d.overview.headless_cost_usd, 0.0);
+        assert_eq!(d.models.len(), 1);
+        assert_eq!(d.models[0].model, "claude-opus-4-8");
+        assert_eq!(d.models[0].messages, 1);
+        assert_eq!(d.daily[0].headless_cost_usd, 0.0);
+        // Not headless, so its duration is counted.
+        assert_eq!(d.overview.avg_session_minutes, 5.0);
     }
 }
