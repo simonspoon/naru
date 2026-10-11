@@ -475,6 +475,18 @@ pub fn set_slot(store: &mut Store, arg: &str, slot: &str, colour: &str) -> Resul
     custom_theme(store.update_custom_theme(id, None, &patch)?)
 }
 
+/// Rename and/or recolour a custom theme as one update: the name and every
+/// slot are validated before anything is written.
+pub fn update(
+    store: &mut Store,
+    arg: &str,
+    name: Option<&str>,
+    patch: &CustomThemeSlotsPatch,
+) -> Result<Theme> {
+    let (id, _) = editable(store, arg)?;
+    custom_theme(store.update_custom_theme(id, name, patch)?)
+}
+
 pub fn rename(store: &mut Store, arg: &str, name: &str) -> Result<Theme> {
     let (id, _) = editable(store, arg)?;
     custom_theme(store.update_custom_theme(id, Some(name), &CustomThemeSlotsPatch::default())?)

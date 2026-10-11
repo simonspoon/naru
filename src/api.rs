@@ -3505,6 +3505,14 @@ fn router(state: AppState) -> Router {
             "/api/config/appearance",
             get(get_config_appearance).put(update_config_appearance),
         )
+        // Colour themes (naru task 1843): built-ins plus user-made custom
+        // ones, all through `core::theme`. Every route is `require_agent_access`.
+        .route("/api/themes", get(list_themes).post(create_theme))
+        .route("/api/themes/preview", post(preview_theme))
+        .route(
+            "/api/themes/{id}",
+            get(get_theme).patch(update_theme).delete(delete_theme),
+        )
         // The same file's `guard` section — the cost-guard's thresholds
         // (mesa task 1018). A seventh route for the same reason as the other
         // five.
@@ -11170,6 +11178,136 @@ async fn get_config_appearance(
             message,
         }),
     }
+}
+
+/// Lock the store, tolerating a poisoned mutex like the appearance routes.
+fn theme_store(state: &AppState) -> std::sync::MutexGuard<'_, Store> {
+    match state.store.lock() {
+        Ok(s) => s,
+        Err(e) => e.into_inner(),
+    }
+}
+
+/// `GET /api/themes` — every theme, built-ins first.
+async fn list_themes(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let store = theme_store(&state);
+    Ok(Json(crate::core::theme::list(&store)?).into_response())
+}
+
+/// `GET /api/themes/{id}` — a built-in id or `custom-<n>`.
+async fn get_theme(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let store = theme_store(&state);
+    Ok(Json(crate::core::theme::show(&store, &id)?).into_response())
+}
+
+#[derive(Deserialize)]
+struct ThemeCreate {
+    from: String,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+/// `POST /api/themes {from, name?}` — copy a theme into a new custom one.
+async fn create_theme(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(body): Json<ThemeCreate>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let mut store = theme_store(&state);
+    let theme = crate::core::theme::create_from(&mut store, &body.from, body.name.as_deref())?;
+    Ok((StatusCode::CREATED, Json(theme)).into_response())
+}
+
+/// Any subset of the nine slots.
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct ThemeSlotsPatch {
+    bg: Option<String>,
+    panel: Option<String>,
+    text: Option<String>,
+    muted: Option<String>,
+    accent: Option<String>,
+    accent2: Option<String>,
+    good: Option<String>,
+    warn: Option<String>,
+    bad: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ThemeUpdate {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    slots: Option<ThemeSlotsPatch>,
+}
+
+/// `PATCH /api/themes/{id} {name?, slots?}` — one update; a built-in is 422.
+async fn update_theme(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<ThemeUpdate>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let s = body.slots.unwrap_or_default();
+    let patch = crate::core::CustomThemeSlotsPatch {
+        bg: s.bg,
+        panel: s.panel,
+        text: s.text,
+        muted: s.muted,
+        accent: s.accent,
+        accent2: s.accent2,
+        good: s.good,
+        warn: s.warn,
+        bad: s.bad,
+    };
+    let mut store = theme_store(&state);
+    let theme = crate::core::theme::update(&mut store, &id, body.name.as_deref(), &patch)?;
+    Ok(Json(theme).into_response())
+}
+
+/// `DELETE /api/themes/{id}` — echoes the deleted theme; clears the saved
+/// appearance if it was the active one.
+async fn delete_theme(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let mut store = theme_store(&state);
+    Ok(Json(crate::core::theme::delete(&mut store, &id)?).into_response())
+}
+
+#[derive(Deserialize)]
+struct ThemePreviewBody {
+    slots: crate::core::ThemeSlots,
+}
+
+/// `POST /api/themes/preview {slots}` — scheme, vars and warnings for nine
+/// slots; writes nothing (the editor's live preview).
+async fn preview_theme(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(body): Json<ThemePreviewBody>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    Ok(Json(crate::core::theme::preview(&body.slots)?).into_response())
 }
 
 #[derive(Deserialize)]
@@ -21368,5 +21506,141 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             "the turn's text reaches the daemon"
         );
         assert!(!ran.exists(), "kokoro-rs was run on the naru-audio engine");
+    }
+
+    // --- Themes (naru task 1843) -------------------------------------------
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn theme_routes_round_trip() {
+        let _env = attachments::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let cfg = tempfile::tempdir().unwrap();
+        // SAFETY: ENV_LOCK gives this test exclusive access to the variable.
+        unsafe { std::env::set_var("MESA_CONFIG_FILE", cfg.path().join("config.json")) };
+        let (_dir, state) = test_state();
+        let h = loopback_agent_headers;
+
+        let list = list_themes(State(state.clone()), ConnectInfo(loopback()), h())
+            .await
+            .unwrap();
+        let list = json_body(list).await;
+        assert_eq!(list.as_array().unwrap().len(), 4);
+        assert_eq!(list[0]["builtin"], true);
+
+        let created = create_theme(
+            State(state.clone()),
+            ConnectInfo(loopback()),
+            h(),
+            Json(ThemeCreate {
+                from: "crimson".into(),
+                name: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let created = json_body(created).await;
+        let id = created["id"].as_str().unwrap().to_string();
+        assert!(id.starts_with("custom-"));
+
+        let patched = update_theme(
+            State(state.clone()),
+            ConnectInfo(loopback()),
+            h(),
+            Path(id.clone()),
+            Json(ThemeUpdate {
+                name: None,
+                slots: Some(ThemeSlotsPatch {
+                    accent: Some("#00ff00".into()),
+                    ..Default::default()
+                }),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(json_body(patched).await["vars"]["--cyan-rgb"], "0, 255, 0");
+
+        let err = update_theme(
+            State(state.clone()),
+            ConnectInfo(loopback()),
+            h(),
+            Path("crimson".into()),
+            Json(ThemeUpdate {
+                name: Some("x".into()),
+                slots: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY);
+
+        // Appearance: a custom id is accepted and echoed; an unknown one is 422.
+        let put = |theme: &str| {
+            update_config_appearance(
+                State(state.clone()),
+                ConnectInfo(loopback()),
+                h(),
+                Json(AppearanceUpdate {
+                    theme: Some(Some(theme.to_string())),
+                }),
+            )
+        };
+        let ok = json_body(put(&id).await.unwrap()).await;
+        assert_eq!(ok["custom"]["id"], id.as_str());
+        let err = put("custom-999").await.unwrap_err();
+        assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY);
+
+        let del = delete_theme(
+            State(state.clone()),
+            ConnectInfo(loopback()),
+            h(),
+            Path(id.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(json_body(del).await["id"], id.as_str());
+        let got = get_config_appearance(State(state.clone()), ConnectInfo(loopback()), h())
+            .await
+            .unwrap();
+        assert!(json_body(got).await["custom"].is_null());
+
+        let err = get_theme(State(state), ConnectInfo(loopback()), h(), Path(id))
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn theme_preview_writes_nothing_and_routes_refuse_foreign_host() {
+        let (_dir, state) = test_state();
+        let slots = crate::core::theme::show(&state.store.lock().unwrap(), "dark")
+            .unwrap()
+            .slots;
+        let resp = preview_theme(
+            State(state.clone()),
+            ConnectInfo(loopback()),
+            loopback_agent_headers(),
+            Json(ThemePreviewBody { slots }),
+        )
+        .await
+        .unwrap();
+        assert!(json_body(resp).await["vars"].is_object());
+
+        let bad = hdrs(Some("evil.example:0"), None);
+        let err = list_themes(State(state.clone()), ConnectInfo(loopback()), bad.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, StatusCode::FORBIDDEN);
+        assert!(
+            get_theme(
+                State(state),
+                ConnectInfo(loopback()),
+                bad,
+                Path("dark".into())
+            )
+            .await
+            .is_err()
+        );
     }
 }
