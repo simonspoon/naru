@@ -141,6 +141,29 @@ a different tool yields sessions the sidebar can't list or attach to.
 - Gate: `scripts/agents-check.sh` (stub `claude`, asserts the JSON contract and
   the local_path CLI plumbing). The WS bridge itself is verified by live QA.
 
+## Runner rows and the run pane (naru task 1816)
+
+The panel also lists `naru run` jobs (`docs/runner.md`) beside Claude Code's
+own sessions, as rows of `AgentSession.kind: "runner"` carrying a `runId` (the
+job id).
+
+- **One merged source.** `agents::list_panel` / `list_panel_under` (both panel
+  routes) append `runner::panel_jobs` — every non-terminal run plus terminal
+  ones finished within `RUN_LINGER_SECS` (3600) — and drop the `claude agents`
+  row sharing a run's `session_id` (the runner's wins). `list_all` /
+  `list_under` are untouched, so the watchers, the reaper and the close guard
+  never see a run.
+- A runner row's `id` stays `null`: it is not `claude attach`-able. A terminal
+  run reads `state: "done"` with `status: null`. `run start`/`stop`/`interrupt`
+  clear the agents cache so a change shows on the next poll.
+- **Row.** Tagged `run`; Stop goes through `POST /api/runs/{id}/stop` while
+  `status` is non-null (an idle run keeps its stop; a terminal one has none).
+- **Run pane.** Clicking opens a `run:<jobId>` leaf (`RunPane.tsx`): it polls
+  `GET /api/runs/{id}` about every 1.5s until the run is terminal,
+  `runEvents.ts` renders `events.jsonl` as plain-text entries, and the
+  composer, Interrupt and Stop are gated by `runControls`. No PTY; Auto Tile
+  carries the pane through like a child pane.
+
 ## Global Agent sidebar
 
 A persistent, collapsible right-hand rail (`AgentSidebar`,

@@ -14,9 +14,10 @@ running, and a restarted server reattaches by reading the same files.
 | File | Content |
 | --- | --- |
 | `job.json` | `job_id` (8 hex), `session_id` (v4 uuid), `cwd`, `model`, `name`, `status` (`running` `idle` `finished` `failed` `stopped`), `runner_pid`, `claude_pid`, `started_at` / `updated_at` / `finished_at` (unix seconds), `last_result` / `last_subtype` / `last_is_error`, `resumes`, `idle_timeout_secs`. Written by the runner alone once it is up, atomically |
-| `events.jsonl` | every stdout line of claude, verbatim, plus runner lines `{"type":"naru_runner","event":…,"at":…}` (`claude_started`, `message_delivered`, `stop_requested`, `idle_timeout`, `resumed`, `exited`, `failed`) |
+| `events.jsonl` | every stdout line of claude, verbatim, plus runner lines `{"type":"naru_runner","event":…,"at":…}` (`claude_started`, `message_delivered`, `stop_requested`, `interrupt_requested`, `idle_timeout`, `resumed`, `exited`, `failed`) |
 | `inbox/` | pending user messages, one `<nanos>-<rand>.json` (`{"text":…}`) each, written by temp+rename; the runner moves one to `inbox/delivered/` **before** writing it to claude, so a resume never delivers it twice (a crash in between loses it rather than repeating it) |
 | `stop` | marker: wind down |
+| `interrupt` | marker: cut the turn in flight short (naru task 1828) |
 | `runner.pid`, `runner.log`, `claude.log` | the runner's pid, its stdout/stderr, claude's stderr |
 
 ## Detach
@@ -45,6 +46,23 @@ in flight, `idle` after a `{"type":"result"}` line (recording `last_result`,
 - claude exits on its own — `failed`.
 
 A terminal run refuses further messages (`conflict`).
+
+**Interrupt** (naru task 1828): `runner::interrupt_in` writes the `interrupt`
+marker — a terminal run is `conflict`, an idle one a no-op, a running one gets
+the marker. The runner loop turns the marker into one stream-json line,
+`{"type":"control_request","request_id":…,"request":{"subtype":"interrupt"}}`,
+**only while a turn is in flight**, and logs `interrupt_requested`; a stale
+marker is removed at runner start. Real claude answers a `control_response`
+and then a `result` (subtype `error_during_execution`), so the run returns to
+`idle` with the session intact.
+
+## Telemetry
+
+The runner's `claude -p` writes an ordinary transcript,
+`~/.claude/projects/<slug>/<session>.jsonl` (naru task 1827), so the cc
+dashboard ingests runner sessions with their cost; `claude agents --json --all`
+also lists the `-p` session (kind `interactive`) — the Agents panel drops that
+row in favour of the runner's own (`docs/agents.md`).
 
 ## Reattach and resume
 
@@ -88,12 +106,12 @@ Settings for a run that must write files.
 
 CLI (JSON out, `--quiet` accepted and ignored): `naru run start --model M [--cwd D]
 [--name L] [--idle-timeout S] <prompt>`, `send <job> <message>`, `show <job>
-[--events] [--tail N]`, `list`, `stop <job>`, `reconcile`. Every job view carries
+[--events] [--tail N]`, `list`, `stop <job>`, `interrupt <job>`, `reconcile`. Every job view carries
 derived `runner_alive` and `pending_messages`.
 
 API, every route `require_agent_access` (reads included — a run executes an
 agent): `GET /api/runs`, `POST /api/runs` (body of `start`, 201), `GET
 /api/runs/{id}[?tail=N]` (`{job, events}`, 500 events by default), `POST
-/api/runs/{id}/message` (`{"text"}`, 202), `POST /api/runs/{id}/stop`.
+/api/runs/{id}/message` (`{"text"}`, 202), `POST /api/runs/{id}/stop`, `POST /api/runs/{id}/interrupt` (six routes).
 
 Gate: `scripts/runner-check.sh`.
