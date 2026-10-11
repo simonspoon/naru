@@ -1629,7 +1629,9 @@ Two of those choices are load-bearing:
   accepts it only from the parent and sets just keys matching
   `^--naru-[a-z0-9-]+$` with string values as custom properties on `<html>`
   (`--naru-color-scheme` `light|dark` also sets `color-scheme`). A new theme
-  in `themes.css` needs no board or template edit beyond defining
+  in `themes.css` needs no board or template edit (and a custom theme,
+  `docs/themes.md`, is followed the same way, its repaint triggered by
+  `data-theme-rev`) beyond defining
   `--panel`, `--panel-raised` and the `*-rgb` variables it reads. The frame
   announces `{naru:'board-ready'}` once its listener exists and the page
   answers with the theme, so there is no unthemed first paint (`onLoad` is

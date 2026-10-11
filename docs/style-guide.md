@@ -47,6 +47,12 @@ overrides the same variables and sets `color-scheme`. `theme.ts` picks the id
 
 - **Adding a variable to `:root` means adding it to every theme block**, or
   deciding it is theme-independent. Never put a colour literal in a rule.
+  A themed variable also needs its derivation decided in
+  `src/core/theme.rs::derive` (`docs/themes.md`), since custom themes get only
+  what `derive` emits; `builtins_match_the_stylesheets` fails if a variable in
+  the `light` block is not derived.
+- The built-in key-colour table (`theme.rs::BUILTIN_THEMES`) must match the
+  `:root` / `themes.css` blocks.
 - Script-painted chrome (xterm, canvas export, the workflow dots) reads the
   variables with `theme.ts::cssVar` at use time and repaints on
   `onThemeChange`.

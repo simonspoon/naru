@@ -1579,9 +1579,12 @@ A twelfth, independent section holds the web UI's colour theme (naru task
 { "appearance": { "theme": "light" } }
 ```
 
-- **`theme`**: `"system"` (the built-in, absent/`null`), or one of the shipped
-  theme ids — `"dark"`, `"light"`, `"contrast"` (high-contrast dark), `"crimson"` (wine-black with crimson accents; a legacy `"red"` reads back as `"crimson"`). Anything
-  else is **422 `validation`**, writing nothing. `system` follows the
+- **`theme`**: `"system"` (the built-in, absent/`null`), one of the shipped
+  theme ids — `"dark"`, `"light"`, `"contrast"` (high-contrast dark), `"crimson"` (wine-black with crimson accents; a legacy `"red"` reads back as `"crimson"`) — or
+  `"custom-<n>"`, an existing user-made theme (`docs/themes.md`). Anything
+  else, including a `custom-<n>` that does not exist, is **422 `validation`**,
+  writing nothing. Deleting the active custom theme clears the setting back to
+  `system`. `system` follows the
   operating system's `prefers-color-scheme` live (dark → `dark`, otherwise
   `light`).
 - **Nothing in Rust reads it** beyond the getter and saver: the theme is the
@@ -1600,7 +1603,10 @@ A twelfth, independent section holds the web UI's colour theme (naru task
 ### Routes
 
 - `GET /api/config/appearance` → `ConfigAppearance`: `{theme,
-  theme_default}`, the theme verbatim or `null` beside the built-in `"system"`.
+  theme_default, custom}`, the theme verbatim or `null` beside the built-in
+  `"system"`; `custom` is the active custom theme with its derived `vars` when
+  `theme` is an existing `custom-<n>`, else `null` (a dangling id reads back
+  verbatim and the page treats it as `system`).
 - `PUT /api/config/appearance`, body `{"theme": … | null}` → echoes the getter.
   `null` and blank remove the key; an unknown theme is **422 `validation`**.
   Both verbs carry `require_agent_access`, like every other config route.
