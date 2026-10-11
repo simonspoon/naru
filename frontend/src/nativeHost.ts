@@ -76,9 +76,11 @@ export function ambientControl(
   live: boolean,
   joined: boolean,
   ambient: boolean,
-): { label: 'Ambient' | 'Live'; next: boolean } | null {
+): { label: 'Ambient' | 'Live'; next: boolean; icon: 'ambient' | 'live' } | null {
   if (!hostPresent || !live || !joined) return null
-  return ambient ? { label: 'Live', next: false } : { label: 'Ambient', next: true }
+  return ambient
+    ? { label: 'Live', next: false, icon: 'live' }
+    : { label: 'Ambient', next: true, icon: 'ambient' }
 }
 
 /** Whether a host push means the person is audibly talking: the host says so,

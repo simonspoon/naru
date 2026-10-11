@@ -344,6 +344,36 @@ function BoardMark() {
   )
 }
 
+function AmbientMark() {
+  return (
+    <svg
+      className="live-icon-mark"
+      viewBox="0 0 24 24"
+      width="15"
+      height="15"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path d="M7 9a5 5 0 1 1 9 3c-1 1.5-2 2-2 4a3 3 0 0 1-5.5 1.5M12 9a1.5 1.5 0 0 1 2 1.5" />
+    </svg>
+  )
+}
+
+function LiveWaveMark() {
+  return (
+    <svg
+      className="live-icon-mark"
+      viewBox="0 0 24 24"
+      width="15"
+      height="15"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path d="M4 10v4M8 6v12M12 3v18M16 7v10M20 10v4" />
+    </svg>
+  )
+}
+
 /**
  * The head's presses, as glyphs (mesa task 1069; the voice switch, 1327).
  *
@@ -4586,7 +4616,7 @@ export function LiveHub({
               tabIndex={open ? undefined : -1}
               onClick={() => pressAmbient()}
             >
-              {ambientCtl.label}
+              {ambientCtl.icon === 'ambient' ? <AmbientMark /> : <LiveWaveMark />}
             </button>
           )}
           {pauseButton && !ambient && (

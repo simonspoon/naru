@@ -98,7 +98,15 @@ describe('nativeHost', () => {
     expect(ambientControl(false, true, true, false)).toBeNull()
     expect(ambientControl(true, false, true, false)).toBeNull()
     expect(ambientControl(true, true, false, false)).toBeNull()
-    expect(ambientControl(true, true, true, false)).toEqual({ label: 'Ambient', next: true })
-    expect(ambientControl(true, true, true, true)).toEqual({ label: 'Live', next: false })
+    expect(ambientControl(true, true, true, false)).toEqual({
+      label: 'Ambient',
+      next: true,
+      icon: 'ambient',
+    })
+    expect(ambientControl(true, true, true, true)).toEqual({
+      label: 'Live',
+      next: false,
+      icon: 'live',
+    })
   })
 })
