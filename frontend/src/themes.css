@@ -89,7 +89,7 @@
    text does not read as a link. Text clears 4.5:1 and muted text 4.5:1 on
    --bg, --panel and --panel-raised. Prism keeps the dark token palette
    (`prismStyleFor`). */
-:root[data-theme='red'] {
+:root[data-theme='crimson'] {
   color-scheme: dark;
   --bg-rgb: 15, 6, 8;
   --edge-rgb: 150, 52, 64;

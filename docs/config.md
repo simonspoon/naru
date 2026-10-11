@@ -1580,7 +1580,7 @@ A twelfth, independent section holds the web UI's colour theme (naru task
 ```
 
 - **`theme`**: `"system"` (the built-in, absent/`null`), or one of the shipped
-  theme ids — `"dark"`, `"light"`, `"contrast"` (high-contrast dark), `"red"` (wine-black with crimson accents). Anything
+  theme ids — `"dark"`, `"light"`, `"contrast"` (high-contrast dark), `"crimson"` (wine-black with crimson accents; a legacy `"red"` reads back as `"crimson"`). Anything
   else is **422 `validation`**, writing nothing. `system` follows the
   operating system's `prefers-color-scheme` live (dark → `dark`, otherwise
   `light`).

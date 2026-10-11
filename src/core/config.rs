@@ -3247,7 +3247,7 @@ pub const THEME: &str = "theme";
 /// The settings the `theme` key accepts: `system` (follow the OS) plus one id
 /// per theme block in `frontend/src/themes.css` — keep in step with
 /// `frontend/src/theme.ts`.
-pub const APPEARANCE_THEMES: &[&str] = &["system", "dark", "light", "contrast", "red"];
+pub const APPEARANCE_THEMES: &[&str] = &["system", "dark", "light", "contrast", "crimson"];
 
 /// The theme setting when the config says nothing.
 pub const DEFAULT_THEME: &str = "system";
@@ -3285,10 +3285,12 @@ fn appearance_in(path: &Path) -> Result<ConfigAppearance, String> {
             .appearance
     };
     Ok(ConfigAppearance {
+        // The pre-rename id `red` reads back as `crimson` (file not rewritten).
         theme: section
             .theme
             .map(|v| v.trim().to_string())
-            .filter(|v| !v.is_empty()),
+            .filter(|v| !v.is_empty())
+            .map(|v| if v == "red" { "crimson".to_string() } else { v }),
         theme_default: DEFAULT_THEME.to_string(),
     })
 }
@@ -7632,6 +7634,18 @@ mod tests {
         let err = save_ambient_in(&path, &["xyz".to_string()]).unwrap_err();
         assert!(matches!(err, SaveError::Unavailable(_)), "{err:?}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "not json");
+    }
+
+    #[test]
+    fn appearance_reads_legacy_red_as_crimson() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = r#"{"appearance": {"theme": "red"}}"#;
+        let path = write_config(dir.path(), body);
+        assert_eq!(
+            appearance_in(&path).unwrap().theme.as_deref(),
+            Some("crimson")
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
     }
 
     #[test]

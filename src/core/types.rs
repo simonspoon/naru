@@ -751,7 +751,7 @@ pub struct AudioTestResult {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../frontend/src/types/")]
 pub struct ConfigAppearance {
-    /// `"system"`, a theme id (`dark`, `light`, `contrast`, `red`), or `null`.
+    /// `"system"`, a theme id (`dark`, `light`, `contrast`, `crimson`), or `null`.
     pub theme: Option<String>,
     /// The built-in setting (`"system"`).
     pub theme_default: String,

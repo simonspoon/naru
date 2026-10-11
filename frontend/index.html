@@ -12,7 +12,8 @@
       ;(function () {
         try {
           var s = localStorage.getItem('naru-theme')
-          var known = { dark: 1, light: 1, contrast: 1, red: 1 }
+          if (s === 'red') s = 'crimson'
+          var known = { dark: 1, light: 1, contrast: 1, crimson: 1 }
           var t = known[s] ? s : window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
           document.documentElement.dataset.theme = t
         } catch (e) {}

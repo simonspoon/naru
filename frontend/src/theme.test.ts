@@ -6,6 +6,7 @@ import {
   THEME_SETTINGS,
   THEME_STORAGE_KEY,
   applyTheme,
+  migrateLegacyTheme,
   parseSetting,
   resolveTheme,
   storedSetting,
@@ -35,7 +36,7 @@ describe('theme list', () => {
   it('offers system plus every theme, ids unique, with four swatches', () => {
     expect(THEME_SETTINGS[0]).toBe('system')
     expect(new Set(THEME_SETTINGS).size).toBe(THEME_SETTINGS.length)
-    expect(THEME_SETTINGS).toEqual(['system', 'dark', 'light', 'contrast', 'red'])
+    expect(THEME_SETTINGS).toEqual(['system', 'dark', 'light', 'contrast', 'crimson'])
     for (const t of THEMES) {
       expect(t.label).not.toBe('')
       expect(t.swatch).toHaveLength(4)
@@ -45,6 +46,13 @@ describe('theme list', () => {
   it('parseSetting keeps known values only', () => {
     expect(parseSetting('light')).toBe('light')
     expect(parseSetting('LIGHT')).toBe('system')
+  })
+
+  it('maps the legacy red id to crimson', () => {
+    expect(migrateLegacyTheme('red')).toBe('crimson')
+    expect(migrateLegacyTheme('dark')).toBe('dark')
+    expect(parseSetting('red')).toBe('crimson')
+    expect(resolveTheme('red', false)).toBe('crimson')
   })
 })
 

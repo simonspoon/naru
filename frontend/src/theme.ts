@@ -6,7 +6,7 @@
 // The ids must match `config::APPEARANCE_THEMES` in Rust, which validates the
 // saved setting.
 
-export type ThemeId = 'dark' | 'light' | 'contrast' | 'red'
+export type ThemeId = 'dark' | 'light' | 'contrast' | 'crimson'
 export type ThemeSetting = 'system' | ThemeId
 
 export interface ThemeInfo {
@@ -20,7 +20,7 @@ export const THEMES: readonly ThemeInfo[] = [
   { id: 'dark', label: 'Dark', swatch: ['#060a10', '#0b1119', '#b8dde8', '#00e5ff'] },
   { id: 'light', label: 'Light', swatch: ['#f4f7fa', '#ffffff', '#162634', '#00668a'] },
   { id: 'contrast', label: 'High contrast', swatch: ['#000000', '#101820', '#ffffff', '#40f0ff'] },
-  { id: 'red', label: 'Red', swatch: ['#0f0608', '#190c0f', '#f2d6d8', '#ff5466'] },
+  { id: 'crimson', label: 'Crimson', swatch: ['#0f0608', '#190c0f', '#f2d6d8', '#ff5466'] },
 ]
 
 export const THEME_SETTINGS: readonly ThemeSetting[] = ['system', ...THEMES.map((t) => t.id)]
@@ -29,10 +29,17 @@ export const THEME_SETTINGS: readonly ThemeSetting[] = ['system', ...THEMES.map(
  *  render so a reload does not flash the wrong theme. */
 export const THEME_STORAGE_KEY = 'naru-theme'
 
+/** The pre-rename id `red` is the theme now called `crimson`; every parsed
+ *  stored or configured value goes through this first. */
+export function migrateLegacyTheme(value: unknown): unknown {
+  return value === 'red' ? 'crimson' : value
+}
+
 /** A stored or configured value as a setting; anything unknown is `system`. */
 export function parseSetting(value: unknown): ThemeSetting {
-  return typeof value === 'string' && (THEME_SETTINGS as readonly string[]).includes(value)
-    ? (value as ThemeSetting)
+  const v = migrateLegacyTheme(value)
+  return typeof v === 'string' && (THEME_SETTINGS as readonly string[]).includes(v)
+    ? (v as ThemeSetting)
     : 'system'
 }
 
