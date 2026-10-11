@@ -8,6 +8,7 @@
 // cutting (`scriptRun.test.ts`).
 import { unregisterHookQuery } from './libraryHooks'
 import { scorecardQuery } from './ccScorecard'
+import type { RunJob, RunShown } from './runEvents'
 import { finishNdjson, parseEvent, splitNdjson } from './scriptRun'
 
 import type { ImportResolution } from './libraryImport'
@@ -752,6 +753,23 @@ export function stopAgent(id: string): Promise<{ id: string }> {
 
 export function stopRun(id: string): Promise<unknown> {
   return request(`/api/runs/${encodeURIComponent(id)}/stop`, jsonInit('POST', {}))
+}
+
+/** One run and its last `tail` events (the server defaults to 500). The body
+ * is the runner's untyped view: `{job, events}` — see `runEvents.ts`. */
+export function getRun(id: string, tail?: number): Promise<RunShown> {
+  const q = tail === undefined ? '' : `?tail=${tail}`
+  return request(`/api/runs/${encodeURIComponent(id)}${q}`)
+}
+
+/** Queues a message for the run's claude (202); answers the job view. */
+export function sendRunMessage(id: string, text: string): Promise<RunJob> {
+  return request(`/api/runs/${encodeURIComponent(id)}/message`, jsonInit('POST', { text }))
+}
+
+/** Interrupts the turn in flight without ending the run; answers the job view. */
+export function interruptRun(id: string): Promise<RunJob> {
+  return request(`/api/runs/${encodeURIComponent(id)}/interrupt`, jsonInit('POST', {}))
 }
 
 // ---- workflows (mesa task 1607) ----
