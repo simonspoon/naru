@@ -7,7 +7,7 @@ persona and the slash command can all change without rebuilding Naru:
 
 | Key | Used by | Built-in default |
 | --- | --- | --- |
-| `todo-watcher` | `serve --watch-todo` dispatch (`docs/todo-watcher.md`) | `claude --bg --agent supervisor --name {name} -- "/execute-mesa-task {id}"` |
+| `todo-watcher` | `serve --watch-todo` dispatch (`docs/todo-watcher.md`) | `claude --bg --agent supervisor --name {name} -- "/execute-naru-task {id}"` |
 | `inbox-watcher` | `serve --watch-inbox` triage (`docs/inbox-watcher.md`): up to two synchronous, tool-less `claude -p --json-schema` calls (haiku decides, sonnet writes the task) per item, run in a detached `naru __job inbox-triage` whose verdict Naru validates and applies itself (naru task 1691). Offers `{id}`, `{name}`, `{prompt}`, `{schema}` and `{model}` | `claude -p --model {model} --name {name} --tools "" --strict-mcp-config --output-format json --json-schema {schema} -- {prompt}` |
 | `agent-spawn` | `POST /api/projects/{id}/agents`, the Agents sidebar's **add agent** (`docs/agents.md`) | `claude --bg --model opus --agent supervisor -- {prompt}` |
 | `live-agent` | `mesa live start`, `POST /api/live` — the session that holds a spoken conversation (`docs/live.md`) | `claude --bg --agent naru-live --name {name} -- {prompt}` |
@@ -27,7 +27,7 @@ from the vocabulary (see *Retired placeholders* below).
 ```json
 {
   "commands": {
-    "todo-watcher":   "claude --bg --agent supervisor --name {name} -- \"/execute-mesa-task {id}\"",
+    "todo-watcher":   "claude --bg --agent supervisor --name {name} -- \"/execute-naru-task {id}\"",
     "inbox-watcher":  "claude -p --model {model} --name {name} --tools \"\" --strict-mcp-config --output-format json --json-schema {schema} -- {prompt}",
     "agent-spawn":    "claude --bg -- {prompt}",
     "live-agent":     "claude --bg --agent naru-live --name {name} -- {prompt}",
@@ -192,7 +192,7 @@ redirection or a conditional binary all simply work, on one line or several:
 ```json
 {
   "commands": {
-    "todo-watcher": "set -euo pipefail\ncd \"$HOME/src/checkouts/{id}\" 2>/dev/null || cd \"$HOME/src\"\nexport CLAUDE_PROJECT=mesa\nexec claude --bg --agent supervisor --name {name} -- \"/execute-mesa-task {id}\""
+    "todo-watcher": "set -euo pipefail\ncd \"$HOME/src/checkouts/{id}\" 2>/dev/null || cd \"$HOME/src\"\nexport CLAUDE_PROJECT=mesa\nexec claude --bg --agent supervisor --name {name} -- \"/execute-naru-task {id}\""
   }
 }
 ```
@@ -203,7 +203,7 @@ More legibly, that value is:
 set -euo pipefail
 cd "$HOME/src/checkouts/{id}" 2>/dev/null || cd "$HOME/src"
 export CLAUDE_PROJECT=mesa
-exec claude --bg --agent supervisor --name {name} -- "/execute-mesa-task {id}"
+exec claude --bg --agent supervisor --name {name} -- "/execute-naru-task {id}"
 ```
 
 This *is* a shell, unlike the argv mode it replaces, and the untrusted-input

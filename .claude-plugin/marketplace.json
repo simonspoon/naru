@@ -1,6 +1,6 @@
 {
-  "name": "mesa",
-  "description": "Claude Code plugins hosted in the mesa repo.",
+  "name": "naru",
+  "description": "Claude Code plugins hosted in the naru repo.",
   "owner": {
     "name": "Simon Spoon",
     "email": "simon@sjspoon.com"

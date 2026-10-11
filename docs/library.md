@@ -665,18 +665,18 @@ is a Claude Code **Stop** hook for *task agents* — sessions the todo-watcher
 ordinary registration flow, user scope:
 
 ```
-mesa library hook enable task-stop-guard --event Stop
+naru library hook enable task-stop-guard --event Stop
 ```
 
 which seeds `~/.claude/hooks/task-stop-guard.sh` and names it under `Stop`
-in `~/.claude/settings.json`. It needs only `bash`, `jq` and `mesa` on PATH
+in `~/.claude/settings.json`. It needs only `bash`, `jq` and `naru` on PATH (`mesa` is the fallback)
 (`MESA_DB` is honoured, since Naru reads it itself) and **never wedges a
 session**: a missing tool, an unreadable transcript, an unknown task or any
 Naru error is an allow — exit 0, nothing printed — and `stop_hook_active`
 is the loop guard.
 
 It reads the Stop payload's `transcript_path` once. The task id is the
-**first** user message — `/execute-mesa-task <id>` (`DEFAULT_TASK_EXECUTE`),
+**first** user message — `/execute-naru-task <id>` (`DEFAULT_TASK_EXECUTE`; `/execute-mesa-task` is still accepted as an older alias),
 the same slash command recorded as `<command-name>` + `<command-args>`, or
 a one-line customised prompt ending in `task: <id>` — that loose form only
 in a session launched with `--agent`, which writes an `agent-setting`
@@ -690,13 +690,13 @@ minus every close — a `<task-notification>` for that id whether it arrived
 as a user turn or was absorbed mid-turn into a `queue-operation` record, a
 `KillShell`/`TaskStop` naming it, or a subagent hand-back — counted
 conservatively. A question is any inbox item with that `task_id` filed at
-or after the transcript's first timestamp (`mesa inbox list`, archived
-included). Then, off `mesa task show <id>`:
+or after the transcript's first timestamp (`naru inbox list`, archived
+included). Then, off `naru task show <id>`:
 
 | status | pending work | question filed | verdict |
 | --- | --- | --- | --- |
 | `in_progress` | yes | — | allow — the harness will wake the agent |
-| `in_progress` | no | no | **block**: keep going, close it (`mesa task update <id> --status done\|cancelled`), park it in `todo`/`backlog` with a result, or file the question (`mesa inbox add --task <id> --kind change-request …`) |
+| `in_progress` | no | no | **block**: keep going, close it (`naru task update <id> --status done\|cancelled`), park it in `todo`/`backlog` with a result, or file the question (`naru inbox add --task <id> --kind change-request …`) |
 | `in_progress` | no | yes | allow |
 | anything else | yes | — | **block**, listing the shell/agent ids to stop |
 | anything else | no | — | allow |

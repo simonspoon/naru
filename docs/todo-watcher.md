@@ -36,7 +36,7 @@ because someone ran `mesa serve`.
   as its `{id}`/`{name}`. **The command line itself — including which slash
   command runs — is user-configurable** in `~/.mesa/config.json`
   (`docs/config.md`); its default is
-  `claude --bg --agent supervisor --name {name} -- "/execute-mesa-task {id}"`,
+  `claude --bg --agent supervisor --name {name} -- "/execute-naru-task {id}"`,
   so by default the name reaches `claude --bg` as `-n/--name` and the
   auto-dispatched session shows up identifiably (prompt box, `/resume` picker,
   terminal title, Agents sidebar) instead of generically, running as the
@@ -47,7 +47,7 @@ because someone ran `mesa serve`.
   the name in the template (`docs/config.md`). Deriving the
   name is still Naru's job, not the template's: a template chooses whether to
   pass it. Claiming the task before the spawn closes
-  the race window between dispatch and the agent's own `/execute-mesa-task`
+  the race window between dispatch and the agent's own `/execute-naru-task`
   pickup step, so a later tick can't double-dispatch the same task while the
   agent is still starting up. A project with no `local_path`, or a stale one
   (the folder no longer exists), is skipped, matching the agents endpoint.

@@ -8,7 +8,7 @@ go to an AST index instead of grep.
 for the tool it offers, and `helios` is promoted through the bash tools table
 in the global CLAUDE.md instead. Load it for one session when you want it:
 
-    claude --plugin-dir <mesa>/plugins
+    claude --plugin-dir <naru>/plugins
 
 | operation | helios | arguments |
 | --- | --- | --- |
@@ -28,7 +28,7 @@ mistaken call says so instead of silently answering a different question.
 
 ## Running it
 
-    claude --plugin-dir <mesa>/plugins/codesearch
+    claude --plugin-dir <naru>/plugins/codesearch
 
 Requires `helios` on PATH and an index in the repo (`helios init` once).
 
@@ -49,9 +49,9 @@ module; `claude plugin validate .` shows what the engine reads from it.
 
 ## Installed copy
 
-`claude plugin marketplace add <mesa>` + `claude plugin install
-codesearch@mesa` makes it always-on at user scope. Install
-copies the tree into `~/.claude/plugins/cache/mesa/codesearch/<version>`,
+`claude plugin marketplace add <naru>` + `claude plugin install
+codesearch@naru` makes it always-on at user scope. Install
+copies the tree into `~/.claude/plugins/cache/naru/codesearch/<version>`,
 keyed by that version, so **edits here do not reach an installed session**: bump
 `version` in the manifest and re-run `claude plugin update codesearch`,
 or develop against `--plugin-dir`, which reads this folder live and reloads on
@@ -68,4 +68,4 @@ in every session, which is why no such symlink is in place; prefer
 plugin of the same name takes precedence and keeps the symlinked copy
 unloaded, so uninstall it first.
 
-    ln -s <mesa>/plugins/codesearch ~/.claude/skills/codesearch
+    ln -s <naru>/plugins/codesearch ~/.claude/skills/codesearch

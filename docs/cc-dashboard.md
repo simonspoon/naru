@@ -1209,7 +1209,7 @@ model", from the db alone (mesa task 1514). No migration: it reads
   `preview` is capped at 200 chars and slash commands are stored unwrapped as
   `/name args`) and `parse_task_prompt` recognises exactly: `Execte this task:
   N` (the configured template's typo) and `Execute this task: N`;
-  `[/][plugin:]execute-mesa-task N`; `[/]execute-todo N`; and
+  `[/][plugin:]execute-naru-task N` (or the older alias `execute-mesa-task N`); `[/]execute-todo N`; and
   `[/]execute-todo ##Task Info … {"id":N,` (a JSON task blob, the first
   `"id":N`). Anything else, an id in later prose or in a later prompt is no
   link, and the id must exist in `tasks` (a deleted task is no link). Derived
