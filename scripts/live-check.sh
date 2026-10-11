@@ -2758,9 +2758,12 @@ check_board_render() { # check_board_render <base> <label>
   [ "$(header_of content-security-policy)" = "$CSP_EXPECTED" ] ||
     fail "$label: the html CSP must be the artifact policy verbatim, got $(header_of content-security-policy)"
   [ "$(header_of x-content-type-options)" = "nosniff" ] || fail "$label: html nosniff"
-  # An html board is its stored bytes followed by the key relay (mesa task
-  # 1599) and nothing else: the prefix is byte-identical, the tail is the one
-  # inline script posting keydowns to the parent.
+  # An html board is its stored bytes followed by the zero-specificity theme
+  # defaults style, the key relay (mesa task 1599) and the theme relay (naru
+  # task 1792) and nothing else: the prefix is byte-identical, the tail holds
+  # exactly two inline scripts, the key relay posting keydowns to the parent
+  # and then the theme relay applying --naru-* variables and announcing
+  # board-ready.
   local html_len
   html_len=$(wc -c <"$TMP/mockup.html" | tr -d ' ')
   # head | cmp, not `cmp -n`: macOS's cmp -n reports EOF on a file of exactly
@@ -2769,10 +2772,11 @@ check_board_render() { # check_board_render <base> <label>
     fail "$label: the html body must start with the stored bytes"
   RELAY_TAIL=$(tail -c +"$((html_len + 1))" "$TMP/bbody")
   case "$RELAY_TAIL" in
-  *"<script>"*"naru:'board-key'"*"</script>") ;;
-  *) fail "$label: the html body must end with exactly the key relay script, got: $RELAY_TAIL" ;;
+  *"<script>"*"naru:'board-key'"*"</script>"*"<script>"*"naru!=='board-theme'"*"board-ready"*"</script>") ;;
+  *) fail "$label: the html body must end with the key relay then the theme relay script, got: $RELAY_TAIL" ;;
   esac
-  [ "$(grep -c '<script>' <<<"$RELAY_TAIL")" = "1" ] || fail "$label: exactly one relay script"
+  [ "$(grep -o '<script>' <<<"$RELAY_TAIL" | wc -l | tr -d ' ')" = "2" ] ||
+    fail "$label: exactly two relay scripts (key, theme)"
 
   board_headers "$base" "$R_SVG"
   [ "$(header_of content-type)" = "image/svg+xml; charset=utf-8" ] ||
@@ -2794,7 +2798,7 @@ check_board_render() { # check_board_render <base> <label>
 }
 
 check_board_render "$BASE" "render (default mode)"
-ok "GET /api/live/boards/{id}/render: markdown/html/diagram/image each with their own type, nosniff and inline, the artifact CSP on the two document kinds, byte-identical bodies (the html board's stored bytes followed by the key relay script, mesa task 1599), 404 for an unknown board"
+ok "GET /api/live/boards/{id}/render: markdown/html/diagram/image each with their own type, nosniff and inline, the artifact CSP on the two document kinds, byte-identical bodies (the html board's stored bytes followed by the key relay script, mesa task 1599, and the theme relay script, naru task 1792), 404 for an unknown board"
 
 # There is no route that writes a caller's board content: boards are pushed
 # by the CLI and read by the browser. The one POST on the collection starts a
