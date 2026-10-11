@@ -102,9 +102,9 @@ describe('agentTint', () => {
 })
 
 describe('agent row kinds', () => {
-  const bg = { id: 'ab12', kind: 'background', runId: null, state: 'working' }
-  const inter = { id: null, kind: 'interactive', runId: null, state: 'working' }
-  const run = { id: null, kind: 'runner', runId: 'r1', state: 'working' }
+  const bg = { id: 'ab12', kind: 'background', runId: null, status: 'busy' }
+  const inter = { id: null, kind: 'interactive', runId: null, status: 'busy' }
+  const run = { id: null, kind: 'runner', runId: 'r1', status: 'busy' }
 
   it('classifies the three kinds', () => {
     expect(agentKindOf(bg)).toBe('background')
@@ -116,6 +116,7 @@ describe('agent row kinds', () => {
   it('background rows attach and stop through claude', () => {
     expect(agentRowActions(bg)).toEqual({
       attachable: true,
+      openable: true,
       stop: { route: 'agent', id: 'ab12' },
       note: null,
     })
@@ -124,6 +125,7 @@ describe('agent row kinds', () => {
   it('interactive rows get only the external-terminal note', () => {
     expect(agentRowActions(inter)).toEqual({
       attachable: false,
+      openable: false,
       stop: null,
       note: 'external terminal — not attachable',
     })
@@ -132,15 +134,15 @@ describe('agent row kinds', () => {
   it('runner rows stop through the run route, never attach, no note', () => {
     expect(agentRowActions(run)).toEqual({
       attachable: false,
+      openable: true,
       stop: { route: 'run', id: 'r1' },
       note: null,
     })
   })
 
-  it('a runner row in a terminal state has no stop', () => {
-    for (const state of ['done', 'failed', 'stopped']) {
-      expect(agentRowActions({ ...run, state }).stop).toBeNull()
-    }
+  it('an idle live run keeps its stop; a terminal run (no status) has none', () => {
+    expect(agentRowActions({ ...run, status: 'idle' }).stop).toEqual({ route: 'run', id: 'r1' })
+    expect(agentRowActions({ ...run, status: null }).stop).toBeNull()
   })
 })
 

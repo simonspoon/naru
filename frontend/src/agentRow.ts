@@ -93,34 +93,35 @@ export function agentKindOf(a: Pick<AgentSession, 'id' | 'kind' | 'runId'>): Age
 export interface AgentRowActions {
   /** Only a background session has a pty to attach to. */
   attachable: boolean
+  /** Whether clicking the row opens a pane (a claude pty or a run view). */
+  openable: boolean
   /** What the stop button calls; `null` hides it. */
   stop: { route: 'agent' | 'run'; id: string } | null
   /** The muted line under the row, `null` for none. */
   note: string | null
 }
 
-const RUN_TERMINAL = ['done', 'failed', 'stopped']
-
 /**
  * What a row may do. A runner row is never attachable (it is not a claude
  * job) and stops through `/api/runs/{id}/stop`, but only while its run is
- * not already over; the "external terminal" note belongs to interactive
+ * not already over (`status` is null once it is); the "external terminal" note belongs to interactive
  * rows alone.
  */
 export function agentRowActions(
-  a: Pick<AgentSession, 'id' | 'kind' | 'runId' | 'state'>,
+  a: Pick<AgentSession, 'id' | 'kind' | 'runId' | 'status'>,
 ): AgentRowActions {
   switch (agentKindOf(a)) {
     case 'background':
-      return { attachable: true, stop: { route: 'agent', id: a.id as string }, note: null }
+      return { attachable: true, openable: true, stop: { route: 'agent', id: a.id as string }, note: null }
     case 'runner':
       return {
         attachable: false,
-        stop: RUN_TERMINAL.includes(a.state ?? '') ? null : { route: 'run', id: a.runId as string },
+        openable: true,
+        stop: a.status !== null ? { route: 'run', id: a.runId as string } : null,
         note: null,
       }
     case 'interactive':
-      return { attachable: false, stop: null, note: 'external terminal — not attachable' }
+      return { attachable: false, openable: false, stop: null, note: 'external terminal — not attachable' }
   }
 }
 

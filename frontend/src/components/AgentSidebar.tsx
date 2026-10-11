@@ -487,18 +487,7 @@ function AgentPane({
   )
 }
 
-/**
- * One open child's pane (mesa task 1278): `PaneShell` over `ChildPane`.
- *
- * Everything it shows is read out of the **parent's** row on the sidebar's
- * own session poll — a child is not a session and has no list entry of its
- * own — so a parent that has dropped out of the list leaves the pane naming
- * what it was opened on and saying it can no longer read it, rather than
- * disappearing underneath the reader.
- *
- * No `PaneViewToggle`: there is no terminal to switch to. A subagent runs
- * in-process with no PTY, and a shell is one Bash call.
- */
+/** One open run's pane: `PaneShell` over `RunPane` (naru task 1832). */
 function RunPaneTile({
   paneId,
   agents,
@@ -569,6 +558,18 @@ function SoloRunPane({
   )
 }
 
+/**
+ * One open child's pane (mesa task 1278): `PaneShell` over `ChildPane`.
+ *
+ * Everything it shows is read out of the **parent's** row on the sidebar's
+ * own session poll — a child is not a session and has no list entry of its
+ * own — so a parent that has dropped out of the list leaves the pane naming
+ * what it was opened on and saying it can no longer read it, rather than
+ * disappearing underneath the reader.
+ *
+ * No `PaneViewToggle`: there is no terminal to switch to. A subagent runs
+ * in-process with no PTY, and a shell is one Bash call.
+ */
 function ChildPaneTile({
   paneId,
   agents,
@@ -878,13 +879,12 @@ function AgentListContent({
           (enteringNow(seen, a.sessionId) ? 'agent-card-enter ' : '') +
           (finished ? 'agent-card-finished ' : '') +
           (leavingNow ? 'agent-card-leaving ' : '') +
-          (actions.attachable ? 'attachable' : '') +
-          (agentKindOf(a) === 'runner' ? ' attachable' : '') +
+          (actions.openable ? 'attachable' : '') +
           (rowPaneId(a) !== null && openIds.includes(rowPaneId(a) as string) ? ' selected' : '')
         }
         onClick={() => {
           const paneId = rowPaneId(a)
-          if (paneId !== null && (actions.attachable || agentKindOf(a) === 'runner')) onTogglePane(paneId)
+          if (paneId !== null && actions.openable) onTogglePane(paneId)
         }}
       >
         <div className="agent-row-title">

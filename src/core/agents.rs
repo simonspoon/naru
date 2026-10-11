@@ -115,8 +115,8 @@ fn runner_row(job: &runner::Job, alive: bool) -> AgentSession {
         Running => (Some("busy"), "working"),
         Idle => (Some("idle"), "done"),
         Finished => (None, "done"),
-        Failed => (None, "failed"),
-        Stopped => (None, "stopped"),
+        Failed => (None, "done"),
+        Stopped => (None, "done"),
     };
     AgentSession {
         pid: if alive { job.claude_pid } else { None },
@@ -1443,8 +1443,8 @@ mod tests {
             (Idle, true, Some("idle"), "done", Some(42)),
             (Running, false, Some("busy"), "working", None),
             (Finished, false, None, "done", None),
-            (Failed, false, None, "failed", None),
-            (Stopped, false, None, "stopped", None),
+            (Failed, false, None, "done", None),
+            (Stopped, false, None, "done", None),
         ] {
             let r = runner_row(&test_job(st), alive);
             assert_eq!(r.kind, "runner");
