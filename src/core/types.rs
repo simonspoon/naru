@@ -130,6 +130,20 @@ pub struct Project {
     pub previous_paths: Vec<String>,
 }
 
+/// One recent tool call in an [`AgentSession`]'s trail (naru task 1879).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+#[serde(rename_all = "camelCase")]
+pub struct AgentStep {
+    /// The tool's description (or `TodoWrite` active form), else a `Bash`
+    /// call's first command line, else the tool name; capped at 120 chars.
+    pub text: String,
+    /// When the call was written, `YYYY-MM-DD HH:MM:SS` UTC; `null` if the
+    /// line had no timestamp.
+    #[serde(default)]
+    pub at: Option<String>,
+}
+
 /// One live Claude Code session as reported by `claude agents --json`.
 /// Parsed from that external CLI output and re-served to the web UI verbatim,
 /// so field names stay camelCase end to end (serde renames both directions).
@@ -222,6 +236,17 @@ pub struct AgentSession {
     /// Bounded by `cc::sanitize_capped`.
     #[serde(default)]
     pub activity: Option<String>,
+    /// **naru-derived** (task 1879): when the step that produced `activity`
+    /// began — the transcript timestamp of that `TodoWrite` or tool call, in
+    /// the stored `YYYY-MM-DD HH:MM:SS` UTC text. `null` when `activity` is
+    /// `null` or the line carried no timestamp.
+    #[serde(default)]
+    pub activity_since: Option<String>,
+    /// **naru-derived** (task 1879): the last up to five main-thread tool
+    /// calls in the transcript window, oldest first. Always present, empty
+    /// when there are none. Every string is bounded.
+    #[serde(default)]
+    pub recent_steps: Vec<AgentStep>,
     /// **mesa-derived** (task 1484): the id of the task whose `owner` is this
     /// session's id, when one claimed its work that way. `null` is the common
     /// case — the page then shows the workspace instead.

@@ -173,6 +173,9 @@ struct ToolDetail {
     command: Option<String>,
     /// A `TodoWrite`'s in-progress entry (`activeForm`, else `content`).
     active_form: Option<String>,
+    /// A `Bash` call's first non-empty command line, sanitized — what
+    /// `command` loses by collapsing newlines.
+    command_head: Option<String>,
 }
 
 /// A `Bash` call dispatched and not yet answered by a `tool_result` — the
@@ -478,6 +481,15 @@ impl RawMessage {
                         .and_then(|v| v.as_str())
                         .and_then(sanitize_capped)
                 };
+                let command_head = (name == "Bash")
+                    .then(|| {
+                        input
+                            .and_then(|o| o.get("command"))
+                            .and_then(|v| v.as_str())
+                            .and_then(|c| c.lines().find(|l| !l.trim().is_empty()))
+                            .and_then(sanitize_capped)
+                    })
+                    .flatten();
                 let (description, command, active_form) = match name.as_str() {
                     "Bash" => (text("description"), text("command"), None),
                     // A delegated job: its description, else the start of the
@@ -510,6 +522,7 @@ impl RawMessage {
                     description,
                     command,
                     active_form,
+                    command_head,
                 })
             })
             .collect()
@@ -4697,6 +4710,45 @@ pub struct SessionPulse {
     pub tool_doing: Option<String>,
     /// `Bash` calls dispatched and not yet answered, oldest first.
     pub pending_bash: Vec<PendingBash>,
+    /// When the line that set `todo_active` was written, in Naru's stored
+    /// timestamp text (`YYYY-MM-DD HH:MM:SS` UTC). `None` without a timestamp.
+    pub todo_active_at: Option<String>,
+    /// Likewise for the line that set `tool_doing`.
+    pub tool_doing_at: Option<String>,
+    /// The newest [`PULSE_STEPS`] main-thread tool calls, oldest first.
+    pub recent_steps: Vec<PulseStep>,
+}
+
+/// How many recent steps a [`SessionPulse`] keeps.
+const PULSE_STEPS: usize = 5;
+/// Character cap on one recent step's text (tighter than
+/// [`TARGET_MAX_CHARS`]: it is a trail, not a preview).
+const PULSE_STEP_CHARS: usize = 120;
+
+/// One tool call in a session's recent trail.
+#[derive(Debug, Default, PartialEq, Clone)]
+pub struct PulseStep {
+    pub text: String,
+    pub at: Option<String>,
+}
+
+/// A transcript timestamp (`2026-09-01T07:00:00.123Z`) as Naru's stored text
+/// (`2026-09-01 07:00:00`). `None` when it does not have that shape.
+fn naru_ts(raw: Option<&str>) -> Option<String> {
+    let s = raw?;
+    parse_ts(s)?;
+    Some(format!("{} {}", s.get(0..10)?, s.get(11..19)?))
+}
+
+/// Cut already-sanitized text to [`PULSE_STEP_CHARS`] characters, `…` marking
+/// the cut.
+fn cap_step(text: String) -> String {
+    if text.chars().count() <= PULSE_STEP_CHARS {
+        return text;
+    }
+    let mut out: String = text.chars().take(PULSE_STEP_CHARS - 1).collect();
+    out.push('…');
+    out
 }
 
 /// One session's pulse, read **live off its transcript** — the fourth read to
@@ -4774,11 +4826,24 @@ fn pulse_from_text(text: &str) -> SessionPulse {
         if let Some(prose) = msg.assistant_text() {
             pulse.last_response = Some(prose);
         }
+        let at = naru_ts(raw.timestamp.as_deref());
         for d in msg.tool_details() {
+            let step = d
+                .description
+                .clone()
+                .or_else(|| d.active_form.clone())
+                .or_else(|| d.command_head.clone())
+                .unwrap_or_else(|| d.name.clone());
+            pulse.recent_steps.push(PulseStep {
+                text: cap_step(step),
+                at: at.clone(),
+            });
             if d.name == "TodoWrite" {
                 pulse.todo_active = d.active_form;
+                pulse.todo_active_at = at.clone();
             } else if d.description.is_some() {
                 pulse.tool_doing = d.description;
+                pulse.tool_doing_at = at.clone();
             }
         }
         if let Some(u) = msg.usage.as_ref() {
@@ -4792,6 +4857,8 @@ fn pulse_from_text(text: &str) -> SessionPulse {
         }
     }
     pulse.pending_bash = pending.into_iter().map(|(_, _, p)| p).collect();
+    let excess = pulse.recent_steps.len().saturating_sub(PULSE_STEPS);
+    pulse.recent_steps.drain(..excess);
     pulse
 }
 
@@ -8919,6 +8986,64 @@ mod tests {
         // The newest description, and an `Agent` call with no description
         // falls back to its prompt.
         assert_eq!(pulse.tool_doing.as_deref(), Some("Review the diff"));
+    }
+
+    fn tool_line(ts: &str, id: &str, input: &str, side: bool) -> String {
+        format!(
+            r#"{{"type":"assistant","timestamp":"{ts}","isSidechain":{side},"message":{{"content":[{{"type":"tool_use","id":"{id}","name":"Bash","input":{input}}}]}}}}"#
+        )
+    }
+
+    #[test]
+    fn pulse_activity_since_and_steps_use_description_then_command_head() {
+        let long = "set -e\n\ncargo test --all && echo done";
+        let l1 = tool_line(
+            "2026-09-01T07:00:05.250Z",
+            "a",
+            &format!(r#"{{"command":{long:?},"description":"Run all tests"}}"#),
+            false,
+        );
+        let l2 = tool_line(
+            "2026-09-01T07:00:09Z",
+            "b",
+            r#"{"command":"\n  make build\nmake more"}"#,
+            false,
+        );
+        let only_first = pulse_from_text(&l1);
+        assert_eq!(only_first.tool_doing.as_deref(), Some("Run all tests"));
+        assert_eq!(
+            only_first.tool_doing_at.as_deref(),
+            Some("2026-09-01 07:00:05")
+        );
+        assert_eq!(
+            only_first.recent_steps.last().unwrap().text,
+            "Run all tests"
+        );
+        let both = pulse_from_text(&format!("{l1}\n{l2}"));
+        let last = both.recent_steps.last().unwrap();
+        assert_eq!(last.text, "make build");
+        assert_eq!(last.at.as_deref(), Some("2026-09-01 07:00:09"));
+        // The newer call has no description, so the activity stays with the
+        // older one that had it.
+        assert_eq!(both.tool_doing_at.as_deref(), Some("2026-09-01 07:00:05"));
+    }
+
+    #[test]
+    fn pulse_keeps_only_the_newest_five_steps_and_skips_sidechains() {
+        let mut text = String::new();
+        for i in 0..7 {
+            let side = i == 6;
+            text.push_str(&tool_line(
+                &format!("2026-09-01T07:00:0{i}Z"),
+                &format!("t{i}"),
+                &format!(r#"{{"command":"step {i}"}}"#),
+                side,
+            ));
+            text.push('\n');
+        }
+        let pulse = pulse_from_text(&text);
+        let texts: Vec<&str> = pulse.recent_steps.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(texts, ["step 1", "step 2", "step 3", "step 4", "step 5"]);
     }
 
     #[test]

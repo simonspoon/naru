@@ -13,7 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::core::cc;
 use crate::core::config;
 use crate::core::runner;
-use crate::core::types::{AgentChild, AgentChildKind, AgentChildState, AgentSession};
+use crate::core::types::{AgentChild, AgentChildKind, AgentChildState, AgentSession, AgentStep};
 
 /// The `claude` binary to drive; `MESA_CLAUDE_BIN` overrides it for tests
 /// (pointing at a stub), mirroring `MESA_CC_*` in cc.rs/usage.rs. Public so
@@ -136,6 +136,8 @@ fn runner_row(job: &runner::Job, alive: bool) -> AgentSession {
         model: Some(job.model.clone()),
         children: vec![],
         activity: None,
+        activity_since: None,
+        recent_steps: vec![],
         task_id: None,
         task_name: None,
         run_id: Some(job.job_id.clone()),
@@ -290,7 +292,22 @@ fn enrich_pulse(sessions: &mut [AgentSession]) -> Vec<Vec<cc::PendingBash>> {
             session.model = pulse.model;
             // The headline's first choice: the todo in progress, else the
             // newest tool description (mesa task 1484).
-            session.activity = pulse.todo_active.or(pulse.tool_doing);
+            // `activity_since` follows whichever of the two won.
+            let (activity, since) = if pulse.todo_active.is_some() {
+                (pulse.todo_active, pulse.todo_active_at)
+            } else {
+                (pulse.tool_doing, pulse.tool_doing_at)
+            };
+            session.activity_since = activity.as_ref().and(since);
+            session.activity = activity;
+            session.recent_steps = pulse
+                .recent_steps
+                .into_iter()
+                .map(|s| AgentStep {
+                    text: s.text,
+                    at: s.at,
+                })
+                .collect();
             pulse.pending_bash
         })
         .collect()

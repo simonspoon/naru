@@ -917,6 +917,13 @@ rest on one faint meta line (`name · kind · model · task or workspace · upti
   in-progress `activeForm` of the newest `TodoWrite`, else the newest tool-call
   `description` in the transcript tail (`cc::pulse_from_text`) — else the latest
   assistant prose.
+- **Step age and trail** (naru task 1879): `AgentSession.activitySince` is when
+  the step behind `activity` began (the transcript timestamp of the winning
+  `TodoWrite` or tool call, stored `YYYY-MM-DD HH:MM:SS` UTC text; `null` with
+  no activity or no timestamp). `recentSteps` (`AgentStep {text, at}`) is the
+  last five main-thread tool calls, oldest first: the description (or todo
+  active form), else a `Bash` call's first command line, else the tool name,
+  each capped at 120 chars. Always present, empty when none.
 - **Task link**: `AgentSession.taskId`/`taskName`, set by `agents::attach_tasks`
   from the task whose `owner` is the session id (`Store::find_task_by_owner`).
   Most sessions claim under another owner, so the card then shows the workspace.
