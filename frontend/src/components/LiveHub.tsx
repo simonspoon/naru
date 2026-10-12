@@ -27,6 +27,7 @@ import {
   startLive,
   stopLive,
   transcribeAudio,
+  interruptLive,
   transcribeStatus,
 } from '../api'
 import { imageFilesFromClipboard } from '../clipboardFiles'
@@ -70,6 +71,7 @@ import {
   type InkBook,
 } from '../liveInk'
 import { isPausePhrase } from '../livePausePhrase'
+import { shouldInterruptAgent } from '../liveInterrupt'
 import { mediaForTurn, type StagedImage } from '../livePastedImage'
 import {
   liveClientId,
@@ -2016,6 +2018,27 @@ export function LiveHub({
   useEffect(() => {
     armed.current = { live, unlocked }
   }, [live, unlocked])
+  // A spoken pause phrase also cuts the agent's turn (naru task 1890). Fire
+  // and forget: a failed interrupt (no agent, no session, offline) never
+  // blocks the pause, so the rejection is swallowed.
+  const workingRef = useRef(session?.working_since != null)
+  useEffect(() => {
+    workingRef.current = session?.working_since != null
+  }, [session?.working_since])
+  const interruptOnPhrase = useRef(() => {})
+  useEffect(() => {
+    interruptOnPhrase.current = () => {
+      if (
+        shouldInterruptAgent({
+          live: armed.current.live,
+          joined: armed.current.unlocked,
+          working: workingRef.current,
+        })
+      ) {
+        interruptLive().catch(() => {})
+      }
+    }
+  })
 
   // The native host's push (declared here, after the setters it writes).
   useEffect(() => {
@@ -2456,7 +2479,10 @@ export function LiveHub({
       // and a pause written then would outlive the falling edge that
       // clears it and start the next Go live silently paused.
       if (isPausePhrase(text)) {
-        if (armed.current.live && !pausedRef.current) pauseNowRef.current()
+        if (armed.current.live && !pausedRef.current) {
+          interruptOnPhrase.current()
+          pauseNowRef.current()
+        }
         return
       }
       if (
@@ -3112,7 +3138,10 @@ export function LiveHub({
         const { text: raw } = await transcribeAudio(toBase64(wav))
         if (!running) return
         const text = utteranceFrom(correctVocabulary(raw, vocabRef.current))
-        if (text !== null && isPausePhrase(text)) pauseNowRef.current()
+        if (text !== null && isPausePhrase(text)) {
+          interruptOnPhrase.current()
+          pauseNowRef.current()
+        }
       } catch {
         // Nothing to report: a segment that did not transcribe is a phrase
         // that was not heard, and the button is still there.
@@ -3368,7 +3397,10 @@ export function LiveHub({
         // torn down for the length of every reply, so there is no barge-in
         // here.
         if (isPausePhrase(text)) {
-          if (armed.current.live && !pausedRef.current) pauseNowRef.current()
+          if (armed.current.live && !pausedRef.current) {
+            interruptOnPhrase.current()
+            pauseNowRef.current()
+          }
           return
         }
         if (

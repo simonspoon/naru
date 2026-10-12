@@ -1139,6 +1139,15 @@ export function transcribeAudio(audioBase64: string): Promise<LiveTranscript> {
 }
 
 /**
+ * Cut the live agent's current turn (naru task 1889): `POST /api/live/interrupt`
+ * answers `{interrupted, job|status}`; 404 `not_found` with no live session,
+ * 503 `unavailable` for a legacy or absent agent. Callers fire it and forget it.
+ */
+export function interruptLive(): Promise<{ interrupted: boolean; job?: string; status?: string }> {
+  return request('/api/live/interrupt', jsonInit('POST', {}))
+}
+
+/**
  * The whole answer of `GET /api/live/transcribe` (mesa task 1388): the
  * engine `audio.engine` names, its probe `state`, the sentence to show when
  * it is not ready and when the (cached) answer was taken. For the Settings
