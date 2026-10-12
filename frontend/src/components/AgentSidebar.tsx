@@ -41,6 +41,8 @@ import {
 } from '../agentLive'
 import {
   agentHeadline,
+  headlineSince,
+  stepTrail,
   agentKindOf,
   agentRowActions,
   agentTint,
@@ -832,6 +834,9 @@ function AgentListContent({
   stopError,
 }: ListPaneProps) {
   const { live, rest: agents } = pinLiveAgent(allAgents, liveAgentId)
+  // Session ids whose recent-steps trail is open (naru task 1880) — this
+  // component's state only, not persisted.
+  const [trailOpen, setTrailOpen] = useState<string[]>([])
   // One card. The live agent's (`pinned`) is drawn apart from the buckets
   // and shows no state of its own (mesa task 1491).
   const renderCard = (a: AgentSession, pinned: boolean) => {
@@ -846,6 +851,16 @@ function AgentListContent({
     const model = shortModel(a.model)
     const modelLabel = modelTag(a.model)
     const headline = agentHeadline(a)
+    const headlineStart = headlineSince(a)
+    const trail = stepTrail(a)
+    const trailShown = trailOpen.includes(a.sessionId)
+    const trailAge = (atMs: number | null) => (atMs === null ? '' : `${elapsedSince(atMs, nowMs)} ago`)
+    const headlineTitle =
+      trail.length === 0
+        ? (headline ?? undefined)
+        : [headline, ...trail.map((t) => `${t.text}${t.atMs === null ? '' : ` (${trailAge(t.atMs)})`}`)]
+            .filter(Boolean)
+            .join('\n')
     const label = agentLabel(a)
     const tint = pinned ? null : agentTint(a)
     const chips = agentChips(a, proj)
@@ -992,10 +1007,45 @@ function AgentListContent({
         {/* What it is doing — model-authored text, a plain
             text node, never HTML. Nothing when unknown: the
             name is already on the line above. */}
-        {headline && (
-          <div className="agent-card-doing" title={headline}>
-            {headline}
+        {(headline || trail.length > 0) && (
+          <div className="agent-card-doing-row">
+            {headline && (
+              <div className="agent-card-doing" title={headlineTitle}>
+                {headline}
+              </div>
+            )}
+            {headline && headlineStart !== null && (
+              <span className="agent-card-step-age" title="how long this step has been running">
+                · {elapsedSince(headlineStart, nowMs)}
+              </span>
+            )}
+            {trail.length > 0 && (
+              <button
+                type="button"
+                className="agent-card-trail-toggle"
+                aria-label={trailShown ? 'Hide recent steps' : 'Show recent steps'}
+                aria-expanded={trailShown}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  setTrailOpen((cur) =>
+                    cur.includes(a.sessionId) ? cur.filter((id) => id !== a.sessionId) : [...cur, a.sessionId],
+                  )
+                }}
+              >
+                {trailShown ? '▾' : '▸'} {trail.length}
+              </button>
+            )}
           </div>
+        )}
+        {trailShown && trail.length > 0 && (
+          <ul className="agent-card-trail" aria-label="Recent steps">
+            {trail.map((t, i) => (
+              <li key={i} className="agent-card-trail-step" title={t.text}>
+                <span className="agent-card-trail-text">{t.text}</span>
+                {t.atMs !== null && <span className="agent-card-trail-age">{trailAge(t.atMs)}</span>}
+              </li>
+            ))}
+          </ul>
         )}
         {(wait || actions.note !== null) && (
           <div className="muted agent-card-meta">

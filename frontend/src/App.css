@@ -10816,6 +10816,72 @@ body.live-panel-ratio-resizing .live-panel-divider {
   text-overflow: ellipsis;
 }
 
+.agent-card-doing-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.agent-card-doing-row .agent-card-doing {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.agent-card-step-age,
+.agent-card-trail-toggle,
+.agent-card-trail-age {
+  flex: none;
+  margin-top: 0.2rem;
+  font-size: 0.68rem;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.agent-card-trail-toggle {
+  margin-left: auto;
+  padding: 0 0.3rem;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.agent-card-trail-toggle:hover,
+.agent-card-trail-toggle:focus-visible {
+  color: var(--text);
+}
+
+.agent-card-trail {
+  margin: 0.2rem 0 0;
+  padding: 0;
+  list-style: none;
+  min-width: 0;
+}
+
+.agent-card-trail-step {
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+  min-width: 0;
+  font-size: 0.7rem;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+.agent-card-trail-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.agent-card-trail-age {
+  margin-top: 0;
+}
+
 /* Stop: a corner icon revealed on hover or keyboard focus, drawn over the
    time/context cluster, which steps aside while it shows. */
 .agent-row-title .agent-row-stop {

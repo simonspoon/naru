@@ -5,6 +5,9 @@ import {
   agentRowActions,
   agentTint,
   formatContextTokens,
+  headlineSince,
+  naruTimeMs,
+  stepTrail,
   isRunPaneId,
   parseRunPaneId,
   responsePreview,
@@ -161,5 +164,48 @@ describe('run pane ids', () => {
     expect(rowPaneId(run)).toBe('run:r1')
     expect(rowPaneId({ id: 'j1', kind: 'background', runId: null })).toBe('j1')
     expect(rowPaneId({ id: null, kind: 'interactive', runId: null })).toBeNull()
+  })
+})
+
+describe('headlineSince', () => {
+  const running = { pid: 42, state: 'working' } as const
+  const at = '2026-10-12 08:00:00'
+  const ms = Date.UTC(2026, 9, 12, 8, 0, 0)
+
+  it('returns the step start while the headline is the activity', () => {
+    expect(headlineSince({ ...running, activity: 'Running tests', activitySince: at })).toBe(ms)
+  })
+
+  it('is null for a done agent, no activity, or no timestamp', () => {
+    expect(headlineSince({ pid: 42, state: 'done', activity: 'x', activitySince: at })).toBeNull()
+    expect(headlineSince({ ...running, activity: null, activitySince: at })).toBeNull()
+    expect(headlineSince({ ...running, activity: '  ', activitySince: at })).toBeNull()
+    expect(headlineSince({ ...running, activity: 'x', activitySince: null })).toBeNull()
+  })
+
+  it('parses Naru timestamps as UTC', () => {
+    expect(naruTimeMs(at)).toBe(ms)
+    expect(naruTimeMs('garbage')).toBeNull()
+    expect(naruTimeMs(null)).toBeNull()
+  })
+})
+
+describe('stepTrail', () => {
+  it('lists newest first with whitespace collapsed and empties dropped', () => {
+    const trail = stepTrail({
+      recentSteps: [
+        { text: 'first', at: '2026-10-12 08:00:00' },
+        { text: '  ', at: null },
+        { text: 'second\n  step', at: null },
+      ],
+    })
+    expect(trail).toEqual([
+      { text: 'second step', atMs: null },
+      { text: 'first', atMs: Date.UTC(2026, 9, 12, 8, 0, 0) },
+    ])
+  })
+
+  it('is empty for no steps', () => {
+    expect(stepTrail({ recentSteps: [] })).toEqual([])
   })
 })

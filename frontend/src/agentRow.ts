@@ -63,6 +63,45 @@ export function agentHeadline(
   return (isRunningAgent(a) ? responsePreview(a.activity) : null) ?? responsePreview(a.lastResponse)
 }
 
+/** A Naru timestamp (`YYYY-MM-DD HH:MM:SS`, UTC) as epoch ms; `null` when
+ *  absent or unparseable. */
+export function naruTimeMs(text: string | null | undefined): number | null {
+  if (text === null || text === undefined) return null
+  const ms = Date.parse(text.trim().replace(' ', 'T') + 'Z')
+  return Number.isFinite(ms) ? ms : null
+}
+
+/**
+ * When the step behind the headline began (epoch ms) — only while the
+ * headline *is* the server's `activity` (a running agent with one); `null`
+ * when it fell back to the latest reply, where a step age would mislead.
+ */
+export function headlineSince(
+  a: Pick<AgentSession, 'pid' | 'state' | 'activity' | 'activitySince'>,
+): number | null {
+  if (!isRunningAgent(a) || responsePreview(a.activity) === null) return null
+  return naruTimeMs(a.activitySince)
+}
+
+export interface TrailStep {
+  text: string
+  /** Epoch ms the step was written, `null` if the line had no timestamp. */
+  atMs: number | null
+}
+
+/**
+ * The recent-steps trail, newest first, each text collapsed to one line;
+ * steps with no text are dropped. Model-authored: render as plain text.
+ */
+export function stepTrail(a: Pick<AgentSession, 'recentSteps'>): TrailStep[] {
+  const out: TrailStep[] = []
+  for (const step of [...(a.recentSteps ?? [])].reverse()) {
+    const text = responsePreview(step.text)
+    if (text !== null) out.push({ text, atMs: naruTimeMs(step.at) })
+  }
+  return out
+}
+
 /**
  * The tint a top-level card wears (mesa task 1502), and the colour of its
  * dot: `active` while the session is `working` (or, with no `state` at all,

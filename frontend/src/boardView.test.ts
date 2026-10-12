@@ -26,6 +26,8 @@ function session(over: Partial<AgentSession> = {}): AgentSession {
     liveSubagents: 0,
     lastResponse: null,
     activity: null,
+    activitySince: null,
+    recentSteps: [],
     taskId: null,
     taskName: null,
     contextTokens: null,
