@@ -1095,10 +1095,13 @@ pub fn structured_script(
 /// `claude -p` for one run (naru task 1686): the `runner` template resolved
 /// through the same [`spawn_for_vars`] every spawn uses, so the
 /// `MESA_CLAUDE_BIN` seam and the quoting rules apply unchanged. `resume`
-/// picks `--resume` over `--session-id` for `{session_flag}`. The caller owns
+/// picks `--resume` over `--session-id` for `{session_flag}`. `action` is the
+/// run's template: [`config::RUNNER`], or [`config::LIVE_AGENT`] for a live
+/// conversation (naru task 1885) — same vars either way. The caller owns
 /// the process — piped stdin/stdout, its own process group — which is why this
 /// returns the script rather than running it.
 pub fn runner_script(
+    action: &str,
     model: &str,
     name: &str,
     session_id: &str,
@@ -1107,7 +1110,7 @@ pub fn runner_script(
     prompts: &config::Prompts,
 ) -> Result<String, String> {
     spawn_for_vars(
-        config::RUNNER,
+        action,
         &config::Vars {
             name: Some(name),
             model: Some(model),
@@ -1221,6 +1224,16 @@ pub fn running_subagents(job_id: &str) -> Vec<AgentChild> {
         return Vec::new();
     };
     running_delegates(&root, &session_id, SystemTime::now())
+}
+
+/// [`running_subagents`] for a session uuid already in hand — a `naru run`
+/// job knows its `session_id` and is no `claude agents` row, so there is
+/// nothing to look up. Same verdict, same empty list on any failure.
+pub fn running_subagents_of_session(session_id: &str) -> Vec<AgentChild> {
+    let Some(root) = cc::projects_dir() else {
+        return Vec::new();
+    };
+    running_delegates(&root, session_id, SystemTime::now())
 }
 
 /// How long a subagent whose last record is a `tool_use` still awaiting its
@@ -1458,6 +1471,7 @@ mod tests {
             last_is_error: None,
             resumes: 0,
             idle_timeout_secs: 60,
+            template: None,
         }
     }
 

@@ -948,6 +948,103 @@ pub fn ensure_agent_definition(store: &crate::core::Store) -> Result<std::path::
     crate::core::library::ensure_agent_file(store, LIVE_AGENT_BUILTIN, AGENT_DEFINITION)
 }
 
+/// Prefix of a live agent receipt that names a `naru run` job (naru task
+/// 1885): `run:<8 hex>`. A receipt without it is a legacy `claude --bg` short
+/// job id, handled by `agents` exactly as before (dream's `pid:<n>` is the
+/// precedent for a typed receipt).
+const RUN_RECEIPT: &str = "run:";
+
+/// What a live agent receipt names.
+#[derive(Debug, PartialEq, Eq)]
+enum AgentReceipt<'a> {
+    /// A `naru run` job id.
+    Run(&'a str),
+    /// A legacy `claude --bg` short job id.
+    Bare(&'a str),
+}
+
+fn parse_agent_receipt(receipt: &str) -> AgentReceipt<'_> {
+    match receipt.strip_prefix(RUN_RECEIPT) {
+        Some(id) => AgentReceipt::Run(id),
+        None => AgentReceipt::Bare(receipt),
+    }
+}
+
+/// Starts the live conversation's agent as a `naru run` job launched through
+/// the `live-agent` template, and answers its `run:<job>` receipt. The agent
+/// definition is seeded first, as both `spawn_bg` sites do; `prompt` is the
+/// run's first inbox message and `dir` its cwd. The model label is cosmetic
+/// (the panel shows the transcript's model).
+pub fn spawn_agent(
+    store: &crate::core::Store,
+    dir: &str,
+    name: &str,
+    prompt: &str,
+) -> Result<String, String> {
+    ensure_agent_definition(store)?;
+    let opts = crate::core::runner::StartOpts {
+        model: "default".into(),
+        prompt: prompt.into(),
+        cwd: Some(dir.into()),
+        name: Some(name.into()),
+        agent: None,
+        idle_timeout_secs: None,
+    };
+    let job = crate::core::runner::start_in_with(
+        &crate::core::runner::runs_dir(),
+        &opts,
+        Some(crate::core::config::LIVE_AGENT),
+    )
+    .map_err(|e| e.to_string())?;
+    let id = job
+        .get("job_id")
+        .and_then(|v| v.as_str())
+        .ok_or("the run reported no job id")?;
+    Ok(format!("{RUN_RECEIPT}{id}"))
+}
+
+/// Stops the agent a receipt names: a run gets its stop marker, a bare id
+/// `claude stop`.
+pub fn stop_agent(receipt: &str) -> Result<(), String> {
+    stop_agent_in(&crate::core::runner::runs_dir(), receipt)
+}
+
+fn stop_agent_in(runs: &std::path::Path, receipt: &str) -> Result<(), String> {
+    match parse_agent_receipt(receipt) {
+        AgentReceipt::Run(id) => crate::core::runner::stop_in(runs, id)
+            .map(|_| ())
+            .map_err(|e| e.to_string()),
+        AgentReceipt::Bare(id) => crate::core::agents::stop(id),
+    }
+}
+
+/// The session uuid a receipt's agent writes its transcript under: a run's
+/// `job.json` `session_id`, else the `claude agents` lookup.
+pub fn agent_session_uuid(receipt: &str) -> Result<Option<String>, String> {
+    agent_session_uuid_in(&crate::core::runner::runs_dir(), receipt)
+}
+
+fn agent_session_uuid_in(runs: &std::path::Path, receipt: &str) -> Result<Option<String>, String> {
+    match parse_agent_receipt(receipt) {
+        AgentReceipt::Run(id) => crate::core::runner::job_in(runs, id)
+            .map(|j| Some(j.session_id))
+            .map_err(|e| e.to_string()),
+        AgentReceipt::Bare(id) => crate::core::agents::find_session_for_job(id),
+    }
+}
+
+/// The delegates the receipt's agent still has running; empty on any failure,
+/// like `agents::running_subagents`.
+pub fn running_delegates(receipt: &str) -> Vec<crate::core::types::AgentChild> {
+    match parse_agent_receipt(receipt) {
+        AgentReceipt::Run(_) => match agent_session_uuid(receipt) {
+            Ok(Some(uuid)) => crate::core::agents::running_subagents_of_session(&uuid),
+            _ => Vec::new(),
+        },
+        AgentReceipt::Bare(id) => crate::core::agents::running_subagents(id),
+    }
+}
+
 /// The prompt for the summariser `live stop` runs (naru task 1690): the
 /// library fork of `live-summary-prompt` (else the built-in), then — Naru's own
 /// tail, whatever the block says — the session line, the active notebook, the
@@ -2787,5 +2884,72 @@ question is a task, not a note",
         assert_eq!(prompt.matches(", kept]").count(), 1, "{prompt}");
         let live = agent_prompt(&store, s.id);
         assert!(!live.contains("kept]"), "{live}");
+    }
+
+    #[test]
+    fn agent_receipts_route_run_prefix_to_the_runner_and_bare_ids_to_agents() {
+        assert_eq!(
+            parse_agent_receipt("run:0a1b2c3d"),
+            AgentReceipt::Run("0a1b2c3d")
+        );
+        assert_eq!(
+            parse_agent_receipt("0a1b2c3d"),
+            AgentReceipt::Bare("0a1b2c3d")
+        );
+        assert_eq!(parse_agent_receipt(""), AgentReceipt::Bare(""));
+    }
+
+    #[test]
+    fn run_receipt_reads_the_session_uuid_from_job_json_and_stop_marks_the_run() {
+        let runs = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let opts = crate::core::runner::StartOpts {
+            model: "default".into(),
+            prompt: "hi".into(),
+            cwd: Some(cwd.path().to_string_lossy().into_owned()),
+            name: None,
+            agent: None,
+            idle_timeout_secs: None,
+        };
+        let job = crate::core::runner::create_job_with(
+            runs.path(),
+            &opts,
+            Some(crate::core::config::LIVE_AGENT),
+        )
+        .unwrap();
+        let receipt = format!("run:{}", job.job_id);
+        assert_eq!(
+            agent_session_uuid_in(runs.path(), &receipt).unwrap(),
+            Some(job.session_id.clone())
+        );
+        // The runner has not started (a fresh job is inside its spawn grace),
+        // so stop leaves the marker the runner honours on start.
+        stop_agent_in(runs.path(), &receipt).unwrap();
+        assert!(runs.path().join(&job.job_id).join("stop").exists());
+        assert!(stop_agent_in(runs.path(), "run:zzzzzzzz").is_err());
+    }
+
+    #[test]
+    fn live_run_records_the_live_agent_template_and_a_resume_keeps_it() {
+        let runs = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let opts = crate::core::runner::StartOpts {
+            model: "default".into(),
+            prompt: "hi".into(),
+            cwd: Some(cwd.path().to_string_lossy().into_owned()),
+            name: Some("naru-live-1".into()),
+            agent: None,
+            idle_timeout_secs: None,
+        };
+        let job = crate::core::runner::create_job_with(
+            runs.path(),
+            &opts,
+            Some(crate::core::config::LIVE_AGENT),
+        )
+        .unwrap();
+        // A resume reloads job.json from disk; the template must survive that.
+        let reloaded = crate::core::runner::job_in(runs.path(), &job.job_id).unwrap();
+        assert_eq!(reloaded.template.as_deref(), Some("live-agent"));
+        assert_eq!(reloaded.action(), crate::core::config::LIVE_AGENT);
     }
 }

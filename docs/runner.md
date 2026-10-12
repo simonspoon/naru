@@ -149,6 +149,15 @@ than a bash `if`. As for the other defaults, `MESA_CLAUDE_BIN` replaces the
 permission flag either — add one (e.g. `--permission-mode acceptEdits`) in
 Settings for a run that must write files.
 
+**Per-job template (naru task 1885).** `job.json` may carry a `template` key
+naming the config action whose template launches claude for that run; absent
+(every job written before) means `runner`, so old job directories behave
+unchanged. Only the crate-internal `runner::start_in_with` sets it (the live
+conversation uses `live-agent`, whose receipt is `run:<job id>`);
+`StartOpts`, `naru run start` and `POST /api/runs` carry no such field, so a
+caller cannot choose one. A resume reloads `job.json` and so keeps it. The
+`spawn_bg` sites do not use the runner yet.
+
 ## Surfaces
 
 CLI (JSON out, `--quiet` accepted and ignored): `naru run start --model M [--cwd D]

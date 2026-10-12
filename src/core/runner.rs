@@ -108,6 +108,19 @@ pub struct Job {
     pub resumes: u32,
     #[serde(default = "default_idle")]
     pub idle_timeout_secs: u64,
+    /// The config action whose template launches claude for this run; absent
+    /// (every job written before naru task 1885) means [`config::RUNNER`].
+    /// Set only by the crate-internal [`start_in_with`], never by a caller of
+    /// `naru run start` / `POST /api/runs`, and kept by every resume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+}
+
+impl Job {
+    /// The template action this run launches claude through.
+    pub fn action(&self) -> &str {
+        self.template.as_deref().unwrap_or(config::RUNNER)
+    }
 }
 
 fn default_idle() -> u64 {
@@ -447,6 +460,16 @@ fn events_of(dir: &Path, tail: Option<usize>, main_only: bool) -> Vec<Value> {
 
 /// Creates the job dir and its first inbox message; spawns nothing.
 pub fn create_job(runs: &Path, opts: &StartOpts) -> Result<Job> {
+    create_job_with(runs, opts, None)
+}
+
+/// [`create_job`] with a per-job template action (`None` = the `runner`
+/// template). Crate-internal: no CLI flag or API body reaches it.
+pub(crate) fn create_job_with(
+    runs: &Path,
+    opts: &StartOpts,
+    template: Option<&str>,
+) -> Result<Job> {
     if opts.model.trim().is_empty() {
         return Err(Error::Validation("model must not be empty".into()));
     }
@@ -521,6 +544,7 @@ pub fn create_job(runs: &Path, opts: &StartOpts) -> Result<Job> {
         last_is_error: None,
         resumes: 0,
         idle_timeout_secs: opts.idle_timeout_secs.unwrap_or(DEFAULT_IDLE_SECS).max(1),
+        template: template.map(str::to_string),
     };
     fs::create_dir_all(dir.join("inbox").join("delivered"))?;
     enqueue(&dir.join("inbox"), &opts.prompt, false)?;
@@ -562,10 +586,24 @@ pub fn start(opts: &StartOpts) -> Result<Value> {
 }
 
 pub fn start_in(runs: &Path, opts: &StartOpts) -> Result<Value> {
-    let job = create_job(runs, opts)?;
+    start_in_with(runs, opts, None)
+}
+
+/// [`start_in`] launching claude through the config template `action`
+/// (`config::LIVE_AGENT` for the live conversation; `None` = `runner`).
+/// Crate-internal on purpose: [`StartOpts`] carries no template, so a caller
+/// of the CLI or API cannot choose one.
+pub(crate) fn start_in_with(runs: &Path, opts: &StartOpts, action: Option<&str>) -> Result<Value> {
+    let job = create_job_with(runs, opts, action)?;
     let dir = runs.join(&job.job_id);
     spawn_runner(&dir)?;
     Ok(view(&dir, &job))
+}
+
+/// The job `id` in `runs`, for callers that need its fields (the live
+/// receipt helpers).
+pub(crate) fn job_in(runs: &Path, id: &str) -> Result<Job> {
+    load(&job_dir_of(runs, id)?)
 }
 
 pub fn send(id: &str, text: &str, interrupt: bool) -> Result<Value> {
@@ -824,6 +862,7 @@ fn run_runner_locked(dir: &Path) -> Result<()> {
         .and_then(|s| library::prompts(&s).ok())
         .unwrap_or_default();
     let script = agents::runner_script(
+        job.action(),
         &job.model,
         &job.name,
         &job.session_id,
@@ -1414,6 +1453,7 @@ mod tests {
         let p = crate::core::config::Prompts::default();
         for resume in [false, true] {
             let script = agents::runner_script(
+                job.action(),
                 &job.model,
                 &job.name,
                 &job.session_id,
@@ -1427,6 +1467,7 @@ mod tests {
         let plain = create_job(runs.path(), &opts("x", cwd.path())).unwrap();
         assert_eq!(plain.agent, None);
         let script = agents::runner_script(
+            plain.action(),
             &plain.model,
             &plain.name,
             &plain.session_id,
@@ -1436,6 +1477,55 @@ mod tests {
         )
         .unwrap();
         assert!(script.starts_with("run_agent=''\n"), "{script}");
+    }
+
+    #[test]
+    fn a_job_without_a_template_key_launches_the_runner_template() {
+        let runs = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let job = create_job(runs.path(), &opts("x", cwd.path())).unwrap();
+        let dir = runs.path().join(&job.job_id);
+        let raw = fs::read_to_string(dir.join("job.json")).unwrap();
+        assert!(!raw.contains("template"), "{raw}");
+        assert_eq!(load(&dir).unwrap().template, None);
+        assert_eq!(load(&dir).unwrap().action(), config::RUNNER);
+        // An old job.json (no key at all) reads the same way.
+        let mut v: Value = serde_json::from_str(&raw).unwrap();
+        v.as_object_mut().unwrap().remove("template");
+        let old: Job = serde_json::from_value(v).unwrap();
+        assert_eq!(old.action(), config::RUNNER);
+    }
+
+    #[test]
+    fn a_template_in_job_json_selects_that_action_and_start_opts_cannot_carry_one() {
+        let runs = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let job = create_job_with(
+            runs.path(),
+            &opts("x", cwd.path()),
+            Some(config::LIVE_AGENT),
+        )
+        .unwrap();
+        let dir = runs.path().join(&job.job_id);
+        assert_eq!(load(&dir).unwrap().action(), config::LIVE_AGENT);
+        // The API/CLI body type ignores a template key.
+        let body = json!({"model":"haiku","prompt":"x","template":"live-agent"});
+        let parsed: StartOpts = serde_json::from_value(body).unwrap();
+        let made = create_job(runs.path(), &parsed);
+        assert!(made.is_ok_and(|j| j.template.is_none()));
+    }
+
+    #[test]
+    fn runner_script_for_live_agent_uses_the_live_agent_template() {
+        let p = crate::core::config::Prompts::default();
+        let live =
+            agents::runner_script(config::LIVE_AGENT, "default", "nm", "sid", false, None, &p)
+                .unwrap();
+        assert!(live.contains("--agent naru-live"), "{live}");
+        assert!(live.contains("'nm'"), "{live}");
+        let run =
+            agents::runner_script(config::RUNNER, "default", "nm", "sid", false, None, &p).unwrap();
+        assert!(run.contains("'--session-id' 'sid'"), "{run}");
     }
 
     #[test]
