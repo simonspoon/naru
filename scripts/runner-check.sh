@@ -236,6 +236,32 @@ sleep 1
 wait_for 10 "raced run stopped" status_is "$J4" stopped
 ok "two concurrent reconciles of a dead run started claude exactly once more"
 
+# ---- agent: --agent reaches claude's argv, is absent without it, survives a resume ----
+: > "$STUB/argv.log"
+echo 6 > "$STUB/sleep-secs"
+JA=$("$NARU" run start --model haiku --agent supervisor --cwd "$TMP/work" "agent prompt" | jq -r .job_id)
+wait_for 10 "agent prompt delivered" delivered_is "$JA" 1
+[ "$(job_field "$JA" agent)" = supervisor ] || fail "job.json should carry the agent"
+grep -q -- " --agent supervisor " "$STUB/argv.log" || fail "agent missing from argv: $(cat "$STUB/argv.log")"
+RA=$(cat "$RUNS/$JA/runner.pid")
+kill -9 "$RA"; kill -- "-$(job_field "$JA" claude_pid)" 2>/dev/null || true
+sleep 0.3
+echo 0 > "$STUB/sleep-secs"
+"$NARU" run reconcile >/dev/null
+wait_for 20 "agent run resumed idle" resumed_idle "$JA"
+grep -- "--resume" "$STUB/argv.log" | grep -q -- " --agent supervisor " || fail "agent missing from the --resume argv: $(cat "$STUB/argv.log")"
+"$NARU" run stop "$JA" >/dev/null
+wait_for 10 "agent run stopped" status_is "$JA" stopped
+: > "$STUB/argv.log"
+JB=$("$NARU" run start --model haiku --cwd "$TMP/work" "no agent prompt" | jq -r .job_id)
+wait_for 10 "plain prompt delivered" delivered_is "$JB" 1
+! grep -q -- "--agent" "$STUB/argv.log" || fail "argv has --agent without one asked for: $(cat "$STUB/argv.log")"
+"$NARU" run stop "$JB" >/dev/null
+wait_for 10 "plain run stopped" status_is "$JB" stopped
+BADERR=$("$NARU" run start --model haiku --agent=-x --cwd "$TMP/work" "bad" 2>&1 || true)
+jq -e '.error.code == "validation"' <<<"$BADERR" >/dev/null || fail "--agent starting with - should be validation"
+ok "agent: --agent in argv when given, absent without, still present after --resume"
+
 # ---- interrupt: a control_request ends the turn, the run stays open ----
 : > "$STUB/control.log"
 echo 4 > "$STUB/sleep-secs"
@@ -287,7 +313,7 @@ wait_for 10 "idle timeout -> finished" status_is "$J2" finished
 ok "idle timeout wound the run down to finished"
 
 # ---- CLI shapes ----
-"$NARU" run list | jq -e 'length == 6' >/dev/null || fail "run list"
+"$NARU" run list | jq -e 'length == 8' >/dev/null || fail "run list"
 "$NARU" run show "$J2" --events | jq -e '.job.job_id and (.events | length) > 0' >/dev/null || fail "run show --events"
 "$NARU" run show "$J2" --tail 1 | jq -e '.events | length == 1' >/dev/null || fail "run show --tail"
 "$NARU" run show "$J2" --quiet | jq -e '.job_id' >/dev/null || fail "--quiet is accepted and ignored"

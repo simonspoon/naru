@@ -392,7 +392,8 @@ enum RunCmd {
     #[command(after_help = "\
 EXAMPLES
   naru run start --model haiku \"reply with the word pong\"
-  naru run start --model sonnet --cwd ~/code/app --name triage \"fix the failing test\"")]
+  naru run start --model sonnet --cwd ~/code/app --name triage \"fix the failing test\"
+  naru run start --model sonnet --agent supervisor \"plan the release\"")]
     Start {
         /// Model alias or full name, passed to the `runner` template's `{model}`
         #[arg(long)]
@@ -403,6 +404,10 @@ EXAMPLES
         /// A label for the run
         #[arg(long)]
         name: Option<String>,
+        /// Run as this agent definition (claude's `--agent`), passed to the
+        /// `runner` template's `{run_agent}`
+        #[arg(long)]
+        agent: Option<String>,
         /// Wind the run down after this many idle seconds (default 3600)
         #[arg(long)]
         idle_timeout: Option<u64>,
@@ -5117,6 +5122,7 @@ fn run_runs(cmd: RunCmd) -> Result<()> {
             model,
             cwd,
             name,
+            agent,
             idle_timeout,
             prompt,
         } => print_json(&runner::start(&runner::StartOpts {
@@ -5124,6 +5130,7 @@ fn run_runs(cmd: RunCmd) -> Result<()> {
             prompt,
             cwd,
             name,
+            agent,
             idle_timeout_secs: idle_timeout,
         })?),
         RunCmd::Send { job, message } => print_json(&runner::send(&job, &message)?),

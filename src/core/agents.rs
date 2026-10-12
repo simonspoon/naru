@@ -889,17 +889,23 @@ fn spawn_for_vars(action: &str, vars: &config::Vars) -> Result<String, String> {
 }
 
 /// The `MESA_CLAUDE_BIN` test seam for a **built-in default** template: the
-/// `claude` word every default starts with becomes `bin`, single-quoted so a
+/// `claude` word every default starts with (or, in a multi-line default,
+/// that starts a line) becomes `bin`, single-quoted so a
 /// path with a space or a `'` in it is still one word. Every default names
 /// `claude` first, so any other first word is left alone — this only ever
 /// rewrites what mesa itself wrote.
 fn with_default_bin(script: String, bin: &str) -> String {
-    match script.strip_prefix("claude") {
-        Some(rest) if rest.is_empty() || rest.starts_with(char::is_whitespace) => {
-            format!("'{}'{rest}", bin.replace('\'', "'\\''"))
-        }
-        _ => script,
-    }
+    let quoted = format!("'{}'", bin.replace('\'', "'\\''"));
+    script
+        .split('\n')
+        .map(|line| match line.strip_prefix("claude") {
+            Some(rest) if rest.is_empty() || rest.starts_with(char::is_whitespace) => {
+                format!("{quoted}{rest}")
+            }
+            _ => line.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Starts a detached background session in `dir` and returns its short job id,
@@ -1080,6 +1086,7 @@ pub fn runner_script(
     name: &str,
     session_id: &str,
     resume: bool,
+    agent: Option<&str>,
     prompts: &config::Prompts,
 ) -> Result<String, String> {
     spawn_for_vars(
@@ -1089,6 +1096,7 @@ pub fn runner_script(
             model: Some(model),
             session_flag: Some(if resume { "--resume" } else { "--session-id" }),
             session_id: Some(session_id),
+            run_agent: agent,
             prompts: Some(prompts),
             ..Default::default()
         },
@@ -1419,6 +1427,7 @@ mod tests {
             session_id: "sess-1".into(),
             cwd: "/w".into(),
             model: "haiku".into(),
+            agent: None,
             name: "r".into(),
             status,
             runner_pid: Some(1),
@@ -1900,6 +1909,10 @@ JSON"#,
         assert_eq!(
             with_default_bin("claude-two --bg".into(), "/s/c"),
             "claude-two --bg"
+        );
+        assert_eq!(
+            with_default_bin("a=''\nclaude -p".into(), "/s/c"),
+            "a=''\n'/s/c' -p"
         );
         assert_eq!(
             with_default_bin("mytool claude".into(), "/s/c"),

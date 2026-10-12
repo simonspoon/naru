@@ -81,6 +81,10 @@ pub struct Job {
     pub session_id: String,
     pub cwd: String,
     pub model: String,
+    /// The agent definition (`--agent`), if one was asked for; read again on
+    /// every resume so the same agent carries on.
+    #[serde(default)]
+    pub agent: Option<String>,
     /// The label (`--name`), or the job id when none was given.
     pub name: String,
     pub status: RunStatus,
@@ -116,6 +120,8 @@ pub struct StartOpts {
     pub cwd: Option<String>,
     #[serde(default)]
     pub name: Option<String>,
+    #[serde(default)]
+    pub agent: Option<String>,
     #[serde(default)]
     pub idle_timeout_secs: Option<u64>,
 }
@@ -391,7 +397,11 @@ pub fn create_job(runs: &Path, opts: &StartOpts) -> Result<Job> {
     }
     // Both land in claude's argv as a word; one starting with `-` would be
     // read as a flag.
-    for (what, v) in [("model", Some(&opts.model)), ("name", opts.name.as_ref())] {
+    for (what, v) in [
+        ("model", Some(&opts.model)),
+        ("name", opts.name.as_ref()),
+        ("agent", opts.agent.as_ref()),
+    ] {
         if v.is_some_and(|v| v.trim().starts_with('-')) {
             return Err(Error::Validation(format!("{what} must not start with '-'")));
         }
@@ -435,6 +445,12 @@ pub fn create_job(runs: &Path, opts: &StartOpts) -> Result<Job> {
         session_id: uuid_from_bytes(random_bytes::<16>()?),
         cwd: cwd.to_string_lossy().into_owned(),
         model: opts.model.trim().to_string(),
+        agent: opts
+            .agent
+            .as_deref()
+            .map(str::trim)
+            .filter(|a| !a.is_empty())
+            .map(str::to_string),
         status: RunStatus::Running,
         runner_pid: None,
         claude_pid: None,
@@ -742,8 +758,15 @@ fn run_runner_locked(dir: &Path) -> Result<()> {
         .ok()
         .and_then(|s| library::prompts(&s).ok())
         .unwrap_or_default();
-    let script = agents::runner_script(&job.model, &job.name, &job.session_id, resume, &prompts)
-        .map_err(Error::Unavailable);
+    let script = agents::runner_script(
+        &job.model,
+        &job.name,
+        &job.session_id,
+        resume,
+        job.agent.as_deref(),
+        &prompts,
+    )
+    .map_err(Error::Unavailable);
     let spawned = script.and_then(|script| {
         let log = OpenOptions::new()
             .create(true)
@@ -1129,6 +1152,7 @@ mod tests {
             prompt: prompt.into(),
             cwd: Some(cwd.to_string_lossy().into_owned()),
             name: None,
+            agent: None,
             idle_timeout_secs: None,
         }
     }
@@ -1171,12 +1195,56 @@ mod tests {
             name: Some(" -x".into()),
             ..opts("x", cwd.path())
         };
-        for bad in [bad_model, bad_name] {
+        let bad_agent = StartOpts {
+            agent: Some("-x".into()),
+            ..opts("x", cwd.path())
+        };
+        for bad in [bad_model, bad_name, bad_agent] {
             assert!(matches!(
                 create_job(runs.path(), &bad),
                 Err(Error::Validation(_))
             ));
         }
+    }
+
+    /// naru task 1861: the agent reaches claude's argv, is absent without one,
+    /// and a resume (which reads it back from job.json) keeps it.
+    #[test]
+    fn agent_reaches_the_script_and_survives_a_resume() {
+        let runs = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let with = StartOpts {
+            agent: Some("supervisor".into()),
+            ..opts("x", cwd.path())
+        };
+        let job = create_job(runs.path(), &with).unwrap();
+        let job = load(&runs.path().join(&job.job_id)).unwrap();
+        assert_eq!(job.agent.as_deref(), Some("supervisor"));
+        let p = crate::core::config::Prompts::default();
+        for resume in [false, true] {
+            let script = agents::runner_script(
+                &job.model,
+                &job.name,
+                &job.session_id,
+                resume,
+                job.agent.as_deref(),
+                &p,
+            )
+            .unwrap();
+            assert!(script.starts_with("run_agent='supervisor'\n"), "{script}");
+        }
+        let plain = create_job(runs.path(), &opts("x", cwd.path())).unwrap();
+        assert_eq!(plain.agent, None);
+        let script = agents::runner_script(
+            &plain.model,
+            &plain.name,
+            &plain.session_id,
+            false,
+            None,
+            &p,
+        )
+        .unwrap();
+        assert!(script.starts_with("run_agent=''\n"), "{script}");
     }
 
     #[test]

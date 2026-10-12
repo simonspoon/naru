@@ -379,7 +379,10 @@ pub const DEFAULT_WORKFLOW_PROMPT: &str = r#"claude -p --model {model} --name {n
 /// `{model}` is the alias or full model name, `{name}` the job label. No
 /// `--bare`, no permission flag: edit the line (Settings) to add e.g.
 /// `--permission-mode acceptEdits` for a run that must write files.
-pub const DEFAULT_RUNNER: &str = "claude -p --input-format stream-json --output-format stream-json --verbose --model {model} --name {name} {session_flag} {session_id}";
+/// `{run_agent}` is the job's `--agent` name (not `{agent}`, a retired
+/// placeholder), empty when none was given; the first line captures it so the
+/// `--agent` word is emitted only when set.
+pub const DEFAULT_RUNNER: &str = "run_agent={run_agent}\nclaude -p --input-format stream-json --output-format stream-json --verbose ${run_agent:+--agent \"$run_agent\"} --model {model} --name {name} {session_flag} {session_id}";
 
 /// The built-in template for `action`, or `None` if `action` isn't one of
 /// [`ACTIONS`]. Public so the docs check and the API can report the shipped
@@ -787,6 +790,7 @@ pub fn validate(action: &str, template: &str, prompts: &Prompts) -> Result<(), S
         schema: Some("{}"),
         session_flag: Some("--session-id"),
         session_id: Some("session"),
+        run_agent: Some("agent"),
         prompts: Some(prompts),
     };
     // Parse what `bash` will actually be handed — placeholders already
@@ -809,7 +813,7 @@ pub fn resolve(action: &str, template: &str, vars: &Vars) -> Result<String, Stri
 /// The three built-in placeholder names. Per-call data, so each is offered to
 /// a subset of the actions ([`offered_placeholders`]); the library's
 /// `{prompt:<name>}` form is orthogonal and offered everywhere.
-const BUILTIN_PLACEHOLDERS: [&str; 8] = [
+const BUILTIN_PLACEHOLDERS: [&str; 9] = [
     "id",
     "name",
     "prompt",
@@ -818,6 +822,7 @@ const BUILTIN_PLACEHOLDERS: [&str; 8] = [
     "schema",
     "session_flag",
     "session_id",
+    "run_agent",
 ];
 
 /// The `{prompt:<name>}` form's prefix — the one thing that keeps it from
@@ -1665,6 +1670,9 @@ pub struct Vars<'a> {
     /// offered to that action alone.
     pub session_flag: Option<&'a str>,
     pub session_id: Option<&'a str>,
+    /// `runner`'s `--agent` name (naru task 1861) — offered to that action
+    /// alone; absent resolves to the empty string.
+    pub run_agent: Option<&'a str>,
     /// The library's prompts, for `{prompt:<name>}` (mesa task 1138). Unlike
     /// the three above this is not per-call data but static library text, so
     /// every action offers it — which is why it sits beside them rather than
@@ -1706,6 +1714,7 @@ impl Vars<'_> {
             "schema" => self.schema.map(str::to_string),
             "session_flag" => self.session_flag.map(str::to_string),
             "session_id" => self.session_id.map(str::to_string),
+            "run_agent" => self.run_agent.map(str::to_string),
             _ => None,
         })
     }
@@ -1727,7 +1736,13 @@ pub fn offered_placeholders(action: &str) -> &'static [&'static str] {
         // Plus the pass's model (naru tasks 1691, 1692).
         INBOX_WATCHER | RETRO => &["{id}", "{name}", "{prompt}", "{schema}", "{model}"],
         WORKFLOW_PROMPT => &["{model}", "{thinking}", "{name}", "{prompt}"],
-        RUNNER => &["{model}", "{name}", "{session_flag}", "{session_id}"],
+        RUNNER => &[
+            "{model}",
+            "{name}",
+            "{session_flag}",
+            "{session_id}",
+            "{run_agent}",
+        ],
         _ => &["{id}", "{name}"],
     }
 }
@@ -5200,7 +5215,13 @@ mod tests {
         assert_eq!(settings[8].default, DEFAULT_RUNNER);
         assert_eq!(
             settings[8].placeholders,
-            ["{model}", "{name}", "{session_flag}", "{session_id}"]
+            [
+                "{model}",
+                "{name}",
+                "{session_flag}",
+                "{session_id}",
+                "{run_agent}"
+            ]
         );
     }
 
@@ -5214,11 +5235,16 @@ mod tests {
             name: Some("a $(x) job"),
             session_flag: Some("--resume"),
             session_id: Some("abc"),
+            run_agent: Some("super visor"),
             ..Default::default()
         };
         let script = resolve(RUNNER, DEFAULT_RUNNER, &vars).unwrap();
         assert!(
-            script.starts_with("claude -p --input-format stream-json"),
+            script.starts_with("run_agent='super visor'\nclaude -p"),
+            "{script}"
+        );
+        assert!(
+            script.contains("${run_agent:+--agent \"$run_agent\"}"),
             "{script}"
         );
         assert!(
@@ -5226,6 +5252,13 @@ mod tests {
             "{script}"
         );
         assert!(!script.contains("--bare"), "{script}");
+        // No agent: the variable is the empty string and no word is added.
+        let none = Vars {
+            run_agent: None,
+            ..vars
+        };
+        let script = resolve(RUNNER, DEFAULT_RUNNER, &none).unwrap();
+        assert!(script.starts_with("run_agent=''\nclaude -p"), "{script}");
     }
 
     /// naru task 1691: the inbox-watcher default is one synchronous `-p`
