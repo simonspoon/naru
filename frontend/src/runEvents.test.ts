@@ -224,6 +224,65 @@ describe('real fixture', () => {
   })
 })
 
+describe('runEntries subagent attribution', () => {
+  const sub = (type: string, parent: string, content: unknown[]) => ({
+    type,
+    parent_tool_use_id: parent,
+    message: { role: type, content },
+  })
+
+  it('folds subagent lines into the launching tool entry with a count', () => {
+    const out = runEntries([
+      assistant([
+        {
+          type: 'tool_use',
+          id: 't1',
+          name: 'Agent',
+          input: { subagent_type: 'implementer', description: 'do it' },
+        },
+      ]),
+      sub('assistant', 't1', [{ type: 'text', text: 'SUBSECRET one' }]),
+      sub('assistant', 't1', [
+        { type: 'tool_use', id: 's1', name: 'Bash', input: { command: 'ls' } },
+      ]),
+      sub('user', 't1', [
+        { type: 'tool_result', tool_use_id: 's1', content: 'SUBSECRET out' },
+      ]),
+      {
+        type: 'user',
+        message: {
+          role: 'user',
+          content: [{ type: 'tool_result', tool_use_id: 't1', content: 'done' }],
+        },
+      },
+    ])
+    expect(out.map((e) => e.kind)).toEqual(['tool', 'tool_result'])
+    expect(JSON.stringify(out.map((e) => ({ ...e, subagent: undefined })))).not.toContain(
+      'SUBSECRET',
+    )
+    const tool = out[0]
+    if (tool.kind !== 'tool') throw new Error('expected tool')
+    expect(tool.subagent?.count).toBe(3)
+    expect(tool.subagent?.label).toBe('implementer · do it')
+    expect(tool.subagent?.entries).toHaveLength(3)
+  })
+
+  it('puts a subagent line with an unknown launch in a trailing group', () => {
+    const out = runEntries([
+      sub('assistant', 'gone', [{ type: 'text', text: 'orphan one' }]),
+      assistant([{ type: 'text', text: 'main' }]),
+      sub('assistant', 'gone', [{ type: 'text', text: 'orphan two' }]),
+    ])
+    expect(out).toHaveLength(2)
+    expect(out[0]).toEqual({ kind: 'text', text: 'main' })
+    expect(out[1]).toMatchObject({
+      kind: 'subagent',
+      label: 'earlier subagent',
+      count: 2,
+    })
+  })
+})
+
 describe('runControls', () => {
   it('enables controls by status', () => {
     expect(runControls({ status: 'running' })).toEqual({

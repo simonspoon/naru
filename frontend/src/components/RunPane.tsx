@@ -1,7 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { getRun, interruptRun, sendRunMessage, stopRun } from '../api'
 import { isNearBottom } from '../agentChat'
-import { runControls, runEntries, type RunEntry } from '../runEvents'
+import {
+  runControls,
+  runEntries,
+  type RunEntry,
+  type SubagentGroup,
+} from '../runEvents'
 import { useFetch } from '../useFetch'
 
 const TAIL = 500
@@ -152,11 +157,16 @@ function RunEntryRow({ entry }: { entry: RunEntry }) {
       )
     case 'tool':
       return (
-        <div className="agent-chat-tool" title={entry.target}>
-          <span className="agent-chat-tool-name">{entry.name}</span>
-          <span className="agent-chat-tool-target">{entry.target}</span>
-        </div>
+        <>
+          <div className="agent-chat-tool" title={entry.target}>
+            <span className="agent-chat-tool-name">{entry.name}</span>
+            <span className="agent-chat-tool-target">{entry.target}</span>
+          </div>
+          {entry.subagent && <SubagentFold group={entry.subagent} />}
+        </>
       )
+    case 'subagent':
+      return <SubagentFold group={entry} />
     case 'tool_result':
       return (
         <div className={`agent-chat-tool run-pane-result${entry.isError ? ' run-pane-error' : ''}`}>
@@ -179,4 +189,28 @@ function RunEntryRow({ entry }: { entry: RunEntry }) {
     case 'raw':
       return <div className="run-pane-note">{entry.text}</div>
   }
+}
+
+/** A subagent's folded work: "label · N events", expanding to its rows. */
+function SubagentFold({ group }: { group: SubagentGroup }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="run-pane-subagent">
+      <button
+        type="button"
+        className="run-pane-subagent-toggle"
+        aria-expanded={open}
+        onClick={() => setOpen(!open)}
+      >
+        {open ? '▾' : '▸'} {group.label} · {group.count} events
+      </button>
+      {open && (
+        <div className="run-pane-subagent-body">
+          {group.entries.map((e, i) => (
+            <RunEntryRow key={i} entry={e} />
+          ))}
+        </div>
+      )}
+    </div>
+  )
 }

@@ -12055,6 +12055,33 @@ body.dock-resizing .dock-body {
   color: var(--red, #e5484d);
 }
 
+/* Subagent work folded under its launch row (naru task 1865). */
+.run-pane-subagent {
+  margin-left: 0.8rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.run-pane-subagent-toggle {
+  align-self: flex-start;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--muted);
+}
+
+.run-pane-subagent-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding-left: 0.6rem;
+  box-shadow: inset 1px 0 0 rgba(128, 128, 128, 0.4);
+}
+
 /* Settings > Appearance theme editor (naru task 1847). */
 .theme-option-wrap {
   display: flex;

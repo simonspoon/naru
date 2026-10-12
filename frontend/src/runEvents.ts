@@ -30,7 +30,14 @@ export type RunShown = { job: RunJob; events: unknown[] }
 
 export type RunEntry =
   | { kind: 'text'; text: string }
-  | { kind: 'tool'; id: string; name: string; target: string }
+  | {
+      kind: 'tool'
+      id: string
+      name: string
+      target: string
+      /** Set on an Agent/Task launch row that has subagent events (task 1865). */
+      subagent?: SubagentGroup
+    }
   | {
       kind: 'tool_result'
       toolId: string
@@ -48,6 +55,17 @@ export type RunEntry =
     }
   | { kind: 'lifecycle'; event: string; label: string }
   | { kind: 'raw'; text: string }
+  /** Subagent events whose launching tool call is outside the loaded window. */
+  | ({ kind: 'subagent' } & SubagentGroup)
+
+/** The folded work of one subagent: `count` is its event lines. */
+export type SubagentGroup = {
+  label: string
+  entries: RunEntry[]
+  count: number
+}
+
+export const EARLIER_SUBAGENT = 'earlier subagent'
 
 export type RunControls = { send: boolean; interrupt: boolean; stop: boolean }
 
@@ -208,9 +226,82 @@ function entriesOf(ev: unknown): RunEntry[] {
   }
 }
 
-/** events.jsonl lines -> the ordered, readable entries of a run. */
+/** The parent tool_use id of a subagent line; '' = owned by one, id unknown. */
+function subagentParent(ev: unknown): string | null {
+  if (!isRecord(ev)) return null
+  const parent = str(ev.parent_tool_use_id)
+  if (parent !== null) return parent
+  return ev.type === 'system' && ev.owned_by_subagent === true ? '' : null
+}
+
+function launchLabel(type: string | null, description: string | null): string {
+  const parts = [type, description].filter((p): p is string => !!p && !!p.trim())
+  return parts.length > 0 ? cut(parts.join(' · '), TARGET_MAX) : 'subagent'
+}
+
+/**
+ * events.jsonl lines -> the ordered, readable entries of a run. Subagent
+ * lines (a string `parent_tool_use_id`, or a system line with
+ * `owned_by_subagent: true`) stay out of the list: they fold into the
+ * launching tool entry's `subagent`, or — launch outside the window — into one
+ * trailing `earlier subagent` entry.
+ */
 export function runEntries(events: readonly unknown[]): RunEntry[] {
-  return events.flatMap(entriesOf)
+  // A launch is labelled from its own tool_use input, else from the
+  // system/task_started line naming it by tool_use_id.
+  const labels = new Map<string, string>()
+  for (const ev of events) {
+    if (!isRecord(ev)) continue
+    if (ev.type === 'system' && ev.subtype === 'task_started') {
+      const id = str(ev.tool_use_id)
+      if (id && !labels.has(id))
+        labels.set(id, launchLabel(str(ev.subagent_type), str(ev.description)))
+    } else if (ev.type === 'assistant') {
+      for (const b of contentBlocks(ev)) {
+        if (!isRecord(b) || b.type !== 'tool_use' || !isRecord(b.input)) continue
+        const id = str(b.id)
+        const type = str(b.input.subagent_type)
+        const description = str(b.input.description)
+        if (id && (type || description))
+          labels.set(id, launchLabel(type, description))
+      }
+    }
+  }
+  const out: RunEntry[] = []
+  const launches = new Map<string, Extract<RunEntry, { kind: 'tool' }>>()
+  const owned: { parent: string; ev: unknown }[] = []
+  let lastParent = ''
+  for (const ev of events) {
+    const parent = subagentParent(ev)
+    if (parent !== null) {
+      // An owned system line carries no id: it follows the previous subagent line.
+      const p = parent === '' ? lastParent : parent
+      if (parent !== '') lastParent = parent
+      owned.push({ parent: p, ev })
+      continue
+    }
+    for (const e of entriesOf(ev)) {
+      out.push(e)
+      if (e.kind === 'tool' && e.id) launches.set(e.id, e)
+    }
+  }
+  const orphan: SubagentGroup = { label: EARLIER_SUBAGENT, entries: [], count: 0 }
+  for (const { parent, ev } of owned) {
+    const launch = launches.get(parent)
+    let group = orphan
+    if (launch) {
+      launch.subagent ??= {
+        label: labels.get(parent) ?? 'subagent',
+        entries: [],
+        count: 0,
+      }
+      group = launch.subagent
+    }
+    group.count += 1
+    group.entries.push(...entriesOf(ev))
+  }
+  if (orphan.count > 0) out.push({ kind: 'subagent', ...orphan })
+  return out
 }
 
 /** The run's controls: send and stop until it is over, interrupt only mid-turn. */
