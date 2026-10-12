@@ -122,7 +122,19 @@ cargo build --quiet
 MESA=target/debug/mesa
 
 TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"; [ -n "${SERVER_PID:-}" ] && kill "$SERVER_PID" 2>/dev/null; [ -n "${LAN_PID:-}" ] && kill "$LAN_PID" 2>/dev/null; true' EXIT
+# The live agent is a `naru run` job: a detached runner and its stub claude
+# outlive the command that started them. Kill exactly the ones this gate
+# started, by the pids their job directories hold, never by a pattern.
+kill_runners() {
+  local d pid
+  for d in "$TMP"/home/.naru/runs/*/; do
+    for pid in $(cat "$d/runner.pid" 2>/dev/null) $(jq -r '.runner_pid // empty, .claude_pid // empty' "$d/job.json" 2>/dev/null); do
+      kill "$pid" 2>/dev/null || true
+      kill -- "-$pid" 2>/dev/null || true
+    done
+  done
+}
+trap 'kill_runners; rm -rf "$TMP"; [ -n "${SERVER_PID:-}" ] && kill "$SERVER_PID" 2>/dev/null; [ -n "${LAN_PID:-}" ] && kill "$LAN_PID" 2>/dev/null; true' EXIT
 export MESA_DB="$TMP/mesa.db"
 
 # A throwaway HOME: user-scope library rows sync against $HOME/.claude, so
@@ -157,12 +169,23 @@ jqe() { jq -r "$1" <<<"$STDERR"; }
 
 # ---- stub claude (section 9: the live prompt now lives in the library) ----
 #
-# Only what that section needs: the flags/prompt of the last `--bg` spawn.
+# Only what that section needs: the prompt of the last live spawn. The live
+# agent is a `naru run` job (naru task 1886), so `claude -p --input-format
+# stream-json …` with the spawn prompt as the first user line on stdin.
 STUB_DIR="$TMP/stub"
 mkdir -p "$STUB_DIR"
 cat > "$STUB_DIR/claude" <<EOF
 #!/usr/bin/env bash
 case "\$1" in
+  -p)
+    IFS= read -r FIRST || exit 0
+    jq -j '.message.content[0].text' <<<"\$FIRST" > "$STUB_DIR/last-prompt.tmp"
+    mv "$STUB_DIR/last-prompt.tmp" "$STUB_DIR/last-prompt"
+    printf '{"type":"result","subtype":"success","is_error":false,"result":"ok"}\\n'
+    while IFS= read -r LINE; do
+      printf '{"type":"result","subtype":"success","is_error":false,"result":"ok"}\\n'
+    done
+    ;;
   --bg)
     PROMPT=""
     for a in "\$@"; do PROMPT=\$a; done
@@ -1128,6 +1151,11 @@ ok "the naru-live definition appears in sync status and sync apply writes it to 
 rm -f "$STUB_DIR/last-prompt"
 run 0 "$MESA" live start
 S1=$(jqs .id)
+# The runner starts claude after `live start` returns; wait for the prompt.
+for _ in $(seq 1 100); do
+  [ -f "$STUB_DIR/last-prompt" ] && break
+  sleep 0.1
+done
 [ -f "$STUB_DIR/last-prompt" ] || fail "live start must spawn the stub claude"
 if grep -q "naru live listen" "$STUB_DIR/last-prompt"; then
   fail "the loop must NOT be injected into the prompt any more: $(cat "$STUB_DIR/last-prompt")"

@@ -982,6 +982,13 @@ pub fn spawn_agent(
     prompt: &str,
 ) -> Result<String, String> {
     ensure_agent_definition(store)?;
+    start_agent(dir, name, prompt)
+}
+
+/// [`spawn_agent`] minus the seeding: the run's file I/O and process spawn,
+/// which needs no store, so a caller can seed under its lock, drop it, then
+/// call this.
+pub fn start_agent(dir: &str, name: &str, prompt: &str) -> Result<String, String> {
     let opts = crate::core::runner::StartOpts {
         model: "default".into(),
         prompt: prompt.into(),
@@ -1031,25 +1038,26 @@ fn wake_note(lease: i64) -> String {
 }
 
 /// Cuts the live agent's turn in flight with the runner's urgent send
-/// (naru task 1889). Reads the session's receipt and lease off the row;
-/// `interrupt_session` does the file I/O, so a caller holding the store lock
-/// can let go of it first.
-pub fn interrupt_agent(store: &crate::core::Store) -> crate::core::Result<serde_json::Value> {
-    let session = store.current_live_session()?.ok_or_else(|| {
-        crate::core::Error::NotFound("no live session; start one with `naru live start`".into())
-    })?;
-    interrupt_session(&session)
-}
-
+/// (naru task 1889), reading the receipt and lease off the session row. The
+/// send is file I/O, so a caller holding the store lock reads the session and
+/// lets go of it first. Refused with `{interrupted: false, reason:
+/// "delegates"}` while the agent has delegates running: a real interrupt
+/// kills the turn's background subagents, and a misheard pause phrase must
+/// not cost a delegate its work.
 pub fn interrupt_session(
     session: &crate::core::LiveSession,
 ) -> crate::core::Result<serde_json::Value> {
-    interrupt_session_in(&crate::core::runner::runs_dir(), session)
+    interrupt_session_in(
+        &crate::core::runner::runs_dir(),
+        session,
+        &running_delegates,
+    )
 }
 
 pub(crate) fn interrupt_session_in(
     runs: &std::path::Path,
     session: &crate::core::LiveSession,
+    delegates: &dyn Fn(&str) -> Vec<crate::core::types::AgentChild>,
 ) -> crate::core::Result<serde_json::Value> {
     use crate::core::{Error, runner};
     let id = match session.agent_id.as_deref().map(parse_agent_receipt) {
@@ -1071,6 +1079,11 @@ pub(crate) fn interrupt_session_in(
     let job = runner::job_in(runs, id)?;
     if job.status != runner::RunStatus::Running {
         return Ok(serde_json::json!({"interrupted": false, "status": job.status}));
+    }
+    if let Some(receipt) = session.agent_id.as_deref()
+        && !delegates(receipt).is_empty()
+    {
+        return Ok(serde_json::json!({"interrupted": false, "reason": "delegates"}));
     }
     runner::send_in(runs, id, &wake_note(session.lease), true)?;
     Ok(serde_json::json!({"interrupted": true, "job": id}))
@@ -3008,7 +3021,7 @@ question is a task, not a note",
     fn interrupt_on_a_running_run_queues_the_urgent_wake_note_with_the_lease() {
         let runs = tempfile::tempdir().unwrap();
         let (session, job, _d) = interrupt_fixture(runs.path(), Some("run:{job}"));
-        let out = interrupt_session_in(runs.path(), &session).unwrap();
+        let out = interrupt_session_in(runs.path(), &session, &|_| Vec::new()).unwrap();
         assert_eq!(out, serde_json::json!({"interrupted": true, "job": job}));
         let files = inbox_files(runs.path(), &job);
         // The job's first prompt may also sit in the inbox; the wake note is
@@ -3028,6 +3041,31 @@ question is a task, not a note",
     }
 
     #[test]
+    fn interrupt_with_a_running_delegate_sends_nothing_and_says_why() {
+        let runs = tempfile::tempdir().unwrap();
+        let (session, job, _d) = interrupt_fixture(runs.path(), Some("run:{job}"));
+        let delegate = crate::core::types::AgentChild {
+            id: Some("agent-x-1".into()),
+            kind: crate::core::types::AgentChildKind::Subagent,
+            name: "x".into(),
+            detail: None,
+            started_at: None,
+            context_tokens: None,
+            model: None,
+            description: None,
+            command: None,
+            state: crate::core::types::AgentChildState::Running,
+        };
+        let before = inbox_files(runs.path(), &job);
+        let out = interrupt_session_in(runs.path(), &session, &|_| vec![delegate.clone()]).unwrap();
+        assert_eq!(
+            out,
+            serde_json::json!({"interrupted": false, "reason": "delegates"})
+        );
+        assert_eq!(inbox_files(runs.path(), &job), before);
+    }
+
+    #[test]
     fn interrupt_on_a_run_that_is_not_running_sends_nothing() {
         let runs = tempfile::tempdir().unwrap();
         let (session, job, _d) = interrupt_fixture(runs.path(), Some("run:{job}"));
@@ -3037,7 +3075,7 @@ question is a task, not a note",
         v["status"] = "idle".into();
         std::fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
         let before = inbox_files(runs.path(), &job);
-        let out = interrupt_session_in(runs.path(), &session).unwrap();
+        let out = interrupt_session_in(runs.path(), &session, &|_| Vec::new()).unwrap();
         assert_eq!(
             out,
             serde_json::json!({"interrupted": false, "status": "idle"})
@@ -3050,12 +3088,12 @@ question is a task, not a note",
         let runs = tempfile::tempdir().unwrap();
         let (bare, _, _d) = interrupt_fixture(runs.path(), Some("0a1b2c3d"));
         assert!(matches!(
-            interrupt_session_in(runs.path(), &bare),
+            interrupt_session_in(runs.path(), &bare, &|_| Vec::new()),
             Err(crate::core::Error::Unavailable(_))
         ));
         let (none, _, _d2) = interrupt_fixture(runs.path(), None);
         assert!(matches!(
-            interrupt_session_in(runs.path(), &none),
+            interrupt_session_in(runs.path(), &none, &|_| Vec::new()),
             Err(crate::core::Error::Unavailable(_))
         ));
     }

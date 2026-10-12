@@ -594,9 +594,29 @@ pub fn start_in(runs: &Path, opts: &StartOpts) -> Result<Value> {
 /// Crate-internal on purpose: [`StartOpts`] carries no template, so a caller
 /// of the CLI or API cannot choose one.
 pub(crate) fn start_in_with(runs: &Path, opts: &StartOpts, action: Option<&str>) -> Result<Value> {
-    let job = create_job_with(runs, opts, action)?;
+    start_in_spawning(runs, opts, action, spawn_runner)
+}
+
+/// [`start_in_with`] with the runner launch injected. A launch that fails
+/// leaves the job `Failed` (terminal): a job left `Running` with no runner is
+/// exactly what [`reconcile_in`] resumes, so a start that reported an error
+/// would come back as a zombie run the caller believes never existed.
+fn start_in_spawning(
+    runs: &Path,
+    opts: &StartOpts,
+    action: Option<&str>,
+    spawn: impl FnOnce(&Path) -> Result<()>,
+) -> Result<Value> {
+    let mut job = create_job_with(runs, opts, action)?;
     let dir = runs.join(&job.job_id);
-    spawn_runner(&dir)?;
+    if let Err(e) = spawn(&dir) {
+        job.status = RunStatus::Failed;
+        job.finished_at = Some(now_secs());
+        job.last_result = Some(e.to_string());
+        let _ = save(&dir, &mut job);
+        runner_event(&dir, "failed", json!({"error": e.to_string()}));
+        return Err(e);
+    }
     Ok(view(&dir, &job))
 }
 
@@ -1175,6 +1195,24 @@ mod tests {
         assert_eq!(v["message"]["role"], "user");
         assert_eq!(v["message"]["content"][0]["type"], "text");
         assert_eq!(v["message"]["content"][0]["text"], "hi \"there\"\nsecond");
+    }
+
+    #[test]
+    fn a_start_whose_runner_cannot_spawn_leaves_a_failed_job_reconcile_skips() {
+        let runs = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let err = start_in_spawning(runs.path(), &opts("a", cwd.path()), None, |_| {
+            Err(Error::Unavailable("no runner".into()))
+        })
+        .unwrap_err();
+        assert!(matches!(err, Error::Unavailable(_)));
+        let jobs = list_in(runs.path()).unwrap();
+        assert_eq!(jobs.len(), 1);
+        let dir = runs.path().join(jobs[0]["job_id"].as_str().unwrap());
+        let job = load(&dir).unwrap();
+        assert_eq!(job.status, RunStatus::Failed);
+        assert!(job.finished_at.is_some());
+        assert!(reconcile_in(runs.path()).unwrap().is_empty());
     }
 
     #[test]

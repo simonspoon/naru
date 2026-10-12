@@ -5279,8 +5279,8 @@ async fn start_live(
     require_agent_access(&state, &addr, &headers)?;
     let Json(body) = body?;
     // Two-phase like every other spawn site in this file: the store lock is
-    // dropped before the blocking `claude --bg` shell-out, which would
-    // otherwise freeze every other API request for its duration.
+    // dropped before the blocking run start (job files + runner process),
+    // which would otherwise freeze every other API request for its duration.
     // The session opens FIRST, so an unknown `project_id` stays the store's
     // `validation` rather than becoming a `not_found` from the project read
     // below. Everything after it goes through the one rollback path.
@@ -5457,15 +5457,17 @@ async fn spawn_live_agent(
         }
         None => live::agent_prompt(&state.store.lock().unwrap(), session_id),
     };
-    // `live::spawn_agent` seeds the `naru-live` agent definition first (mesa
-    // task 1068; a failure is treated exactly like a failed spawn —
-    // `unavailable`, and the caller ends the session it just opened) and starts
-    // the conversation as a `naru run` job (naru task 1886), the prompt its
-    // first inbox message. Off the request thread like every other spawn site
-    // in this file; the store is locked only for the seed.
+    // The `naru-live` agent definition is seeded first (mesa task 1068; a
+    // failure is treated exactly like a failed spawn — `unavailable`, and the
+    // caller ends the session it just opened), then the conversation starts as
+    // a `naru run` job (naru task 1886), the prompt its first inbox message.
+    // Off the request thread like every other spawn site in this file; the
+    // store is locked only for the seed and let go of before the job's file
+    // I/O and process spawn (`live::start_agent` takes no store).
     let store = state.store.clone();
     let job = tokio::task::spawn_blocking(move || {
-        live::spawn_agent(&store.lock().unwrap(), &dir, &name, &prompt).map(Some)
+        live::ensure_agent_definition(&store.lock().unwrap())?;
+        live::start_agent(&dir, &name, &prompt).map(Some)
     })
     .await
     .map_err(|e| agents_unavailable(format!("live agent spawn panicked: {e}")))

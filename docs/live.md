@@ -664,8 +664,10 @@ note. Answers `{"interrupted": true, "job": <id>}`; when the run is not
 mid-turn (idle, stopped, finished) `{"interrupted": false, "status": ...}` and
 nothing is sent. No live session is `not_found`; a session with no agent, or
 one still on a legacy `claude --bg` receipt, is `unavailable`. **Warning:** a
-real interrupt also kills that turn's background subagents and shells, so a
-delegate running in the interrupted turn is lost.
+real interrupt also kills that turn's background subagents and shells, so
+when the agent has a delegate running (`live::running_delegates`) nothing is
+sent and the answer is `{"interrupted": false, "reason": "delegates"}`: a
+misheard pause phrase must not cost a delegate its work.
 
 ### Delegated results across a handoff (mesa task 1359)
 

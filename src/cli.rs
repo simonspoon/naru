@@ -6575,9 +6575,10 @@ fn run_live(cmd: LiveCmd) -> Result<()> {
             .map(Some);
             // NOT `bind_live_agent_or_end`: a successor that could not start
             // leaves the conversation exactly as it was — still live, still
-            // the caller's, same lease — rather than ending it. The caller is
-            // never stopped here: it IS the outgoing agent, and the
-            // successor's first `listen --lease` stops it.
+            // the caller's, same lease — rather than ending it. The outgoing
+            // agent is stopped only once the session is rebound (below, unless
+            // it has delegates running), else by the successor's first
+            // `listen --lease`.
             let job = spawned.map_err(|e| {
                 Error::Unavailable(format!(
                     "live session {} could not spawn a successor agent, so it was not \
