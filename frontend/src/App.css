@@ -12144,13 +12144,13 @@ body.dock-resizing .dock-body {
    list is painted on the sidebar and on the pinned `.nav-top` (its top-left
    coincides with the sidebar's: margin -1rem cancels the sidebar padding), so
    the head is opaque yet shows no seam. Fixed px radii centred on the mark
-   (naru task 1869): widening the nav lengthens the wash's tail, never
-   stretches it. */
+   (naru task 1869); wide soft ellipses (width a % of the nav, so identical
+   on both boxes; height px) fading out well below the mark (naru task 1870). */
 .shell-body.docked .sidebar:not(.collapsed) {
   --nav-wash:
-    radial-gradient(ellipse 150px 120px at 50% 110px, rgba(var(--cyan-rgb), 0.32), transparent 70%),
-    radial-gradient(ellipse 190px 150px at calc(50% - 50px) 125px, rgba(var(--violet-rgb), 0.3), transparent 70%),
-    radial-gradient(ellipse 190px 150px at calc(50% + 50px) 130px, rgba(var(--magenta-rgb), 0.24), transparent 70%);
+    radial-gradient(ellipse 80% 190px at 50% 70px, rgba(var(--cyan-rgb), 0.28), transparent 70%),
+    radial-gradient(ellipse 110% 250px at 25% 85px, rgba(var(--violet-rgb), 0.28), transparent 70%),
+    radial-gradient(ellipse 110% 250px at 78% 95px, rgba(var(--magenta-rgb), 0.2), transparent 70%);
   background-image: var(--nav-wash);
   background-repeat: no-repeat;
 }
@@ -12186,34 +12186,73 @@ body.dock-resizing .dock-body {
   background: var(--violet);
 }
 
-/* Nav entries as chat bubbles (`.live-turn`'s look): a soft tint and a thin
-   inset accent bar, no outline or border; the active one brighter. */
-.shell-body.docked .sidebar:not(.collapsed) .nav-item,
-.shell-body.docked .sidebar:not(.collapsed) .nav-projects a {
-  padding: 0.5rem 0.85rem;
+/* The five main nav links (direct children of the nav; Settings in the
+   footer and the Projects heading are not) are soft cards: a tint, a straight
+   left accent bar (border-left, so it never curls at the corners) and a gap.
+   The active one is brighter with a 3px bar; padding-left is 1px less so the
+   text stays put. */
+.shell-body.docked .sidebar:not(.collapsed) > a.nav-item {
+  margin-bottom: 6px;
+  padding: 9px 14px 9px 14px;
   border: none;
-  outline: none;
-  border-radius: 14px 14px 14px 5px;
+  border-left: 2px solid rgba(var(--cyan-rgb), 0.35);
+  border-radius: 10px;
   background: rgba(var(--cyan-rgb), 0.05);
-  box-shadow: inset 2px 0 0 rgba(var(--cyan-rgb), 0.35);
+  box-shadow: none;
 }
 
-.shell-body.docked .sidebar:not(.collapsed) .nav-item:hover:not(:disabled),
-.shell-body.docked .sidebar:not(.collapsed) .nav-projects a:hover {
+.shell-body.docked .sidebar:not(.collapsed) > a.nav-item:hover {
   background: rgba(var(--cyan-rgb), 0.1);
-  box-shadow: inset 2px 0 0 rgba(var(--cyan-rgb), 0.6);
+  border-left-color: rgba(var(--cyan-rgb), 0.6);
 }
 
-.shell-body.docked .sidebar:not(.collapsed) .nav-item.active,
-.shell-body.docked .sidebar:not(.collapsed) .nav-projects a.active {
-  background: rgba(var(--cyan-rgb), 0.12);
-  box-shadow:
-    inset 3px 0 0 rgba(var(--cyan-rgb), 0.95),
-    0 0 14px rgba(var(--cyan-rgb), 0.15);
+.shell-body.docked .sidebar:not(.collapsed) > a.nav-item.active {
+  padding-left: 13px;
+  border-left: 3px solid var(--cyan);
+  background: rgba(var(--cyan-rgb), 0.13);
+  box-shadow: 0 0 14px rgba(var(--cyan-rgb), 0.15);
   color: var(--text-h);
 }
 
-.shell-body.docked .sidebar:not(.collapsed) .nav-item:focus-visible,
+/* "Projects" is a plain section heading, not a card. */
+.shell-body.docked .sidebar:not(.collapsed) .nav-item.nav-section:not(.nav-subsection) {
+  margin-top: 16px;
+  padding: 0 0.5rem;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.shell-body.docked .sidebar:not(.collapsed) .nav-item.nav-section:not(.nav-subsection):hover {
+  background: none;
+  color: var(--text-h);
+}
+
+/* Project rows: plain light rows, no card, bar or border. */
+.shell-body.docked .sidebar:not(.collapsed) .nav-projects li {
+  margin-top: 2px;
+}
+
+.shell-body.docked .sidebar:not(.collapsed) .nav-projects a {
+  padding: 6px 10px;
+  border: none;
+  border-radius: 7px;
+  background: none;
+  box-shadow: none;
+}
+
+.shell-body.docked .sidebar:not(.collapsed) .nav-projects a:hover {
+  background: rgba(var(--cyan-rgb), 0.05);
+}
+
+.shell-body.docked .sidebar:not(.collapsed) .nav-projects a.active {
+  background: rgba(var(--cyan-rgb), 0.08);
+  text-shadow: none;
+}
+
+.shell-body.docked .sidebar:not(.collapsed) > a.nav-item:focus-visible,
 .shell-body.docked .sidebar:not(.collapsed) .nav-projects a:focus-visible {
   outline: 1px solid rgba(var(--cyan-rgb), 0.6);
 }
