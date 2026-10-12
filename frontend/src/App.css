@@ -12107,3 +12107,71 @@ body.dock-resizing .dock-body {
   font-size: 0.82rem;
   color: var(--amber);
 }
+
+/* Expanded docked desktop nav restyle (naru task 1850). Every rule is scoped
+   to `.shell-body.docked .sidebar:not(.collapsed)`: the phone tier is not
+   `docked` and the collapsed rail is `.collapsed`, so both keep the old look.
+   Theme variables only (the -rgb triplets), so every theme tints it. */
+
+/* The wash spills from the mark's colours behind the nav. The same gradient
+   list is painted on the sidebar and on the pinned `.nav-top` (its top-left
+   coincides with the sidebar's: margin -1rem cancels the sidebar padding), so
+   the head is opaque yet shows no seam. Radii are % of width (identical for
+   both boxes) and px of height, never % of each box's own height. */
+.shell-body.docked .sidebar:not(.collapsed) {
+  --nav-wash:
+    radial-gradient(ellipse 80% 200px at 50% 80px, rgba(var(--cyan-rgb), 0.32), transparent 70%),
+    radial-gradient(ellipse 110% 290px at 25% 126px, rgba(var(--violet-rgb), 0.3), transparent 70%),
+    radial-gradient(ellipse 110% 290px at 78% 135px, rgba(var(--magenta-rgb), 0.24), transparent 70%);
+  background-image: var(--nav-wash);
+  background-repeat: no-repeat;
+}
+
+/* Opaque again so scrolled items never show through the mark; the wash is
+   repainted over the sidebar's base colour. */
+.shell-body.docked .sidebar:not(.collapsed) .nav-top {
+  background-color: var(--bg);
+  background-image: var(--nav-wash);
+  background-repeat: no-repeat;
+  background-position: 0 0;
+}
+
+.shell-body.docked .sidebar:not(.collapsed) .nav-orb {
+  width: 88%;
+  height: auto;
+  aspect-ratio: 1;
+  align-self: center;
+  margin: 0;
+  background: none;
+  box-shadow: none;
+  border-radius: 0;
+  overflow: visible;
+  pointer-events: auto;
+}
+
+/* The mark fills its square (default leaves 1rem on each side). */
+.shell-body.docked .sidebar:not(.collapsed) .orb-panel-mark {
+  width: min(100cqw, 100cqh);
+}
+
+/* Nav entries as chat bubbles (`.live-turn`'s look). */
+.shell-body.docked .sidebar:not(.collapsed) .nav-item {
+  padding: 0.5rem 0.85rem;
+  border-left: none;
+  border-radius: 14px 14px 14px 5px;
+  background: rgba(var(--cyan-rgb), 0.05);
+  box-shadow: inset 2px 0 0 rgba(var(--cyan-rgb), 0.35);
+}
+
+.shell-body.docked .sidebar:not(.collapsed) .nav-item:hover:not(:disabled) {
+  background: rgba(var(--cyan-rgb), 0.1);
+  box-shadow: inset 2px 0 0 rgba(var(--cyan-rgb), 0.6);
+}
+
+.shell-body.docked .sidebar:not(.collapsed) .nav-item.active {
+  background: rgba(var(--cyan-rgb), 0.16);
+  box-shadow:
+    inset 3px 0 0 rgba(var(--cyan-rgb), 0.95),
+    0 0 16px rgba(var(--cyan-rgb), 0.22);
+  color: var(--text-h);
+}
