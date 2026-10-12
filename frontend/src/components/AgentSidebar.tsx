@@ -854,6 +854,7 @@ function AgentListContent({
     const headlineStart = headlineSince(a)
     const trail = stepTrail(a)
     const trailShown = trailOpen.includes(a.sessionId)
+    const nowMs = clockNow()
     const trailAge = (atMs: number | null) => (atMs === null ? '' : `${elapsedSince(atMs, nowMs)} ago`)
     const headlineTitle =
       trail.length === 0
@@ -872,7 +873,6 @@ function AgentListContent({
       a.taskId !== null && proj ? `#/projects/${proj.id}/tasks/${a.taskId}` : null
     const elapsed = elapsedNow(a.startedAt)
     const wait = pinned ? liveCardWait(a) : a.waitingFor
-    const nowMs = clockNow()
     // The work this session holds in flight: each child is a card of its own
     // right under it (mesa tasks 1277, 1561), not a row inside it.
     const shown = visibleChildren(a, nowMs)
