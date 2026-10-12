@@ -9,6 +9,7 @@
 import { unregisterHookQuery } from './libraryHooks'
 import { scorecardQuery } from './ccScorecard'
 import type { RunJob, RunShown } from './runEvents'
+import { parseWatchLine, type FilesWatchEvent } from './filesWatch'
 import { finishNdjson, parseEvent, splitNdjson } from './scriptRun'
 
 import type { ImportResolution } from './libraryImport'
@@ -1875,9 +1876,10 @@ export async function runScriptStream(
  * its run and the GET that only watches one — so a replayed byte and a live
  * one can never be cut or parsed differently.
  */
-async function readNdjson(
+async function readNdjson<T = ScriptRunEvent>(
   res: Response,
-  onEvent: (event: ScriptRunEvent) => void,
+  onEvent: (event: T) => void,
+  parse: (line: string) => T | null = parseEvent as (line: string) => T | null,
 ): Promise<void> {
   if (res.body === null) return
   const reader = res.body.getReader()
@@ -1885,7 +1887,7 @@ async function readNdjson(
   let rest = ''
   const deliver = (lines: string[]) => {
     for (const line of lines) {
-      const event = parseEvent(line)
+      const event = parse(line)
       if (event !== null) onEvent(event)
     }
   }
@@ -1897,6 +1899,24 @@ async function readNdjson(
     deliver(cut.lines)
   }
   deliver(finishNdjson(rest + decoder.decode()))
+}
+
+/**
+ * Follows the Files tab's directory watch (naru task 1873): one NDJSON line
+ * per `FilesWatchEvent` until the body ends. Resolves when the stream ends;
+ * the caller re-opens it after `reconnectDelayMs`. Aborting `signal` closes it.
+ */
+export async function watchProjectFiles(
+  projectId: number,
+  onEvent: (event: FilesWatchEvent) => void,
+  signal: AbortSignal,
+): Promise<void> {
+  const res = await fetch(`/api/projects/${projectId}/files/watch`, {
+    headers: { Accept: 'application/x-ndjson' },
+    signal,
+  })
+  if (!res.ok) throw await apiErrorFrom(res)
+  await readNdjson(res, onEvent, parseWatchLine)
 }
 
 // ---- detached script runs (mesa task 1224) ----
