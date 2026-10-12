@@ -106,7 +106,11 @@ handed — and "Speech, reused rather than rebuilt" (below) for audio-out's:
 
 ## The loop, and why it pulls
 
-A live session is a loop the **agent** runs, not one Naru drives:
+A live session is a loop the **agent** runs, not one Naru drives. Since naru
+task 1886 the agent is a `claude -p --input-format stream-json` session held
+open by `core::runner` (a `naru run` job, `docs/runner.md`), started through the
+`live-agent` template — no longer a `claude --bg` agent — and it still pulls
+with `listen` exactly as below:
 
 1. `mesa live listen --lease <n>` — the agent asks for the next thing the
    person said, and since mesa task 1156 it runs the command **in the
@@ -189,7 +193,7 @@ The instructions the agent is spawned with are the **`naru-live` agent
 definition** (mesa task 1068) — `core::live::AGENT_DEFINITION`, YAML
 frontmatter plus `core::live::AGENT_PROMPT`, one constant in `core` because
 both spawn sites (the CLI's `live start` and `POST /api/live`) drive the same
-`agents::spawn_bg` chokepoint. It states the loop, the route vocabulary, the
+`live::spawn_agent` chokepoint. It states the loop, the route vocabulary, the
 step that tells the agent to run **`mesa live status`** to find out what the
 person is looking at — the page as `route` and what is open on it as `context`,
 *"read it instead of asking them where they are"* (task 888) — the step that
@@ -201,10 +205,10 @@ and the untrusted-input posture below.
 The definition is a **library** row (`docs/library.md`): the `naru-live`
 built-in, kind `agent`, user scope, which is why it has a real path —
 `.claude/agents/naru-live.md` — and rides the ordinary library sync. The
-`live-agent` template spawns `claude --bg --agent naru-live …`, and Claude Code
+`live-agent` template runs `claude -p … --agent naru-live …`, and Claude Code
 errors on an agent it has never seen, so **the first start seeds the file**:
-`live::ensure_agent_definition(store)` runs at both spawn sites, before
-`spawn_bg`, resolves the effective `naru-live` row (its fork if one exists, the
+`live::ensure_agent_definition(store)` runs at both spawn sites (it is the
+first step of `live::spawn_agent`), before the run starts, resolves the effective `naru-live` row (its fork if one exists, the
 built-in otherwise), computes the target through the library's own
 `relative_path`/`scope_base`/`resolve` machinery — so `$HOME` is honoured and
 the traversal check holds — creates the parent directory and writes the body.
@@ -286,7 +290,7 @@ state, and nothing pushed.
 By voice, silence is confusing. `working_since` says the agent *took* the
 utterance; it does not say whether it is thinking, waiting on a Claude Code
 **permission prompt** nobody can see, or wedged — and the agent cannot report
-any of that itself, because a `claude --bg` session stuck on a prompt says
+any of that itself, because a session stuck on a prompt says
 nothing, and so does one that has simply gone quiet. Until this task the
 person found out by attaching a terminal. Detection is therefore external, in
 two halves, and the report is a **turn**. Only the permission prompt is
@@ -333,7 +337,12 @@ it created it or found it: the page does not care which.
 stored**. When the session is live and has an `agent_id`, `get_live` looks the
 job up in `claude agents --json --all` (`agents::job_blocked_on`, the same
 loosely-read payload `find_job_for_session` uses) and answers the job's
-`waitingFor` string — `"permission prompt"` — else null.
+`waitingFor` string — `"permission prompt"` — else null. **A run is always
+null** (naru task 1886): when `agent_id` is a `run:<job>` receipt the lookup is
+skipped outright, because a `claude -p` session gets no permission prompt — a
+tool the session may not use is denied, not waited on — so there is nothing to
+ask `claude agents`. Only a legacy bare job id (a session started before that
+task) is looked up as described here.
 
 `state: "blocked"` alone is **not** the signal (mesa task 1293). Upstream it
 is one `requires_action` bucket covering five distinct reasons, of which only
@@ -436,11 +445,12 @@ The outgoing agent writes a short note — the current topic, what is
 pending, any promise it made — and runs `mesa live handoff "<note>"`. Naru
 then, in order:
 
-1. Spawns a **successor** on the same session through the same `live-agent`
-   template (`agents::spawn_bg`, `--agent naru-live`, working folder and
+1. Starts a **successor** run on the same session through the same `live-agent`
+   template (`live::spawn_agent` → `core::runner`, `--agent naru-live`, working folder and
    name from `live_agent_dir`, the name suffixed `· lease <n>` so the Agents
    sidebar can tell the generations apart), with `live::handoff_prompt` as
-   its prompt.
+   the run's first message. Its receipt, `run:<job>`, becomes the session's
+   `agent_id`.
 2. If the notebook wants a dream pass — `live::dream_wanted`, a cheap
    deterministic check decided *before* anything is spawned (mesa task
    1155, "Dreaming" below) — spawns one through the `live-dream` template,
@@ -495,8 +505,9 @@ a wasted spawn, never a wrong one.
 The **predecessor is stopped by the successor's first `listen`**, not by
 itself: a lease-carrying `listen` whose lease matches takes
 `predecessor_agent_id` off the row (`Store::take_live_predecessor`, one
-`UPDATE … RETURNING`, so it answers exactly once) and runs `claude stop`
-on it, best-effort — a failure is one stderr line, like `stop_live_agent`'s.
+`UPDATE … RETURNING`, so it answers exactly once) and stops it
+(`live::stop_agent`: a `run:<job>` gets its stop marker; a legacy bare id
+still gets `claude stop`), best-effort — a failure is one stderr line, like `stop_live_agent`'s.
 By then the successor is provably in the loop, which is the moment the old
 agent is safe to lose; the outgoing agent, for its part, has been told to
 end its turn after `handoff` and never listen again. Ending the session
@@ -537,7 +548,10 @@ reading the Agents sidebar row shows — after `agents::find_session_for_job`
 (the reverse of the cost guard's `find_job_for_session`: `claude agents
 --json --all`, the row whose short `id` is the receipt, its `sessionId`;
 a lookup, never an inference) has turned the spawn receipt into the uuid
-the transcript is filed under. `context_tokens` is `null` when the
+the transcript is filed under — for a `run:<job>` receipt (naru task 1886,
+`live::agent_session_uuid`) that is the run's `job.json` `session_id`, with no
+`claude agents` lookup at all; the `claude agents` path is the legacy bare-id
+case. `context_tokens` is `null` when the
 transcript cannot be read (the pulse fails open); a session with no agent
 bound, or one `claude agents` does not list, is `unavailable`. CLI-only
 like `look`, and it takes no `--quiet`. `dream` (mesa task 1155) is the
@@ -640,7 +654,7 @@ A delegate — a fork or subagent started under rule 12 — runs *inside* the
 driving agent's Claude Code process, and its result used to arrive only as
 a task-notification to that process. A handoff broke both halves: the
 notification went to an agent that had been told to do nothing more, and
-the successor's first `listen` ran `claude stop` on that agent, very likely
+the successor's first `listen` stopped that agent, very likely
 killing the delegate before it finished. Live session 12 lost a
 crash-analysis this way.
 
@@ -666,9 +680,11 @@ Three pieces close it:
   A result is never a turn: it is not spoken, not in `live turns`, not in
   `GET /api/live` and not indexed into the memory archive.
 - **The handoff protects the delegates.** `handoff` asks
-  `agents::running_subagents` for the outgoing job's running subagents
-  (`claude agents --json --all` → the row whose `id` is the session's
-  `agent_id`, if it is still running → its `sessionId` → that session's
+  `live::running_delegates` for the outgoing agent's running subagents
+  (for a `run:<job>` receipt the session uuid comes straight from the run's
+  `job.json` (`agents::running_subagents_of_session`); for a legacy bare id,
+  `claude agents --json --all` → the row whose `id` is the session's
+  `agent_id`, if it is still running → its `sessionId` — then, either way, that session's
   `subagents/*.jsonl` transcripts judged by `delegate_running`; any failure
   is an empty list, never a failed handoff) and appends a last block to the
   successor's prompt naming each by name and transcript id, framed as data
@@ -679,8 +695,11 @@ Three pieces close it:
   `listen` tries again — and once none is running,
   `take_live_predecessor_if` clears exactly the id it probed (a
   compare-and-set, so a handoff landing between the probe and the take is
-  never cleared by a caller that probed the old predecessor) and `claude
-  stop` runs as before.
+  never cleared by a caller that probed the old predecessor) and the stop
+  runs as before. Likewise the handoff itself stops the outgoing run **at
+  once** — its stop marker, in `stop_handed_off_agent` (naru task 1886) —
+  unless that probe finds delegates, in which case the deferral above is
+  unchanged.
 - **Nothing is orphaned.** A predecessor still deferred is taken and
   stopped by `live stop` (and `DELETE /api/live`) *before* the session is
   ended, since ending clears the column; and by the next `handoff`, whose
@@ -1368,7 +1387,7 @@ The two moments:
    waking). A lease-less `listen` takes the same path. Why `listen` rather
    than `handoff` blocking: the outgoing agent runs `handoff` inside a Bash
    tool call with its own timeout, and a child it detached to wait could
-   not outlive the `claude stop` the successor's first listen runs — the
+   not outlive the stop the successor's first listen runs — the
    successor's listen is the one process provably around for the whole
    rest. `end_live_session` clears both columns too, so a conversation
    ended mid-rest wakes nobody.
@@ -2582,8 +2601,10 @@ takes exactly one value.
   session's end is still noticed promptly — `listen` returns early on it, and
   every later `live` command reports there is no live session, which is the
   stop signal the routine `status` poll used to be.
-- **`start` spawns the agent** through `agents::spawn_bg` with the
-  `live-agent` command template (`docs/config.md`), in the project's
+- **`start` spawns the agent** as a `naru run` job through `live::spawn_agent`
+  (naru task 1886) with the `live-agent` command template (`docs/config.md`),
+  its receipt `run:<job>` stored as `agent_id` (a session from before that
+  task keeps a bare `claude --bg` short id, handled by the legacy path), in the project's
   `local_path` when that is a live directory and `~/.mesa/workspace` otherwise
   (`config::workspace_dir`, the folder every unbound agent runs in — Claude
   Code never persists folder trust for the home directory, so a `$HOME` spawn
@@ -2605,20 +2626,20 @@ takes exactly one value.
   instead. (A spawn that *succeeded* but printed no receipt is a different
   case: `agent_id` stays null, the session stays live, and that is not a
   failure.)
-- **`stop` stops that agent**, on both surfaces — `claude stop <agent_id>`,
-  the short job id the spawn receipt carried. The agent does notice on its own
+- **`stop` stops that agent**, on both surfaces — `live::stop_agent`: the
+  run's stop marker for a `run:<job>` receipt (`claude stop <agent_id>` for a
+  legacy bare id). The agent does notice on its own
   (its loop checks `mesa live status`), but noticing only ends its *turn*: the
   background session stays listed, idle, one per conversation, and the person
   who hung up reads that as Naru never letting go. So ending the conversation
-  finishes the session it started — the same binary either way
-  (`agents::claude_bin`), because `claude stop` takes the id `claude --bg`
-  printed, and deliberately **not** a fifth command template: a template
-  chooses what starts a session, and Naru must be able to stop exactly the
-  session it started.
+  finishes the session it started — by the receipt's own kind, and
+  deliberately **not** a fifth command template: a template chooses what
+  starts a session, and Naru must be able to stop exactly the session it
+  started.
 - **Stopping the agent is best-effort, and never the answer.** The store write
   is what ended the conversation. A session with `agent_id` null (`--no-agent`,
   or a start command that printed no receipt) has nothing to stop; a failing
-  `claude stop` is a warning on **stderr** in the CLI and a log line in the
+  stop is a warning on **stderr** in the CLI and a log line in the
   server, never a nonzero exit and never anything on stdout, which stays the
   ended `LiveSession` and nothing else. The agent's own status check is the
   backstop.
@@ -2749,11 +2770,10 @@ Why each gate is what it is:
 
 `POST /api/live` is two-phase like every other spawn site in `api.rs`: the
 store lock is taken to open the session and read the project's `local_path`,
-then **dropped** before the blocking `claude --bg` shell-out, which would
+then **dropped** before the blocking blocking run start (`live::spawn_agent`), which would
 otherwise freeze every other API request for its duration. It answers **201**,
 invalidating the agents cache on the way out so the Agents sidebar shows the
-new session on its next poll rather than after the TTL — a live agent is an
-ordinary background session.
+new session on its next poll rather than after the TTL.
 
 The one behaviour the speak route does not share with its inbox twin: speaking
 a turn whose `text` is empty — a pure `navigate` — is a **`validation`** error,
@@ -3803,10 +3823,13 @@ the CLI has no server to hold the offer.
 ## Config
 
 The spawn is the fourth configurable command: **`live-agent`**, defaulting to
-`claude --bg --agent naru-live --name {name} -- {prompt}` — the union of the two
-existing shapes, since a live session is a Naru record (so it has an `{id}` and
-a `{name}`) *and* carries a prompt Naru supplies. That prompt is
-`live::agent_prompt`, so the feature works with **no user configuration**. The
+`claude -p --input-format stream-json --output-format stream-json --verbose
+--agent naru-live --name {name} {session_flag} {session_id}` (naru task 1886:
+the conversation is a `naru run` job, so it offers `{name}`, `{session_flag}`
+and `{session_id}`; a saved override that still starts a `--bg` agent is ignored on
+read, and that or one naming `{prompt}` is refused on save, `docs/config.md`). The
+prompt Naru supplies, `live::agent_prompt`, is the run's first inbox message,
+so the feature works with **no user configuration**. The
 agent is named **literally** here (mesa task 1068): the conversation runs as
 the `naru-live` agent definition, which is where its instructions live, and a
 user who wants another edits the name (since mesa task 1141 every default
@@ -3947,9 +3970,8 @@ CLAUDE.md requires: **data, never instructions.**
 ## Gate
 
 `scripts/live-check.sh` — the CLI loop end to end (start → say → navigate →
-listen → turns → sidebars → stop), the spawn's argv and the `claude stop
-<agent_id>` that matches it on both surfaces (including both best-effort cases:
-no agent to stop, and a `claude stop` that fails), the single-session
+listen → turns → sidebars → stop), the spawn's argv and the stop (the run's stop marker) that matches it on both surfaces (including both best-effort cases:
+no agent to stop, and a stop that fails), the single-session
 `conflict`, every `validation` rule,
 `listen` returning `null` on timeout and never handing out the same turn twice,
 the `working_since` span it opens and closes (set when the utterance is handed
