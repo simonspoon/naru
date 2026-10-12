@@ -3087,6 +3087,17 @@ EXAMPLES
     /// task 1155) — or null when it does not. CLI-only, like `look`; takes
     /// no --quiet.
     Context,
+    /// Cut the driving agent's turn in flight and wake it to listen again: `{interrupted, ...}`
+    ///
+    /// A barge-in's urgent send (naru task 1889): the run's turn is
+    /// interrupted and a fixed Naru note naming the current lease is
+    /// delivered as the next message, so the agent re-listens instead of
+    /// being left deaf (a bare interrupt kills the turn's background
+    /// `listen`). It may also kill that turn's background subagents and
+    /// shells. `{"interrupted": false, "status": ...}` when the run is not
+    /// mid-turn, nothing sent; `unavailable` for a session with no agent or
+    /// a legacy `--bg` one. Takes no --lease; --quiet is accepted and ignored.
+    Interrupt,
     /// Record mesa's own report about the agent as a spoken turn; prints it
     ///
     /// KIND is `permission` (the agent's Claude Code session is blocked on a
@@ -6638,6 +6649,13 @@ fn run_live(cmd: LiveCmd) -> Result<()> {
                 &live::stop_agent,
             );
             print_live_session(&session, quiet);
+        }
+        LiveCmd::Interrupt => {
+            let session = current_live_session(&store)?;
+            // The send is file I/O on the run's directory; let go of the
+            // store first.
+            drop(store);
+            print_json(&live::interrupt_session(&session)?);
         }
         LiveCmd::Context => {
             let session = current_live_session(&store)?;

@@ -370,7 +370,17 @@ case "\$1" in
       printf '{"type":"result","subtype":"success","is_error":false,"result":"ok"}\\n'
       while IFS= read -r LINE; do
         printf '%s\\n' "\$LINE" >> "\$D/stdin.log"
-        if [ "\$(jq -r '.type' <<<"\$LINE")" = control_request ]; then continue; fi
+        if [ "\$(jq -r '.type' <<<"\$LINE")" = control_request ]; then
+          # An interrupt (naru task 1889): while a held turn is open, cut it
+          # the way claude does, with a result for the interrupted turn.
+          if [ -e "$STUB_DIR/hold-turn" ]; then
+            rm -f "$STUB_DIR/hold-turn"
+            printf '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"interrupted"}\\n'
+          fi
+          continue
+        fi
+        # \`hold-turn\` keeps a turn in flight: no result until interrupted.
+        if [ -e "$STUB_DIR/hold-turn" ]; then continue; fi
         printf '{"type":"result","subtype":"success","is_error":false,"result":"ok"}\\n'
       done
       exit 0
@@ -5056,6 +5066,97 @@ run 0 "$MESA" live ambient on
   fail "asking for the state the host already reports clears the request and does not bump seq"
 ok "a matching host report clears the request; an already-satisfied ask bumps nothing"
 run 0 "$MESA" live stop
+
+# =====================================================================
+# 20. Interrupt (naru task 1889): `naru live interrupt` / POST /api/live/interrupt
+# =====================================================================
+#
+# A barge-in cuts the agent's turn with the runner's urgent send: one
+# control_request interrupt, then a fixed Naru wake note (the lease and no
+# person text) as the next user message. The stub holds a turn open while
+# $STUB_DIR/hold-turn exists and ends it on the interrupt.
+
+run 1 "$MESA" live interrupt
+[ "$(jqe .error.code)" = "not_found" ] || fail "live interrupt with no session: not_found (got $STDERR)"
+api 404 POST "/api/live/interrupt" '{}'
+[ "$(jqb .error.code)" = "not_found" ] || fail "POST interrupt with no session: not_found"
+
+run 0 "$MESA" live start --no-agent
+run 1 "$MESA" live interrupt
+[ "$(jqe .error.code)" = "unavailable" ] || fail "live interrupt with no agent: unavailable (got $STDERR)"
+api 503 POST "/api/live/interrupt" '{}'
+[ "$(jqb .error.code)" = "unavailable" ] || fail "POST interrupt with no agent: unavailable"
+run 0 "$MESA" live stop
+ok "interrupt: no session is not_found, no agent unavailable (CLI and route)"
+
+run 0 "$MESA" live start
+INT_AGENT=$(jqs .agent_id)
+INT_LEASE=$(jqs .lease)
+use_agent "$INT_AGENT"
+INT_JOB=$(run_id "$INT_AGENT")
+INT_LOG="$STUB_DIR/runs/$INT_JOB/stdin.log"
+count_lines() { { grep -c -- "$1" "$INT_LOG" 2>/dev/null || true; } | head -1; }
+
+# Idle (no turn in flight, run not mid-turn): the run answers, the cut is a no-op
+# beyond the note, so first prove the held case.
+touch "$STUB_DIR/hold-turn"
+run 0 "$MESA" run send "$INT_JOB" "long job"
+wait_for "the held turn to reach the stub" bash -c "grep -q 'long job' '$INT_LOG' 2>/dev/null"
+run 0 "$MESA" live interrupt --quiet
+[ "$(jqs .interrupted)" = "true" ] && [ "$(jqs .job)" = "$INT_JOB" ] || fail "live interrupt: interrupted true (got $STDOUT)"
+wait_for "the wake note to reach the stub" bash -c "grep -q 'naru live listen --lease' '$INT_LOG'"
+[ "$(count_lines '"subtype":"interrupt"')" = "1" ] || fail "exactly one control_request interrupt (got $(count_lines '"subtype":"interrupt"'))"
+CTRL_N=$(grep -n '"subtype":"interrupt"' "$INT_LOG" | head -1 | cut -d: -f1)
+NOTE_N=$(grep -n 'naru live listen --lease' "$INT_LOG" | head -1 | cut -d: -f1)
+[ "$CTRL_N" -lt "$NOTE_N" ] || fail "the interrupt must precede the wake note ($CTRL_N vs $NOTE_N)"
+NOTE_LINE=$(sed -n "${NOTE_N}p" "$INT_LOG")
+[ "$(jq -r .type <<<"$NOTE_LINE")" = user ] || fail "the wake note must arrive as a user message ($NOTE_LINE)"
+grep -q -- "--lease $INT_LEASE\`" <<<"$NOTE_LINE" || fail "the wake note names the current lease $INT_LEASE ($NOTE_LINE)"
+[ "$(count_lines 'naru live listen --lease')" = "1" ] || fail "exactly one wake note"
+ok "live interrupt: one control_request interrupt, then the fixed wake note naming lease $INT_LEASE as the next user message"
+
+# The same over the route, with a second held turn.
+touch "$STUB_DIR/hold-turn"
+run 0 "$MESA" run send "$INT_JOB" "second long job"
+wait_for "the second held turn" bash -c "grep -q 'second long job' '$INT_LOG' 2>/dev/null"
+api 200 POST "/api/live/interrupt" '{}'
+[ "$(jqb .interrupted)" = "true" ] || fail "POST interrupt: interrupted true (got $BODY)"
+wait_for "the second wake note" bash -c "[ \"\$(grep -c 'naru live listen --lease' '$INT_LOG')\" = 2 ]"
+[ "$(count_lines '"subtype":"interrupt"')" = "2" ] || fail "POST interrupt: one more control_request (got $(count_lines '"subtype":"interrupt"'))"
+ok "POST /api/live/interrupt: same JSON, one more interrupt and wake note"
+
+# The route's gates.
+raw POST "/api/live/interrupt" -H 'Host: evil.example:17781' -H 'Content-Type: application/json' -d '{}'
+[ "$STATUS" = "403" ] || fail "POST interrupt with a foreign Host: 403 (got $STATUS)"
+raw POST "/api/live/interrupt" -H 'Content-Type: text/plain' -d '{}'
+[ "$STATUS" = "415" ] || fail "POST interrupt without application/json: 415 (got $STATUS)"
+NOTES_BEFORE=$(count_lines 'naru live listen --lease')
+[ "$NOTES_BEFORE" = "2" ] || fail "a refused interrupt must send nothing (notes $NOTES_BEFORE)"
+ok "POST /api/live/interrupt: foreign Host 403, non-JSON 415, nothing sent"
+
+# A run that is not mid-turn writes nothing.
+run 0 "$MESA" run stop "$INT_JOB"
+wait_run_stopped "$INT_AGENT"
+run 0 "$MESA" live interrupt
+[ "$(jqs .interrupted)" = "false" ] && [ "$(jqs .status)" = "stopped" ] || fail "live interrupt on an ended run: interrupted false (got $STDOUT)"
+api 200 POST "/api/live/interrupt" '{}'
+[ "$(jqb .interrupted)" = "false" ] || fail "POST interrupt on an ended run: interrupted false (got $BODY)"
+[ "$(count_lines 'naru live listen --lease')" = "2" ] || fail "an ended run must be sent nothing"
+ok "interrupt on an ended run: {interrupted:false,status:stopped}, nothing sent"
+run 0 "$MESA" live stop
+
+# Under --lan the route is present and gated (agent access relaxes like speaker).
+"$MESA" serve --lan --port "$LAN_PORT" >"$TMP/lan2.log" 2>&1 &
+LAN_PID=$!
+for _ in $(seq 1 50); do curl -sf "$LAN_BASE/api/projects" >/dev/null 2>&1 && break; sleep 0.1; done
+STATUS=$(curl -s -o "$TMP/body" -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{}' "$LAN_BASE/api/live/interrupt")
+[ "$STATUS" = "404" ] || fail "--lan: a local JSON interrupt reaches the handler (no session: 404, got $STATUS)"
+STATUS=$(curl -s -o "$TMP/body" -w '%{http_code}' -X POST -H 'Content-Type: text/plain' -d '{}' "$LAN_BASE/api/live/interrupt")
+[ "$STATUS" = "415" ] || fail "--lan: non-JSON interrupt is 415 (got $STATUS)"
+kill "$LAN_PID" 2>/dev/null || true
+wait "$LAN_PID" 2>/dev/null || true
+LAN_PID=
+ok "--lan: POST /api/live/interrupt is present and Content-Type gated"
 
 kill "$SERVER_PID" 2>/dev/null || true
 wait "$SERVER_PID" 2>/dev/null || true

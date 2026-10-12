@@ -3075,6 +3075,7 @@ fn router(state: AppState) -> Router {
         // handed a phone can still ask to hear the conversation.
         .route("/api/live/speaker", post(claim_live_speaker))
         .route("/api/live/leave", post(leave_live_speaker))
+        .route("/api/live/interrupt", post(interrupt_live_agent))
         .route("/api/live/turns/{id}/played", post(live_turn_played))
         // Speaking one turn: the same synthesiser, headers and gate pair as
         // the inbox's play button — see `speak_inbox` for why that pair, and
@@ -5948,6 +5949,37 @@ async fn claim_live_speaker(
         return Err(no_live_session());
     };
     Ok(Json(store.claim_live_speaker(session.id, &body.client)?).into_response())
+}
+
+/// `POST /api/live/interrupt` (naru task 1889): `naru live interrupt` over
+/// HTTP — cut the agent's turn in flight and deliver the fixed wake note with
+/// the current lease. The body is an empty JSON object; the Content-Type gate
+/// is the CSRF defence. Gated like `/api/live/transcribe`; the session is read
+/// under the store lock and the run's file I/O happens after it is released.
+async fn interrupt_live_agent(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Result<Json<serde_json::Value>, JsonRejection>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    require_same_site_fetch(&headers)?;
+    let Json(_) = body?;
+    let session = {
+        let store = state.store.lock().unwrap();
+        store.current_live_session()?
+    };
+    let Some(session) = session else {
+        return Err(no_live_session());
+    };
+    let out = tokio::task::spawn_blocking(move || live::interrupt_session(&session))
+        .await
+        .map_err(|e| ApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "internal",
+            message: e.to_string(),
+        })??;
+    Ok(Json(out).into_response())
 }
 
 /// A device saying it is leaving (mesa task 1622): if it holds the voice, the
@@ -19085,6 +19117,54 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         // fallback's plain-text 405, and not the gate's own 403.
         assert!(status_line.contains("422"), "{status_line}");
         assert!(resp.contains("\"code\":\"validation\""), "{resp}");
+    }
+
+    /// One raw HTTP exchange against a router served on a real listener;
+    /// returns the whole response text.
+    async fn raw_post(state: AppState, host: &str, content_type: &str, path: &str) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(
+                listener,
+                router(state).into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await;
+        });
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let req = format!(
+            "POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: {content_type}\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+        );
+        stream.write_all(req.as_bytes()).await.unwrap();
+        let mut resp = Vec::new();
+        stream.read_to_end(&mut resp).await.unwrap();
+        String::from_utf8_lossy(&resp).into_owned()
+    }
+
+    /// naru task 1889: `POST /api/live/interrupt` refuses a foreign Host and
+    /// a non-JSON Content-Type, and a local JSON POST reaches the handler (a
+    /// live session with no agent answers `unavailable`; none, `not_found`).
+    #[tokio::test]
+    async fn interrupt_route_is_gated_and_served_for_a_local_json_post() {
+        let (_dir, state) = test_state();
+        let p = "/api/live/interrupt";
+        let foreign = raw_post(state.clone(), "evil.example:0", "application/json", p).await;
+        assert!(foreign.lines().next().unwrap().contains("403"), "{foreign}");
+        let form = raw_post(state.clone(), "127.0.0.1:0", "text/plain", p).await;
+        let line = form.lines().next().unwrap();
+        assert!(line.contains("415") || line.contains("403"), "{form}");
+        let none = raw_post(state.clone(), "127.0.0.1:0", "application/json", p).await;
+        assert!(none.lines().next().unwrap().contains("404"), "{none}");
+        assert!(none.contains("\"code\":\"not_found\""), "{none}");
+        state
+            .store
+            .lock()
+            .unwrap()
+            .start_live_session(None)
+            .unwrap();
+        let noagent = raw_post(state, "127.0.0.1:0", "application/json", p).await;
+        assert!(noagent.contains("\"code\":\"unavailable\""), "{noagent}");
     }
 
     /// The test above connects from `127.0.0.1`, which is a **loopback**

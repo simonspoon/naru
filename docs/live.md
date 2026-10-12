@@ -648,6 +648,25 @@ turn is `turn <id>: <text>` plus ` (annotated whiteboard: <path>)` when it
 carries ink. Agent rule 14 tells the agent to answer it as a listened turn and
 keep its one background listen. Gated by section 18 of `scripts/live-check.sh`.
 
+
+**Interrupting the turn (naru task 1889).** `naru live interrupt` (no
+arguments; `--quiet` is accepted and ignored) and `POST /api/live/interrupt`
+(an empty JSON body, gated `require_agent_access` + `require_same_site_fetch`
+like the speaker and transcribe routes) cut the agent's turn in flight. They
+use the runner's urgent send (`docs/runner.md`, `send --interrupt`), never a
+bare interrupt: a bare interrupt kills the turn's background `listen` and
+leaves the agent deaf with nothing to wake it. So the cut is one stream-json
+`control_request` interrupt, then a fixed Naru-authored **wake note** as the
+next user message, naming the session's current lease (`naru live listen
+--lease <n>`) and telling the agent to drop what it was doing, start `listen`
+in the background and end its turn. No person or turn text is ever in the
+note. Answers `{"interrupted": true, "job": <id>}`; when the run is not
+mid-turn (idle, stopped, finished) `{"interrupted": false, "status": ...}` and
+nothing is sent. No live session is `not_found`; a session with no agent, or
+one still on a legacy `claude --bg` receipt, is `unavailable`. **Warning:** a
+real interrupt also kills that turn's background subagents and shells, so a
+delegate running in the interrupted turn is lost.
+
 ### Delegated results across a handoff (mesa task 1359)
 
 A delegate — a fork or subagent started under rule 12 — runs *inside* the
