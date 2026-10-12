@@ -69,6 +69,26 @@ if [ -f "$STUB/fail-resume" ] && [[ " \$* " == *" --resume "* ]]; then
   echo "No conversation found" >&2; exit 1
 fi
 turn_pid=
+# Trigger files, named per working directory so only one run's stub reacts:
+# bg-on.<dir> / bg-off.<dir> report one / no background task, self-turn.<dir>
+# starts a turn nobody asked for (init, assistant, 4 s, result).
+me=\$\$
+(
+  while kill -0 "\$me" 2>/dev/null; do
+    d=\$(basename "\$PWD")
+    if [ -f "$STUB/bg-on.\$d" ]; then rm -f "$STUB/bg-on.\$d"
+      echo '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"t1","task_type":"local_agent"}]}'; fi
+    if [ -f "$STUB/bg-off.\$d" ]; then rm -f "$STUB/bg-off.\$d"
+      echo '{"type":"system","subtype":"background_tasks_changed","tasks":[]}'; fi
+    if [ -f "$STUB/self-turn.\$d" ]; then rm -f "$STUB/self-turn.\$d"
+      echo '{"type":"system","subtype":"init","session_id":"s"}'
+      echo '{"type":"assistant","message":{"content":[{"type":"text","text":"woken"}]}}'
+      sleep 4
+      echo '{"type":"result","subtype":"success","is_error":false,"result":"self-started"}'; fi
+    sleep 0.2
+  done
+) &
+disown
 while IFS= read -r line; do
   if [ "\$(jq -r '.type' <<<"\$line")" = control_request ]; then
     printf '%s\n' "\$line" >> "$STUB/control.log"
@@ -92,7 +112,8 @@ while IFS= read -r line; do
   ) &
   turn_pid=\$!
 done
-wait
+[ -n "\$turn_pid" ] && wait "\$turn_pid"
+exit 0
 STUBEOF
 chmod +x "$STUB/claude"
 export MESA_CLAUDE_BIN="$STUB/claude"
@@ -312,8 +333,33 @@ wait_for 10 "result" result_is "$J2" "echo: short lived"
 wait_for 10 "idle timeout -> finished" status_is "$J2" finished
 ok "idle timeout wound the run down to finished"
 
+# ---- idle guard: a waiting run is not idle-killed; a self-started turn is a turn ----
+mkdir -p "$TMP/idle-bg" "$TMP/idle-self"
+echo 2 > "$STUB/sleep-secs"
+J7=$("$NARU" run start --model haiku --cwd "$TMP/idle-bg" --idle-timeout 2 "guard me" | jq -r .job_id)
+touch "$STUB/bg-on.idle-bg"
+wait_for 10 "guard: result" result_is "$J7" "echo: guard me"
+echo 0 > "$STUB/sleep-secs"
+wait_for 10 "guard: idle" status_is "$J7" idle
+sleep 6
+status_is "$J7" idle || fail "idle guard: run with a background task left idle (status $(job_field "$J7" status))"
+grep -q idle_timeout "$RUNS/$J7/events.jsonl" && fail "idle guard: idle_timeout fired with a background task"
+touch "$STUB/bg-off.idle-bg"
+wait_for 10 "guard: tasks [] -> finished" status_is "$J7" finished
+ok "idle guard: a run with one background task stayed idle past its timeout, finished within 10 s of tasks: []"
+J8=$("$NARU" run start --model haiku --cwd "$TMP/idle-self" --idle-timeout 2 "self" | jq -r .job_id)
+wait_for 10 "self: first result" result_is "$J8" "echo: self"
+wait_for 10 "self: idle" status_is "$J8" idle
+touch "$STUB/self-turn.idle-self"
+wait_for 5 "self: unprompted turn -> running" status_is "$J8" running
+sleep 3.2
+status_is "$J8" running || fail "idle guard: idle end fired during a self-started turn (status $(job_field "$J8" status))"
+wait_for 10 "self: result -> idle" result_is "$J8" "self-started"
+status_is "$J8" idle || [ "$(job_field "$J8" status)" = finished ] || fail "self: unexpected status"
+ok "idle guard: an unprompted turn showed running (not killed by a 2 s timeout), then idle"
+
 # ---- CLI shapes ----
-"$NARU" run list | jq -e 'length == 8' >/dev/null || fail "run list"
+"$NARU" run list | jq -e 'length == 10' >/dev/null || fail "run list"
 "$NARU" run show "$J2" --events | jq -e '.job.job_id and (.events | length) > 0' >/dev/null || fail "run show --events"
 "$NARU" run show "$J2" --tail 1 | jq -e '.events | length == 1' >/dev/null || fail "run show --tail"
 "$NARU" run show "$J2" --quiet | jq -e '.job_id' >/dev/null || fail "--quiet is accepted and ignored"

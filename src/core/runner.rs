@@ -183,6 +183,12 @@ pub enum Event {
         subtype: Option<String>,
         is_error: bool,
     },
+    /// `{"type":"system","subtype":"init"}`: claude opened a turn (possibly
+    /// on its own, e.g. a background subagent's notification waking it).
+    TurnStarted,
+    /// `{"type":"system","subtype":"background_tasks_changed","tasks":[…]}`:
+    /// the number of background subagents/shells now running.
+    BackgroundTasks(usize),
     Other,
 }
 
@@ -190,6 +196,16 @@ pub fn parse_event(line: &str) -> Event {
     let Ok(v) = serde_json::from_str::<Value>(line) else {
         return Event::Other;
     };
+    if v.get("type").and_then(Value::as_str) == Some("system") {
+        return match v.get("subtype").and_then(Value::as_str) {
+            Some("init") => Event::TurnStarted,
+            Some("background_tasks_changed") => match v.get("tasks").and_then(Value::as_array) {
+                Some(t) => Event::BackgroundTasks(t.len()),
+                None => Event::Other,
+            },
+            _ => Event::Other,
+        };
+    }
     if v.get("type").and_then(Value::as_str) != Some("result") {
         return Event::Other;
     }
@@ -826,6 +842,9 @@ fn run_runner_locked(dir: &Path) -> Result<()> {
     // deliveries can yield one result: track an open turn, not a count.
     let mut in_flight = false;
     let mut last_activity = Instant::now();
+    // The latest `background_tasks_changed` count: a run waiting on them is
+    // waiting legitimately, so the idle end holds off.
+    let mut background_tasks = 0usize;
     let mut closing: Option<(Closing, Instant)> = None;
     let mut exited: Option<(Instant, Option<i32>)> = None;
     let mut eof = false;
@@ -855,15 +874,25 @@ fn run_runner_locked(dir: &Path) -> Result<()> {
                     continue;
                 }
                 saw_output = true;
+                last_activity = Instant::now();
                 append_event(dir, line);
+                let event = parse_event(line);
+                match &event {
+                    Event::TurnStarted if !in_flight => {
+                        in_flight = true;
+                        job.status = RunStatus::Running;
+                        save(dir, &mut job)?;
+                    }
+                    Event::BackgroundTasks(n) => background_tasks = *n,
+                    _ => {}
+                }
                 if let Event::Result {
                     text,
                     subtype,
                     is_error,
-                } = parse_event(line)
+                } = event
                 {
                     in_flight = false;
-                    last_activity = Instant::now();
                     job.last_result = text;
                     job.last_subtype = subtype;
                     job.last_is_error = Some(is_error);
@@ -950,6 +979,7 @@ fn run_runner_locked(dir: &Path) -> Result<()> {
         }
         if closing.is_none()
             && !in_flight
+            && background_tasks == 0
             && last_activity.elapsed().as_secs() >= job.idle_timeout_secs
         {
             closing = Some((Closing::Finished, Instant::now()));
@@ -1125,6 +1155,33 @@ mod tests {
         }
         assert_eq!(parse_event(r#"{"type":"assistant"}"#), Event::Other);
         assert_eq!(parse_event("not json"), Event::Other);
+    }
+
+    #[test]
+    fn turn_and_background_lines_are_classified() {
+        assert_eq!(
+            parse_event(r#"{"type":"system","subtype":"init","session_id":"s"}"#),
+            Event::TurnStarted
+        );
+        assert_eq!(
+            parse_event(
+                r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a"},{"task_id":"b"}]}"#
+            ),
+            Event::BackgroundTasks(2)
+        );
+        assert_eq!(
+            parse_event(r#"{"type":"system","subtype":"background_tasks_changed","tasks":[]}"#),
+            Event::BackgroundTasks(0)
+        );
+        assert_eq!(
+            parse_event(r#"{"type":"system","subtype":"background_tasks_changed"}"#),
+            Event::Other
+        );
+        assert_eq!(
+            parse_event(r#"{"type":"system","subtype":"task_progress"}"#),
+            Event::Other
+        );
+        assert_eq!(parse_event(r#"{"subtype":"init"}"#), Event::Other);
     }
 
     #[test]
