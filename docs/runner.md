@@ -75,13 +75,16 @@ running.
 If a turn is in flight the runner sends the same `control_request` first
 (`interrupt_requested`, `source: "message"`), holds that message and any behind
 it until the cut turn's `result` or 10 s (`INTERRUPT_HOLD`), then delivers it
-as a fresh turn. With no turn in flight it is an ordinary send.
+as a fresh turn. With no turn in flight it is an ordinary send. Back-to-back
+`--interrupt` messages each fire an interrupt: a second urgent send can cut the
+turn the first one started (and that turn's background agents).
 
 ## Surfacing a mid-wait message
 
 The runner exports `NARU_RUN_DIR` (the job directory) into claude's
 environment. When it delivers a message while a turn is in flight it creates
-`<job>/message-pending`, removed on the next main-thread assistant line (a
+`<job>/message-pending`, removed at runner start and exit (so a resume or a
+finished or stopped run never carries a stale one), on the next main-thread assistant line (a
 subagent's lines do not count) or the turn's `result`. claude reads stdin only
 between tool calls, so a plain send during a long blocking wait is held until
 the wait returns; a wait that checks the marker can end early. The
@@ -135,7 +138,9 @@ claude -p --input-format stream-json --output-format stream-json --verbose ${run
 retired placeholder), the empty string when none was given. The default is two
 lines: the first captures it as `run_agent={run_agent}`, and the `claude` line
 carries `${run_agent:+--agent "$run_agent"}`, so the flag is emitted only when
-set. `job.json` keeps the agent, so a resume starts the same one.
+set. `job.json` keeps the agent, so a resume starts the same one. A saved
+(non-default) `runner` template without `{run_agent}` silently ignores
+`--agent`: the agent is still recorded in `job.json`, but no flag reaches claude.
 
 `{session_flag}` is `--session-id` on the first start and `--resume` after; a
 value is one shell-quoted word, so the flag is a placeholder of its own rather

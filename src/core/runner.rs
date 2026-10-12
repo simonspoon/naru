@@ -401,6 +401,11 @@ fn is_subagent_line(v: &Value) -> bool {
         || v.get("owned_by_subagent").and_then(Value::as_bool) == Some(true)
 }
 
+/// Whether a raw stdout line is a subagent's (unparseable counts as main).
+fn line_is_subagent(line: &str) -> bool {
+    serde_json::from_str::<Value>(line).is_ok_and(|v| is_subagent_line(&v))
+}
+
 /// `<job dir>/message-pending`: a message was delivered while a turn was in
 /// flight, so claude has it on stdin but reads it only once its current tool
 /// call returns. A tool call inside the session (`NARU_RUN_DIR`) can watch it.
@@ -773,6 +778,8 @@ pub fn run_runner(dir: &Path) -> Result<()> {
         return Ok(());
     }
     let result = run_runner_locked(dir);
+    // A finished, stopped or dying run must not leave a stale marker behind.
+    let _ = fs::remove_file(pending_marker(dir));
     drop(lock);
     result
 }
@@ -785,6 +792,8 @@ fn run_runner_locked(dir: &Path) -> Result<()> {
     )?;
     // A leftover request must not interrupt the CONTINUE message of a resume.
     let _ = fs::remove_file(dir.join("interrupt"));
+    // Nor may a resume inherit the dead runner's pending-message marker.
+    let _ = fs::remove_file(pending_marker(dir));
     let resume = job.claude_started;
     let interrupted = resume && job.status == RunStatus::Running;
     if resume {
@@ -924,7 +933,8 @@ fn run_runner_locked(dir: &Path) -> Result<()> {
                 let event = parse_event(line);
                 clear_pending_on(dir, line, &event);
                 match &event {
-                    Event::TurnStarted if !in_flight => {
+                    // A subagent's `system/init` is not the main thread's turn.
+                    Event::TurnStarted if !in_flight && !line_is_subagent(line) => {
                         in_flight = true;
                         job.status = RunStatus::Running;
                         save(dir, &mut job)?;
@@ -1278,6 +1288,18 @@ mod tests {
         fs::write(&marker, b"").unwrap();
         clear(r#"{"type":"result","subtype":"success","result":"x"}"#);
         assert!(!marker.exists(), "a result clears it");
+    }
+
+    #[test]
+    fn subagent_init_is_not_a_main_turn() {
+        let sub = r#"{"type":"system","subtype":"init","parent_tool_use_id":"toolu_sub"}"#;
+        let sub2 = r#"{"type":"system","subtype":"init","owned_by_subagent":true}"#;
+        let main = r#"{"type":"system","subtype":"init","parent_tool_use_id":null}"#;
+        for l in [sub, sub2, main] {
+            assert!(matches!(parse_event(l), Event::TurnStarted));
+        }
+        assert!(line_is_subagent(sub) && line_is_subagent(sub2));
+        assert!(!line_is_subagent(main));
     }
 
     #[test]
