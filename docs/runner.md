@@ -3,7 +3,9 @@
 A *run* is one `claude -p` session held open on stream-json stdin by a small
 detached process of the same binary, so an agent keeps working when the Naru
 server — or the CLI that started it — dies. This is infrastructure: the
-existing `spawn_bg` sites and `llm::complete` do not use it yet.
+existing `spawn_bg` sites and `llm::complete` do not use it yet. In particular
+the todo-watcher still dispatches with `claude --bg`; moving it onto runs is a
+separate decision.
 
 ## Files are the truth
 
@@ -13,11 +15,12 @@ running, and a restarted server reattaches by reading the same files.
 
 | File | Content |
 | --- | --- |
-| `job.json` | `job_id` (8 hex), `session_id` (v4 uuid), `cwd`, `model`, `name`, `status` (`running` `idle` `finished` `failed` `stopped`), `runner_pid`, `claude_pid`, `started_at` / `updated_at` / `finished_at` (unix seconds), `last_result` / `last_subtype` / `last_is_error`, `resumes`, `idle_timeout_secs`. Written by the runner alone once it is up, atomically |
+| `job.json` | `job_id` (8 hex), `session_id` (v4 uuid), `cwd`, `model`, `agent` (when `--agent` was given), `name`, `status` (`running` `idle` `finished` `failed` `stopped`), `runner_pid`, `claude_pid`, `started_at` / `updated_at` / `finished_at` (unix seconds), `last_result` / `last_subtype` / `last_is_error`, `resumes`, `idle_timeout_secs`. Written by the runner alone once it is up, atomically |
 | `events.jsonl` | every stdout line of claude, verbatim, plus runner lines `{"type":"naru_runner","event":…,"at":…}` (`claude_started`, `message_delivered`, `stop_requested`, `interrupt_requested`, `idle_timeout`, `resumed`, `exited`, `failed`) |
 | `inbox/` | pending user messages, one `<nanos>-<rand>.json` (`{"text":…}`) each, written by temp+rename; the runner moves one to `inbox/delivered/` **before** writing it to claude, so a resume never delivers it twice (a crash in between loses it rather than repeating it) |
 | `stop` | marker: wind down |
 | `interrupt` | marker: cut the turn in flight short (naru task 1828) |
+| `message-pending` | marker: a message was delivered while a turn was in flight (naru task 1868); see "Surfacing a mid-wait message" |
 | `runner.pid`, `runner.log`, `claude.log` | the runner's pid, its stdout/stderr, claude's stderr |
 
 ## Detach
@@ -41,8 +44,14 @@ in flight, `idle` after a `{"type":"result"}` line (recording `last_result`,
 
 - the `stop` marker appears: stdin closes, claude gets 5s, then its group is
   killed — `stopped`;
-- nothing is in flight and `idle_timeout_secs` (default 3600, `run start
-  --idle-timeout`) have passed since the last result — `finished`;
+- nothing is in flight, no background task is running and `idle_timeout_secs`
+  (default 3600, `run start --idle-timeout`) have passed since the last line
+  claude wrote — `finished`. Every claude line resets that clock, not only a
+  `result`; a `system/init` line opens a turn the runner did not start itself
+  (a background subagent's notification waking claude), so the run reads
+  `running` through it; and the idle end is held off while the latest
+  `background_tasks_changed` event's `tasks` list is non-empty (a background
+  shell holds it too). `run stop` still ends such a run (naru task 1862);
 - claude exits on its own — `failed`.
 
 A terminal run refuses further messages (`conflict`).
@@ -55,6 +64,32 @@ the marker. The runner loop turns the marker into one stream-json line,
 marker is removed at runner start. Real claude answers a `control_response`
 and then a `result` (subtype `error_during_execution`), so the run returns to
 `idle` with the session intact.
+
+**Warning:** in real `claude -p` an interrupt also kills the interrupted turn's
+background subagents and shells (naru task 1866's trial). Do not interrupt —
+by `run interrupt` or `send --interrupt` — while agents you still need are
+running.
+
+**Send with interrupt** (naru task 1863): `naru run send --interrupt <job>
+<message>` / `{"text":…,"interrupt":true}` writes the flag into the inbox file.
+If a turn is in flight the runner sends the same `control_request` first
+(`interrupt_requested`, `source: "message"`), holds that message and any behind
+it until the cut turn's `result` or 10 s (`INTERRUPT_HOLD`), then delivers it
+as a fresh turn. With no turn in flight it is an ordinary send.
+
+## Surfacing a mid-wait message
+
+The runner exports `NARU_RUN_DIR` (the job directory) into claude's
+environment. When it delivers a message while a turn is in flight it creates
+`<job>/message-pending`, removed on the next main-thread assistant line (a
+subagent's lines do not count) or the turn's `result`. claude reads stdin only
+between tool calls, so a plain send during a long blocking wait is held until
+the wait returns; a wait that checks the marker can end early. The
+`supervising-agent-teams` built-in's `waiting.md` loops do: they exit with
+`MESSAGE` when `$NARU_RUN_DIR/message-pending` exists. Measured with real
+claude (naru task 1868): a plain send during such a wait was answered in
+5.3-6.2 s; without the check it was unanswered at 91 s. A wait that does not
+check the marker still holds the message until it returns.
 
 ## Telemetry
 
@@ -92,26 +127,44 @@ shows `__runner` / the run's session id. `model` and `name` may not start with
 The ninth template (`docs/config.md`):
 
 ```
-claude -p --input-format stream-json --output-format stream-json --verbose --model {model} --name {name} {session_flag} {session_id}
+run_agent={run_agent}
+claude -p --input-format stream-json --output-format stream-json --verbose ${run_agent:+--agent "$run_agent"} --model {model} --name {name} {session_flag} {session_id}
 ```
+
+`{run_agent}` is the run's `--agent` name (naru task 1861; not `{agent}`, a
+retired placeholder), the empty string when none was given. The default is two
+lines: the first captures it as `run_agent={run_agent}`, and the `claude` line
+carries `${run_agent:+--agent "$run_agent"}`, so the flag is emitted only when
+set. `job.json` keeps the agent, so a resume starts the same one.
 
 `{session_flag}` is `--session-id` on the first start and `--resume` after; a
 value is one shell-quoted word, so the flag is a placeholder of its own rather
 than a bash `if`. As for the other defaults, `MESA_CLAUDE_BIN` replaces the
-leading `claude` of the *default* template only. There is no `--bare`; no
+`claude` word that starts a line of the *default* template only. There is no `--bare`; no
 permission flag either — add one (e.g. `--permission-mode acceptEdits`) in
 Settings for a run that must write files.
 
 ## Surfaces
 
 CLI (JSON out, `--quiet` accepted and ignored): `naru run start --model M [--cwd D]
-[--name L] [--idle-timeout S] <prompt>`, `send <job> <message>`, `show <job>
-[--events] [--tail N]`, `list`, `stop <job>`, `interrupt <job>`, `reconcile`. Every job view carries
+[--name L] [--agent A] [--idle-timeout S] <prompt>`, `send <job> <message>
+[--interrupt]`, `show <job> [--events] [--main] [--tail N]`, `list`, `stop <job>`, `interrupt <job>`, `reconcile`. Every job view carries
 derived `runner_alive` and `pending_messages`.
 
 API, every route `require_agent_access` (reads included — a run executes an
 agent): `GET /api/runs`, `POST /api/runs` (body of `start`, 201), `GET
-/api/runs/{id}[?tail=N]` (`{job, events}`, 500 events by default), `POST
-/api/runs/{id}/message` (`{"text"}`, 202), `POST /api/runs/{id}/stop`, `POST /api/runs/{id}/interrupt` (six routes).
+/api/runs/{id}[?tail=N][&scope=main|all]` (`{job, events}`, 500 events by
+default; any other `scope` is 422), `POST
+/api/runs/{id}/message` (`{"text"[,"interrupt":true]}`, 202), `POST /api/runs/{id}/stop`, `POST /api/runs/{id}/interrupt` (six routes).
+
+`--main` / `scope=main` (naru task 1864) drops the lines of subagents — those
+with a string `parent_tool_use_id`, or `owned_by_subagent: true` — from the
+returned view only; `events.jsonl` stays verbatim, and `--tail` counts after
+the filter. `--main` implies `--events`. `POST /api/runs` also takes `agent`.
+
+The run pane (`RunPane.tsx`, `runEvents.ts`, naru task 1865) folds a
+subagent's events under the `Agent` call that launched it ("label · N events");
+events whose launching call is not in the view sit in an "earlier subagent"
+group.
 
 Gate: `scripts/runner-check.sh`.
