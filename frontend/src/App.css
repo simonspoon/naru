@@ -11751,7 +11751,7 @@ body.dock-resizing .dock-body {
   position: relative;
   /* Never shrunk by the nav's tree (naru task 1805). */
   flex: none;
-  height: 170px;
+  height: 112px;
   margin: 0.25rem 0 0;
   background: var(--panel);
   border-radius: var(--r-md);
@@ -12148,9 +12148,9 @@ body.dock-resizing .dock-body {
    on both boxes; height px) fading out well below the mark (naru task 1870). */
 .shell-body.docked .sidebar:not(.collapsed) {
   --nav-wash:
-    radial-gradient(ellipse 80% 190px at 50% 70px, rgba(var(--cyan-rgb), 0.28), transparent 70%),
-    radial-gradient(ellipse 110% 250px at 25% 85px, rgba(var(--violet-rgb), 0.28), transparent 70%),
-    radial-gradient(ellipse 110% 250px at 78% 95px, rgba(var(--magenta-rgb), 0.2), transparent 70%);
+    radial-gradient(ellipse 80% 190px at 50% 41px, rgba(var(--cyan-rgb), 0.28), transparent 70%),
+    radial-gradient(ellipse 110% 250px at 25% 56px, rgba(var(--violet-rgb), 0.28), transparent 70%),
+    radial-gradient(ellipse 110% 250px at 78% 66px, rgba(var(--magenta-rgb), 0.2), transparent 70%);
   background-image: var(--nav-wash);
   background-repeat: no-repeat;
 }
@@ -12164,7 +12164,7 @@ body.dock-resizing .dock-body {
   background-position: 0 0;
 }
 
-/* Fixed height (the base 170px), full nav width: the mark inside is a fixed
+/* Fixed height (the base 112px), full nav width: the mark inside is a fixed
    size, centred, so widening the nav never grows the panel. */
 .shell-body.docked .sidebar:not(.collapsed) .nav-orb {
   width: 100%;
