@@ -7137,6 +7137,8 @@ async fn start_run(
 #[derive(Deserialize)]
 struct RunMessage {
     text: String,
+    #[serde(default)]
+    interrupt: Option<bool>,
 }
 
 async fn message_run(
@@ -7148,7 +7150,11 @@ async fn message_run(
 ) -> ApiResult<Response> {
     require_agent_access(&state, &addr, &headers)?;
     let Json(body) = body?;
-    Ok((StatusCode::ACCEPTED, Json(runner::send(&id, &body.text)?)).into_response())
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(runner::send(&id, &body.text, body.interrupt == Some(true))?),
+    )
+        .into_response())
 }
 
 async fn stop_run(

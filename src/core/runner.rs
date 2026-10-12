@@ -37,6 +37,9 @@ use serde_json::{Value, json};
 use super::store::{Error, Result};
 use super::{agents, config, library, script_runs};
 
+/// How long an urgent message waits for the cut turn's result.
+const INTERRUPT_HOLD: Duration = Duration::from_secs(10);
+
 /// How often the runner looks at its inbox, the stop marker and the clock.
 const POLL: Duration = Duration::from_millis(200);
 /// Default idle timeout: this long since the last result with nothing in
@@ -253,7 +256,7 @@ fn atomic_write(path: &Path, body: &[u8]) -> Result<()> {
 }
 
 /// Queues `text` in `inbox/` as the next message.
-pub fn enqueue(inbox: &Path, text: &str) -> Result<String> {
+pub fn enqueue(inbox: &Path, text: &str, interrupt: bool) -> Result<String> {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
@@ -261,10 +264,13 @@ pub fn enqueue(inbox: &Path, text: &str) -> Result<String> {
     let rnd = random_bytes::<2>()?;
     let name = format!("{nanos:020}-{:02x}{:02x}.json", rnd[0], rnd[1]);
     fs::create_dir_all(inbox)?;
-    atomic_write(
-        &inbox.join(&name),
-        json!({"text": text}).to_string().as_bytes(),
-    )?;
+    // Only an urgent message carries the key, so a plain one is unchanged.
+    let body = if interrupt {
+        json!({"text": text, "interrupt": true})
+    } else {
+        json!({"text": text})
+    };
+    atomic_write(&inbox.join(&name), body.to_string().as_bytes())?;
     Ok(name)
 }
 
@@ -481,7 +487,7 @@ pub fn create_job(runs: &Path, opts: &StartOpts) -> Result<Job> {
         idle_timeout_secs: opts.idle_timeout_secs.unwrap_or(DEFAULT_IDLE_SECS).max(1),
     };
     fs::create_dir_all(dir.join("inbox").join("delivered"))?;
-    enqueue(&dir.join("inbox"), &opts.prompt)?;
+    enqueue(&dir.join("inbox"), &opts.prompt, false)?;
     save(&dir, &mut job)?;
     Ok(job)
 }
@@ -526,11 +532,13 @@ pub fn start_in(runs: &Path, opts: &StartOpts) -> Result<Value> {
     Ok(view(&dir, &job))
 }
 
-pub fn send(id: &str, text: &str) -> Result<Value> {
-    send_in(&runs_dir(), id, text)
+pub fn send(id: &str, text: &str, interrupt: bool) -> Result<Value> {
+    send_in(&runs_dir(), id, text, interrupt)
 }
 
-pub fn send_in(runs: &Path, id: &str, text: &str) -> Result<Value> {
+/// Queues a message. With `interrupt`, a runner with a turn in flight cuts
+/// that turn first and delivers this message as a fresh one.
+pub fn send_in(runs: &Path, id: &str, text: &str, interrupt: bool) -> Result<Value> {
     if text.trim().is_empty() {
         return Err(Error::Validation("message must not be empty".into()));
     }
@@ -547,7 +555,7 @@ pub fn send_in(runs: &Path, id: &str, text: &str) -> Result<Value> {
             job.status
         )));
     }
-    enqueue(&dir.join("inbox"), text)?;
+    enqueue(&dir.join("inbox"), text, interrupt)?;
     Ok(view(&dir, &job))
 }
 
@@ -845,6 +853,10 @@ fn run_runner_locked(dir: &Path) -> Result<()> {
     // The latest `background_tasks_changed` count: a run waiting on them is
     // waiting legitimately, so the idle end holds off.
     let mut background_tasks = 0usize;
+    // An urgent message cut the turn in flight: it and everything after it
+    // wait for that turn's result, at most `INTERRUPT_HOLD`.
+    let mut interrupt_hold: Option<Instant> = None;
+    let mut interrupted_file: Option<std::ffi::OsString> = None;
     let mut closing: Option<(Closing, Instant)> = None;
     let mut exited: Option<(Instant, Option<i32>)> = None;
     let mut eof = false;
@@ -942,15 +954,43 @@ fn run_runner_locked(dir: &Path) -> Result<()> {
         }
         if closing.is_none() {
             for file in pending_inbox(&dir.join("inbox")) {
-                let Some(text) = fs::read_to_string(&file)
+                if let Some(since) = interrupt_hold {
+                    if !in_flight || since.elapsed() >= INTERRUPT_HOLD {
+                        interrupt_hold = None;
+                    } else {
+                        break;
+                    }
+                }
+                let Some((text, urgent)) = fs::read_to_string(&file)
                     .ok()
                     .and_then(|b| serde_json::from_str::<Value>(&b).ok())
-                    .and_then(|v| v.get("text").and_then(Value::as_str).map(str::to_string))
+                    .and_then(|v| {
+                        let text = v.get("text").and_then(Value::as_str)?.to_string();
+                        let urgent = v.get("interrupt").and_then(Value::as_bool) == Some(true);
+                        Some((text, urgent))
+                    })
                 else {
                     // Unreadable: move it aside rather than retry it forever.
                     let _ = fs::rename(&file, file.with_extension("bad"));
                     continue;
                 };
+                if urgent && in_flight && interrupted_file.as_deref() != file.file_name() {
+                    let request_id = uuid_from_bytes(random_bytes::<16>().unwrap_or([7; 16]));
+                    if let Some(w) = stdin.as_mut()
+                        && writeln!(w, "{}", encode_interrupt(&request_id))
+                            .and_then(|()| w.flush())
+                            .is_ok()
+                    {
+                        runner_event(
+                            dir,
+                            "interrupt_requested",
+                            json!({"request_id": request_id, "source": "message"}),
+                        );
+                        interrupt_hold = Some(Instant::now());
+                        interrupted_file = file.file_name().map(|n| n.to_owned());
+                        break;
+                    }
+                }
                 // Out of the inbox first: a crash after this loses the message
                 // rather than delivering it twice.
                 let delivered = dir.join("inbox").join("delivered");
@@ -1185,12 +1225,28 @@ mod tests {
     }
 
     #[test]
+    fn interrupt_flag_rides_in_the_inbox_file_and_plain_is_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let inbox = dir.path().join("inbox");
+        let plain = enqueue(&inbox, "hi", false).unwrap();
+        let urgent = enqueue(&inbox, "now", true).unwrap();
+        assert_eq!(
+            fs::read_to_string(inbox.join(plain)).unwrap(),
+            r#"{"text":"hi"}"#
+        );
+        assert_eq!(
+            fs::read_to_string(inbox.join(urgent)).unwrap(),
+            r#"{"interrupt":true,"text":"now"}"#
+        );
+    }
+
+    #[test]
     fn inbox_is_ordered_and_skips_temp_files() {
         let dir = tempfile::tempdir().unwrap();
         let inbox = dir.path().join("inbox");
-        let a = enqueue(&inbox, "first").unwrap();
-        let b = enqueue(&inbox, "second").unwrap();
-        let c = enqueue(&inbox, "third").unwrap();
+        let a = enqueue(&inbox, "first", false).unwrap();
+        let b = enqueue(&inbox, "second", false).unwrap();
+        let c = enqueue(&inbox, "third", false).unwrap();
         fs::write(inbox.join(".half.json.tmp"), "{").unwrap();
         fs::create_dir_all(inbox.join("delivered")).unwrap();
         let names: Vec<String> = pending_inbox(&inbox)
@@ -1309,7 +1365,7 @@ mod tests {
         let runs = tempfile::tempdir().unwrap();
         let cwd = tempfile::tempdir().unwrap();
         let job = create_job(runs.path(), &opts("one", cwd.path())).unwrap();
-        send_in(runs.path(), &job.job_id, "two").unwrap();
+        send_in(runs.path(), &job.job_id, "two", false).unwrap();
         let inbox = runs.path().join(&job.job_id).join("inbox");
         let texts: Vec<String> = pending_inbox(&inbox)
             .iter()
@@ -1320,11 +1376,11 @@ mod tests {
             .collect();
         assert_eq!(texts, ["one", "two"]);
         assert!(matches!(
-            send_in(runs.path(), &job.job_id, " "),
+            send_in(runs.path(), &job.job_id, " ", false),
             Err(Error::Validation(_))
         ));
         assert!(matches!(
-            send_in(runs.path(), "ffffffff", "x"),
+            send_in(runs.path(), "ffffffff", "x", false),
             Err(Error::NotFound(_))
         ));
         let dir = runs.path().join(&job.job_id);
@@ -1332,7 +1388,7 @@ mod tests {
         j.status = RunStatus::Finished;
         save(&dir, &mut j).unwrap();
         assert!(matches!(
-            send_in(runs.path(), &job.job_id, "late"),
+            send_in(runs.path(), &job.job_id, "late", false),
             Err(Error::Conflict(_))
         ));
     }

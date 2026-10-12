@@ -100,7 +100,7 @@ while IFS= read -r line; do
     fi
     continue
   fi
-  # A file `coalesce` folds a message that arrives mid-turn into the running turn, as the real claude does: no second turn, no second result.
+  # A file named coalesce folds a message that arrives mid-turn into the running turn, as the real claude does: no second turn, no second result.
   if [ -f "$STUB/coalesce" ] && [ -n "\$turn_pid" ] && kill -0 "\$turn_pid" 2>/dev/null; then continue; fi
   text=\$(jq -r '.message.content[0].text' <<<"\$line")
   s=0; [ -f "$STUB/sleep-secs" ] && s=\$(cat "$STUB/sleep-secs")
@@ -327,6 +327,40 @@ echo 0 > "$STUB/sleep-secs"
 wait_for 10 "fold run stopped" status_is "$J6" stopped
 ok "three messages folded into one turn gave one result and the run went idle"
 
+# ---- urgent send: --interrupt cuts the turn in flight, then delivers as a fresh turn ----
+: > "$STUB/control.log"
+echo 30 > "$STUB/sleep-secs"
+J9=$("$NARU" run start --model haiku --cwd "$TMP/work" "very long turn" | jq -r .job_id)
+wait_for 10 "urgent: long turn delivered" delivered_is "$J9" 1
+"$NARU" run send "$J9" "plain" >/dev/null
+wait_for 5 "urgent: plain message delivered mid-turn" delivered_is "$J9" 2
+[ ! -s "$STUB/control.log" ] || fail "a plain send must not interrupt: $(cat "$STUB/control.log")"
+echo 0 > "$STUB/sleep-secs"
+"$NARU" run send --interrupt "$J9" "urgent" >/dev/null
+wait_for 5 "urgent: answered" result_is "$J9" "echo: urgent"
+[ "$(wc -l < "$STUB/control.log" | tr -d " ")" = 1 ] || fail "urgent: one control_request expected: $(cat "$STUB/control.log")"
+[ "$(jq -rs '[.[] | select(.event == "interrupt_requested" or .event == "message_delivered") | .event] | join(",")' "$RUNS/$J9/events.jsonl")" = "message_delivered,message_delivered,interrupt_requested,message_delivered" ] || fail "urgent: interrupt_requested must precede the delivery"
+[ "$(jq -s '[.[] | select(.event == "interrupt_requested")] | .[0].source' -r "$RUNS/$J9/events.jsonl")" = message ] || fail "urgent: source should be message"
+[ "$(grep -c '"message_delivered"' "$RUNS/$J9/events.jsonl")" = 3 ] || fail "urgent: delivered exactly once expected (3 deliveries in all)"
+[ "$(ls "$RUNS/$J9/inbox/delivered" | wc -l | tr -d " ")" = 3 ] || fail "urgent: delivered dir"
+"$NARU" run stop "$J9" >/dev/null
+wait_for 10 "urgent run stopped" status_is "$J9" stopped
+ok "urgent send: a plain send mid-turn sent no control_request; --interrupt sent exactly one, logged it before the delivery, answered echo: urgent"
+
+: > "$STUB/control.log"
+echo 30 > "$STUB/sleep-secs"
+J10=$("$NARU" run start --model haiku --cwd "$TMP/work" "very long turn" | jq -r .job_id)
+wait_for 10 "urgent api: long turn delivered" delivered_is "$J10" 1
+echo 0 > "$STUB/sleep-secs"
+code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -X POST -d '{"text":"urgent","interrupt":true}' "$BASE/api/runs/$J10/message")
+[ "$code" = 202 ] || fail "urgent api: expected 202, got $code"
+wait_for 5 "urgent api: answered" result_is "$J10" "echo: urgent"
+[ "$(wc -l < "$STUB/control.log" | tr -d " ")" = 1 ] || fail "urgent api: one control_request expected"
+[ "$(jq -rs '[.[] | select(.event == "interrupt_requested" or .event == "message_delivered") | .event] | join(",")' "$RUNS/$J10/events.jsonl")" = "message_delivered,interrupt_requested,message_delivered" ] || fail "urgent api: event order"
+"$NARU" run stop "$J10" >/dev/null
+wait_for 10 "urgent api run stopped" status_is "$J10" stopped
+ok "urgent send over the API: 202, one control_request, interrupt_requested before the delivery, echo: urgent"
+
 # ---- idle timeout ----
 J2=$("$NARU" run start --model haiku --cwd "$TMP/work" --idle-timeout 2 "short lived" | jq -r .job_id)
 wait_for 10 "result" result_is "$J2" "echo: short lived"
@@ -359,7 +393,7 @@ status_is "$J8" idle || [ "$(job_field "$J8" status)" = finished ] || fail "self
 ok "idle guard: an unprompted turn showed running (not killed by a 2 s timeout), then idle"
 
 # ---- CLI shapes ----
-"$NARU" run list | jq -e 'length == 10' >/dev/null || fail "run list"
+"$NARU" run list | jq -e 'length == 12' >/dev/null || fail "run list"
 "$NARU" run show "$J2" --events | jq -e '.job.job_id and (.events | length) > 0' >/dev/null || fail "run show --events"
 "$NARU" run show "$J2" --tail 1 | jq -e '.events | length == 1' >/dev/null || fail "run show --tail"
 "$NARU" run show "$J2" --quiet | jq -e '.job_id' >/dev/null || fail "--quiet is accepted and ignored"

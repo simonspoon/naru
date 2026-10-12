@@ -420,6 +420,10 @@ EXAMPLES
         job: String,
         /// The message
         message: String,
+        /// Cut the turn in flight first, so the message starts a fresh turn
+        /// at once instead of waiting for the next tool boundary
+        #[arg(long)]
+        interrupt: bool,
     },
     /// Print a run; `--events` (or `--tail`) adds its event log
     Show {
@@ -5133,7 +5137,11 @@ fn run_runs(cmd: RunCmd) -> Result<()> {
             agent,
             idle_timeout_secs: idle_timeout,
         })?),
-        RunCmd::Send { job, message } => print_json(&runner::send(&job, &message)?),
+        RunCmd::Send {
+            job,
+            message,
+            interrupt,
+        } => print_json(&runner::send(&job, &message, interrupt)?),
         RunCmd::Show { job, events, tail } => {
             let n = (events || tail.is_some()).then(|| tail.unwrap_or(100));
             print_json(&runner::show(&job, n)?)
