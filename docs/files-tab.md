@@ -469,7 +469,8 @@ twice.
     reconciliation against the tree fetch. Task 877's rename/delete do re-point
     or close the tabs they touch, but only because *this* browser performed the
     write and knows which paths moved — a change made anywhere else is still
-    unreconciled.
+    unreconciled by the tab's tabs (the tree itself follows disk through
+    `GET .../files/watch`, below).
 - **Mobile.** No split below the **narrow** tier (≤860px): a two-up split of a
   360px screen is unusable, the Split control is not rendered, and a split open
   when the viewport crosses that tier is folded onto the focused pane. That
@@ -1195,6 +1196,31 @@ Nothing here is reachable by `scripts/files-check.sh` — it gates the API, and
 this task added none. The gate is `npm --prefix frontend run test` over the
 modules above, plus khora for anything needing a rendered tree, real focus
 routing or a trusted keystroke (CLAUDE.md's standing split).
+
+## The watch stream (naru task 1875)
+
+`GET /api/projects/{id}/files/watch` — an `application/x-ndjson` stream
+(`Cache-Control: no-store`, `nosniff`, the `run_script_stream` shape) telling
+the page when the tree on disk changed, so it refetches instead of waiting for
+the 5s cache or a window focus.
+
+- Lines: `{"type":"ready"}` at once; then `{"type":"change","dirs":[...]|null}`
+  per debounced burst (400ms; `dirs` are root-relative, `""` = the root level,
+  `null` = refetch every loaded level, also sent for a broadcast lag or past
+  100 directories); and `{"type":"ping"}` every 15s.
+- Ignore list: `files::EXCLUDED_DIRS` — a write under `target/`,
+  `node_modules/`, `.git/` etc. produces no line.
+- Teardown: the heartbeat is load-bearing. hyper only notices a vanished client
+  when a write fails, so without the ping a closed tab would keep its OS
+  watcher alive; with it the `Subscription` (and, when it was the last, the
+  watcher in `core::files_watch`) is dropped within about 15s of a disconnect.
+- Cache eviction: every `files_tree_cache` entry whose root is this project's
+  `local_path` (all levels) is removed *before* a change line is forwarded, so
+  the page's immediate refetch misses the 5s cache.
+- Gate: the standard `guard` only, like the tree it announces (a GET; the
+  Content-Type gate does not apply), reachable in default mode and under
+  `--lan`. No `local_path` or a dead folder is 404 `not_found`; a watcher that
+  cannot start is 503 `unavailable`. Gate: `scripts/files-check.sh` section 8.
 
 ## Project-wide search (task 813)
 

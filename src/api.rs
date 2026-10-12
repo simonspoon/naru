@@ -204,6 +204,9 @@ struct AppState {
     /// are not cached (mirrors the git diff routes — on-demand, one file,
     /// cheap).
     files_tree_cache: Arc<Mutex<HashMap<(String, String), (Instant, (Vec<FileTreeEntry>, bool))>>>,
+    /// Shared OS watchers behind `GET /api/projects/{id}/files/watch`, one per
+    /// root, alive only while a client stream holds a `Subscription`.
+    files_watch: crate::core::files_watch::WatchRegistry,
     /// Set by `restart_server` before it triggers graceful shutdown; `serve`
     /// checks it right after `axum::serve` returns to decide whether to
     /// relaunch the current binary.
@@ -2645,6 +2648,7 @@ pub fn serve(flags: ServeFlags) -> crate::core::Result<()> {
         git_file_log_cache: Arc::new(Mutex::new(HashMap::new())),
         git_repos_cache: Arc::new(Mutex::new(HashMap::new())),
         files_tree_cache: Arc::new(Mutex::new(HashMap::new())),
+        files_watch: crate::core::files_watch::WatchRegistry::new(),
         restart_requested: restart_requested.clone(),
         shutdown_tx: Arc::new(Mutex::new(Some(shutdown_tx))),
         inbox_dispatched: Arc::new(Mutex::new(std::collections::HashSet::new())),
@@ -3337,6 +3341,10 @@ fn router(state: AppState) -> Router {
         // search is keyed on a query and cached by nothing. Standard guard
         // only, like every other read on this tab.
         .route("/api/projects/{id}/files/search", get(search_project_files))
+        // Change notifications for the tree (naru task 1875): an NDJSON stream
+        // the page refetches on. A read on the standard guard only, like the
+        // tree it announces changes to.
+        .route("/api/projects/{id}/files/watch", get(watch_project_files))
         // Renaming and deleting one entry of that tree (task 877). A FIFTH
         // route, on `/entry` rather than on `/files/content`, because a tree
         // entry is a file OR a directory and everything on the content path is
@@ -8782,6 +8790,84 @@ async fn project_files_root(state: &AppState, id: i64) -> ApiResult<(Option<Stri
     Ok((Some(path), is_dir))
 }
 
+/// `GET /api/projects/{id}/files/watch` — NDJSON change stream for the Files
+/// tab (naru task 1875). `{"type":"ready"}` at once, then
+/// `{"type":"change","dirs":[...]|null}` per debounced batch and a
+/// `{"type":"ping"}` every 15s: the heartbeat is how a vanished client is
+/// noticed (a failed write), which drops the `Subscription` and with it the
+/// OS watcher. Each change evicts the root's `files_tree_cache` entries
+/// BEFORE it is forwarded, so the page's refetch cannot hit the 5s cache.
+async fn watch_project_files(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> ApiResult<Response> {
+    let (local_path, is_dir) = project_files_root(&state, id).await?;
+    let local_path = match local_path {
+        Some(p) if is_dir => p,
+        _ => {
+            return Err(ApiError {
+                status: StatusCode::NOT_FOUND,
+                code: "not_found",
+                message: "project has no readable local_path to watch".into(),
+            });
+        }
+    };
+    let sub = state
+        .files_watch
+        .subscribe(&local_path)
+        .map_err(|e| ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "unavailable",
+            message: format!("could not watch {local_path}: {e}"),
+        })?;
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Vec<u8>, std::io::Error>>(64);
+    let cache = state.files_tree_cache.clone();
+    tokio::spawn(async move {
+        use tokio::sync::broadcast::error::RecvError;
+        // Move the whole Subscription in (a precise field capture would drop
+        // its hub guard and end the OS watch at once).
+        let mut sub = sub;
+        fn line(v: serde_json::Value) -> Vec<u8> {
+            let mut b = serde_json::to_vec(&v).unwrap_or_default();
+            b.push(b'\n');
+            b
+        }
+        if tx.send(Ok(line(json!({"type": "ready"})))).await.is_err() {
+            return;
+        }
+        let mut beat = tokio::time::interval(Duration::from_secs(15));
+        beat.tick().await;
+        loop {
+            let out = tokio::select! {
+                ev = sub.rx.recv() => {
+                    let dirs = match ev {
+                        Ok(ev) => ev.dirs,
+                        Err(RecvError::Lagged(_)) => None,
+                        Err(RecvError::Closed) => return,
+                    };
+                    cache.lock().unwrap().retain(|k, _| k.0 != local_path);
+                    json!({"type": "change", "dirs": dirs})
+                }
+                _ = beat.tick() => json!({"type": "ping"}),
+                _ = tx.closed() => return,
+            };
+            if tx.send(Ok(line(out))).await.is_err() {
+                return;
+            }
+        }
+    });
+    Ok((
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/x-ndjson"),
+            (header::CACHE_CONTROL, "no-store"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        Body::from_stream(ReceiverStream::new(rx)),
+    )
+        .into_response())
+}
+
 #[derive(Deserialize)]
 struct FilesTreeQuery {
     path: Option<String>,
@@ -12680,6 +12766,7 @@ mod tests {
             git_file_log_cache: Arc::new(Mutex::new(HashMap::new())),
             git_repos_cache: Arc::new(Mutex::new(HashMap::new())),
             files_tree_cache: Arc::new(Mutex::new(HashMap::new())),
+            files_watch: crate::core::files_watch::WatchRegistry::new(),
             restart_requested: Arc::new(AtomicBool::new(false)),
             shutdown_tx: Arc::new(Mutex::new(None)),
             inbox_dispatched: Arc::new(Mutex::new(std::collections::HashSet::new())),

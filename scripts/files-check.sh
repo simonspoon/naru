@@ -32,6 +32,12 @@
 #      `--lan`, while the content PATCH and both entry writes keep their
 #      `require_agent_access` + Content-Type gates in both.
 #
+#   8. `GET /api/projects/{id}/files/watch` (naru task 1875) — the NDJSON
+#      change stream: a `ready` line first, a `change` line carrying "" within
+#      2s of a touch/mv/rm, the tree listing the new file immediately after
+#      (the cache eviction), no line for a write under an excluded `target/`,
+#      404 for an unknown project, and the route served under `--lan` too.
+#
 # The tree/content/create/write contract at large is exercised by the Rust
 # unit tests in src/core/files.rs; this script is the HTTP-surface gate.
 set -euo pipefail
@@ -495,6 +501,11 @@ check_modes() { # check_modes <label>
   [ "$(jqb '.files | length')" = "1" ] || fail "$label: search must be reachable"
   ok "$label: GET .../files/search is reachable (a read on the standard guard)"
 
+  curl -sN --max-time 3 "$BASE/api/projects/$PROJ/files/watch" >"$TMP/watch-mode.out" 2>/dev/null || true
+  head -1 "$TMP/watch-mode.out" | jq -e '.type == "ready"' >/dev/null ||
+    fail "$label: watch must answer 200 with a ready line"
+  ok "$label: GET .../files/watch is reachable (a read on the standard guard)"
+
   local status
   status=$(curl -s -o /dev/null -w '%{http_code}' -X PATCH \
     -H 'Content-Type: application/x-www-form-urlencoded' \
@@ -546,6 +557,79 @@ check_modes() { # check_modes <label>
 }
 
 check_modes "default mode"
+
+# =====================================================================
+# 8. the watch stream (naru task 1875)
+# =====================================================================
+
+WATCH_OUT="$TMP/watch.out"
+: > "$WATCH_OUT"
+curl -sN "$BASE/api/projects/$PROJ/files/watch" >"$WATCH_OUT" 2>/dev/null &
+WATCH_PID=$!
+wait_lines() { # wait_lines <min-lines> <seconds> — poll the stream file
+  local want=$1 secs=$2 i
+  for i in $(seq 1 $((secs * 10))); do
+    [ "$(wc -l < "$WATCH_OUT")" -ge "$want" ] && return 0
+    sleep 0.1
+  done
+  return 1
+}
+wait_lines 1 3 || fail "watch: no ready line within 3s"
+[ "$(sed -n 1p "$WATCH_OUT" | jq -r .type)" = "ready" ] || fail "watch: first line must be ready"
+ok "GET .../files/watch: 200 and a ready line first"
+
+# change_since <n-lines-before> <seconds> — a change line past line n naming ""
+change_since() {
+  local before=$1 secs=$2 i
+  for i in $(seq 1 $((secs * 10))); do
+    if tail -n +$((before + 1)) "$WATCH_OUT" |
+      jq -e 'select(.type == "change" and (.dirs == null or (.dirs | index("") != null)))' \
+        >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+
+N=$(wc -l < "$WATCH_OUT")
+touch "$REPO/watched-new.txt"
+change_since "$N" 2 || fail "watch: touch must produce a change line naming the root within 2s"
+api 200 GET "/api/projects/$PROJ/files"
+jq -e '.tree | map(.name) | index("watched-new.txt") != null' <<<"$BODY" >/dev/null ||
+  fail "watch: the tree must list the new file immediately after the change line"
+ok "watch: touch -> change line within 2s, and the tree lists the file at once"
+
+sleep 1
+N=$(wc -l < "$WATCH_OUT")
+mv "$REPO/watched-new.txt" "$REPO/watched-moved.txt"
+change_since "$N" 2 || fail "watch: mv must produce a change line within 2s"
+ok "watch: mv -> change line"
+
+sleep 1
+N=$(wc -l < "$WATCH_OUT")
+rm "$REPO/watched-moved.txt"
+change_since "$N" 2 || fail "watch: rm must produce a change line within 2s"
+ok "watch: rm -> change line"
+
+# an excluded directory is ignored: create it, let the debounce settle, then
+# count only what a write inside it adds
+mkdir -p "$REPO/target"
+sleep 1.5
+N=$(wc -l < "$WATCH_OUT")
+printf 'x\n' > "$REPO/target/artifact.o"
+sleep 1.5
+if tail -n +$((N + 1)) "$WATCH_OUT" | jq -e 'select(.type == "change")' >/dev/null 2>&1; then
+  fail "watch: a write under target/ must not produce a change line"
+fi
+ok "watch: a write under target/ produces no change line"
+
+kill "$WATCH_PID" 2>/dev/null || true
+wait "$WATCH_PID" 2>/dev/null || true
+
+api 404 GET "/api/projects/999999/files/watch"
+[ "$(jqb .error.code)" = "not_found" ] || fail "watch: unknown project error.code"
+ok "watch: an unknown project is 404 not_found"
 
 kill "$SERVER_PID" 2>/dev/null || true
 wait "$SERVER_PID" 2>/dev/null || true
