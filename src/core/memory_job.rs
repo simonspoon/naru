@@ -112,8 +112,10 @@ fn log_path(name: &str) -> PathBuf {
 }
 
 /// The program a job re-runs: `NARU_SELF_BIN` (the test seam — inside `cargo
-/// test` the current exe is the harness) or this executable.
-fn self_exe() -> std::io::Result<PathBuf> {
+/// test` the current exe is the harness) or this executable. Also the
+/// runner's (naru task 1886), so an in-process live start never re-runs the
+/// test harness as a runner.
+pub(crate) fn self_exe() -> std::io::Result<PathBuf> {
     match crate::core::env::var("SELF_BIN").filter(|v| !v.is_empty()) {
         Some(bin) => Ok(PathBuf::from(bin)),
         None => std::env::current_exe(),

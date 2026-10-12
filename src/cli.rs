@@ -33,8 +33,8 @@ use crate::core::{
     Project, ProjectPatch, ReceiptPatch, Result, Script, ScriptArg, ScriptArgKind, ScriptPatch,
     Status, Store, Task, TaskNote, TaskPatch, TaskReceipt, Workflow, WorkflowEdge, WorkflowNode,
     WorkflowNodeKind, WorkflowNodeNew, WorkflowNodePatch, WorkflowPatch, WorkflowRun,
-    WorkflowTrigger, WorkflowView, agents, audio, board, cc, config, files, git, library, live,
-    look, memory_job, migrate, project_memory, receipt, system,
+    WorkflowTrigger, WorkflowView, audio, board, cc, config, files, git, library, live, look,
+    memory_job, migrate, project_memory, receipt, system,
 };
 
 const TOP_AFTER_HELP: &str = "\
@@ -6182,6 +6182,30 @@ fn bind_live_agent_or_end(
     }
 }
 
+/// After a handoff has rebound the session: stops the outgoing agent `old` at
+/// once and clears it from `predecessor_agent_id`, unless it still has
+/// delegates running (`has_delegates`, mesa task 1359) — then it stays the
+/// predecessor for the successor's `listen` to stop. Best-effort, a failed stop
+/// is one stderr line; `stop` is a parameter so a test can aim it at a
+/// throwaway runs directory.
+fn stop_handed_off_agent(
+    store: &mut Store,
+    session_id: i64,
+    old: Option<&str>,
+    has_delegates: bool,
+    stop: &dyn Fn(&str) -> std::result::Result<(), String>,
+) {
+    let Some(old) = old else {
+        return;
+    };
+    if has_delegates || !matches!(store.take_live_predecessor_if(session_id, old), Ok(true)) {
+        return;
+    }
+    if let Err(e) = stop(old) {
+        eprintln!("live session {session_id}: could not stop its previous agent: {e}");
+    }
+}
+
 /// Stops the agent the ended session was spawned with, so hanging up also
 /// finishes the background session in the Agents sidebar instead of leaving
 /// one idling per conversation.
@@ -6196,7 +6220,7 @@ fn stop_live_agent(session: &LiveSession) {
     let Some(agent_id) = session.agent_id.as_deref() else {
         return;
     };
-    if let Err(e) = agents::stop(agent_id) {
+    if let Err(e) = live::stop_agent(agent_id) {
         eprintln!("live session {}: could not stop its agent: {e}", session.id);
     }
 }
@@ -6280,22 +6304,18 @@ fn run_live(cmd: LiveCmd) -> Result<()> {
                 // — comes from `~/.mesa/config.json`'s `live-agent` entry. The
                 // prompt is one argument, never spliced into a shell string.
                 let spawned = match live_agent_dir(&store, project_id, session.id) {
-                    // The `naru-live` agent definition is seeded to disk first
-                    // (mesa task 1068): the default template spawns
-                    // `--agent naru-live`, which errors on an agent Claude Code
-                    // has never seen. A failure here is a failed spawn like any
+                    // `live::spawn_agent` seeds the `naru-live` agent definition
+                    // first (mesa task 1068) and starts the conversation as a
+                    // `naru run` job (naru task 1886), the prompt its first
+                    // inbox message. A failure is a failed spawn like any
                     // other and goes through the same rollback below.
-                    Ok((dir, name)) => live::ensure_agent_definition(&store).and_then(|_| {
-                        let prompts = library::prompts(&store).map_err(|e| e.to_string())?;
-                        agents::spawn_bg(
-                            config::LIVE_AGENT,
-                            &dir,
-                            Some(session.id),
-                            Some(&name),
-                            Some(&live::agent_prompt(&store, session.id)),
-                            &prompts,
-                        )
-                    }),
+                    Ok((dir, name)) => live::spawn_agent(
+                        &store,
+                        &dir,
+                        &name,
+                        &live::agent_prompt(&store, session.id),
+                    )
+                    .map(Some),
                     Err(e) => Err(e.to_string()),
                 };
                 bind_live_agent_or_end(&mut store, session, spawned)?
@@ -6326,7 +6346,7 @@ fn run_live(cmd: LiveCmd) -> Result<()> {
                 spawn_live_dream_after(&mut store, &ended);
             }
             if let Some(prev) = predecessor
-                && let Err(e) = agents::stop(&prev)
+                && let Err(e) = live::stop_agent(&prev)
             {
                 eprintln!(
                     "live session {}: could not stop its previous agent: {e}",
@@ -6362,9 +6382,9 @@ fn run_live(cmd: LiveCmd) -> Result<()> {
                 // listen tries again; the take is still the one-shot, and only
                 // of the very id whose delegates were probed.
                 if let Some(prev) = store.live_predecessor(session.id)?
-                    && agents::running_subagents(&prev).is_empty()
+                    && live::running_delegates(&prev).is_empty()
                     && store.take_live_predecessor_if(session.id, &prev)?
-                    && let Err(e) = agents::stop(&prev)
+                    && let Err(e) = live::stop_agent(&prev)
                 {
                     eprintln!(
                         "live session {}: could not stop its previous agent: {e}",
@@ -6513,6 +6533,7 @@ fn run_live(cmd: LiveCmd) -> Result<()> {
                 )));
             }
             let lease = session.lease + 1;
+            let old_agent = session.agent_id.clone();
             // The same template and the same `--agent naru-live` as `start`,
             // deliberately: everything the successor shares with its
             // predecessor sits in front of everything per-session, so its
@@ -6532,21 +6553,15 @@ fn run_live(cmd: LiveCmd) -> Result<()> {
             let delegates = session
                 .agent_id
                 .as_deref()
-                .map(agents::running_subagents)
+                .map(live::running_delegates)
                 .unwrap_or_default();
-            let spawned = live::ensure_agent_definition(&store).and_then(|_| {
-                let prompts = library::prompts(&store).map_err(|e| e.to_string())?;
-                agents::spawn_bg(
-                    config::LIVE_AGENT,
-                    &dir,
-                    Some(session.id),
-                    Some(&successor),
-                    Some(&live::handoff_prompt(
-                        &store, session.id, lease, note, &delegates,
-                    )),
-                    &prompts,
-                )
-            });
+            let spawned = live::spawn_agent(
+                &store,
+                &dir,
+                &successor,
+                &live::handoff_prompt(&store, session.id, lease, note, &delegates),
+            )
+            .map(Some);
             // NOT `bind_live_agent_or_end`: a successor that could not start
             // leaves the conversation exactly as it was — still live, still
             // the caller's, same lease — rather than ending it. The caller is
@@ -6585,7 +6600,7 @@ fn run_live(cmd: LiveCmd) -> Result<()> {
             // still changes nothing, and best-effort: a failed read here must
             // not strand a successor that is already running.
             if let Ok(Some(prev)) = store.take_live_predecessor(session.id)
-                && let Err(e) = agents::stop(&prev)
+                && let Err(e) = live::stop_agent(&prev)
             {
                 eprintln!(
                     "live session {}: could not stop its previous agent: {e}",
@@ -6601,7 +6616,7 @@ fn run_live(cmd: LiveCmd) -> Result<()> {
                     Ok(session) => session,
                     Err(e) => {
                         if let Some(job) = job.as_deref()
-                            && let Err(stop) = agents::stop(job)
+                            && let Err(stop) = live::stop_agent(job)
                         {
                             eprintln!(
                                 "live session {}: could not stop the successor agent {job}: {stop}",
@@ -6611,6 +6626,17 @@ fn run_live(cmd: LiveCmd) -> Result<()> {
                         return Err(e);
                     }
                 };
+            // The outgoing run is stopped at once (naru task 1886) — its
+            // stop marker — unless it still has delegates running (mesa task
+            // 1359): then it stays `predecessor_agent_id` and the successor's
+            // `listen` stops it once they are done.
+            stop_handed_off_agent(
+                &mut store,
+                session.id,
+                old_agent.as_deref(),
+                !delegates.is_empty(),
+                &live::stop_agent,
+            );
             print_live_session(&session, quiet);
         }
         LiveCmd::Context => {
@@ -6624,7 +6650,7 @@ fn run_live(cmd: LiveCmd) -> Result<()> {
             // Job id → session uuid is a lookup, never an inference (the
             // cost guard's rule, in reverse); the pulse itself fails open, so
             // an unreadable transcript is `null` rather than an error.
-            let uuid = agents::find_session_for_job(agent_id)
+            let uuid = live::agent_session_uuid(agent_id)
                 .map_err(Error::Unavailable)?
                 .ok_or_else(|| {
                     Error::Unavailable(format!(
@@ -9828,6 +9854,63 @@ mod tests {
             bind_live_agent_or_end(&mut store, session, Ok(Some("e34b8ed9".into()))).unwrap();
         assert_eq!(bound.agent_id.as_deref(), Some("e34b8ed9"));
         assert_eq!(bound.status, LiveStatus::Live);
+    }
+
+    /// Naru task 1886: after a handoff rebinds the session the outgoing run is
+    /// stopped at once (its stop marker written, `predecessor_agent_id`
+    /// cleared); while it still has delegates running it stays the predecessor
+    /// for the successor's `listen` to stop (mesa task 1359).
+    #[test]
+    fn handoff_stops_the_outgoing_run_unless_it_has_delegates() {
+        let dir = tempfile::tempdir().unwrap();
+        let runs = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("test.db")).unwrap();
+        let opts = crate::core::runner::StartOpts {
+            model: "default".into(),
+            prompt: "hi".into(),
+            cwd: Some(cwd.path().to_string_lossy().into_owned()),
+            name: None,
+            agent: None,
+            idle_timeout_secs: None,
+        };
+        for has_delegates in [false, true] {
+            let old =
+                crate::core::runner::create_job_with(runs.path(), &opts, Some(config::LIVE_AGENT))
+                    .unwrap();
+            let old_receipt = format!("run:{}", old.job_id);
+            let session = store.start_live_session(None).unwrap();
+            store
+                .bind_live_agent(session.id, Some(&old_receipt))
+                .unwrap();
+            store
+                .hand_off_live_session(session.id, Some("run:feedface"), None)
+                .unwrap();
+            assert_eq!(
+                store.live_predecessor(session.id).unwrap().as_deref(),
+                Some(old_receipt.as_str())
+            );
+
+            let stop = |r: &str| live::stop_agent_in(runs.path(), r);
+            stop_handed_off_agent(
+                &mut store,
+                session.id,
+                Some(&old_receipt),
+                has_delegates,
+                &stop,
+            );
+
+            let marker = runs.path().join(&old.job_id).join("stop");
+            let predecessor = store.live_predecessor(session.id).unwrap();
+            if has_delegates {
+                assert!(!marker.exists(), "a run with delegates must not be stopped");
+                assert_eq!(predecessor.as_deref(), Some(old_receipt.as_str()));
+            } else {
+                assert!(marker.exists(), "the old run's stop marker is written");
+                assert_eq!(predecessor, None);
+            }
+            store.end_live_session(session.id).unwrap();
+        }
     }
 
     /// `--arg` is shape-only: the NAME passes through untouched so `Store`

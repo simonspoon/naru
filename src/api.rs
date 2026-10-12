@@ -5199,6 +5199,11 @@ async fn live_agent_blocked(
     job: &str,
     working_since: Option<&str>,
 ) -> Option<String> {
+    // A `naru run` job is a `-p` session: it has no permission prompt to wait
+    // on (naru task 1886), so there is nothing to ask `claude agents`.
+    if job.starts_with("run:") {
+        return None;
+    }
     let key = format!("{job}@{}", working_since.unwrap_or(""));
     {
         let cache = state.live_blocked_cache.lock().unwrap();
@@ -5238,7 +5243,7 @@ async fn live_agent_context(state: &AppState, job: &str) -> Option<i64> {
     }
     let job_owned = job.to_string();
     let tokens = tokio::task::spawn_blocking(move || {
-        let uuid = agents::find_session_for_job(&job_owned).ok().flatten()?;
+        let uuid = live::agent_session_uuid(&job_owned).ok().flatten()?;
         crate::core::cc::session_pulse(&uuid).context_tokens
     })
     .await
@@ -5434,11 +5439,9 @@ fn live_agent_dir(
 /// later start.
 ///
 /// Resolves the same folder and the same session name the CLI's `live start`
-/// does, then hands `spawn_bg` the `live-agent` template from
-/// `~/.mesa/config.json`, the session id, that name, and the instruction block
-/// from `core::live` — one `Command::arg`, never spliced into a shell string.
-/// Answers the spawn receipt, which is `None` when the configured command
-/// printed none (the session is still real — see `AgentSpawned`).
+/// does, then starts a `naru run` job through `live::spawn_agent` (the
+/// `live-agent` template; the instruction block from `core::live` is the run's
+/// first inbox message). Answers its `run:<job>` receipt.
 async fn spawn_live_agent(
     state: &AppState,
     session_id: i64,
@@ -5453,33 +5456,21 @@ async fn spawn_live_agent(
         }
         None => live::agent_prompt(&state.store.lock().unwrap(), session_id),
     };
-    // The `naru-live` agent definition is seeded to disk before the spawn
-    // (mesa task 1068): the default template spawns `--agent naru-live`, which
-    // errors on an agent Claude Code has never seen. A failure is treated
-    // exactly like a failed spawn — `unavailable`, and the caller ends the
-    // session it just opened.
-    live::ensure_agent_definition(&state.store.lock().unwrap()).map_err(agents_unavailable)?;
-    // The library's prompts, for any `{prompt:<name>}` the template names — an
-    // owned table, so it moves into the blocking closure with the rest.
-    let prompts = library::prompts(&state.store.lock().unwrap())?;
-    // Two-phase like every other spawn site in this file: the store lock is
-    // dropped before the blocking `claude --bg` shell-out, which would
-    // otherwise freeze every other API request for its duration.
+    // `live::spawn_agent` seeds the `naru-live` agent definition first (mesa
+    // task 1068; a failure is treated exactly like a failed spawn —
+    // `unavailable`, and the caller ends the session it just opened) and starts
+    // the conversation as a `naru run` job (naru task 1886), the prompt its
+    // first inbox message. Off the request thread like every other spawn site
+    // in this file; the store is locked only for the seed.
+    let store = state.store.clone();
     let job = tokio::task::spawn_blocking(move || {
-        agents::spawn_bg(
-            config::LIVE_AGENT,
-            &dir,
-            Some(session_id),
-            Some(&name),
-            Some(&prompt),
-            &prompts,
-        )
+        live::spawn_agent(&store.lock().unwrap(), &dir, &name, &prompt).map(Some)
     })
     .await
     .map_err(|e| agents_unavailable(format!("live agent spawn panicked: {e}")))
     .and_then(|result| result.map_err(agents_unavailable))?;
-    // Same cache invalidation as `spawn_project_agent`: a live agent is an
-    // ordinary background session, and the Agents sidebar must show it on the
+    // Same cache invalidation as `spawn_project_agent`: a live agent is a
+    // session of its own, and the Agents sidebar must show it on the
     // next poll rather than after the TTL.
     state.agents_cache.lock().unwrap().remove(&path);
     state.agents_gen.fetch_add(1, Ordering::SeqCst);
@@ -5643,7 +5634,7 @@ async fn stop_live(
     }
     if let Some(prev) = predecessor {
         let id = session.id;
-        match tokio::task::spawn_blocking(move || agents::stop(&prev)).await {
+        match tokio::task::spawn_blocking(move || live::stop_agent(&prev)).await {
             Ok(Ok(())) => {}
             Ok(Err(e)) => eprintln!("live session {id}: could not stop its previous agent: {e}"),
             Err(e) => eprintln!("live session {id}: stopping its previous agent panicked: {e}"),
@@ -5651,7 +5642,7 @@ async fn stop_live(
     }
     if let Some(agent_id) = session.agent_id.clone() {
         let id = session.id;
-        match tokio::task::spawn_blocking(move || agents::stop(&agent_id)).await {
+        match tokio::task::spawn_blocking(move || live::stop_agent(&agent_id)).await {
             Ok(Ok(())) => {
                 // Same cache invalidation as a spawn: the Agents sidebar must
                 // show the session finishing on the next poll, not after the
@@ -19300,6 +19291,34 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             .block_on(fut)
     }
 
+    /// Naru task 1886: a `run:` receipt names a `-p` session, which has no
+    /// permission prompt to wait on, so `GET /api/live`'s `blocked` is `null`
+    /// without asking `claude agents` anything.
+    #[test]
+    fn a_run_receipt_is_never_blocked() {
+        let (_dir, state) = test_state();
+        assert_eq!(
+            block_on(live_agent_blocked(&state, "run:0a1b2c3d", Some("t"))),
+            None
+        );
+        assert!(state.live_blocked_cache.lock().unwrap().is_empty());
+    }
+
+    /// The live agent's runner is a re-run of this binary, which in-process is
+    /// the test harness: `NARU_SELF_BIN` points at a stub that exits instead
+    /// (naru task 1886), so the job directory is all a test has to assert on.
+    /// The caller holds `ENV_LOCK` and removes the var again.
+    fn stub_runner_exe(dir: &std::path::Path) {
+        let stub = dir.join("naru-stub");
+        std::fs::write(&stub, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        unsafe { std::env::set_var("NARU_SELF_BIN", &stub) };
+    }
+
     #[test]
     fn start_live_spawns_the_live_agent_and_binds_its_receipt() {
         // SAFETY: ENV_LOCK gives this test exclusive access to
@@ -19315,6 +19334,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             let log_path = stub_dir.path().join("bg.log");
             let bin = stub_claude_bg(stub_dir.path(), &log_path);
             unsafe { std::env::set_var("MESA_CLAUDE_BIN", &bin) };
+            stub_runner_exe(stub_dir.path());
 
             let (_dir, state) = test_state();
             let proj_dir = tempfile::tempdir().unwrap();
@@ -19335,22 +19355,40 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             let body = block_on(json_body(resp));
             assert_eq!(body["status"], "live");
             assert_eq!(body["project_id"], id);
-            assert_eq!(body["agent_id"], "deadbeef");
             let session_id = body["id"].as_i64().unwrap();
 
-            // The stub logs `<cwd>|<name>|<prompt>`; match the head of the
-            // line rather than splitting the whole thing. A name AND a prompt
-            // together is what pins the `live-agent` template: it is the only
-            // action whose default offers both.
-            let logged = std::fs::read_to_string(&log_path).unwrap();
-            // A scoped conversation is named project-first, the Agents sidebar's
-            // idiom — `new_project` names its project "proj".
-            let head = format!("{}|proj: live {session_id}|", root.display());
-            assert!(logged.starts_with(&head), "{logged}");
+            // The receipt names a `naru run` job (naru task 1886), not a
+            // `claude --bg` short id: `run:<8 hex>`.
+            let receipt = body["agent_id"].as_str().unwrap().to_string();
+            let job_id = receipt.strip_prefix("run:").expect(&receipt);
+            assert!(crate::core::runner::is_valid_job_id(job_id), "{receipt}");
+            let job_dir = crate::core::runner::runs_dir().join(job_id);
+            let job: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(job_dir.join("job.json")).unwrap()).unwrap();
+            // The live-agent template launches it; a scoped conversation is
+            // named project-first, the Agents sidebar's idiom — `new_project`
+            // names its project "proj" — and runs in the project's folder.
+            assert_eq!(job["template"], "live-agent");
+            assert_eq!(job["name"], format!("proj: live {session_id}"));
+            assert_eq!(job["cwd"], root.to_str().unwrap());
+            // The spawn prompt is the run's first inbox message.
+            let inbox: Vec<_> = std::fs::read_dir(job_dir.join("inbox"))
+                .unwrap()
+                .flatten()
+                .filter(|e| e.path().is_file())
+                .collect();
+            assert_eq!(inbox.len(), 1);
+            let first: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(inbox[0].path()).unwrap()).unwrap();
             assert!(
-                logged.contains(&format!("naru live session {session_id}")),
-                "the session's own prompt must reach the agent: {logged}"
+                first["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains(&format!("naru live session {session_id}")),
+                "the session's own prompt must reach the agent: {first}"
             );
+            // No `claude --bg` call was made.
+            assert!(!log_path.exists());
 
             // One live session at a time: the second start is the store's
             // `conflict`, and it must not have spawned anything.
@@ -19366,7 +19404,14 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             .unwrap_err();
             assert_eq!(err.status, StatusCode::CONFLICT);
             assert_eq!(err.code, "conflict");
-            assert_eq!(std::fs::read_to_string(&log_path).unwrap(), logged);
+            assert_eq!(
+                std::fs::read_dir(crate::core::runner::runs_dir())
+                    .unwrap()
+                    .count(),
+                1,
+                "the refused second start must not have spawned a run"
+            );
+            unsafe { std::env::remove_var("NARU_SELF_BIN") };
         });
     }
 
@@ -19479,7 +19524,10 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         std::fs::write(stub_dir.path().join("fail"), "").unwrap();
         unsafe { std::env::set_var("MESA_CLAUDE_BIN", &bin) };
         // As above: the seed writes under `$HOME`.
-        crate::core::library::test_home::with_home_dir(|_| {
+        crate::core::library::test_home::with_home_dir(|home| {
+            // A file where the naru home should be makes the run's job
+            // directory impossible to create: a failed spawn (naru task 1886).
+            std::fs::write(home.join(".naru"), "").unwrap();
             let (_dir, state) = test_state();
             let err = block_on(start_live(
                 State(state.clone()),
@@ -19529,6 +19577,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                 std::env::remove_var("MESA_AUDIO_URL");
                 std::env::set_var("MESA_CONFIG_FILE", &config);
             }
+            stub_runner_exe(stub_dir.path());
             // One start on a fresh db. With one blocking thread the pool runs
             // its queue in order, so the no-op after the handler returns only
             // once any warm-up it queued has finished — no sleep, no poll.
@@ -19577,7 +19626,10 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                 *daemon.requests.lock().unwrap(),
                 vec![r#"POST /api/load {"model":"default","kind":"stt"}"#.to_string()]
             );
-            unsafe { std::env::set_var("MESA_CONFIG_FILE", unconfigured) };
+            unsafe {
+                std::env::set_var("MESA_CONFIG_FILE", unconfigured);
+                std::env::remove_var("NARU_SELF_BIN");
+            }
         });
     }
 

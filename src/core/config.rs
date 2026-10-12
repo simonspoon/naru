@@ -320,8 +320,12 @@ pub const DEFAULT_AGENT_SPAWN: &str = "claude --bg --model opus --agent supervis
 /// (mesa task 1068, `core::live::AGENT_DEFINITION`, seeded to
 /// `~/.claude/agents/naru-live.md` by `core::live::ensure_agent_definition`),
 /// which is where its instructions live; a user who wants another agent edits
-/// the name here.
-pub const DEFAULT_LIVE_AGENT: &str = "claude --bg --agent naru-live --name {name} -- {prompt}";
+/// the name here. Since naru task 1886 the conversation is a `naru run` job
+/// (`core::live::spawn_agent`, [`DEFAULT_RUNNER`]'s stream-json shape): the
+/// prompt is the run's first inbox message, so `{prompt}` is not offered, and
+/// a saved template that still starts a `--bg` agent is retired
+/// ([`retired_bg_override`]).
+pub const DEFAULT_LIVE_AGENT: &str = "claude -p --input-format stream-json --output-format stream-json --verbose --agent naru-live --name {name} {session_flag} {session_id}";
 /// Built-in default for [`LIVE_SUMMARY`] (naru task 1690): one synchronous
 /// `claude -p --output-format json --json-schema {schema}` call, **no tools**
 /// (`--tools ""`, `--strict-mcp-config`), run inside a detached `naru __job`
@@ -538,7 +542,11 @@ fn note_retired_once(action: &str) -> bool {
 /// built-in, the file is never rewritten, the [`migrate_retired_placeholders`]
 /// posture) and refused on **save** ([`validate`]).
 pub fn retired_bg_override(action: &str, template: &str) -> bool {
-    (action == LIVE_SUMMARY || action == LIVE_DREAM || action == INBOX_WATCHER || action == RETRO)
+    (action == LIVE_SUMMARY
+        || action == LIVE_DREAM
+        || action == INBOX_WATCHER
+        || action == RETRO
+        || action == LIVE_AGENT)
         && template.split_whitespace().any(|w| w == "--bg")
 }
 
@@ -546,6 +554,7 @@ pub fn retired_bg_override(action: &str, template: &str) -> bool {
 /// 1691 `inbox-watcher`, 1690 the live memory jobs).
 fn retired_task(action: &str) -> u32 {
     match action {
+        LIVE_AGENT => 1886,
         RETRO => 1692,
         INBOX_WATCHER => 1691,
         _ => 1690,
@@ -773,6 +782,14 @@ pub fn validate(action: &str, template: &str, prompts: &Prompts) -> Result<(), S
     let script = template.trim();
     refuse_env_references(action, script)?;
     if retired_bg_override(action, script) {
+        if action == LIVE_AGENT {
+            return Err(format!(
+                "{action} no longer starts a --bg agent: the conversation is a `naru run` \
+                 stream-json session (`claude -p --input-format stream-json …`, naru task {}); \
+                 remove --bg and {{prompt}}",
+                retired_task(action)
+            ));
+        }
         return Err(format!(
             "{action} no longer starts a --bg agent: it runs one synchronous `claude -p \
              --output-format json --json-schema {{schema}}` call and Naru applies the answer \
@@ -1727,10 +1744,8 @@ impl Vars<'_> {
 pub fn offered_placeholders(action: &str) -> &'static [&'static str] {
     match action {
         AGENT_SPAWN => &["{prompt}"],
-        // The union: a live session (and its summariser, and the dream pass
-        // that borrows the newest session's id) is a mesa record *and*
-        // carries a prompt.
-        LIVE_AGENT => &["{id}", "{name}", "{prompt}"],
+        // The runner's vars (naru task 1886): the prompt rides the run inbox.
+        LIVE_AGENT => &["{name}", "{session_flag}", "{session_id}"],
         // Plus the schema Naru owns (naru task 1690).
         LIVE_SUMMARY | LIVE_DREAM => &["{id}", "{name}", "{prompt}", "{schema}"],
         // Plus the pass's model (naru tasks 1691, 1692).
@@ -5098,11 +5113,11 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
-        let before = r#"{"commands": {"live-agent": "claude --bg --name \"mesa-live\" --agent \"mesa-live\" -- {prompt}"}}"#;
+        let before = r#"{"commands": {"live-agent": "claude -p --name \"mesa-live\" --agent \"mesa-live\" {session_id}"}}"#;
         std::fs::write(&path, before).unwrap();
         assert_eq!(
             command_in(&path, LIVE_AGENT).unwrap().as_deref(),
-            Some(r#"claude --bg --name "mesa-live" --agent "naru-live" -- {prompt}"#)
+            Some(r#"claude -p --name "mesa-live" --agent "naru-live" {session_id}"#)
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
     }
@@ -5175,11 +5190,14 @@ mod tests {
         );
         assert_eq!(settings[2].action, AGENT_SPAWN);
         assert_eq!(settings[2].placeholders, ["{prompt}"]);
-        // The live agent offers the union of the two shapes: it is a mesa
-        // record with an id and a name, and mesa supplies its prompt.
+        // The live agent offers the runner's vars (naru task 1886): its prompt
+        // rides the run inbox, so there is no `{prompt}`.
         assert_eq!(settings[3].action, LIVE_AGENT);
         assert_eq!(settings[3].default, DEFAULT_LIVE_AGENT);
-        assert_eq!(settings[3].placeholders, ["{id}", "{name}", "{prompt}"]);
+        assert_eq!(
+            settings[3].placeholders,
+            ["{name}", "{session_flag}", "{session_id}"]
+        );
         // The summariser offers the same union, for the same reason.
         assert_eq!(settings[4].action, LIVE_SUMMARY);
         assert_eq!(settings[4].default, DEFAULT_LIVE_SUMMARY);
@@ -5337,8 +5355,25 @@ mod tests {
         let err = validate_(RETRO, "claude --bg --agent naru-retro -- {id}").unwrap_err();
         assert!(err.contains("--bg") && err.contains("1692"), "{err}");
         assert!(retired_bg_override(RETRO, "claude --bg -- {prompt}"));
+        // And the live conversation joined them in naru task 1886: a runner
+        // session, with no `{prompt}` either.
+        let err = validate_(LIVE_AGENT, "claude --bg --name {name} -- {prompt}").unwrap_err();
+        assert!(err.contains("--bg") && err.contains("1886"), "{err}");
+        assert!(retired_bg_override(LIVE_AGENT, "claude --bg -- x"));
+        let err = validate_(LIVE_AGENT, "claude -p --name {name} -- {prompt}").unwrap_err();
+        assert!(err.contains("{prompt}"), "{err}");
+        // The default is the runner shape, read as the built-in when a saved
+        // `--bg` template is ignored.
+        assert!(DEFAULT_LIVE_AGENT.contains("-p --input-format stream-json"));
+        assert!(!DEFAULT_LIVE_AGENT.contains("--bg"));
+        let dir = tempfile::tempdir().unwrap();
+        let bg = write_config(
+            dir.path(),
+            r#"{"commands": {"live-agent": "claude --bg --name {name} -- {prompt}"}}"#,
+        );
+        assert_eq!(command_in(&bg, LIVE_AGENT).unwrap(), None);
         // Other actions still start --bg agents.
-        validate_(LIVE_AGENT, "claude --bg --name {name} -- {prompt}").unwrap();
+        validate_(AGENT_SPAWN, "claude --bg -- {prompt}").unwrap();
         // `--background` is not the flag.
         assert!(!retired_bg_override(
             LIVE_SUMMARY,
@@ -5597,15 +5632,17 @@ mod tests {
         // hostile its text. Its agent is the literal `naru-live` definition
         // (mesa task 1068).
         let live = Vars {
-            id: Some(12),
             name: Some("mesa live 12"),
-            prompt: Some("listen; then say \"hi\""),
+            session_flag: Some("--session-id"),
+            session_id: Some("0a1b2c3d-0000-4000-8000-000000000000"),
             prompts: None,
             ..Default::default()
         };
         assert_eq!(
             resolve(LIVE_AGENT, DEFAULT_LIVE_AGENT, &live).unwrap(),
-            r#"claude --bg --agent naru-live --name 'mesa live 12' -- 'listen; then say "hi"'"#
+            "claude -p --input-format stream-json --output-format stream-json --verbose \
+             --agent naru-live --name 'mesa live 12' '--session-id' \
+             '0a1b2c3d-0000-4000-8000-000000000000'"
         );
         // …and a real bash agrees about the argv each of those makes.
         assert_eq!(
@@ -5625,13 +5662,18 @@ mod tests {
             argv_of(&resolve(LIVE_AGENT, DEFAULT_LIVE_AGENT, &live).unwrap()),
             [
                 "claude",
-                "--bg",
+                "-p",
+                "--input-format",
+                "stream-json",
+                "--output-format",
+                "stream-json",
+                "--verbose",
                 "--agent",
                 "naru-live",
                 "--name",
                 "mesa live 12",
-                "--",
-                "listen; then say \"hi\"",
+                "--session-id",
+                "0a1b2c3d-0000-4000-8000-000000000000",
             ]
         );
     }

@@ -557,7 +557,7 @@ pub(crate) fn create_job_with(
 /// thread only stops a long-lived server from keeping a zombie, which
 /// `kill -0` would read as alive).
 pub fn spawn_runner(dir: &Path) -> Result<()> {
-    let exe = std::env::current_exe()?;
+    let exe = crate::core::memory_job::self_exe()?;
     let log = OpenOptions::new()
         .create(true)
         .append(true)

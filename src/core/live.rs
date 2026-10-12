@@ -1009,7 +1009,7 @@ pub fn stop_agent(receipt: &str) -> Result<(), String> {
     stop_agent_in(&crate::core::runner::runs_dir(), receipt)
 }
 
-fn stop_agent_in(runs: &std::path::Path, receipt: &str) -> Result<(), String> {
+pub(crate) fn stop_agent_in(runs: &std::path::Path, receipt: &str) -> Result<(), String> {
     match parse_agent_receipt(receipt) {
         AgentReceipt::Run(id) => crate::core::runner::stop_in(runs, id)
             .map(|_| ())
