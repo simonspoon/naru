@@ -7,6 +7,11 @@ import {
   childLabel,
   childPaneHeading,
   childPaneId,
+  childPaneIdFor,
+  childParentRow,
+  childParentRunId,
+  runPaneView,
+  runParentKey,
   childPaneName,
   childPromptLabel,
   isChildPaneId,
@@ -263,5 +268,55 @@ describe('childCard', () => {
     const shell = child({ kind: 'shell', name: "zsh -c 'source …'", command: 'sleep 9' })
     expect(childCard(shell)).toEqual({ name: 'shell', body: 'sleep 9' })
     expect(childCard({ ...shell, description: 'Wait\nfor it' }).body).toBe('Wait for it')
+  })
+})
+
+describe('runner-parent child panes (naru task 1891)', () => {
+  const sub = child({ id: 'agent-x1' })
+  const shell = child({ kind: 'shell', id: null, name: 'sleep 9' })
+
+  it('keeps --bg ids byte-identical', () => {
+    expect(childPaneId('bg7', sub)).toBe('child:bg7:sub:agent-x1')
+    expect(childPaneIdFor({ id: 'bg7', runId: null }, sub)).toBe('child:bg7:sub:agent-x1')
+    expect(childPaneIdFor({ id: 'bg7', runId: 'r1' }, shell)).toBe('child:bg7:cmd:sleep 9')
+  })
+
+  it('keys a runner row by runId under a distinct prefix', () => {
+    const run = childPaneIdFor({ id: null, runId: 'r1' }, sub)
+    expect(run).toBe('child:run=r1:sub:agent-x1')
+    expect(run).not.toBe(childPaneId('r1', sub))
+    expect(isChildPaneId(run as string)).toBe(true)
+  })
+
+  it('round-trips back to the parent runId', () => {
+    for (const c of [sub, shell]) {
+      const ref = parseChildPaneId(childPaneIdFor({ id: null, runId: 'r1' }, c) as string)
+      expect(ref).not.toBeNull()
+      expect(childParentRunId(ref!)).toBe('r1')
+      expect(ref!.parentId).toBe(runParentKey('r1'))
+    }
+    expect(childParentRunId(parseChildPaneId('child:bg7:sub:a')!)).toBeNull()
+  })
+
+  it('has no pane id for an interactive row', () => {
+    expect(childPaneIdFor({ id: null, runId: null }, sub)).toBeNull()
+  })
+
+  it('finds the parent row by job id or runId', () => {
+    const rows = [
+      { id: 'bg7', runId: null },
+      { id: null, runId: 'r1' },
+    ]
+    expect(childParentRow(parseChildPaneId('child:bg7:sub:a')!, rows)).toBe(rows[0])
+    expect(childParentRow(parseChildPaneId('child:run=r1:sub:a')!, rows)).toBe(rows[1])
+    expect(childParentRow(parseChildPaneId('child:run=zz:sub:a')!, rows)).toBeUndefined()
+  })
+})
+
+describe('runPaneView', () => {
+  it('offers chat only with a session id', () => {
+    expect(runPaneView('chat', 's1')).toBe('chat')
+    expect(runPaneView('chat', null)).toBe('run')
+    expect(runPaneView('run', 's1')).toBe('run')
   })
 })

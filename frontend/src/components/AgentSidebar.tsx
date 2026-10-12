@@ -28,8 +28,11 @@ import {
   childCard,
   childPaneHeading,
   childPaneId,
+  childPaneIdFor,
+  childParentRow,
   isChildPaneId,
   parseChildPaneId,
+  runParentKey,
 } from '../agentChild'
 import {
   defaultListMaximized,
@@ -517,10 +520,15 @@ function RunPaneTile({
       {runId === null ? (
         <div className="agent-chat agent-chat-empty">Not a run pane.</div>
       ) : (
-        <RunPane runId={runId} paused={paused} />
+        <RunPane runId={runId} sessionId={runSessionId(agents, runId)} paused={paused} />
       )}
     </PaneShell>
   )
+}
+
+/** The session id behind a run pane's row, for its chat view. */
+function runSessionId(agents: AgentSession[], runId: string | null): string | null {
+  return agents.find((a) => runId !== null && a.runId === runId)?.sessionId ?? null
 }
 
 /** A run pane's title: the run's name from the session list, else its id. */
@@ -555,7 +563,7 @@ function SoloRunPane({
           <button onClick={onClose}>close</button>
         </span>
       </div>
-      {runId !== null && <RunPane runId={runId} paused={paused} />}
+      {runId !== null && <RunPane runId={runId} sessionId={runSessionId(agents, runId)} paused={paused} />}
     </div>
   )
 }
@@ -588,7 +596,7 @@ function ChildPaneTile({
   dropEdge?: DropEdge | null
 }) {
   const paneRef = parseChildPaneId(paneId)
-  const parent = paneRef !== null ? agents.find((a) => a.id === paneRef.parentId) : undefined
+  const parent = paneRef !== null ? childParentRow(paneRef, agents) : undefined
   const child = paneRef !== null ? childForPane(paneRef, parent?.children ?? []) : null
   const parentLabel = parent ? agentLabel(parent) : (paneRef?.parentId ?? paneId)
   return (
@@ -633,7 +641,7 @@ function SoloChildPane({
   onClose: () => void
 }) {
   const paneRef = parseChildPaneId(paneId)
-  const parent = paneRef !== null ? agents.find((a) => a.id === paneRef.parentId) : undefined
+  const parent = paneRef !== null ? childParentRow(paneRef, agents) : undefined
   const child = paneRef !== null ? childForPane(paneRef, parent?.children ?? []) : null
   const parentLabel = parent ? agentLabel(parent) : (paneRef?.parentId ?? paneId)
   const label = paneRef !== null ? childPaneHeading(paneRef, child, parentLabel) : paneId
@@ -1064,7 +1072,7 @@ function AgentListContent({
         const { name, body } = childCard(child)
         const elapsed = childElapsed(child.startedAt, nowMs)
         const childContext = formatContextTokens(child.contextTokens)
-        const paneId = a.id !== null ? childPaneId(a.id, child) : null
+        const paneId = childPaneIdFor(a, child)
         const gone = childLeaving || leavingNow
         const done = gone || child.state === 'finished'
         return (
@@ -1085,14 +1093,16 @@ function AgentListContent({
             {/* A button, so the keyboard and focus rules are the browser's.
                 Opens this child as a read-only pane beside its parent (mesa
                 task 1278); an interactive session has no pane id to hang one
-                off, so its cards are unpressable. */}
+                off, so its cards are unpressable. A runner row is keyed by its
+                runId instead (naru task 1891). */}
             <button
               type="button"
               className="agent-subcard-btn"
               onClick={() => {
                 if (a.id !== null) onToggleChildPane(a.id, child)
+                else if (a.runId !== null) onToggleChildPane(runParentKey(a.runId), child)
               }}
-              disabled={a.id === null}
+              disabled={paneId === null}
             >
               <div className="agent-row-title">
                 <span className={`agent-card-dot agent-card-dot-${done ? 'done' : 'active'}`} />

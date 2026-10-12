@@ -144,6 +144,54 @@ export function childPaneId(parentId: string, child: AgentChild): string {
     : `${CHILD_PANE_PREFIX}${parentId}:cmd:${child.name}`
 }
 
+/** Marks the parent half of a pane id as a runner row's `runId` rather than a
+ *  background job id. A job id never carries `=`, so a child pane id keyed by a
+ *  run can never equal one keyed by a job (naru task 1891). */
+const RUN_PARENT_PREFIX = 'run='
+
+/** The id a runner row's child panes are keyed under: `run=<runId>`. */
+export function runParentKey(runId: string): string {
+  return `${RUN_PARENT_PREFIX}${runId}`
+}
+
+/** The runId a pane ref's parent half names, or `null` for a --bg parent. */
+export function childParentRunId(ref: ChildPaneRef): string | null {
+  if (!ref.parentId.startsWith(RUN_PARENT_PREFIX)) return null
+  const runId = ref.parentId.slice(RUN_PARENT_PREFIX.length)
+  return runId === '' ? null : runId
+}
+
+/** The pane id for one child of a panel row: keyed by the --bg job id when the
+ *  row has one, else by its runId (a runner row), else `null` — an interactive
+ *  session has nothing to hang a pane off. */
+export function childPaneIdFor(
+  row: { id: string | null; runId: string | null },
+  child: AgentChild,
+): string | null {
+  if (row.id !== null) return childPaneId(row.id, child)
+  if (row.runId !== null) return childPaneId(runParentKey(row.runId), child)
+  return null
+}
+
+/** The panel row a child pane hangs off: matched by job id, or by runId for a
+ *  runner-keyed pane. */
+export function childParentRow<T extends { id: string | null; runId: string | null }>(
+  ref: ChildPaneRef,
+  rows: T[],
+): T | undefined {
+  const runId = childParentRunId(ref)
+  return runId !== null ? rows.find((r) => r.runId === runId) : rows.find((r) => r.id === ref.parentId)
+}
+
+/** A run pane's two views: the runner's own event log, or the session's
+ *  transcript as a read-only chat. Chat needs the row's session id; without
+ *  one the pane stays on the log. */
+export type RunPaneView = 'run' | 'chat'
+
+export function runPaneView(view: RunPaneView, sessionId: string | null): RunPaneView {
+  return view === 'chat' && sessionId !== null ? 'chat' : 'run'
+}
+
 /** Whether a pane id names a child rather than an attached agent — the one
  *  test the sidebar's ptyPool calls are guarded by, since a child pane owns no
  *  PTY to remove. */

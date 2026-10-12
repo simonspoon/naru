@@ -163,6 +163,19 @@ job id).
   `runEvents.ts` renders `events.jsonl` as plain-text entries, and the
   composer, Interrupt and Stop are gated by `runControls`. No PTY; Auto Tile
   carries the pane through like a child pane.
+- **Child cards and panes (naru task 1891).** A runner row's `children` render
+  as enabled cards (they were disabled for want of a job id). Their pane ids
+  are keyed `child:run=<runId>:sub:<id>` / `:cmd:<line>` -- the `run=` parent
+  key cannot equal a `--bg` job id, which never carries `=` -- while `--bg` ids
+  are unchanged. `agentChild.ts` (`childPaneIdFor`, `childParentRow`,
+  `childParentRunId`) maps ids and rows both ways; it is still a `child` leaf,
+  so every `ptyPool` guard treats it as PTY-less. The pane reads the row's
+  `sessionId` for the subagent transcript, as for a `--bg` parent.
+- **run | chat.** The run pane header offers `run` (the event log) and `chat`
+  (`ChatTranscript` over `GET /api/cc/sessions/{session_id}/chat`, the same
+  route the `--bg` chat view polls). Chat is read-only and disabled without a
+  session id (`runPaneView`); the RunPane composer, Interrupt and Stop stay
+  the only way to act.
 
 ## Global Agent sidebar
 

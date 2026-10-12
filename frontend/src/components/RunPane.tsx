@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
-import { getRun, interruptRun, sendRunMessage, stopRun } from '../api'
+import { getCcSessionChat, getRun, interruptRun, sendRunMessage, stopRun } from '../api'
+import { runPaneView, type RunPaneView } from '../agentChild'
+import { ChatTranscript } from './ChatTranscript'
 import { isNearBottom } from '../agentChat'
 import {
   runControls,
@@ -20,7 +22,18 @@ const TAIL = 500
  * Everything in an entry is untrusted model or tool text and is rendered as a
  * plain text node: never HTML, markdown or a URL.
  */
-export function RunPane({ runId, paused }: { runId: string; paused: boolean }) {
+export function RunPane({
+  runId,
+  sessionId,
+  paused,
+}: {
+  runId: string
+  /** The row's Claude Code session id; `null` leaves the pane on its log. */
+  sessionId: string | null
+  paused: boolean
+}) {
+  const [wantView, setWantView] = useState<RunPaneView>('run')
+  const view = runPaneView(wantView, sessionId)
   const [terminal, setTerminal] = useState(false)
   const { data, error, refetch } = useFetch(
     () => getRun(runId, TAIL),
@@ -75,6 +88,27 @@ export function RunPane({ runId, paused }: { runId: string; paused: boolean }) {
         <span>{job?.status ?? (error !== null ? 'unavailable' : 'loading…')}</span>
         {job?.model && <span>{job.model}</span>}
         {job && (job.pending_messages ?? 0) > 0 && <span>{job.pending_messages} queued</span>}
+        <span className="agent-pane-view-toggle" role="group" aria-label="run pane view">
+          {(['run', 'chat'] as const).map((v) => (
+            <button
+              key={v}
+              type="button"
+              className={view === v ? 'active' : undefined}
+              aria-pressed={view === v}
+              disabled={v === 'chat' && sessionId === null}
+              title={
+                v === 'run'
+                  ? "The runner's event log"
+                  : sessionId === null
+                    ? 'No session id for this run'
+                    : 'The session transcript, read-only — send from the composer below'
+              }
+              onClick={() => setWantView(v)}
+            >
+              {v}
+            </button>
+          ))}
+        </span>
         <span className="run-pane-controls">
           <button
             type="button"
@@ -92,6 +126,9 @@ export function RunPane({ runId, paused }: { runId: string; paused: boolean }) {
           </button>
         </span>
       </div>
+      {view === 'chat' && sessionId !== null ? (
+        <RunChat sessionId={sessionId} paused={paused} />
+      ) : (
       <div
         className="agent-chat run-pane-log"
         ref={scrollRef}
@@ -109,6 +146,7 @@ export function RunPane({ runId, paused }: { runId: string; paused: boolean }) {
           <RunEntryRow key={i} entry={e} />
         ))}
       </div>
+      )}
       <form
         className="agent-chat-composer"
         onSubmit={(e) => {
@@ -138,6 +176,31 @@ export function RunPane({ runId, paused }: { runId: string; paused: boolean }) {
         </div>
       </form>
     </div>
+  )
+}
+
+/** The run's session transcript, read-only: the shared `ChatTranscript` over
+ *  the same route the --bg chat view polls. The composer stays RunPane's. */
+function RunChat({ sessionId, paused }: { sessionId: string; paused: boolean }) {
+  const { data, error } = useFetch(
+    () => getCcSessionChat(sessionId),
+    `agent-chat-${sessionId}`,
+    { pollMs: paused ? undefined : 3000 },
+  )
+  if (data === null)
+    return (
+      <div className="agent-chat agent-chat-empty">
+        {error !== null ? <p>No transcript for this session yet.</p> : 'loading…'}
+        {error !== null && <p className="agent-chat-hint">{error}</p>}
+      </div>
+    )
+  return (
+    <ChatTranscript
+      turns={data.turns}
+      truncated={data.truncated}
+      notice={error}
+      emptyText="This session has not said anything yet."
+    />
   )
 }
 
