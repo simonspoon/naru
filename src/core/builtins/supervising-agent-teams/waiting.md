@@ -30,6 +30,7 @@ finished, or at the deadline. Set the Bash `timeout` above the deadline
 F=~/.claude/projects/<project>/<session>/subagents/agent-<id>.jsonl; D=$(( $(date +%s) + 1500 ))
 until tail -n1 "$F" | jq -e '.message.stop_reason=="end_turn"' >/dev/null 2>&1; do
   [ "$(date +%s)" -ge "$D" ] && { echo "TIMEOUT: <agent> still running"; exit 1; }
+  [ -n "$NARU_RUN_DIR" ] && [ -e "$NARU_RUN_DIR/message-pending" ] && { echo "MESSAGE: a person's message is waiting"; exit 0; }
   sleep 15
 done; echo "DONE: <agent> finished"
 ```
@@ -43,9 +44,13 @@ fin() { tail -n1 "$1" | jq -e '.message.stop_reason=="end_turn"' >/dev/null 2>&1
 while :; do n=0; for f in "${FS[@]}"; do fin "$f" && n=$((n+1)); done
   [ "$n" -eq "${#FS[@]}" ] && { echo "DONE: all finished"; exit 0; }
   [ "$(date +%s)" -ge "$D" ] && { echo "TIMEOUT: $n/${#FS[@]} finished:"; for f in "${FS[@]}"; do fin "$f" && echo "  $f"; done; exit 1; }
+  [ -n "$NARU_RUN_DIR" ] && [ -e "$NARU_RUN_DIR/message-pending" ] && { echo "MESSAGE: a person's message is waiting"; exit 0; }
   sleep 15; done
 ```
 
+- **`MESSAGE`** means a person sent a message while you were waiting (the
+  loop sees it only in a `naru run` session, via `NARU_RUN_DIR`). The agents
+  are still running: answer the message, then resume the same wait.
 - **Finished signal:** the transcript's last record is an assistant message with
   `stop_reason: "end_turn"`. A running agent's last record is `tool_use` (or a
   tool result).

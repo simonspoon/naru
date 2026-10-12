@@ -104,6 +104,8 @@ while IFS= read -r line; do
   if [ -f "$STUB/coalesce" ] && [ -n "\$turn_pid" ] && kill -0 "\$turn_pid" 2>/dev/null; then continue; fi
   text=\$(jq -r '.message.content[0].text' <<<"\$line")
   s=0; [ -f "$STUB/sleep-secs" ] && s=\$(cat "$STUB/sleep-secs")
+  # Logged only after sleep-secs is read: a gate that waits on this file may then change it.
+  printf '%s\n' "\$NARU_RUN_DIR" >> "$STUB/turns.log"
   # The turn runs in the background so the loop can still read a control_request.
   (
     [ "\$s" != 0 ] && sleep "\$s"
@@ -355,17 +357,42 @@ ok "urgent send: a plain send mid-turn sent no control_request; --interrupt sent
 
 : > "$STUB/control.log"
 echo 30 > "$STUB/sleep-secs"
+: > "$STUB/turns.log"
 J10=$("$NARU" run start --model haiku --cwd "$TMP/work" "very long turn" | jq -r .job_id)
 wait_for 10 "urgent api: long turn delivered" delivered_is "$J10" 1
+# Delivered only means written to the stub's stdin: wait for the stub to have read
+# the line (and its 30 s sleep), or a late read sees sleep-secs 0 and the turn
+# ends before the interrupt, leaving no control_request.
+wait_for 10 "urgent api: stub began the long turn" test -s "$STUB/turns.log"
 echo 0 > "$STUB/sleep-secs"
 code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -X POST -d '{"text":"urgent","interrupt":true}' "$BASE/api/runs/$J10/message")
 [ "$code" = 202 ] || fail "urgent api: expected 202, got $code"
 wait_for 5 "urgent api: answered" result_is "$J10" "echo: urgent"
-[ "$(wc -l < "$STUB/control.log" | tr -d " ")" = 1 ] || fail "urgent api: one control_request expected"
+[ "$(wc -l < "$STUB/control.log" | tr -d " ")" = 1 ] || fail "urgent api: one control_request expected: control.log=[$(cat "$STUB/control.log")] turns.log=[$(cat "$STUB/turns.log")] events=$(jq -c '[.event // .type] ' "$RUNS/$J10/events.jsonl" | tr '\n' ' ')"
 [ "$(jq -rs '[.[] | select(.event == "interrupt_requested" or .event == "message_delivered") | .event] | join(",")' "$RUNS/$J10/events.jsonl")" = "message_delivered,interrupt_requested,message_delivered" ] || fail "urgent api: event order"
 "$NARU" run stop "$J10" >/dev/null
 wait_for 10 "urgent api run stopped" status_is "$J10" stopped
 ok "urgent send over the API: 202, one control_request, interrupt_requested before the delivery, echo: urgent"
+
+# ---- pending marker: a message sent mid-turn leaves message-pending until claude acts again ----
+: > "$STUB/turns.log"
+echo 6 > "$STUB/sleep-secs"
+J11=$("$NARU" run start --model haiku --cwd "$TMP/work" "marker turn" | jq -r .job_id)
+wait_for 10 "marker: first delivered" delivered_is "$J11" 1
+wait_for 10 "marker: stub began the turn" test -s "$STUB/turns.log"
+[ "$(head -n1 "$STUB/turns.log")" = "$RUNS/$J11" ] || fail "marker: NARU_RUN_DIR in the stub's env should be the job dir: $(cat "$STUB/turns.log")"
+[ ! -e "$RUNS/$J11/message-pending" ] || fail "marker: idle-state first delivery must not create it"
+"$NARU" run send "$J11" "mid-wait" >/dev/null
+wait_for 5 "marker: appears after a plain send mid-turn" test -e "$RUNS/$J11/message-pending"
+wait_for 15 "marker: gone once the turn continues" test ! -e "$RUNS/$J11/message-pending"
+echo 0 > "$STUB/sleep-secs"
+wait_for 15 "marker: run settled" status_is "$J11" idle
+"$NARU" run send "$J11" "idle one" >/dev/null
+wait_for 10 "marker: idle message answered" result_is "$J11" "echo: idle one"
+[ ! -e "$RUNS/$J11/message-pending" ] || fail "marker: an idle delivery must not create it"
+"$NARU" run stop "$J11" >/dev/null
+wait_for 10 "marker run stopped" status_is "$J11" stopped
+ok "pending marker: NARU_RUN_DIR reached claude; a mid-turn send created message-pending, the turn continuing removed it, idle sends made none"
 
 # ---- idle timeout ----
 J2=$("$NARU" run start --model haiku --cwd "$TMP/work" --idle-timeout 2 "short lived" | jq -r .job_id)
@@ -399,7 +426,7 @@ status_is "$J8" idle || [ "$(job_field "$J8" status)" = finished ] || fail "self
 ok "idle guard: an unprompted turn showed running (not killed by a 2 s timeout), then idle"
 
 # ---- CLI shapes ----
-"$NARU" run list | jq -e 'length == 12' >/dev/null || fail "run list"
+"$NARU" run list | jq -e 'length == 13' >/dev/null || fail "run list"
 "$NARU" run show "$J2" --events | jq -e '.job.job_id and (.events | length) > 0' >/dev/null || fail "run show --events"
 "$NARU" run show "$J2" --tail 1 | jq -e '.events | length == 1' >/dev/null || fail "run show --tail"
 "$NARU" run show "$J2" --quiet | jq -e '.job_id' >/dev/null || fail "--quiet is accepted and ignored"

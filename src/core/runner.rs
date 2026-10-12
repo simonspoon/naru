@@ -401,6 +401,24 @@ fn is_subagent_line(v: &Value) -> bool {
         || v.get("owned_by_subagent").and_then(Value::as_bool) == Some(true)
 }
 
+/// `<job dir>/message-pending`: a message was delivered while a turn was in
+/// flight, so claude has it on stdin but reads it only once its current tool
+/// call returns. A tool call inside the session (`NARU_RUN_DIR`) can watch it.
+fn pending_marker(dir: &Path) -> PathBuf {
+    dir.join("message-pending")
+}
+
+/// Drops the marker once claude is acting again: a main-thread assistant line
+/// (a subagent's lines say nothing about the main thread) or the turn's result.
+fn clear_pending_on(dir: &Path, line: &str, event: &Event) {
+    let main_assistant = serde_json::from_str::<Value>(line).is_ok_and(|v| {
+        v.get("type").and_then(Value::as_str) == Some("assistant") && !is_subagent_line(&v)
+    });
+    if main_assistant || matches!(event, Event::Result { .. }) {
+        let _ = fs::remove_file(pending_marker(dir));
+    }
+}
+
 /// The run's events; `main_only` drops subagent lines (the log itself stays
 /// verbatim) and `tail` counts after that filter.
 fn events_of(dir: &Path, tail: Option<usize>, main_only: bool) -> Vec<Value> {
@@ -814,6 +832,7 @@ fn run_runner_locked(dir: &Path) -> Result<()> {
         cmd.arg("-c")
             .arg(script)
             .current_dir(&job.cwd)
+            .env("NARU_RUN_DIR", dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(log);
@@ -903,6 +922,7 @@ fn run_runner_locked(dir: &Path) -> Result<()> {
                 last_activity = Instant::now();
                 append_event(dir, line);
                 let event = parse_event(line);
+                clear_pending_on(dir, line, &event);
                 match &event {
                     Event::TurnStarted if !in_flight => {
                         in_flight = true;
@@ -1020,6 +1040,9 @@ fn run_runner_locked(dir: &Path) -> Result<()> {
                     break;
                 }
                 {
+                    if in_flight {
+                        let _ = fs::write(pending_marker(dir), b"");
+                    }
                     in_flight = true;
                     job.status = RunStatus::Running;
                     save(dir, &mut job)?;
@@ -1236,6 +1259,25 @@ mod tests {
             Event::Other
         );
         assert_eq!(parse_event(r#"{"subtype":"init"}"#), Event::Other);
+    }
+
+    /// naru task 1868: the marker is left by in-flight delivery only and
+    /// cleared by the next main-thread assistant line or a result, not by a
+    /// subagent's line.
+    #[test]
+    fn pending_marker_clears_on_main_thread_activity_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = pending_marker(dir.path());
+        let clear = |line: &str| clear_pending_on(dir.path(), line, &parse_event(line));
+        fs::write(&marker, b"").unwrap();
+        clear(r#"{"type":"system","subtype":"task_progress","owned_by_subagent":true}"#);
+        clear(r#"{"type":"assistant","parent_tool_use_id":"toolu_sub","message":{}}"#);
+        assert!(marker.exists(), "subagent lines must keep the marker");
+        clear(r#"{"type":"assistant","parent_tool_use_id":null,"message":{}}"#);
+        assert!(!marker.exists(), "a main-thread assistant line clears it");
+        fs::write(&marker, b"").unwrap();
+        clear(r#"{"type":"result","subtype":"success","result":"x"}"#);
+        assert!(!marker.exists(), "a result clears it");
     }
 
     #[test]
