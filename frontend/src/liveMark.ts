@@ -45,11 +45,16 @@ export const PALETTES: Record<'idle' | 'hear' | 'speak' | 'think' | 'offer', { b
   offer: { bars: ['#d98a14', '#f0a820', '#ffc23d', '#fff0c2'], glow: '#ffc23d' },
 }
 
+/** The favicon's own colours (frontend/public/favicon.svg), by `BAR_SLOT`: the
+ *  nav's resting mark wears these instead of idle's dim slate (naru task 1869). */
+export const BRAND_IDLE = { bars: ['#8a2bff', '#ff2bd6', '#2b8aff', '#29e6ff'], glow: '#29e6ff' }
+
 /** The mockup's glow alpha (`aa`). */
 export const GLOW_ALPHA = 0xaa / 255
 
 /** Paused wears idle's palette; its stillness and dimness are what say so. */
-export function paletteFor(mode: MarkMode): { bars: string[]; glow: string } {
+export function paletteFor(mode: MarkMode, brandIdle = false): { bars: string[]; glow: string } {
+  if (brandIdle && (mode === 'idle' || mode === 'paused')) return BRAND_IDLE
   return PALETTES[mode === 'paused' ? 'idle' : mode]
 }
 

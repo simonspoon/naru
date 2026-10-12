@@ -51,6 +51,7 @@ export function NaruMark({
   micReady = false,
   decorative = false,
   offer = false,
+  brandIdle = false,
 }: {
   state: LiveIndicator | null
   level: number
@@ -61,19 +62,23 @@ export function NaruMark({
   decorative?: boolean
   /** An ambient "can help" offer is glowing: the idle mark turns gold. */
   offer?: boolean
+  /** Rest in the favicon's own colours rather than idle's dim slate (the nav). */
+  brandIdle?: boolean
 }) {
   const svgRef = useRef<SVGSVGElement>(null)
   const stateRef = useRef(state)
   const levelRef = useRef(level)
   const rmsRef = useRef(speechRms)
   const offerRef = useRef(offer)
+  const brandRef = useRef(brandIdle)
 
   useEffect(() => {
     offerRef.current = offer
+    brandRef.current = brandIdle
     stateRef.current = state
     levelRef.current = level
     rmsRef.current = speechRms
-  }, [state, level, speechRms, offer])
+  }, [state, level, speechRms, offer, brandIdle])
 
   useEffect(() => {
     const svg = svgRef.current
@@ -91,7 +96,7 @@ export function NaruMark({
 
     // Eased values the frame actually paints: every one chases its target so
     // a state change is a glide, never a snap.
-    const idle = paletteFor('idle')
+    const idle = paletteFor('idle', brandRef.current)
     const cur = {
       bars: idle.bars.map(hexToRgb) as Rgb[],
       glowRgb: hexToRgb(idle.glow),
@@ -122,7 +127,7 @@ export function NaruMark({
       cur.lv = smoothLevel(cur.lv, raw)
 
       const target = markFrame(mode, t, cur.lv, reduced)
-      const pal = paletteFor(mode)
+      const pal = paletteFor(mode, brandRef.current)
       cur.bars = cur.bars.map((c, i) => easeRgb(c, hexToRgb(pal.bars[i]), dt, COLOUR_RATE))
       cur.glowRgb = easeRgb(cur.glowRgb, hexToRgb(pal.glow), dt, COLOUR_RATE)
       cur.scale = easeToward(cur.scale, target.scale, dt, SHAPE_RATE)

@@ -12143,13 +12143,14 @@ body.dock-resizing .dock-body {
 /* The wash spills from the mark's colours behind the nav. The same gradient
    list is painted on the sidebar and on the pinned `.nav-top` (its top-left
    coincides with the sidebar's: margin -1rem cancels the sidebar padding), so
-   the head is opaque yet shows no seam. Radii are % of width (identical for
-   both boxes) and px of height, never % of each box's own height. */
+   the head is opaque yet shows no seam. Fixed px radii centred on the mark
+   (naru task 1869): widening the nav lengthens the wash's tail, never
+   stretches it. */
 .shell-body.docked .sidebar:not(.collapsed) {
   --nav-wash:
-    radial-gradient(ellipse 80% 200px at 50% 80px, rgba(var(--cyan-rgb), 0.32), transparent 70%),
-    radial-gradient(ellipse 110% 290px at 25% 126px, rgba(var(--violet-rgb), 0.3), transparent 70%),
-    radial-gradient(ellipse 110% 290px at 78% 135px, rgba(var(--magenta-rgb), 0.24), transparent 70%);
+    radial-gradient(ellipse 150px 120px at 50% 110px, rgba(var(--cyan-rgb), 0.32), transparent 70%),
+    radial-gradient(ellipse 190px 150px at calc(50% - 50px) 125px, rgba(var(--violet-rgb), 0.3), transparent 70%),
+    radial-gradient(ellipse 190px 150px at calc(50% + 50px) 130px, rgba(var(--magenta-rgb), 0.24), transparent 70%);
   background-image: var(--nav-wash);
   background-repeat: no-repeat;
 }
@@ -12163,11 +12164,10 @@ body.dock-resizing .dock-body {
   background-position: 0 0;
 }
 
+/* Fixed height (the base 170px), full nav width: the mark inside is a fixed
+   size, centred, so widening the nav never grows the panel. */
 .shell-body.docked .sidebar:not(.collapsed) .nav-orb {
-  width: 88%;
-  height: auto;
-  aspect-ratio: 1;
-  align-self: center;
+  width: 100%;
   margin: 0;
   background: none;
   box-shadow: none;
@@ -12176,29 +12176,44 @@ body.dock-resizing .dock-body {
   pointer-events: auto;
 }
 
-/* The mark fills its square (default leaves 1rem on each side). */
 .shell-body.docked .sidebar:not(.collapsed) .orb-panel-mark {
-  width: min(100cqw, 100cqh);
+  width: 140px;
 }
 
-/* Nav entries as chat bubbles (`.live-turn`'s look). */
-.shell-body.docked .sidebar:not(.collapsed) .nav-item {
+/* The glow behind the resting mark wears the mark's own violet, not idle's
+   slate. */
+.shell-body.docked .sidebar:not(.collapsed) .orb-panel:not(.bright):not(.mode-speak):not(.mode-think) .orb-panel-glow {
+  background: var(--violet);
+}
+
+/* Nav entries as chat bubbles (`.live-turn`'s look): a soft tint and a thin
+   inset accent bar, no outline or border; the active one brighter. */
+.shell-body.docked .sidebar:not(.collapsed) .nav-item,
+.shell-body.docked .sidebar:not(.collapsed) .nav-projects a {
   padding: 0.5rem 0.85rem;
-  border-left: none;
+  border: none;
+  outline: none;
   border-radius: 14px 14px 14px 5px;
   background: rgba(var(--cyan-rgb), 0.05);
   box-shadow: inset 2px 0 0 rgba(var(--cyan-rgb), 0.35);
 }
 
-.shell-body.docked .sidebar:not(.collapsed) .nav-item:hover:not(:disabled) {
+.shell-body.docked .sidebar:not(.collapsed) .nav-item:hover:not(:disabled),
+.shell-body.docked .sidebar:not(.collapsed) .nav-projects a:hover {
   background: rgba(var(--cyan-rgb), 0.1);
   box-shadow: inset 2px 0 0 rgba(var(--cyan-rgb), 0.6);
 }
 
-.shell-body.docked .sidebar:not(.collapsed) .nav-item.active {
-  background: rgba(var(--cyan-rgb), 0.16);
+.shell-body.docked .sidebar:not(.collapsed) .nav-item.active,
+.shell-body.docked .sidebar:not(.collapsed) .nav-projects a.active {
+  background: rgba(var(--cyan-rgb), 0.12);
   box-shadow:
     inset 3px 0 0 rgba(var(--cyan-rgb), 0.95),
-    0 0 16px rgba(var(--cyan-rgb), 0.22);
+    0 0 14px rgba(var(--cyan-rgb), 0.15);
   color: var(--text-h);
+}
+
+.shell-body.docked .sidebar:not(.collapsed) .nav-item:focus-visible,
+.shell-body.docked .sidebar:not(.collapsed) .nav-projects a:focus-visible {
+  outline: 1px solid rgba(var(--cyan-rgb), 0.6);
 }

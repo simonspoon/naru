@@ -263,7 +263,7 @@ export function OrbPanel(p: OrbProps) {
       <div className="orb-panel-stage">
         <div className="orb-panel-mark">
           <div className="orb-panel-glow" />
-          <NaruMark state={p.state} level={p.level} speechRms={p.speechRms} decorative offer={!!p.offer} />
+          <NaruMark state={p.state} level={p.level} speechRms={p.speechRms} decorative brandIdle offer={!!p.offer} />
         </div>
         {p.offer && <div className="orb-panel-caption">Naru can help — click to talk</div>}
       </div>
