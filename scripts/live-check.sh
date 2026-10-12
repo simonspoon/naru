@@ -202,6 +202,19 @@
 #      job done (predecessor still stopped once), and `live stop` spawning
 #      a dream over threshold and none under it.
 #
+# Naru task 1886 moved the conversation's agent itself off `claude --bg` onto
+# `naru run` (core::runner): `live start`/`handoff` start a run whose receipt is
+# `run:<job>`, launched as `claude -p --input-format stream-json … --agent
+# naru-live --name {name} --session-id <uuid>` with the spawn prompt as the
+# first stream-json user line on stdin; the stub's matching branch answers a
+# result per user line and records each run's argv/cwd/prompt under
+# $STUB_DIR/runs/<job>/. Stopping an agent is the run's `stop` marker (a
+# handoff writes it at once unless the outgoing run has delegates, else the
+# successor's `listen` does), `live context` reads the run's session uuid from
+# job.json, and a run receipt is never `blocked` (section 16 rebinds a session
+# to a legacy `--bg` receipt to keep the derived `blocked` covered). The
+# trap kills only the runner/claude pids this gate's job directories hold.
+#
 # Naru task 1690 moved the summariser and both dream passes off `claude --bg`
 # agents: each is one synchronous `claude -p --output-format json
 # --json-schema` call (no tools) inside a detached `naru __job`, and Naru
@@ -237,9 +250,22 @@ wait_jobs() {
     sleep 0.1
   done
 }
+# The live agent is a `naru run` job (naru task 1886): a detached runner and
+# its stub claude outlive the command that started them. Kill exactly the ones
+# this gate started, by the pids their job directories hold (runner.pid and
+# job.json), never by a pattern other sessions' identical processes match.
+kill_runners() {
+  local d pid
+  for d in "$TMP"/home/.naru/runs/*/; do
+    for pid in $(cat "$d/runner.pid" 2>/dev/null) $(jq -r '.runner_pid // empty, .claude_pid // empty' "$d/job.json" 2>/dev/null); do
+      kill "$pid" 2>/dev/null || true
+      kill -- "-$pid" 2>/dev/null || true
+    done
+  done
+}
 trap '[ -n "${SERVER_PID:-}" ] && kill "$SERVER_PID" 2>/dev/null;
       [ -n "${LAN_PID:-}" ] && kill "$LAN_PID" 2>/dev/null;
-      wait_jobs; rm -rf "$TMP"; true' EXIT
+      kill_runners; wait_jobs; rm -rf "$TMP"; true' EXIT
 export MESA_DB="$TMP/mesa.db"
 # Where a user turn's annotated board is written (mesa task 1353, section 13):
 # never beside the developer's own db.
@@ -324,6 +350,31 @@ cat > "$STUB_DIR/claude" <<EOF
 [ -e "$STUB_DIR/fail" ] && { echo "stub claude is down" >&2; exit 1; }
 case "\$1" in
   -p)
+    # The live conversation itself (naru task 1886): a \`naru run\` job, so
+    # \`claude -p --input-format stream-json …\` with the spawn prompt as the
+    # first user line on stdin. Per run (\$NARU_RUN_DIR names the job) it
+    # records the argv one element per line, the cwd, the prompt text and the
+    # raw first line under \$STUB_DIR/runs/<job>/, the argv LAST so its
+    # presence says the rest is written, then answers a result per user line
+    # like runner-check.sh's stub and ends when its stdin does.
+    if [[ " \$* " == *" --input-format "* ]]; then
+      RID=\$(basename "\$NARU_RUN_DIR")
+      D="$STUB_DIR/runs/\$RID"
+      mkdir -p "\$D"
+      pwd > "\$D/cwd"
+      IFS= read -r FIRST || exit 0
+      printf '%s\\n' "\$FIRST" > "\$D/first-line"
+      jq -j '.message.content[0].text' <<<"\$FIRST" > "\$D/prompt"
+      printf '%s\\n' "\$@" > "\$D/flags.tmp"
+      mv "\$D/flags.tmp" "\$D/flags"
+      printf '{"type":"result","subtype":"success","is_error":false,"result":"ok"}\\n'
+      while IFS= read -r LINE; do
+        printf '%s\\n' "\$LINE" >> "\$D/stdin.log"
+        if [ "\$(jq -r '.type' <<<"\$LINE")" = control_request ]; then continue; fi
+        printf '{"type":"result","subtype":"success","is_error":false,"result":"ok"}\\n'
+      done
+      exit 0
+    fi
     # A memory job (naru task 1690): the summariser and both dream passes are
     # one synchronous \`claude -p --output-format json --json-schema\` call,
     # run inside a detached \`naru __job\`. Recorded per kind (the name ends
@@ -355,6 +406,8 @@ case "\$1" in
     printf '{"type":"result","subtype":"success","is_error":false,"result":"","structured_output":%s}\n' "\$OUT"
     ;;
   --bg)
+    # No live spawn comes here any more (naru task 1886); kept for the
+    # \`claude --bg\` shape other gates' stubs share.
     printf '%s\n' "\$#" > "$STUB_DIR/last-argc"
     # The flags before the prompt, one per line: a name carrying shell syntax
     # must come back as exactly one line for the injection assertion to mean
@@ -389,7 +442,7 @@ case "\$1" in
     # An \`extra-id\` file naming an older job lists it too, on the same
     # session uuid — the outgoing agent of a handoff, still alive while its
     # delegates run (mesa task 1359). Whole rows, as the \`working\` one below.
-    ID=\$(cat "$STUB_DIR/last-id" 2>/dev/null)
+    ID=\$(cat "$STUB_DIR/agents-id" 2>/dev/null)
     EXTRA=\$(cat "$STUB_DIR/extra-id" 2>/dev/null)
     if [ -n "\$EXTRA" ] && [ "\$EXTRA" != "\$ID" ]; then
       printf '[{"id":"%s","sessionId":"00000000-0000-0000-0000-000000000000","state":"working","cwd":"/","kind":"background","startedAt":0},{"id":"%s","sessionId":"00000000-0000-0000-0000-000000000000","state":"working","cwd":"/","kind":"background","startedAt":0}]\n' "\$ID" "\$EXTRA"
@@ -423,6 +476,43 @@ esac
 EOF
 chmod +x "$STUB_DIR/claude"
 export MESA_CLAUDE_BIN="$STUB_DIR/claude"
+
+# ---- the live agent's runs (naru task 1886) ----
+#
+# A receipt `run:<job>` names a job directory under the throwaway HOME. The
+# stub announces each run's argv/cwd/prompt asynchronously (the runner starts
+# claude after `live start` returns), so `use_agent` waits for it and exposes
+# those files as `last-*`, the names the assertions below read.
+RUNS="$HOME/.naru/runs"
+run_id() { printf '%s' "${1#run:}"; }
+spawns() { { ls "$RUNS" 2>/dev/null || true; } | wc -l | tr -d ' '; }
+run_marker() { [ -e "$RUNS/$(run_id "$1")/stop" ]; }
+run_status() { jq -r .status "$RUNS/$(run_id "$1")/job.json"; }
+run_session() { jq -r .session_id "$RUNS/$(run_id "$1")/job.json"; }
+wait_run_stopped() { # <receipt> — the runner honoured the stop marker
+  local _
+  for _ in $(seq 1 150); do
+    [ "$(run_status "$1")" = "stopped" ] && return 0
+    sleep 0.1
+  done
+  fail "run $1 never reached status stopped (it is $(run_status "$1"))"
+}
+use_agent() { # <receipt>
+  local id _
+  [[ "$1" =~ ^run:[0-9a-f]{8}$ ]] || fail "not a run receipt: $1"
+  id=$(run_id "$1")
+  for _ in $(seq 1 100); do
+    [ -e "$STUB_DIR/runs/$id/flags" ] && break
+    sleep 0.1
+  done
+  [ -e "$STUB_DIR/runs/$id/flags" ] || fail "the stub claude never announced run $id (runner.log: $(cat "$RUNS/$id/runner.log" 2>/dev/null))"
+  cp "$STUB_DIR/runs/$id/flags" "$STUB_DIR/last-flags"
+  cp "$STUB_DIR/runs/$id/prompt" "$STUB_DIR/last-prompt"
+  cp "$STUB_DIR/runs/$id/cwd" "$STUB_DIR/last-cwd"
+  printf '%s\n' "$1" > "$STUB_DIR/last-id"
+}
+# The value after --name in the last announced argv.
+agent_name() { awk 'p{print;exit} $0=="--name"{p=1}' "$STUB_DIR/last-flags"; }
 
 # ---- stub kokoro-rs (the speak route) ----
 #
@@ -785,29 +875,45 @@ ok "live start: an unknown project id is validation, an unknown name is not_foun
 run 0 "$MESA" live start "live gate project"
 S3=$(jqs .id)
 [ "$(jqs .project_id)" = "$PROJ" ] || fail "live start <name>: must resolve the project by name"
-[ "$(jqs .agent_id)" = "$(cat "$STUB_DIR/last-id")" ] ||
-  fail "live start: the spawn receipt must be bound to the session (got $(jqs .agent_id))"
-ok "live start <PROJECT>: resolves a project by name and binds the spawn receipt"
+S3_AGENT=$(jqs .agent_id)
+[[ "$S3_AGENT" =~ ^run:[0-9a-f]{8}$ ]] ||
+  fail "live start: the spawn receipt is a run:<8 hex> job id (got $S3_AGENT)"
+[ -d "$RUNS/$(run_id "$S3_AGENT")" ] || fail "live start: the receipt names no job directory"
+use_agent "$S3_AGENT"
+ok "live start <PROJECT>: resolves a project by name and binds the run:<job> spawn receipt"
 
-# The argv the built-in `live-agent` template produces:
-#   claude --bg --agent naru-live --name {name} -- {prompt}
+# The argv the built-in `live-agent` template produces (naru task 1886):
+#   claude -p --input-format stream-json --output-format stream-json --verbose
+#     --agent naru-live --name {name} {session_flag} {session_id}
 # The agent is named literally (mesa task 1068): the conversation runs as the
 # `naru-live` agent definition, which is where its instructions live now.
-[ "$(cat "$STUB_DIR/last-argc")" = "7" ] ||
-  fail "live spawn: expected 7 arguments, got $(cat "$STUB_DIR/last-argc")"
-EXPECTED_FLAGS="--bg
+EXPECTED_FLAGS="-p
+--input-format
+stream-json
+--output-format
+stream-json
+--verbose
 --agent
 naru-live
 --name
 Live gate project: live $S3
---"
-[ "$(cat "$STUB_DIR/last-flags")" = "$EXPECTED_FLAGS" ] ||
+--session-id"
+[ "$(head -11 "$STUB_DIR/last-flags")" = "$EXPECTED_FLAGS" ] ||
   fail "live spawn argv: expected
 $EXPECTED_FLAGS
 got
 $(cat "$STUB_DIR/last-flags")"
-# The prompt is ONE argument, and since mesa task 1068 it carries the session
-# line and nothing else — the loop travels as the agent definition.
+[ "$(sed -n 12p "$STUB_DIR/last-flags")" = "$(run_session "$S3_AGENT")" ] ||
+  fail "live spawn: --session-id must be the run's session uuid"
+[ "$(wc -l <"$STUB_DIR/last-flags" | tr -d ' ')" = "12" ] ||
+  fail "live spawn: expected 12 arguments, got $(cat "$STUB_DIR/last-flags")"
+! grep -qx -- '--bg' "$STUB_DIR/last-flags" || fail "live spawn: a --bg agent is retired (naru task 1886)"
+# The prompt is the run's first stream-json user line on stdin, never an
+# argument; since mesa task 1068 it carries the session line and nothing else
+# — the loop travels as the agent definition.
+jq -e '.type == "user" and .message.role == "user"' "$STUB_DIR/runs/$(run_id "$S3_AGENT")/first-line" >/dev/null ||
+  fail "live spawn: the prompt must arrive as the first stream-json user line on stdin"
+! grep -qF -- "Drive naru live session" "$STUB_DIR/last-flags" || fail "live spawn: the prompt must not ride in argv"
 grep -q "Drive naru live session $S3" "$STUB_DIR/last-prompt" ||
   fail "live spawn: the prompt must be the session line naming the session it drives"
 if grep -q 'You are the voice of Naru' "$STUB_DIR/last-prompt"; then
@@ -818,7 +924,7 @@ if grep -q 'naru live listen' "$STUB_DIR/last-prompt"; then
 fi
 [ "$(cat "$STUB_DIR/last-cwd")" = "$WORKDIR" ] ||
   fail "live spawn: must run in the project's local_path (got $(cat "$STUB_DIR/last-cwd"))"
-ok "live spawn: the built-in live-agent argv (--agent naru-live), the session name, the session line as one argument, the project's folder"
+ok "live spawn: the runner's live-agent argv (-p --input-format stream-json, --agent naru-live, no --bg), the session name, the session line on stdin, the project's folder"
 
 # ---- the agent definition is seeded before the spawn (mesa task 1068) ----
 #
@@ -846,37 +952,43 @@ ok "live spawn: never overwrites an existing naru-live agent definition"
 # ---- stopping the conversation stops its agent ----
 #
 # The other half of the spawn: hanging up finishes the background session
-# rather than leaving one idling per conversation. The job named is the short
-# id from the receipt, and nothing else.
-rm -f "$STUB_DIR/last-stop"
-STOP_AGENT=$(cat "$STUB_DIR/last-id")
+# rather than leaving one idling per conversation. The run named by the
+# receipt gets its stop marker (naru task 1886), and nothing else is stopped.
+run 0 "$MESA" live status
+STOP_AGENT=$(jqs .agent_id)
+[[ "$STOP_AGENT" =~ ^run:[0-9a-f]{8}$ ]] || fail "live status: the session carries a run receipt (got $STOP_AGENT)"
+! run_marker "$STOP_AGENT" || fail "a live run has no stop marker before the conversation ends"
 run 0 "$MESA" live stop
 [ "$(jqs .status)" = "ended" ] || fail "live stop: status must be ended"
-[ "$(cat "$STUB_DIR/last-stop")" = "stop $STOP_AGENT" ] ||
-  fail "live stop: must run \`claude stop <agent_id>\` (got $(cat "$STUB_DIR/last-stop" 2>/dev/null))"
-ok "live stop: ends the session AND stops the agent it was started with, by its short job id"
+run_marker "$STOP_AGENT" || fail "live stop: must write the run's stop marker"
+wait_run_stopped "$STOP_AGENT"
+run_marker "$S3_AGENT" || fail "the earlier conversation's run was stopped when it ended"
+ok "live stop: ends the session AND stops the run it was started with — its stop marker, the job reaching stopped"
 
 # Best-effort, both ways round: a session with no agent has nothing to stop,
-# and a `claude stop` that fails is a warning on stderr — never a nonzero exit,
+# and a run stop that fails is a warning on stderr — never a nonzero exit,
 # and never anything on stdout but the ended session.
-rm -f "$STUB_DIR/last-stop"
+RUNS_BEFORE=$(spawns)
 run 0 "$MESA" live start --no-agent
 run 0 "$MESA" live stop
-[ ! -e "$STUB_DIR/last-stop" ] ||
-  fail "live stop on a --no-agent session: there is no agent to stop"
+[ "$(spawns)" = "$RUNS_BEFORE" ] || fail "a --no-agent session starts no run"
 [ -z "$STDERR" ] || fail "live stop on a --no-agent session: nothing to warn about"
 
-touch "$STUB_DIR/stop-fail"
+# A stop that fails: the run's job.json is unreadable for the moment, so
+# stop_in cannot load the job.
 run 0 "$MESA" live start
+BROKEN_AGENT=$(jqs .agent_id)
+cp "$RUNS/$(run_id "$BROKEN_AGENT")/job.json" "$TMP/job.json.bak"
+printf 'not json' >"$RUNS/$(run_id "$BROKEN_AGENT")/job.json"
 run 0 "$MESA" live stop
-rm -f "$STUB_DIR/stop-fail"
+cp "$TMP/job.json.bak" "$RUNS/$(run_id "$BROKEN_AGENT")/job.json"
 [ "$(jqs .status)" = "ended" ] ||
-  fail "live stop with a failing \`claude stop\`: the conversation is still ended"
+  fail "live stop with a failing run stop: the conversation is still ended"
 grep -q 'could not stop its agent' <<<"$STDERR" ||
-  fail "live stop with a failing \`claude stop\`: the warning belongs on stderr"
+  fail "live stop with a failing run stop: the warning belongs on stderr"
 run 0 "$MESA" live status
 [ "$STDOUT" = "null" ] || fail "a failed agent stop must still leave no live session"
-ok "live stop is best-effort: no agent is a no-op, a failing \`claude stop\` warns on stderr and still exits 0"
+ok "live stop is best-effort: no agent is a no-op, a failing run stop warns on stderr and still exits 0"
 
 # The folder every unbound agent runs in: `~/.naru/workspace`, created on
 # demand (mesa task 1040). Physically resolved, because a throwaway $HOME may
@@ -891,6 +1003,7 @@ S4=$(jqs .id)
 [ "$(jqs .project_id)" = "$NOPATH" ] || fail "live start --project <id>: project_id"
 [ -d "$HOME/.naru/workspace" ] ||
   fail "live spawn with no local_path: must create ~/.naru/workspace on demand"
+use_agent "$(jqs .agent_id)"
 [ "$(cat "$STUB_DIR/last-cwd")" = "$(workspace_path)" ] ||
   fail "live spawn with no local_path: must fall back to ~/.naru/workspace (got $(cat "$STUB_DIR/last-cwd"))"
 run 0 "$MESA" live stop >/dev/null
@@ -899,9 +1012,9 @@ ok "live start --project <id>: resolves by id; a pathless project runs the agent
 # An unscoped session names itself `naru live <id>` and also runs in the workspace.
 run 0 "$MESA" live start
 S5=$(jqs .id)
-head -5 "$STUB_DIR/last-flags" | tail -1 >"$TMP/name"
-[ "$(cat "$TMP/name")" = "naru live $S5" ] ||
-  fail "an unscoped live session must be named 'naru live <id>' (got $(cat "$TMP/name"))"
+use_agent "$(jqs .agent_id)"
+[ "$(agent_name)" = "naru live $S5" ] ||
+  fail "an unscoped live session must be named 'naru live <id>' (got $(agent_name))"
 run 0 "$MESA" live stop >/dev/null
 ok "an unscoped live start: the session name is \`naru live <id>\`"
 
@@ -911,20 +1024,20 @@ HOSTILE_NAME='$(touch '"$TMP"'/pwned); rm -rf / #'
 HOSTILE=$("$MESA" project create "$HOSTILE_NAME" --no-git | jq -r .id)
 run 0 "$MESA" live start --project "$HOSTILE"
 HS=$(jqs .id)
-head -5 "$STUB_DIR/last-flags" | tail -1 >"$TMP/name"
-[ "$(cat "$TMP/name")" = "$HOSTILE_NAME: live $HS" ] ||
-  fail "a hostile project name must arrive verbatim as one argument (got $(cat "$TMP/name"))"
+use_agent "$(jqs .agent_id)"
+[ "$(agent_name)" = "$HOSTILE_NAME: live $HS" ] ||
+  fail "a hostile project name must arrive verbatim as one argument (got $(agent_name))"
 [ ! -e "$TMP/pwned" ] || fail "a hostile project name was evaluated by a shell"
 run 0 "$MESA" live stop >/dev/null
 ok "live spawn: a hostile project name is one argv entry, never syntax"
 
 # A spawn that cannot start must END the session it just opened: a live session
 # nothing is listening to can never answer, and would `conflict` every retry.
-touch "$STUB_DIR/fail"
-run 1 "$MESA" live start
+# What fails a run's start is the runner process itself (naru task 1886): a
+# stub claude that exits at once is a run that ends `failed`, not a failed spawn.
+MESA_SELF_BIN="$TMP/no-such-naru" run 1 "$MESA" live start
 [ "$(jqe .error.code)" = "unavailable" ] ||
   fail "a failed spawn: error.code must be unavailable (something outside mesa)"
-rm -f "$STUB_DIR/fail"
 run 0 "$MESA" live status
 [ "$STDOUT" = "null" ] || fail "a failed spawn must leave NO live session behind"
 run 0 "$MESA" live start --no-agent
@@ -999,13 +1112,15 @@ api 201 POST "/api/live" "{\"project_id\":$PROJ}"
 AS=$(jqb .id)
 [ "$(jqb .status)" = "live" ] || fail "POST /api/live: status"
 [ "$(jqb .project_id)" = "$PROJ" ] || fail "POST /api/live: project_id"
-[ "$(jqb .agent_id)" = "$(cat "$STUB_DIR/last-id")" ] || fail "POST /api/live: the spawn receipt must be bound"
 API_AGENT=$(jqb .agent_id)
+[[ "$API_AGENT" =~ ^run:[0-9a-f]{8}$ ]] || fail "POST /api/live: the spawn receipt must be a bound run:<job> id (got $API_AGENT)"
+use_agent "$API_AGENT"
+[ "$(sed -n 2p "$STUB_DIR/last-flags")" = "--input-format" ] && ! grep -qx -- '--bg' "$STUB_DIR/last-flags" ||
+  fail "POST /api/live: the agent must be the runner's stream-json claude, not a --bg one"
 [ "$(cat "$STUB_DIR/last-cwd")" = "$WORKDIR" ] ||
   fail "POST /api/live: the agent must be spawned in the project's folder"
-head -5 "$STUB_DIR/last-flags" | tail -1 >"$TMP/name"
-[ "$(cat "$TMP/name")" = "Live gate project: live $AS" ] ||
-  fail "POST /api/live: the session name must be the CLI's (got $(cat "$TMP/name"))"
+[ "$(agent_name)" = "Live gate project: live $AS" ] ||
+  fail "POST /api/live: the session name must be the CLI's (got $(agent_name))"
 grep -q "session $AS" "$STUB_DIR/last-prompt" ||
   fail "POST /api/live: the same core::live prompt, naming this session"
 ok "POST /api/live: 201, the session + spawn receipt, and the CLI's folder/name/prompt"
@@ -1312,15 +1427,15 @@ ok "two concurrent listeners, one utterance: heard exactly once"
 "$MESA" live listen --wait 60 >"$TMP/listen-end.json" 2>/dev/null &
 LE=$!
 sleep 1
-rm -f "$STUB_DIR/last-stop"
+! run_marker "$API_AGENT" || fail "DELETE /api/live: the run is not stopped before the delete"
 api 200 DELETE "/api/live"
 [ "$(jqb .status)" = "ended" ] || fail "DELETE /api/live: status must be ended"
 wait "$LE"
 [ "$(cat "$TMP/listen-end.json")" = "null" ] ||
   fail "live listen must return null when the session ends under it"
-# The API twin of the CLI's stop: the same short job id, stopped the same way.
-[ "$(cat "$STUB_DIR/last-stop")" = "stop $API_AGENT" ] ||
-  fail "DELETE /api/live: must stop the agent it spawned (got $(cat "$STUB_DIR/last-stop" 2>/dev/null))"
+# The API twin of the CLI's stop: the same run, stopped the same way.
+run_marker "$API_AGENT" || fail "DELETE /api/live: must write the stop marker of the run it spawned"
+wait_run_stopped "$API_AGENT"
 ok "DELETE /api/live: 200 the ended session, its agent stopped, and a waiting \`live listen\` returns null early"
 
 api 404 DELETE "/api/live"
@@ -1329,17 +1444,19 @@ api 200 GET "/api/live"
 [ "$(jqb .session)" = "null" ] || fail "after DELETE: back to the idle state"
 ok "DELETE /api/live twice: the second is 404 not_found, and the page is idle again"
 
-# Best-effort there too: a `claude stop` that fails must not turn hanging up
+# Best-effort there too: a run stop that fails must not turn hanging up
 # into an error — the store write is what ended the conversation.
 api 201 POST "/api/live" '{}'
-touch "$STUB_DIR/stop-fail"
+FAIL_AGENT=$(jqb .agent_id)
+cp "$RUNS/$(run_id "$FAIL_AGENT")/job.json" "$TMP/job.json.bak"
+printf 'not json' >"$RUNS/$(run_id "$FAIL_AGENT")/job.json"
 api 200 DELETE "/api/live"
-rm -f "$STUB_DIR/stop-fail"
+cp "$TMP/job.json.bak" "$RUNS/$(run_id "$FAIL_AGENT")/job.json"
 [ "$(jqb .status)" = "ended" ] ||
-  fail "DELETE /api/live with a failing \`claude stop\`: the conversation is still ended"
+  fail "DELETE /api/live with a failing run stop: the conversation is still ended"
 api 200 GET "/api/live"
 [ "$(jqb .session)" = "null" ] || fail "a failed agent stop must still leave no live session"
-ok "DELETE /api/live is best-effort: a failing \`claude stop\` still answers the ended session"
+ok "DELETE /api/live is best-effort: a failing run stop still answers the ended session"
 
 # =====================================================================
 # 7. GET /api/live/turns/{id}/speak — the audio contract
@@ -2132,6 +2249,7 @@ run 0 "$MESA" live memory add "$NOTE_TEXT"
 NOTE_ID=$(jqs .id)
 
 run 0 "$MESA" live start
+use_agent "$(jqs .agent_id)"
 grep -q "$RECALL_TEXT" "$STUB_DIR/last-prompt" ||
   fail "a stored summary must reach the very next live-agent spawn's prompt as recall"
 grep -q -- "- \[#$NOTE_ID, added [0-9-]*, from session [0-9]*, last used session [0-9]*\] $NOTE_TEXT" \
@@ -3468,6 +3586,7 @@ grep -q -- "- \[#$C1, .*, unused\] CAND-A" "$STUB_DIR/p-dream-prompt" ||
 ! grep -q -- "- \[#$C2, .*, unused\]" "$STUB_DIR/p-dream-prompt" ||
   fail "the kept entry #$C2 must no longer be marked unused"
 run 0 "$MESA" live start
+use_agent "$(jqs .agent_id)"
 ! grep -q 'unused\]' "$STUB_DIR/last-prompt" || fail "the live agent's notebook lines carry no unused mark"
 grep -q -- "- \[#$C1, added .*\] CAND-A" "$STUB_DIR/last-prompt" ||
   fail "a candidate still rides in the live agent's prompt"
@@ -4062,6 +4181,7 @@ run 0 "$MESA" live start "live gate project"
 HS=$(jqs .id)
 [ "$(jqs .lease)" = "1" ] || fail "a fresh session holds lease 1 (got $(jqs .lease))"
 HA1=$(jqs .agent_id)
+use_agent "$HA1"
 [ "$HA1" = "$(cat "$STUB_DIR/last-id")" ] || fail "live start: the spawn receipt is the stub's newest id"
 [ "$(head -1 "$STUB_DIR/last-prompt")" = "Drive naru live session $HS (lease 1)." ] ||
   fail "a fresh spawn's first line carries lease 1: $(head -1 "$STUB_DIR/last-prompt")"
@@ -4074,17 +4194,22 @@ for i in $(seq 1 6); do
 done
 run 0 "$MESA" live turns
 [ "$(jqs length)" = "12" ] || fail "twelve turns before the handoff (got $(jqs length))"
-rm -f "$STUB_DIR/last-stop"
+! run_marker "$HA1" || fail "the first run is not stopped before the handoff"
 run 0 "$MESA" live handoff "HANDOFF-MARKER: we were on the roadmap; item 3 is pending; I promised to open task 40."
 [ "$(jqs .id)" = "$HS" ] || fail "live handoff: the SAME session (got $(jqs .id))"
 [ "$(jqs .lease)" = "2" ] || fail "live handoff: lease bumps to 2 (got $(jqs .lease))"
 [ "$(jqs .status)" = "live" ] || fail "live handoff: the session stays live"
 HA2=$(jqs .agent_id)
-[ "$HA2" = "$(cat "$STUB_DIR/last-id")" ] && [ "$HA2" != "$HA1" ] ||
+use_agent "$HA2"
+[ "$HA2" != "$HA1" ] ||
   fail "live handoff: agent_id is the successor's receipt (got $HA2, predecessor $HA1)"
-[ ! -e "$STUB_DIR/last-stop" ] || fail "live handoff must not stop the caller: it IS the outgoing agent"
 [ -z "$STDERR" ] || fail "live handoff: nothing on stderr on success (got: $STDERR)"
-ok "live handoff: exit 0, the same session with lease 2 and the successor's receipt, nothing stopped"
+# With no delegate running the outgoing run is stopped at once (naru task
+# 1886): its stop marker, the job reaching stopped, the successor untouched.
+run_marker "$HA1" || fail "live handoff must write the outgoing run's stop marker when no delegate runs"
+wait_run_stopped "$HA1"
+! run_marker "$HA2" || fail "live handoff must not stop the successor"
+ok "live handoff: exit 0, the same session with lease 2 and the successor's receipt, the outgoing run stopped (marker, status stopped)"
 
 # The successor's prompt: the session line naming its lease, the note, and
 # exactly the last 10 of the 12 turns, in order.
@@ -4121,13 +4246,17 @@ ok "the successor's prompt: lease 2 on the first line, the note, exactly the las
 # The cache-prefix invariant: the successor's leading argv is the first
 # spawn's — same template, same `--agent naru-live` — and only the name says
 # which generation it is.
-[ "$(cat "$STUB_DIR/last-argc")" = "7" ] ||
-  fail "the successor spawn: expected 7 arguments, got $(cat "$STUB_DIR/last-argc")"
-[ "$(head -4 "$STUB_DIR/last-flags")" = "$(head -4 <<<"$FIRST_FLAGS")" ] ||
-  fail "the successor's leading argv must equal the first spawn's (got $(head -4 "$STUB_DIR/last-flags" | tr '\n' ' '))"
-[ "$(sed -n 5p "$STUB_DIR/last-flags")" = "Live gate project: live $HS · lease 2" ] ||
-  fail "the successor is named for its lease (got $(sed -n 5p "$STUB_DIR/last-flags"))"
-ok "the successor spawn: the same live-agent argv (--bg --agent naru-live --name), named \`<name> · lease 2\`"
+[ "$(wc -l <"$STUB_DIR/last-flags" | tr -d ' ')" = "12" ] ||
+  fail "the successor spawn: expected 12 arguments, got $(cat "$STUB_DIR/last-flags")"
+[ "$(head -8 "$STUB_DIR/last-flags")" = "$(head -8 <<<"$FIRST_FLAGS")" ] ||
+  fail "the successor's leading argv must equal the first spawn's (got $(head -8 "$STUB_DIR/last-flags" | tr '\n' ' '))"
+! grep -qx -- '--bg' "$STUB_DIR/last-flags" || fail "the successor is no --bg agent"
+[ "$(agent_name)" = "Live gate project: live $HS · lease 2" ] ||
+  fail "the successor is named for its lease (got $(agent_name))"
+[ "$(sed -n 12p "$STUB_DIR/last-flags")" = "$(run_session "$HA2")" ] &&
+  [ "$(sed -n 12p "$STUB_DIR/last-flags")" != "$(run_session "$HA1")" ] ||
+  fail "the successor has a session uuid of its own"
+ok "the successor spawn: a second run with the same live-agent argv (-p --input-format stream-json --agent naru-live --name), named \`<name> · lease 2\`"
 
 # ---- (c) the outgoing agent's lease is refused on every verb ----
 run 1 "$MESA" live listen --lease 1 --wait 0
@@ -4144,37 +4273,32 @@ run 0 "$MESA" live turns
 [ "$(jqs length)" = "12" ] || fail "a refused lease writes no turn (got $(jqs length))"
 ok "a stale lease: listen/say/navigate/sidebars are all conflict naming the handoff, and nothing is written"
 
-# ---- (d) the successor's first listen stops the predecessor, once ----
+# ---- (d) the successor's first listen takes the queue; the predecessor was already stopped ----
 api 201 POST "/api/live/utterance" '{"text":"spoken during the swap"}'
-rm -f "$STUB_DIR/last-stop"
 run 0 "$MESA" live listen --lease 2 --wait 0
 [ "$(jqs .text)" = "spoken during the swap" ] ||
   fail "an utterance posted after the handoff waits in the queue for the successor (got $STDOUT)"
-[ "$(cat "$STUB_DIR/last-stop" 2>/dev/null)" = "stop $HA1" ] ||
-  fail "the successor's first listen must stop the predecessor by its job id (got $(cat "$STUB_DIR/last-stop" 2>/dev/null))"
-rm -f "$STUB_DIR/last-stop"
+[ "$(run_status "$HA1")" = "stopped" ] || fail "the predecessor stays stopped (got $(run_status "$HA1"))"
+! run_marker "$HA2" || fail "the successor's listen stops nobody it should not"
 run 0 "$MESA" live listen --lease 2 --wait 0
 [ "$STDOUT" = "null" ] || fail "nothing else queued"
-[ ! -e "$STUB_DIR/last-stop" ] || fail "the predecessor is stopped exactly once, never re-stopped"
 run 0 "$MESA" live say --lease 2 "Picking up where we left off."
 [ "$(jqs .role)" = "naru" ] || fail "say --lease 2 writes the turn"
-ok "the successor's first listen --lease 2 takes the queued utterance and stops the predecessor exactly once"
+ok "the successor's first listen --lease 2 takes the queued utterance; the predecessor is long stopped and the successor untouched"
 
 # ---- (e) a lease-less person still drives ----
 api 201 POST "/api/live/utterance" '{"text":"no lease at all"}'
-rm -f "$STUB_DIR/last-stop"
 run 0 "$MESA" live listen --wait 0
 [ "$(jqs .text)" = "no lease at all" ] || fail "a lease-less listen still hears"
-[ ! -e "$STUB_DIR/last-stop" ] || fail "a lease-less listen stops nobody"
+! run_marker "$HA2" || fail "a lease-less listen stops nobody"
 run 0 "$MESA" live say "a person at a terminal"
 [ "$(jqs .text)" = "a person at a terminal" ] || fail "a lease-less say still speaks"
 ok "without --lease nothing is checked: listen/say behave exactly as before"
 
 # ---- (f) a failed successor spawn leaves the session untouched ----
-touch "$STUB_DIR/fail"
-run 1 "$MESA" live handoff "doomed"
+MESA_SELF_BIN="$TMP/no-such-naru" run 1 "$MESA" live handoff "doomed"
 [ "$(jqe .error.code)" = "unavailable" ] || fail "a failed successor spawn: unavailable"
-rm -f "$STUB_DIR/fail"
+! run_marker "$HA2" || fail "a failed handoff must not stop the current run"
 run 0 "$MESA" live status
 [ "$(jqs .status)" = "live" ] || fail "a failed handoff must NOT end the session"
 [ "$(jqs .agent_id)" = "$HA2" ] || fail "a failed handoff keeps the current agent (got $(jqs .agent_id))"
@@ -4184,12 +4308,12 @@ run 0 "$MESA" live listen --lease 2 --wait 0
 ok "a failed successor spawn: exit 1 unavailable, the session still live under the same agent and lease"
 
 # ---- (g) the note is validated; nothing is spawned for a bad one ----
-SPAWNS_BEFORE=$(cat "$STUB_DIR/spawns")
+SPAWNS_BEFORE=$(spawns)
 run 1 "$MESA" live handoff "   "
 [ "$(jqe .error.code)" = "validation" ] || fail "a blank note: validation"
 run 1 "$MESA" live handoff "$(head -c 8193 /dev/zero | tr '\0' x)"
 [ "$(jqe .error.code)" = "validation" ] || fail "a note over LIVE_TEXT_MAX: validation"
-[ "$(cat "$STUB_DIR/spawns")" = "$SPAWNS_BEFORE" ] || fail "a refused note must spawn nothing"
+[ "$(spawns)" = "$SPAWNS_BEFORE" ] || fail "a refused note must spawn nothing"
 run 0 "$MESA" live status
 [ "$(jqs .lease)" = "2" ] || fail "a refused note leaves the lease alone"
 ok "live handoff: a blank or over-long note is validation, and nothing is spawned"
@@ -4224,24 +4348,26 @@ jq -e --slurpfile s "$TMP/ho-status-quiet.json" '(keys) == ($s[0] | keys)' <<<"$
   fail "handoff --quiet must print the same key set as status --quiet"
 run 0 "$MESA" live handoff A note that mentions --quiet in passing.
 [ "$(jqs .lease)" = "4" ] || fail "handoff: --quiet typed after the note lands in the note"
+use_agent "$(jqs .agent_id)"
 grep -q -- "Note: A note that mentions --quiet in passing." "$STUB_DIR/last-prompt" ||
   fail "handoff: --quiet after the note is note text"
 ok "live handoff --quiet: the session's quiet shape (nothing to drop), and --quiet must come before the note"
 
 # Ending stops the newest agent — the one the row names.
-rm -f "$STUB_DIR/last-stop"
-HA_LAST=$(cat "$STUB_DIR/last-id")
+run 0 "$MESA" live status
+HA_LAST=$(jqs .agent_id)
+! run_marker "$HA_LAST" || fail "the current run is not stopped before live stop"
 run 0 "$MESA" live stop
 [ "$(jqs .status)" = "ended" ] || fail "live stop after handoffs: ended"
-[ "$(cat "$STUB_DIR/last-stop")" = "stop $HA_LAST" ] ||
-  fail "live stop stops the agent currently holding the session (got $(cat "$STUB_DIR/last-stop" 2>/dev/null))"
+run_marker "$HA_LAST" ||
+  fail "live stop stops the agent currently holding the session (no stop marker on $HA_LAST)"
 # With the session ended there is nothing current to hand off: not_found,
 # and nothing spawned. (The store-level race — ended between the spawn and
 # the rebind — is a Rust test, `hand_off_live_session_refuses_an_ended_row…`.)
-SPAWNS_BEFORE=$(cat "$STUB_DIR/spawns")
+SPAWNS_BEFORE=$(spawns)
 run 1 "$MESA" live handoff "after the end"
 [ "$(jqe .error.code)" = "not_found" ] || fail "live handoff on an ended session: not_found"
-[ "$(cat "$STUB_DIR/spawns")" = "$SPAWNS_BEFORE" ] || fail "live handoff on an ended session must spawn nothing"
+[ "$(spawns)" = "$SPAWNS_BEFORE" ] || fail "live handoff on an ended session must spawn nothing"
 run 0 "$MESA" live start --no-agent
 run 1 "$MESA" live context
 [ "$(jqe .error.code)" = "unavailable" ] || fail "live context with no agent bound: unavailable"
@@ -4301,36 +4427,38 @@ ok "live result: blank or over 16384 chars is validation storing nothing; --quie
 
 # The handoff names the outgoing agent's running delegates, and the
 # successor's listen leaves it running until they are done. A subagent
-# transcript under the stub's session uuid, fresh and mid-turn, is a running
-# delegate (agents::running_subagents).
-SUBDIR="$HOME/.claude/projects/-live-gate/00000000-0000-0000-0000-000000000000/subagents"
-mkdir -p "$SUBDIR"
-printf '{"agentType":"crash-analysis"}' >"$SUBDIR/agent-crash-abc.meta.json"
-printf '%s\n' '{"type":"assistant","message":{"stop_reason":"tool_use"}}' >"$SUBDIR/agent-crash-abc.jsonl"
+# transcript under the OUTGOING run's session uuid (each run has its own,
+# naru task 1886), fresh and mid-turn, is a running delegate
+# (agents::running_subagents_of_session).
+delegate() { # <receipt> <stop_reason> — the crash-analysis delegate of that run
+  local dir="$HOME/.claude/projects/-live-gate/$(run_session "$1")/subagents"
+  mkdir -p "$dir"
+  printf '{"agentType":"crash-analysis"}' >"$dir/agent-crash-abc.meta.json"
+  printf '{"type":"assistant","message":{"stop_reason":"%s"}}\n' "$2" >"$dir/agent-crash-abc.jsonl"
+}
+delegate "$RA1" tool_use
 run 0 "$MESA" live handoff "we were on the crash"
+RA2=$(jqs .agent_id)
+use_agent "$RA2"
 grep -q "^- crash-analysis (agent-crash-abc)$" "$STUB_DIR/last-prompt" ||
   fail "the successor's prompt names the running delegate (got $(tail -3 "$STUB_DIR/last-prompt"))"
 grep -q "still working when it handed off" "$STUB_DIR/last-prompt" || fail "the delegate block is introduced"
-echo "$RA1" >"$STUB_DIR/extra-id"
-rm -f "$STUB_DIR/last-stop"
+! run_marker "$RA1" || fail "a handoff must not stop an outgoing run with a running delegate"
 run 0 "$MESA" live listen --lease 2 --wait 0
 [ "$STDOUT" = "null" ] || fail "nothing queued yet (got $STDOUT)"
-[ ! -e "$STUB_DIR/last-stop" ] || fail "a predecessor with a running delegate must not be stopped"
+! run_marker "$RA1" || fail "a predecessor with a running delegate must not be stopped"
 run 0 "$MESA" live result "RESULT-TWO: posted after the handoff"
-printf '%s\n' '{"type":"assistant","message":{"stop_reason":"end_turn"}}' >>"$SUBDIR/agent-crash-abc.jsonl"
+delegate "$RA1" end_turn
 run 0 "$MESA" live listen --lease 2 --wait 0
 [ "$(jqs .kind)" = "result" ] && [ "$(jqs .text)" = "RESULT-TWO: posted after the handoff" ] ||
   fail "the successor's listen hands out the result the delegate posted after the handoff (got $STDOUT)"
-[ "$(cat "$STUB_DIR/last-stop" 2>/dev/null)" = "stop $RA1" ] ||
-  fail "once its delegate is done the predecessor is stopped (got $(cat "$STUB_DIR/last-stop" 2>/dev/null))"
-rm -f "$STUB_DIR/last-stop"
-run 0 "$MESA" live listen --lease 2 --wait 0
-[ ! -e "$STUB_DIR/last-stop" ] || fail "the predecessor is still stopped exactly once"
-RA2=$(cat "$STUB_DIR/last-id")
+run_marker "$RA1" || fail "once its delegate is done the predecessor is stopped (no stop marker on $RA1)"
+wait_run_stopped "$RA1"
+! run_marker "$RA2" || fail "the successor is never the one stopped"
 
 # A listen the outgoing agent left waiting across its handoff ends in
 # conflict on its next poll rather than taking the successor's result.
-printf '%s\n' '{"type":"assistant","message":{"stop_reason":"tool_use"}}' >"$SUBDIR/agent-crash-abc.jsonl"
+delegate "$RA2" tool_use
 set +e
 "$MESA" live listen --lease 2 --wait 30 >"$TMP/stale.out" 2>"$TMP/stale.err" &
 STALE_PID=$!
@@ -4346,29 +4474,28 @@ set -e
 [ "$STALE_CODE" = "1" ] && [ "$(jq -r .error.code <"$TMP/stale.err")" = "conflict" ] ||
   fail "a listen waiting across a handoff ends in conflict (exit $STALE_CODE, $(cat "$TMP/stale.err"))"
 [ ! -s "$TMP/stale.out" ] || fail "the stale listen took nothing (got $(cat "$TMP/stale.out"))"
-echo "$RA2" >"$STUB_DIR/extra-id"
-: >"$STUB_DIR/stop-log"
 run 0 "$MESA" live listen --lease 3 --wait 0
 [ "$(jqs .text)" = "RESULT-THREE: posted after the second handoff" ] ||
   fail "the successor gets the result the stale listen did not (got $STDOUT)"
-[ ! -s "$STUB_DIR/stop-log" ] || fail "the deferred predecessor is not stopped while its delegate runs"
-# A third handoff would overwrite that deferred predecessor, so it stops it.
+! run_marker "$RA2" || fail "the deferred predecessor is not stopped while its delegate runs"
+# A third handoff would overwrite that deferred predecessor, so it stops it;
+# its own outgoing run RA3 has a delegate too, so it becomes the deferred one.
+delegate "$RA3" tool_use
 run 0 "$MESA" live handoff "a third handoff"
 RA4=$(jqs .agent_id)
-[ "$(cat "$STUB_DIR/stop-log")" = "stop $RA2" ] ||
-  fail "a handoff stops the predecessor still deferred from the last one (got $(cat "$STUB_DIR/stop-log"))"
+run_marker "$RA2" || fail "a handoff stops the predecessor still deferred from the last one (no stop marker on $RA2)"
+! run_marker "$RA3" || fail "the new outgoing run is deferred, not stopped, while its delegate runs"
 # And ending the conversation stops a deferred predecessor with the agent.
-echo "$RA3" >"$STUB_DIR/extra-id"
-: >"$STUB_DIR/stop-log"
 run 0 "$MESA" live listen --lease 4 --wait 0
-[ ! -s "$STUB_DIR/stop-log" ] || fail "the new predecessor is deferred too"
+! run_marker "$RA3" || fail "the new predecessor is deferred too"
+! run_marker "$RA4" || fail "the current run is not stopped before live stop"
 run 0 "$MESA" live stop
-[ "$(cat "$STUB_DIR/stop-log")" = "$(printf 'stop %s\nstop %s' "$RA3" "$RA4")" ] ||
-  fail "live stop stops the deferred predecessor and the current agent (got $(cat "$STUB_DIR/stop-log"))"
-rm -f "$STUB_DIR/extra-id"
+run_marker "$RA3" && run_marker "$RA4" ||
+  fail "live stop stops the deferred predecessor and the current agent"
 rm -rf "$HOME/.claude/projects/-live-gate"
 run 0 "$MESA" live start "live gate project"
 run 0 "$MESA" live handoff "no delegates this time"
+use_agent "$(jqs .agent_id)"
 ! grep -q "still working when it handed off" "$STUB_DIR/last-prompt" || fail "no running delegate, no block"
 run 0 "$MESA" live stop >/dev/null
 ok "live handoff names the outgoing agent's running delegates; the successor's listen leaves it running until they finish, delivers the result posted after the handoff, then stops it once; a listen left waiting across a handoff is conflict; a later handoff or live stop stops a deferred predecessor"
@@ -4523,9 +4650,23 @@ ok "GET/PUT /api/live/boards/{id}/ink-state: null until saved, round trip, last 
 BLOCKED_NULL_AT=$(date +%s)
 #
 # Read off `claude agents --json --all` by the session's job id, never
-# stored, cached for a few seconds per job. The stub now reports the job
-# blocked; the earlier null is served until its TTL runs out.
+# stored, cached for a few seconds per job. A `run:<job>` receipt (naru task
+# 1886) is a `-p` session with no permission prompt to wait on, so it reads
+# null even when the stub lists a blocked job under its name; the derived
+# state is for a legacy `--bg` receipt, which a session carrying one from
+# before the move still has. Rebind this session to one ("deadbeef") the way
+# an old row reads, with the run behind it stopped, and have the stub report
+# that job blocked; the earlier null is served until its TTL runs out.
+printf '%s\n' "$NA" > "$STUB_DIR/agents-id"
 printf '%s\n' "$NA" > "$STUB_DIR/blocked-id"
+api 200 GET "/api/live"
+[ "$(jqb .blocked)" = "null" ] ||
+  fail "GET /api/live: a run receipt is never blocked, whatever claude agents lists (got $(jqb .blocked))"
+run 0 "$MESA" run stop "$(run_id "$NA")"
+sqlite3 "$MESA_DB" "UPDATE live_sessions SET agent_id='deadbeef' WHERE id=$NS"
+printf '%s\n' "deadbeef" > "$STUB_DIR/agents-id"
+printf '%s\n' "deadbeef" > "$STUB_DIR/blocked-id"
+BLOCKED_NULL_AT=$(date +%s)
 ELAPSED=$(( $(date +%s) - BLOCKED_NULL_AT ))
 [ "$ELAPSED" -ge 6 ] || sleep $(( 6 - ELAPSED ))
 api 200 GET "/api/live"
@@ -4551,7 +4692,7 @@ rm -f "$STUB_DIR/blocked-id"
 # The CLI never reads it: `live status` is the stored session alone.
 run 0 "$MESA" live status
 [ "$(jq -c 'has("blocked")' <<<"$STDOUT")" = "false" ] || fail "blocked is derived on the API read, never a session field"
-ok "GET /api/live: blocked is null for a working job, the job's waitingFor when claude agents reports a permission prompt, and null again when the blocked reason is not one"
+ok "GET /api/live: blocked is null for a working job or a run receipt, the job's waitingFor when claude agents reports a permission prompt, and null again when the blocked reason is not one"
 
 # ---- the archive never sees a notice ----
 run 0 "$MESA" live say "The heron says the agent is fine."
@@ -4592,16 +4733,16 @@ DS=$(jqs .id)
 DA1=$(jqs .agent_id)
 run 0 "$MESA" live context
 [ "$(jqs .dream)" = "null" ] || fail "live context: no dream is due under threshold (got $(jqs .dream))"
-SPAWNS_BEFORE=$(cat "$STUB_DIR/spawns")
+SPAWNS_BEFORE=$(spawns)
 run 0 "$MESA" live handoff "under threshold"
 [ "$(jqs .id)" = "$DS" ] || fail "dream handoff (a): the same session"
 [ "$(jqs .lease)" = "2" ] || fail "dream handoff (a): lease 2"
 [ "$(jqs .resting_since)" = "null" ] || fail "a handoff under threshold must not rest the session (got $(jqs .resting_since))"
-[ "$(cat "$STUB_DIR/spawns")" = "$((SPAWNS_BEFORE + 1))" ] ||
-  fail "a handoff under threshold spawns the successor and nothing else (got $(( $(cat "$STUB_DIR/spawns") - SPAWNS_BEFORE )) spawns)"
+[ "$(spawns)" = "$((SPAWNS_BEFORE + 1))" ] ||
+  fail "a handoff under threshold spawns the successor and nothing else (got $(( $(spawns) - SPAWNS_BEFORE )) spawns)"
 DA2=$(jqs .agent_id)
-[ "$DA2" = "$(cat "$STUB_DIR/last-id")" ] && [ "$DA2" != "$DA1" ] ||
-  fail "dream handoff (a): agent_id is the successor's receipt"
+[ "$DA2" != "$DA1" ] || fail "dream handoff (a): agent_id is the successor's receipt"
+run_marker "$DA1" || fail "dream handoff (a): the outgoing run is stopped at the handoff"
 [ -z "$STDERR" ] || fail "dream handoff (a): nothing on stderr (got: $STDERR)"
 ok "the automatic dream: under threshold live context reports dream null and a handoff rests nothing and spawns no dream"
 
@@ -4617,18 +4758,18 @@ run 0 "$MESA" live context
 # session provably rests on the job (the pid marker), not on a timer.
 touch "$STUB_DIR/hold-p"
 printf '%s' '{"edits":[],"contradictions":[],"report":"nothing"}' > "$STUB_DIR/dream-out.json"
-SPAWNS_BEFORE=$(cat "$STUB_DIR/spawns")
+SPAWNS_BEFORE=$(spawns)
 DP_BASE=$(p_base dream)
 run 0 "$MESA" live handoff "resting handoff"
 [ "$(jqs .lease)" = "3" ] || fail "dream handoff (b): lease 3"
 [ "$(jqs .status)" = "live" ] || fail "dream handoff (b): the session stays live"
 [ "$(jqs .resting_since)" != "null" ] || fail "a handoff that dreams must rest the session (got $STDOUT)"
-[ "$(cat "$STUB_DIR/spawns")" = "$((SPAWNS_BEFORE + 1))" ] ||
-  fail "a handoff that dreams spawns the successor alone as a --bg agent (got $(( $(cat "$STUB_DIR/spawns") - SPAWNS_BEFORE )) spawns)"
+[ "$(spawns)" = "$((SPAWNS_BEFORE + 1))" ] ||
+  fail "a handoff that dreams spawns the successor run alone (got $(( $(spawns) - SPAWNS_BEFORE )) spawns)"
 wait_p dream $((DP_BASE + 1))
 DA3=$(jqs .agent_id)
-[ "$DA3" = "$(cat "$STUB_DIR/last-id")" ] && [ "$DA3" != "$DA2" ] ||
-  fail "dream handoff (b): agent_id is the successor's receipt (got $DA3)"
+[ "$DA3" != "$DA2" ] || fail "dream handoff (b): agent_id is the successor's receipt (got $DA3)"
+run_marker "$DA2" || fail "dream handoff (b): the outgoing run is stopped at the handoff, the rest unchanged"
 DREAM_MARKER=$(sqlite3 "$MESA_DB" "SELECT dream_agent_id FROM live_sessions WHERE id=$DS")
 case "$DREAM_MARKER" in pid:[0-9]*) ;; *) fail "the rest must wait on a pid:<n> marker (got $DREAM_MARKER)" ;; esac
 [ "$(head -11 "$STUB_DIR/p-dream-flags")" = "$EXPECTED_DREAM_FLAGS" ] ||
@@ -4650,7 +4791,6 @@ ok "the automatic dream: two lookalike entries make context report why, and the 
 
 # ---- (c) the successor's first listen waits out the rest, then wakes ----
 api 201 POST "/api/live/utterance" '{"text":"said while resting"}'
-rm -f "$STUB_DIR/last-stop"
 # The dream's call is released a moment after listen starts waiting on it:
 # the listen must hold the turn back until then, and hand it over once the
 # job has exited.
@@ -4660,28 +4800,29 @@ run 0 "$MESA" live listen --lease 3 --wait 0
 [ "$(jqs .text)" = "said while resting" ] ||
   fail "listen --lease 3: once the dream job is done the queued utterance is handed over (got $STDOUT)"
 [ $(( $(date +%s) - T0 )) -ge 1 ] || fail "listen must have waited for the held dream job"
-[ "$(cat "$STUB_DIR/last-stop" 2>/dev/null)" = "stop $DA2" ] ||
-  fail "the woken successor's first listen still stops the predecessor (got $(cat "$STUB_DIR/last-stop" 2>/dev/null))"
+! run_marker "$DA3" || fail "the woken successor's first listen stops only the predecessor, never itself"
+wait_run_stopped "$DA2"
 [ -z "$STDERR" ] || fail "a rest that ends before its cap warns about nothing (got: $STDERR)"
 run 0 "$MESA" live status
 [ "$(jqs .resting_since)" = "null" ] || fail "listen must wake the session: resting_since back to null (got $(jqs .resting_since))"
 [ "$(jqs .lease)" = "3" ] || fail "a wake moves nothing but the rest"
 api 200 GET "/api/live"
 [ "$(jqb .session.resting_since)" = "null" ] || fail "GET /api/live: woken"
-ok "the automatic dream: listen --lease waits while the dream job's pid is alive, wakes the session once it exits, hands the queued turn over and stops the predecessor once"
+ok "the automatic dream: listen --lease waits while the dream job's pid is alive, wakes the session once it exits, hands the queued turn over; the predecessor run was stopped at the handoff"
 
 # ---- (d) live stop: a dream over threshold, none under it ----
 run 0 "$MESA" live say --lease 3 "A turn, so the summariser has something to read."
-SPAWNS_BEFORE=$(cat "$STUB_DIR/spawns")
+SPAWNS_BEFORE=$(spawns)
 DP_BASE=$(p_base dream)
 SP_BASE=$(p_base summary)
 run 0 "$MESA" live stop
 [ "$(jqs .status)" = "ended" ] || fail "live stop (over threshold): ended"
+run_marker "$DA3" || fail "live stop writes the current run's stop marker"
 [ "$(jqs .resting_since)" = "null" ] || fail "an ended session is never resting"
 wait_p dream $((DP_BASE + 1))
 wait_p summary $((SP_BASE + 1))
-[ "$(cat "$STUB_DIR/spawns")" = "$SPAWNS_BEFORE" ] ||
-  fail "live stop starts jobs, never a --bg agent (got $(( $(cat "$STUB_DIR/spawns") - SPAWNS_BEFORE )) spawns)"
+[ "$(spawns)" = "$SPAWNS_BEFORE" ] ||
+  fail "live stop starts memory jobs, never another run (got $(( $(spawns) - SPAWNS_BEFORE )) spawns)"
 [ "$(head -11 "$STUB_DIR/p-dream-flags")" = "$EXPECTED_DREAM_FLAGS" ] ||
   fail "live stop's dream must go through the live-dream template (got $(head -11 "$STUB_DIR/p-dream-flags" | tr '\n' ' '))"
 [ "$(cat "$STUB_DIR/p-dream-cwd")" = "$WORKDIR" ] ||
@@ -4698,7 +4839,7 @@ no_new_p dream "$DP_BASE" "live stop under threshold must start the summariser a
 [ "$(sed -n 5p "$STUB_DIR/p-summary-flags")" = "Live gate project: live $(jqs .id) summary" ] ||
   fail "live stop under threshold: the one job is the summariser (got $(sed -n 5p "$STUB_DIR/p-summary-flags"))"
 rm -f "$STUB_DIR/dream-out.json" "$STUB_DIR/hold-p"
-ok "the automatic dream: live stop starts the dream job beside the summariser over threshold and only the summariser under it, neither as a --bg agent"
+ok "the automatic dream: live stop starts the dream job beside the summariser over threshold and only the summariser under it, neither as an agent run"
 
 # =====================================================================
 # 18. Barge-in (mesa task 1595): `mesa live hook` and the live-barge-in.sh
