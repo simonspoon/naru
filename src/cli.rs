@@ -435,6 +435,10 @@ EXAMPLES
         /// Include only the last N events
         #[arg(long)]
         tail: Option<usize>,
+        /// Leave out the subagents' events (implies `--events`; `--tail`
+        /// counts after the filter)
+        #[arg(long)]
+        main: bool,
     },
     /// List every run, newest first
     List,
@@ -5142,9 +5146,14 @@ fn run_runs(cmd: RunCmd) -> Result<()> {
             message,
             interrupt,
         } => print_json(&runner::send(&job, &message, interrupt)?),
-        RunCmd::Show { job, events, tail } => {
-            let n = (events || tail.is_some()).then(|| tail.unwrap_or(100));
-            print_json(&runner::show(&job, n)?)
+        RunCmd::Show {
+            job,
+            events,
+            tail,
+            main,
+        } => {
+            let n = (events || main || tail.is_some()).then(|| tail.unwrap_or(100));
+            print_json(&runner::show(&job, n, main)?)
         }
         RunCmd::List => print_json(&runner::list()?),
         RunCmd::Stop { job } => print_json(&runner::stop(&job)?),

@@ -107,6 +107,12 @@ while IFS= read -r line; do
   # The turn runs in the background so the loop can still read a control_request.
   (
     [ "\$s" != 0 ] && sleep "\$s"
+    # A file named subagent adds the lines a subagent's work leaves in the stream.
+    if [ -f "$STUB/subagent" ]; then
+      echo '{"type":"system","subtype":"task_started","task_id":"t9","tool_use_id":"toolu_sub","description":"sub"}'
+      echo '{"type":"system","subtype":"task_progress","owned_by_subagent":true}'
+      echo '{"type":"assistant","parent_tool_use_id":"toolu_sub","message":{"content":[{"type":"text","text":"sub work"}]}}'
+    fi
     printf '{"type":"assistant","message":{"content":[{"type":"text","text":%s}]}}\n' "\$(jq -Rn --arg t "\$text" '\$t')"
     printf '{"type":"result","subtype":"success","is_error":false,"result":%s}\n' "\$(jq -Rn --arg t "echo: \$text" '\$t')"
   ) &
@@ -411,6 +417,23 @@ set -e
 [ "$rc" = 2 ] || fail "missing prompt should be a usage error, got $rc"
 "$NARU" run reconcile | jq -e '.resumed == []' >/dev/null || fail "reconcile with nothing to do"
 ok "CLI: list/show/tail/quiet, not_found, validation, usage exit codes, empty reconcile"
+
+# ---- scope: the main-thread view of the event log ----
+touch "$STUB/subagent"
+JS=$("$NARU" run start --model haiku --cwd "$TMP/work" "scope me" | jq -r .job_id)
+wait_for 10 "scope: result" result_is "$JS" "echo: scope me"
+rm -f "$STUB/subagent"
+SUBQ='[.events[]|select((.parent_tool_use_id // null)!=null or .owned_by_subagent==true)]|length'
+all_n=$("$NARU" run show "$JS" --events | jq "$SUBQ")
+[ "$all_n" -gt 0 ] || fail "scope: default view has no subagent lines ($all_n)"
+[ "$("$NARU" run show "$JS" --main | jq "$SUBQ")" = 0 ] || fail "scope: --main kept a subagent line"
+[ "$(api "$BASE/api/runs/$JS?scope=main" | jq "$SUBQ")" = 0 ] || fail "scope: ?scope=main kept a subagent line"
+[ "$(api "$BASE/api/runs/$JS?scope=all" | jq "$SUBQ")" = "$all_n" ] || fail "scope: ?scope=all differs from default"
+[ "$(api "$BASE/api/runs/$JS" | jq "$SUBQ")" = "$all_n" ] || fail "scope: default API view changed"
+[ "$("$NARU" run show "$JS" --main --tail 1 | jq '.events[0].type')" = '"result"' ] || fail "scope: --tail did not count after the filter"
+code=$(curl -s -o "$TMP/scope.json" -w '%{http_code}' "$BASE/api/runs/$JS?scope=bogus")
+[ "$code" = 422 ] && [ "$(jq -r .error.code "$TMP/scope.json")" = validation ] || fail "scope: ?scope=bogus answered $code"
+ok "show --main / ?scope=main has no line with parent_tool_use_id or owned_by_subagent, default output unchanged, --tail counts after the filter, ?scope=bogus 422"
 
 # ---- the gate: every route refuses a foreign Host ----
 for route in "GET /api/runs" "GET /api/runs/$ID" "POST /api/runs" "POST /api/runs/$ID/message" "POST /api/runs/$ID/stop" "POST /api/runs/$ID/interrupt"; do

@@ -394,17 +394,30 @@ fn view(dir: &Path, job: &Job) -> Value {
     v
 }
 
-fn events_of(dir: &Path, tail: Option<usize>) -> Vec<Value> {
+/// A line of a subagent: it carries a string `parent_tool_use_id`, or is a
+/// system line with `owned_by_subagent: true`. A null id is the main thread.
+fn is_subagent_line(v: &Value) -> bool {
+    v.get("parent_tool_use_id").is_some_and(Value::is_string)
+        || v.get("owned_by_subagent").and_then(Value::as_bool) == Some(true)
+}
+
+/// The run's events; `main_only` drops subagent lines (the log itself stays
+/// verbatim) and `tail` counts after that filter.
+fn events_of(dir: &Path, tail: Option<usize>, main_only: bool) -> Vec<Value> {
     let Ok(body) = fs::read(dir.join("events.jsonl")) else {
         return vec![];
     };
     let text = String::from_utf8_lossy(&body);
-    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
-    let from = tail.map_or(0, |n| lines.len().saturating_sub(n));
-    lines[from..]
-        .iter()
-        .map(|l| serde_json::from_str(l).unwrap_or_else(|_| Value::String((*l).to_string())))
-        .collect()
+    let mut events: Vec<Value> = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|_| Value::String(l.to_string())))
+        .filter(|v| !(main_only && is_subagent_line(v)))
+        .collect();
+    if let Some(n) = tail {
+        events.drain(..events.len().saturating_sub(n));
+    }
+    events
 }
 
 // ---- the surface --------------------------------------------------------
@@ -559,18 +572,19 @@ pub fn send_in(runs: &Path, id: &str, text: &str, interrupt: bool) -> Result<Val
     Ok(view(&dir, &job))
 }
 
-pub fn show(id: &str, events: Option<usize>) -> Result<Value> {
-    show_in(&runs_dir(), id, events)
+pub fn show(id: &str, events: Option<usize>, main_only: bool) -> Result<Value> {
+    show_in(&runs_dir(), id, events, main_only)
 }
 
-/// The job, plus its last `events` events when asked for.
-pub fn show_in(runs: &Path, id: &str, events: Option<usize>) -> Result<Value> {
+/// The job, plus its last `events` events when asked for (`main_only` leaves
+/// out the subagents' lines).
+pub fn show_in(runs: &Path, id: &str, events: Option<usize>, main_only: bool) -> Result<Value> {
     let dir = job_dir_of(runs, id)?;
     let job = load(&dir)?;
     let v = view(&dir, &job);
     Ok(match events {
         None => v,
-        Some(n) => json!({"job": v, "events": events_of(&dir, Some(n))}),
+        Some(n) => json!({"job": v, "events": events_of(&dir, Some(n), main_only)}),
     })
 }
 
@@ -694,7 +708,7 @@ pub fn reconcile_in(runs: &Path) -> Result<Vec<String>> {
 
 /// Whether claude ever finished a turn on this run.
 fn events_have_result(dir: &Path) -> bool {
-    events_of(dir, None)
+    events_of(dir, None, false)
         .iter()
         .any(|e| e.get("type").and_then(Value::as_str) == Some("result"))
 }
@@ -1402,11 +1416,36 @@ mod tests {
         append_event(&dir, r#"{"type":"a"}"#);
         append_event(&dir, "plain text");
         append_event(&dir, r#"{"type":"c"}"#);
-        let v = show_in(runs.path(), &job.job_id, Some(2)).unwrap();
+        let v = show_in(runs.path(), &job.job_id, Some(2), false).unwrap();
         assert_eq!(v["events"].as_array().unwrap().len(), 2);
         assert_eq!(v["events"][0], "plain text");
         assert_eq!(v["job"]["job_id"], job.job_id);
-        assert!(show_in(runs.path(), &job.job_id, None).unwrap()["events"].is_null());
+        assert!(show_in(runs.path(), &job.job_id, None, false).unwrap()["events"].is_null());
         assert_eq!(list_in(runs.path()).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn events_main_scope_drops_subagent_lines() {
+        let runs = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let job = create_job(runs.path(), &opts("p", cwd.path())).unwrap();
+        let dir = runs.path().join(&job.job_id);
+        append_event(&dir, r#"{"type":"assistant","parent_tool_use_id":null}"#);
+        append_event(
+            &dir,
+            r#"{"type":"assistant","parent_tool_use_id":"toolu_1"}"#,
+        );
+        append_event(&dir, r#"{"type":"system","owned_by_subagent":true}"#);
+        append_event(&dir, r#"{"type":"naru_runner"}"#);
+        append_event(&dir, "garbage");
+        let id = &job.job_id;
+        let main = show_in(runs.path(), id, Some(100), true).unwrap();
+        assert_eq!(main["events"].as_array().unwrap().len(), 3);
+        let all = show_in(runs.path(), id, Some(100), false).unwrap();
+        assert_eq!(all["events"].as_array().unwrap().len(), 5);
+        let last = show_in(runs.path(), id, Some(1), true).unwrap();
+        assert_eq!(last["events"][0], "garbage");
+        let two = show_in(runs.path(), id, Some(2), true).unwrap();
+        assert_eq!(two["events"][0]["type"], "naru_runner");
     }
 }

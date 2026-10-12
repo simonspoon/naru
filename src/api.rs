@@ -7104,6 +7104,8 @@ async fn list_runs(
 struct RunQuery {
     /// How many trailing events to include (default 500).
     tail: Option<usize>,
+    /// `all` (default) or `main` (the subagents' events left out).
+    scope: Option<String>,
 }
 
 async fn show_run(
@@ -7115,7 +7117,16 @@ async fn show_run(
 ) -> ApiResult<Response> {
     require_agent_access(&state, &addr, &headers)?;
     let tail = q.tail.unwrap_or(500);
-    let shown = tokio::task::spawn_blocking(move || runner::show(&id, Some(tail)))
+    let main_only = match q.scope.as_deref() {
+        None | Some("all") => false,
+        Some("main") => true,
+        Some(other) => {
+            return Err(
+                Error::Validation(format!("scope must be `main` or `all`, not `{other}`")).into(),
+            );
+        }
+    };
+    let shown = tokio::task::spawn_blocking(move || runner::show(&id, Some(tail), main_only))
         .await
         .map_err(|e| Error::Unavailable(e.to_string()))??;
     Ok(Json(shown).into_response())
