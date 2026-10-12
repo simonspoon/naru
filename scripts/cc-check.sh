@@ -57,6 +57,10 @@ JSON
 
 export MESA_CC_PROJECTS_DIR="$TMP/tree"
 export MESA_DB="$TMP/mesa.db"
+# Isolate the headless ledger for the whole run: otherwise every sync/summary
+# below reads the real ~/.naru/usage/headless.jsonl. Absent until the ledger
+# section writes it, so the earlier pinned counts see no headless sessions.
+export MESA_CC_LEDGER="$TMP/usage/headless.jsonl"
 
 fail() { echo "FAIL: $1" >&2; exit 1; }
 
@@ -1633,7 +1637,6 @@ cat <<'JSON'
 JSON
 STUB
 chmod +x "$TMP/claude-stub"
-export MESA_CC_LEDGER="$TMP/usage/headless.jsonl"
 HL_DB="$TMP/hl.db"
 "$TMP/claude-stub" -p --no-session-persistence --output-format json hi > "$TMP/hl-result.json"
 MESA_DB="$HL_DB" "$BIN" cc ledger add --source stub --at 2026-06-15T02:00:00Z < "$TMP/hl-result.json" | python3 -c '
