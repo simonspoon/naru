@@ -95,7 +95,9 @@ import {
   renameProjectFileEntry,
   searchProjectFiles,
   updateProjectFilesContent,
+  watchProjectFiles,
 } from '../api'
+import { levelsToRefetch, reconnectDelayMs } from '../filesWatch'
 import type { FileTreeEntry } from '../types/FileTreeEntry'
 import type { ProjectFileSearch } from '../types/ProjectFileSearch'
 import type { GitCommit } from '../types/GitCommit'
@@ -3030,6 +3032,76 @@ export function FilesView({ projectId }: { projectId: number }) {
   const [childrenCache, setChildrenCache] = useState<Map<string, DirState>>(
     new Map(),
   )
+  // The watch stream (naru task 1873) reads the loaded levels through a ref so
+  // its effect is keyed on the project alone, not restarted by every cache edit.
+  const childrenRef = useRef(childrenCache)
+  useEffect(() => {
+    childrenRef.current = childrenCache
+  })
+  const hasRoot = data?.path != null
+  useEffect(() => {
+    if (!hasRoot) return
+    const ctrl = new AbortController()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let attempt = 0
+    let opened = false
+    const refetchDir = (dir: string) => {
+      getProjectFiles(projectId, dir).then(
+        (res) => {
+          if (ctrl.signal.aborted) return
+          // Replace in place — no 'loading' flash; skip a level dropped meanwhile.
+          setChildrenCache((prev) =>
+            prev.has(dir)
+              ? new Map(prev).set(dir, { entries: res.tree ?? [], truncated: res.truncated })
+              : prev,
+          )
+        },
+        (e: unknown) => {
+          if (ctrl.signal.aborted) return
+          if (!(e instanceof ApiError) || e.status !== 404) return
+          // The folder is gone: drop it (and anything under it) from view state.
+          const gone = (p: string) => p === dir || p.startsWith(dir + '/')
+          setChildrenCache((prev) => {
+            const next = new Map(prev)
+            for (const k of prev.keys()) if (gone(k)) next.delete(k)
+            return next
+          })
+          setExpanded((prev) => new Set([...prev].filter((p) => !gone(p))))
+        },
+      )
+    }
+    const refetchLevels = (dirs: string[] | null) => {
+      const { root, dirs: levels } = levelsToRefetch(dirs, childrenRef.current.keys())
+      if (root) void refetch()
+      levels.forEach(refetchDir)
+    }
+    const connect = () => {
+      watchProjectFiles(
+        projectId,
+        (ev) => {
+          if (ev.type === 'ready') {
+            attempt = 0
+            // Events may have been missed while disconnected.
+            if (opened) refetchLevels(null)
+            opened = true
+          } else if (ev.type === 'change') {
+            refetchLevels(ev.dirs)
+          }
+        },
+        ctrl.signal,
+      )
+        .catch(() => {})
+        .then(() => {
+          if (ctrl.signal.aborted) return
+          timer = setTimeout(connect, reconnectDelayMs(attempt++))
+        })
+    }
+    connect()
+    return () => {
+      ctrl.abort()
+      if (timer !== undefined) clearTimeout(timer)
+    }
+  }, [projectId, hasRoot, refetch])
   // Whether the tree is showing. Only the phone tier can turn this off, and
   // only the phone tier renders anything that reacts to it — above 600px the
   // toggle button is `display: none` and `.files-tree-collapsed` has no rule
