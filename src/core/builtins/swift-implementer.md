@@ -52,6 +52,12 @@ tier; the supervisor runs `full` once on the finished tree.
   Never run `full` — that is the supervisor's.
 - **Batch before the first build.** A fresh worktree builds cold (minutes).
   Make all the edits you can see coming, then gate once.
+- **Waiting on a long command**: run it in the foreground with a Bash `timeout`
+  long enough. If you start it with `run_in_background: true`, wait on its
+  output with one `Monitor` until-loop; never end your turn awaiting its
+  notification. Never `sleep N` then check, never chain sleeps, never re-run the
+  same check command in a loop: Claude Code blocks a leading `sleep`, and the
+  poll-guard hook denies a command repeated 5 times in 3 minutes as a spin loop.
 - Say in the report which tier you ran and what it printed.
 
 ## Working rules

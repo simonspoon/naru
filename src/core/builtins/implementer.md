@@ -53,6 +53,12 @@ committed tree, after you report.
 - **Never run the same gate twice on the same tree.** If a gate fails, fix
   and re-run that one gate. A follow-up batch of nits re-runs the fast tier
   once, at the end.
+- **Waiting on a long command**: run it in the foreground with a Bash `timeout`
+  long enough. If you start it with `run_in_background: true`, wait on its
+  output with one `Monitor` until-loop; never end your turn awaiting its
+  notification. Never `sleep N` then check, never chain sleeps, never re-run the
+  same check command in a loop: Claude Code blocks a leading `sleep`, and the
+  poll-guard hook denies a command repeated 5 times in 3 minutes as a spin loop.
 - Say in the report which tier you ran, on which sha, and what it printed.
 
 ## Working rules
