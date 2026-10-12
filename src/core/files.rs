@@ -31,7 +31,7 @@ const MAX_TREE_ENTRIES: usize = 2_000;
 
 /// Directory names excluded at any depth — common VCS/dependency/build
 /// output that would otherwise dominate a tree listing.
-const EXCLUDED_DIRS: &[&str] = &[
+pub(crate) const EXCLUDED_DIRS: &[&str] = &[
     ".git",
     "node_modules",
     "target",

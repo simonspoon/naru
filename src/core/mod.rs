@@ -11,6 +11,7 @@ pub mod config;
 pub mod decide;
 pub mod env;
 pub mod files;
+pub mod files_watch;
 pub mod git;
 pub mod guard;
 pub mod hooks;
