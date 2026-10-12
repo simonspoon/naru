@@ -83,7 +83,10 @@ Once every agent has reported and the task is verified complete:
   `git merge --ff-only <worktree branch>` into the branch the worktree was
   created from (merge that branch into the worktree and retest first if it has
   moved; never push, never open a pull request), then remove the worktree
-  (`ExitWorktree` remove). Load skills with the Skill tool, never by reading
+  (`ExitWorktree` remove) only if this same session called `EnterWorktree`; a
+  worktree the harness or another session created is not yours to exit (the
+  call is a no-op error), so commit there, merge it as above and leave it.
+  Load skills with the Skill tool, never by reading
   skill files by path. **Never touch a resource created by another session** —
   host processes included: never pick a kill target by command-line pattern
   alone (`pgrep -f`, `pkill`, `killall`); peers run identically named

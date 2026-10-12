@@ -41,7 +41,9 @@ Assign them so agents cannot collide.
   - **Let the harness clean it up** when the lock belongs to a live agent or
     session — an isolated agent still running, or this session's own
     worktree. Stop or wait for the agent; the harness removes an unchanged
-    worktree itself, and `ExitWorktree` (remove) removes this session's own.
+    worktree itself, and `ExitWorktree` (remove) removes this session's own,
+    only one this session entered with `EnterWorktree`; otherwise commit,
+    merge it back and leave it.
     Never unlock a worktree a live agent is still using.
   - **`git worktree unlock <path>`, then `git worktree remove <path>`** when
     the agent that locked it has ended and the worktree persisted (it had
