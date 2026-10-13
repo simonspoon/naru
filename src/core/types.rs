@@ -360,6 +360,75 @@ pub struct ProjectAgents {
     pub agents: Vec<AgentSession>,
 }
 
+/// The agent watcher's payload (naru task 1909, `docs/agent-watcher.md`): one
+/// row per live session, subagent and shell, with the times the page needs to
+/// draw a timeline. All times are Unix seconds.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+#[serde(rename_all = "camelCase")]
+pub struct AgentWatch {
+    /// The server's clock when the payload was built.
+    #[ts(type = "number")]
+    pub now: i64,
+    /// The window the rows' `runs` were clipped to (clamped 1..=60).
+    #[ts(type = "number")]
+    pub window_minutes: i64,
+    pub rows: Vec<AgentWatchRow>,
+}
+
+/// Which kind of thing an [`AgentWatchRow`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "kebab-case")]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub enum AgentWatchKind {
+    Session,
+    Subagent,
+    Shell,
+}
+
+/// One timeline row. Every field read from a transcript, `ps` or `lsof` is
+/// best-effort: a miss costs the field, never the row.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+#[serde(rename_all = "camelCase")]
+pub struct AgentWatchRow {
+    /// `<session id>`, `<session id>/<agent id>`, `<session id>/pid:<n>` or
+    /// `<session id>/cmd:<name>`.
+    pub key: String,
+    pub kind: AgentWatchKind,
+    pub session_id: String,
+    /// The session row's key, for a subagent or shell.
+    #[serde(default)]
+    pub parent: Option<String>,
+    /// Sanitized and bounded.
+    pub label: String,
+    #[serde(default)]
+    pub detail: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[ts(type = "number | null")]
+    #[serde(default)]
+    pub started_at: Option<i64>,
+    /// Working stretches inside the window, `[start, end]` Unix seconds;
+    /// empty for a shell.
+    #[ts(type = "Array<[number, number]>")]
+    pub runs: Vec<(i64, i64)>,
+    /// The newest transcript event, whatever the window.
+    #[ts(type = "number | null")]
+    #[serde(default)]
+    pub last_event_at: Option<i64>,
+    /// Set only when the transcript tail read was cut: nothing before this
+    /// instant is known.
+    #[ts(type = "number | null")]
+    #[serde(default)]
+    pub history_from: Option<i64>,
+    /// A shell's output file mtime; `null` when it could not be read.
+    #[ts(type = "number | null")]
+    #[serde(default)]
+    pub output_at: Option<i64>,
+    pub finished: bool,
+}
+
 /// One configurable agent-spawn command as the Settings page sees it
 /// (`core::config`, `docs/config.md`). Not stored in the db — this is a view
 /// of `~/.mesa/config.json`, which is read fresh on every spawn.

@@ -3430,6 +3430,19 @@ pub const THREAD_IDLE_GAP_SECS: i64 = 60;
 /// one yields one zero-length interval, which is the honest answer — it was
 /// there for an instant.
 fn active_intervals(ts: &[i64]) -> Vec<CcInterval> {
+    coalesce_runs(ts)
+        .into_iter()
+        .map(|(start, end)| CcInterval {
+            start: fmt_ts(start),
+            end: fmt_ts(end),
+        })
+        .collect()
+}
+
+/// [`active_intervals`]' arithmetic on Unix seconds: sorted `ts` coalesced
+/// into `(start, end)` runs until a gap of [`THREAD_IDLE_GAP_SECS`] closes one.
+/// Shared with [`watch_thread`] (the agent watcher, naru task 1909).
+fn coalesce_runs(ts: &[i64]) -> Vec<(i64, i64)> {
     let mut ts: Vec<i64> = ts.to_vec();
     ts.sort_unstable();
     let mut out: Vec<(i64, i64)> = Vec::new();
@@ -3439,12 +3452,7 @@ fn active_intervals(ts: &[i64]) -> Vec<CcInterval> {
             _ => out.push((t, t)),
         }
     }
-    out.into_iter()
-        .map(|(start, end)| CcInterval {
-            start: fmt_ts(start),
-            end: fmt_ts(end),
-        })
-        .collect()
+    out
 }
 
 /// One session's exact aggregates. `Ok(None)` when the session was never
@@ -4970,7 +4978,7 @@ fn subagent_from_text(text: &str) -> SubagentPulse {
 /// a `timestamp`, else the file's birth time, else nothing. Only the head is
 /// read — a run's first line is written when it begins, and the tail
 /// [`subagent_pulse`] already holds may not reach back that far.
-fn subagent_started_at(path: &Path) -> Option<String> {
+pub(crate) fn subagent_started_at(path: &Path) -> Option<String> {
     let started = || -> Option<i64> {
         let f = fs::File::open(path).ok()?;
         let mut buf = Vec::new();
@@ -4993,6 +5001,77 @@ fn subagent_started_at(path: &Path) -> Option<String> {
             .map(|d| d.as_secs() as i64)
     })?;
     Some(fmt_store_ts(epoch))
+}
+
+/// The tail the agent watcher reads per transcript (naru task 1909): wide
+/// enough for an hour of a busy thread, far below the chat view's budget
+/// because it runs for every row on a 5s poll.
+const WATCH_TAIL_BYTES: u64 = 2 * 1024 * 1024;
+
+/// What the agent watcher knows of one transcript (naru task 1909).
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct WatchThread {
+    /// Working stretches inside the window, Unix seconds, coalesced by
+    /// [`THREAD_IDLE_GAP_SECS`].
+    pub runs: Vec<(i64, i64)>,
+    /// The newest event, whatever the window.
+    pub last_event_at: Option<i64>,
+    /// First timestamp read, only when the tail read cut the file: nothing
+    /// before it is known, so the page must not paint it as quiet.
+    pub history_from: Option<i64>,
+    /// The model of the newest assistant message that names one.
+    pub model: Option<String>,
+}
+
+/// One transcript's [`WatchThread`]. `main_only` skips sidechain lines (the
+/// session's own file); a subagent file passes `false`. **Fails open**: an
+/// unreadable or missing file answers the default.
+pub(crate) fn watch_thread(path: &Path, since: i64, main_only: bool) -> WatchThread {
+    match read_tail(path, WATCH_TAIL_BYTES) {
+        Ok((text, truncated)) => watch_from_text(&text, since, main_only, truncated),
+        Err(_) => WatchThread::default(),
+    }
+}
+
+/// Pure half of [`watch_thread`]. Every parseable `assistant`/`user` line with
+/// a timestamp is an event.
+fn watch_from_text(text: &str, since: i64, main_only: bool, truncated: bool) -> WatchThread {
+    let mut out = WatchThread::default();
+    let mut events: Vec<i64> = Vec::new();
+    let mut first: Option<i64> = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(raw) = serde_json::from_str::<RawLine>(line) else {
+            continue;
+        };
+        if main_only && raw.is_sidechain == Some(true) {
+            continue;
+        }
+        if !matches!(raw.kind.as_deref(), Some("assistant" | "user")) {
+            continue;
+        }
+        let Some(t) = raw.timestamp.as_deref().and_then(parse_ts) else {
+            continue;
+        };
+        first.get_or_insert(t);
+        out.last_event_at = Some(out.last_event_at.map_or(t, |m| m.max(t)));
+        if t >= since {
+            events.push(t);
+        }
+        if raw.kind.as_deref() == Some("assistant")
+            && let Some(model) = raw.message.as_ref().and_then(|m| m.model.as_ref())
+        {
+            out.model = Some(model.clone());
+        }
+    }
+    out.runs = coalesce_runs(&events);
+    if truncated {
+        out.history_from = first;
+    }
+    out
 }
 
 /// The main-thread transcript of `session_id`: `<projects_dir>/*/<id>.jsonl`.
@@ -9217,6 +9296,57 @@ mod tests {
             pulse.context_tokens, None,
             "a line with no usage block leaves the context unknown, not zero"
         );
+    }
+
+    #[test]
+    fn coalesce_runs_splits_on_the_idle_gap() {
+        assert_eq!(coalesce_runs(&[]), vec![]);
+        assert_eq!(coalesce_runs(&[5]), vec![(5, 5)]);
+        // Unsorted input, a gap of exactly THREAD_IDLE_GAP_SECS closes a run.
+        assert_eq!(
+            coalesce_runs(&[100, 10, 40, 150]),
+            vec![(10, 40), (100, 150)]
+        );
+    }
+
+    fn watch_line(kind: &str, ts: &str, sidechain: bool, model: Option<&str>) -> String {
+        let model = model.map_or(String::new(), |m| format!(r#","model":"{m}""#));
+        format!(
+            r#"{{"type":"{kind}","timestamp":"{ts}","isSidechain":{sidechain},"message":{{"role":"x"{model}}}}}"#
+        )
+    }
+
+    #[test]
+    fn watch_from_text_skips_sidechain_and_cuts_the_window() {
+        let t0 = parse_ts("2026-06-15T01:00:00Z").unwrap();
+        let text = [
+            watch_line("user", "2026-06-15T01:00:00Z", false, None),
+            watch_line("assistant", "2026-06-15T01:10:00Z", false, Some("opus")),
+            watch_line("assistant", "2026-06-15T01:10:05Z", true, Some("haiku")),
+            watch_line("summary", "2026-06-15T01:11:00Z", false, None),
+            "not json".to_string(),
+            watch_line("assistant", "2026-06-15T01:10:30Z", false, None),
+        ]
+        .join("\n");
+        let w = watch_from_text(&text, t0 + 300, true, false);
+        // The 01:00 event is before the window; the sidechain line is skipped.
+        assert_eq!(w.runs, vec![(t0 + 600, t0 + 630)]);
+        // last_event_at ignores the window.
+        assert_eq!(w.last_event_at, Some(t0 + 630));
+        assert_eq!(w.model.as_deref(), Some("opus"));
+        assert_eq!(w.history_from, None);
+        // A subagent file keeps its sidechain lines.
+        let w = watch_from_text(&text, t0 + 300, false, false);
+        assert_eq!(w.runs, vec![(t0 + 600, t0 + 630)]);
+        assert_eq!(w.model.as_deref(), Some("haiku"));
+    }
+
+    #[test]
+    fn watch_from_text_reports_history_from_only_when_truncated() {
+        let text = watch_line("user", "2026-06-15T01:00:00Z", false, None);
+        let t0 = parse_ts("2026-06-15T01:00:00Z").unwrap();
+        assert_eq!(watch_from_text(&text, 0, true, true).history_from, Some(t0));
+        assert_eq!(watch_from_text(&text, 0, true, false).history_from, None);
     }
 
     #[test]

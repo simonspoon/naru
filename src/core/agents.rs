@@ -6,14 +6,18 @@
 //! `unavailable` (the claude CLI missing or misbehaving is an upstream
 //! problem, like a dead usage endpoint).
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::core::cc;
 use crate::core::config;
 use crate::core::runner;
-use crate::core::types::{AgentChild, AgentChildKind, AgentChildState, AgentSession, AgentStep};
+use crate::core::types::{
+    AgentChild, AgentChildKind, AgentChildState, AgentSession, AgentStep, AgentWatch,
+    AgentWatchKind, AgentWatchRow,
+};
 
 /// The `claude` binary to drive; `MESA_CLAUDE_BIN` overrides it for tests
 /// (pointing at a stub), mirroring `MESA_CC_*` in cc.rs/usage.rs. Public so
@@ -1447,9 +1451,272 @@ pub fn strip_ansi(s: &str) -> String {
     out
 }
 
+// ---- agent watcher (naru task 1909, docs/agent-watcher.md) ----
+
+/// A session the watcher draws: it has a process, and is either not `done` or
+/// still holds a running child (upstream reaches `done` the moment a turn
+/// ends, while the work that turn started goes on).
+fn watch_includes(s: &AgentSession) -> bool {
+    s.pid.is_some()
+        && (s.state.as_deref() != Some("done")
+            || s.children
+                .iter()
+                .any(|c| c.state == AgentChildState::Running))
+}
+
+/// The full-page timeline's rows for `sessions` over the last `minutes`.
+/// **Infallible and fail-open**: an unreadable transcript, no `ps`, no `lsof`
+/// each cost a field, never the answer.
+pub fn watch(sessions: Vec<AgentSession>, minutes: i64) -> AgentWatch {
+    let now_st = SystemTime::now();
+    let now = now_st
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let since = now - minutes * 60;
+    let root = cc::projects_dir();
+    let included: Vec<&AgentSession> = sessions.iter().filter(|s| watch_includes(s)).collect();
+    let table = if included
+        .iter()
+        .any(|s| s.children.iter().any(|c| c.kind == AgentChildKind::Shell))
+    {
+        read_proc_table()
+    } else {
+        Vec::new()
+    };
+
+    // Pair each shell child with its process row (parent pid + the same
+    // sanitized command line the child was named by), one row at most per child.
+    let mut used: Vec<i64> = Vec::new();
+    let mut shell_pids: HashMap<(String, usize), i64> = HashMap::new();
+    for s in &included {
+        let Some(spid) = s.pid else { continue };
+        for (i, c) in s.children.iter().enumerate() {
+            if c.kind != AgentChildKind::Shell {
+                continue;
+            }
+            let hit = table.iter().find(|row| {
+                row.ppid == spid
+                    && !used.contains(&row.pid)
+                    && SHELL_COMMS.contains(&basename(&row.comm))
+                    && cc::sanitize_capped(&row.args).as_deref() == Some(c.name.as_str())
+            });
+            if let Some(row) = hit {
+                used.push(row.pid);
+                shell_pids.insert((s.session_id.clone(), i), row.pid);
+            }
+        }
+    }
+    let outputs = shell_outputs(&used);
+
+    let mut rows = Vec::new();
+    for s in included {
+        let key = s.session_id.clone();
+        let thread = cc::find_transcript(&s.session_id)
+            .map(|p| cc::watch_thread(&p, since, true))
+            .unwrap_or_default();
+        rows.push(AgentWatchRow {
+            key: key.clone(),
+            kind: AgentWatchKind::Session,
+            session_id: s.session_id.clone(),
+            parent: None,
+            label: s
+                .name
+                .as_deref()
+                .or(s.task_name.as_deref())
+                .and_then(cc::sanitize_capped)
+                .or_else(|| cc::sanitize_capped(basename(&s.cwd)))
+                .unwrap_or_else(|| s.session_id.clone()),
+            detail: None,
+            model: s.model.clone().or(thread.model),
+            started_at: Some(s.started_at / 1000),
+            runs: thread.runs,
+            last_event_at: thread.last_event_at,
+            history_from: thread.history_from,
+            output_at: None,
+            finished: false,
+        });
+        if let Some(root) = root.as_deref() {
+            let mut paths = subagent_transcripts(root, &s.session_id, now_st, minutes * 60);
+            paths.sort();
+            for (path, _) in paths {
+                let thread = cc::watch_thread(&path, since, false);
+                let id = path
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .unwrap_or("subagent")
+                    .to_string();
+                rows.push(AgentWatchRow {
+                    key: format!("{key}/{id}"),
+                    kind: AgentWatchKind::Subagent,
+                    session_id: s.session_id.clone(),
+                    parent: Some(key.clone()),
+                    label: subagent_name(&path),
+                    detail: meta_description(&path),
+                    model: thread.model,
+                    started_at: cc::subagent_started_at(&path)
+                        .as_deref()
+                        .and_then(cc::parse_ts),
+                    runs: thread.runs,
+                    last_event_at: thread.last_event_at,
+                    history_from: thread.history_from,
+                    output_at: None,
+                    finished: subagent_finished(&path),
+                });
+            }
+        }
+        for (i, c) in s.children.iter().enumerate() {
+            if c.kind != AgentChildKind::Shell {
+                continue;
+            }
+            let pid = shell_pids.get(&(s.session_id.clone(), i)).copied();
+            rows.push(AgentWatchRow {
+                key: match pid {
+                    Some(pid) => format!("{key}/pid:{pid}"),
+                    None => format!("{key}/cmd:{}", c.name),
+                },
+                kind: AgentWatchKind::Shell,
+                session_id: s.session_id.clone(),
+                parent: Some(key.clone()),
+                label: c
+                    .description
+                    .clone()
+                    .or_else(|| c.command.clone())
+                    .unwrap_or_else(|| c.name.clone()),
+                detail: None,
+                model: None,
+                started_at: c.started_at.as_deref().and_then(cc::parse_ts),
+                runs: Vec::new(),
+                last_event_at: None,
+                history_from: None,
+                output_at: pid
+                    .and_then(|pid| outputs.get(&pid))
+                    .and_then(|p| std::fs::metadata(p).ok())
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs() as i64),
+                finished: false,
+            });
+        }
+    }
+    AgentWatch {
+        now,
+        window_minutes: minutes,
+        rows,
+    }
+}
+
+/// fd 1 of each pid in one `lsof` call; a missing or failing `lsof` is an
+/// empty map (every shell's `output_at` is then `null`).
+fn shell_outputs(pids: &[i64]) -> HashMap<i64, PathBuf> {
+    if pids.is_empty() {
+        return HashMap::new();
+    }
+    let list = pids
+        .iter()
+        .map(i64::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    match Command::new("lsof")
+        .args(["-a", "-p", &list, "-d", "1", "-Fpn"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    {
+        // lsof exits 1 when some pid has no match yet still prints the rest.
+        Ok(out) => parse_lsof(&String::from_utf8_lossy(&out.stdout)),
+        Err(_) => HashMap::new(),
+    }
+}
+
+/// Pure half of [`shell_outputs`]: `p<pid>` then `n<path>` per descriptor.
+/// Only a Claude Code task output file (`…/tasks/<id>.output`) is kept; a tty
+/// or pipe says nothing about the command's output.
+fn parse_lsof(stdout: &str) -> HashMap<i64, PathBuf> {
+    let mut out = HashMap::new();
+    let mut pid: Option<i64> = None;
+    for line in stdout.lines() {
+        if let Some(p) = line.strip_prefix('p') {
+            pid = p.parse().ok();
+        } else if let Some(path) = line.strip_prefix('n')
+            && let Some(pid) = pid
+            && path.contains("/tasks/")
+            && path.ends_with(".output")
+        {
+            out.insert(pid, PathBuf::from(path));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn watch_session(
+        state: Option<&str>,
+        pid: Option<i64>,
+        children: Vec<AgentChild>,
+    ) -> AgentSession {
+        let mut s = runner_row(&test_job(runner::RunStatus::Running), true);
+        s.kind = "background".into();
+        s.state = state.map(str::to_string);
+        s.pid = pid;
+        s.children = children;
+        s
+    }
+
+    fn watch_child(state: AgentChildState) -> AgentChild {
+        AgentChild {
+            id: None,
+            kind: AgentChildKind::Shell,
+            name: "zsh -c x".into(),
+            detail: None,
+            started_at: None,
+            context_tokens: None,
+            model: None,
+            description: None,
+            command: None,
+            state,
+        }
+    }
+
+    #[test]
+    fn watch_includes_keeps_live_work_and_drops_the_rest() {
+        let running = vec![watch_child(AgentChildState::Running)];
+        assert!(watch_includes(&watch_session(
+            Some("working"),
+            Some(1),
+            vec![]
+        )));
+        assert!(watch_includes(&watch_session(
+            Some("done"),
+            Some(1),
+            running.clone()
+        )));
+        assert!(!watch_includes(&watch_session(
+            Some("done"),
+            Some(1),
+            vec![]
+        )));
+        assert!(!watch_includes(&watch_session(
+            Some("working"),
+            None,
+            running
+        )));
+    }
+
+    #[test]
+    fn parse_lsof_keeps_only_task_output_files() {
+        let out = "p10\nn/dev/ttys003\np11\nnpipe\np12\nn/private/tmp/claude-501/slug/sess/tasks/abc.output\np13\nn/tmp/other.output\ngarbage\n";
+        let m = parse_lsof(out);
+        assert_eq!(m.len(), 1);
+        assert_eq!(
+            m.get(&12).unwrap(),
+            Path::new("/private/tmp/claude-501/slug/sess/tasks/abc.output")
+        );
+        assert!(parse_lsof("").is_empty());
+    }
 
     fn test_job(status: runner::RunStatus) -> runner::Job {
         runner::Job {

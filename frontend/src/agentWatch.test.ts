@@ -1,0 +1,153 @@
+import { describe, expect, it } from 'vitest'
+import {
+  ALL_QUIET_ALERT_S,
+  QUIET_GAP_S,
+  SHELL_STALL_S,
+  allQuietSince,
+  isWorking,
+  orderRows,
+  pct,
+  rowHref,
+  rowSegments,
+  segmentBox,
+  shouldAlert,
+  ticks,
+} from './agentWatch'
+import type { AgentWatchRow } from './types/AgentWatchRow'
+
+const NOW = 10_000
+const WS = NOW - 900
+
+function row(over: Partial<AgentWatchRow> & { key: string }): AgentWatchRow {
+  return {
+    kind: 'session',
+    sessionId: over.key.split('/')[0],
+    parent: null,
+    label: over.key,
+    detail: null,
+    model: 'claude-opus-5',
+    startedAt: WS - 100,
+    runs: [],
+    lastEventAt: null,
+    historyFrom: null,
+    outputAt: null,
+    finished: false,
+    ...over,
+  }
+}
+
+describe('orderRows', () => {
+  it('puts sessions by start, each followed by subagents then shells', () => {
+    const rows = [
+      row({ key: 'b', startedAt: 20 }),
+      row({ key: 'a/sh', kind: 'shell', parent: 'a', startedAt: 5 }),
+      row({ key: 'a/s2', kind: 'subagent', parent: 'a', startedAt: 9 }),
+      row({ key: 'a', startedAt: 10 }),
+      row({ key: 'a/s1', kind: 'subagent', parent: 'a', startedAt: 7 }),
+    ]
+    const o = orderRows(rows)
+    expect(o.map((x) => x.row.key)).toEqual(['a', 'a/s1', 'a/s2', 'a/sh', 'b'])
+    expect(o.map((x) => x.depth)).toEqual([0, 1, 1, 1, 0])
+  })
+})
+
+describe('rowSegments', () => {
+  it('extends a run ending near now to now', () => {
+    const r = row({ key: 'a', runs: [[WS + 100, NOW - 20]], lastEventAt: NOW - 20 })
+    const segs = rowSegments(r, [], NOW, WS)
+    expect(segs[segs.length - 1]).toEqual({ from: WS + 100, to: NOW, state: 'active' })
+  })
+
+  it('marks a gap covered by a running subagent waiting, otherwise quiet', () => {
+    const parent = row({ key: 'a', runs: [[WS, WS + 100]], startedAt: WS })
+    const sub = row({ key: 'a/x', kind: 'subagent', parent: 'a', startedAt: WS + 200, finished: false })
+    const segs = rowSegments(parent, [sub], NOW, WS)
+    expect(segs).toEqual([
+      { from: WS, to: WS + 100, state: 'active' },
+      { from: WS + 100, to: WS + 200, state: 'quiet' },
+      { from: WS + 200, to: NOW, state: 'waiting' },
+    ])
+    expect(rowSegments(parent, [], NOW, WS).map((s) => s.state)).toEqual(['active', 'quiet'])
+  })
+
+  it('ends a finished subagent bar at its last event', () => {
+    const r = row({
+      key: 'a/x',
+      kind: 'subagent',
+      parent: 'a',
+      startedAt: WS + 10,
+      runs: [[WS + 10, WS + 50]],
+      lastEventAt: WS + 50,
+      finished: true,
+    })
+    const segs = rowSegments(r, [], NOW, WS)
+    expect(segs[segs.length - 1].to).toBe(WS + 50)
+  })
+
+  it('clips to historyFrom', () => {
+    const r = row({ key: 'a', startedAt: WS - 100, historyFrom: WS + 300, runs: [[WS + 300, WS + 400]] })
+    expect(rowSegments(r, [], NOW, WS)[0].from).toBe(WS + 300)
+  })
+
+  it('paints a shell with no output signal all quiet', () => {
+    const r = row({ key: 'a/pid:1', kind: 'shell', parent: 'a', startedAt: WS + 10 })
+    expect(rowSegments(r, [], NOW, WS)).toEqual([{ from: WS + 10, to: NOW, state: 'quiet' }])
+  })
+
+  it('stalls a shell exactly at SHELL_STALL_S', () => {
+    const mk = (age: number) =>
+      row({ key: 'a/pid:1', kind: 'shell', parent: 'a', startedAt: WS, outputAt: NOW - age })
+    const flowing = rowSegments(mk(SHELL_STALL_S - 1), [], NOW, WS)
+    expect(flowing.map((s) => s.state)).toEqual(['output'])
+    const stalled = rowSegments(mk(SHELL_STALL_S), [], NOW, WS)
+    expect(stalled.map((s) => s.state)).toEqual(['output', 'stalled'])
+  })
+})
+
+describe('alerts', () => {
+  const quietSession = (age: number) => row({ key: 'a', lastEventAt: NOW - age })
+
+  it('fires at ALL_QUIET_ALERT_S, not before', () => {
+    expect(shouldAlert([quietSession(ALL_QUIET_ALERT_S - 1)], NOW)).toBe(false)
+    expect(shouldAlert([quietSession(ALL_QUIET_ALERT_S)], NOW)).toBe(true)
+  })
+
+  it('is suppressed by anyone working', () => {
+    const rows = [quietSession(900), row({ key: 'b', lastEventAt: NOW - (QUIET_GAP_S - 1) })]
+    expect(allQuietSince(rows, NOW)).toBeNull()
+    expect(isWorking(rows[1], NOW)).toBe(true)
+  })
+
+  it('is suppressed by a shell with unknown output', () => {
+    const sh = row({ key: 'a/pid:1', kind: 'shell', parent: 'a' })
+    expect(shouldAlert([quietSession(900), sh], NOW)).toBe(false)
+  })
+
+  it('ignores finished subagents and empty lists', () => {
+    const done = row({ key: 'a/x', kind: 'subagent', parent: 'a', finished: true, lastEventAt: NOW - 1 })
+    expect(shouldAlert([quietSession(900), done], NOW)).toBe(true)
+    expect(shouldAlert([], NOW)).toBe(false)
+  })
+})
+
+describe('geometry', () => {
+  it('clamps pct to the track', () => {
+    expect(pct(WS - 50, WS, NOW)).toBe(0)
+    expect(pct(NOW + 50, WS, NOW)).toBe(100)
+    expect(pct(WS + 450, WS, NOW)).toBe(50)
+  })
+
+  it('keeps an instant visible at the right edge', () => {
+    const b = segmentBox({ from: NOW, to: NOW, state: 'active' }, WS, NOW)
+    expect(b.width).toBeGreaterThan(0)
+    expect(b.left + b.width).toBeLessThanOrEqual(100)
+  })
+
+  it('ticks the 15 minute window', () => {
+    expect(ticks(15).map((t) => t.label)).toEqual(['-15m', '-10m', '-5m', 'now'])
+  })
+
+  it('links a row to its session detail', () => {
+    expect(rowHref(row({ key: 'a/x', sessionId: 'a' }))).toBe('#/cc/sessions/a')
+  })
+})

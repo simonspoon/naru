@@ -3251,6 +3251,7 @@ fn router(state: AppState) -> Router {
         // persistent Agents sidebar (unlike the per-project route above,
         // this has no `path`/empty-state wrapper: it is just the bare array).
         .route("/api/agents", get(list_all_agents))
+        .route("/api/agents/watch", get(get_agent_watch))
         .route("/api/agents/{id}/attach", get(attach_agent))
         // The other end of the spawn (mesa task 1289): `claude stop <id>`, so
         // a session the sidebar can no longer act on can leave the list.
@@ -11675,12 +11676,19 @@ async fn list_all_agents(
     headers: HeaderMap,
 ) -> ApiResult<Response> {
     require_agent_access(&state, &addr, &headers)?;
+    Ok(Json(panel_sessions(&state).await?).into_response())
+}
+
+/// The all-sessions panel list, through the 2s `agents_cache` — shared by
+/// `GET /api/agents` and the agent watcher so neither costs an extra
+/// `claude agents` call.
+async fn panel_sessions(state: &AppState) -> ApiResult<Vec<AgentSession>> {
     {
         let cache = state.agents_cache.lock().unwrap();
         if let Some((at, sessions)) = cache.get(ALL_AGENTS_CACHE_KEY)
             && at.elapsed() < AGENTS_TTL
         {
-            return Ok(Json(sessions.clone()).into_response());
+            return Ok(sessions.clone());
         }
     }
     let gen0 = state.agents_gen.load(Ordering::SeqCst);
@@ -11688,7 +11696,7 @@ async fn list_all_agents(
         .await
         .map_err(|e| agents_unavailable(format!("agents list panicked: {e}")))?
         .map_err(agents_unavailable)?;
-    attach_agent_tasks(&state, &mut sessions);
+    attach_agent_tasks(state, &mut sessions);
     if state.agents_gen.load(Ordering::SeqCst) == gen0 {
         let mut cache = state.agents_cache.lock().unwrap();
         cache.insert(
@@ -11696,7 +11704,30 @@ async fn list_all_agents(
             (Instant::now(), sessions.clone()),
         );
     }
-    Ok(Json(sessions).into_response())
+    Ok(sessions)
+}
+
+#[derive(Deserialize)]
+struct AgentWatchQuery {
+    minutes: Option<i64>,
+}
+
+/// The agent watcher's timeline rows (naru task 1909, `docs/agent-watcher.md`).
+/// `require_agent_access` like every agents route; the window is clamped
+/// 1..=60 minutes, default 15.
+async fn get_agent_watch(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Query(q): Query<AgentWatchQuery>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let minutes = q.minutes.unwrap_or(15).clamp(1, 60);
+    let sessions = panel_sessions(&state).await?;
+    let watch = tokio::task::spawn_blocking(move || agents::watch(sessions, minutes))
+        .await
+        .map_err(|e| agents_unavailable(format!("agent watch panicked: {e}")))?;
+    Ok(Json(watch).into_response())
 }
 
 /// Starts a new background session (`claude --bg`) in the project's folder

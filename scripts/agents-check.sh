@@ -342,6 +342,38 @@ RUNNING=$(jq -r '.agents[0].children[] | select(.name == "diff-reviewer")' <<<"$
   fail "children: the second subagent's id must be its own file stem"
 ok "children lists each fresh subagent with its agentType, id, state, detail, context and start"
 
+# ---- GET /api/agents/watch — the Agent watcher's timeline rows (naru task 1909) ----
+# Plant a main transcript with recent timestamps for the stub session, and a
+# subagent with recent ones, so both have working stretches inside the window.
+ago() { perl -MPOSIX -e 'print strftime("%Y-%m-%dT%H:%M:%SZ", gmtime(time-$ARGV[0]))' "$1"; }
+MAIN="$CC_DIR/-Users-x-proj/$SESSION.jsonl"
+{
+  printf '{"type":"user","timestamp":"%s","message":{"role":"user","content":"go"}}\n' "$(ago 120)"
+  printf '{"type":"assistant","timestamp":"%s","message":{"model":"claude-opus-5","content":[{"type":"text","text":"a"}]}}\n' "$(ago 90)"
+  printf '{"type":"assistant","timestamp":"%s","message":{"model":"claude-opus-5","content":[{"type":"text","text":"b"}]}}\n' "$(ago 60)"
+} > "$MAIN"
+{
+  printf '{"type":"user","timestamp":"%s","isSidechain":true,"message":{"role":"user","content":"go"}}\n' "$(ago 100)"
+  printf '{"type":"assistant","timestamp":"%s","isSidechain":true,"message":{"model":"claude-haiku-5","stop_reason":"tool_use","content":[]}}\n' "$(ago 70)"
+} > "$SUBAGENTS/agent-ccc3.jsonl"
+printf '%s\n' '{"agentType":"watcher-probe","description":"probe"}' > "$SUBAGENTS/agent-ccc3.meta.json"
+
+api 200 GET "/api/agents/watch?minutes=15"
+[ "$(jqb '[.rows[] | select(.kind == "session")] | length')" = "3" ] ||
+  fail "watch: one session row per stub session ($(jqb '[.rows[] | .key]'))"
+[ "$(jqb '.windowMinutes')" = "15" ] || fail "watch: windowMinutes"
+[ "$(jqb ".rows[] | select(.key == \"$SESSION\") | .runs | length")" -ge 1 ] ||
+  fail "watch: the planted session must have at least one run"
+[ "$(jqb ".rows[] | select(.key == \"$SESSION/agent-ccc3\") | .parent")" = "$SESSION" ] ||
+  fail "watch: the subagent row's parent must be the session key"
+[ "$(jqb ".rows[] | select(.key == \"$SESSION/agent-ccc3\") | .runs | length")" -ge 1 ] ||
+  fail "watch: the planted subagent must have a run"
+api 200 GET "/api/agents/watch?minutes=999"
+[ "$(jqb '.windowMinutes')" = "60" ] || fail "watch: minutes=999 must clamp to 60"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: evil.example' "http://127.0.0.1:$PORT/api/agents/watch")" = "403" ] ||
+  fail "watch: a foreign Host must be 403"
+ok "GET /api/agents/watch returns session + subagent rows with runs, clamps the window, refuses a foreign Host"
+
 # ---- attach WebSocket handshake (Origin policy + id validation) ----
 # A real ws client is out of scope for bash; the HTTP status of the upgrade
 # request is enough to pin the policy: 101 for local pages, 403 for foreign

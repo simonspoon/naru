@@ -24,6 +24,7 @@ import { CCDashboardView } from './pages/CCDashboardView'
 import type { CcTab } from './ccTab'
 import { CCSessionDetailView } from './pages/CCSessionDetailView'
 import { CCSessionTimelineView } from './pages/CCSessionTimelineView'
+import { AgentWatcherView } from './pages/AgentWatcherView'
 import { InboxView } from './pages/InboxView'
 import { LibraryView } from './pages/LibraryView'
 import { LiveHub, type LiveDock } from './components/LiveHub'
@@ -403,6 +404,7 @@ function App() {
   // websockets survive navigating away and back. This match only drives
   // that visibility toggle and the nav's active-link highlight.
   const terminalMatch = /^\/terminal$/.exec(path)
+  const agentWatcherMatch = /^\/agent-watcher$/.exec(path)
   const terminalActive = terminalMatch !== null
   // CC Dashboard is the default landing view: the root path (#/ or empty) shows
   // the overview, and the brand link points back here. The three sub-pages
@@ -494,6 +496,9 @@ function App() {
     // Three tabs: Claude Code items (synced against .claude), Scripts and a
     // read-only workflow list. Global: no project frame.
     page = <LibraryView tab={libraryRoute.tab} runId={libraryRoute.runId} />
+  } else if (agentWatcherMatch) {
+    // Global full-page timeline of every running agent: no project frame.
+    page = <AgentWatcherView />
   } else if (inboxMatch) {
     // Global inbox: lives above projects, so it renders on its own (no project
     // frame) and carries no active project in the nav.
@@ -832,6 +837,7 @@ function App() {
           workflowsActive={workflowsOverviewMatch !== null || globalWorkflowMatch !== null}
           libraryActive={libraryRoute !== null}
           terminalActive={terminalActive}
+          agentWatcherActive={agentWatcherMatch !== null}
           ccTab={ccTab}
           version={navVersion}
           unread={unread}

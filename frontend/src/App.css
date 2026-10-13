@@ -12344,3 +12344,170 @@ body.dock-resizing .dock-body {
 .shell-body.docked .sidebar:not(.collapsed) .nav-projects a:focus-visible {
   outline: 1px solid rgba(var(--cyan-rgb), 0.6);
 }
+
+/* Agent watcher (naru task 1909, docs/agent-watcher.md). Bars are positioned
+   in percent of the window by agentWatch.ts; --seg is the row's model colour. */
+.agent-watch {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 1rem;
+}
+
+.agent-watch-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.agent-watch-head h1 {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0;
+}
+
+.agent-watch-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  font-size: 0.8rem;
+}
+
+.agent-watch-banner {
+  margin: 0;
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  color: var(--amber);
+  background: rgba(var(--amber-rgb), 0.12);
+}
+
+.agent-watch-chart {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.agent-watch-row,
+.agent-watch-axis {
+  display: grid;
+  grid-template-columns: 14rem 1fr;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+.agent-watch-row {
+  color: inherit;
+  text-decoration: none;
+  padding: 3px 0;
+  border-radius: 4px;
+}
+
+.agent-watch-row:hover {
+  background: var(--surface-hover);
+}
+
+.agent-watch-row.child .agent-watch-label {
+  padding-left: 1rem;
+}
+
+.agent-watch-label {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.agent-watch-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.85rem;
+}
+
+.agent-watch-model {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--muted);
+}
+
+.agent-watch-track {
+  position: relative;
+  height: 18px;
+  background: var(--surface);
+  border-radius: 3px;
+}
+
+.agent-watch-axis .agent-watch-track {
+  height: 1.1rem;
+  background: none;
+}
+
+.agent-watch-tick {
+  position: absolute;
+  transform: translateX(-100%);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--muted);
+}
+
+.agent-watch-tick:first-child {
+  transform: none;
+}
+
+.agent-watch-seg {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  border-radius: 2px;
+}
+
+.agent-watch-seg.active {
+  background: var(--seg);
+}
+
+.agent-watch-seg.waiting,
+.agent-watch-swatch.waiting {
+  background: repeating-linear-gradient(45deg, var(--seg, var(--muted)) 0 3px, transparent 3px 6px);
+}
+
+.agent-watch-seg.quiet,
+.agent-watch-swatch.quiet {
+  background: color-mix(in srgb, var(--amber) 35%, transparent);
+}
+
+.agent-watch-seg.output,
+.agent-watch-swatch.output {
+  background: var(--green);
+}
+
+.agent-watch-seg.stalled,
+.agent-watch-swatch.stalled {
+  background: repeating-linear-gradient(45deg, var(--red) 0 3px, transparent 3px 6px);
+}
+
+.agent-watch-now {
+  position: absolute;
+  top: -1px;
+  bottom: -1px;
+  right: 0;
+  width: 2px;
+  background: var(--red);
+}
+
+.agent-watch-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin-top: 0.5rem;
+  font-size: 0.75rem;
+}
+
+.agent-watch-swatch {
+  display: inline-block;
+  width: 0.8rem;
+  height: 0.6rem;
+  border-radius: 2px;
+  vertical-align: middle;
+}

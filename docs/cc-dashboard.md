@@ -11,15 +11,16 @@ files, so history survives Claude Code's own transcript cleanup and nothing is
 ever double-counted. The parsing/aggregation lives in `src/core/cc.rs` so the
 CLI and API share it and never diverge.
 
-**Four reads carve out of "db only", and only four**: `cc live` (a direct
+**Five reads carve out of "db only", and only five**: `cc live` (a direct
 parse of the last few minutes, where the files are by definition still
 present), `cc text` (one node's full body, which is deliberately not in the db
 — see *Node text* below), `cc chat` (one session's whole conversation, for
-both of those reasons at once — see *Session chat* below) and
-`cc::session_pulse` (mesa task 869: a listed session's newest reply and
+both of those reasons at once — see *Session chat* below), `cc::session_pulse` (mesa task 869: a listed session's newest reply and
 occupied context, for `live`'s reason — it backs the Agent sidebar's list row
 and is the one carve-out with no route of its own, riding on `/api/agents`;
-see `docs/agents.md`). Everything else answers from `cc_*` alone.
+see `docs/agents.md`) and `cc::watch_thread` (naru task 1909: a row's working
+stretches over the Agent watcher's window, riding on `/api/agents/watch`; see
+`docs/agent-watcher.md`). Everything else answers from `cc_*` alone.
 
 Migration numbers in this file are the **resulting `user_version`**, i.e.
 1-based: `MIGRATIONS` in `src/core/store.rs` is a 0-indexed array, so

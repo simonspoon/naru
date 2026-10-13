@@ -212,6 +212,7 @@ export function Sidebar({
   workflowsActive,
   libraryActive,
   terminalActive,
+  agentWatcherActive,
   ccTab,
   version,
   unread,
@@ -229,6 +230,7 @@ export function Sidebar({
   workflowsActive: boolean
   libraryActive: boolean
   terminalActive: boolean
+  agentWatcherActive: boolean
   ccTab: CcTab | null
   version: number
   // Count of UNREAD inbox items, for the Inbox badge (mesa task 831). Fetched
@@ -603,6 +605,9 @@ export function Sidebar({
         </a>
         <a className={`nav-item${terminalActive ? ' active' : ''}`} href="#/terminal">
           <span className="nav-item-label">Terminal</span>
+        </a>
+        <a className={`nav-item${agentWatcherActive ? ' active' : ''}`} href="#/agent-watcher">
+          <span className="nav-item-label">Agent watcher</span>
         </a>
         {/* Flat, like Inbox and Terminal: global pages, not a project
             subtree, so `navCollapse.ts` (which is project-only) is

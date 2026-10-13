@@ -20,6 +20,7 @@ import type { Artifact } from './types/Artifact'
 import type { ArtifactSummary } from './types/ArtifactSummary'
 import type { Attachment } from './types/Attachment'
 import type { CcDashboard } from './types/CcDashboard'
+import type { AgentWatch } from './types/AgentWatch'
 import type { CcLive } from './types/CcLive'
 import type { CcScorecard } from './types/CcScorecard'
 import type { CcNodeText } from './types/CcNodeText'
@@ -734,6 +735,11 @@ export function searchProjectFiles(
  * the persistent Agents sidebar. */
 export function listAllAgents(): Promise<AgentSession[]> {
   return request('/api/agents')
+}
+
+/** The Agent watcher's timeline rows over the last `minutes` (naru task 1909). */
+export function getAgentWatch(minutes: number): Promise<AgentWatch> {
+  return request(`/api/agents/watch?minutes=${minutes}`)
 }
 
 /** Starts a background agent session in the project's folder, running the
