@@ -1317,6 +1317,7 @@ pub struct LoadedModel {
     pub name: String,
     /// `stt` or `tts`, as the daemon says.
     pub kind: String,
+    #[ts(type = "number")]
     pub resident_bytes: u64,
     pub state: String,
 }

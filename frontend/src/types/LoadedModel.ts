@@ -9,4 +9,4 @@ export type LoadedModel = { name: string,
 /**
  * `stt` or `tts`, as the daemon says.
  */
-kind: string, resident_bytes: bigint, state: string, };
+kind: string, resident_bytes: number, state: string, };

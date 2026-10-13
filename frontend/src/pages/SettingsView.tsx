@@ -3274,7 +3274,7 @@ function SystemSection() {
           </div>
           {audio?.models && audio.models.length > 0 ? (
             audio.models.map((m) => (
-              <div key={m.name} className="settings-system-detail muted">
+              <div key={`${m.kind}:${m.name}`} className="settings-system-detail muted">
                 {m.name} · {m.kind} · {formatBytes(m.resident_bytes)} ·{' '}
                 {m.state}
               </div>
