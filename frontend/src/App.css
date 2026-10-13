@@ -9789,6 +9789,28 @@ body.live-panel-ratio-resizing .live-panel-divider {
   font-size: 0.75rem;
 }
 
+/* Agent model pill (naru task 1908): colour by family, from the theme's
+   accent tokens; `other` keeps the plain badge amber, `none` is muted. */
+.library-model-badge {
+  text-transform: none;
+  border-color: currentColor;
+}
+.library-model-opus {
+  color: var(--violet);
+}
+.library-model-sonnet {
+  color: var(--cyan);
+}
+.library-model-haiku {
+  color: var(--green);
+}
+.library-model-fable {
+  color: var(--magenta);
+}
+.library-model-none {
+  color: var(--muted);
+}
+
 /* A fork whose built-in changed under it (mesa task 1349): the one badge that
    asks for a decision, so it wears the red the app means by "needs you"
    rather than the amber of the descriptive badges beside it. */

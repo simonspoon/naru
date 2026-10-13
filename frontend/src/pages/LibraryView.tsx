@@ -52,6 +52,7 @@ import {
   orphanScopesFor,
   registrationLabel,
 } from '../libraryHooks'
+import { modelPill } from '../libraryModel'
 import { diffLines, foldOverrides, hunksOnly, itemKey } from '../libraryOverride'
 import {
   LIBRARY_KINDS,
@@ -1586,6 +1587,7 @@ function LibraryItemsTab() {
                 const overridden = folded.overriddenBody.get(key)
                 const hookStatus = item.id !== null ? hookStatusById.get(item.id) : undefined
                 const review = builtinReview(item)
+                const model = item.kind === 'agent' ? modelPill(item.body) : null
                 return (
                   <li
                     key={key}
@@ -1610,6 +1612,14 @@ function LibraryItemsTab() {
                           <code className="library-meta library-placeholder">
                             {promptPlaceholder(item.name)}
                           </code>
+                        )}
+                        {model !== null && (
+                          <span
+                            className={`library-badge library-model-badge library-model-${model.family}`}
+                            title={`model: ${model.label}`}
+                          >
+                            {model.label}
+                          </span>
                         )}
                         {item.export_command && (
                           <span className="library-badge">slash command</span>

@@ -268,6 +268,8 @@ store's own uniqueness rule is stated in — and applies only where the user
 row's `builtin_id` is null. A **fork** is untouched: its built-in is already
 absent from the list, so there is nothing to fold.
 
+Every `agent` row also wears a model pill (naru task 1908, `frontend/src/libraryModel.ts`): the `model:` key of the body's frontmatter, `none` when absent, coloured by family (opus, sonnet, haiku, fable; any other value keeps its raw text in the plain amber).
+
 A folded row also offers **diff vs built-in**, an inline panel below the row
 rendering `libraryOverride.ts::diffLines(userBody, builtinBody)` through the
 sync modal's own `diffLineClass`/`diffMark` markup. That function is a
