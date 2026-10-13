@@ -77,6 +77,9 @@ export MESA_DB="$TMP/mesa.db"
 # /tmp is a symlink, and a stub's logged cwd/paths must match what mesa
 # resolves.
 export HOME=$(mkdir -p "$TMP/home" && cd "$TMP/home" && pwd -P)
+# naru task 1396: the default engine is naru-audio; this gate drives the stub
+# auris, so it names the legacy engine explicitly.
+mkdir -p "$HOME/.mesa" && echo '{"audio":{"engine":"legacy"}}' > "$HOME/.mesa/config.json"
 
 CHECKS=0
 fail() { echo "FAIL: $*" >&2; exit 1; }

@@ -1508,9 +1508,11 @@ through and where the `naru-audio` daemon listens (mesa task 1388):
 }
 ```
 
-- **`engine`**: `"legacy"` (the external `auris`/`kokoro-rs` binaries — the
-  built-in) or `"naru-audio"` (the daemon). Neither is a fallback for the
-  other. Today it changes what `GET /api/live/transcribe` reports
+- **`engine`**: `"naru-audio"` (the daemon — the default since naru task
+  1396) or `"legacy"` (the external `auris`/`kokoro-rs` binaries). Neither is
+  a fallback for the other. **Switching back:** set
+  `{"audio":{"engine":"legacy"}}` in `~/.mesa/config.json`, or pick it in
+  Settings; an explicit `"legacy"` is always kept. Today it changes what `GET /api/live/transcribe` reports
   (`docs/listen.md`) and, on `naru-audio`, makes opening a Live session
   (`POST /api/live`, `naru live start`) ask the daemon to load its
   speech-to-text model (`POST {url}/api/load`, mesa task 1392) — a failure

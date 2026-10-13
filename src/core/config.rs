@@ -163,8 +163,8 @@
 //! { "audio": { "engine": "naru-audio", "url": "http://127.0.0.1:7870" } }
 //! ```
 //!
-//! [`ENGINE`] is `"legacy"` (the external `auris`/`kokoro-rs` binaries, the
-//! built-in) or `"naru-audio"`; [`URL`] defaults to [`audio::DEFAULT_URL`] and
+//! [`ENGINE`] is `"naru-audio"` (the daemon, the default since naru task 1396)
+//! or `"legacy"` (the external `auris`/`kokoro-rs` binaries); [`URL`] defaults to [`audio::DEFAULT_URL`] and
 //! `NARU_AUDIO_URL` overrides it. See [`audio_engine`], [`audio_url`] and
 //! `docs/config.md`.
 //!
@@ -3407,8 +3407,8 @@ pub const URL: &str = "url";
 const AUDIO_KEYS: &[&str] = &[ENGINE, URL];
 
 /// The engine the server runs speech through when the config says nothing:
-/// the external binaries, exactly as before this section existed.
-pub const DEFAULT_AUDIO_ENGINE: AudioEngine = AudioEngine::Legacy;
+/// the `naru-audio` daemon (naru task 1396; `legacy` is the explicit opt-out).
+pub const DEFAULT_AUDIO_ENGINE: AudioEngine = AudioEngine::NaruAudio;
 
 /// The longest daemon URL the editor will write — a sanity bound.
 const AUDIO_URL_MAX: usize = 200;
@@ -7782,7 +7782,7 @@ mod tests {
     }
 
     #[test]
-    fn audio_defaults_to_legacy_on_the_standard_port() {
+    fn audio_defaults_to_naru_audio_on_the_standard_port() {
         let _env = crate::core::attachments::ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -7793,13 +7793,13 @@ mod tests {
         }
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
-        assert_eq!(audio_engine_in(&path).unwrap(), AudioEngine::Legacy);
+        assert_eq!(audio_engine_in(&path).unwrap(), AudioEngine::NaruAudio);
         assert_eq!(audio_url_in(&path).unwrap(), "http://127.0.0.1:7870");
         let view = audio_in(&path).unwrap();
         assert_eq!(view.url, None);
         assert_eq!(view.url_default, "http://127.0.0.1:7870");
         assert_eq!(view.engine, None);
-        assert_eq!(view.engine_default, "legacy");
+        assert_eq!(view.engine_default, "naru-audio");
 
         // A hand-edited unusable value falls back where it is used, and is
         // still shown verbatim to the editor.
@@ -7807,9 +7807,13 @@ mod tests {
             dir.path(),
             r#"{"audio": {"engine": "auris", "url": "https://x"}}"#,
         );
-        assert_eq!(audio_engine_in(&path).unwrap(), AudioEngine::Legacy);
+        assert_eq!(audio_engine_in(&path).unwrap(), AudioEngine::NaruAudio);
         assert_eq!(audio_url_in(&path).unwrap(), "http://127.0.0.1:7870");
         assert_eq!(audio_in(&path).unwrap().engine.as_deref(), Some("auris"));
+
+        // An explicit "legacy" is kept (naru task 1396).
+        let path = write_config(dir.path(), r#"{"audio": {"engine": "legacy"}}"#);
+        assert_eq!(audio_engine_in(&path).unwrap(), AudioEngine::Legacy);
     }
 
     #[test]
@@ -7953,7 +7957,7 @@ mod tests {
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert!(written["audio"].get(ENGINE).is_none());
         assert!(written["audio"].get(URL).is_none());
-        assert_eq!(audio_engine_in(&path).unwrap(), AudioEngine::Legacy);
+        assert_eq!(audio_engine_in(&path).unwrap(), AudioEngine::NaruAudio);
 
         // Nothing named writes nothing.
         let empty = dir.path().join("empty.json");

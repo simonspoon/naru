@@ -527,7 +527,9 @@ mod tests {
         let env = ENV.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().expect("tempdir");
         // SAFETY: both locks above serialize every test touching these vars.
-        unsafe { std::env::set_var("MESA_CONFIG_FILE", dir.path().join("no-such-config.json")) };
+        let cfg = dir.path().join("legacy-config.json");
+        std::fs::write(&cfg, r#"{"audio":{"engine":"legacy"}}"#).expect("write config");
+        unsafe { std::env::set_var("MESA_CONFIG_FILE", &cfg) };
         Legacy {
             _dir: dir,
             _config: config,

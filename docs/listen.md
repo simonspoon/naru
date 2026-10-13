@@ -24,7 +24,7 @@ failing reads as `legacy`/`server`. The ladder (mesa task 1390):
 2. `audio.engine = "naru-audio"` — `'auris'` (the server path) when the probe
    is `ready` and this browser can capture audio, else **`'unavailable'`**.
    The browser recognizer is **never** a fallback here.
-3. Otherwise (`legacy`, the default) — unchanged since mesa task 957:
+3. Otherwise (`legacy`, an explicit opt-out since naru task 1396) — unchanged since mesa task 957:
 
 - **`'auris'`** — this browser can capture audio (`capturesAudio`,
   `liveAudio.ts`) **and** the server answered the availability probe below
@@ -80,7 +80,7 @@ error`; `message` is the sentence to show (`null` when ready); `checked_at`
 is when the cached answer was taken (RFC 3339 UTC). A config file that
 cannot be read is **502 `unavailable`**.
 
-- **`audio.engine = "legacy"`** (the default, `docs/config.md`): `ready` iff
+- **`audio.engine = "legacy"`** (explicit opt-out; `naru-audio` is the default, `docs/config.md`): `ready` iff
   `listen::models()` is non-empty, else `error` with a message naming the
   binary; `url` is `null`. An empty model list is **"Naru could not ask"** —
   the binary missing, failing, or answering with something that isn't a list
@@ -301,8 +301,8 @@ decode error) re-runs nothing; turning listening off and on reconnects. The barg
 - **Gates, before the upgrade**: the transcribe pair,
   `require_agent_access` + `require_same_site_fetch`, in both serve modes.
   A foreign page is 403 and no daemon is contacted.
-- **Inert by default**: only `audio.engine = "naru-audio"` opens it. On
-  `legacy` (the default) the handshake is refused **503 `unavailable`**
+- **Inert on legacy**: only `audio.engine = "naru-audio"` (the default) opens it. On
+  `legacy` the handshake is refused **503 `unavailable`**
   before any upgrade and the daemon is never contacted, so a legacy install
   with no daemon changes nothing. `listen.engine` is **not** consulted: it
   picks what the *page* listens with, and this route only ever reaches the

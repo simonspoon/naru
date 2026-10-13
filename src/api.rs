@@ -15100,7 +15100,9 @@ mod tests {
     fn stub_claude_bg(dir: &std::path::Path, log_path: &std::path::Path) -> String {
         #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
-        unsafe { std::env::set_var("MESA_CONFIG_FILE", dir.join("no-such-config.json")) };
+        let config = dir.join("legacy-config.json");
+        std::fs::write(&config, r#"{"audio":{"engine":"legacy"}}"#).unwrap();
+        unsafe { std::env::set_var("MESA_CONFIG_FILE", &config) };
         let path = dir.join("claude");
         std::fs::write(
             &path,
@@ -15817,7 +15819,9 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
     ) -> String {
         #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
-        unsafe { std::env::set_var("MESA_CONFIG_FILE", dir.join("no-such-config.json")) };
+        let config = dir.join("legacy-config.json");
+        std::fs::write(&config, r#"{"audio":{"engine":"legacy"}}"#).unwrap();
+        unsafe { std::env::set_var("MESA_CONFIG_FILE", &config) };
         std::fs::write(agents_file, "[]").unwrap();
         let path = dir.join("claude");
         std::fs::write(
@@ -16952,7 +16956,9 @@ exit 2
     ) -> String {
         #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
-        unsafe { std::env::set_var("MESA_CONFIG_FILE", dir.join("no-such-config.json")) };
+        let config = dir.join("legacy-config.json");
+        std::fs::write(&config, r#"{"audio":{"engine":"legacy"}}"#).unwrap();
+        unsafe { std::env::set_var("MESA_CONFIG_FILE", &config) };
         let path = dir.join("claude");
         std::fs::write(
             &path,
@@ -20630,6 +20636,9 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
     #[must_use]
     fn listen_config(dir: &std::path::Path, audio: Option<serde_json::Value>) -> ListenConfig {
         let path = dir.join("config.json");
+        // `None` with no file already there names the legacy engine
+        // explicitly: the built-in default is naru-audio (naru task 1396).
+        let audio = audio.or_else(|| (!path.exists()).then(|| json!({"engine": "legacy"})));
         if let Some(audio) = audio {
             std::fs::write(&path, json!({ "audio": audio }).to_string()).unwrap();
         }
@@ -20880,7 +20889,10 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             .unwrap_or_else(|e| e.into_inner());
         let stub = stream_stub(false).await;
         let cfg = tempfile::tempdir().unwrap();
-        let _config = listen_config(cfg.path(), Some(json!({"url": stub.url})));
+        let _config = listen_config(
+            cfg.path(),
+            Some(json!({"engine": "legacy", "url": stub.url})),
+        );
         let (_dir, opened) = open_listen(LISTEN_ORIGIN).await;
 
         match opened {

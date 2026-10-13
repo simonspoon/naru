@@ -124,7 +124,10 @@ export MESA_KOKORO_BIN="$STUB_DIR/kokoro-rs"
 # about the *unconfigured* argv — they must not turn red because whoever runs
 # the script picked a voice in the UI. `config-check.sh` owns the configured
 # half (it already runs under a throwaway HOME).
-export MESA_CONFIG_FILE="$TMP/no-such-config.json"
+# naru task 1396: the default engine is naru-audio, and this gate drives the
+# stub kokoro-rs, so it names the legacy engine explicitly.
+echo '{"audio":{"engine":"legacy"}}' > "$TMP/legacy-config.json"
+export MESA_CONFIG_FILE="$TMP/legacy-config.json"
 
 # ---- server ----
 

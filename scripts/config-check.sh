@@ -154,7 +154,10 @@ WORKSPACE="$FAKE_HOME/.mesa/workspace"
 DIR_A=$(cd "$TMP/projA" && pwd -P)
 CONFIG="$FAKE_HOME/.mesa/config.json"
 
-write_config() { cat > "$CONFIG"; }   # body on stdin
+# body on stdin. naru task 1396: the default audio engine is naru-audio, and the
+# speech/listen sections below drive the stub kokoro-rs and auris, so a body that
+# names no `audio` section gets the legacy engine written in explicitly.
+write_config() { jq -c 'if has("audio") then . else . + {audio: {engine: "legacy"}} end' > "$CONFIG"; }
 
 run 0 "$MESA" project create "A" --no-git
 A=$(jqs .id)
@@ -1637,9 +1640,13 @@ api PUT /api/config/listen '{"vocabulary": null}'
   fail "null must remove listen.vocabulary: $(cat "$CONFIG")"
 ok "listen.vocabulary round-trips verbatim, a bad line is 422 naming it and writing nothing, null removes it"
 
+# The sections above ran on an explicit legacy engine (write_config); drop it so
+# this one sees the section unconfigured.
+api PUT /api/config/audio '{"engine": null}'
+[ "$CODE" = "200" ] || fail "PUT audio engine null: expected 200, got $CODE: $STDOUT"
 api GET /api/config/audio
 [ "$CODE" = "200" ] || fail "GET audio: expected 200, got $CODE: $STDOUT"
-[ "$(jq -c '[.url, .url_default, .engine, .engine_default]' <<<"$STDOUT")" = '[null,"http://127.0.0.1:7870",null,"legacy"]' ] ||
+[ "$(jq -c '[.url, .url_default, .engine, .engine_default]' <<<"$STDOUT")" = '[null,"http://127.0.0.1:7870",null,"naru-audio"]' ] ||
   fail "GET audio on an unconfigured section: $STDOUT"
 api PUT /api/config/audio '{"engine": "naru-audio", "url": "http://127.0.0.1:7871"}'
 [ "$CODE" = "200" ] || fail "PUT audio: expected 200, got $CODE: $STDOUT"

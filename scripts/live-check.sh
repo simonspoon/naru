@@ -273,7 +273,10 @@ export MESA_LIVE_INK_DIR="$TMP/live-ink"
 # This gate asserts the BUILT-IN `live-agent` template, so the developer's own
 # ~/.mesa/config.json must not leak in (config-check.sh owns the configured
 # half, under a throwaway HOME).
-export MESA_CONFIG_FILE="$TMP/no-such-config.json"
+# naru task 1396: the default engine is naru-audio, and this gate drives the
+# stub kokoro-rs, so it names the legacy engine explicitly.
+echo '{"audio":{"engine":"legacy"}}' > "$TMP/legacy-config.json"
+export MESA_CONFIG_FILE="$TMP/legacy-config.json"
 # A live start seeds the `naru-live` agent definition into
 # $HOME/.claude/agents (mesa task 1068), and every unbound spawn runs in
 # $HOME/.naru/workspace, so the whole gate runs under a throwaway home rather
