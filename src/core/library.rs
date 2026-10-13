@@ -337,15 +337,6 @@ echo \"Claude Code stopped in $(pwd)\"
         export_command: true,
         files: &[],
     },
-    Builtin {
-        id: "execute-refine",
-        name: "execute-refine",
-        kind: LibraryKind::Prompt,
-        scope: LibraryScope::User,
-        body: include_str!("builtins/execute-refine.md"),
-        export_command: true,
-        files: &[],
-    },
 ];
 
 /// Built-in ids renamed by mesa task 1302, old to new. A stored fork was
@@ -888,7 +879,7 @@ pub fn effective_items(store: &Store, project: Option<i64>) -> StoreResult<Vec<L
             continue;
         }
         // A built-in carries a flag only where it ships as a slash command
-        // (`execute-todo`, `execute-refine`); `live-summary-prompt` is mesa's
+        // (`execute-todo`); `live-summary-prompt` is mesa's
         // own and has no business in `.claude/commands`. Forking one gives it
         // a row, and the row may set the flag like any other.
         let path = relative_path(b.kind, b.scope, b.name, b.export_command)
@@ -4173,18 +4164,17 @@ mod tests {
     fn the_execute_prompts_ship_as_slash_commands() {
         let (store, _dir) = temp_store();
         let items = effective_items(&store, None).unwrap();
-        for name in ["execute-todo", "execute-refine"] {
-            let item = items
-                .iter()
-                .find(|i| i.builtin_id.as_deref() == Some(name))
-                .unwrap();
-            assert_eq!(item.kind, LibraryKind::Prompt);
-            assert!(item.export_command);
-            assert_eq!(
-                item.path.as_deref(),
-                Some(format!(".claude/commands/{name}.md").as_str())
-            );
-        }
+        let name = "execute-todo";
+        let item = items
+            .iter()
+            .find(|i| i.builtin_id.as_deref() == Some(name))
+            .unwrap();
+        assert_eq!(item.kind, LibraryKind::Prompt);
+        assert!(item.export_command);
+        assert_eq!(
+            item.path.as_deref(),
+            Some(format!(".claude/commands/{name}.md").as_str())
+        );
     }
 
     // ---- effective_items / sync_status / sync_apply ----

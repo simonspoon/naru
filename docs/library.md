@@ -229,7 +229,6 @@ The starter set — twenty-four rows:
 | `naru-live-split` | `agent` | `user` | The opt-in fast-voice/slow-brain variant of `naru-live`: routes each turn with `naru decide` and delegates deciding and task changes to read-only workers; not spawned by Naru, a person points `live-agent` at it |
 | `supervising-agent-teams` | `skill` | `user` | The supervisor's procedures — waiting, verifying, briefs, resources, intervening — as `SKILL.md` plus five sibling files (`briefs.md`, `intervening.md`, `resources.md`, `verifying.md`, `waiting.md`); the `supervisor` agent loads it with the `Skill` tool |
 | `execute-todo` | `prompt` | `user` | The slash command a task is executed with; ships with `export_command` on, so it has the path `.claude/commands/execute-todo.md` |
-| `execute-refine` | `prompt` | `user` | The slash command that sharpens a task so another agent can execute it; `export_command` on, `.claude/commands/execute-refine.md` |
 
 `naru-live`'s body being the literal `AGENT_DEFINITION` constant (and
 `live-summary-prompt`'s the literal `SUMMARY_PROMPT`) is what lets
@@ -431,8 +430,8 @@ working as slash commands unchanged; a prompt that wants frontmatter writes
 it into its body. The flag is a prompt's alone — `Store` answers
 `validation` for `export_command: true` on any other kind, since every other
 kind already owns a path — and a **built-in** carries the flag only where it
-ships as a slash command (`Builtin.export_command`: `execute-todo` and
-`execute-refine`; `live-summary-prompt` has no business in
+ships as a slash command (`Builtin.export_command`: `execute-todo`;
+`live-summary-prompt` has no business in
 `.claude/commands`); forking one gives it a row, and the row may set the flag
 like any other.
 
