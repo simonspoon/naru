@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   initialWatchdog,
   noticeInSpan,
+  shouldNoticeAgentEnded,
   shouldNoticePermission,
   watchdogAfterPoll,
 } from './liveWatchdog'
@@ -81,7 +82,7 @@ describe('shouldNoticePermission', () => {
     let posted = 0
     polls.forEach((poll) => {
       const prev = w
-      w = watchdogAfterPoll(prev, { blocked: poll.blocked })
+      w = watchdogAfterPoll(prev, { blocked: poll.blocked, agentEnded: null })
       const key = `permission@${poll.workingSince}`
       if (
         shouldNoticePermission({ blocked: w.blocked, wasBlocked: prev.blocked, alreadyNoticed: noticed.has(key) })
@@ -116,5 +117,44 @@ describe('shouldNoticePermission', () => {
         { workingSince: '2026-01-01 00:00:09', blocked: prompt },
       ]),
     ).toBe(2)
+  })
+})
+
+describe('shouldNoticeAgentEnded', () => {
+  it('fires on the rising edge only', () => {
+    expect(
+      shouldNoticeAgentEnded({ agentEnded: 'stopped', wasEnded: null, alreadyNoticed: false }),
+    ).toBe(true)
+    expect(
+      shouldNoticeAgentEnded({ agentEnded: 'stopped', wasEnded: 'stopped', alreadyNoticed: false }),
+    ).toBe(false)
+    expect(
+      shouldNoticeAgentEnded({ agentEnded: null, wasEnded: null, alreadyNoticed: false }),
+    ).toBe(false)
+  })
+
+  it('does not fire when this span already has the notice', () => {
+    expect(
+      shouldNoticeAgentEnded({ agentEnded: 'died', wasEnded: null, alreadyNoticed: true }),
+    ).toBe(false)
+  })
+
+  it('a page loading with the run already over posts once, then not again', () => {
+    let w = initialWatchdog(1)
+    let posted = 0
+    for (const agentEnded of ['failed', 'failed', 'failed']) {
+      const prev = w
+      w = watchdogAfterPoll(prev, { blocked: null, agentEnded })
+      if (
+        shouldNoticeAgentEnded({
+          agentEnded: w.agentEnded,
+          wasEnded: prev.agentEnded,
+          alreadyNoticed: false,
+        })
+      ) {
+        posted += 1
+      }
+    }
+    expect(posted).toBe(1)
   })
 })

@@ -3743,8 +3743,8 @@ api 200 GET "/api/live/memory"
 # mesa task 1157, a string or null, not a body; `context_tokens` is the derived
 # driver context size of mesa task 1478, a number or null, not a body).
 api 200 GET "/api/live"
-[ "$(jqb 'keys | sort | join(",")')" = "blocked,boards,context_tokens,offer,session,turns" ] ||
-  fail "GET /api/live must carry exactly session/turns/boards/blocked/context_tokens/offer — no notebook (got $(jqb 'keys'))"
+[ "$(jqb 'keys | sort | join(",")')" = "agent_ended,blocked,boards,context_tokens,offer,session,turns" ] ||
+  fail "GET /api/live must carry exactly session/turns/boards/blocked/agent_ended/context_tokens/offer — no notebook (got $(jqb 'keys'))"
 ok "/api/live/memory: GET/POST/PATCH/DELETE round trip, 422 validation with the CLI's messages, 404 for unknown and retired ids, POST past the budget retiring nothing, and GET /api/live carries no notebook"
 
 # Both halves of the boundary, default mode: Host allowlist, Content-Type
@@ -4672,8 +4672,31 @@ printf '%s\n' "$NA" > "$STUB_DIR/blocked-id"
 api 200 GET "/api/live"
 [ "$(jqb .blocked)" = "null" ] ||
   fail "GET /api/live: a run receipt is never blocked, whatever claude agents lists (got $(jqb .blocked))"
+# …and its run being over is the one thing a run receipt does report (naru
+# task 1894): `agent_ended` is null while the run lives, the terminal status
+# once it is stopped, and the page's watchdog turns that edge into the
+# `agent-ended` notice.
+[ "$(jqb .agent_ended)" = "null" ] ||
+  fail "GET /api/live: agent_ended must be null while the run lives (got $(jqb .agent_ended))"
 run 0 "$MESA" run stop "$(run_id "$NA")"
+wait_run_stopped "$NA"
+api 200 GET "/api/live"
+[ "$(jqb .agent_ended)" = "stopped" ] ||
+  fail "GET /api/live: agent_ended must read stopped once the run is (got $(jqb .agent_ended))"
+run 0 "$MESA" live notice agent-ended
+NE=$(jqs .id)
+[ "$(jqs .notice)" = "agent-ended" ] || fail "agent-ended notice: kind (got $(jqs .notice))"
+[ "$(jqs .text)" = "The agent has stopped running. End the conversation and start a new one to keep talking." ] ||
+  fail "agent-ended notice: the fixed text (got $(jqs .text))"
+run 0 "$MESA" live notice agent-ended
+[ "$(jqs .id)" = "$NE" ] || fail "agent-ended notice: a repeat in one span answers the existing id"
+api 200 POST "/api/live/notice" '{"kind":"agent-ended"}'
+[ "$(jqb .id)" = "$NE" ] || fail "POST /api/live/notice agent-ended: 200 with the existing turn"
+ok "GET /api/live: agent_ended null while the run lives, stopped once it is; live notice agent-ended writes the fixed sentence once per span on both surfaces"
 sqlite3 "$MESA_DB" "UPDATE live_sessions SET agent_id='deadbeef' WHERE id=$NS"
+api 200 GET "/api/live"
+[ "$(jqb .agent_ended)" = "null" ] ||
+  fail "GET /api/live: a legacy bare receipt is never ended (got $(jqb .agent_ended))"
 printf '%s\n' "deadbeef" > "$STUB_DIR/agents-id"
 printf '%s\n' "deadbeef" > "$STUB_DIR/blocked-id"
 BLOCKED_NULL_AT=$(date +%s)

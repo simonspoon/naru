@@ -182,6 +182,7 @@ import {
 import { BARGE_IN_VAD, DEFAULT_VAD, initialVad, PRE_ROLL_MS, vadCut, vadStep } from '../liveVad'
 import {
   initialWatchdog,
+  shouldNoticeAgentEnded,
   noticeInSpan,
   shouldNoticePermission,
   watchdogAfterPoll,
@@ -1310,6 +1311,7 @@ export function LiveHub({
     const before = watchdog.current
     watchdog.current = watchdogAfterPoll(before, {
       blocked: state.blocked ?? null,
+      agentEnded: state.agent_ended ?? null,
     })
     // The span the server dedupes by: the working span, or the whole session
     // while nobody is working.
@@ -1336,6 +1338,17 @@ export function LiveHub({
       })
     ) {
       post('permission')
+    }
+    // The agent's run is over (naru task 1894): same edge rule, so a poll
+    // that keeps answering it posts nothing more.
+    if (
+      shouldNoticeAgentEnded({
+        agentEnded: watchdog.current.agentEnded,
+        wasEnded: before.agentEnded,
+        alreadyNoticed: noticeInSpan(turns, 'agent-ended', spanStart),
+      })
+    ) {
+      post('agent-ended')
     }
   }
   // Pointed at the current render's closure below, beside `pump` and

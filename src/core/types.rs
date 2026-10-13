@@ -4061,24 +4061,29 @@ impl LiveAction {
 /// exactly once, the `played_at` rule, like anything else mesa says. One
 /// kind: `permission` (the job is `blocked` on a prompt in `claude agents`).
 /// A second, `stalled`, was removed by mesa task 1218 and its rows cleared
-/// by migration. Null on every turn the agent or the person actually said.
+/// by migration. A second, `agent-ended` (naru task 1894), reports that the
+/// agent's `naru run` is over. Null on every turn the agent or the person
+/// actually said.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "kebab-case")]
 #[ts(export, export_to = "../frontend/src/types/")]
 pub enum LiveNotice {
     Permission,
+    AgentEnded,
 }
 
 impl LiveNotice {
     pub fn as_str(self) -> &'static str {
         match self {
             LiveNotice::Permission => "permission",
+            LiveNotice::AgentEnded => "agent-ended",
         }
     }
 
     pub fn parse(s: &str) -> Option<LiveNotice> {
         match s {
             "permission" => Some(LiveNotice::Permission),
+            "agent-ended" => Some(LiveNotice::AgentEnded),
             _ => None,
         }
     }
@@ -4786,6 +4791,12 @@ pub struct LiveState {
     /// list, or a `claude` that is missing or failing — none of which is an
     /// error.
     pub blocked: Option<String>,
+    /// Why the agent's `naru run` can no longer answer (naru task 1894):
+    /// `finished` | `failed` | `stopped`, or `died` for a non-terminal run
+    /// whose runner process is gone. **Derived per request, never stored**;
+    /// null while the run is alive, for a legacy `--bg` agent, a session with
+    /// no agent, or a `job.json` that cannot be read yet.
+    pub agent_ended: Option<String>,
     /// The driving agent's occupied context window in tokens — the figure
     /// `naru live context` prints (mesa task 1478), shown in the panel head.
     /// **Derived per request, never stored**, through a short-TTL cache keyed

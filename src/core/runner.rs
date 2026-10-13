@@ -626,6 +626,25 @@ pub(crate) fn job_in(runs: &Path, id: &str) -> Result<Job> {
     load(&job_dir_of(runs, id)?)
 }
 
+/// Why run `id` can no longer answer, or `None` while it can (naru task 1894):
+/// its terminal status (`finished` | `failed` | `stopped`), or `died` for a
+/// non-terminal run whose runner process is gone (a `kill -9` leaves the
+/// status at `running`/`idle` for ever; a serve start-up reconcile resumes it,
+/// and it reads `None` again). An unreadable `job.json` -- the window right
+/// after a spawn -- is `None`, never ended.
+pub fn ended_in(runs: &Path, id: &str) -> Option<String> {
+    let dir = job_dir_of(runs, id).ok()?;
+    let job = load(&dir).ok()?;
+    match job.status {
+        RunStatus::Finished => Some("finished".into()),
+        RunStatus::Failed => Some("failed".into()),
+        RunStatus::Stopped => Some("stopped".into()),
+        RunStatus::Running | RunStatus::Idle => {
+            (!runner_alive(&dir, &job)).then(|| "died".to_string())
+        }
+    }
+}
+
 pub fn send(id: &str, text: &str, interrupt: bool) -> Result<Value> {
     send_in(&runs_dir(), id, text, interrupt)
 }
@@ -1213,6 +1232,31 @@ mod tests {
         assert_eq!(job.status, RunStatus::Failed);
         assert!(job.finished_at.is_some());
         assert!(reconcile_in(runs.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn ended_in_reads_terminal_status_and_a_dead_runner() {
+        let runs = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let job = create_job(runs.path(), &opts("a", cwd.path())).unwrap();
+        let dir = runs.path().join(&job.job_id);
+        // Just spawned, no pid file yet: alive by grace, never ended.
+        assert_eq!(ended_in(runs.path(), &job.job_id), None);
+        // A runner pid that is not a live `__runner` (kill -9 left the status).
+        fs::write(dir.join("runner.pid"), "2147483646").unwrap();
+        assert_eq!(ended_in(runs.path(), &job.job_id).as_deref(), Some("died"));
+        for (status, want) in [
+            (RunStatus::Finished, "finished"),
+            (RunStatus::Failed, "failed"),
+            (RunStatus::Stopped, "stopped"),
+        ] {
+            let mut j = load(&dir).unwrap();
+            j.status = status;
+            save(&dir, &mut j).unwrap();
+            assert_eq!(ended_in(runs.path(), &job.job_id).as_deref(), Some(want));
+        }
+        // Unknown or unreadable: not ended.
+        assert_eq!(ended_in(runs.path(), "nosuchjob"), None);
     }
 
     #[test]

@@ -486,11 +486,17 @@ pub const LIVE_SUMMARY_RECALL: usize = 1;
 pub const NOTICE_PERMISSION_TEXT: &str =
     "The agent is blocked on a permission prompt. Check the terminal.";
 
+/// What an `agent-ended` notice says (naru task 1894): the agent's run is over
+/// and nothing is listening.
+pub const NOTICE_AGENT_ENDED_TEXT: &str =
+    "The agent has stopped running. End the conversation and start a new one to keep talking.";
+
 /// The fixed text a notice of `kind` is spoken with — the one place the
 /// sentence is chosen, so `Store::add_live_notice` and the tests agree.
 pub fn notice_text(kind: crate::core::LiveNotice) -> &'static str {
     match kind {
         crate::core::LiveNotice::Permission => NOTICE_PERMISSION_TEXT,
+        crate::core::LiveNotice::AgentEnded => NOTICE_AGENT_ENDED_TEXT,
     }
 }
 
@@ -1101,6 +1107,20 @@ fn agent_session_uuid_in(runs: &std::path::Path, receipt: &str) -> Result<Option
             .map(|j| Some(j.session_id))
             .map_err(|e| e.to_string()),
         AgentReceipt::Bare(id) => crate::core::agents::find_session_for_job(id),
+    }
+}
+
+/// Why the receipt's agent can no longer answer (naru task 1894), see
+/// `runner::ended_in`. Only a `run:<job>` receipt can be ended: a legacy bare
+/// `--bg` id is `None`.
+pub fn agent_ended(receipt: &str) -> Option<String> {
+    agent_ended_in(&crate::core::runner::runs_dir(), receipt)
+}
+
+fn agent_ended_in(runs: &std::path::Path, receipt: &str) -> Option<String> {
+    match parse_agent_receipt(receipt) {
+        AgentReceipt::Run(id) => crate::core::runner::ended_in(runs, id),
+        AgentReceipt::Bare(_) => None,
     }
 }
 

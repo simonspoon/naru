@@ -9,6 +9,8 @@
  * exactly once, the `played_at` rule, like anything else mesa says. One
  * kind: `permission` (the job is `blocked` on a prompt in `claude agents`).
  * A second, `stalled`, was removed by mesa task 1218 and its rows cleared
- * by migration. Null on every turn the agent or the person actually said.
+ * by migration. A second, `agent-ended` (naru task 1894), reports that the
+ * agent's `naru run` is over. Null on every turn the agent or the person
+ * actually said.
  */
-export type LiveNotice = "permission";
+export type LiveNotice = "permission" | "agent-ended";

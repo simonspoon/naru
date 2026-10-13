@@ -5134,6 +5134,7 @@ async fn get_live(
                 turns: vec![],
                 boards: vec![],
                 blocked: None,
+                agent_ended: None,
                 context_tokens: None,
                 offer,
             })
@@ -5173,6 +5174,15 @@ async fn get_live(
         Some(job) => live_agent_blocked(&state, job, session.working_since.as_deref()).await,
         None => None,
     };
+    // Whether the agent's `naru run` is over (naru task 1894): job-file reads
+    // and a pid probe, so off the store lock and the async threads.
+    let agent_ended = match session.agent_id.clone() {
+        Some(job) => tokio::task::spawn_blocking(move || live::agent_ended(&job))
+            .await
+            .ok()
+            .flatten(),
+        None => None,
+    };
     let context_tokens = match session.agent_id.as_deref() {
         Some(job) => live_agent_context(&state, job).await,
         None => None,
@@ -5182,6 +5192,7 @@ async fn get_live(
         turns,
         boards,
         blocked,
+        agent_ended,
         context_tokens,
         offer,
     })

@@ -293,8 +293,8 @@ utterance; it does not say whether it is thinking, waiting on a Claude Code
 any of that itself, because a session stuck on a prompt says
 nothing, and so does one that has simply gone quiet. Until this task the
 person found out by attaching a terminal. Detection is therefore external, in
-two halves, and the report is a **turn**. Only the permission prompt is
-reported: a second notice, `stalled` (working and silent for 30 s), was
+two halves, and the report is a **turn**. Two things are reported: the
+permission prompt, and (naru task 1894) the agent's run being over. A notice, `stalled` (working and silent for 30 s), was
 removed by mesa task 1218, because real work routinely runs longer than that,
 so it was spoken on almost every turn and told the person nothing.
 
@@ -302,9 +302,10 @@ so it was spoken on almost every turn and told the person nothing.
 
 A **notice** is a `naru`-role turn Naru itself writes *about* the agent,
 not the agent's own words: `LiveTurn.notice` names the kind — `permission`
-(the job is blocked on a prompt), the only one — and is null on every turn
+(the job is blocked on a prompt) or `agent-ended` (the agent's `naru run` is
+over) — and is null on every turn
 either side actually said. `text` is one fixed plain sentence per kind
-(`core::live::NOTICE_PERMISSION_TEXT`, chosen in one place by
+(`core::live::NOTICE_PERMISSION_TEXT` / `NOTICE_AGENT_ENDED_TEXT`, chosen in one place by
 `live::notice_text`), there is no action, and the column arrives by migration
 index 58. Migration index 63 (mesa task 1218) clears `notice` on any row
 still reading `stalled`, so an old conversation's transcript stays readable
@@ -343,6 +344,22 @@ skipped outright, because a `claude -p` session gets no permission prompt — a
 tool the session may not use is denied, not waited on — so there is nothing to
 ask `claude agents`. Only a legacy bare job id (a session started before that
 task) is looked up as described here.
+
+### The derived `agent_ended` state
+
+A run that goes terminal leaves the session live with nobody listening, and
+`blocked` says nothing about it, so `LiveState` also carries
+`agent_ended: Option<String>` (naru task 1894) — **derived per request, never
+stored**, read off the store lock on `spawn_blocking` from the run's
+`job.json` (`live::agent_ended` -> `runner::ended_in`, no cache). It is the
+run's terminal status — `finished` (the runner's idle timeout), `failed`
+(claude exiting on its own, any exit code, e.g. a crash) or `stopped` (`naru run stop`, the run pane) — or `died` for a
+non-terminal (`running`/`idle`) job whose runner process is gone, which is
+what a `kill -9` of the runner leaves (a `serve` start-up reconcile resumes
+such a run, after which it reads null again). Null while the run lives, for a
+legacy bare `--bg` id, a session with no agent, and a `job.json` that cannot
+be read yet (the moment right after a spawn). Nothing ends or resumes the
+session; the person is told.
 
 `state: "blocked"` alone is **not** the signal (mesa task 1293). Upstream it
 is one `requires_action` bucket covering five distinct reasons, of which only
@@ -386,6 +403,11 @@ can change (the one-second tick went with `stalled`, whose clock it read).
 Each judgement sees **one poll's view** — the session and the transcript
 merged from that same poll, never the `turns` state a later render sets:
 
+- **`agent-ended`** (naru task 1894) is posted on the rising edge of
+  `agent_ended` (null -> non-null) when no `agent-ended` notice exists in this
+  span, the same rule. A page that loads with the run already over sees that
+  as the edge once; the server's dedupe covers any repeat. Its fixed sentence
+  tells the person to end the conversation and start a new one.
 - **`permission`** is posted on the **rising edge** of `blocked` — this poll
   non-null where the previous one was null — and no `permission` notice
   exists in this span (`noticeInSpan`: any turn with that `notice` and

@@ -37,6 +37,14 @@ boards: Array<LiveBoardSummary>,
  */
 blocked: string | null, 
 /**
+ * Why the agent's `naru run` can no longer answer (naru task 1894):
+ * `finished` | `failed` | `stopped`, or `died` for a non-terminal run
+ * whose runner process is gone. **Derived per request, never stored**;
+ * null while the run is alive, for a legacy `--bg` agent, a session with
+ * no agent, or a `job.json` that cannot be read yet.
+ */
+agent_ended: string | null, 
+/**
  * The driving agent's occupied context window in tokens — the figure
  * `naru live context` prints (mesa task 1478), shown in the panel head.
  * **Derived per request, never stored**, through a short-TTL cache keyed

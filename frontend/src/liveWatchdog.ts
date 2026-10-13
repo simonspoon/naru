@@ -15,6 +15,12 @@ import type { LiveTurn } from './types/LiveTurn'
  *   `waitingFor`, read off `claude agents`) where the previous poll answered
  *   null — the **rising edge** — and no such notice exists in this span yet.
  *
+ * - `agent-ended` (naru task 1894) — `GET /api/live` answers a non-null
+ *   `agent_ended` (the agent's `naru run` is over: finished, failed, stopped
+ *   or its runner died) where the previous poll answered null, and no such
+ *   notice exists in this span yet. A page that loads with the run already
+ *   over sees that as the edge too; the server's dedupe covers a repeat.
+ *
  * A second report, `stalled` (working and silent for 30 s), was removed by
  * mesa task 1218: real work routinely runs longer, so it was spoken on
  * almost every turn and told the person nothing.
@@ -35,16 +41,21 @@ export interface Watchdog {
   sessionId: number
   /** The `blocked` the last poll answered, so a new block is an edge. */
   blocked: string | null
+  /** The `agent_ended` the last poll answered, so an ending is an edge. */
+  agentEnded: string | null
 }
 
 /** A fresh watchdog for a conversation this page has just started watching. */
 export function initialWatchdog(sessionId: number): Watchdog {
-  return { sessionId, blocked: null }
+  return { sessionId, blocked: null, agentEnded: null }
 }
 
-/** The watchdog after a poll lands: it remembers that poll's `blocked`. */
-export function watchdogAfterPoll(prev: Watchdog, input: { blocked: string | null }): Watchdog {
-  return { sessionId: prev.sessionId, blocked: input.blocked }
+/** The watchdog after a poll lands: it remembers that poll's `blocked` and `agentEnded`. */
+export function watchdogAfterPoll(
+  prev: Watchdog,
+  input: { blocked: string | null; agentEnded: string | null },
+): Watchdog {
+  return { sessionId: prev.sessionId, blocked: input.blocked, agentEnded: input.agentEnded }
 }
 
 /**
@@ -73,4 +84,16 @@ export function shouldNoticePermission(input: {
   alreadyNoticed: boolean
 }): boolean {
   return input.blocked !== null && input.wasBlocked === null && !input.alreadyNoticed
+}
+
+/**
+ * Whether to post `agent-ended` now: the rising edge of `agent_ended`, never
+ * already reported in this span.
+ */
+export function shouldNoticeAgentEnded(input: {
+  agentEnded: string | null
+  wasEnded: string | null
+  alreadyNoticed: boolean
+}): boolean {
+  return input.agentEnded !== null && input.wasEnded === null && !input.alreadyNoticed
 }
