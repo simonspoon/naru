@@ -2066,6 +2066,19 @@ run 1 "$MESA" library builtin keep no-such-item
 [ "$(jqe .error.code)" = "not_found" ] || fail "keep on an unknown item: not_found, got $STDERR"
 ok "library builtin: merge without a body is usage (exit 2); an unshadowed built-in or a plain row is validation; an unknown item not_found"
 
+# link: a duplicate row (same kind/name as a built-in) becomes its fork, body untouched.
+run 0 "$MESA" library create hook stop-notify.sh 'my own guard'
+DUP=$(jqs .id)
+run 0 "$MESA" library builtin link stop-notify.sh
+[ "$(jqs .id)" = "$DUP" ] || fail "link: must print the same row, got $STDOUT"
+[ "$(jqs .builtin_id)" = "stop-notify" ] || fail "link: builtin_id must be set, got $STDOUT"
+[ "$(jqs .body)" = "my own guard" ] || fail "link: the body must be untouched"
+[ "$(jqs .builtin_updated)" = "true" ] || fail "link: a differing body must read builtin_updated, got $STDOUT"
+run 1 "$MESA" library builtin link "$DUP"
+[ "$(jqe .error.code)" = "conflict" ] || fail "link on a fork: conflict, got $STDERR"
+run 0 "$MESA" library delete "$DUP"
+ok "library builtin link: a duplicate row becomes a fork with its body untouched and flagged; a second link is conflict"
+
 # ---- over the API ----
 "$MESA" serve --port 17799 >"$TMP/serve14.log" 2>&1 &
 SERVER_PID=$!

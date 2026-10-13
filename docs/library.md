@@ -359,6 +359,16 @@ fork is **flagged**, and the user decides.
   **Merge…**, an editor seeded with the fork beside the new built-in
   read-only. Which rows offer it is `frontend/src/libraryBuiltinUpdate.ts`.
 
+- **Linking a duplicate (naru task 1906).** A row created before the fork
+  rule, or by `library create`, can share a built-in's kind, scope and name
+  without carrying its `builtin_id`, so both list. `naru library builtin
+  link <ITEM>` (`Store::link_library_builtin`, CLI only) sets `builtin_id` on
+  such a row and leaves `builtin_base` `NULL`, the fork point being unknown:
+  the body, `updated_at` and history are untouched, and the row reads
+  `builtin_updated` whenever its body differs, for `keep|take|merge` to
+  resolve. `validation` for a row with no matching built-in, `conflict` for a row
+  that is already a fork or (naming the fork) whose built-in is already forked.
+
 The body write deliberately does not go through `library::update_item`: that
 wrapper's only side effect is removing an exported command file when a
 prompt's `export_command` goes off, and these three actions never touch the

@@ -2429,6 +2429,16 @@ enum LibraryBuiltinCmd {
         #[arg(long)]
         quiet: bool,
     },
+    /// Link an existing row that duplicates a built-in (same kind, scope and
+    /// name) to it as a fork, body untouched; once it differs from the
+    /// built-in it reads `builtin_updated`, so keep|take|merge can resolve it
+    Link {
+        /// Library item id or name; must not already be a fork
+        item: String,
+        /// Print the item without `body`/`synced_body`/`builtin_body`
+        #[arg(long)]
+        quiet: bool,
+    },
     /// Replace the fork's body with a hand-merged text; the flag clears
     #[command(after_help = "\
 EXAMPLES
@@ -8378,6 +8388,15 @@ fn run_library_cmd(cmd: LibraryCmd) -> Result<()> {
                 None => print_json(&Vec::<crate::core::LibraryVersion>::new()),
             }
         }
+        LibraryCmd::Builtin(LibraryBuiltinCmd::Link { item, quiet }) => {
+            let current = resolve_library(&store, &item)?;
+            let Some(id) = current.id else {
+                return Err(Error::Validation(format!(
+                    "{item:?} is an unshadowed built-in, not a row to link"
+                )));
+            };
+            print_library_item(&store.link_library_builtin(id)?, quiet);
+        }
         LibraryCmd::Builtin(builtin_cmd) => {
             let (item, action, body, quiet) = match builtin_cmd {
                 LibraryBuiltinCmd::Keep { item, quiet } => {
@@ -8386,6 +8405,7 @@ fn run_library_cmd(cmd: LibraryCmd) -> Result<()> {
                 LibraryBuiltinCmd::Take { item, quiet } => {
                     (item, LibraryBuiltinAction::Take, None, quiet)
                 }
+                LibraryBuiltinCmd::Link { .. } => unreachable!("handled by the arm above"),
                 LibraryBuiltinCmd::Merge {
                     item,
                     body,

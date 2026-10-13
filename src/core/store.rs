@@ -9706,6 +9706,42 @@ impl Store {
         self.get_library_item(id)
     }
 
+    /// Links an existing, unlinked row to the built-in it duplicates (naru
+    /// task 1906), making it a fork without touching its body: `builtin_id`
+    /// is set and `builtin_base` left `NULL` (the fork point is unknown), so
+    /// it reads `builtin_updated` whenever its body differs from the
+    /// built-in's and `keep`/`take`/`merge` resolve it. Writes no version
+    /// and does not move `updated_at`. The built-in is the one with the
+    /// row's kind, scope and exact name.
+    ///
+    /// `validation` for a row with no matching built-in, `conflict` for a
+    /// row that is already a fork or whose built-in already has a fork.
+    pub fn link_library_builtin(&mut self, id: i64) -> Result<LibraryItem> {
+        let current = self.get_library_item(id)?;
+        if let Some(existing) = current.builtin_id.as_deref() {
+            return Err(Error::Conflict(format!(
+                "library item {id} is already a fork of {existing:?}"
+            )));
+        }
+        let Some(builtin) = crate::core::library::BUILTINS
+            .iter()
+            .find(|b| b.kind == current.kind && b.scope == current.scope && b.name == current.name)
+        else {
+            return Err(Error::Validation(format!(
+                "no built-in {} named {:?} in {} scope to link library item {id} to",
+                current.kind.as_str(),
+                current.name,
+                current.scope.as_str()
+            )));
+        };
+        self.ensure_library_builtin(builtin.id)?;
+        self.conn.execute(
+            "UPDATE library_items SET builtin_id = ?1, builtin_base = NULL WHERE id = ?2",
+            (builtin.id, id),
+        )?;
+        self.get_library_item(id)
+    }
+
     /// Forgets a fork's `builtin_base` (mesa task 1349), leaving the row as
     /// a pre-1349 fork is: base unknown, so it reads `builtin_updated`
     /// whenever its body differs from the current built-in. Import's call,
@@ -20834,6 +20870,158 @@ mod tests {
         assert_eq!(library_builtin_base(&store, plain.id.unwrap()), None);
         assert!(!plain.builtin_updated);
         assert_eq!(plain.builtin_body, None);
+    }
+
+    // ---- linking a duplicate row to its built-in (naru task 1906) ----
+
+    fn plain_summary_row(store: &mut Store, body: &str) -> LibraryItem {
+        store
+            .create_library_item(
+                LibraryKind::Prompt,
+                LibraryScope::User,
+                None,
+                "live-summary-prompt",
+                body,
+                None,
+                false,
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn link_library_builtin_forks_without_touching_the_row() {
+        let (mut store, _dir) = temp_store();
+        let row = plain_summary_row(&mut store, "my own summary prompt");
+        let id = row.id.unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE library_items SET updated_at = '2001-01-01 00:00:00' WHERE id = ?1",
+                [id],
+            )
+            .unwrap();
+        let before_versions = store.list_library_versions(id).unwrap().len();
+        // Unlinked, the row and the built-in both list.
+        let listed = crate::core::library::effective_items(&store, None).unwrap();
+        assert!(
+            listed
+                .iter()
+                .any(|i| i.id.is_none() && i.name == "live-summary-prompt")
+        );
+
+        let linked = store.link_library_builtin(id).unwrap();
+        assert_eq!(linked.builtin_id.as_deref(), Some("live-summary-prompt"));
+        assert_eq!(linked.body, "my own summary prompt");
+        assert_eq!(linked.updated_at.as_deref(), Some("2001-01-01 00:00:00"));
+        assert_eq!(
+            store.list_library_versions(id).unwrap().len(),
+            before_versions
+        );
+        assert_eq!(library_builtin_base(&store, id), None);
+        // Body differs from the built-in: flagged.
+        assert!(linked.builtin_updated);
+        // The built-in no longer lists unshadowed.
+        let listed = crate::core::library::effective_items(&store, None).unwrap();
+        assert!(
+            !listed
+                .iter()
+                .any(|i| i.id.is_none() && i.name == "live-summary-prompt")
+        );
+        // keep resolves the flag.
+        let kept = store
+            .resolve_library_builtin_update(id, LibraryBuiltinAction::Keep, None)
+            .unwrap();
+        assert!(!kept.builtin_updated);
+    }
+
+    #[test]
+    fn link_library_builtin_of_an_identical_body_is_not_flagged() {
+        let (mut store, _dir) = temp_store();
+        let row = plain_summary_row(&mut store, SUMMARY);
+        let linked = store.link_library_builtin(row.id.unwrap()).unwrap();
+        assert_eq!(linked.builtin_id.as_deref(), Some("live-summary-prompt"));
+        assert!(!linked.builtin_updated);
+    }
+
+    #[test]
+    fn link_library_builtin_refuses_what_it_cannot_link() {
+        let (mut store, _dir) = temp_store();
+        assert!(matches!(
+            store.link_library_builtin(9999),
+            Err(Error::NotFound(_))
+        ));
+        // Already a fork.
+        let fork = fork_library_summary(&mut store, "forked");
+        assert!(matches!(
+            store.link_library_builtin(fork.id.unwrap()),
+            Err(Error::Conflict(_))
+        ));
+        // No built-in of that name.
+        let other = store
+            .create_library_item(
+                LibraryKind::Prompt,
+                LibraryScope::User,
+                None,
+                "no-such-builtin",
+                "x",
+                None,
+                false,
+            )
+            .unwrap();
+        assert!(matches!(
+            store.link_library_builtin(other.id.unwrap()),
+            Err(Error::Validation(_))
+        ));
+        // Same name, wrong kind.
+        let wrong_kind = store
+            .create_library_item(
+                LibraryKind::Hook,
+                LibraryScope::User,
+                None,
+                "live-summary-prompt",
+                "x",
+                None,
+                false,
+            )
+            .unwrap();
+        assert!(matches!(
+            store.link_library_builtin(wrong_kind.id.unwrap()),
+            Err(Error::Validation(_))
+        ));
+    }
+
+    #[test]
+    fn link_library_builtin_conflicts_when_the_builtin_is_already_forked() {
+        let (mut store, _dir) = temp_store();
+        let fork = fork_library_summary(&mut store, "forked");
+        // A second, unlinked row of the same kind/scope/name cannot exist
+        // (names are unique), so drop the fork's link to make room, then
+        // re-fork through create and try to link the old one.
+        let dup_id = fork.id.unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE library_items SET builtin_id = NULL WHERE id = ?1",
+                [dup_id],
+            )
+            .unwrap();
+        let other = store
+            .create_library_item(
+                LibraryKind::Prompt,
+                LibraryScope::User,
+                None,
+                "other",
+                "o",
+                Some("live-summary-prompt"),
+                false,
+            )
+            .unwrap();
+        match store.link_library_builtin(dup_id) {
+            Err(Error::Conflict(msg)) => {
+                assert!(msg.contains(&other.id.unwrap().to_string()), "{msg}")
+            }
+            other => panic!("expected conflict, got {other:?}"),
+        }
     }
 
     #[test]
