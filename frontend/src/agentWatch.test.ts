@@ -84,6 +84,13 @@ describe('rowSegments', () => {
     expect(segs[segs.length - 1].to).toBe(WS + 50)
   })
 
+  it('keeps a single-event run as an instant', () => {
+    const r = row({ key: 'a/x', kind: 'subagent', parent: 'a', startedAt: WS + 10, finished: true, lastEventAt: WS + 200, runs: [[WS + 100, WS + 100]] })
+    expect(rowSegments(r, [], NOW, WS).filter((s) => s.state === 'active')).toEqual([
+      { from: WS + 100, to: WS + 100, state: 'active' },
+    ])
+  })
+
   it('clips to historyFrom', () => {
     const r = row({ key: 'a', startedAt: WS - 100, historyFrom: WS + 300, runs: [[WS + 300, WS + 400]] })
     expect(rowSegments(r, [], NOW, WS)[0].from).toBe(WS + 300)

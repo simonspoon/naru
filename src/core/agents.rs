@@ -1453,6 +1453,9 @@ pub fn strip_ansi(s: &str) -> String {
 
 // ---- agent watcher (naru task 1909, docs/agent-watcher.md) ----
 
+/// Most subagent transcripts the watcher reads per session (newest by mtime).
+const WATCH_MAX_SUBAGENTS: usize = 50;
+
 /// A session the watcher draws: it has a process, and is either not `done` or
 /// still holds a running child (upstream reaches `done` the moment a turn
 /// ends, while the work that turn started goes on).
@@ -1528,7 +1531,11 @@ pub fn watch(sessions: Vec<AgentSession>, minutes: i64) -> AgentWatch {
                 .or_else(|| cc::sanitize_capped(basename(&s.cwd)))
                 .unwrap_or_else(|| s.session_id.clone()),
             detail: None,
-            model: s.model.clone().or(thread.model),
+            model: s
+                .model
+                .as_deref()
+                .and_then(cc::sanitize_capped)
+                .or(thread.model),
             started_at: Some(s.started_at / 1000),
             runs: thread.runs,
             last_event_at: thread.last_event_at,
@@ -1537,10 +1544,24 @@ pub fn watch(sessions: Vec<AgentSession>, minutes: i64) -> AgentWatch {
             finished: false,
         });
         if let Some(root) = root.as_deref() {
-            let mut paths = subagent_transcripts(root, &s.session_id, now_st, minutes * 60);
+            // Walk as far back as a delegate can sit in one long call without
+            // writing, so its parent is not read as quiet; the newest
+            // WATCH_MAX_SUBAGENTS by mtime bound the cost.
+            let mut paths = subagent_transcripts(
+                root,
+                &s.session_id,
+                now_st,
+                (minutes * 60).max(DELEGATE_TOOL_CALL_SECS),
+            );
+            paths.sort_by_key(|(path, age)| (*age, path.clone()));
+            paths.truncate(WATCH_MAX_SUBAGENTS);
             paths.sort();
             for (path, _) in paths {
+                let finished = subagent_finished(&path);
                 let thread = cc::watch_thread(&path, since, false);
+                if finished && thread.last_event_at.is_none_or(|t| t < since) {
+                    continue;
+                }
                 let id = path
                     .file_stem()
                     .and_then(|stem| stem.to_str())
@@ -1561,7 +1582,7 @@ pub fn watch(sessions: Vec<AgentSession>, minutes: i64) -> AgentWatch {
                     last_event_at: thread.last_event_at,
                     history_from: thread.history_from,
                     output_at: None,
-                    finished: subagent_finished(&path),
+                    finished,
                 });
             }
         }
@@ -1573,7 +1594,7 @@ pub fn watch(sessions: Vec<AgentSession>, minutes: i64) -> AgentWatch {
             rows.push(AgentWatchRow {
                 key: match pid {
                     Some(pid) => format!("{key}/pid:{pid}"),
-                    None => format!("{key}/cmd:{}", c.name),
+                    None => format!("{key}/cmd:{i}:{}", c.name),
                 },
                 kind: AgentWatchKind::Shell,
                 session_id: s.session_id.clone(),

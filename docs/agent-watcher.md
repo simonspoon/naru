@@ -17,7 +17,7 @@ output is byte-identical) and runs `agents::watch` under `spawn_blocking`.
 
 Payload (`AgentWatch`, ts-exported, camelCase, **all times Unix seconds**):
 `now`, `windowMinutes`, `rows[]`. A row (`AgentWatchRow`): `key` (`sid`,
-`sid/<agent id>`, `sid/pid:<n>`, or `sid/cmd:<name>` when no process matched),
+`sid/<agent id>`, `sid/pid:<n>`, or `sid/cmd:<i>:<name>` (child index) when no process matched),
 `kind` (`session|subagent|shell`), `sessionId`, `parent` (the session key, for
 children), `label` (sanitized, bounded), `detail`, `model`, `startedAt`,
 `runs` (`[start, end]` working stretches inside the window, empty for a shell),
@@ -75,7 +75,7 @@ relies on a Claude Code internal convention, not a contract.
 
 ## Limits
 
-No finished-shell history (a shell leaves `ps` the moment its call returns),
+At most the newest 50 subagent transcripts (by mtime) are read per session; they are walked back at least 30 minutes (a delegate mid-long-call writes nothing) and a finished one with no event in the window is dropped. No finished-shell history (a shell leaves `ps` the moment its call returns),
 shells always hang under their session, the transcript tail is 2 MiB (older
 history is cut and flagged by `historyFrom`), no cost figures, no CLI command,
 no config keys, no phone tab-bar entry.

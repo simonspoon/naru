@@ -5064,7 +5064,7 @@ fn watch_from_text(text: &str, since: i64, main_only: bool, truncated: bool) -> 
         if raw.kind.as_deref() == Some("assistant")
             && let Some(model) = raw.message.as_ref().and_then(|m| m.model.as_ref())
         {
-            out.model = Some(model.clone());
+            out.model = sanitize_capped(model);
         }
     }
     out.runs = coalesce_runs(&events);

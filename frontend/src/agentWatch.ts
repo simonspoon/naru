@@ -61,8 +61,8 @@ export function childrenOf(rows: AgentWatchRow[], row: AgentWatchRow): AgentWatc
   return row.kind === 'session' ? rows.filter((r) => r.parent === row.key) : []
 }
 
-function mergeIntervals(iv: [number, number][]): [number, number][] {
-  const sorted = iv.filter(([a, b]) => b > a).sort((x, y) => x[0] - y[0])
+function mergeIntervals(iv: [number, number][], keepInstants = false): [number, number][] {
+  const sorted = iv.filter(([a, b]) => b > a || (keepInstants && b === a)).sort((x, y) => x[0] - y[0])
   const out: [number, number][] = []
   for (const [a, b] of sorted) {
     const last = out[out.length - 1]
@@ -101,7 +101,10 @@ export function rowSegments(
     if (!row.finished && hi - to < QUIET_GAP_S) to = hi
     runs.push([from, to])
   }
-  const active = mergeIntervals(runs.map(([a, b]) => [a, Math.max(b, a)]))
+  const active = mergeIntervals(
+    runs.map(([a, b]) => [a, Math.max(b, a)]),
+    true,
+  )
 
   const covers = mergeIntervals(
     children.flatMap((c): [number, number][] => {

@@ -393,7 +393,7 @@ pub enum AgentWatchKind {
 #[serde(rename_all = "camelCase")]
 pub struct AgentWatchRow {
     /// `<session id>`, `<session id>/<agent id>`, `<session id>/pid:<n>` or
-    /// `<session id>/cmd:<name>`.
+    /// `<session id>/cmd:<child index>:<name>`.
     pub key: String,
     pub kind: AgentWatchKind,
     pub session_id: String,
