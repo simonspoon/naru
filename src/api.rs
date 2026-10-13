@@ -3278,6 +3278,7 @@ fn router(state: AppState) -> Router {
         // task or file, and a `--lan` page needs it for the same reason a
         // local one does.
         .route("/api/system", get(get_system_info))
+        .route("/api/system/audio-models", get(get_system_audio_models))
         // Project git tab: working-tree view (branch + changed files) and a
         // per-file unified diff. Read-only external state like /api/git-status,
         // so the same standard guard only — no agent access gate.
@@ -8205,6 +8206,21 @@ async fn get_system_info() -> Json<SystemInfo> {
             .await
             .expect("core::system::snapshot does not panic"),
     )
+}
+
+/// `GET /api/system/audio-models` — the models the naru-audio daemon has
+/// loaded and what they hold (naru task 1910, `docs/system.md`). Always 200;
+/// `models` is `null` on the legacy engine or when the daemon cannot be asked.
+/// The daemon URL is the one `audio::daemon_url` already resolves; the call is
+/// blocking with a 2 s cap, so it is a route of its own rather than part of
+/// `system::snapshot`. Same standard-guard-only posture as `/api/system`.
+async fn get_system_audio_models() -> Json<audio::AudioModels> {
+    let models = tokio::task::spawn_blocking(|| {
+        audio::daemon_url().and_then(|url| audio::loaded_models(&url))
+    })
+    .await
+    .unwrap_or(None);
+    Json(audio::AudioModels { models })
 }
 
 /// `GET /api/projects/{id}/version` — the app version in the project's

@@ -94,6 +94,7 @@ import type { ScriptRunEvent } from './types/ScriptRunEvent'
 import type { ScriptRunRecord } from './types/ScriptRunRecord'
 import type { Status } from './types/Status'
 import type { SystemInfo } from './types/SystemInfo'
+import type { AudioModels } from './types/AudioModels'
 import type { Task } from './types/Task'
 import type { TaskNote } from './types/TaskNote'
 import type { TaskReceipt } from './types/TaskReceipt'
@@ -425,6 +426,14 @@ export function getNaruVersion(): Promise<NaruVersion> {
  */
 export function getSystemInfo(): Promise<SystemInfo> {
   return request('/api/system')
+}
+
+/**
+ * The models the naru-audio daemon has loaded (naru task 1910). `models` is
+ * `null` when the engine is legacy or the daemon cannot be asked.
+ */
+export function getAudioModels(): Promise<AudioModels> {
+  return request('/api/system/audio-models')
 }
 
 /**

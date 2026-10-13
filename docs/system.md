@@ -66,6 +66,19 @@ one does. The global Host allowlist and Content-Type gate still apply.
 Always `200`. There is no error path, no cache in `AppState` (the GPU's cache
 is inside `core::system`), and nothing is written anywhere.
 
+## Voice models (naru-audio)
+
+`GET /api/system/audio-models` → `AudioModels { models }` lists what the
+naru-audio daemon holds resident (`GET {daemon}/api/ps`: name, kind
+`stt`/`tts`, `resident_bytes`, and a derived state `loading`/`busy`/`idle`),
+shown under Memory with a total. It is a route of its own because it is a
+blocking network call (2 s cap, `audio::loaded_models`, URL from
+`audio::daemon_url`, the one resolution of `audio.url`/`NARU_AUDIO_URL`) that
+must not slow or fail `snapshot()`. `models` is `null` — shown as "naru-audio
+not running" — on the legacy engine or when the daemon cannot be asked; an
+empty list means nothing is loaded. Same standard-guard-only posture as
+`/api/system`; always 200.
+
 ## CLI
 
 `mesa system` prints the same object, byte-comparable with the route's body.

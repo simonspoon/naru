@@ -77,3 +77,10 @@ export function formatUptime(secs: number | null | undefined): string {
   if (m > 0) return `${m}m`
   return `${s}s`
 }
+
+/** Total resident bytes across the daemon's loaded models. */
+export function totalResidentBytes(
+  models: { resident_bytes: number }[],
+): number {
+  return models.reduce((sum, m) => sum + m.resident_bytes, 0)
+}

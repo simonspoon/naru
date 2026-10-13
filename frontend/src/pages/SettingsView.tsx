@@ -15,6 +15,7 @@ import {
   getSpeech,
   getSpeechDesign,
   getSystemInfo,
+  getAudioModels,
   getWatchers,
   listLibrary,
   listLiveMemory,
@@ -92,6 +93,7 @@ import {
   formatUptime,
   systemSeverity,
   usedPct,
+  totalResidentBytes,
 } from '../systemMeter'
 import {
   RATE_FIELDS,
@@ -3225,6 +3227,9 @@ function SystemSection() {
   const { data: info, error } = useFetch(getSystemInfo, 'system-info', {
     pollMs: 3000,
   })
+  const { data: audio } = useFetch(getAudioModels, 'audio-models', {
+    pollMs: 3000,
+  })
 
   if (error) {
     return (
@@ -3258,6 +3263,28 @@ function SystemSection() {
           pct={usedPct(info.ram_used_bytes, info.ram_total_bytes)}
           detail={`${formatBytes(info.ram_used_bytes)} of ${formatBytes(info.ram_total_bytes)}`}
         />
+        <div className="settings-system-row">
+          <div className="settings-system-rowtop">
+            <span className="settings-system-label">Voice models</span>
+            <span className="settings-system-pct">
+              {audio?.models && audio.models.length > 0
+                ? formatBytes(totalResidentBytes(audio.models))
+                : ''}
+            </span>
+          </div>
+          {audio?.models && audio.models.length > 0 ? (
+            audio.models.map((m) => (
+              <div key={m.name} className="settings-system-detail muted">
+                {m.name} · {m.kind} · {formatBytes(m.resident_bytes)} ·{' '}
+                {m.state}
+              </div>
+            ))
+          ) : (
+            <div className="settings-system-detail muted">
+              {audio?.models ? 'no models loaded' : 'naru-audio not running'}
+            </div>
+          )}
+        </div>
         <Meter
           label="Swap"
           pct={usedPct(info.swap_used_bytes, info.swap_total_bytes)}

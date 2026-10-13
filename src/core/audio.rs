@@ -1308,6 +1308,67 @@ fn list(url: &str, path: &str) -> Option<String> {
         .ok()
 }
 
+/// One model resident in (or loading into) the daemon, a row of
+/// `GET /api/ps` (naru task 1910). `state` is derived: `loading`, else
+/// `busy` (a request in flight), else `idle`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct LoadedModel {
+    pub name: String,
+    /// `stt` or `tts`, as the daemon says.
+    pub kind: String,
+    pub resident_bytes: u64,
+    pub state: String,
+}
+
+/// What the System page shows under Memory: the daemon's loaded models.
+/// `models` is `null` when Naru could not ask — the engine is `legacy`, or
+/// the daemon is down — and an empty list when it answered with none loaded.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct AudioModels {
+    pub models: Option<Vec<LoadedModel>>,
+}
+
+/// Parses `GET /api/ps`'s body. `None` for anything that is not the array.
+fn parse_ps(body: &str) -> Option<Vec<LoadedModel>> {
+    #[derive(Deserialize)]
+    struct Row {
+        name: String,
+        kind: String,
+        #[serde(default)]
+        resident_bytes: u64,
+        #[serde(default)]
+        busy: bool,
+        #[serde(default)]
+        loading: bool,
+    }
+    let rows: Vec<Row> = serde_json::from_str(body).ok()?;
+    Some(
+        rows.into_iter()
+            .map(|r| LoadedModel {
+                name: r.name,
+                kind: r.kind,
+                resident_bytes: r.resident_bytes,
+                state: if r.loading {
+                    "loading"
+                } else if r.busy {
+                    "busy"
+                } else {
+                    "idle"
+                }
+                .to_string(),
+            })
+            .collect(),
+    )
+}
+
+/// The models the daemon at `url` has loaded (`GET /api/ps`). `None` on any
+/// failure: "Naru could not ask". Blocking, [`LIST_TIMEOUT`].
+pub fn loaded_models(url: &str) -> Option<Vec<LoadedModel>> {
+    list(url, "/api/ps").and_then(|body| parse_ps(&body))
+}
+
 fn unix_nanos() -> u128 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -2395,6 +2456,23 @@ mod tests {
             AudioState::Error,
             "the cached ready was dropped, so this get fetched"
         );
+    }
+
+    #[test]
+    fn ps_rows_become_loaded_models_with_a_derived_state() {
+        let body = r#"[{"backend":"mlx","busy":false,"expires_at":"2026-10-13T19:18:43Z","kind":"stt","loaded_at":"2026-10-13T19:09:42Z","loading":false,"name":"qwen3-asr-1.7b-4bit-mlx","resident_bytes":1609349848},
+        {"backend":"mlx","busy":true,"kind":"tts","loaded_at":null,"loading":false,"name":"b","resident_bytes":5},
+        {"backend":"mlx","busy":false,"kind":"tts","loaded_at":null,"loading":true,"name":"c","resident_bytes":0}]"#;
+        let models = parse_ps(body).unwrap();
+        assert_eq!(models.len(), 3);
+        assert_eq!(models[0].name, "qwen3-asr-1.7b-4bit-mlx");
+        assert_eq!(models[0].kind, "stt");
+        assert_eq!(models[0].resident_bytes, 1609349848);
+        assert_eq!(models[0].state, "idle");
+        assert_eq!(models[1].state, "busy");
+        assert_eq!(models[2].state, "loading");
+        assert_eq!(parse_ps("[]").unwrap().len(), 0);
+        assert!(parse_ps("{\"error\":{}}").is_none());
     }
 
     /// The model list is the daemon's speech-to-text entries; a daemon that

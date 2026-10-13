@@ -4,6 +4,7 @@ import {
   formatBytes,
   formatUptime,
   systemSeverity,
+  totalResidentBytes,
   usedPct,
 } from './systemMeter'
 
@@ -96,5 +97,14 @@ describe('formatUptime', () => {
     expect(formatUptime(undefined)).toBe('—')
     expect(formatUptime(-1)).toBe('—')
     expect(formatUptime(NaN)).toBe('—')
+  })
+})
+
+describe('totalResidentBytes', () => {
+  it('sums resident bytes, zero for none', () => {
+    expect(totalResidentBytes([])).toBe(0)
+    expect(
+      totalResidentBytes([{ resident_bytes: 5 }, { resident_bytes: 7 }]),
+    ).toBe(12)
   })
 })
