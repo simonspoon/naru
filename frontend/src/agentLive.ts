@@ -16,6 +16,14 @@ export function liveAgentId(live: Pick<LiveState, 'session'> | null | undefined)
   return s && s.status === 'live' ? s.agent_id : null
 }
 
+/** Whether a listed row is the session `agentId` names. A `naru run` driver's
+ *  id is the receipt `run:<job>` and its row has `id: null` with the bare job
+ *  in `runId`; a legacy `--bg` driver's id is the row's own `id`. */
+export function isLiveAgentRow(a: Pick<AgentSession, 'id' | 'runId'>, agentId: string): boolean {
+  if (agentId.startsWith('run:')) return a.runId === agentId.slice(4)
+  return a.id === agentId
+}
+
 /** Splits the list into the pinned live card and everything else. `live` is
  *  `null` when no live session is running or its job is not listed (the card
  *  is then simply omitted); `rest` keeps its order. */
@@ -24,7 +32,7 @@ export function pinLiveAgent(
   agentId: string | null,
 ): { live: AgentSession | null; rest: AgentSession[] } {
   if (agentId === null) return { live: null, rest: agents }
-  const live = agents.find((a) => a.id === agentId) ?? null
+  const live = agents.find((a) => isLiveAgentRow(a, agentId)) ?? null
   return { live, rest: live === null ? agents : agents.filter((a) => a !== live) }
 }
 

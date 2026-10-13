@@ -4,6 +4,7 @@ import {
   agentKindOf,
   agentRowActions,
   agentTint,
+  bucketOf,
   formatContextTokens,
   headlineSince,
   naruTimeMs,
@@ -207,5 +208,27 @@ describe('stepTrail', () => {
 
   it('is empty for no steps', () => {
     expect(stepTrail({ recentSteps: [] })).toEqual([])
+  })
+})
+
+describe('bucketOf', () => {
+  const row = (state: string | null, liveShells = 0, liveSubagents = 0) =>
+    ({ state, liveShells, liveSubagents }) as Parameters<typeof bucketOf>[0]
+
+  it('keeps blocked in its own bucket', () => {
+    expect(bucketOf(row('blocked', 1, 1))).toBe('BLOCKED')
+  })
+  it('keeps a done session with a live shell active', () => {
+    expect(bucketOf(row('done', 1, 0))).toBe('ACTIVE')
+  })
+  it('keeps a done session with a live subagent active', () => {
+    expect(bucketOf(row('done', 0, 2))).toBe('ACTIVE')
+  })
+  it('puts a done session with nothing in flight in done', () => {
+    expect(bucketOf(row('done'))).toBe('DONE')
+  })
+  it('treats every other state as active', () => {
+    expect(bucketOf(row('working'))).toBe('ACTIVE')
+    expect(bucketOf(row(null))).toBe('ACTIVE')
   })
 })

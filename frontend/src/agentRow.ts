@@ -203,3 +203,21 @@ export function rowPaneId(a: Pick<AgentSession, 'id' | 'kind' | 'runId'>): strin
       return null
   }
 }
+
+export type Bucket = 'BLOCKED' | 'ACTIVE' | 'DONE'
+
+/**
+ * Which sidebar bucket a listed session sits in. The same rule as
+ * `isRunningAgent` (`agentProject.ts`): active unless upstream reports it
+ * `done` (mesa task 861); `blocked` keeps its own bucket, the one that needs
+ * a person. A `done` session that still has live shells or subagents is
+ * still working, so it stays ACTIVE (naru task 1902) — DONE is only for one
+ * with nothing in flight.
+ */
+export function bucketOf(
+  a: Pick<AgentSession, 'state' | 'liveShells' | 'liveSubagents'>,
+): Bucket {
+  if (a.state === 'blocked') return 'BLOCKED'
+  if (a.state !== 'done') return 'ACTIVE'
+  return (a.liveShells ?? 0) + (a.liveSubagents ?? 0) > 0 ? 'ACTIVE' : 'DONE'
+}

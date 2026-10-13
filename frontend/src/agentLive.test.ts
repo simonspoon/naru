@@ -33,6 +33,17 @@ describe('pinLiveAgent', () => {
     expect(l?.id).toBe('b')
     expect(rest.map((a) => a.id)).toEqual(['a', null])
   })
+  it('matches a run: receipt against the runner row\'s runId', () => {
+    const runner = { id: null, runId: 'job1', sessionId: 's-r' } as AgentSession
+    const l = pinLiveAgent([agent('a'), runner], 'run:job1')
+    expect(l.live).toBe(runner)
+    expect(l.rest.map((a) => a.id)).toEqual(['a'])
+  })
+  it('does not match a run: receipt to a bare id or another run', () => {
+    const runner = { id: null, runId: 'job1' } as AgentSession
+    expect(pinLiveAgent([agent('job1'), runner], 'run:zzz').live).toBeNull()
+    expect(pinLiveAgent([agent('run:job1')], 'run:job1').live).toBeNull()
+  })
   it('omits the card when nothing is live or the job is not listed', () => {
     expect(pinLiveAgent(list, null)).toEqual({ live: null, rest: list })
     expect(pinLiveAgent(list, 'zzz')).toEqual({ live: null, rest: list })

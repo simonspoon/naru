@@ -49,6 +49,8 @@ import {
   agentKindOf,
   agentRowActions,
   agentTint,
+  bucketOf,
+  type Bucket,
   formatContextTokens,
   isRunPaneId,
   parseRunPaneId,
@@ -333,8 +335,6 @@ function elapsedNow(ms: number): string {
   return elapsedSince(ms, Date.now())
 }
 
-type Bucket = 'BLOCKED' | 'ACTIVE' | 'DONE'
-
 // The same rule as `isRunningAgent` (`agentProject.ts`, where it is written
 // up): a listed session is active unless upstream reports it `done` (mesa
 // task 861). Everything else on the list — `working`, `failed`, `stopped`,
@@ -347,19 +347,15 @@ type Bucket = 'BLOCKED' | 'ACTIVE' | 'DONE'
 //
 // DONE does not mean the process is gone — `claude agents --json` lists live
 // processes and every session it reports `done` is still running (measured,
-// mesa task 571 — 33 of 33). It means upstream calls the work finished. Such
-// a session can still hold work in flight (task 802), which the
-// card's "N running below" reports.
+// mesa task 571 — 33 of 33). It means upstream calls the work finished. A
+// `done` session still holding live shells or subagents (task 802) is kept
+// in ACTIVE instead (naru task 1902), so DONE is only what has nothing in
+// flight. The rule is `agentRow.ts::bucketOf`.
 //
 // `AgentSession` carries no completion timestamp (only `startedAt`) — `claude
 // agents --json` doesn't report one — so DONE keeps the whole list's
 // `startedAt` desc order as the closest available proxy for "most recently
 // finished".
-function bucketOf(a: AgentSession): Bucket {
-  if (a.state === 'blocked') return 'BLOCKED'
-  return a.state === 'done' ? 'DONE' : 'ACTIVE'
-}
-
 const BUCKETS: Bucket[] = ['BLOCKED', 'ACTIVE', 'DONE']
 
 /**
