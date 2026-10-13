@@ -352,8 +352,8 @@ fork is **flagged**, and the user decides.
   builtin merge <ITEM> (--body <TEXT> | --body-file <PATH>)`, each printing
   the updated item (`--quiet` accepted); `POST /api/library/{id}/builtin`
   with `{"action": "keep"|"take"|"merge", "body"?: string}`, answering the
-  updated `LibraryItem`. On `#/library` a flagged fork wears a **built-in
-  updated** badge and offers **review update**: the fork diffed against the
+  updated `LibraryItem`. On `#/library` a flagged fork wears a **differs
+  from built-in** badge and offers **review update**: the fork diffed against the
   new built-in (`- your fork · + the new built-in`), then **Keep my fork**,
   **Take the built-in** (confirmed first — it replaces the fork's body) and
   **Merge…**, an editor seeded with the fork beside the new built-in

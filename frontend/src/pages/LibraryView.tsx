@@ -1365,7 +1365,7 @@ function LibraryItemsTab() {
   const [showingVersions, setShowingVersions] = useState<string | null>(null)
   const [showingDiff, setShowingDiff] = useState<string | null>(null)
   const [showingHooks, setShowingHooks] = useState<string | null>(null)
-  // The "built-in updated" review under a flagged fork (mesa task 1349).
+  // The "differs from built-in" review under a flagged fork (mesa task 1349).
   const [showingReview, setShowingReview] = useState<string | null>(null)
   const [syncing, setSyncing] = useState(false)
 
@@ -1625,8 +1625,11 @@ function LibraryItemsTab() {
                           </span>
                         )}
                         {review !== null && (
-                          <span className="library-badge library-badge-alert">
-                            built-in updated
+                          <span
+                            className="library-badge library-badge-alert"
+                            title="This fork differs from the shipped built-in and has not been reviewed since the built-in changed or since it was linked. Use review to keep yours, take the built-in, or merge."
+                          >
+                            differs from built-in
                           </span>
                         )}
                         {overridden !== undefined && (
