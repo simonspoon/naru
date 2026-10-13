@@ -8,7 +8,7 @@ import type { AgentWatchKind } from "./AgentWatchKind";
 export type AgentWatchRow = { 
 /**
  * `<session id>`, `<session id>/<agent id>`, `<session id>/pid:<n>` or
- * `<session id>/cmd:<name>`.
+ * `<session id>/cmd:<child index>:<name>`.
  */
 key: string, kind: AgentWatchKind, sessionId: string, 
 /**
