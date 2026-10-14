@@ -5021,6 +5021,64 @@ pub(crate) struct WatchThread {
     pub history_from: Option<i64>,
     /// The model of the newest assistant message that names one.
     pub model: Option<String>,
+    /// Other tool calls (not a subagent launch, not a background shell) as
+    /// `(start, end, tool name)`, `tool_use` timestamp to its paired
+    /// `tool_result` timestamp. `end` is [`WATCH_TOOL_OPEN`] while no result
+    /// has arrived. Only calls overlapping the window; newest
+    /// [`WATCH_MAX_TOOLS`] kept.
+    pub tools: Vec<(i64, i64, String)>,
+}
+
+/// `end` of a tool call whose result has not been seen yet.
+pub(crate) const WATCH_TOOL_OPEN: i64 = -1;
+
+/// Most tool calls kept per transcript (the payload rides a 5s poll).
+const WATCH_MAX_TOOLS: usize = 300;
+
+/// The `(id, name)` of each `tool_use` block in `content` that the watcher
+/// draws as a plain tool call: a subagent launch (`Agent`/`Task`) and a
+/// background `Bash` already have their own row, so they are left out.
+fn watch_tool_uses(content: &serde_json::Value) -> Vec<(String, String)> {
+    let Some(blocks) = content.as_array() else {
+        return Vec::new();
+    };
+    blocks
+        .iter()
+        .filter(|b| {
+            matches!(
+                b.get("type").and_then(|t| t.as_str()),
+                Some("tool_use") | Some("server_tool_use")
+            )
+        })
+        .filter_map(|b| {
+            let id = b.get("id")?.as_str()?;
+            let name = b.get("name")?.as_str()?;
+            if matches!(name, "Agent" | "Task") {
+                return None;
+            }
+            let background = b
+                .get("input")
+                .and_then(|i| i.get("run_in_background"))
+                .and_then(|v| v.as_bool())
+                == Some(true);
+            if background {
+                return None;
+            }
+            Some((id.to_string(), sanitize_capped(name)?))
+        })
+        .collect()
+}
+
+/// The `tool_use_id` of each `tool_result` block in `content`.
+fn watch_tool_results(content: &serde_json::Value) -> Vec<String> {
+    let Some(blocks) = content.as_array() else {
+        return Vec::new();
+    };
+    blocks
+        .iter()
+        .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
+        .filter_map(|b| Some(b.get("tool_use_id")?.as_str()?.to_string()))
+        .collect()
 }
 
 /// One transcript's [`WatchThread`]. `main_only` skips sidechain lines (the
@@ -5039,6 +5097,9 @@ fn watch_from_text(text: &str, since: i64, main_only: bool, truncated: bool) -> 
     let mut out = WatchThread::default();
     let mut events: Vec<i64> = Vec::new();
     let mut first: Option<i64> = None;
+    // tool_use id -> index into out.tools, for pairing with its result.
+    let mut open: HashMap<String, usize> = HashMap::new();
+    let mut tools: Vec<(i64, i64, String)> = Vec::new();
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() {
@@ -5061,6 +5122,20 @@ fn watch_from_text(text: &str, since: i64, main_only: bool, truncated: bool) -> 
         if t >= since {
             events.push(t);
         }
+        if let Some(content) = raw.message.as_ref().and_then(|m| m.content.as_ref()) {
+            if raw.kind.as_deref() == Some("assistant") {
+                for (id, name) in watch_tool_uses(content) {
+                    open.insert(id, tools.len());
+                    tools.push((t, WATCH_TOOL_OPEN, name));
+                }
+            } else {
+                for id in watch_tool_results(content) {
+                    if let Some(i) = open.remove(&id) {
+                        tools[i].1 = t.max(tools[i].0);
+                    }
+                }
+            }
+        }
         if raw.kind.as_deref() == Some("assistant")
             && let Some(model) = raw.message.as_ref().and_then(|m| m.model.as_ref())
         {
@@ -5068,6 +5143,11 @@ fn watch_from_text(text: &str, since: i64, main_only: bool, truncated: bool) -> 
         }
     }
     out.runs = coalesce_runs(&events);
+    tools.retain(|(_, end, _)| *end == WATCH_TOOL_OPEN || *end >= since);
+    if tools.len() > WATCH_MAX_TOOLS {
+        tools.drain(..tools.len() - WATCH_MAX_TOOLS);
+    }
+    out.tools = tools;
     if truncated {
         out.history_from = first;
     }
@@ -9339,6 +9419,49 @@ mod tests {
         let w = watch_from_text(&text, t0 + 300, false, false);
         assert_eq!(w.runs, vec![(t0 + 600, t0 + 630)]);
         assert_eq!(w.model.as_deref(), Some("haiku"));
+    }
+
+    #[test]
+    fn watch_from_text_pairs_tool_calls_and_skips_agents_and_background() {
+        let t0 = parse_ts("2026-06-15T01:00:00Z").unwrap();
+        let asst = |ts: &str, blocks: &str| {
+            format!(
+                r#"{{"type":"assistant","timestamp":"{ts}","message":{{"content":[{blocks}]}}}}"#
+            )
+        };
+        let user = |ts: &str, id: &str| {
+            format!(
+                r#"{{"type":"user","timestamp":"{ts}","message":{{"content":[{{"type":"tool_result","tool_use_id":"{id}","content":"ok"}}]}}}}"#
+            )
+        };
+        let text = [
+            asst("2026-06-15T01:00:00Z", r#"{"type":"tool_use","id":"old","name":"Read","input":{}}"#),
+            user("2026-06-15T01:00:01Z", "old"),
+            asst(
+                "2026-06-15T01:10:00Z",
+                r#"{"type":"tool_use","id":"a","name":"Read","input":{}},{"type":"tool_use","id":"b","name":"Agent","input":{}},{"type":"tool_use","id":"c","name":"Bash","input":{"run_in_background":true}}"#,
+            ),
+            user("2026-06-15T01:10:03Z", "a"),
+            asst("2026-06-15T01:10:10Z", r#"{"type":"tool_use","id":"d","name":"Grep","input":{}}"#),
+            "not json".to_string(),
+        ]
+        .join("\n");
+        let w = watch_from_text(&text, t0 + 300, true, false);
+        assert_eq!(
+            w.tools,
+            vec![
+                (t0 + 600, t0 + 603, "Read".to_string()),
+                (t0 + 610, WATCH_TOOL_OPEN, "Grep".to_string()),
+            ]
+        );
+        // A bare-string user message and a missing message are harmless.
+        let w = watch_from_text(
+            r#"{"type":"user","timestamp":"2026-06-15T01:10:00Z","message":{"content":"hi"}}"#,
+            0,
+            true,
+            false,
+        );
+        assert!(w.tools.is_empty());
     }
 
     #[test]

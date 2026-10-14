@@ -11,6 +11,9 @@ import {
   rowSegments,
   segmentBox,
   shouldAlert,
+  formatDuration,
+  toolBars,
+  toolLabel,
   ticks,
 } from './agentWatch'
 import type { AgentWatchRow } from './types/AgentWatchRow'
@@ -32,6 +35,7 @@ function row(over: Partial<AgentWatchRow> & { key: string }): AgentWatchRow {
     historyFrom: null,
     outputAt: null,
     finished: false,
+    tools: [],
     ...over,
   }
 }
@@ -156,5 +160,55 @@ describe('geometry', () => {
 
   it('links a row to its session detail', () => {
     expect(rowHref(row({ key: 'a/x', sessionId: 'a' }))).toBe('#/cc/sessions/a')
+  })
+})
+
+describe('toolBars', () => {
+  it('draws a single call with its duration', () => {
+    const r = row({ key: 'a', tools: [[WS + 100, WS + 103, 'Read']] })
+    const bars = toolBars(r, NOW, WS)
+    expect(bars).toHaveLength(1)
+    expect(bars[0]).toMatchObject({ from: WS + 100, to: WS + 103, count: 1, busy: 3 })
+    expect(toolLabel(bars[0])).toBe('Read · 3s')
+  })
+
+  it('merges adjacent short calls and keeps distant ones apart', () => {
+    const r = row({
+      key: 'a',
+      tools: [
+        [WS + 100, WS + 101, 'Read'],
+        [WS + 102, WS + 103, 'Read'],
+        [WS + 103, WS + 104, 'Edit'],
+        [WS + 400, WS + 410, 'Grep'],
+      ],
+    })
+    const bars = toolBars(r, NOW, WS)
+    expect(bars).toHaveLength(2)
+    expect(bars[0]).toMatchObject({ from: WS + 100, to: WS + 104, count: 3, busy: 3 })
+    expect(toolLabel(bars[0])).toBe('3 calls: Read×2, Edit · busy 3s')
+    expect(toolLabel(bars[1])).toBe('Grep · 10s')
+  })
+
+  it('runs an open call to now, clips to the window, and stops a finished row at its last event', () => {
+    const open = row({ key: 'a', tools: [[NOW - 30, -1, 'Bash']] })
+    expect(toolBars(open, NOW, WS)[0]).toMatchObject({ to: NOW, busy: 30 })
+    const early = row({ key: 'a', tools: [[WS - 50, WS + 10, 'Read']] })
+    expect(toolBars(early, NOW, WS)[0].from).toBe(WS)
+    const done = row({ key: 'a', finished: true, lastEventAt: WS + 200, tools: [[WS + 150, -1, 'Read']] })
+    expect(toolBars(done, NOW, WS)[0].to).toBe(WS + 200)
+  })
+
+  it('tolerates a row with no tools field', () => {
+    const r = row({ key: 'a' })
+    delete (r as Partial<AgentWatchRow>).tools
+    expect(toolBars(r, NOW, WS)).toEqual([])
+  })
+})
+
+describe('formatDuration', () => {
+  it('formats sub-second, seconds and minutes', () => {
+    expect(formatDuration(0.4)).toBe('<1s')
+    expect(formatDuration(4)).toBe('4s')
+    expect(formatDuration(125)).toBe('2m05s')
   })
 })

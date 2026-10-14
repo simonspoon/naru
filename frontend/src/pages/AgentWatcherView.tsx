@@ -10,6 +10,8 @@ import {
   segmentBox,
   shouldAlert,
   ticks,
+  toolBars,
+  toolLabel,
 } from '../agentWatch'
 import { modelColor } from '../sessionDetail'
 import { shortModel } from '../sessionGraph'
@@ -117,6 +119,17 @@ export function AgentWatcherView({ active = true }: { active?: boolean } = {}) {
                     />
                   )
                 })}
+                {toolBars(row, data.now, windowStart).map((bar) => {
+                  const box = segmentBox({ ...bar, state: 'active' }, windowStart, data.now)
+                  return (
+                    <span
+                      key={`tool-${bar.from}`}
+                      className="agent-watch-tool"
+                      title={toolLabel(bar)}
+                      style={{ left: `${box.left}%`, width: `${box.width}%` }}
+                    />
+                  )
+                })}
                 <span className="agent-watch-now" />
               </div>
             </a>
@@ -129,6 +142,7 @@ export function AgentWatcherView({ active = true }: { active?: boolean } = {}) {
             <span><i className="agent-watch-swatch quiet" /> quiet</span>
             <span><i className="agent-watch-swatch output" /> shell output</span>
             <span><i className="agent-watch-swatch stalled" /> stalled</span>
+            <span><i className="agent-watch-swatch tool" /> tool call</span>
           </div>
         </div>
       )}

@@ -36,4 +36,10 @@ historyFrom: number | null,
 /**
  * A shell's output file mtime; `null` when it could not be read.
  */
-outputAt: number | null, finished: boolean, };
+outputAt: number | null, finished: boolean, 
+/**
+ * Other tool calls inside the window as `[start, end, tool name]` Unix
+ * seconds; `end` is `-1` while the call has no result yet. Subagent
+ * launches and background shells are not here (they have their own row).
+ */
+tools: Array<[number, number, string]>, };

@@ -427,6 +427,12 @@ pub struct AgentWatchRow {
     #[serde(default)]
     pub output_at: Option<i64>,
     pub finished: bool,
+    /// Other tool calls inside the window as `[start, end, tool name]` Unix
+    /// seconds; `end` is `-1` while the call has no result yet. Subagent
+    /// launches and background shells are not here (they have their own row).
+    #[ts(type = "Array<[number, number, string]>")]
+    #[serde(default)]
+    pub tools: Vec<(i64, i64, String)>,
 }
 
 /// One configurable agent-spawn command as the Settings page sees it

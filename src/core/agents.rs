@@ -1542,6 +1542,7 @@ pub fn watch(sessions: Vec<AgentSession>, minutes: i64) -> AgentWatch {
             history_from: thread.history_from,
             output_at: None,
             finished: false,
+            tools: thread.tools,
         });
         if let Some(root) = root.as_deref() {
             // Walk as far back as a delegate can sit in one long call without
@@ -1583,6 +1584,7 @@ pub fn watch(sessions: Vec<AgentSession>, minutes: i64) -> AgentWatch {
                     history_from: thread.history_from,
                     output_at: None,
                     finished,
+                    tools: thread.tools,
                 });
             }
         }
@@ -1617,6 +1619,7 @@ pub fn watch(sessions: Vec<AgentSession>, minutes: i64) -> AgentWatch {
                     .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
                     .map(|d| d.as_secs() as i64),
                 finished: false,
+                tools: Vec::new(),
             });
         }
     }

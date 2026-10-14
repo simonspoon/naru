@@ -22,7 +22,7 @@ Payload (`AgentWatch`, ts-exported, camelCase, **all times Unix seconds**):
 children), `label` (sanitized, bounded), `detail`, `model`, `startedAt`,
 `runs` (`[start, end]` working stretches inside the window, empty for a shell),
 `lastEventAt` (newest event, any age), `historyFrom`, `outputAt` (shells),
-`finished`.
+`finished`, `tools` (`[start, end, name]` other tool calls, below).
 
 ## What goes in
 
@@ -37,6 +37,21 @@ event; the session's own file skips sidechain lines (the `pulse_from_text`
 rule), a subagent file keeps them. `runs` are the events inside the window
 coalesced by `coalesce_runs` — the same arithmetic and gap
 (`cc::THREAD_IDLE_GAP_SECS`) as the session timeline's `active_intervals`.
+
+## Tool calls
+
+`cc::watch_from_text` also pairs each `tool_use` block with its `tool_result`
+(`tool_use_id`) into `tools`: `[start, end, name]`, the two line timestamps. `end`
+is `-1` while no result has arrived (drawn to now, or to the last event of a
+finished row). A subagent launch (`Agent`/`Task`) and a `run_in_background`
+call are left out (they have their own row/segment); calls ending before the
+window are dropped and the newest 300 per transcript kept.
+
+The page draws them as a thin cyan strip along the bottom of each track
+(`toolBars`): calls closer than 0.5% of the window merge into one bar, and
+the hover title says `Read · 3s` or `5 calls: Read×3, Edit×2 · busy 12s`.
+Legend entry "tool call". This is overlay only, not a state: `rowSegments` is
+unchanged.
 
 ## Segment states (`frontend/src/agentWatch.ts`)
 
@@ -82,6 +97,6 @@ no config keys, no phone tab-bar entry.
 
 ## Tests
 
-`cc.rs` (`coalesce_runs`, `watch_from_text`), `agents.rs` (`watch_includes`,
+`cc.rs` (`coalesce_runs`, `watch_from_text`, tool pairing), `agents.rs` (`watch_includes`,
 `parse_lsof`), `frontend/src/agentWatch.test.ts`, and a section of
 `scripts/agents-check.sh` (route, parent links, window clamp, foreign Host).

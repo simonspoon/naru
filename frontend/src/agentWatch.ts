@@ -31,6 +31,25 @@ export interface Segment {
   state: SegmentState
 }
 
+/** One drawn tool-call bar: a single call, or adjacent short calls merged so a
+ *  burst stays readable. */
+export interface ToolBar {
+  from: number
+  to: number
+  /** Calls folded into this bar. */
+  count: number
+  /** Summed call durations in seconds (not the bar's span). */
+  busy: number
+  /** Tool names with their call counts, most frequent first. */
+  names: [string, number][]
+}
+
+/** Calls whose gap is under this share of the window merge into one bar. */
+const TOOL_MERGE_PCT = 0.5
+
+/** A call's `end` while its result has not arrived (matches the server). */
+export const TOOL_OPEN = -1
+
 export interface OrderedRow {
   row: AgentWatchRow
   /** 0 for a session, 1 for its subagents and shells. */
@@ -161,6 +180,56 @@ function shellSegments(row: AgentWatchRow, now: number, windowStart: number): Se
     else out.push({ from: at, to: now, state: tail })
   }
   return out
+}
+
+/** The tool-call bars of one row across `[windowStart, now]`. Calls are
+ *  clipped to the window; one with no result yet runs to now (or to the row's
+ *  last event once it is finished). Calls closer together than
+ *  `TOOL_MERGE_PCT` of the window merge, so many short calls stay a few bars. */
+export function toolBars(row: AgentWatchRow, now: number, windowStart: number): ToolBar[] {
+  const hi = row.finished ? Math.min(now, row.lastEventAt ?? now) : now
+  const calls = (row.tools ?? [])
+    .map(([a, b, name]): [number, number, number, string] => {
+      const end = b === TOOL_OPEN ? hi : b
+      return [Math.max(a, windowStart), Math.min(end, now), Math.max(0, end - a), name]
+    })
+    .filter(([a, b]) => b >= a)
+    .sort((x, y) => x[0] - y[0])
+  const gap = ((now - windowStart) * TOOL_MERGE_PCT) / 100
+  const out: ToolBar[] = []
+  const counts: Map<string, number>[] = []
+  for (const [a, b, dur, name] of calls) {
+    const last = out[out.length - 1]
+    if (last && a - last.to <= gap) {
+      last.to = Math.max(last.to, b)
+      last.count += 1
+      last.busy += dur
+      const m = counts[counts.length - 1]
+      m.set(name, (m.get(name) ?? 0) + 1)
+    } else {
+      out.push({ from: a, to: b, count: 1, busy: dur, names: [] })
+      counts.push(new Map([[name, 1]]))
+    }
+  }
+  out.forEach((bar, i) => {
+    bar.names = [...counts[i].entries()].sort((x, y) => y[1] - x[1] || x[0].localeCompare(y[0]))
+  })
+  return out
+}
+
+/** `850ms`, `4s`, `2m05s`. */
+export function formatDuration(s: number): string {
+  if (s < 1) return '<1s'
+  if (s < 60) return `${Math.round(s)}s`
+  const m = Math.floor(s / 60)
+  return `${m}m${String(Math.round(s - m * 60)).padStart(2, '0')}s`
+}
+
+/** The hover text of a tool bar: `Read · 3s`, or `5 calls: Read×3, Edit×2 · busy 12s`. */
+export function toolLabel(bar: ToolBar): string {
+  if (bar.count === 1) return `${bar.names[0][0]} · ${formatDuration(bar.busy)}`
+  const names = bar.names.map(([n, c]) => (c > 1 ? `${n}×${c}` : n)).join(', ')
+  return `${bar.count} calls: ${names} · busy ${formatDuration(bar.busy)}`
 }
 
 /** Whether a row is doing work right now. */
