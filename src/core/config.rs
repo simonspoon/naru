@@ -255,11 +255,16 @@ pub const WORKFLOW_PROMPT: &str = "workflow-prompt";
 /// with stdin and stdout piped to the runner, so an agent run outlives the
 /// Naru server. Print mode on purpose, like `workflow-prompt` and unlike every other spawn above.
 pub const RUNNER: &str = "runner";
+/// The knowledge base's haiku calls (naru task 1919, `docs/kb.md`): `naru kb
+/// ask` makes one and a detached `naru __job kb-add` makes one per chunk of
+/// raw material, both tool-less `claude -p --json-schema` calls whose answer
+/// Naru validates and applies itself.
+pub const KB: &str = "kb";
 
 /// Every configurable command, in the order the docs and the Settings page
 /// list them. The single source of truth for "which keys mesa configures" —
 /// [`default_command`] answers the same question one key at a time.
-pub const ACTIONS: [&str; 9] = [
+pub const ACTIONS: [&str; 10] = [
     TODO_WATCHER,
     INBOX_WATCHER,
     AGENT_SPAWN,
@@ -269,6 +274,7 @@ pub const ACTIONS: [&str; 9] = [
     RETRO,
     WORKFLOW_PROMPT,
     RUNNER,
+    KB,
 ];
 
 /// Built-in default for [`TODO_WATCHER`] — the argv mesa shipped before the
@@ -353,6 +359,11 @@ pub const DEFAULT_LIVE_DREAM: &str = r#"claude -p --model sonnet --name {name} -
 /// answer schema; Naru files the findings. A saved template that still starts
 /// a `--bg` agent is retired ([`retired_bg_override`]).
 pub const DEFAULT_RETRO: &str = DEFAULT_INBOX_WATCHER;
+/// Built-in default for [`KB`] (naru task 1919) — [`DEFAULT_INBOX_WATCHER`]'s
+/// shape: a tool-less structured `claude -p` call. `{name}` is `naru kb ask` or
+/// `naru kb add`, `{model}` `haiku`, `{prompt}` what Naru built from the
+/// question or raw material and the notes, `{schema}` the answer schema.
+pub const DEFAULT_KB: &str = DEFAULT_INBOX_WATCHER;
 /// Built-in default for [`WORKFLOW_PROMPT`] (mesa task 1607, naru task 1687):
 /// one print-mode call — `claude -p --output-format json` — that exits with a
 /// single result object on stdout (`result` holds the answer), not a background
@@ -402,6 +413,7 @@ pub fn default_command(action: &str) -> Option<&'static str> {
         RETRO => Some(DEFAULT_RETRO),
         WORKFLOW_PROMPT => Some(DEFAULT_WORKFLOW_PROMPT),
         RUNNER => Some(DEFAULT_RUNNER),
+        KB => Some(DEFAULT_KB),
         _ => None,
     }
 }
@@ -534,7 +546,7 @@ fn note_retired_once(action: &str) -> bool {
 }
 
 /// Whether `template` is a saved `live-summary`/`live-dream` (naru task 1690)
-/// or `inbox-watcher` (naru task 1691) or `retro` (naru task 1692) override that still starts a `--bg`
+/// or `inbox-watcher` (naru task 1691) or `retro` (naru task 1692) or `kb` (naru task 1919) override that still starts a `--bg`
 /// agent. Those actions now run
 /// synchronously (`claude -p --output-format json`) and Naru applies the
 /// answer itself, so a `--bg` template — which prints a receipt, not result
@@ -546,6 +558,7 @@ pub fn retired_bg_override(action: &str, template: &str) -> bool {
         || action == LIVE_DREAM
         || action == INBOX_WATCHER
         || action == RETRO
+        || action == KB
         || action == LIVE_AGENT)
         && template.split_whitespace().any(|w| w == "--bg")
 }
@@ -555,6 +568,7 @@ pub fn retired_bg_override(action: &str, template: &str) -> bool {
 fn retired_task(action: &str) -> u32 {
     match action {
         LIVE_AGENT => 1886,
+        KB => 1919,
         RETRO => 1692,
         INBOX_WATCHER => 1691,
         _ => 1690,
@@ -1749,7 +1763,7 @@ pub fn offered_placeholders(action: &str) -> &'static [&'static str] {
         // Plus the schema Naru owns (naru task 1690).
         LIVE_SUMMARY | LIVE_DREAM => &["{id}", "{name}", "{prompt}", "{schema}"],
         // Plus the pass's model (naru tasks 1691, 1692).
-        INBOX_WATCHER | RETRO => &["{id}", "{name}", "{prompt}", "{schema}", "{model}"],
+        INBOX_WATCHER | RETRO | KB => &["{id}", "{name}", "{prompt}", "{schema}", "{model}"],
         WORKFLOW_PROMPT => &["{model}", "{thinking}", "{name}", "{prompt}"],
         RUNNER => &[
             "{model}",
@@ -5241,6 +5255,14 @@ mod tests {
                 "{run_agent}"
             ]
         );
+        // The knowledge base (naru task 1919) is the tenth: the retro shape.
+        assert_eq!(settings[9].action, KB);
+        assert_eq!(settings[9].default, DEFAULT_KB);
+        assert_eq!(
+            settings[9].placeholders,
+            ["{id}", "{name}", "{prompt}", "{schema}", "{model}"]
+        );
+        assert!(retired_bg_override(KB, "claude --bg -- {prompt}"));
     }
 
     /// The runner default validates and quotes its values as single words,

@@ -30,7 +30,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::core::{
-    Error, Priority, Result, Status, Store, agents, config, inbox_triage, library, live, llm,
+    Error, Priority, Result, Status, Store, agents, config, inbox_triage, kb, library, live, llm,
     project_memory, retro, runner, script_runs,
 };
 
@@ -57,6 +57,9 @@ pub enum Job {
     /// session and one `sonnet` roll-up, applied by `core::retro`; `run_id`
     /// is the `retro_runs` claim; the claude session names are derived from it.
     Retro { run_id: i64 },
+    /// File one spooled `naru kb add` text into the knowledge base (naru task
+    /// 1919): haiku `-p` calls, applied by `core::kb`.
+    KbAdd { id: String, source: String },
 }
 
 impl Job {
@@ -88,6 +91,11 @@ impl Job {
             Job::Retro { run_id } => {
                 a.extend(["retro".into(), "--run".into(), run_id.to_string()]);
             }
+            Job::KbAdd { id, source } => {
+                a.extend(["kb-add".into(), "--id".into(), id.clone()]);
+                // `=` form: a source label starting with `-` stays a value.
+                a.push(format!("--source={source}"));
+            }
         }
         a.extend(["--dir".into(), dir.to_string()]);
         a
@@ -98,6 +106,7 @@ impl Job {
         match self {
             Job::InboxTriage { .. } => "inbox-triage.log",
             Job::Retro { .. } => "retro.log",
+            Job::KbAdd { .. } => "kb.log",
             _ => "memory-jobs.log",
         }
     }
@@ -266,6 +275,21 @@ pub fn run_with(store: &mut Store, job: &Job, dir: &str, timeout: Duration) -> R
                     prompt,
                     schema,
                     Some(model),
+                    &prompts,
+                    dir,
+                    timeout,
+                )
+            })
+        }
+        Job::KbAdd { id, source } => {
+            kb::run_add_job(&kb::kb_dir(), id, source, &mut |prompt, schema| {
+                llm::complete_structured(
+                    config::KB,
+                    None,
+                    "naru kb add",
+                    prompt,
+                    schema,
+                    Some(kb::MODEL),
                     &prompts,
                     dir,
                     timeout,

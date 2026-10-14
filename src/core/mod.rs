@@ -16,6 +16,7 @@ pub mod git;
 pub mod guard;
 pub mod hooks;
 pub mod inbox_triage;
+pub mod kb;
 pub mod library;
 pub mod listen;
 pub mod live;

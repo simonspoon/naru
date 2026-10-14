@@ -176,7 +176,7 @@ fn delete_in(dir: &Path) -> Result<VoiceEnrollment> {
 }
 
 /// `YYYY-MM-DDTHH:MM:SSZ` (UTC) of a file time.
-fn iso(t: SystemTime) -> String {
+pub(crate) fn iso(t: SystemTime) -> String {
     let secs = t
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)

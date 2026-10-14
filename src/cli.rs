@@ -156,6 +156,15 @@ EXAMPLES
     /// finding log (mesa task 1158)
     #[command(subcommand)]
     Retro(RetroCmd),
+    /// The knowledge base: add raw material, ask it questions, browse its notes
+    /// (naru task 1919)
+    ///
+    /// Markdown notes under `<naru home>/kb/topics/<topic>/<slug>.md`, filed
+    /// and answered from by tool-less haiku `claude -p` calls through the `kb`
+    /// template. The model never touches a file: Naru validates what it
+    /// proposes and writes the notes itself. See docs/kb.md.
+    #[command(subcommand)]
+    Kb(KbCmd),
     /// Move mesa and Claude Code's home directory to a new computer
     /// (docs/migrate.md)
     #[command(subcommand)]
@@ -498,6 +507,16 @@ enum JobCmd {
         /// The claude session name
         #[arg(long)]
         name: String,
+        #[arg(long)]
+        dir: String,
+    },
+    /// File one spooled `kb add` text (the knowledge base's job)
+    KbAdd {
+        /// The spool id
+        #[arg(long)]
+        id: String,
+        #[arg(long, default_value = "cli")]
+        source: String,
         #[arg(long)]
         dir: String,
     },
@@ -2677,6 +2696,72 @@ EXAMPLES
         /// Overwrite an existing db and differing files
         #[arg(long)]
         force: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum KbCmd {
+    /// Queue raw text to be filed into the knowledge base; prints `{id, status}`
+    ///
+    /// Give the text as words after `add`, with `--file <path>`, or with
+    /// `--stdin` — exactly one. It must be non-empty and at most 32 KiB. The
+    /// text is spooled and a detached `naru __job kb-add` files it (the add
+    /// is asynchronous: the notes appear when the job finishes; its report is
+    /// in `logs/kb.log`). A job that cannot start is `unavailable`. Put
+    /// `--source` and `--quiet` BEFORE the words.
+    #[command(after_help = "\
+EXAMPLES
+  mesa kb add --source standup the deploy key rotates on the first of the month
+  mesa kb add --file notes.md
+  pbpaste | mesa kb add --stdin")]
+    Add {
+        /// The text (everything after `add`); quoting is optional
+        #[arg(num_args = 0.., trailing_var_arg = true)]
+        text: Vec<String>,
+        /// Read the text from this file instead
+        #[arg(long, value_name = "PATH")]
+        file: Option<String>,
+        /// Read the text from stdin instead
+        #[arg(long)]
+        stdin: bool,
+        /// Where the text came from, recorded in the kb log (default `cli`)
+        #[arg(long)]
+        source: Option<String>,
+        /// Accepted for consistency; the output has no body to drop
+        #[arg(long)]
+        quiet: bool,
+    },
+    /// Answer a question from the knowledge base alone; prints
+    /// `{answer, sources: [{path, title}]}`
+    ///
+    /// Synchronous: one haiku call over the notes a keyword prefilter picks.
+    /// An empty kb, or notes that do not answer, give `{"answer": "",
+    /// "sources": []}` and exit 0. Every cited source is a real note; an answer
+    /// that cites none is `unavailable`, as is a failed call. Put any flag
+    /// BEFORE the words (like `kb add`): after them it is part of the question.
+    #[command(after_help = "\
+EXAMPLES
+  mesa kb ask when does the deploy key rotate")]
+    Ask {
+        /// The question (everything after `ask`); quoting is optional
+        #[arg(required = true, num_args = 1.., trailing_var_arg = true)]
+        question: Vec<String>,
+    },
+    /// List the notes: a bare array of `{path, topic, title, tags, updated}`
+    List {
+        /// Only this topic's notes
+        #[arg(long)]
+        topic: Option<String>,
+    },
+    /// Print one note as `{path, body}` (`--quiet`: without the body)
+    ///
+    /// A path that is not a note in the kb is `not_found`.
+    Show {
+        /// The note's path as `kb list` shows it, e.g. `topics/ops/deploys.md`
+        path: String,
+        /// Print the path without the body
+        #[arg(long)]
+        quiet: bool,
     },
 }
 
@@ -5044,6 +5129,7 @@ fn execute(command: Command) -> Result<()> {
         Command::Attachment(cmd) => run_attachment(cmd),
         Command::Cc(cmd) => run_cc(cmd),
         Command::Retro(cmd) => run_retro(cmd),
+        Command::Kb(cmd) => run_kb(cmd),
         Command::Migrate(cmd) => run_migrate(cmd),
         Command::Serve {
             port,
@@ -5093,6 +5179,7 @@ fn execute(command: Command) -> Result<()> {
                     dir,
                 ),
                 JobCmd::Retro { run, dir } => (memory_job::Job::Retro { run_id: run }, dir),
+                JobCmd::KbAdd { id, source, dir } => (memory_job::Job::KbAdd { id, source }, dir),
                 JobCmd::InboxTriage { item, name, dir } => (
                     memory_job::Job::InboxTriage {
                         item_id: item,
@@ -6793,6 +6880,97 @@ fn run_migrate(cmd: MigrateCmd) -> Result<()> {
                 &migrate::data_dirs(),
                 &opts,
             )?);
+        }
+    }
+    Ok(())
+}
+
+/// Keys dropped from a kb note under `--quiet` (naru task 1919): the body.
+const QUIET_DROP_KB_NOTE: &[&str] = &["body"];
+
+fn run_kb(cmd: KbCmd) -> Result<()> {
+    use crate::core::kb;
+    let root = kb::kb_dir();
+    match cmd {
+        KbCmd::Add {
+            text,
+            file,
+            stdin,
+            source,
+            quiet: _,
+        } => {
+            let given =
+                usize::from(!text.is_empty()) + usize::from(file.is_some()) + usize::from(stdin);
+            if given != 1 {
+                print_error(
+                    "usage",
+                    "give the text as words, with --file <path> or with --stdin: exactly one",
+                );
+                std::process::exit(2);
+            }
+            // Read at most one byte past the limit, so an oversized file or
+            // pipe is refused by `check_add` without being slurped whole.
+            let read_capped = |r: &mut dyn std::io::Read, what: &str| -> Result<String> {
+                let mut bytes = Vec::new();
+                let mut capped = std::io::Read::take(r, kb::ADD_MAX as u64 + 1);
+                std::io::Read::read_to_end(&mut capped, &mut bytes)
+                    .map_err(|e| Error::Validation(format!("cannot read {what}: {e}")))?;
+                match String::from_utf8(bytes) {
+                    Ok(s) => Ok(s),
+                    Err(e) if e.as_bytes().len() > kb::ADD_MAX => {
+                        Ok(String::from_utf8_lossy(e.as_bytes()).into_owned())
+                    }
+                    Err(_) => Err(Error::Validation(format!("{what} is not valid UTF-8"))),
+                }
+            };
+            let raw = if let Some(path) = file {
+                let mut f = std::fs::File::open(&path)
+                    .map_err(|e| Error::Validation(format!("cannot read {path}: {e}")))?;
+                read_capped(&mut f, &path)?
+            } else if stdin {
+                read_capped(&mut std::io::stdin(), "stdin")?
+            } else {
+                text.join(" ")
+            };
+            let source = source.unwrap_or_else(|| "cli".into());
+            kb::check_add(&raw, &source)?;
+            let store = Store::open_default()?;
+            let id = kb::spool(&root, &raw)?;
+            let dir = config::workspace_dir().to_string_lossy().into_owned();
+            let job = memory_job::Job::KbAdd {
+                id: id.clone(),
+                source,
+            };
+            if let Err(e) = memory_job::spawn(&job, &dir, store.db_path().as_deref()) {
+                kb::unspool(&root, &id);
+                return Err(Error::Unavailable(format!(
+                    "the kb add job could not start, so nothing was queued: {e}"
+                )));
+            }
+            print_json(&json!({"id": id, "status": "queued"}));
+        }
+        KbCmd::Ask { question } => {
+            let store = Store::open_default()?;
+            let prompts = crate::core::library::prompts(&store)?;
+            let dir = config::workspace_dir().to_string_lossy().into_owned();
+            let answer = kb::ask_with(&root, &question.join(" "), &mut |prompt, schema| {
+                crate::core::llm::complete_structured(
+                    config::KB,
+                    None,
+                    "naru kb ask",
+                    prompt,
+                    schema,
+                    Some(kb::MODEL),
+                    &prompts,
+                    &dir,
+                    std::time::Duration::from_secs(120),
+                )
+            })?;
+            print_json(&answer);
+        }
+        KbCmd::List { topic } => print_json(&kb::list(&root, topic.as_deref())?),
+        KbCmd::Show { path, quiet } => {
+            print_record(&kb::show(&root, &path)?, quiet, QUIET_DROP_KB_NOTE);
         }
     }
     Ok(())
@@ -9676,6 +9854,24 @@ mod tests {
                 QUIET_DROP_RETRO_FINDING
             ))),
             minus(&full, QUIET_DROP_RETRO_FINDING),
+        );
+    }
+
+    /// Key parity for a kb note (naru task 1919): `--quiet` drops the body.
+    #[test]
+    fn kb_note_quiet_drops_the_body() {
+        let note = crate::core::kb::Note {
+            path: "topics/a/b.md".into(),
+            body: "text".into(),
+        };
+        assert_eq!(
+            sorted_owned(keys(&note)),
+            sorted(&["path", "body"]),
+            "kb::Note gained/lost a field: decide whether --quiet should drop it"
+        );
+        assert_eq!(
+            sorted_owned(value_keys(&quiet(&note, QUIET_DROP_KB_NOTE))),
+            sorted(&["path"]),
         );
     }
 
