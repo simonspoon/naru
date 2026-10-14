@@ -73,6 +73,7 @@ import {
   SPEED_STEP,
 } from '../speechSpeed'
 import { publishSpeechSpeed } from '../speechSpeedStore'
+import { playSpeechStream } from '../speechStream'
 import {
   bodyError as memoryBodyError,
   budgetMeter,
@@ -1465,6 +1466,13 @@ function SpeechSection() {
   // Inbox page's play button.
   const [playing, setPlaying] = useState(false)
   const [sampleError, setSampleError] = useState<string | null>(null)
+  // The Inbox page's fallback (mesa task 830): the preview route streams
+  // chunked WAV with no `Content-Length`, which Apple's media stack refuses
+  // as an `<audio src>`. Once the element has failed, samples are fetched and
+  // decoded onto this Web Audio clock instead — created and resumed inside
+  // the press, since only the gesture unlocks it.
+  const [decoding, setDecoding] = useState(false)
+  const clock = useRef<AudioContext | null>(null)
   // Adding a cloned voice (mesa task 1418) — offered only when the saved
   // audio engine is naru-audio; the legacy synthesiser clones nothing.
   const audio = useFetch(() => getAudio(), 'speech-audio')
@@ -1541,6 +1549,8 @@ function SpeechSection() {
   // otherwise — the drafted one, not the saved one, which is the whole point.
   function toggleSample() {
     setSampleError(null)
+    clock.current ??= new AudioContext()
+    void clock.current.resume()
     setPlaying(false)
     setSample((current) =>
       current
@@ -1548,6 +1558,50 @@ function SpeechSection() {
         : { voice: seeded.voice, model: seeded.model, nonce: Date.now() },
     )
   }
+
+  // Decode-it-yourself playback of the current sample once the element has
+  // failed. A route error arrives as the fetch's own message; leaving the
+  // sample (stop, a changed voice, unmount) cleans up and stops the audio.
+  useEffect(() => {
+    const ctx = clock.current
+    if (!sample || !decoding || !ctx) return
+    const request = new AbortController()
+    let live = true
+    let stream: { stop: () => void } | null = null
+    const fail = (err: unknown) => {
+      if (!live) return
+      setSample(null)
+      setPlaying(false)
+      setSampleError(sampleFailure(err instanceof Error ? err.message : String(err)))
+    }
+    playSpeechStream(
+      speechPreviewUrl(sample.voice, sample.model),
+      ctx,
+      {
+        onPlaying: () => live && setPlaying(true),
+        onEnded: () => {
+          if (!live) return
+          setSample(null)
+          setPlaying(false)
+        },
+        onError: fail,
+      },
+      request.signal,
+    ).then(
+      (s) => {
+        if (live) stream = s
+        else s.stop()
+      },
+      (err) => {
+        if (!request.signal.aborted) fail(err)
+      },
+    )
+    return () => {
+      live = false
+      request.abort()
+      stream?.stop()
+    }
+  }, [sample, decoding])
 
   // A sample that would not play: stop it and say why, in the server's words
   // (an `<audio>` error carries none, so the same request is asked again).
@@ -2030,7 +2084,7 @@ function SpeechSection() {
           autoplay reports a failure instead of leaving the button reading
           "synthesising…" forever. The in-flight synthesis on the server
           finishes and its bytes are discarded. */}
-      {sample && (
+      {sample && !decoding && (
         <audio
           key={`${sample.model}:${sample.voice}:${sample.nonce}`}
           src={speechPreviewUrl(sample.voice, sample.model)}
@@ -2045,7 +2099,10 @@ function SpeechSection() {
             if (el) applyElementSpeed(el, seeded.speed)
             el?.play().catch((err: DOMException) => {
               if (err.name === 'AbortError' || !live) return
-              failSample()
+              // The element could not start it: try the decoded path before
+              // reporting, which says why in the route's own words if it fails.
+              if (err.name === 'NotSupportedError') setDecoding(true)
+              else failSample()
             })
             return () => {
               live = false
@@ -2056,7 +2113,7 @@ function SpeechSection() {
             setSample(null)
             setPlaying(false)
           }}
-          onError={failSample}
+          onError={() => setDecoding(true)}
         />
       )}
 
