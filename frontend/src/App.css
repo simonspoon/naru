@@ -12358,6 +12358,8 @@ body.dock-resizing .dock-body {
   flex-direction: column;
   gap: 0.75rem;
   padding: 1rem;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .agent-watch-head {
@@ -12402,6 +12404,16 @@ body.dock-resizing .dock-body {
   grid-template-columns: 14rem 1fr;
   gap: 0.75rem;
   align-items: center;
+}
+
+/* Keep the time axis in view while the rows scroll beneath it. */
+.agent-watch-axis {
+  position: sticky;
+  top: -1rem;
+  z-index: 1;
+  padding-top: 1rem;
+  margin-top: -1rem;
+  background: var(--bg, inherit);
 }
 
 .agent-watch-row {
