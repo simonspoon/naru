@@ -5022,11 +5022,12 @@ pub(crate) struct WatchThread {
     /// The model of the newest assistant message that names one.
     pub model: Option<String>,
     /// Other tool calls (not a subagent launch, not a background shell) as
-    /// `(start, end, tool name)`, `tool_use` timestamp to its paired
+    /// `(start, end, tool name, summary)`, `tool_use` timestamp to its paired
     /// `tool_result` timestamp. `end` is [`WATCH_TOOL_OPEN`] while no result
     /// has arrived. Only calls overlapping the window; newest
-    /// [`WATCH_MAX_TOOLS`] kept.
-    pub tools: Vec<(i64, i64, String)>,
+    /// [`WATCH_MAX_TOOLS`] kept. `summary` is [`watch_tool_summary`] of the
+    /// call's input, empty when there is none.
+    pub tools: Vec<(i64, i64, String, String)>,
 }
 
 /// `end` of a tool call whose result has not been seen yet.
@@ -5035,10 +5036,39 @@ pub(crate) const WATCH_TOOL_OPEN: i64 = -1;
 /// Most tool calls kept per transcript (the payload rides a 5s poll).
 const WATCH_MAX_TOOLS: usize = 300;
 
-/// The `(id, name)` of each `tool_use` block in `content` that the watcher
+/// A one-line summary of what a tool call acted on, from its `input`: the same
+/// sanitized, capped text as [`tool_target`], with `Agent`/`Task` showing
+/// `subagent_type: description`, and, failing every known key, the first
+/// string value of the input. Empty when the input holds nothing usable.
+fn watch_tool_summary(name: &str, input: Option<&serde_json::Value>) -> String {
+    let Some(input) = input else {
+        return String::new();
+    };
+    let field = |k: &str| input.get(k).and_then(|v| v.as_str());
+    let raw = if matches!(name, "Agent" | "Task") {
+        match (field("subagent_type"), field("description")) {
+            (Some(a), Some(d)) => Some(format!("{a}: {d}")),
+            (a, d) => a.or(d).map(str::to_string),
+        }
+    } else {
+        None
+    };
+    raw.as_deref()
+        .and_then(sanitize_capped)
+        .or_else(|| tool_target(input))
+        .or_else(|| {
+            input
+                .as_object()?
+                .values()
+                .find_map(|v| v.as_str().and_then(sanitize_capped))
+        })
+        .unwrap_or_default()
+}
+
+/// The `(id, name, summary)` of each `tool_use` block in `content` that the watcher
 /// draws as a plain tool call: a subagent launch (`Agent`/`Task`) and a
 /// background `Bash` already have their own row, so they are left out.
-fn watch_tool_uses(content: &serde_json::Value) -> Vec<(String, String)> {
+fn watch_tool_uses(content: &serde_json::Value) -> Vec<(String, String, String)> {
     let Some(blocks) = content.as_array() else {
         return Vec::new();
     };
@@ -5056,15 +5086,17 @@ fn watch_tool_uses(content: &serde_json::Value) -> Vec<(String, String)> {
             if matches!(name, "Agent" | "Task") {
                 return None;
             }
-            let background = b
-                .get("input")
+            let input = b.get("input");
+            let background = input
                 .and_then(|i| i.get("run_in_background"))
                 .and_then(|v| v.as_bool())
                 == Some(true);
             if background {
                 return None;
             }
-            Some((id.to_string(), sanitize_capped(name)?))
+            let name = sanitize_capped(name)?;
+            let summary = watch_tool_summary(&name, input);
+            Some((id.to_string(), name, summary))
         })
         .collect()
 }
@@ -5099,7 +5131,7 @@ fn watch_from_text(text: &str, since: i64, main_only: bool, truncated: bool) -> 
     let mut first: Option<i64> = None;
     // tool_use id -> index into out.tools, for pairing with its result.
     let mut open: HashMap<String, usize> = HashMap::new();
-    let mut tools: Vec<(i64, i64, String)> = Vec::new();
+    let mut tools: Vec<(i64, i64, String, String)> = Vec::new();
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() {
@@ -5124,9 +5156,9 @@ fn watch_from_text(text: &str, since: i64, main_only: bool, truncated: bool) -> 
         }
         if let Some(content) = raw.message.as_ref().and_then(|m| m.content.as_ref()) {
             if raw.kind.as_deref() == Some("assistant") {
-                for (id, name) in watch_tool_uses(content) {
+                for (id, name, summary) in watch_tool_uses(content) {
                     open.insert(id, tools.len());
-                    tools.push((t, WATCH_TOOL_OPEN, name));
+                    tools.push((t, WATCH_TOOL_OPEN, name, summary));
                 }
             } else {
                 for id in watch_tool_results(content) {
@@ -5143,7 +5175,7 @@ fn watch_from_text(text: &str, since: i64, main_only: bool, truncated: bool) -> 
         }
     }
     out.runs = coalesce_runs(&events);
-    tools.retain(|(_, end, _)| *end == WATCH_TOOL_OPEN || *end >= since);
+    tools.retain(|(_, end, _, _)| *end == WATCH_TOOL_OPEN || *end >= since);
     if tools.len() > WATCH_MAX_TOOLS {
         tools.drain(..tools.len() - WATCH_MAX_TOOLS);
     }
@@ -9422,6 +9454,42 @@ mod tests {
     }
 
     #[test]
+    fn watch_tool_summary_picks_the_input_and_stays_one_line() {
+        let s = |name: &str, v: serde_json::Value| watch_tool_summary(name, Some(&v));
+        assert_eq!(
+            s(
+                "Bash",
+                serde_json::json!({"command":"ls\n  -la","description":"d"})
+            ),
+            "ls -la"
+        );
+        assert_eq!(
+            s("Grep", serde_json::json!({"pattern":"fn x","path":"src"})),
+            "fn x"
+        );
+        assert_eq!(
+            s(
+                "Agent",
+                serde_json::json!({"subagent_type":"recon","description":"find it"})
+            ),
+            "recon: find it"
+        );
+        assert_eq!(
+            s("Custom", serde_json::json!({"n":1,"other":"first string"})),
+            "first string"
+        );
+        assert_eq!(s("Custom", serde_json::json!({"n":1})), "");
+        assert_eq!(watch_tool_summary("Read", None), "");
+        let long = "x".repeat(500);
+        assert_eq!(
+            s("Bash", serde_json::json!({"command":long}))
+                .chars()
+                .count(),
+            TARGET_MAX_CHARS + 1
+        );
+    }
+
+    #[test]
     fn watch_from_text_pairs_tool_calls_and_skips_agents_and_background() {
         let t0 = parse_ts("2026-06-15T01:00:00Z").unwrap();
         let asst = |ts: &str, blocks: &str| {
@@ -9439,7 +9507,7 @@ mod tests {
             user("2026-06-15T01:00:01Z", "old"),
             asst(
                 "2026-06-15T01:10:00Z",
-                r#"{"type":"tool_use","id":"a","name":"Read","input":{}},{"type":"tool_use","id":"b","name":"Agent","input":{}},{"type":"tool_use","id":"c","name":"Bash","input":{"run_in_background":true}}"#,
+                r#"{"type":"tool_use","id":"a","name":"Read","input":{"file_path":"/x/y.rs"}},{"type":"tool_use","id":"b","name":"Agent","input":{}},{"type":"tool_use","id":"c","name":"Bash","input":{"run_in_background":true}}"#,
             ),
             user("2026-06-15T01:10:03Z", "a"),
             asst("2026-06-15T01:10:10Z", r#"{"type":"tool_use","id":"d","name":"Grep","input":{}}"#),
@@ -9450,8 +9518,13 @@ mod tests {
         assert_eq!(
             w.tools,
             vec![
-                (t0 + 600, t0 + 603, "Read".to_string()),
-                (t0 + 610, WATCH_TOOL_OPEN, "Grep".to_string()),
+                (
+                    t0 + 600,
+                    t0 + 603,
+                    "Read".to_string(),
+                    "/x/y.rs".to_string()
+                ),
+                (t0 + 610, WATCH_TOOL_OPEN, "Grep".to_string(), String::new()),
             ]
         );
         // A bare-string user message and a missing message are harmless.

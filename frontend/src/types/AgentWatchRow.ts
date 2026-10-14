@@ -38,8 +38,9 @@ historyFrom: number | null,
  */
 outputAt: number | null, finished: boolean, 
 /**
- * Other tool calls inside the window as `[start, end, tool name]` Unix
- * seconds; `end` is `-1` while the call has no result yet. Subagent
+ * Other tool calls inside the window as `[start, end, tool name,
+ * summary]` (Unix seconds; `summary` is a bounded one-line digest of the
+ * call's input, `""` if none); `end` is `-1` while no result yet. Subagent
  * launches and background shells are not here (they have their own row).
  */
-tools: Array<[number, number, string]>, };
+tools: Array<[number, number, string, string]>, };

@@ -40,6 +40,8 @@ export const TOOL_ROW_CAP = 20
 /** One tool call drawn as its own row under its owner. */
 export interface ToolRow {
   name: string
+  /** One-line digest of the call's input (command, path, pattern…); may be empty. */
+  summary: string
   from: number
   to: number
   /** The call's real duration in seconds, unclipped. */
@@ -196,11 +198,12 @@ function shellSegments(row: AgentWatchRow, now: number, windowStart: number): Se
 export function toolRows(row: AgentWatchRow, now: number, windowStart: number): ToolRow[] {
   const hi = row.finished ? Math.min(now, row.lastEventAt ?? now) : now
   const calls = (row.tools ?? [])
-    .map(([a, b, name]): ToolRow => {
+    .map(([a, b, name, summary]): ToolRow => {
       const open = b === TOOL_OPEN
       const end = open ? hi : b
       return {
         name,
+        summary: summary ?? '',
         from: Math.max(a, windowStart),
         to: Math.min(end, now),
         duration: Math.max(0, end - a),
@@ -220,9 +223,11 @@ export function formatDuration(s: number): string {
   return `${m}m${String(Math.round(s - m * 60)).padStart(2, '0')}s`
 }
 
-/** The hover text of a tool row: `Read · 3s`, or `Bash · running 12s`. */
+/** The hover text of a tool row: `Read · 3s`, or `Bash · running 12s`, then
+ *  the full summary on a second line when there is one. */
 export function toolLabel(t: ToolRow): string {
-  return `${t.name} · ${t.open ? 'running ' : ''}${formatDuration(t.duration)}`
+  const head = `${t.name} · ${t.open ? 'running ' : ''}${formatDuration(t.duration)}`
+  return t.summary ? `${head}\n${t.summary}` : head
 }
 
 /** Whether a row is doing work right now. */

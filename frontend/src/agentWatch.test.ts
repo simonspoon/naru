@@ -166,28 +166,30 @@ describe('geometry', () => {
 
 describe('toolRows', () => {
   it('makes one row per call with its duration', () => {
-    const r = row({ key: 'a', tools: [[WS + 100, WS + 103, 'Read']] })
+    const r = row({ key: 'a', tools: [[WS + 100, WS + 103, 'Read', '/a/b.rs']] })
     const t = toolRows(r, NOW, WS)
     expect(t).toHaveLength(1)
     expect(t[0]).toMatchObject({ name: 'Read', from: WS + 100, to: WS + 103, duration: 3, open: false })
-    expect(toolLabel(t[0])).toBe('Read · 3s')
+    expect(t[0].summary).toBe('/a/b.rs')
+    expect(toolLabel(t[0])).toBe('Read · 3s\n/a/b.rs')
   })
 
   it('runs an open call to now, clips to the window, and stops a finished row at its last event', () => {
-    const open = row({ key: 'a', tools: [[NOW - 30, -1, 'Bash']] })
+    const open = row({ key: 'a', tools: [[NOW - 30, -1, 'Bash', '']] })
     expect(toolRows(open, NOW, WS)[0]).toMatchObject({ to: NOW, duration: 30, open: true })
     expect(toolLabel(toolRows(open, NOW, WS)[0])).toBe('Bash · running 30s')
-    const early = row({ key: 'a', tools: [[WS - 50, WS + 10, 'Read']] })
+    const early = row({ key: 'a', tools: [[WS - 50, WS + 10, 'Read', '']] })
     expect(toolRows(early, NOW, WS)[0].from).toBe(WS)
-    const done = row({ key: 'a', finished: true, lastEventAt: WS + 200, tools: [[WS + 150, -1, 'Read']] })
+    const done = row({ key: 'a', finished: true, lastEventAt: WS + 200, tools: [[WS + 150, -1, 'Read', '']] })
     expect(toolRows(done, NOW, WS)[0].to).toBe(WS + 200)
   })
 
   it('keeps only the newest calls, oldest first', () => {
-    const tools = Array.from({ length: TOOL_ROW_CAP + 5 }, (_, i): [number, number, string] => [
+    const tools = Array.from({ length: TOOL_ROW_CAP + 5 }, (_, i): [number, number, string, string] => [
       WS + i * 10,
       WS + i * 10 + 1,
       'Read',
+      '',
     ])
     const t = toolRows(row({ key: 'a', tools }), NOW, WS)
     expect(t).toHaveLength(TOOL_ROW_CAP)
@@ -205,7 +207,7 @@ describe('toolRows', () => {
 describe('orderRows tool rows', () => {
   it('hangs tool rows under their session and subagent', () => {
     const rows = [
-      row({ key: 'a', startedAt: 10, tools: [[WS + 5, WS + 6, 'Read']] }),
+      row({ key: 'a', startedAt: 10, tools: [[WS + 5, WS + 6, 'Read', '']] }),
       row({ key: 'a/s1', kind: 'subagent', parent: 'a', startedAt: 11, tools: [[WS + 7, WS + 8, 'Grep']] }),
       row({ key: 'a/sh', kind: 'shell', parent: 'a', startedAt: 12 }),
     ]

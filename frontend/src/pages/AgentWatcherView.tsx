@@ -102,6 +102,7 @@ export function AgentWatcherView({ active = true }: { active?: boolean } = {}) {
                     {TOOL_MARK}
                     {tool.name}
                   </span>
+                  {tool.summary && <span className="agent-watch-model agent-watch-name">{tool.summary}</span>}
                 </div>
                 <div className="agent-watch-track">
                   {(() => {

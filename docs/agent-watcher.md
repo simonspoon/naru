@@ -22,7 +22,7 @@ Payload (`AgentWatch`, ts-exported, camelCase, **all times Unix seconds**):
 children), `label` (sanitized, bounded), `detail`, `model`, `startedAt`,
 `runs` (`[start, end]` working stretches inside the window, empty for a shell),
 `lastEventAt` (newest event, any age), `historyFrom`, `outputAt` (shells),
-`finished`, `tools` (`[start, end, name]` other tool calls, below).
+`finished`, `tools` (`[start, end, name, summary]` other tool calls, below).
 
 ## What goes in
 
@@ -41,14 +41,17 @@ coalesced by `coalesce_runs` — the same arithmetic and gap
 ## Tool calls
 
 `cc::watch_from_text` also pairs each `tool_use` block with its `tool_result`
-(`tool_use_id`) into `tools`: `[start, end, name]`, the two line timestamps. `end`
+(`tool_use_id`) into `tools`: `[start, end, name, summary]`, the two line timestamps; `summary` is a one-line
+digest of the call's `input` (`cc::watch_tool_summary`: the `tool_target` key list —
+`command`, `file_path`, `pattern`, `skill`, `url`, `query`… — `subagent_type: description`
+for `Agent`, else the first string value; sanitized, capped at 200 chars, empty if none). `end`
 is `-1` while no result has arrived (drawn to now, or to the last event of a
 finished row). A subagent launch (`Agent`/`Task`) and a `run_in_background`
 call are left out (they have their own row/segment); calls ending before the
 window are dropped and the newest 300 per transcript kept.
 
 The page draws each call as its own child row (`toolRows`, depth 1, glyph `⚙`,
-label = tool name) hanging under its owning session or subagent: after the
+label = tool name, with the summary on a second line, ellipsised, full text in the hover) hanging under its owning session or subagent: after the
 session row, and after each subagent row, oldest call first. A row has one
 segment in the owner's model colour spanning start..end, clipped to the window,
 an open call running to now (or to a finished owner's last event); hover says
