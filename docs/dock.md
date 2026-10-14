@@ -13,6 +13,7 @@ or Rust surface.
 | `agents` | `AgentSidebar` with its `docked` prop |
 | `terminal` | the global `TerminalPage` |
 | `workflows` | `WorkflowsPanel`: the workflows of the project the route is on, opened in place (a saved layout naming the old `diagrams` id is renamed on load) |
+| `watcher` | `AgentWatcherView` (the Agent watcher timeline; polls only while the panel is visible; starts closed in every preset) |
 
 The live orb is **not** a panel (naru task 1798; it was one, `orb`, from mesa
 task 1574): see "The nav's orb" below. Each panel appears at most once. The phone tier (`usePhoneTier()`) is **not**
@@ -149,7 +150,7 @@ a group's front tab, and every opener goes through the dock.
 - A board push reveals the board panel.
 - `navigate` reveals the main panel; so does any route change. `#/live`
   reveals the chat panel.
-- `#/terminal` is a verb like `#/live`: it reveals the terminal panel and the
+- `#/terminal` and `#/agent-watcher` are verbs like `#/live`: each reveals its panel (terminal / watcher) and the
   hash goes back to where the person was.
 - `collapse-sidebars` collapses the nav and closes the agents panel (remembering
   its spot); `expand-sidebars` expands the nav and reveals agents.

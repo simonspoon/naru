@@ -58,6 +58,7 @@ describe('presets', () => {
       const s = p.make()
       consistent(s)
       expect(groupOf(s, 'workflows')).toBeNull()
+      expect(groupOf(s, 'watcher')).toBeNull()
       expect(groupOf(s, 'main')).not.toBeNull()
     }
   })

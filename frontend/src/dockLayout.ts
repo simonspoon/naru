@@ -30,9 +30,9 @@ import {
   type SplitNode,
 } from './lib/paneTree'
 
-export type PanelId = 'main' | 'chat' | 'board' | 'agents' | 'terminal' | 'workflows'
+export type PanelId = 'main' | 'chat' | 'board' | 'agents' | 'terminal' | 'workflows' | 'watcher'
 
-export const PANEL_IDS: readonly PanelId[] = ['main', 'chat', 'board', 'agents', 'terminal', 'workflows']
+export const PANEL_IDS: readonly PanelId[] = ['main', 'chat', 'board', 'agents', 'terminal', 'workflows', 'watcher']
 
 const LABELS: Record<PanelId, string> = {
   main: 'Main',
@@ -41,6 +41,7 @@ const LABELS: Record<PanelId, string> = {
   agents: 'Agents',
   terminal: 'Terminal',
   workflows: 'Workflows',
+  watcher: 'Agent watcher',
 }
 
 export function panelLabel(id: PanelId): string {

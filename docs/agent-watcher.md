@@ -1,6 +1,6 @@
 # Agent watcher (naru task 1909)
 
-A full-page live timeline of every running agent, at `#/agent-watcher` (nav
+A live timeline of every running agent, a dock panel (`watcher`, starts closed; reopen from the header `⋯` menu) and, on the phone tier, a full page at `#/agent-watcher` (nav
 entry "Agent watcher", right after Terminal). One row per live session, then
 its subagents (`↳`), then its shells (`⌁`); children are always depth 1. A
 5m / 15m / 1h toggle picks the window; the page polls every 5s. It is a

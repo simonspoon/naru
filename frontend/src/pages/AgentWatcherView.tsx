@@ -25,10 +25,10 @@ function windowLabel(m: number): string {
   return m < 60 ? `${m}m` : `${m / 60}h`
 }
 
-export function AgentWatcherView() {
+export function AgentWatcherView({ active = true }: { active?: boolean } = {}) {
   const [mins, setMins] = useState(15)
   const { data, error } = useFetch(() => getAgentWatch(mins), `agent-watch-${mins}`, {
-    pollMs: 5000,
+    pollMs: active ? 5000 : undefined,
   })
 
   const ordered = data ? orderRows(data.rows) : []

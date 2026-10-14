@@ -224,6 +224,7 @@ function App() {
   // orb), so it counts as hidden there.
   const agentsVisible = isVisible(dock.state, 'agents', navCollapsed)
   const terminalVisible = isVisible(dock.state, 'terminal', navCollapsed)
+  const watcherVisible = isVisible(dock.state, 'watcher', navCollapsed)
   const chatVisible = isVisible(dock.state, 'chat', navCollapsed)
   const boardVisible = isVisible(dock.state, 'board', navCollapsed)
   // The nav's permanent orb (naru task 1798) shows in an expanded nav on the
@@ -300,7 +301,7 @@ function App() {
   // terminal panel and the hash goes back to where the person was, since the
   // terminal is a panel here, not a page. `bounced` stops the put-back, which
   // is itself a path change, from pulling main back over the terminal.
-  const prevHash = useRef(hash === '/terminal' ? '#/' : `#${hash}`)
+  const prevHash = useRef(hash === '/terminal' || hash === '/agent-watcher' ? '#/' : `#${hash}`)
   const bounced = useRef(false)
   // `null` until the first run: the mount keeps the remembered layout (a
   // closed main stays closed over a reload), except that a page loaded *on*
@@ -310,11 +311,16 @@ function App() {
     if (!docked || dockSeenPath.current === path) return
     const first = dockSeenPath.current === null
     dockSeenPath.current = path
-    if (first && path !== '/terminal') return
-    if (path === '/terminal') {
+    const verb = path === '/terminal' ? 'terminal' : path === '/agent-watcher' ? 'watcher' : null
+    if (first && !verb) return
+    if (verb) {
       bounced.current = true
-      reveal('terminal')
-      window.location.replace(prevHash.current === '#/terminal' ? '#/' : prevHash.current)
+      reveal(verb)
+      window.location.replace(
+        prevHash.current === '#/terminal' || prevHash.current === '#/agent-watcher'
+          ? '#/'
+          : prevHash.current,
+      )
       return
     }
     prevHash.current = `#${hash}`
@@ -496,7 +502,7 @@ function App() {
     // Three tabs: Claude Code items (synced against .claude), Scripts and a
     // read-only workflow list. Global: no project frame.
     page = <LibraryView tab={libraryRoute.tab} runId={libraryRoute.runId} />
-  } else if (agentWatcherMatch) {
+  } else if (agentWatcherMatch && !docked) {
     // Global full-page timeline of every running agent: no project frame.
     page = <AgentWatcherView />
   } else if (inboxMatch) {
@@ -922,6 +928,8 @@ function App() {
           )}
         {docked &&
           createPortal(<WorkflowsPanel projectId={activeProjectId} />, hostFor('workflows'))}
+        {docked &&
+          createPortal(<AgentWatcherView active={watcherVisible} />, hostFor('watcher'))}
         {/* Single always-mounted owner of every open leaf's PtyTerminal
             (mesa task 399, .scratch/arch.md §6.2), across BOTH AgentSidebar
             and TerminalPage — a permanent sibling, never inside `page` or

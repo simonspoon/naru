@@ -110,6 +110,7 @@ const RAIL_GLYPH: Record<PanelId, string> = {
   agents: '◎',
   terminal: '›_',
   workflows: '◇',
+  watcher: '◔',
 }
 
 /** The permanent orb at the top of the expanded nav (naru task 1798): no panel
