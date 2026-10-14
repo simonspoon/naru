@@ -12493,19 +12493,9 @@ body.dock-resizing .dock-body {
   background: repeating-linear-gradient(45deg, var(--red) 0 3px, transparent 3px 6px);
 }
 
-/* Tool calls: a thin strip along the bottom of the track, over the state bar. */
-.agent-watch-tool {
-  position: absolute;
-  bottom: 1px;
-  height: 5px;
-  border-radius: 1px;
-  background: var(--cyan, #22d3ee);
-  box-shadow: 0 0 0 1px var(--surface);
-}
-
-.agent-watch-swatch.tool {
-  background: var(--cyan, #22d3ee);
-  height: 0.3rem;
+/* A tool-call row: a child row, a little quieter than a subagent's. */
+.agent-watch-row.tool .agent-watch-name {
+  color: var(--muted);
 }
 
 .agent-watch-now {

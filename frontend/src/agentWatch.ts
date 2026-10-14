@@ -31,45 +31,52 @@ export interface Segment {
   state: SegmentState
 }
 
-/** One drawn tool-call bar: a single call, or adjacent short calls merged so a
- *  burst stays readable. */
-export interface ToolBar {
-  from: number
-  to: number
-  /** Calls folded into this bar. */
-  count: number
-  /** Summed call durations in seconds (not the bar's span). */
-  busy: number
-  /** Tool names with their call counts, most frequent first. */
-  names: [string, number][]
-}
-
-/** Calls whose gap is under this share of the window merge into one bar. */
-const TOOL_MERGE_PCT = 0.5
-
 /** A call's `end` while its result has not arrived (matches the server). */
 export const TOOL_OPEN = -1
 
+/** At most this many tool rows per owner: the newest within the window. */
+export const TOOL_ROW_CAP = 20
+
+/** One tool call drawn as its own row under its owner. */
+export interface ToolRow {
+  name: string
+  from: number
+  to: number
+  /** The call's real duration in seconds, unclipped. */
+  duration: number
+  /** No result yet. */
+  open: boolean
+}
+
 export interface OrderedRow {
   row: AgentWatchRow
-  /** 0 for a session, 1 for its subagents and shells. */
+  /** 0 for a session, 1 for its subagents, shells and tool calls. */
   depth: 0 | 1
+  /** Set on a tool-call row; `row` is then its owner. */
+  tool?: ToolRow
 }
 
 const byStart = (a: AgentWatchRow, b: AgentWatchRow) =>
   (a.startedAt ?? Infinity) - (b.startedAt ?? Infinity) || a.key.localeCompare(b.key)
 
-/** Sessions oldest first, each followed by its subagents then its shells. */
-export function orderRows(rows: AgentWatchRow[]): OrderedRow[] {
+/** Sessions oldest first, each followed by its own tool calls, then its
+ *  subagents (each followed by its tool calls), then its shells. */
+export function orderRows(rows: AgentWatchRow[], now: number, windowStart: number): OrderedRow[] {
   const sessions = rows.filter((r) => r.kind === 'session').sort(byStart)
   const out: OrderedRow[] = []
+  const pushTools = (owner: AgentWatchRow) => {
+    for (const tool of toolRows(owner, now, windowStart)) out.push({ row: owner, depth: 1, tool })
+  }
   for (const s of sessions) {
     out.push({ row: s, depth: 0 })
+    pushTools(s)
     const kids = rows.filter((r) => r.parent === s.key)
-    for (const kind of ['subagent', 'shell'] as const) {
-      for (const k of kids.filter((r) => r.kind === kind).sort(byStart)) {
-        out.push({ row: k, depth: 1 })
-      }
+    for (const k of kids.filter((r) => r.kind === 'subagent').sort(byStart)) {
+      out.push({ row: k, depth: 1 })
+      pushTools(k)
+    }
+    for (const k of kids.filter((r) => r.kind === 'shell').sort(byStart)) {
+      out.push({ row: k, depth: 1 })
     }
   }
   return out
@@ -182,39 +189,27 @@ function shellSegments(row: AgentWatchRow, now: number, windowStart: number): Se
   return out
 }
 
-/** The tool-call bars of one row across `[windowStart, now]`. Calls are
- *  clipped to the window; one with no result yet runs to now (or to the row's
- *  last event once it is finished). Calls closer together than
- *  `TOOL_MERGE_PCT` of the window merge, so many short calls stay a few bars. */
-export function toolBars(row: AgentWatchRow, now: number, windowStart: number): ToolBar[] {
+/** The tool-call rows of one owner across `[windowStart, now]`, oldest first.
+ *  Calls are clipped to the window; one with no result yet runs to now (or to
+ *  the owner's last event once it is finished). Only the newest
+ *  `TOOL_ROW_CAP` are kept. */
+export function toolRows(row: AgentWatchRow, now: number, windowStart: number): ToolRow[] {
   const hi = row.finished ? Math.min(now, row.lastEventAt ?? now) : now
   const calls = (row.tools ?? [])
-    .map(([a, b, name]): [number, number, number, string] => {
-      const end = b === TOOL_OPEN ? hi : b
-      return [Math.max(a, windowStart), Math.min(end, now), Math.max(0, end - a), name]
+    .map(([a, b, name]): ToolRow => {
+      const open = b === TOOL_OPEN
+      const end = open ? hi : b
+      return {
+        name,
+        from: Math.max(a, windowStart),
+        to: Math.min(end, now),
+        duration: Math.max(0, end - a),
+        open,
+      }
     })
-    .filter(([a, b]) => b >= a)
-    .sort((x, y) => x[0] - y[0])
-  const gap = ((now - windowStart) * TOOL_MERGE_PCT) / 100
-  const out: ToolBar[] = []
-  const counts: Map<string, number>[] = []
-  for (const [a, b, dur, name] of calls) {
-    const last = out[out.length - 1]
-    if (last && a - last.to <= gap) {
-      last.to = Math.max(last.to, b)
-      last.count += 1
-      last.busy += dur
-      const m = counts[counts.length - 1]
-      m.set(name, (m.get(name) ?? 0) + 1)
-    } else {
-      out.push({ from: a, to: b, count: 1, busy: dur, names: [] })
-      counts.push(new Map([[name, 1]]))
-    }
-  }
-  out.forEach((bar, i) => {
-    bar.names = [...counts[i].entries()].sort((x, y) => y[1] - x[1] || x[0].localeCompare(y[0]))
-  })
-  return out
+    .filter((t) => t.to >= t.from)
+    .sort((x, y) => x.from - y.from || x.name.localeCompare(y.name))
+  return calls.slice(-TOOL_ROW_CAP)
 }
 
 /** `850ms`, `4s`, `2m05s`. */
@@ -225,11 +220,9 @@ export function formatDuration(s: number): string {
   return `${m}m${String(Math.round(s - m * 60)).padStart(2, '0')}s`
 }
 
-/** The hover text of a tool bar: `Read · 3s`, or `5 calls: Read×3, Edit×2 · busy 12s`. */
-export function toolLabel(bar: ToolBar): string {
-  if (bar.count === 1) return `${bar.names[0][0]} · ${formatDuration(bar.busy)}`
-  const names = bar.names.map(([n, c]) => (c > 1 ? `${n}×${c}` : n)).join(', ')
-  return `${bar.count} calls: ${names} · busy ${formatDuration(bar.busy)}`
+/** The hover text of a tool row: `Read · 3s`, or `Bash · running 12s`. */
+export function toolLabel(t: ToolRow): string {
+  return `${t.name} · ${t.open ? 'running ' : ''}${formatDuration(t.duration)}`
 }
 
 /** Whether a row is doing work right now. */

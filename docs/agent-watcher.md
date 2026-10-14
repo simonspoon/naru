@@ -47,11 +47,14 @@ finished row). A subagent launch (`Agent`/`Task`) and a `run_in_background`
 call are left out (they have their own row/segment); calls ending before the
 window are dropped and the newest 300 per transcript kept.
 
-The page draws them as a thin cyan strip along the bottom of each track
-(`toolBars`): calls closer than 0.5% of the window merge into one bar, and
-the hover title says `Read · 3s` or `5 calls: Read×3, Edit×2 · busy 12s`.
-Legend entry "tool call". This is overlay only, not a state: `rowSegments` is
-unchanged.
+The page draws each call as its own child row (`toolRows`, depth 1, glyph `⚙`,
+label = tool name) hanging under its owning session or subagent: after the
+session row, and after each subagent row, oldest call first. A row has one
+segment in the owner's model colour spanning start..end, clipped to the window,
+an open call running to now (or to a finished owner's last event); hover says
+`Read · 3s` or `Bash · running 12s`. Only the newest `TOOL_ROW_CAP` (20) calls per
+owner are shown. The row links to the owner. There is no legend entry; the
+rows are not a state, `rowSegments` is unchanged.
 
 ## Segment states (`frontend/src/agentWatch.ts`)
 

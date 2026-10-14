@@ -10,7 +10,6 @@ import {
   segmentBox,
   shouldAlert,
   ticks,
-  toolBars,
   toolLabel,
 } from '../agentWatch'
 import { modelColor } from '../sessionDetail'
@@ -21,7 +20,8 @@ import { useFetch } from '../useFetch'
 // subagents and its shells (naru task 1909, docs/agent-watcher.md). Drawing
 // only — what a bar means lives in agentWatch.ts.
 
-const KIND_MARK = { session: '', subagent: '↳ ', shell: '⌁ ' } as const
+const KIND_MARK = { session: '', subagent: '↳ ', shell: '⌁ ' }
+const TOOL_MARK = '⚙ ' as const
 
 function windowLabel(m: number): string {
   return m < 60 ? `${m}m` : `${m / 60}h`
@@ -33,7 +33,7 @@ export function AgentWatcherView({ active = true }: { active?: boolean } = {}) {
     pollMs: active ? 5000 : undefined,
   })
 
-  const ordered = data ? orderRows(data.rows) : []
+  const ordered = data ? orderRows(data.rows, data.now, data.now - mins * 60) : []
   const running = data ? data.rows.filter((r) => r.kind === 'session').length : 0
   const windowStart = data ? data.now - mins * 60 : 0
 
@@ -89,7 +89,40 @@ export function AgentWatcherView({ active = true }: { active?: boolean } = {}) {
               ))}
             </div>
           </div>
-          {ordered.map(({ row, depth }) => (
+          {ordered.map(({ row, depth, tool }) =>
+            tool ? (
+              <a
+                key={`${row.key}/tool-${tool.from}-${tool.name}`}
+                className="agent-watch-row child tool"
+                href={rowHref(row)}
+                title={toolLabel(tool)}
+              >
+                <div className="agent-watch-label">
+                  <span className="agent-watch-name">
+                    {TOOL_MARK}
+                    {tool.name}
+                  </span>
+                </div>
+                <div className="agent-watch-track">
+                  {(() => {
+                    const box = segmentBox({ ...tool, state: 'active' }, windowStart, data.now)
+                    return (
+                      <span
+                        className="agent-watch-seg active"
+                        style={
+                          {
+                            left: `${box.left}%`,
+                            width: `${box.width}%`,
+                            '--seg': rowColor(row),
+                          } as React.CSSProperties
+                        }
+                      />
+                    )
+                  })()}
+                  <span className="agent-watch-now" />
+                </div>
+              </a>
+            ) : (
             <a
               key={row.key}
               className={`agent-watch-row${depth === 1 ? ' child' : ''}`}
@@ -119,21 +152,11 @@ export function AgentWatcherView({ active = true }: { active?: boolean } = {}) {
                     />
                   )
                 })}
-                {toolBars(row, data.now, windowStart).map((bar) => {
-                  const box = segmentBox({ ...bar, state: 'active' }, windowStart, data.now)
-                  return (
-                    <span
-                      key={`tool-${bar.from}`}
-                      className="agent-watch-tool"
-                      title={toolLabel(bar)}
-                      style={{ left: `${box.left}%`, width: `${box.width}%` }}
-                    />
-                  )
-                })}
                 <span className="agent-watch-now" />
               </div>
             </a>
-          ))}
+            ),
+          )}
           <div className="agent-watch-legend muted">
             <span><i className="agent-watch-swatch" style={{ background: modelColor('opus') }} /> opus</span>
             <span><i className="agent-watch-swatch" style={{ background: modelColor('sonnet') }} /> sonnet</span>
@@ -142,7 +165,6 @@ export function AgentWatcherView({ active = true }: { active?: boolean } = {}) {
             <span><i className="agent-watch-swatch quiet" /> quiet</span>
             <span><i className="agent-watch-swatch output" /> shell output</span>
             <span><i className="agent-watch-swatch stalled" /> stalled</span>
-            <span><i className="agent-watch-swatch tool" /> tool call</span>
           </div>
         </div>
       )}

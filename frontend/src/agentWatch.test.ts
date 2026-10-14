@@ -12,7 +12,8 @@ import {
   segmentBox,
   shouldAlert,
   formatDuration,
-  toolBars,
+  toolRows,
+  TOOL_ROW_CAP,
   toolLabel,
   ticks,
 } from './agentWatch'
@@ -49,7 +50,7 @@ describe('orderRows', () => {
       row({ key: 'a', startedAt: 10 }),
       row({ key: 'a/s1', kind: 'subagent', parent: 'a', startedAt: 7 }),
     ]
-    const o = orderRows(rows)
+    const o = orderRows(rows, NOW, WS)
     expect(o.map((x) => x.row.key)).toEqual(['a', 'a/s1', 'a/s2', 'a/sh', 'b'])
     expect(o.map((x) => x.depth)).toEqual([0, 1, 1, 1, 0])
   })
@@ -163,45 +164,60 @@ describe('geometry', () => {
   })
 })
 
-describe('toolBars', () => {
-  it('draws a single call with its duration', () => {
+describe('toolRows', () => {
+  it('makes one row per call with its duration', () => {
     const r = row({ key: 'a', tools: [[WS + 100, WS + 103, 'Read']] })
-    const bars = toolBars(r, NOW, WS)
-    expect(bars).toHaveLength(1)
-    expect(bars[0]).toMatchObject({ from: WS + 100, to: WS + 103, count: 1, busy: 3 })
-    expect(toolLabel(bars[0])).toBe('Read · 3s')
-  })
-
-  it('merges adjacent short calls and keeps distant ones apart', () => {
-    const r = row({
-      key: 'a',
-      tools: [
-        [WS + 100, WS + 101, 'Read'],
-        [WS + 102, WS + 103, 'Read'],
-        [WS + 103, WS + 104, 'Edit'],
-        [WS + 400, WS + 410, 'Grep'],
-      ],
-    })
-    const bars = toolBars(r, NOW, WS)
-    expect(bars).toHaveLength(2)
-    expect(bars[0]).toMatchObject({ from: WS + 100, to: WS + 104, count: 3, busy: 3 })
-    expect(toolLabel(bars[0])).toBe('3 calls: Read×2, Edit · busy 3s')
-    expect(toolLabel(bars[1])).toBe('Grep · 10s')
+    const t = toolRows(r, NOW, WS)
+    expect(t).toHaveLength(1)
+    expect(t[0]).toMatchObject({ name: 'Read', from: WS + 100, to: WS + 103, duration: 3, open: false })
+    expect(toolLabel(t[0])).toBe('Read · 3s')
   })
 
   it('runs an open call to now, clips to the window, and stops a finished row at its last event', () => {
     const open = row({ key: 'a', tools: [[NOW - 30, -1, 'Bash']] })
-    expect(toolBars(open, NOW, WS)[0]).toMatchObject({ to: NOW, busy: 30 })
+    expect(toolRows(open, NOW, WS)[0]).toMatchObject({ to: NOW, duration: 30, open: true })
+    expect(toolLabel(toolRows(open, NOW, WS)[0])).toBe('Bash · running 30s')
     const early = row({ key: 'a', tools: [[WS - 50, WS + 10, 'Read']] })
-    expect(toolBars(early, NOW, WS)[0].from).toBe(WS)
+    expect(toolRows(early, NOW, WS)[0].from).toBe(WS)
     const done = row({ key: 'a', finished: true, lastEventAt: WS + 200, tools: [[WS + 150, -1, 'Read']] })
-    expect(toolBars(done, NOW, WS)[0].to).toBe(WS + 200)
+    expect(toolRows(done, NOW, WS)[0].to).toBe(WS + 200)
+  })
+
+  it('keeps only the newest calls, oldest first', () => {
+    const tools = Array.from({ length: TOOL_ROW_CAP + 5 }, (_, i): [number, number, string] => [
+      WS + i * 10,
+      WS + i * 10 + 1,
+      'Read',
+    ])
+    const t = toolRows(row({ key: 'a', tools }), NOW, WS)
+    expect(t).toHaveLength(TOOL_ROW_CAP)
+    expect(t[0].from).toBe(WS + 50)
+    expect(t[t.length - 1].from).toBe(WS + (TOOL_ROW_CAP + 4) * 10)
   })
 
   it('tolerates a row with no tools field', () => {
     const r = row({ key: 'a' })
     delete (r as Partial<AgentWatchRow>).tools
-    expect(toolBars(r, NOW, WS)).toEqual([])
+    expect(toolRows(r, NOW, WS)).toEqual([])
+  })
+})
+
+describe('orderRows tool rows', () => {
+  it('hangs tool rows under their session and subagent', () => {
+    const rows = [
+      row({ key: 'a', startedAt: 10, tools: [[WS + 5, WS + 6, 'Read']] }),
+      row({ key: 'a/s1', kind: 'subagent', parent: 'a', startedAt: 11, tools: [[WS + 7, WS + 8, 'Grep']] }),
+      row({ key: 'a/sh', kind: 'shell', parent: 'a', startedAt: 12 }),
+    ]
+    const o = orderRows(rows, NOW, WS)
+    expect(o.map((x) => (x.tool ? `${x.row.key}:${x.tool.name}` : x.row.key))).toEqual([
+      'a',
+      'a:Read',
+      'a/s1',
+      'a/s1:Grep',
+      'a/sh',
+    ])
+    expect(o.map((x) => x.depth)).toEqual([0, 1, 1, 1, 1])
   })
 })
 
