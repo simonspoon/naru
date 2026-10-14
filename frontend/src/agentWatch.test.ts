@@ -208,7 +208,7 @@ describe('orderRows tool rows', () => {
   it('hangs tool rows under their session and subagent', () => {
     const rows = [
       row({ key: 'a', startedAt: 10, tools: [[WS + 5, WS + 6, 'Read', '']] }),
-      row({ key: 'a/s1', kind: 'subagent', parent: 'a', startedAt: 11, tools: [[WS + 7, WS + 8, 'Grep']] }),
+      row({ key: 'a/s1', kind: 'subagent', parent: 'a', startedAt: 11, tools: [[WS + 7, WS + 8, 'Grep', '']] }),
       row({ key: 'a/sh', kind: 'shell', parent: 'a', startedAt: 12 }),
     ]
     const o = orderRows(rows, NOW, WS)
