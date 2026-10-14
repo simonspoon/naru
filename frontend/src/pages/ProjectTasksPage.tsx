@@ -3,6 +3,7 @@ import {
   getProject,
   getProjectVersion,
   listAllAgents,
+  listProjects,
   listTasks,
   updateProject,
 } from '../api'
@@ -25,6 +26,7 @@ import {
   type PaneTab,
 } from '../projectPanes'
 import { TaskModal } from '../components/TaskModal'
+import { boardProjectIds } from '../projectTree'
 import { KanbanBoard } from '../KanbanBoard'
 import { matchesShortcut, type Keymap } from '../keymap'
 import { useKeymap } from '../keymapStore'
@@ -248,7 +250,13 @@ export function ProjectTasksPage({
   )
   // The board always shows every status column, so it fetches unfiltered.
   const { data: tasks, error: tasksError, refetch } = useFetch(
-    () => listTasks({ project: projectId }),
+    // A parent's board also shows its non-archived descendants' tasks
+    // (naru task 1916); creating still targets this project.
+    async () => {
+      const ids = boardProjectIds(await listProjects(true), projectId)
+      const lists = await Promise.all(ids.map((id) => listTasks({ project: id })))
+      return lists.flat()
+    },
     `board-${projectId}`,
     // Live-sync the board: agents mutate the DB underneath the UI, so poll
     // for changes instead of waiting for a window refocus. No-op polls are

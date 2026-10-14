@@ -184,3 +184,34 @@ export function effectivelyArchivedIds<T extends TreeNode & { archived: boolean 
 export function hasChildren<T extends TreeNode>(projects: T[], id: number): boolean {
   return projects.some((p) => p.parent_id === id)
 }
+
+/**
+ * Project ids whose tasks a project's Board shows (naru task 1916): the
+ * project itself first, then every descendant at any depth, minus archived
+ * descendants and anything under one. The project itself is always kept.
+ * Cycle-safe.
+ */
+export function boardProjectIds<T extends TreeNode & { archived: boolean }>(
+  projects: T[],
+  id: number,
+): number[] {
+  const byId = new Map(projects.map((p) => [p.id, p]))
+  const out = [id]
+  for (const d of descendantIds(projects, id)) {
+    // Walk up from `d` to `id`; any archived project on the way (d included) hides it.
+    let hidden = false
+    let cur: number | null = d
+    const seen = new Set<number>()
+    while (cur !== null && cur !== id && !seen.has(cur)) {
+      seen.add(cur)
+      const p = byId.get(cur)
+      if (!p || p.archived) {
+        hidden = true
+        break
+      }
+      cur = p.parent_id
+    }
+    if (!hidden) out.push(d)
+  }
+  return out
+}

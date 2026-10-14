@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   ancestorIds,
+  boardProjectIds,
   buildTree,
   descendantIds,
   effectivelyArchivedIds,
@@ -189,5 +190,24 @@ describe('hasChildren', () => {
     expect(hasChildren(list, 10)).toBe(true)
     expect(hasChildren(list, 100)).toBe(false)
     expect(hasChildren(list, 2)).toBe(false)
+  })
+})
+
+describe('boardProjectIds', () => {
+  const p = (id: number, parent_id: number | null, archived = false) => ({
+    id,
+    parent_id,
+    archived,
+  })
+  it('is the project plus descendants at any depth, archived subtrees excluded', () => {
+    const ps = [p(1, null), p(2, 1), p(3, 2), p(4, 1, true), p(5, 4), p(6, null)]
+    expect(boardProjectIds(ps, 1)).toEqual([1, 2, 3])
+  })
+  it('keeps the viewed project even when it or its ancestor is archived', () => {
+    const ps = [p(1, null, true), p(2, 1), p(3, 2)]
+    expect(boardProjectIds(ps, 2)).toEqual([2, 3])
+  })
+  it('is just the project when it has no children', () => {
+    expect(boardProjectIds([p(1, null)], 1)).toEqual([1])
   })
 })
