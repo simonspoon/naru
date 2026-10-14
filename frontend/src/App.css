@@ -12484,7 +12484,7 @@ body.dock-resizing .dock-body {
 
 .agent-watch-seg.output,
 .agent-watch-swatch.output {
-  background: var(--green);
+  background: var(--magenta);
 }
 
 .agent-watch-seg.stalled,
