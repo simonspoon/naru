@@ -6,6 +6,7 @@ import {
   deleteLibraryItem,
   exportLibrary,
   forkLibraryItem,
+  setLibraryModel,
   getLibraryHook,
   getLibrarySync,
   importLibrary,
@@ -52,7 +53,7 @@ import {
   orphanScopesFor,
   registrationLabel,
 } from '../libraryHooks'
-import { modelPill } from '../libraryModel'
+import { modelChoices, modelFromSelect, modelPill, modelSelectValue } from '../libraryModel'
 import { diffLines, foldOverrides, hunksOnly, itemKey } from '../libraryOverride'
 import {
   LIBRARY_KINDS,
@@ -1363,6 +1364,33 @@ function LibraryItemsTab() {
   // `null` = no form open; `'new'` = the create form; a string = editing that
   // item (`itemKey`, since a built-in has no numeric id).
   const [editing, setEditing] = useState<string | 'new' | null>(null)
+  // An agent's model dropdown (naru task 1911): the row being written, and the
+  // last refusal (e.g. the file was edited on disk since the last sync).
+  const [modelBusy, setModelBusy] = useState<string | null>(null)
+  const [modelError, setModelError] = useState<string | null>(null)
+  function changeModel(item: LibraryItem, model: string | null) {
+    setModelBusy(itemKey(item))
+    setModelError(null)
+    // An unshadowed built-in has no row to write: fork it (body unchanged)
+    // first, then set the model on the fork.
+    const row =
+      item.id !== null
+        ? Promise.resolve(item)
+        : forkLibraryItem(item.builtin_id!, item.body, item.export_command)
+    row
+      .then((r) => setLibraryModel(r.id!, model))
+      .then(
+        () => {
+          setModelBusy(null)
+          refetch()
+        },
+        (err: unknown) => {
+          setModelBusy(null)
+          setModelError(err instanceof Error ? err.message : String(err))
+          refetch()
+        },
+      )
+  }
   const [showingVersions, setShowingVersions] = useState<string | null>(null)
   const [showingDiff, setShowingDiff] = useState<string | null>(null)
   const [showingHooks, setShowingHooks] = useState<string | null>(null)
@@ -1545,6 +1573,7 @@ function LibraryItemsTab() {
       </div>
 
       {bundleError !== null && <p className="error">{bundleError}</p>}
+      {modelError !== null && <p className="error">{modelError}</p>}
 
       {preview !== null && (
         <LibraryImportModal
@@ -1614,12 +1643,25 @@ function LibraryItemsTab() {
                           </code>
                         )}
                         {model !== null && (
-                          <span
+                          // A dropdown, not a pill (naru task 1911): choosing applies at
+                          // once to the stored body and the agent file on disk. An
+                          // unshadowed built-in is forked first.
+                          <select
                             className={`library-badge library-model-badge library-model-${model.family}`}
                             title={`model: ${model.label}`}
+                            aria-label={`model of ${item.name}`}
+                            value={modelSelectValue(item.body)}
+                            disabled={modelBusy === key}
+                            onClick={(e) => e.stopPropagation()}
+                            onChange={(e) => changeModel(item, modelFromSelect(e.target.value))}
                           >
-                            {model.label}
-                          </span>
+                            <option value="">inherit</option>
+                            {modelChoices(item.body).map((m) => (
+                              <option key={m} value={m}>
+                                {m}
+                              </option>
+                            ))}
+                          </select>
                         )}
                         {item.export_command && (
                           <span className="library-badge">slash command</span>

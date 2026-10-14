@@ -30,3 +30,24 @@ export function modelPill(body: string): { label: string; family: ModelFamily } 
   const family = FAMILIES.find((f) => lower.includes(f))
   return family ? { label: model, family } : { label: model, family: 'other' }
 }
+
+/** The dropdown's choices for an agent body (naru task 1911): the four
+ *  families, then the current value when it is some other string (so the
+ *  select can show it). The empty string is the "inherit" choice, which the
+ *  caller sends as a null model to remove the line. */
+export function modelChoices(body: string): string[] {
+  const current = agentModel(body)
+  const list: string[] = [...FAMILIES]
+  if (current !== null && !list.includes(current)) list.push(current)
+  return list
+}
+
+/** The select's value for a body: the current model, or '' for inherit. */
+export function modelSelectValue(body: string): string {
+  return agentModel(body) ?? ''
+}
+
+/** The `model` a select value is sent as: '' (inherit) becomes null. */
+export function modelFromSelect(value: string): string | null {
+  return value === '' ? null : value
+}

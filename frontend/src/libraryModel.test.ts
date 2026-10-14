@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { agentModel, modelPill } from './libraryModel'
+import { agentModel, modelChoices, modelFromSelect, modelPill, modelSelectValue } from './libraryModel'
 
 const doc = (fm: string) => `---\n${fm}\n---\nbody\n`
 
@@ -45,5 +45,27 @@ describe('modelPill', () => {
   })
   it('other for inherit and unknown values', () => {
     expect(modelPill(doc('model: inherit'))).toEqual({ label: 'inherit', family: 'other' })
+  })
+})
+
+describe('model dropdown helpers', () => {
+  it('lists the families, plus a current value outside them', () => {
+    expect(modelChoices(doc('model: opus'))).toEqual(['opus', 'sonnet', 'haiku', 'fable'])
+    expect(modelChoices(doc('name: a'))).toEqual(['opus', 'sonnet', 'haiku', 'fable'])
+    expect(modelChoices(doc('model: claude-opus-4-1'))).toEqual([
+      'opus',
+      'sonnet',
+      'haiku',
+      'fable',
+      'claude-opus-4-1',
+    ])
+  })
+  it('selects the current model, or inherit when there is none', () => {
+    expect(modelSelectValue(doc('model: "haiku"'))).toBe('haiku')
+    expect(modelSelectValue(doc('name: a'))).toBe('')
+  })
+  it('sends inherit as null', () => {
+    expect(modelFromSelect('')).toBeNull()
+    expect(modelFromSelect('sonnet')).toBe('sonnet')
   })
 })

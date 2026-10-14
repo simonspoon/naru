@@ -2245,6 +2245,30 @@ api 200 GET "/api/library/$NSID"
 api 200 PATCH "/api/library/$SKID" '{"files":{}}'
 [ "$(jqb 'has("files")')" = "false" ] || fail "skill PATCH: an empty map must clear the siblings, got $BODY"
 api 200 PATCH "/api/library/$SKID" '{"files":{"waiting.md":"edited over http\n"}}'
+
+# PUT /api/library/{id}/model (naru task 1911): sets the agent's frontmatter
+# `model:` in the stored body AND the on-disk file in one call.
+MP_DIR="$TMP/model-proj"; mkdir -p "$MP_DIR"
+run 0 "$MESA" project create "Model project" --no-git --path "$MP_DIR"
+api 201 POST /api/library "{\"kind\":\"agent\",\"scope\":\"project\",\"project_id\":$(jq -r .id <<<"$STDOUT"),\"name\":\"modeler\",\"body\":\"---\\nname: modeler\\nmodel: opus\\n---\\nhello\\n\"}"
+MID=$(jqb .id)
+api 200 PUT "/api/library/$MID/model" '{"model":"haiku"}'
+WANT=$'---\nname: modeler\nmodel: haiku\n---\nhello'
+[ "$(jqb .body)" = "$WANT" ] || fail "model PUT: response body frontmatter, got $BODY"
+api 200 GET "/api/library/$MID"
+[ "$(jqb .body)" = "$WANT" ] || fail "model PUT: stored body must carry the model"
+[ "$(cat "$MP_DIR/.claude/agents/modeler.md")" = "$WANT" ] || fail "model PUT: the agent file must carry the model"
+api 200 PUT "/api/library/$MID/model" '{"model":null}'
+[ "$(cat "$MP_DIR/.claude/agents/modeler.md")" = $'---\nname: modeler\n---\nhello' ] ||
+  fail "model PUT null: the file's model line must be removed"
+api 422 PUT "/api/library/$MID/model" '{"model":"bad value"}'
+api 422 PUT "/api/library/$NSID/model" '{"model":"opus"}'
+printf 'hand edit\n' > "$MP_DIR/.claude/agents/modeler.md"
+api 409 PUT "/api/library/$MID/model" '{"model":"sonnet"}'
+[ "$(cat "$MP_DIR/.claude/agents/modeler.md")" = "hand edit" ] || fail "model PUT conflict: a hand-edited file must be left alone"
+raw PUT "/api/library/$MID/model" -H 'Content-Type: application/json' -H "Host: evil.example" -d '{"model":"opus"}'
+[ "$STATUS" = "403" ] || fail "model PUT with a foreign Host must be 403, got $STATUS"
+ok "PUT /api/library/{id}/model: body and file both updated, null removes, bad value 422, non-agent 422, hand-edited file 409, foreign Host 403"
 kill "$SERVER_PID"; wait "$SERVER_PID" 2>/dev/null || true; SERVER_PID=""
 
 run 0 "$MESA" library sync apply --resolve "$SK_PATH=mesa"

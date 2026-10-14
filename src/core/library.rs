@@ -379,6 +379,137 @@ pub fn rename_frontmatter_name(body: &str, old: &str, new: &str) -> Option<Strin
     })
 }
 
+/// The agent-definition body with its frontmatter `model:` line set to
+/// `model`, or removed for `None` (naru task 1911). Only that one line moves:
+/// an existing line is replaced in place, a missing one is inserted just
+/// before the closing `---`, and every other byte (including each line's own
+/// `\n`/`\r\n`) is kept. A body with no frontmatter is `validation`, as is a
+/// model that is empty or carries anything but `[A-Za-z0-9._:\[\]-]`.
+pub fn set_frontmatter_model(body: &str, model: Option<&str>) -> StoreResult<String> {
+    if let Some(m) = model
+        && (m.is_empty()
+            || !m
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "._:[]-".contains(c)))
+    {
+        return Err(Error::Validation(format!(
+            "model {m:?} must be non-empty and use only letters, digits and . _ : [ ] -"
+        )));
+    }
+    let lines: Vec<&str> = body.split_inclusive('\n').collect();
+    let is_fence = |l: &str| l.trim_end_matches(['\r', '\n']) == "---";
+    if !lines.first().is_some_and(|l| is_fence(l)) {
+        return Err(Error::Validation(
+            "body has no frontmatter to hold a model".into(),
+        ));
+    }
+    let close = (1..lines.len())
+        .find(|&i| is_fence(lines[i]))
+        .ok_or_else(|| Error::Validation("frontmatter is never closed".into()))?;
+    let is_model = |l: &str| {
+        l.strip_prefix("model")
+            .is_some_and(|r| r.trim_start().starts_with(':'))
+    };
+    let existing = (1..close).find(|&i| is_model(lines[i]));
+    let eol = if lines[0].ends_with("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let mut out = String::with_capacity(body.len() + 32);
+    for (i, line) in lines.iter().enumerate() {
+        if Some(i) == existing {
+            if let Some(m) = model {
+                let own = if line.ends_with("\r\n") {
+                    "\r\n"
+                } else if line.ends_with('\n') {
+                    "\n"
+                } else {
+                    ""
+                };
+                out.push_str(&format!("model: {m}{own}"));
+            }
+            continue;
+        }
+        if i == close
+            && existing.is_none()
+            && let Some(m) = model
+        {
+            // The line before the fence may lack its newline only if the
+            // fence is the last line, which cannot be (it is `lines[close]`).
+            out.push_str(&format!("model: {m}{eol}"));
+        }
+        out.push_str(line);
+    }
+    Ok(out)
+}
+
+/// Sets (or, with `None`, removes) an agent item's frontmatter `model:` in
+/// **both** places at once (naru task 1911): the stored body and the agent
+/// file on disk, the disk write being [`apply_naru`] itself so the baseline is
+/// stamped exactly as a `naru` sync choice would.
+///
+/// Order: everything that can be refused is checked first (the kind, the
+/// frontmatter edit, a usable disk base, and a disk file hand-edited since the
+/// last sync — `disk-changed`/`both-changed` is `conflict`, because writing
+/// would destroy those edits; sync first), then the row is updated, then the
+/// file written. If the file write still fails the row keeps the new model and
+/// the error says so; `sync status` then shows it as `mesa-changed`.
+pub fn set_agent_model(
+    store: &mut Store,
+    id: i64,
+    model: Option<&str>,
+) -> StoreResult<LibraryItem> {
+    let item = store.get_library_item(id)?;
+    if item.kind != LibraryKind::Agent {
+        return Err(Error::Validation("only an agent has a model to set".into()));
+    }
+    let model = model.map(str::trim);
+    let body = set_frontmatter_model(&item.body, model)?;
+    let rows = sync_status(store, item.project_id)?;
+    let row = rows
+        .into_iter()
+        .find(|r| r.item_id == Some(id))
+        .ok_or_else(|| Error::Validation("agent has no file path to write".into()))?;
+    if matches!(
+        row.status,
+        LibrarySyncStatus::DiskChanged | LibrarySyncStatus::BothChanged
+    ) {
+        return Err(Error::Conflict(format!(
+            "{} was edited on disk since the last sync; sync it first so the model write does not overwrite those edits",
+            row.path
+        )));
+    }
+    let project_local_path = match item.project_id {
+        Some(pid) => store.get_project(pid)?.local_path.map(PathBuf::from),
+        None => None,
+    };
+    if usable_base(item.scope, project_local_path.as_deref()).is_none() {
+        return Err(Error::Validation(format!(
+            "{} has no usable base to write into",
+            row.path
+        )));
+    }
+    store.update_library_item(
+        id,
+        LibraryPatch {
+            body: Some(body.clone()),
+            ..Default::default()
+        },
+    )?;
+    let row = LibrarySyncRow {
+        mesa_body: Some(body),
+        ..row
+    };
+    apply_naru(store, item.project_id, &row).map_err(|e| {
+        Error::Unavailable(format!(
+            "the stored body now carries the model but the file {} was not written: {e}",
+            row.path
+        ))
+    })?;
+    store.get_library_item(id)
+}
+
 /// Looks up one built-in by id, a pre-rename id included.
 pub fn builtin(id: &str) -> Option<&'static Builtin> {
     let id = canonical_builtin_id(id);
@@ -4194,6 +4325,82 @@ mod tests {
             .create_project("proj", None, None, base.to_str(), None)
             .unwrap()
             .id
+    }
+
+    #[test]
+    fn set_frontmatter_model_touches_only_the_model_line() {
+        let b = "---\nname: a\nmodel: opus\ntools: x\n---\nbody model: z\n";
+        assert_eq!(
+            set_frontmatter_model(b, Some("haiku")).unwrap(),
+            "---\nname: a\nmodel: haiku\ntools: x\n---\nbody model: z\n"
+        );
+        // Quoted value is replaced whole; removal drops the line.
+        let q = "---\nname: a\nmodel: \"sonnet\" # c\n---\nx";
+        assert_eq!(
+            set_frontmatter_model(q, Some("opus")).unwrap(),
+            "---\nname: a\nmodel: opus\n---\nx"
+        );
+        assert_eq!(
+            set_frontmatter_model(q, None).unwrap(),
+            "---\nname: a\n---\nx"
+        );
+        // Missing line is inserted before the closing fence; CRLF kept.
+        assert_eq!(
+            set_frontmatter_model("---\r\nname: a\r\n---\r\nx", Some("fable")).unwrap(),
+            "---\r\nname: a\r\nmodel: fable\r\n---\r\nx"
+        );
+        assert_eq!(set_frontmatter_model(b, Some("opus")).unwrap(), b);
+        assert_eq!(
+            set_frontmatter_model("---\nname: a\n---\n", None).unwrap(),
+            "---\nname: a\n---\n"
+        );
+    }
+
+    #[test]
+    fn set_frontmatter_model_refuses_bad_input() {
+        for (b, m) in [
+            ("no frontmatter\n", Some("opus")),
+            ("---\nname: a\n", Some("opus")),
+            ("---\nname: a\n---\n", Some("")),
+            ("---\nname: a\n---\n", Some("a\nb: c")),
+            ("---\nname: a\n---\n", Some("a b")),
+        ] {
+            assert!(
+                matches!(set_frontmatter_model(b, m), Err(Error::Validation(_))),
+                "{b:?} {m:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn set_agent_model_writes_row_and_file_and_refuses_a_hand_edited_file() {
+        let (mut store, _dir) = temp_store();
+        let base = tempfile::tempdir().unwrap();
+        let pid = project_at(&mut store, base.path());
+        let item = store
+            .create_library_item(
+                LibraryKind::Agent,
+                LibraryScope::Project,
+                Some(pid),
+                "ag",
+                "---\nname: ag\nmodel: opus\n---\nhi\n",
+                None,
+                false,
+            )
+            .unwrap();
+        let id = item.id.unwrap();
+        let out = set_agent_model(&mut store, id, Some("haiku")).unwrap();
+        let want = "---\nname: ag\nmodel: haiku\n---\nhi\n";
+        assert_eq!(out.body, want);
+        assert_eq!(out.synced_body.as_deref(), Some(want));
+        let file = base.path().join(".claude/agents/ag.md");
+        assert_eq!(fs::read_to_string(&file).unwrap(), want);
+        fs::write(&file, "hand edit\n").unwrap();
+        assert!(matches!(
+            set_agent_model(&mut store, id, None),
+            Err(Error::Conflict(_))
+        ));
+        assert_eq!(store.get_library_item(id).unwrap().body, want);
     }
 
     #[test]

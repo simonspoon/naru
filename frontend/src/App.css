@@ -9795,6 +9795,11 @@ body.live-panel-ratio-resizing .live-panel-divider {
   text-transform: none;
   border-color: currentColor;
 }
+select.library-model-badge {
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+}
 .library-model-opus {
   color: var(--violet);
 }

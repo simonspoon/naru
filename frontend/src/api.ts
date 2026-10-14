@@ -1858,6 +1858,12 @@ export function updateScript(id: number, body: ScriptWrite): Promise<Script> {
   return request(`/api/scripts/${id}`, jsonInit('PATCH', body))
 }
 
+/** Sets (or, with null, removes) an agent's frontmatter `model:` in the stored
+ * body and the on-disk agent file together (naru task 1911). */
+export function setLibraryModel(id: number, model: string | null): Promise<LibraryItem> {
+  return request(`/api/library/${id}/model`, jsonInit('PUT', { model }))
+}
+
 /** Returns the destroyed record — the recoverable delete echo. */
 export function deleteScript(id: number): Promise<Script> {
   return request(`/api/scripts/${id}`, jsonDelete())

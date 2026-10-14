@@ -270,6 +270,8 @@ absent from the list, so there is nothing to fold.
 
 Every `agent` row also wears a model pill (naru task 1908, `frontend/src/libraryModel.ts`): the `model:` key of the body's frontmatter, `none` when absent, coloured by family (opus, sonnet, haiku, fable; any other value keeps its raw text in the plain amber).
 
+The pill is a dropdown (naru task 1911): opus, sonnet, haiku, fable, `inherit` (removes the line) and the current value when it is something else. Choosing one calls `PUT /api/library/{id}/model` (`{model: string|null}`, `require_agent_access`; `library::set_agent_model`), which rewrites only the `model:` line of the stored body (`set_frontmatter_model`) **and** writes the same body to `.claude/agents/<name>.md` through `apply_naru`, stamping the sync baseline. Refusals come first and write nothing: a non-agent or no-frontmatter body or a bad model is 422, a file hand-edited on disk since the last sync (`disk-changed`/`both-changed`) is 409 (sync first). If the file write itself then fails, the row keeps the new model and the error says so. An unshadowed built-in is forked first by the page.
+
 A folded row also offers **diff vs built-in**, an inline panel below the row
 rendering `libraryOverride.ts::diffLines(userBody, builtinBody)` through the
 sync modal's own `diffLineClass`/`diffMark` markup. That function is a

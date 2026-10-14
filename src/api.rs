@@ -29,7 +29,7 @@ use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, Query, Request, State};
 use axum::http::{HeaderMap, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, patch, post};
+use axum::routing::{delete, get, patch, post, put};
 use axum::{Json, Router};
 use base64::Engine;
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
@@ -3200,6 +3200,7 @@ fn router(state: AppState) -> Router {
                 .delete(delete_library),
         )
         .route("/api/library/{id}/versions", get(list_library_versions))
+        .route("/api/library/{id}/model", put(set_library_model))
         .route("/api/library/{id}/builtin", post(resolve_library_builtin))
         .route(
             "/api/library/{id}/hook",
@@ -7487,6 +7488,33 @@ async fn update_library(
     // Through `library::update_item`, not the store directly: a prompt whose
     // `export_command` goes off gives up its file (mesa task 1139).
     Ok(Json(library::update_item(&mut store, id, patch)?).into_response())
+}
+
+/// `PUT /api/library/{id}/model` (naru task 1911): `{model: string|null}` sets
+/// or (null) removes an agent's frontmatter `model:` in the stored body and the
+/// on-disk agent file together (`library::set_agent_model`). Same
+/// [`require_agent_access`] gate as every library route.
+#[derive(Deserialize)]
+struct LibraryModelBody {
+    model: Option<String>,
+}
+
+async fn set_library_model(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    body: Result<Json<LibraryModelBody>, JsonRejection>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let Json(body) = body?;
+    let mut store = state.store.lock().unwrap();
+    Ok(Json(library::set_agent_model(
+        &mut store,
+        id,
+        body.model.as_deref(),
+    )?)
+    .into_response())
 }
 
 async fn delete_library(
