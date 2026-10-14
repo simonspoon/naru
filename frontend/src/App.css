@@ -11432,7 +11432,8 @@ select.library-model-badge {
 .dock-host > .agent-sidebar,
 .dock-host > .dock-chat,
 .dock-host > .dock-board,
-.dock-host > .dock-workflows {
+.dock-host > .dock-workflows,
+.dock-host > .agent-watch {
   flex: 1;
   min-width: 0;
   min-height: 0;
