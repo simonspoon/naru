@@ -52,8 +52,9 @@ use crate::core::{
     ServeNumberSetting, Status, Store, SystemInfo, Task, TaskNote, TaskPatch, TaskSummary,
     VoiceEnrollment, WorkflowNodeKind, WorkflowNodeNew, WorkflowNodePatch, WorkflowPatch,
     WorkflowTrigger, agents, attachments, audio, board, config, files, git, guard, hooks,
-    inbox_triage, library, listen, live, memory_job, project_memory, receipt, runner, script_runs,
-    scripts, speech, supervisor, system, validate_live_client, version, voice_enroll, workflow,
+    inbox_triage, kb, library, listen, live, memory_job, project_memory, receipt, runner,
+    script_runs, scripts, speech, supervisor, system, validate_live_client, version, voice_enroll,
+    workflow,
 };
 
 /// The Vite build output, embedded into the binary at compile time.
@@ -3525,6 +3526,12 @@ fn router(state: AppState) -> Router {
             "/api/themes/{id}",
             get(get_theme).patch(update_theme).delete(delete_theme),
         )
+        // Knowledge base viewer (naru task 1928): thin reads/ask over
+        // `core::kb`, no storage of its own. All three `require_agent_access`
+        // (ask spawns `claude`); the note path rides a query, not the path.
+        .route("/api/kb/notes", get(list_kb_notes))
+        .route("/api/kb/note", get(show_kb_note))
+        .route("/api/kb/ask", post(ask_kb))
         // The same file's `guard` section — the cost-guard's thresholds
         // (mesa task 1018). A seventh route for the same reason as the other
         // five.
@@ -4739,6 +4746,83 @@ async fn list_workflow_log(
         Json(store.list_workflow_log(q.log.as_deref(), q.workflow, q.limit.unwrap_or(50))?)
             .into_response(),
     )
+}
+
+// ---- knowledge base (naru task 1928) ----
+
+#[derive(Deserialize)]
+struct KbListQuery {
+    #[serde(default)]
+    topic: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct KbShowQuery {
+    path: String,
+}
+
+#[derive(Deserialize)]
+struct KbAskBody {
+    question: String,
+}
+
+/// `GET /api/kb/notes[?topic=]`: metadata only, as `naru kb list`.
+async fn list_kb_notes(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Query(q): Query<KbListQuery>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let notes = tokio::task::spawn_blocking(move || kb::list(&kb::kb_dir(), q.topic.as_deref()))
+        .await
+        .map_err(|e| agents_unavailable(format!("kb list panicked: {e}")))??;
+    Ok(Json(notes).into_response())
+}
+
+/// `GET /api/kb/note?path=topics/t/s.md`: one body, as `naru kb show`.
+async fn show_kb_note(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Query(q): Query<KbShowQuery>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let note = tokio::task::spawn_blocking(move || kb::show(&kb::kb_dir(), &q.path))
+        .await
+        .map_err(|e| agents_unavailable(format!("kb show panicked: {e}")))??;
+    Ok(Json(note).into_response())
+}
+
+/// `POST /api/kb/ask {question}`: as `naru kb ask` (one haiku call).
+async fn ask_kb(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Result<Json<KbAskBody>, JsonRejection>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let Json(body) = body?;
+    let prompts = library::prompts(&state.store.lock().unwrap())?;
+    let dir = config::workspace_dir().to_string_lossy().into_owned();
+    let answer = tokio::task::spawn_blocking(move || {
+        kb::ask_with(&kb::kb_dir(), &body.question, &mut |prompt, schema| {
+            crate::core::llm::complete_structured(
+                config::KB,
+                None,
+                "naru kb ask",
+                prompt,
+                schema,
+                Some(kb::MODEL),
+                &prompts,
+                &dir,
+                Duration::from_secs(120),
+            )
+        })
+    })
+    .await
+    .map_err(|e| agents_unavailable(format!("kb ask panicked: {e}")))??;
+    Ok(Json(answer).into_response())
 }
 
 // ---- inbox (global update requests) ----

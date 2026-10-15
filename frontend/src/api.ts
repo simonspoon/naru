@@ -13,6 +13,7 @@ import { parseWatchLine, type FilesWatchEvent } from './filesWatch'
 import { finishNdjson, parseEvent, splitNdjson } from './scriptRun'
 
 import type { ImportResolution } from './libraryImport'
+import type { KbNote } from './kbFilter'
 
 import type { AgentSession } from './types/AgentSession'
 import type { AgentSpawned } from './types/AgentSpawned'
@@ -2300,4 +2301,23 @@ export function unregisterLibraryHook(
   matcher?: string,
 ): Promise<LibraryHookStatus> {
   return request(`/api/library/${id}/hook${unregisterHookQuery(event, matcher)}`, jsonDelete())
+}
+
+// ---- knowledge base (naru task 1928) ----
+
+/** Every note's metadata (no bodies), as `naru kb list`. */
+export function listKbNotes(): Promise<KbNote[]> {
+  return request('/api/kb/notes')
+}
+
+/** One note's markdown (front matter included), as `naru kb show`. */
+export function getKbNote(path: string): Promise<{ path: string; body: string }> {
+  return request(`/api/kb/note?path=${encodeURIComponent(path)}`)
+}
+
+/** `naru kb ask`: one model call; empty `answer` = the notes don't say. */
+export function askKb(
+  question: string,
+): Promise<{ answer: string; sources: { path: string; title: string }[] }> {
+  return request('/api/kb/ask', jsonInit('POST', { question }))
 }

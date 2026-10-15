@@ -12534,3 +12534,20 @@ body.dock-resizing .dock-body {
   border-radius: 2px;
   vertical-align: middle;
 }
+
+/* Knowledge base page (naru task 1928) */
+.kb-page { display: flex; flex-direction: column; gap: 12px; }
+.kb-ask { display: flex; gap: 8px; }
+.kb-ask input { flex: 1; }
+.kb-answer { padding: 10px 12px; border-radius: 10px; background: var(--panel); }
+.kb-answer ul { margin: 6px 0 0; padding-left: 18px; }
+.kb-cols { display: flex; gap: 16px; align-items: flex-start; }
+.kb-list { flex: 0 0 340px; max-height: 70vh; overflow: auto; }
+.kb-body { flex: 1; min-width: 0; }
+.kb-topic { margin: 10px 0 4px; font-size: 0.9em; color: var(--muted); }
+.kb-note { display: block; padding: 3px 6px; border-radius: 6px; text-decoration: none; color: inherit; }
+.kb-note.active, .kb-note:hover { background: var(--panel); }
+.kb-tags { display: flex; flex-wrap: wrap; gap: 4px; }
+.kb-tag { cursor: pointer; padding: 1px 8px; border-radius: 999px; border: 0; background: var(--panel); color: inherit; font-size: 0.8em; }
+.kb-tag.active { background: var(--accent); color: var(--bg); }
+@media (max-width: 860px) { .kb-cols { flex-direction: column; } .kb-list { flex-basis: auto; max-height: 40vh; width: 100%; } }

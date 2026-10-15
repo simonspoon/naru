@@ -129,6 +129,11 @@ export MESA_KOKORO_BIN="$STUB_DIR/kokoro-rs"
 echo '{"audio":{"engine":"legacy"}}' > "$TMP/legacy-config.json"
 export MESA_CONFIG_FILE="$TMP/legacy-config.json"
 
+# kb fixture for the /api/kb routes (naru task 1928)
+mkdir -p "$TMP/kb/topics/demo"
+printf -- '---\ntitle: Demo note\ntags: a, b\nupdated: 2026-01-01\n---\nhello kb\n' > "$TMP/kb/topics/demo/note.md"
+export MESA_KB_DIR="$TMP/kb"
+
 # ---- server ----
 
 PORT=17775
@@ -204,6 +209,28 @@ ok "Host allowlist: 127.0.0.1:<port> is accepted"
 raw GET "/api/projects" -H "Host: localhost:1"
 [ "$STATUS" = "403" ] || fail "Host with wrong port: expected 403, got $STATUS"
 ok "Host allowlist: an allowlisted hostname on the wrong port is 403"
+
+# ---- Knowledge base routes (naru task 1928) ----
+# Thin reads/ask over core::kb, all behind require_agent_access: a foreign
+# Host is 403 (global guard), a foreign Origin is 403 (the route's own gate).
+raw GET "/api/kb/notes"
+[ "$STATUS" = "200" ] || fail "kb list: expected 200, got $STATUS ($BODY)"
+[ "$(jqb '.[0].path')" = "topics/demo/note.md" ] || fail "kb list: path ($BODY)"
+raw GET "/api/kb/note?path=topics/demo/note.md"
+[ "$STATUS" = "200" ] || fail "kb show: expected 200, got $STATUS ($BODY)"
+raw GET "/api/kb/note?path=../../etc/passwd"
+[ "$STATUS" = "404" ] || fail "kb show of a traversal path: expected 404, got $STATUS"
+raw GET "/api/kb/notes" -H "Host: evil.example"
+[ "$STATUS" = "403" ] || fail "kb list with a foreign Host: expected 403, got $STATUS"
+raw GET "/api/kb/note?path=topics/demo/note.md" -H "Host: evil.example"
+[ "$STATUS" = "403" ] || fail "kb show with a foreign Host: expected 403, got $STATUS"
+raw POST "/api/kb/ask" -H "Host: evil.example" -H 'Content-Type: application/json' -d '{"question":"x"}'
+[ "$STATUS" = "403" ] || fail "kb ask with a foreign Host: expected 403, got $STATUS"
+raw GET "/api/kb/notes" -H "Origin: http://evil.example"
+[ "$STATUS" = "403" ] || fail "kb list with a foreign Origin: expected 403, got $STATUS"
+raw POST "/api/kb/ask" -d 'question=x'
+[ "$STATUS" = "415" ] || fail "kb ask without JSON Content-Type: expected 415, got $STATUS"
+ok "kb routes: list/show served; traversal 404; foreign Host and Origin 403; ask needs JSON"
 
 # ---- Content-Type gate (cross-site form posts) ----
 

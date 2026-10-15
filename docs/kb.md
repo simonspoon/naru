@@ -2,7 +2,7 @@
 
 A small personal knowledge base of markdown notes, filed by a model and
 answered from by a model, where **Naru does every write and every check**
-(naru task 1919). CLI only; there is no HTTP route.
+(naru task 1919). CLI first; a read-only web viewer (below) sits over the same functions.
 
 ```
 naru kb add [--source <label>] <text…> | --file <path> | --stdin
@@ -71,6 +71,18 @@ that is not one of the notes actually shown to the model. Outcomes:
 prints `{path, body}`; a path that is not a note in the kb (outside it,
 malformed, a symlink, absent) is `not_found`. `--quiet` on `show` drops `body`;
 `list`, `ask` and `add` accept and ignore it.
+
+## Web page (`#/kb`, naru task 1928)
+
+A nav entry "Knowledge base" opens `#/kb`: notes grouped by topic with counts,
+a text filter and tag chips (client-side over the metadata list,
+`frontend/src/kbFilter.ts`), the opened note's markdown at `#/kb/<note path>`,
+and an ask box whose answer links each source to its note. No new storage; three
+thin routes over `core::kb`, all `require_agent_access` (ask spawns `claude`):
+
+- `GET /api/kb/notes[?topic=]` — as `kb list` (metadata only)
+- `GET /api/kb/note?path=topics/t/s.md` — as `kb show` (`not_found` outside the kb)
+- `POST /api/kb/ask {"question"}` — as `kb ask` (JSON Content-Type required)
 
 ## Mining past sessions (a workflow, not a feature)
 

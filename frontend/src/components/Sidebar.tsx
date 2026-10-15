@@ -210,6 +210,7 @@ export function Sidebar({
   inboxFilter,
   settingsActive,
   workflowsActive,
+  kbActive,
   libraryActive,
   terminalActive,
   agentWatcherActive,
@@ -228,6 +229,7 @@ export function Sidebar({
   inboxFilter: InboxFilter | null
   settingsActive: boolean
   workflowsActive: boolean
+  kbActive: boolean
   libraryActive: boolean
   terminalActive: boolean
   agentWatcherActive: boolean
@@ -620,6 +622,9 @@ export function Sidebar({
         {/* Library is global too, not a project subtree. */}
         <a className={`nav-item${libraryActive ? ' active' : ''}`} href="#/library">
           <span className="nav-item-label">Library</span>
+        </a>
+        <a className={`nav-item${kbActive ? ' active' : ''}`} href="#/kb">
+          <span className="nav-item-label">Knowledge base</span>
         </a>
         <button
           type="button"
