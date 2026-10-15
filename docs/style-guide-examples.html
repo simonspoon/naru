@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<title>Naru style guide examples</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Real tokens and themes, linked so they never drift (docs/style-guide.md). -->
+<link rel="stylesheet" href="../frontend/src/index.css">
+<link rel="stylesheet" href="../frontend/src/themes.css">
+<style>
+/* Component rules copied from frontend/src/App.css; re-check after editing them. */
+#root { height: auto; overflow: visible; display: block; }
+body { padding: 1rem 1.5rem 3rem; }
+.page { max-width: 60rem; margin: 0 auto; }
+.page > section { margin-top: 2.5rem; }
+.bar { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
+.muted { color: var(--muted); }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr)); gap: 0.75rem; }
+.swatch { border-radius: var(--r-md); background: var(--surface); padding: 0.5rem; font-family: var(--font-mono); font-size: 0.72rem; color: var(--muted); }
+.swatch i { display: block; height: 2.2rem; border-radius: var(--r-sm); margin-bottom: 0.4rem; box-shadow: var(--ring); }
+.swatch b { color: var(--text); font-weight: normal; }
+
+.card-list { list-style: none; margin: 0; padding: 0; }
+.card-list li { background: var(--surface); border: 1px solid transparent; border-radius: var(--r-md); padding: 0.5rem 0.75rem; margin-bottom: 0.5rem; transition: border-color 0.15s, box-shadow 0.15s; }
+.card-list li:hover { border-color: var(--border-bright); box-shadow: 0 0 10px rgba(var(--cyan-rgb), 0.1); }
+.card-list li.subtask-row { margin-left: 1.5rem; border-left: 2px solid var(--cyan-dim); }
+.inbox-item { display: flex; flex-direction: column; gap: 0.5rem; }
+.inbox-item.unread { border-left: 3px solid var(--cyan); padding-left: calc(0.75rem - 2px); }
+.inbox-item.unread .inbox-preview { font-weight: 600; }
+.inbox-item.inbox-kind-change-request { background: linear-gradient(var(--violet-dim), var(--violet-dim)), var(--panel); }
+.inbox-item.inbox-kind-task-summary { background: linear-gradient(rgba(var(--green-rgb), 0.08), rgba(var(--green-rgb), 0.08)), var(--panel); }
+.inbox-kind-change-request .inbox-kind { color: var(--violet); }
+.inbox-kind-task-summary .inbox-kind { color: var(--green); }
+.inbox-origin { font-size: 0.8rem; font-weight: 600; color: var(--muted); margin-bottom: 0.15rem; overflow-wrap: anywhere; }
+.inbox-preview { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; white-space: pre-wrap; overflow-wrap: anywhere; cursor: pointer; }
+.meta { font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 1.2px; color: var(--muted); }
+
+.badge { display: inline-block; border: 1px solid transparent; border-radius: var(--r-sm); background: var(--surface-raised); padding: 0 0.5em; font-size: 0.8rem; color: var(--muted); margin-right: 0.25rem; }
+.badge.status-todo { color: var(--cyan); border-color: var(--cyan-dim); }
+.badge.status-in_progress { color: var(--amber); border-color: rgba(var(--amber-rgb), 0.5); }
+.badge.status-done { color: var(--green); border-color: rgba(var(--green-rgb), 0.5); }
+.badge.status-cancelled { text-decoration: line-through; color: var(--muted); border-color: var(--border); }
+.badge.blocked { color: var(--magenta); border-color: rgba(var(--magenta-rgb), 0.6); text-shadow: var(--text-glow-magenta); }
+.badge.priority-high { color: var(--red); border-color: rgba(var(--red-rgb), 0.6); }
+.badge.priority-medium { color: var(--amber); border-color: rgba(var(--amber-rgb), 0.5); }
+.badge.priority-low { color: var(--muted); border-color: var(--border); }
+.live-task-chip { font-family: var(--font-mono); font-size: 13px; color: var(--cyan); background: rgba(var(--cyan-rgb), 0.1); border: 1px solid rgba(var(--cyan-rgb), 0.45); padding: 1px 7px; border-radius: 8px; }
+
+.cc-panel { background: var(--surface); border: 1px solid transparent; border-radius: var(--r-md); padding: 1rem 1.1rem 1.1rem; margin-bottom: 1rem; }
+.cc-panel h2 { margin: 0 0 0.6rem; }
+.cc-hint { margin: -0.2rem 0 0.7rem; font-size: 0.8rem; }
+.cc-table-wrap { overflow-x: auto; }
+.cc-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+.cc-table th, .cc-table td { text-align: left; padding: 0.35rem 0.6rem; border-bottom: 1px solid var(--hairline); white-space: nowrap; }
+.cc-table th { font-size: 0.7rem; color: var(--cyan); font-weight: normal; }
+.cc-table th.sortable { cursor: pointer; user-select: none; }
+.cc-table th.sortable:hover { color: var(--text-h); }
+.cc-table td.num, .cc-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.cc-table tbody tr:hover { background: var(--grid-line); }
+
+.empty { color: var(--muted); font-size: 0.8rem; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0.75rem; padding: 2rem; text-align: center; }
+.empty.dashed { border: 1px dashed var(--border); border-radius: var(--r-md); }
+
+.live-turn { padding: 10px 15px; border-radius: 16px 16px 16px 6px; background: rgba(var(--cyan-rgb), 0.06); box-shadow: inset 2px 0 0 rgba(var(--cyan-rgb), 0.55); color: var(--text-h); font-size: 14px; line-height: 1.55; overflow-wrap: anywhere; white-space: pre-wrap; max-width: 34rem; }
+.nav-row { display: flex; gap: 0.5rem; align-items: center; width: 16rem; background: var(--surface); border-radius: var(--r-sm); padding: 0.4rem 0.6rem; font-size: 0.85rem; font-weight: 600; }
+.nav-row span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.type-row { display: flex; align-items: baseline; gap: 1rem; padding: 0.3rem 0; border-bottom: 1px solid var(--hairline); }
+.type-row .meta { width: 11rem; flex: none; }
+</style>
+</head>
+<body>
+<div id="root"><div class="page">
+  <div class="bar">
+    <h1 style="margin:0">Naru style guide examples</h1>
+    <span class="muted">Theme</span>
+    <select id="theme">
+      <option>dark</option><option>light</option><option>contrast</option><option>crimson</option>
+    </select>
+    <span class="muted">see <code>style-guide.md</code></span>
+  </div>
+
+  <section>
+    <h2>Colour swatches</h2>
+    <div class="grid">
+      <div class="swatch"><i style="background:var(--bg)"></i><b>--bg</b></div>
+      <div class="swatch"><i style="background:var(--panel)"></i><b>--panel</b></div>
+      <div class="swatch"><i style="background:var(--panel-raised)"></i><b>--panel-raised</b></div>
+      <div class="swatch"><i style="background:var(--text)"></i><b>--text</b></div>
+      <div class="swatch"><i style="background:var(--text-h)"></i><b>--text-h</b></div>
+      <div class="swatch"><i style="background:var(--muted)"></i><b>--muted</b></div>
+      <div class="swatch"><i style="background:var(--cyan)"></i><b>--cyan</b> accent</div>
+      <div class="swatch"><i style="background:var(--violet)"></i><b>--violet</b></div>
+      <div class="swatch"><i style="background:var(--magenta)"></i><b>--magenta</b></div>
+      <div class="swatch"><i style="background:var(--amber)"></i><b>--amber</b></div>
+      <div class="swatch"><i style="background:var(--green)"></i><b>--green</b></div>
+      <div class="swatch"><i style="background:var(--red)"></i><b>--red</b></div>
+      <div class="swatch"><i style="background:var(--surface)"></i><b>--surface</b></div>
+      <div class="swatch"><i style="background:var(--surface-raised)"></i><b>--surface-raised</b></div>
+      <div class="swatch"><i style="background:var(--surface-hover)"></i><b>--surface-hover</b></div>
+      <div class="swatch"><i style="background:var(--surface-field)"></i><b>--surface-field</b></div>
+      <div class="swatch"><i style="background:var(--border)"></i><b>--border</b></div>
+      <div class="swatch"><i style="background:var(--border-bright)"></i><b>--border-bright</b></div>
+      <div class="swatch"><i style="background:var(--hairline)"></i><b>--hairline</b></div>
+      <div class="swatch"><i style="background:var(--cyan);color:var(--on-accent);padding:.5rem;font-size:.8rem;font-family:var(--font-sans)">Aa</i><b>--on-accent</b></div>
+    </div>
+    <p style="margin-top:1rem">
+      <span class="badge status-todo">todo</span><span class="badge status-in_progress">in_progress</span><span class="badge status-done">done</span><span class="badge status-cancelled">cancelled</span><span class="badge blocked">blocked</span>
+      <span class="badge priority-high">high</span><span class="badge priority-medium">medium</span><span class="badge priority-low">low</span>
+    </p>
+    <div class="bar"><button>Button</button><button class="danger">Danger</button><button disabled>Disabled</button><input placeholder="Field with ring" value=""></div>
+  </section>
+
+  <section>
+    <h2>Type scale</h2>
+    <div class="type-row"><span class="meta">10.5px mono meta</span><span class="meta">LIVE.META 12:04 · NARU</span></div>
+    <div class="type-row"><span class="meta">0.7rem table header</span><span style="font-size:.7rem;color:var(--cyan)">Header text</span></div>
+    <div class="type-row"><span class="meta">0.8rem badge / hint</span><span style="font-size:.8rem">Small supporting text</span></div>
+    <div class="type-row"><span class="meta">0.9rem button</span><span style="font-size:.9rem;font-weight:500">Button label</span></div>
+    <div class="type-row"><span class="meta">14.5px body / 1.5</span><span>Body text in Inter.</span></div>
+    <div class="type-row"><span class="meta">1rem h2 / 600</span><h2 style="margin:0">Section heading</h2></div>
+    <div class="type-row"><span class="meta">1.5rem h1 / 600</span><h1 style="margin:0">Page heading</h1></div>
+    <p>Mono is for meta and code only: <code>naru task list</code> <span class="live-task-chip">#1931</span></p>
+  </section>
+
+  <section>
+    <h2>Card</h2>
+    <ul class="card-list">
+      <li>Plain card: surface fill, rounded, ring-free. Hover for the border and glow.</li>
+      <li class="subtask-row">Subtask: indented with a cyan-dim rail.</li>
+      <li class="inbox-item unread inbox-kind-change-request">
+        <div><div class="inbox-origin">Task 1931 · naru</div>
+        <div class="inbox-preview">Unread change request: a cyan left edge, bold preview, violet wash over the panel.</div></div>
+        <div class="meta"><span class="inbox-kind">change-request</span> · 2m ago</div>
+      </li>
+      <li class="inbox-item inbox-kind-task-summary">
+        <div class="inbox-preview">Read task summary: green wash, normal weight.</div>
+        <div class="meta"><span class="inbox-kind">task-summary</span> · 1h ago</div>
+      </li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Panel</h2>
+    <div class="cc-panel">
+      <h2>Panel heading</h2>
+      <p class="cc-hint muted">Optional hint line under the heading.</p>
+      <p style="margin:0">Panel body on <code>--surface</code> with <code>--r-md</code>.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>Table</h2>
+    <div class="cc-panel"><div class="cc-table-wrap">
+      <table class="cc-table">
+        <thead><tr><th class="sortable">Session</th><th>Model</th><th class="num sortable">Tokens</th><th class="num">Cost</th></tr></thead>
+        <tbody>
+          <tr><td>session_a1b2</td><td>sonnet</td><td class="num">1,204,331</td><td class="num">$4.20</td></tr>
+          <tr><td>session_c3d4</td><td>haiku</td><td class="num">88,012</td><td class="num">$0.11</td></tr>
+          <tr><td>session_e5f6</td><td>opus</td><td class="num">3,420</td><td class="num">$0.90</td></tr>
+        </tbody>
+      </table>
+    </div></div>
+  </section>
+
+  <section>
+    <h2>Empty state</h2>
+    <div class="empty dashed"><span>Nothing here yet.</span><button>Do the next thing</button></div>
+    <div class="empty">No messages</div>
+  </section>
+
+  <section>
+    <h2>Dense text</h2>
+    <p class="muted">Clamped to 3 lines with a bare URL that must wrap:</p>
+    <div class="cc-panel"><div class="inbox-preview">First line of the body is where the summary goes.
+Second line keeps its break.
+https://example.com/a/really/long/path/with/no/break/opportunities/at/all/0123456789/0123456789/0123456789/0123456789/0123456789
+Fourth line, hidden by the clamp.</div></div>
+    <p class="muted">One-line ellipsis in a flex row (full text in <code>title</code>):</p>
+    <div class="nav-row" title="a-very-long-project-name-that-cannot-fit"><span>a-very-long-project-name-that-cannot-fit</span><b class="meta">12</b></div>
+    <p class="muted">Bubble with pre-wrap and wrap-anywhere:</p>
+    <div class="live-turn">Dictated text keeps
+its line breaks and breaks long tokens: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa</div>
+    <p class="meta">NARU · 12:04 · <span class="live-task-chip">#1931</span></p>
+  </section>
+</div></div>
+<script>
+  var sel = document.getElementById('theme');
+  var t = new URLSearchParams(location.search).get('theme');
+  if (t) { sel.value = t; document.documentElement.dataset.theme = t; }
+  sel.addEventListener('change', function () { document.documentElement.dataset.theme = sel.value; });
+</script>
+</body>
+</html>

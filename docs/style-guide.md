@@ -67,6 +67,119 @@ Only for small meta (ids, times, counts, chips, kbd) and for code: terminal and
 pty panes, the editor, diffs, file content, markdown code, script logs. Body
 text, buttons, headings and form fields are Inter.
 
+## Colour tokens
+
+Values below are the `dark` theme; every one is re-defined per theme
+(`themes.css`). Use the variable, never the literal. A translucent shade is
+`rgba(var(--<name>-rgb), a)`, never a new hex.
+
+| Variable | Use |
+| --- | --- |
+| `--bg` | page canvas (with the `--grid-line` grid on `body`) |
+| `--panel`, `--panel-raised` | opaque layers: floating UI, `select option`, `code` fill |
+| `--text` | body text; `--text-h` headings and bright text (`h1`/`h2`, bubbles) |
+| `--muted` | meta, hints, labels, disabled |
+| `--cyan` | the accent: links, primary action, unread edge, focus; `--cyan-dim` its 0.35 tint |
+| `--violet` (`-dim`, `-edge`) | second accent: the person's side, change-request kind, agent panes |
+| `--magenta` | blocked, rare emphasis (`--magenta-soft` one-off text) |
+| `--amber` | in progress, medium priority, warnings |
+| `--green` | done, success, task-summary kind |
+| `--red` | errors, danger, high priority (`--stderr-text` for stderr) |
+| `--on-accent` | ink on a solid accent fill |
+| `--border`, `--border-bright`, `--hairline` | faint edge on opaque layers, hover edge, row divider |
+| `--surface` / `-raised` / `-hover` / `-field` | translucent fills: panel, card-in-panel, hover, input |
+| `--ring`, `--ring-focus`, `--edge-cyan` | box-shadow separation: control ring, focus glow, left edge |
+| `--text-glow*` | neon text-shadows; `none` in `light`, so never hand-write one |
+
+Status mapping (`.badge.status-*`): todo cyan, in_progress amber, done green,
+cancelled muted + line-through, blocked magenta. Priority: high red, medium
+amber, low muted.
+
+## Type scale
+
+Body is Inter 14.5px / line-height 1.5, colour `--text`. Sizes actually used,
+smallest first:
+
+| Size | Where |
+| --- | --- |
+| 10.5px mono, letter-spacing 1.2px | `.live-meta`: speaker and clock |
+| 0.68-0.75rem | table headers, chips, nav meta, hints (`.cc-hint` is 0.8rem) |
+| 0.8-0.85rem | badges, `.inbox-origin` (600), table cells (`.cc-table` 0.82rem), nav items |
+| 0.9-0.95rem | buttons (500), inputs |
+| 14px / 1.55 | chat bubbles (`.live-turn`) |
+| 1rem | `h2` (600, 1.25) |
+| 1.5rem | `h1` (600, 1.25) |
+
+Weights: 400 body, 500 buttons, 600 headings, row titles and unread previews,
+700 only for the tiny uppercase `.live-who`. Headings are `--text-h`, sentence
+case.
+
+## Spacing
+
+Everything is rem, in this ladder: 0.25 / 0.35 / 0.5 / 0.75 / 1 / 1.5 / 2.5.
+`gap`: 0.5rem is the default between siblings (most common), 0.75rem between
+fields or groups, 0.25-0.4rem inside a control cluster, 1rem between sections
+of a row. Padding: chips `0 0.5em`, buttons `0.3rem 0.9rem`, inputs
+`0.3rem 0.6rem`, cards `0.5rem 0.75rem`, panels `1rem 1.1rem 1.1rem`, page
+(`main`) `1rem 1.5rem 3rem`. Cards stack with `margin-bottom: 0.5rem`, panels
+with `1rem`; sections inside a page with `2.5rem` (`.project-settings`).
+
+## Card, table, panel
+
+- **Card** (`.card-list li`, `.inbox-item`): `--surface` fill, `--r-md`,
+  `1px solid transparent`, padding `0.5rem 0.75rem`. Hover turns the border
+  `--border-bright` and adds a faint cyan glow. A state is an edge, not a
+  recolour: unread is a 3px `--cyan` left border (padding reduced by 2px so
+  rows still line up); kind is a faint wash over `--panel` (violet
+  change-request, green task-summary) and is also named in words in the meta.
+  A subtask is indented 1.5rem with a 2px `--cyan-dim` rail.
+- **Panel** (`.cc-panel`): `--surface`, `--r-md`, padding `1rem 1.1rem 1.1rem`,
+  `h2` with `0 0 0.6rem` margin, then an optional `.cc-hint` (0.8rem muted).
+  Floating layers (modals, palette) are opaque `--panel` with a faint `--border`.
+- **Table** (`.cc-table`, wrapped in `.cc-table-wrap { overflow-x: auto }`):
+  full width, collapsed borders, 0.82rem, cells `0.35rem 0.6rem` on a
+  `--hairline` bottom rule, `nowrap`. Headers 0.7rem `--cyan`, normal weight;
+  sortable ones pointer, hover `--text-h`. Numbers are right-aligned with
+  `tabular-nums`. Row hover is `--grid-line`. The scroll lives on the wrapper,
+  not the panel.
+
+## Empty state
+
+Quiet, centred, no illustration. Muted text at 0.8rem
+(`.agent-chat-empty`, `.dock-empty`), optionally a dashed `--border` box with
+2rem padding (`.files-placeholder`) or `.placeholder` (3rem top margin,
+centred). One sentence says what is missing, and a second muted line or one
+button says what to do about it (`.dock-empty` stacks them with 0.75rem gap).
+It is never red: red is an error.
+
+## Dense text
+
+Agent and user text is free text: assume long lines, bare URLs and many lines.
+
+- Wrap: `overflow-wrap: anywhere` on every container that renders it
+  (`.inbox-body`, `.live-turn`), and `min-width: 0` on the flex child holding
+  it, or a bare URL widens the row.
+- Keep line breaks: `white-space: pre-wrap` for previews and bubbles.
+- Clamp, don't cut in JS: `.inbox-preview` is `-webkit-line-clamp: 3` (plus
+  `line-clamp`) with `overflow: hidden`; a click expands it.
+- One-line names (nav items, branch names, project names) use
+  `overflow: hidden; text-overflow: ellipsis; white-space: nowrap` on a
+  `flex: 1; min-width: 0` element. Never truncate the only copy of the
+  information: put it in `title` or expand.
+- Meta (ids, times, counts, chips) is mono, small, `--muted`, one line,
+  joined by a `·`. Task numbers are the `.live-task-chip` pattern: mono
+  13px, cyan text on a 0.1 cyan fill, 8px radius.
+- Inline `code` is `--panel-raised`, mono 0.9em, 6px radius, `1px 5px` padding.
+
+## Examples
+
+`docs/style-guide-examples.html` renders each of the above with the real
+variables and a theme switcher (opens from disk). It links
+`../frontend/src/index.css` and `themes.css` directly, so tokens and themes
+never drift; only the few component rules it demonstrates (card, panel, table,
+empty, inbox preview, chip, badge) are copied from `App.css` into its own
+`<style>`, so re-check those after changing them.
+
 ## Exceptions
 
 - The `.frame-*` shape silhouettes, their `::before`/`::after` layers and
