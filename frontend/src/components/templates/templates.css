@@ -80,13 +80,16 @@
 }
 .tpl-ld-list {
   flex: 0 0 20rem;
-  max-height: 70vh;
+  max-height: calc(100vh - 20rem);
   overflow: auto;
   min-width: 0;
 }
 .tpl-ld-detail {
   flex: 1;
   min-width: 0;
+  background: var(--surface);
+  border-radius: var(--r-md);
+  padding: 1rem;
   overflow-wrap: anywhere;
 }
 .tpl-ld-group {

@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import { askKb, getKbNote, listKbNotes } from '../api'
 import { Markdown } from '../components/Markdown'
-import { ListDetail } from '../components/templates'
+import { Callout, ListDetail } from '../components/templates'
 import { groupKb, kbNoteHref, kbTags } from '../kbFilter'
 import { useFetch } from '../useFetch'
 
@@ -31,7 +31,7 @@ export function KbView({ notePath }: { notePath: string | null }) {
   const emptyDetail = !notePath
     ? 'Pick a note.'
     : noteError
-      ? noteError
+      ? `Could not load this note: ${noteError}`
       : 'Loading…'
 
   async function ask() {
@@ -52,71 +52,88 @@ export function KbView({ notePath }: { notePath: string | null }) {
   return (
     <div className="kb-page">
       <h1>Knowledge base</h1>
-      <form
-        className="kb-ask"
-        onSubmit={(e) => {
-          e.preventDefault()
-          void ask()
-        }}
-      >
-        <input
-          value={question}
-          onChange={(e) => setQuestion(e.target.value)}
-          placeholder="Ask the knowledge base…"
-          aria-label="Ask the knowledge base"
-        />
-        <button type="submit" disabled={asking || !question.trim()}>
-          {asking ? 'Asking…' : 'Ask'}
-        </button>
-      </form>
-      {askError && <p className="error">{askError}</p>}
-      {answer && (
-        <div className="kb-answer">
-          {answer.answer ? (
-            <>
+      <section className="cc-panel kb-panel">
+        <h2>Ask</h2>
+        <p className="cc-hint muted">Answers come from your notes only.</p>
+        <form
+          className="kb-ask"
+          onSubmit={(e) => {
+            e.preventDefault()
+            void ask()
+          }}
+        >
+          <input
+            value={question}
+            onChange={(e) => setQuestion(e.target.value)}
+            placeholder="Ask the knowledge base…"
+            aria-label="Ask the knowledge base"
+            aria-busy={asking}
+          />
+          <button type="submit" className="kb-ask-btn" disabled={asking || !question.trim()}>
+            {asking ? 'Asking…' : 'Ask'}
+          </button>
+        </form>
+        {askError && <Callout tone="bad" text={askError} />}
+        {answer &&
+          (answer.answer ? (
+            <div className="tpl-callout tpl-tone-info kb-answer" role="status">
               <Markdown text={answer.answer} />
-              <ul>
-                {answer.sources.map((s) => (
-                  <li key={s.path}>
-                    <a href={kbNoteHref(s.path)}>{s.title || s.path}</a>
-                  </li>
-                ))}
-              </ul>
-            </>
+              {answer.sources.length > 0 && (
+                <>
+                  <p className="cc-hint muted kb-sources-label">Sources</p>
+                  <div className="kb-sources">
+                    {answer.sources.map((s) => (
+                      <a key={s.path} className="kb-source" href={kbNoteHref(s.path)} title={s.path}>
+                        {s.title || s.path}
+                      </a>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
           ) : (
-            <p className="muted">The notes do not answer that.</p>
+            <Callout tone="neutral" text="The notes do not answer that." />
+          ))}
+      </section>
+      <section className="cc-panel kb-panel">
+        <h2>Notes</h2>
+        <div className="kb-toolbar">
+          <input
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            placeholder="Filter notes by title, topic or tag…"
+            aria-label="Filter notes"
+          />
+          {notes && notes.length > 0 && (
+            <span className="tpl-meta">
+              {shown} of {notes.length} notes
+            </span>
           )}
         </div>
-      )}
-      <input
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        placeholder="Filter notes by title, topic or tag…"
-        aria-label="Filter notes"
-      />
-      {tags.length > 0 && (
-        <div className="kb-tags">
-          {tags.map((t) => (
-            <button
-              key={t.tag}
-              type="button"
-              className={`kb-tag${tag === t.tag ? ' active' : ''}`}
-              onClick={() => setTag(tag === t.tag ? null : t.tag)}
-            >
-              {t.tag} {t.count}
-            </button>
-          ))}
-        </div>
-      )}
-      {error ? (
-        <p className="error">{error}</p>
-      ) : !notes ? (
-        <p className="muted">Loading…</p>
-      ) : (
-        <>
+        {tags.length > 0 && (
+          <div className="kb-tags">
+            {tags.map((t) => (
+              <button
+                key={t.tag}
+                type="button"
+                className={`kb-tag${tag === t.tag ? ' active' : ''}`}
+                aria-pressed={tag === t.tag}
+                onClick={() => setTag(tag === t.tag ? null : t.tag)}
+              >
+                {t.tag} <span className="kb-tag-count">{t.count}</span>
+              </button>
+            ))}
+          </div>
+        )}
+        {error ? (
+          <Callout tone="bad" text={error} />
+        ) : !notes ? (
+          <p className="muted">Loading…</p>
+        ) : notes.length === 0 ? (
           <p className="muted">
-            {shown} of {notes.length} notes
+            No notes yet. Add one with <code>naru kb add</code>.
           </p>
+        ) : (
           <ListDetail
             items={groups.flatMap((g) =>
               g.notes.map((n) => ({ id: n.path, title: n.title, group: g.topic, meta: n.tags })),
@@ -129,8 +146,8 @@ export function KbView({ notePath }: { notePath: string | null }) {
               window.location.hash = kbNoteHref(path)
             }}
           />
-        </>
-      )}
+        )}
+      </section>
     </div>
   )
 }
