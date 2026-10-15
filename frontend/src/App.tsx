@@ -28,6 +28,7 @@ import { AgentWatcherView } from './pages/AgentWatcherView'
 import { InboxView } from './pages/InboxView'
 import { LibraryView } from './pages/LibraryView'
 import { KbView } from './pages/KbView'
+import { TemplatesView } from './pages/TemplatesView'
 import { kbPathFromRoute } from './kbFilter'
 import { LiveHub, type LiveDock } from './components/LiveHub'
 import { ProjectTasksPage } from './pages/ProjectTasksPage'
@@ -415,6 +416,8 @@ function App() {
   const agentWatcherMatch = /^\/agent-watcher$/.exec(path)
   // Knowledge base viewer (naru task 1928): #/kb, and #/kb/<note path>.
   const kbMatch = /^\/kb(?:\/.+)?$/.exec(path)
+  // Hidden UI-template gallery (naru task 1932): by address only, no nav entry.
+  const templatesMatch = /^\/templates$/.exec(path)
   const terminalActive = terminalMatch !== null
   // CC Dashboard is the default landing view: the root path (#/ or empty) shows
   // the overview, and the brand link points back here. The three sub-pages
@@ -508,6 +511,8 @@ function App() {
     page = <LibraryView tab={libraryRoute.tab} runId={libraryRoute.runId} />
   } else if (kbMatch) {
     page = <KbView notePath={kbPathFromRoute(path)} />
+  } else if (templatesMatch) {
+    page = <TemplatesView />
   } else if (agentWatcherMatch && !docked) {
     // Global full-page timeline of every running agent: no project frame.
     page = <AgentWatcherView />

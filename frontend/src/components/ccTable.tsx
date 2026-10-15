@@ -68,6 +68,22 @@ export function DataTable<T>({
                 key={c.key}
                 className={`${c.numeric ? 'num' : ''}${c.sort ? ' sortable' : ''}`}
                 onClick={() => clickHeader(c)}
+                // A sortable header is a keyboard target: Tab reaches it,
+                // Enter or Space sorts, aria-sort names the state.
+                tabIndex={c.sort ? 0 : undefined}
+                aria-sort={
+                  c.sort ? (c.key === key ? (dir === 'asc' ? 'ascending' : 'descending') : 'none') : undefined
+                }
+                onKeyDown={
+                  c.sort
+                    ? (e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault()
+                          clickHeader(c)
+                        }
+                      }
+                    : undefined
+                }
               >
                 {c.label}
                 {c.key === key ? (dir === 'asc' ? ' ▲' : ' ▼') : ''}

@@ -1,0 +1,150 @@
+/* Reusable UI templates (naru task 1932). Reuses .cc-panel, .cc-kpi*, .cc-table*
+   and .card-list; only the pieces below are new. Tokens only. */
+
+.tpl-meta {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+/* Tone is an edge (and, for a stat, the number's colour), never a recolour. */
+.tpl-tone-info { --tpl-tone: var(--cyan); }
+.tpl-tone-good { --tpl-tone: var(--green); }
+.tpl-tone-warn { --tpl-tone: var(--amber); }
+.tpl-tone-bad { --tpl-tone: var(--red); }
+.tpl-edge-cyan { --tpl-tone: var(--cyan); }
+.tpl-edge-violet { --tpl-tone: var(--violet); }
+
+.tpl-card-list li.tpl-card {
+  margin-bottom: 0.5rem;
+  min-width: 0;
+}
+.tpl-card-list li.tpl-card[class*='tpl-tone-'],
+.tpl-card-list li.tpl-card[class*='tpl-edge-'] {
+  box-shadow: inset 3px 0 0 var(--tpl-tone);
+}
+.tpl-card-title {
+  font-weight: 600;
+  color: var(--text-h);
+  overflow-wrap: anywhere;
+}
+.tpl-card-body {
+  margin-top: 0.25rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.tpl-card-list li.tpl-card .tpl-meta {
+  margin-top: 0.35rem;
+}
+
+.tpl-stat {
+  min-width: 0;
+}
+.tpl-stat .cc-kpi-value,
+.tpl-stat .cc-kpi-label,
+.tpl-stat .cc-kpi-sub {
+  overflow-wrap: anywhere;
+}
+.tpl-stat[class*='tpl-tone-'] .cc-kpi-value {
+  color: var(--tpl-tone);
+}
+
+.tpl-callout {
+  background: var(--surface);
+  border: 1px solid transparent;
+  border-radius: var(--r-md);
+  box-shadow: inset 3px 0 0 var(--tpl-tone, var(--muted));
+  padding: 0.5rem 0.75rem;
+  margin-bottom: 0.5rem;
+  overflow-wrap: anywhere;
+}
+.tpl-callout.tpl-tone-neutral {
+  color: var(--muted);
+}
+.tpl-callout-title {
+  font-weight: 600;
+  color: var(--text-h);
+}
+.tpl-callout.tpl-tone-neutral .tpl-callout-title {
+  color: var(--muted);
+}
+.tpl-callout-text {
+  white-space: pre-wrap;
+}
+
+.tpl-ld {
+  display: flex;
+  gap: 1rem;
+  align-items: flex-start;
+}
+.tpl-ld-list {
+  flex: 0 0 20rem;
+  max-height: 70vh;
+  overflow: auto;
+  min-width: 0;
+}
+.tpl-ld-detail {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.tpl-ld-group {
+  margin: 0.75rem 0 0.25rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.tpl-ld-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  color: inherit;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  padding: 0.3rem 0.5rem;
+  cursor: pointer;
+}
+.tpl-ld-item:hover,
+.tpl-ld-item.active {
+  background: var(--surface);
+}
+.tpl-ld-item.active {
+  box-shadow: var(--edge-cyan);
+}
+.tpl-ld-title {
+  overflow-wrap: anywhere;
+}
+.tpl-ld-back {
+  display: none;
+  margin-bottom: 0.5rem;
+}
+
+@media (max-width: 600px) {
+  /* Two stats per row on a phone (auto-fit 160px would give one). */
+  .tpl-kpis {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .tpl-ld {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .tpl-ld-list {
+    flex-basis: auto;
+    max-height: none;
+  }
+  .tpl-ld-item {
+    min-height: 44px;
+    justify-content: center;
+  }
+  .tpl-ld[data-view='detail'] .tpl-ld-list,
+  .tpl-ld[data-view='list'] .tpl-ld-detail {
+    display: none;
+  }
+  .tpl-ld-back {
+    display: inline-block;
+    min-height: 44px;
+  }
+}

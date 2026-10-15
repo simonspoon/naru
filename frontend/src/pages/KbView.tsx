@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import { askKb, getKbNote, listKbNotes } from '../api'
 import { Markdown } from '../components/Markdown'
+import { ListDetail } from '../components/templates'
 import { groupKb, kbNoteHref, kbTags } from '../kbFilter'
 import { useFetch } from '../useFetch'
 
@@ -24,6 +25,14 @@ export function KbView({ notePath }: { notePath: string | null }) {
     () => (notePath ? getKbNote(notePath) : Promise.resolve(null)),
     `kb-note:${notePath ?? ''}`,
   )
+
+  const detailFor =
+    notePath && note && note.path === notePath ? { [notePath]: { body: note.body } } : {}
+  const emptyDetail = !notePath
+    ? 'Pick a note.'
+    : noteError
+      ? noteError
+      : 'Loading…'
 
   async function ask() {
     const q = question.trim()
@@ -104,40 +113,23 @@ export function KbView({ notePath }: { notePath: string | null }) {
       ) : !notes ? (
         <p className="muted">Loading…</p>
       ) : (
-        <div className="kb-cols">
-          <div className="kb-list">
-            <p className="muted">
-              {shown} of {notes.length} notes
-            </p>
-            {groups.map((g) => (
-              <div key={g.topic}>
-                <div className="kb-topic">
-                  {g.topic} ({g.notes.length})
-                </div>
-                {g.notes.map((n) => (
-                  <a
-                    key={n.path}
-                    className={`kb-note${n.path === notePath ? ' active' : ''}`}
-                    href={kbNoteHref(n.path)}
-                  >
-                    {n.title}
-                  </a>
-                ))}
-              </div>
-            ))}
-          </div>
-          <div className="kb-body">
-            {!notePath ? (
-              <p className="muted">Pick a note.</p>
-            ) : noteError ? (
-              <p className="error">{noteError}</p>
-            ) : !note || note.path !== notePath ? (
-              <p className="muted">Loading…</p>
-            ) : (
-              <Markdown text={note.body} />
+        <>
+          <p className="muted">
+            {shown} of {notes.length} notes
+          </p>
+          <ListDetail
+            items={groups.flatMap((g) =>
+              g.notes.map((n) => ({ id: n.path, title: n.title, group: g.topic, meta: n.tags })),
             )}
-          </div>
-        </div>
+            details={detailFor}
+            selectedId={notePath ?? undefined}
+            emptyList="No notes match."
+            emptyDetail={emptyDetail}
+            onSelect={(path) => {
+              window.location.hash = kbNoteHref(path)
+            }}
+          />
+        </>
       )}
     </div>
   )
