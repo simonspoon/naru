@@ -72,6 +72,18 @@ prints `{path, body}`; a path that is not a note in the kb (outside it,
 malformed, a symlink, absent) is `not_found`. `--quiet` on `show` drops `body`;
 `list`, `ask` and `add` accept and ignore it.
 
+## Mining past sessions (a workflow, not a feature)
+
+The saved workflow `KB: mine past sessions` (voice trigger "mine sessions into
+the knowledge base"; `workflow run <id> --input N` reads N sessions, default 2,
+max 5) is a trigger, a `cli` node running `~/.naru/bin/kb-mine.sh` and a log
+node. The script, which lives outside the repo, picks the newest unprocessed
+sessions from `cc sessions` (8+ messages, ended 20+ minutes ago, not Naru's own
+workspace jobs), has haiku extract only gotchas and new facts from `cc chat`
+(transcript fenced as data), drops each fact `kb ask` already answers, files the
+rest with one `kb add`, and appends the session id to `~/.naru/kb-mined.txt` so
+it is never read twice.
+
 ## Not covered
 
 `naru migrate` does not carry the kb: move `<naru home>/kb/` by hand. The kb
