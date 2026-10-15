@@ -56,7 +56,7 @@ session row, and after each subagent row, oldest call first. A row has one
 segment in the owner's model colour spanning start..end, clipped to the window,
 an open call running to now (or to a finished owner's last event); hover says
 `Read · 3s` or `Bash · running 12s`. Only the newest `TOOL_ROW_CAP` (20) calls per
-owner are shown. The row links to the owner. There is no legend entry; the
+owner are shown. A finished call's row disappears `TOOL_TTL_SECS` (10) seconds after it ended; an open call always stays. The row links to the owner. There is no legend entry; the
 rows are not a state, `rowSegments` is unchanged.
 
 ## Segment states (`frontend/src/agentWatch.ts`)

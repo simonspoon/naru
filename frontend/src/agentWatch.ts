@@ -37,6 +37,9 @@ export const TOOL_OPEN = -1
 /** At most this many tool rows per owner: the newest within the window. */
 export const TOOL_ROW_CAP = 20
 
+/** A finished tool call's row disappears this many seconds after it ended. */
+export const TOOL_TTL_SECS = 10
+
 /** One tool call drawn as its own row under its owner. */
 export interface ToolRow {
   name: string
@@ -193,11 +196,13 @@ function shellSegments(row: AgentWatchRow, now: number, windowStart: number): Se
 
 /** The tool-call rows of one owner across `[windowStart, now]`, oldest first.
  *  Calls are clipped to the window; one with no result yet runs to now (or to
- *  the owner's last event once it is finished). Only the newest
+ *  the owner's last event once it is finished); a finished call is dropped
+ *  `TOOL_TTL_SECS` after it ended, an open one never. Only the newest
  *  `TOOL_ROW_CAP` are kept. */
 export function toolRows(row: AgentWatchRow, now: number, windowStart: number): ToolRow[] {
   const hi = row.finished ? Math.min(now, row.lastEventAt ?? now) : now
   const calls = (row.tools ?? [])
+    .filter(([, b]) => b === TOOL_OPEN || now - b <= TOOL_TTL_SECS)
     .map(([a, b, name, summary]): ToolRow => {
       const open = b === TOOL_OPEN
       const end = open ? hi : b

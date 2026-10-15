@@ -14,6 +14,7 @@ import {
   formatDuration,
   toolRows,
   TOOL_ROW_CAP,
+  TOOL_TTL_SECS,
   toolLabel,
   ticks,
 } from './agentWatch'
@@ -166,10 +167,10 @@ describe('geometry', () => {
 
 describe('toolRows', () => {
   it('makes one row per call with its duration', () => {
-    const r = row({ key: 'a', tools: [[WS + 100, WS + 103, 'Read', '/a/b.rs']] })
+    const r = row({ key: 'a', tools: [[NOW - 6, NOW - 3, 'Read', '/a/b.rs']] })
     const t = toolRows(r, NOW, WS)
     expect(t).toHaveLength(1)
-    expect(t[0]).toMatchObject({ name: 'Read', from: WS + 100, to: WS + 103, duration: 3, open: false })
+    expect(t[0]).toMatchObject({ name: 'Read', from: NOW - 6, to: NOW - 3, duration: 3, open: false })
     expect(t[0].summary).toBe('/a/b.rs')
     expect(toolLabel(t[0])).toBe('Read · 3s\n/a/b.rs')
   })
@@ -178,7 +179,7 @@ describe('toolRows', () => {
     const open = row({ key: 'a', tools: [[NOW - 30, -1, 'Bash', '']] })
     expect(toolRows(open, NOW, WS)[0]).toMatchObject({ to: NOW, duration: 30, open: true })
     expect(toolLabel(toolRows(open, NOW, WS)[0])).toBe('Bash · running 30s')
-    const early = row({ key: 'a', tools: [[WS - 50, WS + 10, 'Read', '']] })
+    const early = row({ key: 'a', tools: [[WS - 50, -1, 'Read', '']] })
     expect(toolRows(early, NOW, WS)[0].from).toBe(WS)
     const done = row({ key: 'a', finished: true, lastEventAt: WS + 200, tools: [[WS + 150, -1, 'Read', '']] })
     expect(toolRows(done, NOW, WS)[0].to).toBe(WS + 200)
@@ -187,7 +188,7 @@ describe('toolRows', () => {
   it('keeps only the newest calls, oldest first', () => {
     const tools = Array.from({ length: TOOL_ROW_CAP + 5 }, (_, i): [number, number, string, string] => [
       WS + i * 10,
-      WS + i * 10 + 1,
+      -1,
       'Read',
       '',
     ])
@@ -195,6 +196,21 @@ describe('toolRows', () => {
     expect(t).toHaveLength(TOOL_ROW_CAP)
     expect(t[0].from).toBe(WS + 50)
     expect(t[t.length - 1].from).toBe(WS + (TOOL_ROW_CAP + 4) * 10)
+  })
+
+  it('shows a fresh finished call, hides one older than the TTL, always shows an open one', () => {
+    const r = row({
+      key: 'a',
+      tools: [
+        [NOW - 100, NOW - TOOL_TTL_SECS - 1, 'Old', ''],
+        [NOW - 100, NOW - TOOL_TTL_SECS, 'Edge', ''],
+        [NOW - 20, NOW - 2, 'Fresh', ''],
+        [NOW - 500, -1, 'Open', ''],
+      ],
+    })
+    expect(toolRows(r, NOW, WS).map((t) => t.name)).toEqual(['Open', 'Edge', 'Fresh'])
+    const done = row({ key: 'a', finished: true, lastEventAt: WS + 200, tools: [[WS + 150, -1, 'Open', '']] })
+    expect(toolRows(done, NOW, WS)).toHaveLength(1)
   })
 
   it('tolerates a row with no tools field', () => {
@@ -207,8 +223,8 @@ describe('toolRows', () => {
 describe('orderRows tool rows', () => {
   it('hangs tool rows under their session and subagent', () => {
     const rows = [
-      row({ key: 'a', startedAt: 10, tools: [[WS + 5, WS + 6, 'Read', '']] }),
-      row({ key: 'a/s1', kind: 'subagent', parent: 'a', startedAt: 11, tools: [[WS + 7, WS + 8, 'Grep', '']] }),
+      row({ key: 'a', startedAt: 10, tools: [[NOW - 5, NOW - 4, 'Read', '']] }),
+      row({ key: 'a/s1', kind: 'subagent', parent: 'a', startedAt: 11, tools: [[NOW - 3, NOW - 2, 'Grep', '']] }),
       row({ key: 'a/sh', kind: 'shell', parent: 'a', startedAt: 12 }),
     ]
     const o = orderRows(rows, NOW, WS)
