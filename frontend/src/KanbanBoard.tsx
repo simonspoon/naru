@@ -13,7 +13,15 @@ import {
 import { SortableContext, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { updateTaskPosition } from './api'
-import { capColumn, liveAgentCount, DONE_INITIAL, DONE_PAGE } from './boardView'
+import {
+  capColumn,
+  hideSubtasks,
+  liveAgentCount,
+  loadHideSubtasks,
+  saveHideSubtasks,
+  DONE_INITIAL,
+  DONE_PAGE,
+} from './boardView'
 import { taskHrefFrom } from './projectPanes'
 import { statusLabel } from './taskStatus'
 import { formatTimestamp, timeAgo } from './time'
@@ -233,6 +241,8 @@ export function KanbanBoard({
   // array, and expanding to 120 then dragging a card must not snap back to 20.
   // It resets when the board unmounts, i.e. on navigating away.
   const [shownDone, setShownDone] = useState(DONE_INITIAL)
+  const [hideSubs, setHideSubs] = useState(loadHideSubtasks)
+  const shownTasks = hideSubtasks(tasks, hideSubs)
   // Mouse and touch get *different* activation gestures, which is why this is
   // MouseSensor + TouchSensor rather than the one PointerSensor that covers
   // both (mesa task 555).
@@ -306,6 +316,17 @@ export function KanbanBoard({
   return (
     <>
       {error && <p className="error">{error}</p>}
+      <label className="kanban-toolbar">
+        <input
+          type="checkbox"
+          checked={hideSubs}
+          onChange={(e) => {
+            setHideSubs(e.target.checked)
+            saveHideSubtasks(e.target.checked)
+          }}
+        />{' '}
+        Hide subtasks
+      </label>
       <DndContext
         sensors={sensors}
         onDragStart={handleDragStart}
@@ -317,7 +338,7 @@ export function KanbanBoard({
             <Column
               key={status}
               status={status}
-              tasks={tasks.filter((t) => t.status === status)}
+              tasks={shownTasks.filter((t) => t.status === status)}
               projectName={projectName}
               sessions={sessions}
               shown={shownDone}

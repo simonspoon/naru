@@ -12576,3 +12576,14 @@ body.dock-resizing .dock-body {
   .kb-ask input { min-height: 44px; }
   .kb-ask-btn { flex: 1 1 100%; justify-content: center; }
 }
+
+/* Board toolbar: the "Hide subtasks" toggle (naru task 1943). */
+.kanban-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.5rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+  cursor: pointer;
+}

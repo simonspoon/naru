@@ -107,3 +107,32 @@ export function loadBoardView(workflowId: number): BoardView | null {
 export function saveBoardView(workflowId: number, view: BoardView): void {
   localStorage.setItem(KEY(workflowId), JSON.stringify(view))
 }
+
+// "Hide subtasks" board toggle (naru task 1943): one global, per-browser
+// switch, default off. Machine-local like the canvas view above.
+export const HIDE_SUBTASKS_KEY = 'naru-board-hide-subtasks'
+
+export function loadHideSubtasks(): boolean {
+  try {
+    return localStorage.getItem(HIDE_SUBTASKS_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
+export function saveHideSubtasks(hide: boolean): void {
+  try {
+    if (hide) localStorage.setItem(HIDE_SUBTASKS_KEY, '1')
+    else localStorage.removeItem(HIDE_SUBTASKS_KEY)
+  } catch {
+    // Storage unavailable — the toggle just won't persist.
+  }
+}
+
+/** Drop child tasks (`parent_id` set) when `hide` is on; identity otherwise. */
+export function hideSubtasks<T extends { parent_id: number | null }>(
+  tasks: T[],
+  hide: boolean,
+): T[] {
+  return hide ? tasks.filter((t) => t.parent_id === null) : tasks
+}

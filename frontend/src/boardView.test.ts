@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import {
   capColumn,
+  hideSubtasks,
+  loadHideSubtasks,
+  saveHideSubtasks,
   liveAgentCount,
   loadBoardView,
   saveBoardView,
@@ -192,5 +195,26 @@ describe('boardView', () => {
   ])('falls back to null on %s', (_label, raw) => {
     localStorage.setItem('mesa-board-view-7', raw)
     expect(loadBoardView(7)).toBeNull()
+  })
+})
+
+describe('hide subtasks', () => {
+  beforeEach(() => localStorage.clear())
+
+  it('defaults off and round-trips through localStorage', () => {
+    expect(loadHideSubtasks()).toBe(false)
+    saveHideSubtasks(true)
+    expect(loadHideSubtasks()).toBe(true)
+    saveHideSubtasks(false)
+    expect(loadHideSubtasks()).toBe(false)
+  })
+
+  it('filters children only when on', () => {
+    const ts = [
+      { id: 1, parent_id: null },
+      { id: 2, parent_id: 1 },
+    ]
+    expect(hideSubtasks(ts, false)).toBe(ts)
+    expect(hideSubtasks(ts, true)).toEqual([{ id: 1, parent_id: null }])
   })
 })
