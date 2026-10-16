@@ -5,10 +5,9 @@
 # script with its values quoted in (mesa task 1143), and that a missing or
 # broken config behaves the way docs/config.md says. It also covers the
 # pricing, watchers, serve (mesa task 1621: every `serve` flag as a config
-# key, a flag beating it), keymap, speech, live and listen sections that share the
-# same file — the last of these (mesa task 955) names the model `live transcribe`
-# runs the external `auris` binary with, the input-side mirror of `speech`'s
-# `kokoro-rs` voice.
+# key, a flag beating it), keymap, speech, live, listen and audio sections that
+# share the same file. The offered voices/models come from the naru-audio
+# daemon, which this gate does not run, so those lists read empty here.
 #
 # The config file is read at its REAL default location, so HOME is pointed at
 # a throwaway dir (MESA_CONFIG_FILE, the unit tests' seam, would sidestep the
@@ -21,8 +20,11 @@
 set -euo pipefail
 # Drop inherited NARU_* vars: Naru reads them before MESA_*, so one would escape this script's isolation.
 unset $(env | sed -n 's/^\(NARU_[A-Za-z0-9_]*\)=.*/\1/p')
-# url_env must read null below, so a developer's exported audio override cannot leak in.
-unset NARU_AUDIO_URL MESA_AUDIO_URL
+# The only speech engine is the naru-audio daemon. Point the override at a closed
+# port so a daemon on the developer's machine cannot answer (the voice and model
+# lists then read empty, and `url_env` below reports exactly this value).
+unset MESA_AUDIO_URL
+export NARU_AUDIO_URL="http://127.0.0.1:9"
 
 cd "$(dirname "$0")/.."
 command -v jq >/dev/null || { echo "jq is required" >&2; exit 1; }
@@ -93,54 +95,7 @@ if [ "\$1" = "-p" ]; then
 fi
 exit 2
 EOF
-# The synthesiser behind the `speech` section (mesa task 822). `--list-voices`
-# is the one source of the voices mesa offers — read by the Settings route and
-# by the save-time check — so the stub answers it with a bounded list plus a
-# line that is not a name, which must be filtered out. mesa asks for the list
-# with `--no-download` beside it (listing names must never become a model
-# fetch), so the stub matches the flag anywhere in its argv rather than at $1.
-# Every other invocation logs its argv (the whole point: does the saved voice reach `-v`?) and emits
-# the streaming WAV header `kokoro-rs -o -` writes, exactly like the stub in
-# scripts/api-check.sh.
-KOKORO_ARGV="$TMP/kokoro.argv"
-cat > "$STUB_DIR/kokoro-rs" <<EOF
-#!/usr/bin/env bash
-case " \$* " in *" --list-voices "*) LISTING=1;; *) LISTING=0;; esac
-if [ "\$LISTING" = "1" ]; then
-  printf 'Available voices:\naf_heart\naf_bella\nbm_george\n'
-  exit 0
-fi
-printf '%s\n' "\$*" > "$KOKORO_ARGV"
-cat > /dev/null
-printf 'RIFF\xff\xff\xff\xffWAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00\xc0\x5d\x00\x00\x80\xbb\x00\x00\x02\x00\x10\x00data\xff\xff\xff\xff'
-printf '\x01\x02\x03\x04\x05\x06\x07\x08'
-EOF
-chmod +x "$STUB_DIR/mytool" "$STUB_DIR/mytool-receipt" "$STUB_DIR/claude" "$STUB_DIR/kokoro-rs"
-export MESA_KOKORO_BIN="$STUB_DIR/kokoro-rs"
-
-# The recognizer behind the `listen` section (mesa task 955), the input-side
-# mirror of kokoro-rs above. `--list-models` (matched anywhere in argv, like
-# `--list-voices` above — mesa passes `--no-download` beside it) answers with
-# a bounded list plus a line that is not a name, which must be filtered out;
-# the one real name includes a DOT ("parakeet-tdt-0.6b-v2-int8", auris's own
-# model), the specific regression this task's notes call out since
-# `is_voice_name`'s rule would have filtered it. Every other invocation logs
-# its argv (does the saved model reach `-m`?), drains stdin and emits a valid
-# `--format json` transcript line so `POST /api/live/transcribe` answers 200.
-AURIS_ARGV="$TMP/auris.argv"
-cat > "$STUB_DIR/auris" <<EOF
-#!/usr/bin/env bash
-case " \$* " in *" --list-models "*) LISTING=1;; *) LISTING=0;; esac
-if [ "\$LISTING" = "1" ]; then
-  printf 'parakeet-tdt-0.6b-v2-int8\nnot a model name!\n'
-  exit 0
-fi
-printf '%s\n' "\$*" > "$AURIS_ARGV"
-cat > /dev/null
-printf '{"type":"transcript","text":"heard it"}\n'
-EOF
-chmod +x "$STUB_DIR/auris"
-export MESA_AURIS_BIN="$STUB_DIR/auris"
+chmod +x "$STUB_DIR/mytool" "$STUB_DIR/mytool-receipt" "$STUB_DIR/claude"
 
 # ---- fixtures ----
 
@@ -154,10 +109,8 @@ WORKSPACE="$FAKE_HOME/.mesa/workspace"
 DIR_A=$(cd "$TMP/projA" && pwd -P)
 CONFIG="$FAKE_HOME/.mesa/config.json"
 
-# body on stdin. naru task 1396: the default audio engine is naru-audio, and the
-# speech/listen sections below drive the stub kokoro-rs and auris, so a body that
-# names no `audio` section gets the legacy engine written in explicitly.
-write_config() { jq -c 'if has("audio") then . else . + {audio: {engine: "legacy"}} end' > "$CONFIG"; }
+# body on stdin.
+write_config() { jq -c . > "$CONFIG"; }
 
 run 0 "$MESA" project create "A" --no-git
 A=$(jqs .id)
@@ -1051,18 +1004,10 @@ ok "GET /api/config/keymap drops a hand-edited entry mesa cannot use, costing th
 
 # ---- the speech section: GET/PUT /api/config/speech (mesa task 822) ----
 #
-# The fourth section of the same file, and the only one whose value has to
-# survive all the way into another program's argv: the voice is what the inbox's
-# play button passes to `kokoro-rs`. So this covers the sibling-section rules
-# like pricing and watchers, and then the thing those two have no analogue of —
-# the saved value showing up in the synthesiser's command line, and NOT showing
-# up at all when nothing is saved.
+# The fourth section of the same file: the voice the inbox's play button speaks
+# in. This covers the sibling-section rules like pricing and watchers; the
+# offered voices come from the naru-audio daemon, which this gate does not run.
 
-speak() { # speak <inbox-id> -> CODE, argv in $KOKORO_ARGV
-  rm -f "$KOKORO_ARGV"
-  CODE=$(curl -s -o "$TMP/audio" -w '%{http_code}' \
-    "http://127.0.0.1:$PORT/api/inbox/$1/speak")
-}
 
 write_config <<EOF
 {"other": {"x": 1}, "commands": {"todo-watcher": "$STUB_DIR/mytool dispatch {id}"}, "pricing": {"claude-opus": {"input": 1, "output": 2, "cache_read": 3, "cache_write": 4}}, "watchers": {"todo-concurrency": 3}}
@@ -1071,11 +1016,11 @@ api GET /api/config/speech
 [ "$CODE" = "200" ] || fail "GET speech: expected 200, got $CODE: $STDOUT"
 [ "$(jq -r '.voice' <<<"$STDOUT")" = "null" ] ||
   fail "an unconfigured voice must report null, got $STDOUT"
-# mesa ships no voice list of its own: the choices are whatever the installed
-# binary answers `--list-voices` with, minus the lines that aren't names.
-[ "$(jq -r '.voices | join(",")' <<<"$STDOUT")" = "af_heart,af_bella,bm_george" ] ||
-  fail "GET speech: voices must be the binary's --list-voices output, names only: $STDOUT"
-ok "GET /api/config/speech reports voice: null on a fresh config and offers exactly the voices the installed synthesiser lists"
+# mesa ships no voice list of its own: the choices come from the naru-audio
+# daemon, and none runs here, so the list is empty.
+[ "$(jq -c '.voices' <<<"$STDOUT")" = '[]' ] ||
+  fail "GET speech: with no daemon voices must be empty: $STDOUT"
+ok "GET /api/config/speech reports voice: null on a fresh config and an empty voice list with no daemon"
 
 api PUT /api/config/speech '{"voice": "bm_george"}'
 [ "$CODE" = "200" ] || fail "PUT speech: expected 200, got $CODE: $STDOUT"
@@ -1093,36 +1038,6 @@ api PUT /api/config/speech '{"voice": "bm_george"}'
   fail "a speech write dropped a section it doesn't own: $(cat "$CONFIG")"
 ok "PUT /api/config/speech sets the voice, leaving commands, pricing, watchers and an unknown section untouched"
 
-# The whole point of the setting: the saved name reaches the synthesiser, as one
-# argument after `-v`, read fresh on the press with no restart.
-speak "$ITEM_1"
-[ "$CODE" = "200" ] || fail "speak with a configured voice: expected 200, got $CODE: $(cat "$TMP/audio")"
-[ "$(cat "$KOKORO_ARGV")" = "-q -o - -v bm_george" ] ||
-  fail "the saved voice must reach the synthesiser's argv, got $(cat "$KOKORO_ARGV")"
-ok "the saved voice reaches the synthesiser as \`-v <voice>\`, read on the press (no restart)"
-
-# …and the Settings page's test button (mesa task 824) is the other way round:
-# the voice it speaks is the *query's*, because it exists to audition a choice
-# that has not been saved. `bm_george` is what the file says here, so a preview
-# asking for `af_bella` proves the route reads the query and not the file —
-# which is only assertable with a voice actually configured, so it lives here
-# rather than beside the route's other checks in api-check.sh.
-preview() { # preview <query> -> CODE, argv in $KOKORO_ARGV
-  rm -f "$KOKORO_ARGV"
-  CODE=$(curl -s -o "$TMP/audio" -w '%{http_code}' \
-    "http://127.0.0.1:$PORT/api/config/speech/preview$1")
-}
-preview "?voice=af_bella"
-[ "$CODE" = "200" ] || fail "preview with a configured voice: expected 200, got $CODE: $(cat "$TMP/audio")"
-[ "$(cat "$KOKORO_ARGV")" = "-q -o - -v af_bella" ] ||
-  fail "preview must speak the query's voice, not the saved one: $(cat "$KOKORO_ARGV")"
-# The blank one is the same story: it means "the synthesiser's own default",
-# never "fall back to whatever is saved".
-preview "?voice="
-[ "$CODE" = "200" ] || fail "preview with a blank voice: expected 200, got $CODE: $(cat "$TMP/audio")"
-[ "$(cat "$KOKORO_ARGV")" = "-q -o -" ] ||
-  fail "a blank preview voice must add no -v, saved or not: $(cat "$KOKORO_ARGV")"
-ok "the voice preview speaks the query's voice, never the saved one — and blank stays the synthesiser's own default"
 
 # The other three savers have to leave the voice alone, exactly as it leaves
 # them alone.
@@ -1154,13 +1069,6 @@ for RESET in 'null' '""'; do
 done
 ok "PUT voice null and voice \"\" both remove the key (absence, never an empty string in the file)"
 
-# …and with the key gone the argv is byte-for-byte the one mesa ran before the
-# setting existed — mesa names no default voice of its own.
-speak "$ITEM_1"
-[ "$CODE" = "200" ] || fail "speak with no voice: expected 200, got $CODE: $(cat "$TMP/audio")"
-[ "$(cat "$KOKORO_ARGV")" = "-q -o -" ] ||
-  fail "an unconfigured voice must add no -v at all, got $(cat "$KOKORO_ARGV")"
-ok "with no voice configured the synthesiser runs the pre-822 argv — no \`-v\`, no mesa-chosen default"
 
 BEFORE=$(cat "$CONFIG")
 # A voice is a bounded identifier, so a value that could be read as an option,
@@ -1172,16 +1080,11 @@ for BAD in '-o' 'a b' 'af_heart; rm -rf /'; do
   [ "$(jq -r .error.code <<<"$STDOUT")" = "validation" ] ||
     fail "voice $BAD: expected code validation, got $STDOUT"
 done
-# A well-shaped name the installed binary never offered is refused too, by the
-# same list the editor is built from.
-api PUT /api/config/speech '{"voice": "zz_nobody"}'
-[ "$CODE" = "422" ] || fail "unknown voice: expected 422, got $CODE: $STDOUT"
-[ "$(jq -r .error.code <<<"$STDOUT")" = "validation" ] ||
-  fail "unknown voice: expected code validation, got $STDOUT"
-grep -q "zz_nobody" <<<"$STDOUT" || fail "the message must name the voice: $STDOUT"
+# (A well-shaped name is not checked for membership: the offered list comes from
+# the naru-audio daemon, and none runs here.)
 [ "$(cat "$CONFIG")" = "$BEFORE" ] ||
   fail "a rejected speech PUT must not touch the file: $(cat "$CONFIG")"
-ok "PUT /api/config/speech rejects a voice that isn't a bounded identifier and one the binary doesn't offer as 422 validation, writing nothing"
+ok "PUT /api/config/speech rejects a voice that isn't a bounded identifier as 422 validation, writing nothing"
 
 CODE=$(curl -s -o "$TMP/body" -w '%{http_code}' -H 'Host: evil.example' \
   "http://127.0.0.1:$PORT/api/config/speech")
@@ -1195,12 +1098,11 @@ CODE=$(curl -s -o "$TMP/body" -w '%{http_code}' -X PUT -H 'Host: evil.example' \
 ok "both speech verbs sit behind the config routes' gate — a request that isn't from this machine's own page is refused, writing nothing"
 
 # The text-to-speech model (mesa task 1425), modelled on the voice: a second
-# key in the same section. Only naru-audio sends it, so on this legacy engine
-# it is offered no list (`models: []`), is stored like any well-shaped name,
-# and must leave the synthesiser's argv byte-identical.
+# key in the same section. The offered list comes from the naru-audio daemon;
+# none runs here, so it is empty (`models: []`) and a well-shaped name is stored.
 api GET /api/config/speech
 [ "$(jq -c '[.model, .models]' <<<"$STDOUT")" = '[null,[]]' ] ||
-  fail "an unconfigured model on the legacy engine must report null and no list: $STDOUT"
+  fail "an unconfigured model with no daemon must report null and no list: $STDOUT"
 api PUT /api/config/speech '{"voice": "bm_george", "model": "kokoro-v1.0"}'
 [ "$CODE" = "200" ] || fail "PUT speech model: expected 200, got $CODE: $STDOUT"
 [ "$(jq -c '[.voice, .model]' <<<"$STDOUT")" = '["bm_george","kokoro-v1.0"]' ] ||
@@ -1209,15 +1111,7 @@ api PUT /api/config/speech '{"voice": "bm_george", "model": "kokoro-v1.0"}'
   fail "PUT speech did not write the model beside the voice: $(cat "$CONFIG")"
 [ "$(jq -r '.other.x' < "$CONFIG")" = "1" ] ||
   fail "a speech model write dropped a section it doesn't own: $(cat "$CONFIG")"
-speak "$ITEM_1"
-[ "$CODE" = "200" ] || fail "speak with a model on legacy: expected 200, got $CODE: $(cat "$TMP/audio")"
-[ "$(cat "$KOKORO_ARGV")" = "-q -o - -v bm_george" ] ||
-  fail "a speech model must never reach kokoro-rs's argv, got $(cat "$KOKORO_ARGV")"
-preview "?voice=af_bella&model=kokoro-v1.0"
-[ "$CODE" = "200" ] || fail "preview with a model on legacy: expected 200, got $CODE: $(cat "$TMP/audio")"
-[ "$(cat "$KOKORO_ARGV")" = "-q -o - -v af_bella" ] ||
-  fail "a preview model must never reach kokoro-rs's argv, got $(cat "$KOKORO_ARGV")"
-ok "PUT /api/config/speech stores a model beside the voice; the legacy engine's argv is byte-identical with one set"
+ok "PUT /api/config/speech stores a model beside the voice"
 
 for RESET in 'null' '""'; do
   api PUT /api/config/speech '{"model": "kokoro-v1.0"}'
@@ -1245,8 +1139,7 @@ api GET "/api/config/speech?model=-o"
 ok "a speech model that isn't a model name is 422 validation on PUT and on GET ?model=, writing nothing"
 
 # The playback speed (mesa task 1560): a JSON *number* in the same section,
-# applied by the page, never the engine — so it is stored and reported and must
-# leave the synthesiser's argv byte-identical.
+# applied by the page, never the engine — so it is stored and reported.
 api GET /api/config/speech
 [ "$(jq '.speed == 1' <<<"$STDOUT")" = "true" ] ||
   fail "an unconfigured speed must report 1, got $STDOUT"
@@ -1258,10 +1151,6 @@ api PUT /api/config/speech '{"speed": 1.25}'
   fail "the speed must be stored as a JSON number: $(cat "$CONFIG")"
 [ "$(jq -r '.speech.voice' < "$CONFIG")" = "bm_george" ] ||
   fail "a speed write dropped the voice: $(cat "$CONFIG")"
-speak "$ITEM_1"
-[ "$CODE" = "200" ] || fail "speak with a speed: expected 200, got $CODE: $(cat "$TMP/audio")"
-[ "$(cat "$KOKORO_ARGV")" = "-q -o - -v bm_george" ] ||
-  fail "a speed must never reach the synthesiser's argv, got $(cat "$KOKORO_ARGV")"
 # Saving the voice must not touch the speed beside it.
 api PUT /api/config/speech '{"voice": "af_bella"}'
 [ "$CODE" = "200" ] || fail "PUT speech voice after speed: got $CODE: $STDOUT"
@@ -1454,11 +1343,8 @@ ok "both live verbs sit behind the config routes' gate — a request that isn't 
 # ---- the listen section: GET/PUT /api/config/listen (mesa task 955) ----
 #
 # The sixth section of the same file, and the input-side mirror of speech:
-# the model `live transcribe` runs the external `auris` binary with. Same
-# sibling-section rules as every other section, plus the thing only speech
-# has an analogue of — the saved value reaching another program's argv (this
-# time auris's rather than kokoro-rs's), and NOT showing up at all when
-# nothing is saved.
+# the transcription model. Same sibling-section rules as every other section.
+
 
 write_config <<EOF
 {"other": {"x": 1}, "commands": {"todo-watcher": "$STUB_DIR/mytool dispatch {id}"}, "pricing": {"claude-opus": {"input": 1, "output": 2, "cache_read": 3, "cache_write": 4}}, "watchers": {"todo-concurrency": 3}, "speech": {"voice": "bm_george"}, "live": {"auto-send-ms": 4500}}
@@ -1467,14 +1353,11 @@ api GET /api/config/listen
 [ "$CODE" = "200" ] || fail "GET listen: expected 200, got $CODE: $STDOUT"
 [ "$(jq -r '.model' <<<"$STDOUT")" = "null" ] ||
   fail "an unconfigured model must report null, got $STDOUT"
-# mesa ships no model list of its own: the choices are whatever the installed
-# binary answers --list-models with, minus the lines that aren't names — and
-# the one name with a DOT ("parakeet-tdt-0.6b-v2-int8", auris's real model)
-# must survive the filter (is_model_name allows `.` where is_voice_name does
-# not — the specific regression mesa task 955's notes call out).
-[ "$(jq -r '.models | join(",")' <<<"$STDOUT")" = "parakeet-tdt-0.6b-v2-int8" ] ||
-  fail "GET listen: models must be the binary's --list-models output, names only: $STDOUT"
-ok "GET /api/config/listen reports model: null on a fresh config and offers exactly the model names the installed recognizer lists, dots included"
+# The offered models come from the naru-audio daemon; none runs here, so the
+# list is empty (membership is then not checked, only the name's shape).
+[ "$(jq -c '.models' <<<"$STDOUT")" = '[]' ] ||
+  fail "GET listen: with no daemon models must be empty: $STDOUT"
+ok "GET /api/config/listen reports model: null on a fresh config and an empty model list with no daemon"
 
 api PUT /api/config/listen '{"model": "parakeet-tdt-0.6b-v2-int8"}'
 [ "$CODE" = "200" ] || fail "PUT listen: expected 200, got $CODE: $STDOUT"
@@ -1495,26 +1378,6 @@ api PUT /api/config/listen '{"model": "parakeet-tdt-0.6b-v2-int8"}'
 [ "$(jq -r '.other.x' < "$CONFIG")" = "1" ] ||
   fail "a listen write dropped a section it doesn't own: $(cat "$CONFIG")"
 ok "PUT /api/config/listen sets the model, leaving commands, pricing, watchers, speech, live and an unknown section untouched"
-
-# The whole point of the setting: the saved name reaches the recognizer, as
-# `-m <model>`, read fresh on the request with no restart — and with nothing
-# saved the argv is byte-for-byte the one mesa ran before this setting
-# existed, no `-m` at all.
-rm -f "$AURIS_ARGV"
-api POST /api/live/transcribe '{"audio_base64": "AAAA"}'
-[ "$CODE" = "200" ] || fail "transcribe with a configured model: expected 200, got $CODE: $STDOUT"
-[ "$(cat "$AURIS_ARGV")" = "-q --format json -m parakeet-tdt-0.6b-v2-int8" ] ||
-  fail "the saved model must reach auris's argv, got $(cat "$AURIS_ARGV")"
-ok "the saved model reaches auris as \`-m <model>\`, read on the request (no restart)"
-
-api PUT /api/config/listen '{"model": null}'
-[ "$CODE" = "200" ] || fail "PUT listen null (for the argv check): expected 200, got $CODE: $STDOUT"
-rm -f "$AURIS_ARGV"
-api POST /api/live/transcribe '{"audio_base64": "AAAA"}'
-[ "$CODE" = "200" ] || fail "transcribe with no model: expected 200, got $CODE: $STDOUT"
-[ "$(cat "$AURIS_ARGV")" = "-q --format json" ] ||
-  fail "with no model configured argv must be exactly -q --format json (no -m), got $(cat "$AURIS_ARGV")"
-ok "with no model configured, /api/live/transcribe runs auris with exactly -q --format json — no -m at all, byte-identical to the pre-955 argv"
 
 # The other five savers have to leave the model alone, exactly as it leaves
 # them alone.
@@ -1562,16 +1425,11 @@ for BAD in '-o' '.leadingdot' 'a b' 'a/b' "$(head -c 65 </dev/zero | tr '\0' 'a'
   [ "$(jq -r .error.code <<<"$STDOUT")" = "validation" ] ||
     fail "model $BAD: expected code validation, got $STDOUT"
 done
-# A well-shaped name the installed binary never offered is refused too, by the
-# same list the editor is built from.
-api PUT /api/config/listen '{"model": "zz-nobody"}'
-[ "$CODE" = "422" ] || fail "unknown model: expected 422, got $CODE: $STDOUT"
-[ "$(jq -r .error.code <<<"$STDOUT")" = "validation" ] ||
-  fail "unknown model: expected code validation, got $STDOUT"
-grep -q "zz-nobody" <<<"$STDOUT" || fail "the message must name the model: $STDOUT"
+# A well-shaped name is accepted whatever the daemon lists: with no naru-audio
+# daemon running there is no list to check membership against.
 [ "$(cat "$CONFIG")" = "$BEFORE" ] ||
   fail "a rejected listen PUT must not touch the file: $(cat "$CONFIG")"
-ok "PUT /api/config/listen rejects a model that isn't a bounded identifier and one the binary doesn't offer as 422 validation, writing nothing"
+ok "PUT /api/config/listen rejects a model that isn't a bounded identifier as 422 validation, writing nothing"
 
 # `model` is the only field `ListenUpdate` declares — like `SpeechUpdate`, and
 # unlike `commands`'s `HashMap<String, String>`, so an unrecognised JSON key
@@ -1640,17 +1498,14 @@ api PUT /api/config/listen '{"vocabulary": null}'
   fail "null must remove listen.vocabulary: $(cat "$CONFIG")"
 ok "listen.vocabulary round-trips verbatim, a bad line is 422 naming it and writing nothing, null removes it"
 
-# The sections above ran on an explicit legacy engine (write_config); drop it so
-# this one sees the section unconfigured.
-api PUT /api/config/audio '{"engine": null}'
-[ "$CODE" = "200" ] || fail "PUT audio engine null: expected 200, got $CODE: $STDOUT"
+# The audio section starts unconfigured: this config file never named one.
 api GET /api/config/audio
 [ "$CODE" = "200" ] || fail "GET audio: expected 200, got $CODE: $STDOUT"
-[ "$(jq -c '[.url, .url_default, .engine, .engine_default]' <<<"$STDOUT")" = '[null,"http://127.0.0.1:7870",null,"naru-audio"]' ] ||
+[ "$(jq -c '[.url, .url_default]' <<<"$STDOUT")" = '[null,"http://127.0.0.1:7870"]' ] ||
   fail "GET audio on an unconfigured section: $STDOUT"
-api PUT /api/config/audio '{"engine": "naru-audio", "url": "http://127.0.0.1:7871"}'
+api PUT /api/config/audio '{"url": "http://127.0.0.1:7871"}'
 [ "$CODE" = "200" ] || fail "PUT audio: expected 200, got $CODE: $STDOUT"
-[ "$(jq -c '.audio' < "$CONFIG")" = '{"engine":"naru-audio","url":"http://127.0.0.1:7871"}' ] ||
+[ "$(jq -c '.audio' < "$CONFIG")" = '{"url":"http://127.0.0.1:7871"}' ] ||
   fail "PUT audio did not write the section: $(cat "$CONFIG")"
 [ "$(jq -r '.listen.engine' < "$CONFIG")" = "browser" ] ||
   fail "an audio write clobbered the listen section: $(cat "$CONFIG")"
@@ -1664,31 +1519,35 @@ api PUT /api/config/live '{"auto_send_ms": 2600}'
 [ "$CODE" = "200" ] || fail "PUT live after audio: expected 200, got $CODE: $STDOUT"
 api PUT /api/config/listen '{"model": null}'
 [ "$CODE" = "200" ] || fail "PUT listen after audio: expected 200, got $CODE: $STDOUT"
-[ "$(jq -c '.audio' < "$CONFIG")" = '{"engine":"naru-audio","url":"http://127.0.0.1:7871"}' ] ||
+[ "$(jq -c '.audio' < "$CONFIG")" = '{"url":"http://127.0.0.1:7871"}' ] ||
   fail "a live or listen write clobbered the audio section: $(cat "$CONFIG")"
-ok "PUT /api/config/audio writes engine+url and leaves every other section alone, and they leave it alone"
+ok "PUT /api/config/audio writes the url and leaves every other section alone, and they leave it alone"
 
 BEFORE=$(cat "$CONFIG")
-for BODY in '{"engine": "auris"}' '{"url": "https://127.0.0.1:7870"}' '{"url": "127.0.0.1:7870"}' '{"url": "http://127.0.0.1:7870/health"}'; do
+for BODY in '{"url": "https://127.0.0.1:7870"}' '{"url": "127.0.0.1:7870"}' '{"url": "http://127.0.0.1:7870/health"}'; do
   api PUT /api/config/audio "$BODY"
   [ "$CODE" = "422" ] || fail "audio $BODY: expected 422, got $CODE: $STDOUT"
   [ "$(jq -r .error.code <<<"$STDOUT")" = "validation" ] || fail "audio $BODY: expected validation, got $STDOUT"
 done
 [ "$(cat "$CONFIG")" = "$BEFORE" ] || fail "a rejected audio PUT must not touch the file: $(cat "$CONFIG")"
-api PUT /api/config/audio '{"engine": null, "url": ""}'
+# There is only one engine: an `engine` key is not a setting, so it writes nothing.
+api PUT /api/config/audio '{"engine": "naru-audio"}'
+[ "$(cat "$CONFIG")" = "$BEFORE" ] || fail "an engine key must write nothing: $(cat "$CONFIG")"
+[ "$(jq 'has("engine")' <<<"$STDOUT")" = "false" ] || fail "the audio response must carry no engine: $STDOUT"
+api PUT /api/config/audio '{"url": ""}'
 [ "$CODE" = "200" ] || fail "PUT audio reset: expected 200, got $CODE: $STDOUT"
 [ "$(jq -c '.audio' < "$CONFIG")" = '{}' ] || fail "null and blank must remove the keys: $(cat "$CONFIG")"
-ok "PUT /api/config/audio: a bad engine or URL is 422 writing nothing; null and blank restore the built-ins"
+ok "PUT /api/config/audio: a bad URL is 422 writing nothing and an engine key writes nothing; null and blank restore the built-ins"
 
 CODE=$(curl -s -o "$TMP/body" -w '%{http_code}' -H 'Host: evil.example' \
   "http://127.0.0.1:$PORT/api/config/audio")
 [ "$CODE" = "403" ] || fail "GET audio with a foreign Host: expected 403, got $CODE: $(cat "$TMP/body")"
 ok "the audio verbs sit behind the config routes' gate"
 
-# naru task 1793: `url_env` is null with no override; the test route answers a
+# naru task 1793: `url_env` reports the override in force; the test route answers a
 # dead port as data (200 daemon_down), refuses a bad URL (422), and is gated.
 api GET /api/config/audio
-[ "$(jq -c '.url_env' <<<"$STDOUT")" = "null" ] || fail "GET audio url_env with no override: $STDOUT"
+[ "$(jq -c '.url_env' <<<"$STDOUT")" = '"http://127.0.0.1:9"' ] || fail "GET audio url_env with the override in force: $STDOUT"
 DEAD_PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')
 api POST /api/config/audio/test "{\"url\": \"http://127.0.0.1:$DEAD_PORT\"}"
 [ "$CODE" = "200" ] || fail "audio test on a dead port: expected 200, got $CODE: $STDOUT"
@@ -1700,7 +1559,7 @@ api POST /api/config/audio/test '{"url": "https://127.0.0.1:7870"}'
 CODE=$(curl -s -o "$TMP/body" -w '%{http_code}' -X POST -H 'Host: evil.example' -H 'Content-Type: application/json' \
   -d '{"url": null}' "http://127.0.0.1:$PORT/api/config/audio/test")
 [ "$CODE" = "403" ] || fail "audio test with a foreign Host: expected 403, got $CODE: $(cat "$TMP/body")"
-ok "url_env is null by default; POST /api/config/audio/test: dead port is 200 daemon_down, a bad url 422, a foreign Host 403"
+ok "url_env reports the override in force; POST /api/config/audio/test: dead port is 200 daemon_down, a bad url 422, a foreign Host 403"
 
 # ---- the appearance section: GET/PUT /api/config/appearance (naru task 1784) ----
 api GET /api/config/appearance
@@ -1719,11 +1578,11 @@ api PUT /api/config/appearance '{"theme": "light"}'
   fail "an appearance write clobbered another section: $(cat "$CONFIG")"
 api PUT /api/config/live '{"auto_send_ms": 2700}'
 [ "$CODE" = "200" ] || fail "PUT live after appearance: expected 200, got $CODE: $STDOUT"
-api PUT /api/config/audio '{"engine": "legacy"}'
+api PUT /api/config/audio '{"url": "http://127.0.0.1:7872"}'
 [ "$CODE" = "200" ] || fail "PUT audio after appearance: expected 200, got $CODE: $STDOUT"
 [ "$(jq -c '.appearance' < "$CONFIG")" = '{"theme":"light"}' ] ||
   fail "a live or audio write clobbered the appearance section: $(cat "$CONFIG")"
-api PUT /api/config/audio '{"engine": null}'
+api PUT /api/config/audio '{"url": null}'
 ok "PUT /api/config/appearance writes the theme and leaves every other section alone, and they leave it alone"
 
 BEFORE=$(cat "$CONFIG")
@@ -1782,15 +1641,6 @@ api PUT /api/config/keymap '{"create-task": ["n"]}'
 [ "$(cat "$CONFIG")" = '{ not json' ] ||
   fail "a PUT must never overwrite a config it could not parse: $(cat "$CONFIG")"
 ok "a malformed config is 502 unavailable on all fourteen config verbs, and a PUT never overwrites a file it could not read"
-
-# The preview is the one speech surface a malformed file cannot break, because
-# it reads no config at all — which is what makes it usable on the page whose
-# job is to fix that file.
-preview "?voice=af_bella"
-[ "$CODE" = "200" ] || fail "preview under a malformed config: expected 200, got $CODE: $(cat "$TMP/audio")"
-[ "$(cat "$KOKORO_ARGV")" = "-q -o - -v af_bella" ] ||
-  fail "preview under a malformed config must still speak the query's voice: $(cat "$KOKORO_ARGV")"
-ok "the voice preview still works under a malformed config — it reads no config at all"
 
 # ---- an unconfigured command falls back to the built-in claude argv ----
 

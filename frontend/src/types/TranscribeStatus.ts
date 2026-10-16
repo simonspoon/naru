@@ -9,11 +9,11 @@ import type { AudioState } from "./AudioState";
  */
 export type TranscribeStatus = { available: boolean, state: AudioState, 
 /**
- * `audio.engine`: `"legacy"` or `"naru-audio"`.
+ * Always `"naru-audio"`.
  */
 engine: string, 
 /**
- * The daemon's URL on `naru-audio`; `null` on `legacy`.
+ * The daemon's URL.
  */
 url: string | null, 
 /**

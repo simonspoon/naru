@@ -651,30 +651,26 @@ pub struct ConfigSpeech {
     /// config says nothing — then the synthesiser's own default applies and
     /// mesa passes no `-v` at all.
     pub voice: Option<String>,
-    /// Every voice the installed `kokoro-rs` reports (`--list-voices`), so the
-    /// editor can offer a list. **Empty means mesa could not ask** — a missing
-    /// or uncooperative binary — never "there are no voices", so an empty list
+    /// Every voice the naru-audio daemon reports, so the
+    /// editor can offer a list. **Empty means mesa could not ask** — a daemon
+    /// that is down — never "there are no voices", so an empty list
     /// is a reason to accept a typed name, not to refuse one. On naru-audio
     /// these are the voices of the configured `model` — or of the one
     /// `GET /api/config/speech?model=` named (mesa task 1425).
     pub voices: Vec<String>,
     /// The names in `voices` that are **cloned** voices (mesa task 1430) —
-    /// the ones naru-audio can export. Always empty on the legacy engine, and
-    /// on a daemon too old to mark them.
+    /// the ones naru-audio can export. Empty on a daemon too old to mark them.
     pub cloned: Vec<String>,
     /// The configured text-to-speech model (mesa task 1425), or `null` when the
     /// config says nothing — then naru-audio speaks in its own default model.
-    /// Only the naru-audio engine sends it.
     pub model: Option<String>,
     /// Every text-to-speech model naru-audio lists (`GET /v1/models`,
-    /// `x_kind == "tts"`). Always empty on the legacy engine — `kokoro-rs`
-    /// has one model — and empty on naru-audio when Naru could not ask.
+    /// `x_kind == "tts"`). Empty when Naru could not ask.
     pub models: Vec<String>,
     /// Each of `models`' capabilities (mesa task 1455) — which of the voice
     /// dropdown, the clone form and the design panel a model on `models`
     /// supports, so the editor can follow whichever model is drafted rather
-    /// than always the daemon's own default. Always empty on the legacy
-    /// engine and whenever `models` is.
+    /// than always the daemon's own default. Empty whenever `models` is.
     pub capabilities: Vec<SpeechModelCaps>,
     /// How fast the page plays everything Naru speaks (mesa task 1560),
     /// 0.75..=1.5, `1` when the config says nothing or holds a bad value.
@@ -773,8 +769,8 @@ pub struct VoiceExport {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../frontend/src/types/")]
 pub struct VoiceDesign {
-    /// Whether naru-audio has `model` (below) pulled. Always `false` on the
-    /// legacy engine, and when Naru could not ask the daemon.
+    /// Whether naru-audio has `model` (below) pulled. `false` when
+    /// Naru could not ask the daemon.
     pub available: bool,
     /// The voice-design model this reflects (mesa task 1455) — the one the
     /// editor's `?model=` named, echoed back for the `naru-audio pull` hint;
@@ -800,18 +796,17 @@ pub struct ConfigAmbient {
 
 /// The listen settings as the Settings page sees them (`core::config`,
 /// `docs/config.md`, mesa task 955) — the input-side mirror of
-/// [`ConfigSpeech`]: the model the external `auris` speech-to-text binary is
-/// run with, plus the models the installed binary offers.
+/// [`ConfigSpeech`]: the model the naru-audio speech-to-text daemon is
+/// run with, plus the models it offers.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../frontend/src/types/")]
 pub struct ConfigListen {
-    /// The configured model `live transcribe` runs `auris` with, or `null`
-    /// when the config says nothing — then no `-m` is passed at all and
-    /// `auris` picks its own default.
+    /// The configured model `live transcribe` sends the daemon, or `null`
+    /// when the config says nothing — then the daemon picks its own default.
     pub model: Option<String>,
-    /// Every model the installed `auris` reports (`--list-models`), so the
-    /// editor can offer a list. **Empty means mesa could not ask** — a missing
-    /// or uncooperative binary — never "there are no models", so an empty
+    /// Every speech-to-text model the daemon reports, so the
+    /// editor can offer a list. **Empty means mesa could not ask** — a daemon
+    /// that is down — never "there are no models", so an empty
     /// list is a reason to accept a typed name, not to refuse one.
     pub models: Vec<String>,
     /// What the **page** listens with (mesa task 1388), verbatim: `"server"`,
@@ -823,8 +818,7 @@ pub struct ConfigListen {
     /// `hotwords` text — or `null` when none is configured.
     pub vocabulary: Option<String>,
     /// The speech-to-text models whose backend uses the vocabulary
-    /// (`x_hotwords` on the daemon's model list). Empty on the legacy engine
-    /// and when the daemon could not be asked.
+    /// (`x_hotwords` on the daemon's model list). Empty when the daemon could not be asked.
     pub hotword_models: Vec<String>,
     /// The daemon's default speech-to-text model, so the page can judge the
     /// vocabulary for a model nobody configured; `null` when unknown.
@@ -832,9 +826,8 @@ pub struct ConfigListen {
 }
 
 /// The `naru-audio` settings as the Settings page sees them (`core::config`,
-/// `docs/config.md`, mesa task 1388): which engine the **server** runs speech
-/// through and where the daemon listens, each verbatim (`null` when the
-/// config says nothing) beside its built-in.
+/// `docs/config.md`, mesa task 1388): where the daemon listens, verbatim
+/// (`null` when the config says nothing) beside its built-in.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../frontend/src/types/")]
 pub struct ConfigAudio {
@@ -843,10 +836,6 @@ pub struct ConfigAudio {
     pub url: Option<String>,
     /// The built-in daemon URL (`http://127.0.0.1:7870`).
     pub url_default: String,
-    /// `"legacy"`, `"naru-audio"`, or `null`.
-    pub engine: Option<String>,
-    /// The built-in engine (`"legacy"`).
-    pub engine_default: String,
     /// The `NARU_AUDIO_URL` (or `MESA_AUDIO_URL`) value when it is set and
     /// valid — the address actually in force, overriding `url`; else `null`.
     pub url_env: Option<String>,
@@ -4373,7 +4362,7 @@ pub struct LiveTurn {
 }
 
 /// The answer to `POST /api/live/transcribe` (mesa task 954): whatever
-/// `listen::transcribe` read back from `auris` for one posted recording.
+/// `listen::transcribe` read back from the daemon for one posted recording.
 /// Nothing else rides along — the audio itself is never stored, so there is
 /// no id, no session, nothing to look up again (`docs/listen.md`).
 #[derive(Debug, Clone, PartialEq, Serialize, TS)]

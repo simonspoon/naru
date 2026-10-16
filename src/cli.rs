@@ -6632,10 +6632,10 @@ fn run_live(cmd: LiveCmd) -> Result<()> {
                 bind_live_agent_or_end(&mut store, session, spawned)?
             };
             print_live_session(&session, quiet);
-            // On the `naru-audio` engine, warm the daemon's speech-to-text
+            // Warm the daemon's speech-to-text
             // model (mesa task 1392). Synchronous, since this process exits
             // next; after the output, and a failure only feeds the probe
-            // state — never the exit code. On `legacy` this does nothing.
+            // state — never the exit code.
             if let Some(url) = audio::warm_url() {
                 let _ = audio::load_stt(&url);
             }

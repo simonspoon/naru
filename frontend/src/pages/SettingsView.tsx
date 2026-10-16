@@ -164,11 +164,10 @@ import {
   changedAudio,
   draftFrom as audioDraftFrom,
   isDirty as isAudioDirty,
-  options as audioEngineOptions,
+  AUDIO_ENGINE,
   engineStatus,
   envNote,
   normalizeUrl,
-  savedEngine as savedAudioEngine,
   testResultLine,
   type AudioDraft,
 } from '../audioDraft'
@@ -1433,8 +1432,8 @@ function LivePromptSection() {
  * Two things it must not soften:
  * - **Blank is the synthesiser's own default**, not silence: mesa passes no
  *   `-v` at all then, which is exactly what it did before this setting existed.
- * - **The list is what the installed binary reports**, not a list mesa ships.
- *   When mesa could not ask it (no `kokoro-rs` on PATH) there is no list to
+ * - **The list is what the naru-audio daemon reports**, not a list mesa
+ *   ships. When mesa could not ask it (the daemon is down) there is no list to
  *   pick from, so the box becomes a plain one rather than an empty dropdown
  *   that would look like "no voices exist".
  */
@@ -1473,9 +1472,7 @@ function SpeechSection() {
   // the press, since only the gesture unlocks it.
   const [decoding, setDecoding] = useState(false)
   const clock = useRef<AudioContext | null>(null)
-  // Adding a cloned voice (mesa task 1418) — offered only when the saved
-  // audio engine is naru-audio; the legacy synthesiser clones nothing.
-  const audio = useFetch(() => getAudio(), 'speech-audio')
+  // Adding a cloned voice (mesa task 1418).
   const [cloneName, setCloneName] = useState('')
   const [cloneText, setCloneText] = useState('')
   const [clip, setClip] = useState<File | null>(null)
@@ -1777,13 +1774,12 @@ function SpeechSection() {
   // happens to be, which is the Breeze-clones-onto-Qwen bug this resolves.
   const currentModel = effectiveModel(seeded.model, speech.capabilities)
   const currentCaps = capsFor(currentModel, speech.capabilities)
-  const naruAudio = !!(audio.data && savedAudioEngine(audio.data) === 'naru-audio')
 
   return (
     <>
       <h2>Speech</h2>
-      {/* Only naru-audio lists models; on the legacy engine (or a daemon Naru
-          could not ask) there is nothing to pick and no picker. */}
+      {/* A daemon Naru could not ask lists no models: nothing to pick and no
+          picker. */}
       {canPickSpeechModel(speech) && (
         <section className="settings-command">
           <label htmlFor="speech-model">
@@ -1820,13 +1816,7 @@ function SpeechSection() {
           <code className="settings-command-key">voice</code>
         </label>
         <p className="muted settings-command-blurb">
-          The voice{' '}
-          <code>
-            {audio.data && savedAudioEngine(audio.data) === 'naru-audio'
-              ? 'naru-audio'
-              : 'kokoro-rs'}
-          </code>{' '}
-          speaks in — a live conversation, or
+          The voice <code>naru-audio</code> speaks in — a live conversation, or
           an inbox item you press play on. Blank = the voice the synthesiser
           picks itself; a change applies on the next thing spoken, with no
           restart.
@@ -1872,18 +1862,12 @@ function SpeechSection() {
             {sampleButton(!!sample, playing).label}
           </button>
         </div>
-        {!canPick(voices) &&
-          (audio.data && savedAudioEngine(audio.data) === 'naru-audio' ? (
-            <p className="muted settings-command-blurb">
-              Naru could not ask the <code>naru-audio</code> daemon which voices
-              it has — type a name.
-            </p>
-          ) : (
-            <p className="muted settings-command-blurb">
-              Naru could not ask <code>kokoro-rs</code> which voices it has — type
-              a name, or run <code>kokoro-rs --list-voices</code> to see them.
-            </p>
-          ))}
+        {!canPick(voices) && (
+          <p className="muted settings-command-blurb">
+            Naru could not ask the <code>naru-audio</code> daemon which voices
+            it has — type a name.
+          </p>
+        )}
         {fieldError && <p className="error">{fieldError}</p>}
         {sampleError && <p className="error">{sampleError}</p>}
       </section>
@@ -1916,7 +1900,7 @@ function SpeechSection() {
         </div>
       </section>
 
-      {naruAudio && currentCaps?.clone === true && (
+      {currentCaps?.clone === true && (
         <section className="settings-command">
           <label htmlFor="clone-name">
             <span className="settings-command-title">Add a cloned voice</span>
@@ -1985,93 +1969,91 @@ function SpeechSection() {
         </section>
       )}
 
-      {audio.data && savedAudioEngine(audio.data) === 'naru-audio' && (
-        <section className="settings-command">
-          <label htmlFor="voice-import">
-            <span className="settings-command-title">
-              Export or import a cloned voice
-            </span>
-          </label>
-          <p className="muted settings-command-blurb">
-            Export saves a cloned voice — its clip and transcript — as one{' '}
-            <code>.naru-voice.json</code> file; import adds a voice from such a
-            file, on this machine or another. A name already taken is refused,
-            never overwritten.
-          </p>
-          {cloned.length > 0 ? (
-            <div className="settings-voice-row">
-              {cloned.map((name) => (
-                <button
-                  key={name}
-                  type="button"
-                  disabled={exporting !== null}
-                  title={`download ${exportFilename(name)}`}
-                  onClick={() => void downloadVoice(name)}
-                >
-                  {exporting === name ? 'exporting…' : `export ${name}`}
-                </button>
-              ))}
-            </div>
-          ) : (
-            <p className="muted settings-command-blurb">
-              The model above lists no cloned voices to export — only a cloning
-              model lists them.
-            </p>
-          )}
-          {exportError && <p className="error">{exportError}</p>}
+      <section className="settings-command">
+        <label htmlFor="voice-import">
+          <span className="settings-command-title">
+            Export or import a cloned voice
+          </span>
+        </label>
+        <p className="muted settings-command-blurb">
+          Export saves a cloned voice — its clip and transcript — as one{' '}
+          <code>.naru-voice.json</code> file; import adds a voice from such a
+          file, on this machine or another. A name already taken is refused,
+          never overwritten.
+        </p>
+        {cloned.length > 0 ? (
           <div className="settings-voice-row">
-            <input
-              id="voice-import"
-              key={importKey}
-              type="file"
-              accept={VOICE_FILE_ACCEPT}
-              aria-label="voice file"
-              onChange={(e) => pickVoiceFile(e.target.files?.[0] ?? null)}
-            />
-            <input
-              type="text"
-              className="settings-voice-input"
-              aria-label="imported voice name"
-              spellCheck={false}
-              placeholder="name to add it as"
-              value={importName}
-              onChange={(e) => setImportName(e.target.value)}
-            />
+            {cloned.map((name) => (
+              <button
+                key={name}
+                type="button"
+                disabled={exporting !== null}
+                title={`download ${exportFilename(name)}`}
+                onClick={() => void downloadVoice(name)}
+              >
+                {exporting === name ? 'exporting…' : `export ${name}`}
+              </button>
+            ))}
           </div>
-          {imported && (
-            <p className="muted settings-command-blurb">
-              “{imported.text}”
-            </p>
-          )}
-          {importName.trim() !== '' && cloneNameError(importName) && (
-            <p className="error">{cloneNameError(importName)}</p>
-          )}
-          {imported && importModelError(imported, currentModel) && (
-            <p className="error">{importModelError(imported, currentModel)}</p>
-          )}
-          <div className="settings-actions">
-            <button
-              type="button"
-              disabled={
-                importing ||
-                !importReady(
-                  imported,
-                  importName,
-                  currentModel,
-                  currentCaps?.clone_requires_transcript ?? true,
-                )
-              }
-              onClick={() => void importVoice()}
-            >
-              {importing ? 'importing…' : 'import voice'}
-            </button>
-            {importNote && <span className="settings-saved">{importNote}</span>}
-          </div>
-          {importError && <p className="error">{importError}</p>}
-        </section>
-      )}
+        ) : (
+          <p className="muted settings-command-blurb">
+            The model above lists no cloned voices to export — only a cloning
+            model lists them.
+          </p>
+        )}
+        {exportError && <p className="error">{exportError}</p>}
+        <div className="settings-voice-row">
+          <input
+            id="voice-import"
+            key={importKey}
+            type="file"
+            accept={VOICE_FILE_ACCEPT}
+            aria-label="voice file"
+            onChange={(e) => pickVoiceFile(e.target.files?.[0] ?? null)}
+          />
+          <input
+            type="text"
+            className="settings-voice-input"
+            aria-label="imported voice name"
+            spellCheck={false}
+            placeholder="name to add it as"
+            value={importName}
+            onChange={(e) => setImportName(e.target.value)}
+          />
+        </div>
+        {imported && (
+          <p className="muted settings-command-blurb">
+            “{imported.text}”
+          </p>
+        )}
+        {importName.trim() !== '' && cloneNameError(importName) && (
+          <p className="error">{cloneNameError(importName)}</p>
+        )}
+        {imported && importModelError(imported, currentModel) && (
+          <p className="error">{importModelError(imported, currentModel)}</p>
+        )}
+        <div className="settings-actions">
+          <button
+            type="button"
+            disabled={
+              importing ||
+              !importReady(
+                imported,
+                importName,
+                currentModel,
+                currentCaps?.clone_requires_transcript ?? true,
+              )
+            }
+            onClick={() => void importVoice()}
+          >
+            {importing ? 'importing…' : 'import voice'}
+          </button>
+          {importNote && <span className="settings-saved">{importNote}</span>}
+        </div>
+        {importError && <p className="error">{importError}</p>}
+      </section>
 
-      {naruAudio && canDesignVoice(currentCaps) && (
+      {canDesignVoice(currentCaps) && (
         <VoiceDesignPanel
           model={currentModel}
           speed={seeded.speed}
@@ -2364,14 +2346,12 @@ function VoiceDesignPanel({
 }
 
 /**
- * Audio: which engine the **server** runs speech through (`audio.engine`,
- * mesa task 1391) — `legacy` (the `auris`/`kokoro-rs` binaries) or
- * `naru-audio` (the daemon) — with the engine in effect (the saved one) and
- * its live probe beside it, from `GET /api/live/transcribe` (`engineStatus`,
- * mesa task 1411). The save drops the server's cached probe, and the probe is
- * refetched after it, so the new engine's state shows with no reload. On
- * `naru-audio` the daemon's address (`audio.url`, naru task 1793) is edited
- * too, with a test button that checks the typed address without saving it.
+ * Audio: where the naru-audio daemon — the only speech engine since naru task
+ * 1386 — listens (`audio.url`, naru task 1793), with its live probe above it,
+ * from `GET /api/live/transcribe` (`engineStatus`, mesa task 1411), and a
+ * test button that checks the typed address without saving it. The save drops
+ * the server's cached probe, and the probe is refetched after it, so the new
+ * address's state shows with no reload.
  */
 function AudioSection() {
   const { data: audio, error, refetch } = useFetch(() => getAudio(), 'audio')
@@ -2382,7 +2362,7 @@ function AudioSection() {
   const [saving, setSaving] = useState(false)
 
   const seeded: AudioDraft =
-    draft ?? (audio ? audioDraftFrom(audio) : { engine: 'legacy', url: '' })
+    draft ?? (audio ? audioDraftFrom(audio) : { url: '' })
   const [testing, setTesting] = useState(false)
   const [testLine, setTestLine] = useState<string | null>(null)
   const [testDetail, setTestDetail] = useState<string | null>(null)
@@ -2443,49 +2423,19 @@ function AudioSection() {
   }
 
   const dirty = isAudioDirty(audio, seeded)
-  // The engine the server is running now — the saved one, not the draft.
-  const savedEngine = savedAudioEngine(audio)
-  const status = engineStatus(savedEngine, probe.data ?? null)
+  const status = engineStatus(probe.data ?? null)
 
   return (
     <>
       <h2>Audio</h2>
       <section className="settings-command">
-        <label htmlFor="audio-engine">
-          <span className="settings-command-title">Server speech engine</span>
-          <code className="settings-command-key">engine</code>
-        </label>
+        <span className="settings-command-title">Speech engine</span>
         <p className="muted settings-command-blurb">
-          <code>legacy</code> speaks through the <code>kokoro-rs</code>{' '}
-          binary and transcribes through the <code>auris</code> binary;{' '}
-          <code>naru-audio</code> sends both speech and transcription (live
-          dictation included) to the naru-audio daemon at the configured URL,
-          and runs neither binary. A saved change applies to the next request,
-          with no restart.
+          Speech and live dictation run through the naru-audio daemon at the
+          address below. A saved change applies to the next request, with no
+          restart.
         </p>
-        <div className="settings-voice-row">
-          <select
-            id="audio-engine"
-            className="settings-voice-input"
-            value={seeded.engine}
-            onChange={(e) => {
-              setDraft({ ...seeded, engine: e.target.value })
-              setSaved(false)
-            }}
-          >
-            {audioEngineOptions(audio).map((e) => (
-              <option key={e} value={e}>
-                {e}
-              </option>
-            ))}
-          </select>
-        </div>
         <p className="settings-command-blurb">{status.headline}</p>
-        {dirty && (
-          <p className="muted settings-command-blurb">
-            Unsaved: {savedEngine} stays in effect until you save.
-          </p>
-        )}
         {probe.error ? (
           <p className="error">{probe.error}</p>
         ) : (
@@ -2495,57 +2445,53 @@ function AudioSection() {
                 {line}
               </p>
             ))}
-            {probe.data?.engine === savedEngine && probe.data.message && (
+            {probe.data?.message && (
               <p className="muted settings-command-blurb">
                 {probe.data.message}
               </p>
             )}
           </>
         )}
-        {seeded.engine === 'naru-audio' && (
-          <>
-            <label htmlFor="audio-url">
-              <span className="settings-command-title">Daemon address</span>
-              <code className="settings-command-key">url</code>
-            </label>
-            <p className="muted settings-command-blurb">
-              Where the naru-audio daemon listens: <code>http://host:port</code>{' '}
-              or just <code>host:port</code>. Blank uses the built-in address.
-            </p>
-            <div className="settings-voice-row">
-              <input
-                id="audio-url"
-                className="settings-voice-input"
-                type="text"
-                value={seeded.url}
-                placeholder={audio.url_default}
-                onChange={(e) => {
-                  setDraft({ ...seeded, url: e.target.value })
-                  setSaved(false)
-                  setTestLine(null)
-                  setTestDetail(null)
-                }}
-              />
-              <button type="button" disabled={testing} onClick={testConnection}>
-                {testing ? 'testing…' : 'test connection'}
-              </button>
-            </div>
-            {envNote(audio) && (
-              <p className="settings-command-blurb">{envNote(audio)}</p>
-            )}
-            {testLine && <p className="settings-command-blurb">{testLine}</p>}
-            {testDetail && (
-              <p className="muted settings-command-blurb">{testDetail}</p>
-            )}
-            <p className="muted settings-command-blurb">
-              To use a daemon on another computer, start it there with{' '}
-              <code>naru-audio serve --listen 0.0.0.0:7870 --allow-remote</code>.
-              The daemon is loopback-only by default; <code>--allow-remote</code>{' '}
-              exposes it to the network and turns off its Host check. There is
-              no authentication, so only do this on a network you trust.
-            </p>
-          </>
+        <label htmlFor="audio-url">
+          <span className="settings-command-title">Daemon address</span>
+          <code className="settings-command-key">url</code>
+        </label>
+        <p className="muted settings-command-blurb">
+          Where the naru-audio daemon listens: <code>http://host:port</code> or
+          just <code>host:port</code>. Blank uses the built-in address.
+        </p>
+        <div className="settings-voice-row">
+          <input
+            id="audio-url"
+            className="settings-voice-input"
+            type="text"
+            value={seeded.url}
+            placeholder={audio.url_default}
+            onChange={(e) => {
+              setDraft({ ...seeded, url: e.target.value })
+              setSaved(false)
+              setTestLine(null)
+              setTestDetail(null)
+            }}
+          />
+          <button type="button" disabled={testing} onClick={testConnection}>
+            {testing ? 'testing…' : 'test connection'}
+          </button>
+        </div>
+        {envNote(audio) && (
+          <p className="settings-command-blurb">{envNote(audio)}</p>
         )}
+        {testLine && <p className="settings-command-blurb">{testLine}</p>}
+        {testDetail && (
+          <p className="muted settings-command-blurb">{testDetail}</p>
+        )}
+        <p className="muted settings-command-blurb">
+          To use a daemon on another computer, start it there with{' '}
+          <code>naru-audio serve --listen 0.0.0.0:7870 --allow-remote</code>.
+          The daemon is loopback-only by default; <code>--allow-remote</code>{' '}
+          exposes it to the network and turns off its Host check. There is no
+          authentication, so only do this on a network you trust.
+        </p>
       </section>
 
       <div className="settings-actions">
@@ -2561,26 +2507,24 @@ function AudioSection() {
 }
 
 /**
- * Listen: the model `live transcribe` runs the external `auris` speech-to-text
- * binary with (mesa task 955). Its own section, draft and save button, for
+ * Listen: the model `live transcribe` runs the naru-audio speech-to-text
+ * daemon with (mesa task 955). Its own section, draft and save button, for
  * the same reason speech has one — a separate endpoint, so one form's
  * rejection must not strand the other's edits.
  *
- * The input-side mirror of `SpeechSection`, minus a test button: `auris` has
+ * The input-side mirror of `SpeechSection`, minus a test button: there is
  * nothing like speaking a sample.
  *
  * Two things it must not soften:
- * - **Blank is the binary's own default**, not silence: mesa passes no `-m`
- *   at all then, which is exactly what it did before this setting existed.
- * - **The list is what the installed binary reports**, not a list mesa
- *   ships. When mesa could not ask it (no `auris` on PATH) there is no list
+ * - **Blank is the daemon's own default**, not silence: mesa names no model
+ *   then.
+ * - **The list is what the naru-audio daemon reports**, not a list mesa
+ *   ships. When mesa could not ask it (the daemon is down) there is no list
  *   to pick from, so the box becomes a plain one rather than an empty
  *   dropdown that would look like "no models exist".
  */
 function ListenSection() {
   const { data: listen, error, refetch } = useFetch(() => getListen(), 'listen')
-  // The server's engine in force, for the vocabulary note (naru task 1754).
-  const { data: audio } = useFetch(() => getAudio(), 'listen-audio')
   const [draft, setDraft] = useState<ListenDraft | null>(null)
   const [saveError, setSaveError] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
@@ -2644,7 +2588,7 @@ function ListenSection() {
   const savable = isListenSavable(listen, seeded)
   const fieldError = modelError(seeded.model)
   const vocabError = vocabularyError(seeded.vocabulary)
-  const vocabNote = vocabularyNote(listen, audio ? savedAudioEngine(audio) : null)
+  const vocabNote = vocabularyNote(listen, AUDIO_ENGINE)
 
   return (
     <>
@@ -2657,9 +2601,9 @@ function ListenSection() {
           <code className="settings-command-key">model</code>
         </label>
         <p className="muted settings-command-blurb">
-          The model <code>auris</code> decodes a live-conversation recording
-          with. Blank = the model auris picks itself; a change applies on the
-          next transcription, with no restart.
+          The model the <code>naru-audio</code> daemon decodes a
+          live-conversation recording with. Blank = the model the daemon picks
+          itself; a change applies on the next transcription, with no restart.
         </p>
         <div className="settings-voice-row">
           {canPickModel(listen) ? (
@@ -2672,7 +2616,7 @@ function ListenSection() {
               {/* Not a count: `options()` may carry a configured model the
                   binary no longer lists, so any number here would be wrong in
                   exactly the case that matters. */}
-              <option value="">default (the binary's own)</option>
+              <option value="">default (the daemon's own)</option>
               {modelOptions(listen).map((m) => (
                 <option key={m} value={m}>
                   {m}
@@ -2693,8 +2637,8 @@ function ListenSection() {
         </div>
         {!canPickModel(listen) && (
           <p className="muted settings-command-blurb">
-            Naru could not ask <code>auris</code> which models it has — type a
-            name, or run <code>auris --list-models</code> to see them.
+            Naru could not ask the <code>naru-audio</code> daemon which models it
+            has — type a name.
           </p>
         )}
         {fieldError && <p className="error">{fieldError}</p>}

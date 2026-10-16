@@ -5149,7 +5149,6 @@ export function LiveHub({
             paused,
             muted,
             chord: listenChordLabel,
-            audioEngine: audio?.engine ?? null,
           })
           const micName =
             chosen === DEFAULT_INPUT

@@ -57,7 +57,7 @@ over the cap is `validation`, naming the limit in bytes.
 
 Note explicitly: the live conversation surface's `LIVE_TEXT_MAX` (8 KiB) does
 **not** apply here. That cap exists because a live turn is spoken aloud
-through `kokoro-rs` — an artifact is read, never spoken, so nothing about
+through the speech daemon — an artifact is read, never spoken, so nothing about
 this feature answers to that limit. `ARTIFACT_BODY_MAX` is its own constant,
 sized for "a mockup or report a person reads in a browser," not "a sentence
 synthesized into audio."

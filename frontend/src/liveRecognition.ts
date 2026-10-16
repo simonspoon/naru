@@ -49,7 +49,7 @@
  * As of mesa task 956, `LiveHub.tsx` no longer calls into this module for the
  * microphone itself — page-side audio capture (`liveAudio.ts`, `liveVad.ts`)
  * posts each finished utterance to `POST /api/live/transcribe`, which hands
- * it to the external `auris` binary and returns text. That text is handed
+ * it to the naru-audio daemon and returns text. That text is handed
  * straight to the functions below, at exactly the point in the flow
  * `onresult`'s final branch used to occupy — `heldWith`, `shouldFlushSilence`,
  * `heldFlush`, `utteranceFrom`, `captureHint`, `correctVocabulary` and the
@@ -60,7 +60,7 @@
  * `readResults`, `isBlockingError` and `SpeechRecognitionLike` are the part
  * that was `SpeechRecognition`-specific; as of mesa task 957 they are **in
  * use again**, by the browser-recognizer path `listenPath` falls back to on
- * a machine with no `auris`.
+ * a machine whose daemon is not ready.
  */
 
 import { DEFAULT_VAD } from './liveVad'
@@ -146,11 +146,9 @@ export type ListenPath = 'auris' | 'browser' | 'none' | 'unavailable'
  */
 export function listenPath(input: {
   /**
-   * The server has an `auris` that answered — `GET /api/live/transcribe`.
-   * False whenever mesa could not ask: the request failed, or
-   * `listen::models()` came back empty. An empty model list means
-   * **"mesa could not ask"**, never "auris says there are none" — the same
-   * rule `speech::voices()` has carried since it shipped.
+   * The naru-audio daemon is ready — `GET /api/live/transcribe`. False
+   * whenever mesa could not ask: the request failed, or the daemon is not
+   * ready.
    */
   transcribes: boolean
   /** This browser can capture audio at all (`liveAudio.ts::capturesAudio`). */
@@ -158,8 +156,9 @@ export function listenPath(input: {
   /** This browser has a recognizer of its own (`recognitionCtor(...) !== null`). */
   recognizes: boolean
   /**
-   * The server's `audio.engine` (`TranscribeStatus.engine`), or `null` when
-   * the probe has not answered or failed — read as `legacy`.
+   * The probe's engine (`TranscribeStatus.engine`, always `naru-audio` when
+   * it answered), or `null` when the probe has not answered or failed — then
+   * the browser recognizer is still a fallback.
    */
   audioEngine: string | null
   /**
@@ -171,8 +170,9 @@ export function listenPath(input: {
   // A deliberate opt-in to the browser's own recognizer (mesa task 1390):
   // the person asked for it, so the server is not consulted at all.
   if (input.listenEngine === 'browser') return input.recognizes ? 'browser' : 'none'
-  // On naru-audio the browser recognizer is never a fallback (design §6.1):
-  // a daemon that is not ready is said out loud, not papered over. A ready
+  // Once the probe has answered, the browser recognizer is never a fallback
+  // (design §6.1): a daemon that is not ready is said out loud, not papered
+  // over. A ready
   // daemon this browser cannot capture audio for is not the server's fault.
   if (input.audioEngine === 'naru-audio') {
     if (!input.transcribes) return 'unavailable'
@@ -948,15 +948,12 @@ export function captureHint(input: {
    *  Optional because only the muted line names it, and the shipped chord is
    *  the right thing to say when nobody has said otherwise. */
   chord?: string
-  /** The server's speech engine, the probe's `audio.engine` (mesa task 1409).
-   *  The server path is `'auris'` on both engines, so this is what names it. */
-  audioEngine?: string | null
 }): string {
   if (input.paused) {
     return 'Paused. Press Resume to talk to Naru again — the conversation is still running.'
   }
   if (input.path === 'none') {
-    return 'Neither auris nor this browser can listen here. Type here, or use your system dictation.'
+    return 'Neither naru-audio nor this browser can listen here. Type here, or use your system dictation.'
   }
   if (input.path === 'unavailable') {
     return "Speech isn't available on the server, so Naru is not listening. Type here — the banner above says how to fix it."
@@ -977,15 +974,10 @@ export function captureHint(input: {
     return `Naru is not listening. Press ${input.chord ?? LISTEN_CHORD} — or the microphone button — to have her listen, or just type here.`
   }
   if (input.listening) {
-    // Named (mesa task 957): the person can act on the difference — auris is
-    // an install away, the browser recognizer is not — so the ladder saying
-    // only "listening" would hide something worth knowing.
-    const via =
-      input.path === 'auris'
-        ? input.audioEngine === 'naru-audio'
-          ? 'naru-audio'
-          : 'auris'
-        : 'this browser'
+    // Named (mesa task 957): the person can act on the difference — the
+    // daemon hears Naru's vocabulary, the browser recognizer does not — so the
+    // ladder saying only "listening" would hide something worth knowing.
+    const via = input.path === 'auris' ? 'naru-audio' : 'this browser'
     return `Listening through ${via} — everything you say is held here and sent to Naru once you go quiet, or right away if you press the switch. She stops listening while she is speaking. Anything you type while she is holding what you said waits and is sent on the end of it.`
   }
   // Joined, unmuted, and still not the way in — nothing left that is worth a

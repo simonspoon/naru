@@ -14,9 +14,9 @@ export type ConfigSpeech = {
  */
 voice: string | null, 
 /**
- * Every voice the installed `kokoro-rs` reports (`--list-voices`), so the
- * editor can offer a list. **Empty means mesa could not ask** — a missing
- * or uncooperative binary — never "there are no voices", so an empty list
+ * Every voice the naru-audio daemon reports, so the
+ * editor can offer a list. **Empty means mesa could not ask** — a daemon
+ * that is down — never "there are no voices", so an empty list
  * is a reason to accept a typed name, not to refuse one. On naru-audio
  * these are the voices of the configured `model` — or of the one
  * `GET /api/config/speech?model=` named (mesa task 1425).
@@ -24,28 +24,24 @@ voice: string | null,
 voices: Array<string>, 
 /**
  * The names in `voices` that are **cloned** voices (mesa task 1430) —
- * the ones naru-audio can export. Always empty on the legacy engine, and
- * on a daemon too old to mark them.
+ * the ones naru-audio can export. Empty on a daemon too old to mark them.
  */
 cloned: Array<string>, 
 /**
  * The configured text-to-speech model (mesa task 1425), or `null` when the
  * config says nothing — then naru-audio speaks in its own default model.
- * Only the naru-audio engine sends it.
  */
 model: string | null, 
 /**
  * Every text-to-speech model naru-audio lists (`GET /v1/models`,
- * `x_kind == "tts"`). Always empty on the legacy engine — `kokoro-rs`
- * has one model — and empty on naru-audio when Naru could not ask.
+ * `x_kind == "tts"`). Empty when Naru could not ask.
  */
 models: Array<string>, 
 /**
  * Each of `models`' capabilities (mesa task 1455) — which of the voice
  * dropdown, the clone form and the design panel a model on `models`
  * supports, so the editor can follow whichever model is drafted rather
- * than always the daemon's own default. Always empty on the legacy
- * engine and whenever `models` is.
+ * than always the daemon's own default. Empty whenever `models` is.
  */
 capabilities: Array<SpeechModelCaps>, 
 /**

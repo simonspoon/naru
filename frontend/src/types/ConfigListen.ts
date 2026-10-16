@@ -3,20 +3,19 @@
 /**
  * The listen settings as the Settings page sees them (`core::config`,
  * `docs/config.md`, mesa task 955) — the input-side mirror of
- * [`ConfigSpeech`]: the model the external `auris` speech-to-text binary is
- * run with, plus the models the installed binary offers.
+ * [`ConfigSpeech`]: the model the naru-audio speech-to-text daemon is
+ * run with, plus the models it offers.
  */
 export type ConfigListen = { 
 /**
- * The configured model `live transcribe` runs `auris` with, or `null`
- * when the config says nothing — then no `-m` is passed at all and
- * `auris` picks its own default.
+ * The configured model `live transcribe` sends the daemon, or `null`
+ * when the config says nothing — then the daemon picks its own default.
  */
 model: string | null, 
 /**
- * Every model the installed `auris` reports (`--list-models`), so the
- * editor can offer a list. **Empty means mesa could not ask** — a missing
- * or uncooperative binary — never "there are no models", so an empty
+ * Every speech-to-text model the daemon reports, so the
+ * editor can offer a list. **Empty means mesa could not ask** — a daemon
+ * that is down — never "there are no models", so an empty
  * list is a reason to accept a typed name, not to refuse one.
  */
 models: Array<string>, 
@@ -36,8 +35,7 @@ engine_default: string,
 vocabulary: string | null, 
 /**
  * The speech-to-text models whose backend uses the vocabulary
- * (`x_hotwords` on the daemon's model list). Empty on the legacy engine
- * and when the daemon could not be asked.
+ * (`x_hotwords` on the daemon's model list). Empty when the daemon could not be asked.
  */
 hotword_models: Array<string>, 
 /**

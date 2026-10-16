@@ -471,9 +471,9 @@ review's input is model-written text; its prompt treats it as data.
 
 A spoken thought, recorded for ten seconds, transcribed locally, kept only if
 words were heard, tagged by a small model with thinking off, and appended to a
-log. Needs `sox` (recording), `auris` (speech to text, `docs/listen.md`: reads
-audio on stdin, `--format json` prints JSON lines whose last `transcript` line
-is the text) and `jq`, and Claude Code logged in (the labelling step is one
+log. Needs `sox` (recording), the naru-audio daemon (speech to text,
+`docs/listen.md`: `POST /v1/audio/transcriptions` answers `{"text": …}`),
+`curl` and `jq`, and Claude Code logged in (the labelling step is one
 `claude -p` call).
 
 ```bash
@@ -484,7 +484,7 @@ naru workflow node create ambient trigger Start \
   --config '{"mode":"manual","phrase":"capture a thought"}'
 
 # 2. Record 10 s, transcribe, print the transcript (empty for silence).
-CMD='f=$(mktemp -t naru-ambient); sox -d -q -t wav "$f" trim 0 10; auris -q --format json < "$f" | jq -rs "map(select(.type==\"transcript\")) | last | .text // \"\""; rm -f "$f"'
+CMD='f=$(mktemp -t naru-ambient); sox -d -q -t wav "$f" trim 0 10; curl -s -F "file=@$f" -F model=default -F response_format=json http://127.0.0.1:7870/v1/audio/transcriptions | jq -r ".text // \"\""; rm -f "$f"'
 naru workflow node create ambient cli Transcribe \
   --config "$(jq -nc --arg c "$CMD" '{command: $c, timeout_secs: 30}')"
 
@@ -515,8 +515,8 @@ is never called and nothing is logged. To gate on an idea *score* instead,
 add a `prompt` node before a `score_above` branch — remembering that the
 branch then passes the score, not the text, downstream. To run it every ten
 minutes instead, give the trigger `{"mode":"time","every_minutes":10}` and
-run `naru serve` (the watcher is on by default). `scripts/workflow-check.sh` builds this
-exact graph over stub `sox`/`auris` and a stub model API.
+run `naru serve` (the watcher is on by default). `scripts/workflow-check.sh` builds
+this graph's shape over stub recording and transcription commands and a stub model API.
 
 ## Web UI
 

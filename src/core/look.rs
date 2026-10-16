@@ -43,7 +43,7 @@ use super::types::LiveWindow;
 const STDERR_EXCERPT: usize = 400;
 
 /// The desktop-automation binary to run. `MESA_LOKI_BIN` overrides it — the
-/// same test seam as `agents::claude_bin` and `speech::kokoro_bin`, and how the
+/// same test seam as `agents::claude_bin`, and how the
 /// end-to-end checks drive this against a stub instead of a real screen.
 fn loki_bin() -> String {
     crate::core::env::var("LOKI_BIN").unwrap_or_else(|| "loki".to_string())

@@ -1647,9 +1647,8 @@ export function updateListen(
 }
 
 /**
- * The audio settings in `~/.mesa/config.json` (mesa task 1388): which engine
- * the server runs speech through (`legacy` | `naru-audio`) and the daemon's
- * URL, each verbatim or `null` beside its built-in. 502 `unavailable` means
+ * The audio settings in `~/.mesa/config.json` (mesa task 1388): the naru-audio
+ * daemon's URL, verbatim or `null` beside its built-in. 502 `unavailable` means
  * the config file itself is unreadable, exactly as for `getConfig`.
  */
 export function getAudio(): Promise<ConfigAudio> {
@@ -1659,9 +1658,9 @@ export function getAudio(): Promise<ConfigAudio> {
 /**
  * Writes audio settings and echoes them as re-read from disk. Only the keys
  * passed are touched; `null` removes one, restoring the built-in. 422
- * `validation` is an unknown engine or a malformed URL, and nothing is
+ * `validation` is an unknown setting or a malformed URL, and nothing is
  * written in that case. A save drops the server's cached probe, so the next
- * `transcribeStatus()` asks the engine just saved.
+ * `transcribeStatus()` asks the address just saved.
  */
 export function updateAudio(
   audio: Record<string, string | null>,

@@ -326,7 +326,7 @@ One inbox item per session per tick, carrying every rule newly tripped.
   wrong move.
 - `author` is `cost-guard`, so the alerts are one identifiable stream.
 - The body is **prose**, not a table. The inbox's play button may read it aloud
-  through `kokoro-rs` (`docs/inbox.md`), so it says "99.8 percent were cache
+  through the speech daemon (`docs/inbox.md`), so it says "99.8 percent were cache
   reads", not a markdown grid. It names the session (short and full id), the
   project or cwd if known, how long it has been running, the tokens, the
   estimated cost, the cache-read share, the output tokens, which rules tripped

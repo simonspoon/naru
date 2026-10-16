@@ -64,8 +64,9 @@ describe('recognitionCtor', () => {
 })
 
 describe('listenPath', () => {
-  // Today's ladder, unchanged: the default `audio.engine` and `listen.engine`.
-  const legacy = { audioEngine: 'legacy', listenEngine: null }
+  // A probe that never answered (audio engine unknown): the browser recognizer
+  // is still a fallback.
+  const legacy = { audioEngine: null, listenEngine: null }
   const naruAudio = { audioEngine: 'naru-audio', listenEngine: null }
 
   it('picks auris when the server can transcribe and this browser can capture audio', () => {
@@ -100,7 +101,7 @@ describe('listenPath', () => {
   it('leaves Firefox with no way in when auris cannot be reached either', () => {
     expect(listenPath({ ...legacy, transcribes: false, captures: true, recognizes: false })).toBe('none')
   })
-  it('reads an unanswered or failed probe and an unset listen engine as legacy', () => {
+  it('reads an unanswered or failed probe and an unset listen engine as unknown', () => {
     const unknown = { audioEngine: null, listenEngine: null }
     expect(listenPath({ ...unknown, transcribes: true, captures: true, recognizes: true })).toBe('auris')
     expect(listenPath({ ...unknown, transcribes: false, captures: true, recognizes: true })).toBe('browser')
@@ -123,12 +124,12 @@ describe('listenPath', () => {
     expect(listenPath({ ...naruAudio, transcribes: false, captures: false, recognizes: true })).toBe('unavailable')
   })
 
-  it('on legacy, the same unreachable server still falls back to the browser recognizer', () => {
+  it('with an unanswered probe, the same unreachable server still falls back to the browser recognizer', () => {
     expect(listenPath({ ...legacy, transcribes: false, captures: true, recognizes: true })).toBe('browser')
   })
 
   it('an explicit listen engine of browser picks the browser recognizer, whatever the server says', () => {
-    for (const audioEngine of ['legacy', 'naru-audio', null]) {
+    for (const audioEngine of ['naru-audio', null]) {
       const opted = { audioEngine, listenEngine: 'browser' }
       expect(listenPath({ ...opted, transcribes: true, captures: true, recognizes: true })).toBe('browser')
       expect(listenPath({ ...opted, transcribes: false, captures: true, recognizes: true })).toBe('browser')
@@ -721,7 +722,7 @@ describe('captureHint', () => {
   }
 
   it('says so where neither way in is available', () => {
-    expect(captureHint({ ...base, path: 'none' })).toMatch(/Neither auris nor this browser/)
+    expect(captureHint({ ...base, path: 'none' })).toMatch(/Neither naru-audio nor this browser/)
   })
 
   it('gives an unavailable server its own line, never the browser one', () => {
@@ -748,29 +749,15 @@ describe('captureHint', () => {
     expect(captureHint({ ...base, listening: true })).toMatch(/Listening/)
   })
 
-  it('names auris as the way in while listening through it', () => {
-    expect(captureHint({ ...base, listening: true, path: 'auris' })).toMatch(
-      /Listening through auris/,
-    )
-  })
-
   it('names naru-audio as the way in when the server runs it', () => {
     expect(
-      captureHint({ ...base, listening: true, path: 'auris', audioEngine: 'naru-audio' }),
+      captureHint({ ...base, listening: true, path: 'auris' }),
     ).toMatch(/Listening through naru-audio/)
-  })
-
-  it('still names auris on the legacy engine or with no engine known', () => {
-    for (const audioEngine of [undefined, null, 'legacy']) {
-      expect(captureHint({ ...base, listening: true, path: 'auris', audioEngine })).toMatch(
-        /Listening through auris/,
-      )
-    }
   })
 
   it('names this browser on its own recognizer whatever the server engine', () => {
     expect(
-      captureHint({ ...base, listening: true, path: 'browser', audioEngine: 'naru-audio' }),
+      captureHint({ ...base, listening: true, path: 'browser' }),
     ).toMatch(/Listening through this browser/)
   })
 

@@ -6,8 +6,8 @@
  */
 export type VoiceDesign = { 
 /**
- * Whether naru-audio has `model` (below) pulled. Always `false` on the
- * legacy engine, and when Naru could not ask the daemon.
+ * Whether naru-audio has `model` (below) pulled. `false` when
+ * Naru could not ask the daemon.
  */
 available: boolean, 
 /**

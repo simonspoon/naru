@@ -3,25 +3,22 @@ import type { AudioTestResult } from './types/AudioTestResult'
 import type { TranscribeStatus } from './types/TranscribeStatus'
 
 /**
- * Pure logic for the Settings page's engine selectors (mesa task 1391):
- * `audio.engine` (which engine the **server** runs speech through) and, via
- * the two engine helpers below, `listen.engine` in
+ * Pure logic for the Settings page's Audio section and, via the two engine
+ * helpers below, the `listen.engine` selector in
  * [`listenDraft`](./listenDraft.ts). Hoisted out of the component so it is
  * unit-testable (CLAUDE.md: the frontend tests cover the pure modules).
  *
- * An engine is picked from a fixed list, so the draft holds the **effective**
- * engine — the configured one, else the built-in — and a save follows the
- * route's rule that `null` removes the key: picking the built-in sends
- * `null` rather than writing the default into the file. The daemon URL
- * (naru task 1793) is free text: blank is the built-in (`null`), a bare
+ * The naru-audio daemon is the only speech engine (naru task 1386 retired
+ * `auris` and `kokoro-rs`), so the only audio setting is the daemon URL
+ * (naru task 1793): free text, blank is the built-in (`null`), a bare
  * `host[:port]` gets `http://` put in front, and the server's validation
  * stays the authority on anything else.
  */
 
-/** The engines `PUT /api/config/audio` accepts, built-in first. */
-export const AUDIO_ENGINES = ['legacy', 'naru-audio']
+/** The one speech engine: the naru-audio daemon. */
+export const AUDIO_ENGINE = 'naru-audio'
 
-export type AudioDraft = { engine: string; url: string }
+export type AudioDraft = { url: string }
 
 /** The engine in force: the configured one, else the built-in. */
 function effective(configured: string | null, fallback: string): string {
@@ -71,35 +68,22 @@ export function urlChange(configured: string | null, drafted: string): string | 
   return next === saved ? undefined : next
 }
 
-/** The form as loaded: the engine in force and the saved URL (blank = built-in). */
+/** The form as loaded: the saved URL (blank = built-in). */
 export function draftFrom(audio: ConfigAudio): AudioDraft {
-  return {
-    engine: effective(audio.engine, audio.engine_default),
-    url: (audio.url ?? '').trim(),
-  }
+  return { url: (audio.url ?? '').trim() }
 }
 
-/** The engines to offer for `audio.engine`. */
-export function options(audio: ConfigAudio): string[] {
-  return engineChoices(audio.engine, AUDIO_ENGINES)
-}
-
-/** True when the select differs from what the server last reported. */
+/** True when the typed URL differs from what the server last reported. */
 export function isDirty(audio: ConfigAudio, draft: AudioDraft): boolean {
-  return (
-    engineChange(audio.engine, audio.engine_default, draft.engine) !== undefined ||
-    urlChange(audio.url, draft.url) !== undefined
-  )
+  return urlChange(audio.url, draft.url) !== undefined
 }
 
-/** The subset to PUT: `engine` and `url`, each only when it changed. */
+/** The subset to PUT: `url`, only when it changed. */
 export function changedAudio(
   audio: ConfigAudio,
   draft: AudioDraft,
 ): Record<string, string | null> {
   const out: Record<string, string | null> = {}
-  const engine = engineChange(audio.engine, audio.engine_default, draft.engine)
-  if (engine !== undefined) out.engine = engine
   const url = urlChange(audio.url, draft.url)
   if (url !== undefined) out.url = url
   return out
@@ -130,41 +114,22 @@ export function testResultLine(result: AudioTestResult): string {
 }
 
 /**
- * The engine the server is running now: the saved one, never the draft,
- * normalised the way the server reads it (`config::audio_engine`) — a known
- * engine is kept, and anything else a hand edit left behind (`Legacy`, an
- * unknown word) is the built-in, since that is what the server falls back to.
+ * The read-only status above the daemon address: what speech and
+ * transcription run through, and what `GET /api/live/transcribe`'s probe
+ * found (mesa task 1411). `null` status is still probing. The probe reports
+ * only speech-to-text readiness, so nothing is claimed about speech output
+ * beyond where it goes. The server's `message` is shown on its own line,
+ * verbatim.
  */
-export function savedEngine(audio: ConfigAudio): string {
-  const engine = effective(audio.engine, audio.engine_default)
-  return AUDIO_ENGINES.includes(engine) ? engine : audio.engine_default
-}
-
-/**
- * The read-only status beside the selector (mesa task 1411): which engine is
- * **in effect** — [`savedEngine`], never the draft — what it runs speech and
- * transcription through, and what `GET /api/live/transcribe`'s probe found.
- * `null` status, or one taken against another engine (the refetch after a
- * save has not landed yet), is still probing. The probe reports only
- * speech-to-text readiness, so nothing is claimed about speech output beyond
- * where it goes. The server's `message` is shown on its own line, verbatim.
- */
-export function engineStatus(
-  saved: string,
-  status: TranscribeStatus | null,
-): { headline: string; details: string[] } {
-  const daemon = saved === 'naru-audio'
-  const headline = daemon
-    ? `In effect: naru-audio — speech and transcription through the daemon${
-        status?.url ? ` at ${status.url}` : ''
-      }`
-    : 'In effect: legacy — speech through kokoro-rs, transcription through auris'
-  if (!status || status.engine !== saved) return { headline, details: ['Probing…'] }
+export function engineStatus(status: TranscribeStatus | null): {
+  headline: string
+  details: string[]
+} {
+  const headline = `Speech and transcription run through the naru-audio daemon${
+    status?.url ? ` at ${status.url}` : ''
+  }`
+  if (!status) return { headline, details: ['Probing…'] }
   const checked = `checked ${status.checked_at}`
-  if (!daemon) {
-    const stt = status.state === 'ready' ? 'ready' : 'not available'
-    return { headline, details: [`Transcription (auris): ${stt} (${checked})`] }
-  }
   if (status.state === 'daemon_down') {
     return { headline, details: [`Daemon: not reachable (${checked})`] }
   }

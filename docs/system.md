@@ -35,7 +35,7 @@ everything except the GPU. Two costs are handled deliberately:
   **macOS only** — and a slow one, so it is asked **once for the life of the
   process** and cached in a `OnceLock`: the hardware does not change under a
   running server. `MESA_SYSTEM_PROFILER_BIN` is the test seam
-  (`listen::auris_bin`'s precedent). Not a Mac, a missing binary, a non-zero
+  (the same env-override seam `MESA_CLAUDE_BIN` is). Not a Mac, a missing binary, a non-zero
   exit, oversized or unparseable output are all `gpu: null`.
 
 Two smaller judgements worth knowing:
@@ -75,7 +75,7 @@ shown under Memory with a total. It is a route of its own because it is a
 blocking network call (2 s cap, `audio::loaded_models`, URL from
 `audio::daemon_url`, the one resolution of `audio.url`/`NARU_AUDIO_URL`) that
 must not slow or fail `snapshot()`. `models` is `null` — shown as "naru-audio
-not running" — on the legacy engine or when the daemon cannot be asked; an
+not running" — when the daemon cannot be asked; an
 empty list means nothing is loaded. Same standard-guard-only posture as
 `/api/system`; always 200.
 

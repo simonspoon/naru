@@ -17,17 +17,17 @@ The two directions were deliberately asymmetric when this feature first
 shipped, and for a while that asymmetry *was* the design: Naru took
 person → Naru as text a browser's own engine had already produced, and kept
 audio to the one direction — Naru → person — where Naru itself controlled
-what left the server. `auris` (mesa task 954 onward) ended that. Person →
-Naru is now audio too, captured in the page and posted to the server to be
-decoded by an external local binary, the same shape Naru → person already
-had: a whole payload handed to an external synthesiser (`kokoro-rs`) or
-decoder (`auris`), on the server, with nothing kept. The two directions are
-symmetric now — both audio, both server-mediated — and what carries over from
-the old design is not the asymmetry but the reason it existed: Naru runs
-neither engine in-process, and every payload that crosses this feature is
+what left the server. The naru-audio daemon (mesa task 954 onward, first as
+the external `auris` binary, retired by naru task 1386) ended that.
+Person → Naru is now audio too, captured in the page and posted to the server to be decoded by the local
+naru-audio daemon, the same shape Naru → person already had: a whole payload
+handed to the daemon, on the server, with nothing kept. The two directions
+are symmetric now — both audio, both server-mediated — and what carries over
+from the old design is not the asymmetry but the reason it existed: Naru runs
+no engine in-process, and every payload that crosses this feature is
 transcribed or spoken and then let go. See `docs/listen.md` for the audio-in
-half's own contract — the route, the limits, and what auris is and is not
-handed — and "Speech, reused rather than rebuilt" (below) for audio-out's:
+half's own contract — the route, the limits, and what the daemon is and is
+not handed — and "Speech, reused rather than rebuilt" (below) for audio-out's:
 
 - **Person → Naru is text, decoded from audio the page captures — through
   whichever of two engines this browser actually has** (`listenPath`,
@@ -35,14 +35,14 @@ handed — and "Speech, reused rather than rebuilt" (below) for audio-out's:
   browser has joined it, the microphone opens on its own (task 917 — before
   that, task 887 had it start muted until an explicit press; a mute is still
   the person's own switch, and stays put for the rest of that session).
-  Where `auris` answers and this browser can capture audio, the page runs the
-  stream through an `AudioWorklet` and a page-side voice-activity detector
-  (`liveVad.ts`, mesa task 956) that decides where one utterance ends —
-  landing exactly where a speech recognizer's *final result* would — turns
-  it into a 16 kHz mono WAV (`liveAudio.ts`), and posts it to
-  `POST /api/live/transcribe`, which hands it to `auris` and returns text.
-  On `audio.engine = "naru-audio"` (mesa task 1395) the same microphone
-  **streams** instead: the page opens the `/api/live/listen` WebSocket
+  Where naru-audio answers and this browser can capture audio, the page runs
+  the stream through an `AudioWorklet` and a page-side voice-activity
+  detector (`liveVad.ts`, mesa task 956) that decides where one utterance
+  ends — landing exactly where a speech recognizer's *final result* would —
+  turns it into a 16 kHz mono WAV (`liveAudio.ts`), and posts it to
+  `POST /api/live/transcribe`, which hands it to the daemon and returns text.
+  The page's main dictation capture (mesa task 1395) instead
+  **streams**: the page opens the `/api/live/listen` WebSocket
   (`docs/listen.md` "Streaming"), sends 16 kHz s16le PCM in ~50 ms frames
   (`liveStream.ts`), runs no VAD of its own — the daemon's is authoritative —
   and holds each `final` it answers through the same tail a posted segment's
@@ -61,28 +61,24 @@ handed — and "Speech, reused rather than rebuilt" (below) for audio-out's:
   and asks `GET /api/live/transcribe` again, which paints the unavailable
   banner when the daemon has gone — and when it has not (a `1013` backlog, a
   `1011` decode error), turning listening off and on reconnects. The barge-in capture stays
-  on the POST route, which reaches the daemon on this engine too.
-  auris wins whenever it can be reached, even on a browser that also has a
-  recognizer of its own: it hears Naru's own vocabulary correctly and
+  on the POST route.
+  naru-audio wins whenever it can be reached, even on a browser that also has
+  a recognizer of its own: it hears Naru's own vocabulary correctly and
   punctuates like a person, where a browser's own recognizer does neither —
   mesa task 922's phonetic correction pass (below) was built against exactly
   that recognizer's mishearings, and task 957 is the reason it was worth
-  keeping rather than deleting once `auris` landed: the fallback still runs
-  the same imperfect engine, on the same machines that never had `auris` to
-  begin with. Where `auris` cannot be reached but this browser
-  has its own recognizer (`SpeechRecognition`/`webkitSpeechRecognition`, task
-  873), listening falls back to that unchanged — the same engine, in the same
-  page, that ran before task 956 ever existed. That fallback is the
-  `legacy` engine's alone (mesa task 1390): on `audio.engine = "naru-audio"`
-  a daemon that is not ready is `'unavailable'` — the microphone stays shut
-  and a banner shows the server's message, the command that fixes it and a
+  keeping rather than deleting. Where the probe never answered (the request
+  failed) but this browser has its own recognizer
+  (`SpeechRecognition`/`webkitSpeechRecognition`, task 873), listening falls
+  back to that unchanged. Once the probe has answered (mesa task 1390), a
+  daemon that is not ready is `'unavailable'` — the microphone stays shut and
+  a banner shows the server's message, the command that fixes it and a
   Retry — and the browser recognizer is used only when `listen.engine =
   "browser"` asks for it (`docs/listen.md`). **Firefox has no recognizer of
-  its own at all**, so `auris` is also the only way a Firefox user gets a
+  its own at all**, so naru-audio is also the only way a Firefox user gets a
   microphone here at all: `getUserMedia` is everywhere `SpeechRecognition` is
   not, which makes that case a genuinely new capability rather than a better
-  one, and the second-best reason for the whole project after the vocabulary
-  fix. Either engine's text is **held** and posted as one `user` turn once
+  one. Either path's text is **held** and posted as one `user` turn once
   the person goes quiet for a beat (the wait `live.auto-send-ms` names), or
   right away if they press the listen switch (tasks
   873, 889, 917, 956, 957). Only where neither engine is reachable does the
@@ -91,15 +87,15 @@ handed — and "Speech, reused rather than rebuilt" (below) for audio-out's:
   key, or their fingers) types into it, exactly as before — and it remains
   the way in regardless of engine whenever the microphone itself is not:
   muted, this browser cannot capture audio at all, or the microphone was
-  refused. Naru still ships no speech-to-text engine of its own — `auris` is
-  a separate external binary this hands a recording to and retains nothing
-  of, in either direction, and a browser's own recognizer is the browser's,
-  not Naru's.
-- **Naru → person is speech.** A Naru turn is synthesised by `kokoro-rs` and
-  streamed back to the browser, through the same `speech::start` and the same
-  browser-side player the Inbox's play button uses (`docs/inbox.md`). This
-  half is unchanged since before `auris`: server to browser, synthesised on
-  demand, nothing retained. What is no longer true is that it is the *only*
+  refused. Naru still ships no speech-to-text engine of its own — naru-audio
+  is a separate daemon this hands a recording to and retains nothing of, in
+  either direction, and a browser's own recognizer is the browser's, not
+  Naru's.
+- **Naru → person is speech.** A Naru turn is synthesised by the naru-audio
+  daemon and streamed back to the browser, through the same `speech::start`
+  and the same browser-side player the Inbox's play button uses
+  (`docs/inbox.md`). This half is server to browser, synthesised on demand,
+  nothing retained. What is no longer true is that it is the *only*
   direction audio moves in this feature — person → Naru is audio reaching the
   server too now, on `POST /api/live/transcribe` (`docs/listen.md`), so
   "audio" is no longer a word that names one direction here.
@@ -1821,8 +1817,7 @@ bodiless like the poll's own summaries, each carrying its `ink`: every
 `live_turns` row that annotated it (`LiveBoardInkEntry`, oldest first),
 naming whether the PNG is still on disk (ink purges after
 `LIVE_INK_KEEP_DAYS` independently of the board it was drawn on, so a board
-can survive its ink). An unknown session id is `not_found`; a session that
-never pushed a board answers with an empty array. A board's own bytes still
+can survive its ink). An unknown session id is `not_found`; a session thatnever pushed a board answers with an empty array. A board's own bytes still
 come from the ordinary `GET /api/live/boards/{id}/render` (unchanged by this
 route, and answering identically whether the session is live or ended, per
 above); one turn's ink comes from the new `GET /api/live/turns/{id}/ink`
@@ -2532,7 +2527,7 @@ match fail against a box of zeroes.
 `loki` is the external desktop-automation binary (CLAUDE.md's verification
 tools), invoked exactly as every other shell-out in `core` is — as **argv**,
 never through a shell — and `MESA_LOKI_BIN` overrides the path, the same test
-seam as `MESA_CLAUDE_BIN` and `MESA_KOKORO_BIN`. Nothing on this path is built
+seam as `MESA_CLAUDE_BIN`. Nothing on this path is built
 out of Naru data anyway: a window id Naru just parsed and a path Naru itself
 chose.
 
@@ -2801,8 +2796,8 @@ Why each gate is what it is:
   the standard `guard`, which under `--lan` is what lets the person hold the
   conversation from their phone.
 - **Speak is exactly `speak_inbox`'s pair**, and both halves are load-bearing.
-  `require_agent_access` because one request spends unbounded CPU in an
-  external binary; `require_same_site_fetch` because every `Origin` check in
+  `require_agent_access` because one request spends unbounded CPU in the
+  daemon; `require_same_site_fetch` because every `Origin` check in
   `api.rs` passes a request carrying no Origin, and a no-cors `<audio src>`
   never carries one — so without it any page on the internet could point an
   `<img src>` at a loopback Naru and burn a core per hit. The full reasoning,
@@ -2828,11 +2823,9 @@ to the page exactly like a synthesiser that died mid-render.
 Nothing about how Naru speaks is new here. `GET /api/live/turns/{id}/speak` is
 the inbox speak route with the body coming off a turn instead of an item: the
 same `config::speech_voice()` read **fresh on every press**, the same
-`spawn_blocking(speech::start)`, the same text on the child's **stdin** (not an
-argument, so a body opening with `-o` cannot become an option), the same
-patched `0x7FFF0000` WAV sizes, the same chunked response with no
-`Content-Length`, and the same `503 unavailable` for a missing or failing
-`kokoro-rs`. `MESA_KOKORO_BIN` is the same seam the checks drive it through.
+`spawn_blocking(speech::start)` posting the text to the naru-audio daemon, the
+same chunked response with no `Content-Length`, and the same `503
+unavailable` for a daemon that is down or refuses.
 
 The browser side is reused unchanged too, including the fallback that matters
 on Apple's media stack: an `<audio>` that refuses a range-less stream fires
@@ -2846,7 +2839,7 @@ passes `inboxSpeakUrl(id)` and Live passes `liveSpeakUrl(id)`. That is the only
 change to the inbox's speech path.
 
 The decoded path also **holds before it plays** (mesa task 1146). Measured on
-a real turn, `kokoro-rs`'s first chunk arrived after nearly three seconds
+a real turn, the synthesiser's first chunk arrived after nearly three seconds
 carrying 80 ms of audio, and the stream then stayed only about a second ahead
 of real time — so a player that scheduled the first buffer the moment it
 decoded said a few words and went silent for the rest of the turn the first
@@ -3266,12 +3259,12 @@ conversation") working with no backend change.
     (`liveCancel.ts::DiscardLedger`): each press of the switch off *commits*
     the stretch of listening it ends and each Escape *discards* it, and each
     capture run (either engine) remembers the stretch it started in, so an
-    auris segment settling afterwards, the utterance the teardown would have
+    naru-audio segment settling afterwards, the utterance the teardown would have
     cut (not even posted) and the final the recognizer's `stop()` delivers
     late all find their stretch discarded and never land — not in this
     recording, and not in the next one a quick second Escape opens. A
     committed stretch is immune: speak, switch off with a segment still at
-    auris, switch on, Escape — the drain the switch started still sends what
+    naru-audio, switch on, Escape — the drain the switch started still sends what
     the switch sent, and the held recording it will flush is kept rather than
     cleared. Turns already sent are untouched, and so is the typed box. Escape again resumes,
     but **only its own mute** (`liveCancel.ts::liveCancelVerdict`): a
@@ -3294,29 +3287,28 @@ conversation") working with no backend change.
     panel and the live board panel now do (field-level Escapes are already
     stood down by `shouldIgnoreShortcut`'s text-control rule, a modal and a
     diagram by its own rules). An IME composition's Escape is left alone too.
-  - **There is no interim preview through `auris`** (mesa task 956) —
+  - **There is no interim preview through naru-audio** (mesa task 956) —
     one-shot transcription has nothing to show until a segment is done, so
-    the italic "what I'm hearing" line under the capture box is gone on that
-    path. Two things replace it, both load-bearing for how the surface
+    the italic "what I'm hearing" line under the capture box is gone on that    path. Two things replace it, both load-bearing for how the surface
     *feels*: a level meter driven off the same audio (a microphone with no
     visible response reads as broken), and a "transcribing…" note while a
     posted segment is in flight. A streaming partial transcript was the
-    alternative and was rejected — it needs a streaming decoder Naru does not
-    have, and `auris` answers a whole request at once. `utteranceFrom` still
+    alternative and was rejected — the page asks the daemon for no partials,
+    and naru-audio answers a whole request at once. `utteranceFrom` still
     drops a transcript with no words in it (a cough, a door, a segment
-    `auris` heard as silence). Where a page instead falls back to its own
+    naru-audio heard as silence). Where a page instead falls back to its own
     recognizer (mesa task 957), that engine's interim guess still feeds
     `heldFlush` and the header band exactly as it did before task 956 — but
     since mesa task 1153 it is no longer *displayed*: the words in flight,
     on either path, are gone from the panel (below), and the
-    "transcribing…" note stays `auris`-specific rather than a property of
+    "transcribing…" note stays naru-audio-specific rather than a property of
     listening itself.
   - **The transcript is corrected against Naru's own vocabulary before
     anything else touches it** (`liveRecognition.ts`, mesa task 922), exactly
     as it was when the browser did the listening — the correction runs
-    against whatever produced the text, and now that is `auris`'s answer
-    rather than the recognizer's. `auris` has no idea what Naru's words are,
-    and mishears them for ordinary ones that sound similar — "khora" comes
+    against whatever produced the text, and now that is naru-audio's answer
+    rather than the recognizer's. The daemon does not know Naru's words by
+    default, and mishears them for ordinary ones that sound similar — "khora" comes
     back as "chorus", "helios" as "helius" — so this still runs *after*
     transcription has already settled on the wrong word. With no interim
     preview left to correct, there is only the one string per segment to
@@ -3342,14 +3334,14 @@ conversation") working with no backend change.
 
     Every rule in both functions serves one governing principle: **a wrong
     "correction" is worse than the mishearing it replaced** — a missed rewrite
-    is a name spelled the way `auris` guessed, no worse than today, but a
+    is a name spelled the way naru-audio guessed, no worse than today, but a
     wrong one silently swaps in a word the person never said, inside a
     transcript nobody proofreads before it is sent. That is why a short token,
     or one that is itself ordinary English (`COMMON_ENGLISH`, a guard list
     rather than a dictionary — "chorus" is deliberately absent from it, being
     the mishearing this feature exists to correct, while "sonnet" and "opus"
     are deliberately present and so drop out of the vocabulary entirely,
-    because nothing needs correcting *to* a word `auris` already spells
+    because nothing needs correcting *to* a word naru-audio already spells
     right), is never a candidate; and why two different names landing on the
     same sound key cancels the key rather than guessing which one was meant.
     Task ids are deliberately outside this: a digit string has no sound-alike
@@ -3377,9 +3369,9 @@ conversation") working with no backend change.
     rest of it, and the person had to talk to the pauses the detector chose
     rather than to Naru; silence after the whole thought is the pause that
     means something. The silence timer is measured on `shouldListen`, not
-    `recognizesSpeech`, and on the auris path is driven by **transcribed
+    `recognizesSpeech`, and on the naru-audio path is driven by **transcribed
     speech**, not by audible frames (mesa task 1189): a segment that comes
-    back from `auris` as words moves the clock to that segment's own last
+    back from naru-audio as words moves the clock to that segment's own last
     loud frame (`liveRecognition.ts::speechHeardAt`, backdated so the
     transcription round trip is not added to the wait), and a segment that
     comes back empty — a fan, a keyboard, traffic — leaves it where it was.
@@ -3404,7 +3396,7 @@ conversation") working with no backend change.
       transcribed). Segments transcribe **in order**, chained through one
       component-level `SegmentChain` (`liveDrain.ts`) that outlives any one
       capture run, so `flushRecording` posts `recording` — the segments
-      `auris` has answered — and `interim`, which mesa task 956 leaves
+      naru-audio has answered — and `interim`, which mesa task 956 leaves
       permanently empty now that there is no partial guess to hold:
       `heldFlush(recording, interim)` is byte-identical to what it always
       did, it is simply never handed anything in that second argument any
@@ -3412,7 +3404,7 @@ conversation") working with no backend change.
       (`vadCut`, through `cutRef`, exactly the windowing task 961 gave Naru
       starting to speak) onto the chain, then **closes** it: with nothing
       outstanding the flush happens at once, as it always did; with a segment
-      still on its way back from `auris` or a cut just queued, nothing is
+      still on its way back from naru-audio or a cut just queued, nothing is
       posted at the press, the flush becomes the step after the last of
       them, and the status pill stays on "transcribing…" (`hearing` is the
       chain's own count) until it runs — so the whole of what was said
@@ -3454,18 +3446,16 @@ conversation") working with no backend change.
       flushes what was already held, or the recording would sit held with
       no control left to send it.
   - **A failed transcription does not end listening.** Posting a segment's
-    WAV to `/api/live/transcribe` can fail — a slow network or a crashed
-    `auris` process — and the route answers `503 unavailable`; the next
+    WAV to `/api/live/transcribe` can fail — a slow network or a
+    daemon that went away — and the route answers `503 unavailable`; the next
     segment tries again on its own rather than the page giving up on the
     microphone. What is lost is only that one segment's words. Which engine a
     page uses at all is decided once per conversation, at the moment it joins
     (`listenPath`, `GET /api/live/transcribe`, mesa task 957) — not re-decided
-    per segment — so a machine with no `auris` installed never routes here in
-    the first place: it hears through its own browser recognizer instead
-    where one exists, or through the typed box where none does, and the
-    status line names which. On `naru-audio` there is no such fallback: a
-    daemon that is not ready is `'unavailable'`, and the panel says so with
-    a Retry (mesa task 1390, `docs/listen.md`).
+    per segment. A daemon that is not ready is `'unavailable'`, and the panel
+    says so with a Retry (mesa task 1390, `docs/listen.md`); only a probe that
+    never answered falls back to the browser recognizer where one exists, or
+    the typed box where none does, and the status line names which.
   - **The capture stream opens and closes around each turn, not once for the
     whole conversation.** It is held for as long as the microphone is wanted,
     reused across VAD segments the way the old recognizer reused it across
@@ -3537,7 +3527,7 @@ conversation") working with no backend change.
   conversation wherever Naru had navigated. That fight also pulled focus back
   off the live whiteboard, so board text could be selected but ⌘C copied the
   empty box instead. Dictation through the page never needed it: a
-  transcribed (`auris`) or recognized (browser `SpeechRecognition`) sentence
+  transcribed (naru-audio) or recognized (browser `SpeechRecognition`) sentence
   reaches the conversation with the keyboard anywhere. The whiteboard's
   content box is `tabIndex={-1}`, so a click on it takes focus natively
   (selection untouched) and ⌘C copies the board's text; a framed `html` board
@@ -3574,7 +3564,7 @@ conversation") working with no backend change.
   recording's own boundary (silence or the switch) and restarts the silence
   wait. It is deliberately not an early boundary — on the browser path a
   flushed guess would be held again by the recognizer's late final and sent
-  twice, and on the auris path a segment in flight may be noise, leaving
+  twice, and on the naru-audio path a segment in flight may be noise, leaving
   nothing for the box to ride on. With no speech pending, Enter sends the box
   exactly as above.
   A failed press (`Go live` on a machine with no `claude`, most likely)
@@ -3645,7 +3635,7 @@ conversation") working with no backend change.
   While Naru is **speaking**, the ordinary microphone is shut (`shouldListen`)
   so she never hears her own reply — which also meant nothing said over her
   could be heard, and "hold on" is exactly what a person says over her. So
-  the auris path runs a second, contained **barge-in** capture effect gated
+  the naru-audio path runs a second, contained **barge-in** capture effect gated
   on `shouldBargeIn` (`recognizesSpeech && speaking`, the exact complement of
   `shouldListen`, so the two never overlap and each opens as the other
   closes). It opens its own `getUserMedia` stream on the chosen device with
@@ -3805,7 +3795,7 @@ conversation") working with no backend change.
   Naru's vocabulary, the vocabulary table built from it and the correction
   that rewrites transcribed text against it, and — mesa task 957 —
   `listenPath`, which of the two engines a conversation actually uses —
-  or, on `naru-audio` since mesa task 1390, that it has none
+  or, once the probe has answered (mesa task 1390), that it has none
   (`'unavailable'`, `unavailableBanner`);
   `recognitionCtor`, `readResults`, `isBlockingError` and
   `SpeechRecognitionLike` were unused by `LiveHub` from mesa task 956 until
@@ -3909,16 +3899,14 @@ CLAUDE.md requires: **data, never instructions.**
 
 ## What is deliberately absent
 
-- **Streaming or partial transcripts, through `auris`.** `auris` answers one
-  whole segment at a time — there is no interim guess to show while it
-  thinks. A "transcribing…" note stands in for it instead
-  (above); a streaming decoder that could offer a running partial would close
-  this gap, but Naru has none and building one is out of scope here. Where a
-  page instead falls back to its own recognizer (mesa task 957, below), that
+- **Partial transcripts, through naru-audio.** The page asks the daemon for
+  no partials, so there is no interim guess to show while it thinks. A
+  "transcribing…" note stands in for it instead (above). Where a page
+  instead falls back to its own recognizer (mesa task 957, below), that
   engine's interim results still drive the send boundaries and the header
   band exactly as they did before task 956, though nothing displays them any
-  more (mesa task 1153, below) — the gap is `auris`-specific, not a property
-  of listening in general.
+  more (mesa task 1153, below) — the gap is specific to the daemon path, not
+  a property of listening in general.
 - **A preview of the words in flight.** Task 1069 put what was being said
   right now — the recording the microphone was holding, or the line Naru was
   speaking — in a panel of its own between the transcript and the capture
@@ -3927,7 +3915,7 @@ CLAUDE.md requires: **data, never instructions.**
   news, was the part it hid. Mesa task 1153 replaced it with a one-line
   status pill in the same place (`liveRecognition.ts::statusPill`) that says
   only *what* is happening — "Naru speaking", "transcribing…" while a segment
-  is on its way back from `auris`, or "hearing" — on the same visibility rule
+  is on its way back from naru-audio, or "hearing" — on the same visibility rule
   the panel had, `showsHearing` and its hold (mesa task 1073) included, and
   the same ranking the header band uses (Naru above the person, since the
   microphone is shut while she talks). The row is rendered at a fixed height
@@ -3938,33 +3926,31 @@ CLAUDE.md requires: **data, never instructions.**
   answering "what" where the pill answers "whether".
 - **A speech-to-text engine of Naru's own.** Naru still runs no recognizer
   in-process — `POST /api/live/transcribe` hands a whole recording to the
-  external `auris` binary and keeps nothing, the same shape `kokoro-rs`
-  already had on the way out. This bullet used to describe that as pure
-  absence; it no longer is, because accepting audio on a route at all is a
-  trade, not a subtraction. What it costs: a payload now reaches the server
-  process that never used to, a new external binary Naru depends on to hear
-  at all, and a route that must not exist under `--lan` — "transcribe
-  whatever this stranger recorded" is not a request an unauthenticated LAN
-  peer should be able to make of a decoder running as the machine's owner.
+  naru-audio daemon and keeps nothing, the same shape the speak routes have
+  on the way out. This bullet used to describe that as pure absence; it no
+  longer is, because accepting audio on a route at all is a trade, not a
+  subtraction. What it costs: a payload now reaches the server process that
+  never used to, and an external daemon Naru depends on to hear at all.
   What it buys: Naru's own vocabulary heard correctly (mesa task 922, above
   — the correction runs the same way regardless of which engine produced the
   text), punctuation a person would actually write, and the only microphone
   Firefox gets here at all (`listenPath`, above) — and the decode itself
   stays fully local throughout, so nothing said out loud leaves the machine.
   `docs/listen.md` is where the mechanism this bullet used to spell out now
-  lives: the route's own body limit and `--lan` absence, the `GET`
-  availability probe, the JSON Lines protocol `auris` speaks on the wire,
-  and exactly what is and is not retained. Before mesa task 956, listening
+  lives: the route's own body limit and `--lan` gating, the `GET`
+  availability probe, the daemon's wire contract, and exactly what is and is
+  not retained. Before mesa task 956, listening
   ran entirely through the browser's own `SpeechRecognition`/
   `webkitSpeechRecognition` (task 873): Naru received only the text it
   produced, and the recognition quality, the language and the privacy
   question were the browser's — for Chrome and Safari, that means the speech
   could be sent to *their* service, a thing worth knowing and not something
-  Naru could answer for, which is exactly the gap `auris` exists to close.
-  `auris` is therefore the preferred engine wherever it can be reached
-  (`listenPath`, above), but it is deliberately not the *only* one: mesa
-  task 957 kept the browser recognizer as the fallback for a machine with no
-  `auris` installed, rather than a machine with no engine at all.
+  Naru could answer for, which is exactly the gap the local daemon exists to
+  close. naru-audio is therefore the preferred engine wherever it can be
+  reached (`listenPath`, above), but it is deliberately not the *only* one:
+  mesa task 957 kept the browser recognizer as an opt-in
+  (`listen.engine = "browser"`) and as the fallback when the availability
+  probe cannot be asked at all.
 - **An HTTP route for `mesa live look`** (task 895). Capturing the person's
   screen is a CLI-only capability on purpose: `--lan` serves the API to the
   whole network with no auth, and no gate here makes "photograph the owner's

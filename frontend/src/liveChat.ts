@@ -83,7 +83,6 @@ export function quietHint(input: {
   paused: boolean
   muted: boolean
   chord: string
-  audioEngine: string | null
 }): QuietHint {
   const ready =
     input.live &&
@@ -94,12 +93,7 @@ export function quietHint(input: {
     input.path !== 'unavailable'
   if (ready && input.muted) return { chord: input.chord, text: 'to talk · Enter sends' }
   if (ready && input.listening) {
-    const via =
-      input.path === 'auris'
-        ? input.audioEngine === 'naru-audio'
-          ? 'naru-audio'
-          : 'auris'
-        : 'this browser'
+    const via = input.path === 'auris' ? 'naru-audio' : 'this browser'
     return { chord: null, text: `Listening through ${via} · Enter sends` }
   }
   const text = captureHint(input)

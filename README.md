@@ -198,17 +198,15 @@ It needs:
 
 - the `claude` CLI on your PATH, because the conversation is a Claude Code
   agent;
-- a speech engine, all running locally after a one-time model download:
-  - **naru-audio** (a separate daemon, speech-to-text and text-to-speech):
-    `brew install naru-audio`, then `naru-audio pull default` (downloads the
-    models) and `brew services start naru-audio`, and select the `naru-audio`
-    engine in the Audio section of Settings -> Voice. Voices can be picked,
-    cloned from a short recording, or designed from a description; a cloned
-    voice exports to a single `<name>.naru-voice.json` file you can import on
-    another machine; or
-  - the older **`auris`** (speech-to-text) and **`kokoro-rs`**
-    (text-to-speech) binaries, also in the tap;
-- with neither, the browser's own speech recognition or the typed box still
+- **naru-audio**, the speech engine (a separate daemon, speech-to-text and
+  text-to-speech), running locally after a one-time model download:
+  `brew install naru-audio`, then `naru-audio pull default` (downloads the
+  models) and `brew services start naru-audio`. The Audio section of
+  Settings -> Voice shows the daemon's status and its address. Voices can be
+  picked, cloned from a short recording, or designed from a description; a
+  cloned voice exports to a single `<name>.naru-voice.json` file you can
+  import on another machine;
+- without it, the browser's own speech recognition or the typed box still
   works ([`docs/listen.md`](docs/listen.md)).
 
 You can also start it from a terminal with `naru live start` and end it with

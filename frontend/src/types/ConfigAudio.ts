@@ -2,9 +2,8 @@
 
 /**
  * The `naru-audio` settings as the Settings page sees them (`core::config`,
- * `docs/config.md`, mesa task 1388): which engine the **server** runs speech
- * through and where the daemon listens, each verbatim (`null` when the
- * config says nothing) beside its built-in.
+ * `docs/config.md`, mesa task 1388): where the daemon listens, verbatim
+ * (`null` when the config says nothing) beside its built-in.
  */
 export type ConfigAudio = { 
 /**
@@ -16,14 +15,6 @@ url: string | null,
  * The built-in daemon URL (`http://127.0.0.1:7870`).
  */
 url_default: string, 
-/**
- * `"legacy"`, `"naru-audio"`, or `null`.
- */
-engine: string | null, 
-/**
- * The built-in engine (`"legacy"`).
- */
-engine_default: string, 
 /**
  * The `NARU_AUDIO_URL` (or `MESA_AUDIO_URL`) value when it is set and
  * valid — the address actually in force, overriding `url`; else `null`.

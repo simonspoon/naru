@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Mesa-live gate (mesa task 855): exercises the spoken-conversation surface end
 # to end — the `mesa live` CLI group and the `/api/live*` routes — against a
-# throwaway MESA_DB, a stub `claude` (MESA_CLAUDE_BIN), a stub `kokoro-rs`
-# (MESA_KOKORO_BIN) and a stub `loki` (MESA_LOKI_BIN). No real agent, no real
-# synthesiser and no real screen are ever touched.
+# throwaway MESA_DB, a stub `claude` (MESA_CLAUDE_BIN) and a stub `loki`
+# (MESA_LOKI_BIN). No real agent, no speech daemon and no real screen are ever
+# touched.
 #
 # Covers, in order:
 #   1. the CLI with nothing running — `status` prints null and exits 0, every
@@ -34,10 +34,9 @@
 #      prints `null` and exits 0, and the session's `working_since` opens when
 #      the utterance is handed over, survives a reply and closes on the next
 #      wait that finds nothing (task 894);
-#   7. GET /api/live/turns/{id}/speak — the audio contract, the patched
-#      streaming WAV sizes, the header arriving mid-render, no Content-Length,
-#      `validation` for a pure-navigate turn and `unavailable` for a failing
-#      synthesiser;
+#   7. GET /api/live/turns/{id}/speak — the route's shape with no naru-audio
+#      daemon: `unavailable` for a permitted request, `validation` for a
+#      pure-navigate turn, 404 for an unknown turn;
 #   8. `mesa live look` (task 895) against a stub loki — the window box riding
 #      in the route report and read back by `mesa live status`, its own
 #      three-way key and the two-client scenario that made it one (a desktop
@@ -100,20 +99,15 @@
 #      1), the archive being append-only (a summary for a session older than
 #      dozens of already-summarised ones still readable, every row kept),
 #      and the project-delete cascade;
-#  12. POST /api/live/transcribe (mesa task 954), against a stub `auris`
-#      (MESA_AURIS_BIN): a real round-trip whose decoded audio reaches the
-#      stub on stdin byte-identical to what was sent (never as an argument),
-#      keeping the LAST `transcript` line among several and ignoring an
-#      unrecognised `type` (auris's own extension mechanism), 200
-#      `{"text":""}` for auris's exit 1 — silence (mesa task 1389) —
-#      `unavailable` for any other nonzero exit, a run with no `transcript`
-#      line at all, and a missing binary; a body one byte over the 25 MiB cap answered 413
-#      validation naming the limit, still as JSON, distinct from 422 for
-#      invalid/empty/missing base64; both halves of the boundary in default
-#      mode (Content-Type, agent gate); and under `--lan` **both verbs are
-#      present and relaxed, not absent** — a LAN POST reaches the stub auris
-#      with the same argv, the GET answers `{"available": true}`, and the
-#      Content-Type gate still fires;
+#  12. POST /api/live/transcribe (mesa task 954), with no naru-audio daemon
+#      running (NARU_AUDIO_URL points at a closed port): a well-formed
+#      recording is 503 `unavailable`; a body one byte over the 25 MiB cap is
+#      answered 413 validation naming the limit, still as JSON, distinct from
+#      422 for invalid/empty/missing base64; both halves of the boundary in
+#      default mode (Content-Type, agent gate); and under `--lan` **both verbs
+#      are present and relaxed, not absent** — a LAN POST reaches the handler,
+#      the GET answers `{"available": false}`, and the Content-Type gate still
+#      fires;
 #  13. the whiteboard (mesa task 1071): `mesa live board` — the four kinds and
 #      where each body comes from (a typed body, `--file` with the kind from
 #      its extension, `--image` stored as base64 with its `content_type` from the
@@ -273,10 +267,13 @@ export MESA_LIVE_INK_DIR="$TMP/live-ink"
 # This gate asserts the BUILT-IN `live-agent` template, so the developer's own
 # ~/.mesa/config.json must not leak in (config-check.sh owns the configured
 # half, under a throwaway HOME).
-# naru task 1396: the default engine is naru-audio, and this gate drives the
-# stub kokoro-rs, so it names the legacy engine explicitly.
-echo '{"audio":{"engine":"legacy"}}' > "$TMP/legacy-config.json"
-export MESA_CONFIG_FILE="$TMP/legacy-config.json"
+# The config file is pinned to an empty one; the only speech engine is the
+# naru-audio daemon, which this gate never starts, and NARU_AUDIO_URL points at
+# a closed port so a daemon on the developer's machine cannot answer a speak or
+# transcribe request.
+echo '{}' > "$TMP/empty-config.json"
+export MESA_CONFIG_FILE="$TMP/empty-config.json"
+export NARU_AUDIO_URL="http://127.0.0.1:9"
 # A live start seeds the `naru-live` agent definition into
 # $HOME/.claude/agents (mesa task 1068), and every unbound spawn runs in
 # $HOME/.naru/workspace, so the whole gate runs under a throwaway home rather
@@ -330,7 +327,10 @@ run() {
   STDOUT=$("$@" 2>"$TMP/stderr")
   CODE=$?
   set -e
-  STDERR=$(cat "$TMP/stderr")
+  # The naru-audio probe logs its state to stderr when no daemon answers
+  # (`warn audio state unknown -> daemon_down …`); that is not what the
+  # "nothing on stderr" checks below are about.
+  STDERR=$(grep -v '^\(warn\|info\) audio state ' "$TMP/stderr" || true)
   [ "$CODE" -eq "$expected" ] ||
     fail "expected exit $expected, got $CODE: $* (stderr: $STDERR)"
 }
@@ -527,30 +527,6 @@ use_agent() { # <receipt>
 # The value after --name in the last announced argv.
 agent_name() { awk 'p{print;exit} $0=="--name"{p=1}' "$STUB_DIR/last-flags"; }
 
-# ---- stub kokoro-rs (the speak route) ----
-#
-# Byte-for-byte the synthesiser stub `api-check.sh` writes, for the same
-# reasons: it logs its stdin, and it emits the exact *streaming* WAV header
-# `kokoro-rs -o -` writes — both sizes 0xFFFFFFFF — so the response proves mesa
-# patched them. A `slow` marker inserts a pause between the header and the
-# samples, which is how the gate proves the header reaches the client while the
-# render is still running.
-cat > "$STUB_DIR/kokoro-rs" <<EOF
-#!/usr/bin/env bash
-printf '%s\n' "\$*" > "$STUB_DIR/last-argv"
-cat > "$STUB_DIR/last-stdin"
-[ -e "$STUB_DIR/tts-fail" ] && { echo "stub kokoro is down" >&2; exit 1; }
-# RIFF ffffffff WAVE fmt (PCM/mono/24k) data ffffffff, then 8 bytes of "audio".
-printf 'RIFF\xff\xff\xff\xffWAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00\xc0\x5d\x00\x00\x80\xbb\x00\x00\x02\x00\x10\x00data\xff\xff\xff\xff'
-if [ -e "$STUB_DIR/slow" ]; then
-  sleep 3
-  head -c 262144 /dev/zero
-else
-  printf '\x01\x02\x03\x04\x05\x06\x07\x08'
-fi
-EOF
-chmod +x "$STUB_DIR/kokoro-rs"
-export MESA_KOKORO_BIN="$STUB_DIR/kokoro-rs"
 
 # ---- stub loki (`live look` photographs the person's browser window) ----
 #
@@ -579,40 +555,6 @@ EOF
 chmod +x "$STUB_DIR/loki"
 export MESA_LOKI_BIN="$STUB_DIR/loki"
 
-# ---- stub auris (POST /api/live/transcribe, mesa task 954) ----
-#
-# The mirror of the kokoro-rs stub, running in the other direction: it logs
-# its stdin (the decoded recording, which must reach it byte-identical and
-# never as an argument) and its argv, then answers auris's real JSON-Lines
-# `--format json` shape — a `segment` line, then a `transcript` line — on
-# stdout. `$STUB_DIR/auris-lines` lets a case override what it emits (to
-# prove mesa keeps the LAST `transcript` line and ignores anything else); an
-# `auris-fail` marker is the exit-1 "nothing transcribed" mode (silence, a
-# 200 `{"text":""}` since mesa task 1389) and `auris-usage` the exit-2
-# failure mode, each printing to stderr and writing nothing to stdout.
-cat > "$STUB_DIR/auris" <<EOF
-#!/usr/bin/env bash
-# The model probe (\`auris --no-download --list-models\`) is how mesa answers
-# GET /api/live/transcribe's \`{"available": bool}\`. It records nothing: a
-# probe must not clobber the argv or the stdin the transcribe assertions
-# read back.
-if [ "\$1" = "--no-download" ] && [ "\$2" = "--list-models" ]; then
-  echo "parakeet-tdt-0.6b-v2-int8"
-  exit 0
-fi
-printf '%s\n' "\$*" > "$STUB_DIR/last-argv"
-cat > "$STUB_DIR/last-stdin"
-[ -e "$STUB_DIR/auris-fail" ] && { echo "stub auris heard nothing" >&2; exit 1; }
-[ -e "$STUB_DIR/auris-usage" ] && { echo "stub auris: bad flag" >&2; exit 2; }
-if [ -e "$STUB_DIR/auris-lines" ]; then
-  cat "$STUB_DIR/auris-lines"
-else
-  printf '{"type":"segment","index":0,"text":"hello"}\n'
-  printf '{"type":"transcript","text":"hello there"}\n'
-fi
-EOF
-chmod +x "$STUB_DIR/auris"
-export MESA_AURIS_BIN="$STUB_DIR/auris"
 
 # ---- fixtures ----
 #
@@ -1472,13 +1414,14 @@ api 200 GET "/api/live"
 ok "DELETE /api/live is best-effort: a failing run stop still answers the ended session"
 
 # =====================================================================
-# 7. GET /api/live/turns/{id}/speak — the audio contract
+# 7. GET /api/live/turns/{id}/speak — the speak route's shape
 # =====================================================================
 #
-# The same route shape as the inbox's speak (api-check.sh section 5b): an
-# external synthesiser, a streamed body, and `unavailable` for a failure
-# outside mesa. What is its own here is the empty-text case — a mesa turn may
-# carry an action instead of words, and asking to speak one is validation.
+# The same route shape as the inbox's speak (api-check.sh section 5b): the
+# only engine is the naru-audio daemon, which this gate does not run, so a
+# permitted request is `unavailable`. What is its own here is the empty-text
+# case — a mesa turn may carry an action instead of words, and asking to speak
+# one is validation.
 
 speak() { # speak <path> [curl args...] -> STATUS, $TMP/audio, $TMP/headers
   local path=$1
@@ -1495,72 +1438,24 @@ SPOKEN=$("$MESA" live say "$HOSTILE_TEXT" | jq -r .id)
 SILENT=$("$MESA" live navigate '#/inbox' | jq -r .id)
 
 speak "/api/live/turns/$SPOKEN/speak"
-[ "$STATUS" = "200" ] || fail "speak: expected 200, got $STATUS ($(cat "$TMP/audio"))"
-grep -qi '^content-type: audio/wav' "$TMP/headers" || fail "speak: Content-Type must be audio/wav"
-grep -qi '^x-content-type-options: nosniff' "$TMP/headers" || fail "speak: nosniff missing"
-grep -qi '^content-length:' "$TMP/headers" &&
-  fail "speak: a streamed body must not declare a Content-Length"
-ok "GET /api/live/turns/{id}/speak: 200 audio/wav + nosniff, chunked (no Content-Length)"
-
-# The stub emits a 44-byte streaming header + 8 bytes of audio with BOTH sizes
-# 0xFFFFFFFF. The real length is unknown when the header goes out, so mesa
-# replaces the placeholders with the open-ended 0x7FFF0000 (+ 36 header bytes
-# for RIFF); the samples must arrive untouched.
-[ "$(wc -c <"$TMP/audio" | tr -d ' ')" = "52" ] || fail "speak: audio bytes not passed through"
-HEXED=$(od -An -tx1 -v "$TMP/audio" | tr -d ' \n')
-[ "${HEXED:8:8}" = "2400ff7f" ] || fail "speak: RIFF size not patched (got ${HEXED:8:8})"
-[ "${HEXED:80:8}" = "0000ff7f" ] || fail "speak: data size not patched (got ${HEXED:80:8})"
-[ "${HEXED:88}" = "0102030405060708" ] || fail "speak: audio payload altered"
-ok "speak: the streaming 0xFFFFFFFF WAV sizes are patched, the samples are untouched"
-
-# The spoken text is the turn's, verbatim, on stdin — never a shell string and
-# never argv. With nothing configured the argv is the fixed flags, which is
-# also the assertion that an unconfigured voice adds no `-v`.
-[ "$(cat "$STUB_DIR/last-stdin")" = "$HOSTILE_TEXT" ] ||
-  fail "speak: the turn's text must reach the synthesiser verbatim on stdin"
-[ ! -e "$TMP/spoken-pwned" ] || fail "speak: a hostile turn body was evaluated by a shell"
-[ "$(cat "$STUB_DIR/last-argv")" = "-q -o -" ] ||
-  fail "speak: argv must be the fixed flags, got $(cat "$STUB_DIR/last-argv")"
-ok "speak: the turn text is stdin data, never syntax and never argv; an unconfigured voice adds no -v"
-
-# Streaming means the header reaches the client while the render is still
-# running: the slow stub pauses 3s between them, so a 1s cap returns the header
-# alone (curl exit 28), not the empty body a collect-then-send route gives.
-touch "$STUB_DIR/slow"
-set +e
-curl -s --max-time 1 -o "$TMP/partial" "$BASE/api/live/turns/$SPOKEN/speak"
-CURL_RC=$?
-set -e
-rm -f "$STUB_DIR/slow"
-[ "$CURL_RC" = "28" ] || fail "speak: the slow stub should have outlived the 1s cap (curl rc $CURL_RC)"
-[ "$(wc -c <"$TMP/partial" | tr -d ' ')" = "44" ] ||
-  fail "speak: the header must arrive while synthesis runs, got $(wc -c <"$TMP/partial") bytes"
-ok "speak: audio streams — the header plays before the render finishes"
+[ "$STATUS" = "503" ] || fail "speak: with no daemon expected 503, got $STATUS ($(cat "$TMP/audio"))"
+[ "$(jq -r .error.code <"$TMP/audio")" = "unavailable" ] ||
+  fail "speak: no daemon must be code unavailable"
+ok "GET /api/live/turns/{id}/speak: a permitted request with no naru-audio daemon is 503 unavailable (an outside-mesa dependency)"
 
 # A pure navigate says nothing, and silence coming down an audio element is
 # indistinguishable from a broken synthesiser. So it is validation, not a
-# zero-length WAV — and nothing is spawned.
-rm -f "$STUB_DIR/last-argv"
+# zero-length WAV — and no synthesis is attempted.
 speak "/api/live/turns/$SILENT/speak"
 [ "$STATUS" = "422" ] || fail "speak on a pure-navigate turn: expected 422, got $STATUS"
 [ "$(jq -r .error.code <"$TMP/audio")" = "validation" ] ||
   fail "speak on a pure-navigate turn: error.code must be validation"
-[ ! -e "$STUB_DIR/last-argv" ] ||
-  fail "speak on a pure-navigate turn: nothing may be spawned"
-ok "speak on a turn with no text: 422 validation, and no synthesiser is started"
+ok "speak on a turn with no text: 422 validation"
 
 speak "/api/live/turns/999999/speak"
 [ "$STATUS" = "404" ] || fail "speak on an unknown turn: expected 404, got $STATUS"
 [ "$(jq -r .error.code <"$TMP/audio")" = "not_found" ] || fail "speak unknown turn: error.code"
 ok "speak on an unknown turn: 404 not_found"
-
-touch "$STUB_DIR/tts-fail"
-speak "/api/live/turns/$SPOKEN/speak"
-rm -f "$STUB_DIR/tts-fail"
-[ "$STATUS" = "503" ] || fail "speak: a failing synthesiser must be 503, got $STATUS"
-[ "$(jq -r .error.code <"$TMP/audio")" = "unavailable" ] ||
-  fail "speak: a failing synthesiser must be code unavailable"
-ok "speak: a missing or failing synthesiser is 503 unavailable (an outside-mesa dependency)"
 
 # =====================================================================
 # 8. `mesa live look`: photographing the person's browser window (task 895)
@@ -1922,10 +1817,10 @@ speak "/api/live/turns/$SPOKEN/speak" -H 'Sec-Fetch-Site: cross-site' -H 'Sec-Fe
 [ "$(jq -r .error.code <"$TMP/audio")" = "validation" ] ||
   fail "speak: the cross-site refusal must be code validation"
 speak "/api/live/turns/$SPOKEN/speak" -H 'Sec-Fetch-Site: same-origin' -H 'Sec-Fetch-Dest: audio'
-[ "$STATUS" = "200" ] || fail "speak: our own page's <audio> must be served, got $STATUS"
+[ "$STATUS" = "503" ] || fail "speak: our own page's <audio> must reach the handler, got $STATUS"
 speak "/api/live/turns/$SPOKEN/speak" -H 'Sec-Fetch-Site: none'
-[ "$STATUS" = "200" ] || fail "speak: a typed-in URL must be served, got $STATUS"
-ok "speak: Sec-Fetch-Site closes the no-Origin subresource hole (cross-site 403, same-origin/none 200)"
+[ "$STATUS" = "503" ] || fail "speak: a typed-in URL must reach the handler, got $STATUS"
+ok "speak: Sec-Fetch-Site closes the no-Origin subresource hole (cross-site 403, same-origin/none reach the handler)"
 
 kill "$SERVER_PID" 2>/dev/null || true
 wait "$SERVER_PID" 2>/dev/null || true
@@ -1994,10 +1889,9 @@ lan_status() { # lan_status <method> <path> <host> [json-body]
 speak "/api/live/turns/$SPOKEN/speak" -H "Host: evil.example"
 [ "$STATUS" = "403" ] || fail "--lan speak: a DNS-name Host must still be 403, got $STATUS"
 speak "/api/live/turns/$SPOKEN/speak" -H "Host: 127.0.0.1:$LAN_PORT"
-[ "$STATUS" = "200" ] || fail "--lan speak: a local Host must be served, got $STATUS"
-grep -qi '^content-type: audio/wav' "$TMP/headers" || fail "--lan speak: Content-Type"
+[ "$STATUS" = "503" ] || fail "--lan speak: a local Host must reach the handler (503 unavailable), got $STATUS"
 speak "/api/live/turns/$SPOKEN/speak" -H "Host: 192.0.2.7:$LAN_PORT"
-[ "$STATUS" = "200" ] || fail "--lan speak: an IP-literal Host must be served, got $STATUS"
+[ "$STATUS" = "503" ] || fail "--lan speak: an IP-literal Host must reach the handler, got $STATUS"
 speak "/api/live/turns/$SPOKEN/speak" -H "Host: 192.0.2.7:999"
 [ "$STATUS" = "403" ] || fail "--lan speak: an IP Host on a foreign port must be 403, got $STATUS"
 # The speaker claim relaxes rather than refusing under --lan, like every other
@@ -2379,29 +2273,11 @@ LIVE_AUDIO_MAX=$((LIVE_AUDIO_MAX_EXPR))
 PORT=17781
 BASE="http://127.0.0.1:$PORT"
 
-# ---- a missing binary, checked with its own short-lived server ----
+# ---- the server: no naru-audio daemon runs here ----
 #
-# MESA_AURIS_BIN is read by the child process at spawn time, so it has to be
-# wrong BEFORE the server starts — changing the shell's export after a server
-# is already running would never reach it.
-MESA_AURIS_BIN="$STUB_DIR/no-such-auris" "$MESA" serve --port "$PORT" >"$TMP/serve-nobin.log" 2>&1 &
-SERVER_PID=$!
-for _ in $(seq 1 50); do
-  curl -sf "$BASE/api/live" >/dev/null 2>&1 && break
-  sleep 0.1
-done
-curl -sf "$BASE/api/live" >/dev/null ||
-  fail "server (missing auris binary) did not start (log: $(cat "$TMP/serve-nobin.log"))"
-NOBIN_BODY=$(jq -n --arg a "$(printf 'AAAA' | base64)" '{audio_base64: $a}')
-api 503 POST "/api/live/transcribe" "$NOBIN_BODY"
-[ "$(jqb .error.code)" = "unavailable" ] ||
-  fail "transcribe with a missing auris binary: error.code must be unavailable"
-ok "POST /api/live/transcribe: a missing auris binary is 503 unavailable"
-kill "$SERVER_PID" 2>/dev/null || true
-wait "$SERVER_PID" 2>/dev/null || true
-SERVER_PID=
-
-# ---- the real server, stubbed auris in place ----
+# The only speech engine is the naru-audio daemon. This gate starts none (and
+# points NARU_AUDIO_URL at a closed port), so a permitted, well-formed request
+# is 503 `unavailable` — which is what proves it reached the handler.
 "$MESA" serve --port "$PORT" >"$TMP/serve12.log" 2>&1 &
 SERVER_PID=$!
 for _ in $(seq 1 50); do
@@ -2411,54 +2287,13 @@ done
 curl -sf "$BASE/api/live" >/dev/null ||
   fail "server did not start for section 12 (log: $(cat "$TMP/serve12.log"))"
 
-# ---- round-trip: a real recording, byte-identical on the stub's stdin ----
 head -c 4096 /dev/urandom >"$TMP/audio.raw"
 AUDIO_B64=$(base64 <"$TMP/audio.raw" | tr -d '\n')
 TRANSCRIBE_BODY=$(jq -n --arg a "$AUDIO_B64" '{audio_base64: $a}')
-api 200 POST "/api/live/transcribe" "$TRANSCRIBE_BODY"
-[ "$(jqb .text)" = "hello there" ] ||
-  fail "transcribe round-trip: expected the stub's transcript, got $(jqb .text)"
-cmp -s "$STUB_DIR/last-stdin" "$TMP/audio.raw" ||
-  fail "transcribe: the decoded audio must reach auris on stdin, byte-identical to what was sent"
-[ "$(cat "$STUB_DIR/last-argv")" = "-q --format json" ] ||
-  fail "transcribe: argv must be exactly -q --format json (got $(cat "$STUB_DIR/last-argv"))"
-ok "POST /api/live/transcribe: 200 with the stub's transcript; audio reaches auris on stdin byte-identical, never as an argument; argv is -q --format json"
-
-# ---- last transcript line wins; an unrecognised type is ignored ----
-cat >"$STUB_DIR/auris-lines" <<'JSONL'
-{"type":"segment","index":0,"text":"first pass"}
-{"type":"transcript","text":"draft one"}
-{"type":"something-new","text":"a field mesa does not know about"}
-{"type":"transcript","text":"final corrected text"}
-JSONL
-api 200 POST "/api/live/transcribe" "$TRANSCRIBE_BODY"
-[ "$(jqb .text)" = "final corrected text" ] ||
-  fail "transcribe: must keep the LAST transcript line, not the first (got $(jqb .text))"
-rm -f "$STUB_DIR/auris-lines"
-ok "transcribe: the last \`transcript\` line wins over an earlier one, and an unrecognised \`type\` is ignored rather than aborting the read — auris's own extension mechanism"
-
-# ---- silence is 200 {"text":""}; a failure, and no transcript line, are 503 ----
-touch "$STUB_DIR/auris-fail"
-api 200 POST "/api/live/transcribe" "$TRANSCRIBE_BODY"
-rm -f "$STUB_DIR/auris-fail"
-[ "$(jq -c . <<<"$BODY")" = '{"text":""}' ] ||
-  fail "transcribe: auris exit 1 (nothing transcribed) must be 200 {\"text\":\"\"}, got $BODY"
-ok "transcribe: auris exit 1 — nothing transcribed — is 200 {\"text\":\"\"}, the silence contract"
-
-touch "$STUB_DIR/auris-usage"
-api 503 POST "/api/live/transcribe" "$TRANSCRIBE_BODY"
-rm -f "$STUB_DIR/auris-usage"
-[ "$(jqb .error.code)" = "unavailable" ] || fail "transcribe: a failing auris (exit 2) must be 503 unavailable"
-
-cat >"$STUB_DIR/auris-lines" <<'JSONL'
-{"type":"segment","index":0,"text":"only a segment, nothing final"}
-{"type":"something-new"}
-JSONL
 api 503 POST "/api/live/transcribe" "$TRANSCRIBE_BODY"
 [ "$(jqb .error.code)" = "unavailable" ] ||
-  fail "transcribe: a run with no transcript line must be 503 unavailable, never a 200 with empty text"
-rm -f "$STUB_DIR/auris-lines"
-ok "transcribe: unavailable for a failing auris (exit 2) and for a run that never emits a transcript line — never a silent empty success"
+  fail "transcribe with no daemon: error.code must be unavailable"
+ok "POST /api/live/transcribe: a well-formed recording with no naru-audio daemon is 503 unavailable"
 
 # ---- over-cap body: 413, JSON, naming the limit ----
 #
@@ -2491,16 +2326,6 @@ api 422 POST "/api/live/transcribe" '{}'
 [ "$(jqb .error.code)" = "validation" ] || fail "transcribe with no audio_base64 field at all: error.code"
 ok "transcribe: invalid base64, an empty recording, and a missing field are all 422 validation"
 
-# Valid base64 that is not actually a WAV: mesa never inspects the bytes
-# itself (`listen::transcribe` hands them to auris verbatim), so with the
-# stub this is indistinguishable from the round-trip above. With a real
-# auris this is exit-1 "no transcript" — the `unavailable` path just proven.
-NOT_WAV_B64=$(printf 'this is not a wav file' | base64 | tr -d '\n')
-api 200 POST "/api/live/transcribe" "$(jq -n --arg a "$NOT_WAV_B64" '{audio_base64: $a}')"
-[ "$(jqb .text)" = "hello there" ] ||
-  fail "transcribe with non-WAV (but valid) base64: mesa must still just hand it to auris"
-ok "transcribe: valid base64 that is not a WAV is not mesa's to reject — it reaches auris unexamined (a real auris would answer unavailable here)"
-
 # ---- both halves of the boundary, default mode ----
 raw POST "/api/live/transcribe"
 [ "$STATUS" = "415" ] || fail "transcribe without Content-Type: expected 415, got $STATUS"
@@ -2511,9 +2336,9 @@ raw POST "/api/live/transcribe" -d 'audio_base64=form+post'
 raw POST "/api/live/transcribe" -H "Host: evil.example" -H 'Content-Type: application/json' \
   -d "$TRANSCRIBE_BODY"
 [ "$STATUS" = "403" ] || fail "transcribe with a bogus Host: expected 403, got $STATUS"
-[ "$(origin_status POST "/api/live/transcribe" 'http://localhost:7770' "$TRANSCRIBE_BODY")" = "200" ] ||
-  fail "transcribe from a local Origin must reach the handler"
-ok "transcribe: Content-Type gate (415 with no/form Content-Type) and agent gate (403 foreign Origin/Host, 200 local) — the same pair speak/start/stop carry"
+[ "$(origin_status POST "/api/live/transcribe" 'http://localhost:7770' "$TRANSCRIBE_BODY")" = "503" ] ||
+  fail "transcribe from a local Origin must reach the handler (503 unavailable, no daemon)"
+ok "transcribe: Content-Type gate (415 with no/form Content-Type) and agent gate (403 foreign Origin/Host, a local one reaches the handler) — the same pair speak/start/stop carry"
 
 kill "$SERVER_PID" 2>/dev/null || true
 wait "$SERVER_PID" 2>/dev/null || true
@@ -2545,29 +2370,28 @@ done
 curl -sf "$LAN_BASE/api/live" >/dev/null ||
   fail "LAN server did not start for section 12 (log: $(cat "$TMP/lan12.log"))"
 
-# A LAN page this server handed a phone reaches the decoder, and the recording
-# reaches auris exactly as it does in default mode.
-rm -f "$STUB_DIR/last-argv"
+# A LAN page this server handed a phone reaches the handler: with no daemon
+# that is 503 unavailable, the same answer as in default mode.
 STATUS=$(curl -s -o "$TMP/lan-body" -w '%{http_code}' -H 'Content-Type: application/json' \
   -d "$TRANSCRIBE_BODY" "$LAN_BASE/api/live/transcribe")
 LAN_BODY=$(cat "$TMP/lan-body")
-[ "$STATUS" = "200" ] ||
-  fail "--lan: POST /api/live/transcribe must reach the handler, got $STATUS ($LAN_BODY)"
-[ "$(jq -r .text <<<"$LAN_BODY")" = "hello there" ] ||
-  fail "--lan: the stub's transcript must come back, got $LAN_BODY"
-[ "$(cat "$STUB_DIR/last-argv")" = "-q --format json" ] ||
-  fail "--lan: auris must be run with the same argv as in default mode, got $(cat "$STUB_DIR/last-argv" 2>/dev/null)"
-ok "--lan: POST /api/live/transcribe reaches the stub auris with the same argv — require_agent_access relaxes rather than refuses, the posture every agent route takes"
+[ "$STATUS" = "503" ] ||
+  fail "--lan: POST /api/live/transcribe must reach the handler (503 unavailable), got $STATUS ($LAN_BODY)"
+[ "$(jq -r .error.code <<<"$LAN_BODY")" = "unavailable" ] ||
+  fail "--lan: the no-daemon refusal must be code unavailable, got $LAN_BODY"
+ok "--lan: POST /api/live/transcribe reaches the handler — require_agent_access relaxes rather than refuses, the posture every agent route takes"
 
 # The GET half rides the same route entry, so a LAN page reads the same real
-# answer a default-mode page does rather than a hard-coded false.
+# answer a default-mode page does rather than a hard-coded one.
 STATUS=$(curl -s -o "$TMP/lan-avail" -w '%{http_code}' "$LAN_BASE/api/live/transcribe")
 LAN_AVAIL=$(cat "$TMP/lan-avail")
 [ "$STATUS" = "200" ] ||
   fail "--lan: GET /api/live/transcribe expected 200, got $STATUS ($LAN_AVAIL)"
-[ "$(jq -r .available <<<"$LAN_AVAIL")" = "true" ] ||
-  fail "--lan: GET /api/live/transcribe must answer available:true against a working stub, got $LAN_AVAIL"
-ok "--lan: GET /api/live/transcribe answers {\"available\": true} off the same route entry — both verbs are present, not just the POST"
+[ "$(jq -r .available <<<"$LAN_AVAIL")" = "false" ] ||
+  fail "--lan: GET /api/live/transcribe must answer available:false with no daemon, got $LAN_AVAIL"
+[ "$(jq -r .engine <<<"$LAN_AVAIL")" = "naru-audio" ] ||
+  fail "--lan: GET /api/live/transcribe must report engine naru-audio, got $LAN_AVAIL"
+ok "--lan: GET /api/live/transcribe answers {\"available\": false} off the same route entry — both verbs are present, not just the POST"
 
 STATUS=$(curl -s -o /dev/null -w '%{http_code}' -d 'audio_base64=form+post' "$LAN_BASE/api/live/transcribe")
 [ "$STATUS" = "415" ] ||

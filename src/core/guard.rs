@@ -319,7 +319,7 @@ pub fn cache_read_share(session: &CcLiveSession) -> f64 {
 
 /// The alert an inbox item carries: **prose**, not a table.
 ///
-/// The inbox's play button may read this aloud through `kokoro-rs`
+/// The inbox's play button may read this aloud through naru-audio
 /// (`docs/inbox.md`), so it has to survive being spoken — which rules out
 /// markdown tables, bullet grids and bare numbers with no unit. The session
 /// id, cwd and project name are **data** and are stated as data; nothing here

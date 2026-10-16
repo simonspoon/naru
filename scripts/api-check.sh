@@ -26,16 +26,12 @@
 #   5a4. PATCH /api/inbox/{id} (task 1269) — assign: the created task back, the
 #      item left ARCHIVED as `converted-to-task` with `converted_task_id`
 #      naming it rather than deleted, and a second PATCH a 409 `conflict`;
-#   5b. GET /api/inbox/{id}/speak (task 815) — the audio contract, the patched
-#      streaming WAV sizes, the audio arriving *while* it is still being
-#      rendered (task 816), the hostile body arriving as stdin data, the
-#      `unavailable` failure and the `require_agent_access` gate, driven
-#      against a stub `kokoro-rs` (`MESA_KOKORO_BIN`);
+#   5b. GET /api/inbox/{id}/speak (task 815) — with no naru-audio daemon a
+#      permitted request is 503 `unavailable` (not a 500), an unknown id is
+#      404, and the `require_agent_access` gate holds;
 #   5c. GET /api/config/speech/preview (task 824) — the Settings page's voice
-#      test button: the same audio contract and gate, mesa's own sentence as
-#      the spoken text, the *query's* voice as one argv after `-v`, no `-v` at
-#      all when it is blank, and a name shaped like an option refused before
-#      anything is spawned;
+#      test button: the same gate and `unavailable` shape, and a name shaped
+#      like an option refused (422) before anything is attempted;
 #   6. LAN mode — the Host allowlist is skipped while the Content-Type gate
 #      still applies, the two halves of one posture (CLAUDE.md), the speak
 #      route keeps its stronger gate through the flip, and `--allow-host`
@@ -75,59 +71,15 @@ ok() { CHECKS=$((CHECKS + 1)); echo "ok: $*"; }
 PROJ=$("$MESA" project create "API gate project" --no-git | jq -r .id)
 OTHER=$("$MESA" project create "API gate archived project" --no-git | jq -r .id)
 
-# ---- stub kokoro-rs (the inbox speak route, mesa task 815) ----
-#
-# A stub, not the real synthesiser: this gate asserts the audio contract and
-# the injection-proofness of the body handoff, neither of which needs a real
-# 45 KB-per-second TTS model. It logs its stdin verbatim (so the hostile-body
-# assertion can read it back) and emits the exact *streaming* WAV header
-# `kokoro-rs -o -` writes — both sizes 0xFFFFFFFF — so the response proves
-# mesa patched them.
-#
-# It also models the property task 816 turned on: a real synthesiser writes the
-# header first and the audio sentence by sentence over the following seconds.
-# Dropping a `slow` file in the stub dir inserts that pause between the two, so
-# the gate can prove the header reaches the client while the render is still
-# running.
-
-STUB_DIR="$TMP/stub"
-mkdir -p "$STUB_DIR"
-cat > "$STUB_DIR/kokoro-rs" <<EOF
-#!/usr/bin/env bash
-printf '%s\n' "\$*" > "$STUB_DIR/last-argv"
-cat > "$STUB_DIR/last-stdin"
-[ -e "$STUB_DIR/fail" ] && { echo "stub kokoro is down" >&2; exit 1; }
-# A failure that says a LOT (more than a pipe buffer) before dying: mesa must
-# be draining stderr all along, or the child blocks there and never writes the
-# stdout byte the request is waiting for.
-[ -e "$STUB_DIR/noisy" ] && { head -c 200000 /dev/zero | tr '\0' 'x' >&2; exit 1; }
-# A failure that complains on *stdout*: not a WAV, so it must never be served
-# as audio.
-[ -e "$STUB_DIR/garbage" ] && { echo "kokoro: model load failed, aborting"; exit 1; }
-# RIFF ffffffff WAVE fmt (PCM/mono/24k) data ffffffff, then 8 bytes of "audio".
-printf 'RIFF\xff\xff\xff\xffWAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00\xc0\x5d\x00\x00\x80\xbb\x00\x00\x02\x00\x10\x00data\xff\xff\xff\xff'
-if [ -e "$STUB_DIR/slow" ]; then
-  sleep 3
-  # More than a pipe buffer: a server that stopped reading wedges here forever
-  # instead of reaching the marker below.
-  head -c 262144 /dev/zero
-else
-  printf '\x01\x02\x03\x04\x05\x06\x07\x08'
-fi
-touch "$STUB_DIR/done"
-EOF
-chmod +x "$STUB_DIR/kokoro-rs"
-export MESA_KOKORO_BIN="$STUB_DIR/kokoro-rs"
-# …against a config file that doesn't exist, so this gate reads the developer's
-# own `~/.mesa/config.json` as little as it reads their db. Since task 822 the
-# speak route takes its voice from that file, and the argv assertions below are
-# about the *unconfigured* argv — they must not turn red because whoever runs
-# the script picked a voice in the UI. `config-check.sh` owns the configured
-# half (it already runs under a throwaway HOME).
-# naru task 1396: the default engine is naru-audio, and this gate drives the
-# stub kokoro-rs, so it names the legacy engine explicitly.
-echo '{"audio":{"engine":"legacy"}}' > "$TMP/legacy-config.json"
-export MESA_CONFIG_FILE="$TMP/legacy-config.json"
+# No speech engine is stubbed: the only one is the naru-audio daemon, and this
+# gate starts none, so a permitted speak/preview request is 503 `unavailable`.
+# The config file is pinned to an empty one so this gate reads the developer's
+# own `~/.mesa/config.json` as little as it reads their db.
+echo '{}' > "$TMP/empty-config.json"
+export MESA_CONFIG_FILE="$TMP/empty-config.json"
+# …and the daemon URL points at a closed port, so a naru-audio daemon on the
+# developer's machine cannot answer a speak request.
+export NARU_AUDIO_URL="http://127.0.0.1:9"
 
 # kb fixture for the /api/kb routes (naru task 1928)
 mkdir -p "$TMP/kb/topics/demo"
@@ -946,11 +898,12 @@ ok "PATCH /api/inbox/{id}: a second assign is 409 conflict naming the task, writ
 # 5b. GET /api/inbox/{id}/speak — reading an item aloud (mesa task 815)
 # =====================================================================
 #
-# The route runs an external synthesiser and answers audio bytes. Four things
-# must hold: the audio contract (type, nosniff, patched WAV sizes), the body
-# reaching the binary as *data* on stdin (never a shell string), the outside-
-# mesa failure being `unavailable` rather than a 500, and the gate — this is
-# `require_agent_access`, stricter than the task routes beside it.
+# The route asks the naru-audio daemon for speech and answers audio bytes. With
+# no daemon running (this gate starts none) a permitted request is 503
+# `unavailable`, which is what proves it reached the handler; what is asserted
+# here is the outside-mesa failure being `unavailable` rather than a 500, the
+# unknown-id 404, and the gate — this is `require_agent_access`, stricter than
+# the task routes beside it.
 
 HOSTILE='$(touch '"$TMP"'/pwned); rm -rf / # spoken'
 SPEAK_ID=$("$MESA" inbox add --task "$INBOX_TASK" "$HOSTILE" | jq -r .id)
@@ -962,111 +915,13 @@ speak() { # speak <path> [curl args...] -> STATUS, $TMP/audio, $TMP/headers
 }
 
 speak "/api/inbox/$SPEAK_ID/speak"
-[ "$STATUS" = "200" ] || fail "speak: expected 200, got $STATUS ($(cat "$TMP/audio"))"
-grep -qi '^content-type: audio/wav' "$TMP/headers" || fail "speak: Content-Type must be audio/wav"
-grep -qi '^x-content-type-options: nosniff' "$TMP/headers" || fail "speak: nosniff missing"
-ok "GET /api/inbox/{id}/speak: 200 audio/wav + nosniff"
-
-# The stub emits a 44-byte streaming header + 8 bytes of audio with BOTH sizes
-# 0xFFFFFFFF. Since the audio streams (task 816) the real length is unknown when
-# the header goes out, so mesa replaces the placeholders with the open-ended
-# 0x7FFF0000 (+ the 36 header bytes for RIFF) — both still positive 31-bit
-# sizes, which is what a player that refuses the placeholder (Safari) wants. The
-# samples must still arrive untouched.
-[ "$(wc -c <"$TMP/audio" | tr -d ' ')" = "52" ] || fail "speak: audio bytes not passed through"
-HEXED=$(od -An -tx1 -v "$TMP/audio" | tr -d ' \n')
-[ "${HEXED:8:8}" = "2400ff7f" ] || fail "speak: RIFF size not patched (got ${HEXED:8:8})"
-[ "${HEXED:80:8}" = "0000ff7f" ] || fail "speak: data size not patched (got ${HEXED:80:8})"
-[ "${HEXED:88}" = "0102030405060708" ] || fail "speak: audio payload altered"
-ok "speak: the streaming 0xFFFFFFFF WAV sizes are patched, the samples are untouched"
-
-# The response must also carry no Content-Length: the body is chunked because
-# its length is not knowable when the header goes out.
-grep -qi '^content-length:' "$TMP/headers" &&
-  fail "speak: a streamed body must not declare a Content-Length"
-ok "speak: the body is chunked, not length-declared"
-
-# …and streaming means exactly this: the header reaches the client while the
-# synthesiser is still rendering. The slow stub pauses 3s between the header and
-# the samples, so a 1s cap must return the header alone (curl exit 28), not the
-# empty body a collect-then-send route would have produced.
-touch "$STUB_DIR/slow"
-set +e
-curl -s --max-time 1 -o "$TMP/partial" "$BASE/api/inbox/$SPEAK_ID/speak"
-CURL_RC=$?
-set -e
-rm -f "$STUB_DIR/slow"
-[ "$CURL_RC" = "28" ] || fail "speak: the slow stub should have outlived the 1s cap (curl rc $CURL_RC)"
-[ "$(wc -c <"$TMP/partial" | tr -d ' ')" = "44" ] ||
-  fail "speak: the header must arrive while synthesis runs, got $(wc -c <"$TMP/partial") bytes"
-ok "speak: audio streams — the header plays before the render finishes"
-
-# A listener that hangs up mid-render (stop, or a closed tab) discards the rest
-# of the audio — but the synthesis still runs to completion, the no-kill-path
-# posture of docs/inbox.md. A server that merely stopped reading would leave the
-# child blocked on a full stdout pipe forever, so the marker is the proof.
-rm -f "$STUB_DIR/done"
-touch "$STUB_DIR/slow"
-curl -s --max-time 1 -o /dev/null "$BASE/api/inbox/$SPEAK_ID/speak" || true
-for _ in $(seq 1 60); do
-  [ -e "$STUB_DIR/done" ] && break
-  sleep 0.5
-done
-rm -f "$STUB_DIR/slow"
-[ -e "$STUB_DIR/done" ] ||
-  fail "speak: a client that hung up left the synthesiser wedged on a full pipe"
-ok "speak: a listener that hangs up mid-render leaves no wedged synthesiser"
-
-# Injection-proof: the body reaches the binary as stdin bytes, verbatim, and
-# no shell ever parses it.
-[ "$(cat "$STUB_DIR/last-stdin")" = "$HOSTILE" ] ||
-  fail "speak: body must reach the synthesiser verbatim on stdin (got $(cat "$STUB_DIR/last-stdin"))"
-[ ! -e "$TMP/pwned" ] || fail "speak: a hostile body was evaluated by a shell"
-# …and the body is on stdin *only*: argv must stay the fixed three flags, so a
-# regression that also passed the text as an argument fails here.
-# Since task 822 the voice is configurable, but mesa names no default of its
-# own, so with nothing configured this exact-match is also the assertion that
-# no `-v` is added: the argv is the one this gate asserted before the setting
-# existed. (The configured half lives in scripts/config-check.sh, which owns a
-# throwaway HOME.)
-[ "$(cat "$STUB_DIR/last-argv")" = "-q -o -" ] ||
-  fail "speak: argv must be the fixed flags, got $(cat "$STUB_DIR/last-argv")"
-ok "speak: a hostile body is stdin data, never syntax and never argv — and an unconfigured voice adds no -v"
-
+[ "$STATUS" = "503" ] || fail "speak: with no daemon expected 503, got $STATUS ($(cat "$TMP/audio"))"
+[ "$(jq -r .error.code <"$TMP/audio")" = "unavailable" ] ||
+  fail "speak: no daemon must be code unavailable"
+ok "GET /api/inbox/{id}/speak: a permitted request reaches the handler (503 unavailable, no daemon)"
 api 404 GET "/api/inbox/999999/speak"
 [ "$(jqb .error.code)" = "not_found" ] || fail "speak: unknown id must be not_found"
 ok "speak: an unknown item is 404 not_found"
-
-touch "$STUB_DIR/fail"
-speak "/api/inbox/$SPEAK_ID/speak"
-[ "$STATUS" = "503" ] || fail "speak: a failing synthesiser must be 503, got $STATUS"
-[ "$(jq -r .error.code <"$TMP/audio")" = "unavailable" ] ||
-  fail "speak: a failing synthesiser must be code unavailable"
-rm -f "$STUB_DIR/fail"
-ok "speak: a failing synthesiser is 503 unavailable (an outside-mesa dependency)"
-
-# …and the two shapes of failure that a *streaming* reader can get wrong, both
-# of which used to be reportable and must stay so. First: a binary that fills
-# its stderr pipe before dying. Every pipe must be drained for the child's whole
-# life, or it blocks on stderr and the request hangs with no status at all.
-touch "$STUB_DIR/noisy"
-speak "/api/inbox/$SPEAK_ID/speak" --max-time 20
-rm -f "$STUB_DIR/noisy"
-[ "$STATUS" = "503" ] || fail "speak: a synthesiser that fills stderr must still be 503, got $STATUS"
-[ "$(jq -r .error.code <"$TMP/audio")" = "unavailable" ] ||
-  fail "speak: the noisy failure must be code unavailable"
-ok "speak: a synthesiser that fills its stderr pipe is still 503, not a hung request"
-
-# Second: a binary that complains on stdout and exits nonzero. Those bytes are
-# not a WAV, so serving them as audio/wav would render an error message to the
-# listener as if it were speech.
-touch "$STUB_DIR/garbage"
-speak "/api/inbox/$SPEAK_ID/speak" --max-time 20
-rm -f "$STUB_DIR/garbage"
-[ "$STATUS" = "503" ] || fail "speak: non-WAV output from a failed run must be 503, got $STATUS"
-[ "$(jq -r .error.code <"$TMP/audio")" = "unavailable" ] ||
-  fail "speak: the garbage-stdout failure must be code unavailable"
-ok "speak: a failed run's stdout is never passed off as audio"
 
 # Gate, half one: require_agent_access refuses a cross-site Origin, while the
 # same item's JSON — on the plain guard — is served with that same Origin. The
@@ -1086,10 +941,10 @@ speak "/api/inbox/$SPEAK_ID/speak" -H 'Sec-Fetch-Site: cross-site' -H 'Sec-Fetch
 [ "$(jq -r .error.code <"$TMP/audio")" = "validation" ] ||
   fail "speak: the cross-site refusal must be code validation"
 speak "/api/inbox/$SPEAK_ID/speak" -H 'Sec-Fetch-Site: same-origin' -H 'Sec-Fetch-Dest: audio'
-[ "$STATUS" = "200" ] || fail "speak: our own page's <audio> must be served, got $STATUS"
+[ "$STATUS" = "503" ] || fail "speak: our own page's <audio> must reach the handler, got $STATUS"
 speak "/api/inbox/$SPEAK_ID/speak" -H 'Sec-Fetch-Site: none'
-[ "$STATUS" = "200" ] || fail "speak: a typed-in URL must be served, got $STATUS"
-ok "speak: Sec-Fetch-Site closes the no-Origin subresource hole (cross-site 403, same-origin/none 200)"
+[ "$STATUS" = "503" ] || fail "speak: a typed-in URL must reach the handler, got $STATUS"
+ok "speak: Sec-Fetch-Site closes the no-Origin subresource hole (cross-site 403, same-origin/none reach the handler)"
 
 # =====================================================================
 # 5c. GET /api/config/speech/preview — hearing a voice before saving it (824)
@@ -1102,55 +957,18 @@ ok "speak: Sec-Fetch-Site closes the no-Origin subresource hole (cross-site 403,
 # are about where each of those two values comes from.
 
 speak "/api/config/speech/preview?voice=af_heart"
-[ "$STATUS" = "200" ] || fail "preview: expected 200, got $STATUS ($(cat "$TMP/audio"))"
-grep -qi '^content-type: audio/wav' "$TMP/headers" || fail "preview: Content-Type must be audio/wav"
-grep -qi '^x-content-type-options: nosniff' "$TMP/headers" || fail "preview: nosniff missing"
-grep -qi '^content-length:' "$TMP/headers" &&
-  fail "preview: a streamed body must not declare a Content-Length"
-[ "$(wc -c <"$TMP/audio" | tr -d ' ')" = "52" ] || fail "preview: audio bytes not passed through"
-HEXED=$(od -An -tx1 -v "$TMP/audio" | tr -d ' \n')
-[ "${HEXED:8:8}" = "2400ff7f" ] || fail "preview: RIFF size not patched (got ${HEXED:8:8})"
-[ "${HEXED:80:8}" = "0000ff7f" ] || fail "preview: data size not patched (got ${HEXED:80:8})"
-ok "GET /api/config/speech/preview: the same streamed audio/wav contract as speak"
+[ "$STATUS" = "503" ] || fail "preview: with no daemon expected 503, got $STATUS ($(cat "$TMP/audio"))"
+[ "$(jq -r .error.code <"$TMP/audio")" = "unavailable" ] ||
+  fail "preview: no daemon must be code unavailable"
+ok "GET /api/config/speech/preview: a valid request reaches the handler (503 unavailable, no daemon)"
 
-# The voice is the query's, one argv after -v…
-[ "$(cat "$STUB_DIR/last-argv")" = "-q -o - -v af_heart" ] ||
-  fail "preview: the query voice must be argv after -v, got $(cat "$STUB_DIR/last-argv")"
-# …and the text is mesa's own sample, not anything the caller supplied — the
-# route reads no request body at all, and the inbox item's text must not leak
-# into it.
-grep -q 'coffee is still warm' "$STUB_DIR/last-stdin" ||
-  fail "preview: the spoken text must be mesa's sample, got $(cat "$STUB_DIR/last-stdin")"
-ok "preview: mesa's own sentence on stdin, the query's voice as one argv after -v"
-
-# No voice (and a blank one) is the synthesiser's own default: no -v at all,
-# the exact argv an unconfigured install has always run.
-for QS in "" "?voice=" "?voice=%20"; do
-  speak "/api/config/speech/preview$QS"
-  [ "$STATUS" = "200" ] || fail "preview: '$QS' must be 200, got $STATUS"
-  [ "$(cat "$STUB_DIR/last-argv")" = "-q -o -" ] ||
-    fail "preview: '$QS' must add no -v, got $(cat "$STUB_DIR/last-argv")"
-done
-ok "preview: an absent or blank voice adds no -v (the synthesiser's own default)"
-
-# A name that isn't a voice name is refused *before* anything is spawned, so a
-# value shaped like an option can never reach the argv.
-rm -f "$STUB_DIR/last-argv"
+# A name that isn't a voice name is refused *before* any synthesis is attempted:
+# 422 validation, not the 503 a permitted request gets.
 speak "/api/config/speech/preview?voice=-o%20%2Ftmp%2Fpwned.wav"
 [ "$STATUS" = "422" ] || fail "preview: a non-voice name must be 422, got $STATUS"
 [ "$(jq -r .error.code <"$TMP/audio")" = "validation" ] ||
   fail "preview: the refusal must be code validation"
-[ ! -e "$STUB_DIR/last-argv" ] ||
-  fail "preview: a refused voice must never reach the synthesiser"
-ok "preview: a name shaped like an option is 422 validation, and nothing is spawned"
-
-touch "$STUB_DIR/fail"
-speak "/api/config/speech/preview?voice=af_heart"
-rm -f "$STUB_DIR/fail"
-[ "$STATUS" = "503" ] || fail "preview: a failing synthesiser must be 503, got $STATUS"
-[ "$(jq -r .error.code <"$TMP/audio")" = "unavailable" ] ||
-  fail "preview: a failing synthesiser must be code unavailable"
-ok "preview: a failing synthesiser is 503 unavailable"
+ok "preview: a name shaped like an option is 422 validation"
 
 # The gate is the speak route's, both halves: a foreign Origin and a cross-site
 # subresource are refused, our own page's <audio> is not.
@@ -1161,7 +979,7 @@ speak "/api/config/speech/preview?voice=af_heart" \
 [ "$STATUS" = "403" ] || fail "preview: a cross-site subresource must be 403, got $STATUS"
 speak "/api/config/speech/preview?voice=af_heart" \
   -H 'Sec-Fetch-Site: same-origin' -H 'Sec-Fetch-Dest: audio'
-[ "$STATUS" = "200" ] || fail "preview: our own page's <audio> must be served, got $STATUS"
+[ "$STATUS" = "503" ] || fail "preview: our own page's <audio> must reach the handler, got $STATUS"
 ok "preview: require_agent_access + the no-Origin subresource half, exactly as speak"
 
 kill "$SERVER_PID" 2>/dev/null || true
@@ -1211,16 +1029,15 @@ ok "--lan: a JSON mutating request from any Host is accepted"
 speak "/api/inbox/$SPEAK_ID/speak" -H "Host: evil.example"
 [ "$STATUS" = "403" ] || fail "--lan speak: a DNS-name Host must still be 403, got $STATUS"
 speak "/api/inbox/$SPEAK_ID/speak" -H "Host: 127.0.0.1:$LAN_PORT"
-[ "$STATUS" = "200" ] || fail "--lan speak: an IP-literal Host must be served, got $STATUS"
-grep -qi '^content-type: audio/wav' "$TMP/headers" || fail "--lan speak: Content-Type"
-ok "--lan: speak keeps the agent gate (DNS Host 403, IP-literal Host 200)"
+[ "$STATUS" = "503" ] || fail "--lan speak: an IP-literal Host must reach the handler (503 unavailable), got $STATUS"
+ok "--lan: speak keeps the agent gate (DNS Host 403, IP-literal Host reaches the handler)"
 
 # The voice preview carries the same gate for the same reason — it is the same
 # synthesis, reached from the Settings page.
 speak "/api/config/speech/preview?voice=af_heart" -H "Host: evil.example"
 [ "$STATUS" = "403" ] || fail "--lan preview: a DNS-name Host must still be 403, got $STATUS"
 speak "/api/config/speech/preview?voice=af_heart" -H "Host: 127.0.0.1:$LAN_PORT"
-[ "$STATUS" = "200" ] || fail "--lan preview: an IP-literal Host must be served, got $STATUS"
+[ "$STATUS" = "503" ] || fail "--lan preview: an IP-literal Host must reach the handler, got $STATUS"
 ok "--lan: the voice preview keeps the agent gate too"
 
 kill "$LAN_PID" 2>/dev/null || true
@@ -1249,10 +1066,9 @@ curl -sf "$ALLOW_BASE/api/projects" >/dev/null ||
 BASE=$ALLOW_BASE
 
 speak "/api/inbox/$SPEAK_ID/speak" -H "Host: naru.local:$ALLOW_PORT"
-[ "$STATUS" = "200" ] || fail "--allow-host: the named host must be served, got $STATUS"
-grep -qi '^content-type: audio/wav' "$TMP/headers" || fail "--allow-host: Content-Type"
+[ "$STATUS" = "503" ] || fail "--allow-host: the named host must reach the handler (503 unavailable), got $STATUS"
 speak "/api/inbox/$SPEAK_ID/speak" -H "Host: NARU.local:$ALLOW_PORT"
-[ "$STATUS" = "200" ] || fail "--allow-host: DNS is case-insensitive, got $STATUS"
+[ "$STATUS" = "503" ] || fail "--allow-host: DNS is case-insensitive, got $STATUS"
 speak "/api/inbox/$SPEAK_ID/speak" -H "Host: evil.example:$ALLOW_PORT"
 [ "$STATUS" = "403" ] || fail "--allow-host: an unlisted name must still be 403, got $STATUS"
 speak "/api/inbox/$SPEAK_ID/speak" -H "Host: evil-naru.local:$ALLOW_PORT"
@@ -1262,7 +1078,7 @@ speak "/api/inbox/$SPEAK_ID/speak" -H "Host: naru.local.evil.com:$ALLOW_PORT"
 speak "/api/inbox/$SPEAK_ID/speak" -H "Host: naru.local:999"
 [ "$STATUS" = "403" ] || fail "--allow-host: the named host on a foreign port must be 403, got $STATUS"
 speak "/api/inbox/$SPEAK_ID/speak" -H "Host: 127.0.0.1:$ALLOW_PORT"
-[ "$STATUS" = "200" ] || fail "--allow-host: an IP-literal Host must still be served, got $STATUS"
+[ "$STATUS" = "503" ] || fail "--allow-host: an IP-literal Host must still reach the handler, got $STATUS"
 ok "--lan --allow-host: the named host is served; every other name, near miss and foreign port is 403"
 
 kill "$LAN_PID" 2>/dev/null || true

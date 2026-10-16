@@ -140,7 +140,7 @@
 //! ## Listen
 //!
 //! A sixth, independent section names the model `live transcribe` runs the
-//! external `auris` speech-to-text binary with (mesa task 955) — the input-side
+//! naru-audio speech-to-text daemon with (mesa task 955) — the input-side
 //! mirror of Speech, above:
 //!
 //! ```json
@@ -148,24 +148,23 @@
 //! ```
 //!
 //! One key, [`MODEL`], read on every request. Absent or blank is **not** a
-//! default mesa names: it means no `-m` is passed at all, so `auris` picks its
-//! own default model and an unconfigured install runs the argv it ran before
-//! this setting existed. See [`listen_model`] and `docs/live.md`. A second
+//! default mesa names: it means no model is named, so the daemon picks its
+//! own default. See [`listen_model`] and `docs/live.md`. A second
 //! key, [`ENGINE`] (`"server"` | `"browser"`, default `"server"`, mesa task
 //! 1388), names what the **page** listens with.
 //!
 //! ## Audio
 //!
-//! A ninth section picks the engine the **server** runs speech through and
-//! where the `naru-audio` daemon listens (mesa task 1388):
+//! A ninth section holds where the `naru-audio` daemon listens (mesa task
+//! 1388) — the only speech engine since naru task 1386 retired `auris` and
+//! `kokoro-rs`:
 //!
 //! ```json
-//! { "audio": { "engine": "naru-audio", "url": "http://127.0.0.1:7870" } }
+//! { "audio": { "url": "http://127.0.0.1:7870" } }
 //! ```
 //!
-//! [`ENGINE`] is `"naru-audio"` (the daemon, the default since naru task 1396)
-//! or `"legacy"` (the external `auris`/`kokoro-rs` binaries); [`URL`] defaults to [`audio::DEFAULT_URL`] and
-//! `NARU_AUDIO_URL` overrides it. See [`audio_engine`], [`audio_url`] and
+//! [`URL`] defaults to [`audio::DEFAULT_URL`] and `NARU_AUDIO_URL` overrides
+//! it. A leftover `engine` key is ignored. See [`audio_url`] and
 //! `docs/config.md`.
 //!
 //! ## Ambient
@@ -208,7 +207,7 @@ use std::process::Stdio;
 
 use serde::Deserialize;
 
-use crate::core::audio::{self, AudioEngine};
+use crate::core::audio;
 use crate::core::guard::{GuardAction, GuardThresholds};
 use crate::core::listen;
 use crate::core::speech;
@@ -2633,8 +2632,7 @@ fn speech_voice_in(path: &Path) -> Result<Option<String>, String> {
 /// The configured text-to-speech model, or `None` for "naru-audio's own
 /// default" (mesa task 1425). The [`speech_voice`] rule exactly — read on
 /// every press, blank or misshapen is `None`, an unreadable file `Err` — with
-/// the model-name shape rule ([`listen::is_model_name`]). Only the naru-audio
-/// engine sends it; `kokoro-rs` never sees it.
+/// the model-name shape rule ([`listen::is_model_name`]). Sent to the daemon.
 pub fn speech_model() -> Result<Option<String>, String> {
     speech_model_in(&config_file())
 }
@@ -2665,8 +2663,7 @@ fn speech_speed_in(path: &Path) -> Result<f64, String> {
 /// configured voice and model (`null` when the file says nothing) plus the
 /// voices and models the engine offers, so the editor can be a list rather
 /// than a magic string. An empty `voices` is "mesa could not ask the binary" —
-/// the editor still has to accept a typed name then; `models` is always empty
-/// on the legacy engine.
+/// the editor still has to accept a typed name then;
 ///
 /// `voices_for` picks whose voices are listed (mesa task 1425): `None` is the
 /// configured model's, `Some("")` the daemon's default model's, `Some(name)`
@@ -2870,8 +2867,8 @@ pub fn validate_voice(voice: &str, offered: &[String]) -> Result<(), String> {
 // Listen (mesa task 955)
 // ---------------------------------------------------------------------------
 
-/// The config key holding the model `live transcribe` runs the external
-/// `auris` speech-to-text binary with.
+/// The config key holding the model `live transcribe` runs the naru-audio
+/// daemon with.
 pub const MODEL: &str = "model";
 
 /// The config key naming what the **page** listens with (mesa task 1388):
@@ -3451,11 +3448,7 @@ pub(crate) fn save_appearance_in(
 pub const URL: &str = "url";
 
 /// Every key the `audio` section understands, for the unknown-key error.
-const AUDIO_KEYS: &[&str] = &[ENGINE, URL];
-
-/// The engine the server runs speech through when the config says nothing:
-/// the `naru-audio` daemon (naru task 1396; `legacy` is the explicit opt-out).
-pub const DEFAULT_AUDIO_ENGINE: AudioEngine = AudioEngine::NaruAudio;
+const AUDIO_KEYS: &[&str] = &[URL];
 
 /// The longest daemon URL the editor will write — a sanity bound.
 const AUDIO_URL_MAX: usize = 200;
@@ -3466,14 +3459,14 @@ struct AudioConfig {
     audio: AudioSection,
 }
 
-/// Both keys kept raw, like [`GuardSection::action`]: a bad hand-edited value
+/// The URL kept raw, like [`GuardSection::action`]: a bad hand-edited value
 /// falls back to the built-in where it is used and is still shown verbatim.
+/// A leftover `engine` key (the retired `legacy`/`naru-audio` switch) is
+/// ignored, never an error.
 #[derive(Debug, Default, Deserialize)]
 struct AudioSection {
     #[serde(default)]
     url: Option<String>,
-    #[serde(default)]
-    engine: Option<String>,
 }
 
 fn read_audio(path: &Path) -> Result<AudioSection, String> {
@@ -3485,22 +3478,6 @@ fn read_audio(path: &Path) -> Result<AudioSection, String> {
     let config: AudioConfig = serde_json::from_slice(&bytes)
         .map_err(|e| format!("malformed mesa config {}: {e}", path.display()))?;
     Ok(config.audio)
-}
-
-/// The engine the server runs speech through (`audio.engine`), read on every
-/// request so a change needs no restart. Absent or a word Naru does not know
-/// is [`DEFAULT_AUDIO_ENGINE`].
-pub fn audio_engine() -> Result<AudioEngine, String> {
-    audio_engine_in(&config_file())
-}
-
-fn audio_engine_in(path: &Path) -> Result<AudioEngine, String> {
-    Ok(read_audio(path)?
-        .engine
-        .as_deref()
-        .map(str::trim)
-        .and_then(AudioEngine::parse)
-        .unwrap_or(DEFAULT_AUDIO_ENGINE))
 }
 
 /// Where the daemon listens: `NARU_AUDIO_URL` (or `MESA_AUDIO_URL`) when set
@@ -3559,8 +3536,6 @@ fn audio_in(path: &Path) -> Result<ConfigAudio, String> {
     Ok(ConfigAudio {
         url: raw(section.url),
         url_default: audio::DEFAULT_URL.to_string(),
-        engine: raw(section.engine),
-        engine_default: DEFAULT_AUDIO_ENGINE.as_str().to_string(),
         url_env: audio_url_env(),
     })
 }
@@ -3618,12 +3593,7 @@ fn save_audio_in(path: &Path, updates: &HashMap<String, Option<String>>) -> Resu
         if let Some(value) = updates[*key].as_deref().map(str::trim)
             && !value.is_empty()
         {
-            if key.as_str() == ENGINE {
-                validate_word(key, value, &["legacy", "naru-audio"])
-            } else {
-                validate_audio_url(value)
-            }
-            .map_err(SaveError::Validation)?;
+            validate_audio_url(value).map_err(SaveError::Validation)?;
         }
     }
 
@@ -7876,27 +7846,22 @@ mod tests {
         }
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
-        assert_eq!(audio_engine_in(&path).unwrap(), AudioEngine::NaruAudio);
         assert_eq!(audio_url_in(&path).unwrap(), "http://127.0.0.1:7870");
         let view = audio_in(&path).unwrap();
         assert_eq!(view.url, None);
         assert_eq!(view.url_default, "http://127.0.0.1:7870");
-        assert_eq!(view.engine, None);
-        assert_eq!(view.engine_default, "naru-audio");
 
         // A hand-edited unusable value falls back where it is used, and is
         // still shown verbatim to the editor.
-        let path = write_config(
-            dir.path(),
-            r#"{"audio": {"engine": "auris", "url": "https://x"}}"#,
-        );
-        assert_eq!(audio_engine_in(&path).unwrap(), AudioEngine::NaruAudio);
+        let path = write_config(dir.path(), r#"{"audio": {"url": "https://x"}}"#);
         assert_eq!(audio_url_in(&path).unwrap(), "http://127.0.0.1:7870");
-        assert_eq!(audio_in(&path).unwrap().engine.as_deref(), Some("auris"));
+        assert_eq!(audio_in(&path).unwrap().url.as_deref(), Some("https://x"));
 
-        // An explicit "legacy" is kept (naru task 1396).
+        // A leftover `engine` key from before the legacy engine was retired
+        // (naru task 1386) is ignored, not an error.
         let path = write_config(dir.path(), r#"{"audio": {"engine": "legacy"}}"#);
-        assert_eq!(audio_engine_in(&path).unwrap(), AudioEngine::Legacy);
+        assert_eq!(audio_url_in(&path).unwrap(), "http://127.0.0.1:7870");
+        assert_eq!(audio_in(&path).unwrap().url, None);
     }
 
     #[test]
@@ -8003,21 +7968,15 @@ mod tests {
         let path = dir.path().join("config.json");
         save_audio_in(
             &path,
-            &audio_update(&[
-                (ENGINE, Some("naru-audio")),
-                (URL, Some("http://localhost:7871/")),
-            ]),
+            &audio_update(&[(URL, Some("http://localhost:7871/"))]),
         )
         .unwrap();
-        assert_eq!(audio_engine_in(&path).unwrap(), AudioEngine::NaruAudio);
         let view = audio_in(&path).unwrap();
-        assert_eq!(view.engine.as_deref(), Some("naru-audio"));
         assert_eq!(view.url.as_deref(), Some("http://localhost:7871/"));
 
         let before = std::fs::read_to_string(&path).unwrap();
         for (key, bad) in [
-            (ENGINE, "auris"),
-            (ENGINE, "Legacy"),
+            (ENGINE, "naru-audio"),
             (URL, "https://127.0.0.1:7870"),
             (URL, "127.0.0.1:7870"),
             (URL, "http://"),
@@ -8035,12 +7994,10 @@ mod tests {
         }
 
         // null and blank both restore the built-in by removing the key.
-        save_audio_in(&path, &audio_update(&[(ENGINE, None), (URL, Some(" "))])).unwrap();
+        save_audio_in(&path, &audio_update(&[(URL, Some(" "))])).unwrap();
         let written: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert!(written["audio"].get(ENGINE).is_none());
         assert!(written["audio"].get(URL).is_none());
-        assert_eq!(audio_engine_in(&path).unwrap(), AudioEngine::NaruAudio);
 
         // Nothing named writes nothing.
         let empty = dir.path().join("empty.json");
@@ -8799,8 +8756,6 @@ mod tests {
             std::env::remove_var("NARU_AUDIO_URL");
             std::env::remove_var("MESA_AUDIO_URL");
             std::env::set_var("MESA_CONFIG_FILE", &path);
-            std::env::set_var("MESA_AURIS_BIN", "no-such-auris-1389");
-            std::env::set_var("MESA_KOKORO_BIN", "no-such-kokoro-1389");
         }
         engine(&daemon.url());
         let shown = (speech(None).unwrap().voices, listen().unwrap().models);
@@ -8822,8 +8777,6 @@ mod tests {
         let misshapen = save_listen(&model_update(&[(MODEL, Some("-o"))]));
         unsafe {
             std::env::remove_var("MESA_CONFIG_FILE");
-            std::env::remove_var("MESA_AURIS_BIN");
-            std::env::remove_var("MESA_KOKORO_BIN");
         }
 
         assert_eq!(shown.0, vec!["af_heart", "bm_george"]);

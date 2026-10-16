@@ -37,8 +37,7 @@ use crate::core::types::{GpuInfo, SystemInfo};
 static SYS: OnceLock<Mutex<sysinfo::System>> = OnceLock::new();
 
 /// The macOS hardware report mesa shells out to. `MESA_SYSTEM_PROFILER_BIN`
-/// overrides it — the same test seam as `listen::auris_bin` and
-/// `speech::kokoro_bin`, and how the GPU parse is tested against a stub.
+/// overrides it — the same test seam as `agents::claude_bin`, and how the GPU parse is tested against a stub.
 fn system_profiler_bin() -> String {
     crate::core::env::var("SYSTEM_PROFILER_BIN").unwrap_or_else(|| "system_profiler".to_string())
 }

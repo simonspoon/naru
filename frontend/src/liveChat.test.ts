@@ -10,7 +10,6 @@ const joined = {
   paused: false,
   muted: true,
   chord: 'F5',
-  audioEngine: null,
 }
 
 describe('taskSegments', () => {
@@ -80,7 +79,7 @@ describe('quietHint', () => {
   })
   it('names the path while listening', () => {
     expect(quietHint({ ...joined, muted: false, listening: true }).text).toBe(
-      'Listening through auris · Enter sends',
+      'Listening through naru-audio · Enter sends',
     )
   })
   it('keeps refusals and pause text', () => {

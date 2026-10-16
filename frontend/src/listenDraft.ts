@@ -7,13 +7,13 @@ import type { ConfigListen } from './types/ConfigListen'
  * frontend tests cover the pure modules, never a rendered tree).
  *
  * The input-side mirror of [`speechDraft`](./speechDraft.ts), for the one
- * value this section edits — the model `live transcribe` runs the external
- * `auris` binary with:
+ * value this section edits — the model `live transcribe` asks the naru-audio
+ * daemon for:
  *
- * - **Blank means "the binary's own default"**, not "silence". A blank box
- *   is PUT as `null`, which removes the key so mesa passes no `-m` at all.
- * - **The model is edited as text**, even when the box is a `<select>`: an
- *   installed binary mesa could not ask has no list to pick from, and the
+ * - **Blank means "the daemon's own default"**, not "silence". A blank box
+ *   is PUT as `null`, which removes the key so mesa names no model at all.
+ * - **The model is edited as text**, even when the box is a `<select>`: a
+ *   daemon mesa could not ask has no list to pick from, and the
  *   value already in the file has to survive that.
  * - **The engine** (`listen.engine`, mesa task 1391) is picked from a fixed
  *   list and drafted as the engine in force; picking the built-in sends
@@ -207,7 +207,7 @@ export function vocabularyError(text: string): string | null {
 /**
  * The line under the vocabulary box saying whether it is used, or `null` when
  * nothing needs saying. `engine` is the server's engine in force
- * (`audioDraft.savedEngine`), `null` while that is still loading. The model
+ * (`audioDraft.AUDIO_ENGINE`), `null` while that is still loading. The model
  * judged is the configured one, else the daemon's default; when neither is
  * known the page claims nothing.
  */

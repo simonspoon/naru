@@ -65,32 +65,6 @@ const HEALTH_BODY_CAP: u64 = 64 * 1024;
 /// The one API version this Naru speaks.
 const API_VERSION: i64 = 1;
 
-/// Which engine Naru's **server** runs speech through (`audio.engine`,
-/// `docs/config.md`). `legacy` is the external `auris`/`kokoro-rs` binaries;
-/// `naru-audio` is the daemon. Neither is ever a fallback for the other.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AudioEngine {
-    Legacy,
-    NaruAudio,
-}
-
-impl AudioEngine {
-    pub fn parse(value: &str) -> Option<AudioEngine> {
-        match value {
-            "legacy" => Some(AudioEngine::Legacy),
-            "naru-audio" => Some(AudioEngine::NaruAudio),
-            _ => None,
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            AudioEngine::Legacy => "legacy",
-            AudioEngine::NaruAudio => "naru-audio",
-        }
-    }
-}
-
 /// What the probe found (design §4.4). Serialized snake_case — the exact
 /// strings `GET /api/live/transcribe` answers with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
@@ -319,22 +293,17 @@ pub fn invalidate() {
     PROBER.cache.invalidate();
 }
 
-/// The daemon URL to warm when Live opens: `Some` only when `audio.engine`
-/// is `naru-audio`. Any config read error is `None` — the warm-up is
-/// best-effort and never fails a start.
+/// The daemon URL to warm when Live opens. Any config read error is `None` —
+/// the warm-up is best-effort and never fails a start.
 pub fn warm_url() -> Option<String> {
     daemon_url()
 }
 
-/// The daemon's URL when `audio.engine` is `naru-audio`, else `None` — the
-/// switch `listen::models()` and `speech::voices()` read (mesa task 1389).
-/// Any config read error is `None`, the legacy engine: those lists are
-/// advisory and cannot report an error.
+/// The daemon's URL, `None` on a config read error — the lists
+/// `listen::models()` and `speech::voices()` are advisory and cannot report
+/// one.
 pub fn daemon_url() -> Option<String> {
-    match crate::core::config::audio_engine() {
-        Ok(AudioEngine::NaruAudio) => crate::core::config::audio_url().ok(),
-        _ => None,
-    }
+    crate::core::config::audio_url().ok()
 }
 
 /// Asks the daemon at `url` to load its default speech-to-text model and
@@ -563,23 +532,20 @@ pub(crate) fn stream_dropped_message() -> String {
 // ---------------------------------------------------------------------------
 //
 // What `listen::transcribe`, `speech::start`, `listen::models` and
-// `speech::voices` call instead of `auris`/`kokoro-rs` when `audio.engine`
-// is `naru-audio` (design §6.2). Each failed transcribe or speak request
+// `speech::voices` call (design §6.2). Each failed transcribe or speak request
 // drops the cached probe (§4.4: a failed real request is fresher news), and
 // its sentence is §4.4's — "Speech isn't available: …" for the recognizer,
 // "Naru's voice isn't available: …" for the synthesiser.
 
 /// How long one transcription may take, connect to answer. The daemon holds
 /// the answer until a cold model load (~4 s) and the whole decode are done,
-/// and it accepts up to ten minutes of audio (§2.2), so this is generous;
-/// `auris` had no limit at all.
+/// and it accepts up to ten minutes of audio (§2.2), so this is generous.
 const TRANSCRIBE_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// How long `POST /v1/audio/speech` may take to send its headers. The
 /// daemon sends them once the first sentence is synthesised (§2.3), after a
 /// cold load at worst — the [`LOAD_TIMEOUT`] budget. The body that follows
-/// has no limit: a long render streams for as long as it takes, as
-/// `kokoro-rs`'s did.
+/// has no limit: a long render streams for as long as it takes.
 const SPEAK_START_TIMEOUT: Duration = LOAD_TIMEOUT;
 
 /// How long connecting to the daemon for speech may take. A refused port
@@ -1323,8 +1289,7 @@ pub struct LoadedModel {
 }
 
 /// What the System page shows under Memory: the daemon's loaded models.
-/// `models` is `null` when Naru could not ask — the engine is `legacy`, or
-/// the daemon is down — and an empty list when it answered with none loaded.
+/// `models` is `null` when Naru could not ask — the daemon is down — and an empty list when it answered with none loaded.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../frontend/src/types/")]
 pub struct AudioModels {
@@ -1982,14 +1947,6 @@ mod tests {
             classify_load(502, "<html>").1.as_deref(),
             Some("Speech isn't available: naru-audio reported: POST /api/load answered HTTP 502")
         );
-    }
-
-    #[test]
-    fn engine_words_round_trip() {
-        for e in [AudioEngine::Legacy, AudioEngine::NaruAudio] {
-            assert_eq!(AudioEngine::parse(e.as_str()), Some(e));
-        }
-        assert_eq!(AudioEngine::parse("auris"), None);
     }
 
     /// A stub daemon answering `POST /v1/audio/transcriptions` with `status`

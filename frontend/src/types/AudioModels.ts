@@ -3,7 +3,6 @@ import type { LoadedModel } from "./LoadedModel";
 
 /**
  * What the System page shows under Memory: the daemon's loaded models.
- * `models` is `null` when Naru could not ask — the engine is `legacy`, or
- * the daemon is down — and an empty list when it answered with none loaded.
+ * `models` is `null` when Naru could not ask — the daemon is down — and an empty list when it answered with none loaded.
  */
 export type AudioModels = { models: Array<LoadedModel> | null, };

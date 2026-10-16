@@ -1,115 +1,65 @@
-//! Transcribing recorded audio with the external `auris` speech-to-text
-//! binary. This is the mirror of `speech.rs` — `speech.rs` turns mesa text
-//! into audio for a browser to play; this turns audio a browser recorded
-//! into text mesa can use — and it copies that module's shape closely: a
-//! subprocess, not storage, invoked as argv with all three pipes drained for
-//! the child's whole life. On `audio.engine = "naru-audio"` (mesa task 1389)
-//! no subprocess runs: [`transcribe`] posts the recording to the daemon's
+//! Transcribing recorded audio through the naru-audio daemon. This is the
+//! mirror of `speech.rs` — `speech.rs` turns Naru text into audio for a
+//! browser to play; this turns audio a browser recorded into text Naru can
+//! use. [`transcribe`] posts the recording to the daemon's
 //! `/v1/audio/transcriptions` and [`models`] reads its list.
 //!
 //! Unlike `speech::start`, this does **not** stream a channel back to the
-//! caller. `speech::start` blocks only until the WAV header is in hand
-//! because audio is elastic — a minute-long render is worth starting to
-//! play after a couple of seconds. A transcript is the opposite shape: one
-//! short string, produced only once the whole recording has been decoded, so
-//! there is nothing earlier to hand back and nothing to gain from a channel.
-//! [`transcribe`] collects the whole answer and returns it.
+//! caller: a transcript is one short string, produced only once the whole
+//! recording has been decoded, so there is nothing earlier to hand back.
 //!
 //! **Nothing here is retained** (`docs/listen.md`, mesa task 930): the audio
 //! is transcribed and dropped. It is never written to `live_turns` (which has
-//! no column for it), never written to disk, and never logged — the speak
-//! routes' "nothing is stored and nothing is cached" read backwards, with the
-//! arrow of what goes in and what comes out reversed.
+//! no column for it), never written to disk, and never logged.
 
-use std::io::{BufRead, BufReader, Read, Write};
-use std::process::{Command, Stdio};
-use std::time::{Instant, SystemTime};
+use std::time::Instant;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use ts_rs::TS;
 
-use crate::core::audio::{self, AudioEngine, AudioState, TtlCache};
+use crate::core::audio::{self, AudioState, TtlCache};
 use crate::core::config;
-use crate::core::speech::{drain_capped, list_names};
 
-/// The speech-to-text binary to run. `MESA_AURIS_BIN` overrides it — the same
-/// test seam as `speech::kokoro_bin`/`agents::claude_bin`, and how the
-/// end-to-end checks drive this route against a stub instead of a real
-/// recognizer.
-pub fn auris_bin() -> String {
-    crate::core::env::var("AURIS_BIN").unwrap_or_else(|| "auris".to_string())
-}
-
-/// The most models [`models`] will report. auris ships exactly one today
-/// (`parakeet-tdt-0.6b-v2-int8`); the bound mirrors `speech::MAX_VOICES` for
-/// the same reason — a binary that answers `--list-models` with something
-/// else entirely must not be able to fill a dropdown, or the JSON a caller
-/// reads, with its output. Small on purpose: unlike voices, mesa has no
-/// reason to expect more than a handful of local models ever to exist here.
+/// The most models [`models`] will report — a bound so a wrong service on the
+/// daemon's port cannot fill a dropdown, or the JSON a caller reads, with its
+/// output. Small on purpose: Naru has no reason to expect more than a handful
+/// of local models.
 const MAX_MODELS: usize = 50;
 
-/// The model names the installed recognizer offers, asked of the binary
-/// itself (`auris --no-download --list-models`, one name per line) — the
-/// `models()` mirror of `speech::voices()`; read that function first, this
-/// copies its shape.
+/// The speech-to-text model names the naru-audio daemon offers
+/// ([`audio::stt_models`]), filtered by [`is_model_name`] and bounded.
 ///
-/// Empty when the binary is missing, fails, or answers with something that
-/// isn't a list of names: an empty list means "mesa could not ask", never
-/// "there are none". Callers must treat it as advisory.
+/// Empty when the daemon cannot be asked: an empty list means "Naru could not
+/// ask", never "there are none". Callers must treat it as advisory.
 ///
-/// On `audio.engine = "naru-audio"` (mesa task 1389) the list is the
-/// daemon's speech-to-text models instead ([`audio::stt_models`]) and
-/// `auris` is never run; the shape rule and the bound below still apply.
-///
-/// Cached with a TTL ([`audio::TtlCache`], mesa task 1388): 10 s for a
-/// non-empty answer, 2 s for an empty one, keyed on the binary path (or the
-/// daemon's URL) — so an `auris` installed (or removed) while `serve` runs
-/// is noticed without a restart, where the old `OnceLock` kept the first
-/// answer for the life of the process. The cache lock is held across the call, so a call that
-/// blocks blocks every concurrent caller — the fix is still not to start
-/// anything that can hang. Unlike `kokoro-rs --list-voices`, this cannot
-/// actually be that call: auris's `--list-models` is a plain directory read
-/// that never touches the network, and exits 0 with empty stdout when no
-/// model is installed yet — it has nothing to download and nothing to hang on
-/// (`auris/README.md` "`--no-download`", which names this function by name).
-/// `--no-download` is passed anyway, matching `speech::voices()`, so listing
-/// names can never become a fetch even if a future auris version changes
-/// that. Both of the child's pipes are bounded (`list_names` →
-/// `speech::spawn_and_drain`), so a `--list-models` that answers with
-/// megabytes of noise costs one capped buffer, never an unbounded one.
+/// Cached with a TTL ([`audio::TtlCache`]): 10 s for a non-empty answer, 2 s
+/// for an empty one, keyed on the daemon's URL, so a daemon started while
+/// `serve` runs is noticed without a restart.
 pub fn models() -> Vec<String> {
-    models_checked().0
-}
-
-/// [`models`] plus the wall-clock time the cached answer was taken.
-fn models_checked() -> (Vec<String>, SystemTime) {
     static MODELS: TtlCache<Vec<String>> = TtlCache::new();
-    let daemon = audio::daemon_url();
-    let key = daemon.clone().unwrap_or_else(auris_bin);
-    MODELS.get(
-        &key,
-        Instant::now(),
-        |v| audio::list_ttl(v),
-        || match &daemon {
-            Some(url) => audio::stt_models(url)
-                .into_iter()
-                .filter(|m| is_model_name(m))
-                .take(MAX_MODELS)
-                .collect(),
-            None => list_names(
-                &key,
-                &["--no-download", "--list-models"],
-                is_model_name,
-                MAX_MODELS,
-            ),
-        },
-    )
+    let Some(url) = audio::daemon_url() else {
+        return Vec::new();
+    };
+    MODELS
+        .get(
+            &url,
+            Instant::now(),
+            |v| audio::list_ttl(v),
+            || {
+                audio::stt_models(&url)
+                    .into_iter()
+                    .filter(|m| is_model_name(m))
+                    .take(MAX_MODELS)
+                    .collect()
+            },
+        )
+        .0
 }
 
 /// What the Settings page needs to say whether the vocabulary is used (naru
 /// task 1754): the daemon's speech-to-text models whose backend decodes
-/// hotwords, and its default speech-to-text model. Empty/`None` on the
-/// legacy engine and when the daemon cannot be asked. Cached like [`models`].
+/// hotwords, and its default speech-to-text model. Empty/`None` when the
+/// daemon cannot be asked. Cached like [`models`].
 pub fn hotword_support() -> (Vec<String>, Option<String>) {
     static CAPS: TtlCache<Vec<audio::SttCaps>> = TtlCache::new();
     let Some(url) = audio::daemon_url() else {
@@ -130,13 +80,9 @@ pub fn hotword_support() -> (Vec<String>, Option<String>) {
     (hot, default)
 }
 
-/// Who offers the names [`models`] lists, for a sentence naming it: the
-/// daemon on `naru-audio`, else the recognizer binary.
+/// Who offers the names [`models`] lists, for a sentence naming it.
 pub fn models_offered_by() -> String {
-    match audio::daemon_url() {
-        Some(_) => "naru-audio".to_string(),
-        None => auris_bin(),
-    }
+    "naru-audio".to_string()
 }
 
 /// What `GET /api/live/transcribe` answers (mesa task 1388): whether the
@@ -148,9 +94,9 @@ pub fn models_offered_by() -> String {
 pub struct TranscribeStatus {
     pub available: bool,
     pub state: AudioState,
-    /// `audio.engine`: `"legacy"` or `"naru-audio"`.
+    /// Always `"naru-audio"`.
     pub engine: &'static str,
-    /// The daemon's URL on `naru-audio`; `null` on `legacy`.
+    /// The daemon's URL.
     pub url: Option<String>,
     /// `null` when ready.
     pub message: Option<String>,
@@ -158,67 +104,32 @@ pub struct TranscribeStatus {
     pub checked_at: String,
 }
 
-/// The engine `audio.engine` names, asked whether it can transcribe. On
-/// `naru-audio` that is [`audio::probe`] (and `available` is its `ready`,
-/// since the POST goes to the daemon — mesa task 1389); on `legacy` it is
-/// ready iff [`models`] is non-empty — the pre-1388 `available` signal, unchanged.
-/// `fresh` (the live banner's Retry, mesa task 1408) drops the cached probe
-/// first, so a daemon started within [`audio::FAILURE_TTL`] of a down answer
-/// is seen at once; it is inert on `legacy`.
-/// Blocking. `Err` only for a config file that cannot be read.
+/// Asks the naru-audio daemon whether it can transcribe ([`audio::probe`]);
+/// `available` is its `ready`, since the POST goes to the daemon. `fresh`
+/// (the live banner's Retry, mesa task 1408) drops the cached probe first, so
+/// a daemon started within [`audio::FAILURE_TTL`] of a down answer is seen at
+/// once. Blocking. `Err` only for a config file that cannot be read.
 pub fn status(fresh: bool) -> Result<TranscribeStatus, String> {
-    let engine = config::audio_engine()?;
-    Ok(match engine {
-        AudioEngine::NaruAudio => {
-            if fresh {
-                audio::invalidate();
-            }
-            let probe = audio::probe(&config::audio_url()?);
-            TranscribeStatus {
-                available: probe.state == AudioState::Ready,
-                state: probe.state,
-                engine: engine.as_str(),
-                url: Some(probe.url),
-                message: probe.message,
-                checked_at: probe.checked_at,
-            }
-        }
-        AudioEngine::Legacy => {
-            let (models, taken_at) = models_checked();
-            let ready = !models.is_empty();
-            let secs = taken_at
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-            TranscribeStatus {
-                available: ready,
-                state: if ready {
-                    AudioState::Ready
-                } else {
-                    AudioState::Error
-                },
-                engine: engine.as_str(),
-                url: None,
-                message: (!ready).then(|| {
-                    format!(
-                        "Speech isn't available: {} isn't installed or reported no \
-                         models (`--no-download --list-models` answered nothing).",
-                        auris_bin()
-                    )
-                }),
-                checked_at: crate::core::cc::fmt_ts(secs),
-            }
-        }
+    if fresh {
+        audio::invalidate();
+    }
+    let probe = audio::probe(&config::audio_url()?);
+    Ok(TranscribeStatus {
+        available: probe.state == AudioState::Ready,
+        state: probe.state,
+        engine: "naru-audio",
+        url: Some(probe.url),
+        message: probe.message,
+        checked_at: probe.checked_at,
     })
 }
 
 /// Whether `name` is shaped like a model name: a bounded identifier that
 /// cannot be mistaken for an option. Mirrors `speech::is_voice_name`, with
 /// one deliberate difference — `.` is accepted as an interior character.
-/// auris's only model today is named `parakeet-tdt-0.6b-v2-int8`, which
+/// the default model is named `parakeet-tdt-0.6b-v2-int8`, which
 /// contains a `.`; `is_voice_name`'s rule would filter it straight out
-/// (`auris/README.md` calls out that mesa's model-name check must allow
-/// `.`). Every other property is unchanged: non-empty, <= 64 chars, must
+/// . Every other property is unchanged: non-empty, <= 64 chars, must
 /// start with an ASCII alphanumeric (so it can never be read as an option),
 /// otherwise only ASCII alphanumerics, `_`, `-`, `.`.
 pub fn is_model_name(name: &str) -> bool {
@@ -230,132 +141,13 @@ pub fn is_model_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
 }
 
-/// How much of auris's stderr rides back in an error message when it produces
-/// no transcript. Bounded for the same reason `look::STDERR_EXCERPT` is: this
-/// lands in a JSON error, not a log file.
-const STDERR_EXCERPT: usize = 400;
-
-/// One JSON Lines record auris's `--format json` may emit. Only the
-/// discriminator every reader must respect and the one field this reader
-/// keeps are named; auris's own contract (`auris/README.md` "`--format
-/// json`") is that an unrecognised `type` — or, here, any other field on a
-/// recognised one — must be ignored rather than treated as an error, since
-/// that is the whole of auris's extension mechanism. `#[serde(other)]` plus
-/// `#[serde(default)]` on `text` is what makes an unparseable/unknown line a
-/// no-op instead of a parse failure that would abort the read.
-#[derive(Deserialize)]
-struct Line {
-    #[serde(rename = "type")]
-    kind: Kind,
-    #[serde(default)]
-    text: String,
-}
-
-#[derive(Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
-enum Kind {
-    Transcript,
-    #[serde(other)]
-    Other,
-}
-
-/// The longest single stdout line mesa will hold from auris's JSON Lines
-/// output before giving up on it. A byte cap on the *whole* stream would risk
-/// discarding a legitimate final `transcript` line arriving after a long run
-/// of `segment` lines — the opposite of `speech::STDERR_CAP`, which is fine to
-/// truncate because it is only ever quoted back in an error. Bounding the
-/// *line* length instead keeps memory bounded while still reading every line
-/// auris writes, in order, to find the last `transcript`.
-const LINE_CAP: usize = 1024 * 1024;
-
-/// Reads `reader` line by line, keeping the text of the **last** `{"type":
-/// "transcript", ...}` line seen — auris's contract (`auris/README.md`
-/// "`--format json`") is that `transcript` is always the last line on a run
-/// that produced one, so the last match is the answer even though `segment`
-/// lines may run ahead of it in volume this function must not buffer as a
-/// whole. A line longer than [`LINE_CAP`] cannot be a real JSON Lines record
-/// from auris, so it is drained and discarded whole rather than parsed as a
-/// truncated (and therefore invalid) fragment. Returns the read error, if
-/// any, alongside whatever was found before it — mirroring `read_to_string`'s
-/// contract of "partial data, then an error" as closely as a line reader can.
-fn last_transcript<R: Read>(reader: R) -> (Option<String>, Option<std::io::Error>) {
-    let mut reader = BufReader::new(reader);
-    let mut transcript = None;
-    loop {
-        let mut line = Vec::new();
-        let read = (&mut reader)
-            .take(LINE_CAP as u64)
-            .read_until(b'\n', &mut line);
-        let n = match read {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(e) => return (transcript, Some(e)),
-        };
-        // Hitting the cap with no trailing newline is ambiguous on its own:
-        // it is either a line still going (over-long, discard it) or a line
-        // that happens to be exactly LINE_CAP bytes with the stream ending
-        // right there (complete — nothing to discard). `drain_overlong`
-        // resolves it by trying to read more.
-        if n as u64 == LINE_CAP as u64 && line.last() != Some(&b'\n') {
-            match drain_overlong(&mut reader) {
-                Ok(true) => continue,
-                Ok(false) => {}
-                Err(e) => return (transcript, Some(e)),
-            }
-        }
-        let text = String::from_utf8_lossy(&line);
-        let Ok(parsed) = serde_json::from_str::<Line>(text.trim_end()) else {
-            continue;
-        };
-        if parsed.kind == Kind::Transcript {
-            transcript = Some(parsed.text);
-        }
-    }
-    (transcript, None)
-}
-
-/// Called only when a line has just hit [`LINE_CAP`] with no trailing
-/// newline — drains whatever comes after it, in further `LINE_CAP`-bounded
-/// reads, until a newline or EOF. `Ok(false)` means the very next read hit
-/// EOF immediately: nothing followed, so the line the caller just read was
-/// not truncated at all — it was exactly `LINE_CAP` bytes and the stream
-/// simply ended there — and must be parsed normally rather than discarded.
-/// `Ok(true)` means at least one more byte followed: the line genuinely
-/// continues past the cap, so the caller's line (and everything drained here)
-/// is discarded whole rather than parsed as a truncated fragment.
-fn drain_overlong<R: BufRead>(reader: &mut R) -> std::io::Result<bool> {
-    let mut discarded = false;
-    loop {
-        let mut sink = Vec::new();
-        let n = (&mut *reader)
-            .take(LINE_CAP as u64)
-            .read_until(b'\n', &mut sink)?;
-        if n == 0 {
-            return Ok(discarded);
-        }
-        discarded = true;
-        if (n as u64) < LINE_CAP as u64 || sink.last() == Some(&b'\n') {
-            return Ok(true);
-        }
-        // Still no newline after another full LINE_CAP-bounded read: the
-        // line keeps going, so keep draining.
-    }
-}
-
-/// Transcribes `audio` (a whole WAV recording) with the engine
-/// `audio.engine` names, read on every call: the naru-audio daemon
-/// ([`audio::transcribe`], mesa task 1389 — `model` or `default`, and
-/// `auris` never run), or `auris` ([`transcribe_auris`]).
+/// Transcribes `audio` (a whole WAV recording) through the naru-audio daemon
+/// ([`audio::transcribe`], mesa task 1389) with `model` or `default`.
 ///
-/// **Silence is a success on both** (design §2.2): nothing transcribed is
-/// `Ok("")` — the daemon's 200 `{"text":""}`, or `auris` exiting 1 — so the
-/// route answers 200 `{"text":""}` rather than a 503. Every other failure is
-/// `Err`, which the caller maps to 503 `unavailable`.
-///
-/// The switch is [`audio::daemon_url`], as for [`models`] and
-/// `speech::start`: a config file that cannot be read is the legacy engine,
-/// never an error of this function's own (`transcribe_live` has already
-/// read `listen.model` from the same file, and answers 503 for that).
+/// **Silence is a success** (design §2.2): nothing transcribed is the
+/// daemon's 200 `{"text":""}`, `Ok("")`, so the route answers 200
+/// `{"text":""}` rather than a 503. Every other failure is `Err`, which the
+/// caller maps to 503 `unavailable`.
 ///
 /// Blocking: call it from `spawn_blocking`, not an async worker.
 pub fn transcribe(
@@ -363,279 +155,53 @@ pub fn transcribe(
     model: Option<&str>,
     hotwords: Option<&str>,
 ) -> Result<String, String> {
-    match audio::daemon_url() {
-        Some(url) => audio::transcribe(&url, audio, model.unwrap_or("default"), hotwords),
-        None => transcribe_auris(audio, model),
-    }
-}
-
-/// Transcribes `audio` (a whole WAV recording) by shelling out to `auris`.
-///
-/// The audio is **never a shell string and never a `Command::arg`** — the
-/// same load-bearing property `speech.rs` states for the text it hands
-/// `kokoro-rs`, and for the same reason: it is written to the child's stdin,
-/// so a payload that happens to start with a flag-shaped byte can never be
-/// parsed as one, and there is no `ARG_MAX` ceiling to hit. There is no shell
-/// anywhere on this path.
-///
-/// Every pipe is drained for the child's whole life: stdin is written from a
-/// dedicated thread (dropping it on that thread's exit is what signals EOF to
-/// auris), stderr is drained on its own thread, and stdout is read on the
-/// calling thread. An audio body is megabytes, not bytes — writing it inline
-/// while also waiting on stdout would deadlock the first time either pipe's
-/// ~64 KiB buffer filled, exactly the failure `speech.rs`'s own comment
-/// documents for the render direction.
-///
-/// auris streams JSON Lines as it decodes (`auris/README.md` "`--format
-/// json`"): a `segment` line per completed utterance, and a final
-/// `transcript` line carrying the whole corrected text. This reads to EOF and
-/// keeps the text from the **last** `transcript` line seen, ignoring
-/// `segment` and anything else — `--format json` guarantees `transcript` is
-/// always the last line on a run that produced one, so reading to EOF and
-/// keeping the last match is a correct reader on its own.
-///
-/// Exit 1 with no `transcript` line is auris's "nothing transcribed"
-/// (`auris/README.md` "Exit codes") and is `Ok("")` — the silence contract
-/// (design §2.2, mesa task 1389). Note that auris also exits 1 for a model
-/// missing under `--no-download` or an unreachable auris daemon; the design
-/// accepts that, since nothing matches on stderr text any more. Any other
-/// nonzero exit is **not** data here, unlike `scripts::run`: there is no
-/// transcript to hand back on failure, so any other run that lands nothing
-/// usable on stdout is an `Err` — the same rule `speech::start` applies to a
-/// kokoro-rs that produced no audio (and returns the same `Result<_, String>`
-/// shape `speech::start` does, for the same reason: the caller maps it
-/// straight to a 503 `unavailable`, exactly as `speak_live_turn` already does
-/// with `speech::start`'s error). The exit status is only consulted once
-/// nothing usable has landed on stdout, never as the primary signal
-/// (mirroring `auris/README.md`'s own "Exit codes" contract) — a non-WAV or
-/// unreadable body is auris's own exit-1 "no transcript" path, not a
-/// distinct case this function has to detect itself.
-///
-/// `model`, when `Some`, is passed as `-m <name>` — the model the config's
-/// `listen` section names (`config::listen_model`, mesa task 955), read by
-/// the caller on every request the same way `speech_voice()` is read on
-/// every press. `None` (nothing configured, or a hand-edited value the shape
-/// rule rejects) produces byte-for-byte the argv this function always ran:
-/// `-q --format json` and nothing else, so `auris` picks its own default
-/// model.
-///
-/// Blocking: call it from `spawn_blocking`, not an async worker.
-fn transcribe_auris(audio: &[u8], model: Option<&str>) -> Result<String, String> {
-    // The Settings vocabulary (naru task 1754) is naru-audio's `hotwords`;
-    // auris has no vocabulary flag, so the legacy engine sends nothing for it.
-    let bin = auris_bin();
-    let mut command = Command::new(&bin);
-    command.args(["-q", "--format", "json"]);
-    if let Some(model) = model {
-        command.args(["-m", model]);
-    }
-    let mut child = command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| {
-            format!(
-                "failed to run {bin}: {e} (set MESA_AURIS_BIN to override the binary mesa runs)"
-            )
-        })?;
-
-    let mut stdin = child.stdin.take().expect("stdin was piped");
-    let payload = audio.to_vec();
-    let writer = std::thread::spawn(move || {
-        let _ = stdin.write_all(&payload);
-        // `stdin` drops here, closing the pipe and signalling EOF to auris —
-        // it cannot decode an offline utterance until it sees the end.
-    });
-
-    let stderr = child.stderr.take().expect("stderr was piped");
-    let complaints = std::thread::spawn(move || drain_capped(stderr));
-
-    let stdout = child.stdout.take().expect("stdout was piped");
-    let (transcript, read_err) = last_transcript(stdout);
-
-    let _ = writer.join();
-    let status = child.wait();
-
-    if let Some(text) = transcript {
-        return Ok(text);
-    }
-    // Exit 1, nothing read wrong: auris transcribed nothing — silence.
-    if read_err.is_none()
-        && let Ok(s) = &status
-        && s.code() == Some(1)
-    {
-        let _ = complaints.join();
-        return Ok(String::new());
-    }
-
-    // Nothing usable landed on stdout: consult the exit status and stderr
-    // only now, to explain the failure rather than to detect it.
-    let said = complaints.join().unwrap_or_default();
-    let said = said.trim();
-    let excerpt: String = said.chars().take(STDERR_EXCERPT).collect();
-    let reason = if !excerpt.is_empty() {
-        format!("{bin} produced no transcript: {excerpt}")
-    } else if let Some(e) = read_err {
-        format!("failed to read output from {bin}: {e}")
-    } else {
-        match status {
-            Ok(s) if !s.success() => format!("{bin} exited with {s}"),
-            Ok(_) => format!("{bin} produced no transcript"),
-            Err(e) => format!("failed to wait on {bin}: {e}"),
-        }
+    let Some(url) = audio::daemon_url() else {
+        return Err(
+            "the naru-audio daemon's address could not be read from the config".to_string(),
+        );
     };
-    Err(reason)
+    audio::transcribe(&url, audio, model.unwrap_or("default"), hotwords)
 }
 
 #[cfg(test)]
 mod tests {
-    #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
     use std::sync::Mutex;
 
     use super::*;
 
-    /// `MESA_AURIS_BIN` is a process-global env var and cargo runs tests in
-    /// parallel, so the two tests that set it must not race each other.
-    /// Poisoning (one test panicking while holding the lock) must not wedge
-    /// the other — `unwrap_or_else` recovers the guard instead of unwrapping
-    /// into a second panic.
+    /// `MESA_CONFIG_FILE` and the audio URL env vars are process-global and
+    /// cargo runs tests in parallel, so every test that sets them must not
+    /// race another. Poisoning must not wedge the others — `unwrap_or_else`
+    /// recovers the guard.
     static ENV: Mutex<()> = Mutex::new(());
 
-    /// The locks every test running a stub binary holds, plus
-    /// `MESA_CONFIG_FILE` pinned at a file that does not exist — the legacy
-    /// engine — so which engine runs never depends on this machine's own
-    /// config (mesa task 1389). Unpinned again when dropped.
-    struct Legacy {
-        _dir: tempfile::TempDir,
+    /// The locks every test pointing Naru at a stub daemon holds. The config
+    /// pin is removed again when dropped.
+    struct Pinned {
         _config: std::sync::MutexGuard<'static, ()>,
         _env: std::sync::MutexGuard<'static, ()>,
     }
 
-    impl Drop for Legacy {
+    impl Drop for Pinned {
         fn drop(&mut self) {
             // SAFETY: both locks are still held; fields drop after this.
             unsafe { std::env::remove_var("MESA_CONFIG_FILE") };
         }
     }
 
-    fn legacy() -> Legacy {
+    fn pinned() -> Pinned {
         let config = crate::core::attachments::ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let env = ENV.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = tempfile::tempdir().expect("tempdir");
-        // SAFETY: both locks above serialize every test touching these vars.
-        let cfg = dir.path().join("legacy-config.json");
-        std::fs::write(&cfg, r#"{"audio":{"engine":"legacy"}}"#).expect("write config");
-        unsafe { std::env::set_var("MESA_CONFIG_FILE", &cfg) };
-        Legacy {
-            _dir: dir,
+        Pinned {
             _config: config,
             _env: env,
         }
     }
 
-    /// A line that is exactly `LINE_CAP` bytes, has no trailing newline, and
-    /// is genuinely the whole of the data (the stream ends right there) must
-    /// still be parsed — not discarded as over-long. Regression for the case
-    /// `drain_overlong` exists to resolve: hitting the cap with no newline is
-    /// ambiguous until a further read proves whether anything follows.
-    #[test]
-    fn a_transcript_line_landing_exactly_on_line_cap_at_eof_is_kept() {
-        let prefix = br#"{"type":"transcript","text":""#;
-        let suffix = br#""}"#;
-        let pad_len = LINE_CAP - prefix.len() - suffix.len();
-        let mut line = Vec::with_capacity(LINE_CAP);
-        line.extend_from_slice(prefix);
-        line.extend(std::iter::repeat_n(b'x', pad_len));
-        line.extend_from_slice(suffix);
-        assert_eq!(line.len(), LINE_CAP);
-        // No trailing newline: the stream ends exactly at LINE_CAP bytes.
-
-        let (transcript, err) = last_transcript(std::io::Cursor::new(line.clone()));
-        assert!(err.is_none());
-        let expected = "x".repeat(pad_len);
-        assert_eq!(transcript, Some(expected));
-    }
-
-    #[test]
-    fn reports_a_missing_binary_as_an_error() {
-        let _guard = legacy();
-        // A binary that cannot exist: the spawn error path, no stub needed —
-        // mirrors `speech::tests::start_reports_a_failing_binary`.
-        unsafe { std::env::set_var("MESA_AURIS_BIN", "mesa-no-such-auris-binary") };
-        let err = transcribe(b"not real audio", None, None).expect_err("no binary, no transcript");
-        unsafe { std::env::remove_var("MESA_AURIS_BIN") };
-        assert!(err.contains("mesa-no-such-auris-binary"), "{err}");
-    }
-
-    /// A payload well over a pipe's ~64 KiB buffer, with a stub that also
-    /// writes more than a buffer's worth to stderr, must still complete.
-    /// Without the dedicated stdin-writer thread, writing the payload inline
-    /// while the stub blocks trying to write its own stderr backlog (nobody
-    /// yet reading it) would deadlock: this call would sit forever pushing
-    /// bytes into a stdin pipe the stub cannot drain because it is itself
-    /// stuck writing stderr. Without the dedicated stderr-drain thread, the
-    /// stub's stderr write would fill that pipe and block the stub before it
-    /// ever reads all of stdin or reaches its stdout line, again forever.
-    #[test]
-    fn a_body_larger_than_a_pipe_buffer_does_not_deadlock() {
-        let _guard = legacy();
-        let dir = tempfile::tempdir().expect("tempdir");
-        let stub = dir.path().join("auris-stub.sh");
-        std::fs::write(
-            &stub,
-            "#!/bin/sh\n\
-             cat > /dev/null\n\
-             yes stderr-filler-line | head -c 200000 >&2\n\
-             printf '%s\\n' '{\"type\":\"transcript\",\"text\":\"ok\"}'\n",
-        )
-        .expect("write stub");
-        #[cfg(unix)]
-        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-
-        unsafe { std::env::set_var("MESA_AURIS_BIN", &stub) };
-        let payload = vec![0u8; 1024 * 1024];
-        let result = transcribe(&payload, None, None);
-        unsafe { std::env::remove_var("MESA_AURIS_BIN") };
-
-        assert_eq!(result, Ok("ok".to_string()));
-    }
-
-    /// A `--list-models` stub flooding stdout with far more than
-    /// `speech::STDERR_CAP` of noise must still return promptly with a
-    /// bounded result. Mirrors
-    /// `speech::tests::list_names_stays_bounded_against_a_flooding_stub` —
-    /// exercises `list_names` directly rather than `models()`, whose
-    /// process-wide cache would leak a stub answer into every other test
-    /// that reads real models.
-    #[test]
-    fn list_names_stays_bounded_against_a_flooding_stub() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let stub = dir.path().join("auris-flood-list-models.sh");
-        std::fs::write(
-            &stub,
-            "#!/bin/sh\n\
-             head -c 8388608 /dev/zero | tr '\\0' 'x'\n",
-        )
-        .expect("write stub");
-        #[cfg(unix)]
-        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-
-        let names = list_names(
-            stub.to_str().expect("utf8 path"),
-            &["--no-download", "--list-models"],
-            is_model_name,
-            MAX_MODELS,
-        );
-        assert!(names.is_empty(), "flooded noise is not a model name");
-    }
-
     /// The shape rule is what keeps a stored model name from ever being read
-    /// as an option, and what filters a `--list-models` answer that isn't a
-    /// list. Mirrors `speech::tests::voice_names_are_bounded_identifiers`.
+    /// as an option, and what filters a daemon model list that isn't names. Mirrors `speech::tests::voice_names_are_bounded_identifiers`.
     #[test]
     fn model_names_are_bounded_identifiers() {
         assert!(is_model_name("parakeet-tdt-0.6b-v2-int8"));
@@ -644,150 +210,12 @@ mod tests {
         }
     }
 
-    fn write_stub(dir: &std::path::Path, name: &str, script: &str) -> std::path::PathBuf {
-        let path = dir.join(name);
-        std::fs::write(&path, script).expect("write stub");
-        #[cfg(unix)]
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-        path
-    }
-
-    /// A stub that says far more than `speech::STDERR_CAP` on stderr and
-    /// fails: the error must still terminate and stay bounded, proving stderr
-    /// is capped rather than collected whole. Exit 2 (auris's usage error),
-    /// since exit 1 is silence and no error at all (mesa task 1389).
+    /// `available` follows the daemon's probe (mesa task 1389: the POST goes
+    /// to the daemon).
     #[test]
-    fn a_noisy_failing_binary_produces_a_bounded_error() {
-        let _guard = legacy();
+    fn status_available_follows_the_probe() {
+        let _guard = pinned();
         let dir = tempfile::tempdir().expect("tempdir");
-        let stub = write_stub(
-            dir.path(),
-            "auris-noisy-stderr.sh",
-            "#!/bin/sh\n\
-             cat > /dev/null\n\
-             head -c 8388608 /dev/zero | tr '\\0' 'x' >&2\n\
-             exit 2\n",
-        );
-
-        unsafe { std::env::set_var("MESA_AURIS_BIN", &stub) };
-        let err =
-            transcribe(b"not real audio", None, None).expect_err("failing binary, no transcript");
-        unsafe { std::env::remove_var("MESA_AURIS_BIN") };
-
-        assert!(
-            err.len() < crate::core::speech::STDERR_CAP + 4096,
-            "error message was not bounded: {} bytes",
-            err.len()
-        );
-    }
-
-    /// The silence contract on the legacy engine (design §2.2, mesa task
-    /// 1389): auris exiting 1 with no `transcript` line — "nothing
-    /// transcribed" — is `Ok("")`, whatever it said on stderr, while exit 2,
-    /// a signal, and exit 0 with no `transcript` line stay errors.
-    #[test]
-    fn exit_1_with_no_transcript_is_silence_and_other_failures_are_not() {
-        let _guard = legacy();
-        let dir = tempfile::tempdir().expect("tempdir");
-        let run = |name: &str, tail: &str| {
-            let stub = write_stub(
-                dir.path(),
-                name,
-                &format!(
-                    "#!/bin/sh\ncat > /dev/null\n\
-                     printf '{{\"type\":\"segment\",\"text\":\"x\"}}\\n'\n{tail}\n"
-                ),
-            );
-            unsafe { std::env::set_var("MESA_AURIS_BIN", &stub) };
-            let result = transcribe(b"not real audio", None, None);
-            unsafe { std::env::remove_var("MESA_AURIS_BIN") };
-            result
-        };
-        assert_eq!(
-            run("auris-silent.sh", "echo 'no speech detected' >&2; exit 1"),
-            Ok(String::new())
-        );
-        let usage = run("auris-usage.sh", "echo 'bad flag' >&2; exit 2").unwrap_err();
-        assert!(usage.contains("bad flag"), "{usage}");
-        let killed = run("auris-killed.sh", "kill -9 $$").unwrap_err();
-        assert!(killed.contains("signal"), "{killed}");
-        let empty = run("auris-no-transcript.sh", "exit 0").unwrap_err();
-        assert!(empty.ends_with("produced no transcript"), "{empty}");
-    }
-
-    /// A stub whose stdout carries far more than `LINE_CAP` of `segment`
-    /// lines before its final `transcript` line: the last line must still
-    /// win, proving the reader stays bounded without losing the answer.
-    #[test]
-    fn the_last_transcript_line_wins_over_a_flood_of_segments() {
-        let _guard = legacy();
-        let dir = tempfile::tempdir().expect("tempdir");
-        let stub = write_stub(
-            dir.path(),
-            "auris-flood-segments.sh",
-            "#!/bin/sh\n\
-             cat > /dev/null\n\
-             i=0\n\
-             while [ $i -lt 20000 ]; do\n\
-             printf '{\"type\":\"segment\",\"text\":\"filler\"}\\n'\n\
-             i=$((i + 1))\n\
-             done\n\
-             printf '{\"type\":\"transcript\",\"text\":\"the real answer\"}\\n'\n",
-        );
-
-        unsafe { std::env::set_var("MESA_AURIS_BIN", &stub) };
-        let result = transcribe(b"not real audio", None, None);
-        unsafe { std::env::remove_var("MESA_AURIS_BIN") };
-
-        assert_eq!(result, Ok("the real answer".to_string()));
-    }
-
-    /// `model: None` must produce byte-identical argv to before task 955 —
-    /// exactly `-q --format json`, no `-m` at all
-    /// (`scripts/auris-check.sh` asserts this too). `model: Some(name)` adds
-    /// `-m <name>` as two more `Command::arg`s, never spliced into anything a
-    /// shell parses.
-    #[test]
-    fn a_model_is_passed_as_m_and_none_adds_nothing() {
-        let _guard = legacy();
-        let dir = tempfile::tempdir().expect("tempdir");
-        let stub = write_stub(
-            dir.path(),
-            "auris-echo-argv.sh",
-            "#!/bin/sh\n\
-             cat > /dev/null\n\
-             printf '{\"type\":\"transcript\",\"text\":\"%s\"}\\n' \"$*\"\n",
-        );
-
-        unsafe { std::env::set_var("MESA_AURIS_BIN", &stub) };
-        let without = transcribe(b"not real audio", None, None);
-        let with = transcribe(b"not real audio", Some("parakeet-tdt-0.6b-v2-int8"), None);
-        unsafe { std::env::remove_var("MESA_AURIS_BIN") };
-
-        assert_eq!(without, Ok("-q --format json".to_string()));
-        assert_eq!(
-            with,
-            Ok("-q --format json -m parakeet-tdt-0.6b-v2-int8".to_string())
-        );
-    }
-
-    /// On `naru-audio`, `available` follows the daemon's probe (mesa task
-    /// 1389: the POST goes to the daemon now), and neither `status`,
-    /// `models` nor `transcribe` ever runs auris — the stub `MESA_AURIS_BIN`
-    /// names records every run, and records none.
-    #[test]
-    fn naru_audio_status_available_follows_the_probe_and_never_runs_auris() {
-        let _guard = legacy();
-        let dir = tempfile::tempdir().expect("tempdir");
-        let ran = dir.path().join("auris-ran");
-        let stub = write_stub(
-            dir.path(),
-            "auris-records-a-run.sh",
-            &format!(
-                "#!/bin/sh\ntouch '{}'\necho parakeet-tdt-0.6b-v2-int8\n",
-                ran.display()
-            ),
-        );
         let daemon = audio::stub::Stub::serve(0, |_, path| {
             audio::stub::Reply::Json(
                 200,
@@ -819,12 +247,11 @@ mod tests {
             .unwrap();
             audio::invalidate();
         };
-        // SAFETY: `legacy()` holds both locks serializing these vars.
+        // SAFETY: `pinned()` holds both locks serializing these vars.
         unsafe {
             std::env::remove_var("NARU_AUDIO_URL");
             std::env::remove_var("MESA_AUDIO_URL");
             std::env::set_var("MESA_CONFIG_FILE", &config);
-            std::env::set_var("MESA_AURIS_BIN", &stub);
         }
         engine(&down);
         let stopped = status(false).unwrap();
@@ -832,7 +259,6 @@ mod tests {
         let ready = status(false).unwrap();
         let listed = models();
         let heard = transcribe(b"RIFF", None, None);
-        unsafe { std::env::remove_var("MESA_AURIS_BIN") };
 
         assert_eq!(stopped.state, AudioState::DaemonDown);
         assert!(!stopped.available, "a stopped daemon cannot decode");
@@ -843,20 +269,15 @@ mod tests {
         assert_eq!(ready.engine, "naru-audio");
         assert_eq!(listed, vec!["parakeet-tdt-0.6b-v2-int8"], "stt models only");
         assert_eq!(heard, Ok("from the daemon".to_string()));
-        assert!(!ran.exists(), "auris was run on the naru-audio engine");
     }
 
     /// The live banner's Retry (mesa task 1408): an ordinary `status` serves
     /// a `daemon_down` answer from the cache for [`audio::FAILURE_TTL`] even
     /// though the daemon has since started, while `status(true)` asks it
-    /// again and sees `ready`. On `legacy` the flag changes nothing.
+    /// again and sees `ready`.
     #[test]
     fn a_fresh_status_re_probes_a_daemon_the_cache_still_calls_down() {
-        let _guard = legacy();
-        let legacy_cached = serde_json::to_value(status(false).unwrap()).unwrap();
-        let legacy_fresh = serde_json::to_value(status(true).unwrap()).unwrap();
-        assert_eq!(legacy_fresh, legacy_cached, "fresh is inert on legacy");
-
+        let _guard = pinned();
         let dir = tempfile::tempdir().expect("tempdir");
         let dead = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = dead.local_addr().unwrap().port();
@@ -868,7 +289,7 @@ mod tests {
             format!(r#"{{"audio": {{"engine": "naru-audio", "url": "{url}"}}}}"#),
         )
         .unwrap();
-        // SAFETY: `legacy()` holds both locks serializing these vars.
+        // SAFETY: `pinned()` holds both locks serializing these vars.
         unsafe {
             std::env::remove_var("NARU_AUDIO_URL");
             std::env::remove_var("MESA_AUDIO_URL");
