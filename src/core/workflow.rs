@@ -1211,6 +1211,13 @@ fn cap(mut s: String) -> String {
     s
 }
 
+/// A run started from a live Claude Code session inherits that session's
+/// identity; a `cli` node is a detached step, so it must not look like the
+/// launcher to `task update --status done`'s close guard.
+fn drop_session_identity(cmd: &mut Command) {
+    cmd.env_remove("CLAUDE_CODE_SESSION_ID");
+}
+
 /// One node's execution: `Ok((output, route))` or the failure message.
 fn run_node<A: StoreAccess>(
     access: &A,
@@ -1262,6 +1269,7 @@ fn run_node<A: StoreAccess>(
                 .unwrap_or(DEFAULT_CLI_TIMEOUT_SECS);
             let mut cmd = crate::core::proc::bash();
             cmd.arg("-c").arg(str_of("command")).current_dir(cwd);
+            drop_session_identity(&mut cmd);
             if input.len() <= ENV_INPUT_MAX {
                 cmd.env("NARU_INPUT", input);
             }
@@ -2562,6 +2570,17 @@ mod tests {
         );
         assert_eq!(String::from_utf8_lossy(&out.stdout), "done\n");
         assert_eq!(out.code, 0);
+    }
+
+    #[test]
+    fn a_cli_node_drops_the_launchers_session_identity() {
+        let mut cmd = Command::new("bash");
+        cmd.arg("-c")
+            .arg("echo \"${CLAUDE_CODE_SESSION_ID-unset}\"");
+        cmd.env("CLAUDE_CODE_SESSION_ID", "live-session");
+        drop_session_identity(&mut cmd);
+        let out = agents::capture(cmd, None, Duration::from_secs(60)).unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "unset\n");
     }
 
     #[test]
