@@ -784,6 +784,85 @@ pub fn interrupt_in(runs: &Path, id: &str) -> Result<Value> {
     Ok(view(&dir, &job))
 }
 
+/// How long `run wait` blocks, and how it looks (naru task 1956).
+#[derive(Debug, Clone)]
+pub struct WaitOpts {
+    /// Give up after this long (`deadline`, exit 11).
+    pub deadline: Duration,
+    /// Give up when `events.jsonl` has grown by no line for this long
+    /// (`silent`, exit 10); `None` = no silence limit.
+    pub silence: Option<Duration>,
+    /// How often the job directory is looked at.
+    pub poll: Duration,
+}
+
+/// Default `--deadline` of `run wait`, seconds.
+pub const WAIT_DEADLINE_SECS: u64 = 600;
+/// How many main-thread events `run wait` prints with the job.
+const WAIT_TAIL: usize = 20;
+
+/// What `run wait` ended on: the `reason`, the process exit code it maps to,
+/// and the `{reason, job}` document printed.
+#[derive(Debug, Clone)]
+pub struct WaitOutcome {
+    pub reason: &'static str,
+    pub exit: i32,
+    pub value: Value,
+}
+
+pub fn wait(id: &str, opts: &WaitOpts) -> Result<WaitOutcome> {
+    wait_in(&runs_dir(), id, opts)
+}
+
+/// Blocks until the run's turn is done or it ends, reading `job.json`,
+/// `events.jsonl`, `inbox/` and `message-pending` only: it never stops,
+/// messages or touches the run. Reasons, in the order they are judged:
+/// `idle` (status idle with no message queued or pending, so the turn is
+/// done; seen at the first look it counts too; exit 0), `finished` (0),
+/// `failed` / `stopped` (12), `silent` (10) and `deadline` (11). An idle run
+/// with an undelivered inbox file or a `message-pending` marker is about to
+/// run a turn, so it keeps waiting.
+pub fn wait_in(runs: &Path, id: &str, opts: &WaitOpts) -> Result<WaitOutcome> {
+    let dir = job_dir_of(runs, id)?;
+    let started = Instant::now();
+    let events_len = |d: &Path| fs::metadata(d.join("events.jsonl")).map_or(0, |m| m.len());
+    let mut seen = events_len(&dir);
+    let mut last_line = Instant::now();
+    loop {
+        let job = load(&dir)?;
+        let n = events_len(&dir);
+        if n != seen {
+            seen = n;
+            last_line = Instant::now();
+        }
+        let queued = !pending_inbox(&dir.join("inbox")).is_empty() || pending_marker(&dir).exists();
+        let (reason, exit) = match job.status {
+            RunStatus::Idle if !queued => ("idle", 0),
+            RunStatus::Finished => ("finished", 0),
+            RunStatus::Failed => ("failed", 12),
+            RunStatus::Stopped => ("stopped", 12),
+            _ if opts.silence.is_some_and(|s| last_line.elapsed() >= s) => ("silent", 10),
+            _ if started.elapsed() >= opts.deadline => ("deadline", 11),
+            _ => {
+                std::thread::sleep(opts.poll);
+                continue;
+            }
+        };
+        let mut v = view(&dir, &job);
+        if let Some(o) = v.as_object_mut() {
+            o.insert(
+                "events".into(),
+                json!(events_of(&dir, Some(WAIT_TAIL), true)),
+            );
+        }
+        return Ok(WaitOutcome {
+            reason,
+            exit,
+            value: json!({"reason": reason, "job": v}),
+        });
+    }
+}
+
 /// Resumes every non-terminal run whose runner is dead; returns their ids.
 pub fn reconcile() -> Result<Vec<String>> {
     reconcile_in(&runs_dir())
@@ -1281,6 +1360,112 @@ mod tests {
         assert!(ids.contains(&live.job_id));
         assert!(ids.contains(&fresh.job_id));
         assert!(!ids.contains(&old.job_id));
+    }
+
+    fn wait_opts(deadline_ms: u64, silence_ms: Option<u64>) -> WaitOpts {
+        WaitOpts {
+            deadline: Duration::from_millis(deadline_ms),
+            silence: silence_ms.map(Duration::from_millis),
+            poll: Duration::from_millis(10),
+        }
+    }
+
+    fn wait_job(status: RunStatus) -> (tempfile::TempDir, tempfile::TempDir, Job, PathBuf) {
+        let runs = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let job = create_job(runs.path(), &opts("a", cwd.path())).unwrap();
+        let dir = runs.path().join(&job.job_id);
+        // The first message is delivered by now, as a live runner would have.
+        for f in pending_inbox(&dir.join("inbox")) {
+            fs::remove_file(f).unwrap();
+        }
+        let mut j = load(&dir).unwrap();
+        j.status = status;
+        j.last_result = Some("done it".into());
+        save(&dir, &mut j).unwrap();
+        (runs, cwd, job, dir)
+    }
+
+    #[test]
+    fn wait_returns_at_once_for_an_idle_or_ended_run_with_its_exit_code() {
+        for (status, reason, exit) in [
+            (RunStatus::Idle, "idle", 0),
+            (RunStatus::Finished, "finished", 0),
+            (RunStatus::Failed, "failed", 12),
+            (RunStatus::Stopped, "stopped", 12),
+        ] {
+            let (runs, _cwd, job, _dir) = wait_job(status);
+            let out = wait_in(runs.path(), &job.job_id, &wait_opts(5000, None)).unwrap();
+            assert_eq!((out.reason, out.exit), (reason, exit));
+            assert_eq!(out.value["reason"], reason);
+            assert_eq!(out.value["job"]["last_result"], "done it");
+            assert!(out.value["job"]["events"].is_array());
+        }
+    }
+
+    #[test]
+    fn wait_times_out_on_a_deadline_and_on_silence() {
+        let (runs, _cwd, job, _dir) = wait_job(RunStatus::Running);
+        let out = wait_in(runs.path(), &job.job_id, &wait_opts(150, None)).unwrap();
+        assert_eq!((out.reason, out.exit), ("deadline", 11));
+        let out = wait_in(runs.path(), &job.job_id, &wait_opts(5000, Some(150))).unwrap();
+        assert_eq!((out.reason, out.exit), ("silent", 10));
+    }
+
+    #[test]
+    fn wait_silence_clock_restarts_on_each_new_event_line() {
+        let (runs, _cwd, job, dir) = wait_job(RunStatus::Running);
+        let writer = std::thread::spawn(move || {
+            for _ in 0..6 {
+                std::thread::sleep(Duration::from_millis(60));
+                append_event(&dir, r#"{"type":"assistant"}"#);
+            }
+        });
+        let t = Instant::now();
+        let out = wait_in(runs.path(), &job.job_id, &wait_opts(5000, Some(250))).unwrap();
+        writer.join().unwrap();
+        assert_eq!(out.reason, "silent");
+        // 6 lines 60 ms apart then 250 ms of quiet: well past the silence limit alone.
+        assert!(t.elapsed() >= Duration::from_millis(500));
+    }
+
+    #[test]
+    fn wait_does_not_call_an_idle_run_done_while_a_message_is_pending() {
+        let (runs, _cwd, job, dir) = wait_job(RunStatus::Idle);
+        fs::write(dir.join("message-pending"), "").unwrap();
+        let out = wait_in(runs.path(), &job.job_id, &wait_opts(150, None)).unwrap();
+        assert_eq!(out.reason, "deadline");
+        fs::remove_file(dir.join("message-pending")).unwrap();
+        enqueue(&dir.join("inbox"), "next", false).unwrap();
+        let out = wait_in(runs.path(), &job.job_id, &wait_opts(150, None)).unwrap();
+        assert_eq!(out.reason, "deadline");
+    }
+
+    #[test]
+    fn wait_sees_a_status_change_made_while_it_blocks_and_never_modifies_the_run() {
+        let (runs, _cwd, job, dir) = wait_job(RunStatus::Running);
+        let before = fs::read(dir.join("job.json")).unwrap();
+        let d2 = dir.clone();
+        let flipper = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            let mut j = load(&d2).unwrap();
+            j.status = RunStatus::Idle;
+            save(&d2, &mut j).unwrap();
+        });
+        let out = wait_in(runs.path(), &job.job_id, &wait_opts(5000, None)).unwrap();
+        flipper.join().unwrap();
+        assert_eq!(out.reason, "idle");
+        assert_ne!(fs::read(dir.join("job.json")).unwrap(), before);
+        assert!(!dir.join("interrupt").exists() && !dir.join("stop").exists());
+    }
+
+    #[test]
+    fn wait_on_an_unknown_job_is_not_found() {
+        let runs = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            wait_in(runs.path(), "deadbeef", &wait_opts(100, None)),
+            Err(Error::NotFound(_))
+        ));
     }
 
     #[test]

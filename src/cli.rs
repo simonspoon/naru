@@ -461,6 +461,23 @@ EXAMPLES
         /// The run id
         job: String,
     },
+    /// Block until a run's turn is done or it ends; read-only, never touches the run
+    ///
+    /// Prints `{reason, job}` (the job with its last result and the tail of
+    /// its main-thread events). Exit 0 `idle` (turn done) or `finished`, 10
+    /// `silent` (no new event line for `--silence` seconds), 11 `deadline`,
+    /// 12 `failed` or `stopped`; an unknown run is `not_found`, exit 1.
+    Wait {
+        /// The run id
+        job: String,
+        /// Give up after this many seconds
+        #[arg(long, default_value_t = crate::core::runner::WAIT_DEADLINE_SECS)]
+        deadline: u64,
+        /// Give up when the event log has had no new line for this many
+        /// seconds (default: no silence limit)
+        #[arg(long)]
+        silence: Option<u64>,
+    },
     /// Resume every unfinished run whose runner died (what `serve` does at start)
     Reconcile,
     /// The detached runner itself; started by `run start`, not by hand
@@ -5268,6 +5285,24 @@ fn run_runs(cmd: RunCmd) -> Result<()> {
         RunCmd::List => print_json(&runner::list()?),
         RunCmd::Stop { job } => print_json(&runner::stop(&job)?),
         RunCmd::Interrupt { job } => print_json(&runner::interrupt(&job)?),
+        RunCmd::Wait {
+            job,
+            deadline,
+            silence,
+        } => {
+            let out = runner::wait(
+                &job,
+                &runner::WaitOpts {
+                    deadline: std::time::Duration::from_secs(deadline),
+                    silence: silence.map(std::time::Duration::from_secs),
+                    poll: std::time::Duration::from_millis(250),
+                },
+            )?;
+            print_json(&out.value);
+            if out.exit != 0 {
+                std::process::exit(out.exit);
+            }
+        }
         RunCmd::Reconcile => print_json(&json!({"resumed": runner::reconcile()?})),
         RunCmd::Runner { dir } => runner::run_runner(&dir)?,
     }

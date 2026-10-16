@@ -94,6 +94,33 @@ claude (naru task 1868): a plain send during such a wait was answered in
 5.3-6.2 s; without the check it was unanswered at 91 s. A wait that does not
 check the marker still holds the message until it returns.
 
+## Waiting for a turn (`naru run wait`, naru task 1956)
+
+`naru run wait <job> [--deadline SECS] [--silence SECS]` blocks until the
+run's turn is done or something needs a decision, printing `{reason, job}`
+(the job view with `last_result` and the last 20 main-thread events under
+`events`). CLI only, no route. It is **read-only**: it polls `job.json`,
+`events.jsonl`, `inbox/` and `message-pending` every 250 ms and never stops,
+messages or interrupts the run, so it works with no server and its caller
+decides what to do with the answer.
+
+| reason | when | exit |
+| --- | --- | --- |
+| `idle` | status `idle`: the turn is done (also when seen at the first look) | 0 |
+| `finished` | terminal `finished` (idle timeout wound it down) | 0 |
+| `silent` | `events.jsonl` got no new line for `--silence` seconds (default: no limit) | 10 |
+| `deadline` | `--deadline` seconds passed (default 600) | 11 |
+| `failed` / `stopped` | terminal `failed` / `stopped` | 12 |
+
+An unknown run is `not_found` (exit 1, error on stderr); 0/1/2 keep their
+usual meaning. `idle` is judged on `job.json`, never on a `send`/`stop` echo
+(those can be stale). An `idle` run that still has an undelivered `inbox/` file
+or a `message-pending` marker is **not** done: a turn is about to run or its
+last message is unread, so the wait continues until the status settles or
+silence/deadline fires. `idle` means a turn ended, not that the work is
+complete (a run may end its turn after starting background work): read
+`last_result`.
+
 ## Telemetry
 
 The runner's `claude -p` writes an ordinary transcript,
@@ -162,7 +189,7 @@ caller cannot choose one. A resume reloads `job.json` and so keeps it. The
 
 CLI (JSON out, `--quiet` accepted and ignored): `naru run start --model M [--cwd D]
 [--name L] [--agent A] [--idle-timeout S] <prompt>`, `send <job> <message>
-[--interrupt]`, `show <job> [--events] [--main] [--tail N]`, `list`, `stop <job>`, `interrupt <job>`, `reconcile`. Every job view carries
+[--interrupt]`, `show <job> [--events] [--main] [--tail N]`, `list`, `stop <job>`, `interrupt <job>`, `wait <job> [--deadline S] [--silence S]`, `reconcile`. Every job view carries
 derived `runner_alive` and `pending_messages`.
 
 API, every route `require_agent_access` (reads included — a run executes an

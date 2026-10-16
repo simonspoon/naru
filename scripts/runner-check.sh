@@ -462,6 +462,39 @@ code=$(curl -s -o "$TMP/scope.json" -w '%{http_code}' "$BASE/api/runs/$JS?scope=
 [ "$code" = 422 ] && [ "$(jq -r .error.code "$TMP/scope.json")" = validation ] || fail "scope: ?scope=bogus answered $code"
 ok "show --main / ?scope=main has no line with parent_tool_use_id or owned_by_subagent, default output unchanged, --tail counts after the filter, ?scope=bogus 422"
 
+# ---- wait: idle / silent / deadline / stopped, each with its exit code and JSON ----
+wait_rc() { # <outfile> <args...>: runs `run wait`, prints its exit code
+  local out=$1; shift
+  set +e; "$NARU" run wait "$@" >"$out" 2>"$out.err"; local rc=$?; set -e
+  echo "$rc"
+}
+echo 2 > "$STUB/sleep-secs"
+JW=$("$NARU" run start --model haiku --cwd "$TMP/work" "wait me" | jq -r .job_id)
+rc=$(wait_rc "$TMP/w1.json" "$JW" --deadline 30)
+[ "$rc" = 0 ] || fail "wait idle: rc=$rc $(cat "$TMP/w1.json" "$TMP/w1.json.err")"
+jq -e '.reason == "idle" and .job.status == "idle" and .job.last_result == "echo: wait me" and (.job.events | length) > 0' "$TMP/w1.json" >/dev/null || fail "wait idle json: $(cat "$TMP/w1.json")"
+rc=$(wait_rc "$TMP/w1b.json" "$JW" --deadline 5)
+[ "$rc" = 0 ] && jq -e '.reason == "idle"' "$TMP/w1b.json" >/dev/null || fail "wait on an already idle run: rc=$rc"
+echo 8 > "$STUB/sleep-secs"
+"$NARU" run send "$JW" "slow one" >/dev/null
+wait_for 10 "slow turn delivered" delivered_is "$JW" 2
+rc=$(wait_rc "$TMP/w2.json" "$JW" --silence 2 --deadline 30)
+[ "$rc" = 10 ] || fail "wait silent: rc=$rc $(cat "$TMP/w2.json")"
+jq -e '.reason == "silent" and .job.status == "running"' "$TMP/w2.json" >/dev/null || fail "wait silent json: $(cat "$TMP/w2.json")"
+rc=$(wait_rc "$TMP/w3.json" "$JW" --deadline 2)
+[ "$rc" = 11 ] || fail "wait deadline: rc=$rc $(cat "$TMP/w3.json")"
+jq -e '.reason == "deadline" and .job.status == "running"' "$TMP/w3.json" >/dev/null || fail "wait deadline json: $(cat "$TMP/w3.json")"
+[ ! -s "$STUB/control.log" ] || [ "$(wc -l < "$STUB/control.log" | tr -d " ")" = 1 ] || fail "wait must send nothing to claude"
+[ "$(grep -c message_delivered "$RUNS/$JW/events.jsonl")" = 2 ] || fail "wait must not message the run"
+"$NARU" run stop "$JW" >/dev/null
+wait_for 10 "wait run stopped" status_is "$JW" stopped
+rc=$(wait_rc "$TMP/w4.json" "$JW" --deadline 5)
+[ "$rc" = 12 ] && jq -e '.reason == "stopped"' "$TMP/w4.json" >/dev/null || fail "wait stopped: rc=$rc $(cat "$TMP/w4.json")"
+rc=$(wait_rc "$TMP/w5.json" deadbeef --deadline 1)
+[ "$rc" = 1 ] && [ "$(jq -r .error.code "$TMP/w5.json.err")" = not_found ] || fail "wait unknown run: rc=$rc $(cat "$TMP/w5.json.err")"
+echo 0 > "$STUB/sleep-secs"
+ok "wait: idle (0, also already idle), silent (10), deadline (11), stopped (12) each with {reason, job}; unknown run not_found; the run neither messaged nor interrupted"
+
 # ---- the gate: every route refuses a foreign Host ----
 for route in "GET /api/runs" "GET /api/runs/$ID" "POST /api/runs" "POST /api/runs/$ID/message" "POST /api/runs/$ID/stop" "POST /api/runs/$ID/interrupt"; do
   code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: evil.example:80' -H 'Content-Type: application/json' -X "${route%% *}" -d '{}' "$BASE${route#* }")
