@@ -28,7 +28,7 @@ over it, and picks a build path. Engine claims were re-checked against
 | Update an existing task / notify | `output task` only *creates* tasks; `output inbox` has a static `task_id`; no notify node | **Gap, workable**: `cli` nodes running `naru task update` and `naru notify` |
 | Pass the task id in | Trigger takes free text only | **Supported** by convention: the input *is* the task id |
 | Observe a run mid-flight | The run row is persisted `running` before and after each node (`workflow.rs` live steps, `Store::update_workflow_run_steps`, `store.rs:5730`); the current node is the step with status `running`. `WorkflowStep` has no `started_at` and a running node has no partial output; `cli` stdout is not readable until the node ends | **Partial**: current node yes, time on it only derivable, last output no |
-| Survive the starter | A run is owned by its starting process (`owner_pid`); if that CLI or serve dies, reconcile marks it `failed` | **Gap** for a 30+ minute run (task 1958) |
+| Survive the starter | A run is owned by its starting process (`owner_pid`); if that CLI or serve dies, reconcile marks it `failed` | Closed by `naru workflow run --detach` (task 1958): a detached job owns the run |
 
 Nothing in the findings I was given was wrong. Two refinements: `cli` accepts
 timeouts up to 86400 s while `prompt` caps at 3600; and the run row *does*

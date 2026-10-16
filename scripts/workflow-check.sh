@@ -409,6 +409,77 @@ run 0 "$NARU" workflow run-show "$RID"
 [ "$(jqs '.steps | map(.status) | join(",")')" = "ok,ok,ok" ] || fail "the stored run is final: $STDOUT"
 ok "a running run shows a running step for the node in flight, then the final steps"
 
+# ================= --detach: a run that outlives its invoker (naru task 1958) =================
+
+run 0 "$NARU" workflow create Detach
+run 0 "$NARU" workflow node create Detach trigger Start
+DT=$(jqs .id)
+run 0 "$NARU" workflow node create Detach cli Slow --config '{"command":"sleep 3; echo done"}'
+DS=$(jqs .id)
+"$NARU" workflow edge create Detach "$DT" "$DS" >/dev/null
+T0=$(date +%s)
+run 0 "$NARU" workflow run Detach --detach
+T1=$(date +%s)
+DRID=$(jqs .run_id)
+[ "$(jqs 'keys | join(",")')" = "run_id,status" ] || fail "detach prints run_id and status: $STDOUT"
+[ "$((T1 - T0))" -lt 3 ] || fail "--detach returned only after the 3s node ($((T1 - T0))s)"
+run 0 "$NARU" workflow run-show "$DRID"
+[ "$(jqs .status)" = "running" ] || fail "a detached run reads running at once: $STDOUT"
+ok "--detach returns before the 3s cli node finishes, with {run_id, status: running}"
+DOWNER=$(/usr/bin/sqlite3 "$MESA_DB" "SELECT owner_pid FROM workflow_runs WHERE id = $DRID")
+[ -n "$DOWNER" ] && [ "$DOWNER" != "$$" ] || fail "owner_pid is the job, not the invoker: $DOWNER"
+ps -p "$DOWNER" -o command= | grep -q "__job workflow-run" || fail "owner_pid $DOWNER is not a workflow-run job"
+for _ in $(seq 1 60); do
+  run 0 "$NARU" workflow run-show "$DRID"
+  [ "$(jqs .status)" != "running" ] && break
+  sleep 0.2
+done
+[ "$(jqs .status)" = "succeeded" ] || fail "the detached run finishes: $STDOUT"
+[ "$(jqs '.steps | map(.status) | join(",")')" = "ok,ok" ] || fail "detached run steps: $STDOUT"
+ok "a detached run reads running, then succeeded, owned by its __job process"
+
+# Killing the invoking CLI mid-run does not fail the run: the job owns it.
+"$NARU" workflow run Detach --detach >"$TMP/detach2.json" &
+INV=$!
+kill -9 "$INV" 2>/dev/null || true
+wait "$INV" 2>/dev/null || true
+for _ in $(seq 1 25); do
+  [ -s "$TMP/detach2.json" ] && break
+  sleep 0.1
+done
+if [ -s "$TMP/detach2.json" ]; then
+  D2=$(jq -r .run_id "$TMP/detach2.json")
+else
+  D2=$(/usr/bin/sqlite3 "$MESA_DB" "SELECT max(id) FROM workflow_runs")
+fi
+for _ in $(seq 1 60); do
+  run 0 "$NARU" workflow run-show "$D2"
+  [ "$(jqs .status)" != "running" ] && break
+  sleep 0.2
+done
+[ "$(jqs .status)" = "succeeded" ] || fail "killing the invoker must not fail the run: $STDOUT"
+ok "killing the invoking CLI mid-run leaves the detached run to finish succeeded"
+
+# Killing the job itself leaves an orphan, which serve's start-up reconcile fails.
+run 0 "$NARU" workflow run Detach --detach
+D3=$(jqs .run_id)
+D3PID=$(/usr/bin/sqlite3 "$MESA_DB" "SELECT owner_pid FROM workflow_runs WHERE id = $D3")
+kill -9 "$D3PID"
+sleep 0.3
+run 0 "$NARU" workflow run-show "$D3"
+[ "$(jqs .status)" = "running" ] || fail "a killed job leaves the row running until reconcile: $STDOUT"
+RPORT=17794
+"$NARU" serve --port "$RPORT" >"$TMP/serve-reconcile.log" 2>&1 &
+SERVER_PID=$!
+for _ in $(seq 1 50); do
+  curl -sf "http://127.0.0.1:$RPORT/api/projects" >/dev/null 2>&1 && break
+  sleep 0.1
+done
+run 0 "$NARU" workflow run-show "$D3"
+[ "$(jqs .status)" = "failed" ] || fail "a dead detached owner is reconciled to failed: $STDOUT"
+kill "$SERVER_PID" 2>/dev/null; wait "$SERVER_PID" 2>/dev/null || true; SERVER_PID=
+ok "a killed detached job is reconciled to failed by serve's start-up"
+
 # ================= prompt node: a background agent through the stub claude =================
 
 run 0 "$NARU" workflow create "Prompting"

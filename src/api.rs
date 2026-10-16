@@ -4623,6 +4623,9 @@ struct WorkflowRunBody {
     /// The run input the trigger node hands on; absent = empty.
     #[serde(default)]
     input: Option<String>,
+    /// `true` = start the run in a detached job and answer 202 at once.
+    #[serde(default)]
+    detach: bool,
 }
 
 #[derive(Deserialize)]
@@ -4814,7 +4817,9 @@ async fn delete_workflow_edge(
 /// between nodes, so a long run does not stall every other request. A run
 /// that *failed* is 200 with `status: "failed"` (the status is data, as a
 /// script's nonzero exit is); 422 is "could not run at all" (no or two
-/// triggers, input too large), 404 an unknown workflow.
+/// triggers, input too large), 404 an unknown workflow. With `"detach": true`
+/// the run is started in a detached job instead and the answer is 202
+/// `{"run_id","status":"running"}` (503 `unavailable` if the job cannot start).
 async fn run_workflow_route(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -4826,6 +4831,21 @@ async fn run_workflow_route(
     let Json(body) = body?;
     let input = body.input.unwrap_or_default();
     let store = state.store.clone();
+    if body.detach {
+        // A detached `naru __job workflow-run` owns the run (naru task 1958),
+        // so it outlives this server too.
+        let run = tokio::task::spawn_blocking(move || {
+            let mut s = store.lock().unwrap();
+            memory_job::start_workflow_run(&mut s, id, WorkflowTrigger::Manual, &input)
+        })
+        .await
+        .map_err(|e| agents_unavailable(format!("workflow run panicked: {e}")))??;
+        return Ok((
+            StatusCode::ACCEPTED,
+            Json(json!({"run_id": run.id, "status": run.status})),
+        )
+            .into_response());
+    }
     let run = tokio::task::spawn_blocking(move || {
         workflow::run_workflow(&*store, id, WorkflowTrigger::Manual, &input)
     })

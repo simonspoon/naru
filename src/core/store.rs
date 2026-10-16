@@ -5694,6 +5694,18 @@ impl Store {
         Ok(closed)
     }
 
+    /// Hands a `running` run to the process that executes it (naru task 1958:
+    /// the detached `naru __job workflow-run`), so reconcile judges that pid
+    /// and not the invoker's. A finished run is left alone.
+    pub fn set_workflow_run_owner(&mut self, id: i64, pid: i64) -> Result<()> {
+        self.get_workflow_run(id)?;
+        self.conn.execute(
+            "UPDATE workflow_runs SET owner_pid = ?1 WHERE id = ?2 AND status = 'running'",
+            (pid, id),
+        )?;
+        Ok(())
+    }
+
     /// Closes a `running` run with its outcome. `not_found` for an unknown id,
     /// `conflict` for one already finished.
     pub fn finish_workflow_run(

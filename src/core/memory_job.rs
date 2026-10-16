@@ -60,6 +60,9 @@ pub enum Job {
     /// File one spooled `naru kb add` text into the knowledge base (naru task
     /// 1919): haiku `-p` calls, applied by `core::kb`.
     KbAdd { id: String, source: String },
+    /// Execute one claimed workflow run (naru task 1958): the `running` row
+    /// is the claim, written by the invoker; the job becomes its owner.
+    WorkflowRun { run_id: i64 },
 }
 
 impl Job {
@@ -91,6 +94,9 @@ impl Job {
             Job::Retro { run_id } => {
                 a.extend(["retro".into(), "--run".into(), run_id.to_string()]);
             }
+            Job::WorkflowRun { run_id } => {
+                a.extend(["workflow-run".into(), "--run".into(), run_id.to_string()]);
+            }
             Job::KbAdd { id, source } => {
                 a.extend(["kb-add".into(), "--id".into(), id.clone()]);
                 // `=` form: a source label starting with `-` stays a value.
@@ -107,6 +113,7 @@ impl Job {
             Job::InboxTriage { .. } => "inbox-triage.log",
             Job::Retro { .. } => "retro.log",
             Job::KbAdd { .. } => "kb.log",
+            Job::WorkflowRun { .. } => "workflow-run.log",
             _ => "memory-jobs.log",
         }
     }
@@ -169,6 +176,48 @@ pub fn spawn(job: &Job, dir: &str, db: Option<&Path>) -> std::result::Result<Str
     Ok(marker)
 }
 
+/// Claims a workflow run (the `running` row) and executes it in a detached
+/// `naru __job workflow-run` (naru task 1958), so the run outlives the
+/// invoker. The row's `owner_pid` is handed to the job's pid at once; the
+/// job re-stamps it itself. A job that cannot start fails the row (it is a
+/// recorded `failed` run, not a stranded `running` one) and answers
+/// `unavailable`.
+pub fn start_workflow_run(
+    store: &mut Store,
+    workflow_id: i64,
+    trigger: crate::core::WorkflowTrigger,
+    input: &str,
+) -> Result<crate::core::WorkflowRun> {
+    let (_, run) = crate::core::workflow::claim_run(store, workflow_id, trigger, input)?;
+    let dir = config::workspace_dir().to_string_lossy().into_owned();
+    let spawned = spawn(
+        &Job::WorkflowRun { run_id: run.id },
+        &dir,
+        store.db_path().as_deref(),
+    );
+    match spawned {
+        Ok(marker) => {
+            if let Some(pid) = marker.strip_prefix("pid:").and_then(|n| n.parse().ok()) {
+                store.set_workflow_run_owner(run.id, pid)?;
+            }
+            store.get_workflow_run(run.id)
+        }
+        Err(e) => {
+            let msg = format!("could not start the detached run: {e}");
+            let _ = store.finish_workflow_run(
+                run.id,
+                crate::core::WorkflowRunStatus::Failed,
+                &[],
+                Some(&msg),
+            );
+            Err(Error::Unavailable(format!(
+                "workflow run {} {msg}; the run was marked failed",
+                run.id
+            )))
+        }
+    }
+}
+
 /// Whether the job a stored receipt names is still running. `pid:<n>` is
 /// alive iff the pid exists **and** its command line is a `__job` (a recycled
 /// pid names some other program); anything else is a `claude --bg` job id
@@ -192,10 +241,33 @@ pub fn is_running(marker: &str) -> bool {
 /// one-line JSON report. Called in the detached child.
 pub fn run(job: &Job, dir: &str) -> Result<()> {
     let mut store = Store::open_default()?;
+    if let Job::WorkflowRun { run_id } = job {
+        let report = run_workflow_job(store, *run_id)?;
+        println!("{report}");
+        let _ = std::io::stdout().flush();
+        return Ok(());
+    }
     let report = run_with(&mut store, job, dir, JOB_TIMEOUT)?;
     println!("{report}");
     let _ = std::io::stdout().flush();
     Ok(())
+}
+
+/// The body of `naru __job workflow-run`: takes ownership of the claimed run
+/// (this process's pid, so a reconcile judges the job and not the invoker),
+/// then executes it with the engine and finishes the row.
+fn run_workflow_job(mut store: Store, run_id: i64) -> Result<Value> {
+    let run = store.get_workflow_run(run_id)?;
+    if run.status != crate::core::WorkflowRunStatus::Running {
+        return Err(Error::Conflict(format!(
+            "workflow run {run_id} is already finished"
+        )));
+    }
+    store.set_workflow_run_owner(run_id, std::process::id() as i64)?;
+    let view = store.get_workflow_view(run.workflow_id)?;
+    let access = std::sync::Mutex::new(store);
+    let done = crate::core::workflow::execute_run(&access, &view, run)?;
+    Ok(json!({"kind": "workflow-run", "run_id": run_id, "status": done.status}))
 }
 
 /// [`run`] against an open store and a chosen timeout: builds the prompt from
@@ -281,6 +353,9 @@ pub fn run_with(store: &mut Store, job: &Job, dir: &str, timeout: Duration) -> R
                 )
             })
         }
+        Job::WorkflowRun { .. } => Err(Error::Validation(
+            "a workflow-run job runs through memory_job::run".into(),
+        )),
         Job::KbAdd { id, source } => {
             kb::run_add_job(&kb::kb_dir(), id, source, &mut |prompt, schema| {
                 llm::complete_structured(
@@ -574,6 +649,11 @@ mod tests {
             ]
         );
         assert_eq!(triage.log_name(), "inbox-triage.log");
+        let wf = Job::WorkflowRun { run_id: 8 };
+        assert_eq!(
+            wf.args("/w"),
+            ["__job", "workflow-run", "--run", "8", "--dir", "/w"]
+        );
         let retro = Job::Retro { run_id: 3 };
         assert_eq!(
             retro.args("/w"),

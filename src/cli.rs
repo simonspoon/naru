@@ -604,6 +604,14 @@ enum JobCmd {
         #[arg(long)]
         dir: String,
     },
+    /// Execute one claimed workflow run (`workflow run --detach`)
+    WorkflowRun {
+        /// The `workflow_runs` row that claimed this run
+        #[arg(long)]
+        run: i64,
+        #[arg(long)]
+        dir: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1946,11 +1954,18 @@ EXAMPLES
     /// as `script run` treats a script's nonzero exit — the status is data.
     /// Exit 1 is for "could not run at all": an unknown workflow, no (or two)
     /// trigger nodes, an input over 256 KiB.
+    ///
+    /// With `--detach` the run row is written `running`, a hidden detached
+    /// `naru __job workflow-run` executes it (it outlives this command and
+    /// its terminal, and owns the row), and the command prints
+    /// `{"run_id","status":"running"}` at once; read the outcome with
+    /// `workflow run-show <id>`. A job that cannot start is `unavailable`.
     #[command(after_help = "\
 EXAMPLES
   naru workflow run ambient
   naru workflow run \"Label idea\" --input \"buy milk\" --trigger voice
-  naru workflow run ambient --input-file notes.txt")]
+  naru workflow run ambient --input-file notes.txt
+  naru workflow run \"Nightly\" --detach")]
     Run {
         /// Workflow id or name
         workflow: String,
@@ -1963,6 +1978,9 @@ EXAMPLES
         /// What started this run: `manual` (the default) or `voice`
         #[arg(long, value_name = "TRIGGER", default_value = "manual", value_parser = parse_workflow_trigger)]
         trigger: WorkflowTrigger,
+        /// Start the run in a detached job and print its id at once
+        #[arg(long)]
+        detach: bool,
         /// Print the run without `steps` and `input` instead of in full
         #[arg(long)]
         quiet: bool,
@@ -5256,6 +5274,9 @@ fn execute(command: Command) -> Result<()> {
                     dir,
                 ),
                 JobCmd::Retro { run, dir } => (memory_job::Job::Retro { run_id: run }, dir),
+                JobCmd::WorkflowRun { run, dir } => {
+                    (memory_job::Job::WorkflowRun { run_id: run }, dir)
+                }
                 JobCmd::KbAdd { id, source, dir } => (memory_job::Job::KbAdd { id, source }, dir),
                 JobCmd::InboxTriage { item, name, dir } => (
                     memory_job::Job::InboxTriage {
@@ -8369,11 +8390,17 @@ fn run_workflow_cmd(cmd: WorkflowCmd) -> Result<()> {
             input,
             input_file,
             trigger,
+            detach,
             quiet,
         } => {
             let id = resolve_workflow(&store, &workflow)?.id;
             let mut stdin_used = false;
             let input = resolve_field(input, input_file, &mut stdin_used)?.unwrap_or_default();
+            if detach {
+                let run = memory_job::start_workflow_run(&mut store, id, trigger, &input)?;
+                print_json(&json!({"run_id": run.id, "status": run.status}));
+                return Ok(());
+            }
             // The engine borrows the store only around a node, never across
             // its process; the CLI hands it the one it owns behind a `Mutex`.
             let access = std::sync::Mutex::new(store);

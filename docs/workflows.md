@@ -250,6 +250,18 @@ binds (`Store::reconcile_workflow_runs`, `reconcile_script_runs`' rule): a
 `failed` with `server restarted: …`; a run owned by another **live** process (a
 CLI run, a second `serve`) is never touched.
 
+**Detached runs** (naru task 1958). `naru workflow run <wf> --detach` (or
+`POST /api/workflows/{id}/run` with `{"detach": true}`) writes the `running`
+row, starts a hidden detached `naru __job workflow-run --run <id>`
+(`core::memory_job`: own process group, stdio off, output to
+`logs/workflow-run.log`) and answers at once — the CLI prints
+`{"run_id","status":"running"}`, the route is 202 with the same body. The job
+becomes the row's `owner_pid`, so the run outlives the CLI or server that
+started it; read it with `workflow run-show <id>`. If the job dies, the row
+stays `running` until the next `serve` start reconciles it to `failed` as
+above. A job that cannot start fails the row and answers `unavailable`.
+Without `--detach` nothing changes.
+
 ## CLI (`naru workflow`)
 
 JSON only, positional-or-flag create shapes, `<id|name>` everywhere a workflow
