@@ -136,3 +136,42 @@ export function hideSubtasks<T extends { parent_id: number | null }>(
 ): T[] {
   return hide ? tasks.filter((t) => t.parent_id === null) : tasks
 }
+
+// "Hide child-project tasks" board toggle (naru task 1948): same shape as the
+// hide-subtasks switch above — one global, per-browser flag, default off.
+export const HIDE_CHILD_PROJECTS_KEY = 'naru-board-hide-child-projects'
+
+export function loadHideChildProjects(): boolean {
+  try {
+    return localStorage.getItem(HIDE_CHILD_PROJECTS_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
+export function saveHideChildProjects(hide: boolean): void {
+  try {
+    if (hide) localStorage.setItem(HIDE_CHILD_PROJECTS_KEY, '1')
+    else localStorage.removeItem(HIDE_CHILD_PROJECTS_KEY)
+  } catch {
+    // Storage unavailable — the toggle just won't persist.
+  }
+}
+
+/** True when any task belongs to a project other than the board's own, i.e.
+ *  the board aggregates child-project tasks. */
+export function hasChildProjectTasks(
+  tasks: { project_id: number }[],
+  boardProjectId: number,
+): boolean {
+  return tasks.some((t) => t.project_id !== boardProjectId)
+}
+
+/** Drop tasks of other (child) projects when `hide` is on; identity otherwise. */
+export function hideChildProjectTasks<T extends { project_id: number }>(
+  tasks: T[],
+  boardProjectId: number,
+  hide: boolean,
+): T[] {
+  return hide ? tasks.filter((t) => t.project_id === boardProjectId) : tasks
+}

@@ -399,6 +399,7 @@ export function ProjectTasksPage({
             onMoved={onTasksChanged}
             projectName={project?.name ?? null}
             sessions={sessions}
+            boardProjectId={projectId}
           />
         )
     }

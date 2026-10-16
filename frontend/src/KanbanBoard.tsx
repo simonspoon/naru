@@ -15,9 +15,13 @@ import { CSS } from '@dnd-kit/utilities'
 import { updateTaskPosition } from './api'
 import {
   capColumn,
+  hasChildProjectTasks,
+  hideChildProjectTasks,
   hideSubtasks,
   liveAgentCount,
+  loadHideChildProjects,
   loadHideSubtasks,
+  saveHideChildProjects,
   saveHideSubtasks,
   DONE_INITIAL,
   DONE_PAGE,
@@ -222,9 +226,12 @@ export function KanbanBoard({
   onMoved,
   projectName,
   sessions,
+  boardProjectId,
 }: {
   tasks: TaskSummary[]
   onMoved: () => void
+  // The project whose board this is; tasks of any other project are child-project tasks.
+  boardProjectId: number
   // The two halves of the live-agent marker (mesa task 663). Both are
   // nullable and purely decorative: the board renders identically when the
   // project hasn't loaded or `/api/agents` is unavailable (it is gated, and
@@ -242,7 +249,13 @@ export function KanbanBoard({
   // It resets when the board unmounts, i.e. on navigating away.
   const [shownDone, setShownDone] = useState(DONE_INITIAL)
   const [hideSubs, setHideSubs] = useState(loadHideSubtasks)
-  const shownTasks = hideSubtasks(tasks, hideSubs)
+  const [hideChildren, setHideChildren] = useState(loadHideChildProjects)
+  const aggregates = hasChildProjectTasks(tasks, boardProjectId)
+  const shownTasks = hideChildProjectTasks(
+    hideSubtasks(tasks, hideSubs),
+    boardProjectId,
+    aggregates && hideChildren,
+  )
   // Mouse and touch get *different* activation gestures, which is why this is
   // MouseSensor + TouchSensor rather than the one PointerSensor that covers
   // both (mesa task 555).
@@ -316,6 +329,7 @@ export function KanbanBoard({
   return (
     <>
       {error && <p className="error">{error}</p>}
+      <div className="kanban-toolbars">
       <label className="kanban-toolbar">
         <input
           type="checkbox"
@@ -327,6 +341,20 @@ export function KanbanBoard({
         />{' '}
         Hide subtasks
       </label>
+      {aggregates && (
+        <label className="kanban-toolbar">
+          <input
+            type="checkbox"
+            checked={hideChildren}
+            onChange={(e) => {
+              setHideChildren(e.target.checked)
+              saveHideChildProjects(e.target.checked)
+            }}
+          />{' '}
+          Hide child-project tasks
+        </label>
+      )}
+      </div>
       <DndContext
         sensors={sensors}
         onDragStart={handleDragStart}

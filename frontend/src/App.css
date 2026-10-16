@@ -12587,3 +12587,10 @@ body.dock-resizing .dock-body {
   color: var(--muted);
   cursor: pointer;
 }
+
+/* Row holding the board's toggles (naru task 1948). */
+.kanban-toolbars {
+  display: flex;
+  flex-wrap: wrap;
+  column-gap: 1rem;
+}

@@ -1,7 +1,11 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import {
   capColumn,
+  hasChildProjectTasks,
+  hideChildProjectTasks,
   hideSubtasks,
+  loadHideChildProjects,
+  saveHideChildProjects,
   loadHideSubtasks,
   saveHideSubtasks,
   liveAgentCount,
@@ -216,5 +220,31 @@ describe('hide subtasks', () => {
     ]
     expect(hideSubtasks(ts, false)).toBe(ts)
     expect(hideSubtasks(ts, true)).toEqual([{ id: 1, parent_id: null }])
+  })
+})
+
+describe('hide child-project tasks', () => {
+  beforeEach(() => localStorage.clear())
+
+  it('defaults off and round-trips through localStorage', () => {
+    expect(loadHideChildProjects()).toBe(false)
+    saveHideChildProjects(true)
+    expect(loadHideChildProjects()).toBe(true)
+    saveHideChildProjects(false)
+    expect(loadHideChildProjects()).toBe(false)
+  })
+
+  it('keeps only the board project own tasks when on', () => {
+    const ts = [
+      { id: 1, project_id: 5 },
+      { id: 2, project_id: 9 },
+    ]
+    expect(hideChildProjectTasks(ts, 5, false)).toBe(ts)
+    expect(hideChildProjectTasks(ts, 5, true)).toEqual([{ id: 1, project_id: 5 }])
+  })
+
+  it('detects an aggregating board', () => {
+    expect(hasChildProjectTasks([{ project_id: 5 }], 5)).toBe(false)
+    expect(hasChildProjectTasks([{ project_id: 5 }, { project_id: 9 }], 5)).toBe(true)
   })
 })
