@@ -2027,6 +2027,20 @@ EXAMPLES
         #[arg(long)]
         quiet: bool,
     },
+    /// Print a derived status snapshot of one run (read-only)
+    ///
+    /// The running step and its elapsed time, steps done/total, the last
+    /// finished step's output tail and, for a task-loop run, the stage
+    /// driver's `status.json` (stage, nudges, restarts) with a `stalled`
+    /// flag. `--follow` prints a fresh snapshot every 3 seconds until the
+    /// run ends.
+    Watch {
+        /// Run id
+        id: i64,
+        /// Keep printing a snapshot every 3 seconds until the run ends
+        #[arg(long)]
+        follow: bool,
+    },
     /// Print the newest lines of a log (what `output` nodes with
     /// target `log` write), newest first
     ///
@@ -8438,6 +8452,14 @@ fn run_workflow_cmd(cmd: WorkflowCmd) -> Result<()> {
         WorkflowCmd::RunShow { id, quiet } => {
             print_workflow_run(&store.get_workflow_run(id)?, quiet)
         }
+        WorkflowCmd::Watch { id, follow } => loop {
+            let snap = workflow::run_status(&store, id)?;
+            print_json(&snap);
+            if !follow || snap["status"] != "running" {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_secs(3));
+        },
         WorkflowCmd::Defaults { project, task_loop } => {
             let project = resolve_project(&store, &project)?;
             let (created, skipped) = if task_loop {

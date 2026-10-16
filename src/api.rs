@@ -3135,6 +3135,7 @@ fn router(state: AppState) -> Router {
         )
         .route("/api/workflow-edges/{id}", delete(delete_workflow_edge))
         .route("/api/workflow-runs/{id}", get(show_workflow_run))
+        .route("/api/workflow-runs/{id}/status", get(workflow_run_status))
         .route("/api/workflow-log", get(list_workflow_log))
         .route("/api/inbox", get(list_inbox).post(create_inbox))
         .route(
@@ -4916,6 +4917,17 @@ async fn show_workflow_run(
     require_agent_access(&state, &addr, &headers)?;
     let store = state.store.lock().unwrap();
     Ok(Json(store.get_workflow_run(id)?).into_response())
+}
+
+async fn workflow_run_status(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let store = state.store.lock().unwrap();
+    Ok(Json(workflow::run_status(&store, id)?).into_response())
 }
 
 async fn list_workflow_log(

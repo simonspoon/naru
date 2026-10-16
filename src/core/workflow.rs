@@ -1569,6 +1569,162 @@ pub fn first_number(s: &str) -> Option<f64> {
     None
 }
 
+// ---- the status watcher (naru task 1961) ------------------------------------
+
+/// Bytes of a finished step's output the status snapshot carries (its tail).
+const WATCH_OUTPUT_TAIL: usize = 2048;
+
+/// The last `cap` bytes of `s`, cut on a char boundary.
+fn tail_bytes(s: &str, cap: usize) -> String {
+    if s.len() <= cap {
+        return s.to_string();
+    }
+    let mut start = s.len() - cap;
+    while !s.is_char_boundary(start) {
+        start += 1;
+    }
+    s[start..].to_string()
+}
+
+/// The stage clock the task-loop gives each stage (`dl` in `LOOP_PRELUDE`),
+/// for a `status.json` that carries no deadline of its own.
+fn loop_stage_deadline(stage: &str) -> Option<i64> {
+    if let Some(v) = std::env::var("NARU_LOOP_DEADLINE")
+        .ok()
+        .and_then(|v| v.trim().parse::<i64>().ok())
+    {
+        return Some(v);
+    }
+    match stage {
+        "plan" => Some(900),
+        "ux" => Some(600),
+        s if s.starts_with("impl") => Some(2400),
+        s if s.starts_with("review") => Some(1500),
+        _ => None,
+    }
+}
+
+/// The scratch folder a task-loop run's state line names (`scratch=<dir>`),
+/// read off the newest step output that carries one.
+fn run_scratch(run: &WorkflowRun) -> Option<String> {
+    run.steps.iter().rev().find_map(|s| {
+        s.output.lines().rev().find_map(|l| {
+            l.split_whitespace()
+                .find_map(|w| w.strip_prefix("scratch="))
+                .filter(|d| !d.is_empty())
+                .map(str::to_string)
+        })
+    })
+}
+
+/// The freshest stage-driver `status.json` under a run's scratch folder
+/// (`<scratch>/<stage>/status.json`), or `None` when none parses.
+fn read_stage_status(scratch: &str) -> Option<Value> {
+    let mut best: Option<(i64, Value)> = None;
+    for entry in std::fs::read_dir(scratch).ok()?.flatten() {
+        let Ok(text) = std::fs::read_to_string(entry.path().join("status.json")) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
+        let at = v.get("updated_at").and_then(Value::as_i64).unwrap_or(0);
+        if best.as_ref().is_none_or(|(b, _)| at >= *b) {
+            best = Some((at, v));
+        }
+    }
+    best.map(|(_, v)| v)
+}
+
+/// A derived, read-only snapshot of one run for `naru workflow watch` and
+/// `GET /api/workflow-runs/{id}/status`: the running step, steps done/total,
+/// the last finished step's output tail and, when the stage driver's
+/// `status.json` can be found, its stage/nudges/restarts. Never stored; any
+/// part that cannot be read is `null`. Only an unknown run is an error.
+pub fn run_status(store: &Store, id: i64) -> Result<Value> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
+    run_status_at(store, id, now)
+}
+
+fn run_status_at(store: &Store, id: i64, now: i64) -> Result<Value> {
+    let run = store.get_workflow_run(id)?;
+    let total = store
+        .get_workflow_view(run.workflow_id)
+        .ok()
+        .map(|v| v.nodes.len());
+    let done = run
+        .steps
+        .iter()
+        .filter(|s| s.status != WorkflowStepStatus::Running)
+        .count();
+    let running = run
+        .steps
+        .iter()
+        .find(|s| s.status == WorkflowStepStatus::Running);
+    let last_done = run.steps.iter().rev().find(|s| {
+        matches!(
+            s.status,
+            WorkflowStepStatus::Ok | WorkflowStepStatus::Failed
+        )
+    });
+    let elapsed = running.and_then(|s| s.started_at).map(|t| (now - t).max(0));
+    let stage = run_scratch(&run).and_then(|d| read_stage_status(&d));
+    let agent = stage
+        .as_ref()
+        .and_then(|v| v.get("agents"))
+        .and_then(Value::as_array)
+        .and_then(|a| {
+            a.iter()
+                .find(|x| x.get("state").and_then(Value::as_str) == Some("running"))
+                .or_else(|| a.first())
+        });
+    let stage_name = stage
+        .as_ref()
+        .and_then(|v| v.get("stage"))
+        .and_then(Value::as_str);
+    let deadline = stage
+        .as_ref()
+        .and_then(|v| v.get("deadline_secs"))
+        .and_then(Value::as_i64)
+        .or_else(|| stage_name.and_then(loop_stage_deadline));
+    let stalled = running.is_some() && matches!((elapsed, deadline), (Some(e), Some(d)) if e > d);
+    let agent_field = |k: &str| agent.and_then(|a| a.get(k)).cloned().unwrap_or(Value::Null);
+    Ok(json!({
+        "run_id": run.id,
+        "workflow_id": run.workflow_id,
+        "status": run.status,
+        "running_step": running.map(|s| json!({
+            "title": s.title,
+            "kind": s.kind,
+            "started_at": s.started_at,
+            "elapsed_secs": elapsed,
+        })),
+        "steps_done": done,
+        "steps_total": total,
+        "last_step": last_done.map(|s| json!({
+            "title": s.title,
+            "status": s.status,
+            "output_tail": tail_bytes(&s.output, WATCH_OUTPUT_TAIL),
+        })),
+        "stage": stage.as_ref().map(|v| json!({
+            "stage": stage_name,
+            "updated_at": v.get("updated_at").cloned().unwrap_or(Value::Null),
+            "agent": agent_field("agent"),
+            "state": agent_field("state"),
+            "job_id": agent_field("job_id"),
+            "last_event_at": agent_field("last_event_at"),
+            "nudges": agent_field("nudges"),
+            "restarts": agent_field("restarts"),
+            "output_tail": agent_field("output_tail"),
+        })),
+        "deadline_secs": deadline,
+        "stalled": stalled,
+        "error": run.error,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1779,6 +1935,91 @@ mod tests {
             Some(WorkflowTrigger::Manual)
         );
         assert_eq!(s.get_workflow(wf2).unwrap().trigger, None);
+    }
+
+    #[test]
+    fn run_status_reads_the_running_step_and_the_stage_file() {
+        let (st, d) = store();
+        let scratch = d.path().join("loop");
+        std::fs::create_dir_all(scratch.join("impl1")).unwrap();
+        let (wf, run) = st.with(|s| {
+            let wf = s.create_workflow(None, "W", None).unwrap().id;
+            let t = node(
+                s,
+                wf,
+                WorkflowNodeKind::Trigger,
+                "T",
+                json!({"mode": "manual"}),
+            );
+            let c = node(s, wf, WorkflowNodeKind::Cli, "Impl", cli("true"));
+            s.create_workflow_edge(wf, t, c, None).unwrap();
+            let run = s
+                .create_workflow_run(wf, WorkflowTrigger::Manual, "")
+                .unwrap();
+            let steps = vec![
+                WorkflowStep {
+                    node_id: t,
+                    title: "T".into(),
+                    kind: WorkflowNodeKind::Trigger,
+                    status: WorkflowStepStatus::Ok,
+                    output: format!("task=1 scratch={} ui=no", scratch.display()),
+                    error: None,
+                    duration_ms: 1,
+                    started_at: Some(900),
+                },
+                WorkflowStep {
+                    node_id: c,
+                    title: "Impl".into(),
+                    kind: WorkflowNodeKind::Cli,
+                    status: WorkflowStepStatus::Running,
+                    output: String::new(),
+                    error: None,
+                    duration_ms: 0,
+                    started_at: Some(1000),
+                },
+            ];
+            s.update_workflow_run_steps(run.id, &steps).unwrap();
+            (wf, run.id)
+        });
+        let _ = wf;
+        // No status file yet: the stage part is null, the rest is derived.
+        let v = st.with(|s| run_status_at(s, run, 1100)).unwrap();
+        assert_eq!(v["status"], "running");
+        assert_eq!(v["running_step"]["title"], "Impl");
+        assert_eq!(v["running_step"]["elapsed_secs"], 100);
+        assert_eq!(v["steps_done"], 1);
+        assert_eq!(v["steps_total"], 2);
+        assert!(v["stage"].is_null());
+        assert_eq!(v["stalled"], false);
+        // Garbage status file: still null, not an error.
+        std::fs::write(scratch.join("impl1/status.json"), "{nope").unwrap();
+        let v = st.with(|s| run_status_at(s, run, 1100)).unwrap();
+        assert!(v["stage"].is_null());
+        // A real one, with a deadline the step has passed.
+        std::fs::write(
+            scratch.join("impl1/status.json"),
+            json!({"stage": "impl1", "updated_at": 1090, "deadline_secs": 50,
+                "agents": [{"agent": "implementer", "job_id": "j1", "state": "running",
+                    "last_event_at": 1080, "nudges": 1, "restarts": 0, "output_tail": "tail"}]})
+            .to_string(),
+        )
+        .unwrap();
+        let v = st.with(|s| run_status_at(s, run, 1100)).unwrap();
+        assert_eq!(v["stage"]["stage"], "impl1");
+        assert_eq!(v["stage"]["nudges"], 1);
+        assert_eq!(v["stage"]["output_tail"], "tail");
+        assert_eq!(v["deadline_secs"], 50);
+        assert_eq!(v["stalled"], true);
+        assert!(
+            v["last_step"]["output_tail"]
+                .as_str()
+                .unwrap()
+                .contains("scratch=")
+        );
+        assert!(matches!(
+            st.with(|s| run_status_at(s, 99999, 1100)),
+            Err(Error::NotFound(_))
+        ));
     }
 
     #[test]

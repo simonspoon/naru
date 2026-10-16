@@ -402,12 +402,21 @@ done
 [ -n "$SEEN" ] || fail "no run-show with a running step for the slow node while it ran"
 [ "$(jq -r '.status' <<<"$SEEN")" = "running" ] || fail "the run is running while its node is: $SEEN"
 [ "$(jq -r '.steps | map(.status) | join(",")' <<<"$SEEN")" = "ok,running" ] || fail "steps so far: $SEEN"
+run 0 "$NARU" workflow watch "$RID"
+[ "$(jqs '.status')" = "running" ] && [ "$(jqs '.running_step.title')" = "Slow" ] && [ "$(jqs '.running_step.kind')" = "cli" ] \
+  && [ "$(jqs '.running_step.elapsed_secs >= 0')" = "true" ] && [ "$(jqs '.steps_done')" = "1" ] && [ "$(jqs '.steps_total')" = "3" ] \
+  && [ "$(jqs '.stage')" = "null" ] && [ "$(jqs '.stalled')" = "false" ] || fail "watch mid-run: $STDOUT"
 wait "$LIVE_PID"
 [ "$(jq -r .status "$TMP/live-run.json")" = "succeeded" ] || fail "live run finishes: $(cat "$TMP/live-run.json")"
 [ "$(jq -r '.steps | map(.status) | join(",")' "$TMP/live-run.json")" = "ok,ok,ok" ] || fail "final steps unchanged"
 run 0 "$NARU" workflow run-show "$RID"
 [ "$(jqs '.steps | map(.status) | join(",")')" = "ok,ok,ok" ] || fail "the stored run is final: $STDOUT"
 ok "a running run shows a running step for the node in flight, then the final steps"
+run 0 "$NARU" workflow watch "$RID" --follow --quiet
+[ "$(jqs '.status')" = "succeeded" ] && [ "$(jqs '.running_step')" = "null" ] && [ "$(jqs '.steps_done')" = "3" ] \
+  && [ "$(jqs '.last_step.title')" = "After" ] || fail "watch after the run: $STDOUT"
+run 1 "$NARU" workflow watch 99999
+ok "workflow watch: a running snapshot mid-run, a final one after (--follow exits at once), unknown run not_found"
 
 # ================= --detach: a run that outlives its invoker (naru task 1958) =================
 
@@ -1139,7 +1148,7 @@ raw() { # raw <method> <path> [extra curl args...]
 JSON=(-H 'Content-Type: application/json' -d '{}')
 EVIL=(-H "Host: 127.0.0.1:$PORT" -H 'Origin: https://evil.example')
 for route in "GET /api/workflows" "GET /api/workflows/$AW" "GET /api/workflows/$AW/runs" \
-  "GET /api/workflow-runs/$AR" "GET /api/workflow-log"; do
+  "GET /api/workflow-runs/$AR" "GET /api/workflow-runs/$AR/status" "GET /api/workflow-log"; do
   set -- $route
   raw "$1" "$2" "${EVIL[@]}"
   [ "$STATUS" = "403" ] || fail "default: $route with a foreign Origin must be 403, got $STATUS"
@@ -1156,6 +1165,12 @@ raw GET /api/workflows -H "Host: evil.example:$PORT"
 [ "$STATUS" = "403" ] || fail "default: a foreign Host must be 403, got $STATUS"
 raw GET /api/workflows -H "Host: 127.0.0.1:$PORT"
 [ "$STATUS" = "200" ] || fail "default: a local Host is served, got $STATUS"
+raw GET "/api/workflow-runs/$AR/status" -H "Host: 127.0.0.1:$PORT"
+[ "$STATUS" = "200" ] && [ "$(jq -r '.run_id' <<<"$BODY")" = "$AR" ] || fail "run status over http: $STATUS $BODY"
+raw GET /api/workflow-runs/99999/status -H "Host: 127.0.0.1:$PORT"
+[ "$STATUS" = "404" ] || fail "run status for an unknown run must be 404, got $STATUS"
+raw GET "/api/workflow-runs/$AR/status" -H "Host: evil.example:$PORT"
+[ "$STATUS" = "403" ] || fail "run status with a foreign Host must be 403, got $STATUS"
 raw POST "/api/workflows/$AW/run" -H "Host: 127.0.0.1:$PORT" -H 'Content-Type: text/plain' -d '{}'
 [ "$STATUS" = "415" ] || [ "$STATUS" = "422" ] || [ "$STATUS" = "403" ] || fail "the Content-Type gate must still fire on run, got $STATUS"
 ok "default mode: every workflow route (reads included) refuses a foreign Origin and Host; the Content-Type gate still fires"
