@@ -11,6 +11,7 @@ const step = (node_id: number, status: WorkflowStep['status']): WorkflowStep => 
   output: '',
   error: null,
   duration_ms: 5,
+  started_at: null,
 })
 
 const run = (steps: WorkflowStep[], over: Partial<WorkflowRun> = {}): WorkflowRun => ({

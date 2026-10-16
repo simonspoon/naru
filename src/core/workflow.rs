@@ -821,6 +821,7 @@ pub fn execute_run<A: StoreAccess>(
             output: String::new(),
             error: None,
             duration_ms: 0,
+            started_at: None,
         };
         let input = if id == trigger_id {
             Some(run.input.clone())
@@ -841,8 +842,13 @@ pub fn execute_run<A: StoreAccess>(
         };
         // Show the node as in flight; best-effort, the final `finish` is
         // authoritative. One brief lock, released before the node's process.
+        let started_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .ok();
         steps.push(WorkflowStep {
             status: WorkflowStepStatus::Running,
+            started_at,
             ..skipped(node)
         });
         let _ = access.with(|s| s.update_workflow_run_steps(run.id, &steps));
@@ -874,6 +880,7 @@ pub fn execute_run<A: StoreAccess>(
             output: output.clone(),
             error,
             duration_ms,
+            started_at,
         });
         done.insert(
             id,
@@ -1501,6 +1508,55 @@ mod tests {
     }
 
     #[test]
+    fn a_running_step_carries_started_at_and_a_finished_one_keeps_it() {
+        let (st, _d) = store();
+        let wf = st.with(|s| {
+            let wf = s.create_workflow(None, "Slow", None).unwrap().id;
+            let t = node(
+                s,
+                wf,
+                WorkflowNodeKind::Trigger,
+                "T",
+                json!({"mode": "manual"}),
+            );
+            let c = node(s, wf, WorkflowNodeKind::Cli, "Nap", cli("sleep 2"));
+            s.create_workflow_edge(wf, t, c, None).unwrap();
+            wf
+        });
+        let seen = std::thread::scope(|scope| {
+            let h = scope.spawn(|| run_workflow(&st, wf, WorkflowTrigger::Manual, "").unwrap());
+            let mut seen = None;
+            for _ in 0..100 {
+                let runs = st.with(|s| s.list_workflow_runs(wf)).unwrap();
+                seen = runs
+                    .iter()
+                    .flat_map(|r| r.steps.iter())
+                    .find(|s| s.status == WorkflowStepStatus::Running)
+                    .cloned();
+                if seen.is_some() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let run = h.join().unwrap();
+            (seen, run)
+        });
+        let (running, run) = seen;
+        let running = running.expect("a running step was persisted");
+        let started = running.started_at.expect("running step has started_at");
+        assert!(started > 1_600_000_000);
+        assert_eq!(run.status, WorkflowRunStatus::Succeeded, "{run:?}");
+        assert_eq!(run.steps[1].started_at, Some(started));
+        assert!(run.steps[1].duration_ms >= 1000);
+        // An old row without the key still deserializes.
+        let old: WorkflowStep = serde_json::from_str(
+            r#"{"node_id":1,"title":"n","kind":"cli","status":"ok","output":"","error":null,"duration_ms":1}"#,
+        )
+        .unwrap();
+        assert_eq!(old.started_at, None);
+    }
+
+    #[test]
     fn a_run_takes_the_true_path_and_skips_the_false_one() {
         let (st, _d) = store();
         let wf = st.with(|s| {
@@ -2069,6 +2125,7 @@ mod tests {
                 output: String::new(),
                 error: None,
                 duration_ms: 0,
+                started_at: None,
             };
             s.update_workflow_run_steps(
                 running.id,

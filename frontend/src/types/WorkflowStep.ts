@@ -9,4 +9,10 @@ export type WorkflowStep = { node_id: number, title: string, kind: WorkflowNodeK
 /**
  * What the node produced, capped at 64 KiB.
  */
-output: string, error: string | null, duration_ms: number, };
+output: string, error: string | null, duration_ms: number, 
+/**
+ * Unix seconds when the node began running; set on the `running` step
+ * and kept once it finishes. `None` for a skipped step and for a row
+ * written before the field existed.
+ */
+started_at: number | null, };

@@ -5050,6 +5050,12 @@ pub struct WorkflowStep {
     pub error: Option<String>,
     #[ts(type = "number")]
     pub duration_ms: i64,
+    /// Unix seconds when the node began running; set on the `running` step
+    /// and kept once it finishes. `None` for a skipped step and for a row
+    /// written before the field existed.
+    #[serde(default)]
+    #[ts(type = "number | null")]
+    pub started_at: Option<i64>,
 }
 
 /// One execution of a workflow. The row is written `running` first and

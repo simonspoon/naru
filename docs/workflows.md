@@ -222,8 +222,12 @@ case-insensitive unique-name rule; an explicit taken `--name` is `conflict`.
 5. A **failed node fails the run**: nothing downstream runs and every node not
    yet run is recorded `skipped`. `WorkflowRun.error` names the node.
 6. Each node leaves one `WorkflowStep`:
-   `{node_id, title, kind, status: ok|skipped|failed, output, error, duration_ms}`,
-   output capped at 64 KiB. The run row is written `running` first (the
+   `{node_id, title, kind, status: ok|skipped|failed, output, error, duration_ms, started_at}`,
+   output capped at 64 KiB. `started_at` (naru task 1957) is unix seconds when
+   the node began running: stamped on the persisted `running` step, kept when
+   it finishes, `null` for a skipped step and for rows written before the
+   field existed — so a reader derives a running step's elapsed time as now
+   minus `started_at`. The run row is written `running` first (the
    claim) and finished exactly once; a run records even when it fails.
    **Live steps** (mesa task 1631): before a node's process starts the engine
    persists the steps so far plus one with status `running` for that node
