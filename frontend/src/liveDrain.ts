@@ -21,13 +21,28 @@
 export interface SegmentChainHooks {
   flush: () => void
   onOutstanding?: (n: number) => void
+  /** Longest a single step may hold the chain; defaults to `STEP_MAX_MS`. */
+  stepMaxMs?: number
 }
+
+/**
+ * The longest one step may hold the chain. `POST /api/live/transcribe` has no
+ * timeout of its own, so a hung request would otherwise wedge the chain for
+ * ever: the switch-off's flush is queued behind it (`close()`), the silence
+ * send is withheld while anything is outstanding, and every later segment
+ * waits too — the text arriving minutes late, or only once something else
+ * moved. A step that overruns is abandoned (its late result, if any, still
+ * lands through its own delivery-time gate) and the chain moves on. Generous,
+ * because a real transcription of a long segment can be slow.
+ */
+export const STEP_MAX_MS = 30000
 
 export class SegmentChain {
   private tail: Promise<void> = Promise.resolve()
   private inFlight = 0
   private pendingFlushes = 0
   private readonly hooks: SegmentChainHooks
+  private readonly stepMaxMs: number
 
   /**
    * `flush` posts the recording held so far and lets go of it; `onOutstanding`
@@ -36,6 +51,7 @@ export class SegmentChain {
    */
   constructor(hooks: SegmentChainHooks) {
     this.hooks = hooks
+    this.stepMaxMs = hooks.stepMaxMs ?? STEP_MAX_MS
   }
 
   /** Segments queued or in flight — a count, not a flag, like `hearing`. */
@@ -56,7 +72,7 @@ export class SegmentChain {
   enqueue(step: () => Promise<void>): void {
     this.count(1)
     this.tail = this.tail
-      .then(step)
+      .then(() => this.bounded(step))
       // A step that failed still ends: the chain's job is order, and a bad
       // segment must not hold every later one — `send` reports its own error.
       .catch(() => {})
@@ -79,6 +95,22 @@ export class SegmentChain {
       this.hooks.flush()
     })
     return 'draining'
+  }
+
+  private bounded(step: () => Promise<void>): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(resolve, this.stepMaxMs)
+      step().then(
+        () => {
+          clearTimeout(timer)
+          resolve()
+        },
+        (err: unknown) => {
+          clearTimeout(timer)
+          reject(err)
+        },
+      )
+    })
   }
 
   private count(delta: number): void {

@@ -211,3 +211,17 @@ describe('mayHold', () => {
     expect(mayHold({ ...base, muted: true, draining: true })).toBe(true)
   })
 })
+
+describe('SegmentChain step bound', () => {
+  it('flushes after a hung step instead of waiting for ever', async () => {
+    let flushed = 0
+    const chain = new SegmentChain({ flush: () => void flushed++, stepMaxMs: 20 })
+    chain.enqueue(() => new Promise<void>(() => {})) // a transcribe call that never answers
+    expect(chain.close()).toBe('draining')
+    expect(flushed).toBe(0)
+    await new Promise((r) => setTimeout(r, 80))
+    expect(flushed).toBe(1)
+    expect(chain.outstanding).toBe(0)
+    expect(chain.draining).toBe(false)
+  })
+})
