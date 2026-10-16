@@ -2052,6 +2052,10 @@ EXAMPLES
         /// Project to scope both workflows (and the filed task) to, by id or name
         #[arg(long)]
         project: String,
+        /// Create the "Task loop" workflow (plan, implement, review and verify
+        /// one task; its input is a task id) instead of the ambient ones
+        #[arg(long)]
+        task_loop: bool,
     },
     /// Create, update and delete the nodes of a workflow
     #[command(subcommand)]
@@ -8434,9 +8438,13 @@ fn run_workflow_cmd(cmd: WorkflowCmd) -> Result<()> {
         WorkflowCmd::RunShow { id, quiet } => {
             print_workflow_run(&store.get_workflow_run(id)?, quiet)
         }
-        WorkflowCmd::Defaults { project } => {
+        WorkflowCmd::Defaults { project, task_loop } => {
             let project = resolve_project(&store, &project)?;
-            let (created, skipped) = workflow::create_default_workflows(&mut store, project)?;
+            let (created, skipped) = if task_loop {
+                workflow::create_task_loop_workflow(&mut store, project)?
+            } else {
+                workflow::create_default_workflows(&mut store, project)?
+            };
             print_json(&json!({"created": created, "skipped": skipped}));
         }
         WorkflowCmd::Log {

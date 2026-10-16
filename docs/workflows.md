@@ -432,6 +432,27 @@ default is never overwritten.
   takes the branch's false side, so the model never runs and nothing is filed.
   Run it on demand with `naru workflow run "Ambient: end-of-day review"`.
 
+## The task-loop workflow (naru task 1960)
+
+`naru workflow defaults --task-loop --project <id|name>` (CLI only; instead of
+the ambient pair, same skip-if-the-name-exists idempotency) creates **Task
+loop**: a `manual` workflow whose input is a task id, running plan -> (UX
+designer if the plan says `UI: yes`) -> implement -> review + verify -> at most
+one fix pass -> close. Design and rationale: `docs/task-loop-workflow.md`; the
+stage driver every agent node runs: `docs/stage.md`. The loop is unrolled (the
+engine is a DAG), so two iterations is structural. Agent stages are `cli` nodes
+running `naru stage run` with `timeout_secs` above the stage deadline; hand-off
+is the per-run scratch folder `~/.naru/loop/<task>-<time>-<pid>/` (task, plan,
+design, diff summary, reports, `reasons.txt`) and only a state line
+(`task=<id> scratch=<dir> ui=<yes|no> <stage>=<result>`) travels as node input.
+Review and verify are one node (a `--also` pair); the reports must end in
+`VERDICT: PASS` or `VERDICT: FAIL`, and anything unfinished or unmarked is
+INCONCLUSIVE, never a pass. Close-pass runs `naru task update --status done
+--result-file`; every other ending runs `naru task note`, `--status backlog`
+and `naru notify` (a notify failure is tolerated). `NARU_LOOP_DEADLINE`,
+`NARU_LOOP_SILENCE` and `NARU_LOOP_GRACE` override the stage clocks. Gate:
+`scripts/task-loop-check.sh`.
+
 **Why backlog.** The review's output must never be `todo`: `serve --watch-todo`
 dispatches an agent onto every unblocked `todo` leaf, and a digest of overheard
 ideas is something a person triages first. Hence the output node's `status` key.

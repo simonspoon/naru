@@ -602,6 +602,280 @@ pub fn create_default_workflows(
     Ok((created, skipped))
 }
 
+// ---- the task-loop workflow (naru task 1960) --------------------------------
+
+/// Name of the workflow `naru workflow defaults --task-loop` creates.
+pub const TASK_LOOP_WORKFLOW: &str = "Task loop";
+
+/// Shared head of every task-loop `cli` node. The run input is the task id for
+/// the Plan node and one state line (`task=<id> scratch=<dir> ui=<yes|no> k=v…`)
+/// for every later node; a node prints the next state line, so only a pointer
+/// to the per-run scratch folder travels as node input. `NARU_LOOP_DEADLINE`,
+/// `NARU_LOOP_SILENCE` and `NARU_LOOP_GRACE` override the stage clocks (the
+/// check script's seam); a stage that fails or overruns is data, never a node
+/// failure, so the graph reaches a Close node.
+const LOOP_PRELUDE: &str = r##"set -o pipefail
+IN=$(cat)
+TASK=$(printf '%s\n' "$IN" | sed -n 's/.*task=\([0-9][0-9]*\).*/\1/p' | tail -n 1)
+SCRATCH=$(printf '%s\n' "$IN" | sed -n 's/.*scratch=\([^ ]*\).*/\1/p' | tail -n 1)
+dl() { echo "${NARU_LOOP_DEADLINE:-$1}"; }
+emit() { echo "task=$TASK scratch=$SCRATCH ui=$(cat "$SCRATCH/ui" 2>/dev/null || echo no) $*"; }
+brief_head() { printf 'You are the %s stage of an automated task loop for naru task %s.\nWork in the current project checkout. Be brief and end with the requested final line.\n\n## Task\n\n' "$1" "$TASK"; cat "$SCRATCH/task.md"; }
+stage_run() { # <name> <agent> <deadline> <brief file> [extra stage args]
+  local name=$1 agent=$2 deadline=$3 brief=$4; shift 4
+  mkdir -p "$SCRATCH/$name"
+  naru stage run --stage "$name" --agent "$agent" --cwd "$PWD" --deadline "$deadline" \
+    --silence "${NARU_LOOP_SILENCE:-300}" --grace "${NARU_LOOP_GRACE:-180}" \
+    --scratch "$SCRATCH/$name" --brief-file "$brief" "$@" > "$SCRATCH/$name.json" 2> "$SCRATCH/$name.err" \
+    || echo '{"verdict":"INCONCLUSIVE","reason":"the stage driver itself failed"}' > "$SCRATCH/$name.json"
+}
+stage_verdict() { jq -r '.verdict // "INCONCLUSIVE"' "$SCRATCH/$1.json" 2>/dev/null || echo INCONCLUSIVE; }
+note_reason() { jq -r --arg s "$1" '"\($s): \(.verdict) \(.reason // "")"' "$SCRATCH/$1.json" >> "$SCRATCH/reasons.txt" 2>/dev/null; return 0; }
+"##;
+
+const LOOP_PLAN: &str = r##"TASK=$(printf '%s' "$IN" | tr -dc '0-9')
+[ -n "$TASK" ] || { echo "task-loop: the run input must be a task id" >&2; exit 1; }
+SCRATCH="$HOME/.naru/loop/$TASK-$(date +%s)-$$"
+mkdir -p "$SCRATCH"
+naru task show "$TASK" | jq -r '.description' > "$SCRATCH/task.md" || exit 1
+echo no > "$SCRATCH/ui"
+{ brief_head planner; printf '\n## What to do\n\nWrite a short implementation plan: the files to touch, the steps, and how to verify. Do not edit any file. End with exactly one line, `UI: yes` if the change touches user-facing UI, else `UI: no`.\n'; } > "$SCRATCH/plan-brief.md"
+stage_run plan planner "$(dl 900)" "$SCRATCH/plan-brief.md"
+if [ "$(stage_verdict plan)" = COMPLETE ]; then
+  jq -r '.report' "$SCRATCH/plan.json" > "$SCRATCH/plan.md"
+  if grep -qiE '^[[:space:]]*UI:[[:space:]]*yes' "$SCRATCH/plan.md"; then echo yes > "$SCRATCH/ui"; fi
+  emit plan=ok
+else
+  note_reason plan
+  emit plan=failed
+fi
+"##;
+
+const LOOP_UX: &str = r##"{ brief_head ux-designer; printf '\n## Plan\n\n'; cat "$SCRATCH/plan.md"; printf '\n## What to do\n\nReturn a short design brief for this change: layout, components to reuse, states, and an observable acceptance checklist. Do not edit any file.\n'; } > "$SCRATCH/ux-brief.md"
+stage_run ux ux-designer "$(dl 600)" "$SCRATCH/ux-brief.md"
+if [ "$(stage_verdict ux)" = COMPLETE ]; then
+  jq -r '.report' "$SCRATCH/ux.json" > "$SCRATCH/design.md"
+  emit ux=ok
+else
+  note_reason ux
+  emit ux=failed
+fi
+"##;
+
+const LOOP_IMPLEMENT: &str = r##"N=@N@
+{ brief_head implementer
+  printf '\n## Plan\n\n'; cat "$SCRATCH/plan.md"
+  if [ -f "$SCRATCH/design.md" ]; then printf '\n## Design brief\n\n'; cat "$SCRATCH/design.md"; fi
+  if [ -f "$SCRATCH/findings.md" ]; then printf '\n## Findings from the last review and verify: fix these\n\n'; cat "$SCRATCH/findings.md"; fi
+  printf '\n## What to do\n\nImplement the work in the working tree and run the fast checks. Do not commit. End with a one-paragraph summary.\n'
+} > "$SCRATCH/impl-$N-brief.md"
+stage_run "impl$N" implementer "$(dl 2400)" "$SCRATCH/impl-$N-brief.md"
+if [ "$(stage_verdict "impl$N")" = COMPLETE ]; then
+  { git diff --stat; git status --short; } > "$SCRATCH/diff-$N.txt" 2>/dev/null
+  emit impl=ok
+else
+  note_reason "impl$N"
+  emit impl=failed
+fi
+"##;
+
+const LOOP_REVIEW: &str = r##"N=@N@
+if [ "$(cat "$SCRATCH/ui")" = yes ]; then VER=ui-verifier; else VER=verifier; fi
+for role in verifier reviewer; do
+  { brief_head "$role"
+    printf '\n## Plan\n\n'; cat "$SCRATCH/plan.md"
+    printf '\n## Diff summary (the full change is the working tree)\n\n'; cat "$SCRATCH/diff-$N.txt"
+    printf '\n## What to do\n\nCheck the change against the plan and the task. Do not edit any file. End with exactly one line, `VERDICT: PASS` or `VERDICT: FAIL`, after your findings.\n'
+  } > "$SCRATCH/$role-$N-brief.md"
+done
+stage_run "review$N" "$VER" "$(dl 1500)" "$SCRATCH/verifier-$N-brief.md" --also diff-reviewer --also-brief-file "$SCRATCH/reviewer-$N-brief.md"
+jq -r '.results[0].report // ""' "$SCRATCH/review$N.json" > "$SCRATCH/review-$N-verify.md" 2>/dev/null
+jq -r '.results[1].report // ""' "$SCRATCH/review$N.json" > "$SCRATCH/review-$N-review.md" 2>/dev/null
+v=INCONCLUSIVE
+if [ "$(stage_verdict "review$N")" = COMPLETE ]; then
+  p=0; f=0
+  for r in verify review; do
+    grep -qE '^[[:space:]]*VERDICT:[[:space:]]*PASS' "$SCRATCH/review-$N-$r.md" && p=$((p + 1))
+    grep -qE '^[[:space:]]*VERDICT:[[:space:]]*FAIL' "$SCRATCH/review-$N-$r.md" && f=$((f + 1))
+  done
+  if [ "$f" -ge 1 ]; then v=NEEDS-FIX; elif [ "$p" -eq 2 ]; then v=PASS; fi
+fi
+if [ "$v" = NEEDS-FIX ]; then
+  { echo "Iteration $N verify report:"; cat "$SCRATCH/review-$N-verify.md"; echo; echo "Iteration $N review report:"; cat "$SCRATCH/review-$N-review.md"; } > "$SCRATCH/findings.md"
+elif [ "$v" = INCONCLUSIVE ]; then
+  note_reason "review$N"
+  jq -r '.results[]? | select(.verdict != "COMPLETE") | "\(.agent): \(.reason // "") partial: \(.partial // "")"' "$SCRATCH/review$N.json" >> "$SCRATCH/reasons.txt" 2>/dev/null
+fi
+emit review=$v
+"##;
+
+const LOOP_CLOSE_PASS: &str = r##"last=$(ls "$SCRATCH"/review-*-verify.md | tail -n 1)
+{ echo "Task loop passed review and verify. Hand-off files: $SCRATCH"; echo; cat "$last"; } | head -c 4000 > "$SCRATCH/result.md"
+naru task update "$TASK" --status done --result-file "$SCRATCH/result.md" > /dev/null || exit 1
+emit close=done
+"##;
+
+const LOOP_CLOSE_BACKLOG: &str = r##"{ echo "Task loop did not pass; the task is back in backlog for a person. State: $(printf '%s\n' "$IN" | tail -n 1)"; echo "Hand-off files: $SCRATCH"; echo; cat "$SCRATCH/reasons.txt" 2>/dev/null
+  if [ -f "$SCRATCH/findings.md" ]; then echo; echo "Last review findings:"; cat "$SCRATCH/findings.md"; fi
+} | head -c 6000 > "$SCRATCH/note.md"
+naru task note "$TASK" --file "$SCRATCH/note.md" > /dev/null || exit 1
+naru task update "$TASK" --status backlog > /dev/null || exit 1
+naru notify --title "Task loop" --open "tasks/$TASK" "Task $TASK needs a person: the task loop ended without a pass. See its latest note." > /dev/null 2>&1 || echo "notify failed" >> "$SCRATCH/reasons.txt"
+emit close=backlog
+"##;
+
+/// Creates the "Task loop" workflow (`docs/task-loop-workflow.md`, "Target
+/// flow") in `project_id`, skipping it when the name already exists. The loop
+/// is unrolled — two implement/review passes — because the engine is a DAG,
+/// so the iteration cap is structural. Answers the created workflows and the
+/// skipped names, like [`create_default_workflows`].
+pub fn create_task_loop_workflow(
+    store: &mut Store,
+    project_id: i64,
+) -> Result<(Vec<WorkflowView>, Vec<String>)> {
+    use WorkflowNodeKind as K;
+    match store.find_workflow_by_name(TASK_LOOP_WORKFLOW) {
+        Ok(_) => return Ok((Vec::new(), vec![TASK_LOOP_WORKFLOW.to_string()])),
+        Err(Error::NotFound(_)) => {}
+        Err(e) => return Err(e),
+    }
+    // `secs` is the stage deadline + three grace periods + a minute, so the
+    // stage driver and not SIGKILL ends a stage.
+    let cli = |body: &str, n: &str, secs: u32| {
+        json!({
+            "command": format!("{LOOP_PRELUDE}{}", body.replace("@N@", n)),
+            "timeout_secs": secs,
+        })
+    };
+    let contains = |v: &str| json!({"op": "contains", "value": v});
+    let nodes = vec![
+        (K::Trigger, "Task id", json!({"mode": "manual"}), 40.0, 80.0),
+        (K::Cli, "Plan", cli(LOOP_PLAN, "0", 1500), 280.0, 80.0),
+        (K::Branch, "Plan ok?", contains("plan=ok"), 520.0, 80.0),
+        (K::Branch, "Touches UI?", contains("ui=yes"), 760.0, 80.0),
+        (K::Cli, "UX designer", cli(LOOP_UX, "0", 1200), 1000.0, 0.0),
+        (
+            K::Cli,
+            "Implement #1",
+            cli(LOOP_IMPLEMENT, "1", 3000),
+            1240.0,
+            80.0,
+        ),
+        (K::Branch, "Implemented?", contains("impl=ok"), 1480.0, 80.0),
+        (
+            K::Cli,
+            "Review + verify #1",
+            cli(LOOP_REVIEW, "1", 2100),
+            1720.0,
+            80.0,
+        ),
+        (
+            K::Branch,
+            "Passed? #1",
+            contains("review=PASS"),
+            1960.0,
+            80.0,
+        ),
+        (
+            K::Branch,
+            "Needs a fix?",
+            contains("review=NEEDS-FIX"),
+            2200.0,
+            160.0,
+        ),
+        (
+            K::Cli,
+            "Implement #2",
+            cli(LOOP_IMPLEMENT, "2", 3000),
+            2440.0,
+            160.0,
+        ),
+        (
+            K::Branch,
+            "Implemented? #2",
+            contains("impl=ok"),
+            2680.0,
+            160.0,
+        ),
+        (
+            K::Cli,
+            "Review + verify #2",
+            cli(LOOP_REVIEW, "2", 2100),
+            2920.0,
+            160.0,
+        ),
+        (
+            K::Branch,
+            "Passed? #2",
+            contains("review=PASS"),
+            3160.0,
+            160.0,
+        ),
+        (
+            K::Cli,
+            "Close: pass",
+            cli(LOOP_CLOSE_PASS, "0", 120),
+            3400.0,
+            80.0,
+        ),
+        (
+            K::Cli,
+            "Close: backlog",
+            cli(LOOP_CLOSE_BACKLOG, "0", 120),
+            3400.0,
+            240.0,
+        ),
+    ];
+    let t = Some("true");
+    let f = Some("false");
+    let edges = vec![
+        (0, 1, None),
+        (1, 2, None),
+        (2, 3, t),
+        (2, 15, f),
+        (3, 4, t),
+        (3, 5, f),
+        (4, 5, None),
+        (5, 6, None),
+        (6, 7, t),
+        (6, 15, f),
+        (7, 8, None),
+        (8, 14, t),
+        (8, 9, f),
+        (9, 10, t),
+        (9, 15, f),
+        (10, 11, None),
+        (11, 12, t),
+        (11, 15, f),
+        (12, 13, None),
+        (13, 14, t),
+        (13, 15, f),
+    ];
+    let wf = store.create_workflow(
+        Some(project_id),
+        TASK_LOOP_WORKFLOW,
+        Some("Plan, implement, review and verify one task, at most two passes; the input is a task id. See docs/task-loop-workflow.md."),
+    )?;
+    let mut ids = Vec::new();
+    for (kind, title, config, x, y) in nodes {
+        let node = store.create_workflow_node(
+            wf.id,
+            &WorkflowNodeNew {
+                kind,
+                title: title.to_string(),
+                config: Some(config),
+                x: Some(x),
+                y: Some(y),
+            },
+        )?;
+        ids.push(node.id);
+    }
+    for (from, to, branch) in edges {
+        store.create_workflow_edge(wf.id, ids[from], ids[to], branch.map(String::from))?;
+    }
+    Ok((vec![store.get_workflow_view(wf.id)?], Vec::new()))
+}
+
 // ---- running -------------------------------------------------------------
 
 /// Checks that `view` can run — exactly one trigger node — and answers its
