@@ -481,11 +481,15 @@ exact graph over stub `sox`/`auris` and a stub model API.
 
 ## Web UI
 
-`#/workflows` (left nav; mesa task 1632) is the global overview, also shown as the Library's read-only Workflows tab at `#/library/workflows` (mesa task 1676):
+`#/workflows` (left nav; mesa task 1632) is the global overview, also shown as the Library's Workflows tab at `#/library/workflows` (mesa task 1676):
 one table of every workflow across all projects with project, on/off, last run,
 last failure and next run, polled every 5s (the On column is the workflow's `enabled` switch). A row opens the workflow in its
-owning project's view; a global (project-less) workflow has no project page, so
-its row is not a link. The label logic is `workflowOverview.ts`.
+owning project's view; a global (project-less) workflow's row links to
+`#/workflows/<id>`, the global builder. An **Add workflow** button in the page
+header (both the standalone page and the Library tab) opens an inline form (name,
+Enter creates, Escape cancels, a server error such as a duplicate name shown
+inline) that creates a project-less workflow and opens its builder; the pure
+parts are `workflowCreate.ts`. The label logic is `workflowOverview.ts`.
 
 The web UI replaced the diagrams tab with a **Workflows** tab (mesa task 1607,
 frontend only; the routes are the ones above). `#/projects/<id>/workflows` is the

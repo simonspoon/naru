@@ -1,4 +1,10 @@
-import { listProjects, listWorkflows } from "../api";
+import { useState } from "react";
+import { createWorkflow, listProjects, listWorkflows } from "../api";
+import {
+  createdWorkflowHref,
+  globalWorkflowBody,
+  validWorkflowName,
+} from "../workflowCreate";
 import { formatTimestamp } from "../time";
 import { useFetch } from "../useFetch";
 import {
@@ -28,9 +34,77 @@ export function WorkflowsOverview({ embedded = false }: { embedded?: boolean }) 
     "workflows-overview-projects",
   );
 
+  const [adding, setAdding] = useState(false);
+  const [name, setName] = useState("");
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  function cancel() {
+    setAdding(false);
+    setName("");
+    setCreateError(null);
+  }
+
+  function submit(e: React.FormEvent) {
+    e.preventDefault();
+    const valid = validWorkflowName(name);
+    if (!valid || busy) return;
+    setBusy(true);
+    createWorkflow(globalWorkflowBody(valid)).then(
+      (w) => {
+        setBusy(false);
+        cancel();
+        window.location.hash = createdWorkflowHref(w.id);
+      },
+      (err: unknown) => {
+        setBusy(false);
+        setCreateError(err instanceof Error ? err.message : String(err));
+      },
+    );
+  }
+
+  const title = embedded ? <h2>Workflows</h2> : <h1>Workflows</h1>;
+
   return (
     <div className="workflows-overview">
-      {embedded ? <h2>Workflows</h2> : <h1>Workflows</h1>}
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: "0.75rem",
+          flexWrap: "wrap",
+        }}
+      >
+        {title}
+        {!adding && (
+          <button type="button" onClick={() => setAdding(true)}>
+            Add workflow
+          </button>
+        )}
+      </div>
+      {adding && (
+        <form className="create-form" onSubmit={submit}>
+          <input
+            type="text"
+            value={name}
+            placeholder="new workflow name"
+            aria-label="New workflow name"
+            autoFocus
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") cancel();
+            }}
+          />
+          <button type="submit" disabled={busy || !validWorkflowName(name)}>
+            create
+          </button>
+          <button type="button" onClick={cancel}>
+            cancel
+          </button>
+          {createError && <span className="error">{createError}</span>}
+        </form>
+      )}
       <p className="muted">
         Every workflow across all projects. A workflow that is on fires from its
         trigger (a time one runs on the server's timer); off, it only runs when
