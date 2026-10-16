@@ -44,6 +44,7 @@ function session(over: Partial<AgentSession> = {}): AgentSession {
     contextTokens: null,
     model: null,
     children: [],
+    stalled: false,
     ...over,
   }
 }
