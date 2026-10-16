@@ -1,47 +1,34 @@
-import { useMemo, useState } from 'react'
-import { askKb, getKbNote, listKbNotes } from '../api'
+import { useState } from 'react'
+import { askKb, getKbNote } from '../api'
 import { Markdown } from '../components/Markdown'
-import { Callout, ListDetail } from '../components/templates'
-import { groupKb, kbNoteHref, kbTags } from '../kbFilter'
+import { Callout } from '../components/templates'
+import { kbNoteHref } from '../kbFilter'
 import { useFetch } from '../useFetch'
 
-/** `#/kb` and `#/kb/<note path>` (naru task 1928): the knowledge base's notes
- * grouped by topic, a note's markdown, text/tag filters (client-side over the
- * metadata list, bodies fetched on demand) and an ask box with linked sources. */
+type KbAnswer = Awaited<ReturnType<typeof askKb>>
+
+/** `#/kb` and `#/kb/<note path>` (naru tasks 1928, 1942): one Ask box over
+ * `POST /api/kb/ask` showing exactly what `naru kb ask` returns (the answer and
+ * its sources, plus the raw JSON), and a source's note body at `#/kb/<path>`. */
 export function KbView({ notePath }: { notePath: string | null }) {
-  const { data: notes, error } = useFetch(() => listKbNotes(), 'kb-notes')
-  const [text, setText] = useState('')
-  const [tag, setTag] = useState<string | null>(null)
   const [question, setQuestion] = useState('')
   const [asking, setAsking] = useState(false)
-  const [answer, setAnswer] = useState<Awaited<ReturnType<typeof askKb>> | null>(null)
+  const [result, setResult] = useState<KbAnswer | null>(null)
   const [askError, setAskError] = useState<string | null>(null)
-
-  const groups = useMemo(() => groupKb(notes ?? [], text, tag), [notes, text, tag])
-  const tags = useMemo(() => kbTags(notes ?? []), [notes])
-  const shown = groups.reduce((n, g) => n + g.notes.length, 0)
 
   const { data: note, error: noteError } = useFetch(
     () => (notePath ? getKbNote(notePath) : Promise.resolve(null)),
     `kb-note:${notePath ?? ''}`,
   )
 
-  const detailFor =
-    notePath && note && note.path === notePath ? { [notePath]: { body: note.body } } : {}
-  const emptyDetail = !notePath
-    ? 'Pick a note.'
-    : noteError
-      ? `Could not load this note: ${noteError}`
-      : 'Loading…'
-
   async function ask() {
     const q = question.trim()
     if (!q || asking) return
     setAsking(true)
     setAskError(null)
-    setAnswer(null)
+    setResult(null)
     try {
-      setAnswer(await askKb(q))
+      setResult(await askKb(q))
     } catch (e) {
       setAskError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -49,12 +36,35 @@ export function KbView({ notePath }: { notePath: string | null }) {
     }
   }
 
+  if (notePath) {
+    return (
+      <div className="kb-page">
+        <h1>Knowledge base</h1>
+        <section className="cc-panel kb-panel">
+          <a className="kb-back" href="#/kb">
+            ← Back to ask
+          </a>
+          <h2>{notePath}</h2>
+          {noteError ? (
+            <Callout tone="bad" text={`Could not load this note: ${noteError}`} />
+          ) : note && note.path === notePath ? (
+            <Markdown text={note.body} />
+          ) : (
+            <p className="muted">Loading…</p>
+          )}
+        </section>
+      </div>
+    )
+  }
+
   return (
     <div className="kb-page">
       <h1>Knowledge base</h1>
       <section className="cc-panel kb-panel">
         <h2>Ask</h2>
-        <p className="cc-hint muted">Answers come from your notes only.</p>
+        <p className="cc-hint muted">
+          The same call as <code>naru kb ask</code>: answers come from your notes only.
+        </p>
         <form
           className="kb-ask"
           onSubmit={(e) => {
@@ -73,79 +83,38 @@ export function KbView({ notePath }: { notePath: string | null }) {
             {asking ? 'Asking…' : 'Ask'}
           </button>
         </form>
-        {askError && <Callout tone="bad" text={askError} />}
-        {answer &&
-          (answer.answer ? (
-            <div className="tpl-callout tpl-tone-info kb-answer" role="status">
-              <Markdown text={answer.answer} />
-              {answer.sources.length > 0 && (
-                <>
-                  <p className="cc-hint muted kb-sources-label">Sources</p>
-                  <div className="kb-sources">
-                    {answer.sources.map((s) => (
-                      <a key={s.path} className="kb-source" href={kbNoteHref(s.path)} title={s.path}>
-                        {s.title || s.path}
-                      </a>
-                    ))}
-                  </div>
-                </>
-              )}
-            </div>
-          ) : (
-            <Callout tone="neutral" text="The notes do not answer that." />
-          ))}
-      </section>
-      <section className="cc-panel kb-panel">
-        <h2>Notes</h2>
-        <div className="kb-toolbar">
-          <input
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            placeholder="Filter notes by title, topic or tag…"
-            aria-label="Filter notes"
-          />
-          {notes && notes.length > 0 && (
-            <span className="tpl-meta">
-              {shown} of {notes.length} notes
-            </span>
-          )}
-        </div>
-        {tags.length > 0 && (
-          <div className="kb-tags">
-            {tags.map((t) => (
-              <button
-                key={t.tag}
-                type="button"
-                className={`kb-tag${tag === t.tag ? ' active' : ''}`}
-                aria-pressed={tag === t.tag}
-                onClick={() => setTag(tag === t.tag ? null : t.tag)}
-              >
-                {t.tag} <span className="kb-tag-count">{t.count}</span>
-              </button>
-            ))}
-          </div>
-        )}
-        {error ? (
-          <Callout tone="bad" text={error} />
-        ) : !notes ? (
-          <p className="muted">Loading…</p>
-        ) : notes.length === 0 ? (
-          <p className="muted">
-            No notes yet. Add one with <code>naru kb add</code>.
+        {asking && (
+          <p className="muted kb-result" role="status">
+            Asking…
           </p>
-        ) : (
-          <ListDetail
-            items={groups.flatMap((g) =>
-              g.notes.map((n) => ({ id: n.path, title: n.title, group: g.topic, meta: n.tags })),
+        )}
+        {askError && <Callout tone="bad" text={askError} />}
+        {result && (
+          <div className="kb-result">
+            {result.answer ? (
+              <div className="tpl-callout tpl-tone-info kb-answer" role="status">
+                <Markdown text={result.answer} />
+              </div>
+            ) : (
+              <Callout tone="neutral" text="The notes do not answer that." />
             )}
-            details={detailFor}
-            selectedId={notePath ?? undefined}
-            emptyList="No notes match."
-            emptyDetail={emptyDetail}
-            onSelect={(path) => {
-              window.location.hash = kbNoteHref(path)
-            }}
-          />
+            {result.sources.length > 0 && (
+              <>
+                <p className="cc-hint muted kb-sources-label">Sources</p>
+                <div className="kb-sources">
+                  {result.sources.map((s) => (
+                    <a key={s.path} className="kb-source" href={kbNoteHref(s.path)} title={s.path}>
+                      {s.title ? `${s.title} · ${s.path}` : s.path}
+                    </a>
+                  ))}
+                </div>
+              </>
+            )}
+            <details className="kb-raw">
+              <summary>Raw JSON</summary>
+              <pre>{JSON.stringify(result, null, 2)}</pre>
+            </details>
+          </div>
         )}
       </section>
     </div>

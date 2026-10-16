@@ -74,11 +74,14 @@ malformed, a symlink, absent) is `not_found`. `--quiet` on `show` drops `body`;
 
 ## Web page (`#/kb`, naru task 1928)
 
-A nav entry "Knowledge base" opens `#/kb`: notes grouped by topic with counts,
-a text filter and tag chips (client-side over the metadata list,
-`frontend/src/kbFilter.ts`), the opened note's markdown at `#/kb/<note path>`,
-and an ask box whose answer links each source to its note. No new storage; three
-thin routes over `core::kb`, all `require_agent_access` (ask spawns `claude`):
+A nav entry "Knowledge base" opens `#/kb`: a single Ask box over
+`POST /api/kb/ask` showing exactly what `naru kb ask` returns — the answer, the
+sources (path + title, each linked to `#/kb/<note path>`, which shows that
+note's markdown with a back-to-ask link), an empty-result state and the raw
+JSON in a collapsed block. No note list, filter or tags
+(`frontend/src/kbFilter.ts` keeps only the route helpers). No new storage;
+three thin routes over `core::kb`, all `require_agent_access` (ask spawns
+`claude`; `GET /api/kb/notes` is no longer used by the page):
 
 - `GET /api/kb/notes[?topic=]` — as `kb list` (metadata only)
 - `GET /api/kb/note?path=topics/t/s.md` — as `kb show` (`not_found` outside the kb)

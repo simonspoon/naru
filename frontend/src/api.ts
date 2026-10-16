@@ -13,7 +13,6 @@ import { parseWatchLine, type FilesWatchEvent } from './filesWatch'
 import { finishNdjson, parseEvent, splitNdjson } from './scriptRun'
 
 import type { ImportResolution } from './libraryImport'
-import type { KbNote } from './kbFilter'
 
 import type { AgentSession } from './types/AgentSession'
 import type { AgentSpawned } from './types/AgentSpawned'
@@ -2304,11 +2303,6 @@ export function unregisterLibraryHook(
 }
 
 // ---- knowledge base (naru task 1928) ----
-
-/** Every note's metadata (no bodies), as `naru kb list`. */
-export function listKbNotes(): Promise<KbNote[]> {
-  return request('/api/kb/notes')
-}
 
 /** One note's markdown (front matter included), as `naru kb show`. */
 export function getKbNote(path: string): Promise<{ path: string; body: string }> {

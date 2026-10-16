@@ -12535,15 +12535,15 @@ body.dock-resizing .dock-body {
   vertical-align: middle;
 }
 
-/* Knowledge base page (naru task 1928) */
+/* Knowledge base page (naru task 1928, reworked in 1942) */
 .kb-page { display: flex; flex-direction: column; gap: 0.75rem; }
 .kb-page .kb-panel { margin-bottom: 0; }
 .kb-ask { display: flex; flex-wrap: wrap; gap: 0.5rem; }
 .kb-ask input { flex: 1; min-width: 0; }
 .kb-ask-btn { color: var(--on-accent); background: var(--cyan); }
 .kb-ask-btn:hover:not(:disabled) { background: var(--cyan); filter: brightness(1.1); }
-.kb-ask ~ .tpl-callout { margin-top: 0.75rem; }
-.kb-answer { margin: 0.75rem 0 0; }
+.kb-ask ~ .tpl-callout, .kb-result { margin-top: 0.75rem; }
+.kb-answer { margin: 0; }
 .kb-sources-label { margin: 0.5rem 0 0.35rem; }
 .kb-sources { display: flex; flex-wrap: wrap; gap: 0.35rem; }
 .kb-source {
@@ -12557,26 +12557,22 @@ body.dock-resizing .dock-body {
   overflow-wrap: anywhere;
 }
 .kb-source:hover { background: rgba(var(--cyan-rgb), 0.2); }
-.kb-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 0.75rem; margin-bottom: 0.6rem; }
-.kb-toolbar input { flex: 1; min-width: 0; }
-.kb-tags { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-bottom: 0.75rem; }
-.kb-tag {
-  cursor: pointer;
-  padding: 0.15rem 0.65rem;
-  border-radius: var(--r-pill);
-  border: 1px solid transparent;
+.kb-raw { margin-top: 0.75rem; }
+.kb-raw summary { cursor: pointer; font-size: 0.8rem; color: var(--muted); }
+.kb-raw pre {
+  margin: 0.4rem 0 0;
+  padding: 0.6rem 0.75rem;
   background: var(--surface-raised);
-  box-shadow: var(--ring);
-  color: inherit;
+  border-radius: var(--r-sm);
+  font-family: var(--font-mono);
   font-size: 0.75rem;
+  overflow-x: auto;
+  white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
-.kb-tag:hover { background: var(--surface-hover); }
-.kb-tag.active { background: rgba(var(--cyan-rgb), 0.18); color: var(--cyan); box-shadow: var(--ring-focus); }
-.kb-tag-count { font-family: var(--font-mono); color: var(--muted); margin-left: 0.35rem; }
-.kb-tag.active .kb-tag-count { color: inherit; }
+.kb-back { display: inline-block; margin-bottom: 0.5rem; }
 @media (max-width: 600px) {
-  .kb-ask-btn, .kb-tag, .kb-source { min-height: 44px; display: inline-flex; align-items: center; }
-  .kb-ask input, .kb-toolbar input { min-height: 44px; }
+  .kb-ask-btn, .kb-source { min-height: 44px; display: inline-flex; align-items: center; }
+  .kb-ask input { min-height: 44px; }
   .kb-ask-btn { flex: 1 1 100%; justify-content: center; }
 }
