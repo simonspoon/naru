@@ -63,6 +63,7 @@ while IFS= read -r line; do
   text=$(jq -r '.message.content[0].text' <<<"$line")
   jq -Rn --arg t "$text" '$t' >> "$STUB/msgs.$agent"
   printf 'turn\n' >> "$STUB/turns.$agent"
+  if [ "$agent" = implementer ] && [ -f "$STUB/touch.implementer" ]; then while IFS= read -r f; do mkdir -p "$(dirname "$f")"; echo "$RANDOM" >> "$f"; done < "$STUB/touch.implementer"; fi
   n=$(grep -c . "$STUB/turns.$agent")
   reply=ok
   if [ -f "$STUB/reply.$agent.$n" ]; then reply=$(cat "$STUB/reply.$agent.$n")
@@ -82,7 +83,7 @@ STUBEOF
 chmod +x "$STUB/vox"
 export MESA_VOX_BIN="$STUB/vox"
 
-reset_stub() { rm -f "$STUB"/reply.* "$STUB"/die.* "$STUB"/turns.* "$STUB"/msgs.* "$STUB/vox.log"; }
+reset_stub() { rm -f "$STUB"/touch.* "$STUB"/reply.* "$STUB"/die.* "$STUB"/turns.* "$STUB"/msgs.* "$STUB/vox.log"; }
 turns() { grep -c . "$STUB/turns.$1" 2>/dev/null || true; }
 # step <run json> <node title>: the status of that node's step (node ids from
 # the workflow's own node list, since a step carries the id only).
@@ -94,9 +95,15 @@ step() {
 tstatus() { "$NARU" task show "$1" | jq -r .status; }
 
 # ---- setup ----
+git -C "$TMP/work" init -q
+git -C "$TMP/work" config user.email t@t
+git -C "$TMP/work" config user.name t
+echo seed > "$TMP/work/seed.txt"
+git -C "$TMP/work" add seed.txt
+git -C "$TMP/work" commit -q -m seed
 "$NARU" project create loopproj --no-git --path "$TMP/work" >/dev/null
 OUT=$("$NARU" workflow defaults --task-loop --project loopproj)
-jq -e '(.created|length)==1 and .created[0].workflow.name=="Task loop" and .skipped==[] and (.created[0].nodes|length)==16' <<<"$OUT" >/dev/null || fail "defaults: $OUT"
+jq -e '(.created|length)==1 and .created[0].workflow.name=="Task loop" and .skipped==[] and (.created[0].nodes|length)==17' <<<"$OUT" >/dev/null || fail "defaults: $OUT"
 ok "defaults --task-loop creates the Task loop workflow"
 OUT=$("$NARU" workflow defaults --task-loop --project loopproj)
 jq -e '.created==[] and .skipped==["Task loop"]' <<<"$OUT" >/dev/null || fail "rerun: $OUT"
@@ -112,6 +119,7 @@ reset_stub
 printf 'Plan: edit foo.\nUI: no' > "$STUB/reply.planner"
 printf 'looks fine\nVERDICT: PASS' > "$STUB/reply.verifier"
 printf 'clean\nVERDICT: PASS' > "$STUB/reply.diff-reviewer"
+printf 'foo.txt\nsub dir/bar baz.txt\nseed.txt\n' > "$STUB/touch.implementer"
 T=$(mk "Fix the foo bug")
 R=$(run_loop "$T")
 [ "$(jq -r .status <<<"$R")" = succeeded ] || fail "pass: run $(jq -c '{status,error}' <<<"$R")"
@@ -124,7 +132,11 @@ R=$(run_loop "$T")
 [ ! -e "$STUB/vox.log" ] || fail "pass: notify was called"
 grep -q -- "Fix the foo bug" "$STUB/msgs.planner" || fail "pass: the planner brief lacks the task"
 ls "$HOME"/.naru/loop/"$T"-*/plan.md >/dev/null || fail "pass: no scratch hand-off"
-ok "non-UI pass: UX and Implement #2 skipped, task done with a result, no notify"
+[ "$(step "$R" "Commit")" = ok ] || fail "pass: Commit was $(step "$R" "Commit")"
+git -C "$TMP/work" log -1 --format=%s | grep -q "task $T" || fail "pass: commit subject: $(git -C "$TMP/work" log -1 --format=%s)"
+[ "$(git -C "$TMP/work" show --name-only --format= HEAD | sort | tr '\n' ',')" = "foo.txt,seed.txt,sub dir/bar baz.txt," ] || fail "pass: commit files: $(git -C "$TMP/work" show --name-only --format= HEAD | tr '\n' ',')"
+[ -z "$(git -C "$TMP/work" status --porcelain)" ] || fail "pass: tree not clean after the commit"
+ok "non-UI pass: UX and Implement #2 skipped, task done with a result, no notify, exactly the changed files committed"
 
 # ---- 2. UI pass ----
 reset_stub
@@ -168,7 +180,8 @@ R=$(run_loop "$T")
 [ "$(step "$R" "Close: backlog")" = ok ] && [ "$(step "$R" "Close: pass")" = skipped ] || fail "twice: close nodes"
 "$NARU" task show "$T" | jq -e '.notes | length == 1 and (.[0].body | test("still broken"))' >/dev/null || fail "twice: note: $("$NARU" task show "$T" | jq -c .notes)"
 [ "$(grep -c -- '--call--' "$STUB/vox.log")" = 1 ] || fail "twice: notify calls"
-ok "two NEEDS-FIX passes end in backlog + note + notify"
+[ "$(step "$R" "Commit")" = skipped ] || fail "twice: Commit was $(step "$R" "Commit")"
+ok "two NEEDS-FIX passes end in backlog + note + notify, nothing committed"
 
 # ---- 5. inconclusive verifier -> backlog ----
 reset_stub
@@ -193,5 +206,22 @@ T=$(mk "Fix nothing")
 R=$(run_loop "$T")
 [ "$(tstatus "$T")" = backlog ] && [ "$(step "$R" "Implement #1")" = skipped ] || fail "planner: task $(tstatus "$T"), impl $(step "$R" "Implement #1")"
 ok "an inconclusive planner ends in backlog without implementing"
+
+# ---- 7. a tree dirty before the run -> pass, but the commit is refused ----
+reset_stub
+printf 'UI: no' > "$STUB/reply.planner"
+printf 'VERDICT: PASS' > "$STUB/reply.verifier"
+printf 'VERDICT: PASS' > "$STUB/reply.diff-reviewer"
+printf 'new.txt\n' > "$STUB/touch.implementer"
+echo stray > "$TMP/work/stray.txt"
+before=$(git -C "$TMP/work" rev-parse HEAD)
+T=$(mk "Fix dirty")
+R=$(run_loop "$T")
+[ "$(tstatus "$T")" = done ] && [ "$(step "$R" "Commit")" = failed ] || fail "dirty: task $(tstatus "$T"), Commit $(step "$R" "Commit")"
+[ "$(git -C "$TMP/work" rev-parse HEAD)" = "$before" ] || fail "dirty: a commit was made"
+[ "$(git -C "$TMP/work" status --porcelain | sort | tr '\n' ',')" = "?? new.txt,?? stray.txt," ] || fail "dirty: tree: $(git -C "$TMP/work" status --porcelain)"
+"$NARU" task show "$T" | jq -e '.notes | length == 1 and (.[0].body | test("stray.txt"))' >/dev/null || fail "dirty: note"
+[ "$(grep -c -- '--call--' "$STUB/vox.log")" = 1 ] || fail "dirty: notify calls"
+ok "a dirty baseline refuses the commit: nothing staged, task noted, one notify"
 
 echo "task-loop-check: all ok"

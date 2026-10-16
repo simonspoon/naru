@@ -639,6 +639,7 @@ SCRATCH="$HOME/.naru/loop/$TASK-$(date +%s)-$$"
 mkdir -p "$SCRATCH"
 naru task show "$TASK" | jq -r '.description' > "$SCRATCH/task.md" || exit 1
 echo no > "$SCRATCH/ui"
+git status --porcelain -uall > "$SCRATCH/baseline.txt" 2>/dev/null || : > "$SCRATCH/baseline.txt"
 { brief_head planner; printf '\n## What to do\n\nWrite a short implementation plan: the files to touch, the steps, and how to verify. Do not edit any file. End with exactly one line, `UI: yes` if the change touches user-facing UI, else `UI: no`.\n'; } > "$SCRATCH/plan-brief.md"
 stage_run plan planner "$(dl 900)" "$SCRATCH/plan-brief.md"
 if [ "$(stage_verdict plan)" = COMPLETE ]; then
@@ -713,6 +714,33 @@ const LOOP_CLOSE_PASS: &str = r##"last=$(ls "$SCRATCH"/review-*-verify.md | tail
 { echo "Task loop passed review and verify. Hand-off files: $SCRATCH"; echo; cat "$last"; } | head -c 4000 > "$SCRATCH/result.md"
 naru task update "$TASK" --status done --result-file "$SCRATCH/result.md" > /dev/null || exit 1
 emit close=done
+"##;
+
+const LOOP_COMMIT: &str = r##"if [ -s "$SCRATCH/baseline.txt" ]; then
+  { echo "Task loop passed, but the commit was skipped: the tree held changes before the run, so the task's own changes cannot be told apart. Nothing was staged or committed. Files dirty before the run:"; cat "$SCRATCH/baseline.txt"; } | head -c 4000 > "$SCRATCH/commit-note.md"
+  naru task note "$TASK" --file "$SCRATCH/commit-note.md" > /dev/null
+  naru notify --title "Task loop" --open "tasks/$TASK" "Task $TASK passed but was not committed: the tree was dirty before the run." > /dev/null 2>&1 || echo "notify failed" >> "$SCRATCH/reasons.txt"
+  echo "task-loop: commit refused, the tree was dirty before the run" >&2
+  exit 1
+fi
+paths=()
+while IFS= read -r -d '' rec; do
+  case "$rec" in
+    R*|C*|\ R*|\ C*) paths+=("${rec:3}"); IFS= read -r -d '' old; paths+=("$old") ;;
+    *) paths+=("${rec:3}") ;;
+  esac
+done < <(git status --porcelain -z -uall)
+if [ "${#paths[@]}" -eq 0 ]; then emit commit=none; exit 0; fi
+NAME=$(naru task show "$TASK" | jq -r '.name')
+if ! git add -A -- "${paths[@]}" || ! git commit -q -m "task $TASK: $NAME" -m "Naru task $TASK (task loop)" -- "${paths[@]}" > "$SCRATCH/commit.out" 2>&1; then
+  git reset -q -- "${paths[@]}" 2>/dev/null
+  naru task note "$TASK" "The task loop could not commit the change: $(head -c 1500 "$SCRATCH/commit.out")" > /dev/null
+  naru notify --title "Task loop" --open "tasks/$TASK" "Task $TASK passed but the commit failed." > /dev/null 2>&1 || true
+  exit 1
+fi
+SHA=$(git rev-parse --short HEAD)
+naru task note "$TASK" "Committed $SHA by the task loop." > /dev/null || true
+emit commit=$SHA
 "##;
 
 const LOOP_CLOSE_BACKLOG: &str = r##"{ echo "Task loop did not pass; the task is back in backlog for a person. State: $(printf '%s\n' "$IN" | tail -n 1)"; echo "Hand-off files: $SCRATCH"; echo; cat "$SCRATCH/reasons.txt" 2>/dev/null
@@ -825,6 +853,7 @@ pub fn create_task_loop_workflow(
             3400.0,
             240.0,
         ),
+        (K::Cli, "Commit", cli(LOOP_COMMIT, "0", 120), 3640.0, 80.0),
     ];
     let t = Some("true");
     let f = Some("false");
@@ -850,6 +879,7 @@ pub fn create_task_loop_workflow(
         (12, 13, None),
         (13, 14, t),
         (13, 15, f),
+        (14, 16, None),
     ];
     let wf = store.create_workflow(
         Some(project_id),

@@ -62,6 +62,7 @@ above the stage deadline so the driver, not SIGKILL, ends a stage.
 | 4' | Review + Verify #2 | as 4 | | unrolled copy |
 | 5' | Join #2 | `branch` | | |
 | 6 | Close | `cli` nodes: PASS -> `naru task update <id> --status done --result ...`; INCONCLUSIVE, or NEEDS-FIX after iteration 2 -> `--status backlog`, `naru task note`, `naru notify` | `cli` | no engine task-update or notify node |
+| 7 | Commit | `cli`, after Close: pass only: stages exactly the paths `git status --porcelain -z -uall` lists (`git add -A -- <paths>`, never the whole tree) and commits `task <id>: <name>`; the Plan node snapshots the status to `baseline.txt` first, and a non-empty baseline refuses (nothing staged, `naru task note`, `naru notify`, node fails; the task stays `done`); nothing changed = `commit=none`; a failed commit unstages and notes it | `cli` | none (no push, no PR) |
 
 Both the pass edge of Join #1 and Join #2 reach the same Close-pass node (any
 semantics make that a plain fan-in). A failed *agent* must not fail the node:
