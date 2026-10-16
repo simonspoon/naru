@@ -2096,8 +2096,19 @@ pub const TODO_CONCURRENCY: &str = "todo-concurrency";
 /// 1158, `docs/retro.md`).
 pub const RETRO_INTERVAL_HOURS: &str = "retro-interval-hours";
 
+/// The config key holding how many minutes a dispatched agent may stay silent
+/// on an `in_progress` task before the stall watchdog acts (naru task 1953,
+/// `docs/todo-watcher.md`).
+pub const STALL_MINUTES: &str = "stall-minutes";
+
 /// Every key the `watchers` section understands, for the unknown-key error.
-const WATCHER_KEYS: &[&str] = &[TODO_CONCURRENCY, RETRO_INTERVAL_HOURS];
+const WATCHER_KEYS: &[&str] = &[TODO_CONCURRENCY, RETRO_INTERVAL_HOURS, STALL_MINUTES];
+
+/// How long a dispatched agent may be silent with no config: twenty minutes.
+pub const DEFAULT_STALL_MINUTES: u32 = 20;
+
+/// The longest stall threshold the editor will write — a day.
+pub const MAX_STALL_MINUTES: u32 = 1440;
 
 /// How long `serve --watch-retro` waits between two retrospectives with no
 /// config: three days, the cadence the feature was asked for.
@@ -2135,6 +2146,8 @@ struct WatchersSection {
     todo_concurrency: Option<u32>,
     #[serde(default, rename = "retro-interval-hours")]
     retro_interval_hours: Option<u32>,
+    #[serde(default, rename = "stall-minutes")]
+    stall_minutes: Option<u32>,
 }
 
 fn read_watchers(path: &Path) -> Result<WatchersSection, String> {
@@ -2190,6 +2203,22 @@ fn retro_interval_hours_in(path: &Path) -> Result<u32, String> {
         .unwrap_or(DEFAULT_RETRO_INTERVAL_HOURS))
 }
 
+/// How many minutes a dispatched agent may be silent before the stall
+/// watchdog nudges and then reports it (naru task 1953).
+/// [`todo_concurrency`]'s rules exactly: read on every tick, absent is
+/// [`DEFAULT_STALL_MINUTES`], a hand-edited value outside
+/// `1..=MAX_STALL_MINUTES` is clamped, an unreadable file is `Err`.
+pub fn stall_minutes() -> Result<u32, String> {
+    stall_minutes_in(&config_file())
+}
+
+fn stall_minutes_in(path: &Path) -> Result<u32, String> {
+    Ok(read_watchers(path)?
+        .stall_minutes
+        .map(|n| n.clamp(1, MAX_STALL_MINUTES))
+        .unwrap_or(DEFAULT_STALL_MINUTES))
+}
+
 /// The watcher settings for the Settings page (`GET /api/config/watchers`):
 /// the configured value (verbatim, or `null` when the file says nothing) plus
 /// the built-in default behind it — the `{value, default}` idiom
@@ -2205,6 +2234,8 @@ fn watchers_in(path: &Path) -> Result<ConfigWatchers, String> {
         todo_concurrency_default: DEFAULT_TODO_CONCURRENCY,
         retro_interval_hours: section.retro_interval_hours,
         retro_interval_hours_default: DEFAULT_RETRO_INTERVAL_HOURS,
+        stall_minutes: section.stall_minutes,
+        stall_minutes_default: DEFAULT_STALL_MINUTES,
     })
 }
 
@@ -2247,6 +2278,8 @@ fn save_watchers_in(
         if let Some(value) = &updates[*key] {
             let max = if key.as_str() == RETRO_INTERVAL_HOURS {
                 MAX_RETRO_INTERVAL_HOURS
+            } else if key.as_str() == STALL_MINUTES {
+                MAX_STALL_MINUTES
             } else {
                 MAX_TODO_CONCURRENCY
             };
@@ -6879,6 +6912,34 @@ mod tests {
             );
             assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
         }
+    }
+
+    #[test]
+    fn stall_minutes_defaults_validates_and_clamps() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        assert_eq!(stall_minutes_in(&path).unwrap(), DEFAULT_STALL_MINUTES);
+        let mut ok = HashMap::new();
+        ok.insert(STALL_MINUTES.to_string(), Some(serde_json::json!(5)));
+        save_watchers_in(&path, &ok).unwrap();
+        assert_eq!(stall_minutes_in(&path).unwrap(), 5);
+        assert_eq!(watchers_in(&path).unwrap().stall_minutes, Some(5));
+        let before = std::fs::read_to_string(&path).unwrap();
+        for bad in [0, 1441] {
+            let mut u = HashMap::new();
+            u.insert(STALL_MINUTES.to_string(), Some(serde_json::json!(bad)));
+            assert!(matches!(
+                save_watchers_in(&path, &u),
+                Err(SaveError::Validation(_))
+            ));
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        let mut u = HashMap::new();
+        u.insert(STALL_MINUTES.to_string(), None);
+        save_watchers_in(&path, &u).unwrap();
+        assert_eq!(stall_minutes_in(&path).unwrap(), DEFAULT_STALL_MINUTES);
+        let path = write_config(dir.path(), r#"{"watchers": {"stall-minutes": 99999}}"#);
+        assert_eq!(stall_minutes_in(&path).unwrap(), MAX_STALL_MINUTES);
     }
 
     #[test]

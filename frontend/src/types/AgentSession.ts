@@ -129,4 +129,10 @@ taskName: string | null,
  * **naru-derived** (task 1829): the run's job id, set only on a `runner`
  * row (`naru run show <id>`); `null` for every `claude agents` row.
  */
-runId: string | null, };
+runId: string | null, 
+/**
+ * **naru-derived** (task 1953): the todo-watcher's stall watchdog has
+ * seen this dispatched session silent past `watchers.stall-minutes`
+ * while its task is still `in_progress`. `false` for every other row.
+ */
+stalled: boolean, };

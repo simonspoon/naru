@@ -221,3 +221,13 @@ export function bucketOf(
   if (a.state !== 'done') return 'ACTIVE'
   return (a.liveShells ?? 0) + (a.liveSubagents ?? 0) > 0 ? 'ACTIVE' : 'DONE'
 }
+
+/**
+ * Whether a row carries the "stalled" badge (naru task 1953): the server's
+ * stall watchdog has seen this dispatched session silent past
+ * `watchers.stall-minutes` on a still-`in_progress` task. Only a row that is
+ * still a live process can be stalled — an exited one is just over.
+ */
+export function isStalledRow(a: Pick<AgentSession, 'stalled' | 'pid'>): boolean {
+  return a.stalled === true && a.pid !== null && a.pid !== undefined
+}

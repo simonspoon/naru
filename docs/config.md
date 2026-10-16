@@ -678,7 +678,8 @@ todo-watcher's per-project concurrency limit (mesa task 777,
 {
   "watchers": {
     "todo-concurrency": 3,
-    "retro-interval-hours": 72
+    "retro-interval-hours": 72,
+    "stall-minutes": 20
   }
 }
 ```
@@ -709,6 +710,13 @@ todo-watcher's per-project concurrency limit (mesa task 777,
   hand-edited out-of-range value is clamped on read, exactly as
   `todo-concurrency` is. Read on every tick and on every `retro run`/`status`,
   so an edit lands on the next tick with no restart.
+- `stall-minutes` (naru task 1953) is how many minutes a dispatched agent may
+  sit silent on a still-`in_progress` task before the todo-watcher's stall
+  watchdog acts (`docs/todo-watcher.md`). **Absent or `null` ⇒ 20.** Integer in
+  `1..=1440`, else `422 validation` writing nothing; a hand-edited
+  out-of-range value is clamped on read; read every reaper pass. Body key
+  `stall_minutes`, `ts(skip)`ped (no Settings UI). `MESA_WATCH_TODO_STALL_MS`
+  overrides it for gate scripts.
 
 ### Routes
 

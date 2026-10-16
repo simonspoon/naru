@@ -6,6 +6,7 @@ import {
   agentTint,
   bucketOf,
   formatContextTokens,
+  isStalledRow,
   headlineSince,
   naruTimeMs,
   stepTrail,
@@ -230,5 +231,13 @@ describe('bucketOf', () => {
   it('treats every other state as active', () => {
     expect(bucketOf(row('working'))).toBe('ACTIVE')
     expect(bucketOf(row(null))).toBe('ACTIVE')
+  })
+})
+
+describe('isStalledRow', () => {
+  it('marks only a live row the server flagged', () => {
+    expect(isStalledRow({ stalled: true, pid: 12 })).toBe(true)
+    expect(isStalledRow({ stalled: false, pid: 12 })).toBe(false)
+    expect(isStalledRow({ stalled: true, pid: null })).toBe(false)
   })
 })

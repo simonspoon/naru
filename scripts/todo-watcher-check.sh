@@ -1185,4 +1185,63 @@ done
 ok "turning it back on resumes dispatching"
 kill "$SERVER_PID" 2>/dev/null || true; SERVER_PID=
 
+# ---- stall watchdog (naru task 1953) ----
+#
+# A dispatched agent that goes silent on an in_progress task: the stub
+# `claude agents` lists it live and idle forever, MESA_WATCH_TODO_STALL_MS
+# shrinks the 20-minute threshold, and a stub `vox` records the phone
+# notification. A `--bg` session has no send channel, so there is no nudge:
+# exactly one notification and exactly one inbox alert, repeated on no later
+# pass, and the task is never touched. Own db, config and port.
+STALL_DB="$TMP/stall.db"
+STALL_CFG="$TMP/stall-config.json"
+STALL_PORT=17796
+STALL_STUB="$TMP/stall-stub"
+mkdir -p "$STALL_STUB" "$TMP/projS"
+DIR_S=$(cd "$TMP/projS" && pwd -P)
+sleep 600 &
+HOLDER=$!
+cat > "$STALL_STUB/claude" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "--bg" ]; then echo "backgrounded · deadbeef (idle)"; exit 0; fi
+if [ "\$1" = "agents" ]; then
+  echo '[{"pid":$HOLDER,"id":"deadbeef","cwd":"$DIR_S","kind":"background","startedAt":1783000000000,"sessionId":"deadbeef-0000-0000-0000-000000000000","status":"idle","state":"working"}]'
+  exit 0
+fi
+exit 2
+EOF
+chmod +x "$STALL_STUB/claude"
+VOX_LOG="$TMP/stall-vox.log"
+cat > "$STALL_STUB/vox" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$VOX_LOG"
+printf '{"ok":true,"message_id":1,"chat_id":1}\n'
+EOF
+chmod +x "$STALL_STUB/vox"
+echo '{"serve": {"watch-todo": true}}' > "$STALL_CFG"
+stall_mesa() { MESA_DB="$STALL_DB" MESA_CONFIG_FILE="$STALL_CFG" "$MESA" "$@"; }
+STDOUT=$(stall_mesa project create S --no-git); SP=$(jq -r .id <<<"$STDOUT")
+stall_mesa project update "$SP" --path "$DIR_S" >/dev/null
+MESA_DB="$STALL_DB" MESA_CONFIG_FILE="$STALL_CFG" MESA_CLAUDE_BIN="$STALL_STUB/claude" \
+  MESA_VOX_BIN="$STALL_STUB/vox" MESA_WATCH_TODO_TICK_MS=150 MESA_WATCH_TODO_STALL_MS=1500 \
+  "$MESA" serve --port "$STALL_PORT" >/dev/null 2>&1 &
+SERVER_PID=$!
+wait_for_server "$STALL_PORT"
+STDOUT=$(stall_mesa task create "$SP" "a silent one"); ST=$(jq -r .id <<<"$STDOUT")
+for _ in $(seq 1 100); do
+  [ -s "$VOX_LOG" ] && break
+  sleep 0.1
+done
+[ -s "$VOX_LOG" ] || fail "a silent agent must trigger a phone notification"
+sleep 1.5  # ten more reaper passes: nothing may repeat
+[ "$(wc -l < "$VOX_LOG")" -eq 1 ] || fail "exactly one notification expected: $(cat "$VOX_LOG")"
+case "$(cat "$VOX_LOG")" in *"$ST"*"a silent one"*) ;; *) fail "notification must name the task id and name: $(cat "$VOX_LOG")" ;; esac
+ALERTS=$(stall_mesa inbox list | jq '[.[] | select(.author == "todo-reaper")] | length')
+[ "$ALERTS" = "1" ] || fail "exactly one stall alert expected, got $ALERTS"
+[ "$(stall_mesa task show "$ST" | jq -r .status)" = "in_progress" ] ||
+  fail "the watchdog must never move the task"
+ok "a silent dispatched agent: one notification naming the task and one inbox alert, none repeated, task untouched"
+kill "$SERVER_PID" 2>/dev/null || true; SERVER_PID=
+kill "$HOLDER" 2>/dev/null || true; HOLDER=
+
 echo "ALL OK ($CHECKS checks)"

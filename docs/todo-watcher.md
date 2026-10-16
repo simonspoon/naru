@@ -280,6 +280,17 @@ because someone ran `mesa serve`.
       uses; the clock resets whenever it is seen busy or with live work —
       files one alert per job id saying the agent looks stalled and naming
       `claude attach <id>`, and keeps the entry.
+    - **Stall watchdog** (naru task 1953). The same silence clock, but at
+      `watchers.stall-minutes` (default 20, `MESA_WATCH_TODO_STALL_MS` for
+      gates) and acting only while the task is still `in_progress`. Stage 1:
+      for a `run:<id>` job, one `naru run send` asking it to report status and
+      continue (a `--bg` session has no send channel, so no nudge). Stage 2,
+      one more window later (at once when no nudge was possible): one phone
+      notification through `core::notify::send` (best-effort, failure logged)
+      naming the task id, name and silence, plus one inbox alert authored
+      `todo-reaper`. Any busy or live-work sighting drops the nudge and both
+      flags, so a later silence starts over. It never stops or moves the task
+      or session; the Agents panel marks the row `stalled` (`AgentSession.stalled`).
     Each alert is fire-once through flags on the dispatch's own in-memory
     entry, set only once the filing succeeded, so a failed filing is retried
     on the next pass.

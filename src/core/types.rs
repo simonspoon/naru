@@ -260,6 +260,11 @@ pub struct AgentSession {
     /// row (`naru run show <id>`); `null` for every `claude agents` row.
     #[serde(default)]
     pub run_id: Option<String>,
+    /// **naru-derived** (task 1953): the todo-watcher's stall watchdog has
+    /// seen this dispatched session silent past `watchers.stall-minutes`
+    /// while its task is still `in_progress`. `false` for every other row.
+    #[serde(default)]
+    pub stalled: bool,
 }
 
 /// Which of the two kinds of work an [`AgentChild`] is. Exactly two: a
@@ -626,6 +631,14 @@ pub struct ConfigWatchers {
     /// `todo_concurrency_default`.
     #[ts(skip)]
     pub retro_interval_hours_default: u32,
+    /// Minutes a dispatched agent may stay silent on an `in_progress` task
+    /// before the stall watchdog acts (naru task 1953), or `null` for
+    /// `stall_minutes_default`. `ts(skip)` like `retro_interval_hours`.
+    #[ts(skip)]
+    pub stall_minutes: Option<u32>,
+    /// The built-in threshold (20).
+    #[ts(skip)]
+    pub stall_minutes_default: u32,
 }
 
 /// The speech settings as the Settings page sees them (`core::config`,

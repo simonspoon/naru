@@ -52,7 +52,7 @@ use crate::core::{
     ServeNumberSetting, Status, Store, SystemInfo, Task, TaskNote, TaskPatch, TaskSummary,
     VoiceEnrollment, WorkflowNodeKind, WorkflowNodeNew, WorkflowNodePatch, WorkflowPatch,
     WorkflowTrigger, agents, attachments, audio, board, config, files, git, guard, hooks,
-    inbox_triage, kb, library, listen, live, memory_job, project_memory, receipt, runner,
+    inbox_triage, kb, library, listen, live, memory_job, notify, project_memory, receipt, runner,
     script_runs, scripts, speech, supervisor, system, validate_live_client, version, voice_enroll,
     workflow,
 };
@@ -1764,6 +1764,12 @@ struct DispatchedSession {
     idle_since: Option<Instant>,
     /// The stalled alert has been filed for this session.
     stalled_alerted: bool,
+    /// Stall watchdog (naru task 1953): when the runner nudge was sent, the
+    /// phone notification attempt was made, and the inbox alert was filed.
+    /// All three drop the moment the session is seen active again.
+    nudged_at: Option<Instant>,
+    stall_notified: bool,
+    stall_filed: bool,
 }
 
 impl DispatchedSession {
@@ -1778,6 +1784,9 @@ impl DispatchedSession {
             work_subagents: 0,
             idle_since: None,
             stalled_alerted: false,
+            nudged_at: None,
+            stall_notified: false,
+            stall_filed: false,
         }
     }
 }
@@ -1800,6 +1809,74 @@ const REAP_REQUEUE_MAX: u32 = 2;
 /// the reaper reports it stalled (mesa task 1191): the same hour
 /// `task next`'s stale-claim diagnostic uses, since both name one wedge.
 const REAP_STALL_AFTER: Duration = Duration::from_secs(STALE_CLAIM_MINUTES as u64 * 60);
+
+/// How long a dispatched agent may sit silent on an `in_progress` task before
+/// the stall watchdog acts (naru task 1953): `watchers.stall-minutes`, with
+/// `MESA_WATCH_TODO_STALL_MS` as the gate scripts' test seam (a minute is the
+/// config's floor). A config that cannot be read skips the check this pass.
+fn stall_after() -> Option<Duration> {
+    if let Some(ms) = crate::core::env::var("WATCH_TODO_STALL_MS").and_then(|s| s.parse().ok()) {
+        return Some(Duration::from_millis(ms));
+    }
+    match config::stall_minutes() {
+        Ok(m) => Some(Duration::from_secs(u64::from(m) * 60)),
+        Err(e) => {
+            eprintln!("todo-watcher: stall watchdog skipped, cannot read stall-minutes: {e}");
+            None
+        }
+    }
+}
+
+/// What the stall watchdog does for one session on this pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StallStep {
+    Wait,
+    /// Ask the session to report (a `naru run` job only).
+    Nudge,
+    /// Still silent after the nudge (or nothing to nudge with): notify the
+    /// phone and file the inbox alert.
+    Notify,
+}
+
+/// The watchdog's decision, pure like [`reap_verdict`] and run after it:
+/// `memory.idle_since` is the silence clock it already keeps (reset by any
+/// busy or live-work sighting), so seeing it cleared drops the nudge and the
+/// flags too. Nothing here ever stops or moves the task or session.
+fn stall_step(
+    status: Option<Status>,
+    memory: &mut DispatchedSession,
+    now: Instant,
+    after: Duration,
+    can_nudge: bool,
+) -> StallStep {
+    let Some(since) = memory
+        .idle_since
+        .filter(|_| status == Some(Status::InProgress))
+    else {
+        memory.nudged_at = None;
+        memory.stall_notified = false;
+        memory.stall_filed = false;
+        return StallStep::Wait;
+    };
+    if (memory.stall_notified && memory.stall_filed) || now.duration_since(since) < after {
+        return StallStep::Wait;
+    }
+    match memory.nudged_at {
+        None if can_nudge => StallStep::Nudge,
+        None => StallStep::Notify,
+        Some(at) if now.duration_since(at) >= after => StallStep::Notify,
+        Some(_) => StallStep::Wait,
+    }
+}
+
+/// The alert and the phone message for a silent agent.
+fn stall_message(task_id: i64, name: &str, job_id: &str, silent: Duration) -> String {
+    format!(
+        "Agent session {job_id} on task {task_id} ({name}) has been silent for {} minutes while \
+         the task is still in_progress.",
+        silent.as_secs().div_ceil(60)
+    )
+}
 
 /// Author every reaper alert is filed under, `COST_GUARD_AUTHOR`'s twin.
 const TODO_REAPER_AUTHOR: &str = "todo-reaper";
@@ -2218,6 +2295,20 @@ fn todo_reaper_tick(state: &AppState) {
         let mut memory = dispatch;
         let verdict = reap_verdict(status, listed, &mut memory, now);
         let DispatchTarget::Task(task_id) = target;
+        if matches!(verdict, ReapVerdict::Keep | ReapVerdict::AlertStalled)
+            && let Some(after) = stall_after()
+        {
+            stall_watchdog(
+                state,
+                &job_id,
+                task_id,
+                task_exists,
+                status,
+                &mut memory,
+                now,
+                after,
+            );
+        }
         match verdict {
             ReapVerdict::Keep => {}
             ReapVerdict::Forget => {
@@ -2373,6 +2464,76 @@ fn todo_reaper_tick(state: &AppState) {
     }
 }
 
+/// Runs [`stall_step`] and carries it out: the nudge to a `run:` job, then the
+/// notification and the inbox alert, each best-effort and logged on failure.
+#[allow(clippy::too_many_arguments)]
+fn stall_watchdog(
+    state: &AppState,
+    job_id: &str,
+    task_id: i64,
+    task_exists: bool,
+    status: Option<Status>,
+    memory: &mut DispatchedSession,
+    now: Instant,
+    after: Duration,
+) {
+    let run_id = job_id.strip_prefix("run:");
+    let mut step = stall_step(status, memory, now, after, run_id.is_some());
+    if step == StallStep::Nudge {
+        let text = format!(
+            "Naru stall watchdog: no activity for {} minutes on task {task_id}, which is \
+             still in_progress. Please report your status and continue.",
+            after.as_secs().div_ceil(60)
+        );
+        match run_id.map(|id| runner::send(id, &text, false)) {
+            Some(Ok(_)) => memory.nudged_at = Some(now),
+            other => {
+                if let Some(Err(e)) = other {
+                    eprintln!("todo-watcher: nudging session {job_id} failed: {e}");
+                }
+                step = StallStep::Notify;
+            }
+        }
+    }
+    if step != StallStep::Notify {
+        return;
+    }
+    let (name, silent) = {
+        let store = match state.store.lock() {
+            Ok(s) => s,
+            Err(e) => e.into_inner(),
+        };
+        let name = store
+            .get_task(task_id)
+            .map(|t| t.name)
+            .unwrap_or_else(|_| String::new());
+        (
+            name,
+            memory.idle_since.map_or(after, |t| now.duration_since(t)),
+        )
+    };
+    let body = stall_message(task_id, &name, job_id, silent);
+    if !memory.stall_notified {
+        // Best-effort: a missing or unconfigured vox is logged, not retried
+        // every pass.
+        if let Err(e) = notify::send(&body, Some("Naru: agent stalled"), None, None) {
+            eprintln!("todo-watcher: stall notification for session {job_id} failed: {e}");
+        }
+        memory.stall_notified = true;
+    }
+    if !memory.stall_filed {
+        let alert = format!(
+            "{body} See what it is waiting on with `claude attach {job_id}`; nothing was stopped."
+        );
+        match file_reaper_alert(state, task_exists, task_id, job_id, &alert) {
+            Ok(()) => memory.stall_filed = true,
+            Err(e) => {
+                eprintln!("todo-watcher: filing the stall alert for session {job_id} failed: {e}")
+            }
+        }
+    }
+}
+
 /// Writes one pass's timers and alert flags back to `todo_dispatched`. Only
 /// the reaper's own fields: `superseded` may have been flipped by a dispatch
 /// since the pass took its snapshot, and an entry the pass forgot stays
@@ -2389,6 +2550,9 @@ fn remember_dispatch(state: &AppState, job_id: &str, memory: DispatchedSession) 
         entry.work_subagents = memory.work_subagents;
         entry.idle_since = memory.idle_since;
         entry.stalled_alerted = memory.stalled_alerted;
+        entry.nudged_at = memory.nudged_at;
+        entry.stall_notified = memory.stall_notified;
+        entry.stall_filed = memory.stall_filed;
     }
 }
 
@@ -10376,6 +10540,9 @@ struct WatchersUpdate {
     /// The retrospective's cadence (mesa task 1158), same three-way rule.
     #[serde(default, deserialize_with = "deserialize_some")]
     retro_interval_hours: Option<Option<serde_json::Value>>,
+    /// The stall watchdog's threshold in minutes (naru task 1953), same rule.
+    #[serde(default, deserialize_with = "deserialize_some")]
+    stall_minutes: Option<Option<serde_json::Value>>,
 }
 
 /// Distinguishes an absent key from an explicit `null` — the difference
@@ -10406,6 +10573,9 @@ async fn update_config_watchers(
     }
     if let Some(value) = body.retro_interval_hours {
         updates.insert(config::RETRO_INTERVAL_HOURS.to_string(), value);
+    }
+    if let Some(value) = body.stall_minutes {
+        updates.insert(config::STALL_MINUTES.to_string(), value);
     }
 
     config::save_watchers(&updates).map_err(|e| match e {
@@ -11803,6 +11973,32 @@ fn attach_agent_tasks(state: &AppState, sessions: &mut [AgentSession]) {
         Err(e) => e.into_inner(),
     };
     agents::attach_tasks(sessions, &store);
+    drop(store);
+    mark_stalled(state, sessions);
+}
+
+/// Sets `stalled` (naru task 1953) on each row whose dispatched session the
+/// reaper has seen continuously silent for the stall threshold.
+fn mark_stalled(state: &AppState, sessions: &mut [AgentSession]) {
+    let Some(after) = stall_after() else {
+        return;
+    };
+    let map = match state.todo_dispatched.lock() {
+        Ok(d) => d,
+        Err(e) => e.into_inner(),
+    };
+    let now = Instant::now();
+    for session in sessions.iter_mut() {
+        session.stalled = session
+            .id
+            .as_ref()
+            .and_then(|id| map.get(id))
+            .is_some_and(|d| {
+                !d.superseded
+                    && d.idle_since
+                        .is_some_and(|since| now.duration_since(since) >= after)
+            });
+    }
 }
 
 /// Lists every live Claude Code session on the machine (no folder filter) —
@@ -14674,6 +14870,7 @@ mod tests {
                         Json(WatchersUpdate {
                             todo_concurrency: None,
                             retro_interval_hours: None,
+                            stall_minutes: None,
                         }),
                     )
                     .await
@@ -16244,6 +16441,75 @@ exit 2
             ),
             ReapVerdict::AlertAbandoned
         );
+    }
+
+    #[test]
+    fn stall_step_nudges_once_then_notifies_once_and_activity_resets() {
+        let now = Instant::now();
+        let after = Duration::from_secs(20 * 60);
+        let mut m = fresh_memory(now);
+        m.idle_since = Some(now);
+        let ip = Some(Status::InProgress);
+        let late = now + after;
+        // Before the threshold: nothing.
+        assert_eq!(
+            stall_step(ip, &mut m, late - Duration::from_secs(1), after, true),
+            StallStep::Wait
+        );
+        // Past it: a nudge, which the caller records.
+        assert_eq!(stall_step(ip, &mut m, late, after, true), StallStep::Nudge);
+        m.nudged_at = Some(late);
+        // Waiting out one more window, then the notification.
+        assert_eq!(
+            stall_step(
+                ip,
+                &mut m,
+                late + after - Duration::from_secs(1),
+                after,
+                true
+            ),
+            StallStep::Wait
+        );
+        let later = late + after;
+        assert_eq!(
+            stall_step(ip, &mut m, later, after, true),
+            StallStep::Notify
+        );
+        // Notified and filed: never again.
+        m.stall_notified = true;
+        assert_eq!(
+            stall_step(ip, &mut m, later, after, true),
+            StallStep::Notify
+        );
+        m.stall_filed = true;
+        assert_eq!(
+            stall_step(ip, &mut m, later + after, after, true),
+            StallStep::Wait
+        );
+        // Activity (the reaper cleared the idle clock) resets every stage.
+        m.idle_since = None;
+        assert_eq!(stall_step(ip, &mut m, later, after, true), StallStep::Wait);
+        assert!(m.nudged_at.is_none() && !m.stall_notified && !m.stall_filed);
+    }
+
+    #[test]
+    fn stall_step_notifies_at_once_without_a_nudge_channel_and_ignores_other_statuses() {
+        let now = Instant::now();
+        let after = Duration::from_secs(60);
+        let mut m = fresh_memory(now);
+        m.idle_since = Some(now);
+        assert_eq!(
+            stall_step(Some(Status::InProgress), &mut m, now + after, after, false),
+            StallStep::Notify
+        );
+        for status in [Some(Status::Done), Some(Status::Todo), None] {
+            let mut m = fresh_memory(now);
+            m.idle_since = Some(now);
+            assert_eq!(
+                stall_step(status, &mut m, now + after, after, true),
+                StallStep::Wait
+            );
+        }
     }
 
     #[test]

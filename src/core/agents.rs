@@ -145,6 +145,7 @@ fn runner_row(job: &runner::Job, alive: bool) -> AgentSession {
         task_id: None,
         task_name: None,
         run_id: Some(job.job_id.clone()),
+        stalled: false,
     }
 }
 

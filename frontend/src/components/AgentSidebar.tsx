@@ -48,6 +48,7 @@ import {
   stepTrail,
   agentKindOf,
   agentRowActions,
+  isStalledRow,
   agentTint,
   bucketOf,
   type Bucket,
@@ -1051,10 +1052,15 @@ function AgentListContent({
             ))}
           </ul>
         )}
-        {(wait || actions.note !== null) && (
+        {(wait || actions.note !== null || isStalledRow(a)) && (
           <div className="muted agent-card-meta">
             {actions.note !== null && <span>{actions.note}</span>}
             {wait && <span className="badge blocked">{wait}</span>}
+            {isStalledRow(a) && (
+              <span className="badge blocked" title="No activity past the stall threshold">
+                stalled
+              </span>
+            )}
           </div>
         )}
         {/* Nothing when the model is unknown. */}
