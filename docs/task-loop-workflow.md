@@ -319,3 +319,5 @@ on work must not treat `idle` as "done" without reading `last_result`.
 4. Runs dir has no override env var, so tests/spikes pollute `~/.naru/runs`.
 5. Node timeout does not stop an agent it started (section 8.6); the stage
    driver (1959) owns that.
+
+The todo-watcher command can be set to `naru workflow run "Task loop" --input {id} --detach` in `~/.naru/config.json` under `commands.todo-watcher` to run tasks through this workflow.
