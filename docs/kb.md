@@ -65,6 +65,41 @@ that is not one of the notes actually shown to the model. Outcomes:
 - an answer citing no real note, or a failed call, or a missing `claude`:
   `unavailable` (exit 1).
 
+The prefilter stems each question word crudely (one of `ing`/`ed`/`es`/`s` off,
+never below 4 letters) so "dumps" finds "dump", and offers the model up to 8
+notes. The prompt tells the model to combine notes for a multi-note question and
+to treat a nearby-but-different fact as no answer.
+
+## Evaluating `kb ask` (naru task 1944)
+
+`scripts/kb-eval.sh [label]` seeds `scripts/kb-eval/facts/` (25 fictional notes,
+so the model cannot know them) into a **throwaway** `NARU_KB_DIR` / `NARU_DB`
+under a temp dir (never the real kb), runs the real `naru kb ask` (real `claude`
+haiku, ~41 calls, 4 in parallel) over `scripts/kb-eval/questions.json` and
+scores deterministically: positive questions need every `all` regex in the
+answer, no `none` regex, and a cited source from the expected list; a negative
+question is correct only if the answer is empty (or an explicit "not stated"
+without any forbidden fact). It prints a per-type table and the failing
+questions (got vs why) and writes `<out>/<label>.json`. Env: `NARU_BIN`
+(default `target/release/naru`, rebuild after changing `kb.rs`), `EVAL_OUT`,
+`EVAL_JOBS`. Not part of any gate.
+
+Before/after the prefilter stemming + 8 notes + prompt change (41 questions;
+haiku is not fully deterministic, a second after-run was identical):
+
+| type | n | before | after |
+| --- | --- | --- | --- |
+| direct | 10 | 10 (100%) | 10 (100%) |
+| multi-hop | 9 | 7 (78%) | 9 (100%) |
+| paraphrased | 12 | 11 (92%) | 12 (100%) |
+| negative | 10 | 9 (90%) | 10 (100%) |
+| all | 41 | 37 (90.2%) | 41 (100%) |
+
+Average latency was 3.3 s before and 3.2-3.4 s after. The fixture is small and
+the questions were written before tuning, so 100% means these failures are
+fixed, not that `ask` is perfect: a bigger or noisier kb, or a paraphrase
+sharing no word with its note, still misses at the prefilter.
+
 ## `kb list` / `kb show`
 
 `list` prints a bare array of `{path, topic, title, tags, updated}`. `show`

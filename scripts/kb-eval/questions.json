@@ -1,0 +1,475 @@
+[
+ {
+  "id": "di1",
+  "type": "direct",
+  "question": "What is the IP address of the staging server?",
+  "all": [
+   "10\\.20\\.4\\.17"
+  ],
+  "sources": [
+   "topics/infra/staging-server.md"
+  ],
+  "none": []
+ },
+ {
+  "id": "di2",
+  "type": "direct",
+  "question": "What time does the nightly Postgres backup run?",
+  "all": [
+   "03:15"
+  ],
+  "sources": [
+   "topics/infra/db-backup.md"
+  ],
+  "none": []
+ },
+ {
+  "id": "di3",
+  "type": "direct",
+  "question": "Which port does Beacon listen on?",
+  "all": [
+   "8472"
+  ],
+  "sources": [
+   "topics/services/beacon.md"
+  ],
+  "none": []
+ },
+ {
+  "id": "di4",
+  "type": "direct",
+  "question": "Which day of the week are releases cut?",
+  "all": [
+   "(?i)thursday"
+  ],
+  "sources": [
+   "topics/dev/release-process.md"
+  ],
+  "none": []
+ },
+ {
+  "id": "di5",
+  "type": "direct",
+  "question": "What is the cat called?",
+  "all": [
+   "Miso"
+  ],
+  "sources": [
+   "topics/home/pets.md"
+  ],
+  "none": []
+ },
+ {
+  "id": "di6",
+  "type": "direct",
+  "question": "What is the WireGuard VPN profile name?",
+  "all": [
+   "hl-corp"
+  ],
+  "sources": [
+   "topics/infra/vpn.md"
+  ],
+  "none": []
+ },
+ {
+  "id": "di7",
+  "type": "direct",
+  "question": "How many runners are in the CI pool?",
+  "all": [
+   "\\b6\\b|six"
+  ],
+  "sources": [
+   "topics/infra/ci-runners.md"
+  ],
+  "none": []
+ },
+ {
+  "id": "mu1",
+  "type": "multi-hop",
+  "question": "Who leads the team that owns the notification service?",
+  "all": [
+   "Priya"
+  ],
+  "sources": [
+   "topics/services/beacon.md",
+   "topics/people/priya-lindqvist.md"
+  ],
+  "none": []
+ },
+ {
+  "id": "mu2",
+  "type": "multi-hop",
+  "question": "Which host does the Redis instance used by Beacon run on?",
+  "all": [
+   "quill-02"
+  ],
+  "sources": [
+   "topics/services/beacon.md",
+   "topics/infra/redis-cache-3.md"
+  ],
+  "none": []
+ },
+ {
+  "id": "mu3",
+  "type": "multi-hop",
+  "question": "What eviction policy does the cache behind the notification service use?",
+  "all": [
+   "allkeys-lru"
+  ],
+  "sources": [
+   "topics/infra/redis-cache-3.md"
+  ],
+  "none": []
+ },
+ {
+  "id": "mu4",
+  "type": "multi-hop",
+  "question": "Who should the secondary on-call escalate to if an incident is not resolved in 30 minutes, and who is that person?",
+  "all": [
+   "Priya"
+  ],
+  "sources": [
+   "topics/people/oncall-rotation.md",
+   "topics/people/priya-lindqvist.md"
+  ],
+  "none": []
+ },
+ {
+  "id": "mu5",
+  "type": "multi-hop",
+  "question": "At what mileage is the next oil change due on the car?",
+  "all": [
+   "54[, ]?200"
+  ],
+  "sources": [
+   "topics/home/car.md"
+  ],
+  "none": []
+ },
+ {
+  "id": "mu6",
+  "type": "multi-hop",
+  "question": "What is the memory limit of the cache that the service listening on port 8472 depends on?",
+  "all": [
+   "4\\s?gb"
+  ],
+  "sources": [
+   "topics/services/beacon.md",
+   "topics/infra/redis-cache-3.md"
+  ],
+  "none": []
+ },
+ {
+  "id": "ne1",
+  "type": "negative",
+  "question": "What is the staging database password?",
+  "all": [],
+  "sources": [],
+  "none": [
+   "(?i)password (is|:)"
+  ]
+ },
+ {
+  "id": "ne2",
+  "type": "negative",
+  "question": "What is the name of the dog?",
+  "all": [],
+  "sources": [],
+  "none": [
+   "(?i)\\bdog\\b.*\\b(is called|named)\\b"
+  ]
+ },
+ {
+  "id": "ne3",
+  "type": "negative",
+  "question": "Who is the CTO?",
+  "all": [],
+  "sources": [],
+  "none": []
+ },
+ {
+  "id": "ne4",
+  "type": "negative",
+  "question": "Which port does the billing service listen on?",
+  "all": [],
+  "sources": [],
+  "none": [
+   "\\b\\d{4,5}\\b"
+  ]
+ },
+ {
+  "id": "ne5",
+  "type": "negative",
+  "question": "What is the production database hostname?",
+  "all": [],
+  "sources": [],
+  "none": [
+   "tern-07|quill-02"
+  ]
+ },
+ {
+  "id": "ne6",
+  "type": "negative",
+  "question": "When is the next company holiday?",
+  "all": [],
+  "sources": [],
+  "none": []
+ },
+ {
+  "id": "pa1",
+  "type": "paraphrased",
+  "question": "Which machine do we push test builds to before they go live?",
+  "all": [
+   "tern-07"
+  ],
+  "sources": [
+   "topics/infra/staging-server.md"
+  ],
+  "none": []
+ },
+ {
+  "id": "pa2",
+  "type": "paraphrased",
+  "question": "When does the database dump happen each night, and where does it end up?",
+  "all": [
+   "03:15",
+   "ridgeline"
+  ],
+  "sources": [
+   "topics/infra/db-backup.md"
+  ],
+  "none": []
+ },
+ {
+  "id": "pa3",
+  "type": "paraphrased",
+  "question": "How do I stop that timezone-dependent unit test from failing?",
+  "all": [
+   "TZ=UTC"
+  ],
+  "sources": [
+   "topics/dev/gotchas.md"
+  ],
+  "none": []
+ },
+ {
+  "id": "pa4",
+  "type": "paraphrased",
+  "question": "What is the feline's veterinarian called?",
+  "all": [
+   "Brandt"
+  ],
+  "sources": [
+   "topics/home/pets.md"
+  ],
+  "none": []
+ },
+ {
+  "id": "pa5",
+  "type": "paraphrased",
+  "question": "How often should the Subaru's engine lubricant be changed?",
+  "all": [
+   "6[, ]?000"
+  ],
+  "sources": [
+   "topics/home/car.md"
+  ],
+  "none": []
+ },
+ {
+  "id": "pa6",
+  "type": "paraphrased",
+  "question": "The tunnel connects but nothing gets through. What should I do?",
+  "all": [
+   "wg-quick down hl-corp",
+   "wg-quick up hl-corp"
+  ],
+  "sources": [
+   "topics/infra/vpn.md"
+  ],
+  "none": []
+ },
+ {
+  "id": "pa7",
+  "type": "paraphrased",
+  "question": "How long are database dumps retained?",
+  "all": [
+   "21"
+  ],
+  "sources": [
+   "topics/infra/db-backup.md"
+  ],
+  "none": []
+ },
+ {
+  "id": "di8",
+  "type": "direct",
+  "question": "Which Node version does make lint need?",
+  "all": [
+   "\\b20\\b"
+  ],
+  "sources": [
+   "topics/dev/gotchas.md"
+  ],
+  "none": []
+ },
+ {
+  "id": "di9",
+  "type": "direct",
+  "question": "What is the command to reset the staging database?",
+  "all": [
+   "reset-staging-db"
+  ],
+  "sources": [
+   "topics/infra/staging-reset.md"
+  ],
+  "none": []
+ },
+ {
+  "id": "di10",
+  "type": "direct",
+  "question": "What is the API rate limit per key?",
+  "all": [
+   "100"
+  ],
+  "sources": [
+   "topics/services/gateway.md"
+  ],
+  "none": []
+ },
+ {
+  "id": "mu7",
+  "type": "multi-hop",
+  "question": "In which city is the primary on-call engineer based?",
+  "all": [
+   "Lisbon"
+  ],
+  "sources": [
+   "topics/people/marta-okonkwo.md"
+  ],
+  "none": []
+ },
+ {
+  "id": "mu8",
+  "type": "multi-hop",
+  "question": "Which team does the secondary on-call engineer work on?",
+  "all": [
+   "Search"
+  ],
+  "sources": [
+   "topics/people/dev-raman.md"
+  ],
+  "none": []
+ },
+ {
+  "id": "mu9",
+  "type": "multi-hop",
+  "question": "How long does resetting the staging database take, and which host do I run it on?",
+  "all": [
+   "12",
+   "tern-07"
+  ],
+  "sources": [
+   "topics/infra/staging-reset.md"
+  ],
+  "none": []
+ },
+ {
+  "id": "pa8",
+  "type": "paraphrased",
+  "question": "Who is the second person to call when the pager goes off?",
+  "all": [
+   "Dev Raman"
+  ],
+  "sources": [
+   "topics/people/oncall-rotation.md"
+  ],
+  "none": []
+ },
+ {
+  "id": "pa9",
+  "type": "paraphrased",
+  "question": "Where do I find Beacon's settings file?",
+  "all": [
+   "/etc/beacon/beacon\\.toml"
+  ],
+  "sources": [
+   "topics/services/beacon.md"
+  ],
+  "none": []
+ },
+ {
+  "id": "pa10",
+  "type": "paraphrased",
+  "question": "How long can a pipeline job run before it is terminated?",
+  "all": [
+   "45"
+  ],
+  "sources": [
+   "topics/infra/ci-runners.md"
+  ],
+  "none": []
+ },
+ {
+  "id": "pa11",
+  "type": "paraphrased",
+  "question": "What should a bugfix branch be called?",
+  "all": [
+   "fix/"
+  ],
+  "sources": [
+   "topics/dev/branching.md"
+  ],
+  "none": []
+ },
+ {
+  "id": "pa12",
+  "type": "paraphrased",
+  "question": "How long do audit events stick around?",
+  "all": [
+   "90"
+  ],
+  "sources": [
+   "topics/services/ledger.md"
+  ],
+  "none": []
+ },
+ {
+  "id": "ne7",
+  "type": "negative",
+  "question": "Who will be the primary on-call next quarter?",
+  "all": [],
+  "sources": [],
+  "none": []
+ },
+ {
+  "id": "ne8",
+  "type": "negative",
+  "question": "What is Dev Raman's phone number?",
+  "all": [],
+  "sources": [],
+  "none": [
+   "\\d{3}[- ]\\d{3,4}"
+  ]
+ },
+ {
+  "id": "ne9",
+  "type": "negative",
+  "question": "What is the memory limit of the Redis cache used by the gateway?",
+  "all": [],
+  "sources": [],
+  "none": [
+   "4\\s?gb"
+  ]
+ },
+ {
+  "id": "ne10",
+  "type": "negative",
+  "question": "Which port does the Beacon admin console use?",
+  "all": [],
+  "sources": [],
+  "none": [
+   "8472|3030|9100"
+  ]
+ }
+]
