@@ -17022,6 +17022,9 @@ exit 2
             let stop_log = stub_dir.path().join("stops.log");
             let bin = stub_claude_reaper(stub_dir.path(), &agents_file, &stop_log);
             unsafe { std::env::set_var("MESA_CLAUDE_BIN", &bin) };
+            // Pin the stall watchdog (naru task 1953) beyond the hour so this
+            // test sees the hour rule alone and never reaches a real vox.
+            unsafe { std::env::set_var("MESA_WATCH_TODO_STALL_MS", "864000000") };
 
             let (_dir, state) = test_state();
             let project = new_project(&state, None);
@@ -17061,6 +17064,7 @@ exit 2
                 Status::InProgress
             );
 
+            unsafe { std::env::remove_var("MESA_WATCH_TODO_STALL_MS") };
             unsafe { std::env::remove_var("MESA_CLAUDE_BIN") };
         });
     }
