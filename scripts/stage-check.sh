@@ -96,7 +96,7 @@ ok "silence -> nudge -> recovers"
 # ---- 3. silence -> nudge -> restart ----
 echo 30 > "$STUB/sleep.a-rst"
 brief rst "restart me"
-( rc=$(stage "$TMP/o3" --agent a-rst --deadline 90 --silence 2 --grace 4 --scratch "$TMP/s3" --brief-file "$TMP/rst.md"); echo "$rc" > "$TMP/rc3" ) &
+( rc=$(stage "$TMP/o3" --agent a-rst --deadline 90 --silence 2 --grace 4 --scratch "$TMP/s3" --brief-file "$TMP/rst.md" --task 7 --stage review1); echo "$rc" > "$TMP/rc3" ) &
 wait_for 10 "nudge read" turns_ge a-rst 2
 echo 0 > "$STUB/sleep.a-rst"
 # mid-run status: running, one nudge, no restart yet
@@ -108,6 +108,10 @@ wait_for 40 "driver done" test -s "$TMP/rc3"
 jq -e '.verdict=="COMPLETE" and .report=="echo: restart me" and .nudges==1 and .restarts==1 and (.job_ids|length)==2 and .job_id==.job_ids[1]' "$TMP/o3" >/dev/null || fail "restart: $(cat "$TMP/o3")"
 [ "$(grep -c -- "--agent a-rst" "$STUB/argv.log")" = 2 ] || fail "restart: expected two claude launches"
 ok "silence -> nudge -> restart"
+for id in $(jq -r '.job_ids[]' "$TMP/o3"); do
+  [ "$(jq -r .name "$HOME/.naru/runs/$id/job.json")" = "task 7 · review1 (a-rst)" ] || fail "restart: job $id name is $(jq -r .name "$HOME/.naru/runs/$id/job.json")"
+done
+ok "restart keeps the session name (task 7 · review1 (a-rst))"
 
 # ---- 3b. second silence ends the stage ----
 echo 30 > "$STUB/sleep.a-dead"
@@ -139,12 +143,15 @@ ok "deadline -> INCONCLUSIVE"
 # ---- 6. parallel pair, one overruns; status.json shape ----
 echo 0 > "$STUB/sleep.p-fast"; echo 30 > "$STUB/sleep.p-slow"
 brief pf "fast one"; brief ps "slow one"
-rc=$(stage "$TMP/o6" --agent p-fast --deadline 3 --grace 2 --scratch "$TMP/s6" --brief-file "$TMP/pf.md" --also p-slow --also-brief-file "$TMP/ps.md")
+rc=$(stage "$TMP/o6" --agent p-fast --deadline 3 --grace 2 --scratch "$TMP/s6" --brief-file "$TMP/pf.md" --also p-slow --also-brief-file "$TMP/ps.md" --task 7 --stage review1)
 [ "$rc" = 0 ] || fail "parallel: exit $rc: $(cat "$TMP/o6.err")"
 jq -e '.verdict=="INCONCLUSIVE" and (.results|length)==2 and .results[0].verdict=="COMPLETE" and .results[0].agent=="p-fast" and .results[1].verdict=="INCONCLUSIVE" and .results[1].agent=="p-slow"' "$TMP/o6" >/dev/null || fail "parallel: $(cat "$TMP/o6")"
 ok "parallel pair: combined INCONCLUSIVE, fast one COMPLETE"
+[ "$(jq -r .name "$HOME/.naru/runs/$(jq -r '.results[0].job_id' "$TMP/o6")/job.json")" = "task 7 · review1 (p-fast)" ] || fail "parallel: first agent name"
+[ "$(jq -r .name "$HOME/.naru/runs/$(jq -r '.results[1].job_id' "$TMP/o6")/job.json")" = "task 7 · review1 (p-slow)" ] || fail "parallel: --also agent name"
+ok "each session named task 7 · review1 (agent), --also included"
 S="$TMP/s6/status.json"
-jq -e '(keys|sort)==["agents","stage","updated_at"] and .stage=="run" and (.updated_at|type)=="number" and (.agents|length)==2' "$S" >/dev/null || fail "status top shape: $(cat "$S")"
+jq -e '(keys|sort)==["agents","stage","updated_at"] and .stage=="review1" and (.updated_at|type)=="number" and (.agents|length)==2' "$S" >/dev/null || fail "status top shape: $(cat "$S")"
 jq -e 'all(.agents[]; (keys|sort)==["agent","job_id","job_ids","last_event_at","nudges","output_tail","restarts","started_at","state"] and (.job_id|type)=="string" and (.job_ids|type)=="array" and (.started_at|type)=="number" and (.last_event_at|type)=="number" and (.output_tail|type)=="string" and (.nudges|type)=="number" and (.restarts|type)=="number")' "$S" >/dev/null || fail "status agent shape: $(cat "$S")"
 jq -e '.agents[0].state=="complete" and .agents[1].state=="inconclusive" and .agents[1].nudges==1' "$S" >/dev/null || fail "status final states: $(cat "$S")"
 ls "$TMP/s6" | grep -q tmp && fail "status tmp file left behind"

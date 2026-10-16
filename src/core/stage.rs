@@ -32,6 +32,8 @@ pub struct AgentSpec {
 
 pub struct StageOpts {
     pub stage: String,
+    /// The task the stage works on, for the session names.
+    pub task: Option<i64>,
     pub cwd: String,
     pub model: String,
     pub deadline: Duration,
@@ -127,6 +129,14 @@ impl Shared<'_> {
     }
 }
 
+/// The Agents-tab name of a stage session: `task N · stage (agent)`.
+fn session_name(opts: &StageOpts, spec: &AgentSpec) -> String {
+    match opts.task {
+        Some(t) => format!("task {t} · {} ({})", opts.stage, spec.agent),
+        None => format!("{} ({})", opts.stage, spec.agent),
+    }
+}
+
 fn start_job(sh: &Shared, spec: &AgentSpec) -> Result<String> {
     let v = runner::start_in(
         sh.runs,
@@ -134,7 +144,7 @@ fn start_job(sh: &Shared, spec: &AgentSpec) -> Result<String> {
             model: sh.opts.model.clone(),
             prompt: spec.brief.clone(),
             cwd: Some(sh.opts.cwd.clone()),
-            name: None,
+            name: Some(session_name(sh.opts, spec)),
             agent: Some(spec.agent.clone()),
             idle_timeout_secs: None,
         },
@@ -452,6 +462,29 @@ mod tests {
         let c = cap_text(&long, 200);
         assert!(c.len() <= 200);
         assert!(c.contains("[truncated: 1000 bytes omitted]"));
+    }
+
+    #[test]
+    fn session_name_carries_task_stage_and_agent() {
+        let mut o = StageOpts {
+            stage: "impl2".into(),
+            task: Some(7),
+            cwd: String::new(),
+            model: String::new(),
+            deadline: Duration::from_secs(1),
+            silence: None,
+            grace: Duration::from_secs(1),
+            max_restarts: 0,
+            scratch: PathBuf::new(),
+            poll: Duration::from_secs(1),
+        };
+        let spec = AgentSpec {
+            agent: "implementer".into(),
+            brief: String::new(),
+        };
+        assert_eq!(session_name(&o, &spec), "task 7 · impl2 (implementer)");
+        o.task = None;
+        assert_eq!(session_name(&o, &spec), "impl2 (implementer)");
     }
 
     #[test]

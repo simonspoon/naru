@@ -624,7 +624,7 @@ brief_head() { printf 'You are the %s stage of an automated task loop for naru t
 stage_run() { # <name> <agent> <deadline> <brief file> [extra stage args]
   local name=$1 agent=$2 deadline=$3 brief=$4; shift 4
   mkdir -p "$SCRATCH/$name"
-  naru stage run --stage "$name" --agent "$agent" --cwd "$PWD" --deadline "$deadline" \
+  naru stage run --stage "$name" --task "$TASK" --agent "$agent" --cwd "$PWD" --deadline "$deadline" \
     --silence "${NARU_LOOP_SILENCE:-300}" --grace "${NARU_LOOP_GRACE:-180}" \
     --scratch "$SCRATCH/$name" --brief-file "$brief" "$@" > "$SCRATCH/$name.json" 2> "$SCRATCH/$name.err" \
     || echo '{"verdict":"INCONCLUSIVE","reason":"the stage driver itself failed"}' > "$SCRATCH/$name.json"

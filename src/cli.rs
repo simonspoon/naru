@@ -544,6 +544,9 @@ EXAMPLES
         /// The stage's name, as written in `status.json`
         #[arg(long, default_value = "run")]
         stage: String,
+        /// The task id, shown in each session's name (`task N · stage (agent)`)
+        #[arg(long)]
+        task: Option<i64>,
     },
 }
 
@@ -5423,6 +5426,7 @@ fn run_stage(cmd: StageCmd) -> Result<()> {
         scratch,
         model,
         stage: name,
+        task,
     } = cmd;
     let secs = |flag: &str, v: f64| -> Result<std::time::Duration> {
         if v.is_finite() && v > 0.0 {
@@ -5456,6 +5460,7 @@ fn run_stage(cmd: StageCmd) -> Result<()> {
     }
     let opts = stage::StageOpts {
         stage: name,
+        task,
         cwd,
         model,
         deadline: secs("--deadline", deadline)?,

@@ -49,6 +49,9 @@ piece is only a **blocking wait with a deadline** (task 1956).
 Trigger input is the task id. Each agent stage is a `cli` node running the
 stage driver (section 3), pinned with `--agent`, with `timeout_secs` set well
 above the stage deadline so the driver, not SIGKILL, ends a stage.
+Each stage passes `--task` (the task id), so its session shows in the Agents tab
+as `task N · stage (agent)`; a `--also` agent and a restart get the same form
+(naru task 1979).
 
 | # | Node | Kind | Uses | Gap |
 | --- | --- | --- | --- | --- |
