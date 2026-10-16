@@ -1198,6 +1198,75 @@ main {
   transition: border-color 0.15s, box-shadow 0.15s, background 0.15s;
 }
 
+/* Collapsible columns (naru task 1650). With a collapsed column the board
+   becomes a wrapping flex row: expanded columns grow from a 14rem basis (so
+   they still wrap in a narrow main area, and widen when space is freed),
+   collapsed ones are fixed strips. */
+.kanban.has-collapsed {
+  display: flex;
+  flex-wrap: wrap;
+}
+
+.kanban.has-collapsed > .kanban-column {
+  flex: 1 1 min(14rem, 100%);
+  min-width: 0;
+}
+
+.kanban.has-collapsed > .kanban-column.collapsed {
+  flex: 0 0 2.5rem;
+}
+
+.kanban-collapse-toggle {
+  background: none;
+  border: none;
+  padding: 0 0.35rem 0 0;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.75rem;
+  border-radius: var(--r-lg);
+}
+
+.kanban-collapse-toggle:hover {
+  color: var(--cyan);
+}
+
+.kanban-collapse-toggle:focus-visible,
+.kanban-collapse-strip:focus-visible {
+  outline: none;
+  box-shadow: var(--ring-focus);
+}
+
+.kanban-column.collapsed {
+  padding: 0;
+  cursor: pointer;
+}
+
+.kanban-column.collapsed:hover {
+  background: rgba(var(--cyan-rgb), 0.08);
+}
+
+.kanban-collapse-strip {
+  width: 100%;
+  height: 100%;
+  min-height: 8rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0;
+  background: none;
+  border: none;
+  border-radius: var(--r-lg);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 0.75rem;
+}
+
+.kanban-strip-label {
+  writing-mode: vertical-rl;
+  font-weight: 600;
+}
+
 .kanban-column.over {
   background: rgba(var(--cyan-rgb), 0.08);
   box-shadow: var(--ring-focus);
@@ -6527,8 +6596,30 @@ body.live-panel-ratio-resizing {
     grid-template-columns: 1fr;
   }
 
+  .kanban.has-collapsed {
+    display: grid;
+  }
+
+  .kanban.has-collapsed > .kanban-column.collapsed {
+    flex: none;
+  }
+
   .kanban-column {
     min-height: 4rem;
+  }
+
+  .kanban-column.collapsed {
+    min-height: 2.75rem;
+  }
+
+  .kanban-collapse-strip {
+    flex-direction: row;
+    min-height: 2.75rem;
+    padding: 0 0.75rem;
+  }
+
+  .kanban-strip-label {
+    writing-mode: horizontal-tb;
   }
 
   /* Modals become full-screen sheets (mesa task 557). At 390px a centred

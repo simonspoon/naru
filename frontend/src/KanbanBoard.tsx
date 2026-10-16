@@ -20,9 +20,12 @@ import {
   hideSubtasks,
   liveAgentCount,
   loadHideChildProjects,
+  loadCollapsedColumns,
   loadHideSubtasks,
+  saveCollapsedColumns,
   saveHideChildProjects,
   saveHideSubtasks,
+  toggleCollapsed,
   DONE_INITIAL,
   DONE_PAGE,
 } from './boardView'
@@ -168,6 +171,8 @@ function Column({
   sessions,
   shown,
   onShowMore,
+  collapsed,
+  onToggle,
 }: {
   status: Status
   tasks: TaskSummary[]
@@ -175,18 +180,50 @@ function Column({
   sessions: AgentSession[] | null
   shown: number
   onShowMore: () => void
+  collapsed: boolean
+  onToggle: () => void
 }) {
   const { setNodeRef, isOver } = useDroppable({ id: status })
   // Cap between the sort and the nesting, so the `done` slice is the 20 (then
   // 70, …) most recently completed rows — see `capColumn`.
   const { visible, hidden } = capColumn(status, orderColumn(status, tasks), shown)
   const ordered = nestColumn(visible)
+  const label = statusLabel(status)
+  const cls = `kanban-column${isOver ? ' over' : ''}${collapsed ? ' collapsed' : ''}`
+  // Collapsed: the droppable div stays mounted (a card dropped on the strip
+  // still resolves to this status); only the strip button is rendered.
+  if (collapsed) {
+    return (
+      <div ref={setNodeRef} className={cls}>
+        <button
+          type="button"
+          className="kanban-collapse-strip"
+          aria-expanded={false}
+          aria-label={`${label}, ${tasks.length} ${tasks.length === 1 ? 'task' : 'tasks'}, collapsed. Expand column`}
+          onClick={onToggle}
+        >
+          <span aria-hidden="true">▸</span>
+          <span className="muted kanban-strip-count">{tasks.length}</span>
+          <span className="kanban-strip-label">{label}</span>
+        </button>
+      </div>
+    )
+  }
   return (
-    <div ref={setNodeRef} className={`kanban-column${isOver ? ' over' : ''}`}>
+    <div ref={setNodeRef} className={cls}>
       <h2>
+        <button
+          type="button"
+          className="kanban-collapse-toggle"
+          aria-expanded={true}
+          aria-label={`Collapse ${label} column`}
+          onClick={onToggle}
+        >
+          ▾
+        </button>
         {/* The *total*, not the shown count: a capped column must not read as
             missing data. */}
-        {statusLabel(status)} <span className="muted">{tasks.length}</span>
+        {label} <span className="muted">{tasks.length}</span>
       </h2>
       <SortableContext
         items={ordered.map(({ task }) => task.id)}
@@ -250,6 +287,22 @@ export function KanbanBoard({
   const [shownDone, setShownDone] = useState(DONE_INITIAL)
   const [hideSubs, setHideSubs] = useState(loadHideSubtasks)
   const [hideChildren, setHideChildren] = useState(loadHideChildProjects)
+  // Collapsed columns, per project (naru task 1650). Re-read when the board
+  // is pointed at another project, in render, so no stale frame shows.
+  const [collapsedState, setCollapsedState] = useState(() => ({
+    pid: boardProjectId,
+    list: loadCollapsedColumns(boardProjectId),
+  }))
+  let collapsedList = collapsedState.list
+  if (collapsedState.pid !== boardProjectId) {
+    collapsedList = loadCollapsedColumns(boardProjectId)
+    setCollapsedState({ pid: boardProjectId, list: collapsedList })
+  }
+  function toggleColumn(status: Status) {
+    const list = toggleCollapsed(collapsedList, status)
+    saveCollapsedColumns(boardProjectId, list)
+    setCollapsedState({ pid: boardProjectId, list })
+  }
   const aggregates = hasChildProjectTasks(tasks, boardProjectId)
   const shownTasks = hideChildProjectTasks(
     hideSubtasks(tasks, hideSubs),
@@ -361,7 +414,7 @@ export function KanbanBoard({
         onDragEnd={handleDragEnd}
         onDragCancel={() => setActiveId(null)}
       >
-        <div className="kanban">
+        <div className={`kanban${collapsedList.length > 0 ? ' has-collapsed' : ''}`}>
           {COLUMNS.map((status) => (
             <Column
               key={status}
@@ -371,6 +424,8 @@ export function KanbanBoard({
               sessions={sessions}
               shown={shownDone}
               onShowMore={() => setShownDone((n) => n + DONE_PAGE)}
+              collapsed={collapsedList.includes(status)}
+              onToggle={() => toggleColumn(status)}
             />
           ))}
         </div>

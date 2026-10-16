@@ -11,6 +11,10 @@ import {
   liveAgentCount,
   loadBoardView,
   saveBoardView,
+  collapsedColumnsKey,
+  loadCollapsedColumns,
+  saveCollapsedColumns,
+  toggleCollapsed,
   DONE_INITIAL,
   DONE_PAGE,
 } from './boardView'
@@ -247,5 +251,38 @@ describe('hide child-project tasks', () => {
   it('detects an aggregating board', () => {
     expect(hasChildProjectTasks([{ project_id: 5 }], 5)).toBe(false)
     expect(hasChildProjectTasks([{ project_id: 5 }, { project_id: 9 }], 5)).toBe(true)
+  })
+})
+
+describe('collapsed columns', () => {
+  beforeEach(() => localStorage.clear())
+
+  it('defaults to none and round-trips', () => {
+    expect(loadCollapsedColumns(1)).toEqual([])
+    saveCollapsedColumns(1, ['todo', 'done'])
+    expect(loadCollapsedColumns(1)).toEqual(['todo', 'done'])
+    saveCollapsedColumns(1, [])
+    expect(localStorage.getItem(collapsedColumnsKey(1))).toBeNull()
+  })
+
+  it('keeps projects apart', () => {
+    saveCollapsedColumns(1, ['todo'])
+    saveCollapsedColumns(2, ['done'])
+    expect(loadCollapsedColumns(1)).toEqual(['todo'])
+    expect(loadCollapsedColumns(2)).toEqual(['done'])
+  })
+
+  it('survives corrupt values and drops unknown statuses', () => {
+    localStorage.setItem(collapsedColumnsKey(1), '{nope')
+    expect(loadCollapsedColumns(1)).toEqual([])
+    localStorage.setItem(collapsedColumnsKey(1), '{"a":1}')
+    expect(loadCollapsedColumns(1)).toEqual([])
+    localStorage.setItem(collapsedColumnsKey(1), '["todo","bogus",3]')
+    expect(loadCollapsedColumns(1)).toEqual(['todo'])
+  })
+
+  it('toggles', () => {
+    expect(toggleCollapsed([], 'todo')).toEqual(['todo'])
+    expect(toggleCollapsed(['todo', 'done'], 'todo')).toEqual(['done'])
   })
 })

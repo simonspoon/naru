@@ -1,5 +1,6 @@
 import type { AgentSession } from './types/AgentSession'
 import { isRunningAgent } from './agentProject'
+import type { Status } from './types/Status'
 import type { TaskSummary } from './types/TaskSummary'
 
 /** How many *live* Claude Code sessions look like they are working on this
@@ -174,4 +175,41 @@ export function hideChildProjectTasks<T extends { project_id: number }>(
   hide: boolean,
 ): T[] {
   return hide ? tasks.filter((t) => t.project_id === boardProjectId) : tasks
+}
+
+// Collapsed kanban columns (naru task 1650): which status columns a project's
+// board has folded into a strip, remembered per project, browser-local.
+const COLLAPSIBLE: readonly string[] = ['backlog', 'todo', 'in_progress', 'done']
+
+export const collapsedColumnsKey = (projectId: number) => `naru-board-collapsed-${projectId}`
+
+/** The saved collapsed statuses for a project; unreadable, corrupt or
+ *  unknown entries fall back to / are dropped from "all expanded". */
+export function loadCollapsedColumns(projectId: number): Status[] {
+  try {
+    const raw = localStorage.getItem(collapsedColumnsKey(projectId))
+    if (raw === null) return []
+    const v = JSON.parse(raw) as unknown
+    if (!Array.isArray(v)) return []
+    return COLLAPSIBLE.filter((s) => v.includes(s)) as Status[]
+  } catch {
+    return []
+  }
+}
+
+export function saveCollapsedColumns(projectId: number, list: Status[]): void {
+  try {
+    if (list.length > 0) {
+      localStorage.setItem(collapsedColumnsKey(projectId), JSON.stringify(list))
+    } else {
+      localStorage.removeItem(collapsedColumnsKey(projectId))
+    }
+  } catch {
+    // Storage unavailable — the collapse just won't persist.
+  }
+}
+
+/** `list` with `status` added if absent, removed if present. */
+export function toggleCollapsed(list: Status[], status: Status): Status[] {
+  return list.includes(status) ? list.filter((s) => s !== status) : [...list, status]
 }
