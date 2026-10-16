@@ -197,3 +197,122 @@ blocks shown:
 Not built, on purpose: engine loop/retry node, parallel walk, wait-for-all
 join, a notify node, an update-task output. Revisit only if a second workflow
 needs them.
+
+## 8. Spike findings (task 1955)
+
+Run with real `claude` (haiku, tiny briefs), installed `naru 2.15.0`, a
+throwaway `NARU_DB`, a throwaway `NARU_CONFIG_FILE`, a scratch git repo for
+`--cwd`. The runs directory has **no override** (`runner::runs_dir()` is
+`~/.naru/runs` from the real home), so the spike's jobs landed there and were
+deleted afterwards (by id). Stub-free throughout.
+
+**GO**: `naru run start --agent X` is a sound agent-stage substrate. One
+setting is mandatory (permission mode) and two behaviours need the stage
+driver (below).
+
+### 8.1 Launch from a `cli` node (works)
+
+```
+naru workflow create spike; naru workflow node create spike trigger Start
+naru workflow node create spike cli Launch --config '{"command":"naru run start --model haiku --agent implementer --cwd /tmp/spike/repo \"Reply with the single word PONG, then wait.\"","timeout_secs":60}'
+naru workflow edge create spike 1 2; naru workflow run spike
+```
+
+The step output is the job record: `{"job_id":"233407d2","agent":"implementer",
+"status":"running","runner_alive":true,"pending_messages":1,"session_id":…}`.
+The node returns at once (about 0 s); the run continues detached. The job id is
+the `job_id` key of the step output (`jq -r .job_id`). Note `runner_pid` and
+`claude_pid` are `null` in the start echo (runner not up yet); read them later
+from `naru run show`.
+
+### 8.2 Poll, send, stop (works)
+
+- ~15 s later `naru run show 233407d2` says `status: idle`,
+  `last_result: "PONG"`, `runner_pid 10495`, `claude_pid 10525`.
+- `naru run send <job> "<text>"` to an idle run starts a new turn in the same
+  session (asked for a file, got `DONE`; asked for a quote, got an answer).
+  Echo is `{status:"idle",pending_messages:1}`, i.e. the pre-delivery view.
+- `naru run stop <job>` echoes the *old* status (`idle`); about 8 s later the
+  job reads `stopped`, `runner_alive:false`, and `ps` shows both pids gone.
+  A stage driver must poll for the terminal status, not trust the echo.
+- **Not exercised**: a nudge delivered while a turn was genuinely in flight
+  (claude backgrounded its `sleep 90` and went idle, so the later send landed
+  on an idle run; the same shape as `run send` in section 4's assumptions).
+  `send --interrupt` was not run either; both are covered by `runner-check.sh`
+  against the stub and by naru task 1868's real-claude measurement in
+  `docs/runner.md`.
+
+### 8.3 Agent definition is honoured (works)
+
+The runner's claude command line carries `--agent implementer`
+(`ps`: `claude -p … --agent implementer --model haiku --name 233407d2 …`) and
+`job.json` records `agent`. The `system/init` event has **no** `agent` field
+(`agent: null`), so init cannot prove it; the proof is behavioural: asked to
+quote its first instruction, the run quoted `implementer.md`'s opening line.
+`--model haiku` overrides the definition's `model: sonnet`. Caveat: that
+opening line is also in the surrounding harness prompt in some setups, so a
+stage check should rely on the argv/`job.json`, not the quote.
+
+### 8.4 Permission flag (needed unless the user's claude default allows)
+
+The default `runner` template passes **no** permission flag, so a run inherits
+claude's own default. On this machine `~/.claude/settings.json` has
+`defaultMode: bypassPermissions`, so the unmodified template wrote files
+without any prompt (`init.permissionMode` was `bypassPermissions`). To prove
+the failure mode, a throwaway config with `--permission-mode default`:
+
+```
+{"commands":{"runner":"run_agent={run_agent}\nclaude -p --input-format stream-json --output-format stream-json --verbose --permission-mode default ${run_agent:+--agent \"$run_agent\"} --model {model} --name {name} {session_flag} {session_id}"}}
+```
+
+The Write tool result was `is_error: true`, "Claude requested permissions to
+write to …/out-default.txt, but you haven't granted it yet." The same template
+with `--permission-mode acceptEdits` gave "File created successfully" and the
+file existed. **Setting for a workflow agent stage**: put
+`--permission-mode acceptEdits` (edits only) or `bypassPermissions` (also
+Bash/git, needed for a gate-running implementer) into the `runner` template
+(`config.json` `commands.runner`, same text as the default with the flag added
+before `${run_agent:+…}`, **keeping the `run_agent={run_agent}` first line** or
+`--agent` is silently dropped). The template is global, not per run, and
+`naru run start` has no `--permission-mode` flag; a stage that needs a mode
+other than the user's default cannot choose one per job. To-file below.
+
+### 8.5 Last output (works)
+
+`naru run show <job> --main --tail N` returns `{…job…, events:[…]}` with the
+last N non-subagent events; the final `result` event's `result` field is the
+answer and the job carries `last_result` / `last_subtype` / `last_is_error`
+(`last_result` alone is enough for "what did it end on"). Tool results appear
+as `type:"user"` events (`message.content[0].type == "tool_result"`).
+Without `--events`/`--main` `run show` prints only the job object.
+
+### 8.6 Kill semantics (runner survives, as designed)
+
+A `cli` node `naru run start … > start.out; sleep 40` with `timeout_secs: 5`
+ended `failed`, "timed out after 5s", at 5 s. The start had already completed
+(job `7c8cc8b8` in `start.out`, `runner_pid` null at that moment). 8 s later:
+runner pid 27122 (`ppid 1`, own pgid 27122) and claude pid 27193 (pgid 27193,
+child of the runner) were alive and the job was `idle`, having done its work.
+So the engine's kill of the node's process group does **not** reach the run:
+the runner is its own group (`process_group(0)`) and re-parented to init.
+It is cleaned up only by `naru run stop` (verified: both pids gone in about
+8 s), by the idle timeout (default 3600 s, `--idle-timeout`) or by claude
+exiting. A workflow timeout therefore leaves an orphan agent that keeps
+spending until stopped: **the stage driver must record the job id and `stop`
+it itself on timeout/cancel**, and should pass a short `--idle-timeout` as a
+backstop. Observation: a briefed `sleep 90` was run by claude as a
+background Bash call and the run went `idle` immediately; a stage that waits
+on work must not treat `idle` as "done" without reading `last_result`.
+
+### 8.7 To-file / bugs
+
+1. No per-job permission mode: `naru run start` / `POST /api/runs` should take
+   `--permission-mode` (or a `--template`-like choice) so a loop stage does not
+   depend on the global `runner` template and the user's claude default.
+2. `naru run stop` echoes the pre-stop status (`idle`); consider echoing
+   `stop_requested` or documenting it. `run start` echo has null pids.
+3. `run send` / `run stop` echo a stale `status`; `run wait` (1956) must poll
+   `job.json`, not use the echo.
+4. Runs dir has no override env var, so tests/spikes pollute `~/.naru/runs`.
+5. Node timeout does not stop an agent it started (section 8.6); the stage
+   driver (1959) owns that.
