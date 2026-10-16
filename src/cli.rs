@@ -312,6 +312,11 @@ EXAMPLES
     /// works with no server. See docs/runner.md.
     #[command(subcommand)]
     Run(RunCmd),
+    /// Drive one task-loop stage: run agent(s), watch, nudge, restart, cut at a deadline (naru task 1959)
+    ///
+    /// See docs/stage.md.
+    #[command(subcommand)]
+    Stage(StageCmd),
     /// A detached memory or triage job (summary / dream / inbox-triage);
     /// started by `live stop`, a handoff, the dream verbs and the inbox
     /// watcher, not by hand. Its one-line JSON report goes to
@@ -485,6 +490,60 @@ EXAMPLES
     Runner {
         /// The job directory
         dir: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum StageCmd {
+    /// Run a stage to one verdict; an agent that fails is data, exit 0
+    ///
+    /// Starts the agent like `run start --agent`, watches it, sends one plain
+    /// nudge on silence, stops and restarts it from the same brief up to
+    /// `--max-restarts`, and at `--deadline` nudges for a partial report and
+    /// stops after `--grace`. Prints `{verdict: COMPLETE|INCONCLUSIVE, ...}`
+    /// (an overrun is always INCONCLUSIVE); with `--also`, `{verdict, results}`.
+    /// Writes `<scratch>/status.json` on every poll. Takes no `--quiet`.
+    #[command(after_help = "\
+EXAMPLES
+  naru stage run --agent diff-reviewer --cwd . --deadline 900 --silence 120 --brief-file brief.md
+  naru stage run --agent verifier --cwd . --deadline 900 --brief-file v.md --also ui-verifier --also-brief-file u.md")]
+    Run {
+        /// The agent definition to run
+        #[arg(long)]
+        agent: String,
+        /// Working folder for the agent(s)
+        #[arg(long)]
+        cwd: String,
+        /// Seconds until the stage is cut
+        #[arg(long)]
+        deadline: f64,
+        /// Seconds without a new event line before a nudge (default: no watchdog)
+        #[arg(long)]
+        silence: Option<f64>,
+        /// Restarts allowed after a silent nudge
+        #[arg(long, default_value_t = 1)]
+        max_restarts: u32,
+        /// Seconds to wait after a nudge
+        #[arg(long, default_value_t = crate::core::stage::GRACE_SECS)]
+        grace: f64,
+        /// File holding the agent's brief (its first message)
+        #[arg(long)]
+        brief_file: PathBuf,
+        /// A second agent to run concurrently
+        #[arg(long, requires = "also_brief_file")]
+        also: Option<String>,
+        /// The second agent's brief file
+        #[arg(long, requires = "also")]
+        also_brief_file: Option<PathBuf>,
+        /// Where `status.json` is written (default: a fresh temp folder)
+        #[arg(long)]
+        scratch: Option<PathBuf>,
+        /// Model alias for the runs
+        #[arg(long, default_value = "sonnet")]
+        model: String,
+        /// The stage's name, as written in `status.json`
+        #[arg(long, default_value = "run")]
+        stage: String,
     },
 }
 
@@ -5174,6 +5233,7 @@ fn execute(command: Command) -> Result<()> {
         }
         Command::Alarm(cmd) => run_alarm(cmd),
         Command::Run(cmd) => run_runs(cmd),
+        Command::Stage(cmd) => run_stage(cmd),
         Command::Job(cmd) => {
             let (job, dir) = match cmd {
                 JobCmd::Summary { session, name, dir } => (
@@ -5306,6 +5366,73 @@ fn run_runs(cmd: RunCmd) -> Result<()> {
         RunCmd::Reconcile => print_json(&json!({"resumed": runner::reconcile()?})),
         RunCmd::Runner { dir } => runner::run_runner(&dir)?,
     }
+    Ok(())
+}
+
+fn run_stage(cmd: StageCmd) -> Result<()> {
+    use crate::core::stage;
+    let StageCmd::Run {
+        agent,
+        cwd,
+        deadline,
+        silence,
+        max_restarts,
+        grace,
+        brief_file,
+        also,
+        also_brief_file,
+        scratch,
+        model,
+        stage: name,
+    } = cmd;
+    let secs = |flag: &str, v: f64| -> Result<std::time::Duration> {
+        if v.is_finite() && v > 0.0 {
+            Ok(std::time::Duration::from_secs_f64(v))
+        } else {
+            Err(Error::Validation(format!(
+                "{flag} must be a positive number"
+            )))
+        }
+    };
+    let brief = |p: &PathBuf| -> Result<String> {
+        let b = std::fs::read_to_string(p)
+            .map_err(|e| Error::Validation(format!("brief file {}: {e}", p.display())))?;
+        if b.trim().is_empty() {
+            return Err(Error::Validation(format!(
+                "brief file {} is empty",
+                p.display()
+            )));
+        }
+        Ok(b)
+    };
+    let mut agents = vec![stage::AgentSpec {
+        agent,
+        brief: brief(&brief_file)?,
+    }];
+    if let (Some(a), Some(p)) = (also, also_brief_file) {
+        agents.push(stage::AgentSpec {
+            agent: a,
+            brief: brief(&p)?,
+        });
+    }
+    let opts = stage::StageOpts {
+        stage: name,
+        cwd,
+        model,
+        deadline: secs("--deadline", deadline)?,
+        silence: silence.map(|s| secs("--silence", s)).transpose()?,
+        grace: secs("--grace", grace)?,
+        max_restarts,
+        scratch: scratch.unwrap_or_else(|| {
+            std::env::temp_dir().join(format!("naru-stage-{}", std::process::id()))
+        }),
+        poll: std::time::Duration::from_millis(250),
+    };
+    print_json(&stage::run(
+        &crate::core::runner::runs_dir(),
+        &opts,
+        &agents,
+    )?);
     Ok(())
 }
 
