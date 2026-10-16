@@ -134,6 +134,12 @@ workspace jobs), has haiku extract only gotchas and new facts from `cc chat`
 rest with one `kb add`, and appends the session id to `~/.naru/kb-mined.txt` so
 it is never read twice.
 
+**Ongoing capture** (naru task 1951): the saved workflow `KB: ongoing capture` is the
+same trigger → `kb-mine.sh` → log chain on a `time` trigger (every 60 minutes, so
+`serve --watch-workflows` runs it unattended, 2 sessions per run). It shares the
+`~/.naru/kb-mined.txt` ledger, so a session is never mined twice by either
+workflow. Disable it with `naru workflow update "KB: ongoing capture" --enabled false`.
+
 ## Not covered
 
 `naru migrate` does not carry the kb: move `<naru home>/kb/` by hand. The kb
