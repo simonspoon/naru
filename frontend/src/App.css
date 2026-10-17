@@ -1532,6 +1532,9 @@ main {
 .wf-kind-prompt {
   background: var(--wf-prompt);
 }
+.wf-kind-agent {
+  background: var(--wf-agent);
+}
 .wf-kind-cli {
   background: var(--wf-cli);
 }

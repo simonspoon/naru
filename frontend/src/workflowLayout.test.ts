@@ -31,6 +31,12 @@ describe('placePanel', () => {
 })
 
 describe('pinsFor / kindColorVar', () => {
+  it('gives an agent an input pin and result and status pins', () => {
+    const pins = pinsFor('agent')
+    expect(pins.inputs.map((p) => p.label)).toEqual(['input'])
+    expect(pins.outputs.map((p) => p.label)).toEqual(['result', 'status'])
+  })
+
   it('gives a prompt a model pin in and a result pin out', () => {
     const pins = pinsFor('prompt')
     expect(pins.inputs.map((x) => x.type)).toEqual(['string', 'model'])

@@ -224,6 +224,7 @@ fn kind_colour(kind: WorkflowNodeKind) -> &'static str {
     match kind {
         WorkflowNodeKind::Trigger => "#f5a524",
         WorkflowNodeKind::Prompt => "#a78bfa",
+        WorkflowNodeKind::Agent => "#2dd4bf",
         WorkflowNodeKind::Cli => "#00e5ff",
         WorkflowNodeKind::Script => "#4ade80",
         WorkflowNodeKind::Branch => "#fb7185",

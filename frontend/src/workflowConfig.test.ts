@@ -87,6 +87,27 @@ describe('buildConfig', () => {
     expect(buildConfig('trigger', draft('trigger', { mode: 'manual', every_minutes: '10' })).config).toEqual({ mode: 'manual' })
   })
 
+  it('builds an agent node and checks its fields', () => {
+    const d = (over: Record<string, unknown>) => ({
+      ...draftFromConfig('agent', { agent: 'reviewer', prompt: 'go' }),
+      ...over,
+    })
+    expect(buildConfig('agent', d({})).config).toEqual({ agent: 'reviewer', prompt: 'go' })
+    expect(buildConfig('agent', d({ agent: ' ' })).error).toMatch(/agent/)
+    expect(buildConfig('agent', d({ prompt: ' ' })).error).toMatch(/empty/)
+    expect(buildConfig('agent', d({ model: 'gpt' })).error).toMatch(/model/)
+    expect(buildConfig('agent', d({ timeout_secs: '0' })).error).toMatch(/timeout/)
+    expect(buildConfig('agent', d({ model: 'opus', result_type: 'Review', retry: false })).config).toEqual({
+      agent: 'reviewer',
+      prompt: 'go',
+      model: 'opus',
+      result_type: 'Review',
+      retry: false,
+    })
+    expect(summarize('agent', { agent: 'reviewer', model: 'sonnet' })).toBe('reviewer · sonnet')
+    expect(summarize('agent', { agent: 'reviewer' })).toBe('reviewer · default')
+  })
+
   it('checks the prompt model, text and timeout', () => {
     const base = { prompt: 'hi' }
     expect(buildConfig('prompt', draft('prompt', { ...base, model: 'gpt' })).error).toMatch(/model/)

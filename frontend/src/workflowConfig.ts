@@ -21,6 +21,7 @@ export interface KindInfo {
 export const NODE_KINDS: readonly KindInfo[] = [
   { kind: 'trigger', label: 'Trigger', title: 'Start' },
   { kind: 'prompt', label: 'Prompt', title: 'Prompt' },
+  { kind: 'agent', label: 'Agent', title: 'Agent' },
   { kind: 'cli', label: 'CLI tool', title: 'Command' },
   { kind: 'script', label: 'Script', title: 'Script' },
   { kind: 'branch', label: 'Branch', title: 'Gate' },
@@ -60,12 +61,14 @@ export const INBOX_KINDS = ['task-summary', 'change-request'] as const
  *  honest default: it gets `script` (the first script the page knows of) or the
  *  placeholder `unset`, which the server accepts at creation (a script that does
  *  not exist is a runtime failure) and the card summarises as unset. */
-export function defaultConfig(kind: WorkflowNodeKind, script?: string): NodeConfig {
+export function defaultConfig(kind: WorkflowNodeKind, script?: string, agent?: string): NodeConfig {
   switch (kind) {
     case 'trigger':
       return { mode: 'manual' }
     case 'prompt':
       return { model: 'haiku', thinking: false, prompt: 'Summarise the input in one line.' }
+    case 'agent':
+      return { agent: agent ?? 'unset', prompt: 'Review the input.' }
     case 'cli':
       return { command: 'cat' }
     case 'script':
@@ -119,6 +122,8 @@ export function summarize(kind: WorkflowNodeKind, config: NodeConfig): string {
       const name = model.startsWith('local:') ? model : model[0]?.toUpperCase() + model.slice(1)
       return `${name}${config.thinking === true ? ' · thinking' : ''} · prompt`
     }
+    case 'agent':
+      return `${clip(str(config, 'agent'), 20) || 'unset'} · ${str(config, 'model') || 'default'}`
     case 'cli':
       return clip(str(config, 'command'), 34) || 'no command'
     case 'script':
@@ -204,6 +209,9 @@ export interface ConfigDraft {
   thinking: boolean
   prompt: string
   timeout_secs: string
+  agent: string
+  result_type: string
+  retry: boolean
   command: string
   script: string
   values: [string, string][]
@@ -231,10 +239,13 @@ export function draftFromConfig(kind: WorkflowNodeKind, config: NodeConfig): Con
     every_minutes: str(config, 'every_minutes'),
     phrase: str(config, 'phrase'),
     events: kind === 'trigger' ? optionList(config.events) : [],
-    model: str(config, 'model') || 'haiku',
+    model: str(config, 'model') || (kind === 'agent' ? '' : 'haiku'),
     thinking: config.thinking === true,
     prompt: str(config, 'prompt'),
     timeout_secs: str(config, 'timeout_secs'),
+    agent: str(config, 'agent'),
+    result_type: str(config, 'result_type') || 'text',
+    retry: config.retry !== false,
     command: str(config, 'command'),
     script: str(config, 'script'),
     values,
@@ -300,6 +311,23 @@ export function buildConfig(kind: WorkflowNodeKind, d: ConfigDraft): BuildResult
       const t = intIn(d.timeout_secs, 1, 3600)
       if (t === null) return bad('timeout must be a whole number of seconds from 1 to 3600')
       if (t !== undefined) config.timeout_secs = t
+      return ok(config)
+    }
+    case 'agent': {
+      if (d.agent.trim() === '') return bad('pick an agent')
+      if (d.prompt.trim() === '') return bad('the prompt cannot be empty')
+      const config: NodeConfig = { agent: d.agent.trim(), prompt: d.prompt }
+      if (d.model !== '') {
+        if (!(PROMPT_MODELS as readonly string[]).includes(d.model)) return bad('model must be haiku, sonnet or opus')
+        config.model = d.model
+      }
+      const t = intIn(d.timeout_secs, 1, 3600)
+      if (t === null) return bad('timeout must be a whole number of seconds from 1 to 3600')
+      if (t !== undefined) config.timeout_secs = t
+      if (d.result_type !== '' && d.result_type !== 'text') {
+        config.result_type = d.result_type
+        if (!d.retry) config.retry = false
+      }
       return ok(config)
     }
     case 'cli': {

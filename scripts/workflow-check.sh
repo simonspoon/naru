@@ -90,11 +90,17 @@ echo "\$i" > "\$D/argc"
 [ -e "\$D/hang" ] && exec sleep 300
 [ -e "\$D/garbage" ] && { echo "this is not json"; exit 0; }
 [ -e "\$D/is-error" ] && { jq -nc '{type:"result",subtype:"success",is_error:true,result:"stub rate limit"}'; exit 0; }
+# Staged replies for the agent-node checks: reply.<n> answers the n-th call
+# since reset_claude, else reply, else the canned line.
+n=\$(( \$(cat "\$D/calls" 2>/dev/null || echo 0) + 1 )); echo "\$n" > "\$D/calls"
+for f in "\$D/reply.\$n" "\$D/reply"; do
+  [ -e "\$f" ] && { jq -nc --rawfile r "\$f" '{type:"result",subtype:"success",is_error:false,result:\$r}'; exit 0; }
+done
 jq -nc '{type:"result",subtype:"success",is_error:false,result:"  idea: buy milk  "}'
 EOS
 chmod +x "$STUB_DIR/claude"
 export MESA_CLAUDE_BIN="$STUB_DIR/claude"
-reset_claude() { rm -f "$STUB_DIR/bg.calls" "$STUB_DIR"/argv.* "$STUB_DIR/argc" "$STUB_DIR"/fail "$STUB_DIR"/hang "$STUB_DIR"/garbage "$STUB_DIR"/is-error; }
+reset_claude() { rm -f "$STUB_DIR/bg.calls" "$STUB_DIR"/argv.* "$STUB_DIR/argc" "$STUB_DIR"/fail "$STUB_DIR"/hang "$STUB_DIR"/garbage "$STUB_DIR"/is-error "$STUB_DIR/calls" "$STUB_DIR"/reply "$STUB_DIR"/reply.*; }
 argv() { cat "$STUB_DIR/argv.$1"; }
 
 # The Ollama stub (POST /api/chat): records the last request byte-exactly.
@@ -611,6 +617,68 @@ run 0 "$NARU" workflow run Prompting --input x
 [ "$(jqs .status)" = "failed" ] && grep -q "timed out" <<<"$(jqs '.steps[1].error')" || fail "a timeout fails the node: $STDOUT"
 reset_claude
 ok "a failing exit, an is_error result, unparseable output and a timeout each fail the node"
+
+# ================= agent node (naru task 1982) =================
+run 0 "$NARU" library create agent wf-reviewer --body=$'---\nname: wf-reviewer\nmodel: opus\n---\nYou review things.\n'
+run 0 "$NARU" workflow create Agenting
+run 0 "$NARU" workflow node create Agenting trigger Start
+AT=$(jqs .id)
+run 0 "$NARU" workflow node create Agenting agent Ask --config '{"agent":"wf-reviewer","prompt":"Review: {input}"}'
+AA=$(jqs .id)
+[ "$(jq -c '.config.pins.out' <<<"$STDOUT")" = '[{"name":"result","ty":"string"},{"name":"status","ty":"string"}]' ] || fail "agent pins: $STDOUT"
+run 0 "$NARU" workflow node create Agenting output Out --config '{"target":"log","log":"agent"}'
+AO=$(jqs .id)
+"$NARU" workflow edge create Agenting "$AT" "$AA" >/dev/null
+"$NARU" workflow edge create Agenting "$AA" "$AO" >/dev/null
+reset_claude
+run 0 "$NARU" workflow run Agenting --input 'a $(touch /tmp/NARU_PWN) b'
+[ "$(jqs .status)" = "succeeded" ] || fail "agent run: $STDOUT"
+[ "$(jqs '.steps[1].output')" = "idea: buy milk" ] || fail "agent text result: $STDOUT"
+[ ! -e /tmp/NARU_PWN ] || { rm -f /tmp/NARU_PWN; fail "a hostile input was executed"; }
+[ "$(argv 2)" = "opus" ] || fail "the agent definition's own model is used: $(argv 2)"
+grep -q 'You review things.' <<<"$(argv 13)" && grep -qF 'Review: a $(touch /tmp/NARU_PWN) b' <<<"$(argv 13)" || fail "the prompt carries the definition and the task: $(argv 13)"
+! grep -q 'name: wf-reviewer' <<<"$(argv 13)" || fail "frontmatter is not sent"
+[ ! -e "$STUB_DIR/bg.calls" ] || fail "no --bg"
+run 0 "$NARU" workflow node update "$AA" --config '{"agent":"wf-reviewer","prompt":"P","model":"haiku"}'
+reset_claude
+run 0 "$NARU" workflow run Agenting --input x
+[ "$(argv 2)" = "haiku" ] || fail "a model override wins: $(argv 2)"
+ok "agent node: plain text result, definition + task in one tool-less call, hostile input inert, model override"
+
+run 1 "$NARU" workflow node create Agenting agent Bad --config '{"agent":"a","prompt":"p","model":"gpt"}'
+run 1 "$NARU" workflow node create Agenting agent Bad --config '{"prompt":"p"}'
+run 0 "$NARU" workflow node update "$AA" --config '{"agent":"no-such-agent","prompt":"P"}'
+run 0 "$NARU" workflow run Agenting --input x
+[ "$(jqs .status)" = "failed" ] && grep -q "unknown agent" <<<"$(jqs '.steps[1].error')" || fail "an unknown agent fails the node: $STDOUT"
+reset_claude
+touch "$STUB_DIR/hang"
+run 0 "$NARU" workflow node update "$AA" --config '{"agent":"wf-reviewer","prompt":"P","timeout_secs":2}'
+run 0 "$NARU" workflow run Agenting --input x
+[ "$(jqs .status)" = "failed" ] && grep -q "timed out" <<<"$(jqs '.steps[1].error')" || fail "an agent timeout fails the node: $STDOUT"
+reset_claude
+ok "agent node: bad config is validation, an unknown agent and a timeout each fail the node"
+
+# Typed result: a struct type, validated, retried once.
+run 0 "$NARU" workflow type add Agenting Verdict --field score:number --field ok:bool
+run 0 "$NARU" workflow node update "$AA" --config '{"agent":"wf-reviewer","prompt":"P","result_type":"Verdict"}'
+[ "$(jqs '.config.pins.out[0].ty')" = "Verdict" ] || fail "the result pin carries the type: $STDOUT"
+printf '```json\n{"ok": true, "score": 3, "extra": 1}\n```' > "$STUB_DIR/reply"
+run 0 "$NARU" workflow run Agenting --input x
+[ "$(jqs .status)" = "succeeded" ] || fail "typed run: $STDOUT"
+[ "$(jqs '.steps[1].output')" = '{"score":3,"ok":true}' ] || fail "typed result is canonical JSON in field order: $STDOUT"
+grep -q 'Verdict' <<<"$(argv 13)" || fail "the prompt names the type"
+reset_claude
+echo 'not json at all' > "$STUB_DIR/reply.1"
+echo '{"score": 1, "ok": false}' > "$STUB_DIR/reply.2"
+run 0 "$NARU" workflow run Agenting --input x
+[ "$(jqs .status)" = "succeeded" ] && [ "$(cat "$STUB_DIR/calls")" = "2" ] || fail "an invalid first reply is retried once: $STDOUT"
+reset_claude
+echo '{"score": "high"}' > "$STUB_DIR/reply"
+run 0 "$NARU" workflow run Agenting --input x
+[ "$(jqs .status)" = "failed" ] && [ "$(cat "$STUB_DIR/calls")" = "2" ] && grep -q "not a valid Verdict" <<<"$(jqs '.steps[1].error')" || fail "two invalid replies fail the node with the reason: $STDOUT"
+[ "$(jqs '.steps[2].status')" = "skipped" ] || fail "downstream is skipped: $STDOUT"
+reset_claude
+ok "agent node: a typed result is validated and canonical, retried once, then a visible failure"
 
 # ---- local:<name>: the Ollama HTTP API, no claude at all ----
 reset_claude

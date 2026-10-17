@@ -32,6 +32,16 @@ export function pinsFor(kind: WorkflowNodeKind): NodePins {
         ],
         outputs: [{ label: 'result', type: 'result' }],
       }
+    case 'agent':
+      // The server declares the typed pins (`result` carries the node's
+      // result type); these are the fallback for a node without them.
+      return {
+        inputs: [{ label: 'input', type: 'string' }],
+        outputs: [
+          { label: 'result', type: 'result' },
+          { label: 'status', type: 'string' },
+        ],
+      }
     case 'cli':
     case 'script':
       return {
@@ -62,6 +72,8 @@ export function kindColorVar(kind: WorkflowNodeKind): string {
     case 'branch':
     case 'decide':
       return '--violet'
+    case 'agent':
+      return '--magenta'
     default:
       return '--cyan'
   }

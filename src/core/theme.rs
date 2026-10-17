@@ -225,6 +225,10 @@ pub fn derive(slots: &ThemeSlots) -> Result<BTreeMap<String, String>> {
         hex(mix(p.panel, mix(p.accent, p.accent2, 0.5), 0.25)),
     );
     put("--wf-prompt", hex(mix(p.panel, p.accent2, 0.25)));
+    put(
+        "--wf-agent",
+        hex(mix(p.panel, mix(p.good, p.accent, 0.5), 0.22)),
+    );
     put("--wf-cli", hex(mix(p.panel, p.accent, 0.22)));
     put("--wf-script", hex(mix(p.panel, p.warn, 0.2)));
     put("--wf-branch", hex(mix(p.panel, p.bad, 0.22)));

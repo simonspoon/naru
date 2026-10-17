@@ -31,9 +31,9 @@ use serde_json::{Map, Value, json};
 
 use crate::core::store::{Error, Result, Store, WorkflowNodeNew};
 use crate::core::types::{
-    InboxKind, LiveBoardKind, Priority, Status, WorkflowEdge, WorkflowNode, WorkflowNodeKind,
-    WorkflowRun, WorkflowRunStatus, WorkflowStep, WorkflowStepStatus, WorkflowTrigger,
-    WorkflowView,
+    InboxKind, LibraryKind, LiveBoardKind, Priority, Status, WorkflowEdge, WorkflowNode,
+    WorkflowNodeKind, WorkflowRun, WorkflowRunStatus, WorkflowStep, WorkflowStepStatus,
+    WorkflowTrigger, WorkflowType, WorkflowView,
 };
 use crate::core::{agents, config, decide, library, llm, scripts, wftypes};
 
@@ -278,6 +278,72 @@ pub fn validate_config(
             if let Some(n) = optional_int(name, obj, "timeout_secs", 1..=3600)? {
                 out.insert("timeout_secs".into(), json!(n));
             }
+        }
+        WorkflowNodeKind::Agent => {
+            only_keys(
+                name,
+                obj,
+                &[
+                    "agent",
+                    "prompt",
+                    "model",
+                    "timeout_secs",
+                    "result_type",
+                    "retry",
+                ],
+            )?;
+            if pins.is_some() {
+                return Err(
+                    "an agent node's pins are fixed (input; result, status); \"pins\" does not apply"
+                        .into(),
+                );
+            }
+            out.insert(
+                "agent".into(),
+                json!(required_str(name, obj, "agent")?.trim()),
+            );
+            out.insert("prompt".into(), json!(required_str(name, obj, "prompt")?));
+            if let Some(m) = optional_str(name, obj, "model")? {
+                if !PROMPT_MODELS.contains(&m) {
+                    return Err(format!(
+                        "agent config: \"model\" must be haiku, sonnet or opus, got {m:?}"
+                    ));
+                }
+                out.insert("model".into(), json!(m));
+            }
+            if let Some(n) = optional_int(name, obj, "timeout_secs", 1..=3600)? {
+                out.insert("timeout_secs".into(), json!(n));
+            }
+            let mut result_ty = "string".to_string();
+            if let Some(t) = optional_str(name, obj, "result_type")? {
+                let t = t.trim();
+                if t != "text" && !t.is_empty() {
+                    if !wftypes::well_formed(t) {
+                        return Err(format!(
+                            "agent config: \"result_type\" must be text or a type name, got {t:?}"
+                        ));
+                    }
+                    out.insert("result_type".into(), json!(t));
+                    result_ty = t.to_string();
+                }
+            }
+            match obj.get("retry") {
+                None | Some(Value::Null) => {}
+                Some(Value::Bool(b)) => {
+                    out.insert("retry".into(), json!(b));
+                }
+                Some(_) => return Err("agent config: \"retry\" must be true or false".into()),
+            }
+            out.insert(
+                "pins".into(),
+                json!({
+                    "in": [{"name": "input", "ty": "any"}],
+                    "out": [
+                        {"name": "result", "ty": result_ty},
+                        {"name": "status", "ty": "string"},
+                    ],
+                }),
+            );
         }
         WorkflowNodeKind::Cli => {
             only_keys(name, obj, &["command", "timeout_secs"])?;
@@ -1271,6 +1337,12 @@ fn active_edges<'a>(
 fn edge_text(view: &WorkflowView, done: &HashMap<i64, Done>, e: &WorkflowEdge) -> String {
     let out = &done[&e.from_node].output;
     let src = view.nodes.iter().find(|n| n.id == e.from_node);
+    if let (Some(src), Some("status")) = (src, e.from_pin.as_deref())
+        && src.kind == WorkflowNodeKind::Agent
+    {
+        // An active edge's source ran to `ok`; a failed node has no edges.
+        return "ok".to_string();
+    }
     if let (Some(src), Some(pin)) = (src, e.from_pin.as_deref())
         && src.kind == WorkflowNodeKind::Break
     {
@@ -1312,6 +1384,92 @@ fn cap(mut s: String) -> String {
 /// launcher to `task update --status done`'s close guard.
 fn drop_session_identity(cmd: &mut Command) {
     cmd.env_remove("CLAUDE_CODE_SESSION_ID");
+}
+
+/// An agent definition's `model:` (when it is one a node can run) and its
+/// body without the YAML frontmatter.
+fn split_agent_definition(body: &str) -> (Option<&str>, &str) {
+    let Some(rest) = body.strip_prefix("---") else {
+        return (None, body);
+    };
+    let Some(end) = rest.find("\n---") else {
+        return (None, body);
+    };
+    let model = rest[..end]
+        .lines()
+        .find_map(|l| l.strip_prefix("model:"))
+        .map(|m| m.trim().trim_matches(|c| c == '"' || c == '\''))
+        .filter(|m| PROMPT_MODELS.contains(m));
+    let after = &rest[end + 4..];
+    (model, after.trim_start_matches(['\r', '\n']))
+}
+
+/// The JSON value in a model reply, tolerating a ``` fence around it.
+fn reply_json(reply: &str) -> std::result::Result<Value, String> {
+    let t = reply.trim();
+    let t = t
+        .strip_prefix("```json")
+        .or_else(|| t.strip_prefix("```"))
+        .map(|r| r.strip_suffix("```").unwrap_or(r).trim())
+        .unwrap_or(t);
+    serde_json::from_str(t).map_err(|e| format!("the reply is not JSON: {e}"))
+}
+
+/// One `agent` node: the agent's definition and the task go to `complete`
+/// (one tool-less model call); with a `result_type` the reply must be JSON
+/// of that type, validated by `wftypes::render`, retried once on a mismatch
+/// (unless `retry` is off) with the reason in the follow-up, else the node
+/// fails naming the type and the reason. The output is the text, or the
+/// canonical JSON.
+#[allow(clippy::too_many_arguments)]
+fn run_agent(
+    agent: &str,
+    definition: &str,
+    prompt: &str,
+    input: &str,
+    result_type: Option<&str>,
+    retry: bool,
+    types: &[WorkflowType],
+    mut complete: impl FnMut(&str) -> std::result::Result<String, String>,
+) -> std::result::Result<String, String> {
+    let task = if prompt.contains("{input}") {
+        prompt.replace("{input}", input)
+    } else if input.is_empty() {
+        prompt.to_string()
+    } else {
+        format!("{prompt}\n\n{input}")
+    };
+    let mut text = format!(
+        "You are the agent \"{agent}\". Act on its definition below, with no tools.\n\n\
+         <<<AGENT DEFINITION\n{definition}\nAGENT DEFINITION>>>\n\n{task}"
+    );
+    let ty = result_type.filter(|t| !matches!(*t, "text" | "string" | "any"));
+    let Some(ty) = ty else {
+        return Ok(complete(&text)?.trim().to_string());
+    };
+    text.push_str(&format!(
+        "\n\nReply with only one JSON value of type {ty}, no prose and no code fence. {}",
+        wftypes::shape(ty, types)
+    ));
+    let mut attempt = text.clone();
+    for n in 0..2 {
+        let reply = complete(&attempt)?;
+        match reply_json(&reply).and_then(|v| wftypes::render(&v, ty, types)) {
+            Ok(out) => return Ok(out),
+            Err(e) if n == 1 || !retry => {
+                let seen: String = reply.trim().chars().take(200).collect();
+                return Err(format!(
+                    "the agent's reply is not a valid {ty}: {e} (reply: {seen})"
+                ));
+            }
+            Err(e) => {
+                attempt = format!(
+                    "{text}\n\nYour previous reply was rejected: {e}. Reply again with only the JSON value."
+                );
+            }
+        }
+    }
+    unreachable!("the loop returns on its second pass")
 }
 
 /// One node's execution: `Ok((output, route))` or the failure message.
@@ -1386,6 +1544,59 @@ fn run_node<A: StoreAccess>(
                 Duration::from_secs(timeout),
             )?;
             Ok((out.trim().to_string(), None))
+        }
+        WorkflowNodeKind::Agent => {
+            let timeout = cfg
+                .get("timeout_secs")
+                .and_then(Value::as_u64)
+                .unwrap_or(DEFAULT_PROMPT_TIMEOUT_SECS);
+            let wanted = str_of("agent");
+            // The library is read under a brief lock; the calls run with the
+            // store free.
+            let (items, prompts) = access
+                .with(|s| -> crate::core::store::Result<_> {
+                    Ok((
+                        library::effective_items(s, view.workflow.project_id)?,
+                        library::prompts(s)?,
+                    ))
+                })
+                .map_err(|e| e.to_string())?;
+            let item = items
+                .iter()
+                .find(|i| i.kind == LibraryKind::Agent && i.name.eq_ignore_ascii_case(wanted))
+                .ok_or_else(|| {
+                    format!(
+                        "unknown agent {wanted:?}: the library has no agent definition of that name"
+                    )
+                })?;
+            let (def_model, def_body) = split_agent_definition(&item.body);
+            let model = cfg
+                .get("model")
+                .and_then(Value::as_str)
+                .or(def_model)
+                .unwrap_or("sonnet");
+            let name = format!("workflow {} · {}", view.workflow.name, node.title);
+            run_agent(
+                &item.name,
+                def_body,
+                str_of("prompt"),
+                input,
+                cfg.get("result_type").and_then(Value::as_str),
+                cfg.get("retry").and_then(Value::as_bool) != Some(false),
+                &view.workflow.types,
+                |text| {
+                    llm::complete(
+                        model,
+                        false,
+                        &name,
+                        text,
+                        &prompts,
+                        cwd,
+                        Duration::from_secs(timeout),
+                    )
+                },
+            )
+            .map(|out| (out, None))
         }
         WorkflowNodeKind::Cli => {
             let timeout = cfg
@@ -3473,6 +3684,89 @@ mod tests {
         let expect = json!({"event": "idea", "speaker": "a'b", "text": text}).to_string();
         assert_eq!(runs[0].input, expect);
         assert_eq!(runs[0].steps[1].output, expect);
+    }
+
+    #[test]
+    fn agent_node_config_and_run() {
+        let cfg = validate_config(
+            WorkflowNodeKind::Agent,
+            &json!({"agent": " reviewer ", "prompt": "go", "result_type": "Review"}),
+        )
+        .unwrap();
+        assert_eq!(cfg["agent"], "reviewer");
+        assert_eq!(cfg["pins"]["out"][0]["ty"], "Review");
+        assert_eq!(cfg["pins"]["out"][1]["name"], "status");
+        let plain = validate_config(
+            WorkflowNodeKind::Agent,
+            &json!({"agent": "a", "prompt": "go", "result_type": "text"}),
+        )
+        .unwrap();
+        assert!(plain.get("result_type").is_none());
+        assert_eq!(plain["pins"]["out"][0]["ty"], "string");
+        let bad = |c: Value| validate_config(WorkflowNodeKind::Agent, &c).unwrap_err();
+        assert!(bad(json!({"prompt": "x"})).contains("agent"));
+        assert!(bad(json!({"agent": "a", "prompt": "x", "model": "gpt"})).contains("model"));
+        assert!(bad(json!({"agent": "a", "prompt": "x", "pins": {}})).contains("pins"));
+
+        let types = review_type();
+        let mut calls = 0;
+        let good = r#"```json
+{"score": 3, "ok": true, "tags": ["a"]}
+```"#;
+        // Plain text: one call, trimmed, input spliced at {input}.
+        let out = run_agent("a", "def", "say {input}", "hi", None, true, &types, |t| {
+            assert!(t.contains("say hi") && t.contains("def"));
+            Ok(" ok \n".into())
+        });
+        assert_eq!(out.unwrap(), "ok");
+        // Typed: the first reply is wrong, the retry carries the reason.
+        let out = run_agent("a", "def", "p", "", Some("Review"), true, &types, |t| {
+            calls += 1;
+            if calls == 1 {
+                Ok("nope".into())
+            } else {
+                assert!(t.contains("rejected"));
+                Ok(good.into())
+            }
+        });
+        assert_eq!(out.unwrap(), r#"{"score":3,"ok":true,"tags":["a"]}"#);
+        // Two bad replies, or retry off after one: the node fails with why.
+        let mut n = 0;
+        let err = run_agent("a", "def", "p", "", Some("Review"), true, &types, |_| {
+            n += 1;
+            Ok(r#"{"score": "x"}"#.into())
+        })
+        .unwrap_err();
+        assert_eq!(n, 2);
+        assert!(err.contains("not a valid Review"), "{err}");
+        let mut n = 0;
+        run_agent("a", "def", "p", "", Some("Review"), false, &types, |_| {
+            n += 1;
+            Ok("nope".into())
+        })
+        .unwrap_err();
+        assert_eq!(n, 1);
+        // A failing call is the node's failure as it is.
+        let err = run_agent(
+            "a",
+            "d",
+            "p",
+            "",
+            None,
+            true,
+            &types,
+            |_| Err("boom".into()),
+        );
+        assert_eq!(err.unwrap_err(), "boom");
+    }
+
+    #[test]
+    fn agent_definition_frontmatter() {
+        let (m, b) = split_agent_definition("---\nname: x\nmodel: opus\n---\nBody here");
+        assert_eq!((m, b), (Some("opus"), "Body here"));
+        let (m, b) = split_agent_definition("---\nmodel: inherit\n---\nB");
+        assert_eq!((m, b), (None, "B"));
+        assert_eq!(split_agent_definition("plain"), (None, "plain"));
     }
 
     fn review_type() -> Vec<WorkflowType> {

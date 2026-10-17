@@ -2122,7 +2122,7 @@ enum WorkflowNodeCmd {
     /// Add a node to a workflow; prints the created node (`--quiet`: without
     /// its `config`)
     ///
-    /// KIND is trigger|prompt|cli|script|branch|decide|output and decides what
+    /// KIND is trigger|prompt|agent|cli|script|branch|decide|output and decides what
     /// `--config` (a JSON object) may hold — unknown keys and bad values are
     /// `validation`, and a workflow has at most one trigger. Without
     /// `--config` a trigger is `{"mode":"manual"}`; every other kind needs
@@ -2147,7 +2147,7 @@ EXAMPLES
         /// Workflow id or name
         #[arg(value_name = "WORKFLOW", required_unless_present = "workflow")]
         workflow_pos: Option<String>,
-        /// trigger|prompt|cli|script|branch|output
+        /// trigger|prompt|agent|cli|script|branch|decide|output
         #[arg(value_name = "KIND", required_unless_present = "kind", value_parser = parse_workflow_node_kind)]
         kind_pos: Option<WorkflowNodeKind>,
         /// Node title (≤ 200 characters)

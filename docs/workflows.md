@@ -73,11 +73,30 @@ Stored config is the validated, normalized form.
 | --- | --- | --- |
 | `trigger` | `{"mode": "manual"\|"time"\|"voice"\|"ambient", "every_minutes": 1..=10080 (required iff time), "events": ["idea"\|"can-help"\|"wake", …] (required iff ambient: non-empty, no duplicates, refused on any other mode), "phrase": "…" (optional, for voice)}` | the run's source; its output **is** the run input. Without `--config`, `{"mode":"manual"}` |
 | `prompt` | `{"model": "haiku"\|"sonnet"\|"opus"\|"local:<name>" (a name never starts with `-`), "thinking": bool (default false), "prompt": "…" (non-empty), "timeout_secs": 1..=3600 (default 600)}` | one synchronous model call; the node's output is the model's text answer, trimmed |
+| `agent` | `{"agent": "<name>", "prompt": "…", "model"?, "timeout_secs"?: 1..=3600, "result_type"?, "retry"?}` | one model call acting as a library agent definition; output is text or canonical typed JSON |
 | `cli` | `{"command": "…" (non-empty), "timeout_secs": 1..=86400 (default 600)}` | `bash -c <command>` **verbatim** (the author wrote it, as with scripts); output is stdout |
 | `script` | `{"script": "<id or name>", "values": {"name": "…"}, "timeout_secs": 1..=86400 (default 600)}` | runs a stored script (`docs/scripts.md`); output is stdout |
 | `branch` | `{"op": "contains"\|"regex"\|"score_above"\|"score_below"\|"equals", "value": "…" (a number for `score_*`)}` | evaluates its input to a verdict; output is its input, unchanged |
 | `decide` | `{"question": "…" (non-empty, may contain `{input}`), "options": ["a", "b", …] (2 or more, distinct, non-empty, none named `fallback`), "threshold": 0..=1 (default 0.5)}` | a local judgement (`core::decide`, `docs/decide.md`) that picks one option; routes like a `branch`, one edge per option plus an optional `fallback` edge |
 | `output` | `{"target": "log", "log": "<name>" (default `default`)}`, `{"target": "task", "project": "<id\|name>", "status": "backlog"\|"todo" (default todo)}`, `{"target": "inbox", "task_id": N, "kind": "task-summary"\|"change-request" (default task-summary)}`, `{"target": "board", "title": "…"}` | delivers its input; output is a short receipt. A key that does not apply to the target is refused |
+
+**`agent`** (naru task 1982). A `prompt`-style call that acts as a **defined agent**:
+config `{"agent": "<library agent name>", "prompt": "…" (`{input}` is replaced by the
+node's input, else the input follows after a blank line), "model"?: haiku|sonnet|opus
+(default: the definition's own `model:` when it is one of those, else sonnet),
+"timeout_secs"?: 1..=3600 (default 600), "result_type"?: a type of the workflow's
+Types card (absent or `text` = plain text), "retry"?: bool (default true)}`. At run
+time the agent is looked up in the library (the effective rows: a fork or built-in,
+project scope first-class) — an unknown name fails the node (`unknown agent …`). The
+definition's body (frontmatter stripped) and the task go as **one tool-less
+`workflow-prompt` call** (no new config template, no `--agent`, no tools: the agent
+contributes its instructions, not its tools). With a `result_type` the prompt asks for one JSON
+value of that type and the reply (a ``` fence tolerated) is validated by
+`wftypes::render`; an invalid reply is retried once with the reason (unless `retry` is
+false), then the node fails with `the agent's reply is not a valid <type>: <reason>`
+and downstream is skipped. The output is the trimmed text, or the canonical JSON.
+Its pins are fixed and written by the server on every save (`pins` in the config is
+refused): `input` in; `result` (typed) and `status` (`ok`) out.
 
 **`prompt`.** One model call (`core::llm`) — **no API key anywhere**. The prompt (the node's text, a blank line, then the node's
 input; just the text when the input is empty) goes in as **one user message**,

@@ -318,6 +318,27 @@ pub fn value_text(v: &Value) -> String {
     }
 }
 
+/// A one-line description of the JSON shape of `ty`, for a prompt.
+pub fn shape(ty: &str, types: &[WorkflowType]) -> String {
+    fn go(ty: &str, types: &[WorkflowType], depth: usize) -> String {
+        if let Some(elem) = list_elem(ty) {
+            return format!("[{}, ...]", go(elem, types, depth + 1));
+        }
+        match (find(types, ty), depth < 8) {
+            (Some(def), true) => {
+                let fields: Vec<String> = def
+                    .fields
+                    .iter()
+                    .map(|f| format!("\"{}\": {}", f.name, go(&f.ty, types, depth + 1)))
+                    .collect();
+                format!("{{{}}}", fields.join(", "))
+            }
+            _ => ty.to_string(),
+        }
+    }
+    format!("Shape: {}", go(ty, types, 0))
+}
+
 /// `v` as compact JSON of type `ty`, struct fields in their declared order.
 pub fn render(v: &Value, ty: &str, types: &[WorkflowType]) -> std::result::Result<String, String> {
     if let Some(elem) = list_elem(ty) {

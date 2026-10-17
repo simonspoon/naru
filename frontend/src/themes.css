@@ -40,6 +40,7 @@
   --surface-field: rgba(255, 255, 255, 0.92);
   --wf-trigger: #d6dcf0;
   --wf-prompt: #e2dbf3;
+  --wf-agent: #d3ebe8;
   --wf-cli: #d2e8ee;
   --wf-script: #ebe6cf;
   --wf-branch: #f0d9e3;
@@ -108,6 +109,7 @@
   --surface-field: rgba(var(--bg-rgb), 0.85);
   --wf-trigger: #4a2a38;
   --wf-prompt: #50283e;
+  --wf-agent: #43302c;
   --wf-cli: #4a2c2c;
   --wf-script: #4d3228;
   --wf-branch: #55283a;

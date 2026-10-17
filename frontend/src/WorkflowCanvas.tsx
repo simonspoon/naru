@@ -23,6 +23,7 @@ import {
   createWorkflowNode,
   deleteWorkflowEdge,
   deleteWorkflowNode,
+  listLibrary,
   listScripts,
   updateWorkflowNode,
 } from './api'
@@ -55,6 +56,7 @@ import {
   type ConfigDraft,
 } from './workflowConfig'
 import { stepClass, stepStatusByNode } from './workflowRun'
+import type { LibraryItem } from './types/LibraryItem'
 import type { Script } from './types/Script'
 import type { WorkflowNode } from './types/WorkflowNode'
 import type { WorkflowNodeKind } from './types/WorkflowNodeKind'
@@ -321,6 +323,7 @@ function NodeInspector({
   node,
   types,
   scripts,
+  agents,
   onSaved,
   onError,
   onDeleted,
@@ -333,6 +336,7 @@ function NodeInspector({
   node: WorkflowNode
   types: WorkflowType[]
   scripts: Script[]
+  agents: LibraryItem[] | null
   onSaved: () => void
   onError: (message: string | null) => void
   onDeleted: () => void
@@ -363,7 +367,8 @@ function NodeInspector({
       return
     }
     setFormError(null)
-    const pins = isShape ? undefined : pinsConfig(declaredPins)
+    // A break/make's pins come from its struct, an agent's are fixed by the server.
+    const pins = isShape || node.kind === 'agent' ? undefined : pinsConfig(declaredPins)
     const config = pins ? { ...built.config, pins } : built.config
     updateWorkflowNode(node.id, { title: title.trim() || node.title, config }).then(
       () => {
@@ -388,7 +393,7 @@ function NodeInspector({
   const localModel = draft.model.startsWith('local:')
 
   const big: { key: 'prompt' | 'command' | 'question'; label: string } | null =
-    node.kind === 'prompt'
+    node.kind === 'prompt' || node.kind === 'agent'
       ? { key: 'prompt', label: 'prompt' }
       : node.kind === 'cli'
         ? { key: 'command', label: 'command' }
@@ -499,6 +504,67 @@ function NodeInspector({
               onChange={(e) => set('timeout_secs', e.target.value)}
             />
           </Field>
+        </>
+      )}
+
+      {node.kind === 'agent' && (
+        <>
+          <Field
+            label="agent"
+            hint={agents === null ? 'loading…' : agents.length === 0 ? 'no agent definitions in the library' : undefined}
+          >
+            <select
+              value={draft.agent}
+              disabled={agents === null || agents.length === 0}
+              onChange={(e) => set('agent', e.target.value)}
+            >
+              {!(agents ?? []).some((a) => a.name === draft.agent) && (
+                <option value={draft.agent}>
+                  {draft.agent && draft.agent !== 'unset' ? `${draft.agent} (missing)` : '— pick an agent —'}
+                </option>
+              )}
+              {(agents ?? []).map((a) => (
+                <option key={a.id ?? a.name} value={a.name}>
+                  {a.name}
+                </option>
+              ))}
+            </select>
+          </Field>
+          {!expanded && (
+            <Field label="prompt" hint="{input} is replaced by the node's input; else it follows after a blank line">
+              <textarea rows={5} value={draft.prompt} onChange={(e) => set('prompt', e.target.value)} />
+            </Field>
+          )}
+          <Field label="model">
+            <select value={draft.model} onChange={(e) => set('model', e.target.value)}>
+              <option value="">default (agent&apos;s own)</option>
+              {PROMPT_MODELS.map((m) => (
+                <option key={m}>{m}</option>
+              ))}
+            </select>
+          </Field>
+          <Field label="timeout (seconds)" hint="1 to 3600, default 600">
+            <input
+              type="text"
+              inputMode="numeric"
+              value={draft.timeout_secs}
+              onChange={(e) => set('timeout_secs', e.target.value)}
+            />
+          </Field>
+          <Field label="result type" hint="text, or a type from the Types card; a reply that does not fit fails the node">
+            <select value={draft.result_type} onChange={(e) => set('result_type', e.target.value)}>
+              <option value="text">text</option>
+              {types.map((t) => (
+                <option key={t.name}>{t.name}</option>
+              ))}
+            </select>
+          </Field>
+          {draft.result_type !== 'text' && (
+            <label className="wf-check">
+              <input type="checkbox" checked={draft.retry} onChange={(e) => set('retry', e.target.checked)} />
+              retry once on an invalid reply
+            </label>
+          )}
         </>
       )}
 
@@ -724,7 +790,7 @@ function NodeInspector({
           from the type; edit the type in the Types card.
         </p>
       )}
-      {!isShape && <PinsEditor pins={declaredPins} types={types} onChange={setDeclaredPins} />}
+      {!isShape && node.kind !== 'agent' && <PinsEditor pins={declaredPins} types={types} onChange={setDeclaredPins} />}
     </>
   )
 
@@ -987,6 +1053,8 @@ export function WorkflowCanvas({
     return () => window.removeEventListener('keydown', onKey)
   }, [expanded])
   const { data: scripts } = useFetch(() => listScripts(), 'workflow-scripts')
+  const { data: library } = useFetch(() => listLibrary(), 'workflow-agents')
+  const agents = library ? library.filter((i) => i.kind === 'agent') : null
   const rf = useRef<ReactFlowInstance<CardNode, Edge> | null>(null)
   const [nodes, setNodes, onNodesChange] = useNodesState<CardNode>([])
 
@@ -1083,7 +1151,7 @@ export function WorkflowCanvas({
       createWorkflowNode(workflowId, {
         kind,
         title: info.title,
-        config: defaultConfig(kind, scripts?.[0]?.name),
+        config: defaultConfig(kind, scripts?.[0]?.name, agents?.[0]?.name),
         x: Math.round(at.x),
         y: Math.round(at.y),
       }).then((created) => {
@@ -1091,7 +1159,7 @@ export function WorkflowCanvas({
         setSelection({ kind: 'node', id: created.id })
       }, showError)
     },
-    [view.nodes.length, workflowId, scripts, changed, showError],
+    [view.nodes.length, workflowId, scripts, agents, changed, showError],
   )
 
   function onPaneDragOver(e: React.DragEvent) {
@@ -1312,6 +1380,7 @@ export function WorkflowCanvas({
               node={selectedNode}
               types={types}
               scripts={scripts ?? []}
+              agents={agents}
               onSaved={changed}
               onError={setError}
               onDeleted={() => {

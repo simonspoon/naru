@@ -38,6 +38,13 @@ export function KindIcon({ kind }: { kind: WorkflowNodeKind }) {
           <path d="M8 1l1.6 4.4L14 7l-4.4 1.6L8 13 6.4 8.6 2 7l4.4-1.6z" />
         </Glyph>
       )
+    case 'agent':
+      return (
+        <Glyph>
+          <circle cx="8" cy="5.5" r="2.5" />
+          <path d="M3 13.5c0-2.8 2.2-4.5 5-4.5s5 1.7 5 4.5" />
+        </Glyph>
+      )
     case 'cli':
       return (
         <Glyph>

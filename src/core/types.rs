@@ -4872,14 +4872,15 @@ macro_rules! workflow_enum {
 }
 
 workflow_enum! {
-    /// What a [`WorkflowNode`] does. Exactly nine — the config of each is
-    /// validated by `core::workflow::validate_config`, so a tenth kind is
+    /// What a [`WorkflowNode`] does. Exactly ten — the config of each is
+    /// validated by `core::workflow::validate_config`, so an eleventh kind is
     /// a change to the engine, the validator and the editor together.
     /// `break` and `make` (naru task 1981) split a struct-typed pin into one
     /// pin per field and combine field pins back into one struct.
     WorkflowNodeKind {
         Trigger => "trigger",
         Prompt => "prompt",
+        Agent => "agent",
         Cli => "cli",
         Script => "script",
         Branch => "branch",

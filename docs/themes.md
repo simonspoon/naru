@@ -37,6 +37,7 @@ anything else is `validation` naming the slot.
 | `--surface-field` | `rgba(var(--bg-rgb), 0.85)` on dark, `panel` at 0.92 on light |
 | `--wf-trigger` | mix(`panel`, mix(`accent`, `accent2`, 0.5), 0.25) |
 | `--wf-prompt` / `--wf-cli` / `--wf-script` | mix(`panel`, `accent2` / `accent` / `warn`, 0.25 / 0.22 / 0.2) |
+| `--wf-agent` | mix(`panel`, mix(`good`, `accent`, 0.5), 0.22) |
 | `--wf-branch` / `--wf-decide` / `--wf-output` | mix(`panel`, `bad` / magenta / `good`, 0.22 / 0.22 / 0.18) |
 | `--wf-run` | `accent2` |
 | `--on-accent`, `--on-accent-alt` | `#ffffff` or `#0a0a0a`, whichever contrasts more with `accent` / `accent2` |
