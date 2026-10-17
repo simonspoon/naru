@@ -16,8 +16,8 @@ use super::types::{
     RetroFinding, RetroRun, RetroStatus, Script, ScriptArg, ScriptArgKind, ScriptRunRecord,
     ScriptRunStatus, Status, Task, TaskDigestEntry, TaskEvent, TaskNote, TaskReceipt, Workflow,
     WorkflowBranch, WorkflowEdge, WorkflowLogEntry, WorkflowNode, WorkflowNodeKind, WorkflowRun,
-    WorkflowRunStatus, WorkflowStep, WorkflowStepStatus, WorkflowTrigger, WorkflowView,
-    is_valid_artifact_content_type, task_name,
+    WorkflowRunStatus, WorkflowStep, WorkflowStepStatus, WorkflowTrigger, WorkflowType,
+    WorkflowView, is_valid_artifact_content_type, task_name,
 };
 
 #[derive(Debug)]
@@ -1453,6 +1453,17 @@ const MIGRATIONS: &[&str] = &[
         created_at TEXT NOT NULL DEFAULT (datetime('now')), \
         updated_at TEXT NOT NULL DEFAULT (datetime('now')) \
      );",
+    // Task 1981: typed workflow pins. `types` is the workflow's user-defined
+    // struct list (JSON text, '[]' = untyped); an edge may name the output
+    // pin it leaves (`from_pin`) and the input pin it enters (`to_pin`),
+    // NULL = the node's default pin. The unique index gains the pins so two
+    // field wires between one break and one make node can coexist.
+    "ALTER TABLE workflows ADD COLUMN types TEXT NOT NULL DEFAULT '[]';
+     ALTER TABLE workflow_edges ADD COLUMN from_pin TEXT;
+     ALTER TABLE workflow_edges ADD COLUMN to_pin TEXT;
+     DROP INDEX idx_workflow_edges_unique;
+     CREATE UNIQUE INDEX idx_workflow_edges_unique
+        ON workflow_edges(from_node, to_node, IFNULL(branch, ''), IFNULL(from_pin, ''), IFNULL(to_pin, ''));",
 ];
 
 /// Selects full task rows including the derived `blocked` flag.
@@ -2730,10 +2741,10 @@ const WORKFLOW_COLUMNS: &str = "w.id, w.project_id, w.name, w.description, \
           AND json_extract(n.config, '$.mode') = 'time' AND w.enabled = 1), \
      (SELECT json_extract(n.config, '$.events') FROM workflow_nodes n \
         WHERE n.workflow_id = w.id AND n.kind = 'trigger' ORDER BY n.id LIMIT 1), \
-     w.enabled";
+     w.enabled, w.types";
 const WORKFLOW_NODE_COLUMNS: &str =
     "id, workflow_id, kind, title, config, x, y, created_at, updated_at";
-const WORKFLOW_EDGE_COLUMNS: &str = "id, workflow_id, from_node, to_node, branch";
+const WORKFLOW_EDGE_COLUMNS: &str = "id, workflow_id, from_node, to_node, branch, from_pin, to_pin";
 const WORKFLOW_RUN_COLUMNS: &str =
     "id, workflow_id, trigger, input, status, steps, error, started_at, finished_at";
 const WORKFLOW_LOG_COLUMNS: &str = "id, log, text, workflow_id, run_id, created_at";
@@ -2781,6 +2792,11 @@ fn row_to_workflow(row: &rusqlite::Row<'_>) -> rusqlite::Result<Workflow> {
             .and_then(|j| serde_json::from_str(&j).ok())
             .unwrap_or_default(),
         enabled: row.get(13)?,
+        types: row
+            .get::<_, String>(14)
+            .ok()
+            .and_then(|j| serde_json::from_str(&j).ok())
+            .unwrap_or_default(),
     })
 }
 
@@ -2808,6 +2824,8 @@ fn row_to_workflow_edge(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowEdg
         from_node: row.get(2)?,
         to_node: row.get(3)?,
         branch,
+        from_pin: row.get(5)?,
+        to_pin: row.get(6)?,
     })
 }
 
@@ -2919,6 +2937,8 @@ pub struct WorkflowPatch {
     /// `Some(None)` clears the description.
     pub description: Option<Option<String>>,
     pub enabled: Option<bool>,
+    /// Replaces the workflow's whole struct-type list (naru task 1981).
+    pub types: Option<Vec<WorkflowType>>,
 }
 
 /// A new node. `config` absent means the kind's default (`{"mode":
@@ -5120,6 +5140,10 @@ impl Store {
     }
 
     pub fn update_workflow(&mut self, id: i64, patch: WorkflowPatch) -> Result<Workflow> {
+        self.immediate(|s| s.update_workflow_checked(id, patch))
+    }
+
+    fn update_workflow_checked(&mut self, id: i64, patch: WorkflowPatch) -> Result<Workflow> {
         let current = self.get_workflow(id)?;
         let mut project_id = current.project_id;
         let mut name = current.name.clone();
@@ -5136,12 +5160,49 @@ impl Store {
         if let Some(d) = patch.description {
             description = d;
         }
+        let mut types = current.types.clone();
+        if let Some(t) = patch.types {
+            super::wftypes::validate_types(&t).map_err(Error::Validation)?;
+            self.ensure_graph_fits_types(id, &t)?;
+            types = t;
+        }
         self.conn.execute(
             "UPDATE workflows SET project_id = ?1, name = ?2, description = ?3, \
-             enabled = ?4, updated_at = datetime('now') WHERE id = ?5",
-            (project_id, &name, &description, enabled, id),
+             enabled = ?4, types = ?5, updated_at = datetime('now') WHERE id = ?6",
+            (
+                project_id,
+                &name,
+                &description,
+                enabled,
+                serde_json::to_string(&types).unwrap_or_else(|_| "[]".into()),
+                id,
+            ),
         )?;
         self.get_workflow(id)
+    }
+
+    /// A new type list may not strand what the graph already uses: every
+    /// node's pin types and break/make struct must still exist, and every
+    /// wire must still type-check (`conflict` naming the first that does
+    /// not, so deleting or reshaping a type in use is refused).
+    fn ensure_graph_fits_types(&self, id: i64, types: &[WorkflowType]) -> Result<()> {
+        let nodes = read_workflow_nodes(&self.conn, id)?;
+        for n in &nodes {
+            super::wftypes::check_node(n, types).map_err(Error::Conflict)?;
+        }
+        for e in read_workflow_edges(&self.conn, id)? {
+            let (Some(a), Some(b)) = (
+                nodes.iter().find(|n| n.id == e.from_node),
+                nodes.iter().find(|n| n.id == e.to_node),
+            ) else {
+                continue;
+            };
+            super::wftypes::check_edge(a, b, e.from_pin.as_deref(), e.to_pin.as_deref(), types)
+                .map_err(|m| {
+                    Error::Conflict(format!("edge {} would no longer type-check: {m}", e.id))
+                })?;
+        }
+        Ok(())
     }
 
     /// Copies a workflow — fields, every node (kind, title, config, position)
@@ -5183,9 +5244,14 @@ impl Store {
                 }
             };
             s.conn.execute(
-                "INSERT INTO workflows (project_id, name, description, enabled, created_at, updated_at) \
-                 VALUES (?1, ?2, ?3, 0, datetime('now'), datetime('now'))",
-                (src.workflow.project_id, &new_name, &src.workflow.description),
+                "INSERT INTO workflows (project_id, name, description, enabled, types, created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, 0, ?4, datetime('now'), datetime('now'))",
+                (
+                    src.workflow.project_id,
+                    &new_name,
+                    &src.workflow.description,
+                    serde_json::to_string(&src.workflow.types).unwrap_or_else(|_| "[]".into()),
+                ),
             )?;
             let new_id = s.conn.last_insert_rowid();
             let mut map = std::collections::HashMap::new();
@@ -5199,9 +5265,16 @@ impl Store {
             }
             for e in &src.edges {
                 s.conn.execute(
-                    "INSERT INTO workflow_edges (workflow_id, from_node, to_node, branch) \
-                     VALUES (?1, ?2, ?3, ?4)",
-                    (new_id, map[&e.from_node], map[&e.to_node], &e.branch),
+                    "INSERT INTO workflow_edges (workflow_id, from_node, to_node, branch, from_pin, to_pin) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    (
+                        new_id,
+                        map[&e.from_node],
+                        map[&e.to_node],
+                        &e.branch,
+                        &e.from_pin,
+                        &e.to_pin,
+                    ),
                 )?;
             }
             s.get_workflow_view(new_id)
@@ -5281,6 +5354,7 @@ impl Store {
         };
         let config =
             super::workflow::validate_config(new.kind, &config).map_err(Error::Validation)?;
+        self.ensure_node_types(workflow_id, new.kind, &title, &config, None)?;
         let (count, has_trigger): (i64, bool) = self.conn.query_row(
             "SELECT COUNT(*), COALESCE(SUM(kind = 'trigger'), 0) > 0 \
              FROM workflow_nodes WHERE workflow_id = ?1",
@@ -5342,6 +5416,9 @@ impl Store {
             }
             None => current.config.clone(),
         };
+        if patch.config.is_some() {
+            self.ensure_node_types(current.workflow_id, current.kind, &title, &config, Some(id))?;
+        }
         if current.kind == WorkflowNodeKind::Decide && patch.config.is_some() {
             // An edge labelled with an option the node no longer offers would
             // never be active; refuse the change instead of orphaning it.
@@ -5376,6 +5453,61 @@ impl Store {
         self.get_workflow_node(id)
     }
 
+    /// A node's pin types and a break/make struct must be defined by its
+    /// workflow, and (on update) its wires must still type-check.
+    fn ensure_node_types(
+        &self,
+        workflow_id: i64,
+        kind: WorkflowNodeKind,
+        title: &str,
+        config: &serde_json::Value,
+        node_id: Option<i64>,
+    ) -> Result<()> {
+        let types = self.get_workflow(workflow_id)?.types;
+        let probe = WorkflowNode {
+            id: node_id.unwrap_or(0),
+            workflow_id,
+            kind,
+            title: title.to_string(),
+            config: config.clone(),
+            x: 0.0,
+            y: 0.0,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        super::wftypes::check_node(&probe, &types).map_err(Error::Validation)?;
+        let Some(nid) = node_id else { return Ok(()) };
+        let nodes = read_workflow_nodes(&self.conn, workflow_id)?;
+        let pick = |id: i64| {
+            if id == nid {
+                Some(&probe)
+            } else {
+                nodes.iter().find(|n| n.id == id)
+            }
+        };
+        for e in read_workflow_edges(&self.conn, workflow_id)? {
+            if e.from_node != nid && e.to_node != nid {
+                continue;
+            }
+            if let (Some(a), Some(b)) = (pick(e.from_node), pick(e.to_node)) {
+                super::wftypes::check_edge(
+                    a,
+                    b,
+                    e.from_pin.as_deref(),
+                    e.to_pin.as_deref(),
+                    &types,
+                )
+                .map_err(|m| {
+                    Error::Validation(format!(
+                        "edge {} would no longer type-check: {m}; delete the wire first",
+                        e.id
+                    ))
+                })?;
+            }
+        }
+        Ok(())
+    }
+
     /// Deletes a node and the edges touching it; echoes both.
     pub fn delete_workflow_node(&mut self, id: i64) -> Result<(WorkflowNode, Vec<WorkflowEdge>)> {
         let node = self.get_workflow_node(id)?;
@@ -5407,7 +5539,32 @@ impl Store {
         to_node: i64,
         branch: Option<String>,
     ) -> Result<WorkflowEdge> {
-        self.immediate(|s| s.create_workflow_edge_checked(workflow_id, from_node, to_node, branch))
+        self.create_workflow_edge_pins(workflow_id, from_node, to_node, branch, None, None)
+    }
+
+    /// [`create_workflow_edge`] with the pins the wire connects (naru task
+    /// 1981). Also refused: a pin the node does not have, and a wire whose
+    /// two pin types do not match (`validation`, naming both types; `any`
+    /// matches everything).
+    pub fn create_workflow_edge_pins(
+        &mut self,
+        workflow_id: i64,
+        from_node: i64,
+        to_node: i64,
+        branch: Option<String>,
+        from_pin: Option<String>,
+        to_pin: Option<String>,
+    ) -> Result<WorkflowEdge> {
+        self.immediate(|s| {
+            s.create_workflow_edge_checked(
+                workflow_id,
+                from_node,
+                to_node,
+                branch,
+                from_pin,
+                to_pin,
+            )
+        })
     }
 
     fn create_workflow_edge_checked(
@@ -5416,8 +5573,10 @@ impl Store {
         from_node: i64,
         to_node: i64,
         branch: Option<String>,
+        from_pin: Option<String>,
+        to_pin: Option<String>,
     ) -> Result<WorkflowEdge> {
-        self.get_workflow(workflow_id)?;
+        let types = self.get_workflow(workflow_id)?.types;
         let from = self.workflow_edge_end("from", workflow_id, from_node)?;
         let to = self.workflow_edge_end("to", workflow_id, to_node)?;
         if from_node == to_node {
@@ -5470,13 +5629,20 @@ impl Store {
             }
             _ => {}
         }
+        let (from_pin, to_pin) = (
+            from_pin.as_deref().map(str::trim).filter(|p| !p.is_empty()),
+            to_pin.as_deref().map(str::trim).filter(|p| !p.is_empty()),
+        );
+        super::wftypes::check_edge(&from, &to, from_pin, to_pin, &types)
+            .map_err(Error::Validation)?;
         let branch_text = branch.as_deref();
         let duplicate: Option<i64> = self
             .conn
             .query_row(
                 "SELECT id FROM workflow_edges \
-                 WHERE from_node = ?1 AND to_node = ?2 AND IFNULL(branch, '') = IFNULL(?3, '')",
-                (from_node, to_node, branch_text),
+                 WHERE from_node = ?1 AND to_node = ?2 AND IFNULL(branch, '') = IFNULL(?3, '') \
+                 AND IFNULL(from_pin, '') = IFNULL(?4, '') AND IFNULL(to_pin, '') = IFNULL(?5, '')",
+                (from_node, to_node, branch_text, from_pin, to_pin),
                 |r| r.get(0),
             )
             .optional()?;
@@ -5501,9 +5667,9 @@ impl Store {
             }
         }
         self.conn.execute(
-            "INSERT INTO workflow_edges (workflow_id, from_node, to_node, branch) \
-             VALUES (?1, ?2, ?3, ?4)",
-            (workflow_id, from_node, to_node, branch_text),
+            "INSERT INTO workflow_edges (workflow_id, from_node, to_node, branch, from_pin, to_pin) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            (workflow_id, from_node, to_node, branch_text, from_pin, to_pin),
         )?;
         self.touch_workflow(workflow_id)?;
         self.get_workflow_edge(self.conn.last_insert_rowid())
@@ -16163,15 +16329,15 @@ mod tests {
         );
         assert_eq!(
             MIGRATIONS.len(),
-            92,
-            "a fresh db should report user_version 92"
+            93,
+            "a fresh db should report user_version 93"
         );
         let (store, _dir) = temp_store();
         let version: i64 = store
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 92);
+        assert_eq!(version, 93);
     }
 
     /// Workflows replace diagrams at migration 83 (mesa task 1607): a db that

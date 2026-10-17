@@ -51,10 +51,10 @@ use crate::core::{
     ScriptArg, ScriptPatch, ScriptRunEvent, ServeBoolSetting, ServeHostsSetting,
     ServeNumberSetting, Status, Store, SystemInfo, Task, TaskNote, TaskPatch, TaskSummary,
     VoiceEnrollment, WorkflowNodeKind, WorkflowNodeNew, WorkflowNodePatch, WorkflowPatch,
-    WorkflowTrigger, agents, attachments, audio, board, config, files, git, guard, hooks,
-    inbox_triage, kb, library, listen, live, memory_job, notify, project_memory, receipt, runner,
-    script_runs, scripts, speech, supervisor, system, validate_live_client, version, voice_enroll,
-    workflow,
+    WorkflowTrigger, WorkflowType, agents, attachments, audio, board, config, files, git, guard,
+    hooks, inbox_triage, kb, library, listen, live, memory_job, notify, project_memory, receipt,
+    runner, script_runs, scripts, speech, supervisor, system, validate_live_client, version,
+    voice_enroll, workflow,
 };
 
 /// The Vite build output, embedded into the binary at compile time.
@@ -4571,6 +4571,9 @@ struct WorkflowUpdate {
     project_id: Option<Option<i64>>,
     #[serde(default)]
     enabled: Option<bool>,
+    /// Replaces the whole struct-type list (naru task 1981).
+    #[serde(default)]
+    types: Option<Vec<WorkflowType>>,
 }
 
 #[derive(Deserialize, Default)]
@@ -4609,6 +4612,10 @@ struct WorkflowEdgeCreate {
     to_node: i64,
     #[serde(default)]
     branch: Option<String>,
+    #[serde(default)]
+    from_pin: Option<String>,
+    #[serde(default)]
+    to_pin: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -4690,6 +4697,7 @@ async fn update_workflow(
         name: body.name,
         description: body.description,
         enabled: body.enabled,
+        types: body.types,
     };
     let mut store = state.store.lock().unwrap();
     Ok(Json(store.update_workflow(id, patch)?).into_response())
@@ -4794,8 +4802,14 @@ async fn create_workflow_edge(
     require_agent_access(&state, &addr, &headers)?;
     let Json(body) = body?;
     let mut store = state.store.lock().unwrap();
-    let edge =
-        store.create_workflow_edge(workflow_id, body.from_node, body.to_node, body.branch)?;
+    let edge = store.create_workflow_edge_pins(
+        workflow_id,
+        body.from_node,
+        body.to_node,
+        body.branch,
+        body.from_pin,
+        body.to_pin,
+    )?;
     Ok((StatusCode::CREATED, Json(edge)).into_response())
 }
 

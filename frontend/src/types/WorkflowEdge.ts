@@ -11,4 +11,15 @@ export type WorkflowEdge = { id: number, workflow_id: number, from_node: number,
  * edge leaving a decide node (required on both), null on every other
  * edge.
  */
-branch: string | null, };
+branch: string | null, 
+/**
+ * The output pin the edge leaves from (naru task 1981); null = the
+ * source's default (first) output pin. A `break` node's pins are its
+ * struct's fields.
+ */
+from_pin: string | null, 
+/**
+ * The input pin the edge enters; null = the target's default (first)
+ * input pin. A `make` node's pins are its struct's fields.
+ */
+to_pin: string | null, };

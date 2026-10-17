@@ -45,6 +45,10 @@ export function pinsFor(kind: WorkflowNodeKind): NodePins {
       return { inputs: [{ label: 'input', type: 'string' }], outputs: [] }
     case 'output':
       return { inputs: [{ label: 'result', type: 'result' }], outputs: [] }
+    case 'break':
+    case 'make':
+      // Typed pins: derived from the struct by workflowTypes.pinsOf.
+      return { inputs: [], outputs: [] }
   }
 }
 

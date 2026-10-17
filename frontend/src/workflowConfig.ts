@@ -28,8 +28,15 @@ export const NODE_KINDS: readonly KindInfo[] = [
   { kind: 'output', label: 'Output', title: 'Output' },
 ]
 
+/** Kinds made by a pin's context menu (naru task 1981), not dropped from the
+ *  palette: they need a struct to be for. */
+const SHAPE_KINDS: readonly KindInfo[] = [
+  { kind: 'break', label: 'Break', title: 'Break' },
+  { kind: 'make', label: 'Make', title: 'Make' },
+]
+
 export function kindInfo(kind: WorkflowNodeKind): KindInfo {
-  return NODE_KINDS.find((k) => k.kind === kind)!
+  return [...NODE_KINDS, ...SHAPE_KINDS].find((k) => k.kind === kind)!
 }
 
 export function isNodeKind(value: unknown): value is WorkflowNodeKind {
@@ -69,6 +76,9 @@ export function defaultConfig(kind: WorkflowNodeKind, script?: string): NodeConf
       return { question: 'Which one fits? {input}', options: ['yes', 'no'], threshold: DEFAULT_DECIDE_THRESHOLD }
     case 'output':
       return { target: 'log', log: 'default' }
+    case 'break':
+    case 'make':
+      return { struct: '' }
   }
 }
 
@@ -129,6 +139,10 @@ export function summarize(kind: WorkflowNodeKind, config: NodeConfig): string {
       if (target === 'inbox') return `inbox · task ${str(config, 'task_id') || '?'}`
       return `board${str(config, 'title') ? ` · ${clip(str(config, 'title'), 24)}` : ''}`
     }
+    case 'break':
+      return `splits ${str(config, 'struct') || '?'}`
+    case 'make':
+      return `builds ${str(config, 'struct') || '?'}`
   }
 }
 
@@ -346,6 +360,9 @@ export function buildConfig(kind: WorkflowNodeKind, d: ConfigDraft): BuildResult
           return bad('target must be log, task, inbox or board')
       }
     }
+    case 'break':
+    case 'make':
+      return bad('a break or make node takes its pins from its struct; there is no config to edit')
   }
 }
 

@@ -102,6 +102,7 @@ import type { TaskSummary } from './types/TaskSummary'
 import type { VoiceDesign } from './types/VoiceDesign'
 import type { VoiceExport } from './types/VoiceExport'
 import type { Workflow } from './types/Workflow'
+import type { WorkflowType } from './types/WorkflowType'
 import type { WorkflowEdge } from './types/WorkflowEdge'
 import type { WorkflowLogEntry } from './types/WorkflowLogEntry'
 import type { WorkflowNode } from './types/WorkflowNode'
@@ -823,6 +824,8 @@ export interface WorkflowPatch {
   name?: string
   description?: string | null
   enabled?: boolean
+  /** Replaces the whole struct-type list (naru task 1981). */
+  types?: WorkflowType[]
 }
 
 export function updateWorkflow(id: number, patch: WorkflowPatch): Promise<Workflow> {
@@ -883,6 +886,9 @@ export interface WorkflowEdgeCreate {
   /** Required on an edge leaving a branch (`true`/`false`) or decide (an
    *  option or `fallback`) node, refused on any other. */
   branch?: string
+  /** The output / input pin the wire connects; absent = the default pin. */
+  from_pin?: string
+  to_pin?: string
 }
 
 export function createWorkflowEdge(

@@ -229,6 +229,7 @@ fn kind_colour(kind: WorkflowNodeKind) -> &'static str {
         WorkflowNodeKind::Branch => "#fb7185",
         WorkflowNodeKind::Decide => "#f472b6",
         WorkflowNodeKind::Output => "#94a3b8",
+        WorkflowNodeKind::Break | WorkflowNodeKind::Make => "#38bdf8",
     }
 }
 
@@ -907,6 +908,7 @@ mod tests {
             next_run_at: None,
             trigger_events: vec![],
             enabled: true,
+            types: vec![],
         }
     }
 
@@ -931,6 +933,8 @@ mod tests {
             from_node: from,
             to_node: to,
             branch: branch.map(String::from),
+            from_pin: None,
+            to_pin: None,
         }
     }
 

@@ -197,7 +197,7 @@ ok "workflow update: clears and un-binds; no field is usage"
 run 0 "$NARU" workflow show "$W"
 [ "$(keys "$STDOUT")" = '["edges","nodes","workflow"]' ] || fail "show shape: $STDOUT"
 run 0 "$NARU" workflow get "gate demo" --quiet
-[ "$(jq -c '.workflow | keys' <<<"$STDOUT")" = '["created_at","enabled","id","last_failure_at","last_run_at","last_run_status","name","next_run_at","project_id","trigger","trigger_events","trigger_phrase","updated_at"]' ] ||
+[ "$(jq -c '.workflow | keys' <<<"$STDOUT")" = '["created_at","enabled","id","last_failure_at","last_run_at","last_run_status","name","next_run_at","project_id","trigger","trigger_events","trigger_phrase","types","updated_at"]' ] ||
   fail "show --quiet drops description: $STDOUT"
 ok "workflow show/get: {workflow, nodes, edges}; --quiet drops the description"
 
@@ -520,6 +520,62 @@ EXPECTED_PROMPT="Tag this as idea/todo/note.
 
 $HOSTILE_P"
 [ "$(argv 13)" = "$EXPECTED_PROMPT" ] || fail "the prompt is the node's text, a blank line, then the input, byte-identical: $(argv 13)"
+# ---- typed pins (naru task 1981) -----------------------------------------
+run 0 "$NARU" workflow create Typed
+run 0 "$NARU" workflow type add Typed Review --field score:number --field ok:bool --field tags:list\<string\>
+[ "$(jqs '.types[0].fields | length')" = "3" ] || fail "type add stores the fields: $STDOUT"
+run 1 "$NARU" workflow type add Typed Bad --field x:Nope
+[ "$(jqe .error.code)" = "validation" ] || fail "an unknown field type is validation: $STDERR"
+run 0 "$NARU" workflow node create Typed trigger Start
+TY_T=$(jqs .id)
+JSON_TEXT='{"score":4,"ok":true,"tags":["x","y"]}'
+SRC_CFG=$(jq -nc --arg c "printf '%s' '$JSON_TEXT'" '{command:$c, pins:{out:[{name:"result",ty:"Review"}]}}')
+run 0 "$NARU" workflow node create Typed cli Src --config "$SRC_CFG"
+TY_SRC=$(jqs .id)
+run 0 "$NARU" workflow node create Typed break "Break Review" --config '{"struct":"Review"}'
+TY_BRK=$(jqs .id)
+run 0 "$NARU" workflow node create Typed make "Make Review" --config '{"struct":"Review"}'
+TY_MK=$(jqs .id)
+run 0 "$NARU" workflow node create Typed cli Sink --config '{"command":"cat","pins":{"in":[{"name":"input","ty":"Review"}]}}'
+TY_SINK=$(jqs .id)
+run 0 "$NARU" workflow node create Typed cli Num --config '{"command":"true","pins":{"in":[{"name":"input","ty":"number"}]}}'
+TY_NUM=$(jqs .id)
+run 0 "$NARU" workflow edge create Typed "$TY_T" "$TY_SRC"
+run 0 "$NARU" workflow edge create Typed "$TY_SRC" "$TY_BRK"
+for f in tags score ok; do
+  run 0 "$NARU" workflow edge create Typed "$TY_BRK" "$TY_MK" --from-pin "$f" --to-pin "$f"
+done
+run 0 "$NARU" workflow edge create Typed "$TY_MK" "$TY_SINK"
+# A Review output into a number input is refused, naming both types.
+run 1 "$NARU" workflow edge create Typed "$TY_SRC" "$TY_NUM"
+[ "$(jqe .error.code)" = "validation" ] || fail "a mismatched wire is validation: $STDERR"
+case "$(jqe .error.message)" in *Review*number*) ;; *) fail "the refusal names both types: $STDERR" ;; esac
+# A bool field into a number input is refused too; a number field is accepted.
+run 1 "$NARU" workflow edge create Typed "$TY_BRK" "$TY_NUM" --from-pin ok
+[ "$(jqe .error.code)" = "validation" ] || fail "bool -> number is validation: $STDERR"
+run 0 "$NARU" workflow edge create Typed "$TY_BRK" "$TY_NUM" --from-pin score
+# A pin the node does not have is validation.
+run 1 "$NARU" workflow edge create Typed "$TY_BRK" "$TY_SINK" --from-pin nope
+[ "$(jqe .error.code)" = "validation" ] || fail "an unknown pin is validation: $STDERR"
+# A type a node still uses cannot be removed.
+run 1 "$NARU" workflow type remove Typed Review
+[ "$(jqe .error.code)" = "conflict" ] || fail "removing a type in use is conflict: $STDERR"
+# The struct passes through break and make as byte-identical JSON.
+run 0 "$NARU" workflow run Typed --input go
+[ "$(jqs .status)" = "succeeded" ] || fail "the typed run succeeds: $STDOUT"
+[ "$(jq -r --arg id "$TY_BRK" '.steps[] | select(.node_id == ($id|tonumber)) | .output' <<<"$STDOUT")" = "$JSON_TEXT" ] ||
+  fail "break passes the struct on: $STDOUT"
+[ "$(jq -r --arg id "$TY_MK" '.steps[] | select(.node_id == ($id|tonumber)) | .output' <<<"$STDOUT")" = "$JSON_TEXT" ] ||
+  fail "make rebuilds the struct byte-identical: $STDOUT"
+[ "$(jq -r --arg id "$TY_NUM" '.steps[] | select(.node_id == ($id|tonumber)) | .output' <<<"$STDOUT")" != "x" ] || true
+ok "typed pins: mismatched wires refused naming both types, a struct round-trips through break/make byte-identical, a type in use is conflict"
+# An untyped workflow is unaffected: no types, pin-free edges.
+run 0 "$NARU" workflow show Typed
+[ "$(jqs '[.edges[] | select(.from_pin == null and .to_pin == null)] | length')" -ge 2 ] || fail "pin-free edges stay pin-free"
+run 0 "$NARU" workflow create Untyped
+[ "$(jqs '.types | length')" = "0" ] || fail "a new workflow has no types: $STDOUT"
+ok "an untyped workflow reads with no types"
+
 [ ! -e "$STUB_DIR/bg.calls" ] || fail "a background agent was spawned (--bg): $(cat "$STUB_DIR/bg.calls")"
 ok "prompt node (haiku): one claude -p --model haiku --name 'workflow <wf> · <node>' --tools \"\" --strict-mcp-config --output-format json --settings {alwaysThinkingEnabled:false} -- <prompt>\\n\\n<input> (byte-identical, no --bg), the answer read off the result JSON and trimmed"
 

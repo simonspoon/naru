@@ -4872,9 +4872,11 @@ macro_rules! workflow_enum {
 }
 
 workflow_enum! {
-    /// What a [`WorkflowNode`] does. Exactly seven — the config of each is
-    /// validated by `core::workflow::validate_config`, so a seventh kind is
+    /// What a [`WorkflowNode`] does. Exactly nine — the config of each is
+    /// validated by `core::workflow::validate_config`, so a tenth kind is
     /// a change to the engine, the validator and the editor together.
+    /// `break` and `make` (naru task 1981) split a struct-typed pin into one
+    /// pin per field and combine field pins back into one struct.
     WorkflowNodeKind {
         Trigger => "trigger",
         Prompt => "prompt",
@@ -4883,6 +4885,8 @@ workflow_enum! {
         Branch => "branch",
         Decide => "decide",
         Output => "output",
+        Break => "break",
+        Make => "make",
     }
 }
 
@@ -4972,6 +4976,28 @@ pub struct Workflow {
     /// Off = never fires automatically (the time watcher and ambient events
     /// skip it); a manual run still works. Stored; a duplicate starts off.
     pub enabled: bool,
+    /// The user-defined struct types pins can carry (naru task 1981). Empty
+    /// = untyped: every pin is `any`.
+    #[serde(default)]
+    pub types: Vec<WorkflowType>,
+}
+
+/// A user-defined struct type of one workflow: a name and typed fields.
+/// A field's `ty` is `string`, `number`, `bool`, `any`, `list<T>` or the name
+/// of another struct of the same workflow (`core::wftypes`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct WorkflowType {
+    pub name: String,
+    pub fields: Vec<WorkflowTypeField>,
+}
+
+/// One named, typed field of a [`WorkflowType`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct WorkflowTypeField {
+    pub name: String,
+    pub ty: String,
 }
 
 /// One step of a graph. `config` is JSON whose shape depends on `kind`
@@ -5013,6 +5039,15 @@ pub struct WorkflowEdge {
     /// edge leaving a decide node (required on both), null on every other
     /// edge.
     pub branch: Option<String>,
+    /// The output pin the edge leaves from (naru task 1981); null = the
+    /// source's default (first) output pin. A `break` node's pins are its
+    /// struct's fields.
+    #[serde(default)]
+    pub from_pin: Option<String>,
+    /// The input pin the edge enters; null = the target's default (first)
+    /// input pin. A `make` node's pins are its struct's fields.
+    #[serde(default)]
+    pub to_pin: Option<String>,
 }
 
 /// A workflow with all its nodes and edges: `show`'s payload and `delete`'s

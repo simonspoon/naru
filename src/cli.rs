@@ -33,8 +33,8 @@ use crate::core::{
     Project, ProjectPatch, ReceiptPatch, Result, Script, ScriptArg, ScriptArgKind, ScriptPatch,
     Status, Store, Task, TaskNote, TaskPatch, TaskReceipt, Workflow, WorkflowEdge, WorkflowNode,
     WorkflowNodeKind, WorkflowNodeNew, WorkflowNodePatch, WorkflowPatch, WorkflowRun,
-    WorkflowTrigger, WorkflowView, audio, board, cc, config, files, git, library, live, look,
-    memory_job, migrate, project_memory, receipt, system,
+    WorkflowTrigger, WorkflowType, WorkflowTypeField, WorkflowView, audio, board, cc, config,
+    files, git, library, live, look, memory_job, migrate, project_memory, receipt, system,
 };
 
 const TOP_AFTER_HELP: &str = "\
@@ -2080,6 +2080,41 @@ EXAMPLES
     /// Create and delete the edges between nodes
     #[command(subcommand)]
     Edge(WorkflowEdgeCmd),
+    /// Define and remove the struct types a workflow's pins can carry
+    #[command(subcommand)]
+    Type(WorkflowTypeCmd),
+}
+
+#[derive(Subcommand)]
+enum WorkflowTypeCmd {
+    /// Define (or replace) a struct type; prints the workflow
+    ///
+    /// Fields are `name:type` where type is string, number, bool, any,
+    /// list<T> or another struct of the workflow. Redefining a type that
+    /// pins or wires use is `conflict` if they would stop type-checking.
+    #[command(after_help = "\
+EXAMPLES
+  naru workflow type add ambient Review --field score:number --field ok:bool")]
+    Add {
+        /// Workflow id or name
+        workflow: String,
+        /// Struct name (letters, digits, _; not string/number/bool/any/list)
+        name: String,
+        /// A field, `name:type`; repeatable
+        #[arg(long = "field", value_name = "NAME:TYPE")]
+        fields: Vec<String>,
+        #[arg(long)]
+        quiet: bool,
+    },
+    /// Remove a struct type; `conflict` while a pin or wire still uses it
+    Remove {
+        /// Workflow id or name
+        workflow: String,
+        /// Struct name
+        name: String,
+        #[arg(long)]
+        quiet: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2221,6 +2256,14 @@ EXAMPLES
         /// node (one of its options, or fallback) on
         #[arg(long, value_name = "LABEL")]
         branch: Option<String>,
+        /// The output pin the edge leaves (default: the source's first;
+        /// a break node's pins are its struct's fields)
+        #[arg(long, value_name = "PIN")]
+        from_pin: Option<String>,
+        /// The input pin the edge enters (default: the target's first; a
+        /// make node's pins are its struct's fields)
+        #[arg(long, value_name = "PIN")]
+        to_pin: Option<String>,
         /// Accepted for uniformity; an edge has no free text to drop
         #[arg(long)]
         quiet: bool,
@@ -8393,6 +8436,7 @@ fn run_workflow_cmd(cmd: WorkflowCmd) -> Result<()> {
                 name,
                 description: description.map(clear_if_empty),
                 enabled,
+                ..Default::default()
             };
             print_workflow(&store.update_workflow(id, patch)?, quiet);
         }
@@ -8540,6 +8584,65 @@ fn run_workflow_cmd(cmd: WorkflowCmd) -> Result<()> {
                 }
             }
         },
+        WorkflowCmd::Type(cmd) => match cmd {
+            WorkflowTypeCmd::Add {
+                workflow,
+                name,
+                fields,
+                quiet,
+            } => {
+                let wf = resolve_workflow(&store, &workflow)?;
+                let mut parsed = Vec::new();
+                for f in &fields {
+                    let Some((n, t)) = f.split_once(':') else {
+                        return Err(Error::Validation(format!(
+                            "--field {f:?} must be name:type"
+                        )));
+                    };
+                    parsed.push(WorkflowTypeField {
+                        name: n.trim().to_string(),
+                        ty: t.trim().to_string(),
+                    });
+                }
+                let mut types: Vec<WorkflowType> = wf
+                    .types
+                    .into_iter()
+                    .filter(|t| !t.name.eq_ignore_ascii_case(&name))
+                    .collect();
+                types.push(WorkflowType {
+                    name,
+                    fields: parsed,
+                });
+                let patch = WorkflowPatch {
+                    types: Some(types),
+                    ..Default::default()
+                };
+                print_workflow(&store.update_workflow(wf.id, patch)?, quiet);
+            }
+            WorkflowTypeCmd::Remove {
+                workflow,
+                name,
+                quiet,
+            } => {
+                let wf = resolve_workflow(&store, &workflow)?;
+                if !wf.types.iter().any(|t| t.name.eq_ignore_ascii_case(&name)) {
+                    return Err(Error::NotFound(format!(
+                        "workflow {} has no type {name:?}",
+                        wf.id
+                    )));
+                }
+                let types = wf
+                    .types
+                    .into_iter()
+                    .filter(|t| !t.name.eq_ignore_ascii_case(&name))
+                    .collect();
+                let patch = WorkflowPatch {
+                    types: Some(types),
+                    ..Default::default()
+                };
+                print_workflow(&store.update_workflow(wf.id, patch)?, quiet);
+            }
+        },
         WorkflowCmd::Edge(cmd) => match cmd {
             WorkflowEdgeCmd::Create {
                 workflow_pos,
@@ -8549,16 +8652,20 @@ fn run_workflow_cmd(cmd: WorkflowCmd) -> Result<()> {
                 from,
                 to,
                 branch,
+                from_pin,
+                to_pin,
                 quiet,
             } => {
                 let workflow = workflow.or(workflow_pos).unwrap();
                 let id = resolve_workflow(&store, &workflow)?.id;
                 print_workflow_edge(
-                    &store.create_workflow_edge(
+                    &store.create_workflow_edge_pins(
                         id,
                         from.or(from_pos).unwrap(),
                         to.or(to_pos).unwrap(),
                         branch,
+                        from_pin,
+                        to_pin,
                     )?,
                     quiet,
                 );
@@ -9122,6 +9229,7 @@ mod tests {
             next_run_at: None,
             trigger_events: vec![],
             enabled: true,
+            types: vec![],
         }
     }
 
@@ -9146,6 +9254,8 @@ mod tests {
             from_node: 3,
             to_node: 4,
             branch: Some("true".into()),
+            from_pin: None,
+            to_pin: None,
         }
     }
 
@@ -9432,6 +9542,7 @@ mod tests {
                 "next_run_at",
                 "trigger_events",
                 "enabled",
+                "types",
             ]),
             "Workflow gained/lost a field: decide whether it belongs in the \
              --quiet shape before updating this list",
@@ -9513,7 +9624,15 @@ mod tests {
         let full = keys(&sample_workflow_edge());
         assert_eq!(
             sorted_owned(full.clone()),
-            sorted(&["id", "workflow_id", "from_node", "to_node", "branch"]),
+            sorted(&[
+                "id",
+                "workflow_id",
+                "from_node",
+                "to_node",
+                "branch",
+                "from_pin",
+                "to_pin"
+            ]),
             "WorkflowEdge gained/lost a field: it has no unbounded free text \
              today, so --quiet == full; revisit if that changes",
         );

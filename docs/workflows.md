@@ -262,6 +262,53 @@ stays `running` until the next `serve` start reconciles it to `failed` as
 above. A job that cannot start fails the row and answers `unavailable`.
 Without `--detach` nothing changes.
 
+## Typed pins (naru task 1981)
+
+Pins carry types. A **type** is a string: `string`, `number`, `bool`, `any`,
+`list<T>`, or the name of a **struct** the workflow defines. A workflow's
+structs live in `workflows.types` (JSON, migration index 92) and travel with
+it (`Workflow.types`, copied by `duplicate`); a struct is a name plus named,
+typed fields. Names are unique case-insensitively, may not be `string`,
+`number`, `bool`, `any` or `list`, and a struct cannot contain itself
+(`validation`).
+
+- **Declaring pins.** Any node but `break`/`make` may carry
+  `config.pins = {"in":[{"name","ty"}], "out":[…]}`. No `pins` = untyped =
+  `any`, so every workflow written before types keeps its behaviour. A pin
+  type must be a primitive or a defined struct (`validation`).
+- **Wires name pins.** An edge has optional `from_pin` / `to_pin` (NULL = the
+  node's first pin of that side, or `any`). `Store` refuses a wire whose two
+  types differ with `validation` naming both ("can't connect number to
+  Review"); `any` matches everything; a pin the node does not have is
+  `validation`.
+- **`break` and `make`** (`config: {"struct": "Review"}`) are two node kinds.
+  A `break` has one input pin `value` (the struct) and one output pin per
+  field; a `make` the reverse. At run time a struct is **one JSON object** in
+  the node's output text. `break` validates it against the struct and passes
+  it on in canonical form (fields in declared order); an edge leaving a
+  `break`'s field pin carries that field (a string raw, anything else compact
+  JSON). `make` builds the object from its field-pin inputs, in declared
+  order, so a Break→Make round trip is byte-identical. A malformed shape fails
+  the node.
+- **Removing or reshaping a type** that a pin, a break/make or a wire still
+  uses is `conflict` (it names the first stranded edge or node); a node
+  config change that would break its wires is `validation`.
+- **CLI:** `naru workflow type add <WF> <NAME> --field score:number …`
+  (replaces a same-named type), `naru workflow type remove <WF> <NAME>`,
+  `naru workflow edge create … --from-pin P --to-pin Q`. **API:** `PATCH
+  /api/workflows/{id}` takes `types` (the whole list); the edge-create body
+  takes `from_pin` / `to_pin`. Same gates as the rest of the workflow routes.
+- **Editor:** a node's inspector edits its pins (name + type picker); the
+  canvas "types" button opens the *Type: Review* card (`+ type`, `+ field`;
+  a type in use cannot be deleted). Typed pins are real handles, coloured by
+  type through theme variables (`workflowTypes.ts::pinColorVar`; a list is a
+  ring), with a type chip. Dragging a wire dims the pins it cannot land on; a
+  mismatched drop is refused with the reason in the controls slot for four
+  seconds. Right-click (or long-press, or Shift+F10 on a focused pin) a struct
+  output → **Break into fields**, a struct input → **Make from fields**; both
+  create the node beside it and wire it. The pure rules are in
+  `frontend/src/workflowTypes.ts`, the server's in `core::wftypes`.
+
 ## CLI (`naru workflow`)
 
 JSON only, positional-or-flag create shapes, `<id|name>` everywhere a workflow

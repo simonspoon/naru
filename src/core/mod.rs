@@ -44,6 +44,7 @@ mod types;
 pub mod usage;
 pub mod version;
 pub mod voice_enroll;
+pub mod wftypes;
 pub mod workflow;
 
 pub use store::{
@@ -77,5 +78,6 @@ pub use types::{
     TaskDigestEntry, TaskNote, TaskReceipt, TaskSummary, Theme, ThemePreview, ThemeSlots,
     VoiceEnrollSample, VoiceEnrollment, Workflow, WorkflowBranch, WorkflowEdge, WorkflowLogEntry,
     WorkflowNode, WorkflowNodeKind, WorkflowRun, WorkflowRunStatus, WorkflowStep,
-    WorkflowStepStatus, WorkflowTrigger, WorkflowView, is_valid_artifact_content_type, task_name,
+    WorkflowStepStatus, WorkflowTrigger, WorkflowType, WorkflowTypeField, WorkflowView,
+    is_valid_artifact_content_type, task_name,
 };

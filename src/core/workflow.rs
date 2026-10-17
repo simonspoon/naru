@@ -35,7 +35,7 @@ use crate::core::types::{
     WorkflowRun, WorkflowRunStatus, WorkflowStep, WorkflowStepStatus, WorkflowTrigger,
     WorkflowView,
 };
-use crate::core::{agents, config, decide, library, llm, scripts};
+use crate::core::{agents, config, decide, library, llm, scripts, wftypes};
 
 /// A step's `output` (and a `cli` node's captured stdout) is capped at 64 KiB,
 /// the scripts' own cap.
@@ -167,9 +167,29 @@ pub fn validate_config(
     config: &Value,
 ) -> std::result::Result<Value, String> {
     let name = kind.as_str();
-    let obj = object(name, config)?;
+    let full = object(name, config)?;
+    // `pins` (naru task 1981) is the one key every kind but break/make
+    // accepts; it is validated apart and re-attached at the end.
+    let mut stripped = full.clone();
+    let pins = stripped.remove("pins");
+    let obj = &stripped;
     let mut out = Map::new();
+    if pins.is_some() && matches!(kind, WorkflowNodeKind::Break | WorkflowNodeKind::Make) {
+        return Err(format!(
+            "a {name} node's pins come from its struct; \"pins\" does not apply"
+        ));
+    }
     match kind {
+        WorkflowNodeKind::Break | WorkflowNodeKind::Make => {
+            only_keys(name, obj, &["struct"])?;
+            let s = required_str(name, obj, "struct")?.trim();
+            if !wftypes::well_formed(s) || s.starts_with("list<") {
+                return Err(format!(
+                    "{name} config: \"struct\" must be a struct type name, got {s:?}"
+                ));
+            }
+            out.insert("struct".into(), json!(s));
+        }
         WorkflowNodeKind::Trigger => {
             only_keys(name, obj, &["mode", "every_minutes", "phrase", "events"])?;
             let mode = required_str(name, obj, "mode")?;
@@ -452,6 +472,9 @@ pub fn validate_config(
                 }
             }
         }
+    }
+    if let Some(p) = pins.filter(|p| !p.is_null()) {
+        out.insert("pins".into(), wftypes::validate_pins(&p)?);
     }
     Ok(Value::Object(out))
 }
@@ -1129,6 +1152,8 @@ pub fn execute_run<A: StoreAccess>(
         };
         let input = if id == trigger_id {
             Some(run.input.clone())
+        } else if node.kind == WorkflowNodeKind::Make {
+            make_input(view, &done, id)
         } else {
             active_input(view, &done, id)
         };
@@ -1208,10 +1233,25 @@ pub fn execute_run<A: StoreAccess>(
 /// matches the label the source routed to. A node with no incoming edges that is not the trigger
 /// is unreachable and is skipped too.
 fn active_input(view: &WorkflowView, done: &HashMap<i64, Done>, node_id: i64) -> Option<String> {
+    let edges = active_edges(view, done, node_id);
+    if edges.is_empty() {
+        None
+    } else {
+        let texts: Vec<String> = edges.iter().map(|e| edge_text(view, done, e)).collect();
+        Some(texts.join("\n"))
+    }
+}
+
+/// The incoming edges of `node_id` that are active, in edge order.
+fn active_edges<'a>(
+    view: &'a WorkflowView,
+    done: &HashMap<i64, Done>,
+    node_id: i64,
+) -> Vec<&'a WorkflowEdge> {
     let mut incoming: Vec<&WorkflowEdge> =
         view.edges.iter().filter(|e| e.to_node == node_id).collect();
     incoming.sort_by_key(|e| e.id);
-    let outputs: Vec<&str> = incoming
+    incoming
         .into_iter()
         .filter(|e| {
             let Some(up) = done.get(&e.from_node) else {
@@ -1223,13 +1263,39 @@ fn active_input(view: &WorkflowView, done: &HashMap<i64, Done>, node_id: i64) ->
                     None => true,
                 }
         })
-        .map(|e| done[&e.from_node].output.as_str())
-        .collect();
-    if outputs.is_empty() {
-        None
-    } else {
-        Some(outputs.join("\n"))
+        .collect()
+}
+
+/// What one active edge carries: its source's output, or — leaving a
+/// `break` node's field pin — that field's value (naru task 1981).
+fn edge_text(view: &WorkflowView, done: &HashMap<i64, Done>, e: &WorkflowEdge) -> String {
+    let out = &done[&e.from_node].output;
+    let src = view.nodes.iter().find(|n| n.id == e.from_node);
+    if let (Some(src), Some(pin)) = (src, e.from_pin.as_deref())
+        && src.kind == WorkflowNodeKind::Break
+    {
+        return wftypes::break_field(out, wftypes::struct_of(src), pin, &view.workflow.types)
+            .unwrap_or_default();
     }
+    out.clone()
+}
+
+/// A `make` node's input: a JSON object of `{field pin: text}` over its
+/// active incoming edges (the first edge per pin wins), or `None` when none
+/// is active.
+fn make_input(view: &WorkflowView, done: &HashMap<i64, Done>, node_id: i64) -> Option<String> {
+    let edges = active_edges(view, done, node_id);
+    if edges.is_empty() {
+        return None;
+    }
+    let mut pins = Map::new();
+    for e in edges {
+        if let Some(pin) = e.to_pin.as_deref() {
+            pins.entry(pin.to_string())
+                .or_insert_with(|| Value::String(edge_text(view, done, e)));
+        }
+    }
+    Some(Value::Object(pins).to_string())
 }
 
 fn cap(mut s: String) -> String {
@@ -1265,6 +1331,35 @@ fn run_node<A: StoreAccess>(
     let str_of = |key: &str| cfg.get(key).and_then(Value::as_str).unwrap_or_default();
     match node.kind {
         WorkflowNodeKind::Trigger => Ok((input.to_string(), None)),
+        WorkflowNodeKind::Break => {
+            // Passes the struct on as canonical JSON (fields in declared
+            // order); a consumer wired to a field pin reads that field.
+            let types = &view.workflow.types;
+            let name = wftypes::struct_of(node);
+            let v: Value = serde_json::from_str(input.trim())
+                .map_err(|e| format!("input is not JSON for {name}: {e}"))?;
+            let def =
+                wftypes::find(types, name).ok_or_else(|| format!("unknown struct {name:?}"))?;
+            for f in &def.fields {
+                wftypes::break_field(input, name, &f.name, types)?;
+            }
+            Ok((wftypes::render(&v, name, types)?, None))
+        }
+        WorkflowNodeKind::Make => {
+            let pins: Value =
+                serde_json::from_str(input).map_err(|e| format!("make input is not JSON: {e}"))?;
+            let values: Vec<(String, String)> = pins
+                .as_object()
+                .map(|o| {
+                    o.iter()
+                        .map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let out =
+                wftypes::make_struct(wftypes::struct_of(node), &values, &view.workflow.types)?;
+            Ok((out, None))
+        }
         WorkflowNodeKind::Prompt => {
             let prompt = str_of("prompt");
             let full = if input.is_empty() {
@@ -1767,6 +1862,7 @@ fn run_status_at(store: &Store, id: i64, now: i64) -> Result<Value> {
 mod tests {
     use super::*;
     use crate::core::store::{WorkflowNodeNew, WorkflowNodePatch, WorkflowPatch};
+    use crate::core::types::{WorkflowType, WorkflowTypeField};
     use std::sync::Arc;
 
     fn store() -> (Mutex<Store>, tempfile::TempDir) {
@@ -3377,5 +3473,170 @@ mod tests {
         let expect = json!({"event": "idea", "speaker": "a'b", "text": text}).to_string();
         assert_eq!(runs[0].input, expect);
         assert_eq!(runs[0].steps[1].output, expect);
+    }
+
+    fn review_type() -> Vec<WorkflowType> {
+        vec![WorkflowType {
+            name: "Review".into(),
+            fields: vec![
+                WorkflowTypeField {
+                    name: "score".into(),
+                    ty: "number".into(),
+                },
+                WorkflowTypeField {
+                    name: "ok".into(),
+                    ty: "bool".into(),
+                },
+                WorkflowTypeField {
+                    name: "tags".into(),
+                    ty: "list<string>".into(),
+                },
+            ],
+        }]
+    }
+
+    fn typed(ty_out: &str, ty_in: &str) -> (Value, Value) {
+        (
+            json!({"command": "true", "pins": {"out": [{"name": "result", "ty": ty_out}]}}),
+            json!({"command": "cat", "pins": {"in": [{"name": "input", "ty": ty_in}]}}),
+        )
+    }
+
+    #[test]
+    fn typed_wires_are_checked_and_a_struct_round_trips_through_break_and_make() {
+        let (st, _d) = store();
+        let json_text = r#"{"score":4,"ok":true,"tags":["x","y"]}"#;
+        let wf = st.with(|s| {
+            let wf = s.create_workflow(None, "Typed", None).unwrap().id;
+            s.update_workflow(
+                wf,
+                WorkflowPatch {
+                    types: Some(review_type()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let t = node(
+                s,
+                wf,
+                WorkflowNodeKind::Trigger,
+                "T",
+                json!({"mode": "manual"}),
+            );
+            let (out_cfg, in_cfg) = typed("Review", "Review");
+            let src = node(
+                s,
+                wf,
+                WorkflowNodeKind::Cli,
+                "Src",
+                json!({"command": format!("printf '%s' '{json_text}'"), "pins": out_cfg["pins"]}),
+            );
+            let brk = node(
+                s,
+                wf,
+                WorkflowNodeKind::Break,
+                "Break Review",
+                json!({"struct": "Review"}),
+            );
+            let mk = node(
+                s,
+                wf,
+                WorkflowNodeKind::Make,
+                "Make Review",
+                json!({"struct": "Review"}),
+            );
+            let sink = node(s, wf, WorkflowNodeKind::Cli, "Sink", in_cfg);
+            s.create_workflow_edge(wf, t, src, None).unwrap();
+            s.create_workflow_edge(wf, src, brk, None).unwrap();
+            for f in ["tags", "score", "ok"] {
+                s.create_workflow_edge_pins(wf, brk, mk, None, Some(f.into()), Some(f.into()))
+                    .unwrap();
+            }
+            s.create_workflow_edge(wf, mk, sink, None).unwrap();
+            wf
+        });
+        let run = run_workflow(&st, wf, WorkflowTrigger::Manual, "").unwrap();
+        assert_eq!(run.status, WorkflowRunStatus::Succeeded, "{:?}", run.error);
+        assert_eq!(
+            run.steps[2].output, json_text,
+            "break passes canonical JSON"
+        );
+        assert_eq!(
+            run.steps[3].output, json_text,
+            "make rebuilds it byte-identical"
+        );
+        assert_eq!(run.steps[4].output, json_text);
+    }
+
+    #[test]
+    fn a_mismatched_wire_is_refused_naming_both_types_and_any_matches_all() {
+        let (st, _d) = store();
+        st.with(|s| {
+            let wf = s.create_workflow(None, "Mismatch", None).unwrap().id;
+            s.update_workflow(
+                wf,
+                WorkflowPatch {
+                    types: Some(review_type()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let (num_out, rev_in) = typed("number", "Review");
+            let a = node(s, wf, WorkflowNodeKind::Cli, "A", num_out);
+            let b = node(s, wf, WorkflowNodeKind::Cli, "B", rev_in);
+            let c = node(s, wf, WorkflowNodeKind::Cli, "C", cli("cat"));
+            match s.create_workflow_edge(wf, a, b, None) {
+                Err(Error::Validation(m)) => {
+                    assert!(m.contains("number") && m.contains("Review"), "{m}");
+                }
+                other => panic!("expected validation, got {other:?}"),
+            }
+            s.create_workflow_edge(wf, a, c, None).unwrap();
+            // A pin the node does not have is refused.
+            assert!(matches!(
+                s.create_workflow_edge_pins(wf, a, c, None, Some("nope".into()), None),
+                Err(Error::Validation(_))
+            ));
+            // A node naming an undefined type is refused.
+            let bad = WorkflowNodeNew {
+                kind: WorkflowNodeKind::Cli,
+                title: "X".into(),
+                config: Some(
+                    json!({"command": "true", "pins": {"in": [{"name": "i", "ty": "Ghost"}]}}),
+                ),
+                x: None,
+                y: None,
+            };
+            assert!(matches!(
+                s.create_workflow_node(wf, &bad),
+                Err(Error::Validation(_))
+            ));
+            // A type in use cannot be removed or reshaped away.
+            let rm = WorkflowPatch {
+                types: Some(vec![]),
+                ..Default::default()
+            };
+            let _ = node(
+                s,
+                wf,
+                WorkflowNodeKind::Break,
+                "Brk",
+                json!({"struct": "Review"}),
+            );
+            assert!(matches!(s.update_workflow(wf, rm), Err(Error::Conflict(_))));
+        });
+    }
+
+    #[test]
+    fn an_old_untyped_workflow_reads_with_no_types_and_pin_free_edges() {
+        let (st, _d) = store();
+        st.with(|s| {
+            let wf = s.create_workflow(None, "Old", None).unwrap();
+            assert!(wf.types.is_empty());
+            let a = node(s, wf.id, WorkflowNodeKind::Cli, "A", cli("true"));
+            let b = node(s, wf.id, WorkflowNodeKind::Cli, "B", cli("true"));
+            let e = s.create_workflow_edge(wf.id, a, b, None).unwrap();
+            assert_eq!((e.from_pin, e.to_pin), (None, None));
+        });
     }
 }

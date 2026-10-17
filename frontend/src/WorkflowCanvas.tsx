@@ -60,11 +60,38 @@ import type { WorkflowNode } from './types/WorkflowNode'
 import type { WorkflowNodeKind } from './types/WorkflowNodeKind'
 import type { WorkflowRun } from './types/WorkflowRun'
 import type { WorkflowStepStatus } from './types/WorkflowStepStatus'
+import type { WorkflowType } from './types/WorkflowType'
 import type { WorkflowView } from './types/WorkflowView'
+import { PinsEditor, WorkflowTypesCard } from './components/WorkflowTypesCard'
+import {
+  effectivePin,
+  isList,
+  pinColorVar,
+  pinHandleId,
+  pinOfHandle,
+  pinType,
+  pinsConfig,
+  pinsOf,
+  refusalReason,
+  shapePlan,
+  typesMatch,
+  type NodePinSet,
+  type PinSide,
+} from './workflowTypes'
 import { KindIcon, SpeakIcon } from './components/WorkflowIcon'
 import { PANEL_H, PANEL_W, kindColorVar, pinsFor, placePanel } from './workflowLayout'
 
-type CardData = { node: WorkflowNode; status: WorkflowStepStatus | undefined }
+/** A wire being dragged: which side it started on and its pin's type, so the
+ *  other cards can dim the pins it cannot land on. */
+type DragFrom = { side: PinSide; ty: string } | null
+type PinMenuOpen = (at: { x: number; y: number }, nodeId: number, side: PinSide, pin: string, ty: string) => void
+type CardData = {
+  node: WorkflowNode
+  status: WorkflowStepStatus | undefined
+  types: WorkflowType[]
+  drag: DragFrom
+  onPinMenu: PinMenuOpen
+}
 type CardNode = Node<CardData, 'card'>
 
 /** A decide card's flow handles sit in rows of their own below the title,
@@ -79,10 +106,66 @@ const DECIDE_ROW = 20
  *  decided by where the line is dragged from, and a decide node one per option
  *  plus `fallback`. The last run's step state is a ring. */
 function NodeCard({ data, selected }: NodeProps<CardNode>) {
-  const { node, status } = data
+  const { node, status, types, drag, onPinMenu } = data
+  const pressTimer = useRef<number | undefined>(undefined)
+  const typedPins = pinsOf(node, types)
+  const typedRows = Math.max(typedPins.inputs.length, typedPins.outputs.length)
+  const isShape = node.kind === 'break' || node.kind === 'make'
   const decideHandles = node.kind === 'decide' ? sourceHandles(node.kind, node.config) : []
-  const pins = pinsFor(node.kind)
+  const pins = typedRows > 0 ? { inputs: [], outputs: [] } : pinsFor(node.kind)
   const rows = Math.max(pins.inputs.length, pins.outputs.length)
+  // A data pin that is a real connection point (typed): a handle, coloured by
+  // its type, with a chip naming it and a menu for Break / Make.
+  const typedPin = (side: PinSide, p: { name: string; ty: string }) => {
+    const dim = drag !== null && drag.side !== side && !typesMatch(drag.ty, p.ty)
+    const ok = drag !== null && drag.side !== side && typesMatch(drag.ty, p.ty)
+    const open = (e: React.MouseEvent | React.KeyboardEvent, at?: { x: number; y: number }) => {
+      e.preventDefault()
+      e.stopPropagation()
+      const r = (e.currentTarget as HTMLElement).getBoundingClientRect()
+      onPinMenu(at ?? { x: r.left, y: r.bottom }, node.id, side, p.name, p.ty)
+    }
+    const handle = (
+      <Handle
+        key={`h-${side}-${p.name}`}
+        id={pinHandleId(side, p.name)}
+        type={side === 'in' ? 'target' : 'source'}
+        position={side === 'in' ? Position.Left : Position.Right}
+        className={`wf-pin wf-pin-handle${isList(p.ty) ? ' wf-pin-list' : ''}${dim ? ' wf-pin-dim' : ''}${ok ? ' wf-pin-ok' : ''}`}
+        style={{ ['--pin' as string]: `var(${pinColorVar(p.ty)})` }}
+        tabIndex={0}
+        aria-label={`${p.name}, ${p.ty}, ${side === 'in' ? 'input' : 'output'}`}
+        title={`${p.name}: ${p.ty}`}
+        onContextMenu={(e) => open(e, { x: e.clientX, y: e.clientY })}
+        onKeyDown={(e) => {
+          if ((e.shiftKey && e.key === 'F10') || e.key === 'ContextMenu') open(e)
+        }}
+        onTouchStart={(e) => {
+          const t = e.touches[0]
+          pressTimer.current = window.setTimeout(() => onPinMenu({ x: t.clientX, y: t.clientY }, node.id, side, p.name, p.ty), 500)
+        }}
+        onTouchEnd={() => window.clearTimeout(pressTimer.current)}
+        onTouchMove={() => window.clearTimeout(pressTimer.current)}
+      />
+    )
+    const label = (
+      <span className="wf-pin-name">
+        {p.name}
+        {p.ty !== 'any' && <span className="wf-pin-chip">{p.ty}</span>}
+      </span>
+    )
+    return side === 'in' ? (
+      <>
+        {handle}
+        {label}
+      </>
+    ) : (
+      <>
+        {label}
+        {handle}
+      </>
+    )
+  }
   return (
     <div
       style={{
@@ -92,7 +175,7 @@ function NodeCard({ data, selected }: NodeProps<CardNode>) {
       className={`wf-node wf-kind-${node.kind}${selected ? ' selected' : ''} ${stepClass(status)}`}
       title={status ? `last run: ${status}` : undefined}
     >
-      {hasInput(node.kind) && (
+      {hasInput(node.kind) && !isShape && (
         <Handle
           type="target"
           position={Position.Left}
@@ -110,6 +193,18 @@ function NodeCard({ data, selected }: NodeProps<CardNode>) {
       {status && <span className="wf-node-step">{status}</span>}
       <div className="wf-node-body">
         <div className="wf-node-sum">{summarize(node.kind, node.config)}</div>
+        {typedRows > 0 && (
+          <div className="wf-pin-rows">
+            {Array.from({ length: typedRows }, (_, i) => (
+              <div key={i} className="wf-pin-row">
+                <span className="wf-pin-cell">{typedPins.inputs[i] && typedPin('in', typedPins.inputs[i])}</span>
+                <span className="wf-pin-cell wf-pin-cell-out">
+                  {typedPins.outputs[i] && typedPin('out', typedPins.outputs[i])}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
         {rows > 0 && (
           <div className="wf-pin-rows">
             {Array.from({ length: rows }, (_, i) => (
@@ -188,7 +283,8 @@ function NodeCard({ data, selected }: NodeProps<CardNode>) {
           )
         })
       ) : (
-        hasOutput(node.kind) && (
+        hasOutput(node.kind) &&
+        !isShape && (
           <Handle
             type="source"
             position={Position.Right}
@@ -223,6 +319,7 @@ function Field({ label, children, hint }: { label: string; children: React.React
  *  what the server holds. */
 function NodeInspector({
   node,
+  types,
   scripts,
   onSaved,
   onError,
@@ -234,6 +331,7 @@ function NodeInspector({
   style,
 }: {
   node: WorkflowNode
+  types: WorkflowType[]
   scripts: Script[]
   onSaved: () => void
   onError: (message: string | null) => void
@@ -248,18 +346,26 @@ function NodeInspector({
   const [title, setTitle] = useState(node.title)
   const [draft, setDraft] = useState<ConfigDraft>(() => draftFromConfig(node.kind, node.config))
   const [formError, setFormError] = useState<string | null>(null)
+  const isShape = node.kind === 'break' || node.kind === 'make'
+  const [declaredPins, setDeclaredPins] = useState<NodePinSet>(() => {
+    const p = isShape ? { inputs: [], outputs: [] } : pinsOf(node, types)
+    return { inputs: p.inputs, outputs: p.outputs }
+  })
   const set = <K extends keyof ConfigDraft>(key: K, value: ConfigDraft[K]) =>
     setDraft((d) => ({ ...d, [key]: value }))
   const info = kindInfo(node.kind)
 
   function save() {
-    const built = buildConfig(node.kind, draft)
+    // A break / make keeps its struct; only its title is editable.
+    const built = isShape ? { error: null, config: node.config } : buildConfig(node.kind, draft)
     if (built.error !== null) {
       setFormError(built.error)
       return
     }
     setFormError(null)
-    updateWorkflowNode(node.id, { title: title.trim() || node.title, config: built.config }).then(
+    const pins = isShape ? undefined : pinsConfig(declaredPins)
+    const config = pins ? { ...built.config, pins } : built.config
+    updateWorkflowNode(node.id, { title: title.trim() || node.title, config }).then(
       () => {
         onError(null)
         onSaved()
@@ -289,7 +395,14 @@ function NodeInspector({
         : node.kind === 'decide'
           ? { key: 'question', label: 'question' }
           : null
-  const pins = pinsFor(node.kind)
+  const typedSet = pinsOf(node, types)
+  const typedMode = typedSet.inputs.length + typedSet.outputs.length > 0
+  const pins = typedMode
+      ? {
+          inputs: typedSet.inputs.map((p) => ({ label: p.name, type: p.ty })),
+          outputs: typedSet.outputs.map((p) => ({ label: p.name, type: p.ty })),
+        }
+      : pinsFor(node.kind)
 
   const fields = (
     <>
@@ -605,6 +718,13 @@ function NodeInspector({
         </>
       )}
 
+      {isShape && (
+        <p className="wf-field-hint muted">
+          {node.kind === 'break' ? 'Splits' : 'Builds'} a <b>{String(node.config.struct ?? '?')}</b>. Its pins come
+          from the type; edit the type in the Types card.
+        </p>
+      )}
+      {!isShape && <PinsEditor pins={declaredPins} types={types} onChange={setDeclaredPins} />}
     </>
   )
 
@@ -648,7 +768,11 @@ function NodeInspector({
                 {[...pins.inputs.map((p) => ({ p, dir: 'in' })), ...pins.outputs.map((p) => ({ p, dir: 'out' }))].map(
                   ({ p, dir }) => (
                     <div key={`${dir}-${p.label}`} className="wf-pin-cell">
-                      <span className={`wf-pin wf-pin-${p.type}`} aria-hidden="true" />
+                      <span
+                        className={`wf-pin wf-pin-${p.type}`}
+                        style={typedMode ? { ['--pin' as string]: `var(${pinColorVar(p.type)})` } : undefined}
+                        aria-hidden="true"
+                      />
                       {p.label} <span className="muted">{dir} · {p.type}</span>
                     </div>
                   ),
@@ -736,6 +860,80 @@ function NodeFloat({
   )
 }
 
+type PinMenuState = { x: number; y: number; nodeId: number; side: PinSide; pin: string; ty: string }
+
+/** The right-click / long-press menu on a pin: Break or Make for a struct pin,
+ *  Disconnect when it is wired. Opaque panel, Esc / click-away closes, arrow
+ *  keys move between items. */
+function PinMenu({
+  menu,
+  types,
+  edges,
+  nodes,
+  onShape,
+  onDisconnect,
+  onClose,
+}: {
+  menu: PinMenuState
+  types: WorkflowType[]
+  edges: WorkflowView['edges']
+  nodes: WorkflowNode[]
+  onShape: (m: PinMenuState) => void
+  onDisconnect: (m: PinMenuState) => void
+  onClose: () => void
+}) {
+  const plan = shapePlan(menu.side, menu.ty, types)
+  const node = nodes.find((n) => n.id === menu.nodeId)
+  const wired =
+    !!node &&
+    edges.some((e) =>
+      menu.side === 'out'
+        ? e.from_node === node.id && effectivePin(node, 'out', e.from_pin, types) === menu.pin
+        : e.to_node === node.id && effectivePin(node, 'in', e.to_pin, types) === menu.pin,
+    )
+  const ref = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    ref.current?.querySelector('button')?.focus()
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault()
+        const items = Array.from(ref.current?.querySelectorAll('button') ?? [])
+        const at = items.indexOf(document.activeElement as HTMLButtonElement)
+        items[(at + (e.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length]?.focus()
+      }
+    }
+    const away = (e: MouseEvent) => {
+      if (!ref.current?.contains(e.target as globalThis.Node)) onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    window.addEventListener('mousedown', away)
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      window.removeEventListener('mousedown', away)
+    }
+  }, [onClose])
+  return createPortal(
+    <div ref={ref} className="wf-pin-menu" role="menu" aria-label={`${menu.pin} pin`} style={{ left: menu.x, top: menu.y }}>
+      <div className="wf-pin-menu-head">
+        {menu.pin} <span className="muted">{menu.ty}</span>
+      </div>
+      {plan && (
+        <button type="button" role="menuitem" onClick={() => onShape(menu)}>
+          {plan.label}
+        </button>
+      )}
+      {wired && (
+        <button type="button" role="menuitem" onClick={() => onDisconnect(menu)}>
+          Disconnect
+        </button>
+      )}
+      {!plan && !wired && <span className="wf-pin-menu-empty muted">Nothing to do on a {menu.ty} pin.</span>}
+    </div>,
+    document.body,
+  )
+}
+
 type Selection = { kind: 'node'; id: number } | { kind: 'edge'; id: number } | null
 
 /**
@@ -763,6 +961,17 @@ export function WorkflowCanvas({
   useEffect(() => onThemeChange(() => setThemeTick((n) => n + 1)), [])
   const dotColor = `rgba(${cssVar('--cyan-rgb', '0, 229, 255')}, 0.12)`
   const [error, setError] = useState<string | null>(null)
+  // A wire refused by the pin types: shown in the same slot for four seconds.
+  const [refusal, setRefusal] = useState<string | null>(null)
+  useEffect(() => {
+    if (refusal === null) return
+    const t = window.setTimeout(() => setRefusal(null), 4000)
+    return () => window.clearTimeout(t)
+  }, [refusal])
+  const [typesOpen, setTypesOpen] = useState(false)
+  const [drag, setDrag] = useState<DragFrom>(null)
+  const [menu, setMenu] = useState<{ x: number; y: number; nodeId: number; side: PinSide; pin: string; ty: string } | null>(null)
+  const types = view.workflow.types
   const [selection, setSelection] = useState<Selection>(null)
   // Expanded belongs to one selection: picking anything else folds it away.
   const [expandedSel, setExpandedSel] = useState<Selection>(null)
@@ -783,6 +992,10 @@ export function WorkflowCanvas({
 
   const statuses = useMemo(() => stepStatusByNode(run), [run])
 
+  function openPinMenu(at: { x: number; y: number }, nodeId: number, side: PinSide, pin: string, ty: string) {
+    setMenu({ ...at, nodeId, side, pin, ty })
+  }
+
   // The graph the server holds is the truth: re-derive the card nodes from it
   // whenever it or the shown run changes. Selection is deliberately not a
   // dependency (it is read through a ref): a position rebuild on a click would
@@ -799,10 +1012,16 @@ export function WorkflowCanvas({
         type: 'card' as const,
         position: { x: n.x, y: n.y },
         selected: sel?.kind === 'node' && sel.id === n.id,
-        data: { node: n, status: statuses.get(n.id) },
+        data: { node: n, status: statuses.get(n.id), types, drag: null, onPinMenu: openPinMenu },
       })),
     )
-  }, [view.nodes, statuses, setNodes])
+  }, [view.nodes, statuses, types, setNodes])
+
+  // A wire in flight dims the pins it cannot land on, in place (no rebuild,
+  // so no node snaps back).
+  useEffect(() => {
+    setNodes((prev) => prev.map((n) => (n.data.drag === drag ? n : { ...n, data: { ...n.data, drag } })))
+  }, [drag, setNodes])
 
   // A selection change only flips the `selected` flags, leaving every position
   // (including one mid-drag) as the canvas holds it.
@@ -817,18 +1036,29 @@ export function WorkflowCanvas({
 
   const edges: Edge[] = useMemo(
     () =>
-      view.edges.map((e) => ({
+      view.edges.map((e) => {
+        const from = view.nodes.find((n) => n.id === e.from_node)
+        const to = view.nodes.find((n) => n.id === e.to_node)
+        const fromPin = from ? effectivePin(from, 'out', e.from_pin, types) : null
+        const toPin = to ? effectivePin(to, 'in', e.to_pin, types) : null
+        // A break/make has typed handles only; elsewhere a null pin is the
+        // node's flow handle.
+        const typedFrom = e.from_pin !== null || from?.kind === 'break' || from?.kind === 'make'
+        const typedTo = e.to_pin !== null || to?.kind === 'break' || to?.kind === 'make'
+        return {
         id: String(e.id),
         source: String(e.from_node),
         target: String(e.to_node),
-        sourceHandle: e.branch ?? undefined,
+        sourceHandle: typedFrom && fromPin ? pinHandleId('out', fromPin) : (e.branch ?? undefined),
+        targetHandle: typedTo && toPin ? pinHandleId('in', toPin) : undefined,
         label: e.branch ?? undefined,
         className: `${edgeLabelClass(e.branch)}${
           selection?.kind === 'edge' && selection.id === e.id ? ' selected' : ''
         }`,
         selected: selection?.kind === 'edge' && selection.id === e.id,
-      })),
-    [view.edges, selection],
+        }
+      }),
+    [view.edges, view.nodes, types, selection],
   )
 
   const showError = useCallback((err: unknown) => {
@@ -882,12 +1112,76 @@ export function WorkflowCanvas({
   function onConnect(c: Connection) {
     if (c.source === c.target) return // self-edges are rejected server-side
     const source = view.nodes.find((n) => String(n.id) === c.source)
-    if (!source) return
+    const target = view.nodes.find((n) => String(n.id) === c.target)
+    if (!source || !target) return
+    const fromPin = pinOfHandle('out', c.sourceHandle)
+    const toPin = pinOfHandle('in', c.targetHandle)
+    // Typed pins only wire to a matching type; say why in words.
+    const why = refusalReason(source, fromPin, target, toPin, types)
+    if (why !== null) {
+      setRefusal(why)
+      return
+    }
     createWorkflowEdge(workflowId, {
       from_node: Number(c.source),
       to_node: Number(c.target),
-      branch: branchForHandle(source.kind, c.sourceHandle),
+      branch: fromPin ? undefined : branchForHandle(source.kind, c.sourceHandle),
+      ...(fromPin ? { from_pin: fromPin } : {}),
+      ...(toPin ? { to_pin: toPin } : {}),
     }).then(changed, showError)
+  }
+
+  function onConnectStart(
+    _e: unknown,
+    p: { nodeId: string | null; handleId: string | null; handleType: 'source' | 'target' | null },
+  ) {
+    const n = view.nodes.find((x) => String(x.id) === p.nodeId)
+    if (!n || !p.handleType) return
+    const side: PinSide = p.handleType === 'source' ? 'out' : 'in'
+    const ty = pinType(n, side, pinOfHandle(side, p.handleId), types)
+    setDrag(ty === null ? null : { side, ty })
+  }
+
+  /** Break (on a struct output) / Make (on a struct input): a new node for
+   *  the struct, wired to the pin, placed beside its node and selected. */
+  function shapeFromPin(m: NonNullable<typeof menu>) {
+    const node = view.nodes.find((n) => n.id === m.nodeId)
+    const plan = shapePlan(m.side, m.ty, types)
+    setMenu(null)
+    if (!node || !plan) return
+    const brk = plan.kind === 'break'
+    createWorkflowNode(workflowId, {
+      kind: plan.kind,
+      title: plan.title,
+      config: { struct: plan.struct },
+      x: Math.round(node.x + (brk ? 300 : -280)),
+      y: Math.round(node.y),
+    }).then(
+      (created) =>
+        createWorkflowEdge(
+          workflowId,
+          brk
+            ? { from_node: node.id, to_node: created.id, from_pin: m.pin, to_pin: 'value' }
+            : { from_node: created.id, to_node: node.id, from_pin: 'value', to_pin: m.pin },
+        ).then(() => {
+          changed()
+          setSelection({ kind: 'node', id: created.id })
+        }, showError),
+      showError,
+    )
+  }
+
+  /** Deletes every wire on one pin. */
+  function disconnectPin(m: NonNullable<typeof menu>) {
+    const node = view.nodes.find((n) => n.id === m.nodeId)
+    setMenu(null)
+    if (!node) return
+    const wired = view.edges.filter((e) =>
+      m.side === 'out'
+        ? e.from_node === node.id && effectivePin(node, 'out', e.from_pin, types) === m.pin
+        : e.to_node === node.id && effectivePin(node, 'in', e.to_pin, types) === m.pin,
+    )
+    Promise.all(wired.map((e) => deleteWorkflowEdge(e.id))).then(changed, showError)
   }
 
   function onNodeDragStop(_e: unknown, node: CardNode) {
@@ -979,6 +1273,8 @@ export function WorkflowCanvas({
           onEdgeClick={(_e, edge) => setSelection({ kind: 'edge', id: Number(edge.id) })}
           onPaneClick={() => setSelection(null)}
           onConnect={onConnect}
+          onConnectStart={onConnectStart}
+          onConnectEnd={() => setDrag(null)}
           defaultViewport={defaultViewport}
           onMoveEnd={(_e, vp) => saveBoardView(workflowId, { tx: vp.x, ty: vp.y, scale: vp.zoom })}
           minZoom={MIN_ZOOM}
@@ -996,12 +1292,25 @@ export function WorkflowCanvas({
             <button type="button" onClick={autoLayout} title="Arrange the nodes left to right by flow">
               auto layout
             </button>
-            {error && <span className="error wf-error">{error}</span>}
+            <button
+              type="button"
+              onClick={() => setTypesOpen((o) => !o)}
+              aria-pressed={typesOpen}
+              title="Define the struct types your pins can carry"
+            >
+              types
+            </button>
+            {(refusal ?? error) && (
+              <span className="error wf-error" role="status">
+                {refusal ?? error}
+              </span>
+            )}
           </Panel>
           {selectedNode && (
             <NodeFloat
               key={inspectorKey(selectedNode)}
               node={selectedNode}
+              types={types}
               scripts={scripts ?? []}
               onSaved={changed}
               onError={setError}
@@ -1019,6 +1328,16 @@ export function WorkflowCanvas({
         <div className="wf-hint muted">
           <SpeakIcon /> &ldquo;Naru, run {view.workflow.name}&rdquo; · or call it from a skill
         </div>
+        {typesOpen && (
+          <WorkflowTypesCard
+            workflowId={workflowId}
+            types={types}
+            nodes={view.nodes}
+            onChanged={changed}
+            onClose={() => setTypesOpen(false)}
+          />
+        )}
+        {menu && <PinMenu menu={menu} types={types} edges={view.edges} nodes={view.nodes} onShape={shapeFromPin} onDisconnect={disconnectPin} onClose={() => setMenu(null)} />}
         {selectedEdge && (
           <div className="wf-inspector">
             <div className="wf-inspector-head">
@@ -1026,7 +1345,10 @@ export function WorkflowCanvas({
               <span className="muted">#{selectedEdge.id}</span>
             </div>
             <p>
-              {title(selectedEdge.from_node)} → {title(selectedEdge.to_node)}
+              {title(selectedEdge.from_node)}
+              {selectedEdge.from_pin && <span className="muted"> · {selectedEdge.from_pin}</span>} →{' '}
+              {title(selectedEdge.to_node)}
+              {selectedEdge.to_pin && <span className="muted"> · {selectedEdge.to_pin}</span>}
               {selectedEdge.branch && <span className="muted"> · when {selectedEdge.branch}</span>}
             </p>
             <div className="wf-inspector-actions">
