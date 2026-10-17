@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { formatDuration, runPollMs, runSummary, runningRunId, stepClass, stepCounts, stepStatusByNode, triggerLabel } from './workflowRun'
+import { formatDuration, gateBadge, gateByNode, runPollMs, runSummary, runningRunId, stepClass, stepCounts, stepStatusByNode, triggerLabel } from './workflowRun'
+import type { WorkflowGate } from './types/WorkflowGate'
 import type { WorkflowRun } from './types/WorkflowRun'
 import type { WorkflowStep } from './types/WorkflowStep'
 
@@ -93,5 +94,35 @@ describe('live run', () => {
     expect(runPollMs(false, null)).toBe(5000)
     expect(runPollMs(true, null)).toBe(1000)
     expect(runPollMs(false, 7)).toBe(1000)
+  })
+})
+
+describe('gate helpers (naru task 1993)', () => {
+  const gate = (over: Partial<WorkflowGate>): WorkflowGate => ({
+    id: 1,
+    run_id: 1,
+    node_id: 5,
+    workflow_id: 1,
+    message: '',
+    status: 'pending',
+    reason: null,
+    created_at: '',
+    decided_at: null,
+    ...over,
+  })
+  it('keys gates by node, newest first wins', () => {
+    const m = gateByNode([gate({ id: 9, node_id: 5 }), gate({ id: 3, node_id: 5 }), gate({ id: 4, node_id: 6 })])
+    expect(m.get(5)?.id).toBe(9)
+    expect(m.get(6)?.id).toBe(4)
+    expect(gateByNode(null).size).toBe(0)
+  })
+  it('words the badge, naming a timeout', () => {
+    expect(gateBadge(gate({}))).toEqual({ text: 'waiting', tone: 'waiting' })
+    expect(gateBadge(gate({ status: 'approved' }))).toEqual({ text: 'approved', tone: 'approved' })
+    expect(gateBadge(gate({ status: 'rejected' }))).toEqual({ text: 'rejected', tone: 'rejected' })
+    expect(gateBadge(gate({ status: 'rejected', reason: 'timed out' }))).toEqual({
+      text: 'rejected — timed out',
+      tone: 'rejected',
+    })
   })
 })

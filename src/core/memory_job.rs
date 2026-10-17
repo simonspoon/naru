@@ -263,6 +263,9 @@ fn run_workflow_job(mut store: Store, run_id: i64) -> Result<Value> {
             "workflow run {run_id} is already finished"
         )));
     }
+    if run.trigger == crate::core::WorkflowTrigger::TaskEvent {
+        crate::core::workflow::mark_task_event_run();
+    }
     store.set_workflow_run_owner(run_id, std::process::id() as i64)?;
     let view = store.get_workflow_view(run.workflow_id)?;
     let access = std::sync::Mutex::new(store);

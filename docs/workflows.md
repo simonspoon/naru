@@ -48,7 +48,9 @@ Graph rules (`Store`):
 - An exact duplicate `(from, to, branch)` is `conflict`.
 - An edge leaving a `branch` node **needs** `branch` (`true`/`false`); an edge
   leaving a `decide` node **needs** one of that node's `options` or `fallback`
-  (`validation`, naming the options); an edge leaving any other node
+  (`validation`, naming the options); an edge leaving a `switch` node needs one
+  of its case labels or `default`; an edge leaving a `gate` node needs
+  `approved` or `rejected`; an edge leaving any other node
   **refuses** one. `branch` is free text in the db (a decide option), so
   `WorkflowEdge.branch` is a string; changing a decide node's config
   is refused (`validation`, naming the edge id and label, nothing written) while
@@ -78,6 +80,15 @@ Stored config is the validated, normalized form.
 | `script` | `{"script": "<id or name>", "values": {"name": "…"}, "timeout_secs": 1..=86400 (default 600)}` | runs a stored script (`docs/scripts.md`); output is stdout |
 | `branch` | `{"op": "contains"\|"regex"\|"score_above"\|"score_below"\|"equals", "value": "…" (a number for `score_*`)}` | evaluates its input to a verdict; output is its input, unchanged |
 | `decide` | `{"question": "…" (non-empty, may contain `{input}`), "options": ["a", "b", …] (2 or more, distinct, non-empty, none named `fallback`), "threshold": 0..=1 (default 0.5)}` | a local judgement (`core::decide`, `docs/decide.md`) that picks one option; routes like a `branch`, one edge per option plus an optional `fallback` edge |
+| `switch` | `{"op": "equals"\|"contains"\|"regex" (default `equals`), "cases": [{"match": "…", "label": "…" (default: the match)}, …] (2 or more, non-empty matches, distinct labels, none named `default`)}` | a many-way branch on its input; routes to the first matching case's edge, else the `default` edge |
+| `gate` | `{"message": "…" (optional), "timeout_secs": 1..=86400 (default 3600), "on_timeout": "reject" (the only value)}` | pauses the run until a person approves or rejects it; routes to the `approved` or `rejected` edge |
+| `subworkflow` | `{"workflow": "<id or name>"}` | runs that workflow with this node's input as its trigger input (naru task 1994); output is the output of the child's last successful step. A failed child fails the node |
+| `task` | `{"action": "create"\|"update"\|"read", "project": "<id or name>" (create), "task": N (update, read), "description", "status", "priority", "result"}` | creates, updates or reads one Naru task (naru task 1996). Create needs `project`; update and read need `task`; an update needs one of `description`/`status`/`priority`/`result`; a field the action does not take is `validation`. Any value may hold `{input}`, replaced by the node's input (so an upstream node can pick the task id); a create with no `description` uses the input. Output is the task as JSON; a missing task, unknown project or bad status fails the node. Updates go through the receipt chokepoint like `task update`. |
+| `http` | `{"method": "GET"\|"POST"\|"PUT"\|"PATCH"\|"DELETE" (default GET), "url": "http://…", "headers": {"Name": "value"}, "body": "…" (POST, PUT, PATCH), "timeout_secs": 1..=600 (default 30)}` | one HTTP request (naru task 1997); `{input}` is replaced in `url` (percent-encoded, unless the url starts with `{input}`, which is then the whole url), header values and `body`. Output is JSON `{status, ok, body, json}` (`json` the body parsed, else `null`; the body is capped at 32 KiB and `truncated: true` is added when cut). A non-2xx status is data (`ok: false`); a refused connection or a timeout fails the node. Pins `any` in, `any` out. |
+| `board` | `{"kind": "markdown"\|"html" (default markdown), "title": "…", "body": "…"}` | pushes a board to the live whiteboard (naru task 2001), the way `naru live board push` does. `body` has `{input}` replaced and defaults to the input; ≤ 2 MiB, `title` ≤ 200 characters. No live conversation fails the node (`naru live start` first). The input passes through unchanged. Pins `any` in, `any` out. |
+| `notify` | `{"mode": "phone"\|"speak" (default phone), "message": "…", "title": "…", "open": "<route>"}` | tells a person (naru task 1998). `phone` sends through `vox` exactly as `naru notify` does (`title`, and an Open Naru button to `open`); `speak` appends a `naru` turn to the live conversation so the page speaks it (`unavailable` and a failed node when none is live). `message` has `{input}` replaced and defaults to the input; ≤ 4096 bytes. The input passes through unchanged; a failed send fails the node. Pins `any` in, `any` out. |
+| `trycatch` | `{"wrap":{"kind":"cli\|script\|prompt\|agent","config":{...}},"timeout_secs":N}` | runs the wrapped node once (naru task 1995). Success routes `ok` with the wrapped output; a failure is caught: the node and the run still succeed, the output is the error text, and the `caught` edges run. Edges need `--branch ok\|caught`; an unwired branch skips everything behind it |
+| `retry` | `{"wrap": {"kind": "cli"\|"script"\|"prompt"\|"agent", "config": {…the wrapped kind's config…}}, "attempts": 1..=10 (default 3), "backoff_ms": 0..=60000 (default 0), "backoff_factor": 1..=10 (default 1), "timeout_secs": 1..=3600}` | runs the wrapped node, retrying on failure (naru task 1991); output is the wrapped node's |
 | `output` | `{"target": "log", "log": "<name>" (default `default`)}`, `{"target": "task", "project": "<id\|name>", "status": "backlog"\|"todo" (default todo)}`, `{"target": "inbox", "task_id": N, "kind": "task-summary"\|"change-request" (default task-summary)}`, `{"target": "board", "title": "…"}` | delivers its input; output is a short receipt. A key that does not apply to the target is refused |
 
 **`agent`** (naru task 1982). A `prompt`-style call that acts as a **defined agent**:
@@ -197,6 +208,21 @@ optional edge labelled `fallback`.
   Unlike a `branch`, the input is **not** passed on — a downstream node that
   needs the original text takes it from a second edge off an earlier node.
 
+**`switch`** (naru task 1990). A many-way `branch`: the input (trimmed) is
+tested against each case's `match` in order with the node's `op` (the `branch`
+node's `equals`, `contains` and `regex`; a regex is POSIX ERE and is checked at
+create/update), and the **first** matching case wins. Its edges carry the case
+`label` (the `match` when no label is given); an edge with no `branch` or one
+that is neither a case label nor `default` is `validation`, and changing the
+config is refused while an edge leaves on a label the new cases lack (the
+decide rule). The `default` edge takes the run when no case matches; with no
+`default` edge a non-match skips everything downstream and the run still
+succeeds. The output is `{"value": "<input>", "matched": bool, "label":
+"<case label>"|null}`; like `decide`, the input is not passed on. The editor
+draws one source handle per case label plus `default` last, in the switch group
+colour (`--wf-switch`, derived from `good` and `warn`, `docs/themes.md`), with
+an operator select and an editable cases list (at least two).
+
 **`output`.** `log` appends a line to the named log (`workflow log <name>`);
 `task` creates a task (the input is its description) in the named project;
 `inbox` files an item of the given kind naming `task_id` (an inbox item always
@@ -206,6 +232,173 @@ An **empty input** (blank text) is **not a failure**: the node succeeds with
 output `nothing to deliver` and writes no record, so a silent run — an empty
 transcript, a filter that let nothing through — files nothing and still
 succeeds.
+
+**`parse-json`** (naru task 1985) turns text into a typed value. Config:
+`type` (optional; `any` by default, else `string`, `number`, `bool`,
+`list<T>` or a struct of the workflow's Types card; a malformed name is
+`validation`). Pins: `text: string` → `value: <type>`, fixed by the kind
+and written into `config.pins` by the validator (a supplied `pins` is
+ignored). The editor draws it in the amber data group colour (`--amber`; the
+board export uses `#ffb444`). The input is parsed as JSON and checked against
+`type` by `wftypes::render`; the output is the compact JSON (a bare string is
+output raw). Invalid JSON fails the node with `invalid JSON: …`, JSON of the
+wrong shape with e.g. `expected number, got "x"`; the run is recorded as
+`failed` with that reason on the step. The editor offers an output-type select.
+
+**`variable`** (naru task 1986) gets or sets a named, typed value shared by
+the nodes of **one run** (a map local to the run: never persisted, never
+shared across runs). Config: `op` (`set` or `get`, required), `name`
+(required; letters, digits, `_` and `-`, starting with a letter or `_`, up to
+64) and `type` (optional, as for `parse-json`; `any` by default). Pins, fixed
+by the kind and written into `config.pins` by the validator (a supplied
+`pins` is ignored): `set` is `value: <type>` → `value: <type>`; `get` is
+`trigger: any` → `value: <type>`. `set` parses its input as JSON, checks it
+against `type` exactly as `parse-json` does, stores the compact value under
+`name` and passes it on as its output; `get` outputs the stored value. A `set`
+of invalid JSON or the wrong shape fails the node with the `parse-json`
+reasons; a `get` before any `set` fails it with `variable "x" is not set`.
+Order is the graph's: a `get` has no data link to its `set`, so wire an edge
+from the `set` (directly or through other nodes) to the `get`; nodes with no
+ordering edge run in topological order, ties by node id. A `get` with no
+active incoming edge is skipped like any orphan. Drawn in the amber data
+group colour (`--amber`; board export `#ffb444`); the editor offers an
+operation select, a name field and a type select.
+
+**`mapfilter`** (naru task 1987) maps or filters a list, in-process (no
+shell, process or model). Config: `mode` (`map` or `filter`, required) and
+`expr` (required). Pins, fixed by the kind and written into `config.pins` by
+the validator: `list: any` → `list: any`. The input is a JSON array, or plain
+text taken as its non-empty lines; any other JSON (an object, a number) fails
+the node with `mapfilter input must be a list`. `map` replaces `{item}` in the
+`expr` template with each item (one pass, so item text is never re-read); the
+output is a JSON array of strings. `filter` keeps the items matching one
+predicate: `contains:X`, `not-contains:X`, `eq:X`, `regex:RE` (Rust regex) or
+`nonempty`; the output is the kept items, unchanged. An unknown predicate or
+a bad regex is `validation` at create/update. Drawn in the amber data group
+colour (`--amber`; board export `#ffb444`); the editor offers a mode select
+and an expression field.
+
+**`foreach`** (naru task 1988) runs a script once per item of a list. Config:
+`body` (a bash script, required) and `timeout_secs` (1..=3600 per item,
+default as for `cli`). Pins, fixed by the kind: `list: any` → `results:
+list<string>`. The input is a JSON array, or plain text taken as its non-empty
+lines; any other JSON fails the node with `foreach input must be a list`. The
+body runs under `bash -c` once per item, in order, in the run's cwd; the item
+arrives as `$1`, `$NARU_INPUT` and on stdin and is **never spliced into the
+script text** (so a hostile item stays literal; `{input}` is not substituted).
+The output is a JSON array of each run's trimmed stdout. A nonzero exit or a
+timeout on any item fails the node with `item <index> exited <code>: …`. The
+body is one inline step, not a downstream subgraph. Drawn in the amber data
+group colour (`--amber`; board export `#ffb444`); the editor offers a body
+textarea and a per-item timeout field.
+
+**`parallel` and `join`** (naru task 1989) are the flow pair: a fan-out
+marker and a gather. Neither takes config (any key is `validation`). `parallel`
+passes its input through to every outgoing edge. `join` runs **only when every
+incoming edge is active**; its output is a JSON array of the incoming outputs
+in edge-id order (pins: `in: any` → `out: list<string>`). If any incoming
+branch was skipped (a branch's other verdict, a skipped upstream) the join is
+`skipped` and the run still succeeds; a failed upstream node fails the run as
+usual. **The engine is sequential**: branches run one after another in
+topological order, so `parallel` is a visual and structural fan-out, not
+concurrency. Drawn in the flow group colour (`--wf-flow`; board export
+`#fb923c`); neither node has a config form.
+
+**`retry`** (naru task 1991) wraps one `cli`, `script`, `prompt` or `agent`
+node held in its own `wrap` config (control kinds, including `retry`, are
+`validation`; the wrapped config is validated as its own kind). The wrapped node
+runs up to `attempts` times; between tries the engine waits
+`backoff_ms * backoff_factor^n` (n = failures so far, capped at 10 minutes).
+`timeout_secs`, when set, replaces the wrapped node's own timeout and bounds
+**each attempt**. The first success is the node's output (pins: `input: any` →
+`output: any`); if every attempt fails the node fails with
+`failed after N attempt(s): <last error>`. Flow group colour (`--wf-flow`; board
+export `#fb923c`). The editor takes the wrapped config as JSON.
+
+**`delay`** (naru task 1992) waits, then passes its input through unchanged
+(pins: `in: any` → `out: any`). Config is exactly one of `{"seconds": 0..=3600}`
+or `{"until": "HH:MM" | "YYYY-MM-DDTHH:MM:SSZ"}` (both UTC; `HH:MM` is the next
+such time of day). An `until` more than 3600 s ahead fails the node at run time
+(an instant already past waits 0); anything else is `validation` at create. The
+wait runs with no store lock held. There is no cancel flag in the engine yet, so
+a run cannot be stopped mid-wait. Flow group colour (`--wf-flow`; board export
+`#fb923c`); the editor offers a Duration / Until choice.
+
+**`gate`** (naru task 1993) is a human approval. When it starts, the engine
+writes a `pending` row in `workflow_gates` (CASCADE from the run), sends a
+best-effort phone notification (`core::notify`, an "Open Naru" button to
+`/open/workflows/<id>`; a missing `vox` is only logged), and polls the row once
+a second **with no store lock held** until a person decides or `timeout_secs`
+pass. The input passes through unchanged; the node's route is `approved` or
+`rejected`, so its edges carry `--branch approved|rejected` (a `decide`-style
+string branch: a missing or other label is `validation`). A rejection is data,
+not a failure: the run goes on down the `rejected` edge and still ends
+`succeeded`. A timeout **is** a rejection: the gate row records
+`status: rejected, reason: "timed out"` (the step's output is the unchanged
+input; read the reason from the gate row or `gate list --all`). Decide with
+`naru workflow gate approve|reject <id>` (`--quiet` drops `message`), `naru
+workflow gate list [--run N] [--all]` (pending gates of running runs, newest
+first), or over the API: `GET /api/workflow-gates[?run=N&all=true]` and
+`POST /api/workflow-gates/{id}/decide {"decision": "approved"|"rejected"}`,
+both on `require_agent_access`, reads included; a gate already decided is
+`conflict` (409), settled by a conditional `UPDATE ... WHERE status='pending'`.
+The run stays `running` while it waits. A `serve` restart fails the orphaned
+run (`reconcile`) and its pending gate stops being listed; there is no resume.
+The editor draws the card in the flow colour (`--amber`; board export
+`#fb923c`) with `in`, and two flow handles `approved` / `rejected`; on a shown
+run a waiting gate's card carries an amber "waiting" badge, its message and
+**Approve** / **Reject** buttons (44px tall at the phone tier), and a decided
+one reads "approved" or "rejected — timed out".
+
+**`trycatch`** (naru task 1995) handles a failure path without failing the run.
+It wraps one `cli`, `script`, `prompt` or `agent` node (the same `wrap` shape
+as `retry`, plus an optional `timeout_secs`, 1-3600) and runs it once. Its
+edges carry `ok` or `caught` in `branch`: a passing wrap activates the `ok`
+edges, a failing one activates the `caught` edges while the node itself is
+`ok` and the run keeps its `succeeded` status. If the branch taken has no edge,
+everything behind it is skipped, as for `branch` and `gate`. In the editor it
+is drawn in the flow group colour with `ok` (green) and `caught` (amber)
+handles.
+
+**`subworkflow`** (naru task 1994) runs another workflow as a node. The child
+is found by id or case-insensitive name; the node's input becomes the child's
+`manual` run input, and the node's output is the last successful step of the
+child's run. A child run that fails fails the node (the error names the child),
+and the child's run is recorded as its own run. The store lock is not held
+while the child runs. The node has one `in` and one `out` pin (both `any`) and
+plain edges. **Recursion rules:** a workflow may not call itself, directly or
+through other workflows, and a chain may be at most 8 workflows deep
+(`SUBWORKFLOW_MAX_DEPTH`). `Store` refuses both, plus an unknown child, as
+`validation` when the node is created or updated; the run checks again (a child
+may have been edited since), failing the node with the same message. Flow group
+colour (`--amber`; board export `#fb923c`); the editor offers a picker of the
+other workflows. There is no per-node timeout: the child's own nodes carry theirs.
+
+**`task`** (naru task 1996) is the one node that writes to the task store directly: `create`, `update` or `read` one task, with `{input}` allowed in every value. Its output is the task JSON, so a later `branch`, `parse-json` or `task read` can use it. Pins are `any` in, `any` out; the editor tints it with `--wf-task` (`docs/themes.md`). Point it at a scratch project when testing: a created `todo` task is dispatchable by the todo-watcher.
+
+**`notify`** (naru task 1998) is the workflow's way to reach a person: `phone` mode shells out to `vox` like `naru notify`, so a machine without it fails the node with `unavailable` and a pointer to `vox init`. `speak` mode writes a `naru` live turn through `Store` (the page reads it aloud; the server has no speaker of its own), so it needs a live conversation. The editor tints it with `--wf-http` (the action group, `docs/themes.md`).
+
+**`board`** (naru task 2001) calls `Store::add_live_board` on the live session (`current_live_session`), so it shows on the whiteboard panel like any pushed board; only `markdown` and `html` are offered (a `diagram` or `image` push stays with `naru live board push`). The editor tints it with `--wf-http` (the action group, `docs/themes.md`).
+
+**`git`** (naru task 1999) runs `git` in a folder through argv, no shell: `commit` (`git add -A`, or only the config's `paths`, then `git commit -m <message>`), `branch` (`git switch -c <name>`, or `git switch` when the branch exists) and `diff` (`git diff [base]`, `--stat` with `stat: true`, capped at 64 KiB). The folder is `cwd`, else the project's `local_path`. `{input}` may appear in `message`, `name` and `base`; a name or base that starts with `-` or holds whitespace is `validation` (config) or a node failure (after substitution), and commit signing is switched off for the call. The identity is the user's own git config. The node outputs the JSON `{result, ok, status}` and the edges leave by the `result` (text: sha, branch name or diff), `ok` (bool) and `status` pins, `result` when none is named. A commit with nothing to commit is data (`ok` false, `status` `nothing to commit`); any other git failure fails the node. Pins are fixed, so a `pins` key is `validation`. The editor tints it with `--wf-http` (the action group, `docs/themes.md`).
+
+**`file`** (naru task 2000) reads or writes one text file, no platform-specific code. Config: `op` (`read`|`write`), `path` (required; a relative path resolves against the run's folder, the project's `local_path`), and for `write` only `content` (may hold `{input}`; absent = write the incoming input) and `append` (default false = truncate). A write creates missing parent folders; a read is capped at 64 KiB with `[truncated]` marked. A missing or unreadable file fails the node; `content`/`append` on a read, an unknown `op`, a blank `path` or a `pins` key are `validation`. The node outputs the JSON `{result, path}` (the text read or written, and the resolved path); edges leave by the `result` or `path` pin, `result` when none is named. It can touch any path the server user can, the same power as a `script` node, and every workflow route is behind `require_agent_access`. The editor tints it with `--wf-http` (the action group, `docs/themes.md`).
+
+**`memory`** (naru task 2002) adds to or searches a project's notebook (`naru memory`, `docs/project-memory.md`), no platform-specific code. Config: `op` (`add`|`search`), `text` (add only; may hold `{input}`; absent = add the incoming input), `query` (search only; same rule), `limit` (search only, 1..=50, default 10) and `project` (id or name, `{input}` allowed; absent = the workflow's own project, and a global workflow with none fails the node). `add` goes through the guarded `Store::add_notebook_entry_in`, so the entry bound applies; `search` is the notebook's full-text search and outputs one JSON line `{id, snippet}` per hit. Empty text or query, an unknown project, an unknown `op`, a key belonging to the other op or a `pins` key are `validation`/node failures. The node outputs the JSON `{result, id}` (the entry added / the hit lines, and the new entry id or empty); edges leave by the `result` or `id` pin, `result` when none is named. The editor tints it with `--wf-http` (the action group).
+
+**`schedule`** (naru task 2004) is a trigger *source*: the workflow's entry node, started by the watcher on a timetable, with nothing flowing into it. Config: exactly one of `every_minutes` (1..=10080, the same interval rule as a `time` trigger) or `cron` (a 5-field `minute hour day-of-month month day-of-week` expression, **UTC**, no platform-specific code: `*`, `n`, `a-b`, `*/s`, `a-b/s` and comma lists; day-of-week 0-6 with 7 also Sunday; when both day fields are restricted a day matches on either, as in Vixie cron). Neither, both, a bad field, a 4- or 6-field expression or an unknown key are `validation`; the stored cron has its whitespace normalised. A workflow has **one** entry node, so a `schedule` and a `trigger` cannot share a workflow (and the `trigger` mode `time` stays as it was; `schedule` is the way to get a cron). The watcher treats it as another due source: an `every_minutes` schedule is due when no run with `trigger = time` started within the interval; a `cron` schedule when the current UTC minute (the store's clock) matches and no `time` run has started in that minute yet. The claim is still the run row (`Store::claim_time_workflow_run`). A manual run works too and its input is the node's output. Pins: no input; output `event`. The editor tints it `--wf-schedule` (the trigger group's red family) with a calendar icon; `next_run_at` in the list is only filled for a `trigger` of mode `time`.
+
+**`webhook`** (naru task 2005) is a trigger *source*: the workflow's entry node, started by an HTTP call, with nothing flowing into it. Config: optional `type` (a pin type name, default `any`; unknown keys are `validation`). `POST /api/workflows/{id}/webhook` with a JSON body (`Content-Type: application/json`, the same gate as every mutating route; `require_agent_access`, reads and writes alike, so no extra secret) claims a run with trigger `webhook`, and the raw body becomes the node's typed output pin `body` through the `parse-json` rule: a body that is not JSON or does not fit `type` fails the webhook node and so the run. The route is synchronous like `/run` and answers the finished run record (a failed run is still 200 with `status: "failed"`); 404 is an unknown workflow and 422 a workflow with no webhook node, an over-limit body, or one without exactly one entry node. A workflow has **one** entry node, so a `webhook` cannot share a workflow with a `trigger` or `schedule`; nothing may connect into it. Platform-neutral (no platform-specific code). The editor tints it with the trigger group's `--red`, a plug-arrow icon, and the inspector shows the body type, the endpoint and a copyable `curl` line. Pins: no input; output `body` (typed from `type`).
+
+**`task-event`** (naru task 2006) is a trigger *source* fired by a task write. Config: `event` (`created` default, `status` or `any`), optional `status` (a task status; only with `status`/`any`, else `validation`) and optional `project` (an id or a case-insensitive name; blank = every project); unknown keys are `validation`. It is an entry node like `schedule`/`webhook` (one per workflow, nothing flows in). A task **creation**, or a **change of status** (a write that leaves the status alone fires nothing), starts one run per matching enabled workflow, id order, with trigger `task-event`, in a detached `naru __job workflow-run` (the task write never waits for it). The firing sits in `core::receipt::{create_task, update_task}`, the one chokepoint both the CLI and the API already use; `Store` stays low-level, and a workflow `task` node writes through `Store`, so it never fires one. Firing is best-effort: a failure to start is a stderr warning, never a failed task write. **Recursion guard:** the detached job exports `NARU_TASK_EVENT_RUN=1`, so a `cli`/`script` node that shells out to `naru task ...` fires nothing. The run input and the node's output pin `task` (a string) is compact JSON `{"event","task_id","project_id","status","old_status","name"}` (`old_status` is `null` for a creation; `name` is the task's derived name, passed byte-identical). Platform-neutral (no platform-specific code). The editor tints it with the trigger group's `--red`, a check-box-and-bolt icon, an event radiogroup, a status select (hidden for `created`) and a project field. Pins: no input; output `task`.
+
+**`file-watch`** (naru task 2007) is a trigger *source* fired when a path changes. Config: `path` (required, a file or folder, 1 to 4096 characters, no globs) and `event` (`any` default, `created`, `modified` or `deleted`); unknown keys and bad values are `validation`. It declares one `event` output pin (`string`, the change as JSON text) and, like the other sources, is an entry node: a workflow has at most one and nothing may connect into it. Detection is polling, with no platform-specific code: each `serve --watch-workflows` tick (`WATCH_WORKFLOWS_TICK_MS`, default 60 s) compares the path's mtime and size with the state it last saw, kept in memory only. The first sight of a path only records it, so a start-up or restart never fires; a later change starts one run (trigger `file-watch`) whose input is JSON `{"path","event","mtime","size"}` (`mtime` in epoch seconds; both are null for a deletion). A change that happens and reverts between two ticks (a create-and-delete) is missed. Editor: header in the trigger group colour (`--red`), a Path field and an Event select.
+
+**`verify`** (naru task 2003) runs a check and reports pass/fail with evidence, no platform-specific code and no model call. Config: `mode` (`test` default | `browser`), `command` (required; run under `bash -c` in the run's folder like a `cli` node), `url` (browser mode only; may hold `{input}`; reaches the command as `$NARU_VERIFY_URL`, never spliced into its text, so a browser-mode command is typically a `khora` script), `expect` (text that must appear in the combined stdout+stderr) and `timeout_secs` (1..=3600, default 300). **Pass** = exit 0 and, when `expect` is set, that text found. A failing check is **data**: the node succeeds with `pass` false; only a spawn failure or the timeout fails the node. An unknown `mode`, an empty `command`, `url` in test mode, a bad timeout, an unknown key or a `pins` key are `validation`. The node outputs the JSON `{pass, evidence, exit_code}` (evidence is stdout then stderr, trimmed and capped at 64 KiB); its pins are `input`; `pass` (bool), `evidence` (string), `exit_code` (number), and edges leave by the pin they name. The editor tints it with `--wf-http` (the action group).
+
+**`comment`** (naru task 2008) is an editor-only group box: a titled, translucent, coloured rectangle drawn behind the other nodes on the canvas to group and label them. It has **no runtime effect**: it has no pins, `Store` refuses any edge into or out of it (`validation`), and `execute_run` drops it from the run order, so a run never gives it a step (no `skipped` row either). Config: `text` (optional, shown under the title) and `color` (a theme token: `accent` default, `accent2`, `good`, `warn`, `bad` or `muted`; anything else, an unknown key or `pins` is `validation`). `naru workflow node create <wf> comment "Title" --config '{"text":"…","color":"warn"}'`. The editor draws it 320×200 with no handles, tinted by the colour's theme variable (`color-mix` at low alpha, so it follows every theme), with a swatch row in its panel; the palette chip uses `--wf-comment`. No platform-specific code.
+
+**`http`** (naru task 1997) makes one request and hands the response on as JSON, so a later `parse-json`, `branch` or `output` can use `status`, `ok` or `json`. Only `http://` URLs are accepted: `ureq` is built without TLS here, so an `https://` URL is `validation` (reach a TLS service through a `cli` node running `curl`). The node can reach `localhost` and the LAN, which a `cli` node can already do. The editor tints it with `--wf-http` (`docs/themes.md`).
 
 ## Enabled and duplicate (naru task 1633)
 

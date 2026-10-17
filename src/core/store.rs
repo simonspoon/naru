@@ -15,9 +15,9 @@ use super::types::{
     LiveRole, LiveSession, LiveStatus, LiveSummary, LiveTurn, LiveWindow, Priority, Project,
     RetroFinding, RetroRun, RetroStatus, Script, ScriptArg, ScriptArgKind, ScriptRunRecord,
     ScriptRunStatus, Status, Task, TaskDigestEntry, TaskEvent, TaskNote, TaskReceipt, Workflow,
-    WorkflowBranch, WorkflowEdge, WorkflowLogEntry, WorkflowNode, WorkflowNodeKind, WorkflowRun,
-    WorkflowRunStatus, WorkflowStep, WorkflowStepStatus, WorkflowTrigger, WorkflowType,
-    WorkflowView, is_valid_artifact_content_type, task_name,
+    WorkflowBranch, WorkflowEdge, WorkflowGate, WorkflowGateStatus, WorkflowLogEntry, WorkflowNode,
+    WorkflowNodeKind, WorkflowRun, WorkflowRunStatus, WorkflowStep, WorkflowStepStatus,
+    WorkflowTrigger, WorkflowType, WorkflowView, is_valid_artifact_content_type, task_name,
 };
 
 #[derive(Debug)]
@@ -1464,6 +1464,19 @@ const MIGRATIONS: &[&str] = &[
      DROP INDEX idx_workflow_edges_unique;
      CREATE UNIQUE INDEX idx_workflow_edges_unique
         ON workflow_edges(from_node, to_node, IFNULL(branch, ''), IFNULL(from_pin, ''), IFNULL(to_pin, ''));",
+    // Naru task 1993: a `gate` node's pending decision. CASCADE from the run,
+    // so a pruned or deleted run takes its gates with it.
+    "CREATE TABLE workflow_gates ( \
+        id INTEGER PRIMARY KEY AUTOINCREMENT, \
+        run_id INTEGER NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE, \
+        node_id INTEGER NOT NULL, \
+        message TEXT NOT NULL DEFAULT '', \
+        status TEXT NOT NULL DEFAULT 'pending', \
+        reason TEXT, \
+        created_at TEXT NOT NULL DEFAULT (datetime('now')), \
+        decided_at TEXT \
+     ); \
+     CREATE INDEX idx_workflow_gates_run ON workflow_gates(run_id);",
 ];
 
 /// Selects full task rows including the derived `blocked` flag.
@@ -2918,6 +2931,19 @@ fn read_workflow_nodes(conn: &Connection, workflow_id: i64) -> Result<Vec<Workfl
     ))?;
     let rows = stmt.query_map([workflow_id], row_to_workflow_node)?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// The case labels a switch node's (validated) config offers.
+fn switch_labels(config: &serde_json::Value) -> Vec<&str> {
+    config
+        .get("cases")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|c| c.get("label").and_then(|l| l.as_str()))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn read_workflow_edges(conn: &Connection, workflow_id: i64) -> Result<Vec<WorkflowEdge>> {
@@ -5338,6 +5364,72 @@ impl Store {
         }
     }
 
+    /// A `subworkflow` node's save-time rules (naru task 1994): the child
+    /// exists, the call does not lead back to `workflow_id` (directly or
+    /// through other subworkflow nodes) and the chain stays within
+    /// `SUBWORKFLOW_MAX_DEPTH` workflows. Other kinds pass untouched.
+    fn ensure_subworkflow_call(
+        &self,
+        workflow_id: i64,
+        kind: WorkflowNodeKind,
+        config: &serde_json::Value,
+    ) -> Result<()> {
+        if kind != WorkflowNodeKind::Subworkflow {
+            return Ok(());
+        }
+        let key = config
+            .get("workflow")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let child = super::workflow::resolve_subworkflow(self, key).map_err(|e| match e {
+            Error::NotFound(m) => Error::Validation(format!("subworkflow: {m}")),
+            e => e,
+        })?;
+        // Longest chain of workflows starting at `id`; `path` guards a
+        // hand-edited db that already holds a loop.
+        fn chain(s: &Store, id: i64, target: i64, path: &mut Vec<i64>) -> Result<usize> {
+            if id == target {
+                return Err(Error::Validation(
+                    "subworkflow: that call leads back to this workflow; a workflow cannot \
+                     run itself, directly or through other workflows"
+                        .into(),
+                ));
+            }
+            if path.contains(&id) {
+                return Ok(0);
+            }
+            path.push(id);
+            let mut stmt = s.conn.prepare(
+                "SELECT config FROM workflow_nodes WHERE workflow_id = ?1 AND kind = 'subworkflow'",
+            )?;
+            let configs = stmt
+                .query_map([id], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut deepest = 0;
+            for c in configs {
+                let key = serde_json::from_str::<serde_json::Value>(&c)
+                    .ok()
+                    .and_then(|v| v.get("workflow").and_then(|k| k.as_str()).map(String::from));
+                if let Some(next) =
+                    key.and_then(|k| super::workflow::resolve_subworkflow(s, &k).ok())
+                {
+                    deepest = deepest.max(chain(s, next.id, target, path)?);
+                }
+            }
+            path.pop();
+            Ok(deepest + 1)
+        }
+        let below = chain(self, child.id, workflow_id, &mut Vec::new())?;
+        if below + 1 > super::workflow::SUBWORKFLOW_MAX_DEPTH {
+            return Err(Error::Validation(format!(
+                "subworkflow: the chain would be {} workflows deep; the limit is {}",
+                below + 1,
+                super::workflow::SUBWORKFLOW_MAX_DEPTH
+            )));
+        }
+        Ok(())
+    }
+
     fn create_workflow_node_checked(
         &mut self,
         workflow_id: i64,
@@ -5355,13 +5447,22 @@ impl Store {
         let config =
             super::workflow::validate_config(new.kind, &config).map_err(Error::Validation)?;
         self.ensure_node_types(workflow_id, new.kind, &title, &config, None)?;
+        self.ensure_subworkflow_call(workflow_id, new.kind, &config)?;
         let (count, has_trigger): (i64, bool) = self.conn.query_row(
-            "SELECT COUNT(*), COALESCE(SUM(kind = 'trigger'), 0) > 0 \
+            "SELECT COUNT(*), COALESCE(SUM(kind IN ('trigger', 'schedule', 'webhook', 'task-event', 'file-watch')), 0) > 0 \
              FROM workflow_nodes WHERE workflow_id = ?1",
             [workflow_id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
-        if new.kind == WorkflowNodeKind::Trigger && has_trigger {
+        if matches!(
+            new.kind,
+            WorkflowNodeKind::Trigger
+                | WorkflowNodeKind::Schedule
+                | WorkflowNodeKind::Webhook
+                | WorkflowNodeKind::TaskEvent
+                | WorkflowNodeKind::FileWatch
+        ) && has_trigger
+        {
             return Err(Error::Validation(format!(
                 "workflow {workflow_id} already has a trigger node; a workflow has at most one"
             )));
@@ -5418,6 +5519,7 @@ impl Store {
         };
         if patch.config.is_some() {
             self.ensure_node_types(current.workflow_id, current.kind, &title, &config, Some(id))?;
+            self.ensure_subworkflow_call(current.workflow_id, current.kind, &config)?;
         }
         if current.kind == WorkflowNodeKind::Decide && patch.config.is_some() {
             // An edge labelled with an option the node no longer offers would
@@ -5438,6 +5540,24 @@ impl Store {
                      options ({}); delete or relabel the edge first",
                     e.id,
                     options.join(", ")
+                )));
+            }
+        }
+        if current.kind == WorkflowNodeKind::Switch && patch.config.is_some() {
+            // Same guard as decide: an edge on a label the node no longer has
+            // would never be active.
+            let labels = switch_labels(&config);
+            let edges = read_workflow_edges(&self.conn, current.workflow_id)?;
+            if let Some((e, label)) = edges.iter().find_map(|e| {
+                let label = e.branch.as_deref()?;
+                (e.from_node == id && label != "default" && !labels.contains(&label))
+                    .then_some((e, label))
+            }) {
+                return Err(Error::Validation(format!(
+                    "edge {} leaves this switch node on {label:?}, which is not among the new \
+                     case labels ({}); delete or relabel the edge first",
+                    e.id,
+                    labels.join(", ")
                 )));
             }
         }
@@ -5584,7 +5704,19 @@ impl Store {
                 "node {from_node} cannot connect to itself"
             )));
         }
-        if to.kind == WorkflowNodeKind::Trigger {
+        if from.kind == WorkflowNodeKind::Comment || to.kind == WorkflowNodeKind::Comment {
+            return Err(Error::Validation(
+                "a comment box has no pins; it cannot be connected".into(),
+            ));
+        }
+        if matches!(
+            to.kind,
+            WorkflowNodeKind::Trigger
+                | WorkflowNodeKind::Schedule
+                | WorkflowNodeKind::Webhook
+                | WorkflowNodeKind::TaskEvent
+                | WorkflowNodeKind::FileWatch
+        ) {
             return Err(Error::Validation(format!(
                 "node {to_node} is the trigger; a trigger has no incoming edges"
             )));
@@ -5620,10 +5752,48 @@ impl Store {
                     )));
                 }
             }
-            (WorkflowNodeKind::Branch, _) => {}
+            (WorkflowNodeKind::Switch, None) => {
+                return Err(Error::Validation(format!(
+                    "node {from_node} is a switch node; its edges need --branch <case label>|default"
+                )));
+            }
+            (WorkflowNodeKind::Switch, Some(label)) => {
+                let labels = switch_labels(&from.config);
+                if label != "default" && !labels.contains(&label) {
+                    return Err(Error::Validation(format!(
+                        "node {from_node} is a switch node; --branch must be one of its case \
+                         labels ({}) or default, got {label:?}",
+                        labels.join(", ")
+                    )));
+                }
+            }
+            (WorkflowNodeKind::Gate, None) => {
+                return Err(Error::Validation(format!(
+                    "node {from_node} is a gate node; its edges need --branch approved|rejected"
+                )));
+            }
+            (WorkflowNodeKind::Gate, Some(label)) if !["approved", "rejected"].contains(&label) => {
+                return Err(Error::Validation(format!(
+                    "node {from_node} is a gate node; --branch must be approved or rejected, \
+                     got {label:?}"
+                )));
+            }
+            (WorkflowNodeKind::Trycatch, None) => {
+                return Err(Error::Validation(format!(
+                    "node {from_node} is a trycatch node; its edges need --branch ok|caught"
+                )));
+            }
+            (WorkflowNodeKind::Trycatch, Some(label)) if !["ok", "caught"].contains(&label) => {
+                return Err(Error::Validation(format!(
+                    "node {from_node} is a trycatch node; --branch must be ok or caught, \
+                     got {label:?}"
+                )));
+            }
+            (WorkflowNodeKind::Branch | WorkflowNodeKind::Gate | WorkflowNodeKind::Trycatch, _) => {
+            }
             (_, Some(_)) => {
                 return Err(Error::Validation(format!(
-                    "node {from_node} is not a branch or decide node; only those nodes' edges \
+                    "node {from_node} is not a branch, decide, switch, gate or trycatch node; only those nodes' edges \
                      carry a branch"
                 )));
             }
@@ -5800,7 +5970,17 @@ impl Store {
                 (workflow_id, std::process::id() as i64),
             )?;
             if n == 0 {
-                return Ok(None);
+                // Not a time trigger: a `schedule` node is claimed the same way,
+                // its due check being [`Store::schedule_due`].
+                if !s.schedule_due(workflow_id)? {
+                    return Ok(None);
+                }
+                s.conn.execute(
+                    "INSERT INTO workflow_runs \
+                     (workflow_id, trigger, input, status, steps, started_at, owner_pid) \
+                     VALUES (?1, 'time', '', 'running', '[]', datetime('now'), ?2)",
+                    (workflow_id, std::process::id() as i64),
+                )?;
             }
             let id = s.conn.last_insert_rowid();
             s.prune_workflow_runs(workflow_id)?;
@@ -5902,6 +6082,91 @@ impl Store {
         self.get_workflow_run(id)
     }
 
+    const GATE_SELECT: &'static str = "SELECT g.id, g.run_id, g.node_id, r.workflow_id, g.message, \
+         g.status, g.reason, g.created_at, g.decided_at \
+         FROM workflow_gates g JOIN workflow_runs r ON r.id = g.run_id";
+
+    fn read_gate(r: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowGate> {
+        let status: String = r.get(5)?;
+        Ok(WorkflowGate {
+            id: r.get(0)?,
+            run_id: r.get(1)?,
+            node_id: r.get(2)?,
+            workflow_id: r.get(3)?,
+            message: r.get(4)?,
+            status: WorkflowGateStatus::parse(&status).unwrap_or(WorkflowGateStatus::Rejected),
+            reason: r.get(6)?,
+            created_at: r.get(7)?,
+            decided_at: r.get(8)?,
+        })
+    }
+
+    /// Opens a `pending` gate for a run's node (naru task 1993).
+    pub fn create_workflow_gate(
+        &mut self,
+        run_id: i64,
+        node_id: i64,
+        message: &str,
+    ) -> Result<WorkflowGate> {
+        self.get_workflow_run(run_id)?;
+        self.conn.execute(
+            "INSERT INTO workflow_gates (run_id, node_id, message) VALUES (?1, ?2, ?3)",
+            (run_id, node_id, message),
+        )?;
+        self.get_workflow_gate(self.conn.last_insert_rowid())
+    }
+
+    pub fn get_workflow_gate(&self, id: i64) -> Result<WorkflowGate> {
+        self.conn
+            .query_row(
+                &format!("{} WHERE g.id = ?1", Self::GATE_SELECT),
+                [id],
+                Self::read_gate,
+            )
+            .optional()?
+            .ok_or_else(|| Error::NotFound(format!("workflow gate {id} not found")))
+    }
+
+    /// Gates, newest first: the pending ones of still-running runs unless `all`
+    /// (a restart-orphaned gate is not waiting on anyone), optionally one run's.
+    pub fn list_workflow_gates(&self, run_id: Option<i64>, all: bool) -> Result<Vec<WorkflowGate>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "{} WHERE (?1 IS NULL OR g.run_id = ?1) AND (?2 = 1 OR (g.status = 'pending' AND r.status = 'running')) \
+             ORDER BY g.id DESC",
+            Self::GATE_SELECT
+        ))?;
+        let rows = stmt.query_map((run_id, all as i64), Self::read_gate)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Decides a pending gate exactly once; a second decision is `conflict`
+    /// (the conditional `UPDATE` is the race-free check).
+    pub fn decide_workflow_gate(
+        &mut self,
+        id: i64,
+        status: WorkflowGateStatus,
+        reason: Option<&str>,
+    ) -> Result<WorkflowGate> {
+        if status == WorkflowGateStatus::Pending {
+            return Err(Error::Validation(
+                "a gate is decided approved or rejected".into(),
+            ));
+        }
+        let n = self.conn.execute(
+            "UPDATE workflow_gates SET status = ?1, reason = ?2, decided_at = datetime('now') \
+             WHERE id = ?3 AND status = 'pending'",
+            (status.as_str(), reason, id),
+        )?;
+        let gate = self.get_workflow_gate(id)?;
+        if n == 0 {
+            return Err(Error::Conflict(format!(
+                "workflow gate {id} is already {}",
+                gate.status.as_str()
+            )));
+        }
+        Ok(gate)
+    }
+
     /// Persists a still-running run's steps so far (the live run view). A run
     /// already finished is left alone; the final `finish_workflow_run` write
     /// stays authoritative.
@@ -5958,7 +6223,79 @@ impl Store {
              ORDER BY w.id"
         ))?;
         let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        let mut ids = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut stmt = self.conn.prepare(&format!(
+            "{HIDDEN_PROJECTS_CTE}SELECT w.id FROM workflows w \
+             WHERE w.enabled = 1 \
+               AND (w.project_id IS NULL OR w.project_id NOT IN (SELECT id FROM hidden_projects)) \
+               AND EXISTS (SELECT 1 FROM workflow_nodes n \
+                    WHERE n.workflow_id = w.id AND n.kind = 'schedule') \
+             ORDER BY w.id"
+        ))?;
+        let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
+        for id in rows.collect::<rusqlite::Result<Vec<_>>>()? {
+            if self.schedule_due(id)? {
+                ids.push(id);
+            }
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        Ok(ids)
+    }
+
+    /// Whether `workflow_id`'s `schedule` node (naru task 2004) is due, on
+    /// SQLite's own clock: an `every_minutes` schedule when no `time` run
+    /// started within that many minutes; a `cron` schedule when the current
+    /// UTC minute is one the expression names and no `time` run has started
+    /// in it yet. False for a disabled workflow or one with no schedule node.
+    fn schedule_due(&self, workflow_id: i64) -> Result<bool> {
+        let config: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT n.config FROM workflow_nodes n JOIN workflows w ON w.id = n.workflow_id \
+                 WHERE n.workflow_id = ?1 AND n.kind = 'schedule' AND w.enabled = 1 \
+                 ORDER BY n.id LIMIT 1",
+                [workflow_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(config) = config else {
+            return Ok(false);
+        };
+        let config: serde_json::Value = serde_json::from_str(&config).unwrap_or_default();
+        if let Some(n) = config.get("every_minutes").and_then(|v| v.as_i64()) {
+            return Ok(self.conn.query_row(
+                "SELECT NOT EXISTS (SELECT 1 FROM workflow_runs r \
+                    WHERE r.workflow_id = ?1 AND r.trigger = 'time' \
+                      AND r.started_at > datetime('now', '-' || ?2 || ' minutes'))",
+                (workflow_id, n),
+                |r| r.get(0),
+            )?);
+        }
+        let Some(cron) = config
+            .get("cron")
+            .and_then(|v| v.as_str())
+            .and_then(|c| super::workflow::parse_cron(c).ok())
+        else {
+            return Ok(false);
+        };
+        let (mi, h, d, mo, w): (u32, u32, u32, u32, u32) = self.conn.query_row(
+            "SELECT CAST(strftime('%M','now') AS INTEGER), CAST(strftime('%H','now') AS INTEGER), \
+                    CAST(strftime('%d','now') AS INTEGER), CAST(strftime('%m','now') AS INTEGER), \
+                    CAST(strftime('%w','now') AS INTEGER)",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )?;
+        if !cron.matches(mi, h, d, mo, w) {
+            return Ok(false);
+        }
+        Ok(self.conn.query_row(
+            "SELECT NOT EXISTS (SELECT 1 FROM workflow_runs r \
+                WHERE r.workflow_id = ?1 AND r.trigger = 'time' \
+                  AND r.started_at >= strftime('%Y-%m-%d %H:%M:00', 'now'))",
+            [workflow_id],
+            |r| r.get(0),
+        )?)
     }
 
     /// Ids of the workflows whose trigger is `ambient` and lists `event`,
@@ -5974,6 +6311,40 @@ impl Store {
         ))?;
         let rows = stmt.query_map([event], |r| r.get::<_, i64>(0))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Every enabled, visible workflow's `task-event` trigger as
+    /// `(workflow id, node config)`, id order (naru task 2006). The matching
+    /// (event, status, project) is `workflow::plan_task_event`'s.
+    pub fn task_event_workflows(&self) -> Result<Vec<(i64, serde_json::Value)>> {
+        self.trigger_node_workflows("task-event")
+    }
+
+    /// Every enabled, visible workflow's `file-watch` trigger as
+    /// `(workflow id, node config)`, id order (naru task 2007).
+    pub fn file_watch_workflows(&self) -> Result<Vec<(i64, serde_json::Value)>> {
+        self.trigger_node_workflows("file-watch")
+    }
+
+    fn trigger_node_workflows(&self, kind: &str) -> Result<Vec<(i64, serde_json::Value)>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "{HIDDEN_PROJECTS_CTE}SELECT w.id, n.config FROM workflows w \
+             JOIN workflow_nodes n ON n.workflow_id = w.id AND n.kind = ?1 \
+             WHERE w.enabled = 1 \
+               AND (w.project_id IS NULL OR w.project_id NOT IN (SELECT id FROM hidden_projects)) \
+             ORDER BY w.id"
+        ))?;
+        let rows = stmt.query_map([kind], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, config) = row?;
+            if let Ok(v) = serde_json::from_str(&config) {
+                out.push((id, v));
+            }
+        }
+        Ok(out)
     }
 
     /// Appends one line to a named log — what an `output` node with
@@ -16329,15 +16700,15 @@ mod tests {
         );
         assert_eq!(
             MIGRATIONS.len(),
-            93,
-            "a fresh db should report user_version 93"
+            94,
+            "a fresh db should report user_version 94"
         );
         let (store, _dir) = temp_store();
         let version: i64 = store
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 93);
+        assert_eq!(version, 94);
     }
 
     /// Workflows replace diagrams at migration 83 (mesa task 1607): a db that
@@ -16361,7 +16732,7 @@ mod tests {
         store
             .conn
             .execute_batch(
-                "DROP TABLE custom_themes; DROP TABLE task_notes; ALTER TABLE live_sessions DROP COLUMN ambient_request_seq; ALTER TABLE live_sessions DROP COLUMN ambient_request; ALTER TABLE live_sessions DROP COLUMN host_seen_at; ALTER TABLE live_sessions DROP COLUMN host_ambient; ALTER TABLE live_notebook DROP COLUMN category; ALTER TABLE cc_messages DROP COLUMN cost_micro_usd; ALTER TABLE cc_sessions DROP COLUMN main_agent; ALTER TABLE live_boards DROP COLUMN pinned_at; DROP TABLE workflow_log; DROP TABLE workflow_runs; DROP TABLE workflow_edges; \
+                "DROP TABLE custom_themes; DROP TABLE task_notes; ALTER TABLE live_sessions DROP COLUMN ambient_request_seq; ALTER TABLE live_sessions DROP COLUMN ambient_request; ALTER TABLE live_sessions DROP COLUMN host_seen_at; ALTER TABLE live_sessions DROP COLUMN host_ambient; ALTER TABLE live_notebook DROP COLUMN category; ALTER TABLE cc_messages DROP COLUMN cost_micro_usd; ALTER TABLE cc_sessions DROP COLUMN main_agent; ALTER TABLE live_boards DROP COLUMN pinned_at; DROP TABLE workflow_log; DROP TABLE workflow_gates; DROP TABLE workflow_runs; DROP TABLE workflow_edges; \
                  DROP TABLE workflow_nodes; DROP TABLE workflows; \
                  CREATE TABLE diagrams (id INTEGER PRIMARY KEY, title TEXT); \
                  INSERT INTO diagrams (title) VALUES ('stale'); \

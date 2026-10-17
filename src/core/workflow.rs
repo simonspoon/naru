@@ -31,9 +31,9 @@ use serde_json::{Map, Value, json};
 
 use crate::core::store::{Error, Result, Store, WorkflowNodeNew};
 use crate::core::types::{
-    InboxKind, LibraryKind, LiveBoardKind, Priority, Status, WorkflowEdge, WorkflowNode,
-    WorkflowNodeKind, WorkflowRun, WorkflowRunStatus, WorkflowStep, WorkflowStepStatus,
-    WorkflowTrigger, WorkflowType, WorkflowView,
+    InboxKind, LibraryKind, LiveBoardKind, LiveRole, Priority, Status, WorkflowEdge, WorkflowGate,
+    WorkflowGateStatus, WorkflowNode, WorkflowNodeKind, WorkflowRun, WorkflowRunStatus,
+    WorkflowStep, WorkflowStepStatus, WorkflowTrigger, WorkflowType, WorkflowView,
 };
 use crate::core::{agents, config, decide, library, llm, scripts, wftypes};
 
@@ -42,6 +42,8 @@ use crate::core::{agents, config, decide, library, llm, scripts, wftypes};
 const OUTPUT_CAP: usize = 64 * 1024;
 /// A `cli` node's default timeout, in seconds.
 pub const DEFAULT_CLI_TIMEOUT_SECS: u64 = 600;
+/// A `verify` node's timeout when it names none.
+const DEFAULT_VERIFY_TIMEOUT_SECS: u64 = 300;
 /// A `prompt` node's default timeout, in seconds.
 pub const DEFAULT_PROMPT_TIMEOUT_SECS: u64 = 600;
 /// `NARU_INPUT` is exported only up to this size: a process environment has
@@ -76,6 +78,14 @@ impl StoreAccess for Mutex<Store> {
 
 // ---- config validation ---------------------------------------------------
 
+/// What a `task-event` trigger may listen for (naru task 2006).
+pub const TASK_EVENTS: [&str; 3] = ["created", "status", "any"];
+
+/// What a `file-watch` trigger may listen for (naru task 2007).
+pub const FILE_WATCH_EVENTS: [&str; 4] = ["any", "created", "modified", "deleted"];
+
+/// Longest watched path, in characters.
+const FILE_WATCH_PATH_MAX: usize = 4096;
 const PROMPT_MODELS: [&str; 3] = ["haiku", "sonnet", "opus"];
 /// The ambient engine's event vocabulary: what an `ambient` trigger's
 /// `events` may list and what [`emit_ambient`] accepts.
@@ -87,6 +97,10 @@ const BRANCH_OPS: [&str; 5] = ["contains", "regex", "score_above", "score_below"
 pub const DEFAULT_DECIDE_THRESHOLD: f64 = 0.5;
 /// The label of a decide node's catch-all edge.
 pub const DECIDE_FALLBACK: &str = "fallback";
+/// The matching ops a switch node offers (a subset of a branch node's).
+const SWITCH_OPS: [&str; 3] = ["equals", "contains", "regex"];
+/// The label of a switch node's catch-all edge.
+pub const SWITCH_DEFAULT: &str = "default";
 const OUTPUT_TARGETS: [&str; 4] = ["log", "task", "inbox", "board"];
 
 fn object<'a>(
@@ -157,11 +171,122 @@ fn optional_int(
     }
 }
 
+/// A parsed 5-field cron expression (`minute hour day-of-month month
+/// day-of-week`), evaluated in UTC (naru task 2004). Each field is a bitmask of
+/// the values it allows. As in Vixie cron, when both day fields are restricted
+/// a day matches if **either** does.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Cron {
+    minute: u64,
+    hour: u64,
+    dom: u64,
+    month: u64,
+    dow: u64,
+    dom_any: bool,
+    dow_any: bool,
+}
+
+fn cron_field(
+    text: &str,
+    lo: u32,
+    hi: u32,
+    what: &str,
+) -> std::result::Result<(u64, bool), String> {
+    let bad = |why: &str| format!("schedule config: cron {what} field {text:?} {why}");
+    let mut mask = 0u64;
+    let mut any = false;
+    for part in text.split(',') {
+        let (range, step) = match part.split_once('/') {
+            Some((r, s)) => {
+                let s: u32 = s.parse().map_err(|_| bad("has a bad step"))?;
+                if s == 0 {
+                    return Err(bad("has a zero step"));
+                }
+                (r, s)
+            }
+            None => (part, 1),
+        };
+        let num = |s: &str| -> std::result::Result<u32, String> {
+            let n: u32 = s.parse().map_err(|_| bad("is not a number or range"))?;
+            if n < lo || n > hi {
+                return Err(bad(&format!("is out of range {lo} to {hi}")));
+            }
+            Ok(n)
+        };
+        let (a, b) = if range == "*" {
+            if part == "*" {
+                any = true;
+            }
+            (lo, hi)
+        } else if let Some((a, b)) = range.split_once('-') {
+            let (a, b) = (num(a)?, num(b)?);
+            if a > b {
+                return Err(bad("has a range that runs backwards"));
+            }
+            (a, b)
+        } else {
+            let n = num(range)?;
+            (n, if step > 1 { hi } else { n })
+        };
+        let mut v = a;
+        while v <= b {
+            mask |= 1 << v;
+            v += step;
+        }
+    }
+    Ok((mask, any))
+}
+
+/// Parses a 5-field cron expression: `*`, `n`, `a-b`, `*/s`, `a-b/s`, and
+/// comma lists of those. Day of week is 0-6 with 7 also Sunday.
+pub fn parse_cron(expr: &str) -> std::result::Result<Cron, String> {
+    let fields: Vec<&str> = expr.split_whitespace().collect();
+    let [m, h, dom, mon, dow] = fields.as_slice() else {
+        return Err(format!(
+            "schedule config: \"cron\" needs 5 fields (minute hour day-of-month month day-of-week), got {}",
+            fields.len()
+        ));
+    };
+    let (minute, _) = cron_field(m, 0, 59, "minute")?;
+    let (hour, _) = cron_field(h, 0, 23, "hour")?;
+    let (dom, dom_any) = cron_field(dom, 1, 31, "day-of-month")?;
+    let (month, _) = cron_field(mon, 1, 12, "month")?;
+    let (mut dow, dow_any) = cron_field(dow, 0, 7, "day-of-week")?;
+    if dow & (1 << 7) != 0 {
+        dow = (dow | 1) & !(1 << 7);
+    }
+    Ok(Cron {
+        minute,
+        hour,
+        dom,
+        month,
+        dow,
+        dom_any,
+        dow_any,
+    })
+}
+
+impl Cron {
+    /// Whether the UTC minute `minute hour dom month dow` (dow 0 = Sunday)
+    /// is one this expression names.
+    pub fn matches(&self, minute: u32, hour: u32, dom: u32, month: u32, dow: u32) -> bool {
+        let bit = |m: u64, v: u32| m & (1 << v) != 0;
+        let day = match (self.dom_any, self.dow_any) {
+            (false, false) => bit(self.dom, dom) || bit(self.dow, dow),
+            _ => bit(self.dom, dom) && bit(self.dow, dow),
+        };
+        bit(self.minute, minute) && bit(self.hour, hour) && bit(self.month, month) && day
+    }
+}
+
 /// Checks one node's `config` against its kind and answers it normalized —
 /// the form `Store` writes. Unknown keys and bad values are errors (the
 /// store's `validation`); nothing about the *environment* is checked (a
 /// script that does not exist yet, a binary that is not installed), only the
 /// shape, so a graph can be authored before everything it names is in place.
+/// The theme colour tokens a `comment` box may take (naru task 2008).
+pub const COMMENT_COLORS: [&str; 6] = ["accent", "accent2", "good", "warn", "bad", "muted"];
+
 pub fn validate_config(
     kind: WorkflowNodeKind,
     config: &Value,
@@ -189,6 +314,517 @@ pub fn validate_config(
                 ));
             }
             out.insert("struct".into(), json!(s));
+        }
+        WorkflowNodeKind::ParseJson => {
+            only_keys(name, obj, &["type"])?;
+            let mut ty = "any".to_string();
+            if let Some(t) = optional_str(name, obj, "type")? {
+                let t = t.trim();
+                if !t.is_empty() {
+                    if !wftypes::well_formed(t) {
+                        return Err(format!(
+                            "parse-json config: \"type\" must be a type name, got {t:?}"
+                        ));
+                    }
+                    ty = t.to_string();
+                }
+            }
+            if ty != "any" {
+                out.insert("type".into(), json!(ty));
+            }
+            out.insert(
+                "pins".into(),
+                json!({
+                    "in": [{"name": "text", "ty": "string"}],
+                    "out": [{"name": "value", "ty": ty}],
+                }),
+            );
+        }
+        WorkflowNodeKind::MapFilter => {
+            only_keys(name, obj, &["mode", "expr"])?;
+            let mode = required_str(name, obj, "mode")?;
+            if !["map", "filter"].contains(&mode) {
+                return Err(format!(
+                    "mapfilter config: \"mode\" must be map or filter, got {mode:?}"
+                ));
+            }
+            let expr = required_str(name, obj, "expr")?;
+            if mode == "filter" {
+                parse_predicate(expr)?;
+            }
+            out.insert("mode".into(), json!(mode));
+            out.insert("expr".into(), json!(expr));
+            out.insert(
+                "pins".into(),
+                json!({
+                    "in": [{"name": "list", "ty": "any"}],
+                    "out": [{"name": "list", "ty": "any"}],
+                }),
+            );
+        }
+        WorkflowNodeKind::Delay => {
+            only_keys(name, obj, &["seconds", "until"])?;
+            let secs = optional_int(name, obj, "seconds", 0..=DELAY_MAX_SECS as i64)?;
+            let until = optional_str(name, obj, "until")?;
+            match (secs, until) {
+                (Some(n), None) => {
+                    out.insert("seconds".into(), json!(n));
+                }
+                (None, Some(u)) => {
+                    delay_wait(u, 0)?;
+                    out.insert("until".into(), json!(u.trim()));
+                }
+                _ => {
+                    return Err(
+                        "delay config: give exactly one of \"seconds\" (0-3600) or \"until\" \
+                                (RFC3339 UTC like 2026-10-17T14:30:00Z, or HH:MM UTC)"
+                            .into(),
+                    );
+                }
+            }
+            out.insert(
+                "pins".into(),
+                json!({
+                    "in": [{"name": "in", "ty": "any"}],
+                    "out": [{"name": "out", "ty": "any"}],
+                }),
+            );
+        }
+        WorkflowNodeKind::Gate => {
+            only_keys(name, obj, &["message", "timeout_secs", "on_timeout"])?;
+            if let Some(m) = optional_str(name, obj, "message")? {
+                out.insert("message".into(), json!(m));
+            }
+            let secs = optional_int(name, obj, "timeout_secs", 1..=GATE_MAX_TIMEOUT_SECS as i64)?;
+            out.insert(
+                "timeout_secs".into(),
+                json!(secs.unwrap_or(GATE_DEFAULT_TIMEOUT_SECS as i64)),
+            );
+            if let Some(v) = optional_str(name, obj, "on_timeout")?
+                && v != "reject"
+            {
+                return Err(format!(
+                    "gate config: \"on_timeout\" must be \"reject\", got {v:?}"
+                ));
+            }
+            out.insert("on_timeout".into(), json!("reject"));
+        }
+        WorkflowNodeKind::Board => {
+            only_keys(name, obj, &["kind", "title", "body"])?;
+            let kind = optional_str(name, obj, "kind")?.unwrap_or("markdown");
+            if !["markdown", "html"].contains(&kind) {
+                return Err(format!(
+                    "board config: \"kind\" must be markdown or html, got {kind:?}"
+                ));
+            }
+            out.insert("kind".into(), json!(kind));
+            if let Some(t) = optional_str(name, obj, "title")? {
+                if t.chars().count() > BOARD_TITLE_MAX {
+                    return Err(format!(
+                        "board config: \"title\" is over {BOARD_TITLE_MAX} characters"
+                    ));
+                }
+                out.insert("title".into(), json!(t));
+            }
+            if let Some(b) = optional_str(name, obj, "body")? {
+                if b.len() > crate::core::store::LIVE_BOARD_BODY_MAX {
+                    return Err(format!(
+                        "board config: \"body\" is over {} bytes",
+                        crate::core::store::LIVE_BOARD_BODY_MAX
+                    ));
+                }
+                out.insert("body".into(), json!(b));
+            }
+            out.insert(
+                "pins".into(),
+                json!({
+                    "in": [{"name": "in", "ty": "any"}],
+                    "out": [{"name": "out", "ty": "any"}],
+                }),
+            );
+        }
+        WorkflowNodeKind::Notify => {
+            only_keys(name, obj, &["message", "title", "mode", "open"])?;
+            let mode = optional_str(name, obj, "mode")?.unwrap_or("phone");
+            if !["phone", "speak"].contains(&mode) {
+                return Err(format!(
+                    "notify config: \"mode\" must be phone or speak, got {mode:?}"
+                ));
+            }
+            out.insert("mode".into(), json!(mode));
+            if let Some(m) = optional_str(name, obj, "message")? {
+                if m.len() > NOTIFY_MESSAGE_MAX {
+                    return Err(format!(
+                        "notify config: \"message\" is over {NOTIFY_MESSAGE_MAX} bytes"
+                    ));
+                }
+                out.insert("message".into(), json!(m));
+            }
+            if mode == "phone" {
+                if let Some(t) = optional_str(name, obj, "title")? {
+                    out.insert("title".into(), json!(t));
+                }
+                if let Some(o) = optional_str(name, obj, "open")? {
+                    crate::core::notify::validate_route(o).map_err(|e| e.to_string())?;
+                    out.insert("open".into(), json!(o));
+                }
+            } else if obj.get("title").is_some_and(|v| !v.is_null())
+                || obj.get("open").is_some_and(|v| !v.is_null())
+            {
+                return Err(
+                    "notify config: \"title\" and \"open\" only apply to mode phone".into(),
+                );
+            }
+            out.insert(
+                "pins".into(),
+                json!({
+                    "in": [{"name": "in", "ty": "any"}],
+                    "out": [{"name": "out", "ty": "any"}],
+                }),
+            );
+        }
+        WorkflowNodeKind::Subworkflow => {
+            only_keys(name, obj, &["workflow"])?;
+            // A name or an id, kept as text; resolved when the node is saved
+            // (`Store`) and again when it runs.
+            let w = match obj.get("workflow") {
+                Some(Value::Number(n)) if n.is_i64() => n.to_string(),
+                _ => required_str(name, obj, "workflow")?.trim().to_string(),
+            };
+            out.insert("workflow".into(), json!(w));
+            out.insert(
+                "pins".into(),
+                json!({
+                    "in": [{"name": "in", "ty": "any"}],
+                    "out": [{"name": "out", "ty": "any"}],
+                }),
+            );
+        }
+        WorkflowNodeKind::Task => {
+            only_keys(
+                name,
+                obj,
+                &[
+                    "action",
+                    "project",
+                    "task",
+                    "description",
+                    "status",
+                    "priority",
+                    "result",
+                ],
+            )?;
+            let action = required_str(name, obj, "action")?;
+            let allowed: &[&str] = match action {
+                "create" => &["project", "description", "status", "priority"],
+                "update" => &["task", "description", "status", "priority", "result"],
+                "read" => &["task"],
+                _ => {
+                    return Err(format!(
+                        "task config: \"action\" must be create, update or read, got {action:?}"
+                    ));
+                }
+            };
+            for key in obj.keys() {
+                if key != "action" && !allowed.contains(&key.as_str()) {
+                    return Err(format!(
+                        "task config: {key:?} does not apply to action {action:?}; it takes {}",
+                        allowed.join(", ")
+                    ));
+                }
+            }
+            out.insert("action".into(), json!(action));
+            // Ids may be written as numbers; everything is kept as text so a
+            // `{input}` placeholder can stand in for any of them.
+            for key in allowed {
+                let text = match obj.get(*key) {
+                    None | Some(Value::Null) => None,
+                    Some(Value::Number(n)) if n.is_i64() => Some(n.to_string()),
+                    Some(Value::String(s)) if !s.trim().is_empty() => Some(s.trim().to_string()),
+                    Some(_) => {
+                        return Err(format!("task config: {key:?} must be a non-empty string"));
+                    }
+                };
+                let Some(text) = text else { continue };
+                if !text.contains("{input}") {
+                    let bad = match *key {
+                        "status" => Status::parse(&text).is_none(),
+                        "priority" => Priority::parse(&text).is_none(),
+                        "task" => text.parse::<i64>().is_err(),
+                        _ => false,
+                    };
+                    if bad {
+                        return Err(format!("task config: {key:?} is not valid: {text:?}"));
+                    }
+                }
+                out.insert((*key).into(), json!(text));
+            }
+            let has = |k: &str| out.contains_key(k);
+            match action {
+                "create" if !has("project") => {
+                    return Err(
+                        "task config: a create action needs \"project\" (id or name)".into(),
+                    );
+                }
+                "update" | "read" if !has("task") => {
+                    return Err(format!(
+                        "task config: a {action} action needs \"task\" (an id)"
+                    ));
+                }
+                "update"
+                    if !["description", "status", "priority", "result"]
+                        .iter()
+                        .any(|k| has(k)) =>
+                {
+                    return Err(
+                        "task config: an update action needs at least one of description, status, \
+                         priority, result"
+                            .into(),
+                    );
+                }
+                _ => {}
+            }
+            out.insert(
+                "pins".into(),
+                json!({
+                    "in": [{"name": "in", "ty": "any"}],
+                    "out": [{"name": "out", "ty": "any"}],
+                }),
+            );
+        }
+        WorkflowNodeKind::Http => {
+            only_keys(
+                name,
+                obj,
+                &["method", "url", "headers", "body", "timeout_secs"],
+            )?;
+            let method = match obj.get("method") {
+                None | Some(Value::Null) => "GET".to_string(),
+                Some(Value::String(s)) => s.trim().to_ascii_uppercase(),
+                Some(_) => return Err("http config: \"method\" must be a string".into()),
+            };
+            if !HTTP_METHODS.contains(&method.as_str()) {
+                return Err(format!(
+                    "http config: \"method\" must be one of {}, got {method:?}",
+                    HTTP_METHODS.join(", ")
+                ));
+            }
+            let url = required_str(name, obj, "url")?.trim().to_string();
+            http_check_scheme(&url)?;
+            out.insert("method".into(), json!(method));
+            out.insert("url".into(), json!(url));
+            match obj.get("headers") {
+                None | Some(Value::Null) => {}
+                Some(Value::Object(h)) => {
+                    let mut clean = Map::new();
+                    for (k, v) in h {
+                        let Value::String(v) = v else {
+                            return Err(format!("http config: header {k:?} must be a string"));
+                        };
+                        if k.trim().is_empty() {
+                            return Err("http config: a header name may not be empty".into());
+                        }
+                        clean.insert(k.trim().to_string(), json!(v));
+                    }
+                    if !clean.is_empty() {
+                        out.insert("headers".into(), Value::Object(clean));
+                    }
+                }
+                Some(_) => {
+                    return Err("http config: \"headers\" must be an object of strings".into());
+                }
+            }
+            match obj.get("body") {
+                None | Some(Value::Null) => {}
+                Some(Value::String(b)) if b.is_empty() => {}
+                Some(Value::String(b)) => {
+                    if !["POST", "PUT", "PATCH"].contains(&method.as_str()) {
+                        return Err(format!("http config: a {method} request takes no body"));
+                    }
+                    out.insert("body".into(), json!(b));
+                }
+                Some(_) => return Err("http config: \"body\" must be a string".into()),
+            }
+            match obj.get("timeout_secs") {
+                None | Some(Value::Null) => {}
+                Some(Value::Number(n))
+                    if n.as_u64()
+                        .is_some_and(|n| (1..=HTTP_TIMEOUT_MAX_SECS).contains(&n)) =>
+                {
+                    out.insert("timeout_secs".into(), Value::Number(n.clone()));
+                }
+                Some(_) => {
+                    return Err(format!(
+                        "http config: \"timeout_secs\" must be a whole number 1..={HTTP_TIMEOUT_MAX_SECS}"
+                    ));
+                }
+            }
+            out.insert(
+                "pins".into(),
+                json!({
+                    "in": [{"name": "in", "ty": "any"}],
+                    "out": [{"name": "out", "ty": "any"}],
+                }),
+            );
+        }
+        WorkflowNodeKind::Parallel | WorkflowNodeKind::Join => {
+            only_keys(name, obj, &[])?;
+            let out_ty = if kind == WorkflowNodeKind::Join {
+                "list<string>"
+            } else {
+                "any"
+            };
+            out.insert(
+                "pins".into(),
+                json!({
+                    "in": [{"name": "in", "ty": "any"}],
+                    "out": [{"name": "out", "ty": out_ty}],
+                }),
+            );
+        }
+        WorkflowNodeKind::Trycatch => {
+            only_keys(name, obj, &["wrap", "timeout_secs"])?;
+            let bad_wrap = "trycatch config: \"wrap\" must be an object like \
+                            {\"kind\": \"cli\", \"config\": {...}}";
+            let Some(Value::Object(w)) = obj.get("wrap") else {
+                return Err(bad_wrap.into());
+            };
+            only_keys("trycatch wrap", w, &["kind", "config"])?;
+            let wk = required_str("trycatch wrap", w, "kind")?;
+            let wkind = match WorkflowNodeKind::parse(wk) {
+                Some(
+                    k @ (WorkflowNodeKind::Cli
+                    | WorkflowNodeKind::Script
+                    | WorkflowNodeKind::Prompt
+                    | WorkflowNodeKind::Agent),
+                ) => k,
+                _ => {
+                    return Err(format!(
+                        "trycatch config: a trycatch node can wrap cli, script, prompt or agent, not {wk:?}"
+                    ));
+                }
+            };
+            let wcfg = w.get("config").cloned().unwrap_or_else(|| json!({}));
+            let wcfg = validate_config(wkind, &wcfg)?;
+            out.insert("wrap".into(), json!({"kind": wk, "config": wcfg}));
+            if let Some(t) = optional_int(name, obj, "timeout_secs", 1..=3600)? {
+                out.insert("timeout_secs".into(), json!(t));
+            }
+            out.insert(
+                "pins".into(),
+                json!({
+                    "in": [{"name": "input", "ty": "any"}],
+                    "out": [{"name": "output", "ty": "any"}],
+                }),
+            );
+        }
+        WorkflowNodeKind::Retry => {
+            only_keys(
+                name,
+                obj,
+                &[
+                    "wrap",
+                    "attempts",
+                    "backoff_ms",
+                    "backoff_factor",
+                    "timeout_secs",
+                ],
+            )?;
+            let bad_wrap = "retry config: \"wrap\" must be an object like \
+                            {\"kind\": \"cli\", \"config\": {...}}";
+            let Some(Value::Object(w)) = obj.get("wrap") else {
+                return Err(bad_wrap.into());
+            };
+            only_keys("retry wrap", w, &["kind", "config"])?;
+            let wk = required_str("retry wrap", w, "kind")?;
+            let wkind = match WorkflowNodeKind::parse(wk) {
+                Some(
+                    k @ (WorkflowNodeKind::Cli
+                    | WorkflowNodeKind::Script
+                    | WorkflowNodeKind::Prompt
+                    | WorkflowNodeKind::Agent),
+                ) => k,
+                _ => {
+                    return Err(format!(
+                        "retry config: a retry node can wrap cli, script, prompt or agent, not {wk:?}"
+                    ));
+                }
+            };
+            let wcfg = w.get("config").cloned().unwrap_or_else(|| json!({}));
+            let wcfg = validate_config(wkind, &wcfg)?;
+            out.insert("wrap".into(), json!({"kind": wk, "config": wcfg}));
+            let attempts = optional_int(name, obj, "attempts", 1..=10)?.unwrap_or(3);
+            out.insert("attempts".into(), json!(attempts));
+            let backoff = optional_int(name, obj, "backoff_ms", 0..=60000)?.unwrap_or(0);
+            out.insert("backoff_ms".into(), json!(backoff));
+            let factor = optional_int(name, obj, "backoff_factor", 1..=10)?.unwrap_or(1);
+            out.insert("backoff_factor".into(), json!(factor));
+            if let Some(t) = optional_int(name, obj, "timeout_secs", 1..=3600)? {
+                out.insert("timeout_secs".into(), json!(t));
+            }
+            out.insert(
+                "pins".into(),
+                json!({
+                    "in": [{"name": "input", "ty": "any"}],
+                    "out": [{"name": "output", "ty": "any"}],
+                }),
+            );
+        }
+        WorkflowNodeKind::ForEach => {
+            only_keys(name, obj, &["body", "timeout_secs"])?;
+            let body = required_str(name, obj, "body")?;
+            out.insert("body".into(), json!(body));
+            if let Some(t) = optional_int(name, obj, "timeout_secs", 1..=3600)? {
+                out.insert("timeout_secs".into(), json!(t));
+            }
+            out.insert(
+                "pins".into(),
+                json!({
+                    "in": [{"name": "list", "ty": "any"}],
+                    "out": [{"name": "results", "ty": "list<string>"}],
+                }),
+            );
+        }
+        WorkflowNodeKind::Variable => {
+            only_keys(name, obj, &["op", "name", "type"])?;
+            let op = required_str(name, obj, "op")?;
+            if !["get", "set"].contains(&op) {
+                return Err(format!(
+                    "variable config: \"op\" must be get or set, got {op:?}"
+                ));
+            }
+            let var = required_str(name, obj, "name")?.trim();
+            let mut chars = var.chars();
+            let ident = chars
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+            if !ident || var.len() > 64 {
+                return Err(format!(
+                    "variable config: \"name\" must be an identifier (letters, digits, _ and -, up to 64), got {var:?}"
+                ));
+            }
+            let mut ty = "any".to_string();
+            if let Some(t) = optional_str(name, obj, "type")? {
+                let t = t.trim();
+                if !wftypes::well_formed(t) {
+                    return Err(format!(
+                        "variable config: \"type\" must be a type name, got {t:?}"
+                    ));
+                }
+                ty = t.to_string();
+            }
+            out.insert("op".into(), json!(op));
+            out.insert("name".into(), json!(var));
+            if ty != "any" {
+                out.insert("type".into(), json!(ty));
+            }
+            let pins = if op == "set" {
+                json!({"in": [{"name": "value", "ty": ty}], "out": [{"name": "value", "ty": ty}]})
+            } else {
+                json!({"in": [{"name": "trigger", "ty": "any"}], "out": [{"name": "value", "ty": ty}]})
+            };
+            out.insert("pins".into(), pins);
         }
         WorkflowNodeKind::Trigger => {
             only_keys(name, obj, &["mode", "every_minutes", "phrase", "events"])?;
@@ -251,6 +887,111 @@ pub fn validate_config(
             if let Some(p) = optional_str(name, obj, "phrase")? {
                 out.insert("phrase".into(), json!(p.trim()));
             }
+        }
+        WorkflowNodeKind::Schedule => {
+            only_keys(name, obj, &["every_minutes", "cron"])?;
+            let every = optional_int(name, obj, "every_minutes", 1..=10080)?;
+            let cron = optional_str(name, obj, "cron")?;
+            match (every, cron) {
+                (Some(n), None) => {
+                    out.insert("every_minutes".into(), json!(n));
+                }
+                (None, Some(c)) => {
+                    parse_cron(c)?;
+                    let norm = c.split_whitespace().collect::<Vec<_>>().join(" ");
+                    out.insert("cron".into(), json!(norm));
+                }
+                _ => {
+                    return Err(
+                        "schedule config: exactly one of \"every_minutes\" (1 to 10080) \
+                                or \"cron\" (5 fields, UTC) is required"
+                            .into(),
+                    );
+                }
+            }
+        }
+        WorkflowNodeKind::Webhook => {
+            only_keys(name, obj, &["type"])?;
+            let mut ty = "any".to_string();
+            if let Some(t) = optional_str(name, obj, "type")? {
+                let t = t.trim();
+                if !t.is_empty() {
+                    if !wftypes::well_formed(t) {
+                        return Err(format!(
+                            "webhook config: \"type\" must be a type name, got {t:?}"
+                        ));
+                    }
+                    ty = t.to_string();
+                }
+            }
+            if ty != "any" {
+                out.insert("type".into(), json!(ty));
+            }
+            out.insert(
+                "pins".into(),
+                json!({"in": [], "out": [{"name": "body", "ty": ty}]}),
+            );
+        }
+        WorkflowNodeKind::FileWatch => {
+            only_keys(name, obj, &["path", "event"])?;
+            let path = optional_str(name, obj, "path")?
+                .map(str::trim)
+                .unwrap_or("");
+            if path.is_empty() || path.chars().count() > FILE_WATCH_PATH_MAX {
+                return Err(format!(
+                    "file-watch config: \"path\" is required (1 to {FILE_WATCH_PATH_MAX} characters)"
+                ));
+            }
+            let event = optional_str(name, obj, "event")?.unwrap_or("any");
+            if !FILE_WATCH_EVENTS.contains(&event) {
+                return Err(format!(
+                    "file-watch config: \"event\" must be one of {}, got {event:?}",
+                    FILE_WATCH_EVENTS.join(", ")
+                ));
+            }
+            out.insert("path".into(), json!(path));
+            out.insert("event".into(), json!(event));
+            out.insert(
+                "pins".into(),
+                json!({"in": [], "out": [{"name": "event", "ty": "string"}]}),
+            );
+        }
+        WorkflowNodeKind::TaskEvent => {
+            only_keys(name, obj, &["event", "status", "project"])?;
+            let event = optional_str(name, obj, "event")?.unwrap_or("created");
+            if !TASK_EVENTS.contains(&event) {
+                return Err(format!(
+                    "task-event config: \"event\" must be one of {}, got {event:?}",
+                    TASK_EVENTS.join(", ")
+                ));
+            }
+            out.insert("event".into(), json!(event));
+            if let Some(s) = optional_str(name, obj, "status")? {
+                if Status::parse(s.trim()).is_none() {
+                    return Err(format!("task-event config: invalid status {s:?}"));
+                }
+                if event == "created" {
+                    return Err(
+                        "task-event config: \"status\" needs event \"status\" or \"any\"".into(),
+                    );
+                }
+                out.insert(
+                    "status".into(),
+                    json!(Status::parse(s.trim()).expect("checked").as_str()),
+                );
+            }
+            // A project is an id or a name, kept as text and matched at fire time.
+            let project = match obj.get("project") {
+                Some(Value::Number(n)) if n.is_i64() => Some(n.to_string()),
+                _ => optional_str(name, obj, "project")?.map(|p| p.trim().to_string()),
+            };
+            if let Some(p) = project {
+                out.insert("project".into(), json!(p));
+            }
+            out.insert(
+                "pins".into(),
+                json!({"in": [], "out": [{"name": "task", "ty": "string"}]}),
+            );
         }
         WorkflowNodeKind::Prompt => {
             only_keys(name, obj, &["model", "thinking", "prompt", "timeout_secs"])?;
@@ -341,6 +1082,279 @@ pub fn validate_config(
                     "out": [
                         {"name": "result", "ty": result_ty},
                         {"name": "status", "ty": "string"},
+                    ],
+                }),
+            );
+        }
+        WorkflowNodeKind::Git => {
+            only_keys(
+                name,
+                obj,
+                &[
+                    "op",
+                    "cwd",
+                    "message",
+                    "paths",
+                    "name",
+                    "base",
+                    "stat",
+                    "timeout_secs",
+                ],
+            )?;
+            if pins.is_some() {
+                return Err(
+                    "a git node's pins are fixed (input; result, ok, status); \"pins\" does not apply"
+                        .into(),
+                );
+            }
+            let op = required_str(name, obj, "op")?;
+            if !GIT_OPS.contains(&op) {
+                return Err(format!(
+                    "git config: \"op\" must be one of {}, got {op:?}",
+                    GIT_OPS.join(", ")
+                ));
+            }
+            out.insert("op".into(), json!(op));
+            // Which keys belong to which operation: a stray one is a typo.
+            let belongs = |key: &str| match key {
+                "message" | "paths" => op == "commit",
+                "name" => op == "branch",
+                "base" | "stat" => op == "diff",
+                _ => true,
+            };
+            for key in obj.keys() {
+                if !belongs(key) {
+                    return Err(format!("git config: \"{key}\" does not apply to {op}"));
+                }
+            }
+            if let Some(c) = optional_str(name, obj, "cwd")? {
+                out.insert("cwd".into(), json!(c.trim()));
+            }
+            match op {
+                "commit" => {
+                    out.insert("message".into(), json!(required_str(name, obj, "message")?));
+                    match obj.get("paths") {
+                        None | Some(Value::Null) => {}
+                        Some(Value::Array(items)) => {
+                            let mut paths = Vec::new();
+                            for item in items {
+                                match item.as_str().map(str::trim) {
+                                    Some(p) if !p.is_empty() => paths.push(p.to_string()),
+                                    _ => {
+                                        return Err("git config: \"paths\" must be a list of non-empty strings".into());
+                                    }
+                                }
+                            }
+                            if !paths.is_empty() {
+                                out.insert("paths".into(), json!(paths));
+                            }
+                        }
+                        Some(_) => {
+                            return Err(
+                                "git config: \"paths\" must be a list of non-empty strings".into(),
+                            );
+                        }
+                    }
+                }
+                "branch" => {
+                    let n = required_str(name, obj, "name")?.trim();
+                    git_ref_check("name", &n.replace("{input}", "x"))?;
+                    out.insert("name".into(), json!(n));
+                }
+                _ => {
+                    if let Some(b) = optional_str(name, obj, "base")? {
+                        git_ref_check("base", &b.replace("{input}", "x"))?;
+                        out.insert("base".into(), json!(b.trim()));
+                    }
+                    match obj.get("stat") {
+                        None | Some(Value::Null) => {}
+                        Some(Value::Bool(b)) => {
+                            out.insert("stat".into(), json!(b));
+                        }
+                        Some(_) => return Err("git config: \"stat\" must be true or false".into()),
+                    }
+                }
+            }
+            if let Some(n) = optional_int(name, obj, "timeout_secs", 1..=3600)? {
+                out.insert("timeout_secs".into(), json!(n));
+            }
+            out.insert(
+                "pins".into(),
+                json!({
+                    "in": [{"name": "input", "ty": "any"}],
+                    "out": [
+                        {"name": "result", "ty": "string"},
+                        {"name": "ok", "ty": "bool"},
+                        {"name": "status", "ty": "string"},
+                    ],
+                }),
+            );
+        }
+        WorkflowNodeKind::File => {
+            only_keys(name, obj, &["op", "path", "content", "append"])?;
+            if pins.is_some() {
+                return Err(
+                    "a file node's pins are fixed (input; result, path); \"pins\" does not apply"
+                        .into(),
+                );
+            }
+            let op = required_str(name, obj, "op")?;
+            if !FILE_OPS.contains(&op) {
+                return Err(format!(
+                    "file config: \"op\" must be one of {}, got {op:?}",
+                    FILE_OPS.join(", ")
+                ));
+            }
+            out.insert("op".into(), json!(op));
+            let path = required_str(name, obj, "path")?.trim();
+            if path.is_empty() {
+                return Err("file config: \"path\" cannot be empty".into());
+            }
+            out.insert("path".into(), json!(path));
+            if op == "read" {
+                for key in ["content", "append"] {
+                    if obj.contains_key(key) {
+                        return Err(format!("file config: \"{key}\" does not apply to read"));
+                    }
+                }
+            } else {
+                if let Some(c) = optional_str(name, obj, "content")? {
+                    out.insert("content".into(), json!(c));
+                }
+                match obj.get("append") {
+                    None | Some(Value::Null) => {}
+                    Some(Value::Bool(b)) => {
+                        out.insert("append".into(), json!(b));
+                    }
+                    Some(_) => return Err("file config: \"append\" must be true or false".into()),
+                }
+            }
+            out.insert(
+                "pins".into(),
+                json!({
+                    "in": [{"name": "input", "ty": "any"}],
+                    "out": [
+                        {"name": "result", "ty": "string"},
+                        {"name": "path", "ty": "string"},
+                    ],
+                }),
+            );
+        }
+        WorkflowNodeKind::Memory => {
+            only_keys(name, obj, &["op", "text", "query", "limit", "project"])?;
+            if pins.is_some() {
+                return Err(
+                    "a memory node's pins are fixed (input; result, id); \"pins\" does not apply"
+                        .into(),
+                );
+            }
+            let op = required_str(name, obj, "op")?;
+            if !MEMORY_OPS.contains(&op) {
+                return Err(format!(
+                    "memory config: \"op\" must be one of {}, got {op:?}",
+                    MEMORY_OPS.join(", ")
+                ));
+            }
+            out.insert("op".into(), json!(op));
+            let (own, stray): (&str, &[&str]) = if op == "add" {
+                ("text", &["query", "limit"])
+            } else {
+                ("query", &["text"])
+            };
+            for key in stray {
+                if obj.contains_key(*key) {
+                    return Err(format!("memory config: \"{key}\" does not apply to {op}"));
+                }
+            }
+            if let Some(v) = optional_str(name, obj, own)? {
+                out.insert(own.into(), json!(v));
+            }
+            if let Some(v) = optional_str(name, obj, "project")? {
+                out.insert("project".into(), json!(v.trim()));
+            }
+            if let Some(n) = optional_int(name, obj, "limit", 1..=50)? {
+                out.insert("limit".into(), json!(n));
+            }
+            out.insert(
+                "pins".into(),
+                json!({
+                    "in": [{"name": "input", "ty": "any"}],
+                    "out": [
+                        {"name": "result", "ty": "string"},
+                        {"name": "id", "ty": "string"},
+                    ],
+                }),
+            );
+        }
+        WorkflowNodeKind::Comment => {
+            only_keys(name, obj, &["text", "color"])?;
+            if pins.is_some() {
+                return Err("a comment node has no pins; \"pins\" does not apply".into());
+            }
+            if let Some(t) = optional_str(name, obj, "text")?
+                && !t.is_empty()
+            {
+                out.insert("text".into(), json!(t));
+            }
+            if let Some(c) = optional_str(name, obj, "color")? {
+                if !COMMENT_COLORS.contains(&c) {
+                    return Err(format!(
+                        "comment config: \"color\" must be one of {}, got {c:?}",
+                        COMMENT_COLORS.join(", ")
+                    ));
+                }
+                out.insert("color".into(), json!(c));
+            }
+        }
+        WorkflowNodeKind::Verify => {
+            only_keys(
+                name,
+                obj,
+                &["mode", "command", "url", "expect", "timeout_secs"],
+            )?;
+            if pins.is_some() {
+                return Err(
+                    "a verify node's pins are fixed (input; pass, evidence, exit_code); \"pins\" does not apply"
+                        .into(),
+                );
+            }
+            let mode = obj.get("mode").and_then(Value::as_str).unwrap_or("test");
+            if !VERIFY_MODES.contains(&mode) {
+                return Err(format!(
+                    "verify config: \"mode\" must be one of {}, got {mode:?}",
+                    VERIFY_MODES.join(", ")
+                ));
+            }
+            out.insert("mode".into(), json!(mode));
+            let command = required_str(name, obj, "command")?;
+            if command.trim().is_empty() {
+                return Err("verify config: \"command\" cannot be empty".into());
+            }
+            out.insert("command".into(), json!(command));
+            if let Some(u) = optional_str(name, obj, "url")? {
+                if mode != "browser" {
+                    return Err("verify config: \"url\" applies to browser mode only".into());
+                }
+                if !u.trim().is_empty() {
+                    out.insert("url".into(), json!(u.trim()));
+                }
+            }
+            if let Some(e) = optional_str(name, obj, "expect")?
+                && !e.is_empty()
+            {
+                out.insert("expect".into(), json!(e));
+            }
+            if let Some(n) = optional_int(name, obj, "timeout_secs", 1..=3600)? {
+                out.insert("timeout_secs".into(), json!(n));
+            }
+            out.insert(
+                "pins".into(),
+                json!({
+                    "in": [{"name": "input", "ty": "any"}],
+                    "out": [
+                        {"name": "pass", "ty": "bool"},
+                        {"name": "evidence", "ty": "string"},
+                        {"name": "exit_code", "ty": "number"},
                     ],
                 }),
             );
@@ -453,6 +1467,64 @@ pub fn validate_config(
             };
             out.insert("threshold".into(), json!(threshold));
         }
+        WorkflowNodeKind::Switch => {
+            only_keys(name, obj, &["op", "cases"])?;
+            let op = match obj.get("op") {
+                None | Some(Value::Null) => "equals",
+                Some(Value::String(s)) if SWITCH_OPS.contains(&s.as_str()) => s.as_str(),
+                _ => {
+                    return Err(format!(
+                        "switch config: \"op\" must be one of {}",
+                        SWITCH_OPS.join(", ")
+                    ));
+                }
+            };
+            out.insert("op".into(), json!(op));
+            let bad_cases = "switch config: \"cases\" must be an array of 2 or more objects \
+                             like {\"match\": \"text\", \"label\": \"optional\"}";
+            let Some(Value::Array(raw)) = obj.get("cases") else {
+                return Err(bad_cases.into());
+            };
+            let mut cases: Vec<Value> = Vec::new();
+            let mut labels: Vec<String> = Vec::new();
+            for c in raw {
+                let Value::Object(c) = c else {
+                    return Err(bad_cases.into());
+                };
+                if let Some(k) = c.keys().find(|k| *k != "match" && *k != "label") {
+                    return Err(format!("switch config: a case has no {k:?} key"));
+                }
+                let m = match c.get("match") {
+                    Some(Value::String(m)) if !m.trim().is_empty() => m.trim().to_string(),
+                    _ => return Err("switch config: every case needs a non-empty \"match\"".into()),
+                };
+                if op == "regex" {
+                    regex_check(&m)?;
+                }
+                let label = match c.get("label") {
+                    None | Some(Value::Null) => m.clone(),
+                    Some(Value::String(l)) if !l.trim().is_empty() => l.trim().to_string(),
+                    _ => {
+                        return Err("switch config: a case \"label\" must be non-empty text".into());
+                    }
+                };
+                if label == SWITCH_DEFAULT {
+                    return Err(format!(
+                        "switch config: a case label may not be {SWITCH_DEFAULT:?}; \
+                         that is the label of the catch-all edge"
+                    ));
+                }
+                if labels.contains(&label) {
+                    return Err(format!("switch config: duplicate case label {label:?}"));
+                }
+                labels.push(label.clone());
+                cases.push(json!({"match": m, "label": label}));
+            }
+            if cases.len() < 2 {
+                return Err(bad_cases.into());
+            }
+            out.insert("cases".into(), Value::Array(cases));
+        }
         WorkflowNodeKind::Output => {
             only_keys(
                 name,
@@ -539,10 +1611,188 @@ pub fn validate_config(
             }
         }
     }
-    if let Some(p) = pins.filter(|p| !p.is_null()) {
+    // parse-json's and variable's pins are fixed by the kind; a supplied `pins` is ignored.
+    if let Some(p) = pins.filter(|p| !p.is_null()).filter(|_| {
+        !matches!(
+            kind,
+            WorkflowNodeKind::ParseJson
+                | WorkflowNodeKind::Variable
+                | WorkflowNodeKind::MapFilter
+                | WorkflowNodeKind::ForEach
+                | WorkflowNodeKind::Parallel
+                | WorkflowNodeKind::Join
+                | WorkflowNodeKind::Retry
+                | WorkflowNodeKind::Delay
+                | WorkflowNodeKind::Gate
+                | WorkflowNodeKind::Trycatch
+                | WorkflowNodeKind::Subworkflow
+                | WorkflowNodeKind::Task
+                | WorkflowNodeKind::Http
+                | WorkflowNodeKind::Notify
+                | WorkflowNodeKind::Board
+        )
+    }) {
         out.insert("pins".into(), wftypes::validate_pins(&p)?);
     }
     Ok(Value::Object(out))
+}
+
+/// A parse-json node: `input` as JSON, checked against `ty` (`any` accepts
+/// any value); the output is the compact JSON, or the string itself.
+fn parse_json_value(
+    input: &str,
+    ty: &str,
+    types: &[WorkflowType],
+) -> std::result::Result<String, String> {
+    let v: Value = serde_json::from_str(input.trim()).map_err(|e| format!("invalid JSON: {e}"))?;
+    let out = wftypes::render(&v, ty, types)?;
+    // A string pin carries its text raw (`wftypes::value_text`).
+    Ok(match (&v, ty) {
+        (Value::String(s), "string" | "any") => s.clone(),
+        _ => out,
+    })
+}
+
+/// A mapfilter filter predicate (naru task 1987).
+enum Predicate {
+    Contains(String),
+    NotContains(String),
+    Eq(String),
+    NonEmpty,
+    Regex(regex::Regex),
+}
+
+/// `contains:X`, `not-contains:X`, `eq:X`, `regex:RE` or `nonempty`.
+fn parse_predicate(expr: &str) -> std::result::Result<Predicate, String> {
+    if expr == "nonempty" {
+        return Ok(Predicate::NonEmpty);
+    }
+    let (op, arg) = expr.split_once(':').unwrap_or((expr, ""));
+    if arg.is_empty() && op != expr {
+        return Err(format!("mapfilter filter: {op:?} needs an argument"));
+    }
+    match op {
+        "contains" => Ok(Predicate::Contains(arg.into())),
+        "not-contains" => Ok(Predicate::NotContains(arg.into())),
+        "eq" => Ok(Predicate::Eq(arg.into())),
+        "regex" => regex::Regex::new(arg)
+            .map(Predicate::Regex)
+            .map_err(|e| format!("mapfilter filter: invalid regex: {e}")),
+        _ => Err(format!(
+            "mapfilter filter: unknown predicate {expr:?}; use contains:X, not-contains:X, eq:X, regex:RE or nonempty"
+        )),
+    }
+}
+
+impl Predicate {
+    fn test(&self, item: &str) -> bool {
+        match self {
+            Predicate::Contains(x) => item.contains(x.as_str()),
+            Predicate::NotContains(x) => !item.contains(x.as_str()),
+            Predicate::Eq(x) => item == x,
+            Predicate::NonEmpty => !item.trim().is_empty(),
+            Predicate::Regex(r) => r.is_match(item),
+        }
+    }
+}
+
+/// A mapfilter node: `input` is a JSON array, or plain text split into its
+/// non-empty lines; `map` renders `expr` per item (`{item}` replaced in one
+/// pass, so item text is never re-read), `filter` keeps the matching items.
+/// The output is a compact JSON array. In-process: no shell, no model.
+fn run_mapfilter(mode: &str, expr: &str, input: &str) -> std::result::Result<String, String> {
+    let items: Vec<Value> = match serde_json::from_str::<Value>(input.trim()) {
+        Ok(Value::Array(a)) => a,
+        Ok(other) => return Err(format!("mapfilter input must be a list, got {other}")),
+        Err(_) => input
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| Value::String(l.to_string()))
+            .collect(),
+    };
+    let out: Vec<Value> = if mode == "map" {
+        items
+            .iter()
+            .map(|i| Value::String(expr.replace("{item}", &wftypes::value_text(i))))
+            .collect()
+    } else {
+        let pred = parse_predicate(expr)?;
+        items
+            .into_iter()
+            .filter(|i| pred.test(&wftypes::value_text(i)))
+            .collect()
+    };
+    Ok(Value::Array(out).to_string())
+}
+
+/// A foreach node: `input` is a JSON array (or plain text split into its
+/// non-empty lines); `body` runs once per item under `bash -c`, the item
+/// arriving as `$1`, `$NARU_INPUT` and on stdin — never spliced into the
+/// script text. The output is a JSON array of each run's trimmed stdout, in
+/// order; a nonzero exit or a timeout on any item fails the node.
+fn run_foreach(
+    body: &str,
+    input: &str,
+    cwd: &str,
+    timeout: Duration,
+) -> std::result::Result<String, String> {
+    let items: Vec<Value> = match serde_json::from_str::<Value>(input.trim()) {
+        Ok(Value::Array(a)) => a,
+        Ok(other) => return Err(format!("foreach input must be a list, got {other}")),
+        Err(_) => input
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| Value::String(l.to_string()))
+            .collect(),
+    };
+    let mut results = Vec::with_capacity(items.len());
+    for (i, item) in items.iter().enumerate() {
+        let text = wftypes::value_text(item);
+        let mut cmd = crate::core::proc::bash();
+        cmd.arg("-c")
+            .arg(body)
+            .arg("foreach")
+            .arg(&text)
+            .current_dir(cwd);
+        drop_session_identity(&mut cmd);
+        if text.len() <= ENV_INPUT_MAX {
+            cmd.env("NARU_INPUT", &text);
+        }
+        let out = agents::capture(cmd, Some(text.into_bytes()), timeout)
+            .map_err(|e| format!("item {i}: {e}"))?;
+        if out.code != 0 {
+            return Err(format!(
+                "item {i} exited {}: {}",
+                out.code,
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        results.push(Value::String(
+            String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        ));
+    }
+    Ok(Value::Array(results).to_string())
+}
+
+/// A variable node over one run's `vars`: `set` types the input like
+/// parse-json and stores it by name, `get` reads it back (naru task 1986).
+fn run_variable(
+    op: &str,
+    name: &str,
+    ty: &str,
+    input: &str,
+    types: &[WorkflowType],
+    vars: &mut HashMap<String, String>,
+) -> std::result::Result<String, String> {
+    if op == "set" {
+        let v = parse_json_value(input, ty, types)?;
+        vars.insert(name.to_string(), v.clone());
+        Ok(v)
+    } else {
+        vars.get(name)
+            .cloned()
+            .ok_or_else(|| format!("variable {name:?} is not set"))
+    }
 }
 
 /// Whether `pattern` is a valid POSIX extended regular expression, asked of
@@ -1003,7 +2253,16 @@ pub fn trigger_of(view: &WorkflowView) -> Result<i64> {
     let triggers: Vec<i64> = view
         .nodes
         .iter()
-        .filter(|n| n.kind == WorkflowNodeKind::Trigger)
+        .filter(|n| {
+            matches!(
+                n.kind,
+                WorkflowNodeKind::Trigger
+                    | WorkflowNodeKind::Schedule
+                    | WorkflowNodeKind::Webhook
+                    | WorkflowNodeKind::TaskEvent
+                    | WorkflowNodeKind::FileWatch
+            )
+        })
         .map(|n| n.id)
         .collect();
     match triggers.as_slice() {
@@ -1095,6 +2354,178 @@ pub fn plan_ambient<A: StoreAccess>(
     }
     let ids = access.with(|s| s.ambient_workflows(event))?;
     Ok((ids, input))
+}
+
+/// The env flag a detached task-event run exports so a `naru task ...` its
+/// nodes shell out to cannot fire the next task-event run (naru task 2006).
+const TASK_EVENT_RUN_ENV: &str = "TASK_EVENT_RUN";
+
+/// Marks this process as executing a task-event run; its child processes
+/// inherit it. Called once, at the start of the detached job.
+pub fn mark_task_event_run() {
+    // SAFETY: called at the top of the detached job, before the engine
+    // spawns any thread.
+    unsafe { std::env::set_var(format!("NARU_{TASK_EVENT_RUN_ENV}"), "1") };
+}
+
+/// The workflows a task change fires, with the run input they all get:
+/// `{"event","task_id","project_id","status","old_status","name"}` as compact
+/// JSON (naru task 2006). `old_status` is `None` for a creation. Nothing runs.
+/// Empty inside a task-event run (the recursion guard).
+pub fn plan_task_event(
+    store: &Store,
+    task: &crate::core::types::Task,
+    old_status: Option<Status>,
+) -> Result<(Vec<i64>, String)> {
+    if crate::core::env::var(TASK_EVENT_RUN_ENV).is_some() {
+        return Ok((vec![], String::new()));
+    }
+    let created = old_status.is_none();
+    let changed = old_status.is_some_and(|o| o != task.status);
+    if !created && !changed {
+        return Ok((vec![], String::new()));
+    }
+    let event = if created { "created" } else { "status" };
+    let project = store.get_project(task.project_id).ok();
+    let mut ids = Vec::new();
+    for (id, cfg) in store.task_event_workflows()? {
+        let want = cfg
+            .get("event")
+            .and_then(Value::as_str)
+            .unwrap_or("created");
+        if want != "any" && want != event {
+            continue;
+        }
+        if let Some(s) = cfg.get("status").and_then(Value::as_str)
+            && s != task.status.as_str()
+        {
+            continue;
+        }
+        if let Some(p) = cfg.get("project").and_then(Value::as_str) {
+            let by_id = p.parse::<i64>().is_ok_and(|n| n == task.project_id);
+            let by_name = project
+                .as_ref()
+                .is_some_and(|pr| pr.name.eq_ignore_ascii_case(p));
+            if !by_id && !by_name {
+                continue;
+            }
+        }
+        ids.push(id);
+    }
+    let input = json!({
+        "event": event,
+        "task_id": task.id,
+        "project_id": task.project_id,
+        "status": task.status.as_str(),
+        "old_status": old_status.map(Status::as_str),
+        "name": task.name,
+    })
+    .to_string();
+    Ok((ids, input))
+}
+
+/// Starts each matching workflow's run in a detached job (naru task 2006).
+/// Best-effort: the task write has already committed, so a failure here is a
+/// stderr warning, never an error.
+pub fn fire_task_event(
+    store: &mut Store,
+    task: &crate::core::types::Task,
+    old_status: Option<Status>,
+) {
+    let (ids, input) = match plan_task_event(store, task, old_status) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("naru: warning: task-event workflows not checked: {e}");
+            return;
+        }
+    };
+    for id in ids {
+        if let Err(e) = crate::core::memory_job::start_workflow_run(
+            store,
+            id,
+            WorkflowTrigger::TaskEvent,
+            &input,
+        ) {
+            eprintln!("naru: warning: task-event workflow {id} did not start: {e}");
+        }
+    }
+}
+
+/// A watched path's last-seen state: `(mtime in ns since the epoch, size)`,
+/// `None` when the path does not exist.
+type FileStamp = Option<(i128, u64)>;
+
+/// The last state each watched `(workflow id, path)` was seen in (naru task
+/// 2007). In memory only: a restart re-baselines instead of firing.
+static FILE_WATCH_SEEN: std::sync::Mutex<Option<HashMap<(i64, String), FileStamp>>> =
+    std::sync::Mutex::new(None);
+
+fn file_stamp(path: &str) -> FileStamp {
+    let meta = std::fs::metadata(path).ok()?;
+    let mtime = meta
+        .modified()
+        .ok()
+        .map(|t| match t.duration_since(std::time::UNIX_EPOCH) {
+            Ok(d) => d.as_nanos() as i128,
+            Err(e) => -(e.duration().as_nanos() as i128),
+        })
+        .unwrap_or(0);
+    Some((mtime, meta.len()))
+}
+
+/// One polling pass over every enabled `file-watch` trigger (naru task 2007):
+/// compares each watched path with the state `seen` last held for it and
+/// answers `(workflow id, run input)` for each change its `event` filter
+/// wants. The first sight of a path only records its state, so a start-up
+/// never fires. The input is `{"path","event","mtime","size"}` as compact JSON
+/// (`mtime` in seconds since the epoch, `null` for a deleted path). A change
+/// that happens and reverts between two passes is missed.
+fn plan_file_watch_with(
+    store: &Store,
+    seen: &mut HashMap<(i64, String), FileStamp>,
+) -> Result<Vec<(i64, String)>> {
+    let mut fires = Vec::new();
+    let mut live = std::collections::HashSet::new();
+    for (id, cfg) in store.file_watch_workflows()? {
+        let Some(path) = cfg.get("path").and_then(Value::as_str) else {
+            continue;
+        };
+        let want = cfg.get("event").and_then(Value::as_str).unwrap_or("any");
+        let key = (id, path.to_string());
+        let now = file_stamp(path);
+        live.insert(key.clone());
+        let Some(before) = seen.insert(key, now) else {
+            continue;
+        };
+        if before == now {
+            continue;
+        }
+        let event = match (before, now) {
+            (None, Some(_)) => "created",
+            (Some(_), None) => "deleted",
+            _ => "modified",
+        };
+        if want != "any" && want != event {
+            continue;
+        }
+        let input = json!({
+            "path": path,
+            "event": event,
+            "mtime": now.map(|(m, _)| m.div_euclid(1_000_000_000) as i64),
+            "size": now.map(|(_, s)| s),
+        })
+        .to_string();
+        fires.push((id, input));
+    }
+    seen.retain(|k, _| live.contains(k));
+    Ok(fires)
+}
+
+/// [`plan_file_watch_with`] against the process-wide state; the watcher
+/// tick's entry point.
+pub fn plan_file_watch(store: &Store) -> Result<Vec<(i64, String)>> {
+    let mut guard = FILE_WATCH_SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    plan_file_watch_with(store, guard.get_or_insert_with(HashMap::new))
 }
 
 /// What an ambient batch left behind: the runs that finished, and the
@@ -1189,6 +2620,15 @@ pub fn execute_run<A: StoreAccess>(
             Some("the graph is not a DAG (a cycle in the database); refusing to run it"),
         );
     }
+    // A comment box is editor-only (naru task 2008): never run, no step.
+    let order: Vec<i64> = order
+        .into_iter()
+        .filter(|id| {
+            view.nodes
+                .iter()
+                .any(|n| n.id == *id && n.kind != WorkflowNodeKind::Comment)
+        })
+        .collect();
     let nodes: HashMap<i64, &WorkflowNode> = view.nodes.iter().map(|n| (n.id, n)).collect();
     let project_dir = view.workflow.project_id.and_then(|id| {
         access
@@ -1202,6 +2642,8 @@ pub fn execute_run<A: StoreAccess>(
         .unwrap_or_else(|| config::workspace_dir().to_string_lossy().into_owned());
 
     let mut done: HashMap<i64, Done> = HashMap::new();
+    // `variable` nodes' shared state: per run, never persisted (naru task 1986).
+    let mut vars: HashMap<String, String> = HashMap::new();
     let mut steps: Vec<WorkflowStep> = Vec::new();
     let mut failure: Option<String> = None;
     for id in order {
@@ -1220,6 +2662,8 @@ pub fn execute_run<A: StoreAccess>(
             Some(run.input.clone())
         } else if node.kind == WorkflowNodeKind::Make {
             make_input(view, &done, id)
+        } else if node.kind == WorkflowNodeKind::Join {
+            join_input(view, &done, id)
         } else {
             active_input(view, &done, id)
         };
@@ -1249,7 +2693,16 @@ pub fn execute_run<A: StoreAccess>(
         let _ = access.with(|s| s.update_workflow_run_steps(run.id, &steps));
         steps.pop();
         let started = Instant::now();
-        let result = run_node(access, view, node, &input, &cwd, run.id, id == trigger_id);
+        let result = run_node(
+            access,
+            view,
+            node,
+            &input,
+            &cwd,
+            run.id,
+            id == trigger_id,
+            &mut vars,
+        );
         let duration_ms = started.elapsed().as_millis() as i64;
         let (status, output, error, route) = match result {
             Ok((output, route)) => (WorkflowStepStatus::Ok, output, None, route),
@@ -1337,6 +2790,23 @@ fn active_edges<'a>(
 fn edge_text(view: &WorkflowView, done: &HashMap<i64, Done>, e: &WorkflowEdge) -> String {
     let out = &done[&e.from_node].output;
     let src = view.nodes.iter().find(|n| n.id == e.from_node);
+    if let Some(src) = src
+        && matches!(
+            src.kind,
+            WorkflowNodeKind::Git
+                | WorkflowNodeKind::File
+                | WorkflowNodeKind::Memory
+                | WorkflowNodeKind::Verify
+        )
+    {
+        // A git/file node's output is `{result, ok, status}` / `{result, path}`; the edge carries the
+        // pin it leaves from (`result` when it names none).
+        let pin = e.from_pin.as_deref().unwrap_or("result");
+        return serde_json::from_str::<Value>(out)
+            .ok()
+            .and_then(|v| v.get(pin).map(wftypes::value_text))
+            .unwrap_or_default();
+    }
     if let (Some(src), Some("status")) = (src, e.from_pin.as_deref())
         && src.kind == WorkflowNodeKind::Agent
     {
@@ -1368,6 +2838,19 @@ fn make_input(view: &WorkflowView, done: &HashMap<i64, Done>, node_id: i64) -> O
         }
     }
     Some(Value::Object(pins).to_string())
+}
+
+/// A `join` node's input: a JSON array of its incoming edges' texts in edge
+/// order, but only when *every* incoming edge is active (naru task 1989);
+/// `None` (skipped) when it has none or any branch did not reach it.
+fn join_input(view: &WorkflowView, done: &HashMap<i64, Done>, node_id: i64) -> Option<String> {
+    let total = view.edges.iter().filter(|e| e.to_node == node_id).count();
+    let edges = active_edges(view, done, node_id);
+    if edges.is_empty() || edges.len() != total {
+        return None;
+    }
+    let texts: Vec<String> = edges.iter().map(|e| edge_text(view, done, e)).collect();
+    Some(json!(texts).to_string())
 }
 
 fn cap(mut s: String) -> String {
@@ -1472,7 +2955,300 @@ fn run_agent(
     unreachable!("the loop returns on its second pass")
 }
 
+/// The operations of a `git` node.
+const GIT_OPS: [&str; 3] = ["commit", "branch", "diff"];
+
+/// A branch name or diff base travels as one argv word; one that starts with
+/// `-` would be read as an option, and whitespace or control characters never
+/// belong in a ref.
+fn git_ref_check(key: &str, v: &str) -> std::result::Result<(), String> {
+    let v = v.trim();
+    if v.is_empty() {
+        return Err(format!("git config: \"{key}\" cannot be empty"));
+    }
+    if v.starts_with('-') {
+        return Err(format!("git config: \"{key}\" cannot start with \"-\""));
+    }
+    if v.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(format!(
+            "git config: \"{key}\" cannot contain whitespace or control characters"
+        ));
+    }
+    Ok(())
+}
+
+/// One `git` call in `dir`: argv only, no shell. The identity of the commit
+/// is the user's own git config; signing is switched off so a headless run
+/// never waits on a key prompt.
+fn git_call(
+    dir: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> std::result::Result<agents::Captured, String> {
+    let mut cmd = Command::new("git");
+    cmd.args(["-c", "commit.gpgsign=false", "--no-pager"])
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_EDITOR", "true");
+    drop_session_identity(&mut cmd);
+    agents::capture(cmd, None, timeout).map_err(|e| format!("git: {e}"))
+}
+
+/// A successful call's trimmed stdout, or the failure message.
+fn git_ok(dir: &str, args: &[&str], timeout: Duration) -> std::result::Result<String, String> {
+    let out = git_call(dir, args, timeout)?;
+    if out.code != 0 {
+        return Err(format!(
+            "git {} exited {}: {}",
+            args.first().copied().unwrap_or(""),
+            out.code,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// A `git` node: `commit`, `branch` or `diff`. The output is the JSON
+/// `{result, ok, status}` that [`edge_text`] splits by output pin. A commit
+/// with nothing to commit is data (`ok` false), not a failure.
+fn run_git(cfg: &Value, input: &str, cwd: &str) -> std::result::Result<String, String> {
+    let s = |key: &str| cfg.get(key).and_then(Value::as_str).unwrap_or_default();
+    let timeout = Duration::from_secs(
+        cfg.get("timeout_secs")
+            .and_then(Value::as_u64)
+            .unwrap_or(DEFAULT_CLI_TIMEOUT_SECS),
+    );
+    let dir = match s("cwd").trim() {
+        "" => cwd,
+        d => d,
+    };
+    let (result, ok, status) = match s("op") {
+        "commit" => {
+            let message = s("message").replace("{input}", input);
+            if message.trim().is_empty() {
+                return Err("the commit message is empty".into());
+            }
+            let paths: Vec<&str> = cfg
+                .get("paths")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            let mut add = vec!["add", "-A", "--"];
+            if paths.is_empty() {
+                add.push(".");
+            } else {
+                add.extend(paths);
+            }
+            git_ok(dir, &add, timeout)?;
+            // Exit 1 = something is staged.
+            let staged = git_call(dir, &["diff", "--cached", "--quiet"], timeout)?;
+            match staged.code {
+                0 => (String::new(), false, "nothing to commit".to_string()),
+                1 => {
+                    git_ok(dir, &["commit", "-m", &message], timeout)?;
+                    let sha = git_ok(dir, &["rev-parse", "HEAD"], timeout)?;
+                    (sha, true, "committed".to_string())
+                }
+                c => {
+                    return Err(format!(
+                        "git diff exited {c}: {}",
+                        String::from_utf8_lossy(&staged.stderr).trim()
+                    ));
+                }
+            }
+        }
+        "branch" => {
+            let name = s("name").replace("{input}", input.trim());
+            git_ref_check("name", &name)?;
+            let name = name.trim();
+            let full = format!("refs/heads/{name}");
+            let exists = git_call(dir, &["rev-parse", "--verify", "--quiet", &full], timeout)?;
+            if exists.code == 0 {
+                git_ok(dir, &["switch", name], timeout)?;
+                (name.to_string(), true, "switched".to_string())
+            } else {
+                git_ok(dir, &["switch", "-c", name], timeout)?;
+                (name.to_string(), true, "created".to_string())
+            }
+        }
+        _ => {
+            let base = s("base").replace("{input}", input.trim());
+            let mut args = vec!["diff", "--no-color", "--no-ext-diff"];
+            if cfg.get("stat").and_then(Value::as_bool) == Some(true) {
+                args.push("--stat");
+            }
+            if !base.trim().is_empty() {
+                git_ref_check("base", &base)?;
+                args.push(base.trim());
+            }
+            args.push("--");
+            let text = cap(git_ok(dir, &args, timeout)?);
+            let status = if text.is_empty() {
+                "no changes"
+            } else {
+                "changes"
+            };
+            (text, true, status.to_string())
+        }
+    };
+    Ok(json!({"result": result, "ok": ok, "status": status}).to_string())
+}
+
+const VERIFY_MODES: [&str; 2] = ["test", "browser"];
+
+/// A `verify` node: runs `command` under `bash -c` (the `cli` node's path) in
+/// the project folder and reports whether the check passed. In `browser` mode
+/// the page to open reaches the command as `$NARU_VERIFY_URL`, never spliced
+/// into its text. Pass = exit 0 and, when `expect` is set, that text in the
+/// combined output. A failing check is data (`pass` false); only a spawn
+/// failure or the timeout fails the node. The output is the JSON
+/// `{pass, evidence, exit_code}` that [`edge_text`] splits by output pin.
+fn run_verify(cfg: &Value, input: &str, cwd: &str) -> std::result::Result<String, String> {
+    let s = |key: &str| cfg.get(key).and_then(Value::as_str).unwrap_or_default();
+    let timeout = cfg
+        .get("timeout_secs")
+        .and_then(Value::as_u64)
+        .unwrap_or(DEFAULT_VERIFY_TIMEOUT_SECS);
+    let mut cmd = crate::core::proc::bash();
+    cmd.arg("-c").arg(s("command")).current_dir(cwd);
+    drop_session_identity(&mut cmd);
+    if input.len() <= ENV_INPUT_MAX {
+        cmd.env("NARU_INPUT", input);
+    }
+    if s("mode") == "browser" && !s("url").is_empty() {
+        cmd.env("NARU_VERIFY_URL", s("url").replace("{input}", input.trim()));
+    }
+    let out = agents::capture(
+        cmd,
+        Some(input.as_bytes().to_vec()),
+        Duration::from_secs(timeout),
+    )?;
+    let mut evidence = String::from_utf8_lossy(&out.stdout).into_owned();
+    let err = String::from_utf8_lossy(&out.stderr);
+    if !err.trim().is_empty() {
+        if !evidence.is_empty() && !evidence.ends_with('\n') {
+            evidence.push('\n');
+        }
+        evidence.push_str(&err);
+    }
+    let expect = s("expect");
+    let pass = out.code == 0 && (expect.is_empty() || evidence.contains(expect));
+    Ok(json!({
+        "pass": pass,
+        "evidence": cap(evidence.trim().to_string()),
+        "exit_code": out.code,
+    })
+    .to_string())
+}
+
+const MEMORY_OPS: [&str; 2] = ["add", "search"];
+
+/// A `memory` node: `add` appends `text` (`{input}` replaced; the incoming
+/// input when none is configured) to a project's notebook through the guarded
+/// `Store` method, `search` runs the notebook's full-text search for `query`
+/// (same rule) and outputs the hits as JSON lines. The project is the
+/// config's (`id` or name, `{input}` allowed), else the workflow's own; with
+/// neither it is a failure. The output is the JSON `{result, id}` that
+/// [`edge_text`] splits by pin (`id` is the new entry's, empty for a search).
+fn run_memory<A: StoreAccess>(
+    access: &A,
+    workflow_project: Option<i64>,
+    cfg: &Value,
+    input: &str,
+) -> std::result::Result<String, String> {
+    let get = |k: &str| {
+        cfg.get(k)
+            .and_then(Value::as_str)
+            .map(|v| v.replace("{input}", input))
+    };
+    let project = get("project");
+    let adding = cfg.get("op").and_then(Value::as_str) == Some("add");
+    let text = get(if adding { "text" } else { "query" }).unwrap_or_else(|| input.to_string());
+    if text.trim().is_empty() {
+        return Err(format!(
+            "memory {}: nothing to {}",
+            if adding { "add" } else { "search" },
+            if adding { "add" } else { "search for" }
+        ));
+    }
+    let limit = cfg.get("limit").and_then(Value::as_i64).unwrap_or(10);
+    access
+        .with(|s| -> Result<String> {
+            let pid = match project.as_deref().map(str::trim) {
+                Some(p) if !p.is_empty() => match p.parse::<i64>() {
+                    Ok(id) => id,
+                    Err(_) => s.find_project_by_name(p)?.id,
+                },
+                _ => workflow_project.ok_or_else(|| {
+                    Error::Validation(
+                        "the workflow has no project; set the node's \"project\"".into(),
+                    )
+                })?,
+            };
+            if adding {
+                let e = s.add_notebook_entry_in(Some(pid), &text)?;
+                Ok(json!({"result": e.body, "id": e.id.to_string()}).to_string())
+            } else {
+                let lines: Vec<String> = s
+                    .search_memory_in(Some(pid), &text, limit)?
+                    .iter()
+                    .map(|h| json!({"id": h.ref_id, "snippet": h.snippet}).to_string())
+                    .collect();
+                Ok(json!({"result": cap(lines.join("\n")), "id": ""}).to_string())
+            }
+        })
+        .map_err(|e| e.to_string())
+}
+
+const FILE_OPS: [&str; 2] = ["read", "write"];
+
+/// A `file` node: `read` returns the file's text (capped at [`OUTPUT_CAP`],
+/// the cut marked), `write` writes `content` (`{input}` replaced; the incoming
+/// input when none is configured), truncating or appending and creating parent
+/// folders. A relative path resolves against the run's working folder. The
+/// output is the JSON `{result, path}` that [`edge_text`] splits by pin.
+fn run_file(cfg: &Value, input: &str, cwd: &str) -> std::result::Result<String, String> {
+    let s = |key: &str| cfg.get(key).and_then(Value::as_str);
+    let raw = s("path").unwrap_or_default().trim();
+    if raw.is_empty() {
+        return Err("the file path is empty".into());
+    }
+    let path = std::path::Path::new(raw);
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::path::Path::new(cwd).join(path)
+    };
+    let shown = path.display().to_string();
+    let result = if s("op") == Some("write") {
+        let content = match s("content") {
+            Some(c) => c.replace("{input}", input),
+            None => input.to_string(),
+        };
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent).map_err(|e| format!("file {shown}: {e}"))?;
+        }
+        let append = cfg.get("append").and_then(Value::as_bool) == Some(true);
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .append(append)
+            .truncate(!append)
+            .open(&path)
+            .map_err(|e| format!("file {shown}: {e}"))?;
+        std::io::Write::write_all(&mut f, content.as_bytes())
+            .map_err(|e| format!("file {shown}: {e}"))?;
+        cap(content)
+    } else {
+        let bytes = std::fs::read(&path).map_err(|e| format!("file {shown}: {e}"))?;
+        cap(String::from_utf8_lossy(&bytes).into_owned())
+    };
+    Ok(json!({"result": result, "path": shown}).to_string())
+}
+
 /// One node's execution: `Ok((output, route))` or the failure message.
+#[allow(clippy::too_many_arguments)]
 fn run_node<A: StoreAccess>(
     access: &A,
     view: &WorkflowView,
@@ -1481,14 +3257,28 @@ fn run_node<A: StoreAccess>(
     cwd: &str,
     run_id: i64,
     is_trigger: bool,
+    vars: &mut HashMap<String, String>,
 ) -> std::result::Result<(String, Option<String>), String> {
     if is_trigger {
+        if node.kind == WorkflowNodeKind::Webhook {
+            // The posted body becomes the typed `body` pin (naru task 2005).
+            let ty = node
+                .config
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("any");
+            return parse_json_value(input, ty, &view.workflow.types).map(|o| (o, None));
+        }
         return Ok((input.to_string(), None));
     }
     let cfg = &node.config;
     let str_of = |key: &str| cfg.get(key).and_then(Value::as_str).unwrap_or_default();
     match node.kind {
-        WorkflowNodeKind::Trigger => Ok((input.to_string(), None)),
+        WorkflowNodeKind::Trigger
+        | WorkflowNodeKind::Schedule
+        | WorkflowNodeKind::Webhook
+        | WorkflowNodeKind::TaskEvent
+        | WorkflowNodeKind::FileWatch => Ok((input.to_string(), None)),
         WorkflowNodeKind::Break => {
             // Passes the struct on as canonical JSON (fields in declared
             // order); a consumer wired to a field pin reads that field.
@@ -1598,6 +3388,13 @@ fn run_node<A: StoreAccess>(
             )
             .map(|out| (out, None))
         }
+        WorkflowNodeKind::Git => run_git(cfg, input, cwd).map(|o| (o, None)),
+        WorkflowNodeKind::File => run_file(cfg, input, cwd).map(|o| (o, None)),
+        WorkflowNodeKind::Comment => Ok((String::new(), None)), // never scheduled
+        WorkflowNodeKind::Verify => run_verify(cfg, input, cwd).map(|o| (o, None)),
+        WorkflowNodeKind::Memory => {
+            run_memory(access, view.workflow.project_id, cfg, input).map(|o| (o, None))
+        }
         WorkflowNodeKind::Cli => {
             let timeout = cfg
                 .get("timeout_secs")
@@ -1672,11 +3469,99 @@ fn run_node<A: StoreAccess>(
             }
             Ok((run.stdout, None))
         }
+        // parallel is the fan-out marker and join's input is already the
+        // gathered array (`join_input`): both pass their input through.
+        WorkflowNodeKind::Parallel | WorkflowNodeKind::Join => Ok((input.to_string(), None)),
+        WorkflowNodeKind::ParseJson => {
+            let ty = cfg.get("type").and_then(Value::as_str).unwrap_or("any");
+            parse_json_value(input, ty, &view.workflow.types).map(|o| (o, None))
+        }
+        WorkflowNodeKind::MapFilter => {
+            run_mapfilter(str_of("mode"), str_of("expr"), input).map(|o| (o, None))
+        }
+        WorkflowNodeKind::ForEach => {
+            let timeout = cfg
+                .get("timeout_secs")
+                .and_then(Value::as_u64)
+                .unwrap_or(DEFAULT_CLI_TIMEOUT_SECS);
+            run_foreach(str_of("body"), input, cwd, Duration::from_secs(timeout)).map(|o| (o, None))
+        }
+        WorkflowNodeKind::Variable => run_variable(
+            str_of("op"),
+            str_of("name"),
+            cfg.get("type").and_then(Value::as_str).unwrap_or("any"),
+            input,
+            &view.workflow.types,
+            vars,
+        )
+        .map(|o| (o, None)),
         WorkflowNodeKind::Branch => {
             let verdict = branch_verdict(str_of("op"), cfg.get("value"), input)?;
             Ok((input.to_string(), Some(verdict.to_string())))
         }
         WorkflowNodeKind::Decide => run_decide(view, node, input, decide::decide),
+        WorkflowNodeKind::Switch => run_switch(&node.config, input),
+        WorkflowNodeKind::Delay => run_delay(&node.config, input, now_unix(), std::thread::sleep),
+        WorkflowNodeKind::Gate => run_gate(
+            access,
+            view,
+            node,
+            input,
+            run_id,
+            Duration::from_secs(1),
+            notify_gate,
+        ),
+        WorkflowNodeKind::Subworkflow => run_subworkflow(access, view, str_of("workflow"), input),
+        WorkflowNodeKind::Task => run_task(access, &node.config, input).map(|o| (o, None)),
+        WorkflowNodeKind::Http => run_http(&node.config, input).map(|o| (o, None)),
+        WorkflowNodeKind::Board => run_board(&node.config, input, |kind, title, body| {
+            access
+                .with(|s| -> Result<()> {
+                    let session = s.current_live_session()?.ok_or_else(|| {
+                        Error::Unavailable(
+                            "no live conversation to show the board in; start one with \
+                             `naru live start`"
+                                .into(),
+                        )
+                    })?;
+                    s.add_live_board(session.id, kind, title, body, None)
+                        .map(|_| ())
+                })
+                .map_err(|e| e.to_string())
+        })
+        .map(|o| (o, None)),
+        WorkflowNodeKind::Notify => run_notify(
+            &node.config,
+            input,
+            |msg, title, open| {
+                crate::core::notify::send(msg, title, open, None)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            },
+            |msg| {
+                access
+                    .with(|s| -> Result<()> {
+                        let session = s.current_live_session()?.ok_or_else(|| {
+                            Error::Unavailable("no live conversation to speak in".into())
+                        })?;
+                        s.add_live_turn(session.id, LiveRole::Naru, msg, None, None)
+                            .map(|_| ())
+                    })
+                    .map_err(|e| e.to_string())
+            },
+        )
+        .map(|o| (o, None)),
+        WorkflowNodeKind::Trycatch => run_trycatch(
+            &node.config,
+            |wrapped| run_node(access, view, wrapped, input, cwd, run_id, false, vars),
+            node,
+        ),
+        WorkflowNodeKind::Retry => run_retry(
+            &node.config,
+            |wrapped| run_node(access, view, wrapped, input, cwd, run_id, false, vars),
+            std::thread::sleep,
+            node,
+        ),
         WorkflowNodeKind::Output => {
             // A silent run (an empty transcript, a filter that let nothing
             // through) has nothing to deliver, and that is not a failure: the
@@ -1857,6 +3742,632 @@ fn run_decide(
             Ok((out.to_string(), fallback()))
         }
     }
+}
+
+/// The longest a delay node waits, in seconds (also the cap on `until`).
+const DELAY_MAX_SECS: u64 = 3600;
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Days since 1970-01-01 of a civil date (proleptic Gregorian).
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// Seconds a delay node's `until` lies after `now` (unix seconds), 0 when it
+/// is already past. `HH:MM` is the next such UTC time of day (today if still
+/// ahead); `YYYY-MM-DDTHH:MM:SSZ` is that UTC instant. Anything further than
+/// [`DELAY_MAX_SECS`] ahead is an error, so a node never parks a run for hours.
+fn parse_delay_until(s: &str, now: u64) -> std::result::Result<u64, String> {
+    let wait = delay_wait(s, now)?;
+    if wait > DELAY_MAX_SECS {
+        return Err(format!(
+            "delay config: \"until\" {s} is more than {DELAY_MAX_SECS} seconds away"
+        ));
+    }
+    Ok(wait)
+}
+
+/// [`parse_delay_until`] without the cap: the format check validation needs.
+fn delay_wait(s: &str, now: u64) -> std::result::Result<u64, String> {
+    let bad = || {
+        format!(
+            "delay config: \"until\" must be HH:MM or RFC3339 UTC like 2026-10-17T14:30:00Z, not {s:?}"
+        )
+    };
+    let s = s.trim();
+    let num = |t: &str| {
+        t.parse::<i64>()
+            .ok()
+            .filter(|_| t.chars().all(|c| c.is_ascii_digit()))
+    };
+    let target = if let Some((h, m)) = s.split_once(':').filter(|_| s.len() <= 5) {
+        let (h, m) = (num(h).ok_or_else(bad)?, num(m).ok_or_else(bad)?);
+        if h > 23 || m > 59 {
+            return Err(bad());
+        }
+        let today = (now as i64).div_euclid(86_400) * 86_400 + h * 3600 + m * 60;
+        if today >= now as i64 {
+            today
+        } else {
+            today + 86_400
+        }
+    } else {
+        let b = s.as_bytes();
+        if b.len() != 20
+            || b[4] != b'-'
+            || b[7] != b'-'
+            || b[10] != b'T'
+            || b[13] != b':'
+            || b[16] != b':'
+            || b[19] != b'Z'
+        {
+            return Err(bad());
+        }
+        let f = |a: usize, z: usize| num(&s[a..z]).ok_or_else(bad);
+        let (y, mo, d, h, mi, se) = (
+            f(0, 4)?,
+            f(5, 7)?,
+            f(8, 10)?,
+            f(11, 13)?,
+            f(14, 16)?,
+            f(17, 19)?,
+        );
+        if !(1..=12).contains(&mo) || !(1..=31).contains(&d) || h > 23 || mi > 59 || se > 59 {
+            return Err(bad());
+        }
+        days_from_civil(y, mo, d) * 86_400 + h * 3600 + mi * 60 + se
+    };
+    Ok((target - now as i64).max(0) as u64)
+}
+
+/// A delay node (naru task 1992): waits `seconds`, or until `until`, then
+/// passes its input through unchanged. The store lock is not held (the node
+/// runs with none), and the wait is capped at [`DELAY_MAX_SECS`].
+fn run_delay(
+    cfg: &Value,
+    input: &str,
+    now: u64,
+    mut sleep: impl FnMut(Duration),
+) -> std::result::Result<(String, Option<String>), String> {
+    let secs = match (
+        cfg.get("seconds").and_then(Value::as_u64),
+        cfg.get("until").and_then(Value::as_str),
+    ) {
+        (Some(n), _) => n.min(DELAY_MAX_SECS),
+        (None, Some(u)) => parse_delay_until(u, now)?,
+        _ => return Err("delay node has neither \"seconds\" nor \"until\"".into()),
+    };
+    if secs > 0 {
+        sleep(Duration::from_secs(secs));
+    }
+    Ok((input.to_string(), None))
+}
+
+/// The longest message a `notify` node carries: a live turn is spoken, so it
+/// stays under the store's `LIVE_TEXT_MAX`.
+const NOTIFY_MESSAGE_MAX: usize = 4096;
+
+/// A notify node (naru task 1998): tells the phone (`mode` phone, through
+/// `vox`) or says the message in the live conversation (`mode` speak). The
+/// message is `message` with `{input}` replaced, else the input itself; the
+/// input passes through unchanged. A failed send fails the node.
+fn run_notify(
+    cfg: &Value,
+    input: &str,
+    send_phone: impl FnOnce(&str, Option<&str>, Option<&str>) -> std::result::Result<(), String>,
+    speak: impl FnOnce(&str) -> std::result::Result<(), String>,
+) -> std::result::Result<String, String> {
+    let text = match cfg.get("message").and_then(Value::as_str) {
+        Some(m) => m.replace("{input}", input),
+        None => input.to_string(),
+    };
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("notify has nothing to say: no message and an empty input".into());
+    }
+    let text: String = if text.len() > NOTIFY_MESSAGE_MAX {
+        let cut = (0..=NOTIFY_MESSAGE_MAX)
+            .rev()
+            .find(|i| text.is_char_boundary(*i))
+            .unwrap_or(0);
+        text[..cut].to_string()
+    } else {
+        text.to_string()
+    };
+    if cfg.get("mode").and_then(Value::as_str) == Some("speak") {
+        speak(&text)?;
+    } else {
+        let s = |k| cfg.get(k).and_then(Value::as_str);
+        send_phone(&text, s("title"), s("open"))?;
+    }
+    Ok(input.to_string())
+}
+
+/// The longest title a `board` node carries (mirrors the store's bound).
+const BOARD_TITLE_MAX: usize = 200;
+
+/// A board node (naru task 2001): pushes a markdown or html board to the live
+/// whiteboard. The body is `body` with `{input}` replaced, else the input
+/// itself; the input passes through unchanged. No live conversation, or a
+/// refused board, fails the node.
+fn run_board(
+    cfg: &Value,
+    input: &str,
+    push: impl FnOnce(LiveBoardKind, Option<&str>, &str) -> std::result::Result<(), String>,
+) -> std::result::Result<String, String> {
+    let body = match cfg.get("body").and_then(Value::as_str) {
+        Some(b) if !b.trim().is_empty() => b.replace("{input}", input),
+        _ => input.to_string(),
+    };
+    if body.trim().is_empty() {
+        return Err("board has nothing to show: no body and an empty input".into());
+    }
+    let kind = match cfg.get("kind").and_then(Value::as_str) {
+        Some("html") => LiveBoardKind::Html,
+        _ => LiveBoardKind::Markdown,
+    };
+    let title = cfg
+        .get("title")
+        .and_then(Value::as_str)
+        .filter(|t| !t.trim().is_empty());
+    push(kind, title, &body)?;
+    Ok(input.to_string())
+}
+
+/// A task node (naru task 1996): create, update or read one task. Every config
+/// value is text, `{input}` replaced by the node's input; the output is the
+/// task as JSON. An update goes through `receipt::update_task`, like the CLI.
+fn run_task<A: StoreAccess>(
+    access: &A,
+    cfg: &Value,
+    input: &str,
+) -> std::result::Result<String, String> {
+    let get = |k: &str| {
+        cfg.get(k)
+            .and_then(Value::as_str)
+            .map(|v| v.replace("{input}", input))
+    };
+    let id = |k: &str| -> std::result::Result<i64, String> {
+        let v = get(k).unwrap_or_default();
+        v.trim()
+            .parse::<i64>()
+            .map_err(|_| format!("{k} must be a task id, got {v:?}"))
+    };
+    let status = match get("status") {
+        Some(v) => {
+            Some(Status::parse(v.trim()).ok_or_else(|| format!("invalid status {:?}", v.trim()))?)
+        }
+        None => None,
+    };
+    let priority = match get("priority") {
+        Some(v) => Some(
+            Priority::parse(v.trim()).ok_or_else(|| format!("invalid priority {:?}", v.trim()))?,
+        ),
+        None => None,
+    };
+    let task = match cfg
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+    {
+        "create" => {
+            let project = get("project").unwrap_or_default();
+            let description = get("description").unwrap_or_else(|| input.to_string());
+            access.with(|s| {
+                let pid = match project.trim().parse::<i64>() {
+                    Ok(id) => id,
+                    Err(_) => s.find_project_by_name(project.trim())?.id,
+                };
+                s.create_task(
+                    pid,
+                    &description,
+                    priority.unwrap_or(Priority::Medium),
+                    &[],
+                    None,
+                    None,
+                    None,
+                    status,
+                )
+            })
+        }
+        "update" => {
+            let task_id = id("task")?;
+            let patch = crate::core::store::TaskPatch {
+                description: get("description"),
+                status,
+                priority,
+                result: get("result").map(Some),
+                ..Default::default()
+            };
+            access.with(|s| crate::core::receipt::update_task(s, task_id, &patch))
+        }
+        _ => {
+            let task_id = id("task")?;
+            access.with(|s| s.get_task(task_id))
+        }
+    }
+    .map_err(|e| e.to_string())?;
+    serde_json::to_string(&task).map_err(|e| e.to_string())
+}
+
+/// Methods an `http` node may use.
+const HTTP_METHODS: [&str; 5] = ["GET", "POST", "PUT", "PATCH", "DELETE"];
+/// An `http` node's default timeout, and the most it may be given, in seconds.
+pub const DEFAULT_HTTP_TIMEOUT_SECS: u64 = 30;
+const HTTP_TIMEOUT_MAX_SECS: u64 = 600;
+/// The most of a response body an `http` node keeps: its output is one JSON
+/// object that must fit [`OUTPUT_CAP`] whole, so the body stays well under it.
+const HTTP_BODY_CAP: usize = 32 * 1024;
+
+/// Checks a URL's scheme. This build carries no TLS, so only `http://` is
+/// served; a URL that starts with `{input}` is judged at run time.
+fn http_check_scheme(url: &str) -> std::result::Result<(), String> {
+    let lower = url.to_ascii_lowercase();
+    if lower.starts_with("{input}") || lower.starts_with("http://") {
+        return Ok(());
+    }
+    if lower.starts_with("https://") {
+        return Err("http config: https is not supported in this build; use an http:// URL".into());
+    }
+    Err(format!(
+        "http config: \"url\" must start with http://, got {url:?}"
+    ))
+}
+
+/// Percent-encodes everything but the RFC 3986 unreserved characters.
+fn percent_encode(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// An http node (naru task 1997): one request, `{input}` replaced in the url,
+/// header values and body. The output is JSON `{status, ok, body, json}`
+/// (`json` the body parsed, else null; `truncated` added when the body was cut).
+/// A non-2xx status is data; a transport error or timeout fails the node.
+fn run_http(cfg: &Value, input: &str) -> std::result::Result<String, String> {
+    use std::io::Read;
+    let fill = |s: &str| s.replace("{input}", input);
+    let method = cfg.get("method").and_then(Value::as_str).unwrap_or("GET");
+    // In the url `{input}` is percent-encoded, except when the url *starts*
+    // with it (the input is then the whole url).
+    let url_cfg = cfg.get("url").and_then(Value::as_str).unwrap_or_default();
+    let url = if url_cfg.starts_with("{input}") {
+        fill(url_cfg)
+    } else {
+        url_cfg.replace("{input}", &percent_encode(input))
+    };
+    http_check_scheme(url.trim())?;
+    let timeout = cfg
+        .get("timeout_secs")
+        .and_then(Value::as_u64)
+        .unwrap_or(DEFAULT_HTTP_TIMEOUT_SECS);
+    let mut req = ureq::http::Request::builder()
+        .method(method)
+        .uri(url.trim());
+    if let Some(h) = cfg.get("headers").and_then(Value::as_object) {
+        for (k, v) in h {
+            req = req.header(k.as_str(), fill(v.as_str().unwrap_or_default()));
+        }
+    }
+    let body = cfg.get("body").and_then(Value::as_str).map(fill);
+    let req = req
+        .body(body.unwrap_or_default())
+        .map_err(|e| format!("invalid request: {e}"))?;
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(timeout)))
+        .http_status_as_error(false)
+        .proxy(None)
+        .build()
+        .into();
+    let mut resp = agent.run(req).map_err(|e| format!("request failed: {e}"))?;
+    let status = resp.status().as_u16();
+    let mut bytes = Vec::new();
+    resp.body_mut()
+        .as_reader()
+        .take(HTTP_BODY_CAP as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("reading the response failed: {e}"))?;
+    let truncated = bytes.len() > HTTP_BODY_CAP;
+    bytes.truncate(HTTP_BODY_CAP);
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    let parsed = if truncated {
+        Value::Null
+    } else {
+        serde_json::from_str::<Value>(&text).unwrap_or(Value::Null)
+    };
+    let mut out = json!({
+        "status": status,
+        "ok": (200..300).contains(&status),
+        "body": text,
+        "json": parsed,
+    });
+    if truncated {
+        out["truncated"] = json!(true);
+    }
+    Ok(out.to_string())
+}
+
+/// How many workflows deep a `subworkflow` chain may go, the outermost
+/// included (naru task 1994). `Store` refuses a longer chain when a node is
+/// saved; the run checks again, since a child may have been edited since.
+pub const SUBWORKFLOW_MAX_DEPTH: usize = 8;
+
+thread_local! {
+    /// The workflows being run by the current thread's nested `subworkflow`
+    /// calls, outermost first. A child runs synchronously on its caller's
+    /// thread, so this is the call stack.
+    static SUBWORKFLOW_STACK: std::cell::RefCell<Vec<i64>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Pops the workflow [`run_subworkflow`] pushed, whatever the child did.
+struct StackGuard(usize);
+
+impl Drop for StackGuard {
+    fn drop(&mut self) {
+        SUBWORKFLOW_STACK.with(|s| s.borrow_mut().truncate(self.0));
+    }
+}
+
+/// Resolves a `subworkflow` node's `workflow` (an id or a name) to a workflow.
+pub fn resolve_subworkflow(store: &Store, key: &str) -> Result<crate::core::types::Workflow> {
+    match key.parse::<i64>() {
+        Ok(id) => store.get_workflow(id),
+        Err(_) => store.find_workflow_by_name(key),
+    }
+}
+
+/// A subworkflow node (naru task 1994): runs the named workflow with the
+/// node's input as its trigger input and answers the output of the child's
+/// last successful step. A failed child fails the node; a call that would
+/// loop back or nest past [`SUBWORKFLOW_MAX_DEPTH`] is refused. The store
+/// lock is never held while the child runs ([`run_workflow`] takes it only
+/// around its own reads and writes).
+fn run_subworkflow<A: StoreAccess>(
+    access: &A,
+    view: &WorkflowView,
+    key: &str,
+    input: &str,
+) -> std::result::Result<(String, Option<String>), String> {
+    let child = access
+        .with(|s| resolve_subworkflow(s, key))
+        .map_err(|e| e.to_string())?;
+    let _guard = SUBWORKFLOW_STACK.with(|s| {
+        let mut stack = s.borrow_mut();
+        let base = stack.len();
+        if stack.is_empty() {
+            stack.push(view.workflow.id);
+        }
+        if stack.contains(&child.id) {
+            let msg = format!(
+                "subworkflow {:?} would call itself (already running in this chain)",
+                child.name
+            );
+            stack.truncate(base);
+            return Err(msg);
+        }
+        if stack.len() >= SUBWORKFLOW_MAX_DEPTH {
+            let msg = format!("subworkflow chain is deeper than {SUBWORKFLOW_MAX_DEPTH} workflows");
+            stack.truncate(base);
+            return Err(msg);
+        }
+        stack.push(child.id);
+        Ok(StackGuard(base))
+    })?;
+    let run = run_workflow(access, child.id, WorkflowTrigger::Manual, input)
+        .map_err(|e| e.to_string())?;
+    if run.status != WorkflowRunStatus::Succeeded {
+        let why = run
+            .error
+            .or_else(|| {
+                run.steps
+                    .iter()
+                    .find_map(|s| s.error.as_ref().map(|e| format!("{}: {e}", s.title)))
+            })
+            .unwrap_or_else(|| "the run did not succeed".into());
+        return Err(format!("subworkflow {:?} failed: {why}", child.name));
+    }
+    let out = run
+        .steps
+        .iter()
+        .rev()
+        .find(|s| s.status == WorkflowStepStatus::Ok)
+        .map(|s| s.output.clone())
+        .unwrap_or_default();
+    Ok((out, None))
+}
+
+/// The longest a gate waits for a person, and the default (naru task 1993).
+const GATE_MAX_TIMEOUT_SECS: u64 = 86400;
+const GATE_DEFAULT_TIMEOUT_SECS: u64 = 3600;
+
+/// Tells the phone a gate is waiting. Best-effort: with no `vox` the web UI
+/// and `naru workflow gate` still decide it, so a failure is only logged.
+fn notify_gate(gate: &WorkflowGate, workflow_name: &str) {
+    let text = if gate.message.is_empty() {
+        format!("Workflow {workflow_name:?} is waiting for approval.")
+    } else {
+        format!(
+            "Workflow {workflow_name:?} is waiting for approval: {}",
+            gate.message
+        )
+    };
+    let route = format!("workflows/{}", gate.workflow_id);
+    if let Err(e) =
+        crate::core::notify::send(&text, Some("Naru: approval needed"), Some(&route), None)
+    {
+        eprintln!("naru: gate {} notification not sent: {e}", gate.id);
+    }
+}
+
+/// A gate node (naru task 1993): records a pending decision, tells the phone
+/// (`notify`), and polls the row every `poll` — holding no store lock between
+/// polls — until a person approves or rejects it or `timeout_secs` pass, which
+/// rejects it with the reason `timed out`. The input passes through; the
+/// route is `approved` or `rejected`, and a rejection is data, not a failure.
+fn run_gate<A: StoreAccess>(
+    access: &A,
+    view: &WorkflowView,
+    node: &WorkflowNode,
+    input: &str,
+    run_id: i64,
+    poll: Duration,
+    notify: impl FnOnce(&WorkflowGate, &str),
+) -> std::result::Result<(String, Option<String>), String> {
+    let message = node
+        .config
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let timeout = node
+        .config
+        .get("timeout_secs")
+        .and_then(Value::as_u64)
+        .unwrap_or(GATE_DEFAULT_TIMEOUT_SECS)
+        .min(GATE_MAX_TIMEOUT_SECS);
+    let gate = access
+        .with(|s| s.create_workflow_gate(run_id, node.id, message))
+        .map_err(|e| e.to_string())?;
+    notify(&gate, &view.workflow.name);
+    let started = Instant::now();
+    loop {
+        let g = access
+            .with(|s| s.get_workflow_gate(gate.id))
+            .map_err(|e| e.to_string())?;
+        if g.status != WorkflowGateStatus::Pending {
+            return Ok((input.to_string(), Some(g.status.as_str().to_string())));
+        }
+        if started.elapsed() >= Duration::from_secs(timeout) {
+            let decided = access.with(|s| {
+                s.decide_workflow_gate(gate.id, WorkflowGateStatus::Rejected, Some("timed out"))
+            });
+            // A person deciding in the same instant wins: read what stuck.
+            let status = match decided {
+                Ok(g) => g.status,
+                Err(_) => {
+                    access
+                        .with(|s| s.get_workflow_gate(gate.id))
+                        .map_err(|e| e.to_string())?
+                        .status
+                }
+            };
+            return Ok((input.to_string(), Some(status.as_str().to_string())));
+        }
+        std::thread::sleep(poll);
+    }
+}
+
+/// A retry node (naru task 1991): runs the wrapped node up to `attempts`
+/// times, sleeping `backoff_ms * backoff_factor^n` between tries; the retry's
+/// `timeout_secs` bounds each attempt. The output is the wrapped node's.
+fn run_retry(
+    cfg: &Value,
+    mut exec: impl FnMut(&WorkflowNode) -> std::result::Result<(String, Option<String>), String>,
+    mut sleep: impl FnMut(Duration),
+    node: &WorkflowNode,
+) -> std::result::Result<(String, Option<String>), String> {
+    let int = |k: &str, d: u64| cfg.get(k).and_then(Value::as_u64).unwrap_or(d);
+    let attempts = int("attempts", 1).max(1);
+    let backoff = int("backoff_ms", 0);
+    let factor = int("backoff_factor", 1);
+    let wrap = cfg.get("wrap").ok_or("retry node has no \"wrap\"")?;
+    let kind = wrap
+        .get("kind")
+        .and_then(Value::as_str)
+        .and_then(WorkflowNodeKind::parse)
+        .ok_or("retry node wraps an unknown kind")?;
+    let mut wcfg = wrap.get("config").cloned().unwrap_or_else(|| json!({}));
+    if let (Some(t), Some(o)) = (cfg.get("timeout_secs"), wcfg.as_object_mut()) {
+        o.insert("timeout_secs".into(), t.clone());
+    }
+    let mut wrapped = node.clone();
+    wrapped.kind = kind;
+    wrapped.config = wcfg;
+    let mut last = String::new();
+    for n in 0..attempts {
+        match exec(&wrapped) {
+            Ok(r) => return Ok(r),
+            Err(e) => last = e,
+        }
+        if n + 1 < attempts {
+            let ms = backoff.saturating_mul(factor.saturating_pow(n as u32));
+            sleep(Duration::from_millis(ms.min(600_000)));
+        }
+    }
+    Err(format!("failed after {attempts} attempt(s): {last}"))
+}
+
+/// A trycatch node (naru task 1995): runs the wrapped node once. Success
+/// routes `ok` with the wrapped output; a failure is caught, the node itself
+/// succeeds with the error text as output and routes `caught`.
+fn run_trycatch(
+    cfg: &Value,
+    mut exec: impl FnMut(&WorkflowNode) -> std::result::Result<(String, Option<String>), String>,
+    node: &WorkflowNode,
+) -> std::result::Result<(String, Option<String>), String> {
+    let wrap = cfg.get("wrap").ok_or("trycatch node has no \"wrap\"")?;
+    let kind = wrap
+        .get("kind")
+        .and_then(Value::as_str)
+        .and_then(WorkflowNodeKind::parse)
+        .ok_or("trycatch node wraps an unknown kind")?;
+    let mut wcfg = wrap.get("config").cloned().unwrap_or_else(|| json!({}));
+    if let (Some(t), Some(o)) = (cfg.get("timeout_secs"), wcfg.as_object_mut()) {
+        o.insert("timeout_secs".into(), t.clone());
+    }
+    let mut wrapped = node.clone();
+    wrapped.kind = kind;
+    wrapped.config = wcfg;
+    Ok(match exec(&wrapped) {
+        Ok((out, _)) => (out, Some("ok".to_string())),
+        Err(e) => (e, Some("caught".to_string())),
+    })
+}
+
+/// A switch node's run: tries its cases in order against the trimmed input
+/// with the node's `op` (the branch node's matching) and routes to the first
+/// match's label, else to `default`. The output is `{value, matched, label}`.
+/// No `default` edge and no match skips everything downstream, as an
+/// unmatched decide does.
+fn run_switch(cfg: &Value, input: &str) -> std::result::Result<(String, Option<String>), String> {
+    let op = cfg.get("op").and_then(Value::as_str).unwrap_or("equals");
+    let value = input.trim();
+    let mut hit: Option<String> = None;
+    for c in cfg
+        .get("cases")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let m = c.get("match").and_then(Value::as_str).unwrap_or_default();
+        if branch_verdict(op, Some(&json!(m)), value)? {
+            hit = c.get("label").and_then(Value::as_str).map(String::from);
+            break;
+        }
+    }
+    let out = json!({"value": value, "matched": hit.is_some(), "label": hit});
+    Ok((
+        out.to_string(),
+        Some(hit.unwrap_or_else(|| SWITCH_DEFAULT.to_string())),
+    ))
 }
 
 /// A branch node's verdict over `input`. `contains` and `regex` (POSIX ERE,
@@ -2417,6 +4928,60 @@ mod tests {
     }
 
     #[test]
+    fn parallel_fans_out_and_join_waits_for_every_branch() {
+        use WorkflowNodeKind as K;
+        let cfg = |k| validate_config(k, &json!({})).unwrap();
+        assert!(validate_config(K::Join, &json!({"x": 1})).is_err());
+        assert!(cfg(K::Parallel)["pins"]["out"][0]["ty"] == "any");
+        assert!(cfg(K::Join)["pins"]["out"][0]["ty"] == "list<string>");
+
+        let (st, _d) = store();
+        let build = |gate: bool| {
+            st.with(|s| {
+                let wf = s
+                    .create_workflow(None, &format!("J{gate}"), None)
+                    .unwrap()
+                    .id;
+                let t = node(s, wf, K::Trigger, "T", json!({"mode": "manual"}));
+                let p = node(s, wf, K::Parallel, "Fan", json!({}));
+                let a = node(s, wf, K::Cli, "A", cli("printf a"));
+                let b = node(s, wf, K::Cli, "B", cli("printf b"));
+                let j = node(s, wf, K::Join, "Join", json!({}));
+                s.create_workflow_edge(wf, t, p, None).unwrap();
+                s.create_workflow_edge(wf, p, a, None).unwrap();
+                if gate {
+                    // B sits behind a branch whose false edge nothing reaches
+                    let g = node(
+                        s,
+                        wf,
+                        K::Branch,
+                        "Gate",
+                        json!({"op": "contains", "value": "zzz"}),
+                    );
+                    s.create_workflow_edge(wf, p, g, None).unwrap();
+                    s.create_workflow_edge(wf, g, b, Some("true".into()))
+                        .unwrap();
+                } else {
+                    s.create_workflow_edge(wf, p, b, None).unwrap();
+                }
+                s.create_workflow_edge(wf, a, j, None).unwrap();
+                s.create_workflow_edge(wf, b, j, None).unwrap();
+                wf
+            })
+        };
+        let run = run_workflow(&st, build(false), WorkflowTrigger::Manual, "").unwrap();
+        assert_eq!(run.status, WorkflowRunStatus::Succeeded, "{run:?}");
+        let join = run.steps.iter().find(|s| s.title == "Join").unwrap();
+        assert_eq!(join.status, WorkflowStepStatus::Ok);
+        assert_eq!(join.output, r#"["a","b"]"#);
+
+        let run = run_workflow(&st, build(true), WorkflowTrigger::Manual, "").unwrap();
+        assert_eq!(run.status, WorkflowRunStatus::Succeeded, "{run:?}");
+        let join = run.steps.iter().find(|s| s.title == "Join").unwrap();
+        assert_eq!(join.status, WorkflowStepStatus::Skipped);
+    }
+
+    #[test]
     fn a_run_takes_the_true_path_and_skips_the_false_one() {
         let (st, _d) = store();
         let wf = st.with(|s| {
@@ -2574,6 +5139,164 @@ mod tests {
         assert_eq!(run.steps[1].output, "$(id) `x` 'q'|$(id) `x` 'q'");
         assert_eq!(run.steps[2].status, WorkflowStepStatus::Failed);
         assert!(run.steps[2].error.as_deref().unwrap().contains("timed out"));
+    }
+
+    #[test]
+    fn parse_json_types_its_output_and_fails_visibly() {
+        let types = vec![WorkflowType {
+            name: "P".into(),
+            fields: vec![WorkflowTypeField {
+                name: "a".into(),
+                ty: "number".into(),
+            }],
+        }];
+        assert_eq!(
+            parse_json_value(" {\"a\": 1} ", "any", &types).unwrap(),
+            "{\"a\":1}"
+        );
+        assert_eq!(
+            parse_json_value("{\"a\":1}", "P", &types).unwrap(),
+            "{\"a\":1}"
+        );
+        assert_eq!(parse_json_value("\"x\"", "string", &types).unwrap(), "x");
+        assert_eq!(
+            parse_json_value("[1,2]", "list<number>", &types).unwrap(),
+            "[1,2]"
+        );
+        let e = parse_json_value("not json", "any", &types).unwrap_err();
+        assert!(e.starts_with("invalid JSON"), "{e}");
+        let e = parse_json_value("\"x\"", "number", &types).unwrap_err();
+        assert!(e.contains("expected number"), "{e}");
+        assert!(parse_json_value("{\"a\":\"s\"}", "P", &types).is_err());
+        let ok = validate_config(WorkflowNodeKind::ParseJson, &json!({"type": "number"})).unwrap();
+        assert_eq!(ok["pins"]["out"][0]["ty"], "number");
+        assert_eq!(ok["pins"]["in"][0]["ty"], "string");
+        assert!(
+            validate_config(WorkflowNodeKind::ParseJson, &json!({"type": "bad type"})).is_err()
+        );
+        assert!(validate_config(WorkflowNodeKind::ParseJson, &json!({})).is_ok());
+    }
+
+    #[test]
+    fn mapfilter_maps_filters_and_fails_visibly() {
+        let r = |m, e, i| run_mapfilter(m, e, i);
+        assert_eq!(
+            r("map", "Task: {item}", "[\"a\",\"b\"]").unwrap(),
+            "[\"Task: a\",\"Task: b\"]"
+        );
+        assert_eq!(r("map", "{item}!", "x\n\ny\n").unwrap(), "[\"x!\",\"y!\"]");
+        assert_eq!(r("map", "{item}", "[1,2]").unwrap(), "[\"1\",\"2\"]");
+        assert_eq!(r("map", "{item}", "[]").unwrap(), "[]");
+        assert_eq!(r("map", "{item}", "").unwrap(), "[]");
+        assert_eq!(
+            r("filter", "contains:a", "[\"ab\",\"cd\",\"ba\"]").unwrap(),
+            "[\"ab\",\"ba\"]"
+        );
+        assert_eq!(r("filter", "not-contains:a", "ab\ncd").unwrap(), "[\"cd\"]");
+        assert_eq!(r("filter", "eq:cd", "ab\ncd").unwrap(), "[\"cd\"]");
+        assert_eq!(
+            r("filter", "nonempty", "[\"\",\" \",\"x\"]").unwrap(),
+            "[\"x\"]"
+        );
+        assert_eq!(
+            r("filter", "regex:^a[0-9]+$", "[\"a1\",\"b2\"]").unwrap(),
+            "[\"a1\"]"
+        );
+        // a hostile item stays literal: no re-expansion, no shell
+        assert_eq!(
+            r("map", "<{item}>", "[\"$(rm -rf /) {item}\"]").unwrap(),
+            "[\"<$(rm -rf /) {item}>\"]"
+        );
+        assert!(
+            r("map", "{item}", "{\"a\":1}")
+                .unwrap_err()
+                .contains("must be a list")
+        );
+        assert!(
+            r("map", "{item}", "5")
+                .unwrap_err()
+                .contains("must be a list")
+        );
+        assert!(r("filter", "bogus", "[]").is_err());
+        let bad = |c: Value| validate_config(WorkflowNodeKind::MapFilter, &c).unwrap_err();
+        assert!(bad(json!({"mode": "filter", "expr": "regex:("})).contains("invalid regex"));
+        assert!(bad(json!({"mode": "filter", "expr": "wat:x"})).contains("unknown predicate"));
+        assert!(bad(json!({"mode": "filter", "expr": "contains:"})).contains("argument"));
+        assert!(bad(json!({"mode": "sort", "expr": "x"})).contains("map or filter"));
+        assert!(bad(json!({"mode": "map"})).contains("required"));
+        let ok = validate_config(
+            WorkflowNodeKind::MapFilter,
+            &json!({"mode": "map", "expr": "{item}"}),
+        )
+        .unwrap();
+        assert_eq!(ok["pins"]["in"][0]["name"], "list");
+    }
+
+    #[test]
+    fn foreach_collects_in_order_and_fails_visibly() {
+        let t = Duration::from_secs(10);
+        assert_eq!(
+            run_foreach("echo item-$1", "[1,2,3]", ".", t).unwrap(),
+            "[\"item-1\",\"item-2\",\"item-3\"]"
+        );
+        assert_eq!(run_foreach("echo $1", "[]", ".", t).unwrap(), "[]");
+        // a hostile item stays literal
+        assert_eq!(
+            run_foreach("echo \"$1\"", "[\"$(echo pwned) `x`\"]", ".", t).unwrap(),
+            "[\"$(echo pwned) `x`\"]"
+        );
+        let e =
+            run_foreach("[ \"$1\" = b ] && exit 3; echo ok", "[\"a\",\"b\"]", ".", t).unwrap_err();
+        assert!(e.starts_with("item 1 exited 3"), "{e}");
+        assert!(
+            run_foreach("echo", "{\"a\":1}", ".", t)
+                .unwrap_err()
+                .contains("must be a list")
+        );
+        let bad = |c: Value| validate_config(WorkflowNodeKind::ForEach, &c).unwrap_err();
+        assert!(bad(json!({})).contains("required"));
+        assert!(bad(json!({"body": "x", "bogus": 1})).contains("bogus"));
+        assert!(bad(json!({"body": "x", "timeout_secs": 0})).contains("timeout"));
+        let ok = validate_config(WorkflowNodeKind::ForEach, &json!({"body": "echo $1"})).unwrap();
+        assert_eq!(ok["pins"]["out"][0]["ty"], "list<string>");
+    }
+
+    #[test]
+    fn variable_sets_and_gets_typed_and_fails_visibly() {
+        let types: Vec<WorkflowType> = Vec::new();
+        let mut vars = HashMap::new();
+        let e = run_variable("get", "x", "number", "", &types, &mut vars).unwrap_err();
+        assert_eq!(e, "variable \"x\" is not set");
+        assert_eq!(
+            run_variable("set", "x", "number", " 3 ", &types, &mut vars).unwrap(),
+            "3"
+        );
+        assert_eq!(
+            run_variable("get", "x", "number", "", &types, &mut vars).unwrap(),
+            "3"
+        );
+        let e = run_variable("set", "x", "number", "\"s\"", &types, &mut vars).unwrap_err();
+        assert!(e.contains("expected number"), "{e}");
+        assert_eq!(vars["x"], "3");
+        let set = validate_config(
+            WorkflowNodeKind::Variable,
+            &json!({"op": "set", "name": "x", "type": "number"}),
+        )
+        .unwrap();
+        assert_eq!(set["pins"]["in"][0]["name"], "value");
+        assert_eq!(set["pins"]["out"][0]["ty"], "number");
+        let get = validate_config(
+            WorkflowNodeKind::Variable,
+            &json!({"op": "get", "name": "x", "type": "number"}),
+        )
+        .unwrap();
+        assert_eq!(get["pins"]["in"][0]["name"], "trigger");
+        assert_eq!(get["pins"]["out"][0]["ty"], "number");
+        let bad = |c: Value| validate_config(WorkflowNodeKind::Variable, &c).is_err();
+        assert!(bad(json!({"op": "put", "name": "x"})));
+        assert!(bad(json!({"op": "get"})));
+        assert!(bad(json!({"op": "get", "name": "1x"})));
+        assert!(bad(json!({"op": "get", "name": "x", "type": "bad type"})));
     }
 
     #[test]
@@ -2737,6 +5460,379 @@ mod tests {
         run_workflow(&st, other, WorkflowTrigger::Manual, "").unwrap();
         assert_eq!(st.with(|s| s.due_time_workflows()).unwrap(), vec![other]);
     }
+    #[test]
+    fn schedule_config_and_cron_matcher() {
+        let ok = |c: Value| validate_config(WorkflowNodeKind::Schedule, &c).unwrap();
+        let bad = |c: Value| validate_config(WorkflowNodeKind::Schedule, &c).unwrap_err();
+        assert_eq!(
+            ok(json!({"every_minutes": 15})),
+            json!({"every_minutes": 15})
+        );
+        assert_eq!(
+            ok(json!({"cron": "  */5  * * * * "})),
+            json!({"cron": "*/5 * * * *"})
+        );
+        assert!(bad(json!({})).contains("exactly one"));
+        assert!(bad(json!({"every_minutes": 5, "cron": "* * * * *"})).contains("exactly one"));
+        assert!(bad(json!({"every_minutes": 0})).contains("1 to 10080"));
+        assert!(bad(json!({"every_minutes": 10081})).contains("1 to 10080"));
+        assert!(bad(json!({"cron": "* * * *"})).contains("5 fields"));
+        assert!(bad(json!({"cron": "60 * * * *"})).contains("out of range"));
+        assert!(bad(json!({"cron": "*/0 * * * *"})).contains("zero step"));
+        assert!(bad(json!({"cron": "5-1 * * * *"})).contains("backwards"));
+        assert!(bad(json!({"cron": "a * * * *"})).contains("not a number"));
+        assert!(bad(json!({"cron": "* * * * *", "x": 1})).contains("unknown key"));
+        // minute hour dom month dow(0 = Sunday)
+        let c = parse_cron("*/15 9-17 * * 1-5").unwrap();
+        assert!(c.matches(30, 9, 14, 10, 3));
+        assert!(!c.matches(31, 9, 14, 10, 3));
+        assert!(!c.matches(30, 18, 14, 10, 3));
+        assert!(!c.matches(30, 9, 14, 10, 0), "Sunday is not 1-5");
+        assert!(
+            parse_cron("0 0 * * 7").unwrap().matches(0, 0, 1, 1, 0),
+            "7 is Sunday"
+        );
+        let both = parse_cron("0 0 13 * 5").unwrap();
+        assert!(both.matches(0, 0, 13, 6, 2) && both.matches(0, 0, 2, 6, 5));
+        assert!(
+            !both.matches(0, 0, 2, 6, 2),
+            "restricted day fields match on either"
+        );
+        assert!(parse_cron("1,2,10-12/2 * * jan *").is_err());
+        assert!(parse_cron("5/20 * * * *").unwrap().matches(45, 0, 1, 1, 0));
+    }
+
+    #[test]
+    fn schedule_node_is_the_entry_and_fires_from_the_watcher() {
+        let (st, _d) = store();
+        let wf = st.with(|s| {
+            let wf = s.create_workflow(None, "Sched", None).unwrap().id;
+            let t = node(
+                s,
+                wf,
+                WorkflowNodeKind::Schedule,
+                "S",
+                json!({"every_minutes": 5}),
+            );
+            let o = node(
+                s,
+                wf,
+                WorkflowNodeKind::Output,
+                "O",
+                json!({"target": "log", "log": "sched"}),
+            );
+            s.create_workflow_edge(wf, t, o, None).unwrap();
+            // One entry node only, and nothing flows into it.
+            assert!(
+                s.create_workflow_node(
+                    wf,
+                    &WorkflowNodeNew {
+                        kind: WorkflowNodeKind::Trigger,
+                        title: "T".into(),
+                        config: None,
+                        x: None,
+                        y: None,
+                    }
+                )
+                .is_err()
+            );
+            assert!(s.create_workflow_edge(wf, o, t, None).is_err());
+            wf
+        });
+        assert_eq!(st.with(|s| s.due_time_workflows()).unwrap(), vec![wf]);
+        let (view, run) = st.with(|s| claim_time_run(s, wf)).unwrap().unwrap();
+        assert!(st.with(|s| s.due_time_workflows()).unwrap().is_empty());
+        assert!(st.with(|s| claim_time_run(s, wf)).unwrap().is_none());
+        let run = execute_run(&st, &view, run).unwrap();
+        assert_eq!(run.status, WorkflowRunStatus::Succeeded);
+        assert_eq!(run.steps[0].kind, WorkflowNodeKind::Schedule);
+        // A manual run works too, and never counts as the schedule's run.
+        let other = st.with(|s| {
+            let w = s.create_workflow(None, "Sched2", None).unwrap().id;
+            node(
+                s,
+                w,
+                WorkflowNodeKind::Schedule,
+                "S",
+                json!({"every_minutes": 5}),
+            );
+            w
+        });
+        run_workflow(&st, other, WorkflowTrigger::Manual, "").unwrap();
+        assert_eq!(st.with(|s| s.due_time_workflows()).unwrap(), vec![other]);
+    }
+
+    #[test]
+    fn webhook_config_is_validated_and_declares_a_typed_body_pin() {
+        let ok = validate_config(WorkflowNodeKind::Webhook, &json!({"type": "number"})).unwrap();
+        assert_eq!(
+            ok["pins"]["out"][0],
+            json!({"name": "body", "ty": "number"})
+        );
+        let plain = validate_config(WorkflowNodeKind::Webhook, &json!({})).unwrap();
+        assert_eq!(plain["pins"]["out"][0]["ty"], "any");
+        assert!(validate_config(WorkflowNodeKind::Webhook, &json!({"type": "a b"})).is_err());
+        assert!(validate_config(WorkflowNodeKind::Webhook, &json!({"secret": "x"})).is_err());
+    }
+
+    #[test]
+    fn task_event_config_is_validated_and_declares_a_task_pin() {
+        let k = WorkflowNodeKind::TaskEvent;
+        let ok = validate_config(k, &json!({})).unwrap();
+        assert_eq!(ok["event"], "created");
+        assert_eq!(
+            ok["pins"]["out"][0],
+            json!({"name": "task", "ty": "string"})
+        );
+        let full = validate_config(
+            k,
+            &json!({"event": "status", "status": "done", "project": 7}),
+        )
+        .unwrap();
+        assert_eq!(full["status"], "done");
+        assert_eq!(full["project"], "7");
+        assert!(validate_config(k, &json!({"event": "bogus"})).is_err());
+        assert!(validate_config(k, &json!({"event": "created", "status": "done"})).is_err());
+        assert!(validate_config(k, &json!({"event": "any", "status": "nope"})).is_err());
+        assert!(validate_config(k, &json!({"secret": "x"})).is_err());
+    }
+
+    #[test]
+    fn task_event_matches_creation_status_filter_and_project_and_carries_the_task() {
+        let (st, _d) = store();
+        let (pa, pb) = st.with(|s| {
+            (
+                s.create_project("Alpha", None, None, None, None)
+                    .unwrap()
+                    .id,
+                s.create_project("Beta", None, None, None, None).unwrap().id,
+            )
+        });
+        let mk = |name: &str, cfg: Value| {
+            st.with(|s| {
+                let wf = s.create_workflow(None, name, None).unwrap().id;
+                let t = node(s, wf, WorkflowNodeKind::TaskEvent, "T", cfg);
+                let o = node(
+                    s,
+                    wf,
+                    WorkflowNodeKind::Output,
+                    "O",
+                    json!({"target": "log", "log": "te"}),
+                );
+                s.create_workflow_edge(wf, t, o, None).unwrap();
+                wf
+            })
+        };
+        let created = mk("OnCreate", json!({"event": "created"}));
+        let done = mk("OnDone", json!({"event": "status", "status": "done"}));
+        let any_beta = mk("AnyBeta", json!({"event": "any", "project": "beta"}));
+        let hostile = "\"; rm -rf / #";
+        let task = st.with(|s| {
+            s.create_task(pa, hostile, Priority::Medium, &[], None, None, None, None)
+                .unwrap()
+        });
+        let plan = |old: Option<Status>, t: &crate::core::types::Task| {
+            st.with(|s| plan_task_event(s, t, old)).unwrap()
+        };
+        let (ids, input) = plan(None, &task);
+        assert_eq!(
+            ids,
+            vec![created],
+            "a creation fires only the created listener"
+        );
+        let v: Value = serde_json::from_str(&input).unwrap();
+        assert_eq!(v["event"], "created");
+        assert_eq!(v["task_id"], task.id);
+        assert_eq!(v["old_status"], Value::Null);
+        assert_eq!(
+            v["name"], task.name,
+            "the hostile name arrives byte-identical"
+        );
+        let mut t2 = task.clone();
+        t2.status = Status::Done;
+        assert_eq!(plan(Some(Status::Todo), &t2).0, vec![done]);
+        t2.status = Status::InProgress;
+        assert!(plan(Some(Status::Todo), &t2).0.is_empty(), "status filter");
+        assert!(
+            plan(Some(Status::InProgress), &t2).0.is_empty(),
+            "no change"
+        );
+        t2.project_id = pb;
+        assert_eq!(
+            plan(Some(Status::Todo), &t2).0,
+            vec![any_beta],
+            "project by name"
+        );
+        // The run input reaches the trigger node unchanged.
+        let run = run_workflow(&st, created, WorkflowTrigger::TaskEvent, &input).unwrap();
+        assert_eq!(run.status, WorkflowRunStatus::Succeeded);
+        assert_eq!(run.trigger, WorkflowTrigger::TaskEvent);
+        assert_eq!(run.steps[0].output, input);
+    }
+
+    #[test]
+    fn file_watch_config_is_validated_and_declares_an_event_pin() {
+        let k = WorkflowNodeKind::FileWatch;
+        let ok = validate_config(k, &json!({"path": " /tmp/x "})).unwrap();
+        assert_eq!(ok["path"], "/tmp/x");
+        assert_eq!(ok["event"], "any");
+        assert_eq!(
+            ok["pins"]["out"][0],
+            json!({"name": "event", "ty": "string"})
+        );
+        assert!(validate_config(k, &json!({})).is_err(), "path is required");
+        assert!(validate_config(k, &json!({"path": "  "})).is_err());
+        assert!(validate_config(k, &json!({"path": "x".repeat(4097)})).is_err());
+        assert!(validate_config(k, &json!({"path": "/x", "event": "bogus"})).is_err());
+        assert!(validate_config(k, &json!({"path": "/x", "secret": 1})).is_err());
+    }
+
+    #[test]
+    fn file_watch_baselines_then_fires_once_per_change_and_filters_by_event() {
+        let (st, d) = store();
+        let file = d.path().join("watched.txt");
+        let path = file.to_str().unwrap().to_string();
+        let mk = |name: &str, event: &str| {
+            st.with(|s| {
+                let wf = s.create_workflow(None, name, None).unwrap().id;
+                let t = node(
+                    s,
+                    wf,
+                    WorkflowNodeKind::FileWatch,
+                    "F",
+                    json!({"path": path, "event": event}),
+                );
+                let o = node(
+                    s,
+                    wf,
+                    WorkflowNodeKind::Output,
+                    "O",
+                    json!({"target": "log", "log": "fw"}),
+                );
+                s.create_workflow_edge(wf, t, o, None).unwrap();
+                wf
+            })
+        };
+        let any = mk("FwAny", "any");
+        let deleted = mk("FwDeleted", "deleted");
+        let mut seen = HashMap::new();
+        let mut plan = || st.with(|s| plan_file_watch_with(s, &mut seen)).unwrap();
+        assert!(plan().is_empty(), "the first pass only baselines");
+        assert!(plan().is_empty(), "nothing changed");
+        std::fs::write(&file, "one").unwrap();
+        let fires = plan();
+        assert_eq!(fires.len(), 1, "a creation fires only the any listener");
+        assert_eq!(fires[0].0, any);
+        let v: Value = serde_json::from_str(&fires[0].1).unwrap();
+        assert_eq!(
+            (v["event"].as_str(), v["size"].as_u64()),
+            (Some("created"), Some(3))
+        );
+        assert_eq!(v["path"], path.as_str());
+        assert!(plan().is_empty(), "one change, one fire");
+        std::fs::write(&file, "three").unwrap();
+        let fires = plan();
+        assert_eq!(fires.len(), 1);
+        let v: Value = serde_json::from_str(&fires[0].1).unwrap();
+        assert_eq!(
+            (v["event"].as_str(), v["size"].as_u64()),
+            (Some("modified"), Some(5))
+        );
+        std::fs::remove_file(&file).unwrap();
+        let mut ids: Vec<i64> = plan().iter().map(|f| f.0).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![any, deleted]);
+        // The change reaches the trigger node as the run input.
+        let input =
+            json!({"path": path, "event": "deleted", "mtime": null, "size": null}).to_string();
+        let run = run_workflow(&st, any, WorkflowTrigger::FileWatch, &input).unwrap();
+        assert_eq!(run.status, WorkflowRunStatus::Succeeded);
+        assert_eq!(run.trigger, WorkflowTrigger::FileWatch);
+        assert_eq!(run.steps[0].output, input);
+    }
+
+    #[test]
+    fn webhook_body_becomes_the_typed_output_and_a_wrong_type_fails_the_node() {
+        let (st, _d) = store();
+        let wf = st.with(|s| {
+            let wf = s.create_workflow(None, "Hook", None).unwrap().id;
+            let t = node(
+                s,
+                wf,
+                WorkflowNodeKind::Webhook,
+                "W",
+                json!({"type": "number"}),
+            );
+            let o = node(
+                s,
+                wf,
+                WorkflowNodeKind::Output,
+                "O",
+                json!({"target": "log", "log": "hook"}),
+            );
+            s.create_workflow_edge(wf, t, o, None).unwrap();
+            // A webhook is the one entry node: no second trigger, no incoming edge.
+            assert!(
+                s.create_workflow_node(
+                    wf,
+                    &WorkflowNodeNew {
+                        kind: WorkflowNodeKind::Trigger,
+                        title: "T".into(),
+                        config: None,
+                        x: None,
+                        y: None,
+                    }
+                )
+                .is_err()
+            );
+            assert!(s.create_workflow_edge(wf, o, t, None).is_err());
+            wf
+        });
+        let run = run_workflow(&st, wf, WorkflowTrigger::Webhook, " 42 ").unwrap();
+        assert_eq!(run.status, WorkflowRunStatus::Succeeded);
+        assert_eq!(run.trigger, WorkflowTrigger::Webhook);
+        assert_eq!(run.steps[0].kind, WorkflowNodeKind::Webhook);
+        assert_eq!(run.steps[0].output, "42");
+        let bad = run_workflow(&st, wf, WorkflowTrigger::Webhook, r#""nope""#).unwrap();
+        assert_eq!(bad.status, WorkflowRunStatus::Failed);
+        assert!(
+            bad.steps[0]
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("expected number")
+        );
+    }
+
+    #[test]
+    fn cron_schedule_is_due_once_in_a_matching_minute() {
+        let (st, _d) = store();
+        let (every, never) = st.with(|s| {
+            let a = s.create_workflow(None, "EveryMinute", None).unwrap().id;
+            node(
+                s,
+                a,
+                WorkflowNodeKind::Schedule,
+                "S",
+                json!({"cron": "* * * * *"}),
+            );
+            let b = s.create_workflow(None, "Never", None).unwrap().id;
+            node(
+                s,
+                b,
+                WorkflowNodeKind::Schedule,
+                "S",
+                json!({"cron": "0 0 31 2 *"}),
+            );
+            (a, b)
+        });
+        assert_eq!(st.with(|s| s.due_time_workflows()).unwrap(), vec![every]);
+        assert!(st.with(|s| claim_time_run(s, never)).unwrap().is_none());
+        assert!(st.with(|s| claim_time_run(s, every)).unwrap().is_some());
+        assert!(st.with(|s| s.due_time_workflows()).unwrap().is_empty());
+        assert!(st.with(|s| claim_time_run(s, every)).unwrap().is_none());
+    }
+
     #[test]
     fn list_carries_derived_run_status_and_next_run() {
         let (st, _d) = store();
@@ -3406,6 +6502,845 @@ mod tests {
     }
 
     #[test]
+    fn notify_config_validation_and_run() {
+        use WorkflowNodeKind as K;
+        use std::cell::RefCell;
+        let v = |c: Value| validate_config(K::Notify, &c);
+        let ok = v(json!({})).unwrap();
+        assert_eq!(ok["mode"], "phone");
+        assert_eq!(ok["pins"]["in"][0]["ty"], "any");
+        let ok = v(json!({"mode": "phone", "message": "hi", "title": "T", "open": "live"}));
+        assert_eq!(ok.unwrap()["open"], "live");
+        assert!(v(json!({"mode": "speak", "message": "hi"})).is_ok());
+        assert!(v(json!({"mode": "shout"})).is_err());
+        assert!(v(json!({"mode": "speak", "title": "T"})).is_err());
+        assert!(v(json!({"open": "../x"})).is_err());
+        assert!(v(json!({"nope": 1})).is_err());
+        assert!(v(json!({"message": "x".repeat(NOTIFY_MESSAGE_MAX + 1)})).is_err());
+
+        let sent = RefCell::new(Vec::new());
+        let phone = |m: &str, t: Option<&str>, o: Option<&str>| {
+            sent.borrow_mut().push(format!("{m}|{t:?}|{o:?}"));
+            Ok(())
+        };
+        let no_speak = |_: &str| Err("speak called".to_string());
+        let cfg = json!({"message": "got {input}", "title": "T"});
+        let out = run_notify(&cfg, "data", phone, no_speak).unwrap();
+        assert_eq!(out, "data");
+        assert_eq!(sent.borrow()[0], "got data|Some(\"T\")|None");
+        // No message: the input is the message; an empty one is an error.
+        let phone = |m: &str, _: Option<&str>, _: Option<&str>| {
+            sent.borrow_mut().push(m.to_string());
+            Ok(())
+        };
+        run_notify(&json!({}), "plain", phone, no_speak).unwrap();
+        assert_eq!(sent.borrow()[1], "plain");
+        assert!(run_notify(&json!({}), " ", phone, no_speak).is_err());
+        // Speak mode never touches the phone; a failed send fails the node.
+        let no_phone = |_: &str, _: Option<&str>, _: Option<&str>| Err("phone called".to_string());
+        let spoken = RefCell::new(String::new());
+        let speak = |m: &str| {
+            *spoken.borrow_mut() = m.to_string();
+            Ok(())
+        };
+        run_notify(&json!({"mode": "speak"}), "say me", no_phone, speak).unwrap();
+        assert_eq!(*spoken.borrow(), "say me");
+        let failing = |_: &str, _: Option<&str>, _: Option<&str>| Err("vox missing".to_string());
+        let e = run_notify(&json!({}), "x", failing, no_speak).unwrap_err();
+        assert_eq!(e, "vox missing");
+    }
+
+    #[test]
+    fn board_config_validation_and_run() {
+        use WorkflowNodeKind as K;
+        use std::cell::RefCell;
+        let v = |c: Value| validate_config(K::Board, &c);
+        let ok = v(json!({})).unwrap();
+        assert_eq!(ok["kind"], "markdown");
+        assert_eq!(ok["pins"]["out"][0]["ty"], "any");
+        assert_eq!(
+            v(json!({"kind": "html", "title": "T"})).unwrap()["kind"],
+            "html"
+        );
+        assert!(v(json!({"kind": "svg"})).is_err());
+        assert!(v(json!({"nope": 1})).is_err());
+        assert!(v(json!({"title": "x".repeat(BOARD_TITLE_MAX + 1)})).is_err());
+
+        let seen = RefCell::new(Vec::new());
+        let push = |k: LiveBoardKind, t: Option<&str>, b: &str| {
+            seen.borrow_mut().push(format!("{}|{t:?}|{b}", k.as_str()));
+            Ok(())
+        };
+        let cfg = json!({"body": "# Hi {input}", "title": "T"});
+        assert_eq!(run_board(&cfg, "bob", push).unwrap(), "bob");
+        assert_eq!(seen.borrow()[0], "markdown|Some(\"T\")|# Hi bob");
+        // No body: the input is the board; an html kind is passed on.
+        run_board(&json!({"kind": "html"}), "<b>x</b>", push).unwrap();
+        assert_eq!(seen.borrow()[1], "html|None|<b>x</b>");
+        assert!(run_board(&json!({}), " ", push).is_err());
+        let failing = |_: LiveBoardKind, _: Option<&str>, _: &str| Err("no session".to_string());
+        assert_eq!(
+            run_board(&json!({}), "x", failing).unwrap_err(),
+            "no session"
+        );
+    }
+
+    #[test]
+    fn delay_config_validation_and_run() {
+        use WorkflowNodeKind as K;
+        let ok = validate_config(K::Delay, &json!({"seconds": 5})).unwrap();
+        assert_eq!(ok["seconds"], json!(5));
+        assert!(validate_config(K::Delay, &json!({"until": "14:30"})).is_ok());
+        let bad = |c: Value| validate_config(K::Delay, &c).unwrap_err();
+        assert!(bad(json!({})).contains("exactly one"));
+        assert!(bad(json!({"seconds": 1, "until": "10:00"})).contains("exactly one"));
+        assert!(bad(json!({"seconds": 3601})).contains("seconds"));
+        assert!(bad(json!({"seconds": -1})).contains("seconds"));
+        assert!(bad(json!({"until": "25:00"})).contains("until"));
+        assert!(bad(json!({"until": "soon"})).contains("until"));
+        // 2026-10-17T00:00:00Z
+        let now = (days_from_civil(2026, 10, 17) * 86_400) as u64;
+        assert_eq!(parse_delay_until("00:10", now).unwrap(), 600);
+        assert_eq!(parse_delay_until("2026-10-17T00:01:00Z", now).unwrap(), 60);
+        assert_eq!(parse_delay_until("2026-10-16T00:01:00Z", now).unwrap(), 0);
+        assert!(parse_delay_until("2026-10-18T00:00:00Z", now).is_err());
+        let mut slept = Vec::new();
+        let r = run_delay(&json!({"seconds": 7}), "hi", now, |d| slept.push(d)).unwrap();
+        assert_eq!(r, ("hi".to_string(), None));
+        assert_eq!(slept, vec![Duration::from_secs(7)]);
+    }
+
+    #[test]
+    fn subworkflow_config_validation() {
+        use WorkflowNodeKind as K;
+        let ok = validate_config(K::Subworkflow, &json!({"workflow": " Child "})).unwrap();
+        assert_eq!(ok["workflow"], json!("Child"));
+        assert_eq!(ok["pins"]["in"][0]["ty"], json!("any"));
+        let ok = validate_config(K::Subworkflow, &json!({"workflow": 7})).unwrap();
+        assert_eq!(ok["workflow"], json!("7"));
+        let bad = |c: Value| validate_config(K::Subworkflow, &c).unwrap_err();
+        assert!(bad(json!({})).contains("workflow"));
+        assert!(bad(json!({"workflow": ""})).contains("workflow"));
+        assert!(bad(json!({"workflow": "x", "nope": 1})).contains("unknown key"));
+    }
+
+    #[test]
+    fn http_config_validation() {
+        use WorkflowNodeKind as K;
+        let ok = validate_config(
+            K::Http,
+            &json!({"method": "post", "url": " http://h/x ", "headers": {"A": "{input}"}, "body": "b", "timeout_secs": 5}),
+        )
+        .unwrap();
+        assert_eq!(ok["method"], json!("POST"));
+        assert_eq!(ok["url"], json!("http://h/x"));
+        assert_eq!(ok["pins"]["out"][0]["ty"], json!("any"));
+        let ok = validate_config(K::Http, &json!({"url": "{input}"})).unwrap();
+        assert_eq!(ok["method"], json!("GET"));
+        let bad = |c: Value| validate_config(K::Http, &c).unwrap_err();
+        assert!(bad(json!({})).contains("url"));
+        assert!(bad(json!({"url": "ftp://x"})).contains("http://"));
+        assert!(bad(json!({"url": "https://x"})).contains("https"));
+        assert!(bad(json!({"url": "http://x", "method": "TRACE"})).contains("method"));
+        assert!(bad(json!({"url": "http://x", "body": "b"})).contains("no body"));
+        assert!(bad(json!({"url": "http://x", "headers": {"A": 1}})).contains("string"));
+        assert!(bad(json!({"url": "http://x", "headers": []})).contains("headers"));
+        assert!(bad(json!({"url": "http://x", "timeout_secs": 0})).contains("timeout_secs"));
+        assert!(bad(json!({"url": "http://x", "zz": 1})).contains("unknown key"));
+    }
+
+    /// Serves `replies` one connection each on a local port, returning the
+    /// URL base and the raw requests it saw.
+    fn http_stub(
+        replies: Vec<(&'static str, &'static str)>,
+    ) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        use std::io::{Read, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        let h = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            for (status, body) in replies {
+                let (mut c, _) = l.accept().unwrap();
+                let mut buf = [0u8; 4096];
+                let n = c.read(&mut buf).unwrap();
+                seen.push(String::from_utf8_lossy(&buf[..n]).into_owned());
+                let _ = write!(
+                    c,
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+            seen
+        });
+        (base, h)
+    }
+
+    #[test]
+    fn http_node_returns_status_body_and_json() {
+        let (base, h) = http_stub(vec![
+            ("200 OK", "{\"a\": 1}"),
+            ("404 Not Found", "nope"),
+            ("200 OK", "ok"),
+        ]);
+        let out = run_http(&json!({"url": format!("{base}/x?q={{input}}")}), "hi").unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["status"], json!(200));
+        assert_eq!(v["ok"], json!(true));
+        assert_eq!(v["json"], json!({"a": 1}));
+        // A 404 is data, not a failure.
+        let out = run_http(&json!({"url": format!("{base}/y")}), "").unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            (v["status"].clone(), v["ok"].clone()),
+            (json!(404), json!(false))
+        );
+        assert_eq!(v["body"], json!("nope"));
+        assert_eq!(v["json"], Value::Null);
+        assert_eq!(percent_encode("a b/$(c)"), "a%20b%2F%24%28c%29");
+        let cfg = json!({"method": "POST", "url": format!("{base}/z"), "headers": {"X-T": "{input}"}, "body": "b={input}"});
+        run_http(&cfg, "val").unwrap();
+        let seen = h.join().unwrap();
+        assert!(seen[0].starts_with("GET /x?q=hi "));
+        assert!(seen[2].starts_with("POST /z "));
+        assert!(seen[2].to_ascii_lowercase().contains("x-t: val"));
+        assert!(seen[2].ends_with("b=val"));
+    }
+
+    #[test]
+    fn http_node_fails_on_transport_error_and_timeout() {
+        // A port nothing listens on.
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        drop(l);
+        let err = run_http(&json!({"url": format!("http://{addr}/")}), "").unwrap_err();
+        assert!(err.contains("request failed"), "{err}");
+        // A server that accepts and never answers.
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let h = std::thread::spawn(move || {
+            let (c, _) = l.accept().unwrap();
+            std::thread::sleep(Duration::from_millis(2500));
+            drop(c);
+        });
+        let err = run_http(
+            &json!({"url": format!("http://{addr}/"), "timeout_secs": 1}),
+            "",
+        )
+        .unwrap_err();
+        assert!(err.contains("request failed"), "{err}");
+        h.join().unwrap();
+        assert!(run_http(&json!({"url": "{input}"}), "ftp://x").is_err());
+    }
+
+    #[test]
+    fn task_config_validation() {
+        use WorkflowNodeKind as K;
+        let ok = validate_config(
+            K::Task,
+            &json!({"action": "create", "project": 3, "status": "todo"}),
+        )
+        .unwrap();
+        assert_eq!(ok["project"], json!("3"));
+        assert_eq!(ok["pins"]["out"][0]["ty"], json!("any"));
+        validate_config(K::Task, &json!({"action": "read", "task": "{input}"})).unwrap();
+        validate_config(
+            K::Task,
+            &json!({"action": "update", "task": 4, "result": "x"}),
+        )
+        .unwrap();
+        let bad = |c: Value| validate_config(K::Task, &c).unwrap_err();
+        assert!(bad(json!({})).contains("action"));
+        assert!(bad(json!({"action": "drop"})).contains("create, update or read"));
+        assert!(bad(json!({"action": "create"})).contains("project"));
+        assert!(bad(json!({"action": "read"})).contains("task"));
+        assert!(bad(json!({"action": "update", "task": 1})).contains("at least one"));
+        assert!(
+            bad(json!({"action": "read", "task": 1, "status": "done"})).contains("does not apply")
+        );
+        assert!(
+            bad(json!({"action": "create", "project": "p", "status": "nope"})).contains("status")
+        );
+        assert!(bad(json!({"action": "read", "task": "abc"})).contains("task"));
+        assert!(bad(json!({"action": "read", "task": 1, "zz": 1})).contains("unknown key"));
+    }
+
+    #[test]
+    fn task_node_creates_reads_and_updates_a_task() {
+        use WorkflowNodeKind as K;
+        let (st, _d) = store();
+        let pid = st.with(|s| {
+            s.create_project("TaskNodes", None, None, None, None)
+                .unwrap()
+                .id
+        });
+        let run_one = |cfg: Value, input: &str| {
+            let wf = st.with(|s| sub_wf(s, &format!("W{}", input.len()), Some((K::Task, cfg))));
+            run_workflow(&st, wf, WorkflowTrigger::Manual, input).unwrap()
+        };
+        let run = run_one(
+            json!({"action": "create", "project": "tasknodes", "description": "do {input}"}),
+            "it",
+        );
+        assert_eq!(run.status, WorkflowRunStatus::Succeeded, "{run:?}");
+        let made: Value = serde_json::from_str(&run.steps.last().unwrap().output).unwrap();
+        assert_eq!(made["description"], json!("do it"));
+        let id = made["id"].as_i64().unwrap();
+        assert_eq!(st.with(|s| s.get_task(id).unwrap().project_id), pid);
+
+        let run = run_one(
+            json!({"action": "update", "task": "{input}", "status": "done", "result": "fine"}),
+            &id.to_string(),
+        );
+        assert_eq!(run.status, WorkflowRunStatus::Succeeded, "{run:?}");
+        let t = st.with(|s| s.get_task(id).unwrap());
+        assert_eq!(t.status, Status::Done);
+        assert_eq!(t.result.as_deref(), Some("fine"));
+
+        let run = run_one(json!({"action": "read", "task": id}), "ignored!!");
+        let read: Value = serde_json::from_str(&run.steps.last().unwrap().output).unwrap();
+        assert_eq!(read["status"], json!("done"));
+
+        let run = run_one(json!({"action": "read", "task": "{input}"}), "999999");
+        assert_eq!(run.status, WorkflowRunStatus::Failed);
+        let run = run_one(json!({"action": "read", "task": "{input}"}), "abc");
+        assert_eq!(run.status, WorkflowRunStatus::Failed);
+    }
+
+    /// A workflow `name`: trigger → `command` (and, if `child` names one, a
+    /// subworkflow node instead of the command).
+    fn sub_wf(s: &mut Store, name: &str, step: Option<(WorkflowNodeKind, Value)>) -> i64 {
+        let wf = s.create_workflow(None, name, None).unwrap().id;
+        let t = node(
+            s,
+            wf,
+            WorkflowNodeKind::Trigger,
+            "T",
+            json!({"mode": "manual"}),
+        );
+        if let Some((kind, cfg)) = step {
+            let n = node(s, wf, kind, "N", cfg);
+            s.create_workflow_edge(wf, t, n, None).unwrap();
+        }
+        wf
+    }
+
+    #[test]
+    fn subworkflow_passes_input_in_and_output_out_and_a_failing_child_fails_the_parent() {
+        let (st, _d) = store();
+        let (ok_parent, bad_parent) = st.with(|s| {
+            sub_wf(s, "Echo", Some((WorkflowNodeKind::Cli, cli("cat"))));
+            sub_wf(s, "Boom", Some((WorkflowNodeKind::Cli, cli("exit 3"))));
+            let a = sub_wf(
+                s,
+                "PA",
+                Some((WorkflowNodeKind::Subworkflow, json!({"workflow": "echo"}))),
+            );
+            let b = sub_wf(
+                s,
+                "PB",
+                Some((WorkflowNodeKind::Subworkflow, json!({"workflow": "Boom"}))),
+            );
+            (a, b)
+        });
+        let run = run_workflow(&st, ok_parent, WorkflowTrigger::Manual, "hello").unwrap();
+        assert_eq!(run.status, WorkflowRunStatus::Succeeded, "{run:?}");
+        assert_eq!(run.steps.last().unwrap().output.trim(), "hello");
+        let run = run_workflow(&st, bad_parent, WorkflowTrigger::Manual, "x").unwrap();
+        assert_eq!(run.status, WorkflowRunStatus::Failed);
+        let step = run.steps.last().unwrap();
+        assert_eq!(step.status, WorkflowStepStatus::Failed);
+        assert!(step.error.as_deref().unwrap().contains("Boom"), "{step:?}");
+    }
+
+    #[test]
+    fn subworkflow_refuses_loops_and_deep_chains() {
+        use WorkflowNodeKind as K;
+        let (st, _d) = store();
+        st.with(|s| {
+            let call = |to: &str| json!({"workflow": to});
+            let new = |to: &str| WorkflowNodeNew {
+                kind: K::Subworkflow,
+                title: "S".into(),
+                config: Some(call(to)),
+                x: None,
+                y: None,
+            };
+            let a = sub_wf(s, "A", None);
+            let b = sub_wf(s, "B", None);
+            // Self-call and an unknown child.
+            assert!(matches!(
+                s.create_workflow_node(a, &new("A")),
+                Err(Error::Validation(_))
+            ));
+            assert!(matches!(
+                s.create_workflow_node(a, &new("Nope")),
+                Err(Error::Validation(_))
+            ));
+            // A → B is fine; B → A closes the loop.
+            s.create_workflow_node(a, &new("B")).unwrap();
+            let err = s.create_workflow_node(b, &new("A")).unwrap_err();
+            assert!(matches!(err, Error::Validation(_)), "{err:?}");
+            // A chain of 8 workflows is allowed, a 9th is not.
+            let ids: Vec<i64> = (1..=9).map(|i| sub_wf(s, &format!("W{i}"), None)).collect();
+            for i in (1..8).rev() {
+                s.create_workflow_node(ids[i - 1], &new(&format!("W{}", i + 1)))
+                    .unwrap();
+            }
+            let w0 = sub_wf(s, "W0", None);
+            let err = s.create_workflow_node(w0, &new("W1")).unwrap_err();
+            assert!(err.to_string().contains("deep"), "{err}");
+        });
+    }
+
+    #[test]
+    fn subworkflow_run_refuses_a_loop_made_after_the_fact() {
+        let (st, d) = store();
+        let (a, b, t) = st.with(|s| {
+            let b = sub_wf(s, "LB", None);
+            let a = sub_wf(
+                s,
+                "LA",
+                Some((WorkflowNodeKind::Subworkflow, json!({"workflow": "LB"}))),
+            );
+            (a, b, s.get_workflow_view(b).unwrap().nodes[0].id)
+        });
+        // Bypass the save-time check, as a hand-edited db would.
+        let conn = rusqlite::Connection::open(d.path().join("t.db")).unwrap();
+        conn.execute(
+            "INSERT INTO workflow_nodes (workflow_id, kind, title, config, x, y, created_at, updated_at) \
+             VALUES (?1, 'subworkflow', 'S', '{\"workflow\":\"LA\"}', 0, 0, datetime('now'), datetime('now'))",
+            [b],
+        )
+        .unwrap();
+        let n = conn.last_insert_rowid();
+        st.with(|s| s.create_workflow_edge(b, t, n, None).unwrap());
+        let run = run_workflow(&st, a, WorkflowTrigger::Manual, "").unwrap();
+        assert_eq!(run.status, WorkflowRunStatus::Failed);
+        assert!(format!("{run:?}").contains("call itself"), "{run:?}");
+    }
+
+    #[test]
+    fn gate_config_validation_and_edges() {
+        use WorkflowNodeKind as K;
+        let ok = validate_config(K::Gate, &json!({})).unwrap();
+        assert_eq!(ok["timeout_secs"], json!(3600));
+        assert_eq!(ok["on_timeout"], json!("reject"));
+        let ok = validate_config(K::Gate, &json!({"message": "ship?", "timeout_secs": 5})).unwrap();
+        assert_eq!(
+            (ok["message"].clone(), ok["timeout_secs"].clone()),
+            (json!("ship?"), json!(5))
+        );
+        let bad = |c: Value| validate_config(K::Gate, &c).unwrap_err();
+        assert!(bad(json!({"timeout_secs": 0})).contains("timeout_secs"));
+        assert!(bad(json!({"timeout_secs": 86401})).contains("timeout_secs"));
+        assert!(bad(json!({"on_timeout": "approve"})).contains("on_timeout"));
+        assert!(bad(json!({"nope": 1})).contains("unknown key"));
+        let (st, _d) = store();
+        st.with(|s| {
+            let wf = s.create_workflow(None, "G", None).unwrap().id;
+            let g = node(s, wf, K::Gate, "G", json!({}));
+            let o = node(s, wf, K::Cli, "O", cli("true"));
+            assert!(matches!(
+                s.create_workflow_edge(wf, g, o, None),
+                Err(Error::Validation(_))
+            ));
+            assert!(matches!(
+                s.create_workflow_edge(wf, g, o, Some("true".into())),
+                Err(Error::Validation(_))
+            ));
+            s.create_workflow_edge(wf, g, o, Some("approved".into()))
+                .unwrap();
+        });
+    }
+
+    /// A gate in a one-node workflow, run directly with a fast poll.
+    fn gate_fixture(
+        timeout: u64,
+    ) -> (Arc<Mutex<Store>>, tempfile::TempDir, WorkflowView, i64, i64) {
+        let (st, d) = store();
+        let (view, run) = st.with(|s| {
+            let wf = s.create_workflow(None, "G", None).unwrap().id;
+            node(
+                s,
+                wf,
+                WorkflowNodeKind::Gate,
+                "G",
+                json!({"message": "ship?", "timeout_secs": timeout}),
+            );
+            let run = s
+                .create_workflow_run(wf, WorkflowTrigger::Manual, "")
+                .unwrap()
+                .id;
+            (s.get_workflow_view(wf).unwrap(), run)
+        });
+        let gate = view.nodes[0].id;
+        (Arc::new(st), d, view, run, gate)
+    }
+
+    #[test]
+    fn gate_routes_on_the_decision_and_times_out_as_a_rejection() {
+        for (decision, want) in [
+            (WorkflowGateStatus::Approved, "approved"),
+            (WorkflowGateStatus::Rejected, "rejected"),
+        ] {
+            let (st, _d, view, run, _) = gate_fixture(30);
+            let decider = {
+                let st = Arc::clone(&st);
+                std::thread::spawn(move || {
+                    loop {
+                        let pending = st.with(|s| s.list_workflow_gates(None, false)).unwrap();
+                        if let Some(g) = pending.first() {
+                            assert_eq!(g.message, "ship?");
+                            st.with(|s| s.decide_workflow_gate(g.id, decision, None))
+                                .unwrap();
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                })
+            };
+            let mut notified = 0;
+            let (out, route) = run_gate(
+                &*st,
+                &view,
+                &view.nodes[0],
+                "payload",
+                run,
+                Duration::from_millis(10),
+                |_, name| {
+                    assert_eq!(name, "G");
+                    notified += 1;
+                },
+            )
+            .unwrap();
+            decider.join().unwrap();
+            assert_eq!(
+                (out.as_str(), route.as_deref(), notified),
+                ("payload", Some(want), 1)
+            );
+        }
+        // Nobody decides: one second later it is a rejection with a reason,
+        // and a late decision is a conflict.
+        let (st, _d, view, run, _) = gate_fixture(1);
+        let (_, route) = run_gate(
+            &*st,
+            &view,
+            &view.nodes[0],
+            "x",
+            run,
+            Duration::from_millis(20),
+            |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(route.as_deref(), Some("rejected"));
+        let g = st
+            .with(|s| s.list_workflow_gates(Some(run), true))
+            .unwrap()
+            .remove(0);
+        assert_eq!(
+            (g.status, g.reason.as_deref()),
+            (WorkflowGateStatus::Rejected, Some("timed out"))
+        );
+        assert!(matches!(
+            st.with(|s| s.decide_workflow_gate(g.id, WorkflowGateStatus::Approved, None)),
+            Err(Error::Conflict(_))
+        ));
+    }
+
+    #[test]
+    fn gate_run_takes_the_decided_edge_and_skips_the_other() {
+        let (st, _d) = store();
+        let st = Arc::new(st);
+        let (view, run) = st.with(|s| {
+            let wf = s.create_workflow(None, "G2", None).unwrap().id;
+            let t = node(
+                s,
+                wf,
+                WorkflowNodeKind::Trigger,
+                "T",
+                json!({"mode": "manual"}),
+            );
+            let g = node(
+                s,
+                wf,
+                WorkflowNodeKind::Gate,
+                "G",
+                json!({"timeout_secs": 30}),
+            );
+            let a = node(s, wf, WorkflowNodeKind::Cli, "A", cli("echo yes"));
+            let b = node(s, wf, WorkflowNodeKind::Cli, "B", cli("echo no"));
+            s.create_workflow_edge(wf, t, g, None).unwrap();
+            s.create_workflow_edge(wf, g, a, Some("approved".into()))
+                .unwrap();
+            s.create_workflow_edge(wf, g, b, Some("rejected".into()))
+                .unwrap();
+            let run = s
+                .create_workflow_run(wf, WorkflowTrigger::Manual, "")
+                .unwrap();
+            (s.get_workflow_view(wf).unwrap(), run)
+        });
+        let decider = {
+            let st = Arc::clone(&st);
+            std::thread::spawn(move || {
+                loop {
+                    if let Some(g) = st
+                        .with(|s| s.list_workflow_gates(None, false))
+                        .unwrap()
+                        .first()
+                    {
+                        st.with(|s| {
+                            s.decide_workflow_gate(g.id, WorkflowGateStatus::Rejected, None)
+                        })
+                        .unwrap();
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            })
+        };
+        let done = execute_run(&*st, &view, run).unwrap();
+        decider.join().unwrap();
+        assert_eq!(done.status, WorkflowRunStatus::Succeeded);
+        let status = |t: &str| done.steps.iter().find(|x| x.title == t).unwrap().status;
+        assert_eq!(status("G"), WorkflowStepStatus::Ok);
+        assert_eq!(status("A"), WorkflowStepStatus::Skipped);
+        assert_eq!(status("B"), WorkflowStepStatus::Ok);
+    }
+
+    #[test]
+    fn trycatch_config_validation_and_edges() {
+        use WorkflowNodeKind as K;
+        let w = json!({"kind": "cli", "config": {"command": "false"}});
+        let ok = validate_config(K::Trycatch, &json!({"wrap": w, "timeout_secs": 5})).unwrap();
+        assert_eq!(ok["wrap"]["config"]["command"], json!("false"));
+        assert_eq!(ok["timeout_secs"], json!(5));
+        let bad = |c: Value| validate_config(K::Trycatch, &c).unwrap_err();
+        assert!(bad(json!({})).contains("wrap"));
+        assert!(bad(json!({"wrap": w, "attempts": 2})).contains("unknown key"));
+        assert!(bad(json!({"wrap": w, "timeout_secs": 0})).contains("timeout_secs"));
+        for k in ["branch", "trycatch", "retry", "nope"] {
+            assert!(bad(json!({"wrap": {"kind": k, "config": {}}})).contains("can wrap"));
+        }
+        assert!(bad(json!({"wrap": {"kind": "cli", "config": {}}})).contains("command"));
+        let (st, _d) = store();
+        st.with(|s| {
+            let wf = s.create_workflow(None, "TC", None).unwrap().id;
+            let t = node(s, wf, K::Trycatch, "T", json!({"wrap": w}));
+            let o = node(s, wf, K::Cli, "O", cli("true"));
+            for b in [None, Some("true"), Some("approved")] {
+                assert!(matches!(
+                    s.create_workflow_edge(wf, t, o, b.map(String::from)),
+                    Err(Error::Validation(_))
+                ));
+            }
+            s.create_workflow_edge(wf, t, o, Some("ok".into())).unwrap();
+            s.create_workflow_edge(wf, t, o, Some("caught".into()))
+                .unwrap();
+        });
+    }
+
+    /// A trycatch around `command`, with an `ok` and a `caught` cli behind
+    /// it (and the `caught` edge left out when `wire_caught` is false).
+    fn run_trycatch_workflow(command: &str, wire_caught: bool) -> WorkflowRun {
+        let (st, _d) = store();
+        let wf = st.with(|s| {
+            let wf = s.create_workflow(None, "TC2", None).unwrap().id;
+            let t = node(
+                s,
+                wf,
+                WorkflowNodeKind::Trigger,
+                "T",
+                json!({"mode": "manual"}),
+            );
+            let c = node(
+                s,
+                wf,
+                WorkflowNodeKind::Trycatch,
+                "C",
+                json!({"wrap": {"kind": "cli", "config": cli(command)}}),
+            );
+            let ok = node(s, wf, WorkflowNodeKind::Cli, "OK", cli("echo fine"));
+            let caught = node(s, wf, WorkflowNodeKind::Cli, "CAUGHT", cli("echo handled"));
+            s.create_workflow_edge(wf, t, c, None).unwrap();
+            s.create_workflow_edge(wf, c, ok, Some("ok".into()))
+                .unwrap();
+            if wire_caught {
+                s.create_workflow_edge(wf, c, caught, Some("caught".into()))
+                    .unwrap();
+            }
+            wf
+        });
+        run_workflow(&st, wf, WorkflowTrigger::Manual, "").unwrap()
+    }
+
+    #[test]
+    fn trycatch_failure_is_caught_and_the_run_succeeds() {
+        let step = |r: &WorkflowRun, t: &str| r.steps.iter().find(|x| x.title == t).unwrap().status;
+        let r = run_trycatch_workflow("exit 3", true);
+        assert_eq!(r.status, WorkflowRunStatus::Succeeded, "{r:?}");
+        assert_eq!(step(&r, "C"), WorkflowStepStatus::Ok);
+        assert_eq!(step(&r, "OK"), WorkflowStepStatus::Skipped);
+        assert_eq!(step(&r, "CAUGHT"), WorkflowStepStatus::Ok);
+        let r = run_trycatch_workflow("echo hi", true);
+        assert_eq!(r.status, WorkflowRunStatus::Succeeded, "{r:?}");
+        assert_eq!(step(&r, "OK"), WorkflowStepStatus::Ok);
+        assert_eq!(step(&r, "CAUGHT"), WorkflowStepStatus::Skipped);
+        // No `caught` edge wired: nothing downstream runs, the run still succeeds.
+        let r = run_trycatch_workflow("exit 3", false);
+        assert_eq!(r.status, WorkflowRunStatus::Succeeded, "{r:?}");
+        assert_eq!(step(&r, "OK"), WorkflowStepStatus::Skipped);
+    }
+
+    #[test]
+    fn retry_config_validation_table() {
+        use WorkflowNodeKind as K;
+        let w = json!({"kind": "cli", "config": {"command": "true"}});
+        let ok = validate_config(K::Retry, &json!({"wrap": w})).unwrap();
+        assert_eq!(ok["attempts"], json!(3));
+        assert_eq!(ok["backoff_ms"], json!(0));
+        assert_eq!(ok["wrap"]["config"]["command"], json!("true"));
+        let bad = |c: Value| validate_config(K::Retry, &c).unwrap_err();
+        assert!(bad(json!({})).contains("wrap"));
+        assert!(bad(json!({"wrap": w, "attempts": 0})).contains("attempts"));
+        assert!(bad(json!({"wrap": w, "attempts": 11})).contains("attempts"));
+        assert!(bad(json!({"wrap": w, "timeout_secs": 3601})).contains("timeout_secs"));
+        assert!(bad(json!({"wrap": w, "backoff_factor": 11})).contains("backoff_factor"));
+        for k in ["branch", "retry", "parallel", "nope"] {
+            assert!(bad(json!({"wrap": {"kind": k, "config": {}}})).contains("can wrap"));
+        }
+        // The wrapped config is validated as its own kind.
+        assert!(bad(json!({"wrap": {"kind": "cli", "config": {}}})).contains("command"));
+    }
+
+    #[test]
+    fn retry_runs_until_success_with_backoff_then_exhausts() {
+        let cfg = validate_config(
+            WorkflowNodeKind::Retry,
+            &json!({"wrap": {"kind": "cli", "config": {"command": "true"}},
+                    "attempts": 3, "backoff_ms": 100, "backoff_factor": 2, "timeout_secs": 7}),
+        )
+        .unwrap();
+        let node = WorkflowNode {
+            id: 1,
+            workflow_id: 1,
+            kind: WorkflowNodeKind::Retry,
+            title: "R".into(),
+            config: cfg.clone(),
+            x: 0.0,
+            y: 0.0,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        let mut calls = 0;
+        let mut sleeps = Vec::new();
+        let r = run_retry(
+            &cfg,
+            |n| {
+                calls += 1;
+                assert_eq!(n.kind, WorkflowNodeKind::Cli);
+                assert_eq!(n.config["timeout_secs"], json!(7));
+                if calls < 3 {
+                    Err("flaky".into())
+                } else {
+                    Ok(("fine".into(), None))
+                }
+            },
+            |d| sleeps.push(d.as_millis()),
+            &node,
+        );
+        assert_eq!(r.unwrap().0, "fine");
+        assert_eq!((calls, sleeps), (3, vec![100, 200]));
+        let e = run_retry(&cfg, |_| Err("boom".into()), |_| {}, &node).unwrap_err();
+        assert_eq!(e, "failed after 3 attempt(s): boom");
+    }
+
+    #[test]
+    fn switch_config_validation_table() {
+        use WorkflowNodeKind as K;
+        let ok = |c: Value| validate_config(K::Switch, &c).unwrap();
+        let bad = |c: Value| validate_config(K::Switch, &c).unwrap_err();
+        // op defaults to equals; labels default to the match, trimmed.
+        assert_eq!(
+            ok(json!({"cases": [{"match": " a "}, {"match": "b", "label": "bee"}]})),
+            json!({"op": "equals", "cases": [
+                {"match": "a", "label": "a"}, {"match": "b", "label": "bee"}]})
+        );
+        let two = || json!([{"match": "a"}, {"match": "b"}]);
+        assert!(bad(json!({"op": "score_above", "cases": two()})).contains("\"op\""));
+        assert!(bad(json!({"cases": [{"match": "a"}]})).contains("2 or more"));
+        assert!(bad(json!({"op": "contains"})).contains("2 or more"));
+        assert!(
+            bad(json!({"cases": [{"match": "a"}, {"match": "b", "label": "default"}]}))
+                .contains("default")
+        );
+        assert!(
+            bad(json!({"cases": [{"match": "a", "label": "x"}, {"match": "b", "label": "x"}]}))
+                .contains("duplicate")
+        );
+        assert!(bad(json!({"cases": [{"match": "a"}, {"match": " "}]})).contains("match"));
+        assert!(!bad(json!({"op": "regex", "cases": [{"match": "a"}, {"match": "("}]})).is_empty());
+        assert!(bad(json!({"cases": two(), "x": 1})).contains("unknown key"));
+    }
+
+    #[test]
+    fn switch_routes_to_the_first_matching_case_else_default() {
+        let (st, _d) = store();
+        let (view, s) = st.with(|s| {
+            let wf = s.create_workflow(None, "Sw", None).unwrap().id;
+            let t = node(
+                s,
+                wf,
+                WorkflowNodeKind::Trigger,
+                "T",
+                json!({"mode": "manual"}),
+            );
+            let sw = node(
+                s,
+                wf,
+                WorkflowNodeKind::Switch,
+                "S",
+                json!({"op": "contains", "cases": [
+                    {"match": "red", "label": "r"}, {"match": "blue", "label": "b"}]}),
+            );
+            let r = node(s, wf, WorkflowNodeKind::Cli, "R", cli("true"));
+            let b = node(s, wf, WorkflowNodeKind::Cli, "B", cli("true"));
+            let d = node(s, wf, WorkflowNodeKind::Cli, "D", cli("true"));
+            s.create_workflow_edge(wf, t, sw, None).unwrap();
+            s.create_workflow_edge(wf, sw, r, Some("r".into())).unwrap();
+            s.create_workflow_edge(wf, sw, b, Some("b".into())).unwrap();
+            s.create_workflow_edge(wf, sw, d, Some("default".into()))
+                .unwrap();
+            // An edge needs a case label or default.
+            assert!(matches!(
+                s.create_workflow_edge(wf, sw, r, None),
+                Err(Error::Validation(_))
+            ));
+            assert!(matches!(
+                s.create_workflow_edge(wf, sw, r, Some("green".into())),
+                Err(Error::Validation(_))
+            ));
+            (s.get_workflow_view(wf).unwrap(), sw)
+        });
+        let node = view.nodes.iter().find(|n| n.id == s).unwrap();
+        let run = |input: &str| run_switch(&node.config, input).unwrap();
+        // First match wins, even when a later case matches too.
+        let (out, route) = run("red and blue");
+        assert_eq!(route.as_deref(), Some("r"));
+        let out: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(out["matched"], json!(true));
+        assert_eq!(out["label"], json!("r"));
+        assert_eq!(reached(&view, s, route), vec!["R"]);
+        let (_, route) = run("just blue\n");
+        assert_eq!(reached(&view, s, route), vec!["B"]);
+        // No match falls to default.
+        let (out, route) = run("green");
+        assert_eq!(route.as_deref(), Some("default"));
+        let out: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(out["matched"], json!(false));
+        assert_eq!(reached(&view, s, route), vec!["D"]);
+    }
+
+    #[test]
     fn ambient_trigger_config_validation() {
         use WorkflowNodeKind as K;
         let ok = |c: Value| validate_config(K::Trigger, &c).unwrap();
@@ -3614,6 +7549,202 @@ mod tests {
     }
 
     #[test]
+    fn comment_box_is_editor_only() {
+        use WorkflowNodeKind::Comment;
+        let bad = |c: Value| validate_config(Comment, &c).unwrap_err();
+        assert!(bad(json!({"color": "teal"})).contains("color"));
+        assert!(bad(json!({"zz": 1})).contains("zz"));
+        assert!(bad(json!({"pins": {"in": [], "out": []}})).contains("pins"));
+        let ok = validate_config(Comment, &json!({"text": "group", "color": "warn"})).unwrap();
+        assert_eq!(ok, json!({"text": "group", "color": "warn"}));
+        assert_eq!(validate_config(Comment, &json!({})).unwrap(), json!({}));
+
+        let (st, _d) = store();
+        let (view, run, c) = st.with(|s| {
+            let wf = s.create_workflow(None, "Cm", None).unwrap().id;
+            let t = node(
+                s,
+                wf,
+                WorkflowNodeKind::Trigger,
+                "T",
+                json!({"mode": "manual"}),
+            );
+            let o = node(
+                s,
+                wf,
+                WorkflowNodeKind::Output,
+                "O",
+                json!({"target": "log", "log": "cm"}),
+            );
+            let c = node(s, wf, Comment, "Group", json!({"color": "good"}));
+            s.create_workflow_edge(wf, t, o, None).unwrap();
+            // No edge may touch a comment, in either direction.
+            for (a, b) in [(t, c), (c, o)] {
+                let e = s.create_workflow_edge(wf, a, b, None).unwrap_err();
+                assert!(e.to_string().contains("comment"), "{e}");
+            }
+            let run = s
+                .create_workflow_run(wf, WorkflowTrigger::Manual, "x")
+                .unwrap()
+                .id;
+            (s.get_workflow_view(wf).unwrap(), run, c)
+        });
+        let done = execute_run(&st, &view, st.with(|s| s.get_workflow_run(run)).unwrap()).unwrap();
+        assert_eq!(done.status, WorkflowRunStatus::Succeeded);
+        assert!(done.steps.iter().all(|x| x.node_id != c));
+        assert_eq!(done.steps.len(), 2);
+    }
+
+    #[test]
+    fn verify_node_validates_and_runs() {
+        use WorkflowNodeKind::Verify;
+        let bad = |c: Value| validate_config(Verify, &c).unwrap_err();
+        assert!(bad(json!({})).contains("command"));
+        assert!(bad(json!({"command": "  "})).contains("empty"));
+        assert!(bad(json!({"command": "true", "mode": "visual"})).contains("mode"));
+        assert!(bad(json!({"command": "true", "url": "http://x/"})).contains("browser"));
+        assert!(bad(json!({"command": "true", "timeout_secs": 0})).contains("timeout_secs"));
+        assert!(bad(json!({"command": "true", "zz": 1})).contains("zz"));
+        assert!(bad(json!({"command": "true", "pins": {"in": [], "out": []}})).contains("pins"));
+        let ok = validate_config(Verify, &json!({"command": "true"})).unwrap();
+        assert_eq!(ok["mode"], "test");
+        assert_eq!(ok["pins"]["out"][0]["name"], "pass");
+        let dir = std::env::temp_dir().display().to_string();
+        let run = |c: Value, input: &str| {
+            run_verify(&validate_config(Verify, &c).unwrap(), input, &dir)
+                .map(|o| serde_json::from_str::<Value>(&o).unwrap())
+        };
+        let r = run(json!({"command": "echo all green"}), "").unwrap();
+        assert_eq!(r["pass"], true);
+        assert_eq!(r["exit_code"], 0);
+        assert_eq!(r["evidence"], "all green");
+        // A failing check is data, not a failed node.
+        let r = run(json!({"command": "echo boom >&2; exit 3"}), "").unwrap();
+        assert_eq!(r["pass"], false);
+        assert_eq!(r["exit_code"], 3);
+        assert!(r["evidence"].as_str().unwrap().contains("boom"));
+        // `expect` must appear in the output.
+        let r = run(
+            json!({"command": "echo ok 12 passed", "expect": "12 passed"}),
+            "",
+        )
+        .unwrap();
+        assert_eq!(r["pass"], true);
+        let r = run(json!({"command": "echo ok", "expect": "12 passed"}), "").unwrap();
+        assert_eq!(r["pass"], false);
+        // Browser mode hands the url over as an environment variable.
+        let r = run(
+            json!({"mode": "browser", "command": "echo \"$NARU_VERIFY_URL\"", "url": "http://h/{input}"}),
+            "p",
+        )
+        .unwrap();
+        assert_eq!(r["evidence"], "http://h/p");
+        // A timeout fails the node.
+        let e = run(json!({"command": "sleep 5", "timeout_secs": 1}), "").unwrap_err();
+        assert!(e.contains("timed out"), "{e}");
+    }
+
+    #[test]
+    fn memory_node_validates_and_runs() {
+        use WorkflowNodeKind::Memory;
+        let bad = |c: Value| validate_config(Memory, &c).unwrap_err();
+        assert!(bad(json!({"op": "drop"})).contains("op"));
+        assert!(bad(json!({"op": "add", "query": "x"})).contains("does not apply"));
+        assert!(bad(json!({"op": "search", "text": "x"})).contains("does not apply"));
+        assert!(bad(json!({"op": "add", "pins": {}})).contains("pins"));
+        assert!(bad(json!({"op": "search", "limit": 0})).contains("limit"));
+        assert!(bad(json!({"op": "add", "zz": 1})).contains("zz"));
+        let (st, _dir) = store();
+        let pid = st
+            .with(|s| s.create_project("P", None, None, None, None))
+            .unwrap()
+            .id;
+        let run = |c: Value, project: Option<i64>, input: &str| {
+            run_memory(&st, project, &validate_config(Memory, &c).unwrap(), input)
+                .map(|o| serde_json::from_str::<Value>(&o).unwrap())
+        };
+        // Add: configured text with {input}, then the incoming input itself.
+        let a = run(
+            json!({"op": "add", "text": "likes {input}"}),
+            Some(pid),
+            "zebras",
+        )
+        .unwrap();
+        assert_eq!(a["result"], "likes zebras");
+        assert!(a["id"].as_str().unwrap().parse::<i64>().is_ok());
+        run(json!({"op": "add"}), Some(pid), "prefers walnut").unwrap();
+        // Search finds it, with the workflow's project or a named one.
+        let r = run(json!({"op": "search", "query": "zebras"}), Some(pid), "").unwrap();
+        assert!(r["result"].as_str().unwrap().contains("zebras"));
+        let r = run(json!({"op": "search", "project": "p"}), None, "walnut").unwrap();
+        assert!(r["result"].as_str().unwrap().contains("walnut"));
+        // No project, nothing to add/search, unknown project: failures.
+        assert!(
+            run(json!({"op": "add", "text": "x"}), None, "")
+                .unwrap_err()
+                .contains("project")
+        );
+        assert!(
+            run(json!({"op": "add"}), Some(pid), " ")
+                .unwrap_err()
+                .contains("nothing")
+        );
+        assert!(run(json!({"op": "search", "project": "nope"}), None, "x").is_err());
+    }
+
+    #[test]
+    fn file_node_validates_and_round_trips() {
+        use WorkflowNodeKind::File;
+        let bad = |c: Value| validate_config(File, &c).unwrap_err();
+        assert!(bad(json!({"op": "delete", "path": "a"})).contains("op"));
+        assert!(bad(json!({"op": "read"})).contains("path"));
+        assert!(bad(json!({"op": "read", "path": " "})).contains("empty"));
+        assert!(bad(json!({"op": "read", "path": "a", "content": "x"})).contains("does not apply"));
+        assert!(bad(json!({"op": "write", "path": "a", "append": "y"})).contains("append"));
+        assert!(bad(json!({"op": "read", "path": "a", "pins": {}})).contains("pins"));
+        assert!(bad(json!({"op": "read", "path": "a", "zz": 1})).contains("zz"));
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path().to_str().unwrap();
+        let run = |c: Value, input: &str| {
+            run_file(&validate_config(File, &c).unwrap(), input, d)
+                .map(|o| serde_json::from_str::<Value>(&o).unwrap())
+        };
+        // Relative path resolves against cwd; parents are created; {input} is literal text.
+        let hostile = "x $(touch pwn) `y` \"q\"";
+        let w = run(
+            json!({"op": "write", "path": "a/b.txt", "content": "<{input}>"}),
+            hostile,
+        )
+        .unwrap();
+        assert_eq!(w["result"], format!("<{hostile}>"));
+        assert!(!dir.path().join("pwn").exists());
+        // No content: the input itself; append keeps what was there.
+        run(
+            json!({"op": "write", "path": "a/b.txt", "append": true}),
+            "+tail",
+        )
+        .unwrap();
+        let r = run(json!({"op": "read", "path": "a/b.txt"}), "").unwrap();
+        assert_eq!(r["result"], format!("<{hostile}>+tail"));
+        assert!(r["path"].as_str().unwrap().ends_with("b.txt"));
+        // Overwrite truncates.
+        run(
+            json!({"op": "write", "path": "a/b.txt", "content": "z"}),
+            "",
+        )
+        .unwrap();
+        assert_eq!(
+            run(json!({"op": "read", "path": "a/b.txt"}), "").unwrap()["result"],
+            "z"
+        );
+        // A missing file is a failure; a large file is cut and marked.
+        assert!(run(json!({"op": "read", "path": "nope.txt"}), "").is_err());
+        std::fs::write(dir.path().join("big"), "x".repeat(OUTPUT_CAP + 10)).unwrap();
+        let big = run(json!({"op": "read", "path": "big"}), "").unwrap();
+        assert!(big["result"].as_str().unwrap().ends_with("[truncated]"));
+    }
+
+    #[test]
     fn a_vanished_workflow_in_a_batch_does_not_stop_the_others() {
         let (st, _d) = store();
         let mk = |name: &str| {
@@ -3684,6 +7815,75 @@ mod tests {
         let expect = json!({"event": "idea", "speaker": "a'b", "text": text}).to_string();
         assert_eq!(runs[0].input, expect);
         assert_eq!(runs[0].steps[1].output, expect);
+    }
+
+    #[test]
+    fn git_node_config_and_run() {
+        use WorkflowNodeKind::Git;
+        let ok = |c: Value| validate_config(Git, &c).unwrap();
+        let bad = |c: Value| validate_config(Git, &c).unwrap_err();
+        let cfg = ok(json!({"op": "commit", "message": "m", "paths": [" a.txt "]}));
+        assert_eq!(cfg["paths"], json!(["a.txt"]));
+        assert_eq!(cfg["pins"]["out"][1]["ty"], "bool");
+        assert!(bad(json!({"op": "push"})).contains("op"));
+        assert!(bad(json!({"op": "commit"})).contains("message"));
+        assert!(
+            bad(json!({"op": "commit", "message": "m", "name": "x"})).contains("does not apply")
+        );
+        assert!(bad(json!({"op": "branch", "name": "-x"})).contains("start with"));
+        assert!(bad(json!({"op": "branch", "name": "a b"})).contains("whitespace"));
+        assert!(bad(json!({"op": "diff", "base": "--output=/tmp/x"})).contains("start with"));
+        assert!(bad(json!({"op": "diff", "pins": {}})).contains("pins"));
+
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path().to_str().unwrap();
+        let g = |args: &[&str]| git_ok(d, args, Duration::from_secs(30)).unwrap();
+        g(&["init", "-q"]);
+        g(&["config", "user.name", "T"]);
+        g(&["config", "user.email", "t@example.com"]);
+        let run = |c: Value, input: &str| -> Value {
+            let c = validate_config(Git, &c).unwrap();
+            serde_json::from_str(&run_git(&c, input, d).unwrap()).unwrap()
+        };
+        std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+        // A hostile message is one argv word, committed byte-identical.
+        let msg = "it's $(touch pwned) `x` \"q\"\n\n- body";
+        let r = run(json!({"op": "commit", "message": msg}), "");
+        assert_eq!(
+            (r["ok"].as_bool(), r["status"].as_str()),
+            (Some(true), Some("committed"))
+        );
+        assert_eq!(r["result"].as_str().unwrap(), g(&["rev-parse", "HEAD"]));
+        assert_eq!(g(&["log", "-1", "--format=%B"]), msg);
+        assert!(!dir.path().join("pwned").exists());
+        // Nothing left to commit is data, not a failure.
+        let r = run(json!({"op": "commit", "message": "again"}), "");
+        assert_eq!(
+            (r["ok"].as_bool(), r["status"].as_str()),
+            (Some(false), Some("nothing to commit"))
+        );
+        // Branch: created, then switched to; the name may come from the input.
+        let r = run(json!({"op": "branch", "name": "feat/{input}"}), "x");
+        assert_eq!(r["status"], "created");
+        assert_eq!(g(&["branch", "--show-current"]), "feat/x");
+        g(&["switch", "-q", "-"]);
+        let r = run(json!({"op": "branch", "name": "feat/x"}), "");
+        assert_eq!(r["status"], "switched");
+        // A hostile name from the input is refused before git sees it.
+        let c = validate_config(Git, &json!({"op": "branch", "name": "{input}"})).unwrap();
+        assert!(run_git(&c, "--orphan", d).is_err());
+        // Diff: empty, then the working-tree change, then --stat.
+        let r = run(json!({"op": "diff"}), "");
+        assert_eq!(r["status"], "no changes");
+        std::fs::write(dir.path().join("a.txt"), "two\n").unwrap();
+        let r = run(json!({"op": "diff"}), "");
+        assert!(r["result"].as_str().unwrap().contains("+two"));
+        let r = run(json!({"op": "diff", "stat": true}), "");
+        assert!(r["result"].as_str().unwrap().contains("a.txt"));
+        // Not a repository: the node fails.
+        let other = tempfile::tempdir().unwrap();
+        let c = validate_config(Git, &json!({"op": "diff"})).unwrap();
+        assert!(run_git(&c, "", other.path().to_str().unwrap()).is_err());
     }
 
     #[test]

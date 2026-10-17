@@ -31,10 +31,11 @@ use crate::core::{
     LibrarySyncStatus, LiveAction, LiveBoard, LiveBoardKind, LiveNotebookEntry, LiveNotice,
     LiveResult, LiveRole, LiveSession, LiveStatus, LiveSummary, LiveTurn, NextResult, Priority,
     Project, ProjectPatch, ReceiptPatch, Result, Script, ScriptArg, ScriptArgKind, ScriptPatch,
-    Status, Store, Task, TaskNote, TaskPatch, TaskReceipt, Workflow, WorkflowEdge, WorkflowNode,
-    WorkflowNodeKind, WorkflowNodeNew, WorkflowNodePatch, WorkflowPatch, WorkflowRun,
-    WorkflowTrigger, WorkflowType, WorkflowTypeField, WorkflowView, audio, board, cc, config,
-    files, git, library, live, look, memory_job, migrate, project_memory, receipt, system,
+    Status, Store, Task, TaskNote, TaskPatch, TaskReceipt, Workflow, WorkflowEdge,
+    WorkflowGateStatus, WorkflowNode, WorkflowNodeKind, WorkflowNodeNew, WorkflowNodePatch,
+    WorkflowPatch, WorkflowRun, WorkflowTrigger, WorkflowType, WorkflowTypeField, WorkflowView,
+    audio, board, cc, config, files, git, library, live, look, memory_job, migrate, project_memory,
+    receipt, system,
 };
 
 const TOP_AFTER_HELP: &str = "\
@@ -2080,6 +2081,9 @@ EXAMPLES
     /// Create and delete the edges between nodes
     #[command(subcommand)]
     Edge(WorkflowEdgeCmd),
+    /// List and decide the approvals `gate` nodes are waiting on
+    #[command(subcommand)]
+    Gate(WorkflowGateCmd),
     /// Define and remove the struct types a workflow's pins can carry
     #[command(subcommand)]
     Type(WorkflowTypeCmd),
@@ -2122,7 +2126,7 @@ enum WorkflowNodeCmd {
     /// Add a node to a workflow; prints the created node (`--quiet`: without
     /// its `config`)
     ///
-    /// KIND is trigger|prompt|agent|cli|script|branch|decide|output and decides what
+    /// KIND is trigger|schedule|webhook|task-event|file-watch|prompt|agent|cli|script|branch|decide|switch|output|mapfilter|foreach|parallel|join|retry|delay|gate|trycatch|subworkflow|task|http|notify|git|file|verify|board|comment and decides what
     /// `--config` (a JSON object) may hold — unknown keys and bad values are
     /// `validation`, and a workflow has at most one trigger. Without
     /// `--config` a trigger is `{"mode":"manual"}`; every other kind needs
@@ -2131,11 +2135,20 @@ enum WorkflowNodeCmd {
     #[command(after_help = "\
 CONFIG BY KIND
   trigger  {\"mode\":\"manual|time|voice|ambient\",\"every_minutes\":N (time),\"events\":[idea|can-help|wake] (ambient),\"phrase\":\"...\"}
+  schedule {\"every_minutes\":N (1-10080) | \"cron\":\"m h dom mon dow\" (UTC); exactly one} (a second entry node is refused)
+  webhook  {\"type\":\"<pin type>\"} (optional, default any; the body POSTed to /api/workflows/<id>/webhook must fit it; a second entry node is refused)
+  task-event {\"event\":\"created|status|any\" (default created),\"status\":\"todo|done|…\" (event status/any),\"project\":\"<id or name>\"} (fires on a task create / status change; the run input is JSON {event,task_id,project_id,status,old_status,name}; an entry node, so a second one is refused)
+  file-watch {\"path\":\"<file or folder>\" (required),\"event\":\"any|created|modified|deleted\" (default any)} (polled each watcher tick, new run per change; the run input is JSON {path,event,mtime,size}; an entry node, so a second one is refused)
   prompt   {\"model\":\"haiku|sonnet|opus|local:<name>\",\"thinking\":false,\"prompt\":\"...\",\"timeout_secs\":N}
   cli      {\"command\":\"...\",\"timeout_secs\":N}
   script   {\"script\":\"<id or name>\",\"values\":{\"name\":\"... {input} ...\"}}
   branch   {\"op\":\"contains|regex|score_above|score_below|equals\",\"value\":\"...\"}
   decide   {\"question\":\"... {input} ...\",\"options\":[\"a\",\"b\"],\"threshold\":0.5}
+  switch   {\"op\":\"equals|contains|regex\",\"cases\":[{\"match\":\"x\",\"label\":\"opt\"},…]} (2+ cases; edges use --branch <label>|default)
+  trycatch {\"wrap\":{\"kind\":\"cli|script|prompt|agent\",\"config\":{...}},\"timeout_secs\":N} (a failure is caught, not fatal; edges use --branch ok|caught)
+  gate     {\"message\":\"...\",\"timeout_secs\":N (1-86400, default 3600; a timeout rejects)} (edges use --branch approved|rejected; decide with `workflow gate approve|reject <id>`)
+  subworkflow {\"workflow\":\"<id or name>\"} (runs that workflow with this node's input; its last step's output comes out; a loop or a chain over 8 workflows is `validation`)
+  task     {\"action\":\"create|update|read\",\"project\":\"<id or name>\" (create),\"task\":N (update, read),\"description\",\"status\",\"priority\",\"result\" (any may hold {input}); output is the task JSON}
   output   {\"target\":\"log\",\"log\":\"name\"} | {\"target\":\"task\",\"project\":\"...\"} |
            {\"target\":\"inbox\",\"task_id\":N,\"kind\":\"task-summary\"} | {\"target\":\"board\"}
 
@@ -2147,7 +2160,7 @@ EXAMPLES
         /// Workflow id or name
         #[arg(value_name = "WORKFLOW", required_unless_present = "workflow")]
         workflow_pos: Option<String>,
-        /// trigger|prompt|agent|cli|script|branch|decide|output
+        /// trigger|prompt|agent|cli|script|branch|decide|switch|output|mapfilter|foreach|parallel|join|retry|delay|gate|trycatch|subworkflow|task|http|notify|git|file|verify|board|comment
         #[arg(value_name = "KIND", required_unless_present = "kind", value_parser = parse_workflow_node_kind)]
         kind_pos: Option<WorkflowNodeKind>,
         /// Node title (≤ 200 characters)
@@ -2220,6 +2233,35 @@ EXAMPLES
 }
 
 #[derive(Subcommand)]
+enum WorkflowGateCmd {
+    /// List gates, newest first (`--all`: decided ones too)
+    List {
+        /// Only the gates of this run
+        #[arg(long)]
+        run: Option<i64>,
+        /// Include approved and rejected gates, not only pending ones
+        #[arg(long)]
+        all: bool,
+    },
+    /// Approve a pending gate; the run takes its `approved` edge
+    Approve {
+        /// Gate id (`workflow gate list`)
+        id: i64,
+        /// Print the gate without its `message` instead of in full
+        #[arg(long)]
+        quiet: bool,
+    },
+    /// Reject a pending gate; the run takes its `rejected` edge
+    Reject {
+        /// Gate id (`workflow gate list`)
+        id: i64,
+        /// Print the gate without its `message` instead of in full
+        #[arg(long)]
+        quiet: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum WorkflowEdgeCmd {
     /// Connect two nodes of a workflow with a directed edge; prints the edge
     ///
@@ -2227,7 +2269,9 @@ enum WorkflowEdgeCmd {
     /// is `cycle`, an edge into the trigger is `validation`, and an exact
     /// duplicate is `conflict`. An edge leaving a `branch` node needs
     /// `--branch true|false` (the verdict it is active on), and one leaving a
-    /// `decide` node needs `--branch <option>|fallback`; any other edge
+    /// `decide` node needs `--branch <option>|fallback`, and one leaving a
+    /// `switch` node needs `--branch <case label>|default`, and one leaving a
+    /// `gate` node needs `--branch approved|rejected`; any other edge
     /// refuses one.
     #[command(after_help = "\
 EXAMPLES
@@ -2253,7 +2297,8 @@ EXAMPLES
         #[arg(long, conflicts_with = "to_pos")]
         to: Option<i64>,
         /// The label this edge leaves a branch node (true|false) or a decide
-        /// node (one of its options, or fallback) on
+        /// node (one of its options, or fallback) or a switch node (a case
+        /// label, or default) on
         #[arg(long, value_name = "LABEL")]
         branch: Option<String>,
         /// The output pin the edge leaves (default: the source's first;
@@ -4848,6 +4893,9 @@ const QUIET_DROP_WORKFLOW: &[&str] = &["description"];
 const QUIET_DROP_WORKFLOW_NODE: &[&str] = &["config"];
 /// A `WorkflowEdge` has no unbounded field: quiet output equals full output.
 const QUIET_DROP_WORKFLOW_EDGE: &[&str] = &[];
+/// Keys dropped from a `WorkflowGate` under `--quiet`: the node's free-text
+/// message.
+const QUIET_DROP_WORKFLOW_GATE: &[&str] = &["message"];
 /// Keys dropped from a `WorkflowRun` under `--quiet`: the input and every
 /// step's output, which are the unbounded part of a run.
 const QUIET_DROP_WORKFLOW_RUN: &[&str] = &["steps", "input"];
@@ -5849,7 +5897,8 @@ fn run_task(cmd: TaskCmd) -> Result<()> {
             let tags = tags.map(parse_tags).unwrap_or_default();
             let project = resolve_project(&store, &project)?;
             print_task(
-                &store.create_task(
+                &receipt::create_task(
+                    &mut store,
                     project,
                     &description,
                     priority,
@@ -8529,6 +8578,21 @@ fn run_workflow_cmd(cmd: WorkflowCmd) -> Result<()> {
             };
             print_json(&store.list_workflow_log(log.as_deref(), workflow_id, limit)?);
         }
+        WorkflowCmd::Gate(cmd) => match cmd {
+            WorkflowGateCmd::List { run, all } => {
+                print_json(&store.list_workflow_gates(run, all)?);
+            }
+            WorkflowGateCmd::Approve { id, quiet } => print_record(
+                &store.decide_workflow_gate(id, WorkflowGateStatus::Approved, None)?,
+                quiet,
+                QUIET_DROP_WORKFLOW_GATE,
+            ),
+            WorkflowGateCmd::Reject { id, quiet } => print_record(
+                &store.decide_workflow_gate(id, WorkflowGateStatus::Rejected, None)?,
+                quiet,
+                QUIET_DROP_WORKFLOW_GATE,
+            ),
+        },
         WorkflowCmd::Node(cmd) => match cmd {
             WorkflowNodeCmd::Create {
                 workflow_pos,

@@ -224,15 +224,33 @@ pub fn derive(slots: &ThemeSlots) -> Result<BTreeMap<String, String>> {
         "--wf-trigger",
         hex(mix(p.panel, mix(p.accent, p.accent2, 0.5), 0.25)),
     );
+    put(
+        "--wf-schedule",
+        hex(mix(p.panel, mix(p.bad, p.accent, 0.5), 0.25)),
+    );
     put("--wf-prompt", hex(mix(p.panel, p.accent2, 0.25)));
     put(
         "--wf-agent",
         hex(mix(p.panel, mix(p.good, p.accent, 0.5), 0.22)),
     );
+    put("--wf-comment", hex(mix(p.panel, p.muted, 0.2)));
     put("--wf-cli", hex(mix(p.panel, p.accent, 0.22)));
     put("--wf-script", hex(mix(p.panel, p.warn, 0.2)));
     put("--wf-branch", hex(mix(p.panel, p.bad, 0.22)));
     put("--wf-decide", hex(mix(p.panel, magenta, 0.22)));
+    put(
+        "--wf-switch",
+        hex(mix(p.panel, mix(p.good, p.warn, 0.5), 0.22)),
+    );
+    put(
+        "--wf-task",
+        hex(mix(p.panel, mix(p.good, p.accent2, 0.5), 0.24)),
+    );
+    put(
+        "--wf-http",
+        hex(mix(p.panel, mix(p.good, p.accent, 0.5), 0.24)),
+    );
+    put("--wf-flow", hex(mix(p.panel, p.warn, 0.28)));
     put("--wf-output", hex(mix(p.panel, p.good, 0.18)));
     put("--wf-run", hex(p.accent2));
     let near_black: Rgb = [0x0a, 0x0a, 0x0a];

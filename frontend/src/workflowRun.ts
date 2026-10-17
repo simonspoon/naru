@@ -3,6 +3,7 @@
 // list. The canvas and the run panel only render what these answer.
 
 import type { Workflow } from './types/Workflow'
+import type { WorkflowGate } from './types/WorkflowGate'
 import type { WorkflowRun } from './types/WorkflowRun'
 import type { WorkflowStepStatus } from './types/WorkflowStepStatus'
 
@@ -67,4 +68,20 @@ export function triggerLabel(w: Pick<Workflow, 'trigger' | 'trigger_phrase'> & P
   if (w.trigger === 'ambient' && w.trigger_events && w.trigger_events.length > 0)
     return `ambient · ${w.trigger_events.join(', ')}`
   return w.trigger_phrase ? `${w.trigger} · “${w.trigger_phrase}”` : w.trigger
+}
+
+/** A run's gates keyed by node id (naru task 1993); a node that gated twice
+ *  keeps its newest. `gates` come newest first, so the first one seen wins. */
+export function gateByNode(gates: readonly WorkflowGate[] | null): Map<number, WorkflowGate> {
+  const out = new Map<number, WorkflowGate>()
+  for (const g of gates ?? []) if (!out.has(g.node_id)) out.set(g.node_id, g)
+  return out
+}
+
+/** What a gate card says: waiting, or how it was decided (a timeout is a
+ *  rejection and says so). */
+export function gateBadge(gate: WorkflowGate): { text: string; tone: 'waiting' | 'approved' | 'rejected' } {
+  if (gate.status === 'pending') return { text: 'waiting', tone: 'waiting' }
+  if (gate.status === 'approved') return { text: 'approved', tone: 'approved' }
+  return { text: gate.reason ? `rejected — ${gate.reason}` : 'rejected', tone: 'rejected' }
 }

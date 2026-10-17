@@ -3,4 +3,4 @@
 /**
  * What started a [`WorkflowRun`].
  */
-export type WorkflowTrigger = "manual" | "time" | "voice" | "ambient";
+export type WorkflowTrigger = "manual" | "time" | "voice" | "ambient" | "webhook" | "task-event" | "file-watch";

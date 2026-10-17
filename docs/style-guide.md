@@ -34,6 +34,7 @@ the rules below are applied across `frontend/src/App.css`.
 | `--surface`, `--surface-raised`, `--surface-hover`, `--surface-field` | tinted fills |
 | `--ring`, `--ring-focus`, `--edge-cyan`, `--hairline`, `--border(-bright)` | separation |
 | `--wf-trigger` … `--wf-output`, `--wf-run` | the workflow builder's per-kind node tints and its Run pill |
+| `--wf-flow` | the parallel / join pair's shared tint (naru task 1989) |
 
 ## Themes
 

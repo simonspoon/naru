@@ -7,7 +7,7 @@
 
 use super::git;
 use super::store::{Error, Result, Store, TaskPatch};
-use super::types::{Status, Task, TaskReceipt};
+use super::types::{Priority, Status, Task, TaskReceipt};
 
 /// THE function `cli.rs` and `api.rs` call for a task update (spec D3) — the
 /// same "one chokepoint, several call sites" shape `agents::spawn_bg` uses
@@ -46,7 +46,38 @@ pub fn update_task(store: &mut Store, id: i64, patch: &TaskPatch) -> Result<Task
     {
         let _ = store.put_task_receipt(&receipt);
     }
+    // Task-event workflows (naru task 2006): the one place both surfaces'
+    // status changes pass through.
+    crate::core::workflow::fire_task_event(store, &after, Some(before.status));
     Ok(after)
+}
+
+/// Creates a task and fires the `task-event` workflows listening for a
+/// creation — the create-side twin of [`update_task`] (naru task 2006).
+#[allow(clippy::too_many_arguments)]
+pub fn create_task(
+    store: &mut Store,
+    project_id: i64,
+    description: &str,
+    priority: Priority,
+    tags: &[String],
+    parent_id: Option<i64>,
+    acceptance: Option<&str>,
+    artifact: Option<&str>,
+    status: Option<Status>,
+) -> Result<Task> {
+    let task = store.create_task(
+        project_id,
+        description,
+        priority,
+        tags,
+        parent_id,
+        acceptance,
+        artifact,
+        status,
+    )?;
+    crate::core::workflow::fire_task_event(store, &task, None);
+    Ok(task)
 }
 
 /// Assembles a receipt for `task` as of right now, attributing to the claim

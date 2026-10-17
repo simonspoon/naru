@@ -22,9 +22,12 @@ import {
   createWorkflowEdge,
   createWorkflowNode,
   deleteWorkflowEdge,
+  decideWorkflowGate,
   deleteWorkflowNode,
   listLibrary,
   listScripts,
+  listWorkflows,
+  listWorkflowGates,
   updateWorkflowNode,
 } from './api'
 import { loadBoardView, saveBoardView } from './boardView'
@@ -33,11 +36,14 @@ import { useFetch } from './useFetch'
 import { cssVar, onThemeChange } from './theme'
 import {
   BRANCH_OPS,
+  COMMENT_COLORS,
+  COMMENT_COLOR_VARS,
   INBOX_KINDS,
   NODE_DRAG_MIME,
   NODE_KINDS,
   OUTPUT_TARGETS,
   PROMPT_MODELS,
+  RETRY_WRAPPABLE,
   AMBIENT_EVENTS,
   TRIGGER_MODES,
   branchForHandle,
@@ -48,16 +54,23 @@ import {
   draftFromConfig,
   hasInput,
   hasOutput,
+  HTTP_BODY_METHODS,
+  HTTP_DEFAULT_TIMEOUT,
+  HTTP_METHODS,
   inspectorKey,
   kindInfo,
   missingValueRows,
+  SWITCH_OPS,
   sourceHandles,
   summarize,
   type ConfigDraft,
+  webhookSample,
 } from './workflowConfig'
-import { stepClass, stepStatusByNode } from './workflowRun'
+import { gateBadge, gateByNode, stepClass, stepStatusByNode } from './workflowRun'
 import type { LibraryItem } from './types/LibraryItem'
 import type { Script } from './types/Script'
+import type { Workflow } from './types/Workflow'
+import type { WorkflowGate } from './types/WorkflowGate'
 import type { WorkflowNode } from './types/WorkflowNode'
 import type { WorkflowNodeKind } from './types/WorkflowNodeKind'
 import type { WorkflowRun } from './types/WorkflowRun'
@@ -93,6 +106,12 @@ type CardData = {
   types: WorkflowType[]
   drag: DragFrom
   onPinMenu: PinMenuOpen
+  /** The shown run's approval for a `gate` node, if it has reached one. */
+  gate: WorkflowGate | undefined
+  /** Gate ids with a decision in flight, and the last refusal to show. */
+  gateBusy: number | null
+  gateError: string | null
+  onDecide: (gate: WorkflowGate, decision: 'approved' | 'rejected') => void
 }
 type CardNode = Node<CardData, 'card'>
 
@@ -108,14 +127,29 @@ const DECIDE_ROW = 20
  *  decided by where the line is dragged from, and a decide node one per option
  *  plus `fallback`. The last run's step state is a ring. */
 function NodeCard({ data, selected }: NodeProps<CardNode>) {
-  const { node, status, types, drag, onPinMenu } = data
+  const { node, status, types, drag, onPinMenu, gate, gateBusy, gateError, onDecide } = data
   const pressTimer = useRef<number | undefined>(undefined)
   const typedPins = pinsOf(node, types)
   const typedRows = Math.max(typedPins.inputs.length, typedPins.outputs.length)
   const isShape = node.kind === 'break' || node.kind === 'make'
-  const decideHandles = node.kind === 'decide' ? sourceHandles(node.kind, node.config) : []
+  const decideHandles = node.kind === 'decide' || node.kind === 'switch' || node.kind === 'gate' || node.kind === 'trycatch' ? sourceHandles(node.kind, node.config) : []
   const pins = typedRows > 0 ? { inputs: [], outputs: [] } : pinsFor(node.kind)
   const rows = Math.max(pins.inputs.length, pins.outputs.length)
+  if (node.kind === 'comment') {
+    // Editor-only group box (naru task 2008): no handles, drawn behind the nodes.
+    const color = typeof node.config.color === 'string' && COMMENT_COLOR_VARS[node.config.color] ? node.config.color : 'accent'
+    const text = typeof node.config.text === 'string' ? node.config.text : ''
+    return (
+      <div
+        className={`wf-comment${selected ? ' selected' : ''}`}
+        style={{ ['--cc' as string]: `var(${COMMENT_COLOR_VARS[color]})` }}
+        aria-label={`Comment: ${node.title}`}
+      >
+        <b className="wf-comment-title">{node.title}</b>
+        {text !== '' && <div className="wf-comment-text">{text}</div>}
+      </div>
+    )
+  }
   // A data pin that is a real connection point (typed): a handle, coloured by
   // its type, with a chip naming it and a menu for Break / Make.
   const typedPin = (side: PinSide, p: { name: string; ty: string }) => {
@@ -172,7 +206,7 @@ function NodeCard({ data, selected }: NodeProps<CardNode>) {
     <div
       style={{
         ['--kc' as string]: `var(${kindColorVar(node.kind)})`,
-        ...(decideHandles.length > 0 ? { paddingBottom: DECIDE_ROW * decideHandles.length + 8 } : {}),
+        ...(decideHandles.length > 0 && node.kind !== 'gate' ? { paddingBottom: DECIDE_ROW * decideHandles.length + 8 } : {}),
       }}
       className={`wf-node wf-kind-${node.kind}${selected ? ' selected' : ''} ${stepClass(status)}`}
       title={status ? `last run: ${status}` : undefined}
@@ -192,7 +226,8 @@ function NodeCard({ data, selected }: NodeProps<CardNode>) {
         </span>
         <b className="wf-node-title">{node.title}</b>
       </div>
-      {status && <span className="wf-node-step">{status}</span>}
+      {status && node.kind !== 'gate' && <span className="wf-node-step">{status}</span>}
+      {status && node.kind === 'gate' && !gate && <span className="wf-node-step">{status}</span>}
       <div className="wf-node-body">
         <div className="wf-node-sum">{summarize(node.kind, node.config)}</div>
         {typedRows > 0 && (
@@ -240,6 +275,45 @@ function NodeCard({ data, selected }: NodeProps<CardNode>) {
           </div>
         )}
       </div>
+      {node.kind === 'gate' && (
+        <>
+          {/* The two flow-handle rows live in this spacer, as a decide card's live in its padding. */}
+          <div style={{ height: DECIDE_ROW * decideHandles.length + 4 }} aria-hidden="true" />
+          {gate && (
+            <div className="wf-gate nodrag nopan">
+              <span className={`wf-gate-badge wf-gate-${gateBadge(gate).tone}`}>{gateBadge(gate).text}</span>
+              {gate.message !== '' && (
+                <span className="wf-gate-msg" title={gate.message}>
+                  {gate.message}
+                </span>
+              )}
+              {gate.status === 'pending' && (
+                <span className="wf-gate-actions">
+                  <button
+                    type="button"
+                    className="wf-gate-btn wf-gate-approve"
+                    aria-label={`Approve gate ${node.title}`}
+                    disabled={gateBusy === gate.id}
+                    onClick={() => onDecide(gate, 'approved')}
+                  >
+                    Approve
+                  </button>
+                  <button
+                    type="button"
+                    className="wf-gate-btn wf-gate-reject"
+                    aria-label={`Reject gate ${node.title}`}
+                    disabled={gateBusy === gate.id}
+                    onClick={() => onDecide(gate, 'rejected')}
+                  >
+                    Reject
+                  </button>
+                </span>
+              )}
+              {gateError !== null && gate.status === 'pending' && <span className="wf-gate-error error">{gateError}</span>}
+            </div>
+          )}
+        </>
+      )}
       {node.kind === 'branch' ? (
         <>
           <Handle
@@ -265,7 +339,7 @@ function NodeCard({ data, selected }: NodeProps<CardNode>) {
             false
           </span>
         </>
-      ) : node.kind === 'decide' ? (
+      ) : node.kind === 'decide' || node.kind === 'switch' || node.kind === 'gate' || node.kind === 'trycatch' ? (
         decideHandles.map((label, i) => {
           const top = DECIDE_ROWS_TOP + DECIDE_ROW * i + DECIDE_ROW / 2
           return (
@@ -278,7 +352,10 @@ function NodeCard({ data, selected }: NodeProps<CardNode>) {
                 aria-label={`${label} out`}
                 style={{ top }}
               />
-              <span className="wf-branch-label" style={{ top }}>
+              <span
+                className={`wf-branch-label${node.kind === 'trycatch' ? (label === 'ok' ? ' wf-branch-true' : ' wf-branch-caught') : ''}`}
+                style={{ top }}
+              >
                 {label}
               </span>
             </Fragment>
@@ -302,6 +379,10 @@ function NodeCard({ data, selected }: NodeProps<CardNode>) {
 
 const nodeTypes = { card: NodeCard }
 
+/** A comment box's default size on the canvas (naru task 2008). */
+const COMMENT_W = 320
+const COMMENT_H = 200
+
 const MIN_ZOOM = 0.3
 const MAX_ZOOM = 2
 
@@ -319,10 +400,72 @@ function Field({ label, children, hint }: { label: string; children: React.React
  *  saved with one PATCH (which replaces the whole config). Remounted per node
  *  and per saved state by its parent's key, so the draft always starts from
  *  what the server holds. */
+/** The webhook node's inspector block: the body type, the endpoint and a
+ *  copyable curl line (naru task 2005). */
+function WebhookFields({
+  node,
+  draft,
+  types,
+  set,
+}: {
+  node: WorkflowNode
+  draft: ConfigDraft
+  types: WorkflowType[]
+  set: <K extends keyof ConfigDraft>(key: K, value: ConfigDraft[K]) => void
+}) {
+  const [copied, setCopied] = useState<'idle' | 'ok' | 'failed'>('idle')
+  const path = `/api/workflows/${node.workflow_id}/webhook`
+  const curl = `curl -X POST -H 'Content-Type: application/json' -d '${webhookSample(draft.json_type)}' ${window.location.origin}${path}`
+  useEffect(() => {
+    if (copied !== 'ok') return
+    const t = window.setTimeout(() => setCopied('idle'), 1500)
+    return () => window.clearTimeout(t)
+  }, [copied])
+  return (
+    <>
+      <Field
+        label="body type"
+        hint="any, string, number, bool, a list, or a type from the Types card; a body that does not fit fails the node"
+      >
+        <select value={draft.json_type} onChange={(e) => set('json_type', e.target.value)}>
+          {['any', 'string', 'number', 'bool', 'list<string>', 'list<number>', 'list<bool>'].map((t) => (
+            <option key={t}>{t}</option>
+          ))}
+          {types.flatMap((t) => [
+            <option key={t.name}>{t.name}</option>,
+            <option key={`list<${t.name}>`}>{`list<${t.name}>`}</option>,
+          ])}
+        </select>
+      </Field>
+      <Field label="endpoint" hint="POST a JSON body; the response is the finished run">
+        <code className="wf-webhook-url">POST {path}</code>
+      </Field>
+      <Field label="example">
+        <pre className="wf-webhook-curl">{curl}</pre>
+        <button
+          type="button"
+          className="wf-webhook-copy"
+          aria-label="Copy curl command"
+          onClick={() => {
+            navigator.clipboard.writeText(curl).then(
+              () => setCopied('ok'),
+              () => setCopied('failed'),
+            )
+          }}
+        >
+          {copied === 'ok' ? 'Copied' : 'Copy'}
+        </button>
+        {copied === 'failed' && <span className="muted"> copy failed — select the text instead</span>}
+      </Field>
+    </>
+  )
+}
+
 function NodeInspector({
   node,
   types,
   scripts,
+  workflows,
   agents,
   onSaved,
   onError,
@@ -336,6 +479,8 @@ function NodeInspector({
   node: WorkflowNode
   types: WorkflowType[]
   scripts: Script[]
+  /** Every workflow, for a sub-workflow node's picker (the node's own is left out). */
+  workflows: Workflow[]
   agents: LibraryItem[] | null
   onSaved: () => void
   onError: (message: string | null) => void
@@ -368,7 +513,7 @@ function NodeInspector({
     }
     setFormError(null)
     // A break/make's pins come from its struct, an agent's are fixed by the server.
-    const pins = isShape || node.kind === 'agent' ? undefined : pinsConfig(declaredPins)
+    const pins = isShape || node.kind === 'agent' || node.kind === 'git' || node.kind === 'file' || node.kind === 'memory' || node.kind === 'verify' || node.kind === 'comment' ? undefined : pinsConfig(declaredPins)
     const config = pins ? { ...built.config, pins } : built.config
     updateWorkflowNode(node.id, { title: title.trim() || node.title, config }).then(
       () => {
@@ -453,6 +598,110 @@ function NodeInspector({
           <Field label="phrase" hint="what a spoken request says to run it (optional)">
             <input type="text" value={draft.phrase} onChange={(e) => set('phrase', e.target.value)} />
           </Field>
+        </>
+      )}
+
+      {node.kind === 'task-event' && (
+        <>
+          <Field label="event" hint="a task being created, changing status, or either">
+            <div className="wf-seg" role="radiogroup" aria-label="Task event">
+              {(
+                [
+                  ['created', 'Created'],
+                  ['status', 'Status change'],
+                  ['any', 'Any'],
+                ] as const
+              ).map(([v, label]) => (
+                <button
+                  key={v}
+                  type="button"
+                  role="radio"
+                  aria-checked={draft.te_event === v}
+                  className={draft.te_event === v ? 'active' : ''}
+                  onClick={() => set('te_event', v)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </Field>
+          {draft.te_event !== 'created' && (
+            <Field label="status" hint="Only fire when the task lands in this status.">
+              <select aria-label="Task status" value={draft.te_status} onChange={(e) => set('te_status', e.target.value)}>
+                <option value="">any status</option>
+                {['backlog', 'todo', 'in_progress', 'done', 'cancelled'].map((v) => (
+                  <option key={v}>{v}</option>
+                ))}
+              </select>
+            </Field>
+          )}
+          <Field label="project" hint="id or name; blank = every project">
+            <input type="text" aria-label="Task project" value={draft.project} onChange={(e) => set('project', e.target.value)} />
+          </Field>
+        </>
+      )}
+      {node.kind === 'file-watch' && (
+        <>
+          <Field label="path" hint="file or folder; checked on each workflow tick, so a create-and-delete between ticks is missed">
+            <input
+              type="text"
+              aria-label="Watched path"
+              placeholder="/path/to/file"
+              value={draft.fw_path}
+              onChange={(e) => set('fw_path', e.target.value)}
+            />
+          </Field>
+          <Field label="event" hint="what counts as a change">
+            <select aria-label="File event" value={draft.fw_event} onChange={(e) => set('fw_event', e.target.value)}>
+              {['any', 'created', 'modified', 'deleted'].map((v) => (
+                <option key={v}>{v}</option>
+              ))}
+            </select>
+          </Field>
+        </>
+      )}
+      {node.kind === 'schedule' && (
+        <>
+          <Field label="repeat" hint="UTC; run by serve --watch-workflows">
+            <div className="wf-seg" role="radiogroup" aria-label="Schedule mode">
+              {(['interval', 'cron'] as const).map((m) => {
+                const active = (m === 'cron') === (draft.cron !== '')
+                return (
+                  <button
+                    key={m}
+                    type="button"
+                    role="radio"
+                    aria-checked={active}
+                    className={active ? 'active' : ''}
+                    onClick={() => set('cron', m === 'cron' ? '* * * * *' : '')}
+                  >
+                    {m === 'cron' ? 'Cron' : 'Every N minutes'}
+                  </button>
+                )
+              })}
+            </div>
+          </Field>
+          {draft.cron === '' ? (
+            <Field label="every (minutes)" hint="1 to 10080">
+              <input
+                type="text"
+                inputMode="numeric"
+                value={draft.every_minutes}
+                onChange={(e) => set('every_minutes', e.target.value)}
+              />
+            </Field>
+          ) : (
+            <Field label="cron" hint="UTC, 5 fields: minute hour day-of-month month day-of-week">
+              <input
+                type="text"
+                className="wf-cron-input"
+                aria-label="Cron expression"
+                value={draft.cron}
+                placeholder="*/5 * * * *"
+                onChange={(e) => set('cron', e.target.value)}
+              />
+            </Field>
+          )}
         </>
       )}
 
@@ -738,6 +987,541 @@ function NodeInspector({
         </>
       )}
 
+      {node.kind === 'switch' && (
+        <>
+          <Field label="match" hint="how the input is compared with each case">
+            <select value={draft.op} onChange={(e) => set('op', e.target.value)}>
+              {SWITCH_OPS.map((o) => (
+                <option key={o}>{o}</option>
+              ))}
+            </select>
+          </Field>
+          <div className="wf-values">
+            <span className="wf-field-label">cases (first match wins)</span>
+            {draft.cases.map((k, i) => (
+              <div key={i} className="wf-value-row">
+                <input
+                  type="text"
+                  value={k.match}
+                  aria-label={`Case ${i + 1} match`}
+                  placeholder="match"
+                  onKeyDown={(e) => e.key === 'Enter' && e.preventDefault()}
+                  onChange={(e) =>
+                    set(
+                      'cases',
+                      draft.cases.map((x, j) => (j === i ? { ...x, match: e.target.value } : x)),
+                    )
+                  }
+                />
+                <input
+                  type="text"
+                  value={k.label}
+                  aria-label={`Case ${i + 1} label`}
+                  placeholder="label (optional)"
+                  onKeyDown={(e) => e.key === 'Enter' && e.preventDefault()}
+                  onChange={(e) =>
+                    set(
+                      'cases',
+                      draft.cases.map((x, j) => (j === i ? { ...x, label: e.target.value } : x)),
+                    )
+                  }
+                />
+                <button
+                  type="button"
+                  title="remove"
+                  aria-label={`Remove case ${i + 1}`}
+                  onClick={() =>
+                    set(
+                      'cases',
+                      draft.cases.filter((_, j) => j !== i),
+                    )
+                  }
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+            <button type="button" onClick={() => set('cases', [...draft.cases, { match: '', label: '' }])}>
+              + case
+            </button>
+            <div className="wf-value-row">
+              <input type="text" value="default" readOnly aria-label="Default case" />
+            </div>
+          </div>
+          <p className="wf-field-hint muted">
+            Drag a case&apos;s handle to wire it; the <b>default</b> handle is taken when nothing matches (with no
+            default edge, everything downstream is skipped). Save the node first after changing its cases.
+          </p>
+        </>
+      )}
+
+      {node.kind === 'variable' && (
+        <>
+          <Field label="operation">
+            <select value={draft.var_op} onChange={(e) => set('var_op', e.target.value)}>
+              <option>set</option>
+              <option>get</option>
+            </select>
+          </Field>
+          <Field label="name" hint="identifier, e.g. count; a get must be wired downstream of its set">
+            <input type="text" value={draft.var_name} onChange={(e) => set('var_name', e.target.value)} />
+          </Field>
+          <Field
+            label="type"
+            hint={draft.var_op === 'get' ? 'the type of the stored value' : 'the input is parsed as JSON and must fit this type'}
+          >
+            <select value={draft.json_type} onChange={(e) => set('json_type', e.target.value)}>
+              {['any', 'string', 'number', 'bool', 'list<string>', 'list<number>', 'list<bool>'].map((t) => (
+                <option key={t}>{t}</option>
+              ))}
+              {types.flatMap((t) => [
+                <option key={t.name}>{t.name}</option>,
+                <option key={`list<${t.name}>`}>{`list<${t.name}>`}</option>,
+              ])}
+            </select>
+          </Field>
+        </>
+      )}
+
+      {node.kind === 'foreach' && (
+        <>
+          <Field label="body" hint="bash script, run once per item; the item is $1 (also $NARU_INPUT and stdin)">
+            <textarea
+              rows={4}
+              style={{ fontFamily: 'var(--font-mono)' }}
+              value={draft.fe_body}
+              onChange={(e) => set('fe_body', e.target.value)}
+            />
+          </Field>
+          <Field label="timeout (s)" hint="seconds per item; blank = the default">
+            <input
+              type="text"
+              inputMode="numeric"
+              value={draft.timeout_secs}
+              onChange={(e) => set('timeout_secs', e.target.value)}
+            />
+          </Field>
+        </>
+      )}
+
+      {node.kind === 'delay' && (
+        <>
+          <Field label="wait">
+            <select aria-label="Delay mode" value={draft.dl_mode} onChange={(e) => set('dl_mode', e.target.value)}>
+              <option value="duration">Duration</option>
+              <option value="until">Until</option>
+            </select>
+          </Field>
+          {draft.dl_mode === 'until' ? (
+            <Field label="until" hint="HH:MM or 2026-10-17T14:30:00Z, UTC; at most an hour ahead. Passes its input through unchanged.">
+              <input type="text" aria-label="Delay until" placeholder="14:30 or 2026-10-17T14:30:00Z" value={draft.dl_until} onChange={(e) => set('dl_until', e.target.value)} />
+            </Field>
+          ) : (
+            <Field label="seconds" hint="0 to 3600. Passes its input through unchanged.">
+              <input type="number" min={0} max={3600} aria-label="Delay seconds" value={draft.dl_seconds} onChange={(e) => set('dl_seconds', e.target.value)} />
+            </Field>
+          )}
+        </>
+      )}
+
+      {node.kind === 'gate' && (
+        <>
+          <Field label="message" hint="Shown on the card and in the phone notification.">
+            <input type="text" aria-label="Gate message" placeholder="Ship it?" value={draft.gate_message} onChange={(e) => set('gate_message', e.target.value)} />
+          </Field>
+          <Field label="timeout (seconds)" hint="1 to 86400. When it runs out the gate rejects.">
+            <input type="number" min={1} max={86400} aria-label="Gate timeout seconds" value={draft.gt_timeout} onChange={(e) => set('gt_timeout', e.target.value)} />
+          </Field>
+          <Field label="on timeout">
+            <span className="muted">reject</span>
+          </Field>
+        </>
+      )}
+
+      {node.kind === 'subworkflow' && (
+        <Field label="workflow" hint="Runs this workflow with the node's input; its last step's output comes out. A loop or a chain over 8 workflows is refused on save.">
+          <select aria-label="Child workflow" value={draft.sw_workflow} onChange={(e) => set('sw_workflow', e.target.value)}>
+            {!workflows.some((w) => w.name === draft.sw_workflow) && (
+              <option value={draft.sw_workflow}>{draft.sw_workflow || '— pick a workflow —'}</option>
+            )}
+            {workflows
+              .filter((w) => w.id !== node.workflow_id)
+              .map((w) => (
+                <option key={w.id} value={w.name}>
+                  {w.name}
+                </option>
+              ))}
+          </select>
+        </Field>
+      )}
+
+      {node.kind === 'task' && (
+        <>
+          <Field label="action" hint="Create a task, update one, or read one. Its output is the task as JSON.">
+            <select aria-label="Task action" value={draft.tk_action} onChange={(e) => set('tk_action', e.target.value)}>
+              <option value="create">create</option>
+              <option value="update">update</option>
+              <option value="read">read</option>
+            </select>
+          </Field>
+          {draft.tk_action === 'create' && (
+            <Field label="project" hint="A project id or name. May hold {input}.">
+              <input type="text" aria-label="Task project" value={draft.tk_project} onChange={(e) => set('tk_project', e.target.value)} />
+            </Field>
+          )}
+          {draft.tk_action !== 'create' && (
+            <Field label="task id" hint="A task id. May hold {input}, so an upstream node can pick the task.">
+              <input type="text" aria-label="Task id" value={draft.tk_task} onChange={(e) => set('tk_task', e.target.value)} />
+            </Field>
+          )}
+          {draft.tk_action !== 'read' && (
+            <>
+              <Field label="description" hint="May hold {input}. A create with none uses the node's input.">
+                <textarea rows={3} aria-label="Task description" value={draft.tk_description} onChange={(e) => set('tk_description', e.target.value)} />
+              </Field>
+              <Field label="status" hint="Blank leaves it alone (create: the default).">
+                <select aria-label="Task status" value={draft.tk_status} onChange={(e) => set('tk_status', e.target.value)}>
+                  <option value="">—</option>
+                  {['backlog', 'todo', 'in_progress', 'done', 'cancelled'].map((v) => (
+                    <option key={v}>{v}</option>
+                  ))}
+                  {draft.tk_status.includes('{input}') && <option>{draft.tk_status}</option>}
+                </select>
+              </Field>
+              <Field label="priority">
+                <select aria-label="Task priority" value={draft.tk_priority} onChange={(e) => set('tk_priority', e.target.value)}>
+                  <option value="">—</option>
+                  {['low', 'medium', 'high'].map((v) => (
+                    <option key={v}>{v}</option>
+                  ))}
+                  {draft.tk_priority.includes('{input}') && <option>{draft.tk_priority}</option>}
+                </select>
+              </Field>
+            </>
+          )}
+          {draft.tk_action === 'update' && (
+            <Field label="result" hint="May hold {input}.">
+              <textarea rows={3} aria-label="Task result" value={draft.tk_result} onChange={(e) => set('tk_result', e.target.value)} />
+            </Field>
+          )}
+        </>
+      )}
+
+      {node.kind === 'http' && (
+        <>
+          <Field label="method" hint="The request method.">
+            <select aria-label="HTTP method" value={draft.ht_method} onChange={(e) => set('ht_method', e.target.value)}>
+              {HTTP_METHODS.map((m) => (
+                <option key={m}>{m}</option>
+              ))}
+            </select>
+          </Field>
+          <Field label="url" hint="An http:// URL (this build has no TLS). May hold {input}.">
+            <input type="text" aria-label="HTTP URL" value={draft.ht_url} onChange={(e) => set('ht_url', e.target.value)} />
+          </Field>
+          <Field label="headers" hint="One Name: value per line. Values may hold {input}.">
+            <textarea rows={3} aria-label="HTTP headers" value={draft.ht_headers} onChange={(e) => set('ht_headers', e.target.value)} />
+          </Field>
+          {HTTP_BODY_METHODS.includes(draft.ht_method) && (
+            <Field label="body" hint="Sent as is. May hold {input}.">
+              <textarea rows={4} aria-label="HTTP body" value={draft.ht_body} onChange={(e) => set('ht_body', e.target.value)} />
+            </Field>
+          )}
+          <Field label="timeout (s)" hint="The whole call; the node fails past it. A non-2xx status is data, not a failure.">
+            <input type="text" inputMode="numeric" aria-label="HTTP timeout" placeholder={String(HTTP_DEFAULT_TIMEOUT)} value={draft.ht_timeout} onChange={(e) => set('ht_timeout', e.target.value)} />
+          </Field>
+        </>
+      )}
+
+      {node.kind === 'notify' && (
+        <>
+          <Field label="mode" hint="Phone sends through vox; speak says it in the live conversation.">
+            <select aria-label="Notify mode" value={draft.nt_mode} onChange={(e) => set('nt_mode', e.target.value)}>
+              <option value="phone">Phone</option>
+              <option value="speak">Speak</option>
+            </select>
+          </Field>
+          <Field label="message" hint="May hold {input}. Empty sends the node's input.">
+            <textarea rows={3} aria-label="Notify message" placeholder="the node's input" value={draft.nt_message} onChange={(e) => set('nt_message', e.target.value)} />
+          </Field>
+          {draft.nt_mode === 'phone' && (
+            <>
+              <Field label="title" hint="The notification's title.">
+                <input type="text" aria-label="Notify title" value={draft.nt_title} onChange={(e) => set('nt_title', e.target.value)} />
+              </Field>
+              <Field label="open route" hint="Adds an Open Naru button to this route.">
+                <input type="text" aria-label="Notify open route" placeholder="live" value={draft.nt_open} onChange={(e) => set('nt_open', e.target.value)} />
+              </Field>
+            </>
+          )}
+        </>
+      )}
+
+      {node.kind === 'board' && (
+        <>
+          <Field label="format" hint="Markdown or HTML page shown on the whiteboard.">
+            <select aria-label="Board format" value={draft.bd_kind} onChange={(e) => set('bd_kind', e.target.value)}>
+              <option value="markdown">Markdown</option>
+              <option value="html">HTML</option>
+            </select>
+          </Field>
+          <Field label="title" hint="Optional caption.">
+            <input type="text" aria-label="Board title" value={draft.bd_title} onChange={(e) => set('bd_title', e.target.value)} />
+          </Field>
+          <Field label="body" hint="May hold {input}. Empty pushes the node's input.">
+            <textarea rows={4} aria-label="Board body" placeholder="the node's input" value={draft.bd_body} onChange={(e) => set('bd_body', e.target.value)} />
+          </Field>
+        </>
+      )}
+
+      {node.kind === 'git' && (
+        <>
+          <Field label="operation">
+            <select aria-label="Git operation" value={draft.gt_op} onChange={(e) => set('gt_op', e.target.value)}>
+              <option value="commit">Commit</option>
+              <option value="branch">Branch</option>
+              <option value="diff">Diff</option>
+            </select>
+          </Field>
+          <Field label="folder" hint="Blank = the project's folder.">
+            <input type="text" aria-label="Git folder" value={draft.gt_cwd} onChange={(e) => set('gt_cwd', e.target.value)} />
+          </Field>
+          {draft.gt_op === 'commit' && (
+            <>
+              <Field label="message" hint="May hold {input}. Passed as one argument, never shell-parsed.">
+                <textarea rows={3} aria-label="Git commit message" value={draft.gt_message} onChange={(e) => set('gt_message', e.target.value)} />
+              </Field>
+              <Field label="paths" hint="Blank = all changes. Separate with spaces.">
+                <input type="text" aria-label="Git paths" value={draft.gt_paths} onChange={(e) => set('gt_paths', e.target.value)} />
+              </Field>
+            </>
+          )}
+          {draft.gt_op === 'branch' && (
+            <Field label="name" hint="An existing branch is switched to; a new one is created. May hold {input}.">
+              <input type="text" aria-label="Git branch name" value={draft.gt_name} onChange={(e) => set('gt_name', e.target.value)} />
+            </Field>
+          )}
+          {draft.gt_op === 'diff' && (
+            <>
+              <Field label="base" hint="Blank = working tree vs HEAD.">
+                <input type="text" aria-label="Git diff base" value={draft.gt_base} onChange={(e) => set('gt_base', e.target.value)} />
+              </Field>
+              <label className="wf-check">
+                <input type="checkbox" aria-label="Git diff summary only" checked={draft.gt_stat} onChange={(e) => set('gt_stat', e.target.checked)} />
+                summary only (--stat)
+              </label>
+            </>
+          )}
+          <Field label="timeout (s)" hint="The whole git call; the node fails past it.">
+            <input type="text" inputMode="numeric" aria-label="Git timeout" placeholder="600" value={draft.timeout_secs} onChange={(e) => set('timeout_secs', e.target.value)} />
+          </Field>
+        </>
+      )}
+
+      {node.kind === 'comment' && (
+        <>
+          <Field label="text" hint="Shown under the title. Editor-only: a comment never runs.">
+            <textarea rows={3} aria-label="Comment text" value={draft.cm_text} onChange={(e) => set('cm_text', e.target.value)} />
+          </Field>
+          <div className="wf-field">
+            <span className="wf-field-label">colour</span>
+            <div className="wf-comment-swatches" role="radiogroup" aria-label="Comment colour">
+              {COMMENT_COLORS.map((c) => (
+                <button
+                  key={c}
+                  type="button"
+                  role="radio"
+                  aria-checked={draft.cm_color === c}
+                  aria-label={c}
+                  title={c}
+                  className={`wf-comment-swatch${draft.cm_color === c ? ' on' : ''}`}
+                  style={{ ['--cc' as string]: `var(${COMMENT_COLOR_VARS[c]})` }}
+                  onClick={() => set('cm_color', c)}
+                />
+              ))}
+            </div>
+          </div>
+        </>
+      )}
+
+      {node.kind === 'verify' && (
+        <>
+          <Field label="mode">
+            <select aria-label="Verify mode" value={draft.vf_mode} onChange={(e) => set('vf_mode', e.target.value)}>
+              <option value="test">Test</option>
+              <option value="browser">Browser</option>
+            </select>
+          </Field>
+          <Field label="command" hint="Runs under bash in the project folder. Exit 0 = pass.">
+            <textarea rows={3} aria-label="Verify command" value={draft.vf_command} onChange={(e) => set('vf_command', e.target.value)} />
+          </Field>
+          {draft.vf_mode === 'browser' && (
+            <Field label="url" hint="Reaches the command as $NARU_VERIFY_URL. May hold {input}.">
+              <input type="text" aria-label="Verify url" value={draft.vf_url} onChange={(e) => set('vf_url', e.target.value)} />
+            </Field>
+          )}
+          <Field label="expect" hint="Text that must appear in the output.">
+            <input type="text" aria-label="Verify expect" value={draft.vf_expect} onChange={(e) => set('vf_expect', e.target.value)} />
+          </Field>
+          <Field label="timeout (s)" hint="The whole check; the node fails past it.">
+            <input type="text" inputMode="numeric" aria-label="Verify timeout" placeholder="300" value={draft.timeout_secs} onChange={(e) => set('timeout_secs', e.target.value)} />
+          </Field>
+        </>
+      )}
+
+      {node.kind === 'file' && (
+        <>
+          <Field label="operation">
+            <select aria-label="Operation" value={draft.fl_op} onChange={(e) => set('fl_op', e.target.value)}>
+              <option value="read">Read</option>
+              <option value="write">Write</option>
+            </select>
+          </Field>
+          <Field label="path" hint="Relative paths resolve against the project folder.">
+            <input type="text" aria-label="File path" value={draft.fl_path} onChange={(e) => set('fl_path', e.target.value)} />
+          </Field>
+          {draft.fl_op === 'write' && (
+            <>
+              <Field label="content" hint="May hold {input}. Leave empty to write the incoming input.">
+                <textarea rows={3} aria-label="File content" value={draft.fl_content} onChange={(e) => set('fl_content', e.target.value)} />
+              </Field>
+              <label className="wf-check">
+                <input type="checkbox" aria-label="Append to the file" checked={draft.fl_append} onChange={(e) => set('fl_append', e.target.checked)} />
+                append
+              </label>
+            </>
+          )}
+        </>
+      )}
+
+      {node.kind === 'memory' && (
+        <>
+          <Field label="operation">
+            <select aria-label="Operation" value={draft.mm_op} onChange={(e) => set('mm_op', e.target.value)}>
+              <option value="add">Add</option>
+              <option value="search">Search</option>
+            </select>
+          </Field>
+          {draft.mm_op === 'add' ? (
+            <Field label="text" hint="May hold {input}. Leave empty to add the incoming input.">
+              <textarea rows={3} aria-label="Memory text" value={draft.mm_text} onChange={(e) => set('mm_text', e.target.value)} />
+            </Field>
+          ) : (
+            <>
+              <Field label="query" hint="May hold {input}. Leave empty to search the incoming input.">
+                <input type="text" aria-label="Memory query" value={draft.mm_query} onChange={(e) => set('mm_query', e.target.value)} />
+              </Field>
+              <Field label="limit" hint="1 to 50; blank = 10.">
+                <input type="text" inputMode="numeric" aria-label="Memory limit" value={draft.mm_limit} onChange={(e) => set('mm_limit', e.target.value)} />
+              </Field>
+            </>
+          )}
+          <Field label="project" hint="Id or name; blank = the workflow's project.">
+            <input type="text" aria-label="Memory project" value={draft.mm_project} onChange={(e) => set('mm_project', e.target.value)} />
+          </Field>
+        </>
+      )}
+
+      {node.kind === 'trycatch' && (
+        <>
+          <Field label="wrap" hint="the node to try; a failure takes the caught edge and the run keeps going">
+            <select value={draft.rt_wrap_kind} onChange={(e) => set('rt_wrap_kind', e.target.value)}>
+              {RETRY_WRAPPABLE.map((k) => (
+                <option key={k}>{k}</option>
+              ))}
+            </select>
+          </Field>
+          <Field label="wrapped config" hint="the wrapped node's config as JSON, e.g. {&quot;command&quot;: &quot;…&quot;} for cli">
+            <textarea
+              rows={4}
+              style={{ fontFamily: 'var(--font-mono)' }}
+              value={draft.rt_wrap_config}
+              onChange={(e) => set('rt_wrap_config', e.target.value)}
+            />
+          </Field>
+          <Field label="timeout (s)" hint="1 to 3600; blank = the wrapped node's own">
+            <input type="text" inputMode="numeric" value={draft.timeout_secs} onChange={(e) => set('timeout_secs', e.target.value)} />
+          </Field>
+        </>
+      )}
+
+      {node.kind === 'retry' && (
+        <>
+          <Field label="wrap" hint="the node to run; control kinds cannot be wrapped">
+            <select value={draft.rt_wrap_kind} onChange={(e) => set('rt_wrap_kind', e.target.value)}>
+              {RETRY_WRAPPABLE.map((k) => (
+                <option key={k}>{k}</option>
+              ))}
+            </select>
+          </Field>
+          <Field label="wrapped config" hint="the wrapped node's config as JSON, e.g. {&quot;command&quot;: &quot;…&quot;} for cli">
+            <textarea
+              rows={4}
+              style={{ fontFamily: 'var(--font-mono)' }}
+              value={draft.rt_wrap_config}
+              onChange={(e) => set('rt_wrap_config', e.target.value)}
+            />
+          </Field>
+          <Field label="attempts" hint="1 to 10 tries before the node fails">
+            <input type="text" inputMode="numeric" value={draft.rt_attempts} onChange={(e) => set('rt_attempts', e.target.value)} />
+          </Field>
+          <Field label="backoff (ms)" hint="wait before the second try, 0 to 60000">
+            <input type="text" inputMode="numeric" value={draft.rt_backoff_ms} onChange={(e) => set('rt_backoff_ms', e.target.value)} />
+          </Field>
+          <Field label="factor" hint="each wait is this many times the last, 1 to 10">
+            <input type="text" inputMode="numeric" value={draft.rt_factor} onChange={(e) => set('rt_factor', e.target.value)} />
+          </Field>
+          <Field label="timeout (s)" hint="seconds per attempt, 1 to 3600; blank = the wrapped node's own">
+            <input type="text" inputMode="numeric" value={draft.timeout_secs} onChange={(e) => set('timeout_secs', e.target.value)} />
+          </Field>
+        </>
+      )}
+
+      {node.kind === 'mapfilter' && (
+        <>
+          <Field label="mode">
+            <select value={draft.mf_mode} onChange={(e) => set('mf_mode', e.target.value)}>
+              <option>map</option>
+              <option>filter</option>
+            </select>
+          </Field>
+          <Field
+            label="expression"
+            hint={
+              draft.mf_mode === 'filter'
+                ? 'contains:X · not-contains:X · eq:X · nonempty · regex:RE'
+                : 'template; {item} is each element'
+            }
+          >
+            <input
+              type="text"
+              style={{ fontFamily: 'var(--font-mono)' }}
+              value={draft.mf_expr}
+              onChange={(e) => set('mf_expr', e.target.value)}
+            />
+          </Field>
+        </>
+      )}
+
+      {node.kind === 'webhook' && <WebhookFields node={node} draft={draft} types={types} set={set} />}
+
+      {node.kind === 'parse-json' && (
+        <Field
+          label="output type"
+          hint="any, string, number, bool, a list, or a type from the Types card; invalid JSON, or JSON that does not fit, fails the node"
+        >
+          <select value={draft.json_type} onChange={(e) => set('json_type', e.target.value)}>
+            {['any', 'string', 'number', 'bool', 'list<string>', 'list<number>', 'list<bool>'].map((t) => (
+              <option key={t}>{t}</option>
+            ))}
+            {types.flatMap((t) => [
+              <option key={t.name}>{t.name}</option>,
+              <option key={`list<${t.name}>`}>{`list<${t.name}>`}</option>,
+            ])}
+          </select>
+        </Field>
+      )}
+
       {node.kind === 'output' && (
         <>
           <Field label="target">
@@ -790,7 +1574,7 @@ function NodeInspector({
           from the type; edit the type in the Types card.
         </p>
       )}
-      {!isShape && node.kind !== 'agent' && <PinsEditor pins={declaredPins} types={types} onChange={setDeclaredPins} />}
+      {!isShape && node.kind !== 'agent' && node.kind !== 'parse-json' && node.kind !== 'webhook' && node.kind !== 'task-event' && node.kind !== 'file-watch' && node.kind !== 'variable' && node.kind !== 'mapfilter' && node.kind !== 'foreach' && node.kind !== 'parallel' && node.kind !== 'join' && node.kind !== 'retry' && node.kind !== 'delay' && node.kind !== 'gate' && node.kind !== 'notify' && node.kind !== 'board' && node.kind !== 'git' && node.kind !== 'file' && node.kind !== 'memory' && node.kind !== 'verify' && node.kind !== 'comment' && node.kind !== 'trycatch' && <PinsEditor pins={declaredPins} types={types} onChange={setDeclaredPins} />}
     </>
   )
 
@@ -1053,12 +1837,41 @@ export function WorkflowCanvas({
     return () => window.removeEventListener('keydown', onKey)
   }, [expanded])
   const { data: scripts } = useFetch(() => listScripts(), 'workflow-scripts')
+  const { data: workflows } = useFetch(() => listWorkflows(), 'workflow-subworkflows')
   const { data: library } = useFetch(() => listLibrary(), 'workflow-agents')
   const agents = library ? library.filter((i) => i.kind === 'agent') : null
   const rf = useRef<ReactFlowInstance<CardNode, Edge> | null>(null)
   const [nodes, setNodes, onNodesChange] = useNodesState<CardNode>([])
 
   const statuses = useMemo(() => stepStatusByNode(run), [run])
+
+  // The shown run's gate approvals (naru task 1993): polled while it runs so
+  // a waiting gate shows its Approve / Reject buttons on the card.
+  const runId = run?.id ?? null
+  const { data: gates, refetch: refetchGates } = useFetch(
+    () => (runId === null ? Promise.resolve([] as WorkflowGate[]) : listWorkflowGates(runId)),
+    `workflow-gates-${runId ?? 'none'}-${run?.status ?? ''}`,
+    { pollMs: run?.status === 'running' ? 2000 : undefined },
+  )
+  const gatesByNode = useMemo(() => gateByNode(gates), [gates])
+  const [gateBusy, setGateBusy] = useState<number | null>(null)
+  const [gateError, setGateError] = useState<string | null>(null)
+  function decideGate(gate: WorkflowGate, decision: 'approved' | 'rejected') {
+    setGateBusy(gate.id)
+    setGateError(null)
+    decideWorkflowGate(gate.id, decision).then(
+      () => {
+        setGateBusy(null)
+        void refetchGates()
+      },
+      (err: unknown) => {
+        setGateBusy(null)
+        // A 409 means someone else decided first: show the final state.
+        setGateError(err instanceof Error ? err.message : String(err))
+        void refetchGates()
+      },
+    )
+  }
 
   function openPinMenu(at: { x: number; y: number }, nodeId: number, side: PinSide, pin: string, ty: string) {
     setMenu({ ...at, nodeId, side, pin, ty })
@@ -1079,11 +1892,23 @@ export function WorkflowCanvas({
         id: String(n.id),
         type: 'card' as const,
         position: { x: n.x, y: n.y },
+        ...(n.kind === 'comment' ? { zIndex: -1, style: { width: COMMENT_W, height: COMMENT_H } } : {}),
         selected: sel?.kind === 'node' && sel.id === n.id,
-        data: { node: n, status: statuses.get(n.id), types, drag: null, onPinMenu: openPinMenu },
+        data: {
+          node: n,
+          status: statuses.get(n.id),
+          types,
+          drag: null,
+          onPinMenu: openPinMenu,
+          gate: gatesByNode.get(n.id),
+          gateBusy,
+          gateError,
+          onDecide: decideGate,
+        },
       })),
     )
-  }, [view.nodes, statuses, types, setNodes])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view.nodes, statuses, types, setNodes, gatesByNode, gateBusy, gateError])
 
   // A wire in flight dims the pins it cannot land on, in place (no rebuild,
   // so no node snaps back).
@@ -1380,6 +2205,7 @@ export function WorkflowCanvas({
               node={selectedNode}
               types={types}
               scripts={scripts ?? []}
+              workflows={workflows ?? []}
               agents={agents}
               onSaved={changed}
               onError={setError}

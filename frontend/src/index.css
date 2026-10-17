@@ -66,13 +66,19 @@
   /* Workflow node kinds (mesa task 1607): one tint per kind, shared by the
      builder's palette and its cards, and the Run pill. */
   --wf-trigger: #2a3355;
+  --wf-schedule: #4a3326;
   --wf-prompt: #3a2f5c;
   --wf-agent: #23413f;
+  --wf-comment: #1f2a36;
   --wf-cli: #24404a;
   --wf-script: #3d3a2c;
   --wf-branch: #4a3040;
   --wf-decide: #4a2f4f;
   --wf-output: #2e3a2e;
+  --wf-flow: #4a3a24;
+  --wf-switch: #3b4527;
+  --wf-task: #2a4150;
+  --wf-http: #264a4a;
   --wf-run: #7c6cf0;
   --edge-cyan: inset 2px 0 0 rgba(var(--cyan-rgb), 0.55);
   /* Neon text glows (naru task 1784): one variable per shape so a light theme

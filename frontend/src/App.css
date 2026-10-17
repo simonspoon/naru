@@ -1529,11 +1529,17 @@ main {
 .wf-kind-trigger {
   background: var(--wf-trigger);
 }
+.wf-kind-schedule {
+  background: var(--wf-schedule);
+}
 .wf-kind-prompt {
   background: var(--wf-prompt);
 }
 .wf-kind-agent {
   background: var(--wf-agent);
+}
+.wf-kind-comment {
+  background: var(--wf-comment);
 }
 .wf-kind-cli {
   background: var(--wf-cli);
@@ -1549,6 +1555,27 @@ main {
 }
 .wf-kind-output {
   background: var(--wf-output);
+}
+.wf-kind-switch {
+  background: var(--wf-switch);
+}
+.wf-kind-task {
+  background: var(--wf-task);
+}
+.wf-kind-http,
+.wf-kind-notify,
+.wf-kind-board,
+.wf-kind-git,
+.wf-kind-file,
+.wf-kind-verify {
+  background: var(--wf-http);
+}
+.wf-kind-parallel,
+.wf-kind-join,
+.wf-kind-delay,
+.wf-kind-gate,
+.wf-kind-trycatch {
+  background: var(--wf-flow);
 }
 
 .wf-viewport {
@@ -1727,6 +1754,14 @@ main {
 
 .wf-pin-bool {
   --pin: var(--red);
+}
+
+.wf-pin-number {
+  --pin: var(--amber);
+}
+
+.wf-pin-any {
+  --pin: var(--muted);
 }
 
 /* Typed pins (naru task 1981): a pin that is a real React Flow handle,
@@ -1941,6 +1976,10 @@ main {
   color: var(--red);
 }
 
+.wf-branch-caught {
+  color: var(--amber);
+}
+
 /* The canvas follows the theme (React Flow's colorMode is fixed to dark). */
 .wf-viewport .react-flow {
   --xy-background-color: var(--bg);
@@ -2139,6 +2178,49 @@ main {
   font-family: var(--font-mono);
   font-size: 0.75rem;
   resize: vertical;
+}
+
+.wf-seg {
+  display: flex;
+  gap: 0.25rem;
+}
+.wf-seg button {
+  flex: 1;
+  min-height: 44px;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel-raised);
+  color: var(--text);
+}
+.wf-seg button.active {
+  border-color: var(--accent);
+  color: var(--text-h);
+}
+.wf-seg button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.wf-cron-input {
+  font-family: var(--font-mono);
+}
+.wf-webhook-url,
+.wf-webhook-curl {
+  display: block;
+  margin: 0 0 0.4rem;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  overflow-x: auto;
+  white-space: pre;
+  max-width: 100%;
+}
+.wf-webhook-copy {
+  min-height: 44px;
+  min-width: 44px;
+}
+.wf-webhook-copy:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 .wf-check {
@@ -13082,4 +13164,133 @@ body.dock-resizing .dock-body {
   display: flex;
   flex-wrap: wrap;
   column-gap: 1rem;
+}
+
+/* Approval gate (naru task 1993): the waiting/decided badge, message and the
+   Approve / Reject pair on a gate card. Theme variables only. */
+.wf-gate {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.4rem 0.6rem 0;
+}
+
+.wf-gate-badge {
+  font-size: 0.62rem;
+  font-family: var(--font-mono);
+  padding: 0.1rem 0.45rem;
+  border-radius: var(--r-md);
+  box-shadow: inset 0 0 0 1px currentColor;
+}
+
+.wf-gate-waiting {
+  color: var(--amber);
+}
+
+.wf-gate-approved {
+  color: var(--green);
+}
+
+.wf-gate-rejected {
+  color: var(--red);
+}
+
+.wf-gate-msg {
+  flex: 1 1 100%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+.wf-gate-actions {
+  display: flex;
+  gap: 0.4rem;
+  flex: 1 1 100%;
+}
+
+.wf-gate-btn {
+  flex: 1;
+  min-height: 1.9rem;
+  font-size: 0.75rem;
+  border-radius: var(--r-md);
+  background: transparent;
+  cursor: pointer;
+}
+
+.wf-gate-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.wf-gate-approve {
+  color: var(--green);
+  border: 1px solid var(--green);
+}
+
+.wf-gate-reject {
+  color: var(--red);
+  border: 1px solid var(--red);
+}
+
+.wf-gate-error {
+  flex: 1 1 100%;
+  font-size: 0.68rem;
+}
+
+@media (max-width: 600px) {
+  .wf-gate-btn {
+    min-height: 44px;
+  }
+}
+
+/* Comment box (naru task 2008): an editor-only, translucent group box drawn
+   behind the nodes; the tint is a theme colour (`--cc`). */
+.wf-comment {
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  padding: 0.5rem 0.75rem;
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--cc) 12%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--cc) 55%, transparent);
+  color: var(--text-h);
+  overflow: hidden;
+}
+.wf-comment:hover {
+  box-shadow: 0 0 0 1px var(--cc);
+}
+.wf-comment.selected {
+  box-shadow: 0 0 0 2px var(--cc);
+}
+.wf-comment-title {
+  display: block;
+  font-size: 0.8rem;
+}
+.wf-comment-text {
+  margin-top: 0.25rem;
+  font-size: 0.75rem;
+  color: var(--muted);
+  white-space: pre-wrap;
+}
+.wf-comment-swatches {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.wf-comment-swatch {
+  width: 2.75rem;
+  height: 2.75rem;
+  padding: 0;
+  border-radius: var(--r-sm);
+  border: 0;
+  background: color-mix(in srgb, var(--cc) 35%, transparent);
+  box-shadow: 0 0 0 1px var(--cc);
+  cursor: pointer;
+}
+.wf-comment-swatch.on {
+  box-shadow: 0 0 0 3px var(--cc);
 }

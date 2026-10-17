@@ -6,7 +6,7 @@
 
 import type { WorkflowNodeKind } from './types/WorkflowNodeKind'
 
-export type PinType = 'string' | 'result' | 'model' | 'bool'
+export type PinType = 'string' | 'result' | 'model' | 'bool' | 'number' | 'any'
 
 export interface Pin {
   label: string
@@ -23,7 +23,17 @@ export interface NodePins {
 export function pinsFor(kind: WorkflowNodeKind): NodePins {
   switch (kind) {
     case 'trigger':
+    case 'schedule':
       return { inputs: [], outputs: [{ label: 'event', type: 'string' }] }
+    case 'task-event':
+      // The server declares the `task` pin (the change as JSON text).
+      return { inputs: [], outputs: [{ label: 'task', type: 'string' }] }
+    case 'file-watch':
+      // The server declares the `event` pin (the change as JSON text).
+      return { inputs: [], outputs: [{ label: 'event', type: 'string' }] }
+    case 'webhook':
+      // The server declares the typed `body` pin; this is the untyped fallback.
+      return { inputs: [], outputs: [{ label: 'body', type: 'any' }] }
     case 'prompt':
       return {
         inputs: [
@@ -42,6 +52,43 @@ export function pinsFor(kind: WorkflowNodeKind): NodePins {
           { label: 'status', type: 'string' },
         ],
       }
+    case 'comment':
+      return { inputs: [], outputs: [] }
+    case 'verify':
+      return {
+        inputs: [{ label: 'input', type: 'string' }],
+        outputs: [
+          { label: 'pass', type: 'bool' },
+          { label: 'evidence', type: 'string' },
+          { label: 'exit_code', type: 'number' },
+        ],
+      }
+    case 'memory':
+      return {
+        inputs: [{ label: 'input', type: 'string' }],
+        outputs: [
+          { label: 'result', type: 'string' },
+          { label: 'id', type: 'string' },
+        ],
+      }
+    case 'file':
+      return {
+        inputs: [{ label: 'input', type: 'string' }],
+        outputs: [
+          { label: 'result', type: 'string' },
+          { label: 'path', type: 'string' },
+        ],
+      }
+    case 'git':
+      // The server declares the typed pins; these are the fallback.
+      return {
+        inputs: [{ label: 'input', type: 'string' }],
+        outputs: [
+          { label: 'result', type: 'string' },
+          { label: 'ok', type: 'bool' },
+          { label: 'status', type: 'string' },
+        ],
+      }
     case 'cli':
     case 'script':
       return {
@@ -52,9 +99,66 @@ export function pinsFor(kind: WorkflowNodeKind): NodePins {
       // true/false are flow handles with their own labels.
       return { inputs: [{ label: 'input', type: 'string' }], outputs: [] }
     case 'decide':
+    case 'switch':
       return { inputs: [{ label: 'input', type: 'string' }], outputs: [] }
     case 'output':
       return { inputs: [{ label: 'result', type: 'result' }], outputs: [] }
+    // Fallback mirroring the pins the server declares for the kind.
+    case 'parse-json':
+      return {
+        inputs: [{ label: 'text', type: 'string' }],
+        outputs: [{ label: 'value', type: 'any' }],
+      }
+    case 'variable':
+      return {
+        inputs: [{ label: 'value', type: 'any' }],
+        outputs: [{ label: 'value', type: 'any' }],
+      }
+    case 'mapfilter':
+      return {
+        inputs: [{ label: 'list', type: 'any' }],
+        outputs: [{ label: 'list', type: 'any' }],
+      }
+    case 'foreach':
+      return {
+        inputs: [{ label: 'list', type: 'any' }],
+        outputs: [{ label: 'results', type: 'any' }],
+      }
+    case 'parallel':
+      return {
+        inputs: [{ label: 'in', type: 'any' }],
+        outputs: [{ label: 'out', type: 'any' }],
+      }
+    case 'join':
+      return {
+        inputs: [{ label: 'in', type: 'any' }],
+        outputs: [{ label: 'all', type: 'any' }],
+      }
+    case 'delay':
+      return {
+        inputs: [{ label: 'in', type: 'any' }],
+        outputs: [{ label: 'out', type: 'any' }],
+      }
+    case 'task':
+    case 'http':
+    case 'notify':
+    case 'board':
+    case 'subworkflow':
+      return {
+        inputs: [{ label: 'in', type: 'any' }],
+        outputs: [{ label: 'out', type: 'any' }],
+      }
+    case 'gate':
+      // approved/rejected are flow handles with their own labels.
+      return { inputs: [{ label: 'in', type: 'any' }], outputs: [] }
+    case 'trycatch':
+      // ok/caught are flow handles with their own labels.
+      return { inputs: [{ label: 'input', type: 'any' }], outputs: [] }
+    case 'retry':
+      return {
+        inputs: [{ label: 'input', type: 'any' }],
+        outputs: [{ label: 'output', type: 'any' }],
+      }
     case 'break':
     case 'make':
       // Typed pins: derived from the struct by workflowTypes.pinsOf.
@@ -66,6 +170,10 @@ export function pinsFor(kind: WorkflowNodeKind): NodePins {
 export function kindColorVar(kind: WorkflowNodeKind): string {
   switch (kind) {
     case 'trigger':
+    case 'schedule':
+    case 'webhook':
+    case 'task-event':
+    case 'file-watch':
       return '--red'
     case 'output':
       return '--green'
@@ -74,6 +182,31 @@ export function kindColorVar(kind: WorkflowNodeKind): string {
       return '--violet'
     case 'agent':
       return '--magenta'
+    case 'comment':
+      return '--muted'
+    case 'switch':
+    case 'task':
+    case 'http':
+    case 'notify':
+    case 'board':
+    case 'git':
+    case 'file':
+    case 'memory':
+    case 'verify':
+      return '--green'
+    case 'parse-json':
+    case 'variable':
+    case 'mapfilter':
+    case 'foreach':
+      return '--amber'
+    case 'parallel':
+    case 'join':
+    case 'retry':
+    case 'delay':
+    case 'gate':
+    case 'trycatch':
+    case 'subworkflow':
+      return '--amber'
     default:
       return '--cyan'
   }

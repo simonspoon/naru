@@ -107,6 +107,7 @@ import type { WorkflowEdge } from './types/WorkflowEdge'
 import type { WorkflowLogEntry } from './types/WorkflowLogEntry'
 import type { WorkflowNode } from './types/WorkflowNode'
 import type { WorkflowNodeKind } from './types/WorkflowNodeKind'
+import type { WorkflowGate } from './types/WorkflowGate'
 import type { WorkflowRun } from './types/WorkflowRun'
 import type { WorkflowView } from './types/WorkflowView'
 
@@ -918,6 +919,17 @@ export function listWorkflowRuns(id: number): Promise<WorkflowRun[]> {
 
 export function getWorkflowRun(id: number): Promise<WorkflowRun> {
   return request(`/api/workflow-runs/${id}`)
+}
+
+/** A run's gate approvals (naru task 1993), newest first: all of them, or
+ *  with `run` omitted only the pending ones of running runs. */
+export function listWorkflowGates(run?: number): Promise<WorkflowGate[]> {
+  return request(run === undefined ? '/api/workflow-gates' : `/api/workflow-gates?run=${run}&all=true`)
+}
+
+/** Approves or rejects a pending gate; an already-decided one is a 409 `ApiError`. */
+export function decideWorkflowGate(id: number, decision: 'approved' | 'rejected'): Promise<WorkflowGate> {
+  return request(`/api/workflow-gates/${id}/decide`, jsonInit('POST', { decision }))
 }
 
 /** Log lines, newest first; no `log` = every log, no `workflow` = every workflow. */

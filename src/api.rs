@@ -50,11 +50,11 @@ use crate::core::{
     ProjectGitView, ProjectPatch, ProjectVersion, ReceiptPatch, STALE_CLAIM_MINUTES, Script,
     ScriptArg, ScriptPatch, ScriptRunEvent, ServeBoolSetting, ServeHostsSetting,
     ServeNumberSetting, Status, Store, SystemInfo, Task, TaskNote, TaskPatch, TaskSummary,
-    VoiceEnrollment, WorkflowNodeKind, WorkflowNodeNew, WorkflowNodePatch, WorkflowPatch,
-    WorkflowTrigger, WorkflowType, agents, attachments, audio, board, config, files, git, guard,
-    hooks, inbox_triage, kb, library, listen, live, memory_job, notify, project_memory, receipt,
-    runner, script_runs, scripts, speech, supervisor, system, validate_live_client, version,
-    voice_enroll, workflow,
+    VoiceEnrollment, WorkflowGateStatus, WorkflowNodeKind, WorkflowNodeNew, WorkflowNodePatch,
+    WorkflowPatch, WorkflowTrigger, WorkflowType, agents, attachments, audio, board, config, files,
+    git, guard, hooks, inbox_triage, kb, library, listen, live, memory_job, notify, project_memory,
+    receipt, runner, script_runs, scripts, speech, supervisor, system, validate_live_client,
+    version, voice_enroll, workflow,
 };
 
 /// The Vite build output, embedded into the binary at compile time.
@@ -502,6 +502,7 @@ fn watch_workflows_tick() -> Duration {
 /// lock around brief reads and writes between nodes. Workflows of an
 /// archived project are never due.
 fn workflow_watcher_tick(state: &AppState) {
+    file_watch_tick(state);
     let due = {
         let store = match state.store.lock() {
             Ok(s) => s,
@@ -527,6 +528,42 @@ fn workflow_watcher_tick(state: &AppState) {
             // Another claimer got the interval first (or it is no longer due).
             Ok(None) => {}
             Ok(Some((view, run))) => {
+                if let Err(e) = workflow::execute_run(&*state.store, &view, run) {
+                    eprintln!("workflow-watcher: workflow {id} could not finish its run: {e}");
+                }
+            }
+            Err(e) => eprintln!("workflow-watcher: workflow {id} could not start: {e}"),
+        }
+    }
+}
+
+/// The `file-watch` half of a watcher pass (naru task 2007): runs each
+/// workflow whose watched path changed since the last pass, the change
+/// being the run input. Claimed under the lock, executed off it.
+fn file_watch_tick(state: &AppState) {
+    let fires = {
+        let store = match state.store.lock() {
+            Ok(s) => s,
+            Err(e) => e.into_inner(),
+        };
+        match workflow::plan_file_watch(&store) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("workflow-watcher: file-watch check failed: {e}");
+                return;
+            }
+        }
+    };
+    for (id, input) in fires {
+        let claimed = {
+            let mut store = match state.store.lock() {
+                Ok(s) => s,
+                Err(e) => e.into_inner(),
+            };
+            workflow::claim_run(&mut store, id, WorkflowTrigger::FileWatch, &input)
+        };
+        match claimed {
+            Ok((view, run)) => {
                 if let Err(e) = workflow::execute_run(&*state.store, &view, run) {
                     eprintln!("workflow-watcher: workflow {id} could not finish its run: {e}");
                 }
@@ -3128,6 +3165,7 @@ fn router(state: AppState) -> Router {
         .route("/api/workflows/{id}/edges", post(create_workflow_edge))
         .route("/api/workflows/events", post(emit_workflow_event))
         .route("/api/workflows/{id}/run", post(run_workflow_route))
+        .route("/api/workflows/{id}/webhook", post(webhook_workflow_route))
         .route("/api/workflows/{id}/runs", get(list_workflow_runs))
         .route(
             "/api/workflow-nodes/{id}",
@@ -3137,6 +3175,11 @@ fn router(state: AppState) -> Router {
         .route("/api/workflow-runs/{id}", get(show_workflow_run))
         .route("/api/workflow-runs/{id}/status", get(workflow_run_status))
         .route("/api/workflow-log", get(list_workflow_log))
+        .route("/api/workflow-gates", get(list_workflow_gates))
+        .route(
+            "/api/workflow-gates/{id}/decide",
+            post(decide_workflow_gate),
+        )
         .route("/api/inbox", get(list_inbox).post(create_inbox))
         .route(
             "/api/inbox/{id}",
@@ -4108,7 +4151,8 @@ async fn create_task(
 ) -> ApiResult<Response> {
     let Json(body) = body?;
     let mut store = state.store.lock().unwrap();
-    let task = store.create_task(
+    let task = receipt::create_task(
+        &mut store,
         body.project_id,
         &body.description,
         body.priority.unwrap_or(Priority::Medium),
@@ -4869,6 +4913,41 @@ async fn run_workflow_route(
     Ok(Json(run).into_response())
 }
 
+/// A webhook call (naru task 2005): the raw JSON body starts a run of a
+/// workflow whose trigger is a `webhook` node and becomes that node's typed
+/// `body` pin. Synchronous like `/run` — a failed run (a body of the wrong
+/// type fails the webhook node) is 200 with `status: "failed"`; 422 is a
+/// workflow without a webhook trigger, 404 an unknown workflow.
+async fn webhook_workflow_route(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    body: String,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let store = state.store.clone();
+    let run = tokio::task::spawn_blocking(move || {
+        {
+            let s = store.lock().unwrap();
+            let view = s.get_workflow_view(id)?;
+            if !view
+                .nodes
+                .iter()
+                .any(|n| n.kind == WorkflowNodeKind::Webhook)
+            {
+                return Err(Error::Validation(format!(
+                    "workflow {id} has no webhook node; add one with `naru workflow node create` (kind webhook)"
+                )));
+            }
+        }
+        workflow::run_workflow(&*store, id, WorkflowTrigger::Webhook, &body)
+    })
+    .await
+    .map_err(|e| agents_unavailable(format!("workflow run panicked: {e}")))??;
+    Ok(Json(run).into_response())
+}
+
 /// An ambient-engine event: validated here (422 on bad input), then the
 /// matching workflows run in the background in id order — the engine is
 /// real-time and must not wait on them. 202 `{"workflow_ids":[…]}`.
@@ -4942,6 +5021,57 @@ async fn workflow_run_status(
     require_agent_access(&state, &addr, &headers)?;
     let store = state.store.lock().unwrap();
     Ok(Json(workflow::run_status(&store, id)?).into_response())
+}
+
+#[derive(Deserialize)]
+struct WorkflowGatesQuery {
+    #[serde(default)]
+    run: Option<i64>,
+    #[serde(default)]
+    all: Option<bool>,
+}
+
+/// Gates, newest first: the pending ones unless `?all=true`, one run's with
+/// `?run=<id>` (naru task 1993). Like every workflow route, reads included,
+/// behind `require_agent_access`.
+async fn list_workflow_gates(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Query(q): Query<WorkflowGatesQuery>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let store = state.store.lock().unwrap();
+    Ok(Json(store.list_workflow_gates(q.run, q.all.unwrap_or(false))?).into_response())
+}
+
+#[derive(Deserialize)]
+struct DecideGateBody {
+    decision: String,
+}
+
+/// Approves or rejects a pending gate: `{"decision": "approved"|"rejected"}`.
+/// A gate already decided is 409.
+async fn decide_workflow_gate(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(body): Json<DecideGateBody>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let status = match body.decision.as_str() {
+        "approved" => WorkflowGateStatus::Approved,
+        "rejected" => WorkflowGateStatus::Rejected,
+        other => {
+            return Err(Error::Validation(format!(
+                "decision must be approved or rejected, got {other:?}"
+            ))
+            .into());
+        }
+    };
+    let mut store = state.store.lock().unwrap();
+    Ok(Json(store.decide_workflow_gate(id, status, None)?).into_response())
 }
 
 async fn list_workflow_log(

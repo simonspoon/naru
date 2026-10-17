@@ -223,14 +223,39 @@ const NODE_H: f64 = 64.0;
 fn kind_colour(kind: WorkflowNodeKind) -> &'static str {
     match kind {
         WorkflowNodeKind::Trigger => "#f5a524",
+        WorkflowNodeKind::Schedule => "#f5a524", // trigger family
+        WorkflowNodeKind::Webhook => "#f5a524",  // trigger family
+        WorkflowNodeKind::TaskEvent => "#f5a524", // trigger family
+        WorkflowNodeKind::FileWatch => "#f5a524", // trigger family
         WorkflowNodeKind::Prompt => "#a78bfa",
         WorkflowNodeKind::Agent => "#2dd4bf",
         WorkflowNodeKind::Cli => "#00e5ff",
         WorkflowNodeKind::Script => "#4ade80",
         WorkflowNodeKind::Branch => "#fb7185",
         WorkflowNodeKind::Decide => "#f472b6",
+        WorkflowNodeKind::Switch => "#a3b84a", // `--wf-switch` family, olive
         WorkflowNodeKind::Output => "#94a3b8",
         WorkflowNodeKind::Break | WorkflowNodeKind::Make => "#38bdf8",
+        WorkflowNodeKind::Variable => "#ffb444", // data node, same amber as parse-json
+        WorkflowNodeKind::MapFilter => "#ffb444", // data node, same amber
+        WorkflowNodeKind::Parallel
+        | WorkflowNodeKind::Join
+        | WorkflowNodeKind::Retry
+        | WorkflowNodeKind::Delay
+        | WorkflowNodeKind::Gate
+        | WorkflowNodeKind::Trycatch
+        | WorkflowNodeKind::Subworkflow => "#fb923c", // flow group, `--wf-flow`
+        WorkflowNodeKind::Task => "#34d399",     // action group, `--wf-task`
+        WorkflowNodeKind::Http => "#34d399",     // action group, `--wf-http`
+        WorkflowNodeKind::Notify => "#34d399",   // action group, `--wf-http`
+        WorkflowNodeKind::Board => "#34d399",    // action group, `--wf-http`
+        WorkflowNodeKind::Git => "#34d399",      // action group, `--wf-http`
+        WorkflowNodeKind::File => "#34d399",     // action group, `--wf-http`
+        WorkflowNodeKind::Comment => "#94a3b8",  // editor-only box
+        WorkflowNodeKind::Verify => "#34d399",   // action group, `--wf-http`
+        WorkflowNodeKind::Memory => "#34d399",   // action group, `--wf-http`
+        WorkflowNodeKind::ForEach => "#ffb444",  // data node, same amber
+        WorkflowNodeKind::ParseJson => "#ffb444", // the canvas `--amber` (index.css); keep in step
     }
 }
 

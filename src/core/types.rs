@@ -4849,7 +4849,11 @@ macro_rules! workflow_enum {
         #[serde(rename_all = "lowercase")]
         #[ts(export, export_to = "../frontend/src/types/")]
         pub enum $name {
-            $($variant),+
+            $(
+                #[serde(rename = $text)]
+                #[ts(rename = $text)]
+                $variant
+            ),+
         }
 
         impl $name {
@@ -4872,22 +4876,49 @@ macro_rules! workflow_enum {
 }
 
 workflow_enum! {
-    /// What a [`WorkflowNode`] does. Exactly ten — the config of each is
-    /// validated by `core::workflow::validate_config`, so an eleventh kind is
-    /// a change to the engine, the validator and the editor together.
+    /// What a [`WorkflowNode`] does. Twenty-one kinds: eight core, `break`/`make`,
+    /// the `parse-json`, `variable`, `mapfilter` and `foreach` data nodes (naru tasks 1985-1988)
+    /// the `parallel`/`join` flow pair (naru task 1989) `switch` (naru task 1990) the `retry` wrapper (naru task 1991) the `delay` wait (naru task 1992) the `gate` human approval (naru task 1993) the `subworkflow` call (naru task 1994) the `trycatch` failure handler (naru task 1995) the `task` action (naru task 1996) and the `verify` check (naru task 2003) and the `schedule` trigger source (naru task 2004) and the `comment` box (naru task 2008, editor-only: no pins, no edges, never run) and the `webhook` trigger source (naru task 2005) and the `task-event` trigger source (naru task 2006). The config of each is
+    /// validated by `core::workflow::validate_config`, so a new kind is a
+    /// change to the engine, the validator and the editor together.
     /// `break` and `make` (naru task 1981) split a struct-typed pin into one
     /// pin per field and combine field pins back into one struct.
     WorkflowNodeKind {
         Trigger => "trigger",
+        Schedule => "schedule",
+        Webhook => "webhook",
+        TaskEvent => "task-event",
+        FileWatch => "file-watch",
         Prompt => "prompt",
         Agent => "agent",
         Cli => "cli",
         Script => "script",
         Branch => "branch",
         Decide => "decide",
+        Switch => "switch",
         Output => "output",
         Break => "break",
         Make => "make",
+        ParseJson => "parse-json",
+        Variable => "variable",
+        MapFilter => "mapfilter",
+        ForEach => "foreach",
+        Parallel => "parallel",
+        Join => "join",
+        Retry => "retry",
+        Delay => "delay",
+        Gate => "gate",
+        Subworkflow => "subworkflow",
+        Trycatch => "trycatch",
+        Task => "task",
+        Http => "http",
+        Notify => "notify",
+        Board => "board",
+        Git => "git",
+        File => "file",
+        Memory => "memory",
+        Verify => "verify",
+        Comment => "comment",
     }
 }
 
@@ -4907,6 +4938,9 @@ workflow_enum! {
         Time => "time",
         Voice => "voice",
         Ambient => "ambient",
+        Webhook => "webhook",
+        TaskEvent => "task-event",
+        FileWatch => "file-watch",
     }
 }
 
@@ -4916,6 +4950,16 @@ workflow_enum! {
         Running => "running",
         Succeeded => "succeeded",
         Failed => "failed",
+    }
+}
+
+workflow_enum! {
+    /// Where a `gate` node's decision is: `pending` until a person decides
+    /// (or the gate times out, which counts as `rejected`).
+    WorkflowGateStatus {
+        Pending => "pending",
+        Approved => "approved",
+        Rejected => "rejected",
     }
 }
 
@@ -5100,6 +5144,27 @@ pub struct WorkflowRun {
     pub error: Option<String>,
     pub started_at: String,
     pub finished_at: Option<String>,
+}
+
+/// One decision a `gate` node (naru task 1993) waits on: written `pending`
+/// when the node starts, decided once by a person (or by the timeout, which
+/// is a rejection with a `reason`). `workflow_id` is derived on read.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct WorkflowGate {
+    #[ts(type = "number")]
+    pub id: i64,
+    #[ts(type = "number")]
+    pub run_id: i64,
+    #[ts(type = "number")]
+    pub node_id: i64,
+    #[ts(type = "number")]
+    pub workflow_id: i64,
+    pub message: String,
+    pub status: WorkflowGateStatus,
+    pub reason: Option<String>,
+    pub created_at: String,
+    pub decided_at: Option<String>,
 }
 
 /// One line an `output` node with `target: log` appended to a named log.

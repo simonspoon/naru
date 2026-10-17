@@ -36,9 +36,14 @@ anything else is `validation` naming the slot.
 | `--text-h` | mix(`text`, white on dark / black on light, 0.5) |
 | `--surface-field` | `rgba(var(--bg-rgb), 0.85)` on dark, `panel` at 0.92 on light |
 | `--wf-trigger` | mix(`panel`, mix(`accent`, `accent2`, 0.5), 0.25) |
+| `--wf-schedule` | mix(`panel`, mix(`bad`, `accent`, 0.5), 0.25) |
 | `--wf-prompt` / `--wf-cli` / `--wf-script` | mix(`panel`, `accent2` / `accent` / `warn`, 0.25 / 0.22 / 0.2) |
 | `--wf-agent` | mix(`panel`, mix(`good`, `accent`, 0.5), 0.22) |
+| `--wf-comment` | mix(`panel`, `muted`, 0.2) |
 | `--wf-branch` / `--wf-decide` / `--wf-output` | mix(`panel`, `bad` / magenta / `good`, 0.22 / 0.22 / 0.18) |
+| `--wf-switch` | mix(`panel`, mix(`good`, `warn`, 0.5), 0.22) |
+| `--wf-task` | mix(`panel`, mix(`good`, `accent2`, 0.5), 0.24) |
+| `--wf-http` | mix(`panel`, mix(`good`, `accent`, 0.5), 0.24) |
 | `--wf-run` | `accent2` |
 | `--on-accent`, `--on-accent-alt` | `#ffffff` or `#0a0a0a`, whichever contrasts more with `accent` / `accent2` |
 | `--magenta-soft` | magenta mixed 0.5 toward white (dark) or 0.1 toward black (light) |
