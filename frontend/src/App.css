@@ -1572,21 +1572,28 @@ main {
   pointer-events: none;
 }
 
-/* A node card: tinted by kind, a ring for selection and one for the last
-   run's step state (ok green, failed red, skipped dimmed). */
+/* A node card, Blueprint style (naru task 1980): a header tinted by kind
+   (--kc, set inline from workflowLayout.kindColorVar) over a 2px cyan rule, a
+   body of summary and data pins, a ring for selection and one for the last
+   run's step state (ok green, failed red, skipped dimmed). Theme variables
+   only. The uppercase title is a deliberate exception to the style guide. */
 .wf-node {
   position: relative;
-  min-width: 11rem;
-  max-width: 16rem;
-  padding: 0.7rem 0.8rem;
+  width: 13.2rem;
+  padding: 0 0 0.5rem;
   border-radius: var(--r-md);
+  background: var(--panel);
   color: var(--text-h);
   box-shadow: var(--ring);
   font-size: 0.85rem;
 }
 
+.wf-node:hover {
+  box-shadow: 0 0 0 1px var(--border-bright);
+}
+
 .wf-node.selected {
-  box-shadow: 0 0 0 1px var(--violet), 0 0 16px var(--violet-dim);
+  box-shadow: 0 0 0 2px var(--cyan), 0 0 16px rgba(var(--cyan-rgb), 0.3);
 }
 
 .wf-node.step-ok {
@@ -1622,6 +1629,12 @@ main {
   display: flex;
   align-items: center;
   gap: 0.4rem;
+  height: 32px;
+  box-sizing: border-box;
+  padding: 0 0.7rem;
+  border-radius: var(--r-md) var(--r-md) 0 0;
+  border-bottom: 2px solid var(--cyan);
+  background: color-mix(in srgb, var(--kc, var(--cyan)) 28%, var(--panel));
 }
 
 .wf-node-title {
@@ -1630,6 +1643,11 @@ main {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-h);
 }
 
 .wf-node-step {
@@ -1644,20 +1662,92 @@ main {
   color: var(--muted);
 }
 
+.wf-node-body {
+  padding: 0.4rem 0.8rem 0;
+}
+
 .wf-node-sum {
-  margin-top: 0.15rem;
   font-size: 0.72rem;
   color: var(--muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  min-height: 1em;
 }
 
-.wf-viewport .react-flow__handle {
-  width: 10px;
-  height: 10px;
-  background: var(--cyan);
-  border: 2px solid var(--bg);
+.wf-pin-rows {
+  margin-top: 0.35rem;
+}
+
+.wf-pin-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  height: 18px;
+}
+
+.wf-pin-cell {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.66rem;
+  color: var(--muted);
+}
+
+.wf-pin-cell-out {
+  margin-left: auto;
+}
+
+.wf-pin {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  box-sizing: border-box;
+  border: 1.5px solid var(--panel);
+  box-shadow: 0 0 0 1.5px var(--pin);
+  background: var(--pin);
+  flex: none;
+}
+
+.wf-pin-string {
+  --pin: var(--cyan);
+}
+
+.wf-pin-result {
+  --pin: var(--green);
+}
+
+.wf-pin-model {
+  --pin: var(--amber);
+}
+
+.wf-pin-bool {
+  --pin: var(--red);
+}
+
+/* Flow (execution) pins: the React Flow handles, drawn as white triangles. */
+.wf-viewport .react-flow__handle.wf-flow-pin {
+  width: 12px;
+  height: 14px;
+  min-width: 0;
+  border: none;
+  border-radius: 0;
+  background: var(--text);
+  clip-path: polygon(0 0, 100% 50%, 0 100%);
+}
+
+.wf-viewport .react-flow__handle.wf-flow-pin:hover {
+  background: var(--text-h);
+  transform: translate(0, -50%) scale(1.25);
+}
+
+.wf-viewport .react-flow__handle-left.wf-flow-pin {
+  left: -6px;
+}
+
+.wf-viewport .react-flow__handle-right.wf-flow-pin {
+  right: -6px;
 }
 
 .wf-viewport .react-flow__handle.wf-handle-true {
@@ -1687,9 +1777,15 @@ main {
   color: var(--red);
 }
 
+/* The canvas follows the theme (React Flow's colorMode is fixed to dark). */
+.wf-viewport .react-flow {
+  --xy-background-color: var(--bg);
+}
+
+/* Wires: curved beziers; flow wires are the thick ones. */
 .wf-viewport .react-flow__edge-path {
-  stroke: var(--border-bright);
-  stroke-width: 2;
+  stroke: var(--text);
+  stroke-width: 3;
 }
 
 .wf-viewport .react-flow__edge.wf-edge-true .react-flow__edge-path {
@@ -1701,7 +1797,7 @@ main {
 }
 
 .wf-viewport .react-flow__edge.selected .react-flow__edge-path {
-  stroke: var(--violet);
+  stroke: var(--cyan);
 }
 
 .wf-viewport .react-flow__edge-textbg {
@@ -1724,7 +1820,9 @@ main {
   border-bottom: 1px solid var(--hairline);
 }
 
-/* The inspector: a floating panel bottom-right, over the canvas. */
+/* The inspector. A selected node's one floats beside it (.wf-float, placed by
+   workflowLayout.placePanel inline); an edge's keeps the small bottom-right
+   box. Narrow tiers dock the floating one as a bottom sheet. */
 .wf-inspector {
   position: absolute;
   right: 1rem;
@@ -1738,6 +1836,109 @@ main {
   border-radius: var(--r-md);
   box-shadow: var(--ring);
   font-size: 0.8rem;
+}
+
+.wf-inspector.wf-float {
+  right: auto;
+  bottom: auto;
+  box-sizing: border-box;
+  max-height: calc(100% - 16px);
+  background: var(--panel);
+  border-radius: var(--r-lg);
+}
+
+.wf-float-wire {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  pointer-events: none;
+}
+
+.wf-float-wire line {
+  stroke: var(--muted);
+  stroke-width: 1.5;
+  stroke-dasharray: 5 4;
+}
+
+.wf-head-btns {
+  display: flex;
+  gap: 0.25rem;
+  margin-left: auto;
+}
+
+.wf-icon-btn {
+  min-width: 1.6rem;
+  padding: 0.1rem 0.4rem;
+}
+
+/* The expanded editor: a large centered modal over the dimmed canvas. The
+   backdrop is .create-task-backdrop so shouldIgnoreShortcut() sees it. */
+.wf-modal {
+  display: flex;
+  flex-direction: column;
+  width: 84vw;
+  height: 84vh;
+  background: var(--panel);
+  border-radius: var(--r-lg);
+  box-shadow: 0 0 0 2px var(--cyan), 0 0 32px rgba(var(--cyan-rgb), 0.2);
+  font-size: 0.8rem;
+}
+
+.wf-modal-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  padding: 0.7rem 1rem;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.wf-modal-head .wf-icon-btn {
+  margin-left: auto;
+}
+
+.wf-modal-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.wf-modal-side {
+  width: 220px;
+  flex: none;
+  overflow-y: auto;
+  padding: 0.5rem 1rem;
+  border-right: 1px solid var(--hairline);
+}
+
+.wf-modal-pins {
+  margin-top: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.wf-modal-main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 0.3rem;
+  min-width: 0;
+  padding: 0.75rem 1rem;
+}
+
+.wf-modal-editor {
+  flex: 1;
+  width: 100%;
+  box-sizing: border-box;
+  resize: none;
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.wf-modal-foot {
+  padding: 0.5rem 1rem 0.8rem;
+  border-top: 1px solid var(--hairline);
 }
 
 .wf-inspector-head {
@@ -1908,9 +2109,42 @@ main {
     min-height: var(--tab-viewport-min);
   }
 
-  .wf-inspector {
+  .wf-inspector,
+  .wf-inspector.wf-float {
+    position: absolute;
+    width: auto !important;
+    min-height: 0 !important;
+    left: 1rem !important;
+    right: 1rem !important;
+    top: auto !important;
+    bottom: 1rem;
+    max-height: 60%;
+  }
+
+  .wf-float-wire {
+    display: none;
+  }
+
+  .wf-modal {
+    width: 96vw;
+    height: 92vh;
+  }
+
+  .wf-modal-body {
+    flex-direction: column;
+  }
+
+  .wf-modal-side {
     width: auto;
-    left: 1rem;
+    max-height: 35%;
+    border-right: none;
+    border-bottom: 1px solid var(--hairline);
+  }
+
+  .wf-viewport .react-flow__handle.wf-flow-pin::after {
+    content: '';
+    position: absolute;
+    inset: -6px;
   }
 
   .workflow-row {

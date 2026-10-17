@@ -1,3 +1,4 @@
+import { createPortal } from 'react-dom'
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Background,
@@ -8,6 +9,7 @@ import {
   Position,
   ReactFlow,
   useNodesState,
+  useStore,
   type Connection,
   type Edge,
   type Node,
@@ -60,30 +62,45 @@ import type { WorkflowRun } from './types/WorkflowRun'
 import type { WorkflowStepStatus } from './types/WorkflowStepStatus'
 import type { WorkflowView } from './types/WorkflowView'
 import { KindIcon, SpeakIcon } from './components/WorkflowIcon'
+import { PANEL_H, PANEL_W, kindColorVar, pinsFor, placePanel } from './workflowLayout'
 
 type CardData = { node: WorkflowNode; status: WorkflowStepStatus | undefined }
 type CardNode = Node<CardData, 'card'>
 
-/** A decide card's handles sit in rows of their own below the title and
- *  summary: the first row starts `DECIDE_ROWS_TOP` px down, one row each. */
-const DECIDE_ROWS_TOP = 58
+/** A decide card's flow handles sit in rows of their own below the title,
+ *  summary and input pins: the first row starts `DECIDE_ROWS_TOP` px down. */
+const DECIDE_ROWS_TOP = 84
 const DECIDE_ROW = 20
 
-/** One node as a card: icon, bold title, a muted one-line summary, handles for
- *  the connections it may take, and the last run's step state as a ring. A
- *  branch offers two labelled source handles so the edge's `true`/`false` is
+/** One node as a Blueprint-style card: a header tinted by kind, a muted
+ *  summary, round typed data pins (decorative: the graph carries no data
+ *  types), and white triangle flow handles for the connections it may take.
+ *  A branch offers two labelled flow handles so the edge's `true`/`false` is
  *  decided by where the line is dragged from, and a decide node one per option
- *  plus `fallback`. */
+ *  plus `fallback`. The last run's step state is a ring. */
 function NodeCard({ data, selected }: NodeProps<CardNode>) {
   const { node, status } = data
   const decideHandles = node.kind === 'decide' ? sourceHandles(node.kind, node.config) : []
+  const pins = pinsFor(node.kind)
+  const rows = Math.max(pins.inputs.length, pins.outputs.length)
   return (
     <div
-      style={decideHandles.length > 0 ? { paddingBottom: DECIDE_ROW * decideHandles.length + 8 } : undefined}
+      style={{
+        ['--kc' as string]: `var(${kindColorVar(node.kind)})`,
+        ...(decideHandles.length > 0 ? { paddingBottom: DECIDE_ROW * decideHandles.length + 8 } : {}),
+      }}
       className={`wf-node wf-kind-${node.kind}${selected ? ' selected' : ''} ${stepClass(status)}`}
       title={status ? `last run: ${status}` : undefined}
     >
-      {hasInput(node.kind) && <Handle type="target" position={Position.Left} />}
+      {hasInput(node.kind) && (
+        <Handle
+          type="target"
+          position={Position.Left}
+          className="wf-flow-pin"
+          aria-label="flow in"
+          style={{ top: 16 }}
+        />
+      )}
       <div className="wf-node-head">
         <span className="wf-node-icon" aria-hidden="true">
           <KindIcon kind={node.kind} />
@@ -91,27 +108,63 @@ function NodeCard({ data, selected }: NodeProps<CardNode>) {
         <b className="wf-node-title">{node.title}</b>
       </div>
       {status && <span className="wf-node-step">{status}</span>}
-      <div className="wf-node-sum">{summarize(node.kind, node.config)}</div>
+      <div className="wf-node-body">
+        <div className="wf-node-sum">{summarize(node.kind, node.config)}</div>
+        {rows > 0 && (
+          <div className="wf-pin-rows">
+            {Array.from({ length: rows }, (_, i) => (
+              <div key={i} className="wf-pin-row">
+                <span className="wf-pin-cell">
+                  {pins.inputs[i] && (
+                    <>
+                      <span
+                        className={`wf-pin wf-pin-${pins.inputs[i].type}`}
+                        role="img"
+                        aria-label={`${pins.inputs[i].label} in`}
+                      />
+                      {pins.inputs[i].label}
+                    </>
+                  )}
+                </span>
+                <span className="wf-pin-cell wf-pin-cell-out">
+                  {pins.outputs[i] && (
+                    <>
+                      {pins.outputs[i].label}
+                      <span
+                        className={`wf-pin wf-pin-${pins.outputs[i].type}`}
+                        role="img"
+                        aria-label={`${pins.outputs[i].label} out`}
+                      />
+                    </>
+                  )}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
       {node.kind === 'branch' ? (
         <>
           <Handle
             id="true"
             type="source"
             position={Position.Right}
-            className="wf-handle-true"
-            style={{ top: '30%' }}
+            className="wf-flow-pin wf-handle-true"
+            aria-label="true out"
+            style={{ top: '50%' }}
           />
-          <span className="wf-branch-label wf-branch-true" style={{ top: '30%' }}>
+          <span className="wf-branch-label wf-branch-true" style={{ top: '50%' }}>
             true
           </span>
           <Handle
             id="false"
             type="source"
             position={Position.Right}
-            className="wf-handle-false"
-            style={{ top: '70%' }}
+            className="wf-flow-pin wf-handle-false"
+            aria-label="false out"
+            style={{ top: '80%' }}
           />
-          <span className="wf-branch-label wf-branch-false" style={{ top: '70%' }}>
+          <span className="wf-branch-label wf-branch-false" style={{ top: '80%' }}>
             false
           </span>
         </>
@@ -120,7 +173,14 @@ function NodeCard({ data, selected }: NodeProps<CardNode>) {
           const top = DECIDE_ROWS_TOP + DECIDE_ROW * i + DECIDE_ROW / 2
           return (
             <Fragment key={label}>
-              <Handle id={label} type="source" position={Position.Right} style={{ top }} />
+              <Handle
+                id={label}
+                type="source"
+                position={Position.Right}
+                className="wf-flow-pin"
+                aria-label={`${label} out`}
+                style={{ top }}
+              />
               <span className="wf-branch-label" style={{ top }}>
                 {label}
               </span>
@@ -128,7 +188,15 @@ function NodeCard({ data, selected }: NodeProps<CardNode>) {
           )
         })
       ) : (
-        hasOutput(node.kind) && <Handle type="source" position={Position.Right} />
+        hasOutput(node.kind) && (
+          <Handle
+            type="source"
+            position={Position.Right}
+            className="wf-flow-pin"
+            aria-label="flow out"
+            style={{ top: 16 }}
+          />
+        )
       )}
     </div>
   )
@@ -159,12 +227,23 @@ function NodeInspector({
   onSaved,
   onError,
   onDeleted,
+  expanded,
+  onExpand,
+  onCollapse,
+  onClose,
+  style,
 }: {
   node: WorkflowNode
   scripts: Script[]
   onSaved: () => void
   onError: (message: string | null) => void
   onDeleted: () => void
+  expanded: boolean
+  onExpand: () => void
+  onCollapse: () => void
+  onClose: () => void
+  /** Where the floating panel sits; absent in the modal. */
+  style?: React.CSSProperties
 }) {
   const [title, setTitle] = useState(node.title)
   const [draft, setDraft] = useState<ConfigDraft>(() => draftFromConfig(node.kind, node.config))
@@ -202,14 +281,18 @@ function NodeInspector({
   const scriptArgs = scripts.find((s) => s.name === draft.script || String(s.id) === draft.script)?.args ?? []
   const localModel = draft.model.startsWith('local:')
 
-  return (
-    <div className="wf-inspector">
-      <div className="wf-inspector-head">
-        <b>
-          <KindIcon kind={node.kind} /> {info.label}
-        </b>
-        <span className="muted">#{node.id}</span>
-      </div>
+  const big: { key: 'prompt' | 'command' | 'question'; label: string } | null =
+    node.kind === 'prompt'
+      ? { key: 'prompt', label: 'prompt' }
+      : node.kind === 'cli'
+        ? { key: 'command', label: 'command' }
+        : node.kind === 'decide'
+          ? { key: 'question', label: 'question' }
+          : null
+  const pins = pinsFor(node.kind)
+
+  const fields = (
+    <>
       <Field label="title">
         <input type="text" value={title} maxLength={200} onChange={(e) => setTitle(e.target.value)} />
       </Field>
@@ -286,13 +369,15 @@ function NodeInspector({
             />
             thinking {draft.thinking ? 'on' : 'off'}
           </label>
-          <Field label="prompt" hint="the node's input follows it after a blank line">
-            <textarea
-              rows={5}
-              value={draft.prompt}
-              onChange={(e) => set('prompt', e.target.value)}
-            />
-          </Field>
+          {!expanded && (
+            <Field label="prompt" hint="the node's input follows it after a blank line">
+              <textarea
+                rows={5}
+                value={draft.prompt}
+                onChange={(e) => set('prompt', e.target.value)}
+              />
+            </Field>
+          )}
           <Field label="timeout (seconds)" hint="1 to 3600, default 600">
             <input
               type="text"
@@ -306,13 +391,15 @@ function NodeInspector({
 
       {node.kind === 'cli' && (
         <>
-          <Field label="command" hint="bash -c, verbatim; the input is on stdin and $NARU_INPUT">
-            <textarea
-              rows={4}
-              value={draft.command}
-              onChange={(e) => set('command', e.target.value)}
-            />
-          </Field>
+          {!expanded && (
+            <Field label="command" hint="bash -c, verbatim; the input is on stdin and $NARU_INPUT">
+              <textarea
+                rows={4}
+                value={draft.command}
+                onChange={(e) => set('command', e.target.value)}
+              />
+            </Field>
+          )}
           <Field label="timeout (seconds)" hint="1 to 86400, default 600">
             <input
               type="text"
@@ -420,9 +507,11 @@ function NodeInspector({
 
       {node.kind === 'decide' && (
         <>
-          <Field label="question" hint="may contain {input}, replaced by this node's input text">
-            <textarea rows={3} value={draft.question} onChange={(e) => set('question', e.target.value)} />
-          </Field>
+          {!expanded && (
+            <Field label="question" hint="may contain {input}, replaced by this node's input text">
+              <textarea rows={3} value={draft.question} onChange={(e) => set('question', e.target.value)} />
+            </Field>
+          )}
           <div className="wf-values">
             <span className="wf-field-label">options</span>
             {draft.options.map((o, i) => (
@@ -516,6 +605,11 @@ function NodeInspector({
         </>
       )}
 
+    </>
+  )
+
+  const actions = (
+    <>
       {formError && <p className="error wf-inspector-error">{formError}</p>}
       <div className="wf-inspector-actions">
         <button type="button" onClick={save}>
@@ -524,8 +618,121 @@ function NodeInspector({
         <button type="button" className="danger" onClick={remove}>
           delete node
         </button>
+        {expanded && (
+          <button type="button" className="wf-modal-collapse" onClick={onCollapse}>
+            collapse
+          </button>
+        )}
       </div>
+    </>
+  )
+
+  if (expanded) {
+    return createPortal(
+      <div className="create-task-backdrop wf-modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onCollapse()}>
+        <div className="wf-modal" role="dialog" aria-modal="true" aria-label={`Edit ${info.label} node`}>
+          <div className="wf-modal-head">
+            <b>
+              <KindIcon kind={node.kind} /> {info.label}
+            </b>
+            <span className="muted">#{node.id}</span>
+            <button type="button" className="wf-icon-btn" aria-label="Collapse editor" onClick={onCollapse}>
+              ⤡
+            </button>
+          </div>
+          <div className="wf-modal-body">
+            <div className="wf-modal-side">
+              {fields}
+              <div className="wf-modal-pins">
+                <span className="wf-field-label">pins</span>
+                {[...pins.inputs.map((p) => ({ p, dir: 'in' })), ...pins.outputs.map((p) => ({ p, dir: 'out' }))].map(
+                  ({ p, dir }) => (
+                    <div key={`${dir}-${p.label}`} className="wf-pin-cell">
+                      <span className={`wf-pin wf-pin-${p.type}`} aria-hidden="true" />
+                      {p.label} <span className="muted">{dir} · {p.type}</span>
+                    </div>
+                  ),
+                )}
+              </div>
+            </div>
+            <div className="wf-modal-main">
+              {big ? (
+                <>
+                  <span className="wf-field-label">{big.label}</span>
+                  <textarea
+                    className="wf-modal-editor"
+                    autoFocus
+                    spellCheck={false}
+                    aria-label={big.label}
+                    value={draft[big.key]}
+                    onChange={(e) => set(big.key, e.target.value)}
+                  />
+                </>
+              ) : (
+                <p className="muted">This node has no long text to edit; use the fields on the left.</p>
+              )}
+            </div>
+          </div>
+          <div className="wf-modal-foot">{actions}</div>
+        </div>
+      </div>,
+      document.body,
+    )
+  }
+
+  return (
+    <div className="wf-inspector wf-float nowheel nopan nodrag" style={style}>
+      <div className="wf-inspector-head">
+        <b>
+          <KindIcon kind={node.kind} /> {info.label}
+        </b>
+        <span className="muted">#{node.id}</span>
+        <span className="wf-head-btns">
+          <button type="button" className="wf-icon-btn" aria-label="Expand editor" onClick={onExpand}>
+            ⤢
+          </button>
+          <button type="button" className="wf-icon-btn" aria-label="Close editor" onClick={onClose}>
+            ✕
+          </button>
+        </span>
+      </div>
+      {fields}
+      {actions}
     </div>
+  )
+}
+
+/** Positions the node editor beside its node (the side with more room, kept
+ *  inside the viewport) and draws a dashed wire back to it; follows pan, zoom
+ *  and drag because it reads the canvas store. Narrow tiers dock it instead
+ *  (CSS). Renders inside <ReactFlow>. */
+function NodeFloat({
+  node,
+  ...rest
+}: { node: WorkflowNode } & Omit<React.ComponentProps<typeof NodeInspector>, 'node' | 'style'>) {
+  const transform = useStore((s) => s.transform)
+  const width = useStore((s) => s.width)
+  const height = useStore((s) => s.height)
+  const internal = useStore((s) => s.nodeLookup.get(String(node.id)))
+  const zoom = transform[2]
+  const w = (internal?.measured.width ?? 210) * zoom
+  const h = (internal?.measured.height ?? 80) * zoom
+  const pos = internal?.internals.positionAbsolute ?? { x: node.x, y: node.y }
+  const place = placePanel(
+    { left: pos.x * zoom + transform[0], top: pos.y * zoom + transform[1], width: w, height: h },
+    { width, height },
+  )
+  return (
+    <>
+      <svg className="wf-float-wire" width={width} height={height} aria-hidden="true">
+        <line x1={place.from.x} y1={place.from.y} x2={place.to.x} y2={place.to.y} />
+      </svg>
+      <NodeInspector
+        node={node}
+        {...rest}
+        style={{ left: place.left, top: place.top, width: PANEL_W, minHeight: PANEL_H }}
+      />
+    </>
   )
 }
 
@@ -557,6 +764,19 @@ export function WorkflowCanvas({
   const dotColor = `rgba(${cssVar('--cyan-rgb', '0, 229, 255')}, 0.12)`
   const [error, setError] = useState<string | null>(null)
   const [selection, setSelection] = useState<Selection>(null)
+  // Expanded belongs to one selection: picking anything else folds it away.
+  const [expandedSel, setExpandedSel] = useState<Selection>(null)
+  const expanded = expandedSel !== null && expandedSel === selection
+  const setExpanded = (on: boolean) => setExpandedSel(on ? selection : null)
+  // Esc folds the expanded editor back into the floating panel.
+  useEffect(() => {
+    if (!expanded) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setExpandedSel(null)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [expanded])
   const { data: scripts } = useFetch(() => listScripts(), 'workflow-scripts')
   const rf = useRef<ReactFlowInstance<CardNode, Edge> | null>(null)
   const [nodes, setNodes, onNodesChange] = useNodesState<CardNode>([])
@@ -778,23 +998,27 @@ export function WorkflowCanvas({
             </button>
             {error && <span className="error wf-error">{error}</span>}
           </Panel>
+          {selectedNode && (
+            <NodeFloat
+              key={inspectorKey(selectedNode)}
+              node={selectedNode}
+              scripts={scripts ?? []}
+              onSaved={changed}
+              onError={setError}
+              onDeleted={() => {
+                setSelection(null)
+                changed()
+              }}
+              expanded={expanded}
+              onExpand={() => setExpanded(true)}
+              onCollapse={() => setExpanded(false)}
+              onClose={() => setSelection(null)}
+            />
+          )}
         </ReactFlow>
         <div className="wf-hint muted">
           <SpeakIcon /> &ldquo;Naru, run {view.workflow.name}&rdquo; · or call it from a skill
         </div>
-        {selectedNode && (
-          <NodeInspector
-            key={inspectorKey(selectedNode)}
-            node={selectedNode}
-            scripts={scripts ?? []}
-            onSaved={changed}
-            onError={setError}
-            onDeleted={() => {
-              setSelection(null)
-              changed()
-            }}
-          />
-        )}
         {selectedEdge && (
           <div className="wf-inspector">
             <div className="wf-inspector-head">
