@@ -334,3 +334,4 @@ on work must not treat `idle` as "done" without reading `last_result`.
 
 The todo-watcher command can be set to `naru workflow run "Task loop" --input {id} --detach` in `~/.naru/config.json` under `commands.todo-watcher` to run tasks through this workflow.
 Loop smoke test passed.
+- Smoke test of the Commit step (task 2034 follow-up): a loop run commits its own change and leaves the tree clean.
