@@ -22,3 +22,5 @@ The `naru-live` prompt (rule 16) tells the live agent to run
 `ask list --status open` on a `question` notice and at natural pauses; the
 `implementer` and `supervisor` built-ins tell agents to use `naru ask`.
 Gate: `scripts/ask-check.sh`. Part of the persistent live agent design (task 2010).
+
+The `question` notice turn is pushed into the live agent like any user turn (`docs/live.md` "Push delivery"); `listen` stays the fallback.

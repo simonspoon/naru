@@ -4109,3 +4109,24 @@ the poll's newest-20 bound with the full unbounded history still reachable past 
 a type per kind, `nosniff`, `inline`, byte-identical bodies and the artifact
 CSP verbatim — asserted **identically in default mode and under `--lan`**,
 alongside the absence of any route that writes caller-supplied board content.
+
+## Push delivery (naru task 2051)
+
+The agent no longer has to hold a background `naru live listen` for the person
+to be heard. `serve` runs a push loop (`live::push_pending`, tick 400 ms,
+`NARU_WATCH_LIVE_PUSH_TICK_MS`; `NARU_LIVE_PUSH=off` disables it) that writes
+the live session's undelivered user turns and delegate results straight into
+the agent's `naru run` inbox as `[live turn] {json}` / `[live result] {json}` —
+the very record `listen` prints, so `id`, `text`, `image_path`, `board_id`,
+`view` and `notice` ride along. Ask-queue notices are `question` notice turns
+and travel the same way.
+
+Exactly-once: the message is queued under a name derived from the record id
+(`live-2-turn-<id>`, `live-1-result-<id>`) and only then is the record stamped
+`delivered_at`. A `kill -9` between the two leaves it unstamped; the next pass
+finds the name already queued or in `inbox/delivered/`, skips the write and
+stamps it. Nothing is lost (the db queue is durable) and nothing is sent twice.
+Only a `run:<job>` agent is pushed to; a legacy bare job id keeps `listen`.
+`listen` and the barge-in hook remain, claiming through their own
+one-statement stamps: if one of them wins a turn in the instant after a push
+queued it, the still-queued message is removed — but if the runner had already moved it to `delivered/`, that one turn reaches the agent twice (a window of milliseconds, only when a fallback `listen` runs beside push). Check: `scripts/live-push-check.sh`.

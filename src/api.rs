@@ -410,6 +410,16 @@ fn live_warm_tick(state: &AppState) {
     }
 }
 
+/// How often the live push loop looks for undelivered turns (naru task 2051);
+/// `NARU_WATCH_LIVE_PUSH_TICK_MS` is the test seam. `NARU_LIVE_PUSH=off`
+/// turns the loop off, leaving `listen` as the only way in.
+fn watch_live_push_tick() -> Duration {
+    crate::core::env::var("WATCH_LIVE_PUSH_TICK_MS")
+        .and_then(|s| s.parse().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(Duration::from_millis(400))
+}
+
 fn watch_retro_tick() -> Duration {
     crate::core::env::var("WATCH_RETRO_TICK_MS")
         .and_then(|s| s.parse().ok())
@@ -3175,6 +3185,23 @@ pub fn serve(flags: ServeFlags) -> crate::core::Result<()> {
                     ticker.tick().await;
                     let state = watch_state.clone();
                     let _ = tokio::task::spawn_blocking(move || live_warm_tick(&state)).await;
+                }
+            });
+        }
+        if crate::core::env::var("LIVE_PUSH").as_deref() != Some("off") {
+            let watch_state = state.clone();
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(watch_live_push_tick());
+                loop {
+                    ticker.tick().await;
+                    let state = watch_state.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        crate::core::live::push_pending(
+                            &state.store,
+                            &crate::core::runner::runs_dir(),
+                        )
+                    })
+                    .await;
                 }
             });
         }

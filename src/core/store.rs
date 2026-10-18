@@ -8008,6 +8008,75 @@ impl Store {
         Ok(turns)
     }
 
+    /// The undelivered user turns, `question` notices (the ask queue's nudge)
+    /// and delegate results of the session, oldest first, without stamping anything (naru task 2051) — what the push loop
+    /// reads before it writes a message into the agent's run. Nothing is
+    /// claimed here: [`Store::ack_live_turn`] / [`Store::ack_live_result`] stamp
+    /// after the message is durably queued, so a crash in between redelivers
+    /// (the queued name dedupes) rather than loses.
+    pub fn unacked_live_items(&self, session_id: i64) -> Result<(Vec<LiveResult>, Vec<LiveTurn>)> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {LIVE_RESULT_COLUMNS} FROM live_results \
+             WHERE session_id = ?1 AND delivered_at IS NULL ORDER BY id LIMIT 20"
+        ))?;
+        let results = stmt
+            .query_map([session_id], row_to_live_result)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(stmt);
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {LIVE_TURN_COLUMNS} FROM live_turns \
+             WHERE session_id = ?1 AND delivered_at IS NULL \
+               AND (role = ?2 OR (role = ?3 AND notice = ?4)) ORDER BY id LIMIT 20"
+        ))?;
+        let turns = stmt
+            .query_map(
+                (
+                    session_id,
+                    LiveRole::User.as_str(),
+                    LiveRole::Naru.as_str(),
+                    LiveNotice::Question.as_str(),
+                ),
+                row_to_live_turn,
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok((results, turns))
+    }
+
+    /// Stamps one pushed user turn delivered. `false` when something else
+    /// (a `listen`, the barge-in hook) claimed it first. A stamp opens
+    /// `working_since` like any handed-out turn.
+    pub fn ack_live_turn(&mut self, session_id: i64, id: i64) -> Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE live_turns SET delivered_at = datetime('now') \
+             WHERE id = ?1 AND session_id = ?2 AND delivered_at IS NULL",
+            (id, session_id),
+        )?;
+        self.open_live_working(session_id, n)?;
+        Ok(n > 0)
+    }
+
+    /// [`Store::ack_live_turn`] for a delegate result.
+    pub fn ack_live_result(&mut self, session_id: i64, id: i64) -> Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE live_results SET delivered_at = datetime('now') \
+             WHERE id = ?1 AND session_id = ?2 AND delivered_at IS NULL",
+            (id, session_id),
+        )?;
+        self.open_live_working(session_id, n)?;
+        Ok(n > 0)
+    }
+
+    fn open_live_working(&self, session_id: i64, stamped: usize) -> Result<()> {
+        if stamped > 0 {
+            self.conn.execute(
+                "UPDATE live_sessions SET working_since = datetime('now') \
+                 WHERE id = ?1 AND status = ?2",
+                (session_id, LiveStatus::Live.as_str()),
+            )?;
+        }
+        Ok(())
+    }
+
     /// Records a delegate's result against the one live conversation (mesa
     /// task 1359), for `listen` to hand to whichever agent is driving it.
     /// `NotFound` with no live session, like every other `live` verb; the

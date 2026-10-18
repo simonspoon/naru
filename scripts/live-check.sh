@@ -274,6 +274,9 @@ export MESA_LIVE_INK_DIR="$TMP/live-ink"
 echo '{}' > "$TMP/empty-config.json"
 export MESA_CONFIG_FILE="$TMP/empty-config.json"
 export NARU_AUDIO_URL="http://127.0.0.1:9"
+# This gate pins `listen`'s hand-out; the serve push loop (naru task 2051,
+# scripts/live-push-check.sh) would take the turns first, so it is off here.
+export NARU_LIVE_PUSH=off
 # A live start seeds the `naru-live` agent definition into
 # $HOME/.claude/agents (mesa task 1068), and every unbound spawn runs in
 # $HOME/.naru/workspace, so the whole gate runs under a throwaway home rather

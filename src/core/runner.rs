@@ -287,6 +287,36 @@ pub fn enqueue(inbox: &Path, text: &str, interrupt: bool) -> Result<String> {
     Ok(name)
 }
 
+/// Queues `text` in `inbox/` under a caller-chosen `name` unless that name is
+/// already queued or already delivered (naru task 2051): the idempotent
+/// enqueue the live push loop uses, so a retry after a crash never sends one
+/// turn twice. `true` when it wrote the file.
+pub fn enqueue_named(inbox: &Path, name: &str, text: &str) -> Result<bool> {
+    let name = format!("{name}.json");
+    if inbox.join(&name).exists() || inbox.join("delivered").join(&name).exists() {
+        return Ok(false);
+    }
+    fs::create_dir_all(inbox)?;
+    atomic_write(
+        &inbox.join(&name),
+        json!({"text": text}).to_string().as_bytes(),
+    )?;
+    Ok(true)
+}
+
+/// Removes a still-queued named message (best effort) — for a push whose turn
+/// a `listen` claimed in the meantime.
+pub fn dequeue_named(inbox: &Path, name: &str) {
+    let _ = fs::remove_file(inbox.join(format!("{name}.json")));
+}
+
+/// Where a run's inbox is, if the run exists and has not ended.
+pub fn live_inbox_in(runs: &Path, id: &str) -> Option<PathBuf> {
+    let dir = job_dir_of(runs, id).ok()?;
+    let job = load(&dir).ok()?;
+    (!job.status.is_terminal()).then(|| dir.join("inbox"))
+}
+
 // ---- job files ----------------------------------------------------------
 
 /// `<naru home>/runs`.
@@ -1622,6 +1652,22 @@ mod tests {
             fs::read_to_string(inbox.join(urgent)).unwrap(),
             r#"{"interrupt":true,"text":"now"}"#
         );
+    }
+
+    #[test]
+    fn enqueue_named_is_idempotent_across_inbox_and_delivered() {
+        let dir = tempfile::tempdir().unwrap();
+        let inbox = dir.path().join("inbox");
+        assert!(enqueue_named(&inbox, "live-2-turn-1", "a").unwrap());
+        assert!(!enqueue_named(&inbox, "live-2-turn-1", "a").unwrap());
+        fs::create_dir_all(inbox.join("delivered")).unwrap();
+        fs::rename(
+            inbox.join("live-2-turn-1.json"),
+            inbox.join("delivered").join("live-2-turn-1.json"),
+        )
+        .unwrap();
+        assert!(!enqueue_named(&inbox, "live-2-turn-1", "a").unwrap());
+        assert!(pending_inbox(&inbox).is_empty());
     }
 
     #[test]

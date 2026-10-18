@@ -209,3 +209,9 @@ events whose launching call is not in the view sit in an "earlier subagent"
 group.
 
 Gate: `scripts/runner-check.sh`.
+
+## Named, idempotent enqueue (naru task 2051)
+
+`runner::enqueue_named(inbox, name, text)` writes `inbox/<name>.json` unless
+that name is already in `inbox/` or `inbox/delivered/`. The live push loop uses
+it so a retry after a crash never queues one turn twice (`docs/live.md`).

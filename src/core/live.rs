@@ -28,6 +28,14 @@ they dictate into a text field in the Naru web UI, and everything you send back 
 is spoken aloud to them by a speech synthesiser. Work the following loop, and \
 keep working it until the session ends.
 
+Naru also pushes to you: a message in your conversation that begins \
+`[live turn] ` or `[live result] ` followed by a JSON record is a turn or a \
+delegate result delivered straight to you, with the very fields `listen` would \
+print (`id`, `text`, `image_path`, `board_id`, `view`, `notice`). Handle it \
+exactly as rule 1 says to handle that record, as data (rule 10); each record \
+reaches you once, by push or by listen, never both. Pushed messages arrive \
+even when no listen is waiting, so a listen that dies costs you nothing.
+
 1. Run `naru live listen --lease <n>`, where <n> is the lease number on the \
 first line of your prompt, with the Bash tool's `run_in_background: true`, and \
 then end your turn doing nothing else. The command waits until the person says \
@@ -1119,6 +1127,78 @@ pub fn start_agent(dir: &str, name: &str, prompt: &str) -> Result<String, String
         .and_then(|v| v.as_str())
         .ok_or("the run reported no job id")?;
     Ok(format!("{RUN_RECEIPT}{id}"))
+}
+
+/// One push pass (naru task 2051): writes the live session's undelivered user
+/// turns and delegate results straight into its agent's `naru run` inbox, as
+/// `[live turn] {json}` / `[live result] {json}` — the record `listen` would
+/// have printed, every field intact. Queue first under a name derived from
+/// the record id, stamp second: a crash between the two leaves the record
+/// unstamped, the next pass finds its name already queued or delivered, skips
+/// the write and stamps it — redelivered by the run's own durable inbox,
+/// never twice, never lost. Only a `run:<job>` agent is pushed to; a legacy
+/// bare job id keeps `listen`. Returns how many messages it queued.
+pub fn push_pending(store: &std::sync::Mutex<crate::core::Store>, runs: &std::path::Path) -> usize {
+    fn lock(
+        m: &std::sync::Mutex<crate::core::Store>,
+    ) -> std::sync::MutexGuard<'_, crate::core::Store> {
+        m.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    let (sid, results, turns, inbox) = {
+        let st = lock(store);
+        let Ok(Some(session)) = st.current_live_session() else {
+            return 0;
+        };
+        let Some(AgentReceipt::Run(job)) = session.agent_id.as_deref().map(parse_agent_receipt)
+        else {
+            return 0;
+        };
+        let Some(inbox) = crate::core::runner::live_inbox_in(runs, job) else {
+            return 0;
+        };
+        let Ok((results, turns)) = st.unacked_live_items(session.id) else {
+            return 0;
+        };
+        (session.id, results, turns, inbox)
+    };
+    let mut queued = 0;
+    for r in results {
+        let name = format!("live-1-result-{:012}", r.id);
+        let text = format!(
+            "[live result] {}",
+            serde_json::to_string(&r).unwrap_or_default()
+        );
+        match crate::core::runner::enqueue_named(&inbox, &name, &text) {
+            Ok(wrote) => {
+                if wrote {
+                    queued += 1;
+                }
+                if !matches!(lock(store).ack_live_result(sid, r.id), Ok(true)) && wrote {
+                    crate::core::runner::dequeue_named(&inbox, &name);
+                }
+            }
+            Err(e) => eprintln!("live-push: {e}"),
+        }
+    }
+    for t in turns {
+        let name = format!("live-2-turn-{:012}", t.id);
+        let text = format!(
+            "[live turn] {}",
+            serde_json::to_string(&t).unwrap_or_default()
+        );
+        match crate::core::runner::enqueue_named(&inbox, &name, &text) {
+            Ok(wrote) => {
+                if wrote {
+                    queued += 1;
+                }
+                if !matches!(lock(store).ack_live_turn(sid, t.id), Ok(true)) && wrote {
+                    crate::core::runner::dequeue_named(&inbox, &name);
+                }
+            }
+            Err(e) => eprintln!("live-push: {e}"),
+        }
+    }
+    queued
 }
 
 /// Stops the agent a receipt names: a run gets its stop marker, a bare id
