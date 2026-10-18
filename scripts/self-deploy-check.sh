@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# self-deploy gate (naru task 2039): scripts/self-deploy.sh steps 1, 2, 4a under
-# a throwaway HOME, db and PREFIX with a stub "new" binary (no real build):
-# --dry-run changes nothing; a failing check aborts with the install untouched
-# and no backup; a pass backs up the db (valid), keeps naru.prev byte-equal to
-# the old binary, installs the new one and leaves no .naru.* temp files.
+# self-deploy gate (naru tasks 2039, 2040): scripts/self-deploy.sh under a
+# throwaway HOME, db and PREFIX with a stub "new" binary (no real build):
+# --dry-run changes nothing; a failing backup aborts with the install untouched;
+# a pass backs up the db (valid), keeps naru.prev byte-equal to the old binary,
+# installs the new one, restarts (stub hook), re-runs workflow defaults, checks
+# health and resumes the queue; an unhealthy new build is rolled back (binary and
+# db byte-equal to before, queue resumed); a drain timeout aborts, resumes and
+# changes nothing; a failed rollback leaves the queue paused.
 set -euo pipefail
 unset $(env | sed -n 's/^\(NARU_[A-Za-z0-9_]*\)=.*/\1/p')
 cd "$(dirname "$0")/.."
@@ -19,7 +22,24 @@ ok() { echo "ok: $*"; }
 NARU="$PREFIX/bin/naru"
 cp "$SRC" "$NARU"
 "$NARU" project create tmp --no-git >/dev/null
-printf '#!/bin/sh\necho new\n' >"$TMP/newbin"; chmod +x "$TMP/newbin"
+# stub "new" binary: queue verbs on marker files ($TMP/busy = not idle), --version, defaults
+cat >"$TMP/newbin" <<STUB
+#!/bin/sh
+case "\$1 \$2" in
+  "queue pause") touch "$TMP/paused" ;;
+  "queue resume") rm -f "$TMP/paused" ;;
+  "queue idle") [ ! -e "$TMP/busy" ] ;;
+  "workflow defaults") echo defaults >>"$TMP/defaults.log" ;;
+  "--version "*) echo "naru 9.9.9" ;;
+  *) echo new ;;
+esac
+STUB
+chmod +x "$TMP/newbin"
+export NARU_DEPLOY_POLL=1 NARU_DEPLOY_DRAIN_TIMEOUT=3 NARU_DEPLOY_HEALTH_TIMEOUT=2
+export NARU_DEPLOY_RESTART_CMD="echo x >>'$TMP/restarts'"
+export NARU_DEPLOY_HEALTH_CMD='[ "$("'"$PREFIX"'/bin/naru" --version 2>/dev/null | awk "{print \$2}")" = "$NARU_DEPLOY_EXPECT" ]'
+BAD_HEALTH='[ "$NARU_DEPLOY_EXPECT" != 9.9.9 ]'  # the new build is unhealthy, the old one fine
+export NARU_DEPLOY_DB="$MESA_DB"
 before=$(shasum "$NARU" | cut -d' ' -f1)
 backups="$HOME/.naru/backups"
 
@@ -29,7 +49,8 @@ out=$(scripts/self-deploy.sh --dry-run)
 ok "dry-run prints the plan and changes nothing"
 
 out=$(NARU_DEPLOY_NEW_BIN="$TMP/newbin" scripts/self-deploy.sh --skip-checks 2>/dev/null) || fail "deploy exit"
-[ "$(echo "$out" | jq -r .status)" = swapped ] || fail "verdict: $out"
+[ "$(echo "$out" | jq -r .status)" = swapped ] && [ "$(echo "$out" | jq -r .healthy)" = true ] && [ "$(echo "$out" | jq -r .queue_resumed)" = true ] || fail "verdict: $out"
+[ ! -e "$TMP/paused" ] && [ -s "$TMP/restarts" ] && [ -s "$TMP/defaults.log" ] || fail "queue not resumed / no restart / no defaults re-run"
 [ "$(shasum "$PREFIX/bin/naru.prev" | cut -d' ' -f1)" = "$before" ] || fail "naru.prev differs from the old binary"
 cmp -s "$NARU" "$TMP/newbin" || [ "$("$NARU" 2>&1 | head -1)" = new ] || fail "new binary not installed"
 db=$(echo "$out" | jq -r .db_backup)
@@ -48,4 +69,38 @@ set -e
 [ "$rc" = 1 ] && [ "$(echo "$out" | jq -r .status)" = aborted ] || fail "backup failure should abort ($rc)"
 [ "$(shasum "$NARU" | cut -d' ' -f1)" = "$cur" ] && [ "$(shasum "$PREFIX/bin/naru.prev" | cut -d' ' -f1)" = "$old_prev" ] || fail "abort changed the install"
 ok "backup failure aborts with binary and naru.prev untouched"
+
+# unhealthy new build -> rolled back: binary and db byte-equal to before, queue resumed
+rm -f "$TMP/restarts"
+# make the installed one the old (real) binary again so a rollback is distinguishable
+cp "$SRC" "$NARU"; cp "$SRC" "$PREFIX/bin/naru.prev"
+# the first restart (after the swap) writes to the db: the restore must discard it
+hook="echo x >>'$TMP/restarts'; [ -e '$TMP/wrote' ] || { touch '$TMP/wrote'; '$SRC' project create post-swap --no-git >/dev/null; }"
+set +e
+out=$(NARU_DEPLOY_RESTART_CMD="$hook" NARU_DEPLOY_HEALTH_CMD="$BAD_HEALTH" NARU_DEPLOY_NEW_BIN="$TMP/newbin" scripts/self-deploy.sh --skip-checks 2>/dev/null); rc=$?
+set -e
+[ "$rc" = 1 ] && [ "$(echo "$out" | jq -r .status)" = rolled_back ] || fail "expected rolled_back ($rc): $out"
+# re-signing on restore may change bytes, so compare behaviour not sha
+[ "$("$NARU" --version)" = "$("$SRC" --version)" ] && [ "$("$NARU" --version)" != "naru 9.9.9" ] || fail "binary not restored"
+[ -e "$TMP/wrote" ] && [ "$("$NARU" project list | jq length)" = 1 ] || fail "db not restored to the backup"
+[ ! -e "$TMP/paused" ] || fail "queue left paused after rollback"
+[ "$(wc -l <"$TMP/restarts")" -ge 2 ] || fail "rollback did not restart"
+ok "unhealthy deploy rolled back (binary restored, db restored, restarted, queue resumed)"
+
+# drain timeout -> aborted, install untouched, queue resumed
+touch "$TMP/busy"; cur=$(shasum "$NARU" | cut -d' ' -f1)
+set +e
+out=$(NARU_DEPLOY_NEW_BIN="$TMP/newbin" scripts/self-deploy.sh --skip-checks 2>/dev/null); rc=$?
+set -e
+rm -f "$TMP/busy"
+[ "$rc" = 1 ] && [ "$(echo "$out" | jq -r .status)" = aborted ] && echo "$out" | jq -r .reason | grep -q drain || fail "drain timeout verdict: $out"
+[ "$(shasum "$NARU" | cut -d' ' -f1)" = "$cur" ] && [ ! -e "$TMP/paused" ] || fail "drain abort changed install or left queue paused"
+ok "drain timeout aborts with the install untouched and the queue resumed"
+
+# rollback that cannot restart -> rollback_failed, queue stays paused
+set +e
+out=$(NARU_DEPLOY_HEALTH_CMD=false NARU_DEPLOY_RESTART_CMD="[ ! -e '$TMP/restarts-stop' ] && { touch '$TMP/restarts-stop'; true; }" NARU_DEPLOY_NEW_BIN="$TMP/newbin" scripts/self-deploy.sh --skip-checks 2>/dev/null); rc=$?
+set -e
+[ "$rc" = 1 ] && [ "$(echo "$out" | jq -r .status)" = rollback_failed ] && [ -e "$TMP/paused" ] || fail "rollback_failed expected ($rc): $out"
+ok "failed rollback leaves the queue paused"
 echo "self-deploy-check: all passed"
