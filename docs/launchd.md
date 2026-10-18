@@ -1,0 +1,29 @@
+# Running `naru serve` under launchd
+
+macOS only (naru task 2042). A hand-run `naru serve` gives `scripts/self-deploy.sh` nothing
+to restart, so a real redeploy rolls back. The `com.naru.serve` user agent fixes that.
+
+- `scripts/launchd.sh install` renders `scripts/launchd/com.naru.serve.plist.in` to
+  `~/Library/LaunchAgents/com.naru.serve.plist`, lints it, then `launchctl bootout`
+  (ignored if absent), `bootstrap gui/<uid>` and `kickstart`. `scripts/install.sh --launchd`
+  does the same after the binary install. Both are opt-in; nothing loads it automatically.
+- It runs `$PREFIX/bin/naru serve` (default `~/.local/bin`), no flags, so port 7770 and the
+  `serve` config section apply. `RunAtLoad` + `KeepAlive`.
+- Logs: `~/.naru/serve.log` and `~/.naru/serve.err.log`.
+- Env: launchd starts with a bare environment, so the plist sets `HOME` and a `PATH`
+  (`~/.local/bin`, Homebrew, system dirs). `NARU_DB`, `MESA_DB`, `MESA_CONFIG_FILE` and
+  `NARU_AUDIO_URL` are copied in only if set in the shell that runs the install; run the
+  install from the shell that started the manual server to keep the same db. Re-run to change.
+- `scripts/launchd.sh install --print` shows the plist; `--dry-run` shows the plan.
+  `uninstall` boots the agent out and removes the plist.
+- Self-deploy: with `NARU_DEPLOY_RESTART_CMD` unset and the plist present it restarts with
+  `launchctl kickstart -k gui/$(id -u)/com.naru.serve`; an explicit value always wins; no
+  plist keeps "unset = cannot restart". Other platforms are unchanged.
+
+## One manual cutover
+
+1. Quit the terminal `naru serve` (two servers on 7770 collide).
+2. From the shell that has the right db env: `scripts/launchd.sh install`.
+3. Check `curl -s http://127.0.0.1:7770/api/version`.
+
+Gate: `scripts/launchd-check.sh` (stub `launchctl`, never touches the real agent).

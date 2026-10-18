@@ -20,7 +20,9 @@
 #        checks; deploy NARU_DEPLOY_NEW_BIN — for tests).
 # Env: PREFIX (default ~/.local), NARU_DEPLOY_CHECKS (scripts/*-check.sh names),
 #      NARU_DEPLOY_NEW_BIN, NARU_DEPLOY_BACKUP_DIR (default ~/.naru/backups),
-#      NARU_DEPLOY_RESTART_CMD (bash; unset = no restart, so the deploy is judged
+#      NARU_DEPLOY_RESTART_CMD (bash; unset = on macOS with the com.naru.serve
+#      launchd agent installed (scripts/launchd.sh), `launchctl kickstart -k
+#      gui/$(id -u)/com.naru.serve`; otherwise no restart, so the deploy is judged
 #      unhealthy and rolled back), NARU_DEPLOY_DB (db path; default NARU_DB, MESA_DB,
 #      then the platform default), NARU_DEPLOY_PORT (7770), NARU_DEPLOY_HEALTH_CMD
 #      (replaces the /api/version check; gets NARU_DEPLOY_EXPECT = the version that should be serving), NARU_DEPLOY_LIVE_CHECK=0 (skip the
@@ -133,8 +135,13 @@ fi
 live_before="$("$NARU" live status 2>/dev/null | jq -r 'select(.status=="live") | .agent_id // "none"')"
 
 restart() {
-  [ -n "${NARU_DEPLOY_RESTART_CMD:-}" ] || { log "NARU_DEPLOY_RESTART_CMD unset: cannot restart"; return 1; }
-  bash -c "$NARU_DEPLOY_RESTART_CMD" >>"$LOG" 2>&1 || return 1
+  local cmd="${NARU_DEPLOY_RESTART_CMD:-}"
+  if [ -z "$cmd" ] && [ "$(uname -s)" = Darwin ] && [ -e "${NARU_LAUNCHD_DIR:-$HOME/Library/LaunchAgents}/com.naru.serve.plist" ]; then
+    cmd="${NARU_LAUNCHCTL:-launchctl} kickstart -k gui/$(id -u)/com.naru.serve"
+    log "NARU_DEPLOY_RESTART_CMD unset: using the launchd agent ($cmd)"
+  fi
+  [ -n "$cmd" ] || { log "NARU_DEPLOY_RESTART_CMD unset: cannot restart"; return 1; }
+  bash -c "$cmd" >>"$LOG" 2>&1 || return 1
   restarted=true
 }
 # healthy <bin> <check live respawn 0|1>
