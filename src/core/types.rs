@@ -4079,6 +4079,8 @@ impl LiveAction {
 pub enum LiveNotice {
     Permission,
     AgentEnded,
+    Question,
+    CacheWarm,
 }
 
 impl LiveNotice {
@@ -4086,6 +4088,8 @@ impl LiveNotice {
         match self {
             LiveNotice::Permission => "permission",
             LiveNotice::AgentEnded => "agent-ended",
+            LiveNotice::Question => "question",
+            LiveNotice::CacheWarm => "cache-warm",
         }
     }
 
@@ -4093,6 +4097,8 @@ impl LiveNotice {
         match s {
             "permission" => Some(LiveNotice::Permission),
             "agent-ended" => Some(LiveNotice::AgentEnded),
+            "question" => Some(LiveNotice::Question),
+            "cache-warm" => Some(LiveNotice::CacheWarm),
             _ => None,
         }
     }
@@ -5202,6 +5208,22 @@ pub struct TaskNote {
     pub session: Option<String>,
     /// SQLite `datetime` text, UTC.
     pub created_at: String,
+}
+
+/// A question an agent queued with `naru ask` (naru task 2014). Not ts-exported.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentQuestion {
+    pub id: i64,
+    /// The task the asker was working on, when it said.
+    pub task_id: Option<i64>,
+    /// The asking Claude Code session, when known.
+    pub session: Option<String>,
+    pub body: String,
+    /// `open` or `answered`.
+    pub status: String,
+    pub answer: Option<String>,
+    pub created_at: String,
+    pub answered_at: Option<String>,
 }
 
 /// The nine key colours of a theme (naru task 1840), each `#rrggbb`. Every

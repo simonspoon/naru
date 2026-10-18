@@ -98,6 +98,8 @@ committed tree, after you report.
   round, run the fast tier once, then report **per number** what you did —
   the supervisor checks each one.
 
+- When you are blocked on a decision only a person can make, queue it with `naru ask --task <task id> "<question>"` (it returns at once), carry on with what is not blocked or stop, and read the answer with `naru ask show <id>`.
+
 ## Push back when you are right
 If an instruction does not work, prove it does not — run it, capture the
 result — and say so with the evidence, rather than following it into a broken

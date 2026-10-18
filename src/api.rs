@@ -384,6 +384,32 @@ fn watch_cost_tick() -> Duration {
 /// matching test seam.
 const WATCH_RETRO_TICK: Duration = Duration::from_secs(60 * 60);
 
+/// How often the live keep-warm check runs (naru task 2015). Always on, no
+/// flag: it does nothing without an idle, unattended live session.
+/// `MESA_WATCH_LIVE_WARM_TICK_MS` is the test seam.
+const WATCH_LIVE_WARM_TICK: Duration = Duration::from_secs(5 * 60);
+
+fn watch_live_warm_tick() -> Duration {
+    crate::core::env::var("WATCH_LIVE_WARM_TICK_MS")
+        .and_then(|s| s.parse().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(WATCH_LIVE_WARM_TICK)
+}
+
+fn live_warm_tick(state: &AppState) {
+    let mut store = match state.store.lock() {
+        Ok(s) => s,
+        Err(e) => e.into_inner(),
+    };
+    let id = match store.current_live_session() {
+        Ok(Some(s)) => s.id,
+        _ => return,
+    };
+    if let Err(e) = store.add_live_warm_if_due(id) {
+        eprintln!("live-warm: {e}");
+    }
+}
+
 fn watch_retro_tick() -> Duration {
     crate::core::env::var("WATCH_RETRO_TICK_MS")
         .and_then(|s| s.parse().ok())
@@ -3009,6 +3035,17 @@ pub fn serve(flags: ServeFlags) -> crate::core::Result<()> {
                         }
                     })
                     .await;
+                }
+            });
+        }
+        {
+            let watch_state = state.clone();
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(watch_live_warm_tick());
+                loop {
+                    ticker.tick().await;
+                    let state = watch_state.clone();
+                    let _ = tokio::task::spawn_blocking(move || live_warm_tick(&state)).await;
                 }
             });
         }

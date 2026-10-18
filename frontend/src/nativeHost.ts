@@ -14,6 +14,7 @@
  */
 
 import { SPEAKER_REFRESH_MS } from './liveSpeaker'
+import { setupHostCallbacks } from './gestureSetupHost'
 
 export const NATIVE_HANDLER = 'naruLive'
 
@@ -43,6 +44,10 @@ export type NativeOut =
   | { type: 'enroll' }
   /** The custom wake words were saved (naru task 1769): no payload, the host refetches them from the server. */
   | { type: 'wakeWords' }
+  /** The Gestures setup wizard's permission calls (naru task 1975); answered by `permissionsReply`. */
+  | { type: 'permissions'; id: number; op: string; pane?: string }
+  /** Start or stop the wizard's calibration stream, which holds the camera. */
+  | { type: 'calibration'; op: 'start' | 'stop' }
 
 /** What the host hands the page. Absent keys leave the page's state alone. */
 export type NativeMicState = {
@@ -161,6 +166,7 @@ export function installNativeHost(
   onState: (state: NativeMicState) => void,
 ): () => void {
   const api = {
+    ...setupHostCallbacks,
     setMicState(state: unknown) {
       if (typeof state !== 'object' || state === null) return
       const { muted, level, hearing, ambient } = state as {

@@ -400,7 +400,7 @@ case "\$1" in
     for ((i = 1; i < \$#; i++)); do
       if [ "\${!i}" = "--name" ]; then j=\$((i + 1)); NAME=\${!j}; fi
     done
-    case "\$NAME" in *" summary") K=summary ;; *) K=dream ;; esac
+    case "\$NAME" in *" summary") K=summary ;; live-recovery-*) K=recovery ;; *) K=dream ;; esac
     PROMPT=""
     for a in "\$@"; do PROMPT=\$a; done
     printf '%s\n' "\${@:1:\$# - 1}" > "$STUB_DIR/p-\$K-flags"
@@ -1590,6 +1590,19 @@ api 200 POST "/api/live/speaker" '{"client":"tab-b"}'
 api 200 GET "/api/live"
 [ "$(jqb .session.speaker)" = "tab-b" ] ||
   fail "speaker: GET /api/live must carry the speaker on the 2s poll"
+
+# Detach (naru task 2013): the holder leaving frees the voice at once and a
+# passive report cannot re-pin it; another client's leave touches nothing; the
+# session stays live. Re-claimed after so the checks below are unchanged.
+api 204 POST "/api/live/leave" '{"client":"tab-a"}'
+api 200 GET "/api/live"
+[ "$(jqb .session.speaker)" = "tab-b" ] || fail "leave: a non-holder's leave must keep the claim"
+api 204 POST "/api/live/leave" '{"client":"tab-b"}'
+api 200 POST "/api/live/route" '{"route":"#/inbox","client":"tab-b"}'
+api 200 GET "/api/live"
+[ "$(jqb .session.speaker)" = "null" ] || fail "leave: the holder's leave must free the voice for good"
+[ "$(jqb .session.status)" = "live" ] || fail "leave: Detach must never end the session"
+api 200 POST "/api/live/speaker" '{"client":"tab-b"}'
 
 # Bounded and non-empty like every other stored string, and a refusal writes
 # nothing — the voice stays where the last good press put it.
@@ -5008,9 +5021,63 @@ wait "$LAN_PID" 2>/dev/null || true
 LAN_PID=
 ok "--lan: POST /api/live/interrupt is present and Content-Type gated"
 
+# ---- crash recovery note (naru task 2012) ----
+# `live handoff --recover` with no note: one tool-less `-p` call reads the prior
+# transcript and its answer becomes the successor's note; a failed call falls
+# back to a fixed sentence and the handoff still goes through.
+"$MESA" live stop >/dev/null 2>&1 || true
+run 0 "$MESA" live start "live gate project"
+RS=$(jqs .id)
+run 0 "$MESA" live say "RECOVERY-TURN: item 3 is pending."
+RC_BASE=$(p_base recovery)
+SPAWNS_BEFORE=$(spawns)
+printf '%s' '{"note":"RECOVERY-NOTE-MARKER: item 3 pending."}' > "$STUB_DIR/recovery-out.json"
+run 0 "$MESA" live handoff --recover
+[ "$(jqs .id)" = "$RS" ] || fail "handoff --recover: the same session"
+[ "$(jqs .status)" = "live" ] || fail "handoff --recover: still live"
+wait_p recovery $((RC_BASE + 1))
+[ "$(pc recovery)" = "$((RC_BASE + 1))" ] || fail "handoff --recover: exactly one recovery call"
+grep -q -- '--bg' "$STUB_DIR/p-recovery-flags" && fail "the recovery call must not be --bg"
+grep -q 'RECOVERY-TURN' "$STUB_DIR/p-recovery-prompt" || fail "the recovery prompt carries the transcript"
+[ "$(spawns)" = "$((SPAWNS_BEFORE + 1))" ] || fail "handoff --recover spawns exactly one successor"
+use_agent "$(jqs .agent_id)"
+grep -q 'RECOVERY-NOTE-MARKER' "$STUB_DIR/last-prompt" || fail "the successor's prompt carries the recovery note"
+# A failing call: fallback sentence, still handed off.
+rm -f "$STUB_DIR/recovery-out.json"
+run 0 "$MESA" live handoff --recover
+[ "$(jqs .status)" = "live" ] || fail "handoff --recover with a failing call: still live"
+use_agent "$(jqs .agent_id)"
+grep -q 'previous agent crashed; no note' "$STUB_DIR/last-prompt" || fail "a failed recovery call falls back to the fixed sentence"
+ok "live handoff --recover: one tool-less call writes the note into the successor's prompt; a failure falls back"
+
 kill "$SERVER_PID" 2>/dev/null || true
 wait "$SERVER_PID" 2>/dev/null || true
 SERVER_PID=
+
+# Keep-warm (naru task 2015): a live session nobody is attached to, idle for an
+# hour, gets one `cache-warm` user-role notice from the always-on tick, which
+# `live listen` hands the agent exactly once.
+if command -v sqlite3 >/dev/null; then
+  sqlite3 "$MESA_DB" \
+    "UPDATE live_sessions SET speaker_seen_at = NULL, working_since = NULL WHERE status = 'live';
+     UPDATE live_turns SET created_at = datetime('now','-61 minutes')
+       WHERE session_id = (SELECT id FROM live_sessions WHERE status = 'live');"
+  MESA_WATCH_LIVE_WARM_TICK_MS=500 "$MESA" serve --port "$PORT" >"$TMP/serve16.log" 2>&1 &
+  SERVER_PID=$!
+  for _ in $(seq 1 50); do
+    curl -fs "http://127.0.0.1:$PORT/api/version" >/dev/null 2>&1 && break
+    sleep 0.1
+  done
+  run 0 "$MESA" live listen --wait 10
+  [ "$(jqs .notice)" = "cache-warm" ] || fail "keep-warm: listen must hand out the cache-warm notice: $STDOUT"
+  [ "$(jqs .role)" = "user" ] || fail "keep-warm: role"
+  run 0 "$MESA" live listen --wait 2
+  [ "$STDOUT" = "null" ] || fail "keep-warm: exactly once: $STDOUT"
+  kill "$SERVER_PID" 2>/dev/null || true
+  wait "$SERVER_PID" 2>/dev/null || true
+  SERVER_PID=
+  ok "keep-warm: an idle unattended session gets one cache-warm turn, handed to listen once"
+fi
 
 
 echo "all $CHECKS checks passed"

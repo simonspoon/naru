@@ -11,7 +11,10 @@
 # skipped, task done with a result, no notify); a UI pass (UX designer and the
 # ui-verifier ran); fix-then-pass (the findings reach the second implementer
 # brief, task done); two NEEDS-FIX passes ending in backlog + note + notify;
-# an inconclusive verifier ending in backlog + note + one recorded notify call.
+# an inconclusive verifier ending in backlog + note + one recorded notify call;
+# an oversized task or a repeated finding set going to the Split step (second
+# pass skipped, backlog sub-tasks, parent noted, one notify), and a split with
+# no usable sub-task falling back to a plain backlog close.
 set -euo pipefail
 unset $(env | sed -n 's/^\(NARU_[A-Za-z0-9_]*\)=.*/\1/p')
 unset CLAUDE_CODE_SESSION_ID
@@ -57,6 +60,29 @@ export STUB
 # every message is logged as one JSON string per line in msgs.<agent>.
 cat > "$STUB/claude" <<'STUBEOF'
 #!/usr/bin/env bash
+# A `-p` call without `--input-format` (the runner's stages stream) is a typed
+# `agent` node's one tool-less call (naru task 2021): by default
+# the answer a correct model would give, read off the text between the markers
+# (the plan's last line; each report's last line); typed.plan / typed.review
+# stage a raw reply instead, and every prompt is logged in typed-msgs.<kind>.
+if [ "$1" = "-p" ] && [[ " $* " != *" --input-format "* ]]; then
+  prompt="${@: -1}"
+  case "$prompt" in *"VERIFY REPORT"*) kind=review ;; *) kind=plan ;; esac
+  printf '%s\n' "$prompt" | jq -Rs . >> "$STUB/typed-msgs.$kind"
+  last() { grep . | tail -n 1; }
+  if [ -f "$STUB/typed.$kind" ]; then reply=$(cat "$STUB/typed.$kind")
+  elif [ "$kind" = plan ]; then
+    case "$(sed -n '/^<<<PLAN$/,/^PLAN>>>$/p' <<<"$prompt" | grep -v '^<<<PLAN$\|^PLAN>>>$' | last)" in
+      "UI: yes") reply='{"ui":true}' ;; *) reply='{"ui":false}' ;; esac
+  else
+    v() { case "$(last)" in "VERDICT: PASS") echo PASS ;; "VERDICT: FAIL") echo FAIL ;; *) echo NONE ;; esac; }
+    a=$(sed -n '/^=== VERIFY REPORT ===$/,/^=== REVIEW REPORT ===$/p' <<<"$prompt" | grep -v '^===' | v)
+    b=$(sed -n '/^=== REVIEW REPORT ===$/,/^REPORTS>>>$/p' <<<"$prompt" | grep -v '^===\|^REPORTS>>>$' | v)
+    reply=$(jq -nc --arg a "$a" --arg b "$b" '{verify:$a,review:$b}')
+  fi
+  jq -nc --arg r "$reply" '{type:"result",subtype:"success",is_error:false,result:$r}'
+  exit 0
+fi
 agent=$(sed -n 's/.*--agent \([^ ]*\).*/\1/p' <<<"$*")
 [ -f "$STUB/die.$agent" ] && exit 1
 while IFS= read -r line; do
@@ -66,7 +92,8 @@ while IFS= read -r line; do
   if [ "$agent" = implementer ] && [ -f "$STUB/touch.implementer" ]; then while IFS= read -r f; do mkdir -p "$(dirname "$f")"; echo "$RANDOM" >> "$f"; done < "$STUB/touch.implementer"; fi
   n=$(grep -c . "$STUB/turns.$agent")
   reply=ok
-  if [ -f "$STUB/reply.$agent.$n" ]; then reply=$(cat "$STUB/reply.$agent.$n")
+  if [ "$agent" = planner ] && [ "$n" -ge 2 ] && [ -f "$STUB/split.json" ]; then reply=$(cat "$STUB/split.json")
+  elif [ -f "$STUB/reply.$agent.$n" ]; then reply=$(cat "$STUB/reply.$agent.$n")
   elif [ -f "$STUB/reply.$agent" ]; then reply=$(cat "$STUB/reply.$agent"); fi
   printf '{"type":"assistant","message":{"content":[{"type":"text","text":%s}]}}\n' "$(jq -Rn --arg t "$reply" '$t')"
   printf '{"type":"result","subtype":"success","is_error":false,"result":%s}\n' "$(jq -Rn --arg t "$reply" '$t')"
@@ -78,12 +105,13 @@ export MESA_CLAUDE_BIN="$STUB/claude"
 cat > "$STUB/vox" <<'STUBEOF'
 #!/usr/bin/env bash
 { echo "--call--"; printf '%s\n' "$@"; } >> "$STUB/vox.log"
+[ -e "$STUB/die.vox" ] && { echo "vox: down" >&2; exit 1; }
 printf '{"ok":true,"message_id":42,"chat_id":7}\n'
 STUBEOF
 chmod +x "$STUB/vox"
 export MESA_VOX_BIN="$STUB/vox"
 
-reset_stub() { rm -f "$STUB"/touch.* "$STUB"/reply.* "$STUB"/die.* "$STUB"/turns.* "$STUB"/msgs.* "$STUB/vox.log"; }
+reset_stub() { rm -f "$STUB"/touch.* "$STUB"/reply.* "$STUB"/die.* "$STUB"/turns.* "$STUB"/msgs.* "$STUB"/typed.* "$STUB"/typed-msgs.* "$STUB"/split.json "$STUB/vox.log"; }
 turns() { grep -c . "$STUB/turns.$1" 2>/dev/null || true; }
 # step <run json> <node title>: the status of that node's step (node ids from
 # the workflow's own node list, since a step carries the id only).
@@ -103,16 +131,23 @@ git -C "$TMP/work" add seed.txt
 git -C "$TMP/work" commit -q -m seed
 "$NARU" project create loopproj --no-git --path "$TMP/work" >/dev/null
 OUT=$("$NARU" workflow defaults --task-loop --project loopproj)
-jq -e '(.created|length)==1 and .created[0].workflow.name=="Task loop" and .skipped==[] and (.created[0].nodes|length)==17' <<<"$OUT" >/dev/null || fail "defaults: $OUT"
+jq -e '(.created|length)==2 and .created[0].workflow.name=="Task loop" and .skipped==[] and (.created[0].nodes|length)==28 and .created[1].workflow.name=="Task loop: implement and review" and (.created[1].nodes|length)==8' <<<"$OUT" >/dev/null || fail "defaults: $OUT"
 ok "defaults --task-loop creates the Task loop workflow"
 OUT=$("$NARU" workflow defaults --task-loop --project loopproj)
 jq -e '.created==[] and .skipped==["Task loop"]' <<<"$OUT" >/dev/null || fail "rerun: $OUT"
-[ "$("$NARU" workflow list | jq length)" = 1 ] || fail "rerun or --task-loop left extra workflows"
+[ "$("$NARU" workflow list | jq length)" = 2 ] || fail "rerun or --task-loop left extra workflows"
 WF=$("$NARU" workflow show "Task loop")
 ok "a rerun is a no-op; no ambient workflows were created"
 
 mk() { "$NARU" task create loopproj "$1" | jq -r .id; }
 run_loop() { "$NARU" workflow run "Task loop" --input "$1"; }
+# metric <task id> <verdict> <iterations> <outcome> <label>: the task-loop-metrics
+# log holds exactly one line for the run, with that verdict/iterations/outcome.
+metric() {
+  local got
+  got=$("$NARU" workflow log task-loop-metrics --limit 1000 | jq -r --arg t "task=$1 " '.[] | select(.text | startswith($t)) | .text')
+  [ "$got" = "task=$1 verdict=$2 iterations=$3 outcome=$4" ] || fail "$5: metric line(s): [$got]"
+}
 
 # ---- 1. non-UI pass ----
 reset_stub
@@ -126,7 +161,7 @@ R=$(run_loop "$T")
 [ "$(tstatus "$T")" = done ] || fail "pass: task is $(tstatus "$T")"
 "$NARU" task show "$T" | jq -e '.result | test("passed review")' >/dev/null || fail "pass: no result on the task"
 [ "$(step "$R" "UX designer")" = skipped ] || fail "pass: UX node was $(step "$R" "UX designer")"
-[ "$(step "$R" "Implement #2")" = skipped ] || fail "pass: Implement #2 was $(step "$R" "Implement #2")"
+[ "$(step "$R" "Implement + review #2")" = skipped ] || fail "pass: Implement #2 was $(step "$R" "Implement + review #2")"
 [ "$(step "$R" "Close: pass")" = ok ] && [ "$(step "$R" "Close: backlog")" = skipped ] || fail "pass: close nodes"
 [ "$(turns ux-designer)" = "" ] && [ "$(turns implementer)" = 1 ] && [ "$(turns verifier)" = 1 ] || fail "pass: turn counts"
 [ ! -e "$STUB/vox.log" ] || fail "pass: notify was called"
@@ -136,6 +171,10 @@ ls "$HOME"/.naru/loop/"$T"-*/plan.md >/dev/null || fail "pass: no scratch hand-o
 git -C "$TMP/work" log -1 --format=%s | grep -q "task $T" || fail "pass: commit subject: $(git -C "$TMP/work" log -1 --format=%s)"
 [ "$(git -C "$TMP/work" show --name-only --format= HEAD | sort | tr '\n' ',')" = "foo.txt,seed.txt,sub dir/bar baz.txt," ] || fail "pass: commit files: $(git -C "$TMP/work" show --name-only --format= HEAD | tr '\n' ',')"
 [ -z "$(git -C "$TMP/work" status --porcelain)" ] || fail "pass: tree not clean after the commit"
+[ "$(step "$R" "Plan UI verdict")" = ok ] && [ "$(step "$R" "Implement + review #1")" = ok ] || fail "pass: the typed agent nodes or the first pass did not run"
+[ "$(step "$R" "Implement + review #2")" = skipped ] || fail "pass: the second pass was $(step "$R" "Implement + review #2")"
+grep -q "VERDICT: PASS" "$STUB/typed-msgs.review" || fail "pass: the reports did not reach the typed verdict agent"
+metric "$T" PASS 1 done pass
 ok "non-UI pass: UX and Implement #2 skipped, task done with a result, no notify, exactly the changed files committed"
 
 # ---- 2. UI pass ----
@@ -150,6 +189,7 @@ R=$(run_loop "$T")
 [ "$(step "$R" "UX designer")" = ok ] || fail "ui: UX node was $(step "$R" "UX designer")"
 [ "$(turns ux-designer)" = 1 ] && [ "$(turns ui-verifier)" = 1 ] && [ "$(turns verifier)" = "" ] || fail "ui: agents used"
 grep -q "layout: a list" "$STUB/msgs.implementer" || fail "ui: the design brief did not reach the implementer"
+metric "$T" PASS 1 done ui
 ok "UI path: UX designer and ui-verifier ran, the design reached the implementer"
 
 # ---- 3. fix then pass ----
@@ -161,10 +201,11 @@ printf 'VERDICT: PASS' > "$STUB/reply.diff-reviewer.2"
 T=$(mk "Fix bar")
 R=$(run_loop "$T")
 [ "$(jq -r .status <<<"$R")" = succeeded ] && [ "$(tstatus "$T")" = done ] || fail "fix: $(jq -c '{status,error}' <<<"$R") task $(tstatus "$T")"
-[ "$(step "$R" "Implement #2")" = ok ] && [ "$(step "$R" "Review + verify #2")" = ok ] || fail "fix: second pass did not run"
+[ "$(step "$R" "Implement + review #2")" = ok ] || fail "fix: second pass did not run"
 [ "$(turns implementer)" = 2 ] || fail "fix: implementer turns $(turns implementer)"
 sed -n 2p "$STUB/msgs.implementer" | grep -q "bug in bar()" || fail "fix: findings missing from the second implementer brief"
 [ ! -e "$STUB/vox.log" ] || fail "fix: notify was called"
+metric "$T" PASS 2 done fix
 ok "fix-then-pass: findings reached Implement #2, task done"
 
 # ---- 4. NEEDS-FIX twice -> backlog ----
@@ -181,6 +222,7 @@ R=$(run_loop "$T")
 "$NARU" task show "$T" | jq -e '.notes | length == 1 and (.[0].body | test("still broken"))' >/dev/null || fail "twice: note: $("$NARU" task show "$T" | jq -c .notes)"
 [ "$(grep -c -- '--call--' "$STUB/vox.log")" = 1 ] || fail "twice: notify calls"
 [ "$(step "$R" "Commit")" = skipped ] || fail "twice: Commit was $(step "$R" "Commit")"
+metric "$T" NEEDS-FIX 2 backlog twice
 ok "two NEEDS-FIX passes end in backlog + note + notify, nothing committed"
 
 # ---- 5. inconclusive verifier -> backlog ----
@@ -192,11 +234,13 @@ T=$(mk "Fix qux")
 R=$(run_loop "$T")
 [ "$(jq -r .status <<<"$R")" = succeeded ] || fail "inconclusive: run $(jq -c '{status,error}' <<<"$R")"
 [ "$(tstatus "$T")" = backlog ] || fail "inconclusive: task is $(tstatus "$T")"
-[ "$(step "$R" "Implement #2")" = skipped ] || fail "inconclusive: looped on an inconclusive verifier"
+[ "$(step "$R" "Implement + review #2")" = skipped ] || fail "inconclusive: looped on an inconclusive verifier"
 "$NARU" task show "$T" | jq -e '.notes | length == 1 and (.[0].body | test("INCONCLUSIVE"))' >/dev/null || fail "inconclusive: note: $("$NARU" task show "$T" | jq -c .notes)"
 [ "$(grep -c -- '--call--' "$STUB/vox.log")" = 1 ] || fail "inconclusive: notify calls"
 grep -q -- "Task $T needs a person" "$STUB/vox.log" || fail "inconclusive: notify message: $(cat "$STUB/vox.log")"
 grep -q -- "/open/tasks/$T" "$STUB/vox.log" || fail "inconclusive: notify button: $(cat "$STUB/vox.log")"
+[ ! -e "$STUB/typed-msgs.review" ] || fail "inconclusive: the verdict agent read a stage that did not finish"
+metric "$T" INCONCLUSIVE 1 backlog inconclusive
 ok "inconclusive verifier: backlog + note + one recorded notify call"
 
 # ---- 6. a planner that never answers -> backlog, nothing implemented ----
@@ -204,8 +248,20 @@ reset_stub
 touch "$STUB/die.planner"
 T=$(mk "Fix nothing")
 R=$(run_loop "$T")
-[ "$(tstatus "$T")" = backlog ] && [ "$(step "$R" "Implement #1")" = skipped ] || fail "planner: task $(tstatus "$T"), impl $(step "$R" "Implement #1")"
+[ "$(tstatus "$T")" = backlog ] && [ "$(step "$R" "Implement + review #1")" = skipped ] || fail "planner: task $(tstatus "$T"), impl $(step "$R" "Implement + review #1")"
+metric "$T" none 0 backlog planner
 ok "an inconclusive planner ends in backlog without implementing"
+
+# ---- 6b. an implementer that never answers: the child ends at Implemented?,
+# its output carries no review token, so Verdict #1 takes default -> backlog ----
+reset_stub
+printf 'UI: no' > "$STUB/reply.planner"
+touch "$STUB/die.implementer"
+T=$(mk "Fix nothing either")
+R=$(run_loop "$T")
+[ "$(jq -r .status <<<"$R")" = succeeded ] && [ "$(tstatus "$T")" = backlog ] || fail "impl failed: $(jq -c '{status,error}' <<<"$R") task $(tstatus "$T")"
+[ "$(step "$R" "Implement + review #1")" = ok ] && [ "$(step "$R" "Implement + review #2")" = skipped ] && [ "$(step "$R" "Close: backlog")" = ok ] || fail "impl failed: the passes or Close: backlog"
+ok "a failed implement ends the child pass and the loop in backlog, no second pass"
 
 # ---- 7. a tree dirty before the run -> pass, but the commit is refused ----
 reset_stub
@@ -217,11 +273,90 @@ echo stray > "$TMP/work/stray.txt"
 before=$(git -C "$TMP/work" rev-parse HEAD)
 T=$(mk "Fix dirty")
 R=$(run_loop "$T")
-[ "$(tstatus "$T")" = done ] && [ "$(step "$R" "Commit")" = failed ] || fail "dirty: task $(tstatus "$T"), Commit $(step "$R" "Commit")"
+[ "$(jq -r .status <<<"$R")" = succeeded ] || fail "dirty: run $(jq -c '{status,error}' <<<"$R")"
+[ "$(tstatus "$T")" = done ] && [ "$(step "$R" "Commit")" = ok ] || fail "dirty: task $(tstatus "$T"), Commit $(step "$R" "Commit")"
 [ "$(git -C "$TMP/work" rev-parse HEAD)" = "$before" ] || fail "dirty: a commit was made"
 [ "$(git -C "$TMP/work" status --porcelain | sort | tr '\n' ',')" = "?? new.txt,?? stray.txt," ] || fail "dirty: tree: $(git -C "$TMP/work" status --porcelain)"
 "$NARU" task show "$T" | jq -e '.notes | length == 1 and (.[0].body | test("stray.txt"))' >/dev/null || fail "dirty: note"
 [ "$(grep -c -- '--call--' "$STUB/vox.log")" = 1 ] || fail "dirty: notify calls"
-ok "a dirty baseline refuses the commit: nothing staged, task noted, one notify"
+ok "a dirty baseline refuses the commit without failing the run: nothing staged, task noted, one notify"
+
+# ---- 8. a failing vox send is caught: backlog, run still succeeds ----
+reset_stub
+printf 'UI: no' > "$STUB/reply.planner"
+touch "$STUB/die.verifier" "$STUB/die.vox"
+printf 'VERDICT: PASS' > "$STUB/reply.diff-reviewer"
+T=$(mk "Fix vox down")
+R=$(run_loop "$T")
+[ "$(jq -r .status <<<"$R")" = succeeded ] || fail "vox down: run $(jq -c '{status,error}' <<<"$R")"
+[ "$(tstatus "$T")" = backlog ] && [ "$(step "$R" "Close: backlog status")" = ok ] || fail "vox down: task $(tstatus "$T")"
+[ "$(step "$R" "Close: backlog notify")" = ok ] || fail "vox down: notify step $(step "$R" "Close: backlog notify")"
+ok "a failing notify is caught: task in backlog, run succeeded"
+
+# ---- 9. a typed verdict that is garbage, or not conclusive -> backlog ----
+reset_stub
+printf 'UI: no' > "$STUB/reply.planner"
+printf 'VERDICT: PASS' > "$STUB/reply.verifier"
+printf 'VERDICT: PASS' > "$STUB/reply.diff-reviewer"
+printf 'definitely passes' > "$STUB/typed.review"
+T=$(mk "Fix garbage verdict")
+R=$(run_loop "$T")
+[ "$(jq -r .status <<<"$R")" = succeeded ] || fail "garbage review: run $(jq -c '{status,error}' <<<"$R")"
+[ "$(tstatus "$T")" = backlog ] || fail "garbage review: task is $(tstatus "$T") (a bad reply must never pass)"
+[ "$(step "$R" "Implement + review #2")" = skipped ] || fail "garbage review: looped on a bad reply"
+[ "$(grep -c . "$STUB/typed-msgs.review")" = 2 ] || fail "garbage review: expected one call and one retry, got $(grep -c . "$STUB/typed-msgs.review")"
+"$NARU" task show "$T" | jq -e '.notes | length == 1 and (.[0].body | test("typed verdict"))' >/dev/null || fail "garbage review: note: $("$NARU" task show "$T" | jq -c .notes)"
+printf '{"verify":"PASS","review":"NONE"}' > "$STUB/typed.review"
+T=$(mk "Fix half a verdict")
+R=$(run_loop "$T")
+[ "$(tstatus "$T")" = backlog ] && [ "$(step "$R" "Implement + review #2")" = skipped ] || fail "half review: task $(tstatus "$T")"
+
+printf 'definitely ui' > "$STUB/typed.plan"
+T=$(mk "Fix garbage plan")
+R=$(run_loop "$T")
+[ "$(tstatus "$T")" = backlog ] && [ "$(step "$R" "Implement + review #1")" = skipped ] || fail "garbage plan: task $(tstatus "$T"), impl $(step "$R" "Implement + review #1")"
+"$NARU" task show "$T" | jq -e '.notes | length == 1 and (.[0].body | test("typed UI verdict"))' >/dev/null || fail "garbage plan: note: $("$NARU" task show "$T" | jq -c .notes)"
+ok "a garbage or inconclusive typed verdict ends in backlog with a note, never a pass; no implement stage after a bad plan reply"
+
+# ---- 10. an oversized task, or a repeated finding set -> the split step ----
+subs() { "$NARU" task list loopproj | jq -r --argjson p "$1" '[.[] | select(.parent_id == $p)] | length'; }
+reset_stub
+printf 'Plan: edit src/a.rs and src/b.rs.\nUI: no' > "$STUB/reply.planner"
+printf 'VERDICT: PASS' > "$STUB/reply.verifier"
+printf 'too much\nVERDICT: FAIL' > "$STUB/reply.diff-reviewer"
+printf '[{"description":"part one"},{"description":"part two"}]' > "$STUB/split.json"
+T=$(mk "Build the big thing")
+R=$(NARU_LOOP_SPLIT_FILES=1 run_loop "$T")
+[ "$(jq -r .status <<<"$R")" = succeeded ] || fail "split: run $(jq -c '{status,error}' <<<"$R")"
+[ "$(step "$R" "Split")" = ok ] && [ "$(step "$R" "Implement + review #2")" = skipped ] || fail "split: second pass ran or Split did not"
+[ "$(tstatus "$T")" = backlog ] && [ "$(subs "$T")" = 2 ] || fail "split: task $(tstatus "$T"), sub-tasks $(subs "$T")"
+"$NARU" task list loopproj | jq -e --argjson p "$T" '[.[] | select(.parent_id == $p)] | all(.status == "backlog")' >/dev/null || fail "split: sub-tasks not in backlog"
+"$NARU" task show "$T" | jq -e '.notes | map(.body) | any(test("split this task")) and any(test("Last review findings"))' >/dev/null || fail "split: notes: $("$NARU" task show "$T" | jq -c .notes)"
+[ "$(turns implementer)" = 1 ] && [ "$(grep -c -- '--call--' "$STUB/vox.log")" = 1 ] || fail "split: implementer turns $(turns implementer), notify calls"
+metric "$T" NEEDS-FIX 1 backlog split
+ok "oversized task: Implement #2 and Review #2 skipped, 2 backlog sub-tasks, parent in backlog with a note, one notify"
+
+reset_stub
+printf 'UI: no' > "$STUB/reply.planner"
+printf 'VERDICT: PASS' > "$STUB/reply.verifier"
+printf 'bug in bar()\nVERDICT: FAIL' > "$STUB/reply.diff-reviewer"
+printf '[{"description":"half of it"}]' > "$STUB/split.json"
+T=$(mk "Fix bar again")
+mkdir -p "$HOME/.naru/loop/$T-1-1"
+printf 'Iteration 1 verify report:\nVERDICT: PASS\n\nIteration 1 review report:\nBug in bar().\nVERDICT: FAIL\n' > "$HOME/.naru/loop/$T-1-1/findings.md"
+R=$(run_loop "$T")
+[ "$(step "$R" "Split")" = ok ] && [ "$(step "$R" "Implement + review #2")" = skipped ] && [ "$(tstatus "$T")" = backlog ] && [ "$(subs "$T")" = 1 ] || fail "repeat: Split $(step "$R" "Split"), task $(tstatus "$T"), sub-tasks $(subs "$T")"
+ok "a finding set an earlier run already left goes to the split step"
+
+reset_stub
+printf 'Plan: edit src/a.rs and src/b.rs.\nUI: no' > "$STUB/reply.planner"
+printf 'VERDICT: PASS' > "$STUB/reply.verifier"
+printf 'bug in bar()\nVERDICT: FAIL' > "$STUB/reply.diff-reviewer"
+T=$(mk "Fix a thing nobody can split")
+R=$(NARU_LOOP_SPLIT_FILES=1 run_loop "$T")
+[ "$(jq -r .status <<<"$R")" = succeeded ] && [ "$(tstatus "$T")" = backlog ] && [ "$(subs "$T")" = 0 ] || fail "split fallback: task $(tstatus "$T"), sub-tasks $(subs "$T")"
+[ "$(step "$R" "Implement + review #2")" = skipped ] && [ "$(step "$R" "Close: backlog")" = ok ] || fail "split fallback: close nodes"
+[ "$(grep -c -- '--call--' "$STUB/vox.log")" = 1 ] || fail "split fallback: notify calls"
+ok "a split with no usable sub-task falls back to a plain backlog close"
 
 echo "task-loop-check: all ok"

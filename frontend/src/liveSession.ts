@@ -34,7 +34,7 @@ export interface LiveButton {
    * other two are this browser's own participation, which is not the server's
    * business (see `pause` below).
    */
-  action: 'start' | 'stop' | 'listen' | 'pause' | 'resume'
+  action: 'start' | 'stop' | 'listen' | 'detach' | 'pause' | 'resume'
   /** A press already in flight: the same press again would start a second one. */
   disabled: boolean
 }
@@ -95,7 +95,7 @@ export function liveControls(
   // otherwise still read "Go live" and invite a second one.
   if (pending === 'start') {
     return {
-      primary: { label: 'Going live…', action: 'stop', disabled: true },
+      primary: { label: 'Attaching…', action: 'stop', disabled: true },
       secondary: null,
       // Nothing to step out of yet, and a press mid-spawn would be pausing a
       // conversation that has not started saying anything.
@@ -113,7 +113,7 @@ export function liveControls(
   }
   if (!isLive(session)) {
     return {
-      primary: { label: 'Go live', action: 'start', disabled: false },
+      primary: { label: 'Attach', action: 'start', disabled: false },
       secondary: null,
       pause: null,
       panel,
@@ -128,11 +128,19 @@ export function liveControls(
       ? { label: 'Resume', action: 'resume', disabled: false }
       : { label: 'Pause', action: 'pause', disabled: false }
     : null
-  const end: LiveButton = { label: 'End', action: 'stop', disabled: false }
-  if (unlocked) return { primary: end, secondary: null, pause, panel }
+  // Naru task 2013: there is no End press. Detach steps this browser out and
+  // leaves the agent running; `naru live stop` is the only way to end it.
+  if (unlocked) {
+    return {
+      primary: { label: 'Detach', action: 'detach', disabled: false },
+      secondary: null,
+      pause,
+      panel,
+    }
+  }
   return {
-    primary: { label: 'Listen', action: 'listen', disabled: false },
-    secondary: end,
+    primary: { label: 'Attach', action: 'listen', disabled: false },
+    secondary: null,
     pause,
     panel,
   }
@@ -168,11 +176,15 @@ export function liveStatusLine(
   error: string | null,
   paused: boolean,
   unavailable = false,
+  unlocked = true,
 ): string | null {
   if (error !== null) return error
-  if (session === null) return 'Not live. Press Go live to start a conversation.'
+  if (session === null) return 'Not live. Press Attach to start a conversation.'
   if (!isLive(session)) {
-    return 'That conversation has ended. Press Go live to start another.'
+    return 'That conversation has ended. Press Attach to start another.'
+  }
+  if (!unlocked) {
+    return 'Detached — the agent is still running. Press Attach to hear it again.'
   }
   if (paused) {
     return 'Paused — not speaking, not listening. Press Resume to pick the conversation back up.'

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   SETTINGS_TABS,
+  visibleSettingsTabs,
   settingsTabFromPath,
   settingsTabHref,
   settingsTabLabel,
@@ -37,7 +38,7 @@ describe('settingsTabFromPath', () => {
 })
 
 describe('strip', () => {
-  it('lists the seven tabs in order, hooks first', () => {
+  it('lists the eight tabs in order, hooks first', () => {
     expect(SETTINGS_TABS).toEqual([
       'hooks',
       'keyboard',
@@ -46,6 +47,7 @@ describe('strip', () => {
       'memory',
       'pricing',
       'system',
+      'gestures',
     ])
   })
 
@@ -57,12 +59,26 @@ describe('strip', () => {
 
   it('round-trips every href back to its tab', () => {
     for (const tab of SETTINGS_TABS) {
-      expect(settingsTabFromPath(settingsTabHref(tab).slice(1))).toBe(tab)
+      expect(settingsTabFromPath(settingsTabHref(tab).slice(1), true)).toBe(tab)
     }
   })
 
   it('labels every tab', () => {
     for (const tab of SETTINGS_TABS) expect(settingsTabLabel(tab)).not.toBe('')
     expect(settingsTabLabel('keyboard')).toBe('Keyboard')
+  })
+})
+
+describe('gestures tab (native only)', () => {
+  it('routes to gestures with a host and falls back to hooks without', () => {
+    expect(settingsTabFromPath('/settings/gestures')).toBe('hooks')
+    expect(settingsTabFromPath('/settings/gestures', true)).toBe('gestures')
+    expect(settingsTabFromPath('/settings/gestures', false)).toBe('hooks')
+    expect(settingsTabHref('gestures')).toBe('#/settings/gestures')
+  })
+
+  it('hides the tab from a plain browser strip', () => {
+    expect(visibleSettingsTabs(false)).not.toContain('gestures')
+    expect(visibleSettingsTabs(true)).toContain('gestures')
   })
 })

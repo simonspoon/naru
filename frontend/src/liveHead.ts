@@ -100,5 +100,5 @@ export function emptyMeterHistory(): number[] {
  * So: a real, pressable End moves; a disabled placeholder stays put.
  */
 export function endsInHead(button: LiveButton | null): boolean {
-  return button !== null && button.action === 'stop' && !button.disabled
+  return button !== null && (button.action === 'stop' || button.action === 'detach') && !button.disabled
 }

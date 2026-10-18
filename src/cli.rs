@@ -306,6 +306,25 @@ EXAMPLES
     /// A self-disarming alarm for a supervisor's handoffs (mesa task 1512)
     #[command(subcommand)]
     Alarm(AlarmCmd),
+    /// Queue a question for the live agent / the person (naru task 2014)
+    ///
+    /// `ask <TEXT…>` stores the question durably with the asking task and
+    /// session and returns at once (it never waits); if a live conversation is
+    /// running it also writes a `question` notice turn to nudge the agent. The
+    /// live agent reads `ask list` and replies with `ask answer <id> <TEXT…>`;
+    /// the asker reads the answer with `ask show <id>`. The session is taken
+    /// from CLAUDE_CODE_SESSION_ID when set. Put flags before the text.
+    /// `--quiet` drops `body` and `answer`. See docs/ask.md.
+    #[command(
+        args_conflicts_with_subcommands = true,
+        after_help = "\
+EXAMPLES
+  naru ask --task 7 \"Keep the old flag or drop it?\"
+  naru ask list --status open
+  naru ask answer 3 drop it
+  naru ask show 3"
+    )]
+    Ask(AskArgs),
     /// Detached `claude -p` agent runs that outlive the server (naru task 1686)
     ///
     /// A run is a job directory under `~/.naru/runs/<id>/` held by a small
@@ -615,6 +634,51 @@ enum JobCmd {
         run: i64,
         #[arg(long)]
         dir: String,
+    },
+}
+
+#[derive(clap::Args)]
+struct AskArgs {
+    #[command(subcommand)]
+    cmd: Option<AskCmd>,
+    /// The question (everything after the flags); quoting is optional
+    #[arg(num_args = 0.., trailing_var_arg = true)]
+    text: Vec<String>,
+    /// The task being worked on
+    #[arg(long)]
+    task: Option<i64>,
+    /// Session id to record; default is CLAUDE_CODE_SESSION_ID
+    #[arg(long)]
+    session: Option<String>,
+    /// Print the question without its `body`
+    #[arg(long)]
+    quiet: bool,
+}
+
+#[derive(Subcommand)]
+enum AskCmd {
+    /// List queued questions, oldest first
+    List {
+        /// Only `open` or `answered` ones
+        #[arg(long)]
+        status: Option<String>,
+    },
+    /// Show one question with its answer
+    Show {
+        id: i64,
+        /// Drop `body` and `answer`
+        #[arg(long)]
+        quiet: bool,
+    },
+    /// Answer an open question (once)
+    Answer {
+        id: i64,
+        /// The answer text
+        #[arg(num_args = 1.., trailing_var_arg = true, required = true)]
+        text: Vec<String>,
+        /// Print the question without its `body` and `answer`
+        #[arg(long)]
+        quiet: bool,
     },
 }
 
@@ -3361,8 +3425,15 @@ EXAMPLES
   mesa live handoff --quiet Fresh start requested.")]
     Handoff {
         /// The note for the successor (everything after `handoff`); quoting is optional
-        #[arg(required = true, num_args = 1.., trailing_var_arg = true)]
+        #[arg(required_unless_present = "recover", num_args = 0.., trailing_var_arg = true)]
         note: Vec<String>,
+        /// Crash recovery (naru task 2012): with no note, a tool-less haiku call reads the prior transcript and writes it
+        ///
+        /// A failed call falls back to a fixed sentence; the last 10 turns
+        /// still ride along. An explicit note always wins. Must come BEFORE
+        /// any note text.
+        #[arg(long)]
+        recover: bool,
         /// Print the session in its compact shape instead of in full
         ///
         /// Must come BEFORE the note text.
@@ -4601,7 +4672,8 @@ fn parse_ambient_state(s: &str) -> std::result::Result<bool, String> {
 
 /// `live notice <KIND>` names the report (mesa task 1157).
 fn parse_live_notice(s: &str) -> std::result::Result<LiveNotice, String> {
-    LiveNotice::parse(s).ok_or_else(|| format!("'{s}' is not one of permission|agent-ended"))
+    LiveNotice::parse(s)
+        .ok_or_else(|| format!("'{s}' is not one of permission|agent-ended|question"))
 }
 
 /// `--kind` on `live board push` names one of the two **text** kinds. The
@@ -4955,6 +5027,9 @@ const QUIET_DROP_RECEIPT: &[&str] = &["commits", "note"];
 /// A `TaskNote`'s one unbounded field is its `body` (naru task 1724); the
 /// id, task id, session and timestamp are bounded and stay.
 const QUIET_DROP_TASK_NOTE: &[&str] = &["body"];
+
+/// An `AgentQuestion`'s unbounded fields are `body` and `answer` (naru task 2014).
+const QUIET_DROP_QUESTION: &[&str] = &["body", "answer"];
 
 /// Quiet projection of one record: the serialized record minus `drop`ped keys.
 ///
@@ -5362,6 +5437,7 @@ fn execute(command: Command) -> Result<()> {
             Ok(())
         }
         Command::Alarm(cmd) => run_alarm(cmd),
+        Command::Ask(args) => run_ask(args),
         Command::Run(cmd) => run_runs(cmd),
         Command::Stage(cmd) => run_stage(cmd),
         Command::Job(cmd) => {
@@ -5568,6 +5644,35 @@ fn run_stage(cmd: StageCmd) -> Result<()> {
         &opts,
         &agents,
     )?);
+    Ok(())
+}
+
+fn run_ask(args: AskArgs) -> Result<()> {
+    let mut store = Store::open_default()?;
+    match args.cmd {
+        None => {
+            let session = args
+                .session
+                .or_else(|| std::env::var("CLAUDE_CODE_SESSION_ID").ok());
+            let q = store.add_question(&args.text.join(" "), args.task, session.as_deref())?;
+            // The queue is the durable record; the notice is only a nudge, so
+            // no live conversation (or a failed nudge) is not an error.
+            if let Ok(Some(live)) = store.current_live_session() {
+                let _ = store.add_live_notice(live.id, LiveNotice::Question);
+            }
+            print_record(&q, args.quiet, QUIET_DROP_QUESTION);
+        }
+        Some(AskCmd::List { status }) => {
+            print_json(&store.list_questions(status.as_deref())?);
+        }
+        Some(AskCmd::Show { id, quiet }) => {
+            print_record(&store.get_question(id)?, quiet, QUIET_DROP_QUESTION);
+        }
+        Some(AskCmd::Answer { id, text, quiet }) => {
+            let q = store.answer_question(id, &text.join(" "))?;
+            print_record(&q, quiet, QUIET_DROP_QUESTION);
+        }
+    }
     Ok(())
 }
 
@@ -6926,10 +7031,33 @@ fn run_live(cmd: LiveCmd) -> Result<()> {
             };
             print_json(&store.list_live_turns(session_id, after, limit)?);
         }
-        LiveCmd::Handoff { note, quiet } => {
+        LiveCmd::Handoff {
+            note,
+            recover,
+            quiet,
+        } => {
             let session = current_live_session(&store)?;
             let note = note.join(" ");
-            let note = note.trim();
+            let mut note = note.trim().to_string();
+            if note.is_empty() && recover {
+                // Crash recovery (naru task 2012): no note, so one tool-less
+                // call reads the prior transcript. Any failure costs recall,
+                // never the spawn: the fixed sentence stands in and the last
+                // turns still ride along in the prompt.
+                let (dir, _) = live_agent_dir(&store, session.project_id, session.id)?;
+                let turns = store.last_live_turns(session.id, 200)?;
+                let prompt = live::recovery_note_prompt(&turns);
+                let prompts = crate::core::library::prompts(&store)?;
+                note =
+                    live::recovery_note(session.id, &prompt, &prompts, &dir).unwrap_or_else(|e| {
+                        eprintln!(
+                            "live session {}: no recovery note ({e}), using the fallback",
+                            session.id
+                        );
+                        live::RECOVERY_NOTE_FALLBACK.to_string()
+                    });
+            }
+            let note = note.as_str();
             if note.is_empty() {
                 return Err(Error::Validation(
                     "a handoff note must not be empty".to_string(),
@@ -10397,6 +10525,56 @@ mod tests {
             sorted_owned(value_keys(&quiet(&note, QUIET_DROP_TASK_NOTE))),
             minus(&full, QUIET_DROP_TASK_NOTE),
         );
+    }
+
+    #[test]
+    fn question_quiet_drops_body_and_answer() {
+        let q = crate::core::AgentQuestion {
+            id: 1,
+            task_id: None,
+            session: None,
+            body: "b".into(),
+            status: "open".into(),
+            answer: None,
+            created_at: "t".into(),
+            answered_at: None,
+        };
+        let full = keys(&q);
+        assert_eq!(
+            sorted_owned(full.clone()),
+            sorted(&[
+                "id",
+                "task_id",
+                "session",
+                "body",
+                "status",
+                "answer",
+                "created_at",
+                "answered_at"
+            ]),
+            "AgentQuestion gained/lost a field: decide whether it belongs in the \
+             --quiet shape before updating this list",
+        );
+        assert_eq!(
+            sorted_owned(value_keys(&quiet(&q, QUIET_DROP_QUESTION))),
+            minus(&full, QUIET_DROP_QUESTION),
+        );
+    }
+
+    #[test]
+    fn ask_parses_text_and_subcommands() {
+        let cli = Cli::try_parse_from(["naru", "ask", "--task", "3", "why", "not?"]).unwrap();
+        let Command::Ask(a) = cli.command else {
+            panic!("not ask")
+        };
+        assert!(a.cmd.is_none());
+        assert_eq!(
+            (a.task, a.text.join(" ")),
+            (Some(3), "why not?".to_string())
+        );
+        assert!(Cli::try_parse_from(["naru", "ask", "list", "--status", "open"]).is_ok());
+        assert!(Cli::try_parse_from(["naru", "ask", "answer", "3", "yes", "do"]).is_ok());
+        assert!(Cli::try_parse_from(["naru", "ask", "answer", "3"]).is_err());
     }
 
     #[test]

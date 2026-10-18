@@ -8,6 +8,7 @@ import { LiveOrb, OrbHeaderControls, OrbPanel } from './LiveOrb'
 import { LiveBoardPanel, type InkFlatten } from './LiveBoardPanel'
 import {
   claimLiveSpeaker,
+  leaveLiveSpeaker,
   createLiveBoard,
   getLiveBoardHistory,
   pinLiveBoard,
@@ -459,6 +460,22 @@ function EndMark() {
       focusable="false"
     >
       <path d="M12 3v9M6.5 6.5a8 8 0 1 0 11 0" />
+    </svg>
+  )
+}
+
+/** Detaching is an unplugged cord: this browser steps out, the agent stays. */
+function DetachMark() {
+  return (
+    <svg
+      className="live-icon-mark"
+      viewBox="0 0 24 24"
+      width="15"
+      height="15"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path d="M9 3v5M15 3v5M6 8h12v3a6 6 0 0 1-12 0V8zM12 17v4" />
     </svg>
   )
 }
@@ -3990,6 +4007,22 @@ export function LiveHub({
 
   function act(button: LiveButton, acceptOffer = false) {
     if (button.disabled) return
+    if (button.action === 'detach') {
+      // Naru task 2013: step this browser out; the session and agent stay live.
+      silence()
+      setReplaying(null)
+      setUnlocked(false)
+      setPaused(false)
+      setActionError(null)
+      // Free the voice now so `speaker` reads null and no refresh re-pins it.
+      leaveLiveSpeaker(client).catch(() => {})
+      try {
+        localStorage.removeItem('naru-live-attached')
+      } catch {
+        /* storage may be unavailable */
+      }
+      return
+    }
     // Unlock the element and the clock from inside the gesture whether or not
     // this press turns out to need them: every turn after this one is spoken
     // without a click behind it, and the failure that says the clock is needed
@@ -3999,6 +4032,11 @@ export function LiveHub({
     void player.current?.load()
     setUnlocked(true)
     setActionError(null)
+    try {
+      localStorage.setItem('naru-live-attached', '1')
+    } catch {
+      /* storage may be unavailable */
+    }
     if (button.action === 'listen') {
       // Joining used to call nothing at all: the press *was* the whole point,
       // and the run can start on whatever the conversation has already said.
@@ -4048,6 +4086,23 @@ export function LiveHub({
     joinRef.current = () => {
       if (pending === null) act({ label: 'Listen', action: 'listen', disabled: false })
     }
+  })
+
+  // Naru task 2013: a reload remembers this browser was attached and
+  // reattaches to the running session once it loads. The AudioContext may
+  // start suspended under an autoplay policy; then the Attach button is the
+  // gesture, exactly as before.
+  const autoAttached = useRef(false)
+  useEffect(() => {
+    if (autoAttached.current || !isLive(session)) return
+    autoAttached.current = true
+    let was = false
+    try {
+      was = localStorage.getItem('naru-live-attached') === '1'
+    } catch {
+      /* storage may be unavailable */
+    }
+    if (was && !unlocked) joinRef.current()
   })
 
   /**
@@ -4458,7 +4513,7 @@ export function LiveHub({
     : endsInHead(secondary)
       ? secondary
       : null
-  const statusLine = liveStatusLine(session, speaking, actionError, paused, path === 'unavailable')
+  const statusLine = liveStatusLine(session, speaking, actionError, paused, path === 'unavailable', unlocked)
   // Whether mesa is saying something *right now*, for the status pill above
   // the composer. `sounding` is a ref because the run advances from a media
   // event, ahead of any render — but `speaking` is state, set from the
@@ -4756,13 +4811,13 @@ export function LiveHub({
             <button
               type="button"
               className="live-icon live-icon-end"
-              aria-label="end the conversation"
+              aria-label={endButton.action === 'detach' ? 'detach from the conversation' : 'end the conversation'}
               title={endButton.label}
               tabIndex={open ? undefined : -1}
               disabled={endButton.disabled}
               onClick={() => act(endButton)}
             >
-              <EndMark />
+              {endButton.action === 'detach' ? <DetachMark /> : <EndMark />}
             </button>
           )}
           <button

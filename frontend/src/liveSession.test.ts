@@ -42,7 +42,7 @@ describe('liveControls', () => {
     // the conversation is the gesture that unlocks it.
     for (const unlocked of [false, true]) {
       expect(liveControls(null, null, unlocked, false)).toEqual({
-        primary: { label: 'Go live', action: 'start', disabled: false },
+        primary: { label: 'Attach', action: 'start', disabled: false },
         secondary: null,
         // Nothing running: there is nothing to step out of.
         pause: null,
@@ -63,7 +63,7 @@ describe('liveControls', () => {
 
   it('offers to end a conversation this browser can already hear', () => {
     expect(liveControls(session(), null, true, false)).toEqual({
-      primary: { label: 'End', action: 'stop', disabled: false },
+      primary: { label: 'Detach', action: 'detach', disabled: false },
       secondary: null,
       pause: { label: 'Pause', action: 'pause', disabled: false },
       panel: true,
@@ -75,8 +75,8 @@ describe('liveControls', () => {
     // mesa is talking and nothing here has had a gesture, so the only control
     // used to be the one that destroys the conversation.
     expect(liveControls(session(), null, false, false)).toEqual({
-      primary: { label: 'Listen', action: 'listen', disabled: false },
-      secondary: { label: 'End', action: 'stop', disabled: false },
+      primary: { label: 'Attach', action: 'listen', disabled: false },
+      secondary: null,
       // A browser that never joined is already silent — there is nothing here
       // for a pause to stop, and `Listen` is the press that belongs there.
       pause: null,
@@ -88,7 +88,7 @@ describe('liveControls', () => {
     // Starting takes a spawn: the session lands seconds after the click, and
     // until then the button must not still read "Go live" and invite a second.
     expect(liveControls(null, 'start', false, false)).toEqual({
-      primary: { label: 'Going live…', action: 'stop', disabled: true },
+      primary: { label: 'Attaching…', action: 'stop', disabled: true },
       secondary: null,
       pause: null,
       panel: false,
@@ -128,7 +128,7 @@ describe('liveControls, pausing', () => {
     expect(held.pause).toEqual({ label: 'Resume', action: 'resume', disabled: false })
     // Pausing is not ending: the conversation is still running, so the primary
     // control still says so.
-    expect(held.primary).toEqual({ label: 'End', action: 'stop', disabled: false })
+    expect(held.primary).toEqual({ label: 'Detach', action: 'detach', disabled: false })
     expect(held.panel).toBe(true)
   })
 
@@ -219,5 +219,12 @@ describe('listenChordAction', () => {
     expect(listenChordAction(true, true)).toBe('toggle')
     expect(listenChordAction(false, false)).toBe('none')
     expect(listenChordAction(false, true)).toBe('none')
+  })
+})
+
+describe('liveStatusLine, detached', () => {
+  it('says the agent is still running when this browser has detached', () => {
+    expect(liveStatusLine(session(), false, null, false, false, false)).toMatch(/^Detached/)
+    expect(liveStatusLine(session(), false, null, false, false, true)).toBe(null)
   })
 })

@@ -37,6 +37,7 @@ import { WorkflowsOverview } from './pages/WorkflowsOverview'
 import { WorkflowBuilderView } from './pages/WorkflowBuilderView'
 import { SettingsView } from './pages/SettingsView'
 import { settingsTabFromPath } from './settingsTab'
+import { detectNativeHost } from './nativeHost'
 import { TerminalPage } from './pages/TerminalPage'
 import { isNavLinkClick, loadMainCollapsed, saveMainCollapsed } from './mainCollapse'
 import { isPhone, onPhoneTierChange, usePhoneTier } from './phoneTier'
@@ -498,7 +499,7 @@ function App() {
   let page
   if (settingsMatch) {
     // ~/.mesa/config.json editor: no project frame, no active project.
-    page = <SettingsView tab={settingsTabFromPath(path)} />
+    page = <SettingsView tab={settingsTabFromPath(path, detectNativeHost(window as unknown as Record<string, unknown>) !== null)} />
   } else if (scriptsRedirect !== null) {
     page = <HashRedirect to={scriptsRedirect} />
   } else if (workflowsOverviewMatch) {

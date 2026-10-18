@@ -404,6 +404,16 @@ merged from that same poll, never the `turns` state a later render sets:
   span, the same rule. A page that loads with the run already over sees that
   as the edge once; the server's dedupe covers any repeat. Its fixed sentence
   tells the person to end the conversation and start a new one.
+- **`cache-warm`** (naru task 2015) is written by the *server*, not a page:
+  an always-on tick (5 min, `MESA_WATCH_LIVE_WARM_TICK_MS`) calls
+  `Store::add_live_warm_if_due` on the live session. It writes one notice turn
+  when no client holds the speaker claim (null after 10 s), the agent is idle
+  (`working_since` null) and the newest turn of any kind is an hour old, so the
+  prompt cache stays warm while nobody is attached. It is a `user`-role turn
+  with `notice: cache-warm` (only those reach the agent's `listen`), stamped
+  `played_at` on insert; the agent answers with a one-word `say` (rule 17),
+  which `add_live_turn` also stamps played so no later browser speaks it. Its own turn counts as the newest, so it repeats hourly at most.
+
 - **`permission`** is posted on the **rising edge** of `blocked` — this poll
   non-null where the previous one was null — and no `permission` notice
   exists in this span (`noticeInSpan`: any turn with that `notice` and
@@ -686,6 +696,32 @@ real interrupt also kills that turn's background subagents and shells, so
 when the agent has a delegate running (`live::running_delegates`) nothing is
 sent and the answer is `{"interrupted": false, "reason": "delegates"}`: a
 misheard pause phrase must not cost a delegate its work.
+
+### Attach and detach (naru task 2013)
+
+The header button is per client: **Attach** (starts the agent if none is
+live, claims the voice) and **Detach** (`POST /api/live/leave`: releases this
+browser's claim at once, silences it, closes its microphone; the session and
+agent keep running, the transcript stays readable). There is no End button in
+the web UI; `naru live stop` is the only way to end a session. A browser that
+was attached remembers it in `localStorage` (`naru-live-attached`) and a
+reload re-attaches by itself where the browser allows audio, else on the first
+press. A detached page's route reports only refresh a claim it holds, so
+`speaker` stays null.
+
+### Crash recovery note (naru task 2012)
+
+A respawn after a crash has no agent left to write the note. `naru live
+handoff --recover` (note optional; an explicit note always wins) makes one
+tool-less `claude -p --json-schema` call through the `live-summary` template
+(haiku, no `--bg`), reading the session's last 200 turns (at most 60 KiB,
+oldest dropped) inside a `<<<DATA … DATA>>>` fence as untrusted data, and uses
+its `note` as the successor's note. A failed call, an empty answer or a missing
+`claude` costs recall only: the note becomes "previous agent crashed; no note,
+continue from the last turns", a line goes to stderr, and the last 10 turns
+still ride along. The call runs with no store transaction open. Like any
+handoff it does not check the old run is dead; the caller (a supervisor)
+decides that.
 
 ### Delegated results across a handoff (mesa task 1359)
 

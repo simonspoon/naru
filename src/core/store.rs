@@ -9,8 +9,8 @@ use super::board;
 use super::files;
 use super::live;
 use super::types::{
-    ArchiveOutcome, Artifact, Attachment, DiffStat, GitCommit, InboxItem, InboxKind, LibraryItem,
-    LibraryKind, LibraryScope, LibraryVersion, LiveAction, LiveBoard, LiveBoardKind,
+    AgentQuestion, ArchiveOutcome, Artifact, Attachment, DiffStat, GitCommit, InboxItem, InboxKind,
+    LibraryItem, LibraryKind, LibraryScope, LibraryVersion, LiveAction, LiveBoard, LiveBoardKind,
     LiveBoardSummary, LiveContext, LiveMemoryHit, LiveNotebookEntry, LiveNotice, LiveResult,
     LiveRole, LiveSession, LiveStatus, LiveSummary, LiveTurn, LiveWindow, Priority, Project,
     RetroFinding, RetroRun, RetroStatus, Script, ScriptArg, ScriptArgKind, ScriptRunRecord,
@@ -1477,6 +1477,19 @@ const MIGRATIONS: &[&str] = &[
         decided_at TEXT \
      ); \
      CREATE INDEX idx_workflow_gates_run ON workflow_gates(run_id);",
+    // Naru task 2014: the durable question queue behind `naru ask`. A sibling
+    // table; `task_id` is advisory (SET NULL, a question outlives its task).
+    "CREATE TABLE agent_questions (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id     INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
+        session     TEXT,
+        body        TEXT NOT NULL,
+        status      TEXT NOT NULL DEFAULT 'open',
+        answer      TEXT,
+        created_at  TEXT NOT NULL,
+        answered_at TEXT
+     );
+     CREATE INDEX idx_agent_questions_status ON agent_questions(status, id);",
 ];
 
 /// Selects full task rows including the derived `blocked` flag.
@@ -1543,6 +1556,19 @@ fn row_to_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskEvent> {
         from_status,
         to_status,
         at: row.get(4)?,
+    })
+}
+
+fn row_to_agent_question(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentQuestion> {
+    Ok(AgentQuestion {
+        id: row.get(0)?,
+        task_id: row.get(1)?,
+        session: row.get(2)?,
+        body: row.get(3)?,
+        status: row.get(4)?,
+        answer: row.get(5)?,
+        created_at: row.get(6)?,
+        answered_at: row.get(7)?,
     })
 }
 
@@ -4815,6 +4841,99 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Longest question or answer body, in bytes.
+    pub const QUESTION_MAX: usize = 8192;
+
+    const QUESTION_COLUMNS: &'static str =
+        "id, task_id, session, body, status, answer, created_at, answered_at";
+
+    /// Queues a question (naru task 2014). `body` non-blank, at most
+    /// [`Self::QUESTION_MAX`] bytes; an unknown `task_id` is `Validation`.
+    pub fn add_question(
+        &mut self,
+        body: &str,
+        task_id: Option<i64>,
+        session: Option<&str>,
+    ) -> Result<AgentQuestion> {
+        if body.trim().is_empty() {
+            return Err(Error::Validation("question must not be empty".into()));
+        }
+        if body.len() > Self::QUESTION_MAX {
+            return Err(Error::Validation(format!(
+                "question must be at most {} bytes",
+                Self::QUESTION_MAX
+            )));
+        }
+        if let Some(t) = task_id {
+            self.get_task(t)
+                .map_err(|_| Error::Validation(format!("task {t} not found")))?;
+        }
+        let session = session.map(str::trim).filter(|s| !s.is_empty());
+        self.conn.execute(
+            "INSERT INTO agent_questions (task_id, session, body, created_at) \
+             VALUES (?1, ?2, ?3, datetime('now'))",
+            (task_id, session, body),
+        )?;
+        self.get_question(self.conn.last_insert_rowid())
+    }
+
+    pub fn get_question(&self, id: i64) -> Result<AgentQuestion> {
+        self.conn
+            .query_row(
+                &format!(
+                    "SELECT {} FROM agent_questions WHERE id = ?1",
+                    Self::QUESTION_COLUMNS
+                ),
+                [id],
+                row_to_agent_question,
+            )
+            .optional()?
+            .ok_or_else(|| Error::NotFound(format!("question {id} not found")))
+    }
+
+    /// Questions oldest first, optionally only `open` or `answered`.
+    pub fn list_questions(&self, status: Option<&str>) -> Result<Vec<AgentQuestion>> {
+        if let Some(s) = status
+            && s != "open"
+            && s != "answered"
+        {
+            return Err(Error::Validation(format!(
+                "'{s}' is not one of open|answered"
+            )));
+        }
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {} FROM agent_questions WHERE (?1 IS NULL OR status = ?1) ORDER BY id",
+            Self::QUESTION_COLUMNS
+        ))?;
+        let rows = stmt.query_map([status], row_to_agent_question)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Answers an open question once; a second answer is `Conflict`.
+    pub fn answer_question(&mut self, id: i64, answer: &str) -> Result<AgentQuestion> {
+        if answer.trim().is_empty() {
+            return Err(Error::Validation("answer must not be empty".into()));
+        }
+        if answer.len() > Self::QUESTION_MAX {
+            return Err(Error::Validation(format!(
+                "answer must be at most {} bytes",
+                Self::QUESTION_MAX
+            )));
+        }
+        let q = self.get_question(id)?;
+        if q.status != "open" {
+            return Err(Error::Conflict(format!(
+                "question {id} is already answered"
+            )));
+        }
+        self.conn.execute(
+            "UPDATE agent_questions SET status = 'answered', answer = ?2, \
+             answered_at = datetime('now') WHERE id = ?1 AND status = 'open'",
+            (id, answer),
+        )?;
+        self.get_question(id)
+    }
+
     /// Writes the whole receipt for `r.task_id`, replacing any existing one
     /// (`INSERT OR REPLACE` — a keyed upsert, since a task has at most one
     /// receipt). This is what `core::receipt::generate`'s caller writes with,
@@ -7346,6 +7465,16 @@ impl Store {
             ),
         )?;
         let id = self.conn.last_insert_rowid();
+        // The reply to a keep-warm turn (naru task 2015) is stamped played at
+        // once, so a browser attaching later never speaks a stray word.
+        if role == LiveRole::Naru {
+            self.conn.execute(
+                "UPDATE live_turns SET played_at = datetime('now') WHERE id = ?1 AND \
+                 (SELECT notice FROM live_turns WHERE session_id = ?2 AND role = 'user' \
+                  ORDER BY id DESC LIMIT 1) = 'cache-warm'",
+                (id, session_id),
+            )?;
+        }
         // The archive index (mesa task 1147): a spoken turn is searchable by
         // `mesa live memory search` for as long as the row exists. A pure
         // action turn has no words, so it is not indexed.
@@ -7710,6 +7839,62 @@ impl Store {
         )?;
         let id = self.conn.last_insert_rowid();
         Ok((self.get_live_turn(id)?, true))
+    }
+
+    /// Writes the hourly keep-warm notice (naru task 2015) when it is due:
+    /// the session is `live`, no client holds the speaker claim (the claim is
+    /// derived and reads `NULL` ten seconds after the last refresh, so this
+    /// means nobody is attached), the agent is idle (`working_since` null) and
+    /// the newest turn of any kind — this notice included, which is what
+    /// stops it repeating — is at least `LIVE_WARM_INTERVAL_SECS` old on
+    /// SQLite's clock. Returns the turn, or `None` when nothing was due. The
+    /// turn is stamped played at once: nobody is there to hear it.
+    pub fn add_live_warm_if_due(&mut self, session_id: i64) -> Result<Option<LiveTurn>> {
+        let session = match self
+            .conn
+            .query_row(
+                &format!("SELECT {LIVE_SESSION_COLUMNS} FROM live_sessions WHERE id = ?1"),
+                [session_id],
+                row_to_live_session,
+            )
+            .optional()?
+        {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        if session.status != LiveStatus::Live
+            || session.speaker.is_some()
+            || session.working_since.is_some()
+        {
+            return Ok(None);
+        }
+        let due: bool = self.conn.query_row(
+            "SELECT CAST(COALESCE(MAX(strftime('%s', created_at)), strftime('%s', \
+                    (SELECT started_at FROM live_sessions WHERE id = ?1))) AS INTEGER) \
+                    <= CAST(strftime('%s', 'now') AS INTEGER) - ?2 \
+             FROM live_turns WHERE session_id = ?1",
+            (session_id, live::LIVE_WARM_INTERVAL_SECS),
+            |r| r.get(0),
+        )?;
+        if !due {
+            return Ok(None);
+        }
+        self.conn.execute(
+            "INSERT INTO live_turns (session_id, role, text, notice, agent_id, created_at, played_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'), datetime('now'))",
+            (
+                session_id,
+                // A `user` turn, because `next_user_turn` (what `listen`
+                // returns) hands out only those; a `naru` notice would never
+                // reach the agent and the cache would stay cold.
+                LiveRole::User.as_str(),
+                live::notice_text(LiveNotice::CacheWarm),
+                LiveNotice::CacheWarm.as_str(),
+                session.agent_id.as_deref(),
+            ),
+        )?;
+        let id = self.conn.last_insert_rowid();
+        Ok(Some(self.get_live_turn(id)?))
     }
 
     /// Hands the agent the oldest undelivered user utterance, stamping it
@@ -13459,6 +13644,37 @@ mod tests {
     }
 
     #[test]
+    fn agent_questions_queue_and_answer_once() {
+        let (mut store, _dir) = temp_store();
+        let p = store.create_project("p", None, None, None, None).unwrap();
+        let t = add_task(&mut store, p.id, "task");
+        let q = store
+            .add_question("which way?", Some(t.id), Some("s1"))
+            .unwrap();
+        assert_eq!((q.status.as_str(), q.answer.as_deref()), ("open", None));
+        assert!(matches!(
+            store.add_question("  ", None, None),
+            Err(Error::Validation(_))
+        ));
+        assert!(matches!(
+            store.add_question("x", Some(999), None),
+            Err(Error::Validation(_))
+        ));
+        assert_eq!(store.list_questions(Some("open")).unwrap().len(), 1);
+        let a = store.answer_question(q.id, "left").unwrap();
+        assert_eq!(a.answer.as_deref(), Some("left"));
+        assert!(a.answered_at.is_some());
+        assert!(store.list_questions(Some("open")).unwrap().is_empty());
+        assert!(matches!(
+            store.answer_question(q.id, "right"),
+            Err(Error::Conflict(_))
+        ));
+        assert!(matches!(store.get_question(99), Err(Error::NotFound(_))));
+        store.delete_task(t.id).unwrap();
+        assert_eq!(store.get_question(q.id).unwrap().task_id, None);
+    }
+
+    #[test]
     fn task_notes_validate_and_need_a_task() {
         let (mut store, _dir) = temp_store();
         let p = store.create_project("p", None, None, None, None).unwrap();
@@ -16700,15 +16916,15 @@ mod tests {
         );
         assert_eq!(
             MIGRATIONS.len(),
-            94,
-            "a fresh db should report user_version 94"
+            95,
+            "a fresh db should report user_version 95"
         );
         let (store, _dir) = temp_store();
         let version: i64 = store
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 94);
+        assert_eq!(version, 95);
     }
 
     /// Workflows replace diagrams at migration 83 (mesa task 1607): a db that
@@ -16732,7 +16948,7 @@ mod tests {
         store
             .conn
             .execute_batch(
-                "DROP TABLE custom_themes; DROP TABLE task_notes; ALTER TABLE live_sessions DROP COLUMN ambient_request_seq; ALTER TABLE live_sessions DROP COLUMN ambient_request; ALTER TABLE live_sessions DROP COLUMN host_seen_at; ALTER TABLE live_sessions DROP COLUMN host_ambient; ALTER TABLE live_notebook DROP COLUMN category; ALTER TABLE cc_messages DROP COLUMN cost_micro_usd; ALTER TABLE cc_sessions DROP COLUMN main_agent; ALTER TABLE live_boards DROP COLUMN pinned_at; DROP TABLE workflow_log; DROP TABLE workflow_gates; DROP TABLE workflow_runs; DROP TABLE workflow_edges; \
+                "DROP TABLE agent_questions; DROP TABLE custom_themes; DROP TABLE task_notes; ALTER TABLE live_sessions DROP COLUMN ambient_request_seq; ALTER TABLE live_sessions DROP COLUMN ambient_request; ALTER TABLE live_sessions DROP COLUMN host_seen_at; ALTER TABLE live_sessions DROP COLUMN host_ambient; ALTER TABLE live_notebook DROP COLUMN category; ALTER TABLE cc_messages DROP COLUMN cost_micro_usd; ALTER TABLE cc_sessions DROP COLUMN main_agent; ALTER TABLE live_boards DROP COLUMN pinned_at; DROP TABLE workflow_log; DROP TABLE workflow_gates; DROP TABLE workflow_runs; DROP TABLE workflow_edges; \
                  DROP TABLE workflow_nodes; DROP TABLE workflows; \
                  CREATE TABLE diagrams (id INTEGER PRIMARY KEY, title TEXT); \
                  INSERT INTO diagrams (title) VALUES ('stale'); \
@@ -17653,6 +17869,63 @@ mod tests {
             .unwrap();
         assert!(created, "a new working span allows a fresh notice");
         assert_ne!(fresh.id, first.id);
+    }
+
+    #[test]
+    fn add_live_warm_if_due_writes_one_hourly_turn_only_when_idle_and_unattended() {
+        let (mut store, _dir) = temp_store();
+        let session = store.start_live_session(None).unwrap();
+        let id = session.id;
+        let backdate = |store: &Store, mins: i64| {
+            store
+                .conn
+                .execute_batch(&format!(
+                    "UPDATE live_turns SET created_at = datetime('now', '-{mins} minutes'); \
+                     UPDATE live_sessions SET started_at = datetime('now', '-{mins} minutes')"
+                ))
+                .unwrap();
+        };
+        // Fresh session: nothing.
+        assert!(store.add_live_warm_if_due(id).unwrap().is_none());
+        backdate(&store, 30);
+        assert!(store.add_live_warm_if_due(id).unwrap().is_none());
+        backdate(&store, 61);
+        // Attached: nothing.
+        store.claim_live_speaker(id, "c1").unwrap();
+        assert!(store.add_live_warm_if_due(id).unwrap().is_none());
+        store.release_live_speaker(id, "c1").unwrap();
+        // Working: nothing.
+        store
+            .conn
+            .execute(
+                "UPDATE live_sessions SET working_since = datetime('now') WHERE id = ?1",
+                [id],
+            )
+            .unwrap();
+        assert!(store.add_live_warm_if_due(id).unwrap().is_none());
+        store
+            .conn
+            .execute(
+                "UPDATE live_sessions SET working_since = NULL WHERE id = ?1",
+                [id],
+            )
+            .unwrap();
+        // Due: exactly one, already played; a second call writes nothing.
+        let turn = store.add_live_warm_if_due(id).unwrap().unwrap();
+        assert_eq!(turn.notice, Some(LiveNotice::CacheWarm));
+        assert!(turn.played_at.is_some());
+        assert!(store.add_live_warm_if_due(id).unwrap().is_none());
+        // The agent's `listen` is handed it, and its reply is born played.
+        let heard = store.next_user_turn(id).unwrap().unwrap();
+        assert_eq!(heard.id, turn.id);
+        let reply = store
+            .add_live_turn(id, LiveRole::Naru, "warm", None, None)
+            .unwrap();
+        assert!(reply.played_at.is_some());
+        // Ended: nothing.
+        backdate(&store, 61);
+        store.end_live_session(id).unwrap();
+        assert!(store.add_live_warm_if_due(id).unwrap().is_none());
     }
 
     /// With the agent waiting (`working_since` null) the span is the whole

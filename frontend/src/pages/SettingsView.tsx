@@ -40,6 +40,7 @@ import {
 } from '../api'
 import { ConfirmDelete } from '../components/ConfirmDelete'
 import { AppearanceSection } from '../components/AppearanceSection'
+import { GesturesSection } from '../components/GesturesSection'
 import { WakeWordsSection } from '../components/WakeWordsSection'
 import { VoiceEnrollSection } from '../components/VoiceEnrollSection'
 import { detectNativeHost } from '../nativeHost'
@@ -83,7 +84,7 @@ import {
   overBudget,
 } from '../memoryDraft'
 import {
-  SETTINGS_TABS,
+  visibleSettingsTabs,
   settingsTabHref,
   settingsTabLabel,
   type SettingsTab,
@@ -406,7 +407,7 @@ export function SettingsView({ tab }: { tab: SettingsTab }) {
       </p>
 
       <div className="tabs">
-        {SETTINGS_TABS.map((t) => (
+        {visibleSettingsTabs(detectNativeHost(window as unknown as Record<string, unknown>) !== null).map((t) => (
           <button
             key={t}
             className={t === tab ? 'active' : ''}
@@ -483,6 +484,12 @@ export function SettingsView({ tab }: { tab: SettingsTab }) {
       <div hidden={tab !== 'pricing'}>
         <PricingSection />
       </div>
+      {/* The Mac app's camera: absent in a plain browser (naru task 1972). */}
+      {detectNativeHost(window as unknown as Record<string, unknown>) && (
+        <div hidden={tab !== 'gestures'}>
+          <GesturesSection />
+        </div>
+      )}
       <div hidden={tab !== 'system'}>
         <ServeSection />
         <SystemSection />

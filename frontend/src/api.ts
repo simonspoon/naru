@@ -1237,6 +1237,13 @@ export function claimLiveSpeaker(client: string): Promise<LiveSession> {
   return request('/api/live/speaker', jsonInit('POST', { client }))
 }
 
+/** Releases the voice this client holds (naru task 2013, Detach): 204 whatever
+ * it found; never ends the session. */
+export async function leaveLiveSpeaker(client: string): Promise<void> {
+  const res = await fetch('/api/live/leave', jsonInit('POST', { client }))
+  if (!res.ok) throw await apiErrorFrom(res)
+}
+
 /**
  * Stamps a mesa turn as spoken, the first time. Idempotent and never moved —
  * the `read_at` rule — so a re-render can never make the page say a turn twice.

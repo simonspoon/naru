@@ -98,6 +98,10 @@ Once every agent has reported and the task is verified complete:
   you verified it>`.
 - After the close the watcher stops this session once idle. Start no new work.
 
+## Questions for a person
+
+When the task is blocked on a decision only a person can make, queue it with `naru ask --task <task id> "<question>"` (it returns at once), then continue with what is not blocked, or stop with the task parked. Read the answer later with `naru ask show <id>`.
+
 ## Never leave the task `in_progress`
 
 A cancel or a stall still needs a terminal state — queued (`--status todo`) when a retry

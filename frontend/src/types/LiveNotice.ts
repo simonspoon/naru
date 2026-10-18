@@ -13,4 +13,4 @@
  * agent's `naru run` is over. Null on every turn the agent or the person
  * actually said.
  */
-export type LiveNotice = "permission" | "agent-ended";
+export type LiveNotice = "permission" | "agent-ended" | "question" | "cache-warm";
