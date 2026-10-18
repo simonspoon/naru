@@ -434,6 +434,62 @@ git -C "$TMP/other" diff --quiet -- oseed.txt || fail "cross debris: tracked fil
 rm -f "$TMP/other/opre.txt"
 ok "a bounced run in another project's repo puts back its debris there"
 
+# ---- 7g. a third repo (naru task 2058): committed when the task names it, when a path dependency points at it, and when only the project scan finds it ----
+git -C "$TMP/sibling" init -q 2>/dev/null || { mkdir -p "$TMP/sibling"; git -C "$TMP/sibling" init -q; }
+git -C "$TMP/sibling" config user.email t@t
+git -C "$TMP/sibling" config user.name t
+echo seed > "$TMP/sibling/sseed.txt"
+git -C "$TMP/sibling" add sseed.txt
+git -C "$TMP/sibling" commit -q -m seed
+"$NARU" project create siblingproj --no-git --path "$TMP/sibling" >/dev/null
+echo spre > "$TMP/sibling/spre.txt"
+sib_commit() { # <label> <file>: one new commit in sibling holding exactly <file>, nothing in work/other, pre-dirty file left
+  [ "$(git -C "$TMP/sibling" rev-parse HEAD)" != "$sbefore" ] || fail "$1: nothing committed in sibling"
+  [ "$(git -C "$TMP/sibling" show --name-only --format= HEAD)" = "$2" ] || fail "$1: sibling commit holds $(git -C "$TMP/sibling" show --name-only --format= HEAD)"
+  [ "$(git -C "$TMP/sibling" status --porcelain)" = "?? spre.txt" ] || fail "$1: sibling tree: $(git -C "$TMP/sibling" status --porcelain)"
+  [ "$(git -C "$TMP/work" rev-parse HEAD)" = "$wbefore" ] && [ "$(git -C "$TMP/other" rev-parse HEAD)" = "$obefore" ] || fail "$1: work or other got a commit"
+  [ -z "$(git -C "$TMP/work" status --porcelain)$(git -C "$TMP/other" status --porcelain)" ] || fail "$1: work or other is dirty"
+  "$NARU" task show "$T" | jq -e '.notes | (map(.body) | any(test("^Committed [0-9a-f]+ by the task loop in .*sibling"))) and (map(.body) | any(test("task loop commit \\(.*\\/(work|other)\\)"; "i")) | not)' >/dev/null || fail "$1: notes: $("$NARU" task show "$T" | jq -c .notes)"
+}
+sib_before() { wbefore=$(git -C "$TMP/work" rev-parse HEAD); obefore=$(git -C "$TMP/other" rev-parse HEAD); sbefore=$(git -C "$TMP/sibling" rev-parse HEAD); }
+loop_ok() { [ "$(jq -r .status <<<"$R")" = succeeded ] && [ "$(tstatus "$T")" = done ] && [ "$(step "$R" "Commit")" = ok ] || fail "$1: run $(jq -c '{status,error}' <<<"$R") task $(tstatus "$T")"; }
+reset_stub
+printf 'UI: no' > "$STUB/reply.planner"
+printf 'VERDICT: PASS' > "$STUB/reply.verifier"
+printf 'VERDICT: PASS' > "$STUB/reply.diff-reviewer"
+
+# named in the description
+printf '%s\n' "$TMP/sibling/x.txt" > "$STUB/touch.implementer"
+sib_before
+T=$("$NARU" task create loopproj "Fix a thing in $TMP/sibling/x.txt" | jq -r .id)
+R=$(run_loop "$T")
+loop_ok named
+sib_commit named x.txt
+grep -qxF "$(cd "$TMP/sibling" && pwd -P)" "$HOME"/.naru/loop/"$T"-*/repos.txt || fail "named: sibling missing from repos.txt"
+ok "a repo the task names is committed, an untouched project repo stays silent, a pre-dirty file is left"
+
+# found by the project scan alone
+printf '%s\n' "$TMP/sibling/y.txt" > "$STUB/touch.implementer"
+sib_before
+T=$(mk "Fix a thing nobody named")
+R=$(run_loop "$T")
+loop_ok scan
+sib_commit scan y.txt
+grep -qxF "$(cd "$TMP/sibling" && pwd -P)" "$HOME"/.naru/loop/"$T"-*/repos.txt && fail "scan: sibling should only be scanned, not in repos.txt"
+ok "a change in a repo nothing names is committed by the project scan"
+
+# a path dependency in the task project's Package.swift
+printf '// swift-tools-version:5.9\nlet p = Package(dependencies: [.package(path: "../sibling")])\n' > "$TMP/other/Package.swift"
+printf '%s\n' "$TMP/sibling/z.txt" > "$STUB/touch.implementer"
+sib_before
+T=$(mko "Fix a thing with a path dependency")
+R=$(run_loop "$T")
+loop_ok dep
+grep -qxF "$(cd "$TMP/sibling" && pwd -P)" "$HOME"/.naru/loop/"$T"-*/repos.txt || fail "dep: sibling missing from repos.txt"
+[ "$(git -C "$TMP/sibling" show --name-only --format= HEAD)" = z.txt ] || fail "dep: sibling commit"
+rm -f "$TMP/other/Package.swift" "$TMP/sibling/spre.txt"
+ok "a path dependency of the task's project pulls its repo in"
+
 # ---- 8. a failing vox send is caught: backlog, run still succeeds ----
 reset_stub
 printf 'UI: no' > "$STUB/reply.planner"

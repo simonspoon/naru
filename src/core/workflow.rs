@@ -1984,6 +1984,7 @@ stage_run() { # <name> <agent> <deadline> <brief file> [extra stage args]
 # workflow project's repo first (its baseline files live in $SCRATCH), then the task's own project repo
 # when that is another one (its files live in $SCRATCH/repo-<n>). No file = just the working dir.
 repo_each() { if [ -s "$SCRATCH/repos.txt" ]; then cat "$SCRATCH/repos.txt"; else pwd; fi; }
+repo_all() { repo_each; cat "$SCRATCH/scan.txt" 2>/dev/null; return 0; }
 repo_state() { if [ "$1" = 1 ]; then echo "$SCRATCH"; else echo "$SCRATCH/repo-$1"; fi; }
 # The no-commit rule (naru task 2047): Commit runs only after Close: pass, so no metric may need a commit.
 no_commit_rule() { cat <<'RULE'
@@ -2017,8 +2018,28 @@ add_repo() { # <dir>
 add_repo "$PWD"
 LP=$(naru project show "$(naru task show "$TASK" | jq -r '.project_id')" 2>/dev/null | jq -r '.local_path // empty' 2>/dev/null)
 [ -z "$LP" ] || add_repo "$LP"
+# repos the task names (naru task 2058): absolute and ~/ paths in its description (the nearest existing
+# directory above each, when that is in a repo) and the path dependencies of the project's Package.swift / Cargo.toml
+add_named() { # <path>
+  local d=$1
+  case "$d" in "~/"*) d="$HOME/${d#\~/}" ;; esac
+  while [ ! -d "$d" ] && [ "$d" != / ] && [ -n "$d" ]; do d=$(dirname "$d"); done
+  [ -d "$d" ] && add_repo "$d"
+  return 0
+}
+while IFS= read -r np; do [ -z "$np" ] || add_named "$np"; done < <(grep -oE '(~/|/)[A-Za-z0-9_./+@-]+' "$SCRATCH/task.md" 2>/dev/null)
+if [ -n "$LP" ] && [ -d "$LP" ]; then
+  while IFS= read -r np; do [ -z "$np" ] || add_named "$LP/$np"; done < <({ sed -n 's/.*\.package([^)]*path: *"\([^"]*\)".*/\1/p' "$LP/Package.swift"; sed -n 's/.*path *= *"\([^"]*\)".*/\1/p' "$LP/Cargo.toml"; } 2>/dev/null)
+fi
 [ -s "$SCRATCH/repos.txt" ] || pwd > "$SCRATCH/repos.txt"
-# per repo, baseline.txt: one `path<TAB>hash` line per path dirty before the run (hash `gone` = absent), so Commit can tell the task's own changes from earlier ones
+# scan.txt: every other project's repo, so Commit can pick up a task's changes in a repo nobody named (naru task 2058)
+: > "$SCRATCH/scan.txt"
+while IFS= read -r pp; do
+  [ -d "$pp" ] || continue
+  top=$(git -C "$pp" rev-parse --show-toplevel 2>/dev/null) || continue
+  grep -qxF -- "$top" "$SCRATCH/repos.txt" "$SCRATCH/scan.txt" 2>/dev/null || printf '%s\n' "$top" >> "$SCRATCH/scan.txt"
+done < <(naru project list 2>/dev/null | jq -r '.[].local_path // empty' 2>/dev/null)
+# per repo (repos.txt, then scan.txt), baseline.txt: one `path<TAB>hash` line per path dirty before the run (hash `gone` = absent), so Commit can tell the task's own changes from earlier ones
 n=0
 while IFS= read -r repo; do
   n=$((n+1)); ST=$(repo_state "$n"); mkdir -p "$ST"; : > "$ST/baseline.txt"
@@ -2032,7 +2053,7 @@ while IFS= read -r repo; do
     # a copy of each, so a bounced run can put the path back as it was (naru task 2041)
     if [ -f "$repo/$p" ]; then mkdir -p "$ST/base/$(dirname "$p")"; cp -p -- "$repo/$p" "$ST/base/$p" 2>/dev/null || true; fi
   done < <(git -C "$repo" status --porcelain -z -uall 2>/dev/null)
-done < "$SCRATCH/repos.txt"
+done < <(cat "$SCRATCH/repos.txt" "$SCRATCH/scan.txt")
 { brief_head planner; printf '\n## What to do\n\nWrite a short implementation plan: the files to touch, the steps, and how to verify. Do not edit any file. End with exactly one line, `UI: yes` if the change touches user-facing UI, else `UI: no`.\n'; no_commit_rule; } > "$SCRATCH/plan-brief.md"
 stage_run plan planner "$(dl 900)" "$SCRATCH/plan-brief.md"
 if [ "$(stage_verdict plan)" = COMPLETE ]; then
@@ -2196,7 +2217,7 @@ gate() {
   return $rc
 }
 commit_repo() { # <repo dir> <state dir>: commits in that repo; appends its short sha to $SCRATCH/shas.txt
-  local repo=$1 ST=$2 rec old first
+  local repo=$1 ST=$2 scan=${3:-0} rec old first
   cd "$repo" || return 1
   BL="$ST/baseline.txt"; paths=(); skipped=(); rode=()
   while IFS= read -r -d '' rec; do
@@ -2205,6 +2226,8 @@ commit_repo() { # <repo dir> <state dir>: commits in that repo; appends its shor
       *) add_path "${rec:3}" ;;
     esac
   done < <(git status --porcelain -z -uall)
+  # a scanned repo (naru task 2058) the run did not change is silent: no note, no commit
+  if [ "$scan" = 1 ] && [ "${#paths[@]}" = 0 ]; then return 0; fi
   if [ "${#skipped[@]}" -gt 0 ] || [ "${#rode[@]}" -gt 0 ]; then
     {
       if [ "${#skipped[@]}" -gt 0 ]; then echo "Task loop commit ($repo): these paths were dirty before the run and unchanged by it, so they were left uncommitted:"; printf '%s\n' "${skipped[@]}"; fi
@@ -2243,11 +2266,11 @@ commit_repo() { # <repo dir> <state dir>: commits in that repo; appends its shor
   echo "$SHA" >> "$SCRATCH/shas.txt"
 }
 : > "$SCRATCH/shas.txt"
-failed=0; n=0
+failed=0; n=0; named=$(repo_each | grep -c .)
 while IFS= read -r repo; do
-  n=$((n+1))
-  commit_repo "$repo" "$(repo_state "$n")" || failed=1
-done < <(repo_each)
+  n=$((n+1)); sc=0; [ "$n" -gt "$named" ] && sc=1
+  commit_repo "$repo" "$(repo_state "$n")" "$sc" || failed=1
+done < <(repo_all)
 [ "$failed" = 0 ] || exit 1
 SHAS=$(paste -sd, "$SCRATCH/shas.txt")
 emit commit=${SHAS:-none}
@@ -2285,7 +2308,7 @@ while IFS= read -r repo; do
       *) restore_path "${rec:3}" ;;
     esac
   done < "$ST/status-now.z"
-done < <(repo_each)
+done < <(repo_all)
 { echo "Task loop did not pass; the task is back in backlog for a person. State: $(printf '%s\n' "$IN" | tail -n 1)"; echo "Hand-off files: $SCRATCH"; echo; cat "$SCRATCH/reasons.txt" 2>/dev/null
   if [ "${#restored[@]}" -gt 0 ]; then echo; echo "Restored to their state before the run (copies in $SCRATCH/debris):"; printf '%s\n' "${restored[@]}"; fi
   if [ -f "$SCRATCH/findings.md" ]; then echo; echo "Last review findings:"; cat "$SCRATCH/findings.md"; fi
