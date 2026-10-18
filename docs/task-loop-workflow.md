@@ -333,3 +333,4 @@ on work must not treat `idle` as "done" without reading `last_result`.
    driver (1959) owns that.
 
 The todo-watcher command can be set to `naru workflow run "Task loop" --input {id} --detach` in `~/.naru/config.json` under `commands.todo-watcher` to run tasks through this workflow.
+Loop smoke test passed.
