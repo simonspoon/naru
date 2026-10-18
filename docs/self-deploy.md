@@ -19,3 +19,9 @@ Unhealthy: `naru.prev` is restored (re-signed), the db backup replaces the db (s
 Queue verbs run on the NEW binary, since the installed one may predate `queue`.
 Verdict JSON: `status`, `reason`, `db_backup`, `binary_backup`, `restarted`, `healthy`,
 `queue_resumed`.
+
+## PATH, db target and the Task loop reseed (naru task 2046)
+
+- Unless `--skip-checks`, the script prepends `~/.cargo/bin`, `~/Library/pnpm/bin` and `~/.local/bin` to `PATH` and exits 2 naming `cargo`/`node` if either is still missing, before anything is paused or changed.
+- The db is resolved once, before the backup: `NARU_DEPLOY_DB`/`NARU_DB`/`MESA_DB`, else the `com.naru.serve` plist's `NARU_DB`/`MESA_DB`, else the platform-default db that exists (both holding data aborts). A rollback only overwrites that existing file — a missing target is `rollback_failed`, never a new db.
+- `workflow defaults --task-loop` gets `--project <id>` (the repo's project); first any existing `Task loop` and `Task loop: implement and review` are renamed `… (pre-<ts> backup)` and disabled so the reseed lands. A rollback restores the db backup, undoing the renames.

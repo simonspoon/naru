@@ -6,7 +6,10 @@
 # installs the new one, restarts (stub hook), re-runs workflow defaults, checks
 # health and resumes the queue; an unhealthy new build is rolled back (binary and
 # db byte-equal to before, queue resumed); a drain timeout aborts, resumes and
-# changes nothing; a failed rollback leaves the queue paused.
+# changes nothing; a failed rollback leaves the queue paused; workflow defaults gets
+# --project and the old Task loop (+ child) is renamed "(pre-<ts> backup)" and
+# disabled first; a missing cargo/node exits 2 early; a rollback restores only the
+# db the server uses (never creating a second one) and refuses a missing target.
 set -euo pipefail
 unset $(env | sed -n 's/^\(NARU_[A-Za-z0-9_]*\)=.*/\1/p')
 cd "$(dirname "$0")/.."
@@ -29,7 +32,9 @@ case "\$1 \$2" in
   "queue pause") touch "$TMP/paused" ;;
   "queue resume") rm -f "$TMP/paused" ;;
   "queue idle") [ ! -e "$TMP/busy" ] ;;
-  "workflow defaults") echo defaults >>"$TMP/defaults.log" ;;
+  "workflow defaults") echo "\$*" >>"$TMP/defaults.log" ;;
+  "workflow list"|"workflow update") exec "$SRC" "\$@" ;;
+  "project resolve") echo '{"id":1}' ;;
   "--version "*) echo "naru 9.9.9" ;;
   *) echo new ;;
 esac
@@ -48,11 +53,17 @@ out=$(scripts/self-deploy.sh --dry-run)
 [ "$(shasum "$NARU" | cut -d' ' -f1)" = "$before" ] && [ ! -e "$PREFIX/bin/naru.prev" ] && [ ! -d "$backups" ] || fail "dry-run changed something"
 ok "dry-run prints the plan and changes nothing"
 
+"$SRC" workflow create "Task loop" --project 1 >/dev/null
+"$SRC" workflow create "Task loop: implement and review" --project 1 >/dev/null
 out=$(NARU_DEPLOY_NEW_BIN="$TMP/newbin" scripts/self-deploy.sh --skip-checks 2>/dev/null) || fail "deploy exit"
 [ "$(echo "$out" | jq -r .status)" = swapped ] && [ "$(echo "$out" | jq -r .healthy)" = true ] && [ "$(echo "$out" | jq -r .queue_resumed)" = true ] || fail "verdict: $out"
 [ ! -e "$TMP/paused" ] && [ -s "$TMP/restarts" ] && [ -s "$TMP/defaults.log" ] || fail "queue not resumed / no restart / no defaults re-run"
 [ "$(shasum "$PREFIX/bin/naru.prev" | cut -d' ' -f1)" = "$before" ] || fail "naru.prev differs from the old binary"
 cmp -s "$NARU" "$TMP/newbin" || [ "$("$NARU" 2>&1 | head -1)" = new ] || fail "new binary not installed"
+grep -q -- '--project 1' "$TMP/defaults.log" && grep -q -- '--task-loop' "$TMP/defaults.log" || fail "defaults lacked --project: $(cat "$TMP/defaults.log")"
+wl=$("$SRC" workflow list 1)
+[ "$(echo "$wl" | jq '[.[] | select((.name|test("^Task loop.* \\(pre-[0-9]+-[0-9]+ backup\\)$")) and .enabled==false)] | length')" = 2 ] || fail "old Task loop not parked: $wl"
+ok "workflow defaults got --project; old Task loop and child renamed (pre-<ts> backup) and disabled"
 db=$(echo "$out" | jq -r .db_backup)
 [ -f "$db" ] && [ "$(dirname "$db")" = "$backups" ] || fail "no timestamped backup: $db"
 case "$(basename "$db")" in naru-pre-deploy-*.db) ;; *) fail "backup name" ;; esac
@@ -103,4 +114,54 @@ out=$(NARU_DEPLOY_HEALTH_CMD=false NARU_DEPLOY_RESTART_CMD="[ ! -e '$TMP/restart
 set -e
 [ "$rc" = 1 ] && [ "$(echo "$out" | jq -r .status)" = rollback_failed ] && [ -e "$TMP/paused" ] || fail "rollback_failed expected ($rc): $out"
 ok "failed rollback leaves the queue paused"
+
+# ---- PATH: without cargo/node (and none in the fake HOME) the deploy exits 2 early
+rm -f "$TMP/paused"
+mkdir -p "$TMP/minbin" "$TMP/hp"
+for t in jq dirname mktemp rm date env awk ls uname sed head cat mkdir tail basename; do
+  ln -sf "$(command -v $t)" "$TMP/minbin/$t"
+done
+before=$(shasum "$NARU" | cut -d' ' -f1)
+set +e
+msg=$(env -u MESA_DB HOME="$TMP/hp" PATH="$TMP/minbin" NARU_DEPLOY_NEW_BIN="$TMP/newbin" "$(command -v bash)" scripts/self-deploy.sh 2>&1 >/dev/null); rc=$?
+set -e
+[ "$rc" = 2 ] && echo "$msg" | grep -q "cargo not found" || fail "missing cargo should exit 2 naming it ($rc): $msg"
+[ "$(shasum "$NARU" | cut -d' ' -f1)" = "$before" ] && [ ! -e "$TMP/paused" ] || fail "PATH failure changed something"
+# cargo in ~/.cargo/bin, node in ~/Library/pnpm/bin of the fake HOME -> the PATH check passes
+mkdir -p "$TMP/hp/.cargo/bin" "$TMP/hp/Library/pnpm/bin"
+printf '#!/bin/sh\nexit 1\n' >"$TMP/hp/.cargo/bin/cargo"; cp "$TMP/hp/.cargo/bin/cargo" "$TMP/hp/Library/pnpm/bin/node"
+chmod +x "$TMP/hp/.cargo/bin/cargo" "$TMP/hp/Library/pnpm/bin/node"
+set +e
+msg=$(env -u MESA_DB HOME="$TMP/hp" PATH="$TMP/minbin" NARU_DEPLOY_NEW_BIN="$TMP/newbin" "$(command -v bash)" scripts/self-deploy.sh 2>&1 >/dev/null); rc=$?
+set -e
+echo "$msg" | grep -q "not found on PATH" && fail "PATH not extended from HOME dirs: $msg"
+[ ! -e "$TMP/paused" ] || fail "queue left paused"
+ok "missing cargo exits 2 naming it; ~/.cargo/bin and ~/Library/pnpm/bin are put on PATH"
+
+# ---- rollback restores the db the server uses and never creates a second one -------
+# live db is the legacy mesa.db under the platform data dir; no env names it
+AS="$TMP/h2/Library/Application Support"; mkdir -p "$AS/mesa" "$TMP/h2/.naru"
+LIVE="$AS/mesa/mesa.db"
+MESA_DB="$LIVE" "$SRC" project create live1 --no-git >/dev/null
+cp "$SRC" "$NARU"; rm -f "$TMP/wrote"
+hook="[ -e '$TMP/wrote' ] || { touch '$TMP/wrote'; MESA_DB='$LIVE' '$SRC' project create post-swap --no-git >/dev/null; }"
+set +e
+out=$(env -u MESA_DB -u NARU_DEPLOY_DB HOME="$TMP/h2" NARU_DEPLOY_RESTART_CMD="$hook" NARU_DEPLOY_HEALTH_CMD="$BAD_HEALTH" NARU_DEPLOY_NEW_BIN="$TMP/newbin" scripts/self-deploy.sh --skip-checks 2>/dev/null); rc=$?
+set -e
+[ "$rc" = 1 ] && [ "$(echo "$out" | jq -r .status)" = rolled_back ] || fail "stub rollback verdict ($rc): $out"
+second=$(find "$TMP/h2" -name '*.db*' ! -path "$TMP/h2/.naru/backups/*" ! -path "$AS/mesa/*" | wc -l | tr -d ' ')
+[ "$second" = 0 ] && [ ! -e "$AS/naru/naru.db" ] || fail "second_db_files_created=$second"
+[ "$(MESA_DB="$LIVE" "$SRC" project list | jq length)" = 1 ] || fail "live db not restored"
+ok "rollback restored the live mesa.db; second_db_files_created=0"
+
+# resolved target vanishes during the deploy -> rollback_failed, nothing created in its place
+rm -f "$TMP/wrote"
+# (a directory in its place, so no CLI call between here and the restore can recreate a db file)
+hook="rm -f '$LIVE' '$LIVE-wal' '$LIVE-shm'; mkdir -p '$LIVE'"
+set +e
+out=$(env -u MESA_DB -u NARU_DEPLOY_DB HOME="$TMP/h2" NARU_DEPLOY_RESTART_CMD="$hook" NARU_DEPLOY_HEALTH_CMD="$BAD_HEALTH" NARU_DEPLOY_NEW_BIN="$TMP/newbin" scripts/self-deploy.sh --skip-checks 2>/dev/null); rc=$?
+set -e
+[ "$rc" = 1 ] && [ "$(echo "$out" | jq -r .status)" = rollback_failed ] && echo "$out" | jq -r .reason | grep -q "db restore failed" || fail "missing-target verdict ($rc): $out"
+[ -d "$LIVE" ] && [ ! -e "$AS/naru/naru.db" ] && [ -z "$(ls -A "$LIVE")" ] || fail "restore created a db"
+ok "missing restore target -> rollback_failed, no file created"
 echo "self-deploy-check: all passed"

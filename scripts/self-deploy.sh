@@ -28,6 +28,12 @@
 #      (replaces the /api/version check; gets NARU_DEPLOY_EXPECT = the version that should be serving), NARU_DEPLOY_LIVE_CHECK=0 (skip the
 #      live-respawn check), NARU_DEPLOY_DRAIN_TIMEOUT (600), NARU_DEPLOY_HEALTH_TIMEOUT
 #      (60), NARU_DEPLOY_POLL (seconds between polls, 3).
+# PATH: a launchd or live-agent shell has neither cargo nor node, so (unless
+#      --skip-checks) ~/.cargo/bin, ~/Library/pnpm/bin and ~/.local/bin are prepended
+#      when present, and a missing cargo/node exits 2 before anything is changed.
+# Db: the one the server uses — NARU_DEPLOY_DB/NARU_DB/MESA_DB, else the
+#      com.naru.serve plist's NARU_DB/MESA_DB, else whichever platform-default db
+#      exists (both holding data = abort). The restore only overwrites that file.
 # Prints one JSON verdict: swapped | aborted | rolled_back | rollback_failed | plan.
 # Exit 0 swapped/plan, 1 otherwise.
 set -uo pipefail
@@ -73,6 +79,16 @@ if [ "$dry" -eq 1 ]; then
   exit 0
 fi
 
+if [ "$skip" -eq 0 ]; then
+  for d in "$HOME/.cargo/bin" "$HOME/Library/pnpm/bin" "$HOME/.local/bin"; do
+    [ -d "$d" ] && PATH="$d:$PATH"
+  done
+  export PATH
+  for t in cargo node; do
+    command -v "$t" >/dev/null || { echo "self-deploy: $t not found on PATH (looked in ~/.cargo/bin, ~/Library/pnpm/bin, ~/.local/bin); install it or fix PATH" >&2; exit 2; }
+  done
+fi
+
 NARU="$INSTALLED"
 [ -x "$NARU" ] || NARU="$(command -v naru || true)"
 [ -x "$NARU" ] || { echo "self-deploy: no installed naru found" >&2; exit 2; }
@@ -106,6 +122,28 @@ done
 log "queue paused and idle"
 
 # ---- 2b db backup ----------------------------------------------------------------
+# Resolve the db the server really uses, once, before anything is backed up or swapped.
+plist_env() { # plist_env <key>: the string under that EnvironmentVariables key
+  local f="${NARU_LAUNCHD_DIR:-$HOME/Library/LaunchAgents}/com.naru.serve.plist"
+  [ -f "$f" ] && awk -v k="$1" '$0 ~ "<key>"k"</key>" {getline; gsub(/.*<string>|<\/string>.*/, ""); print; exit}' "$f"
+}
+holds_data() { [ -s "$1" ] && command -v sqlite3 >/dev/null && [ "$(sqlite3 -readonly "$1" 'select (select count(*) from projects)+(select count(*) from tasks)' 2>/dev/null || echo 0)" != 0 ]; }
+db="${NARU_DEPLOY_DB:-${NARU_DB:-${MESA_DB:-}}}"
+[ -n "$db" ] || db="$(plist_env NARU_DB)"
+[ -n "$db" ] || db="$(plist_env MESA_DB)"
+if [ -z "$db" ]; then
+  d="$HOME/Library/Application Support"; ndb="$d/naru/naru.db"; odb="$d/mesa/mesa.db"
+  if [ -e "$ndb" ] && [ -e "$odb" ]; then
+    if holds_data "$ndb" && holds_data "$odb"; then abort "both $ndb and $odb hold data; set NARU_DEPLOY_DB to the one the server uses"
+    elif holds_data "$ndb"; then db="$ndb"
+    elif holds_data "$odb"; then db="$odb"
+    else abort "both $ndb and $odb exist and the live one cannot be told; set NARU_DEPLOY_DB"; fi
+  elif [ -e "$odb" ]; then db="$odb"
+  else db="$ndb"; fi
+fi
+[ -e "$db" ] || abort "resolved db $db does not exist; set NARU_DEPLOY_DB"
+export NARU_DB="$db"
+log "db: $db"
 mkdir -p "$BACKUP_DIR" || abort "cannot create $BACKUP_DIR"
 backup_db="$BACKUP_DIR/naru-pre-deploy-$(date +%Y%m%d-%H%M%S).db"
 "$NARU" backup "$backup_db" >>"$LOG" 2>&1 || { backup_db=""; abort "db backup failed"; }
@@ -128,10 +166,6 @@ ln -sf naru "$BIN_DIR/mesa"
 log "swapped $INSTALLED (previous kept as naru.prev)"
 
 # ---- 4 restart + health, rollback on failure ----------------------------------------
-db="${NARU_DEPLOY_DB:-${NARU_DB:-${MESA_DB:-}}}"
-if [ -z "$db" ]; then
-  d="$HOME/Library/Application Support"; db="$d/naru/naru.db"; [ -e "$db" ] || db="$d/mesa/mesa.db"
-fi
 live_before="$("$NARU" live status 2>/dev/null | jq -r 'select(.status=="live") | .agent_id // "none"')"
 
 restart() {
@@ -165,9 +199,26 @@ healthy() {
   done
 }
 
+# Park the old Task loop (and its child) under a backup name, then reseed: defaults
+# skips an existing name, so without the rename a changed graph never lands. A rollback
+# restores the db backup, which undoes the renames.
+seed_task_loop() {
+  local pid ts wf id name
+  pid="$("$new_bin" project resolve "$repo" 2>/dev/null | jq -r '.id // empty')"
+  [ -n "$pid" ] || pid="$("$new_bin" project resolve naru 2>/dev/null | jq -r '.id // empty')"
+  [ -n "$pid" ] || { echo "self-deploy: cannot resolve the naru project id" >>"$LOG"; return 1; }
+  ts="$(date +%Y%m%d-%H%M%S)"
+  for name in "Task loop" "Task loop: implement and review"; do
+    id="$("$new_bin" workflow list "$pid" 2>>"$LOG" | jq -r --arg n "$name" '.[] | select(.name==$n) | .id' | head -n 1)"
+    [ -n "$id" ] || continue
+    "$new_bin" workflow update "$id" --name "$name (pre-$ts backup)" --enabled false >>"$LOG" 2>&1 || return 1
+  done
+  "$new_bin" workflow defaults --project "$pid" --task-loop >>"$LOG" 2>&1
+}
+
 fail_reason=""
 if ! restart; then fail_reason="server restart failed"
-elif ! "$new_bin" workflow defaults --task-loop >>"$LOG" 2>&1; then fail_reason="workflow defaults --task-loop failed"
+elif ! seed_task_loop; then fail_reason="workflow defaults --task-loop failed"
 else
   chk=1; { [ -z "$live_before" ] || [ "${NARU_DEPLOY_LIVE_CHECK:-1}" = 0 ]; } && chk=0
   healthy "$INSTALLED" "$chk" || fail_reason="health check failed (version, live respawn)"
@@ -187,10 +238,16 @@ rtmp="$(mktemp "$BIN_DIR/.naru.XXXXXX")" && cp -p "$BIN_DIR/naru.prev" "$rtmp" \
   && { command -v codesign >/dev/null 2>&1 && codesign --force --sign - "$rtmp" >/dev/null 2>&1; true; } \
   && mv -f "$rtmp" "$INSTALLED" || rb="binary restore failed"
 if [ -z "$rb" ] && [ -f "$backup_db" ]; then
+  # Only ever overwrite the db the server uses: it must already exist, so a restore can
+  # never create a second db beside it.
   # Restore via temp file + mv (the running server keeps the old inode until the
   # restart below), then drop the stale WAL/SHM so the restored file is read alone.
   dtmp="$db.restore.$$"
-  cp "$backup_db" "$dtmp" && mv -f "$dtmp" "$db" && rm -f "$db-wal" "$db-shm" || rb="db restore failed"
+  if [ -f "$db" ] && cp "$backup_db" "$dtmp"; then
+    mv -f "$dtmp" "$db" && rm -f "$db-wal" "$db-shm" || rb="db restore failed"
+  else
+    rm -f "$dtmp"; rb="db restore failed"
+  fi
 fi
 if [ -z "$rb" ]; then
   restart || rb="restart after rollback failed"
