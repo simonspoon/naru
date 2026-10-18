@@ -1994,6 +1994,14 @@ no_commit_rule() { cat <<'RULE'
 The loop commits only AFTER review and verify pass: its Commit step runs afterwards, once per touched repo. So every acceptance metric and check must be judged on the uncommitted working-tree state of each repo the task touches (listed in the loop's repos.txt): `git diff`, `git diff --stat`, `git status --porcelain`. Never use `HEAD~1`, `HEAD^`, `git log` or "the commit" as evidence. "Not committed" is never a failure.
 RULE
 }
+# The multi-repo split rule (naru task 2066): work in another project becomes that project's own task, never a failure.
+split_rule() { cat <<'RULE'
+
+## Work in more than one repo (read this)
+
+If the briefing needs changes in more than one repo or project, do not do or plan the other repos' part in this task. For each other owning project, create its own task with `naru task create <project> --description-file <file>` (a self-contained description), then block this task on it with `naru task block <this task id> --by <new task id>`. Keep only this project's part in this task, and say which tasks you created. Never conclude that this task fails because it is multi-repo. If an edit in another repo still happens, leave it as it is: the loop's Commit step commits it and files a note.
+RULE
+}
 stage_verdict() { jq -r '.verdict // "INCONCLUSIVE"' "$SCRATCH/$1.json" 2>/dev/null || echo INCONCLUSIVE; }
 note_reason() { jq -r --arg s "$1" '"\($s): \(.verdict) \(.reason // "")"' "$SCRATCH/$1.json" >> "$SCRATCH/reasons.txt" 2>/dev/null; return 0; }
 "##;
@@ -2054,7 +2062,7 @@ while IFS= read -r repo; do
     if [ -f "$repo/$p" ]; then mkdir -p "$ST/base/$(dirname "$p")"; cp -p -- "$repo/$p" "$ST/base/$p" 2>/dev/null || true; fi
   done < <(git -C "$repo" status --porcelain -z -uall 2>/dev/null)
 done < <(cat "$SCRATCH/repos.txt" "$SCRATCH/scan.txt")
-{ brief_head planner; printf '\n## What to do\n\nWrite a short implementation plan: the files to touch, the steps, and how to verify. Do not edit any file. End with exactly one line, `UI: yes` if the change touches user-facing UI, else `UI: no`.\n'; no_commit_rule; } > "$SCRATCH/plan-brief.md"
+{ brief_head planner; printf '\n## What to do\n\nWrite a short implementation plan: the files to touch, the steps, and how to verify. Do not edit any file. End with exactly one line, `UI: yes` if the change touches user-facing UI, else `UI: no`.\n'; no_commit_rule; split_rule; } > "$SCRATCH/plan-brief.md"
 stage_run plan planner "$(dl 900)" "$SCRATCH/plan-brief.md"
 if [ "$(stage_verdict plan)" = COMPLETE ]; then
   jq -r '.report' "$SCRATCH/plan.json" > "$SCRATCH/plan.md"
@@ -2083,6 +2091,7 @@ const LOOP_IMPLEMENT: &str = r##"N=@N@
   if [ -f "$SCRATCH/findings.md" ]; then printf '\n## Findings from the last review and verify: fix these\n\n'; cat "$SCRATCH/findings.md"; fi
   printf '\n## What to do\n\nImplement the work in the working tree and run the fast checks. Do not commit. End with a one-paragraph summary.\n'
   no_commit_rule
+  split_rule
 } > "$SCRATCH/impl-$N-brief.md"
 stage_run "impl$N" implementer "$(dl 2400)" "$SCRATCH/impl-$N-brief.md"
 if [ "$(stage_verdict "impl$N")" = COMPLETE ]; then

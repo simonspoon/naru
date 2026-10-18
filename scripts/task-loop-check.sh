@@ -173,6 +173,10 @@ R=$(run_loop "$T")
 [ "$(turns ux-designer)" = "" ] && [ "$(turns implementer)" = 1 ] && [ "$(turns verifier)" = 1 ] || fail "pass: turn counts"
 [ ! -e "$STUB/vox.log" ] || fail "pass: notify was called"
 grep -q -- "Fix the foo bug" "$STUB/msgs.planner" || fail "pass: the planner brief lacks the task"
+# the multi-repo split rule (naru task 2066) reaches the planner and implementer briefs
+for ag in planner implementer; do
+  grep -qF "naru task create <project>" "$STUB/msgs.$ag" && grep -qF "naru task block <this task id> --by" "$STUB/msgs.$ag" && grep -qF "Never conclude that this task fails because it is multi-repo" "$STUB/msgs.$ag" || fail "pass: the $ag brief lacks the multi-repo split rule"
+done
 ls "$HOME"/.naru/loop/"$T"-*/plan.md >/dev/null || fail "pass: no scratch hand-off"
 [ "$(step "$R" "Commit")" = ok ] || fail "pass: Commit was $(step "$R" "Commit")"
 git -C "$TMP/work" log -1 --format=%s | grep -q "task $T" || fail "pass: commit subject: $(git -C "$TMP/work" log -1 --format=%s)"
@@ -464,6 +468,8 @@ sib_before
 T=$("$NARU" task create loopproj "Fix a thing in $TMP/sibling/x.txt" | jq -r .id)
 R=$(run_loop "$T")
 loop_ok named
+# the safety net (naru task 2066): a cross-repo edit with no split is committed and noted, never a failed task
+[ "$(tstatus "$T")" != backlog ] || fail "named: a cross-repo edit failed the task"
 sib_commit named x.txt
 grep -qxF "$(cd "$TMP/sibling" && pwd -P)" "$HOME"/.naru/loop/"$T"-*/repos.txt || fail "named: sibling missing from repos.txt"
 ok "a repo the task names is committed, an untouched project repo stays silent, a pre-dirty file is left"
