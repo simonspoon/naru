@@ -7128,14 +7128,26 @@ fn run_live(cmd: LiveCmd) -> Result<()> {
         },
         LiveCmd::Listen { wait, lease, quiet } => {
             let session = current_live_session(&store)?;
-            if let Some(lease) = lease {
-                store.check_live_lease(session.id, lease)?;
-            }
+            // Naru task 2072: a lease-carrying listen registers itself as the
+            // newest listener; every older one is superseded and delivers
+            // nothing. A listen with no lease neither supersedes nor is.
+            let listen_gen = match lease {
+                Some(lease) => Some(store.claim_listen(session.id, lease)?),
+                None => None,
+            };
+            let superseded = || {
+                Error::Conflict(
+                    "superseded by a newer listen for this lease; delivered nothing".into(),
+                )
+            };
             wait_out_live_rest(&mut store, session.id)?;
-            if let Some(lease) = lease {
+            if let (Some(lease), Some(g)) = (lease, listen_gen) {
                 // Re-checked after the rest: a lease may have moved while the
                 // dream ran, and a stale successor must not take a turn.
                 store.check_live_lease(session.id, lease)?;
+                if !store.listen_is_current(session.id, g)? {
+                    return Err(superseded());
+                }
                 // The successor's first lease-carrying listen is what stops the
                 // outgoing agent (mesa task 1150): an agent must not stop
                 // itself, and by now the successor is provably listening.
@@ -7162,20 +7174,23 @@ fn run_live(cmd: LiveCmd) -> Result<()> {
                 // on entry: a listen the outgoing agent left waiting across its
                 // handoff must end in `conflict`, not take the successor's
                 // next result or turn.
-                if let Some(lease) = lease {
+                if let (Some(lease), Some(g)) = (lease, listen_gen) {
                     store.check_live_lease(session.id, lease)?;
+                    if !store.listen_is_current(session.id, g)? {
+                        return Err(superseded());
+                    }
                 }
                 // A delegate's result goes first (mesa task 1359): it is work
                 // already done that the person is waiting to hear, and it is
                 // one-shot the same way a turn is.
-                if let Some(result) = store.next_live_result(session.id)? {
+                if let Some(result) = store.next_live_result_gen(session.id, listen_gen)? {
                     print_live_result(&result, quiet);
                     return Ok(());
                 }
                 // `next_user_turn` stamps `delivered_at` inside one statement,
                 // so two listeners can never be handed the same utterance.
                 // There is deliberately no second guard here.
-                if let Some(turn) = store.next_user_turn(session.id)? {
+                if let Some(turn) = store.next_user_turn_gen(session.id, listen_gen)? {
                     print_live_turn(&turn, quiet);
                     return Ok(());
                 }
@@ -7189,6 +7204,11 @@ fn run_live(cmd: LiveCmd) -> Result<()> {
                     break;
                 }
                 std::thread::sleep(LISTEN_POLL.min(left));
+            }
+            if let Some(g) = listen_gen
+                && !store.listen_is_current(session.id, g)?
+            {
+                return Err(superseded());
             }
             print_json(&serde_json::Value::Null);
         }

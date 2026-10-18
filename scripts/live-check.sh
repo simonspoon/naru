@@ -5082,5 +5082,29 @@ if command -v sqlite3 >/dev/null; then
   ok "keep-warm: an idle unattended session gets one cache-warm turn, handed to listen once"
 fi
 
+# One listener per lease (naru task 2072): a second lease-carrying listen
+# supersedes the first, which delivers nothing; the newest gets the result.
+SUP_DB="$TMP/supersede.db"
+SUP_OUT="$TMP/supersede"
+(
+  export MESA_DB="$SUP_DB"
+  "$MESA" live start --no-agent >/dev/null || exit 1
+  "$MESA" live listen --lease 1 --wait 20 >"$SUP_OUT.a.out" 2>"$SUP_OUT.a.err" &
+  A_PID=$!
+  sleep 1
+  "$MESA" live listen --lease 1 --wait 20 >"$SUP_OUT.b.out" 2>"$SUP_OUT.b.err" &
+  B_PID=$!
+  sleep 1
+  "$MESA" live result "supersede-check" >/dev/null
+  A_RC=0; wait "$A_PID" || A_RC=$?
+  B_RC=0; wait "$B_PID" || B_RC=$?
+  echo "$A_RC $B_RC" >"$SUP_OUT.rc"
+  "$MESA" live stop >/dev/null
+)
+[ "$(cat "$SUP_OUT.rc")" = "1 0" ] || fail "supersede: exit codes (A B): $(cat "$SUP_OUT.rc")"
+[ ! -s "$SUP_OUT.a.out" ] || fail "supersede: the stale listener printed: $(cat "$SUP_OUT.a.out")"
+grep -q 'superseded' "$SUP_OUT.a.err" || fail "supersede: stale listener message: $(cat "$SUP_OUT.a.err")"
+grep -q 'supersede-check' "$SUP_OUT.b.out" || fail "supersede: newest listener got nothing: $(cat "$SUP_OUT.b.out")"
+ok "supersede: a second leased listen ends the first with a conflict; only the newest gets the result"
 
 echo "all $CHECKS checks passed"

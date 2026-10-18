@@ -122,6 +122,13 @@ with `listen` exactly as below:
    once, so that turn would be lost. The rule the agent follows needs no
    bookkeeping: if the last thing it did with `listen` was start one and its
    output has not come back, one is already waiting.
+   Naru enforces it too (naru task 2072): each lease-carrying `listen` bumps
+   the session's `listen_gen` on entry, and the older one is *superseded* —
+   it ends with a `conflict` error ("superseded by a newer listen for this
+   lease", empty stdout, exit 1) at its next poll, and the delivery
+   statements for turns and results require the caller's generation to still
+   be the newest, so a stale listener can never take one. A listen with no
+   `--lease` neither supersedes nor is superseded.
 2. It does the work with the ordinary Naru CLI and its own tools.
 3. `mesa live look` — optionally, it photographs the person's browser window
    and opens the PNG, for the questions no report answers: what actually

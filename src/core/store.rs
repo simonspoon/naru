@@ -1508,6 +1508,10 @@ const MIGRATIONS: &[&str] = &[
         created_at  TEXT NOT NULL DEFAULT (datetime('now'))
      );
      CREATE UNIQUE INDEX idx_workflow_revisions_rev ON workflow_revisions(workflow_id, rev);",
+    // Naru task 2072: a counter bumped by every lease-carrying `live listen`;
+    // only the listener holding the newest value may be handed a turn or a
+    // delegate result. Not in LIVE_SESSION_COLUMNS: it is never serialized.
+    "ALTER TABLE live_sessions ADD COLUMN listen_gen INTEGER NOT NULL DEFAULT 0;",
 ];
 
 /// Selects full task rows including the derived `blocked` flag.
@@ -7587,6 +7591,38 @@ impl Store {
         Ok(())
     }
 
+    /// Registers a new lease-carrying `listen` (naru task 2072): bumps the
+    /// session's listen generation and returns it. Every older listener of
+    /// the session now holds a stale generation and is superseded. Refuses a
+    /// stale lease like [`Store::check_live_lease`], in the same statement.
+    pub fn claim_listen(&self, id: i64, lease: i64) -> Result<i64> {
+        let gen_ = self
+            .conn
+            .query_row(
+                "UPDATE live_sessions SET listen_gen = listen_gen + 1 \
+                 WHERE id = ?1 AND lease = ?2 RETURNING listen_gen",
+                (id, lease),
+                |r| r.get(0),
+            )
+            .optional()?;
+        match gen_ {
+            Some(g) => Ok(g),
+            None => {
+                self.check_live_lease(id, lease)?;
+                Err(Error::Conflict(format!("live session {id} lease {lease}")))
+            }
+        }
+    }
+
+    /// Whether `gen_` is still the newest listen generation of the session.
+    pub fn listen_is_current(&self, id: i64, gen_: i64) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT listen_gen = ?2 FROM live_sessions WHERE id = ?1",
+            (id, gen_),
+            |r| r.get(0),
+        )?)
+    }
+
     /// Whether the session is resting (mesa task 1155), and if so the dream
     /// agent's receipt and how long it has rested — seconds on **SQLite's**
     /// clock, the one `resting_since` was stamped by, so a `listen` killed
@@ -8482,6 +8518,19 @@ impl Store {
     /// free. The clear is guarded on the column, so the twice-a-second poll of
     /// a quiet conversation is a no-op rather than a write.
     pub fn next_user_turn(&mut self, session_id: i64) -> Result<Option<LiveTurn>> {
+        self.next_user_turn_gen(session_id, None)
+    }
+
+    /// [`Store::next_user_turn`] for a listener holding listen generation
+    /// `gen_` (naru task 2072): the same statement also requires that
+    /// generation to still be the session's newest, so a superseded listener
+    /// that passed its poll check just before a newer one arrived is handed
+    /// nothing. `None` is the unguarded take.
+    pub fn next_user_turn_gen(
+        &mut self,
+        session_id: i64,
+        gen_: Option<i64>,
+    ) -> Result<Option<LiveTurn>> {
         let turn = self
             .conn
             .query_row(
@@ -8489,10 +8538,11 @@ impl Store {
                     "UPDATE live_turns SET delivered_at = datetime('now') \
                      WHERE id = (SELECT id FROM live_turns \
                                  WHERE session_id = ?1 AND role = ?2 AND delivered_at IS NULL \
+                                 AND (?3 IS NULL OR ?3 = (SELECT listen_gen FROM live_sessions WHERE id = ?1)) \
                                  ORDER BY id LIMIT 1) \
                      RETURNING {LIVE_TURN_COLUMNS}"
                 ),
-                (session_id, LiveRole::User.as_str()),
+                (session_id, LiveRole::User.as_str(), gen_),
                 row_to_live_turn,
             )
             .optional()?;
@@ -8668,6 +8718,16 @@ impl Store {
     /// *clears* the column — `listen` asks for a user turn straight after an
     /// empty answer here, and that call owns the close.
     pub fn next_live_result(&mut self, session_id: i64) -> Result<Option<LiveResult>> {
+        self.next_live_result_gen(session_id, None)
+    }
+
+    /// [`Store::next_live_result`] guarded by a listen generation, as
+    /// [`Store::next_user_turn_gen`] is.
+    pub fn next_live_result_gen(
+        &mut self,
+        session_id: i64,
+        gen_: Option<i64>,
+    ) -> Result<Option<LiveResult>> {
         let result = self
             .conn
             .query_row(
@@ -8675,10 +8735,11 @@ impl Store {
                     "UPDATE live_results SET delivered_at = datetime('now') \
                      WHERE id = (SELECT id FROM live_results \
                                  WHERE session_id = ?1 AND delivered_at IS NULL \
+                                 AND (?2 IS NULL OR ?2 = (SELECT listen_gen FROM live_sessions WHERE id = ?1)) \
                                  ORDER BY id LIMIT 1) \
                      RETURNING {LIVE_RESULT_COLUMNS}"
                 ),
-                [session_id],
+                (session_id, gen_),
                 row_to_live_result,
             )
             .optional()?;
@@ -17421,6 +17482,55 @@ mod tests {
         );
     }
 
+    /// Naru task 2072: a second `claim_listen` on a lease supersedes the first;
+    /// only the newest generation can be handed a turn or a result.
+    #[test]
+    fn newest_listen_generation_alone_receives_deliveries() {
+        let (mut store, _dir) = temp_store();
+        let session = store.start_live_session(None).unwrap();
+        let lease = store.get_live_session(session.id).unwrap().lease;
+        let old = store.claim_listen(session.id, lease).unwrap();
+        let new = store.claim_listen(session.id, lease).unwrap();
+        assert!(new > old);
+        assert!(!store.listen_is_current(session.id, old).unwrap());
+        assert!(store.listen_is_current(session.id, new).unwrap());
+        assert!(store.claim_listen(session.id, lease + 1).is_err());
+        store
+            .add_live_turn(session.id, LiveRole::User, "hi", None, None)
+            .unwrap();
+        store.add_live_result("done").unwrap();
+        assert!(
+            store
+                .next_user_turn_gen(session.id, Some(old))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .next_live_result_gen(session.id, Some(old))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .next_user_turn_gen(session.id, Some(new))
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            store
+                .next_user_turn_gen(session.id, Some(new))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .next_live_result_gen(session.id, Some(new))
+                .unwrap()
+                .is_some()
+        );
+    }
+
     /// The barge-in claim takes every waiting utterance at once, in order,
     /// leaves nothing for `listen`, and never clears `working_since`.
     #[test]
@@ -17669,15 +17779,15 @@ mod tests {
         );
         assert_eq!(
             MIGRATIONS.len(),
-            97,
-            "a fresh db should report user_version 97"
+            98,
+            "a fresh db should report user_version 98"
         );
         let (store, _dir) = temp_store();
         let version: i64 = store
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 97);
+        assert_eq!(version, 98);
     }
 
     /// Workflows replace diagrams at migration 83 (mesa task 1607): a db that
@@ -17701,7 +17811,7 @@ mod tests {
         store
             .conn
             .execute_batch(
-                "DROP TABLE agent_questions; DROP TABLE custom_themes; DROP TABLE task_notes; ALTER TABLE live_sessions DROP COLUMN ambient_request_seq; ALTER TABLE live_sessions DROP COLUMN ambient_request; ALTER TABLE live_sessions DROP COLUMN host_seen_at; ALTER TABLE live_sessions DROP COLUMN host_ambient; ALTER TABLE live_notebook DROP COLUMN category; ALTER TABLE cc_messages DROP COLUMN cost_micro_usd; ALTER TABLE cc_sessions DROP COLUMN main_agent; ALTER TABLE live_boards DROP COLUMN pinned_at; DROP TABLE workflow_revisions; DROP TABLE workflow_log; DROP TABLE workflow_gates; DROP TABLE workflow_runs; DROP TABLE workflow_edges; \
+                "ALTER TABLE live_sessions DROP COLUMN listen_gen; DROP TABLE agent_questions; DROP TABLE custom_themes; DROP TABLE task_notes; ALTER TABLE live_sessions DROP COLUMN ambient_request_seq; ALTER TABLE live_sessions DROP COLUMN ambient_request; ALTER TABLE live_sessions DROP COLUMN host_seen_at; ALTER TABLE live_sessions DROP COLUMN host_ambient; ALTER TABLE live_notebook DROP COLUMN category; ALTER TABLE cc_messages DROP COLUMN cost_micro_usd; ALTER TABLE cc_sessions DROP COLUMN main_agent; ALTER TABLE live_boards DROP COLUMN pinned_at; DROP TABLE workflow_revisions; DROP TABLE workflow_log; DROP TABLE workflow_gates; DROP TABLE workflow_runs; DROP TABLE workflow_edges; \
                  DROP TABLE workflow_nodes; DROP TABLE workflows; \
                  CREATE TABLE diagrams (id INTEGER PRIMARY KEY, title TEXT); \
                  INSERT INTO diagrams (title) VALUES ('stale'); \
