@@ -350,10 +350,22 @@ T=$(mk "Fix unbuildable")
 R=$(NARU_LOOP_COMMIT_CHECK='[ ! -e broken.txt ]' run_loop "$T")
 [ "$(jq -r .status <<<"$R")" = succeeded ] || fail "gate fail: run $(jq -c '{status,error}' <<<"$R")"
 "$NARU" task show "$T" | jq -e '.notes | map(.body) | any(test("does not build")) and (any(test("^Committed ")) | not)' >/dev/null || fail "gate fail: notes: $("$NARU" task show "$T" | jq -c .notes)"
+[ "$(tstatus "$T")" = backlog ] || fail "gate fail: task is $(tstatus "$T"), not backlog"
 grep -q -- "does not build" "$STUB/vox.log" || fail "gate fail: no notify: $(cat "$STUB/vox.log" 2>/dev/null)"
 [ "$(git -C "$TMP/work" status --porcelain)" = "?? stray2.txt" ] || fail "gate fail: stray file was swept in: $(git -C "$TMP/work" status --porcelain)"
 rm -f "$TMP/work/stray2.txt"
-ok "an unfixable unbuildable commit is noted and notified, and never reported as committed"
+ok "an unfixable unbuildable commit is noted, notified, bounced to backlog and never reported as committed"
+# a missing build tool (exit 127, the "cargo: command not found" case) bounces the same way
+reset_stub
+printf 'UI: no' > "$STUB/reply.planner"
+printf 'VERDICT: PASS' > "$STUB/reply.verifier"
+printf 'VERDICT: PASS' > "$STUB/reply.diff-reviewer"
+printf 'missing.txt\n' > "$STUB/touch.implementer"
+T=$(mk "Fix no toolchain")
+R=$(NARU_LOOP_COMMIT_CHECK='nonexistent-cmd-xyz' run_loop "$T")
+[ "$(tstatus "$T")" = backlog ] || fail "gate 127: task is $(tstatus "$T"), not backlog"
+"$NARU" task show "$T" | jq -e '.notes | map(.body) | any(test("does not build")) and (any(test("^Committed ")) | not)' >/dev/null || fail "gate 127: notes"
+ok "a missing build tool bounces the task to backlog too"
 
 # ---- 7e. a bounced run restores its debris; a pre-dirty file goes back as it was ----
 reset_stub

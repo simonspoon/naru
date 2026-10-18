@@ -2248,8 +2248,9 @@ commit_repo() { # <repo dir> <state dir>: commits in that repo; appends its shor
   NAME=$(naru task show "$TASK" | jq -r '.name')
   if ! git add -A -- "${paths[@]}" || ! git commit -q -m "task $TASK: $NAME" -m "Naru task $TASK (task loop)" -- "${paths[@]}" > "$SCRATCH/commit.out" 2>&1; then
     git reset -q -- "${paths[@]}" 2>/dev/null
-    naru task note "$TASK" "The task loop could not commit the change in $repo: $(head -c 1500 "$SCRATCH/commit.out")" > /dev/null
-    naru notify --title "Task loop" --open "tasks/$TASK" "Task $TASK passed but the commit failed." > /dev/null 2>&1 || true
+    naru task note "$TASK" "The task loop could not commit the change in $repo, so the task is back in backlog: $(head -c 1500 "$SCRATCH/commit.out")" > /dev/null
+    naru task update "$TASK" --status backlog > /dev/null 2>&1 || true
+    naru notify --title "Task loop" --open "tasks/$TASK" "Task $TASK passed but the commit failed; it is back in backlog." > /dev/null 2>&1 || true
     return 1
   fi
   ROOT=$(git rev-parse --show-toplevel)
@@ -2265,8 +2266,9 @@ commit_repo() { # <repo dir> <state dir>: commits in that repo; appends its shor
       { echo "Task loop commit ($repo): the committed tree did not build without these pre-dirty paths, so they were committed too:"; printf '%s\n' "${skipped[@]}"; } | head -c 4000 > "$SCRATCH/commit-note.md"
       naru task note "$TASK" --file "$SCRATCH/commit-note.md" > /dev/null || true
     else
-      naru task note "$TASK" "The task loop committed $(git rev-parse --short HEAD) in $repo but it does not build: $(tail -c 1500 "$SCRATCH/gate.out")" > /dev/null
-      naru notify --title "Task loop" --open "tasks/$TASK" "Task $TASK passed but its commit does not build." > /dev/null 2>&1 || true
+      naru task note "$TASK" "The task loop committed $(git rev-parse --short HEAD) in $repo but it does not build, so the task is back in backlog (the commit stays in HEAD): $(tail -c 1500 "$SCRATCH/gate.out")" > /dev/null
+      naru task update "$TASK" --status backlog > /dev/null 2>&1 || true
+      naru notify --title "Task loop" --open "tasks/$TASK" "Task $TASK passed but its commit does not build; it is back in backlog." > /dev/null 2>&1 || true
       return 1
     fi
   fi
