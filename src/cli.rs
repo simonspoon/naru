@@ -306,6 +306,20 @@ EXAMPLES
     /// A self-disarming alarm for a supervisor's handoffs (mesa task 1512)
     #[command(subcommand)]
     Alarm(AlarmCmd),
+    /// Rebuild and restart the server safely (naru task 2035, docs/self-deploy.md)
+    ///
+    /// Runs scripts/self-deploy.sh: build into a temp dir and check it, back
+    /// up the db, drain the todo-watcher and in-flight workflow runs, swap
+    /// the binary atomically, restart, confirm health, roll back on failure.
+    /// Prints a JSON verdict (`deployed` | `rolled-back` | `aborted`).
+    SelfDeploy(SelfDeployArgs),
+    /// Pause, resume or probe the todo-watcher queue (naru task 2038)
+    ///
+    /// `pause` stops new dispatch until `resume` (persisted across restarts);
+    /// `idle` exits 0 only when no workflow run is running and no task is
+    /// in_progress, else 1 (the JSON says why). See docs/queue-drain.md.
+    #[command(subcommand)]
+    Queue(QueueCmd),
     /// Queue a question for the live agent / the person (naru task 2014)
     ///
     /// `ask <TEXT…>` stores the question durably with the asking task and
@@ -679,6 +693,48 @@ enum AskCmd {
         /// Print the question without its `body` and `answer`
         #[arg(long)]
         quiet: bool,
+    },
+}
+
+#[derive(clap::Args)]
+struct SelfDeployArgs {
+    #[command(subcommand)]
+    cmd: Option<SelfDeployCmd>,
+    /// The naru repo checkout (default: $NARU_REPO, else the current directory)
+    #[arg(long)]
+    repo: Option<PathBuf>,
+    /// Print the plan and change nothing
+    #[arg(long)]
+    dry_run: bool,
+    /// Skip the build and check stage (tests of the deploy itself only)
+    #[arg(long)]
+    skip_checks: bool,
+    /// Seconds to wait for in-flight workflow runs before aborting
+    #[arg(long, default_value_t = 1800)]
+    drain_timeout: u64,
+}
+
+#[derive(Subcommand)]
+enum QueueCmd {
+    /// Stop the todo-watcher claiming new tasks (idempotent)
+    Pause,
+    /// Let the todo-watcher claim tasks again (idempotent)
+    Resume,
+    /// Exit 0 only if no workflow run is running and no task is in_progress
+    Idle,
+}
+
+#[derive(Subcommand)]
+enum SelfDeployCmd {
+    /// Print the path of the db this install uses (for the rollback)
+    DbPath,
+    /// Raise, lower or read the todo-watcher drain flag
+    Drain {
+        /// on | off | status
+        state: String,
+        /// Seconds until the flag clears itself (on only)
+        #[arg(long, default_value_t = 3600)]
+        ttl: u64,
     },
 }
 
@@ -5437,6 +5493,8 @@ fn execute(command: Command) -> Result<()> {
             Ok(())
         }
         Command::Alarm(cmd) => run_alarm(cmd),
+        Command::SelfDeploy(args) => run_self_deploy(args),
+        Command::Queue(cmd) => run_queue(cmd),
         Command::Ask(args) => run_ask(args),
         Command::Run(cmd) => run_runs(cmd),
         Command::Stage(cmd) => run_stage(cmd),
@@ -5674,6 +5732,100 @@ fn run_ask(args: AskArgs) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn run_queue(cmd: QueueCmd) -> Result<()> {
+    use crate::core::drain;
+    match cmd {
+        QueueCmd::Pause | QueueCmd::Resume => {
+            let on = matches!(cmd, QueueCmd::Pause);
+            drain::set_paused(on)?;
+            print_json(&json!({"paused": on}));
+            Ok(())
+        }
+        QueueCmd::Idle => {
+            let store = Store::open_default()?;
+            let (in_progress, runs_active) =
+                store.queue_activity(crate::core::script_runs::pid_is_live)?;
+            let idle = in_progress == 0 && runs_active == 0;
+            print_json(&json!({
+                "idle": idle,
+                "in_progress": in_progress,
+                "runs_active": runs_active,
+                "paused": drain::paused(),
+            }));
+            if !idle {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
+    }
+}
+
+fn run_self_deploy(args: SelfDeployArgs) -> Result<()> {
+    use crate::core::drain;
+    match args.cmd {
+        Some(SelfDeployCmd::DbPath) => {
+            let store = Store::open_default()?;
+            print_json(&json!({"db": store.db_path()}));
+            Ok(())
+        }
+        Some(SelfDeployCmd::Drain { state, ttl }) => {
+            match state.as_str() {
+                "on" => {
+                    let expiry = drain::set(ttl)?;
+                    print_json(&json!({"draining": true, "expires_at_unix": expiry}));
+                }
+                "off" => {
+                    drain::clear();
+                    print_json(&json!({"draining": false}));
+                }
+                "status" => print_json(&json!({
+                    "draining": drain::active(),
+                    "remaining_secs": drain::remaining(),
+                })),
+                other => {
+                    return Err(Error::Validation(format!(
+                        "drain state must be on|off|status, got {other}"
+                    )));
+                }
+            }
+            Ok(())
+        }
+        None => {
+            let repo = args
+                .repo
+                .or_else(|| std::env::var_os("NARU_REPO").map(PathBuf::from))
+                .map(Ok)
+                .unwrap_or_else(std::env::current_dir)
+                .map_err(|e| Error::Validation(e.to_string()))?;
+            let script = repo.join("scripts/self-deploy.sh");
+            if !script.is_file() {
+                return Err(Error::Validation(format!(
+                    "{} not found: run from the naru repo or pass --repo",
+                    script.display()
+                )));
+            }
+            let mut cmd = std::process::Command::new("bash");
+            cmd.arg(&script).current_dir(&repo);
+            if args.dry_run {
+                cmd.arg("--dry-run");
+            }
+            if args.skip_checks {
+                cmd.arg("--skip-checks");
+            }
+            cmd.arg("--drain-timeout")
+                .arg(args.drain_timeout.to_string());
+            let status = cmd
+                .status()
+                .map_err(|e| Error::Validation(format!("cannot run {}: {e}", script.display())))?;
+            if status.success() {
+                Ok(())
+            } else {
+                std::process::exit(status.code().unwrap_or(1));
+            }
+        }
+    }
 }
 
 fn run_alarm(cmd: AlarmCmd) -> Result<()> {

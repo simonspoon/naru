@@ -6107,6 +6107,25 @@ impl Store {
         })
     }
 
+    /// `(in_progress tasks, workflow runs still running)` for `naru queue
+    /// idle` (naru task 2038). A `running` run whose owner pid is dead or
+    /// absent is abandoned, not active, so a crash cannot wedge the probe.
+    pub fn queue_activity(&self, live: impl Fn(i64) -> bool) -> Result<(i64, i64)> {
+        let in_progress: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM tasks WHERE status = 'in_progress'",
+            [],
+            |r| r.get(0),
+        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT owner_pid FROM workflow_runs WHERE status = 'running'")?;
+        let owners: Vec<Option<i64>> = stmt
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let runs = owners.into_iter().filter(|o| o.is_some_and(&live)).count() as i64;
+        Ok((in_progress, runs))
+    }
+
     /// Closes every `running` workflow run this process cannot own, called
     /// once by `serve` before it binds ([`Store::reconcile_script_runs`]'s
     /// rule, for the same reasons): a run whose `owner_pid` is dead, missing

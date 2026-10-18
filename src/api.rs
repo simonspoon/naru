@@ -1389,6 +1389,10 @@ fn deepest_actionable(store: &Store, mut task: Task, exclude: &[i64]) -> Result<
 /// `claude --bg` takes to start (node startup, ~0.5s+, per the Agents-tab
 /// comments) times however many projects this tick dispatches.
 fn todo_watcher_tick(state: &AppState) {
+    // `naru self-deploy` is draining: claim nothing new (naru task 2035).
+    if crate::core::drain::active() || crate::core::drain::paused() {
+        return;
+    }
     // Read once per tick, before the lock. An unreadable/malformed config is
     // a skipped tick, never a dispatch under a guessed limit — the spawn
     // would fail on the same file a moment later anyway.
@@ -16041,6 +16045,39 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                 "a released child must dispatch normally: {log:?}"
             );
             assert_eq!(get(child), Status::InProgress);
+
+            unsafe { std::env::remove_var("MESA_CLAUDE_BIN") };
+        });
+    }
+
+    #[test]
+    fn todo_watcher_tick_withholds_dispatch_while_paused() {
+        // `naru queue pause` (naru task 2038): a persistent marker the tick
+        // reads fresh; resuming dispatches the same todo task.
+        let _env = attachments::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::core::library::test_home::with_home_dir(|_| {
+            let stub_dir = tempfile::tempdir().unwrap();
+            let log_path = stub_dir.path().join("bg.log");
+            let bin = stub_claude_bg(stub_dir.path(), &log_path);
+            unsafe { std::env::set_var("MESA_CLAUDE_BIN", &bin) };
+
+            let (_dir, state) = test_state();
+            let proj_dir = tempfile::tempdir().unwrap();
+            let project = new_project(&state, Some(proj_dir.path().to_str().unwrap()));
+            let task = new_task(&state, project);
+
+            crate::core::drain::set_paused(true).unwrap();
+            todo_watcher_tick(&state);
+            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+            assert!(log.is_empty(), "paused must dispatch nothing: {log:?}");
+            let get = |id| state.store.lock().unwrap().get_task(id).unwrap().status;
+            assert_eq!(get(task), Status::Todo);
+
+            crate::core::drain::set_paused(false).unwrap();
+            todo_watcher_tick(&state);
+            assert_eq!(get(task), Status::InProgress);
 
             unsafe { std::env::remove_var("MESA_CLAUDE_BIN") };
         });
