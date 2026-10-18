@@ -306,6 +306,56 @@ R=$(run_loop "$T")
 "$NARU" task show "$T" | jq -e '.notes | map(.body) | any(test("rider.txt") and test("earlier edits"))' >/dev/null || fail "rider: notes"
 ok "a pre-dirty path the task changed again is committed with a note, and the tree ends clean"
 
+# ---- 7c. a pre-dirty path the committed files need (naru task 2041): the build gate folds it in ----
+reset_stub
+printf 'UI: no' > "$STUB/reply.planner"
+printf 'VERDICT: PASS' > "$STUB/reply.verifier"
+printf 'VERDICT: PASS' > "$STUB/reply.diff-reviewer"
+printf 'use.txt\n' > "$STUB/touch.implementer"
+echo needed > "$TMP/work/dep.txt"
+T=$(mk "Fix needs dep")
+R=$(NARU_LOOP_COMMIT_CHECK='[ ! -e use.txt ] || [ -e dep.txt ]' run_loop "$T")
+[ "$(jq -r .status <<<"$R")" = succeeded ] && [ "$(step "$R" "Commit")" = ok ] || fail "gate: run $(jq -c '{status,error}' <<<"$R"), Commit $(step "$R" "Commit")"
+[ "$(git -C "$TMP/work" show --name-only --format= HEAD | sort | tr '\n' ' ')" = "dep.txt use.txt " ] || fail "gate: commit holds $(git -C "$TMP/work" show --name-only --format= HEAD)"
+[ -z "$(git -C "$TMP/work" status --porcelain)" ] || fail "gate: tree not clean: $(git -C "$TMP/work" status --porcelain)"
+"$NARU" task show "$T" | jq -e '.notes | map(.body) | any(test("did not build") and test("dep.txt"))' >/dev/null || fail "gate: notes"
+ok "a skipped pre-dirty path the commit needs is folded in by the build gate, tree clean, noted"
+
+# ---- 7d. a commit that does not build and cannot be fixed: noted, notified, not reported as committed ----
+reset_stub
+printf 'UI: no' > "$STUB/reply.planner"
+printf 'VERDICT: PASS' > "$STUB/reply.verifier"
+printf 'VERDICT: PASS' > "$STUB/reply.diff-reviewer"
+printf 'broken.txt\n' > "$STUB/touch.implementer"
+echo stray2 > "$TMP/work/stray2.txt"
+T=$(mk "Fix unbuildable")
+R=$(NARU_LOOP_COMMIT_CHECK='[ ! -e broken.txt ]' run_loop "$T")
+[ "$(jq -r .status <<<"$R")" = succeeded ] || fail "gate fail: run $(jq -c '{status,error}' <<<"$R")"
+"$NARU" task show "$T" | jq -e '.notes | map(.body) | any(test("does not build")) and (any(test("^Committed ")) | not)' >/dev/null || fail "gate fail: notes: $("$NARU" task show "$T" | jq -c .notes)"
+grep -q -- "does not build" "$STUB/vox.log" || fail "gate fail: no notify: $(cat "$STUB/vox.log" 2>/dev/null)"
+[ "$(git -C "$TMP/work" status --porcelain)" = "?? stray2.txt" ] || fail "gate fail: stray file was swept in: $(git -C "$TMP/work" status --porcelain)"
+rm -f "$TMP/work/stray2.txt"
+ok "an unfixable unbuildable commit is noted and notified, and never reported as committed"
+
+# ---- 7e. a bounced run restores its debris; a pre-dirty file goes back as it was ----
+reset_stub
+printf 'UI: no' > "$STUB/reply.planner"
+printf 'VERDICT: PASS' > "$STUB/reply.verifier"
+printf 'still broken\nVERDICT: FAIL' > "$STUB/reply.diff-reviewer"
+printf 'draft.txt\nseed.txt\npre.txt\n' > "$STUB/touch.implementer"
+echo early > "$TMP/work/pre.txt"
+git -C "$TMP/work" status --porcelain > /dev/null
+T=$(mk "Fix bounce debris")
+R=$(run_loop "$T")
+[ "$(tstatus "$T")" = backlog ] || fail "debris: task $(tstatus "$T")"
+[ ! -e "$TMP/work/draft.txt" ] || fail "debris: untracked draft left behind"
+git -C "$TMP/work" diff --quiet -- seed.txt || fail "debris: tracked file still modified"
+[ "$(cat "$TMP/work/pre.txt")" = early ] || fail "debris: pre-dirty file is $(cat "$TMP/work/pre.txt")"
+[ "$(git -C "$TMP/work" status --porcelain)" = "?? pre.txt" ] || fail "debris: tree: $(git -C "$TMP/work" status --porcelain)"
+"$NARU" task show "$T" | jq -e '.notes | map(.body) | any(test("Restored to their state") and test("draft.txt"))' >/dev/null || fail "debris: note"
+rm -f "$TMP/work/pre.txt"
+ok "a bounced run puts back its debris and leaves a pre-dirty file as it found it"
+
 # ---- 8. a failing vox send is caught: backlog, run still succeeds ----
 reset_stub
 printf 'UI: no' > "$STUB/reply.planner"
