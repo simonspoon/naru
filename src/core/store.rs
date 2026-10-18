@@ -1993,7 +1993,7 @@ pub struct CcTaskLink {
 /// `None` when it is not one of the shapes a task-execution spawn opens with.
 /// The stored `preview` is already slash-command-unwrapped (`/name args`), so
 /// the shapes are: `Execte this task: N` (the configured template's typo) and
-/// `Execute this task: N`; `[/][plugin:]execute-naru-task N` (or the older `execute-mesa-task`);
+/// `Execute this task: N`; `execute naru task: N` (the Task loop's); `[/][plugin:]execute-naru-task N` (or the older `execute-mesa-task`);
 /// `[/]execute-todo N`; and `[/]execute-todo ##Task Info … {"id":N,` (a JSON
 /// task blob — the first `"id":N`). Only the opening is read, so an id in
 /// later prose never links.
@@ -2002,7 +2002,11 @@ fn parse_task_prompt(text: &str) -> Option<i64> {
         let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
         digits.parse().ok()
     }
-    for prefix in ["Execte this task:", "Execute this task:"] {
+    for prefix in [
+        "Execte this task:",
+        "Execute this task:",
+        "execute naru task:",
+    ] {
         if let Some(rest) = text.strip_prefix(prefix) {
             return leading_id(rest.trim_start());
         }
@@ -10243,6 +10247,7 @@ impl Store {
                FROM cc_prompts \
              ) WHERE rn = 1 \
                AND (preview LIKE 'Exec%this task:%' \
+                    OR preview LIKE 'execute naru task:%' \
                     OR preview LIKE '%execute-naru-task %' \
                     OR preview LIKE '%execute-mesa-task %' \
                     OR preview LIKE '%execute-todo %')",
@@ -12572,6 +12577,11 @@ mod tests {
         assert_eq!(p("Execte this task: 1337"), Some(1337));
         assert_eq!(p("Execute this task: 12"), Some(12));
         assert_eq!(p("Execute this task:7 and more"), Some(7));
+        assert_eq!(p("execute naru task: 2070"), Some(2070));
+        assert_eq!(p("execute naru task:5"), Some(5));
+        assert_eq!(p("execute naru task:"), None);
+        assert_eq!(p("execute naru task: foo 5"), None);
+        assert_eq!(p("please execute naru task: 5"), None);
         assert_eq!(p("execute-naru-task 603"), Some(603));
         assert_eq!(p("/inaros-swe:execute-naru-task 603"), Some(603));
         assert_eq!(p("/execute-naru-task"), None);
