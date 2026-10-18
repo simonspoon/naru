@@ -349,3 +349,15 @@ is a notification the live agent may ignore, and it never fails the run.
 Existing installs need the node added by hand or the workflow recreated; `workflow defaults --task-loop` skips an existing one.
 
 The **stale-claim sweep** lives in the todo-watcher reaper (`docs/todo-watcher.md`).
+
+## 10. Plan and verify never require a commit (naru task 2047)
+
+Commit runs only after Close: pass, so no brief may ask for committed state.
+The prelude's `no_commit_rule` text is appended to the Plan, Split, Implement
+and verifier/reviewer briefs: metrics are judged on the uncommitted
+working-tree diff (`git diff`, `git status --porcelain`) in every repo the task
+touches (`repos.txt`), never `HEAD~1`/`git log`, and "not committed" is never a
+failure. The review diff summary is headed "uncommitted, by design". The typed
+verdict prompt carries the guard: a report whose only FAIL reason is
+"not committed" (or `HEAD~1` showing nothing) counts as PASS if the rest is
+clean. `task-loop-check.sh` section 1b covers a plan mentioning `HEAD~1`.

@@ -154,3 +154,6 @@ verdict.
 
 That report is the message you end your turn with — never also `SendMessage`
 it. `SendMessage` is for mid-run questions and check-ins.
+
+## Commit timing
+A supervised loop commits only after review and verify pass. Judge acceptance metrics on the uncommitted working tree (`git diff`, `git status`) in every repo touched; never require `HEAD~1` or a commit, and never treat "not committed" as a failure.

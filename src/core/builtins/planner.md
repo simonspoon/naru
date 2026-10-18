@@ -51,3 +51,6 @@ Do not start, update or close tasks unless asked.
 The brief (or the task id plus the brief), in one message. State what you read
 and what you inferred. Your report is the message you end your turn with —
 never `SendMessage` it as well.
+
+## Commit timing
+A supervised loop commits only after review and verify pass. Judge acceptance metrics on the uncommitted working tree (`git diff`, `git status`) in every repo touched; never require `HEAD~1` or a commit, and never treat "not committed" as a failure.

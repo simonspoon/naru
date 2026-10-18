@@ -186,6 +186,20 @@ asked "$T" done pass
 [ "$(step "$R" "Notify live agent")" = ok ] || fail "pass: notify step was $(step "$R" "Notify live agent")"
 ok "non-UI pass: UX and Implement #2 skipped, task done with a result, no notify, exactly the changed files committed"
 
+# ---- 1b. a plan mentioning HEAD~1: the briefs carry the no-commit rule, "not committed" is no failure (naru task 2047) ----
+reset_stub
+printf 'Plan: edit baz. Metric: git diff HEAD~1 shows baz.txt.\nUI: no' > "$STUB/reply.planner"
+printf "looks fine\nVERDICT: PASS" > "$STUB/reply.verifier"
+printf 'clean\nVERDICT: PASS' > "$STUB/reply.diff-reviewer"
+printf 'baz.txt\n' > "$STUB/touch.implementer"
+T=$(mk "Fix the baz bug")
+R=$(run_loop "$T")
+for a in planner implementer verifier diff-reviewer; do
+  grep -q "Never use .HEAD~1" "$STUB/msgs.$a" || fail "head1: the $a brief lacks the no-commit rule"
+done
+grep -q "not committed" "$STUB/typed-msgs.review" && grep -q "only reason for FAIL" "$STUB/typed-msgs.review" || fail "head1: the verdict prompt lacks the guard"
+ok "plan, implement, verify and review briefs carry the no-commit rule; the verdict prompt carries the guard"
+
 # ---- 2. UI pass ----
 reset_stub
 printf 'Plan: edit the page.\nUI: yes' > "$STUB/reply.planner"
