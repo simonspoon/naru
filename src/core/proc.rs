@@ -33,7 +33,11 @@ pub fn isolate(cmd: &mut Command) -> &mut Command {
 pub fn bash() -> Command {
     #[cfg(unix)]
     {
-        Command::new("bash")
+        // Every shell step gets the toolchain dirs, even when the server was
+        // started without them (launchd, a bare shell).
+        let mut c = Command::new("bash");
+        augment_path(&mut c);
+        c
     }
     #[cfg(windows)]
     {
@@ -253,5 +257,19 @@ mod path_tests {
             .count();
         assert_eq!(n, 1);
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn bash_command_gets_toolchain_path() {
+        let mut expected = Command::new("bash");
+        augment_path(&mut expected);
+        let path_of = |c: &Command| {
+            c.get_envs()
+                .find(|(k, _)| *k == "PATH")
+                .and_then(|(_, v)| v.map(|v| v.to_os_string()))
+        };
+        let got = path_of(&bash());
+        assert!(got.is_some(), "bash() must set PATH explicitly");
+        assert_eq!(got, path_of(&expected));
     }
 }
