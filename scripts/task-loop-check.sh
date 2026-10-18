@@ -134,7 +134,7 @@ OUT=$("$NARU" workflow defaults --task-loop --project loopproj)
 jq -e '(.created|length)==2 and .created[0].workflow.name=="Task loop" and .skipped==[] and (.created[0].nodes|length)==29 and .created[1].workflow.name=="Task loop: implement and review" and (.created[1].nodes|length)==8' <<<"$OUT" >/dev/null || fail "defaults: $OUT"
 ok "defaults --task-loop creates the Task loop workflow"
 OUT=$("$NARU" workflow defaults --task-loop --project loopproj)
-jq -e '.created==[] and .skipped==["Task loop"]' <<<"$OUT" >/dev/null || fail "rerun: $OUT"
+jq -e '.created==[] and (.skipped|sort)==["Task loop","Task loop: implement and review"]' <<<"$OUT" >/dev/null || fail "rerun: $OUT"
 [ "$("$NARU" workflow list | jq length)" = 2 ] || fail "rerun or --task-loop left extra workflows"
 WF=$("$NARU" workflow show "Task loop")
 ok "a rerun is a no-op; no ambient workflows were created"
