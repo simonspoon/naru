@@ -131,7 +131,7 @@ git -C "$TMP/work" add seed.txt
 git -C "$TMP/work" commit -q -m seed
 "$NARU" project create loopproj --no-git --path "$TMP/work" >/dev/null
 OUT=$("$NARU" workflow defaults --task-loop --project loopproj)
-jq -e '(.created|length)==2 and .created[0].workflow.name=="Task loop" and .skipped==[] and (.created[0].nodes|length)==28 and .created[1].workflow.name=="Task loop: implement and review" and (.created[1].nodes|length)==8' <<<"$OUT" >/dev/null || fail "defaults: $OUT"
+jq -e '(.created|length)==2 and .created[0].workflow.name=="Task loop" and .skipped==[] and (.created[0].nodes|length)==29 and .created[1].workflow.name=="Task loop: implement and review" and (.created[1].nodes|length)==8' <<<"$OUT" >/dev/null || fail "defaults: $OUT"
 ok "defaults --task-loop creates the Task loop workflow"
 OUT=$("$NARU" workflow defaults --task-loop --project loopproj)
 jq -e '.created==[] and .skipped==["Task loop"]' <<<"$OUT" >/dev/null || fail "rerun: $OUT"
@@ -147,6 +147,13 @@ metric() {
   local got
   got=$("$NARU" workflow log task-loop-metrics --limit 1000 | jq -r --arg t "task=$1 " '.[] | select(.text | startswith($t)) | .text')
   [ "$got" = "task=$1 verdict=$2 iterations=$3 outcome=$4" ] || fail "$5: metric line(s): [$got]"
+}
+
+# asked <task id> <outcome> <label>: exactly one notice row in the ask queue for the run
+asked() {
+  local n
+  n=$("$NARU" ask list | jq --arg t "task $1: $2." '[.[] | select(.body | contains("Task loop notice") and contains($t))] | length')
+  [ "$n" = 1 ] || fail "$3: expected one '$2' notice for task $1, found $n"
 }
 
 # ---- 1. non-UI pass ----
@@ -175,6 +182,8 @@ git -C "$TMP/work" log -1 --format=%s | grep -q "task $T" || fail "pass: commit 
 [ "$(step "$R" "Implement + review #2")" = skipped ] || fail "pass: the second pass was $(step "$R" "Implement + review #2")"
 grep -q "VERDICT: PASS" "$STUB/typed-msgs.review" || fail "pass: the reports did not reach the typed verdict agent"
 metric "$T" PASS 1 done pass
+asked "$T" done pass
+[ "$(step "$R" "Notify live agent")" = ok ] || fail "pass: notify step was $(step "$R" "Notify live agent")"
 ok "non-UI pass: UX and Implement #2 skipped, task done with a result, no notify, exactly the changed files committed"
 
 # ---- 2. UI pass ----
@@ -307,7 +316,15 @@ R=$(run_loop "$T")
 [ "$(jq -r .status <<<"$R")" = succeeded ] || fail "vox down: run $(jq -c '{status,error}' <<<"$R")"
 [ "$(tstatus "$T")" = backlog ] && [ "$(step "$R" "Close: backlog status")" = ok ] || fail "vox down: task $(tstatus "$T")"
 [ "$(step "$R" "Close: backlog notify")" = ok ] || fail "vox down: notify step $(step "$R" "Close: backlog notify")"
+asked "$T" backlog "vox down"
 ok "a failing notify is caught: task in backlog, run succeeded"
+
+# ---- 8b. a node failing mid-run still sends the notice (outcome error) ----
+R=$(run_loop 999999)
+[ "$(jq -r .status <<<"$R")" = failed ] || fail "error: run $(jq -c '{status,error}' <<<"$R")"
+[ "$(step "$R" "Notify live agent")" = ok ] || fail "error: notify step was $(step "$R" "Notify live agent")"
+"$NARU" ask list | jq -e '[.[] | select(.body | contains("task 999999: error."))] | length == 1' >/dev/null || fail "error: no error notice queued"
+ok "every run ends in one notice, a failed run included (outcome error)"
 
 # ---- 9. a typed verdict that is garbage, or not conclusive -> backlog ----
 reset_stub
@@ -350,6 +367,7 @@ R=$(NARU_LOOP_SPLIT_FILES=1 run_loop "$T")
 "$NARU" task show "$T" | jq -e '.notes | map(.body) | any(test("split this task")) and any(test("Last review findings"))' >/dev/null || fail "split: notes: $("$NARU" task show "$T" | jq -c .notes)"
 [ "$(turns implementer)" = 1 ] && [ "$(grep -c -- '--call--' "$STUB/vox.log")" = 1 ] || fail "split: implementer turns $(turns implementer), notify calls"
 metric "$T" NEEDS-FIX 1 backlog split
+asked "$T" split split
 ok "oversized task: Implement #2 and Review #2 skipped, 2 backlog sub-tasks, parent in backlog with a note, one notify"
 
 reset_stub

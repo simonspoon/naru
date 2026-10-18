@@ -335,3 +335,17 @@ on work must not treat `idle` as "done" without reading `last_result`.
 The todo-watcher command can be set to `naru workflow run "Task loop" --input {id} --detach` in `~/.naru/config.json` under `commands.todo-watcher` to run tasks through this workflow.
 Loop smoke test passed.
 - Smoke test of the Commit step (task 2034 follow-up): a loop run commits its own change and leaves the tree clean.
+
+## 9. Completion notice and stale-claim sweep (naru task 2033)
+
+The last node of the Task loop, **Notify live agent**, is an `always` cli node
+(`docs/workflows.md`): it has no edges, runs after every other node on every
+outcome and queues one `naru ask --task <id>` row, "Task loop notice (no answer
+needed) - task N: <outcome>. <name> (<verdict/iterations>)". The outcome is
+`done`, `backlog`, `split` (the Split step made sub-tasks), `cancelled` (the
+task is cancelled), or `error` (the run failed, the message carrying the
+failing node; with an unknown task id the ask is queued without `--task`). It
+is a notification the live agent may ignore, and it never fails the run.
+Existing installs need the node added by hand or the workflow recreated; `workflow defaults --task-loop` skips an existing one.
+
+The **stale-claim sweep** lives in the todo-watcher reaper (`docs/todo-watcher.md`).

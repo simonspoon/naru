@@ -2147,6 +2147,8 @@ struct WatchersSection {
     retro_interval_hours: Option<u32>,
     #[serde(default, rename = "stall-minutes")]
     stall_minutes: Option<u32>,
+    #[serde(default, rename = "stale-claim-minutes")]
+    stale_claim_minutes: Option<u32>,
 }
 
 fn read_watchers(path: &Path) -> Result<WatchersSection, String> {
@@ -2216,6 +2218,20 @@ fn stall_minutes_in(path: &Path) -> Result<u32, String> {
         .stall_minutes
         .map(|n| n.clamp(1, MAX_STALL_MINUTES))
         .unwrap_or(DEFAULT_STALL_MINUTES))
+}
+
+/// How long a claimed `in_progress` task may have no live agent before the
+/// stale-claim sweep puts it back to `todo` (naru task 2033).
+pub const DEFAULT_STALE_CLAIM_MINUTES: u32 = 30;
+
+/// The sweep's threshold: `watchers.stale-claim-minutes`, hand-edited only
+/// (no route, no Settings field), absent is [`DEFAULT_STALE_CLAIM_MINUTES`], a
+/// value outside `1..=MAX_STALL_MINUTES` is clamped, an unreadable file is `Err`.
+pub fn stale_claim_minutes() -> Result<u32, String> {
+    Ok(read_watchers(&config_file())?
+        .stale_claim_minutes
+        .map(|n| n.clamp(1, MAX_STALL_MINUTES))
+        .unwrap_or(DEFAULT_STALE_CLAIM_MINUTES))
 }
 
 /// The watcher settings for the Settings page (`GET /api/config/watchers`):
@@ -6882,6 +6898,18 @@ mod tests {
             );
             assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
         }
+    }
+
+    #[test]
+    fn stale_claim_minutes_defaults_and_clamps() {
+        let dir = tempfile::tempdir().unwrap();
+        let read = |body: &str| {
+            let path = write_config(dir.path(), body);
+            read_watchers(&path).unwrap().stale_claim_minutes
+        };
+        assert_eq!(read("{}"), None);
+        assert_eq!(read(r#"{"watchers": {"stale-claim-minutes": 7}}"#), Some(7));
+        assert_eq!(DEFAULT_STALE_CLAIM_MINUTES, 30);
     }
 
     #[test]

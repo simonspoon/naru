@@ -2296,6 +2296,7 @@ fn file_reaper_alert(
 /// sessions mesa can no longer see, and a failing stop keeps its entry so a
 /// transient failure retries.
 fn todo_reaper_tick(state: &AppState) {
+    stale_claim_sweep(state);
     let dispatched: Vec<(String, DispatchedSession)> = {
         let map = match state.todo_dispatched.lock() {
             Ok(d) => d,
@@ -2524,6 +2525,130 @@ fn todo_reaper_tick(state: &AppState) {
             }
         }
         remember_dispatch(state, &job_id, memory);
+    }
+}
+
+/// Whether some live agent still works on `task_id`, claimed by `owner`
+/// (naru task 2033): a session with a process whose session id is the claim's
+/// owner, that the panel ties to the task, or that is one of the watcher's
+/// own dispatches for it (`dispatched_jobs`, matched on the short job id or a
+/// run id).
+fn task_has_live_agent(
+    task_id: i64,
+    owner: &str,
+    sessions: &[AgentSession],
+    dispatched_jobs: &[String],
+) -> bool {
+    sessions.iter().any(|s| {
+        s.pid.is_some()
+            && (s.session_id == owner
+                || s.task_id == Some(task_id)
+                || dispatched_jobs.iter().any(|j| {
+                    s.id.as_deref() == Some(j.as_str())
+                        || s.run_id
+                            .as_deref()
+                            .is_some_and(|r| j == r || *j == format!("run:{r}"))
+                }))
+    })
+}
+
+/// The stale-claim sweep (naru task 2033): a task `in_progress` and claimed
+/// whose claim *and* last write are at least `watchers.stale-claim-minutes`
+/// old, with no live agent on it, goes back to `todo` (claim dropped), gets a
+/// note, and the live agent hears of it through the `naru ask` queue. Nothing
+/// is touched when `claude agents` cannot be listed, a task with subtasks is
+/// an umbrella and left alone, and the change is re-checked under the store
+/// lock so a claim renewed since the snapshot is respected. The query is a
+/// cheap db read, so the `claude` shell-out happens only with a candidate.
+fn stale_claim_sweep(state: &AppState) {
+    let minutes = match config::stale_claim_minutes() {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("todo-watcher: stale-claim sweep skipped, cannot read config: {e}");
+            return;
+        }
+    };
+    let candidates: Vec<(i64, String, String, String)> = {
+        let store = match state.store.lock() {
+            Ok(s) => s,
+            Err(e) => e.into_inner(),
+        };
+        let Ok(cutoff) = store.claim_cutoff(minutes) else {
+            return;
+        };
+        let Ok(tasks) = store.list_tasks(None) else {
+            return;
+        };
+        tasks
+            .iter()
+            .filter(|t| t.status == Status::InProgress)
+            .filter_map(|t| {
+                let claimed = t.claimed_at.clone()?;
+                let owner = t.owner.clone()?;
+                (claimed <= cutoff
+                    && t.updated_at <= cutoff
+                    && !tasks.iter().any(|c| c.parent_id == Some(t.id)))
+                .then(|| (t.id, owner, claimed, t.name.clone()))
+            })
+            .collect()
+    };
+    if candidates.is_empty() {
+        return;
+    }
+    let Ok(sessions) = agents::list_panel() else {
+        return;
+    };
+    for (task_id, owner, claimed, name) in candidates {
+        let dispatched_jobs: Vec<String> = {
+            let map = match state.todo_dispatched.lock() {
+                Ok(d) => d,
+                Err(e) => e.into_inner(),
+            };
+            map.iter()
+                .filter(|(_, d)| {
+                    let DispatchTarget::Task(t) = d.target;
+                    t == task_id && !d.superseded
+                })
+                .map(|(j, _)| j.clone())
+                .collect()
+        };
+        if task_has_live_agent(task_id, &owner, &sessions, &dispatched_jobs) {
+            continue;
+        }
+        let mut store = match state.store.lock() {
+            Ok(s) => s,
+            Err(e) => e.into_inner(),
+        };
+        let Ok(task) = store.get_task(task_id) else {
+            continue;
+        };
+        if task.status != Status::InProgress || task.claimed_at.as_deref() != Some(claimed.as_str())
+        {
+            continue;
+        }
+        let patch = TaskPatch {
+            status: Some(Status::Todo),
+            ..Default::default()
+        };
+        if store.update_task(task_id, &patch).is_err() {
+            continue;
+        }
+        let _ = store.release_task(task_id);
+        let body = format!(
+            "Stale claim swept: task {task_id} ({name}) sat in_progress, claimed by {owner} since \
+             {claimed} UTC, with no live agent on it for {minutes} minutes. It is back in todo \
+             with the claim dropped."
+        );
+        let _ = store.add_task_note(task_id, &body, None);
+        let notice = format!(
+            "Todo-watcher notice (no answer needed) - task {task_id}: stale claim swept. {body}"
+        );
+        if store.add_question(&notice, Some(task_id), None).is_ok()
+            && let Ok(Some(live)) = store.current_live_session()
+        {
+            let _ = store.add_live_notice(live.id, LiveNotice::Question);
+        }
+        eprintln!("todo-watcher: swept the stale claim on task {task_id}; back to todo");
     }
 }
 
@@ -16632,6 +16757,52 @@ exit 2
             ),
             ReapVerdict::AlertAbandoned
         );
+    }
+
+    #[test]
+    fn a_live_agent_on_a_task_is_found_by_owner_task_or_dispatch() {
+        let session = |sid: &str, pid: Option<i64>, task: Option<i64>, id: Option<&str>| {
+            let mut s: AgentSession = serde_json::from_value(serde_json::json!({
+                "cwd": "/tmp", "kind": "background", "startedAt": 0, "sessionId": sid,
+            }))
+            .unwrap();
+            s.pid = pid;
+            s.task_id = task;
+            s.id = id.map(str::to_string);
+            s
+        };
+        let none: Vec<String> = vec![];
+        assert!(!task_has_live_agent(5, "me", &[], &none));
+        assert!(task_has_live_agent(
+            5,
+            "me",
+            &[session("me", Some(1), None, None)],
+            &none
+        ));
+        assert!(!task_has_live_agent(
+            5,
+            "me",
+            &[session("me", None, None, None)],
+            &none
+        ));
+        assert!(!task_has_live_agent(
+            5,
+            "me",
+            &[session("x", Some(1), Some(6), None)],
+            &none
+        ));
+        assert!(task_has_live_agent(
+            5,
+            "me",
+            &[session("x", Some(1), Some(5), None)],
+            &none
+        ));
+        assert!(task_has_live_agent(
+            5,
+            "me",
+            &[session("x", Some(1), None, Some("ab12"))],
+            &["ab12".to_string()]
+        ));
     }
 
     #[test]

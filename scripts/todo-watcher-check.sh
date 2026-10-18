@@ -1244,4 +1244,43 @@ ok "a silent dispatched agent: one notification naming the task and one inbox al
 kill "$SERVER_PID" 2>/dev/null || true; SERVER_PID=
 kill "$HOLDER" 2>/dev/null || true; HOLDER=
 
+# ---- stale-claim sweep (naru task 2033): a claimed in_progress task with no
+# live agent for watchers.stale-claim-minutes goes back to todo, claim dropped,
+# one note and one ask row; a fresh claim and one a live session owns stay. ----
+
+SW_DB="$TMP/sweep.db"
+SW_STUB="$STUB_DIR/claude-sweep"
+printf '#!/bin/sh\necho "[]"\n' > "$SW_STUB"
+chmod +x "$SW_STUB"
+SW_CONFIG="$TMP/sweep-config.json"
+echo '{"watchers": {"stale-claim-minutes": 1}}' > "$SW_CONFIG"
+export MESA_DB="$SW_DB"
+run 0 "$MESA" project create "Sweep" --no-git
+SW=$(jqs .id)
+run 0 "$MESA" task create "$SW" "stale one" --status todo
+SW_OLD=$(jqs .id)
+run 0 "$MESA" task create "$SW" "fresh one" --status todo
+SW_NEW=$(jqs .id)
+run 0 "$MESA" task update "$SW_OLD" --status in_progress
+run 0 "$MESA" task claim "$SW_OLD" --owner ghost-session
+run 0 "$MESA" task update "$SW_NEW" --status in_progress
+run 0 "$MESA" task claim "$SW_NEW" --owner ghost-session
+sqlite3 "$SW_DB" "update tasks set claimed_at = datetime('now','-5 minutes'), updated_at = datetime('now','-5 minutes') where id = $SW_OLD"
+SW_PORT=17791
+MESA_CLAUDE_BIN="$SW_STUB" MESA_WATCH_TODO_TICK_MS=150 MESA_CONFIG_FILE="$SW_CONFIG" \
+  "$MESA" serve --port "$SW_PORT" >/dev/null 2>&1 &
+SERVER_PID=$!
+wait_for_server "$SW_PORT"
+for _ in $(seq 1 100); do
+  [ "$("$MESA" task show "$SW_OLD" | jq -r .status)" = todo ] && break
+  sleep 0.1
+done
+sleep 0.6  # several more passes: nothing may repeat
+[ "$("$MESA" task show "$SW_OLD" | jq -r .status)" = todo ] || fail "the stale claim was not swept"
+"$MESA" task show "$SW_OLD" | jq -e '.owner == null and .claimed_at == null and (.notes | length) == 1' >/dev/null || fail "swept task: claim or note wrong"
+[ "$("$MESA" ask list | jq --argjson t "$SW_OLD" '[.[] | select(.task_id == $t)] | length')" = 1 ] || fail "exactly one ask row for the swept task"
+[ "$("$MESA" task show "$SW_NEW" | jq -r .status)" = in_progress ] || fail "a fresh claim was swept"
+ok "a stale claim with no live agent goes back to todo with a note and one ask row, once; a fresh claim stays"
+kill "$SERVER_PID" 2>/dev/null; wait "$SERVER_PID" 2>/dev/null || true; SERVER_PID=""
+
 echo "ALL OK ($CHECKS checks)"

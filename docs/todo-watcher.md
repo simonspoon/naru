@@ -400,3 +400,16 @@ because someone ran `mesa serve`.
   alert after two such re-queues, and only alerted when the task holds a
   claim) — no CLI surface of its own beyond the `serve` flag, matching the
   agents surface's "no `mesa agent` CLI" precedent.
+
+## Stale-claim sweep (naru task 2033)
+
+Every reaper pass (whatever the watcher switches say) looks for a task that is
+`in_progress`, claimed, and whose claim **and** last write are at least
+`watchers.stale-claim-minutes` old (default 30, clamped 1..=1440, hand-edited
+in `config.json` only, no Settings field). If `claude agents` and the `naru run`
+jobs show no live session on it (session id equals the owner, the panel ties it
+to the task, or it is one of the watcher's own live dispatches), the task goes
+back to `todo` with the claim dropped, gets a note, and an `ask` row tells the
+live agent. A task with subtasks is left alone, an unlistable `claude` skips
+the pass, and the change is re-checked under the store lock. Gate:
+`scripts/todo-watcher-check.sh`.

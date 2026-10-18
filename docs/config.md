@@ -710,6 +710,7 @@ todo-watcher's per-project concurrency limit (mesa task 777,
   hand-edited out-of-range value is clamped on read, exactly as
   `todo-concurrency` is. Read on every tick and on every `retro run`/`status`,
   so an edit lands on the next tick with no restart.
+- `stale-claim-minutes` (naru task 2033, hand-edited only, default 30, clamped 1..=1440) is how long a claimed `in_progress` task may sit with no live agent before the reaper puts it back to `todo` (`docs/todo-watcher.md`).
 - `stall-minutes` (naru task 1953) is how many minutes a dispatched agent may
   sit silent on a still-`in_progress` task before the todo-watcher's stall
   watchdog acts (`docs/todo-watcher.md`). **Absent or `null` ⇒ 20.** Integer in

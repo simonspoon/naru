@@ -1363,8 +1363,15 @@ pub fn validate_config(
             );
         }
         WorkflowNodeKind::Cli => {
-            only_keys(name, obj, &["command", "timeout_secs"])?;
+            only_keys(name, obj, &["command", "timeout_secs", "always"])?;
             out.insert("command".into(), json!(required_str(name, obj, "command")?));
+            match obj.get("always") {
+                None | Some(Value::Null) => {}
+                Some(Value::Bool(b)) => {
+                    out.insert("always".into(), json!(b));
+                }
+                Some(_) => return Err("cli config: \"always\" must be true or false".into()),
+            }
             if let Some(n) = optional_int(name, obj, "timeout_secs", 1..=86400)? {
                 out.insert("timeout_secs".into(), json!(n));
             }
@@ -2195,6 +2202,34 @@ if [ -n "$f" ] && [ -f "$f" ]; then cat "$f"; else echo "task=$TASK verdict=none
 exit 0
 "##;
 
+/// The closing notice (naru task 2033), an `always` cli node: the engine feeds
+/// it the run input (the task id) and a `run_status=` line, and runs it after
+/// every other node, a failed run included. Queues one `naru ask` row for the
+/// live agent with the task id, the outcome (done, backlog, split, cancelled
+/// or error) and a one-line summary. A notification: the text says no answer
+/// is needed. Never fails.
+const LOOP_NOTIFY: &str = r##"IN=$(cat)
+TASK=$(printf '%s\n' "$IN" | head -n 1 | tr -dc '0-9')
+[ -n "$TASK" ] || exit 0
+RS=$(printf '%s\n' "$IN" | sed -n 's/^run_status=\([a-z]*\).*/\1/p' | tail -n 1)
+f=$(ls -t "$HOME"/.naru/loop/"$TASK"-*/metric.txt 2>/dev/null | head -n 1)
+D=$(dirname "${f:-/nonexistent/x}")
+if [ "$RS" != succeeded ]; then
+  OUTCOME=error
+  SUM=$(printf '%s\n' "$IN" | sed -n 's/^run_status=failed error=//p' | head -n 1)
+else
+  OUTCOME=$(sed -n 's/.*outcome=\([a-z]*\).*/\1/p' "$f" 2>/dev/null | tail -n 1)
+  [ -n "$OUTCOME" ] || OUTCOME=unknown
+  if [ "$OUTCOME" = backlog ] && grep -q 'sub-tasks created' "$D/reasons.txt" 2>/dev/null && ! grep -q 'no sub-tasks' "$D/reasons.txt" 2>/dev/null; then OUTCOME=split; fi
+  if [ "$(naru task show "$TASK" 2>/dev/null | jq -r '.status' 2>/dev/null)" = cancelled ]; then OUTCOME=cancelled; fi
+  SUM="$(naru task show "$TASK" 2>/dev/null | jq -r '.name' 2>/dev/null) ($(sed -n 's/^task=[0-9]* //p' "$f" 2>/dev/null | head -n 1))"
+fi
+SUM=$(printf '%s' "$SUM" | tr '\n' ' ' | cut -c 1-200)
+MSG="Task loop notice (no answer needed) - task $TASK: $OUTCOME. $SUM"
+naru ask --task "$TASK" "$MSG" > /dev/null 2>&1 || naru ask "$MSG" > /dev/null 2>&1
+exit 0
+"##;
+
 /// After the `task` node set backlog: the bare task id, the input of the
 /// notify node.
 const LOOP_CLOSE_BACKLOG_ID: &str = r##"jq -j '.id'
@@ -2566,6 +2601,15 @@ pub fn create_task_loop_workflow(
             "Metric log",
             json!({"target": "log", "log": "task-loop-metrics"}),
             4000.0,
+            120.0,
+        ),
+        // The closing notice (naru task 2033): `always`, so it runs on every
+        // outcome, an error included, and has no edges.
+        (
+            K::Cli,
+            "Notify live agent",
+            json!({"command": LOOP_NOTIFY, "timeout_secs": 60, "always": true}),
+            4120.0,
             120.0,
         ),
     ];
@@ -3046,6 +3090,17 @@ pub fn execute_run<A: StoreAccess>(
         })
         .collect();
     let nodes: HashMap<i64, &WorkflowNode> = view.nodes.iter().map(|n| (n.id, n)).collect();
+    // `always` cli nodes (naru task 2033) run last, whatever happened before.
+    let is_always = |id: &i64| {
+        let n = nodes[id];
+        n.kind == WorkflowNodeKind::Cli
+            && n.config.get("always").and_then(Value::as_bool) == Some(true)
+    };
+    let (always_ids, order): (Vec<i64>, Vec<i64>) = order.into_iter().partition(|id| is_always(id));
+    let order: Vec<i64> = order
+        .into_iter()
+        .chain(always_ids.iter().copied())
+        .collect();
     let project_dir = view.workflow.project_id.and_then(|id| {
         access
             .with(|s| s.get_project(id))
@@ -3074,7 +3129,18 @@ pub fn execute_run<A: StoreAccess>(
             duration_ms: 0,
             started_at: None,
         };
-        let input = if id == trigger_id {
+        let always = always_ids.contains(&id);
+        let input = if always {
+            // The run's input plus how it ended, for a closing notice.
+            Some(match &failure {
+                Some(f) => format!(
+                    "{}\nrun_status=failed error={}",
+                    run.input,
+                    f.replace('\n', " ")
+                ),
+                None => format!("{}\nrun_status=succeeded", run.input),
+            })
+        } else if id == trigger_id {
             Some(run.input.clone())
         } else if node.kind == WorkflowNodeKind::Make {
             make_input(view, &done, id)
@@ -3083,7 +3149,7 @@ pub fn execute_run<A: StoreAccess>(
         } else {
             active_input(view, &done, id)
         };
-        let (Some(input), None) = (input, &failure) else {
+        let (Some(input), None) = (input, failure.as_ref().filter(|_| !always)) else {
             steps.push(skipped(node));
             done.insert(
                 id,
@@ -3123,10 +3189,9 @@ pub fn execute_run<A: StoreAccess>(
         let (status, output, error, route) = match result {
             Ok((output, route)) => (WorkflowStepStatus::Ok, output, None, route),
             Err(message) => {
-                failure = Some(format!(
-                    "node {} ({}) failed: {message}",
-                    node.id, node.title
-                ));
+                failure.get_or_insert_with(|| {
+                    format!("node {} ({}) failed: {message}", node.id, node.title)
+                });
                 (
                     WorkflowStepStatus::Failed,
                     String::new(),
@@ -5518,6 +5583,103 @@ mod tests {
         assert!(run.steps[1].error.as_deref().unwrap().contains("boom"));
         assert_eq!(run.steps[2].status, WorkflowStepStatus::Skipped);
         assert!(run.error.as_deref().unwrap().contains("Bad"));
+    }
+
+    #[test]
+    fn an_always_node_runs_last_after_a_failure_and_on_success() {
+        let (st, _d) = store();
+        let build = |name: &str, command: &str| {
+            st.with(|s| {
+                let wf = s.create_workflow(None, name, None).unwrap().id;
+                let t = node(
+                    s,
+                    wf,
+                    WorkflowNodeKind::Trigger,
+                    "T",
+                    json!({"mode": "manual"}),
+                );
+                // Created before the always node and after it in id order
+                // does not matter: it runs last either way.
+                node(
+                    s,
+                    wf,
+                    WorkflowNodeKind::Cli,
+                    "Notice",
+                    json!({"command": "cat", "always": true}),
+                );
+                let work = node(s, wf, WorkflowNodeKind::Cli, "Work", cli(command));
+                s.create_workflow_edge(wf, t, work, None).unwrap();
+                wf
+            })
+        };
+        let run = run_workflow(
+            &st,
+            build("Fails", "echo boom >&2; exit 3"),
+            WorkflowTrigger::Manual,
+            "42",
+        )
+        .unwrap();
+        assert_eq!(run.status, WorkflowRunStatus::Failed, "{run:?}");
+        let notice = run.steps.last().unwrap();
+        assert_eq!(notice.title, "Notice");
+        assert_eq!(notice.status, WorkflowStepStatus::Ok, "{run:?}");
+        assert!(notice.output.starts_with("42\nrun_status=failed error="));
+        assert!(run.error.as_deref().unwrap().contains("Work"));
+        let run = run_workflow(
+            &st,
+            build("Passes", "echo hi"),
+            WorkflowTrigger::Manual,
+            "7",
+        )
+        .unwrap();
+        assert_eq!(run.status, WorkflowRunStatus::Succeeded, "{run:?}");
+        let notice = run.steps.last().unwrap();
+        assert_eq!(notice.title, "Notice");
+        assert_eq!(notice.output, "7\nrun_status=succeeded");
+    }
+
+    #[test]
+    fn always_is_a_cli_only_boolean() {
+        let (st, _d) = store();
+        st.with(|s| {
+            let wf = s.create_workflow(None, "Always", None).unwrap().id;
+            let make = |s: &mut Store, kind, config| {
+                s.create_workflow_node(
+                    wf,
+                    &WorkflowNodeNew {
+                        kind,
+                        title: "N".to_string(),
+                        config: Some(config),
+                        x: None,
+                        y: None,
+                    },
+                )
+            };
+            assert!(
+                make(
+                    s,
+                    WorkflowNodeKind::Cli,
+                    json!({"command": "true", "always": "yes"})
+                )
+                .is_err()
+            );
+            assert!(
+                make(
+                    s,
+                    WorkflowNodeKind::Trigger,
+                    json!({"mode": "manual", "always": true})
+                )
+                .is_err()
+            );
+            assert!(
+                make(
+                    s,
+                    WorkflowNodeKind::Cli,
+                    json!({"command": "true", "always": true})
+                )
+                .is_ok()
+            );
+        });
     }
 
     #[test]
