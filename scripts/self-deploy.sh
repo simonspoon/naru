@@ -24,7 +24,7 @@
 #      launchd agent installed (scripts/launchd.sh), `launchctl kickstart -k
 #      gui/$(id -u)/com.naru.serve`; otherwise no restart, so the deploy is judged
 #      unhealthy and rolled back), NARU_DEPLOY_DB (db path; default NARU_DB, MESA_DB,
-#      then the platform default), NARU_DEPLOY_PORT (7770), NARU_DEPLOY_HEALTH_CMD
+#      then the platform default), NARU_DEPLOY_PORT (default: the config's serve.port, else 7770), NARU_DEPLOY_HEALTH_CMD
 #      (replaces the /api/version check; gets NARU_DEPLOY_EXPECT = the version that should be serving), NARU_DEPLOY_LIVE_CHECK=0 (skip the
 #      live-respawn check), NARU_DEPLOY_DRAIN_TIMEOUT (600), NARU_DEPLOY_HEALTH_TIMEOUT
 #      (60), NARU_DEPLOY_POLL (seconds between polls, 3).
@@ -63,7 +63,7 @@ backup_db=""
 DRAIN_TIMEOUT="${NARU_DEPLOY_DRAIN_TIMEOUT:-600}"
 HEALTH_TIMEOUT="${NARU_DEPLOY_HEALTH_TIMEOUT:-60}"
 POLL="${NARU_DEPLOY_POLL:-3}"
-PORT="${NARU_DEPLOY_PORT:-7770}"
+PORT="${NARU_DEPLOY_PORT:-}"
 paused=0 restarted=false
 
 log() { echo "self-deploy: $*" >&2; }
@@ -142,6 +142,23 @@ if [ -z "$db" ]; then
   else db="$ndb"; fi
 fi
 [ -e "$db" ] || abort "resolved db $db does not exist; set NARU_DEPLOY_DB"
+# The port the server listens on: NARU_DEPLOY_PORT, else `serve.port` in the config it
+# reads (core::config::config_file: NARU_/MESA_CONFIG_FILE, else ~/.naru or ~/.mesa,
+# the file itself or config.json in it), else the built-in 7770. A bare `naru serve`
+# under launchd carries no port flag, so the config is the only place it can come from.
+if [ -z "$PORT" ]; then
+  cfg="${NARU_CONFIG_FILE:-${MESA_CONFIG_FILE:-}}"
+  [ -n "$cfg" ] || cfg="$(plist_env NARU_CONFIG_FILE)"
+  [ -n "$cfg" ] || cfg="$(plist_env MESA_CONFIG_FILE)"
+  if [ -z "$cfg" ]; then
+    cfg="$HOME/.naru"; [ -e "$cfg" ] || { [ -e "$HOME/.mesa" ] && cfg="$HOME/.mesa"; }
+    [ -d "$cfg" ] && cfg="$cfg/config.json"
+  fi
+  [ -f "$cfg" ] && PORT="$(jq -r '.serve.port // empty' "$cfg" 2>/dev/null)"
+  case "$PORT" in ''|*[!0-9]*) PORT=7770 ;; esac
+  [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ] || PORT=7770
+fi
+log "health port: $PORT"
 export NARU_DB="$db"
 log "db: $db"
 mkdir -p "$BACKUP_DIR" || abort "cannot create $BACKUP_DIR"
@@ -234,9 +251,10 @@ fi
 log "UNHEALTHY: $fail_reason; rolling back"
 [ -s "$LOG" ] && tail -n 20 "$LOG" >&2
 rb=""
+# naru.prev was signed when installed: copy it as is, re-signing would change its bytes.
 rtmp="$(mktemp "$BIN_DIR/.naru.XXXXXX")" && cp -p "$BIN_DIR/naru.prev" "$rtmp" \
-  && { command -v codesign >/dev/null 2>&1 && codesign --force --sign - "$rtmp" >/dev/null 2>&1; true; } \
   && mv -f "$rtmp" "$INSTALLED" || rb="binary restore failed"
+[ -n "$rb" ] || cmp -s "$BIN_DIR/naru.prev" "$INSTALLED" || rb="binary restore not byte-identical"
 if [ -z "$rb" ] && [ -f "$backup_db" ]; then
   # Only ever overwrite the db the server uses: it must already exist, so a restore can
   # never create a second db beside it.

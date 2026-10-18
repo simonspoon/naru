@@ -91,7 +91,7 @@ set +e
 out=$(NARU_DEPLOY_RESTART_CMD="$hook" NARU_DEPLOY_HEALTH_CMD="$BAD_HEALTH" NARU_DEPLOY_NEW_BIN="$TMP/newbin" scripts/self-deploy.sh --skip-checks 2>/dev/null); rc=$?
 set -e
 [ "$rc" = 1 ] && [ "$(echo "$out" | jq -r .status)" = rolled_back ] || fail "expected rolled_back ($rc): $out"
-# re-signing on restore may change bytes, so compare behaviour not sha
+[ "$(shasum "$NARU" | cut -d' ' -f1)" = "$before" ] && cmp -s "$NARU" "$PREFIX/bin/naru.prev" || fail "rollback not byte-identical to naru.prev"
 [ "$("$NARU" --version)" = "$("$SRC" --version)" ] && [ "$("$NARU" --version)" != "naru 9.9.9" ] || fail "binary not restored"
 [ -e "$TMP/wrote" ] && [ "$("$NARU" project list | jq length)" = 1 ] || fail "db not restored to the backup"
 [ ! -e "$TMP/paused" ] || fail "queue left paused after rollback"
@@ -164,4 +164,41 @@ set -e
 [ "$rc" = 1 ] && [ "$(echo "$out" | jq -r .status)" = rollback_failed ] && echo "$out" | jq -r .reason | grep -q "db restore failed" || fail "missing-target verdict ($rc): $out"
 [ -d "$LIVE" ] && [ ! -e "$AS/naru/naru.db" ] && [ -z "$(ls -A "$LIVE")" ] || fail "restore created a db"
 ok "missing restore target -> rollback_failed, no file created"
+
+# ---- health port: NARU_DEPLOY_PORT, else the config's serve.port, else 7770 ----------
+# Default /api/version check (no NARU_DEPLOY_HEALTH_CMD) against a stub server that
+# answers {"version":"9.9.9"}; ports are unlikely ones, checked free first.
+cat >"$TMP/stub.py" <<'PY'
+import http.server, sys
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        b = b'{"version":"9.9.9"}'
+        self.send_response(200); self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
+    def log_message(self, *a): pass
+http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+PY
+P1=18877; P2=18878
+for p in $P1 $P2; do ! lsof -nP -iTCP:$p -sTCP:LISTEN >/dev/null 2>&1 || fail "port $p busy"; done
+python3 -I "$TMP/stub.py" $P1 & S1=$!
+trap 'kill $S1 2>/dev/null; rm -rf "$TMP"' EXIT
+sleep 1
+echo "{\"serve\":{\"port\":$P1}}" >"$TMP/port-config.json"
+port_deploy() { # port_deploy <config file> [extra env...]: a deploy judged by the default /api/version check
+  local cfg="$1"; shift
+  cp "$SRC" "$NARU"; rm -f "$TMP/paused"
+  set +e
+  out=$(env -u NARU_DEPLOY_HEALTH_CMD MESA_CONFIG_FILE="$cfg" "$@" NARU_DEPLOY_HEALTH_TIMEOUT=2 NARU_DEPLOY_LIVE_CHECK=0 NARU_DEPLOY_NEW_BIN="$TMP/newbin" scripts/self-deploy.sh --skip-checks 2>/dev/null); rc=$?
+  set -e
+}
+port_deploy "$TMP/port-config.json"
+[ "$rc" = 0 ] && [ "$(echo "$out" | jq -r .status)" = swapped ] || fail "serve.port in the config not used ($rc): $out"
+ok "health check follows the config's serve.port"
+port_deploy "$TMP/no-config.json"
+[ "$rc" = 1 ] && [ "$(echo "$out" | jq -r .status)" != swapped ] || fail "no config: should use 7770, not $P1 ($rc): $out"
+ok "no serve.port falls back to 7770"
+port_deploy "$TMP/port-config.json" NARU_DEPLOY_PORT=$P2
+[ "$rc" = 1 ] && [ "$(echo "$out" | jq -r .status)" != swapped ] || fail "NARU_DEPLOY_PORT should override the config ($rc): $out"
+ok "NARU_DEPLOY_PORT overrides the config"
+kill $S1 2>/dev/null || true
 echo "self-deploy-check: all passed"

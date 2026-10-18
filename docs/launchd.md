@@ -7,8 +7,9 @@ to restart, so a real redeploy rolls back. The `com.naru.serve` user agent fixes
   `~/Library/LaunchAgents/com.naru.serve.plist`, lints it, then `launchctl bootout`
   (ignored if absent), `bootstrap gui/<uid>` and `kickstart`. `scripts/install.sh --launchd`
   does the same after the binary install. Both are opt-in; nothing loads it automatically.
-- It runs `$PREFIX/bin/naru serve` (default `~/.local/bin`), no flags, so port 7770 and the
-  `serve` config section apply. `RunAtLoad` + `KeepAlive`.
+- It runs `$PREFIX/bin/naru serve` (default `~/.local/bin`), no flags, so the `serve` config
+  section applies (its `port`, else 7770). `scripts/self-deploy.sh` health-checks that same
+  port (`NARU_DEPLOY_PORT` overrides). `RunAtLoad` + `KeepAlive`.
 - Logs: `~/.naru/serve.log` and `~/.naru/serve.err.log`.
 - Env: launchd starts with a bare environment, so the plist sets `HOME` and a `PATH`
   (`~/.local/bin`, Homebrew, system dirs). `NARU_DB`, `MESA_DB`, `MESA_CONFIG_FILE` and
