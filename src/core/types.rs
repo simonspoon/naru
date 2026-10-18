@@ -5224,6 +5224,10 @@ pub struct AgentQuestion {
     pub answer: Option<String>,
     pub created_at: String,
     pub answered_at: Option<String>,
+    /// `question` (needs a person) or `notice` (a report, no answer needed).
+    pub kind: String,
+    /// When the live agent first saw it (`ask list --mark-read`); `null` = unread.
+    pub read_at: Option<String>,
 }
 
 /// The nine key colours of a theme (naru task 1840), each `#rrggbb`. Every

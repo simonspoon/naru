@@ -664,6 +664,10 @@ struct AskArgs {
     /// Session id to record; default is CLAUDE_CODE_SESSION_ID
     #[arg(long)]
     session: Option<String>,
+    /// Queue a notice (a report, no answer needed) instead of a question; it
+    /// raises no "question waiting" notice in the live conversation
+    #[arg(long)]
+    notice: bool,
     /// Print the question without its `body`
     #[arg(long)]
     quiet: bool,
@@ -671,11 +675,20 @@ struct AskArgs {
 
 #[derive(Subcommand)]
 enum AskCmd {
-    /// List queued questions, oldest first
+    /// List queued questions and notices, oldest first
     List {
         /// Only `open` or `answered` ones
         #[arg(long)]
         status: Option<String>,
+        /// Only `question` or `notice` rows
+        #[arg(long)]
+        kind: Option<String>,
+        /// Only rows not yet marked read
+        #[arg(long)]
+        unread: bool,
+        /// Stamp the rows listed as read (the first read is kept)
+        #[arg(long)]
+        mark_read: bool,
     },
     /// Show one question with its answer
     Show {
@@ -5712,16 +5725,31 @@ fn run_ask(args: AskArgs) -> Result<()> {
             let session = args
                 .session
                 .or_else(|| std::env::var("CLAUDE_CODE_SESSION_ID").ok());
-            let q = store.add_question(&args.text.join(" "), args.task, session.as_deref())?;
+            let kind = if args.notice { "notice" } else { "question" };
+            let q =
+                store.add_question(&args.text.join(" "), args.task, session.as_deref(), kind)?;
             // The queue is the durable record; the notice is only a nudge, so
-            // no live conversation (or a failed nudge) is not an error.
-            if let Ok(Some(live)) = store.current_live_session() {
+            // no live conversation (or a failed nudge) is not an error. Only a
+            // real question nudges: a notice is read in a batch (naru task 2065).
+            if !args.notice
+                && let Ok(Some(live)) = store.current_live_session()
+            {
                 let _ = store.add_live_notice(live.id, LiveNotice::Question);
             }
             print_record(&q, args.quiet, QUIET_DROP_QUESTION);
         }
-        Some(AskCmd::List { status }) => {
-            print_json(&store.list_questions(status.as_deref())?);
+        Some(AskCmd::List {
+            status,
+            kind,
+            unread,
+            mark_read,
+        }) => {
+            let rows = store.list_questions(status.as_deref(), kind.as_deref(), unread)?;
+            if mark_read {
+                let ids: Vec<i64> = rows.iter().map(|q| q.id).collect();
+                store.mark_questions_read(&ids)?;
+            }
+            print_json(&rows);
         }
         Some(AskCmd::Show { id, quiet }) => {
             print_record(&store.get_question(id)?, quiet, QUIET_DROP_QUESTION);
@@ -10690,6 +10718,8 @@ mod tests {
             answer: None,
             created_at: "t".into(),
             answered_at: None,
+            kind: "question".into(),
+            read_at: None,
         };
         let full = keys(&q);
         assert_eq!(
@@ -10702,7 +10732,9 @@ mod tests {
                 "status",
                 "answer",
                 "created_at",
-                "answered_at"
+                "answered_at",
+                "kind",
+                "read_at"
             ]),
             "AgentQuestion gained/lost a field: decide whether it belongs in the \
              --quiet shape before updating this list",

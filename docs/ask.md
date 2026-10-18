@@ -11,7 +11,15 @@ queues a question instead of guessing or stalling.
   (`LiveNotice::Question`, deduped per working span like every notice) so the
   live agent looks. With no live session the queue alone is the record and the
   command still exits 0.
-- `naru ask list [--status open|answered]` / `ask show <id>` read the queue.
+- Rows have a `kind` (naru task 2065): `question` (default) or `notice`, from
+  `naru ask --notice …` — a completion report that needs no answer (the task
+  loop's last node, the stale-claim sweep). A notice raises **no** notice turn
+  and cannot be answered (`conflict`). `read_at` is when the live agent first
+  saw it; existing rows are unread questions.
+- `naru ask list [--status open|answered] [--kind question|notice] [--unread]
+  [--mark-read]` / `ask show <id>` read the queue. `--mark-read` stamps the
+  listed rows, so rule 16's `ask list --kind notice --unread --mark-read` is a
+  one-call batch the live agent summarises in a line.
 - `naru ask answer <id> <text…>` answers once (`conflict` the second time).
   The asker reads it with `ask show <id>`; nothing is pushed to the asker.
 - `--quiet` drops `body` (and `answer` on show/answer).

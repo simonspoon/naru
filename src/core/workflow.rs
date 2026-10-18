@@ -2368,7 +2368,7 @@ else
 fi
 SUM=$(printf '%s' "$SUM" | tr '\n' ' ' | cut -c 1-200)
 MSG="Task loop notice (no answer needed) - task $TASK: $OUTCOME. $SUM"
-naru ask --task "$TASK" "$MSG" > /dev/null 2>&1 || naru ask "$MSG" > /dev/null 2>&1
+naru ask --notice --task "$TASK" "$MSG" > /dev/null 2>&1 || naru ask --notice "$MSG" > /dev/null 2>&1
 exit 0
 "##;
 

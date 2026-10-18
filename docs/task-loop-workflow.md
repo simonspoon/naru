@@ -340,7 +340,7 @@ Loop smoke test passed.
 
 The last node of the Task loop, **Notify live agent**, is an `always` cli node
 (`docs/workflows.md`): it has no edges, runs after every other node on every
-outcome and queues one `naru ask --task <id>` row, "Task loop notice (no answer
+outcome and queues one `naru ask --notice --task <id>` row (kind `notice`: no "question waiting" notice turn, naru task 2065), "Task loop notice (no answer
 needed) - task N: <outcome>. <name> (<verdict/iterations>)". The outcome is
 `done`, `backlog`, `split` (the Split step made sub-tasks), `cancelled` (the
 task is cancelled), or `error` (the run failed, the message carrying the

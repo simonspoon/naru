@@ -1490,6 +1490,11 @@ const MIGRATIONS: &[&str] = &[
         answered_at TEXT
      );
      CREATE INDEX idx_agent_questions_status ON agent_questions(status, id);",
+    // Naru task 2065: an ask row is a `question` (needs a person) or a
+    // `notice` (a completion report, no answer needed); `read_at` is when the
+    // live agent first saw a notice. Existing rows stay unread questions.
+    "ALTER TABLE agent_questions ADD COLUMN kind TEXT NOT NULL DEFAULT 'question'; \
+     ALTER TABLE agent_questions ADD COLUMN read_at TEXT;",
 ];
 
 /// Selects full task rows including the derived `blocked` flag.
@@ -1569,6 +1574,8 @@ fn row_to_agent_question(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentQuest
         answer: row.get(5)?,
         created_at: row.get(6)?,
         answered_at: row.get(7)?,
+        kind: row.get(8)?,
+        read_at: row.get(9)?,
     })
 }
 
@@ -4845,7 +4852,7 @@ impl Store {
     pub const QUESTION_MAX: usize = 8192;
 
     const QUESTION_COLUMNS: &'static str =
-        "id, task_id, session, body, status, answer, created_at, answered_at";
+        "id, task_id, session, body, status, answer, created_at, answered_at, kind, read_at";
 
     /// Queues a question (naru task 2014). `body` non-blank, at most
     /// [`Self::QUESTION_MAX`] bytes; an unknown `task_id` is `Validation`.
@@ -4854,7 +4861,13 @@ impl Store {
         body: &str,
         task_id: Option<i64>,
         session: Option<&str>,
+        kind: &str,
     ) -> Result<AgentQuestion> {
+        if kind != "question" && kind != "notice" {
+            return Err(Error::Validation(format!(
+                "'{kind}' is not one of question|notice"
+            )));
+        }
         if body.trim().is_empty() {
             return Err(Error::Validation("question must not be empty".into()));
         }
@@ -4870,9 +4883,9 @@ impl Store {
         }
         let session = session.map(str::trim).filter(|s| !s.is_empty());
         self.conn.execute(
-            "INSERT INTO agent_questions (task_id, session, body, created_at) \
-             VALUES (?1, ?2, ?3, datetime('now'))",
-            (task_id, session, body),
+            "INSERT INTO agent_questions (task_id, session, body, kind, created_at) \
+             VALUES (?1, ?2, ?3, ?4, datetime('now'))",
+            (task_id, session, body, kind),
         )?;
         self.get_question(self.conn.last_insert_rowid())
     }
@@ -4891,8 +4904,14 @@ impl Store {
             .ok_or_else(|| Error::NotFound(format!("question {id} not found")))
     }
 
-    /// Questions oldest first, optionally only `open` or `answered`.
-    pub fn list_questions(&self, status: Option<&str>) -> Result<Vec<AgentQuestion>> {
+    /// Rows oldest first, optionally only `open` or `answered`, only a
+    /// `kind` (`question`|`notice`), and/or only those not yet read.
+    pub fn list_questions(
+        &self,
+        status: Option<&str>,
+        kind: Option<&str>,
+        unread: bool,
+    ) -> Result<Vec<AgentQuestion>> {
         if let Some(s) = status
             && s != "open"
             && s != "answered"
@@ -4901,12 +4920,33 @@ impl Store {
                 "'{s}' is not one of open|answered"
             )));
         }
+        if let Some(k) = kind
+            && k != "question"
+            && k != "notice"
+        {
+            return Err(Error::Validation(format!(
+                "'{k}' is not one of question|notice"
+            )));
+        }
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT {} FROM agent_questions WHERE (?1 IS NULL OR status = ?1) ORDER BY id",
+            "SELECT {} FROM agent_questions WHERE (?1 IS NULL OR status = ?1) \
+             AND (?2 IS NULL OR kind = ?2) AND (?3 = 0 OR read_at IS NULL) ORDER BY id",
             Self::QUESTION_COLUMNS
         ))?;
-        let rows = stmt.query_map([status], row_to_agent_question)?;
+        let rows = stmt.query_map((status, kind, unread), row_to_agent_question)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Stamps `read_at` on these rows; the first read is kept, never moved.
+    pub fn mark_questions_read(&mut self, ids: &[i64]) -> Result<()> {
+        for id in ids {
+            self.conn.execute(
+                "UPDATE agent_questions SET read_at = datetime('now') \
+                 WHERE id = ?1 AND read_at IS NULL",
+                [id],
+            )?;
+        }
+        Ok(())
     }
 
     /// Answers an open question once; a second answer is `Conflict`.
@@ -4921,6 +4961,11 @@ impl Store {
             )));
         }
         let q = self.get_question(id)?;
+        if q.kind == "notice" {
+            return Err(Error::Conflict(format!(
+                "{id} is a notice, not a question; nothing to answer"
+            )));
+        }
         if q.status != "open" {
             return Err(Error::Conflict(format!(
                 "question {id} is already answered"
@@ -13737,22 +13782,33 @@ mod tests {
         let p = store.create_project("p", None, None, None, None).unwrap();
         let t = add_task(&mut store, p.id, "task");
         let q = store
-            .add_question("which way?", Some(t.id), Some("s1"))
+            .add_question("which way?", Some(t.id), Some("s1"), "question")
             .unwrap();
         assert_eq!((q.status.as_str(), q.answer.as_deref()), ("open", None));
         assert!(matches!(
-            store.add_question("  ", None, None),
+            store.add_question("  ", None, None, "question"),
             Err(Error::Validation(_))
         ));
         assert!(matches!(
-            store.add_question("x", Some(999), None),
+            store.add_question("x", Some(999), None, "question"),
             Err(Error::Validation(_))
         ));
-        assert_eq!(store.list_questions(Some("open")).unwrap().len(), 1);
+        assert_eq!(
+            store
+                .list_questions(Some("open"), None, false)
+                .unwrap()
+                .len(),
+            1
+        );
         let a = store.answer_question(q.id, "left").unwrap();
         assert_eq!(a.answer.as_deref(), Some("left"));
         assert!(a.answered_at.is_some());
-        assert!(store.list_questions(Some("open")).unwrap().is_empty());
+        assert!(
+            store
+                .list_questions(Some("open"), None, false)
+                .unwrap()
+                .is_empty()
+        );
         assert!(matches!(
             store.answer_question(q.id, "right"),
             Err(Error::Conflict(_))
@@ -17004,15 +17060,15 @@ mod tests {
         );
         assert_eq!(
             MIGRATIONS.len(),
-            95,
-            "a fresh db should report user_version 95"
+            96,
+            "a fresh db should report user_version 96"
         );
         let (store, _dir) = temp_store();
         let version: i64 = store
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 95);
+        assert_eq!(version, 96);
     }
 
     /// Workflows replace diagrams at migration 83 (mesa task 1607): a db that

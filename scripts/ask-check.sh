@@ -75,4 +75,25 @@ run 0 "$NARU" live turns
 N=$(echo "$OUT" | jq '[.[]|select(.notice=="question")]|length')
 [ "$N" = 1 ] || fail "wanted exactly one question notice turn, got $N"
 ok "live session: one deduped question notice"
-echo "open_questions_after_answer=$OPEN live_notice_turns_with_session=$N"
+run 0 "$NARU" ask --notice --task "$TASK" "Task loop notice (no answer needed) - done"
+[ "$(echo "$OUT" | jq -r .kind)" = notice ] || fail "notice kind"
+[ "$(echo "$OUT" | jq -r .read_at)" = null ] || fail "new notice must be unread"
+run 0 "$NARU" ask --notice "another update"
+run 0 "$NARU" live turns
+N2=$(echo "$OUT" | jq '[.[]|select(.notice=="question")]|length')
+[ "$N2" = "$N" ] || fail "notice rows raised a question notice turn ($N -> $N2)"
+run 0 "$NARU" ask list --kind notice --unread --mark-read
+[ "$(echo "$OUT" | jq length)" = 2 ] || fail "wanted 2 unread notices"
+run 0 "$NARU" ask list --kind notice --unread
+[ "$(echo "$OUT" | jq length)" = 0 ] || fail "notices still unread after --mark-read"
+run 0 "$NARU" ask list --kind notice
+echo "$OUT" | jq -e 'all(.[]; .read_at != null)' >/dev/null || fail "read_at not stamped"
+run 0 "$NARU" ask list --kind question
+echo "$OUT" | jq -e 'all(.[]; .kind=="question")' >/dev/null || fail "kind filter"
+NID=$("$NARU" ask list --kind notice | jq -r '.[0].id')
+run 1 "$NARU" ask answer "$NID" nope
+echo "$ERR" | grep -q conflict || fail "answering a notice must be conflict"
+run 1 "$NARU" ask list --kind bogus
+echo "$ERR" | grep -q validation || fail "bad kind must be validation"
+ok "notice rows: no question notice turn, batched read, kind filter"
+echo "open_questions_after_answer=$OPEN live_notice_turns_with_session=$N question_notice_turns_from_notice_rows=$((N2-N))"
