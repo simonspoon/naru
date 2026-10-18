@@ -208,6 +208,8 @@ subagent's events under the `Agent` call that launched it ("label · N events");
 events whose launching call is not in the view sit in an "earlier subagent"
 group.
 
+The runner puts the toolchain dirs that exist (`~/.cargo/bin`, homebrew, `~/.local/bin`, pnpm) in front of the inherited `PATH` of the `claude` it starts (`proc::augment_path`, naru task 2054), so an agent step finds `cargo` even when the server was started without it.
+
 Gate: `scripts/runner-check.sh`.
 
 ## Named, idempotent enqueue (naru task 2051)

@@ -1032,6 +1032,7 @@ fn run_runner_locked(dir: &Path) -> Result<()> {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(log);
+        crate::core::proc::augment_path(&mut cmd);
         crate::core::proc::isolate(&mut cmd);
         cmd.spawn()
             .map_err(|e| Error::Unavailable(format!("cannot start claude: {e}")))

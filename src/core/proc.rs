@@ -42,6 +42,56 @@ pub fn bash() -> Command {
     }
 }
 
+/// `inherited` with the toolchain bin dirs that exist (cargo, homebrew,
+/// `~/.local/bin`, pnpm) put in front, each once. The inherited entries are
+/// all kept, so nothing the caller had on `PATH` is lost.
+fn toolchain_path(
+    home: Option<&std::path::Path>,
+    pnpm_home: Option<std::path::PathBuf>,
+    inherited: Option<std::ffi::OsString>,
+) -> Option<std::ffi::OsString> {
+    use std::path::PathBuf;
+    let mut wanted: Vec<PathBuf> = Vec::new();
+    if let Some(h) = home {
+        wanted.push(h.join(".cargo/bin"));
+    }
+    wanted.push("/opt/homebrew/bin".into());
+    wanted.push("/opt/homebrew/sbin".into());
+    wanted.push("/usr/local/bin".into());
+    if let Some(h) = home {
+        wanted.push(h.join(".local/bin"));
+    }
+    if let Some(p) = pnpm_home.or_else(|| home.map(|h| h.join("Library/pnpm"))) {
+        wanted.push(p);
+    }
+    let mut out: Vec<PathBuf> = Vec::new();
+    for d in wanted {
+        if d.is_dir() && !out.contains(&d) {
+            out.push(d);
+        }
+    }
+    if let Some(p) = &inherited {
+        for d in std::env::split_paths(p) {
+            if !out.contains(&d) {
+                out.push(d);
+            }
+        }
+    }
+    std::env::join_paths(out).ok()
+}
+
+/// Gives the child `cmd` will spawn the toolchain dirs on its `PATH`, so an
+/// agent run by a server that was started without `~/.cargo/bin` (launchd, a
+/// bare shell) can still run `cargo`.
+pub fn augment_path(cmd: &mut Command) -> &mut Command {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let pnpm = std::env::var_os("PNPM_HOME").map(std::path::PathBuf::from);
+    if let Some(p) = toolchain_path(home.as_deref(), pnpm, std::env::var_os("PATH")) {
+        cmd.env("PATH", p);
+    }
+    cmd
+}
+
 #[cfg(windows)]
 fn windows_bash() -> std::path::PathBuf {
     use std::path::PathBuf;
@@ -168,5 +218,40 @@ mod tests {
         }
         assert_eq!(git_bash_for(&root.join("other").join("git.exe")), None);
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod path_tests {
+    use super::*;
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+
+    #[test]
+    fn toolchain_dirs_that_exist_lead_the_inherited_path() {
+        let home = std::env::temp_dir().join(format!("naru-path-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join(".cargo/bin")).unwrap();
+        let got = toolchain_path(Some(&home), None, Some(OsString::from("/a:/b"))).unwrap();
+        let parts: Vec<PathBuf> = std::env::split_paths(&got).collect();
+        assert_eq!(parts[0], home.join(".cargo/bin"));
+        // missing dirs are skipped, inherited entries all kept in order
+        assert!(!parts.contains(&home.join(".local/bin")));
+        assert_eq!(
+            &parts[parts.len() - 2..],
+            [PathBuf::from("/a"), "/b".into()]
+        );
+        // an inherited entry already added in front is not repeated
+        let again = toolchain_path(
+            Some(&home),
+            None,
+            Some(std::env::join_paths([home.join(".cargo/bin"), "/a".into()]).unwrap()),
+        )
+        .unwrap();
+        let n = std::env::split_paths(&again)
+            .filter(|p| *p == home.join(".cargo/bin"))
+            .count();
+        assert_eq!(n, 1);
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

@@ -65,6 +65,8 @@ mkdir -p "$STUB"
 cat > "$STUB/claude" <<STUBEOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$STUB/argv.log"
+printf '%s\n' "\$PATH" > "$STUB/path.log"
+cargo --version > /dev/null 2>&1; echo \$? > "$STUB/cargo.exit"
 if [ -f "$STUB/fail-resume" ] && [[ " \$* " == *" --resume "* ]]; then
   echo "No conversation found" >&2; exit 1
 fi
@@ -124,6 +126,11 @@ done
 exit 0
 STUBEOF
 chmod +x "$STUB/claude"
+# A fake cargo under the throwaway HOME's ~/.cargo/bin, which this script's own
+# PATH does not hold: the agent step must still find it (naru task 2054).
+mkdir -p "$HOME/.cargo/bin"
+printf '#!/bin/sh\necho "cargo 0.0.0-stub"\n' > "$HOME/.cargo/bin/cargo"
+chmod +x "$HOME/.cargo/bin/cargo"
 export MESA_CLAUDE_BIN="$STUB/claude"
 
 wait_for() { # <seconds> <description> <cmd...>
@@ -164,6 +171,9 @@ status_is "$ID" idle || fail "run should be idle after its result: $(job_field "
 grep -q -- "--session-id $SESSION" "$STUB/argv.log" || fail "first start must pass --session-id $SESSION: $(cat "$STUB/argv.log")"
 grep -q -- "--model haiku" "$STUB/argv.log" || fail "model not passed: $(cat "$STUB/argv.log")"
 ok "(a) the turn finished with no server running; claude started once with --session-id"
+[ "$(cat "$STUB/cargo.exit")" = 0 ] || fail "cargo --version failed inside the agent step (PATH: $(cat "$STUB/path.log"))"
+case "$(cat "$STUB/path.log")" in "$HOME/.cargo/bin:"*) ;; *) fail "agent PATH should start with ~/.cargo/bin: $(cat "$STUB/path.log")" ;; esac
+ok "agent step: ~/.cargo/bin leads PATH and cargo --version exits 0"
 
 # ---- (b) a restarted serve shows events and the result ----
 echo 0 > "$STUB/sleep-secs"
