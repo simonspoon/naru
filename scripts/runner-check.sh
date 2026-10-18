@@ -134,8 +134,10 @@ chmod +x "$HOME/.cargo/bin/cargo"
 export MESA_CLAUDE_BIN="$STUB/claude"
 
 wait_for() { # <seconds> <description> <cmd...>
+  # Deadlines are scaled (WAIT_SCALE, default 3): a loaded box (a parallel build) is slow, and a
+  # passing wait returns as soon as its condition holds, so a generous deadline costs nothing.
   local secs=$1 what=$2; shift 2
-  for _ in $(seq 1 $((secs * 10))); do "$@" >/dev/null 2>&1 && return 0; sleep 0.1; done
+  for _ in $(seq 1 $((secs * 10 * ${WAIT_SCALE:-3}))); do "$@" >/dev/null 2>&1 && return 0; sleep 0.1; done
   fail "timed out waiting for: $what"
 }
 start_serve() {
@@ -149,6 +151,8 @@ status_is() { [ "$(job_field "$1" status)" = "$2" ]; }
 result_is() { [ "$(job_field "$1" last_result)" = "$2" ]; }
 pid_alive() { kill -0 "$1" 2>/dev/null; }
 delivered_is() { [ "$(grep -c message_delivered "$RUNS/$1/events.jsonl")" = "$2" ]; }
+# The stub has read (and logged) at least N lines; "delivered" only means written to its stdin.
+turns_at_least() { [ "$(wc -l < "$STUB/turns.log" | tr -d " ")" -ge "$1" ]; }
 resumed_idle() { [ "$(job_field "$1" resumes)" = 1 ] && status_is "$1" idle; }
 
 # ---- (a) a run outlives the serve that started it ----
@@ -348,10 +352,14 @@ ok "three messages folded into one turn gave one result and the run went idle"
 # ---- urgent send: --interrupt cuts the turn in flight, then delivers as a fresh turn ----
 : > "$STUB/control.log"
 echo 30 > "$STUB/sleep-secs"
+: > "$STUB/turns.log"
 J9=$("$NARU" run start --model haiku --cwd "$TMP/work" "very long turn" | jq -r .job_id)
 wait_for 10 "urgent: long turn delivered" delivered_is "$J9" 1
+wait_for 10 "urgent: stub began the long turn" turns_at_least 1
 "$NARU" run send "$J9" "plain" >/dev/null
 wait_for 5 "urgent: plain message delivered mid-turn" delivered_is "$J9" 2
+# The stub must have read "plain" (and its 30 s sleep) before sleep-secs changes.
+wait_for 10 "urgent: stub read the plain message" turns_at_least 2
 [ ! -s "$STUB/control.log" ] || fail "a plain send must not interrupt: $(cat "$STUB/control.log")"
 echo 0 > "$STUB/sleep-secs"
 "$NARU" run send --interrupt "$J9" "urgent" >/dev/null
@@ -395,7 +403,10 @@ wait_for 10 "marker: stub began the turn" test -s "$STUB/turns.log"
 "$NARU" run send "$J11" "mid-wait" >/dev/null
 wait_for 5 "marker: appears after a plain send mid-turn" test -e "$RUNS/$J11/message-pending"
 wait_for 15 "marker: gone once the turn continues" test ! -e "$RUNS/$J11/message-pending"
+wait_for 10 "marker: stub read the mid-wait message" turns_at_least 2
 echo 0 > "$STUB/sleep-secs"
+# Turn 2 still holds its 6 s sleep: let it answer before an idle message goes in.
+wait_for 20 "marker: mid-wait answered" result_is "$J11" "echo: mid-wait"
 wait_for 15 "marker: run settled" status_is "$J11" idle
 "$NARU" run send "$J11" "idle one" >/dev/null
 wait_for 10 "marker: idle message answered" result_is "$J11" "echo: idle one"
