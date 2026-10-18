@@ -40,7 +40,7 @@ trap cleanup EXIT
 export MESA_DB="$TMP/mesa.db"
 export HOME="$TMP/home"
 export MESA_CONFIG_FILE="$TMP/config.json"
-mkdir -p "$HOME" "$TMP/work" "$TMP/bin"
+mkdir -p "$HOME" "$TMP/work" "$TMP/other" "$TMP/bin"
 echo '{"notify":{"base-url":"http://127.0.0.1:7770"}}' > "$MESA_CONFIG_FILE"
 # The workflow's cli nodes run a bare `naru`.
 ln -s "$NARU" "$TMP/bin/naru"
@@ -355,6 +355,70 @@ git -C "$TMP/work" diff --quiet -- seed.txt || fail "debris: tracked file still 
 "$NARU" task show "$T" | jq -e '.notes | map(.body) | any(test("Restored to their state") and test("draft.txt"))' >/dev/null || fail "debris: note"
 rm -f "$TMP/work/pre.txt"
 ok "a bounced run puts back its debris and leaves a pre-dirty file as it found it"
+
+# ---- 7f. a task in another project: Commit, the baseline and the debris restore run in that project's repo (naru task 2044) ----
+git -C "$TMP/other" init -q
+git -C "$TMP/other" config user.email t@t
+git -C "$TMP/other" config user.name t
+echo seed > "$TMP/other/oseed.txt"
+git -C "$TMP/other" add oseed.txt
+git -C "$TMP/other" commit -q -m seed
+"$NARU" project create otherproj --no-git --path "$TMP/other" >/dev/null
+mko() { "$NARU" task create otherproj "$1" | jq -r .id; }
+reset_stub
+printf 'UI: no' > "$STUB/reply.planner"
+printf 'VERDICT: PASS' > "$STUB/reply.verifier"
+printf 'VERDICT: PASS' > "$STUB/reply.diff-reviewer"
+printf '%s\n' "$TMP/other/other.txt" > "$STUB/touch.implementer"
+echo ostray > "$TMP/other/ostray.txt"
+wbefore=$(git -C "$TMP/work" rev-parse HEAD)
+obefore=$(git -C "$TMP/other" rev-parse HEAD)
+T=$(mko "Fix in the other repo")
+R=$(run_loop "$T")
+[ "$(jq -r .status <<<"$R")" = succeeded ] && [ "$(tstatus "$T")" = done ] && [ "$(step "$R" "Commit")" = ok ] || fail "cross: run $(jq -c '{status,error}' <<<"$R") task $(tstatus "$T")"
+[ "$(git -C "$TMP/other" rev-parse HEAD)" != "$obefore" ] || fail "cross: nothing committed in the task's repo"
+git -C "$TMP/other" log -1 --format=%s | grep -q "task $T" || fail "cross: commit subject: $(git -C "$TMP/other" log -1 --format=%s)"
+[ "$(git -C "$TMP/other" show --name-only --format= HEAD)" = other.txt ] || fail "cross: commit holds $(git -C "$TMP/other" show --name-only --format= HEAD)"
+[ "$(git -C "$TMP/other" status --porcelain)" = "?? ostray.txt" ] || fail "cross: other tree: $(git -C "$TMP/other" status --porcelain)"
+[ "$(git -C "$TMP/work" rev-parse HEAD)" = "$wbefore" ] || fail "cross: the workflow repo got a commit"
+"$NARU" task show "$T" | jq -e '.notes | map(.body) | any(test("^Committed [0-9a-f]+ by the task loop")) and any(test("ostray.txt"))' >/dev/null || fail "cross: notes"
+metric "$T" PASS 1 done cross
+ok "a task in another project is committed in that project's repo, its pre-dirty file left, the workflow repo untouched"
+rm -f "$TMP/other/ostray.txt"
+
+# a task changing both repos: one commit in each, reported together
+reset_stub
+printf 'UI: no' > "$STUB/reply.planner"
+printf 'VERDICT: PASS' > "$STUB/reply.verifier"
+printf 'VERDICT: PASS' > "$STUB/reply.diff-reviewer"
+printf '%s\n%s\n' "$TMP/other/both-o.txt" "$TMP/work/both-w.txt" > "$STUB/touch.implementer"
+wbefore=$(git -C "$TMP/work" rev-parse HEAD)
+obefore=$(git -C "$TMP/other" rev-parse HEAD)
+T=$(mko "Fix in both repos")
+R=$(run_loop "$T")
+[ "$(tstatus "$T")" = done ] && [ "$(step "$R" "Commit")" = ok ] || fail "both: task $(tstatus "$T"), Commit $(step "$R" "Commit")"
+[ "$(git -C "$TMP/other" show --name-only --format= HEAD)" = both-o.txt ] && [ "$(git -C "$TMP/other" rev-parse HEAD)" != "$obefore" ] || fail "both: other commit"
+[ "$(git -C "$TMP/work" show --name-only --format= HEAD)" = both-w.txt ] && [ "$(git -C "$TMP/work" rev-parse HEAD)" != "$wbefore" ] || fail "both: work commit"
+[ -z "$(git -C "$TMP/other" status --porcelain)$(git -C "$TMP/work" status --porcelain)" ] || fail "both: a tree is dirty"
+"$NARU" task show "$T" | jq -e '[.notes[].body | select(test("^Committed "))] | length == 2' >/dev/null || fail "both: commit notes"
+ok "a task changing two repos gets one commit in each"
+
+# a bounce restores debris in the task's repo too, a pre-dirty file there as it was
+reset_stub
+printf 'UI: no' > "$STUB/reply.planner"
+printf 'VERDICT: PASS' > "$STUB/reply.verifier"
+printf 'still broken\nVERDICT: FAIL' > "$STUB/reply.diff-reviewer"
+printf '%s\n%s\n%s\n' "$TMP/other/odraft.txt" "$TMP/other/oseed.txt" "$TMP/other/opre.txt" > "$STUB/touch.implementer"
+echo early > "$TMP/other/opre.txt"
+T=$(mko "Fix other bounce")
+R=$(run_loop "$T")
+[ "$(tstatus "$T")" = backlog ] || fail "cross debris: task $(tstatus "$T")"
+[ ! -e "$TMP/other/odraft.txt" ] || fail "cross debris: untracked draft left behind"
+git -C "$TMP/other" diff --quiet -- oseed.txt || fail "cross debris: tracked file still modified"
+[ "$(cat "$TMP/other/opre.txt")" = early ] && [ "$(git -C "$TMP/other" status --porcelain)" = "?? opre.txt" ] || fail "cross debris: tree: $(git -C "$TMP/other" status --porcelain)"
+"$NARU" task show "$T" | jq -e '.notes | map(.body) | any(test("Restored to their state") and test("odraft.txt"))' >/dev/null || fail "cross debris: note"
+rm -f "$TMP/other/opre.txt"
+ok "a bounced run in another project's repo puts back its debris there"
 
 # ---- 8. a failing vox send is caught: backlog, run still succeeds ----
 reset_stub

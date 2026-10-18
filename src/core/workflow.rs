@@ -1980,6 +1980,11 @@ stage_run() { # <name> <agent> <deadline> <brief file> [extra stage args]
     --scratch "$SCRATCH/$name" --brief-file "$brief" "$@" > "$SCRATCH/$name.json" 2> "$SCRATCH/$name.err" \
     || echo '{"verdict":"INCONCLUSIVE","reason":"the stage driver itself failed"}' > "$SCRATCH/$name.json"
 }
+# The repos this run touches (naru task 2044), one top-level dir per line in $SCRATCH/repos.txt: the
+# workflow project's repo first (its baseline files live in $SCRATCH), then the task's own project repo
+# when that is another one (its files live in $SCRATCH/repo-<n>). No file = just the working dir.
+repo_each() { if [ -s "$SCRATCH/repos.txt" ]; then cat "$SCRATCH/repos.txt"; else pwd; fi; }
+repo_state() { if [ "$1" = 1 ]; then echo "$SCRATCH"; else echo "$SCRATCH/repo-$1"; fi; }
 stage_verdict() { jq -r '.verdict // "INCONCLUSIVE"' "$SCRATCH/$1.json" 2>/dev/null || echo INCONCLUSIVE; }
 note_reason() { jq -r --arg s "$1" '"\($s): \(.verdict) \(.reason // "")"' "$SCRATCH/$1.json" >> "$SCRATCH/reasons.txt" 2>/dev/null; return 0; }
 "##;
@@ -1995,18 +2000,31 @@ SCRATCH="$HOME/.naru/loop/$TASK-$(date +%s)-$$"
 mkdir -p "$SCRATCH"
 naru task show "$TASK" | jq -r '.description' > "$SCRATCH/task.md" || exit 1
 echo no > "$SCRATCH/ui"
-# baseline.txt: one `path<TAB>hash` line per path dirty before the run (hash `gone` = absent), so Commit can tell the task's own changes from earlier ones
-: > "$SCRATCH/baseline.txt"
-while IFS= read -r -d '' rec; do
-  case "$rec" in
-    R*|C*|\ R*|\ C*) IFS= read -r -d '' old; printf '%s\tgone\n' "$old" >> "$SCRATCH/baseline.txt" ;;
-  esac
-  p="${rec:3}"
-  if [ -e "$p" ]; then h=$(git hash-object -- "$p" 2>/dev/null || echo gone); else h=gone; fi
-  printf '%s\t%s\n' "$p" "$h" >> "$SCRATCH/baseline.txt"
-  # a copy of each, so a bounced run can put the path back as it was (naru task 2041)
-  if [ -f "$p" ]; then mkdir -p "$SCRATCH/base/$(dirname "$p")"; cp -p -- "$p" "$SCRATCH/base/$p" 2>/dev/null || true; fi
-done < <(git status --porcelain -z -uall 2>/dev/null)
+# repos.txt: the workflow project's repo, plus the repo of the task's own project when it is another one (naru task 2044)
+: > "$SCRATCH/repos.txt"
+add_repo() { # <dir>
+  local top; top=$(git -C "$1" rev-parse --show-toplevel 2>/dev/null) || return 0
+  grep -qxF -- "$top" "$SCRATCH/repos.txt" 2>/dev/null || printf '%s\n' "$top" >> "$SCRATCH/repos.txt"
+}
+add_repo "$PWD"
+LP=$(naru project show "$(naru task show "$TASK" | jq -r '.project_id')" 2>/dev/null | jq -r '.local_path // empty' 2>/dev/null)
+[ -z "$LP" ] || add_repo "$LP"
+[ -s "$SCRATCH/repos.txt" ] || pwd > "$SCRATCH/repos.txt"
+# per repo, baseline.txt: one `path<TAB>hash` line per path dirty before the run (hash `gone` = absent), so Commit can tell the task's own changes from earlier ones
+n=0
+while IFS= read -r repo; do
+  n=$((n+1)); ST=$(repo_state "$n"); mkdir -p "$ST"; : > "$ST/baseline.txt"
+  while IFS= read -r -d '' rec; do
+    case "$rec" in
+      R*|C*|\ R*|\ C*) IFS= read -r -d '' old; printf '%s\tgone\n' "$old" >> "$ST/baseline.txt" ;;
+    esac
+    p="${rec:3}"
+    if [ -e "$repo/$p" ]; then h=$(git -C "$repo" hash-object -- "$repo/$p" 2>/dev/null || echo gone); else h=gone; fi
+    printf '%s\t%s\n' "$p" "$h" >> "$ST/baseline.txt"
+    # a copy of each, so a bounced run can put the path back as it was (naru task 2041)
+    if [ -f "$repo/$p" ]; then mkdir -p "$ST/base/$(dirname "$p")"; cp -p -- "$repo/$p" "$ST/base/$p" 2>/dev/null || true; fi
+  done < <(git -C "$repo" status --porcelain -z -uall 2>/dev/null)
+done < "$SCRATCH/repos.txt"
 { brief_head planner; printf '\n## What to do\n\nWrite a short implementation plan: the files to touch, the steps, and how to verify. Do not edit any file. End with exactly one line, `UI: yes` if the change touches user-facing UI, else `UI: no`.\n'; } > "$SCRATCH/plan-brief.md"
 stage_run plan planner "$(dl 900)" "$SCRATCH/plan-brief.md"
 if [ "$(stage_verdict plan)" = COMPLETE ]; then
@@ -2038,7 +2056,7 @@ const LOOP_IMPLEMENT: &str = r##"N=@N@
 } > "$SCRATCH/impl-$N-brief.md"
 stage_run "impl$N" implementer "$(dl 2400)" "$SCRATCH/impl-$N-brief.md"
 if [ "$(stage_verdict "impl$N")" = COMPLETE ]; then
-  { git diff --stat; git status --short; } > "$SCRATCH/diff-$N.txt" 2>/dev/null
+  while IFS= read -r repo; do echo "== repo $repo =="; git -C "$repo" diff --stat; git -C "$repo" status --short; done < <(repo_each) > "$SCRATCH/diff-$N.txt" 2>/dev/null
   emit impl=ok
 else
   note_reason "impl$N"
@@ -2139,47 +2157,23 @@ SCRATCH=$(printf '%s' "$IN" | jq -r '.result // ""' | sed -n 's/.*Hand-off files
 echo "task=$TASK scratch=$SCRATCH ui=$(cat "$SCRATCH/ui" 2>/dev/null || echo no) close=done"
 "##;
 
-const LOOP_COMMIT: &str = r##"# Commit only what the run changed: a path dirty before the run (in baseline.txt) stays
-# out unless its content hash moved since; a refusal here would feed itself, every later
-# run starting from the same dirty tree.
-paths=()
-skipped=()
-rode=()
+const LOOP_COMMIT: &str = r##"# Commit only what the run changed, in each repo the run touches (naru task 2044: the workflow
+# project's and the task's own project's): a path dirty before the run (in that repo's
+# baseline.txt) stays out unless its content hash moved since; a refusal here would feed itself,
+# every later run starting from the same dirty tree. One repo failing never hides a commit made in another.
 add_path() { # <path>
   local p=$1 h line
   if [ -e "$p" ]; then h=$(git hash-object -- "$p" 2>/dev/null || echo gone); else h=gone; fi
   line=$(printf '%s\t%s' "$p" "$h")
-  if grep -qxF -- "$line" "$SCRATCH/baseline.txt" 2>/dev/null; then skipped+=("$p"); return; fi
-  if awk -F'\t' -v p="$p" '$1 == p { f = 1 } END { exit !f }' "$SCRATCH/baseline.txt" 2>/dev/null; then rode+=("$p"); fi
+  if grep -qxF -- "$line" "$BL" 2>/dev/null; then skipped+=("$p"); return; fi
+  if awk -F'\t' -v p="$p" '$1 == p { f = 1 } END { exit !f }' "$BL" 2>/dev/null; then rode+=("$p"); fi
   paths+=("$p")
 }
-while IFS= read -r -d '' rec; do
-  case "$rec" in
-    R*|C*|\ R*|\ C*) add_path "${rec:3}"; IFS= read -r -d '' old; add_path "$old" ;;
-    *) add_path "${rec:3}" ;;
-  esac
-done < <(git status --porcelain -z -uall)
-if [ "${#skipped[@]}" -gt 0 ] || [ "${#rode[@]}" -gt 0 ]; then
-  {
-    if [ "${#skipped[@]}" -gt 0 ]; then echo "Task loop commit: these paths were dirty before the run and unchanged by it, so they were left uncommitted:"; printf '%s\n' "${skipped[@]}"; fi
-    if [ "${#rode[@]}" -gt 0 ]; then echo "Task loop commit: these paths were dirty before the run and changed again by it, so they were committed with their earlier edits:"; printf '%s\n' "${rode[@]}"; fi
-  } | head -c 4000 > "$SCRATCH/commit-note.md"
-  naru task note "$TASK" --file "$SCRATCH/commit-note.md" > /dev/null || true
-fi
-if [ "${#paths[@]}" -eq 0 ]; then emit commit=none; exit 0; fi
-NAME=$(naru task show "$TASK" | jq -r '.name')
-if ! git add -A -- "${paths[@]}" || ! git commit -q -m "task $TASK: $NAME" -m "Naru task $TASK (task loop)" -- "${paths[@]}" > "$SCRATCH/commit.out" 2>&1; then
-  git reset -q -- "${paths[@]}" 2>/dev/null
-  naru task note "$TASK" "The task loop could not commit the change: $(head -c 1500 "$SCRATCH/commit.out")" > /dev/null
-  naru notify --title "Task loop" --open "tasks/$TASK" "Task $TASK passed but the commit failed." > /dev/null 2>&1 || true
-  exit 1
-fi
 # The build gate (naru task 2041): the committed tree must build on its own. A skipped
 # pre-dirty path may be what the committed files need (a `pub mod x;` in a file the
 # run did not touch), so on a failure those paths are folded in and the gate runs again.
 # NARU_LOOP_COMMIT_CHECK overrides the check; default `cargo check` for a Cargo.toml;
 # no known build system = no gate.
-ROOT=$(git rev-parse --show-toplevel)
 gate() {
   local cmd=${NARU_LOOP_COMMIT_CHECK:-} W="$SCRATCH/gate-wt" rc=0
   if [ -z "$cmd" ] && [ -f "$ROOT/Cargo.toml" ]; then cmd='cargo check --quiet'; fi
@@ -2191,26 +2185,62 @@ gate() {
   git worktree remove --force "$W" > /dev/null 2>&1 || true
   return $rc
 }
-if ! gate; then
-  fixed=no
-  if [ "${#skipped[@]}" -gt 0 ]; then
-    first=$(git rev-parse HEAD)
-    if git add -A -- "${skipped[@]}" && git commit -q --amend --no-edit -- "${skipped[@]}" > /dev/null 2>&1; then
-      if gate; then fixed=yes; else git update-ref HEAD "$first"; git reset -q -- "${skipped[@]}" 2>/dev/null; fi
+commit_repo() { # <repo dir> <state dir>: commits in that repo; appends its short sha to $SCRATCH/shas.txt
+  local repo=$1 ST=$2 rec old first
+  cd "$repo" || return 1
+  BL="$ST/baseline.txt"; paths=(); skipped=(); rode=()
+  while IFS= read -r -d '' rec; do
+    case "$rec" in
+      R*|C*|\ R*|\ C*) add_path "${rec:3}"; IFS= read -r -d '' old; add_path "$old" ;;
+      *) add_path "${rec:3}" ;;
+    esac
+  done < <(git status --porcelain -z -uall)
+  if [ "${#skipped[@]}" -gt 0 ] || [ "${#rode[@]}" -gt 0 ]; then
+    {
+      if [ "${#skipped[@]}" -gt 0 ]; then echo "Task loop commit ($repo): these paths were dirty before the run and unchanged by it, so they were left uncommitted:"; printf '%s\n' "${skipped[@]}"; fi
+      if [ "${#rode[@]}" -gt 0 ]; then echo "Task loop commit ($repo): these paths were dirty before the run and changed again by it, so they were committed with their earlier edits:"; printf '%s\n' "${rode[@]}"; fi
+    } | head -c 4000 > "$SCRATCH/commit-note.md"
+    naru task note "$TASK" --file "$SCRATCH/commit-note.md" > /dev/null || true
+  fi
+  [ "${#paths[@]}" -gt 0 ] || return 0
+  NAME=$(naru task show "$TASK" | jq -r '.name')
+  if ! git add -A -- "${paths[@]}" || ! git commit -q -m "task $TASK: $NAME" -m "Naru task $TASK (task loop)" -- "${paths[@]}" > "$SCRATCH/commit.out" 2>&1; then
+    git reset -q -- "${paths[@]}" 2>/dev/null
+    naru task note "$TASK" "The task loop could not commit the change in $repo: $(head -c 1500 "$SCRATCH/commit.out")" > /dev/null
+    naru notify --title "Task loop" --open "tasks/$TASK" "Task $TASK passed but the commit failed." > /dev/null 2>&1 || true
+    return 1
+  fi
+  ROOT=$(git rev-parse --show-toplevel)
+  if ! gate; then
+    fixed=no
+    if [ "${#skipped[@]}" -gt 0 ]; then
+      first=$(git rev-parse HEAD)
+      if git add -A -- "${skipped[@]}" && git commit -q --amend --no-edit -- "${skipped[@]}" > /dev/null 2>&1; then
+        if gate; then fixed=yes; else git update-ref HEAD "$first"; git reset -q -- "${skipped[@]}" 2>/dev/null; fi
+      fi
+    fi
+    if [ "$fixed" = yes ]; then
+      { echo "Task loop commit ($repo): the committed tree did not build without these pre-dirty paths, so they were committed too:"; printf '%s\n' "${skipped[@]}"; } | head -c 4000 > "$SCRATCH/commit-note.md"
+      naru task note "$TASK" --file "$SCRATCH/commit-note.md" > /dev/null || true
+    else
+      naru task note "$TASK" "The task loop committed $(git rev-parse --short HEAD) in $repo but it does not build: $(tail -c 1500 "$SCRATCH/gate.out")" > /dev/null
+      naru notify --title "Task loop" --open "tasks/$TASK" "Task $TASK passed but its commit does not build." > /dev/null 2>&1 || true
+      return 1
     fi
   fi
-  if [ "$fixed" = yes ]; then
-    { echo "Task loop commit: the committed tree did not build without these pre-dirty paths, so they were committed too:"; printf '%s\n' "${skipped[@]}"; } | head -c 4000 > "$SCRATCH/commit-note.md"
-    naru task note "$TASK" --file "$SCRATCH/commit-note.md" > /dev/null || true
-  else
-    naru task note "$TASK" "The task loop committed $(git rev-parse --short HEAD) but it does not build: $(tail -c 1500 "$SCRATCH/gate.out")" > /dev/null
-    naru notify --title "Task loop" --open "tasks/$TASK" "Task $TASK passed but its commit does not build." > /dev/null 2>&1 || true
-    exit 1
-  fi
-fi
-SHA=$(git rev-parse --short HEAD)
-naru task note "$TASK" "Committed $SHA by the task loop." > /dev/null || true
-emit commit=$SHA
+  SHA=$(git rev-parse --short HEAD)
+  naru task note "$TASK" "Committed $SHA by the task loop in $repo." > /dev/null || true
+  echo "$SHA" >> "$SCRATCH/shas.txt"
+}
+: > "$SCRATCH/shas.txt"
+failed=0; n=0
+while IFS= read -r repo; do
+  n=$((n+1))
+  commit_repo "$repo" "$(repo_state "$n")" || failed=1
+done < <(repo_each)
+[ "$failed" = 0 ] || exit 1
+SHAS=$(paste -sd, "$SCRATCH/shas.txt")
+emit commit=${SHAS:-none}
 "##;
 
 const LOOP_CLOSE_BACKLOG: &str = r##"# Put back what the bounced run left (naru task 2041): a path dirty now that was clean
@@ -2218,30 +2248,34 @@ const LOOP_CLOSE_BACKLOG: &str = r##"# Put back what the bounced run left (naru 
 # run changed is restored from the Plan node's copy, and a path still equal to its
 # baseline line is never touched.
 restored=()
-if [ -f "$SCRATCH/baseline.txt" ]; then
-  restore_path() { # <path>
-    local p=$1 h b
-    if [ -e "$p" ]; then h=$(git hash-object -- "$p" 2>/dev/null || echo gone); else h=gone; fi
-    grep -qxF -- "$(printf '%s\t%s' "$p" "$h")" "$SCRATCH/baseline.txt" 2>/dev/null && return
-    if [ -f "$p" ]; then mkdir -p "$SCRATCH/debris/$(dirname "$p")"; cp -p -- "$p" "$SCRATCH/debris/$p" 2>/dev/null || true; fi
-    if awk -F'\t' -v p="$p" '$1 == p { f = 1 } END { exit !f }' "$SCRATCH/baseline.txt" 2>/dev/null; then
-      b=$(awk -F'\t' -v p="$p" '$1 == p { print $2; exit }' "$SCRATCH/baseline.txt")
-      if [ "$b" = gone ] || [ ! -f "$SCRATCH/base/$p" ]; then rm -f -- "$p"; else cp -p -- "$SCRATCH/base/$p" "$p"; fi
-    elif git cat-file -e "HEAD:$p" 2>/dev/null; then
-      git checkout -q HEAD -- "$p" 2>/dev/null || return
-    else
-      git rm -q -f --cached -- "$p" > /dev/null 2>&1; rm -f -- "$p"
-    fi
-    restored+=("$p")
-  }
-  git status --porcelain -z -uall > "$SCRATCH/status-now.z" 2>/dev/null || true
+restore_path() { # <path>: in the repo the loop below is in; $ST is its state dir, $pre what a listed path is prefixed with
+  local p=$1 h b
+  if [ -e "$p" ]; then h=$(git hash-object -- "$p" 2>/dev/null || echo gone); else h=gone; fi
+  grep -qxF -- "$(printf '%s\t%s' "$p" "$h")" "$ST/baseline.txt" 2>/dev/null && return
+  if [ -f "$p" ]; then mkdir -p "$ST/debris/$(dirname "$p")"; cp -p -- "$p" "$ST/debris/$p" 2>/dev/null || true; fi
+  if awk -F'\t' -v p="$p" '$1 == p { f = 1 } END { exit !f }' "$ST/baseline.txt" 2>/dev/null; then
+    b=$(awk -F'\t' -v p="$p" '$1 == p { print $2; exit }' "$ST/baseline.txt")
+    if [ "$b" = gone ] || [ ! -f "$ST/base/$p" ]; then rm -f -- "$p"; else cp -p -- "$ST/base/$p" "$p"; fi
+  elif git cat-file -e "HEAD:$p" 2>/dev/null; then
+    git checkout -q HEAD -- "$p" 2>/dev/null || return
+  else
+    git rm -q -f --cached -- "$p" > /dev/null 2>&1; rm -f -- "$p"
+  fi
+  restored+=("$pre$p")
+}
+n=0
+while IFS= read -r repo; do
+  n=$((n+1)); ST=$(repo_state "$n"); pre=""; [ "$n" -gt 1 ] && pre="$repo/"
+  [ -f "$ST/baseline.txt" ] || continue
+  cd "$repo" || continue
+  git status --porcelain -z -uall > "$ST/status-now.z" 2>/dev/null || true
   while IFS= read -r -d '' rec; do
     case "$rec" in
       R*|C*|\ R*|\ C*) restore_path "${rec:3}"; IFS= read -r -d '' old; restore_path "$old" ;;
       *) restore_path "${rec:3}" ;;
     esac
-  done < "$SCRATCH/status-now.z"
-fi
+  done < "$ST/status-now.z"
+done < <(repo_each)
 { echo "Task loop did not pass; the task is back in backlog for a person. State: $(printf '%s\n' "$IN" | tail -n 1)"; echo "Hand-off files: $SCRATCH"; echo; cat "$SCRATCH/reasons.txt" 2>/dev/null
   if [ "${#restored[@]}" -gt 0 ]; then echo; echo "Restored to their state before the run (copies in $SCRATCH/debris):"; printf '%s\n' "${restored[@]}"; fi
   if [ -f "$SCRATCH/findings.md" ]; then echo; echo "Last review findings:"; cat "$SCRATCH/findings.md"; fi
