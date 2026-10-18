@@ -7,8 +7,8 @@
 # health and resumes the queue; an unhealthy new build is rolled back (binary and
 # db byte-equal to before, queue resumed); a drain timeout aborts, resumes and
 # changes nothing; a failed rollback leaves the queue paused; workflow defaults gets
-# --project and the old Task loop (+ child) is renamed "(pre-<ts> backup)" and
-# disabled first; a missing cargo/node exits 2 early; a rollback restores only the
+# --project and the Task loop (+ child) is never renamed or copied (naru task 2053:
+# a changed graph becomes a revision of the same workflow); a missing cargo/node exits 2 early; a rollback restores only the
 # db the server uses (never creating a second one) and refuses a missing target.
 set -euo pipefail
 unset $(env | sed -n 's/^\(NARU_[A-Za-z0-9_]*\)=.*/\1/p')
@@ -65,8 +65,8 @@ out=$(NARU_DEPLOY_NEW_BIN="$TMP/newbin" scripts/self-deploy.sh --skip-checks 2>/
 cmp -s "$NARU" "$TMP/newbin" || [ "$("$NARU" 2>&1 | head -1)" = new ] || fail "new binary not installed"
 grep -q -- '--project 1' "$TMP/defaults.log" && grep -q -- '--task-loop' "$TMP/defaults.log" || fail "defaults lacked --project: $(cat "$TMP/defaults.log")"
 wl=$("$SRC" workflow list 1)
-[ "$(echo "$wl" | jq '[.[] | select((.name|test("^Task loop.* \\(pre-[0-9]+-[0-9]+ backup\\)$")) and .enabled==false)] | length')" = 2 ] || fail "old Task loop not parked: $wl"
-ok "workflow defaults got --project; old Task loop and child renamed (pre-<ts> backup) and disabled"
+[ "$(echo "$wl" | jq 'length')" = 2 ] && [ "$(echo "$wl" | jq '[.[] | select(.name|test("pre-|copy|old"))] | length')" = 0 ] || fail "deploy renamed or copied a workflow: $wl"
+ok "workflow defaults got --project; the Task loop and child were not renamed or copied"
 db=$(echo "$out" | jq -r .db_backup)
 [ -f "$db" ] && [ "$(dirname "$db")" = "$backups" ] || fail "no timestamped backup: $db"
 case "$(basename "$db")" in naru-pre-deploy-*.db) ;; *) fail "backup name" ;; esac

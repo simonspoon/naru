@@ -226,20 +226,15 @@ healthy() {
   done
 }
 
-# Park the old Task loop (and its child) under a backup name, then reseed: defaults
-# skips an existing name, so without the rename a changed graph never lands. A rollback
-# restores the db backup, which undoes the renames.
+# Reseed the Task loop (and its child): defaults replaces a changed graph in place as a
+# new revision of the same workflow. A rollback restores the db backup, which undoes it.
 seed_task_loop() {
-  local pid ts wf id name
+  local pid
   pid="$("$new_bin" project resolve "$repo" 2>/dev/null | jq -r '.id // empty')"
   [ -n "$pid" ] || pid="$("$new_bin" project resolve naru 2>/dev/null | jq -r '.id // empty')"
   [ -n "$pid" ] || { echo "self-deploy: cannot resolve the naru project id" >>"$LOG"; return 1; }
-  ts="$(date +%Y%m%d-%H%M%S)"
-  for name in "Task loop" "Task loop: implement and review"; do
-    id="$("$new_bin" workflow list "$pid" 2>>"$LOG" | jq -r --arg n "$name" '.[] | select(.name==$n) | .id' | head -n 1)"
-    [ -n "$id" ] || continue
-    "$new_bin" workflow update "$id" --name "$name (pre-$ts backup)" --enabled false >>"$LOG" 2>&1 || return 1
-  done
+  # A changed definition becomes a new revision of the same workflow (naru task 2053),
+  # never a renamed copy; an unchanged one writes nothing.
   "$new_bin" workflow defaults --project "$pid" --task-loop >>"$LOG" 2>&1
 }
 

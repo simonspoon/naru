@@ -108,6 +108,7 @@ import type { WorkflowLogEntry } from './types/WorkflowLogEntry'
 import type { WorkflowNode } from './types/WorkflowNode'
 import type { WorkflowNodeKind } from './types/WorkflowNodeKind'
 import type { WorkflowGate } from './types/WorkflowGate'
+import type { WorkflowRevision } from './types/WorkflowRevision'
 import type { WorkflowRun } from './types/WorkflowRun'
 import type { WorkflowView } from './types/WorkflowView'
 
@@ -910,6 +911,17 @@ export function runWorkflow(id: number, input?: string): Promise<WorkflowRun> {
     `/api/workflows/${id}/run`,
     jsonInit('POST', input ? { input } : {}),
   )
+}
+
+/** A workflow's saved versions (naru task 2053), newest first, each with its
+ * whole snapshot — the page diffs any two itself. */
+export function listWorkflowRevisions(id: number): Promise<WorkflowRevision[]> {
+  return request(`/api/workflows/${id}/revisions`)
+}
+
+/** Puts the workflow back to a revision (recorded as a new `restore of N` one). */
+export function restoreWorkflowRevision(id: number, rev: number): Promise<WorkflowView> {
+  return request(`/api/workflows/${id}/revisions/${rev}/restore`, jsonInit('POST', {}))
 }
 
 /** A workflow's runs, newest first, each with its steps. */

@@ -2333,6 +2333,79 @@ run 0 "$NARU" workflow run Boxed --input hi
 [ "$(jqs '.steps | length')" = "2" ] || fail "only the trigger and output ran: $STDOUT"
 ok "comment box: created via the CLI, no edge in or out, a bad colour/key/pins validation, a run has no comment step"
 
+# ---- version history (naru task 2053) ----
+# A burst of CLI edits is one revision; the same graph edited over the API is a
+# different author, so a second one. Restore keeps node ids and adds a revision.
+run 0 "$NARU" workflow create Hist
+run 0 "$NARU" workflow node create Hist cli HA --config '{"command":"true"}'
+run 0 "$NARU" workflow node create Hist cli HB --config '{"command":"true"}'
+run 0 "$NARU" workflow revisions Hist
+[ "$(jqs length)" = "1" ] && [ "$(jqs '.[0].author')" = "cli" ] && [ "$(jqs '.[0] | has("snapshot")')" = "false" ] ||
+  fail "a burst of CLI edits is one revision without its snapshot: $STDOUT"
+PORT=17798
+"$NARU" serve --port "$PORT" >"$TMP/serve-hist.log" 2>&1 &
+SERVER_PID=$!
+for _ in $(seq 1 50); do
+  curl -sf "http://127.0.0.1:$PORT/api/projects" >/dev/null 2>&1 && break
+  sleep 0.1
+done
+curl -sf "http://127.0.0.1:$PORT/api/projects" >/dev/null ||
+  fail "history server did not start (log: $(cat "$TMP/serve-hist.log"))"
+HID=$("$NARU" workflow show Hist | jq -r '.workflow.id')
+HN1=$("$NARU" workflow show Hist | jq -r '.nodes[0].id')
+api 201 POST "/api/workflows/$HID/nodes" '{"kind":"cli","title":"HC","config":{"command":"true"}}'
+api 200 GET "/api/workflows/$HID/revisions"
+[ "$(jqb length)" = "2" ] && [ "$(jqb '.[0].author')" = "web" ] && [ "$(jqb '.[0].snapshot.nodes | length')" = "3" ] ||
+  fail "an API edit is a second revision by web: $BODY"
+run 0 "$NARU" workflow revision show Hist 1 --quiet
+[ "$(jqs 'has("snapshot")')" = "false" ] || fail "revision show --quiet drops the snapshot"
+run 0 "$NARU" workflow revision diff Hist 1 2
+[ "$(jqs .changed)" = "true" ] && [ "$(jqs '[.lines[] | select(startswith("+ node"))] | length')" = "1" ] ||
+  fail "the diff shows the added node: $STDOUT"
+run 1 "$NARU" workflow revision restore Hist 2
+[ "$(jqe .error.code)" = "validation" ] || fail "restoring the current graph is validation"
+run 0 "$NARU" workflow revision restore Hist 1
+[ "$(jqs '.nodes | length')" = "2" ] && [ "$(jqs '.nodes[0].id')" = "$HN1" ] || fail "restore keeps node ids: $STDOUT"
+run 0 "$NARU" workflow revisions Hist
+[ "$(jqs length)" = "3" ] && [ "$(jqs '.[0].reason')" = "restore of 1" ] || fail "restore adds a revision, deletes none: $STDOUT"
+api 200 POST "/api/workflows/$HID/revisions/2/restore"
+[ "$(jqb '.nodes | length')" = "3" ] || fail "restore over the API: $BODY"
+api 404 POST "/api/workflows/$HID/revisions/99/restore"
+STATUS=$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: evil.example' "http://127.0.0.1:$PORT/api/workflows/$HID/revisions")
+[ "$STATUS" = "403" ] || fail "revisions refuse a foreign Host: $STATUS"
+kill "$SERVER_PID" 2>/dev/null; wait "$SERVER_PID" 2>/dev/null || true; SERVER_PID=
+ok "revisions: a CLI burst is one, an API edit another (author web), show/diff/restore, node ids kept, nothing deleted, gated"
+
+# Reseeding the task loop is a revision of the same workflow, never a renamed copy.
+run 0 "$NARU" project create HistProj --no-git
+run 0 "$NARU" workflow defaults --project HistProj --task-loop
+TL=$("$NARU" workflow show "Task loop" | jq -r '.workflow.id')
+TLN=$("$NARU" workflow show "Task loop" | jq -r '.nodes[1].id')
+run 0 "$NARU" workflow node update "$TLN" --title "Edited by hand"
+run 0 "$NARU" workflow defaults --project HistProj --task-loop
+[ "$(jq -r '[.created[].workflow.id] | index('"$TL"') != null' <<<"$STDOUT")" = "true" ] || fail "the reseed updated Task loop in place: $STDOUT"
+[ "$("$NARU" workflow list HistProj | jq 'length')" = "2" ] || fail "reseeding left a copy behind"
+[ "$("$NARU" workflow revisions "$TL" | jq -r '.[0].reason')" = "seed" ] || fail "the reseed is a seed revision"
+[ "$("$NARU" workflow show "$TL" | jq -r '.nodes[1].title')" = "Plan ok?" ] || fail "the reseed restored the shipped graph"
+run 0 "$NARU" workflow defaults --project HistProj --task-loop
+[ "$(jqs '.created | length')" = "0" ] || fail "an unchanged reseed writes nothing"
+ok "defaults --task-loop: a changed graph becomes a seed revision of the same workflow, an unchanged one is a no-op, no copies"
+
+# collapse: old copies fold into revisions of the current workflow, after a backup.
+run 0 "$NARU" workflow create "Task loop (pre-1 backup)" --project HistProj
+run 0 "$NARU" workflow node create "Task loop (pre-1 backup)" cli OldOne --config '{"command":"true"}'
+run 0 "$NARU" workflow history collapse --dry-run
+[ "$(jqs '.collapsed | length')" = "1" ] && [ "$(jqs .backup)" = "null" ] || fail "collapse --dry-run plans, backs up nothing: $STDOUT"
+[ "$("$NARU" workflow list HistProj | jq 'length')" = "3" ] || fail "--dry-run deleted something"
+run 0 "$NARU" workflow history collapse --backup "$TMP/collapse-backup.db"
+[ -s "$TMP/collapse-backup.db" ] && [ "$(jqs '.collapsed | length')" = "1" ] || fail "collapse backs up first: $STDOUT"
+[ "$("$NARU" workflow list HistProj | jq 'length')" = "2" ] || fail "the copy is gone"
+run 0 "$NARU" workflow revisions "$TL"
+[ "$(jqs '[.[] | select(.reason == "collapsed from Task loop (pre-1 backup)")] | length')" = "1" ] || fail "the copy is a revision: $STDOUT"
+run 0 "$NARU" workflow history collapse
+[ "$(jqs '.collapsed | length')" = "0" ] && [ "$(jqs .backup)" = "null" ] || fail "a second collapse is a no-op: $STDOUT"
+ok "history collapse: dry-run plans, backup then fold, the copy kept as a revision, idempotent"
+
 [ ! -e "$STUB_DIR/bg.calls" ] || fail "a workflow spawned a background agent (--bg): $(cat "$STUB_DIR/bg.calls")"
 ok "no --bg agent was spawned anywhere in this gate"
 

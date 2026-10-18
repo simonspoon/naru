@@ -19,6 +19,7 @@ use super::types::{
     WorkflowNodeKind, WorkflowRun, WorkflowRunStatus, WorkflowStep, WorkflowStepStatus,
     WorkflowTrigger, WorkflowType, WorkflowView, is_valid_artifact_content_type, task_name,
 };
+use super::types::{WorkflowRevision, WorkflowSnapEdge, WorkflowSnapNode, WorkflowSnapshot};
 
 #[derive(Debug)]
 pub enum Error {
@@ -1495,6 +1496,18 @@ const MIGRATIONS: &[&str] = &[
     // live agent first saw a notice. Existing rows stay unread questions.
     "ALTER TABLE agent_questions ADD COLUMN kind TEXT NOT NULL DEFAULT 'question'; \
      ALTER TABLE agent_questions ADD COLUMN read_at TEXT;",
+    // Naru task 2053: a workflow's version history. One row per saved
+    // version, the whole definition as JSON; CASCADE with the workflow.
+    "CREATE TABLE workflow_revisions (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        workflow_id INTEGER NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+        rev         INTEGER NOT NULL,
+        author      TEXT NOT NULL,
+        reason      TEXT NOT NULL,
+        snapshot    TEXT NOT NULL,
+        created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+     );
+     CREATE UNIQUE INDEX idx_workflow_revisions_rev ON workflow_revisions(workflow_id, rev);",
 ];
 
 /// Selects full task rows including the derived `blocked` flag.
@@ -2846,6 +2859,58 @@ fn row_to_workflow(row: &rusqlite::Row<'_>) -> rusqlite::Result<Workflow> {
     })
 }
 
+/// Two snapshots define the same graph: nodes, edges, types and description
+/// (name and enabled are not part of the graph).
+fn same_workflow_graph(a: &WorkflowSnapshot, b: &WorkflowSnapshot) -> bool {
+    a.nodes == b.nodes && a.edges == b.edges && a.types == b.types && a.description == b.description
+}
+
+/// Like [`same_workflow_graph`] but blind to node ids and their order: a node
+/// is its kind, title, config and position, an edge its two nodes — a reseed
+/// builds fresh ids, and an in-place reseed leaves new nodes after old ones.
+fn same_workflow_content(a: &WorkflowSnapshot, b: &WorkflowSnapshot) -> bool {
+    type NodeKey = (String, String, String, u64, u64);
+    let key = |s: &WorkflowSnapshot| {
+        let node_key = |id: i64| -> Option<NodeKey> {
+            s.nodes.iter().find(|n| n.id == id).map(|n| {
+                (
+                    n.kind.as_str().to_string(),
+                    n.title.clone(),
+                    n.config.to_string(),
+                    n.x.to_bits(),
+                    n.y.to_bits(),
+                )
+            })
+        };
+        let mut nodes: Vec<_> = s.nodes.iter().filter_map(|n| node_key(n.id)).collect();
+        nodes.sort();
+        let mut edges: Vec<_> = s
+            .edges
+            .iter()
+            .map(|e| {
+                (
+                    node_key(e.from_node),
+                    node_key(e.to_node),
+                    e.branch.clone(),
+                    e.from_pin.clone(),
+                    e.to_pin.clone(),
+                )
+            })
+            .collect();
+        edges.sort();
+        (nodes, edges, s.types.clone(), s.description.clone())
+    };
+    key(a) == key(b)
+}
+
+/// What `collapse_workflow_copies` did (or, dry, would do).
+#[derive(Debug, Default, Clone, PartialEq, serde::Serialize)]
+pub struct WorkflowCollapse {
+    pub collapsed: Vec<String>,
+    pub skipped: Vec<String>,
+    pub runs_moved: i64,
+}
+
 fn row_to_workflow_node(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowNode> {
     let kind: String = row.get(2)?;
     let config: String = row.get(4)?;
@@ -3501,6 +3566,8 @@ pub struct CcIngestCounts {
 
 pub struct Store {
     conn: Connection,
+    /// Who a workflow revision made through this store is attributed to.
+    actor: String,
 }
 
 // Serializes the open sequence across threads *in this process*. Two
@@ -3534,7 +3601,22 @@ impl Store {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", true)?;
         migrate(&conn)?;
-        Ok(Store { conn })
+        let mut store = Store {
+            conn,
+            actor: "cli".to_string(),
+        };
+        store.backfill_workflow_revisions()?;
+        Ok(store)
+    }
+
+    /// Names who workflow revisions made through this store are credited to
+    /// (`cli` by default; the server says `web`).
+    pub fn set_actor(&mut self, actor: &str) {
+        self.actor = actor.to_string();
+    }
+
+    pub fn actor(&self) -> &str {
+        &self.actor
     }
 
     pub fn open_default() -> Result<Store> {
@@ -5368,6 +5450,7 @@ impl Store {
                 id,
             ),
         )?;
+        self.auto_workflow_revision(id)?;
         self.get_workflow(id)
     }
 
@@ -5467,6 +5550,12 @@ impl Store {
                     ),
                 )?;
             }
+            let actor = s.actor.clone();
+            s.record_workflow_revision(
+                new_id,
+                &actor,
+                &format!("copy of {}", src.workflow.name),
+            )?;
             s.get_workflow_view(new_id)
         })
     }
@@ -5646,8 +5735,10 @@ impl Store {
                 y,
             ),
         )?;
+        // Read before touching: the revision insert moves the rowid.
+        let new_id = self.conn.last_insert_rowid();
         self.touch_workflow(workflow_id)?;
-        self.get_workflow_node(self.conn.last_insert_rowid())
+        self.get_workflow_node(new_id)
     }
 
     pub fn get_workflow_node(&self, id: i64) -> Result<WorkflowNode> {
@@ -6005,8 +6096,9 @@ impl Store {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             (workflow_id, from_node, to_node, branch_text, from_pin, to_pin),
         )?;
+        let new_id = self.conn.last_insert_rowid();
         self.touch_workflow(workflow_id)?;
-        self.get_workflow_edge(self.conn.last_insert_rowid())
+        self.get_workflow_edge(new_id)
     }
 
     fn workflow_edge_end(
@@ -6057,12 +6149,421 @@ impl Store {
         Ok(edge)
     }
 
+    // ---- workflow revisions (naru task 2053) ----
+
+    /// The workflow as it is now, ids kept, nodes and edges in id order.
+    pub fn workflow_snapshot(&self, id: i64) -> Result<WorkflowSnapshot> {
+        let w = self.get_workflow(id)?;
+        let nodes = read_workflow_nodes(&self.conn, id)?
+            .into_iter()
+            .map(|n| WorkflowSnapNode {
+                id: n.id,
+                kind: n.kind,
+                title: n.title,
+                config: n.config,
+                x: n.x,
+                y: n.y,
+            })
+            .collect();
+        let edges = read_workflow_edges(&self.conn, id)?
+            .into_iter()
+            .map(|e| WorkflowSnapEdge {
+                from_node: e.from_node,
+                to_node: e.to_node,
+                branch: e.branch,
+                from_pin: e.from_pin,
+                to_pin: e.to_pin,
+            })
+            .collect();
+        Ok(WorkflowSnapshot {
+            name: w.name,
+            description: w.description,
+            enabled: w.enabled,
+            types: w.types,
+            nodes,
+            edges,
+        })
+    }
+
+    fn row_to_workflow_revision(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRevision> {
+        let snap: String = row.get(5)?;
+        Ok(WorkflowRevision {
+            id: row.get(0)?,
+            workflow_id: row.get(1)?,
+            rev: row.get(2)?,
+            author: row.get(3)?,
+            reason: row.get(4)?,
+            snapshot: serde_json::from_str(&snap).map_err(|e| conversion_failure(5, e))?,
+            created_at: row.get(6)?,
+        })
+    }
+
+    const WORKFLOW_REVISION_COLUMNS: &'static str =
+        "id, workflow_id, rev, author, reason, snapshot, created_at";
+
+    /// A workflow's revisions, newest first.
+    pub fn list_workflow_revisions(&self, workflow_id: i64) -> Result<Vec<WorkflowRevision>> {
+        self.get_workflow(workflow_id)?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {} FROM workflow_revisions WHERE workflow_id = ?1 ORDER BY rev DESC",
+            Self::WORKFLOW_REVISION_COLUMNS
+        ))?;
+        let rows = stmt.query_map([workflow_id], Self::row_to_workflow_revision)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn get_workflow_revision(&self, workflow_id: i64, rev: i64) -> Result<WorkflowRevision> {
+        self.conn
+            .query_row(
+                &format!(
+                    "SELECT {} FROM workflow_revisions WHERE workflow_id = ?1 AND rev = ?2",
+                    Self::WORKFLOW_REVISION_COLUMNS
+                ),
+                (workflow_id, rev),
+                Self::row_to_workflow_revision,
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Error::NotFound(format!(
+                    "workflow {workflow_id} has no revision {rev}; see `naru workflow revisions {workflow_id}`"
+                )),
+                e => Error::Db(e),
+            })
+    }
+
+    fn latest_workflow_revision(&self, workflow_id: i64) -> Result<Option<WorkflowRevision>> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT {} FROM workflow_revisions WHERE workflow_id = ?1 \
+                     ORDER BY rev DESC LIMIT 1",
+                    Self::WORKFLOW_REVISION_COLUMNS
+                ),
+                [workflow_id],
+                Self::row_to_workflow_revision,
+            )
+            .optional()?)
+    }
+
+    fn insert_workflow_revision(
+        &self,
+        workflow_id: i64,
+        snap: &WorkflowSnapshot,
+        author: &str,
+        reason: &str,
+        created_at: Option<&str>,
+    ) -> Result<()> {
+        // The rev is computed inside the INSERT, and the unique index makes a
+        // race between two processes fail rather than duplicate.
+        self.conn.execute(
+            "INSERT INTO workflow_revisions (workflow_id, rev, author, reason, snapshot, created_at) \
+             VALUES (?1, (SELECT COALESCE(MAX(rev), 0) + 1 FROM workflow_revisions \
+                          WHERE workflow_id = ?1), ?2, ?3, ?4, COALESCE(?5, datetime('now')))",
+            (
+                workflow_id,
+                author,
+                reason,
+                serde_json::to_string(snap).unwrap_or_else(|_| "{}".into()),
+                created_at,
+            ),
+        )?;
+        Ok(())
+    }
+
+    /// Seconds a graph edit keeps folding into the revision it made: a save
+    /// that is many node and edge calls is one revision, not dozens.
+    const REVISION_COALESCE_SECS: i64 = 30;
+
+    /// Called after every graph mutation. Folds into the newest revision when
+    /// that is this actor's own `edit` from the last few seconds; otherwise
+    /// adds one. An unchanged graph adds nothing.
+    fn auto_workflow_revision(&self, id: i64) -> Result<()> {
+        let snap = self.workflow_snapshot(id)?;
+        match self.latest_workflow_revision(id)? {
+            Some(l) if same_workflow_graph(&l.snapshot, &snap) => Ok(()),
+            Some(l) if l.reason == "edit" && l.author == self.actor => {
+                let age: i64 = self.conn.query_row(
+                    "SELECT strftime('%s','now') - strftime('%s', created_at) \
+                     FROM workflow_revisions WHERE id = ?1",
+                    [l.id],
+                    |r| r.get(0),
+                )?;
+                if age < Self::REVISION_COALESCE_SECS {
+                    self.conn.execute(
+                        "UPDATE workflow_revisions SET snapshot = ?1 WHERE id = ?2",
+                        (serde_json::to_string(&snap).unwrap_or_default(), l.id),
+                    )?;
+                    Ok(())
+                } else {
+                    self.insert_workflow_revision(id, &snap, &self.actor, "edit", None)
+                }
+            }
+            _ => self.insert_workflow_revision(id, &snap, &self.actor, "edit", None),
+        }
+    }
+
+    /// Records a revision with an explicit author and reason. A graph equal to
+    /// the newest revision adds none (an automatic `edit` one takes the new
+    /// label instead). Answers the revision the graph is now at.
+    pub fn record_workflow_revision(
+        &mut self,
+        id: i64,
+        author: &str,
+        reason: &str,
+    ) -> Result<WorkflowRevision> {
+        let snap = self.workflow_snapshot(id)?;
+        if let Some(l) = self.latest_workflow_revision(id)?
+            && same_workflow_graph(&l.snapshot, &snap)
+        {
+            if l.reason == "edit" && reason != "edit" {
+                self.conn.execute(
+                    "UPDATE workflow_revisions SET author = ?1, reason = ?2 WHERE id = ?3",
+                    (author, reason, l.id),
+                )?;
+                return self.get_workflow_revision(id, l.rev);
+            }
+            return Ok(l);
+        }
+        self.insert_workflow_revision(id, &snap, author, reason, None)?;
+        Ok(self.latest_workflow_revision(id)?.expect("just inserted"))
+    }
+
+    /// A revision #1 for every workflow with a graph and no history, so the
+    /// state before history existed is not lost to the first edit. An empty
+    /// workflow has nothing to lose: its first node makes revision 1.
+    fn backfill_workflow_revisions(&mut self) -> Result<()> {
+        let ids: Vec<i64> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT id FROM workflows WHERE id NOT IN \
+                 (SELECT workflow_id FROM workflow_revisions) \
+                 AND id IN (SELECT workflow_id FROM workflow_nodes)",
+            )?;
+            stmt.query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        for id in ids {
+            let snap = self.workflow_snapshot(id)?;
+            // A concurrent opener may have won the race: ignore its conflict.
+            let _ = self.insert_workflow_revision(id, &snap, "migration", "baseline", None);
+        }
+        Ok(())
+    }
+
+    /// Puts the workflow's graph (and description and types, not name,
+    /// project or enabled) back to `snap`. Nodes keep their ids — by id for a
+    /// restore, by `(kind, title)` for a reseed — so runs and gates that
+    /// name them still resolve. Raw writes: a stored snapshot was valid when
+    /// it was taken.
+    fn apply_workflow_snapshot(
+        &self,
+        id: i64,
+        snap: &WorkflowSnapshot,
+        by_title: bool,
+    ) -> Result<()> {
+        let existing = read_workflow_nodes(&self.conn, id)?;
+        let mut free: Vec<&WorkflowNode> = existing.iter().collect();
+        let mut keep: HashSet<i64> = HashSet::new();
+        let mut map: HashMap<i64, i64> = HashMap::new();
+        for n in &snap.nodes {
+            let hit = free.iter().position(|e| {
+                if by_title {
+                    e.kind == n.kind && e.title == n.title
+                } else {
+                    e.id == n.id
+                }
+            });
+            let cfg = n.config.to_string();
+            if let Some(i) = hit {
+                let e = free.remove(i);
+                self.conn.execute(
+                    "UPDATE workflow_nodes SET kind = ?1, title = ?2, config = ?3, x = ?4, \
+                     y = ?5, updated_at = datetime('now') WHERE id = ?6",
+                    (n.kind.as_str(), &n.title, &cfg, n.x, n.y, e.id),
+                )?;
+                keep.insert(e.id);
+                map.insert(n.id, e.id);
+                continue;
+            }
+            // Re-insert under the old id when it is free (a node deleted since),
+            // else take a fresh one.
+            let taken: bool = !by_title
+                && self
+                    .conn
+                    .query_row("SELECT 1 FROM workflow_nodes WHERE id = ?1", [n.id], |_| {
+                        Ok(())
+                    })
+                    .optional()?
+                    .is_some();
+            let want = if by_title || taken { None } else { Some(n.id) };
+            self.conn.execute(
+                "INSERT INTO workflow_nodes (id, workflow_id, kind, title, config, x, y, created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'), datetime('now'))",
+                (want, id, n.kind.as_str(), &n.title, &cfg, n.x, n.y),
+            )?;
+            let new_id = self.conn.last_insert_rowid();
+            keep.insert(new_id);
+            map.insert(n.id, new_id);
+        }
+        for e in &existing {
+            if !keep.contains(&e.id) {
+                self.conn
+                    .execute("DELETE FROM workflow_nodes WHERE id = ?1", [e.id])?;
+            }
+        }
+        self.conn
+            .execute("DELETE FROM workflow_edges WHERE workflow_id = ?1", [id])?;
+        for e in &snap.edges {
+            let (Some(&from), Some(&to)) = (map.get(&e.from_node), map.get(&e.to_node)) else {
+                return Err(Error::Validation(
+                    "snapshot edge names a node the snapshot does not hold".into(),
+                ));
+            };
+            self.conn.execute(
+                "INSERT INTO workflow_edges (workflow_id, from_node, to_node, branch, from_pin, to_pin) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                (id, from, to, &e.branch, &e.from_pin, &e.to_pin),
+            )?;
+        }
+        self.conn.execute(
+            "UPDATE workflows SET description = ?1, types = ?2, updated_at = datetime('now') \
+             WHERE id = ?3",
+            (
+                &snap.description,
+                serde_json::to_string(&snap.types).unwrap_or_else(|_| "[]".into()),
+                id,
+            ),
+        )?;
+        Ok(())
+    }
+
+    /// Restores revision `rev` onto the same workflow (id, runs and name
+    /// kept) and records the result as a new `restore of <rev>` revision;
+    /// nothing is deleted from the history.
+    pub fn restore_workflow_revision(&mut self, id: i64, rev: i64) -> Result<WorkflowView> {
+        self.immediate(|s| {
+            let r = s.get_workflow_revision(id, rev)?;
+            if same_workflow_graph(&r.snapshot, &s.workflow_snapshot(id)?) {
+                return Err(Error::Validation(format!(
+                    "revision {rev} is already the current graph of workflow {id}"
+                )));
+            }
+            s.apply_workflow_snapshot(id, &r.snapshot, false)?;
+            let actor = s.actor.clone();
+            s.force_workflow_revision(id, &actor, &format!("restore of {rev}"))?;
+            s.get_workflow_view(id)
+        })
+    }
+
+    /// Replaces the graph with `snap` (nodes matched by kind and title) and
+    /// records `reason` — how a reseed updates a workflow in place. A graph
+    /// that already matches changes nothing and answers false.
+    pub fn replace_workflow_graph(
+        &mut self,
+        id: i64,
+        snap: &WorkflowSnapshot,
+        reason: &str,
+    ) -> Result<bool> {
+        self.immediate(|s| {
+            if same_workflow_content(&s.workflow_snapshot(id)?, snap) {
+                return Ok(false);
+            }
+            s.apply_workflow_snapshot(id, snap, true)?;
+            let actor = s.actor.clone();
+            s.force_workflow_revision(id, &actor, reason)?;
+            Ok(true)
+        })
+    }
+
+    /// Adds a revision of the current graph even when it equals the newest.
+    fn force_workflow_revision(&self, id: i64, author: &str, reason: &str) -> Result<()> {
+        let snap = self.workflow_snapshot(id)?;
+        self.insert_workflow_revision(id, &snap, author, reason, None)
+    }
+
+    /// Folds the old `Task loop (pre-… backup)`, `(copy…)` and `(old)`
+    /// workflows into revisions of the current one of the same project.
+    /// Each copy's graph is stored as a revision of the canonical workflow
+    /// and read back before the copy is deleted; its runs move to the
+    /// canonical workflow. A copy with no canonical is left and reported.
+    /// `dry_run` plans and writes nothing. The caller backs the db up first.
+    pub fn collapse_workflow_copies(&mut self, dry_run: bool) -> Result<WorkflowCollapse> {
+        let re = regex::Regex::new(
+            r"^(Task loop(?:: implement and review)?) \((?:pre-[^)]*|copy(?: \d+)?|old)\)$",
+        )
+        .expect("static regex");
+        self.immediate(|s| {
+            let all = {
+                let mut stmt = s.conn.prepare(&format!(
+                    "SELECT {WORKFLOW_COLUMNS} FROM workflows w ORDER BY w.created_at, w.id"
+                ))?;
+                stmt.query_map([], row_to_workflow)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            let mut out = WorkflowCollapse::default();
+            let mut touched: Vec<i64> = Vec::new();
+            for w in &all {
+                let Some(base) = re.captures(&w.name).map(|c| c[1].to_string()) else {
+                    continue;
+                };
+                let canon = all.iter().find(|c| {
+                    c.id != w.id
+                        && c.project_id == w.project_id
+                        && c.name.eq_ignore_ascii_case(&base)
+                });
+                let Some(canon) = canon else {
+                    out.skipped
+                        .push(format!("{}: no current {base:?} to fold into", w.name));
+                    continue;
+                };
+                out.collapsed
+                    .push(format!("{} -> {} ({})", w.name, canon.name, canon.id));
+                if dry_run {
+                    continue;
+                }
+                let snap = s.workflow_snapshot(w.id)?;
+                s.insert_workflow_revision(
+                    canon.id,
+                    &snap,
+                    "collapse",
+                    &format!("collapsed from {}", w.name),
+                    Some(&w.updated_at),
+                )?;
+                // Read it back: the graph must be in the history before the
+                // copy goes.
+                let stored = s
+                    .latest_workflow_revision(canon.id)?
+                    .ok_or_else(|| Error::Validation("collapse revision missing".into()))?;
+                if stored.snapshot != snap || stored.reason != format!("collapsed from {}", w.name)
+                {
+                    return Err(Error::Validation(format!(
+                        "revision of {:?} did not round-trip; nothing was deleted",
+                        w.name
+                    )));
+                }
+                out.runs_moved += s.conn.execute(
+                    "UPDATE workflow_runs SET workflow_id = ?1 WHERE workflow_id = ?2",
+                    (canon.id, w.id),
+                )? as i64;
+                s.conn
+                    .execute("DELETE FROM workflows WHERE id = ?1", [w.id])?;
+                if !touched.contains(&canon.id) {
+                    touched.push(canon.id);
+                }
+            }
+            // The newest revision of each must again be the live graph.
+            for id in touched {
+                s.force_workflow_revision(id, "collapse", "current after collapse")?;
+            }
+            Ok(out)
+        })
+    }
+
     fn touch_workflow(&self, id: i64) -> Result<()> {
         self.conn.execute(
             "UPDATE workflows SET updated_at = datetime('now') WHERE id = ?1",
             [id],
         )?;
-        Ok(())
+        self.auto_workflow_revision(id)
     }
 
     /// Opens a run row `running` and prunes the workflow's history back to
@@ -11967,6 +12468,104 @@ mod tests {
         (store, dir)
     }
 
+    fn rev_node(s: &mut Store, wf: i64, title: &str) -> i64 {
+        s.create_workflow_node(
+            wf,
+            &WorkflowNodeNew {
+                kind: WorkflowNodeKind::Cli,
+                title: title.into(),
+                config: Some(serde_json::json!({"command": "true"})),
+                x: None,
+                y: None,
+            },
+        )
+        .unwrap()
+        .id
+    }
+
+    #[test]
+    fn workflow_revisions_restore_keeps_ids_and_history() {
+        let (mut s, _d) = temp_store();
+        let wf = s.create_workflow(None, "Flow", None).unwrap().id;
+        let a = rev_node(&mut s, wf, "A");
+        let b = rev_node(&mut s, wf, "B");
+        s.create_workflow_edge(wf, a, b, None).unwrap();
+        // The burst of edits is one revision.
+        let revs = s.list_workflow_revisions(wf).unwrap();
+        assert_eq!(revs.len(), 1);
+        assert_eq!(revs[0].snapshot.nodes.len(), 2);
+        assert_eq!(revs[0].snapshot.edges.len(), 1);
+        // An explicit label takes over an unchanged edit revision.
+        s.record_workflow_revision(wf, "me", "first").unwrap();
+        assert_eq!(s.list_workflow_revisions(wf).unwrap()[0].reason, "first");
+        let c = rev_node(&mut s, wf, "C");
+        assert_eq!(s.list_workflow_revisions(wf).unwrap().len(), 2);
+        let view = s.restore_workflow_revision(wf, 1).unwrap();
+        let ids: Vec<i64> = view.nodes.iter().map(|n| n.id).collect();
+        assert_eq!(ids, vec![a, b]);
+        assert!(!ids.contains(&c));
+        let revs = s.list_workflow_revisions(wf).unwrap();
+        assert_eq!(revs.len(), 3);
+        assert_eq!(revs[0].reason, "restore of 1");
+        // Restoring what is already current is refused; an old one is not.
+        assert!(s.restore_workflow_revision(wf, 3).is_err());
+        s.restore_workflow_revision(wf, 2).unwrap();
+        assert_eq!(s.get_workflow_view(wf).unwrap().nodes.len(), 3);
+        assert_eq!(s.list_workflow_revisions(wf).unwrap().len(), 4);
+        // A deleted workflow takes its history along.
+        s.delete_workflow(wf).unwrap();
+        assert!(s.list_workflow_revisions(wf).is_err());
+    }
+
+    #[test]
+    fn collapse_folds_copies_into_revisions_without_losing_a_graph() {
+        let (mut s, _d) = temp_store();
+        let main = s.create_workflow(None, "Task loop", None).unwrap().id;
+        rev_node(&mut s, main, "Live");
+        let old = s
+            .create_workflow(None, "Task loop (pre-1 backup)", None)
+            .unwrap()
+            .id;
+        rev_node(&mut s, old, "Old one");
+        let cp = s
+            .create_workflow(None, "Task loop (copy 2)", None)
+            .unwrap()
+            .id;
+        rev_node(&mut s, cp, "Copy one");
+        rev_node(&mut s, cp, "Copy two");
+        let keep = s.create_workflow(None, "Other (copy)", None).unwrap().id;
+        let lone = s
+            .create_workflow(None, "Task loop: implement and review (old)", None)
+            .unwrap()
+            .id;
+        let before = s.workflow_snapshot(main).unwrap();
+
+        let plan = s.collapse_workflow_copies(true).unwrap();
+        assert_eq!(plan.collapsed.len(), 2);
+        assert_eq!(plan.skipped.len(), 1);
+        assert!(s.get_workflow(old).is_ok());
+
+        let done = s.collapse_workflow_copies(false).unwrap();
+        assert_eq!(done.collapsed.len(), 2);
+        assert!(s.get_workflow(old).is_err() && s.get_workflow(cp).is_err());
+        assert!(s.get_workflow(keep).is_ok() && s.get_workflow(lone).is_ok());
+        let revs = s.list_workflow_revisions(main).unwrap();
+        let reasons: Vec<&str> = revs.iter().map(|r| r.reason.as_str()).collect();
+        assert!(reasons.contains(&"collapsed from Task loop (pre-1 backup)"));
+        assert!(reasons.contains(&"collapsed from Task loop (copy 2)"));
+        assert_eq!(reasons[0], "current after collapse");
+        let copy_rev = revs
+            .iter()
+            .find(|r| r.reason.ends_with("(copy 2)"))
+            .unwrap();
+        assert_eq!(copy_rev.snapshot.nodes.len(), 2);
+        // The live graph is untouched, and a second run is a no-op.
+        assert_eq!(s.workflow_snapshot(main).unwrap(), before);
+        let again = s.collapse_workflow_copies(false).unwrap();
+        assert!(again.collapsed.is_empty());
+        assert_eq!(s.list_workflow_revisions(main).unwrap().len(), revs.len());
+    }
+
     #[test]
     fn task_prompt_parser_reads_the_known_openings_only() {
         let p = parse_task_prompt;
@@ -17060,15 +17659,15 @@ mod tests {
         );
         assert_eq!(
             MIGRATIONS.len(),
-            96,
-            "a fresh db should report user_version 96"
+            97,
+            "a fresh db should report user_version 97"
         );
         let (store, _dir) = temp_store();
         let version: i64 = store
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 96);
+        assert_eq!(version, 97);
     }
 
     /// Workflows replace diagrams at migration 83 (mesa task 1607): a db that
@@ -17092,7 +17691,7 @@ mod tests {
         store
             .conn
             .execute_batch(
-                "DROP TABLE agent_questions; DROP TABLE custom_themes; DROP TABLE task_notes; ALTER TABLE live_sessions DROP COLUMN ambient_request_seq; ALTER TABLE live_sessions DROP COLUMN ambient_request; ALTER TABLE live_sessions DROP COLUMN host_seen_at; ALTER TABLE live_sessions DROP COLUMN host_ambient; ALTER TABLE live_notebook DROP COLUMN category; ALTER TABLE cc_messages DROP COLUMN cost_micro_usd; ALTER TABLE cc_sessions DROP COLUMN main_agent; ALTER TABLE live_boards DROP COLUMN pinned_at; DROP TABLE workflow_log; DROP TABLE workflow_gates; DROP TABLE workflow_runs; DROP TABLE workflow_edges; \
+                "DROP TABLE agent_questions; DROP TABLE custom_themes; DROP TABLE task_notes; ALTER TABLE live_sessions DROP COLUMN ambient_request_seq; ALTER TABLE live_sessions DROP COLUMN ambient_request; ALTER TABLE live_sessions DROP COLUMN host_seen_at; ALTER TABLE live_sessions DROP COLUMN host_ambient; ALTER TABLE live_notebook DROP COLUMN category; ALTER TABLE cc_messages DROP COLUMN cost_micro_usd; ALTER TABLE cc_sessions DROP COLUMN main_agent; ALTER TABLE live_boards DROP COLUMN pinned_at; DROP TABLE workflow_revisions; DROP TABLE workflow_log; DROP TABLE workflow_gates; DROP TABLE workflow_runs; DROP TABLE workflow_edges; \
                  DROP TABLE workflow_nodes; DROP TABLE workflows; \
                  CREATE TABLE diagrams (id INTEGER PRIMARY KEY, title TEXT); \
                  INSERT INTO diagrams (title) VALUES ('stale'); \

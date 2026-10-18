@@ -2443,11 +2443,7 @@ pub fn create_task_loop_workflow(
     project_id: i64,
 ) -> Result<(Vec<WorkflowView>, Vec<String>)> {
     use WorkflowNodeKind as K;
-    match store.find_workflow_by_name(TASK_LOOP_WORKFLOW) {
-        Ok(_) => return Ok((Vec::new(), vec![TASK_LOOP_WORKFLOW.to_string()])),
-        Err(Error::NotFound(_)) => {}
-        Err(e) => return Err(e),
-    }
+    let mut skipped = Vec::new();
     // `secs` is the stage deadline + three grace periods + a minute, so the
     // stage driver and not SIGKILL ends a stage.
     // `n` is the pass number, or `iter` to read it from the state line's
@@ -2484,9 +2480,8 @@ pub fn create_task_loop_workflow(
     // nodes read `N` from that token and `emit` carries it on. Created first
     // so the parent's subworkflow nodes can name it; an existing one is
     // reused as it is.
-    match store.find_workflow_by_name(TASK_LOOP_CHILD) {
-        Ok(_) => {}
-        Err(Error::NotFound(_)) => {
+    {
+        {
             let nodes = vec![
                 (
                     K::Trigger,
@@ -2551,25 +2546,23 @@ pub fn create_task_loop_workflow(
                 (6, 7, ok),
                 (6, 7, caught),
             ];
-            let wf = store.create_workflow(
-                Some(project_id),
+            let seeded = seed_loop_workflow(
+                store,
+                project_id,
                 TASK_LOOP_CHILD,
-                Some("One implement and review pass of the task loop, called twice by \"Task loop\" with iter=1 and iter=2 on the state line. See docs/task-loop-workflow.md."),
+                "One implement and review pass of the task loop, called twice by \"Task loop\" with iter=1 and iter=2 on the state line. See docs/task-loop-workflow.md.",
+                vec![WorkflowType {
+                    name: "ReviewVerdict".to_string(),
+                    fields: vec![field("verify"), field("review")],
+                }],
+                nodes,
+                edges,
             )?;
-            store.update_workflow(
-                wf.id,
-                WorkflowPatch {
-                    types: Some(vec![WorkflowType {
-                        name: "ReviewVerdict".to_string(),
-                        fields: vec![field("verify"), field("review")],
-                    }]),
-                    ..Default::default()
-                },
-            )?;
-            add_loop_graph(store, wf.id, nodes, edges)?;
-            created.push(store.get_workflow_view(wf.id)?);
+            match seeded {
+                Some(v) => created.push(v),
+                None => skipped.push(TASK_LOOP_CHILD.to_string()),
+            }
         }
-        Err(e) => return Err(e),
     }
     // Appends ` iter=N` to the state line, so the child knows which pass it is.
     let iter = |n: u32| json!({"command": format!("echo \"$(cat) iter={n}\""), "timeout_secs": 60});
@@ -2797,27 +2790,143 @@ pub fn create_task_loop_workflow(
         (16, 26, None),
         (26, 27, ok),
     ];
-    let wf = store.create_workflow(
-        Some(project_id),
+    // The struct the typed plan agent node answers is defined before the
+    // node that names it.
+    let seeded = seed_loop_workflow(
+        store,
+        project_id,
         TASK_LOOP_WORKFLOW,
-        Some("Plan, implement, review and verify one task, at most two passes; the input is a task id. See docs/task-loop-workflow.md."),
+        "Plan, implement, review and verify one task, at most two passes; the input is a task id. See docs/task-loop-workflow.md.",
+        vec![WorkflowType {
+            name: "PlanVerdict".to_string(),
+            fields: vec![field("ui")],
+        }],
+        nodes,
+        edges,
     )?;
-    // The struct the typed plan agent node answers; defined before the node
-    // that names it.
-    store.update_workflow(
-        wf.id,
-        WorkflowPatch {
-            types: Some(vec![WorkflowType {
-                name: "PlanVerdict".to_string(),
-                fields: vec![field("ui")],
-            }]),
-            ..Default::default()
-        },
-    )?;
-    add_loop_graph(store, wf.id, nodes, edges)?;
     // The parent first, then the child it calls.
-    created.insert(0, store.get_workflow_view(wf.id)?);
-    Ok((created, Vec::new()))
+    match seeded {
+        Some(v) => created.insert(0, v),
+        None => skipped.push(TASK_LOOP_WORKFLOW.to_string()),
+    }
+    Ok((created, skipped))
+}
+
+/// A snapshot as text lines, the one thing a revision diff compares (the web
+/// page's `workflowHistory.ts` builds the same lines). Nodes and edges are
+/// named by kind and title, never by id, so a restore that renumbers nodes
+/// is not a change; name and enabled are not part of the graph.
+pub fn snapshot_lines(snap: &crate::core::types::WorkflowSnapshot) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(d) = &snap.description {
+        out.push(format!("description: {d}"));
+    }
+    for t in &snap.types {
+        let fields: Vec<String> = t
+            .fields
+            .iter()
+            .map(|f| format!("{}: {}", f.name, f.ty))
+            .collect();
+        out.push(format!("type {} {{ {} }}", t.name, fields.join(", ")));
+    }
+    let title = |id: i64| {
+        snap.nodes
+            .iter()
+            .find(|n| n.id == id)
+            .map(|n| n.title.clone())
+            .unwrap_or_else(|| format!("#{id}"))
+    };
+    let mut nodes: Vec<_> = snap.nodes.iter().collect();
+    nodes.sort_by(|a, b| (a.kind.as_str(), &a.title).cmp(&(b.kind.as_str(), &b.title)));
+    for n in nodes {
+        out.push(format!(
+            "node [{}] \"{}\" at {},{}",
+            n.kind.as_str(),
+            n.title,
+            n.x,
+            n.y
+        ));
+        let cfg = serde_json::to_string_pretty(&n.config).unwrap_or_default();
+        for l in cfg.lines() {
+            out.push(format!("  {l}"));
+        }
+    }
+    let mut edges: Vec<String> = snap
+        .edges
+        .iter()
+        .map(|e| {
+            let mut l = format!(
+                "edge \"{}\" -> \"{}\"",
+                title(e.from_node),
+                title(e.to_node)
+            );
+            if let Some(b) = &e.branch {
+                l.push_str(&format!(" [{b}]"));
+            }
+            if e.from_pin.is_some() || e.to_pin.is_some() {
+                l.push_str(&format!(
+                    " ({} -> {})",
+                    e.from_pin.as_deref().unwrap_or(""),
+                    e.to_pin.as_deref().unwrap_or("")
+                ));
+            }
+            l
+        })
+        .collect();
+    edges.sort();
+    out.extend(edges);
+    out
+}
+
+/// Seeds one task-loop workflow (naru task 2053). Absent: created, with its
+/// first revision labelled `seed`. Present: the definition is built under a
+/// scratch name, and when it differs the existing workflow's graph is
+/// replaced **in place** as a new `seed` revision — same id, runs and name,
+/// never a renamed copy. Unchanged: nothing is written and `None` answers.
+fn seed_loop_workflow(
+    store: &mut Store,
+    project_id: i64,
+    name: &str,
+    description: &str,
+    types: Vec<WorkflowType>,
+    nodes: Vec<(WorkflowNodeKind, &str, serde_json::Value, f64, f64)>,
+    edges: Vec<(usize, usize, Option<&str>)>,
+) -> Result<Option<WorkflowView>> {
+    let existing = match store.find_workflow_by_name(name) {
+        Ok(w) => Some(w),
+        Err(Error::NotFound(_)) => None,
+        Err(e) => return Err(e),
+    };
+    let build_name = match &existing {
+        Some(_) => format!("{name} (seeding)"),
+        None => name.to_string(),
+    };
+    let wf = store.create_workflow(Some(project_id), &build_name, Some(description))?;
+    let built = store
+        .update_workflow(
+            wf.id,
+            WorkflowPatch {
+                types: Some(types),
+                ..Default::default()
+            },
+        )
+        .and_then(|_| add_loop_graph(store, wf.id, nodes, edges));
+    if let Err(e) = built {
+        let _ = store.delete_workflow(wf.id);
+        return Err(e);
+    }
+    let Some(old) = existing else {
+        let actor = store.actor().to_string();
+        store.record_workflow_revision(wf.id, &actor, "seed")?;
+        return Ok(Some(store.get_workflow_view(wf.id)?));
+    };
+    let snap = store.workflow_snapshot(wf.id)?;
+    store.delete_workflow(wf.id)?;
+    if store.replace_workflow_graph(old.id, &snap, "seed")? {
+        Ok(Some(store.get_workflow_view(old.id)?))
+    } else {
+        Ok(None)
+    }
 }
 
 /// Creates a task-loop graph's nodes in order and wires `edges`, which name

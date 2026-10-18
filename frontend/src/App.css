@@ -10573,6 +10573,23 @@ select.library-model-badge {
   color: var(--cyan);
 }
 
+.workflow-history-compare {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4ch;
+  font-size: 0.75rem;
+}
+
+@media (max-width: 600px) {
+  .workflow-history {
+    grid-template-columns: 1fr;
+  }
+  .workflow-history-compare,
+  .workflow-history-compare select {
+    width: 100%;
+  }
+}
+
 .library-history-detail p {
   margin: 0 0 0.5rem;
   font-size: 0.75rem;

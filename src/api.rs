@@ -2983,7 +2983,8 @@ pub fn serve(flags: ServeFlags) -> crate::core::Result<()> {
     };
     let (port, lan, allow_hosts) = resolve_startup(&flags, &cfg);
     let flags = Arc::new(flags);
-    let store = Store::open_default()?;
+    let mut store = Store::open_default()?;
+    store.set_actor("web");
     let restart_requested = Arc::new(AtomicBool::new(false));
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let allow_hosts: Arc<[String]> = allow_hosts.into();
@@ -3351,6 +3352,14 @@ fn router(state: AppState) -> Router {
                 .delete(delete_workflow),
         )
         .route("/api/workflows/{id}/duplicate", post(duplicate_workflow))
+        .route(
+            "/api/workflows/{id}/revisions",
+            get(list_workflow_revisions),
+        )
+        .route(
+            "/api/workflows/{id}/revisions/{rev}/restore",
+            post(restore_workflow_revision),
+        )
         .route("/api/workflows/{id}/nodes", post(create_workflow_node))
         .route("/api/workflows/{id}/edges", post(create_workflow_edge))
         .route("/api/workflows/events", post(emit_workflow_event))
@@ -4959,6 +4968,32 @@ async fn duplicate_workflow(
     let mut store = state.store.lock().unwrap();
     let view = store.duplicate_workflow(id, name.as_deref())?;
     Ok((StatusCode::CREATED, Json(view)).into_response())
+}
+
+/// A workflow's revisions, newest first, each with its whole snapshot — the
+/// page diffs any two of them itself (naru task 2053).
+async fn list_workflow_revisions(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let store = state.store.lock().unwrap();
+    Ok(Json(store.list_workflow_revisions(id)?).into_response())
+}
+
+/// Puts the workflow back to a revision (recorded as a new `restore of N`
+/// one) and answers the restored {workflow, nodes, edges}.
+async fn restore_workflow_revision(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path((id, rev)): Path<(i64, i64)>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let mut store = state.store.lock().unwrap();
+    Ok(Json(store.restore_workflow_revision(id, rev)?).into_response())
 }
 
 /// Echoes the destroyed {workflow, nodes, edges}.

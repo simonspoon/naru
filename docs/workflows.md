@@ -474,6 +474,62 @@ stays `running` until the next `serve` start reconciles it to `failed` as
 above. A job that cannot start fails the row and answers `unavailable`.
 Without `--detach` nothing changes.
 
+## Version history (naru task 2053)
+
+Every workflow keeps its history, like a library item: each saved version is a
+row in `workflow_revisions` (`workflow_id`, `rev` counting up per workflow,
+`author`, `reason`, the whole definition as JSON, `created_at`; `ON DELETE
+CASCADE`). A snapshot holds the name, description, `enabled`, `types`, every node
+(id, kind, title, config, position) and every edge. **All writes stay in
+`Store`:** every graph mutation (`touch_workflow`) and every workflow update
+records a revision automatically.
+
+- **Author and reason.** The author is the surface that wrote it: `cli` by
+  default, `web` for the server (`Store::set_actor`). The reason is `edit` for
+  an ordinary change, `seed` for a reseed, `restore of N`, `copy of <name>`,
+  `baseline` (a workflow that predates history gets a revision 1 on the first
+  open) or `collapsed from <name>`.
+- **No noise.** A graph equal to the newest revision (name and `enabled` do not
+  count) adds nothing; edits by one author within 30 seconds of that author's
+  own `edit` revision fold into it, so a save that is many node and edge calls
+  is one revision.
+- **Restore** (`Store::restore_workflow_revision`) writes a revision's graph
+  back onto the **same workflow** — id, name, project, `enabled` and runs kept —
+  nodes keep their ids (a node deleted since comes back under its old id), and
+  the result is recorded as a new `restore of N` revision. Nothing is ever
+  deleted from the history; restoring what is already current is `validation`.
+- **Reseed is a revision.** `naru workflow defaults --task-loop` builds the
+  shipped definition under a scratch name; when it differs from the existing
+  workflow, the existing one's graph is replaced **in place** (nodes matched by
+  kind and title, so ids survive) as a `seed` revision, and the scratch copy is
+  deleted. An unchanged definition writes nothing. `scripts/self-deploy.sh` no
+  longer renames anything.
+- **Collapse.** `naru workflow history collapse [--dry-run] [--backup PATH]`
+  folds the old `Task loop`, `Task loop: implement and review` and their
+  `(pre-… backup|rollback)`, `(copy[ N])` and `(old)` copies of the same project
+  into revisions of the current one: it backs the db up first (refusing to go
+  on if that fails; no backup when there is nothing to fold), stores each copy's
+  graph as a `collapsed from <name>` revision, reads it back, moves the copy's
+  runs to the current workflow and only then deletes the copy, and ends with a
+  `current after collapse` revision so the newest revision is the live graph. A
+  copy with no current workflow to fold into is left and reported. Idempotent.
+- **CLI**: `workflow revisions <wf>` (a bare array, without the snapshot),
+  `workflow revision show <wf> <rev>` (`--quiet` drops the snapshot),
+  `workflow revision diff <wf> <from> <to>` (`{changed, lines}`, `- `/`+ `/`  `
+  text lines, nodes and edges matched by kind and title, never id) and
+  `workflow revision restore <wf> <rev>` (prints what `show` does).
+- **API** (`require_agent_access`): `GET /api/workflows/{id}/revisions` (every
+  revision with its snapshot, newest first — the page diffs any two itself) and
+  `POST /api/workflows/{id}/revisions/{rev}/restore` (the restored
+  `{workflow, nodes, edges}`).
+- **Web**: a **History** button in the builder header swaps the graph for a
+  revision list (`#rev`, reason, author, age, `+a −r` against the previous
+  one) beside a diff (against the previous revision or any chosen in "compare
+  with…") or the full snapshot as text, and a confirmed **restore**. The pure
+  parts — `snapshotLines`, `diffRevisions`, `revisionEntries` — are
+  `frontend/src/workflowHistory.ts`; `core::workflow::snapshot_lines` builds the
+  same lines for the CLI, so keep the two in step.
+
 ## Typed pins (naru task 1981)
 
 Pins carry types. A **type** is a string: `string`, `number`, `bool`, `any`,

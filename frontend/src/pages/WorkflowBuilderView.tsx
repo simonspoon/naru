@@ -10,6 +10,7 @@ import {
   updateWorkflow,
 } from '../api'
 import { ConfirmDelete } from '../components/ConfirmDelete'
+import { WorkflowHistory } from '../components/WorkflowHistory'
 import { InlineEdit } from '../components/InlineEdit'
 import { useLiveContext } from '../liveContext'
 import { formatTimestamp, timeAgo } from '../time'
@@ -175,6 +176,8 @@ export function WorkflowBuilderView({
   const [runError, setRunError] = useState<string | null>(null)
   const [shown, setShown] = useState<WorkflowRun | null>(null)
   const [tab, setTab] = useState<'steps' | 'runs' | 'log'>('steps')
+  // Graph editor or the version history (naru task 2053), in place.
+  const [historyOpen, setHistoryOpen] = useState(false)
   // Bumped on every run so the recent-runs and log lists refetch.
   const [runVersion, setRunVersion] = useState(0)
   // Live run view (mesa task 1631): the run list is polled — fast while a run
@@ -285,6 +288,14 @@ export function WorkflowBuilderView({
           </button>
           <button
             type="button"
+            aria-label="Workflow history"
+            className={historyOpen ? 'selected' : undefined}
+            onClick={() => setHistoryOpen((o) => !o)}
+          >
+            History
+          </button>
+          <button
+            type="button"
             onClick={() =>
               duplicateWorkflow(workflowId).then(
                 (v) => {
@@ -320,16 +331,30 @@ export function WorkflowBuilderView({
       </p>
       {runError && <p className="error">could not run: {runError}</p>}
 
+      {historyOpen && (
+        <>
+          <p>
+            <button type="button" onClick={() => setHistoryOpen(false)}>
+              ← graph
+            </button>
+          </p>
+          <WorkflowHistory workflowId={workflowId} onRestored={refetch} />
+        </>
+      )}
+
       {/* Keyed by workflow id: a switch remounts the canvas so React Flow
           re-reads that workflow's saved viewport (defaultViewport is
           mount-time). */}
-      <WorkflowCanvas
-        key={workflowId}
-        view={view}
-        run={display}
-        onChanged={refetch}
-      />
+      {!historyOpen && (
+        <WorkflowCanvas
+          key={workflowId}
+          view={view}
+          run={display}
+          onChanged={refetch}
+        />
+      )}
 
+      {!historyOpen && (
       <div className="workflow-runpanel">
         <div className="tabs workflow-runtabs">
           {(['steps', 'runs', 'log'] as const).map((t) => (
@@ -358,6 +383,7 @@ export function WorkflowBuilderView({
         )}
         {tab === 'log' && <LogPanel version={runVersion} workflowId={workflowId} />}
       </div>
+      )}
     </div>
   )
 }

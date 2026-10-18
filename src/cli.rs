@@ -1970,6 +1970,61 @@ enum ThemeCmd {
 /// agent-gated; the CLI talks to the database directly like every other
 /// command.
 #[derive(Subcommand)]
+enum WorkflowRevisionCmd {
+    /// Show one revision with its whole graph (`--quiet`: without it)
+    Show {
+        /// Workflow id or name
+        workflow: String,
+        /// Revision number
+        rev: i64,
+        #[arg(long)]
+        quiet: bool,
+    },
+    /// Diff two revisions as text lines: `- ` only in FROM, `+ ` only in TO
+    ///
+    /// Nodes and edges are matched by kind and title, never by id.
+    Diff {
+        /// Workflow id or name
+        workflow: String,
+        /// The older revision
+        from: i64,
+        /// The newer revision
+        to: i64,
+    },
+    /// Put the workflow back to a revision; adds a `restore of N` revision
+    ///
+    /// Same workflow id, name and runs; nodes keep their ids. Nothing is
+    /// deleted from the history. Prints what `workflow show` does.
+    Restore {
+        /// Workflow id or name
+        workflow: String,
+        /// Revision number
+        rev: i64,
+        /// Keep the {workflow, nodes, edges} keys but drop free text
+        #[arg(long)]
+        quiet: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum WorkflowHistoryCmd {
+    /// Fold "Task loop (pre-… backup)", "(copy…)" and "(old)" workflows into
+    /// revisions of the current one
+    ///
+    /// Backs the db up first (refusing to go on if that fails), stores each
+    /// copy's graph as a `collapsed from <name>` revision, checks it reads
+    /// back, moves the copy's runs over and only then deletes the copy.
+    /// Idempotent. `--dry-run` prints the plan and writes nothing.
+    Collapse {
+        #[arg(long)]
+        dry_run: bool,
+        /// Where to write the backup (default: beside the db)
+        #[arg(long)]
+        backup: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
 enum WorkflowCmd {
     /// Create a workflow; prints the full created workflow (`--quiet`:
     /// without its `description`)
@@ -2208,6 +2263,20 @@ EXAMPLES
         #[arg(long)]
         task_loop: bool,
     },
+    /// List a workflow's saved versions, newest first (without the graphs)
+    ///
+    /// Every save of a workflow keeps a revision: who, when, why and the whole
+    /// graph. A burst of edits by one author folds into one revision.
+    Revisions {
+        /// Workflow id or name
+        workflow: String,
+    },
+    /// Show, diff and restore one revision of a workflow
+    #[command(subcommand)]
+    Revision(WorkflowRevisionCmd),
+    /// One-off history maintenance
+    #[command(subcommand)]
+    History(WorkflowHistoryCmd),
     /// Create, update and delete the nodes of a workflow
     #[command(subcommand)]
     Node(WorkflowNodeCmd),
@@ -5040,6 +5109,8 @@ const QUIET_DROP_WORKFLOW_GATE: &[&str] = &["message"];
 /// Keys dropped from a `WorkflowRun` under `--quiet`: the input and every
 /// step's output, which are the unbounded part of a run.
 const QUIET_DROP_WORKFLOW_RUN: &[&str] = &["steps", "input"];
+/// `WorkflowRevision` under `--quiet` (naru task 2053): without the graph.
+const QUIET_DROP_WORKFLOW_REVISION: &[&str] = &["snapshot"];
 /// Keys dropped from an `InboxItem` under `--quiet`.
 const QUIET_DROP_INBOX_ITEM: &[&str] = &["body"];
 /// Keys dropped from a `Script` under `--quiet`: both of its unbounded
@@ -8866,6 +8937,87 @@ fn run_workflow_cmd(cmd: WorkflowCmd) -> Result<()> {
             }
             std::thread::sleep(std::time::Duration::from_secs(3));
         },
+        WorkflowCmd::Revisions { workflow } => {
+            let id = resolve_workflow(&store, &workflow)?.id;
+            print_json(&quiet_all(
+                &store.list_workflow_revisions(id)?,
+                QUIET_DROP_WORKFLOW_REVISION,
+            ));
+        }
+        WorkflowCmd::Revision(cmd) => match cmd {
+            WorkflowRevisionCmd::Show {
+                workflow,
+                rev,
+                quiet,
+            } => {
+                let id = resolve_workflow(&store, &workflow)?.id;
+                print_record(
+                    &store.get_workflow_revision(id, rev)?,
+                    quiet,
+                    QUIET_DROP_WORKFLOW_REVISION,
+                );
+            }
+            WorkflowRevisionCmd::Diff { workflow, from, to } => {
+                let id = resolve_workflow(&store, &workflow)?.id;
+                let text = |rev| -> Result<String> {
+                    Ok(
+                        workflow::snapshot_lines(&store.get_workflow_revision(id, rev)?.snapshot)
+                            .join("\n"),
+                    )
+                };
+                let lines: Vec<String> = crate::core::library::diff_lines(&text(from)?, &text(to)?)
+                    .into_iter()
+                    .map(|l| {
+                        let mark = match l.kind {
+                            crate::core::LibraryDiffKind::Context => "  ",
+                            crate::core::LibraryDiffKind::MesaOnly => "- ",
+                            crate::core::LibraryDiffKind::DiskOnly => "+ ",
+                        };
+                        format!("{mark}{}", l.text)
+                    })
+                    .collect();
+                let changed = lines.iter().any(|l| !l.starts_with("  "));
+                print_json(&json!({"from": from, "to": to, "changed": changed, "lines": lines}));
+            }
+            WorkflowRevisionCmd::Restore {
+                workflow,
+                rev,
+                quiet,
+            } => {
+                let id = resolve_workflow(&store, &workflow)?.id;
+                print_workflow_view(&store.restore_workflow_revision(id, rev)?, quiet);
+            }
+        },
+        WorkflowCmd::History(WorkflowHistoryCmd::Collapse { dry_run, backup }) => {
+            let mut backed_up = None;
+            // Nothing to fold: no backup, no write.
+            let write = !dry_run && !store.collapse_workflow_copies(true)?.collapsed.is_empty();
+            if write {
+                let path = match backup {
+                    Some(p) => p,
+                    None => {
+                        let db = store.db_path().ok_or_else(|| {
+                            Error::Validation("no db file to back up; pass --backup".into())
+                        })?;
+                        let secs = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+                        db.with_file_name(format!("pre-workflow-collapse-{secs}.db"))
+                    }
+                };
+                store.backup(&path)?;
+                backed_up = Some(path);
+            }
+            let report = store.collapse_workflow_copies(!write)?;
+            print_json(&json!({
+                "dry_run": dry_run,
+                "backup": backed_up,
+                "collapsed": report.collapsed,
+                "skipped": report.skipped,
+                "runs_moved": report.runs_moved,
+            }));
+        }
         WorkflowCmd::Defaults { project, task_loop } => {
             let project = resolve_project(&store, &project)?;
             let (created, skipped) = if task_loop {

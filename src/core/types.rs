@@ -5111,6 +5111,67 @@ pub struct WorkflowView {
     pub edges: Vec<WorkflowEdge>,
 }
 
+/// One node of a [`WorkflowSnapshot`]. The id is kept so a restore can put a
+/// node back under the id runs and gates already name.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct WorkflowSnapNode {
+    #[ts(type = "number")]
+    pub id: i64,
+    pub kind: WorkflowNodeKind,
+    pub title: String,
+    #[ts(type = "Record<string, unknown>")]
+    pub config: serde_json::Value,
+    pub x: f64,
+    pub y: f64,
+}
+
+/// One edge of a [`WorkflowSnapshot`], naming its nodes by snapshot node id.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct WorkflowSnapEdge {
+    #[ts(type = "number")]
+    pub from_node: i64,
+    #[ts(type = "number")]
+    pub to_node: i64,
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub from_pin: Option<String>,
+    #[serde(default)]
+    pub to_pin: Option<String>,
+}
+
+/// A workflow's whole definition at one moment: what a revision stores.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct WorkflowSnapshot {
+    pub name: String,
+    pub description: Option<String>,
+    pub enabled: bool,
+    #[serde(default)]
+    pub types: Vec<WorkflowType>,
+    pub nodes: Vec<WorkflowSnapNode>,
+    pub edges: Vec<WorkflowSnapEdge>,
+}
+
+/// One saved version of a workflow (naru task 2053): who changed it, when,
+/// why, and the full definition after the change. `rev` counts up per
+/// workflow; a restore adds a revision and deletes none.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct WorkflowRevision {
+    #[ts(type = "number")]
+    pub id: i64,
+    #[ts(type = "number")]
+    pub workflow_id: i64,
+    #[ts(type = "number")]
+    pub rev: i64,
+    pub author: String,
+    pub reason: String,
+    pub created_at: String,
+    pub snapshot: WorkflowSnapshot,
+}
+
 /// One node's outcome inside a [`WorkflowRun`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../frontend/src/types/")]
