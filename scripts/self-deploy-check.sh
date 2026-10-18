@@ -35,6 +35,9 @@ case "\$1 \$2" in
   "workflow defaults") echo "\$*" >>"$TMP/defaults.log" ;;
   "workflow list"|"workflow update") exec "$SRC" "\$@" ;;
   "project resolve") echo '{"id":1}' ;;
+  "live status") if [ -e "$TMP/live" ]; then echo '{"status":"live","agent_id":"run:same"}'; else echo '{"status":"none"}'; fi ;;
+  "live say") [ ! -e "$TMP/say_fail" ] && echo '{"id":7}' ;;
+  "live turns") echo '[{"id":6},{"id":7}]' ;;
   "--version "*) echo "naru 9.9.9" ;;
   *) echo new ;;
 esac
@@ -107,6 +110,38 @@ rm -f "$TMP/busy"
 [ "$rc" = 1 ] && [ "$(echo "$out" | jq -r .status)" = aborted ] && echo "$out" | jq -r .reason | grep -q drain || fail "drain timeout verdict: $out"
 [ "$(shasum "$NARU" | cut -d' ' -f1)" = "$cur" ] && [ ! -e "$TMP/paused" ] || fail "drain abort changed install or left queue paused"
 ok "drain timeout aborts with the install untouched and the queue resumed"
+
+# live session check: still live (same agent_id) + say round trip; not live / say failing
+# roll back; no live session before the deploy, or NARU_DEPLOY_LIVE_CHECK=0, skips it
+live_deploy() { # live_deploy <restart hook> [extra env...]
+  local h="$1"; shift
+  sleep 1  # backup names are per-second
+  cp "$SRC" "$NARU"; cp "$SRC" "$PREFIX/bin/naru.prev"; rm -f "$TMP/paused"
+  set +e
+  out=$(env "$@" NARU_DEPLOY_RESTART_CMD="$h" NARU_DEPLOY_NEW_BIN="$TMP/newbin" scripts/self-deploy.sh --skip-checks 2>/dev/null); rc=$?
+  set -e
+}
+touch "$TMP/live"
+live_deploy "true"
+[ "$rc" = 0 ] && [ "$(echo "$out" | jq -r .status)" = swapped ] && [ "$(echo "$out" | jq -r .healthy)" = true ] || fail "same agent_id should be healthy ($rc): $out"
+ok "live session still live under the same agent_id -> swapped"
+live_deploy "rm -f '$TMP/live'"
+[ "$rc" = 1 ] && [ "$(echo "$out" | jq -r .status)" = rolled_back ] || fail "session gone should roll back ($rc): $out"
+ok "live session gone after the restart -> rolled_back"
+touch "$TMP/live" "$TMP/say_fail"
+live_deploy "true"
+rm -f "$TMP/say_fail"
+[ "$rc" = 1 ] && [ "$(echo "$out" | jq -r .status)" = rolled_back ] || fail "failing say should roll back ($rc): $out"
+ok "live say failing -> rolled_back"
+rm -f "$TMP/live"
+live_deploy "true"
+[ "$rc" = 0 ] && [ "$(echo "$out" | jq -r .status)" = swapped ] || fail "no live session before should skip ($rc): $out"
+ok "no live session before the deploy -> check skipped, swapped"
+touch "$TMP/live" "$TMP/say_fail"
+live_deploy "true" NARU_DEPLOY_LIVE_CHECK=0
+rm -f "$TMP/live" "$TMP/say_fail"
+[ "$rc" = 0 ] && [ "$(echo "$out" | jq -r .status)" = swapped ] || fail "NARU_DEPLOY_LIVE_CHECK=0 should skip ($rc): $out"
+ok "NARU_DEPLOY_LIVE_CHECK=0 skips the live check"
 
 # rollback that cannot restart -> rollback_failed, queue stays paused
 set +e

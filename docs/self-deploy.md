@@ -9,8 +9,9 @@ resumed) → db backup → atomic binary swap (`naru.prev` kept) → restart via
 = `launchctl kickstart -k gui/$(id -u)/com.naru.serve`, see `docs/launchd.md`; unset with no
 agent = cannot restart = unhealthy) → `naru workflow defaults --task-loop` with the new binary → health
 (`/api/version` on `NARU_DEPLOY_PORT` reports the new version, or `NARU_DEPLOY_HEALTH_CMD`
-with `NARU_DEPLOY_EXPECT`; and, if a live conversation was open before, its `agent_id`
-changed — i.e. the live supervisor respawned it; `NARU_DEPLOY_LIVE_CHECK=0` skips) within
+with `NARU_DEPLOY_EXPECT`; and, if a live conversation was open before, it is
+still `live` (same or new `agent_id` — the agent process survives a restart) and a
+`live say` round trip reads back from `live turns`; `NARU_DEPLOY_LIVE_CHECK=0` skips) within
 `NARU_DEPLOY_HEALTH_TIMEOUT` (60 s) → `queue resume`.
 
 Unhealthy: `naru.prev` is restored (re-signed), the db backup replaces the db (stale

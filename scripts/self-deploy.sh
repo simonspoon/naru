@@ -9,7 +9,8 @@
 #   4 restart the server (NARU_DEPLOY_RESTART_CMD, e.g. a launchctl kickstart),
 #     re-run `naru workflow defaults --task-loop` with the new binary, then check
 #     health: /api/version reports the new version, defaults succeeded, and a live
-#     conversation open before the swap was respawned (new agent_id)
+#     conversation open before the swap is still live (same or new agent_id) and a
+#     `live say` round trip works
 #   5 healthy: resume the queue. Unhealthy: restore naru.prev and the db backup,
 #     restart, resume (rolled_back); if that is unhealthy too, rollback_failed and
 #     the queue stays paused.
@@ -26,7 +27,7 @@
 #      unhealthy and rolled back), NARU_DEPLOY_DB (db path; default NARU_DB, MESA_DB,
 #      then the platform default), NARU_DEPLOY_PORT (default: the config's serve.port, else 7770), NARU_DEPLOY_HEALTH_CMD
 #      (replaces the /api/version check; gets NARU_DEPLOY_EXPECT = the version that should be serving), NARU_DEPLOY_LIVE_CHECK=0 (skip the
-#      live-respawn check), NARU_DEPLOY_DRAIN_TIMEOUT (600), NARU_DEPLOY_HEALTH_TIMEOUT
+#      live-session check), NARU_DEPLOY_DRAIN_TIMEOUT (600), NARU_DEPLOY_HEALTH_TIMEOUT
 #      (60), NARU_DEPLOY_POLL (seconds between polls, 3).
 # PATH: a launchd or live-agent shell has neither cargo nor node, so (unless
 #      --skip-checks) ~/.cargo/bin, ~/Library/pnpm/bin and ~/.local/bin are prepended
@@ -195,7 +196,17 @@ restart() {
   bash -c "$cmd" >>"$LOG" 2>&1 || return 1
   restarted=true
 }
-# healthy <bin> <check live respawn 0|1>
+# The live agent survives a server restart and reconnects under the same agent_id, so
+# the check is: the session is still `live`, and a say round trip works (the new turn
+# reads back from `live turns`). `listen` is not used: it would consume a pending utterance.
+live_ok() {
+  local bin="$1" tid
+  "$bin" live status 2>/dev/null | jq -e '.status=="live"' >/dev/null 2>&1 || return 1
+  tid="$("$bin" live say --quiet "Deploy health check." 2>>"$LOG" | jq -r '.id // empty')"
+  [ -n "$tid" ] || return 1
+  "$bin" live turns --after "$((tid - 1))" 2>>"$LOG" | jq -e --argjson id "$tid" 'any(.[]; .id==$id)' >/dev/null 2>&1
+}
+# healthy <bin> <check live session 0|1>
 healthy() {
   local bin="$1" live="$2" want end
   want="$("$bin" --version 2>/dev/null | awk '{print $2}')"
@@ -207,8 +218,7 @@ healthy() {
       curl -fsS --max-time 5 "http://127.0.0.1:$PORT/api/version" 2>>"$LOG" | jq -e --arg v "$want" '.version==$v' >/dev/null 2>&1 && ok=1 || ok=0
     fi
     if [ "$ok" -eq 1 ] && [ "$live" -eq 1 ]; then
-      now="$("$bin" live status 2>/dev/null | jq -r 'select(.status=="live") | .agent_id // "none"')"
-      [ -n "$now" ] && [ "$now" != "none" ] && [ "$now" != "$live_before" ] || ok=0
+      live_ok "$bin" || ok=0
     fi
     [ "$ok" -eq 1 ] && return 0
     [ "$(date +%s)" -ge "$end" ] && return 1
@@ -238,7 +248,7 @@ if ! restart; then fail_reason="server restart failed"
 elif ! seed_task_loop; then fail_reason="workflow defaults --task-loop failed"
 else
   chk=1; { [ -z "$live_before" ] || [ "${NARU_DEPLOY_LIVE_CHECK:-1}" = 0 ]; } && chk=0
-  healthy "$INSTALLED" "$chk" || fail_reason="health check failed (version, live respawn)"
+  healthy "$INSTALLED" "$chk" || fail_reason="health check failed (version, live session)"
 fi
 
 if [ -z "$fail_reason" ]; then
