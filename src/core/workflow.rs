@@ -1988,7 +1988,16 @@ SCRATCH="$HOME/.naru/loop/$TASK-$(date +%s)-$$"
 mkdir -p "$SCRATCH"
 naru task show "$TASK" | jq -r '.description' > "$SCRATCH/task.md" || exit 1
 echo no > "$SCRATCH/ui"
-git status --porcelain -uall > "$SCRATCH/baseline.txt" 2>/dev/null || : > "$SCRATCH/baseline.txt"
+# baseline.txt: one `path<TAB>hash` line per path dirty before the run (hash `gone` = absent), so Commit can tell the task's own changes from earlier ones
+: > "$SCRATCH/baseline.txt"
+while IFS= read -r -d '' rec; do
+  case "$rec" in
+    R*|C*|\ R*|\ C*) IFS= read -r -d '' old; printf '%s\tgone\n' "$old" >> "$SCRATCH/baseline.txt" ;;
+  esac
+  p="${rec:3}"
+  if [ -e "$p" ]; then h=$(git hash-object -- "$p" 2>/dev/null || echo gone); else h=gone; fi
+  printf '%s\t%s\n' "$p" "$h" >> "$SCRATCH/baseline.txt"
+done < <(git status --porcelain -z -uall 2>/dev/null)
 { brief_head planner; printf '\n## What to do\n\nWrite a short implementation plan: the files to touch, the steps, and how to verify. Do not edit any file. End with exactly one line, `UI: yes` if the change touches user-facing UI, else `UI: no`.\n'; } > "$SCRATCH/plan-brief.md"
 stage_run plan planner "$(dl 900)" "$SCRATCH/plan-brief.md"
 if [ "$(stage_verdict plan)" = COMPLETE ]; then
@@ -2121,20 +2130,33 @@ SCRATCH=$(printf '%s' "$IN" | jq -r '.result // ""' | sed -n 's/.*Hand-off files
 echo "task=$TASK scratch=$SCRATCH ui=$(cat "$SCRATCH/ui" 2>/dev/null || echo no) close=done"
 "##;
 
-const LOOP_COMMIT: &str = r##"if [ -s "$SCRATCH/baseline.txt" ]; then
-  { echo "Task loop passed, but the commit was skipped: the tree held changes before the run, so the task's own changes cannot be told apart. Nothing was staged or committed. Files dirty before the run:"; cat "$SCRATCH/baseline.txt"; } | head -c 4000 > "$SCRATCH/commit-note.md"
-  naru task note "$TASK" --file "$SCRATCH/commit-note.md" > /dev/null
-  naru notify --title "Task loop" --open "tasks/$TASK" "Task $TASK passed but was not committed: the tree was dirty before the run." > /dev/null 2>&1 || echo "notify failed" >> "$SCRATCH/reasons.txt"
-  echo "task-loop: commit refused, the tree was dirty before the run" >&2
-  exit 1
-fi
+const LOOP_COMMIT: &str = r##"# Commit only what the run changed: a path dirty before the run (in baseline.txt) stays
+# out unless its content hash moved since; a refusal here would feed itself, every later
+# run starting from the same dirty tree.
 paths=()
+skipped=()
+rode=()
+add_path() { # <path>
+  local p=$1 h line
+  if [ -e "$p" ]; then h=$(git hash-object -- "$p" 2>/dev/null || echo gone); else h=gone; fi
+  line=$(printf '%s\t%s' "$p" "$h")
+  if grep -qxF -- "$line" "$SCRATCH/baseline.txt" 2>/dev/null; then skipped+=("$p"); return; fi
+  if awk -F'\t' -v p="$p" '$1 == p { f = 1 } END { exit !f }' "$SCRATCH/baseline.txt" 2>/dev/null; then rode+=("$p"); fi
+  paths+=("$p")
+}
 while IFS= read -r -d '' rec; do
   case "$rec" in
-    R*|C*|\ R*|\ C*) paths+=("${rec:3}"); IFS= read -r -d '' old; paths+=("$old") ;;
-    *) paths+=("${rec:3}") ;;
+    R*|C*|\ R*|\ C*) add_path "${rec:3}"; IFS= read -r -d '' old; add_path "$old" ;;
+    *) add_path "${rec:3}" ;;
   esac
 done < <(git status --porcelain -z -uall)
+if [ "${#skipped[@]}" -gt 0 ] || [ "${#rode[@]}" -gt 0 ]; then
+  {
+    if [ "${#skipped[@]}" -gt 0 ]; then echo "Task loop commit: these paths were dirty before the run and unchanged by it, so they were left uncommitted:"; printf '%s\n' "${skipped[@]}"; fi
+    if [ "${#rode[@]}" -gt 0 ]; then echo "Task loop commit: these paths were dirty before the run and changed again by it, so they were committed with their earlier edits:"; printf '%s\n' "${rode[@]}"; fi
+  } | head -c 4000 > "$SCRATCH/commit-note.md"
+  naru task note "$TASK" --file "$SCRATCH/commit-note.md" > /dev/null || true
+fi
 if [ "${#paths[@]}" -eq 0 ]; then emit commit=none; exit 0; fi
 NAME=$(naru task show "$TASK" | jq -r '.name')
 if ! git add -A -- "${paths[@]}" || ! git commit -q -m "task $TASK: $NAME" -m "Naru task $TASK (task loop)" -- "${paths[@]}" > "$SCRATCH/commit.out" 2>&1; then

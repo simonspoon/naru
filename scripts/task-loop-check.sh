@@ -263,7 +263,7 @@ R=$(run_loop "$T")
 [ "$(step "$R" "Implement + review #1")" = ok ] && [ "$(step "$R" "Implement + review #2")" = skipped ] && [ "$(step "$R" "Close: backlog")" = ok ] || fail "impl failed: the passes or Close: backlog"
 ok "a failed implement ends the child pass and the loop in backlog, no second pass"
 
-# ---- 7. a tree dirty before the run -> pass, but the commit is refused ----
+# ---- 7. a tree dirty before the run -> the task's own file is committed, the stray one is left ----
 reset_stub
 printf 'UI: no' > "$STUB/reply.planner"
 printf 'VERDICT: PASS' > "$STUB/reply.verifier"
@@ -275,11 +275,27 @@ T=$(mk "Fix dirty")
 R=$(run_loop "$T")
 [ "$(jq -r .status <<<"$R")" = succeeded ] || fail "dirty: run $(jq -c '{status,error}' <<<"$R")"
 [ "$(tstatus "$T")" = done ] && [ "$(step "$R" "Commit")" = ok ] || fail "dirty: task $(tstatus "$T"), Commit $(step "$R" "Commit")"
-[ "$(git -C "$TMP/work" rev-parse HEAD)" = "$before" ] || fail "dirty: a commit was made"
-[ "$(git -C "$TMP/work" status --porcelain | sort | tr '\n' ',')" = "?? new.txt,?? stray.txt," ] || fail "dirty: tree: $(git -C "$TMP/work" status --porcelain)"
-"$NARU" task show "$T" | jq -e '.notes | length == 1 and (.[0].body | test("stray.txt"))' >/dev/null || fail "dirty: note"
-[ "$(grep -c -- '--call--' "$STUB/vox.log")" = 1 ] || fail "dirty: notify calls"
-ok "a dirty baseline refuses the commit without failing the run: nothing staged, task noted, one notify"
+[ "$(git -C "$TMP/work" rev-parse HEAD)" != "$before" ] || fail "dirty: no commit was made"
+[ "$(git -C "$TMP/work" show --name-only --format= HEAD)" = new.txt ] || fail "dirty: commit holds $(git -C "$TMP/work" show --name-only --format= HEAD)"
+[ "$(git -C "$TMP/work" status --porcelain)" = "?? stray.txt" ] || fail "dirty: tree: $(git -C "$TMP/work" status --porcelain)"
+"$NARU" task show "$T" | jq -e '.notes | map(.body) | any(test("stray.txt")) and any(test("^Committed "))' >/dev/null || fail "dirty: notes"
+ok "a dirty baseline no longer refuses: the task's file is committed, the stray one stays dirty and is noted"
+rm -f "$TMP/work/stray.txt"
+
+# ---- 7b. a path dirty before the run and changed again by it rides along; the tree ends clean ----
+reset_stub
+printf 'UI: no' > "$STUB/reply.planner"
+printf 'VERDICT: PASS' > "$STUB/reply.verifier"
+printf 'VERDICT: PASS' > "$STUB/reply.diff-reviewer"
+printf 'rider.txt\nnew2.txt\n' > "$STUB/touch.implementer"
+echo early > "$TMP/work/rider.txt"
+T=$(mk "Fix rider")
+R=$(run_loop "$T")
+[ "$(jq -r .status <<<"$R")" = succeeded ] && [ "$(step "$R" "Commit")" = ok ] || fail "rider: run $(jq -c '{status,error}' <<<"$R")"
+[ "$(git -C "$TMP/work" show --name-only --format= HEAD | sort | tr '\n' ' ')" = "new2.txt rider.txt " ] || fail "rider: commit holds $(git -C "$TMP/work" show --name-only --format= HEAD)"
+[ -z "$(git -C "$TMP/work" status --porcelain)" ] || fail "rider: tree not clean: $(git -C "$TMP/work" status --porcelain)"
+"$NARU" task show "$T" | jq -e '.notes | map(.body) | any(test("rider.txt") and test("earlier edits"))' >/dev/null || fail "rider: notes"
+ok "a pre-dirty path the task changed again is committed with a note, and the tree ends clean"
 
 # ---- 8. a failing vox send is caught: backlog, run still succeeds ----
 reset_stub
