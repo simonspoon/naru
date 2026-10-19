@@ -158,8 +158,11 @@ The ninth template (`docs/config.md`):
 
 ```
 run_agent={run_agent}
-claude -p --input-format stream-json --output-format stream-json --verbose ${run_agent:+--agent "$run_agent"} --model {model} --name {name} {session_flag} {session_id}
+model={model}
+claude -p --input-format stream-json --output-format stream-json --verbose ${run_agent:+--agent "$run_agent"} ${model:+--model "$model"} --name {name} {session_flag} {session_id}
 ```
+
+An empty `{model}` (`naru stage run` without `--model`, so the agent file's own model decides) emits no `--model`; a saved override still spelling `--model {model}` would pass `--model ''`.
 
 `{run_agent}` is the run's `--agent` name (naru task 1861; not `{agent}`, a
 retired placeholder), the empty string when none was given. The default is two

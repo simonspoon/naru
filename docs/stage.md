@@ -9,7 +9,7 @@ verdict. CLI only, no route; `--quiet` is accepted and ignored.
 ```
 naru stage run --agent A --cwd D --deadline S --brief-file F
     [--silence S] [--max-restarts 1] [--grace 180]
-    [--also AGENT2 --also-brief-file F2] [--scratch DIR] [--model sonnet] [--stage NAME] [--task ID]
+    [--also AGENT2 --also-brief-file F2] [--scratch DIR] [--model M] [--stage NAME] [--task ID]
 ```
 
 `--task` names each session `task <ID> · <stage> (<agent>)` (just `<stage>

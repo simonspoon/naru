@@ -500,9 +500,6 @@ pub(crate) fn create_job_with(
     opts: &StartOpts,
     template: Option<&str>,
 ) -> Result<Job> {
-    if opts.model.trim().is_empty() {
-        return Err(Error::Validation("model must not be empty".into()));
-    }
     if opts.prompt.trim().is_empty() {
         return Err(Error::Validation("prompt must not be empty".into()));
     }
@@ -1776,10 +1773,6 @@ mod tests {
         assert_eq!(pending_inbox(&dir.join("inbox")).len(), 1);
         for bad in [
             opts("  ", cwd.path()),
-            StartOpts {
-                model: " ".into(),
-                ..opts("x", cwd.path())
-            },
             opts("x", Path::new("/nonexistent-naru-dir")),
         ] {
             assert!(matches!(

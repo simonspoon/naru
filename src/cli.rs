@@ -572,9 +572,9 @@ EXAMPLES
         /// Where `status.json` is written (default: a fresh temp folder)
         #[arg(long)]
         scratch: Option<PathBuf>,
-        /// Model alias for the runs
-        #[arg(long, default_value = "sonnet")]
-        model: String,
+        /// Overrides the agent file's model for the runs (default: none, so the agent file decides)
+        #[arg(long)]
+        model: Option<String>,
         /// The stage's name, as written in `status.json`
         #[arg(long, default_value = "run")]
         stage: String,
@@ -5804,7 +5804,7 @@ fn run_stage(cmd: StageCmd) -> Result<()> {
         stage: name,
         task,
         cwd,
-        model,
+        model: model.unwrap_or_default(),
         deadline: secs("--deadline", deadline)?,
         silence: silence.map(|s| secs("--silence", s)).transpose()?,
         grace: secs("--grace", grace)?,

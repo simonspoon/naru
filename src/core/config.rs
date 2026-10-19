@@ -396,7 +396,7 @@ pub const DEFAULT_WORKFLOW_PROMPT: &str = r#"claude -p --model {model} --name {n
 /// `{run_agent}` is the job's `--agent` name (not `{agent}`, a retired
 /// placeholder), empty when none was given; the first line captures it so the
 /// `--agent` word is emitted only when set.
-pub const DEFAULT_RUNNER: &str = "run_agent={run_agent}\nclaude -p --input-format stream-json --output-format stream-json --verbose ${run_agent:+--agent \"$run_agent\"} --model {model} --name {name} {session_flag} {session_id}";
+pub const DEFAULT_RUNNER: &str = "run_agent={run_agent}\nmodel={model}\nclaude -p --input-format stream-json --output-format stream-json --verbose ${run_agent:+--agent \"$run_agent\"} ${model:+--model \"$model\"} --name {name} {session_flag} {session_id}";
 
 /// The built-in template for `action`, or `None` if `action` isn't one of
 /// [`ACTIONS`]. Public so the docs check and the API can report the shipped
@@ -5310,7 +5310,7 @@ mod tests {
         };
         let script = resolve(RUNNER, DEFAULT_RUNNER, &vars).unwrap();
         assert!(
-            script.starts_with("run_agent='super visor'\nclaude -p"),
+            script.starts_with("run_agent='super visor'\nmodel='haiku'\nclaude -p"),
             "{script}"
         );
         assert!(
@@ -5328,7 +5328,16 @@ mod tests {
             ..vars
         };
         let script = resolve(RUNNER, DEFAULT_RUNNER, &none).unwrap();
-        assert!(script.starts_with("run_agent=''\nclaude -p"), "{script}");
+        assert!(
+            script.starts_with("run_agent=''\nmodel='haiku'\nclaude -p"),
+            "{script}"
+        );
+        let nomodel = Vars {
+            model: None,
+            ..none
+        };
+        let script = resolve(RUNNER, DEFAULT_RUNNER, &nomodel).unwrap();
+        assert!(script.contains("\nmodel=''\n"), "{script}");
     }
 
     /// naru task 1691: the inbox-watcher default is one synchronous `-p`

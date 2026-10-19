@@ -2610,12 +2610,12 @@ fn build_task_loop_builtins(
         })
     };
     let contains = |v: &str| json!({"op": "contains", "value": v});
-    // A trycatch around a tool-less typed `agent` node: haiku reads the text,
+    // A trycatch around a tool-less typed `agent` node: the agent's own model reads the text,
     // the struct is validated by the engine (one retry), a failure is caught.
     let loop_agent = |agent: &str, prompt: &str, ty: &str| {
         json!({
             "wrap": {"kind": "agent", "config": {
-                "agent": agent, "model": "haiku", "prompt": prompt, "result_type": ty,
+                "agent": agent, "prompt": prompt, "result_type": ty,
             }},
             "timeout_secs": 180,
         })
