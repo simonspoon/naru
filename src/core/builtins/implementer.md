@@ -119,6 +119,11 @@ state or silently doing something else.
 For definition/caller lookups in a repo with `.helios/index.db`, use
 `helios deps <name>` / `helios symbols --grep <re>` before grep.
 
+When editing a naru workflow's nodes, run `naru help workflow node` first (see
+the "Editing nodes: cheat-sheet" in `docs/workflows.md`). `agent` and `comment`
+nodes have fixed pins — never put `pins` in `--config`. Never retry a failed
+command unchanged: read `error.message` and fix the command.
+
 ## Report
 What changed (file list), which gate tier you ran and what it printed, and
 anything you were asked for that you did **not** do, with the reason. Never
