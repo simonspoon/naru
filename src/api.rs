@@ -3352,6 +3352,9 @@ fn router(state: AppState) -> Router {
                 .delete(delete_workflow),
         )
         .route("/api/workflows/{id}/duplicate", post(duplicate_workflow))
+        // Portable export / import of one workflow (naru task 2102).
+        .route("/api/workflows/{id}/export", get(export_workflow))
+        .route("/api/workflows/import", post(import_workflow))
         .route(
             "/api/workflows/{id}/revisions",
             get(list_workflow_revisions),
@@ -4826,6 +4829,14 @@ struct WorkflowDuplicate {
 }
 
 #[derive(Deserialize)]
+struct WorkflowImportBody {
+    /// The export file: the JSON object itself, or its text as a string.
+    document: serde_json::Value,
+    #[serde(default)]
+    project_id: Option<i64>,
+}
+
+#[derive(Deserialize)]
 struct WorkflowNodeCreate {
     kind: WorkflowNodeKind,
     title: String,
@@ -4968,6 +4979,72 @@ async fn duplicate_workflow(
     let mut store = state.store.lock().unwrap();
     let view = store.duplicate_workflow(id, name.as_deref())?;
     Ok((StatusCode::CREATED, Json(view)).into_response())
+}
+
+/// The workflow as a downloadable `*.naru-workflow.json` file.
+async fn export_workflow(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let doc = {
+        let store = state.store.lock().unwrap();
+        store.export_workflow(id)?
+    };
+    let slug: String = doc
+        .workflow
+        .name
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .split('-')
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    let slug = if slug.is_empty() {
+        "workflow".into()
+    } else {
+        slug
+    };
+    let body = serde_json::to_string_pretty(&doc).unwrap_or_default();
+    Ok((
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/json".to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                content_disposition(&format!("{slug}.naru-workflow.json")),
+            ),
+        ],
+        body,
+    )
+        .into_response())
+}
+
+/// Creates a (disabled) workflow from an export file and answers what was
+/// created plus its missing references and warnings.
+async fn import_workflow(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Result<Json<WorkflowImportBody>, JsonRejection>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let Json(body) = body?;
+    let doc = match body.document {
+        serde_json::Value::String(text) => serde_json::from_str(&text).map_err(|e| {
+            crate::core::Error::Validation(format!(
+                "not a readable workflow export: the file is not JSON ({e})"
+            ))
+        })?,
+        other => other,
+    };
+    let mut store = state.store.lock().unwrap();
+    let result = store.import_workflow(&doc, body.project_id)?;
+    Ok((StatusCode::CREATED, Json(result)).into_response())
 }
 
 /// A workflow's revisions, newest first, each with its whole snapshot — the

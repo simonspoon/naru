@@ -8435,6 +8435,89 @@ mod tests {
     }
 
     #[test]
+    fn export_import_round_trips_disabled_suffixed_and_reports_missing() {
+        let (st, _d) = store();
+        let wf = st.with(|s| {
+            let wf = s.create_workflow(None, "Flow", Some("d")).unwrap().id;
+            let t = node(
+                s,
+                wf,
+                WorkflowNodeKind::Trigger,
+                "T",
+                json!({"mode": "manual"}),
+            );
+            let sc = node(
+                s,
+                wf,
+                WorkflowNodeKind::Script,
+                "S",
+                json!({"script": "ghost-script"}),
+            );
+            let ag = node(
+                s,
+                wf,
+                WorkflowNodeKind::Agent,
+                "A",
+                json!({"agent": "ghost-agent", "prompt": "hi"}),
+            );
+            s.create_workflow_edge(wf, t, sc, None).unwrap();
+            s.create_workflow_edge(wf, sc, ag, None).unwrap();
+            wf
+        });
+        let doc = st.with(|s| s.export_workflow(wf)).unwrap();
+        assert_eq!((doc.format.as_str(), doc.version), ("naru-workflow", 1));
+        let mut json_doc = serde_json::to_value(&doc).unwrap();
+        // Unknown fields are ignored; a newer version is a warning.
+        json_doc["extra"] = json!({"x": 1});
+        json_doc["version"] = json!(2);
+        json_doc["nodes"][0]["future"] = json!(true);
+        let r = st.with(|s| s.import_workflow(&json_doc, None)).unwrap();
+        assert_eq!(r.workflow.name, "Flow (imported)");
+        assert_eq!(r.renamed_from.as_deref(), Some("Flow"));
+        assert!(!r.workflow.enabled);
+        assert_eq!((r.nodes.len(), r.edges.len()), (3, 2));
+        assert_eq!(r.warnings.len(), 1);
+        let orig = st.with(|s| s.get_workflow_view(wf)).unwrap();
+        for (n, o) in r.nodes.iter().zip(&orig.nodes) {
+            assert_eq!((n.kind, &n.title, &n.config), (o.kind, &o.title, &o.config));
+        }
+        let what: Vec<_> = r
+            .missing
+            .iter()
+            .map(|m| (m.what.as_str(), m.reference.as_str()))
+            .collect();
+        assert_eq!(
+            what,
+            vec![("script", "ghost-script"), ("agent", "ghost-agent")]
+        );
+        let r2 = st.with(|s| s.import_workflow(&json_doc, None)).unwrap();
+        assert_eq!(r2.workflow.name, "Flow (imported 2)");
+        // Unreadable files are validation errors and write nothing.
+        let before = st.with(|s| s.list_workflows(None)).unwrap().len();
+        for bad in [
+            json!([]),
+            json!({"format": "other", "version": 1}),
+            json!({"format": "naru-workflow"}),
+        ] {
+            assert!(matches!(
+                st.with(|s| s.import_workflow(&bad, None)),
+                Err(Error::Validation(_))
+            ));
+        }
+        let mut cyc = serde_json::to_value(&doc).unwrap();
+        let (a, b) = (
+            cyc["nodes"][1]["ref"].clone(),
+            cyc["nodes"][2]["ref"].clone(),
+        );
+        cyc["edges"] = json!([{"from": a, "to": b}, {"from": b, "to": a}]);
+        assert!(matches!(
+            st.with(|s| s.import_workflow(&cyc, None)),
+            Err(Error::Cycle(_))
+        ));
+        assert_eq!(st.with(|s| s.list_workflows(None)).unwrap().len(), before);
+    }
+
+    #[test]
     fn comment_box_is_editor_only() {
         use WorkflowNodeKind::Comment;
         let bad = |c: Value| validate_config(Comment, &c).unwrap_err();

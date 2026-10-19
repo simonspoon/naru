@@ -78,8 +78,9 @@ pub use types::{
     ScriptRunStatus, ScriptStream, ServeBoolSetting, ServeHostsSetting, ServeNumberSetting, Status,
     SystemInfo, Task, TaskDigestEntry, TaskNote, TaskReceipt, TaskSummary, Theme, ThemePreview,
     ThemeSlots, VoiceEnrollSample, VoiceEnrollment, Workflow, WorkflowBranch, WorkflowEdge,
-    WorkflowGate, WorkflowGateStatus, WorkflowLogEntry, WorkflowNode, WorkflowNodeKind,
-    WorkflowRevision, WorkflowRun, WorkflowRunStatus, WorkflowSnapshot, WorkflowStep,
-    WorkflowStepStatus, WorkflowTrigger, WorkflowType, WorkflowTypeField, WorkflowView,
-    is_valid_artifact_content_type, task_name,
+    WorkflowExport, WorkflowExportEdge, WorkflowExportMeta, WorkflowExportNode, WorkflowGate,
+    WorkflowGateStatus, WorkflowImportResult, WorkflowLogEntry, WorkflowMissingRef, WorkflowNode,
+    WorkflowNodeKind, WorkflowRevision, WorkflowRun, WorkflowRunStatus, WorkflowSnapshot,
+    WorkflowStep, WorkflowStepStatus, WorkflowTrigger, WorkflowType, WorkflowTypeField,
+    WorkflowView, is_valid_artifact_content_type, task_name,
 };

@@ -5111,6 +5111,94 @@ pub struct WorkflowView {
     pub edges: Vec<WorkflowEdge>,
 }
 
+/// The portable file `naru workflow export` writes and `import` reads
+/// (naru task 2102). Nodes are keyed by a local `ref` (the exported node id)
+/// so edges stay valid whatever ids the target assigns. Readers ignore
+/// unknown fields; `version` gates what a reader accepts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct WorkflowExport {
+    /// Always `"naru-workflow"`.
+    pub format: String,
+    #[ts(type = "number")]
+    pub version: i64,
+    pub exported_at: String,
+    pub naru_version: String,
+    pub workflow: WorkflowExportMeta,
+    pub nodes: Vec<WorkflowExportNode>,
+    pub edges: Vec<WorkflowExportEdge>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct WorkflowExportMeta {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub types: Vec<WorkflowType>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct WorkflowExportNode {
+    #[serde(rename = "ref")]
+    #[ts(type = "number")]
+    pub node_ref: i64,
+    pub kind: WorkflowNodeKind,
+    pub title: String,
+    #[ts(type = "Record<string, unknown>")]
+    pub config: serde_json::Value,
+    #[serde(default)]
+    pub x: f64,
+    #[serde(default)]
+    pub y: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct WorkflowExportEdge {
+    #[ts(type = "number")]
+    pub from: i64,
+    #[ts(type = "number")]
+    pub to: i64,
+    #[serde(default)]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub from_pin: Option<String>,
+    #[serde(default)]
+    pub to_pin: Option<String>,
+}
+
+/// Something an imported node names that this instance does not have. The
+/// reference stays in the node's config untouched; it is only reported.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct WorkflowMissingRef {
+    /// The new node's id on this instance.
+    #[ts(type = "number")]
+    pub node_id: i64,
+    pub node_title: String,
+    pub kind: WorkflowNodeKind,
+    /// `agent`, `project`, `script` or `workflow`.
+    pub what: String,
+    pub reference: String,
+}
+
+/// What `workflow import` answers: the created (disabled) workflow plus
+/// everything the person should know before enabling it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct WorkflowImportResult {
+    pub workflow: Workflow,
+    pub nodes: Vec<WorkflowNode>,
+    pub edges: Vec<WorkflowEdge>,
+    /// The file's name when a clash forced a suffix, else null.
+    pub renamed_from: Option<String>,
+    pub missing: Vec<WorkflowMissingRef>,
+    pub warnings: Vec<String>,
+}
+
 /// One node of a [`WorkflowSnapshot`]. The id is kept so a restore can put a
 /// node back under the id runs and gates already name.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

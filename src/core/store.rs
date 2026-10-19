@@ -19,6 +19,10 @@ use super::types::{
     WorkflowNodeKind, WorkflowRun, WorkflowRunStatus, WorkflowStep, WorkflowStepStatus,
     WorkflowTrigger, WorkflowType, WorkflowView, is_valid_artifact_content_type, task_name,
 };
+use super::types::{
+    WorkflowExport, WorkflowExportEdge, WorkflowExportMeta, WorkflowExportNode,
+    WorkflowImportResult, WorkflowMissingRef,
+};
 use super::types::{WorkflowRevision, WorkflowSnapEdge, WorkflowSnapNode, WorkflowSnapshot};
 
 #[derive(Debug)]
@@ -2821,6 +2825,9 @@ const WORKFLOW_LOG_COLUMNS: &str = "id, log, text, workflow_id, run_id, created_
 pub const WORKFLOW_RUN_KEEP: i64 = 50;
 /// Longest workflow, node or log-name text.
 const WORKFLOW_NAME_MAX: usize = 200;
+/// The `format` and newest `version` of the workflow export file.
+pub const WORKFLOW_EXPORT_FORMAT: &str = "naru-workflow";
+pub const WORKFLOW_EXPORT_VERSION: i64 = 1;
 /// Largest run input, in bytes: it is stored on the run row and handed to
 /// every downstream node.
 /// The `error` of a run [`Store::reconcile_workflow_runs`] closes.
@@ -5566,6 +5573,272 @@ impl Store {
             )?;
             s.get_workflow_view(new_id)
         })
+    }
+
+    /// The portable file for one workflow (naru task 2102): the graph with
+    /// nodes keyed by their id as `ref`, its struct types and a format
+    /// version. No runs, no ids a target would have to share.
+    pub fn export_workflow(&self, id: i64) -> Result<WorkflowExport> {
+        let v = self.get_workflow_view(id)?;
+        Ok(WorkflowExport {
+            format: WORKFLOW_EXPORT_FORMAT.into(),
+            version: WORKFLOW_EXPORT_VERSION,
+            exported_at: self
+                .conn
+                .query_row("SELECT datetime('now')", [], |r| r.get(0))?,
+            naru_version: env!("CARGO_PKG_VERSION").into(),
+            workflow: WorkflowExportMeta {
+                name: v.workflow.name,
+                description: v.workflow.description,
+                types: v.workflow.types,
+            },
+            nodes: v
+                .nodes
+                .into_iter()
+                .map(|n| WorkflowExportNode {
+                    node_ref: n.id,
+                    kind: n.kind,
+                    title: n.title,
+                    config: n.config,
+                    x: n.x,
+                    y: n.y,
+                })
+                .collect(),
+            edges: v
+                .edges
+                .into_iter()
+                .map(|e| WorkflowExportEdge {
+                    from: e.from_node,
+                    to: e.to_node,
+                    branch: e.branch,
+                    from_pin: e.from_pin,
+                    to_pin: e.to_pin,
+                })
+                .collect(),
+        })
+    }
+
+    /// Creates a workflow from an export file, always **disabled**, never
+    /// overwriting: a taken name gets `(imported)`, `(imported 2)`… The file
+    /// is read tolerantly (unknown fields ignored, a newer `version` accepted
+    /// — node configs are stored as exported, as `duplicate_workflow` does,
+    /// since a stored config is already normalized and need not re-validate —
+    /// with a warning) but an unreadable one is `validation`. Anything a node
+    /// names that this instance lacks is reported in `missing`, the config
+    /// left as written. `project_id` binds the result to a project (default
+    /// global).
+    pub fn import_workflow(
+        &mut self,
+        doc: &serde_json::Value,
+        project_id: Option<i64>,
+    ) -> Result<WorkflowImportResult> {
+        let bad = |m: String| Error::Validation(format!("not a readable workflow export: {m}"));
+        let obj = doc
+            .as_object()
+            .ok_or_else(|| bad("the file is not a JSON object".into()))?;
+        if obj.get("format").and_then(|v| v.as_str()) != Some(WORKFLOW_EXPORT_FORMAT) {
+            return Err(bad(format!(
+                "\"format\" must be {WORKFLOW_EXPORT_FORMAT:?}"
+            )));
+        }
+        let version = obj
+            .get("version")
+            .and_then(|v| v.as_i64())
+            .ok_or_else(|| bad("\"version\" is missing or not a number".into()))?;
+        if version < 1 {
+            return Err(bad(format!("unsupported version {version}")));
+        }
+        let mut warnings = Vec::new();
+        if version > WORKFLOW_EXPORT_VERSION {
+            warnings.push(format!(
+                "the file is format version {version}; this Naru reads version \
+                 {WORKFLOW_EXPORT_VERSION}, so anything newer in it was ignored"
+            ));
+        }
+        let file: WorkflowExport = serde_json::from_value(doc.clone()).map_err(|e| {
+            bad(format!(
+                "{e} (a node kind this Naru does not know also lands here)"
+            ))
+        })?;
+        super::wftypes::validate_types(&file.workflow.types).map_err(Error::Validation)?;
+        let mut refs = HashSet::new();
+        for n in &file.nodes {
+            if !refs.insert(n.node_ref) {
+                return Err(bad(format!("node ref {} appears twice", n.node_ref)));
+            }
+            validate_workflow_node_title(&n.title)?;
+        }
+        for e in &file.edges {
+            if !refs.contains(&e.from) || !refs.contains(&e.to) {
+                return Err(bad(format!(
+                    "edge {} -> {} names a node the file does not contain",
+                    e.from, e.to
+                )));
+            }
+            if e.from == e.to {
+                return Err(Error::Cycle(format!(
+                    "edge {0} -> {0} is a self-edge",
+                    e.from
+                )));
+            }
+        }
+        // Kahn: a cyclic file is refused before anything is written.
+        let mut indeg: HashMap<i64, usize> = refs.iter().map(|r| (*r, 0)).collect();
+        for e in &file.edges {
+            *indeg.get_mut(&e.to).unwrap() += 1;
+        }
+        let mut ready: Vec<i64> = indeg
+            .iter()
+            .filter(|(_, d)| **d == 0)
+            .map(|(r, _)| *r)
+            .collect();
+        let mut seen = 0;
+        while let Some(r) = ready.pop() {
+            seen += 1;
+            for e in file.edges.iter().filter(|e| e.from == r) {
+                let d = indeg.get_mut(&e.to).unwrap();
+                *d -= 1;
+                if *d == 0 {
+                    ready.push(e.to);
+                }
+            }
+        }
+        if seen != refs.len() {
+            return Err(Error::Cycle("the file's edges form a cycle".into()));
+        }
+        let base = validate_workflow_name(&file.workflow.name)?;
+        self.ensure_script_project(project_id)?;
+        let (new_id, final_name) = self.immediate(|s| {
+            let mut n = 1;
+            let name = loop {
+                let cand = match n {
+                    1 if s.ensure_workflow_name_free(&base, None).is_ok() => base.clone(),
+                    1 => {
+                        n += 1;
+                        continue;
+                    }
+                    2 => format!("{base} (imported)"),
+                    k => format!("{base} (imported {})", k - 1),
+                };
+                let cand = if cand.chars().count() > WORKFLOW_NAME_MAX {
+                    let suffix = cand.chars().count() - base.chars().count();
+                    let head: String = base
+                        .chars()
+                        .take(WORKFLOW_NAME_MAX.saturating_sub(suffix))
+                        .collect();
+                    cand.replacen(base.as_str(), &head, 1)
+                } else {
+                    cand
+                };
+                if s.ensure_workflow_name_free(&cand, None).is_ok() {
+                    break cand;
+                }
+                n += 1;
+            };
+            s.conn.execute(
+                "INSERT INTO workflows (project_id, name, description, enabled, types, created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, 0, ?4, datetime('now'), datetime('now'))",
+                (
+                    project_id,
+                    &name,
+                    &file.workflow.description,
+                    serde_json::to_string(&file.workflow.types).unwrap_or_else(|_| "[]".into()),
+                ),
+            )?;
+            let new_id = s.conn.last_insert_rowid();
+            let mut map = HashMap::new();
+            for n in &file.nodes {
+                s.conn.execute(
+                    "INSERT INTO workflow_nodes (workflow_id, kind, title, config, x, y, created_at, updated_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'), datetime('now'))",
+                    (new_id, n.kind.as_str(), &n.title, n.config.to_string(), n.x, n.y),
+                )?;
+                map.insert(n.node_ref, s.conn.last_insert_rowid());
+            }
+            for e in &file.edges {
+                s.conn.execute(
+                    "INSERT INTO workflow_edges (workflow_id, from_node, to_node, branch, from_pin, to_pin) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    (new_id, map[&e.from], map[&e.to], &e.branch, &e.from_pin, &e.to_pin),
+                )?;
+            }
+            let actor = s.actor.clone();
+            s.record_workflow_revision(new_id, &actor, "import")?;
+            Ok((new_id, name))
+        })?;
+        let view = self.get_workflow_view(new_id)?;
+        let missing = self.workflow_missing_refs(&view)?;
+        Ok(WorkflowImportResult {
+            renamed_from: (final_name != base).then_some(base),
+            workflow: view.workflow,
+            nodes: view.nodes,
+            edges: view.edges,
+            missing,
+            warnings,
+        })
+    }
+
+    /// Scans an imported graph for named things this instance lacks: an
+    /// `agent` node's agent (library), a `script` node's script, a
+    /// `subworkflow` node's workflow and any node's `project`.
+    fn workflow_missing_refs(&self, view: &WorkflowView) -> Result<Vec<WorkflowMissingRef>> {
+        let agents = super::library::effective_items(self, view.workflow.project_id)?;
+        let mut out = Vec::new();
+        for n in &view.nodes {
+            let text = |key: &str| -> Option<String> {
+                match n.config.get(key)? {
+                    serde_json::Value::String(s) if !s.trim().is_empty() => {
+                        Some(s.trim().to_string())
+                    }
+                    serde_json::Value::Number(x) => Some(x.to_string()),
+                    _ => None,
+                }
+            };
+            let mut push = |what: &str, reference: String| {
+                out.push(WorkflowMissingRef {
+                    node_id: n.id,
+                    node_title: n.title.clone(),
+                    kind: n.kind,
+                    what: what.into(),
+                    reference,
+                });
+            };
+            if n.kind == WorkflowNodeKind::Agent
+                && let Some(a) = text("agent")
+                && !agents
+                    .iter()
+                    .any(|i| i.kind == LibraryKind::Agent && i.name.eq_ignore_ascii_case(&a))
+            {
+                push("agent", a);
+            }
+            if n.kind == WorkflowNodeKind::Script
+                && let Some(s) = text("script")
+                && match s.parse::<i64>() {
+                    Ok(id) => self.get_script(id).is_err(),
+                    Err(_) => self.find_script_by_name(&s).is_err(),
+                }
+            {
+                push("script", s);
+            }
+            if n.kind == WorkflowNodeKind::Subworkflow
+                && let Some(w) = text("workflow")
+                && match w.parse::<i64>() {
+                    Ok(id) => self.get_workflow(id).is_err(),
+                    Err(_) => self.find_workflow_by_name(&w).is_err(),
+                }
+            {
+                push("workflow", w);
+            }
+            if let Some(p) = text("project")
+                && match p.parse::<i64>() {
+                    Ok(id) => self.get_project(id).is_err(),
+                    Err(_) => self.find_project_by_name(&p).is_err(),
+                }
+            {
+                push("project", p);
+            }
+        }
+        Ok(out)
     }
 
     /// Deletes a workflow with its nodes, edges and runs; echoes the whole

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import {
   deleteWorkflow,
   duplicateWorkflow,
+  exportWorkflow,
   getWorkflow,
   getWorkflowRun,
   listWorkflowLog,
@@ -306,6 +307,24 @@ export function WorkflowBuilderView({
             }
           >
             duplicate
+          </button>
+          <button
+            type="button"
+            onClick={() =>
+              exportWorkflow(workflowId).then(
+                ({ filename, text }) => {
+                  const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }))
+                  const a = document.createElement('a')
+                  a.href = url
+                  a.download = filename
+                  a.click()
+                  URL.revokeObjectURL(url)
+                },
+                (err: unknown) => setRunError(err instanceof Error ? err.message : String(err)),
+              )
+            }
+          >
+            export
           </button>
           <ConfirmDelete
             label="delete workflow"

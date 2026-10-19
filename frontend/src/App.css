@@ -13415,3 +13415,18 @@ body.dock-resizing .dock-body {
 .gest-wiz .gest-lib-foot button, .gest-wiz .gest-switch { min-height: 40px; }
 .gest-wiz .gest-switch { min-height: 1.2rem; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+/* Workflow import result (naru task 2102): sits under the create row and
+ * stays until dismissed. Theme tokens only. */
+.workflow-import-panel {
+  flex-basis: 100%;
+  margin: 0.5rem 0;
+  padding: 0.5rem 0.75rem;
+  border-radius: 8px;
+  background: var(--panel);
+  overflow-wrap: anywhere;
+}
+.workflow-import-panel p,
+.workflow-import-panel ul {
+  margin: 0.25rem 0;
+}

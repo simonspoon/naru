@@ -1472,7 +1472,7 @@ raw() { # raw <method> <path> [extra curl args...]
 }
 JSON=(-H 'Content-Type: application/json' -d '{}')
 EVIL=(-H "Host: 127.0.0.1:$PORT" -H 'Origin: https://evil.example')
-for route in "GET /api/workflows" "GET /api/workflows/$AW" "GET /api/workflows/$AW/runs" \
+for route in "GET /api/workflows" "GET /api/workflows/$AW" "GET /api/workflows/$AW/runs" "GET /api/workflows/$AW/export" \
   "GET /api/workflow-runs/$AR" "GET /api/workflow-runs/$AR/status" "GET /api/workflow-log"; do
   set -- $route
   raw "$1" "$2" "${EVIL[@]}"
@@ -1481,7 +1481,7 @@ done
 for route in "POST /api/workflows" "PATCH /api/workflows/$AW" "DELETE /api/workflows/$AW" \
   "POST /api/workflows/$AW/nodes" "PATCH /api/workflow-nodes/$AC" "DELETE /api/workflow-nodes/$AC" \
   "POST /api/workflows/$AW/edges" "DELETE /api/workflow-edges/1" "POST /api/workflows/$AW/run" \
-  "POST /api/workflows/events" "POST /api/workflows/$AW/duplicate"; do
+  "POST /api/workflows/events" "POST /api/workflows/$AW/duplicate" "POST /api/workflows/import"; do
   set -- $route
   raw "$1" "$2" "${EVIL[@]}" "${JSON[@]}"
   [ "$STATUS" = "403" ] || fail "default: $route with a foreign Origin must be 403, got $STATUS"
@@ -2405,6 +2405,32 @@ run 0 "$NARU" workflow revisions "$TL"
 run 0 "$NARU" workflow history collapse
 [ "$(jqs '.collapsed | length')" = "0" ] && [ "$(jqs .backup)" = "null" ] || fail "a second collapse is a no-op: $STDOUT"
 ok "history collapse: dry-run plans, backup then fold, the copy kept as a revision, idempotent"
+
+# ---- export / import (naru task 2102) ----
+# A graph with a script and an agent this db lacks: export, import (disabled,
+# suffixed, missing listed, config identical), a bad file, and the two routes.
+run 0 "$NARU" workflow create "Portable"
+run 0 "$NARU" workflow node create Portable trigger Go --config '{"mode":"manual"}'
+run 0 "$NARU" workflow node create Portable script Sc --config '{"script":"no-such-script"}'
+run 0 "$NARU" workflow edge create Portable "$("$NARU" workflow show Portable | jq -r '.nodes[0].id')" "$("$NARU" workflow show Portable | jq -r '.nodes[1].id')"
+run 0 "$NARU" workflow export Portable --out "$TMP/portable.json"
+[ "$(jq -r .format "$TMP/portable.json")" = "naru-workflow" ] && [ "$(jq '.nodes|length' "$TMP/portable.json")" = "2" ] || fail "export file shape"
+run 0 "$NARU" workflow import "$TMP/portable.json"
+[ "$(jqs .workflow.name)" = "Portable (imported)" ] && [ "$(jqs .renamed_from)" = "Portable" ] || fail "import suffixes a taken name: $STDOUT"
+[ "$(jqs .workflow.enabled)" = "false" ] && [ "$(jqs '.nodes|length')" = "2" ] && [ "$(jqs '.edges|length')" = "1" ] || fail "import is disabled with the same graph: $STDOUT"
+[ "$(jqs '.missing|map(.what+":"+.reference)|join(",")')" = "script:no-such-script" ] || fail "import lists the missing script: $STDOUT"
+[ "$(jq -c '[.nodes[]|.config]' <<<"$STDOUT")" = "$(jq -c '[.nodes[]|.config]' "$TMP/portable.json")" ] || fail "configs identical"
+echo '{"format":"naru-workflow","version":1}' >"$TMP/bad.json"
+run 1 "$NARU" workflow import "$TMP/bad.json"
+echo 'not json' >"$TMP/bad2.json"
+run 1 "$NARU" workflow import "$TMP/bad2.json"
+[ "$(jqe .error.code)" = "validation" ] || fail "an unreadable file is validation: $STDERR"
+api 200 GET "/api/workflows/$AW/export"
+[ "$(jqb .format)" = "naru-workflow" ] || fail "export route body"
+api 201 POST /api/workflows/import "{\"document\": $(cat "$TMP/portable.json")}"
+[ "$(jqb .workflow.enabled)" = "false" ] && [ "$(jqb '.missing|length')" = "1" ] || fail "import route: $BODY"
+api 422 POST /api/workflows/import '{"document":{"format":"x","version":1}}'
+ok "export/import: round trip disabled + suffixed + missing listed, bad files validation, both routes"
 
 [ ! -e "$STUB_DIR/bg.calls" ] || fail "a workflow spawned a background agent (--bg): $(cat "$STUB_DIR/bg.calls")"
 ok "no --bg agent was spawned anywhere in this gate"

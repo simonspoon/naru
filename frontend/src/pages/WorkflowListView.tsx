@@ -8,6 +8,7 @@ import {
   updateWorkflow,
 } from '../api'
 import { ConfirmDelete } from '../components/ConfirmDelete'
+import { WorkflowImportControl } from '../components/WorkflowImport'
 import { PlayIcon } from '../components/WorkflowIcon'
 import { useLiveContext } from '../liveContext'
 import { formatTimestamp, timeAgo } from '../time'
@@ -92,6 +93,7 @@ export function WorkflowListView({ projectId }: { projectId: number }) {
           onChange={(e) => setName(e.target.value)}
         />
         <button type="submit">create</button>
+        <WorkflowImportControl projectId={projectId} onImported={refetch} />
         {createError && <span className="error">{createError}</span>}
       </form>
 

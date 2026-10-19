@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { WorkflowImportControl } from "../components/WorkflowImport";
 import { createWorkflow, listProjects, listWorkflows } from "../api";
 import {
   createdWorkflowHref,
@@ -77,11 +78,14 @@ export function WorkflowsOverview({ embedded = false }: { embedded?: boolean }) 
         }}
       >
         {title}
-        {!adding && (
-          <button type="button" onClick={() => setAdding(true)}>
-            Add workflow
-          </button>
-        )}
+        <span style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+          {!adding && (
+            <button type="button" onClick={() => setAdding(true)}>
+              Add workflow
+            </button>
+          )}
+          <WorkflowImportControl />
+        </span>
       </div>
       {adding && (
         <form className="create-form" onSubmit={submit}>

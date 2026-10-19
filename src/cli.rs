@@ -2118,6 +2118,33 @@ EXAMPLES
         #[arg(long)]
         quiet: bool,
     },
+    /// Print one workflow as a self-contained, portable JSON file
+    ///
+    /// The file (`format: naru-workflow`, a `version`) holds the workflow, its
+    /// nodes, edges and struct types, nodes keyed by a local `ref`. With
+    /// `--out` it is written there and a short receipt printed instead.
+    /// `workflow import` reads it on any Naru instance.
+    Export {
+        /// Workflow id or name
+        workflow: String,
+        /// Write the file here instead of printing it
+        #[arg(long)]
+        out: Option<String>,
+    },
+    /// Create a workflow from an exported file. It lands DISABLED
+    ///
+    /// A taken name gets a suffix ("(imported)", "(imported 2)"…), nothing is
+    /// overwritten. Agents, scripts, projects and workflows the file names
+    /// that this instance lacks are listed under `missing` (the config is
+    /// left as written). Unknown fields are ignored; an unreadable file or a
+    /// wrong format is `validation`.
+    Import {
+        /// Path of the exported JSON file
+        file: String,
+        /// Bind the new workflow to this project (id or name); default global
+        #[arg(long)]
+        project: Option<String>,
+    },
     /// Delete a workflow AND its nodes, edges and runs (no confirmation)
     ///
     /// The output echoes the full destroyed contents ({workflow, nodes,
@@ -8898,6 +8925,39 @@ fn run_workflow_cmd(cmd: WorkflowCmd) -> Result<()> {
         } => {
             let id = resolve_workflow(&store, &workflow)?.id;
             print_workflow_view(&store.duplicate_workflow(id, name.as_deref())?, quiet);
+        }
+        WorkflowCmd::Export { workflow, out } => {
+            let id = resolve_workflow(&store, &workflow)?.id;
+            let doc = store.export_workflow(id)?;
+            match out {
+                None => print_json(&doc),
+                Some(path) => {
+                    let text = serde_json::to_string_pretty(&doc).unwrap_or_default();
+                    std::fs::write(&path, text + "\n")
+                        .map_err(|e| Error::Validation(format!("could not write {path}: {e}")))?;
+                    print_json(&json!({
+                        "path": path,
+                        "name": doc.workflow.name,
+                        "version": doc.version,
+                        "nodes": doc.nodes.len(),
+                        "edges": doc.edges.len(),
+                    }));
+                }
+            }
+        }
+        WorkflowCmd::Import { file, project } => {
+            let text = std::fs::read_to_string(&file)
+                .map_err(|e| Error::Validation(format!("could not read {file}: {e}")))?;
+            let doc: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+                Error::Validation(format!(
+                    "not a readable workflow export: {file} is not JSON ({e})"
+                ))
+            })?;
+            let project_id = match project.as_deref() {
+                None => None,
+                Some(p) => Some(resolve_project(&store, p)?),
+            };
+            print_json(&store.import_workflow(&doc, project_id)?);
         }
         WorkflowCmd::Delete { workflow, quiet } => {
             let id = resolve_workflow(&store, &workflow)?.id;

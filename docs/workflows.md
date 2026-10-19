@@ -418,6 +418,41 @@ double-fires until switched on. Run history and log lines are not copied. The
 default name is `<name> (copy)`, then `(copy 2)`…, satisfying the
 case-insensitive unique-name rule; an explicit taken `--name` is `conflict`.
 
+## Export and import (naru task 2102)
+
+A workflow moves between Naru instances (machines may run different
+versions) as one JSON file: `naru workflow export <id|name> [--out FILE]`, the
+workflow page's **export** button or `GET /api/workflows/{id}/export` writes
+it; `naru workflow import FILE [--project P]`, the **import…** button on the
+global and project Workflows pages or `POST /api/workflows/import` reads it.
+
+```json
+{"format": "naru-workflow", "version": 1, "exported_at": "…", "naru_version": "…",
+ "workflow": {"name": "…", "description": "…", "types": [ … ]},
+ "nodes": [{"ref": 12, "kind": "cli", "title": "…", "config": { … }, "x": 0, "y": 0}],
+ "edges": [{"from": 12, "to": 13, "branch": null, "from_pin": null, "to_pin": null}]}
+```
+
+Nodes are keyed by a local `ref` (the exported node id) so edges stay valid
+whatever ids the target assigns. No runs, logs or gate decisions travel.
+
+Import (`Store::import_workflow`, one `BEGIN IMMEDIATE` transaction, an
+`import` revision) rules:
+
+- **Always disabled**, global unless `--project`/`project_id` is given.
+- **Never overwrites**: a taken name (case-insensitively) becomes
+  `<name> (imported)`, `(imported 2)`…; `renamed_from` carries the file's name.
+- **Tolerant**: unknown fields are ignored; a `version` newer than this
+  Naru's (1) imports with a `warnings` entry. Not JSON, a wrong `format`, a
+  missing `version`, an unknown node kind, a dangling or self edge or a cycle
+  is `validation`/`cycle` and writes nothing. Node configs are stored as
+  exported (as `duplicate` does), not re-validated.
+- **Missing references are reported, never dropped or remapped**: `missing`
+  lists `{node_id, node_title, kind, what, reference}` for an `agent` node's
+  agent (library), a `script` node's script (id or name), a `subworkflow`
+  node's workflow and any node config's `project`, when this instance has
+  none. The web UI shows them in a panel under the create row until dismissed.
+
 ## Engine semantics
 
 1. **Order** is a topological sort (Kahn), the ready set a `BTreeSet`, so ties
@@ -589,6 +624,8 @@ is named.
 | `workflow show\|get <id\|name>` | `{workflow, nodes, edges}` |
 | `workflow update <id\|name> [--name] [--description ""] [--project ""] [--enabled true\|false]` | the `Workflow`; `""` clears/unbinds; no field is `usage` |
 | `workflow duplicate <id\|name> [--name NEW]` | the copy's `{workflow, nodes, edges}` (see below); `--quiet` accepted |
+| `workflow export <id\|name> [--out FILE]` | the portable export file (see "Export and import"), or with `--out` a `{path, name, version, nodes, edges}` receipt; `--quiet` ignored |
+| `workflow import FILE [--project ID\|NAME]` | `{workflow, nodes, edges, renamed_from, missing, warnings}`; the workflow is created disabled; `--quiet` ignored |
 | `workflow delete <id\|name>` | the destroyed `{workflow, nodes, edges}` |
 | `workflow run <id\|name> [--input TEXT \| --input-file PATH\|-] [--trigger manual\|voice]` | the finished `WorkflowRun` |
 | `workflow emit <idea\|can-help\|wake> --speaker S [--text TEXT \| --text-file PATH\|-]` | runs every matching `ambient` workflow synchronously, id order; a bare array of the finished `WorkflowRun`s (`[]` when none match, exit 0); `--quiet` accepted and ignored |
@@ -647,6 +684,8 @@ applies as everywhere.
 | `GET /api/workflows?project=<id>` / `POST /api/workflows` `{name, project_id?, description?}` | list / create (201) |
 | `GET /api/workflows/{id}` / `PATCH` / `DELETE` | the view / update (`name`, `enabled`, `description`, `project_id` three-state: omit, `null` clears) / echo the destroyed view |
 | `POST /api/workflows/{id}/duplicate` `{name?}` (201) | copy a workflow; the body may be empty or `{}`, but `Content-Type: application/json` is still required (the CSRF gate answers 415 without it); answers the copy's view; a taken `name` is 409 |
+| `GET /api/workflows/{id}/export` | the export file as a `*.naru-workflow.json` download (`Content-Disposition: attachment`) |
+| `POST /api/workflows/import` `{document, project_id?}` (201) | `document` is the export object (or its text as a string); answers the import result; unreadable file 422 |
 | `POST /api/workflows/{id}/nodes` `{kind, title, config?, x?, y?}` (201) | add a node |
 | `PATCH /api/workflow-nodes/{id}` `{title?, config?, x?, y?}` / `DELETE` | update / echo `{node, edges}` |
 | `POST /api/workflows/{id}/edges` `{from_node, to_node, branch?}` (201) / `DELETE /api/workflow-edges/{id}` | add / delete |

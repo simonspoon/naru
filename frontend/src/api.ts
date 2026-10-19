@@ -14,6 +14,9 @@ import { finishNdjson, parseEvent, splitNdjson } from './scriptRun'
 
 import type { ImportResolution } from './libraryImport'
 
+import { downloadName } from './workflowImport'
+import type { WorkflowImportResult } from './types/WorkflowImportResult'
+
 import type { AgentSession } from './types/AgentSession'
 import type { AgentSpawned } from './types/AgentSpawned'
 import type { Artifact } from './types/Artifact'
@@ -838,6 +841,28 @@ export function updateWorkflow(id: number, patch: WorkflowPatch): Promise<Workfl
  * disabled; the answer is its whole graph. */
 export function duplicateWorkflow(id: number, name?: string): Promise<WorkflowView> {
   return request(`/api/workflows/${id}/duplicate`, jsonInit('POST', name === undefined ? {} : { name }))
+}
+
+/** Fetches a workflow's export file: its text and the filename the server proposed. */
+export async function exportWorkflow(id: number): Promise<{ filename: string; text: string }> {
+  const res = await fetch(`/api/workflows/${id}/export`)
+  if (!res.ok) throw await apiErrorFrom(res)
+  return {
+    filename: downloadName(res.headers.get('Content-Disposition'), `workflow-${id}.naru-workflow.json`),
+    text: await res.text(),
+  }
+}
+
+/** Creates a disabled workflow from a parsed export file; the answer lists
+ * the references this instance lacks. `projectId` binds it to a project. */
+export function importWorkflow(
+  document: Record<string, unknown>,
+  projectId?: number,
+): Promise<WorkflowImportResult> {
+  return request(
+    '/api/workflows/import',
+    jsonInit('POST', projectId === undefined ? { document } : { document, project_id: projectId }),
+  )
 }
 
 /** Returns the destroyed graph: the workflow plus its cascaded nodes and edges. */
