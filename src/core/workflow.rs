@@ -1961,7 +1961,8 @@ pub const TASK_LOOP_CHILD: &str = "Task loop: implement and review";
 /// Shared head of every task-loop `cli` node. The run input is the task id for
 /// the Plan node and one state line (`task=<id> scratch=<dir> ui=<yes|no> k=v…`)
 /// for every later node; a node prints the next state line, so only a pointer
-/// to the per-run scratch folder travels as node input. `NARU_LOOP_DEADLINE`,
+/// to the per-run scratch folder travels as node input. `NARU_LOOP_DEADLINE_<STAGE>`
+/// (PLAN, UX, IMPL, REVIEW, SPLIT) sets one stage's clock, `NARU_LOOP_DEADLINE`,
 /// `NARU_LOOP_SILENCE` and `NARU_LOOP_GRACE` override the stage clocks (the
 /// check script's seam); a stage that fails or overruns is data, never a node
 /// failure, so the graph reaches a Close node.
@@ -1969,7 +1970,7 @@ const LOOP_PRELUDE: &str = r##"set -o pipefail
 IN=$(cat)
 TASK=$(printf '%s\n' "$IN" | sed -n 's/.*task=\([0-9][0-9]*\).*/\1/p' | tail -n 1)
 SCRATCH=$(printf '%s\n' "$IN" | sed -n 's/.*scratch=\([^ ]*\).*/\1/p' | tail -n 1)
-dl() { echo "${NARU_LOOP_DEADLINE:-$1}"; }
+dl() { local k; k=$(printf "%s" "$1" | tr a-z A-Z); local v; v=$(printenv "NARU_LOOP_DEADLINE_$k"); echo "${v:-${NARU_LOOP_DEADLINE:-$2}}"; }
 emit() { echo "task=$TASK scratch=$SCRATCH ui=$(cat "$SCRATCH/ui" 2>/dev/null || echo no) ${N:+iter=$N }$*"; }
 brief_head() { printf 'You are the %s stage of an automated task loop for naru task %s.\nWork in the current project checkout. Be brief and end with the requested final line.\n\n## Task\n\n' "$1" "$TASK"; cat "$SCRATCH/task.md"; }
 stage_run() { # <name> <agent> <deadline> <brief file> [extra stage args]
@@ -2063,7 +2064,7 @@ while IFS= read -r repo; do
   done < <(git -C "$repo" status --porcelain -z -uall 2>/dev/null)
 done < <(cat "$SCRATCH/repos.txt" "$SCRATCH/scan.txt")
 { brief_head planner; printf '\n## What to do\n\nWrite a short implementation plan: the files to touch, the steps, and how to verify. Do not edit any file. End with exactly one line, `UI: yes` if the change touches user-facing UI, else `UI: no`.\n'; no_commit_rule; split_rule; } > "$SCRATCH/plan-brief.md"
-stage_run plan planner "$(dl 900)" "$SCRATCH/plan-brief.md"
+stage_run plan planner "$(dl plan 900)" "$SCRATCH/plan-brief.md"
 if [ "$(stage_verdict plan)" = COMPLETE ]; then
   jq -r '.report' "$SCRATCH/plan.json" > "$SCRATCH/plan.md"
   emit plan=ok
@@ -2074,7 +2075,7 @@ fi
 "##;
 
 const LOOP_UX: &str = r##"{ brief_head ux-designer; printf '\n## Plan\n\n'; cat "$SCRATCH/plan.md"; printf '\n## What to do\n\nReturn a short design brief for this change: layout, components to reuse, states, and an observable acceptance checklist. Do not edit any file.\n'; } > "$SCRATCH/ux-brief.md"
-stage_run ux ux-designer "$(dl 600)" "$SCRATCH/ux-brief.md"
+stage_run ux ux-designer "$(dl ux 600)" "$SCRATCH/ux-brief.md"
 if [ "$(stage_verdict ux)" = COMPLETE ]; then
   jq -r '.report' "$SCRATCH/ux.json" > "$SCRATCH/design.md"
   emit ux=ok
@@ -2093,7 +2094,7 @@ const LOOP_IMPLEMENT: &str = r##"N=@N@
   no_commit_rule
   split_rule
 } > "$SCRATCH/impl-$N-brief.md"
-stage_run "impl$N" implementer "$(dl 2400)" "$SCRATCH/impl-$N-brief.md"
+stage_run "impl$N" implementer "$(dl impl 2400)" "$SCRATCH/impl-$N-brief.md"
 if [ "$(stage_verdict "impl$N")" = COMPLETE ]; then
   while IFS= read -r repo; do echo "== repo $repo =="; git -C "$repo" diff --stat; git -C "$repo" status --short; done < <(repo_each) > "$SCRATCH/diff-$N.txt" 2>/dev/null
   emit impl=ok
@@ -2113,7 +2114,7 @@ for role in verifier reviewer; do
     no_commit_rule
   } > "$SCRATCH/$role-$N-brief.md"
 done
-stage_run "review$N" "$VER" "$(dl 1500)" "$SCRATCH/verifier-$N-brief.md" --also diff-reviewer --also-brief-file "$SCRATCH/reviewer-$N-brief.md"
+stage_run "review$N" "$VER" "$(dl review 1500)" "$SCRATCH/verifier-$N-brief.md" --also diff-reviewer --also-brief-file "$SCRATCH/reviewer-$N-brief.md"
 jq -r '.results[0].report // ""' "$SCRATCH/review$N.json" > "$SCRATCH/review-$N-verify.md" 2>/dev/null
 jq -r '.results[1].report // ""' "$SCRATCH/review$N.json" > "$SCRATCH/review-$N-review.md" 2>/dev/null
 # The verdict is read from the two reports by the typed agent node behind
@@ -2415,7 +2416,7 @@ const LOOP_SPLIT: &str = r##"{ brief_head planner
   printf '\n## What to do\n\nThis task is too large or keeps failing review, so split it. Propose 2 to 6 smaller sub-tasks, each independently implementable and verifiable, together covering the task. Do not edit any file. Reply with a JSON array of objects, each {"description": "<what to do and how to check it>"}, and nothing after it.\n'
   no_commit_rule
 } > "$SCRATCH/split-brief.md"
-stage_run split planner "$(dl 600)" "$SCRATCH/split-brief.md"
+stage_run split planner "$(dl split 600)" "$SCRATCH/split-brief.md"
 made=0
 if [ "$(stage_verdict split)" = COMPLETE ]; then
   PROJ=$(naru task show "$TASK" | jq -r '.project_id')
@@ -5180,13 +5181,23 @@ fn tail_bytes(s: &str, cap: usize) -> String {
 /// The stage clock the task-loop gives each stage (`dl` in `LOOP_PRELUDE`),
 /// for a `status.json` that carries no deadline of its own.
 fn loop_stage_deadline(stage: &str) -> Option<i64> {
-    if let Some(v) = std::env::var("NARU_LOOP_DEADLINE")
-        .ok()
-        .and_then(|v| v.trim().parse::<i64>().ok())
-    {
-        return Some(v);
+    let kind = ["plan", "ux", "impl", "review", "split"]
+        .into_iter()
+        .find(|k| stage.starts_with(k));
+    let keys = kind
+        .map(|k| format!("NARU_LOOP_DEADLINE_{}", k.to_uppercase()))
+        .into_iter()
+        .chain(["NARU_LOOP_DEADLINE".to_string()]);
+    for key in keys {
+        if let Some(v) = std::env::var(&key)
+            .ok()
+            .and_then(|v| v.trim().parse::<i64>().ok())
+        {
+            return Some(v);
+        }
     }
     match stage {
+        "split" => Some(600),
         "plan" => Some(900),
         "ux" => Some(600),
         s if s.starts_with("impl") => Some(2400),

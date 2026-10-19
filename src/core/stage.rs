@@ -24,6 +24,10 @@ pub const GRACE_SECS: f64 = 180.0;
 const SILENCE_NUDGE: &str = "Status check: report what you have so far, briefly.";
 const DEADLINE_NUDGE: &str = "Deadline reached, report partial results now.";
 const TAIL_CHARS: usize = 500;
+/// How long a stop may take before the run's process groups are SIGKILLed.
+/// Slack past deadline + grace before the stage gives up on its own loop.
+const BACKSTOP_MARGIN: Duration = Duration::from_secs(30);
+const HARD_STOP_WAIT: Duration = Duration::from_secs(10);
 
 pub struct AgentSpec {
     pub agent: String,
@@ -222,6 +226,19 @@ fn drive(sh: &Shared, idx: usize, spec: &AgentSpec) -> Value {
     let mut deadline_nudge_at: Option<Instant> = None;
 
     loop {
+        // Absolute backstop: whatever wedged the loop below, the stage ends.
+        if t0.elapsed() >= o.deadline + o.grace + BACKSTOP_MARGIN {
+            let _ = runner::hard_stop_in(sh.runs, &job_id, HARD_STOP_WAIT);
+            return finish(
+                "INCONCLUSIVE",
+                Some("timeout: stage backstop reached".into()),
+                text.clone(),
+                &job_ids,
+                nudges,
+                restarts,
+                tail_of(&text),
+            );
+        }
         let out = runner::wait_in(
             sh.runs,
             &job_id,
@@ -234,6 +251,7 @@ fn drive(sh: &Shared, idx: usize, spec: &AgentSpec) -> Value {
         let out = match out {
             Ok(v) => v,
             Err(e) => {
+                let _ = runner::hard_stop_in(sh.runs, &job_id, HARD_STOP_WAIT);
                 return finish(
                     "INCONCLUSIVE",
                     Some(format!("run lost: {e}")),
@@ -274,7 +292,7 @@ fn drive(sh: &Shared, idx: usize, spec: &AgentSpec) -> Value {
                     };
                     return finish(
                         "INCONCLUSIVE",
-                        Some("deadline reached; partial report".into()),
+                        Some("timeout: deadline reached; partial report".into()),
                         partial,
                         &job_ids,
                         nudges,
@@ -318,10 +336,10 @@ fn drive(sh: &Shared, idx: usize, spec: &AgentSpec) -> Value {
                     deadline_nudge_at = Some(Instant::now());
                 }
                 Some(t) if t.elapsed() >= o.grace => {
-                    let _ = runner::stop_in(sh.runs, &job_id);
+                    let _ = runner::hard_stop_in(sh.runs, &job_id, HARD_STOP_WAIT);
                     return finish(
                         "INCONCLUSIVE",
-                        Some("deadline reached; no report".into()),
+                        Some("timeout: deadline reached; no report".into()),
                         text.clone(),
                         &job_ids,
                         nudges,
@@ -340,7 +358,7 @@ fn drive(sh: &Shared, idx: usize, spec: &AgentSpec) -> Value {
                 }
                 Some(t) if last_change > t => nudge_at = None,
                 Some(t) if t.elapsed() >= o.grace => {
-                    let _ = runner::stop_in(sh.runs, &job_id);
+                    let _ = runner::hard_stop_in(sh.runs, &job_id, HARD_STOP_WAIT);
                     if restarts >= o.max_restarts {
                         return finish(
                             "INCONCLUSIVE",

@@ -89,6 +89,7 @@ while IFS= read -r line; do
   text=$(jq -r '.message.content[0].text' <<<"$line")
   jq -Rn --arg t "$text" '$t' >> "$STUB/msgs.$agent"
   printf 'turn\n' >> "$STUB/turns.$agent"
+  [ -f "$STUB/hang.$agent" ] && { while :; do sleep 1; done; }
   if [ "$agent" = implementer ] && [ -f "$STUB/touch.implementer" ]; then while IFS= read -r f; do mkdir -p "$(dirname "$f")"; echo "$RANDOM" >> "$f"; done < "$STUB/touch.implementer"; fi
   n=$(grep -c . "$STUB/turns.$agent")
   reply=ok
@@ -111,7 +112,7 @@ STUBEOF
 chmod +x "$STUB/vox"
 export MESA_VOX_BIN="$STUB/vox"
 
-reset_stub() { rm -f "$STUB"/touch.* "$STUB"/reply.* "$STUB"/die.* "$STUB"/turns.* "$STUB"/msgs.* "$STUB"/typed.* "$STUB"/typed-msgs.* "$STUB"/split.json "$STUB/vox.log"; }
+reset_stub() { rm -f "$STUB"/touch.* "$STUB"/reply.* "$STUB"/die.* "$STUB"/hang.* "$STUB"/turns.* "$STUB"/msgs.* "$STUB"/typed.* "$STUB"/typed-msgs.* "$STUB"/split.json "$STUB/vox.log"; }
 turns() { grep -c . "$STUB/turns.$1" 2>/dev/null || true; }
 # step <run json> <node title>: the status of that node's step (node ids from
 # the workflow's own node list, since a step carries the id only).
@@ -278,6 +279,18 @@ R=$(run_loop "$T")
 [ "$(tstatus "$T")" = backlog ] && [ "$(step "$R" "Implement + review #1")" = skipped ] || fail "planner: task $(tstatus "$T"), impl $(step "$R" "Implement + review #1")"
 metric "$T" none 0 backlog planner
 ok "an inconclusive planner ends in backlog without implementing"
+
+# ---- 6a. a per-stage clock (naru task 2082): NARU_LOOP_DEADLINE_PLAN cuts a hung
+# planner well before the global 20s clock would, and the loop still ends in backlog ----
+reset_stub
+touch "$STUB/hang.planner"
+T=$(mk "Fix nothing, hung planner")
+t0=$SECONDS
+R=$(NARU_LOOP_DEADLINE_PLAN=2 run_loop "$T")
+el=$((SECONDS - t0))
+[ "$el" -lt 18 ] || fail "per-stage clock: planner took ${el}s, the global clock applied"
+[ "$(tstatus "$T")" = backlog ] && [ "$(step "$R" "Implement + review #1")" = skipped ] || fail "per-stage clock: task $(tstatus "$T")"
+ok "NARU_LOOP_DEADLINE_PLAN times out only the planner stage"
 
 # ---- 6b. an implementer that never answers: the child ends at Implemented?,
 # its output carries no review token, so Verdict #1 takes default -> backlog ----

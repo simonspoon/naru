@@ -34,7 +34,12 @@ a driver bug is nonzero.
    restart the same nudge-and-grace happens once more; a second silence ends
    the stage `INCONCLUSIVE`.
 4. **Deadline** (`--deadline`, from the stage start): one "Deadline reached,
-   report partial results now." nudge, then `--grace`, then `run stop`.
+   report partial results now." nudge, then `--grace`, then a **hard stop**
+   (naru task 2082): `run stop`, and if the run is not terminal after 10 s its
+   claude process group (subagents and shells) and runner are SIGKILLed and
+   the run is closed `stopped`. The verdict's `reason` starts `timeout:` and
+   `partial` keeps whatever text exists. The silence-stop and run-lost paths
+   use the same hard stop.
 5. A run that goes idle or finishes with a result before that is `COMPLETE`
    and is stopped. A run that `failed`/`stopped` on its own ends `INCONCLUSIVE`.
 

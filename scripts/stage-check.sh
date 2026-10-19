@@ -48,6 +48,11 @@ cat > "$STUB/claude" <<STUBEOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$STUB/argv.log"
 agent=\$(sed -n 's/.*--agent \([^ ]*\).*/\1/p' <<<"\$*")
+if [ -f "$STUB/wedge.\$agent" ]; then # ignores stop/TERM; a child shell lives on
+  trap '' TERM HUP INT PIPE
+  sleep 300 & echo \$! > "$STUB/child.\$agent"
+  while :; do sleep 1; done
+fi
 while IFS= read -r line; do
   text=\$(jq -r '.message.content[0].text' <<<"\$line")
   s=0; [ -f "$STUB/sleep.\$agent" ] && s=\$(cat "$STUB/sleep.\$agent")
@@ -137,8 +142,30 @@ echo 30 > "$STUB/sleep.a-dl2"
 brief dl2 "hopeless"
 rc=$(stage "$TMP/o5" --agent a-dl2 --deadline 2 --grace 2 --scratch "$TMP/s5" --brief-file "$TMP/dl2.md")
 [ "$rc" = 0 ] || fail "deadline none: exit $rc"
-jq -e '.verdict=="INCONCLUSIVE" and (.reason|test("deadline")) and .report==null and .nudges==1' "$TMP/o5" >/dev/null || fail "deadline none: $(cat "$TMP/o5")"
-ok "deadline -> INCONCLUSIVE"
+jq -e '.verdict=="INCONCLUSIVE" and (.reason|startswith("timeout:")) and .report==null and .nudges==1' "$TMP/o5" >/dev/null || fail "deadline none: $(cat "$TMP/o5")"
+ok "deadline -> INCONCLUSIVE, reason timeout:"
+# naru task 2082: the hard stop leaves no live claude group and a terminal run.
+jid=$(jq -r '.job_id' "$TMP/o5")
+st=$(jq -r '.status' "$HOME/.naru/runs/$jid/job.json")
+case "$st" in stopped|finished|failed) ;; *) fail "timeout left run $jid $st" ;; esac
+cpid=$(jq -r '.claude_pid // empty' "$HOME/.naru/runs/$jid/job.json")
+if [ -n "$cpid" ] && kill -0 "$cpid" 2>/dev/null; then fail "timeout leaked claude pid $cpid"; fi
+ok "timeout leaves no live claude process"
+
+# naru task 2082: a claude that ignores stop (TERM) and keeps a child shell is
+# SIGKILLed with its group by the hard stop; nothing outlives the stage.
+touch "$STUB/wedge.a-wedge"
+brief wedge "wedged"
+rc=$(stage "$TMP/o5w" --agent a-wedge --deadline 2 --grace 2 --scratch "$TMP/s5w" --brief-file "$TMP/wedge.md")
+[ "$rc" = 0 ] || fail "wedged: exit $rc"
+jq -e '.verdict=="INCONCLUSIVE" and (.reason|startswith("timeout:"))' "$TMP/o5w" >/dev/null || fail "wedged: $(cat "$TMP/o5w")"
+jid=$(jq -r '.job_id' "$TMP/o5w")
+cpid=$(jq -r '.claude_pid // empty' "$HOME/.naru/runs/$jid/job.json")
+[ -n "$cpid" ] || fail "wedged: no claude_pid recorded"
+kpid=$(cat "$STUB/child.a-wedge" 2>/dev/null || true)
+[ -n "$kpid" ] || fail "wedged: stub child never started"
+wait_for 5 "wedged claude and its child gone" bash -c "! kill -0 $cpid 2>/dev/null && ! kill -0 $kpid 2>/dev/null"
+ok "stop-ignoring claude and its child are killed by the hard stop"
 
 # ---- 6. parallel pair, one overruns; status.json shape ----
 echo 0 > "$STUB/sleep.p-fast"; echo 30 > "$STUB/sleep.p-slow"

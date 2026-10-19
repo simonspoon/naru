@@ -792,6 +792,43 @@ pub fn stop_in(runs: &Path, id: &str) -> Result<Value> {
     Ok(view(&dir, &job))
 }
 
+/// `stop_in`, then a guarantee: if the run is still not terminal after `wait`
+/// (a wedged runner or claude that ignores the marker), SIGKILL claude's whole
+/// process group (its subagents and shells) and the runner, and close the run
+/// as stopped with a `timeout` event. Both kills keep `kill_claude`'s guard
+/// against a recycled pid.
+pub fn hard_stop_in(runs: &Path, id: &str, wait: Duration) -> Result<Value> {
+    let v = stop_in(runs, id)?;
+    let dir = job_dir_of(runs, id)?;
+    let t = Instant::now();
+    loop {
+        let job = load(&dir)?;
+        if job.status.is_terminal() {
+            return Ok(v);
+        }
+        if t.elapsed() >= wait {
+            if let Some(pid) = job.claude_pid {
+                kill_claude(pid, &job.session_id, "KILL");
+            }
+            if let Some(pid) = job.runner_pid
+                && pid_command(pid).is_some_and(|c| c.contains("__runner"))
+            {
+                signal_group(pid, "KILL");
+            }
+            // Re-load: the runner may have closed the run while we signalled.
+            let mut job = load(&dir)?;
+            if !job.status.is_terminal() {
+                job.status = RunStatus::Stopped;
+                job.finished_at = Some(now_secs());
+                save(&dir, &mut job)?;
+                runner_event(&dir, "stopped", json!({"by": "timeout", "hard": true}));
+            }
+            return Ok(view(&dir, &job));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
 pub fn interrupt(id: &str) -> Result<Value> {
     interrupt_in(&runs_dir(), id)
 }
@@ -1342,6 +1379,31 @@ mod tests {
         assert_eq!(job.status, RunStatus::Failed);
         assert!(job.finished_at.is_some());
         assert!(reconcile_in(runs.path()).unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hard_stop_kills_a_claude_that_ignores_the_stop_marker() {
+        use std::os::unix::process::CommandExt;
+        let runs = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let job = create_job(runs.path(), &opts("a", cwd.path())).unwrap();
+        let dir = runs.path().join(&job.job_id);
+        // A stand-in claude in its own group whose command line carries the
+        // session id, and which never looks at the stop marker.
+        let mut child = Command::new("sh")
+            .args(["-c", "sleep 60; :", &job.session_id])
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let mut j = load(&dir).unwrap();
+        j.claude_pid = Some(child.id() as i64);
+        save(&dir, &mut j).unwrap();
+        hard_stop_in(runs.path(), &job.job_id, Duration::from_millis(300)).unwrap();
+        assert_eq!(load(&dir).unwrap().status, RunStatus::Stopped);
+        // SIGKILLed: reaped with a signal, not left running.
+        let st = child.wait().unwrap();
+        assert!(!st.success());
     }
 
     #[test]

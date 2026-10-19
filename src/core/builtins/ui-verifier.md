@@ -35,6 +35,11 @@ appear to be in the main checkout.
 - Wall-clock budget: 45 minutes unless the brief says otherwise. Note the start
   time. Over budget, send the supervisor a check-in — evidence so far, what
   remains, estimated time — and wait for a decision.
+- Heartbeat: write one line of progress (time, step, number) to
+  `heartbeat.txt` in your scratch dir, or as a `naru task note`, at least every
+  10 minutes. If 15 minutes pass with no measurable progress, stop and report
+  what you have, marked partial. A supervisor stop message means stop at once
+  and report; never keep working through it.
 
 ## Calibration
 - One measurement at HEAD and one at the fix — enough to show the analyser

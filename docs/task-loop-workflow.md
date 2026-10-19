@@ -121,7 +121,7 @@ stops them in its normal path, and a killed driver leaves a run that
 
 ## 4. Status view outside the flow
 
-**Shipped (task 1961)** as `workflow::run_status`; `status.json` carries no deadline, so `stalled` uses its optional `deadline_secs`, else `NARU_LOOP_DEADLINE`, else the stage default (plan 900, ux 600, impl 2400, review 1500). The scratch folder is found from the `scratch=<dir>` in the newest step output.
+**Shipped (task 1961)** as `workflow::run_status`; `status.json` carries no deadline, so `stalled` uses its optional `deadline_secs`, else `NARU_LOOP_DEADLINE_<STAGE>` (PLAN, UX, IMPL, REVIEW, SPLIT), else `NARU_LOOP_DEADLINE`, else the stage default (plan 900, ux 600, impl 2400, review 1500, split 600). The scratch folder is found from the `scratch=<dir>` in the newest step output.
 
 A **watcher that only reads**, never a node. `naru workflow watch <run id>`
 and `GET /api/workflow-runs/{id}/status` (task 1961) derive on every read:

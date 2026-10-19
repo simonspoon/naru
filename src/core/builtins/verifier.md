@@ -27,6 +27,11 @@ If the brief assigns a browser session, simulator, device or scratch path, use o
 - Wall-clock budget 45 minutes unless the brief says otherwise. Note the start
   time. Over budget, send a check-in (evidence so far, what remains, estimate)
   and wait for a decision.
+- Heartbeat: write one line of progress (time, step, number) to
+  `heartbeat.txt` in your scratch dir, or as a `naru task note`, at least every
+  10 minutes. If 15 minutes pass with no measurable progress, stop and report
+  what you have, marked partial. A supervisor stop message means stop at once
+  and report; never keep working through it.
 
 ## Provenance
 - Before running: `stat` mtime and `shasum -a 256` of every relevant source
