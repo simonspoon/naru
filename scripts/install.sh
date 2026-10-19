@@ -36,7 +36,9 @@ tmp="$(mktemp "$BIN_DIR/.naru.XXXXXX")"
 trap 'rm -f "$tmp"' EXIT
 install -m 0755 target/release/naru "$tmp"
 if command -v codesign >/dev/null 2>&1; then
-  codesign --force --sign - "$tmp"
+  # Pin the identifier + designated requirement: a bare ad-hoc (cdhash) identity changes
+  # every build and drops the CLI's TCC grants on each deploy.
+  codesign --force --sign - -i com.naru.cli -r='designated => identifier "com.naru.cli"' "$tmp"
 fi
 mv -f "$tmp" "$BIN_DIR/naru"
 # Replaces an older install's real `mesa` binary with the symlink.

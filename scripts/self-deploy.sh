@@ -15,7 +15,9 @@
 #     restart, resume (rolled_back); if that is unhealthy too, rollback_failed and
 #     the queue stays paused.
 #
-# Queue verbs run on the NEW binary (the installed one may predate `queue`).
+# Pre-swap queue verbs run on the NEW binary (the installed one may predate `queue`);
+# every verb after the swap (defaults, run list, live handoff/say) runs on the INSTALLED
+# one, so a handed-off runner never lives in the temp build dir (TCC would deny it).
 #
 # Flags: --dry-run (print the plan, change nothing), --skip-checks (no build or
 #        checks; deploy NARU_DEPLOY_NEW_BIN — for tests).
@@ -179,7 +181,7 @@ else
   rm -f "$prev"
 fi
 install -m 0755 "$new_bin" "$tmp" || { rm -f "$tmp"; abort "cannot stage the new binary"; }
-command -v codesign >/dev/null 2>&1 && codesign --force --sign - "$tmp" >/dev/null 2>&1
+command -v codesign >/dev/null 2>&1 && codesign --force --sign - -i com.naru.cli -r='designated => identifier "com.naru.cli"' "$tmp" >/dev/null 2>&1
 swap_epoch=$(date +%s)
 mv -f "$tmp" "$INSTALLED" || { rm -f "$tmp"; abort "swap failed"; }
 ln -sf naru "$BIN_DIR/mesa"
@@ -232,12 +234,12 @@ healthy() {
 # new revision of the same workflow. A rollback restores the db backup, which undoes it.
 seed_task_loop() {
   local pid
-  pid="$("$new_bin" project resolve "$repo" 2>/dev/null | jq -r '.id // empty')"
-  [ -n "$pid" ] || pid="$("$new_bin" project resolve naru 2>/dev/null | jq -r '.id // empty')"
+  pid="$("$INSTALLED" project resolve "$repo" 2>/dev/null | jq -r '.id // empty')"
+  [ -n "$pid" ] || pid="$("$INSTALLED" project resolve naru 2>/dev/null | jq -r '.id // empty')"
   [ -n "$pid" ] || { echo "self-deploy: cannot resolve the naru project id" >>"$LOG"; return 1; }
   # A changed definition becomes a new revision of the same workflow (naru task 2053),
   # never a renamed copy; an unchanged one writes nothing.
-  "$new_bin" workflow defaults --project "$pid" --task-loop >>"$LOG" 2>&1
+  "$INSTALLED" workflow defaults --project "$pid" --task-loop >>"$LOG" 2>&1
 }
 
 # Long-lived `naru run __runner` processes started before the swap keep the old binary
@@ -261,7 +263,7 @@ handle_stale_runners() {
   [ "${NARU_DEPLOY_RUNNERS:-1}" = 0 ] && return 0
   local live_job="" runs row pid job started action note=""
   case "$live_before" in run:*) live_job="${live_before#run:}" ;; esac
-  runs="$("$new_bin" run list 2>>"$LOG")" || { log "run list failed; stale runners not checked"; return 0; }
+  runs="$("$INSTALLED" run list 2>>"$LOG")" || { log "run list failed; stale runners not checked"; return 0; }
   while IFS= read -r row; do
     [ -n "$row" ] || continue
     pid="$(echo "$row" | jq -r '.runner_pid // empty')"
@@ -271,7 +273,7 @@ handle_stale_runners() {
     case "$started" in ''|*[!0-9]*) continue ;; esac
     [ "$started" -lt "$swap_epoch" ] || continue
     if [ -n "$live_job" ] && [ "$job" = "$live_job" ]; then
-      if "$new_bin" live handoff "Deployed a new naru binary; restarting you onto it. Continue where you left off." >>"$LOG" 2>&1; then
+      if "$INSTALLED" live handoff "Deployed a new naru binary; restarting you onto it. Continue where you left off." >>"$LOG" 2>&1; then
         action=handed_off
       else
         action=failed
@@ -285,7 +287,7 @@ handle_stale_runners() {
   done < <(echo "$runs" | jq -c '.[]? | select((.status=="running" or .status=="idle") and .runner_alive==true)' 2>/dev/null)
   if [ -n "$live_before" ] && [ "$(echo "$stale_runners" | jq 'length')" -gt 0 ]; then
     note="Deploy report: $(echo "$stale_runners" | jq -r '[.[] | "\(.job_id) \(.name) \(.action)"] | join("; ")'). Runners marked left_running still run the old binary until they end."
-    "$new_bin" live say --quiet "$note" >>"$LOG" 2>&1 || true
+    "$INSTALLED" live say --quiet "$note" >>"$LOG" 2>&1 || true
   fi
   return 0
 }
