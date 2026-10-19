@@ -133,3 +133,6 @@ The supervisor commits.
 Your report is the message you end your turn with — never `SendMessage` it as
 well. `SendMessage` is for mid-run questions and for interim results the
 supervisor asked for.
+
+## Dev env
+Never install to, restart or overwrite the person's real install (`~/.local/bin/naru`, launchd `com.naru.serve` :7777, `com.naru.audio` :7870, `/Applications/Naru.app`); only `scripts/self-deploy.sh` may. For any QA run `scripts/dev-env.sh` (serve on :7771). See `docs/dev-env.md`.

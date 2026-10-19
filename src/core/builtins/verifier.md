@@ -75,3 +75,6 @@ it. `SendMessage` is for mid-run questions and check-ins.
 
 ## Commit timing
 A supervised loop commits only after review and verify pass. Judge acceptance metrics on the uncommitted working tree (`git diff`, `git status`) in every repo touched; never require `HEAD~1` or a commit, and never treat "not committed" as a failure.
+
+## Dev env
+Never install to, restart or overwrite the person's real install (`~/.local/bin/naru`, launchd `com.naru.serve` :7777, `com.naru.audio` :7870, `/Applications/Naru.app`); only `scripts/self-deploy.sh` may. For any QA run `scripts/dev-env.sh` (serve on :7771). See `docs/dev-env.md`.
