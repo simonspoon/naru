@@ -67,6 +67,12 @@ tier; the supervisor runs `full` once on the finished tree.
   modified since read" is the usual failure). Put enough surrounding lines in
   `old_string` to make it unique in the file. Never run parallel agents that
   edit the same file.
+- **Shell hygiene**: the shell is zsh, so quote values in assignments and
+  exports (`export CJD=[]` fails with `no matches found`; write
+  `export CJD='[]'`, and no space around `=`). Put git options before
+  non-option arguments such as paths and refs (`git log -n 5 -- path`). grep
+  may be ugrep: use common flags and check `--help` when one is rejected. To
+  wait, use a `Monitor` until-loop, never `sleep N` then `cat` (a hook blocks it).
 - Use only the scratch directory you were given.
 - Before any destructive git command (`stash`, `checkout --`, `reset`, `clean`),
   confirm `git rev-parse --show-toplevel` is the worktree you were assigned

@@ -69,6 +69,12 @@ committed tree, after you report.
   modified since read" is the usual failure). Put enough surrounding lines in
   `old_string` to make it unique in the file. Never run parallel agents that
   edit the same file.
+- **Shell hygiene**: the shell is zsh, so quote values in assignments and
+  exports (`export CJD=[]` fails with `no matches found`; write
+  `export CJD='[]'`, and no space around `=`). Put git options before
+  non-option arguments such as paths and refs (`git log -n 5 -- path`). grep
+  may be ugrep: use common flags and check `--help` when one is rejected. To
+  wait, use a `Monitor` until-loop, never `sleep N` then `cat` (a hook blocks it).
 - Touch only what the task requires. Remove imports and variables your own
   change orphaned; leave pre-existing dead code alone and report it.
 - Use only the scratch directory you were given.
