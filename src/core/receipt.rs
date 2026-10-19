@@ -57,7 +57,10 @@ pub fn update_task(store: &mut Store, id: i64, patch: &TaskPatch) -> Result<Task
             "Task {} done: {}. Commit/artifact: {}.",
             after.id,
             after.name,
-            after.artifact.as_deref().unwrap_or("none")
+            after
+                .artifact
+                .as_deref()
+                .unwrap_or("none recorded at close")
         ))
     } else if before.status == Status::InProgress && after.status == Status::Backlog {
         Some(format!(

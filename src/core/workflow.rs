@@ -2291,8 +2291,9 @@ commit_repo() { # <repo dir> <state dir>: commits in that repo; appends its shor
   SHA=$(git rev-parse --short HEAD)
   naru task note "$TASK" "Committed $SHA by the task loop in $repo." > /dev/null || true
   echo "$SHA" >> "$SCRATCH/shas.txt"
+  echo "$(basename "$ROOT")@$SHA" >> "$SCRATCH/refs.txt"
 }
-: > "$SCRATCH/shas.txt"
+: > "$SCRATCH/shas.txt"; : > "$SCRATCH/refs.txt"
 failed=0; n=0; named=$(repo_each | grep -c .)
 while IFS= read -r repo; do
   n=$((n+1)); sc=0; [ "$n" -gt "$named" ] && sc=1
@@ -2300,6 +2301,13 @@ while IFS= read -r repo; do
 done < <(repo_all)
 [ "$failed" = 0 ] || exit 1
 SHAS=$(paste -sd, "$SCRATCH/shas.txt")
+# The Close node's landing result went out before this commit existed (naru task 2098): record the
+# commit on the task and follow up. Best-effort; the artifact stays null if either fails.
+if [ -s "$SCRATCH/refs.txt" ]; then
+  REFS=$(paste -sd, "$SCRATCH/refs.txt" | sed 's/,/, /g')
+  naru task update "$TASK" --artifact "$REFS" > /dev/null 2>&1 || true
+  naru live result "Task $TASK committed: $REFS." > /dev/null 2>&1 || true
+fi
 emit commit=${SHAS:-none}
 "##;
 

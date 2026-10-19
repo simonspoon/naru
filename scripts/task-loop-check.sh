@@ -183,6 +183,8 @@ ls "$HOME"/.naru/loop/"$T"-*/plan.md >/dev/null || fail "pass: no scratch hand-o
 git -C "$TMP/work" log -1 --format=%s | grep -q "task $T" || fail "pass: commit subject: $(git -C "$TMP/work" log -1 --format=%s)"
 [ "$(git -C "$TMP/work" show --name-only --format= HEAD | sort | tr '\n' ',')" = "foo.txt,seed.txt,sub dir/bar baz.txt," ] || fail "pass: commit files: $(git -C "$TMP/work" show --name-only --format= HEAD | tr '\n' ',')"
 [ -z "$(git -C "$TMP/work" status --porcelain)" ] || fail "pass: tree not clean after the commit"
+# the commit is recorded on the task as <repo>@<sha> (naru task 2098)
+[ "$("$NARU" task show "$T" | jq -r .artifact)" = "work@$(git -C "$TMP/work" rev-parse --short HEAD)" ] || fail "pass: artifact is $("$NARU" task show "$T" | jq -r .artifact)"
 [ "$(step "$R" "Plan UI verdict")" = ok ] && [ "$(step "$R" "Implement + review #1")" = ok ] || fail "pass: the typed agent nodes or the first pass did not run"
 [ "$(step "$R" "Implement + review #2")" = skipped ] || fail "pass: the second pass was $(step "$R" "Implement + review #2")"
 grep -q "VERDICT: PASS" "$STUB/typed-msgs.review" || fail "pass: the reports did not reach the typed verdict agent"
