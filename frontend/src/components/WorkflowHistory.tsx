@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { listWorkflowRevisions, restoreWorkflowRevision } from '../api'
+import { BUILTIN_TITLE } from '../workflowBuiltin'
 import { diffLineClass, diffMark } from '../librarySync'
 import { formatTimestamp, timeAgo } from '../time'
 import { useFetch } from '../useFetch'
@@ -21,7 +22,10 @@ import {
 export function WorkflowHistory({
   workflowId,
   onRestored,
+  readOnly = false,
 }: {
+  /** A built-in: revisions are readable, never restorable (naru task 2103). */
+  readOnly?: boolean
   workflowId: number
   /** Called after a restore so the caller refetches the graph. */
   onRestored: () => void
@@ -171,8 +175,14 @@ export function WorkflowHistory({
             <button
               type="button"
               aria-label={`Restore revision ${entry.revision.rev}`}
-              disabled={isLatest || restoring}
-              title={isLatest ? 'This is the current revision' : undefined}
+              disabled={isLatest || restoring || readOnly}
+              title={
+                readOnly
+                  ? BUILTIN_TITLE
+                  : isLatest
+                    ? 'This is the current revision'
+                    : undefined
+              }
               onClick={() => setConfirming(true)}
             >
               restore

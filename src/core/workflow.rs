@@ -1970,6 +1970,18 @@ const LOOP_PRELUDE: &str = r##"set -o pipefail
 IN=$(cat)
 TASK=$(printf '%s\n' "$IN" | sed -n 's/.*task=\([0-9][0-9]*\).*/\1/p' | tail -n 1)
 SCRATCH=$(printf '%s\n' "$IN" | sed -n 's/.*scratch=\([^ ]*\).*/\1/p' | tail -n 1)
+# The loop is a global built-in (naru task 2103), so a node starts in the workspace, not a checkout: every
+# node moves to the task's own project checkout (its local_path) before it does anything else.
+to_project() {
+  local pid lp
+  [ -n "$TASK" ] || return 0
+  pid=$(naru task show "$TASK" 2>/dev/null | jq -r '.project_id // empty' 2>/dev/null)
+  [ -n "$pid" ] || return 0
+  lp=$(naru project show "$pid" 2>/dev/null | jq -r '.local_path // empty' 2>/dev/null)
+  [ -z "$lp" ] || [ ! -d "$lp" ] || cd "$lp"
+  return 0
+}
+to_project
 dl() { local k; k=$(printf "%s" "$1" | tr a-z A-Z); local v; v=$(printenv "NARU_LOOP_DEADLINE_$k"); echo "${v:-${NARU_LOOP_DEADLINE:-$2}}"; }
 emit() { echo "task=$TASK scratch=$SCRATCH ui=$(cat "$SCRATCH/ui" 2>/dev/null || echo no) ${N:+iter=$N }$*"; }
 brief_head() { printf 'You are the %s stage of an automated task loop for naru task %s.\nWork in the current project checkout. Be brief and end with the requested final line.\n\n## Task\n\n' "$1" "$TASK"; cat "$SCRATCH/task.md"; }
@@ -2022,6 +2034,7 @@ const LOOP_ITER: &str =
 
 const LOOP_PLAN: &str = r##"TASK=$(printf '%s' "$IN" | tr -dc '0-9')
 [ -n "$TASK" ] || { echo "task-loop: the run input must be a task id" >&2; exit 1; }
+to_project
 SCRATCH="$HOME/.naru/loop/$TASK-$(date +%s)-$$"
 mkdir -p "$SCRATCH"
 naru task show "$TASK" | jq -r '.description' > "$SCRATCH/task.md" || exit 1
@@ -2510,14 +2523,75 @@ fi
 emit split=done subtasks=$made
 "##;
 
-/// Creates the "Task loop" workflow (`docs/task-loop-workflow.md`, "Target
+/// The `builtin_id`s of the managed built-in workflows (naru task 2103).
+pub const BUILTIN_TASK_LOOP: &str = "task-loop";
+pub const BUILTIN_TASK_LOOP_CHILD: &str = "task-loop-child";
+
+/// Installs or updates the managed built-in workflows — "Task loop" and the
+/// child it calls — global and enabled (naru task 2103). Idempotent; run on
+/// every `serve` start and by `naru workflow defaults --task-loop`.
+///
+/// A same-named workflow that is not yet a built-in is a user's own: it is
+/// renamed `"<name> (custom)"` (id, graph and runs kept, never deleted), and
+/// when both loop workflows were renamed the custom parent's subworkflow
+/// nodes are re-pointed at the custom child so it keeps calling its own.
+/// An installed built-in whose shipped graph changed is reseeded in place as
+/// a `seed` revision. Answers the workflows created or updated and the names
+/// found unchanged.
+pub fn install_builtins(store: &mut Store) -> Result<(Vec<WorkflowView>, Vec<String>)> {
+    let mut renamed = Vec::new();
+    for (name, bid) in [
+        (TASK_LOOP_WORKFLOW, BUILTIN_TASK_LOOP),
+        (TASK_LOOP_CHILD, BUILTIN_TASK_LOOP_CHILD),
+    ] {
+        if store.builtin_workflow_id(bid)?.is_some() {
+            continue;
+        }
+        match store.find_workflow_by_name(name) {
+            Ok(w) => {
+                let new_name = store.rename_workflow_to_custom(w.id)?;
+                renamed.push((w.id, new_name));
+            }
+            Err(Error::NotFound(_)) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    if let [(parent_id, _), (_, child_name)] = renamed.as_slice() {
+        let view = store.get_workflow_view(*parent_id)?;
+        for n in view
+            .nodes
+            .iter()
+            .filter(|n| n.kind == WorkflowNodeKind::Subworkflow)
+        {
+            let calls_child = n
+                .config
+                .get("workflow")
+                .and_then(|v| v.as_str())
+                .is_some_and(|w| w.eq_ignore_ascii_case(TASK_LOOP_CHILD));
+            if calls_child {
+                let mut config = n.config.clone();
+                config["workflow"] = json!(child_name);
+                store.update_workflow_node(
+                    n.id,
+                    crate::core::WorkflowNodePatch {
+                        config: Some(config),
+                        ..Default::default()
+                    },
+                )?;
+            }
+        }
+    }
+    build_task_loop_builtins(store, None)
+}
+
+/// Creates the "Task loop" workflows (`docs/task-loop-workflow.md`, "Target
 /// flow") in `project_id`, skipping it when the name already exists. The loop
 /// is unrolled — two implement/review passes — because the engine is a DAG,
 /// so the iteration cap is structural. Answers the created workflows and the
 /// skipped names, like [`create_default_workflows`].
-pub fn create_task_loop_workflow(
+fn build_task_loop_builtins(
     store: &mut Store,
-    project_id: i64,
+    project_id: Option<i64>,
 ) -> Result<(Vec<WorkflowView>, Vec<String>)> {
     use WorkflowNodeKind as K;
     let mut skipped = Vec::new();
@@ -2626,6 +2700,7 @@ pub fn create_task_loop_workflow(
             let seeded = seed_loop_workflow(
                 store,
                 project_id,
+                BUILTIN_TASK_LOOP_CHILD,
                 TASK_LOOP_CHILD,
                 "One implement and review pass of the task loop, called twice by \"Task loop\" with iter=1 and iter=2 on the state line. See docs/task-loop-workflow.md.",
                 vec![WorkflowType {
@@ -2872,6 +2947,7 @@ pub fn create_task_loop_workflow(
     let seeded = seed_loop_workflow(
         store,
         project_id,
+        BUILTIN_TASK_LOOP,
         TASK_LOOP_WORKFLOW,
         "Plan, implement, review and verify one task, at most two passes; the input is a task id. See docs/task-loop-workflow.md.",
         vec![WorkflowType {
@@ -2960,9 +3036,11 @@ pub fn snapshot_lines(snap: &crate::core::types::WorkflowSnapshot) -> Vec<String
 /// scratch name, and when it differs the existing workflow's graph is
 /// replaced **in place** as a new `seed` revision — same id, runs and name,
 /// never a renamed copy. Unchanged: nothing is written and `None` answers.
+#[allow(clippy::too_many_arguments)]
 fn seed_loop_workflow(
     store: &mut Store,
-    project_id: i64,
+    project_id: Option<i64>,
+    builtin_id: &str,
     name: &str,
     description: &str,
     types: Vec<WorkflowType>,
@@ -2978,7 +3056,7 @@ fn seed_loop_workflow(
         Some(_) => format!("{name} (seeding)"),
         None => name.to_string(),
     };
-    let wf = store.create_workflow(Some(project_id), &build_name, Some(description))?;
+    let wf = store.create_workflow(project_id, &build_name, Some(description))?;
     let built = store
         .update_workflow(
             wf.id,
@@ -2995,6 +3073,7 @@ fn seed_loop_workflow(
     let Some(old) = existing else {
         let actor = store.actor().to_string();
         store.record_workflow_revision(wf.id, &actor, "seed")?;
+        store.mark_workflow_builtin(wf.id, builtin_id)?;
         return Ok(Some(store.get_workflow_view(wf.id)?));
     };
     let snap = store.workflow_snapshot(wf.id)?;
@@ -7290,6 +7369,110 @@ mod tests {
         assert!(again.is_empty());
         assert_eq!(skipped, [DEFAULT_LABEL_WORKFLOW, DEFAULT_REVIEW_WORKFLOW]);
         assert_eq!(s.list_workflows(Some(p)).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn builtins_install_once_and_are_read_only() {
+        let (st, _d) = store();
+        let mut s = st.lock().unwrap();
+        let (done, _) = install_builtins(&mut s).unwrap();
+        assert_eq!(done.len(), 2);
+        for v in &done {
+            assert!(v.workflow.builtin && v.workflow.enabled);
+            assert_eq!(v.workflow.project_id, None);
+        }
+        // Idempotent: nothing changed, nothing renamed.
+        let (again, _) = install_builtins(&mut s).unwrap();
+        assert!(again.is_empty());
+        assert_eq!(s.list_workflows(None).unwrap().len(), 2);
+        let parent = s.find_workflow_by_name(TASK_LOOP_WORKFLOW).unwrap();
+        let node = s.get_workflow_view(parent.id).unwrap().nodes[0].clone();
+        let refused = |e: Error| matches!(e, Error::Validation(m) if m.contains("duplicate it"));
+        assert!(refused(
+            s.update_workflow(
+                parent.id,
+                WorkflowPatch {
+                    name: Some("x".into()),
+                    ..Default::default()
+                }
+            )
+            .unwrap_err()
+        ));
+        assert!(refused(s.delete_workflow(parent.id).unwrap_err()));
+        assert!(refused(
+            s.update_workflow_node(node.id, crate::core::WorkflowNodePatch::default())
+                .unwrap_err()
+        ));
+        assert!(refused(s.delete_workflow_node(node.id).unwrap_err()));
+        assert!(refused(
+            s.restore_workflow_revision(parent.id, 1).unwrap_err()
+        ));
+        // Enable/disable is allowed.
+        let off = s
+            .update_workflow(
+                parent.id,
+                WorkflowPatch {
+                    enabled: Some(false),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(!off.enabled && off.builtin);
+        // A duplicate is an ordinary, editable "(custom)" copy.
+        let copy = s.duplicate_workflow(parent.id, None).unwrap();
+        assert_eq!(copy.workflow.name, "Task loop (custom)");
+        assert!(!copy.workflow.builtin);
+        s.update_workflow_node(copy.nodes[0].id, crate::core::WorkflowNodePatch::default())
+            .unwrap();
+        s.delete_workflow(copy.workflow.id).unwrap();
+    }
+
+    #[test]
+    fn a_user_loop_is_renamed_custom_and_keeps_its_child() {
+        let (st, _d) = store();
+        let mut s = st.lock().unwrap();
+        let child = s.create_workflow(None, TASK_LOOP_CHILD, None).unwrap();
+        let t = s
+            .create_workflow_node(
+                child.id,
+                &WorkflowNodeNew {
+                    kind: WorkflowNodeKind::Trigger,
+                    title: "t".into(),
+                    config: Some(json!({"mode": "manual"})),
+                    x: None,
+                    y: None,
+                },
+            )
+            .unwrap();
+        let _ = t;
+        let parent = s.create_workflow(None, TASK_LOOP_WORKFLOW, None).unwrap();
+        let sub = s
+            .create_workflow_node(
+                parent.id,
+                &WorkflowNodeNew {
+                    kind: WorkflowNodeKind::Subworkflow,
+                    title: "call".into(),
+                    config: Some(json!({"workflow": TASK_LOOP_CHILD})),
+                    x: None,
+                    y: None,
+                },
+            )
+            .unwrap();
+        install_builtins(&mut s).unwrap();
+        let p = s.get_workflow(parent.id).unwrap();
+        assert_eq!(p.name, "Task loop (custom)");
+        assert!(!p.builtin);
+        assert_eq!(
+            s.get_workflow(child.id).unwrap().name,
+            "Task loop: implement and review (custom)"
+        );
+        assert_eq!(
+            s.get_workflow_node(sub.id).unwrap().config["workflow"],
+            json!("Task loop: implement and review (custom)")
+        );
+        let b = s.find_workflow_by_name(TASK_LOOP_WORKFLOW).unwrap();
+        assert!(b.builtin && b.id != parent.id);
+        assert_eq!(s.list_workflows(None).unwrap().len(), 4);
     }
 
     #[test]

@@ -13430,3 +13430,15 @@ body.dock-resizing .dock-body {
 .workflow-import-panel ul {
   margin: 0.25rem 0;
 }
+
+/* A built-in workflow's node fields: inspectable, not editable (naru task 2103). */
+.wf-readonly-fields {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+.wf-palette-item:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}

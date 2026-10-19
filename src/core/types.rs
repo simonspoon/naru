@@ -5031,6 +5031,11 @@ pub struct Workflow {
     /// = untyped: every pin is `any`.
     #[serde(default)]
     pub types: Vec<WorkflowType>,
+    /// A built-in shipped with Naru and managed by it (naru task 2103):
+    /// installed and updated on `serve` start, read-only except enable/disable.
+    /// Derived on every read from `workflow_builtins`.
+    #[serde(default)]
+    pub builtin: bool,
 }
 
 /// A user-defined struct type of one workflow: a name and typed fields.

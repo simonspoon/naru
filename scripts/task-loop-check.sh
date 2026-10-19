@@ -463,7 +463,8 @@ git -C "$TMP/other" diff --quiet -- oseed.txt || fail "cross debris: tracked fil
 [ "$(cat "$TMP/other/opre.txt")" = early ] && [ "$(git -C "$TMP/other" status --porcelain)" = "?? opre.txt" ] || fail "cross debris: tree: $(git -C "$TMP/other" status --porcelain)"
 "$NARU" task show "$T" | jq -e '.notes | map(.body) | any(test("Restored to their state") and test("odraft.txt"))' >/dev/null || fail "cross debris: note"
 "$NARU" task show "$T" | jq -e '.notes | map(.body) | any(test("Diffs saved:") and test("run.diff") and test("Still dirty after restore") and test("opre.txt"))' >/dev/null || fail "cross debris: diff/leftover note"
-grep -q odraft "$HOME"/.naru/loop/"$T"-*/repo-2/debris/run.diff 2>/dev/null || grep -q oseed "$HOME"/.naru/loop/"$T"-*/repo-2/debris/run.diff || fail "cross debris: run.diff missing the edit"
+# the loop is global (naru task 2103) and enters the task's own project first, so that repo's state is the scratch dir itself
+grep -q oseed "$HOME"/.naru/loop/"$T"-*/debris/run.diff || fail "cross debris: run.diff missing the edit"
 rm -f "$TMP/other/opre.txt"
 ok "a bounced run in another project's repo puts back its debris there, saves its diff and reports what is still dirty"
 

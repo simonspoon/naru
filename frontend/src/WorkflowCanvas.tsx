@@ -1,4 +1,5 @@
 import { createPortal } from 'react-dom'
+import { BUILTIN_TITLE, readOnlyTitle } from './workflowBuiltin'
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Background,
@@ -475,7 +476,10 @@ function NodeInspector({
   onCollapse,
   onClose,
   style,
+  readOnly = false,
 }: {
+  /** A built-in's node: inspect only (naru task 2103). */
+  readOnly?: boolean
   node: WorkflowNode
   types: WorkflowType[]
   scripts: Script[]
@@ -1578,14 +1582,36 @@ function NodeInspector({
     </>
   )
 
+  // A built-in's fields are inspectable but not editable.
+  const fieldsEl = readOnly ? (
+    <fieldset disabled className="wf-readonly-fields">
+      {fields}
+    </fieldset>
+  ) : (
+    fields
+  )
+
   const actions = (
     <>
       {formError && <p className="error wf-inspector-error">{formError}</p>}
       <div className="wf-inspector-actions">
-        <button type="button" onClick={save}>
+        <button
+          type="button"
+          onClick={save}
+          disabled={readOnly}
+          title={readOnlyTitle(readOnly)}
+          aria-label={readOnly ? 'Save disabled: built-in workflow' : undefined}
+        >
           save
         </button>
-        <button type="button" className="danger" onClick={remove}>
+        <button
+          type="button"
+          className="danger"
+          onClick={remove}
+          disabled={readOnly}
+          title={readOnlyTitle(readOnly)}
+          aria-label={readOnly ? 'Delete disabled: built-in workflow' : undefined}
+        >
           delete node
         </button>
         {expanded && (
@@ -1612,7 +1638,7 @@ function NodeInspector({
           </div>
           <div className="wf-modal-body">
             <div className="wf-modal-side">
-              {fields}
+              {fieldsEl}
               <div className="wf-modal-pins">
                 <span className="wf-field-label">pins</span>
                 {[...pins.inputs.map((p) => ({ p, dir: 'in' })), ...pins.outputs.map((p) => ({ p, dir: 'out' }))].map(
@@ -1639,6 +1665,7 @@ function NodeInspector({
                     spellCheck={false}
                     aria-label={big.label}
                     value={draft[big.key]}
+                    readOnly={readOnly}
                     onChange={(e) => set(big.key, e.target.value)}
                   />
                 </>
@@ -1670,7 +1697,7 @@ function NodeInspector({
           </button>
         </span>
       </div>
-      {fields}
+      {fieldsEl}
       {actions}
     </div>
   )
@@ -1799,7 +1826,10 @@ export function WorkflowCanvas({
   view,
   run,
   onChanged,
+  readOnly = false,
 }: {
+  /** A built-in: nothing on the canvas edits the graph (naru task 2103). */
+  readOnly?: boolean
   view: WorkflowView
   /** The run whose steps are painted on the nodes, if one is shown. */
   run: WorkflowRun | null
@@ -1874,6 +1904,7 @@ export function WorkflowCanvas({
   }
 
   function openPinMenu(at: { x: number; y: number }, nodeId: number, side: PinSide, pin: string, ty: string) {
+    if (readOnly) return
     setMenu({ ...at, nodeId, side, pin, ty })
   }
 
@@ -1994,6 +2025,7 @@ export function WorkflowCanvas({
   }
 
   function onPaneDrop(e: React.DragEvent) {
+    if (readOnly) return
     const kind = decodeKindDrag(e.dataTransfer.getData(NODE_DRAG_MIME))
     const inst = rf.current
     if (kind === null || !inst) return
@@ -2003,7 +2035,7 @@ export function WorkflowCanvas({
   }
 
   function onConnect(c: Connection) {
-    if (c.source === c.target) return // self-edges are rejected server-side
+    if (readOnly || c.source === c.target) return // self-edges are rejected server-side
     const source = view.nodes.find((n) => String(n.id) === c.source)
     const target = view.nodes.find((n) => String(n.id) === c.target)
     if (!source || !target) return
@@ -2134,8 +2166,10 @@ export function WorkflowCanvas({
             key={k.kind}
             type="button"
             className={`wf-palette-item wf-kind-${k.kind}`}
-            draggable
-            title={`Drag onto the canvas, or click to add a ${k.label}`}
+            draggable={!readOnly}
+            disabled={readOnly}
+            title={readOnly ? BUILTIN_TITLE : `Drag onto the canvas, or click to add a ${k.label}`}
+            aria-label={readOnly ? `Add ${k.label} disabled: built-in workflow` : undefined}
             onDragStart={(e) => {
               e.dataTransfer.setData(NODE_DRAG_MIME, k.kind)
               e.dataTransfer.effectAllowed = 'copy'
@@ -2176,20 +2210,28 @@ export function WorkflowCanvas({
           // Deletion stays behind the explicit controls in the inspector,
           // never a stray keypress — matching the rest of the app.
           deleteKeyCode={null}
+          nodesDraggable={!readOnly}
+          nodesConnectable={!readOnly}
           nodesFocusable={false}
           edgesFocusable={false}
         >
           <Background variant={BackgroundVariant.Dots} gap={24} color={dotColor} />
           <Controls showInteractive={false} position="top-right" />
           <Panel position="top-left" className="wf-controls">
-            <button type="button" onClick={autoLayout} title="Arrange the nodes left to right by flow">
+            <button
+              type="button"
+              onClick={autoLayout}
+              disabled={readOnly}
+              title={readOnly ? BUILTIN_TITLE : 'Arrange the nodes left to right by flow'}
+            >
               auto layout
             </button>
             <button
               type="button"
               onClick={() => setTypesOpen((o) => !o)}
               aria-pressed={typesOpen}
-              title="Define the struct types your pins can carry"
+              disabled={readOnly}
+              title={readOnly ? BUILTIN_TITLE : 'Define the struct types your pins can carry'}
             >
               types
             </button>
@@ -2207,6 +2249,7 @@ export function WorkflowCanvas({
               scripts={scripts ?? []}
               workflows={workflows ?? []}
               agents={agents}
+              readOnly={readOnly}
               onSaved={changed}
               onError={setError}
               onDeleted={() => {
@@ -2250,6 +2293,9 @@ export function WorkflowCanvas({
               <button
                 type="button"
                 className="danger"
+                disabled={readOnly}
+                title={readOnlyTitle(readOnly)}
+                aria-label={readOnly ? 'Delete edge disabled: built-in workflow' : undefined}
                 onClick={() =>
                   deleteWorkflowEdge(selectedEdge.id).then(() => {
                     setSelection(null)

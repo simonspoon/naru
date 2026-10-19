@@ -8,7 +8,7 @@ persona and the slash command can all change without rebuilding Naru:
 
 | Key | Used by | Built-in default |
 | --- | --- | --- |
-| `todo-watcher` | `serve --watch-todo` dispatch (`docs/todo-watcher.md`) | `claude --bg --agent supervisor --name {name} -- "/execute-naru-task {id}"` |
+| `todo-watcher` | `serve --watch-todo` dispatch (`docs/todo-watcher.md`; to run tasks through the managed `Task loop` built-in use `naru workflow run "Task loop" --input {id} --detach`, or `"Task loop (custom)"` for an upgraded install's own copy — `docs/workflows.md`) | `claude --bg --agent supervisor --name {name} -- "/execute-naru-task {id}"` |
 | `inbox-watcher` | `serve --watch-inbox` triage (`docs/inbox-watcher.md`): up to two synchronous, tool-less `claude -p --json-schema` calls (haiku decides, sonnet writes the task) per item, run in a detached `naru __job inbox-triage` whose verdict Naru validates and applies itself (naru task 1691). Offers `{id}`, `{name}`, `{prompt}`, `{schema}` and `{model}` | `claude -p --model {model} --name {name} --tools "" --strict-mcp-config --output-format json --json-schema {schema} -- {prompt}` |
 | `agent-spawn` | `POST /api/projects/{id}/agents`, the Agents sidebar's **add agent** (`docs/agents.md`) | `claude --bg --model opus --agent supervisor -- {prompt}` |
 | `live-agent` | `mesa live start`, `POST /api/live`, `mesa live handoff` — the session that holds a spoken conversation (`docs/live.md`), since naru task 1886 a `naru run` job (`core::live::spawn_agent` → `core::runner`, `docs/runner.md`) rather than a `--bg` agent. Offers `{name}`, `{session_flag}` and `{session_id}` | `claude -p --input-format stream-json --output-format stream-json --verbose --agent naru-live --name {name} {session_flag} {session_id}` |

@@ -3065,6 +3065,21 @@ pub fn serve(flags: ServeFlags) -> crate::core::Result<()> {
             Err(e) => eprintln!("naru: could not reconcile workflow runs: {e}"),
         }
     }
+    // Managed built-in workflows (naru task 2103): installed or brought up to
+    // date on every start, whatever the watcher flags say.
+    {
+        let mut store = state.store.lock().unwrap();
+        match crate::core::workflow::install_builtins(&mut store) {
+            Ok((done, _)) if !done.is_empty() => eprintln!(
+                "naru: installed or updated built-in workflow(s): {:?}",
+                done.iter()
+                    .map(|v| v.workflow.name.as_str())
+                    .collect::<Vec<_>>()
+            ),
+            Ok(_) => {}
+            Err(e) => eprintln!("naru: could not install built-in workflows: {e}"),
+        }
+    }
     // Agent runs outlive the server (naru task 1686): a run whose runner died
     // is resumed on the same claude session; one whose runner is alive is
     // left alone — the files are all `/api/runs` reads.

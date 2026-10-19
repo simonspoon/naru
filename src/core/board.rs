@@ -952,6 +952,7 @@ mod tests {
             trigger_events: vec![],
             enabled: true,
             types: vec![],
+            builtin: false,
         }
     }
 

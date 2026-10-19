@@ -13,6 +13,7 @@ import { PlayIcon } from '../components/WorkflowIcon'
 import { useLiveContext } from '../liveContext'
 import { formatTimestamp, timeAgo } from '../time'
 import { useFetch } from '../useFetch'
+import { BUILTIN_TITLE, duplicateLabel, isBuiltin } from '../workflowBuiltin'
 import { runSummary, triggerLabel } from '../workflowRun'
 import { toggleLabel } from '../workflowOverview'
 import type { WorkflowRun } from '../types/WorkflowRun'
@@ -116,6 +117,14 @@ export function WorkflowListView({ projectId }: { projectId: number }) {
                   >
                     {w.name}
                   </a>
+                  {isBuiltin(w) && (
+                    <>
+                      {' '}
+                      <span className="library-badge" title={BUILTIN_TITLE}>
+                        built-in
+                      </span>
+                    </>
+                  )}
                   {!w.enabled && <span className="muted workflow-off-tag"> · disabled</span>}
                   {w.description && <p className="muted workflow-row-desc">{w.description}</p>}
                   <div className="muted meta-line">
@@ -150,13 +159,15 @@ export function WorkflowListView({ projectId }: { projectId: number }) {
                     {toggleLabel(w)}
                   </button>
                   <button type="button" onClick={() => duplicate(w.id)}>
-                    duplicate
+                    {duplicateLabel(w)}
                   </button>
-                  <ConfirmDelete
-                    label="delete"
-                    message="Deletes this workflow with its nodes, edges and run history. Entries it wrote to logs are kept."
-                    onDelete={() => deleteWorkflow(w.id).then(refetch)}
-                  />
+                  {!isBuiltin(w) && (
+                    <ConfirmDelete
+                      label="delete"
+                      message="Deletes this workflow with its nodes, edges and run history. Entries it wrote to logs are kept."
+                      onDelete={() => deleteWorkflow(w.id).then(refetch)}
+                    />
+                  )}
                 </div>
               </li>
             )

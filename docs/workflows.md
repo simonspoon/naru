@@ -799,11 +799,54 @@ default is never overwritten.
   takes the branch's false side, so the model never runs and nothing is filed.
   Run it on demand with `naru workflow run "Ambient: end-of-day review"`.
 
+## Built-in workflows (naru task 2103)
+
+Two workflows ship in the binary and are **managed**: `Task loop` and
+`Task loop: implement and review` (the child it calls). `serve` installs or
+updates them on **every start**, whatever the watcher flags say (and
+`naru workflow defaults --task-loop` does the same by hand; `--project` is
+accepted and unused). They are global (no project), enabled, and marked
+`builtin: true` on the workflow record (a row in `workflow_builtins`, migration
+index 98, naming the shipped definition — not a column on `workflows`).
+
+- **Read-only.** `workflow update` (anything but `--enabled`), `delete`,
+  `node create|update|delete`, `edge create|delete`, `type add|remove` and a
+  revision restore are `validation`: `workflow "Task loop" is a built-in managed
+  by Naru and is read-only; duplicate it to customise`, in the CLI and the API
+  (422) alike. Run, show, revisions, runs, export and the on/off switch work.
+- **Updates.** A shipped graph that differs from the installed one is reseeded
+  **in place** as a `seed` revision (same id, runs and history). Nothing a user
+  did to a built-in survives that, which is the point: it cannot be edited.
+- **Duplicate to customise.** `naru workflow duplicate "Task loop"` (the web UI's
+  "Duplicate to customise") makes an ordinary editable workflow named
+  `Task loop (custom)` (`(custom 2)`… when taken), disabled like every duplicate,
+  `builtin: false`. A duplicated parent still calls the **built-in** child by name.
+- **Upgrade from an install that already has them.** A workflow with the same
+  name that is not yet a built-in is the user's: it is renamed
+  `"<name> (custom)"` (id, graph, runs and project kept — nothing is ever
+  deleted), and when both loop workflows were renamed in the same start the
+  custom parent's `subworkflow` nodes are re-pointed at the custom child so it
+  keeps calling its own. Only then is the built-in created. The renamed
+  workflows are ordinary editable ones.
+- **Which one the watcher runs** is decided by the name in
+  `commands.todo-watcher` (`naru workflow run "Task loop" --input {id} --detach`)
+  — there is no separate setting. After an upgrade that name means the
+  built-in; to keep running a customised loop, edit that command to
+  `"Task loop (custom)"` (`docs/config.md`).
+- **Inventory.** The only workflows shipped code, hooks and watchers call by
+  name are these two (the watcher command, and the parent's subworkflow node).
+  The ambient pair (`naru workflow defaults --project`) is not managed: it files
+  tasks into a project the user picks, and nothing calls it by name.
+- **Global means the task's checkout.** A global workflow's `cli` nodes start in
+  the workspace, so every loop node first moves to the task's own project
+  `local_path` (when it has one and it exists): stage agents run in the task's
+  checkout, not in one fixed project's.
+
 ## The task-loop workflow (naru task 1960)
 
 `naru workflow defaults --task-loop --project <id|name>` (CLI only; instead of
-the ambient pair, same skip-if-the-name-exists idempotency) creates **Task
-loop**: a `manual` workflow whose input is a task id, running plan -> (UX
+the ambient pair) installs the managed built-in **Task loop** (see "Built-in
+workflows" above; `serve` does it on start): a `manual` workflow whose input is a task id, running plan -> (UX
 designer if the plan says `UI: yes`) -> implement -> review + verify -> at most
 one fix pass -> close. Design and rationale: `docs/task-loop-workflow.md`; the
 stage driver every agent node runs: `docs/stage.md`. The loop is unrolled (the

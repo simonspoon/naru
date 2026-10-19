@@ -1516,6 +1516,13 @@ const MIGRATIONS: &[&str] = &[
     // only the listener holding the newest value may be handed a turn or a
     // delegate result. Not in LIVE_SESSION_COLUMNS: it is never serialized.
     "ALTER TABLE live_sessions ADD COLUMN listen_gen INTEGER NOT NULL DEFAULT 0;",
+    // Naru task 2103: a managed built-in workflow is a workflow with a row
+    // here, naming the shipped definition it holds. A side table, not a
+    // column, so the workflows table itself is untouched.
+    "CREATE TABLE workflow_builtins (
+        workflow_id INTEGER PRIMARY KEY REFERENCES workflows(id) ON DELETE CASCADE,
+        builtin_id  TEXT NOT NULL UNIQUE
+     );",
 ];
 
 /// Selects full task rows including the derived `blocked` flag.
@@ -2812,7 +2819,8 @@ const WORKFLOW_COLUMNS: &str = "w.id, w.project_id, w.name, w.description, \
           AND json_extract(n.config, '$.mode') = 'time' AND w.enabled = 1), \
      (SELECT json_extract(n.config, '$.events') FROM workflow_nodes n \
         WHERE n.workflow_id = w.id AND n.kind = 'trigger' ORDER BY n.id LIMIT 1), \
-     w.enabled, w.types";
+     w.enabled, w.types, \
+     EXISTS (SELECT 1 FROM workflow_builtins b WHERE b.workflow_id = w.id)";
 const WORKFLOW_NODE_COLUMNS: &str =
     "id, workflow_id, kind, title, config, x, y, created_at, updated_at";
 const WORKFLOW_EDGE_COLUMNS: &str = "id, workflow_id, from_node, to_node, branch, from_pin, to_pin";
@@ -2836,6 +2844,14 @@ pub const WORKFLOW_RUN_ABANDONED: &str =
 pub const WORKFLOW_INPUT_MAX: usize = 256 * 1024;
 /// Largest text one log line may carry.
 const WORKFLOW_LOG_TEXT_MAX: usize = 64 * 1024;
+
+/// The refusal every write to a managed built-in workflow gets.
+fn builtin_refusal(name: &str) -> Error {
+    Error::Validation(format!(
+        "workflow {name:?} is a built-in managed by Naru and is read-only; \
+         duplicate it to customise (`naru workflow duplicate`)"
+    ))
+}
 
 fn conversion_failure(col: usize, e: serde_json::Error) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(col, rusqlite::types::Type::Text, Box::new(e))
@@ -2871,6 +2887,7 @@ fn row_to_workflow(row: &rusqlite::Row<'_>) -> rusqlite::Result<Workflow> {
             .ok()
             .and_then(|j| serde_json::from_str(&j).ok())
             .unwrap_or_default(),
+        builtin: row.get(15)?,
     })
 }
 
@@ -5432,6 +5449,15 @@ impl Store {
 
     fn update_workflow_checked(&mut self, id: i64, patch: WorkflowPatch) -> Result<Workflow> {
         let current = self.get_workflow(id)?;
+        // A built-in may only be switched on or off.
+        if current.builtin
+            && (patch.name.is_some()
+                || patch.description.is_some()
+                || patch.project_id.is_some()
+                || patch.types.is_some())
+        {
+            return Err(builtin_refusal(&current.name));
+        }
         let mut project_id = current.project_id;
         let mut name = current.name.clone();
         let mut description = current.description.clone();
@@ -5510,12 +5536,14 @@ impl Store {
                 }
                 None => {
                     let base = &src.workflow.name;
+                    // A copy of a built-in is a customisation (naru task 2103).
+                    let word = if src.workflow.builtin { "custom" } else { "copy" };
                     let mut n = 1;
                     loop {
                         let cand = if n == 1 {
-                            format!("{base} (copy)")
+                            format!("{base} ({word})")
                         } else {
-                            format!("{base} (copy {n})")
+                            format!("{base} ({word} {n})")
                         };
                         let cand = if cand.chars().count() > WORKFLOW_NAME_MAX {
                             let keep = WORKFLOW_NAME_MAX - (cand.chars().count() - base.chars().count());
@@ -5846,9 +5874,71 @@ impl Store {
     /// Its log lines stay, unattributed.
     pub fn delete_workflow(&mut self, id: i64) -> Result<WorkflowView> {
         let view = self.get_workflow_view(id)?;
+        if view.workflow.builtin {
+            return Err(builtin_refusal(&view.workflow.name));
+        }
         self.conn
             .execute("DELETE FROM workflows WHERE id = ?1", [id])?;
         Ok(view)
+    }
+
+    /// The workflow holding shipped definition `builtin_id`, if installed.
+    pub fn builtin_workflow_id(&self, builtin_id: &str) -> Result<Option<i64>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT workflow_id FROM workflow_builtins WHERE builtin_id = ?1",
+                [builtin_id],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Marks workflow `id` as the managed built-in `builtin_id`.
+    pub fn mark_workflow_builtin(&mut self, id: i64, builtin_id: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO workflow_builtins (workflow_id, builtin_id) VALUES (?1, ?2)",
+            (id, builtin_id),
+        )?;
+        Ok(())
+    }
+
+    /// Renames a user workflow out of a built-in's way to `"<name> (custom)"`,
+    /// then `"<name> (custom 2)"`…; answers the new name. Nothing else about
+    /// it changes (naru task 2103).
+    pub fn rename_workflow_to_custom(&mut self, id: i64) -> Result<String> {
+        let w = self.get_workflow(id)?;
+        if w.builtin {
+            return Err(builtin_refusal(&w.name));
+        }
+        let mut n = 1;
+        loop {
+            let cand = if n == 1 {
+                format!("{} (custom)", w.name)
+            } else {
+                format!("{} (custom {n})", w.name)
+            };
+            if self.ensure_workflow_name_free(&cand, None).is_ok() {
+                self.update_workflow(
+                    id,
+                    WorkflowPatch {
+                        name: Some(cand.clone()),
+                        ..Default::default()
+                    },
+                )?;
+                return Ok(cand);
+            }
+            n += 1;
+        }
+    }
+
+    /// `validation` when workflow `id` is a managed built-in (naru task 2103).
+    fn ensure_not_builtin(&self, id: i64) -> Result<()> {
+        let w = self.get_workflow(id)?;
+        if w.builtin {
+            return Err(builtin_refusal(&w.name));
+        }
+        Ok(())
     }
 
     fn ensure_workflow_name_free(&self, name: &str, except: Option<i64>) -> Result<()> {
@@ -5969,7 +6059,7 @@ impl Store {
         workflow_id: i64,
         new: &WorkflowNodeNew,
     ) -> Result<WorkflowNode> {
-        self.get_workflow(workflow_id)?;
+        self.ensure_not_builtin(workflow_id)?;
         let title = validate_workflow_node_title(&new.title)?;
         let config = match &new.config {
             Some(c) => c.clone(),
@@ -6043,6 +6133,7 @@ impl Store {
         patch: WorkflowNodePatch,
     ) -> Result<WorkflowNode> {
         let current = self.get_workflow_node(id)?;
+        self.ensure_not_builtin(current.workflow_id)?;
         let title = match &patch.title {
             Some(t) => validate_workflow_node_title(t)?,
             None => current.title.clone(),
@@ -6167,6 +6258,7 @@ impl Store {
     /// Deletes a node and the edges touching it; echoes both.
     pub fn delete_workflow_node(&mut self, id: i64) -> Result<(WorkflowNode, Vec<WorkflowEdge>)> {
         let node = self.get_workflow_node(id)?;
+        self.ensure_not_builtin(node.workflow_id)?;
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {WORKFLOW_EDGE_COLUMNS} FROM workflow_edges \
              WHERE from_node = ?1 OR to_node = ?1 ORDER BY id"
@@ -6232,6 +6324,7 @@ impl Store {
         from_pin: Option<String>,
         to_pin: Option<String>,
     ) -> Result<WorkflowEdge> {
+        self.ensure_not_builtin(workflow_id)?;
         let types = self.get_workflow(workflow_id)?.types;
         let from = self.workflow_edge_end("from", workflow_id, from_node)?;
         let to = self.workflow_edge_end("to", workflow_id, to_node)?;
@@ -6424,6 +6517,7 @@ impl Store {
 
     pub fn delete_workflow_edge(&mut self, id: i64) -> Result<WorkflowEdge> {
         let edge = self.get_workflow_edge(id)?;
+        self.ensure_not_builtin(edge.workflow_id)?;
         self.conn
             .execute("DELETE FROM workflow_edges WHERE id = ?1", [id])?;
         self.touch_workflow(edge.workflow_id)?;
@@ -6722,6 +6816,7 @@ impl Store {
     /// nothing is deleted from the history.
     pub fn restore_workflow_revision(&mut self, id: i64, rev: i64) -> Result<WorkflowView> {
         self.immediate(|s| {
+            s.ensure_not_builtin(id)?;
             let r = s.get_workflow_revision(id, rev)?;
             if same_workflow_graph(&r.snapshot, &s.workflow_snapshot(id)?) {
                 return Err(Error::Validation(format!(
@@ -18052,15 +18147,15 @@ mod tests {
         );
         assert_eq!(
             MIGRATIONS.len(),
-            98,
-            "a fresh db should report user_version 98"
+            99,
+            "a fresh db should report user_version 99"
         );
         let (store, _dir) = temp_store();
         let version: i64 = store
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 98);
+        assert_eq!(version, 99);
     }
 
     /// Workflows replace diagrams at migration 83 (mesa task 1607): a db that
@@ -18084,7 +18179,7 @@ mod tests {
         store
             .conn
             .execute_batch(
-                "ALTER TABLE live_sessions DROP COLUMN listen_gen; DROP TABLE agent_questions; DROP TABLE custom_themes; DROP TABLE task_notes; ALTER TABLE live_sessions DROP COLUMN ambient_request_seq; ALTER TABLE live_sessions DROP COLUMN ambient_request; ALTER TABLE live_sessions DROP COLUMN host_seen_at; ALTER TABLE live_sessions DROP COLUMN host_ambient; ALTER TABLE live_notebook DROP COLUMN category; ALTER TABLE cc_messages DROP COLUMN cost_micro_usd; ALTER TABLE cc_sessions DROP COLUMN main_agent; ALTER TABLE live_boards DROP COLUMN pinned_at; DROP TABLE workflow_revisions; DROP TABLE workflow_log; DROP TABLE workflow_gates; DROP TABLE workflow_runs; DROP TABLE workflow_edges; \
+                "ALTER TABLE live_sessions DROP COLUMN listen_gen; DROP TABLE agent_questions; DROP TABLE custom_themes; DROP TABLE task_notes; ALTER TABLE live_sessions DROP COLUMN ambient_request_seq; ALTER TABLE live_sessions DROP COLUMN ambient_request; ALTER TABLE live_sessions DROP COLUMN host_seen_at; ALTER TABLE live_sessions DROP COLUMN host_ambient; ALTER TABLE live_notebook DROP COLUMN category; ALTER TABLE cc_messages DROP COLUMN cost_micro_usd; ALTER TABLE cc_sessions DROP COLUMN main_agent; ALTER TABLE live_boards DROP COLUMN pinned_at; DROP TABLE workflow_builtins; DROP TABLE workflow_revisions; DROP TABLE workflow_log; DROP TABLE workflow_gates; DROP TABLE workflow_runs; DROP TABLE workflow_edges; \
                  DROP TABLE workflow_nodes; DROP TABLE workflows; \
                  CREATE TABLE diagrams (id INTEGER PRIMARY KEY, title TEXT); \
                  INSERT INTO diagrams (title) VALUES ('stale'); \

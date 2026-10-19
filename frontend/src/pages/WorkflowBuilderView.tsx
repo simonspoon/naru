@@ -18,6 +18,7 @@ import { formatTimestamp, timeAgo } from '../time'
 import { useFetch } from '../useFetch'
 import { WorkflowCanvas } from '../WorkflowCanvas'
 import { PlayIcon } from '../components/WorkflowIcon'
+import { BUILTIN_NOTE, BUILTIN_TITLE, duplicateLabel, isBuiltin } from '../workflowBuiltin'
 import { toggleLabel, workflowHref, workflowsListHref } from '../workflowOverview'
 import { formatDuration, runPollMs, runSummary, runningRunId, stepClass } from '../workflowRun'
 import type { WorkflowRun } from '../types/WorkflowRun'
@@ -241,6 +242,7 @@ export function WorkflowBuilderView({
   if (!view) return <p className="muted">Loading…</p>
 
   const wf = view.workflow
+  const builtin = isBuiltin(wf)
   const live = liveId !== null && liveRun?.id === liveId ? liveRun : null
   // Until the final record lands, keep the last live one on screen rather
   // than flashing the previous run.
@@ -254,10 +256,22 @@ export function WorkflowBuilderView({
       </p>
       <div className="workflow-head">
         <h2 className="workflow-title">
-          <InlineEdit
-            value={wf.name}
-            onSave={(name) => updateWorkflow(workflowId, { name }).then(() => refetch())}
-          />
+          {builtin ? (
+            wf.name
+          ) : (
+            <InlineEdit
+              value={wf.name}
+              onSave={(name) => updateWorkflow(workflowId, { name }).then(() => refetch())}
+            />
+          )}
+          {builtin && (
+            <>
+              {' '}
+              <span className="library-badge" title={BUILTIN_TITLE}>
+                built-in
+              </span>
+            </>
+          )}
           <span className="muted workflow-title-tag"> · workflow{wf.enabled ? '' : ' · disabled'}</span>
         </h2>
         <div className="workflow-head-actions">
@@ -306,7 +320,7 @@ export function WorkflowBuilderView({
               )
             }
           >
-            duplicate
+            {duplicateLabel(wf)}
           </button>
           <button
             type="button"
@@ -326,6 +340,7 @@ export function WorkflowBuilderView({
           >
             export
           </button>
+          {!builtin && (
           <ConfirmDelete
             label="delete workflow"
             message={`Deletes this workflow with its ${view.nodes.length} node(s), ${view.edges.length} edge(s) and its run history. Entries it wrote to logs are kept.`}
@@ -336,18 +351,24 @@ export function WorkflowBuilderView({
               })
             }
           />
+          )}
         </div>
       </div>
       <p className="muted">
-        <InlineEdit
-          value={wf.description ?? ''}
-          multiline
-          placeholder="no description — click to add"
-          onSave={(d) =>
-            updateWorkflow(workflowId, { description: d === '' ? null : d }).then(() => refetch())
-          }
-        />
+        {builtin ? (
+          wf.description
+        ) : (
+          <InlineEdit
+            value={wf.description ?? ''}
+            multiline
+            placeholder="no description — click to add"
+            onSave={(d) =>
+              updateWorkflow(workflowId, { description: d === '' ? null : d }).then(() => refetch())
+            }
+          />
+        )}
       </p>
+      {builtin && <p className="muted">{BUILTIN_NOTE}</p>}
       {runError && <p className="error">could not run: {runError}</p>}
 
       {historyOpen && (
@@ -357,7 +378,7 @@ export function WorkflowBuilderView({
               ← graph
             </button>
           </p>
-          <WorkflowHistory workflowId={workflowId} onRestored={refetch} />
+          <WorkflowHistory workflowId={workflowId} onRestored={refetch} readOnly={builtin} />
         </>
       )}
 
@@ -370,6 +391,7 @@ export function WorkflowBuilderView({
           view={view}
           run={display}
           onChanged={refetch}
+          readOnly={builtin}
         />
       )}
 

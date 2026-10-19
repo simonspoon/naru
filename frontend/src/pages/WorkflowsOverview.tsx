@@ -7,6 +7,7 @@ import {
   validWorkflowName,
 } from "../workflowCreate";
 import { formatTimestamp } from "../time";
+import { BUILTIN_TITLE, isBuiltin } from "../workflowBuiltin";
 import { useFetch } from "../useFetch";
 import {
   stateLabel,
@@ -138,7 +139,17 @@ export function WorkflowsOverview({ embedded = false }: { embedded?: boolean }) 
                 const href = workflowHref(w);
                 return (
                   <tr key={w.id}>
-                    <td>{href ? <a href={href}>{w.name}</a> : w.name}</td>
+                    <td>
+                      {href ? <a href={href}>{w.name}</a> : w.name}
+                      {isBuiltin(w) && (
+                        <>
+                          {" "}
+                          <span className="library-badge" title={BUILTIN_TITLE}>
+                            built-in
+                          </span>
+                        </>
+                      )}
+                    </td>
                     <td>{projectLabel(w, projects)}</td>
                     <td>{stateLabel(w)}</td>
                     <td

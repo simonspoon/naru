@@ -2285,8 +2285,10 @@ EXAMPLES
         /// Project to scope both workflows (and the filed task) to, by id or name
         #[arg(long)]
         project: String,
-        /// Create the "Task loop" workflow (plan, implement, review and verify
-        /// one task; its input is a task id) instead of the ambient ones
+        /// Install or update the managed built-in "Task loop" workflows (plan,
+        /// implement, review and verify one task; its input is a task id)
+        /// instead of creating the ambient ones. They are global and read-only
+        /// (`serve` does this on start); --project is accepted and unused
         #[arg(long)]
         task_loop: bool,
     },
@@ -9104,7 +9106,9 @@ fn run_workflow_cmd(cmd: WorkflowCmd) -> Result<()> {
         WorkflowCmd::Defaults { project, task_loop } => {
             let project = resolve_project(&store, &project)?;
             let (created, skipped) = if task_loop {
-                workflow::create_task_loop_workflow(&mut store, project)?
+                // The task loop is a managed built-in: global, whatever the
+                // project (naru task 2103).
+                workflow::install_builtins(&mut store)?
             } else {
                 workflow::create_default_workflows(&mut store, project)?
             };
@@ -9837,6 +9841,7 @@ mod tests {
             trigger_events: vec![],
             enabled: true,
             types: vec![],
+            builtin: false,
         }
     }
 
@@ -10135,6 +10140,7 @@ mod tests {
         assert_eq!(
             sorted_owned(full.clone()),
             sorted(&[
+                "builtin",
                 "id",
                 "project_id",
                 "name",

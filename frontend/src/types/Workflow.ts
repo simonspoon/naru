@@ -63,4 +63,10 @@ enabled: boolean,
  * The user-defined struct types pins can carry (naru task 1981). Empty
  * = untyped: every pin is `any`.
  */
-types: Array<WorkflowType>, };
+types: Array<WorkflowType>, 
+/**
+ * A built-in shipped with Naru and managed by it (naru task 2103):
+ * installed and updated on `serve` start, read-only except enable/disable.
+ * Derived on every read from `workflow_builtins`.
+ */
+builtin: boolean, };

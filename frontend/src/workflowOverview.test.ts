@@ -32,6 +32,7 @@ function wf(over: Partial<Workflow> = {}): Workflow {
     last_failure_at: null,
     next_run_at: null,
     enabled: true,
+    builtin: false,
     ...over,
   }
 }

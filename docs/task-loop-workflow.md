@@ -333,6 +333,8 @@ on work must not treat `idle` as "done" without reading `last_result`.
    driver (1959) owns that.
 
 The todo-watcher command can be set to `naru workflow run "Task loop" --input {id} --detach` in `~/.naru/config.json` under `commands.todo-watcher` to run tasks through this workflow.
+
+**Managed built-in (naru task 2103).** `Task loop` and its child ship in the binary and `serve` installs and updates them on every start (global, enabled, read-only; see `docs/workflows.md` "Built-in workflows"). A same-named workflow an install already had is renamed `Task loop (custom)` / `Task loop: implement and review (custom)` and kept. The watcher runs whatever name `commands.todo-watcher` holds: after an upgrade `"Task loop"` is the built-in; to keep running a customised loop, set the command to `naru workflow run "Task loop (custom)" --input {id} --detach`. Because the loop is global, every node moves to the task's own project checkout first (`to_project` in the shared prelude), so stage agents run where the task's project lives rather than in one fixed project.
 Loop smoke test passed.
 - Smoke test of the Commit step (task 2034 follow-up): a loop run commits its own change and leaves the tree clean.
 
