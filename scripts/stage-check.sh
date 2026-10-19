@@ -86,6 +86,15 @@ rc=$(stage "$TMP/o1" --agent a-ok --deadline 30 --silence 5 --grace 2 --scratch 
 jq -e '.verdict=="COMPLETE" and .report=="echo: do the thing" and .partial==null and .nudges==0 and .restarts==0 and .agent=="a-ok" and (.job_ids|length)==1' "$TMP/o1" >/dev/null || fail "normal: $(cat "$TMP/o1")"
 grep -q -- "--agent a-ok" "$STUB/argv.log" || fail "normal: --agent did not reach claude"
 ok "normal completion"
+# naru task 2116: no --model passes none (the agent file decides); an explicit one overrides.
+grep -- "--agent a-ok" "$STUB/argv.log" | grep -q -- "--model" && fail "no --model: claude was still given --model"
+ok "no --model reaches claude when none is given"
+echo 0 > "$STUB/sleep.a-mod"
+brief mod "do the thing"
+rc=$(stage "$TMP/o1m" --agent a-mod --model opus --deadline 30 --silence 5 --grace 2 --scratch "$TMP/s1m" --brief-file "$TMP/mod.md")
+[ "$rc" = 0 ] || fail "model: exit $rc: $(cat "$TMP/o1m.err")"
+grep -- "--agent a-mod" "$STUB/argv.log" | grep -q -- "--model opus" || fail "explicit --model opus did not reach claude"
+ok "explicit --model overrides"
 
 # ---- 2. silence -> nudge -> recovers ----
 echo 20 > "$STUB/sleep.a-rec"
