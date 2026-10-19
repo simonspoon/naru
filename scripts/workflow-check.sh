@@ -2425,11 +2425,21 @@ run 1 "$NARU" workflow import "$TMP/bad.json"
 echo 'not json' >"$TMP/bad2.json"
 run 1 "$NARU" workflow import "$TMP/bad2.json"
 [ "$(jqe .error.code)" = "validation" ] || fail "an unreadable file is validation: $STDERR"
-api 200 GET "/api/workflows/$AW/export"
+"$NARU" serve --port "$PORT" >"$TMP/serve-port.log" 2>&1 &
+SERVER_PID=$!
+for _ in $(seq 1 50); do
+  curl -sf "http://127.0.0.1:$PORT/api/projects" >/dev/null 2>&1 && break
+  sleep 0.1
+done
+curl -sf "http://127.0.0.1:$PORT/api/projects" >/dev/null ||
+  fail "export server did not start (log: $(cat "$TMP/serve-port.log"))"
+PW=$("$NARU" workflow show Portable | jq -r '.workflow.id')
+api 200 GET "/api/workflows/$PW/export"
 [ "$(jqb .format)" = "naru-workflow" ] || fail "export route body"
 api 201 POST /api/workflows/import "{\"document\": $(cat "$TMP/portable.json")}"
 [ "$(jqb .workflow.enabled)" = "false" ] && [ "$(jqb '.missing|length')" = "1" ] || fail "import route: $BODY"
 api 422 POST /api/workflows/import '{"document":{"format":"x","version":1}}'
+kill "$SERVER_PID" 2>/dev/null; wait "$SERVER_PID" 2>/dev/null || true; SERVER_PID=
 ok "export/import: round trip disabled + suffixed + missing listed, bad files validation, both routes"
 
 [ ! -e "$STUB_DIR/bg.calls" ] || fail "a workflow spawned a background agent (--bg): $(cat "$STUB_DIR/bg.calls")"
