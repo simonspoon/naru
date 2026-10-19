@@ -36,6 +36,12 @@ prose.
 - **Acceptance metric**: one named, measurable metric and its pass value
   (e.g. "main_thread_deallocs = 0"). Never leave it vague; never invent a pass
   value you cannot justify from the code or the task.
+  When the deliverable is guidance for agents (a cheat-sheet, convention or
+  how-to), the acceptance must name the exact file it lives in, and that file
+  must be one agents actually load: a builtin prompt under
+  `src/core/builtins/` or a skill. `docs/*.md` is not loaded by agents. Allow
+  no fallback to docs, and name the agent prompt that reaches it (e.g. a
+  pointer in `implementer.md`).
 - **Team**: which of `recon`, `implementer`, `swift-implementer`,
   `diff-reviewer`, `verifier`, `ui-verifier`, `researcher`, in order, with what
   each owns. Only one writer in a tree at a time.

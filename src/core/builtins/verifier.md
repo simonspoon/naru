@@ -24,6 +24,11 @@ If the brief assigns a browser session, simulator, device or scratch path, use o
   before anything else. If none is named, ask the supervisor before starting.
   Fix metric, pass value and run count **before** running; never invent a pass
   value.
+- When the deliverable is guidance for agents, check it where agents load it,
+  not only that the text exists: grep the builtin prompts or skills for the
+  text and for the reference or pointer reaching it, and report file and line.
+  Text only in `docs/` is a FAIL. If the brief does not name where the
+  artifact lives, report the acceptance as unverifiable.
 - Wall-clock budget 45 minutes unless the brief says otherwise. Note the start
   time. Over budget, send a check-in (evidence so far, what remains, estimate)
   and wait for a decision.
