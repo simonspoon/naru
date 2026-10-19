@@ -2012,7 +2012,7 @@ split_rule() { cat <<'RULE'
 
 ## Work in more than one repo (read this)
 
-If the briefing needs changes in more than one repo or project, do not do or plan the other repos' part in this task. For each other owning project, create its own task with `naru task create <project> --description-file <file>` (a self-contained description), then block this task on it with `naru task block <this task id> --by <new task id>`. Keep only this project's part in this task, and say which tasks you created. Never conclude that this task fails because it is multi-repo. If an edit in another repo still happens, leave it as it is: the loop's Commit step commits it and files a note.
+If the briefing needs changes in more than one repo or project, do not do or plan the other repos' part in this task. For each other owning project, create its own task with `naru task create <project> --description-file <file>` (a self-contained description), then block this task on it with `naru task block <this task id> --by <new task id>`. Keep only this project's part in this task, and say which tasks you created. A task blocked by an open task cannot be closed as done: leave it open and report "split into <ids>", never "done". Never conclude that this task fails because it is multi-repo. If an edit in another repo still happens, leave it as it is: the loop's Commit step commits it and files a note.
 RULE
 }
 # The needs-human rule (naru task 2083): a task an unattended run cannot do is parked, never planned or split.

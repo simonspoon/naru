@@ -119,3 +119,7 @@ and that reading it releases nothing while `task release` does. Both scripts
 age a claim with a direct `sqlite3 UPDATE` against the throwaway `MESA_DB`:
 nothing in `Store` moves `claimed_at` backwards, which is the property under
 test.
+
+## Closing a blocked task
+
+A task blocked by an open task cannot move to `done` (`conflict`, exit 1 / 409; naru task 2101), in `receipt::update_task`, the chokepoint the CLI and API share. `cancelled` and a blocker that is done/cancelled are fine. Split work off, leave the task open and report "split into N".

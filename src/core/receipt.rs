@@ -31,6 +31,21 @@ use super::types::{Priority, Status, Task, TaskReceipt};
 /// no correct way to unwind it over a receipt that is, at worst, informational.
 pub fn update_task(store: &mut Store, id: i64, patch: &TaskPatch) -> Result<Task> {
     let before = store.get_task(id)?;
+    // A task blocked by an open task cannot be closed (naru task 2101): a
+    // planning-only run that split its work off must leave its task open.
+    if patch.status == Some(Status::Done) && before.status != Status::Done && before.blocked {
+        let open: Vec<String> = store
+            .list_blockers(id)?
+            .iter()
+            .filter(|t| !matches!(t.status, Status::Done | Status::Cancelled))
+            .map(|t| t.id.to_string())
+            .collect();
+        return Err(Error::Conflict(format!(
+            "task {id} is blocked by open task(s) {}; leave it open (split into {}) until they are done or cancelled",
+            open.join(", "),
+            open.join(", ")
+        )));
+    }
     let after = store.update_task(id, patch)?;
     let closed_with_claim = before.status != Status::Done
         && after.status == Status::Done
@@ -358,6 +373,35 @@ mod tests {
         std::fs::write(dir.join("7"), "repo\tscratch\n").unwrap();
         assert!(loop_entry_live(home.path(), 7));
         assert!(!loop_entry_live(home.path(), 8));
+    }
+
+    #[test]
+    fn update_task_refuses_to_close_a_task_blocked_by_an_open_task() {
+        let repo = synthetic_repo();
+        let (mut store, project_id) = store_with_project_at(repo.path());
+        let mk = |store: &mut Store, d: &str| {
+            store
+                .create_task(project_id, d, Priority::Medium, &[], None, None, None, None)
+                .unwrap()
+        };
+        let task = mk(&mut store, "planner");
+        let blocker = mk(&mut store, "real fix");
+        store.add_dependency(task.id, blocker.id).unwrap();
+        let done = TaskPatch {
+            status: Some(Status::Done),
+            ..Default::default()
+        };
+        let err = update_task(&mut store, task.id, &done).unwrap_err();
+        assert!(matches!(err, Error::Conflict(_)));
+        assert_ne!(store.get_task(task.id).unwrap().status, Status::Done);
+        // cancelled blocker unblocks
+        let cancel = TaskPatch {
+            status: Some(Status::Cancelled),
+            ..Default::default()
+        };
+        update_task(&mut store, blocker.id, &cancel).unwrap();
+        update_task(&mut store, task.id, &done).unwrap();
+        assert_eq!(store.get_task(task.id).unwrap().status, Status::Done);
     }
 
     #[test]

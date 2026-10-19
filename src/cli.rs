@@ -1460,7 +1460,8 @@ EXAMPLES
     },
     /// Make a task blocked by another task
     ///
-    /// Blocking is informational: a blocked task can still be closed. A task
+    /// A task blocked by an open task cannot be closed as done (exit 1, code
+    /// "conflict"); cancel it, or finish the blockers first. A task
     /// is blocked while any of its blockers is not done/cancelled. Self-edges
     /// and anything that would create a dependency cycle are rejected
     /// (exit 1, code "cycle"). Re-adding an existing edge succeeds.
