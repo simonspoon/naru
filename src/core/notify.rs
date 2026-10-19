@@ -127,6 +127,19 @@ pub fn send(
         }
     };
 
+    // Unit tests must never reach the person's phone: without an explicit
+    // vox override (a stub), `cargo test` sends nothing (naru task 2097).
+    #[cfg(test)]
+    if crate::core::env::var("VOX_BIN").is_none() {
+        return Ok(json!({
+            "sent": false,
+            "stubbed": true,
+            "message_id": Value::Null,
+            "chat_id": Value::Null,
+            "open_url": open_url,
+        }));
+    }
+
     let bin = vox_bin();
     let mut cmd = Command::new(&bin);
     cmd.arg("notify").arg("--json");
@@ -185,6 +198,16 @@ fn excerpt(stderr: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn send_is_stubbed_under_test_without_a_vox_override() {
+        if crate::core::env::var("VOX_BIN").is_some() {
+            return;
+        }
+        let v = send("x", None, None, None).unwrap();
+        assert_eq!(v["sent"], false);
+        assert_eq!(v["stubbed"], true);
+    }
 
     #[test]
     fn route_rule() {
