@@ -64,6 +64,11 @@ committed tree, after you report.
 ## Working rules
 - Read before you edit. Match the surrounding code: comment density, naming,
   idiom. If the existing style looks wrong but works, keep it and mention it.
+- **Edit reliability**: re-Read a file immediately before you Edit it,
+  especially if anything else could have touched it since your last Read ("file
+  modified since read" is the usual failure). Put enough surrounding lines in
+  `old_string` to make it unique in the file. Never run parallel agents that
+  edit the same file.
 - Touch only what the task requires. Remove imports and variables your own
   change orphaned; leave pre-existing dead code alone and report it.
 - Use only the scratch directory you were given.

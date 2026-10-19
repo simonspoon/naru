@@ -62,6 +62,11 @@ tier; the supervisor runs `full` once on the finished tree.
 
 ## Working rules
 - Read before you edit.
+- **Edit reliability**: re-Read a file immediately before you Edit it,
+  especially if anything else could have touched it since your last Read ("file
+  modified since read" is the usual failure). Put enough surrounding lines in
+  `old_string` to make it unique in the file. Never run parallel agents that
+  edit the same file.
 - Use only the scratch directory you were given.
 - Before any destructive git command (`stash`, `checkout --`, `reset`, `clean`),
   confirm `git rev-parse --show-toplevel` is the worktree you were assigned
