@@ -6,6 +6,9 @@
 # a db env set at install is baked in, an unset one absent; a hostile HOME (& < space)
 # is XML-escaped; uninstall = bootout + plist gone; self-deploy defaults its restart to
 # `kickstart -k` when the plist exists, not when absent, and an explicit command wins.
+# PATH (naru task 2161) comes from a stub login shell (NARU_LAUNCHD_SHELL, so the real
+# ~/.zshrc is never read): its dirs first, deduped, relative entries dropped, the fixed
+# dirs appended; a failing shell gives exactly the fixed list; an `&` is escaped.
 set -euo pipefail
 [ "$(uname -s)" = Darwin ] || { echo "skip: launchd-check is macOS only"; exit 0; }
 unset $(env | grep -oE "^(NARU|MESA)_[A-Za-z0-9_]*")
@@ -23,6 +26,17 @@ cat >"$NARU_LAUNCHCTL" <<STUB
 echo "\$*" >>"$TMP/launchctl.log"
 STUB
 chmod +x "$NARU_LAUNCHCTL"
+cat >"$TMP/shell-fail" <<'STUB'
+#!/bin/sh
+exit 1
+STUB
+cat >"$TMP/shell-ok" <<'STUB'
+#!/bin/sh
+echo "rc-file noise __NARU_PATH__=/nope"
+printf '\n__NARU_PATH__=%s\n' "$HOME/Library/pnpm/bin:/usr/bin:/usr/bin:relative:$HOME/a & b"
+STUB
+chmod +x "$TMP/shell-fail" "$TMP/shell-ok"
+export NARU_LAUNCHD_SHELL="$TMP/shell-fail"
 PLIST="$NARU_LAUNCHD_DIR/com.naru.serve.plist"
 log() { cat "$TMP/launchctl.log" 2>/dev/null || true; }
 
@@ -80,6 +94,16 @@ ok "uninstall boots out and removes the plist"
 ( harness ) && fail "restart with no plist and no command should fail"
 [ -z "$(log)" ] || fail "restart touched launchctl with no plist"
 ok "no plist and no command: still cannot restart"
+
+plist_path() { sed -n '/<key>PATH<\/key>/{n;s/.*<string>\(.*\)<\/string>.*/\1/p;}'; }
+FIXED="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+[ "$(scripts/launchd.sh install --print | plist_path)" = "$FIXED" ] || fail "failing shell: PATH is not the fixed list"
+ok "a failing login shell falls back to the fixed PATH"
+out=$(NARU_LAUNCHD_SHELL="$TMP/shell-ok" scripts/launchd.sh install --print)
+echo "$out" | plutil -lint - >/dev/null || fail "login-shell PATH breaks the plist"
+[ "$(echo "$out" | plist_path)" = "$HOME/Library/pnpm/bin:/usr/bin:$HOME/a &amp; b:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/bin:/usr/sbin:/sbin" ] \
+  || fail "login-shell PATH: $(echo "$out" | plist_path)"
+ok "login-shell PATH first, deduped, relative dropped, fixed dirs appended, & escaped"
 
 BAD="$TMP/a & b <c>"
 mkdir -p "$BAD"

@@ -10,7 +10,9 @@
 # bootstraps and kickstarts it. NARU_DB / MESA_DB / MESA_CONFIG_FILE / NARU_AUDIO_URL
 # set in the installing shell are baked in. Quit any hand-run `naru serve` first.
 # --print writes the plist to stdout and touches nothing; --dry-run prints the plan.
-# Env seams: NARU_LAUNCHD_DIR (plist dir), NARU_LAUNCHCTL (launchctl binary).
+# The plist PATH is the installing user's login-shell PATH plus fixed fallback dirs.
+# Env seams: NARU_LAUNCHD_DIR (plist dir), NARU_LAUNCHCTL (launchctl binary),
+# NARU_LAUNCHD_SHELL (shell asked for that PATH, default $SHELL).
 # Exit 2 off macOS or on bad usage.
 set -euo pipefail
 
@@ -41,7 +43,17 @@ render() {
     <string>$(xml "$v")</string>
 "
   done
-  local path="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+  # PATH: the installing user's interactive login-shell PATH (pnpm/nvm dirs usually come
+  # from .zshrc), absolute entries only, then the fixed fallback dirs, first occurrence wins.
+  local shell_path dir path="" sep=""
+  shell_path="$("${NARU_LAUNCHD_SHELL:-${SHELL:-/bin/sh}}" -ilc 'printf "\n__NARU_PATH__=%s\n" "$PATH"' </dev/null 2>/dev/null | sed -n 's/^__NARU_PATH__=//p' | tail -n 1)" || shell_path=""
+  local dirs=()
+  IFS=: read -r -a dirs <<<"$shell_path" || true
+  for dir in ${dirs[@]+"${dirs[@]}"} "$HOME/.local/bin" /opt/homebrew/bin /usr/local/bin /usr/bin /bin /usr/sbin /sbin; do
+    case "$dir" in /*) ;; *) continue ;; esac
+    case ":$path:" in *":$dir:"*) continue ;; esac
+    path="$path$sep$dir"; sep=:
+  done
   # Substitute with awk -v-free bash replacement; values are already XML-escaped.
   local out; out="$(cat "$here/launchd/$LABEL.plist.in")"
   out="${out//__BIN__/$(xml "$BIN")}"

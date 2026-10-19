@@ -11,8 +11,13 @@ to restart, so a real redeploy rolls back. The `com.naru.serve` user agent fixes
   section applies (its `port`, else 7770). `scripts/self-deploy.sh` health-checks that same
   port (`NARU_DEPLOY_PORT` overrides). `RunAtLoad` + `KeepAlive`.
 - Logs: `~/.naru/serve.log` and `~/.naru/serve.err.log`.
-- Env: launchd starts with a bare environment, so the plist sets `HOME` and a `PATH`
-  (`~/.local/bin`, Homebrew, system dirs). `NARU_DB`, `MESA_DB`, `MESA_CONFIG_FILE` and
+- Env: launchd starts with a bare environment, so the plist sets `HOME` and a `PATH`.
+  The `PATH` is the installing user's interactive login-shell `PATH` (`$SHELL -ilc`, so
+  dirs added in `.zshrc` such as pnpm's or nvm's node are kept; absolute entries only),
+  followed by `~/.local/bin`, Homebrew and the system dirs, duplicates dropped; a shell that
+  fails gives just those fixed dirs. Task loop stages inherit it from `naru serve`. It is
+  read once at install, so re-run `scripts/launchd.sh install` after adding a tool dir.
+  `NARU_LAUNCHD_SHELL` names a different shell to ask (the gate's stub). `NARU_DB`, `MESA_DB`, `MESA_CONFIG_FILE` and
   `NARU_AUDIO_URL` are copied in only if set in the shell that runs the install; run the
   install from the shell that started the manual server to keep the same db. Re-run to change.
 - `scripts/launchd.sh install --print` shows the plist; `--dry-run` shows the plan.
