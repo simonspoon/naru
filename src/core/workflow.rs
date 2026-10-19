@@ -7765,9 +7765,31 @@ mod tests {
             let mut seen = Vec::new();
             for (status, body) in replies {
                 let (mut c, _) = l.accept().unwrap();
+                c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                // A request can arrive in several segments (headers, then
+                // body): read until the headers end and Content-Length bytes
+                // of body are in.
+                let mut req: Vec<u8> = Vec::new();
                 let mut buf = [0u8; 4096];
-                let n = c.read(&mut buf).unwrap();
-                seen.push(String::from_utf8_lossy(&buf[..n]).into_owned());
+                loop {
+                    let n = c.read(&mut buf).unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    req.extend_from_slice(&buf[..n]);
+                    if let Some(p) = req.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let head = String::from_utf8_lossy(&req[..p]).to_ascii_lowercase();
+                        let want = head
+                            .lines()
+                            .find_map(|l| l.strip_prefix("content-length:"))
+                            .and_then(|v| v.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+                        if req.len() >= p + 4 + want {
+                            break;
+                        }
+                    }
+                }
+                seen.push(String::from_utf8_lossy(&req).into_owned());
                 let _ = write!(
                     c,
                     "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
