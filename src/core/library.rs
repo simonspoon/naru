@@ -95,6 +95,11 @@ pub struct Builtin {
 /// reroutes a misrouted general-purpose subagent spawn through `naru decide` —
 /// body `core::agent_route::AGENT_ROUTE_HOOK`, installed by `naru library hook
 /// enable agent-route.sh --event PreToolUse --matcher 'Agent|Task'`.
+/// `dev-env-guard` is the seventh (naru task 2094): a `PreToolUse` hook that
+/// denies task-loop agents `install.sh`, `cargo install`, `launchctl` on
+/// `com.naru.*` and writes to `/Applications/Naru.app` — body
+/// `core::dev_guard::DEV_GUARD_HOOK`, installed by `naru library hook enable
+/// dev-env-guard.sh --event PreToolUse --matcher 'Bash|Write|Edit'`.
 pub const BUILTINS: &[Builtin] = &[
     Builtin {
         id: crate::core::live::LIVE_AGENT_BUILTIN,
@@ -216,6 +221,15 @@ echo \"Claude Code stopped in $(pwd)\"
         export_command: false,
         files: &[],
         body: crate::core::agent_route::AGENT_ROUTE_HOOK,
+    },
+    Builtin {
+        id: crate::core::dev_guard::DEV_GUARD_HOOK_BUILTIN,
+        name: crate::core::dev_guard::DEV_GUARD_HOOK_NAME,
+        kind: LibraryKind::Hook,
+        scope: LibraryScope::User,
+        export_command: false,
+        files: &[],
+        body: crate::core::dev_guard::DEV_GUARD_HOOK,
     },
     Builtin {
         id: "implementer",

@@ -218,6 +218,7 @@ The starter set — twenty-four rows:
 | `alarm-disarm` | `hook` | `user` | A `SubagentStop` hook that disarms the supervisor's `naru alarm arm` — literally `core::alarm::ALARM_HOOK` (`docs/alarm.md`); name `alarm-disarm.sh` |
 | `live-barge-in` | `hook` | `user` | A `PreToolUse`/`PostToolUse` hook that delivers what the person said mid-turn to the `naru-live` agent — literally `core::barge_in::BARGE_IN_HOOK`; name `live-barge-in.sh` |
 | `agent-route` | `hook` | `user` | A `PreToolUse` hook that reroutes a misrouted general-purpose subagent spawn through `naru decide` — literally `core::agent_route::AGENT_ROUTE_HOOK` (`docs/agent-route.md`); name `agent-route.sh` |
+| `dev-env-guard` | `hook` | `user` | A `PreToolUse` hook that denies task-loop agents `install.sh`, `cargo install`, `launchctl` on `com.naru.*` and writes to `/Applications/Naru.app` — literally `core::dev_guard::DEV_GUARD_HOOK` (naru task 2094, `docs/dev-env.md`); name `dev-env-guard.sh` |
 | `implementer` | `agent` | `user` | Implements one scoped change in any non-Swift project, runs the fast gate tier from the repo's own docs and reports per finding (`sonnet`) |
 | `verifier` | `agent` | `user` | Verification of non-UI work against a named metric with provenance, baseline vs fix and variance; never edits source (`sonnet`, read-only tools) |
 | `recon` | `agent` | `user` | Read-only code reconnaissance, helios first (`haiku`, read-only tools) |
