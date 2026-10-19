@@ -49,6 +49,27 @@ pub fn update_task(store: &mut Store, id: i64, patch: &TaskPatch) -> Result<Task
     // Task-event workflows (naru task 2006): the one place both surfaces'
     // status changes pass through.
     crate::core::workflow::fire_task_event(store, &after, Some(before.status));
+    // Landing report (naru task 2081): a close, or a bounce from
+    // `in_progress` back to `backlog`, reaches the live agent as a `result`
+    // so it need not remember to poll. No live session = a quiet no-op.
+    let landing = if before.status != Status::Done && after.status == Status::Done {
+        Some(format!(
+            "Task {} done: {}. Commit/artifact: {}.",
+            after.id,
+            after.name,
+            after.artifact.as_deref().unwrap_or("none")
+        ))
+    } else if before.status == Status::InProgress && after.status == Status::Backlog {
+        Some(format!(
+            "Task {} bounced back to backlog: {}.",
+            after.id, after.name
+        ))
+    } else {
+        None
+    };
+    if let Some(text) = landing {
+        let _ = store.add_live_result(&text);
+    }
     Ok(after)
 }
 
@@ -530,5 +551,53 @@ mod tests {
             }
             other => panic!("expected Validation, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn landing_writes_a_live_result_only_for_close_or_bounce() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, project_id) = store_with_project_at(dir.path());
+        let mk = |store: &mut Store| {
+            store
+                .create_task(
+                    project_id,
+                    "ship it",
+                    Priority::Medium,
+                    &[],
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap()
+        };
+        let patch = |status| TaskPatch {
+            status: Some(status),
+            ..Default::default()
+        };
+        // No live session: the close still succeeds.
+        let t0 = mk(&mut store);
+        update_task(&mut store, t0.id, &patch(Status::Done)).unwrap();
+
+        let session = store.start_live_session(None).unwrap();
+        let t = mk(&mut store);
+        update_task(
+            &mut store,
+            t.id,
+            &TaskPatch {
+                tags: Some(vec!["x".into()]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(store.next_live_result(session.id).unwrap().is_none());
+        update_task(&mut store, t.id, &patch(Status::InProgress)).unwrap();
+        update_task(&mut store, t.id, &patch(Status::Backlog)).unwrap();
+        let bounced = store.next_live_result(session.id).unwrap().unwrap();
+        assert!(bounced.text.contains(&format!("Task {} bounced", t.id)));
+        update_task(&mut store, t.id, &patch(Status::Done)).unwrap();
+        let done = store.next_live_result(session.id).unwrap().unwrap();
+        assert!(done.text.contains(&format!("Task {} done", t.id)));
+        assert!(store.next_live_result(session.id).unwrap().is_none());
     }
 }

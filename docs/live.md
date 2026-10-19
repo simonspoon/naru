@@ -4137,3 +4137,7 @@ Only a `run:<job>` agent is pushed to; a legacy bare job id keeps `listen`.
 `listen` and the barge-in hook remain, claiming through their own
 one-statement stamps: if one of them wins a turn in the instant after a push
 queued it, the still-queued message is removed — but if the runner had already moved it to `delivered/`, that one turn reaches the agent twice (a window of milliseconds, only when a fallback `listen` runs beside push). Check: `scripts/live-push-check.sh`.
+
+## Landing reports (naru task 2081)
+
+`core::receipt::update_task` (the one chokepoint for `task update` and `PATCH /api/tasks/{id}`) writes a `live result` — `Task N done: <name>. Commit/artifact: <artifact>.` or `Task N bounced back to backlog: <name>.` — when a task closes into `done` or goes `in_progress` → `backlog`, so the next `listen` hands it to the agent as `kind: result`. No live session means nothing is written. The Task loop's "Notify live agent" notice ask is unchanged (it still covers split/cancelled/error); notice asks raise no turn, which is why a landing used to go unreported until the agent polled. Rule 16 of `naru-live` also tells the agent to run `naru task show <id> --quiet` before claiming a task is queued, running or done.
