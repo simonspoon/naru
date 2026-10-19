@@ -2307,7 +2307,7 @@ const LOOP_CLOSE_BACKLOG: &str = r##"# Put back what the bounced run left (naru 
 # before the run is reverted (a copy goes to $SCRATCH/debris first), a pre-dirty path the
 # run changed is restored from the Plan node's copy, and a path still equal to its
 # baseline line is never touched.
-restored=()
+restored=(); diffs=(); failed=(); leftover=()
 restore_path() { # <path>: in the repo the loop below is in; $ST is its state dir, $pre what a listed path is prefixed with
   local p=$1 h b
   if [ -e "$p" ]; then h=$(git hash-object -- "$p" 2>/dev/null || echo gone); else h=gone; fi
@@ -2317,7 +2317,7 @@ restore_path() { # <path>: in the repo the loop below is in; $ST is its state di
     b=$(awk -F'\t' -v p="$p" '$1 == p { print $2; exit }' "$ST/baseline.txt")
     if [ "$b" = gone ] || [ ! -f "$ST/base/$p" ]; then rm -f -- "$p"; else cp -p -- "$ST/base/$p" "$p"; fi
   elif git cat-file -e "HEAD:$p" 2>/dev/null; then
-    git checkout -q HEAD -- "$p" 2>/dev/null || return
+    git checkout -q HEAD -- "$p" 2>/dev/null || { failed+=("$pre$p (could not restore)"); return; }
   else
     git rm -q -f --cached -- "$p" > /dev/null 2>&1; rm -f -- "$p"
   fi
@@ -2327,7 +2327,10 @@ n=0
 while IFS= read -r repo; do
   n=$((n+1)); ST=$(repo_state "$n"); pre=""; [ "$n" -gt 1 ] && pre="$repo/"
   [ -f "$ST/baseline.txt" ] || continue
-  cd "$repo" || continue
+  cd "$repo" || { failed+=("$repo (could not enter the repo)"); continue; }
+  mkdir -p "$ST/debris"
+  git diff HEAD > "$ST/debris/run.diff" 2>/dev/null || true
+  if [ -s "$ST/debris/run.diff" ]; then diffs+=("$ST/debris/run.diff"); else rm -f "$ST/debris/run.diff"; fi
   git status --porcelain -z -uall > "$ST/status-now.z" 2>/dev/null || true
   while IFS= read -r -d '' rec; do
     case "$rec" in
@@ -2335,6 +2338,8 @@ while IFS= read -r repo; do
       *) restore_path "${rec:3}" ;;
     esac
   done < "$ST/status-now.z"
+  left=$(git status --porcelain -uall 2>/dev/null | head -n 20 | cut -c 4- | paste -sd, -)
+  [ -z "$left" ] || leftover+=("$repo: $left")
 done < <(repo_all)
 NHF="$SCRATCH/needs-human.txt"
 if [ -s "$NHF" ]; then
@@ -2348,6 +2353,9 @@ if [ -s "$NHF" ]; then
 fi
 { echo "Task loop did not pass; the task is back in backlog for a person. State: $(printf '%s\n' "$IN" | tail -n 1)"; echo "Hand-off files: $SCRATCH"; echo; cat "$SCRATCH/reasons.txt" 2>/dev/null
   if [ "${#restored[@]}" -gt 0 ]; then echo; echo "Restored to their state before the run (copies in $SCRATCH/debris):"; printf '%s\n' "${restored[@]}"; fi
+  if [ "${#diffs[@]}" -gt 0 ]; then echo; echo "Diffs saved:"; printf '%s\n' "${diffs[@]}"; fi
+  if [ "${#failed[@]}" -gt 0 ]; then echo; echo "Could not restore:"; printf '%s\n' "${failed[@]}"; fi
+  if [ "${#leftover[@]}" -gt 0 ]; then echo; echo "Still dirty after restore (left untouched, not this run's to clean):"; printf '%s\n' "${leftover[@]}"; fi
   if [ -f "$SCRATCH/findings.md" ]; then echo; echo "Last review findings:"; cat "$SCRATCH/findings.md"; fi
 } | head -c 6000 > "$SCRATCH/note.md"
 naru task note "$TASK" --file "$SCRATCH/note.md" > /dev/null || exit 1

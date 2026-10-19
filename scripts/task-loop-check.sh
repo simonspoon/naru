@@ -460,8 +460,10 @@ R=$(run_loop "$T")
 git -C "$TMP/other" diff --quiet -- oseed.txt || fail "cross debris: tracked file still modified"
 [ "$(cat "$TMP/other/opre.txt")" = early ] && [ "$(git -C "$TMP/other" status --porcelain)" = "?? opre.txt" ] || fail "cross debris: tree: $(git -C "$TMP/other" status --porcelain)"
 "$NARU" task show "$T" | jq -e '.notes | map(.body) | any(test("Restored to their state") and test("odraft.txt"))' >/dev/null || fail "cross debris: note"
+"$NARU" task show "$T" | jq -e '.notes | map(.body) | any(test("Diffs saved:") and test("run.diff") and test("Still dirty after restore") and test("opre.txt"))' >/dev/null || fail "cross debris: diff/leftover note"
+grep -q odraft "$HOME"/.naru/loop/"$T"-*/repo-2/debris/run.diff 2>/dev/null || grep -q oseed "$HOME"/.naru/loop/"$T"-*/repo-2/debris/run.diff || fail "cross debris: run.diff missing the edit"
 rm -f "$TMP/other/opre.txt"
-ok "a bounced run in another project's repo puts back its debris there"
+ok "a bounced run in another project's repo puts back its debris there, saves its diff and reports what is still dirty"
 
 # ---- 7g. a third repo (naru task 2058): committed when the task names it, when a path dependency points at it, and when only the project scan finds it ----
 git -C "$TMP/sibling" init -q 2>/dev/null || { mkdir -p "$TMP/sibling"; git -C "$TMP/sibling" init -q; }
