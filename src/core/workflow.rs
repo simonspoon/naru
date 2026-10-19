@@ -2345,13 +2345,16 @@ done < <(repo_all)
 rm -f "$HOME/.naru/loop/active/$TASK"
 [ "$failed" = 0 ] || exit 1
 SHAS=$(paste -sd, "$SCRATCH/shas.txt")
-# The Close node's landing result went out before this commit existed (naru task 2098): record the
-# commit on the task and follow up. Best-effort; the artifact stays null if either fails.
+# Close withholds its landing result while this run's registry entry exists (naru task 2088), so this
+# posts the one complete line. The artifact is best-effort; the result is sent on every path that lands.
+NAME=$(naru task show "$TASK" 2>/dev/null | jq -r '.name // empty' 2>/dev/null)
 if [ -s "$SCRATCH/refs.txt" ]; then
   REFS=$(paste -sd, "$SCRATCH/refs.txt" | sed 's/,/, /g')
   naru task update "$TASK" --artifact "$REFS" > /dev/null 2>&1 || true
-  naru live result "Task $TASK committed: $REFS." > /dev/null 2>&1 || true
+else
+  REFS="none (nothing to commit)"
 fi
+naru live result "Task $TASK done: $NAME. Commit/artifact: $REFS." > /dev/null 2>&1 || true
 emit commit=${SHAS:-none}
 "##;
 

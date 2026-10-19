@@ -164,6 +164,7 @@ printf 'looks fine\nVERDICT: PASS' > "$STUB/reply.verifier"
 printf 'clean\nVERDICT: PASS' > "$STUB/reply.diff-reviewer"
 printf 'foo.txt\nsub dir/bar baz.txt\nseed.txt\n' > "$STUB/touch.implementer"
 T=$(mk "Fix the foo bug")
+"$NARU" live start --no-agent >/dev/null || fail "pass: live start"
 R=$(run_loop "$T")
 [ "$(jq -r .status <<<"$R")" = succeeded ] || fail "pass: run $(jq -c '{status,error}' <<<"$R")"
 [ "$(tstatus "$T")" = done ] || fail "pass: task is $(tstatus "$T")"
@@ -191,6 +192,18 @@ grep -q "VERDICT: PASS" "$STUB/typed-msgs.review" || fail "pass: the reports did
 metric "$T" PASS 1 done pass
 asked "$T" done pass
 [ "$(step "$R" "Notify live agent")" = ok ] || fail "pass: notify step was $(step "$R" "Notify live agent")"
+# the landing result is one line, sent by Commit, carrying the commit hash (naru task 2088)
+# results are handed out by listen, once each: drain them
+RES=""
+while :; do
+  L=$("$NARU" live listen --wait 0)
+  [ "$L" = null ] && break
+  RES="$RES$(jq -r '.text // .result // empty' <<<"$L")"$'\n'
+done
+N=$(grep -c "^Task $T done:" <<<"$RES" || true)
+[ "$N" = 1 ] || fail "pass: expected one landing result for task $T, found $N in: $RES"
+grep -Eq "^Task $T done: .*Commit/artifact: .*@[0-9a-f]{7,}" <<<"$RES" || fail "pass: landing result lacks the commit hash: $RES"
+"$NARU" live stop >/dev/null || fail "pass: live stop"
 ok "non-UI pass: UX and Implement #2 skipped, task done with a result, no notify, exactly the changed files committed"
 
 # ---- 1b. a plan mentioning HEAD~1: the briefs carry the no-commit rule, "not committed" is no failure (naru task 2047) ----

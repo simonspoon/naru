@@ -53,15 +53,21 @@ pub fn update_task(store: &mut Store, id: i64, patch: &TaskPatch) -> Result<Task
     // `in_progress` back to `backlog`, reaches the live agent as a `result`
     // so it need not remember to poll. No live session = a quiet no-op.
     let landing = if before.status != Status::Done && after.status == Status::Done {
-        Some(format!(
-            "Task {} done: {}. Commit/artifact: {}.",
-            after.id,
-            after.name,
-            after
-                .artifact
-                .as_deref()
-                .unwrap_or("none recorded at close")
-        ))
+        // A task-loop close with no artifact yet is followed by the loop's Commit step,
+        // which posts the one complete landing line carrying the commit (naru task 2088).
+        if after.artifact.is_none() && loop_commit_pending(after.id) {
+            None
+        } else {
+            Some(format!(
+                "Task {} done: {}. Commit/artifact: {}.",
+                after.id,
+                after.name,
+                after
+                    .artifact
+                    .as_deref()
+                    .unwrap_or("none recorded at close")
+            ))
+        }
     } else if before.status == Status::InProgress && after.status == Status::Backlog {
         Some(format!(
             "Task {} bounced back to backlog: {}.",
@@ -74,6 +80,21 @@ pub fn update_task(store: &mut Store, id: i64, patch: &TaskPatch) -> Result<Task
         let _ = store.add_live_result(&text);
     }
     Ok(after)
+}
+
+/// True while the task loop has a live (under 3h old) registry entry for `id`, i.e. its
+/// Commit step has yet to run and will post the landing result itself.
+fn loop_commit_pending(id: i64) -> bool {
+    std::env::var_os("HOME").is_some_and(|home| loop_entry_live(std::path::Path::new(&home), id))
+}
+
+fn loop_entry_live(home: &std::path::Path, id: i64) -> bool {
+    let f = home.join(".naru/loop/active").join(id.to_string());
+    std::fs::metadata(f)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age < std::time::Duration::from_secs(3 * 3600))
 }
 
 /// Creates a task and fires the `task-event` workflows listening for a
@@ -326,6 +347,17 @@ mod tests {
         // `session_abc` is not a `cc_sessions` UUID (D5): never resolves.
         assert!(receipt.session_id.is_none());
         assert!(receipt.transcript_path.is_none());
+    }
+
+    #[test]
+    fn loop_entry_live_needs_a_fresh_registry_file() {
+        let home = tempfile::tempdir().unwrap();
+        assert!(!loop_entry_live(home.path(), 7));
+        let dir = home.path().join(".naru/loop/active");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("7"), "repo\tscratch\n").unwrap();
+        assert!(loop_entry_live(home.path(), 7));
+        assert!(!loop_entry_live(home.path(), 8));
     }
 
     #[test]
