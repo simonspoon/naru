@@ -9,7 +9,8 @@
 # changes nothing; a failed rollback leaves the queue paused; workflow defaults gets
 # --project and the Task loop (+ child) is never renamed or copied (naru task 2053:
 # a changed graph becomes a revision of the same workflow); a missing cargo/node exits 2 early; a rollback restores only the
-# db the server uses (never creating a second one) and refuses a missing target.
+# db the server uses (never creating a second one) and refuses a missing target; after a
+# healthy swap the live agent's runner is handed off and other stale runners recorded, never stopped.
 set -euo pipefail
 unset $(env | sed -n 's/^\(NARU_[A-Za-z0-9_]*\)=.*/\1/p')
 cd "$(dirname "$0")/.."
@@ -38,6 +39,9 @@ case "\$1 \$2" in
   "live status") if [ -e "$TMP/live" ]; then echo '{"status":"live","agent_id":"run:same"}'; else echo '{"status":"none"}'; fi ;;
   "live say") [ ! -e "$TMP/say_fail" ] && echo '{"id":7}' ;;
   "live turns") echo '[{"id":6},{"id":7}]' ;;
+  "run list") [ -e "$TMP/runs.json" ] && cat "$TMP/runs.json" || echo '[]' ;;
+  "run stop") echo "\$*" >>"$TMP/runstop.log" ;;
+  "live handoff") echo "\$*" >>"$TMP/handoff.log"; [ ! -e "$TMP/handoff_fail" ] ;;
   "--version "*) echo "naru 9.9.9" ;;
   *) echo new ;;
 esac
@@ -142,6 +146,33 @@ live_deploy "true" NARU_DEPLOY_LIVE_CHECK=0
 rm -f "$TMP/live" "$TMP/say_fail"
 [ "$rc" = 0 ] && [ "$(echo "$out" | jq -r .status)" = swapped ] || fail "NARU_DEPLOY_LIVE_CHECK=0 should skip ($rc): $out"
 ok "NARU_DEPLOY_LIVE_CHECK=0 skips the live check"
+
+# ---- stale runners (naru task 2084): started before the swap and still on the old binary
+# the live agent's run is handed off; every other one is only recorded, nothing is stopped
+run() { echo "{\"job_id\":\"$1\",\"name\":\"n-$1\",\"agent\":\"a\",\"status\":\"$2\",\"runner_pid\":$3,\"runner_alive\":true,\"pending_messages\":$4}"; }
+echo "[$(run same running 101 0),$(run idle1 idle 102 0),$(run busy running 103 0),$(run pend idle 104 2),$(run fresh running 105 0)]" >"$TMP/runs.json"
+for p in 101 102 103 104; do echo 100 >"$TMP/start-$p"; done
+echo 99999999999 >"$TMP/start-105"   # started after the swap
+export NARU_DEPLOY_RUNNER_START_CMD='cat "'"$TMP"'/start-$1"'
+rm -f "$TMP/handoff.log" "$TMP/runstop.log"
+touch "$TMP/live"
+live_deploy "true"
+[ "$rc" = 0 ] && [ "$(echo "$out" | jq -r .status)" = swapped ] || fail "stale runners deploy ($rc): $out"
+[ "$(wc -l <"$TMP/handoff.log" | tr -d ' ')" = 1 ] && [ ! -e "$TMP/runstop.log" ] || fail "expected one handoff and no run stop"
+act() { echo "$out" | jq -r --arg j "$1" '[.stale_runners[] | select(.job_id==$j) | .action][0] // "absent"'; }
+[ "$(act same)" = handed_off ] && [ "$(act idle1)" = left_running ] && [ "$(act busy)" = left_running ] && [ "$(act pend)" = left_running ] || fail "stale actions: $out"
+[ "$(act fresh)" = absent ] || fail "a runner started after the swap was listed: $out"
+ok "live runner handed off once; other stale runners recorded left_running, none stopped; a post-swap runner is not listed"
+rm -f "$TMP/handoff.log"; touch "$TMP/handoff_fail"
+live_deploy "true"
+rm -f "$TMP/handoff_fail"
+[ "$rc" = 0 ] && [ "$(echo "$out" | jq -r .status)" = swapped ] && [ "$(act same)" = failed ] || fail "failing handoff should record failed, still swapped ($rc): $out"
+ok "failing handoff -> action failed, deploy still swapped"
+rm -f "$TMP/handoff.log"
+live_deploy "true" NARU_DEPLOY_RUNNERS=0
+[ "$rc" = 0 ] && [ "$(echo "$out" | jq '.stale_runners|length')" = 0 ] && [ ! -e "$TMP/handoff.log" ] || fail "NARU_DEPLOY_RUNNERS=0 should do nothing ($rc): $out"
+ok "NARU_DEPLOY_RUNNERS=0 skips the stale-runner step"
+rm -f "$TMP/live" "$TMP/runs.json"; unset NARU_DEPLOY_RUNNER_START_CMD
 
 # rollback that cannot restart -> rollback_failed, queue stays paused
 set +e

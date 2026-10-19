@@ -19,7 +19,22 @@ Unhealthy: `naru.prev` is restored (re-signed), the db backup replaces the db (s
 `rolled_back` (exit 1). If that is unhealthy too: `rollback_failed`, queue left paused.
 Queue verbs run on the NEW binary, since the installed one may predate `queue`.
 Verdict JSON: `status`, `reason`, `db_backup`, `binary_backup`, `restarted`, `healthy`,
-`queue_resumed`.
+`queue_resumed`, `stale_runners`.
+
+## Stale runners (naru task 2084)
+
+A `naru run __runner` started before the swap keeps the old binary image (macOS TCC
+then denies the old program's tree, e.g. Accessibility for `loki`). After a healthy
+deploy, before `queue resume` (queue paused and idle, so no task-loop commit is in
+flight), the new binary's `run list` is filtered to `running`/`idle` runs whose live
+`__runner` pid started before the swap (`ps -o lstart=`). The live agent's run
+(`run:<job>` in `live status`) is moved with `naru live handoff`; every other stale
+runner is only recorded, because a stopped run is terminal and only a dead-runner
+non-terminal run resumes (`docs/runner.md`), so nothing here ever stops a run. The
+verdict's `stale_runners` lists `{job_id, name, agent, action}`, action `handed_off`,
+`left_running` or `failed`, and a `live say` note tells the live agent. Failures never
+fail the deploy; a rollback does nothing. `NARU_DEPLOY_RUNNERS=0` skips the step;
+`NARU_DEPLOY_RUNNER_START_CMD` (pid as `$1`, prints the start epoch) is the test seam.
 
 ## PATH, db target and the Task loop reseed (naru task 2046)
 

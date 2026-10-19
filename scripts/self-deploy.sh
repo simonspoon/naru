@@ -29,6 +29,7 @@
 #      (replaces the /api/version check; gets NARU_DEPLOY_EXPECT = the version that should be serving), NARU_DEPLOY_LIVE_CHECK=0 (skip the
 #      live-session check), NARU_DEPLOY_DRAIN_TIMEOUT (600), NARU_DEPLOY_HEALTH_TIMEOUT
 #      (60), NARU_DEPLOY_POLL (seconds between polls, 3).
+#      NARU_DEPLOY_RUNNERS=0 (skip the stale-runner step; NARU_DEPLOY_RUNNER_START_CMD: tests, prints a pid's start epoch),
 # PATH: a launchd or live-agent shell has neither cargo nor node, so (unless
 #      --skip-checks) ~/.cargo/bin, ~/Library/pnpm/bin and ~/.local/bin are prepended
 #      when present, and a missing cargo/node exits 2 before anything is changed.
@@ -65,18 +66,18 @@ DRAIN_TIMEOUT="${NARU_DEPLOY_DRAIN_TIMEOUT:-600}"
 HEALTH_TIMEOUT="${NARU_DEPLOY_HEALTH_TIMEOUT:-60}"
 POLL="${NARU_DEPLOY_POLL:-3}"
 PORT="${NARU_DEPLOY_PORT:-}"
-paused=0 restarted=false
+paused=0 restarted=false stale_runners='[]' swap_epoch=0
 
 log() { echo "self-deploy: $*" >&2; }
 verdict() { jq -cn --arg s "$1" --arg r "$2" --arg db "$backup_db" --arg prev "$BIN_DIR/naru.prev" \
-  --argjson restarted "$restarted" --argjson paused "$paused" \
-  '{status:$s,reason:$r,db_backup:$db,binary_backup:(if $s=="swapped" then $prev else "" end),restarted:$restarted,healthy:($s=="swapped"),queue_resumed:($paused==0)}'; }
+  --argjson restarted "$restarted" --argjson paused "$paused" --argjson stale "$stale_runners" \
+  '{status:$s,reason:$r,db_backup:$db,binary_backup:(if $s=="swapped" then $prev else "" end),restarted:$restarted,healthy:($s=="swapped"),queue_resumed:($paused==0),stale_runners:$stale}'; }
 resume_queue() { [ "$paused" -eq 1 ] && "$new_bin" queue resume >>"$LOG" 2>&1 && paused=0; }
 abort() { log "ABORT: $1"; [ -s "$LOG" ] && tail -n 30 "$LOG" >&2; resume_queue; verdict aborted "$1"; exit 1; }
 
 if [ "$dry" -eq 1 ]; then
   jq -cn --arg checks "$CHECKS" --arg bin "$INSTALLED" --arg dir "$BACKUP_DIR" --argjson skip "$skip" \
-    '{status:"plan",steps:["build release into a temp target dir","cargo test + checks","backup db","pause queue, drain","atomic swap, previous kept as naru.prev","restart server, re-run workflow defaults --task-loop","health check","resume queue or roll back"],checks:($checks|split(" ")),skip_checks:($skip==1),install:$bin,backup_dir:$dir,restart:true}'
+    '{status:"plan",steps:["build release into a temp target dir","cargo test + checks","backup db","pause queue, drain","atomic swap, previous kept as naru.prev","restart server, re-run workflow defaults --task-loop","health check","hand the live agent off to the new binary and record other stale runners (NARU_DEPLOY_RUNNERS=0 skips)","resume queue or roll back"],checks:($checks|split(" ")),skip_checks:($skip==1),install:$bin,backup_dir:$dir,restart:true}'
   exit 0
 fi
 
@@ -179,6 +180,7 @@ else
 fi
 install -m 0755 "$new_bin" "$tmp" || { rm -f "$tmp"; abort "cannot stage the new binary"; }
 command -v codesign >/dev/null 2>&1 && codesign --force --sign - "$tmp" >/dev/null 2>&1
+swap_epoch=$(date +%s)
 mv -f "$tmp" "$INSTALLED" || { rm -f "$tmp"; abort "swap failed"; }
 ln -sf naru "$BIN_DIR/mesa"
 log "swapped $INSTALLED (previous kept as naru.prev)"
@@ -238,6 +240,56 @@ seed_task_loop() {
   "$new_bin" workflow defaults --project "$pid" --task-loop >>"$LOG" 2>&1
 }
 
+# Long-lived `naru run __runner` processes started before the swap keep the old binary
+# image (macOS TCC then treats their whole tree as the old, ungranted program). After a
+# healthy deploy, with the queue still paused and idle: the live agent's run is moved by
+# `live handoff`; every other stale runner is only recorded. A stopped run is terminal
+# (docs/runner.md "Reattach and resume": only a dead-runner non-terminal run resumes), so
+# there is no safe direct restart, and nothing here ever stops a run. Never fails a deploy.
+runner_start_epoch() { # runner_start_epoch <pid>: unix start time of a `__runner` process, else empty
+  local pid="$1" cmd ls
+  if [ -n "${NARU_DEPLOY_RUNNER_START_CMD:-}" ]; then
+    bash -c "$NARU_DEPLOY_RUNNER_START_CMD" _ "$pid" 2>>"$LOG"; return
+  fi
+  cmd="$(ps -o command= -p "$pid" 2>/dev/null)"
+  case "$cmd" in *__runner*) ;; *) return 0 ;; esac  # a recycled pid is not a runner
+  ls="$(LC_ALL=C ps -o lstart= -p "$pid" 2>/dev/null)"
+  [ -n "$ls" ] || return 0
+  date -j -f "%a %b %e %T %Y" "$ls" +%s 2>/dev/null || date -d "$ls" +%s 2>/dev/null
+}
+handle_stale_runners() {
+  [ "${NARU_DEPLOY_RUNNERS:-1}" = 0 ] && return 0
+  local live_job="" runs row pid job started action note=""
+  case "$live_before" in run:*) live_job="${live_before#run:}" ;; esac
+  runs="$("$new_bin" run list 2>>"$LOG")" || { log "run list failed; stale runners not checked"; return 0; }
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    pid="$(echo "$row" | jq -r '.runner_pid // empty')"
+    job="$(echo "$row" | jq -r '.job_id')"
+    [ -n "$pid" ] || continue
+    started="$(runner_start_epoch "$pid")"
+    case "$started" in ''|*[!0-9]*) continue ;; esac
+    [ "$started" -lt "$swap_epoch" ] || continue
+    if [ -n "$live_job" ] && [ "$job" = "$live_job" ]; then
+      if "$new_bin" live handoff "Deployed a new naru binary; restarting you onto it. Continue where you left off." >>"$LOG" 2>&1; then
+        action=handed_off
+      else
+        action=failed
+      fi
+    else
+      action=left_running
+    fi
+    log "stale runner $job (pid $pid): $action"
+    stale_runners="$(echo "$stale_runners" | jq -c --argjson r "$row" --arg a "$action" \
+      '. + [{job_id:$r.job_id,name:($r.name // ""),agent:($r.agent // ""),action:$a}]')"
+  done < <(echo "$runs" | jq -c '.[]? | select((.status=="running" or .status=="idle") and .runner_alive==true)' 2>/dev/null)
+  if [ -n "$live_before" ] && [ "$(echo "$stale_runners" | jq 'length')" -gt 0 ]; then
+    note="Deploy report: $(echo "$stale_runners" | jq -r '[.[] | "\(.job_id) \(.name) \(.action)"] | join("; ")'). Runners marked left_running still run the old binary until they end."
+    "$new_bin" live say --quiet "$note" >>"$LOG" 2>&1 || true
+  fi
+  return 0
+}
+
 fail_reason=""
 if ! restart; then fail_reason="server restart failed"
 elif ! seed_task_loop; then fail_reason="workflow defaults --task-loop failed"
@@ -247,6 +299,7 @@ else
 fi
 
 if [ -z "$fail_reason" ]; then
+  handle_stale_runners
   resume_queue
   log "healthy; queue resumed"
   verdict swapped "binary swapped, server restarted and healthy"
