@@ -608,4 +608,15 @@ R=$(NARU_LOOP_SPLIT_FILES=1 run_loop "$T")
 [ "$(grep -c -- '--call--' "$STUB/vox.log")" = 1 ] || fail "split fallback: notify calls"
 ok "a split with no usable sub-task falls back to a plain backlog close"
 
+# ---- 6b. a needs-human plan (naru task 2083): backlog + tag + note, no split, no implement ----
+reset_stub
+printf 'This needs the microphone.\nNEEDS-HUMAN: needs mic consent' > "$STUB/reply.planner"
+T=$(mk "Record from the real mic")
+R=$(run_loop "$T")
+[ "$(tstatus "$T")" = backlog ] && [ "$(subs "$T")" = 0 ] && [ "$(step "$R" "Implement + review #1")" = skipped ] || fail "needs-human: task $(tstatus "$T"), sub-tasks $(subs "$T")"
+"$NARU" task show "$T" | jq -e '.tags | index("needs-human")' > /dev/null || fail "needs-human: tag missing"
+"$NARU" task show "$T" | jq -r '.notes[-1].body' | head -n 1 | grep -qxF "needs-human: needs mic consent" || fail "needs-human: note"
+[ "$(grep -c -- '--call--' "$STUB/vox.log")" = 1 ] || fail "needs-human: notify calls"
+ok "a needs-human plan parks the task in backlog with a tag and note, no split"
+
 echo "task-loop-check: all ok"

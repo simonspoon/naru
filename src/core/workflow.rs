@@ -2003,6 +2003,14 @@ split_rule() { cat <<'RULE'
 If the briefing needs changes in more than one repo or project, do not do or plan the other repos' part in this task. For each other owning project, create its own task with `naru task create <project> --description-file <file>` (a self-contained description), then block this task on it with `naru task block <this task id> --by <new task id>`. Keep only this project's part in this task, and say which tasks you created. Never conclude that this task fails because it is multi-repo. If an edit in another repo still happens, leave it as it is: the loop's Commit step commits it and files a note.
 RULE
 }
+# The needs-human rule (naru task 2083): a task an unattended run cannot do is parked, never planned or split.
+needs_human_rule() { cat <<'RULE'
+
+## Needs a human (read this)
+
+If the task needs something an unattended run cannot supply (an attended Mac, a permission or consent dialog, Accessibility, a real audio device or microphone, system audio routing, a physical device), do not plan it and do not split it into subtasks, which would hit the same wall. Use this only for a requirement that truly cannot be met unattended. Then end your reply with exactly one line `NEEDS-HUMAN: <the exact requirement>` and no `UI:` line.
+RULE
+}
 stage_verdict() { jq -r '.verdict // "INCONCLUSIVE"' "$SCRATCH/$1.json" 2>/dev/null || echo INCONCLUSIVE; }
 note_reason() { jq -r --arg s "$1" '"\($s): \(.verdict) \(.reason // "")"' "$SCRATCH/$1.json" >> "$SCRATCH/reasons.txt" 2>/dev/null; return 0; }
 "##;
@@ -2063,10 +2071,17 @@ while IFS= read -r repo; do
     if [ -f "$repo/$p" ]; then mkdir -p "$ST/base/$(dirname "$p")"; cp -p -- "$repo/$p" "$ST/base/$p" 2>/dev/null || true; fi
   done < <(git -C "$repo" status --porcelain -z -uall 2>/dev/null)
 done < <(cat "$SCRATCH/repos.txt" "$SCRATCH/scan.txt")
-{ brief_head planner; printf '\n## What to do\n\nWrite a short implementation plan: the files to touch, the steps, and how to verify. Do not edit any file. End with exactly one line, `UI: yes` if the change touches user-facing UI, else `UI: no`.\n'; no_commit_rule; split_rule; } > "$SCRATCH/plan-brief.md"
+{ brief_head planner; printf '\n## What to do\n\nWrite a short implementation plan: the files to touch, the steps, and how to verify. Do not edit any file. End with exactly one line, `UI: yes` if the change touches user-facing UI, else `UI: no`.\n'; no_commit_rule; split_rule; needs_human_rule; } > "$SCRATCH/plan-brief.md"
 stage_run plan planner "$(dl plan 900)" "$SCRATCH/plan-brief.md"
 if [ "$(stage_verdict plan)" = COMPLETE ]; then
   jq -r '.report' "$SCRATCH/plan.json" > "$SCRATCH/plan.md"
+  NH=$(grep -E '^NEEDS-HUMAN: ?.' "$SCRATCH/plan.md" | tail -n 1 | sed 's/^NEEDS-HUMAN: *//' | cut -c 1-300)
+  if [ -n "$NH" ]; then
+    printf '%s\n' "$NH" > "$SCRATCH/needs-human.txt"
+    echo "plan: needs-human: $NH" >> "$SCRATCH/reasons.txt"
+    emit plan=failed
+    exit 0
+  fi
   emit plan=ok
 else
   note_reason plan
@@ -2321,6 +2336,16 @@ while IFS= read -r repo; do
     esac
   done < "$ST/status-now.z"
 done < <(repo_all)
+NHF="$SCRATCH/needs-human.txt"
+if [ -s "$NHF" ]; then
+  { echo "needs-human: $(head -n 1 "$NHF")"; echo; echo "The planner found a requirement an unattended run cannot meet, so the task was not planned or split. Hand-off files: $SCRATCH"; } > "$SCRATCH/note.md"
+  naru task note "$TASK" --file "$SCRATCH/note.md" > /dev/null || exit 1
+  TAGS=$(naru task show "$TASK" | jq -r '((.tags // []) + ["needs-human"]) | unique | join(",")')
+  naru task update "$TASK" --tags "$TAGS" > /dev/null || exit 1
+  echo "task=$TASK verdict=none iterations=0 outcome=backlog" > "$SCRATCH/metric.txt"
+  echo "$TASK"
+  exit 0
+fi
 { echo "Task loop did not pass; the task is back in backlog for a person. State: $(printf '%s\n' "$IN" | tail -n 1)"; echo "Hand-off files: $SCRATCH"; echo; cat "$SCRATCH/reasons.txt" 2>/dev/null
   if [ "${#restored[@]}" -gt 0 ]; then echo; echo "Restored to their state before the run (copies in $SCRATCH/debris):"; printf '%s\n' "${restored[@]}"; fi
   if [ -f "$SCRATCH/findings.md" ]; then echo; echo "Last review findings:"; cat "$SCRATCH/findings.md"; fi
@@ -2369,6 +2394,7 @@ else
   if [ "$(naru task show "$TASK" 2>/dev/null | jq -r '.status' 2>/dev/null)" = cancelled ]; then OUTCOME=cancelled; fi
   SUM="$(naru task show "$TASK" 2>/dev/null | jq -r '.name' 2>/dev/null) ($(sed -n 's/^task=[0-9]* //p' "$f" 2>/dev/null | head -n 1))"
 fi
+if [ -s "$D/needs-human.txt" ]; then SUM="needs-human: $(head -n 1 "$D/needs-human.txt")"; fi
 SUM=$(printf '%s' "$SUM" | tr '\n' ' ' | cut -c 1-200)
 MSG="Task loop notice (no answer needed) - task $TASK: $OUTCOME. $SUM"
 naru ask --notice --task "$TASK" "$MSG" > /dev/null 2>&1 || naru ask --notice "$MSG" > /dev/null 2>&1

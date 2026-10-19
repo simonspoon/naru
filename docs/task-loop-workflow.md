@@ -361,3 +361,16 @@ failure. The review diff summary is headed "uncommitted, by design". The typed
 verdict prompt carries the guard: a report whose only FAIL reason is
 "not committed" (or `HEAD~1` showing nothing) counts as PASS if the rest is
 clean. `task-loop-check.sh` section 1b covers a plan mentioning `HEAD~1`.
+
+## 11. Needs-human tasks (naru task 2083)
+
+The planner brief carries a needs-human rule: a task that needs something an
+unattended run cannot supply (attended Mac, permission or consent dialog,
+Accessibility, a real audio device or mic, system audio routing, a physical
+device) is neither planned nor split. The planner ends its reply with
+`NEEDS-HUMAN: <exact requirement>` and no `UI:` line. The Plan node finds that
+line deterministically (no model), writes `needs-human.txt`, and emits
+`plan=failed`, so Split, Implement and Review are skipped. `Close: backlog`
+then files the note `needs-human: <requirement>`, adds the `needs-human` tag to
+the existing tags, and the notify reads `needs-human: <requirement>`.
+`task-loop-check.sh` section 6b covers it.
