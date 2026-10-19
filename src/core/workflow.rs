@@ -2511,9 +2511,10 @@ made=0
 if [ "$(stage_verdict split)" = COMPLETE ]; then
   PROJ=$(naru task show "$TASK" | jq -r '.project_id')
   jq -r '.report // ""' "$SCRATCH/split.json" | jq -Rsc 'try (capture("(?<a>\\[.*\\])"; "s").a | fromjson | map(.description) | map(select(type == "string" and length > 0)) | .[:6]) catch []' > "$SCRATCH/subtasks.json" 2>/dev/null || echo '[]' > "$SCRATCH/subtasks.json"
-  while IFS= read -r desc; do
+  while IFS= read -r item; do
+    desc=$(jq -r '.' <<<"$item")
     naru task create "$PROJ" "$(printf 'Part of task %s: %s' "$TASK" "$desc")" --parent "$TASK" --status backlog > /dev/null && made=$((made + 1))
-  done < <(jq -r '.[]' "$SCRATCH/subtasks.json" 2>/dev/null)
+  done < <(jq -c '.[]' "$SCRATCH/subtasks.json" 2>/dev/null)
 else
   note_reason split
 fi

@@ -628,13 +628,15 @@ reset_stub
 printf 'Plan: edit src/a.rs and src/b.rs.\nUI: no' > "$STUB/reply.planner"
 printf 'VERDICT: PASS' > "$STUB/reply.verifier"
 printf 'too much\nVERDICT: FAIL' > "$STUB/reply.diff-reviewer"
-printf '[{"description":"part one"},{"description":"part two"}]' > "$STUB/split.json"
+printf '[{"description":"part one\\nline two\\nline three"},{"description":"part two"}]' > "$STUB/split.json"
 T=$(mk "Build the big thing")
 R=$(NARU_LOOP_SPLIT_FILES=1 run_loop "$T")
 [ "$(jq -r .status <<<"$R")" = succeeded ] || fail "split: run $(jq -c '{status,error}' <<<"$R")"
 [ "$(step "$R" "Split")" = ok ] && [ "$(step "$R" "Implement + review #2")" = skipped ] || fail "split: second pass ran or Split did not"
 [ "$(tstatus "$T")" = backlog ] && [ "$(subs "$T")" = 2 ] || fail "split: task $(tstatus "$T"), sub-tasks $(subs "$T")"
 "$NARU" task list loopproj | jq -e --argjson p "$T" '[.[] | select(.parent_id == $p)] | all(.status == "backlog")' >/dev/null || fail "split: sub-tasks not in backlog"
+S1=$("$NARU" task list loopproj | jq -r --argjson p "$T" '[.[] | select(.parent_id == $p)] | min_by(.id) | .id')
+"$NARU" task show "$S1" | jq -e '.description | test("part one\nline two\nline three")' >/dev/null || fail "split: multi-line sub-task description not kept whole: $("$NARU" task show "$S1" | jq -c .description)"
 "$NARU" task show "$T" | jq -e '.notes | map(.body) | any(test("split this task")) and any(test("Last review findings"))' >/dev/null || fail "split: notes: $("$NARU" task show "$T" | jq -c .notes)"
 [ "$(turns implementer)" = 1 ] && [ "$(grep -c -- '--call--' "$STUB/vox.log")" = 1 ] || fail "split: implementer turns $(turns implementer), notify calls"
 metric "$T" NEEDS-FIX 1 backlog split
