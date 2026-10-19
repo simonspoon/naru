@@ -13226,6 +13226,21 @@ mod tests {
         let _lock = crate::core::attachments::ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        // Save the inherited values (a live agent shell exports NARU_DB) and
+        // restore them on exit, even if an assertion panics.
+        struct Restore(Option<std::ffi::OsString>, Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                for (k, v) in [("NARU_DB", &self.0), ("MESA_DB", &self.1)] {
+                    match v {
+                        Some(v) => unsafe { std::env::set_var(k, v) },
+                        None => unsafe { std::env::remove_var(k) },
+                    }
+                }
+            }
+        }
+        let _restore = Restore(std::env::var_os("NARU_DB"), std::env::var_os("MESA_DB"));
+        unsafe { std::env::remove_var("NARU_DB") };
         unsafe { std::env::set_var("MESA_DB", "") };
         let empty = default_db_path();
         assert!(
@@ -13239,8 +13254,6 @@ mod tests {
         assert_eq!(default_db_path(), PathBuf::from("/tmp/naru-explicit.db"));
         unsafe { std::env::set_var("NARU_DB", "") };
         assert_eq!(default_db_path(), PathBuf::from("/tmp/explicit.db"));
-        unsafe { std::env::remove_var("NARU_DB") };
-        unsafe { std::env::remove_var("MESA_DB") };
     }
 
     fn sqlite_file(path: &Path, rows: bool) {
