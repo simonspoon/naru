@@ -3741,6 +3741,9 @@ EXAMPLES
   mesa live board push --template cards '{\"cards\":[{\"title\":\"Fast\",\"body\":\"Ships today\",\"tag\":\"safe\"}]}'
   mesa live board push --template flow --file /tmp/steps.json --title Rollout
   mesa live board push --template checklist '{\"items\":[{\"text\":\"Write tests\",\"done\":true},{\"text\":\"Ship\"}]}'
+  mesa live board push --template compare '{\"columns\":[{\"title\":\"A\",\"points\":[\"fast\",\"cheap\"]},{\"title\":\"B\",\"points\":[\"slow\"]}]}'
+  mesa live board push --template timeline '{\"events\":[{\"when\":\"Mon\",\"title\":\"Kickoff\",\"detail\":\"...\"}]}'
+  mesa live board push --template tree '{\"root\":{\"title\":\"Plan\",\"children\":[{\"title\":\"Step 1\"}]}}'
   mesa live board push --template stats '{\"stats\":[{\"label\":\"Tests\",\"value\":412,\"note\":\"all green\"}]}'
   mesa live board push --template callout '{\"text\":\"Ship it\",\"by\":\"Ada\",\"tone\":\"good\"}'")]
     #[command(group(ArgGroup::new("source").required(true).args(["body", "file", "image", "workflow"])))]

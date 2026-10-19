@@ -918,6 +918,23 @@ mod tests {
         assert_eq!(ink_filename("notes"), "notes-ink.png");
     }
 
+    #[test]
+    fn every_template_shape_is_json_and_named_in_its_error() {
+        for t in TEMPLATES {
+            let shape = template_shape(t);
+            serde_json::from_str::<serde_json::Value>(shape)
+                .unwrap_or_else(|e| panic!("{t} shape is not JSON: {e}"));
+            let Err(Error::Validation(m)) = template_html(t, "{}") else {
+                panic!("{t}: an empty object should be a validation error");
+            };
+            assert!(m.contains(shape), "{t}: {m}");
+        }
+        let Err(Error::Validation(m)) = template_html("compare", "{}") else {
+            panic!("compare accepted {{}}");
+        };
+        assert!(m.contains("columns") && m.contains("points"), "{m}");
+    }
+
     fn workflow() -> Workflow {
         Workflow {
             id: 1,
