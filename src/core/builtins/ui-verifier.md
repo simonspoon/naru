@@ -91,7 +91,17 @@ say so in the report.
 - Keep the per-trial timeout (`timeout <secs> <trial-script> …`) inside the
   series — it bounds a hung trial — and name it in the report.
 
+## Retries
+After the same command fails identically twice (same error text), stop
+repeating it. Change approach (tool, selector or route), or report the blocker
+with the exact error text.
+
 ## Device pitfalls — read before the first command
+- naru-mac gesture replay: build with `scripts/build.sh` and run
+  `build/Naru.app/Contents/MacOS/NaruMac` with uppercase
+  `NARU_GESTURE_REPLAY=<gesture>`. Never run the bare `.build/release/NaruMac`
+  binary; outside the bundle it fails with dyld `Library not loaded:
+  @rpath/llama.framework`.
 - Never export a scratch `HOME` in a script that calls qorvex (its session
   socket lives under `HOME`; calls hang). Isolate a scratch naru with
   `NARU_DB=<path>` on that one command: `NARU_DB=<scratch>/naru.db naru serve
