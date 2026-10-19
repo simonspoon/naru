@@ -2049,6 +2049,14 @@ if [ -n "$LP" ] && [ -d "$LP" ]; then
   while IFS= read -r np; do [ -z "$np" ] || add_named "$LP/$np"; done < <({ sed -n 's/.*\.package([^)]*path: *"\([^"]*\)".*/\1/p' "$LP/Package.swift"; sed -n 's/.*path *= *"\([^"]*\)".*/\1/p' "$LP/Cargo.toml"; } 2>/dev/null)
 fi
 [ -s "$SCRATCH/repos.txt" ] || pwd > "$SCRATCH/repos.txt"
+# primary.txt + the active registry (naru task 2104): the repo this run owns is its task's own project's (else the
+# workflow cwd's); Commit leaves a repo another live run owns alone, so two loops in different projects never sweep each other's work
+PRIM=""
+[ -z "$LP" ] || PRIM=$(git -C "$LP" rev-parse --show-toplevel 2>/dev/null) || PRIM=""
+[ -n "$PRIM" ] || PRIM=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null) || PRIM=$PWD
+printf '%s\n' "$PRIM" > "$SCRATCH/primary.txt"
+mkdir -p "$HOME/.naru/loop/active"
+printf '%s\t%s\n' "$PRIM" "$SCRATCH" > "$HOME/.naru/loop/active/$TASK"
 # scan.txt: every other project's repo, so Commit can pick up a task's changes in a repo nobody named (naru task 2058)
 : > "$SCRATCH/scan.txt"
 while IFS= read -r pp; do
@@ -2293,12 +2301,35 @@ commit_repo() { # <repo dir> <state dir>: commits in that repo; appends its shor
   echo "$SHA" >> "$SCRATCH/shas.txt"
   echo "$(basename "$ROOT")@$SHA" >> "$SCRATCH/refs.txt"
 }
+# Ownership (naru task 2104): a repo that is not this run's primary and is the primary of another live run
+# (its task still in_progress, its registry entry under 3h old) is that run's to commit, never swept in here.
+PRIM=$(cat "$SCRATCH/primary.txt" 2>/dev/null)
+claimed_by() { # <repo>: prints the task id of another live run owning it
+  local f t pr
+  for f in "$HOME"/.naru/loop/active/*; do
+    [ -f "$f" ] || continue
+    t=$(basename "$f"); [ "$t" != "$TASK" ] || continue
+    [ -z "$(find "$f" -mmin +180 2>/dev/null)" ] || continue
+    pr=$(cut -f1 "$f")
+    [ "$pr" = "$1" ] || continue
+    [ "$(naru task show "$t" 2>/dev/null | jq -r '.status' 2>/dev/null)" = in_progress ] || continue
+    printf '%s' "$t"; return 0
+  done
+  return 1
+}
 : > "$SCRATCH/shas.txt"; : > "$SCRATCH/refs.txt"
 failed=0; n=0; named=$(repo_each | grep -c .)
 while IFS= read -r repo; do
   n=$((n+1)); sc=0; [ "$n" -gt "$named" ] && sc=1
+  if [ -n "$PRIM" ] && [ "$repo" != "$PRIM" ] && other=$(claimed_by "$repo"); then
+    if [ -n "$(git -C "$repo" status --porcelain 2>/dev/null)" ]; then
+      naru task note "$TASK" "Task loop commit ($repo): left uncommitted, task $other is running in this repo and owns its changes." > /dev/null 2>&1 || true
+    fi
+    continue
+  fi
   commit_repo "$repo" "$(repo_state "$n")" "$sc" || failed=1
 done < <(repo_all)
+rm -f "$HOME/.naru/loop/active/$TASK"
 [ "$failed" = 0 ] || exit 1
 SHAS=$(paste -sd, "$SCRATCH/shas.txt")
 # The Close node's landing result went out before this commit existed (naru task 2098): record the
@@ -2315,6 +2346,7 @@ const LOOP_CLOSE_BACKLOG: &str = r##"# Put back what the bounced run left (naru 
 # before the run is reverted (a copy goes to $SCRATCH/debris first), a pre-dirty path the
 # run changed is restored from the Plan node's copy, and a path still equal to its
 # baseline line is never touched.
+rm -f "$HOME/.naru/loop/active/$TASK"
 restored=(); diffs=(); failed=(); leftover=()
 restore_path() { # <path>: in the repo the loop below is in; $ST is its state dir, $pre what a listed path is prefixed with
   local p=$1 h b

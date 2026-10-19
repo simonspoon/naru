@@ -525,6 +525,43 @@ grep -qxF "$(cd "$TMP/sibling" && pwd -P)" "$HOME"/.naru/loop/"$T"-*/repos.txt |
 rm -f "$TMP/other/Package.swift" "$TMP/sibling/spre.txt"
 ok "a path dependency of the task's project pulls its repo in"
 
+# ---- 7h. two loops at once (naru task 2104): a repo another live run owns is not swept into this run's commit ----
+# Run Y (a task of loopproj, repo $TMP/work) is live: its registry entry names $TMP/work as its primary and its task is in_progress.
+# Run X (a task of otherproj) changes both repos; its Commit must commit only $TMP/other and leave Y's repo alone.
+reset_stub
+printf 'UI: no' > "$STUB/reply.planner"
+printf 'VERDICT: PASS' > "$STUB/reply.verifier"
+printf 'VERDICT: PASS' > "$STUB/reply.diff-reviewer"
+printf '%s\n%s\n' "$TMP/other/x-o.txt" "$TMP/work/y-wip.txt" > "$STUB/touch.implementer"
+TY=$(mk "Task Y, running in the work repo")
+"$NARU" task update "$TY" --status in_progress >/dev/null
+mkdir -p "$HOME/.naru/loop/active"
+printf '%s\t%s\n' "$(git -C "$TMP/work" rev-parse --show-toplevel)" "$TMP/ysratch" > "$HOME/.naru/loop/active/$TY"
+wbefore=$(git -C "$TMP/work" rev-parse HEAD)
+obefore=$(git -C "$TMP/other" rev-parse HEAD)
+T=$(mko "Task X, in the other repo")
+R=$(run_loop "$T")
+[ "$(tstatus "$T")" = done ] && [ "$(step "$R" "Commit")" = ok ] || fail "concurrent: task $(tstatus "$T"), Commit $(step "$R" "Commit")"
+[ "$(git -C "$TMP/other" show --name-only --format= HEAD)" = x-o.txt ] && [ "$(git -C "$TMP/other" rev-parse HEAD)" != "$obefore" ] || fail "concurrent: other commit"
+[ "$(git -C "$TMP/work" rev-parse HEAD)" = "$wbefore" ] || fail "concurrent: foreign_files_in_commit > 0: the work repo got a commit"
+[ "$(git -C "$TMP/work" status --porcelain)" = "?? y-wip.txt" ] || fail "concurrent: Y's file not left dirty: $(git -C "$TMP/work" status --porcelain)"
+"$NARU" task show "$T" | jq -e --arg y "$TY" '.notes | map(.body) | any(test("left uncommitted") and test("task " + $y))' >/dev/null || fail "concurrent: skip note"
+[ ! -e "$HOME/.naru/loop/active/$T" ] || fail "concurrent: X's registry entry not removed"
+ok "a repo another live run owns is left uncommitted and noted; the run's own repo is committed"
+# the same run once Y is no longer in progress (a crashed/finished run): the cross-repo change is committed again
+"$NARU" task update "$TY" --status done >/dev/null
+reset_stub
+printf 'UI: no' > "$STUB/reply.planner"
+printf 'VERDICT: PASS' > "$STUB/reply.verifier"
+printf 'VERDICT: PASS' > "$STUB/reply.diff-reviewer"
+printf '%s\n' "$TMP/work/z-w.txt" > "$STUB/touch.implementer"
+T=$(mko "Task Z, after Y ended")
+R=$(run_loop "$T")
+[ "$(tstatus "$T")" = done ] || fail "stale entry: task $(tstatus "$T")"
+git -C "$TMP/work" show --name-only --format= HEAD | grep -qx z-w.txt || fail "stale entry: work repo not committed"
+rm -f "$HOME/.naru/loop/active/$TY" "$TMP/work/y-wip.txt"
+ok "an entry whose task is no longer in progress does not block a cross-repo commit"
+
 # ---- 8. a failing vox send is caught: backlog, run still succeeds ----
 reset_stub
 printf 'UI: no' > "$STUB/reply.planner"
