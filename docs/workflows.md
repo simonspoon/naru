@@ -603,6 +603,17 @@ is named.
 | `workflow edge create <WORKFLOW> <FROM> <TO> [--branch true\|false\|<option>\|fallback]` | the `WorkflowEdge` |
 | `workflow edge delete <id>` | the destroyed edge |
 
+**Editing nodes: cheat-sheet** (naru task 2067; checked against the CLI).
+Agents guessing at `workflow node` flags kept failing, so:
+
+- **Before using it**, run `naru help workflow node` and `naru help workflow node <sub>`; the per-kind `--config` keys are listed there.
+- **When a call fails**, read `error.message`, fix the command, then retry. Never repeat a failed call unchanged.
+- The only subcommands are `create`, `update` and `delete`. There is no `node list` or `node show` (`usage` error); read nodes with `naru workflow show <wf>`.
+- Create: `naru workflow node create <wf id|name> <kind> "<title>" [--config '<json object>']`, e.g. `naru workflow node create ambient cli Record --config '{"command":"…"}'`. Use the positional or the `--workflow/--kind/--title` flag for an argument, not both.
+- Delete: `naru workflow node delete <node id>`. The id is numeric (a workflow name or title is `usage`). It also deletes the node's edges, with no confirmation.
+- Update: `naru workflow node update <node id> [--title] [--config] [--x] [--y]`, at least one flag; `--config` replaces the whole config and the kind cannot change.
+- **Pins are fixed for `agent` (and `comment`) nodes**: never put `pins` in `--config`, on create or update. It is `validation`: `an agent node's pins are fixed (input; result, status); "pins" does not apply`.
+
 **A failed run exits 0.** `workflow run` prints the recorded run
 (`status: "failed"`, the steps, `error`) and exits **0**, exactly as `script
 run` treats a script's nonzero exit: the status is data, and a caller reads it
