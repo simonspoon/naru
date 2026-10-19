@@ -801,8 +801,9 @@ default is never overwritten.
 
 ## Built-in workflows (naru task 2103)
 
-Two workflows ship in the binary and are **managed**: `Task loop` and
-`Task loop: implement and review` (the child it calls). `serve` installs or
+Four workflows ship in the binary and are **managed**: `Task loop` and
+`Task loop: implement and review` (the child it calls), described here, and the
+two KB workflows (see "The KB built-ins" below). `serve` installs or
 updates them on **every start**, whatever the watcher flags say (and
 `naru workflow defaults --task-loop` does the same by hand; `--project` is
 accepted and unused). They are global (no project), enabled, and marked
@@ -841,6 +842,34 @@ index 98, naming the shipped definition — not a column on `workflows`).
   the workspace, so every loop node first moves to the task's own project
   `local_path` (when it has one and it exists): stage agents run in the task's
   checkout, not in one fixed project's.
+
+### The KB built-ins (naru task 2118)
+
+Two more managed built-ins mine past Claude Code sessions into the knowledge
+base (`docs/kb.md`): **`KB: mine past sessions`** (a `voice` trigger, phrase
+"mine sessions into the knowledge base"; input = how many sessions, default 2,
+max 5) and **`KB: ongoing capture`** (a `time` trigger, every 60 minutes). Each
+is trigger → one `cli` node → an `output` to the `kb-mine` log, and the cli
+node carries the whole kb-mine script inline (`KB_MINE_SCRIPT` in
+`src/core/workflow.rs`): it needs `jq` and `claude` and exits 1 naming the
+missing one; state is `~/.naru/kb-mined.txt` (`NARU_KB_MINED` overrides).
+
+- **Installed off.** A KB built-in is created **disabled** — it spends model
+  calls — and an install never writes `enabled` on a built-in already there,
+  so whatever the person set stands. (The Task loop pair is still created
+  enabled: the todo-watcher depends on it.) A KB built-in deleted behind
+  Naru's back comes back, off, on the next install.
+- **Same rename rule.** A same-named user workflow is renamed
+  `"<name> (custom)"` and left exactly as it was, enabled state included.
+- **Self-contained.** No built-in may run a script or file outside the build:
+  `builtins_never_reference_external_scripts` fails on a `~/…`, `$HOME/…` or
+  `/Users/…` path naming a script or a `bin/` dir in any built-in node config.
+- **Installing by hand.** `naru workflow defaults --builtins` (no `--project`
+  needed; `--task-loop` does the same) and the Workflows page's
+  **Install built-ins** button (`POST /api/workflows/builtins/install`,
+  `require_agent_access`) run the same `install_builtins` as `serve` start and
+  answer `{created, skipped}` — `created` holds the built-ins created *or*
+  updated (a reseed counts), each with its `enabled`.
 
 ## The task-loop workflow (naru task 1960)
 

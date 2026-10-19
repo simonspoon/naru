@@ -1,4 +1,5 @@
 import type { Workflow } from './types/Workflow'
+import type { WorkflowView } from './types/WorkflowView'
 
 /** A built-in is shipped with Naru, installed and updated on `serve` start
  * and read-only except for its on/off switch (naru task 2103). */
@@ -21,4 +22,17 @@ export function duplicateLabel(w: Pick<Workflow, 'builtin'>): string {
 /** The disabled-control tooltip, or undefined when editing is allowed. */
 export function readOnlyTitle(readOnly: boolean): string | undefined {
   return readOnly ? BUILTIN_TITLE : undefined
+}
+
+/** The headline of the "Install built-ins" result (naru task 2118). A
+ * reseeded built-in counts too, so it says "installed or updated". */
+export function installHeadline(r: { created: Pick<WorkflowView, 'workflow'>[] }): string {
+  const n = r.created.length
+  if (n === 0) return 'All built-ins already installed.'
+  return `Installed or updated ${n} built-in workflow${n === 1 ? '' : 's'}.`
+}
+
+/** One result line per workflow: its name and whether it is on. */
+export function installLine(v: Pick<WorkflowView, 'workflow'>): string {
+  return `${v.workflow.name} — ${v.workflow.enabled ? 'on' : 'off'}`
 }

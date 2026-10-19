@@ -3371,6 +3371,10 @@ fn router(state: AppState) -> Router {
         .route("/api/workflows/{id}/export", get(export_workflow))
         .route("/api/workflows/import", post(import_workflow))
         .route(
+            "/api/workflows/builtins/install",
+            post(install_builtin_workflows),
+        )
+        .route(
             "/api/workflows/{id}/revisions",
             get(list_workflow_revisions),
         )
@@ -5060,6 +5064,22 @@ async fn import_workflow(
     let mut store = state.store.lock().unwrap();
     let result = store.import_workflow(&doc, body.project_id)?;
     Ok((StatusCode::CREATED, Json(result)).into_response())
+}
+
+/// Installs any missing managed built-in workflow and brings the others up
+/// to date — the Workflows page's "Install built-ins" button (naru task
+/// 2118), the same `install_builtins` serve start and `naru workflow
+/// defaults --builtins` run. A KB built-in is created disabled and no
+/// installed one's on/off is touched. Answers `{created, skipped}`.
+async fn install_builtin_workflows(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_agent_access(&state, &addr, &headers)?;
+    let mut store = state.store.lock().unwrap();
+    let (created, skipped) = crate::core::workflow::install_builtins(&mut store)?;
+    Ok(Json(json!({"created": created, "skipped": skipped})))
 }
 
 /// A workflow's revisions, newest first, each with its whole snapshot — the
@@ -14374,6 +14394,61 @@ mod tests {
     /// (same-origin GETs/PATCHes from the embedded UI carry none).
     fn loopback_agent_headers() -> HeaderMap {
         hdrs(Some("localhost:0"), None)
+    }
+
+    #[tokio::test]
+    async fn install_builtins_route_installs_them_off_and_refuses_a_foreign_host() {
+        use crate::core::workflow::{KB_CAPTURE_WORKFLOW, KB_MINE_WORKFLOW, TASK_LOOP_WORKFLOW};
+        let (_dir, state) = test_state();
+        let refused = install_builtin_workflows(
+            State(state.clone()),
+            ConnectInfo(loopback()),
+            hdrs(Some("evil.example:0"), None),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(refused.status, StatusCode::FORBIDDEN);
+        assert!(
+            state
+                .store
+                .lock()
+                .unwrap()
+                .list_workflows(None)
+                .unwrap()
+                .is_empty()
+        );
+
+        let Json(out) = install_builtin_workflows(
+            State(state.clone()),
+            ConnectInfo(loopback()),
+            loopback_agent_headers(),
+        )
+        .await
+        .unwrap();
+        let created = out["created"].as_array().unwrap();
+        assert_eq!(created.len(), 4);
+        let enabled = |name: &str| {
+            created
+                .iter()
+                .find(|v| v["workflow"]["name"] == name)
+                .unwrap()["workflow"]["enabled"]
+                .as_bool()
+                .unwrap()
+        };
+        assert!(enabled(TASK_LOOP_WORKFLOW));
+        assert!(!enabled(KB_MINE_WORKFLOW));
+        assert!(!enabled(KB_CAPTURE_WORKFLOW));
+
+        // A second press installs nothing.
+        let Json(again) = install_builtin_workflows(
+            State(state.clone()),
+            ConnectInfo(loopback()),
+            loopback_agent_headers(),
+        )
+        .await
+        .unwrap();
+        assert!(again["created"].as_array().unwrap().is_empty());
+        assert_eq!(again["skipped"].as_array().unwrap().len(), 4);
     }
 
     #[tokio::test]

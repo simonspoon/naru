@@ -2408,6 +2408,19 @@ run 0 "$NARU" workflow defaults --project HistProj --task-loop
 [ "$(jqs '.created | length')" = "0" ] || fail "an unchanged reseed writes nothing"
 ok "built-ins: global and read-only (update/node/delete/restore refused with the way out), duplicate is editable, a changed graph becomes a seed revision of the same workflow, an unchanged one is a no-op, no copies"
 
+# The KB built-ins (naru task 2118): installed off, an install never switches one on or off,
+# a deleted one comes back off, and --builtins needs no project.
+KBC='KB: ongoing capture'
+[ "$("$NARU" workflow show "$KBC" | jq -r '.workflow | "\(.builtin) \(.enabled)"')" = "true false" ] || fail "a KB built-in installs disabled"
+run 0 "$NARU" workflow update "$KBC" --enabled true
+run 0 "$NARU" workflow defaults --builtins
+[ "$("$NARU" workflow show "$KBC" | jq -r '.workflow.enabled')" = "true" ] || fail "an install kept the KB built-in on"
+PATH="/usr/bin:$PATH" sqlite3 "$MESA_DB" "PRAGMA foreign_keys=ON; DELETE FROM workflows WHERE name = '$KBC'"
+run 0 "$NARU" workflow defaults --builtins
+[ "$(jqs '[.created[].workflow | "\(.name) \(.builtin) \(.enabled)"] | join("|")')" = "$KBC true false" ] || fail "a deleted KB built-in comes back off: $STDOUT"
+run 2 "$NARU" workflow defaults
+ok "KB built-ins: installed off, an install keeps the person's on/off, a deleted one comes back off; defaults --builtins needs no project"
+
 # collapse: old copies fold into revisions of the current workflow, after a backup.
 run 0 "$NARU" workflow create "Task loop (pre-1 backup)"
 run 0 "$NARU" workflow node create "Task loop (pre-1 backup)" cli OldOne --config '{"command":"true"}'

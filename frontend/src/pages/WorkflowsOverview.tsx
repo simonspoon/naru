@@ -1,13 +1,24 @@
 import { useState } from "react";
 import { WorkflowImportControl } from "../components/WorkflowImport";
-import { createWorkflow, listProjects, listWorkflows } from "../api";
+import {
+  createWorkflow,
+  installBuiltinWorkflows,
+  listProjects,
+  listWorkflows,
+  type BuiltinInstallResult,
+} from "../api";
 import {
   createdWorkflowHref,
   globalWorkflowBody,
   validWorkflowName,
 } from "../workflowCreate";
 import { formatTimestamp } from "../time";
-import { BUILTIN_TITLE, isBuiltin } from "../workflowBuiltin";
+import {
+  BUILTIN_TITLE,
+  installHeadline,
+  installLine,
+  isBuiltin,
+} from "../workflowBuiltin";
 import { useFetch } from "../useFetch";
 import {
   stateLabel,
@@ -40,6 +51,24 @@ export function WorkflowsOverview({ embedded = false }: { embedded?: boolean }) 
   const [name, setName] = useState("");
   const [createError, setCreateError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [installing, setInstalling] = useState(false);
+  const [installError, setInstallError] = useState<string | null>(null);
+  const [installed, setInstalled] = useState<BuiltinInstallResult | null>(
+    null,
+  );
+
+  // "Install built-ins" (naru task 2118): the list picks the result up on its
+  // own 5 s poll.
+  function installBuiltins() {
+    setInstallError(null);
+    setInstalled(null);
+    setInstalling(true);
+    installBuiltinWorkflows()
+      .then(setInstalled, (err: unknown) =>
+        setInstallError(err instanceof Error ? err.message : String(err)),
+      )
+      .finally(() => setInstalling(false));
+  }
 
   function cancel() {
     setAdding(false);
@@ -85,9 +114,32 @@ export function WorkflowsOverview({ embedded = false }: { embedded?: boolean }) 
               Add workflow
             </button>
           )}
+          <button
+            type="button"
+            disabled={installing}
+            onClick={installBuiltins}
+          >
+            {installing ? "installing…" : "Install built-ins"}
+          </button>
           <WorkflowImportControl />
+          {installError && <span className="error">{installError}</span>}
         </span>
       </div>
+      {installed && (
+        <div className="workflow-import-panel" role="status">
+          <p>
+            {installHeadline(installed)} ·{" "}
+            <button type="button" onClick={() => setInstalled(null)}>
+              dismiss
+            </button>
+          </p>
+          {installed.created.map((v) => (
+            <p key={v.workflow.id} className="muted">
+              {installLine(v)}
+            </p>
+          ))}
+        </div>
+      )}
       {adding && (
         <form className="create-form" onSubmit={submit}>
           <input

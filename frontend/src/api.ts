@@ -865,6 +865,19 @@ export function importWorkflow(
   )
 }
 
+/** What "Install built-ins" answers: the built-ins created or updated, and
+ * the names already up to date (naru task 2118). */
+export interface BuiltinInstallResult {
+  created: WorkflowView[]
+  skipped: string[]
+}
+
+/** Installs any missing managed built-in workflow (a KB one left off) and
+ * brings the others up to date; never switches one on or off. */
+export function installBuiltinWorkflows(): Promise<BuiltinInstallResult> {
+  return request('/api/workflows/builtins/install', jsonInit('POST', {}))
+}
+
 /** Returns the destroyed graph: the workflow plus its cascaded nodes and edges. */
 export function deleteWorkflow(id: number): Promise<WorkflowView> {
   return request(`/api/workflows/${id}`, jsonDelete())
