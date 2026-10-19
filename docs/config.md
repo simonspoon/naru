@@ -1842,3 +1842,15 @@ A tenth, read-only section names the base URL `naru notify --open` builds its
 Telegram button from (mesa task 1482): `{ "notify": { "base-url":
 "http://192.168.1.5:7770" } }`. Only the CLI reads it — no API route, no
 Settings UI — and every other section's save preserves it. See `docs/notify.md`.
+
+## `NARU_HOME` and the dev environment (naru task 2091)
+
+`NARU_HOME` (or `MESA_HOME`), when set and non-empty, is Naru's home directory
+itself — the `~/.naru` that holds `config.json`, `runs/`, `logs/` and
+`workspace/` — taken verbatim (absolute, no `.mesa` fallback). Everything that
+resolves through `config::dot_dir_in` follows it. The database and other data
+dirs have their own overrides (`NARU_DB`, `NARU_KB_DIR`, …).
+`scripts/dev-env.sh` sets all of them under `~/.naru-dev`, points
+`NARU_AUDIO_URL` at `:7871`, and `exec`s `target/release/naru serve --port 7771`
+with every watcher off. It never installs, restarts or overwrites the real
+install (`scripts/self-deploy.sh` does that).

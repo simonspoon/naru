@@ -442,7 +442,18 @@ pub fn config_file() -> PathBuf {
 /// file or directory), else `.naru` (a fresh install). Nothing is moved —
 /// an existing `~/.mesa` simply stays the one in use. The config file, the
 /// workspace and `mesa migrate`'s config item all resolve through this.
+///
+/// `NARU_HOME` (or `MESA_HOME`), when set and non-empty, *is* the directory —
+/// absolute, taken verbatim, no `.mesa` fallback — so a dev instance keeps its
+/// runs, logs, workspace and config apart from the real install's.
 pub fn dot_dir_in(home: &Path) -> PathBuf {
+    dot_dir_resolve(crate::core::env::var("HOME"), home)
+}
+
+fn dot_dir_resolve(over: Option<String>, home: &Path) -> PathBuf {
+    if let Some(dir) = over.filter(|d| !d.is_empty()) {
+        return PathBuf::from(dir);
+    }
     let new = home.join(".naru");
     let old = home.join(".mesa");
     if !new.exists() && old.exists() {
@@ -7860,6 +7871,24 @@ mod tests {
             .iter()
             .map(|(k, v)| ((*k).to_string(), v.map(str::to_string)))
             .collect()
+    }
+
+    #[test]
+    fn naru_home_override_is_the_dot_dir_and_empty_is_unset() {
+        let home = tempfile::tempdir().unwrap();
+        let over = Some("/tmp/naru-dev-home".to_string());
+        assert_eq!(
+            dot_dir_resolve(over, home.path()),
+            PathBuf::from("/tmp/naru-dev-home")
+        );
+        assert_eq!(
+            dot_dir_resolve(Some(String::new()), home.path()),
+            home.path().join(".naru")
+        );
+        assert_eq!(
+            dot_dir_resolve(None, home.path()),
+            home.path().join(".naru")
+        );
     }
 
     #[test]
