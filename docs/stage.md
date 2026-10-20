@@ -8,7 +8,7 @@ verdict. CLI only, no route; `--quiet` is accepted and ignored.
 
 ```
 naru stage run --agent A --cwd D --deadline S --brief-file F
-    [--silence S] [--max-restarts 1] [--grace 180]
+    [--ceiling S] [--silence S] [--max-restarts 1] [--grace 180]
     [--also AGENT2 --also-brief-file F2] [--scratch DIR] [--model M] [--stage NAME] [--task ID]
 ```
 
@@ -18,7 +18,7 @@ own name, and a restart keeps it.
 
 Seconds are positive numbers (fractions allowed). A missing required flag is
 usage (exit 2); an unreadable or empty brief file, or a non-positive duration,
-is `validation` (exit 1). **Anything an agent does is data and exits 0**; only
+is `validation` (exit 1), and so is a `--ceiling` below `--deadline`. **Anything an agent does is data and exits 0**; only
 a driver bug is nonzero.
 
 ## The ladder
@@ -33,12 +33,22 @@ a driver bug is nonzero.
    brief (a new job, a new session), up to `--max-restarts`. After the last
    restart the same nudge-and-grace happens once more; a second silence ends
    the stage `INCONCLUSIVE`.
-4. **Deadline** (`--deadline`, from the stage start): one "Deadline reached,
+4. **Deadline** (`--deadline`, from the stage start). Without `--ceiling` it
+   is hard: it is due the moment it passes. With `--ceiling` (naru task 2184)
+   it is **soft**: past it the stage runs on while the agent keeps writing
+   lines to `events.jsonl` within the `--silence` window (with no `--silence`,
+   it is due at once), and the silence ladder above stops applying. It is due
+   once the agent has been quiet that long past the deadline, or at the
+   ceiling however active it is. When due: one "Deadline reached,
    report partial results now." nudge, then `--grace`, then a **hard stop**
    (naru task 2082): `run stop`, and if the run is not terminal after 10 s its
    claude process group (subagents and shells) and runner are SIGKILLed and
-   the run is closed `stopped`. The verdict's `reason` starts `timeout:` and
-   `partial` keeps whatever text exists. The silence-stop and run-lost paths
+   the run is closed `stopped`. The verdict's `reason` starts `timeout:`
+   (`timeout: deadline reached; …` without a ceiling, `timeout: deadline
+   passed while silent; …` or `timeout: ceiling reached; …` with one) and
+   `partial` keeps whatever text exists. Once the deadline nudge is sent the
+   path is committed: its reply does not count as activity. An absolute
+   backstop ends the stage at the ceiling (else the deadline) + grace + 30 s. The silence-stop and run-lost paths
    use the same hard stop.
 5. A run that goes idle or finishes with a result before that is `COMPLETE`
    and is stopped. A run that `failed`/`stopped` on its own ends `INCONCLUSIVE`.
@@ -80,4 +90,4 @@ run, `job_ids` every run the stage started; `output_tail` the last 500 chars of
 the agent's newest assistant or result text; times are unix seconds.
 
 Gate: `scripts/stage-check.sh` (stub `claude` via `MESA_CLAUDE_BIN`, tiny
-silence/deadline/grace values).
+silence/deadline/ceiling/grace values).

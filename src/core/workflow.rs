@@ -1953,6 +1953,12 @@ pub fn create_default_workflows(
 
 // ---- the task-loop workflow (naru task 1960) --------------------------------
 
+/// The default stage ceiling (`cl` in `LOOP_PRELUDE`, naru task 2184).
+const LOOP_STAGE_CEILING: i64 = 10800;
+/// Engine timeout of a stage node: the ceiling + three grace periods + a
+/// minute, so the stage driver and not SIGKILL ends a stage.
+const LOOP_STAGE_TIMEOUT: u32 = LOOP_STAGE_CEILING as u32 + 3 * 180 + 60;
+
 /// Name of the workflow `naru workflow defaults --task-loop` creates.
 pub const TASK_LOOP_WORKFLOW: &str = "Task loop";
 /// The child workflow both passes of the loop call (naru task 2024).
@@ -1964,7 +1970,9 @@ pub const TASK_LOOP_CHILD: &str = "Task loop: implement and review";
 /// to the per-run scratch folder travels as node input. `NARU_LOOP_DEADLINE_<STAGE>`
 /// (PLAN, UX, IMPL, REVIEW, SPLIT) sets one stage's clock, `NARU_LOOP_DEADLINE`,
 /// `NARU_LOOP_SILENCE` and `NARU_LOOP_GRACE` override the stage clocks (the
-/// check script's seam); a stage that fails or overruns is data, never a node
+/// check script's seam). The deadline is soft (naru task 2184): a stage still
+/// active within the silence window runs on until `NARU_LOOP_CEILING_<STAGE>`,
+/// else `NARU_LOOP_CEILING`, else 10800 s (never below its deadline); a stage that fails or overruns is data, never a node
 /// failure, so the graph reaches a Close node.
 const LOOP_PRELUDE: &str = r##"set -o pipefail
 IN=$(cat)
@@ -1983,12 +1991,15 @@ to_project() {
 }
 to_project
 dl() { local k; k=$(printf "%s" "$1" | tr a-z A-Z); local v; v=$(printenv "NARU_LOOP_DEADLINE_$k"); echo "${v:-${NARU_LOOP_DEADLINE:-$2}}"; }
+cl() { local k; k=$(printf "%s" "$1" | tr a-z A-Z); local v; v=$(printenv "NARU_LOOP_CEILING_$k"); echo "${v:-${NARU_LOOP_CEILING:-10800}}"; }
 emit() { echo "task=$TASK scratch=$SCRATCH ui=$(cat "$SCRATCH/ui" 2>/dev/null || echo no) ${N:+iter=$N }$*"; }
 brief_head() { printf 'You are the %s stage of an automated task loop for naru task %s.\nWork in the current project checkout. Be brief and end with the requested final line.\n\n## Task\n\n' "$1" "$TASK"; cat "$SCRATCH/task.md"; }
 stage_run() { # <name> <agent> <deadline> <brief file> [extra stage args]
-  local name=$1 agent=$2 deadline=$3 brief=$4; shift 4
+  local name=$1 agent=$2 deadline=$3 brief=$4 ceiling; shift 4
+  ceiling=$(cl "${name%%[0-9]*}")
+  awk -v c="$ceiling" -v d="$deadline" 'BEGIN { exit !(c + 0 < d + 0) }' && ceiling=$deadline
   mkdir -p "$SCRATCH/$name"
-  naru stage run --stage "$name" --task "$TASK" --agent "$agent" --cwd "$PWD" --deadline "$deadline" \
+  naru stage run --stage "$name" --task "$TASK" --agent "$agent" --cwd "$PWD" --deadline "$deadline" --ceiling "$ceiling" \
     --silence "${NARU_LOOP_SILENCE:-300}" --grace "${NARU_LOOP_GRACE:-180}" \
     --scratch "$SCRATCH/$name" --brief-file "$brief" "$@" > "$SCRATCH/$name.json" 2> "$SCRATCH/$name.err" \
     || echo '{"verdict":"INCONCLUSIVE","reason":"the stage driver itself failed"}' > "$SCRATCH/$name.json"
@@ -2827,8 +2838,9 @@ fn build_task_loop_builtins(
 ) -> Result<(Vec<WorkflowView>, Vec<String>)> {
     use WorkflowNodeKind as K;
     let mut skipped = Vec::new();
-    // `secs` is the stage deadline + three grace periods + a minute, so the
-    // stage driver and not SIGKILL ends a stage.
+    // `secs` is the stage ceiling (10800, the deadline being soft, naru task
+    // 2184) + three grace periods + a minute, so the stage driver and not
+    // SIGKILL ends a stage.
     // `n` is the pass number, or `iter` to read it from the state line's
     // `iter=` token (the child workflow's nodes).
     let cli = |body: &str, n: &str, secs: u32| {
@@ -2876,7 +2888,7 @@ fn build_task_loop_builtins(
                 (
                     K::Cli,
                     "Implement",
-                    cli(LOOP_IMPLEMENT, "iter", 3000),
+                    cli(LOOP_IMPLEMENT, "iter", LOOP_STAGE_TIMEOUT),
                     280.0,
                     80.0,
                 ),
@@ -2884,7 +2896,7 @@ fn build_task_loop_builtins(
                 (
                     K::Cli,
                     "Review + verify",
-                    cli(LOOP_REVIEW, "iter", 2100),
+                    cli(LOOP_REVIEW, "iter", LOOP_STAGE_TIMEOUT),
                     760.0,
                     80.0,
                 ),
@@ -2954,10 +2966,22 @@ fn build_task_loop_builtins(
     let sub = json!({"workflow": TASK_LOOP_CHILD});
     let nodes = vec![
         (K::Trigger, "Task id", json!({"mode": "manual"}), 40.0, 80.0),
-        (K::Cli, "Plan", cli(LOOP_PLAN, "0", 1500), 280.0, 80.0),
+        (
+            K::Cli,
+            "Plan",
+            cli(LOOP_PLAN, "0", LOOP_STAGE_TIMEOUT),
+            280.0,
+            80.0,
+        ),
         (K::Branch, "Plan ok?", contains("plan=ok"), 520.0, 80.0),
         (K::Branch, "Touches UI?", contains("ui=yes"), 760.0, 80.0),
-        (K::Cli, "UX designer", cli(LOOP_UX, "0", 1200), 1000.0, 0.0),
+        (
+            K::Cli,
+            "UX designer",
+            cli(LOOP_UX, "0", LOOP_STAGE_TIMEOUT),
+            1000.0,
+            0.0,
+        ),
         (K::Cli, "Pass 1 input", iter(1), 1240.0, 80.0),
         (
             K::Subworkflow,
@@ -3103,7 +3127,13 @@ fn build_task_loop_builtins(
             200.0,
         ),
         (K::Branch, "Split?", contains("split=yes"), 2320.0, 200.0),
-        (K::Cli, "Split", cli(LOOP_SPLIT, "0", 1200), 2440.0, 300.0),
+        (
+            K::Cli,
+            "Split",
+            cli(LOOP_SPLIT, "0", LOOP_STAGE_TIMEOUT),
+            2440.0,
+            300.0,
+        ),
         // The per-run metric (naru task 2023): one line, verdict / iterations /
         // outcome, appended to the `task-loop-metrics` log after either Close
         // path. A side branch behind a trycatch, so it can never fail the run.
@@ -5598,6 +5628,34 @@ fn loop_stage_deadline(stage: &str) -> Option<i64> {
     }
 }
 
+/// The hard stage ceiling the task-loop gives each stage (`cl` in
+/// `LOOP_PRELUDE`, naru task 2184), never below its deadline.
+fn loop_stage_ceiling(stage: &str) -> Option<i64> {
+    let deadline = loop_stage_deadline(stage)?;
+    let kind = ["plan", "ux", "impl", "review", "split"]
+        .into_iter()
+        .find(|k| stage.starts_with(k));
+    let c = kind
+        .map(|k| format!("NARU_LOOP_CEILING_{}", k.to_uppercase()))
+        .into_iter()
+        .chain(["NARU_LOOP_CEILING".to_string()])
+        .find_map(|key| {
+            std::env::var(&key)
+                .ok()
+                .and_then(|v| v.trim().parse::<i64>().ok())
+        })
+        .unwrap_or(LOOP_STAGE_CEILING);
+    Some(c.max(deadline))
+}
+
+/// The task-loop's silence window (`NARU_LOOP_SILENCE`, default 300 s).
+fn loop_stage_silence() -> i64 {
+    std::env::var("NARU_LOOP_SILENCE")
+        .ok()
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .unwrap_or(300)
+}
+
 /// The scratch folder a task-loop run's state line names (`scratch=<dir>`),
 /// read off the newest step output that carries one.
 fn run_scratch(run: &WorkflowRun) -> Option<String> {
@@ -5683,7 +5741,25 @@ fn run_status_at(store: &Store, id: i64, now: i64) -> Result<Value> {
         .and_then(|v| v.get("deadline_secs"))
         .and_then(Value::as_i64)
         .or_else(|| stage_name.and_then(loop_stage_deadline));
-    let stalled = running.is_some() && matches!((elapsed, deadline), (Some(e), Some(d)) if e > d);
+    let from_file = |k: &str| {
+        stage
+            .as_ref()
+            .and_then(|v| v.get(k))
+            .and_then(Value::as_i64)
+    };
+    let ceiling = from_file("ceiling_secs").or_else(|| stage_name.and_then(loop_stage_ceiling));
+    let silence = from_file("silence_secs").unwrap_or_else(loop_stage_silence);
+    let last_event = agent
+        .and_then(|a| a.get("last_event_at"))
+        .and_then(Value::as_i64);
+    // The deadline is soft (naru task 2184): past it a step is stalled only
+    // once the agent has been quiet for the silence window (or, with no
+    // event time to judge by, at once); past the ceiling it is stalled.
+    let stalled = running.is_some()
+        && elapsed.is_some_and(|e| {
+            ceiling.is_some_and(|c| e > c)
+                || (deadline.is_some_and(|d| e > d) && last_event.is_none_or(|t| now - t > silence))
+        });
     let agent_field = |k: &str| agent.and_then(|a| a.get(k)).cloned().unwrap_or(Value::Null);
     Ok(json!({
         "run_id": run.id,
@@ -5714,6 +5790,7 @@ fn run_status_at(store: &Store, id: i64, now: i64) -> Result<Value> {
             "output_tail": agent_field("output_tail"),
         })),
         "deadline_secs": deadline,
+        "ceiling_secs": ceiling,
         "stalled": stalled,
         "error": run.error,
     }))
@@ -5990,10 +6067,12 @@ mod tests {
         std::fs::write(scratch.join("impl1/status.json"), "{nope").unwrap();
         let v = st.with(|s| run_status_at(s, run, 1100)).unwrap();
         assert!(v["stage"].is_null());
-        // A real one, with a deadline the step has passed.
+        // A real one, with a deadline the step has passed and an agent
+        // quiet for longer than the silence window.
         std::fs::write(
             scratch.join("impl1/status.json"),
             json!({"stage": "impl1", "updated_at": 1090, "deadline_secs": 50,
+                "ceiling_secs": 500, "silence_secs": 10,
                 "agents": [{"agent": "implementer", "job_id": "j1", "state": "running",
                     "last_event_at": 1080, "nudges": 1, "restarts": 0, "output_tail": "tail"}]})
             .to_string(),
@@ -6004,6 +6083,22 @@ mod tests {
         assert_eq!(v["stage"]["nudges"], 1);
         assert_eq!(v["stage"]["output_tail"], "tail");
         assert_eq!(v["deadline_secs"], 50);
+        assert_eq!(v["ceiling_secs"], 500);
+        assert_eq!(v["stalled"], true);
+        // The deadline is soft (naru task 2184): past it but active is not
+        // stalled; past the ceiling is, however active.
+        let active = |ceiling: i64| {
+            json!({"stage": "impl1", "updated_at": 1099, "deadline_secs": 50,
+                "ceiling_secs": ceiling, "silence_secs": 10,
+                "agents": [{"agent": "implementer", "job_id": "j1", "state": "running",
+                    "last_event_at": 1095, "nudges": 0, "restarts": 0, "output_tail": "t"}]})
+            .to_string()
+        };
+        std::fs::write(scratch.join("impl1/status.json"), active(500)).unwrap();
+        let v = st.with(|s| run_status_at(s, run, 1100)).unwrap();
+        assert_eq!(v["stalled"], false);
+        std::fs::write(scratch.join("impl1/status.json"), active(90)).unwrap();
+        let v = st.with(|s| run_status_at(s, run, 1100)).unwrap();
         assert_eq!(v["stalled"], true);
         assert!(
             v["last_step"]["output_tail"]

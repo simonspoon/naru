@@ -556,7 +556,9 @@ enum StageCmd {
     /// Starts the agent like `run start --agent`, watches it, sends one plain
     /// nudge on silence, stops and restarts it from the same brief up to
     /// `--max-restarts`, and at `--deadline` nudges for a partial report and
-    /// stops after `--grace`. Prints `{verdict: COMPLETE|INCONCLUSIVE, ...}`
+    /// stops after `--grace`. With `--ceiling` the deadline is soft: an agent
+    /// still writing events within `--silence` runs on, and the cut comes once
+    /// it goes quiet past the deadline or reaches the ceiling. Prints `{verdict: COMPLETE|INCONCLUSIVE, ...}`
     /// (an overrun is always INCONCLUSIVE); with `--also`, `{verdict, results}`.
     /// Writes `<scratch>/status.json` on every poll. Takes no `--quiet`.
     #[command(after_help = "\
@@ -570,9 +572,12 @@ EXAMPLES
         /// Working folder for the agent(s)
         #[arg(long)]
         cwd: String,
-        /// Seconds until the stage is cut
+        /// Seconds until the stage is cut (soft with `--ceiling`)
         #[arg(long)]
         deadline: f64,
+        /// Hard limit, seconds: makes `--deadline` soft, so an agent still active within `--silence` runs on until this (default: none, the deadline is hard)
+        #[arg(long)]
+        ceiling: Option<f64>,
         /// Seconds without a new event line before a nudge (default: no watchdog)
         #[arg(long)]
         silence: Option<f64>,
@@ -5862,6 +5867,7 @@ fn run_stage(cmd: StageCmd) -> Result<()> {
         agent,
         cwd,
         deadline,
+        ceiling,
         silence,
         max_restarts,
         grace,
@@ -5903,12 +5909,20 @@ fn run_stage(cmd: StageCmd) -> Result<()> {
             brief: brief(&p)?,
         });
     }
+    let deadline = secs("--deadline", deadline)?;
+    let ceiling = ceiling.map(|c| secs("--ceiling", c)).transpose()?;
+    if ceiling.is_some_and(|c| c < deadline) {
+        return Err(Error::Validation(
+            "--ceiling must be at least --deadline".into(),
+        ));
+    }
     let opts = stage::StageOpts {
         stage: name,
         task,
         cwd,
         model: model.unwrap_or_default(),
-        deadline: secs("--deadline", deadline)?,
+        deadline,
+        ceiling,
         silence: silence.map(|s| secs("--silence", s)).transpose()?,
         grace: secs("--grace", grace)?,
         max_restarts,

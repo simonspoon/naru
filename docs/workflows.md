@@ -632,7 +632,7 @@ is named.
 | `workflow defaults --project <id\|name>` | `{created: [{workflow, nodes, edges}], skipped: [name]}` — creates the two default ambient workflows (below), skipping any whose name exists; `--quiet` accepted and ignored |
 | `workflow runs <id\|name>` | a bare array of runs, newest first, **without `steps` and `input`** |
 | `workflow run-show <run id>` | one run in full |
-| `workflow watch <run id> [--follow]` | a derived, read-only status snapshot (naru task 1961): the running step with elapsed seconds, steps done/total, the last finished step's output tail (2 KiB), and for a task-loop run the freshest stage-driver `status.json` under the `scratch=<dir>` its state line names (`stage` null when missing or unparseable, never an error), `deadline_secs` and `stalled` (the running step older than the deadline: `status.json`'s `deadline_secs` if present, else `NARU_LOOP_DEADLINE`, else the task-loop's per-stage default). `--follow` reprints every 3 s until the run ends; unknown run is `not_found`; `--quiet` ignored |
+| `workflow watch <run id> [--follow]` | a derived, read-only status snapshot (naru task 1961): the running step with elapsed seconds, steps done/total, the last finished step's output tail (2 KiB), and for a task-loop run the freshest stage-driver `status.json` under the `scratch=<dir>` its state line names (`stage` null when missing or unparseable, never an error), `deadline_secs`, `ceiling_secs` and `stalled` (naru task 2184: the running step past the ceiling, or past the deadline with the agent quiet for the silence window; each value from `status.json` if present, else `NARU_LOOP_DEADLINE`/`NARU_LOOP_CEILING`/`NARU_LOOP_SILENCE`, else the task-loop's per-stage default). `--follow` reprints every 3 s until the run ends; unknown run is `not_found`; `--quiet` ignored |
 | `workflow log [<log>] [--workflow <id\|name>] [--limit N]` | the newest N lines (default 50), newest first; no name = every log; `--workflow` keeps only the lines that workflow wrote (unknown = `not_found`). A limit outside 1..=1000 is `validation` (the API's `?limit=` too), not clamped |
 | `workflow node create <WORKFLOW> <KIND> <TITLE> [--config JSON] [--x] [--y]` | the `WorkflowNode`; omitted coordinates place it in a row beside the others |
 | `workflow node update <id> [--title] [--config JSON] [--x] [--y]` | the node; `--config` **replaces** the whole config |
@@ -889,7 +889,9 @@ Review and verify are one node (a `--also` pair); the reports must end in
 INCONCLUSIVE, never a pass. Close-pass runs `naru task update --status done
 --result-file`; every other ending runs `naru task note`, `--status backlog`
 and `naru notify` (a notify failure is tolerated). `NARU_LOOP_DEADLINE`,
-`NARU_LOOP_SILENCE` and `NARU_LOOP_GRACE` override the stage clocks. Gate:
+`NARU_LOOP_CEILING`, `NARU_LOOP_SILENCE` and `NARU_LOOP_GRACE` override the stage
+clocks (the deadline is soft: an active stage runs on to the ceiling, naru task
+2184). Gate:
 `scripts/task-loop-check.sh`.
 
 **Why backlog.** The review's output must never be `todo`: `serve --watch-todo`

@@ -1,7 +1,9 @@
 //! `naru stage run` (naru task 1959, docs/stage.md): the stage driver of the
 //! task-loop workflow. It starts one agent run (or two, concurrently), watches
 //! it with the `run wait` semantics, nudges a silent one once, restarts it
-//! once from the same brief, cuts an overrun at the deadline, and prints one
+//! once from the same brief, cuts an overrun at the deadline (with `--ceiling`,
+//! a soft one: an agent still writing events runs on until it goes quiet or
+//! reaches the ceiling, naru task 2184), and prints one
 //! JSON verdict. An agent that fails is data (`INCONCLUSIVE`), never an error:
 //! only a bad argument or a driver bug is an `Err`.
 
@@ -25,7 +27,7 @@ const SILENCE_NUDGE: &str = "Status check: report what you have so far, briefly.
 const DEADLINE_NUDGE: &str = "Deadline reached, report partial results now.";
 const TAIL_CHARS: usize = 500;
 /// How long a stop may take before the run's process groups are SIGKILLed.
-/// Slack past deadline + grace before the stage gives up on its own loop.
+/// Slack past the hard limit + grace before the stage gives up on its own loop.
 const BACKSTOP_MARGIN: Duration = Duration::from_secs(30);
 const HARD_STOP_WAIT: Duration = Duration::from_secs(10);
 
@@ -41,6 +43,9 @@ pub struct StageOpts {
     pub cwd: String,
     pub model: String,
     pub deadline: Duration,
+    /// With a ceiling the deadline is soft: past it the stage runs on while
+    /// the agent writes events within `silence`, and is cut at the ceiling.
+    pub ceiling: Option<Duration>,
     pub silence: Option<Duration>,
     pub grace: Duration,
     pub max_restarts: u32,
@@ -159,6 +164,33 @@ fn start_job(sh: &Shared, spec: &AgentSpec) -> Result<String> {
         .ok_or_else(|| Error::Validation("run start returned no job_id".into()))
 }
 
+/// Whether the deadline path (nudge for a partial report, then a hard stop
+/// after grace) is due, and why: `None` while the stage runs on. Without a
+/// ceiling the deadline is hard (naru task 1959). With one (naru task 2184)
+/// it is soft: past it the stage runs on while the agent wrote an event
+/// within the silence window, and the ceiling is the hard limit. Once the
+/// deadline nudge went out (`committed`) the path stays taken, since the
+/// agent's reply to that nudge is activity too.
+fn deadline_due(
+    elapsed: Duration,
+    quiet: Duration,
+    deadline: Duration,
+    ceiling: Option<Duration>,
+    silence: Option<Duration>,
+    committed: bool,
+) -> Option<&'static str> {
+    let Some(ceiling) = ceiling else {
+        return (committed || elapsed >= deadline).then_some("deadline reached");
+    };
+    if elapsed >= ceiling {
+        Some("ceiling reached")
+    } else if committed || (elapsed >= deadline && silence.is_none_or(|s| quiet >= s)) {
+        Some("deadline passed while silent")
+    } else {
+        None
+    }
+}
+
 /// Drives one agent to a verdict document.
 fn drive(sh: &Shared, idx: usize, spec: &AgentSpec) -> Value {
     let o = sh.opts;
@@ -224,10 +256,12 @@ fn drive(sh: &Shared, idx: usize, spec: &AgentSpec) -> Value {
     let mut last_change = Instant::now();
     let mut nudge_at: Option<Instant> = None;
     let mut deadline_nudge_at: Option<Instant> = None;
+    // Why the deadline path was taken, for the `timeout:` reason.
+    let mut why = "deadline reached";
 
     loop {
         // Absolute backstop: whatever wedged the loop below, the stage ends.
-        if t0.elapsed() >= o.deadline + o.grace + BACKSTOP_MARGIN {
+        if t0.elapsed() >= o.ceiling.unwrap_or(o.deadline) + o.grace + BACKSTOP_MARGIN {
             let _ = runner::hard_stop_in(sh.runs, &job_id, HARD_STOP_WAIT);
             return finish(
                 "INCONCLUSIVE",
@@ -292,7 +326,7 @@ fn drive(sh: &Shared, idx: usize, spec: &AgentSpec) -> Value {
                     };
                     return finish(
                         "INCONCLUSIVE",
-                        Some("timeout: deadline reached; partial report".into()),
+                        Some(format!("timeout: {why}; partial report")),
                         partial,
                         &job_ids,
                         nudges,
@@ -328,18 +362,27 @@ fn drive(sh: &Shared, idx: usize, spec: &AgentSpec) -> Value {
         }
 
         // Still going: the deadline first, then the silence ladder.
-        if t0.elapsed() >= o.deadline {
+        let due = deadline_due(
+            t0.elapsed(),
+            last_change.elapsed(),
+            o.deadline,
+            o.ceiling,
+            o.silence,
+            deadline_nudge_at.is_some(),
+        );
+        if let Some(w) = due {
             match deadline_nudge_at {
                 None => {
                     let _ = runner::send_in(sh.runs, &job_id, DEADLINE_NUDGE, false);
                     nudges += 1;
                     deadline_nudge_at = Some(Instant::now());
+                    why = w;
                 }
                 Some(t) if t.elapsed() >= o.grace => {
                     let _ = runner::hard_stop_in(sh.runs, &job_id, HARD_STOP_WAIT);
                     return finish(
                         "INCONCLUSIVE",
-                        Some("timeout: deadline reached; no report".into()),
+                        Some(format!("timeout: {why}; no report")),
                         text.clone(),
                         &job_ids,
                         nudges,
@@ -349,6 +392,8 @@ fn drive(sh: &Shared, idx: usize, spec: &AgentSpec) -> Value {
                 }
                 Some(_) => {}
             }
+        } else if t0.elapsed() >= o.deadline {
+            // Past a soft deadline and still active: the stage runs on.
         } else if let Some(silence) = o.silence {
             match nudge_at {
                 None if last_change.elapsed() >= silence => {
@@ -490,6 +535,7 @@ mod tests {
             cwd: String::new(),
             model: String::new(),
             deadline: Duration::from_secs(1),
+            ceiling: None,
             silence: None,
             grace: Duration::from_secs(1),
             max_restarts: 0,
@@ -503,6 +549,42 @@ mod tests {
         assert_eq!(session_name(&o, &spec), "task 7 · impl2 (implementer)");
         o.task = None;
         assert_eq!(session_name(&o, &spec), "impl2 (implementer)");
+    }
+
+    #[test]
+    fn deadline_due_is_hard_without_a_ceiling_and_soft_with_one() {
+        let s = Duration::from_secs;
+        // No ceiling: the deadline alone decides, activity or not.
+        assert_eq!(
+            deadline_due(s(5), s(0), s(10), None, Some(s(3)), false),
+            None
+        );
+        assert_eq!(
+            deadline_due(s(10), s(0), s(10), None, Some(s(3)), false),
+            Some("deadline reached")
+        );
+        // Soft deadline: past it but active runs on; quiet is due.
+        let c = Some(s(100));
+        assert_eq!(deadline_due(s(5), s(9), s(10), c, Some(s(3)), false), None);
+        assert_eq!(deadline_due(s(50), s(1), s(10), c, Some(s(3)), false), None);
+        assert_eq!(
+            deadline_due(s(50), s(3), s(10), c, Some(s(3)), false),
+            Some("deadline passed while silent")
+        );
+        // No silence window: a soft deadline is due at once.
+        assert_eq!(
+            deadline_due(s(10), s(0), s(10), c, None, false),
+            Some("deadline passed while silent")
+        );
+        // The ceiling is hard, however active the agent is.
+        assert_eq!(
+            deadline_due(s(100), s(0), s(10), c, Some(s(3)), false),
+            Some("ceiling reached")
+        );
+        // Once the deadline nudge went out the path stays taken, even
+        // though its reply is activity.
+        assert!(deadline_due(s(50), s(0), s(10), c, Some(s(3)), true).is_some());
+        assert!(deadline_due(s(10), s(0), s(10), None, Some(s(3)), true).is_some());
     }
 
     #[test]

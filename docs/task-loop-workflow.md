@@ -48,7 +48,13 @@ piece is only a **blocking wait with a deadline** (task 1956).
 
 Trigger input is the task id. Each agent stage is a `cli` node running the
 stage driver (section 3), pinned with `--agent`, with `timeout_secs` set well
-above the stage deadline so the driver, not SIGKILL, ends a stage.
+above the stage ceiling (11400 = the default 10800 ceiling + three grace periods
++ a minute) so the driver, not SIGKILL, ends a stage. Each stage passes
+`--ceiling`, so its deadline is soft (naru task 2184): a stage still active runs
+on past it, and only a quiet one or one at the ceiling is nudged and cut. The
+ceiling is `NARU_LOOP_CEILING_<STAGE>`, else `NARU_LOOP_CEILING`, else 10800 s,
+and never below the stage's deadline. A ceiling set above 10800 is still cut by
+the node's `timeout_secs` (SIGKILL), as an over-long deadline already was.
 Each stage passes `--task` (the task id), so its session shows in the Agents tab
 as `task N · stage (agent)`; a `--also` agent and a restart get the same form
 (naru task 1979).
@@ -121,7 +127,7 @@ stops them in its normal path, and a killed driver leaves a run that
 
 ## 4. Status view outside the flow
 
-**Shipped (task 1961)** as `workflow::run_status`; `status.json` carries no deadline, so `stalled` uses its optional `deadline_secs`, else `NARU_LOOP_DEADLINE_<STAGE>` (PLAN, UX, IMPL, REVIEW, SPLIT), else `NARU_LOOP_DEADLINE`, else the stage default (plan 900, ux 600, impl 2400, review 1500, split 600). The scratch folder is found from the `scratch=<dir>` in the newest step output.
+**Shipped (task 1961)** as `workflow::run_status`; `status.json` carries no deadline, so `stalled` uses its optional `deadline_secs`, else `NARU_LOOP_DEADLINE_<STAGE>` (PLAN, UX, IMPL, REVIEW, SPLIT), else `NARU_LOOP_DEADLINE`, else the stage default (plan 900, ux 600, impl 2400, review 1500, split 600). The deadline is soft (naru task 2184): `stalled` is true when the running step is past its ceiling (`ceiling_secs` in the file, else `NARU_LOOP_CEILING_<STAGE>`, else `NARU_LOOP_CEILING`, else 10800, never below the deadline; also printed as `ceiling_secs`), or past its deadline with the agent's `last_event_at` older than the silence window (`silence_secs` in the file, else `NARU_LOOP_SILENCE`, else 300; with no event time, past the deadline alone). The scratch folder is found from the `scratch=<dir>` in the newest step output.
 
 A **watcher that only reads**, never a node. `naru workflow watch <run id>`
 and `GET /api/workflow-runs/{id}/status` (task 1961) derive on every read:
@@ -130,7 +136,8 @@ and `GET /api/workflow-runs/{id}/status` (task 1961) derive on every read:
 - steps done / total and the last finished step's output tail;
 - from the stage driver's `status.json`: stage, agent, job ids, last event
   time, nudges sent, restarts, last output tail;
-- `stalled` when the current node's silence exceeds its stage deadline.
+- `stalled` when the current node is past its stage deadline and quiet for
+  the silence window, or past its stage ceiling.
 
 It reads `run-show` (works mid-run because of the live step persistence) plus
 the scratch status file. A read failure is null, not an error, so a broken

@@ -4,7 +4,7 @@
 # a throwaway HOME / MESA_DB, a stub `claude` (MESA_CLAUDE_BIN) steered per
 # agent by files in the stub dir, and a stub `vox` (MESA_VOX_BIN) recording
 # every notify call. Stage clocks are shrunk through NARU_LOOP_DEADLINE /
-# NARU_LOOP_SILENCE / NARU_LOOP_GRACE.
+# NARU_LOOP_CEILING / NARU_LOOP_SILENCE / NARU_LOOP_GRACE.
 #
 # Covers: defaults creating the workflow, a rerun skipping it (idempotent, and
 # no ambient workflows came with it); a non-UI pass (UX node and Implement #2
@@ -46,7 +46,7 @@ echo '{"notify":{"base-url":"http://127.0.0.1:7770"}}' > "$MESA_CONFIG_FILE"
 ln -s "$NARU" "$TMP/bin/naru"
 export PATH="$TMP/bin:$PATH"
 
-export NARU_LOOP_DEADLINE=20 NARU_LOOP_SILENCE=10 NARU_LOOP_GRACE=3
+export NARU_LOOP_DEADLINE=20 NARU_LOOP_CEILING=40 NARU_LOOP_SILENCE=10 NARU_LOOP_GRACE=3
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok() { echo "ok: $*"; }
@@ -299,13 +299,14 @@ R=$(run_loop "$T")
 metric "$T" none 0 backlog planner
 ok "an inconclusive planner ends in backlog without implementing"
 
-# ---- 6a. a per-stage clock (naru task 2082): NARU_LOOP_DEADLINE_PLAN cuts a hung
-# planner well before the global 20s clock would, and the loop still ends in backlog ----
+# ---- 6a. a per-stage clock (naru task 2082): NARU_LOOP_DEADLINE_PLAN (with its ceiling,
+# the deadline being soft since naru task 2184) cuts a hung planner well before the
+# global 20s clock would, and the loop still ends in backlog ----
 reset_stub
 touch "$STUB/hang.planner"
 T=$(mk "Fix nothing, hung planner")
 t0=$SECONDS
-R=$(NARU_LOOP_DEADLINE_PLAN=2 run_loop "$T")
+R=$(NARU_LOOP_DEADLINE_PLAN=2 NARU_LOOP_CEILING_PLAN=2 run_loop "$T")
 el=$((SECONDS - t0))
 [ "$el" -lt 18 ] || fail "per-stage clock: planner took ${el}s, the global clock applied"
 [ "$(tstatus "$T")" = backlog ] && [ "$(step "$R" "Implement + review #1")" = skipped ] || fail "per-stage clock: task $(tstatus "$T")"

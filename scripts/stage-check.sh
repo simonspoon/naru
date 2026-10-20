@@ -3,10 +3,13 @@
 # stage driver, against a throwaway HOME and a stub `claude` (MESA_CLAUDE_BIN)
 # speaking stream-json. Per-agent files in the stub dir steer it:
 # sleep.<agent> = seconds each turn takes before it answers (read when the
-# message is read, so a gate can change it between turns); turns.<agent> gets
-# one line per message read. Covers: normal completion; silence -> nudge ->
-# recovers; silence -> nudge -> restart; deadline -> partial report; deadline
-# -> INCONCLUSIVE; a parallel pair with one overrunning; status.json's shape;
+# message is read, so a gate can change it between turns); chatty.<agent> =
+# seconds a turn keeps writing an assistant line every 0.5s before it answers;
+# turns.<agent> gets one line per message read. Covers: normal completion;
+# silence -> nudge -> recovers; silence -> nudge -> restart; deadline ->
+# partial report; deadline -> INCONCLUSIVE; with --ceiling (naru task 2184) an
+# active agent running on past the deadline to COMPLETE, an active one cut at
+# the ceiling and a quiet one cut past the deadline; a parallel pair with one overrunning; status.json's shape;
 # the 64 KiB cap; usage / validation shapes.
 set -euo pipefail
 unset $(env | sed -n 's/^\(NARU_[A-Za-z0-9_]*\)=.*/\1/p')
@@ -56,9 +59,14 @@ fi
 while IFS= read -r line; do
   text=\$(jq -r '.message.content[0].text' <<<"\$line")
   s=0; [ -f "$STUB/sleep.\$agent" ] && s=\$(cat "$STUB/sleep.\$agent")
+  c=0; [ -f "$STUB/chatty.\$agent" ] && c=\$(cat "$STUB/chatty.\$agent")
   printf 'turn\n' >> "$STUB/turns.\$agent"
   (
     [ "\$s" != 0 ] && sleep "\$s"
+    i=0; while [ "\$i" -lt \$((c * 2)) ]; do
+      printf '{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]}}\n'
+      sleep 0.5; i=\$((i + 1))
+    done
     printf '{"type":"assistant","message":{"content":[{"type":"text","text":%s}]}}\n' "\$(jq -Rn --arg t "\$text" '\$t')"
     printf '{"type":"result","subtype":"success","is_error":false,"result":%s}\n' "\$(jq -Rn --arg t "echo: \$text" '\$t')"
   ) &
@@ -176,6 +184,32 @@ kpid=$(cat "$STUB/child.a-wedge" 2>/dev/null || true)
 wait_for 5 "wedged claude and its child gone" bash -c "! kill -0 $cpid 2>/dev/null && ! kill -0 $kpid 2>/dev/null"
 ok "stop-ignoring claude and its child are killed by the hard stop"
 
+# ---- 5c. --ceiling makes the deadline soft (naru task 2184) ----
+# (a) an agent writing events past --deadline runs on and completes.
+echo 5 > "$STUB/chatty.c-on"
+brief con "busy but healthy"
+rc=$(stage "$TMP/o5a" --agent c-on --deadline 2 --ceiling 20 --silence 2 --grace 2 --scratch "$TMP/s5a" --brief-file "$TMP/con.md")
+[ "$rc" = 0 ] || fail "soft deadline: exit $rc"
+jq -e '.verdict=="COMPLETE" and .report=="echo: busy but healthy" and .nudges==0' "$TMP/o5a" >/dev/null || fail "soft deadline: $(cat "$TMP/o5a")"
+ok "an agent active past a soft deadline runs on to COMPLETE"
+# (b) one that never stops writing is cut at the ceiling.
+echo 300 > "$STUB/chatty.c-ceil"
+brief cceil "busy forever"
+rc=$(stage "$TMP/o5b" --agent c-ceil --deadline 2 --ceiling 6 --silence 2 --grace 2 --scratch "$TMP/s5b" --brief-file "$TMP/cceil.md")
+[ "$rc" = 0 ] || fail "ceiling: exit $rc"
+jq -e '.verdict=="INCONCLUSIVE" and (.reason|startswith("timeout: ceiling reached")) and .report==null and .nudges==1' "$TMP/o5b" >/dev/null || fail "ceiling: $(cat "$TMP/o5b")"
+ok "an agent still active at the ceiling is INCONCLUSIVE, reason timeout:"
+# (c) a quiet one is cut past the deadline, long before the ceiling.
+echo 30 > "$STUB/sleep.c-quiet"
+brief cquiet "quiet"
+t0=$SECONDS
+rc=$(stage "$TMP/o5c" --agent c-quiet --deadline 1 --ceiling 120 --silence 3 --grace 2 --scratch "$TMP/s5c" --brief-file "$TMP/cquiet.md")
+el=$((SECONDS - t0))
+[ "$rc" = 0 ] || fail "quiet past deadline: exit $rc"
+jq -e '.verdict=="INCONCLUSIVE" and (.reason|startswith("timeout: deadline passed while silent")) and .nudges==1' "$TMP/o5c" >/dev/null || fail "quiet past deadline: $(cat "$TMP/o5c")"
+[ "$el" -lt 30 ] || fail "quiet past deadline: took ${el}s, the ceiling applied"
+ok "a quiet agent past a soft deadline is cut long before the ceiling"
+
 # ---- 6. parallel pair, one overruns; status.json shape ----
 echo 0 > "$STUB/sleep.p-fast"; echo 30 > "$STUB/sleep.p-slow"
 brief pf "fast one"; brief ps "slow one"
@@ -215,6 +249,10 @@ set +e
 "$NARU" stage run --agent x --cwd . --deadline 5 --brief-file "$TMP/ok.md" --also y >/dev/null 2>"$TMP/e3"; rc=$?
 set -e
 [ "$rc" = 2 ] || fail "--also without --also-brief-file should be usage, exit 2 (got $rc)"
+set +e
+"$NARU" stage run --agent x --cwd . --deadline 5 --ceiling 4 --brief-file "$TMP/ok.md" >/dev/null 2>"$TMP/e4"; rc=$?
+set -e
+[ "$rc" = 1 ] && jq -e '.error.code=="validation"' "$TMP/e4" >/dev/null || fail "--ceiling below --deadline should be validation, exit 1 (got $rc): $(cat "$TMP/e4")"
 ok "usage and validation shapes"
 
 echo "stage-check: all ok"
