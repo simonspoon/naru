@@ -274,6 +274,18 @@ one-shot route.
   drop, drops the cached probe (`audio::invalidate`), so the page's next
   `GET /api/live/transcribe` asks the daemon afresh.
 
+## The live socket: `GET /v1/audio/live` (WebSocket, naru task 2176)
+
+The native Mac client dials its live conversation socket at the **serve**
+URL (`<serve>/v1/audio/live`), and only the daemon serves that route, so
+Naru passes it through to the daemon's own `/v1/audio/live` (`audio_live`
+in `src/api.rs`, the same `proxy_listen` pump and `audio::open_stream` with
+`audio::LIVE_PATH`). Everything above holds unchanged — the transcribe gates
+before the upgrade, no `Origin` upstream, text/binary/close frames verbatim,
+a failed open as an `error` event then `1011` — with one difference: no
+`hotwords` are ever added, so every frame reaches the daemon byte-identical.
+A resume rides inside the client's own `start`, so the URL carries no query.
+
 ## Gate
 
 The Rust tests in `src/core/audio.rs` (a stub daemon over a local socket)

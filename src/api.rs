@@ -3559,6 +3559,10 @@ fn router(state: AppState) -> Router {
         // naru-audio daemon, behind the transcribe pair of gates, and 503
         // before any upgrade unless `audio.engine` selects the daemon.
         .route("/api/live/listen", get(live_listen))
+        // The live conversation socket (naru task 2176): the native Mac
+        // client dials `<serve>/v1/audio/live`, passed through to the
+        // daemon's own route behind the same gates, frames untouched.
+        .route("/v1/audio/live", get(audio_live))
         // Scripts: user-authored shell run from a generated form. A script
         // body is a program mesa executes, so all six routes — authoring,
         // reading and *running* alike — share the agents' code-execution gate
@@ -7363,7 +7367,32 @@ async fn live_listen(
     })
     .await?
     .map_err(unavailable)?;
-    Ok(ws.on_upgrade(move |socket| proxy_listen(socket, url, hotwords)))
+    Ok(ws.on_upgrade(move |socket| proxy_listen(socket, url, hotwords, audio::STREAM_PATH)))
+}
+
+/// `GET /v1/audio/live` — the live conversation socket (naru task 2176,
+/// `docs/listen.md`): the native Mac client dials the serve URL, so this
+/// passes the WebSocket through to the daemon's own `/v1/audio/live`, text,
+/// binary and close frames untouched — no vocabulary is added here.
+///
+/// Gated before the upgrade exactly as [`live_listen`]; a daemon that cannot
+/// be opened reaches the client as an `error` event, then close 1011.
+async fn audio_live(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    require_same_site_fetch(&headers)?;
+    let url = blocking(config::audio_url)
+        .await?
+        .map_err(|message| ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "unavailable",
+            message,
+        })?;
+    Ok(ws.on_upgrade(move |socket| proxy_listen(socket, url, None, audio::LIVE_PATH)))
 }
 
 /// The page's `start` message with the configured vocabulary added as the
@@ -7382,13 +7411,19 @@ fn with_hotwords(frame: &str, hotwords: Option<&str>) -> String {
     }
 }
 
-/// Pumps one [`live_listen`] session until either side closes. Text and
+/// Pumps one [`live_listen`] or [`audio_live`] session, to the daemon's
+/// route `path`, until either side closes. Text and
 /// binary frames go through verbatim, a close frame with its code and
 /// reason; pings are each library's own business. A side that vanishes
 /// without a close closes the other — the page with `error` + 1011, since an
 /// error always precedes a non-1000 close (§2.4). Nothing is spawned: the
 /// session is this one future, so it ends with the upgrade task.
-async fn proxy_listen(mut browser: WebSocket, url: String, hotwords: Option<String>) {
+async fn proxy_listen(
+    mut browser: WebSocket,
+    url: String,
+    hotwords: Option<String>,
+    path: &'static str,
+) {
     use axum::extract::ws::CloseFrame;
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::{self, protocol::frame::coding::CloseCode};
@@ -7403,7 +7438,7 @@ async fn proxy_listen(mut browser: WebSocket, url: String, hotwords: Option<Stri
         let _ = browser.send(Message::Close(Some(close))).await;
     }
 
-    let mut daemon = match audio::open_stream(&url).await {
+    let mut daemon = match audio::open_stream(&url, path).await {
         Ok(daemon) => daemon,
         Err((state, message)) => {
             fail(&mut browser, state, message).await;
@@ -21769,9 +21804,12 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         origins: Arc<Mutex<Vec<Option<String>>>>,
         /// Every `start` message the daemon received, as the JSON it got.
         starts: Arc<Mutex<Vec<serde_json::Value>>>,
+        /// One entry per handshake: the path it was made on.
+        paths: Arc<Mutex<Vec<String>>>,
     }
 
-    /// Serves a stub `/v1/audio/transcriptions/stream`: `ready` to `start`,
+    /// Serves a stub `/v1/audio/transcriptions/stream` (and the same stub at
+    /// `/v1/audio/live`, naru task 2176): `ready` to `start`,
     /// then either (`backlog == false`) counts binary bytes and answers
     /// `stop` with one `final` naming the count, `done` and close 1000
     /// "done", or (`backlog == true`) an `error` and close 1013 at once.
@@ -21780,16 +21818,17 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         let seen = origins.clone();
         let starts: Arc<Mutex<Vec<serde_json::Value>>> = Arc::default();
         let started = starts.clone();
-        let app = Router::new().route(
-            "/v1/audio/transcriptions/stream",
-            get(move |headers: HeaderMap, ws: WebSocketUpgrade| {
-                let origin = headers
-                    .get(header::ORIGIN)
-                    .map(|v| v.to_str().unwrap().to_string());
-                seen.lock().unwrap().push(origin);
-                let started = started.clone();
-                async move {
-                    ws.on_upgrade(move |mut socket| async move {
+        let paths: Arc<Mutex<Vec<String>>> = Arc::default();
+        let hit = paths.clone();
+        let handler = move |uri: axum::http::Uri, headers: HeaderMap, ws: WebSocketUpgrade| {
+            let origin = headers
+                .get(header::ORIGIN)
+                .map(|v| v.to_str().unwrap().to_string());
+            seen.lock().unwrap().push(origin);
+            hit.lock().unwrap().push(uri.path().to_string());
+            let started = started.clone();
+            async move {
+                ws.on_upgrade(move |mut socket| async move {
                         use axum::extract::ws::CloseFrame;
                         let text = |v: serde_json::Value| Message::Text(v.to_string().into());
                         let close = |code, reason: &'static str| {
@@ -21832,9 +21871,11 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                             }
                         }
                     })
-                }
-            }),
-        );
+            }
+        };
+        let app = Router::new()
+            .route("/v1/audio/transcriptions/stream", get(handler.clone()))
+            .route("/v1/audio/live", get(handler));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move {
@@ -21844,6 +21885,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             url,
             origins,
             starts,
+            paths,
         }
     }
 
@@ -21900,6 +21942,20 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         tempfile::TempDir,
         Result<ListenClient, tokio_tungstenite::tungstenite::Error>,
     ) {
+        open_ws("/api/live/listen", Some(origin), lan, fetch_site).await
+    }
+
+    /// Serves Naru on an ephemeral port and opens the WebSocket route `path`
+    /// on it, with `origin` if any (the native Mac client sends none).
+    async fn open_ws(
+        path: &str,
+        origin: Option<&str>,
+        lan: bool,
+        fetch_site: Option<&str>,
+    ) -> (
+        tempfile::TempDir,
+        Result<ListenClient, tokio_tungstenite::tungstenite::Error>,
+    ) {
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
         let (dir, mut state) = test_state();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -21913,13 +21969,15 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             )
             .await;
         });
-        let mut request = format!("ws://127.0.0.1:{port}/api/live/listen")
+        let mut request = format!("ws://127.0.0.1:{port}{path}")
             .into_client_request()
             .unwrap();
-        let origin = origin.replace("{port}", &port.to_string());
-        request
-            .headers_mut()
-            .insert(header::ORIGIN, origin.parse().unwrap());
+        if let Some(origin) = origin {
+            let origin = origin.replace("{port}", &port.to_string());
+            request
+                .headers_mut()
+                .insert(header::ORIGIN, origin.parse().unwrap());
+        }
         if let Some(site) = fetch_site {
             request
                 .headers_mut()
@@ -22155,6 +22213,95 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             }
         }
         assert!(stub.origins.lock().unwrap().is_empty());
+    }
+
+    // ---- /v1/audio/live (naru task 2176) ----
+
+    /// The native client's live socket reaches the daemon's own
+    /// `/v1/audio/live` without an `Origin`: text and binary frames go
+    /// through byte-identical — no `hotwords`, even with a vocabulary
+    /// configured — and the daemon's events and close 1000 come back.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn audio_live_passes_frames_through_to_the_daemon_untouched() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message as Tm;
+        let _env = attachments::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let stub = stream_stub(false).await;
+        let cfg = tempfile::tempdir().unwrap();
+        let config = json!({
+            "audio": {"url": stub.url},
+            "listen": {"vocabulary": "Naru :4"},
+        });
+        std::fs::write(cfg.path().join("config.json"), config.to_string()).unwrap();
+        let _config = listen_config(cfg.path(), None);
+        let (_dir, opened) = open_ws("/v1/audio/live", None, false, None).await;
+        let mut ws = opened.expect("the upgrade");
+
+        let start = json!({"type": "start", "format": "s16le", "sample_rate": 16000});
+        ws.send(Tm::Text(start.to_string().into())).await.unwrap();
+        let ready = ws.next().await.unwrap().unwrap();
+        assert!(ready.to_text().unwrap().contains("\"ready\""), "{ready:?}");
+        ws.send(Tm::Binary(vec![1u8; 4000].into())).await.unwrap();
+        ws.send(Tm::Text(json!({"type": "stop"}).to_string().into()))
+            .await
+            .unwrap();
+        let (events, code) = listen_until_close(&mut ws).await;
+
+        let finals: Vec<_> = events.iter().filter(|e| e["type"] == "final").collect();
+        assert_eq!(finals.len(), 1, "{events:?}");
+        assert_eq!(finals[0]["text"], "4000 bytes");
+        assert_eq!(code, Some(1000));
+        assert_eq!(*stub.paths.lock().unwrap(), vec!["/v1/audio/live"]);
+        assert_eq!(*stub.origins.lock().unwrap(), vec![None]);
+        assert_eq!(*stub.starts.lock().unwrap(), vec![start], "no hotwords");
+    }
+
+    /// A foreign page is refused before the upgrade; the daemon never hears.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn audio_live_refuses_a_foreign_origin_before_the_upgrade() {
+        let _env = attachments::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let stub = stream_stub(false).await;
+        let cfg = tempfile::tempdir().unwrap();
+        let _config = listen_config(cfg.path(), Some(json!({"url": stub.url})));
+        let (_dir, opened) =
+            open_ws("/v1/audio/live", Some("http://evil.example"), false, None).await;
+
+        match opened {
+            Err(tokio_tungstenite::tungstenite::Error::Http(resp)) => {
+                assert_eq!(resp.status().as_u16(), 403);
+            }
+            other => panic!("expected a 403 refusal, got {other:?}"),
+        }
+        assert!(stub.origins.lock().unwrap().is_empty());
+    }
+
+    /// Nothing listening at `audio.url`: the client hears an `error` event
+    /// naming the daemon down, then close 1011.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn audio_live_reports_a_daemon_that_is_down() {
+        let _env = attachments::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dead = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://127.0.0.1:{}", dead.local_addr().unwrap().port());
+        drop(dead);
+        let cfg = tempfile::tempdir().unwrap();
+        let _config = listen_config(cfg.path(), Some(json!({"url": url})));
+        let (_dir, opened) = open_ws("/v1/audio/live", None, false, None).await;
+        let mut ws = opened.expect("the upgrade");
+        let (events, code) = listen_until_close(&mut ws).await;
+
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0]["type"], "error");
+        assert_eq!(events[0]["code"], "daemon_down");
+        assert_eq!(code, Some(1011));
     }
 
     /// `POST /api/live/transcribe` once, as the page sends it.

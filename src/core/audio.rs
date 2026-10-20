@@ -478,9 +478,13 @@ fn classify_transport(url: &str, e: &ureq::Error) -> (AudioState, Option<String>
 }
 
 /// The daemon's streaming speech-to-text route (design §2.4).
-const STREAM_PATH: &str = "/v1/audio/transcriptions/stream";
+pub(crate) const STREAM_PATH: &str = "/v1/audio/transcriptions/stream";
 
-/// How long opening [`STREAM_PATH`] may take before the daemon counts as
+/// The daemon's live conversation route, which `GET /v1/audio/live` passes
+/// the native Mac client through to (naru task 2176).
+pub(crate) const LIVE_PATH: &str = "/v1/audio/live";
+
+/// How long opening a daemon WebSocket route may take before the daemon counts as
 /// down. A refused port fails at once; this bounds one that accepts and
 /// never answers the handshake.
 const STREAM_OPEN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -489,16 +493,20 @@ const STREAM_OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) type DaemonStream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-/// Opens the daemon's streaming route at `url` for `GET /api/live/listen`
-/// (mesa task 1394). The request is built from the URL alone, so it carries
+/// Opens the daemon's WebSocket route `path` at `url` — [`STREAM_PATH`] for
+/// `GET /api/live/listen` (mesa task 1394), [`LIVE_PATH`] for
+/// `GET /v1/audio/live` (naru task 2176). The request is built from the URL alone, so it carries
 /// the handshake headers and nothing else — no `Origin`, which the daemon
 /// refuses (design §2.1), and nothing of the browser's. A failure drops the
 /// cached probe (§4.4: a failed WS open is fresher news) and comes back as
 /// the state and sentence the page shows: nothing answering is
 /// `daemon_down`, an HTTP refusal or anything else is `error`.
-pub(crate) async fn open_stream(url: &str) -> Result<DaemonStream, (AudioState, String)> {
+pub(crate) async fn open_stream(
+    url: &str,
+    path: &str,
+) -> Result<DaemonStream, (AudioState, String)> {
     let authority = url.strip_prefix("http://").unwrap_or(url);
-    let target = format!("ws://{}{STREAM_PATH}", authority.trim_end_matches('/'));
+    let target = format!("ws://{}{path}", authority.trim_end_matches('/'));
     let opened = tokio::time::timeout(
         STREAM_OPEN_TIMEOUT,
         tokio_tungstenite::connect_async(target),
@@ -512,7 +520,7 @@ pub(crate) async fn open_stream(url: &str) -> Result<DaemonStream, (AudioState, 
         Ok(Err(tokio_tungstenite::tungstenite::Error::Http(response))) => (
             AudioState::Error,
             error_message(&format!(
-                "opening {STREAM_PATH} answered HTTP {}",
+                "opening {path} answered HTTP {}",
                 response.status().as_u16()
             )),
         ),
