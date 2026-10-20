@@ -580,6 +580,62 @@ git -C "$TMP/work" show --name-only --format= HEAD | grep -qx z-w.txt || fail "s
 rm -f "$HOME/.naru/loop/active/$TY" "$TMP/work/y-wip.txt"
 ok "an entry whose task is no longer in progress does not block a cross-repo commit"
 
+# ---- 7i. a task whose job is to land a change already dirty before the run (naru task 2169): the run
+# changes nothing, the pre-dirty file the task names is committed, an unrelated pre-dirty one is left ----
+reset_stub
+printf 'UI: no' > "$STUB/reply.planner"
+printf 'VERDICT: PASS' > "$STUB/reply.verifier"
+printf 'VERDICT: PASS' > "$STUB/reply.diff-reviewer"
+echo v1 > "$TMP/work/landme.txt"
+git -C "$TMP/work" add landme.txt
+git -C "$TMP/work" commit -q -m landme
+echo v2 > "$TMP/work/landme.txt"
+echo stray > "$TMP/work/stray7i.txt"
+# a scanned sibling (siblingproj, after the work repo in the driver's loop) holds a pre-dirty file of the same name
+echo sib > "$TMP/sibling/landme.txt"
+sbefore=$(git -C "$TMP/sibling" rev-parse HEAD)
+before=$(git -C "$TMP/work" rev-parse HEAD)
+T=$(mk "Land the uncommitted change in landme.txt")
+R=$(run_loop "$T")
+[ "$(jq -r .status <<<"$R")" = succeeded ] || fail "named pre-dirty: run $(jq -c '{status,error}' <<<"$R")"
+[ "$(tstatus "$T")" = done ] && [ "$(step "$R" "Commit")" = ok ] || fail "named pre-dirty: task $(tstatus "$T"), Commit $(step "$R" "Commit")"
+[ "$(git -C "$TMP/work" rev-parse HEAD)" != "$before" ] || fail "named pre-dirty: named_predirty_committed = 0, a silent done with nothing committed"
+[ "$(git -C "$TMP/work" show --name-only --format= HEAD)" = landme.txt ] || fail "named pre-dirty: commit holds $(git -C "$TMP/work" show --name-only --format= HEAD)"
+[ "$(git -C "$TMP/work" status --porcelain)" = "?? stray7i.txt" ] || fail "named pre-dirty: unrelated_predirty_left = 0: $(git -C "$TMP/work" status --porcelain)"
+"$NARU" task show "$T" | jq -e '.artifact | test("^work@[0-9a-f]+$")' >/dev/null || fail "named pre-dirty: artifact $("$NARU" task show "$T" | jq -r .artifact)"
+"$NARU" task show "$T" | jq -e '.notes | map(.body) | any(test("landme.txt") and test("named by the task")) and any(test("stray7i.txt") and test("left uncommitted"))' >/dev/null || fail "named pre-dirty: notes"
+[ "$(git -C "$TMP/sibling" rev-parse HEAD)" = "$sbefore" ] && [ "$(git -C "$TMP/sibling" status --porcelain)" = "?? landme.txt" ] || fail "named pre-dirty: scanned sibling swept: $(git -C "$TMP/sibling" status --porcelain)"
+"$NARU" task show "$T" | jq -e '.notes | map(.body) | any(test("task loop commit \\(.*/sibling\\)"; "i")) | not' >/dev/null || fail "named pre-dirty: a note for the scanned sibling: $("$NARU" task show "$T" | jq -c .notes)"
+ok "a pre-dirty file the task names is committed when the run changes nothing; an unrelated one and a scanned repo's same-named one stay dirty and silent"
+rm -f "$TMP/work/stray7i.txt" "$TMP/sibling/landme.txt"
+
+# ---- 7j. the task names a pre-dirty file in another repo by absolute path (naru task 2169): that repo's
+# file is committed; the work repo's pre-dirty file of the same name (`/landme.txt` in the text) stays ----
+reset_stub
+printf 'UI: no' > "$STUB/reply.planner"
+printf 'VERDICT: PASS' > "$STUB/reply.verifier"
+printf 'VERDICT: PASS' > "$STUB/reply.diff-reviewer"
+SIBP=$(cd "$TMP/sibling" && pwd -P)
+echo v1 > "$TMP/sibling/landme.txt"
+git -C "$TMP/sibling" add landme.txt
+git -C "$TMP/sibling" commit -q -m landme
+echo v2 > "$TMP/sibling/landme.txt"
+echo v3 > "$TMP/work/landme.txt"
+sbefore=$(git -C "$TMP/sibling" rev-parse HEAD)
+before=$(git -C "$TMP/work" rev-parse HEAD)
+T=$(mk "Land the uncommitted change in $SIBP/landme.txt")
+R=$(run_loop "$T")
+[ "$(jq -r .status <<<"$R")" = succeeded ] || fail "other-repo pre-dirty: run $(jq -c '{status,error}' <<<"$R")"
+[ "$(tstatus "$T")" = done ] && [ "$(step "$R" "Commit")" = ok ] || fail "other-repo pre-dirty: task $(tstatus "$T"), Commit $(step "$R" "Commit")"
+grep -qxF "$SIBP" "$HOME"/.naru/loop/"$T"-*/repos.txt || fail "other-repo pre-dirty: sibling missing from repos.txt"
+[ "$(git -C "$TMP/sibling" rev-parse HEAD)" != "$sbefore" ] || fail "other-repo pre-dirty: named_predirty_committed = 0 in the sibling"
+[ "$(git -C "$TMP/sibling" show --name-only --format= HEAD)" = landme.txt ] || fail "other-repo pre-dirty: sibling commit holds $(git -C "$TMP/sibling" show --name-only --format= HEAD)"
+[ "$(git -C "$TMP/work" rev-parse HEAD)" = "$before" ] || fail "other-repo pre-dirty: wrong_repo_predirty_committed = 1, work commit holds $(git -C "$TMP/work" show --name-only --format= HEAD)"
+[ "$(git -C "$TMP/work" status --porcelain)" = " M landme.txt" ] || fail "other-repo pre-dirty: work tree: $(git -C "$TMP/work" status --porcelain)"
+"$NARU" task show "$T" | jq -e '.notes | map(.body) | any(test("/sibling\\)") and test("named by the task") and test("landme.txt")) and any(test("/work\\)") and test("left uncommitted") and test("landme.txt"))' >/dev/null || fail "other-repo pre-dirty: notes: $("$NARU" task show "$T" | jq -c .notes)"
+ok "a pre-dirty file named by absolute path in another repo is committed there; the work repo's same-named one stays dirty"
+git -C "$TMP/work" checkout -q -- landme.txt
+
 # ---- 8. a failing vox send is caught: backlog, run still succeeds ----
 reset_stub
 printf 'UI: no' > "$STUB/reply.planner"

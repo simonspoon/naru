@@ -2270,7 +2270,8 @@ echo "task=$TASK scratch=$SCRATCH ui=$(cat "$SCRATCH/ui" 2>/dev/null || echo no)
 const LOOP_COMMIT: &str = r##"# Commit only what the run changed, in each repo the run touches (naru task 2044: the workflow
 # project's and the task's own project's): a path dirty before the run (in that repo's
 # baseline.txt) stays out unless its content hash moved since; a refusal here would feed itself,
-# every later run starting from the same dirty tree. One repo failing never hides a commit made in another.
+# every later run starting from the same dirty tree (except a path the task names in a repo the run
+# changed nothing in, naru task 2169). One repo failing never hides a commit made in another.
 add_path() { # <path>
   local p=$1 h line
   if [ -e "$p" ]; then h=$(git hash-object -- "$p" 2>/dev/null || echo gone); else h=gone; fi
@@ -2278,6 +2279,29 @@ add_path() { # <path>
   if grep -qxF -- "$line" "$BL" 2>/dev/null; then skipped+=("$p"); return; fi
   if awk -F'\t' -v p="$p" '$1 == p { f = 1 } END { exit !f }' "$BL" 2>/dev/null; then rode+=("$p"); fi
   paths+=("$p")
+}
+# <repo> <path> <text file>: the text names the path, as <repo>/<path>, as ~/<repo under $HOME>/<path>,
+# or as <path> standing alone (after start, a space, a backtick, a quote or `(`; never after `/`,
+# which points into some other directory, maybe another repo's same-named file; not followed by
+# a name character), so `a.txt` is not named by `data.txt`, `a.txt.bak` or `/x/a.txt`.
+# Fixed-string matching, never a regex; values reach awk through ENVIRON, never -v.
+named_by_task() {
+  local tp=""
+  case "$1" in "$HOME"/*) tp="~${1#"$HOME"}/$2" ;; esac
+  P="$2" RP="$1/$2" TP="$tp" awk '
+    { t = t $0 "\n" }
+    END {
+      p = ENVIRON["P"]; rp = ENVIRON["RP"]; tp = ENVIRON["TP"]
+      if (index(t, rp) || (tp != "" && index(t, tp))) exit 0
+      off = 0; s = t
+      while ((i = index(s, p)) > 0) {
+        at = off + i; b = (at > 1) ? substr(t, at - 1, 1) : ""
+        a = substr(t, at + length(p), 1); a2 = substr(t, at + length(p) + 1, 1)
+        if ((b == "" || b ~ /[[:space:]`"(]/ || b == "\047") && a !~ /[[:alnum:]_\/-]/ && !(a == "." && a2 ~ /[[:alnum:]_]/)) exit 0
+        off = at; s = substr(t, off + 1)
+      }
+      exit 1
+    }' "$3"
 }
 # The build gate (naru task 2041): the committed tree must build on its own. A skipped
 # pre-dirty path may be what the committed files need (a `pub mod x;` in a file the
@@ -2307,10 +2331,25 @@ commit_repo() { # <repo dir> <state dir>: commits in that repo; appends its shor
   done < <(git status --porcelain -z -uall)
   # a scanned repo (naru task 2058) the run did not change is silent: no note, no commit
   if [ "$scan" = 1 ] && [ "${#paths[@]}" = 0 ]; then return 0; fi
-  if [ "${#skipped[@]}" -gt 0 ] || [ "${#rode[@]}" -gt 0 ]; then
+  # Landing a change left dirty (naru task 2169): in a named repo the run changed nothing in,
+  # a pre-dirty path the task description names is committed rather than closing the task
+  # done with nothing committed. Only the description, the person's written scope, counts:
+  # a plan lists files it merely read. A run that changed anything keeps the rule above.
+  # `landed` is local: the driver below keeps its repo count in a global `named`.
+  local landed=()
+  if [ "$scan" = 0 ] && [ "${#paths[@]}" = 0 ] && [ "${#skipped[@]}" -gt 0 ]; then
+    naru task show "$TASK" | jq -r '.description // ""' > "$SCRATCH/named-text.txt"
+    local keep=() p
+    for p in "${skipped[@]}"; do
+      if named_by_task "$repo" "$p" "$SCRATCH/named-text.txt"; then landed+=("$p"); paths+=("$p"); else keep+=("$p"); fi
+    done
+    skipped=(${keep[@]+"${keep[@]}"})
+  fi
+  if [ "${#skipped[@]}" -gt 0 ] || [ "${#rode[@]}" -gt 0 ] || [ "${#landed[@]}" -gt 0 ]; then
     {
       if [ "${#skipped[@]}" -gt 0 ]; then echo "Task loop commit ($repo): these paths were dirty before the run and unchanged by it, so they were left uncommitted:"; printf '%s\n' "${skipped[@]}"; fi
       if [ "${#rode[@]}" -gt 0 ]; then echo "Task loop commit ($repo): these paths were dirty before the run and changed again by it, so they were committed with their earlier edits:"; printf '%s\n' "${rode[@]}"; fi
+      if [ "${#landed[@]}" -gt 0 ]; then echo "Task loop commit ($repo): these paths were dirty before the run and are named by the task, and the run changed nothing else, so they were committed:"; printf '%s\n' "${landed[@]}"; fi
     } | head -c 4000 > "$SCRATCH/commit-note.md"
     naru task note "$TASK" --file "$SCRATCH/commit-note.md" > /dev/null || true
   fi
