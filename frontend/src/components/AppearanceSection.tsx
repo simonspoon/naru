@@ -1,6 +1,19 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
-import { createTheme, getAppearance, listThemes, updateAppearance, updateMarkSkin } from '../api'
+import {
+  createMarkSkin,
+  createTheme,
+  deleteMarkSkin,
+  getAppearance,
+  getMarkSkin,
+  listMarkSkins,
+  listThemes,
+  updateAppearance,
+  updateMarkSkin,
+} from '../api'
 import { currentMarkSkin, MARK_SKIN_IDS, MARK_SKIN_LABELS, setMarkSkin, subscribeMarkSkin } from '../markSkin'
+import { exportFilename, importName } from '../markSkinCustom'
+import type { SkinLoadState } from '../markSkinCustom'
+import type { MarkSkinSummary } from '../types/MarkSkinSummary'
 import { previewMicRms, previewState } from '../markSkinFrames'
 import { applyTheme, isCustomId, parseSetting, themeSwatch } from '../theme'
 import type { ThemeSetting } from '../theme'
@@ -28,6 +41,12 @@ export function AppearanceSection() {
   const skin = useSyncExternalStore(subscribeMarkSkin, currentMarkSkin)
   const [skinError, setSkinError] = useState<string | null>(null)
   const latestSkin = useRef(0)
+  // Custom skins (naru task 2122): stored server-side, listed after the
+  // built-ins; each preview reports whether it loaded or fell back.
+  const customSkins = useFetch(() => listMarkSkins(), 'mark-skins')
+  const [skinLoad, setSkinLoad] = useState<Record<string, SkinLoadState>>({})
+  const [importing, setImporting] = useState(false)
+  const skinFile = useRef<HTMLInputElement>(null)
 
   const failure = error ?? themes.error
   if (failure) {
@@ -95,6 +114,47 @@ export function AppearanceSection() {
       setMarkSkin(previous)
       setSkinError(e instanceof Error ? e.message : String(e))
     })
+  }
+
+  async function importSkin(file: File | undefined) {
+    if (!file) return
+    setSkinError(null)
+    setImporting(true)
+    try {
+      await createMarkSkin({ name: importName(file.name), body: await file.text() })
+      await customSkins.refetch()
+    } catch (e) {
+      setSkinError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setImporting(false)
+    }
+  }
+
+  async function exportSkin(s: MarkSkinSummary) {
+    setSkinError(null)
+    try {
+      const { body } = await getMarkSkin(s.id)
+      const url = URL.createObjectURL(new Blob([body], { type: 'text/html' }))
+      const a = document.createElement('a')
+      a.href = url
+      a.download = exportFilename(s.name)
+      a.click()
+      URL.revokeObjectURL(url)
+    } catch (e) {
+      setSkinError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  async function deleteSkin(s: MarkSkinSummary) {
+    setSkinError(null)
+    try {
+      await deleteMarkSkin(s.id)
+      // The server cleared the saved choice if it was this skin.
+      if (currentMarkSkin() === s.id) setMarkSkin('waveform')
+      await customSkins.refetch()
+    } catch (e) {
+      setSkinError(e instanceof Error ? e.message : String(e))
+    }
   }
 
   const active = isCustomId(current) ? byId(current) : undefined
@@ -174,10 +234,80 @@ export function AppearanceSection() {
                 </span>
                 <span className="settings-command-title">{MARK_SKIN_LABELS[id]}</span>
               </label>
-            ))
+            )).concat(
+              (customSkins.data ?? []).map((s) => (
+                <div key={s.id} className="theme-option-wrap">
+                  <label className={`theme-option${s.id === skin ? ' selected' : ''}`}>
+                    <input
+                      type="radio"
+                      name="mark-skin"
+                      value={s.id}
+                      checked={s.id === skin}
+                      onChange={() => pickSkin(s.id)}
+                    />
+                    <span className="mark-skin-preview" aria-hidden="true">
+                      <NaruMark
+                        state={state}
+                        level={level}
+                        speechRms={noRms}
+                        decorative
+                        brandIdle
+                        skin={s.id}
+                        onSkinState={(load) => setSkinLoad((m) => (m[s.id] === load ? m : { ...m, [s.id]: load }))}
+                      />
+                    </span>
+                    <span className="settings-command-title mark-skin-name" title={s.name}>
+                      {s.name}
+                    </span>
+                    {skinLoad[s.id] === 'fallback' && (
+                      <span className="mark-skin-failed">failed to load · showing waveform</span>
+                    )}
+                  </label>
+                  <div className="mark-skin-actions">
+                    <button
+                      type="button"
+                      className="theme-duplicate"
+                      aria-label={`Export ${s.name}`}
+                      onClick={() => void exportSkin(s)}
+                    >
+                      Export
+                    </button>
+                    <button
+                      type="button"
+                      className="theme-duplicate danger"
+                      aria-label={`Delete ${s.name}`}
+                      onClick={() => void deleteSkin(s)}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </div>
+              )),
+            )
           }
         </MarkPreviews>
       </div>
+      <div className="mark-skin-import">
+        <button type="button" disabled={importing} onClick={() => skinFile.current?.click()}>
+          {importing ? 'Importing…' : 'Import skin…'}
+        </button>
+        <input
+          ref={skinFile}
+          type="file"
+          accept=".html,text/html"
+          hidden
+          aria-label="Mark skin file"
+          onChange={(e) => {
+            void importSkin(e.target.files?.[0])
+            // Reset so the same file can be picked again.
+            e.target.value = ''
+          }}
+        />
+        <p className="muted mark-skin-hint">
+          A single self-contained HTML file, up to 64 KiB. See <code>docs/mark-skins.md</code>.
+        </p>
+      </div>
+      {customSkins.error && <p className="error">{customSkins.error}</p>}
       {skinError && <p className="error">{skinError}</p>}
     </>
   )

@@ -58,10 +58,19 @@ export const MARK_SKIN_LABELS: Record<(typeof MARK_SKIN_IDS)[number], string> = 
   blob: 'Blob',
 }
 
-/** The skin id to draw for a saved setting: an unknown or absent id is the default. */
+/** A user-made skin's id (naru task 2122): `custom-<n>`, stored server-side. */
+export function isCustomMarkSkin(id: string): boolean {
+  return /^custom-\d+$/.test(id)
+}
+
+/**
+ * The skin id to draw for a saved setting: a built-in or a `custom-<n>` id is
+ * kept (a custom skin that turns out missing or broken falls back where it is
+ * drawn, `NaruMark.tsx`); anything else, or nothing, is the default.
+ */
 export function markSkinId(setting: string | null | undefined): string {
   const id = setting?.trim() ?? ''
-  return (MARK_SKIN_IDS as readonly string[]).includes(id) ? id : DEFAULT_MARK_SKIN
+  return (MARK_SKIN_IDS as readonly string[]).includes(id) || isCustomMarkSkin(id) ? id : DEFAULT_MARK_SKIN
 }
 
 // The current skin: one value for every mark on the page, set from the saved

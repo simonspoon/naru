@@ -1575,8 +1575,11 @@ A twelfth, independent section holds the web UI's colour theme (naru task
   `light`).
 - **`mark-skin`** (naru task 2120): the live mark's skin id — `"waveform"`
   (the built-in, absent/`null`), `"face"` or `"blob"` (naru task 2121),
-  picked in Settings → Appearance → **Mark**. Anything else is
-  **422 `validation`**, writing nothing; a hand-edited unknown id reads back
+  picked in Settings → Appearance → **Mark**, or `"custom-<n>"`, an existing
+  user-made skin (naru task 2122, `docs/mark-skins.md` "Custom skins").
+  Anything else, including a `custom-<n>` that does not exist, is
+  **422 `validation`**, writing nothing; deleting the chosen custom skin clears
+  the setting back to `waveform`. A hand-edited unknown id reads back
   verbatim and the page draws the waveform. The allowed ids live in
   `config::MARK_SKINS` and `markSkin.ts::MARK_SKIN_IDS` — keep them in step.
   The skin contract is in `docs/mark-skins.md`.

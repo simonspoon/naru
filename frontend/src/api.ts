@@ -42,6 +42,8 @@ import type { VoiceEnrollment } from './types/VoiceEnrollment'
 import type { AudioTestResult } from './types/AudioTestResult'
 import type { ConfigAudio } from './types/ConfigAudio'
 import type { ConfigAppearance } from './types/ConfigAppearance'
+import type { MarkSkinRecord } from './types/MarkSkinRecord'
+import type { MarkSkinSummary } from './types/MarkSkinSummary'
 import type { Theme } from './types/Theme'
 import type { ThemePreview } from './types/ThemePreview'
 import type { ThemeSlots } from './types/ThemeSlots'
@@ -1771,6 +1773,31 @@ export function updateAppearance(theme: string | null): Promise<ConfigAppearance
  */
 export function updateMarkSkin(skin: string): Promise<ConfigAppearance> {
   return request('/api/config/appearance', jsonInit('PUT', { mark_skin: skin }))
+}
+
+/** Every custom mark skin, oldest first, without bodies (naru task 2122). */
+export function listMarkSkins(): Promise<MarkSkinSummary[]> {
+  return request('/api/mark-skins')
+}
+
+/** One custom mark skin with its HTML body (the picker's Export). */
+export function getMarkSkin(id: string): Promise<MarkSkinRecord> {
+  return request(`/api/mark-skins/${encodeURIComponent(id)}`)
+}
+
+/** Stores a skin file; a taken name is 409, a bad name or a body over 64 KiB 422. */
+export function createMarkSkin(body: { name: string; body: string }): Promise<MarkSkinRecord> {
+  return request('/api/mark-skins', jsonInit('POST', body))
+}
+
+/** Deletes a custom skin; the server clears the saved choice if it was this one. */
+export function deleteMarkSkin(id: string): Promise<MarkSkinRecord> {
+  return request(`/api/mark-skins/${encodeURIComponent(id)}`, jsonDelete())
+}
+
+/** The URL a custom skin's sandboxed iframe loads. */
+export function markSkinRenderUrl(id: string): string {
+  return `/api/mark-skins/${encodeURIComponent(id)}/render`
 }
 
 /** Every theme, built-ins first (naru task 1843). */

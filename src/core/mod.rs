@@ -56,7 +56,7 @@ pub use store::{
     ProjectPatch, RETRO_EVIDENCE_LINE_MAX, RETRO_FINDINGS_LIST_MAX, RETRO_SUMMARY_MAX,
     ReceiptPatch, Result, SCRIPT_RUN_ABANDONED, SCRIPT_RUN_KEEP, STALE_CLAIM_MINUTES, ScriptPatch,
     Store, TaskPatch, WorkflowNodeNew, WorkflowNodePatch, WorkflowPatch, default_db_path,
-    validate_live_client,
+    mark_skin_number, validate_live_client,
 };
 pub use types::{
     ARTIFACT_CONTENT_TYPES, AgentQuestion, AgentSession, AgentSpawned, ArchiveOutcome, Artifact,

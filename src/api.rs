@@ -3955,6 +3955,19 @@ fn router(state: AppState) -> Router {
             "/api/themes/{id}",
             get(get_theme).patch(update_theme).delete(delete_theme),
         )
+        // Custom live mark skins (naru task 2122, `docs/mark-skins.md`):
+        // CRUD on `require_agent_access` like the themes; `render` on the
+        // plain guard only, the artifact render route's posture, since the
+        // sandbox CSP is the defense and the page's iframe must load it.
+        .route(
+            "/api/mark-skins",
+            get(list_mark_skins).post(create_mark_skin),
+        )
+        .route(
+            "/api/mark-skins/{id}",
+            get(get_mark_skin).delete(delete_mark_skin),
+        )
+        .route("/api/mark-skins/{id}/render", get(render_mark_skin))
         // Knowledge base viewer (naru task 1928): thin reads/ask over
         // `core::kb`, no storage of its own. All three `require_agent_access`
         // (ask spawns `claude`); the note path rides a query, not the path.
@@ -12240,6 +12253,147 @@ async fn preview_theme(
 ) -> ApiResult<Response> {
     require_agent_access(&state, &addr, &headers)?;
     Ok(Json(crate::core::theme::preview(&body.slots)?).into_response())
+}
+
+// ---- custom mark skins (naru task 2122) ----
+
+/// The row number of a `custom-<n>` path id; anything else is a 404.
+fn mark_skin_path_id(id: &str) -> ApiResult<i64> {
+    crate::core::mark_skin_number(id)
+        .ok_or_else(|| Error::NotFound(format!("mark skin {id} not found")).into())
+}
+
+/// `GET /api/mark-skins` — every custom skin, oldest first, without bodies.
+async fn list_mark_skins(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let store = theme_store(&state);
+    Ok(Json(store.list_mark_skins()?).into_response())
+}
+
+/// `GET /api/mark-skins/{id}` — one skin with its body (the page's export).
+async fn get_mark_skin(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let n = mark_skin_path_id(&id)?;
+    let store = theme_store(&state);
+    Ok(Json(store.get_mark_skin(n)?).into_response())
+}
+
+#[derive(Deserialize)]
+struct MarkSkinCreate {
+    name: String,
+    body: String,
+}
+
+/// `POST /api/mark-skins {name, body}` — 201 with the stored skin; a taken
+/// name is 409, a bad name or a body over 64 KiB 422.
+async fn create_mark_skin(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(body): Json<MarkSkinCreate>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let mut store = theme_store(&state);
+    let skin = store.create_mark_skin(&body.name, &body.body)?;
+    Ok((StatusCode::CREATED, Json(skin)).into_response())
+}
+
+/// `DELETE /api/mark-skins/{id}` — echoes the deleted skin; clears the saved
+/// `mark-skin` if it was the chosen one.
+async fn delete_mark_skin(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let mut store = theme_store(&state);
+    Ok(Json(crate::core::theme::delete_mark_skin(&mut store, &id)?).into_response())
+}
+
+/// Put in front of a custom mark skin's document by [`render_mark_skin`]
+/// (naru task 2122, the contract in `docs/mark-skins.md`). It has to run
+/// before the skin's own scripts, which call `naruMark.onFrame` at load:
+/// it defines `window.naruMark` (`onFrame(cb)`, `onTheme(cb)`), posts
+/// `{naru:'mark-ready'}` to the parent the first time `onFrame` is called,
+/// and posts `{naru:'mark-error'}` once — on any uncaught error or rejection,
+/// or a handler throwing — after which it stops calling the skin. Only a
+/// message from the parent counts: `mark-frame` goes to the frame handler,
+/// `mark-theme` sets each `--naru-*` string var on `<html>` (the board
+/// relay's rule) and goes to the theme handler. The style keeps the frame
+/// transparent and unscrolled; the skin's own later rules may override it.
+/// Its `color-scheme: light` matches the iframe element's (`App.css`
+/// `.naru-mark-frame iframe`): a frame whose scheme differs from its
+/// element's is painted on an opaque canvas, a white box behind the mark.
+const MARK_SKIN_BOOTSTRAP: &str = "<script>(function(){var F=null,T=null,E=0,R=0;\
+function err(m){if(E)return;E=1;try{parent.postMessage({naru:'mark-error',message:String(m).slice(0,500)},'*')}catch(x){}}\
+addEventListener('error',function(e){err(e.message||'error')});\
+addEventListener('unhandledrejection',function(e){err(e.reason)});\
+window.naruMark={onFrame:function(cb){if(typeof cb!=='function')return;F=cb;\
+if(!R){R=1;parent.postMessage({naru:'mark-ready'},'*')}},\
+onTheme:function(cb){if(typeof cb==='function')T=cb}};\
+addEventListener('message',function(e){var d=e.data;if(E||e.source!==parent||!d)return;\
+try{if(d.naru==='mark-frame'){if(F)F(d)}\
+else if(d.naru==='mark-theme'&&d.vars&&typeof d.vars==='object'){var s=document.documentElement.style;\
+Object.keys(d.vars).forEach(function(k){var v=d.vars[k];\
+if(/^--naru-[a-z0-9-]+$/.test(k)&&typeof v==='string')s.setProperty(k,v)});if(T)T(d.vars)}}\
+catch(x){err(x&&x.message||x)}})})();</script>\
+<style>:root{color-scheme:light}html,body{margin:0;background:transparent;overflow:hidden}</style>\n";
+
+/// A skin's document as the render route serves it: [`MARK_SKIN_BOOTSTRAP`]
+/// right after a leading `<!doctype …>` (so the page stays in standards
+/// mode), else in front of everything.
+fn mark_skin_render_body(body: &str) -> String {
+    let lead = body.len() - body.trim_start().len();
+    let rest = &body[lead..];
+    if rest
+        .get(..9)
+        .is_some_and(|h| h.eq_ignore_ascii_case("<!doctype"))
+        && let Some(end) = rest.find('>')
+    {
+        let at = lead + end + 1;
+        return format!("{}{MARK_SKIN_BOOTSTRAP}{}", &body[..at], &body[at..]);
+    }
+    format!("{MARK_SKIN_BOOTSTRAP}{body}")
+}
+
+/// `GET /api/mark-skins/{id}/render` — the skin's document for the page's
+/// `<iframe sandbox="allow-scripts">`. Gate: plain `guard` only, identical in
+/// both serve modes, with the artifact route's [`RENDER_CSP`] — the
+/// [`render_project_artifact`] posture: the sandbox strips the document of
+/// Naru's origin and `default-src 'none'` keeps it off the network.
+async fn render_mark_skin(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Response> {
+    let n = mark_skin_path_id(&id)?;
+    let skin = {
+        let store = theme_store(&state);
+        store.get_mark_skin(n)?
+    };
+    Ok((
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8".to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                disposition("inline", &format!("{}.html", skin.id)),
+            ),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
+            (header::CONTENT_SECURITY_POLICY, RENDER_CSP.to_string()),
+        ],
+        mark_skin_render_body(&skin.body).into_bytes(),
+    )
+        .into_response())
 }
 
 #[derive(Deserialize)]
@@ -22797,6 +22951,141 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             .await
             .unwrap_err();
         assert_eq!(err.status, StatusCode::NOT_FOUND);
+    }
+
+    // --- Custom mark skins (naru task 2122) --------------------------------
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn mark_skin_routes_round_trip_and_render() {
+        let _env = attachments::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let cfg = tempfile::tempdir().unwrap();
+        // SAFETY: ENV_LOCK gives this test exclusive access to the variable.
+        unsafe { std::env::set_var("MESA_CONFIG_FILE", cfg.path().join("config.json")) };
+        let (_dir, state) = test_state();
+        let h = loopback_agent_headers;
+        let create = |name: &str, body: String| {
+            create_mark_skin(
+                State(state.clone()),
+                ConnectInfo(loopback()),
+                h(),
+                Json(MarkSkinCreate {
+                    name: name.into(),
+                    body,
+                }),
+            )
+        };
+
+        let doc = "<!DOCTYPE html><html><body><script>naruMark.onFrame(function(){})</script></body></html>";
+        let resp = create("Pulse", doc.into()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let created = json_body(resp).await;
+        let id = created["id"].as_str().unwrap().to_string();
+        assert_eq!(id, "custom-1");
+        assert_eq!(
+            create("pulse", "<p/>".into()).await.unwrap_err().status,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            create("Big", "x".repeat(64 * 1024 + 1))
+                .await
+                .unwrap_err()
+                .status,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+
+        let list = list_mark_skins(State(state.clone()), ConnectInfo(loopback()), h())
+            .await
+            .unwrap();
+        let list = json_body(list).await;
+        assert_eq!(list.as_array().unwrap().len(), 1);
+        assert!(list[0].get("body").is_none());
+        let got = get_mark_skin(
+            State(state.clone()),
+            ConnectInfo(loopback()),
+            h(),
+            Path(id.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(json_body(got).await["body"], doc);
+
+        // Render: the artifact headers, the bootstrap after the doctype and
+        // before the skin's first script.
+        let resp = render_mark_skin(State(state.clone()), Path(id.clone()))
+            .await
+            .unwrap();
+        let headers = resp.headers().clone();
+        assert_eq!(headers[header::CONTENT_TYPE], "text/html; charset=utf-8");
+        assert_eq!(headers[header::CONTENT_SECURITY_POLICY], RENDER_CSP);
+        assert_eq!(headers[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let html = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(html.starts_with(&format!("<!DOCTYPE html>{MARK_SKIN_BOOTSTRAP}")));
+        assert!(html.find(MARK_SKIN_BOOTSTRAP).unwrap() < html.find("naruMark.onFrame").unwrap());
+        assert!(html.ends_with("</html>"));
+        assert_eq!(
+            mark_skin_render_body("<svg/>"),
+            format!("{MARK_SKIN_BOOTSTRAP}<svg/>")
+        );
+        for bad in ["custom-9", "waveform"] {
+            let err = render_mark_skin(State(state.clone()), Path(bad.into()))
+                .await
+                .unwrap_err();
+            assert_eq!(err.status, StatusCode::NOT_FOUND, "{bad}");
+        }
+
+        // Appearance accepts an existing skin and refuses a missing one.
+        let put = |skin: &str| {
+            update_config_appearance(
+                State(state.clone()),
+                ConnectInfo(loopback()),
+                h(),
+                Json(AppearanceUpdate {
+                    theme: None,
+                    mark_skin: Some(Some(skin.to_string())),
+                }),
+            )
+        };
+        assert_eq!(
+            json_body(put(&id).await.unwrap()).await["mark_skin"],
+            id.as_str()
+        );
+        assert_eq!(
+            put("custom-999").await.unwrap_err().status,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+
+        // Delete echoes the skin and clears the choice.
+        let del = delete_mark_skin(
+            State(state.clone()),
+            ConnectInfo(loopback()),
+            h(),
+            Path(id.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(json_body(del).await["id"], id.as_str());
+        let got = get_config_appearance(State(state.clone()), ConnectInfo(loopback()), h())
+            .await
+            .unwrap();
+        assert!(json_body(got).await["mark_skin"].is_null());
+        let err = get_mark_skin(State(state.clone()), ConnectInfo(loopback()), h(), Path(id))
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, StatusCode::NOT_FOUND);
+
+        let bad = hdrs(Some("evil.example:0"), None);
+        let err = list_mark_skins(State(state), ConnectInfo(loopback()), bad)
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, StatusCode::FORBIDDEN);
+        // SAFETY: ENV_LOCK is held.
+        unsafe { std::env::remove_var("MESA_CONFIG_FILE") };
     }
 
     #[tokio::test]

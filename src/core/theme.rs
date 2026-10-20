@@ -590,7 +590,44 @@ pub fn save_appearance_in(
             }
         }
     }
+    // A custom mark skin (naru task 2122) must exist; an overflowing number
+    // names none.
+    if let Some(Some(v)) = updates.get(config::MARK_SKIN) {
+        let v = v.trim();
+        if v.starts_with("custom-") {
+            let missing = || SaveError::Validation(format!("mark skin {v:?} does not exist"));
+            let n = crate::core::store::mark_skin_number(v).ok_or_else(missing)?;
+            match store.get_mark_skin(n) {
+                Ok(_) => {}
+                Err(Error::NotFound(_)) => return Err(missing()),
+                Err(e) => return Err(SaveError::Unavailable(e.to_string())),
+            }
+        }
+    }
     config::save_appearance_in(path, updates)
+}
+
+/// Deletes a custom mark skin (naru task 2122) by its `custom-<n>` id and
+/// echoes it; clears the saved `mark-skin` if it was the chosen one, so every
+/// page falls back to the default.
+pub fn delete_mark_skin(store: &mut Store, id: &str) -> Result<super::types::MarkSkinRecord> {
+    delete_mark_skin_in(store, &config::config_file(), id)
+}
+
+pub fn delete_mark_skin_in(
+    store: &mut Store,
+    path: &Path,
+    id: &str,
+) -> Result<super::types::MarkSkinRecord> {
+    let n = crate::core::store::mark_skin_number(id)
+        .ok_or_else(|| Error::NotFound(format!("mark skin {id} not found")))?;
+    let skin = store.delete_mark_skin(n)?;
+    let saved = config::appearance_in(path).map_err(Error::Unavailable)?;
+    if saved.mark_skin.as_deref() == Some(skin.id.as_str()) {
+        let clear = HashMap::from([(config::MARK_SKIN.to_string(), None)]);
+        config::save_appearance_in(path, &clear).map_err(save_err)?;
+    }
+    Ok(skin)
 }
 
 /// The appearance settings with the active custom theme filled in.
@@ -767,6 +804,39 @@ mod tests {
             Err(SaveError::Validation(_))
         ));
         assert!(!cfg.exists());
+    }
+
+    #[test]
+    fn mark_skin_custom_id_must_exist_and_delete_clears_it() {
+        let (mut store, cfg, _d) = temp();
+        let set = |v: &str| HashMap::from([(config::MARK_SKIN.to_string(), Some(v.to_string()))]);
+        for missing in ["custom-1", "custom-99999999999999999999"] {
+            assert!(matches!(
+                save_appearance_in(&store, &cfg, &set(missing)),
+                Err(SaveError::Validation(_))
+            ));
+        }
+        assert!(!cfg.exists());
+        let a = store.create_mark_skin("A", "<p>a</p>").unwrap();
+        let b = store.create_mark_skin("B", "<p>b</p>").unwrap();
+        save_appearance_in(&store, &cfg, &set(&a.id)).unwrap();
+        // Deleting a skin that is not the chosen one leaves the choice alone.
+        assert_eq!(delete_mark_skin_in(&mut store, &cfg, &b.id).unwrap(), b);
+        assert_eq!(
+            config::appearance_in(&cfg).unwrap().mark_skin.as_deref(),
+            Some(a.id.as_str())
+        );
+        // Deleting the chosen one clears it.
+        assert_eq!(delete_mark_skin_in(&mut store, &cfg, &a.id).unwrap(), a);
+        assert_eq!(config::appearance_in(&cfg).unwrap().mark_skin, None);
+        assert!(matches!(
+            delete_mark_skin_in(&mut store, &cfg, &a.id),
+            Err(Error::NotFound(_))
+        ));
+        assert!(matches!(
+            delete_mark_skin_in(&mut store, &cfg, "waveform"),
+            Err(Error::NotFound(_))
+        ));
     }
 
     fn is_validation<T: std::fmt::Debug>(r: Result<T>) -> String {

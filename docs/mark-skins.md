@@ -41,8 +41,10 @@ and filter on every painted frame, since a skin swap keeps the same `<svg>`.
     through React.
 
   The palette is the per-state one from `liveMark.ts`, theme-independent on
-  purpose (`docs/style-guide.md` "Themes"); a skin must not read the site's
-  CSS theme vars to colour the mark.
+  purpose (`docs/style-guide.md` "Themes"); a built-in skin colours the mark
+  from the palette alone, never from the site's CSS theme vars. A custom skin
+  (below) is handed the theme's `--naru-*` vars as well, for chrome only —
+  the state colours still come from the palette.
 
 ## Choosing a skin
 
@@ -60,3 +62,106 @@ envelope), thinking and paused two seconds each on one shared clock. A pick
 calls `setMarkSkin` at once and saves through `api.ts::updateMarkSkin`, which
 sends `{mark_skin}` alone so the theme is left untouched; a refused save puts
 the previous skin back and shows the error.
+
+## Custom skins
+
+Naru task 2122 lets a person add their own skins. A custom skin is **one
+self-contained HTML document** — inline SVG, CSS and JS, at most 64 KiB,
+nothing loaded from anywhere — stored server-side in the `mark_skins` table
+(`Store::create_mark_skin`/`list_mark_skins`/`get_mark_skin`/
+`delete_mark_skin`), so every browser of that Naru shows it. Its id is
+`custom-<n>` (AUTOINCREMENT, never reissued after a delete); its name is
+1–40 characters, unique case-insensitively, and may not be a built-in id or
+`custom-<digits>`.
+
+### Routes
+
+| Route | Gate | Answer |
+| --- | --- | --- |
+| `GET /api/mark-skins` | `require_agent_access` | every skin, oldest first, no `body` (`MarkSkinSummary`) |
+| `POST /api/mark-skins {name, body}` | `require_agent_access` | 201 + the `MarkSkinRecord`; a taken name 409 `conflict`, a bad name, an empty body or one over 64 KiB 422 `validation` |
+| `GET /api/mark-skins/{id}` | `require_agent_access` | the record with its body (the picker's Export) |
+| `DELETE /api/mark-skins/{id}` | `require_agent_access` | echoes the destroyed record; clears `appearance.mark-skin` if it named this skin |
+| `GET /api/mark-skins/{id}/render` | plain guard only | the document for the iframe |
+
+There is no CLI yet: `naru mark` is naru task 2123, so for now the routes and
+the web picker are the only surface (a known, temporary gap in "CLI and API
+never diverge"). Moving a skin between machines is the web UI: Export on one
+Naru's picker downloads `<name>.html`, Import skin… on the other uploads it.
+
+### How it runs
+
+The render route serves the stored document as `text/html` under the
+artifact route's `RENDER_CSP` (`sandbox allow-scripts`, `default-src
+'none'`, so an opaque origin and no network) with `nosniff`, identically in
+both serve modes, and puts **a bootstrap first** — right after a leading
+`<!doctype …>`, else in front of everything — so it exists before the skin's
+own scripts run. The page loads it in `<iframe sandbox="allow-scripts">`
+(never `allow-same-origin`) inside the mark's box
+(`NaruMark.tsx::CustomMark`); the frame's viewport *is* the mark, so draw to
+`100vw`/`100vh` (an `<svg viewBox="0 0 64 64">` at full size is the easy
+way). The bootstrap also sets `:root{color-scheme:light}` and
+`html,body{margin:0;background:transparent;overflow:hidden}`; keep the
+background transparent and leave `color-scheme` alone — the iframe element
+is pinned to `light` too, and a frame whose scheme differs from its
+element's is painted on an opaque white canvas.
+
+The bootstrap gives the skin one object:
+
+- `naruMark.onFrame(cb)` — `cb({naru:'mark-frame', mode, level, palette,
+  reduced, t, dt})` every animation frame, exactly what a built-in painter is
+  handed (`MarkInput` above: `mode` is `idle|hear|speak|think|paused|offer`,
+  `level` 0..1, `palette` `{bars: [7 colours], glow}`). The **first** call is
+  what tells the page the skin is ready.
+- `naruMark.onTheme(cb)` — `cb(vars)` with the theme's `--naru-*` map (the
+  html board vocabulary, `docs/live.md`) on ready and on every theme change;
+  the bootstrap has already set each var on `<html>`, so CSS can just use
+  `var(--naru-fg)`.
+
+Only messages from the parent page count. An uncaught error, an unhandled
+rejection or a handler throwing posts `mark-error` once and the skin is
+called no more.
+
+### Fallback
+
+A custom skin that is broken draws **waveform** instead
+(`markSkinCustom.ts::nextSkinState`, final once taken): no `onFrame` call
+within 2 s (`MARK_SKIN_READY_MS` — which also catches a deleted or unknown
+id, whose 404 page never announces itself), or a `mark-error` at any time.
+The host span carries `data-skin-state="loading|ready|fallback"`; the picker
+card adds "failed to load · showing waveform".
+
+### Sample
+
+```html
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>svg { display: block; width: 100vw; height: 100vh; }</style>
+</head>
+<body>
+<svg viewBox="0 0 64 64">
+  <circle id="ring" cx="32" cy="32" r="27" fill="none" stroke-width="3" stroke-linecap="round"/>
+  <circle id="core" cx="32" cy="32" r="16"/>
+</svg>
+<script>
+  var ring = document.getElementById('ring')
+  var core = document.getElementById('core')
+  naruMark.onFrame(function (f) {
+    var speed = f.reduced ? 0.5 : 1
+    var r = 12 + 10 * f.level
+    if (f.mode === 'idle' || f.mode === 'offer') r = 13 + 1.5 * Math.sin(f.t * 2 * speed)
+    if (f.mode === 'think') r = 11
+    core.setAttribute('r', r.toFixed(2))
+    core.setAttribute('fill', f.palette.bars[3])
+    core.style.opacity = f.mode === 'paused' ? 0.35 : 1
+    ring.setAttribute('stroke', f.palette.glow)
+    ring.setAttribute('stroke-dasharray', f.mode === 'think' ? '10 7' : f.mode === 'hear' ? '2 5' : 'none')
+    ring.setAttribute('transform', 'rotate(' + ((f.t * 120 * speed) % 360).toFixed(1) + ' 32 32)')
+    ring.style.opacity = f.mode === 'paused' ? 0.2 : 0.4 + 0.6 * f.level
+  })
+</script>
+</body>
+</html>
+```

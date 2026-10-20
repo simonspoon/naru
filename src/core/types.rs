@@ -875,6 +875,30 @@ pub struct ConfigAppearance {
     pub mark_skin_default: String,
 }
 
+/// A user-made live mark skin (naru task 2122, `docs/mark-skins.md`): one
+/// self-contained HTML document the page runs in a sandboxed iframe.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct MarkSkinRecord {
+    /// `custom-<n>`, never reissued after a delete.
+    pub id: String,
+    pub name: String,
+    /// The HTML document, at most 64 KiB.
+    pub body: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// A [`MarkSkinRecord`] without its body (`GET /api/mark-skins`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct MarkSkinSummary {
+    pub id: String,
+    pub name: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 /// The live-conversation settings as the Settings page sees them
 /// (`core::config`, `docs/config.md`, mesa task 867) — a fifth view of
 /// `~/.mesa/config.json`, with the same null-means-fallback rule as

@@ -3441,7 +3441,14 @@ pub(crate) fn save_appearance_in(
             if let Some(value) = updates[*key].as_deref().map(str::trim)
                 && !value.is_empty()
             {
-                validate_word(key, value, MARK_SKINS).map_err(SaveError::Validation)?;
+                // A custom skin id (naru task 2122) is checked for syntax
+                // only; `core::theme` checks that the skin exists.
+                let custom = value
+                    .strip_prefix("custom-")
+                    .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()));
+                if !custom {
+                    validate_word(key, value, MARK_SKINS).map_err(SaveError::Validation)?;
+                }
             }
             continue;
         }
@@ -7929,6 +7936,19 @@ mod tests {
             save_appearance_in(&path, &audio_update(&[(MARK_SKIN, Some("nope"))])).unwrap_err();
         assert!(matches!(err, SaveError::Validation(_)), "{err:?}");
         assert_eq!(std::fs::read(&path).unwrap(), before);
+        // A custom skin id (naru task 2122) passes the syntax check here;
+        // a near miss does not.
+        for bad in ["custom-", "custom-x"] {
+            let err =
+                save_appearance_in(&path, &audio_update(&[(MARK_SKIN, Some(bad))])).unwrap_err();
+            assert!(matches!(err, SaveError::Validation(_)), "{bad}: {err:?}");
+        }
+        save_appearance_in(&path, &audio_update(&[(MARK_SKIN, Some("custom-4"))])).unwrap();
+        assert_eq!(
+            appearance_in(&path).unwrap().mark_skin.as_deref(),
+            Some("custom-4")
+        );
+        save_appearance_in(&path, &audio_update(&[(MARK_SKIN, Some("waveform"))])).unwrap();
         // A theme save leaves the skin alone; null restores the default.
         save_appearance_in(&path, &audio_update(&[(THEME, Some("light"))])).unwrap();
         assert_eq!(

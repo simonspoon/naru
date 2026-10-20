@@ -20,7 +20,10 @@ describe('markSkinId', () => {
     expect(markSkinId(' waveform ')).toBe('waveform')
     expect(markSkinId('face')).toBe('face')
     expect(markSkinId('blob')).toBe('blob')
-    for (const bad of ['nope', '', '  ', null, undefined, 'Waveform', 'Face']) expect(markSkinId(bad)).toBe('waveform')
+    for (const bad of ['nope', '', '  ', null, undefined, 'Waveform', 'Face', 'custom-', 'custom-x', 'Custom-1'])
+      expect(markSkinId(bad)).toBe('waveform')
+    // A custom skin's id (naru task 2122) is kept.
+    expect(markSkinId(' custom-12 ')).toBe('custom-12')
   })
 })
 

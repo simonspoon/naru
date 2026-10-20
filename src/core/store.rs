@@ -1523,6 +1523,16 @@ const MIGRATIONS: &[&str] = &[
         workflow_id INTEGER PRIMARY KEY REFERENCES workflows(id) ON DELETE CASCADE,
         builtin_id  TEXT NOT NULL UNIQUE
      );",
+    // Naru task 2122: user-made live mark skins, one HTML document each
+    // (`docs/mark-skins.md`). AUTOINCREMENT so a deleted `custom-<id>` is
+    // never reissued to a skin a stale config would then pick up.
+    "CREATE TABLE mark_skins (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        name       TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        body       TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+     );",
 ];
 
 /// Selects full task rows including the derived `blocked` flag.
@@ -12827,6 +12837,135 @@ impl Store {
     }
 }
 
+/// The largest custom mark skin body, in bytes (naru task 2122).
+pub const MARK_SKIN_BODY_MAX: usize = 64 * 1024;
+
+/// The row number in a `custom-<digits>` mark skin id; `None` for anything
+/// else, an overflowing number included.
+pub fn mark_skin_number(id: &str) -> Option<i64> {
+    let d = id.trim().strip_prefix("custom-")?;
+    if d.is_empty() || !d.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    d.parse().ok()
+}
+
+const MARK_SKIN_COLUMNS: &str = "id, name, body, created_at, updated_at";
+
+fn row_to_mark_skin(r: &rusqlite::Row) -> rusqlite::Result<super::types::MarkSkinRecord> {
+    Ok(super::types::MarkSkinRecord {
+        id: format!("custom-{}", r.get::<_, i64>(0)?),
+        name: r.get(1)?,
+        body: r.get(2)?,
+        created_at: r.get(3)?,
+        updated_at: r.get(4)?,
+    })
+}
+
+/// Trimmed name, 1..=40 chars, no control characters, and not a built-in
+/// skin's id or `custom-<digits>` (those are selectors).
+fn validate_mark_skin_name(name: &str) -> Result<String> {
+    let name = name.trim();
+    let len = name.chars().count();
+    if len == 0 || len > 40 {
+        return Err(Error::Validation(
+            "mark skin name must be 1 to 40 characters".into(),
+        ));
+    }
+    if name.chars().any(char::is_control) {
+        return Err(Error::Validation(
+            "mark skin name must not contain control characters".into(),
+        ));
+    }
+    let lower = name.to_lowercase();
+    let reserved = super::config::MARK_SKINS.contains(&lower.as_str());
+    let custom_id = lower
+        .strip_prefix("custom-")
+        .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()));
+    if reserved || custom_id {
+        return Err(Error::Validation(format!(
+            "mark skin name \"{name}\" is reserved"
+        )));
+    }
+    Ok(name.to_string())
+}
+
+impl Store {
+    /// Stores a new custom mark skin (naru task 2122). The body must be
+    /// non-blank and at most [`MARK_SKIN_BODY_MAX`] bytes; a name taken by
+    /// another skin (case-insensitively) is `conflict`.
+    pub fn create_mark_skin(
+        &mut self,
+        name: &str,
+        body: &str,
+    ) -> Result<super::types::MarkSkinRecord> {
+        let name = validate_mark_skin_name(name)?;
+        if body.trim().is_empty() {
+            return Err(Error::Validation("mark skin body must not be empty".into()));
+        }
+        if body.len() > MARK_SKIN_BODY_MAX {
+            return Err(Error::Validation(format!(
+                "mark skin body is {} bytes; the limit is {MARK_SKIN_BODY_MAX} bytes (64 KiB)",
+                body.len()
+            )));
+        }
+        let clash: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM mark_skins WHERE name = ?1 COLLATE NOCASE)",
+            [&name],
+            |r| r.get(0),
+        )?;
+        if clash {
+            return Err(Error::Conflict(format!(
+                "a mark skin named \"{name}\" already exists"
+            )));
+        }
+        self.conn.execute(
+            "INSERT INTO mark_skins (name, body) VALUES (?1, ?2)",
+            (&name, body),
+        )?;
+        self.get_mark_skin(self.conn.last_insert_rowid())
+    }
+
+    pub fn get_mark_skin(&self, id: i64) -> Result<super::types::MarkSkinRecord> {
+        self.conn
+            .query_row(
+                &format!("SELECT {MARK_SKIN_COLUMNS} FROM mark_skins WHERE id = ?1"),
+                [id],
+                row_to_mark_skin,
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    Error::NotFound(format!("mark skin custom-{id} not found"))
+                }
+                e => Error::Db(e),
+            })
+    }
+
+    /// Every custom skin, oldest first, without bodies.
+    pub fn list_mark_skins(&self) -> Result<Vec<super::types::MarkSkinSummary>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, name, created_at, updated_at FROM mark_skins ORDER BY id")?;
+        let rows = stmt.query_map([], |r| {
+            Ok(super::types::MarkSkinSummary {
+                id: format!("custom-{}", r.get::<_, i64>(0)?),
+                name: r.get(1)?,
+                created_at: r.get(2)?,
+                updated_at: r.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Deletes a skin; returns the destroyed record.
+    pub fn delete_mark_skin(&mut self, id: i64) -> Result<super::types::MarkSkinRecord> {
+        let row = self.get_mark_skin(id)?;
+        self.conn
+            .execute("DELETE FROM mark_skins WHERE id = ?1", [id])?;
+        Ok(row)
+    }
+}
+
 /// The `MIGRATIONS` index that indexes existing whiteboards (mesa task 1548).
 const BOARD_INDEX_MIGRATION: usize = 79;
 
@@ -18160,15 +18299,15 @@ mod tests {
         );
         assert_eq!(
             MIGRATIONS.len(),
-            99,
-            "a fresh db should report user_version 99"
+            100,
+            "a fresh db should report user_version 100"
         );
         let (store, _dir) = temp_store();
         let version: i64 = store
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 99);
+        assert_eq!(version, 100);
     }
 
     /// Workflows replace diagrams at migration 83 (mesa task 1607): a db that
@@ -18192,7 +18331,7 @@ mod tests {
         store
             .conn
             .execute_batch(
-                "ALTER TABLE live_sessions DROP COLUMN listen_gen; DROP TABLE agent_questions; DROP TABLE custom_themes; DROP TABLE task_notes; ALTER TABLE live_sessions DROP COLUMN ambient_request_seq; ALTER TABLE live_sessions DROP COLUMN ambient_request; ALTER TABLE live_sessions DROP COLUMN host_seen_at; ALTER TABLE live_sessions DROP COLUMN host_ambient; ALTER TABLE live_notebook DROP COLUMN category; ALTER TABLE cc_messages DROP COLUMN cost_micro_usd; ALTER TABLE cc_sessions DROP COLUMN main_agent; ALTER TABLE live_boards DROP COLUMN pinned_at; DROP TABLE workflow_builtins; DROP TABLE workflow_revisions; DROP TABLE workflow_log; DROP TABLE workflow_gates; DROP TABLE workflow_runs; DROP TABLE workflow_edges; \
+                "DROP TABLE mark_skins; ALTER TABLE live_sessions DROP COLUMN listen_gen; DROP TABLE agent_questions; DROP TABLE custom_themes; DROP TABLE task_notes; ALTER TABLE live_sessions DROP COLUMN ambient_request_seq; ALTER TABLE live_sessions DROP COLUMN ambient_request; ALTER TABLE live_sessions DROP COLUMN host_seen_at; ALTER TABLE live_sessions DROP COLUMN host_ambient; ALTER TABLE live_notebook DROP COLUMN category; ALTER TABLE cc_messages DROP COLUMN cost_micro_usd; ALTER TABLE cc_sessions DROP COLUMN main_agent; ALTER TABLE live_boards DROP COLUMN pinned_at; DROP TABLE workflow_builtins; DROP TABLE workflow_revisions; DROP TABLE workflow_log; DROP TABLE workflow_gates; DROP TABLE workflow_runs; DROP TABLE workflow_edges; \
                  DROP TABLE workflow_nodes; DROP TABLE workflows; \
                  CREATE TABLE diagrams (id INTEGER PRIMARY KEY, title TEXT); \
                  INSERT INTO diagrams (title) VALUES ('stale'); \
@@ -23963,6 +24102,70 @@ mod tests {
         let cursors = store.cc_cursors().unwrap();
         assert_eq!(cursors.len(), 1);
         assert_eq!(cursors["/t/a.jsonl"], c2);
+    }
+
+    // ---- custom mark skins (naru task 2122) --------------------------
+
+    #[test]
+    fn mark_skin_round_trip_rules_and_ids_never_reused() {
+        let (mut store, _d) = temp_store();
+        let a = store.create_mark_skin("  Pulse ", "<p>a</p>").unwrap();
+        assert_eq!(a.id, "custom-1");
+        assert_eq!(a.name, "Pulse");
+        assert_eq!(a.body, "<p>a</p>");
+        assert_eq!(store.get_mark_skin(1).unwrap(), a);
+        let list = store.list_mark_skins().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, "custom-1");
+        assert!(matches!(
+            store.create_mark_skin("PULSE", "<p>b</p>"),
+            Err(Error::Conflict(_))
+        ));
+        for bad in [
+            "",
+            "   ",
+            "Waveform",
+            "blob",
+            "custom-3",
+            &"x".repeat(41),
+            "a\tb",
+        ] {
+            assert!(
+                matches!(
+                    store.create_mark_skin(bad, "<p/>"),
+                    Err(Error::Validation(_))
+                ),
+                "{bad:?}"
+            );
+        }
+        assert!(matches!(
+            store.create_mark_skin("Empty", "  \n"),
+            Err(Error::Validation(_))
+        ));
+        assert!(matches!(
+            store.create_mark_skin("Big", &"x".repeat(MARK_SKIN_BODY_MAX + 1)),
+            Err(Error::Validation(_))
+        ));
+        store
+            .create_mark_skin("Max", &"x".repeat(MARK_SKIN_BODY_MAX))
+            .unwrap();
+        assert_eq!(store.delete_mark_skin(1).unwrap(), a);
+        assert!(matches!(store.get_mark_skin(1), Err(Error::NotFound(_))));
+        assert!(matches!(store.delete_mark_skin(1), Err(Error::NotFound(_))));
+        // The freed name is usable again, but the id is never reissued.
+        assert_eq!(
+            store.create_mark_skin("Pulse", "<p/>").unwrap().id,
+            "custom-3"
+        );
+        assert_eq!(mark_skin_number("custom-12"), Some(12));
+        for bad in [
+            "custom-",
+            "custom-1a",
+            "waveform",
+            "custom-99999999999999999999",
+        ] {
+            assert_eq!(mark_skin_number(bad), None, "{bad}");
+        }
     }
 
     // ---- custom themes (naru task 1841) ------------------------------
