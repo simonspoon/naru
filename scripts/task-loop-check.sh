@@ -14,7 +14,9 @@
 # an inconclusive verifier ending in backlog + note + one recorded notify call;
 # an oversized task or a repeated finding set going to the Split step (second
 # pass skipped, backlog sub-tasks, parent noted, one notify), and a split with
-# no usable sub-task falling back to a plain backlog close.
+# no usable sub-task falling back to a plain backlog close; a pass-1 implement
+# timeout carried into pass 2 (partial in the brief, tree kept, then a pass),
+# and a second timeout ending in backlog with the partial in the note.
 set -euo pipefail
 unset $(env | sed -n 's/^\(NARU_[A-Za-z0-9_]*\)=.*/\1/p')
 unset CLAUDE_CODE_SESSION_ID
@@ -89,9 +91,14 @@ while IFS= read -r line; do
   text=$(jq -r '.message.content[0].text' <<<"$line")
   jq -Rn --arg t "$text" '$t' >> "$STUB/msgs.$agent"
   printf 'turn\n' >> "$STUB/turns.$agent"
-  [ -f "$STUB/hang.$agent" ] && { while :; do sleep 1; done; }
-  if [ "$agent" = implementer ] && [ -f "$STUB/touch.implementer" ]; then while IFS= read -r f; do mkdir -p "$(dirname "$f")"; echo "$RANDOM" >> "$f"; done < "$STUB/touch.implementer"; fi
   n=$(grep -c . "$STUB/turns.$agent")
+  if [ "$agent" = implementer ] && [ -f "$STUB/touch.implementer" ]; then while IFS= read -r f; do mkdir -p "$(dirname "$f")"; echo "$RANDOM" >> "$f"; done < "$STUB/touch.implementer"; fi
+  # hang.<agent> hangs every turn, hang.<agent>.<n> only that agent's n-th turn; a hang first
+  # writes partial.<agent> as an assistant line, so the stage has a partial to report
+  if [ -f "$STUB/hang.$agent" ] || [ -f "$STUB/hang.$agent.$n" ]; then
+    [ -f "$STUB/partial.$agent" ] && printf '{"type":"assistant","message":{"content":[{"type":"text","text":%s}]}}\n' "$(jq -Rs . < "$STUB/partial.$agent")"
+    while :; do sleep 1; done
+  fi
   reply=ok
   if [ "$agent" = planner ] && [ "$n" -ge 2 ] && [ -f "$STUB/split.json" ]; then reply=$(cat "$STUB/split.json")
   elif [ -f "$STUB/reply.$agent.$n" ]; then reply=$(cat "$STUB/reply.$agent.$n")
@@ -112,7 +119,7 @@ STUBEOF
 chmod +x "$STUB/vox"
 export MESA_VOX_BIN="$STUB/vox"
 
-reset_stub() { rm -f "$STUB"/touch.* "$STUB"/reply.* "$STUB"/die.* "$STUB"/hang.* "$STUB"/turns.* "$STUB"/msgs.* "$STUB"/typed.* "$STUB"/typed-msgs.* "$STUB"/split.json "$STUB/vox.log"; }
+reset_stub() { rm -f "$STUB"/touch.* "$STUB"/reply.* "$STUB"/die.* "$STUB"/hang.* "$STUB"/partial.* "$STUB"/turns.* "$STUB"/msgs.* "$STUB"/typed.* "$STUB"/typed-msgs.* "$STUB"/split.json "$STUB/vox.log"; }
 turns() { grep -c . "$STUB/turns.$1" 2>/dev/null || true; }
 # step <run json> <node title>: the status of that node's step (node ids from
 # the workflow's own node list, since a step carries the id only).
@@ -322,6 +329,40 @@ R=$(run_loop "$T")
 [ "$(jq -r .status <<<"$R")" = succeeded ] && [ "$(tstatus "$T")" = backlog ] || fail "impl failed: $(jq -c '{status,error}' <<<"$R") task $(tstatus "$T")"
 [ "$(step "$R" "Implement + review #1")" = ok ] && [ "$(step "$R" "Implement + review #2")" = skipped ] && [ "$(step "$R" "Close: backlog")" = ok ] || fail "impl failed: the passes or Close: backlog"
 ok "a failed implement ends the child pass and the loop in backlog, no second pass"
+
+# ---- 6c. a pass-1 implement timeout is carried into pass 2 (naru task 2185): the
+# working tree and the partial are kept, the second brief says resume, review runs ----
+reset_stub
+printf 'UI: no' > "$STUB/reply.planner"
+printf 'VERDICT: PASS' > "$STUB/reply.verifier"
+printf 'VERDICT: PASS' > "$STUB/reply.diff-reviewer"
+printf 'carry.txt\n' > "$STUB/touch.implementer"
+printf 'halfway: carry-partial-marker done' > "$STUB/partial.implementer"
+touch "$STUB/hang.implementer.1"
+T=$(mk "Fix the carry bug")
+R=$(NARU_LOOP_DEADLINE_IMPL=2 NARU_LOOP_CEILING_IMPL=2 run_loop "$T")
+[ "$(jq -r .status <<<"$R")" = succeeded ] && [ "$(tstatus "$T")" = done ] || fail "carry: $(jq -c '{status,error}' <<<"$R") task $(tstatus "$T")"
+[ "$(step "$R" "Implement + review #2")" = ok ] && [ "$(step "$R" "Split check")" = skipped ] || fail "carry: pass 2 $(step "$R" "Implement + review #2"), split check $(step "$R" "Split check")"
+[ "$(turns implementer)" = 2 ] && [ "$(turns verifier)" = 1 ] || fail "carry: turns implementer $(turns implementer) verifier $(turns verifier)"
+jq -r . "$STUB/msgs.implementer" | grep -q "Previous pass timed out: resume" || fail "carry: the second brief lacks the resume section"
+jq -r . "$STUB/msgs.implementer" | grep -q "carry-partial-marker" || fail "carry: the second brief lacks the partial"
+# pass 1 and pass 2 each appended one line: pass 1's edit survived into the commit
+[ "$(git -C "$TMP/work" show HEAD:carry.txt | grep -c .)" = 2 ] || fail "carry: carry.txt in the commit: $(git -C "$TMP/work" show HEAD:carry.txt 2>&1 | tr '\n' ' ')"
+metric "$T" PASS 2 done carry
+ok "a pass-1 implement timeout carries its partial and tree into pass 2, which passes"
+
+# ---- 6d. an implement timeout in both passes -> backlog, the partial in the note ----
+reset_stub
+printf 'UI: no' > "$STUB/reply.planner"
+printf 'twice-partial-marker' > "$STUB/partial.implementer"
+touch "$STUB/hang.implementer"
+T=$(mk "Fix the twice-timed-out bug")
+R=$(NARU_LOOP_DEADLINE_IMPL=2 NARU_LOOP_CEILING_IMPL=2 run_loop "$T")
+[ "$(jq -r .status <<<"$R")" = succeeded ] && [ "$(tstatus "$T")" = backlog ] || fail "two timeouts: $(jq -c '{status,error}' <<<"$R") task $(tstatus "$T")"
+[ "$(step "$R" "Implement + review #2")" = ok ] && [ "$(step "$R" "Close: backlog")" = ok ] && [ "$(turns verifier)" = "" ] || fail "two timeouts: passes, close or a review ran"
+"$NARU" task show "$T" | jq -e '[.notes[].body] | any(contains("impl2 partial: twice-partial-marker"))' >/dev/null || fail "two timeouts: the note lacks the partial"
+metric "$T" none 2 backlog two-timeouts
+ok "a second implement timeout ends in backlog with the partial in the note"
 
 # ---- 7. a tree dirty before the run -> the task's own file is committed, the stray one is left ----
 reset_stub

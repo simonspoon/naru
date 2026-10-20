@@ -2183,6 +2183,11 @@ const LOOP_IMPLEMENT: &str = r##"N=@N@
   printf '\n## Plan\n\n'; cat "$SCRATCH/plan.md"
   if [ -f "$SCRATCH/design.md" ]; then printf '\n## Design brief\n\n'; cat "$SCRATCH/design.md"; fi
   if [ -f "$SCRATCH/findings.md" ]; then printf '\n## Findings from the last review and verify: fix these\n\n'; cat "$SCRATCH/findings.md"; fi
+  # a pass-1 timeout carried into this pass (naru task 2185): resume, do not restart
+  if [ "$N" = 2 ] && [ -f "$SCRATCH/impl-1-partial.md" ]; then
+    printf '\n## Previous pass timed out: resume\n\nThe first implement pass ran out of time. Its edits are still in the working tree: inspect `git status` and `git diff` in each repo, then continue from where it stopped. Do not restart and do not revert its work. Its partial report:\n\n'
+    cat "$SCRATCH/impl-1-partial.md"
+  fi
   printf '\n## What to do\n\nImplement the work in the working tree and run the fast checks. Do not commit. End with a one-paragraph summary.\n'
   no_commit_rule
   split_rule
@@ -2193,7 +2198,14 @@ if [ "$(stage_verdict "impl$N")" = COMPLETE ]; then
   emit impl=ok
 else
   note_reason "impl$N"
-  emit impl=failed
+  echo "impl$N partial: $(jq -r '.partial // ""' "$SCRATCH/impl$N.json" 2>/dev/null | head -c 2000)" >> "$SCRATCH/reasons.txt"
+  # only a pass-1 timeout goes on to pass 2, with the tree and the partial kept (naru task 2185)
+  if [ "$N" = 1 ] && jq -e '(.reason // "") | startswith("timeout:")' "$SCRATCH/impl$N.json" > /dev/null 2>&1; then
+    jq -r '.partial // ""' "$SCRATCH/impl$N.json" > "$SCRATCH/impl-1-partial.md" 2>/dev/null
+    emit impl=timeout
+  else
+    emit impl=failed
+  fi
 fi
 "##;
 
@@ -2991,14 +3003,17 @@ fn build_task_loop_builtins(
             80.0,
         ),
         // One switch on the review verdict: PASS closes, NEEDS-FIX goes to the
-        // second pass, anything else (INCONCLUSIVE, or a pass that ended at a
-        // failed implement) takes `default` to backlog.
+        // second pass, an implement that timed out (`impl=timeout`, naru task
+        // 2185) goes straight to the second pass with its partial and the tree
+        // kept, anything else (INCONCLUSIVE, or a pass that ended at a failed
+        // implement) takes `default` to backlog.
         (
             K::Switch,
             "Verdict #1",
             json!({"op": "contains", "cases": [
                 {"match": "review=PASS", "label": "PASS"},
                 {"match": "review=NEEDS-FIX", "label": "NEEDS-FIX"},
+                {"match": "impl=timeout", "label": "TIMEOUT"},
             ]}),
             1960.0,
             120.0,
@@ -3186,6 +3201,8 @@ fn build_task_loop_builtins(
         (6, 7, None),
         (7, 11, Some("PASS")),
         (7, 23, Some("NEEDS-FIX")),
+        // past Split check, which reads diff-1.txt (written only on a complete implement)
+        (7, 8, Some("TIMEOUT")),
         (23, 24, None),
         (24, 8, f),
         (24, 25, t),
