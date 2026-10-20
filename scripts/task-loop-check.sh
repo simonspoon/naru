@@ -580,6 +580,33 @@ git -C "$TMP/work" show --name-only --format= HEAD | grep -qx z-w.txt || fail "s
 rm -f "$HOME/.naru/loop/active/$TY" "$TMP/work/y-wip.txt"
 ok "an entry whose task is no longer in progress does not block a cross-repo commit"
 
+# ---- 7h2. two loops at once, one bouncing (naru task 2170): Close: backlog restores only its own repo,
+# never a file in a repo another live run owns ----
+# Run Y (loopproj, repo $TMP/work) is live and already has y-wip.txt dirty; run A (otherproj) bounces while
+# Y's edits land in y-wip.txt mid-run (the stub implementer appends to it). A's own edits are put back; Y's file keeps every line.
+reset_stub
+printf 'UI: no' > "$STUB/reply.planner"
+printf 'VERDICT: PASS' > "$STUB/reply.verifier"
+printf 'still broken\nVERDICT: FAIL' > "$STUB/reply.diff-reviewer"
+printf '%s\n%s\n%s\n' "$TMP/other/a-own.txt" "$TMP/other/oseed.txt" "$TMP/work/y-wip.txt" > "$STUB/touch.implementer"
+TY=$(mk "Task Y, live in the work repo")
+"$NARU" task update "$TY" --status in_progress >/dev/null
+mkdir -p "$HOME/.naru/loop/active"
+printf '%s\t%s\n' "$(git -C "$TMP/work" rev-parse --show-toplevel)" "$TMP/ysratch" > "$HOME/.naru/loop/active/$TY"
+echo y-before > "$TMP/work/y-wip.txt"
+T=$(mko "Task A, bouncing in the other repo")
+R=$(run_loop "$T")
+[ "$(tstatus "$T")" = backlog ] && [ "$(step "$R" "Close: backlog")" = ok ] || fail "bounce beside a live run: task $(tstatus "$T"), Close: backlog $(step "$R" "Close: backlog")"
+[ -f "$TMP/work/y-wip.txt" ] && [ "$(head -n 1 "$TMP/work/y-wip.txt")" = y-before ] && [ "$(grep -c . "$TMP/work/y-wip.txt")" = 3 ] || fail "bounce beside a live run: foreign_files_restored > 0, y-wip.txt is: $(cat "$TMP/work/y-wip.txt" 2>/dev/null || echo gone)"
+[ "$(git -C "$TMP/work" status --porcelain)" = "?? y-wip.txt" ] || fail "bounce beside a live run: work tree: $(git -C "$TMP/work" status --porcelain)"
+[ ! -e "$TMP/other/a-own.txt" ] || fail "bounce beside a live run: A's own untracked file left behind"
+git -C "$TMP/other" diff --quiet -- oseed.txt || fail "bounce beside a live run: A's own tracked edit not restored"
+[ -z "$(git -C "$TMP/other" status --porcelain)" ] || fail "bounce beside a live run: other tree: $(git -C "$TMP/other" status --porcelain)"
+"$NARU" task show "$T" | jq -e --arg y "$TY" '.notes | map(.body) | any(test("left alone, task " + $y + " is running in this repo")) and any(test("Restored to their state") and test("a-own.txt")) and (any(test("y-wip.txt")) | not)' >/dev/null || fail "bounce beside a live run: note: $("$NARU" task show "$T" | jq -c .notes)"
+"$NARU" task update "$TY" --status done >/dev/null
+rm -f "$HOME/.naru/loop/active/$TY" "$TMP/work/y-wip.txt"
+ok "a bounced run restores only its own edits; a live run's file in its repo is left with every line"
+
 # ---- 7i. a task whose job is to land a change already dirty before the run (naru task 2169): the run
 # changes nothing, the pre-dirty file the task names is committed, an unrelated pre-dirty one is left ----
 reset_stub

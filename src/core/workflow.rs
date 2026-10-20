@@ -2029,6 +2029,22 @@ base_scan() { # <changed|same>
 }
 run_changed() { base_scan changed; }
 pre_dirty() { base_scan same; }
+# Ownership (naru task 2104): the primary repo of another live run (its task still in_progress, its
+# registry entry under 3h old) is that run's; Commit never sweeps it in and Close: backlog never restores
+# in it (naru task 2170).
+claimed_by() { # <repo>: prints the task id of another live run owning it
+  local f t pr
+  for f in "$HOME"/.naru/loop/active/*; do
+    [ -f "$f" ] || continue
+    t=$(basename "$f"); [ "$t" != "$TASK" ] || continue
+    [ -z "$(find "$f" -mmin +180 2>/dev/null)" ] || continue
+    pr=$(cut -f1 "$f")
+    [ "$pr" = "$1" ] || continue
+    [ "$(naru task show "$t" 2>/dev/null | jq -r '.status' 2>/dev/null)" = in_progress ] || continue
+    printf '%s' "$t"; return 0
+  done
+  return 1
+}
 # The no-commit rule (naru task 2047): Commit runs only after Close: pass, so no metric may need a commit.
 no_commit_rule() { cat <<'RULE'
 
@@ -2386,22 +2402,9 @@ commit_repo() { # <repo dir> <state dir>: commits in that repo; appends its shor
   echo "$SHA" >> "$SCRATCH/shas.txt"
   echo "$(basename "$ROOT")@$SHA" >> "$SCRATCH/refs.txt"
 }
-# Ownership (naru task 2104): a repo that is not this run's primary and is the primary of another live run
-# (its task still in_progress, its registry entry under 3h old) is that run's to commit, never swept in here.
+# Ownership (naru task 2104): a repo that is not this run's primary and is claimed_by another live run
+# is that run's to commit, never swept in here.
 PRIM=$(cat "$SCRATCH/primary.txt" 2>/dev/null)
-claimed_by() { # <repo>: prints the task id of another live run owning it
-  local f t pr
-  for f in "$HOME"/.naru/loop/active/*; do
-    [ -f "$f" ] || continue
-    t=$(basename "$f"); [ "$t" != "$TASK" ] || continue
-    [ -z "$(find "$f" -mmin +180 2>/dev/null)" ] || continue
-    pr=$(cut -f1 "$f")
-    [ "$pr" = "$1" ] || continue
-    [ "$(naru task show "$t" 2>/dev/null | jq -r '.status' 2>/dev/null)" = in_progress ] || continue
-    printf '%s' "$t"; return 0
-  done
-  return 1
-}
 : > "$SCRATCH/shas.txt"; : > "$SCRATCH/refs.txt"
 failed=0; n=0; named=$(repo_each | grep -c .)
 while IFS= read -r repo; do
@@ -2433,9 +2436,11 @@ emit commit=${SHAS:-none}
 const LOOP_CLOSE_BACKLOG: &str = r##"# Put back what the bounced run left (naru task 2041): a path dirty now that was clean
 # before the run is reverted (a copy goes to $SCRATCH/debris first), a pre-dirty path the
 # run changed is restored from the Plan node's copy, and a path still equal to its
-# baseline line is never touched.
+# baseline line is never touched. A repo another live run owns (claimed_by, naru task 2170) gets
+# its diff saved and is otherwise left alone: its changes since the baseline are that run's.
 rm -f "$HOME/.naru/loop/active/$TASK"
-restored=(); diffs=(); failed=(); leftover=()
+PRIM=$(cat "$SCRATCH/primary.txt" 2>/dev/null)
+restored=(); diffs=(); failed=(); leftover=(); skipped=()
 restore_path() { # <path>: in the repo the loop below is in; $ST is its state dir, $pre what a listed path is prefixed with
   local p=$1 h b
   if [ -e "$p" ]; then h=$(git hash-object -- "$p" 2>/dev/null || echo gone); else h=gone; fi
@@ -2459,6 +2464,9 @@ while IFS= read -r repo; do
   mkdir -p "$ST/debris"
   git diff HEAD > "$ST/debris/run.diff" 2>/dev/null || true
   if [ -s "$ST/debris/run.diff" ]; then diffs+=("$ST/debris/run.diff"); else rm -f "$ST/debris/run.diff"; fi
+  if [ -n "$PRIM" ] && [ "$repo" != "$PRIM" ] && other=$(claimed_by "$repo"); then
+    skipped+=("$repo: left alone, task $other is running in this repo and owns its changes"); continue
+  fi
   git status --porcelain -z -uall > "$ST/status-now.z" 2>/dev/null || true
   while IFS= read -r -d '' rec; do
     case "$rec" in
@@ -2483,6 +2491,7 @@ fi
   if [ "${#restored[@]}" -gt 0 ]; then echo; echo "Restored to their state before the run (copies in $SCRATCH/debris):"; printf '%s\n' "${restored[@]}"; fi
   if [ "${#diffs[@]}" -gt 0 ]; then echo; echo "Diffs saved:"; printf '%s\n' "${diffs[@]}"; fi
   if [ "${#failed[@]}" -gt 0 ]; then echo; echo "Could not restore:"; printf '%s\n' "${failed[@]}"; fi
+  if [ "${#skipped[@]}" -gt 0 ]; then echo; echo "Not restored (another live run's repo):"; printf '%s\n' "${skipped[@]}"; fi
   if [ "${#leftover[@]}" -gt 0 ]; then echo; echo "Still dirty after restore (left untouched, not this run's to clean):"; printf '%s\n' "${leftover[@]}"; fi
   if [ -f "$SCRATCH/findings.md" ]; then echo; echo "Last review findings:"; cat "$SCRATCH/findings.md"; fi
 } | head -c 6000 > "$SCRATCH/note.md"
