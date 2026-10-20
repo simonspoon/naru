@@ -342,6 +342,18 @@ echo \"Claude Code stopped in $(pwd)\"
             ),
         ],
     },
+    // How the live agent designs a custom mark skin (naru task 2123,
+    // `docs/mark-skins.md`): the skin contract, a sample and the `naru mark`
+    // preview/install loop.
+    Builtin {
+        id: "mark-skin-design",
+        name: "mark-skin-design",
+        kind: LibraryKind::Skill,
+        scope: LibraryScope::User,
+        body: include_str!("builtins/mark-skin-design/SKILL.md"),
+        export_command: false,
+        files: &[],
+    },
     Builtin {
         id: "execute-todo",
         name: "execute-todo",

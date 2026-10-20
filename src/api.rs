@@ -12353,17 +12353,7 @@ catch(x){err(x&&x.message||x)}})})();</script>\
 /// right after a leading `<!doctype …>` (so the page stays in standards
 /// mode), else in front of everything.
 fn mark_skin_render_body(body: &str) -> String {
-    let lead = body.len() - body.trim_start().len();
-    let rest = &body[lead..];
-    if rest
-        .get(..9)
-        .is_some_and(|h| h.eq_ignore_ascii_case("<!doctype"))
-        && let Some(end) = rest.find('>')
-    {
-        let at = lead + end + 1;
-        return format!("{}{MARK_SKIN_BOOTSTRAP}{}", &body[..at], &body[at..]);
-    }
-    format!("{MARK_SKIN_BOOTSTRAP}{body}")
+    crate::core::theme::after_doctype(body, MARK_SKIN_BOOTSTRAP)
 }
 
 /// `GET /api/mark-skins/{id}/render` — the skin's document for the page's

@@ -126,6 +126,28 @@ EXAMPLES
   naru theme use Ocean"
     )]
     Theme(ThemeCmd),
+    /// List, preview, install and remove skins for the live mark
+    ///
+    /// The live mark (the nav orb and the conversation's head) draws in a
+    /// SKIN: a built-in (waveform, face, blob) or a custom one, a single
+    /// self-contained HTML document of at most 64 KiB driven by
+    /// `naruMark.onFrame`. The contract and a sample are in the library skill
+    /// `mark-skin-design` (`naru library show mark-skin-design`).
+    ///
+    /// SKIN is a built-in id, a custom id (custom-<n>) or a name,
+    /// case-insensitive. `preview` shows a skin file on the live whiteboard,
+    /// cycling every mode, before anything is installed; `add` stores it and
+    /// `use` (or `add --use`) makes it the mark everyone sees.
+    #[command(
+        subcommand,
+        after_help = "\
+EXAMPLES
+  naru mark preview --file /tmp/orb.html --say \"Here is the new orb.\"
+  naru mark add Ember --file /tmp/orb.html --use
+  naru mark use waveform
+  naru mark remove Ember"
+    )]
+    Mark(MarkCmd),
     /// Send and triage global inbox items (project-update requests)
     #[command(subcommand)]
     Inbox(InboxCmd),
@@ -1957,6 +1979,78 @@ enum ThemeCmd {
         /// Built-in id, custom-<n>, name, or `system`
         theme: String,
         /// Print the setting without the active custom theme's `vars`
+        #[arg(long)]
+        quiet: bool,
+    },
+}
+
+/// Subcommands of `naru mark` (naru task 2123); the long help lives on
+/// `Command::Mark`.
+#[derive(Subcommand)]
+enum MarkCmd {
+    /// List every skin as a bare array of {id, name, builtin}
+    List,
+    /// Show one custom skin with its document
+    #[command(visible_alias = "get")]
+    Show {
+        /// custom-<n> or name
+        skin: String,
+        /// Print the skin without its `body`
+        #[arg(long)]
+        quiet: bool,
+    },
+    /// Install a skin from an HTML file (`-` reads stdin); prints it
+    #[command(visible_alias = "install")]
+    Add {
+        /// The new skin's name (1-40 characters, unique)
+        name: String,
+        /// The skin's HTML document, or `-` for stdin
+        #[arg(long, value_name = "PATH")]
+        file: String,
+        /// Also make it the mark's skin
+        #[arg(long = "use")]
+        use_it: bool,
+        /// Print the skin without its `body`
+        #[arg(long)]
+        quiet: bool,
+    },
+    /// Make a skin the live mark's skin; prints the appearance setting
+    Use {
+        /// waveform, face, blob, custom-<n> or name
+        skin: String,
+        /// Print the setting without the active custom theme's `vars`
+        #[arg(long)]
+        quiet: bool,
+    },
+    /// Show a skin on the live whiteboard, cycling every mode; prints the board
+    ///
+    /// The skin runs with a preview driver in place of the mark: every mode
+    /// for two seconds in turn, a chip naming it, and a red banner if the
+    /// skin throws or never calls `naruMark.onFrame` within 2 s. Needs a live
+    /// session, like `naru live board push`.
+    #[command(group(ArgGroup::new("source").required(true).args(["skin", "file"])))]
+    Preview {
+        /// An installed custom skin (custom-<n> or name)
+        skin: Option<String>,
+        /// A skin file not yet installed, or `-` for stdin
+        #[arg(long, value_name = "PATH")]
+        file: Option<String>,
+        /// The board's caption (default "Mark preview")
+        #[arg(long)]
+        title: Option<String>,
+        /// Speak a sentence alongside it
+        #[arg(long)]
+        say: Option<String>,
+        /// Print the board without its `body`
+        #[arg(long)]
+        quiet: bool,
+    },
+    /// Delete a custom skin; prints the deleted record
+    #[command(visible_alias = "delete")]
+    Remove {
+        /// custom-<n> or name
+        skin: String,
+        /// Print the skin without its `body`
         #[arg(long)]
         quiet: bool,
     },
@@ -5582,6 +5676,7 @@ fn execute(command: Command) -> Result<()> {
         Command::Task(cmd) => run_task(cmd),
         Command::Workflow(cmd) => run_workflow_cmd(cmd),
         Command::Theme(cmd) => run_theme_cmd(cmd),
+        Command::Mark(cmd) => run_mark_cmd(cmd),
         Command::Inbox(cmd) => run_inbox(cmd),
         Command::Script(cmd) => run_script_cmd(cmd),
         Command::Artifact(cmd) => run_artifact_cmd(cmd),
@@ -8862,17 +8957,121 @@ fn run_theme_cmd(cmd: ThemeCmd) -> Result<()> {
         }
         ThemeCmd::Use { theme: arg, quiet } => {
             theme::use_theme(&store, &arg)?;
-            let appearance = theme::appearance(&store).map_err(Error::Unavailable)?;
-            if quiet {
-                // The active custom theme's `vars` are the one unbounded part.
-                let mut v = serde_json::to_value(&appearance).expect("json serialize");
-                if let Some(custom) = v.get_mut("custom").and_then(|c| c.as_object_mut()) {
-                    custom.remove("vars");
-                }
-                print_json(&v);
-            } else {
-                print_json(&appearance);
+            print_appearance(&store, quiet)?;
+        }
+    }
+    Ok(())
+}
+
+/// Print the appearance setting (`theme use`, `mark use`); `--quiet` drops
+/// the active custom theme's `vars`, its one unbounded part.
+fn print_appearance(store: &Store, quiet: bool) -> Result<()> {
+    let appearance = crate::core::theme::appearance(store).map_err(Error::Unavailable)?;
+    if quiet {
+        let mut v = serde_json::to_value(&appearance).expect("json serialize");
+        if let Some(custom) = v.get_mut("custom").and_then(|c| c.as_object_mut()) {
+            custom.remove("vars");
+        }
+        print_json(&v);
+    } else {
+        print_json(&appearance);
+    }
+    Ok(())
+}
+
+/// A `MarkSkinRecord`'s unbounded field is its HTML document.
+const QUIET_DROP_MARK_SKIN: &[&str] = &["body"];
+
+/// A skin document from a path, or stdin for `-`.
+fn read_skin_file(path: &str) -> Result<String> {
+    if path == "-" {
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)
+            .map_err(|e| Error::Validation(format!("could not read stdin: {e}")))?;
+        return Ok(text);
+    }
+    std::fs::read_to_string(path)
+        .map_err(|e| Error::Validation(format!("could not read {path}: {e}")))
+}
+
+fn run_mark_cmd(cmd: MarkCmd) -> Result<()> {
+    use crate::core::theme;
+    let mut store = Store::open_default()?;
+    match cmd {
+        MarkCmd::List => {
+            let mut rows: Vec<Value> = crate::core::config::MARK_SKINS
+                .iter()
+                .map(|id| json!({"id": id, "name": id, "builtin": true}))
+                .collect();
+            for s in store.list_mark_skins()? {
+                rows.push(json!({
+                    "id": s.id,
+                    "name": s.name,
+                    "builtin": false,
+                    "created_at": s.created_at,
+                    "updated_at": s.updated_at,
+                }));
             }
+            print_json(&rows);
+        }
+        MarkCmd::Show { skin, quiet } => {
+            print_record(
+                &theme::find_mark_skin(&store, &skin)?,
+                quiet,
+                QUIET_DROP_MARK_SKIN,
+            );
+        }
+        MarkCmd::Add {
+            name,
+            file,
+            use_it,
+            quiet,
+        } => {
+            let body = read_skin_file(&file)?;
+            let skin = store.create_mark_skin(&name, &body)?;
+            if use_it {
+                theme::use_mark_skin(&store, &skin.id)?;
+            }
+            print_record(&skin, quiet, QUIET_DROP_MARK_SKIN);
+        }
+        MarkCmd::Use { skin, quiet } => {
+            theme::use_mark_skin(&store, &skin)?;
+            print_appearance(&store, quiet)?;
+        }
+        MarkCmd::Preview {
+            skin,
+            file,
+            title,
+            say,
+            quiet,
+        } => {
+            let body = match file {
+                Some(path) => read_skin_file(&path)?,
+                None => theme::find_mark_skin(&store, skin.as_deref().unwrap_or_default())?.body,
+            };
+            // Checked before the session, so a bad skin is the error a
+            // person sees first, and no board is written for it.
+            let content = theme::mark_skin_preview_body(&body)?;
+            let session = current_live_session(&store)?;
+            let board = store.add_live_board(
+                session.id,
+                LiveBoardKind::Html,
+                Some(title.as_deref().unwrap_or("Mark preview")),
+                &content,
+                None,
+            )?;
+            if let Some(say) = say {
+                store.add_live_turn(session.id, LiveRole::Naru, &say, None, None)?;
+            }
+            print_live_board(&board, quiet);
+        }
+        MarkCmd::Remove { skin, quiet } => {
+            let id = theme::find_mark_skin(&store, &skin)?.id;
+            print_record(
+                &theme::delete_mark_skin(&mut store, &id)?,
+                quiet,
+                QUIET_DROP_MARK_SKIN,
+            );
         }
     }
     Ok(())
@@ -10937,6 +11136,28 @@ mod tests {
                 QUIET_DROP_LIVE_NOTEBOOK
             ))),
             minus(&full, QUIET_DROP_LIVE_NOTEBOOK),
+        );
+    }
+
+    #[test]
+    fn mark_skin_quiet_drops_body_only() {
+        let skin = crate::core::MarkSkinRecord {
+            id: "custom-1".into(),
+            name: "n".into(),
+            body: "b".into(),
+            created_at: "t".into(),
+            updated_at: "t".into(),
+        };
+        let full = keys(&skin);
+        assert_eq!(
+            sorted_owned(full.clone()),
+            sorted(&["id", "name", "body", "created_at", "updated_at"]),
+            "MarkSkinRecord gained/lost a field: decide whether it belongs in \
+             the --quiet shape before updating this list",
+        );
+        assert_eq!(
+            sorted_owned(value_keys(&quiet(&skin, QUIET_DROP_MARK_SKIN))),
+            minus(&full, QUIET_DROP_MARK_SKIN),
         );
     }
 

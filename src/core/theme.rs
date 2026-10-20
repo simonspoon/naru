@@ -630,6 +630,154 @@ pub fn delete_mark_skin_in(
     Ok(skin)
 }
 
+/// A custom mark skin by its `custom-<n>` id or its name (case-insensitive),
+/// with its body (`naru mark`, naru task 2123). A built-in skin id has no
+/// document and is `validation`; anything else unknown is `not_found`.
+pub fn find_mark_skin(store: &Store, arg: &str) -> Result<super::types::MarkSkinRecord> {
+    let arg = arg.trim();
+    if let Some(n) = crate::core::store::mark_skin_number(arg) {
+        return store.get_mark_skin(n);
+    }
+    if config::MARK_SKINS.contains(&arg.to_lowercase().as_str()) {
+        return Err(Error::Validation(format!(
+            "\"{arg}\" is a built-in skin; it has no document"
+        )));
+    }
+    let lower = arg.to_lowercase();
+    match store
+        .list_mark_skins()?
+        .into_iter()
+        .find(|s| s.name.to_lowercase() == lower)
+    {
+        Some(s) => store
+            .get_mark_skin(crate::core::store::mark_skin_number(&s.id).expect("stored skin id")),
+        None => Err(Error::NotFound(format!(
+            "mark skin \"{arg}\" not found; run `naru mark list`"
+        ))),
+    }
+}
+
+/// Makes a skin the mark's skin: a built-in id, or a custom skin by id or
+/// name. Returns the saved id.
+pub fn use_mark_skin(store: &Store, arg: &str) -> Result<String> {
+    use_mark_skin_in(store, &config::config_file(), arg)
+}
+
+pub fn use_mark_skin_in(store: &Store, path: &Path, arg: &str) -> Result<String> {
+    let arg = arg.trim();
+    let lower = arg.to_lowercase();
+    let id = if config::MARK_SKINS.contains(&lower.as_str()) {
+        lower
+    } else {
+        // An unknown skin here is a bad setting, not a missing record.
+        match find_mark_skin(store, arg) {
+            Ok(s) => s.id,
+            Err(Error::NotFound(m)) => return Err(Error::Validation(m)),
+            Err(e) => return Err(e),
+        }
+    };
+    let updates = HashMap::from([(config::MARK_SKIN.to_string(), Some(id.clone()))]);
+    save_appearance_in(store, path, &updates).map_err(save_err)?;
+    Ok(id)
+}
+
+/// `insert` right after a leading `<!doctype …>` (so the page stays in
+/// standards mode), else in front of everything. Shared by the mark skin
+/// render route and [`mark_skin_preview_body`].
+pub fn after_doctype(body: &str, insert: &str) -> String {
+    let lead = body.len() - body.trim_start().len();
+    let rest = &body[lead..];
+    if rest
+        .get(..9)
+        .is_some_and(|h| h.eq_ignore_ascii_case("<!doctype"))
+        && let Some(end) = rest.find('>')
+    {
+        let at = lead + end + 1;
+        return format!("{}{insert}{}", &body[..at], &body[at..]);
+    }
+    format!("{insert}{body}")
+}
+
+/// The preview driver put first in a skin pushed as an `html` live board
+/// (`naru mark preview`, naru task 2123). A board has no host posting
+/// frames, so this defines the same `window.naruMark` API the render route's
+/// bootstrap does and drives it itself: every animation frame, cycling idle,
+/// hear, speak, think, paused and offer two seconds each, with the host's
+/// level rules (`NaruMark.tsx::runMarkLoop`: a made-up mic RMS while hearing,
+/// the simulated envelope while speaking, `smoothLevel`) and its palettes
+/// (`liveMark.ts::PALETTES`, paused wearing idle's). The board's own theme
+/// relay posts `board-ready`; this only listens for the `board-theme` answer
+/// and hands its vars to the skin's `onTheme`. It posts nothing. A chip names
+/// the mode; an error, or no `onFrame` call within 2 s, shows a banner and
+/// stops the skin for good. The stage is the nav's dark canvas, not the board
+/// frame's white.
+const MARK_PREVIEW_BOOTSTRAP: &str = r#"<style>html{background:var(--naru-bg,#060a10)!important;color-scheme:var(--naru-color-scheme,dark)}
+#naru-preview-chip{position:fixed;top:.75rem;left:.75rem;z-index:2147483647;pointer-events:none;display:inline-flex;align-items:center;gap:.4em;white-space:nowrap;padding:0 .5em;border-radius:999px;background:var(--naru-surface,#0b1119);border:1px solid var(--naru-ring,rgba(184,221,232,.25));color:var(--naru-fg,#b8dde8);font:11px/1.8 ui-monospace,"Share Tech Mono",monospace}
+#naru-preview-chip i{display:inline-block;width:.5rem;height:.5rem;border-radius:50%}
+#naru-preview-error{position:fixed;left:.75rem;right:.75rem;bottom:.75rem;z-index:2147483647;pointer-events:none;padding:.5em .75em;border-radius:.5rem;border:1px solid var(--naru-bad,#ff3b5c);background:color-mix(in srgb,var(--naru-bad,#ff3b5c) 18%,var(--naru-surface,#0b1119));color:var(--naru-fg,#b8dde8);font:.85rem/1.4 Inter,system-ui,sans-serif;overflow-wrap:anywhere}</style>
+<script>(function(){
+var P={idle:{bars:['#3b3550','#4a4366','#5b537c','#6d6592'],glow:'#6d6592'},
+hear:{bars:['#1f7fff','#1fb6ff','#29e6ff','#b8f6ff'],glow:'#29e6ff'},
+speak:{bars:['#ff5a3c','#ff8a2b','#ffb02b','#ffe2a8'],glow:'#ffa02b'},
+think:{bars:['#6a2bff','#8a4bff','#b06bff','#e6d1ff'],glow:'#b06bff'},
+offer:{bars:['#d98a14','#f0a820','#ffc23d','#fff0c2'],glow:'#ffc23d'}};
+var MODES=['idle','hear','speak','think','paused','offer'];
+var F=null,T=null,E=0,msg='',shown='',chip=null,dot=null,label=null,banner=null;
+var mq=matchMedia('(prefers-reduced-motion: reduce)'),start=null,last=0,lv=0;
+function ui(){if(chip||!document.body)return;var d=document;
+chip=d.createElement('div');chip.id='naru-preview-chip';chip.setAttribute('role','status');chip.setAttribute('aria-live','polite');
+dot=d.createElement('i');label=d.createElement('span');chip.appendChild(dot);chip.appendChild(label);
+banner=d.createElement('div');banner.id='naru-preview-error';banner.setAttribute('role','alert');banner.hidden=true;
+d.body.appendChild(chip);d.body.appendChild(banner)}
+function paint(){ui();if(!chip)return;var p=P[shown==='paused'?'idle':shown]||P.idle;
+label.textContent='preview · '+(shown||'idle');dot.style.background=p.glow;
+if(E){banner.textContent='skin error · '+msg;banner.hidden=false}}
+function err(m){if(E)return;E=1;msg=String(m).slice(0,200);paint()}
+addEventListener('error',function(e){err(e.message||'error')});
+addEventListener('unhandledrejection',function(e){err(e.reason)});
+addEventListener('DOMContentLoaded',paint);
+window.naruMark={onFrame:function(cb){if(typeof cb==='function')F=cb},
+onTheme:function(cb){if(typeof cb==='function')T=cb}};
+addEventListener('message',function(e){var d=e.data;
+if(E||e.source!==parent||!d||d.naru!=='board-theme'||!d.vars||typeof d.vars!=='object')return;
+var s=document.documentElement.style;Object.keys(d.vars).forEach(function(k){var v=d.vars[k];
+if(/^--naru-[a-z0-9-]+$/.test(k)&&typeof v==='string')s.setProperty(k,v)});
+try{if(T)T(d.vars)}catch(x){err(x&&x.message||x)}});
+setTimeout(function(){if(!F)err('no onFrame call within 2 s')},2000);
+function env(t){var ph=Math.max(0,Math.sin(t*0.34)*0.5+0.42),a=0.5+0.5*Math.sin(t*11.3),b=0.5+0.5*Math.sin(t*7.1+1.4);
+return Math.min(1,ph*(0.35+0.5*a*b+0.15*Math.sin(t*23)))}
+function tick(now){if(E)return;if(start===null){start=now;last=now}
+var dt=Math.min(0.05,(now-last)/1000);last=now;var t=(now-start)/1000,red=mq.matches;
+var mode=MODES[Math.floor(t/2)%MODES.length],raw=0;
+if(mode==='hear'){var rms=0.01+0.11*(0.5+0.5*Math.sin(t*6.3)*Math.sin(t*1.7+0.6));raw=Math.min(1,Math.sqrt(rms)*2)}
+else if(mode==='speak')raw=0.35+0.65*env(t*(red?0.5:1)*1.7);
+lv=lv+(raw-lv)*(raw>lv?0.55:0.14);
+if(mode!==shown){shown=mode;paint()}
+var p=P[mode==='paused'?'idle':mode];
+if(F){try{F({naru:'mark-frame',mode:mode,level:lv,palette:{bars:p.bars.slice(),glow:p.glow},reduced:red,t:t,dt:dt})}
+catch(x){err(x&&x.message||x);return}}
+requestAnimationFrame(tick)}
+requestAnimationFrame(tick)})();</script>
+"#;
+
+/// A skin's document as `naru mark preview` pushes it to the live
+/// whiteboard: [`MARK_PREVIEW_BOOTSTRAP`] put first. The body must be what
+/// `Store::create_mark_skin` would accept (non-blank, at most 64 KiB), so a
+/// previewed skin can be installed as is.
+pub fn mark_skin_preview_body(body: &str) -> Result<String> {
+    use crate::core::store::MARK_SKIN_BODY_MAX;
+    if body.trim().is_empty() {
+        return Err(Error::Validation("mark skin body must not be empty".into()));
+    }
+    if body.len() > MARK_SKIN_BODY_MAX {
+        return Err(Error::Validation(format!(
+            "mark skin body is {} bytes; the limit is {MARK_SKIN_BODY_MAX} bytes (64 KiB)",
+            body.len()
+        )));
+    }
+    Ok(after_doctype(body, MARK_PREVIEW_BOOTSTRAP))
+}
+
 /// The appearance settings with the active custom theme filled in.
 pub fn appearance(store: &Store) -> std::result::Result<ConfigAppearance, String> {
     appearance_in(store, &config::config_file())
@@ -914,5 +1062,87 @@ mod tests {
         let a = appearance_in(&store, &cfg).unwrap();
         assert_eq!(a.theme.as_deref(), Some("custom-7"));
         assert!(a.custom.is_none());
+    }
+
+    // ---- naru mark (naru task 2123) ----
+
+    #[test]
+    fn mark_skin_found_by_id_or_name_and_used() {
+        let (mut store, cfg, _d) = temp();
+        let a = store.create_mark_skin("Ocean Orb", "<p>a</p>").unwrap();
+        assert_eq!(find_mark_skin(&store, &a.id).unwrap(), a);
+        assert_eq!(find_mark_skin(&store, " ocean orb ").unwrap(), a);
+        assert!(matches!(
+            find_mark_skin(&store, "nope"),
+            Err(Error::NotFound(_))
+        ));
+        assert!(matches!(
+            find_mark_skin(&store, "Face"),
+            Err(Error::Validation(_))
+        ));
+        assert_eq!(use_mark_skin_in(&store, &cfg, "OCEAN ORB").unwrap(), a.id);
+        assert_eq!(
+            config::appearance_in(&cfg).unwrap().mark_skin.as_deref(),
+            Some(a.id.as_str())
+        );
+        assert_eq!(use_mark_skin_in(&store, &cfg, "Blob").unwrap(), "blob");
+        assert!(matches!(
+            use_mark_skin_in(&store, &cfg, "nope"),
+            Err(Error::Validation(_))
+        ));
+        assert!(matches!(
+            use_mark_skin_in(&store, &cfg, "custom-99"),
+            Err(Error::Validation(_))
+        ));
+    }
+
+    #[test]
+    fn preview_body_puts_the_driver_first_and_keeps_the_skin() {
+        let skin = "<!DOCTYPE html><svg/><script>naruMark.onFrame(function(){})</script>";
+        let html = mark_skin_preview_body(skin).unwrap();
+        assert!(html.starts_with(&format!("<!DOCTYPE html>{MARK_PREVIEW_BOOTSTRAP}")));
+        assert!(html.ends_with("<svg/><script>naruMark.onFrame(function(){})</script>"));
+        assert_eq!(
+            mark_skin_preview_body("<svg/>").unwrap(),
+            format!("{MARK_PREVIEW_BOOTSTRAP}<svg/>")
+        );
+        assert!(matches!(
+            mark_skin_preview_body("  "),
+            Err(Error::Validation(_))
+        ));
+        let big = "x".repeat(crate::core::store::MARK_SKIN_BODY_MAX + 1);
+        assert!(matches!(
+            mark_skin_preview_body(&big),
+            Err(Error::Validation(_))
+        ));
+    }
+
+    /// The driver posts nothing to the page and loads nothing.
+    #[test]
+    fn preview_driver_posts_nothing() {
+        assert!(!MARK_PREVIEW_BOOTSTRAP.contains("postMessage"));
+        assert!(!MARK_PREVIEW_BOOTSTRAP.contains("fetch"));
+        assert!(!MARK_PREVIEW_BOOTSTRAP.contains("src="));
+    }
+
+    /// The driver's palettes are copied from `liveMark.ts::PALETTES`; every
+    /// line of that table must appear in the driver, so the copy cannot drift.
+    #[test]
+    fn preview_palettes_match_live_mark() {
+        const LIVE_MARK: &str = include_str!("../../frontend/src/liveMark.ts");
+        let start = LIVE_MARK.find("export const PALETTES").unwrap();
+        let table = &LIVE_MARK[start..start + LIVE_MARK[start..].find("\n}").unwrap()];
+        let mut seen = 0;
+        for line in table.lines().skip(1) {
+            let line = line.trim().trim_end_matches(',');
+            let (name, rest) = line.split_once(": ").unwrap();
+            let expected = format!("{name}:{}", rest.replace(", ", ",").replace(' ', ""));
+            assert!(
+                MARK_PREVIEW_BOOTSTRAP.contains(&expected),
+                "preview palette drifted from liveMark.ts: {expected}"
+            );
+            seen += 1;
+        }
+        assert_eq!(seen, 5);
     }
 }

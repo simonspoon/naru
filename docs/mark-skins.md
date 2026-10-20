@@ -84,10 +84,44 @@ nothing loaded from anywhere — stored server-side in the `mark_skins` table
 | `DELETE /api/mark-skins/{id}` | `require_agent_access` | echoes the destroyed record; clears `appearance.mark-skin` if it named this skin |
 | `GET /api/mark-skins/{id}/render` | plain guard only | the document for the iframe |
 
-There is no CLI yet: `naru mark` is naru task 2123, so for now the routes and
-the web picker are the only surface (a known, temporary gap in "CLI and API
-never diverge"). Moving a skin between machines is the web UI: Export on one
-Naru's picker downloads `<name>.html`, Import skin… on the other uploads it.
+Moving a skin between machines is the web UI: Export on one Naru's picker
+downloads `<name>.html`, Import skin… on the other uploads it.
+
+### CLI
+
+`naru mark` (naru task 2123) is the CLI over the same store and config, no
+server needed. SKIN is a built-in id, `custom-<n>` or a name,
+case-insensitive.
+
+| Command | Does |
+| --- | --- |
+| `naru mark list` | a bare array: the three built-ins (`{id, name, builtin: true}`), then each custom skin (`builtin: false`, timestamps, no body) |
+| `naru mark show <SKIN>` (`get`) | the `MarkSkinRecord` with its body; a built-in id is `validation` (it has no document) |
+| `naru mark add <NAME> --file <PATH\|-> [--use]` (`install`) | `Store::create_mark_skin`; `--use` also makes it the mark's skin |
+| `naru mark use <SKIN>` | writes `appearance.mark-skin`, prints the appearance setting like `theme use`; an unknown skin is `validation` |
+| `naru mark preview <SKIN> \| --file <PATH\|-> [--title] [--say]` | pushes the skin to the live whiteboard as an `html` board (below); no live session is `not_found`, a bad body `validation`, and neither pushes a board |
+| `naru mark remove <SKIN>` (`delete`) | `theme::delete_mark_skin`: echoes the record and clears `appearance.mark-skin` if it named this skin |
+
+`--quiet` drops `body` on `show`, `add`, `preview` and `remove`, and the
+active custom theme's `vars` on `use`.
+
+**Preview.** A board has no host posting frames, so `preview` puts a driver
+first in the document (`theme::mark_skin_preview_body`, after a leading
+`<!doctype>` like the render route's bootstrap) that defines the same
+`window.naruMark` and calls the skin itself every animation frame: idle,
+hear, speak, think, paused and offer two seconds each, with the host's level
+rules and `liveMark.ts::PALETTES` (a unit test pins the copy against that
+file). It paints the stage the dark `--naru-bg` the mark really sits on, shows
+a `preview · <mode>` chip at the top left, and listens for the board's own
+`board-theme` relay to feed `onTheme`; it posts nothing to the page. An error,
+or no `onFrame` call within 2 s, shows a `skin error · …` banner and stops the
+skin for good, as the real mark's fallback does. The body is held to the same
+64 KiB limit as an installed skin, so a previewed file installs as is.
+
+**Designing one.** The built-in library skill `mark-skin-design` (`naru
+library show mark-skin-design`) is the contract, the sample and the
+write → preview → adjust → `add --use` loop for an agent; the live agent's
+rule 18 sends it there when the person describes a look.
 
 ### How it runs
 
@@ -111,7 +145,7 @@ The bootstrap gives the skin one object:
 - `naruMark.onFrame(cb)` — `cb({naru:'mark-frame', mode, level, palette,
   reduced, t, dt})` every animation frame, exactly what a built-in painter is
   handed (`MarkInput` above: `mode` is `idle|hear|speak|think|paused|offer`,
-  `level` 0..1, `palette` `{bars: [7 colours], glow}`). The **first** call is
+  `level` 0..1, `palette` `{bars: [4 colours], glow}`, outer to centre). The **first** call is
   what tells the page the skin is ready.
 - `naruMark.onTheme(cb)` — `cb(vars)` with the theme's `--naru-*` map (the
   html board vocabulary, `docs/live.md`) on ready and on every theme change;
