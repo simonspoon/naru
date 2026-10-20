@@ -218,6 +218,7 @@ R=$(run_loop "$T")
 for a in planner implementer verifier diff-reviewer; do
   grep -q "Never use .HEAD~1" "$STUB/msgs.$a" || fail "head1: the $a brief lacks the no-commit rule"
 done
+! grep -q "Live UI check" "$STUB/msgs.verifier" && ! grep -q "Live UI check" "$STUB/msgs.diff-reviewer" || fail "head1: a non-UI brief carries the live-check rule"
 grep -q "not committed" "$STUB/typed-msgs.review" && grep -q "only reason for FAIL" "$STUB/typed-msgs.review" || fail "head1: the verdict prompt lacks the guard"
 ok "plan, implement, verify and review briefs carry the no-commit rule; the verdict prompt carries the guard"
 
@@ -233,6 +234,8 @@ R=$(run_loop "$T")
 [ "$(step "$R" "UX designer")" = ok ] || fail "ui: UX node was $(step "$R" "UX designer")"
 [ "$(turns ux-designer)" = 1 ] && [ "$(turns ui-verifier)" = 1 ] && [ "$(turns verifier)" = "" ] || fail "ui: agents used"
 grep -q "layout: a list" "$STUB/msgs.implementer" || fail "ui: the design brief did not reach the implementer"
+grep -q "Live UI check (required)" "$STUB/msgs.ui-verifier" && grep -q "allowed only if those checks actually ran" "$STUB/msgs.ui-verifier" || fail "ui: the ui-verifier brief lacks the live-check rule"
+! grep -q "Live UI check" "$STUB/msgs.diff-reviewer" || fail "ui: the reviewer brief carries the live-check rule"
 metric "$T" PASS 1 done ui
 ok "UI path: UX designer and ui-verifier ran, the design reached the implementer"
 
