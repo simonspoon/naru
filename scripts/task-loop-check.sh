@@ -788,12 +788,12 @@ reset_stub
 printf 'UI: no' > "$STUB/reply.planner"
 printf 'VERDICT: PASS' > "$STUB/reply.verifier"
 printf 'bug in bar()\nVERDICT: FAIL' > "$STUB/reply.diff-reviewer"
-printf '[{"description":"half of it"}]' > "$STUB/split.json"
+printf 'Proposed split:\n[\n  {"description":"half of it"},\n  {"description":"other half"}\n]\nDone.' > "$STUB/split.json"
 T=$(mk "Fix bar again")
 mkdir -p "$HOME/.naru/loop/$T-1-1"
 printf 'Iteration 1 verify report:\nVERDICT: PASS\n\nIteration 1 review report:\nBug in bar().\nVERDICT: FAIL\n' > "$HOME/.naru/loop/$T-1-1/findings.md"
 R=$(run_loop "$T")
-[ "$(step "$R" "Split")" = ok ] && [ "$(step "$R" "Implement + review #2")" = skipped ] && [ "$(tstatus "$T")" = backlog ] && [ "$(subs "$T")" = 1 ] || fail "repeat: Split $(step "$R" "Split"), task $(tstatus "$T"), sub-tasks $(subs "$T")"
+[ "$(step "$R" "Split")" = ok ] && [ "$(step "$R" "Implement + review #2")" = skipped ] && [ "$(tstatus "$T")" = backlog ] && [ "$(subs "$T")" = 2 ] || fail "repeat: Split $(step "$R" "Split"), task $(tstatus "$T"), sub-tasks $(subs "$T")"
 ok "a finding set an earlier run already left goes to the split step"
 
 reset_stub
