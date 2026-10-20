@@ -5768,6 +5768,13 @@ struct LiveUtterance {
     /// Absent or empty stores none; over `LIVE_VIEW_MAX` is 422.
     #[serde(default)]
     view: Option<String>,
+    /// The sending browser's speaker id (`liveSpeaker.ts`, naru task 2095).
+    /// When present and another client holds the speaker claim, the turn is
+    /// refused `conflict` — only the claiming browser captures and sends, so
+    /// two pages open on one conversation cannot post one line twice. Absent
+    /// (the CLI, an older page) is never checked.
+    #[serde(default)]
+    client: Option<String>,
 }
 
 /// A whiteboard flattened with the person's ink over it: the PNG, base64 in
@@ -6503,6 +6510,17 @@ async fn live_utterance(
         let Some(session) = store.current_live_session()? else {
             return Err(no_live_session());
         };
+        if let (Some(client), Some(speaker)) = (body.client.as_deref(), session.speaker.as_deref())
+            && client != speaker
+        {
+            return Err(ApiError {
+                status: StatusCode::CONFLICT,
+                code: "conflict",
+                message: "Another browser has the conversation — press the microphone to take it \
+                          here, then send again."
+                    .into(),
+            });
+        }
         match (ink, image) {
             (Some((board_id, png)), None) => store.add_live_ink_turn(
                 session.id,
@@ -20567,6 +20585,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                 ink: None,
                 image: None,
                 view: None,
+                client: None,
             })),
         )
         .await
@@ -21050,6 +21069,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                 ink: None,
                 image: None,
                 view: None,
+                client: None,
             })),
         )
         .await
@@ -21158,6 +21178,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                     png_base64: png_base64.clone(),
                 }),
                 view: None,
+                client: None,
             })),
         )
         .await
@@ -21188,6 +21209,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                 }),
                 image: Some(LiveImageBody { png_base64 }),
                 view: None,
+                client: None,
             })),
         )
         .await
@@ -21204,12 +21226,60 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                     png_base64: "not base64!!".into(),
                 }),
                 view: None,
+                client: None,
             })),
         )
         .await
         .unwrap_err();
         assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(err.code, "validation");
+    }
+
+    /// Only the browser holding the speaker claim may post a turn (naru task
+    /// 2095): the holder is 201, another client is 409 `conflict` with nothing
+    /// stored, and a body naming no client (the CLI, an older page) is 201.
+    #[tokio::test]
+    async fn live_utterance_refuses_a_client_that_does_not_hold_the_speaker() {
+        let (_dir, state) = test_state();
+        {
+            let mut store = state.store.lock().unwrap();
+            let session = store.start_live_session(None).unwrap();
+            store.claim_live_speaker(session.id, "tab-a").unwrap();
+        }
+        let post = |client: Option<&str>| {
+            live_utterance(
+                State(state.clone()),
+                Ok(Json(LiveUtterance {
+                    text: "hello".into(),
+                    ink: None,
+                    image: None,
+                    view: None,
+                    client: client.map(Into::into),
+                })),
+            )
+        };
+        let user_turns = || {
+            let store = state.store.lock().unwrap();
+            let session = store.current_live_session().unwrap().unwrap();
+            store
+                .list_live_turns(session.id, None, 1000)
+                .unwrap()
+                .into_iter()
+                .filter(|t| t.role == crate::core::LiveRole::User)
+                .count()
+        };
+        let ok = post(Some("tab-a")).await.unwrap().into_response();
+        assert_eq!(ok.status(), StatusCode::CREATED);
+        assert_eq!(user_turns(), 1);
+
+        let err = post(Some("tab-b")).await.unwrap_err();
+        assert_eq!(err.status, StatusCode::CONFLICT);
+        assert_eq!(err.code, "conflict");
+        assert_eq!(user_turns(), 1);
+
+        let ok = post(None).await.unwrap().into_response();
+        assert_eq!(ok.status(), StatusCode::CREATED);
+        assert_eq!(user_turns(), 2);
     }
 
     use crate::core::LiveContextKind;

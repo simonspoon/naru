@@ -83,10 +83,13 @@ export function quietHint(input: {
   paused: boolean
   muted: boolean
   chord: string
+  /** Another client holds the speaker claim (naru task 2095). */
+  elsewhere?: boolean
 }): QuietHint {
   const ready =
     input.live &&
     input.joined &&
+    !input.elsewhere &&
     !input.paused &&
     !input.blocked &&
     input.path !== 'none' &&

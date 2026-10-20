@@ -716,6 +716,16 @@ reload re-attaches by itself where the browser allows audio, else on the first
 press. A detached page's route reports only refresh a claim it holds, so
 `speaker` stays null.
 
+Capture and posting belong to the client that holds the claim (naru task
+2095). Two attached pages used to both hear and both post each spoken line,
+so the page opens its microphone only while `maySpeak(speaker, client)` — the
+same rule as speech output, so an unclaimed conversation is open to every
+attached page — and sends its `client` with every `POST /api/live/utterance`,
+which is `conflict` (409, nothing stored) when another client holds the claim.
+A body with no `client` (the CLI, an older page) is never checked. An attached
+page without the claim shows its mic switch off with "Listen on this browser
+instead"; pressing it (or the listen chord) claims the voice here.
+
 ### Crash recovery note (naru task 2012)
 
 A respawn after a crash has no agent left to write the note. `naru live

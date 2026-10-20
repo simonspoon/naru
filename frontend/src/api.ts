@@ -1175,13 +1175,17 @@ export function sendLiveUtterance(
   ink?: { board_id: number; png_base64: string },
   view?: string | null,
   image?: { png_base64: string },
+  client?: string,
 ): Promise<LiveTurn> {
   // `view` is the page's one-line view of the browser at submit (mesa task
-  // 1424, `liveView.ts`); an absent or empty one stores none.
+  // 1424, `liveView.ts`); an absent or empty one stores none. `client` is this
+  // browser's speaker id (naru task 2095): the server refuses the turn
+  // `conflict` while another client holds the claim.
   const body: Record<string, unknown> = { text }
   if (ink !== undefined) body.ink = ink
   if (image !== undefined) body.image = image
   if (view) body.view = view
+  if (client !== undefined) body.client = client
   return request('/api/live/utterance', jsonInit('POST', body))
 }
 

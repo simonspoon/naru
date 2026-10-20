@@ -76,6 +76,7 @@ import { shouldInterruptAgent } from '../liveInterrupt'
 import { mediaForTurn, type StagedImage } from '../livePastedImage'
 import {
   liveClientId,
+  maySpeak,
   needsSpeakerRefresh,
   spokenTurnVerdict,
 } from '../liveSpeaker'
@@ -2028,6 +2029,22 @@ export function LiveHub({
     pauseNowRef.current = pauseNow
   }, [pauseNow])
 
+  // Only the client holding the speaker claim captures (naru task 2095): two
+  // pages joined to one conversation both heard and both posted each line.
+  // `elsewhere` is joined here with the claim on another client — the mic
+  // shuts, the hint says so, and the mic press takes the claim back.
+  const capturing = unlocked && maySpeak(session?.speaker ?? null, client)
+  const elsewhere = unlocked && !capturing
+  const elsewhereRef = useRef(false)
+  useEffect(() => {
+    elsewhereRef.current = elsewhere
+  }, [elsewhere])
+  // Whether this page's microphone switch reads as on: unmuted *and* the claim
+  // here. A press flips that — from "elsewhere" it opens (and claims).
+  const micOn = !muted && !elsewhere
+  const micOffLabel = elsewhere
+    ? 'Listen on this browser instead'
+    : 'Listen through this browser'
   // The steady question — is the person talking to mesa through the microphone
   // — which is what the composer's hint and placeholder read. Deliberately not
   // `wantsMic` below: that one goes false for the length of every reply, and
@@ -2035,7 +2052,7 @@ export function LiveHub({
   // than by any rule.
   const recognizes = recognizesSpeech({
     live,
-    joined: unlocked,
+    joined: capturing,
     supported,
     blocked,
     paused,
@@ -2197,7 +2214,7 @@ export function LiveHub({
 
   const wantsMic = shouldListen({
     live,
-    joined: unlocked,
+    joined: capturing,
     supported,
     blocked,
     paused,
@@ -2209,7 +2226,7 @@ export function LiveHub({
   // room for one thing only — a spoken pause phrase.
   const wantsBargeIn = shouldBargeIn({
     live,
-    joined: unlocked,
+    joined: capturing,
     supported,
     blocked,
     paused,
@@ -2419,7 +2436,7 @@ export function LiveHub({
       const what = listenChordAction(live, unlocked)
       // Not joined yet: the chord is the Listen press (joining opens the mic).
       if (what === 'join') joinRef.current()
-      else if (what === 'toggle') toggleListening(!mutedRef.current)
+      else if (what === 'toggle') toggleListening(!mutedRef.current && !elsewhereRef.current)
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -4270,9 +4287,13 @@ export function LiveHub({
     const media = mediaForTurn(stagedImage !== null, pendingInkNow !== null)
 
     if (media === 'image') {
-      return sendLiveUtterance(text, undefined, viewNow.current(), {
-        png_base64: stagedImage!.png_base64,
-      }).then(
+      return sendLiveUtterance(
+        text,
+        undefined,
+        viewNow.current(),
+        { png_base64: stagedImage!.png_base64 },
+        client,
+      ).then(
         () => {
           armThinking(carriesMedia)
           setPastedImage(null)
@@ -4300,6 +4321,8 @@ export function LiveHub({
           text,
           carried === null ? undefined : { board_id: carried.boardId, png_base64: carried.png },
           viewNow.current(),
+          undefined,
+          client,
         ).then(() => ({ carried, dropped: pending !== null && png === null }))
       })
       .then(
@@ -4570,14 +4593,14 @@ export function LiveHub({
     level,
     speechRms,
     micAvailable: supported && !blocked,
-    micMuted: muted,
+    micMuted: !micOn,
     speechMuted,
     paused,
     pauseLabel: pauseButton?.label ?? '',
     pauseDisabled: pauseButton?.disabled ?? true,
     canPause: pauseButton !== undefined && pauseButton !== null,
     ambient: ambientCtl ? { label: ambientCtl.label, onPress: pressAmbient } : null,
-    onToggleMic: () => toggleListening(!muted),
+    onToggleMic: () => toggleListening(!muted && !elsewhere),
     onTogglePause: () => {
       if (pauseButton) togglePause(pauseButton)
     },
@@ -4734,21 +4757,17 @@ export function LiveHub({
           {live && unlocked && supported && !blocked && (
             <button
               type="button"
-              className={`live-icon live-mic${muted ? '' : ' live-on'}`}
-              aria-pressed={!muted}
-              aria-label={
-                muted ? 'listen through this browser' : 'stop listening'
-              }
+              className={`live-icon live-mic${micOn ? ' live-on' : ''}`}
+              aria-pressed={micOn}
+              aria-label={micOn ? 'stop listening' : micOffLabel.toLowerCase()}
               // Out of the tab order while the panel is clipped, for
               // the same reason the close button is: `pointer-events`
               // stops the mouse, not a Tab, and an invisible control
               // that toggles the microphone on Enter is worse than a
               // button nobody can reach.
               tabIndex={open ? undefined : -1}
-              title={`${
-                muted ? 'Listen through this browser' : 'Stop listening'
-              } (${listenChordLabel})`}
-              onClick={() => toggleListening(!muted)}
+              title={`${micOn ? 'Stop listening' : micOffLabel} (${listenChordLabel})`}
+              onClick={() => toggleListening(!muted && !elsewhere)}
             >
               <MicMark />
             </button>
@@ -5167,14 +5186,12 @@ export function LiveHub({
           {live && unlocked && supported && !blocked && (
             <button
               type="button"
-              className={`live-composer-mic${muted ? '' : ' live-on'}`}
-              aria-pressed={!muted}
-              aria-label={muted ? 'listen through this browser' : 'stop listening'}
+              className={`live-composer-mic${micOn ? ' live-on' : ''}`}
+              aria-pressed={micOn}
+              aria-label={micOn ? 'stop listening' : micOffLabel.toLowerCase()}
               tabIndex={open ? undefined : -1}
-              title={`${
-                muted ? 'Listen through this browser' : 'Stop listening'
-              } (${listenChordLabel})`}
-              onClick={() => toggleListening(!muted)}
+              title={`${micOn ? 'Stop listening' : micOffLabel} (${listenChordLabel})`}
+              onClick={() => toggleListening(!muted && !elsewhere)}
             >
               <MicMark />
             </button>
@@ -5204,6 +5221,7 @@ export function LiveHub({
             paused,
             muted,
             chord: listenChordLabel,
+            elsewhere,
           })
           const micName =
             chosen === DEFAULT_INPUT

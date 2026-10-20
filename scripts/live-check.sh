@@ -1622,6 +1622,27 @@ api 200 GET "/api/live"
   fail "speaker: claiming the voice must not touch the reported window box"
 ok "the speaker claim: a press names one client, a passive report refreshes but never steals, and GET /api/live carries it"
 
+# Only the speaker posts (naru task 2095): two pages open on one conversation
+# both heard one line, and both posted it. An utterance naming a client that
+# does not hold the claim is now `conflict`, storing nothing; the holder's is
+# stored; re-claiming reverses the two. A body with no client (the CLI, an
+# older page) is never checked — every other utterance in this gate.
+user_turns() { run 0 "$MESA" live turns --limit 500; jqs 'map(select(.role == "user")) | length'; }
+api 200 POST "/api/live/speaker" '{"client":"tab-a"}'
+BEFORE=$(user_turns)
+api 201 POST "/api/live/utterance" '{"text":"one line, two pages","client":"tab-a"}'
+api 409 POST "/api/live/utterance" '{"text":"one line, two pages","client":"tab-b"}'
+[ "$(jqb .error.code)" = "conflict" ] || fail "two clients: a non-speaker's utterance must be conflict"
+[ "$(( $(user_turns) - BEFORE ))" = "1" ] ||
+  fail "two clients: one line from two pages must store exactly one user turn"
+api 200 POST "/api/live/speaker" '{"client":"tab-b"}'
+api 409 POST "/api/live/utterance" '{"text":"the other way","client":"tab-a"}'
+[ "$(jqb .error.code)" = "conflict" ] || fail "two clients: the old speaker's utterance must be conflict after a re-claim"
+api 201 POST "/api/live/utterance" '{"text":"the other way","client":"tab-b"}'
+[ "$(( $(user_turns) - BEFORE ))" = "2" ] ||
+  fail "two clients: after a re-claim the new speaker's line must store exactly one more turn"
+ok "two clients (user_turns_per_line_two_clients = 1): only the speaker's utterance is stored, the other is 409 conflict, and a re-claim reverses them"
+
 # A report mesa REFUSES writes nothing — the refresh included. Proving the
 # refresh did not land needs a claim old enough to tell apart, and
 # `datetime('now')` has one-second resolution, so the age is backdated in the

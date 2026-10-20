@@ -948,6 +948,9 @@ export function captureHint(input: {
    *  Optional because only the muted line names it, and the shipped chord is
    *  the right thing to say when nobody has said otherwise. */
   chord?: string
+  /** Joined here, but another client holds the speaker claim, so this page's
+   *  microphone stays shut (naru task 2095). Absent reads as false. */
+  elsewhere?: boolean
 }): string {
   if (input.paused) {
     return 'Paused. Press Resume to talk to Naru again — the conversation is still running.'
@@ -969,6 +972,9 @@ export function captureHint(input: {
     // browser has had a gesture, and the switch is not even offered yet — so
     // naming the chord would be naming something that does nothing.
     return 'Press Listen to join the conversation on this browser. You can also type here, or use your system dictation.'
+  }
+  if (input.elsewhere) {
+    return `Listening on another browser. Press ${input.chord ?? LISTEN_CHORD} — or the microphone button — to listen here instead.`
   }
   if (input.muted) {
     return `Naru is not listening. Press ${input.chord ?? LISTEN_CHORD} — or the microphone button — to have her listen, or just type here.`

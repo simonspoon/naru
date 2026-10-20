@@ -87,4 +87,9 @@ describe('quietHint', () => {
     expect(quietHint({ ...joined, paused: true }).text).toContain('Paused')
     expect(quietHint({ ...joined, live: false }).chord).toBeNull()
   })
+  it('says another browser is listening when the claim is elsewhere', () => {
+    const hint = quietHint({ ...joined, muted: false, listening: false, elsewhere: true })
+    expect(hint.chord).toBeNull()
+    expect(hint.text).toMatch(/^Listening on another browser\..*instead\. Enter sends\.$/)
+  })
 })

@@ -794,6 +794,13 @@ describe('captureHint', () => {
     expect(captureHint({ ...base, muted: true })).toMatch(/Shift\+L/)
   })
 
+  it('says the claim is on another browser, under joined and above muted (naru task 2095)', () => {
+    expect(captureHint({ ...base, elsewhere: true })).toMatch(/^Listening on another browser/)
+    expect(captureHint({ ...base, elsewhere: true, muted: true })).toMatch(/another browser/)
+    expect(captureHint({ ...base, elsewhere: true, joined: false })).toMatch(/Press Listen/)
+    expect(captureHint({ ...base, elsewhere: true, blocked: true })).toMatch(/refused/)
+  })
+
   it('a refusal outranks a mute — one of the two is the person\'s to undo', () => {
     expect(captureHint({ ...base, muted: true, blocked: true })).toMatch(/refused/)
   })
