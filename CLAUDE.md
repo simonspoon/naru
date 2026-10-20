@@ -146,7 +146,7 @@ The code is the source of truth. These are the invariants you must not break:
   `liveVad`, `liveView`,
   `liveWatchdog`,
   `liveWindow`,
-  `mainCollapse`, `markdownAssets`, `markSkin`, `memoryDraft`, `modalDrag`, `nativeHost`, `navCollapse`, `navOrder`,
+  `mainCollapse`, `markdownAssets`, `markSkin`, `markSkinFrames`, `memoryDraft`, `modalDrag`, `nativeHost`, `navCollapse`, `navOrder`,
   `navWidth`, `newFile`, `openFiles`, `panelDrag`, `pricingDraft`, `projectPanes`,
   `projectTree`, `promptPlaceholders`, `ptyResize`, `runEvents`, `scriptDraft`, `scriptRun`, `sessionDetail`,
   `sessionGraph`,

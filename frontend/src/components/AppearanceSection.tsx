@@ -1,9 +1,12 @@
-import { useRef, useState } from 'react'
-import { createTheme, getAppearance, listThemes, updateAppearance } from '../api'
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { createTheme, getAppearance, listThemes, updateAppearance, updateMarkSkin } from '../api'
+import { currentMarkSkin, MARK_SKIN_IDS, MARK_SKIN_LABELS, setMarkSkin, subscribeMarkSkin } from '../markSkin'
+import { previewMicRms, previewState } from '../markSkinFrames'
 import { applyTheme, isCustomId, parseSetting, themeSwatch } from '../theme'
 import type { ThemeSetting } from '../theme'
 import type { Theme } from '../types/Theme'
 import { useFetch } from '../useFetch'
+import { NaruMark } from './NaruMark'
 import { ThemeEditor } from './ThemeEditor'
 
 /**
@@ -20,6 +23,11 @@ export function AppearanceSection() {
   const [saveError, setSaveError] = useState<string | null>(null)
   // Only the newest pick may revert on failure (out-of-order rejections).
   const latest = useRef(0)
+  // The mark skin (naru task 2121): the selection is the live current skin
+  // itself, so a pick, a revert and a CLI change behind the page all show.
+  const skin = useSyncExternalStore(subscribeMarkSkin, currentMarkSkin)
+  const [skinError, setSkinError] = useState<string | null>(null)
+  const latestSkin = useRef(0)
 
   const failure = error ?? themes.error
   if (failure) {
@@ -74,6 +82,19 @@ export function AppearanceSection() {
     } catch (e) {
       setSaveError(e instanceof Error ? e.message : String(e))
     }
+  }
+
+  function pickSkin(next: string) {
+    if (next === skin) return
+    const previous = skin
+    const id = ++latestSkin.current
+    setSkinError(null)
+    setMarkSkin(next)
+    updateMarkSkin(next).catch((e: unknown) => {
+      if (id !== latestSkin.current) return
+      setMarkSkin(previous)
+      setSkinError(e instanceof Error ? e.message : String(e))
+    })
   }
 
   const active = isCustomId(current) ? byId(current) : undefined
@@ -140,6 +161,47 @@ export function AppearanceSection() {
           }}
         />
       )}
+      <h2>Mark</h2>
+      <p className="muted">The live mark in the nav and conversation panel. Applies immediately.</p>
+      <div className="theme-picker mark-skin-picker" role="radiogroup" aria-label="Live mark">
+        <MarkPreviews>
+          {(state, level) =>
+            MARK_SKIN_IDS.map((id) => (
+              <label key={id} className={`theme-option${id === skin ? ' selected' : ''}`}>
+                <input type="radio" name="mark-skin" value={id} checked={id === skin} onChange={() => pickSkin(id)} />
+                <span className="mark-skin-preview" aria-hidden="true">
+                  <NaruMark state={state} level={level} speechRms={noRms} decorative brandIdle skin={id} />
+                </span>
+                <span className="settings-command-title">{MARK_SKIN_LABELS[id]}</span>
+              </label>
+            ))
+          }
+        </MarkPreviews>
+      </div>
+      {skinError && <p className="error">{skinError}</p>}
     </>
   )
+}
+
+/** Speaking previews have no playback to tap: the mark simulates the voice. */
+const noRms = (): number | null => null
+
+/**
+ * The previews' one shared clock: every preview cycles idle, hearing,
+ * speaking, thinking and paused in step (`markSkinFrames.ts::previewState`),
+ * with a made-up microphone level while hearing. Kept in its own component so
+ * its ticks re-render only the previews.
+ */
+function MarkPreviews({
+  children,
+}: {
+  children: (state: ReturnType<typeof previewState>, level: number) => React.ReactNode
+}) {
+  const [t, setT] = useState(0)
+  useEffect(() => {
+    const start = performance.now()
+    const timer = window.setInterval(() => setT((performance.now() - start) / 1000), 120)
+    return () => window.clearInterval(timer)
+  }, [])
+  return <>{children(previewState(t), previewMicRms(t))}</>
 }

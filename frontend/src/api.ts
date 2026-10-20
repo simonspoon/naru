@@ -1765,6 +1765,14 @@ export function updateAppearance(theme: string | null): Promise<ConfigAppearance
   return request('/api/config/appearance', jsonInit('PUT', { theme }))
 }
 
+/**
+ * Saves the live mark's skin alone (naru task 2121) — the body carries no
+ * `theme`, so the saved theme is left as it is. An unknown id is 422.
+ */
+export function updateMarkSkin(skin: string): Promise<ConfigAppearance> {
+  return request('/api/config/appearance', jsonInit('PUT', { mark_skin: skin }))
+}
+
 /** Every theme, built-ins first (naru task 1843). */
 export function listThemes(): Promise<Theme[]> {
   return request('/api/themes')

@@ -1574,7 +1574,8 @@ A twelfth, independent section holds the web UI's colour theme (naru task
   operating system's `prefers-color-scheme` live (dark → `dark`, otherwise
   `light`).
 - **`mark-skin`** (naru task 2120): the live mark's skin id — `"waveform"`
-  (the built-in, absent/`null`) is the only one so far. Anything else is
+  (the built-in, absent/`null`), `"face"` or `"blob"` (naru task 2121),
+  picked in Settings → Appearance → **Mark**. Anything else is
   **422 `validation`**, writing nothing; a hand-edited unknown id reads back
   verbatim and the page draws the waveform. The allowed ids live in
   `config::MARK_SKINS` and `markSkin.ts::MARK_SKIN_IDS` — keep them in step.

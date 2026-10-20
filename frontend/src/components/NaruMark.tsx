@@ -28,6 +28,7 @@ export function NaruMark({
   decorative = false,
   offer = false,
   brandIdle = false,
+  skin: skinOverride,
 }: {
   state: LiveIndicator | null
   level: number
@@ -40,6 +41,8 @@ export function NaruMark({
   offer?: boolean
   /** Rest in the favicon's own colours rather than idle's dim slate (the nav). */
   brandIdle?: boolean
+  /** Draw this skin rather than the current one (the Settings previews). */
+  skin?: string
 }) {
   const svgRef = useRef<SVGSVGElement>(null)
   const stateRef = useRef(state)
@@ -56,7 +59,8 @@ export function NaruMark({
     rmsRef.current = speechRms
   }, [state, level, speechRms, offer, brandIdle])
 
-  const skin = SKINS[useSyncExternalStore(subscribeMarkSkin, currentMarkSkin)] ?? SKINS.waveform
+  const chosen = useSyncExternalStore(subscribeMarkSkin, currentMarkSkin)
+  const skin = SKINS[skinOverride ?? chosen] ?? SKINS.waveform
 
   useEffect(() => {
     const svg = svgRef.current

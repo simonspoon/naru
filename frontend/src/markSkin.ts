@@ -48,8 +48,15 @@ export interface MarkSkin<Markup = unknown> {
 }
 
 /** Every built-in skin id — keep in step with `config::MARK_SKINS`. */
-export const MARK_SKIN_IDS = ['waveform'] as const
+export const MARK_SKIN_IDS = ['waveform', 'face', 'blob'] as const
 export const DEFAULT_MARK_SKIN = 'waveform'
+
+/** Each built-in skin's name in the Settings picker (naru task 2121). */
+export const MARK_SKIN_LABELS: Record<(typeof MARK_SKIN_IDS)[number], string> = {
+  waveform: 'Waveform',
+  face: 'Face',
+  blob: 'Blob',
+}
 
 /** The skin id to draw for a saved setting: an unknown or absent id is the default. */
 export function markSkinId(setting: string | null | undefined): string {

@@ -1612,6 +1612,11 @@ api PUT /api/config/appearance '{"mark_skin": "waveform"}'
   fail "PUT mark_skin waveform: expected 200 echo, got $CODE: $STDOUT"
 [ "$(jq -cS '.appearance' < "$CONFIG")" = '{"mark-skin":"waveform","theme":"dark"}' ] ||
   fail "PUT mark_skin must write mark-skin and leave the theme: $(cat "$CONFIG")"
+api PUT /api/config/appearance '{"mark_skin": "blob"}'
+[ "$CODE" = "200" ] && [ "$(jq -r .mark_skin <<<"$STDOUT")" = "blob" ] ||
+  fail "PUT mark_skin blob: expected 200 echo, got $CODE: $STDOUT"
+[ "$(jq -cS '.appearance' < "$CONFIG")" = '{"mark-skin":"blob","theme":"dark"}' ] ||
+  fail "PUT mark_skin blob must write mark-skin and leave the theme: $(cat "$CONFIG")"
 BEFORE=$(cat "$CONFIG")
 api PUT /api/config/appearance '{"mark_skin": "nope"}'
 [ "$CODE" = "422" ] && [ "$(jq -r .error.code <<<"$STDOUT")" = "validation" ] ||
@@ -1619,7 +1624,7 @@ api PUT /api/config/appearance '{"mark_skin": "nope"}'
 [ "$(cat "$CONFIG")" = "$BEFORE" ] || fail "a rejected mark_skin PUT must not touch the file: $(cat "$CONFIG")"
 api PUT /api/config/appearance '{"theme": null, "mark_skin": null}'
 [ "$(jq -c '.appearance' < "$CONFIG")" = '{}' ] || fail "null must remove the mark skin: $(cat "$CONFIG")"
-ok "PUT /api/config/appearance mark_skin: waveform written beside the theme, an unknown skin 422 writing nothing, null restores the default"
+ok "PUT /api/config/appearance mark_skin: waveform and blob written beside the theme, an unknown skin 422 writing nothing, null restores the default"
 
 CODE=$(curl -s -o "$TMP/body" -w '%{http_code}' -H 'Host: evil.example' \
   "http://127.0.0.1:$PORT/api/config/appearance")

@@ -3358,7 +3358,7 @@ pub const MARK_SKIN: &str = "mark-skin";
 
 /// The mark skins the `mark-skin` key accepts — keep in step with
 /// `frontend/src/markSkin.ts::MARK_SKIN_IDS`.
-pub const MARK_SKINS: &[&str] = &["waveform"];
+pub const MARK_SKINS: &[&str] = &["waveform", "face", "blob"];
 
 /// The mark skin when the config says nothing.
 pub const DEFAULT_MARK_SKIN: &str = "waveform";
@@ -7914,6 +7914,15 @@ mod tests {
         let root: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(root["appearance"]["mark-skin"], "waveform");
+        // The face and the blob (naru task 2121) are accepted too.
+        for skin in ["face", "blob"] {
+            save_appearance_in(&path, &audio_update(&[(MARK_SKIN, Some(skin))])).unwrap();
+            assert_eq!(
+                appearance_in(&path).unwrap().mark_skin.as_deref(),
+                Some(skin)
+            );
+        }
+        save_appearance_in(&path, &audio_update(&[(MARK_SKIN, Some("waveform"))])).unwrap();
         // An unknown skin is a validation error writing nothing.
         let before = std::fs::read(&path).unwrap();
         let err =

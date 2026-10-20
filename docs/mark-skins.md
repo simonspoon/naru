@@ -1,8 +1,24 @@
 # Mark skins
 
 The live mark (the conversation panel head and the nav orb) is a **host**
-around a pluggable **skin** (naru task 2120). Only the built-in `waveform`
-skin exists so far — the favicon's seven bars, unchanged from mesa task 1544.
+around a pluggable **skin** (naru task 2120). Three are built in:
+
+- `waveform` — the favicon's seven bars, unchanged from mesa task 1544 (the
+  default);
+- `face` (naru task 2121) — a round head that blinks every 2.5–6 s, opens its
+  mouth with the speech level, looks wide-eyed and leans in while hearing,
+  looks up and aside with a raised brow while thinking, and dims with its
+  eyes half shut when paused;
+- `blob` (naru task 2121) — a soft shape through eight radii that breathes at
+  idle, wobbles and pulses with the level while hearing or speaking, turns
+  slowly with a two-lobed ripple while thinking, and holds still when paused.
+
+The face's and the blob's arithmetic lives in `frontend/src/markSkinFrames.ts`
+(unit-tested, `reduced` halving the clock blinks included); their painters
+fill a radial gradient from the palette's slots, so every state colour still
+comes from the host's palette. Each mounted painter gets its own gradient id
+(`markSkins/paint.ts`), and every skin writes the host svg's scale, opacity
+and filter on every painted frame, since a skin swap keeps the same `<svg>`.
 
 ## The split
 
@@ -36,3 +52,11 @@ poll calls `markSkin.ts::setMarkSkin`; every mark reads that one value through
 `useSyncExternalStore`, so a change re-renders each mark once and re-mounts
 its painter. An unknown or absent id draws `waveform`, and the waveform draws
 before the config answers.
+
+Settings → Appearance → **Mark** (naru task 2121) is the picker: a radio
+card per skin with a live preview — a `NaruMark` with its `skin` prop set,
+cycling idle, hearing (a made-up mic level), speaking (the simulated
+envelope), thinking and paused two seconds each on one shared clock. A pick
+calls `setMarkSkin` at once and saves through `api.ts::updateMarkSkin`, which
+sends `{mark_skin}` alone so the theme is left untouched; a refused save puts
+the previous skin back and shows the error.
