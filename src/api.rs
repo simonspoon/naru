@@ -12343,8 +12343,14 @@ async fn delete_mark_skin(
 /// before the skin's own scripts, which call `naruMark.onFrame` at load:
 /// it defines `window.naruMark` (`onFrame(cb)`, `onTheme(cb)`), posts
 /// `{naru:'mark-ready'}` to the parent the first time `onFrame` is called,
-/// and posts `{naru:'mark-error'}` once — on any uncaught error or rejection,
-/// or a handler throwing — after which it stops calling the skin. Only a
+/// and posts `{naru:'mark-error'}` once — on an uncaught error or rejection
+/// of the skin's own, or a handler throwing — after which it stops calling
+/// the skin. A skin can run only inline script (`RENDER_CSP`), so its own
+/// errors carry this document's URL as their `filename` and its rejections a
+/// stack naming it (or no stack at all, a rejected string); an error a
+/// browser extension's injected script throws in the frame (`chrome-extension://…`,
+/// or a muted "Script error." with no filename) is ignored, since it says
+/// nothing about the skin (naru task 2166). Only a
 /// message from the parent counts: `mark-frame` goes to the frame handler,
 /// `mark-theme` sets each `--naru-*` string var on `<html>` (the board
 /// relay's rule) and goes to the theme handler. The style keeps the frame
@@ -12352,10 +12358,10 @@ async fn delete_mark_skin(
 /// Its `color-scheme: light` matches the iframe element's (`App.css`
 /// `.naru-mark-frame iframe`): a frame whose scheme differs from its
 /// element's is painted on an opaque canvas, a white box behind the mark.
-const MARK_SKIN_BOOTSTRAP: &str = "<script>(function(){var F=null,T=null,E=0,R=0;\
+const MARK_SKIN_BOOTSTRAP: &str = "<script>(function(){var F=null,T=null,E=0,R=0,U=location.href.split('#')[0];\
 function err(m){if(E)return;E=1;try{parent.postMessage({naru:'mark-error',message:String(m).slice(0,500)},'*')}catch(x){}}\
-addEventListener('error',function(e){err(e.message||'error')});\
-addEventListener('unhandledrejection',function(e){err(e.reason)});\
+addEventListener('error',function(e){if(String(e.filename||'').split('#')[0]===U)err(e.message||'error')});\
+addEventListener('unhandledrejection',function(e){var r=e.reason,s=r&&r.stack;if(!s||String(s).indexOf(U)>=0)err(r)});\
 window.naruMark={onFrame:function(cb){if(typeof cb!=='function')return;F=cb;\
 if(!R){R=1;parent.postMessage({naru:'mark-ready'},'*')}},\
 onTheme:function(cb){if(typeof cb==='function')T=cb}};\
@@ -23087,6 +23093,15 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         let html = String::from_utf8(bytes.to_vec()).unwrap();
         assert!(html.starts_with(&format!("<!DOCTYPE html>{MARK_SKIN_BOOTSTRAP}")));
         assert!(html.find(MARK_SKIN_BOOTSTRAP).unwrap() < html.find("naruMark.onFrame").unwrap());
+        // Only the skin's own errors fall back (naru task 2166); the preview
+        // driver in `core::theme` carries the identical filter.
+        for filter in [
+            "U=location.href.split('#')[0]",
+            "addEventListener('error',function(e){if(String(e.filename||'').split('#')[0]===U)err(e.message||'error')});",
+            "addEventListener('unhandledrejection',function(e){var r=e.reason,s=r&&r.stack;if(!s||String(s).indexOf(U)>=0)err(r)});",
+        ] {
+            assert!(html.contains(filter), "{filter}");
+        }
         assert!(html.ends_with("</html>"));
         assert_eq!(
             mark_skin_render_body("<svg/>"),

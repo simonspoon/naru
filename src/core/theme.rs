@@ -708,8 +708,10 @@ pub fn after_doctype(body: &str, insert: &str) -> String {
 /// (`liveMark.ts::PALETTES`, paused wearing idle's). The board's own theme
 /// relay posts `board-ready`; this only listens for the `board-theme` answer
 /// and hands its vars to the skin's `onTheme`. It posts nothing. A chip names
-/// the mode; an error, or no `onFrame` call within 2 s, shows a banner and
-/// stops the skin for good. The stage is the nav's dark canvas, not the board
+/// the mode; an error of the skin's own (the render route's bootstrap's rule:
+/// a foreign script's error or rejection, e.g. a browser extension's, is
+/// ignored), or no `onFrame` call within 2 s, shows a banner and stops the
+/// skin for good. The stage is the nav's dark canvas, not the board
 /// frame's white.
 const MARK_PREVIEW_BOOTSTRAP: &str = r#"<style>html{background:var(--naru-bg,#060a10)!important;color-scheme:var(--naru-color-scheme,dark)}
 #naru-preview-chip{position:fixed;top:.75rem;left:.75rem;z-index:2147483647;pointer-events:none;display:inline-flex;align-items:center;gap:.4em;white-space:nowrap;padding:0 .5em;border-radius:999px;background:var(--naru-surface,#0b1119);border:1px solid var(--naru-ring,rgba(184,221,232,.25));color:var(--naru-fg,#b8dde8);font:11px/1.8 ui-monospace,"Share Tech Mono",monospace}
@@ -722,7 +724,7 @@ speak:{bars:['#ff5a3c','#ff8a2b','#ffb02b','#ffe2a8'],glow:'#ffa02b'},
 think:{bars:['#6a2bff','#8a4bff','#b06bff','#e6d1ff'],glow:'#b06bff'},
 offer:{bars:['#d98a14','#f0a820','#ffc23d','#fff0c2'],glow:'#ffc23d'}};
 var MODES=['idle','hear','speak','think','paused','offer'];
-var F=null,T=null,E=0,msg='',shown='',chip=null,dot=null,label=null,banner=null;
+var F=null,T=null,E=0,msg='',shown='',chip=null,dot=null,label=null,banner=null,U=location.href.split('#')[0];
 var mq=matchMedia('(prefers-reduced-motion: reduce)'),start=null,last=0,lv=0;
 function ui(){if(chip||!document.body)return;var d=document;
 chip=d.createElement('div');chip.id='naru-preview-chip';chip.setAttribute('role','status');chip.setAttribute('aria-live','polite');
@@ -733,8 +735,8 @@ function paint(){ui();if(!chip)return;var p=P[shown==='paused'?'idle':shown]||P.
 label.textContent='preview · '+(shown||'idle');dot.style.background=p.glow;
 if(E){banner.textContent='skin error · '+msg;banner.hidden=false}}
 function err(m){if(E)return;E=1;msg=String(m).slice(0,200);paint()}
-addEventListener('error',function(e){err(e.message||'error')});
-addEventListener('unhandledrejection',function(e){err(e.reason)});
+addEventListener('error',function(e){if(String(e.filename||'').split('#')[0]===U)err(e.message||'error')});
+addEventListener('unhandledrejection',function(e){var r=e.reason,s=r&&r.stack;if(!s||String(s).indexOf(U)>=0)err(r)});
 addEventListener('DOMContentLoaded',paint);
 window.naruMark={onFrame:function(cb){if(typeof cb==='function')F=cb},
 onTheme:function(cb){if(typeof cb==='function')T=cb}};
@@ -1123,6 +1125,20 @@ mod tests {
         assert!(!MARK_PREVIEW_BOOTSTRAP.contains("postMessage"));
         assert!(!MARK_PREVIEW_BOOTSTRAP.contains("fetch"));
         assert!(!MARK_PREVIEW_BOOTSTRAP.contains("src="));
+    }
+
+    /// Only the skin's own errors stop the preview (naru task 2166): the
+    /// same filter the render route's bootstrap applies, so a browser
+    /// extension's error never shows the banner.
+    #[test]
+    fn preview_counts_only_the_skins_own_errors() {
+        for filter in [
+            "U=location.href.split('#')[0]",
+            "addEventListener('error',function(e){if(String(e.filename||'').split('#')[0]===U)err(e.message||'error')});",
+            "addEventListener('unhandledrejection',function(e){var r=e.reason,s=r&&r.stack;if(!s||String(s).indexOf(U)>=0)err(r)});",
+        ] {
+            assert!(MARK_PREVIEW_BOOTSTRAP.contains(filter), "{filter}");
+        }
     }
 
     /// The driver's palettes are copied from `liveMark.ts::PALETTES`; every

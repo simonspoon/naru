@@ -113,8 +113,9 @@ hear, speak, think, paused and offer two seconds each, with the host's level
 rules and `liveMark.ts::PALETTES` (a unit test pins the copy against that
 file). It paints the stage the dark `--naru-bg` the mark really sits on, shows
 a `preview · <mode>` chip at the top left, and listens for the board's own
-`board-theme` relay to feed `onTheme`; it posts nothing to the page. An error,
-or no `onFrame` call within 2 s, shows a `skin error · …` banner and stops the
+`board-theme` relay to feed `onTheme`; it posts nothing to the page. An error
+of the skin's own (the rule under the contract below), or no `onFrame` call
+within 2 s, shows a `skin error · …` banner and stops the
 skin for good, as the real mark's fallback does. The body is held to the same
 64 KiB limit as an installed skin, so a previewed file installs as is.
 
@@ -154,7 +155,14 @@ The bootstrap gives the skin one object:
 
 Only messages from the parent page count. An uncaught error, an unhandled
 rejection or a handler throwing posts `mark-error` once and the skin is
-called no more.
+called no more. Only the skin's **own** errors count (naru task 2166): an
+error whose `filename` is the skin document, and a rejection with no stack
+(a rejected string) or a stack naming it. An error a browser extension's
+injected script throws inside the frame (a `chrome-extension://…` filename,
+or a muted "Script error." with none) and a rejection whose stack names only
+foreign scripts are ignored, so a wallet extension failing to connect never
+knocks a working skin back to waveform. The preview driver applies the same
+rule.
 
 ### Fallback
 
