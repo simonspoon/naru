@@ -76,7 +76,6 @@ import { shouldInterruptAgent } from '../liveInterrupt'
 import { mediaForTurn, type StagedImage } from '../livePastedImage'
 import {
   liveClientId,
-  maySpeak,
   needsSpeakerRefresh,
   spokenTurnVerdict,
 } from '../liveSpeaker'
@@ -234,6 +233,7 @@ import {
   controlUrl,
   conversationKey,
   intentFor,
+  micSwitch,
   mutedFromMode,
   parseControlEvent,
   reconnectDelay,
@@ -2059,23 +2059,29 @@ export function LiveHub({
   // Only the client holding the speaker claim captures (naru task 2095): two
   // pages joined to one conversation both heard and both posted each line.
   // `elsewhere` is joined here with the claim on another client — the mic
-  // shuts, the hint says so, and the mic press takes the claim back.
-  const capturing = unlocked && maySpeak(session?.speaker ?? null, client)
-  const elsewhere = unlocked && !capturing
+  // shuts, the hint says so, and the mic press takes the claim back. Under a
+  // native host that hands the mic to naru-audio the host holds the claim
+  // under its own id, so there the claim counts as this page's (naru task
+  // 2201, `liveMicControl.ts::micSwitch`).
+  const {
+    capturing,
+    elsewhere,
+    waiting: micWaiting,
+    on: micOn,
+    offLabel: micOffLabel,
+  } = micSwitch({
+    unlocked,
+    speaker: session?.speaker ?? null,
+    client,
+    hostOwnsMic: native !== null && hostThin,
+    thin,
+    micReady,
+    muted,
+  })
   const elsewhereRef = useRef(false)
   useEffect(() => {
     elsewhereRef.current = elsewhere
   }, [elsewhere])
-  // Whether this page's microphone switch reads as on: unmuted *and* the claim
-  // here. A press flips that — from "elsewhere" it opens (and claims).
-  // The switch waits for naru-audio's first `state` on the thin path.
-  const micWaiting = thin && !micReady
-  const micOn = !micWaiting && !muted && !elsewhere
-  const micOffLabel = micWaiting
-    ? 'Connecting to naru-audio…'
-    : elsewhere
-      ? 'Listen on this browser instead'
-      : 'Listen through this browser'
   // The steady question — is the person talking to mesa through the microphone
   // — which is what the composer's hint and placeholder read. Deliberately not
   // `wantsMic` below: that one goes false for the length of every reply, and

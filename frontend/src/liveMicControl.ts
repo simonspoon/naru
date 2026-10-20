@@ -1,3 +1,5 @@
+import { maySpeak } from './liveSpeaker'
+
 /**
  * The page as a control client of naru-audio's mic state (naru task 2179,
  * `docs/live.md` "The mic control client").
@@ -74,4 +76,35 @@ export function takesThinPath(hostPresent: boolean, hostThin: boolean): boolean 
 /** Reconnect backoff: 500 ms doubling, capped at 5 s. */
 export function reconnectDelay(attempt: number): number {
   return Math.min(5000, 500 * 2 ** Math.max(0, attempt))
+}
+
+/**
+ * The mic switch (naru task 2201). Only the client holding the speaker claim
+ * captures (naru task 2095), so with the claim on another client the switch
+ * is `elsewhere`: off, and a press takes the claim back. A native host that
+ * hands the mic to naru-audio (`hostOwnsMic`: a host present and thin) holds
+ * the claim under its own client id, not the page's — there the claim is the
+ * page's own and the switch follows naru-audio's mute alone. A plain browser
+ * is on the thin path too but captures itself, so it keeps the claim rule.
+ */
+export function micSwitch(o: {
+  unlocked: boolean
+  speaker: string | null
+  client: string
+  hostOwnsMic: boolean
+  thin: boolean
+  micReady: boolean
+  muted: boolean
+}): { capturing: boolean; elsewhere: boolean; waiting: boolean; on: boolean; offLabel: string } {
+  const capturing = o.unlocked && (o.hostOwnsMic || maySpeak(o.speaker, o.client))
+  const elsewhere = o.unlocked && !capturing
+  // The switch waits for naru-audio's first `state` on the thin path.
+  const waiting = o.thin && !o.micReady
+  const on = !waiting && !o.muted && !elsewhere
+  const offLabel = waiting
+    ? 'Connecting to naru-audio…'
+    : elsewhere
+      ? 'Listen on this browser instead'
+      : 'Listen through this browser'
+  return { capturing, elsewhere, waiting, on, offLabel }
 }
