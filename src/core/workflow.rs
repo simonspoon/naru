@@ -1999,6 +1999,36 @@ stage_run() { # <name> <agent> <deadline> <brief file> [extra stage args]
 repo_each() { if [ -s "$SCRATCH/repos.txt" ]; then cat "$SCRATCH/repos.txt"; else pwd; fi; }
 repo_all() { repo_each; cat "$SCRATCH/scan.txt" 2>/dev/null; return 0; }
 repo_state() { if [ "$1" = 1 ]; then echo "$SCRATCH"; else echo "$SCRATCH/repo-$1"; fi; }
+# Read-only views of the baselines (naru task 2115), on restore_path's own test (a path whose
+# `path<TAB>hash` is not a baseline line is the run's): run_changed prints `<path><TAB><debris copy>`
+# per file the run changed, the copy Close: backlog makes; pre_dirty prints each path that was
+# dirty before the run and still matches its baseline. Paths in a later repo carry the repo prefix.
+base_scan() { # <changed|same>
+  local n=0 repo ST pre rec p h old
+  while IFS= read -r repo; do
+    n=$((n+1)); ST=$(repo_state "$n"); pre=""; [ "$n" -gt 1 ] && pre="$repo/"
+    [ -f "$ST/baseline.txt" ] || continue
+    if [ "$1" = same ]; then
+      while IFS=$'\t' read -r p h; do
+        [ -n "$p" ] || continue
+        if [ -e "$repo/$p" ]; then old=$(git -C "$repo" hash-object -- "$repo/$p" 2>/dev/null || echo gone); else old=gone; fi
+        [ "$old" = "$h" ] && printf '%s%s\n' "$pre" "$p"
+      done < "$ST/baseline.txt"
+      continue
+    fi
+    while IFS= read -r -d '' rec; do
+      case "$rec" in R*|C*|\ R*|\ C*) IFS= read -r -d '' old ;; esac
+      p="${rec:3}"
+      [ -f "$repo/$p" ] || continue
+      h=$(git -C "$repo" hash-object -- "$repo/$p" 2>/dev/null || echo gone)
+      grep -qxF -- "$(printf '%s\t%s' "$p" "$h")" "$ST/baseline.txt" 2>/dev/null && continue
+      printf '%s%s\t%s\n' "$pre" "$p" "$ST/debris/$p"
+    done < <(git -C "$repo" status --porcelain -z -uall 2>/dev/null)
+  done < <(repo_all)
+  return 0
+}
+run_changed() { base_scan changed; }
+pre_dirty() { base_scan same; }
 # The no-commit rule (naru task 2047): Commit runs only after Close: pass, so no metric may need a commit.
 no_commit_rule() { cat <<'RULE'
 
@@ -2142,10 +2172,12 @@ fi
 
 const LOOP_REVIEW: &str = r##"N=@N@
 if [ "$(cat "$SCRATCH/ui")" = yes ]; then VER=ui-verifier; else VER=verifier; fi
+PD=$(pre_dirty | head -n 100)
 for role in verifier reviewer; do
   { brief_head "$role"
     printf '\n## Plan\n\n'; cat "$SCRATCH/plan.md"
     printf '\n## Diff summary (uncommitted, by design: the full change is the working tree of each repo below)\n\n'; cat "$SCRATCH/diff-$N.txt"
+    if [ -n "$PD" ]; then printf '\n## Dirty before this run (not this task%ss change)\n\nThese paths were already dirty before the run started and the run has not changed them since. Do not count them against the task.\n\n' "'"; printf '%s\n' "$PD"; fi
     printf '\n## What to do\n\nCheck the change against the plan and the task. Do not edit any file. End with exactly one line, `VERDICT: PASS` or `VERDICT: FAIL`, after your findings.\n'
     if [ "$role" = verifier ] && [ "$VER" = ui-verifier ]; then printf '\n## Live UI check (required)\n\nThis change touches the UI. Run the live check in the dev environment (docs/dev-env.md: the dev serve on :7771 via scripts/dev-env.sh, khora headless; never the real install on :7770 or :7777). Cover every UI check in the plan and in the acceptance of the task. `VERDICT: PASS` is allowed only if those checks actually ran and passed. If you could not run them, end with `VERDICT: FAIL` and say why.\n'; fi
     no_commit_rule
@@ -2509,12 +2541,22 @@ const LOOP_SPLIT: &str = r##"{ brief_head planner
 } > "$SCRATCH/split-brief.md"
 stage_run split planner "$(dl split 600)" "$SCRATCH/split-brief.md"
 made=0
+# The parent run's work is reverted by Close: backlog right after this node (copies kept in debris),
+# so each sub-task is told where those copies will be (naru task 2115).
+CARRY=""
+RC=$(run_changed | head -n 40)
+if [ -n "$RC" ]; then
+  CARRY=$( { printf '\n\n## Work the parent run left (put back what you need first)\n\nWhen task %s closes after this split, the files its run created or changed are reverted. Copies are kept:\n\n' "$TASK"
+    printf '%s\n' "$RC" | awk -F'\t' '{ print "- " $1 " -> " $2 }'
+    printf '\nThe full diff of each repo is saved as debris/run.diff beside those copies (%s/debris/run.diff for the first repo).\n' "$SCRATCH"
+  } | head -c 4000)
+fi
 if [ "$(stage_verdict split)" = COMPLETE ]; then
   PROJ=$(naru task show "$TASK" | jq -r '.project_id')
   jq -r '.report // ""' "$SCRATCH/split.json" | jq -Rsc 'try (capture("(?<a>\\[.*\\])"; "s").a | fromjson | map(.description) | map(select(type == "string" and length > 0)) | .[:6]) catch []' > "$SCRATCH/subtasks.json" 2>/dev/null || echo '[]' > "$SCRATCH/subtasks.json"
   while IFS= read -r item; do
     desc=$(jq -r '.' <<<"$item")
-    naru task create "$PROJ" "$(printf 'Part of task %s: %s' "$TASK" "$desc")" --parent "$TASK" --status backlog > /dev/null && made=$((made + 1))
+    naru task create "$PROJ" "$(printf 'Part of task %s: %s%s' "$TASK" "$desc" "$CARRY")" --parent "$TASK" --status backlog > /dev/null && made=$((made + 1))
   done < <(jq -c '.[]' "$SCRATCH/subtasks.json" 2>/dev/null)
 else
   note_reason split

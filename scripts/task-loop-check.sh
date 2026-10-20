@@ -632,6 +632,8 @@ printf 'Plan: edit src/a.rs and src/b.rs.\nUI: no' > "$STUB/reply.planner"
 printf 'VERDICT: PASS' > "$STUB/reply.verifier"
 printf 'too much\nVERDICT: FAIL' > "$STUB/reply.diff-reviewer"
 printf '[{"description":"part one\\nline two\\nline three"},{"description":"part two"}]' > "$STUB/split.json"
+printf 'newpart.sh\n' > "$STUB/touch.implementer"
+echo early > "$TMP/work/predirty.txt"
 T=$(mk "Build the big thing")
 R=$(NARU_LOOP_SPLIT_FILES=1 run_loop "$T")
 [ "$(jq -r .status <<<"$R")" = succeeded ] || fail "split: run $(jq -c '{status,error}' <<<"$R")"
@@ -640,6 +642,17 @@ R=$(NARU_LOOP_SPLIT_FILES=1 run_loop "$T")
 "$NARU" task list loopproj | jq -e --argjson p "$T" '[.[] | select(.parent_id == $p)] | all(.status == "backlog")' >/dev/null || fail "split: sub-tasks not in backlog"
 S1=$("$NARU" task list loopproj | jq -r --argjson p "$T" '[.[] | select(.parent_id == $p)] | min_by(.id) | .id')
 "$NARU" task show "$S1" | jq -e '.description | test("part one\nline two\nline three")' >/dev/null || fail "split: multi-line sub-task description not kept whole: $("$NARU" task show "$S1" | jq -c .description)"
+# the parent's reverted work is carried into each sub-task, and reviewers see the pre-dirty list (naru task 2115)
+[ "$("$NARU" task list loopproj | jq -r --argjson p "$T" '.[] | select(.parent_id == $p) | .id' | while read -r s; do "$NARU" task show "$s" | jq -e '.description | test("newpart\\.sh -> .*/debris/newpart\\.sh")' >/dev/null && echo y; done | grep -c y)" = 2 ] || fail "split: sub-tasks lack the debris path: $("$NARU" task show "$S1" | jq -c .description)"
+DP=$("$NARU" task show "$S1" | jq -r '.description' | sed -n 's/^- newpart\.sh -> //p')
+[ -f "$DP" ] || fail "split: no debris copy at [$DP]"
+[ ! -e "$TMP/work/newpart.sh" ] || fail "split: newpart.sh was not reverted"
+for a in verifier diff-reviewer; do
+  grep -q "Dirty before this run" "$STUB/msgs.$a" && grep -q "predirty.txt" "$STUB/msgs.$a" || fail "split: the $a brief lacks the pre-dirty list"
+  ! grep -q "Dirty before this run.*newpart" "$STUB/msgs.$a" || fail "split: the $a pre-dirty list names the run's own file"
+done
+[ "$(cat "$TMP/work/predirty.txt")" = early ] || fail "split: pre-dirty file changed"
+rm -f "$TMP/work/predirty.txt"
 "$NARU" task show "$T" | jq -e '.notes | map(.body) | any(test("split this task")) and any(test("Last review findings"))' >/dev/null || fail "split: notes: $("$NARU" task show "$T" | jq -c .notes)"
 [ "$(turns implementer)" = 1 ] && [ "$(grep -c -- '--call--' "$STUB/vox.log")" = 1 ] || fail "split: implementer turns $(turns implementer), notify calls"
 metric "$T" NEEDS-FIX 1 backlog split
