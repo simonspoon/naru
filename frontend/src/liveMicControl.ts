@@ -108,3 +108,14 @@ export function micSwitch(o: {
       : 'Listen through this browser'
   return { capturing, elsewhere, waiting, on, offLabel }
 }
+
+/**
+ * The speaker id a turn is posted with (naru task 2203). The server refuses a
+ * turn whose `client` is not the claim holder (naru task 2095), and a native
+ * host that owns the mic holds the claim under its own id — so there the page
+ * posts with no `client`, the check the server skips, exactly as `micSwitch`
+ * counts that claim as the page's own. Everywhere else it posts its own id.
+ */
+export function utteranceClient(client: string, hostOwnsMic: boolean): string | undefined {
+  return hostOwnsMic ? undefined : client
+}

@@ -238,6 +238,7 @@ import {
   parseControlEvent,
   reconnectDelay,
   takesThinPath,
+  utteranceClient,
 } from '../liveMicControl'
 
 /**
@@ -2063,6 +2064,7 @@ export function LiveHub({
   // native host that hands the mic to naru-audio the host holds the claim
   // under its own id, so there the claim counts as this page's (naru task
   // 2201, `liveMicControl.ts::micSwitch`).
+  const hostOwnsMic = native !== null && hostThin
   const {
     capturing,
     elsewhere,
@@ -2073,7 +2075,7 @@ export function LiveHub({
     unlocked,
     speaker: session?.speaker ?? null,
     client,
-    hostOwnsMic: native !== null && hostThin,
+    hostOwnsMic,
     thin,
     micReady,
     muted,
@@ -2082,6 +2084,12 @@ export function LiveHub({
   useEffect(() => {
     elsewhereRef.current = elsewhere
   }, [elsewhere])
+  // Read by `postNow`, which runs from the post queue after the render that
+  // queued it (naru task 2203, `liveMicControl.ts::utteranceClient`).
+  const hostOwnsMicRef = useRef(false)
+  useEffect(() => {
+    hostOwnsMicRef.current = hostOwnsMic
+  }, [hostOwnsMic])
   // The steady question — is the person talking to mesa through the microphone
   // — which is what the composer's hint and placeholder read. Deliberately not
   // `wantsMic` below: that one goes false for the length of every reply, and
@@ -4423,7 +4431,7 @@ export function LiveHub({
         undefined,
         viewNow.current(),
         { png_base64: stagedImage!.png_base64 },
-        client,
+        utteranceClient(client, hostOwnsMicRef.current),
       ).then(
         () => {
           armThinking(carriesMedia)
@@ -4453,7 +4461,7 @@ export function LiveHub({
           carried === null ? undefined : { board_id: carried.boardId, png_base64: carried.png },
           viewNow.current(),
           undefined,
-          client,
+          utteranceClient(client, hostOwnsMicRef.current),
         ).then(() => ({ carried, dropped: pending !== null && png === null }))
       })
       .then(

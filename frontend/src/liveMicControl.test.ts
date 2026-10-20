@@ -10,6 +10,7 @@ import {
   parseControlEvent,
   reconnectDelay,
   takesThinPath,
+  utteranceClient,
 } from './liveMicControl'
 
 describe('liveMicControl', () => {
@@ -150,5 +151,18 @@ describe('micSwitch (naru task 2201)', () => {
     expect(s.waiting).toBe(true)
     expect(s.on).toBe(false)
     expect(s.offLabel).toBe('Connecting to naru-audio…')
+  })
+})
+
+describe('utteranceClient (naru task 2203)', () => {
+  it('posts without a client when a native host owns the mic, so the send goes through', () => {
+    expect(utteranceClient('page-1', true)).toBeUndefined()
+  })
+  it('keeps the claim guard in a plain tab', () => {
+    expect(utteranceClient('page-1', false)).toBe('page-1')
+  })
+  it('keeps the claim guard under an older, non-thin host', () => {
+    // A host present but not thin is `hostOwnsMic: false`.
+    expect(utteranceClient('page-1', false)).toBe('page-1')
   })
 })
