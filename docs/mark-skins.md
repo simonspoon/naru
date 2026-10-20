@@ -1,0 +1,38 @@
+# Mark skins
+
+The live mark (the conversation panel head and the nav orb) is a **host**
+around a pluggable **skin** (naru task 2120). Only the built-in `waveform`
+skin exists so far — the favicon's seven bars, unchanged from mesa task 1544.
+
+## The split
+
+- **Host** — `frontend/src/components/NaruMark.tsx`. Owns the `<svg
+  class="naru-mark" viewBox="0 0 64 64">`, its aria (`role=status` +
+  `indicatorLabel`, or `aria-hidden` when decorative), the reduced-motion
+  query (read live) and the **one rAF loop**. Each frame it works out the
+  mode (`liveMark.ts::markMode`), the level (mic RMS when hearing, the
+  playback analyser or `simEnvelope` when speaking, smoothed by
+  `smoothLevel`) and the palette (`paletteFor(mode, brandIdle)`), and hands
+  them to the skin's painter. Props, refs and the no-rerender property are
+  unchanged: state and level reach the loop through refs.
+- **Skin** — `frontend/src/components/markSkins/<id>.tsx`, registered in
+  `markSkins/index.ts`. A `MarkSkin` (`frontend/src/markSkin.ts`):
+  - `id`;
+  - `markup()` — the static SVG content inside the host's svg;
+  - `mount(svg, idlePalette)` — called once the markup is in the DOM;
+    answers a painter whose `paint({mode, level, palette, reduced, t, dt})`
+    the loop calls every frame and which writes attributes directly, never
+    through React.
+
+  The palette is the per-state one from `liveMark.ts`, theme-independent on
+  purpose (`docs/style-guide.md` "Themes"); a skin must not read the site's
+  CSS theme vars to colour the mark.
+
+## Choosing a skin
+
+The `appearance.mark-skin` config key (`docs/config.md` "Appearance"),
+`GET`/`PUT /api/config/appearance` (`mark_skin`). `main.tsx`'s appearance
+poll calls `markSkin.ts::setMarkSkin`; every mark reads that one value through
+`useSyncExternalStore`, so a change re-renders each mark once and re-mounts
+its painter. An unknown or absent id draws `waveform`, and the waveform draws
+before the config answers.

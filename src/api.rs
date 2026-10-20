@@ -12247,6 +12247,9 @@ struct AppearanceUpdate {
     /// Absent leaves the theme alone; `null` (or blank) restores `system`.
     #[serde(default, deserialize_with = "deserialize_some")]
     theme: Option<Option<String>>,
+    /// Absent leaves the mark skin alone; `null` (or blank) restores `waveform`.
+    #[serde(default, deserialize_with = "deserialize_some")]
+    mark_skin: Option<Option<String>>,
 }
 
 /// `PUT /api/config/appearance` — writes the section and echoes it. An
@@ -12261,6 +12264,9 @@ async fn update_config_appearance(
     let mut updates = HashMap::new();
     if let Some(value) = body.theme {
         updates.insert(config::THEME.to_string(), value);
+    }
+    if let Some(value) = body.mark_skin {
+        updates.insert(config::MARK_SKIN.to_string(), value);
     }
     let saved = {
         let store = match state.store.lock() {
@@ -15505,7 +15511,10 @@ mod tests {
                         State($state.clone()),
                         ConnectInfo($peer),
                         $headers.clone(),
-                        Json(AppearanceUpdate { theme: None }),
+                        Json(AppearanceUpdate {
+                            theme: None,
+                            mark_skin: None,
+                        }),
                     )
                     .await
                     .is_ok(),
@@ -22761,6 +22770,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                 h(),
                 Json(AppearanceUpdate {
                     theme: Some(Some(theme.to_string())),
+                    mark_skin: None,
                 }),
             )
         };

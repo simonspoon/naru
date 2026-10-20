@@ -1573,6 +1573,12 @@ A twelfth, independent section holds the web UI's colour theme (naru task
   `system`. `system` follows the
   operating system's `prefers-color-scheme` live (dark → `dark`, otherwise
   `light`).
+- **`mark-skin`** (naru task 2120): the live mark's skin id — `"waveform"`
+  (the built-in, absent/`null`) is the only one so far. Anything else is
+  **422 `validation`**, writing nothing; a hand-edited unknown id reads back
+  verbatim and the page draws the waveform. The allowed ids live in
+  `config::MARK_SKINS` and `markSkin.ts::MARK_SKIN_IDS` — keep them in step.
+  The skin contract is in `docs/mark-skins.md`.
 - **Nothing in Rust reads it** beyond the getter and saver: the theme is the
   page's. `frontend/src/theme.ts` resolves the setting to one concrete theme
   and sets `data-theme` on `<html>`; the palettes are `:root[data-theme=…]`
@@ -1589,11 +1595,13 @@ A twelfth, independent section holds the web UI's colour theme (naru task
 ### Routes
 
 - `GET /api/config/appearance` → `ConfigAppearance`: `{theme,
-  theme_default, custom}`, the theme verbatim or `null` beside the built-in
+  theme_default, custom, mark_skin, mark_skin_default}` (the skin verbatim or
+  `null` beside the built-in `"waveform"`), the theme verbatim or `null` beside the built-in
   `"system"`; `custom` is the active custom theme with its derived `vars` when
   `theme` is an existing `custom-<n>`, else `null` (a dangling id reads back
   verbatim and the page treats it as `system`).
-- `PUT /api/config/appearance`, body `{"theme": … | null}` → echoes the getter.
+- `PUT /api/config/appearance`, body `{"theme": … | null, "mark_skin": … |
+  null}` (each optional, absent = unchanged) → echoes the getter.
   `null` and blank remove the key; an unknown theme is **422 `validation`**.
   Both verbs carry `require_agent_access`, like every other config route.
 

@@ -1602,6 +1602,25 @@ api PUT /api/config/appearance '{"theme": null}'
 [ "$(jq -c '.appearance' < "$CONFIG")" = '{}' ] || fail "null must remove the theme: $(cat "$CONFIG")"
 ok "PUT /api/config/appearance: an unknown theme is 422 writing nothing; every shipped id and system are accepted; null restores the default"
 
+# The mark skin (naru task 2120) beside the theme.
+api PUT /api/config/appearance '{"theme": "dark"}'
+api GET /api/config/appearance
+[ "$(jq -c '[.mark_skin, .mark_skin_default]' <<<"$STDOUT")" = '[null,"waveform"]' ] ||
+  fail "GET appearance mark skin on an unconfigured key: $STDOUT"
+api PUT /api/config/appearance '{"mark_skin": "waveform"}'
+[ "$CODE" = "200" ] && [ "$(jq -r .mark_skin <<<"$STDOUT")" = "waveform" ] ||
+  fail "PUT mark_skin waveform: expected 200 echo, got $CODE: $STDOUT"
+[ "$(jq -cS '.appearance' < "$CONFIG")" = '{"mark-skin":"waveform","theme":"dark"}' ] ||
+  fail "PUT mark_skin must write mark-skin and leave the theme: $(cat "$CONFIG")"
+BEFORE=$(cat "$CONFIG")
+api PUT /api/config/appearance '{"mark_skin": "nope"}'
+[ "$CODE" = "422" ] && [ "$(jq -r .error.code <<<"$STDOUT")" = "validation" ] ||
+  fail "mark_skin nope: expected 422 validation, got $CODE: $STDOUT"
+[ "$(cat "$CONFIG")" = "$BEFORE" ] || fail "a rejected mark_skin PUT must not touch the file: $(cat "$CONFIG")"
+api PUT /api/config/appearance '{"theme": null, "mark_skin": null}'
+[ "$(jq -c '.appearance' < "$CONFIG")" = '{}' ] || fail "null must remove the mark skin: $(cat "$CONFIG")"
+ok "PUT /api/config/appearance mark_skin: waveform written beside the theme, an unknown skin 422 writing nothing, null restores the default"
+
 CODE=$(curl -s -o "$TMP/body" -w '%{http_code}' -H 'Host: evil.example' \
   "http://127.0.0.1:$PORT/api/config/appearance")
 [ "$CODE" = "403" ] || fail "GET appearance with a foreign Host: expected 403, got $CODE: $(cat "$TMP/body")"

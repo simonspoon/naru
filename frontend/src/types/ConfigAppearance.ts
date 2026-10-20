@@ -20,4 +20,13 @@ theme_default: string,
  * existing `custom-<n>` id; `null` otherwise (a dangling id reads back
  * verbatim and the page treats it as `system`).
  */
-custom: Theme | null, };
+custom: Theme | null, 
+/**
+ * The live mark's skin id (`waveform`, naru task 2120), verbatim, or
+ * `null`; the page falls back to the default for an unknown id.
+ */
+mark_skin: string | null, 
+/**
+ * The built-in skin (`"waveform"`).
+ */
+mark_skin_default: string, };

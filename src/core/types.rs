@@ -868,6 +868,11 @@ pub struct ConfigAppearance {
     /// existing `custom-<n>` id; `null` otherwise (a dangling id reads back
     /// verbatim and the page treats it as `system`).
     pub custom: Option<Theme>,
+    /// The live mark's skin id (`waveform`, naru task 2120), verbatim, or
+    /// `null`; the page falls back to the default for an unknown id.
+    pub mark_skin: Option<String>,
+    /// The built-in skin (`"waveform"`).
+    pub mark_skin_default: String,
 }
 
 /// The live-conversation settings as the Settings page sees them

@@ -17,6 +17,7 @@ import './index.css'
 import './themes.css'
 import { getAppearance } from './api'
 import { applyTheme, isEditorDirty, parseSetting, storedSetting } from './theme'
+import { setMarkSkin } from './markSkin'
 import App from './App.tsx'
 
 // Apply the last-known theme before first render so a reload does not flash the
@@ -30,9 +31,10 @@ function syncAppearance() {
   if (isEditorDirty()) return
   getAppearance().then(
     (a) => {
-      const key = JSON.stringify({ theme: a.theme, custom: a.custom })
+      const key = JSON.stringify({ theme: a.theme, custom: a.custom, mark_skin: a.mark_skin })
       if (key === lastAppearance) return
       lastAppearance = key
+      setMarkSkin(a.mark_skin)
       applyTheme(parseSetting(a.theme), a.custom ?? null)
     },
     () => {},

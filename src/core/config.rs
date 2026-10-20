@@ -3353,6 +3353,16 @@ pub const APPEARANCE_THEMES: &[&str] = &["system", "dark", "light", "contrast", 
 /// The theme setting when the config says nothing.
 pub const DEFAULT_THEME: &str = "system";
 
+/// The config key naming the live mark's skin (naru task 2120).
+pub const MARK_SKIN: &str = "mark-skin";
+
+/// The mark skins the `mark-skin` key accepts — keep in step with
+/// `frontend/src/markSkin.ts::MARK_SKIN_IDS`.
+pub const MARK_SKINS: &[&str] = &["waveform"];
+
+/// The mark skin when the config says nothing.
+pub const DEFAULT_MARK_SKIN: &str = "waveform";
+
 #[derive(Debug, Default, Deserialize)]
 struct AppearanceConfig {
     #[serde(default)]
@@ -3365,6 +3375,8 @@ struct AppearanceConfig {
 struct AppearanceSection {
     #[serde(default)]
     theme: Option<String>,
+    #[serde(default, rename = "mark-skin")]
+    mark_skin: Option<String>,
 }
 
 /// The appearance settings (`GET /api/config/appearance`).
@@ -3394,6 +3406,11 @@ pub(crate) fn appearance_in(path: &Path) -> Result<ConfigAppearance, String> {
             .map(|v| if v == "red" { "crimson".to_string() } else { v }),
         theme_default: DEFAULT_THEME.to_string(),
         custom: None,
+        mark_skin: section
+            .mark_skin
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty()),
+        mark_skin_default: DEFAULT_MARK_SKIN.to_string(),
     })
 }
 
@@ -3415,10 +3432,18 @@ pub(crate) fn save_appearance_in(
     let mut keys: Vec<&String> = updates.keys().collect();
     keys.sort();
     for key in &keys {
-        if key.as_str() != THEME {
+        if key.as_str() != THEME && key.as_str() != MARK_SKIN {
             return Err(SaveError::Validation(format!(
-                "unknown appearance setting {key:?}; mesa configures {THEME}"
+                "unknown appearance setting {key:?}; mesa configures {THEME} and {MARK_SKIN}"
             )));
+        }
+        if key.as_str() == MARK_SKIN {
+            if let Some(value) = updates[*key].as_deref().map(str::trim)
+                && !value.is_empty()
+            {
+                validate_word(key, value, MARK_SKINS).map_err(SaveError::Validation)?;
+            }
+            continue;
         }
         if let Some(value) = updates[*key].as_deref().map(str::trim)
             && !value.is_empty()
@@ -7873,6 +7898,40 @@ mod tests {
         // null restores the default.
         save_appearance_in(&path, &audio_update(&[(THEME, None)])).unwrap();
         assert_eq!(appearance_in(&path).unwrap().theme, None);
+    }
+
+    #[test]
+    fn appearance_mark_skin_defaults_saves_validates_and_keeps_the_theme() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(dir.path(), r#"{"appearance": {"theme": "dark"}}"#);
+        let got = appearance_in(&path).unwrap();
+        assert_eq!(got.mark_skin, None);
+        assert_eq!(got.mark_skin_default, "waveform");
+        save_appearance_in(&path, &audio_update(&[(MARK_SKIN, Some("waveform"))])).unwrap();
+        let got = appearance_in(&path).unwrap();
+        assert_eq!(got.mark_skin.as_deref(), Some("waveform"));
+        assert_eq!(got.theme.as_deref(), Some("dark"));
+        let root: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(root["appearance"]["mark-skin"], "waveform");
+        // An unknown skin is a validation error writing nothing.
+        let before = std::fs::read(&path).unwrap();
+        let err =
+            save_appearance_in(&path, &audio_update(&[(MARK_SKIN, Some("nope"))])).unwrap_err();
+        assert!(matches!(err, SaveError::Validation(_)), "{err:?}");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        // A theme save leaves the skin alone; null restores the default.
+        save_appearance_in(&path, &audio_update(&[(THEME, Some("light"))])).unwrap();
+        assert_eq!(
+            appearance_in(&path).unwrap().mark_skin.as_deref(),
+            Some("waveform")
+        );
+        save_appearance_in(&path, &audio_update(&[(MARK_SKIN, None)])).unwrap();
+        assert_eq!(appearance_in(&path).unwrap().mark_skin, None);
+        assert_eq!(
+            appearance_in(&path).unwrap().theme.as_deref(),
+            Some("light")
+        );
     }
 
     fn audio_update(pairs: &[(&str, Option<&str>)]) -> HashMap<String, Option<String>> {
