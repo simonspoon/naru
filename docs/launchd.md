@@ -7,6 +7,13 @@ to restart, so a real redeploy rolls back. The `com.naru.serve` user agent fixes
   `~/Library/LaunchAgents/com.naru.serve.plist`, lints it, then `launchctl bootout`
   (ignored if absent), `bootstrap gui/<uid>` and `kickstart`. `scripts/install.sh --launchd`
   does the same after the binary install. Both are opt-in; nothing loads it automatically.
+- `bootout` is asynchronous, so install polls `launchctl print` until the old service is
+  gone (up to `NARU_LAUNCHD_WAIT` seconds, default 10), retries a failed `bootstrap` (the
+  `5: Input/output error` of a service still tearing down) up to 5 times, and checks the
+  service is loaded after `kickstart`. If it is not, it exits 1 with no `ok:` line and
+  names the `launchctl bootstrap` command to run by hand (naru task 2164).
+  `NARU_LAUNCHD_LABEL` replaces `com.naru.serve` (label and plist name) so the real-launchd
+  path can be tested under a dev label without touching the real agent.
 - It runs `$PREFIX/bin/naru serve` (default `~/.local/bin`), no flags, so the `serve` config
   section applies (its `port`, else 7770). `scripts/self-deploy.sh` health-checks that same
   port (`NARU_DEPLOY_PORT` overrides). `RunAtLoad` + `KeepAlive`.

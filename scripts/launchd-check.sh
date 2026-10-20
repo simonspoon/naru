@@ -9,6 +9,11 @@
 # PATH (naru task 2161) comes from a stub login shell (NARU_LAUNCHD_SHELL, so the real
 # ~/.zshrc is never read): its dirs first, deduped, relative entries dropped, the fixed
 # dirs appended; a failing shell gives exactly the fixed list; an `&` is escaped.
+# Bootstrap race (naru task 2164): the stub keeps state (a bootout that lingers for N
+# `print`s, a bootstrap failing with 5 N times, a bootstrap that loads nothing): install
+# waits for the old service to go before bootstrapping, retries error 5, fails loudly
+# (exit 1, no `ok:`, the manual command named) when it never loads, stays bounded under
+# a service that never goes, and NARU_LAUNCHD_LABEL reaches the plist and every call.
 set -euo pipefail
 [ "$(uname -s)" = Darwin ] || { echo "skip: launchd-check is macOS only"; exit 0; }
 unset $(env | grep -oE "^(NARU|MESA)_[A-Za-z0-9_]*")
@@ -21,9 +26,24 @@ ok() { echo "ok: $*"; }
 export HOME="$TMP/home" PREFIX="$TMP/prefix" NARU_LAUNCHD_DIR="$TMP/agents" NARU_LAUNCHCTL="$TMP/launchctl"
 mkdir -p "$HOME"
 UID_=$(id -u)
+# State: linger-init = prints a bootout keeps answering "still there"; bsfail = bootstraps
+# left to fail with 5; noload = bootstrap succeeds but loads nothing.
 cat >"$NARU_LAUNCHCTL" <<STUB
 #!/bin/sh
 echo "\$*" >>"$TMP/launchctl.log"
+S="$TMP"
+case "\$1" in
+  bootout) rm -f "\$S/loaded"; [ -e "\$S/linger-init" ] && cp "\$S/linger-init" "\$S/linger" ;;
+  print)
+    n=\$(cat "\$S/linger" 2>/dev/null || echo 0)
+    if [ "\$n" -gt 0 ]; then echo \$((n - 1)) >"\$S/linger"; exit 0; fi
+    [ -e "\$S/loaded" ] || exit 113 ;;
+  bootstrap)
+    n=\$(cat "\$S/bsfail" 2>/dev/null || echo 0)
+    if [ "\$n" -gt 0 ]; then echo \$((n - 1)) >"\$S/bsfail"; echo "Bootstrap failed: 5: Input/output error" >&2; exit 5; fi
+    [ -e "\$S/noload" ] || touch "\$S/loaded" ;;
+esac
+exit 0
 STUB
 chmod +x "$NARU_LAUNCHCTL"
 cat >"$TMP/shell-fail" <<'STUB'
@@ -38,7 +58,8 @@ STUB
 chmod +x "$TMP/shell-fail" "$TMP/shell-ok"
 export NARU_LAUNCHD_SHELL="$TMP/shell-fail"
 PLIST="$NARU_LAUNCHD_DIR/com.naru.serve.plist"
-log() { cat "$TMP/launchctl.log" 2>/dev/null || true; }
+rawlog() { cat "$TMP/launchctl.log" 2>/dev/null || true; }
+log() { rawlog | grep -v '^print' || true; }
 
 out=$(scripts/launchd.sh install --print)
 echo "$out" | plutil -lint - >/dev/null || fail "printed plist does not lint"
@@ -110,6 +131,52 @@ mkdir -p "$BAD"
 HOME="$BAD" scripts/launchd.sh install --print | plutil -lint - >/dev/null || fail "hostile HOME breaks the plist"
 HOME="$BAD" scripts/launchd.sh install --print | grep -qF 'a &amp; b &lt;c&gt;' || fail "hostile HOME not escaped"
 ok "hostile HOME is XML-escaped"
+
+reset() { rm -f "$TMP/launchctl.log" "$TMP/linger" "$TMP/linger-init" "$TMP/bsfail" "$TMP/noload" "$TMP/loaded"; }
+reset; echo 3 >"$TMP/linger-init"
+scripts/launchd.sh install >/dev/null 2>&1 || fail "lingering bootout: install failed"
+[ "$(rawlog | sed -n '1,6p' | tr '\n' '|')" = "bootout gui/$UID_/com.naru.serve|print gui/$UID_/com.naru.serve|print gui/$UID_/com.naru.serve|print gui/$UID_/com.naru.serve|print gui/$UID_/com.naru.serve|bootstrap gui/$UID_ $PLIST|" ] \
+  || fail "bootstrap did not wait for the bootout: $(rawlog)"
+ok "install waits until the old service is gone before bootstrapping"
+
+reset; echo 2 >"$TMP/bsfail"
+out=$(scripts/launchd.sh install 2>/dev/null) || fail "bootstrap error 5 twice: install failed"
+[ "$(log | grep -c '^bootstrap')" = 3 ] || fail "expected 3 bootstraps: $(log)"
+echo "$out" | grep -q '^ok: installed' || fail "no ok line after a retried bootstrap"
+ok "bootstrap error 5 is retried"
+
+reset; echo 99 >"$TMP/bsfail"
+if out=$(NARU_LAUNCHD_WAIT=1 scripts/launchd.sh install 2>"$TMP/err"); then fail "a bootstrap that always fails exited 0"; fi
+echo "$out" | grep -q '^ok:' && fail "printed ok: with the service down"
+grep -qF "launchctl bootstrap gui/$UID_ $PLIST" "$TMP/err" || fail "failure names no manual command: $(cat "$TMP/err")"
+log | grep -q '^kickstart' && fail "kickstarted after a failed bootstrap"
+ok "a bootstrap that never succeeds fails loudly with the manual command"
+
+reset; touch "$TMP/noload"
+if out=$(scripts/launchd.sh install 2>"$TMP/err"); then fail "a service that never loads exited 0"; fi
+echo "$out" | grep -q '^ok:' && fail "printed ok: for a service that is not loaded"
+grep -q 'NOT running' "$TMP/err" || fail "not-loaded failure is silent"
+ok "a service not loaded after bootstrap fails loudly"
+
+reset; echo 100000 >"$TMP/linger-init"
+start=$SECONDS
+NARU_LAUNCHD_WAIT=1 scripts/launchd.sh install >/dev/null 2>&1 || fail "never-gone bootout: install failed"
+[ $((SECONDS - start)) -le 5 ] || fail "never-gone bootout took $((SECONDS - start))s"
+ok "a bootout that never finishes is waited on for a bounded time"
+
+reset
+out=$(NARU_LAUNCHD_LABEL=com.naru.dev-x scripts/launchd.sh install --print)
+echo "$out" | grep -qF '<string>com.naru.dev-x</string>' || fail "dev label not in the plist"
+echo "$out" | grep -qF '<string>com.naru.serve</string>' && fail "default label left in a dev plist"
+NARU_LAUNCHD_LABEL=com.naru.dev-x scripts/launchd.sh install >/dev/null 2>&1 || fail "dev-label install failed"
+[ -e "$NARU_LAUNCHD_DIR/com.naru.dev-x.plist" ] || fail "dev-label plist not written"
+rawlog | grep -q 'com.naru.serve' && fail "dev-label install touched com.naru.serve: $(rawlog)"
+[ "$(log)" = "bootout gui/$UID_/com.naru.dev-x
+bootstrap gui/$UID_ $NARU_LAUNCHD_DIR/com.naru.dev-x.plist
+kickstart gui/$UID_/com.naru.dev-x" ] || fail "dev-label calls: $(log)"
+NARU_LAUNCHD_LABEL=com.naru.dev-x scripts/launchd.sh uninstall >/dev/null
+[ ! -e "$NARU_LAUNCHD_DIR/com.naru.dev-x.plist" ] || fail "dev-label uninstall left the plist"
+ok "NARU_LAUNCHD_LABEL reaches the plist, its file name and every launchctl call"
 
 if scripts/launchd.sh bogus 2>/dev/null; then fail "bad verb accepted"; fi
 echo "all launchd checks passed"
