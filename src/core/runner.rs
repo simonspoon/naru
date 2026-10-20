@@ -899,7 +899,7 @@ pub fn wait_in(runs: &Path, id: &str, opts: &WaitOpts) -> Result<WaitOutcome> {
             seen = n;
             last_line = Instant::now();
         }
-        let queued = !pending_inbox(&dir.join("inbox")).is_empty() || pending_marker(&dir).exists();
+        let queued = has_queued(&dir);
         let (reason, exit) = match job.status {
             RunStatus::Idle if !queued => ("idle", 0),
             RunStatus::Finished => ("finished", 0),
@@ -924,6 +924,29 @@ pub fn wait_in(runs: &Path, id: &str, opts: &WaitOpts) -> Result<WaitOutcome> {
             exit,
             value: json!({"reason": reason, "job": v}),
         });
+    }
+}
+
+/// Whether a message is waiting in the run's `inbox/` or was delivered
+/// mid-turn and not yet read (`message-pending`): the run is about to work.
+fn has_queued(dir: &Path) -> bool {
+    !pending_inbox(&dir.join("inbox")).is_empty() || pending_marker(dir).exists()
+}
+
+/// Whether a run is working or about to (naru task 2165): status `running`,
+/// or not ended with a message queued or pending — [`wait_in`]'s test for a
+/// turn not yet done. An unknown or ended run is not busy.
+pub fn busy_in(runs: &Path, id: &str) -> bool {
+    let Ok(dir) = job_dir_of(runs, id) else {
+        return false;
+    };
+    let Ok(job) = load(&dir) else {
+        return false;
+    };
+    match job.status {
+        RunStatus::Running => true,
+        RunStatus::Idle => has_queued(&dir),
+        _ => false,
     }
 }
 
@@ -1529,6 +1552,29 @@ mod tests {
         enqueue(&dir.join("inbox"), "next", false).unwrap();
         let out = wait_in(runs.path(), &job.job_id, &wait_opts(150, None)).unwrap();
         assert_eq!(out.reason, "deadline");
+    }
+
+    #[test]
+    fn busy_means_running_or_idle_with_a_message_queued_or_pending() {
+        for (status, busy) in [
+            (RunStatus::Running, true),
+            (RunStatus::Idle, false),
+            (RunStatus::Finished, false),
+            (RunStatus::Failed, false),
+            (RunStatus::Stopped, false),
+        ] {
+            let (runs, _cwd, job, _dir) = wait_job(status);
+            assert_eq!(busy_in(runs.path(), &job.job_id), busy, "{status:?}");
+        }
+        let (runs, _cwd, job, dir) = wait_job(RunStatus::Idle);
+        enqueue(&dir.join("inbox"), "next", false).unwrap();
+        assert!(busy_in(runs.path(), &job.job_id));
+        for f in pending_inbox(&dir.join("inbox")) {
+            fs::remove_file(f).unwrap();
+        }
+        fs::write(dir.join("message-pending"), "").unwrap();
+        assert!(busy_in(runs.path(), &job.job_id));
+        assert!(!busy_in(runs.path(), "0000ffff"));
     }
 
     #[test]

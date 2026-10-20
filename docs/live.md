@@ -288,6 +288,21 @@ It rides on `LiveSession`, so it reaches the page on the existing 2s
 `GET /api/live` poll and the agent on `mesa live status` — no new route, no new
 state, and nothing pushed.
 
+**A pushed agent (naru task 2165).** Since push delivery (below) a `run:<job>`
+agent is handed its turns by `serve`, and the push's stamp
+(`Store::ack_live_turn` / `ack_live_result`) opens the span — but the agent
+still keeps one background `listen` running *while it works*, so that
+listen's empty poll ended the span within half a second and the mark showed
+working only when the page's 2s poll happened to land inside it. For a
+`run:<job>` agent an empty poll therefore no longer clears the column; the
+span ends through `Store::close_live_working` once the run is idle with no
+message queued or pending, or has ended (`runner::busy_in`, `wait_in`'s
+test) — checked by the listen's poll and by every push pass, so it closes
+with no listen running too. Both closes skip a span under two
+seconds old, so neither can end the span its own stamp just opened in the
+instant before the runner marks the run running. A legacy bare job id and `--no-agent` keep the rule
+above exactly.
+
 ## Telling the person the agent is stuck or silent (mesa task 1157)
 
 By voice, silence is confusing. `working_since` says the agent *took* the
@@ -4146,7 +4161,7 @@ stamps it. Nothing is lost (the db queue is durable) and nothing is sent twice.
 Only a `run:<job>` agent is pushed to; a legacy bare job id keeps `listen`.
 `listen` and the barge-in hook remain, claiming through their own
 one-statement stamps: if one of them wins a turn in the instant after a push
-queued it, the still-queued message is removed — but if the runner had already moved it to `delivered/`, that one turn reaches the agent twice (a window of milliseconds, only when a fallback `listen` runs beside push). Check: `scripts/live-push-check.sh`.
+queued it, the still-queued message is removed — but if the runner had already moved it to `delivered/`, that one turn reaches the agent twice (a window of milliseconds, only when a fallback `listen` runs beside push). Each pass also closes the working span once the run is idle (naru task 2165, "Whether the agent is working" above). Check: `scripts/live-push-check.sh`.
 
 ## Landing reports (naru task 2081)
 

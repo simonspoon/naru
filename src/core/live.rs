@@ -1145,6 +1145,15 @@ pub fn start_agent(dir: &str, name: &str, prompt: &str) -> Result<String, String
     Ok(format!("{RUN_RECEIPT}{id}"))
 }
 
+/// The `naru run` job a receipt names, `None` for a legacy bare job id or no
+/// agent (naru task 2165): such a session keeps `listen`'s own working span.
+pub fn run_job_of(receipt: Option<&str>) -> Option<&str> {
+    match receipt.map(parse_agent_receipt) {
+        Some(AgentReceipt::Run(id)) => Some(id),
+        _ => None,
+    }
+}
+
 /// One push pass (naru task 2051): writes the live session's undelivered user
 /// turns and delegate results straight into its agent's `naru run` inbox, as
 /// `[live turn] {json}` / `[live result] {json}` — the record `listen` would
@@ -1154,13 +1163,18 @@ pub fn start_agent(dir: &str, name: &str, prompt: &str) -> Result<String, String
 /// the write and stamps it — redelivered by the run's own durable inbox,
 /// never twice, never lost. Only a `run:<job>` agent is pushed to; a legacy
 /// bare job id keeps `listen`. Returns how many messages it queued.
+///
+/// The pass also ends the session's working span once the run is idle with
+/// nothing queued, or has ended (naru task 2165): a pushed agent's `listen`
+/// no longer closes it, and one with no `listen` running must not leave the
+/// mark working.
 pub fn push_pending(store: &std::sync::Mutex<crate::core::Store>, runs: &std::path::Path) -> usize {
     fn lock(
         m: &std::sync::Mutex<crate::core::Store>,
     ) -> std::sync::MutexGuard<'_, crate::core::Store> {
         m.lock().unwrap_or_else(|e| e.into_inner())
     }
-    let (sid, results, turns, inbox) = {
+    let (sid, results, turns, inbox, job, working) = {
         let st = lock(store);
         let Ok(Some(session)) = st.current_live_session() else {
             return 0;
@@ -1170,12 +1184,23 @@ pub fn push_pending(store: &std::sync::Mutex<crate::core::Store>, runs: &std::pa
             return 0;
         };
         let Some(inbox) = crate::core::runner::live_inbox_in(runs, job) else {
+            drop(st);
+            if session.working_since.is_some() {
+                let _ = lock(store).close_live_working(session.id, 2);
+            }
             return 0;
         };
         let Ok((results, turns)) = st.unacked_live_items(session.id) else {
             return 0;
         };
-        (session.id, results, turns, inbox)
+        (
+            session.id,
+            results,
+            turns,
+            inbox,
+            job.to_string(),
+            session.working_since.is_some(),
+        )
     };
     let mut queued = 0;
     for r in results {
@@ -1213,6 +1238,9 @@ pub fn push_pending(store: &std::sync::Mutex<crate::core::Store>, runs: &std::pa
             }
             Err(e) => eprintln!("live-push: {e}"),
         }
+    }
+    if (working || queued > 0) && !crate::core::runner::busy_in(runs, &job) {
+        let _ = lock(store).close_live_working(sid, 2);
     }
     queued
 }

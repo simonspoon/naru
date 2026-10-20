@@ -7326,9 +7326,26 @@ fn run_live(cmd: LiveCmd) -> Result<()> {
                 // `next_user_turn` stamps `delivered_at` inside one statement,
                 // so two listeners can never be handed the same utterance.
                 // There is deliberately no second guard here.
-                if let Some(turn) = store.next_user_turn_gen(session.id, listen_gen)? {
+                //
+                // A `naru run` agent is pushed its turns and keeps this listen
+                // running while it works (naru task 2165), so an empty poll
+                // ends its working span only once the run itself is idle; a
+                // legacy agent's empty poll still ends it. The 2 s age floor is
+                // the push pass's own: the runner moves a turn to `delivered/`
+                // before it marks the run `Running`, so a poll in that gap
+                // must not close the span the push just opened.
+                let agent = store.get_live_session(session.id)?.agent_id;
+                let job = live::run_job_of(agent.as_deref());
+                if let Some(turn) =
+                    store.next_user_turn_gen(session.id, listen_gen, job.is_none())?
+                {
                     print_live_turn(&turn, quiet);
                     return Ok(());
+                }
+                if let Some(job) = job
+                    && !crate::core::runner::busy_in(&crate::core::runner::runs_dir(), job)
+                {
+                    store.close_live_working(session.id, 2)?;
                 }
                 // A session stopped from the web UI ends the wait early rather
                 // than leaving the agent listening to a finished conversation.

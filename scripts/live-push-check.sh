@@ -15,7 +15,11 @@
 #   (e) no turn is lost and none is delivered twice (lost_turns = 0,
 #       duplicate_deliveries = 0);
 #   (g) `listen` still works as the fallback, and a turn it claims is never
-#       also pushed.
+#       also pushed;
+#   (h) a pushed turn keeps the session working (`working_since` set) for the
+#       whole of the agent's turn even while its background `listen` polls
+#       empty, and the span ends within seconds of the run going idle (naru
+#       task 2165).
 set -euo pipefail
 unset $(env | sed -n 's/^\(NARU_[A-Za-z0-9_]*\)=.*/\1/p')
 
@@ -60,6 +64,7 @@ cat > "$STUB/claude" <<STUBEOF
 while IFS= read -r line; do
   text=\$(jq -r '.message.content[0].text' <<<"\$line")
   printf '%s\n' "\$text" >> "$STUB/msgs.log"
+  case "\$text" in *'hold for working'*) sleep 6 ;; esac
   printf '{"type":"assistant","message":{"content":[{"type":"text","text":"ok"}]}}\n'
   printf '{"type":"result","subtype":"success","is_error":false,"result":"ok"}\n'
 done
@@ -150,6 +155,26 @@ if [ "$(jq -r '.id // empty' <<<"$OUT")" = "$T4" ]; then
   [ "$(n_msgs 'claimed by listen')" -le 1 ] || fail "turn both listened and pushed twice"
 fi
 ok "listen still works; one turn is never delivered twice"
+
+# (h) working spans the whole pushed turn, even with a background listen
+# polling empty beside it, then ends once the run is idle
+working() { "$NARU" live status | jq -r '.working_since // empty'; }
+is_working() { [ -n "$(working)" ]; }
+not_working() { [ -z "$(working)" ]; }
+post /api/live/utterance '{"text":"hold for working"}' >/dev/null
+wait_for 10 "held turn pushed" has_msg 'hold for working'
+wait_for 5 "working opened" is_working
+"$NARU" live listen --wait 30 >/dev/null 2>&1 &
+LISTEN_PID=$!
+for _ in $(seq 1 14); do
+  sleep 0.25
+  is_working || { kill "$LISTEN_PID" 2>/dev/null || true; fail "working_since cleared while the run was still busy"; }
+done
+ok "working_since stays set through the held turn beside a background listen"
+wait_for 8 "working closed after the run went idle" not_working
+kill "$LISTEN_PID" 2>/dev/null || true
+wait "$LISTEN_PID" 2>/dev/null || true
+ok "working_since ends once the run is idle"
 
 # (e) the totals
 sleep 1

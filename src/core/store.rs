@@ -8894,9 +8894,12 @@ impl Store {
     /// the `listen` command means the column cannot drift from the loop, and
     /// every caller — CLI today, anything else later — keeps it honest for
     /// free. The clear is guarded on the column, so the twice-a-second poll of
-    /// a quiet conversation is a no-op rather than a write.
+    /// a quiet conversation is a no-op rather than a write. A pushed
+    /// `run:<job>` agent's span is closed by [`Store::close_live_working`]
+    /// instead (naru task 2165, [`Store::next_user_turn_gen`]'s
+    /// `clear_working`).
     pub fn next_user_turn(&mut self, session_id: i64) -> Result<Option<LiveTurn>> {
-        self.next_user_turn_gen(session_id, None)
+        self.next_user_turn_gen(session_id, None, true)
     }
 
     /// [`Store::next_user_turn`] for a listener holding listen generation
@@ -8904,10 +8907,17 @@ impl Store {
     /// generation to still be the session's newest, so a superseded listener
     /// that passed its poll check just before a newer one arrived is handed
     /// nothing. `None` is the unguarded take.
+    ///
+    /// `clear_working: false` leaves `working_since` alone on an empty poll
+    /// (naru task 2165): a `naru run` agent is pushed its turns, so its
+    /// background `listen` finding nothing says nothing about whether it is
+    /// working — the caller asks the run instead and closes the span with
+    /// [`Store::close_live_working`].
     pub fn next_user_turn_gen(
         &mut self,
         session_id: i64,
         gen_: Option<i64>,
+        clear_working: bool,
     ) -> Result<Option<LiveTurn>> {
         let turn = self
             .conn
@@ -8936,13 +8946,29 @@ impl Store {
                  WHERE id = ?1 AND status = ?2",
                 (session_id, LiveStatus::Live.as_str()),
             )?,
-            None => self.conn.execute(
+            None if clear_working => self.conn.execute(
                 "UPDATE live_sessions SET working_since = NULL \
                  WHERE id = ?1 AND working_since IS NOT NULL",
                 [session_id],
             )?,
+            None => 0,
         };
         Ok(turn)
+    }
+
+    /// Ends the session's working span once its `naru run` agent is idle
+    /// (naru task 2165). Guarded on the column, so a quiet conversation is a
+    /// no-op, and on a span at least `min_age_secs` old: the push pass asks
+    /// for a couple of seconds, so its check right after the stamp that
+    /// opened the span (the runner moving the message out of its inbox
+    /// before it marks the run running) cannot end it at once.
+    pub fn close_live_working(&mut self, session_id: i64, min_age_secs: i64) -> Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE live_sessions SET working_since = NULL \
+             WHERE id = ?1 AND working_since IS NOT NULL \
+             AND working_since <= datetime('now', printf('-%d seconds', ?2))",
+            (session_id, min_age_secs),
+        )? > 0)
     }
 
     /// Whether the session has a user utterance nobody has been handed — the
@@ -18002,6 +18028,57 @@ mod tests {
         );
     }
 
+    /// Naru task 2165: a pushed agent's background `listen` finding nothing
+    /// leaves its working span open; only `close_live_working` ends it, and
+    /// only once the span is old enough not to be the one a push just opened.
+    #[test]
+    fn an_empty_poll_without_clear_leaves_working_and_close_ends_an_old_span() {
+        let (mut store, _dir) = temp_store();
+        let session = store.start_live_session(None).unwrap();
+        let turn = store
+            .add_live_turn(session.id, LiveRole::User, "hi", None, None)
+            .unwrap();
+        assert!(store.ack_live_turn(session.id, turn.id).unwrap());
+        let working = |s: &Store| s.get_live_session(session.id).unwrap().working_since;
+        assert!(working(&store).is_some());
+        assert!(
+            store
+                .next_user_turn_gen(session.id, None, false)
+                .unwrap()
+                .is_none()
+        );
+        assert!(working(&store).is_some());
+        // A span opened just now is not closed when asked to wait: it may be
+        // racing its push.
+        assert!(!store.close_live_working(session.id, 2).unwrap());
+        assert!(working(&store).is_some());
+        store
+            .conn
+            .execute(
+                "UPDATE live_sessions SET working_since = datetime('now', '-5 seconds') \
+                 WHERE id = ?1",
+                [session.id],
+            )
+            .unwrap();
+        assert!(store.close_live_working(session.id, 2).unwrap());
+        assert!(working(&store).is_none());
+        assert!(!store.close_live_working(session.id, 0).unwrap());
+        // With no age asked for, a span just opened closes at once.
+        let turn = store
+            .add_live_turn(session.id, LiveRole::User, "now", None, None)
+            .unwrap();
+        assert!(store.ack_live_turn(session.id, turn.id).unwrap());
+        assert!(store.close_live_working(session.id, 0).unwrap());
+        assert!(working(&store).is_none());
+        // The unguarded take still ends a span at once.
+        let turn = store
+            .add_live_turn(session.id, LiveRole::User, "again", None, None)
+            .unwrap();
+        assert!(store.ack_live_turn(session.id, turn.id).unwrap());
+        assert!(store.next_user_turn(session.id).unwrap().is_none());
+        assert!(working(&store).is_none());
+    }
+
     /// Naru task 2072: a second `claim_listen` on a lease supersedes the first;
     /// only the newest generation can be handed a turn or a result.
     #[test]
@@ -18021,7 +18098,7 @@ mod tests {
         store.add_live_result("done").unwrap();
         assert!(
             store
-                .next_user_turn_gen(session.id, Some(old))
+                .next_user_turn_gen(session.id, Some(old), true)
                 .unwrap()
                 .is_none()
         );
@@ -18033,13 +18110,13 @@ mod tests {
         );
         assert!(
             store
-                .next_user_turn_gen(session.id, Some(new))
+                .next_user_turn_gen(session.id, Some(new), true)
                 .unwrap()
                 .is_some()
         );
         assert!(
             store
-                .next_user_turn_gen(session.id, Some(new))
+                .next_user_turn_gen(session.id, Some(new), true)
                 .unwrap()
                 .is_none()
         );
