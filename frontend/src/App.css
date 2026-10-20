@@ -10022,7 +10022,8 @@ body.live-panel-ratio-resizing .live-panel-divider {
   color: var(--on-accent-alt);
 }
 
-.live-send:disabled {
+.live-send:disabled,
+.live-composer-mic:disabled {
   opacity: 0.35;
 }
 

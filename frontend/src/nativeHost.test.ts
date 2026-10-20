@@ -79,6 +79,20 @@ describe('nativeHost', () => {
     expect(got).toEqual([{ muted: false, level: 0.2, hearing: true }, { level: 1 }, { level: 0 }])
   })
 
+  it('delivers setHostInfo only for micOwner naru-audio', () => {
+    const { win } = stubWindow()
+    const info: unknown[] = []
+    const states: unknown[] = []
+    installNativeHost(win, detectNativeHost(win)!, (s) => states.push(s), (i) => info.push(i))
+    const api = win.naruNativeHost as { setHostInfo: (i: unknown) => void }
+    api.setHostInfo(null)
+    api.setHostInfo({})
+    api.setHostInfo({ micOwner: 'page' })
+    api.setHostInfo({ micOwner: 'naru-audio', extra: 1 })
+    expect(info).toEqual([{ micOwner: 'naru-audio' }])
+    expect(states).toEqual([])
+  })
+
   it('judges voiced from the host verdict or the onset level', () => {
     expect(hostVoiced({ muted: false }, 0.02)).toBe(false)
     expect(hostVoiced({ level: 0.01 }, 0.02)).toBe(false)

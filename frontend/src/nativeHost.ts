@@ -9,6 +9,9 @@
  *
  * Page to host: `window.webkit.messageHandlers.naruLive.postMessage(msg)`.
  * Host to page: `window.naruNativeHost.setMicState({ muted?, level?, hearing?, ambient? })`.
+ * A host that is a thin client of naru-audio's mic state (naru task 2179) also
+ * calls `window.naruNativeHost.setHostInfo({ micOwner: 'naru-audio' })`; the
+ * page then takes the mute from naru-audio and ignores `setMicState.muted`.
  * `level` (RMS 0..1) and `hearing` (host's own speech verdict) carry the voice
  * the page would otherwise meter itself, so the orb and glow follow it too.
  */
@@ -158,15 +161,25 @@ export function detectNativeHost(win: Bridge): NativeHost | null {
   return { post: (msg) => handler.postMessage!(msg) }
 }
 
+/** What a host says about itself through `setHostInfo` (naru task 2179). */
+export type NativeHostInfo = { micOwner: 'naru-audio' }
+
 /** Installs `window.naruNativeHost`, delivering each valid state to
- *  `onState`, and tells the host the page is ready. Returns the uninstall. */
+ *  `onState` (and a valid `setHostInfo` to `onHostInfo`), and tells the host
+ *  the page is ready. Returns the uninstall. */
 export function installNativeHost(
   win: Bridge,
   host: NativeHost,
   onState: (state: NativeMicState) => void,
+  onHostInfo?: (info: NativeHostInfo) => void,
 ): () => void {
   const api = {
     ...setupHostCallbacks,
+    setHostInfo(info: unknown) {
+      if (typeof info !== 'object' || info === null) return
+      if ((info as { micOwner?: unknown }).micOwner !== 'naru-audio') return
+      onHostInfo?.({ micOwner: 'naru-audio' })
+    },
     setMicState(state: unknown) {
       if (typeof state !== 'object' || state === null) return
       const { muted, level, hearing, ambient } = state as {

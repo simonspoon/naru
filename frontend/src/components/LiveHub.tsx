@@ -228,6 +228,17 @@ import {
   reportedAmbient,
   stateMessage,
 } from '../nativeHost'
+import {
+  acceptState,
+  controlStart,
+  controlUrl,
+  conversationKey,
+  intentFor,
+  mutedFromMode,
+  parseControlEvent,
+  reconnectDelay,
+  takesThinPath,
+} from '../liveMicControl'
 
 /**
  * Mesa Live, in the header (mesa tasks 855, 857): the whole conversation lives
@@ -825,6 +836,21 @@ export function LiveHub({
   // The native host, decided once (see below where it matters most). The
   // ambient "can help" offer is the Mac app's: a plain browser never glows.
   const [native] = useState(() => detectNativeHost(window as unknown as Record<string, unknown>))
+  // Who owns the microphone's mute (naru task 2179, `liveMicControl.ts`): in a
+  // plain browser, or in a host that called `setHostInfo` to say it is a thin
+  // client, naru-audio does, and the page is a control client of it; an older
+  // host keeps the `{type:mic}` / `setMicState` bridge exactly as before. The
+  // ref is what the host's push reads, so that effect never reinstalls.
+  const [hostThin, setHostThin] = useState(false)
+  const thin = takesThinPath(native !== null, hostThin)
+  const thinRef = useRef(thin)
+  useEffect(() => {
+    thinRef.current = thin
+  }, [thin])
+  // On the thin path: the control socket is open *and* has delivered a
+  // `state`. Until then the mic switch is disabled and capture stays shut —
+  // there is no optimistic value.
+  const [micReady, setMicReady] = useState(false)
   // Ambient mode (naru task 1746): a native host keeps the live session open
   // while this page's run is paused. The host's push is authoritative; the
   // ref is what the receiver reads, and the flag only means anything while
@@ -867,8 +893,7 @@ export function LiveHub({
   const autoSendMs = autoSendIdleMs(liveConfig)
 
   // The correction table for mishearings of mesa's own vocabulary (mesa task
-  // 922) — built once per conversation, keyed on the session id the same way
-  // `micOpenedFor` below is, rather than rebuilt on every recognised result:
+  // 922) — built once per conversation, keyed on the session id, rather than rebuilt on every recognised result:
   // the set of names worth correcting *to* does not change mid-conversation.
   // Held in a ref, not state, since it is read from inside `onresult`
   // (a media-event handler set up once per recognizer, long after the render
@@ -1066,15 +1091,17 @@ export function LiveHub({
   }, [])
   // The person's own switch on the microphone (mesa task 887). Still
   // *initialises* muted — a page with no conversation joined is not listening
-  // to the room — but joining one opens it on its own (`micOpenedFor` below,
-  // mesa task 917): a hands-free surface that waits for a press before it can
+  // to the room — but joining one opens it on its own (the control socket's
+  // `start` below, mesa task 917): a hands-free surface that waits for a press before it can
   // hear is not hands-free. A press — the keystroke (`live-listen`) or the
   // button in the conversation panel — is what turns it back off, and keeps
   // it off for the rest of that session. Browser-side and this browser's
   // alone, like pause: no route, no session state, and mesa carries on
   // speaking while it is off. The ref is what the recognizer's own handlers
   // read, since they fire long after the render that changed it — the same
-  // pairing as `pausedRef`.
+  // pairing as `pausedRef`. Since naru task 2179 the mute is naru-audio's on
+  // the thin path (`liveMicControl.ts`): there the only writer is the control
+  // socket's effect below `toggleListening`, and the press sends an intent.
   const [muted, setMuted] = useState(true)
   const mutedRef = useRef(true)
   const setMutedNow = useCallback((next: boolean) => {
@@ -2041,10 +2068,14 @@ export function LiveHub({
   }, [elsewhere])
   // Whether this page's microphone switch reads as on: unmuted *and* the claim
   // here. A press flips that — from "elsewhere" it opens (and claims).
-  const micOn = !muted && !elsewhere
-  const micOffLabel = elsewhere
-    ? 'Listen on this browser instead'
-    : 'Listen through this browser'
+  // The switch waits for naru-audio's first `state` on the thin path.
+  const micWaiting = thin && !micReady
+  const micOn = !micWaiting && !muted && !elsewhere
+  const micOffLabel = micWaiting
+    ? 'Connecting to naru-audio…'
+    : elsewhere
+      ? 'Listen on this browser instead'
+      : 'Listen through this browser'
   // The steady question — is the person talking to mesa through the microphone
   // — which is what the composer's hint and placeholder read. Deliberately not
   // `wantsMic` below: that one goes false for the length of every reply, and
@@ -2091,7 +2122,8 @@ export function LiveHub({
   useEffect(() => {
     if (native === null) return
     return installNativeHost(window as unknown as Record<string, unknown>, native, (state) => {
-      if (state.muted !== undefined) setMutedNow(state.muted)
+      // A thin host's mute comes from naru-audio's `state`, never from here.
+      if (state.muted !== undefined && !thinRef.current) setMutedNow(state.muted)
       // Ambient vs live (naru task 1746): the host's word is final. Entering
       // pauses this page's run; leaving waits for a fresh poll before the
       // page may run again, so a stale poll cannot make it speak while the
@@ -2114,26 +2146,13 @@ export function LiveHub({
       // glow instead. The host's cadence is the throttle.
       if (state.level !== undefined) setLevel(state.level)
       if (hostVoiced(state, DEFAULT_VAD.onsetRms)) setVoicedAt(Date.now())
-    })
+    }, () => setHostThin(true))
   }, [native, setMutedNow, setAmbientNow, setPausedNow, refetch, claimVoice])
 
-  // Joining opens the microphone (mesa task 917): a conversation this browser
-  // has joined should be hands-free from the first word, not only after a
-  // press on the switch. `micOpenedFor` is the session this browser has
-  // already opened the microphone for, keyed on the session id rather than a
-  // boolean so a fresh conversation opens it again while a mute made *during*
-  // this one stays put — the only write to this ref is here, which is what
-  // makes it sticky rather than something this effect re-opens on its own
-  // next run. A `null` id (no session) never counts as opened, so ending a
-  // conversation leaves the next one free to trigger.
-  const micOpenedFor = useRef<number | null>(null)
-  useEffect(() => {
-    const id = session?.id ?? null
-    // The native host decides whether it is listening; the page never opens it.
-    if (native !== null || id === null || !unlocked || micOpenedFor.current === id) return
-    micOpenedFor.current = id
-    setMutedNow(false)
-  }, [session?.id, unlocked, setMutedNow, native])
+  // Joining opens the microphone (mesa task 917) on the thin path through the
+  // control socket's `start` (`mode: "live"`, below `toggleListening`); a
+  // legacy host decides for itself. The page-side `micOpenedFor` that used to
+  // unmute here is gone with the page's own mute (naru task 2179).
   // Tell the native host which conversation to capture for.
   const sessionId = session?.id ?? null
   useEffect(() => {
@@ -2363,18 +2382,17 @@ export function LiveHub({
 
   // The Listen press, for the chord: set each render beside `act`.
   const joinRef = useRef<() => void>(() => {})
-  const toggleListening = useCallback(
+  // What a mute or an unmute does to this page's capture: the press-time side
+  // effects, run by the legacy press itself and, on the thin path (naru task
+  // 2179), on the muted/unmuted edge of naru-audio's `state` — so a mute from
+  // another tab or the Mac behaves exactly like one pressed here.
+  const applyMute = useCallback(
     (next: boolean, discard = false) => {
       // The ref first, before the cut and the close below: a segment that
-      // settles from here on must read this press, and `setMutedNow` a few
+      // settles from here on must read this change, and `setMutedNow` a few
       // lines down would only be re-affirming it.
       mutedRef.current = next
       mutedByCancelRef.current = next && discard
-      // Opening the microphone is a press that says "talk to me here", so it
-      // claims the voice (mesa task 1267). Closing it gives nothing up: a
-      // muted page still hears mesa, and moving the voice to another tab
-      // because this one stopped talking would be a second surprise.
-      if (!next) claimVoice()
       if (next && discard) {
         // The discard key (mesa task 1354) is the switch off *without* the
         // send: nothing is cut onto the chain and nothing is flushed. The
@@ -2411,11 +2429,118 @@ export function LiveHub({
         setInterimNow('')
       }
       setMutedNow(next)
+    },
+    [setRecordingNow, setInterimNow, setMutedNow],
+  )
+  // The thin path's control socket (set by the effect below) and a discard
+  // press waiting for naru-audio's answer.
+  const controlRef = useRef<{ ws: WebSocket; ready: boolean } | null>(null)
+  const pendingDiscardRef = useRef(false)
+  const toggleListening = useCallback(
+    (next: boolean, discard = false) => {
+      if (thin) {
+        // Intent only (naru task 2179): the switch flips when naru-audio's
+        // `state` comes back, never before. Nothing to say it to — the socket
+        // still connecting, or no `state` yet — is no press at all.
+        const ctl = controlRef.current
+        if (ctl === null || !ctl.ready || ctl.ws.readyState !== WebSocket.OPEN) return
+        if (!next) claimVoice()
+        pendingDiscardRef.current = next && discard
+        ctl.ws.send(intentFor(next))
+        return
+      }
+      // Opening the microphone is a press that says "talk to me here", so it
+      // claims the voice (mesa task 1267). Closing it gives nothing up: a
+      // muted page still hears mesa, and moving the voice to another tab
+      // because this one stopped talking would be a second surprise.
+      if (!next) claimVoice()
+      applyMute(next, discard)
       // The press is also the host's to hear; its `setMicState` is the last word.
       native?.post({ type: 'mic', muted: next })
     },
-    [claimVoice, setRecordingNow, setInterimNow, setMutedNow, native],
+    [claimVoice, applyMute, native, thin],
   )
+  // The control client itself (naru task 2179): while live, joined and on the
+  // thin path, one `role: "control"` socket on the conversation keyed by the
+  // session id. An accepted `state` (seq rising since the last `ready`) is the
+  // only thing that unmutes this page; a dropped socket mutes it (capture must
+  // not outlive the owner's word) and reconnects with backoff. The first
+  // connect for a session asks for `live` — joining opens the microphone — and
+  // a reconnect asks for the last mode it was told, so a daemon restart cannot
+  // undo a mute; a conversation another socket holds keeps its own mode.
+  const applyMuteRef = useRef(applyMute)
+  useEffect(() => {
+    applyMuteRef.current = applyMute
+  }, [applyMute])
+  const lastMicFor = useRef<{ id: number; muted: boolean } | null>(null)
+  const controlSession = session?.id ?? null
+  useEffect(() => {
+    if (!thin || !live || !unlocked || controlSession === null) return
+    const id = controlSession
+    let stopped = false
+    let attempt = 0
+    let retry: number | undefined
+    const connect = () => {
+      const ws = new WebSocket(controlUrl(window.location))
+      const ctl = { ws, ready: false }
+      controlRef.current = ctl
+      let lastSeq = 0
+      ws.onopen = () => {
+        const prior = lastMicFor.current
+        const mode = prior !== null && prior.id === id && prior.muted ? 'muted' : 'live'
+        ws.send(controlStart(conversationKey(id), mode))
+      }
+      ws.onmessage = (m) => {
+        const ev = parseControlEvent(m.data)
+        if (ev === null) return
+        if (ev.kind === 'ready') {
+          lastSeq = 0
+          return
+        }
+        if (!acceptState(lastSeq, ev.seq)) return
+        lastSeq = ev.seq
+        attempt = 0
+        const next = mutedFromMode(ev.mode)
+        lastMicFor.current = { id, muted: next }
+        // The pending discard is read only on a mute edge: the shared seq
+        // also rises on another socket's `agent_speaking`, which must not
+        // spend it and turn the discard into a send.
+        if (next !== mutedRef.current) {
+          const discard = pendingDiscardRef.current
+          pendingDiscardRef.current = false
+          applyMuteRef.current(next, discard)
+        }
+        if (!ctl.ready) {
+          ctl.ready = true
+          setMicReady(true)
+        }
+      }
+      ws.onclose = () => {
+        if (controlRef.current === ctl) controlRef.current = null
+        pendingDiscardRef.current = false
+        if (stopped) return
+        setMicReady(false)
+        if (!mutedRef.current) applyMuteRef.current(true)
+        retry = window.setTimeout(connect, reconnectDelay(attempt++))
+      }
+    }
+    connect()
+    return () => {
+      stopped = true
+      window.clearTimeout(retry)
+      const ctl = controlRef.current
+      controlRef.current = null
+      pendingDiscardRef.current = false
+      if (ctl !== null) {
+        ctl.ws.onclose = null
+        ctl.ws.close()
+      }
+      setMicReady(false)
+      // Leaving the conversation: nothing of this page is listening any more,
+      // and the next one opens through its own `start`.
+      setMutedNow(true)
+    }
+  }, [thin, live, unlocked, controlSession, setMutedNow])
 
   // The chord that opens and shuts the microphone (mesa task 887). A window
   // listener of the hub's own, in the shape of the command palette's, because
@@ -4759,6 +4884,7 @@ export function LiveHub({
               type="button"
               className={`live-icon live-mic${micOn ? ' live-on' : ''}`}
               aria-pressed={micOn}
+              disabled={micWaiting}
               aria-label={micOn ? 'stop listening' : micOffLabel.toLowerCase()}
               // Out of the tab order while the panel is clipped, for
               // the same reason the close button is: `pointer-events`
@@ -5188,6 +5314,7 @@ export function LiveHub({
               type="button"
               className={`live-composer-mic${micOn ? ' live-on' : ''}`}
               aria-pressed={micOn}
+              disabled={micWaiting}
               aria-label={micOn ? 'stop listening' : micOffLabel.toLowerCase()}
               tabIndex={open ? undefined : -1}
               title={`${micOn ? 'Stop listening' : micOffLabel} (${listenChordLabel})`}

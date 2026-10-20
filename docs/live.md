@@ -2283,6 +2283,23 @@ as before. It is the last word on `muted`: a press is
 applied locally at once and posted as `mic`, and the host's next `setMicState`
 overrides it.
 
+**The mic control client** (naru task 2179, `frontend/src/liveMicControl.ts`).
+naru-audio owns the conversation's mute (naru-audio task 2178). In a plain
+browser, and in a host that calls `window.naruNativeHost.setHostInfo({micOwner:
+"naru-audio"})`, the page joins the live conversation as a `role: "control"`
+socket on serve's `/v1/audio/live` proxy, `conversation` = the live session id
+as a decimal string (the same value as `state.session` above; the host must use
+it too). Its `start` asks for `mode: "live"` (joining opens the microphone), or
+on a reconnect the last mode it was told. A mic press or the chord sends only
+`{"type":"mode","mode":"muted"|"live"}`; the rendered mute comes only from the
+server's `state` (only `live` is listening; a `state` whose `seq` is not above
+the last one since `ready` is ignored), and the press-time effects (cut, send,
+discard, fresh recording) run on that state's edge. Until the first `state`, and
+while the socket is down, the switch is disabled with "Connecting to
+naru-audio…" and capture is shut. A thin host's `setMicState.muted` is ignored
+(its `level`, `hearing` and `ambient` still apply) and the page posts no `mic`.
+A host that never calls `setHostInfo` keeps the bridge above exactly.
+
 **Ambient mode** (naru task 1746): the host owns live-vs-ambient and the live
 session stays open across the switch. `ambient: true` pauses this page's run
 (nothing spoken, no navigate; the typed box reads "ambient — press Live to talk
