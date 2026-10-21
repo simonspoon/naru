@@ -229,10 +229,12 @@ import {
 } from '../nativeHost'
 import {
   acceptState,
+  ambientEdge,
   controlStart,
   controlUrl,
   conversationKey,
   intentFor,
+  levelVoiced,
   MIC_FOR_KEY,
   type MicFor,
   micSwitch,
@@ -2136,20 +2138,17 @@ export function LiveHub({
     }
   })
 
-  // The native host's push (declared here, after the setters it writes).
-  useEffect(() => {
-    if (native === null) return
-    return installNativeHost(window as unknown as Record<string, unknown>, native, (state) => {
-      // A thin host's mute comes from naru-audio's `state`, never from here.
-      if (state.muted !== undefined && !thinRef.current) setMutedNow(state.muted)
-      // Ambient vs live (naru task 1746): the host's word is final. Entering
-      // pauses this page's run; leaving waits for a fresh poll before the
-      // page may run again, so a stale poll cannot make it speak while the
-      // Mac reclaims the voice (nothing pumps the run on `paused` alone).
-      if (state.ambient === true && !ambientRef.current && armed.current.live) {
+  // Ambient vs live (naru task 1746), from either source that may say it: a
+  // legacy host's push or naru-audio's `state` (naru task 2210). Entering
+  // pauses this page's run; leaving waits for a fresh poll before the page
+  // may run again, so a stale poll cannot make it speak while the Mac
+  // reclaims the voice (nothing pumps the run on `paused` alone).
+  const applyAmbient = useCallback(
+    (next: boolean) => {
+      if (next && !ambientRef.current && armed.current.live) {
         setAmbientNow(true)
         pauseNowRef.current()
-      } else if (state.ambient === false && ambientRef.current) {
+      } else if (!next && ambientRef.current) {
         setAmbientNow(false)
         // Then mirror Resume (`togglePause`): claim the voice and run, since
         // the run only advances on a turns change.
@@ -2159,13 +2158,29 @@ export function LiveHub({
           pump.current()
         })
       }
+    },
+    [setAmbientNow, setPausedNow, refetch, claimVoice],
+  )
+  const applyAmbientRef = useRef(applyAmbient)
+  useEffect(() => {
+    applyAmbientRef.current = applyAmbient
+  }, [applyAmbient])
+
+  // The native host's push (declared here, after the setters it writes).
+  useEffect(() => {
+    if (native === null) return
+    return installNativeHost(window as unknown as Record<string, unknown>, native, (state) => {
+      // A thin host's mute comes from naru-audio's `state`, never from here.
+      if (state.muted !== undefined && !thinRef.current) setMutedNow(state.muted)
+      // The host's word on ambient is final while it still pushes one.
+      if (state.ambient !== undefined) applyAmbient(state.ambient)
       // The host owns the microphone, so the capture effects that normally
       // write these never run: its level and speech verdict drive the orb and
       // glow instead. The host's cadence is the throttle.
       if (state.level !== undefined) setLevel(state.level)
       if (hostVoiced(state, DEFAULT_VAD.onsetRms)) setVoicedAt(Date.now())
     }, () => setHostThin(true))
-  }, [native, setMutedNow, setAmbientNow, setPausedNow, refetch, claimVoice])
+  }, [native, setMutedNow, applyAmbient])
 
   // Joining opens the microphone (mesa task 917) on the thin path through the
   // control socket's `start` (`mode: "live"`, below `toggleListening`); a
@@ -2508,6 +2523,9 @@ export function LiveHub({
     let stopped = false
     let attempt = 0
     let retry: number | undefined
+    // Across reconnects, so naru-audio leaving ambient while the socket was
+    // down still reads as the edge it was.
+    let lastMode: string | null = null
     const connect = () => {
       const ws = new WebSocket(controlUrl(window.location))
       const ctl = { ws, ready: false }
@@ -2523,9 +2541,25 @@ export function LiveHub({
           lastSeq = 0
           return
         }
+        // A host that hands the mic to naru-audio pushes no level of its own
+        // any more (naru-mac task 2057): naru-audio's reading drives the orb
+        // and glow instead (naru task 2210). A plain browser measures its own
+        // capture, so it ignores these.
+        if (ev.kind === 'level') {
+          if (!hostOwnsMicRef.current) return
+          setLevel(ev.rms)
+          if (levelVoiced(ev.rms, ev.gate, DEFAULT_VAD.onsetRms)) setVoicedAt(Date.now())
+          return
+        }
         if (!acceptState(lastSeq, ev.seq)) return
         lastSeq = ev.seq
         attempt = 0
+        // Ambient, likewise, is naru-audio's mode under such a host — on an
+        // edge only (`ambientEdge`), so a `state` raised for another reason
+        // never overrides the page's own press or a legacy host's push.
+        const edge = ambientEdge(lastMode, ev.mode)
+        lastMode = ev.mode
+        if (edge !== null && hostOwnsMicRef.current) applyAmbientRef.current(edge)
         const next = mutedFromMode(ev.mode)
         lastMicFor.current = { id, muted: next }
         try {
@@ -2570,6 +2604,8 @@ export function LiveHub({
       // Leaving the conversation: nothing of this page is listening any more,
       // and the next one opens through its own `start`.
       setMutedNow(true)
+      // Nor is the orb left on the last naru-audio reading.
+      setLevel(0)
     }
   }, [thin, live, unlocked, controlSession, setMutedNow])
 

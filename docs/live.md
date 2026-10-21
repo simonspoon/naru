@@ -2299,6 +2299,15 @@ while the socket is down, the switch is disabled with "Connecting to
 naru-audio…" and capture is shut. A thin host's `setMicState.muted` is ignored
 (its `level`, `hearing` and `ambient` still apply) and the page posts no `mic`.
 A host that never calls `setHostInfo` keeps the bridge above exactly.
+Since naru task 2210 such a host need push none of those three either: the
+orb's level and the hearing glow follow naru-audio's `level` events
+(`{rms, gate}`; heard while `gate` is open and `rms` reaches the onset) on the
+same control socket, and ambient follows its `state` — entered on mode
+`ambient`, left when the mode moves off it (`ambientEdge`, an edge only, so a
+`state` raised for another reason never undoes the page's own Ambient press).
+A plain browser ignores both and keeps measuring its own capture.
+`setMicState`'s `level`/`hearing`/`ambient` still apply until naru task 2181
+removes them.
 
 **Ambient mode** (naru task 1746): the host owns live-vs-ambient and the live
 session stays open across the switch. `ambient: true` pauses this page's run

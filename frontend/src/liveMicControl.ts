@@ -34,8 +34,14 @@ export function intentFor(nextMuted: boolean): string {
   return JSON.stringify({ type: 'mode', mode: nextMuted ? 'muted' : 'live' })
 }
 
-/** The server events the page reads; anything else is `null` (ignored). */
-export type ControlEvent = { kind: 'ready' } | { kind: 'state'; mode: string; seq: number } | null
+/** The server events the page reads; anything else is `null` (ignored).
+ *  `level` (naru task 2210) is naru-audio's mic reading, about every 100 ms:
+ *  `rms` clamped to 0..1, `gate` its voice gate. It carries no `seq`. */
+export type ControlEvent =
+  | { kind: 'ready' }
+  | { kind: 'state'; mode: string; seq: number }
+  | { kind: 'level'; rms: number; gate: boolean }
+  | null
 
 export function parseControlEvent(data: unknown): ControlEvent {
   if (typeof data !== 'string') return null
@@ -46,8 +52,17 @@ export function parseControlEvent(data: unknown): ControlEvent {
     return null
   }
   if (typeof msg !== 'object' || msg === null) return null
-  const { type, mode, seq } = msg as { type?: unknown; mode?: unknown; seq?: unknown }
+  const { type, mode, seq, rms, gate } = msg as {
+    type?: unknown
+    mode?: unknown
+    seq?: unknown
+    rms?: unknown
+    gate?: unknown
+  }
   if (type === 'ready') return { kind: 'ready' }
+  if (type === 'level' && typeof rms === 'number' && Number.isFinite(rms)) {
+    return { kind: 'level', rms: Math.min(1, Math.max(0, rms)), gate: gate === true }
+  }
   if (type === 'state' && typeof mode === 'string' && typeof seq === 'number' && Number.isFinite(seq)) {
     return { kind: 'state', mode, seq }
   }
@@ -64,6 +79,25 @@ export function acceptState(lastSeq: number, seq: number): boolean {
 /** Only `live` is listening; `muted`, `idle` and `ambient` all shut the mic. */
 export function mutedFromMode(mode: string): boolean {
   return mode !== 'live'
+}
+
+/**
+ * The ambient edge a `state` makes (naru task 2210), given the mode of the
+ * previous accepted `state` (`null` before the first): `true` enters ambient
+ * on a mode of `ambient`, `false` leaves it only when the mode moves *off*
+ * `ambient`, `null` is no change. Edge-only, so a `state` the shared `seq`
+ * raises for another reason (`agent_speaking`) never overrides an ambient the
+ * page entered by its own press or a legacy host's push.
+ */
+export function ambientEdge(prevMode: string | null, mode: string): boolean | null {
+  if (mode === 'ambient') return true
+  return prevMode === 'ambient' ? false : null
+}
+
+/** Whether a naru-audio `level` is the person talking — its voice gate open
+ *  and loud enough to count, the `hostVoiced` rule over a host's reading. */
+export function levelVoiced(rms: number, gate: boolean, onsetRms: number): boolean {
+  return gate && rms >= onsetRms
 }
 
 /** Whether the page takes the control-client path: a plain browser (no host),

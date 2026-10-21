@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import {
   acceptState,
+  ambientEdge,
   controlStart,
   controlUrl,
   conversationKey,
   intentFor,
+  levelVoiced,
   micSwitch,
   mutedFromMode,
   parseControlEvent,
@@ -183,5 +185,62 @@ describe('utteranceClient (naru task 2203)', () => {
     expect(readMicFor('{"id":"7","muted":true}')).toBeNull()
     expect(readMicFor('{"id":7,"muted":"yes"}')).toBeNull()
     expect(readMicFor('[7,true]')).toBeNull()
+  })
+})
+
+describe('level and ambient from naru-audio (naru task 2210)', () => {
+  it('parses a level event, clamping rms to 0..1', () => {
+    expect(parseControlEvent('{"type":"level","rms":0.2,"gate":true}')).toEqual({
+      kind: 'level',
+      rms: 0.2,
+      gate: true,
+    })
+    expect(parseControlEvent('{"type":"level","rms":3,"gate":false}')).toEqual({
+      kind: 'level',
+      rms: 1,
+      gate: false,
+    })
+    expect(parseControlEvent('{"type":"level","rms":-0.5,"gate":true}')).toEqual({
+      kind: 'level',
+      rms: 0,
+      gate: true,
+    })
+  })
+
+  it('reads a missing or non-boolean gate as closed', () => {
+    expect(parseControlEvent('{"type":"level","rms":0.3}')).toEqual({ kind: 'level', rms: 0.3, gate: false })
+    expect(parseControlEvent('{"type":"level","rms":0.3,"gate":"yes"}')).toEqual({
+      kind: 'level',
+      rms: 0.3,
+      gate: false,
+    })
+  })
+
+  it('ignores a level with no usable rms', () => {
+    expect(parseControlEvent('{"type":"level","gate":true}')).toBeNull()
+    expect(parseControlEvent('{"type":"level","rms":"0.2","gate":true}')).toBeNull()
+    expect(parseControlEvent('{"type":"level","rms":null,"gate":true}')).toBeNull()
+  })
+
+  it('counts a level as voiced only with the gate open and rms at the onset', () => {
+    expect(levelVoiced(0.02, true, 0.02)).toBe(true)
+    expect(levelVoiced(0.0199, true, 0.02)).toBe(false)
+    expect(levelVoiced(0.9, false, 0.02)).toBe(false)
+    expect(levelVoiced(0, false, 0.02)).toBe(false)
+  })
+
+  it('enters ambient on mode ambient, from any previous mode', () => {
+    for (const prev of [null, 'live', 'muted', 'idle', 'ambient']) {
+      expect(ambientEdge(prev, 'ambient')).toBe(true)
+    }
+  })
+
+  it('leaves ambient only when the mode moves off ambient', () => {
+    for (const mode of ['live', 'muted', 'idle']) {
+      expect(ambientEdge('ambient', mode)).toBe(false)
+      expect(ambientEdge(null, mode)).toBeNull()
+      expect(ambientEdge('live', mode)).toBeNull()
+      expect(ambientEdge('muted', mode)).toBeNull()
+    }
   })
 })
