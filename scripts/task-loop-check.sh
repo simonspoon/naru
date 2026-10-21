@@ -258,6 +258,7 @@ R=$(run_loop "$T")
 [ "$(step "$R" "Implement + review #2")" = ok ] || fail "fix: second pass did not run"
 [ "$(turns implementer)" = 2 ] || fail "fix: implementer turns $(turns implementer)"
 sed -n 2p "$STUB/msgs.implementer" | grep -q "bug in bar()" || fail "fix: findings missing from the second implementer brief"
+grep -q "bug in bar()" "$STUB/msgs.verifier" || fail "fix: the verifier brief lacks the review findings (the review must run first)"
 [ ! -e "$STUB/vox.log" ] || fail "fix: notify was called"
 metric "$T" PASS 2 done fix
 ok "fix-then-pass: findings reached Implement #2, task done"
@@ -296,6 +297,18 @@ grep -q -- "/open/tasks/$T" "$STUB/vox.log" || fail "inconclusive: notify button
 [ ! -e "$STUB/typed-msgs.review" ] || fail "inconclusive: the verdict agent read a stage that did not finish"
 metric "$T" INCONCLUSIVE 1 backlog inconclusive
 ok "inconclusive verifier: backlog + note + one recorded notify call"
+
+# ---- 5b. a reviewer that never finishes -> the verifier does not run, backlog ----
+reset_stub
+printf 'UI: no' > "$STUB/reply.planner"
+touch "$STUB/die.diff-reviewer"
+printf 'VERDICT: PASS' > "$STUB/reply.verifier"
+T=$(mk "Fix quux")
+R=$(run_loop "$T")
+[ "$(tstatus "$T")" = backlog ] || fail "reviewer dies: task is $(tstatus "$T")"
+[ "$(turns verifier)" = "" ] || fail "reviewer dies: the verifier ran without the review"
+[ ! -e "$STUB/typed-msgs.review" ] || fail "reviewer dies: the verdict agent read a stage that did not finish"
+ok "reviewer that never finishes: verifier not run, backlog"
 
 # ---- 6. a planner that never answers -> backlog, nothing implemented ----
 reset_stub

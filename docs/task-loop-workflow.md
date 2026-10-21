@@ -20,7 +20,7 @@ over it, and picks a build path. Engine claims were re-checked against
 | Pin a stage to a named agent | No node kind takes an agent. `prompt` is one tool-less `claude -p` call (`workflow-prompt` template). A `cli` node can run `naru run start --agent X` (the runner carries `run_agent`, `docs/runner.md`), then poll. Never exercised from a workflow | **Gap, workable** via `cli` + `naru run`; needs a spike (task 1955) |
 | Per-node hard timeout | `timeout_secs` on `cli`/`script` (1..=86400) and `prompt` (1..=3600), default 600 (`workflow.rs:44-46`); the whole process group is SIGKILLed at the deadline. `decide`, `branch`, `output` have none (in-process, instant) | **Supported** |
 | Nudge before kill | The timeout kills; it does not nudge. A `cli` node can contain its own watchdog loop (below) | **Gap, workable** inside a node |
-| Parallel nodes | None: `for id in order` (`workflow.rs:814`) is a serial topological walk. Two branches run one after the other | **Gap**. Worked around by running the reviewer and verifier concurrently *inside one `cli` node* |
+| Parallel nodes | None: `for id in order` (`workflow.rs:814`) is a serial topological walk. Two branches run one after the other | **Gap**. Worked around inside one `cli` node, which runs the reviewer first and then the verifier with the review's findings in its brief (naru task 2173) |
 | Joins | Any-semantics: a node runs if at least one incoming edge is active, inputs joined by `\n` in edge-id order (`active_input`, `workflow.rs:899`). There is no wait-for-all, and a failed upstream aborts the run | **Partial**. Fine because the join is inside the parallel node; a failure must be encoded as output, not as a node failure |
 | Conditionals | `branch` (`contains`, `regex`, `equals`, `score_above/below`) and `decide` (rules); an edge is active per verdict | **Supported** |
 | Loops / retry / max iterations | DAG only; a cycle is refused. No retry, no loop node | **Gap**. Worked around by **unrolling** two iterations: the max of 2 becomes structural |
@@ -196,7 +196,7 @@ Pick **(c)**. Justification:
 
 Cost accepted: the graph is longer than the idealised diagram (the loop is
 unrolled), and parallelism is invisible to the engine's step list (review and
-verify are one step; their detail is in `status.json`).
+verify are one step, run reviewer first then verifier; their detail is in `status.json`).
 
 ## 7. Follow-up build tasks, in order
 

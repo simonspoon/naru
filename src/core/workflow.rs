@@ -2293,26 +2293,38 @@ fi
 const LOOP_REVIEW: &str = r##"N=@N@
 if [ "$(cat "$SCRATCH/ui")" = yes ]; then VER=ui-verifier; else VER=verifier; fi
 PD=$(pre_dirty | head -n 100)
-for role in verifier reviewer; do
+mkbrief() {
+  role=$1
   { brief_head "$role"
     printf '\n## Plan\n\n'; cat "$SCRATCH/plan.md"
     printf '\n## Diff summary (uncommitted, by design: the full change is the working tree of each repo below)\n\n'; cat "$SCRATCH/diff-$N.txt"
     if [ -n "$PD" ]; then printf '\n## Dirty before this run (not this task%ss change)\n\nThese paths were already dirty before the run started and the run has not changed them since. Do not count them against the task.\n\n' "'"; printf '%s\n' "$PD"; fi
     printf '\n## What to do\n\nCheck the change against the plan and the task. Do not edit any file. End with exactly one line, `VERDICT: PASS` or `VERDICT: FAIL`, after your findings.\n'
     if [ "$role" = verifier ] && [ "$VER" = ui-verifier ]; then printf '\n## Live UI check (required)\n\nThis change touches the UI. Run the live check in the dev environment (docs/dev-env.md: the dev serve on :7771 via scripts/dev-env.sh, khora headless; never the real install on :7770 or :7777). Cover every UI check in the plan and in the acceptance of the task. `VERDICT: PASS` is allowed only if those checks actually ran and passed. If you could not run them, end with `VERDICT: FAIL` and say why.\n'; fi
+    if [ "$role" = verifier ]; then printf '\n## Review findings: check each one\n\nThe reviewer ran first. Its report is below. Confirm or refute every finding by running it (a test, a repro). Run the project checks (for example `cargo test`) yourself; do not leave them to the reviewer. A finding you confirm is a `VERDICT: FAIL`.\n\n'; cat "$SCRATCH/review-$N-review.md"; fi
     no_commit_rule
   } > "$SCRATCH/$role-$N-brief.md"
-done
-stage_run "review$N" "$VER" "$(dl review 1500)" "$SCRATCH/verifier-$N-brief.md" --also diff-reviewer --also-brief-file "$SCRATCH/reviewer-$N-brief.md"
-jq -r '.results[0].report // ""' "$SCRATCH/review$N.json" > "$SCRATCH/review-$N-verify.md" 2>/dev/null
-jq -r '.results[1].report // ""' "$SCRATCH/review$N.json" > "$SCRATCH/review-$N-review.md" 2>/dev/null
+}
+# The reviewer runs first, then the verifier with the review's findings in its brief (naru task 2173).
+mkbrief reviewer
+stage_run "review$N" diff-reviewer "$(dl review 1500)" "$SCRATCH/reviewer-$N-brief.md"
+jq -r '.report // ""' "$SCRATCH/review$N.json" > "$SCRATCH/review-$N-review.md" 2>/dev/null
+if [ "$(stage_verdict "review$N")" != COMPLETE ]; then
+  note_reason "review$N"
+  echo "review$N partial: $(jq -r '.partial // ""' "$SCRATCH/review$N.json" 2>/dev/null | head -c 2000)" >> "$SCRATCH/reasons.txt"
+  emit review=INCONCLUSIVE
+  exit 0
+fi
+mkbrief verifier
+stage_run "review${N}-verify" "$VER" "$(dl review 1500)" "$SCRATCH/verifier-$N-brief.md"
+jq -r '.report // ""' "$SCRATCH/review${N}-verify.json" > "$SCRATCH/review-$N-verify.md" 2>/dev/null
 # The verdict is read from the two reports by the typed agent node behind
-# this one; here only whether the stage finished.
-if [ "$(stage_verdict "review$N")" = COMPLETE ]; then
+# this one; here only whether both stages finished.
+if [ "$(stage_verdict "review${N}-verify")" = COMPLETE ]; then
   emit review=done
 else
-  note_reason "review$N"
-  jq -r '.results[]? | select(.verdict != "COMPLETE") | "\(.agent): \(.reason // "") partial: \(.partial // "")"' "$SCRATCH/review$N.json" >> "$SCRATCH/reasons.txt" 2>/dev/null
+  note_reason "review${N}-verify"
+  echo "review${N}-verify partial: $(jq -r '.partial // ""' "$SCRATCH/review${N}-verify.json" 2>/dev/null | head -c 2000)" >> "$SCRATCH/reasons.txt"
   emit review=INCONCLUSIVE
 fi
 "##;
@@ -3007,7 +3019,7 @@ fn build_task_loop_builtins(
                 (
                     K::Cli,
                     "Review + verify",
-                    cli(LOOP_REVIEW, "iter", LOOP_STAGE_TIMEOUT),
+                    cli(LOOP_REVIEW, "iter", 2 * LOOP_STAGE_TIMEOUT),
                     760.0,
                     80.0,
                 ),
@@ -6106,6 +6118,22 @@ fn run_status_at(store: &Store, id: i64, now: i64) -> Result<Value> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn task_loop_review_runs_reviewer_before_verifier() {
+        // naru task 2173: no concurrent --also pair; the verifier comes second
+        // and its brief carries the review's report.
+        assert!(!super::LOOP_REVIEW.contains("--also"));
+        let rev = super::LOOP_REVIEW
+            .find("stage_run \"review$N\" diff-reviewer")
+            .unwrap();
+        let ver = super::LOOP_REVIEW
+            .find("stage_run \"review${N}-verify\"")
+            .unwrap();
+        assert!(rev < ver);
+        assert!(super::LOOP_REVIEW.contains("cat \"$SCRATCH/review-$N-review.md\""));
+        assert!(super::LOOP_REVIEW.contains("review-$N-verify.md"));
+    }
+
     use super::*;
     use crate::core::store::{WorkflowNodeNew, WorkflowNodePatch, WorkflowPatch};
     use crate::core::types::{WorkflowType, WorkflowTypeField};
