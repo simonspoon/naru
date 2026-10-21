@@ -403,3 +403,7 @@ compares it with the newest earlier scratch dir of the same task that has a
 the count. An equal key means two bounces in a row: the task gets the
 `needs-human` tag and a note `needs-human: bounced twice on <key>`. The
 `metric.txt` line is unchanged. `task-loop-check.sh` sections 6e–6g cover it.
+
+## Verify lease and per-run isolation (naru task 2175)
+
+Loop runs that overlap share SwiftPM locks, simulators and ports, so the Review node takes a **per-repo lease** before the fast gate and drops it after the verifier (also on any early exit, and again in the Close nodes). A lease is one lock directory per repo of the run's `repos.txt` under `~/.naru/loop/lease/` (path with `/` turned into `_`), taken in sorted order; naru-mac's `repos.txt` lists naru-ios, so the two share it. A holder is stale (and its lock broken) when its pid is dead, its task is no longer `in_progress`, or it is over 180 minutes old. The wait is `NARU_LOOP_LEASE_WAIT` seconds (default 3600, poll `NARU_LOOP_LEASE_POLL`, default 5); a wait is written to `lease.txt` and `reasons.txt`, and a timeout ends the review as `review=INCONCLUSIVE` (backlog), never a pass. Each run also gets its own `SWIFTPM_SCRATCH` (`$SCRATCH/spm`), `NARU_IOS_DERIVED_DATA`, `NARU_DEV_DIR` and `NARU_DEV_PORT` (first free port in 7800–7899), stated in both review briefs. The lease only separates loop runs from each other; the real install and a person's own app are not covered, and the iOS simulator pool is serialised by the lease, not given per run.

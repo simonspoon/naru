@@ -2166,19 +2166,76 @@ needs_human_rule() { cat <<'RULE'
 If the task needs something an unattended run cannot supply (an attended Mac, a permission or consent dialog, Accessibility, a real audio device or microphone, system audio routing, a physical device), do not plan it and do not split it into subtasks, which would hit the same wall. Use this only for a requirement that truly cannot be met unattended. Then end your reply with exactly one line `NEEDS-HUMAN: <the exact requirement>` and no `UI:` line.
 RULE
 }
+# The per-repo verify lease (naru task 2175): loop runs that overlap share SwiftPM locks, simulators and
+# ports, so a run holds one lock directory per repo of its repos.txt (naru-mac lists naru-ios, so they
+# share) for the length of its review. Repos are taken in sorted order (no deadlock). A lock is stale
+# when its pid is dead, its task is no longer in_progress, it is the same task's, or it is over 180
+# minutes old. The wait is NARU_LOOP_LEASE_WAIT seconds (3600) polled every NARU_LOOP_LEASE_POLL (5),
+# and is recorded in $SCRATCH/lease.txt and reasons.txt. No macOS flock, hence mkdir.
+lease_dir() { printf '%s/.naru/loop/lease/%s' "$HOME" "$(printf '%s' "$1" | tr '/' '_')"; }
+lease_stale() { # <lock dir>
+  local d=$1 t pid
+  [ -f "$d/owner" ] || { [ -n "$(find "$d" -maxdepth 0 -mmin +2 2>/dev/null)" ]; return; }
+  [ -z "$(find "$d" -maxdepth 0 -mmin +180 2>/dev/null)" ] || return 0
+  t=$(cut -f1 "$d/owner"); pid=$(cut -f2 "$d/owner")
+  [ "$t" != "$TASK" ] || return 0
+  kill -0 "$pid" 2>/dev/null || return 0
+  [ "$(naru task show "$t" 2>/dev/null | jq -r '.status' 2>/dev/null)" = in_progress ] || return 0
+  return 1
+}
+lease_drop() {
+  local d
+  for d in "$HOME"/.naru/loop/lease/*; do
+    [ -f "$d/owner" ] || continue
+    [ "$(cut -f1 "$d/owner")" = "$TASK" ] && rm -rf "$d"
+  done
+  return 0
+}
+lease_take() {
+  local repo d t0 now holder w=${NARU_LOOP_LEASE_WAIT:-3600} p=${NARU_LOOP_LEASE_POLL:-5} waited
+  mkdir -p "$HOME/.naru/loop/lease"
+  while IFS= read -r repo; do
+    d=$(lease_dir "$repo"); t0=$(date +%s); holder=""
+    while ! mkdir "$d" 2>/dev/null; do
+      if lease_stale "$d"; then rm -rf "$d"; continue; fi
+      holder=$(cut -f1 "$d/owner" 2>/dev/null)
+      now=$(date +%s)
+      if [ $((now - t0)) -ge "$w" ]; then
+        echo "lease $repo waited=$((now - t0))s holder=task ${holder:-?} timed out" | tee -a "$SCRATCH/lease.txt" >> "$SCRATCH/reasons.txt"
+        lease_drop; return 1
+      fi
+      sleep "$p"
+    done
+    printf '%s\t%s\t%s\t%s\n' "$TASK" "$$" "$SCRATCH" "$(date +%s)" > "$d/owner"
+    waited=$(( $(date +%s) - t0 ))
+    [ -z "$holder" ] || echo "lease $repo waited=${waited}s holder=task $holder" >> "$SCRATCH/lease.txt"
+  done < <(repo_each | sort -u)
+  return 0
+}
+# Per-run build and port isolation (naru task 2175), exported for every stage the run starts.
+run_iso() {
+  local p
+  mkdir -p "$SCRATCH/spm" "$SCRATCH/dd" "$SCRATCH/naru-dev"
+  if [ -s "$SCRATCH/port" ]; then p=$(cat "$SCRATCH/port")
+  else
+    for p in $(seq 7800 7899); do lsof -nP -iTCP:"$p" -sTCP:LISTEN > /dev/null 2>&1 || break; done
+    echo "$p" > "$SCRATCH/port"
+  fi
+  export SWIFTPM_SCRATCH="$SCRATCH/spm" NARU_IOS_DERIVED_DATA="$SCRATCH/dd" NARU_DEV_DIR="$SCRATCH/naru-dev" NARU_DEV_PORT="$p"
+}
 stage_verdict() { jq -r '.verdict // "INCONCLUSIVE"' "$SCRATCH/$1.json" 2>/dev/null || echo INCONCLUSIVE; }
 note_reason() { jq -r --arg s "$1" '"\($s): \(.verdict) \(.reason // "")"' "$SCRATCH/$1.json" >> "$SCRATCH/reasons.txt" 2>/dev/null; return 0; }
 # The fast gate (naru task 2172): the loop runs the repo's own fast check itself on the uncommitted tree, once
 # per review pass and repo, so a verifier that skipped the checks cannot pass a broken change. The command is
 # NARU_LOOP_FAST_GATE, else `scripts/gates.sh fast <the run's changed paths>`, else `cargo test --quiet`, else
-# `swift build && swift test`, else no gate. Full output: $SCRATCH/fastgate-$N-<n>.out; one record per repo in
+# `swift build && swift test` (each with its own --scratch-path), else no gate. Full output: $SCRATCH/fastgate-$N-<n>.out; one record per repo in
 # $SCRATCH/fastgate-$N.txt. A failure is re-run at HEAD in a detached worktree with the same paths; it is
 # `baseline=same` when HEAD fails too and every failure line of the change also appears at HEAD, else `baseline=new`.
 fail_lines() { grep -E 'FAILED|failed|error:|^FAIL:' "$1" 2>/dev/null | sed -E 's#(/[^ /:]+)+/##g; s/[0-9.]+//g' | sort -u; return 0; }
 fast_run() { # <dir> <out file> <tag> <cmd> [paths]
   local dir=$1 o=$2 tag=$3 cmd=$4 t=${NARU_LOOP_FAST_GATE_TIMEOUT:-1800} tmo=""; shift 4
   if command -v timeout >/dev/null 2>&1; then tmo=timeout; elif command -v gtimeout >/dev/null 2>&1; then tmo=gtimeout; fi
-  (cd "$dir" && GATES_LOG_DIR="$SCRATCH/gates-$tag" NARU_IOS_DERIVED_DATA="$SCRATCH/dd-$tag" ${tmo:+$tmo $t} bash -c "$cmd" gate "$@") > "$o" 2>&1
+  (cd "$dir" && GATES_LOG_DIR="$SCRATCH/gates-$tag" NARU_IOS_DERIVED_DATA="$SCRATCH/dd-$tag" NARU_LOOP_SPM="$SCRATCH/spm-$tag" ${tmo:+$tmo $t} bash -c "$cmd" gate "$@") > "$o" 2>&1
 }
 fast_gate() { # <n> <repo>
   local n=$1 repo=$2 cmd=${NARU_LOOP_FAST_GATE:-} out="$SCRATCH/fastgate-$N-$1.out" rec="$SCRATCH/fastgate-$N.txt" rc=0 hrc=0 b="" W="$SCRATCH/fastgate-wt" p
@@ -2191,7 +2248,7 @@ fast_gate() { # <n> <repo>
   if [ -z "$cmd" ]; then
     if [ -f "$repo/scripts/gates.sh" ]; then cmd='scripts/gates.sh fast "$@"'
     elif [ -f "$repo/Cargo.toml" ]; then cmd='cargo test --quiet'
-    elif [ -f "$repo/Package.swift" ]; then cmd='swift build && swift test'
+    elif [ -f "$repo/Package.swift" ]; then cmd='swift build --scratch-path "$NARU_LOOP_SPM" && swift test --scratch-path "$NARU_LOOP_SPM"'
     fi
   fi
   if [ -z "$cmd" ]; then echo "repo=$repo no gate: no scripts/gates.sh, Cargo.toml or Package.swift" >> "$rec"; return 0; fi
@@ -2355,6 +2412,24 @@ fi
 const LOOP_REVIEW: &str = r##"N=@N@
 if [ "$(cat "$SCRATCH/ui")" = yes ]; then VER=ui-verifier; else VER=verifier; fi
 PD=$(pre_dirty | head -n 100)
+# The verify lease and the run's own build dirs and port (naru task 2175).
+trap lease_drop EXIT
+if ! lease_take; then
+  emit review=INCONCLUSIVE
+  exit 0
+fi
+run_iso
+iso_rule() { cat <<RULE
+
+## Isolation for this run (read this)
+
+This run holds the verify lease on every repo it touches, so no other loop run is building or testing there now. Another loop run's use of a shared resource is therefore not a reason to skip a check. Use only this run's own resources:
+- SwiftPM: pass --scratch-path $SCRATCH/spm to swift build and swift test (exported as SWIFTPM_SCRATCH).
+- Xcode: DerivedData is $NARU_IOS_DERIVED_DATA (exported as NARU_IOS_DERIVED_DATA).
+- Dev serve: NARU_DEV_PORT=$NARU_DEV_PORT NARU_DEV_DIR=$NARU_DEV_DIR for scripts/dev-env.sh. Never :7770, :7777 or :7771.
+A check that could not run is VERDICT: FAIL, never a pass.
+RULE
+}
 mkbrief() {
   role=$1
   { brief_head "$role"
@@ -2362,8 +2437,9 @@ mkbrief() {
     printf '\n## Diff summary (uncommitted, by design: the full change is the working tree of each repo below)\n\n'; cat "$SCRATCH/diff-$N.txt"
     if [ -n "$PD" ]; then printf '\n## Dirty before this run (not this task%ss change)\n\nThese paths were already dirty before the run started and the run has not changed them since. Do not count them against the task.\n\n' "'"; printf '%s\n' "$PD"; fi
     printf '\n## Fast gate (run by the loop, before this review)\n\nThe loop already ran the repo fast gate on the uncommitted tree; do not count it as unrun. `rc=0` passed. A failure with `baseline=same` fails at HEAD too (not this change); `baseline=new` is caused by this change and is a `VERDICT: FAIL`. `no gate` means the repo has none.\n\n'; fast_gate_text
+    iso_rule
     printf '\n## What to do\n\nCheck the change against the plan and the task. Do not edit any file. End with exactly one line, `VERDICT: PASS` or `VERDICT: FAIL`, after your findings.\n'
-    if [ "$role" = verifier ] && [ "$VER" = ui-verifier ]; then printf '\n## Live UI check (required)\n\nThis change touches the UI. Run the live check in the dev environment (docs/dev-env.md: the dev serve on :7771 via scripts/dev-env.sh, khora headless; never the real install on :7770 or :7777). Cover every UI check in the plan and in the acceptance of the task. `VERDICT: PASS` is allowed only if those checks actually ran and passed. If you could not run them, end with `VERDICT: FAIL` and say why.\n'; fi
+    if [ "$role" = verifier ] && [ "$VER" = ui-verifier ]; then printf '\n## Live UI check (required)\n\nThis change touches the UI. Run the live check in the dev environment (docs/dev-env.md: the dev serve on this run'"'"'s own port %s via scripts/dev-env.sh with NARU_DEV_PORT and NARU_DEV_DIR set as in the isolation section, khora headless; never the real install on :7770 or :7777). Cover every UI check in the plan and in the acceptance of the task. `VERDICT: PASS` is allowed only if those checks actually ran and passed. If you could not run them, end with `VERDICT: FAIL` and say why.\n' "$NARU_DEV_PORT"; fi
     if [ "$role" = verifier ]; then printf '\n## Review findings: check each one\n\nThe reviewer ran first. Its report is below. Confirm or refute every finding by running it (a test, a repro). Run the project checks (for example `cargo test`) yourself; do not leave them to the reviewer. A finding you confirm is a `VERDICT: FAIL`.\n\n'; cat "$SCRATCH/review-$N-review.md"; fi
     no_commit_rule
   } > "$SCRATCH/$role-$N-brief.md"
@@ -2634,6 +2710,7 @@ while IFS= read -r repo; do
   commit_repo "$repo" "$(repo_state "$n")" "$sc" || failed=1
 done < <(repo_all)
 rm -f "$HOME/.naru/loop/active/$TASK"
+lease_drop
 [ "$failed" = 0 ] || exit 1
 SHAS=$(paste -sd, "$SCRATCH/shas.txt")
 # Close withholds its landing result while this run's registry entry exists (naru task 2088), so this
@@ -2655,6 +2732,7 @@ const LOOP_CLOSE_BACKLOG: &str = r##"# Put back what the bounced run left (naru 
 # baseline line is never touched. A repo another live run owns (claimed_by, naru task 2170) gets
 # its diff saved and is otherwise left alone: its changes since the baseline are that run's.
 rm -f "$HOME/.naru/loop/active/$TASK"
+lease_drop
 PRIM=$(cat "$SCRATCH/primary.txt" 2>/dev/null)
 restored=(); diffs=(); failed=(); leftover=(); skipped=()
 restore_path() { # <path>: in the repo the loop below is in; $ST is its state dir, $pre what a listed path is prefixed with
@@ -6239,6 +6317,19 @@ mod tests {
         assert!(rev < ver);
         assert!(super::LOOP_REVIEW.contains("cat \"$SCRATCH/review-$N-review.md\""));
         assert!(super::LOOP_REVIEW.contains("review-$N-verify.md"));
+    }
+
+    #[test]
+    fn task_loop_review_takes_lease_and_isolates() {
+        // naru task 2175
+        let r = super::LOOP_REVIEW;
+        let lease = r.find("lease_take").unwrap();
+        assert!(lease < r.find("fast_gate \"$fn\"").unwrap());
+        assert!(lease < r.find("stage_run \"review$N\"").unwrap());
+        assert!(r.contains("## Isolation for this run"));
+        assert!(r.contains("trap lease_drop EXIT"));
+        assert!(super::LOOP_PRELUDE.contains("swift build --scratch-path"));
+        assert!(super::LOOP_CLOSE_BACKLOG.contains("lease_drop"));
     }
 
     use super::*;

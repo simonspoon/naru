@@ -976,6 +976,39 @@ R=$(run_loop "$T")
 [ "$(turns planner)" -ge 1 ] || fail "sticky: after the tag was cleared the planner did not run"
 ok "a needs-human tag holds until a person removes it: no planner turn, backlog, one notify"
 
+# ---- 5c. the per-repo verify lease (naru task 2175) ----
+LEASE_DIR="$HOME/.naru/loop/lease"
+REPO_TOP=$(git -C "$TMP/work" rev-parse --show-toplevel)
+LD="$LEASE_DIR/$(printf '%s' "$REPO_TOP" | tr '/' '_')"
+reset_stub
+printf 'UI: no' > "$STUB/reply.planner"
+printf 'VERDICT: PASS' > "$STUB/reply.verifier"
+printf 'VERDICT: PASS' > "$STUB/reply.diff-reviewer"
+H=$(mk "Lease holder")
+"$NARU" task update "$H" --status in_progress >/dev/null || fail "lease: holder in_progress"
+sleep 120 & HPID=$!
+mkdir -p "$LD"
+printf '%s\t%s\t%s\t%s\n' "$H" "$HPID" "$TMP" "$(date +%s)" > "$LD/owner"
+T=$(mk "Fix lease one")
+R=$(NARU_LOOP_LEASE_WAIT=2 NARU_LOOP_LEASE_POLL=1 run_loop "$T")
+[ "$(turns verifier)" = "" ] && [ "$(turns diff-reviewer)" = "" ] || fail "lease: a stage ran while the lease was held (verifier_calls_while_lease_held != 0)"
+[ "$(tstatus "$T")" = backlog ] || fail "lease: a lease timeout ended as $(tstatus "$T"), not backlog (lease_timeout_passes != 0)"
+grep -q "holder=task $H" "$HOME"/.naru/loop/"$T"-*/lease.txt || fail "lease: lease.txt does not name the holder"
+[ "$(cut -f1 "$LD/owner")" = "$H" ] || fail "lease: the holder's lease was taken or removed"
+kill "$HPID" 2>/dev/null; wait "$HPID" 2>/dev/null || true
+"$NARU" task update "$H" --status done >/dev/null 2>&1 || true
+# (b) a stale holder (dead pid) is broken and the run passes
+printf '%s\t%s\t%s\t%s\n' "$H" "$HPID" "$TMP" "$(date +%s)" > "$LD/owner"
+T=$(mk "Fix lease two")
+printf 'x\n' > "$STUB/touch.implementer"
+R=$(NARU_LOOP_LEASE_WAIT=20 NARU_LOOP_LEASE_POLL=1 run_loop "$T")
+[ "$(tstatus "$T")" = done ] || fail "lease: a stale holder blocked the run: $(tstatus "$T")"
+# (c) nothing left behind
+[ -z "$(ls "$LEASE_DIR" 2>/dev/null)" ] || fail "lease: left behind: $(ls "$LEASE_DIR")"
+# (d) the verifier brief carries the run's own port and SwiftPM path
+grep -Eq "NARU_DEV_PORT=78[0-9][0-9]" "$STUB/msgs.verifier" && grep -q -- "--scratch-path .*/spm" "$STUB/msgs.verifier" || fail "lease: the verifier brief lacks the isolation section"
+ok "verify lease: a held lease blocks without a pass, a stale one is broken, none is left, the brief names the run's port and SwiftPM path"
+
 # ---- 6f. two bounces on the same failure -> needs-human; 6g. different failures -> no tag ----
 bounce_twice() { # <description> <key 1> <key 2>
   reset_stub
