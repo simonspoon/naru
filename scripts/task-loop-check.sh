@@ -868,6 +868,40 @@ wait
 [ "$(step "$R" "Commit")" = ok ] || fail "closing child: Commit was $(step "$R" "Commit")"
 ok "a pass waits for a split child that closes, then completes"
 
+# ---- 11c. a pass with an open subtask (naru task 2171): "split into N" never closes done ----
+reset_stub
+printf 'UI: no' > "$STUB/reply.planner"
+printf 'VERDICT: PASS' > "$STUB/reply.verifier"
+printf 'VERDICT: PASS' > "$STUB/reply.diff-reviewer"
+printf 'split-c.txt\n' > "$STUB/touch.implementer"
+T=$(mk "Pass with an open blocker and subtask")
+C=$(mk "The blocker that never closes")
+"$NARU" task block "$T" --by "$C" >/dev/null || fail "open subtask: block"
+S=$("$NARU" task create loopproj "The backlog subtask" --parent "$T" --status backlog | jq -r .id)
+( sleep 2; "$NARU" task update "$C" --status done >/dev/null 2>&1 ) &
+R=$(NARU_LOOP_CLOSE_WAIT=4 run_loop "$T")
+wait
+[ "$(tstatus "$T")" = todo ] || fail "open subtask: task is $(tstatus "$T"), not todo (false done)"
+"$NARU" task show "$T" | jq -e --arg s "$S" '.notes | any(.body | contains("split into") and contains($s))' >/dev/null || fail "open subtask: no 'split into' note naming $S"
+[ "$(step "$R" "Close: pass status")" = skipped ] && [ "$(step "$R" "Commit")" = skipped ] || fail "open subtask: close/commit were $(step "$R" "Close: pass status")/$(step "$R" "Commit")"
+asked "$T" todo "open subtask"
+ok "a pass with an open subtask goes back to todo as 'split into', never done"
+git -C "$TMP/work" checkout -q -- . 2>/dev/null; git -C "$TMP/work" clean -fdq 2>/dev/null
+
+# the subtask closes during the wait: the close goes through
+reset_stub
+printf 'UI: no' > "$STUB/reply.planner"
+printf 'VERDICT: PASS' > "$STUB/reply.verifier"
+printf 'VERDICT: PASS' > "$STUB/reply.diff-reviewer"
+printf 'split-d.txt\n' > "$STUB/touch.implementer"
+T=$(mk "Pass with a subtask that closes soon")
+S=$("$NARU" task create loopproj "The subtask that closes" --parent "$T" --status backlog | jq -r .id)
+( sleep 3; "$NARU" task update "$S" --status done >/dev/null 2>&1 ) &
+R=$(NARU_LOOP_CLOSE_WAIT=60 run_loop "$T")
+wait
+[ "$(tstatus "$T")" = done ] || fail "closing subtask: task is $(tstatus "$T")"
+ok "a pass waits for an open subtask that closes, then completes"
+
 # ---- 12. the fast gate (naru task 2172): the loop runs the repo's check itself and judges it against HEAD ----
 fg_reset() {
   reset_stub
