@@ -387,3 +387,19 @@ line deterministically (no model), writes `needs-human.txt`, and emits
 then files the note `needs-human: <requirement>`, adds the `needs-human` tag to
 the existing tags, and the notify reads `needs-human: <requirement>`.
 `task-loop-check.sh` section 6b covers it.
+
+**Sticky (naru task 2174).** The tag is kept until a person removes it. Before
+the planner runs, the Plan node checks the task's tags; with `needs-human` set
+it does not start the planner, reuses the newest `needs-human:` note as the
+requirement, emits `plan=failed` and closes to backlog as above. Clearing the
+tag (`naru task update <id> --tags ""`) is how a person lets the loop run it again.
+
+**Repeat bounces (naru task 2174).** The typed `ReviewVerdict` carries a third
+field, `blocker`: a short snake_case key for the main reason a FAIL report
+failed (`none` if nothing failed). A NEEDS-FIX writes it to `bounce.txt` in the
+scratch dir (a failing fast gate uses the key `fast_gate`). `Close: backlog`
+compares it with the newest earlier scratch dir of the same task that has a
+`bounce.txt`; a run that ended `outcome=done` or with `needs-human.txt` resets
+the count. An equal key means two bounces in a row: the task gets the
+`needs-human` tag and a note `needs-human: bounced twice on <key>`. The
+`metric.txt` line is unchanged. `task-loop-check.sh` sections 6e–6g cover it.

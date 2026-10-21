@@ -82,7 +82,8 @@ if [ "$1" = "-p" ] && [[ " $* " != *" --input-format "* ]]; then
     v() { case "$(last)" in "VERDICT: PASS") echo PASS ;; "VERDICT: FAIL") echo FAIL ;; *) echo NONE ;; esac; }
     a=$(sed -n '/^=== VERIFY REPORT ===$/,/^=== REVIEW REPORT ===$/p' <<<"$prompt" | grep -v '^===' | v)
     b=$(sed -n '/^=== REVIEW REPORT ===$/,/^REPORTS>>>$/p' <<<"$prompt" | grep -v '^===\|^REPORTS>>>$' | v)
-    reply=$(jq -nc --arg a "$a" --arg b "$b" '{verify:$a,review:$b}')
+    c=none; [ -f "$STUB/blocker" ] && c=$(cat "$STUB/blocker")
+    reply=$(jq -nc --arg a "$a" --arg b "$b" --arg c "$c" '{verify:$a,review:$b,blocker:$c}')
   fi
   jq -nc --arg r "$reply" '{type:"result",subtype:"success",is_error:false,result:$r}'
   exit 0
@@ -123,7 +124,7 @@ STUBEOF
 chmod +x "$STUB/vox"
 export MESA_VOX_BIN="$STUB/vox"
 
-reset_stub() { rm -f "$STUB"/rmrec.* "$STUB"/touch.* "$STUB"/reply.* "$STUB"/die.* "$STUB"/hang.* "$STUB"/partial.* "$STUB"/turns.* "$STUB"/msgs.* "$STUB"/typed.* "$STUB"/typed-msgs.* "$STUB"/split.json "$STUB/vox.log"; }
+reset_stub() { rm -f "$STUB"/rmrec.* "$STUB"/touch.* "$STUB"/reply.* "$STUB"/die.* "$STUB"/hang.* "$STUB"/partial.* "$STUB"/turns.* "$STUB"/msgs.* "$STUB"/typed.* "$STUB"/typed-msgs.* "$STUB"/blocker "$STUB"/split.json "$STUB/vox.log"; }
 turns() { grep -c . "$STUB/turns.$1" 2>/dev/null || true; }
 # step <run json> <node title>: the status of that node's step (node ids from
 # the workflow's own node list, since a step carries the id only).
@@ -959,5 +960,39 @@ R=$(NARU_LOOP_FAST_GATE= run_loop "$T")
 [ "$(tstatus "$T")" = done ] || fail "gate e: task is $(tstatus "$T")"
 grep -q " no gate: " "$HOME"/.naru/loop/"$T"-*/fastgate-*.txt || fail "gate e: the record does not say no gate"
 ok "a repo with no gate command still closes on two PASSes"
+
+# ---- 6e. a task still tagged needs-human is not planned again (naru task 2174) ----
+reset_stub
+printf 'Plan: edit src/a.rs.\nUI: no' > "$STUB/reply.planner"
+T=$(mk "Tagged by a person")
+"$NARU" task update "$T" --tags needs-human > /dev/null
+R=$(run_loop "$T")
+[ "$(turns planner)" = "" ] || [ "$(turns planner)" = 0 ] || fail "sticky: the planner ran ($(turns planner) turns)"
+[ "$(tstatus "$T")" = backlog ] && [ "$(step "$R" "Implement + review #1")" = skipped ] || fail "sticky: task $(tstatus "$T")"
+"$NARU" task show "$T" | jq -e '.tags | index("needs-human")' > /dev/null || fail "sticky: tag lost"
+[ "$(grep -c -- '--call--' "$STUB/vox.log")" = 1 ] || fail "sticky: notify calls"
+"$NARU" task update "$T" --tags "" > /dev/null
+R=$(run_loop "$T")
+[ "$(turns planner)" -ge 1 ] || fail "sticky: after the tag was cleared the planner did not run"
+ok "a needs-human tag holds until a person removes it: no planner turn, backlog, one notify"
+
+# ---- 6f. two bounces on the same failure -> needs-human; 6g. different failures -> no tag ----
+bounce_twice() { # <description> <key 1> <key 2>
+  reset_stub
+  printf 'UI: no' > "$STUB/reply.planner"
+  printf 'VERDICT: PASS' > "$STUB/reply.verifier"
+  printf 'bug in bar()\nVERDICT: FAIL' > "$STUB/reply.diff-reviewer"
+  T=$(mk "$1")
+  printf '%s' "$2" > "$STUB/blocker"; run_loop "$T" > /dev/null
+  "$NARU" task show "$T" | jq -e '(.tags // []) | index("needs-human") | not' > /dev/null || fail "bounce: tagged after one bounce"
+  printf '%s' "$3" > "$STUB/blocker"; run_loop "$T" > /dev/null
+}
+bounce_twice "Same failure twice" no_utterance no_utterance
+[ "$(tstatus "$T")" = backlog ] || fail "bounce: task $(tstatus "$T")"
+"$NARU" task show "$T" | jq -e '(.tags | index("needs-human")) and (.notes | map(.body) | any(startswith("needs-human: bounced twice on no_utterance")))' > /dev/null || fail "bounce: not marked: $("$NARU" task show "$T" | jq -c '{tags,n:[.notes[].body[:60]]}')"
+ok "a second bounce on the same failure key tags the task needs-human with a note"
+bounce_twice "Different failures" no_utterance tests_red
+"$NARU" task show "$T" | jq -e '(.tags // []) | index("needs-human") | not' > /dev/null || fail "bounce: different keys were tagged"
+ok "two bounces on different failure keys leave the task untagged"
 
 echo "task-loop-check: all ok"
