@@ -36,7 +36,7 @@ use crate::core::types::{
     WorkflowStep, WorkflowStepStatus, WorkflowTrigger, WorkflowType, WorkflowTypeField,
     WorkflowView,
 };
-use crate::core::{agents, config, decide, library, llm, scripts, wftypes};
+use crate::core::{agents, config, decide, library, llm, runner, scripts, stage, wftypes};
 
 /// A step's `output` (and a `cli` node's captured stdout) is capped at 64 KiB,
 /// the scripts' own cap.
@@ -1034,6 +1034,14 @@ pub fn validate_config(
                     "timeout_secs",
                     "result_type",
                     "retry",
+                    "input_type",
+                    "cwd",
+                    "deadline",
+                    "ceiling",
+                    "silence",
+                    "grace",
+                    "max_restarts",
+                    "also",
                 ],
             )?;
             if pins.is_some() {
@@ -1055,8 +1063,78 @@ pub fn validate_config(
                 }
                 out.insert("model".into(), json!(m));
             }
-            if let Some(n) = optional_int(name, obj, "timeout_secs", 1..=3600)? {
+            // Stage mode (naru task 2217): any of these keys runs the node
+            // through the stage driver, which has no 1..=3600 cap.
+            let secs_key = |key: &str| optional_int(name, obj, key, 1..=STAGE_MAX_SECS);
+            let deadline = secs_key("deadline")?;
+            let ceiling = secs_key("ceiling")?;
+            let silence = secs_key("silence")?;
+            let grace = secs_key("grace")?;
+            let max_restarts = optional_int(name, obj, "max_restarts", 0..=5)?;
+            let stage_cwd = optional_str(name, obj, "cwd")?;
+            let also = match obj.get("also") {
+                None | Some(Value::Null) => None,
+                Some(Value::Object(a)) => {
+                    only_keys(name, a, &["agent", "prompt"])?;
+                    Some(json!({
+                        "agent": required_str(name, a, "agent")?.trim(),
+                        "prompt": required_str(name, a, "prompt")?,
+                    }))
+                }
+                Some(_) => {
+                    return Err("agent config: \"also\" must be an object {agent, prompt}".into());
+                }
+            };
+            let staged = deadline.is_some()
+                || ceiling.is_some()
+                || silence.is_some()
+                || grace.is_some()
+                || max_restarts.is_some()
+                || stage_cwd.is_some()
+                || also.is_some();
+            if staged {
+                let Some(deadline) = deadline else {
+                    return Err("agent config: stage mode needs \"deadline\" (seconds)".into());
+                };
+                if ceiling.is_some_and(|c| c < deadline) {
+                    return Err("agent config: \"ceiling\" must be at least \"deadline\"".into());
+                }
+                if let Some(c) = stage_cwd {
+                    if c.trim().is_empty() {
+                        return Err("agent config: \"cwd\" cannot be empty".into());
+                    }
+                    out.insert("cwd".into(), json!(c));
+                }
+                out.insert("deadline".into(), json!(deadline));
+                for (key, v) in [("ceiling", ceiling), ("silence", silence), ("grace", grace)] {
+                    if let Some(v) = v {
+                        out.insert(key.into(), json!(v));
+                    }
+                }
+                if let Some(v) = max_restarts {
+                    out.insert("max_restarts".into(), json!(v));
+                }
+                if let Some(a) = also {
+                    out.insert("also".into(), a);
+                }
+                let wait = ceiling.unwrap_or(deadline);
+                let grace = grace.unwrap_or(stage::GRACE_SECS as i64);
+                out.insert("timeout_secs".into(), json!(wait + 3 * grace + 60));
+            } else if let Some(n) = optional_int(name, obj, "timeout_secs", 1..=3600)? {
                 out.insert("timeout_secs".into(), json!(n));
+            }
+            let mut input_ty = "any".to_string();
+            if let Some(t) = optional_str(name, obj, "input_type")? {
+                let t = t.trim();
+                if !t.is_empty() {
+                    if !wftypes::well_formed(t) {
+                        return Err(format!(
+                            "agent config: \"input_type\" must be a type name, got {t:?}"
+                        ));
+                    }
+                    out.insert("input_type".into(), json!(t));
+                    input_ty = t.to_string();
+                }
             }
             let mut result_ty = "string".to_string();
             if let Some(t) = optional_str(name, obj, "result_type")? {
@@ -1081,7 +1159,7 @@ pub fn validate_config(
             out.insert(
                 "pins".into(),
                 json!({
-                    "in": [{"name": "input", "ty": "any"}],
+                    "in": [{"name": "input", "ty": input_ty}],
                     "out": [
                         {"name": "result", "ty": result_ty},
                         {"name": "status", "ty": "string"},
@@ -1955,6 +2033,9 @@ pub fn create_default_workflows(
 
 /// The default stage ceiling (`cl` in `LOOP_PRELUDE`, naru task 2184).
 const LOOP_STAGE_CEILING: i64 = 10800;
+
+/// The longest any stage-mode agent time may be, seconds (a day).
+const STAGE_MAX_SECS: i64 = 86400;
 /// Engine timeout of a stage node: the ceiling + three grace periods + a
 /// minute, so the stage driver and not SIGKILL ends a stage.
 const LOOP_STAGE_TIMEOUT: u32 = LOOP_STAGE_CEILING as u32 + 3 * 180 + 60;
@@ -4073,6 +4154,158 @@ fn reply_json(reply: &str) -> std::result::Result<Value, String> {
     serde_json::from_str(t).map_err(|e| format!("the reply is not JSON: {e}"))
 }
 
+/// The prompt with the input spliced at `{input}`, else appended.
+fn task_text(prompt: &str, input: &str) -> String {
+    if prompt.contains("{input}") {
+        prompt.replace("{input}", input)
+    } else if input.is_empty() {
+        prompt.to_string()
+    } else {
+        format!("{prompt}\n\n{input}")
+    }
+}
+
+/// `template` with `{field}` replaced by each field of the struct `ty` read
+/// from the JSON `input` (a string raw, anything else compact JSON). The
+/// input is checked against `ty` first, so a missing or mistyped field is an
+/// error naming it. `{input}` is left for [`task_text`].
+fn render_fields(
+    template: &str,
+    input: &str,
+    ty: &str,
+    types: &[WorkflowType],
+) -> std::result::Result<String, String> {
+    let v: Value = serde_json::from_str(input.trim())
+        .map_err(|e| format!("the input is not JSON for {ty}: {e}"))?;
+    wftypes::render(&v, ty, types).map_err(|e| format!("the input is not a valid {ty}: {e}"))?;
+    let mut out = template.to_string();
+    if let Some(def) = wftypes::find(types, ty) {
+        for f in &def.fields {
+            if let Some(fv) = v.get(&f.name) {
+                out = out.replace(&format!("{{{}}}", f.name), &wftypes::value_text(fv));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The text of a stage document's report(s): one agent's `report` (else its
+/// `partial`), or each of `results` labelled by agent.
+fn stage_reports(doc: &Value) -> String {
+    let one = |r: &Value| {
+        ["report", "partial"]
+            .iter()
+            .find_map(|k| r.get(*k).and_then(Value::as_str))
+            .unwrap_or_default()
+            .to_string()
+    };
+    match doc.get("results").and_then(Value::as_array) {
+        Some(rs) => rs
+            .iter()
+            .enumerate()
+            .map(|(i, r)| {
+                let who = r.get("agent").and_then(Value::as_str).unwrap_or("agent");
+                format!("=== Report {} ({who}) ===\n{}", i + 1, one(r))
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+        None => one(doc),
+    }
+}
+
+/// A stage-mode `agent` node (naru task 2217): the rendered brief(s) go to
+/// `stage` (the stage driver; a closure so tests need no real agent). The
+/// output is the stage JSON, or, with a struct `result_type`, that struct
+/// extracted from the report(s) by the tool-less typed call in [`run_agent`].
+#[allow(clippy::too_many_arguments)]
+fn run_agent_stage(
+    cfg: &Value,
+    title: &str,
+    agent: &str,
+    definition: &str,
+    model: &str,
+    input: &str,
+    default_cwd: &str,
+    scratch: std::path::PathBuf,
+    types: &[WorkflowType],
+    stage_fn: impl FnOnce(&stage::StageOpts, &[stage::AgentSpec]) -> crate::core::store::Result<Value>,
+    complete: impl FnMut(&str) -> std::result::Result<String, String>,
+) -> std::result::Result<String, String> {
+    let ty = cfg.get("input_type").and_then(Value::as_str);
+    let render = |t: &str| -> std::result::Result<String, String> {
+        let t = match ty {
+            Some(ty) => render_fields(t, input, ty, types)?,
+            None => t.to_string(),
+        };
+        Ok(task_text(&t, input))
+    };
+    let s = |key: &str| cfg.get(key).and_then(Value::as_str).unwrap_or_default();
+    let secs = |key: &str| {
+        cfg.get(key)
+            .and_then(Value::as_u64)
+            .map(Duration::from_secs)
+    };
+    let mut specs = vec![stage::AgentSpec {
+        agent: agent.to_string(),
+        brief: render(s("prompt"))?,
+    }];
+    if let Some(a) = cfg.get("also") {
+        let get = |k: &str| a.get(k).and_then(Value::as_str).unwrap_or_default();
+        specs.push(stage::AgentSpec {
+            agent: get("agent").to_string(),
+            brief: render(get("prompt"))?,
+        });
+    }
+    let cwd = match s("cwd") {
+        "" => default_cwd.to_string(),
+        c => match ty {
+            Some(ty) => render_fields(c, input, ty, types)?,
+            None => c.to_string(),
+        },
+    };
+    let task = serde_json::from_str::<Value>(input.trim())
+        .ok()
+        .and_then(|v| {
+            ["task", "task_id"]
+                .iter()
+                .find_map(|k| v.get(*k).and_then(Value::as_i64))
+        });
+    let opts = stage::StageOpts {
+        stage: title.to_string(),
+        task,
+        cwd,
+        model: model.to_string(),
+        deadline: secs("deadline").unwrap_or_default(),
+        ceiling: secs("ceiling"),
+        silence: secs("silence"),
+        grace: secs("grace").unwrap_or(Duration::from_secs_f64(stage::GRACE_SECS)),
+        max_restarts: cfg
+            .get("max_restarts")
+            .and_then(Value::as_u64)
+            .map_or(1, |n| n as u32),
+        scratch,
+        poll: Duration::from_millis(250),
+    };
+    let doc = stage_fn(&opts, &specs).map_err(|e| e.to_string())?;
+    let result_ty = cfg
+        .get("result_type")
+        .and_then(Value::as_str)
+        .filter(|t| wftypes::find(types, t).is_some());
+    match result_ty {
+        None => Ok(doc.to_string()),
+        Some(rt) => run_agent(
+            agent,
+            definition,
+            "Read the stage report(s) below and produce the result from them.",
+            &stage_reports(&doc),
+            Some(rt),
+            cfg.get("retry").and_then(Value::as_bool) != Some(false),
+            types,
+            complete,
+        ),
+    }
+}
+
 /// One `agent` node: the agent's definition and the task go to `complete`
 /// (one tool-less model call); with a `result_type` the reply must be JSON
 /// of that type, validated by `wftypes::render`, retried once on a mismatch
@@ -4090,13 +4323,7 @@ fn run_agent(
     types: &[WorkflowType],
     mut complete: impl FnMut(&str) -> std::result::Result<String, String>,
 ) -> std::result::Result<String, String> {
-    let task = if prompt.contains("{input}") {
-        prompt.replace("{input}", input)
-    } else if input.is_empty() {
-        prompt.to_string()
-    } else {
-        format!("{prompt}\n\n{input}")
-    };
+    let task = task_text(prompt, input);
     let mut text = format!(
         "You are the agent \"{agent}\". Act on its definition below, with no tools.\n\n\
          <<<AGENT DEFINITION\n{definition}\nAGENT DEFINITION>>>\n\n{task}"
@@ -4541,10 +4768,54 @@ fn run_node<A: StoreAccess>(
                 .or(def_model)
                 .unwrap_or("sonnet");
             let name = format!("workflow {} · {}", view.workflow.name, node.title);
+            let input_ty = cfg.get("input_type").and_then(Value::as_str);
+            if let Some(ty) = input_ty {
+                render_fields("", input, ty, &view.workflow.types)?;
+            }
+            if cfg.get("deadline").is_some() {
+                // The stage can run for hours: the store is not held.
+                let runs = runner::runs_dir();
+                let scratch = runs
+                    .parent()
+                    .unwrap_or(&runs)
+                    .join("workflow-stages")
+                    .join(format!("{run_id}-{}", node.id));
+                return run_agent_stage(
+                    cfg,
+                    &node.title,
+                    &item.name,
+                    def_body,
+                    cfg.get("model")
+                        .and_then(Value::as_str)
+                        .or(def_model)
+                        .unwrap_or_default(),
+                    input,
+                    cwd,
+                    scratch,
+                    &view.workflow.types,
+                    |o, a| stage::run(&runs, o, a),
+                    |text| {
+                        llm::complete(
+                            model,
+                            false,
+                            &name,
+                            text,
+                            &prompts,
+                            cwd,
+                            Duration::from_secs(timeout),
+                        )
+                    },
+                )
+                .map(|out| (out, None));
+            }
+            let prompt_text = match input_ty {
+                Some(ty) => render_fields(str_of("prompt"), input, ty, &view.workflow.types)?,
+                None => str_of("prompt").to_string(),
+            };
             run_agent(
                 &item.name,
                 def_body,
-                str_of("prompt"),
+                &prompt_text,
                 input,
                 cfg.get("result_type").and_then(Value::as_str),
                 cfg.get("retry").and_then(Value::as_bool) != Some(false),
@@ -9624,6 +9895,155 @@ mod tests {
         let (m, b) = split_agent_definition("---\nmodel: inherit\n---\nB");
         assert_eq!((m, b), (None, "B"));
         assert_eq!(split_agent_definition("plain"), (None, "plain"));
+    }
+
+    fn tf(name: &str, ty: &str) -> WorkflowTypeField {
+        WorkflowTypeField {
+            name: name.into(),
+            ty: ty.into(),
+        }
+    }
+
+    fn stage_types() -> Vec<WorkflowType> {
+        vec![
+            WorkflowType {
+                name: "Job".into(),
+                fields: vec![tf("task", "number"), tf("repo", "string")],
+            },
+            WorkflowType {
+                name: "ReviewVerdict".into(),
+                fields: vec![tf("verdict", "string"), tf("summary", "string")],
+            },
+        ]
+    }
+
+    type StageSeen = Vec<(stage::StageOpts, Vec<String>)>;
+
+    fn stage_cfg(extra: Value) -> Value {
+        let mut c = json!({"agent": "implementer", "prompt": "do {task} in {repo}", "deadline": 2});
+        c.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        validate_config(WorkflowNodeKind::Agent, &c).unwrap()
+    }
+
+    fn fake_stage(
+        seen: &std::cell::RefCell<Vec<(stage::StageOpts, Vec<String>)>>,
+        doc: Value,
+    ) -> impl FnOnce(&stage::StageOpts, &[stage::AgentSpec]) -> crate::core::store::Result<Value> + '_
+    {
+        move |o, a| {
+            seen.borrow_mut().push((
+                stage::StageOpts {
+                    stage: o.stage.clone(),
+                    cwd: o.cwd.clone(),
+                    model: o.model.clone(),
+                    scratch: o.scratch.clone(),
+                    ..*o
+                },
+                a.iter().map(|x| x.brief.clone()).collect(),
+            ));
+            Ok(doc)
+        }
+    }
+
+    fn run_stage(
+        cfg: &Value,
+        input: &str,
+        doc: Value,
+        complete: impl FnMut(&str) -> std::result::Result<String, String>,
+    ) -> (std::result::Result<String, String>, StageSeen) {
+        let seen = std::cell::RefCell::new(Vec::new());
+        let out = run_agent_stage(
+            cfg,
+            "Implement",
+            "implementer",
+            "def",
+            "sonnet",
+            input,
+            "/default",
+            std::path::PathBuf::from("/tmp/scratch"),
+            &stage_types(),
+            fake_stage(&seen, doc),
+            complete,
+        );
+        (out, seen.into_inner())
+    }
+
+    #[test]
+    fn stage_mode_silent_agent_is_inconclusive_not_error() {
+        let cfg = stage_cfg(json!({"silence": 1}));
+        let doc = json!({"verdict": "INCONCLUSIVE", "reason": "silent", "partial": "half"});
+        let (out, seen) = run_stage(&cfg, "", doc, |_| panic!("no extraction"));
+        let out: Value = serde_json::from_str(&out.unwrap()).unwrap();
+        assert_eq!(out["verdict"], "INCONCLUSIVE");
+        assert_eq!(out["partial"], "half");
+        assert_eq!(seen[0].0.deadline, Duration::from_secs(2));
+        assert_eq!(seen[0].0.silence, Some(Duration::from_secs(1)));
+        assert_eq!(seen[0].0.cwd, "/default");
+        assert_eq!(seen[0].0.max_restarts, 1);
+    }
+
+    #[test]
+    fn stage_also_yields_two_results() {
+        let cfg = stage_cfg(json!({"also": {"agent": "ux", "prompt": "look"}}));
+        let doc = json!({"verdict": "COMPLETE", "results": [
+            {"agent": "implementer", "report": "a"}, {"agent": "ux", "report": "b"}]});
+        let (out, seen) = run_stage(&cfg, "", doc, |_| panic!("no extraction"));
+        let out: Value = serde_json::from_str(&out.unwrap()).unwrap();
+        assert_eq!(out["results"].as_array().unwrap().len(), 2);
+        assert_eq!(seen[0].1.len(), 2);
+        assert_eq!(seen[0].1[1], "look");
+    }
+
+    #[test]
+    fn input_type_rejects_missing_field_and_substitutes() {
+        let cfg = stage_cfg(json!({"input_type": "Job", "cwd": "/w/{repo}"}));
+        assert_eq!(cfg["pins"]["in"][0]["ty"], "Job");
+        let (err, seen) = run_stage(&cfg, r#"{"task": 7}"#, json!({}), |_| unreachable!());
+        assert!(err.unwrap_err().contains("repo"), "names the field");
+        assert!(seen.is_empty());
+        let input = r#"{"task": 7, "repo": "naru"}"#;
+        let doc = json!({"verdict": "COMPLETE", "report": "ok"});
+        let (out, seen) = run_stage(&cfg, input, doc, |_| unreachable!());
+        out.unwrap();
+        assert_eq!(seen[0].0.cwd, "/w/naru");
+        assert!(seen[0].1[0].starts_with("do 7 in naru"), "{}", seen[0].1[0]);
+    }
+
+    #[test]
+    fn agent_timeout_7200_without_stage_keys_rejected() {
+        let base = json!({"agent": "a", "prompt": "p", "timeout_secs": 7200});
+        assert!(validate_config(WorkflowNodeKind::Agent, &base).is_err());
+        let mut staged = base.clone();
+        staged["deadline"] = json!(600);
+        let c = validate_config(WorkflowNodeKind::Agent, &staged).unwrap();
+        assert_eq!(c["timeout_secs"], 600 + 3 * 180 + 60);
+        staged["ceiling"] = json!(10800);
+        let c = validate_config(WorkflowNodeKind::Agent, &staged).unwrap();
+        assert_eq!(c["timeout_secs"], 10800 + 3 * 180 + 60);
+        staged["ceiling"] = json!(100);
+        assert!(validate_config(WorkflowNodeKind::Agent, &staged).is_err());
+        let no_deadline = json!({"agent": "a", "prompt": "p", "silence": 5});
+        assert!(validate_config(WorkflowNodeKind::Agent, &no_deadline).is_err());
+    }
+
+    #[test]
+    fn result_type_review_verdict_over_two_reports() {
+        let cfg = stage_cfg(json!({
+            "also": {"agent": "ux", "prompt": "look"},
+            "result_type": "ReviewVerdict"
+        }));
+        let doc = json!({"verdict": "COMPLETE", "results": [
+            {"agent": "reviewer", "report": "REPORT-ONE"},
+            {"agent": "verifier", "report": "REPORT-TWO"}]});
+        let mut prompt = String::new();
+        let (out, _) = run_stage(&cfg, "", doc, |t| {
+            prompt = t.to_string();
+            Ok(r#"{"verdict": "PASS", "summary": "fine"}"#.into())
+        });
+        assert_eq!(out.unwrap(), r#"{"verdict":"PASS","summary":"fine"}"#);
+        assert!(prompt.contains("REPORT-ONE") && prompt.contains("REPORT-TWO"));
     }
 
     fn review_type() -> Vec<WorkflowType> {
