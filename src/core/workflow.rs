@@ -2049,6 +2049,10 @@ const LOOP_FAST_GATE_TIMEOUT: u32 = 1800;
 pub const TASK_LOOP_WORKFLOW: &str = "Task loop";
 /// The child workflow both passes of the loop call (naru task 2024).
 pub const TASK_LOOP_CHILD: &str = "Task loop: implement and review";
+/// The pilot pair (naru task 2227): the live graphs with the review stage
+/// rebuilt on typed agent nodes. Disabled built-ins, own keys.
+pub const TASK_LOOP_PILOT: &str = "Task loop pilot";
+pub const TASK_LOOP_PILOT_CHILD: &str = "Task loop pilot: implement and review";
 
 /// Shared head of every task-loop `cli` node. The run input is the task id for
 /// the Plan node and one state line (`task=<id> scratch=<dir> ui=<yes|no> k=v…`)
@@ -2469,6 +2473,123 @@ else
   echo "review${N}-verify partial: $(jq -r '.partial // ""' "$SCRATCH/review${N}-verify.json" 2>/dev/null | head -c 2000)" >> "$SCRATCH/reasons.txt"
   emit review=INCONCLUSIVE
 fi
+"##;
+
+/// `LOOP_PRELUDE` without its two state-line parsers (naru task 2227): the
+/// pilot's `Review result` node reads the typed `ReviewInput` with `jq` and
+/// sets `TASK` / `SCRATCH` / `N` itself, so `Review input` is the one pilot
+/// node that sed-parses `task=` / `scratch=`. Every helper stays.
+fn loop_prelude_no_parser() -> String {
+    let mut out: String = LOOP_PRELUDE
+        .lines()
+        .filter(|l| !l.starts_with("TASK=$(printf") && !l.starts_with("SCRATCH=$(printf"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    out.push('\n');
+    out
+}
+
+/// The pilot's review prompts (naru task 2227). The text of each brief stays
+/// in a file under the run's scratch (the `ReviewInput` names it), so the
+/// input the engine appends to a prompt stays small.
+const LOOP_PILOT_PRIMARY_PROMPT: &str = "You are the verifier stage of an automated task loop for naru task {task}, pass {iter}. Your complete brief is the file {verifier_brief}: read it first and do exactly what it says. Work in the current project checkout and do not edit any file. End with exactly one line, `VERDICT: PASS` or `VERDICT: FAIL`. When you fail the change, add one line `BLOCKER: <short snake_case tag naming the main reason>` before it.";
+const LOOP_PILOT_REVIEWER_PROMPT: &str = "You are the reviewer stage of an automated task loop for naru task {task}, pass {iter}. Your complete brief is the file {reviewer_brief}: read it first and do exactly what it says. Work in the current project checkout and do not edit any file. End with exactly one line, `VERDICT: PASS` or `VERDICT: FAIL`. When you fail the change, add one line `BLOCKER: <short snake_case tag naming the main reason>` before it.";
+
+/// The pilot's `Review input` node (naru task 2227): what `LOOP_REVIEW` does
+/// before it starts a stage (the verify lease, the run's own build dirs and
+/// port, the fast gate, the two briefs), then prints one `ReviewInput` JSON
+/// line instead of running the stage driver. The lease is **not** dropped
+/// here: `Review result` (a later node) drops it, so its owner pid is this
+/// node's parent (the workflow process), which outlives the node. A lease
+/// that cannot be taken prints the state line `review=INCONCLUSIVE`, which
+/// the `Ready?` branch sends past the agent node.
+const LOOP_PILOT_REVIEW_INPUT: &str = r##"N=@N@
+if [ "$(cat "$SCRATCH/ui")" = yes ]; then VER=ui-verifier; else VER=verifier; fi
+PD=$(pre_dirty | head -n 100)
+if ! lease_take; then
+  emit review=INCONCLUSIVE
+  exit 0
+fi
+for d in "$HOME"/.naru/loop/lease/*; do
+  [ -f "$d/owner" ] || continue
+  [ "$(cut -f1 "$d/owner")" = "$TASK" ] || continue
+  awk -F'\t' -v OFS='\t' -v p="$PPID" '{ $2 = p; print }' "$d/owner" > "$d/owner.new" && mv "$d/owner.new" "$d/owner"
+done
+run_iso
+iso_rule() { cat <<RULE
+
+## Isolation for this run (read this)
+
+This run holds the verify lease on every repo it touches, so no other loop run is building or testing there now. Another loop run's use of a shared resource is therefore not a reason to skip a check. Use only this run's own resources:
+- SwiftPM: pass --scratch-path $SCRATCH/spm to swift build and swift test (exported as SWIFTPM_SCRATCH).
+- Xcode: DerivedData is $NARU_IOS_DERIVED_DATA (exported as NARU_IOS_DERIVED_DATA).
+- Dev serve: NARU_DEV_PORT=$NARU_DEV_PORT NARU_DEV_DIR=$NARU_DEV_DIR for scripts/dev-env.sh. Never :7770, :7777 or :7771.
+A check that could not run is VERDICT: FAIL, never a pass.
+RULE
+}
+mkbrief() {
+  role=$1
+  { brief_head "$role"
+    printf '\n## Plan\n\n'; cat "$SCRATCH/plan.md"
+    printf '\n## Diff summary (uncommitted, by design: the full change is the working tree of each repo below)\n\n'; cat "$SCRATCH/diff-$N.txt"
+    if [ -n "$PD" ]; then printf '\n## Dirty before this run (not this task%ss change)\n\nThese paths were already dirty before the run started and the run has not changed them since. Do not count them against the task.\n\n' "'"; printf '%s\n' "$PD"; fi
+    printf '\n## Fast gate (run by the loop, before this review)\n\nThe loop already ran the repo fast gate on the uncommitted tree; do not count it as unrun. `rc=0` passed. A failure with `baseline=same` fails at HEAD too (not this change); `baseline=new` is caused by this change and is a `VERDICT: FAIL`. `no gate` means the repo has none.\n\n'; fast_gate_text
+    iso_rule
+    printf '\n## What to do\n\nCheck the change against the plan and the task. Do not edit any file. End with exactly one line, `VERDICT: PASS` or `VERDICT: FAIL`, after your findings.\n'
+    if [ "$role" = verifier ] && [ "$VER" = ui-verifier ]; then printf '\n## Live UI check (required)\n\nThis change touches the UI. Run the live check in the dev environment (docs/dev-env.md: the dev serve on this run'"'"'s own port %s via scripts/dev-env.sh with NARU_DEV_PORT and NARU_DEV_DIR set as in the isolation section, khora headless; never the real install on :7770 or :7777). Cover every UI check in the plan and in the acceptance of the task. `VERDICT: PASS` is allowed only if those checks actually ran and passed. If you could not run them, end with `VERDICT: FAIL` and say why.\n' "$NARU_DEV_PORT"; fi
+    if [ "$role" = verifier ]; then printf '\n## Run the checks yourself\n\nA diff-reviewer reads the same change at the same time and you do not see its findings. Run the project checks (for example `cargo test`) yourself and try to refute the change with a test or a repro. A check that fails because of this change is a `VERDICT: FAIL`.\n'; fi
+    no_commit_rule
+  } > "$SCRATCH/$role-$N-brief.md"
+}
+rm -f "$SCRATCH"/fastgate-$N.txt "$SCRATCH"/fastgate-$N-*
+fn=0
+while IFS= read -r fr; do fn=$((fn+1)); fast_gate "$fn" "$fr"; done < <(repo_each)
+mkbrief reviewer
+mkbrief verifier
+jq -nc --argjson task "${TASK:-0}" --arg scratch "$SCRATCH" --argjson iter "$N" --arg ui "$(cat "$SCRATCH/ui" 2>/dev/null || echo no)" --arg cwd "$PWD" --arg port "$NARU_DEV_PORT" --arg vb "$SCRATCH/verifier-$N-brief.md" --arg rb "$SCRATCH/reviewer-$N-brief.md" '{task:$task, scratch:$scratch, iter:$iter, ui:$ui, cwd:$cwd, port:$port, verifier_brief:$vb, reviewer_brief:$rb}'
+"##;
+
+/// The pilot's `Review result` node (naru task 2227): input is the
+/// `ReviewInput` line from `Review input` (or, when the lease could not be
+/// taken, that node's `review=INCONCLUSIVE` state line, passed on as it is),
+/// then the typed `ReviewVerdict` or the caught error. Reads both with `jq`,
+/// drops the verify lease, writes the two report files the next pass and the
+/// close nodes read, and prints the same state line as `LOOP_REVIEW_APPLY`,
+/// so everything downstream is unchanged.
+const LOOP_PILOT_REVIEW_RESULT: &str = r##"FIRST=$(printf '%s\n' "$IN" | head -n 1)
+case "$FIRST" in
+  '{'*) ;;
+  *) printf '%s\n' "$FIRST"; exit 0 ;;
+esac
+V=$(printf '%s\n' "$IN" | tail -n +2)
+TASK=$(printf '%s' "$FIRST" | jq -r '.task')
+SCRATCH=$(printf '%s' "$FIRST" | jq -r '.scratch')
+N=$(printf '%s' "$FIRST" | jq -r '.iter')
+lease_drop
+v=$(printf '%s' "$V" | jq -r 'if type == "object" and (.verify | type) == "string" and (.review | type) == "string" then ([.verify, .review] | map(if . == "PASS" or . == "FAIL" then . else "NONE" end) | if any(. == "FAIL") then "NEEDS-FIX" elif all(. == "PASS") then "PASS" else "INCONCLUSIVE" end) else "INCONCLUSIVE" end' 2>/dev/null || echo INCONCLUSIVE)
+case "$v" in PASS|NEEDS-FIX|INCONCLUSIVE) ;; *) v=INCONCLUSIVE ;; esac
+if [ "$v" = INCONCLUSIVE ]; then echo "review$N: the typed verdict was missing, invalid or not conclusive: $(printf '%s' "$V" | head -c 300)" >> "$SCRATCH/reasons.txt"; fi
+F=$(printf '%s' "$V" | jq -r '.findings // ""' 2>/dev/null || true)
+for k in verify review; do
+  r=$(printf '%s' "$V" | jq -r --arg k "$k" '.[$k] // "NONE"' 2>/dev/null || echo NONE)
+  printf '%s\n\nVERDICT: %s\n' "$F" "$r" > "$SCRATCH/review-$N-$k.md"
+done
+# The fast gate (naru task 2172) outranks the typed verdict, as in the live loop.
+rec="$SCRATCH/fastgate-$N.txt"
+if [ ! -s "$rec" ]; then bad="the loop's fast gate left no record, so there is no gate evidence"
+else bad=$(grep -v ' no gate: ' "$rec" | grep -vE ' rc=0( |$)' | grep -v ' baseline=same ' || true); fi
+if [ -n "$bad" ]; then v=NEEDS-FIX; echo "review$N: fast gate: $(printf '%s' "$bad" | head -c 600)" >> "$SCRATCH/reasons.txt"; fi
+if [ -s "$rec" ] && grep -q ' baseline=same ' "$rec"; then
+  naru task note "$TASK" "The fast gate fails at HEAD too, so it was not counted against this change: $(grep ' baseline=same ' "$rec" | head -c 1500)" > /dev/null 2>&1 || true
+fi
+if [ "$v" = NEEDS-FIX ]; then
+  # the failure key a repeat bounce is compared on (naru task 2174)
+  if [ -n "$bad" ]; then key=fast_gate; else key=$(printf '%s' "$V" | jq -r '.blocker // "none"' 2>/dev/null | tr 'A-Z' 'a-z' | tr -c 'a-z0-9_\n' '_' | head -n 1 | cut -c 1-40); fi
+  printf '%s\n' "${key:-none}" > "$SCRATCH/bounce.txt"
+  { echo "Iteration $N verify report:"; cat "$SCRATCH/review-$N-verify.md"; echo; echo "Iteration $N review report:"; cat "$SCRATCH/review-$N-review.md"; } > "$SCRATCH/findings.md"
+  if [ -n "$bad" ]; then { echo; echo "Iteration $N fast gate (run by the loop; fix this):"; printf '%s\n' "$bad"; fast_gate_text; } >> "$SCRATCH/findings.md"; fi
+fi
+emit review=$v
 "##;
 
 /// After the Plan node said `plan=ok`: the plan text alone (its tail, so the
@@ -2936,6 +3057,8 @@ emit split=done subtasks=$made
 /// The `builtin_id`s of the managed built-in workflows (naru task 2103).
 pub const BUILTIN_TASK_LOOP: &str = "task-loop";
 pub const BUILTIN_TASK_LOOP_CHILD: &str = "task-loop-child";
+pub const BUILTIN_TASK_LOOP_PILOT: &str = "task-loop-pilot";
+pub const BUILTIN_TASK_LOOP_PILOT_CHILD: &str = "task-loop-pilot-child";
 pub const BUILTIN_KB_MINE: &str = "kb-mine";
 pub const BUILTIN_KB_CAPTURE: &str = "kb-capture";
 
@@ -3014,45 +3137,53 @@ done
 /// a `seed` revision. Answers the workflows created or updated and the names
 /// found unchanged.
 pub fn install_builtins(store: &mut Store) -> Result<(Vec<WorkflowView>, Vec<String>)> {
-    let mut renamed = Vec::new();
-    for (name, bid) in [
-        (TASK_LOOP_WORKFLOW, BUILTIN_TASK_LOOP),
-        (TASK_LOOP_CHILD, BUILTIN_TASK_LOOP_CHILD),
+    for ((parent_name, parent_bid), (child_name, child_bid)) in [
+        (
+            (TASK_LOOP_WORKFLOW, BUILTIN_TASK_LOOP),
+            (TASK_LOOP_CHILD, BUILTIN_TASK_LOOP_CHILD),
+        ),
+        (
+            (TASK_LOOP_PILOT, BUILTIN_TASK_LOOP_PILOT),
+            (TASK_LOOP_PILOT_CHILD, BUILTIN_TASK_LOOP_PILOT_CHILD),
+        ),
     ] {
-        if store.builtin_workflow_id(bid)?.is_some() {
-            continue;
-        }
-        match store.find_workflow_by_name(name) {
-            Ok(w) => {
-                let new_name = store.rename_workflow_to_custom(w.id, bid)?;
-                renamed.push((w.id, new_name));
+        let mut renamed = Vec::new();
+        for (name, bid) in [(parent_name, parent_bid), (child_name, child_bid)] {
+            if store.builtin_workflow_id(bid)?.is_some() {
+                continue;
             }
-            Err(Error::NotFound(_)) => {}
-            Err(e) => return Err(e),
+            match store.find_workflow_by_name(name) {
+                Ok(w) => {
+                    let new_name = store.rename_workflow_to_custom(w.id, bid)?;
+                    renamed.push((w.id, new_name));
+                }
+                Err(Error::NotFound(_)) => {}
+                Err(e) => return Err(e),
+            }
         }
-    }
-    if let [(parent_id, _), (_, child_name)] = renamed.as_slice() {
-        let view = store.get_workflow_view(*parent_id)?;
-        for n in view
-            .nodes
-            .iter()
-            .filter(|n| n.kind == WorkflowNodeKind::Subworkflow)
-        {
-            let calls_child = n
-                .config
-                .get("workflow")
-                .and_then(|v| v.as_str())
-                .is_some_and(|w| w.eq_ignore_ascii_case(TASK_LOOP_CHILD));
-            if calls_child {
-                let mut config = n.config.clone();
-                config["workflow"] = json!(child_name);
-                store.update_workflow_node(
-                    n.id,
-                    crate::core::WorkflowNodePatch {
-                        config: Some(config),
-                        ..Default::default()
-                    },
-                )?;
+        if let [(parent_id, _), (_, custom_child)] = renamed.as_slice() {
+            let view = store.get_workflow_view(*parent_id)?;
+            for n in view
+                .nodes
+                .iter()
+                .filter(|n| n.kind == WorkflowNodeKind::Subworkflow)
+            {
+                let calls_child = n
+                    .config
+                    .get("workflow")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|w| w.eq_ignore_ascii_case(child_name));
+                if calls_child {
+                    let mut config = n.config.clone();
+                    config["workflow"] = json!(custom_child);
+                    store.update_workflow_node(
+                        n.id,
+                        crate::core::WorkflowNodePatch {
+                            config: Some(config),
+                            ..Default::default()
+                        },
+                    )?;
+                }
             }
         }
     }
@@ -3073,7 +3204,10 @@ pub fn install_builtins(store: &mut Store) -> Result<(Vec<WorkflowView>, Vec<Str
             Err(e) => return Err(e),
         }
     }
-    let (mut created, mut skipped) = build_task_loop_builtins(store, None)?;
+    let (mut created, mut skipped) = build_task_loop_builtins(store, None, false)?;
+    let (pilot_created, pilot_skipped) = build_task_loop_builtins(store, None, true)?;
+    created.extend(pilot_created);
+    skipped.extend(pilot_skipped);
     let (kb_created, kb_skipped) = build_kb_builtins(store)?;
     created.extend(kb_created);
     skipped.extend(kb_skipped);
@@ -3139,9 +3273,30 @@ fn build_kb_builtins(store: &mut Store) -> Result<(Vec<WorkflowView>, Vec<String
 fn build_task_loop_builtins(
     store: &mut Store,
     project_id: Option<i64>,
+    pilot: bool,
 ) -> Result<(Vec<WorkflowView>, Vec<String>)> {
     use WorkflowNodeKind as K;
     let mut skipped = Vec::new();
+    // The pilot (naru task 2227) is the same two graphs under its own names
+    // and keys, created disabled, with the review stage swapped for the typed
+    // agent path: every other node keeps the live config.
+    let (parent_name, child_name, parent_bid, child_bid, enabled_on_create) = if pilot {
+        (
+            TASK_LOOP_PILOT,
+            TASK_LOOP_PILOT_CHILD,
+            BUILTIN_TASK_LOOP_PILOT,
+            BUILTIN_TASK_LOOP_PILOT_CHILD,
+            false,
+        )
+    } else {
+        (
+            TASK_LOOP_WORKFLOW,
+            TASK_LOOP_CHILD,
+            BUILTIN_TASK_LOOP,
+            BUILTIN_TASK_LOOP_CHILD,
+            true,
+        )
+    };
     // `secs` is the stage ceiling (10800, the deadline being soft, naru task
     // 2184) + three grace periods + a minute, so the stage driver and not
     // SIGKILL ends a stage.
@@ -3181,7 +3336,7 @@ fn build_task_loop_builtins(
     // reused as it is.
     {
         {
-            let nodes = vec![
+            let mut nodes = vec![
                 (
                     K::Trigger,
                     "Task state",
@@ -3237,7 +3392,7 @@ fn build_task_loop_builtins(
                     80.0,
                 ),
             ];
-            let edges = vec![
+            let mut edges = vec![
                 (0, 1, None),
                 (1, 2, None),
                 (2, 3, t),
@@ -3249,29 +3404,144 @@ fn build_task_loop_builtins(
                 (6, 7, ok),
                 (6, 7, caught),
             ];
+            let mut types = vec![WorkflowType {
+                name: "ReviewVerdict".to_string(),
+                fields: vec![field("verify"), field("review"), field("blocker")],
+            }];
+            if pilot {
+                // Review input -> Ready? -> UI? -> the stage-mode agent node
+                // (verifier or ui-verifier, with diff-reviewer beside it) ->
+                // Review result. The stage driver is the engine's, not a cli
+                // node's; `Review result` also takes Review input's line
+                // directly (listed first), so it reads the typed verdict
+                // beside the input it answers.
+                nodes.truncate(3);
+                let stage_agent = |agent: &str| {
+                    json!({"wrap": {"kind": "agent", "config": {
+                        "agent": agent,
+                        "prompt": LOOP_PILOT_PRIMARY_PROMPT,
+                        "input_type": "ReviewInput",
+                        "result_type": "ReviewVerdict",
+                        "cwd": "{cwd}",
+                        "deadline": 1500,
+                        "ceiling": LOOP_STAGE_CEILING,
+                        "silence": 300,
+                        "grace": 180,
+                        "also": {"agent": "diff-reviewer", "prompt": LOOP_PILOT_REVIEWER_PROMPT},
+                    }}})
+                };
+                nodes.extend([
+                    (
+                        K::Cli,
+                        "Review input",
+                        cli(
+                            LOOP_PILOT_REVIEW_INPUT,
+                            "iter",
+                            4 * LOOP_FAST_GATE_TIMEOUT + 3600,
+                        ),
+                        760.0,
+                        80.0,
+                    ),
+                    (K::Branch, "Ready?", contains("\"task\":"), 1000.0, 80.0),
+                    (K::Branch, "UI?", contains("\"ui\":\"yes\""), 1120.0, 80.0),
+                    (
+                        K::Trycatch,
+                        "UI verify + review",
+                        stage_agent("ui-verifier"),
+                        1240.0,
+                        20.0,
+                    ),
+                    (
+                        K::Trycatch,
+                        "Verify + review",
+                        stage_agent("verifier"),
+                        1240.0,
+                        140.0,
+                    ),
+                    (
+                        K::Cli,
+                        "Review result",
+                        json!({
+                            "command": format!(
+                                "{}{}",
+                                loop_prelude_no_parser(),
+                                LOOP_PILOT_REVIEW_RESULT
+                            ),
+                            "timeout_secs": 60,
+                        }),
+                        1360.0,
+                        80.0,
+                    ),
+                ]);
+                edges = vec![
+                    (0, 1, None),
+                    (1, 2, None),
+                    (2, 3, t),
+                    (3, 4, None),
+                    (4, 5, t),
+                    (5, 6, t),
+                    (5, 7, f),
+                    (3, 8, None),
+                    (6, 8, ok),
+                    (6, 8, caught),
+                    (7, 8, ok),
+                    (7, 8, caught),
+                ];
+                types = vec![
+                    WorkflowType {
+                        name: "ReviewInput".to_string(),
+                        fields: [
+                            ("task", "number"),
+                            ("scratch", "string"),
+                            ("iter", "number"),
+                            ("ui", "string"),
+                            ("cwd", "string"),
+                            ("port", "string"),
+                            ("verifier_brief", "string"),
+                            ("reviewer_brief", "string"),
+                        ]
+                        .iter()
+                        .map(|(n, ty)| WorkflowTypeField {
+                            name: n.to_string(),
+                            ty: ty.to_string(),
+                        })
+                        .collect(),
+                    },
+                    WorkflowType {
+                        name: "ReviewVerdict".to_string(),
+                        fields: vec![
+                            field("verify"),
+                            field("review"),
+                            field("blocker"),
+                            field("findings"),
+                        ],
+                    },
+                ];
+            }
             let seeded = seed_loop_workflow(
                 store,
                 project_id,
-                BUILTIN_TASK_LOOP_CHILD,
-                TASK_LOOP_CHILD,
-                "One implement and review pass of the task loop, called twice by \"Task loop\" with iter=1 and iter=2 on the state line. See docs/task-loop-workflow.md.",
-                vec![WorkflowType {
-                    name: "ReviewVerdict".to_string(),
-                    fields: vec![field("verify"), field("review"), field("blocker")],
-                }],
+                child_bid,
+                child_name,
+                if pilot {
+                    "Pilot (naru task 2227): one implement and review pass with the review stage on typed agent nodes (Review input, stage-mode verifier + diff-reviewer, Review result). Disabled; see docs/task-loop-workflow.md."
+                } else {
+                    "One implement and review pass of the task loop, called twice by \"Task loop\" with iter=1 and iter=2 on the state line. See docs/task-loop-workflow.md."
+                },
+                types,
                 nodes,
                 edges,
-                true,
+                enabled_on_create,
             )?;
             match seeded {
                 Some(v) => created.push(v),
-                None => skipped.push(TASK_LOOP_CHILD.to_string()),
+                None => skipped.push(child_name.to_string()),
             }
         }
     }
     // Appends ` iter=N` to the state line, so the child knows which pass it is.
     let iter = |n: u32| json!({"command": format!("echo \"$(cat) iter={n}\""), "timeout_secs": 60});
-    let sub = json!({"workflow": TASK_LOOP_CHILD});
+    let sub = json!({"workflow": child_name});
     let nodes = vec![
         (K::Trigger, "Task id", json!({"mode": "manual"}), 40.0, 80.0),
         (
@@ -3523,21 +3793,25 @@ fn build_task_loop_builtins(
     let seeded = seed_loop_workflow(
         store,
         project_id,
-        BUILTIN_TASK_LOOP,
-        TASK_LOOP_WORKFLOW,
-        "Plan, implement, review and verify one task, at most two passes; the input is a task id. See docs/task-loop-workflow.md.",
+        parent_bid,
+        parent_name,
+        if pilot {
+            "Pilot (naru task 2227) of \"Task loop\": the same graph calling the pilot child. Disabled; the input is a task id. See docs/task-loop-workflow.md."
+        } else {
+            "Plan, implement, review and verify one task, at most two passes; the input is a task id. See docs/task-loop-workflow.md."
+        },
         vec![WorkflowType {
             name: "PlanVerdict".to_string(),
             fields: vec![field("ui")],
         }],
         nodes,
         edges,
-        true,
+        enabled_on_create,
     )?;
     // The parent first, then the child it calls.
     match seeded {
         Some(v) => created.insert(0, v),
-        None => skipped.push(TASK_LOOP_WORKFLOW.to_string()),
+        None => skipped.push(parent_name.to_string()),
     }
     Ok((created, skipped))
 }
@@ -8240,11 +8514,72 @@ mod tests {
     }
 
     #[test]
+    fn pilot_review_path_is_typed_and_has_one_parser() {
+        // naru task 2227
+        let (st, _d) = store();
+        let mut s = st.lock().unwrap();
+        install_builtins(&mut s).unwrap();
+        for name in [TASK_LOOP_PILOT, TASK_LOOP_PILOT_CHILD] {
+            let w = s.find_workflow_by_name(name).unwrap();
+            assert!(w.builtin && !w.enabled, "{name} is a disabled built-in");
+        }
+        let parent = s.find_workflow_by_name(TASK_LOOP_PILOT).unwrap();
+        let pv = s.get_workflow_view(parent.id).unwrap();
+        let subs: Vec<_> = pv
+            .nodes
+            .iter()
+            .filter(|n| n.kind == WorkflowNodeKind::Subworkflow)
+            .map(|n| n.config["workflow"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(subs, vec![TASK_LOOP_PILOT_CHILD; 2]);
+        let child = s.find_workflow_by_name(TASK_LOOP_PILOT_CHILD).unwrap();
+        let cv = s.get_workflow_view(child.id).unwrap();
+        let review_path = |v: &WorkflowView| {
+            v.nodes
+                .iter()
+                .filter(|n| n.kind == WorkflowNodeKind::Cli)
+                .filter(|n| matches!(n.title.as_str(), "Review input" | "Review result"))
+                .map(|n| n.config["command"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        };
+        let cmds = review_path(&cv);
+        assert_eq!(cmds.len(), 2);
+        assert_eq!(
+            cmds.iter().filter(|c| c.contains("stage_run \"")).count(),
+            0
+        );
+        assert_eq!(
+            cmds.iter()
+                .filter(|c| c.contains("sed -n 's/.*task=") || c.contains("sed -n 's/.*scratch="))
+                .count(),
+            1
+        );
+        // The stage is a typed agent node, the live review is not touched.
+        assert!(cv.nodes.iter().any(|n| n.kind == WorkflowNodeKind::Trycatch
+            && n.config["wrap"]["config"]["input_type"] == "ReviewInput"
+            && n.config["wrap"]["config"]["also"]["agent"] == "diff-reviewer"));
+        let live = s.find_workflow_by_name(TASK_LOOP_CHILD).unwrap();
+        let lv = s.get_workflow_view(live.id).unwrap();
+        assert_eq!(lv.nodes.len(), 8);
+        assert!(
+            lv.nodes.iter().all(|n| n.title != "Review input")
+                && lv.nodes.iter().any(|n| n.title == "Review + verify"
+                    && n.config["command"]
+                        .as_str()
+                        .unwrap()
+                        .contains("stage_run \"review$N\""))
+        );
+        // A second install writes nothing.
+        let (again, _) = install_builtins(&mut s).unwrap();
+        assert!(again.is_empty());
+    }
+
+    #[test]
     fn builtins_install_once_and_are_read_only() {
         let (st, _d) = store();
         let mut s = st.lock().unwrap();
         let (done, _) = install_builtins(&mut s).unwrap();
-        assert_eq!(done.len(), 4);
+        assert_eq!(done.len(), 6);
         for v in &done {
             assert!(v.workflow.builtin);
             assert_eq!(v.workflow.project_id, None);
@@ -8252,7 +8587,7 @@ mod tests {
         // Idempotent: nothing changed, nothing renamed.
         let (again, _) = install_builtins(&mut s).unwrap();
         assert!(again.is_empty());
-        assert_eq!(s.list_workflows(None).unwrap().len(), 4);
+        assert_eq!(s.list_workflows(None).unwrap().len(), 6);
         let parent = s.find_workflow_by_name(TASK_LOOP_WORKFLOW).unwrap();
         let node = s.get_workflow_view(parent.id).unwrap().nodes[0].clone();
         let refused = |e: Error| matches!(e, Error::Validation(m) if m.contains("duplicate it"));
@@ -8340,7 +8675,7 @@ mod tests {
         );
         let b = s.find_workflow_by_name(TASK_LOOP_WORKFLOW).unwrap();
         assert!(b.builtin && b.id != parent.id);
-        assert_eq!(s.list_workflows(None).unwrap().len(), 6);
+        assert_eq!(s.list_workflows(None).unwrap().len(), 8);
     }
 
     /// Deletes workflow `id` behind `Store`'s back (a built-in refuses a
@@ -8438,7 +8773,7 @@ mod tests {
         let (st, _d) = store();
         let mut s = st.lock().unwrap();
         let (done, _) = install_builtins(&mut s).unwrap();
-        assert_eq!(done.len(), 4);
+        assert_eq!(done.len(), 6);
         for v in &done {
             for n in &v.nodes {
                 let mut found = Vec::new();

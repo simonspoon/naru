@@ -71,10 +71,17 @@ cat > "$STUB/claude" <<'STUBEOF'
 # stage a raw reply instead, and every prompt is logged in typed-msgs.<kind>.
 if [ "$1" = "-p" ] && [[ " $* " != *" --input-format "* ]]; then
   prompt="${@: -1}"
-  case "$prompt" in *"VERIFY REPORT"*) kind=review ;; *) kind=plan ;; esac
+  case "$prompt" in *"=== Report 1 ("*) kind=pilot ;; *"VERIFY REPORT"*) kind=review ;; *) kind=plan ;; esac
   printf '%s\n' "$prompt" | jq -Rs . >> "$STUB/typed-msgs.$kind"
   last() { grep . | tail -n 1; }
   if [ -f "$STUB/typed.$kind" ]; then reply=$(cat "$STUB/typed.$kind")
+  elif [ "$kind" = pilot ]; then
+    # the pilot's stage-mode agent node (naru task 2227): "=== Report 1 (verifier) ===" then the diff-reviewer's
+    pv() { case "$(grep . | tail -n 1)" in "VERDICT: PASS") echo PASS ;; "VERDICT: FAIL") echo FAIL ;; *) echo NONE ;; esac; }
+    r1=$(sed -n '/^=== Report 1 (/,/^=== Report 2 (/p' <<<"$prompt" | grep -v '^=== Report')
+    r2=$(sed -n '/^=== Report 2 (/,/^Reply with only one JSON value/p' <<<"$prompt" | grep -v '^=== Report\|^Reply with only')
+    c=none; [ -f "$STUB/blocker" ] && c=$(cat "$STUB/blocker")
+    reply=$(jq -nc --arg a "$(pv <<<"$r1")" --arg b "$(pv <<<"$r2")" --arg c "$c" --arg f "$(printf '%s %s' "$r1" "$r2" | tr '\n' ' ')" '{verify:$a,review:$b,blocker:$c,findings:$f}')
   elif [ "$kind" = plan ]; then
     case "$(sed -n '/^<<<PLAN$/,/^PLAN>>>$/p' <<<"$prompt" | grep -v '^<<<PLAN$\|^PLAN>>>$' | last)" in
       "UI: yes") reply='{"ui":true}' ;; *) reply='{"ui":false}' ;; esac
@@ -145,11 +152,11 @@ git -C "$TMP/work" commit -q -m seed
 "$NARU" project create loopproj --no-git --path "$TMP/work" >/dev/null
 OUT=$("$NARU" workflow defaults --task-loop --project loopproj)
 # Every built-in is installed (naru task 2118): the two loop workflows on, the two KB ones off.
-jq -e '(.created|length)==4 and .created[0].workflow.name=="Task loop" and .skipped==[] and (.created[0].nodes|length)==29 and .created[1].workflow.name=="Task loop: implement and review" and (.created[1].nodes|length)==8 and ([.created[] | select(.workflow.name | startswith("KB: ")) | .workflow.enabled] == [false,false])' <<<"$OUT" >/dev/null || fail "defaults: $OUT"
+jq -e '(.created|length)==6 and .created[0].workflow.name=="Task loop" and .skipped==[] and (.created[0].nodes|length)==29 and .created[1].workflow.name=="Task loop: implement and review" and (.created[1].nodes|length)==8 and ([.created[] | select(.workflow.name | startswith("KB: ")) | .workflow.enabled] == [false,false])' <<<"$OUT" >/dev/null || fail "defaults: $OUT"
 ok "defaults --task-loop creates the Task loop workflow"
 OUT=$("$NARU" workflow defaults --task-loop --project loopproj)
-jq -e '.created==[] and (.skipped|sort)==["KB: mine past sessions","KB: ongoing capture","Task loop","Task loop: implement and review"]' <<<"$OUT" >/dev/null || fail "rerun: $OUT"
-[ "$("$NARU" workflow list | jq length)" = 4 ] || fail "rerun or --task-loop left extra workflows"
+jq -e '.created==[] and (.skipped|sort)==["KB: mine past sessions","KB: ongoing capture","Task loop","Task loop pilot","Task loop pilot: implement and review","Task loop: implement and review"]' <<<"$OUT" >/dev/null || fail "rerun: $OUT"
+[ "$("$NARU" workflow list | jq length)" = 6 ] || fail "rerun or --task-loop left extra workflows"
 WF=$("$NARU" workflow show "Task loop")
 ok "a rerun is a no-op; no ambient workflows were created"
 
@@ -1027,5 +1034,76 @@ ok "a second bounce on the same failure key tags the task needs-human with a not
 bounce_twice "Different failures" no_utterance tests_red
 "$NARU" task show "$T" | jq -e '(.tags // []) | index("needs-human") | not' > /dev/null || fail "bounce: different keys were tagged"
 ok "two bounces on different failure keys leave the task untagged"
+
+# ---- 13. the pilot (naru task 2227): the review stage on typed agent nodes ----
+PW=$("$NARU" workflow show "Task loop pilot: implement and review")
+PP=$("$NARU" workflow show "Task loop pilot")
+SQ="sed -n 's/.*task="
+[ "$(jq --arg p "$SQ" '[.nodes[] | select(.kind == "cli" and (.title == "Review input" or .title == "Review result") and (.config.command | contains("stage_run \"")))] | length' <<<"$PW")" = 0 ] || fail "pilot: a review-path cli node runs the stage driver"
+[ "$(jq --arg p "$SQ" '[.nodes[] | select(.kind == "cli" and (.title == "Review input" or .title == "Review result") and (.config.command | contains($p)))] | length' <<<"$PW")" = 1 ] || fail "pilot: the sed parsers on the review path are not exactly one"
+jq -e --arg p "$SQ" '[.nodes[] | select(.title == "Review input" and (.config.command | contains($p)))] | length == 1' <<<"$PW" >/dev/null || fail "pilot: the one parser is not Review input"
+jq -e '[.nodes[] | select(.kind == "subworkflow") | .config.workflow] == ["Task loop pilot: implement and review", "Task loop pilot: implement and review"]' <<<"$PP" >/dev/null || fail "pilot: the parent does not call the pilot child"
+jq -e '.workflow.enabled == false and .workflow.builtin == true' <<<"$PP" >/dev/null || fail "pilot: parent is not a disabled built-in"
+jq -e '[.nodes[] | select(.kind == "trycatch") | .config.wrap.config | select(.input_type == "ReviewInput" and .result_type == "ReviewVerdict" and .deadline == 1500 and .ceiling == 10800 and .silence == 300 and .grace == 180 and .also.agent == "diff-reviewer")] | length == 2' <<<"$PW" >/dev/null || fail "pilot: the stage-mode agent nodes"
+ok "pilot graph: pilot_review_stage_driver_cli_nodes = 0, pilot sed parsers = 1 (Review input), parent calls the pilot child, disabled built-in"
+
+run_pilot() { "$NARU" workflow run "Task loop pilot" --input "$1"; }
+pstep() { jq -r --arg t "$2" '[.steps[] | select(.title == $t)][0].status // "absent"' <<<"$1"; }
+no_lease() { [ -z "$(ls -A "$HOME/.naru/loop/lease" 2>/dev/null)" ] || fail "$1: a verify lease was left: $(ls "$HOME/.naru/loop/lease")"; }
+
+# P1. non-UI pass
+reset_stub
+printf 'Plan: edit foo.\nUI: no' > "$STUB/reply.planner"
+printf 'looks fine\nVERDICT: PASS' > "$STUB/reply.verifier"
+printf 'clean\nVERDICT: PASS' > "$STUB/reply.diff-reviewer"
+printf 'pilot-one.txt\n' > "$STUB/touch.implementer"
+T=$(mk "Pilot pass")
+R=$(run_pilot "$T")
+[ "$(jq -r .status <<<"$R")" = succeeded ] || fail "pilot pass: run $(jq -c '{status,error}' <<<"$R")"
+[ "$(tstatus "$T")" = done ] || fail "pilot pass: task is $(tstatus "$T")"
+[ "$(pstep "$R" "Close: pass")" = ok ] && [ "$(pstep "$R" "Implement + review #2")" = skipped ] || fail "pilot pass: steps"
+[ "$(turns verifier)" = 1 ] && [ "$(turns diff-reviewer)" = 1 ] && [ "$(turns implementer)" = 1 ] || fail "pilot pass: turn counts"
+[ -e "$STUB/typed-msgs.pilot" ] && [ ! -e "$STUB/typed-msgs.review" ] || fail "pilot pass: the verdict did not come from the typed stage path"
+grep -q "Your complete brief is the file" "$STUB/msgs.verifier" || fail "pilot pass: the verifier prompt"
+for b in verifier reviewer; do
+  grep -q "Never use .HEAD~1" "$HOME"/.naru/loop/"$T"-*/$b-1-brief.md && grep -q "Isolation for this run" "$HOME"/.naru/loop/"$T"-*/$b-1-brief.md || fail "pilot pass: the $b brief file"
+done
+! grep -q "Live UI check" "$HOME"/.naru/loop/"$T"-*/verifier-1-brief.md || fail "pilot pass: a non-UI brief carries the live-check rule"
+no_lease "pilot pass"
+metric "$T" PASS 1 done "pilot pass"
+ok "pilot: a non-UI pass runs the typed stage path, briefs in files, no lease left, task done"
+
+# P2. NEEDS-FIX then pass
+reset_stub
+printf 'UI: no' > "$STUB/reply.planner"
+printf 'VERDICT: PASS' > "$STUB/reply.verifier"
+printf 'bug in bar()\nVERDICT: FAIL' > "$STUB/reply.diff-reviewer.1"
+printf 'VERDICT: PASS' > "$STUB/reply.diff-reviewer.2"
+printf 'bar_broken' > "$STUB/blocker"
+T=$(mk "Pilot fix bar")
+R=$(run_pilot "$T")
+[ "$(jq -r .status <<<"$R")" = succeeded ] && [ "$(tstatus "$T")" = done ] || fail "pilot fix: $(jq -c '{status,error}' <<<"$R") task $(tstatus "$T")"
+[ "$(turns implementer)" = 2 ] || fail "pilot fix: implementer turns $(turns implementer)"
+sed -n 2p "$STUB/msgs.implementer" | grep -q "bug in bar()" || fail "pilot fix: findings missing from the second implementer brief"
+grep -qx bar_broken "$HOME"/.naru/loop/"$T"-*/bounce.txt || fail "pilot fix: bounce key: $(cat "$HOME"/.naru/loop/"$T"-*/bounce.txt)"
+no_lease "pilot fix"
+metric "$T" PASS 2 done "pilot fix"
+ok "pilot: NEEDS-FIX reaches Implement #2 with the findings and the blocker, then a pass"
+
+# P3. a verifier with no verdict line is inconclusive -> backlog
+reset_stub
+printf 'UI: no' > "$STUB/reply.planner"
+printf 'I could not run the checks' > "$STUB/reply.verifier"
+printf 'VERDICT: PASS' > "$STUB/reply.diff-reviewer"
+T=$(mk "Pilot inconclusive")
+R=$(run_pilot "$T")
+[ "$(jq -r .status <<<"$R")" = succeeded ] || fail "pilot inconclusive: run $(jq -c '{status,error}' <<<"$R")"
+[ "$(tstatus "$T")" = backlog ] || fail "pilot inconclusive: task is $(tstatus "$T")"
+[ "$(turns implementer)" = 1 ] || fail "pilot inconclusive: looped ($(turns implementer))"
+"$NARU" task show "$T" | jq -e '.notes | length == 1' >/dev/null || fail "pilot inconclusive: notes: $("$NARU" task show "$T" | jq -c .notes)"
+[ "$(grep -c -- '--call--' "$STUB/vox.log")" = 1 ] || fail "pilot inconclusive: notify calls"
+no_lease "pilot inconclusive"
+metric "$T" INCONCLUSIVE 1 backlog "pilot inconclusive"
+ok "pilot: an inconclusive verifier ends in backlog with a note and one notify"
 
 echo "task-loop-check: all ok"

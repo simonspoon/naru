@@ -14717,7 +14717,7 @@ mod tests {
         .await
         .unwrap();
         let created = out["created"].as_array().unwrap();
-        assert_eq!(created.len(), 4);
+        assert_eq!(created.len(), 6);
         let enabled = |name: &str| {
             created
                 .iter()
@@ -14739,7 +14739,7 @@ mod tests {
         .await
         .unwrap();
         assert!(again["created"].as_array().unwrap().is_empty());
-        assert_eq!(again["skipped"].as_array().unwrap().len(), 4);
+        assert_eq!(again["skipped"].as_array().unwrap().len(), 6);
     }
 
     #[tokio::test]
