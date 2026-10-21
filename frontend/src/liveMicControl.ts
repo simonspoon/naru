@@ -119,3 +119,30 @@ export function micSwitch(o: {
 export function utteranceClient(client: string, hostOwnsMic: boolean): string | undefined {
   return hostOwnsMic ? undefined : client
 }
+
+/** The last mode the page was told, per session (naru task 2204). */
+export type MicFor = { id: number; muted: boolean }
+
+/** Where `MicFor` survives a reload: `sessionStorage`, one tab's own. */
+export const MIC_FOR_KEY = 'naru-live-mic'
+
+/** The mode a `start` asks for: `muted` only when the last word for this
+ *  same session was a mute — a new session (another id) begins live. */
+export function seedMode(prior: MicFor | null, id: number): 'live' | 'muted' {
+  return prior !== null && prior.id === id && prior.muted ? 'muted' : 'live'
+}
+
+/** A stored `MicFor` read back; anything malformed is `null`. */
+export function readMicFor(raw: string | null): MicFor | null {
+  if (raw === null) return null
+  let v: unknown
+  try {
+    v = JSON.parse(raw)
+  } catch {
+    return null
+  }
+  if (typeof v !== 'object' || v === null) return null
+  const { id, muted } = v as { id?: unknown; muted?: unknown }
+  if (typeof id !== 'number' || !Number.isFinite(id) || typeof muted !== 'boolean') return null
+  return { id, muted }
+}

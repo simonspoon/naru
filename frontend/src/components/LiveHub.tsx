@@ -233,10 +233,14 @@ import {
   controlUrl,
   conversationKey,
   intentFor,
+  MIC_FOR_KEY,
+  type MicFor,
   micSwitch,
   mutedFromMode,
   parseControlEvent,
+  readMicFor,
   reconnectDelay,
+  seedMode,
   takesThinPath,
   utteranceClient,
 } from '../liveMicControl'
@@ -2481,12 +2485,22 @@ export function LiveHub({
   // not outlive the owner's word) and reconnects with backoff. The first
   // connect for a session asks for `live` — joining opens the microphone — and
   // a reconnect asks for the last mode it was told, so a daemon restart cannot
-  // undo a mute; a conversation another socket holds keeps its own mode.
+  // undo a mute; a conversation another socket holds keeps its own mode. That
+  // last mode is kept in this tab's sessionStorage (naru task 2204), so a
+  // reload of the same session asks for it too — a new session starts live.
   const applyMuteRef = useRef(applyMute)
   useEffect(() => {
     applyMuteRef.current = applyMute
   }, [applyMute])
-  const lastMicFor = useRef<{ id: number; muted: boolean } | null>(null)
+  const [storedMicFor] = useState<MicFor | null>(() => {
+    try {
+      return readMicFor(window.sessionStorage.getItem(MIC_FOR_KEY))
+    } catch {
+      // Storage unavailable: nothing remembered, so the session starts live.
+      return null
+    }
+  })
+  const lastMicFor = useRef<MicFor | null>(storedMicFor)
   const controlSession = session?.id ?? null
   useEffect(() => {
     if (!thin || !live || !unlocked || controlSession === null) return
@@ -2500,9 +2514,7 @@ export function LiveHub({
       controlRef.current = ctl
       let lastSeq = 0
       ws.onopen = () => {
-        const prior = lastMicFor.current
-        const mode = prior !== null && prior.id === id && prior.muted ? 'muted' : 'live'
-        ws.send(controlStart(conversationKey(id), mode))
+        ws.send(controlStart(conversationKey(id), seedMode(lastMicFor.current, id)))
       }
       ws.onmessage = (m) => {
         const ev = parseControlEvent(m.data)
@@ -2516,6 +2528,11 @@ export function LiveHub({
         attempt = 0
         const next = mutedFromMode(ev.mode)
         lastMicFor.current = { id, muted: next }
+        try {
+          window.sessionStorage.setItem(MIC_FOR_KEY, JSON.stringify(lastMicFor.current))
+        } catch {
+          // Best-effort: a reload without it starts live, as before.
+        }
         // The pending discard is read only on a mute edge: the shared seq
         // also rises on another socket's `agent_speaking`, which must not
         // spend it and turn the discard into a send.

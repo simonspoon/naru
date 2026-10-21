@@ -8,7 +8,9 @@ import {
   micSwitch,
   mutedFromMode,
   parseControlEvent,
+  readMicFor,
   reconnectDelay,
+  seedMode,
   takesThinPath,
   utteranceClient,
 } from './liveMicControl'
@@ -164,5 +166,22 @@ describe('utteranceClient (naru task 2203)', () => {
   it('keeps the claim guard under an older, non-thin host', () => {
     // A host present but not thin is `hostOwnsMic: false`.
     expect(utteranceClient('page-1', false)).toBe('page-1')
+  })
+
+  it('seeds a reloaded start with the mute of the same session only', () => {
+    expect(seedMode({ id: 7, muted: true }, 7)).toBe('muted')
+    expect(seedMode({ id: 7, muted: false }, 7)).toBe('live')
+    expect(seedMode({ id: 7, muted: true }, 8)).toBe('live')
+    expect(seedMode(null, 7)).toBe('live')
+  })
+
+  it('reads a stored mic mode back, refusing anything malformed', () => {
+    expect(readMicFor(JSON.stringify({ id: 7, muted: true }))).toEqual({ id: 7, muted: true })
+    expect(readMicFor(null)).toBeNull()
+    expect(readMicFor('null')).toBeNull()
+    expect(readMicFor('{not json')).toBeNull()
+    expect(readMicFor('{"id":"7","muted":true}')).toBeNull()
+    expect(readMicFor('{"id":7,"muted":"yes"}')).toBeNull()
+    expect(readMicFor('[7,true]')).toBeNull()
   })
 })
