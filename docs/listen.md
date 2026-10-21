@@ -283,8 +283,11 @@ in `src/api.rs`, the same `proxy_listen` pump and `audio::open_stream` with
 `audio::LIVE_PATH`). Everything above holds unchanged — the transcribe gates
 before the upgrade, no `Origin` upstream, text/binary/close frames verbatim,
 a failed open as an `error` event then `1011` — with one difference: no
-`hotwords` are ever added, so every frame reaches the daemon byte-identical.
-A resume rides inside the client's own `start`, so the URL carries no query.
+`hotwords` are ever added, and every frame reaches the daemon byte-identical
+except a `speak` frame (naru task 2221): one naming no `voice` or `model` gets
+Settings' `speech.voice` / `speech.model` (`with_speech`, config read per frame,
+unset or unreadable = left out, a client's own value kept), so the Mac app
+speaks in the person's voice rather than the daemon's default. A resume rides inside the client's own `start`, so the URL carries no query.
 
 ## Gate
 

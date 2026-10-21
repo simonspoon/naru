@@ -7373,7 +7373,9 @@ async fn live_listen(
 /// `GET /v1/audio/live` — the live conversation socket (naru task 2176,
 /// `docs/listen.md`): the native Mac client dials the serve URL, so this
 /// passes the WebSocket through to the daemon's own `/v1/audio/live`, text,
-/// binary and close frames untouched — no vocabulary is added here.
+/// binary and close frames untouched — no vocabulary is added here — except
+/// that a `speak` frame naming no voice or model gets the Settings ones
+/// ([`with_speech`], naru task 2221).
 ///
 /// Gated before the upgrade exactly as [`live_listen`]; a daemon that cannot
 /// be opened reaches the client as an `error` event, then close 1011.
@@ -7406,6 +7408,32 @@ fn with_hotwords(frame: &str, hotwords: Option<&str>) -> String {
         Ok(serde_json::Value::Object(mut start)) if start.get("type") == Some(&json!("start")) => {
             start.insert("hotwords".to_string(), json!(hotwords));
             serde_json::Value::Object(start).to_string()
+        }
+        _ => frame.to_string(),
+    }
+}
+
+/// A live `speak` frame with the Settings voice and model filled in where
+/// the client named none (naru task 2221) — a client that sends its own, or
+/// a value that is not configured, is left alone; any other frame passes
+/// through byte-identical.
+fn with_speech(frame: &str, voice: Option<&str>, model: Option<&str>) -> String {
+    match serde_json::from_str::<serde_json::Value>(frame) {
+        Ok(serde_json::Value::Object(mut speak)) if speak.get("type") == Some(&json!("speak")) => {
+            let mut changed = false;
+            for (key, value) in [("voice", voice), ("model", model)] {
+                if let Some(value) = value
+                    && speak.get(key).is_none_or(|v| v.is_null())
+                {
+                    speak.insert(key.to_string(), json!(value));
+                    changed = true;
+                }
+            }
+            if changed {
+                serde_json::Value::Object(speak).to_string()
+            } else {
+                frame.to_string()
+            }
         }
         _ => frame.to_string(),
     }
@@ -7453,6 +7481,19 @@ async fn proxy_listen(
         tokio::select! {
             from_browser = browser.recv() => {
                 let out = match from_browser {
+                    Some(Ok(Message::Text(t))) if path == audio::LIVE_PATH && t.as_str().contains("\"speak\"") => {
+                        // The Settings voice and model, read per frame so a
+                        // change applies to the next turn; fail open.
+                        let (voice, model) = tokio::task::spawn_blocking(|| {
+                            (
+                                config::speech_voice().ok().flatten(),
+                                config::speech_model().ok().flatten(),
+                            )
+                        })
+                        .await
+                        .unwrap_or_default();
+                        tungstenite::Message::Text(with_speech(t.as_str(), voice.as_deref(), model.as_deref()).into())
+                    }
                     Some(Ok(Message::Text(t))) => tungstenite::Message::Text(with_hotwords(t.as_str(), hotwords.as_deref()).into()),
                     Some(Ok(Message::Binary(b))) => tungstenite::Message::Binary(b),
                     Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
@@ -21804,6 +21845,8 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         origins: Arc<Mutex<Vec<Option<String>>>>,
         /// Every `start` message the daemon received, as the JSON it got.
         starts: Arc<Mutex<Vec<serde_json::Value>>>,
+        /// Every `speak` message the daemon received, as the JSON it got.
+        speaks: Arc<Mutex<Vec<serde_json::Value>>>,
         /// One entry per handshake: the path it was made on.
         paths: Arc<Mutex<Vec<String>>>,
     }
@@ -21818,6 +21861,8 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         let seen = origins.clone();
         let starts: Arc<Mutex<Vec<serde_json::Value>>> = Arc::default();
         let started = starts.clone();
+        let speaks: Arc<Mutex<Vec<serde_json::Value>>> = Arc::default();
+        let spoken = speaks.clone();
         let paths: Arc<Mutex<Vec<String>>> = Arc::default();
         let hit = paths.clone();
         let handler = move |uri: axum::http::Uri, headers: HeaderMap, ws: WebSocketUpgrade| {
@@ -21827,6 +21872,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             seen.lock().unwrap().push(origin);
             hit.lock().unwrap().push(uri.path().to_string());
             let started = started.clone();
+            let spoken = spoken.clone();
             async move {
                 ws.on_upgrade(move |mut socket| async move {
                         use axum::extract::ws::CloseFrame;
@@ -21855,6 +21901,9 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                                                 let _ = socket.send(close(1013, "backlog")).await;
                                                 return;
                                             }
+                                        }
+                                        Some("speak") => {
+                                            spoken.lock().unwrap().push(event.clone());
                                         }
                                         Some("stop") => {
                                             let fin = json!({"type": "final", "segment": 0, "text": format!("{bytes} bytes")});
@@ -21885,6 +21934,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             url,
             origins,
             starts,
+            speaks,
             paths,
         }
     }
@@ -22257,6 +22307,99 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         assert_eq!(*stub.paths.lock().unwrap(), vec!["/v1/audio/live"]);
         assert_eq!(*stub.origins.lock().unwrap(), vec![None]);
         assert_eq!(*stub.starts.lock().unwrap(), vec![start], "no hotwords");
+    }
+
+    /// A `speak` frame that names no voice or model gets the Settings ones
+    /// (naru task 2221), read again for every frame; a client's own choice
+    /// and every other frame are left alone.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn audio_live_fills_the_settings_voice_into_speak_frames() {
+        use futures_util::SinkExt;
+        use tokio_tungstenite::tungstenite::Message as Tm;
+        let _env = attachments::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let stub = stream_stub(false).await;
+        let cfg = tempfile::tempdir().unwrap();
+        let write = |voice: &str| {
+            let config = json!({
+                "audio": {"url": stub.url},
+                "speech": {"voice": voice, "model": "qwen3-tts-0.6b-base-mlx"},
+            });
+            std::fs::write(cfg.path().join("config.json"), config.to_string()).unwrap();
+        };
+        write("Her3");
+        let _config = listen_config(cfg.path(), None);
+        let (_dir, opened) = open_ws("/v1/audio/live", None, false, None).await;
+        let mut ws = opened.expect("the upgrade");
+        let wait_for = |n: usize| {
+            let speaks = stub.speaks.clone();
+            async move {
+                for _ in 0..100 {
+                    if speaks.lock().unwrap().len() >= n {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                panic!("the daemon never got speak frame {n}");
+            }
+        };
+
+        let speak = json!({"type": "speak", "id": "1", "text": "hi"});
+        ws.send(Tm::Text(speak.to_string().into())).await.unwrap();
+        wait_for(1).await;
+        write("Other");
+        ws.send(Tm::Text(
+            json!({"type": "speak", "id": "2"}).to_string().into(),
+        ))
+        .await
+        .unwrap();
+        wait_for(2).await;
+        let own = json!({"type": "speak", "id": "3", "voice": "Mine"});
+        ws.send(Tm::Text(own.to_string().into())).await.unwrap();
+        wait_for(3).await;
+        ws.send(Tm::Text(json!({"type": "stop"}).to_string().into()))
+            .await
+            .unwrap();
+        let _ = listen_until_close(&mut ws).await;
+
+        let speaks = stub.speaks.lock().unwrap().clone();
+        assert_eq!(speaks[0]["voice"], "Her3", "{speaks:?}");
+        assert_eq!(speaks[0]["model"], "qwen3-tts-0.6b-base-mlx");
+        assert_eq!(speaks[0]["text"], "hi");
+        assert_eq!(speaks[1]["voice"], "Other", "config re-read per frame");
+        assert_eq!(speaks[2]["voice"], "Mine", "a client's own voice stays");
+        assert_eq!(speaks[2]["model"], "qwen3-tts-0.6b-base-mlx");
+    }
+
+    #[test]
+    fn with_speech_touches_only_speak_frames_missing_a_field() {
+        let (v, m) = (Some("Her3"), Some("m"));
+        let out: serde_json::Value =
+            serde_json::from_str(&with_speech(r#"{"type":"speak","text":"x"}"#, v, m)).unwrap();
+        assert_eq!(out["voice"], "Her3");
+        assert_eq!(out["model"], "m");
+        let own: serde_json::Value = serde_json::from_str(&with_speech(
+            r#"{"type":"speak","voice":"Mine","model":null}"#,
+            v,
+            m,
+        ))
+        .unwrap();
+        assert_eq!(
+            (own["voice"].as_str(), own["model"].as_str()),
+            (Some("Mine"), Some("m"))
+        );
+        for same in [
+            r#"{"type":"flush"}"#,
+            r#"{"type":"start"}"#,
+            "garbage",
+            "[1]",
+        ] {
+            assert_eq!(with_speech(same, v, m), same);
+        }
+        let bare = r#"{ "type":"speak" }"#;
+        assert_eq!(with_speech(bare, None, None), bare);
     }
 
     /// A foreign page is refused before the upgrade; the daemon never hears.
