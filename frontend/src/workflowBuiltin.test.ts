@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest'
+import type { WorkflowSnapshot } from './types/WorkflowSnapshot'
 import {
   BUILTIN_TITLE,
+  builtinRepoints,
+  builtinUpdateBadge,
+  builtinUpdateDiff,
+  builtinUpdateHead,
+  builtinUpdateNote,
   duplicateLabel,
   installHeadline,
   installLine,
@@ -32,5 +38,44 @@ describe('workflowBuiltin', () => {
     )
     expect(installLine(v('KB: ongoing capture', false))).toBe('KB: ongoing capture — off')
     expect(installLine(v('Task loop', true))).toBe('Task loop — on')
+  })
+})
+
+const snap = (nodes: WorkflowSnapshot['nodes']): WorkflowSnapshot => ({
+  name: 'w',
+  description: null,
+  enabled: true,
+  types: [],
+  nodes,
+  edges: [],
+})
+const node = (id: number, kind: string, title: string, config: unknown = {}) =>
+  ({ id, kind, title, config, x: 0, y: 0 }) as WorkflowSnapshot['nodes'][number]
+
+describe('builtin update (naru task 2052)', () => {
+  it('badges only a flagged copy', () => {
+    expect(builtinUpdateBadge({ builtin_updated: false, name: 'A' })).toBeNull()
+    const b = builtinUpdateBadge({ builtin_updated: true, name: 'A' })
+    expect(b?.text).toBe('update available')
+    expect(b?.label).toBe('Update available for A, review')
+  })
+  it('diffs the copy (-) against the built-in (+)', () => {
+    const d = builtinUpdateDiff(snap([node(1, 'cli', 'Old')]), snap([node(2, 'cli', 'New')]))
+    expect(d.some((l) => l.kind === 'mesa-only' && l.text.includes('Old'))).toBe(true)
+    expect(d.some((l) => l.kind === 'disk-only' && l.text.includes('New'))).toBe(true)
+  })
+  it('says when the base is unknown', () => {
+    expect(builtinUpdateHead({ base_rev: null, builtin_rev: 3 })).toMatch(/Base unknown/)
+    expect(builtinUpdateHead({ base_rev: 1, builtin_rev: 3 })).toMatch(/revision 1.*now at 3/)
+  })
+  it('lists a subworkflow node the built-in would re-point', () => {
+    const mine = snap([node(1, 'subworkflow', 'Child', { workflow: 'Loop (custom)' })])
+    const theirs = snap([node(9, 'subworkflow', 'Child', { workflow: 'Loop' })])
+    expect(builtinRepoints(mine, theirs)).toEqual([{ title: 'Child', from: 'Loop (custom)', to: 'Loop' }])
+    expect(builtinRepoints(theirs, theirs)).toEqual([])
+  })
+  it('words the note after an answer', () => {
+    expect(builtinUpdateNote('keep', 4)).toBe('Kept your version.')
+    expect(builtinUpdateNote('take', 4)).toMatch(/revision 4.*History/)
   })
 })

@@ -69,4 +69,11 @@ types: Array<WorkflowType>,
  * installed and updated on `serve` start, read-only except enable/disable.
  * Derived on every read from `workflow_builtins`.
  */
-builtin: boolean, };
+builtin: boolean, 
+/**
+ * A customised copy of a built-in whose built-in has a newer revision
+ * than the one the copy was based on (naru task 2052). Derived on every
+ * read from `workflow_builtin_copies`, never stored; cleared by keeping
+ * or taking the new built-in.
+ */
+builtin_updated: boolean, };

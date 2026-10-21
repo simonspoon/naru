@@ -13,7 +13,7 @@ import { PlayIcon } from '../components/WorkflowIcon'
 import { useLiveContext } from '../liveContext'
 import { formatTimestamp, timeAgo } from '../time'
 import { useFetch } from '../useFetch'
-import { BUILTIN_TITLE, duplicateLabel, isBuiltin } from '../workflowBuiltin'
+import { BUILTIN_TITLE, builtinUpdateBadge, duplicateLabel, isBuiltin } from '../workflowBuiltin'
 import { runSummary, triggerLabel } from '../workflowRun'
 import { toggleLabel } from '../workflowOverview'
 import type { WorkflowRun } from '../types/WorkflowRun'
@@ -123,6 +123,19 @@ export function WorkflowListView({ projectId }: { projectId: number }) {
                       <span className="library-badge" title={BUILTIN_TITLE}>
                         built-in
                       </span>
+                    </>
+                  )}
+                  {builtinUpdateBadge(w) && (
+                    <>
+                      {' '}
+                      <a
+                        className="library-badge"
+                        href={`#/projects/${projectId}/workflows/${w.id}`}
+                        title={builtinUpdateBadge(w)!.title}
+                        aria-label={builtinUpdateBadge(w)!.label}
+                      >
+                        {builtinUpdateBadge(w)!.text}
+                      </a>
                     </>
                   )}
                   {!w.enabled && <span className="muted workflow-off-tag"> · disabled</span>}

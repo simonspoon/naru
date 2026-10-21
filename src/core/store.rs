@@ -20,10 +20,13 @@ use super::types::{
     WorkflowTrigger, WorkflowType, WorkflowView, is_valid_artifact_content_type, task_name,
 };
 use super::types::{
+    WorkflowBuiltinAction, WorkflowBuiltinUpdate, WorkflowRevision, WorkflowSnapEdge,
+    WorkflowSnapNode, WorkflowSnapshot,
+};
+use super::types::{
     WorkflowExport, WorkflowExportEdge, WorkflowExportMeta, WorkflowExportNode,
     WorkflowImportResult, WorkflowMissingRef,
 };
-use super::types::{WorkflowRevision, WorkflowSnapEdge, WorkflowSnapNode, WorkflowSnapshot};
 
 #[derive(Debug)]
 pub enum Error {
@@ -1533,6 +1536,31 @@ const MIGRATIONS: &[&str] = &[
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         updated_at TEXT NOT NULL DEFAULT (datetime('now'))
      );",
+    // Naru task 2052: which built-in a customised workflow was copied from,
+    // and the built-in's newest revision it was based on (NULL = unknown, so
+    // it counts as behind until the person keeps or takes). Existing
+    // `<built-in> (custom…)` workflows are backfilled with an unknown base.
+    "CREATE TABLE workflow_builtin_copies (
+        workflow_id INTEGER PRIMARY KEY REFERENCES workflows(id) ON DELETE CASCADE,
+        builtin_id  TEXT NOT NULL,
+        base_rev    INTEGER
+     );
+     INSERT INTO workflow_builtin_copies (workflow_id, builtin_id, base_rev)
+        SELECT w.id, 'task-loop', NULL FROM workflows w
+         WHERE w.name LIKE 'Task loop (custom%'
+           AND NOT EXISTS (SELECT 1 FROM workflow_builtins b WHERE b.workflow_id = w.id);
+     INSERT INTO workflow_builtin_copies (workflow_id, builtin_id, base_rev)
+        SELECT w.id, 'task-loop-child', NULL FROM workflows w
+         WHERE w.name LIKE 'Task loop: implement and review (custom%'
+           AND NOT EXISTS (SELECT 1 FROM workflow_builtins b WHERE b.workflow_id = w.id);
+     INSERT INTO workflow_builtin_copies (workflow_id, builtin_id, base_rev)
+        SELECT w.id, 'kb-mine', NULL FROM workflows w
+         WHERE w.name LIKE 'KB: mine past sessions (custom%'
+           AND NOT EXISTS (SELECT 1 FROM workflow_builtins b WHERE b.workflow_id = w.id);
+     INSERT INTO workflow_builtin_copies (workflow_id, builtin_id, base_rev)
+        SELECT w.id, 'kb-capture', NULL FROM workflows w
+         WHERE w.name LIKE 'KB: ongoing capture (custom%'
+           AND NOT EXISTS (SELECT 1 FROM workflow_builtins b WHERE b.workflow_id = w.id);",
 ];
 
 /// Selects full task rows including the derived `blocked` flag.
@@ -2830,7 +2858,13 @@ const WORKFLOW_COLUMNS: &str = "w.id, w.project_id, w.name, w.description, \
      (SELECT json_extract(n.config, '$.events') FROM workflow_nodes n \
         WHERE n.workflow_id = w.id AND n.kind = 'trigger' ORDER BY n.id LIMIT 1), \
      w.enabled, w.types, \
-     EXISTS (SELECT 1 FROM workflow_builtins b WHERE b.workflow_id = w.id)";
+     EXISTS (SELECT 1 FROM workflow_builtins b WHERE b.workflow_id = w.id), \
+     EXISTS (SELECT 1 FROM workflow_builtin_copies c \
+               JOIN workflow_builtins b ON b.builtin_id = c.builtin_id \
+              WHERE c.workflow_id = w.id \
+                AND (c.base_rev IS NULL OR c.base_rev < \
+                     (SELECT MAX(r.rev) FROM workflow_revisions r \
+                       WHERE r.workflow_id = b.workflow_id)))";
 const WORKFLOW_NODE_COLUMNS: &str =
     "id, workflow_id, kind, title, config, x, y, created_at, updated_at";
 const WORKFLOW_EDGE_COLUMNS: &str = "id, workflow_id, from_node, to_node, branch, from_pin, to_pin";
@@ -2898,6 +2932,7 @@ fn row_to_workflow(row: &rusqlite::Row<'_>) -> rusqlite::Result<Workflow> {
             .and_then(|j| serde_json::from_str(&j).ok())
             .unwrap_or_default(),
         builtin: row.get(15)?,
+        builtin_updated: row.get(16)?,
     })
 }
 
@@ -5609,6 +5644,16 @@ impl Store {
                 &actor,
                 &format!("copy of {}", src.workflow.name),
             )?;
+            if src.workflow.builtin {
+                // Remember what the copy came from and how far it had got.
+                s.conn.execute(
+                    "INSERT INTO workflow_builtin_copies (workflow_id, builtin_id, base_rev) \
+                     SELECT ?1, b.builtin_id, \
+                            (SELECT MAX(r.rev) FROM workflow_revisions r WHERE r.workflow_id = b.workflow_id) \
+                       FROM workflow_builtins b WHERE b.workflow_id = ?2",
+                    (new_id, id),
+                )?;
+            }
             s.get_workflow_view(new_id)
         })
     }
@@ -5916,7 +5961,7 @@ impl Store {
     /// Renames a user workflow out of a built-in's way to `"<name> (custom)"`,
     /// then `"<name> (custom 2)"`…; answers the new name. Nothing else about
     /// it changes (naru task 2103).
-    pub fn rename_workflow_to_custom(&mut self, id: i64) -> Result<String> {
+    pub fn rename_workflow_to_custom(&mut self, id: i64, builtin_id: &str) -> Result<String> {
         let w = self.get_workflow(id)?;
         if w.builtin {
             return Err(builtin_refusal(&w.name));
@@ -5936,10 +5981,93 @@ impl Store {
                         ..Default::default()
                     },
                 )?;
+                // Its base is unknown: it is offered the built-in until answered.
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO workflow_builtin_copies (workflow_id, builtin_id, base_rev) \
+                     VALUES (?1, ?2, NULL)",
+                    (id, builtin_id),
+                )?;
                 return Ok(cand);
             }
             n += 1;
         }
+    }
+
+    /// The built-in a customised copy came from: its workflow id, its newest
+    /// revision and the copy's recorded base. `validation` when `id` is no copy.
+    fn builtin_copy_source(&self, id: i64) -> Result<(i64, i64, Option<i64>)> {
+        self.get_workflow(id)?;
+        self.conn
+            .query_row(
+                "SELECT b.workflow_id, \
+                        COALESCE((SELECT MAX(r.rev) FROM workflow_revisions r \
+                                   WHERE r.workflow_id = b.workflow_id), 0), \
+                        c.base_rev \
+                   FROM workflow_builtin_copies c \
+                   JOIN workflow_builtins b ON b.builtin_id = c.builtin_id \
+                  WHERE c.workflow_id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?
+            .ok_or_else(|| {
+                Error::Validation(format!(
+                    "workflow {id} is not a customised copy of an installed built-in"
+                ))
+            })
+    }
+
+    /// What a customised copy is offered: both graphs and the revisions.
+    pub fn workflow_builtin_update(&self, id: i64) -> Result<WorkflowBuiltinUpdate> {
+        let (bid, builtin_rev, base_rev) = self.builtin_copy_source(id)?;
+        Ok(WorkflowBuiltinUpdate {
+            mine: self.workflow_snapshot(id)?,
+            builtin: self.workflow_snapshot(bid)?,
+            builtin_name: self.get_workflow(bid)?.name,
+            base_rev,
+            builtin_rev,
+        })
+    }
+
+    /// Answers the offered update of a customised copy. `Keep` moves the
+    /// copy's base to the built-in's newest revision and changes nothing
+    /// else; `Take` replaces the copy's graph with the built-in's as one new
+    /// revision (undone by a restore) and moves the base too. `validation`
+    /// when the copy is not behind its built-in.
+    pub fn resolve_workflow_builtin_update(
+        &mut self,
+        id: i64,
+        action: WorkflowBuiltinAction,
+    ) -> Result<WorkflowView> {
+        self.immediate(|s| {
+            let (bid, builtin_rev, base_rev) = s.builtin_copy_source(id)?;
+            if base_rev.is_some_and(|b| b >= builtin_rev) {
+                return Err(Error::Validation(format!(
+                    "workflow {id} is already up to date with its built-in"
+                )));
+            }
+            if action == WorkflowBuiltinAction::Take {
+                let mut snap = s.workflow_snapshot(bid)?;
+                let mine = s.get_workflow(id)?;
+                // The copy keeps its own name and stays as enabled as it was.
+                snap.name = mine.name;
+                snap.enabled = mine.enabled;
+                if !same_workflow_content(&s.workflow_snapshot(id)?, &snap) {
+                    s.apply_workflow_snapshot(id, &snap, true)?;
+                    let actor = s.actor.clone();
+                    s.force_workflow_revision(
+                        id,
+                        &actor,
+                        &format!("take built-in rev {builtin_rev}"),
+                    )?;
+                }
+            }
+            s.conn.execute(
+                "UPDATE workflow_builtin_copies SET base_rev = ?1 WHERE workflow_id = ?2",
+                (builtin_rev, id),
+            )?;
+            s.get_workflow_view(id)
+        })
     }
 
     /// `validation` when workflow `id` is a managed built-in (naru task 2103).
@@ -13116,6 +13244,115 @@ mod tests {
         assert!(s.list_workflow_revisions(wf).is_err());
     }
 
+    /// A built-in with two nodes, a customised copy of it, and a reseed that
+    /// adds a node to the built-in. Answers (store, builtin, copy).
+    fn builtin_with_copy() -> (Store, tempfile::TempDir, i64, i64) {
+        let (mut s, d) = temp_store();
+        let b = s.create_workflow(None, "Shipped", None).unwrap().id;
+        let a1 = rev_node(&mut s, b, "A");
+        let a2 = rev_node(&mut s, b, "B");
+        s.create_workflow_edge(b, a1, a2, None).unwrap();
+        s.mark_workflow_builtin(b, "task-loop").unwrap();
+        let copy = s.duplicate_workflow(b, None).unwrap().workflow.id;
+        (s, d, b, copy)
+    }
+
+    fn reseed_builtin(s: &mut Store, b: i64) {
+        let mut snap = s.workflow_snapshot(b).unwrap();
+        snap.nodes.push(WorkflowSnapNode {
+            id: 9999,
+            kind: WorkflowNodeKind::Cli,
+            title: "Added".into(),
+            config: serde_json::json!({"command": "true"}),
+            x: 10.0,
+            y: 10.0,
+        });
+        assert!(s.replace_workflow_graph(b, &snap, "seed").unwrap());
+    }
+
+    #[test]
+    fn workflow_builtin_update_fresh_copy_is_not_flagged() {
+        let (s, _d, b, copy) = builtin_with_copy();
+        assert!(!s.get_workflow(copy).unwrap().builtin_updated);
+        assert!(!s.get_workflow(b).unwrap().builtin_updated);
+    }
+
+    #[test]
+    fn workflow_builtin_update_flags_a_stale_copy_without_touching_it() {
+        let (mut s, _d, b, copy) = builtin_with_copy();
+        let before = s.workflow_snapshot(copy).unwrap();
+        let revs = s.list_workflow_revisions(copy).unwrap().len();
+        reseed_builtin(&mut s, b);
+        assert!(s.get_workflow(copy).unwrap().builtin_updated);
+        assert!(!s.get_workflow(b).unwrap().builtin_updated);
+        assert_eq!(s.workflow_snapshot(copy).unwrap(), before);
+        assert_eq!(s.list_workflow_revisions(copy).unwrap().len(), revs);
+        let offer = s.workflow_builtin_update(copy).unwrap();
+        assert_eq!(offer.mine, before);
+        assert_eq!(offer.builtin.nodes.len(), 3);
+        assert!(offer.base_rev.unwrap() < offer.builtin_rev);
+    }
+
+    #[test]
+    fn workflow_builtin_update_keep_clears_the_flag_and_changes_nothing() {
+        let (mut s, _d, b, copy) = builtin_with_copy();
+        reseed_builtin(&mut s, b);
+        let before = s.workflow_snapshot(copy).unwrap();
+        let revs = s.list_workflow_revisions(copy).unwrap().len();
+        s.resolve_workflow_builtin_update(copy, WorkflowBuiltinAction::Keep)
+            .unwrap();
+        assert!(!s.get_workflow(copy).unwrap().builtin_updated);
+        assert_eq!(s.workflow_snapshot(copy).unwrap(), before);
+        assert_eq!(s.list_workflow_revisions(copy).unwrap().len(), revs);
+        // Nothing left to answer, and a non-copy is no copy.
+        assert!(
+            s.resolve_workflow_builtin_update(copy, WorkflowBuiltinAction::Keep)
+                .is_err()
+        );
+        assert!(
+            s.resolve_workflow_builtin_update(b, WorkflowBuiltinAction::Keep)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn workflow_builtin_update_take_adopts_the_builtin_as_one_revision() {
+        let (mut s, _d, b, copy) = builtin_with_copy();
+        reseed_builtin(&mut s, b);
+        let name = s.get_workflow(copy).unwrap().name;
+        let revs = s.list_workflow_revisions(copy).unwrap().len();
+        s.resolve_workflow_builtin_update(copy, WorkflowBuiltinAction::Take)
+            .unwrap();
+        let w = s.get_workflow(copy).unwrap();
+        assert!(!w.builtin_updated);
+        assert_eq!(w.name, name);
+        assert!(same_workflow_content(
+            &s.workflow_snapshot(copy).unwrap(),
+            &s.workflow_snapshot(b).unwrap()
+        ));
+        let after = s.list_workflow_revisions(copy).unwrap();
+        assert_eq!(after.len(), revs + 1);
+        assert!(after[0].reason.starts_with("take built-in rev"));
+        // Undo: the old graph is one restore away.
+        s.restore_workflow_revision(copy, after[1].rev).unwrap();
+        assert_eq!(s.get_workflow_view(copy).unwrap().nodes.len(), 2);
+    }
+
+    #[test]
+    fn workflow_builtin_update_renamed_workflow_has_an_unknown_base() {
+        let (mut s, _d, b, _copy) = builtin_with_copy();
+        let mine = s.create_workflow(None, "Old", None).unwrap().id;
+        rev_node(&mut s, mine, "Z");
+        let _ = b;
+        s.rename_workflow_to_custom(mine, "task-loop").unwrap();
+        let w = s.get_workflow(mine).unwrap();
+        assert!(w.builtin_updated);
+        assert_eq!(s.workflow_builtin_update(mine).unwrap().base_rev, None);
+        s.resolve_workflow_builtin_update(mine, WorkflowBuiltinAction::Keep)
+            .unwrap();
+        assert!(!s.get_workflow(mine).unwrap().builtin_updated);
+    }
+
     #[test]
     fn collapse_folds_copies_into_revisions_without_losing_a_graph() {
         let (mut s, _d) = temp_store();
@@ -18376,15 +18613,15 @@ mod tests {
         );
         assert_eq!(
             MIGRATIONS.len(),
-            100,
-            "a fresh db should report user_version 100"
+            101,
+            "a fresh db should report user_version 101"
         );
         let (store, _dir) = temp_store();
         let version: i64 = store
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 100);
+        assert_eq!(version, 101);
     }
 
     /// Workflows replace diagrams at migration 83 (mesa task 1607): a db that
@@ -18408,7 +18645,7 @@ mod tests {
         store
             .conn
             .execute_batch(
-                "DROP TABLE mark_skins; ALTER TABLE live_sessions DROP COLUMN listen_gen; DROP TABLE agent_questions; DROP TABLE custom_themes; DROP TABLE task_notes; ALTER TABLE live_sessions DROP COLUMN ambient_request_seq; ALTER TABLE live_sessions DROP COLUMN ambient_request; ALTER TABLE live_sessions DROP COLUMN host_seen_at; ALTER TABLE live_sessions DROP COLUMN host_ambient; ALTER TABLE live_notebook DROP COLUMN category; ALTER TABLE cc_messages DROP COLUMN cost_micro_usd; ALTER TABLE cc_sessions DROP COLUMN main_agent; ALTER TABLE live_boards DROP COLUMN pinned_at; DROP TABLE workflow_builtins; DROP TABLE workflow_revisions; DROP TABLE workflow_log; DROP TABLE workflow_gates; DROP TABLE workflow_runs; DROP TABLE workflow_edges; \
+                "DROP TABLE workflow_builtin_copies; DROP TABLE mark_skins; ALTER TABLE live_sessions DROP COLUMN listen_gen; DROP TABLE agent_questions; DROP TABLE custom_themes; DROP TABLE task_notes; ALTER TABLE live_sessions DROP COLUMN ambient_request_seq; ALTER TABLE live_sessions DROP COLUMN ambient_request; ALTER TABLE live_sessions DROP COLUMN host_seen_at; ALTER TABLE live_sessions DROP COLUMN host_ambient; ALTER TABLE live_notebook DROP COLUMN category; ALTER TABLE cc_messages DROP COLUMN cost_micro_usd; ALTER TABLE cc_sessions DROP COLUMN main_agent; ALTER TABLE live_boards DROP COLUMN pinned_at; DROP TABLE workflow_builtins; DROP TABLE workflow_revisions; DROP TABLE workflow_log; DROP TABLE workflow_gates; DROP TABLE workflow_runs; DROP TABLE workflow_edges; \
                  DROP TABLE workflow_nodes; DROP TABLE workflows; \
                  CREATE TABLE diagrams (id INTEGER PRIMARY KEY, title TEXT); \
                  INSERT INTO diagrams (title) VALUES ('stale'); \

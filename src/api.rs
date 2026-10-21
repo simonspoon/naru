@@ -3382,6 +3382,10 @@ fn router(state: AppState) -> Router {
             "/api/workflows/{id}/revisions/{rev}/restore",
             post(restore_workflow_revision),
         )
+        .route(
+            "/api/workflows/{id}/builtin-update",
+            get(get_workflow_builtin_update).post(resolve_workflow_builtin_update),
+        )
         .route("/api/workflows/{id}/nodes", post(create_workflow_node))
         .route("/api/workflows/{id}/edges", post(create_workflow_edge))
         .route("/api/workflows/events", post(emit_workflow_event))
@@ -5123,6 +5127,39 @@ async fn restore_workflow_revision(
     require_agent_access(&state, &addr, &headers)?;
     let mut store = state.store.lock().unwrap();
     Ok(Json(store.restore_workflow_revision(id, rev)?).into_response())
+}
+
+/// What a customised copy of a built-in is offered: both graphs and the
+/// revisions (naru task 2052). `validation` for a workflow that is no copy.
+async fn get_workflow_builtin_update(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let store = state.store.lock().unwrap();
+    Ok(Json(store.workflow_builtin_update(id)?).into_response())
+}
+
+#[derive(Deserialize)]
+struct WorkflowBuiltinUpdateBody {
+    action: crate::core::WorkflowBuiltinAction,
+}
+
+/// Takes the new built-in or keeps the copy as it is; answers the copy's
+/// {workflow, nodes, edges}.
+async fn resolve_workflow_builtin_update(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    body: Result<Json<WorkflowBuiltinUpdateBody>, JsonRejection>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let Json(body) = body?;
+    let mut store = state.store.lock().unwrap();
+    Ok(Json(store.resolve_workflow_builtin_update(id, body.action)?).into_response())
 }
 
 /// Echoes the destroyed {workflow, nodes, edges}.

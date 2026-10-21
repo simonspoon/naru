@@ -3024,7 +3024,7 @@ pub fn install_builtins(store: &mut Store) -> Result<(Vec<WorkflowView>, Vec<Str
         }
         match store.find_workflow_by_name(name) {
             Ok(w) => {
-                let new_name = store.rename_workflow_to_custom(w.id)?;
+                let new_name = store.rename_workflow_to_custom(w.id, bid)?;
                 renamed.push((w.id, new_name));
             }
             Err(Error::NotFound(_)) => {}
@@ -3067,7 +3067,7 @@ pub fn install_builtins(store: &mut Store) -> Result<(Vec<WorkflowView>, Vec<Str
         }
         match store.find_workflow_by_name(name) {
             Ok(w) => {
-                store.rename_workflow_to_custom(w.id)?;
+                store.rename_workflow_to_custom(w.id, bid)?;
             }
             Err(Error::NotFound(_)) => {}
             Err(e) => return Err(e),

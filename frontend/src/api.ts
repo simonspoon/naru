@@ -115,6 +115,7 @@ import type { WorkflowNodeKind } from './types/WorkflowNodeKind'
 import type { WorkflowGate } from './types/WorkflowGate'
 import type { WorkflowRevision } from './types/WorkflowRevision'
 import type { WorkflowRun } from './types/WorkflowRun'
+import type { WorkflowBuiltinUpdate } from './types/WorkflowBuiltinUpdate'
 import type { WorkflowView } from './types/WorkflowView'
 
 /** Error body shape shared by the API and CLI: {"error": {"code", "message"}}. */
@@ -962,6 +963,19 @@ export function listWorkflowRevisions(id: number): Promise<WorkflowRevision[]> {
 /** Puts the workflow back to a revision (recorded as a new `restore of N` one). */
 export function restoreWorkflowRevision(id: number, rev: number): Promise<WorkflowView> {
   return request(`/api/workflows/${id}/revisions/${rev}/restore`, jsonInit('POST', {}))
+}
+
+/** What a customised copy of a built-in is offered (naru task 2052). */
+export function getWorkflowBuiltinUpdate(id: number): Promise<WorkflowBuiltinUpdate> {
+  return request(`/api/workflows/${id}/builtin-update`)
+}
+
+/** Takes the new built-in graph or keeps the copy as it is. */
+export function resolveWorkflowBuiltinUpdate(
+  id: number,
+  action: 'take' | 'keep',
+): Promise<WorkflowView> {
+  return request(`/api/workflows/${id}/builtin-update`, jsonInit('POST', { action }))
 }
 
 /** A workflow's runs, newest first, each with its steps. */

@@ -953,6 +953,7 @@ mod tests {
             enabled: true,
             types: vec![],
             builtin: false,
+            builtin_updated: false,
         }
     }
 

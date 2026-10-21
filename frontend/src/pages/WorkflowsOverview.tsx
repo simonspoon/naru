@@ -15,6 +15,7 @@ import {
 import { formatTimestamp } from "../time";
 import {
   BUILTIN_TITLE,
+  builtinUpdateBadge,
   installHeadline,
   installLine,
   isBuiltin,
@@ -201,6 +202,17 @@ export function WorkflowsOverview({ embedded = false }: { embedded?: boolean }) 
                           </span>
                         </>
                       )}
+                      {(() => {
+                        const b = builtinUpdateBadge(w);
+                        return b && href ? (
+                          <>
+                            {" "}
+                            <a className="library-badge" href={href} title={b.title} aria-label={b.label}>
+                              {b.text}
+                            </a>
+                          </>
+                        ) : null;
+                      })()}
                     </td>
                     <td>{projectLabel(w, projects)}</td>
                     <td>{stateLabel(w)}</td>

@@ -33,6 +33,7 @@ function wf(over: Partial<Workflow> = {}): Workflow {
     next_run_at: null,
     enabled: true,
     builtin: false,
+    builtin_updated: false,
     ...over,
   }
 }

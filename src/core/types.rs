@@ -5065,6 +5065,12 @@ pub struct Workflow {
     /// Derived on every read from `workflow_builtins`.
     #[serde(default)]
     pub builtin: bool,
+    /// A customised copy of a built-in whose built-in has a newer revision
+    /// than the one the copy was based on (naru task 2052). Derived on every
+    /// read from `workflow_builtin_copies`, never stored; cleared by keeping
+    /// or taking the new built-in.
+    #[serde(default)]
+    pub builtin_updated: bool,
 }
 
 /// A user-defined struct type of one workflow: a name and typed fields.
@@ -5261,6 +5267,31 @@ pub struct WorkflowSnapEdge {
     pub from_pin: Option<String>,
     #[serde(default)]
     pub to_pin: Option<String>,
+}
+
+/// What a customised copy of a built-in is offered (naru task 2052): the
+/// copy's graph, the built-in's current one, and the revision numbers.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct WorkflowBuiltinUpdate {
+    pub mine: WorkflowSnapshot,
+    pub builtin: WorkflowSnapshot,
+    /// The built-in's name, for display.
+    pub builtin_name: String,
+    /// The built-in revision the copy was based on; null when unknown.
+    #[ts(type = "number | null")]
+    pub base_rev: Option<i64>,
+    #[ts(type = "number")]
+    pub builtin_rev: i64,
+}
+
+/// How a copy answers an offered built-in update.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+#[serde(rename_all = "lowercase")]
+pub enum WorkflowBuiltinAction {
+    Take,
+    Keep,
 }
 
 /// A workflow's whole definition at one moment: what a revision stores.

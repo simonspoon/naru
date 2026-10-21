@@ -10305,6 +10305,13 @@ body.live-panel-ratio-resizing .live-panel-divider {
   color: var(--amber);
 }
 
+button.library-badge,
+a.library-badge {
+  cursor: pointer;
+  font-family: inherit;
+  text-decoration: none;
+}
+
 .library-actions {
   display: flex;
   gap: 0.5rem;

@@ -2218,6 +2218,26 @@ EXAMPLES
         #[arg(long)]
         quiet: bool,
     },
+    /// Answer a built-in update offered to a customised copy (`builtin_updated`)
+    ///
+    /// `--keep` keeps your graph and moves the base to the built-in's current
+    /// revision; `--take` replaces your graph with the built-in's as one new
+    /// revision (undo with `workflow revision restore`). Exactly one of the two.
+    /// Prints what `workflow show` does.
+    #[command(group(ArgGroup::new("answer").required(true).multiple(false)))]
+    BuiltinUpdate {
+        /// Workflow id or name of the customised copy
+        workflow: String,
+        /// Replace the copy's graph with the built-in's
+        #[arg(long, group = "answer")]
+        take: bool,
+        /// Keep the copy as it is
+        #[arg(long, group = "answer")]
+        keep: bool,
+        /// Keep the {workflow, nodes, edges} keys but drop free text
+        #[arg(long)]
+        quiet: bool,
+    },
     /// Print one workflow as a self-contained, portable JSON file
     ///
     /// The file (`format: naru-workflow`, a `version`) holds the workflow, its
@@ -9167,6 +9187,20 @@ fn run_workflow_cmd(cmd: WorkflowCmd) -> Result<()> {
             let id = resolve_workflow(&store, &workflow)?.id;
             print_workflow_view(&store.duplicate_workflow(id, name.as_deref())?, quiet);
         }
+        WorkflowCmd::BuiltinUpdate {
+            workflow,
+            take,
+            keep: _,
+            quiet,
+        } => {
+            let id = resolve_workflow(&store, &workflow)?.id;
+            let action = if take {
+                crate::core::WorkflowBuiltinAction::Take
+            } else {
+                crate::core::WorkflowBuiltinAction::Keep
+            };
+            print_workflow_view(&store.resolve_workflow_builtin_update(id, action)?, quiet);
+        }
         WorkflowCmd::Export { workflow, out } => {
             let id = resolve_workflow(&store, &workflow)?.id;
             let doc = store.export_workflow(id)?;
@@ -10086,6 +10120,7 @@ mod tests {
             enabled: true,
             types: vec![],
             builtin: false,
+            builtin_updated: false,
         }
     }
 
@@ -10385,6 +10420,7 @@ mod tests {
             sorted_owned(full.clone()),
             sorted(&[
                 "builtin",
+                "builtin_updated",
                 "id",
                 "project_id",
                 "name",

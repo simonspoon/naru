@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   deleteWorkflow,
   duplicateWorkflow,
@@ -11,6 +11,7 @@ import {
   updateWorkflow,
 } from '../api'
 import { ConfirmDelete } from '../components/ConfirmDelete'
+import { WorkflowBuiltinUpdate } from '../components/WorkflowBuiltinUpdate'
 import { WorkflowHistory } from '../components/WorkflowHistory'
 import { InlineEdit } from '../components/InlineEdit'
 import { useLiveContext } from '../liveContext'
@@ -18,7 +19,13 @@ import { formatTimestamp, timeAgo } from '../time'
 import { useFetch } from '../useFetch'
 import { WorkflowCanvas } from '../WorkflowCanvas'
 import { PlayIcon } from '../components/WorkflowIcon'
-import { BUILTIN_NOTE, BUILTIN_TITLE, duplicateLabel, isBuiltin } from '../workflowBuiltin'
+import {
+  BUILTIN_NOTE,
+  BUILTIN_TITLE,
+  builtinUpdateBadge,
+  duplicateLabel,
+  isBuiltin,
+} from '../workflowBuiltin'
 import { toggleLabel, workflowHref, workflowsListHref } from '../workflowOverview'
 import { formatDuration, runPollMs, runSummary, runningRunId, stepClass } from '../workflowRun'
 import type { WorkflowRun } from '../types/WorkflowRun'
@@ -180,6 +187,9 @@ export function WorkflowBuilderView({
   const [tab, setTab] = useState<'steps' | 'runs' | 'log'>('steps')
   // Graph editor or the version history (naru task 2053), in place.
   const [historyOpen, setHistoryOpen] = useState(false)
+  const [updateOpen, setUpdateOpen] = useState(false)
+  const [updateNote, setUpdateNote] = useState<string | null>(null)
+  const titleRef = useRef<HTMLHeadingElement>(null)
   // Bumped on every run so the recent-runs and log lists refetch.
   const [runVersion, setRunVersion] = useState(0)
   // Live run view (mesa task 1631): the run list is polled — fast while a run
@@ -243,6 +253,7 @@ export function WorkflowBuilderView({
 
   const wf = view.workflow
   const builtin = isBuiltin(wf)
+  const updateBadge = builtinUpdateBadge(wf)
   const live = liveId !== null && liveRun?.id === liveId ? liveRun : null
   // Until the final record lands, keep the last live one on screen rather
   // than flashing the previous run.
@@ -255,7 +266,7 @@ export function WorkflowBuilderView({
         <a href={workflowsListHref(projectId)}>← workflows</a>
       </p>
       <div className="workflow-head">
-        <h2 className="workflow-title">
+        <h2 className="workflow-title" ref={titleRef} tabIndex={-1}>
           {builtin ? (
             wf.name
           ) : (
@@ -270,6 +281,21 @@ export function WorkflowBuilderView({
               <span className="library-badge" title={BUILTIN_TITLE}>
                 built-in
               </span>
+            </>
+          )}
+          {updateBadge && (
+            <>
+              {' '}
+              <button
+                type="button"
+                className="library-badge"
+                title={updateBadge.title}
+                aria-label={updateBadge.label}
+                aria-expanded={updateOpen}
+                onClick={() => setUpdateOpen((o) => !o)}
+              >
+                {updateBadge.text}
+              </button>
             </>
           )}
           <span className="muted workflow-title-tag"> · workflow{wf.enabled ? '' : ' · disabled'}</span>
@@ -369,6 +395,22 @@ export function WorkflowBuilderView({
         )}
       </p>
       {builtin && <p className="muted">{BUILTIN_NOTE}</p>}
+      {updateNote !== null && !updateBadge && <p className="muted">{updateNote}</p>}
+      {updateBadge && updateOpen && (
+        <WorkflowBuiltinUpdate
+          workflowId={workflowId}
+          onClose={() => {
+            setUpdateOpen(false)
+            titleRef.current?.focus()
+          }}
+          onDone={(note) => {
+            setUpdateOpen(false)
+            setUpdateNote(note)
+            refetch()
+            titleRef.current?.focus()
+          }}
+        />
+      )}
       {runError && <p className="error">could not run: {runError}</p>}
 
       {historyOpen && (

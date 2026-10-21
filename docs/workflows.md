@@ -843,6 +843,26 @@ index 98, naming the shipped definition — not a column on `workflows`).
   `local_path` (when it has one and it exists): stage agents run in the task's
   checkout, not in one fixed project's.
 
+### Updates to a customised copy (naru task 2052)
+
+A `(custom)` copy (from "Duplicate to customise", or a same-named workflow
+renamed out of a built-in's way at upgrade) remembers which built-in it came
+from and which of that built-in's revisions it was based on
+(`workflow_builtin_copies`; an unknown base — a renamed or backfilled copy — is
+NULL). When the built-in's newest revision is past the base, or the base is
+unknown, the copy reads `builtin_updated: true` (derived on every read, never
+stored) and shows an **update available** badge on the Workflows pages and in
+its builder, opening a panel with the copy-against-built-in diff (`-` yours,
+`+` the built-in) and a note when a `subworkflow` node would be re-pointed.
+Nothing changes until you answer: **Keep mine** moves the base forward and
+leaves the graph and history alone; **Take the new built-in** replaces the
+graph with the built-in's as one `take built-in rev N` revision (undo with
+`workflow revision restore`; the copy keeps its name and on/off state). CLI:
+`naru workflow builtin-update <WF> --take|--keep`; API: `GET`/`POST
+/api/workflows/{id}/builtin-update` (`{action: "take"|"keep"}`), both
+`require_agent_access`. A workflow that is no copy, or is not behind, is
+`validation`. Nothing merges automatically.
+
 ### The KB built-ins (naru task 2118)
 
 Two more managed built-ins mine past Claude Code sessions into the knowledge

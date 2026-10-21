@@ -207,7 +207,7 @@ ok "workflow update: clears and un-binds; no field is usage"
 run 0 "$NARU" workflow show "$W"
 [ "$(keys "$STDOUT")" = '["edges","nodes","workflow"]' ] || fail "show shape: $STDOUT"
 run 0 "$NARU" workflow get "gate demo" --quiet
-[ "$(jq -c '.workflow | keys' <<<"$STDOUT")" = '["builtin","created_at","enabled","id","last_failure_at","last_run_at","last_run_status","name","next_run_at","project_id","trigger","trigger_events","trigger_phrase","types","updated_at"]' ] ||
+[ "$(jq -c '.workflow | keys' <<<"$STDOUT")" = '["builtin","builtin_updated","created_at","enabled","id","last_failure_at","last_run_at","last_run_status","name","next_run_at","project_id","trigger","trigger_events","trigger_phrase","types","updated_at"]' ] ||
   fail "show --quiet drops description: $STDOUT"
 ok "workflow show/get: {workflow, nodes, edges}; --quiet drops the description"
 
@@ -2407,6 +2407,54 @@ run 0 "$NARU" workflow defaults --project HistProj --task-loop
 run 0 "$NARU" workflow defaults --project HistProj --task-loop
 [ "$(jqs '.created | length')" = "0" ] || fail "an unchanged reseed writes nothing"
 ok "built-ins: global and read-only (update/node/delete/restore refused with the way out), duplicate is editable, a changed graph becomes a seed revision of the same workflow, an unchanged one is a no-op, no copies"
+
+# An update offered to a customised copy (naru task 2052): flagged after a reseed, nothing
+# changes until the person answers, keep clears it with the graph untouched, take adopts
+# the built-in as one revision.
+run 0 "$NARU" workflow duplicate "$TL"
+UPC=$(jqs .workflow.id)
+[ "$(jqs .workflow.builtin_updated)" = "false" ] || fail "a fresh copy is not behind: $STDOUT"
+run 2 "$NARU" workflow builtin-update "$UPC"
+run 2 "$NARU" workflow builtin-update "$UPC" --take --keep
+run 1 "$NARU" workflow builtin-update "$TL" --keep
+[ "$(jqe .error.code)" = "validation" ] || fail "a built-in is no copy: $STDERR"
+run 1 "$NARU" workflow builtin-update "$UPC" --keep
+[ "$(jqe .error.code)" = "validation" ] || fail "an up-to-date copy has nothing to answer: $STDERR"
+UPN=$("$NARU" workflow show "$UPC" | jq -r '.nodes | length')
+TLN=$("$NARU" workflow show "$TL" | jq -r '.nodes[1].id')
+PATH="/usr/bin:$PATH" sqlite3 "$MESA_DB" "UPDATE workflow_nodes SET title = 'Edited by hand' WHERE id = $TLN"
+run 0 "$NARU" workflow defaults --project HistProj --task-loop
+[ "$("$NARU" workflow show "$UPC" | jq -r '.workflow.builtin_updated')" = "true" ] || fail "the copy is flagged after a reseed"
+[ "$("$NARU" workflow list | jq -r "[.[] | select(.id == $UPC)][0].builtin_updated")" = "true" ] || fail "the list carries the flag"
+UPREV=$("$NARU" workflow revisions "$UPC" | jq length)
+PORT=17799
+"$NARU" serve --port "$PORT" >"$TMP/serve-upd.log" 2>&1 &
+SERVER_PID=$!
+for _ in $(seq 1 50); do curl -s -o /dev/null "http://127.0.0.1:$PORT/api/version" && break; sleep 0.1; done
+api 200 GET "/api/workflows/$UPC/builtin-update"
+[ "$(jqb '.builtin_rev > .base_rev')" = "true" ] && [ "$(jqb '.mine.nodes | length')" = "$UPN" ] || fail "the offer: $BODY"
+api 422 GET "/api/workflows/$TL/builtin-update"
+api 404 GET "/api/workflows/999999/builtin-update"
+api 422 POST "/api/workflows/$UPC/builtin-update" '{"action":"merge"}'
+STATUS=$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: evil.example' "http://127.0.0.1:$PORT/api/workflows/$UPC/builtin-update")
+[ "$STATUS" = "403" ] || fail "builtin-update refuses a foreign Host: $STATUS"
+[ "$("$NARU" workflow show "$UPC" | jq -r '.workflow.builtin_updated')" = "true" ] || fail "nothing changed without an answer"
+kill "$SERVER_PID" 2>/dev/null; wait "$SERVER_PID" 2>/dev/null || true; SERVER_PID=
+BEFORE=$("$NARU" workflow show "$UPC" | jq -S '[.nodes[] | del(.id, .workflow_id, .created_at, .updated_at)]')
+run 0 "$NARU" workflow builtin-update "$UPC" --keep
+[ "$(jqs .workflow.builtin_updated)" = "false" ] || fail "keep clears the flag: $STDOUT"
+[ "$("$NARU" workflow show "$UPC" | jq -S '[.nodes[] | del(.id, .workflow_id, .created_at, .updated_at)]')" = "$BEFORE" ] || fail "keep changed the graph"
+[ "$("$NARU" workflow revisions "$UPC" | jq length)" = "$UPREV" ] || fail "keep added a revision"
+TLN=$("$NARU" workflow show "$TL" | jq -r '.nodes[1].id')
+PATH="/usr/bin:$PATH" sqlite3 "$MESA_DB" "UPDATE workflow_nodes SET title = 'Edited again' WHERE id = $TLN"
+run 0 "$NARU" workflow defaults --project HistProj --task-loop
+run 0 "$NARU" workflow node update "$("$NARU" workflow show "$UPC" | jq -r '.nodes[1].id')" --title "Mine"
+UPREV=$("$NARU" workflow revisions "$UPC" | jq length)
+run 0 "$NARU" workflow builtin-update "$UPC" --take
+[ "$(jqs '.workflow.builtin_updated')" = "false" ] && [ "$(jqs '[.nodes[].title] | (index("Mine") == null) and (index("Plan ok?") != null)')" = "true" ] || fail "take adopts the built-in: $STDOUT"
+[ "$("$NARU" workflow revisions "$UPC" | jq -r '.[0].reason')" = "take built-in rev $("$NARU" workflow revisions "$TL" | jq '.[0].rev')" ] && [ "$("$NARU" workflow revisions "$UPC" | jq length)" = "$((UPREV + 1))" ] || fail "take is one revision: $("$NARU" workflow revisions "$UPC" | jq -c "[.[]|[.rev,.reason]]")"
+run 0 "$NARU" workflow delete "$UPC"
+ok "built-in update: a copy is flagged only after a reseed, answers refused for a non-copy, 404/422/403 on the route, keep clears it with no change, take adopts the built-in as one revision"
 
 # The KB built-ins (naru task 2118): installed off, an install never switches one on or off,
 # a deleted one comes back off, and --builtins needs no project.
