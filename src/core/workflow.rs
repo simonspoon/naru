@@ -3417,7 +3417,9 @@ fn seed_loop_workflow(
         Err(e) => return Err(e),
     };
     let build_name = match &existing {
-        Some(_) => format!("{name} (seeding)"),
+        // Per-process, so serve start-up and the CLI seeding at once (a
+        // self-deploy restart) never collide on the unique name.
+        Some(_) => format!("{name} (seeding {})", std::process::id()),
         None => name.to_string(),
     };
     let wf = store.create_workflow(project_id, &build_name, Some(description))?;
@@ -8155,6 +8157,20 @@ mod tests {
         assert!(!done[0].workflow.enabled && done[0].workflow.builtin);
         assert!(enabled_of(&s, KB_CAPTURE_WORKFLOW));
         assert!(s.get_workflow(mine.id).unwrap().enabled);
+    }
+
+    #[test]
+    fn reseed_survives_a_leftover_seeding_workflow() {
+        // Serve start-up and the CLI seed at once on a self-deploy; the
+        // scratch name is per-process so the other's copy never conflicts.
+        let (st, _d) = store();
+        let mut s = st.lock().unwrap();
+        install_builtins(&mut s).unwrap();
+        let id = s.find_workflow_by_name(TASK_LOOP_WORKFLOW).unwrap().id;
+        s.create_workflow(None, &format!("{TASK_LOOP_WORKFLOW} (seeding)"), None)
+            .unwrap();
+        install_builtins(&mut s).unwrap();
+        assert_eq!(s.find_workflow_by_name(TASK_LOOP_WORKFLOW).unwrap().id, id);
     }
 
     #[test]
