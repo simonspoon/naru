@@ -2040,6 +2040,11 @@ const STAGE_MAX_SECS: i64 = 86400;
 /// minute, so the stage driver and not SIGKILL ends a stage.
 const LOOP_STAGE_TIMEOUT: u32 = LOOP_STAGE_CEILING as u32 + 3 * 180 + 60;
 
+/// The longest the loop lets one fast-gate run take (`NARU_LOOP_FAST_GATE_TIMEOUT`
+/// in `LOOP_PRELUDE`, naru task 2172); the Review node allows four runs of it
+/// (the change and HEAD, in up to two repos).
+const LOOP_FAST_GATE_TIMEOUT: u32 = 1800;
+
 /// Name of the workflow `naru workflow defaults --task-loop` creates.
 pub const TASK_LOOP_WORKFLOW: &str = "Task loop";
 /// The child workflow both passes of the loop call (naru task 2024).
@@ -2163,6 +2168,54 @@ RULE
 }
 stage_verdict() { jq -r '.verdict // "INCONCLUSIVE"' "$SCRATCH/$1.json" 2>/dev/null || echo INCONCLUSIVE; }
 note_reason() { jq -r --arg s "$1" '"\($s): \(.verdict) \(.reason // "")"' "$SCRATCH/$1.json" >> "$SCRATCH/reasons.txt" 2>/dev/null; return 0; }
+# The fast gate (naru task 2172): the loop runs the repo's own fast check itself on the uncommitted tree, once
+# per review pass and repo, so a verifier that skipped the checks cannot pass a broken change. The command is
+# NARU_LOOP_FAST_GATE, else `scripts/gates.sh fast <the run's changed paths>`, else `cargo test --quiet`, else
+# `swift build && swift test`, else no gate. Full output: $SCRATCH/fastgate-$N-<n>.out; one record per repo in
+# $SCRATCH/fastgate-$N.txt. A failure is re-run at HEAD in a detached worktree with the same paths; it is
+# `baseline=same` when HEAD fails too and every failure line of the change also appears at HEAD, else `baseline=new`.
+fail_lines() { grep -E 'FAILED|failed|error:|^FAIL:' "$1" 2>/dev/null | sed -E 's#(/[^ /:]+)+/##g; s/[0-9.]+//g' | sort -u; return 0; }
+fast_run() { # <dir> <out file> <tag> <cmd> [paths]
+  local dir=$1 o=$2 tag=$3 cmd=$4 t=${NARU_LOOP_FAST_GATE_TIMEOUT:-1800} tmo=""; shift 4
+  if command -v timeout >/dev/null 2>&1; then tmo=timeout; elif command -v gtimeout >/dev/null 2>&1; then tmo=gtimeout; fi
+  (cd "$dir" && GATES_LOG_DIR="$SCRATCH/gates-$tag" NARU_IOS_DERIVED_DATA="$SCRATCH/dd-$tag" ${tmo:+$tmo $t} bash -c "$cmd" gate "$@") > "$o" 2>&1
+}
+fast_gate() { # <n> <repo>
+  local n=$1 repo=$2 cmd=${NARU_LOOP_FAST_GATE:-} out="$SCRATCH/fastgate-$N-$1.out" rec="$SCRATCH/fastgate-$N.txt" rc=0 hrc=0 b="" W="$SCRATCH/fastgate-wt" p
+  local paths=()
+  while IFS=$'\t' read -r p _; do
+    [ -n "$p" ] || continue
+    if [ "$n" = 1 ]; then case "$p" in /*) continue ;; esac; else case "$p" in "$repo"/*) p=${p#"$repo"/} ;; *) continue ;; esac; fi
+    paths+=("$p")
+  done < <(run_changed)
+  if [ -z "$cmd" ]; then
+    if [ -f "$repo/scripts/gates.sh" ]; then cmd='scripts/gates.sh fast "$@"'
+    elif [ -f "$repo/Cargo.toml" ]; then cmd='cargo test --quiet'
+    elif [ -f "$repo/Package.swift" ]; then cmd='swift build && swift test'
+    fi
+  fi
+  if [ -z "$cmd" ]; then echo "repo=$repo no gate: no scripts/gates.sh, Cargo.toml or Package.swift" >> "$rec"; return 0; fi
+  fast_run "$repo" "$out" "$N-$n" "$cmd" ${paths[@]+"${paths[@]}"} || rc=$?
+  if [ "$rc" != 0 ]; then
+    b=new
+    rm -rf "$W"; git -C "$repo" worktree prune
+    if git -C "$repo" worktree add -q --detach "$W" HEAD > /dev/null 2>&1; then
+      if [ -d "$repo/frontend/dist" ] && [ ! -e "$W/frontend/dist" ]; then ln -s "$repo/frontend/dist" "$W/frontend/dist" 2>/dev/null || true; fi
+      CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$repo/target}" fast_run "$W" "$out.head" "$N-$n-head" "$cmd" ${paths[@]+"${paths[@]}"} || hrc=$?
+      if [ "$hrc" != 0 ] && [ -z "$(comm -23 <(fail_lines "$out") <(fail_lines "$out.head"))" ]; then b=same; fi
+      git -C "$repo" worktree remove --force "$W" > /dev/null 2>&1 || true
+    fi
+  fi
+  printf 'repo=%s rc=%s%s cmd=%s\n' "$repo" "$rc" "${b:+ baseline=$b}" "$(printf '%s' "$cmd" | tr '\n' ' ')" >> "$rec"
+  return 0
+}
+# The records and the tails of the outputs, for a brief and for findings.md.
+fast_gate_text() {
+  cat "$SCRATCH/fastgate-$N.txt" 2>/dev/null
+  local f
+  for f in "$SCRATCH"/fastgate-$N-*.out; do [ -f "$f" ] || continue; printf '\n--- %s (tail) ---\n' "$f"; tail -c 3000 "$f"; done
+  return 0
+}
 "##;
 
 /// What `@N@` becomes in the child workflow's nodes: the pass number, from the
@@ -2299,12 +2352,16 @@ mkbrief() {
     printf '\n## Plan\n\n'; cat "$SCRATCH/plan.md"
     printf '\n## Diff summary (uncommitted, by design: the full change is the working tree of each repo below)\n\n'; cat "$SCRATCH/diff-$N.txt"
     if [ -n "$PD" ]; then printf '\n## Dirty before this run (not this task%ss change)\n\nThese paths were already dirty before the run started and the run has not changed them since. Do not count them against the task.\n\n' "'"; printf '%s\n' "$PD"; fi
+    printf '\n## Fast gate (run by the loop, before this review)\n\nThe loop already ran the repo fast gate on the uncommitted tree; do not count it as unrun. `rc=0` passed. A failure with `baseline=same` fails at HEAD too (not this change); `baseline=new` is caused by this change and is a `VERDICT: FAIL`. `no gate` means the repo has none.\n\n'; fast_gate_text
     printf '\n## What to do\n\nCheck the change against the plan and the task. Do not edit any file. End with exactly one line, `VERDICT: PASS` or `VERDICT: FAIL`, after your findings.\n'
     if [ "$role" = verifier ] && [ "$VER" = ui-verifier ]; then printf '\n## Live UI check (required)\n\nThis change touches the UI. Run the live check in the dev environment (docs/dev-env.md: the dev serve on :7771 via scripts/dev-env.sh, khora headless; never the real install on :7770 or :7777). Cover every UI check in the plan and in the acceptance of the task. `VERDICT: PASS` is allowed only if those checks actually ran and passed. If you could not run them, end with `VERDICT: FAIL` and say why.\n'; fi
     if [ "$role" = verifier ]; then printf '\n## Review findings: check each one\n\nThe reviewer ran first. Its report is below. Confirm or refute every finding by running it (a test, a repro). Run the project checks (for example `cargo test`) yourself; do not leave them to the reviewer. A finding you confirm is a `VERDICT: FAIL`.\n\n'; cat "$SCRATCH/review-$N-review.md"; fi
     no_commit_rule
   } > "$SCRATCH/$role-$N-brief.md"
 }
+rm -f "$SCRATCH"/fastgate-$N.txt "$SCRATCH"/fastgate-$N-*
+fn=0
+while IFS= read -r fr; do fn=$((fn+1)); fast_gate "$fn" "$fr"; done < <(repo_each)
 # The reviewer runs first, then the verifier with the review's findings in its brief (naru task 2173).
 mkbrief reviewer
 stage_run "review$N" diff-reviewer "$(dl review 1500)" "$SCRATCH/reviewer-$N-brief.md"
@@ -2367,14 +2424,25 @@ TASK=$(printf '%s\n' "$STATE" | sed -n 's/.*task=\([0-9][0-9]*\).*/\1/p' | tail 
 SCRATCH=$(printf '%s\n' "$STATE" | sed -n 's/.*scratch=\([^ ]*\).*/\1/p' | tail -n 1)
 V=$(printf '%s\n' "$IN" | sed 1d)
 v=INCONCLUSIVE
+bad=""
 case "$STATE" in
   *review=done*)
     v=$(printf '%s' "$V" | jq -r 'if type == "object" and (.verify | type) == "string" and (.review | type) == "string" then ([.verify, .review] | map(if . == "PASS" or . == "FAIL" then . else "NONE" end) | if any(. == "FAIL") then "NEEDS-FIX" elif all(. == "PASS") then "PASS" else "INCONCLUSIVE" end) else "INCONCLUSIVE" end' 2>/dev/null || echo INCONCLUSIVE)
     case "$v" in PASS|NEEDS-FIX|INCONCLUSIVE) ;; *) v=INCONCLUSIVE ;; esac
-    if [ "$v" = INCONCLUSIVE ]; then echo "review$N: the typed verdict was missing, invalid or not conclusive: $(printf '%s' "$V" | head -c 300)" >> "$SCRATCH/reasons.txt"; fi ;;
+    if [ "$v" = INCONCLUSIVE ]; then echo "review$N: the typed verdict was missing, invalid or not conclusive: $(printf '%s' "$V" | head -c 300)" >> "$SCRATCH/reasons.txt"; fi
+    # The fast gate (naru task 2172) outranks the typed verdict: no record is no evidence, and a failure
+    # that HEAD does not already show is the change's.
+    rec="$SCRATCH/fastgate-$N.txt"
+    if [ ! -s "$rec" ]; then bad="the loop's fast gate left no record, so there is no gate evidence"
+    else bad=$(grep -v ' no gate: ' "$rec" | grep -vE ' rc=0( |$)' | grep -v ' baseline=same ' || true); fi
+    if [ -n "$bad" ]; then v=NEEDS-FIX; echo "review$N: fast gate: $(printf '%s' "$bad" | head -c 600)" >> "$SCRATCH/reasons.txt"; fi
+    if [ -s "$rec" ] && grep -q ' baseline=same ' "$rec"; then
+      naru task note "$TASK" "The fast gate fails at HEAD too, so it was not counted against this change: $(grep ' baseline=same ' "$rec" | head -c 1500)" > /dev/null 2>&1 || true
+    fi ;;
 esac
 if [ "$v" = NEEDS-FIX ]; then
   { echo "Iteration $N verify report:"; cat "$SCRATCH/review-$N-verify.md"; echo; echo "Iteration $N review report:"; cat "$SCRATCH/review-$N-review.md"; } > "$SCRATCH/findings.md"
+  if [ -n "$bad" ]; then { echo; echo "Iteration $N fast gate (run by the loop; fix this):"; printf '%s\n' "$bad"; fast_gate_text; } >> "$SCRATCH/findings.md"; fi
 fi
 emit review=$v
 "##;
@@ -3019,7 +3087,11 @@ fn build_task_loop_builtins(
                 (
                     K::Cli,
                     "Review + verify",
-                    cli(LOOP_REVIEW, "iter", 2 * LOOP_STAGE_TIMEOUT),
+                    cli(
+                        LOOP_REVIEW,
+                        "iter",
+                        2 * LOOP_STAGE_TIMEOUT + 4 * LOOP_FAST_GATE_TIMEOUT,
+                    ),
                     760.0,
                     80.0,
                 ),

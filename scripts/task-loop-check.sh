@@ -49,6 +49,8 @@ ln -s "$NARU" "$TMP/bin/naru"
 export PATH="$TMP/bin:$PATH"
 
 export NARU_LOOP_DEADLINE=20 NARU_LOOP_CEILING=40 NARU_LOOP_SILENCE=10 NARU_LOOP_GRACE=3
+# Throwaway repos here may carry a Cargo.toml (7g): keep the fast gate (naru task 2172) a no-op except in section 12.
+export NARU_LOOP_FAST_GATE=true
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok() { echo "ok: $*"; }
@@ -93,6 +95,8 @@ while IFS= read -r line; do
   printf 'turn\n' >> "$STUB/turns.$agent"
   n=$(grep -c . "$STUB/turns.$agent")
   if [ "$agent" = implementer ] && [ -f "$STUB/touch.implementer" ]; then while IFS= read -r f; do mkdir -p "$(dirname "$f")"; echo "$RANDOM" >> "$f"; done < "$STUB/touch.implementer"; fi
+  # rmrec.verifier deletes the loop's fast-gate records, as if the gate had left none (section 12d)
+  if [ "$agent" = verifier ] && [ -f "$STUB/rmrec.verifier" ]; then rm -f "$HOME"/.naru/loop/*/fastgate-*.txt; fi
   # hang.<agent> hangs every turn, hang.<agent>.<n> only that agent's n-th turn; a hang first
   # writes partial.<agent> as an assistant line, so the stage has a partial to report
   if [ -f "$STUB/hang.$agent" ] || [ -f "$STUB/hang.$agent.$n" ]; then
@@ -119,7 +123,7 @@ STUBEOF
 chmod +x "$STUB/vox"
 export MESA_VOX_BIN="$STUB/vox"
 
-reset_stub() { rm -f "$STUB"/touch.* "$STUB"/reply.* "$STUB"/die.* "$STUB"/hang.* "$STUB"/partial.* "$STUB"/turns.* "$STUB"/msgs.* "$STUB"/typed.* "$STUB"/typed-msgs.* "$STUB"/split.json "$STUB/vox.log"; }
+reset_stub() { rm -f "$STUB"/rmrec.* "$STUB"/touch.* "$STUB"/reply.* "$STUB"/die.* "$STUB"/hang.* "$STUB"/partial.* "$STUB"/turns.* "$STUB"/msgs.* "$STUB"/typed.* "$STUB"/typed-msgs.* "$STUB"/split.json "$STUB/vox.log"; }
 turns() { grep -c . "$STUB/turns.$1" 2>/dev/null || true; }
 # step <run json> <node title>: the status of that node's step (node ids from
 # the workflow's own node list, since a step carries the id only).
@@ -863,5 +867,63 @@ wait
 [ "$(tstatus "$T")" = done ] || fail "closing child: task is $(tstatus "$T")"
 [ "$(step "$R" "Commit")" = ok ] || fail "closing child: Commit was $(step "$R" "Commit")"
 ok "a pass waits for a split child that closes, then completes"
+
+# ---- 12. the fast gate (naru task 2172): the loop runs the repo's check itself and judges it against HEAD ----
+fg_reset() {
+  reset_stub
+  printf 'UI: no' > "$STUB/reply.planner"
+  printf 'VERDICT: PASS' > "$STUB/reply.verifier"
+  printf 'VERDICT: PASS' > "$STUB/reply.diff-reviewer"
+}
+# a) fails on the change, passes at HEAD -> NEEDS-FIX with the gate output in the findings; pass 2 passes
+fg_reset
+printf 'gate-a.txt\n' > "$STUB/touch.implementer"
+echo 1 > "$TMP/gate-once"
+T=$(mk "Gate fails on the change")
+R=$(NARU_LOOP_FAST_GATE="[ -e '$TMP/gate-once' ] && { rm '$TMP/gate-once'; echo 'FAILED: boom in a'; exit 1; }; exit 0" run_loop "$T")
+[ "$(jq -r .status <<<"$R")" = succeeded ] && [ "$(tstatus "$T")" = done ] || fail "gate a: $(jq -c '{status,error}' <<<"$R") task $(tstatus "$T")"
+[ "$(step "$R" "Implement + review #2")" = ok ] || fail "gate a: a failing gate did not force a second pass"
+sed -n 2p "$STUB/msgs.implementer" | grep -q "FAILED: boom in a" || fail "gate a: the gate output is missing from the second implementer brief"
+grep -q "Fast gate (run by the loop" "$STUB/msgs.verifier" || fail "gate a: the verifier brief lacks the fast gate section"
+ok "a gate that fails on the change and passes at HEAD bounces the pass and reaches Implement #2"
+
+# b) the same failure at HEAD -> not bounced, noted
+fg_reset
+printf 'gate-b.txt\n' > "$STUB/touch.implementer"
+T=$(mk "Gate fails at HEAD too")
+R=$(NARU_LOOP_FAST_GATE="echo 'FAILED: preexisting'; exit 1" run_loop "$T")
+[ "$(tstatus "$T")" = done ] || fail "gate b: task is $(tstatus "$T")"
+[ "$(step "$R" "Implement + review #2")" != ok ] || fail "gate b: a failure that HEAD shows bounced the pass"
+"$NARU" task show "$T" | jq -e '.notes | any(.body | contains("fails at HEAD too"))' >/dev/null || fail "gate b: no note"
+ok "a gate failure that HEAD shows too is noted, not bounced"
+
+# c) a new failure on top of a pre-existing one -> bounced both passes, backlog
+fg_reset
+printf 'gate-c.txt\n' > "$STUB/touch.implementer"
+T=$(mk "Gate fails new on top of old")
+R=$(NARU_LOOP_FAST_GATE="echo 'FAILED: old'; [ -e gate-c.txt ] && echo 'FAILED: new thing'; exit 1" run_loop "$T")
+[ "$(tstatus "$T")" = backlog ] || fail "gate c: task is $(tstatus "$T")"
+ok "a new failure on top of a pre-existing one is bounced"
+git -C "$TMP/work" checkout -q -- . 2>/dev/null; git -C "$TMP/work" clean -fdq 2>/dev/null
+
+# d) the record is gone while both stubs say PASS (the 2165 case): no evidence is NEEDS-FIX
+fg_reset
+printf 'gate-d.txt\n' > "$STUB/touch.implementer"
+: > "$STUB/rmrec.verifier"
+T=$(mk "Gate left no record")
+R=$(run_loop "$T")
+[ "$(tstatus "$T")" = backlog ] || fail "gate d: task is $(tstatus "$T")"
+grep -q "left no record" "$HOME"/.naru/loop/"$T"-*/reasons.txt || fail "gate d: reasons.txt does not name the missing record"
+ok "a PASS with no gate record counts as NEEDS-FIX"
+git -C "$TMP/work" checkout -q -- . 2>/dev/null; git -C "$TMP/work" clean -fdq 2>/dev/null
+
+# e) a repo with no gate command at all: no evidence is required, the pass closes
+fg_reset
+printf 'gate-e.txt\n' > "$STUB/touch.implementer"
+T=$(mk "No gate in this repo")
+R=$(NARU_LOOP_FAST_GATE= run_loop "$T")
+[ "$(tstatus "$T")" = done ] || fail "gate e: task is $(tstatus "$T")"
+grep -q " no gate: " "$HOME"/.naru/loop/"$T"-*/fastgate-*.txt || fail "gate e: the record does not say no gate"
+ok "a repo with no gate command still closes on two PASSes"
 
 echo "task-loop-check: all ok"
