@@ -96,7 +96,7 @@ config `{"agent": "<library agent name>", "prompt": "…" (`{input}` is replaced
 node's input, else the input follows after a blank line), "model"?: haiku|sonnet|opus
 (default: the definition's own `model:` when it is one of those, else sonnet),
 "timeout_secs"?: 1..=3600 (default 600), "result_type"?: a type of the workflow's
-Types card (absent or `text` = plain text), "retry"?: bool (default true)}`. At run
+Types card (absent or `text` = plain text), "retry"?: bool (default true), stage mode only: "result_prompt"?: string replacing the fixed sentence that introduces the stage reports (naru task 2236)}`. At run
 time the agent is looked up in the library (the effective rows: a fork or built-in,
 project scope first-class) — an unknown name fails the node (`unknown agent …`). The
 definition's body (frontmatter stripped) and the task go as **one tool-less

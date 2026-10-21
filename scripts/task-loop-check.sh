@@ -81,7 +81,11 @@ if [ "$1" = "-p" ] && [[ " $* " != *" --input-format "* ]]; then
     r1=$(sed -n '/^=== Report 1 (/,/^=== Report 2 (/p' <<<"$prompt" | grep -v '^=== Report')
     r2=$(sed -n '/^=== Report 2 (/,/^Reply with only one JSON value/p' <<<"$prompt" | grep -v '^=== Report\|^Reply with only')
     c=none; [ -f "$STUB/blocker" ] && c=$(cat "$STUB/blocker")
-    reply=$(jq -nc --arg a "$(pv <<<"$r1")" --arg b "$(pv <<<"$r2")" --arg c "$c" --arg f "$(printf '%s %s' "$r1" "$r2" | tr '\n' ' ')" '{verify:$a,review:$b,blocker:$c,findings:$f}')
+    cav=$(printf '%s\n%s\n' "$r1" "$r2" | sed -n 's/^CAVEATS: //p' | tr '\n' ' ')
+    va=$(pv <<<"$r1")
+    # without the instruction naming the allowed values, a caveated pass drifts into the field (pilot run 752)
+    case "$prompt" in *"exactly PASS or FAIL"*) ;; *) [ -n "$cav" ] && [ "$va" = PASS ] && va="PASS with caveats" ;; esac
+    reply=$(jq -nc --arg a "$va" --arg b "$(pv <<<"$r2")" --arg c "$c" --arg f "$(printf '%s %s' "$r1" "$r2" | tr '\n' ' ')" --arg k "$cav" '{verify:$a,review:$b,blocker:$c,findings:$f,caveats:$k}')
   elif [ "$kind" = plan ]; then
     case "$(sed -n '/^<<<PLAN$/,/^PLAN>>>$/p' <<<"$prompt" | grep -v '^<<<PLAN$\|^PLAN>>>$' | last)" in
       "UI: yes") reply='{"ui":true}' ;; *) reply='{"ui":false}' ;; esac
@@ -1045,6 +1049,7 @@ jq -e --arg p "$SQ" '[.nodes[] | select(.title == "Review input" and (.config.co
 jq -e '[.nodes[] | select(.kind == "subworkflow") | .config.workflow] == ["Task loop pilot: implement and review", "Task loop pilot: implement and review"]' <<<"$PP" >/dev/null || fail "pilot: the parent does not call the pilot child"
 jq -e '.workflow.enabled == false and .workflow.builtin == true' <<<"$PP" >/dev/null || fail "pilot: parent is not a disabled built-in"
 jq -e '[.nodes[] | select(.kind == "trycatch") | .config.wrap.config | select(.input_type == "ReviewInput" and .result_type == "ReviewVerdict" and .deadline == 1500 and .ceiling == 10800 and .silence == 300 and .grace == 180 and .also.agent == "diff-reviewer")] | length == 2' <<<"$PW" >/dev/null || fail "pilot: the stage-mode agent nodes"
+jq -e '[.nodes[] | select(.kind == "trycatch") | .config.wrap.config | select(.result_prompt | contains("exactly PASS or FAIL"))] | length == 2' <<<"$PW" >/dev/null || fail "pilot: result_prompt missing"
 ok "pilot graph: pilot_review_stage_driver_cli_nodes = 0, pilot sed parsers = 1 (Review input), parent calls the pilot child, disabled built-in"
 
 run_pilot() { "$NARU" workflow run "Task loop pilot" --input "$1"; }
@@ -1105,5 +1110,36 @@ R=$(run_pilot "$T")
 no_lease "pilot inconclusive"
 metric "$T" INCONCLUSIVE 1 backlog "pilot inconclusive"
 ok "pilot: an inconclusive verifier ends in backlog with a note and one notify"
+
+# P4. a PASS with caveats: the caveats ride in their own field, the verdict stays PASS (naru task 2236)
+reset_stub
+printf 'UI: no' > "$STUB/reply.planner"
+printf 'fine overall\nCAVEATS: docs lag the code\nVERDICT: PASS' > "$STUB/reply.verifier"
+printf 'VERDICT: PASS' > "$STUB/reply.diff-reviewer"
+printf 'pilot-caveat.txt\n' > "$STUB/touch.implementer"
+T=$(mk "Pilot pass with caveats")
+R=$(run_pilot "$T")
+[ "$(jq -r .status <<<"$R")" = succeeded ] && [ "$(tstatus "$T")" = done ] || fail "pilot caveats: $(jq -c '{status,error}' <<<"$R") task $(tstatus "$T")"
+grep -q "exactly PASS or FAIL" "$STUB/typed-msgs.pilot" || fail "pilot caveats: the result call was not told the allowed values"
+[ "$(cat "$HOME"/.naru/loop/"$T"-*/reasons.txt 2>/dev/null | grep -c "typed verdict was missing")" = 0 ] || fail "pilot caveats: pilot_review_inconclusive != 0"
+no_lease "pilot caveats"
+metric "$T" PASS 1 done "pilot caveats"
+ok "pilot: a PASS with caveats stays PASS (pilot_review_inconclusive = 0), the result call names PASS or FAIL"
+
+# P5. a wrong value in verify is refused cleanly: backlog, never done
+reset_stub
+printf 'UI: no' > "$STUB/reply.planner"
+printf 'VERDICT: PASS' > "$STUB/reply.verifier"
+printf 'VERDICT: PASS' > "$STUB/reply.diff-reviewer"
+printf '{"verify":"PASS with caveats","review":"PASS","blocker":"none","findings":"x","caveats":""}' > "$STUB/typed.pilot"
+printf 'pilot-wrong.txt\n' > "$STUB/touch.implementer"
+T=$(mk "Pilot wrong value")
+R=$(run_pilot "$T")
+[ "$(jq -r .status <<<"$R")" = succeeded ] || fail "pilot wrong value: run $(jq -c '{status,error}' <<<"$R")"
+[ "$(tstatus "$T")" = backlog ] || fail "pilot wrong value: task is $(tstatus "$T"), not backlog"
+[ "$(grep -c -- '--call--' "$STUB/vox.log")" = 1 ] || fail "pilot wrong value: notify calls"
+no_lease "pilot wrong value"
+metric "$T" INCONCLUSIVE 1 backlog "pilot wrong value"
+ok "pilot: a wrong verify value ends in backlog, never done"
 
 echo "task-loop-check: all ok"

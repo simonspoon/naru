@@ -1034,6 +1034,7 @@ pub fn validate_config(
                     "timeout_secs",
                     "result_type",
                     "retry",
+                    "result_prompt",
                     "input_type",
                     "cwd",
                     "deadline",
@@ -1148,6 +1149,13 @@ pub fn validate_config(
                     out.insert("result_type".into(), json!(t));
                     result_ty = t.to_string();
                 }
+            }
+            // Stage mode only: replaces the fixed sentence that introduces the
+            // stage reports to the result call (naru task 2236).
+            if let Some(p) = optional_str(name, obj, "result_prompt")?
+                && !p.trim().is_empty()
+            {
+                out.insert("result_prompt".into(), json!(p));
             }
             match obj.get("retry") {
                 None | Some(Value::Null) => {}
@@ -2492,8 +2500,9 @@ fn loop_prelude_no_parser() -> String {
 /// The pilot's review prompts (naru task 2227). The text of each brief stays
 /// in a file under the run's scratch (the `ReviewInput` names it), so the
 /// input the engine appends to a prompt stays small.
-const LOOP_PILOT_PRIMARY_PROMPT: &str = "You are the verifier stage of an automated task loop for naru task {task}, pass {iter}. Your complete brief is the file {verifier_brief}: read it first and do exactly what it says. Work in the current project checkout and do not edit any file. End with exactly one line, `VERDICT: PASS` or `VERDICT: FAIL`. When you fail the change, add one line `BLOCKER: <short snake_case tag naming the main reason>` before it.";
-const LOOP_PILOT_REVIEWER_PROMPT: &str = "You are the reviewer stage of an automated task loop for naru task {task}, pass {iter}. Your complete brief is the file {reviewer_brief}: read it first and do exactly what it says. Work in the current project checkout and do not edit any file. End with exactly one line, `VERDICT: PASS` or `VERDICT: FAIL`. When you fail the change, add one line `BLOCKER: <short snake_case tag naming the main reason>` before it.";
+const LOOP_PILOT_PRIMARY_PROMPT: &str = "You are the verifier stage of an automated task loop for naru task {task}, pass {iter}. Your complete brief is the file {verifier_brief}: read it first and do exactly what it says. Work in the current project checkout and do not edit any file. End with exactly one line, `VERDICT: PASS` or `VERDICT: FAIL`. When you fail the change, add one line `BLOCKER: <short snake_case tag naming the main reason>` before it. Put any caveats or qualifications on one line `CAVEATS: <text>` before the VERDICT line, never on it: the VERDICT line is exactly `VERDICT: PASS` or `VERDICT: FAIL` and nothing follows it.";
+const LOOP_PILOT_REVIEWER_PROMPT: &str = "You are the reviewer stage of an automated task loop for naru task {task}, pass {iter}. Your complete brief is the file {reviewer_brief}: read it first and do exactly what it says. Work in the current project checkout and do not edit any file. End with exactly one line, `VERDICT: PASS` or `VERDICT: FAIL`. When you fail the change, add one line `BLOCKER: <short snake_case tag naming the main reason>` before it. Put any caveats or qualifications on one line `CAVEATS: <text>` before the VERDICT line, never on it: the VERDICT line is exactly `VERDICT: PASS` or `VERDICT: FAIL` and nothing follows it.";
+const LOOP_PILOT_RESULT_PROMPT: &str = "Read the stage report(s) below and produce the result from them. The fields `verify` and `review` must each be exactly PASS or FAIL, never any other text: take them from the final `VERDICT:` line of the verifier and of the reviewer report, and use NONE only when that report has no such line. Put every caveat, qualification or note in the free-text `caveats` field (empty string when there is none), never in `verify` or `review`.";
 
 /// The pilot's `Review input` node (naru task 2227): what `LOOP_REVIEW` does
 /// before it starts a stage (the verify lease, the run's own build dirs and
@@ -3420,6 +3429,7 @@ fn build_task_loop_builtins(
                     json!({"wrap": {"kind": "agent", "config": {
                         "agent": agent,
                         "prompt": LOOP_PILOT_PRIMARY_PROMPT,
+                        "result_prompt": LOOP_PILOT_RESULT_PROMPT,
                         "input_type": "ReviewInput",
                         "result_type": "ReviewVerdict",
                         "cwd": "{cwd}",
@@ -3514,6 +3524,7 @@ fn build_task_loop_builtins(
                             field("review"),
                             field("blocker"),
                             field("findings"),
+                            field("caveats"),
                         ],
                     },
                 ];
@@ -4787,7 +4798,9 @@ fn run_agent_stage(
         Some(rt) => run_agent(
             agent,
             definition,
-            "Read the stage report(s) below and produce the result from them.",
+            cfg.get("result_prompt")
+                .and_then(Value::as_str)
+                .unwrap_or("Read the stage report(s) below and produce the result from them."),
             &stage_reports(&doc),
             Some(rt),
             cfg.get("retry").and_then(Value::as_bool) != Some(false),
@@ -8558,6 +8571,18 @@ mod tests {
         assert!(cv.nodes.iter().any(|n| n.kind == WorkflowNodeKind::Trycatch
             && n.config["wrap"]["config"]["input_type"] == "ReviewInput"
             && n.config["wrap"]["config"]["also"]["agent"] == "diff-reviewer"));
+        // naru task 2236: the result call is told the allowed values, and the
+        // free text has its own field.
+        assert!(cv.nodes.iter().any(|n| {
+            n.kind == WorkflowNodeKind::Trycatch
+                && n.config["wrap"]["config"]["result_prompt"]
+                    .as_str()
+                    .is_some_and(|p| p.contains("exactly PASS or FAIL") && p.contains("`caveats`"))
+        }));
+        assert!(
+            LOOP_PILOT_PRIMARY_PROMPT.contains("CAVEATS:")
+                && LOOP_PILOT_REVIEWER_PROMPT.contains("CAVEATS:")
+        );
         let live = s.find_workflow_by_name(TASK_LOOP_CHILD).unwrap();
         let lv = s.get_workflow_view(live.id).unwrap();
         assert_eq!(lv.nodes.len(), 8);
