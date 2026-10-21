@@ -818,4 +818,37 @@ R=$(run_loop "$T")
 [ "$(grep -c -- '--call--' "$STUB/vox.log")" = 1 ] || fail "needs-human: notify calls"
 ok "a needs-human plan parks the task in backlog with a tag and note, no split"
 
+# ---- 11. a pass with an open split child (naru task 2177): never stranded in_progress ----
+reset_stub
+printf 'UI: no' > "$STUB/reply.planner"
+printf 'VERDICT: PASS' > "$STUB/reply.verifier"
+printf 'VERDICT: PASS' > "$STUB/reply.diff-reviewer"
+printf 'split-a.txt\n' > "$STUB/touch.implementer"
+T=$(mk "Pass with an open child")
+C=$(mk "The split child that never closes")
+"$NARU" task block "$T" --by "$C" >/dev/null || fail "open child: block"
+R=$(NARU_LOOP_CLOSE_WAIT=3 run_loop "$T")
+[ "$(tstatus "$T")" = todo ] || fail "open child: stranded_in_progress, task is $(tstatus "$T")"
+"$NARU" task show "$T" | jq -e --arg c "$C" '.notes | any(.body | contains("open task(s) " + $c))' >/dev/null || fail "open child: no note naming $C"
+[ "$(step "$R" "Close: pass status")" = skipped ] && [ "$(step "$R" "Commit")" = skipped ] || fail "open child: close/commit were $(step "$R" "Close: pass status")/$(step "$R" "Commit")"
+asked "$T" todo "open child"
+ok "a pass blocked by an open split child goes back to todo with a note and one notice"
+git -C "$TMP/work" checkout -q -- . 2>/dev/null; git -C "$TMP/work" clean -fdq 2>/dev/null
+
+# the child closes during the wait: the close goes through
+reset_stub
+printf 'UI: no' > "$STUB/reply.planner"
+printf 'VERDICT: PASS' > "$STUB/reply.verifier"
+printf 'VERDICT: PASS' > "$STUB/reply.diff-reviewer"
+printf 'split-b.txt\n' > "$STUB/touch.implementer"
+T=$(mk "Pass with a child that closes soon")
+C=$(mk "The split child that closes")
+"$NARU" task block "$T" --by "$C" >/dev/null || fail "closing child: block"
+( sleep 3; "$NARU" task update "$C" --status done >/dev/null 2>&1 ) &
+R=$(NARU_LOOP_CLOSE_WAIT=60 run_loop "$T")
+wait
+[ "$(tstatus "$T")" = done ] || fail "closing child: task is $(tstatus "$T")"
+[ "$(step "$R" "Commit")" = ok ] || fail "closing child: Commit was $(step "$R" "Commit")"
+ok "a pass waits for a split child that closes, then completes"
+
 echo "task-loop-check: all ok"

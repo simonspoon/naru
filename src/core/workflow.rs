@@ -2375,6 +2375,20 @@ const LOOP_REVIEW_PROMPT: &str = "Below are two reports from reviewing a change,
 const LOOP_CLOSE_PASS: &str = r##"last=$(ls "$SCRATCH"/review-*-verify.md | tail -n 1)
 { echo "Task loop passed review and verify. Hand-off files: $SCRATCH"; echo; cat "$last"; } | head -c 4000 > "$SCRATCH/result.md"
 naru task update "$TASK" --result-file "$SCRATCH/result.md" > /dev/null || exit 1
+# A split child still open blocks the close (naru task 2101). Wait for it, bounded; if it stays open
+# put the task back to todo with a note and a live result, never leave it in_progress (naru task 2177).
+w=0
+while [ "$(naru task show "$TASK" | jq -r '.blocked')" = true ] && [ "$w" -lt "${NARU_LOOP_CLOSE_WAIT:-600}" ]; do sleep 1; w=$((w + 1)); done
+if [ "$(naru task show "$TASK" | jq -r '.blocked')" = true ]; then
+  B=$(naru task deps "$TASK" | jq -r '[.blocked_by[] | select(.status != "done" and .status != "cancelled") | .id] | join(",")')
+  MSG="Passed review and verify but waits on open task(s) $B; set back to todo so the watcher re-runs it once they close. Hand-off files: $SCRATCH"
+  naru task note "$TASK" "$MSG" > /dev/null 2>&1 || true
+  naru task update "$TASK" --status todo > /dev/null 2>&1 || true
+  echo "task=$TASK verdict=PASS iterations=0 outcome=todo blockers=$B" > "$SCRATCH/metric.txt"
+  naru live result "Task $TASK passed but waits on open task(s) $B; set back to todo." > /dev/null 2>&1 || true
+  echo "close bounced: task $TASK waits on open task(s) $B" >&2
+  exit 1
+fi
 echo "task=$TASK verdict=PASS iterations=$(ls "$SCRATCH"/impl-*-brief.md 2>/dev/null | wc -l | tr -d ' ') outcome=done" > "$SCRATCH/metric.txt"
 echo "$TASK"
 "##;
@@ -2636,6 +2650,10 @@ D=$(dirname "${f:-/nonexistent/x}")
 if [ "$RS" != succeeded ]; then
   OUTCOME=error
   SUM=$(printf '%s\n' "$IN" | sed -n 's/^run_status=failed error=//p' | head -n 1)
+  if grep -q 'outcome=todo' "$f" 2>/dev/null && [ "$(naru task show "$TASK" 2>/dev/null | jq -r '.status' 2>/dev/null)" = todo ]; then
+    OUTCOME=todo
+    SUM="passed but waits on open task(s) $(sed -n 's/.*blockers=\([0-9,]*\).*/\1/p' "$f" | head -n 1); back to todo"
+  fi
 else
   OUTCOME=$(sed -n 's/.*outcome=\([a-z]*\).*/\1/p' "$f" 2>/dev/null | tail -n 1)
   [ -n "$OUTCOME" ] || OUTCOME=unknown
@@ -3111,7 +3129,7 @@ fn build_task_loop_builtins(
         (
             K::Cli,
             "Close: pass",
-            cli(LOOP_CLOSE_PASS, "0", 120),
+            cli(LOOP_CLOSE_PASS, "0", 720),
             3400.0,
             80.0,
         ),
