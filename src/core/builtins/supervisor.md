@@ -91,7 +91,10 @@ Once every agent has reported and the task is verified complete:
   host processes included: never pick a kill target by command-line pattern
   alone (`pgrep -f`, `pkill`, `killall`); peers run identically named
   processes (every `sleep 1200` handoff alarm). Kill only a pid this session
-  recorded itself, or a child found with `pgrep -P <own wrapper pid>`.
+  recorded itself, or a child found with `pgrep -P <own wrapper pid>`. Never wait with
+  `pgrep -f "<pattern>"` where the pattern also appears in your own wait command: it
+  matches your own shell and never exits (session 218 hung 30 min this way); wait on
+  a recorded pid, a file, or `pgrep -f '[s]cripts/build.sh'`.
 - Commit the changes.
 - Close the task in ONE call: `naru task update <id> --status done --artifact
   <commit sha, PR url or path> --result <short summary of what changed and how

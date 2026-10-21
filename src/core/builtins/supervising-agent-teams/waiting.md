@@ -17,7 +17,7 @@ a cleverer poll.
 | Situation | Move |
 |---|---|
 | An agent is running | **One blocking wait** (below), then act on its report. |
-| External state the harness cannot see (a build, CI, a device) | The same kind of blocking until-loop on that state. |
+| External state the harness cannot see (a build, CI, a device) | The same kind of blocking until-loop on that state. Never wait on a process with `pgrep -f "<pattern>"` where the pattern also appears in your own wait command: it matches your own shell and never exits (session 218 hung 30 min this way). Wait on a pid you recorded (`kill -0 $PID`), on a file the job writes, or bracket the first character: `pgrep -f '[s]cripts/build.sh'`. |
 | Independent work exists that does not depend on the answer | Do that first, then wait. |
 
 ## The blocking wait

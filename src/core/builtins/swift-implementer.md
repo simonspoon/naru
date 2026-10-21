@@ -58,6 +58,10 @@ tier; the supervisor runs `full` once on the finished tree.
   notification. Never `sleep N` then check, never chain sleeps, never re-run the
   same check command in a loop: Claude Code blocks a leading `sleep`, and the
   poll-guard hook denies a command repeated 5 times in 3 minutes as a spin loop.
+  Never wait on a process with `pgrep -f "<pattern>"` where the pattern also appears in
+  your own wait command: it matches your own shell and never exits (session 218
+  hung 30 min this way). Wait on a pid you recorded (`kill -0 $PID`), on a file the
+  job writes, or bracket the first character: `pgrep -f '[s]cripts/build.sh'`.
 - Say in the report which tier you ran and what it printed.
 
 ## Working rules
