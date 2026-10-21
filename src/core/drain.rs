@@ -1,7 +1,7 @@
 //! The drain flag `naru self-deploy` raises (naru task 2035).
 //!
 //! A marker file `<naru home>/drain` holding a unix-seconds expiry. While it
-//! is in the future the todo-watcher claims no new task; an expired or
+//! is in the future the queue-watcher claims no new task; an expired or
 //! unreadable marker reads as "not draining", so a crashed deploy releases
 //! the watcher by itself. File, not db: it must be settable with no server
 //! running and survive the restart it brackets. See `docs/self-deploy.md`.
@@ -71,7 +71,7 @@ fn pause_marker() -> PathBuf {
     marker().with_file_name("queue-paused")
 }
 
-/// Pause (`true`) or resume (`false`) the todo-watcher's dispatch; idempotent.
+/// Pause (`true`) or resume (`false`) the queue-watcher's dispatch; idempotent.
 pub fn set_paused(paused: bool) -> Result<()> {
     let path = pause_marker();
     if paused {

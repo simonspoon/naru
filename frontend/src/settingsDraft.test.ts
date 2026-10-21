@@ -18,12 +18,12 @@ function cmd(action: string, value: string | null): ConfigCommand {
   }
 }
 
-const COMMANDS = [cmd('todo-watcher', 'mytool {id}'), cmd('agent-spawn', null)]
+const COMMANDS = [cmd('queue-watcher', 'mytool {id}'), cmd('agent-spawn', null)]
 
 describe('draftFrom', () => {
   it('renders an unconfigured command as an empty textarea', () => {
     expect(draftFrom(COMMANDS)).toEqual({
-      'todo-watcher': 'mytool {id}',
+      'queue-watcher': 'mytool {id}',
       'agent-spawn': '',
     })
   })
@@ -35,8 +35,8 @@ describe('effectiveCommand', () => {
     expect(effectiveCommand(COMMANDS[1], draft)).toBe('claude --bg -- agent-spawn')
     expect(effectiveCommand(COMMANDS[0], draft)).toBe('mytool {id}')
     // Whitespace-only is blank, the same way the server trims before storing.
-    expect(effectiveCommand(COMMANDS[0], { 'todo-watcher': '   ' })).toBe(
-      'claude --bg -- todo-watcher',
+    expect(effectiveCommand(COMMANDS[0], { 'queue-watcher': '   ' })).toBe(
+      'claude --bg -- queue-watcher',
     )
   })
 })
@@ -51,12 +51,12 @@ describe('isRowChanged / isDirty', () => {
   })
 
   it('sees a cleared box as a change back to the default', () => {
-    expect(isRowChanged(COMMANDS[0], { 'todo-watcher': '' })).toBe(true)
-    expect(isDirty(COMMANDS, { 'todo-watcher': '', 'agent-spawn': '' })).toBe(true)
+    expect(isRowChanged(COMMANDS[0], { 'queue-watcher': '' })).toBe(true)
+    expect(isDirty(COMMANDS, { 'queue-watcher': '', 'agent-spawn': '' })).toBe(true)
   })
 
   it('ignores surrounding whitespace on an otherwise unchanged row', () => {
-    expect(isRowChanged(COMMANDS[0], { 'todo-watcher': ' mytool {id} ' })).toBe(
+    expect(isRowChanged(COMMANDS[0], { 'queue-watcher': ' mytool {id} ' })).toBe(
       false,
     )
   })
@@ -67,7 +67,7 @@ describe('placeholderError', () => {
     expect(placeholderError(COMMANDS[0], draftFrom(COMMANDS))).toBeNull()
     expect(
       placeholderError(COMMANDS[0], {
-        'todo-watcher': 'cd /repo\nclaude --name {name} -- "task {id}"',
+        'queue-watcher': 'cd /repo\nclaude --name {name} -- "task {id}"',
       }),
     ).toBeNull()
   })
@@ -75,7 +75,7 @@ describe('placeholderError', () => {
   it('leaves a script’s own ${VAR} and bash braces alone', () => {
     expect(
       placeholderError(COMMANDS[0], {
-        'todo-watcher':
+        'queue-watcher':
           'cd /repo\nexec "$CLAUDE_BIN" --name "${HOME}"\ncp a{,.bak}\n{ echo x; }\necho \'{id: 1}\'',
       }),
     ).toBeNull()
@@ -84,16 +84,16 @@ describe('placeholderError', () => {
   it('never questions a library prompt — every action offers those', () => {
     expect(
       placeholderError(COMMANDS[0], {
-        'todo-watcher': 'claude -- {prompt:nightly-brief} {prompt:my.brief}',
+        'queue-watcher': 'claude -- {prompt:nightly-brief} {prompt:my.brief}',
       }),
     ).toBeNull()
   })
 
   it('reports a placeholder this action never offered as out of scope', () => {
     const error = placeholderError(COMMANDS[0], {
-      'todo-watcher': 'cd /repo\nclaude -- {prompt}',
+      'queue-watcher': 'cd /repo\nclaude -- {prompt}',
     })
-    expect(error).toContain('{prompt} is not offered to todo-watcher')
+    expect(error).toContain('{prompt} is not offered to queue-watcher')
     // A name mesa does not know is shaped like a placeholder and is a typo,
     // not bash text — the server refuses it, so the page says so first.
     expect(placeholderError(COMMANDS[1], { 'agent-spawn': 'claude {tsak}' })).toContain(
@@ -104,15 +104,15 @@ describe('placeholderError', () => {
 
 describe('changedCommands', () => {
   it('sends only the rows that moved, trimmed', () => {
-    const draft = { 'todo-watcher': '  other {id}  ', 'agent-spawn': '' }
+    const draft = { 'queue-watcher': '  other {id}  ', 'agent-spawn': '' }
     expect(changedCommands(COMMANDS, draft)).toEqual({
-      'todo-watcher': 'other {id}',
+      'queue-watcher': 'other {id}',
     })
   })
 
   it('sends a cleared row as the empty string (the reset-to-default signal)', () => {
-    expect(changedCommands(COMMANDS, { 'todo-watcher': '', 'agent-spawn': '' })).toEqual(
-      { 'todo-watcher': '' },
+    expect(changedCommands(COMMANDS, { 'queue-watcher': '', 'agent-spawn': '' })).toEqual(
+      { 'queue-watcher': '' },
     )
   })
 

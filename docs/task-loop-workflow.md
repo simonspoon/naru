@@ -159,12 +159,12 @@ Both are done and are **complements, not replaced**:
   inconclusive) out of prose and into the stage driver, where they cannot be
   forgotten. Until the workflow ships, 1952 is the only guard for supervisor
   runs and stays in force afterwards for any ad-hoc supervision.
-- **1953** (stall watchdog): shipped in `d11acd4`, in the todo-watcher reaper
+- **1953** (stall watchdog): shipped in `d11acd4`, in the queue-watcher reaper
   (`watchers.stall-minutes`, default 20): a silent `in_progress` dispatched
   session gets one nudge (naru-run sessions only), then one `naru notify` and
   one inbox alert, and a `stalled` badge. It watches *dispatched sessions*.
   A workflow run, and the `naru run` jobs its stage driver starts, are not
-  sessions the todo-watcher dispatched, so 1953 does not see a hung workflow
+  sessions the queue-watcher dispatched, so 1953 does not see a hung workflow
   run. The status
   watcher's `stalled` flag (section 4) is the workflow-side twin and should
   reuse 1953's notify-and-alert path rather than duplicate it (a follow-up
@@ -204,7 +204,7 @@ verify are one step, run reviewer first then verifier; their detail is in `statu
 
 ## 7. Follow-up build tasks, in order
 
-All created in `backlog` (the todo-watcher would dispatch `todo`), with the
+All created in `backlog` (the queue-watcher would dispatch `todo`), with the
 blocks shown:
 
 1. **1955** Spike: `naru run start --agent X` as a workflow agent stage
@@ -343,9 +343,9 @@ on work must not treat `idle` as "done" without reading `last_result`.
 5. Node timeout does not stop an agent it started (section 8.6); the stage
    driver (1959) owns that.
 
-The todo-watcher command can be set to `naru workflow run "Task loop" --input {id} --detach` in `~/.naru/config.json` under `commands.todo-watcher` to run tasks through this workflow.
+The queue-watcher command can be set to `naru workflow run "Task loop" --input {id} --detach` in `~/.naru/config.json` under `commands.queue-watcher` to run tasks through this workflow.
 
-**Managed built-in (naru task 2103).** `Task loop` and its child ship in the binary and `serve` installs and updates them on every start (global, enabled, read-only; see `docs/workflows.md` "Built-in workflows"). A same-named workflow an install already had is renamed `Task loop (custom)` / `Task loop: implement and review (custom)` and kept. The watcher runs whatever name `commands.todo-watcher` holds: after an upgrade `"Task loop"` is the built-in; to keep running a customised loop, set the command to `naru workflow run "Task loop (custom)" --input {id} --detach`. Because the loop is global, every node moves to the task's own project checkout first (`to_project` in the shared prelude), so stage agents run where the task's project lives rather than in one fixed project.
+**Managed built-in (naru task 2103).** `Task loop` and its child ship in the binary and `serve` installs and updates them on every start (global, enabled, read-only; see `docs/workflows.md` "Built-in workflows"). A same-named workflow an install already had is renamed `Task loop (custom)` / `Task loop: implement and review (custom)` and kept. The watcher runs whatever name `commands.queue-watcher` holds: after an upgrade `"Task loop"` is the built-in; to keep running a customised loop, set the command to `naru workflow run "Task loop (custom)" --input {id} --detach`. Because the loop is global, every node moves to the task's own project checkout first (`to_project` in the shared prelude), so stage agents run where the task's project lives rather than in one fixed project.
 Loop smoke test passed.
 - Smoke test of the Commit step (task 2034 follow-up): a loop run commits its own change and leaves the tree clean.
 
@@ -361,7 +361,7 @@ failing node; with an unknown task id the ask is queued without `--task`). It
 is a notification the live agent may ignore, and it never fails the run.
 Existing installs need the node added by hand or the workflow recreated; `workflow defaults --task-loop` skips an existing one.
 
-The **stale-claim sweep** lives in the todo-watcher reaper (`docs/todo-watcher.md`).
+The **stale-claim sweep** lives in the queue-watcher reaper (`docs/queue-watcher.md`).
 
 ## 10. Plan and verify never require a commit (naru task 2047)
 

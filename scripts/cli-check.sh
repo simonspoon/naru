@@ -358,7 +358,7 @@ BEFORE=$("$MESA" task list "$PS")
   fail "task list: the flag must actually narrow the result"
 ok "task list with no flag: unchanged; the flag narrows only when passed"
 
-# `task next` reports the wedge on the todo-watcher's own path.
+# `task next` reports the wedge on the queue-watcher's own path.
 run 0 "$MESA" task next "$PS"
 [ "$(jqs .next)" = "null" ] || fail "task next: nothing should be actionable here"
 [ "$(jqs .in_progress)" = "2" ] || fail "task next: in_progress count"

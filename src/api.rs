@@ -218,7 +218,7 @@ struct AppState {
     /// panicking on a consumed oneshot.
     shutdown_tx: Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
     /// Inbox item ids the inbox-watcher (`watch_inbox`) has already dispatched
-    /// a triage job (`naru __job inbox-triage`) for. The inbox-watcher's answer to the todo-watcher's
+    /// a triage job (`naru __job inbox-triage`) for. The inbox-watcher's answer to the queue-watcher's
     /// `in_progress` claim — but in memory, not in the db, because an inbox
     /// item has no status column to claim with (`docs/inbox.md`: an item *is*
     /// the record, and assignment converts + deletes it). Pruned each tick to
@@ -261,7 +261,7 @@ struct AppState {
     /// `todo_dispatched`, so no relay can happen then either.
     cost_relay_seeded: Arc<Mutex<HashMap<i64, String>>>,
     /// Background job id → what it was dispatched for, for every session
-    /// the todo-watcher spawned in this server's lifetime and has not yet
+    /// the queue-watcher spawned in this server's lifetime and has not yet
     /// reaped (mesa task 1057). The reaper's whole memory: a dispatched
     /// session that has finished with its task sits idle for hours holding a
     /// worktree, and nothing in the db records which session was started for
@@ -283,7 +283,7 @@ struct AppState {
     /// `in_progress` (closed, deleted or moved by hand) and when the task is
     /// parked. In memory like `todo_dispatched`, so a restart forgives it.
     todo_requeued: Arc<Mutex<HashMap<i64, u32>>>,
-    /// Task id → the todo-watcher's last failed spawn for it (mesa task 1338):
+    /// Task id → the queue-watcher's last failed spawn for it (mesa task 1338):
     /// the task's `updated_at` as the watcher's own revert left it, and the
     /// error texts already filed as inbox alerts. The watcher skips a task
     /// while its `updated_at` still reads that value and the backoff window
@@ -306,7 +306,7 @@ struct AppState {
     script_runs: Arc<script_runs::Registry>,
 }
 
-/// How often the todo-watcher (`watch_todo`) checks every project for
+/// How often the queue-watcher (`watch_queue`) checks every project for
 /// dispatchable work. Not user-configurable — a fixed background cadence,
 /// not a request-driven poll like the UI's. `MESA_WATCH_TODO_TICK_MS`
 /// overrides it for tests (mirrors `MESA_CLAUDE_BIN`'s test-seam precedent),
@@ -321,21 +321,21 @@ const WATCH_TODO_SPAWN_BACKOFF: Duration = Duration::from_secs(2 * 60);
 /// The longest a failed todo spawn is backed off for.
 const SPAWN_BACKOFF_CAP: Duration = Duration::from_secs(30 * 60);
 
-fn watch_todo_spawn_backoff() -> Duration {
+fn watch_queue_spawn_backoff() -> Duration {
     crate::core::env::var("WATCH_TODO_SPAWN_BACKOFF_MS")
         .and_then(|s| s.parse().ok())
         .map(Duration::from_millis)
         .unwrap_or(WATCH_TODO_SPAWN_BACKOFF)
 }
 
-fn watch_todo_tick() -> Duration {
+fn watch_queue_tick() -> Duration {
     crate::core::env::var("WATCH_TODO_TICK_MS")
         .and_then(|s| s.parse().ok())
         .map(Duration::from_millis)
         .unwrap_or(WATCH_TODO_TICK)
 }
 
-/// How often the todo-watcher's **reaper** (`todo_reaper_tick`) checks the
+/// How often the queue-watcher's **reaper** (`todo_reaper_tick`) checks the
 /// sessions it dispatched for ones whose task has closed. A third of
 /// [`WATCH_TODO_TICK`] so "the session ends within a minute of its task
 /// closing" holds comfortably against the dispatch cadence, and it shares
@@ -344,7 +344,7 @@ fn watch_todo_tick() -> Duration {
 /// with it.
 const WATCH_TODO_REAP_TICK: Duration = Duration::from_secs(20);
 
-fn watch_todo_reap_tick() -> Duration {
+fn watch_queue_reap_tick() -> Duration {
     crate::core::env::var("WATCH_TODO_TICK_MS")
         .and_then(|s| s.parse().ok())
         .map(Duration::from_millis)
@@ -437,7 +437,7 @@ fn watch_retro_tick() -> Duration {
 /// concurrent `mesa retro run` sees as `conflict`. A failed spawn deletes the
 /// row again, so the next tick retries instead of waiting out the interval.
 /// The interval is read from `~/.mesa/config.json` fresh every tick, the
-/// `todo_concurrency` rule, and "due" is judged on the store's clock
+/// `queue_concurrency` rule, and "due" is judged on the store's clock
 /// (`Store::retro_status`), the same arithmetic `mesa retro status` prints.
 ///
 /// cwd is `~/.mesa/workspace`: a retrospective spans every project, so there
@@ -643,7 +643,7 @@ fn inbox_session_name(item: &InboxItem) -> String {
 /// has not already dispatched. The job makes the two tool-less `claude -p
 /// --json-schema` calls and applies the answer through `Store` itself, then
 /// exits — no `--bg` session, so nothing to remember or reap. The inbox is one
-/// **global** queue that lives above projects, so — unlike the todo-watcher,
+/// **global** queue that lives above projects, so — unlike the queue-watcher,
 /// which is naturally capped at one agent per project — every un-dispatched
 /// item goes out in the same tick.
 ///
@@ -653,7 +653,7 @@ fn inbox_session_name(item: &InboxItem) -> String {
 /// (`config::workspace_dir`).
 ///
 /// The dedup set (`AppState::inbox_dispatched`) stands in for the
-/// todo-watcher's `in_progress` claim, which has no inbox equivalent — an
+/// queue-watcher's `in_progress` claim, which has no inbox equivalent — an
 /// item has no status column. Two of the triage's outcomes archive the item
 /// or convert it (a real request becomes a backlog task via
 /// `assign_inbox_item`, a stale, duplicate, shipped or non-actionable one is
@@ -664,7 +664,7 @@ fn inbox_session_name(item: &InboxItem) -> String {
 /// starting) and released again only if the job process failed to start, so a
 /// transient failure retries next tick instead of silently dropping the item.
 ///
-/// Two-phase, like [`todo_watcher_tick`]: the store lock is dropped before the
+/// Two-phase, like [`queue_watcher_tick`]: the store lock is dropped before the
 /// spawn.
 fn inbox_watcher_tick(state: &AppState) {
     let dispatch_dir = config::workspace_dir().to_string_lossy().into_owned();
@@ -768,11 +768,11 @@ fn inbox_item_pending(item: &InboxItem) -> bool {
 /// resolves — an unattributable runaway is exactly the one nobody else is
 /// going to stop.
 ///
-/// Two-phase like [`inbox_watcher_tick`] and `todo_watcher_tick`: reading the
+/// Two-phase like [`inbox_watcher_tick`] and `queue_watcher_tick`: reading the
 /// transcripts and evaluating the rules is the slow part and happens with no
 /// store lock held; the lock is taken only for the task resolution and the
 /// inbox writes. Thresholds are read from `~/.mesa/config.json` **fresh every
-/// tick**, the `todo_concurrency` rule, so a limit changed in Settings takes
+/// tick**, the `queue_concurrency` rule, so a limit changed in Settings takes
 /// effect without restarting `mesa serve`; a config mesa cannot parse skips
 /// the tick rather than guarding against guessed numbers.
 ///
@@ -956,7 +956,7 @@ fn stop_runaway(
 
 /// The context-ceiling relay (mesa task 1527, `docs/cost-guard.md`): for each
 /// live session whose *current* breaches include `context`, and which the
-/// todo-watcher dispatched for an `in_progress` task that has written its
+/// queue-watcher dispatched for an `in_progress` task that has written its
 /// `checkpoint-task-<id>` artifact, stop it and start a fresh session on the
 /// same task. Not gated on the fire-once alert set — the checkpoint usually
 /// lands after the first breach tick — but on its own `cost_relayed` set.
@@ -1058,7 +1058,7 @@ fn relay_context_sessions(
         };
         let local_path = local_path.unwrap_or_default();
 
-        // Superseded *before* the stop, as the todo-watcher's own re-dispatch
+        // Superseded *before* the stop, as the queue-watcher's own re-dispatch
         // does: a reaper pass landing between the stop and the spawn must read
         // the old entry as replaced, not as a dead session to report.
         let replaced = supersede_dispatch(state, task_id);
@@ -1159,9 +1159,9 @@ fn relay_context_sessions(
     }
 }
 
-/// Starts the todo-watcher's session for `task_id` in `local_path`: seeds the
+/// Starts the queue-watcher's session for `task_id` in `local_path`: seeds the
 /// `supervisor` definition, reads the library's prompts and runs the
-/// `todo-watcher` template through `spawn_bg`. The one spawn both the watcher's
+/// `queue-watcher` template through `spawn_bg`. The one spawn both the watcher's
 /// dispatch and the cost guard's relay use; returns the receipt's job id.
 fn dispatch_task_session(
     state: &AppState,
@@ -1179,7 +1179,7 @@ fn dispatch_task_session(
             .map_err(|e| format!("cannot seed the supervisor agent definition: {e}"))?;
     }
     // The command — including which slash command executes a task — comes
-    // from `~/.mesa/config.json`'s `todo-watcher` entry, defaulting to
+    // from `~/.mesa/config.json`'s `queue-watcher` entry, defaulting to
     // `claude --bg --agent supervisor … -- /execute-naru-task <id>`.
     // The library's prompts, for any `{prompt:<name>}` the template names
     // (mesa task 1138).
@@ -1284,7 +1284,7 @@ fn outcome_note(outcome: &guard::StopOutcome) -> String {
 /// identifiable stream in a list of hand-written and agent-written items.
 const COST_GUARD_AUTHOR: &str = "cost-guard";
 
-/// Walks `task` down to the actionable task the todo watcher should really
+/// Walks `task` down to the actionable task the queue watcher should really
 /// dispatch: the top-ranked actionable descendant of `task`, recursively, or
 /// `task` itself once nothing under it is actionable.
 ///
@@ -1319,7 +1319,7 @@ fn deepest_actionable(store: &Store, mut task: Task, exclude: &[i64]) -> Result<
     Ok(task)
 }
 
-/// One todo-watcher pass: for every project with a live `local_path` and a
+/// One queue-watcher pass: for every project with a live `local_path` and a
 /// free dispatch slot, pick the next actionable task and dispatch a
 /// background `claude` agent on it. Marks the task `in_progress`
 /// itself *before* spawning — closing the race window between dispatch and
@@ -1352,7 +1352,7 @@ fn deepest_actionable(store: &Store, mut task: Task, exclude: &[i64]) -> Result<
 ///
 /// A project's `in_progress` **leaf** tasks occupy slots, and the tick fills
 /// up to
-/// `config::todo_concurrency()` — the user's per-project ceiling, default 1,
+/// `config::queue_concurrency()` — the user's per-project ceiling, default 1,
 /// so an unconfigured install behaves exactly as before. The limit is read
 /// once at the top of every tick rather than at startup, the same
 /// read-per-use rule the spawn templates follow, which is what makes an edit
@@ -1398,7 +1398,7 @@ fn deepest_actionable(store: &Store, mut task: Task, exclude: &[i64]) -> Result<
 /// freeze every other API request (each needs the same lock) for as long as
 /// `claude --bg` takes to start (node startup, ~0.5s+, per the Agents-tab
 /// comments) times however many projects this tick dispatches.
-fn todo_watcher_tick(state: &AppState) {
+fn queue_watcher_tick(state: &AppState) {
     // `naru self-deploy` is draining: claim nothing new (naru task 2035).
     if crate::core::drain::active() || crate::core::drain::paused() {
         return;
@@ -1406,10 +1406,10 @@ fn todo_watcher_tick(state: &AppState) {
     // Read once per tick, before the lock. An unreadable/malformed config is
     // a skipped tick, never a dispatch under a guessed limit — the spawn
     // would fail on the same file a moment later anyway.
-    let limit = match config::todo_concurrency() {
+    let limit = match config::queue_concurrency() {
         Ok(limit) => limit as usize,
         Err(e) => {
-            eprintln!("todo-watcher: {e}");
+            eprintln!("queue-watcher: {e}");
             return;
         }
     };
@@ -1425,7 +1425,7 @@ fn todo_watcher_tick(state: &AppState) {
             .map(|s| s.cwd)
             .collect(),
         Err(e) => {
-            eprintln!("todo-watcher: agents list failed, assuming nothing live: {e}");
+            eprintln!("queue-watcher: agents list failed, assuming nothing live: {e}");
             Vec::new()
         }
     };
@@ -1437,14 +1437,14 @@ fn todo_watcher_tick(state: &AppState) {
         let projects = match store.list_projects() {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("todo-watcher: list_projects failed: {e}");
+                eprintln!("queue-watcher: list_projects failed: {e}");
                 return;
             }
         };
         let tasks = match store.list_tasks(None) {
             Ok(t) => t,
             Err(e) => {
-                eprintln!("todo-watcher: list_tasks failed: {e}");
+                eprintln!("queue-watcher: list_tasks failed: {e}");
                 return;
             }
         };
@@ -1456,7 +1456,7 @@ fn todo_watcher_tick(state: &AppState) {
         // whose backoff window is still open (mesa tasks 1338, 1477): never
         // picked, so the pick moves past them.
         let mut backed_off: HashMap<i64, Vec<i64>> = HashMap::new();
-        let backoff_base = watch_todo_spawn_backoff();
+        let backoff_base = watch_queue_spawn_backoff();
         {
             let failed = match state.todo_spawn_failed.lock() {
                 Ok(f) => f,
@@ -1525,7 +1525,7 @@ fn todo_watcher_tick(state: &AppState) {
                         Ok(None) => break,
                         Err(e) => {
                             eprintln!(
-                                "todo-watcher: next_subtask failed for project {}: {e}",
+                                "queue-watcher: next_subtask failed for project {}: {e}",
                                 project.id
                             );
                             break;
@@ -1536,7 +1536,7 @@ fn todo_watcher_tick(state: &AppState) {
                         Ok(NextResult::None { .. }) => break,
                         Err(e) => {
                             eprintln!(
-                                "todo-watcher: next_task failed for project {}: {e}",
+                                "queue-watcher: next_task failed for project {}: {e}",
                                 project.id
                             );
                             break;
@@ -1547,7 +1547,7 @@ fn todo_watcher_tick(state: &AppState) {
                     Ok(task) => task,
                     Err(e) => {
                         eprintln!(
-                            "todo-watcher: next_subtask failed for project {}: {e}",
+                            "queue-watcher: next_subtask failed for project {}: {e}",
                             project.id
                         );
                         break;
@@ -1566,7 +1566,7 @@ fn todo_watcher_tick(state: &AppState) {
                         Ok(None) => {}
                         Err(e) => {
                             eprintln!(
-                                "todo-watcher: next_subtask failed for project {}: {e}",
+                                "queue-watcher: next_subtask failed for project {}: {e}",
                                 project.id
                             );
                             break;
@@ -1578,7 +1578,7 @@ fn todo_watcher_tick(state: &AppState) {
                     ..Default::default()
                 };
                 if let Err(e) = store.update_task(task.id, &in_progress) {
-                    eprintln!("todo-watcher: failed to claim task {}: {e}", task.id);
+                    eprintln!("queue-watcher: failed to claim task {}: {e}", task.id);
                     break;
                 }
                 let session_name = format!("{}: {}", project.name, task.name);
@@ -1589,7 +1589,7 @@ fn todo_watcher_tick(state: &AppState) {
         claimed
     };
     for (task_id, local_path, session_name) in claimed {
-        // Seeds the definition and runs the `todo-watcher` template; a failure
+        // Seeds the definition and runs the `queue-watcher` template; a failure
         // of either is a failed spawn for *this* task — reverted, backed off
         // and alerted below — and the tick goes on.
         let spawned = dispatch_task_session(state, task_id, &local_path, &session_name);
@@ -1617,7 +1617,7 @@ fn todo_watcher_tick(state: &AppState) {
                         match agents::stop(&stale) {
                             Ok(()) => {
                                 eprintln!(
-                                    "todo-watcher: task {task_id} was re-dispatched, stopped its \
+                                    "queue-watcher: task {task_id} was re-dispatched, stopped its \
                                      previous session (claude stop {stale})"
                                 );
                                 forget_dispatch(state, &stale);
@@ -1625,7 +1625,7 @@ fn todo_watcher_tick(state: &AppState) {
                             // Left marked superseded rather than forgotten, so
                             // the next reaper pass tries the stop again.
                             Err(e) => {
-                                eprintln!("todo-watcher: stopping session {stale} failed: {e}")
+                                eprintln!("queue-watcher: stopping session {stale} failed: {e}")
                             }
                         }
                     }
@@ -1640,7 +1640,7 @@ fn todo_watcher_tick(state: &AppState) {
                 }
             }
             Err(e) => {
-                eprintln!("todo-watcher: spawn failed for task {task_id}: {e}");
+                eprintln!("queue-watcher: spawn failed for task {task_id}: {e}");
                 // The alert body and the dedup key: escapes stripped (the real
                 // `claude` colours its output) and the length bounded, since
                 // the body may be spoken.
@@ -1673,9 +1673,9 @@ fn todo_watcher_tick(state: &AppState) {
                 // once filed, so a failed filing is tried again next failure.
                 if !failure.alerted.contains(&e) {
                     let body =
-                        spawn_failed_body(task_id, &local_path, &e, watch_todo_spawn_backoff());
+                        spawn_failed_body(task_id, &local_path, &e, watch_queue_spawn_backoff());
                     match store.create_inbox_item(
-                        Some(TODO_WATCHER_AUTHOR),
+                        Some(QUEUE_WATCHER_AUTHOR),
                         &body,
                         InboxKind::TaskSummary,
                         task_id,
@@ -1684,7 +1684,7 @@ fn todo_watcher_tick(state: &AppState) {
                             failure.alerted.insert(e);
                         }
                         Err(err) => eprintln!(
-                            "todo-watcher: could not file the spawn-failure alert for task \
+                            "queue-watcher: could not file the spawn-failure alert for task \
                              {task_id}: {err}"
                         ),
                     }
@@ -1694,11 +1694,11 @@ fn todo_watcher_tick(state: &AppState) {
     }
 }
 
-/// Author the todo-watcher's spawn-failure alerts are filed under, the
-/// dispatch side's twin of [`TODO_REAPER_AUTHOR`].
-const TODO_WATCHER_AUTHOR: &str = "todo-watcher";
+/// Author the queue-watcher's spawn-failure alerts are filed under, the
+/// dispatch side's twin of [`QUEUE_REAPER_AUTHOR`].
+const QUEUE_WATCHER_AUTHOR: &str = "queue-watcher";
 
-/// One task's failed todo-watcher spawn (mesa task 1338), kept in
+/// One task's failed queue-watcher spawn (mesa task 1338), kept in
 /// `AppState::todo_spawn_failed`.
 #[derive(Debug, Default)]
 struct SpawnFailure {
@@ -1722,7 +1722,7 @@ fn spawn_backoff_window(base: Duration, failures: u32) -> Duration {
         .min(SPAWN_BACKOFF_CAP)
 }
 
-/// Whether the todo-watcher should pass `task` over: its last spawn failed,
+/// Whether the queue-watcher should pass `task` over: its last spawn failed,
 /// nothing has written to it since — its `updated_at` is still the one the
 /// watcher's own revert stamped — and `now` is still inside the backoff
 /// window ([`spawn_backoff_window`]) that began at the failure. Any other
@@ -1760,11 +1760,11 @@ fn spawn_error_text(error: &str) -> String {
     format!("{}…", &clean[..end])
 }
 
-/// The alert for a task the todo-watcher could not start an agent on.
+/// The alert for a task the queue-watcher could not start an agent on.
 fn spawn_failed_body(task_id: i64, local_path: &str, error: &str, base: Duration) -> String {
     let minutes = spawn_backoff_window(base, 1).as_secs().div_ceil(60).max(1);
     format!(
-        "The todo watcher could not start an agent for task {task_id} in {local_path}. \
+        "The queue watcher could not start an agent for task {task_id} in {local_path}. \
          The spawn failed with: {error}. The task is back in the queue, and the watcher will \
          try it again automatically in about {minutes} minutes, waiting longer after each \
          further failure. Once the cause is fixed you can also touch the task — for \
@@ -1773,7 +1773,7 @@ fn spawn_failed_body(task_id: i64, local_path: &str, error: &str, base: Duration
     )
 }
 
-/// What a dispatched session was started for: the todo-watcher's task. (The
+/// What a dispatched session was started for: the queue-watcher's task. (The
 /// inbox-watcher's item was a second variant until naru task 1691 made its
 /// triage a self-exiting job.) The reaper asks the question — is the session
 /// still working on it? — through [`todo_reaper_tick`]'s one `still mine`
@@ -1787,7 +1787,7 @@ impl DispatchTarget {
     /// The stderr prefix of the watcher that dispatched this session.
     fn watcher(self) -> &'static str {
         match self {
-            DispatchTarget::Task(_) => "todo-watcher",
+            DispatchTarget::Task(_) => "queue-watcher",
         }
     }
 }
@@ -1800,7 +1800,7 @@ impl std::fmt::Display for DispatchTarget {
     }
 }
 
-/// One session the todo-watcher spawned, as
+/// One session the queue-watcher spawned, as
 /// `AppState::todo_dispatched` remembers it: what it was dispatched onto,
 /// and whether a later dispatch onto that same task has since **superseded**
 /// it.
@@ -1898,7 +1898,7 @@ fn stall_after() -> Option<Duration> {
     match config::stall_minutes() {
         Ok(m) => Some(Duration::from_secs(u64::from(m) * 60)),
         Err(e) => {
-            eprintln!("todo-watcher: stall watchdog skipped, cannot read stall-minutes: {e}");
+            eprintln!("queue-watcher: stall watchdog skipped, cannot read stall-minutes: {e}");
             None
         }
     }
@@ -1956,7 +1956,7 @@ fn stall_message(task_id: i64, name: &str, job_id: &str, silent: Duration) -> St
 }
 
 /// Author every reaper alert is filed under, `COST_GUARD_AUTHOR`'s twin.
-const TODO_REAPER_AUTHOR: &str = "todo-reaper";
+const QUEUE_REAPER_AUTHOR: &str = "queue-reaper";
 
 /// What the reaper should do with one dispatched session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2084,7 +2084,7 @@ fn reaper_force_stop_body(
     )
 }
 
-/// Path of the reaper log: `logs/todo-reaper.log` in Naru's home directory
+/// Path of the reaper log: `logs/queue-reaper.log` in Naru's home directory
 /// (`~/.naru`, or `~/.mesa` on an install that still has that), beside the
 /// config file and the workspace.
 fn reaper_log_path() -> Option<std::path::PathBuf> {
@@ -2092,7 +2092,7 @@ fn reaper_log_path() -> Option<std::path::PathBuf> {
     Some(
         config::dot_dir_in(dirs.home_dir())
             .join("logs")
-            .join("todo-reaper.log"),
+            .join("queue-reaper.log"),
     )
 }
 
@@ -2156,7 +2156,7 @@ fn append_reaper_log(line: &str) {
         .and_then(|mut f| f.write_all(line.as_bytes()));
     if let Err(e) = written {
         eprintln!(
-            "todo-watcher: writing the reaper log {} failed: {e}",
+            "queue-watcher: writing the reaper log {} failed: {e}",
             path.display()
         );
     }
@@ -2273,7 +2273,7 @@ fn file_reaper_alert(
 ) -> Result<(), String> {
     if !task_exists {
         eprintln!(
-            "todo-watcher: task {task_id} was deleted while its session {job_id} still had \
+            "queue-watcher: task {task_id} was deleted while its session {job_id} still had \
              work running; nothing to file the alert against"
         );
         return Ok(());
@@ -2284,7 +2284,7 @@ fn file_reaper_alert(
     };
     store
         .create_inbox_item(
-            Some(TODO_REAPER_AUTHOR),
+            Some(QUEUE_REAPER_AUTHOR),
             body,
             InboxKind::TaskSummary,
             task_id,
@@ -2293,7 +2293,7 @@ fn file_reaper_alert(
         .map_err(|e| e.to_string())
 }
 
-/// One reaper pass: stop the sessions the todo-watcher dispatched whose task
+/// One reaper pass: stop the sessions the queue-watcher dispatched whose task
 /// has since closed (mesa task 1057).
 ///
 /// The watchers' dispatch is one-directional — it starts agents and never
@@ -2323,11 +2323,11 @@ fn todo_reaper_tick(state: &AppState) {
     }
     // One listing per pass, taken before the store lock — it is a `claude`
     // shell-out, and holding the lock across it would freeze every other
-    // request, exactly as in `todo_watcher_tick`.
+    // request, exactly as in `queue_watcher_tick`.
     let sessions = match agents::list_all() {
         Ok(sessions) => sessions,
         Err(e) => {
-            eprintln!("todo-watcher: reaper could not list sessions, retrying next pass: {e}");
+            eprintln!("queue-watcher: reaper could not list sessions, retrying next pass: {e}");
             return;
         }
     };
@@ -2438,7 +2438,7 @@ fn todo_reaper_tick(state: &AppState) {
                                 file_reaper_alert(state, task_exists, task_id, &job_id, &body)
                             {
                                 eprintln!(
-                                    "todo-watcher: filing the force-stop alert for session \
+                                    "queue-watcher: filing the force-stop alert for session \
                                      {job_id} failed: {e}"
                                 );
                             }
@@ -2481,7 +2481,7 @@ fn todo_reaper_tick(state: &AppState) {
                             &format!("re-queued to todo (attempt {n}/{REAP_REQUEUE_MAX})"),
                         );
                         eprintln!(
-                            "todo-watcher: session {job_id} died with task {task_id} \
+                            "queue-watcher: session {job_id} died with task {task_id} \
                              in_progress; put it back to todo ({n}/{REAP_REQUEUE_MAX})"
                         );
                         forget_dispatch(state, &job_id);
@@ -2498,7 +2498,7 @@ fn todo_reaper_tick(state: &AppState) {
                             file_reaper_alert(state, task_exists, task_id, &job_id, &body)
                         {
                             eprintln!(
-                                "todo-watcher: filing the parked-task alert for session \
+                                "queue-watcher: filing the parked-task alert for session \
                                  {job_id} failed: {e}"
                             );
                         }
@@ -2515,7 +2515,7 @@ fn todo_reaper_tick(state: &AppState) {
                 match file_reaper_alert(state, task_exists, task_id, &job_id, &body) {
                     Ok(()) => {
                         eprintln!(
-                            "todo-watcher: session {job_id} ended without closing task \
+                            "queue-watcher: session {job_id} ended without closing task \
                              {task_id}; filed an inbox alert"
                         );
                         forget_dispatch(state, &job_id);
@@ -2523,7 +2523,7 @@ fn todo_reaper_tick(state: &AppState) {
                     }
                     // Kept, so the next pass files again.
                     Err(e) => eprintln!(
-                        "todo-watcher: filing the abandoned-task alert for session {job_id} \
+                        "queue-watcher: filing the abandoned-task alert for session {job_id} \
                          failed: {e}"
                     ),
                 }
@@ -2533,7 +2533,7 @@ fn todo_reaper_tick(state: &AppState) {
                 match file_reaper_alert(state, task_exists, task_id, &job_id, &body) {
                     Ok(()) => memory.stalled_alerted = true,
                     Err(e) => eprintln!(
-                        "todo-watcher: filing the stalled alert for session {job_id} failed: {e}"
+                        "queue-watcher: filing the stalled alert for session {job_id} failed: {e}"
                     ),
                 }
             }
@@ -2578,7 +2578,7 @@ fn stale_claim_sweep(state: &AppState) {
     let minutes = match config::stale_claim_minutes() {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("todo-watcher: stale-claim sweep skipped, cannot read config: {e}");
+            eprintln!("queue-watcher: stale-claim sweep skipped, cannot read config: {e}");
             return;
         }
     };
@@ -2655,11 +2655,11 @@ fn stale_claim_sweep(state: &AppState) {
         );
         let _ = store.add_task_note(task_id, &body, None);
         let notice = format!(
-            "Todo-watcher notice (no answer needed) - task {task_id}: stale claim swept. {body}"
+            "Queue-watcher notice (no answer needed) - task {task_id}: stale claim swept. {body}"
         );
         // A report, not a question: queued as a notice, raising no live notice.
         let _ = store.add_question(&notice, Some(task_id), None, "notice");
-        eprintln!("todo-watcher: swept the stale claim on task {task_id}; back to todo");
+        eprintln!("queue-watcher: swept the stale claim on task {task_id}; back to todo");
     }
 }
 
@@ -2688,7 +2688,7 @@ fn stall_watchdog(
             Some(Ok(_)) => memory.nudged_at = Some(now),
             other => {
                 if let Some(Err(e)) = other {
-                    eprintln!("todo-watcher: nudging session {job_id} failed: {e}");
+                    eprintln!("queue-watcher: nudging session {job_id} failed: {e}");
                 }
                 step = StallStep::Notify;
             }
@@ -2716,7 +2716,7 @@ fn stall_watchdog(
         // Best-effort: a missing or unconfigured vox is logged, not retried
         // every pass.
         if let Err(e) = notify::send(&body, Some("Naru: agent stalled"), None, None) {
-            eprintln!("todo-watcher: stall notification for session {job_id} failed: {e}");
+            eprintln!("queue-watcher: stall notification for session {job_id} failed: {e}");
         }
         memory.stall_notified = true;
     }
@@ -2727,7 +2727,7 @@ fn stall_watchdog(
         match file_reaper_alert(state, task_exists, task_id, job_id, &alert) {
             Ok(()) => memory.stall_filed = true,
             Err(e) => {
-                eprintln!("todo-watcher: filing the stall alert for session {job_id} failed: {e}")
+                eprintln!("queue-watcher: filing the stall alert for session {job_id} failed: {e}")
             }
         }
     }
@@ -2817,7 +2817,7 @@ pub struct ServeFlags {
     pub lan: Option<bool>,
     /// `--allow-host` names; non-empty replaces the config's list.
     pub allow_host: Vec<String>,
-    pub watch_todo: Option<bool>,
+    pub watch_queue: Option<bool>,
     pub watch_inbox: Option<bool>,
     pub watch_cost: Option<bool>,
     pub watch_retro: Option<bool>,
@@ -2878,9 +2878,9 @@ const WATCH_WORKFLOWS_DEFAULT: bool = true;
 fn todo_on(flags: &ServeFlags) -> bool {
     watcher_on(
         flags,
-        "watch-todo",
-        |f| f.watch_todo,
-        |c| c.watch_todo,
+        "watch-queue",
+        |f| f.watch_queue,
+        |c| c.watch_queue,
         false,
     )
 }
@@ -3112,13 +3112,13 @@ pub fn serve(flags: ServeFlags) -> crate::core::Result<()> {
         {
             let watch_state = state.clone();
             tokio::spawn(async move {
-                let mut ticker = tokio::time::interval(watch_todo_tick());
+                let mut ticker = tokio::time::interval(watch_queue_tick());
                 loop {
                     ticker.tick().await;
                     let state = watch_state.clone();
                     let _ = tokio::task::spawn_blocking(move || {
                         if todo_on(&state.serve_flags) {
-                            todo_watcher_tick(&state)
+                            queue_watcher_tick(&state)
                         }
                     })
                     .await;
@@ -3134,7 +3134,7 @@ pub fn serve(flags: ServeFlags) -> crate::core::Result<()> {
             // should not wait a whole dispatch tick to be stopped.
             let reap_state = state.clone();
             tokio::spawn(async move {
-                let mut ticker = tokio::time::interval(watch_todo_reap_tick());
+                let mut ticker = tokio::time::interval(watch_queue_reap_tick());
                 loop {
                     ticker.tick().await;
                     let state = reap_state.clone();
@@ -3265,7 +3265,7 @@ pub fn serve(flags: ServeFlags) -> crate::core::Result<()> {
         }
         for (name, given) in [
             ("--lan", flags.lan),
-            ("--watch-todo", flags.watch_todo),
+            ("--watch-queue", flags.watch_queue),
             ("--watch-inbox", flags.watch_inbox),
             ("--watch-cost", flags.watch_cost),
             ("--watch-retro", flags.watch_retro),
@@ -3864,7 +3864,7 @@ fn router(state: AppState) -> Router {
             "/api/config/pricing",
             get(get_config_pricing).put(update_config_pricing),
         )
-        // The same file's `watchers` section — the todo-watcher's per-project
+        // The same file's `watchers` section — the queue-watcher's per-project
         // agent ceiling. A third route for the same reason as `pricing`:
         // `/api/config` keeps its bare ConfigCommand[] shape.
         .route(
@@ -6248,7 +6248,7 @@ async fn delete_live_memory(
 ///
 /// The name is what a person reads in the Agents sidebar and the `/resume`
 /// picker, so a scoped conversation leads with its project, the idiom the
-/// todo-watcher's `"{project}: {task}"` set. The id is in both halves, so two
+/// queue-watcher's `"{project}: {task}"` set. The id is in both halves, so two
 /// conversations about one project stay distinguishable.
 fn live_agent_dir(
     store: &Store,
@@ -11155,7 +11155,7 @@ async fn update_config_pricing(
 }
 
 /// `GET /api/config/watchers` — the watcher settings the Settings page edits:
-/// today the todo-watcher's per-project agent ceiling, with the built-in
+/// today the queue-watcher's per-project agent ceiling, with the built-in
 /// default beside it (`docs/config.md`, mesa task 777).
 ///
 /// Gated like `get_config_pricing` — same file, same class of secret — and a
@@ -11182,8 +11182,12 @@ struct WatchersUpdate {
     /// Absent leaves the key alone; `null` removes it (restoring the built-in
     /// 1). The value stays raw JSON so `0`, `-1` and `2.5` are the config
     /// layer's named 422 rather than a deserializer rejection.
-    #[serde(default, deserialize_with = "deserialize_some")]
-    todo_concurrency: Option<Option<serde_json::Value>>,
+    #[serde(
+        default,
+        alias = "todo_concurrency",
+        deserialize_with = "deserialize_some"
+    )]
+    queue_concurrency: Option<Option<serde_json::Value>>,
     /// The retrospective's cadence (mesa task 1158), same three-way rule.
     #[serde(default, deserialize_with = "deserialize_some")]
     retro_interval_hours: Option<Option<serde_json::Value>>,
@@ -11215,7 +11219,7 @@ async fn update_config_watchers(
 ) -> ApiResult<Response> {
     require_agent_access(&state, &addr, &headers)?;
     let mut updates = HashMap::new();
-    if let Some(value) = body.todo_concurrency {
+    if let Some(value) = body.queue_concurrency {
         updates.insert(config::TODO_CONCURRENCY.to_string(), value);
     }
     if let Some(value) = body.retro_interval_hours {
@@ -11283,7 +11287,7 @@ async fn get_config_serve(
             effective: state.allow_hosts.to_vec(),
             flag: (!flags.allow_host.is_empty()).then(|| flags.allow_host.clone()),
         },
-        watch_todo: boolean(cfg.watch_todo, flags.watch_todo),
+        watch_queue: boolean(cfg.watch_queue, flags.watch_queue),
         watch_inbox: boolean(cfg.watch_inbox, flags.watch_inbox),
         watch_cost: boolean(cfg.watch_cost, flags.watch_cost),
         watch_retro: boolean(cfg.watch_retro, flags.watch_retro),
@@ -11310,8 +11314,8 @@ struct ServeUpdate {
     lan: Option<Option<serde_json::Value>>,
     #[serde(default, deserialize_with = "deserialize_some")]
     allow_host: Option<Option<serde_json::Value>>,
-    #[serde(default, deserialize_with = "deserialize_some")]
-    watch_todo: Option<Option<serde_json::Value>>,
+    #[serde(default, alias = "watch_todo", deserialize_with = "deserialize_some")]
+    watch_queue: Option<Option<serde_json::Value>>,
     #[serde(default, deserialize_with = "deserialize_some")]
     watch_inbox: Option<Option<serde_json::Value>>,
     #[serde(default, deserialize_with = "deserialize_some")]
@@ -11336,7 +11340,7 @@ async fn update_config_serve(
         (config::SERVE_PORT, body.port),
         (config::SERVE_LAN, body.lan),
         (config::SERVE_ALLOW_HOST, body.allow_host),
-        (config::SERVE_WATCH_TODO, body.watch_todo),
+        (config::SERVE_WATCH_TODO, body.watch_queue),
         (config::SERVE_WATCH_INBOX, body.watch_inbox),
         (config::SERVE_WATCH_COST, body.watch_cost),
         (config::SERVE_WATCH_RETRO, body.watch_retro),
@@ -15704,7 +15708,7 @@ mod tests {
                         ConnectInfo($peer),
                         $headers.clone(),
                         Json(WatchersUpdate {
-                            todo_concurrency: None,
+                            queue_concurrency: None,
                             retro_interval_hours: None,
                             stall_minutes: None,
                         }),
@@ -16218,20 +16222,20 @@ mod tests {
         assert_eq!(stored.acceptance.as_deref(), Some("a"));
     }
 
-    // --- todo-watcher must skip archived projects (mesa task 506) -----------
+    // --- queue-watcher must skip archived projects (mesa task 506) -----------
     //
-    // `todo_watcher_tick`'s only project source is `Store::list_projects()`,
+    // `queue_watcher_tick`'s only project source is `Store::list_projects()`,
     // which excludes archived rows (mesa task 504); it then calls
     // `next_task(Some(project.id))`, a scoped/archive-agnostic read (mesa task
     // 505), so the project list is the sole gate. This test calls the private
-    // `todo_watcher_tick` directly (same crate) against a stub `claude` so it
+    // `queue_watcher_tick` directly (same crate) against a stub `claude` so it
     // would fail immediately if a future change swapped in
     // `list_projects_all()` or otherwise let an archived project's task reach
     // dispatch.
 
     /// Writes an executable stub `claude` that only understands `--bg`,
     /// appending `<cwd>|<name>|<prompt>` to `log_path` and printing a
-    /// well-formed receipt line (mirrors `scripts/todo-watcher-check.sh`'s
+    /// well-formed receipt line (mirrors `scripts/queue-watcher-check.sh`'s
     /// stub). `--agent <name>` is consumed ahead of `--name`/`--` and written
     /// to `<dir>/last-agent` — argv order matters, so a stub that parses
     /// positionally has to know about every flag `spawn_bg` may emit.
@@ -16278,7 +16282,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
     }
 
     #[test]
-    fn todo_watcher_tick_skips_archived_project_dispatches_normal_one() {
+    fn queue_watcher_tick_skips_archived_project_dispatches_normal_one() {
         // SAFETY: ENV_LOCK (shared with attachments/cc tests) gives this test
         // exclusive access to MESA_CLAUDE_BIN for its duration.
         let _env = attachments::ENV_LOCK
@@ -16311,7 +16315,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                 .archive_project(archived_id)
                 .unwrap();
 
-            todo_watcher_tick(&state);
+            queue_watcher_tick(&state);
 
             unsafe { std::env::remove_var("MESA_CLAUDE_BIN") };
 
@@ -16356,7 +16360,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         });
     }
 
-    // --- todo-watcher umbrella tasks (mesa task 570) -----------------------
+    // --- queue-watcher umbrella tasks (mesa task 570) -----------------------
     //
     // An `in_progress` task that has subtasks must not wedge its project: the
     // watcher keeps dispatching, but only from under that umbrella. An
@@ -16397,7 +16401,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
     }
 
     #[test]
-    fn todo_watcher_tick_dispatches_subtask_under_in_progress_parent() {
+    fn queue_watcher_tick_dispatches_subtask_under_in_progress_parent() {
         // SAFETY: ENV_LOCK gives this test exclusive access to
         // MESA_CLAUDE_BIN for its duration.
         let _env = attachments::ENV_LOCK
@@ -16424,7 +16428,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             let child_b = new_subtask(&state, project, parent, "child b");
             set_status(&state, parent, Status::InProgress);
 
-            todo_watcher_tick(&state);
+            queue_watcher_tick(&state);
 
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             assert_eq!(
@@ -16447,7 +16451,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
 
             // The dispatched child is a leaf, so the project is busy again: the
             // second child must wait rather than fan out concurrently.
-            todo_watcher_tick(&state);
+            queue_watcher_tick(&state);
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             assert_eq!(
                 log.lines().count(),
@@ -16458,7 +16462,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
 
             // Child done -> the next tick takes the umbrella's second child.
             set_status(&state, child_a, Status::Done);
-            todo_watcher_tick(&state);
+            queue_watcher_tick(&state);
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             assert_eq!(log.lines().count(), 2, "second child dispatched: {log:?}");
             assert!(
@@ -16469,7 +16473,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             // Subtree exhausted while the umbrella is still open -> the watcher
             // stops rather than reaching for the unrelated todo.
             set_status(&state, child_b, Status::Done);
-            todo_watcher_tick(&state);
+            queue_watcher_tick(&state);
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             assert_eq!(
                 log.lines().count(),
@@ -16480,7 +16484,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
 
             // Umbrella closed -> the project is plainly idle again.
             set_status(&state, parent, Status::Done);
-            todo_watcher_tick(&state);
+            queue_watcher_tick(&state);
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             assert_eq!(log.lines().count(), 3, "idle project resumes: {log:?}");
             assert!(
@@ -16493,9 +16497,9 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
     }
 
     #[test]
-    fn todo_watcher_tick_never_dispatches_backlog_tasks() {
+    fn queue_watcher_tick_never_dispatches_backlog_tasks() {
         // `backlog` is the agent-side opt-out an orchestrating agent relies on
-        // (mesa task 613, `docs/todo-watcher.md`): tasks it authored and
+        // (mesa task 613, `docs/queue-watcher.md`): tasks it authored and
         // intends to dispatch itself must not be picked up by the watcher in
         // the window between creation and dispatch. Both picks
         // (`next_task` and, under an umbrella, `next_subtask`) filter on
@@ -16525,7 +16529,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             let shelved = new_task(&state, project);
             set_status(&state, shelved, Status::Backlog);
 
-            todo_watcher_tick(&state);
+            queue_watcher_tick(&state);
 
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             assert!(
@@ -16542,7 +16546,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             set_status(&state, child, Status::Backlog);
             set_status(&state, parent, Status::InProgress);
 
-            todo_watcher_tick(&state);
+            queue_watcher_tick(&state);
 
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             assert!(
@@ -16554,7 +16558,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             // The opt-out is the status and nothing else: releasing the child to
             // `todo` dispatches it on the very next tick.
             set_status(&state, child, Status::Todo);
-            todo_watcher_tick(&state);
+            queue_watcher_tick(&state);
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             assert!(
                 log.contains(&format!("/execute-naru-task {child}")),
@@ -16567,7 +16571,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
     }
 
     #[test]
-    fn todo_watcher_tick_withholds_dispatch_while_paused() {
+    fn queue_watcher_tick_withholds_dispatch_while_paused() {
         // `naru queue pause` (naru task 2038): a persistent marker the tick
         // reads fresh; resuming dispatches the same todo task.
         let _env = attachments::ENV_LOCK
@@ -16585,14 +16589,14 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             let task = new_task(&state, project);
 
             crate::core::drain::set_paused(true).unwrap();
-            todo_watcher_tick(&state);
+            queue_watcher_tick(&state);
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             assert!(log.is_empty(), "paused must dispatch nothing: {log:?}");
             let get = |id| state.store.lock().unwrap().get_task(id).unwrap().status;
             assert_eq!(get(task), Status::Todo);
 
             crate::core::drain::set_paused(false).unwrap();
-            todo_watcher_tick(&state);
+            queue_watcher_tick(&state);
             assert_eq!(get(task), Status::InProgress);
 
             unsafe { std::env::remove_var("MESA_CLAUDE_BIN") };
@@ -16672,7 +16676,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
     }
 
     #[test]
-    fn todo_watcher_tick_alerts_once_and_backs_off_a_failed_spawn() {
+    fn queue_watcher_tick_alerts_once_and_backs_off_a_failed_spawn() {
         // SAFETY: ENV_LOCK gives this test exclusive access to
         // MESA_CLAUDE_BIN for its duration.
         let _env = attachments::ENV_LOCK
@@ -16705,12 +16709,12 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             let status = |id| state.store.lock().unwrap().get_task(id).unwrap().status;
 
             // First tick: `first` is claimed, fails, reverted, reported once.
-            todo_watcher_tick(&state);
+            queue_watcher_tick(&state);
             assert_eq!(status(first), Status::Todo);
             let items = inbox();
             assert_eq!(items.len(), 1, "one alert for the failed spawn: {items:?}");
             let item = &items[0];
-            assert_eq!(item.author.as_deref(), Some("todo-watcher"));
+            assert_eq!(item.author.as_deref(), Some("queue-watcher"));
             assert_eq!(item.kind, InboxKind::TaskSummary);
             assert_eq!(item.task_id, Some(first));
             assert!(
@@ -16724,7 +16728,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
 
             // Second tick: `first` is backed off, so the pick moves on to
             // `second` rather than stopping the project at `first`.
-            todo_watcher_tick(&state);
+            queue_watcher_tick(&state);
             assert_eq!(
                 events(first),
                 first_events,
@@ -16738,8 +16742,8 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             let second_events = events(second);
 
             // Both backed off: further ticks claim nothing and file nothing.
-            todo_watcher_tick(&state);
-            todo_watcher_tick(&state);
+            queue_watcher_tick(&state);
+            queue_watcher_tick(&state);
             assert_eq!(events(first), first_events);
             assert_eq!(events(second), second_events);
             assert_eq!(inbox().len(), 2);
@@ -16751,7 +16755,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             unsafe { std::env::set_var("MESA_WATCH_TODO_SPAWN_BACKOFF_MS", "1") };
             std::thread::sleep(Duration::from_millis(1100));
             let expired_events = events(first);
-            todo_watcher_tick(&state);
+            queue_watcher_tick(&state);
             assert!(
                 events(first) > expired_events,
                 "an expired backoff is retried without a write"
@@ -16769,7 +16773,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             std::thread::sleep(Duration::from_millis(1100));
             set_status(&state, first, Status::Todo);
             let touched_events = events(first);
-            todo_watcher_tick(&state);
+            queue_watcher_tick(&state);
             assert!(
                 events(first) > touched_events,
                 "a touched task is tried again"
@@ -16781,7 +16785,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             std::fs::remove_file(&fail).unwrap();
             std::thread::sleep(Duration::from_millis(1100));
             set_status(&state, first, Status::Todo);
-            todo_watcher_tick(&state);
+            queue_watcher_tick(&state);
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             assert!(
                 log.contains(&format!("/execute-naru-task {first}")),
@@ -16807,7 +16811,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
     }
 
     #[test]
-    fn todo_watcher_tick_treats_a_failed_definition_seed_as_a_failed_spawn() {
+    fn queue_watcher_tick_treats_a_failed_definition_seed_as_a_failed_spawn() {
         // A definition that cannot be seeded used to `continue` past the
         // task, leaving it `in_progress` with no agent and the project's slot
         // wedged. It is now a failed spawn: reverted, backed off, alerted.
@@ -16830,8 +16834,8 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             let project = new_project(&state, Some(proj_dir.path().to_str().unwrap()));
             let task = new_task(&state, project);
 
-            todo_watcher_tick(&state);
-            todo_watcher_tick(&state);
+            queue_watcher_tick(&state);
+            queue_watcher_tick(&state);
             unsafe { std::env::remove_var("MESA_CLAUDE_BIN") };
 
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
@@ -16853,7 +16857,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
     }
 
     #[test]
-    fn todo_watcher_tick_never_claims_a_batch_whose_subtasks_are_backed_off() {
+    fn queue_watcher_tick_never_claims_a_batch_whose_subtasks_are_backed_off() {
         // A backed-off leaf must not make its parent look like a leaf: the
         // parent still has an actionable subtask, so claiming it would break
         // the umbrella rule `deepest_actionable` exists for.
@@ -16877,11 +16881,11 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             let child = new_subtask(&state, project, epic, "child");
             let status = |id| state.store.lock().unwrap().get_task(id).unwrap().status;
 
-            todo_watcher_tick(&state);
+            queue_watcher_tick(&state);
             assert!(state.todo_spawn_failed.lock().unwrap().contains_key(&child));
             let epic_events = state.store.lock().unwrap().list_events(Some(epic)).unwrap();
 
-            todo_watcher_tick(&state);
+            queue_watcher_tick(&state);
             assert_eq!(status(epic), Status::Todo);
             assert_eq!(
                 state
@@ -16900,7 +16904,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
     }
 
     #[test]
-    fn todo_watcher_tick_never_dispatches_a_task_with_actionable_subtasks() {
+    fn queue_watcher_tick_never_dispatches_a_task_with_actionable_subtasks() {
         // The umbrella rule's other half: if the watcher itself claimed a
         // *todo* epic, that epic would read as an umbrella on the very next
         // tick and a second agent would be spawned onto one of its own
@@ -16932,7 +16936,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             let child = new_subtask(&state, project, epic, "child");
             let grandchild = new_subtask(&state, project, child, "grandchild");
 
-            todo_watcher_tick(&state);
+            queue_watcher_tick(&state);
             let get = |id| state.store.lock().unwrap().get_task(id).unwrap().status;
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             assert_eq!(log.lines().count(), 1, "one dispatch: {log:?}");
@@ -16946,7 +16950,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             // Second tick: the claimed grandchild is a leaf, so the project is
             // busy. Without the leaf rule the epic would have been in_progress
             // here and this tick would spawn a second agent alongside it.
-            todo_watcher_tick(&state);
+            queue_watcher_tick(&state);
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             assert_eq!(
                 log.lines().count(),
@@ -16958,7 +16962,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             // its own claim parks the project rather than dispatching alongside.
             set_status(&state, grandchild, Status::Done);
             set_status(&state, child, Status::Done);
-            todo_watcher_tick(&state);
+            queue_watcher_tick(&state);
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             assert_eq!(log.lines().count(), 2, "roll-up dispatched: {log:?}");
             assert!(
@@ -16966,7 +16970,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                 "{log:?}"
             );
             assert_eq!(get(epic), Status::InProgress);
-            todo_watcher_tick(&state);
+            queue_watcher_tick(&state);
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             assert_eq!(
                 log.lines().count(),
@@ -17500,7 +17504,7 @@ exit 2
             let task = new_task(&state, project);
 
             // The dispatch records the receipt's job id against the task.
-            todo_watcher_tick(&state);
+            queue_watcher_tick(&state);
             assert_eq!(
                 dispatched_task(&state, "job0001"),
                 Some(task),
@@ -17592,7 +17596,7 @@ exit 2
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         crate::core::library::test_home::with_home_dir(|home| {
-            let log_path = home.join(".naru").join("logs").join("todo-reaper.log");
+            let log_path = home.join(".naru").join("logs").join("queue-reaper.log");
             let log_lines = || {
                 std::fs::read_to_string(&log_path)
                     .unwrap_or_default()
@@ -17606,7 +17610,7 @@ exit 2
             let bin = stub_claude_reaper(stub_dir.path(), &agents_file, &stop_log);
             unsafe { std::env::set_var("MESA_CLAUDE_BIN", &bin) };
             // A subagent transcript written just now is live work on job0001
-            // (the same signal `todo_watcher_tick` counts a slot on).
+            // (the same signal `queue_watcher_tick` counts a slot on).
             let cc_dir = tempfile::tempdir().unwrap();
             let subagents = cc_dir
                 .path()
@@ -17651,7 +17655,7 @@ exit 2
             assert_eq!(stops(&stop_log), vec!["job0001".to_string()]);
             assert_eq!(dispatched_task(&state, "job0001"), None);
             let expected = vec![(
-                Some(TODO_REAPER_AUTHOR.to_string()),
+                Some(QUEUE_REAPER_AUTHOR.to_string()),
                 InboxKind::TaskSummary,
                 Some(task),
             )];
@@ -17778,7 +17782,7 @@ exit 2
             std::fs::write(&agents_file, agents_listing("job0001", None, Some("idle"))).unwrap();
             todo_reaper_tick(&state);
             let expected = vec![(
-                Some(TODO_REAPER_AUTHOR.to_string()),
+                Some(QUEUE_REAPER_AUTHOR.to_string()),
                 InboxKind::TaskSummary,
                 Some(task),
             )];
@@ -17857,7 +17861,7 @@ exit 2
                 assert_eq!(dispatched_task(&state, &job), None);
             }
             let log =
-                std::fs::read_to_string(home.join(".naru").join("logs").join("todo-reaper.log"))
+                std::fs::read_to_string(home.join(".naru").join("logs").join("queue-reaper.log"))
                     .unwrap();
             assert!(log.contains("reason=session-died outcome=re-queued to todo (attempt 2/2)"));
 
@@ -17870,7 +17874,7 @@ exit 2
             assert_eq!(
                 inbox_rows(&state),
                 vec![(
-                    Some(TODO_REAPER_AUTHOR.to_string()),
+                    Some(QUEUE_REAPER_AUTHOR.to_string()),
                     InboxKind::TaskSummary,
                     Some(task),
                 )]
@@ -17960,7 +17964,7 @@ exit 2
             });
             todo_reaper_tick(&state);
             let expected = vec![(
-                Some(TODO_REAPER_AUTHOR.to_string()),
+                Some(QUEUE_REAPER_AUTHOR.to_string()),
                 InboxKind::TaskSummary,
                 Some(task),
             )];
@@ -17985,7 +17989,7 @@ exit 2
     }
 
     #[test]
-    fn todo_watcher_tick_stops_the_session_a_re_dispatch_supersedes() {
+    fn queue_watcher_tick_stops_the_session_a_re_dispatch_supersedes() {
         // SAFETY: ENV_LOCK gives this test exclusive access to
         // MESA_CLAUDE_BIN / MESA_CONFIG_FILE for its duration.
         let _env = attachments::ENV_LOCK
@@ -18010,7 +18014,7 @@ exit 2
             // back to `todo` before any reaper pass reached it.
             seed_dispatch(&state, "job0009", task);
 
-            todo_watcher_tick(&state);
+            queue_watcher_tick(&state);
 
             assert_eq!(
                 stops(&stop_log),
@@ -18029,7 +18033,7 @@ exit 2
     }
 
     #[test]
-    fn todo_watcher_tick_keeps_a_superseded_session_whose_stop_failed() {
+    fn queue_watcher_tick_keeps_a_superseded_session_whose_stop_failed() {
         // The supersede path's failure mode: a job dropped from the map on a
         // stop that then failed would be both unstopped and untracked. It
         // stays marked instead, and the task reading `in_progress` again
@@ -18060,7 +18064,7 @@ exit 2
             let task = new_task(&state, project);
             seed_dispatch(&state, "job0009", task);
 
-            todo_watcher_tick(&state);
+            queue_watcher_tick(&state);
 
             assert_eq!(
                 stops(&stop_log),
@@ -18144,7 +18148,7 @@ exit 2
     }
 
     #[test]
-    fn todo_watcher_tick_fills_up_to_the_configured_limit() {
+    fn queue_watcher_tick_fills_up_to_the_configured_limit() {
         // SAFETY: ENV_LOCK gives this test exclusive access to
         // MESA_CLAUDE_BIN / MESA_CONFIG_FILE for its duration.
         let _env = attachments::ENV_LOCK
@@ -18159,7 +18163,7 @@ exit 2
             let log_path = stub_dir.path().join("bg.log");
             let bin = stub_claude_bg(stub_dir.path(), &log_path);
             unsafe { std::env::set_var("MESA_CLAUDE_BIN", &bin) };
-            config_with(stub_dir.path(), r#"{"watchers": {"todo-concurrency": 2}}"#);
+            config_with(stub_dir.path(), r#"{"watchers": {"queue-concurrency": 2}}"#);
 
             let (_dir, state) = test_state();
             let proj_dir = tempfile::tempdir().unwrap();
@@ -18170,7 +18174,7 @@ exit 2
 
             // One tick fills both slots — the limit is a ceiling on concurrent
             // agents, not a rate of one per tick.
-            todo_watcher_tick(&state);
+            queue_watcher_tick(&state);
             let get = |id| state.store.lock().unwrap().get_task(id).unwrap().status;
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             assert_eq!(
@@ -18183,13 +18187,13 @@ exit 2
             assert_eq!(get(third), Status::Todo, "the third waits for a free slot");
 
             // Full: further ticks dispatch nothing.
-            todo_watcher_tick(&state);
+            queue_watcher_tick(&state);
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             assert_eq!(log.lines().count(), 2, "the project is full: {log:?}");
 
             // Freeing one slot releases exactly one more.
             set_status(&state, first, Status::Done);
-            todo_watcher_tick(&state);
+            queue_watcher_tick(&state);
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             assert_eq!(
                 log.lines().count(),
@@ -18203,7 +18207,7 @@ exit 2
     }
 
     #[test]
-    fn todo_watcher_tick_with_no_config_still_dispatches_exactly_one() {
+    fn queue_watcher_tick_with_no_config_still_dispatches_exactly_one() {
         // The whole point of the default: an install that never touched
         // `~/.mesa/config.json` behaves exactly as mesa did before task 777.
         //
@@ -18228,8 +18232,8 @@ exit 2
             let first = new_task(&state, project);
             let second = new_task(&state, project);
 
-            todo_watcher_tick(&state);
-            todo_watcher_tick(&state);
+            queue_watcher_tick(&state);
+            queue_watcher_tick(&state);
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             assert_eq!(log.lines().count(), 1, "one agent per project: {log:?}");
             let get = |id| state.store.lock().unwrap().get_task(id).unwrap().status;
@@ -18281,7 +18285,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
     }
 
     #[test]
-    fn todo_watcher_tick_treats_a_live_subagent_as_an_occupied_slot() {
+    fn queue_watcher_tick_treats_a_live_subagent_as_an_occupied_slot() {
         // The whole point of task 802: `claude agents` calls this session
         // `done`, but it still has a subagent transcript being written, so a
         // second agent must not be dropped into the same checkout.
@@ -18332,7 +18336,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             std::fs::write(subagents.join("agent-1.jsonl"), "{}").unwrap();
             unsafe { std::env::set_var("MESA_CC_PROJECTS_DIR", cc_dir.path()) };
 
-            todo_watcher_tick(&state);
+            queue_watcher_tick(&state);
             assert!(
                 std::fs::read_to_string(&log_path).is_err(),
                 "a session with work in flight parks the project's only slot"
@@ -18341,7 +18345,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
 
             // The session finishes: nothing live, and the slot refills.
             std::fs::write(&sessions, "[]").unwrap();
-            todo_watcher_tick(&state);
+            queue_watcher_tick(&state);
             assert_eq!(
                 std::fs::read_to_string(&log_path)
                     .unwrap_or_default()
@@ -18357,7 +18361,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             set_status(&state, first, Status::Done);
             let second = new_task(&state, project);
             std::fs::remove_file(&sessions).unwrap();
-            todo_watcher_tick(&state);
+            queue_watcher_tick(&state);
             assert_eq!(
                 get(second),
                 Status::InProgress,
@@ -18384,22 +18388,22 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             let log_path = stub_dir.path().join("bg.log");
             let bin = stub_claude_bg(stub_dir.path(), &log_path);
             unsafe { std::env::set_var("MESA_CLAUDE_BIN", &bin) };
-            let config = config_with(stub_dir.path(), r#"{"watchers": {"todo-concurrency": 3}}"#);
+            let config = config_with(stub_dir.path(), r#"{"watchers": {"queue-concurrency": 3}}"#);
 
             let (_dir, state) = test_state();
             let proj_dir = tempfile::tempdir().unwrap();
             let project = new_project(&state, Some(proj_dir.path().to_str().unwrap()));
             let ids: Vec<i64> = (0..4).map(|_| new_task(&state, project)).collect();
 
-            todo_watcher_tick(&state);
+            queue_watcher_tick(&state);
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             assert_eq!(log.lines().count(), 3, "three slots filled: {log:?}");
 
             // Lowered under the in-flight count, mid-run, with no restart: the
             // next tick reads the new value, dispatches nothing, and de-claims
             // nothing.
-            std::fs::write(&config, r#"{"watchers": {"todo-concurrency": 1}}"#).unwrap();
-            todo_watcher_tick(&state);
+            std::fs::write(&config, r#"{"watchers": {"queue-concurrency": 1}}"#).unwrap();
+            queue_watcher_tick(&state);
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             assert_eq!(log.lines().count(), 3, "nothing new is picked: {log:?}");
             let get = |id| state.store.lock().unwrap().get_task(id).unwrap().status;
@@ -18412,7 +18416,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             for id in &ids[..3] {
                 set_status(&state, *id, Status::Done);
             }
-            todo_watcher_tick(&state);
+            queue_watcher_tick(&state);
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             assert_eq!(
                 log.lines().count(),
@@ -18442,7 +18446,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         let project = new_project(&state, Some(proj_dir.path().to_str().unwrap()));
         let task = new_task(&state, project);
 
-        todo_watcher_tick(&state);
+        queue_watcher_tick(&state);
         assert!(
             std::fs::read_to_string(&log_path)
                 .unwrap_or_default()
@@ -18476,7 +18480,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             let log_path = stub_dir.path().join("bg.log");
             let bin = stub_claude_bg(stub_dir.path(), &log_path);
             unsafe { std::env::set_var("MESA_CLAUDE_BIN", &bin) };
-            config_with(stub_dir.path(), r#"{"watchers": {"todo-concurrency": 2}}"#);
+            config_with(stub_dir.path(), r#"{"watchers": {"queue-concurrency": 2}}"#);
 
             let (_dir, state) = test_state();
             let proj_dir = tempfile::tempdir().unwrap();
@@ -18487,7 +18491,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             let outsider = new_task(&state, project);
             set_status(&state, epic, Status::InProgress);
 
-            todo_watcher_tick(&state);
+            queue_watcher_tick(&state);
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             assert_eq!(
                 log.lines().count(),
@@ -18610,7 +18614,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         }
     }
 
-    /// The dedup set is what stands in for the todo-watcher's `in_progress`
+    /// The dedup set is what stands in for the queue-watcher's `in_progress`
     /// claim: every pending item is dispatched once, and a second tick over
     /// the same inbox dispatches nothing — a hold or a failed call leaves the
     /// item in place, so without this the watcher would start a job for it
@@ -18808,7 +18812,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
 
     /// A job that cannot start must release the claim, so a transient failure
     /// retries next tick instead of silently dropping the item — the inbox
-    /// equivalent of the todo-watcher's revert-to-`todo`.
+    /// equivalent of the queue-watcher's revert-to-`todo`.
     #[test]
     fn inbox_watcher_tick_releases_claim_when_the_job_cannot_start() {
         // SAFETY: see `inbox_watcher_tick_dispatches_each_item_once_...`.

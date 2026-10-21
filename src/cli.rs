@@ -209,9 +209,9 @@ EXAMPLES
     /// Only use it on networks you trust.
     ///
     /// Every option below is also a key of the `serve` section of
-    /// ~/.mesa/config.json (`port`, `lan`, `allow-host`, `watch-todo`, …), so a
+    /// ~/.mesa/config.json (`port`, `lan`, `allow-host`, `watch-queue`, …), so a
     /// bare `naru serve` can run as a service. A flag given on the command
-    /// line wins over the config; `--lan=false` / `--watch-todo=false` turn a
+    /// line wins over the config; `--lan=false` / `--watch-queue=false` turn a
     /// config `true` off for that run. The port, --lan and --allow-host are
     /// read once at start; the watchers are re-read every tick, so the
     /// Settings page toggles them live.
@@ -239,7 +239,7 @@ EXAMPLES
         /// Preserved across the web UI's Restart Server action.
         #[arg(long, value_name = "HOSTNAME")]
         allow_host: Vec<String>,
-        /// Periodically check every project for an actionable todo task and
+        /// Periodically check every project for an actionable queued task and
         /// auto-start a background `claude` agent on it (default prompt:
         /// `/execute-naru-task <task-id>`, configurable in
         /// ~/.mesa/config.json). A project is busy only while an in_progress
@@ -248,15 +248,15 @@ EXAMPLES
         /// parking the project. Off by default: this spawns real agents (API
         /// cost, code execution) with no user request behind it. Preserved
         /// across the web UI's Restart Server action.
-        #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true", value_name = "BOOL")]
-        watch_todo: Option<bool>,
+        #[arg(long, alias = "watch-todo", num_args = 0..=1, require_equals = true, default_missing_value = "true", value_name = "BOOL")]
+        watch_queue: Option<bool>,
         /// Periodically triage each pending change request in the global inbox
         /// with two tool-less `claude -p --json-schema` calls (haiku decides,
         /// sonnet writes the task) in a detached `naru __job inbox-triage`
         /// process; Naru applies the answer itself (template configurable in
         /// ~/.mesa/config.json; cwd `~/.mesa/workspace` — an inbox item
         /// belongs to no project). Off by default: this spends model calls
-        /// with no user request behind it. Independent of --watch-todo. Each
+        /// with no user request behind it. Independent of --watch-queue. Each
         /// item is dispatched at most once per server run. Preserved across the web
         /// UI's Restart Server action.
         #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true", value_name = "BOOL")]
@@ -273,7 +273,7 @@ EXAMPLES
         /// `guard.action = "report"` in ~/.mesa/config.json restores
         /// alert-only. Off by default: it reads Claude Code's
         /// transcripts and writes inbox items with no user request behind it.
-        /// Independent of --watch-todo and --watch-inbox. Preserved across the
+        /// Independent of --watch-queue and --watch-inbox. Preserved across the
         /// web UI's Restart Server action.
         #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true", value_name = "BOOL")]
         watch_cost: Option<bool>,
@@ -331,11 +331,11 @@ EXAMPLES
     /// Rebuild and restart the server safely (naru task 2035, docs/self-deploy.md)
     ///
     /// Runs scripts/self-deploy.sh: build into a temp dir and check it, back
-    /// up the db, drain the todo-watcher and in-flight workflow runs, swap
+    /// up the db, drain the queue-watcher and in-flight workflow runs, swap
     /// the binary atomically, restart, confirm health, roll back on failure.
     /// Prints a JSON verdict (`deployed` | `rolled-back` | `aborted`).
     SelfDeploy(SelfDeployArgs),
-    /// Pause, resume or probe the todo-watcher queue (naru task 2038)
+    /// Pause, resume or probe the queue-watcher queue (naru task 2038)
     ///
     /// `pause` stops new dispatch until `resume` (persisted across restarts);
     /// `idle` exits 0 only when no workflow run is running and no task is
@@ -756,9 +756,9 @@ struct SelfDeployArgs {
 
 #[derive(Subcommand)]
 enum QueueCmd {
-    /// Stop the todo-watcher claiming new tasks (idempotent)
+    /// Stop the queue-watcher claiming new tasks (idempotent)
     Pause,
-    /// Let the todo-watcher claim tasks again (idempotent)
+    /// Let the queue-watcher claim tasks again (idempotent)
     Resume,
     /// Exit 0 only if no workflow run is running and no task is in_progress
     Idle,
@@ -768,7 +768,7 @@ enum QueueCmd {
 enum SelfDeployCmd {
     /// Print the path of the db this install uses (for the rollback)
     DbPath,
-    /// Raise, lower or read the todo-watcher drain flag
+    /// Raise, lower or read the queue-watcher drain flag
     Drain {
         /// on | off | status
         state: String,
@@ -5717,7 +5717,7 @@ fn execute(command: Command) -> Result<()> {
             port,
             lan,
             allow_host,
-            watch_todo,
+            watch_queue,
             watch_inbox,
             watch_cost,
             watch_retro,
@@ -5726,7 +5726,7 @@ fn execute(command: Command) -> Result<()> {
             port,
             lan,
             allow_host,
-            watch_todo,
+            watch_queue,
             watch_inbox,
             watch_cost,
             watch_retro,
@@ -6326,7 +6326,7 @@ fn run_project_path(store: &mut Store, cmd: ProjectPathCmd) -> Result<()> {
 /// The close guard (mesa task 1515): `naru task update --status done` inside a
 /// Claude Code session (`CLAUDE_CODE_SESSION_ID`) is a `conflict` while that
 /// session's own shells/subagents still run, since closing is what makes the
-/// todo-watcher's reaper stop the session. No env var means no probe; a probe
+/// queue-watcher's reaper stop the session. No env var means no probe; a probe
 /// that fails or finds nothing allows the close. `force` (a reason) closes
 /// anyway, and the refusal and the forced close are both logged.
 fn close_guard(task_id: i64, force: Option<&str>) -> Result<()> {
@@ -7065,7 +7065,7 @@ fn current_live_session(store: &Store) -> Result<LiveSession> {
 ///
 /// The session NAME is what a person reads in the Agents sidebar, so it is the
 /// project name plus the session id when the conversation is scoped to a
-/// project (the todo-watcher's `"{project}: {task}"` idiom), and `naru live
+/// project (the queue-watcher's `"{project}: {task}"` idiom), and `naru live
 /// <id>` when it is not. The id is in both halves because two conversations
 /// about the same project would otherwise be indistinguishable. **The API's
 /// `POST /api/live` builds the same name** — the two spawn sites must not

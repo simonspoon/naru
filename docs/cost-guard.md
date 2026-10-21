@@ -49,9 +49,9 @@ already computes, the one sanctioned live-transcript read the CC Dashboard
 already carves out (`docs/cc-dashboard.md`). No new tables, no new parse, no
 second telemetry path.
 
-**Off by default**, for the todo-watcher's reason and one of its own: it reads
+**Off by default**, for the queue-watcher's reason and one of its own: it reads
 Claude Code's transcripts and writes inbox items with no user request behind
-it. It is independent of `--watch-todo` and `--watch-inbox` — none implies
+it. It is independent of `--watch-queue` and `--watch-inbox` — none implies
 another — and, like them, it is re-appended to the argv the web UI's **Restart
 Server** action relaunches with.
 
@@ -61,7 +61,7 @@ Server** action relaunches with.
 `MESA_WATCH_COST_TICK_MS` is the test seam, mirroring the other two watchers):
 
 1. **Read the thresholds**, fresh from `~/.mesa/config.json`'s `guard` section
-   — the `todo-concurrency` rule (`docs/config.md`): a limit changed in
+   — the `queue-concurrency` rule (`docs/config.md`): a limit changed in
    Settings takes effect without restarting `mesa serve`. A config Naru cannot
    parse **skips the tick** and logs, rather than guarding against guessed
    numbers.
@@ -69,7 +69,7 @@ Server** action relaunches with.
    hour-wide window (see below).
 3. **Evaluate**, with no store lock held. This and step 2 are the slow part;
    holding the lock across them would freeze every other API request, the
-   two-phase shape `inbox_watcher_tick` and `todo_watcher_tick` already have.
+   two-phase shape `inbox_watcher_tick` and `queue_watcher_tick` already have.
 4. **Act**, still with no store lock held: under the `stop` action, look the
    session's short job id up with `claude agents --json --all` and run
    `claude stop <job id>`. Two shell-outs, both best-effort. This happens
@@ -150,14 +150,14 @@ the session running because the context rule only reports. If another rule
 trips alongside it, that rule's stop proceeds as usual. The one exception is the
 relay below.
 
-The `supervisor` agent definition (`core::supervisor`, what the todo-watcher's `--agent supervisor` spawn runs as) tells a task session that, past that same 120k, it writes its own checkpoint (goal, state, in-flight agents, next step, key refs) to a `checkpoint-task-<id>` artifact on its task, reading its occupied context from `naru cc live`. A session starting on a task that already has one reads it first and resumes from its **Next step**.
+The `supervisor` agent definition (`core::supervisor`, what the queue-watcher's `--agent supervisor` spawn runs as) tells a task session that, past that same 120k, it writes its own checkpoint (goal, state, in-flight agents, next step, key refs) to a `checkpoint-task-<id>` artifact on its task, reading its occupied context from `naru cc live`. A session starting on a task that already has one reads it first and resumes from its **Next step**.
 
 The 120,000-token default is the size past which a fresh session seeded with a
 checkpoint is cheaper than carrying the context forward.
 
 #### The relay (mesa task 1527)
 
-A session over the ceiling that the **todo-watcher dispatched for a task** is
+A session over the ceiling that the **queue-watcher dispatched for a task** is
 stopped and replaced by a fresh one on the same task, which reads the
 checkpoint. `relay_context_sessions` in `src/api.rs` evaluates it on every tick
 for each live session whose *current* breaches include `context` — not only a
@@ -165,7 +165,7 @@ fresh one, because the checkpoint is usually written after the first breach tick
 — and `guard::relay_decision` (pure) says yes iff **all** hold:
 
 - the guard `action` is `stop` (`report` keeps the alert-only behaviour exactly);
-- the session's job id (`claude agents --json --all`) is in the todo-watcher's
+- the session's job id (`claude agents --json --all`) is in the queue-watcher's
   dispatch memory (`todo_dispatched`) for a task;
 - that task is `in_progress`, and its project has a `local_path`;
 - a `checkpoint-task-<id>` artifact exists on that task (`guard::find_checkpoint`);
@@ -174,8 +174,8 @@ fresh one, because the checkpoint is usually written after the first breach tick
 
 Otherwise nothing changes: the context-only alert still says the session was
 left running. The relay runs `claude stop <old job>`, then the same dispatch
-the todo-watcher uses (`dispatch_task_session`: seed the definition, run the
-`todo-watcher` template), and swaps the old job for the new in the dispatch
+the queue-watcher uses (`dispatch_task_session`: seed the definition, run the
+`queue-watcher` template), and swaps the old job for the new in the dispatch
 memory so the reaper tracks the new session. It files **one** `task-summary`
 alert (author `cost-guard`) naming the checkpoint artifact and the new job
 (`StopOutcome::Relayed`). A failed stop spawns nothing, retries next tick and
@@ -186,7 +186,7 @@ checkpoint is relayed only once it has been **rewritten since the last relay
 seeded one**: `cost_relay_seeded` remembers, per task, the `updated_at` of the
 checkpoint each successful relay seeded, and `relay_decision` refuses while the
 current checkpoint still carries it (the session then gets the ordinary
-"left running" alert). Every dispatch (the todo-watcher's and the relay's) also records the
+"left running" alert). Every dispatch (the queue-watcher's and the relay's) also records the
 checkpoint already on the task, if any, as seeded, so an earlier run's
 checkpoint is never taken for the new session's own; entries for tasks no
 longer `in_progress` are pruned each tick. The map is in memory; after a restart it is empty, but
@@ -406,7 +406,7 @@ remaining route onto it too). A bad
 value is `validation` (422) and writes **nothing** — the whole update is
 checked before the file is touched. A hand-edited value of the right type but
 outside its bound falls back to the built-in *for that key*, the clamp posture
-`todo-concurrency` takes: a stray `0` must not switch the guard off silently.
+`queue-concurrency` takes: a stray `0` must not switch the guard off silently.
 A value of the wrong *type* is an error on read, and the tick skips.
 
 ## Gate

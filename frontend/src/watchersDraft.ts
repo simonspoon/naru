@@ -21,12 +21,12 @@ export const MIN_CONCURRENCY = 1
 export const MAX_CONCURRENCY = 20
 
 /** The section's boxes as typed — today, exactly one. */
-export type WatchersDraft = { todo_concurrency: string }
+export type WatchersDraft = { queue_concurrency: string }
 
 /** The editable text as loaded: an unconfigured value is blank. */
 export function draftFrom(watchers: ConfigWatchers): WatchersDraft {
-  const value = watchers.todo_concurrency
-  return { todo_concurrency: value === null ? '' : String(value) }
+  const value = watchers.queue_concurrency
+  return { queue_concurrency: value === null ? '' : String(value) }
 }
 
 /**
@@ -48,7 +48,7 @@ export function valueError(text: string): string | null {
 
 /** What the box means: a number, or `null` for "the built-in default". */
 function valueOf(draft: WatchersDraft): number | null {
-  const trimmed = (draft.todo_concurrency ?? '').trim()
+  const trimmed = (draft.queue_concurrency ?? '').trim()
   return trimmed === '' ? null : Number(trimmed)
 }
 
@@ -57,13 +57,13 @@ export function isDirty(
   watchers: ConfigWatchers,
   draft: WatchersDraft,
 ): boolean {
-  if (valueError(draft.todo_concurrency ?? '')) return true
-  return valueOf(draft) !== watchers.todo_concurrency
+  if (valueError(draft.queue_concurrency ?? '')) return true
+  return valueOf(draft) !== watchers.queue_concurrency
 }
 
 /** True when nothing drafted would be rejected by the server. */
 export function isSavable(draft: WatchersDraft): boolean {
-  return valueError(draft.todo_concurrency ?? '') === null
+  return valueError(draft.queue_concurrency ?? '') === null
 }
 
 /**
@@ -77,5 +77,5 @@ export function changedWatchers(
   draft: WatchersDraft,
 ): Record<string, number | null> {
   if (!isDirty(watchers, draft) || !isSavable(draft)) return {}
-  return { todo_concurrency: valueOf(draft) }
+  return { queue_concurrency: valueOf(draft) }
 }

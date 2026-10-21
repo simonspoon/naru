@@ -1,6 +1,17 @@
-# Todo watcher
+# Queue watcher
 
-`mesa serve --watch-todo` starts a periodic background loop (a fixed-interval
+> Called the "todo watcher" until naru task 1898, to match a `todo` task being
+> shown as "Queued". The old names keep working: `serve --watch-todo`, the
+> config keys `commands.todo-watcher`, `watchers.todo-concurrency` and
+> `serve.watch-todo` (read when the new key is absent; a save writes the new
+> key and removes the old one), and the API fields `todo_concurrency` /
+> `watch_todo` on a PUT. The `MESA_WATCH_TODO_*` test variables, the
+> `execute-todo` prompt and the Rust identifiers `todo_dispatched` /
+> `todo_reaper_tick` keep their names. New alerts are authored `queue-watcher`
+> / `queue-reaper` and the reaper logs to `logs/queue-reaper.log`; items and
+> logs written earlier keep `todo-watcher` / `todo-reaper`.
+
+`mesa serve --watch-queue` starts a periodic background loop (a fixed-interval
 `tokio::spawn`, the first true interval loop in the codebase — everything
 else in `src/api.rs` is request-driven or a one-shot fire-and-forget refresh)
 that keeps every project's todo backlog moving without a human manually
@@ -13,14 +24,14 @@ because someone ran `mesa serve`.
   auto-dispatched onto (main-loop ruling 1), with no separate check of its
   own: it simply never appears in the list the watcher loops over. Unarchiving
   restores it starting with the next tick. Regression: a Rust unit test
-  (`api::tests::todo_watcher_tick_skips_archived_project_dispatches_normal_one`)
-  calls `todo_watcher_tick` directly against an archived + a normal project so
+  (`api::tests::queue_watcher_tick_skips_archived_project_dispatches_normal_one`)
+  calls `queue_watcher_tick` directly against an archived + a normal project so
   the exclusion can't silently regress if `list_projects()` were ever swapped
-  for `list_projects_all()`; `scripts/todo-watcher-check.sh` covers the same
+  for `list_projects_all()`; `scripts/queue-watcher-check.sh` covers the same
   behavior end-to-end through the real dispatch loop.
-- Each tick (`todo_watcher_tick` in `src/api.rs`) reads the configured
+- Each tick (`queue_watcher_tick` in `src/api.rs`) reads the configured
   **per-project concurrency limit** from `~/.mesa/config.json`
-  (`watchers.todo-concurrency`, `docs/config.md`) fresh — no caching, no
+  (`watchers.queue-concurrency`, `docs/config.md`) fresh — no caching, no
   restart, so a saved change takes effect on the very next tick. If the read
   fails (malformed file), the tick `eprintln!`s and returns without
   dispatching anything, rather than guessing a limit. For every
@@ -31,7 +42,7 @@ because someone ran `mesa serve`.
   actionable tasks to fill the gap — up to `limit - count` in that one tick,
   not just one. Each dispatch calls `Store::next_task` for that project and, on an
   actionable task, immediately flips that task to `in_progress` itself —
-  *before* spawning — then calls `agents::spawn_bg` for the **`todo-watcher`**
+  *before* spawning — then calls `agents::spawn_bg` for the **`queue-watcher`**
   command, with the task id and the session name `<project name>: <task name>`
   as its `{id}`/`{name}`. **The command line itself — including which slash
   command runs — is user-configurable** in `~/.mesa/config.json`
@@ -92,12 +103,12 @@ because someone ran `mesa serve`.
     for; it is only surprising if the parent was a leaf when its agent
     started. An agent that means to orchestrate its own children takes the
     `backlog` opt-out below rather than racing the tick.
-  - Regressions: `api::tests::todo_watcher_tick_dispatches_subtask_under_in_progress_parent`
+  - Regressions: `api::tests::queue_watcher_tick_dispatches_subtask_under_in_progress_parent`
     (whole lifecycle: first child dispatched, siblings and unrelated tasks
     wait, exhausted subtree does not fall back, closing the umbrella resumes
     whole-backlog dispatch) plus
     `core::store::tests::next_subtask_scopes_to_descendants_shares_next_task_rules`,
-    and the same lifecycle end-to-end in `scripts/todo-watcher-check.sh`.
+    and the same lifecycle end-to-end in `scripts/queue-watcher-check.sh`.
 - **`backlog` is the agent-side opt-out, and the only one** (mesa task 613).
   Both picks filter `status = 'todo'`, so a `backlog` task is invisible to the
   watcher on either path — an agent that authors tasks it intends to dispatch
@@ -109,7 +120,7 @@ because someone ran `mesa serve`.
   does not gate dispatch (`next_task` only ever returns `todo` rows, so the
   claim is already invisible to it), and `updated_at` freshness is not
   consulted at all. Regression:
-  `api::tests::todo_watcher_tick_never_dispatches_backlog_tasks` (both picks,
+  `api::tests::queue_watcher_tick_never_dispatches_backlog_tasks` (both picks,
   plus release-to-`todo` dispatching normally, so the opt-out is proven to be
   the status and nothing else).
 - If `spawn_bg` fails (the `claude` CLI missing or erroring), the claimed
@@ -122,7 +133,7 @@ because someone ran `mesa serve`.
   watcher claimed and reverted it on every tick, forever, with the error only
   on the server's stderr.
   - The failure files an inbox alert (kind `task-summary`, so the
-    inbox-watcher never triages it; author `todo-watcher`; against the task,
+    inbox-watcher never triages it; author `queue-watcher`; against the task,
     through the same `Store::create_inbox_item` the reaper uses) naming the
     task id, the project folder the spawn ran in and the error text —
     ANSI escapes stripped and cut to 2 KiB, the same text serving as the
@@ -161,11 +172,11 @@ because someone ran `mesa serve`.
     small entry per task whose spawn has failed.
   - Regressions: `api::tests::spawn_backed_off_holds_only_while_updated_at_is_unchanged`,
     `api::tests::spawn_backoff_window_doubles_and_is_capped`,
-    `api::tests::todo_watcher_tick_alerts_once_and_backs_off_a_failed_spawn`,
-    `api::tests::todo_watcher_tick_never_claims_a_batch_whose_subtasks_are_backed_off`,
-    `api::tests::todo_watcher_tick_treats_a_failed_definition_seed_as_a_failed_spawn`,
+    `api::tests::queue_watcher_tick_alerts_once_and_backs_off_a_failed_spawn`,
+    `api::tests::queue_watcher_tick_never_claims_a_batch_whose_subtasks_are_backed_off`,
+    `api::tests::queue_watcher_tick_treats_a_failed_definition_seed_as_a_failed_spawn`,
     `api::tests::spawn_error_text_strips_escapes_and_caps_the_length`,
-    and the spawn-failure blocks at the end of `scripts/todo-watcher-check.sh`
+    and the spawn-failure blocks at the end of `scripts/queue-watcher-check.sh`
     (the last one runs with `MESA_WATCH_TODO_SPAWN_BACKOFF_MS=600` and asserts
     an untouched task is retried, the alert still filed once).
 - **A project's occupied slots are `max(in_progress leaves, live-work
@@ -238,7 +249,7 @@ because someone ran `mesa serve`.
     above. The wait is capped: `REAP_LIVE_WORK_GRACE` (10 minutes, from the
     pass that first saw the work) after which it is stopped anyway. This is
     routine and files **nothing** by itself: one line goes to the **reaper
-    log**, `logs/todo-reaper.log` under Naru's home directory (`~/.naru`, or
+    log**, `logs/queue-reaper.log` under Naru's home directory (`~/.naru`, or
     `~/.mesa` on an install that still has it — beside `config.json` and
     `workspace/`), written when the work ends, one per event:
     `<UTC time> task=<id> session=<job id> reason=closed|re-dispatched
@@ -246,7 +257,7 @@ because someone ran `mesa serve`.
     where the outcome is `finished within the grace; session stopped`,
     `finished; session ended on its own`, or `still running after the grace;
     force-stopped`. Only that last outcome files an inbox alert (kind
-    `task-summary`, author `todo-reaper`, against the task) — saying the work
+    `task-summary`, author `queue-reaper`, against the task) — saying the work
     was cut off and naming `claude attach <id>`. A task deleted in the
     meantime has nothing to file against, so nothing is filed (one stderr
     line) and the grace still runs. A log that cannot be written is one stderr
@@ -266,7 +277,7 @@ because someone ran `mesa serve`.
       session=<job id> reason=session-died outcome=re-queued to todo (attempt
       n/2)`. The count is per task, in memory (`AppState::todo_requeued`),
       capped at `REAP_REQUEUE_MAX` = 2: the next death **parks** the task in
-      `backlog` and files one `task-summary` alert (author `todo-reaper`) that
+      `backlog` and files one `task-summary` alert (author `queue-reaper`) that
       the session died that many times, so a task that kills every agent is not
       retried forever (the park alert is best-effort: a failed filing is one stderr line, not retried, since the task already sits in backlog). The re-queue only happens while the dead session's entry is still current — not superseded by a relay or re-dispatch since the pass's snapshot — and removes that entry under the same lock. The count is dropped when the reaper next sees the task
       not `in_progress` (closed, deleted, moved by hand) and when it parks. A
@@ -288,7 +299,7 @@ because someone ran `mesa serve`.
       one more window later (at once when no nudge was possible): one phone
       notification through `core::notify::send` (best-effort, failure logged)
       naming the task id, name and silence, plus one inbox alert authored
-      `todo-reaper`. Any busy or live-work sighting drops the nudge and both
+      `queue-reaper`. Any busy or live-work sighting drops the nudge and both
       flags, so a later silence starts over. It never stops or moves the task
       or session; the Agents panel marks the row `stalled` (`AgentSession.stalled`).
     Each alert is fire-once through flags on the dispatch's own in-memory
@@ -319,24 +330,24 @@ because someone ran `mesa serve`.
     `cost_stopped`, and deliberately not persisted: a `serve` restart forgets
     the sessions spawned before it, which leaves them to be stopped by hand
     — and forgets the three alerts above with them, so a session dispatched
-    before a restart is neither reaped nor reported. A replacement `todo-watcher` template that prints no `backgrounded · <id>`
+    before a restart is neither reaped nor reported. A replacement `queue-watcher` template that prints no `backgrounded · <id>`
     receipt records nothing and so leaves nothing to stop — the same
     limitation the attach pane already has. (A multi-line **script** template
     is not that case: its stdout is read exactly as an argv command's is, so
     a script whose last line is `claude --bg …` still hands Naru the id.)
   - The reaper runs on its own `WATCH_TODO_REAP_TICK` (20s) interval loop,
-    started alongside the dispatch loop under `--watch-todo` — so a closed
+    started alongside the dispatch loop under `--watch-queue` — so a closed
     task's session ends well inside a minute. It served `--watch-inbox` too
     from mesa task 1192 until naru task 1691 made the inbox triage a
     self-exiting `naru __job` with no session to stop
     (`docs/inbox-watcher.md`); `DispatchTarget` has only the task variant now. It shares `MESA_WATCH_TODO_TICK_MS` rather than adding a seam of
     its own — the two loops are one feature.
   - Regressions: `api::tests::todo_reaper_tick_stops_a_dispatched_session_once_its_task_closes`,
-    `api::tests::todo_watcher_tick_stops_the_session_a_re_dispatch_supersedes`,
+    `api::tests::queue_watcher_tick_stops_the_session_a_re_dispatch_supersedes`,
     `api::tests::todo_reaper_tick_logs_live_work_and_alerts_only_when_it_is_force_stopped`,
     the two other `todo_reaper_tick_reports_*` tests and the six
     `reap_verdict_*` unit tests, plus the reaper block in
-    `scripts/todo-watcher-check.sh` end-to-end.
+    `scripts/queue-watcher-check.sh` end-to-end.
   - **The close guard** (mesa task 1515) is the reaper's mirror on the agent's
     side: `naru task update <id> --status done` run inside a Claude Code
     session (`CLAUDE_CODE_SESSION_ID` set and non-empty) is refused —
@@ -365,29 +376,29 @@ because someone ran `mesa serve`.
     `<UTC> task=<id> session=<sid> outcome=refused|forced still_running="<n>
     shell(s), <n> subagent(s)" reason="<reason>"`; a log that cannot be written
     is one stderr line, never a failed command. Covered by the close-guard block
-    in `scripts/todo-watcher-check.sh` and the `close_*`/`a_subagent_running_*`
+    in `scripts/queue-watcher-check.sh` and the `close_*`/`a_subagent_running_*`
     unit tests in `src/core/agents.rs`.
 - The tick cadence is a fixed internal constant (`WATCH_TODO_TICK`, 60s), not
   user-configurable. `MESA_WATCH_TODO_TICK_MS` overrides it, a test-only seam
-  (mirrors `MESA_CLAUDE_BIN`) so `scripts/todo-watcher-check.sh` isn't stuck
+  (mirrors `MESA_CLAUDE_BIN`) so `scripts/queue-watcher-check.sh` isn't stuck
   waiting a full tick per assertion. `MESA_WATCH_TODO_SPAWN_BACKOFF_MS` is
   the same kind of seam for the failed-spawn backoff's 2-minute base
   (`WATCH_TODO_SPAWN_BACKOFF`); the 30-minute cap is fixed.
 - The flag is propagated through the web UI's **Restart Server** action the
   same way `--lan` is: `serve`'s post-shutdown relaunch re-execs the binary
-  with `--watch-todo` appended when it was set, so restarting the server
+  with `--watch-queue` appended when it was set, so restarting the server
   never silently turns the watcher off.
-- The flag can also be a config key (mesa task 1621): `serve.watch-todo` in
+- The flag can also be a config key (mesa task 1621): `serve.watch-queue` in
   `~/.mesa/config.json`. The loop always runs and each tick checks whether the
   watcher is enabled (the flag if given, else the config read fresh), so
-  Settings → System → Server toggles it live, within a minute (its tick; the reaper never stops running, so a session dispatched before the switch went off is still reaped); `--watch-todo=false`
+  Settings → System → Server toggles it live, within a minute (its tick; the reaper never stops running, so a session dispatched before the switch went off is still reaped); `--watch-queue=false`
   forces it off for a run. See `docs/config.md` "Serve".
-- Gate: `scripts/todo-watcher-check.sh` (flag on/off, dispatch + claim,
+- Gate: `scripts/queue-watcher-check.sh` (flag on/off, dispatch + claim,
   at-the-limit skip, path-less/stale-path skip, spawn-failure revert, a
   failing spawn tried once per task and alerted once while the pick moves on
   and a touch after the fix dispatching it,
   archived-project skip + unarchive-resumes-dispatch, umbrella
-  subtask-dispatch lifecycle, a configured `todo-concurrency` filling to the
+  subtask-dispatch lifecycle, a configured `queue-concurrency` filling to the
   limit in one tick and picking up the next task once one finishes, a real
   process holding a real shell child parking the slot until it is killed, and
   the fail-open path where an erroring `agents` probe still dispatches)
@@ -396,7 +407,7 @@ because someone ran `mesa serve`.
   in_progress and while it is still `busy`, stopped exactly once when its task
   closes, the old session stopped when a task goes back to `todo`, and a
   session that dies with its task still `in_progress` put back to `todo`
-  with a log line and no alert, parked in `backlog` with one `todo-reaper`
+  with a log line and no alert, parked in `backlog` with one `queue-reaper`
   alert after two such re-queues, and only alerted when the task holds a
   claim) — no CLI surface of its own beyond the `serve` flag, matching the
   agents surface's "no `mesa agent` CLI" precedent.
@@ -412,4 +423,4 @@ to the task, or it is one of the watcher's own live dispatches), the task goes
 back to `todo` with the claim dropped, gets a note, and an `ask` row tells the
 live agent. A task with subtasks is left alone, an unlistable `claude` skips
 the pass, and the change is re-checked under the store lock. Gate:
-`scripts/todo-watcher-check.sh`.
+`scripts/queue-watcher-check.sh`.

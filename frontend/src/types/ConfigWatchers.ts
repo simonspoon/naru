@@ -9,13 +9,13 @@
  */
 export type ConfigWatchers = { 
 /**
- * How many watcher agents the todo-watcher may have running per project,
- * or `null` when the config says nothing — then `todo_concurrency_default`
+ * How many watcher agents the queue-watcher may have running per project,
+ * or `null` when the config says nothing — then `queue_concurrency_default`
  * is what applies.
  */
-todo_concurrency: number | null, 
+queue_concurrency: number | null, 
 /**
  * The built-in limit mesa ships (1), so the editor can show what blank
  * means without hardcoding it.
  */
-todo_concurrency_default: number, };
+queue_concurrency_default: number, };

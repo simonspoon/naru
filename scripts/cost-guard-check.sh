@@ -434,13 +434,13 @@ ok "GET /api/config/guard: absent config = null values beside the built-in defau
 # section first, then save `guard`, then read them all back.
 
 curl -sf -X PUT -H 'Content-Type: application/json' \
-  -d '{"commands":{"todo-watcher":"mytool --bg -- /go {id}"}}' \
+  -d '{"commands":{"queue-watcher":"mytool --bg -- /go {id}"}}' \
   "http://127.0.0.1:$PORT/api/config" >/dev/null || fail "seed commands"
 curl -sf -X PUT -H 'Content-Type: application/json' \
   -d '{"pricing":{"claude-fictional":{"input":1.5,"output":2.5,"cache_read":0.5,"cache_write":3.0}}}' \
   "http://127.0.0.1:$PORT/api/config/pricing" >/dev/null || fail "seed pricing"
 curl -sf -X PUT -H 'Content-Type: application/json' \
-  -d '{"todo_concurrency":4}' \
+  -d '{"queue_concurrency":4}' \
   "http://127.0.0.1:$PORT/api/config/watchers" >/dev/null || fail "seed watchers"
 curl -sf -X PUT -H 'Content-Type: application/json' \
   -d '{"voice":"af_sky"}' \
@@ -460,11 +460,11 @@ jq -e '.cache_read_share == 0.75' <<<"$CFG" >/dev/null || fail "PUT echoed the w
 jq -e '.repeat_count == 7 and .context_tokens == 150000 and .action == "report"' <<<"$CFG" >/dev/null ||
   fail "PUT echoed the wrong repeat/action: $CFG"
 
-jq -e '.commands["todo-watcher"] == "mytool --bg -- /go {id}"' "$CONFIG" >/dev/null ||
+jq -e '.commands["queue-watcher"] == "mytool --bg -- /go {id}"' "$CONFIG" >/dev/null ||
   fail "the commands section did not survive: $(cat "$CONFIG")"
 jq -e '.pricing["claude-fictional"].input == 1.5' "$CONFIG" >/dev/null ||
   fail "the pricing section did not survive: $(cat "$CONFIG")"
-jq -e '.watchers["todo-concurrency"] == 4' "$CONFIG" >/dev/null ||
+jq -e '.watchers["queue-concurrency"] == 4' "$CONFIG" >/dev/null ||
   fail "the watchers section did not survive: $(cat "$CONFIG")"
 jq -e '.speech.voice == "af_sky"' "$CONFIG" >/dev/null ||
   fail "the speech section did not survive: $(cat "$CONFIG")"
@@ -544,7 +544,7 @@ stop_server
 
 # ---- the relay (mesa task 1527) ---------------------------------------------
 #
-# A session the todo-watcher dispatched for a task, past the context ceiling
+# A session the queue-watcher dispatched for a task, past the context ceiling
 # with a `checkpoint-task-<id>` artifact on its task, is stopped and replaced
 # by a fresh session on the same task. A fresh world: its own db, transcript
 # tree and HOME, and a stub `claude` that also answers `--bg` with a receipt,
@@ -587,7 +587,7 @@ STUB
 
 relay_server() { # relay_server <flags...>
   HOME="$FAKE_HOME" MESA_WATCH_COST_TICK_MS=150 MESA_WATCH_TODO_TICK_MS=150 \
-    "$MESA" serve --port "$PORT" --watch-todo --watch-cost "$@" >"$TMP/server.log" 2>&1 &
+    "$MESA" serve --port "$PORT" --watch-queue --watch-cost "$@" >"$TMP/server.log" 2>&1 &
   SERVER_PID=$!
   wait_for_server
 }

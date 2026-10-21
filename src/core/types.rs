@@ -260,7 +260,7 @@ pub struct AgentSession {
     /// row (`naru run show <id>`); `null` for every `claude agents` row.
     #[serde(default)]
     pub run_id: Option<String>,
-    /// **naru-derived** (task 1953): the todo-watcher's stall watchdog has
+    /// **naru-derived** (task 1953): the queue-watcher's stall watchdog has
     /// seen this dispatched session silent past `watchers.stall-minutes`
     /// while its task is still `in_progress`. `false` for every other row.
     #[serde(default)]
@@ -447,7 +447,7 @@ pub struct AgentWatchRow {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../frontend/src/types/")]
 pub struct ConfigCommand {
-    /// The config key: `todo-watcher`, `inbox-watcher` or `agent-spawn`.
+    /// The config key: `queue-watcher`, `inbox-watcher` or `agent-spawn`.
     pub action: String,
     /// The configured template, or `null` when the key is absent or blank.
     /// Null is "falling back to `default`", never "run nothing".
@@ -595,7 +595,7 @@ pub struct ConfigServe {
     pub port: ServeNumberSetting,
     pub lan: ServeBoolSetting,
     pub allow_host: ServeHostsSetting,
-    pub watch_todo: ServeBoolSetting,
+    pub watch_queue: ServeBoolSetting,
     pub watch_inbox: ServeBoolSetting,
     pub watch_cost: ServeBoolSetting,
     pub watch_retro: ServeBoolSetting,
@@ -613,13 +613,13 @@ pub struct ConfigServe {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../frontend/src/types/")]
 pub struct ConfigWatchers {
-    /// How many watcher agents the todo-watcher may have running per project,
-    /// or `null` when the config says nothing — then `todo_concurrency_default`
+    /// How many watcher agents the queue-watcher may have running per project,
+    /// or `null` when the config says nothing — then `queue_concurrency_default`
     /// is what applies.
-    pub todo_concurrency: Option<u32>,
+    pub queue_concurrency: Option<u32>,
     /// The built-in limit mesa ships (1), so the editor can show what blank
     /// means without hardcoding it.
-    pub todo_concurrency_default: u32,
+    pub queue_concurrency_default: u32,
     /// How many hours `serve --watch-retro` waits between two retrospectives
     /// (mesa task 1158, `docs/retro.md`), or `null` when the config says
     /// nothing — then `retro_interval_hours_default` applies. `ts(skip)`: the
@@ -628,7 +628,7 @@ pub struct ConfigWatchers {
     #[ts(skip)]
     pub retro_interval_hours: Option<u32>,
     /// The built-in cadence mesa ships (72), for the same reason as
-    /// `todo_concurrency_default`.
+    /// `queue_concurrency_default`.
     #[ts(skip)]
     pub retro_interval_hours_default: u32,
     /// Minutes a dispatched agent may stay silent on an `in_progress` task

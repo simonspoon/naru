@@ -179,7 +179,7 @@ otherwise begin driving the conversation; only the agent that spawned it
 speaks. Two hard rules ride with it: **nothing spawned from a conversation,
 and not the agent itself, ever edits code in a project** — a change the person
 wants becomes a Naru task (`backlog` for an idea, `todo` for work the
-todo-watcher's own agents pick up) — and two delegates never work in the same
+queue-watcher's own agents pick up) — and two delegates never work in the same
 tree or repository at once (own worktree, own files, or one after another). A
 result that lands mid-discussion on another topic is held for a natural pause;
 one that lands while the conversation is quiet is announced right away, never
@@ -2267,26 +2267,14 @@ browser has no such handler and behaves exactly as before.
 
 | `msg` | When |
 | --- | --- |
-| `{"type":"ready"}` | The page installed its API below; answer with `setMicState`. |
+| `{"type":"ready"}` | The page installed `window.naruNativeHost` (the gesture-setup callbacks; naru task 2181 removed the mic bridge). |
 | `{"type":"state","session":<id or null>,"live":<bool>,"joined":<bool>,"paused":<bool>,"speechMuted":<bool>}` | On mount and whenever the live session, `live`, this browser's `joined`, the page's Pause or its speaker mute changes. Capture only while `live && joined`, and while `paused` capture nothing, submit no utterance and speak no reply (naru task 1786); while `speechMuted` speak no reply (naru task 1787). |
-| `{"type":"mic","muted":<bool>}` | The person pressed the listen button or chord. |
 | `{"type":"ambient","on":<bool>}` | The person pressed the **Ambient** (`on: true`) or **Live** (`on: false`) button, or accepted an offer while ambient (`on: false`). Naru task 1746. |
 | `{"type":"wakeWords"}` | The custom wake words were saved in Settings > Voice (naru task 1769). No payload: refetch `GET /api/config/ambient`. |
 
-**Host to page** — `window.naruNativeHost.setMicState({muted?: <bool>,
-level?: <rms 0..1>, hearing?: <bool>, ambient?: <bool>})` (installed only when the host is
-detected; a missing key leaves that state alone, a wrongly typed one is
-ignored). `level` drives the orb and glow as the page's own meter would, and
-the person counts as heard while `hearing` is true or `level` reaches the
-capture onset (`DEFAULT_VAD.onsetRms`); a host sending only `muted` behaves
-as before. It is the last word on `muted`: a press is
-applied locally at once and posted as `mic`, and the host's next `setMicState`
-overrides it.
-
 **The mic control client** (naru task 2179, `frontend/src/liveMicControl.ts`).
 naru-audio owns the conversation's mute (naru-audio task 2178). In a plain
-browser, and in a host that calls `window.naruNativeHost.setHostInfo({micOwner:
-"naru-audio"})`, the page joins the live conversation as a `role: "control"`
+browser and in a host alike (one path since naru task 2181), the page joins the live conversation as a `role: "control"`
 socket on serve's `/v1/audio/live` proxy, `conversation` = the live session id
 as a decimal string (the same value as `state.session` above; the host must use
 it too). Its `start` asks for `mode: "live"` (joining opens the microphone), or
@@ -2296,27 +2284,22 @@ server's `state` (only `live` is listening; a `state` whose `seq` is not above
 the last one since `ready` is ignored), and the press-time effects (cut, send,
 discard, fresh recording) run on that state's edge. Until the first `state`, and
 while the socket is down, the switch is disabled with "Connecting to
-naru-audio…" and capture is shut. A thin host's `setMicState.muted` is ignored
-(its `level`, `hearing` and `ambient` still apply) and the page posts no `mic`.
-A host that never calls `setHostInfo` keeps the bridge above exactly.
-Since naru task 2210 such a host need push none of those three either: the
-orb's level and the hearing glow follow naru-audio's `level` events
+naru-audio…" and capture is shut. Under a host the page opens no capture of
+its own, so (naru task 2210) the orb's level and the hearing glow follow naru-audio's `level` events
 (`{rms, gate}`; heard while `gate` is open and `rms` reaches the onset) on the
 same control socket, and ambient follows its `state` — entered on mode
 `ambient`, left when the mode moves off it (`ambientEdge`, an edge only, so a
 `state` raised for another reason never undoes the page's own Ambient press).
 A plain browser ignores both and keeps measuring its own capture.
-`setMicState`'s `level`/`hearing`/`ambient` still apply until naru task 2181
-removes them.
 
 **Ambient mode** (naru task 1746): the host owns live-vs-ambient and the live
-session stays open across the switch. `ambient: true` pauses this page's run
+session stays open across the switch. Entering ambient pauses this page's run
 (nothing spoken, no navigate; the typed box reads "ambient — press Live to talk
-to Naru", Pause is hidden); `ambient: false` refetches `GET /api/live` and only
+to Naru", Pause is hidden); leaving it refetches `GET /api/live` and only
 then unpauses, so a stale poll cannot make the page speak while the host
-reclaims the voice. The host's push is the last word: the **Ambient** button
-pauses locally and posts `ambient`, the **Live** button only posts it and
-waits for the host's reply. The switch is offered only with a host, while live
+reclaims the voice. naru-audio's `state` mode is the last word (naru task
+2210): the **Ambient** button pauses locally and posts `ambient`, the **Live**
+button only posts it and waits for that `state`. The switch is offered only with a host, while live
 and joined; ambient clears when the session ends. A plain browser never sees it.
 
 **The agent can ask for the switch** (naru task 1813): `naru live ambient

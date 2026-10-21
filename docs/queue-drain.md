@@ -3,7 +3,7 @@
 Naru task 2038, part 1 of the safe self-redeploy (task 2035, `docs/self-deploy.md`).
 
 - `naru queue pause` / `naru queue resume` — idempotent; print `{"paused": bool}`. The
-  todo-watcher's dispatch (`todo_watcher_tick`) claims nothing while paused, read
+  queue-watcher's dispatch (`queue_watcher_tick`) claims nothing while paused, read
   fresh every tick. The reaper and the other watchers keep running; sessions already
   dispatched are not stopped.
 - `naru queue idle` — prints `{"idle", "in_progress", "runs_active", "paused"}`; exit 0
@@ -15,4 +15,4 @@ Naru task 2038, part 1 of the safe self-redeploy (task 2035, `docs/self-deploy.m
 
 After an install, re-run `naru workflow defaults --task-loop` so the Notify live agent
 node exists. Gate: `scripts/queue-check.sh`; dispatch gate: Rust test
-`todo_watcher_tick_withholds_dispatch_while_paused`.
+`queue_watcher_tick_withholds_dispatch_while_paused`.

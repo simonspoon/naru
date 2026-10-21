@@ -29,5 +29,5 @@ export NARU_ATTACHMENTS_DIR="$dev/attachments"
 export NARU_AUDIO_URL="http://127.0.0.1:7871"
 
 exec "$bin" serve --port "$port" \
-  --watch-todo=false --watch-inbox=false --watch-cost=false \
+  --watch-queue=false --watch-inbox=false --watch-cost=false \
   --watch-retro=false --watch-workflows=false

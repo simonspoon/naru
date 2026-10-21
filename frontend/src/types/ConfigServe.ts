@@ -10,7 +10,7 @@ import type { ServeNumberSetting } from "./ServeNumberSetting";
  * change needs a restart (`restart_required`); the five watcher switches are
  * read on every tick.
  */
-export type ConfigServe = { port: ServeNumberSetting, lan: ServeBoolSetting, allow_host: ServeHostsSetting, watch_todo: ServeBoolSetting, watch_inbox: ServeBoolSetting, watch_cost: ServeBoolSetting, watch_retro: ServeBoolSetting, watch_workflows: ServeBoolSetting, 
+export type ConfigServe = { port: ServeNumberSetting, lan: ServeBoolSetting, allow_host: ServeHostsSetting, watch_queue: ServeBoolSetting, watch_inbox: ServeBoolSetting, watch_cost: ServeBoolSetting, watch_retro: ServeBoolSetting, watch_workflows: ServeBoolSetting, 
 /**
  * True when the port, LAN switch or allowed hosts the config would give a
  * fresh start differ from what this process is running with.

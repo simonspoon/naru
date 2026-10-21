@@ -8,7 +8,7 @@ persona and the slash command can all change without rebuilding Naru:
 
 | Key | Used by | Built-in default |
 | --- | --- | --- |
-| `todo-watcher` | `serve --watch-todo` dispatch (`docs/todo-watcher.md`; to run tasks through the managed `Task loop` built-in use `naru workflow run "Task loop" --input {id} --detach`, or `"Task loop (custom)"` for an upgraded install's own copy — `docs/workflows.md`) | `claude --bg --agent supervisor --name {name} -- "/execute-naru-task {id}"` |
+| `queue-watcher` | `serve --watch-queue` dispatch (`docs/queue-watcher.md`; to run tasks through the managed `Task loop` built-in use `naru workflow run "Task loop" --input {id} --detach`, or `"Task loop (custom)"` for an upgraded install's own copy — `docs/workflows.md`) | `claude --bg --agent supervisor --name {name} -- "/execute-naru-task {id}"` |
 | `inbox-watcher` | `serve --watch-inbox` triage (`docs/inbox-watcher.md`): up to two synchronous, tool-less `claude -p --json-schema` calls (haiku decides, sonnet writes the task) per item, run in a detached `naru __job inbox-triage` whose verdict Naru validates and applies itself (naru task 1691). Offers `{id}`, `{name}`, `{prompt}`, `{schema}` and `{model}` | `claude -p --model {model} --name {name} --tools "" --strict-mcp-config --output-format json --json-schema {schema} -- {prompt}` |
 | `agent-spawn` | `POST /api/projects/{id}/agents`, the Agents sidebar's **add agent** (`docs/agents.md`) | `claude --bg --model opus --agent supervisor -- {prompt}` |
 | `live-agent` | `mesa live start`, `POST /api/live`, `mesa live handoff` — the session that holds a spoken conversation (`docs/live.md`), since naru task 1886 a `naru run` job (`core::live::spawn_agent` → `core::runner`, `docs/runner.md`) rather than a `--bg` agent. Offers `{name}`, `{session_flag}` and `{session_id}` | `claude -p --input-format stream-json --output-format stream-json --verbose --agent naru-live --name {name} {session_flag} {session_id}` |
@@ -29,7 +29,7 @@ from the vocabulary (see *Retired placeholders* below).
 ```json
 {
   "commands": {
-    "todo-watcher":   "claude --bg --agent supervisor --name {name} -- \"/execute-naru-task {id}\"",
+    "queue-watcher":   "claude --bg --agent supervisor --name {name} -- \"/execute-naru-task {id}\"",
     "inbox-watcher":  "claude -p --model {model} --name {name} --tools \"\" --strict-mcp-config --output-format json --json-schema {schema} -- {prompt}",
     "agent-spawn":    "claude --bg -- {prompt}",
     "live-agent":     "claude -p --input-format stream-json --output-format stream-json --verbose --agent naru-live --name {name} {session_flag} {session_id}",
@@ -185,6 +185,15 @@ re-prompted forever. `config::workspace_dir()` creates it on demand and is
 deliberately **independent of `MESA_CONFIG_FILE`**: that override moves the
 config *file*, not Naru's home.
 
+
+> **Renamed (naru task 1898):** the todo watcher is now the queue watcher.
+> `commands.queue-watcher`, `watchers.queue-concurrency` and
+> `serve.watch-queue` replace `todo-watcher`, `todo-concurrency` and
+> `watch-todo`; the old keys are still read when the new one is absent, and a
+> save of the new key removes the old. `GET`/`PUT /api/config/watchers` and
+> `/serve` use `queue_concurrency` / `watch_queue`; a PUT still accepts the old
+> field names. See `docs/queue-watcher.md`.
+
 ## One mode: every hook is a bash script
 
 A value is a **bash script**, run as `bash -c <script>` from the project folder
@@ -198,7 +207,7 @@ redirection or a conditional binary all simply work, on one line or several:
 ```json
 {
   "commands": {
-    "todo-watcher": "set -euo pipefail\ncd \"$HOME/src/checkouts/{id}\" 2>/dev/null || cd \"$HOME/src\"\nexport CLAUDE_PROJECT=mesa\nexec claude --bg --agent supervisor --name {name} -- \"/execute-naru-task {id}\""
+    "queue-watcher": "set -euo pipefail\ncd \"$HOME/src/checkouts/{id}\" 2>/dev/null || cd \"$HOME/src\"\nexport CLAUDE_PROJECT=mesa\nexec claude --bg --agent supervisor --name {name} -- \"/execute-naru-task {id}\""
   }
 }
 ```
@@ -227,7 +236,7 @@ knows about:
 | Placeholder | Where | Value |
 | --- | --- | --- |
 | `{id}` | watchers, `retro`, `live-summary`, `live-dream` | the task id / inbox item id / retro run id / live session id (for `live-dream`, the newest session's; empty on an install that has never held one) |
-| `{name}` | watchers, `retro`, `kb`, `live-agent`, `live-summary`, `live-dream`, `workflow-prompt` | the session name Naru derives — `workflow <workflow name> · <node title>` (`workflow-prompt`), `<project>: <task name>` (todo-watcher), `inbox <id>: <first body line>` (**untrusted text**), `naru retro <id>`, the live session's own name, or the literal `live memory dream` |
+| `{name}` | watchers, `retro`, `kb`, `live-agent`, `live-summary`, `live-dream`, `workflow-prompt` | the session name Naru derives — `workflow <workflow name> · <node title>` (`workflow-prompt`), `<project>: <task name>` (queue-watcher), `inbox <id>: <first body line>` (**untrusted text**), `naru retro <id>`, the live session's own name, or the literal `live memory dream` |
 | `{schema}` | `live-summary`, `live-dream`, `inbox-watcher`, `retro` | the JSON Schema Naru passes to `--json-schema` (`core::live::SUMMARY_SCHEMA`, `LIVE_DREAM_SCHEMA` or, for a project dream, `PROJECT_DREAM_SCHEMA`; `core::inbox_triage::TRIAGE_SCHEMA` or `SHARPEN_SCHEMA`) — Naru's own text, so a template edit cannot break the contract |
 | `{prompt}` | `agent-spawn`, `live-summary`, `live-dream`, `inbox-watcher`, `retro`, `kb`, `workflow-prompt` | the POST body's `prompt` (`agent-spawn`; absent when omitted) / the summariser's, dream pass's or inbox triage's instruction block, always present / the workflow node's prompt, a blank line and its input (`workflow-prompt`) |
 | `{model}` | `workflow-prompt`, `inbox-watcher`, `retro`, `kb` | the node's `model`: `haiku`, `sonnet` or `opus` (`workflow-prompt`) / the pass's: `haiku` for the verdict, `sonnet` for the sharpened task (`inbox-watcher`) / `haiku` for a session skim, `sonnet` for the roll-up (`retro`) |
@@ -470,7 +479,7 @@ so `{prompt: see below}` in a script body is the literal prose it looks like.
 
 ## What a replacement command owes Naru
 
-Only its **exit code**. Nonzero is a failed spawn (the todo-watcher reverts the
+Only its **exit code**. Nonzero is a failed spawn (the queue-watcher reverts the
 task to `todo`; the inbox-watcher's is the job process failing to start, which
 drops the id from its in-memory dispatched set, so a later tick retries). The script runs with stdin
 closed and nothing set in its environment beyond what `mesa serve` inherited.
@@ -670,21 +679,21 @@ See `docs/cc-dashboard.md` for the permanent-loss property.
 ## Watchers
 
 A third, independent section holds per-watcher tuning knobs — two: the
-todo-watcher's per-project concurrency limit (mesa task 777,
-`docs/todo-watcher.md`) and the retrospective's cadence (mesa task 1158,
+queue-watcher's per-project concurrency limit (mesa task 777,
+`docs/queue-watcher.md`) and the retrospective's cadence (mesa task 1158,
 `docs/retro.md`).
 
 ```json
 {
   "watchers": {
-    "todo-concurrency": 3,
+    "queue-concurrency": 3,
     "retro-interval-hours": 72,
     "stall-minutes": 20
   }
 }
 ```
 
-- `todo-concurrency` bounds how many `in_progress` **leaf** tasks a single
+- `queue-concurrency` bounds how many `in_progress` **leaf** tasks a single
   project may hold at once. **Absent or `null` ⇒ the built-in default, 1** —
   today's one-agent-per-project behavior, unchanged for anyone who never
   touches this key. The editor (`PUT`) requires an integer in `1..=20`; zero,
@@ -708,12 +717,12 @@ todo-watcher's per-project concurrency limit (mesa task 777,
   editor requires an integer in `1..=8760` — a year, a sanity cap like the
   one above — and is `422 validation` otherwise, writing nothing; a
   hand-edited out-of-range value is clamped on read, exactly as
-  `todo-concurrency` is. Read on every tick and on every `retro run`/`status`,
+  `queue-concurrency` is. Read on every tick and on every `retro run`/`status`,
   so an edit lands on the next tick with no restart.
-- `stale-claim-minutes` (naru task 2033, hand-edited only, default 30, clamped 1..=1440) is how long a claimed `in_progress` task may sit with no live agent before the reaper puts it back to `todo` (`docs/todo-watcher.md`).
+- `stale-claim-minutes` (naru task 2033, hand-edited only, default 30, clamped 1..=1440) is how long a claimed `in_progress` task may sit with no live agent before the reaper puts it back to `todo` (`docs/queue-watcher.md`).
 - `stall-minutes` (naru task 1953) is how many minutes a dispatched agent may
-  sit silent on a still-`in_progress` task before the todo-watcher's stall
-  watchdog acts (`docs/todo-watcher.md`). **Absent or `null` ⇒ 20.** Integer in
+  sit silent on a still-`in_progress` task before the queue-watcher's stall
+  watchdog acts (`docs/queue-watcher.md`). **Absent or `null` ⇒ 20.** Integer in
   `1..=1440`, else `422 validation` writing nothing; a hand-edited
   out-of-range value is clamped on read; read every reaper pass. Body key
   `stall_minutes`, `ts(skip)`ped (no Settings UI). `MESA_WATCH_TODO_STALL_MS`
@@ -722,14 +731,14 @@ todo-watcher's per-project concurrency limit (mesa task 777,
 ### Routes
 
 - `GET /api/config/watchers` → `ConfigWatchers`:
-  `{todo_concurrency, todo_concurrency_default, retro_interval_hours,
+  `{queue_concurrency, queue_concurrency_default, retro_interval_hours,
   retro_interval_hours_default}`, where each `*` is the override (`null` when
   unset) and each `*_default` is the built-in (1 and 72). The two retro keys
   are `ts(skip)`ped off the generated TypeScript type — the retrospective has
   no page, so the Settings editor neither shows nor writes them. Gated like
   `GET /api/config`/`GET /api/config/pricing` (`require_agent_access`); a
   malformed config is **502 `unavailable`**.
-- `PUT /api/config/watchers`, body `{"todo_concurrency": <1..=20> | null,
+- `PUT /api/config/watchers`, body `{"queue_concurrency": <1..=20> | null,
   "retro_interval_hours": <1..=8760> | null}` (either key may be absent,
   which leaves it alone) → echoes the getter. `null` removes the key,
   restoring the default. An out-of-range or non-integer value is **422
@@ -753,12 +762,12 @@ otherwise the key; otherwise the default. Keys are kebab-case:
 | `port` | integer 1..=65535 | 7770 | once, at start |
 | `lan` | bool | false | once, at start |
 | `allow-host` | list of bare hostnames (trimmed, lowercased; no spaces, `/` or `:`) | `[]` | once, at start |
-| `watch-todo`, `watch-inbox`, `watch-cost`, `watch-retro` | bool | false | **every tick** |
+| `watch-queue`, `watch-inbox`, `watch-cost`, `watch-retro` | bool | false | **every tick** |
 | `watch-workflows` | bool | **true** (mesa task 1630) | **every tick** |
 
 Absent or `null` is the default. A bad value on `PUT` is 422 writing nothing; a
 hand-edited bad value is ignored for that key alone. On the command line a
-bool is `--watch-todo` (true) or `--watch-todo=false` / `--lan=false`, which
+bool is `--watch-queue` (true) or `--watch-queue=false` / `--lan=false`, which
 turns a config `true` off for that run; `--allow-host`, when given at all,
 replaces the config list.
 
@@ -782,7 +791,7 @@ config is re-read rather than frozen into argv.
   the port, LAN switch or hosts the config would now give differ from what
   this process runs with.
 - `PUT /api/config/serve`, body keys `port`, `lan`, `allow_host`,
-  `watch_todo`, `watch_inbox`, `watch_cost`, `watch_retro`, `watch_workflows`;
+  `watch_queue`, `watch_inbox`, `watch_cost`, `watch_retro`, `watch_workflows`;
   absent leaves the key, `null` removes it. Both verbs carry
   `require_agent_access`, like `watchers`. The Settings page edits all of it
   in a **Server** section on the System tab.
@@ -806,7 +815,7 @@ in, and is modelled exactly on `voice` below; see "The model" after the list.
 
 - **Absent or blank ⇒ no voice is sent.** Naru names no default voice of its
   own: with nothing configured the daemon's own default applies. That is why
-  `ConfigSpeech` has no `voice_default` twin to `todo_concurrency_default` —
+  `ConfigSpeech` has no `voice_default` twin to `queue_concurrency_default` —
   there is no Naru-side default to report.
 - **The list of voices comes from the daemon**, not from Naru:
   `GET {audio.url}/v1/audio/voices`, the default speech model's voice ids,
@@ -1672,7 +1681,7 @@ against, and what the watcher does about a session that crosses one (mesa tasks
   against guessed numbers.
 - A hand-edited value of the right type but outside its bound (found in the
   file, not written through `PUT`) falls back to the built-in **for that key
-  alone** on read, the same clamp posture `todo-concurrency` takes — a stray
+  alone** on read, the same clamp posture `queue-concurrency` takes — a stray
   `0` must not switch the guard off silently. Only the write path is strict,
   and the Settings page still shows the raw stored value.
 
@@ -1740,7 +1749,7 @@ Settings that Naru's own Rust reads nothing from.
 - **Nothing in Rust reads this section.** The shortcuts are the page's; Naru's
   job is to store them and to refuse what the editor refuses.
 - The read path is **forgiving** where the write path is strict, the
-  `todo-concurrency` clamp posture: a hand-edited entry Naru cannot use — a
+  `queue-concurrency` clamp posture: a hand-edited entry Naru cannot use — a
   non-list, an empty list, a malformed chord, an action it does not bind — is
   dropped, costing **that action** its override and nothing else. The page then
   falls back to that one action's shipped chords.
@@ -1787,7 +1796,7 @@ or `$'…'` quotes, a heredoc delimiter, arithmetic, and a bash syntax error. It
 `~/.mesa/config.json` under a throwaway `HOME` rather than using
 `MESA_CONFIG_FILE`, so the default path resolution is covered too. For
 watchers it also covers the round trip (`GET` reporting the default with a
-`null` override, `PUT` setting/clearing `todo_concurrency`), 0 and a
+`null` override, `PUT` setting/clearing `queue_concurrency`), 0 and a
 non-integer rejected as 422 writing nothing, 502 on a malformed file, and
 `commands`/`pricing`/an unknown section surviving a watchers write and vice
 versa.

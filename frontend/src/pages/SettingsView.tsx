@@ -247,10 +247,10 @@ import {
  * because it is prose about mesa's behavior, not config data.
  */
 const COPY: Record<string, { title: string; blurb: string }> = {
-  'todo-watcher': {
-    title: 'Todo watcher',
+  'queue-watcher': {
+    title: 'Queue watcher',
     blurb:
-      '`serve --watch-todo` runs this to pick up the next unblocked task in a project.',
+      '`serve --watch-queue` runs this to pick up the next unblocked task in a project.',
   },
   'inbox-watcher': {
     title: 'Inbox watcher',
@@ -940,7 +940,7 @@ function MemorySection() {
 
 /**
  * Watchers: how the background loops behave (mesa task 777) — today, how many
- * todo-watcher agents one project may have running at once. Its own section,
+ * queue-watcher agents one project may have running at once. Its own section,
  * its own draft and its own save button, for the same reason pricing has one:
  * a separate endpoint, so one form's rejection must not strand the other's
  * edits.
@@ -956,10 +956,10 @@ function WatchersSection() {
   const [saving, setSaving] = useState(false)
 
   const seeded: WatchersDraft =
-    draft ?? (watchers ? watchersDraftFrom(watchers) : { todo_concurrency: '' })
+    draft ?? (watchers ? watchersDraftFrom(watchers) : { queue_concurrency: '' })
 
   function edit(value: string) {
-    setDraft({ ...seeded, todo_concurrency: value })
+    setDraft({ ...seeded, queue_concurrency: value })
     setSaved(false)
   }
 
@@ -1001,31 +1001,31 @@ function WatchersSection() {
 
   const dirty = isWatchersDirty(watchers, seeded)
   const savable = isWatchersSavable(seeded)
-  const fieldError = valueError(seeded.todo_concurrency)
+  const fieldError = valueError(seeded.queue_concurrency)
 
   return (
     <>
       <h2>Watchers</h2>
       <section className="settings-command">
-        <label htmlFor="watch-todo-concurrency">
+        <label htmlFor="watch-queue-concurrency">
           <span className="settings-command-title">
-            Todo watcher: max concurrent agents per project
+            Queue watcher: max concurrent agents per project
           </span>
-          <code className="settings-command-key">todo_concurrency</code>
+          <code className="settings-command-key">queue_concurrency</code>
         </label>
         <p className="muted settings-command-blurb">
-          blank = {watchers.todo_concurrency_default} (the default); lowering it
+          blank = {watchers.queue_concurrency_default} (the default); lowering it
           never stops work already in flight
         </p>
         <input
-          id="watch-todo-concurrency"
+          id="watch-queue-concurrency"
           type="number"
           min={MIN_CONCURRENCY}
           max={MAX_CONCURRENCY}
           step="1"
           className="settings-watcher-input"
-          value={seeded.todo_concurrency}
-          placeholder={String(watchers.todo_concurrency_default)}
+          value={seeded.queue_concurrency}
+          placeholder={String(watchers.queue_concurrency_default)}
           onChange={(e) => edit(e.target.value)}
         />
         {fieldError && <p className="error">{fieldError}</p>}
@@ -1055,8 +1055,8 @@ const SERVE_LABELS: Record<BoolKey, { title: string; blurb: string }> = {
     blurb:
       'binds 0.0.0.0 and skips the Host check; no authentication, so every device on the network gets full access. Needs a restart.',
   },
-  watch_todo: {
-    title: 'Todo watcher',
+  watch_queue: {
+    title: 'Queue watcher',
     blurb: 'auto-starts an agent on actionable todo tasks.',
   },
   watch_inbox: {

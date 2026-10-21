@@ -72,7 +72,7 @@ access to your data and a shell on your machine; use it only on networks you
 trust (see [Security](#web-ui-http-api-and-security)).
 
 To run Naru as a service, put the same options in the `serve` section of
-`~/.naru/config.json` (`port`, `lan`, `allow-host`, `watch-todo`, ...) so a
+`~/.naru/config.json` (`port`, `lan`, `allow-host`, `watch-queue`, ...) so a
 bare `naru serve` is enough; a flag you pass wins over the config. The same
 switches are on **Settings -> System**. See [`docs/config.md`](docs/config.md).
 
@@ -256,10 +256,10 @@ command documents itself, with examples.
 
 Each of these is off by default. You turn them on with a `naru serve` flag.
 
-- **Todo watcher** (`--watch-todo`) starts a background Claude Code agent on
+- **Queue watcher** (`--watch-queue`) starts a background Claude Code agent on
   each project's next actionable task, with a per-project concurrency limit.
   A reaper stops each session once its task is closed
-  ([`docs/todo-watcher.md`](docs/todo-watcher.md)).
+  ([`docs/queue-watcher.md`](docs/queue-watcher.md)).
 - **Inbox**: one global queue for the things that need a decision, either
   change requests or alerts addressed to you. With `--watch-inbox`, an
   `inbox-triage` agent turns each change request into a backlog task or
@@ -475,7 +475,7 @@ NARU_DB=/tmp/test.db naru task list
 naru serve --port 7770     # API + web UI on http://127.0.0.1:7770 (default port)
 naru serve --lan           # bind 0.0.0.0 so other devices on your network can connect
 naru serve --lan --allow-host naru.local   # also accept that hostname
-naru serve --watch-todo --watch-inbox --watch-cost --watch-retro   # the watchers, each opt-in
+naru serve --watch-queue --watch-inbox --watch-cost --watch-retro   # the watchers, each opt-in
 ```
 
 The REST API lives under `/api`, and the web UI is served at `/`. The web UI

@@ -1516,9 +1516,9 @@ export function updatePricing(
 }
 
 /**
- * The watcher settings in `~/.mesa/config.json`: today, how many todo-watcher
- * agents a project may run at once (mesa task 777). `todo_concurrency: null`
- * means the config says nothing, so the shipped `todo_concurrency_default`
+ * The watcher settings in `~/.mesa/config.json`: today, how many queue-watcher
+ * agents a project may run at once (mesa task 777). `queue_concurrency: null`
+ * means the config says nothing, so the shipped `queue_concurrency_default`
  * applies. 502 `unavailable` means the config file itself is unreadable,
  * exactly as for `getConfig`.
  */

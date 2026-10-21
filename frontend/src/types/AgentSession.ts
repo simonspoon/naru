@@ -131,7 +131,7 @@ taskName: string | null,
  */
 runId: string | null, 
 /**
- * **naru-derived** (task 1953): the todo-watcher's stall watchdog has
+ * **naru-derived** (task 1953): the queue-watcher's stall watchdog has
  * seen this dispatched session silent past `watchers.stall-minutes`
  * while its task is still `in_progress`. `false` for every other row.
  */

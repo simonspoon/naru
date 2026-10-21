@@ -310,13 +310,13 @@ wait_lines "$P_LOG" 9
 wait_lines "$JOBLOG" 8
 ok "a new inbox item is dispatched on the next tick, with its own id"
 
-# ---- --watch-todo is a separate flag: the todo backlog is untouched ----
+# ---- --watch-queue is a separate flag: the todo backlog is untouched ----
 
 run 0 "$MESA" task show "$TASK_A"
 [ "$(jqs .status)" = "todo" ] || fail "--watch-inbox alone must not claim a todo task"
 [ ! -s "$BG_CALLS" ] || fail "--watch-inbox alone must not dispatch anything through --bg"
 stop_server
-ok "watch_inbox is independent of watch_todo: no task claimed, nothing spawned through --bg"
+ok "watch_inbox is independent of watch_queue: no task claimed, nothing spawned through --bg"
 
 # ---- a restart re-triages what is still pending, never what is settled ----
 

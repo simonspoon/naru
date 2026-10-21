@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Config gate: proves the spawn hooks in ~/.mesa/config.json actually replace
-# the built-in `claude --bg …` argv — for the todo-watcher, the inbox-watcher
+# the built-in `claude --bg …` argv — for the queue-watcher, the inbox-watcher
 # and the Agents surface's spawn route — that every hook runs as one bash
 # script with its values quoted in (mesa task 1143), and that a missing or
 # broken config behaves the way docs/config.md says. It also covers the
@@ -146,14 +146,14 @@ api() { # api <method> <path> [json-body] -> STDOUT=body, CODE=status
 
 # ---- both watchers + the spawn route run the CONFIGURED command ----
 
-# The todo-watcher template carries a literal quoted multi-word token as well
+# The queue-watcher template carries a literal quoted multi-word token as well
 # as {id}/{name}: quoting is the template author's tool for "one argument with
 # spaces", and {name} (a task name, untrusted text) must land as exactly one
 # argument without being quoted at all.
 write_config <<EOF
 {
   "commands": {
-    "todo-watcher": "$STUB_DIR/mytool dispatch 'one arg' --task {id} --label {name}",
+    "queue-watcher": "$STUB_DIR/mytool dispatch 'one arg' --task {id} --label {name}",
     "inbox-watcher": "$STUB_DIR/mytool triage {id}",
     "agent-spawn": "$STUB_DIR/mytool-receipt start --prompt {prompt}"
   }
@@ -162,14 +162,14 @@ EOF
 
 HOME="$FAKE_HOME" MESA_CLAUDE_BIN="$STUB_DIR/claude" \
   MESA_WATCH_TODO_TICK_MS=150 MESA_WATCH_INBOX_TICK_MS=150 \
-  "$MESA" serve --port "$PORT" --watch-todo --watch-inbox >/dev/null 2>&1 &
+  "$MESA" serve --port "$PORT" --watch-queue --watch-inbox >/dev/null 2>&1 &
 SERVER_PID=$!
 wait_for_server
 
 wait_lines "$ARGV_LOG" 2
 grep -qx "$DIR_A|dispatch|one arg|--task|$TASK_A|--label|A: task a" "$ARGV_LOG" ||
-  fail "todo-watcher did not run the configured command: $(cat "$ARGV_LOG")"
-ok "todo-watcher runs the configured command, in the project folder, with {id}/{name} substituted (a quoted template token stays one arg; so does a name with spaces)"
+  fail "queue-watcher did not run the configured command: $(cat "$ARGV_LOG")"
+ok "queue-watcher runs the configured command, in the project folder, with {id}/{name} substituted (a quoted template token stays one arg; so does a name with spaces)"
 
 grep -qx "$WORKSPACE|triage|$ITEM_1" "$ARGV_LOG" ||
   fail "inbox-watcher did not run the configured command: $(cat "$ARGV_LOG")"
@@ -245,11 +245,11 @@ ok "placeholders are scoped per command: {id} is not offered to agent-spawn"
 # The web UI edits this same file. What matters is that it is genuinely the
 # same file and the same rules — not a parallel store that happens to agree.
 write_config <<EOF
-{"other": {"x": 1}, "commands": {"todo-watcher": "$STUB_DIR/mytool dispatch {id}"}}
+{"other": {"x": 1}, "commands": {"queue-watcher": "$STUB_DIR/mytool dispatch {id}"}}
 EOF
 api GET /api/config
 [ "$CODE" = "200" ] || fail "GET /api/config: expected 200, got $CODE: $STDOUT"
-[ "$(jq -r 'map(.action) | join(",")' <<<"$STDOUT")" = "todo-watcher,inbox-watcher,agent-spawn,live-agent,live-summary,live-dream,retro,workflow-prompt,runner,kb" ] ||
+[ "$(jq -r 'map(.action) | join(",")' <<<"$STDOUT")" = "queue-watcher,inbox-watcher,agent-spawn,live-agent,live-summary,live-dream,retro,workflow-prompt,runner,kb" ] ||
   fail "GET /api/config must list all ten actions in order: $STDOUT"
 [ "$(jq -r '.[0].value' <<<"$STDOUT")" = "$STUB_DIR/mytool dispatch {id}" ] ||
   fail "GET /api/config: configured value wrong: $STDOUT"
@@ -269,7 +269,7 @@ api PUT /api/config "{\"commands\": {\"agent-spawn\": \"  $STUB_DIR/mytool from-
   fail "PUT must echo the stored (trimmed) value: $STDOUT"
 [ "$(jq -r '.other.x' < "$CONFIG")" = "1" ] ||
   fail "PUT dropped a section of the file it doesn't own: $(cat "$CONFIG")"
-[ "$(jq -r '.commands["todo-watcher"]' < "$CONFIG")" = "$STUB_DIR/mytool dispatch {id}" ] ||
+[ "$(jq -r '.commands["queue-watcher"]' < "$CONFIG")" = "$STUB_DIR/mytool dispatch {id}" ] ||
   fail "PUT clobbered a command it wasn't asked to touch: $(cat "$CONFIG")"
 api POST "/api/projects/$A/agents" '{"prompt":"from the settings page"}'
 [ "$CODE" = "201" ] || fail "post-PUT spawn: expected 201, got $CODE: $STDOUT"
@@ -286,7 +286,7 @@ api PUT /api/config '{"commands": {"agent-spawn": "   "}}'
 ok "PUT with a blank value clears one command back to its built-in default (the key is removed, never stored empty)"
 
 BEFORE=$(cat "$CONFIG")
-api PUT /api/config '{"commands": {"todo-watcher": "mytool {prompt}"}}'
+api PUT /api/config '{"commands": {"queue-watcher": "mytool {prompt}"}}'
 [ "$CODE" = "422" ] || fail "bad placeholder: expected 422, got $CODE: $STDOUT"
 [ "$(jq -r .error.code <<<"$STDOUT")" = "validation" ] ||
   fail "bad placeholder: expected code validation, got $STDOUT"
@@ -343,13 +343,13 @@ watcher_script() { # watcher_script <action>
 SPAWN_SCRIPT=$(printf 'set -u\ncd "$(pwd)"\nexport PICKED=yes\nprintf "%%s|%%s|[%%s]\\n" "agent-spawn" "$PICKED" {prompt} >> "%s"\necho "backgrounded · 5c81bbbb"' "$SCRIPT_LOG")
 
 jq -n \
-  --arg todo "$(watcher_script todo-watcher)" \
+  --arg todo "$(watcher_script queue-watcher)" \
   --arg inbox "$(watcher_script inbox-watcher)" \
   --arg spawn "$SPAWN_SCRIPT" \
-  '{commands: {"todo-watcher": $todo, "inbox-watcher": $inbox, "agent-spawn": $spawn}}' \
+  '{commands: {"queue-watcher": $todo, "inbox-watcher": $inbox, "agent-spawn": $spawn}}' \
   > "$CONFIG"
 
-# A fresh project, so the todo-watcher's one-agent-per-project cap doesn't
+# A fresh project, so the queue-watcher's one-agent-per-project cap doesn't
 # hide the dispatch, and a task name that is a shell-injection attempt.
 mkdir -p "$TMP/projC"
 DIR_C=$(cd "$TMP/projC" && pwd -P)
@@ -367,9 +367,9 @@ run 0 "$MESA" inbox add --task "$TASK_C" --kind change-request "script-mode tria
 ITEM_3=$(jqs .id)
 
 wait_lines "$SCRIPT_LOG" 2
-grep -Fqx "todo-watcher|$DIR_C|$TASK_C|C: $HOSTILE" "$SCRIPT_LOG" ||
-  fail "todo-watcher multi-line hook wrong: $(cat "$SCRIPT_LOG")"
-ok "a multi-line todo-watcher runs as bash -c in the project folder, with {id} and a \"{name}\" quoted in"
+grep -Fqx "queue-watcher|$DIR_C|$TASK_C|C: $HOSTILE" "$SCRIPT_LOG" ||
+  fail "queue-watcher multi-line hook wrong: $(cat "$SCRIPT_LOG")"
+ok "a multi-line queue-watcher runs as bash -c in the project folder, with {id} and a \"{name}\" quoted in"
 
 [ ! -e "$PWNED" ] ||
   fail "an untrusted task name was parsed as shell syntax — the quoting leaks"
@@ -426,7 +426,7 @@ ok "a configured multi-line hook's {prompt} holding a space, a single quote and 
 BEFORE=$(cat "$CONFIG")
 # A placeholder this action never offers is still a save-time error — there is
 # no value to substitute, so the fix is not "quote it differently".
-api PUT /api/config '{"commands": {"todo-watcher": "cd /repo\nclaude --prompt {prompt}"}}'
+api PUT /api/config '{"commands": {"queue-watcher": "cd /repo\nclaude --prompt {prompt}"}}'
 [ "$CODE" = "422" ] || fail "out-of-scope {} in a script: expected 422, got $CODE: $STDOUT"
 [ "$(jq -r .error.code <<<"$STDOUT")" = "validation" ] ||
   fail "out-of-scope {} in a script: expected code validation, got $STDOUT"
@@ -434,46 +434,46 @@ grep -q "unsupported placeholder" <<<"$STDOUT" ||
   fail "the message must say the placeholder is unsupported here: $STDOUT"
 # A supported one inside single quotes is refused: a `'` in the value would
 # end the run, so there is no right thing mesa could put there.
-api PUT /api/config "$(jq -n '{commands: {"todo-watcher": "cd /repo\nclaude --name '"'"'{name}'"'"'"}}')"
+api PUT /api/config "$(jq -n '{commands: {"queue-watcher": "cd /repo\nclaude --name '"'"'{name}'"'"'"}}')"
 [ "$CODE" = "422" ] || fail "{} in single quotes: expected 422, got $CODE: $STDOUT"
 grep -q "single quotes" <<<"$STDOUT" ||
   fail "the message must name the context it found the placeholder in: $STDOUT"
 # …and so is $'…', which is ANSI-C quoting rather than a single-quoted string:
 # a distinction that was one of three command-execution escapes in an earlier
 # value-substituting draft.
-api PUT /api/config '{"commands": {"todo-watcher": "cd /repo\nprintf %s $'"'"'{name}'"'"'"}}'
+api PUT /api/config '{"commands": {"queue-watcher": "cd /repo\nprintf %s $'"'"'{name}'"'"'"}}'
 [ "$CODE" = "422" ] || fail "{} in $'...': expected 422, got $CODE: $STDOUT"
 grep -q "ANSI-C" <<<"$STDOUT" ||
   fail "the message must name ANSI-C quoting: $STDOUT"
 # A placeholder used as a heredoc *delimiter* is a label, not text: refused
 # rather than silently left as braces.
-api PUT /api/config '{"commands": {"todo-watcher": "cd /repo\ncat <<{name}\nhi\nEOF"}}'
+api PUT /api/config '{"commands": {"queue-watcher": "cd /repo\ncat <<{name}\nhi\nEOF"}}'
 [ "$CODE" = "422" ] || fail "{} as a heredoc delimiter: expected 422, got $CODE: $STDOUT"
 grep -q "delimiter word" <<<"$STDOUT" ||
   fail "the message must name the delimiter word: $STDOUT"
 # Arithmetic is a second parser — it re-reads what it is given, so a value of
 # `a[$(cmd)]` would run there however it was quoted. Both spellings the lexer
 # can see are refused; `[[ -gt ]]` and `let` are documented sharp edges.
-api PUT /api/config '{"commands": {"todo-watcher": "cd /repo\nn=$(( {id} + 1 ))"}}'
+api PUT /api/config '{"commands": {"queue-watcher": "cd /repo\nn=$(( {id} + 1 ))"}}'
 [ "$CODE" = "422" ] || fail "{} in \$((…)): expected 422, got $CODE: $STDOUT"
 grep -q "arithmetic" <<<"$STDOUT" ||
   fail "the message must name arithmetic: $STDOUT"
-api PUT /api/config '{"commands": {"todo-watcher": "cd /repo\n(( n = {id} ))"}}'
+api PUT /api/config '{"commands": {"queue-watcher": "cd /repo\n(( n = {id} ))"}}'
 [ "$CODE" = "422" ] || fail "{} in ((…)): expected 422, got $CODE: $STDOUT"
 # …and the refusal is inherited: a nested $( ) inside arithmetic is still
 # arithmetic, because it is the substitution's *output* that gets re-parsed.
-api PUT /api/config '{"commands": {"todo-watcher": "cd /repo\necho $(( $(echo {id}) ))"}}'
+api PUT /api/config '{"commands": {"queue-watcher": "cd /repo\necho $(( $(echo {id}) ))"}}'
 [ "$CODE" = "422" ] || fail "{} nested in \$((…)): expected 422, got $CODE: $STDOUT"
 grep -q "arithmetic" <<<"$STDOUT" ||
   fail "the nested-arithmetic message must name arithmetic: $STDOUT"
-api PUT /api/config '{"commands": {"todo-watcher": "cd /repo\nif true; then\necho stuck"}}'
+api PUT /api/config '{"commands": {"queue-watcher": "cd /repo\nif true; then\necho stuck"}}'
 [ "$CODE" = "422" ] || fail "bash syntax error: expected 422, got $CODE: $STDOUT"
 grep -q "not valid bash" <<<"$STDOUT" ||
   fail "a bash syntax error must say so: $STDOUT"
 # A hand-typed reference to a variable mesa no longer sets would save fine and
 # then read as empty on every spawn — so it is refused, naming the placeholder
 # to write instead.
-api PUT /api/config '{"commands": {"todo-watcher": "cd /repo\nclaude --name \"$MESA_NAME\" -- {id}"}}'
+api PUT /api/config '{"commands": {"queue-watcher": "cd /repo\nclaude --name \"$MESA_NAME\" -- {id}"}}'
 [ "$CODE" = "422" ] || fail "\$MESA_NAME in a hook: expected 422, got $CODE: $STDOUT"
 grep -q "no longer sets" <<<"$STDOUT" ||
   fail "the message must say mesa no longer sets MESA_* variables: $STDOUT"
@@ -591,7 +591,7 @@ ok "a script saved over PUT /api/config round-trips verbatim, reports its placeh
 # each other, which is the whole reason the saver is a sibling of the commands
 # one rather than a second file format.
 write_config <<EOF
-{"other": {"x": 1}, "commands": {"todo-watcher": "$STUB_DIR/mytool dispatch {id}"}}
+{"other": {"x": 1}, "commands": {"queue-watcher": "$STUB_DIR/mytool dispatch {id}"}}
 EOF
 api GET /api/config/pricing
 [ "$CODE" = "200" ] || fail "GET pricing: expected 200, got $CODE: $STDOUT"
@@ -614,7 +614,7 @@ api PUT /api/config/pricing '{"pricing": {"claude-opus": {"input": 1, "output": 
   fail "a user-added prefix must have no built-in behind it: $STDOUT"
 [ "$(jq '.[] | select(.prefix=="newco-x") | .value.input == 7' <<<"$STDOUT")" = "true" ] ||
   fail "a user-added prefix must round-trip: $STDOUT"
-[ "$(jq -r '.commands["todo-watcher"]' < "$CONFIG")" = "$STUB_DIR/mytool dispatch {id}" ] ||
+[ "$(jq -r '.commands["queue-watcher"]' < "$CONFIG")" = "$STUB_DIR/mytool dispatch {id}" ] ||
   fail "a pricing write clobbered the commands section: $(cat "$CONFIG")"
 [ "$(jq -r '.other.x' < "$CONFIG")" = "1" ] ||
   fail "a pricing write dropped a section it doesn't own: $(cat "$CONFIG")"
@@ -690,62 +690,87 @@ ok "both pricing verbs sit behind the config routes' gate — a request that isn
 
 # Same file, same sibling-section rules as pricing, a different route.
 write_config <<EOF
-{"other": {"x": 1}, "commands": {"todo-watcher": "$STUB_DIR/mytool dispatch {id}"}, "pricing": {"claude-opus": {"input": 1, "output": 2, "cache_read": 3, "cache_write": 4}}}
+{"other": {"x": 1}, "commands": {"queue-watcher": "$STUB_DIR/mytool dispatch {id}"}, "pricing": {"claude-opus": {"input": 1, "output": 2, "cache_read": 3, "cache_write": 4}}}
 EOF
 api GET /api/config/watchers
 [ "$CODE" = "200" ] || fail "GET watchers: expected 200, got $CODE: $STDOUT"
-[ "$(jq -r '.todo_concurrency' <<<"$STDOUT")" = "null" ] ||
-  fail "an unconfigured todo_concurrency must report null, got $STDOUT"
-[ "$(jq -r '.todo_concurrency_default' <<<"$STDOUT")" = "1" ] ||
+[ "$(jq -r '.queue_concurrency' <<<"$STDOUT")" = "null" ] ||
+  fail "an unconfigured queue_concurrency must report null, got $STDOUT"
+[ "$(jq -r '.queue_concurrency_default' <<<"$STDOUT")" = "1" ] ||
   fail "GET watchers: built-in default wrong: $STDOUT"
-ok "GET /api/config/watchers reports todo_concurrency: null (no override) and todo_concurrency_default: 1 on a fresh config"
+ok "GET /api/config/watchers reports queue_concurrency: null (no override) and queue_concurrency_default: 1 on a fresh config"
 
-api PUT /api/config/watchers '{"todo_concurrency": 3}'
+# Pre-rename (naru task 1898) keys still read, and a PUT with the old field
+# names lands on the new keys.
+write_config <<EOF
+{"commands": {"todo-watcher": "$STUB_DIR/mytool dispatch {id}"}, "watchers": {"todo-concurrency": 3}, "serve": {"watch-todo": true}}
+EOF
+api GET /api/config/watchers
+[ "$(jq -r '.queue_concurrency' <<<"$STDOUT")" = "3" ] ||
+  fail "a config holding only todo-concurrency must read as queue_concurrency 3, got $STDOUT"
+api GET /api/config/serve
+[ "$(jq -r '.watch_queue.value' <<<"$STDOUT")" = "true" ] ||
+  fail "a config holding only serve.watch-todo must read as watch_queue true, got $STDOUT"
+api GET /api/config
+[ "$(jq -r '[.[] | select(.action == "queue-watcher")][0].value' <<<"$STDOUT")" = "$STUB_DIR/mytool dispatch {id}" ] ||
+  fail "a config holding only commands.todo-watcher must read as queue-watcher, got $STDOUT"
+api PUT /api/config/watchers '{"todo_concurrency": 2}'
+[ "$CODE" = "200" ] || fail "PUT with the old todo_concurrency field: expected 200, got $CODE: $STDOUT"
+[ "$(jq -r '.watchers["queue-concurrency"]' < "$CONFIG")" = "2" ] &&
+  [ "$(jq -r '.watchers | has("todo-concurrency")' < "$CONFIG")" = "false" ] ||
+  fail "an old-name PUT must write queue-concurrency and drop todo-concurrency: $(cat "$CONFIG")"
+ok "the pre-rename todo-watcher/todo-concurrency/watch-todo keys still read, and an old-name PUT is saved under the new keys"
+# Back to the fixture the sections below expect.
+write_config <<EOF
+{"other": {"x": 1}, "commands": {"queue-watcher": "$STUB_DIR/mytool dispatch {id}"}, "pricing": {"claude-opus": {"input": 1, "output": 2, "cache_read": 3, "cache_write": 4}}}
+EOF
+
+api PUT /api/config/watchers '{"queue_concurrency": 3}'
 [ "$CODE" = "200" ] || fail "PUT watchers: expected 200, got $CODE: $STDOUT"
-[ "$(jq -r '.todo_concurrency' <<<"$STDOUT")" = "3" ] ||
+[ "$(jq -r '.queue_concurrency' <<<"$STDOUT")" = "3" ] ||
   fail "PUT must echo the stored override: $STDOUT"
-[ "$(jq -r '.watchers["todo-concurrency"]' < "$CONFIG")" = "3" ] ||
-  fail "PUT watchers did not write todo-concurrency: $(cat "$CONFIG")"
-[ "$(jq -r '.commands["todo-watcher"]' < "$CONFIG")" = "$STUB_DIR/mytool dispatch {id}" ] ||
+[ "$(jq -r '.watchers["queue-concurrency"]' < "$CONFIG")" = "3" ] ||
+  fail "PUT watchers did not write queue-concurrency: $(cat "$CONFIG")"
+[ "$(jq -r '.commands["queue-watcher"]' < "$CONFIG")" = "$STUB_DIR/mytool dispatch {id}" ] ||
   fail "a watchers write clobbered the commands section: $(cat "$CONFIG")"
 [ "$(jq '.pricing["claude-opus"].output == 2' < "$CONFIG")" = "true" ] ||
   fail "a watchers write clobbered the pricing section: $(cat "$CONFIG")"
 [ "$(jq -r '.other.x' < "$CONFIG")" = "1" ] ||
   fail "a watchers write dropped a section it doesn't own: $(cat "$CONFIG")"
-ok "PUT /api/config/watchers sets todo_concurrency, leaving commands, pricing and an unknown section untouched"
+ok "PUT /api/config/watchers sets queue_concurrency, leaving commands, pricing and an unknown section untouched"
 
 # The other two savers have to be just as careful toward watchers.
 api PUT /api/config '{"commands": {"inbox-watcher": "mytool triage {id}"}}'
 [ "$CODE" = "200" ] || fail "PUT commands after watchers: expected 200, got $CODE: $STDOUT"
-[ "$(jq -r '.watchers["todo-concurrency"]' < "$CONFIG")" = "3" ] ||
+[ "$(jq -r '.watchers["queue-concurrency"]' < "$CONFIG")" = "3" ] ||
   fail "a commands write clobbered the watchers section: $(cat "$CONFIG")"
 api PUT /api/config/pricing '{"pricing": {"claude-opus": null}}'
 [ "$CODE" = "200" ] || fail "PUT pricing after watchers: expected 200, got $CODE: $STDOUT"
-[ "$(jq -r '.watchers["todo-concurrency"]' < "$CONFIG")" = "3" ] ||
+[ "$(jq -r '.watchers["queue-concurrency"]' < "$CONFIG")" = "3" ] ||
   fail "a pricing write clobbered the watchers section: $(cat "$CONFIG")"
 ok "saving commands or pricing preserves the watchers section, exactly as watchers preserves them"
 
-api PUT /api/config/watchers '{"todo_concurrency": null}'
+api PUT /api/config/watchers '{"queue_concurrency": null}'
 [ "$CODE" = "200" ] || fail "PUT watchers null: expected 200, got $CODE: $STDOUT"
-[ "$(jq -r '.todo_concurrency' <<<"$STDOUT")" = "null" ] ||
+[ "$(jq -r '.queue_concurrency' <<<"$STDOUT")" = "null" ] ||
   fail "null must restore the default, got $STDOUT"
-[ "$(jq -r '.watchers | has("todo-concurrency")' < "$CONFIG")" = "false" ] ||
+[ "$(jq -r '.watchers | has("queue-concurrency")' < "$CONFIG")" = "false" ] ||
   fail "null must remove the key, never store it: $(cat "$CONFIG")"
-ok "PUT null on todo_concurrency removes the key, restoring the built-in default"
+ok "PUT null on queue_concurrency removes the key, restoring the built-in default"
 
 BEFORE=$(cat "$CONFIG")
-api PUT /api/config/watchers '{"todo_concurrency": 0}'
-[ "$CODE" = "422" ] || fail "todo_concurrency 0: expected 422, got $CODE: $STDOUT"
+api PUT /api/config/watchers '{"queue_concurrency": 0}'
+[ "$CODE" = "422" ] || fail "queue_concurrency 0: expected 422, got $CODE: $STDOUT"
 [ "$(jq -r .error.code <<<"$STDOUT")" = "validation" ] ||
-  fail "todo_concurrency 0: expected code validation, got $STDOUT"
-api PUT /api/config/watchers '{"todo_concurrency": 2.5}'
-[ "$CODE" = "422" ] || fail "todo_concurrency 2.5: expected 422, got $CODE: $STDOUT"
-api PUT /api/config/watchers '{"todo_concurrency": "abc"}'
-[ "$CODE" = "422" ] || fail "todo_concurrency \"abc\": expected 422, got $CODE: $STDOUT"
-api PUT /api/config/watchers '{"todo_concurrency": 21}'
-[ "$CODE" = "422" ] || fail "todo_concurrency 21: expected 422, got $CODE: $STDOUT"
-api PUT /api/config/watchers '{"todo_concurrency": -1}'
-[ "$CODE" = "422" ] || fail "todo_concurrency -1: expected 422, got $CODE: $STDOUT"
+  fail "queue_concurrency 0: expected code validation, got $STDOUT"
+api PUT /api/config/watchers '{"queue_concurrency": 2.5}'
+[ "$CODE" = "422" ] || fail "queue_concurrency 2.5: expected 422, got $CODE: $STDOUT"
+api PUT /api/config/watchers '{"queue_concurrency": "abc"}'
+[ "$CODE" = "422" ] || fail "queue_concurrency \"abc\": expected 422, got $CODE: $STDOUT"
+api PUT /api/config/watchers '{"queue_concurrency": 21}'
+[ "$CODE" = "422" ] || fail "queue_concurrency 21: expected 422, got $CODE: $STDOUT"
+api PUT /api/config/watchers '{"queue_concurrency": -1}'
+[ "$CODE" = "422" ] || fail "queue_concurrency -1: expected 422, got $CODE: $STDOUT"
 [ "$(cat "$CONFIG")" = "$BEFORE" ] ||
   fail "a rejected watchers PUT must not touch the file: $(cat "$CONFIG")"
 ok "PUT /api/config/watchers rejects 0, a non-integer, and a value outside 1..=20 as 422 validation, writing nothing"
@@ -755,7 +780,7 @@ CODE=$(curl -s -o "$TMP/body" -w '%{http_code}' -H 'Host: evil.example' \
 [ "$CODE" = "403" ] || fail "GET watchers with a foreign Host: expected 403, got $CODE: $(cat "$TMP/body")"
 CODE=$(curl -s -o "$TMP/body" -w '%{http_code}' -X PUT -H 'Host: evil.example' \
   -H 'Content-Type: application/json' \
-  --data '{"todo_concurrency": 5}' \
+  --data '{"queue_concurrency": 5}' \
   "http://127.0.0.1:$PORT/api/config/watchers")
 [ "$CODE" = "403" ] || fail "PUT watchers with a foreign Host: expected 403, got $CODE: $(cat "$TMP/body")"
 [ "$(cat "$CONFIG")" = "$BEFORE" ] || fail "a refused watchers PUT must not touch the file"
@@ -764,11 +789,11 @@ ok "both watchers verbs sit behind the config routes' gate — a request that is
 # ---- the serve section: GET/PUT /api/config/serve (mesa task 1621) ----
 #
 # Every `naru serve` flag as a config key. The server under test was started
-# with --port, --watch-todo and --watch-inbox, so those three report a `flag`
+# with --port, --watch-queue and --watch-inbox, so those three report a `flag`
 # (the command line wins) and the rest do not.
 
 write_config <<EOF2
-{"other": {"x": 1}, "commands": {"todo-watcher": "$STUB_DIR/mytool dispatch {id}"}, "watchers": {"todo-concurrency": 3}}
+{"other": {"x": 1}, "commands": {"queue-watcher": "$STUB_DIR/mytool dispatch {id}"}, "watchers": {"queue-concurrency": 3}}
 EOF2
 api GET /api/config/serve
 [ "$CODE" = "200" ] || fail "GET serve: expected 200, got $CODE: $STDOUT"
@@ -776,7 +801,7 @@ api GET /api/config/serve
 [ "$(jq -r '.port.default' <<<"$STDOUT")" = "7770" ] || fail "port default wrong: $STDOUT"
 [ "$(jq -r '.port.effective' <<<"$STDOUT")" = "$PORT" ] || fail "effective port must be the running one: $STDOUT"
 [ "$(jq -r '.port.flag' <<<"$STDOUT")" = "$PORT" ] || fail "--port must be reported as the pinning flag: $STDOUT"
-[ "$(jq -r '.watch_todo.flag, .watch_inbox.flag, .watch_cost.flag, .lan.flag' <<<"$STDOUT" | tr '\n' ' ')" = "true true null null " ] ||
+[ "$(jq -r '.watch_queue.flag, .watch_inbox.flag, .watch_cost.flag, .lan.flag' <<<"$STDOUT" | tr '\n' ' ')" = "true true null null " ] ||
   fail "flag pins wrong: $STDOUT"
 [ "$(jq -r '.allow_host.value, .allow_host.flag' <<<"$STDOUT" | tr '\n' ' ')" = "null null " ] ||
   fail "unconfigured allow_host wrong: $STDOUT"
@@ -792,15 +817,15 @@ api PUT /api/config/serve '{"port": 17786, "lan": true, "allow_host": [" Naru.Lo
 [ "$(jq -r '.restart_required' <<<"$STDOUT")" = "true" ] ||
   fail "a config lan/hosts differing from the running process must need a restart: $STDOUT"
 [ "$(jq -r '.serve["allow-host"][0]' < "$CONFIG")" = "naru.local" ] || fail "kebab key not written: $(cat "$CONFIG")"
-[ "$(jq -r '.commands["todo-watcher"]' < "$CONFIG")" = "$STUB_DIR/mytool dispatch {id}" ] ||
+[ "$(jq -r '.commands["queue-watcher"]' < "$CONFIG")" = "$STUB_DIR/mytool dispatch {id}" ] ||
   fail "a serve write clobbered commands: $(cat "$CONFIG")"
-[ "$(jq -r '.watchers["todo-concurrency"]' < "$CONFIG")" = "3" ] || fail "a serve write clobbered watchers: $(cat "$CONFIG")"
+[ "$(jq -r '.watchers["queue-concurrency"]' < "$CONFIG")" = "3" ] || fail "a serve write clobbered watchers: $(cat "$CONFIG")"
 [ "$(jq -r '.other.x' < "$CONFIG")" = "1" ] || fail "a serve write dropped an unknown section: $(cat "$CONFIG")"
 ok "PUT /api/config/serve stores the kebab keys, normalizes hosts, flags a needed restart and leaves other sections alone"
 
 api PUT /api/config '{"commands": {"inbox-watcher": "mytool triage {id}"}}'
 [ "$CODE" = "200" ] || fail "PUT commands after serve: expected 200, got $CODE: $STDOUT"
-api PUT /api/config/watchers '{"todo_concurrency": 4}'
+api PUT /api/config/watchers '{"queue_concurrency": 4}'
 [ "$CODE" = "200" ] || fail "PUT watchers after serve: expected 200, got $CODE: $STDOUT"
 [ "$(jq -r '.serve.port' < "$CONFIG")" = "17786" ] || fail "another section's write clobbered serve: $(cat "$CONFIG")"
 ok "saving commands or watchers preserves the serve section"
@@ -814,7 +839,7 @@ ok "PUT null removes the key, restoring its default"
 
 BEFORE=$(cat "$CONFIG")
 for bad in '{"port": 0}' '{"port": 65536}' '{"port": "80"}' '{"port": 1.5}' '{"lan": "yes"}' \
-  '{"watch_todo": 1}' '{"allow_host": "naru.local"}' '{"allow_host": [""]}' '{"allow_host": ["a b"]}' \
+  '{"watch_queue": 1}' '{"allow_host": "naru.local"}' '{"allow_host": [""]}' '{"allow_host": ["a b"]}' \
   '{"allow_host": ["http://x"]}' '{"allow_host": ["x:80"]}' '{"watch_cost": true, "port": -1}'; do
   api PUT /api/config/serve "$bad"
   [ "$CODE" = "422" ] || fail "serve $bad: expected 422, got $CODE: $STDOUT"
@@ -868,7 +893,7 @@ ok "--port on the command line beats the config's serve.port"
 
 # Put the config back to what the sections below expect.
 write_config <<EOF2
-{"other": {"x": 1}, "commands": {"todo-watcher": "$STUB_DIR/mytool dispatch {id}"}, "pricing": {"claude-opus": {"input": 1, "output": 2, "cache_read": 3, "cache_write": 4}}}
+{"other": {"x": 1}, "commands": {"queue-watcher": "$STUB_DIR/mytool dispatch {id}"}, "pricing": {"claude-opus": {"input": 1, "output": 2, "cache_read": 3, "cache_write": 4}}}
 EOF2
 
 # ---- the keymap section: GET/PUT /api/config/keymap (mesa task 1079) ----
@@ -880,7 +905,7 @@ EOF2
 # *between* its values — one chord belongs to one action — which the server
 # enforces so it refuses exactly what the editor refuses.
 write_config <<EOF
-{"other": {"x": 1}, "commands": {"todo-watcher": "$STUB_DIR/mytool dispatch {id}"}, "watchers": {"todo-concurrency": 3}}
+{"other": {"x": 1}, "commands": {"queue-watcher": "$STUB_DIR/mytool dispatch {id}"}, "watchers": {"queue-concurrency": 3}}
 EOF
 api GET /api/config/keymap
 [ "$CODE" = "200" ] || fail "GET keymap: expected 200, got $CODE: $STDOUT"
@@ -904,9 +929,9 @@ api PUT /api/config/keymap '{"create-task": ["Shift+Mod+N"]}'
   fail "PUT keymap did not write the chord: $(cat "$CONFIG")"
 [ "$(jq -r '.keymap | length' < "$CONFIG")" = "1" ] ||
   fail "only the override may be stored; a default is an absence: $(cat "$CONFIG")"
-[ "$(jq -r '.commands["todo-watcher"]' < "$CONFIG")" = "$STUB_DIR/mytool dispatch {id}" ] ||
+[ "$(jq -r '.commands["queue-watcher"]' < "$CONFIG")" = "$STUB_DIR/mytool dispatch {id}" ] ||
   fail "a keymap write clobbered the commands section: $(cat "$CONFIG")"
-[ "$(jq -r '.watchers["todo-concurrency"]' < "$CONFIG")" = "3" ] ||
+[ "$(jq -r '.watchers["queue-concurrency"]' < "$CONFIG")" = "3" ] ||
   fail "a keymap write clobbered the watchers section: $(cat "$CONFIG")"
 [ "$(jq -r '.other.x' < "$CONFIG")" = "1" ] ||
   fail "a keymap write dropped a section it doesn't own: $(cat "$CONFIG")"
@@ -917,7 +942,7 @@ api PUT /api/config '{"commands": {"inbox-watcher": "mytool triage {id}"}}'
 [ "$CODE" = "200" ] || fail "PUT commands after keymap: expected 200, got $CODE: $STDOUT"
 [ "$(jq -r '.keymap["create-task"][0]' < "$CONFIG")" = "Mod+Shift+n" ] ||
   fail "a commands write clobbered the keymap section: $(cat "$CONFIG")"
-api PUT /api/config/watchers '{"todo_concurrency": 4}'
+api PUT /api/config/watchers '{"queue_concurrency": 4}'
 [ "$CODE" = "200" ] || fail "PUT watchers after keymap: expected 200, got $CODE: $STDOUT"
 [ "$(jq -r '.keymap["create-task"][0]' < "$CONFIG")" = "Mod+Shift+n" ] ||
   fail "a watchers write clobbered the keymap section: $(cat "$CONFIG")"
@@ -928,7 +953,7 @@ api PUT /api/config/live '{"auto_send_ms": 2500}'
 # …and the keymap saver toward them, in the other direction.
 api PUT /api/config/keymap '{"focus-up": ["Alt+ArrowUp"]}'
 [ "$CODE" = "200" ] || fail "PUT keymap again: expected 200, got $CODE: $STDOUT"
-[ "$(jq -r '.watchers["todo-concurrency"]' < "$CONFIG")" = "4" ] ||
+[ "$(jq -r '.watchers["queue-concurrency"]' < "$CONFIG")" = "4" ] ||
   fail "a keymap write clobbered watchers: $(cat "$CONFIG")"
 [ "$(jq -r '.live["auto-send-ms"]' < "$CONFIG")" = "2500" ] ||
   fail "a keymap write clobbered live: $(cat "$CONFIG")"
@@ -986,7 +1011,7 @@ ok "both keymap verbs sit behind the config routes' gate — a request that isn'
 
 # A hand-edited entry mesa cannot use costs that action its override and
 # nothing else — the read path is forgiving where the write path is strict,
-# the `todo-concurrency` clamp posture.
+# the `queue-concurrency` clamp posture.
 write_config <<'EOF'
 {"keymap": {"create-task": "n", "focus-up": [], "invent-a-shortcut": ["q"], "focus-left": ["Mod+Shift+H"]}}
 EOF
@@ -1010,7 +1035,7 @@ ok "GET /api/config/keymap drops a hand-edited entry mesa cannot use, costing th
 
 
 write_config <<EOF
-{"other": {"x": 1}, "commands": {"todo-watcher": "$STUB_DIR/mytool dispatch {id}"}, "pricing": {"claude-opus": {"input": 1, "output": 2, "cache_read": 3, "cache_write": 4}}, "watchers": {"todo-concurrency": 3}}
+{"other": {"x": 1}, "commands": {"queue-watcher": "$STUB_DIR/mytool dispatch {id}"}, "pricing": {"claude-opus": {"input": 1, "output": 2, "cache_read": 3, "cache_write": 4}}, "watchers": {"queue-concurrency": 3}}
 EOF
 api GET /api/config/speech
 [ "$CODE" = "200" ] || fail "GET speech: expected 200, got $CODE: $STDOUT"
@@ -1028,11 +1053,11 @@ api PUT /api/config/speech '{"voice": "bm_george"}'
   fail "PUT must echo the stored voice: $STDOUT"
 [ "$(jq -r '.speech.voice' < "$CONFIG")" = "bm_george" ] ||
   fail "PUT speech did not write the voice: $(cat "$CONFIG")"
-[ "$(jq -r '.commands["todo-watcher"]' < "$CONFIG")" = "$STUB_DIR/mytool dispatch {id}" ] ||
+[ "$(jq -r '.commands["queue-watcher"]' < "$CONFIG")" = "$STUB_DIR/mytool dispatch {id}" ] ||
   fail "a speech write clobbered the commands section: $(cat "$CONFIG")"
 [ "$(jq '.pricing["claude-opus"].output == 2' < "$CONFIG")" = "true" ] ||
   fail "a speech write clobbered the pricing section: $(cat "$CONFIG")"
-[ "$(jq -r '.watchers["todo-concurrency"]' < "$CONFIG")" = "3" ] ||
+[ "$(jq -r '.watchers["queue-concurrency"]' < "$CONFIG")" = "3" ] ||
   fail "a speech write clobbered the watchers section: $(cat "$CONFIG")"
 [ "$(jq -r '.other.x' < "$CONFIG")" = "1" ] ||
   fail "a speech write dropped a section it doesn't own: $(cat "$CONFIG")"
@@ -1049,7 +1074,7 @@ api PUT /api/config/pricing '{"pricing": {"claude-opus": null}}'
 [ "$CODE" = "200" ] || fail "PUT pricing after speech: expected 200, got $CODE: $STDOUT"
 [ "$(jq -r '.speech.voice' < "$CONFIG")" = "bm_george" ] ||
   fail "a pricing write clobbered the speech section: $(cat "$CONFIG")"
-api PUT /api/config/watchers '{"todo_concurrency": 2}'
+api PUT /api/config/watchers '{"queue_concurrency": 2}'
 [ "$CODE" = "200" ] || fail "PUT watchers after speech: expected 200, got $CODE: $STDOUT"
 [ "$(jq -r '.speech.voice' < "$CONFIG")" = "bm_george" ] ||
   fail "a watchers write clobbered the speech section: $(cat "$CONFIG")"
@@ -1202,7 +1227,7 @@ ok "PUT speed null removes the key; a hand-edited out-of-range speed reads as 1"
 # read or a write.
 
 write_config <<EOF
-{"other": {"x": 1}, "commands": {"todo-watcher": "$STUB_DIR/mytool dispatch {id}"}, "pricing": {"claude-opus": {"input": 1, "output": 2, "cache_read": 3, "cache_write": 4}}, "watchers": {"todo-concurrency": 3}, "speech": {"voice": "bm_george"}}
+{"other": {"x": 1}, "commands": {"queue-watcher": "$STUB_DIR/mytool dispatch {id}"}, "pricing": {"claude-opus": {"input": 1, "output": 2, "cache_read": 3, "cache_write": 4}}, "watchers": {"queue-concurrency": 3}, "speech": {"voice": "bm_george"}}
 EOF
 api GET /api/config/live
 [ "$CODE" = "200" ] || fail "GET live: expected 200, got $CODE: $STDOUT"
@@ -1227,11 +1252,11 @@ api PUT /api/config/live '{"auto_send_ms": 4500}'
   fail "PUT live did not write the wait: $(cat "$CONFIG")"
 [ "$(jq -r '.live["auto-send-ms"] | type' < "$CONFIG")" = "number" ] ||
   fail "the wait must be written as a JSON number, not a string: $(cat "$CONFIG")"
-[ "$(jq -r '.commands["todo-watcher"]' < "$CONFIG")" = "$STUB_DIR/mytool dispatch {id}" ] ||
+[ "$(jq -r '.commands["queue-watcher"]' < "$CONFIG")" = "$STUB_DIR/mytool dispatch {id}" ] ||
   fail "a live write clobbered the commands section: $(cat "$CONFIG")"
 [ "$(jq '.pricing["claude-opus"].output == 2' < "$CONFIG")" = "true" ] ||
   fail "a live write clobbered the pricing section: $(cat "$CONFIG")"
-[ "$(jq -r '.watchers["todo-concurrency"]' < "$CONFIG")" = "3" ] ||
+[ "$(jq -r '.watchers["queue-concurrency"]' < "$CONFIG")" = "3" ] ||
   fail "a live write clobbered the watchers section: $(cat "$CONFIG")"
 [ "$(jq -r '.speech.voice' < "$CONFIG")" = "bm_george" ] ||
   fail "a live write clobbered the speech section: $(cat "$CONFIG")"
@@ -1250,7 +1275,7 @@ api PUT /api/config/speech '{"voice": "af_bella"}'
 [ "$CODE" = "200" ] || fail "PUT speech after live: expected 200, got $CODE: $STDOUT"
 [ "$(jq -r '.live["auto-send-ms"]' < "$CONFIG")" = "4500" ] ||
   fail "a speech write clobbered the live section: $(cat "$CONFIG")"
-api PUT /api/config/watchers '{"todo_concurrency": 2}'
+api PUT /api/config/watchers '{"queue_concurrency": 2}'
 [ "$CODE" = "200" ] || fail "PUT watchers after live: expected 200, got $CODE: $STDOUT"
 [ "$(jq -r '.live["auto-send-ms"]' < "$CONFIG")" = "4500" ] ||
   fail "a watchers write clobbered the live section: $(cat "$CONFIG")"
@@ -1347,7 +1372,7 @@ ok "both live verbs sit behind the config routes' gate — a request that isn't 
 
 
 write_config <<EOF
-{"other": {"x": 1}, "commands": {"todo-watcher": "$STUB_DIR/mytool dispatch {id}"}, "pricing": {"claude-opus": {"input": 1, "output": 2, "cache_read": 3, "cache_write": 4}}, "watchers": {"todo-concurrency": 3}, "speech": {"voice": "bm_george"}, "live": {"auto-send-ms": 4500}}
+{"other": {"x": 1}, "commands": {"queue-watcher": "$STUB_DIR/mytool dispatch {id}"}, "pricing": {"claude-opus": {"input": 1, "output": 2, "cache_read": 3, "cache_write": 4}}, "watchers": {"queue-concurrency": 3}, "speech": {"voice": "bm_george"}, "live": {"auto-send-ms": 4500}}
 EOF
 api GET /api/config/listen
 [ "$CODE" = "200" ] || fail "GET listen: expected 200, got $CODE: $STDOUT"
@@ -1365,11 +1390,11 @@ api PUT /api/config/listen '{"model": "parakeet-tdt-0.6b-v2-int8"}'
   fail "PUT must echo the stored model: $STDOUT"
 [ "$(jq -r '.listen.model' < "$CONFIG")" = "parakeet-tdt-0.6b-v2-int8" ] ||
   fail "PUT listen did not write the model: $(cat "$CONFIG")"
-[ "$(jq -r '.commands["todo-watcher"]' < "$CONFIG")" = "$STUB_DIR/mytool dispatch {id}" ] ||
+[ "$(jq -r '.commands["queue-watcher"]' < "$CONFIG")" = "$STUB_DIR/mytool dispatch {id}" ] ||
   fail "a listen write clobbered the commands section: $(cat "$CONFIG")"
 [ "$(jq '.pricing["claude-opus"].output == 2' < "$CONFIG")" = "true" ] ||
   fail "a listen write clobbered the pricing section: $(cat "$CONFIG")"
-[ "$(jq -r '.watchers["todo-concurrency"]' < "$CONFIG")" = "3" ] ||
+[ "$(jq -r '.watchers["queue-concurrency"]' < "$CONFIG")" = "3" ] ||
   fail "a listen write clobbered the watchers section: $(cat "$CONFIG")"
 [ "$(jq -r '.speech.voice' < "$CONFIG")" = "bm_george" ] ||
   fail "a listen write clobbered the speech section: $(cat "$CONFIG")"
@@ -1391,7 +1416,7 @@ api PUT /api/config/speech '{"voice": "af_bella"}'
 [ "$CODE" = "200" ] || fail "PUT speech after listen: expected 200, got $CODE: $STDOUT"
 [ "$(jq -r '.listen.model' < "$CONFIG")" = "parakeet-tdt-0.6b-v2-int8" ] ||
   fail "a speech write clobbered the listen section: $(cat "$CONFIG")"
-api PUT /api/config/watchers '{"todo_concurrency": 2}'
+api PUT /api/config/watchers '{"queue_concurrency": 2}'
 [ "$CODE" = "200" ] || fail "PUT watchers after listen: expected 200, got $CODE: $STDOUT"
 [ "$(jq -r '.listen.model' < "$CONFIG")" = "parakeet-tdt-0.6b-v2-int8" ] ||
   fail "a watchers write clobbered the listen section: $(cat "$CONFIG")"
@@ -1644,7 +1669,7 @@ api PUT /api/config/pricing '{"pricing": {"claude-opus": null}}'
 [ "$CODE" = "502" ] || fail "malformed config pricing PUT: expected 502, got $CODE: $STDOUT"
 api GET /api/config/watchers
 [ "$CODE" = "502" ] || fail "malformed config watchers GET: expected 502, got $CODE: $STDOUT"
-api PUT /api/config/watchers '{"todo_concurrency": 5}'
+api PUT /api/config/watchers '{"queue_concurrency": 5}'
 [ "$CODE" = "502" ] || fail "malformed config watchers PUT: expected 502, got $CODE: $STDOUT"
 api GET /api/config/speech
 [ "$CODE" = "502" ] || fail "malformed config speech GET: expected 502, got $CODE: $STDOUT"
@@ -1682,7 +1707,7 @@ grep -qx "$DIR_A|--model|opus|--agent|supervisor|--|/execute-mesa-task 1" "$CLAU
 ok "an action absent from the config uses the built-in \`claude --bg --model opus --agent supervisor -- <prompt>\` argv (MESA_CLAUDE_BIN stands in for a default template's \`claude\` only)"
 
 # The other two actions fall back the same way — proven on a fresh project, so
-# the todo-watcher's one-agent-per-project cap doesn't hide it.
+# the queue-watcher's one-agent-per-project cap doesn't hide it.
 mkdir -p "$TMP/projB"
 DIR_B=$(cd "$TMP/projB" && pwd -P)
 run 0 "$MESA" project create "B" --no-git
@@ -1692,8 +1717,8 @@ run 0 "$MESA" task create "$B" "task b"
 TASK_B=$(jqs .id)
 wait_lines "$CLAUDE_LOG" 2
 grep -qx "$DIR_B|--agent|supervisor|--name|B: task b|--|/execute-naru-task $TASK_B" "$CLAUDE_LOG" ||
-  fail "the built-in todo-watcher argv changed: $(cat "$CLAUDE_LOG")"
-ok "the unconfigured todo-watcher keeps its built-in \`--agent supervisor --name <project>: <name> -- /execute-naru-task <id>\` argv"
+  fail "the built-in queue-watcher argv changed: $(cat "$CLAUDE_LOG")"
+ok "the unconfigured queue-watcher keeps its built-in \`--agent supervisor --name <project>: <name> -- /execute-naru-task <id>\` argv"
 
 run 0 "$MESA" inbox add --task "$TASK_B" --kind change-request "loki: find exits 0 on no match"
 ITEM_2=$(jqs .id)

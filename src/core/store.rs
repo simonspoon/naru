@@ -3347,7 +3347,7 @@ pub enum NextResult {
         todo: i64,
         /// How many of those `in_progress` tasks carry a claim at least
         /// [`STALE_CLAIM_MINUTES`] old — the wedge diagnostic. It rides here
-        /// because the todo-watcher calls `next_task` itself, so the signal
+        /// because the queue-watcher calls `next_task` itself, so the signal
         /// lands on the watcher's own path with no watcher code and no dedup
         /// state of its own.
         stale_claims: i64,
@@ -4694,7 +4694,7 @@ impl Store {
     }
 
     /// [`Store::next_task`] with the tasks in `exclude` never picked — the
-    /// todo-watcher's pick, which passes the tasks it has backed off after a
+    /// queue-watcher's pick, which passes the tasks it has backed off after a
     /// failed spawn (mesa task 1338) so one of them cannot stand in front of
     /// the rest of the project's backlog. Only the pick is filtered: the
     /// no-actionable-task counts are the same as `next_task`'s.

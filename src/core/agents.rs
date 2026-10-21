@@ -228,7 +228,7 @@ struct ProcRow {
 /// **Fails open in every direction**: no `ps`, no projects dir, an unreadable
 /// folder or an unparseable row all leave the counts at `0` and the list
 /// empty. This is a best-effort liveness probe hanging off the agents
-/// endpoints and the todo watcher — it must never turn either into an error
+/// endpoints and the queue watcher — it must never turn either into an error
 /// or park a watcher.
 ///
 /// The counts are derived from the same walk that builds the list, so the
@@ -1431,7 +1431,7 @@ fn parse_spawn(stdout: &str) -> Option<String> {
 
 /// Strips ANSI CSI escape sequences (`ESC '[' <params> <final byte>`, e.g.
 /// SGR color codes like `\x1b[36m`). No crate dependency for two narrow uses
-/// (the spawn receipt, and the todo-watcher's spawn-failure alert).
+/// (the spawn receipt, and the queue-watcher's spawn-failure alert).
 pub fn strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
@@ -2281,7 +2281,7 @@ echo "backgrounded · 5we00000 · n""#,
             &config_file,
             serde_json::json!({
                 "commands": {
-                    "todo-watcher": format!("{tool} dispatch --task {{id}} --label {{name}}"),
+                    "queue-watcher": format!("{tool} dispatch --task {{id}} --label {{name}}"),
                 }
             })
             .to_string(),
@@ -2323,7 +2323,7 @@ echo "backgrounded · 5we00000 · n""#,
         let broken = script_for(config::TODO_WATCHER, Some(1), Some("n"), None);
         std::fs::write(
             &config_file,
-            r#"{"commands": {"todo-watcher": "tool {oops}"}}"#,
+            r#"{"commands": {"queue-watcher": "tool {oops}"}}"#,
         )
         .unwrap();
         let bad_placeholder = script_for(config::TODO_WATCHER, Some(1), Some("n"), None);
@@ -2356,7 +2356,7 @@ echo "backgrounded · abc00000""#,
 
     #[test]
     fn spawn_bg_passes_name_flag_before_prompt_separator() {
-        // The todo-watcher default names its agent literally (mesa task
+        // The queue-watcher default names its agent literally (mesa task
         // 1075), so `--agent supervisor` is there; what this pins is `--name`
         // landing before the `--`.
         let dir = tempfile::tempdir().unwrap();
@@ -2450,7 +2450,7 @@ echo "backgrounded · cf0c3945 · proj: do the thing""#,
 
     #[test]
     fn spawn_script_reads_an_absent_value_as_the_empty_string() {
-        // No name on this call, and todo-watcher never offers a prompt at
+        // No name on this call, and queue-watcher never offers a prompt at
         // all: the slot is `''`, one empty argument, under `set -u` too.
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("empty.log");
@@ -2624,7 +2624,7 @@ echo "backgrounded · cf0c3945 · proj: do the thing""#,
         // Every row survived the padded numeric columns `ps` actually emits —
         // a per-character split drops the padded ones and reports 0 shells on
         // a real machine while a single-spaced fixture passes (caught by
-        // todo-watcher-check.sh, not by this test's shell rows).
+        // queue-watcher-check.sh, not by this test's shell rows).
         assert_eq!(table.len(), 7);
         assert_eq!(shell_count(1, &table), 1); // the top-level bash
     }
@@ -2832,7 +2832,7 @@ echo "backgrounded · cf0c3945 · proj: do the thing""#,
         // pids could belong to anything on the machine running the tests.)
         assert!(sessions.iter().all(|s| s.live_subagents == 0));
         // Same rule for the pulse: no transcript to read is silence, not an
-        // Err — the todo watcher reads this list.
+        // Err — the queue watcher reads this list.
         assert!(sessions.iter().all(|s| s.last_response.is_none()));
         assert!(sessions.iter().all(|s| s.context_tokens.is_none()));
         // Nothing to list either — an empty list, never a missing key.

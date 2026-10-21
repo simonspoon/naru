@@ -374,7 +374,7 @@ may have been edited since), failing the node with the same message. Flow group
 colour (`--amber`; board export `#fb923c`); the editor offers a picker of the
 other workflows. There is no per-node timeout: the child's own nodes carry theirs.
 
-**`task`** (naru task 1996) is the one node that writes to the task store directly: `create`, `update` or `read` one task, with `{input}` allowed in every value. Its output is the task JSON, so a later `branch`, `parse-json` or `task read` can use it. Pins are `any` in, `any` out; the editor tints it with `--wf-task` (`docs/themes.md`). Point it at a scratch project when testing: a created `todo` task is dispatchable by the todo-watcher.
+**`task`** (naru task 1996) is the one node that writes to the task store directly: `create`, `update` or `read` one task, with `{input}` allowed in every value. Its output is the task JSON, so a later `branch`, `parse-json` or `task read` can use it. Pins are `any` in, `any` out; the editor tints it with `--wf-task` (`docs/themes.md`). Point it at a scratch project when testing: a created `todo` task is dispatchable by the queue-watcher.
 
 **`notify`** (naru task 1998) is the workflow's way to reach a person: `phone` mode shells out to `vox` like `naru notify`, so a machine without it fails the node with `unavailable` and a pointer to `vox init`. `speak` mode writes a `naru` live turn through `Store` (the page reads it aloud; the server has no speaker of its own), so it needs a live conversation. The editor tints it with `--wf-http` (the action group, `docs/themes.md`).
 
@@ -830,7 +830,7 @@ index 98, naming the shipped definition — not a column on `workflows`).
   keeps calling its own. Only then is the built-in created. The renamed
   workflows are ordinary editable ones.
 - **Which one the watcher runs** is decided by the name in
-  `commands.todo-watcher` (`naru workflow run "Task loop" --input {id} --detach`)
+  `commands.queue-watcher` (`naru workflow run "Task loop" --input {id} --detach`)
   — there is no separate setting. After an upgrade that name means the
   built-in; to keep running a customised loop, edit that command to
   `"Task loop (custom)"` (`docs/config.md`).
@@ -877,7 +877,7 @@ missing one; state is `~/.naru/kb-mined.txt` (`NARU_KB_MINED` overrides).
 - **Installed off.** A KB built-in is created **disabled** — it spends model
   calls — and an install never writes `enabled` on a built-in already there,
   so whatever the person set stands. (The Task loop pair is still created
-  enabled: the todo-watcher depends on it.) A KB built-in deleted behind
+  enabled: the queue-watcher depends on it.) A KB built-in deleted behind
   Naru's back comes back, off, on the next install.
 - **Same rename rule.** A same-named user workflow is renamed
   `"<name> (custom)"` and left exactly as it was, enabled state included.
@@ -914,7 +914,7 @@ clocks (the deadline is soft: an active stage runs on to the ceiling, naru task
 2184). Gate:
 `scripts/task-loop-check.sh`.
 
-**Why backlog.** The review's output must never be `todo`: `serve --watch-todo`
+**Why backlog.** The review's output must never be `todo`: `serve --watch-queue`
 dispatches an agent onto every unblocked `todo` leaf, and a digest of overheard
 ideas is something a person triages first. Hence the output node's `status` key.
 

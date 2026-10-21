@@ -1,7 +1,7 @@
 //! User config: the hook mesa runs when it starts a coding agent, and the
 //! per-model price table the CC Dashboard estimates cost from.
 //!
-//! mesa spawns an agent from exactly six places — the todo-watcher's
+//! mesa spawns an agent from exactly six places — the queue-watcher's
 //! dispatch, the inbox-watcher's triage, the Agents surface's "add agent"
 //! button, the live conversation's agent, the short-lived agent that
 //! writes a live conversation's memory once it ends (mesa task 921), and the
@@ -13,7 +13,7 @@
 //! ```json
 //! {
 //!   "commands": {
-//!     "todo-watcher":   "claude --bg --agent supervisor --name {name} -- \"/execute-naru-task {id}\"",
+//!     "queue-watcher":   "claude --bg --agent supervisor --name {name} -- \"/execute-naru-task {id}\"",
 //!     "inbox-watcher":  "claude -p --model {model} --name {name} --tools \"\" --strict-mcp-config --output-format json --json-schema {schema} -- {prompt}",
 //!     "agent-spawn":    "claude --bg --model opus --agent supervisor -- {prompt}",
 //!     "live-agent":     "claude --bg --agent naru-live --name {name} -- {prompt}",
@@ -92,16 +92,16 @@
 //! A third, equally independent section tunes the watchers (mesa task 777):
 //!
 //! ```json
-//! { "watchers": { "todo-concurrency": 3 } }
+//! { "watchers": { "queue-concurrency": 3 } }
 //! ```
 //!
 //! Two keys: how many agents `serve --watch-todo` may have running **per
-//! project** ([`todo_concurrency`]), default [`DEFAULT_TODO_CONCURRENCY`],
+//! project** ([`queue_concurrency`]), default [`DEFAULT_TODO_CONCURRENCY`],
 //! and how many hours `serve --watch-retro` waits between two
 //! retrospectives ([`retro_interval_hours`], mesa task 1158), default
 //! [`DEFAULT_RETRO_INTERVAL_HOURS`]. Both read per tick rather than at
 //! startup, so an edit lands on the next tick with no restart. See
-//! `docs/todo-watcher.md` and `docs/retro.md`.
+//! `docs/queue-watcher.md` and `docs/retro.md`.
 
 //!
 //! ## Speech
@@ -217,8 +217,17 @@ use crate::core::types::{
     ContextTier, ModelRates,
 };
 
-/// The todo-watcher's dispatch command (`docs/todo-watcher.md`).
-pub const TODO_WATCHER: &str = "todo-watcher";
+/// The queue watcher's dispatch command (`docs/queue-watcher.md`). Called the
+/// queue watcher until naru task 1898; [`LEGACY_TODO_WATCHER`] is still read.
+pub const TODO_WATCHER: &str = "queue-watcher";
+/// The pre-1898 spelling of [`TODO_WATCHER`]: read when the new key is
+/// absent, removed on the next save of the new one.
+pub const LEGACY_TODO_WATCHER: &str = "todo-watcher";
+
+/// The pre-rename key an `action` was saved under, if it was renamed.
+fn legacy_action(action: &str) -> Option<&'static str> {
+    (action == TODO_WATCHER).then_some(LEGACY_TODO_WATCHER)
+}
 /// The inbox-watcher's triage command (`docs/inbox-watcher.md`).
 pub const INBOX_WATCHER: &str = "inbox-watcher";
 /// The Agents surface's "add agent" command (`docs/agents.md`).
@@ -524,6 +533,7 @@ fn command_in(path: &Path, action: &str) -> Result<Option<String>, String> {
     Ok(config
         .commands
         .get(action)
+        .or_else(|| legacy_action(action).and_then(|old| config.commands.get(old)))
         .map(|s| {
             migrate_renamed_agents(&migrate_env_references(&migrate_retired_placeholders(
                 s.trim(),
@@ -759,6 +769,9 @@ fn save_commands_in(
     };
     for action in actions {
         let template = updates[action].trim();
+        if let Some(old) = legacy_action(action) {
+            commands.remove(old);
+        }
         if template.is_empty() {
             commands.remove(action);
         } else {
@@ -2099,8 +2112,33 @@ fn validate_rates(prefix: &str, rates: &ModelRates) -> Result<(), String> {
 // Watchers
 // ---------------------------------------------------------------------------
 
-/// The config key holding the todo-watcher's per-project agent ceiling.
-pub const TODO_CONCURRENCY: &str = "todo-concurrency";
+/// The config key holding the queue watcher's per-project agent ceiling.
+pub const TODO_CONCURRENCY: &str = "queue-concurrency";
+/// The pre-naru-task-1898 spelling of [`TODO_CONCURRENCY`]: still read when
+/// the new key is absent, dropped on the next save.
+pub const LEGACY_TODO_CONCURRENCY: &str = "todo-concurrency";
+
+/// Rewrites a legacy key in a save request to its current name (an older
+/// client still sends `todo-concurrency`/`watch-todo`); a request naming both
+/// keeps the current one.
+fn canonical_updates(
+    updates: &HashMap<String, Option<serde_json::Value>>,
+    renamed: &[(&str, &str)],
+) -> HashMap<String, Option<serde_json::Value>> {
+    let mut out = HashMap::new();
+    for (key, value) in updates {
+        if !renamed.iter().any(|(old, _)| old == key) {
+            out.insert(key.clone(), value.clone());
+        }
+    }
+    for (old, new) in renamed {
+        if let Some(value) = updates.get(*old) {
+            out.entry((*new).to_string())
+                .or_insert_with(|| value.clone());
+        }
+    }
+    out
+}
 
 /// The config key holding the retrospective's cadence, in hours (mesa task
 /// 1158, `docs/retro.md`).
@@ -2108,7 +2146,7 @@ pub const RETRO_INTERVAL_HOURS: &str = "retro-interval-hours";
 
 /// The config key holding how many minutes a dispatched agent may stay silent
 /// on an `in_progress` task before the stall watchdog acts (naru task 1953,
-/// `docs/todo-watcher.md`).
+/// `docs/queue-watcher.md`).
 pub const STALL_MINUTES: &str = "stall-minutes";
 
 /// Every key the `watchers` section understands, for the unknown-key error.
@@ -2152,8 +2190,12 @@ struct WatchersConfig {
 
 #[derive(Debug, Default, Deserialize)]
 struct WatchersSection {
+    #[serde(default, rename = "queue-concurrency")]
+    queue_concurrency: Option<u32>,
+    /// Pre-1898 spelling; a separate field because serde `alias` would make a
+    /// file holding both keys a "duplicate field" error.
     #[serde(default, rename = "todo-concurrency")]
-    todo_concurrency: Option<u32>,
+    legacy_queue_concurrency: Option<u32>,
     #[serde(default, rename = "retro-interval-hours")]
     retro_interval_hours: Option<u32>,
     #[serde(default, rename = "stall-minutes")]
@@ -2170,16 +2212,20 @@ fn read_watchers(path: &Path) -> Result<WatchersSection, String> {
     };
     let config: WatchersConfig = serde_json::from_slice(&bytes)
         .map_err(|e| format!("malformed mesa config {}: {e}", path.display()))?;
-    Ok(config.watchers)
+    let mut section = config.watchers;
+    section.queue_concurrency = section
+        .queue_concurrency
+        .or(section.legacy_queue_concurrency);
+    Ok(section)
 }
 
-/// How many agents the todo-watcher may have running per project.
+/// How many agents the queue-watcher may have running per project.
 ///
 /// Read **on every tick**, like [`command_for`] is read on every spawn: that
 /// is what makes a change take effect without restarting `mesa serve`. An
 /// absent file or key is [`DEFAULT_TODO_CONCURRENCY`]; a file that exists but
 /// can't be read or parsed is `Err`, never a silent fall back to 1 — same rule
-/// as [`read_pricing`], and the caller (`todo_watcher_tick`) skips the tick
+/// as [`read_pricing`], and the caller (`queue_watcher_tick`) skips the tick
 /// rather than dispatch under a guessed limit.
 ///
 /// A hand-edited value outside `1..=MAX_TODO_CONCURRENCY` is **clamped** into
@@ -2187,19 +2233,19 @@ fn read_watchers(path: &Path) -> Result<WatchersSection, String> {
 /// machine, and refusing to dispatch at all would be a worse answer to `0`
 /// than treating it as the one-at-a-time it obviously means. The editor still
 /// refuses to *write* such a value.
-pub fn todo_concurrency() -> Result<u32, String> {
-    todo_concurrency_in(&config_file())
+pub fn queue_concurrency() -> Result<u32, String> {
+    queue_concurrency_in(&config_file())
 }
 
-fn todo_concurrency_in(path: &Path) -> Result<u32, String> {
+fn queue_concurrency_in(path: &Path) -> Result<u32, String> {
     Ok(read_watchers(path)?
-        .todo_concurrency
+        .queue_concurrency
         .map(|n| n.clamp(1, MAX_TODO_CONCURRENCY))
         .unwrap_or(DEFAULT_TODO_CONCURRENCY))
 }
 
 /// How many hours `serve --watch-retro` waits between two retrospectives
-/// (mesa task 1158). [`todo_concurrency`]'s rules exactly: read on every
+/// (mesa task 1158). [`queue_concurrency`]'s rules exactly: read on every
 /// tick (and by `mesa retro run`/`status`), an absent file or key is
 /// [`DEFAULT_RETRO_INTERVAL_HOURS`], a hand-edited value outside
 /// `1..=MAX_RETRO_INTERVAL_HOURS` is clamped rather than rejected, and a file
@@ -2217,7 +2263,7 @@ fn retro_interval_hours_in(path: &Path) -> Result<u32, String> {
 
 /// How many minutes a dispatched agent may be silent before the stall
 /// watchdog nudges and then reports it (naru task 1953).
-/// [`todo_concurrency`]'s rules exactly: read on every tick, absent is
+/// [`queue_concurrency`]'s rules exactly: read on every tick, absent is
 /// [`DEFAULT_STALL_MINUTES`], a hand-edited value outside
 /// `1..=MAX_STALL_MINUTES` is clamped, an unreadable file is `Err`.
 pub fn stall_minutes() -> Result<u32, String> {
@@ -2256,8 +2302,8 @@ pub fn watchers() -> Result<ConfigWatchers, String> {
 fn watchers_in(path: &Path) -> Result<ConfigWatchers, String> {
     let section = read_watchers(path)?;
     Ok(ConfigWatchers {
-        todo_concurrency: section.todo_concurrency,
-        todo_concurrency_default: DEFAULT_TODO_CONCURRENCY,
+        queue_concurrency: section.queue_concurrency,
+        queue_concurrency_default: DEFAULT_TODO_CONCURRENCY,
         retro_interval_hours: section.retro_interval_hours,
         retro_interval_hours_default: DEFAULT_RETRO_INTERVAL_HOURS,
         stall_minutes: section.stall_minutes,
@@ -2292,6 +2338,7 @@ fn save_watchers_in(
         // `"watchers": {}` written into a file the user never configured.
         return Ok(());
     }
+    let updates = &canonical_updates(updates, &[(LEGACY_TODO_CONCURRENCY, TODO_CONCURRENCY)]);
     let mut keys: Vec<&String> = updates.keys().collect();
     keys.sort();
     for key in &keys {
@@ -2330,6 +2377,9 @@ fn save_watchers_in(
         )));
     };
     for key in keys {
+        if key == TODO_CONCURRENCY {
+            section.remove(LEGACY_TODO_CONCURRENCY);
+        }
         match &updates[key] {
             None => {
                 section.remove(key);
@@ -2373,7 +2423,9 @@ fn validate_limit(key: &str, value: &serde_json::Value, max: u32) -> Result<(), 
 pub const SERVE_PORT: &str = "port";
 pub const SERVE_LAN: &str = "lan";
 pub const SERVE_ALLOW_HOST: &str = "allow-host";
-pub const SERVE_WATCH_TODO: &str = "watch-todo";
+pub const SERVE_WATCH_TODO: &str = "watch-queue";
+/// The pre-naru-task-1898 spelling of [`SERVE_WATCH_TODO`].
+pub const LEGACY_SERVE_WATCH_TODO: &str = "watch-todo";
 pub const SERVE_WATCH_INBOX: &str = "watch-inbox";
 pub const SERVE_WATCH_COST: &str = "watch-cost";
 pub const SERVE_WATCH_RETRO: &str = "watch-retro";
@@ -2411,7 +2463,7 @@ pub struct ServeSettings {
     pub port: Option<u16>,
     pub lan: Option<bool>,
     pub allow_host: Option<Vec<String>>,
-    pub watch_todo: Option<bool>,
+    pub watch_queue: Option<bool>,
     pub watch_inbox: Option<bool>,
     pub watch_cost: Option<bool>,
     pub watch_retro: Option<bool>,
@@ -2447,7 +2499,7 @@ fn read_serve(path: &Path) -> Result<ServeSettings, String> {
             .filter(|n| *n >= 1),
         lan: flag(SERVE_LAN),
         allow_host,
-        watch_todo: flag(SERVE_WATCH_TODO),
+        watch_queue: flag(SERVE_WATCH_TODO).or_else(|| flag(LEGACY_SERVE_WATCH_TODO)),
         watch_inbox: flag(SERVE_WATCH_INBOX),
         watch_cost: flag(SERVE_WATCH_COST),
         watch_retro: flag(SERVE_WATCH_RETRO),
@@ -2490,6 +2542,7 @@ fn save_serve_in(
     if updates.is_empty() {
         return Ok(());
     }
+    let updates = &canonical_updates(updates, &[(LEGACY_SERVE_WATCH_TODO, SERVE_WATCH_TODO)]);
     let mut keys: Vec<&String> = updates.keys().collect();
     keys.sort();
     let mut normalized: HashMap<&String, Option<serde_json::Value>> = HashMap::new();
@@ -2524,6 +2577,9 @@ fn save_serve_in(
         )));
     };
     for key in keys {
+        if key == SERVE_WATCH_TODO {
+            section.remove(LEGACY_SERVE_WATCH_TODO);
+        }
         match normalized.remove(key).flatten() {
             None => {
                 section.remove(key);
@@ -2643,7 +2699,7 @@ fn read_speech(path: &Path) -> Result<SpeechSection, String> {
 /// change is audible on the next play with no restart. Absent, blank and a
 /// value the shape rule rejects all mean `None`: a hand-edited nonsense voice
 /// falls back to the default rather than reaching the binary's argv, which is
-/// the same conservatism [`todo_concurrency`] clamps with. A file that exists
+/// the same conservatism [`queue_concurrency`] clamps with. A file that exists
 /// but can't be read or parsed is `Err`, never a silent fall back.
 pub fn speech_voice() -> Result<Option<String>, String> {
     speech_voice_in(&config_file())
@@ -2672,7 +2728,7 @@ fn speech_model_in(path: &Path) -> Result<Option<String>, String> {
 }
 
 /// The speech playback speed, [`SPEECH_SPEED_DEFAULT`] when the file says
-/// nothing or a hand-edited value is out of range (the [`todo_concurrency`]
+/// nothing or a hand-edited value is out of range (the [`queue_concurrency`]
 /// clamp posture — playback never fails on it). An unreadable file is `Err`.
 pub fn speech_speed() -> Result<f64, String> {
     speech_speed_in(&config_file())
@@ -4054,14 +4110,14 @@ fn read_guard(path: &Path) -> Result<GuardSection, String> {
 }
 
 /// The thresholds the cost-guard watcher evaluates against, read **on every
-/// tick** — the [`todo_concurrency`] rule, and for the same reason: a limit
+/// tick** — the [`queue_concurrency`] rule, and for the same reason: a limit
 /// raised in Settings must take effect without restarting `mesa serve`.
 ///
 /// A file that exists but can't be read or parsed is `Err`, never a silent
 /// fall back — the caller (`cost_watcher_tick`) skips the tick rather than
 /// guard against guessed numbers. A value of the right *type* but outside its
 /// sanity bound falls back to the built-in for that key alone, the same
-/// don't-stop-working posture [`todo_concurrency`]'s clamp takes: a
+/// don't-stop-working posture [`queue_concurrency`]'s clamp takes: a
 /// hand-edited `0` must not turn the guard off silently, and the editor still
 /// refuses to *write* such a value.
 pub fn guard_thresholds() -> Result<GuardThresholds, String> {
@@ -5052,7 +5108,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = write_config(
             dir.path(),
-            r#"{"commands": {"todo-watcher": "mytool {id}"},
+            r#"{"commands": {"queue-watcher": "mytool {id}"},
                 "watchers": {"todo-concurrency": 3},
                 "live": {"auto-send-ms": 3000}}"#,
         );
@@ -5066,7 +5122,7 @@ mod tests {
         .unwrap();
         let root: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(root["commands"]["todo-watcher"], "mytool {id}");
+        assert_eq!(root["commands"]["queue-watcher"], "mytool {id}");
         assert_eq!(root["watchers"]["todo-concurrency"], 3);
         assert_eq!(root["live"]["auto-send-ms"], 3000);
         assert_eq!(root["guard"]["cost-usd"], 9.5);
@@ -5092,7 +5148,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = write_config(
             dir.path(),
-            r#"{"commands": {"todo-watcher": "mytool run {id}"}}"#,
+            r#"{"commands": {"queue-watcher": "mytool run {id}"}}"#,
         );
         assert_eq!(
             command_in(&path, TODO_WATCHER).unwrap().as_deref(),
@@ -5110,7 +5166,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let before = concat!(
             r#"{"commands": {"#,
-            r#""todo-watcher": "{bin} --bg --agent {agent} --name {name} -- \"/execute-mesa-task {id}\"", "#,
+            r#""queue-watcher": "{bin} --bg --agent {agent} --name {name} -- \"/execute-mesa-task {id}\"", "#,
             r#""agent-spawn": "cd /repo\nexec \"{bin}\" --agent {agent} -- {prompt}""#,
             r#"}}"#
         );
@@ -5203,7 +5259,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // A blank value falls back to the default rather than expanding to an
         // empty argv — the natural way to "un-set" one command.
-        let path = write_config(dir.path(), r#"{"commands": {"todo-watcher": "   "}}"#);
+        let path = write_config(dir.path(), r#"{"commands": {"queue-watcher": "   "}}"#);
         assert_eq!(command_in(&path, TODO_WATCHER).unwrap(), None);
         let path = write_config(dir.path(), r#"{"other": {"x": 1}}"#);
         assert_eq!(command_in(&path, TODO_WATCHER).unwrap(), None);
@@ -5229,7 +5285,7 @@ mod tests {
         validate(action, template, &Prompts::default())
     }
 
-    /// [`resolve`] for the todo-watcher, unwrapped — most of the script tests
+    /// [`resolve`] for the queue-watcher, unwrapped — most of the script tests
     /// only care what the text became.
     fn resolved(template: &str, vars: &Vars) -> String {
         resolve(TODO_WATCHER, template, vars).unwrap()
@@ -5247,7 +5303,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = write_config(
             dir.path(),
-            r#"{"commands": {"todo-watcher": "mytool run {id}"}}"#,
+            r#"{"commands": {"queue-watcher": "mytool run {id}"}}"#,
         );
         let settings = settings_in(&path).unwrap();
         assert_eq!(settings.len(), ACTIONS.len());
@@ -5583,14 +5639,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = write_config(
             dir.path(),
-            r#"{"other": {"x": 1}, "commands": {"todo-watcher": "mytool {id}"}}"#,
+            r#"{"other": {"x": 1}, "commands": {"queue-watcher": "mytool {id}"}}"#,
         );
         save_in(&path, &update(&[(INBOX_WATCHER, "mytool triage {id}")])).unwrap();
         let written: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         // A section mesa knows nothing about survives the edit verbatim.
         assert_eq!(written["other"]["x"], 1);
-        assert_eq!(written["commands"]["todo-watcher"], "mytool {id}");
+        assert_eq!(written["commands"]["queue-watcher"], "mytool {id}");
         assert_eq!(written["commands"]["inbox-watcher"], "mytool triage {id}");
     }
 
@@ -5599,7 +5655,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = write_config(
             dir.path(),
-            r#"{"commands": {"todo-watcher": "mytool {id}", "agent-spawn": "mytool"}}"#,
+            r#"{"commands": {"queue-watcher": "mytool {id}", "agent-spawn": "mytool"}}"#,
         );
         save_in(&path, &update(&[(TODO_WATCHER, "   ")])).unwrap();
         let written: serde_json::Value =
@@ -5618,7 +5674,7 @@ mod tests {
     #[test]
     fn save_commands_rejects_a_bad_template_without_writing() {
         let dir = tempfile::tempdir().unwrap();
-        let before = r#"{"commands": {"todo-watcher": "mytool {id}"}}"#;
+        let before = r#"{"commands": {"queue-watcher": "mytool {id}"}}"#;
         let path = write_config(dir.path(), before);
         // Unsupported placeholder for this action…
         let err = save_in(&path, &update(&[(TODO_WATCHER, "mytool {prompt}")])).unwrap_err();
@@ -5857,7 +5913,7 @@ mod tests {
         // …and the watchers' prompt is theirs to write, not mesa's to inject.
         let err = resolve(TODO_WATCHER, "claude {prompt}", &vars).unwrap_err();
         assert!(err.contains("{prompt}"), "{err}");
-        assert!(err.contains("todo-watcher offers {id}, {name}"), "{err}");
+        assert!(err.contains("queue-watcher offers {id}, {name}"), "{err}");
         // A placeholder-shaped name mesa does not know is a typo, not text:
         // bash has no use for `{nope}` either.
         let err = resolve(TODO_WATCHER, "claude {nope}", &vars).unwrap_err();
@@ -5930,7 +5986,7 @@ mod tests {
         // is left byte-identical, exactly like the `{bin}`/`{agent}` rewrite.
         let dir = tempfile::tempdir().unwrap();
         let before = serde_json::json!({"commands": {
-            "todo-watcher": "cd /repo\nexec claude --name \"$MESA_NAME\" -- \"work on ${MESA_ID}\" ${MESA_ID-} $MESA_NAME",
+            "queue-watcher": "cd /repo\nexec claude --name \"$MESA_NAME\" -- \"work on ${MESA_ID}\" ${MESA_ID-} $MESA_NAME",
             "agent-spawn": "printf '%s' \"${MESA_PROMPT-}\" $MESA_PROMPT_NIGHTLY_BRIEF \"${MESA_PROMPT_A_B}\"",
         }})
         .to_string();
@@ -6748,7 +6804,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = write_config(
             dir.path(),
-            r#"{"other": {"x": 1}, "commands": {"todo-watcher": "mytool {id}"}}"#,
+            r#"{"other": {"x": 1}, "commands": {"queue-watcher": "mytool {id}"}}"#,
         );
         save_pricing_in(
             &path,
@@ -6757,7 +6813,7 @@ mod tests {
         .unwrap();
         let written: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert_eq!(written["commands"]["todo-watcher"], "mytool {id}");
+        assert_eq!(written["commands"]["queue-watcher"], "mytool {id}");
         assert_eq!(written["other"]["x"], 1);
         assert_eq!(written["pricing"]["claude-opus"]["output"], 2.0);
         // …and the commands saver leaves the pricing section alone in turn.
@@ -6869,22 +6925,22 @@ mod tests {
     }
 
     #[test]
-    fn todo_concurrency_defaults_to_one_and_round_trips() {
+    fn queue_concurrency_defaults_to_one_and_round_trips() {
         let dir = tempfile::tempdir().unwrap();
         // No file at all, and a file with no watchers section: the shipped 1.
         assert_eq!(
-            todo_concurrency_in(&dir.path().join("nope.json")).unwrap(),
+            queue_concurrency_in(&dir.path().join("nope.json")).unwrap(),
             DEFAULT_TODO_CONCURRENCY
         );
         let path = write_config(dir.path(), r#"{"commands": {}}"#);
-        assert_eq!(todo_concurrency_in(&path).unwrap(), 1);
-        assert_eq!(watchers_in(&path).unwrap().todo_concurrency, None);
+        assert_eq!(queue_concurrency_in(&path).unwrap(), 1);
+        assert_eq!(watchers_in(&path).unwrap().queue_concurrency, None);
 
         save_watchers_in(&path, &watcher(&[(TODO_CONCURRENCY, Some(3))])).unwrap();
-        assert_eq!(todo_concurrency_in(&path).unwrap(), 3);
+        assert_eq!(queue_concurrency_in(&path).unwrap(), 3);
         let view = watchers_in(&path).unwrap();
-        assert_eq!(view.todo_concurrency, Some(3));
-        assert_eq!(view.todo_concurrency_default, DEFAULT_TODO_CONCURRENCY);
+        assert_eq!(view.queue_concurrency, Some(3));
+        assert_eq!(view.queue_concurrency_default, DEFAULT_TODO_CONCURRENCY);
     }
 
     /// The second watcher key (mesa task 1158): 72 with no config, the
@@ -6908,8 +6964,8 @@ mod tests {
         let view = watchers_in(&path).unwrap();
         assert_eq!(view.retro_interval_hours, Some(24));
         // The other key survived the save.
-        assert_eq!(view.todo_concurrency, Some(2));
-        assert_eq!(todo_concurrency_in(&path).unwrap(), 2);
+        assert_eq!(view.queue_concurrency, Some(2));
+        assert_eq!(queue_concurrency_in(&path).unwrap(), 2);
 
         // `null` removes it; the default is expressed by absence.
         save_watchers_in(&path, &watcher(&[(RETRO_INTERVAL_HOURS, None)])).unwrap();
@@ -6993,7 +7049,66 @@ mod tests {
     }
 
     #[test]
-    fn removing_todo_concurrency_restores_the_built_in() {
+    fn pre_1898_keys_still_read_and_the_new_ones_win() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(
+            dir.path(),
+            r#"{"commands": {"todo-watcher": "oldtool {id}"},
+                "watchers": {"queue-concurrency": 4},
+                "serve": {"watch-todo": true}}"#,
+        );
+        assert_eq!(
+            command_in(&path, TODO_WATCHER).unwrap().as_deref(),
+            Some("oldtool {id}")
+        );
+        assert_eq!(settings_in(&path).unwrap()[0].action, TODO_WATCHER);
+        assert_eq!(queue_concurrency_in(&path).unwrap(), 4);
+        assert_eq!(read_serve(&path).unwrap().watch_queue, Some(true));
+
+        let both = write_config(
+            dir.path(),
+            r#"{"commands": {"todo-watcher": "old {id}", "queue-watcher": "new {id}"},
+                "watchers": {"todo-concurrency": 4, "queue-concurrency": 2},
+                "serve": {"watch-todo": true, "watch-queue": false}}"#,
+        );
+        assert_eq!(
+            command_in(&both, TODO_WATCHER).unwrap().as_deref(),
+            Some("new {id}")
+        );
+        assert_eq!(queue_concurrency_in(&both).unwrap(), 2);
+        assert_eq!(read_serve(&both).unwrap().watch_queue, Some(false));
+    }
+
+    #[test]
+    fn saving_moves_a_pre_1898_key_to_its_new_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(
+            dir.path(),
+            r#"{"commands": {"todo-watcher": "oldtool {id}"},
+                "watchers": {"queue-concurrency": 4},
+                "serve": {"watch-todo": true}}"#,
+        );
+        save_in(&path, &update(&[(TODO_WATCHER, "newtool {id}")])).unwrap();
+        // An older client's request names the old key; it lands on the new one.
+        save_watchers_in(&path, &watcher(&[(LEGACY_TODO_CONCURRENCY, Some(3))])).unwrap();
+        let mut serve = HashMap::new();
+        serve.insert(
+            LEGACY_SERVE_WATCH_TODO.to_string(),
+            Some(serde_json::json!(false)),
+        );
+        save_serve_in(&path, &serve).unwrap();
+        let root: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(root["commands"]["queue-watcher"], "newtool {id}");
+        assert!(root["commands"].get("todo-watcher").is_none());
+        assert_eq!(root["watchers"]["queue-concurrency"], 3);
+        assert!(root["watchers"].get("todo-concurrency").is_none());
+        assert_eq!(root["serve"]["watch-queue"], false);
+        assert!(root["serve"].get("watch-todo").is_none());
+    }
+
+    #[test]
+    fn removing_queue_concurrency_restores_the_built_in() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_config(dir.path(), r#"{"watchers": {"todo-concurrency": 5}}"#);
         save_watchers_in(&path, &watcher(&[(TODO_CONCURRENCY, None)])).unwrap();
@@ -7001,8 +7116,8 @@ mod tests {
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         // Removed, not stored as 1: the default is expressed by absence.
         assert!(written["watchers"].get(TODO_CONCURRENCY).is_none());
-        assert_eq!(todo_concurrency_in(&path).unwrap(), 1);
-        assert_eq!(watchers_in(&path).unwrap().todo_concurrency, None);
+        assert_eq!(queue_concurrency_in(&path).unwrap(), 1);
+        assert_eq!(watchers_in(&path).unwrap().queue_concurrency, None);
     }
 
     fn serve_updates(
@@ -7017,7 +7132,7 @@ mod tests {
     #[test]
     fn serve_section_round_trips_normalizes_and_resets() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_config(dir.path(), r#"{"watchers": {"todo-concurrency": 4}}"#);
+        let path = write_config(dir.path(), r#"{"watchers": {"queue-concurrency": 4}}"#);
         assert_eq!(read_serve(&path).unwrap(), ServeSettings::default());
         save_serve_in(
             &path,
@@ -7030,7 +7145,7 @@ mod tests {
         .unwrap();
         let got = read_serve(&path).unwrap();
         assert_eq!(got.port, Some(8000));
-        assert_eq!(got.watch_todo, Some(true));
+        assert_eq!(got.watch_queue, Some(true));
         assert_eq!(got.allow_host, Some(vec!["naru.local".to_string()]));
         let root: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
@@ -7086,7 +7201,7 @@ mod tests {
             r#"{
                  "commands": {"inbox-watcher": "mytool triage {id}"},
                  "pricing": {"claude-opus": {"input": 1, "output": 2, "cache_read": 3, "cache_write": 4}},
-                 "watchers": {"todo-concurrency": 4},
+                 "watchers": {"queue-concurrency": 4},
                  "serve": {"port": 8123},
                  "speech": {"voice": "bm_george"},
                  "listen": {"model": "parakeet-tdt-0.6b-v2-int8"},
@@ -7119,7 +7234,7 @@ mod tests {
         save_watchers_in(&path, &watcher(&[(TODO_CONCURRENCY, Some(7))])).unwrap();
         assert_eq!(survives("watchers")["watchers"][TODO_CONCURRENCY], 7);
         // …and each of the other savers leaves `watchers` alone.
-        save_in(&path, &update(&[("todo-watcher", "mytool run {id}")])).unwrap();
+        save_in(&path, &update(&[("queue-watcher", "mytool run {id}")])).unwrap();
         assert_eq!(survives("commands")["watchers"][TODO_CONCURRENCY], 7);
         save_pricing_in(
             &path,
@@ -7127,7 +7242,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(survives("pricing")["watchers"][TODO_CONCURRENCY], 7);
-        assert_eq!(todo_concurrency_in(&path).unwrap(), 7);
+        assert_eq!(queue_concurrency_in(&path).unwrap(), 7);
         // The speech saver is the fourth of the same shape: it rewrites its own
         // key and nothing else (`survives` re-asserts the voice it just wrote).
         save_speech_in(
@@ -7139,7 +7254,7 @@ mod tests {
         .unwrap();
         assert_eq!(survives("speech")["watchers"][TODO_CONCURRENCY], 7);
         assert_eq!(
-            survives("speech")["commands"]["todo-watcher"],
+            survives("speech")["commands"]["queue-watcher"],
             "mytool run {id}"
         );
         // And the live saver is the fifth (mesa task 867).
@@ -7251,7 +7366,7 @@ mod tests {
         // The bounds themselves are inclusive.
         for ok in [1u64, u64::from(MAX_TODO_CONCURRENCY)] {
             save_watchers_in(&path, &watcher(&[(TODO_CONCURRENCY, Some(ok))])).unwrap();
-            assert_eq!(todo_concurrency_in(&path).unwrap(), ok as u32);
+            assert_eq!(queue_concurrency_in(&path).unwrap(), ok as u32);
         }
     }
 
@@ -7259,7 +7374,7 @@ mod tests {
     fn watchers_refuse_a_malformed_config() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_config(dir.path(), "not json");
-        let err = todo_concurrency_in(&path).unwrap_err();
+        let err = queue_concurrency_in(&path).unwrap_err();
         assert!(err.contains("malformed mesa config"), "{err}");
         assert!(watchers_in(&path).is_err());
         let err = save_watchers_in(&path, &watcher(&[(TODO_CONCURRENCY, Some(2))])).unwrap_err();
@@ -7274,11 +7389,11 @@ mod tests {
     fn a_hand_edited_limit_is_clamped_into_the_sanity_bound() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_config(dir.path(), r#"{"watchers": {"todo-concurrency": 0}}"#);
-        assert_eq!(todo_concurrency_in(&path).unwrap(), 1);
+        assert_eq!(queue_concurrency_in(&path).unwrap(), 1);
         // The raw value still reaches the editor, which is what refuses it.
-        assert_eq!(watchers_in(&path).unwrap().todo_concurrency, Some(0));
+        assert_eq!(watchers_in(&path).unwrap().queue_concurrency, Some(0));
         let path = write_config(dir.path(), r#"{"watchers": {"todo-concurrency": 500}}"#);
-        assert_eq!(todo_concurrency_in(&path).unwrap(), MAX_TODO_CONCURRENCY);
+        assert_eq!(queue_concurrency_in(&path).unwrap(), MAX_TODO_CONCURRENCY);
     }
 
     fn voice(pairs: &[(&str, Option<&str>)]) -> HashMap<String, Option<String>> {
@@ -8785,7 +8900,7 @@ mod tests {
             prompts: Some(&table),
             ..Default::default()
         };
-        // todo-watcher offers {id}/{name} but not {prompt}.
+        // queue-watcher offers {id}/{name} but not {prompt}.
         assert_eq!(
             resolve(TODO_WATCHER, "claude -- {prompt:brief}", &vars).unwrap(),
             "claude -- 'task 7 (A: do it) — {prompt:other} {prompt} {nope}'"

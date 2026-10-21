@@ -207,7 +207,7 @@ The starter set — twenty-four rows:
 | `id` | kind | scope | what it is |
 | --- | --- | --- | --- |
 | `naru-live` | `agent` | `user` | The agent definition the live conversation runs as — literally `core::live::AGENT_DEFINITION`, YAML frontmatter plus `core::live::AGENT_PROMPT`, moved here rather than duplicated (mesa task 1068) |
-| `supervisor` | `agent` | `user` | The agent definition an auto-dispatched `/execute-todo` run is supervised as — literally `core::supervisor::SUPERVISOR_DEFINITION` (mesa task 1075), seeded to `~/.claude/agents/supervisor.md` by `core::supervisor::ensure_agent_definition` before the `todo-watcher` spawn |
+| `supervisor` | `agent` | `user` | The agent definition an auto-dispatched `/execute-todo` run is supervised as — literally `core::supervisor::SUPERVISOR_DEFINITION` (mesa task 1075), seeded to `~/.claude/agents/supervisor.md` by `core::supervisor::ensure_agent_definition` before the `queue-watcher` spawn |
 | `naru-retro` | `agent` | `user` | The agent definition the session retrospective used to run as — literally `core::retro::RETRO_DEFINITION` (mesa task 1158, `docs/retro.md`). Kept for manual `claude --agent naru-retro` use (seeded to `~/.claude/agents/naru-retro.md` by `core::retro::ensure_agent_definition` only if something calls it); since naru task 1692 the watcher and `retro run` no longer spawn or seed it — the retrospective is `claude -p` calls in a detached `naru __job retro` |
 | `inbox-triage` | `agent` | `user` | An agent definition — literally `core::inbox_triage::INBOX_TRIAGE_DEFINITION` (mesa task 1168): `haiku` at medium effort, no `Edit`/`Write`. Kept for manual `claude --agent inbox-triage` use; no longer spawned or seeded since naru task 1691 (`docs/inbox-watcher.md`) |
 | `live-summary-prompt` | `prompt` | `user` | The instructions for the tool-less `claude -p --json-schema` call (a detached `naru __job summary`, naru task 1690) that writes a live conversation's memory once it ends (mesa task 921) — literally `core::live::SUMMARY_PROMPT`, placed immediately after the prompt it belongs beside |
@@ -674,7 +674,7 @@ destroy configuration Naru did not write and cannot reconstruct.
 ### The task-stop-guard hook
 
 `task-stop-guard` (mesa task 1190, body `core::stop_guard::STOP_GUARD_HOOK`)
-is a Claude Code **Stop** hook for *task agents* — sessions the todo-watcher
+is a Claude Code **Stop** hook for *task agents* — sessions the queue-watcher
 (or a person) dispatched with the task-execute prompt. Installed through the
 ordinary registration flow, user scope:
 

@@ -59,7 +59,7 @@ BIN_DIR="${PREFIX:+$PREFIX/bin}"
 BIN_DIR="${BIN_DIR:-$HOME/.local/bin}"
 INSTALLED="$BIN_DIR/naru"
 BACKUP_DIR="${NARU_DEPLOY_BACKUP_DIR:-$HOME/.naru/backups}"
-CHECKS="${NARU_DEPLOY_CHECKS:-cli-check api-check task-loop-check todo-watcher-check runner-check concurrent-check}"
+CHECKS="${NARU_DEPLOY_CHECKS:-cli-check api-check task-loop-check queue-watcher-check runner-check concurrent-check}"
 work="$(mktemp -d "${TMPDIR:-/tmp}/naru-self-deploy.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 LOG="$work/self-deploy.log"

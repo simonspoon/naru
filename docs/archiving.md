@@ -18,7 +18,7 @@ its own account stays archived, because its own flag still says so.
 One shared recursive-CTE predicate (`HIDDEN_PROJECTS_CTE` /
 `NOT_HIDDEN_PROJECT` in `src/core/store.rs`) implements it at every unscoped
 site — `list_projects`, `list_tasks`, `next_task`, `list_workflows`, and so
-the todo watcher and `GET /api/git-status` that read through them. It is
+the queue watcher and `GET /api/git-status` that read through them. It is
 defined once on purpose: four hand-copied CTEs would be four chances for
 "archived" to mean something slightly different.
 
@@ -41,7 +41,7 @@ parent**.
 - `mesa project list --include-archived` and
   `GET /api/projects?include_archived=true` widen to the full set. The unscoped
   default (CLI/API, and every current caller of `list_projects()`: the
-  todo-watcher's project fan-out and `GET /api/git-status`) is unchanged and
+  queue-watcher's project fan-out and `GET /api/git-status`) is unchanged and
   simply stops seeing archived projects — which is how the watcher and
   git-status decoration both skip them with no edit of their own.
 

@@ -4769,7 +4769,7 @@ fn cap_step(text: String) -> String {
 /// disk, an unreadable file, a window holding no assistant line and a session
 /// that has never carried usage all answer an all-`None` [`SessionPulse`],
 /// never an error. It hangs off the agents endpoints and off the list the
-/// todo watcher reads: neither may be turned into a failure by a missing file.
+/// queue watcher reads: neither may be turned into a failure by a missing file.
 pub fn session_pulse(session_id: &str) -> SessionPulse {
     if session_id.is_empty()
         || !session_id
@@ -5532,7 +5532,7 @@ mod tests {
     // tests below also move `MESA_CONFIG_FILE`, which `src/api.rs`'s watcher
     // tests hold constant for their duration — two separate mutexes exclude
     // each other's module but not each other, and a config file swapped out
-    // from under a running `todo_watcher_tick` reads as an unconfigured
+    // from under a running `queue_watcher_tick` reads as an unconfigured
     // concurrency limit.
     use crate::core::attachments::ENV_LOCK;
 

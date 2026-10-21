@@ -81,11 +81,11 @@ Two read-side surfaces, no writes, no new column and no new status.
   reason above, plus one more: nobody types a flag at a diagnostic. The shape
   is unchanged when a task *is* returned.
 
-  It lives on `next_task` rather than in the todo-watcher because the watcher
+  It lives on `next_task` rather than in the queue-watcher because the watcher
   calls `next_task` itself — so the signal lands on the watcher's own path with
   no watcher code, no config key and no dedup state, and a person running
   `mesa task next` in a quiet project gets the same answer
-  (`docs/todo-watcher.md`).
+  (`docs/queue-watcher.md`).
 
 - **A read never releases.** Both surfaces only report. Breaking a stale claim
   stays the explicit, separate act it always was: `mesa task release <ID>` /

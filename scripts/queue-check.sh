@@ -4,7 +4,7 @@
 # pause/resume, the marker persisting across invocations, idle exiting 1 for an
 # in_progress task and for a running workflow run with a live owner pid (not
 # a dead one), and 0 once both are gone. The dispatch gate itself is the Rust
-# test `todo_watcher_tick_withholds_dispatch_while_paused`.
+# test `queue_watcher_tick_withholds_dispatch_while_paused`.
 set -euo pipefail
 unset $(env | sed -n 's/^\(NARU_[A-Za-z0-9_]*\)=.*/\1/p')
 cd "$(dirname "$0")/.."

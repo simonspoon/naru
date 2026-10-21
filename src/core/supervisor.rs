@@ -5,20 +5,20 @@
 //!
 //! The shape mirrors the agent bits of [`crate::core::live`]: a const holding
 //! the definition, a const holding the built-in's id (which is also the agent
-//! *name* the `todo-watcher` template spawns with and the file stem it is
+//! *name* the `queue-watcher` template spawns with and the file stem it is
 //! seeded under), and [`ensure_agent_definition`], which puts the file on disk
 //! before the first spawn so `claude --agent supervisor` finds a real agent.
 
 /// The library built-in holding [`SUPERVISOR_DEFINITION`], and — since the
 /// built-in is an agent definition rather than a prompt — the agent *name* the
-/// `todo-watcher` template spawns with and the file stem it is seeded under.
+/// `queue-watcher` template spawns with and the file stem it is seeded under.
 /// One const, so the three can never drift apart.
 pub const SUPERVISOR_AGENT_BUILTIN: &str = "supervisor";
 
 /// The `supervisor` agent definition — YAML frontmatter plus the supervising
 /// contract. This is what the `supervisor` library built-in holds and what
 /// [`ensure_agent_definition`] seeds to `$HOME/.claude/agents/supervisor.md`,
-/// so `claude --agent supervisor` (the `todo-watcher` template's default)
+/// so `claude --agent supervisor` (the `queue-watcher` template's default)
 /// finds a real agent. The tool list deliberately carries no `Edit`, `Write`
 /// or `NotebookEdit`: a supervisor that cannot edit cannot quietly become the
 /// implementer, which is the rule the whole definition rests on.
@@ -26,7 +26,7 @@ pub const SUPERVISOR_DEFINITION: &str = include_str!("builtins/supervisor.md");
 
 /// Writes the `supervisor` agent definition to
 /// `$HOME/.claude/agents/supervisor.md` if it is not there already, and
-/// answers where it went (mesa task 1075). Called by the todo watcher before
+/// answers where it went (mesa task 1075). Called by the queue watcher before
 /// `agents::spawn_bg`, because `claude --agent supervisor` errors on an agent
 /// Claude Code has never seen and nothing else puts the file there — the
 /// library sync is a thing the user runs, not something a dispatch may depend

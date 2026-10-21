@@ -507,7 +507,7 @@ run 0 "$MESA" retro status
 [ "$(jqs .interval_hours)" = "1" ] || fail "the configured interval is read: $STDOUT"
 [ "$(jqs '((.last_run.started_at | strptime("%Y-%m-%d %H:%M:%S") | mktime) + 3600) == (.next_due_at | strptime("%Y-%m-%d %H:%M:%S") | mktime)')" = "true" ] ||
   fail "next_due_at follows the configured interval: $STDOUT"
-# A hand-edited out-of-range value clamps on read (the todo-concurrency posture).
+# A hand-edited out-of-range value clamps on read (the queue-concurrency posture).
 cat > "$MESA_CONFIG_FILE" <<'EOC'
 {"watchers": {"retro-interval-hours": 0}}
 EOC
@@ -565,7 +565,7 @@ sleep 1
 run 0 "$MESA" retro status
 [ "$(jqs .last_run)" = "null" ] || fail "flag off: no run row"
 
-# GET/PUT /api/config/watchers carries the new key beside todo_concurrency.
+# GET/PUT /api/config/watchers carries the new key beside queue_concurrency.
 api GET /api/config/watchers
 [ "$CODE" = "200" ] || fail "GET /api/config/watchers: $CODE $STDOUT"
 [ "$(jqs .retro_interval_hours)" = "null" ] || fail "unconfigured: null: $STDOUT"
@@ -582,11 +582,11 @@ for bad in 0 8761 1.5 '"24"'; do
   [ "$(jqs .error.code)" = "validation" ] || fail "PUT $bad: $STDOUT"
   [ "$(jq -r '.watchers["retro-interval-hours"]' "$MESA_CONFIG_FILE")" = "24" ] || fail "a rejected PUT writes nothing"
 done
-api PUT /api/config/watchers '{"todo_concurrency": 3}'
+api PUT /api/config/watchers '{"queue_concurrency": 3}'
 [ "$(jqs .retro_interval_hours)" = "24" ] || fail "saving the sibling key preserves this one: $STDOUT"
 api PUT /api/config/watchers '{"retro_interval_hours": null}'
 [ "$(jqs .retro_interval_hours)" = "null" ] || fail "null restores the built-in: $STDOUT"
-[ "$(jqs .todo_concurrency)" = "3" ] || fail "…and preserves the sibling: $STDOUT"
+[ "$(jqs .queue_concurrency)" = "3" ] || fail "…and preserves the sibling: $STDOUT"
 rm -f "$MESA_CONFIG_FILE"
 stop_server
 ok "watch_retro off: no dispatch; GET/PUT /api/config/watchers carry retro_interval_hours (422 on a bad value writing nothing, null restores 72, siblings preserved)"

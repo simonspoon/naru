@@ -23,7 +23,7 @@ function serve(over: Partial<ConfigServe> = {}): ConfigServe {
     port: { value: null, default: 7770, effective: 7770, flag: null },
     lan: b(null),
     allow_host: { value: null, default: [], effective: [], flag: null },
-    watch_todo: b(null),
+    watch_queue: b(null),
     watch_inbox: b(null),
     watch_cost: b(null),
     watch_retro: b(null),
@@ -39,7 +39,7 @@ describe('draftFrom', () => {
       port: '',
       allow_host: '',
       lan: false,
-      watch_todo: false,
+      watch_queue: false,
     })
     const set = serve({
       port: { value: 8000, default: 7770, effective: 7770, flag: null },
@@ -49,12 +49,12 @@ describe('draftFrom', () => {
         effective: [],
         flag: null,
       },
-      watch_todo: b(true),
+      watch_queue: b(true),
     })
     expect(draftFrom(set)).toMatchObject({
       port: '8000',
       allow_host: 'a.local\nb.local',
-      watch_todo: true,
+      watch_queue: true,
     })
   })
 
@@ -95,8 +95,8 @@ describe('validation', () => {
 describe('changedServe', () => {
   it('sends only the changed keys', () => {
     const s = serve()
-    const d = { ...draftFrom(s), port: '9000', watch_todo: true }
-    expect(changedServe(s, d)).toEqual({ port: 9000, watch_todo: true })
+    const d = { ...draftFrom(s), port: '9000', watch_queue: true }
+    expect(changedServe(s, d)).toEqual({ port: 9000, watch_queue: true })
   })
   it('sends null for a cleared port and an emptied host list', () => {
     const s = serve({
@@ -128,7 +128,7 @@ describe('changedServe', () => {
 
 describe('flagName', () => {
   it('spells the key as its command-line flag', () => {
-    expect(flagName('watch_todo')).toBe('--watch-todo')
+    expect(flagName('watch_queue')).toBe('--watch-queue')
     expect(flagName('port')).toBe('--port')
   })
 })

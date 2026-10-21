@@ -59,11 +59,11 @@ body was the wrong shape for "pick one of five verdicts", so since naru task
 
 Never guess a project, never delete an item whose request is not captured
 somewhere first, never edit project code: the job has no way to. The sibling of
-the todo watcher (`docs/todo-watcher.md`), over a different queue. **Off by
+the queue watcher (`docs/queue-watcher.md`), over a different queue. **Off by
 default**, for the same reason: it spends model calls with no user request
 behind it, so it must not fire just because someone ran `mesa serve`.
 
-The two watcher flags (`--watch-todo` and `--watch-inbox`) are **independent**
+The two watcher flags (`--watch-queue` and `--watch-inbox`) are **independent**
 — neither implies the other, and each drives its own interval loop with its own
 tick constant. `--watch-inbox` alone never claims a task or dispatches
 `/execute-naru-task`.
@@ -82,7 +82,7 @@ tick constant. `--watch-inbox` alone never claims a task or dispatches
   verdict on a duplicate, shipped or non-actionable request, and the listing
   still carries the row; an un-archived item is pending again and is picked
   up) — then dispatches **every** one of those this process has not already
-  dispatched, all in the same tick. Unlike the todo watcher, which is
+  dispatched, all in the same tick. Unlike the queue watcher, which is
   naturally capped at one agent per project, the inbox is one **global** queue
   with no per-project structure to pace it. A server started against a large
   backlog therefore starts that many jobs at once; that is the chosen
@@ -110,7 +110,7 @@ tick constant. `--watch-inbox` alone never claims a task or dispatches
 ## The dedup set — why it exists
 
 An inbox item has **no status column** to claim with (an item *is* the record;
-`docs/inbox.md`), so there is no equivalent of the todo watcher's flip to
+`docs/inbox.md`), so there is no equivalent of the queue watcher's flip to
 `in_progress`. The stand-in is `AppState::inbox_dispatched`, an in-memory set
 of dispatched item ids.
 
@@ -124,7 +124,7 @@ item pending. Without the set, that item would start a job every tick, forever.
   tick fires while the job is still starting up.
 - A spawn failure (the job process could not be started) **releases** the id,
   so a transient failure retries on the next tick instead of silently dropping
-  the item — the inbox equivalent of the todo watcher's revert-to-`todo`. A job
+  the item — the inbox equivalent of the queue watcher's revert-to-`todo`. A job
   that started and then failed does **not** release it.
 - The set is pruned each tick to the ids still present in the inbox, so it
   cannot grow unboundedly on a long-lived server. (SQLite may reuse a deleted
@@ -151,11 +151,11 @@ item pending. Without the set, that item would start a job every tick, forever.
   mirroring `MESA_WATCH_TODO_TICK_MS`; `NARU_SELF_BIN` names the program a job
   re-runs (the other test seam).
 - The flag is propagated through the web UI's **Restart Server** action the
-  same way `--lan` and `--watch-todo` are: `serve`'s post-shutdown relaunch
+  same way `--lan` and `--watch-queue` are: `serve`'s post-shutdown relaunch
   re-execs the binary with `--watch-inbox` appended when it was set. (The
   in-memory dedup set does not survive that relaunch — see above.)
 - No CLI or web surface of its own beyond the `serve` flag (and the hidden
-  `__job` self-command), matching the todo watcher and the agents surface's
+  `__job` self-command), matching the queue watcher and the agents surface's
   "no `mesa agent` CLI" precedent.
 - Gate: `scripts/inbox-watcher-check.sh` against a stub `claude` that answers
   `-p` calls from staged `<model>-<item id>.json` files (and logs `--bg`/
@@ -168,7 +168,7 @@ item pending. Without the set, that item would start a job every tick, forever.
   outcome (not-actionable, duplicate, shipped with a real and a made-up sha,
   sharpen through sonnet into a backlog task, hold, a failed call), no
   re-dispatch of a held or failed item, a task-summary never dispatched, a new
-  item picked up, the whole queue in one tick, independence from `--watch-todo`,
+  item picked up, the whole queue in one tick, independence from `--watch-queue`,
   a restart re-dispatching the pending items but never the settled ones, and an
   unstartable job dispatching nothing without crashing the server. Rust unit
   tests cover `inbox_session_name`, the dispatch-once/pick-up-new behaviour,

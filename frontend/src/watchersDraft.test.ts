@@ -9,18 +9,18 @@ import {
 import type { ConfigWatchers } from './types/ConfigWatchers'
 
 const DEFAULTED: ConfigWatchers = {
-  todo_concurrency: null,
-  todo_concurrency_default: 1,
+  queue_concurrency: null,
+  queue_concurrency_default: 1,
 }
 const SET: ConfigWatchers = {
-  todo_concurrency: 3,
-  todo_concurrency_default: 1,
+  queue_concurrency: 3,
+  queue_concurrency_default: 1,
 }
 
 describe('draftFrom', () => {
   it('renders an unconfigured value blank and a configured one as text', () => {
-    expect(draftFrom(DEFAULTED)).toEqual({ todo_concurrency: '' })
-    expect(draftFrom(SET)).toEqual({ todo_concurrency: '3' })
+    expect(draftFrom(DEFAULTED)).toEqual({ queue_concurrency: '' })
+    expect(draftFrom(SET)).toEqual({ queue_concurrency: '3' })
   })
 
   it('reports a freshly loaded section as pristine', () => {
@@ -33,7 +33,7 @@ describe('valueError', () => {
   it('accepts blank — that is the default, not a mistake', () => {
     expect(valueError('')).toBeNull()
     expect(valueError('   ')).toBeNull()
-    expect(isSavable({ todo_concurrency: '' })).toBe(true)
+    expect(isSavable({ queue_concurrency: '' })).toBe(true)
   })
 
   it('accepts a whole number inside the range, trimmed', () => {
@@ -52,16 +52,16 @@ describe('valueError', () => {
     expect(valueError('0')).toBe('must be between 1 and 20')
     expect(valueError('21')).toBe('must be between 1 and 20')
     expect(valueError('-1')).toBe('must be between 1 and 20')
-    expect(isSavable({ todo_concurrency: '21' })).toBe(false)
+    expect(isSavable({ queue_concurrency: '21' })).toBe(false)
   })
 })
 
 describe('isDirty', () => {
   it('is true once the box is edited, and for a half-typed value', () => {
-    expect(isDirty(DEFAULTED, { todo_concurrency: '4' })).toBe(true)
-    expect(isDirty(SET, { todo_concurrency: '3' })).toBe(false)
-    expect(isDirty(SET, { todo_concurrency: '' })).toBe(true)
-    expect(isDirty(DEFAULTED, { todo_concurrency: '2.5' })).toBe(true)
+    expect(isDirty(DEFAULTED, { queue_concurrency: '4' })).toBe(true)
+    expect(isDirty(SET, { queue_concurrency: '3' })).toBe(false)
+    expect(isDirty(SET, { queue_concurrency: '' })).toBe(true)
+    expect(isDirty(DEFAULTED, { queue_concurrency: '2.5' })).toBe(true)
   })
 })
 
@@ -72,18 +72,18 @@ describe('changedWatchers', () => {
   })
 
   it('sends the number as typed, trimmed', () => {
-    expect(changedWatchers(DEFAULTED, { todo_concurrency: ' 4 ' })).toEqual({
-      todo_concurrency: 4,
+    expect(changedWatchers(DEFAULTED, { queue_concurrency: ' 4 ' })).toEqual({
+      queue_concurrency: 4,
     })
   })
 
   it('sends null for a value cleared back to blank', () => {
-    expect(changedWatchers(SET, { todo_concurrency: '' })).toEqual({
-      todo_concurrency: null,
+    expect(changedWatchers(SET, { queue_concurrency: '' })).toEqual({
+      queue_concurrency: null,
     })
   })
 
   it('never sends a value the server would reject', () => {
-    expect(changedWatchers(DEFAULTED, { todo_concurrency: '21' })).toEqual({})
+    expect(changedWatchers(DEFAULTED, { queue_concurrency: '21' })).toEqual({})
   })
 })

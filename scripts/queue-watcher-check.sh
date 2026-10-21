@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Todo-watcher gate: exercises `mesa serve --watch-todo`'s periodic dispatch
+# Todo-watcher gate: exercises `mesa serve --watch-queue`'s periodic dispatch
 # loop against a stub `claude` binary (MESA_CLAUDE_BIN), so no real Claude
 # Code is involved. Uses MESA_WATCH_TODO_TICK_MS (a test-only seam, mirrors
 # MESA_CLAUDE_BIN) to shrink the tick from 60s down to test speed.
@@ -147,12 +147,12 @@ sleep 1
 [ "$(wc -l < "$BG_LOG")" -eq 0 ] || fail "flag off: watcher must not dispatch"
 [ "$(task_status "$TASK_A")" = "todo" ] || fail "flag off: task must stay todo"
 kill "$SERVER_PID"; wait "$SERVER_PID" 2>/dev/null || true; SERVER_PID=""
-ok "watch_todo off: no dispatch, no status change"
+ok "watch_queue off: no dispatch, no status change"
 
 # ---- flag ON: dispatches the actionable task, claims it in_progress ----
 
 MESA_CLAUDE_BIN="$STUB_DIR/claude" MESA_WATCH_TODO_TICK_MS=150 \
-  "$MESA" serve --port "$PORT" --watch-todo >/dev/null 2>&1 &
+  "$MESA" serve --port "$PORT" --watch-queue >/dev/null 2>&1 &
 SERVER_PID=$!
 wait_for_server "$PORT"
 
@@ -161,10 +161,10 @@ LINE=$(head -1 "$BG_LOG")
 [ "$LINE" = "$DIR_A|A: task a|/execute-naru-task $TASK_A" ] ||
   fail "expected '$DIR_A|A: task a|/execute-naru-task $TASK_A', got '$LINE'"
 [ "$(task_status "$TASK_A")" = "in_progress" ] || fail "dispatched task must be claimed in_progress"
-ok "watch_todo on: dispatches next actionable task, prompt is /execute-naru-task <id>, session named '<project>: <name>', claims in_progress"
+ok "watch_queue on: dispatches next actionable task, prompt is /execute-naru-task <id>, session named '<project>: <name>', claims in_progress"
 
 # Auto-dispatched sessions run as the `supervisor` agent definition (mesa task
-# 1075) — named literally in the todo-watcher default, so this is not the
+# 1075) — named literally in the queue-watcher default, so this is not the
 # generic `swe` persona the other watchers use. The
 # stub records whatever `--agent` value arrived ahead of --name/--.
 [ "$(cat "$STUB_DIR/last-agent")" = "supervisor" ] ||
@@ -273,7 +273,7 @@ TASK_ARCH=$(jqs .id)
 
 ARCH_PORT=17782
 MESA_CLAUDE_BIN="$ARCH_STUB" MESA_WATCH_TODO_TICK_MS=150 \
-  "$MESA" serve --port "$ARCH_PORT" --watch-todo >/dev/null 2>&1 &
+  "$MESA" serve --port "$ARCH_PORT" --watch-queue >/dev/null 2>&1 &
 SERVER_PID=$!
 wait_for_server "$ARCH_PORT"
 
@@ -340,7 +340,7 @@ run 0 "$MESA" task update "$TASK_EPIC" --status in_progress
 
 UMB_PORT=17783
 MESA_CLAUDE_BIN="$UMB_STUB" MESA_WATCH_TODO_TICK_MS=150 \
-  "$MESA" serve --port "$UMB_PORT" --watch-todo >/dev/null 2>&1 &
+  "$MESA" serve --port "$UMB_PORT" --watch-queue >/dev/null 2>&1 &
 SERVER_PID=$!
 wait_for_server "$UMB_PORT"
 
@@ -414,7 +414,7 @@ T_STORY=$(jqs .id)
 
 EPIC_PORT=17784
 MESA_CLAUDE_BIN="$EPIC_STUB" MESA_WATCH_TODO_TICK_MS=150 \
-  "$MESA" serve --port "$EPIC_PORT" --watch-todo >/dev/null 2>&1 &
+  "$MESA" serve --port "$EPIC_PORT" --watch-queue >/dev/null 2>&1 &
 SERVER_PID=$!
 wait_for_server "$EPIC_PORT"
 
@@ -448,7 +448,7 @@ ok "an exhausted epic is dispatched last (its roll-up) and parks the project whi
 
 kill "$SERVER_PID" 2>/dev/null; wait "$SERVER_PID" 2>/dev/null || true; SERVER_PID=""
 
-# ---- configured `watchers.todo-concurrency` (mesa task 777): a limit above 1
+# ---- configured `watchers.queue-concurrency` (mesa task 777): a limit above 1
 # fills to the limit in ONE tick, a task beyond it waits, and finishing one
 # lets the next tick pick up the one that waited. Fully isolated -- own db,
 # port, stub log and its own MESA_CONFIG_FILE (the top-of-file export pins it
@@ -464,7 +464,7 @@ chmod +x "$CONC_STUB"
 
 CONC_CONFIG="$TMP/concurrency-config.json"
 cat > "$CONC_CONFIG" <<'EOF'
-{"watchers": {"todo-concurrency": 2}}
+{"watchers": {"queue-concurrency": 2}}
 EOF
 
 mkdir -p "$TMP/concDir"
@@ -483,7 +483,7 @@ CONC_T3=$(jqs .id)
 
 CONC_PORT=17786
 MESA_CLAUDE_BIN="$CONC_STUB" MESA_WATCH_TODO_TICK_MS=150 MESA_CONFIG_FILE="$CONC_CONFIG" \
-  "$MESA" serve --port "$CONC_PORT" --watch-todo >/dev/null 2>&1 &
+  "$MESA" serve --port "$CONC_PORT" --watch-queue >/dev/null 2>&1 &
 SERVER_PID=$!
 wait_for_server "$CONC_PORT"
 
@@ -504,7 +504,7 @@ sleep 1
 [ "$(conc_task_status "$CONC_T1")" = "in_progress" ] || fail "task one must be dispatched under a limit of 2"
 [ "$(conc_task_status "$CONC_T2")" = "in_progress" ] || fail "task two must be dispatched under a limit of 2"
 [ "$(conc_task_status "$CONC_T3")" = "todo" ] || fail "task three must stay todo once the limit of 2 is filled"
-ok "a configured todo-concurrency of 2 fills the project to the limit in one tick, leaving the excess task todo"
+ok "a configured queue-concurrency of 2 fills the project to the limit in one tick, leaving the excess task todo"
 
 run 0 "$MESA" task update "$CONC_T1" --status done
 wait_conc_bg_lines 3
@@ -618,7 +618,7 @@ start_holder
 
 LIVE_PORT=17787
 MESA_CLAUDE_BIN="$LIVE_STUB" MESA_WATCH_TODO_TICK_MS=150 MESA_CC_PROJECTS_DIR="$LIVE_CC_DIR" \
-  "$MESA" serve --port "$LIVE_PORT" --watch-todo >/dev/null 2>&1 &
+  "$MESA" serve --port "$LIVE_PORT" --watch-queue >/dev/null 2>&1 &
 SERVER_PID=$!
 wait_for_server "$LIVE_PORT"
 
@@ -659,7 +659,7 @@ LIVE_T2=$(jqs .id)
 start_holder
 
 MESA_CLAUDE_BIN="$LIVE_FAIL_STUB" MESA_WATCH_TODO_TICK_MS=150 MESA_CC_PROJECTS_DIR="$LIVE_CC_DIR" \
-  "$MESA" serve --port "$LIVE_PORT" --watch-todo >/dev/null 2>&1 &
+  "$MESA" serve --port "$LIVE_PORT" --watch-queue >/dev/null 2>&1 &
 SERVER_PID=$!
 wait_for_server "$LIVE_PORT"
 
@@ -747,7 +747,7 @@ REAP_T1=$(jqs .id)
 
 REAP_PORT=17788
 MESA_CLAUDE_BIN="$REAP_STUB" MESA_WATCH_TODO_TICK_MS=150 \
-  "$MESA" serve --port "$REAP_PORT" --watch-todo >/dev/null 2>&1 &
+  "$MESA" serve --port "$REAP_PORT" --watch-queue >/dev/null 2>&1 &
 SERVER_PID=$!
 wait_for_server "$REAP_PORT"
 
@@ -816,7 +816,7 @@ ok "a dispatched task set back to todo has its old session stopped too"
 # The task set back to todo above is re-dispatched as the third job; the stub's
 # pid then goes `null` for every listed job, so jobs 3 and 4 die and are
 # re-queued (the cap is 2) and task two's third death (the fifth dispatch) parks the task in backlog with
-# exactly one todo-reaper alert. The stop count is captured once the earlier
+# exactly one queue-reaper alert. The stop count is captured once the earlier
 # stops have settled rather than pinned at 2: the re-dispatch and a reaper
 # pass whose snapshot predates it may both stop $REAP_J2 (harmless — the
 # stop is idempotent), so the assertion is that the dead sessions add no stop.
@@ -839,7 +839,7 @@ sleep 1
 run 0 "$MESA" inbox list
 [ "$(jqs 'length')" -eq 1 ] ||
   fail "expected exactly one reaper alert (the park), got $(jqs 'length'): $STDOUT"
-[ "$(jqs '.[0].author')" = "todo-reaper" ] || fail "the alert must be authored todo-reaper: $STDOUT"
+[ "$(jqs '.[0].author')" = "queue-reaper" ] || fail "the alert must be authored queue-reaper: $STDOUT"
 [ "$(jqs '.[0].kind')" = "task-summary" ] || fail "the alert is a task summary: $STDOUT"
 [ "$(jqs '.[0].task_id')" = "$REAP_T2" ] || fail "the alert must name task $REAP_T2: $STDOUT"
 [ "$(wc -l < "$REAP_STOPS")" -eq "$REAP_STOPS_BEFORE" ] ||
@@ -853,7 +853,7 @@ kill "$SERVER_PID" 2>/dev/null; wait "$SERVER_PID" 2>/dev/null || true; SERVER_P
 # ---- a failed spawn is reported once and backed off (mesa task 1338) ----
 # A spawn that fails every time (seen live: "Workspace not trusted") used to be
 # claimed and reverted on every tick, forever, with the error only on stderr.
-# Now: one todo-watcher inbox alert per (task, error text), the task skipped
+# Now: one queue-watcher inbox alert per (task, error text), the task skipped
 # while its updated_at is what the watcher's own revert left, the pick moving
 # on to the next task, and a touch after the fix dispatching it. Own db, stub
 # and server, like the sections above.
@@ -902,7 +902,7 @@ SF_T2=$(jqs .id)
 touch "$STUB_DIR/spawnfail"
 SF_PORT=17792
 MESA_CLAUDE_BIN="$SF_STUB" MESA_WATCH_TODO_TICK_MS=150 \
-  "$MESA" serve --port "$SF_PORT" --watch-todo >/dev/null 2>&1 &
+  "$MESA" serve --port "$SF_PORT" --watch-queue >/dev/null 2>&1 &
 SERVER_PID=$!
 wait_for_server "$SF_PORT"
 
@@ -928,13 +928,13 @@ ok "a failed spawn is tried once per task, then backed off; the pick moves past 
 
 run 0 "$MESA" inbox list
 [ "$(jqs 'length')" -eq 2 ] || fail "expected one alert per failed task, got $(jqs 'length'): $STDOUT"
-[ "$(jqs '[.[] | select(.author == "todo-watcher" and .kind == "task-summary")] | length')" -eq 2 ] ||
-  fail "the alerts are todo-watcher task summaries: $STDOUT"
+[ "$(jqs '[.[] | select(.author == "queue-watcher" and .kind == "task-summary")] | length')" -eq 2 ] ||
+  fail "the alerts are queue-watcher task summaries: $STDOUT"
 SF_BODY=$(jq -r --argjson t "$SF_T1" '.[] | select(.task_id == $t) | .body' <<<"$STDOUT")
 grep -q "task $SF_T1 " <<<"$SF_BODY" || fail "the alert must name task $SF_T1: $SF_BODY"
 grep -qF "$SF_DIR" <<<"$SF_BODY" || fail "the alert must name the project folder $SF_DIR: $SF_BODY"
 grep -q "Workspace not trusted" <<<"$SF_BODY" || fail "the alert must carry the spawn error: $SF_BODY"
-ok "each failed spawn files exactly one todo-watcher alert naming the task, the folder and the error"
+ok "each failed spawn files exactly one queue-watcher alert naming the task, the folder and the error"
 
 # Touched while still failing: tried again, but the same error files nothing
 # new. updated_at has one-second resolution, so each touch waits out the
@@ -992,7 +992,7 @@ run 0 "$MESA" project update "$SF_SEED_P" --path "$SF_SEED_DIR"
 run 0 "$MESA" task create "$SF_SEED_P" "task sf seed"
 SF_SEED_T=$(jqs .id)
 HOME="$TMP/badhome" MESA_CLAUDE_BIN="$SF_STUB" MESA_WATCH_TODO_TICK_MS=150 \
-  "$MESA" serve --port "$SF_PORT" --watch-todo >/dev/null 2>&1 &
+  "$MESA" serve --port "$SF_PORT" --watch-queue >/dev/null 2>&1 &
 SERVER_PID=$!
 wait_for_server "$SF_PORT"
 for _ in $(seq 1 50); do
@@ -1031,7 +1031,7 @@ run 0 "$MESA" task create "$SR_P" "task sr one"
 SR_T=$(jqs .id)
 SR_PORT=17793
 MESA_CLAUDE_BIN="$SF_STUB" MESA_WATCH_TODO_TICK_MS=150 MESA_WATCH_TODO_SPAWN_BACKOFF_MS=600 \
-  "$MESA" serve --port "$SR_PORT" --watch-todo >/dev/null 2>&1 &
+  "$MESA" serve --port "$SR_PORT" --watch-queue >/dev/null 2>&1 &
 SERVER_PID=$!
 wait_for_server "$SR_PORT"
 
@@ -1132,8 +1132,8 @@ ok "once the shell child is gone the close is allowed"
 
 # ---- live toggle from the config's `serve` section (mesa task 1621) ----
 #
-# A server started WITHOUT --watch-todo has the loop running but idle. Setting
-# serve.watch-todo in the config turns it on, and clearing it turns it off
+# A server started WITHOUT --watch-queue has the loop running but idle. Setting
+# serve.watch-queue in the config turns it on, and clearing it turns it off
 # again, with no restart. Its own db, config and port, so the servers above
 # cannot dispatch for it.
 LIVE_DB="$TMP/live.db"
@@ -1146,7 +1146,7 @@ live_api() { # live_api <method> <path> <json>
   curl -s -o "$TMP/live-body" -w '%{http_code}' -X "$1" -H 'Content-Type: application/json' \
     --data "$3" "http://127.0.0.1:$LIVE_PORT$2"
 }
-echo '{"serve": {"watch-todo": true}}' > "$LIVE_CFG"
+echo '{"serve": {"watch-queue": true}}' > "$LIVE_CFG"
 STDOUT=$(live_mesa project create L --no-git); LP=$(jq -r .id <<<"$STDOUT")
 live_mesa project update "$LP" --path "$DIR_L" >/dev/null
 MESA_DB="$LIVE_DB" MESA_CONFIG_FILE="$LIVE_CFG" MESA_CLAUDE_BIN="$STUB_DIR/claude" \
@@ -1159,31 +1159,75 @@ for _ in $(seq 1 50); do
   sleep 0.1
 done
 [ "$(live_mesa task show "$LT1" | jq -r .status)" = "in_progress" ] ||
-  fail "serve.watch-todo in the config must start dispatching with no flag"
-ok "a server started without --watch-todo dispatches once the config's serve.watch-todo is true"
+  fail "serve.watch-queue in the config must start dispatching with no flag"
+ok "a server started without --watch-queue dispatches once the config's serve.watch-queue is true"
 
-CODE=$(live_api PUT /api/config/serve '{"watch_todo": false}')
-[ "$CODE" = "200" ] || fail "PUT serve watch_todo false: expected 200, got $CODE: $(cat "$TMP/live-body")"
+CODE=$(live_api PUT /api/config/serve '{"watch_queue": false}')
+[ "$CODE" = "200" ] || fail "PUT serve watch_queue false: expected 200, got $CODE: $(cat "$TMP/live-body")"
 sleep 0.5  # let any tick already in flight finish
 LIVE_LINES=$(wc -l < "$BG_LOG")
 live_mesa task update "$LT1" --status done >/dev/null
 STDOUT=$(live_mesa task create "$LP" "live two"); LT2=$(jq -r .id <<<"$STDOUT")
 sleep 1.5  # ten ticks
 [ "$(live_mesa task show "$LT2" | jq -r .status)" = "todo" ] ||
-  fail "after serve.watch-todo is turned off the task must stay todo"
+  fail "after serve.watch-queue is turned off the task must stay todo"
 [ "$(wc -l < "$BG_LOG")" = "$LIVE_LINES" ] || fail "a disabled watcher must dispatch nothing"
-ok "turning serve.watch-todo off through PUT /api/config/serve stops dispatching within a tick, no restart"
+ok "turning serve.watch-queue off through PUT /api/config/serve stops dispatching within a tick, no restart"
 
-CODE=$(live_api PUT /api/config/serve '{"watch_todo": true}')
-[ "$CODE" = "200" ] || fail "PUT serve watch_todo true: expected 200, got $CODE"
+CODE=$(live_api PUT /api/config/serve '{"watch_queue": true}')
+[ "$CODE" = "200" ] || fail "PUT serve watch_queue true: expected 200, got $CODE"
 for _ in $(seq 1 50); do
   [ "$(live_mesa task show "$LT2" | jq -r .status)" = "in_progress" ] && break
   sleep 0.1
 done
 [ "$(live_mesa task show "$LT2" | jq -r .status)" = "in_progress" ] ||
-  fail "turning serve.watch-todo back on must resume dispatching"
+  fail "turning serve.watch-queue back on must resume dispatching"
 ok "turning it back on resumes dispatching"
 kill "$SERVER_PID" 2>/dev/null || true; SERVER_PID=
+
+# ---- the pre-rename names still work (naru task 1898) ----
+#
+# `--watch-todo` and a config holding only `serve.watch-todo` must each start
+# dispatching exactly as `--watch-queue` / `serve.watch-queue` do. Own db,
+# config and port.
+AL_DB="$TMP/alias.db"
+AL_CFG="$TMP/alias-config.json"
+AL_PORT=17797
+mkdir -p "$TMP/projAL"
+DIR_AL=$(cd "$TMP/projAL" && pwd -P)
+al_mesa() { MESA_DB="$AL_DB" MESA_CONFIG_FILE="$AL_CFG" "$MESA" "$@"; }
+echo '{}' > "$AL_CFG"
+STDOUT=$(al_mesa project create AL --no-git); ALP=$(jq -r .id <<<"$STDOUT")
+al_mesa project update "$ALP" --path "$DIR_AL" >/dev/null
+MESA_DB="$AL_DB" MESA_CONFIG_FILE="$AL_CFG" MESA_CLAUDE_BIN="$STUB_DIR/claude" \
+  MESA_WATCH_TODO_TICK_MS=150 "$MESA" serve --port "$AL_PORT" --watch-todo >/dev/null 2>&1 &
+SERVER_PID=$!
+wait_for_server "$AL_PORT"
+STDOUT=$(al_mesa task create "$ALP" "alias one"); AL1=$(jq -r .id <<<"$STDOUT")
+for _ in $(seq 1 50); do
+  [ "$(al_mesa task show "$AL1" | jq -r .status)" = "in_progress" ] && break
+  sleep 0.1
+done
+[ "$(al_mesa task show "$AL1" | jq -r .status)" = "in_progress" ] ||
+  fail "the old --watch-todo flag must still start the watcher"
+ok "--watch-todo still starts the queue watcher"
+kill "$SERVER_PID" 2>/dev/null; wait "$SERVER_PID" 2>/dev/null || true; SERVER_PID=""
+
+echo '{"serve": {"watch-todo": true}}' > "$AL_CFG"
+al_mesa task update "$AL1" --status done >/dev/null
+MESA_DB="$AL_DB" MESA_CONFIG_FILE="$AL_CFG" MESA_CLAUDE_BIN="$STUB_DIR/claude" \
+  MESA_WATCH_TODO_TICK_MS=150 "$MESA" serve --port "$AL_PORT" >/dev/null 2>&1 &
+SERVER_PID=$!
+wait_for_server "$AL_PORT"
+STDOUT=$(al_mesa task create "$ALP" "alias two"); AL2=$(jq -r .id <<<"$STDOUT")
+for _ in $(seq 1 50); do
+  [ "$(al_mesa task show "$AL2" | jq -r .status)" = "in_progress" ] && break
+  sleep 0.1
+done
+[ "$(al_mesa task show "$AL2" | jq -r .status)" = "in_progress" ] ||
+  fail "a config holding only serve.watch-todo must still start the watcher"
+ok "a config holding only the old serve.watch-todo key still starts the queue watcher"
+kill "$SERVER_PID" 2>/dev/null; wait "$SERVER_PID" 2>/dev/null || true; SERVER_PID=""
 
 # ---- stall watchdog (naru task 1953) ----
 #
@@ -1218,7 +1262,7 @@ printf '%s\n' "\$*" >> "$VOX_LOG"
 printf '{"ok":true,"message_id":1,"chat_id":1}\n'
 EOF
 chmod +x "$STALL_STUB/vox"
-echo '{"serve": {"watch-todo": true}}' > "$STALL_CFG"
+echo '{"serve": {"watch-queue": true}}' > "$STALL_CFG"
 stall_mesa() { MESA_DB="$STALL_DB" MESA_CONFIG_FILE="$STALL_CFG" "$MESA" "$@"; }
 STDOUT=$(stall_mesa project create S --no-git); SP=$(jq -r .id <<<"$STDOUT")
 stall_mesa project update "$SP" --path "$DIR_S" >/dev/null
@@ -1236,7 +1280,7 @@ done
 sleep 1.5  # ten more reaper passes: nothing may repeat
 [ "$(wc -l < "$VOX_LOG")" -eq 1 ] || fail "exactly one notification expected: $(cat "$VOX_LOG")"
 case "$(cat "$VOX_LOG")" in *"$ST"*"a silent one"*) ;; *) fail "notification must name the task id and name: $(cat "$VOX_LOG")" ;; esac
-ALERTS=$(stall_mesa inbox list | jq '[.[] | select(.author == "todo-reaper")] | length')
+ALERTS=$(stall_mesa inbox list | jq '[.[] | select(.author == "queue-reaper")] | length')
 [ "$ALERTS" = "1" ] || fail "exactly one stall alert expected, got $ALERTS"
 [ "$(stall_mesa task show "$ST" | jq -r .status)" = "in_progress" ] ||
   fail "the watchdog must never move the task"

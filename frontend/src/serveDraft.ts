@@ -17,7 +17,7 @@ export const MAX_PORT = 65535
 
 export const BOOL_KEYS = [
   'lan',
-  'watch_todo',
+  'watch_queue',
   'watch_inbox',
   'watch_cost',
   'watch_retro',
@@ -27,7 +27,7 @@ export type BoolKey = (typeof BOOL_KEYS)[number]
 
 /** The watcher switches — the ones that take effect live, on that watcher's next tick. */
 export const WATCH_KEYS = [
-  'watch_todo',
+  'watch_queue',
   'watch_inbox',
   'watch_cost',
   'watch_retro',

@@ -4,7 +4,7 @@ A *run* is one `claude -p` session held open on stream-json stdin by a small
 detached process of the same binary, so an agent keeps working when the Naru
 server — or the CLI that started it — dies. This is infrastructure: the
 existing `spawn_bg` sites and `llm::complete` do not use it yet. In particular
-the todo-watcher still dispatches with `claude --bg`; moving it onto runs is a
+the queue-watcher still dispatches with `claude --bg`; moving it onto runs is a
 separate decision.
 
 ## Files are the truth

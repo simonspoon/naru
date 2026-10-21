@@ -10,8 +10,8 @@ shares the agents' mode-dependent access gate (`require_agent_access`).
 
 - One hook point so far: **`task-execute`** — fired by `mesa task execute <id>`
   or `POST /api/tasks/{id}/execute`. There is no web UI trigger: the task
-  panel's Execute button was removed once the todo watcher took over
-  auto-dispatch (`docs/todo-watcher.md`). The command runs under `sh -c` with the full task JSON on
+  panel's Execute button was removed once the queue watcher took over
+  auto-dispatch (`docs/queue-watcher.md`). The command runs under `sh -c` with the full task JSON on
   stdin, `MESA_HOOK`/`MESA_TASK_ID`/`MESA_TASK_NAME`/`MESA_PROJECT_ID`/
   `MESA_DB` in the environment (each also as `NARU_*`, mesa task 1301), and
   the project's `local_path` as cwd when

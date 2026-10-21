@@ -107,7 +107,7 @@ pub enum StopOutcome {
     /// Every breach this time was the `context` rule, which only reports:
     /// mesa did not try to stop it, whatever the action says.
     ContextOnly,
-    /// The relay (mesa task 1527): the session was a todo-watcher dispatch past
+    /// The relay (mesa task 1527): the session was a queue-watcher dispatch past
     /// the context ceiling with a checkpoint written, so mesa stopped it and
     /// started a fresh session on the same task. `new_job` is `None` when the
     /// spawn printed no receipt.
@@ -117,7 +117,7 @@ pub enum StopOutcome {
         artifact_id: i64,
     },
     /// The relay's stop worked but the fresh session did not start; the task
-    /// stays `in_progress` and the todo-watcher's reaper reports it.
+    /// stays `in_progress` and the queue-watcher's reaper reports it.
     RelaySpawnFailed {
         old_job: String,
         artifact_id: i64,
@@ -133,7 +133,7 @@ pub struct RelayFacts {
     /// The session's *current* breaches include `context` (not merely a fresh
     /// one: the checkpoint is often written after the first breach tick).
     pub context_breached: bool,
-    /// The task the todo-watcher dispatched this session's job for, if any.
+    /// The task the queue-watcher dispatched this session's job for, if any.
     pub dispatched_task: Option<i64>,
     pub task_in_progress: bool,
     /// Id and `updated_at` of the task's `checkpoint-task-<id>` artifact, if
@@ -168,7 +168,7 @@ pub fn find_checkpoint(artifacts: &[Artifact], task_id: i64) -> Option<(i64, Str
 
 /// Whether a context-ceiling breach is answered by a relay rather than an
 /// alert-only report: `Some((task id, checkpoint artifact id))` iff the action
-/// is `stop`, the session is a todo-watcher dispatch for an `in_progress` task
+/// is `stop`, the session is a queue-watcher dispatch for an `in_progress` task
 /// that has a checkpoint **rewritten since the last relay seeded one** (a
 /// successor starts with its predecessor's checkpoint still on the task, and
 /// relaying that again would discard everything the successor did) and a
@@ -418,7 +418,7 @@ fn outcome_sentence(outcome: &StopOutcome) -> String {
         } => format!(
             "mesa stopped this session by running claude stop {old_job} to relay it, but the \
              fresh session did not start: {reason}. The task is still in progress with nothing \
-             running on it; its checkpoint is artifact {artifact_id}, and the todo watcher will \
+             running on it; its checkpoint is artifact {artifact_id}, and the queue watcher will \
              report it as abandoned."
         ),
         StopOutcome::ContextOnly => "mesa left this session running: the context rule only \

@@ -173,7 +173,7 @@ it, so triage's convert-to-task outcome no longer drops the pointer at all.) `me
 `retro_watcher_tick` in `src/api.rs`:
 
 - Reads `watchers.retro-interval-hours` from `~/.mesa/config.json` **fresh
-  every tick** (the `todo-concurrency` rule); a config Naru cannot parse
+  every tick** (the `queue-concurrency` rule); a config Naru cannot parse
   skips the tick with a line on stderr rather than running on a guessed
   cadence.
 - Asks the store whether a run is due — `Store::retro_status`: due when
@@ -223,14 +223,14 @@ The command prints the run row; the findings arrive when the job finishes
   test-only seam mirroring `MESA_WATCH_INBOX_TICK_MS`.
 - The interval is `watchers.retro-interval-hours`: integer `1..=8760`,
   absent/`null` = 72, over `GET`/`PUT /api/config/watchers` (body key
-  `retro_interval_hours`, beside `todo_concurrency`; a bad value is 422
+  `retro_interval_hours`, beside `queue_concurrency`; a bad value is 422
   writing nothing, `null` restores the built-in) and by hand. A hand-edited
-  out-of-range value is **clamped** on read, the `todo-concurrency` posture.
+  out-of-range value is **clamped** on read, the `queue-concurrency` posture.
   There is deliberately no Settings UI for it: the retrospective has no page,
   and the key is `ts(skip)`ped off `ConfigWatchers` so the editor neither
   shows nor writes it.
 - The flag is propagated through the web UI's **Restart Server** action the
-  same way `--lan`, `--watch-todo`, `--watch-inbox` and `--watch-cost` are:
+  same way `--lan`, `--watch-queue`, `--watch-inbox` and `--watch-cost` are:
   the relaunch re-execs the binary with `--watch-retro` appended when it was
   set. The run and finding tables survive that relaunch — that is the point
   of their being tables.

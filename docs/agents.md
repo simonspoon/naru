@@ -258,7 +258,7 @@ already use.
     that do differ (`output`, `firstTerminalAt`) live in that private jobs
     file, which Naru neither reads nor owns, and separate terminal from
     live rather than false from genuine. The cost is display plus two
-    waits: the todo watcher's reaper (`reap_verdict` in `src/api.rs`) never
+    waits: the queue watcher's reaper (`reap_verdict` in `src/api.rs`) never
     reads `state` at all — only `pid`, `status` and the two counts below —
     so dispatch is not held up, but the session keeps the BLOCKED section
     open and, under Auto Tile, a pane that never closes (the tile set is
@@ -279,10 +279,10 @@ already use.
   running (list presence and `state` do, above), so the sidebar no longer
   shows them as a badge (mesa task 1484: the card's meta line says "N running
   below", counted from `children`). They still
-  **do** decide a slot in the todo watcher, where the question is different: a
+  **do** decide a slot in the queue watcher, where the question is different: a
   project is busy if a session under it holds work in flight, not merely if a
   finished-but-alive process is still listed — counting mere presence there
-  would wedge dispatch behind an idle session (`docs/todo-watcher.md`).
+  would wedge dispatch behind an idle session (`docs/queue-watcher.md`).
   - `liveShells` counts the session pid's **direct** children whose `comm`
     basename is in `{zsh, bash, sh, dash}`, from **one** `ps -A -o
     pid=,ppid=,etime=,comm=,args=` per list refresh — not one `ps` per
@@ -306,7 +306,7 @@ already use.
   - Both probes **fail open to `0`**: no `ps` (or a platform without one), no
     projects dir, an unreadable folder or an unparseable row all yield `0`,
     never an `Err`. This is a best-effort liveness probe hanging off the agents
-    endpoints and the todo watcher (`docs/todo-watcher.md`), and it must never
+    endpoints and the queue watcher (`docs/queue-watcher.md`), and it must never
     turn either into a failure. Enrichment happens in `list_sessions`, so the
     per-project route, the global route and the `agents_cache` TTL all see the
     same numbers for the same one `ps`.
@@ -894,7 +894,7 @@ column, and it goes stale when an agent crashes. So the marker fires in every
 column, and an `in_progress` row whose agent is gone does not animate.
 
 - **Match rule:** a session belongs to a task when its `name` is exactly
-  `"{project.name}: {task.name}"` — the string the todo watcher spawns with
+  `"{project.name}: {task.name}"` — the string the queue watcher spawns with
   (`src/api.rs`). The frontend holds both halves and reconstructs it.
 - **Liveness** is the existing `isRunningAgent()` (`agentProject.ts`), the same
   predicate the sidebar's bucketing uses: a matching session on the list
@@ -904,7 +904,7 @@ column, and an `in_progress` row whose agent is gone does not animate.
 - **Best-effort by construction**, and it must always degrade to *no
   animation*: sidebar `+ agent` sessions carry no `--name`
   (`DEFAULT_AGENT_SPAWN` has no `{name}`) and never match; a replaced
-  `todo-watcher` template without `{name}` loses the marker
+  `queue-watcher` template without `{name}` loses the marker
   and nothing else; editing a task's `description` after dispatch changes the
   derived `name` and lapses the match; and two tasks in one project sharing
   their first 50 chars both animate. There is no task↔session column,
