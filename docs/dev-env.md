@@ -39,7 +39,16 @@ Bash/Write/Edit touching `/Applications/Naru.app`. `scripts/self-deploy.sh` and
 `scripts/dev-env.sh` command lines pass, and so does the `naru-live` main
 agent (`agent_type` `naru-live`, no `agent_id`). It fails open (no `jq`,
 garbage stdin) and is a guardrail, not a security boundary: an obfuscated
-`bash -c` can dodge it. Enable it (it edits `~/.claude/settings.json`, so the
+`bash -c` can dodge it. Since naru task 2255 it also denies a Bash `naru serve` / `mesa serve` (also
+`target/release/naru serve`, `./…/mesa serve`) whose `NARU_DB`/`MESA_DB`/
+`NARU_HOME`/`MESA_HOME` — read from an assignment in the command, else from the
+hook's environment — is a real data location (`~/Library/Application
+Support/{naru,mesa}`, `~/.naru`, `~/.mesa`, spelled `~`, `$HOME` or absolute),
+or when none of the four is set at all (it would open the real db). Fix: use
+`scripts/dev-env.sh`, or set `NARU_HOME` and `NARU_DB` to a temp dir. Plain CLI
+(`naru task list`, `naru live say`…) is never touched; other db-opening runs
+are left alone on purpose, since blocking them would block normal CLI use.
+Enable it (it edits `~/.claude/settings.json`, so the
 person runs this):
 
 ```

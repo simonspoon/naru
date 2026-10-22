@@ -62,6 +62,22 @@ allow "a similarly named path" "$(file_in Write /Applications/Naru.app.bak/x)"
 allow "an Agent tool call" '{"tool_name":"Agent","tool_input":{"prompt":"cargo install"}}'
 allow "the naru-live agent" "$(bash_in 'cargo install --path .' naru-live)"
 
+# naru serve against the real data (naru task 2255). Synthetic payloads only:
+# the hook only reads the command text, serve is never launched.
+# the hook sees the environment: a bare serve is only denied when no db/home
+# var is set, so drop the throwaway MESA_DB the gate exported above
+unset MESA_DB MESA_CONFIG_FILE
+REALDB="$HOME/Library/Application Support/naru/naru.db"
+deny "serve with NARU_DB at the real db" "$(bash_in 'NARU_DB="$HOME/Library/Application Support/naru/naru.db" naru serve')"
+deny "bare serve, no NARU_HOME/NARU_DB" "$(bash_in 'naru serve')"
+(export NARU_DB="$REALDB"; deny "serve with env NARU_DB at the real db" "$(bash_in 'target/release/naru serve')")
+allow "serve with temp NARU_HOME+NARU_DB" "$(bash_in 'NARU_HOME=/tmp/x NARU_DB=/tmp/x/naru.db naru serve --port 7799')"
+deny "serve with an escaped-space real path" "$(bash_in 'NARU_HOME=$HOME/Library/Application\ Support/naru naru serve')"
+allow "a commit message mentioning naru serve" "$(bash_in 'git commit -m "fix naru serve guard"')"
+allow "a live say mentioning naru serve" "$(bash_in 'naru live say "restart naru serve"')"
+allow "naru task list" "$(bash_in 'naru task list')"
+allow "naru live status" "$(bash_in 'naru live status')"
+
 # A live-agent subagent (agent_id present) is not exempt.
 out=$("$HOOK" <<<"$(bash_in 'cargo install --path .' | jq -c '. + {agent_id:"a1"}')")
 [ "$(jq -r .hookSpecificOutput.permissionDecision <<<"$out")" = deny ] || fail "naru-live subagent must not be exempt"
