@@ -16,8 +16,6 @@ import type { TaskSummary } from './types/TaskSummary'
  * stored task↔session link (no column, no migration, no route), so the match
  * lapses silently in several ordinary cases and must always degrade to "no
  * animation":
- * - sessions started from the Agents sidebar's "add agent" button carry no
- *   `--name` at all (`DEFAULT_AGENT_SPAWN` has no `{name}`) and never match;
  * - a user-replaced `queue-watcher` command template that
  *   drops `{name}` loses the animation and nothing else;
  * - if a task's `description` (and so its derived `name`) changed after

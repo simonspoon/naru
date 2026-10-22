@@ -154,7 +154,7 @@ shows `__runner` / the run's session id. `model` and `name` may not start with
 
 ## The `runner` config template
 
-The ninth template (`docs/config.md`):
+The eighth template (`docs/config.md`):
 
 ```
 run_agent={run_agent}

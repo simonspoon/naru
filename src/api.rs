@@ -38,23 +38,23 @@ use serde_json::json;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::core::{
-    AgentSession, AgentSpawned, ArchiveOutcome, Artifact, ArtifactPatch, ArtifactSummary,
-    AudioTestResult, CcDashboard, CcLiveSession, CcScorecard, CcUsage, ConfigServe, Error,
-    FileTreeEntry, GitCommit, GitCommitFile, GitFileDiff, GitRepo, GitRepoView, GitStatus,
-    GitWorktree, InboxItem, InboxKind, LIVE_AUDIO_MAX, LIVE_BOARD_INK_STATE_MAX, LIVE_BOARD_KEEP,
-    LIVE_INK_MAX, LibraryBuiltinAction, LibraryBundle, LibraryImportResult, LibraryKind,
-    LibraryPatch, LibraryScope, LiveBoardHistoryEntry, LiveBoardHistoryPage, LiveBoardInkEntry,
-    LiveBoardKind, LiveBoardSummary, LiveContext, LiveNotebookEntry, LiveNotice, LiveOffer,
-    LiveState, LiveStatus, LiveTranscript, LiveWindow, ModelRates, NaruVersion, NextResult,
-    Priority, ProjectAgents, ProjectFileTree, ProjectGitLog, ProjectGitRepos, ProjectGitStatus,
-    ProjectGitView, ProjectPatch, ProjectVersion, ReceiptPatch, STALE_CLAIM_MINUTES, Script,
-    ScriptArg, ScriptPatch, ScriptRunEvent, ServeBoolSetting, ServeHostsSetting,
-    ServeNumberSetting, Status, Store, SystemInfo, Task, TaskNote, TaskPatch, TaskSummary,
-    VoiceEnrollment, WorkflowGateStatus, WorkflowNodeKind, WorkflowNodeNew, WorkflowNodePatch,
-    WorkflowPatch, WorkflowTrigger, WorkflowType, agents, attachments, audio, board, config, files,
-    git, guard, hooks, inbox_triage, kb, library, listen, live, memory_job, notify, project_memory,
-    receipt, runner, script_runs, scripts, speech, supervisor, system, validate_live_client,
-    version, voice_enroll, workflow,
+    AgentSession, ArchiveOutcome, Artifact, ArtifactPatch, ArtifactSummary, AudioTestResult,
+    CcDashboard, CcLiveSession, CcScorecard, CcUsage, ConfigServe, Error, FileTreeEntry, GitCommit,
+    GitCommitFile, GitFileDiff, GitRepo, GitRepoView, GitStatus, GitWorktree, InboxItem, InboxKind,
+    LIVE_AUDIO_MAX, LIVE_BOARD_INK_STATE_MAX, LIVE_BOARD_KEEP, LIVE_INK_MAX, LibraryBuiltinAction,
+    LibraryBundle, LibraryImportResult, LibraryKind, LibraryPatch, LibraryScope,
+    LiveBoardHistoryEntry, LiveBoardHistoryPage, LiveBoardInkEntry, LiveBoardKind,
+    LiveBoardSummary, LiveContext, LiveNotebookEntry, LiveNotice, LiveOffer, LiveState, LiveStatus,
+    LiveTranscript, LiveWindow, ModelRates, NaruVersion, NextResult, Priority, ProjectAgents,
+    ProjectFileTree, ProjectGitLog, ProjectGitRepos, ProjectGitStatus, ProjectGitView,
+    ProjectPatch, ProjectVersion, ReceiptPatch, STALE_CLAIM_MINUTES, Script, ScriptArg,
+    ScriptPatch, ScriptRunEvent, ServeBoolSetting, ServeHostsSetting, ServeNumberSetting, Status,
+    Store, SystemInfo, Task, TaskNote, TaskPatch, TaskSummary, VoiceEnrollment, WorkflowGateStatus,
+    WorkflowNodeKind, WorkflowNodeNew, WorkflowNodePatch, WorkflowPatch, WorkflowTrigger,
+    WorkflowType, agents, attachments, audio, board, config, files, git, guard, hooks,
+    inbox_triage, kb, library, listen, live, memory_job, notify, project_memory, receipt, runner,
+    script_runs, scripts, speech, supervisor, system, validate_live_client, version, voice_enroll,
+    workflow,
 };
 
 /// The Vite build output, embedded into the binary at compile time.
@@ -1392,7 +1392,7 @@ fn deepest_actionable(store: &Store, mut task: Task, exclude: &[i64]) -> Result<
 /// from the next tick on — and is the cost of "fill to the limit now"
 /// rather than "one per tick".)
 ///
-/// Two-phase, like `spawn_project_agent`: the store lock is held only long
+/// Two-phase: the store lock is held only long
 /// enough to decide and claim (phase 1), then dropped before the blocking
 /// `claude --bg` shell-outs (phase 2) — holding it across a spawn would
 /// freeze every other API request (each needs the same lock) for as long as
@@ -3682,10 +3682,7 @@ fn router(state: AppState) -> Router {
         // five routes share `require_agent_access` (terminal access = code
         // execution): loopback-only in default mode, LAN-page-authenticated
         // under `--lan`.
-        .route(
-            "/api/projects/{id}/agents",
-            get(list_project_agents).post(spawn_project_agent),
-        )
+        .route("/api/projects/{id}/agents", get(list_project_agents))
         // Global session list across every project folder — backs the
         // persistent Agents sidebar (unlike the per-project route above,
         // this has no `path`/empty-state wrapper: it is just the bare array).
@@ -5913,7 +5910,7 @@ fn no_live_session() -> ApiError {
 /// inbox-watcher's fallback, and the same folder the global Terminal page opens
 /// in (`config::workspace_dir`).
 ///
-/// Deliberately a fallback rather than the 422 `spawn_project_agent` gives: a
+/// Deliberately a fallback rather than a 422: a
 /// live conversation is not scoped to a repo (its `project_id` is optional, and
 /// the whole session survives that project's deletion), so a missing or stale
 /// path is a session with no working folder, not a broken request.
@@ -6307,7 +6304,7 @@ async fn spawn_live_agent(
     .await
     .map_err(|e| agents_unavailable(format!("live agent spawn panicked: {e}")))
     .and_then(|result| result.map_err(agents_unavailable))?;
-    // Same cache invalidation as `spawn_project_agent`: a live agent is a
+    // Drop the cached list: a live agent is a
     // session of its own, and the Agents sidebar must show it on the
     // next poll rather than after the TTL.
     state.agents_cache.lock().unwrap().remove(&path);
@@ -8979,14 +8976,6 @@ async fn render_project_artifact(
 }
 
 // ---- agents (live Claude Code sessions under a project's folder) ----
-
-#[derive(Deserialize)]
-struct AgentSpawnBody {
-    /// Optional first prompt; without one the session starts idle, ready for
-    /// the first message over an attach.
-    #[serde(default)]
-    prompt: Option<String>,
-}
 
 #[derive(Deserialize)]
 struct AttachQuery {
@@ -12850,66 +12839,6 @@ async fn get_agent_watch(
     Ok(Json(watch).into_response())
 }
 
-/// Starts a new background session (`claude --bg`) in the project's folder
-/// and returns the short job id.
-async fn spawn_project_agent(
-    State(state): State<AppState>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-    Path(id): Path<i64>,
-    body: Result<Json<AgentSpawnBody>, JsonRejection>,
-) -> ApiResult<Response> {
-    require_agent_access(&state, &addr, &headers)?;
-    let Json(body) = body?;
-    let local_path = state.store.lock().unwrap().get_project(id)?.local_path;
-    let Some(path) = local_path else {
-        return Err(ApiError {
-            status: StatusCode::UNPROCESSABLE_ENTITY,
-            code: "validation",
-            message: format!(
-                "project {id} has no local_path; run `mesa project resolve` in its repo \
-                 or `mesa project update {id} --path <dir>`"
-            ),
-        });
-    };
-    if !std::path::Path::new(&path).is_dir() {
-        return Err(ApiError {
-            status: StatusCode::UNPROCESSABLE_ENTITY,
-            code: "validation",
-            message: format!("project {id} local_path {path:?} is not a directory on this machine"),
-        });
-    }
-    let dir = path.clone();
-    // The default template spawns `--agent supervisor` (mesa task 1188), so the
-    // definition is seeded to disk first — `claude --agent` errors on an agent
-    // it has never seen. A failure is treated exactly like a failed spawn.
-    supervisor::ensure_agent_definition(&state.store.lock().unwrap())
-        .map_err(agents_unavailable)?;
-    let prompts = library::prompts(&state.store.lock().unwrap())?;
-    // `~/.mesa/config.json`'s `agent-spawn` entry, defaulting to
-    // `claude --bg … -- <prompt>`. `job` is None when that command printed no
-    // receipt — the session is still real (see `AgentSpawned`).
-    let job = tokio::task::spawn_blocking(move || {
-        agents::spawn_bg(
-            config::AGENT_SPAWN,
-            &dir,
-            None,
-            None,
-            body.prompt.as_deref(),
-            &prompts,
-        )
-    })
-    .await
-    .map_err(|e| agents_unavailable(format!("agent spawn panicked: {e}")))?
-    .map_err(agents_unavailable)?;
-    // Drop the cached list so the next poll shows the new session immediately,
-    // and bump the generation so a list request in flight since before this
-    // spawn won't reinsert its pre-spawn snapshot over the invalidation.
-    state.agents_cache.lock().unwrap().remove(&path);
-    state.agents_gen.fetch_add(1, Ordering::SeqCst);
-    Ok((StatusCode::CREATED, Json(AgentSpawned { id: job })).into_response())
-}
-
 /// Upgrades to a WebSocket bridged onto `claude attach <id>` in a PTY — the
 /// embedded terminal. Closing the socket kills only the attach client; the
 /// background session keeps running (claude's own attach/detach contract).
@@ -13007,8 +12936,8 @@ async fn stop_agent(
 /// cwd is `~/.mesa/workspace` (the global Terminal page) unless
 /// `?project=<id>` is given
 /// (the project Terminal tab), in which case it is that project's
-/// `local_path` — resolved, and rejected, exactly as [`spawn_project_agent`]
-/// resolves its own spawn folder: unknown id is `not_found`, unset or
+/// `local_path` — resolved, and rejected, exactly as [`list_project_agents`]
+/// resolves its folder: unknown id is `not_found`, unset or
 /// non-directory `local_path` is `validation`. Both land as a failed
 /// handshake before the upgrade, so no shell is ever spawned somewhere the
 /// caller didn't ask for.

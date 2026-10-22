@@ -9,13 +9,11 @@ touches the Naru store only to read `local_path`. There is deliberately no
 `mesa agent` CLI: an agent in a terminal would just use `claude` directly.
 
 **The spawn command is user-configurable** — `docs/config.md`.
-`agents::spawn_bg` is the single spawn chokepoint (the two watchers, this POST
-route and `mesa live start` all go through it) and runs the template
-`~/.mesa/config.json` gives for that action; this route's key is
-**`agent-spawn`**, defaulting to `claude --bg --model opus --agent supervisor -- {prompt}`
-(mesa task 1188; the `supervisor` definition is seeded to disk first). The
-sections below describe that default. A replacement command owes Naru only its
-exit code; see the `POST` route below on the `id: null` case.
+`agents::spawn_bg` is the single spawn chokepoint (the two watchers and
+`mesa live start` go through it) and runs the template `~/.mesa/config.json`
+gives for that action. The Agents sidebar no longer starts sessions itself
+(the `+ agent` button, its `POST /api/projects/{id}/agents` route and the
+`agent-spawn` template were removed, naru task 2253).
 
 **Every session Naru *starts* runs under an agent persona** by default:
 `--agent <name>`, **`swe`** — Naru auto-dispatches engineering work, and the
@@ -23,7 +21,7 @@ generic assistant persona is the wrong front door for it. The name is a
 literal in the template (mesa task 1141, replacing the old `MESA_CLAUDE_AGENT`
 env var): to use another agent, or none — an unknown agent name is a hard
 startup failure in the claude CLI, not a warning, so a machine without a `swe`
-agent needs to drop the flag — edit the `agent-spawn` line in Settings. The
+agent needs to drop the flag — edit the `queue-watcher` line in Settings. The
 flag is placed after `--bg` and before the `--` prompt separator.
 `claude agents --json` and the attach bridge don't start a session, so neither
 takes it — and neither is affected by the templates, so a template pointing at
@@ -39,16 +37,8 @@ a different tool yields sessions the sidebar can't list or attach to.
   of trusting that black box. Cached 2s per folder in
   `AppState.agents_cache` (each list call costs ~0.5s of node startup; the UI
   polls every 3s). No `local_path` → `{path: null, agents: []}`, not an error.
-- `POST /api/projects/{id}/agents` (body `{prompt?}`) → runs the
-  `agent-spawn` command (`claude --bg` by default) in `local_path` and returns
-  `{id}` — the short job id parsed from the "backgrounded · <id>" receipt, or
-  **`null`** when the command printed no such line, which a configured
-  replacement is entitled to do. A null id is still `201`: the session exists
-  and the next list call shows it, Naru just has nothing to open an attach pane
-  with. Without a prompt the session starts idle.
-  No/missing `local_path` is `validation`; a failing/missing `claude` CLI is
-  **502 `unavailable`** on both endpoints. Both this route and the list route
-  run their subprocess under `spawn_blocking` and hold no lock across it, so
+  A failing/missing `claude` CLI is **502 `unavailable`**. The list route
+  runs its subprocess under `spawn_blocking` and holds no lock across it, so
   spawns do **not** serialize behind agent-list polls — a slow spawn observed
   under a *stub* `claude` is a stub artifact, not a Naru lock: `output()`
   waits for pipe EOF, so a stub that forks a fake long-lived session hangs
@@ -810,21 +800,6 @@ already use.
   (`agent-sidebar-maximize`) grows the panel to fill the whole main content
   area instead (`main` display:none via `:has()`), matching the diagram
   canvas's own takeover-view expand toggle; `Escape` restores.
-- **Starting a new agent**: a `+ agent` button (`agent-sidebar-add`) sits in
-  the header actions next to maximize, visible only while expanded. It opens
-  a small form (`agent-sidebar-add-form`) above the pane tree — a project
-  `<select>`, an optional first-prompt text input, and start/cancel — rather
-  than being part of the split tree itself (it starts a session; it isn't
-  one). The project picker only lists projects with a linked folder
-  (`local_path` set), since that's where `POST /api/projects/{id}/agents`
-  runs `claude --bg` and a folderless project would just 400; it defaults to
-  the project currently in focus (App's `activeProjectId`, the same value
-  the left `Sidebar` highlights) if that project is startable, else the
-  first startable project, else empty. Submitting calls
-  `spawnProjectAgent` and inserts the returned id straight into the pane
-  tree via `insertLeaf`, so the new
-  session opens attached immediately instead of waiting for the next list
-  poll.
 - **Auto Tile** (mesa task 411): a toggle (`agent-sidebar-autotile`) in the
   header actions, next to maximize, visible only while expanded. Off by
   default. While on, an effect keyed on `sessions` (the poll result, not the
@@ -871,12 +846,12 @@ already use.
   freezes the layout as-is.
 
   Because of that guard, panes opened **by hand** while the mode is on (a
-  list-rail click, or `+ agent`) must re-tile rather than root-append, and
+  list-rail click) must re-tile rather than root-append, and
   both go through `addPane` for exactly that reason: `insertLeaf` would drop
   the new leaf in as a full-height extra column of the row-oriented grid, and
   the next poll — seeing a pane set that already matches the sessions list —
   would leave it that way indefinitely. `addPane` rebuilds the grid with the
-  new id appended, which is also what makes a `+ agent` pane appear tiled
+  new id appended, which is also what makes a hand-opened pane appear tiled
   immediately instead of on the next poll.
 
 ## Live-agent marker on Board cards
@@ -902,8 +877,7 @@ column, and an `in_progress` row whose agent is gone does not animate.
   (task 861), and `pid: null` — or the session leaving the list — leaves the
   card still. There is no second liveness predicate.
 - **Best-effort by construction**, and it must always degrade to *no
-  animation*: sidebar `+ agent` sessions carry no `--name`
-  (`DEFAULT_AGENT_SPAWN` has no `{name}`) and never match; a replaced
+  animation*: a replaced
   `queue-watcher` template without `{name}` loses the marker
   and nothing else; editing a task's `description` after dispatch changes the
   derived `name` and lapses the match; and two tasks in one project sharing

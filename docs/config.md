@@ -1,7 +1,11 @@
 # Config (`~/.mesa/config.json`)
 
-Naru starts a coding agent from exactly ten places (the eighth is a workflow
-`prompt` node, the ninth the detached run `runner`, the tenth the knowledge base's
+> The Agents sidebar's "add agent" button, `POST /api/projects/{id}/agents` and the
+> `agent-spawn` command were removed (naru task 2253). A saved `agent-spawn` key is
+> unknown to Naru: it is ignored on read and a `PUT` naming it is `validation`.
+
+Naru starts a coding agent from exactly nine places (the seventh is a workflow
+`prompt` node, the eighth the detached run `runner`, the ninth the knowledge base's
 `kb` calls). Each one's command line
 is a **template** in `~/.mesa/config.json`, so the program, its flags, the
 persona and the slash command can all change without rebuilding Naru:
@@ -10,7 +14,6 @@ persona and the slash command can all change without rebuilding Naru:
 | --- | --- | --- |
 | `queue-watcher` | `serve --watch-queue` dispatch (`docs/queue-watcher.md`; to run tasks through the managed `Task loop` built-in use `naru workflow run "Task loop" --input {id} --detach`, or `"Task loop (custom)"` for an upgraded install's own copy — `docs/workflows.md`) | `claude --bg --agent supervisor --name {name} -- "/execute-naru-task {id}"` |
 | `inbox-watcher` | `serve --watch-inbox` triage (`docs/inbox-watcher.md`): up to two synchronous, tool-less `claude -p --json-schema` calls (haiku decides, sonnet writes the task) per item, run in a detached `naru __job inbox-triage` whose verdict Naru validates and applies itself (naru task 1691). Offers `{id}`, `{name}`, `{prompt}`, `{schema}` and `{model}` | `claude -p --model {model} --name {name} --tools "" --strict-mcp-config --output-format json --json-schema {schema} -- {prompt}` |
-| `agent-spawn` | `POST /api/projects/{id}/agents`, the Agents sidebar's **add agent** (`docs/agents.md`) | `claude --bg --model opus --agent supervisor -- {prompt}` |
 | `live-agent` | `mesa live start`, `POST /api/live`, `mesa live handoff` — the session that holds a spoken conversation (`docs/live.md`), since naru task 1886 a `naru run` job (`core::live::spawn_agent` → `core::runner`, `docs/runner.md`) rather than a `--bg` agent. Offers `{name}`, `{session_flag}` and `{session_id}` | `claude -p --input-format stream-json --output-format stream-json --verbose --agent naru-live --name {name} {session_flag} {session_id}` |
 | `live-summary` | `live stop`'s CLI handler and the API's stop route — the one synchronous, tool-less `claude -p --json-schema` call that writes a live conversation's memory once it ends, run in a detached `naru __job summary` whose answer Naru saves itself (mesa task 921, naru task 1690, `docs/live.md`). Offers `{id}`, `{name}`, `{prompt}` and `{schema}` | `claude -p --model sonnet --name {name} --tools "" --strict-mcp-config --output-format json --json-schema {schema} -- {prompt}` |
 | `live-dream` | The pass that tidies a notebook — `mesa live memory dream` explicitly, and on its own at a handoff or when a conversation ends once `live::dream_wanted` says the notebook needs it (mesa task 1155), and a project's notebook (`naru memory dream`, and after a task closes over budget): one synchronous, tool-less `claude -p --json-schema` call in a detached `naru __job dream` / `project-dream` whose edits (merge, delete, keep, replace) Naru applies itself, one guarded store call each (mesa task 1152, naru task 1690, `docs/live.md`). Offers `{id}`, `{name}`, `{prompt}` and `{schema}` | `claude -p --model sonnet --name {name} --tools "" --strict-mcp-config --output-format json --json-schema {schema} -- {prompt}` |
@@ -31,7 +34,6 @@ from the vocabulary (see *Retired placeholders* below).
   "commands": {
     "queue-watcher":   "claude --bg --agent supervisor --name {name} -- \"/execute-naru-task {id}\"",
     "inbox-watcher":  "claude -p --model {model} --name {name} --tools \"\" --strict-mcp-config --output-format json --json-schema {schema} -- {prompt}",
-    "agent-spawn":    "claude --bg -- {prompt}",
     "live-agent":     "claude -p --input-format stream-json --output-format stream-json --verbose --agent naru-live --name {name} {session_flag} {session_id}",
     "live-summary":   "claude -p --model sonnet --name {name} --tools \"\" --strict-mcp-config --output-format json --json-schema {schema} -- {prompt}",
     "live-dream":     "claude -p --model sonnet --name {name} --tools \"\" --strict-mcp-config --output-format json --json-schema {schema} -- {prompt}",
@@ -238,7 +240,7 @@ knows about:
 | `{id}` | watchers, `retro`, `live-summary`, `live-dream` | the task id / inbox item id / retro run id / live session id (for `live-dream`, the newest session's; empty on an install that has never held one) |
 | `{name}` | watchers, `retro`, `kb`, `live-agent`, `live-summary`, `live-dream`, `workflow-prompt` | the session name Naru derives — `workflow <workflow name> · <node title>` (`workflow-prompt`), `<project>: <task name>` (queue-watcher), `inbox <id>: <first body line>` (**untrusted text**), `naru retro <id>`, the live session's own name, or the literal `live memory dream` |
 | `{schema}` | `live-summary`, `live-dream`, `inbox-watcher`, `retro` | the JSON Schema Naru passes to `--json-schema` (`core::live::SUMMARY_SCHEMA`, `LIVE_DREAM_SCHEMA` or, for a project dream, `PROJECT_DREAM_SCHEMA`; `core::inbox_triage::TRIAGE_SCHEMA` or `SHARPEN_SCHEMA`) — Naru's own text, so a template edit cannot break the contract |
-| `{prompt}` | `agent-spawn`, `live-summary`, `live-dream`, `inbox-watcher`, `retro`, `kb`, `workflow-prompt` | the POST body's `prompt` (`agent-spawn`; absent when omitted) / the summariser's, dream pass's or inbox triage's instruction block, always present / the workflow node's prompt, a blank line and its input (`workflow-prompt`) |
+| `{prompt}` | `live-summary`, `live-dream`, `inbox-watcher`, `retro`, `kb`, `workflow-prompt` | the summariser's, dream pass's or inbox triage's instruction block, always present / the workflow node's prompt, a blank line and its input (`workflow-prompt`) |
 | `{model}` | `workflow-prompt`, `inbox-watcher`, `retro`, `kb` | the node's `model`: `haiku`, `sonnet` or `opus` (`workflow-prompt`) / the pass's: `haiku` for the verdict, `sonnet` for the sharpened task (`inbox-watcher`) / `haiku` for a session skim, `sonnet` for the roll-up (`retro`) |
 | `{thinking}` | `workflow-prompt` | `true` or `false`, the node's `thinking` flag |
 | `{session_flag}` | `runner`, `live-agent` | `--session-id` (first start) or `--resume` (after a restart) — a placeholder of its own because a value is one quoted word, so it is passed as `'--resume'`, still a flag to `claude` |
@@ -314,7 +316,7 @@ are what make the remaining lexer mistakes cheap.)
 ### Absent values, unknown braces
 
 - **A placeholder the hook isn't offered is an error**, named in the message
-  (`{id}` in `agent-spawn`, `{prompt}` in a watcher, a typo like `{tsak}`) —
+  (`{id}` in `workflow-prompt`, `{prompt}` in a watcher, a typo like `{tsak}`) —
   raised at save time and again before anything runs. A brace holding only
   name characters (`[A-Za-z0-9_-]`) is a placeholder as far as Naru is
   concerned, since bash has no use for `{tsak}` either. Every other brace —

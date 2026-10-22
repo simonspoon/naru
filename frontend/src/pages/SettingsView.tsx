@@ -256,10 +256,6 @@ const COPY: Record<string, { title: string; blurb: string }> = {
     title: 'Inbox watcher',
     blurb: '`serve --watch-inbox` runs this to triage a new inbox item.',
   },
-  'agent-spawn': {
-    title: 'Add agent',
-    blurb: "The Agents sidebar's + button runs this to start a session.",
-  },
 }
 
 /**

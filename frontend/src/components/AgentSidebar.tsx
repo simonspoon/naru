@@ -19,7 +19,7 @@ import {
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { getLive, listAllAgents, listProjects, spawnProjectAgent, stopAgent, stopRun } from '../api'
+import { getLive, listAllAgents, listProjects, stopAgent, stopRun } from '../api'
 import { attributeAlarms, formatCountdown, remainingMs } from '../agentAlarm'
 import { projectForCwd } from '../agentProject'
 import {
@@ -297,22 +297,6 @@ function PaneBody({
       )}
     </div>
   )
-}
-
-// Only projects with a linked folder can host a new session (`local_path`
-// is where `claude --bg` runs) — filtered here so the picker never offers a
-// choice the spawn call would just reject as `validation`.
-function startableProjects(projects: Project[] | null | undefined): Project[] {
-  return (projects ?? []).filter((p) => p.local_path !== null)
-}
-
-// The picker's initial selection: the in-focus project if it's startable,
-// else the first startable project, else none (an empty picker with no
-// linked project anywhere).
-function defaultStartProjectId(projects: Project[] | null | undefined, activeProjectId: number | null): number | '' {
-  const startable = startableProjects(projects)
-  if (activeProjectId !== null && startable.some((p) => p.id === activeProjectId)) return activeProjectId
-  return startable[0]?.id ?? ''
 }
 
 function startedAgo(ms: number): string {
@@ -1389,13 +1373,11 @@ function mainEdge(): number {
 }
 
 export function AgentSidebar({
-  activeProjectId,
   collapsed,
   onCollapsedChange,
   liveSlot = null,
   docked = false,
 }: {
-  activeProjectId: number | null
   // Owned by `App.tsx` since mesa task 556: the phone tab bar's "Agents" slot
   // opens this drawer, so the collapse is no longer this component's private
   // state. Nothing else changes — collapsing still only alters CSS, never the
@@ -1487,28 +1469,11 @@ export function AgentSidebar({
   // holds, since the effect depends on `autoTile` itself.
   const [autoTile, setAutoTile] = useState(false)
 
-  // "Add Agent" form: a transient overlay row above the pane tree, not part
-  // of it — it starts a session, it isn't one. `open` is a plain boolean
-  // rather than the presence of a project id, so cancel/collapse can reset
-  // it without losing the distinction between "closed" and "closed with
-  // nothing chosen yet".
-  const [addOpen, setAddOpen] = useState(false)
-  const [addProjectId, setAddProjectId] = useState<number | ''>('')
-  const [addPrompt, setAddPrompt] = useState('')
-  const [adding, setAdding] = useState(false)
-  const [addError, setAddError] = useState<string | null>(null)
   // Job ids with a `claude stop` in flight, and the last failure. A successful
   // stop needs no state of its own: the row leaves `claude agents --json`, so
   // the refetch below is what removes it.
   const [stoppingIds, setStoppingIds] = useState<string[]>([])
   const [stopError, setStopError] = useState<string | null>(null)
-  // Bumped by closeAddAgent and every new submit — a submit's `.then`/`.catch`
-  // only applies its result if this still matches the id it captured, so
-  // canceling (or reopening the form for a different project) before a spawn
-  // resolves can't have the stale response clobber whatever the form shows
-  // by the time it lands. The project-id ref below guards
-  // against the analogous stale-async-write problem.
-  const addRequestId = useRef(0)
 
   // Set while dragging a divider between two adjacent children of the split
   // node at `path`; `i` is the index of the upper/left one (the divider sits
@@ -1743,7 +1708,7 @@ export function AgentSidebar({
 
   /**
    * Opens `agentId`'s pane. While Auto Tile is on it owns the layout, so a
-   * pane opened by hand (list-rail click, `+ agent`) has to re-tile rather
+   * pane opened by hand (list-rail click) has to re-tile rather
    * than root-append: an appended leaf lands as a full-height extra column
    * in a row-oriented grid, and the sync effect's own "pane set unchanged"
    * guard would then leave it that way indefinitely — the set it sees on
@@ -1877,21 +1842,6 @@ export function AgentSidebar({
   const phone = usePhoneTier()
   const soloId = phone ? openIds[openIds.length - 1] ?? null : null
   const soloSession = soloId !== null ? agents.find((a) => a.id === soloId) : undefined
-  // Computed once per render and reused by both the add-form's option list
-  // and its empty-state check below, rather than each re-filtering `projects`
-  // independently.
-  const startableAddProjects = startableProjects(projects)
-  // `addProjectId` only holds a value once the user has explicitly picked
-  // one (or it's no longer a startable choice) — the default is re-derived
-  // from `startableAddProjects` on every render instead of being written
-  // into state by an effect, so it stays correct the moment `projects`
-  // finishes loading even if the form was opened before that fetch resolved
-  // (no effect needed, and nothing to re-sync).
-  const selectedAddProjectId =
-    addProjectId !== '' && startableAddProjects.some((p) => p.id === addProjectId)
-      ? addProjectId
-      : defaultStartProjectId(projects, activeProjectId)
-
   const listProps: ListPaneProps = {
     agents,
     leaving,
@@ -1991,59 +1941,6 @@ export function AgentSidebar({
     if (phone) setListCollapsed(false)
   }
 
-  function openAddAgent() {
-    setAddError(null)
-    setAddPrompt('')
-    // No explicit selection yet — `selectedAddProjectId` derives the
-    // in-focus/first-startable default at render time, including once
-    // `projects` finishes loading if it hasn't yet.
-    setAddProjectId('')
-    setAddOpen(true)
-  }
-
-  function closeAddAgent() {
-    setAddOpen(false)
-    setAddError(null)
-    // Any spawn still in flight from this form is now stale — its own
-    // `.then`/`.catch` checks this id before touching state, so canceling
-    // (or the sidebar collapsing) can't have a late response reopen/clobber
-    // whatever the form shows next. The spawn call itself isn't aborted —
-    // mesa's `request()` has no AbortController plumbed through it — so the
-    // agent it was starting still starts; this only stops that response
-    // from corrupting UI state that's since moved on.
-    addRequestId.current += 1
-  }
-
-  function submitAddAgent(e: React.FormEvent) {
-    e.preventDefault()
-    if (selectedAddProjectId === '') return
-    setAdding(true)
-    setAddError(null)
-    const requestId = ++addRequestId.current
-    const body = addPrompt.trim() === '' ? {} : { prompt: addPrompt.trim() }
-    spawnProjectAgent(selectedAddProjectId, body).then(
-      (spawned) => {
-        // The newly started agent is real either way, so always insert its
-        // pane — but only touch the form's own state if this is still the
-        // request that owns it. A null id means the configured spawn command
-        // printed no job-id receipt: the session exists and the next poll
-        // lists it, there is just nothing to attach a pane to yet.
-        const spawnedId = spawned.id
-        if (spawnedId !== null) setRoot((r) => addPane(r, spawnedId))
-        refetch()
-        if (addRequestId.current !== requestId) return
-        setAdding(false)
-        setAddOpen(false)
-        setAddPrompt('')
-      },
-      (err: unknown) => {
-        if (addRequestId.current !== requestId) return
-        setAdding(false)
-        setAddError(err instanceof Error ? err.message : String(err))
-      },
-    )
-  }
-
   // `activatorEvent` is the native pointerdown/mousedown that started this
   // drag — the one place dnd-kit hands over an absolute pointer position;
   // every later event on the same drag gives only `delta` relative to it.
@@ -2141,7 +2038,6 @@ export function AgentSidebar({
           onClick={() => {
             setCollapsed(true)
             setMaximized(false)
-            closeAddAgent()
           }}
         />
       )}
@@ -2168,8 +2064,7 @@ export function AgentSidebar({
             onClick={() => {
               setCollapsed(!collapsed)
               setMaximized(false)
-              closeAddAgent()
-            }}
+              }}
           >
             {collapsed ? '«' : '»'}
           </button>
@@ -2213,65 +2108,7 @@ export function AgentSidebar({
               auto tile
             </button>
           )}
-          {!collapsed && (
-            <button
-              type="button"
-              className={`agent-sidebar-add${addOpen ? ' active' : ''}`}
-              aria-label={addOpen ? 'Cancel starting an agent' : 'Start a new agent'}
-              title={addOpen ? 'Cancel starting an agent' : 'Start a new agent'}
-              onClick={() => (addOpen ? closeAddAgent() : openAddAgent())}
-            >
-              + agent
-            </button>
-          )}
         </div>
-
-        {/* A transient overlay above the pane tree, not a pane itself — it
-            starts a session, it isn't one (unlike an attached agent or the
-            permanent list pane, both members of `root`). */}
-        {!collapsed && addOpen && (
-          <form className="agent-sidebar-add-form" onSubmit={submitAddAgent}>
-            <select
-              value={selectedAddProjectId}
-              onChange={(e) => setAddProjectId(e.target.value ? Number(e.target.value) : '')}
-              required
-            >
-              <option value="" disabled>
-                select project…
-              </option>
-              {startableAddProjects.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))}
-            </select>
-            <input
-              type="text"
-              value={addPrompt}
-              placeholder="optional first prompt — blank starts idle"
-              onChange={(e) => setAddPrompt(e.target.value)}
-            />
-            <div className="agent-sidebar-add-form-actions">
-              <button type="submit" disabled={adding || selectedAddProjectId === ''}>
-                {adding ? 'starting…' : 'start agent'}
-              </button>
-              <button type="button" onClick={closeAddAgent}>
-                cancel
-              </button>
-            </div>
-            {addError && <span className="error">{addError}</span>}
-            {/* `projects === null` is "still loading" (the initial `useFetch`
-                value), not "confirmed zero" — showing this message during that
-                window would claim no project is linked when one might be about
-                to load. */}
-            {projects !== null && startableAddProjects.length === 0 && (
-              <span className="muted">
-                No project has a linked folder yet — run{' '}
-                <code>mesa project resolve</code> inside a repo to link one.
-              </span>
-            )}
-          </form>
-        )}
 
         <div
           className={`agent-sidebar-body${listMaximized ? ' list-maximized' : ''}`}

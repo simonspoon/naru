@@ -7,7 +7,7 @@
  */
 export type ConfigCommand = { 
 /**
- * The config key: `queue-watcher`, `inbox-watcher` or `agent-spawn`.
+ * The config key: `queue-watcher` or `inbox-watcher` (and so on, see `config::ACTIONS`).
  */
 action: string, 
 /**

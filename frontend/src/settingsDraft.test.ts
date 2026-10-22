@@ -14,17 +14,17 @@ function cmd(action: string, value: string | null): ConfigCommand {
     action,
     value,
     default: `claude --bg -- ${action}`,
-    placeholders: action === 'agent-spawn' ? ['{prompt}'] : ['{id}', '{name}'],
+    placeholders: action === 'inbox-watcher' ? ['{prompt}'] : ['{id}', '{name}'],
   }
 }
 
-const COMMANDS = [cmd('queue-watcher', 'mytool {id}'), cmd('agent-spawn', null)]
+const COMMANDS = [cmd('queue-watcher', 'mytool {id}'), cmd('inbox-watcher', null)]
 
 describe('draftFrom', () => {
   it('renders an unconfigured command as an empty textarea', () => {
     expect(draftFrom(COMMANDS)).toEqual({
       'queue-watcher': 'mytool {id}',
-      'agent-spawn': '',
+      'inbox-watcher': '',
     })
   })
 })
@@ -32,7 +32,7 @@ describe('draftFrom', () => {
 describe('effectiveCommand', () => {
   it('falls back to the built-in default while the box is blank', () => {
     const draft = draftFrom(COMMANDS)
-    expect(effectiveCommand(COMMANDS[1], draft)).toBe('claude --bg -- agent-spawn')
+    expect(effectiveCommand(COMMANDS[1], draft)).toBe('claude --bg -- inbox-watcher')
     expect(effectiveCommand(COMMANDS[0], draft)).toBe('mytool {id}')
     // Whitespace-only is blank, the same way the server trims before storing.
     expect(effectiveCommand(COMMANDS[0], { 'queue-watcher': '   ' })).toBe(
@@ -47,12 +47,12 @@ describe('isRowChanged / isDirty', () => {
     expect(isRowChanged(COMMANDS[1], draft)).toBe(false)
     expect(isDirty(COMMANDS, draft)).toBe(false)
     // Whitespace typed into an unconfigured row is still "unconfigured".
-    expect(isRowChanged(COMMANDS[1], { 'agent-spawn': '  ' })).toBe(false)
+    expect(isRowChanged(COMMANDS[1], { 'inbox-watcher': '  ' })).toBe(false)
   })
 
   it('sees a cleared box as a change back to the default', () => {
     expect(isRowChanged(COMMANDS[0], { 'queue-watcher': '' })).toBe(true)
-    expect(isDirty(COMMANDS, { 'queue-watcher': '', 'agent-spawn': '' })).toBe(true)
+    expect(isDirty(COMMANDS, { 'queue-watcher': '', 'inbox-watcher': '' })).toBe(true)
   })
 
   it('ignores surrounding whitespace on an otherwise unchanged row', () => {
@@ -96,7 +96,7 @@ describe('placeholderError', () => {
     expect(error).toContain('{prompt} is not offered to queue-watcher')
     // A name mesa does not know is shaped like a placeholder and is a typo,
     // not bash text — the server refuses it, so the page says so first.
-    expect(placeholderError(COMMANDS[1], { 'agent-spawn': 'claude {tsak}' })).toContain(
+    expect(placeholderError(COMMANDS[1], { 'inbox-watcher': 'claude {tsak}' })).toContain(
       '{tsak}',
     )
   })
@@ -104,14 +104,14 @@ describe('placeholderError', () => {
 
 describe('changedCommands', () => {
   it('sends only the rows that moved, trimmed', () => {
-    const draft = { 'queue-watcher': '  other {id}  ', 'agent-spawn': '' }
+    const draft = { 'queue-watcher': '  other {id}  ', 'inbox-watcher': '' }
     expect(changedCommands(COMMANDS, draft)).toEqual({
       'queue-watcher': 'other {id}',
     })
   })
 
   it('sends a cleared row as the empty string (the reset-to-default signal)', () => {
-    expect(changedCommands(COMMANDS, { 'queue-watcher': '', 'agent-spawn': '' })).toEqual(
+    expect(changedCommands(COMMANDS, { 'queue-watcher': '', 'inbox-watcher': '' })).toEqual(
       { 'queue-watcher': '' },
     )
   })

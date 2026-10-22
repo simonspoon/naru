@@ -1,9 +1,8 @@
 //! User config: the hook mesa runs when it starts a coding agent, and the
 //! per-model price table the CC Dashboard estimates cost from.
 //!
-//! mesa spawns an agent from exactly six places — the queue-watcher's
-//! dispatch, the inbox-watcher's triage, the Agents surface's "add agent"
-//! button, the live conversation's agent, the short-lived agent that
+//! mesa spawns an agent from exactly five places — the queue-watcher's
+//! dispatch, the inbox-watcher's triage, the live conversation's agent, the short-lived agent that
 //! writes a live conversation's memory once it ends (mesa task 921), and the
 //! dream pass that tidies the live notebook between conversations (mesa task
 //! 1152). Each used to be a hardcoded `claude --bg …` argv, so swapping the
@@ -15,7 +14,6 @@
 //!   "commands": {
 //!     "queue-watcher":   "claude --bg --agent supervisor --name {name} -- \"/execute-naru-task {id}\"",
 //!     "inbox-watcher":  "claude -p --model {model} --name {name} --tools \"\" --strict-mcp-config --output-format json --json-schema {schema} -- {prompt}",
-//!     "agent-spawn":    "claude --bg --model opus --agent supervisor -- {prompt}",
 //!     "live-agent":     "claude --bg --agent naru-live --name {name} -- {prompt}",
 //!     "live-summary":   "claude --bg --name {name} -- {prompt}",
 //!     "live-dream":     "claude --bg --name {name} -- {prompt}"
@@ -230,8 +228,6 @@ fn legacy_action(action: &str) -> Option<&'static str> {
 }
 /// The inbox-watcher's triage command (`docs/inbox-watcher.md`).
 pub const INBOX_WATCHER: &str = "inbox-watcher";
-/// The Agents surface's "add agent" command (`docs/agents.md`).
-pub const AGENT_SPAWN: &str = "agent-spawn";
 /// The live conversation's agent (`docs/live.md`).
 pub const LIVE_AGENT: &str = "live-agent";
 /// The short-lived agent that writes a live conversation's memory once it
@@ -272,10 +268,9 @@ pub const KB: &str = "kb";
 /// Every configurable command, in the order the docs and the Settings page
 /// list them. The single source of truth for "which keys mesa configures" —
 /// [`default_command`] answers the same question one key at a time.
-pub const ACTIONS: [&str; 10] = [
+pub const ACTIONS: [&str; 9] = [
     TODO_WATCHER,
     INBOX_WATCHER,
-    AGENT_SPAWN,
     LIVE_AGENT,
     LIVE_SUMMARY,
     LIVE_DREAM,
@@ -320,12 +315,6 @@ pub const DEFAULT_TODO_WATCHER: &str =
 /// Naru applies the answer through `Store`. A saved template that still starts
 /// a `--bg` agent is retired ([`retired_bg_override`]).
 pub const DEFAULT_INBOX_WATCHER: &str = r#"claude -p --model {model} --name {name} --tools "" --strict-mcp-config --output-format json --json-schema {schema} -- {prompt}"#;
-/// Built-in default for [`AGENT_SPAWN`]. No `{id}`/`{name}`: this spawn is
-/// driven by a request body, not a mesa record, and the prompt is optional —
-/// absent, the `-- {prompt}` pair drops out and the session starts idle. The
-/// agent is the literal `supervisor` on opus (mesa task 1188: no `swe` agent
-/// exists), seeded by `spawn_project_agent` before the spawn.
-pub const DEFAULT_AGENT_SPAWN: &str = "claude --bg --model opus --agent supervisor -- {prompt}";
 /// Built-in default for [`LIVE_AGENT`]. The union of the two shapes above: a
 /// live session is a mesa record (so it has an `{id}` and a `{name}`) *and*
 /// carries a prompt mesa supplies — `core::live::agent_prompt`, the session
@@ -414,7 +403,6 @@ pub fn default_command(action: &str) -> Option<&'static str> {
     match action {
         TODO_WATCHER => Some(DEFAULT_TODO_WATCHER),
         INBOX_WATCHER => Some(DEFAULT_INBOX_WATCHER),
-        AGENT_SPAWN => Some(DEFAULT_AGENT_SPAWN),
         LIVE_AGENT => Some(DEFAULT_LIVE_AGENT),
         LIVE_SUMMARY => Some(DEFAULT_LIVE_SUMMARY),
         LIVE_DREAM => Some(DEFAULT_LIVE_DREAM),
@@ -1780,7 +1768,6 @@ impl Vars<'_> {
 /// accepts.
 pub fn offered_placeholders(action: &str) -> &'static [&'static str] {
     match action {
-        AGENT_SPAWN => &["{prompt}"],
         // The runner's vars (naru task 1886): the prompt rides the run inbox.
         LIVE_AGENT => &["{name}", "{session_flag}", "{session_id}"],
         // Plus the schema Naru owns (naru task 1690).
@@ -5167,7 +5154,7 @@ mod tests {
         let before = concat!(
             r#"{"commands": {"#,
             r#""queue-watcher": "{bin} --bg --agent {agent} --name {name} -- \"/execute-mesa-task {id}\"", "#,
-            r#""agent-spawn": "cd /repo\nexec \"{bin}\" --agent {agent} -- {prompt}""#,
+            r#""workflow-prompt": "cd /repo\nexec \"{bin}\" --agent {agent} -- {prompt}""#,
             r#"}}"#
         );
         let path = write_config(dir.path(), before);
@@ -5196,7 +5183,7 @@ mod tests {
         // Script mode too: the reference-substitution rules never see the
         // retired names, so a script that used them still runs as written.
         assert_eq!(
-            command_in(&path, AGENT_SPAWN).unwrap().as_deref(),
+            command_in(&path, WORKFLOW_PROMPT).unwrap().as_deref(),
             Some("cd /repo\nexec \"claude\" --agent supervisor -- {prompt}")
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
@@ -5320,51 +5307,49 @@ mod tests {
             settings[1].placeholders,
             ["{id}", "{name}", "{prompt}", "{schema}", "{model}"]
         );
-        assert_eq!(settings[2].action, AGENT_SPAWN);
-        assert_eq!(settings[2].placeholders, ["{prompt}"]);
         // The live agent offers the runner's vars (naru task 1886): its prompt
         // rides the run inbox, so there is no `{prompt}`.
-        assert_eq!(settings[3].action, LIVE_AGENT);
-        assert_eq!(settings[3].default, DEFAULT_LIVE_AGENT);
+        assert_eq!(settings[2].action, LIVE_AGENT);
+        assert_eq!(settings[2].default, DEFAULT_LIVE_AGENT);
         assert_eq!(
-            settings[3].placeholders,
+            settings[2].placeholders,
             ["{name}", "{session_flag}", "{session_id}"]
         );
         // The summariser offers the same union, for the same reason.
-        assert_eq!(settings[4].action, LIVE_SUMMARY);
-        assert_eq!(settings[4].default, DEFAULT_LIVE_SUMMARY);
+        assert_eq!(settings[3].action, LIVE_SUMMARY);
+        assert_eq!(settings[3].default, DEFAULT_LIVE_SUMMARY);
+        assert_eq!(
+            settings[3].placeholders,
+            ["{id}", "{name}", "{prompt}", "{schema}"]
+        );
+        // The dream pass (mesa task 1152) is the fifth, same union.
+        assert_eq!(settings[4].action, LIVE_DREAM);
+        assert_eq!(settings[4].default, DEFAULT_LIVE_DREAM);
         assert_eq!(
             settings[4].placeholders,
             ["{id}", "{name}", "{prompt}", "{schema}"]
         );
-        // The dream pass (mesa task 1152) is the sixth, same union.
-        assert_eq!(settings[5].action, LIVE_DREAM);
-        assert_eq!(settings[5].default, DEFAULT_LIVE_DREAM);
+        // The retrospective (mesa task 1158) is the sixth: the
+        // inbox-watcher's structured shape since naru task 1692.
+        assert_eq!(settings[5].action, RETRO);
+        assert_eq!(settings[5].default, DEFAULT_RETRO);
         assert_eq!(
             settings[5].placeholders,
-            ["{id}", "{name}", "{prompt}", "{schema}"]
-        );
-        // The retrospective (mesa task 1158) is the seventh: the
-        // inbox-watcher's structured shape since naru task 1692.
-        assert_eq!(settings[6].action, RETRO);
-        assert_eq!(settings[6].default, DEFAULT_RETRO);
-        assert_eq!(
-            settings[6].placeholders,
             ["{id}", "{name}", "{prompt}", "{schema}", "{model}"]
         );
-        // The workflow prompt node (mesa task 1607) is the eighth: a
+        // The workflow prompt node (mesa task 1607) is the seventh: a
         // background agent the engine waits on, with its own vocabulary.
-        assert_eq!(settings[7].action, WORKFLOW_PROMPT);
-        assert_eq!(settings[7].default, DEFAULT_WORKFLOW_PROMPT);
+        assert_eq!(settings[6].action, WORKFLOW_PROMPT);
+        assert_eq!(settings[6].default, DEFAULT_WORKFLOW_PROMPT);
         assert_eq!(
-            settings[7].placeholders,
+            settings[6].placeholders,
             ["{model}", "{thinking}", "{name}", "{prompt}"]
         );
-        // The run runner (naru task 1686) is the ninth.
-        assert_eq!(settings[8].action, RUNNER);
-        assert_eq!(settings[8].default, DEFAULT_RUNNER);
+        // The run runner (naru task 1686) is the eighth.
+        assert_eq!(settings[7].action, RUNNER);
+        assert_eq!(settings[7].default, DEFAULT_RUNNER);
         assert_eq!(
-            settings[8].placeholders,
+            settings[7].placeholders,
             [
                 "{model}",
                 "{name}",
@@ -5373,11 +5358,11 @@ mod tests {
                 "{run_agent}"
             ]
         );
-        // The knowledge base (naru task 1919) is the tenth: the retro shape.
-        assert_eq!(settings[9].action, KB);
-        assert_eq!(settings[9].default, DEFAULT_KB);
+        // The knowledge base (naru task 1919) is the ninth: the retro shape.
+        assert_eq!(settings[8].action, KB);
+        assert_eq!(settings[8].default, DEFAULT_KB);
         assert_eq!(
-            settings[9].placeholders,
+            settings[8].placeholders,
             ["{id}", "{name}", "{prompt}", "{schema}", "{model}"]
         );
         assert!(retired_bg_override(KB, "claude --bg -- {prompt}"));
@@ -5522,7 +5507,7 @@ mod tests {
         );
         assert_eq!(command_in(&bg, LIVE_AGENT).unwrap(), None);
         // Other actions still start --bg agents.
-        validate_(AGENT_SPAWN, "claude --bg -- {prompt}").unwrap();
+        validate_(TODO_WATCHER, "claude --bg -- {id}").unwrap();
         // `--background` is not the flag.
         assert!(!retired_bg_override(
             LIVE_SUMMARY,
@@ -5625,10 +5610,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // The file need not exist yet — nor its parent directory.
         let path = dir.path().join("nested").join("config.json");
-        save_in(&path, &update(&[(AGENT_SPAWN, "  mytool -- {prompt}  ")])).unwrap();
+        save_in(
+            &path,
+            &update(&[(WORKFLOW_PROMPT, "  mytool -- {prompt}  ")]),
+        )
+        .unwrap();
         // Stored trimmed, and visible to the ordinary read path immediately.
         assert_eq!(
-            command_in(&path, AGENT_SPAWN).unwrap().as_deref(),
+            command_in(&path, WORKFLOW_PROMPT).unwrap().as_deref(),
             Some("mytool -- {prompt}")
         );
         assert_eq!(command_in(&path, TODO_WATCHER).unwrap(), None);
@@ -5655,20 +5644,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = write_config(
             dir.path(),
-            r#"{"commands": {"queue-watcher": "mytool {id}", "agent-spawn": "mytool"}}"#,
+            r#"{"commands": {"queue-watcher": "mytool {id}", "workflow-prompt": "mytool"}}"#,
         );
         save_in(&path, &update(&[(TODO_WATCHER, "   ")])).unwrap();
         let written: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         // Removed, not stored blank: the default is expressed by absence.
         assert!(written["commands"].get(TODO_WATCHER).is_none());
-        assert_eq!(written["commands"]["agent-spawn"], "mytool");
+        assert_eq!(written["commands"]["workflow-prompt"], "mytool");
         assert_eq!(command_in(&path, TODO_WATCHER).unwrap(), None);
         // …and a multi-line blank is blank too.
-        save_in(&path, &update(&[(AGENT_SPAWN, "\n  \n")])).unwrap();
+        save_in(&path, &update(&[(WORKFLOW_PROMPT, "\n  \n")])).unwrap();
         let written: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert!(written["commands"].get(AGENT_SPAWN).is_none());
+        assert!(written["commands"].get(WORKFLOW_PROMPT).is_none());
     }
 
     #[test]
@@ -5683,7 +5672,7 @@ mod tests {
             "{err:?}"
         );
         // …an unterminated quote, which `bash -n` refuses…
-        let err = save_in(&path, &update(&[(AGENT_SPAWN, "mytool \"oops")])).unwrap_err();
+        let err = save_in(&path, &update(&[(WORKFLOW_PROMPT, "mytool \"oops")])).unwrap_err();
         assert!(
             matches!(&err, SaveError::Validation(m) if m.contains("not valid bash")),
             "{err:?}"
@@ -5706,7 +5695,10 @@ mod tests {
         // One good entry, one bad one — the good one must not land either.
         let err = save_in(
             &path,
-            &update(&[(TODO_WATCHER, "mytool {id}"), (AGENT_SPAWN, "mytool {id}")]),
+            &update(&[
+                (TODO_WATCHER, "mytool {id}"),
+                (WORKFLOW_PROMPT, "mytool {id}"),
+            ]),
         )
         .unwrap_err();
         assert!(matches!(err, SaveError::Validation(_)), "{err:?}");
@@ -5767,14 +5759,6 @@ mod tests {
             // Literal since mesa task 1075: the run is supervised by the
             // `supervisor` agent definition.
             r#"claude --bg --agent supervisor --name 'mesa: do the thing' -- "/execute-naru-task 731""#
-        );
-        let spawn = Vars {
-            prompt: Some("look at the tests"),
-            ..Default::default()
-        };
-        assert_eq!(
-            resolve(AGENT_SPAWN, DEFAULT_AGENT_SPAWN, &spawn).unwrap(),
-            "claude --bg --model opus --agent supervisor -- 'look at the tests'"
         );
         // The live agent takes both halves: a named session id *and* the
         // prompt mesa supplies. The prompt is one argument however long or
@@ -5856,20 +5840,20 @@ mod tests {
         // quotes, so a promptless spawn hands its program an empty prompt.
         let vars = Vars::default();
         assert_eq!(
-            resolve(AGENT_SPAWN, DEFAULT_AGENT_SPAWN, &vars).unwrap(),
-            "claude --bg --model opus --agent supervisor -- ''"
+            resolve(TODO_WATCHER, DEFAULT_TODO_WATCHER, &vars).unwrap(),
+            r#"claude --bg --agent supervisor --name '' -- "/execute-naru-task ""#
         );
         assert_eq!(
-            argv_of(&resolve(AGENT_SPAWN, DEFAULT_AGENT_SPAWN, &vars).unwrap()),
+            argv_of(&resolve(TODO_WATCHER, DEFAULT_TODO_WATCHER, &vars).unwrap()),
             [
                 "claude",
                 "--bg",
-                "--model",
-                "opus",
                 "--agent",
                 "supervisor",
+                "--name",
+                "",
                 "--",
-                ""
+                "/execute-naru-task "
             ]
         );
         let named = Vars {
@@ -5906,10 +5890,10 @@ mod tests {
             prompt: Some("p"),
             ..Default::default()
         };
-        // agent-spawn has no mesa record behind it, so no {id}/{name}…
-        let err = resolve(AGENT_SPAWN, "claude {id}", &vars).unwrap_err();
+        // workflow-prompt has no mesa record behind it, so no {id}…
+        let err = resolve(WORKFLOW_PROMPT, "claude {id}", &vars).unwrap_err();
         assert!(err.contains("{id}"), "{err}");
-        assert!(err.contains("agent-spawn offers {prompt}"), "{err}");
+        assert!(err.contains("workflow-prompt offers {model}"), "{err}");
         // …and the watchers' prompt is theirs to write, not mesa's to inject.
         let err = resolve(TODO_WATCHER, "claude {prompt}", &vars).unwrap_err();
         assert!(err.contains("{prompt}"), "{err}");
@@ -5987,7 +5971,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let before = serde_json::json!({"commands": {
             "queue-watcher": "cd /repo\nexec claude --name \"$MESA_NAME\" -- \"work on ${MESA_ID}\" ${MESA_ID-} $MESA_NAME",
-            "agent-spawn": "printf '%s' \"${MESA_PROMPT-}\" $MESA_PROMPT_NIGHTLY_BRIEF \"${MESA_PROMPT_A_B}\"",
+            "workflow-prompt": "printf '%s' \"${MESA_PROMPT-}\" $MESA_PROMPT_NIGHTLY_BRIEF \"${MESA_PROMPT_A_B}\"",
         }})
         .to_string();
         let path = write_config(dir.path(), &before);
@@ -5996,7 +5980,7 @@ mod tests {
             Some("cd /repo\nexec claude --name {name} -- \"work on {id}\" {id} {name}")
         );
         assert_eq!(
-            command_in(&path, AGENT_SPAWN).unwrap().as_deref(),
+            command_in(&path, WORKFLOW_PROMPT).unwrap().as_deref(),
             Some("printf '%s' {prompt} {prompt:nightly-brief} {prompt:a-b}")
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
@@ -8811,7 +8795,7 @@ mod tests {
         for written in ["Nightly-Brief", "nightly-brief", "NIGHTLY-BRIEF"] {
             assert_eq!(
                 resolve(
-                    AGENT_SPAWN,
+                    WORKFLOW_PROMPT,
                     &format!("claude -- {{prompt:{written}}}"),
                     &vars
                 )
@@ -8828,7 +8812,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            resolve(AGENT_SPAWN, "claude -- {prompt:my.brief}", &vars).unwrap(),
+            resolve(WORKFLOW_PROMPT, "claude -- {prompt:my.brief}", &vars).unwrap(),
             "claude -- 'text'"
         );
     }
@@ -8843,7 +8827,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            resolve(AGENT_SPAWN, "claude -- {prompt:blank}", &vars).unwrap(),
+            resolve(WORKFLOW_PROMPT, "claude -- {prompt:blank}", &vars).unwrap(),
             "claude -- ''"
         );
     }

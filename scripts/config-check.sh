@@ -68,13 +68,6 @@ LINE="\$(pwd)"; for a in "\$@"; do LINE="\$LINE|\$a"; done; echo "\$LINE" >> "$A
 echo "started my own way"
 EOF
 
-# Same, but speaks claude's receipt format, so mesa can lift an id out of it.
-cat > "$STUB_DIR/mytool-receipt" <<EOF
-#!/usr/bin/env bash
-LINE="\$(pwd)"; for a in "\$@"; do LINE="\$LINE|\$a"; done; echo "\$LINE" >> "$ARGV_LOG"
-echo "backgrounded · cafe1234 · mine"
-EOF
-
 # The program the BUILT-IN default names. Logs to its own file so "the config
 # took over" is provable as "this file stayed empty".
 cat > "$STUB_DIR/claude" <<EOF
@@ -95,7 +88,7 @@ if [ "\$1" = "-p" ]; then
 fi
 exit 2
 EOF
-chmod +x "$STUB_DIR/mytool" "$STUB_DIR/mytool-receipt" "$STUB_DIR/claude"
+chmod +x "$STUB_DIR/mytool" "$STUB_DIR/claude"
 
 # ---- fixtures ----
 
@@ -154,8 +147,7 @@ write_config <<EOF
 {
   "commands": {
     "queue-watcher": "$STUB_DIR/mytool dispatch 'one arg' --task {id} --label {name}",
-    "inbox-watcher": "$STUB_DIR/mytool triage {id}",
-    "agent-spawn": "$STUB_DIR/mytool-receipt start --prompt {prompt}"
+    "inbox-watcher": "$STUB_DIR/mytool triage {id}"
   }
 }
 EOF
@@ -179,66 +171,9 @@ ok "inbox-watcher runs the configured command in ~/.mesa/workspace with {id} sub
   fail "a configured command must still be a real dispatch (task left unclaimed)"
 ok "a configured dispatch claims the task exactly like the built-in one"
 
-api POST "/api/projects/$A/agents" '{"prompt":"look at the tests"}'
-[ "$CODE" = "201" ] || fail "spawn: expected 201, got $CODE: $STDOUT"
-[ "$(jq -r .id <<<"$STDOUT")" = "cafe1234" ] ||
-  fail "spawn: the id must come from the configured command's receipt: $STDOUT"
-grep -qx "$DIR_A|start|--prompt|look at the tests" "$ARGV_LOG" ||
-  fail "agent-spawn did not run the configured command: $(cat "$ARGV_LOG")"
-ok "POST /api/projects/{id}/agents runs the configured command and returns the id from its receipt"
-
-api POST "/api/projects/$A/agents" '{}'
-[ "$CODE" = "201" ] || fail "spawn without a prompt: expected 201, got $CODE: $STDOUT"
-grep -qx "$DIR_A|start|--prompt|" "$ARGV_LOG" ||
-  fail "an absent {prompt} must be one empty argument: $(cat "$ARGV_LOG")"
-ok "an absent value is the empty string — \`--prompt {prompt}\` becomes \`--prompt ''\`, one empty argument"
-
 [ ! -s "$CLAUDE_LOG" ] ||
   fail "the built-in claude command ran anyway: $(cat "$CLAUDE_LOG")"
-ok "with all three commands configured, the built-in \`claude\` argv is never used"
-
-# ---- a command that prints no receipt: created, with a null id ----
-
-# Read per spawn, not cached at startup: editing the file takes effect on the
-# next dispatch, with no server restart.
-write_config <<EOF
-{"commands": {"agent-spawn": "$STUB_DIR/mytool start-idle"}}
-EOF
-api POST "/api/projects/$A/agents" '{}'
-[ "$CODE" = "201" ] || fail "no-receipt spawn: expected 201, got $CODE: $STDOUT"
-[ "$(jq -r '.id' <<<"$STDOUT")" = "null" ] ||
-  fail "a command with no receipt must yield id: null, got $STDOUT"
-grep -qx "$DIR_A|start-idle" "$ARGV_LOG" || fail "no-receipt command did not run"
-ok "an edited config applies to the next spawn with no restart; a command printing no receipt is 201 with id: null, not an error"
-
-# ---- a broken config is an error, not a silent fallback ----
-
-printf '{ not json' > "$CONFIG"
-api POST "/api/projects/$A/agents" '{}'
-[ "$CODE" = "502" ] || fail "malformed config: expected 502, got $CODE: $STDOUT"
-[ "$(jq -r .error.code <<<"$STDOUT")" = "unavailable" ] ||
-  fail "malformed config: expected code unavailable, got $STDOUT"
-grep -q "malformed mesa config" <<<"$STDOUT" ||
-  fail "malformed config: the message must name the problem: $STDOUT"
-ok "a malformed config fails the spawn as unavailable and says so (never a silent fall back to the default)"
-
-write_config <<EOF
-{"commands": {"agent-spawn": "$STUB_DIR/mytool run {oops}"}}
-EOF
-api POST "/api/projects/$A/agents" '{}'
-[ "$CODE" = "502" ] || fail "bad placeholder: expected 502, got $CODE: $STDOUT"
-grep -q "{oops}" <<<"$STDOUT" ||
-  fail "bad placeholder: the message must name it: $STDOUT"
-ok "an unsupported placeholder is reported by name, before anything is run"
-
-write_config <<EOF
-{"commands": {"agent-spawn": "$STUB_DIR/mytool run {id}"}}
-EOF
-api POST "/api/projects/$A/agents" '{}'
-[ "$CODE" = "502" ] || fail "out-of-scope placeholder: expected 502, got $CODE: $STDOUT"
-grep -q '{id}' <<<"$STDOUT" ||
-  fail "out-of-scope placeholder: expected {id} named: $STDOUT"
-ok "placeholders are scoped per command: {id} is not offered to agent-spawn"
+ok "with both commands configured, the built-in \`claude\` argv is never used"
 
 # ---- the Settings surface: GET/PUT /api/config (mesa task 654) ----
 
@@ -249,8 +184,8 @@ write_config <<EOF
 EOF
 api GET /api/config
 [ "$CODE" = "200" ] || fail "GET /api/config: expected 200, got $CODE: $STDOUT"
-[ "$(jq -r 'map(.action) | join(",")' <<<"$STDOUT")" = "queue-watcher,inbox-watcher,agent-spawn,live-agent,live-summary,live-dream,retro,workflow-prompt,runner,kb" ] ||
-  fail "GET /api/config must list all ten actions in order: $STDOUT"
+[ "$(jq -r 'map(.action) | join(",")' <<<"$STDOUT")" = "queue-watcher,inbox-watcher,live-agent,live-summary,live-dream,retro,workflow-prompt,runner,kb" ] ||
+  fail "GET /api/config must list all nine actions in order: $STDOUT"
 [ "$(jq -r '.[0].value' <<<"$STDOUT")" = "$STUB_DIR/mytool dispatch {id}" ] ||
   fail "GET /api/config: configured value wrong: $STDOUT"
 [ "$(jq -r '.[1].value' <<<"$STDOUT")" = "null" ] ||
@@ -259,29 +194,25 @@ api GET /api/config
   fail "GET /api/config: built-in default wrong: $STDOUT"
 [ "$(jq -r '.[1].placeholders | join(" ")' <<<"$STDOUT")" = "{id} {name} {prompt} {schema} {model}" ] ||
   fail "GET /api/config: inbox-watcher's placeholder vocabulary wrong: $STDOUT"
-[ "$(jq -r '.[2].placeholders | join(" ")' <<<"$STDOUT")" = "{prompt}" ] ||
-  fail "GET /api/config: agent-spawn's placeholder vocabulary wrong: $STDOUT"
+[ "$(jq -r '.[] | select(.action == "workflow-prompt") | .placeholders | join(" ")' <<<"$STDOUT")" = "{model} {thinking} {name} {prompt}" ] ||
+  fail "GET /api/config: workflow-prompt's placeholder vocabulary wrong: $STDOUT"
 ok "GET /api/config reports each command's configured value (null when unset), its built-in default and the placeholders it offers"
 
-api PUT /api/config "{\"commands\": {\"agent-spawn\": \"  $STUB_DIR/mytool from-settings --prompt {prompt}  \"}}"
+api PUT /api/config "{\"commands\": {\"workflow-prompt\": \"  $STUB_DIR/mytool from-settings --prompt {prompt}  \"}}"
 [ "$CODE" = "200" ] || fail "PUT /api/config: expected 200, got $CODE: $STDOUT"
-[ "$(jq -r '.[2].value' <<<"$STDOUT")" = "$STUB_DIR/mytool from-settings --prompt {prompt}" ] ||
+[ "$(jq -r '.[] | select(.action == "workflow-prompt") | .value' <<<"$STDOUT")" = "$STUB_DIR/mytool from-settings --prompt {prompt}" ] ||
   fail "PUT must echo the stored (trimmed) value: $STDOUT"
 [ "$(jq -r '.other.x' < "$CONFIG")" = "1" ] ||
   fail "PUT dropped a section of the file it doesn't own: $(cat "$CONFIG")"
 [ "$(jq -r '.commands["queue-watcher"]' < "$CONFIG")" = "$STUB_DIR/mytool dispatch {id}" ] ||
   fail "PUT clobbered a command it wasn't asked to touch: $(cat "$CONFIG")"
-api POST "/api/projects/$A/agents" '{"prompt":"from the settings page"}'
-[ "$CODE" = "201" ] || fail "post-PUT spawn: expected 201, got $CODE: $STDOUT"
-grep -qx "$DIR_A|from-settings|--prompt|from the settings page" "$ARGV_LOG" ||
-  fail "the spawn did not use the just-saved command: $(cat "$ARGV_LOG")"
-ok "PUT /api/config writes the same file the spawn path reads — the next spawn uses it, with no restart — and leaves untouched keys and unknown sections alone"
+ok "PUT /api/config writes the same file the spawn path reads and leaves untouched keys and unknown sections alone"
 
-api PUT /api/config '{"commands": {"agent-spawn": "   "}}'
+api PUT /api/config '{"commands": {"workflow-prompt": "   "}}'
 [ "$CODE" = "200" ] || fail "PUT blank: expected 200, got $CODE: $STDOUT"
-[ "$(jq -r '.[2].value' <<<"$STDOUT")" = "null" ] ||
+[ "$(jq -r '.[] | select(.action == "workflow-prompt") | .value' <<<"$STDOUT")" = "null" ] ||
   fail "a blank value must clear the key, got $STDOUT"
-[ "$(jq -r '.commands | has("agent-spawn")' < "$CONFIG")" = "false" ] ||
+[ "$(jq -r '.commands | has("workflow-prompt")' < "$CONFIG")" = "false" ] ||
   fail "a blank value must remove the key, not store an empty string: $(cat "$CONFIG")"
 ok "PUT with a blank value clears one command back to its built-in default (the key is removed, never stored empty)"
 
@@ -291,7 +222,7 @@ api PUT /api/config '{"commands": {"queue-watcher": "mytool {prompt}"}}'
 [ "$(jq -r .error.code <<<"$STDOUT")" = "validation" ] ||
   fail "bad placeholder: expected code validation, got $STDOUT"
 grep -q "{prompt}" <<<"$STDOUT" || fail "the message must name the placeholder: $STDOUT"
-api PUT /api/config '{"commands": {"agent-spawn": "mytool \"oops"}}'
+api PUT /api/config '{"commands": {"workflow-prompt": "mytool \"oops"}}'
 [ "$CODE" = "422" ] || fail "unterminated quote: expected 422, got $CODE: $STDOUT"
 grep -q "not valid bash" <<<"$STDOUT" || fail "an unterminated quote is bash -n's to name: $STDOUT"
 api PUT /api/config '{"commands": {"tsak": "mytool"}}'
@@ -340,13 +271,11 @@ SCRIPT_LOG="$TMP/script.log"
 watcher_script() { # watcher_script <action>
   printf 'set -u\nprintf "%%s|%%s|%%s|%%s\\n" "%s" "$(pwd)" {id} "{name}" >> "%s"\necho "backgrounded · 5c81aaaa"' "$1" "$SCRIPT_LOG"
 }
-SPAWN_SCRIPT=$(printf 'set -u\ncd "$(pwd)"\nexport PICKED=yes\nprintf "%%s|%%s|[%%s]\\n" "agent-spawn" "$PICKED" {prompt} >> "%s"\necho "backgrounded · 5c81bbbb"' "$SCRIPT_LOG")
 
 jq -n \
   --arg todo "$(watcher_script queue-watcher)" \
   --arg inbox "$(watcher_script inbox-watcher)" \
-  --arg spawn "$SPAWN_SCRIPT" \
-  '{commands: {"queue-watcher": $todo, "inbox-watcher": $inbox, "agent-spawn": $spawn}}' \
+  '{commands: {"queue-watcher": $todo, "inbox-watcher": $inbox}}' \
   > "$CONFIG"
 
 # A fresh project, so the queue-watcher's one-agent-per-project cap doesn't
@@ -379,47 +308,9 @@ grep -Fqx "inbox-watcher|$WORKSPACE|$ITEM_3|inbox $ITEM_3: script-mode triage" "
   fail "inbox-watcher multi-line hook wrong: $(cat "$SCRIPT_LOG")"
 ok "the inbox-watcher takes a multi-line hook too, in its own cwd"
 
-api POST "/api/projects/$C/agents" '{"prompt":"from a script"}'
-[ "$CODE" = "201" ] || fail "script spawn: expected 201, got $CODE: $STDOUT"
-[ "$(jq -r .id <<<"$STDOUT")" = "5c81bbbb" ] ||
-  fail "a script's \`backgrounded · <id>\` receipt must be parsed as usual: $STDOUT"
-grep -Fqx "agent-spawn|yes|[from a script]" "$SCRIPT_LOG" ||
-  fail "agent-spawn multi-line hook wrong: $(cat "$SCRIPT_LOG")"
-ok "agent-spawn takes a multi-line hook (cd/export work), its receipt is parsed as usual, and a bare {prompt} is one word"
-
-api POST "/api/projects/$C/agents" '{}'
-[ "$CODE" = "201" ] || fail "promptless script spawn: expected 201, got $CODE: $STDOUT"
-grep -Fqx "agent-spawn|yes|[]" "$SCRIPT_LOG" ||
-  fail "an absent prompt must be the EMPTY string, one empty word: $(cat "$SCRIPT_LOG")"
-ok "a value absent on this call is the empty string — one empty argument, under \`set -u\` too"
-
 [ ! -s "$CLAUDE_LOG" ] ||
   fail "the built-in claude command ran during the multi-line hooks: $(cat "$CLAUDE_LOG")"
-ok "with all three commands configured as multi-line hooks, the built-in \`claude\` argv is still never used"
-
-# A script that exits nonzero is a failed spawn, exactly as a one-liner is.
-write_config <<'EOF'
-{"commands": {"agent-spawn": "echo nope >&2\nexit 4"}}
-EOF
-api POST "/api/projects/$C/agents" '{}'
-[ "$CODE" = "502" ] || fail "failing script: expected 502, got $CODE: $STDOUT"
-grep -q "nope" <<<"$STDOUT" || fail "a failing script must surface its stderr: $STDOUT"
-ok "a script's exit code is the whole contract: nonzero is a failed spawn, stderr and all"
-
-# ---- the acceptance case: a value with a space and a quote is ONE argument ----
-
-# A configured multi-line hook hands {prompt} to a program bare and inside
-# "…"; the stub logs `<cwd>|<arg>|…`, so one argument is one field.
-: > "$ARGV_LOG"
-ONE_ARG_SCRIPT=$(printf 'set -u\ncd "$(pwd)"\nexec "%s" start --prompt {prompt} --also "pre {prompt} post"' "$STUB_DIR/mytool")
-api PUT /api/config "$(jq -n --arg s "$ONE_ARG_SCRIPT" '{commands: {"agent-spawn": $s}}')"
-[ "$CODE" = "200" ] || fail "one-argument hook: expected 200, got $CODE: $STDOUT"
-SPACED_QUOTED='it'"'"'s "a b" c'
-api POST "/api/projects/$C/agents" "$(jq -n --arg p "$SPACED_QUOTED" '{prompt: $p}')"
-[ "$CODE" = "201" ] || fail "one-argument spawn: expected 201, got $CODE: $STDOUT"
-grep -Fqx "$DIR_C|start|--prompt|$SPACED_QUOTED|--also|pre $SPACED_QUOTED post" "$ARGV_LOG" ||
-  fail "a value with a space and a quote must reach the stub as ONE argument, byte-identical: $(cat "$ARGV_LOG")"
-ok "a configured multi-line hook's {prompt} holding a space, a single quote and double quotes reaches the stub as one argument byte-identical, bare and inside \"…\""
+ok "with both commands configured as multi-line hooks, the built-in \`claude\` argv is still never used"
 
 # ---- validation is a save-time 422, writing nothing ----
 
@@ -490,57 +381,27 @@ ok "a script with an out-of-scope placeholder, one inside single or \$'…' quot
 # working and Settings shows the migrated text.
 : > "$SCRIPT_LOG"
 OLD_SCRIPT=$(printf 'set -u\nprintf "%%s|%%s|%%s\\n" "migrated" "$MESA_PROMPT" "${MESA_PROMPT-}" >> "%s"\necho "backgrounded · 5c81cccc"' "$SCRIPT_LOG")
-jq -n --arg s "$OLD_SCRIPT" '{commands: {"agent-spawn": $s}}' > "$CONFIG"
+jq -n --arg s "$OLD_SCRIPT" '{commands: {"workflow-prompt": $s}}' > "$CONFIG"
 api GET /api/config
 [ "$CODE" = "200" ] || fail "GET /api/config with \$MESA_*: expected 200, got $CODE: $STDOUT"
-[ "$(jq -r '.[2].value' <<<"$STDOUT")" = "$(printf 'set -u\nprintf "%%s|%%s|%%s\\n" "migrated" {prompt} {prompt} >> "%s"\necho "backgrounded · 5c81cccc"' "$SCRIPT_LOG")" ] ||
-  fail "a saved \$MESA_PROMPT must read back migrated to {prompt}: $(jq -r '.[2].value' <<<"$STDOUT")"
+[ "$(jq -r '.[] | select(.action == "workflow-prompt") | .value' <<<"$STDOUT")" = "$(printf 'set -u\nprintf "%%s|%%s|%%s\\n" "migrated" {prompt} {prompt} >> "%s"\necho "backgrounded · 5c81cccc"' "$SCRIPT_LOG")" ] ||
+  fail "a saved \$MESA_PROMPT must read back migrated to {prompt}: $(jq -r '.[] | select(.action == "workflow-prompt") | .value' <<<"$STDOUT")"
 grep -Fq '$MESA_PROMPT' "$CONFIG" ||
   fail "the migration must never rewrite the user's file: $(cat "$CONFIG")"
-api POST "/api/projects/$C/agents" '{"prompt":"still works"}'
-[ "$CODE" = "201" ] || fail "spawn through a migrated hook: expected 201, got $CODE: $STDOUT"
-grep -Fqx "migrated|still works|still works" "$SCRIPT_LOG" ||
-  fail "a migrated hook must spawn with the value in place: $(cat "$SCRIPT_LOG")"
-ok "a pre-1143 hook reading \$MESA_PROMPT / \"\${MESA_PROMPT-}\" is migrated to {prompt} on read, never rewritten on disk, and still drives the spawn"
-
-# ---- every position a hook author writes delivers a hostile value literally ----
-
-# Bare, inside "…", inside a subshell inside a command substitution (the shape
-# of a review's proof of concept against an earlier draft, which used to
-# mis-type everything after its `)`), and in a heredoc body — the same hostile
-# prompt arrives as one literal string in each, executing nothing.
-PWNED2="$DIR_C/pwned2"
-HOSTILE_P='"; touch pwned2 #`touch pwned2`$(touch pwned2)'"'"'; touch pwned2; '"'"'\'
-SUBST_SCRIPT=$(printf 'set -u\nprintf "%%s\\n" {prompt} >> "%s"\nprintf "%%s\\n" "{prompt}" >> "%s"\nprintf "%%s\\n" "$( (true) ; printf %%s {prompt} )" >> "%s"\ncat >> "%s" <<EOF\n{prompt}\nEOF\necho "backgrounded · 5c81dddd"' "$SCRIPT_LOG" "$SCRIPT_LOG" "$SCRIPT_LOG" "$SCRIPT_LOG")
-api PUT /api/config "$(jq -n --arg s "$SUBST_SCRIPT" '{commands: {"agent-spawn": $s}}')"
-[ "$CODE" = "200" ] || fail "a supported {} in every position must save: expected 200, got $CODE: $STDOUT"
-: > "$SCRIPT_LOG"
-api POST "/api/projects/$C/agents" "$(jq -n --arg p "$HOSTILE_P" '{prompt: $p}')"
-[ "$CODE" = "201" ] || fail "substituting script spawn: expected 201, got $CODE: $STDOUT"
-[ ! -e "$PWNED2" ] ||
-  fail "a substituted value was parsed as shell syntax — the quoting chokepoint leaks"
-[ "$(grep -Fxc "$HOSTILE_P" "$SCRIPT_LOG")" = "4" ] ||
-  fail "a substituted {prompt} must arrive byte-identical bare, in \"…\", inside \$( (…) ) and in a heredoc: $(cat "$SCRIPT_LOG")"
-ok "a prompt of \`\"; touch <file> #\` + backticks + \$() + quotes + a trailing backslash arrives literally bare, in \"…\", inside \$( (…) ) and in a heredoc body, executing nothing"
+ok "a pre-1143 hook reading \$MESA_PROMPT / \"\${MESA_PROMPT-}\" is migrated to {prompt} on read and never rewritten on disk"
 
 # ---- library prompts as placeholders: {prompt:<name>} (mesa task 1138) ----
 
 # Every action offers the library's prompts, and a prompt body is exactly the
 # hostile multi-line free text the quoting has to survive.
-PWNED3="$DIR_C/pwned3"
 PROMPT_BODY='line one "quoted" `touch pwned3` $(touch pwned3) $((1+1)) '"'"'single'"'"'
 line two {prompt} {name} {prompt:other-brief} {nope}'
-# One pass, no recursion: {prompt} is offered to agent-spawn and has a value on
-# this call, so it expands; {name} is not offered to agent-spawn, a nested
-# {prompt:…} never expands, and {nope} is nobody's — all three stay literal
-# rather than erroring, because a library body is data, not a template.
-PROMPT_EXPANDED=${PROMPT_BODY//\{prompt\}/ignored}
 run 0 "$MESA" library create prompt nightly-brief --body "$PROMPT_BODY"
 run 0 "$MESA" library create prompt other-brief --body 'NEVER'
 
 # An unknown name is refused in the editor, where the author can fix it —
 # library names are known at save time.
-api PUT /api/config '{"commands": {"agent-spawn": "mytool -- {prompt:no-such-prompt}"}}'
+api PUT /api/config '{"commands": {"workflow-prompt": "mytool -- {prompt:no-such-prompt}"}}'
 [ "$CODE" = "422" ] || fail "unknown library prompt: expected 422, got $CODE: $STDOUT"
 [ "$(jq -r .error.code <<<"$STDOUT")" = "validation" ] ||
   fail "unknown library prompt: expected code validation, got $STDOUT"
@@ -550,40 +411,11 @@ grep -q "{prompt:nightly-brief}" <<<"$STDOUT" ||
   fail "the message must list the prompts the library does offer: $STDOUT"
 ok "a {prompt:<name>} naming no library prompt is 422 validation at save time, naming it and listing the ones that exist"
 
-# …and the real one saves, in a multi-line hook, and the spawned command gets
-# the body bare and inside "…" alike.
-PROMPT_LOG="$TMP/prompt.log"
-: > "$PROMPT_LOG"
-PROMPT_SCRIPT=$(printf 'set -u
-printf "%%s" {prompt:nightly-brief} >> "%s"
-printf "%%s" "{prompt:nightly-brief}" >> "%s"
-echo "backgrounded · 5c81eeee"' "$PROMPT_LOG" "$PROMPT_LOG")
-api PUT /api/config "$(jq -n --arg s "$PROMPT_SCRIPT" '{commands: {"agent-spawn": $s}}')"
+# …and the real one saves, in a multi-line hook.
+PROMPT_SCRIPT=$(printf 'set -u\nprintf "%%s" {prompt:nightly-brief}\nprintf "%%s" "{prompt:nightly-brief}"\n')
+api PUT /api/config "$(jq -n --arg s "$PROMPT_SCRIPT" '{commands: {"workflow-prompt": $s}}')"
 [ "$CODE" = "200" ] || fail "a {prompt:<name>} script must save: expected 200, got $CODE: $STDOUT"
-api POST "/api/projects/$C/agents" '{"prompt":"ignored"}'
-[ "$CODE" = "201" ] || fail "library-prompt script spawn: expected 201, got $CODE: $STDOUT"
-[ ! -e "$PWNED3" ] ||
-  fail "a library prompt body was parsed as shell syntax — the placeholder leaks"
-printf '%s%s' "$PROMPT_EXPANDED" "$PROMPT_EXPANDED" > "$TMP/prompt.expected"
-cmp -s "$PROMPT_LOG" "$TMP/prompt.expected" ||
-  fail "the library prompt body must arrive byte-identical bare AND inside \"…\": $(cat "$PROMPT_LOG")"
-ok "a multi-line hook naming {prompt:<name>} spawns with the library body byte-identical bare and inside \"…\" — quotes, backticks, \$(), \$((…)) and newlines all inert — with the body's own placeholders expanded exactly one pass"
-
-# A valid script round-trips through the editor and drives the next spawn.
-api PUT /api/config "$(jq -n --arg s "$SPAWN_SCRIPT" '{commands: {"agent-spawn": $s}}')"
-[ "$CODE" = "200" ] || fail "PUT a script: expected 200, got $CODE: $STDOUT"
-[ "$(jq -r '.[2].value' <<<"$STDOUT")" = "$SPAWN_SCRIPT" ] ||
-  fail "PUT must echo the stored script verbatim: $STDOUT"
-[ "$(jq -r '.[2].placeholders | join(" ")' <<<"$STDOUT")" = "{prompt}" ] ||
-  fail "GET/PUT must report agent-spawn's placeholder vocabulary: $STDOUT"
-[ "$(jq -r '.[0] | has("env_vars")' <<<"$STDOUT")" = "false" ] ||
-  fail "there is no env_vars key any more — nothing is set in the environment: $STDOUT"
-: > "$SCRIPT_LOG"
-api POST "/api/projects/$C/agents" '{"prompt":"saved from settings"}'
-[ "$CODE" = "201" ] || fail "post-PUT script spawn: expected 201, got $CODE: $STDOUT"
-grep -Fqx "agent-spawn|yes|[saved from settings]" "$SCRIPT_LOG" ||
-  fail "the just-saved script did not drive the next spawn: $(cat "$SCRIPT_LOG")"
-ok "a script saved over PUT /api/config round-trips verbatim, reports its placeholder vocabulary (no env_vars), and drives the very next spawn"
+ok "a multi-line hook naming {prompt:<name>} saves; the one-pass expansion and the quoting of a hostile body are pinned by the config.rs unit tests"
 
 # ---- the pricing section: GET/PUT /api/config/pricing (mesa task 692) ----
 
@@ -1661,7 +1493,7 @@ api GET /api/config
 [ "$CODE" = "502" ] || fail "malformed config GET: expected 502, got $CODE: $STDOUT"
 [ "$(jq -r .error.code <<<"$STDOUT")" = "unavailable" ] ||
   fail "malformed config GET: expected code unavailable, got $STDOUT"
-api PUT /api/config '{"commands": {"agent-spawn": "mytool"}}'
+api PUT /api/config '{"commands": {"workflow-prompt": "mytool"}}'
 [ "$CODE" = "502" ] || fail "malformed config PUT: expected 502, got $CODE: $STDOUT"
 api GET /api/config/pricing
 [ "$CODE" = "502" ] || fail "malformed config pricing GET: expected 502, got $CODE: $STDOUT"
@@ -1693,20 +1525,12 @@ ok "a malformed config is 502 unavailable on all fourteen config verbs, and a PU
 
 # ---- an unconfigured command falls back to the built-in claude argv ----
 
-# `{}` (no commands at all) and a config file that never mentions this action
-# are the same state as no file: use the default.
+# `{}` (no commands at all) is the same state as no file: use the default.
 write_config <<'EOF'
 {"commands": {}}
 EOF
-api POST "/api/projects/$A/agents" '{"prompt":"/execute-mesa-task 1"}'
-[ "$CODE" = "201" ] || fail "default fallback: expected 201, got $CODE: $STDOUT"
-[ "$(jq -r .id <<<"$STDOUT")" = "deadbeef" ] ||
-  fail "default fallback: expected the claude stub's id, got $STDOUT"
-grep -qx "$DIR_A|--model|opus|--agent|supervisor|--|/execute-mesa-task 1" "$CLAUDE_LOG" ||
-  fail "the built-in default argv changed: $(cat "$CLAUDE_LOG")"
-ok "an action absent from the config uses the built-in \`claude --bg --model opus --agent supervisor -- <prompt>\` argv (MESA_CLAUDE_BIN stands in for a default template's \`claude\` only)"
 
-# The other two actions fall back the same way — proven on a fresh project, so
+# The two watchers fall back to the default — proven on a fresh project, so
 # the queue-watcher's one-agent-per-project cap doesn't hide it.
 mkdir -p "$TMP/projB"
 DIR_B=$(cd "$TMP/projB" && pwd -P)
@@ -1715,14 +1539,14 @@ B=$(jqs .id)
 run 0 "$MESA" project update "$B" --path "$DIR_B"
 run 0 "$MESA" task create "$B" "task b"
 TASK_B=$(jqs .id)
-wait_lines "$CLAUDE_LOG" 2
+wait_lines "$CLAUDE_LOG" 1
 grep -qx "$DIR_B|--agent|supervisor|--name|B: task b|--|/execute-naru-task $TASK_B" "$CLAUDE_LOG" ||
   fail "the built-in queue-watcher argv changed: $(cat "$CLAUDE_LOG")"
 ok "the unconfigured queue-watcher keeps its built-in \`--agent supervisor --name <project>: <name> -- /execute-naru-task <id>\` argv"
 
 run 0 "$MESA" inbox add --task "$TASK_B" --kind change-request "loki: find exits 0 on no match"
 ITEM_2=$(jqs .id)
-wait_lines "$CLAUDE_LOG" 3
+wait_lines "$CLAUDE_LOG" 2
 grep -Fq "$WORKSPACE|-p|--model|haiku|--name|inbox $ITEM_2: loki: find exits 0 on no match|--tools||--strict-mcp-config|--output-format|json|--json-schema|" "$CLAUDE_LOG" ||
   fail "the built-in inbox-watcher argv changed: $(cat "$CLAUDE_LOG")"
 ok "the unconfigured inbox-watcher runs its built-in \`claude -p --model haiku --name inbox <id>: <body> --tools \"\" --strict-mcp-config --output-format json --json-schema <schema> -- <prompt>\` call (naru task 1691)"
@@ -1760,45 +1584,23 @@ ok "a saved legacy --bg inbox-watcher override is ignored: the built-in \`-p --m
 # written: MESA_CLAUDE_BIN stands in for `claude` only in a built-in default,
 # so this one resolves to a real `claude` on PATH — a stub of that name on the
 # front of PATH is what a user who wanted a different binary would write in.
-mkdir -p "$TMP/onpath"
-cat >"$TMP/onpath/claude" <<EOF
-#!/bin/sh
-printf '%s\n' "\$*" >> "$TMP/onpath.log"
-echo "backgrounded · 5c81eeee"
-EOF
-chmod +x "$TMP/onpath/claude"
-: > "$TMP/onpath.log"
 write_config <<'EOF'
-{"commands": {"agent-spawn": "{bin} --bg --agent {agent} -- {prompt}"}}
+{"commands": {"workflow-prompt": "{bin} --bg --agent {agent} -- {prompt}"}}
 EOF
 api GET /api/config
 [ "$CODE" = "200" ] || fail "GET /api/config with a retired placeholder: expected 200, got $CODE: $STDOUT"
-[ "$(jq -r '.[2].value' <<<"$STDOUT")" = "claude --bg --agent supervisor -- {prompt}" ] ||
+[ "$(jq -r '.[] | select(.action == "workflow-prompt") | .value' <<<"$STDOUT")" = "claude --bg --agent supervisor -- {prompt}" ] ||
   fail "a saved {bin}/{agent} must read back migrated to the literal form: $STDOUT"
 grep -Fq '{bin} --bg --agent {agent} -- {prompt}' "$CONFIG" ||
   fail "the migration must never rewrite the user's file: $(cat "$CONFIG")"
-kill "$SERVER_PID"; wait "$SERVER_PID" 2>/dev/null || true; SERVER_PID=""
-HOME="$FAKE_HOME" PATH="$TMP/onpath:$PATH" MESA_CLAUDE_BIN="$STUB_DIR/claude" \
-  "$MESA" serve --port "$PORT" >/dev/null 2>&1 &
-SERVER_PID=$!
-wait_for_server
-: > "$CLAUDE_LOG"
-api POST "/api/projects/$A/agents" '{"prompt":"still spawns"}'
-[ "$CODE" = "201" ] || fail "spawn through a migrated template: expected 201, got $CODE: $STDOUT"
-[ "$(jq -r .id <<<"$STDOUT")" = "5c81eeee" ] ||
-  fail "a configured template must run the \`claude\` it names, not MESA_CLAUDE_BIN: $STDOUT"
-grep -Fqx -- "--bg --agent supervisor -- still spawns" "$TMP/onpath.log" ||
-  fail "the migrated template's argv is wrong: $(cat "$TMP/onpath.log")"
-[ ! -s "$CLAUDE_LOG" ] ||
-  fail "MESA_CLAUDE_BIN must not be substituted into a configured template: $(cat "$CLAUDE_LOG")"
-api PUT /api/config '{"commands": {"agent-spawn": "{bin} --bg -- {prompt}"}}'
+api PUT /api/config '{"commands": {"workflow-prompt": "{bin} --bg -- {prompt}"}}'
 [ "$CODE" = "422" ] || fail "saving {bin} anew: expected 422, got $CODE: $STDOUT"
 [ "$(jq -r .error.code <<<"$STDOUT")" = "validation" ] || fail "saving {bin} anew: expected validation, got $STDOUT"
-api PUT /api/config '{"commands": {"agent-spawn": "claude --bg --agent {agent} -- {prompt}"}}'
+api PUT /api/config '{"commands": {"workflow-prompt": "claude --bg --agent {agent} -- {prompt}"}}'
 [ "$CODE" = "422" ] || fail "saving {agent} anew: expected 422, got $CODE: $STDOUT"
 grep -Fq '{bin} --bg --agent {agent} -- {prompt}' "$CONFIG" ||
   fail "a refused save must leave the file untouched: $(cat "$CONFIG")"
-ok "a pre-1141 template holding {bin}/{agent} is migrated on read (claude/supervisor), never rewritten on disk, runs the \`claude\` it names rather than MESA_CLAUDE_BIN, and neither token can be saved anew"
+ok "a pre-1141 template holding {bin}/{agent} is migrated on read (claude/supervisor), never rewritten on disk, and neither token can be saved anew"
 
 echo
 echo "config-check: $CHECKS checks passed"

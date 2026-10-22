@@ -914,7 +914,6 @@ function App() {
             and an empty slot takes no room. */}
         <div className="live-slot" ref={setLiveSlot} />
         <AgentSidebar
-          activeProjectId={activeProjectId}
           liveSlot={liveSlot}
           collapsed={agentsCollapsed}
           onCollapsedChange={setAgentsCollapsed}
@@ -933,7 +932,6 @@ function App() {
           createPortal(
             <AgentSidebar
               docked
-              activeProjectId={activeProjectId}
               collapsed={!agentsVisible}
               onCollapsedChange={(collapsed) => (collapsed ? hide('agents') : reveal('agents'))}
             />,

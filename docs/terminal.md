@@ -26,7 +26,7 @@ navigating to another page and back never disturbs an open pane.
   directory, so Naru owns one folder instead. The path is never
   client-supplied: the id is resolved
   through the store to that project's `local_path`, and rejected exactly as
-  `spawn_project_agent` rejects its own spawn folder — unknown id is
+  the agents list route resolves its folder — unknown id is
   `not_found`, unset or non-directory `local_path` is `validation` (422).
   Both fail the handshake *before* the upgrade, so a bad scope never spawns a
   shell somewhere the caller didn't ask for. This adds no new reachability:

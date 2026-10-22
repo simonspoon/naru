@@ -111,7 +111,7 @@ describe('liveAgentCount', () => {
     ).toBe(2)
   })
 
-  it('ignores an unnamed session (add-agent spawns carry no --name)', () => {
+  it('ignores an unnamed session', () => {
     expect(liveAgentCount(task, 'mesa', [session({ name: null })])).toBe(0)
   })
 

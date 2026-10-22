@@ -189,28 +189,9 @@ api 200 GET "/api/projects/$D/agents"
 [ "$(jqb '.agents | length')" = "0" ] || fail "GET agents (no path): empty list"
 ok "GET agents on a path-less project: {path: null, agents: []}"
 
-api 201 POST "/api/projects/$P/agents" '{}'
-[ "$(jqb .id)" = "deadbeef" ] || fail "POST agents: parsed job id"
-api 201 POST "/api/projects/$P/agents" '{"prompt":"do the thing"}'
-[ "$(jqb .id)" = "deadbeef" ] || fail "POST agents with prompt: parsed job id"
-ok "POST /api/projects/{id}/agents starts a --bg session (with/without prompt)"
-
-# Every session mesa starts runs under an agent persona (`supervisor` on opus,
-# literal in the default template since mesa task 1188) — the flag must sit between
-# `--bg` and the `--` separator or a prompt-leading `-` swallows it.
-ARGV=$(cat "$STUB_DIR/last-bg-argv")
-case "$ARGV" in
-  "--bg --model opus --agent supervisor -- do the thing") ;;
-  *) fail "spawn argv: expected '--bg --model opus --agent supervisor -- do the thing', got '$ARGV'" ;;
-esac
-ok "spawns pass --agent before the prompt separator"
-[ -f "$TMP/home/.claude/agents/supervisor.md" ] ||
-  fail "the spawn route must seed the supervisor agent definition under HOME"
-ok "the spawn route seeds the supervisor agent definition before spawning"
-
-api 422 POST "/api/projects/$D/agents" '{}'
-[ "$(jqb .error.code)" = "validation" ] || fail "POST agents (no path): validation"
-ok "POST agents on a path-less project: 422 validation"
+# The spawn route is gone (naru task 2253): the list route is GET-only.
+api 405 POST "/api/projects/$P/agents" '{}'
+ok "POST /api/projects/{id}/agents is gone (405) — the list route is read-only"
 
 api 404 GET "/api/projects/99999/agents"
 [ "$(jqb .error.code)" = "not_found" ] || fail "GET agents unknown project: not_found"
@@ -229,7 +210,7 @@ api 200 GET "/api/agents"
   fail "GET /api/agents: every session must carry the pulse pair, null here"
 ok "GET /api/agents lists sessions across every folder (bare array, no --cwd), each enriched with the liveness counts"
 
-# Cross-site defense: list/spawn reject a foreign browser Origin (like the
+# Cross-site defense: list rejects a foreign browser Origin (like the
 # attach socket), while an Origin-less client (curl default) passes.
 origin_status() { # origin_status <method> <path> <origin> [body]
   local method=$1 path=$2 origin=$3 body=${4:-}
@@ -239,13 +220,11 @@ origin_status() { # origin_status <method> <path> <origin> [body]
 }
 [ "$(origin_status GET "/api/projects/$P/agents" 'https://evil.example')" = "403" ] ||
   fail "GET agents foreign Origin: must be 403"
-[ "$(origin_status POST "/api/projects/$P/agents" 'https://evil.example' '{}')" = "403" ] ||
-  fail "POST agents foreign Origin: must be 403"
 [ "$(origin_status GET "/api/projects/$P/agents" 'http://localhost:7770')" = "200" ] ||
   fail "GET agents local Origin: must pass"
 [ "$(origin_status GET "/api/agents" 'https://evil.example')" = "403" ] ||
   fail "GET /api/agents foreign Origin: must be 403"
-ok "list/spawn/global-list reject foreign Origin (cross-site defense), allow local"
+ok "list/global-list reject foreign Origin (cross-site defense), allow local"
 
 # ---- API: POST /api/agents/{id}/stop — the other end of the spawn ----
 # mesa never infers past a session's `state` (docs/agents.md); stopping one is
@@ -282,10 +261,8 @@ F=$(jqb .id)
 [ "$(jqb .local_path)" = "$FRESH" ] || fail "API create: local_path stored"
 api 502 GET "/api/projects/$F/agents"
 [ "$(jqb .error.code)" = "unavailable" ] || fail "claude down: unavailable"
-api 502 POST "/api/projects/$F/agents" '{}'
-[ "$(jqb .error.code)" = "unavailable" ] || fail "claude down on spawn: unavailable"
 rm "$STUB_DIR/fail"
-ok "claude CLI failure surfaces as 502 unavailable (list + spawn)"
+ok "claude CLI failure surfaces as 502 unavailable (list)"
 
 api 200 PATCH "/api/projects/$F" '{"local_path":null}'
 [ "$(jqb .local_path)" = "null" ] || fail "API PATCH: local_path cleared"

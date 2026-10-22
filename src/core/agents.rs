@@ -862,8 +862,8 @@ fn probe_close_blockers(session_id: &str, task_id: i64) -> Option<CloseBlockers>
     Some(blockers)
 }
 
-/// Resolves the script to run for one spawn `action` (`config::TODO_WATCHER`,
-/// `INBOX_WATCHER` or `AGENT_SPAWN`): the user's `~/.mesa/config.json` hook
+/// Resolves the script to run for one spawn `action` (`config::TODO_WATCHER`
+/// or `INBOX_WATCHER`): the user's `~/.mesa/config.json` hook
 /// if it configures that action, else the built-in default. Both go through
 /// the same resolver, so a missing config file yields exactly the command
 /// line mesa hardcoded before the file existed.
@@ -2202,7 +2202,7 @@ JSON"#,
             dir.path(),
             r#"[ "$1" = "--bg" ] || exit 1; echo "backgrounded · deadbeef (idle — send a prompt to start)""#,
         );
-        let script = default_script(config::AGENT_SPAWN, &bin, None, None, None);
+        let script = default_script(config::TODO_WATCHER, &bin, Some(1), Some("n"), None);
         let id = run_script(&script, dir.path().to_str().unwrap()).unwrap();
         assert_eq!(id.as_deref(), Some("deadbeef"));
     }
@@ -2337,24 +2337,6 @@ echo "backgrounded · 5we00000 · n""#,
     }
 
     #[test]
-    fn spawn_bg_passes_dash_prompt_after_separator() {
-        // A prompt beginning with `-` must reach claude as a positional, not a
-        // flag: the stub asserts `--bg --model opus --agent supervisor --
-        // <prompt>` and echoes the prompt back.
-        let dir = tempfile::tempdir().unwrap();
-        let bin = stub_claude(
-            dir.path(),
-            r#"[ "$1" = "--bg" ] && [ "$2" = "--model" ] && [ "$3" = "opus" ] &&
-              [ "$4" = "--agent" ] && [ "$5" = "supervisor" ] && [ "$6" = "--" ] &&
-              [ "$7" = "--resume" ] && [ "$#" = 7 ] || { echo "bad argv: $*" >&2; exit 1; }
-echo "backgrounded · abc00000""#,
-        );
-        let script = default_script(config::AGENT_SPAWN, &bin, None, None, Some("--resume"));
-        let id = run_script(&script, dir.path().to_str().unwrap()).unwrap();
-        assert_eq!(id.as_deref(), Some("abc00000"));
-    }
-
-    #[test]
     fn spawn_bg_passes_name_flag_before_prompt_separator() {
         // The queue-watcher default names its agent literally (mesa task
         // 1075), so `--agent supervisor` is there; what this pins is `--name`
@@ -2483,7 +2465,7 @@ echo "backgrounded · cf0c3945 · proj: do the thing""#,
 
     #[test]
     fn spawn_bg_runs_a_configured_script() {
-        // End to end through the config file: a multi-line agent-spawn value
+        // End to end through the config file: a multi-line queue-watcher value
         // is run under bash, and its receipt parsed exactly as a one-line
         // command's would be.
         let _guard = crate::core::attachments::ENV_LOCK
@@ -2496,8 +2478,8 @@ echo "backgrounded · cf0c3945 · proj: do the thing""#,
             &config_file,
             serde_json::json!({
                 "commands": {
-                    "agent-spawn": format!(
-                        "cd \"$(pwd)\"\nexport PICKED=yes\nprintf '%s|%s\\n' \"$PICKED\" \"{{prompt}}\" > {}\necho 'backgrounded · 5c819701'",
+                    "queue-watcher": format!(
+                        "cd \"$(pwd)\"\nexport PICKED=yes\nprintf '%s|%s\\n' \"$PICKED\" \"{{name}}\" > {}\necho 'backgrounded · 5c819701'",
                         log.display()
                     ),
                 }
@@ -2507,11 +2489,11 @@ echo "backgrounded · cf0c3945 · proj: do the thing""#,
         .unwrap();
         unsafe { std::env::set_var("MESA_CONFIG_FILE", &config_file) };
         let spawned = spawn_bg(
-            config::AGENT_SPAWN,
+            config::TODO_WATCHER,
             dir.path().to_str().unwrap(),
-            None,
-            None,
+            Some(1),
             Some("look at the tests"),
+            None,
             &config::Prompts::default(),
         );
         unsafe { std::env::remove_var("MESA_CONFIG_FILE") };
