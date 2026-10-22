@@ -1308,12 +1308,25 @@ run 0 "$MESA" live listen --wait 1
 [ "$STDOUT" = "null" ] || fail "live listen: a delivered utterance must never be handed out twice"
 ok "live listen: never the same utterance twice (delivery is the stamp)"
 
-# …and going back to the wait with nothing to hand out is the agent genuinely
-# waiting on the person, which is the one thing that ends the span.
+# …and going back to the wait with nothing to hand out ends the span only for a
+# legacy agent. This session was started over the API, so its agent is a
+# `run:<job>` one, which is pushed its turns (naru task 2165): the empty poll
+# says nothing about whether it is working and leaves the span open, and
+# `close_live_working` ends it once the run is idle and the span is 2 s old
+# (live-push-check.sh pins the push side, a store test the plain-agent clear).
+api 200 GET "/api/live"
+case "$(jqb .session.agent_id)" in
+  run:*) ;;
+  *) fail "section 6 expects the API-started session to carry a run:<job> agent" ;;
+esac
+[ "$(jqb .session.working_since)" != "null" ] ||
+  fail "live listen with nothing to hand out must not end a run: agent's working span"
+sleep 3
+run 0 "$MESA" live listen --wait 1
 api 200 GET "/api/live"
 [ "$(jqb .session.working_since)" = "null" ] ||
-  fail "live listen with nothing to hand out must clear the working span"
-ok "live listen: waiting with nothing to do clears the working span"
+  fail "live listen with nothing to hand out must end an idle run: agent's working span"
+ok "live listen: an empty poll leaves a run: agent's span open until the run is idle, then clears it"
 
 run 0 "$MESA" live listen --wait 1
 [ "$STDOUT" = "null" ] || fail "live listen with nothing said: expected null"
