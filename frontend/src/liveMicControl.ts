@@ -87,7 +87,7 @@ export function mutedFromMode(mode: string): boolean {
  * on a mode of `ambient`, `false` leaves it only when the mode moves *off*
  * `ambient`, `null` is no change. Edge-only, so a `state` the shared `seq`
  * raises for another reason (`agent_speaking`) never overrides an ambient the
- * page entered by its own press or a legacy host's push.
+ * page entered by its own press.
  */
 export function ambientEdge(prevMode: string | null, mode: string): boolean | null {
   if (mode === 'ambient') return true
@@ -95,16 +95,9 @@ export function ambientEdge(prevMode: string | null, mode: string): boolean | nu
 }
 
 /** Whether a naru-audio `level` is the person talking — its voice gate open
- *  and loud enough to count, the `hostVoiced` rule over a host's reading. */
+ *  and loud enough to reach the page's own capture onset. */
 export function levelVoiced(rms: number, gate: boolean, onsetRms: number): boolean {
   return gate && rms >= onsetRms
-}
-
-/** Whether the page takes the control-client path: a plain browser (no host),
- *  or a host that said it is a thin client (`setHostInfo`). An older host
- *  keeps the `{type:mic}` / `setMicState` bridge. */
-export function takesThinPath(hostPresent: boolean, hostThin: boolean): boolean {
-  return !hostPresent || hostThin
 }
 
 /** Reconnect backoff: 500 ms doubling, capped at 5 s. */
@@ -116,24 +109,23 @@ export function reconnectDelay(attempt: number): number {
  * The mic switch (naru task 2201). Only the client holding the speaker claim
  * captures (naru task 2095), so with the claim on another client the switch
  * is `elsewhere`: off, and a press takes the claim back. A native host that
- * hands the mic to naru-audio (`hostOwnsMic`: a host present and thin) holds
+ * hands the mic to naru-audio (`hostOwnsMic`: any host present) holds
  * the claim under its own client id, not the page's — there the claim is the
  * page's own and the switch follows naru-audio's mute alone. A plain browser
- * is on the thin path too but captures itself, so it keeps the claim rule.
+ * captures itself, so it keeps the claim rule.
  */
 export function micSwitch(o: {
   unlocked: boolean
   speaker: string | null
   client: string
   hostOwnsMic: boolean
-  thin: boolean
   micReady: boolean
   muted: boolean
 }): { capturing: boolean; elsewhere: boolean; waiting: boolean; on: boolean; offLabel: string } {
   const capturing = o.unlocked && (o.hostOwnsMic || maySpeak(o.speaker, o.client))
   const elsewhere = o.unlocked && !capturing
-  // The switch waits for naru-audio's first `state` on the thin path.
-  const waiting = o.thin && !o.micReady
+  // The switch waits for naru-audio's first `state`.
+  const waiting = !o.micReady
   const on = !waiting && !o.muted && !elsewhere
   const offLabel = waiting
     ? 'Connecting to naru-audio…'

@@ -2,18 +2,15 @@
  * The native-host bridge (mesa task 1628, `docs/live.md` "Native host bridge").
  *
  * A native app that embeds the page in a WKWebView (naru-mac) can own the live
- * microphone itself. It announces itself by registering one script message
- * handler, `naruLive`; the page then opens no `getUserMedia` of its own and
- * mirrors the mic state the host reports. A plain browser has no such handler,
- * so `detectNativeHost` answers `null` and nothing here is ever installed.
+ * microphone through naru-audio. It announces itself by registering one script
+ * message handler, `naruLive`; the page then opens no `getUserMedia` of its
+ * own and takes the mute, level and ambient mode from naru-audio's control
+ * socket like any other page (naru tasks 2179, 2210, 2181). A plain browser
+ * has no such handler, so `detectNativeHost` answers `null` and nothing here
+ * is ever installed.
  *
  * Page to host: `window.webkit.messageHandlers.naruLive.postMessage(msg)`.
- * Host to page: `window.naruNativeHost.setMicState({ muted?, level?, hearing?, ambient? })`.
- * A host that is a thin client of naru-audio's mic state (naru task 2179) also
- * calls `window.naruNativeHost.setHostInfo({ micOwner: 'naru-audio' })`; the
- * page then takes the mute from naru-audio and ignores `setMicState.muted`.
- * `level` (RMS 0..1) and `hearing` (host's own speech verdict) carry the voice
- * the page would otherwise meter itself, so the orb and glow follow it too.
+ * Host to page: only the gesture-setup callbacks on `window.naruNativeHost`.
  */
 
 import { SPEAKER_REFRESH_MS } from './liveSpeaker'
@@ -23,7 +20,7 @@ export const NATIVE_HANDLER = 'naruLive'
 
 /** What the page posts to the host. */
 export type NativeOut =
-  /** The page subscribed: the host should answer with `setMicState`. */
+  /** The page installed `window.naruNativeHost`. */
   | { type: 'ready' }
   /** The conversation the host captures for. `joined` = this browser took part. */
   | {
@@ -38,10 +35,8 @@ export type NativeOut =
        *  reads false again. */
       speechMuted: boolean
     }
-  /** The person pressed the listen switch (button or chord). */
-  | { type: 'mic'; muted: boolean }
   /** The person asked to switch the host between ambient (live session open,
-   *  page paused) and live. The host's `setMicState.ambient` answers. */
+   *  page paused) and live. naru-audio's `state` mode answers. */
   | { type: 'ambient'; on: boolean }
   /** A speaker-enrollment recording was saved (naru task 1744): the host builds the enrollment from it. */
   | { type: 'enroll' }
@@ -51,15 +46,6 @@ export type NativeOut =
   | { type: 'permissions'; id: number; op: string; pane?: string }
   /** Start or stop the wizard's calibration stream, which holds the camera. */
   | { type: 'calibration'; op: 'start' | 'stop' }
-
-/** What the host hands the page. Absent keys leave the page's state alone. */
-export type NativeMicState = {
-  muted?: boolean
-  level?: number
-  hearing?: boolean
-  /** The host's verdict on ambient vs live; authoritative. */
-  ambient?: boolean
-}
 
 /** The `state` message the page posts whenever the conversation or Pause changes. */
 export function stateMessage(s: {
@@ -140,12 +126,6 @@ export function ambientRequestStep(input: {
   return null
 }
 
-/** Whether a host push means the person is audibly talking: the host says so,
- *  or its level reaches the page's own capture onset. */
-export function hostVoiced(state: NativeMicState, onsetRms: number): boolean {
-  return state.hearing === true || (state.level !== undefined && state.level >= onsetRms)
-}
-
 export type NativeHost = { post: (msg: NativeOut) => void }
 
 type Bridge = Record<string, unknown>
@@ -161,43 +141,10 @@ export function detectNativeHost(win: Bridge): NativeHost | null {
   return { post: (msg) => handler.postMessage!(msg) }
 }
 
-/** What a host says about itself through `setHostInfo` (naru task 2179). */
-export type NativeHostInfo = { micOwner: 'naru-audio' }
-
-/** Installs `window.naruNativeHost`, delivering each valid state to
- *  `onState` (and a valid `setHostInfo` to `onHostInfo`), and tells the host
- *  the page is ready. Returns the uninstall. */
-export function installNativeHost(
-  win: Bridge,
-  host: NativeHost,
-  onState: (state: NativeMicState) => void,
-  onHostInfo?: (info: NativeHostInfo) => void,
-): () => void {
-  const api = {
-    ...setupHostCallbacks,
-    setHostInfo(info: unknown) {
-      if (typeof info !== 'object' || info === null) return
-      if ((info as { micOwner?: unknown }).micOwner !== 'naru-audio') return
-      onHostInfo?.({ micOwner: 'naru-audio' })
-    },
-    setMicState(state: unknown) {
-      if (typeof state !== 'object' || state === null) return
-      const { muted, level, hearing, ambient } = state as {
-        ambient?: unknown
-        muted?: unknown
-        level?: unknown
-        hearing?: unknown
-      }
-      const out: NativeMicState = {}
-      if (typeof muted === 'boolean') out.muted = muted
-      if (typeof level === 'number' && Number.isFinite(level)) {
-        out.level = Math.min(1, Math.max(0, level))
-      }
-      if (typeof hearing === 'boolean') out.hearing = hearing
-      if (typeof ambient === 'boolean') out.ambient = ambient
-      if (Object.keys(out).length > 0) onState(out)
-    },
-  }
+/** Installs `window.naruNativeHost` (the gesture-setup callbacks) and tells
+ *  the host the page is ready. Returns the uninstall. */
+export function installNativeHost(win: Bridge, host: NativeHost): () => void {
+  const api = { ...setupHostCallbacks }
   win.naruNativeHost = api
   host.post({ type: 'ready' })
   return () => {

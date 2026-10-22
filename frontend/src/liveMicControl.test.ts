@@ -13,7 +13,6 @@ import {
   readMicFor,
   reconnectDelay,
   seedMode,
-  takesThinPath,
   utteranceClient,
 } from './liveMicControl'
 
@@ -87,12 +86,6 @@ describe('liveMicControl', () => {
     expect(mutedFromMode('ambient')).toBe(true)
   })
 
-  it('takes the thin path with no host or a thin host only', () => {
-    expect(takesThinPath(false, false)).toBe(true)
-    expect(takesThinPath(true, true)).toBe(true)
-    expect(takesThinPath(true, false)).toBe(false)
-  })
-
   it('backs off reconnects up to 5s', () => {
     expect(reconnectDelay(0)).toBe(500)
     expect(reconnectDelay(1)).toBe(1000)
@@ -106,13 +99,12 @@ describe('micSwitch (naru task 2201)', () => {
     speaker: 'mac-123' as string | null,
     client: 'page-1',
     hostOwnsMic: true,
-    thin: true,
     micReady: true,
     muted: false,
   }
   const INSTEAD = 'Listen on this browser instead'
 
-  it('hosted thin: the host-held claim counts as this page’s, the switch follows naru-audio', () => {
+  it('hosted: the host-held claim counts as this page’s, the switch follows naru-audio', () => {
     const live = micSwitch(base)
     expect(live.elsewhere).toBe(false)
     expect(live.capturing).toBe(true)
@@ -124,21 +116,16 @@ describe('micSwitch (naru task 2201)', () => {
     expect(live.offLabel).not.toBe(INSTEAD)
   })
 
-  it('plain-browser thin keeps the claim guard (naru task 2095)', () => {
+  it('a plain browser keeps the claim guard (naru task 2095)', () => {
     const s = micSwitch({ ...base, hostOwnsMic: false })
     expect(s.elsewhere).toBe(true)
     expect(s.on).toBe(false)
     expect(s.offLabel).toBe(INSTEAD)
   })
 
-  it('an older (non-thin) host keeps the elsewhere behaviour', () => {
-    const older = { ...base, hostOwnsMic: false, thin: false, micReady: false }
-    const away = micSwitch(older)
-    expect(away.elsewhere).toBe(true)
-    expect(away.on).toBe(false)
-    expect(away.offLabel).toBe(INSTEAD)
+  it('a plain browser holding the claim, or an unclaimed one, is not elsewhere', () => {
     for (const speaker of ['page-1', null]) {
-      const here = micSwitch({ ...older, speaker })
+      const here = micSwitch({ ...base, hostOwnsMic: false, speaker })
       expect(here.elsewhere).toBe(false)
       expect(here.on).toBe(true)
     }
@@ -150,7 +137,7 @@ describe('micSwitch (naru task 2201)', () => {
     expect(s.capturing).toBe(false)
   })
 
-  it('waits for naru-audio’s first state on the thin path', () => {
+  it('waits for naru-audio’s first state', () => {
     const s = micSwitch({ ...base, micReady: false })
     expect(s.waiting).toBe(true)
     expect(s.on).toBe(false)
@@ -163,10 +150,6 @@ describe('utteranceClient (naru task 2203)', () => {
     expect(utteranceClient('page-1', true)).toBeUndefined()
   })
   it('keeps the claim guard in a plain tab', () => {
-    expect(utteranceClient('page-1', false)).toBe('page-1')
-  })
-  it('keeps the claim guard under an older, non-thin host', () => {
-    // A host present but not thin is `hostOwnsMic: false`.
     expect(utteranceClient('page-1', false)).toBe('page-1')
   })
 
