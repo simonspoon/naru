@@ -749,9 +749,10 @@ struct SelfDeployArgs {
     /// Skip the build and check stage (tests of the deploy itself only)
     #[arg(long)]
     skip_checks: bool,
-    /// Seconds to wait for in-flight workflow runs before aborting
-    #[arg(long, default_value_t = 1800)]
-    drain_timeout: u64,
+    /// Seconds to wait for in-flight workflow runs before aborting (omitted: the
+    /// script's own default applies, NARU_DEPLOY_DRAIN_TIMEOUT, else 600)
+    #[arg(long)]
+    drain_timeout: Option<u64>,
 }
 
 #[derive(Subcommand)]
@@ -6083,8 +6084,9 @@ fn run_self_deploy(args: SelfDeployArgs) -> Result<()> {
             if args.skip_checks {
                 cmd.arg("--skip-checks");
             }
-            cmd.arg("--drain-timeout")
-                .arg(args.drain_timeout.to_string());
+            if let Some(n) = args.drain_timeout {
+                cmd.env("NARU_DEPLOY_DRAIN_TIMEOUT", n.to_string());
+            }
             let status = cmd
                 .status()
                 .map_err(|e| Error::Validation(format!("cannot run {}: {e}", script.display())))?;
