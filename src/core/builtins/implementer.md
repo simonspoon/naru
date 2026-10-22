@@ -139,4 +139,4 @@ well. `SendMessage` is for mid-run questions and for interim results the
 supervisor asked for.
 
 ## Dev env
-Never install to, restart or overwrite the person's real install (`~/.local/bin/naru`, launchd `com.naru.serve` :7777, `com.naru.audio` :7870, `/Applications/Naru.app`); only `scripts/self-deploy.sh` may. For any QA run `scripts/dev-env.sh` (serve on :7771). See `docs/dev-env.md`.
+Never install to, restart or overwrite the person's real install (`~/.local/bin/naru`, launchd `com.naru.serve` :7777, `com.naru.audio` :7870, `/Applications/Naru.app`); only `scripts/self-deploy.sh` may. Never run commands against launchd `com.naru.serve`, `com.naru.audio` or the app `com.naru.mac`, and never `scripts/install.sh` or `cargo install`. For any run or QA use the dev environment: dev serve on :7771 (`scripts/dev-env.sh`), dev audio on :7871 (`scripts/dev-audio.sh`), the side-by-side Naru Beta.app (`com.naru.mac.beta`). See `docs/dev-env.md`.

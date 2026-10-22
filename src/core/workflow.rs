@@ -2401,6 +2401,7 @@ const LOOP_IMPLEMENT: &str = r##"N=@N@
     cat "$SCRATCH/impl-1-partial.md"
   fi
   printf '\n## What to do\n\nImplement the work in the working tree and run the fast checks. Do not commit. End with a one-paragraph summary.\n'
+  printf '\n## Dev environment (read this)\n\nNever touch the real Naru install: no commands against launchd com.naru.serve (:7777), com.naru.audio (:7870) or the app com.naru.mac (/Applications/Naru.app), and no scripts/install.sh or cargo install. For any run or QA use the dev environment: dev serve on :7771 (scripts/dev-env.sh), dev audio on :7871 (scripts/dev-audio.sh), the side-by-side Naru Beta.app (com.naru.mac.beta). See docs/dev-env.md.\n'
   no_commit_rule
   split_rule
 } > "$SCRATCH/impl-$N-brief.md"
