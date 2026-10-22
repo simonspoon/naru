@@ -104,6 +104,9 @@ struct AppState {
     /// library, not `cc_*`) and the task-event stamp (the task-outcome
     /// columns) it was built with; same stamp-gated staleness as
     /// `cc_cache`.
+    /// Serializes API-driven `cc::sync_shared` runs (a second caller waits, so
+    /// its response still reflects a finished ingest without a second walk).
+    cc_sync: Arc<Mutex<()>>,
     cc_scorecard_cache: Arc<Mutex<HashMap<ScorecardKey, ((i64, i64, String), CcScorecard)>>>,
     /// Live subscription-usage cache: `(fetched_unix, data)`. The UI polls this,
     /// but each fetch hits Anthropic's usage endpoint, so a short TTL throttles
@@ -2996,6 +2999,7 @@ pub fn serve(flags: ServeFlags) -> crate::core::Result<()> {
         serve_flags: flags.clone(),
         cc_cache: Arc::new(Mutex::new(HashMap::new())),
         project_cc_cache: Arc::new(Mutex::new(HashMap::new())),
+        cc_sync: Arc::new(Mutex::new(())),
         cc_scorecard_cache: Arc::new(Mutex::new(HashMap::new())),
         usage_cache: Arc::new(Mutex::new(None)),
         usage_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -13163,6 +13167,19 @@ struct CcScorecardQuery {
     until: Option<String>,
 }
 
+/// Ingests new transcript lines off the async workers without holding the
+/// store lock across the ingest (`cc::sync_shared` locks it per file).
+async fn cc_sync_api(state: &AppState) -> ApiResult<()> {
+    let store = state.store.clone();
+    let gate = state.cc_sync.clone();
+    blocking(move || {
+        let _one_at_a_time = gate.lock().unwrap();
+        crate::core::cc::sync_shared(&store, false).map(|_| ())
+    })
+    .await??;
+    Ok(())
+}
+
 /// `(since, until)` as the caller sent them — the scorecard cache key.
 type ScorecardKey = (Option<String>, Option<String>);
 
@@ -13173,8 +13190,8 @@ async fn get_cc_scorecard(
     Query(q): Query<CcScorecardQuery>,
 ) -> ApiResult<Response> {
     let stamp = {
-        let mut store = state.store.lock().unwrap();
-        crate::core::cc::sync(&mut store, false)?;
+        cc_sync_api(&state).await?;
+        let store = state.store.lock().unwrap();
         (
             store.cc_stamp()?,
             store.library_versions_stamp()?,
@@ -13227,8 +13244,8 @@ async fn get_cc_dashboard(
     let window = q.window.unwrap_or_else(|| "30d".to_string());
     let since = usage_window_since(&state, &window).await?;
     let stamp = {
-        let mut store = state.store.lock().unwrap();
-        crate::core::cc::sync(&mut store, false)?;
+        cc_sync_api(&state).await?;
+        let store = state.store.lock().unwrap();
         store.cc_stamp()?
     };
     let key = cache_key(&window, since);
@@ -13315,8 +13332,8 @@ async fn get_cc_session_graph(
         .unwrap_or(crate::core::cc::GRAPH_NODE_LIMIT)
         .min(5_000);
     let graph = {
-        let mut store = state.store.lock().unwrap();
-        crate::core::cc::sync(&mut store, false)?;
+        cc_sync_api(&state).await?;
+        let store = state.store.lock().unwrap();
         crate::core::cc::session_graph(&store, &session_id, limit)?
     };
     match graph {
@@ -13344,8 +13361,8 @@ async fn get_cc_node_text(
     Path((session_id, node_id)): Path<(String, String)>,
 ) -> ApiResult<Response> {
     let text = {
-        let mut store = state.store.lock().unwrap();
-        crate::core::cc::sync(&mut store, false)?;
+        cc_sync_api(&state).await?;
+        let store = state.store.lock().unwrap();
         crate::core::cc::node_text(&store, &session_id, &node_id)?
     };
     Ok(Json(text).into_response())
@@ -13441,8 +13458,8 @@ async fn get_cc_session_detail(
     Path(session_id): Path<String>,
 ) -> ApiResult<Response> {
     let detail = {
-        let mut store = state.store.lock().unwrap();
-        crate::core::cc::sync(&mut store, false)?;
+        cc_sync_api(&state).await?;
+        let store = state.store.lock().unwrap();
         crate::core::cc::session_detail(&store, &session_id)?
     };
     match detail {
@@ -13478,8 +13495,8 @@ async fn get_project_cc_dashboard(
     };
     let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
     let stamp = {
-        let mut store = state.store.lock().unwrap();
-        crate::core::cc::sync(&mut store, false)?;
+        cc_sync_api(&state).await?;
+        let store = state.store.lock().unwrap();
         store.cc_stamp()?
     };
     let key = (id, cache_key(&window, since));
@@ -13854,6 +13871,7 @@ mod tests {
             serve_flags: Arc::new(ServeFlags::default()),
             cc_cache: Arc::new(Mutex::new(HashMap::new())),
             project_cc_cache: Arc::new(Mutex::new(HashMap::new())),
+            cc_sync: Arc::new(Mutex::new(())),
             cc_scorecard_cache: Arc::new(Mutex::new(HashMap::new())),
             usage_cache: Arc::new(Mutex::new(None)),
             usage_lock: Arc::new(tokio::sync::Mutex::new(())),

@@ -2008,15 +2008,50 @@ pub struct CcSyncReport {
 /// to *change* an already-ingested row's values still needs that row deleted
 /// by hand first.
 pub fn sync(store: &mut Store, rebuild: bool) -> Result<CcSyncReport> {
-    let mut report = CcSyncReport::default();
-    if rebuild {
-        store.cc_clear_cursors()?;
+    sync_via(store, rebuild)
+}
+
+/// [`sync`] for a store shared behind a mutex (the API's `AppState.store`):
+/// the lock is taken only around each db step — the cursor snapshot, the
+/// ledger fold, and one file's `cc_ingest_file` — and released between them,
+/// so the directory walk, the `stat`s, the file reads and the parsing (the
+/// slow, db-free part) never hold it. The worst single hold is therefore one
+/// file's ingest transaction. Same rows as [`sync`]: every row upserts on a
+/// stable key, so concurrent writers can only cost re-parsing.
+pub fn sync_shared(store: &std::sync::Mutex<Store>, rebuild: bool) -> Result<CcSyncReport> {
+    sync_via(store, rebuild)
+}
+
+/// How [`sync_via`] reaches the store: directly (`&mut Store`, held for the
+/// whole run) or through a mutex locked per step.
+trait SyncStore {
+    fn with<R>(&mut self, f: impl FnOnce(&mut Store) -> R) -> R;
+}
+
+impl SyncStore for &mut Store {
+    fn with<R>(&mut self, f: impl FnOnce(&mut Store) -> R) -> R {
+        f(self)
     }
-    let cursors = store.cc_cursors()?;
+}
+
+impl SyncStore for &std::sync::Mutex<Store> {
+    fn with<R>(&mut self, f: impl FnOnce(&mut Store) -> R) -> R {
+        f(&mut self.lock().unwrap())
+    }
+}
+
+fn sync_via(mut store: impl SyncStore, rebuild: bool) -> Result<CcSyncReport> {
+    let mut report = CcSyncReport::default();
+    let cursors = store.with(|s| -> Result<_> {
+        if rebuild {
+            s.cc_clear_cursors()?;
+        }
+        s.cc_cursors()
+    })?;
     let mut sessions_touched: HashSet<String> = HashSet::new();
     // The headless usage ledger needs no transcript root, so it is folded in
     // before the early return below.
-    super::cc_ledger::ingest(store, &cursors, &mut report, &mut sessions_touched)?;
+    store.with(|s| super::cc_ledger::ingest(s, &cursors, &mut report, &mut sessions_touched))?;
     let Some(root) = projects_dir() else {
         report.sessions = sessions_touched.len() as i64;
         return Ok(report);
@@ -2044,7 +2079,7 @@ pub fn sync(store: &mut Store, rebuild: bool) -> Result<CcSyncReport> {
             size: bytes.len() as i64,
             byte_offset: (start + consumed) as i64,
         };
-        let counts = store.cc_ingest_file(&path, &cursor, &batch)?;
+        let counts = store.with(|s| s.cc_ingest_file(&path, &cursor, &batch))?;
         report.files_ingested += 1;
         report.messages_added += counts.messages_added;
         report.tool_calls_added += counts.tool_calls_added;
