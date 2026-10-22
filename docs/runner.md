@@ -152,6 +152,23 @@ quietly. Pids read from `runner.pid` / `job.json` are only acted on if `ps`
 shows `__runner` / the run's session id. `model` and `name` may not start with
 `-`.
 
+## Sandbox guard (naru task 2266)
+
+`runs_dir()` follows `NARU_HOME`/`HOME`, never the db env. A test or debug
+`serve` with `NARU_DB`/`MESA_DB` pointed at a throwaway db but the real home
+would therefore reconcile the real `~/.naru/runs` and resume the real live
+agent with the throwaway db in its environment. So `reconcile()` (serve
+start-up) skips with one stderr line, and `run __runner` / `spawn_runner`
+refuse, when `runner::sandboxed_against_real_runs` holds: a db override that
+is not the default db, no `NARU_HOME`/`MESA_HOME`, and the runs dir under the
+account's real `~/.naru` or `~/.mesa` (the real home is read from the passwd
+entry or `/Users/$USER`, not `$HOME`, which a sandbox moves). Set `NARU_HOME`
+(as `scripts/dev-env.sh` does) or a throwaway `HOME` to run agents in a
+sandbox. `run start` is refused before it writes anything (no job dir). A db
+override under the real home's `.naru`, `.mesa` or `Library/Application
+Support` counts as a real install, not a sandbox; a custom real db anywhere
+else needs `NARU_HOME` set. Paths are compared after resolving symlinks.
+
 ## The `runner` config template
 
 The eighth template (`docs/config.md`):

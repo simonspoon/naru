@@ -56,3 +56,7 @@ naru library hook enable dev-env-guard.sh --event PreToolUse --matcher 'Bash|Wri
 ```
 
 Gate: `scripts/dev-env-guard-check.sh`.
+
+A `serve` with a throwaway `NARU_DB`/`MESA_DB` but the real home and no
+`NARU_HOME` will not reconcile or run the real `~/.naru/runs` (naru task 2266,
+`docs/runner.md` "Sandbox guard"); always set `NARU_HOME` or `HOME` too.

@@ -327,6 +327,107 @@ pub fn runs_dir() -> PathBuf {
     config::dot_dir_in(&home).join("runs")
 }
 
+/// Whether a process with this environment must not touch run dirs under
+/// `runs` (naru task 2266): its db is redirected to a throwaway
+/// (`db_override` set and not one of `default_dbs`), yet `runs` sits in the
+/// account's real naru home (`real_home`'s `.naru`/`.mesa`) because nothing
+/// redirected that too (`naru_home_set` false). Such a process is a test or
+/// debug `serve`; reconciling or running the real runs would resume the real
+/// agents with the throwaway db in their env. A sandbox that moves `HOME` or
+/// sets `NARU_HOME` has its runs elsewhere and is not guarded.
+pub fn sandboxed_against_real_runs(
+    db_override: Option<&str>,
+    default_dbs: &[PathBuf],
+    naru_home_set: bool,
+    runs: &Path,
+    real_home: Option<&Path>,
+) -> bool {
+    let Some(db) = db_override.filter(|d| !d.is_empty()) else {
+        return false;
+    };
+    let db = canon(Path::new(db));
+    if naru_home_set || default_dbs.iter().any(|d| canon(d) == db) {
+        return false;
+    }
+    let Some(home) = real_home.map(canon) else {
+        return false;
+    };
+    // A real install with a custom db location is not a sandbox.
+    let real_dirs = [
+        home.join(".naru"),
+        home.join(".mesa"),
+        home.join("Library/Application Support"),
+    ];
+    if real_dirs.iter().any(|d| db.starts_with(d)) {
+        return false;
+    }
+    let runs = canon(runs);
+    runs.starts_with(home.join(".naru")) || runs.starts_with(home.join(".mesa"))
+}
+
+/// `p` with symlinks resolved (a symlinked home, `/private` aliases): the
+/// nearest existing ancestor is canonicalized and the rest appended, so a
+/// path that does not exist yet still compares; lexical when nothing resolves.
+fn canon(p: &Path) -> PathBuf {
+    let mut tail = vec![];
+    let mut cur = p;
+    loop {
+        if let Ok(c) = fs::canonicalize(cur) {
+            return tail.iter().rev().fold(c, |acc, n| acc.join(n));
+        }
+        match (cur.parent(), cur.file_name()) {
+            (Some(parent), Some(name)) => {
+                tail.push(name);
+                cur = parent;
+            }
+            _ => return p.to_path_buf(),
+        }
+    }
+}
+
+/// The account's real home, independent of `$HOME` (which a sandbox moves):
+/// the passwd entry of `$USER`/`$LOGNAME`, else `/Users/<user>` (macOS has no
+/// passwd entry to read). `None` when it cannot be told, which leaves the
+/// guard off rather than blocking a legitimate run.
+fn real_home() -> Option<PathBuf> {
+    let user = std::env::var("USER")
+        .or_else(|_| std::env::var("LOGNAME"))
+        .ok()
+        .filter(|u| !u.is_empty())?;
+    if let Ok(passwd) = fs::read_to_string("/etc/passwd") {
+        for line in passwd.lines() {
+            let f: Vec<&str> = line.split(':').collect();
+            if f.len() >= 6 && f[0] == user && !f[5].is_empty() {
+                return Some(PathBuf::from(f[5]));
+            }
+        }
+    }
+    let mac = PathBuf::from("/Users").join(&user);
+    mac.is_dir().then_some(mac)
+}
+
+/// [`sandboxed_against_real_runs`] over this process's environment.
+fn sandboxed_here(runs: &Path) -> bool {
+    let db = crate::core::env::var("DB");
+    if db.as_deref().is_none_or(str::is_empty) {
+        return false;
+    }
+    let default_dbs: Vec<PathBuf> = [("naru", "naru.db"), ("mesa", "mesa.db")]
+        .iter()
+        .filter_map(|(app, file)| {
+            directories::ProjectDirs::from("", "", app).map(|d| d.data_dir().join(file))
+        })
+        .collect();
+    let naru_home_set = crate::core::env::var("HOME").is_some_and(|h| !h.is_empty());
+    sandboxed_against_real_runs(
+        db.as_deref(),
+        &default_dbs,
+        naru_home_set,
+        runs,
+        real_home().as_deref(),
+    )
+}
+
 fn job_dir_of(runs: &Path, id: &str) -> Result<PathBuf> {
     if !is_valid_job_id(id) {
         return Err(Error::Validation(format!(
@@ -584,6 +685,12 @@ pub(crate) fn create_job_with(
 /// thread only stops a long-lived server from keeping a zombie, which
 /// `kill -0` would read as alive).
 pub fn spawn_runner(dir: &Path) -> Result<()> {
+    if dir.parent().is_some_and(sandboxed_here) {
+        return Err(Error::Conflict(format!(
+            "refusing to start a runner in {}: this process has a throwaway db but the real runs dir",
+            dir.display()
+        )));
+    }
     let exe = crate::core::memory_job::self_exe()?;
     let log = OpenOptions::new()
         .create(true)
@@ -621,6 +728,23 @@ pub fn start_in(runs: &Path, opts: &StartOpts) -> Result<Value> {
 /// Crate-internal on purpose: [`StartOpts`] carries no template, so a caller
 /// of the CLI or API cannot choose one.
 pub(crate) fn start_in_with(runs: &Path, opts: &StartOpts, action: Option<&str>) -> Result<Value> {
+    start_in_guarded(runs, opts, action, sandboxed_here(runs))
+}
+
+/// Refuses (writing nothing) when `sandboxed`, see
+/// [`sandboxed_against_real_runs`]; else starts normally.
+fn start_in_guarded(
+    runs: &Path,
+    opts: &StartOpts,
+    action: Option<&str>,
+    sandboxed: bool,
+) -> Result<Value> {
+    if sandboxed {
+        return Err(Error::Conflict(format!(
+            "refusing to start a run in {}: this process has a throwaway db (NARU_DB/MESA_DB) but the real runs dir; set NARU_HOME too",
+            runs.display()
+        )));
+    }
     start_in_spawning(runs, opts, action, spawn_runner)
 }
 
@@ -952,10 +1076,23 @@ pub fn busy_in(runs: &Path, id: &str) -> bool {
 
 /// Resumes every non-terminal run whose runner is dead; returns their ids.
 pub fn reconcile() -> Result<Vec<String>> {
-    reconcile_in(&runs_dir())
+    let runs = runs_dir();
+    reconcile_guarded(&runs, sandboxed_here(&runs))
 }
 
 pub fn reconcile_in(runs: &Path) -> Result<Vec<String>> {
+    reconcile_guarded(runs, false)
+}
+
+/// `sandboxed` (see [`sandboxed_against_real_runs`]) skips the whole walk.
+fn reconcile_guarded(runs: &Path, sandboxed: bool) -> Result<Vec<String>> {
+    if sandboxed {
+        eprintln!(
+            "naru: not reconciling {}: this process has a throwaway db (NARU_DB/MESA_DB) but the real runs dir; set NARU_HOME too",
+            runs.display()
+        );
+        return Ok(vec![]);
+    }
     let mut resumed = vec![];
     for entry in fs::read_dir(runs).into_iter().flatten().flatten() {
         let dir = entry.path();
@@ -1010,6 +1147,12 @@ enum Closing {
 /// `naru run __runner <dir>`: holds one claude session open until it is
 /// stopped, goes idle for too long, or dies.
 pub fn run_runner(dir: &Path) -> Result<()> {
+    if dir.parent().is_some_and(sandboxed_here) {
+        return Err(Error::Conflict(format!(
+            "refusing to run {}: this process has a throwaway db (NARU_DB/MESA_DB) but the real runs dir; set NARU_HOME too",
+            dir.display()
+        )));
+    }
     // One runner per job for as long as it lives: a second (a racing
     // reconcile, two serves) finds the lock taken and leaves quietly. The OS
     // drops the lock when this process dies, however it dies.
@@ -1399,6 +1542,79 @@ mod tests {
         assert_eq!(job.status, RunStatus::Failed);
         assert!(job.finished_at.is_some());
         assert!(reconcile_in(runs.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn sandbox_guard_predicate() {
+        let home = Path::new("/Users/me");
+        let real_db = vec![PathBuf::from(
+            "/Users/me/Library/Application Support/naru/naru.db",
+        )];
+        let runs = Path::new("/Users/me/.naru/runs");
+        let g = |db: Option<&str>, nh: bool, runs: &Path| {
+            sandboxed_against_real_runs(db, &real_db, nh, runs, Some(home))
+        };
+        // The incident: throwaway db, real HOME, no NARU_HOME.
+        assert!(g(Some("/tmp/t.db"), false, runs));
+        assert!(g(
+            Some("/tmp/t.db"),
+            false,
+            Path::new("/Users/me/.mesa/runs")
+        ));
+        // dev-env: NARU_HOME set.
+        assert!(!g(
+            Some("/tmp/t.db"),
+            true,
+            Path::new("/Users/me/.naru-dev/runs")
+        ));
+        // No db override, or an empty one.
+        assert!(!g(None, false, runs));
+        assert!(!g(Some(""), false, runs));
+        // Override equal to the real default db.
+        assert!(!g(Some(real_db[0].to_str().unwrap()), false, runs));
+        // Throwaway HOME with its own runs dir.
+        assert!(!g(Some("/tmp/t.db"), false, Path::new("/tmp/h/.naru/runs")));
+        // Real home unknown: guard off.
+        assert!(!sandboxed_against_real_runs(
+            Some("/tmp/t.db"),
+            &real_db,
+            false,
+            runs,
+            None
+        ));
+    }
+
+    #[test]
+    fn sandbox_guard_custom_real_db_is_not_a_sandbox() {
+        let home = Path::new("/Users/me");
+        let runs = Path::new("/Users/me/.naru/runs");
+        let g = |db: &str| sandboxed_against_real_runs(Some(db), &[], false, runs, Some(home));
+        assert!(!g("/Users/me/.naru/custom.db"));
+        assert!(!g("/Users/me/.mesa/x/y.db"));
+        assert!(!g("/Users/me/Library/Application Support/other/z.db"));
+        assert!(g("/Users/me/Documents/z.db"));
+    }
+
+    #[test]
+    fn a_guarded_start_writes_no_job_dir() {
+        let base = tempfile::tempdir().unwrap();
+        let runs = base.path().join("runs");
+        let cwd = tempfile::tempdir().unwrap();
+        let err = start_in_guarded(&runs, &opts("a", cwd.path()), None, true).unwrap_err();
+        assert!(matches!(err, Error::Conflict(_)));
+        assert!(!runs.exists());
+    }
+
+    #[test]
+    fn reconcile_refuses_to_spawn_when_sandboxed() {
+        let runs = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        // A non-terminal run with no runner alive: reconcile would respawn it.
+        let job = create_job(runs.path(), &opts("a", cwd.path())).unwrap();
+        let dir = runs.path().join(&job.job_id);
+        assert!(reconcile_guarded(runs.path(), true).unwrap().is_empty());
+        assert!(!dir.join("runner.pid").exists());
+        assert!(!dir.join("runner.log").exists());
     }
 
     #[cfg(unix)]
