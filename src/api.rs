@@ -49,12 +49,11 @@ use crate::core::{
     ProjectFileTree, ProjectGitLog, ProjectGitRepos, ProjectGitStatus, ProjectGitView,
     ProjectPatch, ProjectVersion, ReceiptPatch, STALE_CLAIM_MINUTES, Script, ScriptArg,
     ScriptPatch, ScriptRunEvent, ServeBoolSetting, ServeHostsSetting, ServeNumberSetting, Status,
-    Store, SystemInfo, Task, TaskNote, TaskPatch, TaskSummary, VoiceEnrollment, WorkflowGateStatus,
+    Store, SystemInfo, Task, TaskNote, TaskPatch, TaskSummary, WorkflowGateStatus,
     WorkflowNodeKind, WorkflowNodeNew, WorkflowNodePatch, WorkflowPatch, WorkflowTrigger,
     WorkflowType, agents, attachments, audio, board, config, files, git, guard, hooks,
     inbox_triage, kb, library, listen, live, memory_job, notify, project_memory, receipt, runner,
-    script_runs, scripts, speech, supervisor, system, validate_live_client, version, voice_enroll,
-    workflow,
+    script_runs, scripts, speech, supervisor, system, validate_live_client, version, workflow,
 };
 
 /// The Vite build output, embedded into the binary at compile time.
@@ -3930,17 +3929,31 @@ fn router(state: AppState) -> Router {
             "/api/config/ambient",
             get(get_config_ambient).put(update_config_ambient),
         )
-        // The speaker-enrollment recording (naru task 1744,
-        // `docs/voice-enrollment.md`): the browser's WAV as base64 in JSON,
-        // kept beside the Mac app's `ambient-enrollment.json`. The transcribe
-        // route's body limit; the server computes no embedding.
+        // The people voice library (naru task 2262, `docs/voice-enrollment.md`):
+        // proxies for naru-audio's `/v1/audio/speaker/*`. A clip arrives as
+        // base64 in JSON (the transcribe route's body limit) and is sent on
+        // as multipart; the server computes no embedding.
         .route(
-            "/api/config/voice-enrollment",
-            get(get_voice_enrollment)
-                .put(put_voice_enrollment)
-                .delete(delete_voice_enrollment)
-                .layer(DefaultBodyLimit::max(TRANSCRIBE_BODY_LIMIT)),
+            "/api/voice/people",
+            get(voice_people).post(voice_person_add),
         )
+        .route(
+            "/api/voice/people/{id}",
+            patch(voice_person_patch).delete(voice_person_delete),
+        )
+        .route(
+            "/api/voice/people/{id}/clips",
+            post(voice_clip_add).layer(DefaultBodyLimit::max(TRANSCRIBE_BODY_LIMIT)),
+        )
+        .route(
+            "/api/voice/people/{id}/clips/{clip}",
+            delete(voice_clip_delete),
+        )
+        .route(
+            "/api/voice/people/{id}/clips/{clip}/audio",
+            get(voice_clip_audio),
+        )
+        .route("/api/voice/guard", get(voice_guard).put(voice_guard_set))
         // The same file's `audio` section — which engine the server runs
         // speech through and where the `naru-audio` daemon listens (mesa task
         // 1388). A ninth route for the same reason as the others.
@@ -11830,29 +11843,189 @@ async fn add_speech_voice(
     Ok((StatusCode::CREATED, Json(added)).into_response())
 }
 
-/// `GET /api/config/voice-enrollment` — the speaker-enrollment status
-/// (naru task 1744, [`voice_enroll::status`]): the saved recording, when the
-/// Mac app last wrote its enrollment, and whether that is current. Gated by
-/// [`require_agent_access`].
-async fn get_voice_enrollment(
-    State(state): State<AppState>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-) -> ApiResult<Json<VoiceEnrollment>> {
-    require_agent_access(&state, &addr, &headers)?;
-    Ok(Json(blocking(voice_enroll::status).await??))
+#[derive(Deserialize)]
+struct VoicePersonNew {
+    name: String,
+    #[serde(default)]
+    owner: Option<bool>,
 }
 
-/// `PUT /api/config/voice-enrollment` — saves the recording
-/// ([`voice_enroll::save`]). Gated like [`add_speech_voice`], with its base64
-/// rules: invalid or empty is 422, over [`LIVE_AUDIO_MAX`] 413; a WAV that is
-/// not 16 kHz mono 16-bit PCM of 20..=300 s is 422.
-async fn put_voice_enrollment(
+#[derive(Deserialize)]
+struct VoicePersonPatch {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    owner: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct VoiceGuardBody {
+    live: bool,
+}
+
+/// One call to naru-audio's `/v1/audio/speaker/*` (naru task 2262,
+/// `docs/voice-enrollment.md`). Every voice route is gated by
+/// [`require_agent_access`] — a recording of someone's voice — and a mutating
+/// one also by [`require_same_site_fetch`], `add_speech_voice`'s pair. A
+/// daemon that does not answer is 503 `unavailable`; its own refusals pass
+/// through: 400 (a clip under a second) 422 `validation`, 404 `not_found`, a
+/// model not pulled (409) 503 `unavailable`, anything else 502. `audio`
+/// answers the body as `audio/wav` instead of JSON.
+async fn voice_proxy(
+    state: &AppState,
+    addr: &SocketAddr,
+    headers: &HeaderMap,
+    audio: bool,
+    method: &'static str,
+    path: String,
+    body: Option<(String, Vec<u8>)>,
+) -> ApiResult<Response> {
+    require_agent_access(state, addr, headers)?;
+    if method != "GET" {
+        require_same_site_fetch(headers)?;
+    }
+    let answer = blocking(move || {
+        let url = config::audio_url()?;
+        audio::speaker_request(&url, method, &path, body)
+    })
+    .await?
+    .map_err(|message| ApiError {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        code: "unavailable",
+        message,
+    })?;
+    if (200..300).contains(&answer.status) {
+        let (content_type, nosniff) = if audio {
+            ("audio/wav", true)
+        } else {
+            ("application/json", false)
+        };
+        let mut response = Response::new(Body::from(answer.body));
+        response.headers_mut().insert(
+            header::CONTENT_TYPE,
+            header::HeaderValue::from_static(content_type),
+        );
+        if nosniff {
+            response.headers_mut().insert(
+                header::X_CONTENT_TYPE_OPTIONS,
+                header::HeaderValue::from_static("nosniff"),
+            );
+        }
+        return Ok(response);
+    }
+    let said = serde_json::from_slice::<serde_json::Value>(&answer.body)
+        .ok()
+        .and_then(|v| v["error"]["message"].as_str().map(str::to_string))
+        .unwrap_or_else(|| format!("answered HTTP {}", answer.status));
+    let (status, code) = match answer.status {
+        400 | 413 | 415 => (StatusCode::UNPROCESSABLE_ENTITY, "validation"),
+        404 => (StatusCode::NOT_FOUND, "not_found"),
+        409 => (StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
+        _ => (StatusCode::BAD_GATEWAY, "unavailable"),
+    };
+    Err(ApiError {
+        status,
+        code,
+        message: format!("naru-audio: {said}"),
+    })
+}
+
+fn json_form(value: serde_json::Value) -> Option<(String, Vec<u8>)> {
+    Some((
+        "application/json".to_string(),
+        value.to_string().into_bytes(),
+    ))
+}
+
+/// `GET /api/voice/people` — the voice library: `{model, live_guard, people}`.
+async fn voice_people(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
+) -> ApiResult<Response> {
+    let path = "/v1/audio/speaker/people".to_string();
+    voice_proxy(&state, &addr, &headers, false, "GET", path, None).await
+}
+
+/// `POST /api/voice/people` — `{name, owner?}` makes a person.
+async fn voice_person_add(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Result<Json<VoicePersonNew>, JsonRejection>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    require_same_site_fetch(&headers)?;
+    let Json(body) = body?;
+    let mut sent = json!({ "name": body.name });
+    if let Some(owner) = body.owner {
+        sent["owner"] = json!(owner);
+    }
+    let path = "/v1/audio/speaker/people".to_string();
+    voice_proxy(
+        &state,
+        &addr,
+        &headers,
+        false,
+        "POST",
+        path,
+        json_form(sent),
+    )
+    .await
+}
+
+/// `PATCH /api/voice/people/{id}` — `{name?, owner?}`.
+async fn voice_person_patch(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<u64>,
+    body: Result<Json<VoicePersonPatch>, JsonRejection>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    require_same_site_fetch(&headers)?;
+    let Json(body) = body?;
+    let mut sent = json!({});
+    if let Some(name) = body.name {
+        sent["name"] = json!(name);
+    }
+    if let Some(owner) = body.owner {
+        sent["owner"] = json!(owner);
+    }
+    let path = format!("/v1/audio/speaker/people/{id}");
+    voice_proxy(
+        &state,
+        &addr,
+        &headers,
+        false,
+        "PATCH",
+        path,
+        json_form(sent),
+    )
+    .await
+}
+
+/// `DELETE /api/voice/people/{id}` — removes the person and their clips.
+async fn voice_person_delete(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<u64>,
+) -> ApiResult<Response> {
+    let path = format!("/v1/audio/speaker/people/{id}");
+    voice_proxy(&state, &addr, &headers, false, "DELETE", path, None).await
+}
+
+/// `POST /api/voice/people/{id}/clips` — `{audio_base64}` (a WAV), sent on
+/// as the daemon's multipart `file`. Base64 rules as [`transcribe_live`]'s:
+/// invalid or empty 422, over [`LIVE_AUDIO_MAX`] 413.
+async fn voice_clip_add(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<u64>,
     body: Result<Json<TranscribeBody>, JsonRejection>,
-) -> ApiResult<Json<VoiceEnrollment>> {
+) -> ApiResult<Response> {
     require_agent_access(&state, &addr, &headers)?;
     require_same_site_fetch(&headers)?;
     let Json(body) = body?;
@@ -11877,19 +12050,57 @@ async fn put_voice_enrollment(
             ),
         });
     }
-    Ok(Json(blocking(move || voice_enroll::save(&wav)).await??))
+    let path = format!("/v1/audio/speaker/people/{id}/clips");
+    let form = Some(audio::speaker_clip_form(&wav));
+    voice_proxy(&state, &addr, &headers, false, "POST", path, form).await
 }
 
-/// `DELETE /api/config/voice-enrollment` — removes the recording and the
-/// enrollment (a missing file is fine), turning the voice guard off. Answers
-/// the now-empty status. Gated by [`require_agent_access`].
-async fn delete_voice_enrollment(
+/// `DELETE /api/voice/people/{id}/clips/{clip}`.
+async fn voice_clip_delete(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
-) -> ApiResult<Json<VoiceEnrollment>> {
+    Path((id, clip)): Path<(u64, u64)>,
+) -> ApiResult<Response> {
+    let path = format!("/v1/audio/speaker/people/{id}/clips/{clip}");
+    voice_proxy(&state, &addr, &headers, false, "DELETE", path, None).await
+}
+
+/// `GET /api/voice/people/{id}/clips/{clip}/audio` — the kept clip as
+/// `audio/wav` (404 when it has none).
+async fn voice_clip_audio(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path((id, clip)): Path<(u64, u64)>,
+) -> ApiResult<Response> {
+    let path = format!("/v1/audio/speaker/people/{id}/clips/{clip}/audio");
+    voice_proxy(&state, &addr, &headers, true, "GET", path, None).await
+}
+
+/// `GET /api/voice/guard` — `{live: bool}`, the live voice guard switch.
+async fn voice_guard(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    let path = "/v1/audio/speaker/guard".to_string();
+    voice_proxy(&state, &addr, &headers, false, "GET", path, None).await
+}
+
+/// `PUT /api/voice/guard` — `{live: bool}`.
+async fn voice_guard_set(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Result<Json<VoiceGuardBody>, JsonRejection>,
+) -> ApiResult<Response> {
     require_agent_access(&state, &addr, &headers)?;
-    Ok(Json(blocking(voice_enroll::delete).await??))
+    require_same_site_fetch(&headers)?;
+    let Json(body) = body?;
+    let path = "/v1/audio/speaker/guard".to_string();
+    let sent = json_form(json!({ "live": body.live }));
+    voice_proxy(&state, &addr, &headers, false, "PUT", path, sent).await
 }
 
 /// `GET /api/config/speech/voices/{name}` — the cloned voice `name` as one
@@ -22509,23 +22720,144 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         .await
     }
 
-    fn enroll_wav(seconds: usize) -> Vec<u8> {
-        let data = (seconds * 16_000 * 2) as u32;
-        let mut b = Vec::new();
-        b.extend_from_slice(b"RIFF");
-        b.extend_from_slice(&(36 + data).to_le_bytes());
-        b.extend_from_slice(b"WAVEfmt ");
-        b.extend_from_slice(&16u32.to_le_bytes());
-        b.extend_from_slice(&1u16.to_le_bytes());
-        b.extend_from_slice(&1u16.to_le_bytes());
-        b.extend_from_slice(&16_000u32.to_le_bytes());
-        b.extend_from_slice(&32_000u32.to_le_bytes());
-        b.extend_from_slice(&2u16.to_le_bytes());
-        b.extend_from_slice(&16u16.to_le_bytes());
-        b.extend_from_slice(b"data");
-        b.extend_from_slice(&data.to_le_bytes());
-        b.resize(b.len() + data as usize, 0);
-        b
+    /// naru task 2262: the `/api/voice/*` proxies relay naru-audio's speaker
+    /// library — gates refuse a foreign Host, a list and a clip upload
+    /// (JSON base64 in, multipart `file` out) reach the daemon, its 400/404
+    /// map to 422/404, a clip's audio comes back as `audio/wav`, and a
+    /// stopped daemon is 503 `unavailable`.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn voice_people_routes_proxy_the_daemon() {
+        let _env = attachments::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (_dir, state) = test_state();
+        let cfg = tempfile::tempdir().unwrap();
+        let daemon = audio::stub::Stub::serve(0, |method, path| match (method, path) {
+            ("GET", "/v1/audio/speaker/people") => audio::stub::Reply::Json(
+                200,
+                r#"{"model":"m","live_guard":false,"people":[]}"#.to_string(),
+            ),
+            ("POST", "/v1/audio/speaker/people/3/clips") => audio::stub::Reply::Json(
+                400,
+                r#"{"error":{"message":"clip is under 1 s"}}"#.to_string(),
+            ),
+            ("POST", "/v1/audio/speaker/people/4/clips") => audio::stub::Reply::Json(
+                200,
+                r#"{"id":9,"created_at":"x","seconds":2.0,"has_audio":true}"#.to_string(),
+            ),
+            ("GET", "/v1/audio/speaker/people/4/clips/9/audio") => {
+                audio::stub::Reply::Json(200, "RIFF-clip".to_string())
+            }
+            ("GET", "/v1/audio/speaker/people/4/clips/8/audio") => {
+                audio::stub::Reply::Json(404, r#"{"error":{"message":"no audio"}}"#.to_string())
+            }
+            ("PUT", "/v1/audio/speaker/guard") => {
+                audio::stub::Reply::Json(200, r#"{"live":true}"#.to_string())
+            }
+            _ => audio::stub::Reply::Json(404, "{}".to_string()),
+        });
+        let _config = listen_config(cfg.path(), Some(json!({ "url": daemon.url() })));
+        let ok = || (State(state.clone()), ConnectInfo(loopback()));
+        let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+        let clip = |id: u64| {
+            let (s, c) = ok();
+            voice_clip_add(
+                s,
+                c,
+                loopback_agent_headers(),
+                Path(id),
+                Ok(Json(TranscribeBody {
+                    audio_base64: b64(b"RIFFxxxxWAVE"),
+                })),
+            )
+        };
+
+        // Gate: a foreign Host is refused before the daemon is asked.
+        let (s, c) = ok();
+        assert!(
+            voice_people(s, c, hdrs(Some("evil.example:0"), None))
+                .await
+                .is_err()
+        );
+        let (s, c) = ok();
+        assert!(
+            voice_guard_set(
+                s,
+                c,
+                hdrs(Some("evil.example:0"), None),
+                Ok(Json(VoiceGuardBody { live: true }))
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(daemon.count("GET"), 0);
+        assert_eq!(daemon.count("PUT"), 0);
+
+        let (s, c) = ok();
+        let resp = voice_people(s, c, loopback_agent_headers()).await.unwrap();
+        assert_eq!(
+            json_body(resp).await,
+            json!({"model": "m", "live_guard": false, "people": []})
+        );
+
+        let resp = clip(4).await.unwrap();
+        assert_eq!(json_body(resp).await["id"], 9);
+        let sent = daemon.requests.lock().unwrap().clone();
+        let upload = sent
+            .iter()
+            .find(|r| r.starts_with("POST /v1/audio/speaker/people/4/clips"))
+            .unwrap();
+        assert!(upload.contains("name=\"file\"") && upload.contains("RIFFxxxxWAVE"));
+
+        let err = clip(3).await.unwrap_err();
+        assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(err.code, "validation");
+        assert!(err.message.contains("under 1 s"));
+
+        let audio_of = |clip_id: u64| {
+            let (s, c) = ok();
+            voice_clip_audio(s, c, loopback_agent_headers(), Path((4, clip_id)))
+        };
+        let resp = audio_of(9).await.unwrap();
+        assert_eq!(resp.headers()[header::CONTENT_TYPE], "audio/wav");
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&bytes[..], b"RIFF-clip");
+        let err = audio_of(8).await.unwrap_err();
+        assert_eq!((err.status, err.code), (StatusCode::NOT_FOUND, "not_found"));
+
+        let (s, c) = ok();
+        let resp = voice_guard_set(
+            s,
+            c,
+            loopback_agent_headers(),
+            Ok(Json(VoiceGuardBody { live: true })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(json_body(resp).await, json!({"live": true}));
+        assert!(
+            daemon
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|r| r == r#"PUT /v1/audio/speaker/guard {"live":true}"#)
+        );
+
+        let url = daemon.url();
+        drop(daemon);
+        let _config = listen_config(cfg.path(), Some(json!({ "url": url })));
+        let (s, c) = ok();
+        let err = voice_people(s, c, loopback_agent_headers())
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(err.code, "unavailable");
+        // SAFETY: ENV_LOCK is held.
+        unsafe { std::env::remove_var("MESA_CONFIG_FILE") };
     }
 
     /// naru task 1769: `/api/config/ambient` stores trimmed, case-deduped wake
@@ -22602,77 +22934,6 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         assert!(foreign.is_err());
         // SAFETY: as above.
         unsafe { std::env::remove_var("MESA_CONFIG_FILE") };
-    }
-
-    /// naru task 1744: `/api/config/voice-enrollment` saves a valid WAV
-    /// (sample present, not current), turns `current` on once the Mac app's
-    /// json is newer, refuses a bad format / too-short / bad base64 with 422,
-    /// refuses a foreign Host, and DELETE clears both files.
-    #[allow(clippy::await_holding_lock)]
-    #[tokio::test]
-    async fn voice_enrollment_routes_save_report_and_delete() {
-        let _env = attachments::ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let (_dir, state) = test_state();
-        let enroll = tempfile::tempdir().unwrap();
-        // SAFETY: ENV_LOCK gives this test exclusive access to the environment.
-        unsafe { std::env::set_var("NARU_VOICE_ENROLL_DIR", enroll.path()) };
-        let put = |audio: String| {
-            put_voice_enrollment(
-                State(state.clone()),
-                ConnectInfo(loopback()),
-                loopback_agent_headers(),
-                Ok(Json(TranscribeBody {
-                    audio_base64: audio,
-                })),
-            )
-        };
-        let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
-
-        let Json(s) = put(b64(&enroll_wav(30))).await.unwrap();
-        assert!(s.sample.is_some() && !s.current);
-
-        std::fs::write(enroll.path().join("ambient-enrollment.json"), "[0.1]").unwrap();
-        let Json(s) = get_voice_enrollment(
-            State(state.clone()),
-            ConnectInfo(loopback()),
-            loopback_agent_headers(),
-        )
-        .await
-        .unwrap();
-        assert!(s.current && s.enrolled_at.is_some());
-
-        for bad in [
-            b64(&enroll_wav(5)),
-            b64(b"not a wav"),
-            "!!!".to_string(),
-            String::new(),
-        ] {
-            let err = put(bad).await.unwrap_err();
-            assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY);
-        }
-
-        let foreign = get_voice_enrollment(
-            State(state.clone()),
-            ConnectInfo(loopback()),
-            hdrs(Some("evil.example:0"), None),
-        )
-        .await;
-        assert!(foreign.is_err());
-
-        let Json(s) = delete_voice_enrollment(
-            State(state.clone()),
-            ConnectInfo(loopback()),
-            loopback_agent_headers(),
-        )
-        .await
-        .unwrap();
-        assert!(s.sample.is_none() && s.enrolled_at.is_none() && !s.current);
-        assert!(!enroll.path().join("voice-sample.wav").exists());
-        assert!(!enroll.path().join("ambient-enrollment.json").exists());
-        // SAFETY: as above.
-        unsafe { std::env::remove_var("NARU_VOICE_ENROLL_DIR") };
     }
 
     async fn post_voice(

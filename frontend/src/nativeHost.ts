@@ -40,8 +40,8 @@ export type NativeOut =
    *  page paused) and live. naru-audio's `state` mode answers. */
   | { type: 'ambient'; on: boolean }
   /** Start the native voice-guard enrollment (naru task 2259): the host records ~12 s from the mic itself and
-   *  answers through `enrollStatus`. A bare `{type: 'enroll'}` is ignored by the host. */
-  | { type: 'enroll'; op: 'start' }
+   *  answers through `enrollStatus`; `person` is the library person (naru task 2262) the clip is added to. A bare `{type: 'enroll'}` is ignored by the host. */
+  | { type: 'enroll'; op: 'start'; person: number }
   /** The custom wake words were saved (naru task 1769): no payload, the host refetches them from the server. */
   | { type: 'wakeWords' }
   /** The Gestures setup wizard's permission calls (naru task 1975); answered by `permissionsReply`. */
@@ -129,7 +129,14 @@ export function ambientRequestStep(input: {
 }
 
 /** The host's enrollment state, pushed through `naruNativeHost.enrollStatus` (naru task 2258). */
-export type EnrollStatus = { enrolling: boolean; enrolled: boolean; note: string | null; seconds: number }
+export type EnrollStatus = {
+  enrolling: boolean
+  enrolled: boolean
+  note: string | null
+  seconds: number
+  /** The library person the host is recording for, `null` when none (naru task 2262). */
+  person: number | null
+}
 
 let enrollLast: EnrollStatus | null = null
 const enrollListeners = new Set<(s: EnrollStatus) => void>()
@@ -144,6 +151,7 @@ export function enrollStatus(r: unknown) {
     enrolled: o.enrolled,
     note: typeof o.note === 'string' ? o.note : null,
     seconds: typeof o.seconds === 'number' && o.seconds > 0 ? o.seconds : 12,
+    person: typeof o.person === 'number' && Number.isInteger(o.person) ? o.person : null,
   }
   enrollListeners.forEach((cb) => cb(enrollLast!))
 }

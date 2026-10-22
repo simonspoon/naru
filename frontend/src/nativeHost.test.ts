@@ -151,15 +151,31 @@ describe('ambientRequestStep', () => {
 
 describe('enrollStatus', () => {
   it('delivers the host payload to subscribers and replays the last one', () => {
-    enrollStatus({ enrolling: true, enrolled: false, note: 'speak for 12 s', seconds: 12 })
+    enrollStatus({ enrolling: true, enrolled: false, note: 'speak for 12 s', seconds: 12, person: 4 })
     enrollStatus({ bogus: 1 })
     const got: unknown[] = []
     const off = onEnrollStatus((s) => got.push(s))
     enrollStatus({ enrolling: false, enrolled: true, note: null, seconds: 12 })
     off()
     expect(got).toEqual([
-      { enrolling: true, enrolled: false, note: 'speak for 12 s', seconds: 12 },
-      { enrolling: false, enrolled: true, note: null, seconds: 12 },
+      { enrolling: true, enrolled: false, note: 'speak for 12 s', seconds: 12, person: 4 },
+      { enrolling: false, enrolled: true, note: null, seconds: 12, person: null },
     ])
+  })
+})
+
+describe('enrollStatus person', () => {
+  it('carries the person id, and null for a missing, null or non-integer one', () => {
+    const got: Array<number | null> = []
+    const off = onEnrollStatus((s) => got.push(s.person))
+    got.length = 0
+    const base = { enrolling: false, enrolled: false, note: null, seconds: 12 }
+    enrollStatus({ ...base, person: 7 })
+    enrollStatus({ ...base, person: null })
+    enrollStatus({ ...base })
+    enrollStatus({ ...base, person: 1.5 })
+    enrollStatus({ ...base, person: '7' })
+    off()
+    expect(got).toEqual([7, null, null, null, null])
   })
 })

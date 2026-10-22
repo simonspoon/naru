@@ -45,7 +45,6 @@ pub mod theme;
 mod types;
 pub mod usage;
 pub mod version;
-pub mod voice_enroll;
 pub mod wftypes;
 pub mod workflow;
 
@@ -77,11 +76,11 @@ pub use types::{
     ProjectGitView, ProjectVersion, RetroFinding, RetroRun, RetroStatus, Script, ScriptArg,
     ScriptArgKind, ScriptRun, ScriptRunEvent, ScriptRunRecord, ScriptRunStatus, ScriptStream,
     ServeBoolSetting, ServeHostsSetting, ServeNumberSetting, Status, SystemInfo, Task,
-    TaskDigestEntry, TaskNote, TaskReceipt, TaskSummary, Theme, ThemePreview, ThemeSlots,
-    VoiceEnrollSample, VoiceEnrollment, Workflow, WorkflowBranch, WorkflowBuiltinAction,
-    WorkflowBuiltinUpdate, WorkflowEdge, WorkflowExport, WorkflowExportEdge, WorkflowExportMeta,
-    WorkflowExportNode, WorkflowGate, WorkflowGateStatus, WorkflowImportResult, WorkflowLogEntry,
-    WorkflowMissingRef, WorkflowNode, WorkflowNodeKind, WorkflowRevision, WorkflowRun,
-    WorkflowRunStatus, WorkflowSnapshot, WorkflowStep, WorkflowStepStatus, WorkflowTrigger,
-    WorkflowType, WorkflowTypeField, WorkflowView, is_valid_artifact_content_type, task_name,
+    TaskDigestEntry, TaskNote, TaskReceipt, TaskSummary, Theme, ThemePreview, ThemeSlots, Workflow,
+    WorkflowBranch, WorkflowBuiltinAction, WorkflowBuiltinUpdate, WorkflowEdge, WorkflowExport,
+    WorkflowExportEdge, WorkflowExportMeta, WorkflowExportNode, WorkflowGate, WorkflowGateStatus,
+    WorkflowImportResult, WorkflowLogEntry, WorkflowMissingRef, WorkflowNode, WorkflowNodeKind,
+    WorkflowRevision, WorkflowRun, WorkflowRunStatus, WorkflowSnapshot, WorkflowStep,
+    WorkflowStepStatus, WorkflowTrigger, WorkflowType, WorkflowTypeField, WorkflowView,
+    is_valid_artifact_content_type, task_name,
 };

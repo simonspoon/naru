@@ -1,69 +1,77 @@
-# Voice guard enrollment
+# Voice library: people and the live voice guard
 
-Settings > Voice has a **Voice guard enrollment** section (naru task 1744). The
-browser records about 10 seconds of the person's voice (auto-stopping at 12 s) and the server saves
-it as a WAV. Inside the Naru Mac app the page instead asks the app to record 12 s from its own mic and
-build the speaker enrollment (see "The Mac app's half"); nothing builds one from the saved WAV.
-
-## Files
-
-Both live in the enrollment directory: the platform data dir plus `Naru`
-(`~/Library/Application Support/Naru`), overridable with
-`NARU_VOICE_ENROLL_DIR` (the test seam).
-
-| File | Written by | Notes |
-| --- | --- | --- |
-| `voice-sample.wav` | the server (`core::voice_enroll`) | 16 kHz mono 16-bit PCM, 8..=300 s, written temp + rename |
-| `ambient-enrollment.json` | the Naru Mac app | a JSON `[Float]`; the server only reads its mtime, and deletes it on `DELETE` |
+Settings > Voice has a **People** section and a **Live voice guard** switch
+(naru task 2262, replacing the single "Voice guard enrollment" of task 1744).
+The voice library is **naru-audio's** (`$NARU_AUDIO_HOME/speaker/people.json`,
+`naru-audio/docs/live-mode-spec.md` "Speaker guard"): people, each with clips
+whose embeddings the daemon computes and whose WAVs it keeps. Naru stores
+nothing and computes nothing; it relays.
 
 ## Routes
 
-`GET`, `PUT`, `DELETE /api/config/voice-enrollment`; the body of `PUT` is
-`{"audio_base64"}` (base64 in JSON, so it stays inside the Content-Type gate).
+Proxies for the daemon's `/v1/audio/speaker/*`, at the configured audio url.
+Every one carries `require_agent_access` (a recording of someone's voice),
+reads included; each mutating one adds `require_same_site_fetch`, exactly
+`add_speech_voice`'s pair.
 
-- `GET` and `DELETE` carry `require_agent_access`; `PUT` adds
-  `require_same_site_fetch`, exactly `add_speech_voice`'s pair.
-- Invalid or empty base64 is 422, a body over `LIVE_AUDIO_MAX` is 413, a WAV
-  that is not RIFF/WAVE 16 kHz mono 16-bit PCM of 8..=300 s is 422.
-- All three answer `VoiceEnrollment`: `sample` (`bytes`, `seconds`,
-  `recorded_at`) or `null`, `enrolled_at` or `null`, and `current` = the
-  enrollment exists and is not older than the sample.
-- `DELETE` removes both files (a missing one is fine). Deleting the enrollment
-  turns the voice guard and ambient tagging off, which is the intent.
+| Route | Daemon route | Notes |
+| --- | --- | --- |
+| `GET /api/voice/people` | `GET .../people` | `{model, live_guard, people:[{id, name, owner, clips:[{id, created_at, seconds, has_audio}]}]}` |
+| `POST /api/voice/people` | `POST .../people` | `{name, owner?}` |
+| `PATCH /api/voice/people/{id}` | `PATCH .../people/{id}` | `{name?, owner?}`; `owner: true` clears it on the others |
+| `DELETE /api/voice/people/{id}` | `DELETE .../people/{id}` | removes the clips' WAVs |
+| `POST /api/voice/people/{id}/clips` | `POST .../clips` | body `{audio_base64}` (a WAV, inside the JSON Content-Type gate), sent on as multipart `file`; invalid/empty base64 422, over `LIVE_AUDIO_MAX` 413 |
+| `GET /api/voice/people/{id}/clips/{clip}/audio` | same | answers `audio/wav` (+ `nosniff`) |
+| `DELETE /api/voice/people/{id}/clips/{clip}` | same | |
+| `GET`/`PUT /api/voice/guard` | `GET`/`PUT .../guard` | `{live: bool}` |
 
-## The Mac app's half
+Ids are integers. Errors: a daemon that does not answer is 503 `unavailable`
+(with the "isn't running" sentence); its 400 (a clip under 1 s) and 413/415
+are 422 `validation`, its 404 is 404 `not_found`, its 409 (model not pulled)
+503 `unavailable`, anything else 502, each with the daemon's own message.
 
-naru-audio's voice guard reads only its own `speaker/enrollment.json`, which only
-the Mac app's native enrollment writes, recording 12 s from the mic. So inside the
-app (`detectNativeHost`) the page opens **no** `getUserMedia` and saves no WAV
-(naru task 2259, host half naru-mac 964d225):
+The old `GET/PUT/DELETE /api/config/voice-enrollment`, `core::voice_enroll` and
+`voice-sample.wav` are gone; nothing but the old section used them.
 
-- Page to host: the record button posts `{type: 'enroll', op: 'start'}` on the
-  `naruLive` bridge (`NativeOut`); a bare `{type: 'enroll'}` is ignored by the host.
-  The page shows the read-aloud text and a 12 s countdown while the host records.
-- Host to page: the host calls `window.naruNativeHost.enrollStatus({enrolling,
-  enrolled, note, seconds})` on page ready and on every enrollment state change
-  (`note` e.g. "speak for 12 s", "voice enrolled", "enrollment failed: ...",
-  "leave live first"). `nativeHost.ts` keeps the latest payload so a section
-  mounted after the push still sees it.
-- Inside the app the section's status line is the host's `note`, else
-  recording / Enrolled / Not enrolled; the server's sample/enrollment status is
-  not shown.
+## The live voice guard
 
-A plain browser keeps the flow below unchanged but posts nothing to a host: it
-records, saves the WAV, and polls the status every 3 s. Nothing in the server
-builds an enrollment from that WAV.
+A separate switch, **default off**. On, a live conversation drops a segment of
+2 s or more that is not the person marked **me** (and only once "me" has a
+clip). Ambient tagging uses the voiceprints either way (the owner is `Him`,
+another named person `Other` with their name). The daemon reloads the library
+when it changes, so edits and the switch apply to a running session.
 
-## Why the server computes nothing
+## Adding a clip
 
-An embedding needs the speaker model, and the Mac app already has it. A second
-enrollment on the server would be a second model, a second file format and a
-way for the two to disagree, so the server only keeps the audio.
+- **Inside the Naru Mac app** (naru task 2259, host half naru-mac 964d225): the
+  page opens no `getUserMedia` and saves no WAV. The row's "add clip" posts
+  `{type: 'enroll', op: 'start', person: <id>}` on the `naruLive` bridge
+  (`NativeOut`, `startNativeEnroll`); a bare `{type: 'enroll'}` is ignored. The
+  app records ~12 s from its own mic and adds it, with its audio, to that
+  person's clips through the daemon (live protocol `enroll` `begin` with
+  `person`, then `finish`). It reports through
+  `window.naruNativeHost.enrollStatus({enrolling, enrolled, note, seconds, person})`
+  on page ready and on every change (`note` e.g. "speak for 12 s", "voice
+  enrolled", "enrollment failed: ...", "leave live first"); `nativeHost.ts`
+  keeps the latest payload so a section mounted after the push still sees it.
+  `person` is the library person being recorded (`null` when none). Only the
+  row that asked, and only while `person` is its id, shows the recording line
+  and the read-aloud text; a finished clip says the host's `note`, else "Clip
+  added." (`enrolled` stays false for a non-owner, so it is never read). The
+  line clears when another row asks, and the list is read again when the
+  recording ends. "Add clip" is disabled on every row while any recording, in
+  the app or in a browser, runs.
+- **In a plain browser**: `getUserMedia` (echo cancellation, noise suppression
+  and auto gain off) through `liveAudio.ts`'s `mesa-pcm` worklet and
+  `encodeWav`; the 16 kHz mono WAV goes up through the clips route. The page
+  asks for at least 8 s (the daemon accepts 1 s) and stops itself at 12 s.
+
+A clip with `has_audio: false` (the one migrated from the old single
+enrollment) is listed as "no audio kept" and has no play button.
 
 ## The page
 
-`frontend/src/voiceEnroll.ts` holds the logic (a two-sentence read-aloud text,
-peak dBFS, the near-silent test at -40 dBFS, the 8 s minimum / 12 s target,
-the status line); `VoiceEnrollSection.tsx` wires it
-to `getUserMedia` (echo cancellation, noise suppression and auto gain all off)
-and `liveAudio.ts`'s `mesa-pcm` worklet and `encodeWav`.
+`frontend/src/voicePeople.ts` is the pure logic (sorting, names, clip lines,
+the Mac app's status); `voiceEnroll.ts` keeps the recording schedule, meter and the
+native start/status helpers; `components/VoicePeopleSection.tsx` wires them. A first person added to
+an empty library is made "me".

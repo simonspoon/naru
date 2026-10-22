@@ -37,7 +37,7 @@ import type { ConfigSpeech } from './types/ConfigSpeech'
 import type { AddedVoice } from './types/AddedVoice'
 import type { ConfigListen } from './types/ConfigListen'
 import type { ConfigAmbient } from './types/ConfigAmbient'
-import type { VoiceEnrollment } from './types/VoiceEnrollment'
+import type { VoiceClip, VoicePeople, VoicePerson } from './voicePeople'
 import type { AudioTestResult } from './types/AudioTestResult'
 import type { ConfigAudio } from './types/ConfigAudio'
 import type { ConfigAppearance } from './types/ConfigAppearance'
@@ -1699,27 +1699,45 @@ export function updateAmbient(wakeWords: string[]): Promise<ConfigAmbient> {
   return request('/api/config/ambient', jsonInit('PUT', { wake_words: wakeWords }))
 }
 
-/**
- * The speaker-enrollment status (naru task 1744, `docs/voice-enrollment.md`):
- * the saved recording and whether the Naru Mac app has built its enrollment
- * from it.
- */
-export function getVoiceEnrollment(): Promise<VoiceEnrollment> {
-  return request('/api/config/voice-enrollment')
+/** The people voice library (naru task 2262, `docs/voice-enrollment.md`): naru-audio's, relayed. */
+export function getVoicePeople(): Promise<VoicePeople> {
+  return request('/api/voice/people')
 }
 
-/** Saves the recorded WAV (16 kHz mono 16-bit, 20..300 s) as base64. 422 on a WAV the server refuses. */
-export function saveVoiceEnrollment(audioBase64: string): Promise<VoiceEnrollment> {
-  return request('/api/config/voice-enrollment', jsonInit('PUT', { audio_base64: audioBase64 }))
+export function addVoicePerson(name: string, owner?: boolean): Promise<VoicePerson> {
+  return request('/api/voice/people', jsonInit('POST', { name, owner }))
 }
 
-/** Removes the recording and the enrollment, turning the voice guard off. */
-export function deleteVoiceEnrollment(): Promise<VoiceEnrollment> {
+/** `owner: true` makes the person "me" and clears it on everyone else. */
+export function patchVoicePerson(
+  id: number,
+  patch: { name?: string; owner?: boolean },
+): Promise<VoicePerson> {
+  return request(`/api/voice/people/${id}`, jsonInit('PATCH', patch))
+}
+
+export function deleteVoicePerson(id: number): Promise<{ deleted: boolean }> {
   // The server's mutating-request gate wants a JSON Content-Type even with no body.
-  return request('/api/config/voice-enrollment', {
+  return request(`/api/voice/people/${id}`, {
     method: 'DELETE',
     headers: { 'Content-Type': 'application/json' },
   })
+}
+
+/** Adds a recorded WAV (16 kHz mono, base64; 1 s or longer) to a person's clips. */
+export function addVoiceClip(id: number, audioBase64: string): Promise<VoiceClip> {
+  return request(`/api/voice/people/${id}/clips`, jsonInit('POST', { audio_base64: audioBase64 }))
+}
+
+export function deleteVoiceClip(id: number, clip: number): Promise<{ deleted: boolean }> {
+  return request(`/api/voice/people/${id}/clips/${clip}`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+  })
+}
+
+export function setVoiceGuard(live: boolean): Promise<{ live: boolean }> {
+  return request('/api/voice/guard', jsonInit('PUT', { live }))
 }
 
 /**

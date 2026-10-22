@@ -42,7 +42,7 @@ import { ConfirmDelete } from '../components/ConfirmDelete'
 import { AppearanceSection } from '../components/AppearanceSection'
 import { GesturesSection } from '../components/GesturesSection'
 import { WakeWordsSection } from '../components/WakeWordsSection'
-import { VoiceEnrollSection } from '../components/VoiceEnrollSection'
+import { VoicePeopleSection } from '../components/VoicePeopleSection'
 import { detectNativeHost } from '../nativeHost'
 import {
   ACTIONS,
@@ -467,12 +467,9 @@ export function SettingsView({ tab }: { tab: SettingsTab }) {
         <AudioSection />
         <ListenSection />
         {/* Ambient is the Mac app's: hidden in a plain browser (naru task 1748). */}
-        {detectNativeHost(window as unknown as Record<string, unknown>) && (
-          <>
-            <WakeWordsSection />
-            <VoiceEnrollSection />
-          </>
-        )}
+        {detectNativeHost(window as unknown as Record<string, unknown>) && <WakeWordsSection />}
+        {/* The people library works in a plain browser too (naru task 2262). */}
+        <VoicePeopleSection />
       </div>
       <div hidden={tab !== 'memory'}>
         <MemorySection />

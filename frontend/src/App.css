@@ -12596,11 +12596,33 @@ body.dock-resizing .dock-body {
   text-align: center;
 }
 
-/* Settings > Voice > Voice guard enrollment (naru task 1744): status line,
-   live level meter, the script / one-word prompt being read. */
-.voice-enroll-status {
+/* Settings > Voice > People (naru tasks 1744, 2262): the people list, the
+   clip recorder's live level meter and the script being read. */
+.voice-people,
+.voice-clips {
+  list-style: none;
   margin: 0.5rem 0;
-  font-weight: 600;
+  padding: 0;
+}
+
+.voice-person {
+  padding: 0.5rem 0;
+}
+
+.voice-person-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.voice-person-me {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--cyan);
+}
+
+.voice-clips {
+  margin-left: 1rem;
 }
 
 .voice-enroll-meter {
@@ -13478,4 +13500,9 @@ body.dock-resizing .dock-body {
 .wf-palette-item:disabled {
   opacity: 0.45;
   cursor: not-allowed;
+}
+
+.voice-enroll-status {
+  margin: 0.5rem 0;
+  font-weight: 600;
 }

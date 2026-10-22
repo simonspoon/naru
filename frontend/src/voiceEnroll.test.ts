@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest'
 import {
-  awaitingMacApp,
   canStop,
   clock,
   enrollPath,
@@ -14,12 +13,8 @@ import {
   READ_ALOUD,
   shouldAutoStop,
   STOP_SECONDS,
-  statusLine,
   TARGET_SECONDS,
 } from './voiceEnroll'
-import type { VoiceEnrollment } from './types/VoiceEnrollment'
-
-const sample = { bytes: 100, seconds: 12, recorded_at: '2026-10-09T10:00:00Z' }
 
 describe('the schedule', () => {
   it('has a read-aloud text that fits the target time', () => {
@@ -86,30 +81,6 @@ describe('levels', () => {
   })
 })
 
-describe('statusLine', () => {
-  const base: VoiceEnrollment = { sample: null, enrolled_at: null, current: false }
-  it('reads each state', () => {
-    expect(statusLine(null)).toBe('Checking…')
-    expect(statusLine(base)).toBe('Not enrolled')
-    expect(statusLine({ ...base, sample })).toBe(
-      'Sample saved — waiting for the Naru Mac app to build the enrollment',
-    )
-    expect(
-      statusLine({ sample, enrolled_at: '2026-10-09T10:05:00Z', current: true }),
-    ).toBe('Enrolled 2026-10-09')
-    // An enrollment older than the sample is not this voice yet.
-    expect(
-      statusLine({ sample, enrolled_at: '2026-01-01T00:00:00Z', current: false }),
-    ).toContain('waiting')
-  })
-
-  it('polls only while a saved sample has no current enrollment', () => {
-    expect(awaitingMacApp(null)).toBe(false)
-    expect(awaitingMacApp({ sample: null, enrolled_at: null, current: false })).toBe(false)
-    expect(awaitingMacApp({ sample, enrolled_at: null, current: false })).toBe(true)
-    expect(awaitingMacApp({ sample, enrolled_at: 'x', current: true })).toBe(false)
-  })
-})
 
 describe('native enrollment (naru task 2259)', () => {
   it('takes the native path only with a host, and starts it with one op:start message, no getUserMedia', () => {
@@ -124,16 +95,16 @@ describe('native enrollment (naru task 2259)', () => {
     try {
       expect(enrollPath(host as never)).toBe('native')
       expect(enrollPath(null)).toBe('browser')
-      startNativeEnroll(host as never)
+      startNativeEnroll(host as never, 7)
     } finally {
       Object.defineProperty(globalThis, 'navigator', { configurable: true, value: orig })
     }
-    expect(posted).toEqual([{ type: 'enroll', op: 'start' }])
+    expect(posted).toEqual([{ type: 'enroll', op: 'start', person: 7 }])
     expect(micAsked).toBe(0)
   })
 
   it('maps an enrollStatus payload to the status text', () => {
-    const base = { enrolling: false, enrolled: false, note: null, seconds: 12 }
+    const base = { enrolling: false, enrolled: false, note: null, seconds: 12, person: null }
     expect(nativeStatusLine(null)).toBe('Waiting for the Naru Mac app…')
     expect(nativeStatusLine(base)).toBe('Not enrolled')
     expect(nativeStatusLine({ ...base, enrolled: true })).toBe('Enrolled')

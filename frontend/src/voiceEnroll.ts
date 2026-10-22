@@ -1,9 +1,8 @@
-// Speaker-enrollment recording (naru task 1744, docs/voice-enrollment.md): the
-// pure logic behind Settings > Voice's "Voice guard enrollment" section — what
-// to read and when, how loud the take was, what the status line says. The
+// Voice-clip recording (naru tasks 1744, 2262, docs/voice-enrollment.md): the
+// pure logic behind recording a clip in Settings > Voice — what
+// to read and when, how loud the take was. The
 // component only wires this to the microphone.
 import type { EnrollStatus, NativeHost } from './nativeHost'
-import type { VoiceEnrollment } from './types/VoiceEnrollment'
 
 /** The Mac app's `enroll(wavURLs:)` and the server need at least this much audio. */
 export const MIN_SECONDS = 8
@@ -66,27 +65,14 @@ export function clock(seconds: number): string {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
 }
 
-/** The one-line state of the enrollment. */
-export function statusLine(e: VoiceEnrollment | null): string {
-  if (!e) return 'Checking…'
-  if (e.current && e.enrolled_at) return `Enrolled ${e.enrolled_at.slice(0, 10)}`
-  if (e.sample) return 'Sample saved — waiting for the Naru Mac app to build the enrollment'
-  return 'Not enrolled'
-}
-
-/** Whether the status page should keep polling for the Mac app's file. */
-export function awaitingMacApp(e: VoiceEnrollment | null): boolean {
-  return !!e && !!e.sample && !e.current
-}
-
 /** Inside the Mac app the host records (naru-audio enrolls only from the mic); a plain browser records itself. */
 export function enrollPath(host: NativeHost | null): 'native' | 'browser' {
   return host ? 'native' : 'browser'
 }
 
-/** The native path's start: one bridge message, no `getUserMedia` (naru task 2259). */
-export function startNativeEnroll(host: NativeHost): void {
-  host.post({ type: 'enroll', op: 'start' })
+/** The native path's start for one person in the library: one bridge message, no `getUserMedia` (naru task 2259). */
+export function startNativeEnroll(host: NativeHost, person: number): void {
+  host.post({ type: 'enroll', op: 'start', person })
 }
 
 /** The one-line state inside the Mac app, from the host's last `enrollStatus`. */

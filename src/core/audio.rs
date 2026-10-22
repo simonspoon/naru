@@ -1258,6 +1258,81 @@ pub fn add_voice(
     })
 }
 
+/// The daemon's answer to one `/v1/audio/speaker/*` call, passed through
+/// unread (naru task 2262): the people library is the daemon's, so Naru only
+/// relays it.
+#[derive(Debug)]
+pub struct SpeakerAnswer {
+    pub status: u16,
+    pub body: Vec<u8>,
+}
+
+/// The most of a speaker answer Naru reads — a kept clip is 16 kHz mono.
+const SPEAKER_CAP: u64 = 16 * 1024 * 1024;
+const SPEAKER_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// A clip upload for `POST /v1/audio/speaker/people/{id}/clips`: the WAV as
+/// the multipart part named `file`. Returns `(content type, body)`.
+pub fn speaker_clip_form(wav: &[u8]) -> (String, Vec<u8>) {
+    form_data(("clip.wav", "audio/wav", wav), &[])
+}
+
+/// One call to the daemon's speaker library (`path` under
+/// `/v1/audio/speaker/`), `body` being `(content type, bytes)`. Any HTTP
+/// status is `Ok` — the caller maps it; `Err` is the sentence for a daemon
+/// that did not answer. Blocking.
+pub fn speaker_request(
+    url: &str,
+    method: &str,
+    path: &str,
+    body: Option<(String, Vec<u8>)>,
+) -> Result<SpeakerAnswer, String> {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(SPEAKER_TIMEOUT))
+        .http_status_as_error(false)
+        .proxy(None)
+        .max_redirects(0)
+        .build()
+        .into();
+    let full = format!("{}{path}", url.trim_end_matches('/'));
+    let sent = match (method, body) {
+        ("GET", _) => agent.get(&full).call(),
+        ("DELETE", _) => agent.delete(&full).call(),
+        (m, body) => {
+            let (content_type, bytes) =
+                body.unwrap_or_else(|| ("application/json".to_string(), Vec::new()));
+            let request = match m {
+                "PUT" => agent.put(&full),
+                "PATCH" => agent.patch(&full),
+                _ => agent.post(&full),
+            };
+            request
+                .header("Content-Type", content_type)
+                .send(&bytes[..])
+        }
+    };
+    sent.and_then(|mut response| {
+        let status = response.status().as_u16();
+        let body = response
+            .body_mut()
+            .with_config()
+            .limit(SPEAKER_CAP)
+            .read_to_vec()?;
+        Ok(SpeakerAnswer { status, body })
+    })
+    .map_err(|e| match e {
+        ureq::Error::Timeout(_) => format!(
+            "naru-audio did not answer {path} within {} s",
+            SPEAKER_TIMEOUT.as_secs()
+        ),
+        ureq::Error::Io(_) | ureq::Error::ConnectionFailed | ureq::Error::HostNotFound => {
+            invalidate();
+            down_message(url)
+        }
+        other => format!("naru-audio could not answer {path}: {other}"),
+    })
+}
+
 /// `GET {url}{path}`'s body when it answered 2xx within [`LIST_TIMEOUT`].
 fn list(url: &str, path: &str) -> Option<String> {
     let agent: ureq::Agent = ureq::Agent::config_builder()
