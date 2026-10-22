@@ -2,6 +2,7 @@
 // pure logic behind Settings > Voice's "Voice guard enrollment" section — what
 // to read and when, how loud the take was, what the status line says. The
 // component only wires this to the microphone.
+import type { EnrollStatus, NativeHost } from './nativeHost'
 import type { VoiceEnrollment } from './types/VoiceEnrollment'
 
 /** The Mac app's `enroll(wavURLs:)` and the server need at least this much audio. */
@@ -76,4 +77,22 @@ export function statusLine(e: VoiceEnrollment | null): string {
 /** Whether the status page should keep polling for the Mac app's file. */
 export function awaitingMacApp(e: VoiceEnrollment | null): boolean {
   return !!e && !!e.sample && !e.current
+}
+
+/** Inside the Mac app the host records (naru-audio enrolls only from the mic); a plain browser records itself. */
+export function enrollPath(host: NativeHost | null): 'native' | 'browser' {
+  return host ? 'native' : 'browser'
+}
+
+/** The native path's start: one bridge message, no `getUserMedia` (naru task 2259). */
+export function startNativeEnroll(host: NativeHost): void {
+  host.post({ type: 'enroll', op: 'start' })
+}
+
+/** The one-line state inside the Mac app, from the host's last `enrollStatus`. */
+export function nativeStatusLine(s: EnrollStatus | null): string {
+  if (!s) return 'Waiting for the Naru Mac app…'
+  if (s.note) return s.note
+  if (s.enrolling) return `Recording — speak for ${s.seconds} s`
+  return s.enrolled ? 'Enrolled' : 'Not enrolled'
 }

@@ -10,7 +10,8 @@
  * is ever installed.
  *
  * Page to host: `window.webkit.messageHandlers.naruLive.postMessage(msg)`.
- * Host to page: only the gesture-setup callbacks on `window.naruNativeHost`.
+ * Host to page: the gesture-setup callbacks and `enrollStatus` (naru task 2259)
+ * on `window.naruNativeHost`.
  */
 
 import { SPEAKER_REFRESH_MS } from './liveSpeaker'
@@ -38,8 +39,9 @@ export type NativeOut =
   /** The person asked to switch the host between ambient (live session open,
    *  page paused) and live. naru-audio's `state` mode answers. */
   | { type: 'ambient'; on: boolean }
-  /** A speaker-enrollment recording was saved (naru task 1744): the host builds the enrollment from it. */
-  | { type: 'enroll' }
+  /** Start the native voice-guard enrollment (naru task 2259): the host records ~12 s from the mic itself and
+   *  answers through `enrollStatus`. A bare `{type: 'enroll'}` is ignored by the host. */
+  | { type: 'enroll'; op: 'start' }
   /** The custom wake words were saved (naru task 1769): no payload, the host refetches them from the server. */
   | { type: 'wakeWords' }
   /** The Gestures setup wizard's permission calls (naru task 1975); answered by `permissionsReply`. */
@@ -126,6 +128,34 @@ export function ambientRequestStep(input: {
   return null
 }
 
+/** The host's enrollment state, pushed through `naruNativeHost.enrollStatus` (naru task 2258). */
+export type EnrollStatus = { enrolling: boolean; enrolled: boolean; note: string | null; seconds: number }
+
+let enrollLast: EnrollStatus | null = null
+const enrollListeners = new Set<(s: EnrollStatus) => void>()
+
+/** The host-to-page enrollment callback. A malformed payload is dropped. */
+export function enrollStatus(r: unknown) {
+  if (typeof r !== 'object' || r === null) return
+  const o = r as Record<string, unknown>
+  if (typeof o.enrolling !== 'boolean' || typeof o.enrolled !== 'boolean') return
+  enrollLast = {
+    enrolling: o.enrolling,
+    enrolled: o.enrolled,
+    note: typeof o.note === 'string' ? o.note : null,
+    seconds: typeof o.seconds === 'number' && o.seconds > 0 ? o.seconds : 12,
+  }
+  enrollListeners.forEach((cb) => cb(enrollLast!))
+}
+
+/** Subscribes to enrollment pushes; the newest one so far (the host pushes on ready, before the page
+ *  section mounts) is replayed at once. Returns the unsubscribe. */
+export function onEnrollStatus(cb: (s: EnrollStatus) => void): () => void {
+  enrollListeners.add(cb)
+  if (enrollLast) cb(enrollLast)
+  return () => enrollListeners.delete(cb)
+}
+
 export type NativeHost = { post: (msg: NativeOut) => void }
 
 type Bridge = Record<string, unknown>
@@ -141,10 +171,10 @@ export function detectNativeHost(win: Bridge): NativeHost | null {
   return { post: (msg) => handler.postMessage!(msg) }
 }
 
-/** Installs `window.naruNativeHost` (the gesture-setup callbacks) and tells
+/** Installs `window.naruNativeHost` (the gesture-setup and enrollment callbacks) and tells
  *  the host the page is ready. Returns the uninstall. */
 export function installNativeHost(win: Bridge, host: NativeHost): () => void {
-  const api = { ...setupHostCallbacks }
+  const api = { ...setupHostCallbacks, enrollStatus }
   win.naruNativeHost = api
   host.post({ type: 'ready' })
   return () => {

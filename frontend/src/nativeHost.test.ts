@@ -4,6 +4,8 @@ import {
   ambientControl,
   ambientRequestStep,
   detectNativeHost,
+  enrollStatus,
+  onEnrollStatus,
   installNativeHost,
   needsHostRefresh,
   reportedAmbient,
@@ -56,9 +58,9 @@ describe('nativeHost', () => {
     const { win, posted } = stubWindow()
     const off = installNativeHost(win, detectNativeHost(win)!)
     expect(posted).toEqual([{ type: 'ready' }])
-    // The gesture-setup callbacks and nothing else: no mic bridge (naru task 2181).
+    // The gesture-setup callbacks and enrollStatus: no mic bridge (naru task 2181).
     expect(Object.keys(win.naruNativeHost as object).sort()).toEqual(
-      Object.keys(setupHostCallbacks).sort(),
+      [...Object.keys(setupHostCallbacks), 'enrollStatus'].sort(),
     )
     off()
     expect(win.naruNativeHost).toBeUndefined()
@@ -144,5 +146,20 @@ describe('ambientRequestStep', () => {
       post: true,
       on: false,
     })
+  })
+})
+
+describe('enrollStatus', () => {
+  it('delivers the host payload to subscribers and replays the last one', () => {
+    enrollStatus({ enrolling: true, enrolled: false, note: 'speak for 12 s', seconds: 12 })
+    enrollStatus({ bogus: 1 })
+    const got: unknown[] = []
+    const off = onEnrollStatus((s) => got.push(s))
+    enrollStatus({ enrolling: false, enrolled: true, note: null, seconds: 12 })
+    off()
+    expect(got).toEqual([
+      { enrolling: true, enrolled: false, note: 'speak for 12 s', seconds: 12 },
+      { enrolling: false, enrolled: true, note: null, seconds: 12 },
+    ])
   })
 })

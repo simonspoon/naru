@@ -1,8 +1,9 @@
 # Voice guard enrollment
 
 Settings > Voice has a **Voice guard enrollment** section (naru task 1744). The
-browser records about 10 seconds of the person's voice (auto-stopping at 12 s), the server saves it as
-a WAV, and the Naru Mac app builds the speaker enrollment from that WAV.
+browser records about 10 seconds of the person's voice (auto-stopping at 12 s) and the server saves
+it as a WAV. Inside the Naru Mac app the page instead asks the app to record 12 s from its own mic and
+build the speaker enrollment (see "The Mac app's half"); nothing builds one from the saved WAV.
 
 ## Files
 
@@ -32,16 +33,26 @@ Both live in the enrollment directory: the platform data dir plus `Naru`
 
 ## The Mac app's half
 
-On a successful save, a page running inside the Mac app posts the native bridge
-message `{type: 'enroll'}` (`NativeOut` in `nativeHost.ts`). The app then runs
-its FluidAudio WeSpeaker `enroll(wavURLs:)` over `voice-sample.wav` and writes
-`ambient-enrollment.json`. The page polls the status every 3 s while a sample
-has no current enrollment, so "waiting for the Naru Mac app" flips to
-"Enrolled" by itself. A browser outside the app saves the WAV and waits; the
-app builds the enrollment the next time it runs that step.
+naru-audio's voice guard reads only its own `speaker/enrollment.json`, which only
+the Mac app's native enrollment writes, recording 12 s from the mic. So inside the
+app (`detectNativeHost`) the page opens **no** `getUserMedia` and saves no WAV
+(naru task 2259, host half naru-mac 964d225):
 
-One short recording is enough: the Mac app builds a single enrollment from it
-and it works for every mic, so there is no re-enrollment per mic.
+- Page to host: the record button posts `{type: 'enroll', op: 'start'}` on the
+  `naruLive` bridge (`NativeOut`); a bare `{type: 'enroll'}` is ignored by the host.
+  The page shows the read-aloud text and a 12 s countdown while the host records.
+- Host to page: the host calls `window.naruNativeHost.enrollStatus({enrolling,
+  enrolled, note, seconds})` on page ready and on every enrollment state change
+  (`note` e.g. "speak for 12 s", "voice enrolled", "enrollment failed: ...",
+  "leave live first"). `nativeHost.ts` keeps the latest payload so a section
+  mounted after the push still sees it.
+- Inside the app the section's status line is the host's `note`, else
+  recording / Enrolled / Not enrolled; the server's sample/enrollment status is
+  not shown.
+
+A plain browser keeps the flow below unchanged but posts nothing to a host: it
+records, saves the WAV, and polls the status every 3 s. Nothing in the server
+builds an enrollment from that WAV.
 
 ## Why the server computes nothing
 

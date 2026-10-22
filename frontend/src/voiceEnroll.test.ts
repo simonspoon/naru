@@ -3,6 +3,9 @@ import {
   awaitingMacApp,
   canStop,
   clock,
+  enrollPath,
+  nativeStatusLine,
+  startNativeEnroll,
   meterFraction,
   meterStep,
   MIN_SECONDS,
@@ -105,5 +108,37 @@ describe('statusLine', () => {
     expect(awaitingMacApp({ sample: null, enrolled_at: null, current: false })).toBe(false)
     expect(awaitingMacApp({ sample, enrolled_at: null, current: false })).toBe(true)
     expect(awaitingMacApp({ sample, enrolled_at: 'x', current: true })).toBe(false)
+  })
+})
+
+describe('native enrollment (naru task 2259)', () => {
+  it('takes the native path only with a host, and starts it with one op:start message, no getUserMedia', () => {
+    const posted: unknown[] = []
+    const host = { post: (m: unknown) => posted.push(m) }
+    let micAsked = 0
+    const orig = (globalThis as { navigator?: unknown }).navigator
+    Object.defineProperty(globalThis, 'navigator', {
+      configurable: true,
+      value: { mediaDevices: { getUserMedia: () => { micAsked++; return Promise.reject(new Error('no')) } } },
+    })
+    try {
+      expect(enrollPath(host as never)).toBe('native')
+      expect(enrollPath(null)).toBe('browser')
+      startNativeEnroll(host as never)
+    } finally {
+      Object.defineProperty(globalThis, 'navigator', { configurable: true, value: orig })
+    }
+    expect(posted).toEqual([{ type: 'enroll', op: 'start' }])
+    expect(micAsked).toBe(0)
+  })
+
+  it('maps an enrollStatus payload to the status text', () => {
+    const base = { enrolling: false, enrolled: false, note: null, seconds: 12 }
+    expect(nativeStatusLine(null)).toBe('Waiting for the Naru Mac app…')
+    expect(nativeStatusLine(base)).toBe('Not enrolled')
+    expect(nativeStatusLine({ ...base, enrolled: true })).toBe('Enrolled')
+    expect(nativeStatusLine({ ...base, enrolling: true })).toBe('Recording — speak for 12 s')
+    expect(nativeStatusLine({ ...base, enrolling: true, note: 'speak for 12 s' })).toBe('speak for 12 s')
+    expect(nativeStatusLine({ ...base, note: 'enrollment failed: x' })).toBe('enrollment failed: x')
   })
 })

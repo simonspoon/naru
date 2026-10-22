@@ -9,19 +9,22 @@ import {
   toBase64,
   toPcm16,
 } from '../liveAudio'
-import { detectNativeHost } from '../nativeHost'
+import { detectNativeHost, onEnrollStatus, type EnrollStatus } from '../nativeHost'
 import { useFetch } from '../useFetch'
 import {
   awaitingMacApp,
   canStop,
   clock,
+  enrollPath,
   meterFraction,
   meterStep,
   MIN_SECONDS,
+  nativeStatusLine,
   nearSilent,
   peakDb,
   READ_ALOUD,
   shouldAutoStop,
+  startNativeEnroll,
   STOP_SECONDS,
   statusLine,
   TARGET_SECONDS,
@@ -63,6 +66,29 @@ export function VoiceEnrollSection() {
   const [starting, setStarting] = useState(false)
   const capture = useRef<Capture | null>(null)
   const mounted = useRef(true)
+  // Inside the Mac app the host records and reports; the page opens no microphone (naru task 2259).
+  const nativeHost = detectNativeHost(window as unknown as Record<string, unknown>)
+  const native = enrollPath(nativeHost) === 'native'
+  const [hostStatus, setHostStatus] = useState<EnrollStatus | null>(null)
+  const [nativeElapsed, setNativeElapsed] = useState(0)
+  const hostEnrolling = native && !!hostStatus?.enrolling
+
+  useEffect(() => {
+    if (!native) return
+    return onEnrollStatus(setHostStatus)
+  }, [native])
+
+  // The countdown while the host records.
+  useEffect(() => {
+    if (!hostEnrolling) return
+    const t0 = performance.now()
+    const id = window.setInterval(() => setNativeElapsed((performance.now() - t0) / 1000), 200)
+    return () => {
+      window.clearInterval(id)
+      // Zeroed when the recording ends, so the next one starts from 0:00.
+      setNativeElapsed(0)
+    }
+  }, [hostEnrolling])
 
   const release = useCallback(() => {
     const cap = capture.current
@@ -86,7 +112,7 @@ export function VoiceEnrollSection() {
   }, [release])
 
   // Poll while a saved sample waits for the Mac app's enrollment file.
-  const waiting = awaitingMacApp(status)
+  const waiting = !native && awaitingMacApp(status)
   useEffect(() => {
     if (!waiting) return
     const until = Date.now() + POLL_MAX_MS
@@ -208,8 +234,6 @@ export function VoiceEnrollSection() {
       () => {
         setBusy(false)
         setTake(null)
-        // Tell the Naru Mac app, when we are inside it, to build the enrollment.
-        detectNativeHost(window as unknown as Record<string, unknown>)?.post({ type: 'enroll' })
         refetch()
       },
       (e: unknown) => {
@@ -219,6 +243,7 @@ export function VoiceEnrollSection() {
     )
   }
 
+  const hostSeconds = hostStatus?.seconds ?? TARGET_SECONDS
   const silent = take ? nearSilent(take.peak) : false
 
   return (
@@ -226,15 +251,38 @@ export function VoiceEnrollSection() {
       <h2>Voice guard enrollment</h2>
       <section className="settings-command">
         <p className="muted settings-command-blurb">
-          Record about 10 seconds of your voice (it stops by itself at 12) so the voice guard can tell you from everyone
-          else. Read the text aloud at a normal pace. One recording works for every mic, so there
-          is no need to re-enroll per mic. The Naru Mac app builds the enrollment from the
-          recording.
+          {native
+            ? 'The Naru app records 12 seconds from its own microphone and builds the enrollment, so the voice guard can tell you from everyone else. Read the text aloud at a normal pace.'
+            : 'Record about 10 seconds of your voice (it stops by itself at 12) so the voice guard can tell you from everyone else. Read the text aloud at a normal pace. One recording works for every mic, so there is no need to re-enroll per mic. The recording is saved here; this browser does not build an enrollment from it.'}
         </p>
         {error && <p className="error">{error}</p>}
-        <p className="voice-enroll-status">{statusLine(status)}</p>
+        <p className="voice-enroll-status">
+          {native ? nativeStatusLine(hostStatus) : statusLine(status)}
+        </p>
 
-        {recording && (
+        {native && (
+          <>
+            {hostEnrolling && (
+              <div className="voice-enroll-live">
+                <p className="voice-enroll-clock">
+                  {clock(Math.min(nativeElapsed, hostSeconds))} / {clock(hostSeconds)}
+                </p>
+                <p className="voice-enroll-script">{READ_ALOUD}</p>
+              </div>
+            )}
+            <div className="settings-actions">
+              <button
+                type="button"
+                disabled={hostEnrolling || !hostStatus}
+                onClick={() => nativeHost && startNativeEnroll(nativeHost)}
+              >
+                {hostStatus?.enrolled ? 'Re-record' : 'Record your voice'}
+              </button>
+            </div>
+          </>
+        )}
+
+        {!native && recording && (
           <div className="voice-enroll-live">
             <div className="voice-enroll-meter" aria-label="microphone level">
               <div className="voice-enroll-meter-fill" style={{ width: `${level * 100}%` }} />
@@ -246,7 +294,7 @@ export function VoiceEnrollSection() {
           </div>
         )}
 
-        {take && !recording && (
+        {!native && take && !recording && (
           <div className="voice-enroll-take">
             <p>
               Recorded {clock(take.seconds)}; peak level {take.peak.toFixed(0)} dBFS.
@@ -266,6 +314,7 @@ export function VoiceEnrollSection() {
 
         {problem && <p className="error">{problem}</p>}
 
+        {!native && (
         <div className="settings-actions">
           {recording ? (
             <button type="button" disabled={!canStop(elapsed)} onClick={stop}>
@@ -303,6 +352,7 @@ export function VoiceEnrollSection() {
             </>
           )}
         </div>
+        )}
       </section>
     </>
   )
