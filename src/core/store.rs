@@ -9188,26 +9188,55 @@ impl Store {
     }
 
     /// Stamps one pushed user turn delivered. `false` when something else
-    /// (a `listen`, the barge-in hook) claimed it first. A stamp opens
-    /// `working_since` like any handed-out turn.
-    pub fn ack_live_turn(&mut self, session_id: i64, id: i64) -> Result<bool> {
+    /// (a `listen`, the barge-in hook) claimed it first, or when the session
+    /// no longer names `agent`, the agent it was pushed to (naru task 2269:
+    /// a handoff rebound it in between, so the push goes to the successor
+    /// instead). A stamp opens `working_since` like any handed-out turn.
+    pub fn ack_live_turn(&mut self, session_id: i64, id: i64, agent: Option<&str>) -> Result<bool> {
         let n = self.conn.execute(
             "UPDATE live_turns SET delivered_at = datetime('now') \
-             WHERE id = ?1 AND session_id = ?2 AND delivered_at IS NULL",
-            (id, session_id),
+             WHERE id = ?1 AND session_id = ?2 AND delivered_at IS NULL \
+               AND (SELECT agent_id FROM live_sessions WHERE id = ?2) IS ?3",
+            (id, session_id, agent),
         )?;
         self.open_live_working(session_id, n)?;
         Ok(n > 0)
     }
 
     /// [`Store::ack_live_turn`] for a delegate result.
-    pub fn ack_live_result(&mut self, session_id: i64, id: i64) -> Result<bool> {
+    pub fn ack_live_result(
+        &mut self,
+        session_id: i64,
+        id: i64,
+        agent: Option<&str>,
+    ) -> Result<bool> {
         let n = self.conn.execute(
             "UPDATE live_results SET delivered_at = datetime('now') \
-             WHERE id = ?1 AND session_id = ?2 AND delivered_at IS NULL",
-            (id, session_id),
+             WHERE id = ?1 AND session_id = ?2 AND delivered_at IS NULL \
+               AND (SELECT agent_id FROM live_sessions WHERE id = ?2) IS ?3",
+            (id, session_id, agent),
         )?;
         self.open_live_working(session_id, n)?;
+        Ok(n > 0)
+    }
+
+    /// Clears a pushed turn's delivery stamp so the next push pass sends it
+    /// again (naru task 2269): the handoff's reclaim of a turn the outgoing
+    /// agent was queued but never read.
+    pub fn unack_live_turn(&mut self, session_id: i64, id: i64) -> Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE live_turns SET delivered_at = NULL WHERE id = ?1 AND session_id = ?2",
+            (id, session_id),
+        )?;
+        Ok(n > 0)
+    }
+
+    /// [`Store::unack_live_turn`] for a delegate result.
+    pub fn unack_live_result(&mut self, session_id: i64, id: i64) -> Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE live_results SET delivered_at = NULL WHERE id = ?1 AND session_id = ?2",
+            (id, session_id),
+        )?;
         Ok(n > 0)
     }
 
@@ -18288,7 +18317,7 @@ mod tests {
         let turn = store
             .add_live_turn(session.id, LiveRole::User, "hi", None, None)
             .unwrap();
-        assert!(store.ack_live_turn(session.id, turn.id).unwrap());
+        assert!(store.ack_live_turn(session.id, turn.id, None).unwrap());
         let working = |s: &Store| s.get_live_session(session.id).unwrap().working_since;
         assert!(working(&store).is_some());
         assert!(
@@ -18317,16 +18346,52 @@ mod tests {
         let turn = store
             .add_live_turn(session.id, LiveRole::User, "now", None, None)
             .unwrap();
-        assert!(store.ack_live_turn(session.id, turn.id).unwrap());
+        assert!(store.ack_live_turn(session.id, turn.id, None).unwrap());
         assert!(store.close_live_working(session.id, 0).unwrap());
         assert!(working(&store).is_none());
         // The unguarded take still ends a span at once.
         let turn = store
             .add_live_turn(session.id, LiveRole::User, "again", None, None)
             .unwrap();
-        assert!(store.ack_live_turn(session.id, turn.id).unwrap());
+        assert!(store.ack_live_turn(session.id, turn.id, None).unwrap());
         assert!(store.next_user_turn(session.id).unwrap().is_none());
         assert!(working(&store).is_none());
+    }
+
+    /// Naru task 2269: a push is stamped only while the session still names
+    /// the agent it went to, and a reclaim clears the stamp again.
+    #[test]
+    fn a_push_ack_needs_the_same_agent_and_unack_reopens_it() {
+        let (mut store, _dir) = temp_store();
+        let session = store.start_live_session(None).unwrap();
+        store
+            .bind_live_agent(session.id, Some("run:0000abcd"))
+            .unwrap();
+        let turn = store
+            .add_live_turn(session.id, LiveRole::User, "hi", None, None)
+            .unwrap();
+        assert!(
+            !store
+                .ack_live_turn(session.id, turn.id, Some("run:0000ffff"))
+                .unwrap()
+        );
+        assert!(
+            store
+                .ack_live_turn(session.id, turn.id, Some("run:0000abcd"))
+                .unwrap()
+        );
+        assert!(store.unacked_live_items(session.id).unwrap().1.is_empty());
+        assert!(store.unack_live_turn(session.id, turn.id).unwrap());
+        assert_eq!(store.unacked_live_items(session.id).unwrap().1.len(), 1);
+        let result = store.add_live_result("found it").unwrap();
+        assert!(!store.ack_live_result(session.id, result.id, None).unwrap());
+        assert!(
+            store
+                .ack_live_result(session.id, result.id, Some("run:0000abcd"))
+                .unwrap()
+        );
+        assert!(store.unack_live_result(session.id, result.id).unwrap());
+        assert_eq!(store.unacked_live_items(session.id).unwrap().0.len(), 1);
     }
 
     /// Naru task 2072: a second `claim_listen` on a lease supersedes the first;

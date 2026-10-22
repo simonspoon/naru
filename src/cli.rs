@@ -3617,6 +3617,15 @@ EXAMPLES
     /// ROUTE must start with `#/` (e.g. `#/projects/3`). `--say` is the
     /// sentence spoken as the page changes; without it the turn is a pure
     /// action and says nothing.
+    ///
+    /// The app's routes: `#/`, `#/live`, `#/inbox`, `#/cc`, `#/library`,
+    /// `#/library/scripts`, `#/library/workflows`, `#/settings`,
+    /// `#/settings/keyboard`, `#/settings/voice`, `#/settings/memory`,
+    /// `#/settings/pricing`, `#/settings/system`, `#/terminal`,
+    /// `#/projects/<id>`, `#/projects/<id>/tasks/<task id>`,
+    /// `#/projects/<id>/workflows`, `#/projects/<id>/git`,
+    /// `#/projects/<id>/files`, `#/projects/<id>/terminal`,
+    /// `#/projects/<id>/dashboard`, `#/projects/<id>/settings`.
     #[command(after_help = "\
 EXAMPLES
   mesa live navigate '#/inbox' --say \"Opening your inbox.\"
@@ -3878,6 +3887,12 @@ enum LiveBoardCmd {
     /// (bare arrays work for the list templates; flow and checklist also take
     /// an array of strings). Bad JSON, a wrong shape or nothing to show is
     /// `validation`. All text is escaped.
+    ///
+    /// A hand-written html board gets the person's theme as CSS variables:
+    /// `--naru-bg`, `--naru-fg`, `--naru-muted`, `--naru-surface`,
+    /// `--naru-raised`, `--naru-ring`, `--naru-accent`, `--naru-accent-2`,
+    /// `--naru-good`, `--naru-warn`, `--naru-bad`. Write
+    /// `var(--naru-fg, #ccc)` rather than a fixed colour.
     ///
     /// `--say` speaks a sentence alongside it, exactly like `navigate --say`.
     /// Put every flag BEFORE the body text: everything after `push` that is

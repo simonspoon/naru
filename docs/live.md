@@ -826,9 +826,25 @@ Three pieces close it:
   agent left waiting across its handoff ends in `conflict` on its next poll
   rather than taking the successor's next result or turn.
 
-The outgoing driver, if a delegate's notification wakes it after the
-handoff, does nothing (rule 11). If a delegate posted nothing, the driver
-falls back to the notification's final message (rule 12).
+The outgoing driver, if a delegate's notification or a pushed record wakes
+it after the handoff, does nothing (rule 11). If a delegate posted nothing,
+the driver falls back to the notification's final message (rule 12).
+
+**A push racing the handoff (naru task 2269).** A pushed turn or result is
+stamped delivered (`ack_live_turn`/`ack_live_result`) only while the session
+still names the run it was queued for, so a push pass that read the outgoing
+agent just before the rebind leaves the record unstamped and dequeued, and
+the next pass sends it to the successor. And right after the rebind,
+`live::reclaim_unread_pushes` clears the stamp of every pushed record the
+outgoing run was handed but never read — still queued in its `inbox/`, or
+written to claude's stdin after its last main-thread step
+(`runner::take_unread`, read off `events.jsonl`) — because that run is
+stopped within seconds and its stale lease refuses any `say`. "Read" is a
+heuristic: a main-thread assistant line from the step already in flight
+counts as claude having read a message it may only reach at its next step,
+so such a record can still be lost; and one claude had in fact read is sent
+to the successor too, where the old agent can no longer speak to answer it
+twice.
 
 Rule 13 (mesa task 1482) lets the agent reach the person's phone with
 `naru notify "<sentence>" --open live` — a Telegram message whose button

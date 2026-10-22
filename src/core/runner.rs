@@ -310,6 +310,51 @@ pub fn dequeue_named(inbox: &Path, name: &str) {
     let _ = fs::remove_file(inbox.join(format!("{name}.json")));
 }
 
+/// The messages named `prefix…` the run was handed but its claude has not
+/// read (naru task 2269), for a caller about to stop it: each still queued in
+/// `inbox/` is removed and named, and so is each the runner delivered since
+/// claude's last main-thread step (an assistant line or a result), since a
+/// message written to stdin mid-turn is read only when the turn next acts.
+/// Best effort: an unknown run or unreadable log names nothing.
+pub fn take_unread(runs: &Path, id: &str, prefix: &str) -> Vec<String> {
+    let Ok(dir) = job_dir_of(runs, id) else {
+        return vec![];
+    };
+    // The queue first: a file the runner moves out after this is logged
+    // as delivered before the log is read below.
+    let mut queued = Vec::new();
+    for file in pending_inbox(&dir.join("inbox")) {
+        let name = file
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        if name.starts_with(prefix) && fs::remove_file(&file).is_ok() {
+            queued.push(name);
+        }
+    }
+    let mut unread = Vec::new();
+    if let Ok(body) = fs::read_to_string(dir.join("events.jsonl")) {
+        for v in body
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        {
+            let kind = v.get("type").and_then(Value::as_str);
+            if matches!(kind, Some("assistant" | "result")) && !is_subagent_line(&v) {
+                unread.clear();
+            } else if kind == Some("naru_runner")
+                && v.get("event").and_then(Value::as_str) == Some("message_delivered")
+                && let Some(file) = v.get("file").and_then(Value::as_str)
+            {
+                unread.push(file.to_string());
+            }
+        }
+    }
+    unread.retain(|f| f.starts_with(prefix));
+    unread.extend(queued);
+    unread
+}
+
 /// Where a run's inbox is, if the run exists and has not ended.
 pub fn live_inbox_in(runs: &Path, id: &str) -> Option<PathBuf> {
     let dir = job_dir_of(runs, id).ok()?;
@@ -1990,6 +2035,41 @@ mod tests {
         .unwrap();
         assert!(!enqueue_named(&inbox, "live-2-turn-1", "a").unwrap());
         assert!(pending_inbox(&inbox).is_empty());
+    }
+
+    /// Naru task 2269: a queued message and one delivered since claude's last
+    /// main-thread step are unread; one delivered before it, a subagent line
+    /// in between and another prefix are not.
+    #[test]
+    fn take_unread_names_queued_and_unread_delivered_messages() {
+        let runs = tempfile::tempdir().unwrap();
+        let dir = runs.path().join("0000abcd");
+        fs::create_dir_all(dir.join("inbox").join("delivered")).unwrap();
+        fs::write(dir.join("job.json"), "{}").unwrap();
+        let ev = |v: Value| append_event(&dir, &v.to_string());
+        ev(
+            json!({"type": "naru_runner", "event": "message_delivered", "file": "live-2-turn-000000000001.json"}),
+        );
+        ev(json!({"type": "assistant", "parent_tool_use_id": null}));
+        ev(
+            json!({"type": "naru_runner", "event": "message_delivered", "file": "live-2-turn-000000000002.json"}),
+        );
+        ev(json!({"type": "assistant", "parent_tool_use_id": "toolu_1"}));
+        ev(
+            json!({"type": "naru_runner", "event": "message_delivered", "file": "1700000000-x.json"}),
+        );
+        assert!(enqueue_named(&dir.join("inbox"), "live-1-result-000000000003", "r").unwrap());
+        assert!(enqueue_named(&dir.join("inbox"), "other", "o").unwrap());
+        assert_eq!(
+            take_unread(runs.path(), "0000abcd", "live-"),
+            [
+                "live-2-turn-000000000002.json",
+                "live-1-result-000000000003.json"
+            ]
+        );
+        // The queued one is gone, the foreign one stays.
+        assert_eq!(pending_inbox(&dir.join("inbox")).len(), 1);
+        assert!(take_unread(runs.path(), "0000ffff", "live-").is_empty());
     }
 
     #[test]
