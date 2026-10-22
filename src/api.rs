@@ -6845,9 +6845,14 @@ async fn restart_live_agent(
     body: Result<Json<serde_json::Value>, JsonRejection>,
 ) -> ApiResult<Response> {
     require_agent_access(&state, &addr, &headers)?;
+    require_same_site_fetch(&headers)?;
     let Json(_) = body?;
     let store = state.store.clone();
     let session = tokio::task::spawn_blocking(move || -> ApiResult<crate::core::LiveSession> {
+        // The store lock is held across `handoff_session` on purpose: it
+        // serialises concurrent restarts, since the second sees the fresh
+        // agent_id, so `agent_ended` is null and it gets a 409. The cost is
+        // that other store requests wait for the duration of the spawn.
         let mut store = store.lock().unwrap();
         let Some(session) = store.current_live_session()? else {
             return Err(no_live_session());

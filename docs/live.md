@@ -381,8 +381,8 @@ session on its own; the person is told, and the page leads with **Restart
 agent** (naru task 2263): `POST /api/live/restart` (`require_agent_access`)
 is a handoff with a fixed note (`the previous agent ended (<reason>); restarted
 from the web`) through `live::handoff_session`, the same core function as
-`naru live handoff`. 404 with no live session, 409 `conflict` while the agent
-has not ended, 503 and an untouched session when the successor cannot start.
+`naru live handoff`. 404 `not_found` with no live session, 409 `conflict` while the agent
+has not ended, 503 `unavailable` and an untouched session when the successor cannot start.
 The live agent's run is started with `idle_timeout_secs` =
 `live::LIVE_AGENT_IDLE_SECS` (7200), above the hourly keep-warm interval plus
 the watcher's tick, so its own idle timeout no longer wins that race.
