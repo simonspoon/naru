@@ -618,6 +618,13 @@ pub const NOTICE_CACHE_WARM_TEXT: &str = "Cache warm-up: reply with one word, no
 /// the prompt cache's one-hour TTL.
 pub const LIVE_WARM_INTERVAL_SECS: i64 = 3600;
 
+/// The live agent's runner idle timeout (naru task 2263). It must outlast the
+/// keep-warm interval plus the watcher's 5-minute tick: at the runner's
+/// default hour the run ended on its idle timeout seconds after the warm
+/// notice became due, leaving a `live` session with a dead agent. Twice the
+/// interval leaves the warm notice (and a real turn) room to arrive first.
+pub const LIVE_AGENT_IDLE_SECS: u64 = 2 * LIVE_WARM_INTERVAL_SECS as u64;
+
 /// The fixed text a notice of `kind` is spoken with — the one place the
 /// sentence is chosen, so `Store::add_live_notice` and the tests agree.
 pub fn notice_text(kind: crate::core::LiveNotice) -> &'static str {
@@ -1130,7 +1137,7 @@ pub fn start_agent(dir: &str, name: &str, prompt: &str) -> Result<String, String
         cwd: Some(dir.into()),
         name: Some(name.into()),
         agent: None,
-        idle_timeout_secs: None,
+        idle_timeout_secs: Some(LIVE_AGENT_IDLE_SECS),
     };
     let job = crate::core::runner::start_in_with(
         &crate::core::runner::runs_dir(),
@@ -1143,6 +1150,141 @@ pub fn start_agent(dir: &str, name: &str, prompt: &str) -> Result<String, String
         .and_then(|v| v.as_str())
         .ok_or("the run reported no job id")?;
     Ok(format!("{RUN_RECEIPT}{id}"))
+}
+
+/// After a handoff has rebound the session: stops the outgoing agent `old` at
+/// once and clears it from `predecessor_agent_id`, unless it still has
+/// delegates running (`has_delegates`, mesa task 1359) — then it stays the
+/// predecessor for the successor's `listen` to stop. Best-effort, a failed stop
+/// is one stderr line; `stop` is a parameter so a test can aim it at a
+/// throwaway runs directory.
+pub fn stop_handed_off_agent(
+    store: &mut crate::core::Store,
+    session_id: i64,
+    old: Option<&str>,
+    has_delegates: bool,
+    stop: &dyn Fn(&str) -> std::result::Result<(), String>,
+) {
+    let Some(old) = old else {
+        return;
+    };
+    if has_delegates || !matches!(store.take_live_predecessor_if(session_id, old), Ok(true)) {
+        return;
+    }
+    if let Err(e) = stop(old) {
+        eprintln!("live session {session_id}: could not stop its previous agent: {e}");
+    }
+}
+
+/// `naru live handoff` for a session whose note is already settled, shared by
+/// the CLI and `POST /api/live/restart` (naru task 2263): validates the note,
+/// bumps the lease by spawning a successor in `dir` named `name · lease N`
+/// with [`handoff_prompt`], rebinds the session without ending it, and stops
+/// the outgoing run. A failed successor spawn is `unavailable` and leaves the
+/// session untouched. `dir`/`name` are the caller's `live_agent_dir`.
+pub fn handoff_session(
+    store: &mut crate::core::Store,
+    session: &crate::core::types::LiveSession,
+    note: &str,
+    dir: &str,
+    name: &str,
+) -> Result<crate::core::types::LiveSession, crate::core::Error> {
+    use crate::core::Error;
+    if note.is_empty() {
+        return Err(Error::Validation(
+            "a handoff note must not be empty".to_string(),
+        ));
+    }
+    if note.chars().count() > crate::core::LIVE_TEXT_MAX {
+        return Err(Error::Validation(format!(
+            "a handoff note must be at most {} characters",
+            crate::core::LIVE_TEXT_MAX
+        )));
+    }
+    let lease = session.lease + 1;
+    let old_agent = session.agent_id.clone();
+    let successor = format!("{name} · lease {lease}");
+    // Decided before anything is spawned; the pass itself is spawned only once
+    // the successor exists, so a failed spawn still changes nothing.
+    let dream_wanted = dream_wanted(&store.list_notebook(false)?, &[]);
+    let delegates = old_agent
+        .as_deref()
+        .map(running_delegates)
+        .unwrap_or_default();
+    let job = spawn_agent(
+        store,
+        dir,
+        &successor,
+        &handoff_prompt(store, session.id, lease, note, &delegates),
+    )
+    .map(Some)
+    .map_err(|e| {
+        Error::Unavailable(format!(
+            "live session {} could not spawn a successor agent, so it was not \
+             handed off: {e}",
+            session.id
+        ))
+    })?;
+    // Best-effort, like the summariser: a failed spawn is one stderr line and
+    // the handoff goes through un-resting.
+    let dream = dream_wanted.and_then(|reason| {
+        match crate::core::memory_job::spawn(
+            &crate::core::memory_job::Job::Dream {
+                session_id: Some(session.id),
+            },
+            dir,
+            store.db_path().as_deref(),
+        ) {
+            Ok(receipt) => Some(receipt),
+            Err(e) => {
+                eprintln!(
+                    "live session {}: could not spawn the dream pass ({reason}), so the \
+                     handoff does not rest: {e}",
+                    session.id
+                );
+                None
+            }
+        }
+    });
+    // A predecessor still waiting on its delegates from an earlier handoff
+    // would be overwritten by this rebind and never stopped.
+    if let Ok(Some(prev)) = store.take_live_predecessor(session.id)
+        && let Err(e) = stop_agent(&prev)
+    {
+        eprintln!(
+            "live session {}: could not stop its previous agent: {e}",
+            session.id
+        );
+    }
+    // The rebind is guarded on `status = 'live'`: a successor bound to nothing
+    // must not be left running.
+    let rebound = match store.hand_off_live_session(session.id, job.as_deref(), dream.as_deref()) {
+        Ok(session) => session,
+        Err(e) => {
+            if let Some(job) = job.as_deref()
+                && let Err(stop) = stop_agent(job)
+            {
+                eprintln!(
+                    "live session {}: could not stop the successor agent {job}: {stop}",
+                    session.id
+                );
+            }
+            return Err(e);
+        }
+    };
+    stop_handed_off_agent(
+        store,
+        rebound.id,
+        old_agent.as_deref(),
+        !delegates.is_empty(),
+        &stop_agent,
+    );
+    Ok(rebound)
+}
+
+/// What `POST /api/live/restart` hands the successor (naru task 2263).
+pub fn restart_note(reason: &str) -> String {
+    format!("the previous agent ended ({reason}); restarted from the web")
 }
 
 /// The `naru run` job a receipt names, `None` for a legacy bare job id or no
@@ -1685,6 +1827,13 @@ pub fn notebook_line(e: &crate::core::LiveNotebookEntry) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Naru task 2263: the live agent's idle timeout must outlast the keep-warm
+    /// notice plus the watcher's 5-minute tick, or the run ends first.
+    #[test]
+    fn live_agent_idle_timeout_outlasts_the_warm_notice() {
+        assert!(LIVE_AGENT_IDLE_SECS > LIVE_WARM_INTERVAL_SECS as u64 + 300);
+    }
 
     /// The prompt is one argument mesa passes through `spawn_bg`, and since
     /// mesa task 1068 the session id is the whole of it: the instructions are

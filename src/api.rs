@@ -3514,6 +3514,7 @@ fn router(state: AppState) -> Router {
         .route("/api/live/speaker", post(claim_live_speaker))
         .route("/api/live/leave", post(leave_live_speaker))
         .route("/api/live/interrupt", post(interrupt_live_agent))
+        .route("/api/live/restart", post(restart_live_agent))
         .route("/api/live/turns/{id}/played", post(live_turn_played))
         // Speaking one turn: the same synthesiser, headers and gate pair as
         // the inbox's play button — see `speak_inbox` for why that pair, and
@@ -6829,6 +6830,55 @@ async fn interrupt_live_agent(
             message: e.to_string(),
         })??;
     Ok(Json(out).into_response())
+}
+
+/// `POST /api/live/restart` (naru task 2263): a handoff with a fixed note for a
+/// session whose agent has ended (`agent_ended` non-null), so the web can
+/// bring the conversation back without ending it. Shares
+/// `live::handoff_session` with `naru live handoff`. No session is 404, a
+/// session whose agent is still running (or has no run) is 409, a failed
+/// spawn is 503 and leaves the session untouched. Answers the rebound session.
+async fn restart_live_agent(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Result<Json<serde_json::Value>, JsonRejection>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let Json(_) = body?;
+    let store = state.store.clone();
+    let session = tokio::task::spawn_blocking(move || -> ApiResult<crate::core::LiveSession> {
+        let mut store = store.lock().unwrap();
+        let Some(session) = store.current_live_session()? else {
+            return Err(no_live_session());
+        };
+        let Some(reason) = session.agent_id.as_deref().and_then(live::agent_ended) else {
+            return Err(ApiError {
+                status: StatusCode::CONFLICT,
+                code: "conflict",
+                message: format!(
+                    "live session {}'s agent has not ended, so there is nothing to restart",
+                    session.id
+                ),
+            });
+        };
+        let (dir, name) = live_agent_dir(&store, session.project_id, session.id)?;
+        Ok(live::handoff_session(
+            &mut store,
+            &session,
+            &live::restart_note(&reason),
+            &dir,
+            &name,
+        )?)
+    })
+    .await
+    .map_err(|e| ApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        code: "internal",
+        message: e.to_string(),
+    })??;
+    state.agents_gen.fetch_add(1, Ordering::SeqCst);
+    Ok(Json(session).into_response())
 }
 
 /// A device saying it is leaving (mesa task 1622): if it holds the voice, the

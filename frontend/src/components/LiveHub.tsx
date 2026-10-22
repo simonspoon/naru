@@ -27,6 +27,7 @@ import {
   sendLiveUtterance,
   startLive,
   stopLive,
+  restartLiveAgent,
   transcribeAudio,
   interruptLive,
   transcribeStatus,
@@ -836,6 +837,7 @@ export function LiveHub({
     { pollMs: POLL_MS },
   )
   const session = data?.session ?? null
+  const agentEnded = data?.agent_ended ?? null
   const live = isLive(session)
   const offer = data?.offer ?? null
   // The native host, decided once (see below where it matters most). The
@@ -4094,7 +4096,7 @@ export function LiveHub({
 
   // ---- the press ----
 
-  const controls = liveControls(session, pending, unlocked, paused)
+  const controls = liveControls(session, pending, unlocked, paused, agentEnded)
 
   // Drag-resize (mesa task 1144): the handle is on the panel's left edge and
   // the panel sits at the right of `.shell-body`'s row — with the agents
@@ -4188,6 +4190,17 @@ export function LiveHub({
 
   function act(button: LiveButton, acceptOffer = false) {
     if (button.disabled) return
+    if (button.action === 'restart') {
+      // Naru task 2263: a new agent on the same session; no audio gesture.
+      setPending('start')
+      setActionError(null)
+      restartLiveAgent()
+        .then(() => refetch(), (err: unknown) => {
+          setActionError(err instanceof Error ? err.message : String(err))
+        })
+        .finally(() => setPending(null))
+      return
+    }
     if (button.action === 'detach') {
       // Naru task 2013: step this browser out; the session and agent stay live.
       silence()
@@ -4700,7 +4713,7 @@ export function LiveHub({
     : endsInHead(secondary)
       ? secondary
       : null
-  const statusLine = liveStatusLine(session, speaking, actionError, paused, path === 'unavailable', unlocked)
+  const statusLine = liveStatusLine(session, speaking, actionError, paused, path === 'unavailable', unlocked, agentEnded)
   // Whether mesa is saying something *right now*, for the status pill above
   // the composer. `sounding` is a ref because the run advances from a media
   // event, ahead of any render — but `speaking` is state, set from the

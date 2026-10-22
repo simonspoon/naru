@@ -34,7 +34,7 @@ export interface LiveButton {
    * other two are this browser's own participation, which is not the server's
    * business (see `pause` below).
    */
-  action: 'start' | 'stop' | 'listen' | 'detach' | 'pause' | 'resume'
+  action: 'start' | 'stop' | 'listen' | 'detach' | 'pause' | 'resume' | 'restart'
   /** A press already in flight: the same press again would start a second one. */
   disabled: boolean
 }
@@ -86,6 +86,7 @@ export function liveControls(
   pending: LivePending,
   unlocked: boolean,
   paused: boolean,
+  agentEnded: string | null = null,
 ): LiveControls {
   // The panel is about the transcript, not the press: it stays offered for as
   // long as there is a session to read, in-flight presses included.
@@ -128,6 +129,18 @@ export function liveControls(
       ? { label: 'Resume', action: 'resume', disabled: false }
       : { label: 'Pause', action: 'pause', disabled: false }
     : null
+  // Naru task 2263: the agent's run is over (`LiveState.agent_ended`) while
+  // the session is still `live`. Nothing will answer until it is restarted, so
+  // that leads, in every browser, joined or not; there is still no End press
+  // (below), and Pause stays where it was.
+  if (agentEnded !== null) {
+    return {
+      primary: { label: 'Restart agent', action: 'restart', disabled: false },
+      secondary: null,
+      pause,
+      panel,
+    }
+  }
   // Naru task 2013: there is no End press. Detach steps this browser out and
   // leaves the agent running; `naru live stop` is the only way to end it.
   if (unlocked) {
@@ -177,11 +190,15 @@ export function liveStatusLine(
   paused: boolean,
   unavailable = false,
   unlocked = true,
+  agentEnded: string | null = null,
 ): string | null {
   if (error !== null) return error
   if (session === null) return 'Not live. Press Attach to start a conversation.'
   if (!isLive(session)) {
     return 'That conversation has ended. Press Attach to start another.'
+  }
+  if (agentEnded !== null) {
+    return `The agent ended (${agentEnded}). Press Restart agent to bring it back.`
   }
   if (!unlocked) {
     return 'Detached — the agent is still running. Press Attach to hear it again.'

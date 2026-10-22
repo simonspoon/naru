@@ -1163,6 +1163,11 @@ export function stopLive(): Promise<LiveSession> {
   return request('/api/live', jsonDelete())
 }
 
+/** Restarts the agent of a live session whose agent has ended (naru task 2263). */
+export function restartLiveAgent(): Promise<LiveSession> {
+  return request('/api/live/restart', jsonInit('POST', {}))
+}
+
 /**
  * One dictated line from the person. Free text from a microphone by way of the
  * OS — untrusted data, which is why it goes into the store as a turn and

@@ -37,6 +37,20 @@ describe('isLive', () => {
 })
 
 describe('liveControls', () => {
+  it('leads with Restart agent once the live agent has ended', () => {
+    for (const unlocked of [false, true]) {
+      const c = liveControls(session(), null, unlocked, false, 'idle timeout')
+      expect(c.primary).toEqual({ label: 'Restart agent', action: 'restart', disabled: false })
+      expect(c.secondary).toBe(null)
+    }
+    // An ended session, or a running agent, is unchanged.
+    expect(liveControls(session({ status: 'ended' }), null, true, false, 'x').primary.action).toBe('start')
+    expect(liveControls(session(), null, true, false, null).primary.action).toBe('detach')
+    expect(liveStatusLine(session(), false, null, false, false, true, 'idle timeout')).toContain(
+      'agent ended',
+    )
+  })
+
   it('offers to start when nothing is running', () => {
     // Not live, so audio being locked changes nothing: the press that starts
     // the conversation is the gesture that unlocks it.

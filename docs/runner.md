@@ -45,7 +45,7 @@ in flight, `idle` after a `{"type":"result"}` line (recording `last_result`,
 - the `stop` marker appears: stdin closes, claude gets 5s, then its group is
   killed — `stopped`;
 - nothing is in flight, no background task is running and `idle_timeout_secs`
-  (default 3600, `run start --idle-timeout`) have passed since the last line
+  (default 3600, `run start --idle-timeout`; the live conversation's agent gets 7200, naru task 2263) have passed since the last line
   claude wrote — `finished`. Every claude line resets that clock, not only a
   `result`; a `system/init` line opens a turn the runner did not start itself
   (a background subagent's notification waking claude), so the run reads
