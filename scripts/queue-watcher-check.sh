@@ -20,6 +20,11 @@ export MESA_DB="$TMP/mesa.db"
 # Pin the user config away from the real ~/.mesa/config.json: this gate
 # asserts the BUILT-IN spawn command, so a configured one must not leak in.
 export MESA_CONFIG_FILE="$TMP/no-config.json"
+# Pin the naru home too: the queue pause marker (`naru queue pause`), logs and
+# runs live there, and a real paused queue would stall every dispatch below.
+export NARU_HOME="$TMP/naru-home"
+# A free port per server, so a concurrent check's server never answers ours.
+free_port() { python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])'; }
 
 CHECKS=0
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -99,7 +104,7 @@ TASK_A=$(jqs .id)
 [ "$(jqs .status)" = "todo" ] || fail "new task must start todo"
 ok "fixtures: project A (real path), B (no path), C (real path), task A todo"
 
-PORT=17781
+PORT=$(free_port)
 wait_for_server() {
   local port=$1
   for _ in $(seq 1 50); do
@@ -271,7 +276,7 @@ run 0 "$MESA" project archive "$ARCH"
 run 0 "$MESA" task create "$ARCH" "task arch"
 TASK_ARCH=$(jqs .id)
 
-ARCH_PORT=17782
+ARCH_PORT=$(free_port)
 MESA_CLAUDE_BIN="$ARCH_STUB" MESA_WATCH_TODO_TICK_MS=150 \
   "$MESA" serve --port "$ARCH_PORT" --watch-queue >/dev/null 2>&1 &
 SERVER_PID=$!
@@ -338,7 +343,7 @@ run 0 "$MESA" task create "$UMB" "child two" --parent "$TASK_EPIC"
 TASK_C2=$(jqs .id)
 run 0 "$MESA" task update "$TASK_EPIC" --status in_progress
 
-UMB_PORT=17783
+UMB_PORT=$(free_port)
 MESA_CLAUDE_BIN="$UMB_STUB" MESA_WATCH_TODO_TICK_MS=150 \
   "$MESA" serve --port "$UMB_PORT" --watch-queue >/dev/null 2>&1 &
 SERVER_PID=$!
@@ -412,7 +417,7 @@ T_EPIC=$(jqs .id)
 run 0 "$MESA" task create "$EPIC_P" "story" --parent "$T_EPIC"
 T_STORY=$(jqs .id)
 
-EPIC_PORT=17784
+EPIC_PORT=$(free_port)
 MESA_CLAUDE_BIN="$EPIC_STUB" MESA_WATCH_TODO_TICK_MS=150 \
   "$MESA" serve --port "$EPIC_PORT" --watch-queue >/dev/null 2>&1 &
 SERVER_PID=$!
@@ -481,7 +486,7 @@ CONC_T2=$(jqs .id)
 run 0 "$MESA" task create "$CONC" "task three"
 CONC_T3=$(jqs .id)
 
-CONC_PORT=17786
+CONC_PORT=$(free_port)
 MESA_CLAUDE_BIN="$CONC_STUB" MESA_WATCH_TODO_TICK_MS=150 MESA_CONFIG_FILE="$CONC_CONFIG" \
   "$MESA" serve --port "$CONC_PORT" --watch-queue >/dev/null 2>&1 &
 SERVER_PID=$!
@@ -616,7 +621,7 @@ LIVE_T1=$(jqs .id)
 
 start_holder
 
-LIVE_PORT=17787
+LIVE_PORT=$(free_port)
 MESA_CLAUDE_BIN="$LIVE_STUB" MESA_WATCH_TODO_TICK_MS=150 MESA_CC_PROJECTS_DIR="$LIVE_CC_DIR" \
   "$MESA" serve --port "$LIVE_PORT" --watch-queue >/dev/null 2>&1 &
 SERVER_PID=$!
@@ -745,7 +750,7 @@ run 0 "$MESA" project update "$REAP_P" --path "$REAP_DIR"
 run 0 "$MESA" task create "$REAP_P" "task reap"
 REAP_T1=$(jqs .id)
 
-REAP_PORT=17788
+REAP_PORT=$(free_port)
 MESA_CLAUDE_BIN="$REAP_STUB" MESA_WATCH_TODO_TICK_MS=150 \
   "$MESA" serve --port "$REAP_PORT" --watch-queue >/dev/null 2>&1 &
 SERVER_PID=$!
@@ -900,7 +905,7 @@ run 0 "$MESA" task create "$SF_P" "task sf two"
 SF_T2=$(jqs .id)
 
 touch "$STUB_DIR/spawnfail"
-SF_PORT=17792
+SF_PORT=$(free_port)
 MESA_CLAUDE_BIN="$SF_STUB" MESA_WATCH_TODO_TICK_MS=150 \
   "$MESA" serve --port "$SF_PORT" --watch-queue >/dev/null 2>&1 &
 SERVER_PID=$!
@@ -1029,7 +1034,7 @@ SR_P=$(jqs .id)
 run 0 "$MESA" project update "$SR_P" --path "$SR_DIR"
 run 0 "$MESA" task create "$SR_P" "task sr one"
 SR_T=$(jqs .id)
-SR_PORT=17793
+SR_PORT=$(free_port)
 MESA_CLAUDE_BIN="$SF_STUB" MESA_WATCH_TODO_TICK_MS=150 MESA_WATCH_TODO_SPAWN_BACKOFF_MS=600 \
   "$MESA" serve --port "$SR_PORT" --watch-queue >/dev/null 2>&1 &
 SERVER_PID=$!
@@ -1074,7 +1079,7 @@ exit 2
 EOF
 printf '#!/usr/bin/env bash\necho "stub claude agents is down" >&2\nexit 1\n' > "$GUARD_FAIL_STUB"
 chmod +x "$GUARD_STUB" "$GUARD_FAIL_STUB"
-GUARD_LOG="$GUARD_HOME/.naru/logs/task-close-guard.log"
+GUARD_LOG="$NARU_HOME/logs/task-close-guard.log"
 
 export MESA_DB="$TMP/guard.db"
 run 0 "$MESA" project create "Guard" --no-git
@@ -1140,7 +1145,7 @@ LIVE_DB="$TMP/live.db"
 LIVE_CFG="$TMP/live-config.json"
 mkdir -p "$TMP/projL"
 DIR_L=$(cd "$TMP/projL" && pwd -P)
-LIVE_PORT=17795
+LIVE_PORT=$(free_port)
 live_mesa() { MESA_DB="$LIVE_DB" MESA_CONFIG_FILE="$LIVE_CFG" "$MESA" "$@"; }
 live_api() { # live_api <method> <path> <json>
   curl -s -o "$TMP/live-body" -w '%{http_code}' -X "$1" -H 'Content-Type: application/json' \
@@ -1192,7 +1197,7 @@ kill "$SERVER_PID" 2>/dev/null || true; SERVER_PID=
 # config and port.
 AL_DB="$TMP/alias.db"
 AL_CFG="$TMP/alias-config.json"
-AL_PORT=17797
+AL_PORT=$(free_port)
 mkdir -p "$TMP/projAL"
 DIR_AL=$(cd "$TMP/projAL" && pwd -P)
 al_mesa() { MESA_DB="$AL_DB" MESA_CONFIG_FILE="$AL_CFG" "$MESA" "$@"; }
@@ -1239,7 +1244,7 @@ kill "$SERVER_PID" 2>/dev/null; wait "$SERVER_PID" 2>/dev/null || true; SERVER_P
 # pass, and the task is never touched. Own db, config and port.
 STALL_DB="$TMP/stall.db"
 STALL_CFG="$TMP/stall-config.json"
-STALL_PORT=17796
+STALL_PORT=$(free_port)
 STALL_STUB="$TMP/stall-stub"
 mkdir -p "$STALL_STUB" "$TMP/projS"
 DIR_S=$(cd "$TMP/projS" && pwd -P)
@@ -1310,7 +1315,7 @@ run 0 "$MESA" task claim "$SW_OLD" --owner ghost-session
 run 0 "$MESA" task update "$SW_NEW" --status in_progress
 run 0 "$MESA" task claim "$SW_NEW" --owner ghost-session
 sqlite3 "$SW_DB" "update tasks set claimed_at = datetime('now','-5 minutes'), updated_at = datetime('now','-5 minutes') where id = $SW_OLD"
-SW_PORT=17791
+SW_PORT=$(free_port)
 MESA_CLAUDE_BIN="$SW_STUB" MESA_WATCH_TODO_TICK_MS=150 MESA_CONFIG_FILE="$SW_CONFIG" \
   "$MESA" serve --port "$SW_PORT" >/dev/null 2>&1 &
 SERVER_PID=$!

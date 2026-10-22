@@ -231,6 +231,8 @@ cargo build --quiet
 MESA=target/debug/mesa
 
 TMP=$(mktemp -d)
+# A free port per server, so a concurrent check's server never answers ours.
+free_port() { python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])'; }
 # A detached memory job (`naru __job …`, naru task 1690) may still be running
 # when the gate ends and would write into $TMP while it is removed, so the trap
 # waits (bounded, ~10s) for any whose command line names the physical $TMP
@@ -1007,7 +1009,7 @@ ok "a failed spawn: exit 1 unavailable, the session is ended again, the retry is
 # 5. The API twin over a live `serve`
 # =====================================================================
 
-PORT=17781
+PORT=$(free_port)
 BASE="http://127.0.0.1:$PORT"
 "$MESA" serve --port "$PORT" >"$TMP/serve.log" 2>&1 &
 SERVER_PID=$!
@@ -1884,7 +1886,7 @@ SERVER_PID=
 # one opt-in posture (CLAUDE.md). What it must NOT do is relax the Content-Type
 # gate, or let the agent-gated live routes off their stronger gate.
 
-LAN_PORT=17782
+LAN_PORT=$(free_port)
 LAN_BASE="http://127.0.0.1:$LAN_PORT"
 "$MESA" serve --lan --port "$LAN_PORT" >"$TMP/lan.log" 2>&1 &
 LAN_PID=$!
@@ -2320,7 +2322,7 @@ LIVE_AUDIO_MAX_EXPR=$(grep -Eo 'pub const LIVE_AUDIO_MAX: usize = [^;]+;' src/co
 [ -n "$LIVE_AUDIO_MAX_EXPR" ] || fail "could not read LIVE_AUDIO_MAX from src/core/store.rs"
 LIVE_AUDIO_MAX=$((LIVE_AUDIO_MAX_EXPR))
 
-PORT=17781
+PORT=$(free_port)
 BASE="http://127.0.0.1:$PORT"
 
 # ---- the server: no naru-audio daemon runs here ----
@@ -2409,7 +2411,7 @@ SERVER_PID=
 # The two confused-deputy defenses are untouched by that relaxation: the
 # Content-Type gate below still fires in this mode, exactly as it does in
 # default mode.
-LAN_PORT=17782
+LAN_PORT=$(free_port)
 LAN_BASE="http://127.0.0.1:$LAN_PORT"
 "$MESA" serve --lan --port "$LAN_PORT" >"$TMP/lan12.log" 2>&1 &
 LAN_PID=$!
@@ -2726,7 +2728,7 @@ R_HTML=$("$MESA" live board push --quiet --kind html --file "$TMP/mockup.html" |
 R_SVG=$("$MESA" live board push --quiet --workflow "$DIA" | jq -r .id)
 R_IMG=$("$MESA" live board push --quiet --image "$TMP/shot.png" | jq -r .id)
 
-PORT=17781
+PORT=$(free_port)
 BASE="http://127.0.0.1:$PORT"
 "$MESA" serve --port "$PORT" >"$TMP/serve13.log" 2>&1 &
 SERVER_PID=$!
@@ -2981,7 +2983,7 @@ SERVER_PID=
 # Plain guard in both modes, identical headers in both: what makes an
 # agent-written document safe to render is the CSP, not who asked for it, so
 # the answer must not vary with the mode mesa is running in.
-LAN_PORT=17782
+LAN_PORT=$(free_port)
 LAN_BASE="http://127.0.0.1:$LAN_PORT"
 "$MESA" serve --lan --port "$LAN_PORT" >"$TMP/lan13.log" 2>&1 &
 LAN_PID=$!
@@ -3541,7 +3543,7 @@ run 0 "$MESA" live memory delete "$CATB"
 ok "live memory categories: --category on add/replace stores it, a bad one is validation writing nothing, categorize (--quiet keeps category, drops body; updated_at unmoved; retired id not_found), and the dream prompt shows each category and teaches categorize whose staged answer lands"
 
 # ---- the API: four routes on require_agent_access, default mode ----
-PORT=17781
+PORT=$(free_port)
 BASE="http://127.0.0.1:$PORT"
 "$MESA" serve --port "$PORT" >"$TMP/serve14.log" 2>&1 &
 SERVER_PID=$!
@@ -3653,7 +3655,7 @@ wait "$SERVER_PID" 2>/dev/null || true
 SERVER_PID=
 
 # ---- the same routes under --lan: relaxed, never absent ----
-LAN_PORT=17782
+LAN_PORT=$(free_port)
 LAN_BASE="http://127.0.0.1:$LAN_PORT"
 "$MESA" serve --lan --port "$LAN_PORT" >"$TMP/lan14.log" 2>&1 &
 LAN_PID=$!
@@ -4051,7 +4053,7 @@ ok "live handoff/context with nothing live: not_found naming live start; a missi
 
 # A server for the utterances (the page's half of the loop) and for the
 # one-session-id check.
-PORT=17781
+PORT=$(free_port)
 BASE="http://127.0.0.1:$PORT"
 "$MESA" serve --port "$PORT" >"$TMP/serve15.log" 2>&1 &
 SERVER_PID=$!
@@ -5026,7 +5028,7 @@ wait_for "the second wake note" bash -c "[ \"\$(grep -c 'naru live listen --leas
 ok "POST /api/live/interrupt: same JSON, one more interrupt and wake note"
 
 # The route's gates.
-raw POST "/api/live/interrupt" -H 'Host: evil.example:17781' -H 'Content-Type: application/json' -d '{}'
+raw POST "/api/live/interrupt" -H "Host: evil.example:$PORT" -H 'Content-Type: application/json' -d '{}'
 [ "$STATUS" = "403" ] || fail "POST interrupt with a foreign Host: 403 (got $STATUS)"
 raw POST "/api/live/interrupt" -H 'Content-Type: text/plain' -d '{}'
 [ "$STATUS" = "415" ] || fail "POST interrupt without application/json: 415 (got $STATUS)"
