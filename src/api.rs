@@ -98,15 +98,15 @@ struct AppState {
     /// counter, so any ingest anywhere conservatively invalidates every
     /// project's cached entry too.
     project_cc_cache: Arc<Mutex<HashMap<(i64, String), (i64, CcDashboard)>>>,
+    /// Serializes API-driven `cc::sync_shared` runs (a second caller waits, so
+    /// its response still reflects a finished ingest without a second walk).
+    cc_sync: Arc<Mutex<()>>,
     /// Model scorecard cache (mesa task 1514), keyed by the `(since, until)`
     /// strings as sent. Each entry carries the `cc_stamp` plus the stored
     /// agent-definition version count (the change markers come from the
     /// library, not `cc_*`) and the task-event stamp (the task-outcome
     /// columns) it was built with; same stamp-gated staleness as
     /// `cc_cache`.
-    /// Serializes API-driven `cc::sync_shared` runs (a second caller waits, so
-    /// its response still reflects a finished ingest without a second walk).
-    cc_sync: Arc<Mutex<()>>,
     cc_scorecard_cache: Arc<Mutex<HashMap<ScorecardKey, ((i64, i64, String), CcScorecard)>>>,
     /// Live subscription-usage cache: `(fetched_unix, data)`. The UI polls this,
     /// but each fetch hits Anthropic's usage endpoint, so a short TTL throttles
@@ -13173,7 +13173,7 @@ async fn cc_sync_api(state: &AppState) -> ApiResult<()> {
     let store = state.store.clone();
     let gate = state.cc_sync.clone();
     blocking(move || {
-        let _one_at_a_time = gate.lock().unwrap();
+        let _one_at_a_time = gate.lock().unwrap_or_else(|e| e.into_inner());
         crate::core::cc::sync_shared(&store, false).map(|_| ())
     })
     .await??;
@@ -13301,10 +13301,16 @@ async fn reset_cc_index(
     headers: HeaderMap,
 ) -> ApiResult<Response> {
     require_agent_access(&state, &addr, &headers)?;
-    let report = {
-        let mut store = state.store.lock().unwrap();
-        crate::core::cc::reset_and_sync(&mut store)?
-    };
+    // Same order as `cc_sync_api` (gate, then store): a reset must not land
+    // between an in-flight sync's files, or its stale cursors would skip rows.
+    let store = state.store.clone();
+    let gate = state.cc_sync.clone();
+    let report = blocking(move || {
+        let _one_at_a_time = gate.lock().unwrap_or_else(|e| e.into_inner());
+        let mut store = store.lock().unwrap();
+        crate::core::cc::reset_and_sync(&mut store)
+    })
+    .await??;
     Ok(Json(report).into_response())
 }
 
