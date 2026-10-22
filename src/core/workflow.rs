@@ -2253,7 +2253,7 @@ pub fn snapshot_lines(snap: &crate::core::types::WorkflowSnapshot) -> Vec<String
     out
 }
 
-/// Seeds one task-loop workflow (naru task 2053). Absent: created, with its
+/// Seeds one managed built-in workflow (naru task 2053; now the KB ones). Absent: created, with its
 /// first revision labelled `seed`. Present: the definition is built under a
 /// scratch name, and when it differs the existing workflow's graph is
 /// replaced **in place** as a new `seed` revision — same id, runs, name and
@@ -2314,7 +2314,7 @@ fn seed_loop_workflow(
     }
 }
 
-/// Creates a task-loop graph's nodes in order and wires `edges`, which name
+/// Creates a managed built-in workflow graph's nodes in order and wires `edges`, which name
 /// nodes by their index in `nodes`.
 fn add_loop_graph(
     store: &mut Store,

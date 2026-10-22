@@ -37,7 +37,7 @@ describe('workflowBuiltin', () => {
       'Installed or updated 2 built-in workflows.',
     )
     expect(installLine(v('KB: ongoing capture', false))).toBe('KB: ongoing capture — off')
-    expect(installLine(v('Task loop', true))).toBe('Task loop — on')
+    expect(installLine(v('KB: mine past sessions', true))).toBe('KB: mine past sessions — on')
   })
 })
 

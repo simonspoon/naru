@@ -25,14 +25,13 @@ ok() { echo "ok: $*"; }
 NARU="$PREFIX/bin/naru"
 cp "$SRC" "$NARU"
 "$NARU" project create tmp --no-git >/dev/null
-# stub "new" binary: queue verbs on marker files ($TMP/busy = not idle), --version, defaults
+# stub "new" binary: queue verbs on marker files ($TMP/busy = not idle), --version
 cat >"$TMP/newbin" <<STUB
 #!/bin/sh
 case "\$1 \$2" in
   "queue pause") touch "$TMP/paused" ;;
   "queue resume") rm -f "$TMP/paused" ;;
   "queue idle") [ ! -e "$TMP/busy" ] ;;
-  "workflow defaults") echo "\$*" >>"$TMP/defaults.log" ;;
   "workflow list"|"workflow update") exec "$SRC" "\$@" ;;
   "project resolve") echo '{"id":1}' ;;
   "live status") if [ -e "$TMP/live" ]; then echo '{"status":"live","agent_id":"run:same"}'; else echo '{"status":"none"}'; fi ;;
