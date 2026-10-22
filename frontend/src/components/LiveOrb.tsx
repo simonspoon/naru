@@ -54,6 +54,22 @@ function MicGlyph({ slashed = false }: { slashed?: boolean }) {
   )
 }
 
+/** The ambient/live switch's glyph: the paths of LiveHub's `AmbientMark` /
+ *  `LiveWaveMark` (label 'Ambient' = icon ambient, 'Live' = icon live). */
+function AmbientGlyph({ label }: { label: 'Ambient' | 'Live' }) {
+  return (
+    <g fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path
+        d={
+          label === 'Ambient'
+            ? 'M7 9a5 5 0 1 1 9 3c-1 1.5-2 2-2 4a3 3 0 0 1-5.5 1.5M12 9a1.5 1.5 0 0 1 2 1.5'
+            : 'M4 10v4M8 6v12M12 3v18M16 7v10M20 10v4'
+        }
+      />
+    </g>
+  )
+}
+
 function SpeakerGlyph({ muted }: { muted: boolean }) {
   return (
     <g fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -325,7 +341,7 @@ export function OrbHeaderControls(p: OrbProps) {
         )}
         {p.ambient && (
           <HeaderButton label={p.ambient.label} off={false} onPress={p.ambient.onPress}>
-            <span>{p.ambient.label}</span>
+            <AmbientGlyph label={p.ambient.label} />
           </HeaderButton>
         )}
         {p.canPause && p.ambient?.label !== 'Live' && (
