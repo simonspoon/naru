@@ -533,7 +533,7 @@ records a revision automatically.
   nodes keep their ids (a node deleted since comes back under its old id), and
   the result is recorded as a new `restore of N` revision. Nothing is ever
   deleted from the history; restoring what is already current is `validation`.
-- **Reseed is a revision.** `naru workflow defaults --task-loop` builds the
+- **Reseed is a revision.** a built-in install builds the
   shipped definition under a scratch name; when it differs from the existing
   workflow, the existing one's graph is replaced **in place** (nodes matched by
   kind and title, so ids survive) as a `seed` revision, and the scratch copy is
@@ -801,47 +801,37 @@ default is never overwritten.
 
 ## Built-in workflows (naru task 2103)
 
-Four workflows ship in the binary and are **managed**: `Task loop` and
-`Task loop: implement and review` (the child it calls), described here, and the
-two KB workflows (see "The KB built-ins" below). `serve` installs or
-updates them on **every start**, whatever the watcher flags say (and
-`naru workflow defaults --task-loop` does the same by hand; `--project` is
-accepted and unused). They are global (no project), enabled, and marked
-`builtin: true` on the workflow record (a row in `workflow_builtins`, migration
-index 98, naming the shipped definition — not a column on `workflows`).
+Two workflows ship in the binary and are **managed**: the two KB workflows
+(see "The KB built-ins" below). The Task loop workflows that shipped before
+naru task 2264 are gone: migration index 101 deletes the managed rows (their
+nodes, edges, runs and revisions cascade), and a user's own `Task loop (custom)`
+copy is untouched. `serve` installs or updates the built-ins on **every start**,
+whatever the watcher flags say (and `naru workflow defaults --builtins` does the
+same by hand). They are global (no project), and marked `builtin: true` on the
+workflow record (a row in `workflow_builtins`, migration index 98, naming the
+shipped definition — not a column on `workflows`).
 
 - **Read-only.** `workflow update` (anything but `--enabled`), `delete`,
   `node create|update|delete`, `edge create|delete`, `type add|remove` and a
-  revision restore are `validation`: `workflow "Task loop" is a built-in managed
-  by Naru and is read-only; duplicate it to customise`, in the CLI and the API
-  (422) alike. Run, show, revisions, runs, export and the on/off switch work.
+  revision restore are `validation`: `workflow "KB: mine past sessions" is a
+  built-in managed by Naru and is read-only; duplicate it to customise`, in the
+  CLI and the API (422) alike. Run, show, revisions, runs, export and the
+  on/off switch work.
 - **Updates.** A shipped graph that differs from the installed one is reseeded
   **in place** as a `seed` revision (same id, runs and history). Nothing a user
   did to a built-in survives that, which is the point: it cannot be edited.
-- **Duplicate to customise.** `naru workflow duplicate "Task loop"` (the web UI's
-  "Duplicate to customise") makes an ordinary editable workflow named
-  `Task loop (custom)` (`(custom 2)`… when taken), disabled like every duplicate,
-  `builtin: false`. A duplicated parent still calls the **built-in** child by name.
+- **Duplicate to customise.** `naru workflow duplicate "KB: mine past sessions"`
+  (the web UI's "Duplicate to customise") makes an ordinary editable workflow
+  named `KB: mine past sessions (custom)` (`(custom 2)`… when taken), disabled
+  like every duplicate, `builtin: false`.
 - **Upgrade from an install that already has them.** A workflow with the same
   name that is not yet a built-in is the user's: it is renamed
   `"<name> (custom)"` (id, graph, runs and project kept — nothing is ever
-  deleted), and when both loop workflows were renamed in the same start the
-  custom parent's `subworkflow` nodes are re-pointed at the custom child so it
-  keeps calling its own. Only then is the built-in created. The renamed
-  workflows are ordinary editable ones.
-- **Which one the watcher runs** is decided by the name in
-  `commands.queue-watcher` (`naru workflow run "Task loop" --input {id} --detach`)
-  — there is no separate setting. After an upgrade that name means the
-  built-in; to keep running a customised loop, edit that command to
-  `"Task loop (custom)"` (`docs/config.md`).
-- **Inventory.** The only workflows shipped code, hooks and watchers call by
-  name are these two (the watcher command, and the parent's subworkflow node).
-  The ambient pair (`naru workflow defaults --project`) is not managed: it files
-  tasks into a project the user picks, and nothing calls it by name.
-- **Global means the task's checkout.** A global workflow's `cli` nodes start in
-  the workspace, so every loop node first moves to the task's own project
-  `local_path` (when it has one and it exists): stage agents run in the task's
-  checkout, not in one fixed project's.
+  deleted). Only then is the built-in created. The renamed workflows are
+  ordinary editable ones.
+- **Inventory.** The ambient pair (`naru workflow defaults --project`) is not
+  managed: it files tasks into a project the user picks, and nothing calls it by
+  name.
 
 ### Updates to a customised copy (naru task 2052)
 
@@ -876,8 +866,7 @@ missing one; state is `~/.naru/kb-mined.txt` (`NARU_KB_MINED` overrides).
 
 - **Installed off.** A KB built-in is created **disabled** — it spends model
   calls — and an install never writes `enabled` on a built-in already there,
-  so whatever the person set stands. (The Task loop pair is still created
-  enabled: the queue-watcher depends on it.) A KB built-in deleted behind
+  so whatever the person set stands. A KB built-in deleted behind
   Naru's back comes back, off, on the next install.
 - **Same rename rule.** A same-named user workflow is renamed
   `"<name> (custom)"` and left exactly as it was, enabled state included.
@@ -885,34 +874,11 @@ missing one; state is `~/.naru/kb-mined.txt` (`NARU_KB_MINED` overrides).
   `builtins_never_reference_external_scripts` fails on a `~/…`, `$HOME/…` or
   `/Users/…` path naming a script or a `bin/` dir in any built-in node config.
 - **Installing by hand.** `naru workflow defaults --builtins` (no `--project`
-  needed; `--task-loop` does the same) and the Workflows page's
+  needed) and the Workflows page's
   **Install built-ins** button (`POST /api/workflows/builtins/install`,
   `require_agent_access`) run the same `install_builtins` as `serve` start and
   answer `{created, skipped}` — `created` holds the built-ins created *or*
   updated (a reseed counts), each with its `enabled`.
-
-## The task-loop workflow (naru task 1960)
-
-`naru workflow defaults --task-loop --project <id|name>` (CLI only; instead of
-the ambient pair) installs the managed built-in **Task loop** (see "Built-in
-workflows" above; `serve` does it on start): a `manual` workflow whose input is a task id, running plan -> (UX
-designer if the plan says `UI: yes`) -> implement -> review + verify -> at most
-one fix pass -> close. Design and rationale: `docs/task-loop-workflow.md`; the
-stage driver every agent node runs: `docs/stage.md`. The loop is unrolled (the
-engine is a DAG), so two iterations is structural. Agent stages are `cli` nodes
-running `naru stage run` with `timeout_secs` above the stage deadline; hand-off
-is the per-run scratch folder `~/.naru/loop/<task>-<time>-<pid>/` (task, plan,
-design, diff summary, reports, `reasons.txt`) and only a state line
-(`task=<id> scratch=<dir> ui=<yes|no> <stage>=<result>`) travels as node input.
-Review and verify are one node (a `--also` pair); the reports must end in
-`VERDICT: PASS` or `VERDICT: FAIL`, and anything unfinished or unmarked is
-INCONCLUSIVE, never a pass. Close-pass runs `naru task update --status done
---result-file`; every other ending runs `naru task note`, `--status backlog`
-and `naru notify` (a notify failure is tolerated). `NARU_LOOP_DEADLINE`,
-`NARU_LOOP_CEILING`, `NARU_LOOP_SILENCE` and `NARU_LOOP_GRACE` override the stage
-clocks (the deadline is soft: an active stage runs on to the ceiling, naru task
-2184). Gate:
-`scripts/task-loop-check.sh`.
 
 **Why backlog.** The review's output must never be `todo`: `serve --watch-queue`
 dispatches an agent onto every unblocked `todo` leaf, and a digest of overheard

@@ -1,7 +1,6 @@
 # Stage driver (`naru stage run`, naru task 1959)
 
-The one thing a task-loop workflow agent node runs (`docs/task-loop-workflow.md`
-sections 3 and 4). It starts an agent run exactly as `naru run start --agent`
+The driver a workflow `cli` node runs to supervise one agent stage. It starts an agent run exactly as `naru run start --agent`
 does (in-process, `core::runner::start_in`), then watches it with the `run
 wait` reading of the job directory (`docs/runner.md`) and prints one JSON
 verdict. CLI only, no route; `--quiet` is accepted and ignored.

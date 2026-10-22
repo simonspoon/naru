@@ -2376,14 +2376,14 @@ STATUS=$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: evil.example' "http://
 kill "$SERVER_PID" 2>/dev/null; wait "$SERVER_PID" 2>/dev/null || true; SERVER_PID=
 ok "revisions: a CLI burst is one, an API edit another (author web), show/diff/restore, node ids kept, nothing deleted, gated"
 
-# The task loop is a managed built-in (naru task 2103): global, read-only, reseeded in place as a revision.
-NTL='[.[] | select(.name | startswith("Task loop"))] | length'
+# The KB workflows are managed built-ins (naru tasks 2103, 2118): global, read-only, reseeded in place as a revision.
 run 0 "$NARU" project create HistProj --no-git
-run 0 "$NARU" workflow defaults --project HistProj --task-loop
-TL=$("$NARU" workflow show "Task loop" | jq -r '.workflow.id')
-TLN=$("$NARU" workflow show "Task loop" | jq -r '.nodes[1].id')
-[ "$("$NARU" workflow show "Task loop" | jq -r '.workflow | "\(.builtin) \(.project_id) \(.enabled)"')" = "true null true" ] || fail "Task loop is a global, enabled built-in"
+run 0 "$NARU" workflow defaults --builtins
+TL=$("$NARU" workflow show "KB: mine past sessions" | jq -r '.workflow.id')
+TLN=$("$NARU" workflow show "KB: mine past sessions" | jq -r '.nodes[1].id')
+[ "$("$NARU" workflow show "KB: mine past sessions" | jq -r '.workflow | "\(.builtin) \(.project_id) \(.enabled)"')" = "true null false" ] || fail "KB: mine past sessions is a global, disabled built-in"
 [ "$("$NARU" workflow list HistProj | jq 'length')" = "0" ] || fail "the built-ins are global, not in the project"
+[ "$("$NARU" workflow list | jq '[.[] | select(.name | startswith("Task loop"))] | length')" = "0" ] || fail "no Task loop built-in is installed"
 run 1 "$NARU" workflow node update "$TLN" --title "Edited by hand"
 grep -q "read-only; duplicate it to customise" <<<"$STDERR" || fail "node update names the way out: $STDERR"
 run 1 "$NARU" workflow update "$TL" --name Renamed
@@ -2391,20 +2391,20 @@ run 1 "$NARU" workflow delete "$TL"
 run 1 "$NARU" workflow node create "$TL" cli Extra --config '{"command":"true"}'
 run 1 "$NARU" workflow node delete "$TLN"
 run 1 "$NARU" workflow revision restore "$TL" 1
-run 0 "$NARU" workflow update "$TL" --enabled false
 run 0 "$NARU" workflow update "$TL" --enabled true
+run 0 "$NARU" workflow update "$TL" --enabled false
 run 0 "$NARU" workflow duplicate "$TL"
-[ "$(jqs '.workflow.name + " " + (.workflow.builtin|tostring)')" = "Task loop (custom) false" ] || fail "a duplicate is an ordinary copy: $STDOUT"
+[ "$(jqs '.workflow.name + " " + (.workflow.builtin|tostring)')" = "KB: mine past sessions (custom) false" ] || fail "a duplicate is an ordinary copy: $STDOUT"
 run 0 "$NARU" workflow node update "$(jqs '.nodes[1].id')" --title "Edited by hand"
-run 0 "$NARU" workflow delete "Task loop (custom)"
+run 0 "$NARU" workflow delete "KB: mine past sessions (custom)"
 # a changed shipped graph is brought back in place, as a seed revision (the edit goes in behind Naru's back)
 PATH="/usr/bin:$PATH" sqlite3 "$MESA_DB" "UPDATE workflow_nodes SET title = 'Edited by hand' WHERE id = $TLN"
-run 0 "$NARU" workflow defaults --project HistProj --task-loop
-[ "$(jq -r '[.created[].workflow.id] | index('"$TL"') != null' <<<"$STDOUT")" = "true" ] || fail "the reseed updated Task loop in place: $STDOUT"
-[ "$("$NARU" workflow list | jq "$NTL")" = "2" ] || fail "reseeding left a copy behind"
+run 0 "$NARU" workflow defaults --builtins
+[ "$(jq -r '[.created[].workflow.id] | index('"$TL"') != null' <<<"$STDOUT")" = "true" ] || fail "the reseed updated the built-in in place: $STDOUT"
+[ "$("$NARU" workflow list | jq '[.[] | select(.name | startswith("KB:"))] | length')" = "2" ] || fail "reseeding left a copy behind"
 [ "$("$NARU" workflow revisions "$TL" | jq -r '.[0].reason')" = "seed" ] || fail "the reseed is a seed revision"
-[ "$("$NARU" workflow show "$TL" | jq -r '.nodes[1].title')" = "Plan ok?" ] || fail "the reseed restored the shipped graph"
-run 0 "$NARU" workflow defaults --project HistProj --task-loop
+[ "$("$NARU" workflow show "$TL" | jq -r '[.nodes[].title] | index("Mine sessions") != null and index("Edited by hand") == null')" = "true" ] || fail "the reseed restored the shipped graph"
+run 0 "$NARU" workflow defaults --builtins
 [ "$(jqs '.created | length')" = "0" ] || fail "an unchanged reseed writes nothing"
 ok "built-ins: global and read-only (update/node/delete/restore refused with the way out), duplicate is editable, a changed graph becomes a seed revision of the same workflow, an unchanged one is a no-op, no copies"
 
@@ -2423,7 +2423,7 @@ run 1 "$NARU" workflow builtin-update "$UPC" --keep
 UPN=$("$NARU" workflow show "$UPC" | jq -r '.nodes | length')
 TLN=$("$NARU" workflow show "$TL" | jq -r '.nodes[1].id')
 PATH="/usr/bin:$PATH" sqlite3 "$MESA_DB" "UPDATE workflow_nodes SET title = 'Edited by hand' WHERE id = $TLN"
-run 0 "$NARU" workflow defaults --project HistProj --task-loop
+run 0 "$NARU" workflow defaults --builtins
 [ "$("$NARU" workflow show "$UPC" | jq -r '.workflow.builtin_updated')" = "true" ] || fail "the copy is flagged after a reseed"
 [ "$("$NARU" workflow list | jq -r "[.[] | select(.id == $UPC)][0].builtin_updated")" = "true" ] || fail "the list carries the flag"
 UPREV=$("$NARU" workflow revisions "$UPC" | jq length)
@@ -2447,11 +2447,11 @@ run 0 "$NARU" workflow builtin-update "$UPC" --keep
 [ "$("$NARU" workflow revisions "$UPC" | jq length)" = "$UPREV" ] || fail "keep added a revision"
 TLN=$("$NARU" workflow show "$TL" | jq -r '.nodes[1].id')
 PATH="/usr/bin:$PATH" sqlite3 "$MESA_DB" "UPDATE workflow_nodes SET title = 'Edited again' WHERE id = $TLN"
-run 0 "$NARU" workflow defaults --project HistProj --task-loop
+run 0 "$NARU" workflow defaults --builtins
 run 0 "$NARU" workflow node update "$("$NARU" workflow show "$UPC" | jq -r '.nodes[1].id')" --title "Mine"
 UPREV=$("$NARU" workflow revisions "$UPC" | jq length)
 run 0 "$NARU" workflow builtin-update "$UPC" --take
-[ "$(jqs '.workflow.builtin_updated')" = "false" ] && [ "$(jqs '[.nodes[].title] | (index("Mine") == null) and (index("Plan ok?") != null)')" = "true" ] || fail "take adopts the built-in: $STDOUT"
+[ "$(jqs '.workflow.builtin_updated')" = "false" ] && [ "$(jqs '[.nodes[].title] | (index("Mine") == null) and (index("Mine sessions") != null)')" = "true" ] || fail "take adopts the built-in: $STDOUT"
 [ "$("$NARU" workflow revisions "$UPC" | jq -r '.[0].reason')" = "take built-in rev $("$NARU" workflow revisions "$TL" | jq '.[0].rev')" ] && [ "$("$NARU" workflow revisions "$UPC" | jq length)" = "$((UPREV + 1))" ] || fail "take is one revision: $("$NARU" workflow revisions "$UPC" | jq -c "[.[]|[.rev,.reason]]")"
 run 0 "$NARU" workflow delete "$UPC"
 ok "built-in update: a copy is flagged only after a reseed, answers refused for a non-copy, 404/422/403 on the route, keep clears it with no change, take adopts the built-in as one revision"
@@ -2470,14 +2470,18 @@ run 2 "$NARU" workflow defaults
 ok "KB built-ins: installed off, an install keeps the person's on/off, a deleted one comes back off; defaults --builtins needs no project"
 
 # collapse: old copies fold into revisions of the current workflow, after a backup.
+NTL='[.[] | select(.name | startswith("Task loop"))] | length'
+run 0 "$NARU" workflow create "Task loop"
+TL=$("$NARU" workflow show "Task loop" | jq -r '.workflow.id')
+run 0 "$NARU" workflow node create "Task loop" cli Main --config '{"command":"true"}'
 run 0 "$NARU" workflow create "Task loop (pre-1 backup)"
 run 0 "$NARU" workflow node create "Task loop (pre-1 backup)" cli OldOne --config '{"command":"true"}'
 run 0 "$NARU" workflow history collapse --dry-run
 [ "$(jqs '.collapsed | length')" = "1" ] && [ "$(jqs .backup)" = "null" ] || fail "collapse --dry-run plans, backs up nothing: $STDOUT"
-[ "$("$NARU" workflow list | jq "$NTL")" = "3" ] || fail "--dry-run deleted something"
+[ "$("$NARU" workflow list | jq "$NTL")" = "2" ] || fail "--dry-run deleted something"
 run 0 "$NARU" workflow history collapse --backup "$TMP/collapse-backup.db"
 [ -s "$TMP/collapse-backup.db" ] && [ "$(jqs '.collapsed | length')" = "1" ] || fail "collapse backs up first: $STDOUT"
-[ "$("$NARU" workflow list | jq "$NTL")" = "2" ] || fail "the copy is gone"
+[ "$("$NARU" workflow list | jq "$NTL")" = "1" ] || fail "the copy is gone"
 run 0 "$NARU" workflow revisions "$TL"
 [ "$(jqs '[.[] | select(.reason == "collapsed from Task loop (pre-1 backup)")] | length')" = "1" ] || fail "the copy is a revision: $STDOUT"
 run 0 "$NARU" workflow history collapse

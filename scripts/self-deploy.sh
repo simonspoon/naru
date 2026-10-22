@@ -7,8 +7,7 @@
 #     and resumes), back up the db to <naru home>/backups/naru-pre-deploy-<ts>.db
 #   3 atomically swap the binary at $PREFIX/bin/naru, keeping naru.prev
 #   4 restart the server (NARU_DEPLOY_RESTART_CMD, e.g. a launchctl kickstart),
-#     re-run `naru workflow defaults --task-loop` with the new binary, then check
-#     health: /api/version reports the new version, defaults succeeded, and a live
+#     then check health: /api/version reports the new version and a live
 #     conversation open before the swap is still live (same or new agent_id) and a
 #     `live say` round trip works
 #   5 healthy: resume the queue. Unhealthy: restore naru.prev and the db backup,
@@ -16,7 +15,7 @@
 #     the queue stays paused.
 #
 # Pre-swap queue verbs run on the NEW binary (the installed one may predate `queue`);
-# every verb after the swap (defaults, run list, live handoff/say) runs on the INSTALLED
+# every verb after the swap (run list, live handoff/say) runs on the INSTALLED
 # one, so a handed-off runner never lives in the temp build dir (TCC would deny it).
 #
 # Flags: --dry-run (print the plan, change nothing), --skip-checks (no build or
@@ -59,7 +58,7 @@ BIN_DIR="${PREFIX:+$PREFIX/bin}"
 BIN_DIR="${BIN_DIR:-$HOME/.local/bin}"
 INSTALLED="$BIN_DIR/naru"
 BACKUP_DIR="${NARU_DEPLOY_BACKUP_DIR:-$HOME/.naru/backups}"
-CHECKS="${NARU_DEPLOY_CHECKS:-cli-check api-check task-loop-check queue-watcher-check runner-check concurrent-check}"
+CHECKS="${NARU_DEPLOY_CHECKS:-cli-check api-check queue-watcher-check runner-check concurrent-check}"
 work="$(mktemp -d "${TMPDIR:-/tmp}/naru-self-deploy.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 LOG="$work/self-deploy.log"
@@ -79,7 +78,7 @@ abort() { log "ABORT: $1"; [ -s "$LOG" ] && tail -n 30 "$LOG" >&2; resume_queue;
 
 if [ "$dry" -eq 1 ]; then
   jq -cn --arg checks "$CHECKS" --arg bin "$INSTALLED" --arg dir "$BACKUP_DIR" --argjson skip "$skip" \
-    '{status:"plan",steps:["build release into a temp target dir","cargo test + checks","backup db","pause queue, drain","atomic swap, previous kept as naru.prev","restart server, re-run workflow defaults --task-loop","health check","hand the live agent off to the new binary and record other stale runners (NARU_DEPLOY_RUNNERS=0 skips)","resume queue or roll back"],checks:($checks|split(" ")),skip_checks:($skip==1),install:$bin,backup_dir:$dir,restart:true}'
+    '{status:"plan",steps:["build release into a temp target dir","cargo test + checks","backup db","pause queue, drain","atomic swap, previous kept as naru.prev","restart server (it installs the managed built-ins on start)","health check","hand the live agent off to the new binary and record other stale runners (NARU_DEPLOY_RUNNERS=0 skips)","resume queue or roll back"],checks:($checks|split(" ")),skip_checks:($skip==1),install:$bin,backup_dir:$dir,restart:true}'
   exit 0
 fi
 
@@ -230,18 +229,6 @@ healthy() {
   done
 }
 
-# Reseed the Task loop (and its child): defaults replaces a changed graph in place as a
-# new revision of the same workflow. A rollback restores the db backup, which undoes it.
-seed_task_loop() {
-  local pid
-  pid="$("$INSTALLED" project resolve "$repo" 2>/dev/null | jq -r '.id // empty')"
-  [ -n "$pid" ] || pid="$("$INSTALLED" project resolve naru 2>/dev/null | jq -r '.id // empty')"
-  [ -n "$pid" ] || { echo "self-deploy: cannot resolve the naru project id" >>"$LOG"; return 1; }
-  # A changed definition becomes a new revision of the same workflow (naru task 2053),
-  # never a renamed copy; an unchanged one writes nothing.
-  "$INSTALLED" workflow defaults --project "$pid" --task-loop >>"$LOG" 2>&1
-}
-
 # Long-lived `naru run __runner` processes started before the swap keep the old binary
 # image (macOS TCC then treats their whole tree as the old, ungranted program). After a
 # healthy deploy, with the queue still paused and idle: the live agent's run is moved by
@@ -294,7 +281,6 @@ handle_stale_runners() {
 
 fail_reason=""
 if ! restart; then fail_reason="server restart failed"
-elif ! seed_task_loop; then fail_reason="workflow defaults --task-loop failed"
 else
   chk=1; { [ -z "$live_before" ] || [ "${NARU_DEPLOY_LIVE_CHECK:-1}" = 0 ]; } && chk=0
   healthy "$INSTALLED" "$chk" || fail_reason="health check failed (version, live session)"

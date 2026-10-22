@@ -14908,7 +14908,7 @@ mod tests {
 
     #[tokio::test]
     async fn install_builtins_route_installs_them_off_and_refuses_a_foreign_host() {
-        use crate::core::workflow::{KB_CAPTURE_WORKFLOW, KB_MINE_WORKFLOW, TASK_LOOP_WORKFLOW};
+        use crate::core::workflow::{KB_CAPTURE_WORKFLOW, KB_MINE_WORKFLOW};
         let (_dir, state) = test_state();
         let refused = install_builtin_workflows(
             State(state.clone()),
@@ -14936,7 +14936,7 @@ mod tests {
         .await
         .unwrap();
         let created = out["created"].as_array().unwrap();
-        assert_eq!(created.len(), 6);
+        assert_eq!(created.len(), 2);
         let enabled = |name: &str| {
             created
                 .iter()
@@ -14945,7 +14945,6 @@ mod tests {
                 .as_bool()
                 .unwrap()
         };
-        assert!(enabled(TASK_LOOP_WORKFLOW));
         assert!(!enabled(KB_MINE_WORKFLOW));
         assert!(!enabled(KB_CAPTURE_WORKFLOW));
 
@@ -14958,7 +14957,7 @@ mod tests {
         .await
         .unwrap();
         assert!(again["created"].as_array().unwrap().is_empty());
-        assert_eq!(again["skipped"].as_array().unwrap().len(), 6);
+        assert_eq!(again["skipped"].as_array().unwrap().len(), 2);
     }
 
     #[tokio::test]

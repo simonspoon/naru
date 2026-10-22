@@ -1,5 +1,5 @@
 //! Dev-sandbox guard (naru task 2094, `docs/dev-env.md`): a Claude Code
-//! `PreToolUse` hook that denies a task-loop agent the commands that would
+//! `PreToolUse` hook that denies an agent the commands that would
 //! install to, restart or overwrite the person's real install. Ships as a
 //! library hook built-in the person registers with `naru library hook enable`.
 
@@ -17,7 +17,7 @@ pub const DEV_GUARD_HOOK: &str = r##"#!/usr/bin/env bash
 # Installed with:
 #   naru library hook enable dev-env-guard.sh --event PreToolUse --matcher 'Bash|Write|Edit'
 #
-# Denies, for task-loop agents: install.sh, cargo install, launchctl on a
+# Denies, for agents: install.sh, cargo install, launchctl on a
 # com.naru.* label, and any write to /Applications/Naru.app. The naru-live main
 # agent and scripts/self-deploy.sh / scripts/dev-env.sh command lines pass.
 # It also denies `naru serve` / `mesa serve` (naru task 2255) unless NARU_DB /

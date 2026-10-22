@@ -1561,6 +1561,19 @@ const MIGRATIONS: &[&str] = &[
         SELECT w.id, 'kb-capture', NULL FROM workflows w
          WHERE w.name LIKE 'KB: ongoing capture (custom%'
            AND NOT EXISTS (SELECT 1 FROM workflow_builtins b WHERE b.workflow_id = w.id);",
+    // Naru task 2264: the built-in Task loop workflows (and the pilot pair)
+    // are gone from the product. Delete the managed rows — their nodes,
+    // edges, runs, gates, revisions, `workflow_builtins` and copy rows
+    // cascade; `workflow_log` keeps its lines (workflow_id SET NULL). A
+    // user's own "Task loop (custom)" copy has no `workflow_builtins` row
+    // and stays, only losing its now-meaningless `workflow_builtin_copies`
+    // pointer at a built-in that no longer exists.
+    "DELETE FROM workflows WHERE id IN (
+        SELECT workflow_id FROM workflow_builtins
+        WHERE builtin_id IN ('task-loop', 'task-loop-child', 'task-loop-pilot', 'task-loop-pilot-child')
+     );
+     DELETE FROM workflow_builtin_copies
+        WHERE builtin_id IN ('task-loop', 'task-loop-child', 'task-loop-pilot', 'task-loop-pilot-child');",
 ];
 
 /// Selects full task rows including the derived `blocked` flag.
@@ -18613,15 +18626,105 @@ mod tests {
         );
         assert_eq!(
             MIGRATIONS.len(),
-            101,
-            "a fresh db should report user_version 101"
+            102,
+            "a fresh db should report user_version 102"
         );
         let (store, _dir) = temp_store();
         let version: i64 = store
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 101);
+        assert_eq!(version, 102);
+    }
+
+    /// Naru task 2264: the migration that deletes the managed Task loop
+    /// workflows (and the pilot pair) and what hangs off them, and nothing
+    /// else. Pinned by index, NOT `MIGRATIONS.len() - 1`.
+    #[test]
+    fn the_task_loop_builtins_are_deleted_by_migration() {
+        const DROP_LOOP: usize = 101;
+        assert!(
+            MIGRATIONS[DROP_LOOP].contains("DELETE FROM workflows"),
+            "migration {DROP_LOOP} is no longer the Task loop removal — a \
+             shipped migration was edited or reordered, which is never allowed"
+        );
+        let (mut store, dir) = temp_store();
+        let path = dir.path().join("test.db");
+        let mut ids = Vec::new();
+        for (name, bid) in [
+            ("Task loop", Some("task-loop")),
+            ("Task loop: implement and review", Some("task-loop-child")),
+            ("Task loop pilot", Some("task-loop-pilot")),
+            (
+                "Task loop pilot: implement and review",
+                Some("task-loop-pilot-child"),
+            ),
+            ("Task loop (custom)", None),
+            ("KB: mine past sessions", Some("kb-mine")),
+            ("KB: mine past sessions (custom)", None),
+        ] {
+            let w = store.create_workflow(None, name, None).unwrap();
+            store
+                .create_workflow_node(
+                    w.id,
+                    &crate::core::WorkflowNodeNew {
+                        kind: crate::core::WorkflowNodeKind::Trigger,
+                        title: "t".into(),
+                        config: Some(serde_json::json!({"mode": "manual"})),
+                        x: None,
+                        y: None,
+                    },
+                )
+                .unwrap();
+            if let Some(bid) = bid {
+                store.mark_workflow_builtin(w.id, bid).unwrap();
+            }
+            ids.push(w.id);
+        }
+        for (id, bid) in [(ids[4], "task-loop"), (ids[6], "kb-mine")] {
+            store
+                .conn
+                .execute(
+                    "INSERT INTO workflow_builtin_copies (workflow_id, builtin_id, base_rev) VALUES (?1, ?2, NULL)",
+                    rusqlite::params![id, bid],
+                )
+                .unwrap();
+        }
+        store
+            .conn
+            .execute_batch(&format!("PRAGMA user_version = {DROP_LOOP}"))
+            .unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        let count = |sql: &str| -> i64 { store.conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+        let names: Vec<String> = store
+            .conn
+            .prepare("SELECT name FROM workflows ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            names,
+            [
+                "Task loop (custom)",
+                "KB: mine past sessions",
+                "KB: mine past sessions (custom)"
+            ]
+        );
+        assert_eq!(count("SELECT COUNT(*) FROM workflow_nodes"), 3);
+        assert_eq!(count("SELECT COUNT(*) FROM workflow_builtins"), 1);
+        assert_eq!(
+            count("SELECT COUNT(*) FROM workflow_builtins WHERE builtin_id = 'kb-mine'"),
+            1
+        );
+        // The loop copy's pointer is gone, the KB copy's stays.
+        assert_eq!(count("SELECT COUNT(*) FROM workflow_builtin_copies"), 1);
+        assert_eq!(
+            count("SELECT COUNT(*) FROM workflow_builtin_copies WHERE builtin_id = 'kb-mine'"),
+            1
+        );
     }
 
     /// Workflows replace diagrams at migration 83 (mesa task 1607): a db that

@@ -96,7 +96,7 @@ pub struct Builtin {
 /// body `core::agent_route::AGENT_ROUTE_HOOK`, installed by `naru library hook
 /// enable agent-route.sh --event PreToolUse --matcher 'Agent|Task'`.
 /// `dev-env-guard` is the seventh (naru task 2094): a `PreToolUse` hook that
-/// denies task-loop agents `install.sh`, `cargo install`, `launchctl` on
+/// denies agents `install.sh`, `cargo install`, `launchctl` on
 /// `com.naru.*` and writes to `/Applications/Naru.app` — body
 /// `core::dev_guard::DEV_GUARD_HOOK`, installed by `naru library hook enable
 /// dev-env-guard.sh --event PreToolUse --matcher 'Bash|Write|Edit'`.

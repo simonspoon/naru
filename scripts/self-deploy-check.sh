@@ -3,12 +3,11 @@
 # throwaway HOME, db and PREFIX with a stub "new" binary (no real build):
 # --dry-run changes nothing; a failing backup aborts with the install untouched;
 # a pass backs up the db (valid), keeps naru.prev byte-equal to the old binary,
-# installs the new one, restarts (stub hook), re-runs workflow defaults, checks
+# installs the new one, restarts (stub hook), checks
 # health and resumes the queue; an unhealthy new build is rolled back (binary and
 # db byte-equal to before, queue resumed); a drain timeout aborts, resumes and
-# changes nothing; a failed rollback leaves the queue paused; workflow defaults gets
-# --project and the Task loop (+ child) is never renamed or copied (naru task 2053:
-# a changed graph becomes a revision of the same workflow); a missing cargo/node exits 2 early; a rollback restores only the
+# changes nothing; a failed rollback leaves the queue paused; a user's workflows are
+# never renamed or copied by a deploy; a missing cargo/node exits 2 early; a rollback restores only the
 # db the server uses (never creating a second one) and refuses a missing target; after a
 # healthy swap the live agent's runner is handed off and other stale runners recorded, never stopped.
 set -euo pipefail
@@ -64,13 +63,12 @@ ok "dry-run prints the plan and changes nothing"
 "$SRC" workflow create "Task loop: implement and review" --project 1 >/dev/null
 out=$(NARU_DEPLOY_NEW_BIN="$TMP/newbin" scripts/self-deploy.sh --skip-checks 2>/dev/null) || fail "deploy exit"
 [ "$(echo "$out" | jq -r .status)" = swapped ] && [ "$(echo "$out" | jq -r .healthy)" = true ] && [ "$(echo "$out" | jq -r .queue_resumed)" = true ] || fail "verdict: $out"
-[ ! -e "$TMP/paused" ] && [ -s "$TMP/restarts" ] && [ -s "$TMP/defaults.log" ] || fail "queue not resumed / no restart / no defaults re-run"
+[ ! -e "$TMP/paused" ] && [ -s "$TMP/restarts" ] || fail "queue not resumed / no restart"
 [ "$(shasum "$PREFIX/bin/naru.prev" | cut -d' ' -f1)" = "$before" ] || fail "naru.prev differs from the old binary"
 cmp -s "$NARU" "$TMP/newbin" || [ "$("$NARU" 2>&1 | head -1)" = new ] || fail "new binary not installed"
-grep -q -- '--project 1' "$TMP/defaults.log" && grep -q -- '--task-loop' "$TMP/defaults.log" || fail "defaults lacked --project: $(cat "$TMP/defaults.log")"
 wl=$("$SRC" workflow list 1)
 [ "$(echo "$wl" | jq 'length')" = 2 ] && [ "$(echo "$wl" | jq '[.[] | select(.name|test("pre-|copy|old"))] | length')" = 0 ] || fail "deploy renamed or copied a workflow: $wl"
-ok "workflow defaults got --project; the Task loop and child were not renamed or copied"
+ok "a deploy did not rename or copy the user workflows"
 db=$(echo "$out" | jq -r .db_backup)
 [ -f "$db" ] && [ "$(dirname "$db")" = "$backups" ] || fail "no timestamped backup: $db"
 case "$(basename "$db")" in naru-pre-deploy-*.db) ;; *) fail "backup name" ;; esac

@@ -2404,19 +2404,12 @@ EXAMPLES
     /// Prints {created: [{workflow, nodes, edges}], skipped: [name]}.
     Defaults {
         /// Project to scope both workflows (and the filed task) to, by id or
-        /// name; required unless --task-loop or --builtins
-        #[arg(long, required_unless_present_any = ["task_loop", "builtins"])]
+        /// name; required unless --builtins
+        #[arg(long, required_unless_present = "builtins")]
         project: Option<String>,
-        /// Install or update the managed built-in "Task loop" workflows (plan,
-        /// implement, review and verify one task; its input is a task id)
-        /// instead of creating the ambient ones. They are global and read-only
-        /// (`serve` does this on start); --project is accepted and unused.
-        /// Installs every built-in, the same as --builtins
-        #[arg(long)]
-        task_loop: bool,
         /// Install any missing managed built-in workflow and bring the others
-        /// up to date: "Task loop" and its child (enabled), "KB: mine past
-        /// sessions" and "KB: ongoing capture" (created disabled). Never
+        /// up to date: "KB: mine past sessions" and "KB: ongoing capture"
+        /// (created disabled). Never
         /// changes whether an installed one is on or off
         #[arg(long)]
         builtins: bool,
@@ -9242,12 +9235,8 @@ fn run_workflow_cmd(cmd: WorkflowCmd) -> Result<()> {
                 "runs_moved": report.runs_moved,
             }));
         }
-        WorkflowCmd::Defaults {
-            project,
-            task_loop,
-            builtins,
-        } => {
-            let (created, skipped) = if task_loop || builtins {
+        WorkflowCmd::Defaults { project, builtins } => {
+            let (created, skipped) = if builtins {
                 // The built-ins are managed: global, whatever the project
                 // (naru tasks 2103, 2118).
                 workflow::install_builtins(&mut store)?

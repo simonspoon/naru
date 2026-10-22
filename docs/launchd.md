@@ -22,7 +22,7 @@ to restart, so a real redeploy rolls back. The `com.naru.serve` user agent fixes
   The `PATH` is the installing user's interactive login-shell `PATH` (`$SHELL -ilc`, so
   dirs added in `.zshrc` such as pnpm's or nvm's node are kept; absolute entries only),
   followed by `~/.local/bin`, Homebrew and the system dirs, duplicates dropped; a shell that
-  fails gives just those fixed dirs. Task loop stages inherit it from `naru serve`. It is
+  fails gives just those fixed dirs. Workflow `cli` nodes inherit it from `naru serve`. It is
   read once at install, so re-run `scripts/launchd.sh install` after adding a tool dir.
   `NARU_LAUNCHD_SHELL` names a different shell to ask (the gate's stub). `NARU_DB`, `MESA_DB`, `MESA_CONFIG_FILE` and
   `NARU_AUDIO_URL` are copied in only if set in the shell that runs the install; run the
