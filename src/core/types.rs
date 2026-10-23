@@ -826,6 +826,9 @@ pub struct AudioTestResult {
     pub state: crate::core::audio::AudioState,
     /// The sentence to show the person; `null` when ready.
     pub message: Option<String>,
+    /// The daemon is older than the minimum naru-audio version this Naru
+    /// needs, or reports none (naru task 2282); `null` otherwise.
+    pub version_warning: Option<String>,
 }
 
 /// The `appearance` settings as the Settings page sees them (`core::config`,

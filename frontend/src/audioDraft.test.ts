@@ -58,6 +58,7 @@ describe('engineStatus', () => {
     url,
     message: state === 'ready' ? null : "Speech isn't available",
     checked_at: at,
+    version_warning: null,
   })
 
   it('names the daemon URL, its reachability and STT readiness', () => {
@@ -120,7 +121,7 @@ describe('audio url (naru task 1793)', () => {
 
   it('words each test answer', () => {
     const r = (state: 'ready' | 'daemon_down' | 'model_missing' | 'incompatible' | 'error') =>
-      testResultLine({ url: 'http://h:1', state, message: null })
+      testResultLine({ url: 'http://h:1', state, message: null, version_warning: null })
     expect(r('ready')).toBe('Reachable and ready at http://h:1')
     expect(r('daemon_down')).toBe('Not reachable at http://h:1')
     expect(r('model_missing')).toContain('model is missing')

@@ -5044,6 +5044,14 @@ export function LiveHub({
         </div>
       )}
 
+      {/* naru-audio is older than this Naru needs (naru task 2282): a
+          warning only, audio keeps working. */}
+      {audio?.version_warning && (
+        <div className="live-version-warning" role="status">
+          {audio.version_warning}
+        </div>
+      )}
+
       {/* The server's speech engine is not ready (mesa task 1390,
           design §4.4): said loudly, with the way to fix it and a
           Retry, rather than quietly falling back to the browser's

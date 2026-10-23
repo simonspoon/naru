@@ -9590,6 +9590,17 @@ body.live-panel-ratio-resizing .live-panel-divider {
   font-size: 0.75rem;
 }
 
+.live-version-warning {
+  padding: 0.5rem;
+  border: 1px solid var(--amber);
+  color: var(--amber);
+  font-size: 0.75rem;
+}
+
+.audio-version-warning {
+  color: var(--amber);
+}
+
 .live-unavailable-text {
   color: var(--red);
 }

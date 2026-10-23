@@ -23,4 +23,11 @@ message: string | null,
 /**
  * When the (cached) answer was taken, RFC 3339 UTC.
  */
-checked_at: string, };
+checked_at: string, 
+/**
+ * The daemon is older than `audio::MIN_NARU_AUDIO_VERSION` or reports
+ * no version (naru task 2282): the sentence to show. A warning only —
+ * `available` and `state` are unaffected. `null` when new enough or
+ * when nothing answered.
+ */
+version_warning: string | null, };

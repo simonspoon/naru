@@ -102,6 +102,11 @@ pub struct TranscribeStatus {
     pub message: Option<String>,
     /// When the (cached) answer was taken, RFC 3339 UTC.
     pub checked_at: String,
+    /// The daemon is older than `audio::MIN_NARU_AUDIO_VERSION` or reports
+    /// no version (naru task 2282): the sentence to show. A warning only —
+    /// `available` and `state` are unaffected. `null` when new enough or
+    /// when nothing answered.
+    pub version_warning: Option<String>,
 }
 
 /// Asks the naru-audio daemon whether it can transcribe ([`audio::probe`]);
@@ -121,6 +126,7 @@ pub fn status(fresh: bool) -> Result<TranscribeStatus, String> {
         url: Some(probe.url),
         message: probe.message,
         checked_at: probe.checked_at,
+        version_warning: probe.version_warning,
     })
 }
 

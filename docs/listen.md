@@ -73,7 +73,7 @@ server path is worth trying at all (mesa task 957, `transcribe_available` in
 {"available":false,"state":"daemon_down","engine":"naru-audio",
  "url":"http://127.0.0.1:7870",
  "message":"Speech isn't available: naru-audio isn't running at http://127.0.0.1:7870. Start it with `brew services start naru-audio`.",
- "checked_at":"2026-09-24T12:00:03Z"}
+ "checked_at":"2026-09-24T12:00:03Z","version_warning":null}
 ```
 
 `engine` is always `naru-audio` and `url` always set. `available` means
@@ -94,6 +94,23 @@ and anything else — a `/health` with no `stt` block included — is `error`
 quoting what the daemon reported. Every **change** of state is logged to the
 server's stderr, e.g. `warn audio state ready -> daemon_down
 url=http://127.0.0.1:7870` (`info` when the new state is `ready`).
+
+### The minimum naru-audio version (naru task 2282)
+
+`core::audio::MIN_NARU_AUDIO_VERSION` (`0.13.0`, the first release with the
+person-aware enroll and guard endpoints) is the oldest daemon this Naru is
+built against. Whenever `/health` answered with its JSON, the probe compares
+its `version` against it **as semver** (`0.9.0 < 0.13.0`, a pre-release
+before its release, build metadata ignored; `audio::version_warning`) and,
+when it is older, missing or not semver, carries `version_warning`: "Naru
+Audio 0.12.0 is older than the 0.13.0 this Naru needs; upgrade naru-audio."
+It is a **warning only** — `available` and `state` are untouched and audio
+keeps working. A daemon that is down (or a port answering with something
+that is not its JSON) gets no warning (`null`). It rides on this GET and on
+`POST /api/config/audio/test`, is shown amber in the live panel and under
+Settings → Audio, and is logged to the server's stderr as `warn audio
+version … url=…` right after each state-change line. Raise the constant
+when Naru starts depending on a newer daemon.
 
 Opening a Live session also sends `POST {audio.url}/api/load
 {"model":"default","kind":"stt"}` (mesa task 1392) so the first utterance

@@ -65,6 +65,12 @@ const HEALTH_BODY_CAP: u64 = 64 * 1024;
 /// The one API version this Naru speaks.
 const API_VERSION: i64 = 1;
 
+/// The oldest naru-audio release this Naru is built against (naru task 2282):
+/// 0.13.0 is the first with the person-aware enroll and guard endpoints. An
+/// older or unversioned daemon is only **warned** about ([`version_warning`]);
+/// audio keeps working exactly as before.
+pub const MIN_NARU_AUDIO_VERSION: &str = "0.13.0";
+
 /// What the probe found (design §4.4). Serialized snake_case — the exact
 /// strings `GET /api/live/transcribe` answers with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
@@ -96,13 +102,16 @@ impl AudioState {
 }
 
 /// One probe's answer: the state, the sentence to show the person (`None`
-/// when ready), the URL asked, and when (RFC 3339 UTC).
+/// when ready), the URL asked, and when (RFC 3339 UTC). `version_warning` is
+/// [`version_warning`]'s sentence for a daemon that answered `/health` with
+/// its JSON; `None` when it is new enough, or when nothing answered.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Probe {
     pub state: AudioState,
     pub message: Option<String>,
     pub url: String,
     pub checked_at: String,
+    pub version_warning: Option<String>,
 }
 
 /// A single cached value with a TTL decided by the value itself, keyed so a
@@ -259,6 +268,7 @@ impl Prober {
             message,
             url: url.to_string(),
             checked_at: crate::core::cc::fmt_ts(unix_now()),
+            version_warning: None,
         };
         let line = self.record(&probe, now);
         Some((probe, line))
@@ -269,11 +279,15 @@ static PROBER: Prober = Prober::new();
 
 /// Whether the daemon at `url` can transcribe, from the cache when it is
 /// fresh ([`READY_TTL`] / [`FAILURE_TTL`]). Blocking — at most
-/// [`PROBE_TIMEOUT`] on a miss. A change of state is logged to stderr.
+/// [`PROBE_TIMEOUT`] on a miss. A change of state is logged to stderr,
+/// followed by the probe's version warning when it has one.
 pub fn probe(url: &str) -> Probe {
     let (probe, line) = PROBER.probe_at(url, Instant::now());
     if let Some(line) = line {
         eprintln!("{line}");
+        if let Some(warning) = &probe.version_warning {
+            eprintln!("warn audio version {warning} url={url}");
+        }
     }
     probe
 }
@@ -366,16 +380,74 @@ struct Problem {
 /// `GET {url}/health`, classified. Never fails: every way of not getting a
 /// ready daemon is a state with a sentence.
 fn fetch_health(url: &str) -> Probe {
-    let (state, message) = match request_health(url) {
-        Ok((status, body)) => classify(status, &body),
-        Err(e) => classify_transport(url, &e),
+    let (state, message, version_warning) = match request_health(url) {
+        Ok((status, body)) => {
+            let (state, message) = classify(status, &body);
+            (state, message, health_version_warning(&body))
+        }
+        Err(e) => {
+            let (state, message) = classify_transport(url, &e);
+            (state, message, None)
+        }
     };
     Probe {
         state,
         message,
         url: url.to_string(),
         checked_at: crate::core::cc::fmt_ts(unix_now()),
+        version_warning,
     }
+}
+
+/// The version warning for a `/health` body: `None` unless the body is the
+/// daemon's JSON (anything else on the port is not a naru-audio to judge).
+fn health_version_warning(body: &str) -> Option<String> {
+    let health = serde_json::from_str::<Health>(body).ok()?;
+    version_warning(health.version.as_deref())
+}
+
+/// The sentence to show when a daemon that answered reports a `version`
+/// older than [`MIN_NARU_AUDIO_VERSION`], or none (or one that is not
+/// semver); `None` when it is at least the minimum. Compared as semver,
+/// never as strings: `0.9.0 < 0.13.0`, and a pre-release sorts before its
+/// release.
+pub fn version_warning(version: Option<&str>) -> Option<String> {
+    let min = parse_semver(MIN_NARU_AUDIO_VERSION).expect("MIN_NARU_AUDIO_VERSION is semver");
+    match version.map(|v| (v, parse_semver(v))) {
+        Some((_, Some(v))) if v >= min => None,
+        Some((v, _)) => Some(format!(
+            "Naru Audio {v} is older than the {MIN_NARU_AUDIO_VERSION} this Naru needs; \
+             upgrade naru-audio."
+        )),
+        None => Some(format!(
+            "Naru Audio reports no version; this Naru needs {MIN_NARU_AUDIO_VERSION} or \
+             newer. Upgrade naru-audio."
+        )),
+    }
+}
+
+/// `MAJOR.MINOR.PATCH[-PRE][+BUILD]` as a comparable key: the three numbers,
+/// then `true` for a release (so it sorts after any pre-release of the same
+/// numbers). Build metadata is ignored, as semver says; `None` for anything
+/// else.
+fn parse_semver(v: &str) -> Option<(u64, u64, u64, bool)> {
+    let v = v.trim();
+    let v = v.split_once('+').map_or(v, |(core, _)| core);
+    let (core, release) = match v.split_once('-') {
+        Some((core, pre)) if !pre.is_empty() => (core, false),
+        Some(_) => return None,
+        None => (v, true),
+    };
+    let mut parts = core.split('.').map(|p| {
+        (!p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| p.parse::<u64>().ok())
+            .flatten()
+    });
+    let (major, minor, patch) = (parts.next()??, parts.next()??, parts.next()??);
+    parts
+        .next()
+        .is_none()
+        .then_some((major, minor, patch, release))
 }
 
 fn request_health(url: &str) -> Result<(u16, String), ureq::Error> {
@@ -1773,6 +1845,57 @@ mod tests {
     }
 
     #[test]
+    fn version_warning_compares_as_semver() {
+        // Older, including a minor that sorts after the minimum as a string.
+        let w = version_warning(Some("0.12.0")).expect("older warns");
+        assert_eq!(
+            w,
+            "Naru Audio 0.12.0 is older than the 0.13.0 this Naru needs; upgrade naru-audio."
+        );
+        assert!(version_warning(Some("0.9.9")).is_some());
+        assert!(
+            version_warning(Some("0.13.0-dev")).is_some(),
+            "pre-release is older"
+        );
+        // Equal and newer: no warning, whatever a string compare would say.
+        assert_eq!(version_warning(Some("0.13.0")), None);
+        assert_eq!(version_warning(Some("0.13.0+abc")), None);
+        assert_eq!(version_warning(Some("0.13.1")), None);
+        assert_eq!(version_warning(Some("0.100.0")), None);
+        assert_eq!(version_warning(Some("1.0.0")), None);
+        // Missing, or not semver: warn.
+        assert!(
+            version_warning(None)
+                .unwrap()
+                .contains("reports no version")
+        );
+        assert!(version_warning(Some("")).is_some());
+        assert!(version_warning(Some("0.13")).is_some());
+        assert!(version_warning(Some("v0.13.0")).is_some());
+    }
+
+    #[test]
+    fn the_probe_carries_the_version_warning_only_when_the_daemon_answered() {
+        let old = Stub::start(0, READY);
+        assert!(check(&old.url()).version_warning.unwrap().contains("0.1.0"));
+        let current = Stub::start(
+            0,
+            r#"{"status":"ok","version":"0.13.0","api":1,
+                "stt":{"default":"m","ready":true}}"#,
+        );
+        assert_eq!(check(&current.url()).version_warning, None);
+        let unversioned = Stub::start(0, r#"{"status":"ok","api":1,"stt":{"ready":true}}"#);
+        assert!(check(&unversioned.url()).version_warning.is_some());
+        // Server down: no warning at all.
+        let other = TcpListener::bind("127.0.0.1:0").unwrap();
+        let dead = format!("http://127.0.0.1:{}", other.local_addr().unwrap().port());
+        drop(other);
+        let down = check(&dead);
+        assert_eq!(down.state, AudioState::DaemonDown);
+        assert_eq!(down.version_warning, None);
+    }
+
+    #[test]
     fn model_missing_names_the_default_model_and_the_pull_command() {
         let stub = Stub::start(
             0,
@@ -2483,6 +2606,7 @@ mod tests {
                         message: None,
                         url: stub.url(),
                         checked_at: String::new(),
+                        version_warning: None,
                     },
                 )
                 .0

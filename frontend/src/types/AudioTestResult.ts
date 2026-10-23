@@ -14,4 +14,9 @@ url: string, state: AudioState,
 /**
  * The sentence to show the person; `null` when ready.
  */
-message: string | null, };
+message: string | null, 
+/**
+ * The daemon is older than the minimum naru-audio version this Naru
+ * needs, or reports none (naru task 2282); `null` otherwise.
+ */
+version_warning: string | null, };

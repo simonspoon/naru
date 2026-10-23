@@ -2366,16 +2366,19 @@ function AudioSection() {
   const [testing, setTesting] = useState(false)
   const [testLine, setTestLine] = useState<string | null>(null)
   const [testDetail, setTestDetail] = useState<string | null>(null)
+  const [testWarning, setTestWarning] = useState<string | null>(null)
 
   function testConnection() {
     setTesting(true)
     setTestLine(null)
     setTestDetail(null)
+    setTestWarning(null)
     testAudio(normalizeUrl(seeded.url) ?? audio?.url_default ?? null).then(
       (r) => {
         setTesting(false)
         setTestLine(testResultLine(r))
         setTestDetail(r.message)
+        setTestWarning(r.version_warning)
       },
       (e: unknown) => {
         setTesting(false)
@@ -2395,6 +2398,7 @@ function AudioSection() {
         setSaved(true)
         setTestLine(null)
         setTestDetail(null)
+        setTestWarning(null)
         refetch()
         probe.refetch()
       },
@@ -2450,6 +2454,11 @@ function AudioSection() {
                 {probe.data.message}
               </p>
             )}
+            {probe.data?.version_warning && (
+              <p className="settings-command-blurb audio-version-warning" role="status">
+                {probe.data.version_warning}
+              </p>
+            )}
           </>
         )}
         <label htmlFor="audio-url">
@@ -2472,6 +2481,7 @@ function AudioSection() {
               setSaved(false)
               setTestLine(null)
               setTestDetail(null)
+              setTestWarning(null)
             }}
           />
           <button type="button" disabled={testing} onClick={testConnection}>
@@ -2484,6 +2494,9 @@ function AudioSection() {
         {testLine && <p className="settings-command-blurb">{testLine}</p>}
         {testDetail && (
           <p className="muted settings-command-blurb">{testDetail}</p>
+        )}
+        {testWarning && (
+          <p className="settings-command-blurb audio-version-warning">{testWarning}</p>
         )}
         <p className="muted settings-command-blurb">
           To use a daemon on another computer, start it there with{' '}

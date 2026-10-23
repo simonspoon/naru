@@ -12476,6 +12476,7 @@ async fn test_config_audio(
             url: probe.url,
             state: probe.state,
             message: probe.message,
+            version_warning: probe.version_warning,
         })
     })
     .await?
