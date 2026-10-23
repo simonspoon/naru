@@ -3,6 +3,7 @@ import {
   actsOn,
   advanceCursor,
   isNaruRole,
+  landStamps,
   mergeTurns,
   navigateTarget,
   nextUnplayed,
@@ -353,5 +354,25 @@ describe('a turn stored as mesa before mesa task 1319', () => {
     const groups = turnGroups([turn(1), legacy(2), turn(3, { role: 'user' })])
     expect(groups.map((g) => g.turns.map((t) => t.id))).toEqual([[1, 2], [3]])
     expect(turnLabel(legacy(2).role)).toBe('Naru')
+  })
+})
+
+// Naru task 2285: turns another browser spoke while this one was detached are
+// held unstamped; the reattach re-read must take them off the pending list.
+describe('landStamps', () => {
+  it('clears turns spoken elsewhere from the pending list', () => {
+    const held = [turn(1), turn(2), turn(3)]
+    const fetched = [
+      turn(1, { played_at: '2026-01-01 00:00:01' }),
+      turn(2, { played_at: '2026-01-01 00:00:02' }),
+      turn(3),
+    ]
+    expect(pendingTurns(landStamps(held, fetched), new Set()).map((t) => t.id)).toEqual([3])
+  })
+
+  it('never adds, drops or un-stamps a held turn', () => {
+    const held = [turn(1, { played_at: '2026-01-01 00:00:01' }), turn(5)]
+    const fetched = [turn(1), turn(2, { played_at: '2026-01-01 00:00:02' })]
+    expect(landStamps(held, fetched)).toEqual(held)
   })
 })

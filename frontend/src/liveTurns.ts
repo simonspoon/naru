@@ -62,6 +62,23 @@ export function mergeTurns(
 }
 
 /**
+ * The held transcript with the server's `played_at` stamps from a re-read
+ * landed on it (naru task 2285). The poll's `after=` cursor never re-sends a
+ * turn, so one another browser spoke while this page was detached stays held
+ * unstamped; a re-read from the top brings the stamp back. Only stamps land —
+ * no turn is added, dropped or un-stamped — so a poll that merged in between
+ * keeps everything it brought.
+ */
+export function landStamps(
+  held: readonly LiveTurn[],
+  fetched: readonly LiveTurn[],
+): LiveTurn[] {
+  const stamped = new Map<number, LiveTurn>()
+  for (const turn of fetched) if (turn.played_at !== null) stamped.set(turn.id, turn)
+  return held.map((turn) => (turn.played_at === null ? (stamped.get(turn.id) ?? turn) : turn))
+}
+
+/**
  * The transcript after a poll lands, and whether it belongs to a different
  * conversation than the one on screen (mesa task 862).
  *

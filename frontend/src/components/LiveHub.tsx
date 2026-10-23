@@ -145,6 +145,7 @@ import {
 import {
   actsOn,
   advanceCursor,
+  landStamps,
   navigateTarget,
   pendingTurns,
   releaseForReplay,
@@ -1418,6 +1419,9 @@ export function LiveHub({
   // The latest transcript for the run, which advances from a media event long
   // after the render that scheduled it.
   const held = useRef<LiveTurn[]>(turns)
+  // Bumped by every Attach and Detach press, so an Attach whose transcript
+  // re-read (naru task 2285) outlives a later press does not claim the voice.
+  const attachPress = useRef(0)
 
   useEffect(() => {
     if (!data) return
@@ -4203,6 +4207,7 @@ export function LiveHub({
     }
     if (button.action === 'detach') {
       // Naru task 2013: step this browser out; the session and agent stay live.
+      attachPress.current++
       silence()
       setReplaying(null)
       setUnlocked(false)
@@ -4236,8 +4241,39 @@ export function LiveHub({
       // and the run can start on whatever the conversation has already said.
       // As of mesa task 1267 it makes exactly one call — the claim on the
       // voice, since "listen here" is precisely what this press means.
-      claimVoice()
-      pump.current()
+      //
+      // Naru task 2285: first re-read the transcript from the top. The poll's
+      // `after=` cursor never re-sends a turn, so a turn another browser spoke
+      // while this one was detached is still held with `played_at` null — and
+      // claiming the voice would have this page say all of them again. The
+      // claim waits for the stamps to land, so no poll can hand this page the
+      // voice over the stale copies.
+      const press = ++attachPress.current
+      void (async () => {
+        const sid = shown.current
+        const stop = cursor.current
+        let after: number | undefined
+        let fetched: LiveTurn[] = []
+        for (;;) {
+          const page = await getLive(after)
+          if ((page.session?.id ?? null) !== sid || page.turns.length === 0) break
+          fetched = fetched.concat(page.turns)
+          after = advanceCursor(after ?? null, page.turns) ?? undefined
+          if (stop === null || (after !== undefined && after >= stop)) break
+        }
+        if (fetched.length === 0 || shown.current !== sid) return
+        held.current = landStamps(held.current, fetched)
+        setTurns((ts) => landStamps(ts, fetched))
+      })()
+        // Fails open: a failed re-read still attaches, since a page that
+        // cannot join is worse than a repeated sentence.
+        .catch(() => {})
+        .finally(() => {
+          // Detached (or pressed again) while the re-read was in flight.
+          if (attachPress.current !== press) return
+          claimVoice()
+          pump.current()
+        })
       setOpen(true)
       return
     }
