@@ -3319,6 +3319,28 @@ EXAMPLES
         #[arg(long)]
         quiet: bool,
     },
+    /// Run the automatic lookup for a Claude Code `UserPromptSubmit` payload on stdin
+    ///
+    /// What the `kb-lookup.sh` library hook runs (`docs/kb.md` "Automatic
+    /// lookup"). On a session's first prompt it asks the kb (a queued
+    /// `execute naru task: N` asks with the task's text), logs the lookup to
+    /// `<kb>/lookups.jsonl` and, when notes answer, prints the hook's
+    /// `additionalContext` JSON. Skipped when `NARU_KB_SKIP` is set (Naru's own
+    /// model calls and workflow nodes), in Naru's workspace and for a
+    /// `naru-live` driver. Capped at 6 s; always exits 0, printing nothing on
+    /// any failure.
+    Hook,
+    /// Report how useful the automatic lookups were
+    ///
+    /// Reads `<kb>/lookups.jsonl` for the last `--days` days and each injected
+    /// lookup's session transcript: `useful` (the agent named a returned note),
+    /// `unused`, `unchecked` (transcript gone), `empty` (nothing relevant) and
+    /// `failed`, in total and per week (`weeks`, keyed by the week's Monday).
+    Usage {
+        /// How many days back to report (default 28)
+        #[arg(long, default_value_t = 28)]
+        days: u32,
+    },
 }
 
 #[derive(Subcommand)]
@@ -7730,8 +7752,60 @@ fn run_kb(cmd: KbCmd) -> Result<()> {
         KbCmd::Show { path, quiet } => {
             print_record(&kb::show(&root, &path)?, quiet, QUIET_DROP_KB_NOTE);
         }
+        KbCmd::Hook => run_kb_hook(&root),
+        KbCmd::Usage { days } => print_json(&crate::core::kb_lookup::usage(&root, days)),
     }
     Ok(())
+}
+
+/// `naru kb hook`: never fails and prints nothing unless notes answer.
+fn run_kb_hook(root: &std::path::Path) {
+    use crate::core::{kb, kb_lookup};
+    let mut input = String::new();
+    let mut stdin = std::io::Read::take(std::io::stdin(), 1 << 20);
+    if std::io::Read::read_to_string(&mut stdin, &mut input).is_err() {
+        return;
+    }
+    let Ok(payload) = serde_json::from_str::<serde_json::Value>(&input) else {
+        return;
+    };
+    let skip = std::env::var_os(kb_lookup::SKIP_ENV).is_some_and(|v| !v.is_empty());
+    let workspace = config::workspace_dir();
+    let Some(req) = kb_lookup::request(&payload, skip, &workspace) else {
+        return;
+    };
+    // An empty kb has nothing to say: no marker, no log line.
+    if kb::scan(root).map_or(true, |n| n.is_empty()) {
+        return;
+    }
+    if !kb_lookup::first_prompt(root, &req.session_id) {
+        return;
+    }
+    let store = Store::open_default().ok();
+    let prompts = store
+        .as_ref()
+        .and_then(|s| crate::core::library::prompts(s).ok())
+        .unwrap_or_default();
+    let dir = workspace.to_string_lossy().into_owned();
+    let out = kb_lookup::lookup(&req, store.as_ref(), &mut |q, left| {
+        kb::ask_with(root, q, &mut |prompt, schema| {
+            crate::core::llm::complete_structured(
+                config::KB,
+                None,
+                "naru kb lookup",
+                prompt,
+                schema,
+                Some(kb::MODEL),
+                &prompts,
+                &dir,
+                left,
+            )
+        })
+    });
+    kb_lookup::log(root, &out.row);
+    if let Some(context) = out.context {
+        print_json(&kb_lookup::hook_output(&context));
+    }
 }
 
 fn run_retro(cmd: RetroCmd) -> Result<()> {

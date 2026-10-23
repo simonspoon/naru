@@ -100,6 +100,10 @@ pub struct Builtin {
 /// `com.naru.*` and writes to `/Applications/Naru.app` — body
 /// `core::dev_guard::DEV_GUARD_HOOK`, installed by `naru library hook enable
 /// dev-env-guard.sh --event PreToolUse --matcher 'Bash|Write|Edit'`.
+/// `kb-lookup` is the eighth (naru task 2274): a `UserPromptSubmit` hook that
+/// asks the knowledge base about a session's first prompt — body
+/// `core::kb_lookup::KB_LOOKUP_HOOK`, installed by `naru library hook enable
+/// kb-lookup.sh --event UserPromptSubmit`.
 pub const BUILTINS: &[Builtin] = &[
     Builtin {
         id: crate::core::live::LIVE_AGENT_BUILTIN,
@@ -230,6 +234,15 @@ echo \"Claude Code stopped in $(pwd)\"
         export_command: false,
         files: &[],
         body: crate::core::dev_guard::DEV_GUARD_HOOK,
+    },
+    Builtin {
+        id: crate::core::kb_lookup::KB_LOOKUP_HOOK_BUILTIN,
+        name: crate::core::kb_lookup::KB_LOOKUP_HOOK_NAME,
+        kind: LibraryKind::Hook,
+        scope: LibraryScope::User,
+        export_command: false,
+        files: &[],
+        body: crate::core::kb_lookup::KB_LOOKUP_HOOK,
     },
     Builtin {
         id: "implementer",

@@ -92,9 +92,12 @@ if [ "$1" = "-p" ]; then
   case "$NAME" in
     *" ask") KEY=ask ;;
     *" add") KEY=add ;;
+    *" lookup") KEY=ask ;;
     *) KEY=other ;;
   esac
   echo "$(pwd)|$NAME|$MODEL" >> "$STUB_DIR/../p.log"
+  printf '%s' "${NARU_KB_SKIP:-}" > "$STUB_DIR/skip-$KEY"
+  [ -e "$STUB_DIR/slow" ] && sleep 30
   if [ "$KEY" != add ] || [ ! -e "$STUB_DIR/add-dynamic" ]; then
     printf '%s\n' "${@:1:$# - 1}" > "$STUB_DIR/flags-$KEY"
     printf '%s' "$SCHEMA" > "$STUB_DIR/schema-$KEY"
@@ -319,5 +322,100 @@ wait_jobs $((JOBS + 1))
 tail -1 "$JOBLOG" | jq -e '.error.code == "unavailable"' >/dev/null || fail "failed job report: $(tail -1 "$JOBLOG")"
 rm -f "$STUB_DIR/fail"
 ok "failed add: unavailable in the job log, spool kept"
+
+# ---- the automatic lookup hook (naru task 2274) ----
+#
+# The kb-lookup.sh built-in extracted from `library show`, fed UserPromptSubmit
+# payloads, with `naru` on PATH being this build.
+
+HOOK="$TMP/kb-lookup.sh"
+"$MESA" library show kb-lookup.sh | jq -r .body > "$HOOK"
+chmod +x "$HOOK"
+bash -n "$HOOK" || fail "kb-lookup.sh does not parse"
+BIN_DIR="$TMP/bin"
+mkdir -p "$BIN_DIR"
+ln -s "$PWD/target/debug/naru" "$BIN_DIR/naru"
+LOOKUPS="$KB/lookups.jsonl"
+payload() { # payload <session> <prompt> [cwd]
+  jq -nc --arg s "$1" --arg p "$2" --arg c "${3:-$TMP}" \
+    '{session_id: $s, prompt: $p, cwd: $c, transcript_path: "", hook_event_name: "UserPromptSubmit"}'
+}
+hook() { # hook <stdin> -> HOUT, HCODE
+  set +e
+  HOUT=$(printf '%s' "$1" | PATH="$BIN_DIR:$PATH" "$HOOK" 2>"$TMP/stderr")
+  HCODE=$?
+  set -e
+  [ "$HCODE" -eq 0 ] || fail "the hook must exit 0, got $HCODE: $(cat "$TMP/stderr")"
+}
+lookups() { if [ -f "$LOOKUPS" ]; then wc -l < "$LOOKUPS" | tr -d ' '; else echo 0; fi; }
+
+# (a) a matching note is injected, and logged
+stage ask '{"answer":"The cat is named Miso.","sources":["topics/pets/cat.md"]}'
+hook "$(payload s-match 'what is the cat named')"
+jq -e '.hookSpecificOutput.hookEventName == "UserPromptSubmit"
+  and (.hookSpecificOutput.additionalContext | contains("The cat is named Miso.") and contains("topics/pets/cat.md"))' \
+  <<<"$HOUT" >/dev/null || fail "a match must inject the answer and the note path: $HOUT"
+[ "$(lookups)" = "1" ] || fail "one lookup logged, got $(lookups)"
+tail -1 "$LOOKUPS" | jq -e '.session_id == "s-match" and .outcome == "injected" and .injected == true
+  and .sources[0].path == "topics/pets/cat.md" and .question == "what is the cat named" and (.latency_ms | type) == "number"' \
+  >/dev/null || fail "log row: $(tail -1 "$LOOKUPS")"
+[ "$(cat "$STUB_DIR/skip-ask")" = "1" ] || fail "the kb's own call must carry NARU_KB_SKIP (no recursion)"
+hook "$(payload s-match 'what is the cat named again')"
+[ -z "$HOUT" ] && [ "$(lookups)" = "1" ] || fail "a second prompt in the same session is not looked up: $HOUT"
+ok "hook (a): a match injects additionalContext with the answer and note path, logs one row; the kb call carries NARU_KB_SKIP; only the first prompt"
+
+# (b) no match: nothing injected
+stage ask '{"answer":"","sources":[]}'
+hook "$(payload s-empty 'what is the cat named')"
+[ -z "$HOUT" ] || fail "an empty answer must inject nothing: $HOUT"
+tail -1 "$LOOKUPS" | jq -e '.outcome == "empty" and .injected == false' >/dev/null || fail "empty row: $(tail -1 "$LOOKUPS")"
+hook "$(payload s-nohit 'tax return deadline')"
+[ -z "$HOUT" ] || fail "no keyword hit must inject nothing: $HOUT"
+ok "hook (b): no answer / no keyword hit inject nothing, logged as empty"
+
+# (c) fail open: a failing call, a hung call (6 s cap), no naru at all
+touch "$STUB_DIR/fail"
+hook "$(payload s-fail 'what is the cat named')"
+[ -z "$HOUT" ] || fail "a failed call must inject nothing: $HOUT"
+tail -1 "$LOOKUPS" | jq -e '.outcome == "failed" and (.error | length) > 0' >/dev/null || fail "failed row: $(tail -1 "$LOOKUPS")"
+rm -f "$STUB_DIR/fail"
+touch "$STUB_DIR/slow"
+T0=$(date +%s)
+hook "$(payload s-slow 'what is the cat named')"
+T1=$(date +%s)
+rm -f "$STUB_DIR/slow"
+[ -z "$HOUT" ] || fail "a hung call must inject nothing: $HOUT"
+[ $((T1 - T0)) -le 9 ] || fail "a hung call must be cut off near 6 s, took $((T1 - T0)) s"
+tail -1 "$LOOKUPS" | jq -e '.outcome == "failed" and .session_id == "s-slow"' >/dev/null || fail "slow row: $(tail -1 "$LOOKUPS")"
+set +e
+HOUT=$(payload s-nonaru 'what is the cat named' | PATH=/usr/bin:/bin "$HOOK")
+HCODE=$?
+set -e
+[ "$HCODE" -eq 0 ] && [ -z "$HOUT" ] || fail "no naru on PATH must exit 0 silently"
+for garbage in '' 'not json' '{"prompt": 7}'; do
+  hook "$garbage"
+  [ -z "$HOUT" ] || fail "garbage stdin [$garbage] must print nothing"
+done
+ok "hook (c): a failing call and a hung call (cut off in $((T1 - T0)) s) inject nothing and log failed; no naru / garbage stdin exit 0 silently"
+
+# (d) never inside Naru's own calls, workflow nodes, the workspace or a live driver
+N=$(lookups)
+set +e
+HOUT=$(payload s-skip 'what is the cat named' | NARU_KB_SKIP=1 PATH="$BIN_DIR:$PATH" "$HOOK")
+set -e
+[ -z "$HOUT" ] || fail "NARU_KB_SKIP must skip"
+hook "$(payload s-ws 'what is the cat named' "$FAKE_HOME/.naru/workspace")"
+[ -z "$HOUT" ] || fail "a session in the workspace must be skipped"
+hook "$(payload s-live 'Drive naru live session 3 (lease 1).')"
+[ -z "$HOUT" ] || fail "a naru-live driver must be skipped"
+[ "$(lookups)" = "$N" ] || fail "skipped prompts must not be logged"
+[ "$(grep -c 'kb_lookup::SKIP_ENV, "1"' src/core/llm.rs)" = 2 ] && grep -q 'kb_lookup::SKIP_ENV, "1"' src/core/workflow.rs ||
+  fail "Naru's model calls and workflow nodes must set NARU_KB_SKIP"
+ok "hook (d): NARU_KB_SKIP, the workspace and a naru-live driver are skipped and not logged"
+
+run 0 "$MESA" kb usage
+[ "$(jqs .lookups)" = "$(lookups)" ] && [ "$(jqs .empty)" = "2" ] && [ "$(jqs .failed)" = "2" ] &&
+  [ "$(jqs .unchecked)" = "1" ] && [ "$(jqs '.weeks | length')" = "1" ] || fail "kb usage: $STDOUT"
+ok "kb usage: $(jqs .lookups) lookups counted (1 injected, 2 empty, 2 failed) with a weekly row"
 
 echo "kb-check: $CHECKS checks passed"

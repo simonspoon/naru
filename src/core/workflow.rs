@@ -2982,9 +2982,11 @@ fn cap(mut s: String) -> String {
 
 /// A run started from a live Claude Code session inherits that session's
 /// identity; a `cli` node is a detached step, so it must not look like the
-/// launcher to `task update --status done`'s close guard.
+/// launcher to `task update --status done`'s close guard. Nor is it a working
+/// session, so a `claude` it starts makes no automatic kb lookup.
 fn drop_session_identity(cmd: &mut Command) {
     cmd.env_remove("CLAUDE_CODE_SESSION_ID");
+    cmd.env(crate::core::kb_lookup::SKIP_ENV, "1");
 }
 
 /// An agent definition's `model:` (when it is one a node can run) and its

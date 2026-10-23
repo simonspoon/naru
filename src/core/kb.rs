@@ -165,11 +165,17 @@ fn fence(text: &str) -> String {
 }
 
 /// `YYYY-MM-DDTHH:MM:SSZ` (UTC) of now.
-fn now_iso() -> String {
-    let secs = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
+pub(crate) fn now_iso() -> String {
+    iso_of(
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0),
+    )
+}
+
+/// `YYYY-MM-DDTHH:MM:SSZ` (UTC) of `secs` past the epoch.
+pub(crate) fn iso_of(secs: i64) -> String {
     let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
     // Hinnant's civil_from_days.
     let z = days + 719_468;

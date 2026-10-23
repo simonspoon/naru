@@ -95,6 +95,8 @@ pub fn complete_structured(
     let script = agents::structured_script(action, id, name, prompt, schema, model, prompts)?;
     let mut cmd = crate::core::proc::bash();
     cmd.arg("-c").arg(&script).current_dir(cwd);
+    // Naru's own model call: never an automatic kb lookup (no recursion).
+    cmd.env(crate::core::kb_lookup::SKIP_ENV, "1");
     let out = agents::capture(cmd, None, timeout)?;
     if out.stdout.len() > ANSWER_CAP {
         return Err(format!(
@@ -134,6 +136,8 @@ fn parse_structured(code: i32, stdout: &str, stderr: &str) -> Result<Value, Stri
 fn run_claude(script: &str, cwd: &str, timeout: Duration) -> Result<String, String> {
     let mut cmd = crate::core::proc::bash();
     cmd.arg("-c").arg(script).current_dir(cwd);
+    // Naru's own model call: never an automatic kb lookup (no recursion).
+    cmd.env(crate::core::kb_lookup::SKIP_ENV, "1");
     let out = agents::capture(cmd, None, timeout)?;
     if out.stdout.len() > ANSWER_CAP {
         return Err(format!(

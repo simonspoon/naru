@@ -9,6 +9,8 @@ naru kb add [--source <label>] <text…> | --file <path> | --stdin
 naru kb ask <question…>
 naru kb list [--topic <topic>]
 naru kb show <path>
+naru kb usage [--days N]
+naru kb hook            # run by the kb-lookup.sh hook, reads a payload on stdin
 ```
 
 ## Layout
@@ -23,6 +25,8 @@ predates the rename; `NARU_KB_DIR` / `MESA_KB_DIR` overrides it):
 | `log.jsonl` | append-only `{ts, op: create\|append, path, bytes, source}`, one `O_APPEND` write per line |
 | `spool/<id>.md` | the raw text of a queued add, removed only when its job succeeds with no refused op; **kept** when the call fails or any op is `failed` (the report then carries `spool`, its path) |
 | `.lock` | the `flock` that serialises applies |
+| `lookups.jsonl` | one line per automatic lookup (below) |
+| `lookups-seen/<session id>` | an empty marker: that session has had its one lookup |
 
 ## `kb add`
 
@@ -100,6 +104,60 @@ the questions were written before tuning, so 100% means these failures are
 fixed, not that `ask` is perfect: a bigger or noisier kb, or a paraphrase
 sharing no word with its note, still misses at the prefilter.
 
+## Automatic lookup (naru task 2274)
+
+Notes were being filed but never read back, so the `kb-lookup.sh` library
+built-in (`core::kb_lookup::KB_LOOKUP_HOOK`) asks the kb at the start of
+**every** Claude Code session. Enable it once per machine:
+
+```
+naru library hook enable kb-lookup.sh --event UserPromptSubmit
+```
+
+The script only pipes Claude Code's payload into `naru kb hook`, which:
+
+- looks up only the **first** prompt of a session (an `O_EXCL` marker in
+  `lookups-seen/`, claimed before the call; a resumed session keeps its id, so
+  it is not asked again, and a failed or timed-out lookup is not retried);
+- asks with the prompt, or for a queued `execute naru task: N` with the first
+  five non-empty lines of task N's description (an unknown task asks nothing);
+- runs the ordinary `kb ask` (prefilter, one haiku call through the `kb`
+  template); the model call gets what is left of a **6 s** budget and is killed
+  at it. The steps before it (opening the db, reading the notes) are not under
+  the cap — about 0.25 s on a 1,000-note kb, though a locked db can add up to
+  its 5 s busy timeout;
+- when the answer cites real notes, prints the hook's `additionalContext`: the
+  answer cut to 150 words, the note paths and titles, and how to read one —
+  framed as data from earlier sessions, not instructions. No answer, no
+  keyword hit, an error or the timeout inject nothing; it always exits 0, so a
+  prompt is never blocked;
+- appends one `lookups.jsonl` row: `ts`, `unix`, `session_id`, `cwd`,
+  `project` (the folder's project name, `null` when none), `transcript_path`,
+  `question`, `sources`, `latency_ms`, `injected`, `outcome`
+  (`injected|empty|failed`) and `error`. An empty kb is not looked up or logged.
+
+It **never fires** — nothing asked, nothing logged — when `NARU_KB_SKIP` is set,
+which Naru sets on every `claude -p` call it makes itself (`llm.rs`: the kb's own
+ask/add calls, so a lookup cannot recurse, plus triage, retro, live memory and
+workflow prompt nodes) and on every workflow `cli`/`foreach`/`verify` node (so
+the `KB: ongoing capture` / `mine past sessions` runs and anything they start
+are skipped); for a session whose `cwd` is under Naru's workspace
+(`~/.naru/workspace`, where every Naru job and `kb-mine.sh`'s calls run); and
+for a **`naru-live`** driver, whose one prompt is the `Drive naru live session
+…` boilerplate (its real turns arrive through `naru live listen`, never as
+prompts, so a lookup there would only ever be noise).
+
+### `kb usage`
+
+`naru kb usage [--days 28]` reads `lookups.jsonl` and, for each injected
+lookup, the session's transcript: it counts as `useful` when an **assistant**
+line (text or tool call) names a returned note's path, its `topic/slug`, or its
+title when that is 16+ characters — the injected context itself is not an
+assistant line, so it never counts. Otherwise `unused`, or `unchecked` when the
+transcript is gone. Prints `{lookups, useful, unused, unchecked, empty, failed,
+avg_latency_ms, days, weeks: [{week, …same counts}]}`, `week` being the UTC
+Monday. The heuristic misses an agent that uses a fact without naming its note.
+
 ## `kb list` / `kb show`
 
 `list` prints a bare array of `{path, topic, title, tags, updated}`. `show`
@@ -143,7 +201,7 @@ workflow. Disable it with `naru workflow update "KB: ongoing capture" --enabled 
 ## Not covered
 
 `naru migrate` does not carry the kb: move `<naru home>/kb/` by hand. The kb
-is not a project notebook (`docs/project-memory.md`) and is not read by any
-agent start-up hook.
+is not a project notebook (`docs/project-memory.md`); the only hook that reads
+it is the opt-in `kb-lookup.sh` above.
 
 Gate: `scripts/kb-check.sh`.
