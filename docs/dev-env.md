@@ -27,7 +27,9 @@ So: no `scripts/install.sh`, no `cargo install`, no `launchctl` on a
 `scripts/dev-env.sh` exports `NARU_HOME`, `NARU_DB`, `NARU_CONFIG_FILE`,
 `NARU_KB_DIR`, `NARU_HOOKS_FILE` and `NARU_ATTACHMENTS_DIR` (all under
 `~/.naru-dev`) and `NARU_AUDIO_URL=http://127.0.0.1:7871`, and runs
-`serve --port 7771` with every watcher off. It refuses port 7777. The binary
+`serve --port 7771` with every watcher off, in the foreground. It refuses port
+7777. It takes no arguments: `-h`/`--help` prints usage and exits 0, anything
+else prints usage and exits 2 — neither starts a server (naru task 2275). The binary
 id of the CLI is `com.naru.cli`.
 
 ## The guard hook (naru task 2094)

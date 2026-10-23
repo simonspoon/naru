@@ -5,6 +5,14 @@
 # /Applications/Naru.app) — that is scripts/self-deploy.sh's job alone.
 set -euo pipefail
 
+usage="usage: scripts/dev-env.sh  (takes no arguments; NARU_DEV_DIR and NARU_DEV_PORT override ~/.naru-dev and 7771; runs naru serve in the foreground)"
+if [ $# -gt 0 ]; then
+  case "$1" in
+    -h|--help) echo "$usage"; exit 0 ;;
+    *) echo "dev-env: unknown argument: $1" >&2; echo "$usage" >&2; exit 2 ;;
+  esac
+fi
+
 root="$(cd "$(dirname "$0")/.." && pwd)"
 bin="$root/target/release/naru"
 dev="${NARU_DEV_DIR:-$HOME/.naru-dev}"
