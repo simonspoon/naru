@@ -232,6 +232,28 @@ injected prompt. A rewritten definition is how the conversation changes
 character — but the loop it describes is what makes the feature work, and one
 that never mentions `mesa live listen` produces an agent that hears nothing.
 
+### Say first, think in the background (naru task 2284)
+
+Delegating only the *long* jobs still left the person in silence while the
+agent thought, looked things up or ran a "quick" command in the foreground:
+over the `live_turns` rows since 1 October the time from each user turn's
+`created_at` to the next non-notice `naru` turn's in the same session (gaps
+over 300 s dropped, n = 1717) was a median of 9 s and a p90 of 19 s. Rule 2
+now makes the agent's **first action on every user turn a short `naru live
+say`**, before any thinking or tool call, the full answer following when the
+work comes back; rule 12 sends **anything beyond a quick lookup** to a
+background fork or agent, and runs **every other command the agent runs
+itself** with `run_in_background: true` — only `naru live` commands other than
+`listen` and `look` stay in the foreground, being instant and, for `context`
+then `handoff`, ordered — so the agent is always free to hear the next turn.
+The first say only acknowledges; it claims no job or status before that is
+checked, and a turn that came from `listen` still restarts it before the turn
+ends. Something new the person says while a job runs is folded into it
+(`SendMessage` to the delegate, or the job restarted). The voice states as
+fact only what it verified or a delegate reported, speaks as briefly as it
+can, and says no ids unless asked; detail goes on the board. This replaces the
+router of naru task 1711 (`naru-live-split`), which is left as it was.
+
 ## Why the queue lives in SQLite
 
 The turn queue is two tables, not a channel in the server's memory, because
