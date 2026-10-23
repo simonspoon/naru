@@ -3719,13 +3719,14 @@ EXAMPLES
         #[arg(long)]
         quiet: bool,
     },
-    /// Ask the Naru Mac app to enter or leave ambient mode; prints the session
+    /// Ask the native host to enter or leave ambient mode; prints the session
     ///
     /// STATE is `on` (go quiet and just listen in) or `off` (back to the live
-    /// conversation). The request is written to the session and the page
-    /// passes it to the Mac app on its next poll; the app has the last word,
-    /// so read `ambient` and `ambient_request` from `live status`. `--say` is
-    /// a sentence spoken as the mode changes. With no Mac app attached this is
+    /// conversation). The request is written to the session and the host
+    /// picks it up on its next poll; the host has the last word, so read
+    /// `ambient` and `ambient_request` from `live status`. `--say` is a
+    /// sentence spoken as the mode changes. With no host reporting ambient
+    /// (no Mac or iPhone app joined to the conversation) this is
     /// `unavailable` and nothing is written.
     #[command(after_help = "\
 EXAMPLES

@@ -2356,12 +2356,15 @@ mode. The host page acts on a request once per `ambient_request_seq`, on the
 poll it already makes; an `on` waits for the run to finish speaking (15s
 grace) so the agent's `--say` is heard first. The host's verdict is still the
 last word: the page reports its state in the route report's `ambient` key
-(sent only while a host is attached), `live status` carries it as `ambient`
+(sent only while a host is attached; the Naru iPhone app, which has no
+embedded page doing it, reports the same `ambient` key on `POST
+/api/live/route` directly), `live status` carries it as `ambient`
 (`null` until a host has reported), and a report matching the request clears
 `ambient_request`. With no host report fresher than 10s — derived on the
 store's clock, the speaker claim's rule — the command is `unavailable`,
-exit 1, and writes nothing, not even the `--say` turn; asking for the state the
-host already reports clears the request without bumping the seq. `--say` is
+exit 1 (the message names both hosts: open the conversation in the Naru Mac
+or iPhone app and join it), and writes nothing, not even the `--say` turn;
+asking for the state the host already reports clears the request without bumping the seq. `--say` is
 trimmed and an empty one writes no turn. It is not a `LiveAction` turn
 because an ambient page's run is halted whole: a turn carrying the action
 would sit unperformed in exactly the state the agent wants to leave.
