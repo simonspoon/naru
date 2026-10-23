@@ -44,22 +44,25 @@ because someone ran `mesa serve`.
   actionable task, immediately flips that task to `in_progress` itself —
   *before* spawning — then calls `agents::spawn_bg` for the **`queue-watcher`**
   command, with the task id and the session name `<project name>: <task name>`
-  as its `{id}`/`{name}`. **The command line itself — including which slash
-  command runs — is user-configurable** in `~/.mesa/config.json`
+  as its `{id}`/`{name}`. **The command line itself — including the prompt
+  that runs the task — is user-configurable** in `~/.mesa/config.json`
   (`docs/config.md`); its default is
-  `claude --bg --agent supervisor --name {name} -- "/execute-naru-task {id}"`,
+  `claude --bg --model opus --name {name} -- "execute naru task: {id}"`,
   so by default the name reaches `claude --bg` as `-n/--name` and the
   auto-dispatched session shows up identifiably (prompt box, `/resume` picker,
-  terminal title, Agents sidebar) instead of generically, running as the
-  `supervisor` agent definition — the library built-in Naru seeds to
-  `~/.claude/agents/supervisor.md` before the spawn (mesa task 1075,
-  `docs/library.md`), which is where the supervising rules live (including, past 120k tokens of context, writing a `checkpoint-task-<id>` artifact on the task, `docs/cost-guard.md`). The agent is
-  named literally, so an override that wants the generic `swe` persona edits
-  the name in the template (`docs/config.md`). Deriving the
+  terminal title, Agents sidebar) instead of generically, running as plain
+  Claude Code on Opus with no agent definition (naru task 2273: a trial of
+  plain runs against supervised ones found them faster and cheaper). Until
+  then the default was `--agent supervisor` (mesa task 1075), and a template
+  that still names it keeps working: Naru seeds the `supervisor` library
+  built-in to `~/.claude/agents/supervisor.md` before every spawn
+  (`docs/library.md`) — only that definition carries the rule of writing a
+  `checkpoint-task-<id>` artifact past 120k tokens of context
+  (`docs/cost-guard.md`), so a plain session writes none and is never relayed.
+  Deriving the
   name is still Naru's job, not the template's: a template chooses whether to
   pass it. Claiming the task before the spawn closes
-  the race window between dispatch and the agent's own `/execute-naru-task`
-  pickup step, so a later tick can't double-dispatch the same task while the
+  the race window between dispatch and the agent's own task pickup step, so a later tick can't double-dispatch the same task while the
   agent is still starting up. A project with no `local_path`, or a stale one
   (the folder no longer exists), is skipped, matching the agents endpoint.
 - **An `in_progress` task that has subtasks is an *umbrella*, not a worker,

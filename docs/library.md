@@ -691,7 +691,9 @@ is the loop guard.
 
 It reads the Stop payload's `transcript_path` once. The task id is the
 **first** user message — `/execute-naru-task <id>` (`DEFAULT_TASK_EXECUTE`; `/execute-mesa-task` is still accepted as an older alias),
-the same slash command recorded as `<command-name>` + `<command-args>`, or
+the same slash command recorded as `<command-name>` + `<command-args>`, the
+whole prompt `execute naru task: <id>` (the queue-watcher default since naru
+task 2273, exact so it needs no header), or
 a one-line customised prompt ending in `task: <id>` — that loose form only
 in a session launched with `--agent`, which writes an `agent-setting`
 header record no interactive session has, so "please take a look at task

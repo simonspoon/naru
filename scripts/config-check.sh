@@ -1540,9 +1540,9 @@ run 0 "$MESA" project update "$B" --path "$DIR_B"
 run 0 "$MESA" task create "$B" "task b"
 TASK_B=$(jqs .id)
 wait_lines "$CLAUDE_LOG" 1
-grep -qx "$DIR_B|--agent|supervisor|--name|B: task b|--|/execute-naru-task $TASK_B" "$CLAUDE_LOG" ||
+grep -qx "$DIR_B|--model|opus|--name|B: task b|--|execute naru task: $TASK_B" "$CLAUDE_LOG" ||
   fail "the built-in queue-watcher argv changed: $(cat "$CLAUDE_LOG")"
-ok "the unconfigured queue-watcher keeps its built-in \`--agent supervisor --name <project>: <name> -- /execute-naru-task <id>\` argv"
+ok "the unconfigured queue-watcher keeps its built-in \`--model opus --name <project>: <name> -- 'execute naru task: <id>'\` argv"
 
 run 0 "$MESA" inbox add --task "$TASK_B" --kind change-request "loki: find exits 0 on no match"
 ITEM_2=$(jqs .id)

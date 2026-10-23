@@ -1171,18 +1171,19 @@ fn dispatch_task_session(
     local_path: &str,
     session_name: &str,
 ) -> Result<Option<String>, String> {
-    // The default template spawns `--agent supervisor`, so the definition
-    // has to be on disk before the spawn — `claude --agent` errors on an
-    // agent it has never seen (mesa task 1075). Taken as its own short lock,
+    // A configured template may spawn `--agent supervisor` (the default did
+    // until naru task 2273), so the definition has to be on disk before the
+    // spawn — `claude --agent` errors on an agent it has never seen (mesa
+    // task 1075). Taken as its own short lock,
     // like the prompts read below.
     {
         let store = state.store.lock().unwrap();
         supervisor::ensure_agent_definition(&store)
             .map_err(|e| format!("cannot seed the supervisor agent definition: {e}"))?;
     }
-    // The command — including which slash command executes a task — comes
+    // The command — including the prompt that executes a task — comes
     // from `~/.mesa/config.json`'s `queue-watcher` entry, defaulting to
-    // `claude --bg --agent supervisor … -- /execute-naru-task <id>`.
+    // `claude --bg --model opus … -- "execute naru task: <id>"`.
     // The library's prompts, for any `{prompt:<name>}` the template names
     // (mesa task 1138).
     let prompts = {
@@ -1325,7 +1326,7 @@ fn deepest_actionable(store: &Store, mut task: Task, exclude: &[i64]) -> Result<
 /// free dispatch slot, pick the next actionable task and dispatch a
 /// background `claude` agent on it. Marks the task `in_progress`
 /// itself *before* spawning — closing the race window between dispatch and
-/// the agent's own `/execute-naru-task` pickup step, so a second tick can't
+/// the agent's own pickup step, so a second tick can't
 /// double-dispatch the same task while the agent is still starting up. A
 /// spawn failure reverts the task back to `todo` so the project isn't
 /// wedged, files one inbox alert per (task, error text) and backs the task
@@ -16454,8 +16455,8 @@ mod tests {
     /// Writes an executable stub `claude` that only understands `--bg`,
     /// appending `<cwd>|<name>|<prompt>` to `log_path` and printing a
     /// well-formed receipt line (mirrors `scripts/queue-watcher-check.sh`'s
-    /// stub). `--agent <name>` is consumed ahead of `--name`/`--` and written
-    /// to `<dir>/last-agent` — argv order matters, so a stub that parses
+    /// stub). `--model <name>` is consumed ahead of `--name`/`--` and written
+    /// to `<dir>/last-model` — argv order matters, so a stub that parses
     /// positionally has to know about every flag `spawn_bg` may emit.
     ///
     /// Also pins `MESA_CONFIG_FILE` at a path that does not exist, so these
@@ -16478,9 +16479,9 @@ mod tests {
 [ "$1" = "--bg" ] || exit 1
 shift
 [ -e "{fail}" ] && {{ echo "stub claude is down" >&2; exit 1; }}
-AGENT=""
-if [ "$1" = "--agent" ]; then shift; AGENT="$1"; shift; fi
-echo "$AGENT" > "{agent_log}"
+MODEL=""
+if [ "$1" = "--model" ]; then shift; MODEL="$1"; shift; fi
+echo "$MODEL" > "{model_log}"
 NAME=""
 if [ "$1" = "--name" ]; then shift; NAME="$1"; shift; fi
 PROMPT=""
@@ -16489,7 +16490,7 @@ echo "$(pwd)|$NAME|$PROMPT" >> "{log}"
 echo "backgrounded · deadbeef (idle — send a prompt to start)"
 "#,
                 fail = dir.join("fail").display(),
-                agent_log = dir.join("last-agent").display(),
+                model_log = dir.join("last-model").display(),
                 log = log_path.display()
             ),
         )
@@ -16543,17 +16544,12 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                 1,
                 "expected exactly one dispatch (the unarchived project), got: {log:?}"
             );
-            // Auto-dispatch spawns as the `supervisor` agent definition (mesa
-            // task 1075, a literal in the template) —
-            // asserted here because the watcher path is the one that must never
-            // regress to a generic session.
-            let agent =
-                std::fs::read_to_string(stub_dir.path().join("last-agent")).unwrap_or_default();
-            assert_eq!(
-                agent.trim(),
-                "supervisor",
-                "dispatch must pass --agent supervisor"
-            );
+            // Auto-dispatch spawns plain Claude Code on Opus (naru task 2273,
+            // a literal in the template) — asserted here because the watcher
+            // path is the one whose default must not drift silently.
+            let model =
+                std::fs::read_to_string(stub_dir.path().join("last-model")).unwrap_or_default();
+            assert_eq!(model.trim(), "opus", "dispatch must pass --model opus");
             assert!(
                 log.contains(normal_path),
                 "the unarchived project's task must be dispatched: {log:?}"
@@ -16655,7 +16651,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                 "an open umbrella must not wedge its project: {log:?}"
             );
             assert!(
-                log.contains(&format!("/execute-naru-task {child_a}")),
+                log.contains(&format!("execute naru task: {child_a}")),
                 "the umbrella's first child must be the dispatched task: {log:?}"
             );
             let get = |id| state.store.lock().unwrap().get_task(id).unwrap().status;
@@ -16684,7 +16680,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             assert_eq!(log.lines().count(), 2, "second child dispatched: {log:?}");
             assert!(
-                log.contains(&format!("/execute-naru-task {child_b}")),
+                log.contains(&format!("execute naru task: {child_b}")),
                 "{log:?}"
             );
 
@@ -16706,7 +16702,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             assert_eq!(log.lines().count(), 3, "idle project resumes: {log:?}");
             assert!(
-                log.contains(&format!("/execute-naru-task {outsider}")),
+                log.contains(&format!("execute naru task: {outsider}")),
                 "{log:?}"
             );
 
@@ -16779,7 +16775,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             queue_watcher_tick(&state);
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             assert!(
-                log.contains(&format!("/execute-naru-task {child}")),
+                log.contains(&format!("execute naru task: {child}")),
                 "a released child must dispatch normally: {log:?}"
             );
             assert_eq!(get(child), Status::InProgress);
@@ -17006,7 +17002,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             queue_watcher_tick(&state);
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             assert!(
-                log.contains(&format!("/execute-naru-task {first}")),
+                log.contains(&format!("execute naru task: {first}")),
                 "a touched task dispatches once the spawn works: {log:?}"
             );
             assert_eq!(status(first), Status::InProgress);
@@ -17159,7 +17155,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             assert_eq!(log.lines().count(), 1, "one dispatch: {log:?}");
             assert!(
-                log.contains(&format!("/execute-naru-task {grandchild}")),
+                log.contains(&format!("execute naru task: {grandchild}")),
                 "the deepest actionable descendant is the unit of work, not the epic: {log:?}"
             );
             assert_eq!(get(epic), Status::Todo, "the epic must not be claimed");
@@ -17184,7 +17180,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             assert_eq!(log.lines().count(), 2, "roll-up dispatched: {log:?}");
             assert!(
-                log.contains(&format!("/execute-naru-task {epic}")),
+                log.contains(&format!("execute naru task: {epic}")),
                 "{log:?}"
             );
             assert_eq!(get(epic), Status::InProgress);

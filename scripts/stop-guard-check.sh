@@ -169,6 +169,9 @@ transcript "$TMP/naru-slash.jsonl" "<command-message>execute-naru-task</command-
 <command-name>/execute-naru-task</command-name>
 <command-args>$T_PROG</command-args>"
 hook "$TMP/naru-slash.jsonl"; blocked "the <command-name> record shape with execute-naru-task" "task $T_PROG"
+# the queue-watcher default prompt (naru task 2273) is exact, so it needs no header
+transcript "$TMP/naru-plain.jsonl" "execute naru task: $T_PROG"
+hook "$TMP/naru-plain.jsonl"; blocked "the plain queue-watcher prompt, no --agent header" "task $T_PROG"
 
 # ================= in_progress, pending shell =================
 transcript "$TMP/prog-shell.jsonl" "/execute-mesa-task $T_PROG" "$(shell_launch bq1w2e3r4)"

@@ -12,7 +12,7 @@ persona and the slash command can all change without rebuilding Naru:
 
 | Key | Used by | Built-in default |
 | --- | --- | --- |
-| `queue-watcher` | `serve --watch-queue` dispatch (`docs/queue-watcher.md`) | `claude --bg --agent supervisor --name {name} -- "/execute-naru-task {id}"` |
+| `queue-watcher` | `serve --watch-queue` dispatch (`docs/queue-watcher.md`) | `claude --bg --model opus --name {name} -- "execute naru task: {id}"` (naru task 2273; `--agent supervisor` until then) |
 | `inbox-watcher` | `serve --watch-inbox` triage (`docs/inbox-watcher.md`): up to two synchronous, tool-less `claude -p --json-schema` calls (haiku decides, sonnet writes the task) per item, run in a detached `naru __job inbox-triage` whose verdict Naru validates and applies itself (naru task 1691). Offers `{id}`, `{name}`, `{prompt}`, `{schema}` and `{model}` | `claude -p --model {model} --name {name} --tools "" --strict-mcp-config --output-format json --json-schema {schema} -- {prompt}` |
 | `live-agent` | `mesa live start`, `POST /api/live`, `mesa live handoff` — the session that holds a spoken conversation (`docs/live.md`), since naru task 1886 a `naru run` job (`core::live::spawn_agent` → `core::runner`, `docs/runner.md`) rather than a `--bg` agent. Offers `{name}`, `{session_flag}` and `{session_id}` | `claude -p --input-format stream-json --output-format stream-json --verbose --agent naru-live --name {name} {session_flag} {session_id}` |
 | `live-summary` | `live stop`'s CLI handler and the API's stop route — the one synchronous, tool-less `claude -p --json-schema` call that writes a live conversation's memory once it ends, run in a detached `naru __job summary` whose answer Naru saves itself (mesa task 921, naru task 1690, `docs/live.md`). Offers `{id}`, `{name}`, `{prompt}` and `{schema}` | `claude -p --model sonnet --name {name} --tools "" --strict-mcp-config --output-format json --json-schema {schema} -- {prompt}` |
@@ -32,7 +32,7 @@ from the vocabulary (see *Retired placeholders* below).
 ```json
 {
   "commands": {
-    "queue-watcher":   "claude --bg --agent supervisor --name {name} -- \"/execute-naru-task {id}\"",
+    "queue-watcher":   "claude --bg --model opus --name {name} -- \"execute naru task: {id}\"",
     "inbox-watcher":  "claude -p --model {model} --name {name} --tools \"\" --strict-mcp-config --output-format json --json-schema {schema} -- {prompt}",
     "live-agent":     "claude -p --input-format stream-json --output-format stream-json --verbose --agent naru-live --name {name} {session_flag} {session_id}",
     "live-summary":   "claude -p --model sonnet --name {name} --tools \"\" --strict-mcp-config --output-format json --json-schema {schema} -- {prompt}",

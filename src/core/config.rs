@@ -12,7 +12,7 @@
 //! ```json
 //! {
 //!   "commands": {
-//!     "queue-watcher":   "claude --bg --agent supervisor --name {name} -- \"/execute-naru-task {id}\"",
+//!     "queue-watcher":   "claude --bg --model opus --name {name} -- \"execute naru task: {id}\"",
 //!     "inbox-watcher":  "claude -p --model {model} --name {name} --tools \"\" --strict-mcp-config --output-format json --json-schema {schema} -- {prompt}",
 //!     "live-agent":     "claude --bg --agent naru-live --name {name} -- {prompt}",
 //!     "live-summary":   "claude --bg --name {name} -- {prompt}",
@@ -294,18 +294,18 @@ pub const ACTIONS: [&str; 9] = [
 /// `claude` of a **default** template only, so the check scripts' stub binary
 /// keeps working; a configured template runs exactly as written.
 ///
-/// The run happens as the `supervisor` agent definition (mesa task 1075,
-/// `core::supervisor::SUPERVISOR_DEFINITION`, seeded to
-/// `~/.claude/agents/supervisor.md` by
-/// `core::supervisor::ensure_agent_definition`), which is where the
-/// supervising rules live.
+/// The run is plain Claude Code on Opus with no agent definition (naru task
+/// 2273, replacing mesa task 1075's `--agent supervisor`): a trial of plain
+/// runs against supervised ones found them faster and cheaper with real
+/// verification. A configured template may still name `--agent supervisor`,
+/// which is why `core::supervisor::ensure_agent_definition` still seeds it.
 ///
-/// Note the quotes around the prompt: a slash command and its argument are
-/// **one** argv entry (`claude` takes the prompt as a single positional), and
-/// tokenization is by whitespace. Unquoted, `/execute-naru-task {id}` would
-/// arrive as two arguments and the id would be lost.
+/// Note the quotes around the prompt: the prompt is **one** argv entry
+/// (`claude` takes it as a single positional), and tokenization is by
+/// whitespace. Unquoted, `execute naru task: {id}` would arrive as several
+/// arguments.
 pub const DEFAULT_TODO_WATCHER: &str =
-    r#"claude --bg --agent supervisor --name {name} -- "/execute-naru-task {id}""#;
+    r#"claude --bg --model opus --name {name} -- "execute naru task: {id}""#;
 /// Built-in default for [`INBOX_WATCHER`] (naru task 1691): [`DEFAULT_LIVE_SUMMARY`]'s
 /// shape — one synchronous tool-less `claude -p --output-format json
 /// --json-schema {schema}` call, run inside a detached `naru __job
@@ -5756,9 +5756,9 @@ mod tests {
         };
         assert_eq!(
             resolve(TODO_WATCHER, DEFAULT_TODO_WATCHER, &vars).unwrap(),
-            // Literal since mesa task 1075: the run is supervised by the
-            // `supervisor` agent definition.
-            r#"claude --bg --agent supervisor --name 'mesa: do the thing' -- "/execute-naru-task 731""#
+            // Plain Claude Code on Opus since naru task 2273 (mesa task 1075's
+            // `--agent supervisor` retired from the default).
+            r#"claude --bg --model opus --name 'mesa: do the thing' -- "execute naru task: 731""#
         );
         // The live agent takes both halves: a named session id *and* the
         // prompt mesa supplies. The prompt is one argument however long or
@@ -5783,12 +5783,12 @@ mod tests {
             [
                 "claude",
                 "--bg",
-                "--agent",
-                "supervisor",
+                "--model",
+                "opus",
                 "--name",
                 "mesa: do the thing",
                 "--",
-                "/execute-naru-task 731",
+                "execute naru task: 731",
             ]
         );
         assert_eq!(
@@ -5841,19 +5841,19 @@ mod tests {
         let vars = Vars::default();
         assert_eq!(
             resolve(TODO_WATCHER, DEFAULT_TODO_WATCHER, &vars).unwrap(),
-            r#"claude --bg --agent supervisor --name '' -- "/execute-naru-task ""#
+            r#"claude --bg --model opus --name '' -- "execute naru task: ""#
         );
         assert_eq!(
             argv_of(&resolve(TODO_WATCHER, DEFAULT_TODO_WATCHER, &vars).unwrap()),
             [
                 "claude",
                 "--bg",
-                "--agent",
-                "supervisor",
+                "--model",
+                "opus",
                 "--name",
                 "",
                 "--",
-                "/execute-naru-task "
+                "execute naru task: "
             ]
         );
         let named = Vars {
@@ -5862,7 +5862,7 @@ mod tests {
         };
         assert_eq!(
             resolve(TODO_WATCHER, DEFAULT_TODO_WATCHER, &named).unwrap(),
-            r#"claude --bg --agent supervisor --name '' -- "/execute-naru-task 7""#
+            r#"claude --bg --model opus --name '' -- "execute naru task: 7""#
         );
         assert_eq!(resolved("t run \"{name}\" {id}", &named), "t run \"\" '7'");
     }

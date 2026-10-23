@@ -36,7 +36,9 @@ pub const STOP_GUARD_HOOK_NAME: &str = "task-stop-guard.sh";
 /// * the task id — the FIRST user message, as `/execute-naru-task <id>`
 ///   (`DEFAULT_TASK_EXECUTE`), a slash command recorded as
 ///   `<command-name>/execute-naru-task</command-name>` +
-///   `<command-args><id></command-args>`, or — only in a session launched
+///   `<command-args><id></command-args>`, the whole prompt
+///   `execute naru task: <id>` (the queue-watcher default since naru task
+///   2273), or — only in a session launched
 ///   with `--agent`, marked by a `{"type":"agent-setting","agentSetting":…}`
 ///   header record no interactive session carries — a one-line prompt
 ///   ending in `task: <id>` (a customised template);
@@ -103,6 +105,7 @@ facts=$(jq -Rs '
     [ (capture("(?:^|\\s)/execute-(?:naru|mesa)-task\\s+(?<id>[0-9]+)") | .id),
       (capture("<command-name>/execute-(?:naru-task|mesa-task|todo)</command-name>\\s*<command-args>\\s*(?<id>[0-9]+)") | .id),
       (capture("<command-name>/execute-(?:naru-task|mesa-task|todo)</command-name>\\s*<command-args>.{0,200}?\"id\":\\s*(?<id>[0-9]+)"; "s") | .id),
+      (capture("^\\s*execute naru task:\\s*(?<id>[0-9]+)\\s*$") | .id),
       (select($dispatched and length <= 200 and (test("\n") | not)) | capture("\\btask:?\\s*#?(?<id>[0-9]+)\\W*$") | .id)
     ] | .[0];
   [ split("\n")[] | fromjson? | select(type == "object" and ((.isSidechain // false) | not)) ] as $rows

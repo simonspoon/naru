@@ -66,7 +66,7 @@ behind it, so it must not fire just because someone ran `mesa serve`.
 The two watcher flags (`--watch-queue` and `--watch-inbox`) are **independent**
 — neither implies the other, and each drives its own interval loop with its own
 tick constant. `--watch-inbox` alone never claims a task or dispatches
-`/execute-naru-task`.
+a task session.
 
 ## How one tick works
 

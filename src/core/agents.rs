@@ -2244,16 +2244,16 @@ JSON"#,
     }
 
     #[test]
-    fn spawn_bg_passes_agent_before_name_and_prompt() {
-        // `--agent` must land after `--bg` and before the `--` separator, or a
+    fn spawn_bg_passes_model_before_name_and_prompt() {
+        // `--model` must land after `--bg` and before the `--` separator, or a
         // prompt-leading `-` swallows it. The stub asserts the full argv. The
-        // agent is the literal `supervisor` since mesa task 1075.
+        // default is plain Claude Code on Opus since naru task 2273.
         let dir = tempfile::tempdir().unwrap();
         let bin = stub_claude(
             dir.path(),
-            r#"[ "$1" = "--bg" ] && [ "$2" = "--agent" ] && [ "$3" = "supervisor" ] &&
+            r#"[ "$1" = "--bg" ] && [ "$2" = "--model" ] && [ "$3" = "opus" ] &&
               [ "$4" = "--name" ] && [ "$5" = "n" ] && [ "$6" = "--" ] &&
-              [ "$7" = "/execute-naru-task 9" ] && [ "$#" = 7 ] ||
+              [ "$7" = "execute naru task: 9" ] && [ "$#" = 7 ] ||
               { echo "bad argv: $*" >&2; exit 1; }
 echo "backgrounded · 5we00000 · n""#,
         );
@@ -2338,13 +2338,13 @@ echo "backgrounded · 5we00000 · n""#,
 
     #[test]
     fn spawn_bg_passes_name_flag_before_prompt_separator() {
-        // The queue-watcher default names its agent literally (mesa task
-        // 1075), so `--agent supervisor` is there; what this pins is `--name`
-        // landing before the `--`.
+        // The queue-watcher default names its model (naru task 2273), so
+        // `--model opus` is there; what this pins is `--name` landing before
+        // the `--`.
         let dir = tempfile::tempdir().unwrap();
         let bin = stub_claude(
             dir.path(),
-            r#"[ "$1" = "--bg" ] && [ "$2" = "--agent" ] && [ "$3" = "supervisor" ] &&
+            r#"[ "$1" = "--bg" ] && [ "$2" = "--model" ] && [ "$3" = "opus" ] &&
               [ "$4" = "--name" ] && [ "$5" = "proj: do the thing" ] && [ "$6" = "--" ] ||
               { echo "bad argv: $*" >&2; exit 1; }
 echo "backgrounded · cf0c3945 · proj: do the thing""#,
