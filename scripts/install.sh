@@ -11,6 +11,9 @@
 #
 # --launchd (macOS) also installs the com.naru.serve launchd agent afterwards
 # (scripts/launchd.sh install, docs/launchd.md); quit a hand-run `naru serve` first.
+# Without it, a running serve reporting another version on /api/version gets one
+# NOTICE line (port: NARU_INSTALL_PORT, else the config's serve.port, else 7770);
+# nothing is restarted.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -52,4 +55,23 @@ esac
 
 if [ "$launchd" = 1 ]; then
   PREFIX="${PREFIX:-}" scripts/launchd.sh install
+else
+  # A running serve keeps the old build until restarted (naru task 2279): compare the
+  # version it reports with the installed one and say so loudly. Port: NARU_INSTALL_PORT,
+  # else `serve.port` in the config (resolved like self-deploy.sh, minus its plist lookup), else 7770.
+  port="${NARU_INSTALL_PORT:-}"
+  if [ -z "$port" ]; then
+    cfg="${NARU_CONFIG_FILE:-${MESA_CONFIG_FILE:-}}"
+    if [ -z "$cfg" ]; then
+      cfg="$HOME/.naru"; [ -e "$cfg" ] || { [ -e "$HOME/.mesa" ] && cfg="$HOME/.mesa"; }
+      [ -d "$cfg" ] && cfg="$cfg/config.json"
+    fi
+    [ -f "$cfg" ] && port="$(jq -r '.serve.port // empty' "$cfg" 2>/dev/null || true)"
+    case "$port" in ''|*[!0-9]*) port=7770 ;; esac
+  fi
+  installed="$("$BIN_DIR/naru" --version 2>/dev/null | awk '{print $2}' || true)"
+  running="$(curl -fsS --max-time 2 "http://127.0.0.1:$port/api/version" 2>/dev/null | jq -r '.version // empty' 2>/dev/null || true)"
+  if [ -n "$running" ] && [ -n "$installed" ] && [ "$running" != "$installed" ]; then
+    echo "NOTICE: running serve is v$running, installed is v$installed: restart it with scripts/install.sh --launchd" >&2
+  fi
 fi
