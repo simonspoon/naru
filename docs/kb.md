@@ -165,6 +165,29 @@ prints `{path, body}`; a path that is not a note in the kb (outside it,
 malformed, a symlink, absent) is `not_found`. `--quiet` on `show` drops `body`;
 `list`, `ask` and `add` accept and ignore it.
 
+## `kb dupes` / `kb merge` (naru task 2277)
+
+`kb dupes` is read-only: it prints clusters of near-duplicate notes as
+`[{score, notes: [{path, title, tags}]}]`, biggest first (`--quiet` drops the
+tags; paths stay, so they feed `kb show` and `kb merge`). No model call: each
+pair scores 0.7 x the Jaccard overlap of the title+body words (lowercased,
+stop words and words under 3 letters dropped, crudely stemmed) + 0.15 x the
+title-word overlap + 0.15 x the tag overlap. Pairs at or above the threshold
+(default 0.3, `--threshold` to change) are joined into clusters (connected
+components); `score` is the mean of a cluster's pair scores. On the real kb
+(~1000 notes) 0.3 gave 35 clusters, the largest 6; 0.2 chains unrelated notes
+into one 145-note cluster.
+
+`kb merge <keep> <drop>...` keeps `<keep>` and appends to it each paragraph or
+bullet line of the drops it lacks (whitespace- and case-insensitive compare),
+unions the tags (the usual cap of 8), then deletes the drops, logs a `merge`
+and a `delete` line per note in `log.jsonl` and rebuilds `INDEX.md`. Prints
+`{kept, removed}`. Everything is checked first: an unknown or malformed path is
+`not_found`, a keep listed among the drops, no drops, or a merged body over the
+note cap is `validation`, and nothing is written. `kb ask` reads the files, so
+it never cites a removed note. A drop's title and `updated` are discarded, and
+the merged tags are capped at 8. `--threshold` must be above 0 and at most 1.
+
 ## Web page (`#/kb`, naru task 1928)
 
 A nav entry "Knowledge base" opens `#/kb`: a single Ask box over

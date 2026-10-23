@@ -868,6 +868,292 @@ pub fn ask_with(root: &Path, question: &str, call: &mut Call) -> Result<Answer> 
     })
 }
 
+// ---- dupes and merge -------------------------------------------------------
+
+/// Pairs scoring at least this are near-duplicates (see [`similarity`]).
+pub const DUPES_THRESHOLD: f64 = 0.3;
+
+/// One note in a duplicate cluster.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ClusterNote {
+    pub path: String,
+    pub title: String,
+    pub tags: Vec<String>,
+}
+
+/// A group of near-duplicate notes; `score` is the mean similarity of the
+/// pairs that joined them (0..=1).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Cluster {
+    pub score: f64,
+    pub notes: Vec<ClusterNote>,
+}
+
+/// The sorted, de-duplicated word ids of `text`: lowercase, stop words and
+/// words under 3 letters dropped, crudely stemmed.
+fn word_ids(text: &str, ids: &mut std::collections::HashMap<String, u32>) -> Vec<u32> {
+    let mut out: Vec<u32> = text
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.chars().count() >= 3 && !STOP_WORDS.contains(w))
+        .map(|w| {
+            let next = ids.len() as u32;
+            *ids.entry(stem(w)).or_insert(next)
+        })
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+fn jaccard(a: &[u32], b: &[u32]) -> f64 {
+    let (mut i, mut j, mut both) = (0, 0, 0usize);
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                both += 1;
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    let union = a.len() + b.len() - both;
+    if union == 0 {
+        0.0
+    } else {
+        both as f64 / union as f64
+    }
+}
+
+/// 0.7 x Jaccard of the title+body words, 0.15 x of the title words, 0.15 x of
+/// the tags. Deterministic; no model.
+fn similarity(a: &Fingerprint, b: &Fingerprint) -> f64 {
+    0.7 * jaccard(&a.words, &b.words)
+        + 0.15 * jaccard(&a.title, &b.title)
+        + 0.15 * jaccard(&a.tags, &b.tags)
+}
+
+struct Fingerprint {
+    words: Vec<u32>,
+    title: Vec<u32>,
+    tags: Vec<u32>,
+}
+
+fn find(parent: &mut [usize], mut x: usize) -> usize {
+    while parent[x] != x {
+        parent[x] = parent[parent[x]];
+        x = parent[x];
+    }
+    x
+}
+
+/// `kb dupes`: clusters of near-duplicate notes (connected components of the
+/// pairs scoring at least `threshold`), biggest first. Read-only.
+pub fn dupes(root: &Path, threshold: f64) -> Result<Vec<Cluster>> {
+    if !(threshold.is_finite() && threshold > 0.0 && threshold <= 1.0) {
+        return Err(Error::Validation(format!(
+            "the threshold {threshold} must be above 0 and at most 1"
+        )));
+    }
+    let notes = scan(root)?;
+    let mut ids = std::collections::HashMap::new();
+    let prints: Vec<Fingerprint> = notes
+        .iter()
+        .map(|n| {
+            let body = show(root, &n.path).map(|s| s.body).unwrap_or_default();
+            Fingerprint {
+                words: word_ids(&format!("{} {body}", n.title), &mut ids),
+                title: word_ids(&n.title, &mut ids),
+                tags: word_ids(&n.tags.join(" "), &mut ids),
+            }
+        })
+        .collect();
+    let mut parent: Vec<usize> = (0..notes.len()).collect();
+    let mut edges = Vec::new();
+    for i in 0..notes.len() {
+        for j in i + 1..notes.len() {
+            let s = similarity(&prints[i], &prints[j]);
+            if s >= threshold {
+                edges.push((i, j, s));
+                let (a, b) = (find(&mut parent, i), find(&mut parent, j));
+                parent[a.max(b)] = a.min(b);
+            }
+        }
+    }
+    let mut groups: std::collections::BTreeMap<usize, (Vec<usize>, f64, usize)> =
+        std::collections::BTreeMap::new();
+    for i in 0..notes.len() {
+        let r = find(&mut parent, i);
+        groups.entry(r).or_default().0.push(i);
+    }
+    for (i, _, s) in &edges {
+        let g = groups.get_mut(&find(&mut parent, *i)).unwrap();
+        g.1 += s;
+        g.2 += 1;
+    }
+    let mut out: Vec<Cluster> = groups
+        .into_values()
+        .filter(|(m, _, _)| m.len() > 1)
+        .map(|(m, sum, n)| Cluster {
+            score: (sum / n as f64 * 1000.0).round() / 1000.0,
+            notes: m
+                .into_iter()
+                .map(|i| ClusterNote {
+                    path: notes[i].path.clone(),
+                    title: notes[i].title.clone(),
+                    tags: notes[i].tags.clone(),
+                })
+                .collect(),
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        b.notes
+            .len()
+            .cmp(&a.notes.len())
+            .then(b.score.total_cmp(&a.score))
+            .then_with(|| a.notes[0].path.cmp(&b.notes[0].path))
+    });
+    Ok(out)
+}
+
+fn squash(s: &str) -> String {
+    s.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+fn is_bullet(line: &str) -> bool {
+    let t = line.trim_start();
+    t.starts_with("- ") || t.starts_with("* ")
+}
+
+/// A body's facts: each paragraph, each top-level bullet (with its indented
+/// sub-bullets and continuation lines), each fenced code block (blank lines
+/// inside included); the flag marks a bullet.
+fn units(body: &str) -> Vec<(String, bool)> {
+    let mut out: Vec<(String, bool)> = Vec::new();
+    let mut cur: Option<(String, bool)> = None;
+    let mut in_fence = false;
+    let flush = |cur: &mut Option<(String, bool)>, out: &mut Vec<(String, bool)>| {
+        out.extend(cur.take());
+    };
+    for line in body.lines() {
+        let line = line.trim_end();
+        if in_fence {
+            let c = cur.as_mut().unwrap();
+            c.0.push('\n');
+            c.0.push_str(line);
+            in_fence = !line.trim_start().starts_with("```");
+        } else if line.trim().is_empty() {
+            flush(&mut cur, &mut out);
+        } else if line.trim_start().starts_with("```") {
+            flush(&mut cur, &mut out);
+            cur = Some((line.to_string(), false));
+            in_fence = true;
+        } else if line.starts_with(char::is_whitespace) && cur.as_ref().is_some_and(|c| c.1) {
+            let c = cur.as_mut().unwrap();
+            c.0.push('\n');
+            c.0.push_str(line);
+        } else if is_bullet(line) {
+            flush(&mut cur, &mut out);
+            cur = Some((line.to_string(), true));
+        } else if let Some(c) = cur.as_mut().filter(|c| !c.1) {
+            c.0.push('\n');
+            c.0.push_str(line);
+        } else {
+            flush(&mut cur, &mut out);
+            cur = Some((line.to_string(), false));
+        }
+    }
+    flush(&mut cur, &mut out);
+    out
+}
+
+/// `kb merge`: folds into `keep` the facts of each `drop` it lacks (paragraphs
+/// and bullet lines not already there, compared whitespace- and case-
+/// insensitively), unions the tags, deletes the drops, and rebuilds `INDEX.md`.
+/// Everything is checked before anything is written. `{kept, removed}`.
+pub fn merge(root: &Path, keep: &str, drops: &[String]) -> Result<Value> {
+    let _lock = lock(root)?;
+    let root = root.canonicalize()?;
+    let missing = |p: &str| Error::NotFound(format!("no note {p:?} in the knowledge base"));
+    if drops.is_empty() {
+        return Err(Error::Validation("name at least one note to drop".into()));
+    }
+    if drops.iter().any(|d| d == keep) {
+        return Err(Error::Validation(format!(
+            "{keep} is both the note to keep and a note to drop"
+        )));
+    }
+    let load = |p: &str| -> Result<(PathBuf, Parsed)> {
+        let (topic, slug) = parse_rel(p).ok_or_else(|| missing(p))?;
+        let file = existing_note_file(&root, &topic, &slug).ok_or_else(|| missing(p))?;
+        let parsed = parse_note(&fs::read_to_string(&file)?, &slug);
+        Ok((file, parsed))
+    };
+    let (keep_file, mut kept) = load(keep)?;
+    let mut seen_drops: Vec<&String> = Vec::new();
+    let mut loaded = Vec::new();
+    for d in drops {
+        if seen_drops.contains(&d) {
+            continue;
+        }
+        seen_drops.push(d);
+        loaded.push((d.as_str(), load(d)?));
+    }
+    let mut known: HashSet<String> = units(&kept.body).iter().map(|(u, _)| squash(u)).collect();
+    let mut body = kept.body.clone();
+    let mut last_bullet = units(&kept.body).last().is_some_and(|u| u.1);
+    for (_, (_, p)) in &loaded {
+        for (unit, bullet) in units(&p.body) {
+            if !known.insert(squash(&unit)) {
+                continue;
+            }
+            let sep = if bullet && last_bullet { "\n" } else { "\n\n" };
+            if !body.trim().is_empty() {
+                body.push_str(sep);
+            }
+            body.push_str(&unit);
+            last_bullet = bullet;
+        }
+        clean_tags(&p.tags, &mut kept.tags);
+    }
+    let body = body.trim();
+    if body.len() > NOTE_MAX {
+        return Err(Error::Validation(format!(
+            "the merged note would be {} bytes, over the {NOTE_MAX}-byte note cap",
+            body.len()
+        )));
+    }
+    let text = render(
+        &one_line(&kept.title, TITLE_MAX),
+        &kept.tags,
+        &now_iso(),
+        body,
+    );
+    write_atomic(&keep_file, &text)?;
+    log_line(&root, "merge", keep, text.len(), "kb merge")?;
+    let mut removed = Vec::new();
+    let mut failure = Ok(());
+    for (path, (file, _)) in &loaded {
+        let done = fs::remove_file(file)
+            .map_err(Error::from)
+            .and_then(|()| log_line(&root, "delete", path, 0, "kb merge"));
+        if let Err(e) = done {
+            failure = Err(e);
+            break;
+        }
+        removed.push(path.to_string());
+    }
+    // The index must match the files even when a delete failed midway.
+    rebuild_index(&root)?;
+    failure?;
+    Ok(json!({"kept": keep, "removed": removed}))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1224,5 +1510,167 @@ mod tests {
                 .count(),
             12
         );
+    }
+
+    fn put(root: &Path, topic: &str, slug: &str, title: &str, tags: &[&str], body: &str) {
+        let tags: Vec<String> = tags.iter().map(|t| t.to_string()).collect();
+        let dir = root.join("topics").join(topic);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join(format!("{slug}.md")),
+            render(title, &tags, "2026-01-01T00:00:00Z", body),
+        )
+        .unwrap();
+    }
+
+    fn seed_dupes(root: &Path) {
+        put(
+            root,
+            "agents",
+            "npm-path-a",
+            "npm is not on the runner PATH",
+            &["npm", "path"],
+            "The runner PATH lacks npm, so the frontend build fails.\n\n- use pnpm via node\n- check which npm",
+        );
+        put(
+            root,
+            "agents",
+            "npm-path-b",
+            "npm not on PATH in runner",
+            &["npm", "runner"],
+            "The runner PATH lacks npm, so the frontend build fails.\n\n- use pnpm via node\n- homebrew installs npm under /opt/homebrew/bin",
+        );
+        put(
+            root,
+            "ios",
+            "simulators",
+            "Simulator teardown",
+            &["ios"],
+            "Delete scratch simulators with simctl after each qorvex run.",
+        );
+    }
+
+    #[test]
+    fn dupes_clusters_the_seeded_pair_only() {
+        let (_d, root) = kb();
+        seed_dupes(&root);
+        let c = dupes(&root, DUPES_THRESHOLD).unwrap();
+        assert_eq!(c.len(), 1);
+        let paths: Vec<&str> = c[0].notes.iter().map(|n| n.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            ["topics/agents/npm-path-a.md", "topics/agents/npm-path-b.md"]
+        );
+        assert!(dupes(&root, 1.0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn merge_unions_facts_removes_drops_and_reindexes() {
+        let (_d, root) = kb();
+        seed_dupes(&root);
+        let keep = "topics/agents/npm-path-a.md";
+        let drop = "topics/agents/npm-path-b.md".to_string();
+        let r = merge(&root, keep, std::slice::from_ref(&drop)).unwrap();
+        assert_eq!(r, json!({"kept": keep, "removed": [drop]}));
+        let body = show(&root, keep).unwrap().body;
+        assert_eq!(body.matches("use pnpm via node").count(), 1);
+        assert_eq!(body.matches("The runner PATH lacks npm").count(), 1);
+        assert!(body.contains("- check which npm\n- homebrew installs npm"));
+        let notes = scan(&root).unwrap();
+        assert_eq!(notes.len(), 2);
+        let a = notes.iter().find(|n| n.path == keep).unwrap();
+        assert_eq!(a.tags, ["npm", "path", "runner"]);
+        let index = fs::read_to_string(root.join("INDEX.md")).unwrap();
+        assert!(index.contains(keep) && !index.contains("npm-path-b"));
+        assert!(show(&root, &drop).is_err());
+        let log = fs::read_to_string(root.join("log.jsonl")).unwrap();
+        assert!(log.contains("\"op\":\"merge\"") && log.contains("\"op\":\"delete\""));
+    }
+
+    #[test]
+    fn merge_refuses_bad_input_and_writes_nothing() {
+        let (_d, root) = kb();
+        seed_dupes(&root);
+        let a = "topics/agents/npm-path-a.md";
+        let b = "topics/agents/npm-path-b.md".to_string();
+        for (keep, drops) in [
+            (a, vec![a.to_string()]),
+            (a, vec![b.clone(), a.to_string()]),
+            (a, vec![]),
+            (a, vec!["topics/agents/nope.md".to_string()]),
+            ("topics/agents/nope.md", vec![b.clone()]),
+            (a, vec!["../topics/agents/npm-path-b.md".to_string()]),
+            (a, vec!["/etc/passwd".to_string()]),
+            ("topics/../../x.md", vec![b.clone()]),
+        ] {
+            assert!(merge(&root, keep, &drops).is_err(), "{keep} {drops:?}");
+        }
+        assert_eq!(scan(&root).unwrap().len(), 3);
+        assert!(show(&root, a).unwrap().body.contains("check which npm"));
+        assert!(!show(&root, a).unwrap().body.contains("homebrew"));
+    }
+
+    #[test]
+    fn units_keep_fences_and_sub_bullets_whole() {
+        let u = units("intro\n\n```\na\n\nb\n```\n\n- top\n  - sub\n  more\n- next");
+        let texts: Vec<&str> = u.iter().map(|x| x.0.as_str()).collect();
+        assert_eq!(
+            texts,
+            [
+                "intro",
+                "```\na\n\nb\n```",
+                "- top\n  - sub\n  more",
+                "- next"
+            ]
+        );
+    }
+
+    #[test]
+    fn merge_keeps_fenced_blocks_balanced_and_sub_bullets_under_parents() {
+        let (_d, root) = kb();
+        put(&root, "t", "k", "K", &[], "- one\n  - same");
+        put(
+            &root,
+            "t",
+            "d",
+            "D",
+            &[],
+            "- two\n  - same\n\n```\nx\n\n```\n\n```\nx\n\n```",
+        );
+        merge(&root, "topics/t/k.md", &["topics/t/d.md".to_string()]).unwrap();
+        let body = show(&root, "topics/t/k.md").unwrap().body;
+        assert_eq!(body, "- one\n  - same\n- two\n  - same\n\n```\nx\n\n```");
+        assert_eq!(body.matches("```").count() % 2, 0);
+    }
+
+    #[test]
+    fn dupes_rejects_bad_thresholds() {
+        let (_d, root) = kb();
+        for t in [f64::NAN, 0.0, -0.1, 1.5, f64::INFINITY] {
+            assert!(matches!(dupes(&root, t), Err(Error::Validation(_))), "{t}");
+        }
+        assert!(dupes(&root, 1.0).is_ok());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn merge_reindexes_when_a_delete_fails() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_d, root) = kb();
+        put(&root, "t", "k", "K", &[], "kept");
+        put(&root, "t", "d1", "D1", &[], "gone");
+        put(&root, "ro", "d2", "D2", &[], "stays");
+        let ro = root.join("topics/ro");
+        fs::set_permissions(&ro, fs::Permissions::from_mode(0o555)).unwrap();
+        let drops = ["topics/t/d1.md".to_string(), "topics/ro/d2.md".to_string()];
+        let r = merge(&root, "topics/t/k.md", &drops);
+        let is_root = fs::File::create(ro.join("probe")).is_ok();
+        fs::set_permissions(&ro, fs::Permissions::from_mode(0o755)).unwrap();
+        if is_root {
+            return; // running as root: the delete cannot be made to fail
+        }
+        assert!(r.is_err());
+        let index = fs::read_to_string(root.join("INDEX.md")).unwrap();
+        assert!(!index.contains("topics/t/d1.md") && index.contains("topics/ro/d2.md"));
     }
 }

@@ -3319,6 +3319,31 @@ EXAMPLES
         #[arg(long)]
         quiet: bool,
     },
+    /// List clusters of near-duplicate notes (read-only): `[{score, notes: [{path, title, tags}]}]`
+    ///
+    /// Deterministic word-overlap similarity of title, body and tags; pairs at
+    /// or above the threshold are joined into clusters, biggest first.
+    /// `--quiet` drops the tags. Fold a cluster with `kb merge`.
+    Dupes {
+        /// Minimum pair similarity, 0..1 (default 0.3)
+        #[arg(long)]
+        threshold: Option<f64>,
+        /// Print only `{score, notes: [{path, title}]}` per cluster
+        #[arg(long)]
+        quiet: bool,
+    },
+    /// Fold near-duplicate notes into one; prints `{kept, removed}`
+    ///
+    /// Appends to `<keep>` the paragraphs and bullet lines of each `<drop>` it
+    /// lacks, unions the tags, deletes the drops and rebuilds `INDEX.md`.
+    /// Refuses unknown paths and a keep listed among the drops.
+    Merge {
+        /// The note to keep, as `kb list` shows it
+        keep: String,
+        /// The notes to fold in and delete
+        #[arg(required = true, num_args = 1..)]
+        drop: Vec<String>,
+    },
     /// Run the automatic lookup for a Claude Code `UserPromptSubmit` payload on stdin
     ///
     /// What the `kb-lookup.sh` library hook runs (`docs/kb.md` "Automatic
@@ -7752,6 +7777,24 @@ fn run_kb(cmd: KbCmd) -> Result<()> {
         KbCmd::Show { path, quiet } => {
             print_record(&kb::show(&root, &path)?, quiet, QUIET_DROP_KB_NOTE);
         }
+        KbCmd::Dupes { threshold, quiet } => {
+            let clusters = kb::dupes(&root, threshold.unwrap_or(kb::DUPES_THRESHOLD))?;
+            if quiet {
+                let compact: Vec<Value> = clusters
+                    .iter()
+                    .map(|c| {
+                        json!({
+                            "score": c.score,
+                            "notes": c.notes.iter().map(|n| json!({"path": n.path, "title": n.title})).collect::<Vec<_>>(),
+                        })
+                    })
+                    .collect();
+                print_json(&compact);
+            } else {
+                print_json(&clusters);
+            }
+        }
+        KbCmd::Merge { keep, drop } => print_json(&kb::merge(&root, &keep, &drop)?),
         KbCmd::Hook => run_kb_hook(&root),
         KbCmd::Usage { days } => print_json(&crate::core::kb_lookup::usage(&root, days)),
     }
