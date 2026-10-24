@@ -103,7 +103,7 @@ smallest first:
 
 | Size | Where |
 | --- | --- |
-| 10.5px mono, letter-spacing 1.2px | `.live-meta`: speaker and clock |
+| 10.5px mono, letter-spacing 1.2px | `.live-meta`: a notice turn's label (the speaker/clock line went in naru task 2310) |
 | 0.68-0.75rem | table headers, chips, nav meta, hints (`.cc-hint` is 0.8rem) |
 | 0.8-0.85rem | badges, `.inbox-origin` (600), table cells (`.cc-table` 0.82rem), nav items |
 | 0.9-0.95rem | buttons (500), inputs |

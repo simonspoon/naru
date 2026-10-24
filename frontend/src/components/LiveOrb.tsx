@@ -181,6 +181,13 @@ export type OrbProps = {
   /** An overheard "can help" offer is waiting (naru task 1700): the orb glows
    *  silently and a press accepts it. Absent/null = no offer. */
   offer?: { title: string; onAccept: () => void } | null
+  /** The driver's model/context readout (`headMeta`), shown in the header
+   *  (naru task 2310). Empty/absent = nothing shown. */
+  meta?: string
+  /** The press that ends (or detaches from) the conversation, in the header
+   *  since the docked chat panel lost its head (naru task 2310). Null/absent =
+   *  not offered. */
+  end?: { label: string; detach: boolean; disabled: boolean; onPress: () => void } | null
 }
 
 /** The props that make an orb element a button while an offer glows. */
@@ -326,9 +333,14 @@ function HeaderButton({
  * collapsed nav; the muted mic is red and slashed.
  */
 export function OrbHeaderControls(p: OrbProps) {
-  if (!p.micAvailable && !p.canPause && !p.ambient) return null
   return (
     <>
+      {/* The live mark and the context readout (naru task 2310), moved here
+          from the docked chat panel's head, which is gone. */}
+      <span className="header-orb-mark">
+        <NaruMark state={p.state} level={p.level} speechRms={p.speechRms} micReady={!p.micMuted} />
+      </span>
+      {p.meta && <span className="live-head-ctx">{p.meta}</span>}
       <div className="header-orb-ctrls">
         {p.micAvailable && (
           <HeaderButton
@@ -357,6 +369,27 @@ export function OrbHeaderControls(p: OrbProps) {
           >
             <SpeakerGlyph muted={p.speechMuted} />
           </HeaderButton>
+        )}
+        {p.end && (
+          <button
+            type="button"
+            className="header-orb-btn header-orb-end"
+            aria-label={p.end.detach ? 'detach from the conversation' : 'end the conversation'}
+            title={p.end.label}
+            disabled={p.end.disabled}
+            onClick={p.end.onPress}
+          >
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+              <path
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d={p.end.detach ? 'M9 3v5M15 3v5M6 8h12v3a6 6 0 0 1-12 0V8zM12 17v4' : 'M12 3v9M6.5 6.5a8 8 0 1 0 11 0'}
+              />
+            </svg>
+          </button>
         )}
       </div>
       <span className="header-orb-divider" aria-hidden="true" />

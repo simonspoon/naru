@@ -9680,27 +9680,14 @@ body.live-panel-ratio-resizing .live-panel-divider {
   max-width: 92%;
 }
 
-/* The speaker and the clock, once per run (mesa task 1565): mono only for
-   this small meta, the person's side reading time then name. */
+/* A notice's label, the one meta line left above a bubble (naru task 2310). */
 .live-meta {
   display: flex;
   align-items: center;
-  gap: 8px;
   margin-top: 0.5rem;
   font-family: var(--font-mono);
   font-size: 10.5px;
-  letter-spacing: 1.2px;
   color: var(--muted);
-}
-
-.live-user .live-meta {
-  justify-content: flex-end;
-}
-
-/* The dot between the two halves of the meta line. */
-.live-meta > :first-child:not(:last-child)::after {
-  content: '·';
-  margin-left: 8px;
 }
 
 .live-who {
@@ -9708,10 +9695,6 @@ body.live-panel-ratio-resizing .live-panel-divider {
   letter-spacing: 1.4px;
   text-transform: uppercase;
   color: var(--cyan);
-}
-
-.live-user .live-who {
-  color: var(--violet);
 }
 
 /* Dictation and spoken prose are both free text that may carry a bare URL with
@@ -9802,10 +9785,6 @@ body.live-panel-ratio-resizing .live-panel-divider {
 
 .live-turn-replay:disabled {
   opacity: 0.4;
-}
-
-.live-play-head {
-  opacity: 0.6;
 }
 
 /* Inside the bubble's right padding, so it can never overflow a narrow panel. */
@@ -13516,4 +13495,28 @@ body.dock-resizing .dock-body {
 .voice-enroll-status {
   margin: 0.5rem 0;
   font-weight: 600;
+}
+
+/* The live mark in the page header (naru task 2310), moved from the docked
+   chat panel's head. */
+.header-orb-mark {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.header-orb-btn.header-orb-end {
+  color: var(--red);
+}
+
+/* Below this the header has no room for the two read-only items; the presses
+   stay. */
+@media (max-width: 960px) {
+  .header-orb-mark,
+  .live-hub > .live-head-ctx {
+    display: none;
+  }
 }

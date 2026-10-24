@@ -96,7 +96,7 @@ import { chordLabel, matchesShortcut } from '../keymap'
 import { useKeymap } from '../keymapStore'
 import { parseBoardKey } from '../liveBoardKeys'
 import { elapsedLabel, endsInHead } from '../liveHead'
-import { headMeta, quietHint, taskHash, taskSegments, turnClock } from '../liveChat'
+import { headMeta, quietHint, taskHash, taskSegments } from '../liveChat'
 import { headerIndicator } from '../liveIndicator'
 import { offerGlows, offerTitle } from '../liveOffer'
 import {
@@ -4818,6 +4818,15 @@ export function LiveHub({
       if (pauseButton) togglePause(pauseButton)
     },
     onToggleSpeech: toggleSpeechMuted,
+    meta: session !== null ? headMeta(driverModel, data?.context_tokens) : '',
+    end: endButton
+      ? {
+          label: endButton.label,
+          detach: endButton.action === 'detach',
+          disabled: endButton.disabled,
+          onPress: () => act(endButton),
+        }
+      : null,
     // The ambient "can help" offer (naru task 1700): glows the idle orb, and
     // a press on it is a start that carries the overheard text.
     offer: glowing && offer
@@ -4866,8 +4875,13 @@ export function LiveHub({
           fold buttons and the arrangement toggle they replace —
           each one moves or resizes the board the strokes are
           pinned to. With no board history there is one pane and
-          nothing to lay out, so none of them is offered. */}
-      <div className="live-head-row live-toolbar">
+          nothing to lay out, so none of them is offered.
+
+          Docked, there is no toolbar at all (naru task 2310): the
+          dock tab is the panel's head, and the mark, the context
+          readout and every press live in the page header
+          (`OrbHeaderControls`). */}
+      {!dock && <div className="live-head-row live-toolbar">
         {hasBoards && !dock && (
           <div className="live-toolbar-panes">
             <button
@@ -5068,7 +5082,7 @@ export function LiveHub({
             <CloseMark />
           </button>
         </div>
-      </div>
+      </div>}
 
       {/* One sentence under the toolbar, only when there is something
           to say (an error, paused, resting, ended, no agent, speech
@@ -5169,34 +5183,16 @@ export function LiveHub({
               key={group.turns[0].id}
               className={`live-group live-${group.role}`}
             >
-              {(() => {
-                // The speaker and the clock, once per group; a
-                // Naru group's own play button sits beside the
-                // clock and plays its first spoken turn.
-                const clock = turnClock(group.turns[0].created_at)
-                const who = (
-                  <span className="live-who">
-                    {turnLabel(group.role, group.notice)}
-                  </span>
-                )
-                const lead = group.turns.find((t) => replayState(t) !== 'hidden')
-                return (
-                  <div className="live-meta">
-                    {group.role === 'user' ? (
-                      <>
-                        {clock !== '' && <span>{clock}</span>}
-                        {who}
-                      </>
-                    ) : (
-                      <>
-                        {who}
-                        {clock !== '' && <span>{clock}</span>}
-                        {lead !== undefined && renderReplay(lead, 'live-play-head')}
-                      </>
-                    )}
-                  </div>
-                )
-              })()}
+              {/* No speaker/clock line above the bubbles (naru task 2310):
+                  the bubble's side and colour say who spoke, and each
+                  bubble keeps its own hover replay button. A notice is
+                  the one exception — it looks like Naru's bubble but is
+                  Naru's own system line, so it keeps its label. */}
+              {group.notice && (
+                <div className="live-meta">
+                  <span className="live-who">{turnLabel(group.role, group.notice)}</span>
+                </div>
+              )}
               {group.turns.map((turn) => {
                 return (
                   <div key={turn.id} className="live-turn">
