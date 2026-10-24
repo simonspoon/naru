@@ -30,11 +30,21 @@ import {
   type SplitNode,
 } from './lib/paneTree'
 
-export type PanelId = 'main' | 'chat' | 'board' | 'agents' | 'terminal' | 'workflows' | 'watcher'
+export type BasePanelId = 'main' | 'chat' | 'board' | 'agents' | 'terminal' | 'workflows' | 'watcher'
 
-export const PANEL_IDS: readonly PanelId[] = ['main', 'chat', 'board', 'agents', 'terminal', 'workflows', 'watcher']
+/** One agent's detail opened from the Agents panel's card list (naru task
+ *  2313): `agent:<pane id>`, the pane id being the one `AgentSidebar` mints
+ *  for that card (a job id, a `run:` id or a child pane id). Transient: it is
+ *  never in `PANEL_IDS` (so never in the reopen menu or the rail), a close
+ *  remembers no spot, and `parseState` drops it, so a reload starts without
+ *  it — the old in-panel pane tree was component state too. */
+export type AgentPanelId = `agent:${string}`
 
-const LABELS: Record<PanelId, string> = {
+export type PanelId = BasePanelId | AgentPanelId
+
+export const PANEL_IDS: readonly BasePanelId[] = ['main', 'chat', 'board', 'agents', 'terminal', 'workflows', 'watcher']
+
+const LABELS: Record<BasePanelId, string> = {
   main: 'Main',
   chat: 'Chat',
   board: 'Whiteboard',
@@ -44,12 +54,28 @@ const LABELS: Record<PanelId, string> = {
   watcher: 'Agent watcher',
 }
 
-export function panelLabel(id: PanelId): string {
+/** An agent tab's label is the one it was opened with (`DockState.labels`). */
+export function panelLabel(id: PanelId, state?: DockState): string {
+  if (isAgentPanelId(id)) return state?.labels?.[id] ?? 'Agent'
   return LABELS[id]
 }
 
-export function isPanelId(value: unknown): value is PanelId {
+/** A fixed panel id — what a saved layout may hold. */
+export function isPanelId(value: unknown): value is BasePanelId {
   return typeof value === 'string' && (PANEL_IDS as readonly string[]).includes(value)
+}
+
+export function isAgentPanelId(value: unknown): value is AgentPanelId {
+  return typeof value === 'string' && value.startsWith('agent:') && value.length > 'agent:'.length
+}
+
+/** Anything a tab may be dragged as: a fixed panel or an agent tab. */
+export function isDockPanelId(value: unknown): value is PanelId {
+  return isPanelId(value) || isAgentPanelId(value)
+}
+
+export function agentPanelId(paneId: string): AgentPanelId {
+  return `agent:${paneId}`
 }
 
 // The drag payload a panel tab travels as — its own type so a drag of
@@ -70,6 +96,8 @@ export type DockState = {
   /** Panels docked into the left navigation, top to bottom (mesa task 1574). */
   nav: PanelId[]
   lastSpot: Partial<Record<PanelId, LastSpot>>
+  /** Each open agent tab's label, set when it was opened (naru task 2313). */
+  labels?: Partial<Record<AgentPanelId, string>>
 }
 
 // --- Building blocks ---------------------------------------------------
@@ -127,7 +155,7 @@ export function closedPanels(state: DockState): PanelId[] {
   return PANEL_IDS.filter((p) => groupOf(state, p) === null && !inNav(state, p))
 }
 
-export type PanelEntry = { id: PanelId; label: string; where: 'nav' | 'dock' | 'closed'; open: boolean }
+export type PanelEntry = { id: BasePanelId; label: string; where: 'nav' | 'dock' | 'closed'; open: boolean }
 
 /** The nav's Panels list: every panel, where it sits, and whether it is
  *  showing (a background tab is docked but not open). */
@@ -162,8 +190,11 @@ function spotOf(state: DockState, panel: PanelId): LastSpot | undefined {
   if (inNav(state, panel)) return { nav: true }
   const gid = groupOf(state, panel)
   if (gid === null) return undefined
-  const mates = state.groups[gid].tabs.filter((t) => t !== panel)
-  if (mates.length > 0) return { anchor: state.groups[gid].active === panel ? mates[0] : state.groups[gid].active, edge: 'center' }
+  // An anchor is a fixed panel: an agent tab is transient (naru task 2313), so
+  // a spot beside one would be lost with it.
+  const active = state.groups[gid].active
+  const mates = state.groups[gid].tabs.filter((t) => t !== panel && isPanelId(t))
+  if (mates.length > 0) return { anchor: active !== panel && isPanelId(active) ? active : mates[0], edge: 'center' }
   const path = findPathToLeaf(state.tree, gid)
   if (path === null) return undefined
   let parent: SplitNode<'group'> = state.tree
@@ -174,9 +205,11 @@ function spotOf(state: DockState, panel: PanelId): LastSpot | undefined {
   const first = (n: PaneNode<'group'>): string => (n.kind === 'leaf' ? n.id : first(n.children[0].node))
   const ng = state.groups[first(parent.children[neighborIdx].node)]
   if (!ng) return undefined
+  const anchor = isPanelId(ng.active) ? ng.active : ng.tabs.find(isPanelId)
+  if (anchor === undefined) return undefined
   const after = neighborIdx > i // the neighbour is after us, so we were before it
   const edge: DropEdge = parent.orientation === 'row' ? (after ? 'left' : 'right') : after ? 'top' : 'bottom'
-  return { anchor: ng.active, edge }
+  return { anchor, edge }
 }
 
 /** Appends a fresh one-panel group at the root's right edge. */
@@ -244,6 +277,22 @@ export function dockToNav(state: DockState, panel: PanelId, index?: number): Doc
 }
 
 export function closePanel(state: DockState, panel: PanelId): DockState {
+  if (isAgentPanelId(panel)) {
+    if (groupOf(state, panel) === null && !inNav(state, panel)) return state
+    const gid = groupOf(state, panel)
+    let next = withoutPanel(state, panel)
+    // A closed agent tab hands the front back toward the Agents tab it opened
+    // beside, rather than to whatever came after it.
+    const g = gid !== null ? state.groups[gid] : undefined
+    const left = g && g.active === panel ? g.tabs[g.tabs.indexOf(panel) - 1] : undefined
+    if (gid !== null && left !== undefined && next.groups[gid]) next = activateTab(next, gid, left)
+    const labels = { ...next.labels }
+    delete labels[panel]
+    // A drag may have left it a spot (`dropPanel`, `dockToNav`); it has none.
+    const lastSpot = { ...next.lastSpot }
+    delete lastSpot[panel]
+    return { ...next, tree: normalize(next.tree), labels, lastSpot }
+  }
   const spot = spotOf(state, panel)
   if (spot === undefined && groupOf(state, panel) === null) return state
   const next = withoutPanel(state, panel)
@@ -275,6 +324,33 @@ export function revealPanel(state: DockState, panel: PanelId): DockState {
   const anchorGroup = spot && 'anchor' in spot ? groupOf(state, spot.anchor) : null
   if (spot && 'anchor' in spot && anchorGroup !== null) return dropPanel(state, panel, anchorGroup, spot.edge)
   return appendAtRight(state, panel)
+}
+
+/**
+ * Opens an agent tab (naru task 2313), or brings it to the front when it is
+ * already docked — clicking a card twice never makes a duplicate. A new tab
+ * joins `anchor`'s group (the Agents panel's), right after it and any agent
+ * tabs already beside it; with the anchor in the nav or closed it goes on the
+ * root's right.
+ */
+export function openAgentPanel(state: DockState, panel: AgentPanelId, label: string, anchor: PanelId = 'agents'): DockState {
+  if (inNav(state, panel) || groupOf(state, panel) !== null) return revealPanel(state, panel)
+  const labels = { ...state.labels, [panel]: label }
+  const gid = groupOf(state, anchor)
+  if (gid === null) return { ...appendAtRight(state, panel), labels }
+  const g = state.groups[gid]
+  let at = g.tabs.indexOf(anchor) + 1
+  while (at < g.tabs.length && isAgentPanelId(g.tabs[at])) at += 1
+  const tabs = [...g.tabs.slice(0, at), panel, ...g.tabs.slice(at)]
+  return { ...state, labels, groups: { ...state.groups, [gid]: { tabs, active: panel } } }
+}
+
+/** The agent tabs docked anywhere, in no particular order. */
+export function agentPanels(state: DockState): AgentPanelId[] {
+  const out: AgentPanelId[] = []
+  for (const g of Object.values(state.groups)) for (const t of g.tabs) if (isAgentPanelId(t)) out.push(t)
+  for (const p of state.nav) if (isAgentPanelId(p)) out.push(p)
+  return out
 }
 
 /** Whether `revealPanel` would *change* anything by putting a closed `panel`

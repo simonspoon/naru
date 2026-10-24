@@ -7,7 +7,7 @@ import { CommandPalette } from './components/CommandPalette'
 import { WorkflowsPanel } from './components/WorkflowsPanel'
 import { DockBar, DockLayout } from './components/DockLayout'
 import { useDockStore } from './useDockStore'
-import { isVisible, revealNeedsNav, type PanelId } from './dockLayout'
+import { agentPanels, isVisible, openAgentPanel, revealNeedsNav, type AgentPanelId, type PanelId } from './dockLayout'
 import { NavOrb, NavRail, NavZone } from './components/NavDock'
 import { hostFor } from './lib/dockHosts'
 import { DoneToasts } from './components/DoneToasts'
@@ -200,7 +200,13 @@ function App() {
     () => new Set<PanelId>(boardFrozen ? ['board'] : []),
     [boardFrozen],
   )
-  const { hide } = dock
+  const { hide, update: dockUpdate } = dock
+  // A card in the docked Agents panel opens its agent as a tab beside it
+  // (naru task 2313).
+  const openAgentTab = useCallback(
+    (p: AgentPanelId, label: string) => dockUpdate((s) => openAgentPanel(s, p, label)),
+    [dockUpdate],
+  )
 
   // What the keyboard is bound to right now — the shipped chords until the
   // one `GET /api/config/keymap` this page makes resolves (mesa task 1079).
@@ -231,6 +237,10 @@ function App() {
   const watcherVisible = isVisible(dock.state, 'watcher', navCollapsed)
   const chatVisible = isVisible(dock.state, 'chat', navCollapsed)
   const boardVisible = isVisible(dock.state, 'board', navCollapsed)
+  const agentTabs = useMemo(
+    () => agentPanels(dock.state).map((id) => ({ id, visible: isVisible(dock.state, id, navCollapsed) })),
+    [dock.state, navCollapsed],
+  )
   // The nav's permanent orb (naru task 1798) shows in an expanded nav on the
   // dock tiers only; the phone tier keeps its floating orb.
   const orbPanelShown = docked && !navCollapsed
@@ -934,6 +944,9 @@ function App() {
               docked
               collapsed={!agentsVisible}
               onCollapsedChange={(collapsed) => (collapsed ? hide('agents') : reveal('agents'))}
+              agentTabs={agentTabs}
+              onOpenAgentTab={openAgentTab}
+              onCloseAgentTab={hide}
             />,
             hostFor('agents'),
           )}

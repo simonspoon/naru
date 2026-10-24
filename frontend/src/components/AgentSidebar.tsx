@@ -2,6 +2,7 @@ import { Fragment, useEffect, useRef, useState } from 'react'
 import { mainFloor, mainIsCollapsed } from '../mainCollapse'
 import { MIN_LIVE_SIDEBAR_WIDTH } from '../liveSidebarWidth'
 import type { CSSProperties, ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import {
   DndContext,
   PointerSensor,
@@ -78,6 +79,8 @@ import {
   type Lingering,
 } from '../agentCard'
 import { publishOpenAgents } from '../liveView'
+import { agentPanelId, type AgentPanelId } from '../dockLayout'
+import { hostFor } from '../lib/dockHosts'
 import {
   clampAgentSidebarWidth,
   DEFAULT_AGENT_SIDEBAR_WIDTH,
@@ -516,6 +519,26 @@ function runSessionId(agents: AgentSession[], runId: string | null): string | nu
 function runPaneLabel(agents: AgentSession[], runId: string | null, paneId: string): string {
   const row = agents.find((a) => runId !== null && a.runId === runId)
   return `run · ${row ? agentLabel(row) : (runId ?? paneId)}`
+}
+
+/** The label a card's pane wears: the session's name, a run's label, or a
+ *  child's heading — what each pane's own header shows. */
+function paneLabelFor(agents: AgentSession[], paneId: string): string {
+  if (isRunPaneId(paneId)) return runPaneLabel(agents, parseRunPaneId(paneId), paneId)
+  const paneRef = parseChildPaneId(paneId)
+  if (paneRef !== null) {
+    const parent = childParentRow(paneRef, agents)
+    const child = childForPane(paneRef, parent?.children ?? [])
+    return childPaneHeading(paneRef, child, parent ? agentLabel(parent) : paneRef.parentId)
+  }
+  const a = agents.find((x) => x.id === paneId)
+  return a ? agentLabel(a) : paneId
+}
+
+/** A dock tab's title (naru task 2313): the pane's label, cut short. */
+const TAB_LABEL_MAX = 24
+function tabLabel(label: string): string {
+  return label.length > TAB_LABEL_MAX ? `${label.slice(0, TAB_LABEL_MAX - 1)}…` : label
 }
 
 /** The phone tier's run pane — `SoloChildPane`'s sibling, no `DndContext`. */
@@ -1377,6 +1400,9 @@ export function AgentSidebar({
   onCollapsedChange,
   liveSlot = null,
   docked = false,
+  agentTabs = [],
+  onOpenAgentTab,
+  onCloseAgentTab,
 }: {
   // Owned by `App.tsx` since mesa task 556: the phone tab bar's "Agents" slot
   // opens this drawer, so the collapse is no longer this component's private
@@ -1395,8 +1421,21 @@ export function AgentSidebar({
    *  are off, and the panel fills whatever the dock gives it. `collapsed` still
    *  means "nobody can see it" and still gates the polling. */
   docked?: boolean
+  /** Docked only (naru task 2313): the agent tabs open in the dock, each with
+   *  whether it is showing. A card click opens its agent as one of these
+   *  rather than as a pane inside this panel, and this panel renders each
+   *  one's content into its dock host. */
+  agentTabs?: { id: AgentPanelId; visible: boolean }[]
+  /** Docked only: open (or focus) a card's tab. */
+  onOpenAgentTab?: (panel: AgentPanelId, label: string) => void
+  /** Docked only: a tab pane's own close button. */
+  onCloseAgentTab?: (panel: AgentPanelId) => void
 }) {
   const setCollapsed = onCollapsedChange
+  // An open agent tab that is showing needs the session poll too: a child's
+  // pane reads its state off its parent's row, and a run pane its session id.
+  const anyTabVisible = agentTabs.some((t) => t.visible)
+  const pollPaused = collapsed && !anyTabVisible
   // Split tree holding every open AGENT pane + how each split's children
   // share its flex space — the 'Agents' session-list is no longer part of
   // this tree (mesa task 414: it's a fixed rail, see `listWidth`/
@@ -1659,7 +1698,7 @@ export function AgentSidebar({
   const { data: sessions, error, refetch } = useFetch(
     () => listAllAgents(),
     'agents-sidebar',
-    { pollMs: collapsed ? undefined : 3000 },
+    { pollMs: pollPaused ? undefined : 3000 },
   )
   // Polled on the same terms as the session list above, for the same reason
   // (mesa task 898): this sidebar is a permanent mount, so a one-shot fetch
@@ -1673,10 +1712,10 @@ export function AgentSidebar({
   // The live conversation's agent, pinned atop the list (mesa task 1491). A
   // cursor past every turn keeps the answer to the session row alone.
   const { data: liveState } = useFetch(() => getLive(Number.MAX_SAFE_INTEGER), 'agents-sidebar-live', {
-    pollMs: collapsed ? undefined : 3000,
+    pollMs: pollPaused ? undefined : 3000,
   })
   const { data: projects } = useFetch(() => listProjects(), 'agents-sidebar-projects', {
-    pollMs: collapsed ? undefined : 3000,
+    pollMs: pollPaused ? undefined : 3000,
   })
 
   // Tile-area measurement (mesa task 466). Observed unconditionally rather
@@ -1822,7 +1861,19 @@ export function AgentSidebar({
     return () => clearTimeout(t)
   }, [lingering, childLingering])
   const { agents, leaving } = withLingering(live, lingering)
-  const openIds = collectLeafIds(root)
+  // Docked, a card's pane is a dock tab (naru task 2313), so what is open is
+  // the dock's agent tabs rather than this panel's own pane tree.
+  const tabPaneKey = agentTabs.map((t) => t.id.slice('agent:'.length)).join('\n')
+  const openIds = docked ? (tabPaneKey === '' ? [] : tabPaneKey.split('\n')) : collectLeafIds(root)
+  // A tab closed in the dock (its ×, a layout switch) releases its pooled
+  // terminal, as closing a pane here does.
+  const prevTabPanes = useRef<string[]>([])
+  useEffect(() => {
+    if (!docked) return
+    const now = tabPaneKey === '' ? [] : tabPaneKey.split('\n')
+    for (const id of prevTabPanes.current) if (!now.includes(id)) releasePane(id)
+    prevTabPanes.current = now
+  }, [docked, tabPaneKey])
   // The open agent panes, for the live conversation's view line (mesa task
   // 1424, `liveView.ts`) — agent panes only, not their child panes.
   const openAgentKey = openIds.filter((id) => !isChildPaneId(id) && !isRunPaneId(id)).join(' ')
@@ -1889,6 +1940,11 @@ export function AgentSidebar({
   }
 
   function togglePane(id: string) {
+    if (docked) {
+      onOpenAgentTab?.(agentPanelId(id), tabLabel(paneLabelFor(agents, id)))
+      refetch()
+      return
+    }
     // Decided against the current `root`, not inside the `setRoot` updater:
     // `ptyPool.remove` is a real side effect (kills the pool entry, so the
     // shell can be reaped), and an updater function can run more than once
@@ -2054,8 +2110,10 @@ export function AgentSidebar({
             }}
           />
         )}
+        {/* Docked, every control here is off (the dock owns the box, and auto
+            tile went with the in-panel panes, naru task 2313). */}
+        {!docked && (
         <div className="agent-sidebar-header-actions">
-          {!docked && (
           <button
             type="button"
             className="sidebar-toggle agent-sidebar-toggle"
@@ -2068,8 +2126,7 @@ export function AgentSidebar({
           >
             {collapsed ? '«' : '»'}
           </button>
-          )}
-          {!collapsed && !docked && (
+          {!collapsed && (
             <button
               type="button"
               className={`agent-sidebar-maximize${maximized ? ' active' : ''}`}
@@ -2109,7 +2166,15 @@ export function AgentSidebar({
             </button>
           )}
         </div>
+        )}
 
+        {docked ? (
+          // Docked (naru task 2313): the card list is the whole panel, always
+          // expanded, and a card opens its agent as a dock tab beside this one.
+          <div className="agent-sidebar-body agent-sidebar-list-only" ref={bodyRef}>
+            <AgentListContent {...listProps} />
+          </div>
+        ) : (
         <div
           className={`agent-sidebar-body${listMaximized ? ' list-maximized' : ''}`}
           ref={bodyRef}
@@ -2234,7 +2299,33 @@ export function AgentSidebar({
             {!listCollapsed && <AgentListContent {...listProps} />}
           </div>
         </div>
+        )}
       </aside>
+      {docked &&
+        agentTabs.map(({ id: tabId, visible }) => {
+          const paneId = tabId.slice('agent:'.length)
+          const close = () => onCloseAgentTab?.(tabId)
+          const pane = isRunPaneId(paneId) ? (
+            <SoloRunPane paneId={paneId} agents={agents} paused={!visible} onClose={close} />
+          ) : isChildPaneId(paneId) ? (
+            <SoloChildPane paneId={paneId} agents={agents} paused={!visible} onClose={close} />
+          ) : (
+            <SoloAgentPane
+              agentId={paneId}
+              sessionId={sessionIdFor(agents, paneId)}
+              label={paneLabelFor(agents, paneId)}
+              view={paneViews[paneId] ?? 'chat'}
+              onViewChange={(v) => setPaneView(paneId, v)}
+              paused={!visible}
+              onClose={close}
+            />
+          )
+          return createPortal(
+            <div className="agent-tab-pane">{pane}</div>,
+            hostFor(tabId),
+            tabId,
+          )
+        })}
     </>
   )
 }

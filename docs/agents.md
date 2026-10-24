@@ -801,7 +801,9 @@ already use.
   area instead (`main` display:none via `:has()`), matching the diagram
   canvas's own takeover-view expand toggle; `Escape` restores.
 - **Auto Tile** (mesa task 411): a toggle (`agent-sidebar-autotile`) in the
-  header actions, next to maximize, visible only while expanded. Off by
+  header actions, next to maximize, visible only while expanded and only
+  when not docked (naru task 2313: the docked panel is the card list alone and
+  opens each card as a dock tab, `docs/dock.md` "Agent tabs"). Off by
   default. While on, an effect keyed on `sessions` (the poll result, not the
   per-render sorted `agents` copy — so it only re-runs when a poll actually
   returns new data) keeps the pane tree in sync with agent state instead of

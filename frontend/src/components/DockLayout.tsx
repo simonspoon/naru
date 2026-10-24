@@ -9,7 +9,7 @@ import {
   missingBuiltins,
   moveLayout,
   dropPanel,
-  isPanelId,
+  isDockPanelId,
   PANEL_DRAG_MIME,
   PANEL_IDS,
   panelLabel,
@@ -87,18 +87,18 @@ function DockGroupView({ id, ratio, ctx }: { id: string; ratio: number; ctx: Ctx
               onClick={() => ctx.update((s) => activateTab(s, id, t))}
               onDragStart={(e) => beginPanelDrag(e, t)}
               onDragEnd={ctx.onDragEnd}
-              title={lock ? 'Unsent ink on the board holds it in place' : `Drag ${panelLabel(t)} to rearrange`}
+              title={lock ? 'Unsent ink on the board holds it in place' : `Drag ${panelLabel(t, ctx.state)} to rearrange`}
             >
               <span className="dock-grip" aria-hidden="true">
                 ⠿
               </span>
-              <span className="dock-tab-label">{panelLabel(t)}</span>
+              <span className="dock-tab-label">{panelLabel(t, ctx.state)}</span>
               {!lock && (
                 <button
                   type="button"
                   className="dock-tab-close"
-                  aria-label={`Close ${panelLabel(t)}`}
-                  title={`Close ${panelLabel(t)}`}
+                  aria-label={`Close ${panelLabel(t, ctx.state)}`}
+                  title={`Close ${panelLabel(t, ctx.state)}`}
                   onClick={(e) => {
                     e.stopPropagation()
                     ctx.update((s) => closePanel(s, t))
@@ -137,7 +137,7 @@ function DockGroupView({ id, ratio, ctx }: { id: string; ratio: number; ctx: Ctx
           }}
           onDrop={(e) => {
             const p = e.dataTransfer.getData(PANEL_DRAG_MIME)
-            if (!isPanelId(p)) return
+            if (!isDockPanelId(p)) return
             e.preventDefault()
             const s = pointerSpot(e)
             ctx.onDragEnd()

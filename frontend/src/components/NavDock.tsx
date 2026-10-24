@@ -2,12 +2,13 @@ import { useLayoutEffect, useRef, useState } from 'react'
 import {
   closePanel,
   dockToNav,
-  isPanelId,
+  isDockPanelId,
   navDropIndex,
   PANEL_DRAG_MIME,
   panelEntries,
   panelLabel,
   type DockState,
+  type BasePanelId,
   type PanelId,
 } from '../dockLayout'
 import { ccHref } from '../lastView'
@@ -52,7 +53,7 @@ export function NavZone({ state, update, locked }: { state: DockState; update: U
       }}
       onDrop={(e) => {
         const p = e.dataTransfer.getData(PANEL_DRAG_MIME)
-        if (!isPanelId(p)) return
+        if (!isDockPanelId(p)) return
         e.preventDefault()
         const i = indexAt(e.clientY)
         setAt(null)
@@ -73,18 +74,18 @@ export function NavZone({ state, update, locked }: { state: DockState; update: U
                 endPanelDrag()
                 setAt(null)
               }}
-              title={lock ? 'Unsent ink on the board holds it in place' : `Drag ${panelLabel(p)} to rearrange`}
+              title={lock ? 'Unsent ink on the board holds it in place' : `Drag ${panelLabel(p, state)} to rearrange`}
             >
               <span className="dock-grip" aria-hidden="true">
                 ⠿
               </span>
-              <span className="nav-dock-label">{panelLabel(p)}</span>
+              <span className="nav-dock-label">{panelLabel(p, state)}</span>
               {!lock && (
                 <button
                   type="button"
                   className="nav-dock-close"
-                  aria-label={`Close ${panelLabel(p)}`}
-                  title={`Close ${panelLabel(p)}`}
+                  aria-label={`Close ${panelLabel(p, state)}`}
+                  title={`Close ${panelLabel(p, state)}`}
                   onClick={() => update((s) => closePanel(s, p))}
                 >
                   ×
@@ -103,7 +104,7 @@ export function NavZone({ state, update, locked }: { state: DockState; update: U
   )
 }
 
-const RAIL_GLYPH: Record<PanelId, string> = {
+const RAIL_GLYPH: Record<BasePanelId, string> = {
   main: '▦',
   chat: '✎',
   board: '◧',

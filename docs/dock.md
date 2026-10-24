@@ -10,7 +10,7 @@ or Rust surface.
 | `main` | the routed page (`<main>{page}</main>`) |
 | `chat` | the live conversation: head, transcript, composer |
 | `board` | the live whiteboard (`LiveBoardPanel`), or "No whiteboard yet" |
-| `agents` | `AgentSidebar` with its `docked` prop |
+| `agents` | `AgentSidebar` with its `docked` prop: the card list alone (naru task 2313, "Agent tabs" below) |
 | `terminal` | the global `TerminalPage` |
 | `workflows` | `WorkflowsPanel`: the workflows of the project the route is on, opened in place (a saved layout naming the old `diagrams` id is renamed on load) |
 | `watcher` | `AgentWatcherView` (the Agent watcher timeline; polls only while the panel is visible; starts closed in every preset) |
@@ -55,6 +55,26 @@ host while the nav is expanded, so closing Chat stops nothing. Collapsing the
 nav unmounts the orb's view (only the host stays stable) and expanding mounts
 it afresh; the state is LiveHub's, so nothing of the conversation restarts. The phone tier has no dock, no nav
 orb, and keeps its floating orb.
+
+## Agent tabs (naru task 2313)
+
+Docked, the Agents panel is only its card list, always expanded: no auto-tile
+chip, no collapsible "Agents n" rail header, no in-panel pane tree. A card
+click opens that agent as its **own tab**, `agent:<pane id>` (the pane id the
+card always minted: a job id, a `run:` id or a child pane id), in the Agents
+panel's group, right after Agents and any agent tabs already beside it, in
+front (`openAgentPanel`); with Agents in the nav or closed it goes on the
+root's right. Clicking the card again only brings that tab forward, so a card
+never opens twice. The tab's title is the pane's label cut to 24 characters,
+fixed when it opens (`DockState.labels`); the body is the phone tier's solo
+pane (agent: term/chat toggle; run; child) with its full label, rendered by
+`AgentSidebar` into the tab's host. An agent tab drags and docks like any
+panel, but is transient: never in `PANEL_IDS` (not in the `⋯` menu or the
+rail), a close records no last spot and hands the front back to the tab on its
+left, and `parseState` drops it, so a reload starts without it (as the old
+pane tree did). A tab leaving the dock, by its × or a layout switch, releases
+its pooled terminal. Auto tile is gone from the docked panel (each agent is
+one click away as a tab); the phone tier's drawer keeps it and its pane tree.
 
 ## Gestures
 

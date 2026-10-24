@@ -2,6 +2,11 @@ import { describe, expect, it, vi } from 'vitest'
 import { collectLeafIds } from './lib/paneTree'
 import {
   activateTab,
+  agentPanelId,
+  agentPanels,
+  isDockPanelId,
+  openAgentPanel,
+  panelLabel,
   closePanel,
   closedPanels,
   dockToNav,
@@ -465,5 +470,67 @@ describe('debouncedSaver', () => {
     vi.advanceTimersByTime(1000)
     expect(saved).toEqual(['b', 'c'])
     vi.useRealTimers()
+  })
+})
+
+describe('agent tabs (naru task 2313)', () => {
+  const a = agentPanelId('job1')
+  const b = agentPanelId('run:r2')
+  it('opens beside Agents in its group, in front, labelled', () => {
+    const s = openAgentPanel(talk(), a, 'naru live')
+    consistent(s)
+    const g = s.groups[groupOf(s, 'agents')!]
+    expect(g.tabs.indexOf(a)).toBe(g.tabs.indexOf('agents') + 1)
+    expect(g.active).toBe(a)
+    expect(panelLabel(a, s)).toBe('naru live')
+    expect(agentPanels(s)).toEqual([a])
+  })
+  it('a second card goes after the first; the same card again only focuses it', () => {
+    let s = openAgentPanel(openAgentPanel(talk(), a, 'A'), b, 'B')
+    const gid = groupOf(s, 'agents')!
+    const at = s.groups[gid].tabs.indexOf('agents')
+    expect(s.groups[gid].tabs.slice(at, at + 3)).toEqual(['agents', a, b])
+    s = openAgentPanel(s, a, 'A again')
+    consistent(s)
+    expect(s.groups[gid].active).toBe(a)
+    expect(agentPanels(s).filter((p) => p === a)).toHaveLength(1)
+    expect(panelLabel(a, s)).toBe('A')
+  })
+  it('closing forgets it: no last spot, no label, not in the reopen menu', () => {
+    const s = closePanel(openAgentPanel(talk(), a, 'A'), a)
+    consistent(s)
+    expect(agentPanels(s)).toEqual([])
+    expect(s.lastSpot[a]).toBeUndefined()
+    expect(s.labels?.[a]).toBeUndefined()
+    expect(closedPanels(s)).not.toContain(a)
+    expect(isVisible(s, 'agents')).toBe(true)
+  })
+  it('a fixed panel never anchors its last spot on an agent tab', () => {
+    let s = openAgentPanel(talk(), a, 'A')
+    s = closePanel(s, 'agents')
+    const spot = s.lastSpot.agents
+    expect(spot && 'anchor' in spot ? spot.anchor : null).toBe('terminal')
+  })
+  it('a dragged agent tab leaves no last spot once closed', () => {
+    let s = openAgentPanel(talk(), a, 'A')
+    s = dockToNav(s, a)
+    expect(s.lastSpot[a]).toBeDefined()
+    s = closePanel(s, a)
+    expect(s.lastSpot[a]).toBeUndefined()
+    consistent(s)
+  })
+  it('with Agents closed it opens on the right', () => {
+    const s = openAgentPanel(closePanel(talk(), 'agents'), a, 'A')
+    consistent(s)
+    expect(isVisible(s, a)).toBe(true)
+  })
+  it('is draggable but never survives a reload', () => {
+    expect(isDockPanelId(a)).toBe(true)
+    expect(isDockPanelId('agent:')).toBe(false)
+    const s = openAgentPanel(talk(), a, 'A')
+    const back = parseState(JSON.parse(JSON.stringify(s)))!
+    consistent(back)
+    expect(agentPanels(back)).toEqual([])
+    expect(isVisible(back, 'agents')).toBe(true)
   })
 })

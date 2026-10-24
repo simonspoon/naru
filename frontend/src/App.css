@@ -12076,6 +12076,27 @@ select.library-model-badge {
   width: 100%;
 }
 
+/* Docked, the card list is the whole panel (naru task 2313). */
+.agent-sidebar-body.agent-sidebar-list-only {
+  flex-direction: column;
+  padding: 0.5rem;
+}
+
+/* An agent opened from a card, as its own dock tab (naru task 2313). */
+.dock-host > .agent-tab-pane {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  padding: 0.5rem;
+}
+
+.agent-tab-pane > .agent-sidebar-pane {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
 /* Thin dividers: a hairline that lights on hover, with a small knob. */
 .dock-divider {
   flex: none;

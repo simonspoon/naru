@@ -36,7 +36,8 @@ export function hostFor(id: HostId): HTMLDivElement {
   let el = hosts.get(id)
   if (el === undefined) {
     el = document.createElement('div')
-    el.className = `dock-host dock-host-${id}`
+    // An agent tab's id carries a pane id (naru task 2313), not a class name.
+    el.className = `dock-host dock-host-${id.startsWith('agent:') ? 'agent' : id}`
     el.dataset.panel = id
     hosts.set(id, el)
     park().appendChild(el)
