@@ -19,7 +19,7 @@ import type { LiveBoardSummary } from './types/LiveBoardSummary'
  */
 
 /** One sampled pointer position, in the content box's **content**
- *  coordinates (CSS px, scroll included), so a stroke stays on what it was
+ *  coordinates (unzoomed CSS px, scroll included), so a stroke stays on what it was
  *  drawn over when the content scrolls. */
 export interface InkPoint {
   x: number
@@ -41,6 +41,10 @@ export interface InkFrame {
   height: number
   scrollLeft: number
   scrollTop: number
+  /** The board's zoom (naru task 2314). Points are stored unzoomed, in the
+   *  board's own coordinates, so they stay on what they were drawn over at any
+   *  zoom; the zoom is locked while the frame is frozen. */
+  zoom: number
 }
 
 /** One board's ink. */
@@ -374,7 +378,10 @@ export function inkCaption(board: LiveBoardSummary): string {
 
 /** A point in content coordinates, where it lands in the frozen frame. */
 export function framePoint(point: InkPoint, frame: InkFrame): InkPoint {
-  return { x: point.x - frame.scrollLeft, y: point.y - frame.scrollTop }
+  return {
+    x: point.x * frame.zoom - frame.scrollLeft,
+    y: point.y * frame.zoom - frame.scrollTop,
+  }
 }
 
 /** The pen's colour: a saturated magenta that reads on the dark diagram, on

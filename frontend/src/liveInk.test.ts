@@ -42,8 +42,8 @@ function board(id: number, patch: Partial<LiveBoardSummary> = {}): LiveBoardSumm
   }
 }
 
-const FRAME: InkFrame = { width: 600, height: 400, scrollLeft: 0, scrollTop: 120 }
-const LATER: InkFrame = { width: 900, height: 700, scrollLeft: 0, scrollTop: 0 }
+const FRAME: InkFrame = { width: 600, height: 400, scrollLeft: 0, scrollTop: 120, zoom: 1 }
+const LATER: InkFrame = { width: 900, height: 700, scrollLeft: 0, scrollTop: 0, zoom: 1 }
 
 function stroke(x: number): InkStroke {
   return [
@@ -340,6 +340,10 @@ describe('backgrounds', () => {
 describe('framePoint', () => {
   it('moves a content point into the frozen frame', () => {
     expect(framePoint({ x: 10, y: 150 }, FRAME)).toEqual({ x: 10, y: 30 })
+  })
+
+  it('scales an unzoomed board point by the frame zoom before the scroll', () => {
+    expect(framePoint({ x: 10, y: 150 }, { ...FRAME, zoom: 2 })).toEqual({ x: 20, y: 180 })
   })
 })
 

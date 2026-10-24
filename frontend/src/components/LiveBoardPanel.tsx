@@ -15,6 +15,15 @@ import { boundFunctionKeys } from '../liveBoardKeys'
 import { boardThemeMessage } from '../boardTheme'
 import { imageFilesFromClipboard } from '../clipboardFiles'
 import {
+  MAX_BOARD_ZOOM,
+  MIN_BOARD_ZOOM,
+  boardZoomLabel,
+  isPan,
+  scrollForZoom,
+  stepBoardZoom,
+  wheelBoardZoom,
+} from '../liveBoardZoom'
+import {
   boardAt,
   boardRender,
   boardTitle,
@@ -369,12 +378,16 @@ function strokeOnto(ctx: CanvasRenderingContext2D, points: readonly InkPoint[]) 
  */
 function PlacedImage({
   image,
+  zoom,
   bounds,
   getOrigin,
   onChange,
   onRemove,
 }: {
   image: InkImage
+  /** The board's zoom: the picture sits inside the zoomed content, so a drag
+   *  in screen px is `zoom` times as far as the move it makes. */
+  zoom: number
   bounds: { width: number; height: number }
   getOrigin: () => { x: number; y: number }
   onChange: (next: InkImage) => void
@@ -397,8 +410,8 @@ function PlacedImage({
   function move(e: ReactPointerEvent<HTMLElement>) {
     const d = drag.current
     if (d === null) return
-    const dx = e.clientX - d.startX
-    const dy = e.clientY - d.startY
+    const dx = (e.clientX - d.startX) / zoom
+    const dy = (e.clientY - d.startY) / zoom
     onChange(
       d.mode === 'move'
         ? moveImage(d.orig, dx, dy, bounds, getOrigin())
@@ -619,7 +632,13 @@ async function flattenAt(
   for (const image of images) {
     const el = await loadImage(image.src).catch(() => null)
     if (el !== null) {
-      ctx.drawImage(el, image.x - frame.scrollLeft, image.y - frame.scrollTop, image.width, image.height)
+      ctx.drawImage(
+        el,
+        image.x * frame.zoom - frame.scrollLeft,
+        image.y * frame.zoom - frame.scrollTop,
+        image.width * frame.zoom,
+        image.height * frame.zoom,
+      )
     }
   }
   for (const stroke of strokes) strokeOnto(ctx, stroke.map((p) => framePoint(p, frame)))
@@ -755,6 +774,42 @@ export function LiveBoardPanel({
     return () => window.removeEventListener('keydown', onKey)
   }, [expanded, frozen, maximized, onHide, micCapturing])
 
+  // ---- zoom and pan (naru task 2314) ----
+
+  // A CSS `zoom` on the board's content, so text is re-laid out and stays
+  // crisp; the pan is the content box's own scroll. Back to 100% whenever
+  // another board comes on screen — a push included. Locked while the board
+  // carries unsent ink, like every other control that moves the content.
+  const [zoom, setZoom] = useState(1)
+  // Read by the native wheel listener and the frame relay between renders.
+  const zoomRef = useRef(1)
+  const showingKey = showing?.id ?? null
+  const [zoomFor, setZoomFor] = useState(showingKey)
+  if (zoomFor !== showingKey) {
+    setZoomFor(showingKey)
+    setZoom(1)
+  }
+  // `zoomTo` and `resetView` keep the ref in step themselves; only a board
+  // switch's reset happens in render, so it is mirrored at that commit alone.
+  useLayoutEffect(() => {
+    zoomRef.current = 1
+  }, [showingKey])
+  // The scroll that keeps the point under the cursor still, applied once the
+  // new zoom is laid out.
+  const pendingScroll = useRef<{ left: number; top: number } | null>(null)
+  // A press on the board that may become a pan once it moves.
+  const pan = useRef<{
+    id: number
+    x: number
+    y: number
+    left: number
+    top: number
+    panning: boolean
+  } | null>(null)
+  // A pan just ended: the click it would otherwise make is swallowed.
+  const panned = useRef(false)
+  const [panning, setPanning] = useState(false)
+
   // ---- the pen (mesa task 1353) ----
 
   // Opt-in, so a board with the pen off scrolls and its frame takes clicks
@@ -797,6 +852,7 @@ export function LiveBoardPanel({
       height: rect.height,
       scrollLeft: content.scrollLeft,
       scrollTop: content.scrollTop,
+      zoom: zoomRef.current,
     }
   }, [])
 
@@ -816,13 +872,14 @@ export function LiveBoardPanel({
       height: 0,
       scrollLeft: content.scrollLeft,
       scrollTop: content.scrollTop,
+      zoom,
     }
     const strokes = showingInk?.strokes ?? []
     for (const stroke of strokes) strokeOnto(ctx, stroke.map((p) => framePoint(p, scroll)))
     if (drawing.current !== null) {
       strokeOnto(ctx, drawing.current.points.map((p) => framePoint(p, scroll)))
     }
-  }, [showingInk])
+  }, [showingInk, zoom])
 
   // The canvas follows the content box's size; a resize clears a canvas, so
   // every size change redraws.
@@ -842,6 +899,170 @@ export function LiveBoardPanel({
     observer.observe(content)
     return () => observer.disconnect()
   }, [])
+
+  useLayoutEffect(() => {
+    const content = contentRef.current
+    const at = pendingScroll.current
+    pendingScroll.current = null
+    if (content === null || at === null) return
+    content.scrollLeft = at.left
+    content.scrollTop = at.top
+  }, [zoom])
+
+  // `cursor` is an offset inside the content box's visible window. Every
+  // caller is off while the board is frozen.
+  const zoomTo = useCallback(
+    (next: number, cursor?: { x: number; y: number }) => {
+      const content = contentRef.current
+      const from = zoomRef.current
+      if (content === null || next === from) return
+      const c = cursor ?? { x: content.clientWidth / 2, y: content.clientHeight / 2 }
+      const base = pendingScroll.current ?? { left: content.scrollLeft, top: content.scrollTop }
+      pendingScroll.current = {
+        left: scrollForZoom(base.left, c.x, from, next),
+        top: scrollForZoom(base.top, c.y, from, next),
+      }
+      zoomRef.current = next
+      setZoom(next)
+    },
+    [setZoom],
+  )
+
+  // Back to the default view: 100%, scrolled to the top-left.
+  function resetView() {
+    const content = contentRef.current
+    if (content === null) return
+    if (zoomRef.current === 1) {
+      content.scrollLeft = 0
+      content.scrollTop = 0
+      return
+    }
+    pendingScroll.current = { left: 0, top: 0 }
+    zoomRef.current = 1
+    setZoom(1)
+  }
+
+  // The plain wheel zooms toward the cursor (the person's spec), a trackpad
+  // pinch too. Native and non-passive, since React's wheel handler cannot
+  // stop the box scrolling.
+  const stageRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    const stage = stageRef.current
+    if (stage === null) return
+    const onWheel = (e: WheelEvent) => {
+      const content = contentRef.current
+      if (content === null || frozen || e.deltaY === 0) return
+      e.preventDefault()
+      const r = content.getBoundingClientRect()
+      zoomTo(wheelBoardZoom(zoomRef.current, e.deltaY, e.deltaMode, e.ctrlKey), {
+        x: e.clientX - r.left,
+        y: e.clientY - r.top,
+      })
+    }
+    stage.addEventListener('wheel', onWheel, { passive: false })
+    return () => stage.removeEventListener('wheel', onWheel)
+  }, [frozen, zoomTo])
+
+  // An html board's frame takes its own wheel and drags; the render route's
+  // view relay posts them here (`BOARD_VIEW_RELAY` in `src/api.rs`), in the
+  // frame's own px, and is told the zoom so it can scroll its own document.
+  useEffect(() => {
+    const onMessage = (e: MessageEvent) => {
+      const content = contentRef.current
+      const iframe = content?.querySelector('iframe') ?? null
+      const d = e.data
+      if (content === null || iframe === null || e.source !== iframe.contentWindow) return
+      if (d?.naru === 'board-ready') {
+        iframe.contentWindow?.postMessage({ naru: 'board-zoom', zoom: zoomRef.current }, '*')
+        return
+      }
+      if (frozen) return
+      const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null)
+      if (d?.naru === 'board-wheel') {
+        const x = num(d.x)
+        const y = num(d.y)
+        const deltaY = num(d.deltaY)
+        if (x === null || y === null || deltaY === null || deltaY === 0) return
+        const f = iframe.getBoundingClientRect()
+        const c = content.getBoundingClientRect()
+        const z = zoomRef.current
+        zoomTo(wheelBoardZoom(z, deltaY, num(d.deltaMode) ?? 0, d.ctrlKey === true), {
+          x: f.left - c.left + x * z,
+          y: f.top - c.top + y * z,
+        })
+      } else if (d?.naru === 'board-pan') {
+        const dx = num(d.dx)
+        const dy = num(d.dy)
+        if (dx === null || dy === null) return
+        content.scrollLeft -= dx * zoomRef.current
+        content.scrollTop -= dy * zoomRef.current
+      }
+    }
+    window.addEventListener('message', onMessage)
+    return () => window.removeEventListener('message', onMessage)
+  }, [frozen, zoomTo])
+
+  useEffect(() => {
+    const iframe = contentRef.current?.querySelector('iframe')
+    iframe?.contentWindow?.postMessage({ naru: 'board-zoom', zoom }, '*')
+  }, [zoom, showingKey])
+
+  // Dragging the board pans it. The pen's canvas takes the pointer while the
+  // pen is on, so a stroke is never a pan; a picture's own drag stops here.
+  function panDown(e: ReactPointerEvent<HTMLDivElement>) {
+    if (frozen || e.pointerType === 'touch' || (e.button !== 0 && e.button !== 1)) return
+    // An html board's frame pans itself through its relay.
+    if (e.target instanceof HTMLIFrameElement) return
+    const content = contentRef.current
+    if (content === null) return
+    // A click a cancelled pan never delivered must not eat this one's.
+    panned.current = false
+    // A middle press would start the browser's autoscroll.
+    if (e.button === 1) e.preventDefault()
+    pan.current = {
+      id: e.pointerId,
+      x: e.clientX,
+      y: e.clientY,
+      left: content.scrollLeft,
+      top: content.scrollTop,
+      panning: false,
+    }
+  }
+
+  function panMove(e: ReactPointerEvent<HTMLDivElement>) {
+    const p = pan.current
+    const content = contentRef.current
+    if (p === null || content === null || e.pointerId !== p.id) return
+    // Released somewhere this box never heard about.
+    if (e.buttons === 0) {
+      endPan()
+      return
+    }
+    const dx = e.clientX - p.x
+    const dy = e.clientY - p.y
+    if (!p.panning) {
+      if (!isPan(dx, dy)) return
+      p.panning = true
+      content.setPointerCapture(e.pointerId)
+      setPanning(true)
+    }
+    window.getSelection()?.removeAllRanges()
+    content.scrollLeft = p.left - dx
+    content.scrollTop = p.top - dy
+  }
+
+  function panUp(e: ReactPointerEvent<HTMLDivElement>) {
+    if (pan.current?.id === e.pointerId) endPan()
+  }
+
+  // Every way a press ends — up, cancel, a lost capture, a move with no
+  // button — goes through here, so `panning` can never be left on.
+  function endPan() {
+    const p = pan.current
+    pan.current = null
+    if (p?.panning === true) panned.current = true
+    setPanning(false)
+  }
 
   // Pinned to where the ink was drawn, whatever reflowed around it.
   useLayoutEffect(() => {
@@ -875,8 +1096,8 @@ export function LiveBoardPanel({
     if (content === null) return null
     const rect = e.currentTarget.getBoundingClientRect()
     return {
-      x: e.clientX - rect.left + content.scrollLeft,
-      y: e.clientY - rect.top + content.scrollTop,
+      x: (e.clientX - rect.left + content.scrollLeft) / zoom,
+      y: (e.clientY - rect.top + content.scrollTop) / zoom,
     }
   }
 
@@ -909,9 +1130,15 @@ export function LiveBoardPanel({
 
   // ---- pictures dropped or pasted on (mesa task 1580) ----
 
+  // The visible window in the board's own (unzoomed) coordinates, which is
+  // where the pictures live.
   const scrollOrigin = () => ({
-    x: contentRef.current?.scrollLeft ?? 0,
-    y: contentRef.current?.scrollTop ?? 0,
+    x: (contentRef.current?.scrollLeft ?? 0) / zoomRef.current,
+    y: (contentRef.current?.scrollTop ?? 0) / zoomRef.current,
+  })
+  const boardBox = () => ({
+    width: boxRef.current.width / zoomRef.current,
+    height: boxRef.current.height / zoomRef.current,
   })
 
   function changeImage(next: InkImage) {
@@ -948,10 +1175,11 @@ export function LiveBoardPanel({
       if (loaded === null || content === null) continue
       const at = currentFrame()
       if (at === null) break
-      const origin = { x: content.scrollLeft, y: content.scrollTop }
+      const origin = scrollOrigin()
+      const bounds = boardBox()
       onInk((book) => {
         const images = boardInk(book, id).images
-        const placed = placeImage(loaded, boxRef.current, images.length, origin)
+        const placed = placeImage(loaded, bounds, images.length, origin)
         return addImage(book, id, { id: nextImageId(images), src: loaded.src, ...placed }, at)
       })
     }
@@ -1139,6 +1367,41 @@ export function LiveBoardPanel({
               </button>
             </>
           )}
+          {/* Zoom out, the zoom (pressed: back to the default view), zoom in. */}
+          {showing !== null && (
+            <div className="live-board-zoom-tools">
+              <button
+                type="button"
+                className="live-board-step"
+                aria-label="zoom out"
+                title="Zoom out"
+                disabled={frozen || zoom <= MIN_BOARD_ZOOM}
+                onClick={() => zoomTo(stepBoardZoom(zoom, -1))}
+              >
+                −
+              </button>
+              <button
+                type="button"
+                className="live-board-more live-board-zoom-reset"
+                aria-label="reset the view"
+                title="Reset the view"
+                disabled={frozen}
+                onClick={resetView}
+              >
+                {boardZoomLabel(zoom)}
+              </button>
+              <button
+                type="button"
+                className="live-board-step"
+                aria-label="zoom in"
+                title="Zoom in"
+                disabled={frozen || zoom >= MAX_BOARD_ZOOM}
+                onClick={() => zoomTo(stepBoardZoom(zoom, 1))}
+              >
+                +
+              </button>
+            </div>
+          )}
           <button
             type="button"
             className="live-icon live-board-maximize"
@@ -1160,6 +1423,7 @@ export function LiveBoardPanel({
             first unsent stroke went down, and its overflow hidden, so neither
             a window resize nor a scroll can move the content under the ink. */}
         <div
+          ref={stageRef}
           className="live-board-stage"
           onDragOver={stageDragOver}
           onDrop={(e) => takeImages(e, e.dataTransfer)}
@@ -1167,13 +1431,27 @@ export function LiveBoardPanel({
         >
           <div
             ref={contentRef}
-            className={`live-board-content${frozen ? ' inked' : ''}`}
+            className={`live-board-content${frozen ? ' inked' : ''}${panning ? ' panning' : ''}`}
             // Focusable by click, never by Tab (mesa task 1439): a mousedown
             // on the board moves focus here natively — selection untouched —
             // so ⌘C copies the board's selected text rather than whatever
             // field held the keyboard. A framed html board takes focus itself.
             tabIndex={-1}
             onScroll={redraw}
+            onPointerDown={panDown}
+            onPointerMove={panMove}
+            onPointerUp={panUp}
+            onPointerCancel={panUp}
+            onLostPointerCapture={panUp}
+            // A drag on the board pans it: never the browser's own drag of
+            // the board's image or text (files dragged in still drop).
+            onDragStart={(e) => e.preventDefault()}
+            onClickCapture={(e) => {
+              if (!panned.current) return
+              panned.current = false
+              e.preventDefault()
+              e.stopPropagation()
+            }}
             style={
               frame === null
                 ? undefined
@@ -1186,28 +1464,41 @@ export function LiveBoardPanel({
                   }
             }
           >
-            {showing === null ? (
-              <p className="muted">Nothing on the whiteboard yet.</p>
-            ) : (
-              // Keyed by board id so a switch to another board mounts a fresh
-              // frame/image/fetch rather than re-pointing the one on screen —
-              // the previous board's pixels must not sit under the new one's
-              // while it loads.
-              <BoardBody key={showing.id} board={showing} />
-            )}
-            {/* The person's dropped and pasted pictures (mesa task 1580), in
-                the strokes' content coordinates. Under the ink canvas, so
-                they take the pointer only while the pen is up. */}
-            {(showingInk?.images ?? []).map((image) => (
-              <PlacedImage
-                key={image.id}
-                image={image}
-                bounds={box}
-                getOrigin={scrollOrigin}
-                onChange={changeImage}
-                onRemove={removeImageById}
-              />
-            ))}
+            {/* The zoomed content. Its width is pinned to the box's own at
+                any zoom but 100%, so the board lays out as it does unzoomed
+                and only its scale changes. */}
+            <div
+              className="live-board-zoom"
+              style={
+                zoom === 1
+                  ? undefined
+                  : { zoom, width: `${box.width}px`, minHeight: `${box.height}px` }
+              }
+            >
+              {showing === null ? (
+                <p className="muted">Nothing on the whiteboard yet.</p>
+              ) : (
+                // Keyed by board id so a switch to another board mounts a fresh
+                // frame/image/fetch rather than re-pointing the one on screen —
+                // the previous board's pixels must not sit under the new one's
+                // while it loads.
+                <BoardBody key={showing.id} board={showing} />
+              )}
+              {/* The person's dropped and pasted pictures (mesa task 1580), in
+                  the strokes' content coordinates. Under the ink canvas, so
+                  they take the pointer only while the pen is up. */}
+              {(showingInk?.images ?? []).map((image) => (
+                <PlacedImage
+                  key={image.id}
+                  image={image}
+                  zoom={zoom}
+                  bounds={{ width: box.width / zoom, height: box.height / zoom }}
+                  getOrigin={scrollOrigin}
+                  onChange={changeImage}
+                  onRemove={removeImageById}
+                />
+              ))}
+            </div>
           </div>
           <canvas
             ref={canvasRef}

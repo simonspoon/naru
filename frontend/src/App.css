@@ -9338,6 +9338,39 @@ body.live-panel-ratio-resizing .live-panel-divider {
   background: var(--bg);
 }
 
+/* The zoomed content (naru task 2314): the box the CSS `zoom` sits on,
+   standing in for the content box at 100% — the frame still fills the height
+   and the pictures are placed in its coordinates. Dragging the board pans it,
+   so it reads as grabbable while the pen is up and nothing is frozen. */
+.live-board-zoom {
+  position: relative;
+  flex: 1 0 auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.live-board-content:not(.inked) {
+  cursor: grab;
+}
+
+.live-board-content.panning {
+  cursor: grabbing;
+  user-select: none;
+}
+
+/* − 100% + in the board's tools. */
+.live-board-zoom-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.live-board-zoom-reset {
+  min-width: 3.25rem;
+  padding: 0 0.35rem;
+  font-variant-numeric: tabular-nums;
+}
+
 /* Dark behind the document (mesa task 1615): the render route appends the
    same canvas and text as zero-specificity defaults, so a mockup that sets its
    own background still wins. Only an `html` board is framed — a diagram is an `<img>` since mesa

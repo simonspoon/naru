@@ -7072,13 +7072,50 @@ s.setProperty(k,v)})});\
 parent.postMessage({naru:'board-ready'},'*')})();\
 </script>\n";
 
+/// Appended to an `html` live board's body beside [`BOARD_KEY_RELAY`] (naru
+/// task 2314): the whiteboard zooms on the plain wheel and pans on a drag,
+/// and the frame takes both itself, so this hands them to the parent. A wheel
+/// with a vertical delta is `preventDefault`ed and posted as `{naru:'board-wheel', x, y, deltaY,
+/// deltaMode, ctrlKey}` in the frame's own px. A press (left or middle, not
+/// touch, not on a control or link) that moves 4px becomes a drag: it scrolls
+/// the frame's own document first, at the zoom the parent posts as
+/// `{naru:'board-zoom', zoom}` (screen px are `zoom` times the frame's), and
+/// posts whatever is left as `{naru:'board-pan', dx, dy}`. A click that ended
+/// a drag is swallowed.
+const BOARD_VIEW_RELAY: &str = "\n<script>(function(){var Z=1,D=null,S=0;\
+addEventListener('message',function(e){var d=e.data;\
+if(e.source===parent&&d&&d.naru==='board-zoom'&&typeof d.zoom==='number'&&d.zoom>0)Z=d.zoom});\
+addEventListener('wheel',function(e){if(!e.deltaY)return;e.preventDefault();\
+parent.postMessage({naru:'board-wheel',x:e.clientX,y:e.clientY,deltaY:e.deltaY,\
+deltaMode:e.deltaMode,ctrlKey:e.ctrlKey},'*')},{passive:false,capture:true});\
+addEventListener('pointerdown',function(e){var t=e.target;\
+if(e.pointerType==='touch'||(e.button!==0&&e.button!==1)||\
+(t&&t.closest&&t.closest('input,textarea,select,button,a,label,[contenteditable]')))return;\
+S=0;if(e.button===1)e.preventDefault();D={x:e.screenX,y:e.screenY,p:false,t:t}},true);\
+addEventListener('pointermove',function(e){if(!D)return;if(!e.buttons){end();return}var dx=e.screenX-D.x,dy=e.screenY-D.y;\
+if(!D.p){if(Math.hypot(dx,dy)<4)return;D.p=true;\
+try{D.t.setPointerCapture(e.pointerId)}catch(_){}\
+document.documentElement.style.userSelect='none'}\
+D.x=e.screenX;D.y=e.screenY;var g=getSelection();if(g)g.removeAllRanges();\
+var se=document.scrollingElement||document.documentElement,l=se.scrollLeft,u=se.scrollTop;\
+scrollBy(-dx/Z,-dy/Z);var rx=dx/Z+(se.scrollLeft-l),ry=dy/Z+(se.scrollTop-u);\
+if(Math.abs(rx)>=.5||Math.abs(ry)>=.5)parent.postMessage({naru:'board-pan',dx:rx,dy:ry},'*')},true);\
+function end(){if(D&&D.p){S=1;document.documentElement.style.userSelect=''}D=null}\
+addEventListener('pointerup',end,true);addEventListener('pointercancel',end,true);\
+addEventListener('click',function(e){if(S){S=0;e.preventDefault();e.stopPropagation()}},true)})();\
+</script>\n";
+
 /// A board's body as the render route serves it: an `html` board is its
-/// stored bytes followed by [`BOARD_DARK_DEFAULTS`], [`BOARD_KEY_RELAY`] and
-/// [`BOARD_THEME_RELAY`]; every other kind is untouched.
+/// stored bytes followed by [`BOARD_DARK_DEFAULTS`], [`BOARD_KEY_RELAY`],
+/// [`BOARD_VIEW_RELAY`] and [`BOARD_THEME_RELAY`] (last, since its
+/// `board-ready` is the parent's cue to post the theme and the zoom); every
+/// other kind is untouched.
 fn board_render_body(kind: LiveBoardKind, body: &str) -> String {
     match kind {
         LiveBoardKind::Html => {
-            format!("{body}{BOARD_DARK_DEFAULTS}{BOARD_KEY_RELAY}{BOARD_THEME_RELAY}")
+            format!(
+                "{body}{BOARD_DARK_DEFAULTS}{BOARD_KEY_RELAY}{BOARD_VIEW_RELAY}{BOARD_THEME_RELAY}"
+            )
         }
         _ => body.to_string(),
     }
@@ -13974,8 +14011,13 @@ mod tests {
         let html = board_render_body(LiveBoardKind::Html, "<p>hi</p>");
         assert_eq!(
             html,
-            format!("<p>hi</p>{BOARD_DARK_DEFAULTS}{BOARD_KEY_RELAY}{BOARD_THEME_RELAY}")
+            format!(
+                "<p>hi</p>{BOARD_DARK_DEFAULTS}{BOARD_KEY_RELAY}{BOARD_VIEW_RELAY}{BOARD_THEME_RELAY}"
+            )
         );
+        assert!(html.contains("naru:'board-wheel'"));
+        assert!(html.contains("naru:'board-pan'"));
+        assert!(html.contains("d.naru==='board-zoom'"));
         assert!(html.contains("naru:'board-key'"));
         assert!(html.contains("d.naru!=='board-theme'"));
         assert!(html.contains("e.source!==parent"));
