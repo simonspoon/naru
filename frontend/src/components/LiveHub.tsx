@@ -98,6 +98,7 @@ import { parseBoardKey } from '../liveBoardKeys'
 import { elapsedLabel, endsInHead } from '../liveHead'
 import { headMeta, quietHint, taskHash, taskSegments } from '../liveChat'
 import { headerIndicator } from '../liveIndicator'
+import { COMPOSER_HIDE_DELAY_MS, composerShown, inRevealZone } from '../liveComposerReveal'
 import { offerGlows, offerTitle } from '../liveOffer'
 import {
   IDLE,
@@ -1708,6 +1709,30 @@ export function LiveHub({
   useEffect(() => {
     pastedImageRef.current = pastedImage
   }, [pastedImage])
+
+  // The chat input folds away when it is not in use (naru task 2311,
+  // `liveComposerReveal.ts`): the mouse near the chat's bottom edge, focus
+  // inside the box, or unsent text keeps it out. Whether a device without
+  // hover hides it at all is CSS's call.
+  const [composerHovered, setComposerHovered] = useState(false)
+  const [composerFocused, setComposerFocused] = useState(false)
+  const composerRef = useRef<HTMLDivElement | null>(null)
+  const composerHideTimer = useRef<number | undefined>(undefined)
+  const composerInZone = useRef(false)
+  useEffect(() => () => window.clearTimeout(composerHideTimer.current), [])
+  const composerHover = (inside: boolean) => {
+    composerInZone.current = inside
+    if (inside) {
+      window.clearTimeout(composerHideTimer.current)
+      composerHideTimer.current = undefined
+      setComposerHovered(true)
+    } else if (composerHideTimer.current === undefined) {
+      composerHideTimer.current = window.setTimeout(() => {
+        composerHideTimer.current = undefined
+        setComposerHovered(false)
+      }, COMPOSER_HIDE_DELAY_MS)
+    }
+  }
 
   // Whether the board holds unsent ink (mesa task 1353) — the same book
   // `LiveBoardPanel` reads to decide the same thing for its own controls.
@@ -5170,8 +5195,28 @@ export function LiveHub({
       onShowBoard={restoreInk}
     />
   )
+  const composerShownNow = composerShown({
+    hovered: composerHovered,
+    focused: composerFocused,
+    draft,
+    staged: pastedImage !== null,
+  })
   const renderChatBody = () => (
-    <>
+    <div
+      className="live-chat-body"
+      onMouseMove={(e) => {
+        const bottom = e.currentTarget.getBoundingClientRect().bottom
+        const box = composerRef.current
+        composerHover(
+          inRevealZone({
+            y: e.clientY,
+            bottom,
+            composerTop: box && composerShownNow ? box.getBoundingClientRect().top : null,
+          }),
+        )
+      }}
+      onMouseLeave={() => composerHover(false)}
+    >
       <div className="live-transcript" ref={scroller} onScroll={onTranscriptScroll}>
         {groups.length === 0 ? (
           <p className="muted">
@@ -5287,187 +5332,203 @@ export function LiveHub({
         {pill ?? ''}
       </div>
 
-      <form
-        className="live-composer"
-        onSubmit={(e) => {
-          e.preventDefault()
-          send()
+      <div
+        ref={composerRef}
+        className={`live-composer-slot${composerShownNow ? '' : ' live-composer-hidden'}`}
+        onFocus={() => setComposerFocused(true)}
+        onBlur={(e) => {
+          if (e.currentTarget.contains(e.relatedTarget as Node | null)) return
+          setComposerFocused(false)
+          // A blur with the mouse already away still waits the hide delay,
+          // so the box does not vanish the instant focus leaves it.
+          if (!composerInZone.current) {
+            setComposerHovered(true)
+            composerHover(false)
+          }
         }}
       >
-        {/* A picture pasted into the box, staged for the next turn
-            (mesa task 1475) — a small chip with a thumbnail and a
-            way to drop it before sending. */}
-        {pastedImage && (
-          <div className="live-pasted-image">
-            <img
-              src={pastedImage.previewUrl}
-              alt="pasted"
-              className="live-pasted-image-thumb"
+        <form
+          className="live-composer"
+          onSubmit={(e) => {
+            e.preventDefault()
+            send()
+          }}
+        >
+          {/* A picture pasted into the box, staged for the next turn
+              (mesa task 1475) — a small chip with a thumbnail and a
+              way to drop it before sending. */}
+          {pastedImage && (
+            <div className="live-pasted-image">
+              <img
+                src={pastedImage.previewUrl}
+                alt="pasted"
+                className="live-pasted-image-thumb"
+              />
+              <button
+                type="button"
+                className="live-pasted-image-remove"
+                aria-label="remove the pasted image"
+                onClick={() => setPastedImage(null)}
+              >
+                ×
+              </button>
+            </div>
+          )}
+          {/* The box alone: the microphone switch moved up beside the
+              speech mute in the head's presses (mesa task 1551), so
+              dictation is reachable with the chat pane hidden. */}
+          <div className="live-input-row">
+            <textarea
+              className="live-input"
+              rows={2}
+              value={draft}
+              // Paused is the same answer as not-live for the box: nothing typed
+              // here would be heard until Resume, and a field that accepts words
+              // nobody will read is worse than one that says it is shut.
+              disabled={!live || paused}
+              placeholder={
+                !live
+                  ? 'go live to start the conversation'
+                  : ambient
+                    ? 'ambient — press Live to talk to Naru'
+                    : paused
+                    ? 'paused — press Resume to talk to Naru'
+                    : recognizes
+                      ? 'listening — or type here'
+                      : 'dictate or type here…'
+              }
+              aria-label="say something to Naru"
+              onChange={(e) => {
+                // eslint-disable-next-line react-hooks/refs -- an event handler; the compiler counts it as render only because `renderChatBody()` is called while rendering
+                updateDraft(e.target.value)
+                // Typing or pasting while listening is the person still
+                // adding to the recording (mesa task 1351), so the silence
+                // wait restarts rather than sending the speech without it.
+                // eslint-disable-next-line react-hooks/refs -- as above
+                if (recognizes) markHeard()
+              }}
+              onPaste={(e) => {
+                // An image paste (mesa task 1475) is staged rather than
+                // typed — a plain text paste falls through unchanged.
+                const files = imageFilesFromClipboard(e.clipboardData, Date.now())
+                if (files.length === 0) return
+                e.preventDefault()
+                void stagePastedImage(files[0])
+              }}
+              onKeyDown={(e) => {
+                if (e.key !== 'Enter' || e.shiftKey) return
+                // The Enter that commits an IME candidate is not a send: it
+                // arrives as a plain `Enter` keydown with `isComposing` set, and
+                // acting on it would ship half-converted text. The same guard,
+                // for the same reason, as the agent chat composer's.
+                if (e.nativeEvent.isComposing) return
+                e.preventDefault()
+                send()
+              }}
             />
+            {/* The microphone chooser, folded into a sliders icon
+                (mesa task 1565): the real <select> lies invisibly
+                over it, so the semantics, the keyboard and the
+                native picker are all unchanged. Offered only
+                where there is more than one microphone and the
+                browser takes a track (`liveDevices.ts`) — a
+                control that cannot change what mesa hears is
+                worse than no control. */}
+            {choosesInput && (
+              <label className="live-mic-source" title="Microphone source">
+                <SlidersMark />
+                <select
+                  className="live-input-choice"
+                  aria-label="microphone"
+                  tabIndex={open ? undefined : -1}
+                  value={chosen}
+                  onChange={(event) => {
+                    const next = event.target.value
+                    writeInputChoice(next)
+                    setStoredInput(next)
+                    // Choosing is asking again: a device that refused
+                    // before may be free now, and the person picking it is
+                    // who decides to retry.
+                    setRefusedInput(null)
+                  }}
+                >
+                  <option value={DEFAULT_INPUT}>Default mic</option>
+                  {inputs.map((input, index) => (
+                    <option key={input.deviceId} value={input.deviceId}>
+                      {inputLabel(input, index)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+            {live && unlocked && supported && !blocked && (
+              <button
+                type="button"
+                className={`live-composer-mic${micOn ? ' live-on' : ''}`}
+                aria-pressed={micOn}
+                disabled={micWaiting}
+                aria-label={micOn ? 'stop listening' : micOffLabel.toLowerCase()}
+                tabIndex={open ? undefined : -1}
+                title={`${micOn ? 'Stop listening' : micOffLabel} (${listenChordLabel})`}
+                onClick={() => toggleListening(!muted && !elsewhere)}
+              >
+                <MicMark />
+              </button>
+            )}
             <button
-              type="button"
-              className="live-pasted-image-remove"
-              aria-label="remove the pasted image"
-              onClick={() => setPastedImage(null)}
+              type="submit"
+              className="live-send"
+              aria-label="send"
+              title="Send (Enter)"
+              tabIndex={open ? undefined : -1}
+              disabled={!live || paused}
             >
-              ×
+              <SendMark />
             </button>
           </div>
-        )}
-        {/* The box alone: the microphone switch moved up beside the
-            speech mute in the head's presses (mesa task 1551), so
-            dictation is reachable with the chat pane hidden. */}
-        <div className="live-input-row">
-          <textarea
-            className="live-input"
-            rows={2}
-            value={draft}
-            // Paused is the same answer as not-live for the box: nothing typed
-            // here would be heard until Resume, and a field that accepts words
-            // nobody will read is worse than one that says it is shut.
-            disabled={!live || paused}
-            placeholder={
-              !live
-                ? 'go live to start the conversation'
-                : ambient
-                  ? 'ambient — press Live to talk to Naru'
-                  : paused
-                  ? 'paused — press Resume to talk to Naru'
-                  : recognizes
-                    ? 'listening — or type here'
-                    : 'dictate or type here…'
-            }
-            aria-label="say something to Naru"
-            onChange={(e) => {
-              // eslint-disable-next-line react-hooks/refs -- an event handler; the compiler counts it as render only because `renderChatBody()` is called while rendering
-              updateDraft(e.target.value)
-              // Typing or pasting while listening is the person still
-              // adding to the recording (mesa task 1351), so the silence
-              // wait restarts rather than sending the speech without it.
-              // eslint-disable-next-line react-hooks/refs -- as above
-              if (recognizes) markHeard()
-            }}
-            onPaste={(e) => {
-              // An image paste (mesa task 1475) is staged rather than
-              // typed — a plain text paste falls through unchanged.
-              const files = imageFilesFromClipboard(e.clipboardData, Date.now())
-              if (files.length === 0) return
-              e.preventDefault()
-              void stagePastedImage(files[0])
-            }}
-            onKeyDown={(e) => {
-              if (e.key !== 'Enter' || e.shiftKey) return
-              // The Enter that commits an IME candidate is not a send: it
-              // arrives as a plain `Enter` keydown with `isComposing` set, and
-              // acting on it would ship half-converted text. The same guard,
-              // for the same reason, as the agent chat composer's.
-              if (e.nativeEvent.isComposing) return
-              e.preventDefault()
-              send()
-            }}
-          />
-          {/* The microphone chooser, folded into a sliders icon
-              (mesa task 1565): the real <select> lies invisibly
-              over it, so the semantics, the keyboard and the
-              native picker are all unchanged. Offered only
-              where there is more than one microphone and the
-              browser takes a track (`liveDevices.ts`) — a
-              control that cannot change what mesa hears is
-              worse than no control. */}
-          {choosesInput && (
-            <label className="live-mic-source" title="Microphone source">
-              <SlidersMark />
-              <select
-                className="live-input-choice"
-                aria-label="microphone"
-                tabIndex={open ? undefined : -1}
-                value={chosen}
-                onChange={(event) => {
-                  const next = event.target.value
-                  writeInputChoice(next)
-                  setStoredInput(next)
-                  // Choosing is asking again: a device that refused
-                  // before may be free now, and the person picking it is
-                  // who decides to retry.
-                  setRefusedInput(null)
-                }}
-              >
-                <option value={DEFAULT_INPUT}>Default mic</option>
-                {inputs.map((input, index) => (
-                  <option key={input.deviceId} value={input.deviceId}>
-                    {inputLabel(input, index)}
-                  </option>
-                ))}
-              </select>
-            </label>
-          )}
-          {live && unlocked && supported && !blocked && (
-            <button
-              type="button"
-              className={`live-composer-mic${micOn ? ' live-on' : ''}`}
-              aria-pressed={micOn}
-              disabled={micWaiting}
-              aria-label={micOn ? 'stop listening' : micOffLabel.toLowerCase()}
-              tabIndex={open ? undefined : -1}
-              title={`${micOn ? 'Stop listening' : micOffLabel} (${listenChordLabel})`}
-              onClick={() => toggleListening(!muted && !elsewhere)}
-            >
-              <MicMark />
-            </button>
-          )}
-          <button
-            type="submit"
-            className="live-send"
-            aria-label="send"
-            title="Send (Enter)"
-            tabIndex={open ? undefined : -1}
-            disabled={!live || paused}
-          >
-            <SendMark />
-          </button>
-        </div>
-        {/* The one quiet line under the box (mesa task 1565):
-            the chord, or whatever `captureHint` has to say in a
-            state that is not the plain resting one, and which
-            microphone is in use. */}
-        {(() => {
-          const hint = quietHint({
-            live,
-            joined: unlocked,
-            path,
-            blocked,
-            listening: recognizes,
-            paused,
-            muted,
-            chord: listenChordLabel,
-            elsewhere,
-          })
-          const micName =
-            chosen === DEFAULT_INPUT
-              ? 'default mic'
-              : inputLabel(
-                  inputs.find((i) => i.deviceId === chosen) ?? inputs[0],
-                  Math.max(
-                    0,
-                    inputs.findIndex((i) => i.deviceId === chosen),
-                  ),
-                )
-          return (
-            <div className="live-caption">
-              <span
-                className="live-hint muted"
-                title={hint.chord === null ? hint.text : undefined}
-              >
-                {hint.chord !== null && <kbd>{hint.chord}</kbd>} {hint.text}
-              </span>
-              {choosesInput && (
-                <span className="live-hint-mic muted">{micName}</span>
-              )}
-            </div>
-          )
-        })()}
-      </form>
-    </>
+          {/* The one quiet line under the box (mesa task 1565):
+              the chord, or whatever `captureHint` has to say in a
+              state that is not the plain resting one, and which
+              microphone is in use. */}
+          {(() => {
+            const hint = quietHint({
+              live,
+              joined: unlocked,
+              path,
+              blocked,
+              listening: recognizes,
+              paused,
+              muted,
+              chord: listenChordLabel,
+              elsewhere,
+            })
+            const micName =
+              chosen === DEFAULT_INPUT
+                ? 'default mic'
+                : inputLabel(
+                    inputs.find((i) => i.deviceId === chosen) ?? inputs[0],
+                    Math.max(
+                      0,
+                      inputs.findIndex((i) => i.deviceId === chosen),
+                    ),
+                  )
+            return (
+              <div className="live-caption">
+                <span
+                  className="live-hint muted"
+                  title={hint.chord === null ? hint.text : undefined}
+                >
+                  {hint.chord !== null && <kbd>{hint.chord}</kbd>} {hint.text}
+                </span>
+                {choosesInput && (
+                  <span className="live-hint-mic muted">{micName}</span>
+                )}
+              </div>
+            )
+          })()}
+        </form>
+      </div>
+    </div>
   )
 
   return (

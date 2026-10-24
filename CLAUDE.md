@@ -139,7 +139,7 @@ The code is the source of truth. These are the invariants you must not break:
   `editorInput`, `editorStatus`, `fileCsv`, `fileDirty`, `fileFind`, `fileHtml`, `fileImage`, `fileMedia`,
   `fileSearch`, `fileTabs`, `filesWatch`, `gitRepos`, `filesTreeWidth`, `inboxArchive`, `inboxFilter`, `inboxKind`, `inboxOrigin`, `inboxQueue`, `inboxRead`,
   `keyboardScope`, `keymap`, `keymapDraft`,
-  `lastView`, `layout`, `libraryBuiltinUpdate`, `libraryBundle`, `libraryDraft`, `libraryHistory`, `libraryImport`, `libraryModel`, `libraryOverride`, `librarySkillFiles`, `librarySync`, `listenDraft`, `liveAudio`, `liveBand`, `liveBoard`, `liveBoardImages`, `liveBoardKeys`, `liveBoardWidth`, `liveCancel`, `liveCaption`, `liveCapture`, `liveContext`, `liveDevices`, `liveDrain`, `liveGlow`, `liveHead`, `liveInk`, `liveIndicator`, `liveInterrupt`, `liveLayout`, `liveMark`, `liveMicControl`, `liveOrb`, `livePastedImage`, `livePausePhrase`, `livePromptDraft`,
+  `lastView`, `layout`, `libraryBuiltinUpdate`, `libraryBundle`, `libraryDraft`, `libraryHistory`, `libraryImport`, `libraryModel`, `libraryOverride`, `librarySkillFiles`, `librarySync`, `listenDraft`, `liveAudio`, `liveBand`, `liveBoard`, `liveBoardImages`, `liveBoardKeys`, `liveBoardWidth`, `liveCancel`, `liveCaption`, `liveCapture`, `liveComposerReveal`, `liveContext`, `liveDevices`, `liveDrain`, `liveGlow`, `liveHead`, `liveInk`, `liveIndicator`, `liveInterrupt`, `liveLayout`, `liveMark`, `liveMicControl`, `liveOrb`, `livePastedImage`, `livePausePhrase`, `livePromptDraft`,
   `liveRecognition`, `liveReplay`,
   `liveScroll`, `liveSession`, `liveSidebarWidth`, `liveSpeaker`, `liveStream`,
   `liveThinkingCue`, `liveTurns`,

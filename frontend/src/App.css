@@ -9824,6 +9824,52 @@ body.live-panel-ratio-resizing .live-panel-divider {
   gap: 0.35rem;
 }
 
+/* The chat body (naru task 2311): one box around transcript, pill and
+   composer so the mouse's distance from the chat's bottom edge can be read. */
+.live-chat-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+}
+
+/* The composer folds away when not in use (naru task 2311): a grid row
+   eased between its content height and zero, so the transcript takes the
+   room. Never `display: none` or `visibility: hidden` — Tab must still reach
+   the box, and focus is what brings it back. Only where there is a hovering
+   pointer and outside the phone tier; a touch screen keeps it always. */
+.live-composer-slot {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: 1fr;
+  transition:
+    grid-template-rows 0.18s ease,
+    opacity 0.18s ease;
+}
+
+.live-composer-slot > .live-composer {
+  min-height: 0;
+  min-width: 0;
+}
+
+@media (hover: hover) and (pointer: fine) and (min-width: 601px) {
+  .live-composer-slot.live-composer-hidden {
+    grid-template-rows: 0fr;
+    opacity: 0;
+  }
+
+  .live-composer-hidden > .live-composer {
+    overflow: hidden;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .live-composer-slot {
+    transition-duration: 0.09s;
+  }
+}
+
 /* What is happening right now (mesa task 1153), in one line: "mesa speaking",
    "transcribing…" or "hearing", between the settled transcript and the box.
    It replaces task 1069's preview panel, which showed the words in flight at
