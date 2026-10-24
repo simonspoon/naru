@@ -218,7 +218,7 @@ import type { LiveState } from '../types/LiveState'
 import type { LiveTurn } from '../types/LiveTurn'
 import type { LiveWindow } from '../types/LiveWindow'
 import type { TranscribeStatus } from '../types/TranscribeStatus'
-import { isNearBottom, newSince } from '../liveScroll'
+import { isNearBottom, newSince, ownTurnSince } from '../liveScroll'
 import { useFetch } from '../useFetch'
 import {
   ambientControl,
@@ -1821,10 +1821,32 @@ export function LiveHub({
   const scroller = useRef<HTMLDivElement | null>(null)
   const stuck = useRef(true)
   const [awayAt, setAwayAt] = useState<number | null>(null)
+  // The person's own new turn, typed or spoken, always brings the transcript
+  // back down (naru task 2312); the scroll it causes clears `awayAt`. Turn
+  // ids are db-global and increasing, so this high-water mark needs no reset
+  // when the session changes.
+  const seenTurnId = useRef(0)
   useEffect(() => {
+    if (ownTurnSince(turns, seenTurnId.current)) stuck.current = true
+    for (const t of turns) seenTurnId.current = Math.max(seenTurnId.current, t.id)
     const el = scroller.current
     if (el && stuck.current) el.scrollTop = el.scrollHeight
   }, [turns, open, captionChars])
+  // The scroller shrinks when the auto-hiding composer reveals (naru task
+  // 2311); while following, stay pinned, or the newest lines slip under it and
+  // the next small scroll reads as having left the bottom.
+  const scrollerRef = useCallback((el: HTMLDivElement | null) => {
+    scroller.current = el
+    if (!el) return
+    const ro = new ResizeObserver(() => {
+      if (stuck.current) el.scrollTop = el.scrollHeight
+    })
+    ro.observe(el)
+    return () => {
+      ro.disconnect()
+      scroller.current = null
+    }
+  }, [])
   function onTranscriptScroll() {
     const el = scroller.current
     if (!el) return
@@ -5217,7 +5239,7 @@ export function LiveHub({
       }}
       onMouseLeave={() => composerHover(false)}
     >
-      <div className="live-transcript" ref={scroller} onScroll={onTranscriptScroll}>
+      <div className="live-transcript" ref={scrollerRef} onScroll={onTranscriptScroll}>
         {groups.length === 0 ? (
           <p className="muted">
             Nothing said yet. Press {controls.primary.label} to begin.

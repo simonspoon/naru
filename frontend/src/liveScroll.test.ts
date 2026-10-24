@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isNearBottom, newSince } from './liveScroll'
+import { isNearBottom, newSince, ownTurnSince } from './liveScroll'
 
 describe('isNearBottom', () => {
   it('is true at the very bottom', () => {
@@ -27,5 +27,22 @@ describe('newSince', () => {
   })
   it('never goes negative', () => {
     expect(newSince(3, 10)).toBe(0)
+  })
+})
+
+describe('ownTurnSince', () => {
+  const turns = [
+    { id: 4, role: 'naru' },
+    { id: 5, role: 'user' },
+    { id: 6, role: 'naru' },
+  ]
+  it('is true for a person turn newer than the last one seen', () => {
+    expect(ownTurnSince(turns, 4)).toBe(true)
+  })
+  it('is false once that turn has been seen', () => {
+    expect(ownTurnSince(turns, 5)).toBe(false)
+  })
+  it('ignores new Naru turns', () => {
+    expect(ownTurnSince([...turns, { id: 7, role: 'naru' }], 6)).toBe(false)
   })
 })

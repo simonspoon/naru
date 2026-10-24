@@ -19,3 +19,14 @@ export function isNearBottom(
 export function newSince(turnCount: number, awayAt: number | null): number {
   return awayAt === null ? 0 : Math.max(0, turnCount - awayAt)
 }
+
+/** True when `turns` holds one of the person's own turns newer than `seenId`
+ *  (the highest turn id the transcript had already shown). Their own message —
+ *  typed or spoken — always brings the transcript back to the bottom, even if
+ *  they had scrolled up (naru task 2312). */
+export function ownTurnSince(
+  turns: readonly { id: number; role: string }[],
+  seenId: number,
+): boolean {
+  return turns.some((t) => t.role === 'user' && t.id > seenId)
+}
