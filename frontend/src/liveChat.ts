@@ -12,6 +12,34 @@ import { contextLabel } from './liveHead'
 export type TextSegment =
   { kind: 'text'; text: string } | { kind: 'task'; id: number; text: string }
 
+export type TurnSegment = TextSegment | { kind: 'tone'; text: string }
+
+/**
+ * Splits a Naru turn's text into Breeze tone tags (naru task 2357) and the
+ * rest, the rest further split by `taskSegments`. A tag is a short run of
+ * letters, spaces, commas, hyphens and apostrophes in parentheses —
+ * `(laughs)`, `(warmly, a little faster)` — which Breeze uses for delivery and
+ * does not speak, so the transcript shows it quietly rather than as words. A
+ * tag still open at the very end counts too, so a caption revealing it
+ * character by character never flashes it as plain text. Joining the
+ * segments' `text` reproduces the input.
+ */
+export function turnSegments(text: string): TurnSegment[] {
+  const out: TurnSegment[] = []
+  // A tag starts a word: the start or a space before it, matched as a
+  // character rather than a lookbehind (older Safari), so `f(x)` stays text.
+  const re = /(^|\s)(\([A-Za-z][A-Za-z ,'-]{0,39}(?:\)|$))/g
+  let last = 0
+  for (const m of text.matchAll(re)) {
+    const at = (m.index ?? 0) + m[1].length
+    if (at > last) out.push(...taskSegments(text.slice(last, at)))
+    out.push({ kind: 'tone', text: m[2] })
+    last = at + m[2].length
+  }
+  if (last < text.length) out.push(...taskSegments(text.slice(last)))
+  return out
+}
+
 /**
  * Splits a turn's text into plain runs and `#1563`-style task references.
  * A reference is `#` plus digits standing alone: not glued to the end of a word

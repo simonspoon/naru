@@ -96,7 +96,7 @@ import { chordLabel, matchesShortcut } from '../keymap'
 import { useKeymap } from '../keymapStore'
 import { parseBoardKey } from '../liveBoardKeys'
 import { elapsedLabel, endsInHead } from '../liveHead'
-import { headMeta, quietHint, taskHash, taskSegments } from '../liveChat'
+import { headMeta, quietHint, taskHash, taskSegments, turnSegments } from '../liveChat'
 import { headerIndicator } from '../liveIndicator'
 import { COMPOSER_HIDE_DELAY_MS, composerShown, inRevealZone } from '../liveComposerReveal'
 import { offerGlows, offerTitle } from '../liveOffer'
@@ -146,6 +146,7 @@ import {
 import {
   actsOn,
   advanceCursor,
+  isNaruRole,
   landStamps,
   navigateTarget,
   pendingTurns,
@@ -5268,8 +5269,14 @@ export function LiveHub({
                         is untrusted dictation. */}
                     {turn.text !== '' && (
                       <div className="live-text">
-                        {taskSegments(captioned(turn)).map((seg, i) =>
-                          seg.kind === 'task' ? (
+                        {(isNaruRole(group.role) ? turnSegments : taskSegments)(
+                          captioned(turn),
+                        ).map((seg, i) =>
+                          seg.kind === 'tone' ? (
+                            <span key={i} className="live-tone">
+                              {seg.text}
+                            </span>
+                          ) : seg.kind === 'task' ? (
                             <a
                               key={i}
                               className="live-task-chip"

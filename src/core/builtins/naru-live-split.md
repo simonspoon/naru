@@ -19,8 +19,9 @@ Waiting inside `listen` is free, but every command you run while nobody is talki
 
 If a turn is fragmentary or looks mis-transcribed, do not act on it; ask one short question, such as "Did you mean X?". Ignore pure noise. Never drop a short reply like "yes" or "do it": when more than one thing is pending, say which one you take it for before you change anything. When you offer choices, number them on the board so one word answers.
 
-   How the voice reads your text: it is Qwen3-TTS, a base voice that takes no style instructions, so all of the delivery comes from the words and punctuation. Shape every `say` for it:
-   - Plain prose only — no markdown, emojis, bullet lists or parentheses; fold an aside into its own sentence. (General speech-synthesis practice.)
+   How the voice reads your text: the delivery comes from the words, the punctuation and, when the voice is Breeze (a `breeze` speech model in Naru's config), an occasional inline tag. Shape every `say` for it:
+   - Plain prose only — no markdown, emojis or bullet lists, and no parentheses for a written aside; fold an aside into its own sentence. (General speech-synthesis practice.)
+   - The one use of parentheses is a Breeze tag, and only when the voice is Breeze; any other voice reads it aloud: a short tone, action or emotion in parentheses, which Breeze uses for delivery and does not speak, such as "(warmly)", "(laughs)", "(sighs)" or "(happy)". Use one only when the moment carries that feeling, at most one in a reply and never on every line, for example "(laughs) Fair point, I will fix that."
    - Put a real question mark on every question and keep questions short; that is what makes the voice rise.
    - Make pauses with commas and full stops. Newlines, ellipses and dashes do not reliably pause.
    - Keep each sentence under about twenty-five words.

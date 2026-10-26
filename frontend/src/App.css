@@ -9773,6 +9773,14 @@ body.live-panel-ratio-resizing .live-panel-divider {
   background: rgba(var(--cyan-rgb), 0.2);
 }
 
+/* A Breeze tone tag in a Naru turn (naru task 2357): a delivery cue the voice
+   does not speak, so it reads as a quiet aside rather than as words. */
+.live-tone {
+  color: var(--muted);
+  font-style: italic;
+  font-size: 0.85em;
+}
+
 /* What a turn DID, as opposed to what it said: a navigate turn may carry no
    words at all, and this is the only trace of it in the transcript. */
 .live-navigated {

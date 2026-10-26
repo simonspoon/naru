@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { headMeta, quietHint, taskHash, taskSegments, turnClock } from './liveChat'
+import { headMeta, quietHint, taskHash, taskSegments, turnClock, turnSegments } from './liveChat'
 
 const joined = {
   live: true,
@@ -91,5 +91,35 @@ describe('quietHint', () => {
     const hint = quietHint({ ...joined, muted: false, listening: false, elsewhere: true })
     expect(hint.chord).toBeNull()
     expect(hint.text).toMatch(/^Listening on another browser\..*instead\. Enter sends\.$/)
+  })
+})
+
+describe('turnSegments', () => {
+  it('pulls a Breeze tone tag out and keeps task chips, round-tripping the text', () => {
+    const text = '(laughs) Fair point, #12 is on it.'
+    const segs = turnSegments(text)
+    expect(segs).toEqual([
+      { kind: 'tone', text: '(laughs)' },
+      { kind: 'text', text: ' Fair point, ' },
+      { kind: 'task', id: 12, text: '#12' },
+      { kind: 'text', text: ' is on it.' },
+    ])
+    expect(segs.map((s) => s.text).join('')).toBe(text)
+  })
+  it('takes a multi-word tone mid-line and a tag still being captioned', () => {
+    expect(turnSegments('Done. (warmly, a little slower) Rest now.').map((s) => s.kind)).toEqual([
+      'text',
+      'tone',
+      'text',
+    ])
+    expect(turnSegments('Okay (lau')).toEqual([
+      { kind: 'text', text: 'Okay ' },
+      { kind: 'tone', text: '(lau' },
+    ])
+  })
+  it('leaves parentheses that are not a short word tag as text', () => {
+    for (const t of ['(1) first', '( spaced)', '()', 'f(x)', `(${'a'.repeat(41)})`]) {
+      expect(turnSegments(t).some((s) => s.kind === 'tone'), t).toBe(false)
+    }
   })
 })
