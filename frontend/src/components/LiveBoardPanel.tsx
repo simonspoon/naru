@@ -21,6 +21,7 @@ import {
   isPan,
   scrollForZoom,
   stepBoardZoom,
+  isZoomWheel,
   wheelBoardZoom,
 } from '../liveBoardZoom'
 import {
@@ -942,17 +943,19 @@ export function LiveBoardPanel({
     setZoom(1)
   }
 
-  // The plain wheel zooms toward the cursor (the person's spec), a trackpad
-  // pinch too. Native and non-passive, since React's wheel handler cannot
-  // stop the box scrolling.
+  // Cmd/Option/Ctrl + wheel zooms toward the cursor, a trackpad pinch too
+  // (naru task 2358); a plain wheel is left to scroll the box. Native and
+  // non-passive, since React's wheel handler cannot stop the box scrolling.
   const stageRef = useRef<HTMLDivElement | null>(null)
   useEffect(() => {
     const stage = stageRef.current
     if (stage === null) return
     const onWheel = (e: WheelEvent) => {
       const content = contentRef.current
-      if (content === null || frozen || e.deltaY === 0) return
+      if (content === null || !isZoomWheel(e)) return
+      // A zooming wheel never scrolls, even while unsent ink locks the zoom.
       e.preventDefault()
+      if (frozen || e.deltaY === 0) return
       const r = content.getBoundingClientRect()
       zoomTo(wheelBoardZoom(zoomRef.current, e.deltaY, e.deltaMode, e.ctrlKey), {
         x: e.clientX - r.left,
@@ -983,6 +986,7 @@ export function LiveBoardPanel({
         const y = num(d.y)
         const deltaY = num(d.deltaY)
         if (x === null || y === null || deltaY === null || deltaY === 0) return
+        if (!isZoomWheel({ ctrlKey: d.ctrlKey === true, metaKey: d.metaKey === true, altKey: d.altKey === true })) return
         const f = iframe.getBoundingClientRect()
         const c = content.getBoundingClientRect()
         const z = zoomRef.current

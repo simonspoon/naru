@@ -2184,16 +2184,16 @@ save), and at once when the tab is hidden or the page is closed (`pagehide`). Th
 
 ### Zoom and pan (naru task 2314)
 
-The panel zooms a board of any kind, 25%–400%. The **plain wheel** zooms
-toward the cursor (the person's spec — no modifier), a trackpad pinch too;
+The panel zooms a board of any kind, 25%–400%. **Cmd or Option (Ctrl
+elsewhere) + wheel** zooms toward the cursor, a trackpad pinch too (a pinch
+arrives as a ctrl-wheel); the **plain wheel scrolls** the board like a page
+(naru task 2358 — task 2314 had the plain wheel zoom);
 the `−`/`+` buttons in the board's tools step by 25% (snapping through 100%),
 and the percentage between them resets the view to 100% at the top-left.
 **Dragging** the board pans it, with the pen up; with the pen on, a drag is
 a stroke and never a pan. A press only becomes a pan after 4 px, so a click
 still clicks, and the click ending a pan is swallowed. The cost is that a
-drag no longer selects board text (a double-click still selects a word), and
-the wheel no longer scrolls a board — a horizontal-only wheel still reaches an
-`html` frame. The zoom goes back to
+drag no longer selects board text (a double-click still selects a word). The zoom goes back to
 100% whenever another board comes on screen, a push included.
 
 The zoom is a CSS `zoom` on a `.live-board-zoom` wrapper inside the content
@@ -2205,11 +2205,11 @@ was drawn over at any zoom, and an `InkFrame` carries the `zoom` it was
 frozen at, which the flatten maps through (`framePoint`): the PNG is what the
 person saw. Unsent ink locks the zoom and the pan like every other control
 that moves the content. An `html` board's frame takes its own wheel and
-drags, so the render route appends `BOARD_VIEW_RELAY` (`src/api.rs`): the
-wheel is posted to the panel as `board-wheel`, and a drag scrolls the frame's
-own document first, at the zoom the panel posts in as `board-zoom`, and posts
-the rest as `board-pan` — a mockup taller than the panel is still readable,
-since the wheel no longer scrolls it.
+drags, so the render route appends `BOARD_VIEW_RELAY` (`src/api.rs`): a
+plain wheel scrolls the frame's own document, a modified one is posted to the
+panel as `board-wheel`, and a drag scrolls the frame's own document first, at
+the zoom the panel posts in as `board-zoom`, and posts the rest as
+`board-pan`.
 
 ### Pasted images (mesa task 1475)
 

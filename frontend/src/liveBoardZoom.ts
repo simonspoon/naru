@@ -27,9 +27,17 @@ export function stepBoardZoom(zoom: number, dir: 1 | -1): number {
 }
 
 /**
- * The zoom one wheel event lands on. A plain wheel zooms (the person's spec),
- * a notch of a mouse wheel (~100px) about 15%; a trackpad pinch arrives as a
- * ctrl-wheel of small deltas and gets a stronger gain so it tracks the
+ * Whether a wheel zooms the board rather than scrolls it (naru task 2358): Cmd
+ * or Option (Ctrl elsewhere) held, and a trackpad pinch, which browsers report
+ * as a ctrl-wheel. A plain wheel scrolls the board like a page.
+ */
+export function isZoomWheel(e: { ctrlKey: boolean; metaKey: boolean; altKey: boolean }): boolean {
+  return e.ctrlKey || e.metaKey || e.altKey
+}
+
+/**
+ * The zoom one zooming wheel event lands on (`isZoomWheel`): a notch of a
+ * mouse wheel (~100px) about 15%; a trackpad pinch arrives as a ctrl-wheel of small deltas and gets a stronger gain so it tracks the
  * fingers. Line and page deltas are turned into pixels first.
  */
 export function wheelBoardZoom(

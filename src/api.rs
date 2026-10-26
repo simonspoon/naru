@@ -7073,10 +7073,12 @@ parent.postMessage({naru:'board-ready'},'*')})();\
 </script>\n";
 
 /// Appended to an `html` live board's body beside [`BOARD_KEY_RELAY`] (naru
-/// task 2314): the whiteboard zooms on the plain wheel and pans on a drag,
-/// and the frame takes both itself, so this hands them to the parent. A wheel
-/// with a vertical delta is `preventDefault`ed and posted as `{naru:'board-wheel', x, y, deltaY,
-/// deltaMode, ctrlKey}` in the frame's own px. A press (left or middle, not
+/// task 2314): the whiteboard zooms on Cmd/Option/Ctrl + wheel (a pinch is a
+/// ctrl-wheel, naru task 2358) and pans on a drag, and the frame takes both
+/// itself, so this hands them to the parent. A plain wheel is left to scroll
+/// the frame's own document; a modified one with a vertical delta is
+/// `preventDefault`ed and posted as `{naru:'board-wheel', x, y, deltaY,
+/// deltaMode, ctrlKey, metaKey, altKey}` in the frame's own px. A press (left or middle, not
 /// touch, not on a control or link) that moves 4px becomes a drag: it scrolls
 /// the frame's own document first, at the zoom the parent posts as
 /// `{naru:'board-zoom', zoom}` (screen px are `zoom` times the frame's), and
@@ -7085,9 +7087,10 @@ parent.postMessage({naru:'board-ready'},'*')})();\
 const BOARD_VIEW_RELAY: &str = "\n<script>(function(){var Z=1,D=null,S=0;\
 addEventListener('message',function(e){var d=e.data;\
 if(e.source===parent&&d&&d.naru==='board-zoom'&&typeof d.zoom==='number'&&d.zoom>0)Z=d.zoom});\
-addEventListener('wheel',function(e){if(!e.deltaY)return;e.preventDefault();\
+addEventListener('wheel',function(e){if(!(e.ctrlKey||e.metaKey||e.altKey))return;\
+e.preventDefault();if(!e.deltaY)return;\
 parent.postMessage({naru:'board-wheel',x:e.clientX,y:e.clientY,deltaY:e.deltaY,\
-deltaMode:e.deltaMode,ctrlKey:e.ctrlKey},'*')},{passive:false,capture:true});\
+deltaMode:e.deltaMode,ctrlKey:e.ctrlKey,metaKey:e.metaKey,altKey:e.altKey},'*')},{passive:false,capture:true});\
 addEventListener('pointerdown',function(e){var t=e.target;\
 if(e.pointerType==='touch'||(e.button!==0&&e.button!==1)||\
 (t&&t.closest&&t.closest('input,textarea,select,button,a,label,[contenteditable]')))return;\
@@ -14016,6 +14019,8 @@ mod tests {
             )
         );
         assert!(html.contains("naru:'board-wheel'"));
+        // A plain wheel scrolls the frame; only a modified one is relayed (naru task 2358).
+        assert!(html.contains("if(!(e.ctrlKey||e.metaKey||e.altKey))return;"));
         assert!(html.contains("naru:'board-pan'"));
         assert!(html.contains("d.naru==='board-zoom'"));
         assert!(html.contains("naru:'board-key'"));

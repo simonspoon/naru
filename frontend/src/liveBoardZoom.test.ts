@@ -7,6 +7,7 @@ import {
   isPan,
   scrollForZoom,
   stepBoardZoom,
+  isZoomWheel,
   wheelBoardZoom,
 } from './liveBoardZoom'
 
@@ -31,6 +32,16 @@ describe('stepBoardZoom', () => {
   it('stops at the bounds', () => {
     expect(stepBoardZoom(MAX_BOARD_ZOOM, 1)).toBe(MAX_BOARD_ZOOM)
     expect(stepBoardZoom(MIN_BOARD_ZOOM, -1)).toBe(MIN_BOARD_ZOOM)
+  })
+})
+
+describe('isZoomWheel', () => {
+  it('a plain wheel scrolls; Cmd, Option, Ctrl and a pinch zoom', () => {
+    const none = { ctrlKey: false, metaKey: false, altKey: false }
+    expect(isZoomWheel(none)).toBe(false)
+    expect(isZoomWheel({ ...none, metaKey: true })).toBe(true)
+    expect(isZoomWheel({ ...none, altKey: true })).toBe(true)
+    expect(isZoomWheel({ ...none, ctrlKey: true })).toBe(true)
   })
 })
 
