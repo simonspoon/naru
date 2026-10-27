@@ -7522,7 +7522,8 @@ async fn live_listen(
 /// passes the WebSocket through to the daemon's own `/v1/audio/live`, text,
 /// binary and close frames untouched — no vocabulary is added here — except
 /// that a `speak` frame naming no voice or model gets the Settings ones
-/// ([`with_speech`], naru task 2221).
+/// ([`with_defaults`], naru task 2221), and a `start` frame naming no model
+/// gets the Settings listen model (naru task 2364).
 ///
 /// Gated before the upgrade exactly as [`live_listen`]; a daemon that cannot
 /// be opened reaches the client as an `error` event, then close 1011.
@@ -7560,24 +7561,25 @@ fn with_hotwords(frame: &str, hotwords: Option<&str>) -> String {
     }
 }
 
-/// A live `speak` frame with the Settings voice and model filled in where
-/// the client named none (naru task 2221) — a client that sends its own, or
-/// a value that is not configured, is left alone; any other frame passes
-/// through byte-identical.
-fn with_speech(frame: &str, voice: Option<&str>, model: Option<&str>) -> String {
+/// A live frame of type `kind` with the Settings values in `fields` filled
+/// in where the client named none — the voice and model of a `speak` frame
+/// (naru task 2221), the listen model of a `start` frame (naru task 2364). A
+/// client that sends its own, or a value that is not configured, is left
+/// alone; any other frame passes through byte-identical.
+fn with_defaults(frame: &str, kind: &str, fields: &[(&str, Option<&str>)]) -> String {
     match serde_json::from_str::<serde_json::Value>(frame) {
-        Ok(serde_json::Value::Object(mut speak)) if speak.get("type") == Some(&json!("speak")) => {
+        Ok(serde_json::Value::Object(mut obj)) if obj.get("type") == Some(&json!(kind)) => {
             let mut changed = false;
-            for (key, value) in [("voice", voice), ("model", model)] {
+            for &(key, value) in fields {
                 if let Some(value) = value
-                    && speak.get(key).is_none_or(|v| v.is_null())
+                    && obj.get(key).is_none_or(|v| v.is_null())
                 {
-                    speak.insert(key.to_string(), json!(value));
+                    obj.insert(key.to_string(), json!(value));
                     changed = true;
                 }
             }
             if changed {
-                serde_json::Value::Object(speak).to_string()
+                serde_json::Value::Object(obj).to_string()
             } else {
                 frame.to_string()
             }
@@ -7639,7 +7641,16 @@ async fn proxy_listen(
                         })
                         .await
                         .unwrap_or_default();
-                        tungstenite::Message::Text(with_speech(t.as_str(), voice.as_deref(), model.as_deref()).into())
+                        let fields = [("voice", voice.as_deref()), ("model", model.as_deref())];
+                        tungstenite::Message::Text(with_defaults(t.as_str(), "speak", &fields).into())
+                    }
+                    Some(Ok(Message::Text(t))) if path == audio::LIVE_PATH && t.as_str().contains("\"start\"") => {
+                        // The Settings listen model (naru task 2364), which
+                        // the native client never names; fail open.
+                        let model = tokio::task::spawn_blocking(|| config::listen_model().ok().flatten())
+                            .await
+                            .unwrap_or_default();
+                        tungstenite::Message::Text(with_defaults(t.as_str(), "start", &[("model", model.as_deref())]).into())
                     }
                     Some(Ok(Message::Text(t))) => tungstenite::Message::Text(with_hotwords(t.as_str(), hotwords.as_deref()).into()),
                     Some(Ok(Message::Binary(b))) => tungstenite::Message::Binary(b),
@@ -22678,6 +22689,9 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
 
     #[test]
     fn with_speech_touches_only_speak_frames_missing_a_field() {
+        let with_speech = |frame: &str, voice: Option<&str>, model: Option<&str>| {
+            with_defaults(frame, "speak", &[("voice", voice), ("model", model)])
+        };
         let (v, m) = (Some("Her3"), Some("m"));
         let out: serde_json::Value =
             serde_json::from_str(&with_speech(r#"{"type":"speak","text":"x"}"#, v, m)).unwrap();
@@ -22703,6 +22717,73 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         }
         let bare = r#"{ "type":"speak" }"#;
         assert_eq!(with_speech(bare, None, None), bare);
+    }
+
+    #[test]
+    fn with_defaults_fills_the_listen_model_into_a_start_frame() {
+        let fill = |frame: &str, model| with_defaults(frame, "start", &[("model", model)]);
+        let out: serde_json::Value =
+            serde_json::from_str(&fill(r#"{"type":"start","rate":16000}"#, Some("p"))).unwrap();
+        assert_eq!(
+            (out["model"].as_str(), out["rate"].as_i64()),
+            (Some("p"), Some(16000))
+        );
+        let own = r#"{"type":"start","model":"mine"}"#;
+        assert_eq!(fill(own, Some("p")), own, "a client's own model wins");
+        let bare = r#"{ "type":"start" }"#;
+        assert_eq!(fill(bare, None), bare, "no model configured: untouched");
+        let speak = r#"{"type":"speak"}"#;
+        assert_eq!(fill(speak, Some("p")), speak);
+    }
+
+    /// A `start` frame that names no model gets the Settings listen model
+    /// (naru task 2364), read per connection; a client's own model stays.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn audio_live_fills_the_settings_listen_model_into_the_start_frame() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message as Tm;
+        let _env = attachments::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let stub = stream_stub(false).await;
+        let cfg = tempfile::tempdir().unwrap();
+        let write = |model: &str| {
+            let config = json!({"audio": {"url": stub.url}, "listen": {"model": model}});
+            std::fs::write(cfg.path().join("config.json"), config.to_string()).unwrap();
+        };
+        write("parakeet-tdt-0.6b-v2-int8");
+        let _config = listen_config(cfg.path(), None);
+        for (start, n) in [
+            (json!({"type": "start", "rate": 16000}), 1),
+            (json!({"type": "start", "model": "mine"}), 2),
+            (json!({"type": "start"}), 3),
+        ] {
+            if n == 3 {
+                write("whisper-large-v3-turbo-mlx");
+            }
+            let (_dir, opened) = open_ws("/v1/audio/live", None, false, None).await;
+            let mut ws = opened.expect("the upgrade");
+            ws.send(Tm::Text(start.to_string().into())).await.unwrap();
+            let ready = ws.next().await.unwrap().unwrap();
+            assert!(ready.to_text().unwrap().contains("\"ready\""), "{ready:?}");
+            ws.send(Tm::Text(json!({"type": "stop"}).to_string().into()))
+                .await
+                .unwrap();
+            let _ = listen_until_close(&mut ws).await;
+            assert_eq!(stub.starts.lock().unwrap().len(), n);
+        }
+        let starts = stub.starts.lock().unwrap().clone();
+        assert_eq!(
+            starts[0]["model"], "parakeet-tdt-0.6b-v2-int8",
+            "{starts:?}"
+        );
+        assert_eq!(starts[0]["rate"], 16000);
+        assert_eq!(starts[1]["model"], "mine", "a client's own model stays");
+        assert_eq!(
+            starts[2]["model"], "whisper-large-v3-turbo-mlx",
+            "re-read per connection"
+        );
     }
 
     /// A foreign page is refused before the upgrade; the daemon never hears.
