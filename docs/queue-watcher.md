@@ -47,12 +47,18 @@ because someone ran `mesa serve`.
   as its `{id}`/`{name}`. **The command line itself — including the prompt
   that runs the task — is user-configurable** in `~/.mesa/config.json`
   (`docs/config.md`); its default is
-  `claude --bg --model opus --name {name} -- "execute naru task: {id}"`,
+  `claude --bg --model opus --name {name} -- "/execute-naru-task {id}"`
+  (naru task 2394; `"execute naru task: {id}"` until then),
   so by default the name reaches `claude --bg` as `-n/--name` and the
   auto-dispatched session shows up identifiably (prompt box, `/resume` picker,
   terminal title, Agents sidebar) instead of generically, running as plain
   Claude Code on Opus with no agent definition (naru task 2273: a trial of
-  plain runs against supervised ones found them faster and cheaper). Until
+  plain runs against supervised ones found them faster and cheaper). The
+  prompt is the slash command of the `execute-naru-task` library built-in
+  skill — the task lifecycle (claim, the work loop, notes, `naru ask`, end
+  done or parked, never `in_progress`) — which Naru seeds to
+  `~/.claude/skills/execute-naru-task/SKILL.md` before every spawn, never
+  overwriting a file already there. Until
   then the default was `--agent supervisor` (mesa task 1075), and a template
   that still names it keeps working: Naru seeds the `supervisor` library
   built-in to `~/.claude/agents/supervisor.md` before every spawn

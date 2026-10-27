@@ -37,8 +37,8 @@ pub const STOP_GUARD_HOOK_NAME: &str = "task-stop-guard.sh";
 ///   (`DEFAULT_TASK_EXECUTE`), a slash command recorded as
 ///   `<command-name>/execute-naru-task</command-name>` +
 ///   `<command-args><id></command-args>`, the whole prompt
-///   `execute naru task: <id>` (the queue-watcher default since naru task
-///   2273), or — only in a session launched
+///   `execute naru task: <id>` (the queue-watcher default from naru task
+///   2273 until naru task 2394 made it `/execute-naru-task <id>`), or — only in a session launched
 ///   with `--agent`, marked by a `{"type":"agent-setting","agentSetting":…}`
 ///   header record no interactive session carries — a one-line prompt
 ///   ending in `task: <id>` (a customised template);

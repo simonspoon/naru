@@ -2253,7 +2253,7 @@ JSON"#,
             dir.path(),
             r#"[ "$1" = "--bg" ] && [ "$2" = "--model" ] && [ "$3" = "opus" ] &&
               [ "$4" = "--name" ] && [ "$5" = "n" ] && [ "$6" = "--" ] &&
-              [ "$7" = "execute naru task: 9" ] && [ "$#" = 7 ] ||
+              [ "$7" = "/execute-naru-task 9" ] && [ "$#" = 7 ] ||
               { echo "bad argv: $*" >&2; exit 1; }
 echo "backgrounded · 5we00000 · n""#,
         );

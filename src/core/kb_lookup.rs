@@ -6,7 +6,7 @@
 //! The hook script ([`KB_LOOKUP_HOOK`], a library built-in) only hands its
 //! stdin to `naru kb hook`; everything else is here: which prompts are looked
 //! up at all ([`request`]), the once-per-session marker, the question (a
-//! queued `execute naru task: N` asks with the task's own text), the lookup
+//! queued `/execute-naru-task N` asks with the task's own text), the lookup
 //! under [`TIMEOUT`] ([`lookup`]), the context it injects ([`context_text`]),
 //! one `lookups.jsonl` line per lookup, and `naru kb usage`'s report
 //! ([`usage`]), which reads each session's transcript to see whether the agent
@@ -133,10 +133,12 @@ pub fn first_prompt(root: &Path, session_id: &str) -> bool {
         .is_ok()
 }
 
-/// The task id of a queued task's prompt (`execute naru task: N`).
+/// The task id of a queued task's prompt (`/execute-naru-task N`, or the
+/// older `execute naru task: N`).
 fn queued_task_id(prompt: &str) -> Option<i64> {
     let rest = prompt
-        .strip_prefix("execute naru task")
+        .strip_prefix("/execute-naru-task")
+        .or_else(|| prompt.strip_prefix("execute naru task"))
         .or_else(|| prompt.strip_prefix("execute mesa task"))?;
     rest.trim_start_matches([':', ' ']).trim().parse().ok()
 }
@@ -489,6 +491,8 @@ mod tests {
             .unwrap();
         let q = question(&format!("execute naru task: {}", t.id), Some(&store)).unwrap();
         assert_eq!(q, "Rotate the deploy key\nline two\nline three");
+        let slash = question(&format!("/execute-naru-task {}", t.id), Some(&store)).unwrap();
+        assert_eq!(slash, q);
         assert_eq!(question("execute naru task: 99999", Some(&store)), None);
         assert_eq!(
             question("plain words", None).as_deref(),

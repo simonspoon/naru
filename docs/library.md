@@ -230,7 +230,7 @@ The starter set — twenty-four rows:
 | `swift-implementer` | `agent` | `user` | Implements one scoped Swift/SwiftUI change in an iOS or macOS project (`sonnet`) |
 | `naru-live-split` | `agent` | `user` | The opt-in fast-voice/slow-brain variant of `naru-live`: routes each turn with `naru decide` and delegates deciding and task changes to read-only workers; not spawned by Naru, a person points `live-agent` at it |
 | `supervising-agent-teams` | `skill` | `user` | The supervisor's procedures — waiting, verifying, briefs, resources, intervening — as `SKILL.md` plus five sibling files (`briefs.md`, `intervening.md`, `resources.md`, `verifying.md`, `waiting.md`); the `supervisor` agent loads it with the `Skill` tool |
-| `execute-todo` | `prompt` | `user` | The slash command a task is executed with; ships with `export_command` on, so it has the path `.claude/commands/execute-todo.md` |
+| `execute-naru-task` | `skill` | `user` | The task lifecycle a queue-watcher task agent runs as `/execute-naru-task <id>` (naru task 2394, replacing the retired `execute-todo` prompt): claim, the six-step work loop, notes, `naru ask`, end done or parked. Seeded to `~/.claude/skills/execute-naru-task/SKILL.md` before every dispatch (`library::ensure_user_file`, never overwriting) |
 
 `naru-live`'s body being the literal `AGENT_DEFINITION` constant (and
 `live-summary-prompt`'s the literal `SUMMARY_PROMPT`) is what lets
@@ -436,8 +436,8 @@ working as slash commands unchanged; a prompt that wants frontmatter writes
 it into its body. The flag is a prompt's alone — `Store` answers
 `validation` for `export_command: true` on any other kind, since every other
 kind already owns a path — and a **built-in** carries the flag only where it
-ships as a slash command (`Builtin.export_command`: `execute-todo`;
-`live-summary-prompt` has no business in
+ships as a slash command (`Builtin.export_command`: none since the
+`execute-todo` prompt was retired, naru task 2394; `live-summary-prompt` has no business in
 `.claude/commands`); forking one gives it a row, and the row may set the flag
 like any other.
 
@@ -693,8 +693,8 @@ is the loop guard.
 It reads the Stop payload's `transcript_path` once. The task id is the
 **first** user message — `/execute-naru-task <id>` (`DEFAULT_TASK_EXECUTE`; `/execute-mesa-task` is still accepted as an older alias),
 the same slash command recorded as `<command-name>` + `<command-args>`, the
-whole prompt `execute naru task: <id>` (the queue-watcher default since naru
-task 2273, exact so it needs no header), or
+whole prompt `execute naru task: <id>` (the queue-watcher default from naru
+task 2273 until naru task 2394 made it `/execute-naru-task <id>`, exact so it needs no header), or
 a one-line customised prompt ending in `task: <id>` — that loose form only
 in a session launched with `--agent`, which writes an `agent-setting`
 header record no interactive session has, so "please take a look at task

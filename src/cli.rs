@@ -241,7 +241,7 @@ EXAMPLES
         allow_host: Vec<String>,
         /// Periodically check every project for an actionable queued task and
         /// auto-start a background `claude` agent on it (default prompt:
-        /// `execute naru task: <task-id>`, configurable in
+        /// `/execute-naru-task <task-id>`, configurable in
         /// ~/.mesa/config.json). A project is busy only while an in_progress
         /// *leaf* holds it; an in_progress task that has subtasks is an
         /// umbrella, which narrows the tick to its own descendants instead of
@@ -3348,7 +3348,7 @@ EXAMPLES
     ///
     /// What the `kb-lookup.sh` library hook runs (`docs/kb.md` "Automatic
     /// lookup"). On a session's first prompt it asks the kb (a queued
-    /// `execute naru task: N` asks with the task's text), logs the lookup to
+    /// `/execute-naru-task N` asks with the task's text), logs the lookup to
     /// `<kb>/lookups.jsonl` and, when notes answer, prints the hook's
     /// `additionalContext` JSON. Skipped when `NARU_KB_SKIP` is set (Naru's own
     /// model calls and workflow nodes), in Naru's workspace and for a

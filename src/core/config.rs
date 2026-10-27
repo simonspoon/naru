@@ -12,7 +12,7 @@
 //! ```json
 //! {
 //!   "commands": {
-//!     "queue-watcher":   "claude --bg --model opus --name {name} -- \"execute naru task: {id}\"",
+//!     "queue-watcher":   "claude --bg --model opus --name {name} -- \"/execute-naru-task {id}\"",
 //!     "inbox-watcher":  "claude -p --model {model} --name {name} --tools \"\" --strict-mcp-config --output-format json --json-schema {schema} -- {prompt}",
 //!     "live-agent":     "claude --bg --agent naru-live --name {name} -- {prompt}",
 //!     "live-summary":   "claude --bg --name {name} -- {prompt}",
@@ -299,13 +299,16 @@ pub const ACTIONS: [&str; 9] = [
 /// runs against supervised ones found them faster and cheaper with real
 /// verification. A configured template may still name `--agent supervisor`,
 /// which is why `core::supervisor::ensure_agent_definition` still seeds it.
+/// The prompt is the `execute-naru-task` skill's slash command (naru task
+/// 2394, was `execute naru task: {id}`), so the agent starts with the task
+/// lifecycle loaded; the dispatch seeds the skill before spawning.
 ///
 /// Note the quotes around the prompt: the prompt is **one** argv entry
 /// (`claude` takes it as a single positional), and tokenization is by
-/// whitespace. Unquoted, `execute naru task: {id}` would arrive as several
+/// whitespace. Unquoted, `/execute-naru-task {id}` would arrive as two
 /// arguments.
 pub const DEFAULT_TODO_WATCHER: &str =
-    r#"claude --bg --model opus --name {name} -- "execute naru task: {id}""#;
+    r#"claude --bg --model opus --name {name} -- "/execute-naru-task {id}""#;
 /// Built-in default for [`INBOX_WATCHER`] (naru task 1691): [`DEFAULT_LIVE_SUMMARY`]'s
 /// shape — one synchronous tool-less `claude -p --output-format json
 /// --json-schema {schema}` call, run inside a detached `naru __job
@@ -5758,7 +5761,7 @@ mod tests {
             resolve(TODO_WATCHER, DEFAULT_TODO_WATCHER, &vars).unwrap(),
             // Plain Claude Code on Opus since naru task 2273 (mesa task 1075's
             // `--agent supervisor` retired from the default).
-            r#"claude --bg --model opus --name 'mesa: do the thing' -- "execute naru task: 731""#
+            r#"claude --bg --model opus --name 'mesa: do the thing' -- "/execute-naru-task 731""#
         );
         // The live agent takes both halves: a named session id *and* the
         // prompt mesa supplies. The prompt is one argument however long or
@@ -5788,7 +5791,7 @@ mod tests {
                 "--name",
                 "mesa: do the thing",
                 "--",
-                "execute naru task: 731",
+                "/execute-naru-task 731",
             ]
         );
         assert_eq!(
@@ -5841,7 +5844,7 @@ mod tests {
         let vars = Vars::default();
         assert_eq!(
             resolve(TODO_WATCHER, DEFAULT_TODO_WATCHER, &vars).unwrap(),
-            r#"claude --bg --model opus --name '' -- "execute naru task: ""#
+            r#"claude --bg --model opus --name '' -- "/execute-naru-task ""#
         );
         assert_eq!(
             argv_of(&resolve(TODO_WATCHER, DEFAULT_TODO_WATCHER, &vars).unwrap()),
@@ -5853,7 +5856,7 @@ mod tests {
                 "--name",
                 "",
                 "--",
-                "execute naru task: "
+                "/execute-naru-task "
             ]
         );
         let named = Vars {
@@ -5862,7 +5865,7 @@ mod tests {
         };
         assert_eq!(
             resolve(TODO_WATCHER, DEFAULT_TODO_WATCHER, &named).unwrap(),
-            r#"claude --bg --model opus --name '' -- "execute naru task: 7""#
+            r#"claude --bg --model opus --name '' -- "/execute-naru-task 7""#
         );
         assert_eq!(resolved("t run \"{name}\" {id}", &named), "t run \"\" '7'");
     }

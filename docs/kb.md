@@ -119,7 +119,7 @@ The script only pipes Claude Code's payload into `naru kb hook`, which:
 - looks up only the **first** prompt of a session (an `O_EXCL` marker in
   `lookups-seen/`, claimed before the call; a resumed session keeps its id, so
   it is not asked again, and a failed or timed-out lookup is not retried);
-- asks with the prompt, or for a queued `execute naru task: N` with the first
+- asks with the prompt, or for a queued `/execute-naru-task N` (or `execute naru task: N`) with the first
   five non-empty lines of task N's description (an unknown task asks nothing);
 - runs the ordinary `kb ask` (prefilter, one haiku call through the `kb`
   template); the model call gets what is left of a **6 s** budget and is killed

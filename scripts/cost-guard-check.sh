@@ -648,7 +648,7 @@ sleep 1.5   # later ticks must neither re-stop nor re-spawn
   fail "exactly the checkpointed session is stopped, once: $(cat "$STOPS")"
 [ "$(bg_in "$DA")" -eq 2 ] || fail "task A must be re-dispatched exactly once: $(cat "$BGLOG")"
 [ "$(bg_in "$DB")" -eq 1 ] || fail "task B has no checkpoint and must not be re-spawned: $(cat "$BGLOG")"
-[ "$(grep "^$DA|" "$BGLOG" | cut -d'|' -f3 | sort -u)" = "execute naru task: $TA" ] ||
+[ "$(grep "^$DA|" "$BGLOG" | cut -d'|' -f3 | sort -u)" = "/execute-naru-task $TA" ] ||
   fail "the relay must dispatch the same task: $(cat "$BGLOG")"
 NEW_A=$(grep "^$DA|" "$BGLOG" | tail -1 | cut -d'|' -f4)
 run 0 "$MESA" inbox list

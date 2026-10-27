@@ -59,7 +59,7 @@ pub struct Builtin {
 /// — so the sync flow carries it like any other agent definition, and
 /// `core::live::ensure_agent_definition` seeds it there on the first spawn.
 /// `supervisor` is the same shape one step up (mesa task 1075): the agent
-/// definition an `/execute-todo` run is *supervised* as, body
+/// definition a configured `--agent supervisor` dispatch runs as, body
 /// `core::supervisor::SUPERVISOR_DEFINITION`, at
 /// `.claude/agents/supervisor.md`, seeded by
 /// `core::supervisor::ensure_agent_definition` on the first dispatch.
@@ -367,16 +367,24 @@ echo \"Claude Code stopped in $(pwd)\"
         export_command: false,
         files: &[],
     },
+    // The task lifecycle a queue-watcher task agent follows (naru task 2394,
+    // replacing the `execute-todo` prompt): the `queue-watcher` default
+    // prompt is its slash command, and the dispatch seeds it first.
     Builtin {
-        id: "execute-todo",
-        name: "execute-todo",
-        kind: LibraryKind::Prompt,
+        id: TASK_SKILL_BUILTIN,
+        name: TASK_SKILL_BUILTIN,
+        kind: LibraryKind::Skill,
         scope: LibraryScope::User,
-        body: include_str!("builtins/execute-todo.md"),
-        export_command: true,
+        body: include_str!("builtins/execute-naru-task/SKILL.md"),
+        export_command: false,
         files: &[],
     },
 ];
+
+/// The task-execution skill built-in, and the slash command
+/// (`/execute-naru-task <id>`) the `queue-watcher` default prompt invokes —
+/// the name the transcript parsers already read a task id off.
+pub const TASK_SKILL_BUILTIN: &str = "execute-naru-task";
 
 /// Built-in ids renamed by mesa task 1302, old to new. A stored fork was
 /// moved by the migration at index 71; everything that still names a
@@ -715,16 +723,27 @@ pub fn ensure_agent_file(
     builtin_id: &str,
     fallback: &str,
 ) -> Result<PathBuf, String> {
+    ensure_user_file(store, LibraryKind::Agent, builtin_id, fallback)
+}
+
+/// [`ensure_agent_file`] for any user-scope kind with a path — the task skill
+/// (`.claude/skills/<id>/SKILL.md`) seeded before a queue-watcher dispatch.
+pub fn ensure_user_file(
+    store: &Store,
+    kind: LibraryKind,
+    builtin_id: &str,
+    fallback: &str,
+) -> Result<PathBuf, String> {
     let body = store
         .find_library_fork(builtin_id)
         .ok()
         .flatten()
         .map(|item| item.body)
         .unwrap_or_else(|| fallback.to_string());
-    let rel = relative_path(LibraryKind::Agent, LibraryScope::User, builtin_id, false)
+    let rel = relative_path(kind, LibraryScope::User, builtin_id, false)
         .ok_or_else(|| format!("{builtin_id} has no path"))?;
     let base = scope_base(LibraryScope::User, None)
-        .ok_or_else(|| format!("cannot seed the {builtin_id} agent definition: no HOME"))?;
+        .ok_or_else(|| format!("cannot seed the {builtin_id} {}: no HOME", kind.as_str()))?;
     let full = resolve(&base, &rel)?;
     if full.exists() {
         return Ok(full);
@@ -1048,10 +1067,11 @@ pub fn effective_items(store: &Store, project: Option<i64>) -> StoreResult<Vec<L
         if shadowed.contains(b.id) {
             continue;
         }
-        // A built-in carries a flag only where it ships as a slash command
-        // (`execute-todo`); `live-summary-prompt` is mesa's
-        // own and has no business in `.claude/commands`. Forking one gives it
-        // a row, and the row may set the flag like any other.
+        // A built-in prompt carries the flag only where it ships as a slash
+        // command (none does since `execute-todo` was retired, naru task
+        // 2394); `live-summary-prompt` is mesa's own and has no business in
+        // `.claude/commands`. Forking one gives it a row, and the row may set
+        // the flag like any other.
         let path = relative_path(b.kind, b.scope, b.name, b.export_command)
             .map(|p| p.to_string_lossy().into_owned());
         items.push(LibraryItem {
@@ -4284,33 +4304,6 @@ mod tests {
     }
 
     #[test]
-    fn pulling_the_disk_side_of_an_execute_prompt_keeps_its_command_path() {
-        let (mut store, _dir) = temp_store();
-        with_home_dir(|home| {
-            let commands = home.join(".claude/commands");
-            fs::create_dir_all(&commands).unwrap();
-            fs::write(commands.join("execute-todo.md"), "my own version").unwrap();
-            let results = sync_apply(
-                &mut store,
-                None,
-                &[(
-                    ".claude/commands/execute-todo.md".to_string(),
-                    "disk".to_string(),
-                )],
-            )
-            .unwrap();
-            assert!(results[0].applied, "{:?}", results[0].error);
-            let fork = store.find_library_fork("execute-todo").unwrap().unwrap();
-            assert!(fork.export_command);
-            assert_eq!(fork.body, "my own version");
-            assert_eq!(
-                fork.path.as_deref(),
-                Some(".claude/commands/execute-todo.md")
-            );
-        });
-    }
-
-    #[test]
     fn a_same_name_row_wins_the_prompt_table_over_the_builtin() {
         let (mut store, _dir) = temp_store();
         store
@@ -4318,33 +4311,44 @@ mod tests {
                 LibraryKind::Prompt,
                 LibraryScope::User,
                 None,
-                "execute-todo",
-                "my own todo",
+                "live-summary-prompt",
+                "my own summary",
                 None,
                 false,
             )
             .unwrap();
         assert_eq!(
-            prompts(&store).unwrap().body("execute-todo"),
-            Some("my own todo")
+            prompts(&store).unwrap().body("live-summary-prompt"),
+            Some("my own summary")
         );
     }
 
+    /// The task skill is a user-scope skill at the path its slash command
+    /// needs (naru task 2394), and seeding writes it once, never over a file.
     #[test]
-    fn the_execute_prompts_ship_as_slash_commands() {
+    fn the_task_skill_ships_as_a_skill_and_is_seeded_once() {
         let (store, _dir) = temp_store();
         let items = effective_items(&store, None).unwrap();
-        let name = "execute-todo";
         let item = items
             .iter()
-            .find(|i| i.builtin_id.as_deref() == Some(name))
+            .find(|i| i.builtin_id.as_deref() == Some(TASK_SKILL_BUILTIN))
             .unwrap();
-        assert_eq!(item.kind, LibraryKind::Prompt);
-        assert!(item.export_command);
+        assert_eq!(item.kind, LibraryKind::Skill);
         assert_eq!(
             item.path.as_deref(),
-            Some(format!(".claude/commands/{name}.md").as_str())
+            Some(".claude/skills/execute-naru-task/SKILL.md")
         );
+        assert!(builtin("execute-todo").is_none());
+        with_home_dir(|_home| {
+            let body = builtin(TASK_SKILL_BUILTIN).unwrap().body;
+            let path =
+                ensure_user_file(&store, LibraryKind::Skill, TASK_SKILL_BUILTIN, body).unwrap();
+            assert!(path.ends_with(".claude/skills/execute-naru-task/SKILL.md"));
+            assert_eq!(fs::read_to_string(&path).unwrap(), body);
+            fs::write(&path, "hand edited").unwrap();
+            ensure_user_file(&store, LibraryKind::Skill, TASK_SKILL_BUILTIN, body).unwrap();
+            assert_eq!(fs::read_to_string(&path).unwrap(), "hand edited");
+        });
     }
 
     // ---- effective_items / sync_status / sync_apply ----

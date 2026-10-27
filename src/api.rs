@@ -1162,7 +1162,7 @@ fn relay_context_sessions(
 }
 
 /// Starts the queue-watcher's session for `task_id` in `local_path`: seeds the
-/// `supervisor` definition, reads the library's prompts and runs the
+/// `supervisor` definition and the `execute-naru-task` skill, reads the library's prompts and runs the
 /// `queue-watcher` template through `spawn_bg`. The one spawn both the watcher's
 /// dispatch and the cost guard's relay use; returns the receipt's job id.
 fn dispatch_task_session(
@@ -1180,10 +1180,15 @@ fn dispatch_task_session(
         let store = state.store.lock().unwrap();
         supervisor::ensure_agent_definition(&store)
             .map_err(|e| format!("cannot seed the supervisor agent definition: {e}"))?;
+        // The default prompt is the task skill's slash command (naru task
+        // 2394), which does nothing until the skill is on disk.
+        let skill = library::builtin(library::TASK_SKILL_BUILTIN).expect("task skill built-in");
+        library::ensure_user_file(&store, skill.kind, skill.id, skill.body)
+            .map_err(|e| format!("cannot seed the {} skill: {e}", skill.id))?;
     }
     // The command — including the prompt that executes a task — comes
     // from `~/.mesa/config.json`'s `queue-watcher` entry, defaulting to
-    // `claude --bg --model opus … -- "execute naru task: <id>"`.
+    // `claude --bg --model opus … -- "/execute-naru-task <id>"`.
     // The library's prompts, for any `{prompt:<name>}` the template names
     // (mesa task 1138).
     let prompts = {
@@ -8351,7 +8356,7 @@ struct LibraryUpdate {
 struct LibraryForkBody {
     body: String,
     /// The fork's `export_command` (mesa task 1139). Absent means the
-    /// built-in's own flag, so forking `execute-todo` keeps its command path.
+    /// built-in's own flag, so forking an exporting built-in keeps its command path.
     #[serde(default)]
     export_command: Option<bool>,
 }
@@ -16710,7 +16715,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                 "an open umbrella must not wedge its project: {log:?}"
             );
             assert!(
-                log.contains(&format!("execute naru task: {child_a}")),
+                log.contains(&format!("/execute-naru-task {child_a}")),
                 "the umbrella's first child must be the dispatched task: {log:?}"
             );
             let get = |id| state.store.lock().unwrap().get_task(id).unwrap().status;
@@ -16739,7 +16744,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             assert_eq!(log.lines().count(), 2, "second child dispatched: {log:?}");
             assert!(
-                log.contains(&format!("execute naru task: {child_b}")),
+                log.contains(&format!("/execute-naru-task {child_b}")),
                 "{log:?}"
             );
 
@@ -16761,7 +16766,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             assert_eq!(log.lines().count(), 3, "idle project resumes: {log:?}");
             assert!(
-                log.contains(&format!("execute naru task: {outsider}")),
+                log.contains(&format!("/execute-naru-task {outsider}")),
                 "{log:?}"
             );
 
@@ -16834,7 +16839,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             queue_watcher_tick(&state);
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             assert!(
-                log.contains(&format!("execute naru task: {child}")),
+                log.contains(&format!("/execute-naru-task {child}")),
                 "a released child must dispatch normally: {log:?}"
             );
             assert_eq!(get(child), Status::InProgress);
@@ -17061,7 +17066,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             queue_watcher_tick(&state);
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             assert!(
-                log.contains(&format!("execute naru task: {first}")),
+                log.contains(&format!("/execute-naru-task {first}")),
                 "a touched task dispatches once the spawn works: {log:?}"
             );
             assert_eq!(status(first), Status::InProgress);
@@ -17214,7 +17219,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             assert_eq!(log.lines().count(), 1, "one dispatch: {log:?}");
             assert!(
-                log.contains(&format!("execute naru task: {grandchild}")),
+                log.contains(&format!("/execute-naru-task {grandchild}")),
                 "the deepest actionable descendant is the unit of work, not the epic: {log:?}"
             );
             assert_eq!(get(epic), Status::Todo, "the epic must not be claimed");
@@ -17239,7 +17244,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             assert_eq!(log.lines().count(), 2, "roll-up dispatched: {log:?}");
             assert!(
-                log.contains(&format!("execute naru task: {epic}")),
+                log.contains(&format!("/execute-naru-task {epic}")),
                 "{log:?}"
             );
             assert_eq!(get(epic), Status::InProgress);
