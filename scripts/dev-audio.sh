@@ -53,4 +53,6 @@ fi
 
 echo "dev-audio: pid $$ port $port home $dev" >&2
 export NARU_AUDIO_HOME="$dev"
+# The ambient host check-in (naru-audio task 2373) goes to dev naru serve, never :7777.
+export NARU_AUDIO_NARU_URL="http://127.0.0.1:7771"
 exec "$bin" serve --listen "127.0.0.1:$port"

@@ -2870,7 +2870,7 @@ takes exactly one value.
 | `DELETE /api/live` | the ended session | `require_agent_access` |
 | `POST /api/live/utterance` `{text, ink?: {board_id, png_base64}}` | the dictated user turn, carrying the person's annotated board when `ink` is sent (mesa task 1353; body limit raised above `LIVE_INK_MAX`, so an over-cap PNG is 422 JSON) | standard write |
 | `POST /api/live/notice` `{kind}` | the notice turn, **200** created or existing (deduped per working span, mesa task 1157); an unknown `kind` is 422 | standard write |
-| `POST /api/live/route` `{route, context?, window?, ambient?}` | the session, route, context **and window box** recorded — an omitted `context`/`window` leaves the stored one alone, an explicit `null` clears it; `ambient` (a host's report, naru task 1813) is stored, stamps the report time and clears a matching `ambient_request` | standard write |
+| `POST /api/live/route` `{route?, context?, window?, ambient?}` | the session, route, context **and window box** recorded — an omitted `context`/`window` leaves the stored one alone, an explicit `null` clears it; `ambient` (a host's report, naru task 1813) is stored, stamps the report time and clears a matching `ambient_request`; a report with no `route` (naru-audio's headless check-in, naru task 2412) applies only `ambient` and `client` | standard write |
 | `POST /api/live/speaker` `{client}` | the session, this client now its **speaker** (mesa task 1267) | `require_agent_access` |
 | `POST /api/live/leave` `{client}` | **204**, always — releases this client's claim on the voice if it holds it, so it is free at once; never ends the session or touches the agent (mesa task 1622) | `require_agent_access` |
 | `POST /api/live/turns/{id}/played` | the stamped turn | standard write |

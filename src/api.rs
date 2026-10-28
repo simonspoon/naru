@@ -5865,9 +5865,12 @@ struct LiveNoticeBody {
 
 #[derive(Deserialize)]
 struct LiveRouteBody {
-    /// Where the user's browser currently is, as a hash route. Required —
-    /// reporting no route is not a thing the page has to say.
-    route: String,
+    /// Where the user's browser currently is, as a hash route. Every page
+    /// report carries it; a headless host (naru-audio, naru task 2412) has no
+    /// page, omits it, and then only `ambient` and `client` apply — the stored
+    /// route, context, window and view are left alone.
+    #[serde(default)]
+    route: Option<String>,
     /// What is *on* that page — the file, the diagram, the task, the commit
     /// (mesa task 888). A `double_option`, exactly as `TaskUpdate`'s clearable
     /// fields are, because the three states are genuinely different (mesa task
@@ -6767,13 +6770,16 @@ async fn live_route(
         .as_deref()
         .map(validate_live_client)
         .transpose()?;
-    let session = store.set_live_route(
-        session.id,
-        &body.route,
-        body.context.as_ref().map(Option::as_ref),
-        body.window.as_ref().map(Option::as_ref),
-        body.view.as_ref().map(|v| v.as_deref()),
-    )?;
+    let session = match &body.route {
+        Some(route) => store.set_live_route(
+            session.id,
+            route,
+            body.context.as_ref().map(Option::as_ref),
+            body.window.as_ref().map(Option::as_ref),
+            body.view.as_ref().map(|v| v.as_deref()),
+        )?,
+        None => session,
+    };
     let session = match body.ambient {
         Some(ambient) => {
             store.report_live_host_ambient(session.id, ambient)?;
@@ -21478,7 +21484,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         let route = live_route(
             State(state),
             Ok(Json(LiveRouteBody {
-                route: "#/live".into(),
+                route: Some("#/live".into()),
                 context: None,
                 window: None,
                 view: None,
@@ -21755,7 +21761,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                 let resp = live_route(
                     State(state),
                     Ok(Json(LiveRouteBody {
-                        route: "#/live".into(),
+                        route: Some("#/live".into()),
                         context: None,
                         window: None,
                         view: None,
@@ -21777,6 +21783,41 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
     }
 
     #[tokio::test]
+    async fn live_route_without_a_route_reports_ambient_and_keeps_the_page() {
+        let (_dir, state) = test_state();
+        state
+            .store
+            .lock()
+            .unwrap()
+            .start_live_session(None)
+            .unwrap();
+        let body = |route: Option<&str>, ambient| LiveRouteBody {
+            route: route.map(Into::into),
+            context: None,
+            window: None,
+            view: None,
+            client: None,
+            ambient,
+        };
+        live_route(State(state.clone()), Ok(Json(body(Some("#/inbox"), None))))
+            .await
+            .unwrap();
+        // naru-audio's check-in (naru task 2412): no page, so no route.
+        live_route(State(state.clone()), Ok(Json(body(None, Some(Some(true))))))
+            .await
+            .unwrap();
+        let session = state
+            .store
+            .lock()
+            .unwrap()
+            .current_live_session()
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.route.as_deref(), Some("#/inbox"));
+        assert_eq!(session.ambient, Some(true));
+    }
+
+    #[tokio::test]
     async fn live_route_records_the_context_the_page_reports_with_it() {
         let (_dir, state) = test_state();
         state
@@ -21788,7 +21829,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         live_route(
             State(state.clone()),
             Ok(Json(LiveRouteBody {
-                route: "#/projects/1/files".into(),
+                route: Some("#/projects/1/files".into()),
                 context: Some(Some(LiveContext {
                     kind: LiveContextKind::Files,
                     id: Some("src/api.rs".into()),
@@ -21829,7 +21870,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         live_route(
             State(state.clone()),
             Ok(Json(LiveRouteBody {
-                route: "#/inbox".into(),
+                route: Some("#/inbox".into()),
                 context: None,
                 window: None,
                 view: None,
@@ -21855,7 +21896,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         live_route(
             State(state.clone()),
             Ok(Json(LiveRouteBody {
-                route: "#/inbox".into(),
+                route: Some("#/inbox".into()),
                 context: Some(None),
                 window: Some(None),
                 view: None,
