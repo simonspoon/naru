@@ -317,15 +317,6 @@ echo \"Claude Code stopped in $(pwd)\"
         files: &[],
     },
     Builtin {
-        id: "naru-live-split",
-        name: "naru-live-split",
-        kind: LibraryKind::Agent,
-        scope: LibraryScope::User,
-        body: include_str!("builtins/naru-live-split.md"),
-        export_command: false,
-        files: &[],
-    },
-    Builtin {
         id: "supervising-agent-teams",
         name: "supervising-agent-teams",
         kind: LibraryKind::Skill,

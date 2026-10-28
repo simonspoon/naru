@@ -228,7 +228,6 @@ The starter set — twenty-four rows:
 | `diff-reviewer` | `agent` | `user` | Independent review of an uncommitted diff or a branch; never edits the tree (`sonnet`, read-only tools) |
 | `ui-verifier` | `agent` | `user` | Live UI verification end to end with qorvex, khora or loki, calibrated against HEAD and the fix (`sonnet`) |
 | `swift-implementer` | `agent` | `user` | Implements one scoped Swift/SwiftUI change in an iOS or macOS project (`sonnet`) |
-| `naru-live-split` | `agent` | `user` | The opt-in fast-voice/slow-brain variant of `naru-live`: routes each turn with `naru decide` and delegates deciding and task changes to read-only workers; not spawned by Naru, a person points `live-agent` at it |
 | `supervising-agent-teams` | `skill` | `user` | The supervisor's procedures — waiting, verifying, briefs, resources, intervening — as `SKILL.md` plus five sibling files (`briefs.md`, `intervening.md`, `resources.md`, `verifying.md`, `waiting.md`); the `supervisor` agent loads it with the `Skill` tool |
 | `execute-naru-task` | `skill` | `user` | The task lifecycle a queue-watcher task agent runs as `/execute-naru-task <id>` (naru task 2394, replacing the retired `execute-todo` prompt): claim, the six-step work loop, notes, `naru ask`, end done or parked. Seeded to `~/.claude/skills/execute-naru-task/SKILL.md` before every dispatch (`library::ensure_user_file`, never overwriting) |
 

@@ -257,7 +257,7 @@ ends. Something new the person says while a job runs is folded into it
 (`SendMessage` to the delegate, or the job restarted). The voice states as
 fact only what it verified or a delegate reported, speaks as briefly as it
 can, and says no ids unless asked; detail goes on the board. This replaces the
-router of naru task 1711 (`naru-live-split`), which is left as it was.
+router of naru task 1711, whose separate agent was deleted by naru task 2407.
 
 ## Why the queue lives in SQLite
 
