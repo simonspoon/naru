@@ -6,7 +6,7 @@
 //! The hook script ([`KB_LOOKUP_HOOK`], a library built-in) only hands its
 //! stdin to `naru kb hook`; everything else is here: which prompts are looked
 //! up at all ([`request`]), the once-per-session marker, the question (a
-//! queued `/execute-naru-task N` asks with the task's own text), the lookup
+//! queued `/execute-naru-task N` asks with the task's title), the lookup
 //! under [`TIMEOUT`] ([`lookup`]), the context it injects ([`context_text`]),
 //! one `lookups.jsonl` line per lookup, and `naru kb usage`'s report
 //! ([`usage`]), which reads each session's transcript to see whether the agent
@@ -40,8 +40,10 @@ pub const TIMEOUT: Duration = Duration::from_secs(6);
 /// The most words of the answer the injected context carries.
 const CONTEXT_WORDS: usize = 150;
 
-/// Lines of a queued task's description that go into its question.
-const TASK_LINES: usize = 5;
+/// A prompt over this many words asks with its first non-empty line only: the
+/// kb's keyword prefilter takes every word, so a long text's generic words
+/// crowd out the ones that pick a note (naru task 2409).
+const LONG_PROMPT_WORDS: usize = 40;
 
 /// The hook script. It **exits 0 always** and prints only what `naru kb hook`
 /// prints, which is nothing on any miss or failure.
@@ -143,21 +145,21 @@ fn queued_task_id(prompt: &str) -> Option<i64> {
     rest.trim_start_matches([':', ' ']).trim().parse().ok()
 }
 
-/// What to ask: the prompt itself, or for a queued task its name and the
-/// first lines of its description (the prompt only names the task). An
-/// unknown task asks nothing. Cut to the kb's question limit.
+/// What to ask: the prompt itself, or its first non-empty line when it runs
+/// over [`LONG_PROMPT_WORDS`] words; for a queued task (the prompt only names
+/// it) the first non-empty line of its description, its title. An unknown
+/// task asks nothing. Cut to the kb's question limit.
 pub fn question(prompt: &str, store: Option<&Store>) -> Option<String> {
+    let first_line = |text: &str| {
+        text.lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .unwrap_or_default()
+            .to_string()
+    };
     let q = match queued_task_id(prompt) {
-        Some(id) => {
-            let task = store?.get_task(id).ok()?;
-            task.description
-                .lines()
-                .map(str::trim)
-                .filter(|l| !l.is_empty())
-                .take(TASK_LINES)
-                .collect::<Vec<_>>()
-                .join("\n")
-        }
+        Some(id) => first_line(&store?.get_task(id).ok()?.description),
+        None if prompt.split_whitespace().count() > LONG_PROMPT_WORDS => first_line(prompt),
         None => prompt.to_string(),
     };
     let mut q = q;
@@ -473,7 +475,7 @@ mod tests {
     }
 
     #[test]
-    fn a_queued_task_asks_with_its_own_text() {
+    fn a_queued_task_asks_with_its_title() {
         let d = tempfile::tempdir().unwrap();
         let mut store = Store::open(&d.path().join("t.db")).unwrap();
         let p = store.create_project("p", None, None, None, None).unwrap();
@@ -490,7 +492,7 @@ mod tests {
             )
             .unwrap();
         let q = question(&format!("execute naru task: {}", t.id), Some(&store)).unwrap();
-        assert_eq!(q, "Rotate the deploy key\nline two\nline three");
+        assert_eq!(q, "Rotate the deploy key");
         let slash = question(&format!("/execute-naru-task {}", t.id), Some(&store)).unwrap();
         assert_eq!(slash, q);
         assert_eq!(question("execute naru task: 99999", Some(&store)), None);
@@ -498,6 +500,10 @@ mod tests {
             question("plain words", None).as_deref(),
             Some("plain words")
         );
+        let short = "Fix the hook\nit fails";
+        assert_eq!(question(short, None).as_deref(), Some(short));
+        let long = format!("Fix the hook\n\n{}", "word ".repeat(LONG_PROMPT_WORDS));
+        assert_eq!(question(&long, None).as_deref(), Some("Fix the hook"));
         let long = "é".repeat(kb::QUESTION_MAX);
         assert!(question(&long, None).unwrap().len() <= kb::QUESTION_MAX);
     }
