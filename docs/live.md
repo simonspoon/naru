@@ -2397,6 +2397,16 @@ error. A plain browser never reports `ambient` itself, and with no audio
 server reporting the switch stays hidden. The ambient "can help" glow follows
 the same host test.
 
+**The Ambient view** (naru task 2375): `#/ambient` shows what the audio
+server's ambient listener heard — naru-audio's in-memory `GET /ambient/log`
+(2 minutes, 500 events) relayed by `GET /api/live/ambient/log` and polled every
+second, oldest first so the newest line is at the bottom, each with its speaker
+(a matched person by name, `You` for the enrolled owner, `Someone else`,
+`Unknown`) and the wake / idea / can-help markers. Naru stores none of it; a
+line outlives the ring only if a workflow saves it. While the session's
+`ambient` reads `true` the nav shows a **Listening** badge on every page (also
+on the collapsed nav), which opens the view. The parsing is `ambientLog.ts`.
+
 **The agent can ask for the switch** (naru task 1813): `naru live ambient
 <on|off> [--say <TEXT>] [--lease <N>]` writes a pending request on the session
 (`ambient_request`, a bool, and `ambient_request_seq`, bumped on every new
@@ -2887,6 +2897,7 @@ takes exactly one value.
 | `POST /api/live/notice` `{kind}` | the notice turn, **200** created or existing (deduped per working span, mesa task 1157); an unknown `kind` is 422 | standard write |
 | `POST /api/live/route` `{route?, context?, window?, ambient?}` | the session, route, context **and window box** recorded — an omitted `context`/`window` leaves the stored one alone, an explicit `null` clears it; `ambient` (a host's report, naru task 1813) is stored, stamps the report time and clears a matching `ambient_request`; a report with no `route` (naru-audio's headless check-in, naru task 2412) applies only `ambient` and `client` | standard write |
 | `POST /api/live/ambient` `{on}` | the session carrying the pending `ambient_request` (naru task 2374, `naru live ambient` with no `--say` or lease); 503 `unavailable` with no host reporting, 404 with no live session | `require_agent_access` |
+| `GET /api/live/ambient/log` | naru-audio's `GET /ambient/log` body (`{events}`, oldest first) relayed as is, nothing stored (naru task 2375); 503 `unavailable` when the daemon is down, 502 when it has no microphone | `require_agent_access` |
 | `POST /api/live/speaker` `{client}` | the session, this client now its **speaker** (mesa task 1267) | `require_agent_access` |
 | `POST /api/live/leave` `{client}` | **204**, always — releases this client's claim on the voice if it holds it, so it is free at once; never ends the session or touches the agent (mesa task 1622) | `require_agent_access` |
 | `POST /api/live/turns/{id}/played` | the stamped turn | standard write |

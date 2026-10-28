@@ -13628,3 +13628,71 @@ body.dock-resizing .dock-body {
     display: none;
   }
 }
+
+/* Ambient view and the nav's listening badge (naru task 2375, docs/live.md
+   "The Ambient view"): large, readable lines, newest at the bottom. */
+.ambient-view {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 1rem;
+  min-height: 0;
+  height: 100%;
+}
+
+.ambient-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.9rem;
+  flex-wrap: wrap;
+}
+
+.ambient-head h1 {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0;
+}
+
+.ambient-lines {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.ambient-line {
+  margin: 0;
+  font-size: 1.35rem;
+  line-height: 1.45;
+}
+
+.ambient-speaker {
+  display: block;
+  font-size: 0.75rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.ambient-wake .ambient-speaker,
+.ambient-idea .ambient-speaker,
+.ambient-can_help .ambient-speaker {
+  color: var(--cyan);
+}
+
+.ambient-badge {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 0.5rem;
+  color: var(--green);
+  font-weight: 600;
+}
+
+.sidebar.collapsed .ambient-badge {
+  justify-content: center;
+  padding: 0.5rem 0;
+}

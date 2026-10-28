@@ -3522,6 +3522,9 @@ fn router(state: AppState) -> Router {
         // ambient on|off` over HTTP, for a page with no native host — the
         // audio server picks the request up on its next check-in.
         .route("/api/live/ambient", post(request_live_ambient))
+        // What the audio server's ambient listener heard (naru task 2375):
+        // naru-audio's in-memory `GET /ambient/log`, relayed, never stored.
+        .route("/api/live/ambient/log", get(live_ambient_log))
         .route("/api/live/interrupt", post(interrupt_live_agent))
         .route("/api/live/restart", post(restart_live_agent))
         .route("/api/live/turns/{id}/played", post(live_turn_played))
@@ -12041,6 +12044,19 @@ async fn voice_people(
     headers: HeaderMap,
 ) -> ApiResult<Response> {
     let path = "/v1/audio/speaker/people".to_string();
+    voice_proxy(&state, &addr, &headers, false, "GET", path, None).await
+}
+
+/// `GET /api/live/ambient/log` (naru task 2375) — naru-audio's
+/// `GET /ambient/log` (`{"events":[…]}`, oldest first, its 2-minute in-memory
+/// ring) relayed for the Ambient view. Naru keeps none of it. Gated like the
+/// voice library: it is what a microphone in the house heard.
+async fn live_ambient_log(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    let path = "/ambient/log".to_string();
     voice_proxy(&state, &addr, &headers, false, "GET", path, None).await
 }
 
@@ -23011,6 +23027,10 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             ("PUT", "/v1/audio/speaker/guard") => {
                 audio::stub::Reply::Json(200, r#"{"live":true}"#.to_string())
             }
+            ("GET", "/ambient/log") => audio::stub::Reply::Json(
+                200,
+                r#"{"events":[{"type":"ambient_flag","text":"hi"}]}"#.to_string(),
+            ),
             _ => audio::stub::Reply::Json(404, "{}".to_string()),
         });
         let _config = listen_config(cfg.path(), Some(json!({ "url": daemon.url() })));
@@ -23055,6 +23075,22 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         assert_eq!(
             json_body(resp).await,
             json!({"model": "m", "live_guard": false, "people": []})
+        );
+
+        // The ambient log (naru task 2375) is the same relay.
+        let (s, c) = ok();
+        assert!(
+            live_ambient_log(s, c, hdrs(Some("evil.example:0"), None))
+                .await
+                .is_err()
+        );
+        let (s, c) = ok();
+        let resp = live_ambient_log(s, c, loopback_agent_headers())
+            .await
+            .unwrap();
+        assert_eq!(
+            json_body(resp).await,
+            json!({"events": [{"type": "ambient_flag", "text": "hi"}]})
         );
 
         let resp = clip(4).await.unwrap();

@@ -28,6 +28,7 @@ import { AgentWatcherView } from './pages/AgentWatcherView'
 import { InboxView } from './pages/InboxView'
 import { LibraryView } from './pages/LibraryView'
 import { KbView } from './pages/KbView'
+import { AmbientView } from './pages/AmbientView'
 import { TemplatesView } from './pages/TemplatesView'
 import { kbPathFromRoute } from './kbFilter'
 import { LiveHub, type LiveDock } from './components/LiveHub'
@@ -427,6 +428,8 @@ function App() {
   const agentWatcherMatch = /^\/agent-watcher$/.exec(path)
   // Knowledge base viewer (naru task 1928): #/kb, and #/kb/<note path>.
   const kbMatch = /^\/kb(?:\/.+)?$/.exec(path)
+  // What ambient hears (naru task 2375): the nav's listening badge opens it.
+  const ambientMatch = /^\/ambient$/.exec(path)
   // Hidden UI-template gallery (naru task 1932): by address only, no nav entry.
   const templatesMatch = /^\/templates$/.exec(path)
   const terminalActive = terminalMatch !== null
@@ -522,6 +525,8 @@ function App() {
     page = <LibraryView tab={libraryRoute.tab} runId={libraryRoute.runId} />
   } else if (kbMatch) {
     page = <KbView notePath={kbPathFromRoute(path)} />
+  } else if (ambientMatch) {
+    page = <AmbientView />
   } else if (templatesMatch) {
     page = <TemplatesView />
   } else if (agentWatcherMatch && !docked) {
@@ -863,6 +868,7 @@ function App() {
           inboxFilter={inboxFilter}
           settingsActive={settingsMatch !== null}
           kbActive={kbMatch !== null}
+          ambientActive={ambientMatch !== null}
           workflowsActive={workflowsOverviewMatch !== null || globalWorkflowMatch !== null}
           libraryActive={libraryRoute !== null}
           terminalActive={terminalActive}

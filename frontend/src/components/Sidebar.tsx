@@ -16,6 +16,7 @@ import { SortableContext, useSortable, type SortingStrategy } from '@dnd-kit/sor
 import { CSS } from '@dnd-kit/utilities'
 import {
   getGitStatus,
+  getLive,
   listAllAgents,
   listProjects,
   listTasks,
@@ -211,6 +212,7 @@ export function Sidebar({
   settingsActive,
   workflowsActive,
   kbActive,
+  ambientActive,
   libraryActive,
   terminalActive,
   agentWatcherActive,
@@ -230,6 +232,7 @@ export function Sidebar({
   settingsActive: boolean
   workflowsActive: boolean
   kbActive: boolean
+  ambientActive: boolean
   libraryActive: boolean
   terminalActive: boolean
   agentWatcherActive: boolean
@@ -322,6 +325,25 @@ export function Sidebar({
       if (p) activeAgentProjectIds.add(p.id)
     }
   }
+  // Whether the audio server reports ambient on (naru task 2375): the
+  // listening badge below, on every page. The turns after a huge cursor are
+  // none, so the poll carries the session alone.
+  const { data: live } = useFetch(() => getLive(Number.MAX_SAFE_INTEGER), 'ambient-nav', {
+    pollMs: 2000,
+  })
+  const listening = live?.session?.ambient === true
+  const ambientBadge = (compact: boolean) =>
+    listening && (
+      <a
+        className={`nav-item ambient-badge${ambientActive ? ' active' : ''}`}
+        href="#/ambient"
+        title="Ambient is listening — open what it hears"
+        aria-label="Ambient is listening"
+      >
+        <span className="live-dot on" />
+        {!compact && <span className="nav-item-label">Listening</span>}
+      </a>
+    )
   const [creatingProject, setCreatingProject] = useState(false)
   // Ephemeral collapse of the Projects subnav (persistence is a nice-to-have;
   // `navCollapse.ts` localStorage is reserved for the project subtrees the
@@ -540,6 +562,7 @@ export function Sidebar({
   if (collapsed) {
     return (
       <nav className={`sidebar collapsed${rail ? ' has-rail' : ''}`}>
+        {ambientBadge(true)}
         {rail ?? (
           <button
             type="button"
@@ -593,6 +616,7 @@ export function Sidebar({
             toggle
           )
         })()}
+        {ambientBadge(false)}
         {dockZone}
         {/* The href is the user's remembered CC tab (task 694); the tabs
             themselves live on the page (mesa task 1159). */}

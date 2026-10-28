@@ -1307,6 +1307,13 @@ export function requestLiveAmbient(on: boolean): Promise<LiveSession> {
   return request('/api/live/ambient', jsonInit('POST', { on }))
 }
 
+/** What the audio server's ambient listener heard (naru task 2375):
+ * naru-audio's in-memory `{events}` log, oldest first, relayed and never
+ * stored. Parse with `ambientLog.ts`. */
+export function getAmbientLog(): Promise<unknown> {
+  return request('/api/live/ambient/log')
+}
+
 /** Releases the voice this client holds (naru task 2013, Detach): 204 whatever
  * it found; never ends the session. */
 export async function leaveLiveSpeaker(client: string): Promise<void> {
