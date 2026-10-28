@@ -9,6 +9,7 @@ import { LiveBoardPanel, type InkFlatten } from './LiveBoardPanel'
 import {
   claimLiveSpeaker,
   leaveLiveSpeaker,
+  requestLiveAmbient,
   createLiveBoard,
   getLiveBoardHistory,
   pinLiveBoard,
@@ -222,11 +223,14 @@ import { isNearBottom, newSince, ownTurnSince } from '../liveScroll'
 import { useFetch } from '../useFetch'
 import {
   ambientControl,
+  ambientHostPresent,
+  AMBIENT_SAY_GRACE_MS,
   ambientRequestStep,
   detectNativeHost,
   installNativeHost,
   needsHostRefresh,
   reportedAmbient,
+  reportedAmbientStep,
   stateMessage,
 } from '../nativeHost'
 import {
@@ -865,7 +869,12 @@ export function LiveHub({
     setAmbientState(next)
   }, [])
   const ambient = ambientState && live
-  const glowing = native !== null && offerGlows(offer, live, ambient)
+  // An ambient host is the native shell or, in a plain browser, the audio
+  // server checking in (naru task 2374): the session's `ambient` is non-null
+  // only while a host has reported within 10 s.
+  const reportedHostAmbient = session?.ambient ?? null
+  const hostPresent = ambientHostPresent(native !== null, reportedHostAmbient)
+  const glowing = hostPresent && offerGlows(offer, live, ambient)
 
   // The live section of `~/.mesa/config.json`, for the one value this page
   // reads out of it: how long the person may fall silent before a
@@ -2211,6 +2220,38 @@ export function LiveHub({
   useEffect(() => {
     applyAmbientRef.current = applyAmbient
   }, [applyAmbient])
+  // A plain browser has no host to push the mode (naru task 2374): it follows
+  // the audio server's listener as the session's `ambient` reports it.
+  // Entering waits, like `ambientRequestStep`, until the run has nothing
+  // sounding or pending or `AMBIENT_SAY_GRACE_MS` has passed, so an agent's
+  // `naru live ambient on --say` line is heard before the page goes quiet.
+  const lastHostAmbient = useRef<boolean | null>(null)
+  useEffect(() => {
+    if (native !== null) return
+    const prev = lastHostAmbient.current
+    lastHostAmbient.current = reportedHostAmbient
+    if (!live || !unlocked) return
+    const step = reportedAmbientStep(prev, reportedHostAmbient, ambientRef.current)
+    if (step === null) return
+    if (!step) {
+      applyAmbientRef.current(false)
+      return
+    }
+    const since = Date.now()
+    const tick = () => {
+      if (ambientRef.current) return true
+      const idle =
+        sounding.current === null && pendingTurns(held.current, handled.current).length === 0
+      if (!idle && Date.now() - since < AMBIENT_SAY_GRACE_MS) return false
+      applyAmbientRef.current(true)
+      return true
+    }
+    if (tick()) return
+    const timer = window.setInterval(() => {
+      if (tick()) window.clearInterval(timer)
+    }, 500)
+    return () => window.clearInterval(timer)
+  }, [native, reportedHostAmbient, live, unlocked])
 
   // The native host's gesture-setup callbacks and its `ready`.
   useEffect(() => {
@@ -4804,17 +4845,39 @@ export function LiveHub({
   // Pulled out of the object so its narrowing survives into the handler below.
   const secondary = controls.secondary
   const pauseButton = controls.pause
-  // The ambient/live switch (naru task 1746): only with a native host, in a
-  // live session this browser joined. Ambient pauses the run here and asks
-  // the host; Live only asks — the host's reply changes the page.
-  const ambientCtl = ambientControl(native !== null, live, unlocked, ambient)
+  // The ambient/live switch (naru task 1746): only with a host (the native
+  // shell or the audio server, naru task 2374), in a live session this
+  // browser joined. Ambient pauses the run here and asks the host; Live only
+  // asks — the host's reply changes the page.
+  const ambientCtl = ambientControl(hostPresent, live, unlocked, ambient)
+  function askHostAmbient(on: boolean) {
+    if (native !== null) {
+      native.post({ type: 'ambient', on })
+      return
+    }
+    // A plain browser asks naru serve, and the audio server obeys on its next
+    // check-in. A host already in that state answers at once, so a Live press
+    // with the listener already off (or a refused Ambient) lands here.
+    setActionError(null)
+    requestLiveAmbient(on).then(
+      (s) => {
+        if (s.ambient !== true && !on) applyAmbient(false)
+        refetch()
+      },
+      (err: unknown) => {
+        if (on) applyAmbient(false)
+        setActionError(err instanceof Error ? err.message : String(err))
+        setOpen(true)
+      },
+    )
+  }
   function pressAmbient() {
     if (!ambientCtl) return
     if (ambientCtl.next) {
       setAmbientNow(true)
       pauseNow()
     }
-    native?.post({ type: 'ambient', on: ambientCtl.next })
+    askHostAmbient(ambientCtl.next)
   }
   // The press that ends the conversation, wherever `liveControls` put it
   // (mesa task 1069): the primary while this browser has joined, the secondary
@@ -4922,7 +4985,7 @@ export function LiveHub({
               () => {
                 armThinking(false)
                 refetch()
-                native?.post({ type: 'ambient', on: false })
+                askHostAmbient(false)
               },
               (err: unknown) => {
                 setActionError(err instanceof Error ? err.message : String(err))

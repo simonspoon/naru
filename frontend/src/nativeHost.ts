@@ -67,6 +67,32 @@ export function stateMessage(s: {
   }
 }
 
+/** Whether an ambient host is there to switch (naru task 2374): the native
+ *  shell, or the audio server checking in — the session's derived `ambient`
+ *  is non-null only while some host has reported within the last 10 s. */
+export function ambientHostPresent(native: boolean, reported: boolean | null | undefined): boolean {
+  return native || reported != null
+}
+
+/** What a plain browser does about the audio server's reported `ambient`
+ *  between two polls (naru task 2374): `true` = enter ambient (the listener
+ *  is on and the page is not ambient yet), `false` = leave it (the page is
+ *  ambient and the listener went off or the host stopped reporting), `null`
+ *  = nothing. Leaving on `false` needs the listener to have been seen on, so
+ *  a poll that has not yet seen the page's own Ambient press land never
+ *  undoes it; a host that stops reporting always ends it, or the page would
+ *  sit paused with the switch hidden. */
+export function reportedAmbientStep(
+  prev: boolean | null | undefined,
+  next: boolean | null | undefined,
+  applied: boolean,
+): boolean | null {
+  if (next === true && !applied) return true
+  if (applied && next == null) return false
+  if (applied && prev === true && next === false) return false
+  return null
+}
+
 /** The ambient/live switch button: only with a host, in a live session this
  *  browser joined. `next` is the mode a press asks for. */
 export function ambientControl(

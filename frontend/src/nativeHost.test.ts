@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   AMBIENT_SAY_GRACE_MS,
   ambientControl,
+  ambientHostPresent,
   ambientRequestStep,
   detectNativeHost,
   enrollStatus,
@@ -9,6 +10,7 @@ import {
   installNativeHost,
   needsHostRefresh,
   reportedAmbient,
+  reportedAmbientStep,
   stateMessage,
   type NativeOut,
 } from './nativeHost'
@@ -90,6 +92,35 @@ describe('reportedAmbient', () => {
     expect(reportedAmbient(false, true, true, false)).toBeUndefined()
     expect(reportedAmbient(true, false, true, true)).toBeUndefined()
     expect(reportedAmbient(true, true, false, true)).toBeUndefined()
+  })
+})
+
+describe('ambientHostPresent', () => {
+  it('counts the native shell or any fresh host report', () => {
+    expect(ambientHostPresent(true, null)).toBe(true)
+    expect(ambientHostPresent(false, false)).toBe(true)
+    expect(ambientHostPresent(false, true)).toBe(true)
+    expect(ambientHostPresent(false, null)).toBe(false)
+    expect(ambientHostPresent(false, undefined)).toBe(false)
+  })
+})
+
+describe('reportedAmbientStep', () => {
+  it('enters when the listener is on and the page is not ambient', () => {
+    expect(reportedAmbientStep(false, true, false)).toBe(true)
+    expect(reportedAmbientStep(undefined, true, false)).toBe(true)
+    expect(reportedAmbientStep(true, true, false)).toBe(true)
+    expect(reportedAmbientStep(false, true, true)).toBeNull()
+  })
+  it('leaves only once the listener was seen on', () => {
+    expect(reportedAmbientStep(true, false, true)).toBe(false)
+    expect(reportedAmbientStep(true, null, true)).toBe(false)
+    // The host vanished before it ever obeyed the press.
+    expect(reportedAmbientStep(false, null, true)).toBe(false)
+    // The page pressed Ambient and the host has not obeyed yet.
+    expect(reportedAmbientStep(false, false, true)).toBeNull()
+    expect(reportedAmbientStep(true, false, false)).toBeNull()
+    expect(reportedAmbientStep(null, null, false)).toBeNull()
   })
 })
 

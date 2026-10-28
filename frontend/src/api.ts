@@ -1300,6 +1300,13 @@ export function claimLiveSpeaker(client: string): Promise<LiveSession> {
   return request('/api/live/speaker', jsonInit('POST', { client }))
 }
 
+/** The Ambient/Live switch for a page with no native host (naru task 2374):
+ * writes the request the audio server obeys on its next check-in; 503
+ * `unavailable` when no host is reporting. */
+export function requestLiveAmbient(on: boolean): Promise<LiveSession> {
+  return request('/api/live/ambient', jsonInit('POST', { on }))
+}
+
 /** Releases the voice this client holds (naru task 2013, Detach): 204 whatever
  * it found; never ends the session. */
 export async function leaveLiveSpeaker(client: string): Promise<void> {

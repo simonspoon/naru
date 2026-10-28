@@ -3720,15 +3720,15 @@ EXAMPLES
         #[arg(long)]
         quiet: bool,
     },
-    /// Ask the native host to enter or leave ambient mode; prints the session
+    /// Ask the audio server to enter or leave ambient mode; prints the session
     ///
     /// STATE is `on` (go quiet and just listen in) or `off` (back to the live
-    /// conversation). The request is written to the session and the host
-    /// picks it up on its next poll; the host has the last word, so read
-    /// `ambient` and `ambient_request` from `live status`. `--say` is a
-    /// sentence spoken as the mode changes. With no host reporting ambient
-    /// (no Mac or iPhone app joined to the conversation) this is
-    /// `unavailable` and nothing is written.
+    /// conversation). The request is written to the session and the audio
+    /// server (naru-audio) picks it up on its next check-in; it has the last
+    /// word, so read `ambient` and `ambient_request` from `live status`.
+    /// `--say` is a sentence spoken as the mode changes. With the audio
+    /// server not reporting ambient (naru-audio stopped, or not checking in
+    /// to this naru serve) this is `unavailable` and nothing is written.
     #[command(after_help = "\
 EXAMPLES
   naru live ambient on --lease 3 --say \"Going quiet, say Naru when you need me.\"

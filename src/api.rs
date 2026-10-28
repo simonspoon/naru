@@ -3518,6 +3518,10 @@ fn router(state: AppState) -> Router {
         // handed a phone can still ask to hear the conversation.
         .route("/api/live/speaker", post(claim_live_speaker))
         .route("/api/live/leave", post(leave_live_speaker))
+        // The web page's Ambient/Live switch (naru task 2374): `naru live
+        // ambient on|off` over HTTP, for a page with no native host — the
+        // audio server picks the request up on its next check-in.
+        .route("/api/live/ambient", post(request_live_ambient))
         .route("/api/live/interrupt", post(interrupt_live_agent))
         .route("/api/live/restart", post(restart_live_agent))
         .route("/api/live/turns/{id}/played", post(live_turn_played))
@@ -5912,6 +5916,13 @@ struct LiveRouteBody {
     ambient: Option<Option<bool>>,
 }
 
+/// The Ambient/Live press (naru task 2374).
+#[derive(Deserialize)]
+struct LiveAmbientBody {
+    /// `true` asks the audio server for ambient mode, `false` for live.
+    on: bool,
+}
+
 /// The press that claims the voice (mesa task 1267).
 #[derive(Deserialize)]
 struct LiveSpeakerBody {
@@ -6824,6 +6835,29 @@ async fn claim_live_speaker(
         return Err(no_live_session());
     };
     Ok(Json(store.claim_live_speaker(session.id, &body.client)?).into_response())
+}
+
+/// `POST /api/live/ambient` (naru task 2374): the page's Ambient/Live switch,
+/// `naru live ambient on|off` with no `--say` and no lease. Writes the pending
+/// request the audio server obeys on its next check-in and answers the
+/// session; with no host reporting it is `unavailable` (503) and writes
+/// nothing. Gated like the interrupt route: it decides whether a microphone
+/// in the house starts listening.
+async fn request_live_ambient(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Result<Json<LiveAmbientBody>, JsonRejection>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    require_same_site_fetch(&headers)?;
+    let Json(body) = body?;
+    let mut store = state.store.lock().unwrap();
+    let Some(session) = store.current_live_session()? else {
+        return Err(no_live_session());
+    };
+    let (session, _turn) = store.request_live_ambient(session.id, body.on, None)?;
+    Ok(Json(session).into_response())
 }
 
 /// `POST /api/live/interrupt` (naru task 1889): `naru live interrupt` over
@@ -21741,6 +21775,58 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             leave("phone").await.unwrap().status(),
             StatusCode::NO_CONTENT
         );
+    }
+
+    /// `POST /api/live/ambient` (naru task 2374): with no host reporting it is
+    /// `unavailable` and writes nothing; with one it writes the request and a
+    /// matching report clears it.
+    #[tokio::test]
+    async fn live_ambient_request_needs_a_reporting_host() {
+        let (_dir, state) = test_state();
+        let id = state
+            .store
+            .lock()
+            .unwrap()
+            .start_live_session(None)
+            .unwrap()
+            .id;
+        let press = |on: bool| {
+            request_live_ambient(
+                State(state.clone()),
+                ConnectInfo(loopback()),
+                loopback_agent_headers(),
+                Ok(Json(LiveAmbientBody { on })),
+            )
+        };
+        let session = || state.store.lock().unwrap().get_live_session(id).unwrap();
+
+        let err = press(true).await.unwrap_err();
+        assert_eq!(
+            err.into_response().status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(session().ambient_request, None);
+
+        state
+            .store
+            .lock()
+            .unwrap()
+            .report_live_host_ambient(id, Some(false))
+            .unwrap();
+        assert_eq!(press(true).await.unwrap().status(), StatusCode::OK);
+        let asked = session();
+        assert_eq!(asked.ambient_request, Some(true));
+        assert_eq!(asked.ambient_request_seq, 1);
+
+        state
+            .store
+            .lock()
+            .unwrap()
+            .report_live_host_ambient(id, Some(true))
+            .unwrap();
+        let done = session();
+        assert_eq!(done.ambient, Some(true));
+        assert_eq!(done.ambient_request, None);
     }
 
     /// the context key is three-way (mesa task 1016): a page with nothing to

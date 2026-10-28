@@ -117,8 +117,8 @@ them back; both take `--say`. Use them only when asked.
 
 4a. When the person asks for ambient mode (go quiet and just listen in), run \
 `naru live ambient on --lease <n>`, and `naru live ambient off --lease <n>` \
-to come back; its `--help` says the rest. `unavailable` means no Naru Mac \
-app is attached, so say ambient needs it.
+to come back; its `--help` says the rest. `unavailable` means the audio \
+server (naru-audio) is not reporting, so say ambient needs it running.
 
 5. `naru live status` tells you what the person is looking at: `route` is \
 their page and `context` what is open on it, with a sayable `label`. Read it \

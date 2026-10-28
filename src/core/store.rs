@@ -8384,7 +8384,7 @@ impl Store {
         }
         let Some(current) = session.ambient else {
             return Err(Error::Unavailable(format!(
-                "no native host is reporting ambient for live session {id}; open it in the Naru Mac or iPhone app and join the conversation"
+                "the audio server is not reporting ambient for live session {id}; start naru-audio, which checks in to naru serve every 2 s while a conversation is live"
             )));
         };
         let say = say.map(str::trim).filter(|t| !t.is_empty());

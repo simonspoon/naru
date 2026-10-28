@@ -2380,7 +2380,22 @@ then unpauses, so a stale poll cannot make the page speak while the host
 reclaims the voice. naru-audio's `state` mode is the last word (naru task
 2210): the **Ambient** button pauses locally and posts `ambient`, the **Live**
 button only posts it and waits for that `state`. The switch is offered only with a host, while live
-and joined; ambient clears when the session ends. A plain browser never sees it.
+and joined; ambient clears when the session ends.
+
+**Ambient without the Mac app** (naru task 2374): naru-audio itself checks in
+to naru serve as the ambient host (naru-audio task 2373) — every 2s while a
+session is live it reports its listener on the route report's `ambient` key
+(no `route`) and obeys `ambient_request`. So a plain browser offers the same
+switch whenever the session's `ambient` is non-null (`ambientHostPresent`):
+**Ambient** pauses the page and `POST /api/live/ambient {on: true}` writes the
+request; **Live** posts `{on: false}`. The page then follows the reported
+`ambient` on its own poll (`reportedAmbientStep`): entering when the listener
+reads on, leaving only once it was seen on and reads off or the host stops
+reporting, so a poll from before naru-audio obeyed never undoes the press. A
+refused request (`unavailable`, the host gone) un-pauses at once and shows the
+error. A plain browser never reports `ambient` itself, and with no audio
+server reporting the switch stays hidden. The ambient "can help" glow follows
+the same host test.
 
 **The agent can ask for the switch** (naru task 1813): `naru live ambient
 <on|off> [--say <TEXT>] [--lease <N>]` writes a pending request on the session
@@ -2396,8 +2411,8 @@ embedded page doing it, reports the same `ambient` key on `POST
 (`null` until a host has reported), and a report matching the request clears
 `ambient_request`. With no host report fresher than 10s — derived on the
 store's clock, the speaker claim's rule — the command is `unavailable`,
-exit 1 (the message names both hosts: open the conversation in the Naru Mac
-or iPhone app and join it), and writes nothing, not even the `--say` turn;
+exit 1 (the message names the audio server: start naru-audio, which checks in
+every 2s while a conversation is live), and writes nothing, not even the `--say` turn;
 asking for the state the host already reports clears the request without bumping the seq. `--say` is
 trimmed and an empty one writes no turn. It is not a `LiveAction` turn
 because an ambient page's run is halted whole: a turn carrying the action
@@ -2871,6 +2886,7 @@ takes exactly one value.
 | `POST /api/live/utterance` `{text, ink?: {board_id, png_base64}}` | the dictated user turn, carrying the person's annotated board when `ink` is sent (mesa task 1353; body limit raised above `LIVE_INK_MAX`, so an over-cap PNG is 422 JSON) | standard write |
 | `POST /api/live/notice` `{kind}` | the notice turn, **200** created or existing (deduped per working span, mesa task 1157); an unknown `kind` is 422 | standard write |
 | `POST /api/live/route` `{route?, context?, window?, ambient?}` | the session, route, context **and window box** recorded — an omitted `context`/`window` leaves the stored one alone, an explicit `null` clears it; `ambient` (a host's report, naru task 1813) is stored, stamps the report time and clears a matching `ambient_request`; a report with no `route` (naru-audio's headless check-in, naru task 2412) applies only `ambient` and `client` | standard write |
+| `POST /api/live/ambient` `{on}` | the session carrying the pending `ambient_request` (naru task 2374, `naru live ambient` with no `--say` or lease); 503 `unavailable` with no host reporting, 404 with no live session | `require_agent_access` |
 | `POST /api/live/speaker` `{client}` | the session, this client now its **speaker** (mesa task 1267) | `require_agent_access` |
 | `POST /api/live/leave` `{client}` | **204**, always — releases this client's claim on the voice if it holds it, so it is free at once; never ends the session or touches the agent (mesa task 1622) | `require_agent_access` |
 | `POST /api/live/turns/{id}/played` | the stamped turn | standard write |
@@ -4007,9 +4023,11 @@ under reduced motion) with the overheard text as its tooltip; pressing it starts
 a conversation with `POST /api/live {"accept_offer": true}`, which puts the
 overheard words last in the agent's spawn prompt, framed as data, never
 instructions. Any live start, accepted or not, clears the offer. In **ambient
-mode** (native host only) the orb glows for such an offer too, and pressing it
-sends the overheard text as a user turn on the already-open session, then asks
-the host back to live (`{"type":"ambient","on":false}`). No sound plays
+mode** (any ambient host, the audio server included since naru task 2374) the
+orb glows for such an offer too, and pressing it sends the overheard text as a
+user turn on the already-open session, then asks the host back to live
+(`{"type":"ambient","on":false}`, or `POST /api/live/ambient` in a plain
+browser). No sound plays
 on the offer itself. `naru workflow emit can-help` from the CLI cannot light it:
 the CLI has no server to hold the offer.
 
