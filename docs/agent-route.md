@@ -9,7 +9,7 @@ general-purpose subagent spawn to a specialist through `naru decide`
 
 The task 1654 audit counted 184 general-purpose spawns, about 43% of them
 misrouted, mostly work that belonged to `ui-verifier`. Prose guidance in
-`execute-todo.md` helps; a hook makes the routing hold.
+the task prompt helps; a hook makes the routing hold.
 
 ## Contract
 

@@ -5,8 +5,8 @@
 > config keys `commands.todo-watcher`, `watchers.todo-concurrency` and
 > `serve.watch-todo` (read when the new key is absent; a save writes the new
 > key and removes the old one), and the API fields `todo_concurrency` /
-> `watch_todo` on a PUT. The `MESA_WATCH_TODO_*` test variables, the
-> `execute-todo` prompt and the Rust identifiers `todo_dispatched` /
+> `watch_todo` on a PUT. The `MESA_WATCH_TODO_*` test variables and the
+> Rust identifiers `todo_dispatched` /
 > `todo_reaper_tick` keep their names. New alerts are authored `queue-watcher`
 > / `queue-reaper` and the reaper logs to `logs/queue-reaper.log`; items and
 > logs written earlier keep `todo-watcher` / `todo-reaper`.
