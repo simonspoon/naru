@@ -263,8 +263,10 @@ IB=$(jqs '.imported[0].id')
 run 0 "$NARU" memory show --project "$P" "$IB"
 [ "$(jqs .body)" = "Run the gates in order — fmt, then clippy, then the tests." ] || fail "import: description + body (got $STDOUT)"
 run 0 "$NARU" memory list --project "$P"
-LONG=$(jqs '.[] | select(.body | startswith("A long one")) | .body')
-[ "${#LONG}" -le 600 ] && [ "${LONG: -1}" = "…" ] || fail "import: a long file is cut to fit with … (got ${#LONG} chars)"
+# jq counts characters; bash's ${#…} counts bytes under the C locale.
+LONG_LEN=$(jqs '.[] | select(.body | startswith("A long one")) | .body | length')
+LONG_END=$(jqs '.[] | select(.body | startswith("A long one")) | .body[-1:]')
+[ "$LONG_LEN" -le 600 ] && [ "$LONG_END" = "…" ] || fail "import: a long file is cut to fit with … (got $LONG_LEN chars)"
 run 0 "$NARU" memory import --project "$P"
 [ "$(jqs '.imported | length')" = "0" ] || fail "re-import adds nothing (got $STDOUT)"
 [ "$(jqs '[.skipped[] | select(.reason == "already in the notebook")] | length')" = "2" ] || fail "re-import skips both as already present"
