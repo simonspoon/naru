@@ -967,8 +967,12 @@ context kind `workflows`, with the workflow's id and name once one is open.
   shows the run's one-line summary on the row, delete (the usual two-step
   confirm, whose echo is the recovery transcript) and a create form (a name).
 - **Builder** (`WorkflowBuilderView` + `WorkflowCanvas`, on `@xyflow/react`). A
-  **NODES** palette down the left holds the seven kinds as tinted pills (`--wf-*`
-  tokens): drag one onto the canvas, or click it to add one in a free spot; each
+  **NODES** palette down the left holds the kinds as tinted pills (`--wf-*`
+  tokens), in collapsible groups (`workflowConfig.ts::PALETTE_GROUPS`; all open
+  by default, the collapsed set remembered per browser under
+  `naru-wf-palette-collapsed`) in a column that scrolls on its own when it
+  outgrows the canvas height (naru task 2422): drag one onto the canvas, or
+  click it to add one in a free spot; each
   is one `POST .../nodes` with a config the server accepts as it stands
   (`workflowConfig.ts::defaultConfig`). A node drag ends in one `PATCH` of x/y;
   dragging from a node's right handle to another's left handle is one

@@ -1583,6 +1583,29 @@ main {
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
+  /* Scrolls within its own column, never the page (naru task 2422). */
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.wf-palette-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.wf-palette-group-head {
+  text-align: left;
+  background: none;
+  border: none;
+  padding: 0.15rem 0;
+  font-size: 0.75rem;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.wf-palette-group-head:hover {
+  color: var(--text-h);
 }
 
 .wf-palette-title {
@@ -2435,11 +2458,18 @@ main {
   }
 
   .wf-palette {
-    flex-direction: row;
-    flex-wrap: wrap;
     width: auto;
     border-right: none;
     border-bottom: 1px solid var(--hairline);
+  }
+
+  .wf-palette-group {
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+
+  .wf-palette-group-head {
+    flex-basis: 100%;
   }
 
   .wf-palette-title {

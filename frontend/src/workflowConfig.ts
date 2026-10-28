@@ -78,6 +78,45 @@ export const NODE_KINDS: readonly KindInfo[] = [
 ]
 
 
+/** The palette's collapsible groups (naru task 2422), in palette order. Every
+ *  `NODE_KINDS` kind is in exactly one (workflowConfig.test.ts holds that). */
+export const PALETTE_GROUPS: readonly { name: string; kinds: readonly WorkflowNodeKind[] }[] = [
+  { name: 'Triggers', kinds: ['trigger', 'schedule', 'webhook', 'task-event', 'file-watch'] },
+  { name: 'AI', kinds: ['prompt', 'agent'] },
+  { name: 'Run', kinds: ['cli', 'script', 'subworkflow'] },
+  {
+    name: 'Logic',
+    kinds: ['branch', 'decide', 'switch', 'foreach', 'mapfilter', 'parallel', 'join'],
+  },
+  { name: 'Control', kinds: ['retry', 'trycatch', 'delay', 'gate'] },
+  { name: 'Data', kinds: ['parse-json', 'variable', 'output'] },
+  {
+    name: 'Actions',
+    kinds: ['task', 'http', 'notify', 'git', 'file', 'memory', 'verify', 'board'],
+  },
+  { name: 'Notes', kinds: ['comment'] },
+]
+
+// Which palette groups are collapsed: one per-browser list, default none.
+export const PALETTE_COLLAPSED_KEY = 'naru-wf-palette-collapsed'
+
+export function loadPaletteCollapsed(): string[] {
+  try {
+    const v = JSON.parse(localStorage.getItem(PALETTE_COLLAPSED_KEY) ?? '[]') as unknown
+    return Array.isArray(v) ? v.filter((s): s is string => typeof s === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+export function savePaletteCollapsed(names: string[]): void {
+  try {
+    localStorage.setItem(PALETTE_COLLAPSED_KEY, JSON.stringify(names))
+  } catch {
+    // Storage unavailable — the groups just won't stay collapsed.
+  }
+}
+
 /** Kinds made by a pin's context menu (naru task 1981), not dropped from the
  *  palette: they need a struct to be for. */
 const SHAPE_KINDS: readonly KindInfo[] = [

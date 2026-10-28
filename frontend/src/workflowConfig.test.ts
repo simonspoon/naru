@@ -1,6 +1,10 @@
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import {
   NODE_KINDS,
+  PALETTE_COLLAPSED_KEY,
+  PALETTE_GROUPS,
+  loadPaletteCollapsed,
+  savePaletteCollapsed,
   branchForHandle,
   edgeLabelClass,
   edgeNeedsBranch,
@@ -777,5 +781,24 @@ describe('comment node (naru task 2008)', () => {
   it('refuses an unknown colour and falls back to accent on read', () => {
     expect(buildConfig('comment', d({ cm_color: '#fff' })).error).toMatch(/colour/)
     expect(draftFromConfig('comment', { color: 'teal' }).cm_color).toBe('accent')
+  })
+})
+
+describe('palette groups', () => {
+  beforeEach(() => localStorage.clear())
+
+  it('put every palette kind in exactly one group', () => {
+    const grouped = PALETTE_GROUPS.flatMap((g) => g.kinds)
+    expect([...grouped].sort()).toEqual([...kinds].sort())
+  })
+
+  it('remember the collapsed groups, and read junk as none', () => {
+    expect(loadPaletteCollapsed()).toEqual([])
+    savePaletteCollapsed(['AI', 'Data'])
+    expect(loadPaletteCollapsed()).toEqual(['AI', 'Data'])
+    localStorage.setItem(PALETTE_COLLAPSED_KEY, 'not json{')
+    expect(loadPaletteCollapsed()).toEqual([])
+    localStorage.setItem(PALETTE_COLLAPSED_KEY, '{"a":1}')
+    expect(loadPaletteCollapsed()).toEqual([])
   })
 })

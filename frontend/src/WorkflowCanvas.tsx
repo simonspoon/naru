@@ -41,8 +41,8 @@ import {
   COMMENT_COLOR_VARS,
   INBOX_KINDS,
   NODE_DRAG_MIME,
-  NODE_KINDS,
   OUTPUT_TARGETS,
+  PALETTE_GROUPS,
   PROMPT_MODELS,
   RETRY_WRAPPABLE,
   AMBIENT_EVENTS,
@@ -60,7 +60,9 @@ import {
   HTTP_METHODS,
   inspectorKey,
   kindInfo,
+  loadPaletteCollapsed,
   missingValueRows,
+  savePaletteCollapsed,
   SWITCH_OPS,
   sourceHandles,
   summarize,
@@ -2143,6 +2145,16 @@ export function WorkflowCanvas({
     ).then(changed, showError)
   }
 
+  // Collapsed palette groups: per-browser, all open by default.
+  const [collapsed, setCollapsed] = useState(loadPaletteCollapsed)
+  const toggleGroup = (name: string) => {
+    const next = collapsed.includes(name)
+      ? collapsed.filter((n) => n !== name)
+      : [...collapsed, name]
+    setCollapsed(next)
+    savePaletteCollapsed(next)
+  }
+
   // Pan/zoom is browser-local view state, keyed by workflow (boardView.ts):
   // loaded once per mount (the parent remounts per workflow), saved on every
   // move end.
@@ -2161,24 +2173,40 @@ export function WorkflowCanvas({
     <div className="workflow-canvas">
       <div className="wf-palette">
         <div className="wf-palette-title">NODES</div>
-        {NODE_KINDS.map((k) => (
-          <button
-            key={k.kind}
-            type="button"
-            className={`wf-palette-item wf-kind-${k.kind}`}
-            draggable={!readOnly}
-            disabled={readOnly}
-            title={readOnly ? BUILTIN_TITLE : `Drag onto the canvas, or click to add a ${k.label}`}
-            aria-label={readOnly ? `Add ${k.label} disabled: built-in workflow` : undefined}
-            onDragStart={(e) => {
-              e.dataTransfer.setData(NODE_DRAG_MIME, k.kind)
-              e.dataTransfer.effectAllowed = 'copy'
-            }}
-            onClick={() => addNode(k.kind)}
-          >
-            <span aria-hidden="true"><KindIcon kind={k.kind} /></span> {k.label}
-          </button>
-        ))}
+        {PALETTE_GROUPS.map((g) => {
+          const open = !collapsed.includes(g.name)
+          return (
+            <div key={g.name} className="wf-palette-group">
+              <button
+                type="button"
+                className="wf-palette-group-head"
+                aria-expanded={open}
+                onClick={() => toggleGroup(g.name)}
+              >
+                <span aria-hidden="true">{open ? '▾' : '▸'}</span> {g.name}
+              </button>
+              {open &&
+                g.kinds.map(kindInfo).map((k) => (
+                  <button
+                    key={k.kind}
+                    type="button"
+                    className={`wf-palette-item wf-kind-${k.kind}`}
+                    draggable={!readOnly}
+                    disabled={readOnly}
+                    title={readOnly ? BUILTIN_TITLE : `Drag onto the canvas, or click to add a ${k.label}`}
+                    aria-label={readOnly ? `Add ${k.label} disabled: built-in workflow` : undefined}
+                    onDragStart={(e) => {
+                      e.dataTransfer.setData(NODE_DRAG_MIME, k.kind)
+                      e.dataTransfer.effectAllowed = 'copy'
+                    }}
+                    onClick={() => addNode(k.kind)}
+                  >
+                    <span aria-hidden="true"><KindIcon kind={k.kind} /></span> {k.label}
+                  </button>
+                ))}
+            </div>
+          )
+        })}
       </div>
       <div
         className="wf-viewport"
