@@ -12184,6 +12184,16 @@ select.library-model-badge {
   overflow: hidden;
 }
 
+/* Zen (naru task 2423): a tab title's double-click lifts its group over the
+   whole window — nav and other panels included — in place, with no reparent,
+   so nothing in it remounts or reloads. Below the modals (1200+). */
+.dock-group.dock-group-zen {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  border-radius: 0;
+}
+
 .dock-tabs {
   flex: none;
   height: 36px;

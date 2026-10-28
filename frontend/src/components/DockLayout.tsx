@@ -40,6 +40,9 @@ type Ctx = {
   dragging: PanelId | null
   over: Over
   setOver: (o: Over) => void
+  // The group filling the window (a tab title's double-click), or null.
+  zen: string | null
+  toggleZen: (group: string) => void
   onDragEnd: () => void
   onDividerDown: (path: number[], i: number, o: 'row' | 'column', pos: number, el: HTMLElement) => void
 }
@@ -70,9 +73,11 @@ function DockGroupView({ id, ratio, ctx }: { id: string; ratio: number; ctx: Ctx
   return (
     <div
       ref={ref}
-      className="dock-group"
+      className={`dock-group${ctx.zen === id ? ' dock-group-zen' : ''}`}
       style={{ flexGrow: ratio, flexBasis: 0, minWidth: 0, minHeight: 0 }}
       data-group={id}
+      // Covered by a zen group: out of reach of focus and typing too.
+      inert={ctx.zen !== null && ctx.zen !== id}
     >
       <div className="dock-tabs" role="tablist">
         {group.tabs.map((t) => {
@@ -83,8 +88,13 @@ function DockGroupView({ id, ratio, ctx }: { id: string; ratio: number; ctx: Ctx
               role="tab"
               aria-selected={t === group.active}
               className={`dock-tab${t === group.active ? ' active' : ''}`}
-              draggable={!lock}
+              // No drags while zen: a drop would rearrange the layout unseen.
+              draggable={!lock && ctx.zen === null}
               onClick={() => ctx.update((s) => activateTab(s, id, t))}
+              onDoubleClick={(e) => {
+                if ((e.target as HTMLElement).closest('.dock-tab-close')) return
+                ctx.toggleZen(id)
+              }}
               onDragStart={(e) => beginPanelDrag(e, t)}
               onDragEnd={ctx.onDragEnd}
               title={lock ? 'Unsent ink on the board holds it in place' : `Drag ${panelLabel(t, ctx.state)} to rearrange`}
@@ -164,6 +174,9 @@ function DockSplitView({ node, path, ctx }: { node: DockRoot; path: number[]; ct
     <div ref={ref} className={`dock-split dock-split-${node.orientation}`}>
       {node.children.map((child, i) => (
         <Fragment key={child.node.id}>
+          {/* A zen group leaves the flow; this holds its place so nothing
+              behind it reflows (an xterm there would resize its shells). */}
+          {ctx.zen === child.node.id && <div style={{ flexGrow: child.ratio, flexBasis: 0 }} />}
           {child.node.kind === 'leaf' ? (
             <DockGroupView id={child.node.id} ratio={child.ratio} ctx={ctx} />
           ) : (
@@ -206,6 +219,15 @@ export function DockLayout({
 }) {
   const dragging = usePanelDrag()
   const [over, setOver] = useState<Over>(null)
+  // View-only, never dock state: the arrangement underneath is untouched, so
+  // leaving zen restores it exactly. A group that has since gone (closed, a
+  // layout switch) simply ends it.
+  const [zenGroup, setZenGroup] = useState<string | null>(null)
+  const zen = zenGroup !== null && state.groups[zenGroup] ? zenGroup : null
+  // Cleared, not just ignored: preset layouts share group ids (`g-main`), so a
+  // stale id would lift a group again after a reset or a layout switch.
+  if (zenGroup !== null && zen === null) setZenGroup(null)
+  const toggleZen = useCallback((g: string) => setZenGroup((z) => (z === g ? null : g)), [])
   const [divider, setDivider] = useState<null | {
     path: number[]
     i: number
@@ -260,6 +282,8 @@ export function DockLayout({
     dragging,
     over,
     setOver,
+    zen,
+    toggleZen,
     onDragEnd,
     onDividerDown: (path, i, orientation, startPos, el) => {
       const node = getNodeAtPath(state.tree, path)

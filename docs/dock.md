@@ -87,6 +87,16 @@ one click away as a tab); the phone tier's drawer keeps it and its pane tree.
   goes up one tick after `dragstart`, since mounting it inside the event
   cancels the drag in some browsers. A group showing a board that holds unsent
   ink takes no drops and its tab does not drag or close.
+- **Double-click a tab title** (naru task 2423) to fill the whole window with
+  its group, over the nav, the header and every other panel; double-click a
+  tab title there again to put it back. It is view state in `DockLayout`
+  (`zen`), never dock state: the group is lifted in place with `position:
+  fixed` (`.dock-group-zen`), not moved, so nothing remounts and the
+  arrangement underneath — sizes, positions, front tabs — is exactly what it
+  returns to. A reload, closing that group's last panel, or a layout switch
+  that leaves no group of that id ends it. While zen, tabs do not drag (a
+  drop would rearrange the layout unseen) and the covered groups are `inert`. The close button's double-click does not count; a single click
+  still just switches tabs.
 - **Thin dividers** resize splits (the other pane surfaces' divider math,
   `MIN_PANE_PX` floor).
 - **Close / reopen.** A tab's × closes the panel; the header's `⋯` menu lists
