@@ -3817,6 +3817,10 @@ export function LiveHub({
       if (verdict === 'read') {
         // Speech muted (mesa task 1327): the words are on screen, so the turn
         // is heard as it lands — stamped now, never queued for unmute.
+        // Counted as captioned too (naru task 2397): the poll's `after=`
+        // cursor never re-sends this row, so its `played_at` never reaches the
+        // held copy, and after unmuting `captionHeld` would blank it for good.
+        setCaptionedIds((prev) => new Set(prev).add(turn.id))
         markPlayed(turn.id)
         continue
       }
