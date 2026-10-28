@@ -22,7 +22,7 @@ Note decisions and progress as you go: `naru task note $ARGUMENTS "<text>"`. Blo
 ## Ending
 
 End in exactly one of:
-- **Done**: `naru task update $ARGUMENTS --status done --result "<what changed, where, how verified>"`.
+- **Done**: `naru task update $ARGUMENTS --status done --result "<what changed, where, how verified>"`. Commit with a message citing `task $ARGUMENTS:` first and the close records that commit as the artifact; otherwise pass `--artifact <commit sha, PR url or path>`, or `--no-artifact "<reason>"` when there is honestly none (e.g. config only, no code change).
 - **Parked**: note what is finished, what is left and why, then `--status backlog` if it needs the person (a release tag, a physical device, an unanswered question) or `--status todo` if another attempt can finish it.
 
 Never end the session with the task still `in_progress`: it holds the project's queue slot.

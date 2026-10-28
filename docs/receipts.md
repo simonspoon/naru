@@ -155,6 +155,21 @@ nothing — `--regenerate` on the common case (a done task that already has a
 receipt) would fail every time instead of only the once, before any receipt
 exists.
 
+## A close needs an artifact (task 2401)
+
+A receipt never fails a close, so on its own it cannot stop unverified work
+from looking finished. The `artifact` field can: a fresh
+`naru task update <id> --status done` with no `--artifact` and none stored
+looks in the project's `local_path` repo (`git log --all`) for the newest
+commit since the claim (since creation if never claimed) whose message cites
+`task <id>` (`task 2401:`, `task #2401`; not `task 24010`), and records its
+short sha as the artifact. None found, or no `local_path`, is a `validation`
+error unless `--no-artifact "<reason>"` is given; the reason becomes a task
+note `Closed with no artifact: <reason>`. `--no-artifact` conflicts with
+`--artifact`. CLI only, deterministic, no model call — the API and web UI
+close as before. `cli.rs::close_artifact`, `git::commit_citing_task`;
+tests `cli::tests::close_artifact_*`, and `scripts/cli-check.sh`.
+
 ## CLI surface
 
 ```

@@ -39,7 +39,7 @@ T=$($N task create "$P" "queue check task" | jq .id)
 $N task update "$T" --status in_progress >/dev/null
 idle_code; [ $IDLE_RC = 1 ] || fail "in_progress should not be idle (rc $IDLE_RC)"
 [ "$(jq .in_progress "$TMP/out")" = 1 ] || fail "in_progress count"
-$N task update "$T" --status done >/dev/null
+$N task update "$T" --status done --no-artifact gate >/dev/null
 idle_code; [ $IDLE_RC = 0 ] || fail "done task idle (rc $IDLE_RC)"
 ok "in_progress task blocks idle"
 

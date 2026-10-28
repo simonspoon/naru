@@ -151,7 +151,7 @@ ok "an empty message is validation"
 # ---- task digest --notify (naru task 1725) ----
 DP=$("$MESA" project create "Digest" --no-git | jq -r .id)
 DT=$("$MESA" task create "$DP" "digest me" | jq -r .id)
-"$MESA" task update "$DT" --status done >/dev/null
+"$MESA" task update "$DT" --status done --no-artifact gate >/dev/null
 rm -f "$STUB_DIR/last-argv"
 OUT=$("$MESA" task digest --since "2000-01-01 00:00:00" --notify --base-url http://h:1) || fail "digest --notify failed"
 [ "$(jq -r '.notify.sent' <<<"$OUT")" = "true" ] || fail "digest notify result: $OUT"

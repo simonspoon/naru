@@ -435,7 +435,7 @@ close_task() { # <project> — creates a task and closes it, STDOUT the update's
   run 0 "$NARU" task create "$1" "a task in project $1"
   local t
   t=$(jqs .id)
-  run 0 "$NARU" task update "$t" --status done
+  run 0 "$NARU" task update "$t" --status done --no-artifact gate
   CLOSED=$t
 }
 over_budget Dreamy
@@ -459,7 +459,7 @@ no_new_spawns $((BEFORE + 1)) "no second dream while the first one's job is runn
 # spawns nothing; the next real close spawns again.
 rm -f "$STUB/hold-p"
 sleep 1.5
-run 0 "$NARU" task update "$CLOSED" --status done
+run 0 "$NARU" task update "$CLOSED" --status done --no-artifact gate
 no_new_spawns $((BEFORE + 1)) "re-closing a done task spawns no dream"
 close_task "$D"
 wait_spawns $((BEFORE + 2))
@@ -474,7 +474,7 @@ no_new_spawns $((BEFORE + 2)) "a close in a within-budget project spawns nothing
 over_budget Broken
 run 0 env NARU_SELF_BIN="$TMP/no-such-naru" "$NARU" task create "$OB" "doomed dream"
 T=$(jqs .id)
-run 0 env NARU_SELF_BIN="$TMP/no-such-naru" "$NARU" task update "$T" --status done
+run 0 env NARU_SELF_BIN="$TMP/no-such-naru" "$NARU" task update "$T" --status done --no-artifact gate
 [ "$(jqs .status)" = "done" ] && [ "$(jqs .id)" = "$T" ] || fail "a failed dream start leaves the close intact (got $STDOUT)"
 grep -q "no automatic dream pass" <<<"$STDERR" || fail "a failed dream start is reported on stderr (got $STDERR)"
 no_new_spawns $((BEFORE + 2)) "a failed start ran nothing"

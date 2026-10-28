@@ -96,7 +96,7 @@ git commit -q -m "commit two, touches a.txt again and b.txt" >/dev/null
 SHA2=$(git rev-parse HEAD)
 
 sleep 1
-run 0 "$MESA" task update "$T" --status done
+run 0 "$MESA" task update "$T" --status done --no-artifact gate
 [ "$(jqs .owner)" = "null" ] || fail "closing a claim: owner must be cleared on the task row"
 ok "closing a claimed task clears its own owner/claimed_at"
 
@@ -118,7 +118,7 @@ ok "diff summary counts a file changed by two commits once, not twice"
 # ================= closing an UNCLAIMED task generates none =================
 run 0 "$MESA" task create "$P" "Unclaimed work"
 TU=$(jqs .id)
-run 0 "$MESA" task update "$TU" --status done
+run 0 "$MESA" task update "$TU" --status done --no-artifact gate
 run 1 "$MESA" task receipt "$TU"
 [ "$(jqe .error.code)" = "not_found" ] || fail "receipt on an unclaimed close: error.code"
 ok "closing an unclaimed task generates no receipt (not_found on read)"

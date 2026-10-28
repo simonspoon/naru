@@ -98,7 +98,9 @@ Once every agent has reported and the task is verified complete:
 - Commit the changes.
 - Close the task in ONE call: `naru task update <id> --status done --artifact
   <commit sha, PR url or path> --result <short summary of what changed and how
-  you verified it>`.
+  you verified it>`. With no `--artifact`, the close records the newest commit
+  citing `task <id>` since the claim, and is refused if there is none; give
+  `--no-artifact "<reason>"` only when there is honestly no artifact.
 - After the close the watcher stops this session once idle. Start no new work.
 
 ## Questions for a person

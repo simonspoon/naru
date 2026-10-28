@@ -370,20 +370,20 @@ LINE=$(head -1 "$UMB_LOG")
 [ "$(umb_task_status "$TASK_C2")" = "todo" ] || fail "children must not fan out concurrently"
 ok "an in_progress task with subtasks does not wedge its project: its first child is dispatched, siblings and unrelated tasks wait"
 
-run 0 "$MESA" task update "$TASK_C1" --status done
+run 0 "$MESA" task update "$TASK_C1" --status done --no-artifact gate
 wait_umb_bg_lines 2
 LINE=$(sed -n '2p' "$UMB_LOG")
 [ "$LINE" = "$UMB_DIR|Umb: child two|/execute-naru-task $TASK_C2" ] ||
   fail "expected '$UMB_DIR|Umb: child two|/execute-naru-task $TASK_C2', got '$LINE'"
 ok "a finished child lets the next tick take the umbrella's next subtask"
 
-run 0 "$MESA" task update "$TASK_C2" --status done
+run 0 "$MESA" task update "$TASK_C2" --status done --no-artifact gate
 sleep 1
 [ "$(wc -l < "$UMB_LOG")" -eq 2 ] || fail "an exhausted subtree must not fall back to the wider project"
 [ "$(umb_task_status "$TASK_OUT")" = "todo" ] || fail "unrelated todo must stay untouched while the umbrella is open"
 ok "an open umbrella with no actionable subtasks left keeps the rest of the project parked"
 
-run 0 "$MESA" task update "$TASK_EPIC" --status done
+run 0 "$MESA" task update "$TASK_EPIC" --status done --no-artifact gate
 wait_umb_bg_lines 3
 LINE=$(sed -n '3p' "$UMB_LOG")
 [ "$LINE" = "$UMB_DIR|Umb: outsider|/execute-naru-task $TASK_OUT" ] ||
@@ -442,7 +442,7 @@ LINE=$(head -1 "$EPIC_LOG")
 [ "$(epic_task_status "$T_EPIC")" = "todo" ] || fail "a task with actionable subtasks must never be claimed by the watcher"
 ok "the watcher claims an actionable leaf, never a task that still has actionable subtasks"
 
-run 0 "$MESA" task update "$T_STORY" --status done
+run 0 "$MESA" task update "$T_STORY" --status done --no-artifact gate
 wait_epic_bg_lines 2
 LINE=$(sed -n '2p' "$EPIC_LOG")
 [ "$LINE" = "$EPIC_DIR|Epic: epic|/execute-naru-task $T_EPIC" ] ||
@@ -511,7 +511,7 @@ sleep 1
 [ "$(conc_task_status "$CONC_T3")" = "todo" ] || fail "task three must stay todo once the limit of 2 is filled"
 ok "a configured queue-concurrency of 2 fills the project to the limit in one tick, leaving the excess task todo"
 
-run 0 "$MESA" task update "$CONC_T1" --status done
+run 0 "$MESA" task update "$CONC_T1" --status done --no-artifact gate
 wait_conc_bg_lines 3
 LINE=$(sed -n '3p' "$CONC_LOG")
 [ "$LINE" = "$CONC_DIR|Conc: task three|/execute-naru-task $CONC_T3" ] ||
@@ -658,7 +658,7 @@ kill "$SERVER_PID" 2>/dev/null; wait "$SERVER_PID" 2>/dev/null || true; SERVER_P
 # sessions, never a skipped tick. Same live holder as above -- the only
 # difference is the stub's `agents` branch exiting nonzero -- so a watcher that
 # treated the failure as "unknown, hold off" would dispatch nothing here.
-run 0 "$MESA" task update "$LIVE_T1" --status done
+run 0 "$MESA" task update "$LIVE_T1" --status done --no-artifact gate
 run 0 "$MESA" task create "$LIVE_P" "task live two"
 LIVE_T2=$(jqs .id)
 start_holder
@@ -788,7 +788,7 @@ ok "the reaper leaves a dispatched session alone while its task is in_progress"
 # test's own doing, not the reaper's.
 echo busy > "$REAP_STATUS"
 sleep 0.8
-run 0 "$MESA" task update "$REAP_T1" --status done
+run 0 "$MESA" task update "$REAP_T1" --status done --no-artifact gate
 sleep 1
 [ "$(wc -l < "$REAP_STOPS")" -eq 0 ] ||
   fail "a busy session must not be stopped: $(cat "$REAP_STOPS")"
@@ -1101,7 +1101,7 @@ run_guard() {
 }
 
 start_holder
-run_guard 1 "$GUARD_STUB" --status done
+run_guard 1 "$GUARD_STUB" --status done --no-artifact gate
 [ "$(jq -r .error.code <<<"$STDERR")" = "conflict" ] || fail "the refusal must be a conflict: $STDERR"
 jq -r .error.message <<<"$STDERR" | grep -q "shell pid $HOLDER_CHILD" ||
   fail "the refusal must name the shell's pid $HOLDER_CHILD: $STDERR"
@@ -1110,28 +1110,28 @@ jq -r .error.message <<<"$STDERR" | grep -q -- '--force' || fail "the refusal mu
 grep -q "outcome=refused" "$GUARD_LOG" || fail "a refusal must be logged"
 ok "a close inside a session with a live shell child is refused (conflict, names the pid), nothing written, logged"
 
-run_guard 2 "$GUARD_STUB" --status done --force ""
+run_guard 2 "$GUARD_STUB" --status done --no-artifact gate --force ""
 ok "--force with an empty reason is a usage error"
 
-run_guard 0 "$GUARD_STUB" --status done --force "handing off to the verifier"
+run_guard 0 "$GUARD_STUB" --status done --no-artifact gate --force "handing off to the verifier"
 [ "$(jqs .status)" = "done" ] || fail "--force must close the task"
 grep -q 'outcome=forced .*reason="handing off to the verifier"' "$GUARD_LOG" ||
   fail "a forced close must log its reason: $(cat "$GUARD_LOG")"
 ok "--force \"<reason>\" closes anyway and logs outcome=forced with the reason"
 
 run 0 "$MESA" task update "$GUARD_T" --status in_progress
-run 0 env HOME="$GUARD_HOME" MESA_CLAUDE_BIN="$GUARD_STUB" "$MESA" task update "$GUARD_T" --status done
+run 0 env HOME="$GUARD_HOME" MESA_CLAUDE_BIN="$GUARD_STUB" "$MESA" task update "$GUARD_T" --status done --no-artifact gate
 [ "$(jqs .status)" = "done" ] || fail "no CLAUDE_CODE_SESSION_ID must close unguarded"
 ok "with no CLAUDE_CODE_SESSION_ID the close is unguarded"
 
 run 0 "$MESA" task update "$GUARD_T" --status in_progress
-run_guard 0 "$GUARD_FAIL_STUB" --status done
+run_guard 0 "$GUARD_FAIL_STUB" --status done --no-artifact gate
 [ "$(jqs .status)" = "done" ] || fail "a failing agents probe must allow the close"
 ok "a failing 'claude agents' probe fails open: the close goes through"
 
 stop_holder
 run 0 "$MESA" task update "$GUARD_T" --status in_progress
-run_guard 0 "$GUARD_STUB" --status done
+run_guard 0 "$GUARD_STUB" --status done --no-artifact gate
 [ "$(jqs .status)" = "done" ] || fail "no running work must allow the close"
 ok "once the shell child is gone the close is allowed"
 
@@ -1171,7 +1171,7 @@ CODE=$(live_api PUT /api/config/serve '{"watch_queue": false}')
 [ "$CODE" = "200" ] || fail "PUT serve watch_queue false: expected 200, got $CODE: $(cat "$TMP/live-body")"
 sleep 0.5  # let any tick already in flight finish
 LIVE_LINES=$(wc -l < "$BG_LOG")
-live_mesa task update "$LT1" --status done >/dev/null
+live_mesa task update "$LT1" --status done --no-artifact gate >/dev/null
 STDOUT=$(live_mesa task create "$LP" "live two"); LT2=$(jq -r .id <<<"$STDOUT")
 sleep 1.5  # ten ticks
 [ "$(live_mesa task show "$LT2" | jq -r .status)" = "todo" ] ||
@@ -1219,7 +1219,7 @@ ok "--watch-todo still starts the queue watcher"
 kill "$SERVER_PID" 2>/dev/null; wait "$SERVER_PID" 2>/dev/null || true; SERVER_PID=""
 
 echo '{"serve": {"watch-todo": true}}' > "$AL_CFG"
-al_mesa task update "$AL1" --status done >/dev/null
+al_mesa task update "$AL1" --status done --no-artifact gate >/dev/null
 MESA_DB="$AL_DB" MESA_CONFIG_FILE="$AL_CFG" MESA_CLAUDE_BIN="$STUB_DIR/claude" \
   MESA_WATCH_TODO_TICK_MS=150 "$MESA" serve --port "$AL_PORT" >/dev/null 2>&1 &
 SERVER_PID=$!

@@ -1331,6 +1331,16 @@ EXAMPLES
         /// would run: a fresh `--status done` inside a Claude Code session.
         #[arg(long, value_name = "REASON", value_parser = clap::builder::NonEmptyStringValueParser::new())]
         force: Option<String>,
+        /// Close as done with no artifact, giving the reason (stored as a note)
+        ///
+        /// A fresh `--status done` needs an artifact (naru task 2401): with no
+        /// `--artifact` and none stored, the newest commit in the project's
+        /// `local_path` repo citing `task <id>` since the claim is recorded
+        /// as it; failing that the close is refused (`validation`) unless
+        /// this reason is given, e.g. "config only, no code change". Outside
+        /// the `fields` group, like `--force`.
+        #[arg(long, value_name = "REASON", conflicts_with = "artifact", value_parser = clap::builder::NonEmptyStringValueParser::new())]
+        no_artifact: Option<String>,
     },
     /// Delete a task AND all its subtasks (no confirmation)
     ///
@@ -6414,6 +6424,44 @@ fn close_guard(task_id: i64, force: Option<&str>) -> Result<()> {
     }
 }
 
+/// The artifact rule for a fresh `--status done` (naru task 2401). `Ok(None)`
+/// = close as patched: an artifact is given or already stored, or
+/// `no_artifact` names why there is none. `Ok(Some(sha))` = the newest commit
+/// in the project's `local_path` repo citing `task <id>` since the claim (or
+/// since creation, for a never-claimed task), to record as the artifact.
+/// Otherwise `validation`, so unverified work never looks finished.
+fn close_artifact(
+    store: &Store,
+    task: &Task,
+    patch: &TaskPatch,
+    no_artifact: Option<&str>,
+) -> Result<Option<String>> {
+    let has_artifact = match &patch.artifact {
+        Some(given) => given.is_some(),
+        None => task.artifact.is_some(),
+    };
+    if has_artifact || no_artifact.is_some() {
+        return Ok(None);
+    }
+    let since = task.claimed_at.as_deref().unwrap_or(&task.created_at);
+    let local_path = store.get_project(task.project_id)?.local_path;
+    let searched = match &local_path {
+        Some(dir) => match git::commit_citing_task(dir, since, task.id) {
+            Some(sha) => return Ok(Some(sha)),
+            None => format!(
+                "no commit in {dir} cites 'task {}' since {since} (or git could not read it)",
+                task.id
+            ),
+        },
+        None => "its project has no local_path to look for a commit in".to_string(),
+    };
+    Err(Error::Validation(format!(
+        "task {} has no artifact and {searched}; pass --artifact <commit sha, PR url or path>, \
+         or --no-artifact \"<reason>\" (e.g. \"config only, no code change\")",
+        task.id
+    )))
+}
+
 /// One line in `logs/task-close-guard.log` (beside the reaper's log). Best
 /// effort: a log that cannot be written is one stderr line, never a failed
 /// command.
@@ -6628,6 +6676,7 @@ fn run_task(cmd: TaskCmd) -> Result<()> {
             append,
             quiet,
             force,
+            no_artifact,
         } => {
             let mut stdin_used = false;
             let description = resolve_field(description, description_file, &mut stdin_used)?;
@@ -6655,7 +6704,7 @@ fn run_task(cmd: TaskCmd) -> Result<()> {
                     std::process::exit(2);
                 }
             }
-            let patch = TaskPatch {
+            let mut patch = TaskPatch {
                 // No `clear_if_empty`: a description cannot be cleared, so an
                 // empty one reaches `Store` and fails there — one rule, shared
                 // with the API's `{"description": null}` rejection.
@@ -6680,11 +6729,27 @@ fn run_task(cmd: TaskCmd) -> Result<()> {
             // directly — mirroring `agents::spawn_bg` being the one chokepoint
             // every agent spawn goes through instead of four separate
             // `Command::new("claude")` call sites.
-            let was_done = store.get_task(id)?.status == Status::Done;
-            if status == Some(Status::Done) && !was_done {
+            let before = store.get_task(id)?;
+            let was_done = before.status == Status::Done;
+            let closing = status == Some(Status::Done) && !was_done;
+            if closing {
+                if let Some(sha) = close_artifact(&store, &before, &patch, no_artifact.as_deref())?
+                {
+                    patch.artifact = Some(Some(sha));
+                }
                 close_guard(id, force.as_deref())?;
             }
             let task = receipt::update_task(&mut store, id, &patch)?;
+            if closing
+                && task.artifact.is_none()
+                && let Some(reason) = &no_artifact
+            {
+                store.add_task_note(
+                    id,
+                    &format!("Closed with no artifact: {reason}"),
+                    std::env::var("CLAUDE_CODE_SESSION_ID").ok().as_deref(),
+                )?;
+            }
             print_task(&task, quiet);
             // mesa task 1339: a close is when an over-budget project notebook
             // gets its dream — best-effort, after the task is printed, and
@@ -11520,5 +11585,137 @@ mod tests {
         for key in value_keys(&projected) {
             assert_eq!(projected[&key], full[&key], "value changed for {key}");
         }
+    }
+
+    /// A repo at a fresh tempdir plus a store whose one project points at it
+    /// (or at nothing, for `with_path = false`), and one claimed task.
+    fn close_artifact_fixture(with_path: bool) -> (tempfile::TempDir, Store, Task) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap().to_string();
+        let mut store = Store::open(&dir.path().join("test.db")).unwrap();
+        let project = store
+            .create_project("p", None, None, with_path.then_some(path.as_str()), None)
+            .unwrap();
+        let task = store
+            .create_task(
+                project.id,
+                "do it",
+                Priority::Medium,
+                &[],
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let task = store.claim_task(task.id, "s", false).unwrap();
+        repo_git(&path, &["init", "-b", "trunk"], None);
+        (dir, store, task)
+    }
+
+    /// An empty commit in `dir`, dated `date` (git's own format) when given.
+    fn repo_git(dir: &str, args: &[&str], date: Option<&str>) {
+        let mut cmd = std::process::Command::new("git");
+        cmd.args(["-C", dir, "-c", "user.email=t@t", "-c", "user.name=t"])
+            .args(args)
+            .stdout(std::process::Stdio::null());
+        if let Some(d) = date {
+            cmd.env("GIT_COMMITTER_DATE", d).env("GIT_AUTHOR_DATE", d);
+        }
+        assert!(cmd.status().unwrap().success(), "git {args:?} failed");
+    }
+
+    fn close_patch() -> TaskPatch {
+        TaskPatch {
+            status: Some(Status::Done),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn close_artifact_fills_the_newest_commit_citing_the_task() {
+        let (dir, store, task) = close_artifact_fixture(true);
+        let path = dir.path().to_str().unwrap();
+        let cite = format!("task {}: first", task.id);
+        let newer = format!("task {}: second", task.id);
+        let other = format!("task {}0: someone else", task.id);
+        let sub = format!("subtask {}: not this one", task.id);
+        repo_git(path, &["commit", "--allow-empty", "-m", &cite], None);
+        repo_git(path, &["commit", "--allow-empty", "-m", &newer], None);
+        repo_git(path, &["commit", "--allow-empty", "-m", &other], None);
+        repo_git(path, &["commit", "--allow-empty", "-m", &sub], None);
+        let head = std::process::Command::new("git")
+            .args(["-C", path, "log", "-n1", "--format=%h", "HEAD~2"])
+            .output()
+            .unwrap();
+        let want = String::from_utf8_lossy(&head.stdout).trim().to_string();
+        let got = close_artifact(&store, &task, &close_patch(), None).unwrap();
+        assert_eq!(got.as_deref(), Some(want.as_str()));
+    }
+
+    #[test]
+    fn close_artifact_refuses_without_a_citing_commit_since_the_claim() {
+        let (dir, store, task) = close_artifact_fixture(true);
+        let path = dir.path().to_str().unwrap();
+        // Cites the task, but predates the claim; the newer one cites nothing.
+        let cite = format!("task {}: old", task.id);
+        repo_git(
+            path,
+            &["commit", "--allow-empty", "-m", &cite],
+            Some("2001-01-01T00:00:00Z"),
+        );
+        repo_git(path, &["commit", "--allow-empty", "-m", "unrelated"], None);
+        let err = close_artifact(&store, &task, &close_patch(), None).unwrap_err();
+        assert!(
+            matches!(&err, Error::Validation(m) if m.contains("--no-artifact")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn close_artifact_passes_with_a_reason_a_given_or_a_stored_artifact() {
+        let (_dir, mut store, task) = close_artifact_fixture(true);
+        assert_eq!(
+            close_artifact(&store, &task, &close_patch(), Some("config only")).unwrap(),
+            None
+        );
+        let given = TaskPatch {
+            artifact: Some(Some("abc1234".into())),
+            ..close_patch()
+        };
+        assert_eq!(close_artifact(&store, &task, &given, None).unwrap(), None);
+        let stored = store
+            .update_task(
+                task.id,
+                &TaskPatch {
+                    artifact: Some(Some("abc1234".into())),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            close_artifact(&store, &stored, &close_patch(), None).unwrap(),
+            None
+        );
+        // `--artifact ""` clears it, so the rule applies again.
+        let cleared = TaskPatch {
+            artifact: Some(None),
+            ..close_patch()
+        };
+        assert!(close_artifact(&store, &stored, &cleared, None).is_err());
+    }
+
+    #[test]
+    fn close_artifact_without_a_local_path_refuses_unless_given_a_reason() {
+        let (_dir, store, task) = close_artifact_fixture(false);
+        let err = close_artifact(&store, &task, &close_patch(), None).unwrap_err();
+        assert!(
+            matches!(&err, Error::Validation(m) if m.contains("no local_path")),
+            "{err:?}"
+        );
+        assert_eq!(
+            close_artifact(&store, &task, &close_patch(), Some("plan only")).unwrap(),
+            None
+        );
     }
 }

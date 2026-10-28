@@ -300,9 +300,14 @@ ok "task release on an unclaimed task: idempotent"
 
 # leaving in_progress drops the claim rather than leaving a done task owned
 run 0 "$MESA" task claim "$T2" --owner sess-a
-run 0 "$MESA" task update "$T2" --status done
+# a close needs an artifact (task 2401): no local_path, no --artifact = refused
+run 1 "$MESA" task update "$T2" --status done
+[ "$(jqe .error.code)" = "validation" ] || fail "done without an artifact: error.code"
+run 0 "$MESA" task update "$T2" --status done --no-artifact gate
 [ "$(jqs .owner)" = "null" ] || fail "done: claim must be dropped"
 [ "$(jqs .claimed_at)" = "null" ] || fail "done: claimed_at must be dropped"
+run 0 "$MESA" task show "$T2"
+[ "$(jqs '.notes[-1].body')" = "Closed with no artifact: gate" ] || fail "done --no-artifact: reason noted"
 ok "leaving in_progress drops the claim"
 
 # ---- stale claims (task 1017): a read-side filter, never a release ----
@@ -505,7 +510,7 @@ run 0 "$MESA" task update "$TA" --acceptance ""
 ok "task update --acceptance \"\": clears the field"
 
 # ---- result field (update-only: written when the agent finishes a task) ----
-run 0 "$MESA" task update "$TA" --status done --result "shipped in abc123"
+run 0 "$MESA" task update "$TA" --status done --no-artifact gate --result "shipped in abc123"
 [ "$(jqs .result)" = "shipped in abc123" ] || fail "update --result: not stored"
 ok "task update --status done --result: stored"
 
@@ -585,9 +590,9 @@ run 2 "$MESA" task list "$PI" --project "$PI"
 ok "task next/list: positional project ≡ --project; both is usage"
 
 # drive that project to completion; next then reports a counts object
-run 0 "$MESA" task update "$IA" --status done
-run 0 "$MESA" task update "$IB" --status done
-run 0 "$MESA" task update "$IC" --status done
+run 0 "$MESA" task update "$IA" --status done --no-artifact gate
+run 0 "$MESA" task update "$IB" --status done --no-artifact gate
+run 0 "$MESA" task update "$IC" --status done --no-artifact gate
 run 0 "$MESA" task next --project "$PI"
 [ "$(jqs .next)" = "null" ] || fail "next (none): must print {\"next\":null,...}"
 [ "$(jqs .blocked)" = "0" ] || fail "next (none): blocked count"
@@ -811,7 +816,7 @@ ok "error path: exit 1 and byte-identical stderr with and without --quiet"
 python3 -c "import sys; sys.stdout.write('x' * 28672)" >"$TMP/big.txt"
 run 0 "$MESA" task create "$PQ" --description-file "$TMP/big.txt" --quiet
 QBIG=$(jqs .id)
-run 0 "$MESA" task update "$QBIG" --status done --quiet
+run 0 "$MESA" task update "$QBIG" --status done --no-artifact gate --quiet
 printf '%s' "$STDOUT" >"$TMP/big-quiet.json"
 [ "$(wc -c <"$TMP/big-quiet.json")" -lt 1024 ] ||
   fail "task update --quiet on a 28 KB description: stdout must be < 1 KB"

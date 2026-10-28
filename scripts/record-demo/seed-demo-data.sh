@@ -15,7 +15,7 @@ id() { python3 -c "import json,sys;print(json.load(sys.stdin)['id'])"; }
 
 proj1=$(mesa project create "Acme Storefront Revamp" --no-git | id)
 t1=$(mesa task create "$proj1" "Design new checkout flow" --priority high | id)
-mesa task update "$t1" --status done >/dev/null
+mesa task update "$t1" --status done --no-artifact gate >/dev/null
 t2=$(mesa task create "$proj1" "Implement payment gateway integration" --priority high | id)
 mesa task update "$t2" --status in_progress >/dev/null
 mesa task create "$proj1" "Wire up Stripe webhook" --parent "$t2" >/dev/null

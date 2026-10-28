@@ -300,7 +300,7 @@ HOSTILE_TASK='fix $(touch pwned) `touch pwned2` "q"'
 run 0 "$MESA" task create "$B" "$HOSTILE_TASK"
 TASK_B=$(jqs .id)
 # env -u: inside a Claude Code session the close guard (mesa task 1515) probes `claude agents`.
-run 0 env -u CLAUDE_CODE_SESSION_ID "$MESA" task update "$TASK_B" --status done
+run 0 env -u CLAUDE_CODE_SESSION_ID "$MESA" task update "$TASK_B" --status done --no-artifact gate
 # Timestamps an hour ahead, so they stay inside every run's window.
 TS=$(python3 -c 'import datetime; print((datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S.000Z"))')
 transcript() { # transcript <file> <session id> <cwd> <with errors: 1|0>
@@ -467,7 +467,7 @@ TS=$(python3 -c 'import datetime; print((datetime.datetime.now(datetime.timezone
 transcript "$TMP/tree/-proj-b/old.jsonl" sess-old "$DIR_B" 1
 # The folder fallback attributes to a task closed in THIS run's window, so close one.
 run 0 "$MESA" task create "$B" "second task"
-run 0 env -u CLAUDE_CODE_SESSION_ID "$MESA" task update "$(jqs .id)" --status done
+run 0 env -u CLAUDE_CODE_SESSION_ID "$MESA" task update "$(jqs .id)" --status done --no-artifact gate
 # (1) every skim fails (claude down): the job fails, the row is kept.
 touch "$STUB_DIR/fail"
 : > "$FAIL_LOG"

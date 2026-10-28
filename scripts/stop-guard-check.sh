@@ -67,7 +67,7 @@ P=$("$MESA" project list | jq -r '.[0].id')
 T_PROG=$("$MESA" task create "$P" "In progress task" | jq -r .id)
 "$MESA" task update "$T_PROG" --status in_progress >/dev/null
 T_DONE=$("$MESA" task create "$P" "Done task" | jq -r .id)
-"$MESA" task update "$T_DONE" --status done >/dev/null
+"$MESA" task update "$T_DONE" --status done --no-artifact gate >/dev/null
 T_INBOX=$("$MESA" task create "$P" "Task with a question" | jq -r .id)
 "$MESA" task update "$T_INBOX" --status in_progress >/dev/null
 T_OLD=$("$MESA" task create "$P" "Task with an old item" | jq -r .id)

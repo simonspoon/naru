@@ -448,6 +448,33 @@ pub fn log_since(dir: &str, since: &str) -> Vec<GitCommit> {
     run_log(dir, None, &[format!("--since={since} UTC")])
 }
 
+/// The newest commit on any ref in `dir` since `since` (`Store`'s UTC text)
+/// whose message cites `task <id>` (naru task 2401) — its abbreviated sha,
+/// or `None` when there is none or git fails. `--all` so a commit still on
+/// a worktree branch counts; the trailing non-digit keeps `task 24` from
+/// matching `task 240`, the leading non-letter from matching `subtask 24`.
+pub fn commit_citing_task(dir: &str, since: &str, task_id: i64) -> Option<String> {
+    let out = Command::new("git")
+        .args([
+            "-C",
+            dir,
+            "log",
+            "--all",
+            "-n",
+            "1",
+            "-i",
+            "-E",
+            "--format=%h",
+        ])
+        .arg(format!("--since={since} UTC"))
+        .arg(format!("--grep=(^|[^a-z])task #?{task_id}([^0-9]|$)"))
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (out.status.success() && !sha.is_empty()).then_some(sha)
+}
+
 /// The first `max` paths `git ls-files` lists in `dir` (naru task 1691), empty
 /// on any failure — not a repo and an empty repo read the same.
 pub fn tracked_files(dir: &str, max: usize) -> Vec<String> {

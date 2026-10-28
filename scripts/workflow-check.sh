@@ -1570,7 +1570,7 @@ run 0 "$NARU" workflow run-show "$RID"
 run 0 "$NARU" task update "$TET" --status in_progress
 te_wait TEBoth 2
 [ "$(te_runs TEDone)" = "0" ] || fail "a non-matching status must not fire the done workflow"
-run 0 "$NARU" task update "$TET" --status done
+run 0 "$NARU" task update "$TET" --status done --no-artifact gate
 te_wait TEDone 1
 te_wait TEBoth 3
 run 0 "$NARU" task update "$TET" --priority high
