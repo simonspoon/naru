@@ -557,7 +557,7 @@ records a revision automatically.
   revision with its snapshot, newest first — the page diffs any two itself) and
   `POST /api/workflows/{id}/revisions/{rev}/restore` (the restored
   `{workflow, nodes, edges}`).
-- **Web**: a **History** button in the builder header swaps the graph for a
+- **Web**: **History** in the builder header's ⋯ menu swaps the graph for a
   revision list (`#rev`, reason, author, age, `+a −r` against the previous
   one) beside a diff (against the previous revision or any chosen in "compare
   with…") or the full snapshot as text, and a confirmed **restore**. The pure
@@ -993,13 +993,23 @@ context kind `workflows`, with the workflow's id and name once one is open.
 - **Running**: the header's **▶ Run** (with an optional input) posts
   `/api/workflows/{id}/run`, then paints each node with its step's status (ring
   green for `ok`, red for `failed`, dimmed for `skipped`) and lists the steps
-  with duration, output and error in the run panel under the canvas. While a
+  with duration, output and error in the **Last run** tab. While a
   run is in progress — started here, or by the CLI, the watcher or voice — the
   page polls it (1 s; the run list every 5 s when idle) and the running node
   pulses amber (still under `prefers-reduced-motion`), repainting as each step
-  lands; the final record replaces the live one when it ends. The panel's
-  other tabs are the recent runs (click one to repaint the canvas with it) and
-  the logs (`GET /api/workflow-log`, one named log or all).
+  lands; the final record replaces the live one when it ends. **Recent runs**
+  lists the runs (click one to open it in Last run and repaint the canvas with it)
+  and **Log** the logs (`GET /api/workflow-log`, one named log or all).
+- **Page layout** (naru task 2421): one header row (← back, name, description
+  cut to a line, run input, ▶ Run, and a ⋯ menu holding turn on/off, History,
+  duplicate, export and delete), then a `Canvas | Last run | Recent runs | Log`
+  tab row, each its own view. The open view fills what is left down to the
+  bottom edge at every width — `.workflow-page` is a flex column and the canvas
+  `flex: 1; min-height: 0` — so the page never scrolls the canvas off-screen
+  (in the project frame, a Custom pane, the dock and the global route). The
+  canvas stays mounted (hidden) on the run tabs, so a selection or unsaved
+  inspector edit survives a look at a run; a run started from the Canvas tab
+  stays there, painting the nodes, with its status as a badge on Last run.
 - **Logic in pure modules** (`frontend/src/*.test.ts`): `workflowConfig.ts`
   (kinds, default config, the card's summary line, the draft ⇄ config round trip
   with the shape checks of `validate_config`, the branch-handle rule) and

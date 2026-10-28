@@ -1467,10 +1467,85 @@ main {
 
 .workflow-head {
   display: flex;
-  justify-content: space-between;
   align-items: center;
-  gap: 1rem;
+  gap: 0.4rem 0.9rem;
   flex-wrap: wrap;
+}
+
+.workflow-back {
+  flex: none;
+  font-size: 1.15rem;
+  text-decoration: none;
+}
+
+/* The description shares the header row (naru task 2421): one line, cut with
+   an ellipsis, the whole text on hover. */
+.workflow-desc {
+  flex: 1 1 8rem;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.85rem;
+}
+
+/* While it is being edited the description takes a row of its own. */
+.workflow-desc:has(textarea) {
+  flex-basis: 100%;
+  white-space: normal;
+  overflow: visible;
+}
+
+.workflow-head-actions {
+  margin-left: auto;
+  flex-wrap: nowrap;
+}
+
+/* Shrinks before Run or ⋯ would wrap onto a row of their own. */
+.workflow-head-actions .workflow-run-input {
+  flex: 0 1 14rem;
+  min-width: 6rem;
+}
+
+/* The ⋯ menu: the header actions used less often than Run. */
+.workflow-menu {
+  position: relative;
+}
+
+.workflow-menu-list {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 50;
+  min-width: 11rem;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.15rem;
+  padding: 0.25rem;
+  background: var(--panel-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+
+.workflow-menu-list > button {
+  justify-content: flex-start;
+  text-align: left;
+  background: transparent;
+  box-shadow: none;
+  font-size: 0.8rem;
+}
+
+.workflow-menu-list > button:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+
+.workflow-menu-list .confirm-delete {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  width: min(18rem, 80vw);
+  font-size: 0.8rem;
 }
 
 .workflow-title {
@@ -2246,9 +2321,30 @@ main {
   margin: 0.5rem 0 0;
 }
 
-/* The run panel beneath the canvas. */
-.workflow-runpanel {
-  margin-top: 1rem;
+/* Canvas | Last run | Recent runs | Log, under the header (naru task 2421). */
+.workflow-runtabs {
+  margin: 0.5rem 0;
+}
+
+.workflow-runtab-badge {
+  margin-left: 0.4rem;
+  padding: 0 0.4rem;
+  border-radius: var(--r-pill);
+  font-size: 0.7rem;
+  background: var(--surface);
+  color: var(--muted);
+}
+
+.workflow-runtab-badge.run-succeeded {
+  color: var(--green);
+}
+
+.workflow-runtab-badge.run-running {
+  color: var(--amber);
+}
+
+.workflow-runtab-badge.run-failed {
+  color: var(--red);
 }
 
 .workflow-steps,
@@ -8836,6 +8932,87 @@ button:focus-visible,
   .project-page-fills > .project-panes {
     height: auto;
     margin-bottom: 0;
+  }
+
+  main:has(> .workflow-page) {
+    padding-bottom: 1rem;
+  }
+}
+
+/* An open workflow (naru task 2421): header and tab row on top, the canvas
+   or run view taking every pixel left and never running past the bottom edge
+   — in the project frame, a Custom pane, the dock and the global route, and
+   at every width (the project frame's own fill above is wide-tier only, so
+   the narrow tier opts in here for this one view). */
+main > .workflow-page {
+  height: 100%;
+}
+
+.workflow-page {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.project-page-fills > .project-view-drop > .workflow-page,
+.project-pane-body > .workflow-page,
+.dock-workflows > .workflow-page {
+  flex: 1;
+}
+
+.project-page-fills:has(> .project-view-drop > .workflow-page) {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+
+.project-page-fills > .project-view-drop:has(> .workflow-page),
+.dock-workflows:has(> .workflow-page) {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.workflow-page > .workflow-canvas-slot {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.workflow-page > .workflow-canvas-slot[hidden] {
+  display: none;
+}
+
+.workflow-canvas-slot > .workflow-canvas {
+  flex: 1;
+  height: auto;
+  min-height: 0;
+}
+
+/* Narrow tier: the stacked builder's viewport takes what the palette row
+   leaves rather than its own --tab-viewport-* box. */
+.workflow-canvas-slot > .workflow-canvas > .wf-viewport {
+  height: auto;
+  min-height: 0;
+}
+
+.workflow-page > .workflow-view {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* Narrow tier, filling: the wrapping palette row may take at most 40% of the
+   box and scrolls within it, or a full row of node kinds leaves the canvas
+   no height at all on a phone. */
+@media (max-width: 860px) {
+  .workflow-canvas-slot > .workflow-canvas > .wf-palette {
+    flex: none;
+    max-height: 40%;
+    overflow-y: auto;
   }
 }
 

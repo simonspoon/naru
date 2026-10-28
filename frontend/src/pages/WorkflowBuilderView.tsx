@@ -160,9 +160,10 @@ function LogPanel({
 }
 
 /**
- * One workflow rendered in place inside ProjectTasksPage's frame: its name
- * header with the Run button, the builder canvas, and the run panel (the
- * shown run's steps, recent runs, and the logs). The canvas owns node/edge
+ * One workflow rendered in place inside ProjectTasksPage's frame: a one-row
+ * header (name, description, Run, and a ⋯ menu for the rest), then a tab row
+ * switching between the builder canvas and the run views (the shown run's
+ * steps, recent runs, and the logs). The canvas owns node/edge
  * editing; this owns the workflow-level fields and running it.
  */
 export function WorkflowBuilderView({
@@ -184,14 +185,32 @@ export function WorkflowBuilderView({
   const [running, setRunning] = useState(false)
   const [runError, setRunError] = useState<string | null>(null)
   const [shown, setShown] = useState<WorkflowRun | null>(null)
-  const [tab, setTab] = useState<'steps' | 'runs' | 'log'>('steps')
+  const [tab, setTab] = useState<'canvas' | 'steps' | 'runs' | 'log'>('canvas')
   // Graph editor or the version history (naru task 2053), in place.
   const [historyOpen, setHistoryOpen] = useState(false)
   const [updateOpen, setUpdateOpen] = useState(false)
   const [updateNote, setUpdateNote] = useState<string | null>(null)
   const titleRef = useRef<HTMLHeadingElement>(null)
+  // The ⋯ menu holding the less-used actions (naru task 2421).
+  const [menuOpen, setMenuOpen] = useState(false)
+  const menuRef = useRef<HTMLDivElement>(null)
   // Bumped on every run so the recent-runs and log lists refetch.
   const [runVersion, setRunVersion] = useState(0)
+  useEffect(() => {
+    if (!menuOpen) return
+    const onDown = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenuOpen(false)
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setMenuOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [menuOpen])
   // Live run view (mesa task 1631): the run list is polled — fast while a run
   // is in progress here or anywhere (CLI, watcher, voice), slow otherwise —
   // and the running run is polled whole so its steps repaint the canvas.
@@ -238,7 +257,6 @@ export function WorkflowBuilderView({
       (done) => {
         setRunning(false)
         setShown(done)
-        setTab('steps')
         setRunVersion((v) => v + 1)
       },
       (err: unknown) => {
@@ -262,10 +280,10 @@ export function WorkflowBuilderView({
 
   return (
     <div className="workflow-page">
-      <p>
-        <a href={workflowsListHref(projectId)}>← workflows</a>
-      </p>
       <div className="workflow-head">
+        <a className="workflow-back" href={workflowsListHref(projectId)} title="Back to workflows">
+          ←
+        </a>
         <h2 className="workflow-title" ref={titleRef} tabIndex={-1}>
           {builtin ? (
             wf.name
@@ -300,6 +318,20 @@ export function WorkflowBuilderView({
           )}
           <span className="muted workflow-title-tag"> · workflow{wf.enabled ? '' : ' · disabled'}</span>
         </h2>
+        <div className="muted workflow-desc" title={wf.description ?? undefined}>
+          {builtin ? (
+            wf.description
+          ) : (
+            <InlineEdit
+              value={wf.description ?? ''}
+              multiline
+              placeholder="no description — click to add"
+              onSave={(d) =>
+                updateWorkflow(workflowId, { description: d === '' ? null : d }).then(() => refetch())
+              }
+            />
+          )}
+        </div>
         <div className="workflow-head-actions">
           <input
             type="text"
@@ -315,85 +347,97 @@ export function WorkflowBuilderView({
               </>
             )}
           </button>
-          <button
-            type="button"
-            title={wf.enabled ? 'Enabled: fires from its trigger' : 'Disabled: only runs when asked'}
-            onClick={() =>
-              updateWorkflow(workflowId, { enabled: !wf.enabled }).then(
-                () => refetch(),
-                (err: unknown) => setRunError(err instanceof Error ? err.message : String(err)),
-              )
-            }
-          >
-            {toggleLabel(wf)}
-          </button>
-          <button
-            type="button"
-            aria-label="Workflow history"
-            className={historyOpen ? 'selected' : undefined}
-            onClick={() => setHistoryOpen((o) => !o)}
-          >
-            History
-          </button>
-          <button
-            type="button"
-            onClick={() =>
-              duplicateWorkflow(workflowId).then(
-                (v) => {
-                  window.location.hash = workflowHref(v.workflow)
-                },
-                (err: unknown) => setRunError(err instanceof Error ? err.message : String(err)),
-              )
-            }
-          >
-            {duplicateLabel(wf)}
-          </button>
-          <button
-            type="button"
-            onClick={() =>
-              exportWorkflow(workflowId).then(
-                ({ filename, text }) => {
-                  const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }))
-                  const a = document.createElement('a')
-                  a.href = url
-                  a.download = filename
-                  a.click()
-                  URL.revokeObjectURL(url)
-                },
-                (err: unknown) => setRunError(err instanceof Error ? err.message : String(err)),
-              )
-            }
-          >
-            export
-          </button>
-          {!builtin && (
-          <ConfirmDelete
-            label="delete workflow"
-            message={`Deletes this workflow with its ${view.nodes.length} node(s), ${view.edges.length} edge(s) and its run history. Entries it wrote to logs are kept.`}
-            onDelete={() =>
-              deleteWorkflow(workflowId).then(() => {
-                if (onDeleted) return onDeleted()
-                window.location.hash = workflowsListHref(projectId)
-              })
-            }
-          />
-          )}
+          <div className="workflow-menu" ref={menuRef}>
+            <button
+              type="button"
+              aria-label="More workflow actions"
+              title="More actions"
+              aria-haspopup="menu"
+              aria-expanded={menuOpen}
+              onClick={() => setMenuOpen((o) => !o)}
+            >
+              ⋯
+            </button>
+            {menuOpen && (
+              <div className="workflow-menu-list" role="menu">
+                <button
+                  type="button"
+                  role="menuitem"
+                  title={wf.enabled ? 'Enabled: fires from its trigger' : 'Disabled: only runs when asked'}
+                  onClick={() => {
+                    setMenuOpen(false)
+                    updateWorkflow(workflowId, { enabled: !wf.enabled }).then(
+                      () => refetch(),
+                      (err: unknown) => setRunError(err instanceof Error ? err.message : String(err)),
+                    )
+                  }}
+                >
+                  {toggleLabel(wf)}
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  aria-label="Workflow history"
+                  className={historyOpen ? 'selected' : undefined}
+                  onClick={() => {
+                    setMenuOpen(false)
+                    setHistoryOpen((o) => !o)
+                  }}
+                >
+                  History
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setMenuOpen(false)
+                    duplicateWorkflow(workflowId).then(
+                      (v) => {
+                        window.location.hash = workflowHref(v.workflow)
+                      },
+                      (err: unknown) => setRunError(err instanceof Error ? err.message : String(err)),
+                    )
+                  }}
+                >
+                  {duplicateLabel(wf)}
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setMenuOpen(false)
+                    exportWorkflow(workflowId).then(
+                      ({ filename, text }) => {
+                        const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }))
+                        const a = document.createElement('a')
+                        a.href = url
+                        a.download = filename
+                        a.click()
+                        URL.revokeObjectURL(url)
+                      },
+                      (err: unknown) => setRunError(err instanceof Error ? err.message : String(err)),
+                    )
+                  }}
+                >
+                  export
+                </button>
+                {!builtin && (
+                <ConfirmDelete
+                  label="delete workflow"
+                  message={`Deletes this workflow with its ${view.nodes.length} node(s), ${view.edges.length} edge(s) and its run history. Entries it wrote to logs are kept.`}
+                  onDelete={() =>
+                    deleteWorkflow(workflowId).then(() => {
+                      if (onDeleted) return onDeleted()
+                      window.location.hash = workflowsListHref(projectId)
+                    })
+                  }
+                />
+                )}
+              </div>
+            )}
+          </div>
         </div>
       </div>
-      <p className="muted">
-        {builtin ? (
-          wf.description
-        ) : (
-          <InlineEdit
-            value={wf.description ?? ''}
-            multiline
-            placeholder="no description — click to add"
-            onSave={(d) =>
-              updateWorkflow(workflowId, { description: d === '' ? null : d }).then(() => refetch())
-            }
-          />
-        )}
-      </p>
       {builtin && <p className="muted">{BUILTIN_NOTE}</p>}
       {updateNote !== null && !updateBadge && <p className="muted">{updateNote}</p>}
       {updateBadge && updateOpen && (
@@ -413,59 +457,70 @@ export function WorkflowBuilderView({
       )}
       {runError && <p className="error">could not run: {runError}</p>}
 
-      {historyOpen && (
-        <>
+      {historyOpen ? (
+        <div className="workflow-view">
           <p>
             <button type="button" onClick={() => setHistoryOpen(false)}>
               ← graph
             </button>
           </p>
           <WorkflowHistory workflowId={workflowId} onRestored={refetch} readOnly={builtin} />
-        </>
-      )}
-
-      {/* Keyed by workflow id: a switch remounts the canvas so React Flow
-          re-reads that workflow's saved viewport (defaultViewport is
-          mount-time). */}
-      {!historyOpen && (
-        <WorkflowCanvas
-          key={workflowId}
-          view={view}
-          run={display}
-          onChanged={refetch}
-          readOnly={builtin}
-        />
-      )}
-
-      {!historyOpen && (
-      <div className="workflow-runpanel">
-        <div className="tabs workflow-runtabs">
-          {(['steps', 'runs', 'log'] as const).map((t) => (
-            <button
-              key={t}
-              type="button"
-              className={tab === t ? 'active' : ''}
-              onClick={() => setTab(t)}
-            >
-              {t === 'steps' ? 'last run' : t === 'runs' ? 'recent runs' : 'log'}
-            </button>
-          ))}
         </div>
-        {tab === 'steps' &&
-          (display ? <RunSteps run={display} /> : <p className="muted">Run it to see each step here.</p>)}
-        {tab === 'runs' && (
-          <RecentRuns
-            workflowId={workflowId}
-            version={runVersion}
-            shownId={shown?.id ?? null}
-            onShow={(r) => {
-              setShown(r)
-              setTab('steps')
-            }}
-          />
-        )}
-        {tab === 'log' && <LogPanel version={runVersion} workflowId={workflowId} />}
-      </div>
+      ) : (
+        <>
+          <div className="tabs workflow-runtabs">
+            {(['canvas', 'steps', 'runs', 'log'] as const).map((t) => (
+              <button
+                key={t}
+                type="button"
+                className={tab === t ? 'active' : ''}
+                onClick={() => setTab(t)}
+              >
+                {t === 'canvas' ? 'Canvas' : t === 'steps' ? 'Last run' : t === 'runs' ? 'Recent runs' : 'Log'}
+                {t === 'steps' && display && (
+                  <span className={`workflow-runtab-badge run-${display.status}`}>{display.status}</span>
+                )}
+              </button>
+            ))}
+          </div>
+          {/* Hidden, not unmounted, on the run tabs: the canvas keeps its
+              selection and an unsaved inspector edit across a look at a run.
+              Keyed by workflow id: a switch remounts the canvas so React Flow
+              re-reads that workflow's saved viewport (defaultViewport is
+              mount-time). */}
+          <div className="workflow-canvas-slot" hidden={tab !== 'canvas'}>
+            <WorkflowCanvas
+              key={workflowId}
+              view={view}
+              run={display}
+              onChanged={refetch}
+              readOnly={builtin}
+            />
+          </div>
+          {tab === 'steps' && (
+            <div className="workflow-view">
+              {display ? <RunSteps run={display} /> : <p className="muted">Run it to see each step here.</p>}
+            </div>
+          )}
+          {tab === 'runs' && (
+            <div className="workflow-view">
+              <RecentRuns
+                workflowId={workflowId}
+                version={runVersion}
+                shownId={shown?.id ?? null}
+                onShow={(r) => {
+                  setShown(r)
+                  setTab('steps')
+                }}
+              />
+            </div>
+          )}
+          {tab === 'log' && (
+            <div className="workflow-view">
+              <LogPanel version={runVersion} workflowId={workflowId} />
+            </div>
+          )}
+        </>
       )}
     </div>
   )
