@@ -1,42 +1,53 @@
 /**
- * Streaming dictation over `GET /api/live/listen` (mesa task 1395) — the
- * pure half of the page's streaming capture, used only when the server runs
- * `audio.engine = "naru-audio"`. The route is a WebSocket Naru proxies
- * verbatim to the daemon's `/v1/audio/transcriptions/stream` (naru-audio
- * design §2.4, `docs/listen.md` "Streaming"): the page sends one `start`
- * message, then raw 16 kHz s16le PCM in binary frames, and the daemon — whose
- * VAD is authoritative — answers `speech` edges and one `final` per segment
- * it heard words in.
+ * Streaming capture over naru-audio's live socket (mesa task 1395; naru task
+ * 2385 moved it off the dictation stream `/api/live/listen`) — the pure half
+ * of the page's streaming capture, used only when the server runs
+ * `audio.engine = "naru-audio"`. The page dials serve's `/v1/audio/live`
+ * passthrough as a `role: "audio"` socket in the live session's
+ * `conversation` — the one its mic control socket joins — so the daemon's
+ * mute and its speaker guard apply to the page's microphone as they do to the
+ * Mac and phone apps' (`docs/listen.md` "The live socket"). The page sends one
+ * `start`, then raw 16 kHz s16le PCM in binary frames, and the daemon — whose
+ * VAD is authoritative — answers `speech` edges and one `utterance` per
+ * segment it admits, or a clearing `partial` for one it drops.
  *
  * Everything here is side-effect-free so it can be pinned in vitest; the
  * socket, the microphone and the held recording stay in `LiveHub`.
  */
 import { downsample, TARGET_SAMPLE_RATE, toPcm16 } from './liveAudio'
+import { vocabularyError } from './listenDraft'
 
 /**
- * The listen route on the page's own origin, `ws:`/`wss:` following the
- * page's scheme — `PtyTerminal`'s rule for its own socket.
+ * The live socket's first frame (naru-audio `docs/live-protocol.md`
+ * "Handshake"): an audio socket in `conversation` — the live session id, the
+ * key the control socket names — so a later joiner takes the conversation's
+ * mode rather than this `live`. `model` is the configured `listen.model`, and
+ * `hotwords` the configured `listen.vocabulary` — the page names it itself,
+ * since the live passthrough adds none (the dictation route used to) — each
+ * left out when the config names none. A vocabulary failing the Settings
+ * validator (`listenDraft.vocabularyError`, the mirror of
+ * `config::validate_vocabulary`) is left out too, as serve drops it, since
+ * the daemon would refuse the whole `start`. No partials: nothing on the page
+ * shows one.
  */
-export function listenUrl(location: { protocol: string; host: string }): string {
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-  return `${proto}://${location.host}/api/live/listen`
-}
-
-/**
- * The first frame (§2.4 "Handshake"). `model` is the configured
- * `listen.model` — the same name the one-shot route sends the daemon
- * (`config::listen_model()`) — and is left out when the config names none,
- * so the daemon's default applies. No partials: nothing on the page shows
- * one.
- */
-export function startMessage(model?: string | null): string {
+export function startMessage(
+  conversation: string,
+  model?: string | null,
+  hotwords?: string | null,
+): string {
   const named = model?.trim() ? { model: model.trim() } : {}
+  const terms = hotwords?.trim()
+  const vocabulary = terms && vocabularyError(terms) === null ? { hotwords: terms } : {}
   return JSON.stringify({
     type: 'start',
+    role: 'audio',
+    conversation,
+    mode: 'live',
     format: 's16le',
-    sample_rate: TARGET_SAMPLE_RATE,
+    rate: TARGET_SAMPLE_RATE,
     partials: false,
     ...named,
+    ...vocabulary,
   })
 }
 
@@ -125,20 +136,29 @@ export class FrameBatcher {
   }
 }
 
-/** What the daemon says, as far as the page reads it (§2.4 "Server events"). */
+/**
+ * What the daemon says, as far as the page reads it (live-protocol "Server
+ * events"). An `utterance` is read as a `final`; a `partial` with empty text
+ * — the only kind a `partials: false` socket gets — is a segment the daemon
+ * dropped (empty, echo, or another voice under the speaker guard): `dropped`.
+ * So is an `ambient_flag`, a segment answered in `ambient` mode, which is
+ * never the person's turn.
+ */
 export type StreamEvent =
   | { type: 'loading' }
   | { type: 'ready' }
   | { type: 'speech'; active: boolean; at: number }
   | { type: 'final'; segment: number; start: number; end: number; text: string }
+  | { type: 'dropped' }
   | { type: 'warning'; code: string; message: string }
   | { type: 'error'; code: string; message: string }
   | { type: 'done' }
 
 /**
  * One text frame, or `null` for anything the page does not act on — a
- * binary frame, malformed JSON, an unknown `type` (a `partial` included,
- * since the page asks for none) or a known one missing a field it needs.
+ * binary frame, malformed JSON, an unknown `type` (the conversation's
+ * `state` and `level` included), a `partial` with words, or a known one
+ * missing a field it needs.
  */
 export function parseStreamEvent(data: unknown): StreamEvent | null {
   if (typeof data !== 'string') return null
@@ -159,7 +179,11 @@ export function parseStreamEvent(data: unknown): StreamEvent | null {
     case 'speech':
       if (typeof v.active !== 'boolean' || typeof v.at !== 'number') return null
       return { type: 'speech', active: v.active, at: v.at }
-    case 'final':
+    case 'partial':
+      return v.text === '' ? { type: 'dropped' } : null
+    case 'ambient_flag':
+      return { type: 'dropped' }
+    case 'utterance':
       if (
         typeof v.text !== 'string' ||
         typeof v.end !== 'number' ||
@@ -197,14 +221,15 @@ export function closeVerdict(input: {
 
 /**
  * How long a finished segment waits for its `final` before it is counted as
- * settled anyway. The daemon sends **no** final for a segment its gates
- * dropped (§2.4: "a gated segment is simply dropped"), so without a bound
- * one cough would hold "transcribing…" and the silence send for ever. The
+ * settled anyway. A dropped segment is answered by a clearing `partial`
+ * (`FinalWaits.dropped`), but that is the backstop for one whose answer
+ * never comes, so one cough cannot hold "transcribing…" and the silence send
+ * for ever. The
  * same bound as `STOP_WAIT_MS`, because a real final can be that late: the
  * daemon lets a shared decode FIFO back up to 30 s of audio, and a wait that
  * expired first would let the silence send go without the final and the
- * late final start a second turn. A gated segment is still released sooner
- * in practice, by the next final behind it.
+ * late final start a second turn. A gated segment is released sooner, by its
+ * clearing `partial` or the next final behind it.
  */
 export const FINAL_WAIT_MS = STOP_WAIT_MS
 
@@ -219,7 +244,8 @@ export const FINAL_WAIT_MS = STOP_WAIT_MS
  * and finals arrive in segment order, so a wait still open behind a later
  * final belonged to a segment that was gated. A `max_segment` cut sends a
  * final mid-span, before any `active: false`, and so settles nothing still
- * to come. The last gated segment has no later final: `timeoutMs` bounds it.
+ * to come. A dropped segment's clearing `partial` settles the oldest wait;
+ * an answer that never comes is bounded by `timeoutMs`.
  */
 interface FinalWait {
   at: number
@@ -254,6 +280,15 @@ export class FinalWaits {
   /** A final ending at `end` (stream seconds) arrived. */
   final(end: number): void {
     this.settle((w) => w.at <= end + 1e-6)
+  }
+
+  /** The daemon dropped a segment: answers arrive in segment order, so the
+   *  oldest wait is the one answered. (A `max_segment`/`flush` cut dropped
+   *  mid-span has no wait of its own; should a later segment's wait be open
+   *  by then, it is settled early — a narrow window, accepted.) */
+  dropped(): void {
+    const oldest = this.waits[0]
+    if (oldest) this.settle((w) => w === oldest)
   }
 
   /** The socket is gone: nothing more will be answered. */

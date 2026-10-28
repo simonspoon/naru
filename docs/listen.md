@@ -220,9 +220,10 @@ saved model is checked against; empty means "Naru could not ask".
 The Settings vocabulary is naru-audio's `hotwords` (grammar and limits in
 `docs/config.md`). It is read per request like the model and sent as the
 multipart `hotwords` part of every one-shot transcription, and as `hotwords`
-added to the page's `start` message on the streaming route (the proxy
-rewrites that one frame; every other frame, and every frame when no
-vocabulary is set, passes through untouched). It is sent whenever configured,
+added to a `start` message on the `/api/live/listen` streaming route (the
+proxy rewrites that one frame; every other frame, and every frame when no
+vocabulary is set, passes through untouched). On the live socket the page
+names it in its own `start` (naru task 2385, "The live socket" below). It is sent whenever configured,
 whatever the model — the daemon ignores it on a model whose backend cannot
 decode hotwords (`x_hotwords: false` in `GET /v1/models`, which the Settings
 page reads to say so). A stored value that no longer validates is logged once
@@ -252,8 +253,9 @@ shape the speak routes already have on the way out, with the arrow reversed.
 Mesa task 1394, naru-audio design §2.4 / §6.2: a WebSocket the page opens
 on Naru, proxied to the daemon's `/v1/audio/transcriptions/stream`
 (`live_listen` + `proxy_listen` in `src/api.rs`, `audio::open_stream` in
-`src/core/audio.rs`). The page's main dictation capture uses it (mesa task
-1395, `frontend/src/liveStream.ts`, `docs/live.md` "Person → Naru"): a
+`src/core/audio.rs`). The page's main dictation capture used it (mesa task
+1395) until naru task 2385 moved that capture to the live socket below, which
+carries the speaker guard; the route stays, unused by the page. What it did: a
 `start` of 16 kHz `s16le` with no partials, naming `listen.model` as `model`
 when the config names one (the name the one-shot route sends the daemon,
 `config::listen_model()`; absent otherwise, so the daemon's default applies),
@@ -305,6 +307,19 @@ except a `speak` frame (naru task 2221): one naming no `voice` or `model` gets
 Settings' `speech.voice` / `speech.model` (`with_speech`, config read per frame,
 unset or unreadable = left out, a client's own value kept), so the Mac app
 speaks in the person's voice rather than the daemon's default. A resume rides inside the client's own `start`, so the URL carries no query.
+
+The page uses it twice (`docs/live.md`): a `role: "control"` socket for the
+mic mute (naru task 2179), and, on the streaming path, a `role: "audio"`
+socket in the same `conversation` (the live session id) carrying its
+microphone (naru task 2385, `frontend/src/liveStream.ts`), so the daemon's
+mode and its opt-in speaker guard (`live_guard`) govern a plain browser's
+capture as they do the native apps'. Its `start` is `mode: "live"`, 16 kHz
+`s16le`, no partials, `listen.model` (also filled in by the passthrough) and
+`listen.vocabulary` as `hotwords` — named by the page, since this route adds
+none, and left out when it fails the Settings validator (`listenDraft.ts`'s
+mirror of `validate_vocabulary`), as serve drops it; it reads each `utterance` as a final and a clearing `partial` (a dropped
+segment) or an `ambient_flag` as that segment answered, and keeps the stop/`done`/re-probe rules of
+the dictation stream above.
 
 ## Gate
 

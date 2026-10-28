@@ -5,7 +5,6 @@ import {
   FINAL_WAIT_MS,
   FinalWaits,
   FrameBatcher,
-  listenUrl,
   parseStreamEvent,
   pcmBytes,
   startMessage,
@@ -13,38 +12,35 @@ import {
   STOP_WAIT_MS,
 } from './liveStream'
 
-describe('listenUrl', () => {
-  it('follows the page scheme onto the same host', () => {
-    expect(listenUrl({ protocol: 'http:', host: '127.0.0.1:7770' })).toBe(
-      'ws://127.0.0.1:7770/api/live/listen',
-    )
-    expect(listenUrl({ protocol: 'https:', host: 'naru.local:7770' })).toBe(
-      'wss://naru.local:7770/api/live/listen',
-    )
-  })
-})
-
 describe('control messages', () => {
-  it('starts 16 kHz s16le with no partials and no model when none is configured', () => {
-    const bare = {
-      type: 'start',
-      format: 's16le',
-      sample_rate: 16000,
-      partials: false,
-    }
-    expect(JSON.parse(startMessage())).toEqual(bare)
-    expect(JSON.parse(startMessage(null))).toEqual(bare)
-    expect(JSON.parse(startMessage('  '))).toEqual(bare)
+  const bare = {
+    type: 'start',
+    role: 'audio',
+    conversation: '42',
+    mode: 'live',
+    format: 's16le',
+    rate: 16000,
+    partials: false,
+  }
+
+  it('starts an audio socket in the conversation, 16 kHz s16le, no partials, nothing unconfigured', () => {
+    expect(JSON.parse(startMessage('42'))).toEqual(bare)
+    expect(JSON.parse(startMessage('42', null, null))).toEqual(bare)
+    expect(JSON.parse(startMessage('42', '  ', ' '))).toEqual(bare)
   })
 
-  it('names the configured listen model', () => {
-    expect(JSON.parse(startMessage('whisper-small'))).toEqual({
-      type: 'start',
-      format: 's16le',
-      sample_rate: 16000,
-      partials: false,
+  it('names the configured listen model and vocabulary', () => {
+    expect(JSON.parse(startMessage('42', 'whisper-small', 'Naru, Kokoro'))).toEqual({
+      ...bare,
       model: 'whisper-small',
+      hotwords: 'Naru, Kokoro',
     })
+  })
+
+  it('trims the vocabulary and leaves out one serve would drop', () => {
+    expect(JSON.parse(startMessage('42', null, '  Naru\nKokoro :2 \n')).hotwords).toBe('Naru\nKokoro :2')
+    expect(JSON.parse(startMessage('42', null, 'x/y'))).toEqual(bare)
+    expect(JSON.parse(startMessage('42', null, 'a'.repeat(65)))).toEqual(bare)
   })
 
   it('stops with a bare stop', () => {
@@ -110,9 +106,13 @@ describe('parseStreamEvent', () => {
     })
     expect(
       parseStreamEvent(
-        '{"type":"final","segment":3,"start":12.4,"end":15.02,"text":"Add a task.","decode_ms":188}',
+        '{"type":"utterance","id":0,"segment":3,"start":12.4,"end":15.02,"text":"Add a task.","decode_ms":188,"speaker":{"score":0.8,"is_him":true}}',
       ),
     ).toEqual({ type: 'final', segment: 3, start: 12.4, end: 15.02, text: 'Add a task.' })
+    expect(parseStreamEvent('{"type":"partial","segment":4,"text":""}')).toEqual({ type: 'dropped' })
+    expect(parseStreamEvent('{"type":"ambient_flag","id":1,"segment":5,"text":"hm"}')).toEqual({
+      type: 'dropped',
+    })
     expect(parseStreamEvent('{"type":"error","code":"daemon_down","message":"gone"}')).toEqual({
       type: 'error',
       code: 'daemon_down',
@@ -129,12 +129,15 @@ describe('parseStreamEvent', () => {
   it('ignores what the page does not act on', () => {
     expect(parseStreamEvent('{"type":"partial","segment":1,"start":0,"text":"hi"}')).toBeNull()
     expect(parseStreamEvent('{"type":"mystery"}')).toBeNull()
+    expect(parseStreamEvent('{"type":"state","mode":"live","seq":2}')).toBeNull()
+    expect(parseStreamEvent('{"type":"level","rms":0.1,"gate":true}')).toBeNull()
+    expect(parseStreamEvent('{"type":"final","segment":0,"start":0,"end":1,"text":"x"}')).toBeNull()
     expect(parseStreamEvent('not json')).toBeNull()
     expect(parseStreamEvent('null')).toBeNull()
     expect(parseStreamEvent('"final"')).toBeNull()
     expect(parseStreamEvent(new ArrayBuffer(4))).toBeNull()
     expect(parseStreamEvent('{"type":"speech","active":"yes","at":1}')).toBeNull()
-    expect(parseStreamEvent('{"type":"final","segment":0,"start":0,"end":1}')).toBeNull()
+    expect(parseStreamEvent('{"type":"utterance","segment":0,"start":0,"end":1}')).toBeNull()
   })
 })
 
@@ -183,6 +186,21 @@ describe('FinalWaits', () => {
     waits.final(3)
     await Promise.resolve()
     expect(order).toEqual(['gated', 'spoken'])
+  })
+
+  it('settles only the oldest segment on a drop', async () => {
+    const waits = new FinalWaits()
+    const order: string[] = []
+    void waits.expect(1).then(() => order.push('other voice'))
+    void waits.expect(3).then(() => order.push('his'))
+    waits.dropped()
+    await Promise.resolve()
+    expect(order).toEqual(['other voice'])
+    expect(waits.count).toBe(1)
+    waits.dropped()
+    waits.dropped() // nothing left: a no-op
+    await Promise.resolve()
+    expect(order).toEqual(['other voice', 'his'])
   })
 
   it('gives up on a final that never comes', async () => {

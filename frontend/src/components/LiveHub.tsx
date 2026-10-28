@@ -198,7 +198,6 @@ import {
   closeVerdict,
   FinalWaits,
   FrameBatcher,
-  listenUrl,
   parseStreamEvent,
   startMessage,
   STOP_MESSAGE,
@@ -1194,6 +1193,9 @@ export function LiveHub({
   // `listen.model`, named in the streaming path's `start` (mesa task 1395)
   // exactly as the one-shot route names it to the daemon.
   const [listenModel, setListenModel] = useState<string | null>(null)
+  // `listen.vocabulary`, named as the live socket's `hotwords` (naru task
+  // 2385): the live passthrough adds none, as the dictation route did.
+  const [listenVocabulary, setListenVocabulary] = useState<string | null>(null)
   const applyProbe = useCallback((status: TranscribeStatus | null) => {
     setAudio(status)
     setTranscribes(status?.available === true)
@@ -1209,6 +1211,7 @@ export function LiveHub({
       if (dropped) return
       setListenEngine(listen?.engine ?? null)
       setListenModel(listen?.model ?? null)
+      setListenVocabulary(listen?.vocabulary ?? null)
       applyProbe(status)
     })
     return () => {
@@ -2834,7 +2837,7 @@ export function LiveHub({
 
   // Which way the server hears the person (mesa task 1395): on
   // `audio.engine = "naru-audio"` the microphone streams to the daemon over
-  // `/api/live/listen` rather than posting VAD-cut segments, so exactly one
+  // its live socket rather than posting VAD-cut segments, so exactly one
   // of the two server capture effects below runs.
   const streams = audio?.engine === 'naru-audio'
 
@@ -3110,10 +3113,15 @@ export function LiveHub({
 
   // Streaming capture (mesa task 1395): the sibling of the effect above for
   // `audio.engine = "naru-audio"`, where the microphone streams to the daemon
-  // over the `/api/live/listen` WebSocket (`liveStream.ts`, `docs/listen.md`
-  // "Streaming") instead of posting segments the page's own VAD cut. The
+  // over its live socket (`/v1/audio/live` as a `role: "audio"` socket in the
+  // session's conversation, naru task 2385, so its mute and speaker guard
+  // apply; `liveStream.ts`, `docs/listen.md` "The live socket") instead of
+  // posting segments the page's own VAD cut. The
   // daemon's VAD is authoritative, so the page runs none: it sends every
-  // frame and reads the daemon's `speech` edges and `final`s. Everything
+  // frame and reads the daemon's `speech` edges, `utterance`s (as `final`s)
+  // and drops. It never begins the conversation's mode: `wantsMic` needs
+  // `muted === false`, which only the control socket's first `state` sets,
+  // so this socket always joins after it and takes its mode. Everything
   // downstream is the same as the POST path's — the microphone ladder
   // (`openInput`), the held recording (`holdSettled`), the ordered chain
   // (`chainRef`) and the silence send — so the two differ only here:
@@ -3122,8 +3130,9 @@ export function LiveHub({
   //   (`markHeard`); `active: false` closes it, stamps the clock at that
   //   moment and puts a wait for its `final` on the chain (`FinalWaits`), so
   //   `hearing` — "transcribing…" and the silence send's withholding — counts
-  //   segments the daemon has ended and not yet answered.
-  // - A `final` is the settled text, run through `holdSettled` exactly as a
+  //   segments the daemon has ended and not yet answered. A segment it drops
+  //   (the speaker guard's other voice included) is answered by `dropped`.
+  // - A `final` (the socket's `utterance`) is the settled text, run through `holdSettled` exactly as a
   //   posted segment's transcript is.
   // - Teardown and the listen switch send `stop` rather than cutting a
   //   segment, and put one more wait on the chain — for `done` — so the
@@ -3139,7 +3148,17 @@ export function LiveHub({
   //   no dependency, so the person's listen switch is: off and on re-runs
   //   this effect and reconnects.
   useEffect(() => {
-    if (native !== null || !wantsMic || transcribes === null || path !== 'auris' || !streams) return
+    if (
+      native !== null ||
+      !wantsMic ||
+      transcribes === null ||
+      path !== 'auris' ||
+      !streams ||
+      controlSession === null
+    ) {
+      return
+    }
+    const conversation = conversationKey(controlSession)
     let running = true
     const stretch = discardsRef.current!.current
     const discarded = () => discardsRef.current!.isDiscarded(stretch)
@@ -3182,7 +3201,7 @@ export function LiveHub({
       setVoicedAt(null)
     }
 
-    const ws = new WebSocket(listenUrl(window.location))
+    const ws = new WebSocket(controlUrl(window.location))
     ws.binaryType = 'arraybuffer'
     // Frames captured before the handshake finishes, sent behind `start`.
     let early: ArrayBuffer[] = []
@@ -3197,7 +3216,7 @@ export function LiveHub({
     })
 
     ws.onopen = () => {
-      ws.send(startMessage(listenModel))
+      ws.send(startMessage(conversation, listenModel, listenVocabulary))
       for (const frame of early) ws.send(frame)
       early = []
       if (stopping) ws.send(STOP_MESSAGE)
@@ -3228,6 +3247,9 @@ export function LiveHub({
           waits.final(event.end)
           return
         }
+        case 'dropped':
+          waits.dropped()
+          return
         case 'error':
           failure = event.message || event.code
           return
@@ -3244,7 +3266,7 @@ export function LiveHub({
       endStream()
       if (running) trackSegment(false)
       if (closeVerdict({ code: e.code, sawDone, closedByUs }) === 'reprobe') {
-        const reason = failure ?? `the dictation stream closed (${e.code})`
+        const reason = failure ?? `the live audio socket closed (${e.code})`
         if (running) {
           lost = true
           dropCapture()
@@ -3348,6 +3370,8 @@ export function LiveHub({
     openInput,
     applyProbe,
     listenModel,
+    listenVocabulary,
+    controlSession,
   ])
 
   // Barge-in (mesa task 1160): the microphone while mesa is speaking. The

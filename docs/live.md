@@ -42,16 +42,21 @@ not handed — and "Speech, reused rather than rebuilt" (below) for audio-out's:
   turns it into a 16 kHz mono WAV (`liveAudio.ts`), and posts it to
   `POST /api/live/transcribe`, which hands it to the daemon and returns text.
   The page's main dictation capture (mesa task 1395) instead
-  **streams**: the page opens the `/api/live/listen` WebSocket
-  (`docs/listen.md` "Streaming"), sends 16 kHz s16le PCM in ~50 ms frames
+  **streams**: the page opens naru-audio's live socket through serve's
+  `/v1/audio/live` passthrough as a `role: "audio"` socket in the session's
+  `conversation` (naru task 2385, replacing the `/api/live/listen` dictation
+  stream, which has no speaker guard; `docs/listen.md` "The live socket"), so
+  the daemon's mute and its opt-in voice guard apply to a plain browser's
+  microphone as to the Mac and phone apps', sends 16 kHz s16le PCM in ~50 ms frames
   (`liveStream.ts`), runs no VAD of its own — the daemon's is authoritative —
-  and holds each `final` it answers through the same tail a posted segment's
+  and holds each `utterance` it answers through the same tail a posted segment's
   transcript takes. The daemon's `speech` edges stand in for the page's VAD:
   `active: true` opens `segmentOpen` and is a heartbeat, `active: false`
   stamps the silence clock and puts a wait for that segment's `final` on the
   segment chain, so "transcribing…" and the silence send read the same
-  signals on both paths (a segment the daemon gates never gets a final; its
-  wait gives up after `FINAL_WAIT_MS`, 10 s — as long as a stop's drain,
+  signals on both paths (a segment the daemon drops — empty, echo, or another
+  voice under the guard — gets a clearing `partial` instead, which settles the
+  oldest wait; a wait whose answer never comes gives up after `FINAL_WAIT_MS`, 10 s — as long as a stop's drain,
   since the daemon's decode backlog can hold a real final that long — or at
   the next final). The listen switch and every teardown send `stop` and wait
   for `done` on the chain, so what was heard before the press is still sent
