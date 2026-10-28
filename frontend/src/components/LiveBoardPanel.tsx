@@ -1259,9 +1259,9 @@ export function LiveBoardPanel({
       <div className="live-board-body">
         {/* No title header (mesa task 1483): the pane toggles live in the
             panel's toolbar. What is left is the board's own tools — the
-            history, the pen and maximise — as a small cluster floating over
-            the stage's top-right corner, and the board's title and kind as
-            its tooltip. */}
+            history, the pen and maximise — as a small strip of its own above
+            the stage (naru task 2420), and the board's title and kind as its
+            tooltip. */}
         <div
           className="live-board-tools"
           title={showing === null ? 'Whiteboard' : `${boardTitle(showing)} · ${showing.kind}`}

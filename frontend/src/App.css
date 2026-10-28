@@ -9170,25 +9170,22 @@ body.live-panel-ratio-resizing .live-panel-divider {
   width: 100%;
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
-  padding: 0.75rem;
+  gap: 0.25rem;
+  padding: 0.25rem 0.75rem 0.75rem;
 }
 
 /* The board's own tools (mesa task 1483, replacing its title header): a small
-   cluster floating over the stage's top-right corner. The stage scrolls
-   underneath it. */
+   right-aligned strip of its own above the stage (naru task 2420 — it used
+   to float over the stage's top-right corner and covered the board there).
+   It wraps rather than overflow a narrow panel. */
 .live-board-tools {
-  position: absolute;
-  top: calc(0.75rem + 6px);
-  right: calc(0.75rem + 6px);
-  z-index: 2;
+  flex: none;
+  align-self: flex-end;
   display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   align-items: center;
   gap: 4px;
-  padding: 2px;
-  background: rgba(var(--bg-rgb), 0.85);
-  border: 1px solid transparent;
-  border-radius: var(--r-md);
 }
 
 .live-board-tools .live-icon {
