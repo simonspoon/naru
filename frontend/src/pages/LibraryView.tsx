@@ -119,10 +119,11 @@ import {
 import { ScriptsView } from './ScriptsView'
 import { WorkflowsOverview } from './WorkflowsOverview'
 
-/** Prism grammar for the body editor: a hook is shell, everything else on
- * this surface — agent/skill/prompt bodies and a CLAUDE.md — is markdown. */
+/** Prism grammar for the body editor: a hook or a tool is shell, everything
+ * else on this surface — agent/skill/prompt bodies and a CLAUDE.md — is
+ * markdown. */
 function bodyLanguage(kind: LibraryItem['kind']): string {
-  return kind === 'hook' ? 'sh' : 'md'
+  return kind === 'hook' || kind === 'tool' ? 'sh' : 'md'
 }
 
 /** The create/edit form. Mounted fresh per item (a `key` on the caller), so

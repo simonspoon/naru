@@ -2108,7 +2108,7 @@ impl From<&Artifact> for ArtifactSummary {
 // `.claude/commands/`. The separate `command` kind that used to own that
 // directory is gone: every such row is now a prompt with the flag on.
 
-/// What a [`LibraryItem`] is. Five kinds, and the wire value is the exact word
+/// What a [`LibraryItem`] is. Six kinds, and the wire value is the exact word
 /// Claude Code (or mesa, for `prompt`) uses for the thing — `kebab-case`
 /// keeps `claude-md` readable rather than `claude_md`. The `command` kind
 /// mesa task 919 shipped was folded into `prompt` by mesa task 1139; the one
@@ -2124,6 +2124,9 @@ pub enum LibraryKind {
     Hook,
     Prompt,
     ClaudeMd,
+    /// An executable helper script kept at `.claude/bin/<name>` and linked
+    /// onto `PATH` (mesa task 2424, `core::library::link_tool`).
+    Tool,
 }
 
 impl LibraryKind {
@@ -2134,6 +2137,7 @@ impl LibraryKind {
             LibraryKind::Hook => "hook",
             LibraryKind::Prompt => "prompt",
             LibraryKind::ClaudeMd => "claude-md",
+            LibraryKind::Tool => "tool",
         }
     }
 
@@ -2144,6 +2148,7 @@ impl LibraryKind {
             "hook" => Some(LibraryKind::Hook),
             "prompt" => Some(LibraryKind::Prompt),
             "claude-md" => Some(LibraryKind::ClaudeMd),
+            "tool" => Some(LibraryKind::Tool),
             _ => None,
         }
     }

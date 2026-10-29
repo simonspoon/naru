@@ -8433,7 +8433,7 @@ fn parse_library_kind(kind: &str) -> Result<LibraryKind, ApiError> {
         code: "validation",
         message: format!(
             "unknown library kind {kind:?}; expected one of agent, skill, hook, prompt, \
-             claude-md"
+             claude-md, tool"
         ),
     })
 }

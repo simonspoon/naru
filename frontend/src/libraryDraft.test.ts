@@ -95,7 +95,7 @@ describe('emptyDraft / draftFrom', () => {
 
 describe('kindLabel / scopeLabel', () => {
   it('labels every kind', () => {
-    expect(LIBRARY_KINDS.map(kindLabel)).toEqual(['Agent', 'Skill', 'Hook', 'Prompt', 'CLAUDE.md'])
+    expect(LIBRARY_KINDS.map(kindLabel)).toEqual(['Agent', 'Skill', 'Hook', 'Prompt', 'CLAUDE.md', 'Tool'])
   })
 
   it('no longer offers a command kind — that is a prompt with export on', () => {

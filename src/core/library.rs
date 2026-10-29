@@ -567,7 +567,9 @@ pub fn builtin(id: &str) -> Option<&'static Builtin> {
 /// A [`LibraryKind::Hook`] appends nothing: a hook is any script the user
 /// cares to drop in — `.sh`, `.py`, or no extension at all — so its *name*
 /// carries the whole filename and the extension travels with the item
-/// (mesa task 1114). Every other kind owns its extension.
+/// (mesa task 1114). A [`LibraryKind::Tool`] is the same: any script, named
+/// by its whole filename (mesa task 2424). Every other kind owns its
+/// extension.
 pub fn relative_path(
     kind: LibraryKind,
     scope: LibraryScope,
@@ -578,6 +580,7 @@ pub fn relative_path(
         LibraryKind::Agent => Some(PathBuf::from(format!(".claude/agents/{name}.md"))),
         LibraryKind::Skill => Some(PathBuf::from(format!(".claude/skills/{name}/SKILL.md"))),
         LibraryKind::Hook => Some(PathBuf::from(format!(".claude/hooks/{name}"))),
+        LibraryKind::Tool => Some(PathBuf::from(format!(".claude/bin/{name}"))),
         LibraryKind::ClaudeMd => Some(match scope {
             LibraryScope::User => PathBuf::from(".claude/CLAUDE.md"),
             LibraryScope::Project => PathBuf::from("CLAUDE.md"),
@@ -874,6 +877,7 @@ pub fn scan_disk(base: &Path) -> Vec<(LibraryKind, bool, String, String, Option<
         &mut found,
     );
     leaf_dir("hooks", LibraryKind::Hook, false, None, &mut found);
+    leaf_dir("bin", LibraryKind::Tool, false, None, &mut found);
 
     if let Some(skills_dir) = safe_dir(".claude/skills")
         && let Ok(entries) = fs::read_dir(&skills_dir)
@@ -1592,14 +1596,84 @@ fn apply_naru(store: &mut Store, project: Option<i64>, row: &LibrarySyncRow) -> 
     }
     // A hook is registered as its bare path, so the file Claude Code runs
     // must be executable — `fs::write` leaves a new file at the umask's 0644.
-    if row.kind == LibraryKind::Hook {
+    if row.kind == LibraryKind::Hook || row.kind == LibraryKind::Tool {
         make_executable(&full)?;
     }
     if let Some(id) = row.item_id {
         store.set_library_synced(id, body)?;
         store.set_library_synced_files(id, &row.mesa_files)?;
     }
+    // Linked last, after the baseline: the file itself is written and agreed
+    // on, so a link that cannot be made is reported without undoing that.
+    if row.kind == LibraryKind::Tool && row.scope == LibraryScope::User {
+        link_tool(&full, &row.name)?;
+    }
     Ok(())
+}
+
+/// Puts a user-scope tool on `PATH`: a symlink `~/.local/bin/<name>` →
+/// `full` (mesa task 2424), the same directory Naru's own installer uses.
+/// A link already pointing at `full` is left as it is; anything else at that
+/// path — a file, or a link to somewhere else — is never replaced, and comes
+/// back as `conflict`. Off unix there is no link: the tool still lands in
+/// `.claude/bin`, which the person puts on `PATH` themselves.
+fn link_tool(full: &Path, name: &str) -> StoreResult<()> {
+    #[cfg(unix)]
+    {
+        let Some(home) = std::env::var_os("HOME") else {
+            return Ok(());
+        };
+        let dir = Path::new(&home).join(".local/bin");
+        let link = dir.join(name);
+        match fs::symlink_metadata(&link) {
+            // Compared resolved, so a link written through a symlinked home
+            // (or as a relative path) still counts as this tool's own.
+            Ok(_) if fs::canonicalize(&link).ok() == fs::canonicalize(full).ok() => {
+                return Ok(());
+            }
+            Ok(_) => {
+                return Err(Error::Conflict(format!(
+                    "{} is on disk, but {} already exists and is not a link to it; left alone",
+                    full.display(),
+                    link.display()
+                )));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        fs::create_dir_all(&dir)?;
+        std::os::unix::fs::symlink(full, &link)?;
+    }
+    #[cfg(not(unix))]
+    let _ = (full, name);
+    Ok(())
+}
+
+/// Installs a just-imported user-scope tool (mesa task 2424): import writes
+/// rows only for every other kind, but a tool that other items name on
+/// `PATH` is useless until it is there. Goes through the sync row for its
+/// path, so the write is `apply_naru`'s own — executable, baseline stamped,
+/// linked — and only where sync would push without asking: no file yet, a
+/// file already identical, or one unchanged since the last agreement. A file
+/// that moved on disk is left for `sync` to show and pick, and reported here.
+fn install_tool(store: &mut Store, name: &str) -> Result<(), String> {
+    let path = relative_path(LibraryKind::Tool, LibraryScope::User, name, false)
+        .expect("a tool always has a path")
+        .to_string_lossy()
+        .into_owned();
+    let status = sync_status(store, None).map_err(|e| e.to_string())?;
+    let Some(row) = status.iter().find(|r| r.path == path) else {
+        return Err(format!("{path} is not part of the current sync status"));
+    };
+    match row.status {
+        LibrarySyncStatus::MesaNew
+        | LibrarySyncStatus::DiskDeleted
+        | LibrarySyncStatus::MesaChanged
+        | LibrarySyncStatus::InSync => apply_naru(store, None, row).map_err(|e| e.to_string()),
+        _ => Err(format!(
+            "{path} on disk differs from the imported body; resolve it with library sync"
+        )),
+    }
 }
 
 /// `disk` wins: pull the disk body into mesa, or destroy the row on a
@@ -1964,6 +2038,14 @@ pub fn import(
             ),
             _ => import_one(store, item, choice.unwrap_or(on_conflict)),
         });
+        let result = results.last_mut().expect("just pushed");
+        if item.kind == LibraryKind::Tool
+            && item.scope == LibraryScope::User
+            && result.status != "failed"
+            && let Err(e) = install_tool(store, &item.name)
+        {
+            result.error = Some(e);
+        }
     }
 
     for (i, (key, _)) in resolutions.iter().enumerate() {
@@ -6122,6 +6204,148 @@ mod tests {
         let user_item = bundle.items.iter().find(|i| i.name == "my-hook").unwrap();
         assert_eq!(user_item.scope, LibraryScope::User);
         assert_eq!(user_item.project, None);
+    }
+
+    fn tool_bundle(body: &str) -> LibraryBundle {
+        bundle_of(vec![LibraryBundleItem {
+            name: "merge-to-main".to_string(),
+            kind: LibraryKind::Tool,
+            scope: LibraryScope::User,
+            project: None,
+            body: body.to_string(),
+            builtin_id: None,
+            export_command: false,
+            files: Default::default(),
+        }])
+    }
+
+    #[test]
+    fn a_tool_lives_in_claude_bin_and_the_scan_finds_it() {
+        assert_eq!(
+            relative_path(
+                LibraryKind::Tool,
+                LibraryScope::User,
+                "merge-to-main",
+                false
+            ),
+            Some(PathBuf::from(".claude/bin/merge-to-main"))
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join(".claude/bin");
+        fs::create_dir_all(bin.join("tests")).unwrap();
+        fs::write(bin.join("merge-to-main"), "#!/bin/bash\n").unwrap();
+        fs::write(bin.join(".DS_Store"), "x").unwrap();
+        assert_eq!(
+            scanned(dir.path()),
+            vec![(
+                LibraryKind::Tool,
+                "merge-to-main".to_string(),
+                "#!/bin/bash\n".to_string()
+            )],
+            "a directory and a dotfile are not tools"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn importing_a_tool_installs_it_executable_and_on_path() {
+        use std::os::unix::fs::PermissionsExt;
+        with_home_dir(|home| {
+            let (mut store, _dir) = temp_store();
+            let results = import(
+                &mut store,
+                &tool_bundle("#!/bin/bash\necho hi\n"),
+                "skip",
+                &[],
+            )
+            .unwrap();
+            assert_eq!(results[0].status, "created");
+            assert_eq!(results[0].error, None);
+
+            let file = home.join(".claude/bin/merge-to-main");
+            assert_eq!(fs::read_to_string(&file).unwrap(), "#!/bin/bash\necho hi\n");
+            let mode = fs::metadata(&file).unwrap().permissions().mode();
+            assert_eq!(mode & 0o111, 0o111);
+            let link = home.join(".local/bin/merge-to-main");
+            assert_eq!(
+                fs::canonicalize(fs::read_link(&link).unwrap()).unwrap(),
+                fs::canonicalize(&file).unwrap()
+            );
+
+            let status = sync_status(&store, None).unwrap();
+            let row = status
+                .iter()
+                .find(|r| r.path == ".claude/bin/merge-to-main")
+                .unwrap();
+            assert_eq!(row.status, LibrarySyncStatus::InSync);
+            let id = results[0].item_id.unwrap();
+            assert_eq!(
+                store.get_library_item(id).unwrap().synced_body.as_deref(),
+                Some("#!/bin/bash\necho hi\n")
+            );
+
+            // Importing it again changes nothing and reports nothing.
+            let results = import(
+                &mut store,
+                &tool_bundle("#!/bin/bash\necho hi\n"),
+                "skip",
+                &[],
+            )
+            .unwrap();
+            assert_eq!(results[0].status, "skipped");
+            assert_eq!(results[0].error, None);
+
+            // A replace onto an unchanged file pushes the new body.
+            let results = import(
+                &mut store,
+                &tool_bundle("#!/bin/bash\necho v2\n"),
+                "replace",
+                &[],
+            )
+            .unwrap();
+            assert_eq!(results[0].status, "replaced");
+            assert_eq!(results[0].error, None);
+            assert_eq!(fs::read_to_string(&file).unwrap(), "#!/bin/bash\necho v2\n");
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn importing_a_tool_never_overwrites_a_file_it_does_not_own() {
+        with_home_dir(|home| {
+            // A different script already at the tool's own path is a sync
+            // conflict, not something import decides.
+            let (mut store, _dir) = temp_store();
+            let file = home.join(".claude/bin/merge-to-main");
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(&file, "mine\n").unwrap();
+            let results = import(&mut store, &tool_bundle("theirs\n"), "skip", &[]).unwrap();
+            assert_eq!(results[0].status, "created");
+            assert!(
+                results[0]
+                    .error
+                    .as_deref()
+                    .unwrap()
+                    .contains("library sync")
+            );
+            assert_eq!(fs::read_to_string(&file).unwrap(), "mine\n");
+            assert!(!home.join(".local/bin/merge-to-main").exists());
+        });
+        with_home_dir(|home| {
+            // An unrelated file on PATH under the same name is left alone;
+            // the tool itself still lands in `.claude/bin`.
+            let (mut store, _dir) = temp_store();
+            let link = home.join(".local/bin/merge-to-main");
+            fs::create_dir_all(link.parent().unwrap()).unwrap();
+            fs::write(&link, "unrelated\n").unwrap();
+            let results = import(&mut store, &tool_bundle("theirs\n"), "skip", &[]).unwrap();
+            assert!(results[0].error.as_deref().unwrap().contains("left alone"));
+            assert_eq!(fs::read_to_string(&link).unwrap(), "unrelated\n");
+            assert_eq!(
+                fs::read_to_string(home.join(".claude/bin/merge-to-main")).unwrap(),
+                "theirs\n"
+            );
+        });
     }
 
     fn bundle_of(items: Vec<LibraryBundleItem>) -> LibraryBundle {

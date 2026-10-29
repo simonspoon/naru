@@ -1,4 +1,4 @@
-# Library (agents, skills, hooks, prompts, CLAUDE.md)
+# Library (agents, skills, hooks, prompts, CLAUDE.md, tools)
 
 The web page is three tabs (mesa task 1676, `libraryTab.ts`): **Claude Code**
 (`#/library`, everything below, Sync included), **Scripts** (`#/library/scripts`,
@@ -17,7 +17,11 @@ template splices in as `{prompt:<name>}` (mesa task 1138) — each of which may
 task 1139, see [Prompts that are also slash
 commands](#prompts-that-are-also-slash-commands)). The live agent's own
 instructions are the `naru-live` **agent definition** (mesa task 1068) — see
-[Where the live prompt went](#where-the-live-prompt-went).
+[Where the live prompt went](#where-the-live-prompt-went). A sixth kind,
+**tools**, carries the person's helper scripts — `~/.claude/bin/<name>`, put
+on `PATH` — so a hook, agent or CLAUDE.md that names one still finds it on
+another machine (mesa task 2424, see [Tools are scripts on
+`PATH`](#tools-are-scripts-on-path)).
 
 ## The record
 
@@ -27,7 +31,7 @@ Table `library_items` (migration index 47, resulting `user_version` 48):
 | --- | --- | --- |
 | `id` | INTEGER PK | |
 | `name` | TEXT NOT NULL | `^[A-Za-z0-9][A-Za-z0-9._-]*$`, no `/`, `\` or `..` — it is half a filename |
-| `kind` | TEXT NOT NULL | `agent \| skill \| hook \| prompt \| claude-md` — `command` until migration index 54 folded it into `prompt` |
+| `kind` | TEXT NOT NULL | `agent \| skill \| hook \| prompt \| claude-md \| tool` — `command` until migration index 54 folded it into `prompt` |
 | `scope` | TEXT NOT NULL | `user \| project` |
 | `project_id` | INTEGER NULL | FK `ON DELETE CASCADE`; required iff `scope = project`, must be NULL iff `scope = user` |
 | `body` | TEXT NOT NULL | the file's contents; may be empty |
@@ -389,6 +393,7 @@ to the **scope base** — the home directory for `user`, a project's
 | `agent` | `.claude/agents/<name>.md` | `.claude/agents/<name>.md` |
 | `skill` | `.claude/skills/<name>/SKILL.md` | `.claude/skills/<name>/SKILL.md` |
 | `hook` | `.claude/hooks/<name>` | `.claude/hooks/<name>` |
+| `tool` | `.claude/bin/<name>` | `.claude/bin/<name>` |
 | `claude-md` | `.claude/CLAUDE.md` | `CLAUDE.md` (the repo root — where Claude Code actually reads it) |
 | `prompt`, `export_command` on | `.claude/commands/<name>.md` | `.claude/commands/<name>.md` |
 | `prompt`, `export_command` off | **none** | **none** |
@@ -404,6 +409,35 @@ cannot name is one it could not round-trip) — dotfiles included, since that
 rule requires an alphanumeric first character. Migration index 52 appended
 `.sh` to every pre-existing hook row's name, which is exactly the path it
 already had.
+
+## Tools are scripts on `PATH`
+
+A `tool` (mesa task 2424) is an executable helper script — `merge-to-main` is
+the first — named, like a hook, by its whole filename, and scanned the same
+way: every regular file in `.claude/bin/` whose name the name rule accepts
+(a subdirectory such as a script's `tests/` is not a tool). Two things set it
+apart from every other kind, and both happen wherever Naru writes its file —
+a sync resolved toward naru, and an import:
+
+- the file is made **executable** (`make_executable`, as for a hook);
+- at `user` scope it is **linked onto `PATH`**: `core::library::link_tool`
+  creates the symlink `~/.local/bin/<name>` → the file. A link that already
+  resolves to the file is left as it is; anything else at that path — a
+  regular file, a link to somewhere else, a dangling link — is never
+  replaced, and the row reports `conflict` (`… already exists and is not a
+  link to it; left alone`) while the file itself stays written and agreed.
+  Agreed means the row is `in-sync` afterwards, which a sync never offers
+  again — so once the blocker is gone, re-import the tool (import installs
+  an `in-sync` tool too) to make the link.
+  A `project`-scope tool is written and made executable but not linked:
+  `PATH` is per user, not per repo. Off unix there is no link — the file
+  lands in `.claude/bin` and putting that on `PATH` is the person's own step,
+  so nothing here changes how Mac/Unix behaves.
+
+Deleting a tool row deletes the row only, as for every kind; the file and its
+link stay on disk. A rename moves the file the way any kind's does, and the
+next sync links the new name; the old name's link is not removed and is left
+dangling.
 
 ## Prompts that are also slash commands
 
@@ -1094,8 +1128,18 @@ while the rest of the batch still applies. The CLI deliberately has no
 per-item resolve flag: the pick is made against a diff, which is a thing to
 read rather than to type, so `--preview` reports and the web flow decides.
 
-**Import never touches disk.** It writes rows the same way `create`/`update`
-do, and nothing more — no file is written, no baseline is stamped. A freshly
+**Import never touches disk — except to install a tool.** A user-scope `tool`
+is useless to whatever names it until it is on `PATH`, so after its row is
+created, replaced or skipped, `core::library::install_tool` resolves it
+through that path's own sync row and applies the naru side — written
+executable, baseline stamped, linked (see [Tools are scripts on
+`PATH`](#tools-are-scripts-on-path)) — but only where a sync would push
+without a question: `mesa-new`, `disk-deleted`, `mesa-changed` or
+`in-sync`. A file that moved on disk (`disk-changed`, `both-changed`) is left
+untouched for `sync` to show and pick. Either refusal — that one, or a link
+`link_tool` will not replace — keeps the item's import `status` and carries
+the reason in its `error`. Every other kind: import writes rows the same way
+`create`/`update` do, and nothing more — no file is written, no baseline is stamped. A freshly
 imported row therefore has a null `synced_body`, so the very next `sync
 status` reports it honestly: `mesa-new` if nothing sits at its path yet, or
 `both-changed` if a file already does. That is correct, not a gap — Naru and

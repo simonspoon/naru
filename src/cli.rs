@@ -158,8 +158,8 @@ EXAMPLES
     /// written HTML/SVG/markdown pages)
     #[command(subcommand)]
     Artifact(ArtifactCmd),
-    /// Agent definitions, skills, hooks, prompts and CLAUDE.md
-    /// files, synced against `.claude/`
+    /// Agent definitions, skills, hooks, prompts, CLAUDE.md files and
+    /// tools, synced against `.claude/`
     #[command(subcommand)]
     Library(LibraryCmd),
     /// Run a spoken conversation with mesa (the agent side of the Live page)
@@ -2819,7 +2819,7 @@ EXAMPLES
   mesa library create prompt my-note --body 'remember this'
   mesa library create agent reviewer --body-file reviewer.md --scope project --project mesa")]
     Create {
-        /// agent|skill|hook|prompt|claude-md
+        /// agent|skill|hook|prompt|claude-md|tool
         #[arg(value_name = "KIND", required_unless_present = "kind")]
         kind_pos: Option<String>,
         /// Kind (flag form of KIND)
@@ -4970,7 +4970,7 @@ fn parse_archive_outcome(s: &str) -> std::result::Result<ArchiveOutcome, String>
 
 fn parse_library_kind(s: &str) -> std::result::Result<LibraryKind, String> {
     LibraryKind::parse(s)
-        .ok_or_else(|| format!("'{s}' is not one of agent|skill|hook|prompt|claude-md"))
+        .ok_or_else(|| format!("'{s}' is not one of agent|skill|hook|prompt|claude-md|tool"))
 }
 
 fn parse_library_scope(s: &str) -> std::result::Result<LibraryScope, String> {
