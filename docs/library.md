@@ -206,7 +206,7 @@ That split is the whole point:
   `Store::create_library_item`/the fork route both check
   `Store::find_library_fork` first and answer `conflict` on a second attempt.
 
-The starter set — twenty-four rows:
+The starter set — twenty-five rows:
 
 | `id` | kind | scope | what it is |
 | --- | --- | --- | --- |
@@ -234,6 +234,7 @@ The starter set — twenty-four rows:
 | `swift-implementer` | `agent` | `user` | Implements one scoped Swift/SwiftUI change in an iOS or macOS project (`sonnet`) |
 | `supervising-agent-teams` | `skill` | `user` | The supervisor's procedures — waiting, verifying, briefs, resources, intervening — as `SKILL.md` plus five sibling files (`briefs.md`, `intervening.md`, `resources.md`, `verifying.md`, `waiting.md`); the `supervisor` agent loads it with the `Skill` tool |
 | `execute-naru-task` | `skill` | `user` | The task lifecycle a queue-watcher task agent runs as `/execute-naru-task <id>` (naru task 2394, replacing the retired `execute-todo` prompt): claim, the six-step work loop, notes, `naru ask`, end done or parked. Seeded to `~/.claude/skills/execute-naru-task/SKILL.md` before every dispatch (`library::ensure_user_file`, never overwriting) |
+| `merge-to-main` | `tool` | `user` | The worktree-landing script agents are told to run — `src/core/builtins/merge-to-main` (naru task 2464). A sync toward naru writes it to `~/.claude/bin/merge-to-main` and links `~/.local/bin/merge-to-main` (see [Tools are scripts on `PATH`](#tools-are-scripts-on-path)) |
 
 `naru-live`'s body being the literal `AGENT_DEFINITION` constant (and
 `live-summary-prompt`'s the literal `SUMMARY_PROMPT`) is what lets
@@ -433,6 +434,22 @@ a sync resolved toward naru, and an import:
   `PATH` is per user, not per repo. Off unix there is no link — the file
   lands in `.claude/bin` and putting that on `PATH` is the person's own step,
   so nothing here changes how Mac/Unix behaves.
+
+`merge-to-main` ships as a **built-in** tool (naru task 2464), so a fresh
+account — another user on a shared Mac, a new install — gets it from its own
+`naru library sync apply --all-naru` (or `--resolve
+.claude/bin/merge-to-main=naru`): written, made executable and linked, per
+user, no sudo. An account that already had its own `merge-to-main` row from
+before is unaffected: that row is not a fork, so the built-in still lists
+beside it (the page folds it under **overrides built-in**), but the stored row
+outranks the built-in on the shared path, so sync keeps offering only the
+row's own body. `naru library builtin link <ITEM>` turns that row into the
+built-in's fork if wanted.
+
+When a sync links a user-scope tool and `~/.local/bin` is not on `PATH`, the
+applied `LibrarySyncResult` carries a `note` saying so (`null` otherwise), and
+the page's result line shows it after `applied`. The link is still made;
+adding the directory to `PATH` is the person's step.
 
 Deleting a tool row deletes the row only, as for every kind; the file and its
 link stay on disk. A rename moves the file the way any kind's does, and the

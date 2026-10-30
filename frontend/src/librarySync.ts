@@ -155,10 +155,11 @@ export function resolutionsFor(
  * the server's honest report of a `skip` — nothing was applied and nothing
  * went wrong, so it reads as "skipped", never "failed". Only a non-null
  * `error` is an actual failure; `applied` alone does not mean "ok" the way a
- * naive `applied ? 'applied' : 'failed'` would render it.
+ * naive `applied ? 'applied' : 'failed'` would render it. An applied row's
+ * `note` (a tool linked into a directory not on PATH) rides after it.
  */
 export function resultLabel(result: LibrarySyncResult): string {
-  if (result.applied) return 'applied'
+  if (result.applied) return result.note !== null ? `applied — ${result.note}` : 'applied'
   if (result.error !== null) return `failed — ${result.error}`
   return 'skipped'
 }

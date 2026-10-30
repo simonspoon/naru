@@ -1,0 +1,213 @@
+#!/usr/bin/env bash
+# merge-to-main: land the current worktree branch on the local base branch.
+# Local only: no fetch, no push, no pull request. See --help.
+set -u
+
+usage() {
+  cat <<'USAGE'
+Usage: merge-to-main [--base <branch>] [--gate "<cmd>" | --gate none] [--timeout <seconds>]
+
+Run from inside a linked git worktree on its feature branch (clean tree).
+Takes a repo-wide lock (waits if another merge-to-main holds it), rebases the
+branch onto the current local base tip, runs the gate, then fast-forwards the
+base branch to the branch. Never fetches, never pushes.
+
+Options:
+  --base <branch>    base branch (default: main, else master)
+  --gate "<cmd>"     gate command run in the worktree after the rebase;
+                     "none" skips the gate. Default: .merge-gate file at the
+                     repo top level (run with bash -c), else autodetect:
+                       Cargo.toml -> cargo test -q
+                       package.json + pnpm-lock.yaml -> pnpm test
+                       package.json -> npm test
+                       Package.swift -> swift build
+                       *.sln / *.csproj -> dotnet build
+  --timeout <s>      max seconds to wait for the lock (default 1800;
+                     env MERGE_TO_MAIN_TIMEOUT)
+  -h, --help         this text
+
+Exit codes:
+  0   merged (or nothing to merge)
+  2   usage error or precondition failed (not a repo, on base branch, dirty
+      tree, no gate detected)
+  3   rebase conflict (rebase aborted, branch restored, base untouched)
+  4   gate failed (base untouched)
+  5   fast-forward of base failed (base untouched)
+  75  timed out waiting for the lock (base untouched; safe to retry)
+USAGE
+}
+
+die() { code=$1; shift; echo "merge-to-main: $*" >&2; exit "$code"; }
+
+BASE=""
+GATE=""
+GATE_SET=0
+TIMEOUT="${MERGE_TO_MAIN_TIMEOUT:-1800}"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --base) [ $# -ge 2 ] || die 2 "--base needs a value"; BASE=$2; shift 2 ;;
+    --gate) [ $# -ge 2 ] || die 2 "--gate needs a value"; GATE=$2; GATE_SET=1; shift 2 ;;
+    --timeout) [ $# -ge 2 ] || die 2 "--timeout needs a value"; TIMEOUT=$2; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage >&2; die 2 "unknown argument: $1" ;;
+  esac
+done
+case "$TIMEOUT" in ''|*[!0-9]*) die 2 "--timeout must be a number of seconds" ;; esac
+
+git rev-parse --git-dir >/dev/null 2>&1 || die 2 "not inside a git repository"
+TOP=$(git rev-parse --show-toplevel) || die 2 "cannot find the worktree top level"
+COMMON=$(git rev-parse --path-format=absolute --git-common-dir) || die 2 "cannot find the git common dir"
+BRANCH=$(git symbolic-ref --quiet --short HEAD) || die 2 "detached HEAD: check out the feature branch first"
+
+if [ -z "$BASE" ]; then
+  if git show-ref --verify --quiet refs/heads/main; then BASE=main
+  elif git show-ref --verify --quiet refs/heads/master; then BASE=master
+  else die 2 "no main or master branch; pass --base <branch>"; fi
+else
+  git show-ref --verify --quiet "refs/heads/$BASE" || die 2 "base branch '$BASE' does not exist"
+fi
+[ "$BRANCH" != "$BASE" ] || die 2 "on the base branch '$BASE'; run from the feature worktree"
+[ -z "$(git status --porcelain --untracked-files=no)" ] || die 2 "working tree not clean: commit first"
+
+for d in rebase-merge rebase-apply; do
+  [ ! -e "$(git rev-parse --path-format=absolute --git-path "$d")" ] || die 2 "a rebase is already in progress in this worktree; finish or abort it first"
+done
+
+# Sets GATE from the files at the repo top level; fails if none applies.
+resolve_gate() {
+  if [ -f "$TOP/.merge-gate" ]; then GATE=$(cat "$TOP/.merge-gate")
+  elif [ -f "$TOP/Cargo.toml" ]; then GATE="cargo test -q"
+  elif [ -f "$TOP/package.json" ] && [ -f "$TOP/pnpm-lock.yaml" ]; then GATE="pnpm test"
+  elif [ -f "$TOP/package.json" ]; then GATE="npm test"
+  elif [ -f "$TOP/Package.swift" ]; then GATE="swift build"
+  elif compgen -G "$TOP/*.sln" >/dev/null || compgen -G "$TOP/*.csproj" >/dev/null; then GATE="dotnet build"
+  else return 1
+  fi
+}
+NOGATE_MSG="no gate detected: pass --gate <cmd> or --gate none, or add a .merge-gate file"
+# Early check on the pre-rebase tree so a missing gate fails before the lock;
+# the gate is re-resolved after the rebase, from the tree that will be merged.
+if [ "$GATE_SET" = 0 ]; then resolve_gate || die 2 "$NOGATE_MSG"; fi
+
+LOCK="$COMMON/merge-to-main.lock"
+OWNER="$LOCK/owner"
+HOST=$(hostname)
+HELD=0
+REBASING=0
+
+owner_field() { sed -n "s/^$1=//p" "$OWNER" 2>/dev/null | head -n 1; }
+mtime() { stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0; }
+
+cleanup() {
+  if [ "$REBASING" = 1 ]; then git rebase --abort >/dev/null 2>&1; REBASING=0; fi
+  if [ "$HELD" = 1 ] && [ "$(owner_field pid)" = "$$" ]; then rm -rf "$LOCK"; fi
+  HELD=0
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+
+try_acquire() {
+  if mkdir "$LOCK" 2>/dev/null; then
+    printf 'pid=%s\nhost=%s\nbranch=%s\nworktree=%s\nstart=%s\n' \
+      "$$" "$HOST" "$BRANCH" "$TOP" "$(date +%s)" > "$OWNER"
+    HELD=1
+    return 0
+  fi
+  return 1
+}
+
+# Break the lock if its holder is provably gone. Moves the dir aside first so
+# two breakers cannot both delete a lock a third process just acquired.
+maybe_break_stale() {
+  local pid host start now age stale=""
+  now=$(date +%s)
+  pid=$(owner_field pid); host=$(owner_field host); start=$(owner_field start)
+  case "$pid" in
+    ''|*[!0-9]*)
+      age=$((now - $(mtime "$LOCK")))
+      [ "$age" -gt 60 ] && stale="owner file missing or unparseable, lock ${age}s old" ;;
+    *)
+      if ! kill -0 "$pid" 2>/dev/null; then
+        stale="holder pid $pid is not alive"
+      fi ;;
+  esac
+  [ -n "$stale" ] || return 1
+  [ "$(owner_field pid)" = "$pid" ] || return 1
+  local aside="$LOCK.stale.$$"
+  mv "$LOCK" "$aside" 2>/dev/null || return 1
+  if [ "$(sed -n 's/^pid=//p' "$aside/owner" 2>/dev/null | head -n 1)" != "$pid" ]; then
+    # The lock changed hands between the check and the mv: we took a live one.
+    if mv "$aside" "$LOCK" 2>/dev/null; then
+      echo "merge-to-main: lock changed hands while breaking it; restored, waiting" >&2
+    else
+      echo "merge-to-main: lock changed hands while breaking it; could not restore (left at $aside)" >&2
+    fi
+    return 1
+  fi
+  rm -rf "$aside"
+  echo "merge-to-main: broke stale lock ($stale)" >&2
+  return 0
+}
+
+waited=0
+last_msg=-30
+while ! try_acquire; do
+  if maybe_break_stale; then continue; fi
+  if [ "$waited" -ge "$TIMEOUT" ]; then
+    echo "merge-to-main: timed out after ${waited}s waiting for the lock held by branch '$(owner_field branch)' (pid $(owner_field pid))." >&2
+    echo "merge-to-main: the base branch is untouched; it is safe to retry." >&2
+    exit 75
+  fi
+  if [ $((waited - last_msg)) -ge 30 ]; then
+    start=$(owner_field start)
+    held_for="?"
+    case "$start" in ''|*[!0-9]*) ;; *) held_for="$(( $(date +%s) - start ))s" ;; esac
+    echo "merge-to-main: waiting for lock: held by branch '$(owner_field branch)' pid $(owner_field pid) worktree $(owner_field worktree) for $held_for; waited ${waited}s" >&2
+    last_msg=$waited
+  fi
+  sleep 5
+  waited=$((waited + 5))
+done
+echo "merge-to-main: lock acquired (waited ${waited}s)"
+
+# Everything below is local: no fetch, no push. The base tip may have moved
+# while we waited, so read it now.
+OLD=$(git rev-parse "refs/heads/$BASE")
+
+echo "merge-to-main: rebasing $BRANCH onto $BASE ($OLD)"
+REBASING=1
+if ! git rebase "$BASE" >/dev/null 2>&1; then
+  git rebase --abort >/dev/null 2>&1
+  REBASING=0
+  die 3 "rebase of '$BRANCH' onto '$BASE' conflicted; rebase aborted, branch restored, '$BASE' untouched. Resolve by rebasing manually, then re-run."
+fi
+REBASING=0
+
+NEW=$(git rev-parse HEAD)
+if [ "$NEW" = "$OLD" ] || git merge-base --is-ancestor "$NEW" "$OLD"; then
+  echo "merge-to-main: nothing to merge: '$BASE' already contains '$BRANCH'"
+  exit 0
+fi
+
+if [ "$GATE_SET" = 0 ]; then resolve_gate || die 2 "$NOGATE_MSG ('$BASE' untouched; the branch is rebased onto it)"; fi
+if [ "$GATE" != "none" ]; then
+  echo "merge-to-main: gate: $GATE"
+  if ! (cd "$TOP" && bash -c "$GATE"); then
+    die 4 "gate failed; '$BASE' untouched (the branch is rebased onto '$BASE')."
+  fi
+fi
+
+# Find a worktree that has the base branch checked out.
+BASE_WT=$(git worktree list --porcelain | awk -v ref="refs/heads/$BASE" '
+  /^worktree /{wt=substr($0,10)} $0=="branch " ref {print wt; exit}')
+if [ -n "$BASE_WT" ]; then
+  if ! git -C "$BASE_WT" merge --ff-only "$BRANCH" >/dev/null 2>&1; then
+    die 5 "fast-forward of '$BASE' in $BASE_WT failed (dirty checkout or base moved); '$BASE' untouched."
+  fi
+else
+  git update-ref "refs/heads/$BASE" "$NEW" "$OLD" || die 5 "update-ref of '$BASE' failed (base moved); '$BASE' untouched."
+fi
+echo "merge-to-main: $BASE $OLD -> $NEW"
+exit 0

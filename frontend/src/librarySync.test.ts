@@ -197,11 +197,17 @@ describe('rowKey', () => {
 
 describe('resultLabel', () => {
   function result(overrides: Partial<LibrarySyncResult> = {}): LibrarySyncResult {
-    return { path: 'x', choice: 'mesa', applied: false, error: null, ...overrides }
+    return { path: 'x', choice: 'mesa', applied: false, error: null, note: null, ...overrides }
   }
 
   it('reads "applied" when applied is true', () => {
     expect(resultLabel(result({ applied: true, error: null }))).toBe('applied')
+  })
+
+  it('carries an applied row\'s note after "applied"', () => {
+    expect(resultLabel(result({ applied: true, note: 'not on PATH' }))).toBe(
+      'applied — not on PATH',
+    )
   })
 
   it('reads "skipped" — not "failed" — for a no-op skip (applied: false, error: null)', () => {

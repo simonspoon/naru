@@ -370,6 +370,18 @@ echo \"Claude Code stopped in $(pwd)\"
         export_command: false,
         files: &[],
     },
+    // The worktree-landing script agents are told to run (naru task 2464):
+    // shipped so every install has it, not just the account that wrote it.
+    // A sync toward naru writes it to `~/.claude/bin` and links it onto `PATH`.
+    Builtin {
+        id: "merge-to-main",
+        name: "merge-to-main",
+        kind: LibraryKind::Tool,
+        scope: LibraryScope::User,
+        body: include_str!("builtins/merge-to-main"),
+        export_command: false,
+        files: &[],
+    },
 ];
 
 /// The task-execution skill built-in, and the slash command
@@ -1500,6 +1512,7 @@ pub fn sync_apply(
                     "{path:?} was submitted more than once in this batch; only the first \
                      resolution for a path is applied"
                 )),
+                note: None,
             });
             continue;
         }
@@ -1509,6 +1522,7 @@ pub fn sync_apply(
                 choice: choice.clone(),
                 applied: false,
                 error: Some(format!("{path:?} is not part of the current sync status")),
+                note: None,
             });
             continue;
         };
@@ -1518,6 +1532,7 @@ pub fn sync_apply(
                 choice: choice.clone(),
                 applied: false,
                 error: None,
+                note: None,
             }),
             // `naru` is the same choice as `mesa` under the new name (mesa
             // task 1302); the result echoes whichever spelling was given.
@@ -1527,12 +1542,14 @@ pub fn sync_apply(
                     choice: choice.clone(),
                     applied: true,
                     error: None,
+                    note: tool_path_note(row),
                 }),
                 Err(e) => results.push(LibrarySyncResult {
                     path: path.clone(),
                     choice: choice.clone(),
                     applied: false,
                     error: Some(e.to_string()),
+                    note: None,
                 }),
             },
             "disk" => match apply_disk(store, row) {
@@ -1541,12 +1558,14 @@ pub fn sync_apply(
                     choice: choice.clone(),
                     applied: true,
                     error: None,
+                    note: None,
                 }),
                 Err(e) => results.push(LibrarySyncResult {
                     path: path.clone(),
                     choice: choice.clone(),
                     applied: false,
                     error: Some(e.to_string()),
+                    note: None,
                 }),
             },
             other => results.push(LibrarySyncResult {
@@ -1554,6 +1573,7 @@ pub fn sync_apply(
                 choice: choice.clone(),
                 applied: false,
                 error: Some(format!("{other:?} is not a valid sync choice")),
+                note: None,
             }),
         }
     }
@@ -1647,6 +1667,36 @@ fn link_tool(full: &Path, name: &str) -> StoreResult<()> {
     #[cfg(not(unix))]
     let _ = (full, name);
     Ok(())
+}
+
+/// Why a tool just linked by a sync may still not run by name: a user-scope
+/// tool's link lands in `~/.local/bin`, and a shell whose `PATH` lacks that
+/// directory never finds it (naru task 2464). `None` for any other row, off
+/// unix (no link is made), or when the directory is on `PATH`.
+fn tool_path_note(row: &LibrarySyncRow) -> Option<String> {
+    if !cfg!(unix) || row.kind != LibraryKind::Tool || row.scope != LibraryScope::User {
+        return None;
+    }
+    let dir = Path::new(&std::env::var_os("HOME")?).join(".local/bin");
+    if dir_on_path(&dir, std::env::var_os("PATH").as_deref()) {
+        return None;
+    }
+    Some(format!(
+        "{} is not on PATH; add it to run {} by name",
+        dir.display(),
+        row.name
+    ))
+}
+
+/// Whether `dir` is one of `path`'s entries, compared resolved where both
+/// exist so a symlinked home still matches.
+fn dir_on_path(dir: &Path, path: Option<&std::ffi::OsStr>) -> bool {
+    let Some(path) = path else {
+        return false;
+    };
+    let want = fs::canonicalize(dir).ok();
+    std::env::split_paths(path)
+        .any(|p| p == dir || (want.is_some() && fs::canonicalize(&p).ok() == want))
 }
 
 /// Installs a just-imported user-scope tool (mesa task 2424): import writes
@@ -4280,7 +4330,9 @@ mod tests {
     }
 
     /// The built-ins ship to every install, so none of them may carry the
-    /// author's own paths or tools, and no agent, skill or prompt a task number.
+    /// author's own paths, and no agent, skill or prompt a task number.
+    /// (`merge-to-main` was barred as a personal tool until it shipped as a
+    /// built-in itself, naru task 2464.)
     /// The task-number rule skips hooks: the pre-existing hook scripts name the
     /// task that added them in a header comment, and rewording a shipped hook
     /// body would flag every fork of it as `builtin_updated`.
@@ -4296,7 +4348,7 @@ mod tests {
             }
         }
         for (what, text, numbered) in texts {
-            for needle in ["/Users/", "simonspoon", "merge-to-main"] {
+            for needle in ["/Users/", "simonspoon"] {
                 assert!(!text.contains(needle), "{what} contains {needle:?}");
             }
             assert!(
@@ -6307,6 +6359,96 @@ mod tests {
             assert_eq!(results[0].error, None);
             assert_eq!(fs::read_to_string(&file).unwrap(), "#!/bin/bash\necho v2\n");
         });
+    }
+
+    /// naru task 2464: a fresh library ships merge-to-main, and one sync
+    /// toward naru installs it executable and linked onto `PATH`.
+    #[cfg(unix)]
+    #[test]
+    fn a_fresh_library_ships_merge_to_main_and_sync_installs_it() {
+        use std::os::unix::fs::PermissionsExt;
+        with_home_dir(|home| {
+            let (mut store, _dir) = temp_store();
+            let item = effective_items(&store, None)
+                .unwrap()
+                .into_iter()
+                .find(|i| i.name == "merge-to-main")
+                .expect("merge-to-main is a built-in");
+            assert!(item.builtin);
+            assert_eq!(item.kind, LibraryKind::Tool);
+            assert_eq!(item.path.as_deref(), Some(".claude/bin/merge-to-main"));
+
+            let path = ".claude/bin/merge-to-main".to_string();
+            let status = sync_status(&store, None).unwrap();
+            let row = status.iter().find(|r| r.path == path).unwrap();
+            assert_eq!(row.status, LibrarySyncStatus::MesaNew);
+
+            let results = sync_apply(&mut store, None, &[(path, "naru".to_string())]).unwrap();
+            assert!(results[0].applied, "{:?}", results[0].error);
+            // The temp home's `.local/bin` is on no test runner's PATH.
+            assert!(
+                results[0]
+                    .note
+                    .as_deref()
+                    .unwrap()
+                    .contains("is not on PATH"),
+                "{:?}",
+                results[0].note
+            );
+
+            let file = home.join(".claude/bin/merge-to-main");
+            assert_eq!(fs::read_to_string(&file).unwrap(), item.body);
+            assert!(item.body.starts_with("#!/usr/bin/env bash\n"));
+            let mode = fs::metadata(&file).unwrap().permissions().mode();
+            assert_eq!(mode & 0o111, 0o111);
+            let link = home.join(".local/bin/merge-to-main");
+            assert_eq!(
+                fs::canonicalize(&link).unwrap(),
+                fs::canonicalize(&file).unwrap()
+            );
+        });
+    }
+
+    /// naru task 2464: an account's own pre-existing merge-to-main row (not a
+    /// fork) outranks the new built-in on the one path, so the file it already
+    /// installed stays in sync and nothing is offered twice.
+    #[cfg(unix)]
+    #[test]
+    fn a_stored_merge_to_main_row_outranks_the_built_in() {
+        with_home_dir(|home| {
+            let (mut store, _dir) = temp_store();
+            let results =
+                import(&mut store, &tool_bundle("#!/bin/bash\nmine\n"), "skip", &[]).unwrap();
+            assert_eq!(results[0].error, None);
+            let id = results[0].item_id.unwrap();
+
+            let status = sync_status(&store, None).unwrap();
+            let rows: Vec<_> = status
+                .iter()
+                .filter(|r| r.path == ".claude/bin/merge-to-main")
+                .collect();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].item_id, Some(id));
+            assert_eq!(rows[0].status, LibrarySyncStatus::InSync);
+            assert_eq!(
+                fs::read_to_string(home.join(".claude/bin/merge-to-main")).unwrap(),
+                "#!/bin/bash\nmine\n"
+            );
+        });
+    }
+
+    #[test]
+    fn dir_on_path_matches_an_entry_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join(".local/bin");
+        fs::create_dir_all(&bin).unwrap();
+        let joined = std::env::join_paths([Path::new("/usr/bin"), bin.as_path()]).unwrap();
+        assert!(dir_on_path(&bin, Some(&joined)));
+        assert!(!dir_on_path(
+            &bin,
+            Some(std::ffi::OsStr::new("/usr/bin:/bin"))
+        ));
+        assert!(!dir_on_path(&bin, None));
     }
 
     #[cfg(unix)]

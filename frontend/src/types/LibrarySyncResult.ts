@@ -9,4 +9,10 @@ export type LibrarySyncResult = { path: string,
 /**
  * `mesa | disk | skip`, echoing the resolution this result answers.
  */
-choice: string, applied: boolean, error: string | null, };
+choice: string, applied: boolean, error: string | null, 
+/**
+ * Something worth knowing about an applied row that is not a failure —
+ * a user-scope tool linked into a `~/.local/bin` that is not on `PATH`
+ * (naru task 2464). `null` otherwise.
+ */
+note: string | null, };

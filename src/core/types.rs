@@ -2479,6 +2479,10 @@ pub struct LibrarySyncResult {
     pub choice: String,
     pub applied: bool,
     pub error: Option<String>,
+    /// Something worth knowing about an applied row that is not a failure —
+    /// a user-scope tool linked into a `~/.local/bin` that is not on `PATH`
+    /// (naru task 2464). `null` otherwise.
+    pub note: Option<String>,
 }
 
 // ---- library import/export (mesa task 963) ----
