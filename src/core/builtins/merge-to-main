@@ -10,7 +10,10 @@ Usage: merge-to-main [--base <branch>] [--gate "<cmd>" | --gate none] [--timeout
 Run from inside a linked git worktree on its feature branch (clean tree).
 Takes a repo-wide lock (waits if another merge-to-main holds it), rebases the
 branch onto the current local base tip, runs the gate, then fast-forwards the
-base branch to the branch. Never fetches, never pushes.
+base branch to the branch. Never fetches, never pushes. After a merge it
+removes the worktree (ignored files such as build output go with it) and
+deletes the branch (git branch -d), unless the tree has untracked or modified
+files or another live process holds its lock.
 
 Options:
   --base <branch>    base branch (default: main, else master)
@@ -210,4 +213,45 @@ else
   git update-ref "refs/heads/$BASE" "$NEW" "$OLD" || die 5 "update-ref of '$BASE' failed (base moved); '$BASE' untouched."
 fi
 echo "merge-to-main: $BASE $OLD -> $NEW"
+
+# The branch is landed: remove this linked worktree and its branch so they do
+# not pile up. `git worktree remove` (no --force) refuses a tree with modified
+# or untracked files (gitignored ones, e.g. build output, are deleted with it),
+# and `git branch -d` refuses an unmerged branch, so either refusal just
+# leaves things in place. A worktree lock is lifted only
+# when its holder pid (Claude Code writes "(pid N ...)") is dead or is an
+# ancestor of this process, i.e. the agent that ran us.
+lock_is_ours() {
+  local reason=$1 pid p
+  pid=$(printf '%s\n' "$reason" | sed -n 's/.*(pid \([0-9][0-9]*\).*/\1/p')
+  [ -n "$pid" ] || return 1
+  ps -p "$pid" >/dev/null 2>&1 || return 0
+  p=$$
+  while [ -n "$p" ] && [ "$p" -gt 1 ]; do
+    [ "$p" = "$pid" ] && return 0
+    p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
+  done
+  return 1
+}
+if [ "$(git rev-parse --path-format=absolute --git-dir)" != "$COMMON" ]; then
+  HOME_WT=${BASE_WT:-$(git worktree list --porcelain | sed -n '1s/^worktree //p')}
+  LOCKED=$(git worktree list --porcelain | WT="worktree $TOP" awk '
+    $0==ENVIRON["WT"] {f=1; next} /^worktree /{f=0} f && /^locked/ {print "locked " substr($0,8); exit}')
+  if [ -n "$LOCKED" ] && ! lock_is_ours "$LOCKED"; then
+    echo "merge-to-main: kept worktree $TOP (locked by another process: ${LOCKED#locked })" >&2
+  else
+    [ -z "$LOCKED" ] || git -C "$HOME_WT" worktree unlock "$TOP" >/dev/null 2>&1
+    if git -C "$HOME_WT" worktree remove "$TOP" >/dev/null 2>&1; then
+      echo "merge-to-main: removed worktree $TOP (cd out of it: $HOME_WT)"
+      if git -C "$HOME_WT" branch -d "$BRANCH" >/dev/null 2>&1; then
+        echo "merge-to-main: deleted branch $BRANCH"
+      else
+        echo "merge-to-main: kept branch $BRANCH (git branch -d refused)" >&2
+      fi
+    else
+      [ -z "$LOCKED" ] || git -C "$HOME_WT" worktree lock --reason "${LOCKED#locked }" "$TOP" >/dev/null 2>&1
+      echo "merge-to-main: kept worktree $TOP (untracked or modified files); remove it with git worktree remove" >&2
+    fi
+  fi
+fi
 exit 0
