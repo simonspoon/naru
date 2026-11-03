@@ -407,6 +407,16 @@ const GATE_HANDLES = ['approved', 'rejected'] as const
 /** A try / catch node's two flow handles: success, then a caught failure. */
 const TRYCATCH_HANDLES = ['ok', 'caught'] as const
 
+/** The `branch` of a failure exit (naru task 2533): an edge any node may
+ *  leave on, active only when that node fails. */
+export const FAILURE_BRANCH = 'failure'
+
+/** Whether a node of `kind` draws a failure exit: every node with flow
+ *  handles — not a comment box, nor a break/make (data only). */
+export function hasFailureExit(kind: WorkflowNodeKind): boolean {
+  return kind !== 'comment' && kind !== 'break' && kind !== 'make'
+}
+
 /** The labelled source handles a node offers, in the order they are drawn:
  *  `true`/`false` on a branch, one per option plus `fallback` on a decide
  *  node, `approved`/`rejected` on a gate, none (one unlabelled handle)
@@ -421,12 +431,14 @@ export function sourceHandles(kind: WorkflowNodeKind, config: NodeConfig): strin
 }
 
 /** The `branch` an edge dragged from `handle` of a node of `sourceKind`
- *  carries: the handle's own id on a branch (default `true`) or decide
- *  (default `fallback`) node, nothing anywhere else. */
+ *  carries: `failure` from any node's failure exit, else the handle's own id
+ *  on a branch (default `true`) or decide (default `fallback`) node, nothing
+ *  anywhere else. */
 export function branchForHandle(
   sourceKind: WorkflowNodeKind,
   handle: string | null | undefined,
 ): string | undefined {
+  if (handle === FAILURE_BRANCH) return FAILURE_BRANCH
   if (sourceKind === 'branch') return handle === 'false' ? 'false' : 'true'
   if (sourceKind === 'decide') return handle ? handle : DECIDE_FALLBACK
   if (sourceKind === 'switch') return handle ? handle : SWITCH_DEFAULT
@@ -436,9 +448,10 @@ export function branchForHandle(
 }
 
 /** The CSS class an edge's label colours it with: only the two branch
- *  verdicts have one — a decide option is free text and never a class name. */
+ *  verdicts and the failure exit have one — a decide option is free text and
+ *  never a class name. */
 export function edgeLabelClass(branch: string | null): string {
-  return branch === 'true' || branch === 'false' ? `wf-edge-${branch}` : ''
+  return branch === 'true' || branch === 'false' || branch === FAILURE_BRANCH ? `wf-edge-${branch}` : ''
 }
 
 /** A sample JSON body for a webhook node's `curl` line, by its body type

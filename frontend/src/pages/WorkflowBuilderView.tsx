@@ -27,12 +27,14 @@ import {
   isBuiltin,
 } from '../workflowBuiltin'
 import { toggleLabel, workflowHref, workflowsListHref } from '../workflowOverview'
-import { formatDuration, runPollMs, runSummary, runningRunId, stepClass } from '../workflowRun'
+import { formatDuration, handledFailures, runPollMs, runSummary, runningRunId, stepClass } from '../workflowRun'
+import type { WorkflowEdge } from '../types/WorkflowEdge'
 import type { WorkflowRun } from '../types/WorkflowRun'
 
 /** One finished run, step by step: status, timing and what each node produced
  *  or why it failed. */
-function RunSteps({ run }: { run: WorkflowRun }) {
+function RunSteps({ run, edges }: { run: WorkflowRun; edges: WorkflowEdge[] }) {
+  const handled = handledFailures(run, edges)
   return (
     <div className="workflow-run">
       <p className={run.status === 'failed' ? 'error' : 'muted'}>
@@ -45,9 +47,9 @@ function RunSteps({ run }: { run: WorkflowRun }) {
       )}
       <ol className="workflow-steps">
         {run.steps.map((s) => (
-          <li key={s.node_id} className={`workflow-step ${stepClass(s.status)}`}>
+          <li key={s.node_id} className={`workflow-step ${stepClass(s.status)}${handled.has(s.node_id) ? ' step-handled' : ''}`}>
             <div className="workflow-step-head">
-              <span className="workflow-step-status">{s.status}</span>
+              <span className="workflow-step-status">{handled.has(s.node_id) ? `${s.status} · handled` : s.status}</span>
               <b>{s.title}</b>
               <span className="muted">
                 {s.kind} · {formatDuration(s.duration_ms)}
@@ -499,7 +501,7 @@ export function WorkflowBuilderView({
           </div>
           {tab === 'steps' && (
             <div className="workflow-view">
-              {display ? <RunSteps run={display} /> : <p className="muted">Run it to see each step here.</p>}
+              {display ? <RunSteps run={display} edges={view.edges} /> : <p className="muted">Run it to see each step here.</p>}
             </div>
           )}
           {tab === 'runs' && (

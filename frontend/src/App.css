@@ -1749,6 +1749,10 @@ main {
   box-shadow: 0 0 0 2px var(--red);
 }
 
+.wf-node.step-failed.step-handled {
+  box-shadow: 0 0 0 2px var(--amber);
+}
+
 .wf-node.step-skipped {
   opacity: 0.45;
 }
@@ -2132,8 +2136,17 @@ main {
   background: var(--green);
 }
 
-.wf-viewport .react-flow__handle.wf-handle-false {
+.wf-viewport .react-flow__handle.wf-handle-false,
+.wf-viewport .react-flow__handle.wf-handle-failure {
   background: var(--red);
+}
+
+/* A card's failure exit row (naru task 2536), the full card width so its
+   handle sits on the card's right edge like the others. */
+.wf-fail-row {
+  position: relative;
+  height: 20px;
+  margin-top: 0.3rem;
 }
 
 .wf-branch-label {
@@ -2152,6 +2165,10 @@ main {
 
 .wf-branch-false,
 .wf-branch-false-text {
+  color: var(--red);
+}
+
+.wf-branch-failure {
   color: var(--red);
 }
 
@@ -2176,6 +2193,11 @@ main {
 
 .wf-viewport .react-flow__edge.wf-edge-false .react-flow__edge-path {
   stroke: var(--red);
+}
+
+.wf-viewport .react-flow__edge.wf-edge-failure .react-flow__edge-path {
+  stroke: var(--red);
+  stroke-dasharray: 8 5;
 }
 
 .wf-viewport .react-flow__edge.selected .react-flow__edge-path {
@@ -2477,6 +2499,10 @@ main {
 
 .workflow-step.step-failed {
   border-left-color: var(--red);
+}
+
+.workflow-step.step-failed.step-handled {
+  border-left-color: var(--amber);
 }
 
 .workflow-step.step-skipped {

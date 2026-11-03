@@ -16,6 +16,7 @@ import {
   hasInput,
   inspectorKey,
   hasOutput,
+  hasFailureExit,
   missingValueRows,
   summarize,
   webhookSample,
@@ -256,7 +257,17 @@ describe('graph rules', () => {
     expect(sourceHandles('branch', {})).toEqual(['true', 'false'])
     expect(sourceHandles('cli', {})).toEqual([])
   })
-  it('classes only the two branch verdicts', () => {
+  it('a failure exit carries failure from any node kind (naru task 2536)', () => {
+    for (const k of ['cli', 'branch', 'decide', 'switch', 'gate', 'trycatch', 'trigger'] as const)
+      expect(branchForHandle(k, 'failure')).toBe('failure')
+    expect(hasFailureExit('cli')).toBe(true)
+    expect(hasFailureExit('decide')).toBe(true)
+    expect(hasFailureExit('comment')).toBe(false)
+    expect(hasFailureExit('break')).toBe(false)
+    expect(hasFailureExit('make')).toBe(false)
+  })
+  it('classes only the two branch verdicts and the failure exit', () => {
+    expect(edgeLabelClass('failure')).toBe('wf-edge-failure')
     expect(edgeLabelClass('true')).toBe('wf-edge-true')
     expect(edgeLabelClass('false')).toBe('wf-edge-false')
     expect(edgeLabelClass('a b"c')).toBe('')

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatDuration, gateBadge, gateByNode, hasOutputPanel, runPollMs, runSummary, runningRunId, stepClass, stepCounts, stepOutput, stepStatusByNode, triggerLabel } from './workflowRun'
+import { formatDuration, gateBadge, gateByNode, handledFailures, hasOutputPanel, runPollMs, runSummary, runningRunId, stepClass, stepCounts, stepOutput, stepStatusByNode, triggerLabel } from './workflowRun'
 import type { WorkflowGate } from './types/WorkflowGate'
 import type { WorkflowRun } from './types/WorkflowRun'
 import type { WorkflowStep } from './types/WorkflowStep'
@@ -44,6 +44,20 @@ describe('stepClass', () => {
   it('paints nothing before a run', () => {
     expect(stepClass(undefined)).toBe('')
     expect(stepClass('failed')).toBe('step-failed')
+  })
+})
+
+describe('handledFailures', () => {
+  it('marks a failed step whose node has a wired failure exit', () => {
+    const r = run([step(1, 'failed'), step(2, 'ok'), step(3, 'failed'), step(4, 'ok')])
+    const edges = [
+      { from_node: 1, branch: 'failure', kind: 'exec' as const },
+      { from_node: 3, branch: null, kind: 'exec' as const },
+      { from_node: 3, branch: 'failure', kind: 'data' as const },
+      { from_node: 4, branch: 'failure', kind: 'exec' as const },
+    ]
+    expect([...handledFailures(r, edges)]).toEqual([1])
+    expect(handledFailures(null, edges).size).toBe(0)
   })
 })
 

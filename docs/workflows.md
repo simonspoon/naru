@@ -1109,7 +1109,13 @@ context kind `workflows`, with the workflow's id and name once one is open.
   **fallback** handle (labels drawn on the card; the handles follow the saved
   options), and an edge takes the handle's label as its `branch`; only those two
   kinds' edges carry one. A trigger has no input
-  handle and an output node no output handle. Click a node or an edge to select
+  handle and an output node no output handle. **Failure exit** (naru task
+  2536): every card but a comment and a break/make also has a red **failure**
+  source handle — in a row at the card's foot, or as the last labelled row on
+  a decide/switch/gate/trycatch — and an edge dragged from it carries `branch`
+  `failure` (the engine's failure exit above); it is drawn dashed red. The
+  unlabelled success handle stays the card's first source handle, so an edge
+  with no `branch` keeps landing on it. Click a node or an edge to select
   it: the **inspector** (bottom-right) edits a node's title and a real control
   per config key of its kind (trigger mode/every-minutes/phrase; prompt
   model, thinking, prompt, timeout, with `local:<name>`; cli command and
@@ -1124,7 +1130,10 @@ context kind `workflows`, with the workflow's id and name once one is open.
 - **Running**: the header's **▶ Run** (with an optional input) posts
   `/api/workflows/{id}/run`, then paints each node with its step's status (ring
   green for `ok`, red for `failed`, dimmed for `skipped`) and lists the steps
-  with duration, output and error in the **Last run** tab. While a
+  with duration, output and error in the **Last run** tab. A failed step whose
+  node has a wired failure exit reads `failed · handled` with an amber ring
+  and stripe (`workflowRun.ts::handledFailures`, read from the graph as it is
+  now). While a
   run is in progress — started here, or by the CLI, the watcher or voice — the
   page polls it (1 s; the run list every 5 s when idle) and the running node
   pulses amber (still under `prefers-reduced-motion`), repainting as each step

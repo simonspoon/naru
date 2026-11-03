@@ -53,6 +53,8 @@ import {
   defaultConfig,
   edgeLabelClass,
   draftFromConfig,
+  FAILURE_BRANCH,
+  hasFailureExit,
   hasInput,
   hasOutput,
   HTTP_BODY_METHODS,
@@ -69,7 +71,7 @@ import {
   type ConfigDraft,
   webhookSample,
 } from './workflowConfig'
-import { gateBadge, gateByNode, hasOutputPanel, stepClass, stepOutput, stepStatusByNode } from './workflowRun'
+import { gateBadge, gateByNode, handledFailures, hasOutputPanel, stepClass, stepOutput, stepStatusByNode } from './workflowRun'
 import type { LibraryItem } from './types/LibraryItem'
 import type { Script } from './types/Script'
 import type { Workflow } from './types/Workflow'
@@ -106,6 +108,8 @@ type PinMenuOpen = (at: { x: number; y: number }, nodeId: number, side: PinSide,
 type CardData = {
   node: WorkflowNode
   status: WorkflowStepStatus | undefined
+  /** The step failed but its failure exit handled it (naru task 2536). */
+  handled: boolean
   types: WorkflowType[]
   drag: DragFrom
   onPinMenu: PinMenuOpen
@@ -125,6 +129,9 @@ type CardNode = Node<CardData, 'card'>
  *  summary and input pins: the first row starts `DECIDE_ROWS_TOP` px down. */
 const DECIDE_ROWS_TOP = 84
 const DECIDE_ROW = 20
+/** A branch's true/false handles, placed down the card above its failure row. */
+const BRANCH_TRUE_TOP = `calc((100% - ${DECIDE_ROW + 8}px) * 0.5)`
+const BRANCH_FALSE_TOP = `calc((100% - ${DECIDE_ROW + 8}px) * 0.8)`
 
 /** One node as a Blueprint-style card: a header tinted by kind, a muted
  *  summary, round typed data pins (decorative: the graph carries no data
@@ -133,12 +140,19 @@ const DECIDE_ROW = 20
  *  decided by where the line is dragged from, and a decide node one per option
  *  plus `fallback`. The last run's step state is a ring. */
 function NodeCard({ data, selected }: NodeProps<CardNode>) {
-  const { node, status, types, drag, onPinMenu, gate, gateBusy, gateError, onDecide, outputOpen, onOutput } = data
+  const { node, status, handled, types, drag, onPinMenu, gate, gateBusy, gateError, onDecide, outputOpen, onOutput } = data
   const pressTimer = useRef<number | undefined>(undefined)
   const typedPins = pinsOf(node, types)
   const typedRows = Math.max(typedPins.inputs.length, typedPins.outputs.length)
   const isShape = node.kind === 'break' || node.kind === 'make'
-  const decideHandles = node.kind === 'decide' || node.kind === 'switch' || node.kind === 'gate' || node.kind === 'trycatch' ? sourceHandles(node.kind, node.config) : []
+  const failureExit = hasFailureExit(node.kind)
+  // A labelled-exit card draws its failure exit as one more row under its own
+  // (naru task 2536); every other card draws it in a row at its foot.
+  const decideHandles =
+    node.kind === 'decide' || node.kind === 'switch' || node.kind === 'gate' || node.kind === 'trycatch'
+      ? [...sourceHandles(node.kind, node.config), FAILURE_BRANCH]
+      : []
+  const footFailure = failureExit && decideHandles.length === 0
   const pins = typedRows > 0 ? { inputs: [], outputs: [] } : pinsFor(node.kind)
   const rows = Math.max(pins.inputs.length, pins.outputs.length)
   if (node.kind === 'comment') {
@@ -214,8 +228,8 @@ function NodeCard({ data, selected }: NodeProps<CardNode>) {
         ['--kc' as string]: `var(${kindColorVar(node.kind)})`,
         ...(decideHandles.length > 0 && node.kind !== 'gate' ? { paddingBottom: DECIDE_ROW * decideHandles.length + 8 } : {}),
       }}
-      className={`wf-node wf-kind-${node.kind}${selected ? ' selected' : ''} ${stepClass(status)}`}
-      title={status ? `last run: ${status}` : undefined}
+      className={`wf-node wf-kind-${node.kind}${selected ? ' selected' : ''} ${stepClass(status)}${handled ? ' step-handled' : ''}`}
+      title={status ? `last run: ${status}${handled ? ' (handled)' : ''}` : undefined}
     >
       {hasInput(node.kind) && !isShape && (
         <Handle
@@ -232,8 +246,8 @@ function NodeCard({ data, selected }: NodeProps<CardNode>) {
         </span>
         <b className="wf-node-title">{node.title}</b>
       </div>
-      {status && node.kind !== 'gate' && <span className="wf-node-step">{status}</span>}
-      {status && node.kind === 'gate' && !gate && <span className="wf-node-step">{status}</span>}
+      {status && node.kind !== 'gate' && <span className="wf-node-step">{handled ? `${status} · handled` : status}</span>}
+      {status && node.kind === 'gate' && !gate && <span className="wf-node-step">{handled ? `${status} · handled` : status}</span>}
       <div className="wf-node-body">
         <div className="wf-node-sum">{summarize(node.kind, node.config)}</div>
         {typedRows > 0 && (
@@ -343,9 +357,9 @@ function NodeCard({ data, selected }: NodeProps<CardNode>) {
             position={Position.Right}
             className="wf-flow-pin wf-handle-true"
             aria-label="true out"
-            style={{ top: '50%' }}
+            style={{ top: BRANCH_TRUE_TOP }}
           />
-          <span className="wf-branch-label wf-branch-true" style={{ top: '50%' }}>
+          <span className="wf-branch-label wf-branch-true" style={{ top: BRANCH_TRUE_TOP }}>
             true
           </span>
           <Handle
@@ -354,9 +368,9 @@ function NodeCard({ data, selected }: NodeProps<CardNode>) {
             position={Position.Right}
             className="wf-flow-pin wf-handle-false"
             aria-label="false out"
-            style={{ top: '80%' }}
+            style={{ top: BRANCH_FALSE_TOP }}
           />
-          <span className="wf-branch-label wf-branch-false" style={{ top: '80%' }}>
+          <span className="wf-branch-label wf-branch-false" style={{ top: BRANCH_FALSE_TOP }}>
             false
           </span>
         </>
@@ -369,12 +383,20 @@ function NodeCard({ data, selected }: NodeProps<CardNode>) {
                 id={label}
                 type="source"
                 position={Position.Right}
-                className="wf-flow-pin"
+                className={`wf-flow-pin${label === FAILURE_BRANCH ? ' wf-handle-failure' : ''}`}
                 aria-label={`${label} out`}
                 style={{ top }}
               />
               <span
-                className={`wf-branch-label${node.kind === 'trycatch' ? (label === 'ok' ? ' wf-branch-true' : ' wf-branch-caught') : ''}`}
+                className={`wf-branch-label${
+                  label === FAILURE_BRANCH
+                    ? ' wf-branch-failure'
+                    : node.kind === 'trycatch'
+                      ? label === 'ok'
+                        ? ' wf-branch-true'
+                        : ' wf-branch-caught'
+                      : ''
+                }`}
                 style={{ top }}
               >
                 {label}
@@ -393,6 +415,23 @@ function NodeCard({ data, selected }: NodeProps<CardNode>) {
             style={{ top: 16 }}
           />
         )
+      )}
+      {/* After the success handle: an edge with no handle id lands on a
+          card's first source handle, which must stay the success one. */}
+      {footFailure && (
+        <div className="wf-fail-row">
+          <Handle
+            id={FAILURE_BRANCH}
+            type="source"
+            position={Position.Right}
+            className="wf-flow-pin wf-handle-failure"
+            aria-label="failure out"
+            style={{ top: '50%' }}
+          />
+          <span className="wf-branch-label wf-branch-failure" style={{ top: '50%' }}>
+            failure
+          </span>
+        </div>
       )}
     </div>
   )
@@ -1938,6 +1977,7 @@ export function WorkflowCanvas({
   const [nodes, setNodes, onNodesChange] = useNodesState<CardNode>([])
 
   const statuses = useMemo(() => stepStatusByNode(run), [run])
+  const handled = useMemo(() => handledFailures(run, view.edges), [run, view.edges])
 
   // The shown run's gate approvals (naru task 1993): polled while it runs so
   // a waiting gate shows its Approve / Reject buttons on the card.
@@ -1992,6 +2032,7 @@ export function WorkflowCanvas({
         data: {
           node: n,
           status: statuses.get(n.id),
+          handled: handled.has(n.id),
           types,
           drag: null,
           onPinMenu: openPinMenu,
@@ -2005,7 +2046,7 @@ export function WorkflowCanvas({
       })),
     )
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [view.nodes, statuses, types, setNodes, gatesByNode, gateBusy, gateError, outputNode])
+  }, [view.nodes, statuses, handled, types, setNodes, gatesByNode, gateBusy, gateError, outputNode])
 
   // A wire in flight dims the pins it cannot land on, in place (no rebuild,
   // so no node snaps back).
@@ -2107,8 +2148,17 @@ export function WorkflowCanvas({
     if (!source || !target) return
     const fromPin = pinOfHandle('out', c.sourceHandle)
     const toPin = pinOfHandle('in', c.targetHandle)
-    // Typed pins only wire to a matching type; say why in words.
-    const why = refusalReason(source, fromPin, target, toPin, types)
+    // Typed pins only wire to a matching type; say why in words. A failure
+    // exit carries the error text, so it is a `string` (as `check_edge`).
+    const failure = c.sourceHandle === FAILURE_BRANCH
+    const toTy = failure ? pinType(target, 'in', toPin, types) : null
+    const why = failure
+      ? toTy === null
+        ? `Can't connect: that pin does not exist on ${target.title}`
+        : typesMatch('string', toTy)
+          ? null
+          : `Can't connect string to ${toTy}: the pin types do not match`
+      : refusalReason(source, fromPin, target, toPin, types)
     if (why !== null) {
       setRefusal(why)
       return
@@ -2129,7 +2179,7 @@ export function WorkflowCanvas({
     const n = view.nodes.find((x) => String(x.id) === p.nodeId)
     if (!n || !p.handleType) return
     const side: PinSide = p.handleType === 'source' ? 'out' : 'in'
-    const ty = pinType(n, side, pinOfHandle(side, p.handleId), types)
+    const ty = p.handleId === FAILURE_BRANCH ? 'string' : pinType(n, side, pinOfHandle(side, p.handleId), types)
     setDrag(ty === null ? null : { side, ty })
   }
 

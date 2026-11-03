@@ -3,6 +3,7 @@
 // list. The canvas and the run panel only render what these answer.
 
 import type { Workflow } from './types/Workflow'
+import type { WorkflowEdge } from './types/WorkflowEdge'
 import type { WorkflowGate } from './types/WorkflowGate'
 import type { WorkflowNodeKind } from './types/WorkflowNodeKind'
 import type { WorkflowRun } from './types/WorkflowRun'
@@ -19,6 +20,20 @@ export function stepStatusByNode(run: WorkflowRun | null): Map<number, WorkflowS
 /** The class a node card wears for its step's status; none before any run. */
 export function stepClass(status: WorkflowStepStatus | undefined): string {
   return status === undefined ? '' : `step-${status}`
+}
+
+/** The nodes whose step in `run` failed but was handled (naru task 2536):
+ *  the node has a wired failure exit, so the run went on past it. Read from
+ *  the graph as it is now — the run does not record its edges. */
+export function handledFailures(
+  run: WorkflowRun | null,
+  edges: readonly Pick<WorkflowEdge, 'from_node' | 'branch' | 'kind'>[],
+): Set<number> {
+  const out = new Set<number>()
+  for (const s of run?.steps ?? [])
+    if (s.status === 'failed' && edges.some((e) => e.from_node === s.node_id && e.kind === 'exec' && e.branch === 'failure'))
+      out.add(s.node_id)
+  return out
 }
 
 export function stepCounts(run: WorkflowRun): Record<WorkflowStepStatus, number> {
