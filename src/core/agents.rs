@@ -980,11 +980,47 @@ pub struct Captured {
 /// SIGKILLed and the answer is `Err("timed out after Ns")`; a nonzero exit is
 /// **data** in [`Captured::code`], and `Err` is only "could not spawn/wait".
 pub fn capture(
-    mut cmd: Command,
+    cmd: Command,
     stdin: Option<Vec<u8>>,
     timeout: std::time::Duration,
 ) -> Result<Captured, String> {
+    capture_inner(cmd, stdin, timeout, None)
+}
+
+/// The most of a [`capture_live`] combined log kept; past it the rest is
+/// still read (so the child never blocks) but dropped.
+pub const LIVE_LOG_CAP: usize = 64 * 1024;
+
+/// How often [`capture_live`] hands a grown log to its callback.
+const LIVE_LOG_EVERY: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// [`capture`], also handing `on_log` the stdout and stderr bytes read so far,
+/// interleaved in arrival order and capped at [`LIVE_LOG_CAP`] (past it the
+/// log ends `\n[truncated]`): at most every [`LIVE_LOG_EVERY`] while the log
+/// grows, and once more with the whole log when the process ends or times out
+/// (naru task 2531, a workflow node's live output panel).
+pub fn capture_live(
+    cmd: Command,
+    stdin: Option<Vec<u8>>,
+    timeout: std::time::Duration,
+    on_log: &mut dyn FnMut(&[u8]),
+) -> Result<Captured, String> {
+    capture_inner(cmd, stdin, timeout, Some(on_log))
+}
+
+/// What [`capture_live`] hands the combined log to.
+type OnLog<'a> = &'a mut dyn FnMut(&[u8]);
+
+/// [`capture`] and [`capture_live`]; the combined log is only kept when
+/// there is an `on_log` to hand it to.
+fn capture_inner(
+    mut cmd: Command,
+    stdin: Option<Vec<u8>>,
+    timeout: std::time::Duration,
+    mut on_log: Option<OnLog<'_>>,
+) -> Result<Captured, String> {
     use std::io::{Read, Write};
+    use std::sync::{Arc, Mutex};
 
     crate::core::proc::isolate(&mut cmd);
     let mut child = cmd
@@ -1000,20 +1036,60 @@ pub fn capture(
         // A child that exits without reading is not an error.
         let _ = pipe_in.write_all(&stdin.unwrap_or_default());
     });
+    // The combined log and whether its cap dropped anything; `None` when
+    // nobody reads it.
+    let log = on_log
+        .is_some()
+        .then(|| Arc::new(Mutex::new((Vec::<u8>::new(), false))));
     // Each reader reports through a channel, so a join is a bounded
     // `recv_timeout` rather than a wait on a pipe a stray descendant may hold.
     let drain = |mut pipe: Box<dyn Read + Send>| {
         let (tx, rx) = std::sync::mpsc::channel();
+        let log = log.clone();
         std::thread::spawn(move || {
             let mut buf = Vec::new();
-            let _ = pipe.read_to_end(&mut buf);
+            let mut chunk = [0u8; 8192];
+            loop {
+                match pipe.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        buf.extend_from_slice(&chunk[..n]);
+                        if let Some(Ok(mut l)) = log.as_ref().map(|l| l.lock()) {
+                            let room = LIVE_LOG_CAP.saturating_sub(l.0.len()).min(n);
+                            l.0.extend_from_slice(&chunk[..room]);
+                            l.1 |= room < n;
+                        }
+                    }
+                }
+            }
             let _ = tx.send(buf);
         });
         rx
     };
     let out = drain(Box::new(child.stdout.take().expect("stdout was piped")));
     let err = drain(Box::new(child.stderr.take().expect("stderr was piped")));
+    // Hands `on_log` the log when it grew since the last call (always on
+    // `force`, the final one).
+    let mut sent = 0usize;
+    let mut emit = |force: bool| {
+        let (Some(on_log), Some(log)) = (on_log.as_mut(), log.as_ref()) else {
+            return;
+        };
+        let Ok(l) = log.lock() else { return };
+        if !force && l.0.len() == sent {
+            return;
+        }
+        sent = l.0.len();
+        let mut bytes = l.0.clone();
+        let cut = l.1;
+        drop(l);
+        if cut {
+            bytes.extend_from_slice(b"\n[truncated]");
+        }
+        on_log(&bytes);
+    };
     let started = std::time::Instant::now();
+    let mut last_sent = started;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
@@ -1021,9 +1097,16 @@ pub fn capture(
                 kill_group();
                 let _ = child.kill();
                 let _ = child.wait();
+                emit(true);
                 return Err(format!("timed out after {}s", timeout.as_secs()));
             }
-            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(25)),
+            Ok(None) => {
+                if last_sent.elapsed() >= LIVE_LOG_EVERY {
+                    emit(false);
+                    last_sent = std::time::Instant::now();
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25))
+            }
             Err(e) => return Err(format!("failed to wait for the process: {e}")),
         }
     };
@@ -1033,11 +1116,13 @@ pub fn capture(
     // descendant that left the group.
     kill_group();
     let grace = std::time::Duration::from_secs(2);
-    Ok(Captured {
+    let captured = Captured {
         code: status.code().unwrap_or(-1),
         stdout: out.recv_timeout(grace).unwrap_or_default(),
         stderr: err.recv_timeout(grace).unwrap_or_default(),
-    })
+    };
+    emit(true);
+    Ok(captured)
 }
 
 /// The script for a workflow `prompt` node's one `claude -p` call on an
@@ -1677,6 +1762,27 @@ fn parse_lsof(stdout: &str) -> HashMap<i64, PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_live_caps_the_log_and_says_so_but_keeps_stdout_whole() {
+        let run = |script: &str| {
+            let mut cmd = Command::new("bash");
+            cmd.arg("-c").arg(script);
+            let mut last = Vec::new();
+            let out = capture_live(cmd, None, std::time::Duration::from_secs(20), &mut |b| {
+                last = b.to_vec()
+            })
+            .unwrap();
+            (out, last)
+        };
+        let (out, log) = run("head -c 70000 /dev/zero | tr '\\0' a");
+        assert_eq!(out.stdout.len(), 70000);
+        assert_eq!(log.len(), LIVE_LOG_CAP + "\n[truncated]".len());
+        assert!(log.ends_with(b"\n[truncated]"));
+        // Exactly at the cap nothing was dropped, so nothing is marked.
+        let (_, log) = run("head -c 65536 /dev/zero | tr '\\0' a");
+        assert_eq!(log.len(), LIVE_LOG_CAP);
+    }
 
     fn watch_session(
         state: Option<&str>,

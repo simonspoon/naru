@@ -4,6 +4,7 @@
 
 import type { Workflow } from './types/Workflow'
 import type { WorkflowGate } from './types/WorkflowGate'
+import type { WorkflowNodeKind } from './types/WorkflowNodeKind'
 import type { WorkflowRun } from './types/WorkflowRun'
 import type { WorkflowStepStatus } from './types/WorkflowStepStatus'
 
@@ -84,4 +85,22 @@ export function gateBadge(gate: WorkflowGate): { text: string; tone: 'waiting' |
   if (gate.status === 'pending') return { text: 'waiting', tone: 'waiting' }
   if (gate.status === 'approved') return { text: 'approved', tone: 'approved' }
   return { text: gate.reason ? `rejected — ${gate.reason}` : 'rejected', tone: 'rejected' }
+}
+
+/** The node kinds whose card offers a live output panel (naru task 2531). */
+export function hasOutputPanel(kind: WorkflowNodeKind): boolean {
+  return kind === 'cli' || kind === 'script'
+}
+
+/** What a node's output panel shows for `run`: the step's status and its
+ *  stdout/stderr log so far, or null when the run has no step for it yet. A
+ *  step written before logs existed falls back to its output and error. */
+export function stepOutput(
+  run: WorkflowRun | null,
+  nodeId: number,
+): { status: WorkflowStepStatus; text: string } | null {
+  const step = run?.steps.find((s) => s.node_id === nodeId)
+  if (!step) return null
+  const text = step.log ?? [step.output, step.error ?? ''].filter((t) => t !== '').join('\n')
+  return { status: step.status, text }
 }

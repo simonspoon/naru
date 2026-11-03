@@ -69,7 +69,7 @@ import {
   type ConfigDraft,
   webhookSample,
 } from './workflowConfig'
-import { gateBadge, gateByNode, stepClass, stepStatusByNode } from './workflowRun'
+import { gateBadge, gateByNode, hasOutputPanel, stepClass, stepOutput, stepStatusByNode } from './workflowRun'
 import type { LibraryItem } from './types/LibraryItem'
 import type { Script } from './types/Script'
 import type { Workflow } from './types/Workflow'
@@ -115,6 +115,9 @@ type CardData = {
   gateBusy: number | null
   gateError: string | null
   onDecide: (gate: WorkflowGate, decision: 'approved' | 'rejected') => void
+  /** Whether this node's live output panel is the one open (naru task 2531). */
+  outputOpen: boolean
+  onOutput: (nodeId: number) => void
 }
 type CardNode = Node<CardData, 'card'>
 
@@ -130,7 +133,7 @@ const DECIDE_ROW = 20
  *  decided by where the line is dragged from, and a decide node one per option
  *  plus `fallback`. The last run's step state is a ring. */
 function NodeCard({ data, selected }: NodeProps<CardNode>) {
-  const { node, status, types, drag, onPinMenu, gate, gateBusy, gateError, onDecide } = data
+  const { node, status, types, drag, onPinMenu, gate, gateBusy, gateError, onDecide, outputOpen, onOutput } = data
   const pressTimer = useRef<number | undefined>(undefined)
   const typedPins = pinsOf(node, types)
   const typedRows = Math.max(typedPins.inputs.length, typedPins.outputs.length)
@@ -278,6 +281,21 @@ function NodeCard({ data, selected }: NodeProps<CardNode>) {
           </div>
         )}
       </div>
+      {status && hasOutputPanel(node.kind) && (
+        <button
+          type="button"
+          className="wf-node-output nodrag nopan"
+          aria-pressed={outputOpen}
+          aria-label={`Output of ${node.title}`}
+          title="Show this node's stdout and stderr"
+          onClick={(e) => {
+            e.stopPropagation()
+            onOutput(node.id)
+          }}
+        >
+          output
+        </button>
+      )}
       {node.kind === 'gate' && (
         <>
           {/* The two flow-handle rows live in this spacer, as a decide card's live in its padding. */}
@@ -1739,6 +1757,48 @@ function NodeFloat({
   )
 }
 
+/** A cli or script node's stdout and stderr for the shown run (naru task
+ *  2531): fed by the run poll, so it grows while the node runs and keeps the
+ *  whole log after. Follows the tail unless the person scrolled up. */
+function OutputPanel({
+  title,
+  output,
+  onClose,
+}: {
+  title: string
+  output: ReturnType<typeof stepOutput>
+  onClose: () => void
+}) {
+  const pre = useRef<HTMLPreElement | null>(null)
+  const follow = useRef(true)
+  const text = output?.text ?? ''
+  useEffect(() => {
+    const el = pre.current
+    if (el && follow.current) el.scrollTop = el.scrollHeight
+  }, [text])
+  return (
+    <div className="wf-output-card" role="region" aria-label={`Output of ${title}`}>
+      <div className="wf-output-head">
+        <b>{title}</b>
+        <span className="muted">{output ? output.status : 'not run yet'}</span>
+        <button type="button" className="wf-output-close" aria-label="Close output" onClick={onClose}>
+          ×
+        </button>
+      </div>
+      <pre
+        ref={pre}
+        className="wf-output-log"
+        onScroll={(e) => {
+          const el = e.currentTarget
+          follow.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24
+        }}
+      >
+        {text !== '' ? text : output?.status === 'running' ? 'waiting for output…' : 'no output'}
+      </pre>
+    </div>
+  )
+}
+
 type PinMenuState = { x: number; y: number; nodeId: number; side: PinSide; pin: string; ty: string }
 
 /** The right-click / long-press menu on a pin: Break or Make for a struct pin,
@@ -1851,6 +1911,8 @@ export function WorkflowCanvas({
     return () => window.clearTimeout(t)
   }, [refusal])
   const [typesOpen, setTypesOpen] = useState(false)
+  // The node whose live output panel is open (naru task 2531), if any.
+  const [outputNode, setOutputNode] = useState<number | null>(null)
   const [drag, setDrag] = useState<DragFrom>(null)
   const [menu, setMenu] = useState<{ x: number; y: number; nodeId: number; side: PinSide; pin: string; ty: string } | null>(null)
   const types = view.workflow.types
@@ -1937,11 +1999,13 @@ export function WorkflowCanvas({
           gateBusy,
           gateError,
           onDecide: decideGate,
+          outputOpen: outputNode === n.id,
+          onOutput: (id: number) => setOutputNode((cur) => (cur === id ? null : id)),
         },
       })),
     )
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [view.nodes, statuses, types, setNodes, gatesByNode, gateBusy, gateError])
+  }, [view.nodes, statuses, types, setNodes, gatesByNode, gateBusy, gateError, outputNode])
 
   // A wire in flight dims the pins it cannot land on, in place (no rebuild,
   // so no node snaps back).
@@ -2294,6 +2358,14 @@ export function WorkflowCanvas({
         <div className="wf-hint muted">
           <SpeakIcon /> &ldquo;Naru, run {view.workflow.name}&rdquo; · or call it from a skill
         </div>
+        {outputNode !== null && (
+          <OutputPanel
+            key={outputNode}
+            title={view.nodes.find((n) => n.id === outputNode)?.title ?? `node ${outputNode}`}
+            output={stepOutput(run, outputNode)}
+            onClose={() => setOutputNode(null)}
+          />
+        )}
         {typesOpen && (
           <WorkflowTypesCard
             workflowId={workflowId}

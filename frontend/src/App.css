@@ -2004,7 +2004,88 @@ main {
   color: var(--muted);
 }
 
+/* A cli or script card's live output control and panel (naru task 2531). */
+.wf-node-output {
+  display: block;
+  margin: 0.4rem 0.8rem 0;
+  padding: 0.1rem 0.5rem;
+  font-size: 0.68rem;
+  font-family: var(--font-mono);
+  border-radius: var(--r-pill);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.wf-node-output[aria-pressed='true'] {
+  color: var(--text-h);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.wf-output-card {
+  position: absolute;
+  right: 1rem;
+  bottom: 2.6rem;
+  z-index: 6;
+  width: min(36rem, calc(100% - 2rem));
+  height: min(20rem, calc(100% - 5rem));
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  font-size: 0.8rem;
+}
+
+.wf-output-head {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.wf-output-head b {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wf-output-close {
+  background: transparent;
+  box-shadow: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.wf-output-log {
+  flex: 1;
+  margin: 0;
+  padding: 0.6rem 0.75rem;
+  overflow: auto;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text);
+}
+
 @media (max-width: 600px) {
+  .wf-output-card {
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: auto;
+    height: 60%;
+    border-radius: var(--r-md) var(--r-md) 0 0;
+  }
+
+  .wf-node-output {
+    min-height: 44px;
+  }
+
   .wf-types-card {
     left: 0;
     right: 0;

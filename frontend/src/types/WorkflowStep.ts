@@ -15,4 +15,11 @@ output: string, error: string | null, duration_ms: number,
  * and kept once it finishes. `None` for a skipped step and for a row
  * written before the field existed.
  */
-started_at: number | null, };
+started_at: number | null, 
+/**
+ * A `cli` or `script` node's stdout and stderr interleaved as they
+ * arrived, capped at 64 KiB (naru task 2531): updated while the step is
+ * `running` and kept once it finishes. `None` for every other kind and
+ * for a row written before the field existed.
+ */
+log: string | null, };

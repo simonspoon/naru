@@ -212,16 +212,19 @@ pub fn run(
 /// the group killed at `timeout` (`Err("timed out after Ns")`). Output is
 /// the child's bytes capped at 64 KiB per stream, so a value a script echoes
 /// back arrives exactly as written (the streamed run's line events cannot
-/// promise that). A workflow `script` node runs through this.
+/// promise that). A workflow `script` node runs through this; `on_log` gets
+/// the live combined output as `agents::capture_live` describes.
 pub fn run_with_timeout(
     script: &Script,
     values: &BTreeMap<String, String>,
     cwd: Option<&str>,
     timeout: Duration,
+    on_log: &mut dyn FnMut(&[u8]),
 ) -> Result<ScriptRun, String> {
     let resolved = validate_values(&script.args, values)?;
-    let out = crate::core::agents::capture(command(script, &resolved, cwd), None, timeout)
-        .map_err(|e| format!("script {:?}: {e}", script.name))?;
+    let out =
+        crate::core::agents::capture_live(command(script, &resolved, cwd), None, timeout, on_log)
+            .map_err(|e| format!("script {:?}: {e}", script.name))?;
     let (stdout, out_cut) = capped(&out.stdout);
     let (stderr, err_cut) = capped(&out.stderr);
     Ok(ScriptRun {

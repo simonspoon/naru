@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatDuration, gateBadge, gateByNode, runPollMs, runSummary, runningRunId, stepClass, stepCounts, stepStatusByNode, triggerLabel } from './workflowRun'
+import { formatDuration, gateBadge, gateByNode, hasOutputPanel, runPollMs, runSummary, runningRunId, stepClass, stepCounts, stepOutput, stepStatusByNode, triggerLabel } from './workflowRun'
 import type { WorkflowGate } from './types/WorkflowGate'
 import type { WorkflowRun } from './types/WorkflowRun'
 import type { WorkflowStep } from './types/WorkflowStep'
@@ -13,6 +13,7 @@ const step = (node_id: number, status: WorkflowStep['status']): WorkflowStep => 
   error: null,
   duration_ms: 5,
   started_at: null,
+  log: null,
 })
 
 const run = (steps: WorkflowStep[], over: Partial<WorkflowRun> = {}): WorkflowRun => ({
@@ -124,5 +125,26 @@ describe('gate helpers (naru task 1993)', () => {
       text: 'rejected — timed out',
       tone: 'rejected',
     })
+  })
+})
+
+describe('output panel', () => {
+  it('is offered on cli and script nodes only', () => {
+    expect(hasOutputPanel('cli')).toBe(true)
+    expect(hasOutputPanel('script')).toBe(true)
+    expect(hasOutputPanel('prompt')).toBe(false)
+    expect(hasOutputPanel('subworkflow')).toBe(false)
+  })
+
+  it('shows the step log, or nothing before the node has a step', () => {
+    const live = { ...step(2, 'running'), log: 'one\ntwo\n' }
+    expect(stepOutput(run([live]), 2)).toEqual({ status: 'running', text: 'one\ntwo\n' })
+    expect(stepOutput(run([live]), 3)).toBeNull()
+    expect(stepOutput(null, 2)).toBeNull()
+  })
+
+  it('falls back to output and error for a step without a log', () => {
+    const old = { ...step(2, 'failed'), output: 'out', error: 'exited 1: bad' }
+    expect(stepOutput(run([old]), 2)?.text).toBe('out\nexited 1: bad')
   })
 })

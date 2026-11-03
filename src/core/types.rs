@@ -5317,6 +5317,12 @@ pub struct WorkflowStep {
     #[serde(default)]
     #[ts(type = "number | null")]
     pub started_at: Option<i64>,
+    /// A `cli` or `script` node's stdout and stderr interleaved as they
+    /// arrived, capped at 64 KiB (naru task 2531): updated while the step is
+    /// `running` and kept once it finishes. `None` for every other kind and
+    /// for a row written before the field existed.
+    #[serde(default)]
+    pub log: Option<String>,
 }
 
 /// One execution of a workflow. The row is written `running` first and

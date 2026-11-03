@@ -2765,6 +2765,7 @@ pub fn execute_run<A: StoreAccess>(
             error: None,
             duration_ms: 0,
             started_at: None,
+            log: None,
         };
         let always = always_ids.contains(&id);
         let input = if always {
@@ -2810,8 +2811,11 @@ pub fn execute_run<A: StoreAccess>(
             ..skipped(node)
         });
         let _ = access.with(|s| s.update_workflow_run_steps(run.id, &steps));
-        steps.pop();
+        let mut running = steps.pop().expect("just pushed");
         let started = Instant::now();
+        // A cli or script node streams its output onto the running step, so
+        // the run view can show it live (naru task 2531); best-effort too.
+        let mut log: Option<String> = None;
         let result = run_node(
             access,
             view,
@@ -2821,6 +2825,14 @@ pub fn execute_run<A: StoreAccess>(
             run.id,
             id == trigger_id,
             &mut vars,
+            &mut |bytes| {
+                let text = String::from_utf8_lossy(bytes).into_owned();
+                running.log = Some(text.clone());
+                steps.push(running.clone());
+                let _ = access.with(|s| s.update_workflow_run_steps(run.id, &steps));
+                steps.pop();
+                log = Some(text);
+            },
         );
         let duration_ms = started.elapsed().as_millis() as i64;
         let (status, output, error, route) = match result {
@@ -2847,6 +2859,7 @@ pub fn execute_run<A: StoreAccess>(
             error,
             duration_ms,
             started_at,
+            log,
         });
         done.insert(
             id,
@@ -3526,6 +3539,7 @@ fn run_node<A: StoreAccess>(
     run_id: i64,
     is_trigger: bool,
     vars: &mut HashMap<String, String>,
+    on_log: &mut dyn FnMut(&[u8]),
 ) -> std::result::Result<(String, Option<String>), String> {
     if is_trigger {
         if node.kind == WorkflowNodeKind::Webhook {
@@ -3718,10 +3732,11 @@ fn run_node<A: StoreAccess>(
             if input.len() <= ENV_INPUT_MAX {
                 cmd.env("NARU_INPUT", input);
             }
-            let out = agents::capture(
+            let out = agents::capture_live(
                 cmd,
                 Some(input.as_bytes().to_vec()),
                 Duration::from_secs(timeout),
+                on_log,
             )?;
             if out.code != 0 {
                 return Err(format!(
@@ -3775,6 +3790,7 @@ fn run_node<A: StoreAccess>(
                 &values,
                 Some(&dir),
                 Duration::from_secs(timeout),
+                on_log,
             )?;
             if run.exit_code != 0 {
                 return Err(format!("exited {}: {}", run.exit_code, run.stderr.trim()));
@@ -3865,12 +3881,36 @@ fn run_node<A: StoreAccess>(
         .map(|o| (o, None)),
         WorkflowNodeKind::Trycatch => run_trycatch(
             &node.config,
-            |wrapped| run_node(access, view, wrapped, input, cwd, run_id, false, vars),
+            |wrapped| {
+                run_node(
+                    access,
+                    view,
+                    wrapped,
+                    input,
+                    cwd,
+                    run_id,
+                    false,
+                    vars,
+                    &mut |_| {},
+                )
+            },
             node,
         ),
         WorkflowNodeKind::Retry => run_retry(
             &node.config,
-            |wrapped| run_node(access, view, wrapped, input, cwd, run_id, false, vars),
+            |wrapped| {
+                run_node(
+                    access,
+                    view,
+                    wrapped,
+                    input,
+                    cwd,
+                    run_id,
+                    false,
+                    vars,
+                    &mut |_| {},
+                )
+            },
             std::thread::sleep,
             node,
         ),
@@ -5192,6 +5232,7 @@ mod tests {
                     error: None,
                     duration_ms: 1,
                     started_at: Some(900),
+                    log: None,
                 },
                 WorkflowStep {
                     node_id: c,
@@ -5202,6 +5243,7 @@ mod tests {
                     error: None,
                     duration_ms: 0,
                     started_at: Some(1000),
+                    log: None,
                 },
             ];
             s.update_workflow_run_steps(run.id, &steps).unwrap();
@@ -5313,6 +5355,58 @@ mod tests {
         )
         .unwrap();
         assert_eq!(old.started_at, None);
+    }
+
+    #[test]
+    fn a_cli_step_streams_its_log_while_running_and_keeps_it() {
+        let (st, _d) = store();
+        let wf = st.with(|s| {
+            let wf = s.create_workflow(None, "Chatty", None).unwrap().id;
+            let t = node(
+                s,
+                wf,
+                WorkflowNodeKind::Trigger,
+                "T",
+                json!({"mode": "manual"}),
+            );
+            let c = node(
+                s,
+                wf,
+                WorkflowNodeKind::Cli,
+                "Talk",
+                cli("echo one; echo two >&2; sleep 2; echo three"),
+            );
+            s.create_workflow_edge(wf, t, c, None).unwrap();
+            wf
+        });
+        let (live, run) = std::thread::scope(|scope| {
+            let h = scope.spawn(|| run_workflow(&st, wf, WorkflowTrigger::Manual, "").unwrap());
+            let mut live = None;
+            for _ in 0..150 {
+                let runs = st.with(|s| s.list_workflow_runs(wf)).unwrap();
+                live = runs
+                    .iter()
+                    .flat_map(|r| r.steps.iter())
+                    .find(|s| s.status == WorkflowStepStatus::Running && s.log.is_some())
+                    .and_then(|s| s.log.clone());
+                if live.is_some() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            (live, h.join().unwrap())
+        });
+        let live = live.expect("the running step carried its log");
+        assert!(live.contains("one") && live.contains("two"), "{live:?}");
+        assert!(!live.contains("three"), "{live:?}");
+        assert_eq!(run.status, WorkflowRunStatus::Succeeded, "{run:?}");
+        assert_eq!(run.steps[1].output, "one\nthree\n");
+        // The two pipes are read on their own threads, so only the sleep
+        // orders `three` after both.
+        let log = run.steps[1].log.clone().unwrap_or_default();
+        assert!(log.ends_with("\nthree\n") && log.len() == 14, "{log:?}");
+        // Only cli and script nodes carry one.
+        assert_eq!(run.steps[0].log, None);
     }
 
     #[test]
@@ -6578,6 +6672,7 @@ mod tests {
                 error: None,
                 duration_ms: 0,
                 started_at: None,
+                log: None,
             };
             s.update_workflow_run_steps(
                 running.id,

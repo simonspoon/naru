@@ -469,7 +469,7 @@ Import (`Store::import_workflow`, one `BEGIN IMMEDIATE` transaction, an
 5. A **failed node fails the run**: nothing downstream runs and every node not
    yet run is recorded `skipped`. `WorkflowRun.error` names the node.
 6. Each node leaves one `WorkflowStep`:
-   `{node_id, title, kind, status: ok|skipped|failed, output, error, duration_ms, started_at}`,
+   `{node_id, title, kind, status: ok|skipped|failed, output, error, duration_ms, started_at, log}`,
    output capped at 64 KiB. `started_at` (naru task 1957) is unix seconds when
    the node began running: stamped on the persisted `running` step, kept when
    it finishes, `null` for a skipped step and for rows written before the
@@ -483,6 +483,15 @@ Import (`Store::import_workflow`, one `BEGIN IMMEDIATE` transaction, an
    on an in-progress run show where it is. `running` appears only on a
    `running` run; a persist failure never fails the run, the final finish is
    authoritative.
+   **Live output** (naru task 2531): a `cli` or `script` node's step also
+   carries `log`, its stdout and stderr interleaved in arrival order, capped at
+   64 KiB (`\n[truncated]` past it; `agents::capture_live`). While the node
+   runs the engine re-persists the `running` step with the log so far, at most
+   every 500 ms while it grows, and the finished step keeps the whole log (a
+   failed or timed-out node too). Every other kind, and a row written before
+   the field existed, has `log: null`; a cli or script node wrapped in
+   `retry`/`trycatch` streams nothing. The log rides in every run read, so a
+   run listing can carry up to 64 KiB more per such step.
 
 **Locking.** The engine takes the store only through a `StoreAccess` closure,
 for the brief reads and writes around a node, and **never holds it while a
@@ -1001,7 +1010,11 @@ context kind `workflows`, with the workflow's id and name once one is open.
   run is in progress — started here, or by the CLI, the watcher or voice — the
   page polls it (1 s; the run list every 5 s when idle) and the running node
   pulses amber (still under `prefers-reduced-motion`), repainting as each step
-  lands; the final record replaces the live one when it ends. **Recent runs**
+  lands; the final record replaces the live one when it ends. A `cli` or
+  `script` card that has a step in the shown run gets an **output** button
+  (naru task 2531) opening a panel over the canvas with that step's `log`: it
+  grows with the 1 s poll while the node runs, follows the tail unless
+  scrolled up, and keeps the full log afterwards. **Recent runs**
   lists the runs (click one to open it in Last run and repaint the canvas with it)
   and **Log** the logs (`GET /api/workflow-log`, one named log or all).
 - **Page layout** (naru task 2421): one header row (← back, name, description

@@ -10220,6 +10220,7 @@ mod tests {
                 error: Some("e".into()),
                 duration_ms: 5,
                 started_at: Some(1),
+                log: None,
             }],
             error: Some("e".into()),
             started_at: "2026-01-01 00:00:00".into(),
