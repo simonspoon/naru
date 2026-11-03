@@ -7517,6 +7517,19 @@ impl Store {
             })
     }
 
+    /// Every `running` workflow run, oldest first, each with its workflow's
+    /// runnable node count (every node but a `comment` box) — the agent
+    /// watcher's workflow jobs (naru task 2540). Visibility is the caller's.
+    pub fn running_workflow_runs(&self) -> Result<Vec<(WorkflowRun, i64)>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {WORKFLOW_RUN_COLUMNS}, (SELECT COUNT(*) FROM workflow_nodes n \
+               WHERE n.workflow_id = workflow_runs.workflow_id AND n.kind != 'comment') \
+             FROM workflow_runs WHERE status = 'running' ORDER BY id"
+        ))?;
+        let rows = stmt.query_map([], |r| Ok((row_to_workflow_run(r)?, r.get::<_, i64>(9)?)))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// A workflow's runs, newest first.
     pub fn list_workflow_runs(&self, workflow_id: i64) -> Result<Vec<WorkflowRun>> {
         self.get_workflow(workflow_id)?;

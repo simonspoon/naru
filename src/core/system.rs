@@ -25,12 +25,14 @@
 //!   best-effort — not a Mac, no binary, a non-zero exit or output mesa cannot
 //!   parse are all `gpu: null`.
 
+use std::collections::VecDeque;
 use std::path::Path;
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::core::store::default_db_path;
-use crate::core::types::{GpuInfo, SystemInfo};
+use crate::core::types::{GpuInfo, SystemInfo, SystemSample, SystemStats};
 
 /// The process-global sampler. CPU percentages are a difference between two
 /// refreshes of the *same* `System`, so it has to outlive one call.
@@ -98,6 +100,126 @@ pub fn snapshot() -> SystemInfo {
         os: sysinfo::System::long_os_version(),
         hostname: sysinfo::System::host_name(),
     }
+}
+
+/// The least spacing between two [`stats`] samples, seconds: a poll sooner
+/// than this gets the newest sample back without a new reading.
+pub const STATS_INTERVAL_SECS: i64 = 2;
+/// Samples [`stats`] keeps — two minutes at the poll interval.
+pub const STATS_HISTORY: usize = 60;
+/// A stats `System` refreshed longer ago than this is re-primed with the two
+/// refreshes [`snapshot`] uses, so the first value after a quiet spell is not
+/// an average over the whole quiet spell — and the history is restarted.
+const STATS_STALE: std::time::Duration = std::time::Duration::from_secs(10);
+/// The most `ioreg` output Naru reads (a real one is ~50 KiB).
+const IOREG_CAP: usize = 1024 * 1024;
+/// How long one `ioreg` call may take (a real one is ~20 ms).
+const IOREG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The stats sampler: its own `System` (so `snapshot`'s refreshes do not
+/// shorten its CPU delta), when it was last refreshed, and the history.
+struct Stats {
+    sys: sysinfo::System,
+    refreshed: Option<Instant>,
+    history: VecDeque<SystemSample>,
+}
+
+static STATS: OnceLock<Mutex<Stats>> = OnceLock::new();
+
+/// The agent watcher's sparkline feed (naru task 2540): the newest sample
+/// and up to [`STATS_HISTORY`] before it, oldest first. **Poll-driven** — no
+/// background thread; a call takes a new sample only when the newest is at
+/// least [`STATS_INTERVAL_SECS`] old, so any number of pollers share one
+/// history. CPU % is the delta since the previous sample (so it averages the
+/// whole interval, as Activity Monitor does); the first call, or one after
+/// [`STATS_STALE`] of quiet, blocks ~200 ms to prime it. Infallible.
+pub fn stats() -> SystemStats {
+    let mutex = STATS.get_or_init(|| {
+        Mutex::new(Stats {
+            sys: sysinfo::System::new(),
+            refreshed: None,
+            history: VecDeque::new(),
+        })
+    });
+    // Held across the sample on purpose: two pollers arriving together take
+    // one sample, not two.
+    let mut st = mutex.lock().unwrap_or_else(|e| e.into_inner());
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    if st
+        .history
+        .back()
+        .is_none_or(|s| now - s.at >= STATS_INTERVAL_SECS || s.at > now)
+    {
+        let fresh = st.refreshed.is_some_and(|t| t.elapsed() < STATS_STALE);
+        if !fresh {
+            // After a quiet spell the old samples are not a recent history:
+            // a sparkline would draw them abutting the new one with no gap.
+            st.history.clear();
+            st.sys.refresh_cpu_all();
+            std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
+        }
+        st.sys.refresh_cpu_all();
+        st.sys.refresh_memory();
+        st.refreshed = Some(Instant::now());
+        let disk = disk_for(&default_db_path());
+        let sample = SystemSample {
+            at: now,
+            cpu_pct: f64::from(st.sys.global_cpu_usage()),
+            mem_used_bytes: st.sys.used_memory(),
+            mem_total_bytes: st.sys.total_memory(),
+            gpu_pct: gpu_usage(),
+            disk_used_bytes: disk.map(|(total, free)| total.saturating_sub(free)),
+            disk_total_bytes: disk.map(|(total, _)| total),
+        };
+        st.history.push_back(sample);
+        while st.history.len() > STATS_HISTORY {
+            st.history.pop_front();
+        }
+    }
+    let history: Vec<SystemSample> = st.history.iter().cloned().collect();
+    SystemStats {
+        sample: history.last().cloned().expect("a sample was just pushed"),
+        gpu_available: history.iter().any(|s| s.gpu_pct.is_some()),
+        history,
+        interval_secs: STATS_INTERVAL_SECS,
+    }
+}
+
+/// `ioreg` (`MESA_IOREG_BIN`/`NARU_IOREG_BIN` overrides it, the
+/// `system_profiler_bin` seam).
+fn ioreg_bin() -> String {
+    crate::core::env::var("IOREG_BIN").unwrap_or_else(|| "ioreg".to_string())
+}
+
+/// The GPU's current utilisation, 0..=100: `ioreg -r -d 1 -c IOAccelerator`,
+/// which macOS answers without privileges (~20 ms). `None` off macOS and on
+/// every failure — never a guessed zero.
+fn gpu_usage() -> Option<f64> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let mut cmd = Command::new(ioreg_bin());
+    cmd.args(["-r", "-d", "1", "-c", "IOAccelerator"]);
+    // A deadline, because it runs under the stats lock: a wedged `ioreg`
+    // must cost one sample's GPU value, not every poller behind it.
+    let out = crate::core::agents::capture(cmd, None, IOREG_TIMEOUT).ok()?;
+    if out.code != 0 || out.stdout.len() > IOREG_CAP {
+        return None;
+    }
+    parse_gpu_usage(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// The first accelerator's `"Device Utilization %"=N` out of `ioreg` text.
+/// Pure, so it is testable without a Mac. A value outside 0..=100 is `None`.
+fn parse_gpu_usage(text: &str) -> Option<f64> {
+    const KEY: &str = "\"Device Utilization %\"=";
+    let rest = &text[text.find(KEY)? + KEY.len()..];
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    let n: u32 = digits.parse().ok()?;
+    (n <= 100).then_some(f64::from(n))
 }
 
 /// The 1/5/15-minute load average, or `None` where the platform has no such
@@ -248,6 +370,37 @@ mod tests {
             parse_gpu(r#"{"SPDisplaysDataType":[{"sppci_model":""}]}"#),
             None
         );
+    }
+
+    #[test]
+    fn gpu_usage_reads_device_utilization() {
+        let text = r#"| "PerformanceStatistics" = {"Tiler Utilization %"=3,"Renderer Utilization %"=12,"Device Utilization %"=41,"x"=0}"#;
+        assert_eq!(parse_gpu_usage(text), Some(41.0));
+        assert_eq!(parse_gpu_usage(r#""Device Utilization %"=0"#), Some(0.0));
+        assert_eq!(parse_gpu_usage(r#""Device Utilization %"=101"#), None);
+        assert_eq!(parse_gpu_usage(r#""Device Utilization %"=x"#), None);
+        assert_eq!(parse_gpu_usage("no accelerator here"), None);
+    }
+
+    #[test]
+    fn stats_reports_a_history_of_plausible_samples() {
+        let a = stats();
+        assert_eq!(a.history.last(), Some(&a.sample));
+        assert!(a.sample.mem_total_bytes > 0);
+        assert!(a.sample.mem_used_bytes <= a.sample.mem_total_bytes);
+        assert!((0.0..=100.0).contains(&a.sample.cpu_pct));
+        if let (Some(used), Some(total)) = (a.sample.disk_used_bytes, a.sample.disk_total_bytes) {
+            assert!(used <= total);
+        }
+        assert_eq!(
+            a.gpu_available,
+            a.history.iter().any(|s| s.gpu_pct.is_some())
+        );
+        // A poll inside the interval returns the same newest sample.
+        let b = stats();
+        assert!(b.history.len() <= STATS_HISTORY);
+        assert!(b.sample.at >= a.sample.at);
+        assert_eq!(a.interval_secs, STATS_INTERVAL_SECS);
     }
 
     #[test]

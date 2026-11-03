@@ -101,8 +101,84 @@ shells always hang under their session, the transcript tail is 2 MiB (older
 history is cut and flagged by `historyFrom`), no cost figures, no CLI command,
 no config keys, no phone tab-bar entry.
 
+## Orbit feed (naru task 2540)
+
+The data half of the watcher redesign (the orbit view; the page that draws it
+is the follow-up task — until then the timeline above is unchanged). It
+describes the whole machine as **jobs**, not tool-call rows.
+
+`GET /api/agents/orbit` — gated by `require_agent_access` like every agents
+route. It reads the same 2s-cached panel list (`panel_sessions`) and runs
+`agents::watch` over it with a 60-minute window (`ORBIT_WATCH_MINUTES`, so a
+job's finished stages stay on its ring), then `core::orbit::from_store`
+assembles the rest from the store. An unreadable session list (no `claude`)
+is **not** a 502 here: `agentsAvailable` is `false`, jobs are still listed
+(state `idle`, no agents) and the queue is whole.
+
+Payload (`AgentOrbit`, ts-exported, camelCase, times Unix seconds unless
+said): `now`, `naru`, `agentsAvailable`, `jobs[]`, `queue[]`, `projects[]`.
+
+- **`naru`** (`OrbitNaru`): `active`, `sessionId`, `projectId`, and `state` —
+  `off` (no live session), `speaking` (the newest Naru turn is unplayed and
+  younger than `orbit::SPEAKING_SECS` = 30 s; an older unplayed one was never
+  played, so it is not speech), `resting` (`resting_since`), `working`
+  (`working_since`: the agent holds a turn), else `listening`.
+- **`jobs`** (`OrbitJob`): `kind` `task` or `workflow`, `id` (task id or run
+  id), `workflowId`, `title`, `projectId`/`projectName`, `color`, `stage`,
+  `progress` (0..1), `progressEstimated`, `state`, `sessionId`, `startedAt`,
+  `agents[]`.
+  - A **task job** is every `in_progress` task of a visible project, except an
+    umbrella (a parent with subtasks) that no session works — it shows through
+    its children, the queue-watcher's leaf rule. A session works a task when
+    the task's `owner` is its id (`AgentSession::task_id`), its name is the
+    stage driver's `task <id> · <stage> (<agent>)`, or it is the
+    queue-watcher's `<project>: <task name>` (only for a session that owns
+    no task yet). With several stage-driver sessions, the newest one's stage
+    wins.
+  - Its **agents** are the watcher's subagent rows of those sessions:
+    `role` from the `agentType` (`orbit::role_of`: recon/Explore → `recon`,
+    planner/Plan/ux-designer → `plan`, implementer → `build`, diff-reviewer →
+    `review`, verifier → `test`, ui-verifier → `check`, else `agent`),
+    `label` (the agentType), `detail` (its description), `state` `done`
+    (finished), `working` (an event within `orbit::QUIET_SECS` = 60 s) or
+    `waiting` (unfinished and quiet longer).
+  - **Stage**: a stage driver's declared stage, else the newest unfinished
+    agent's role, as `recon` `plan` `build` `review` `verify` (test and
+    check) or `working`.
+  - **Progress**: with subtasks, done ÷ non-cancelled subtasks
+    (`progressEstimated: false`). Otherwise an estimate from the furthest
+    stage seen (recon .15, plan .25, build .5, review .7, verify .85; .05
+    before any) — a guess, flagged `progressEstimated: true`.
+  - **State**, the most urgent over its sessions: `waiting` (blocked on the
+    person: `state: blocked` or `waiting_for`), `stalled` (the queue-watcher's
+    watchdog), `working`, else `idle` (no session, or one whose turn ended
+    with nothing running).
+  - A **workflow job** is every `running` workflow run of a visible workflow:
+    `stage` is the running node's title, `progress` the steps that ended
+    (ok, failed or skipped) ÷ the workflow's nodes (comment boxes excluded), `state` `waiting` while a gate
+    of the run is pending, else `working`; its `agents` are the run's steps
+    (`role` = node kind, `working` while running, else `done`; skipped steps
+    left out).
+- **`queue`** (`OrbitQueued`): every `todo` task of a visible project
+  (`blocked` from the derived flag), then every enabled `time`-triggered
+  workflow not running now, with its `nextRunAt` (stored UTC text). It carries
+  **no order numbers**: projects run concurrently, so a position would mean
+  nothing; the order is the task list's, then workflows by name.
+- **`projects`** (`OrbitProject`): each project a job or queued item names,
+  in project-list order, with its `color`.
+
+**Colour**: `orbit::project_color` — `PROJECT_COLORS[project id % 8]`, so a
+project keeps its colour wherever it appears and however lists are filtered.
+Naru's own purple (`#a371f7`) is not in the palette; a global workflow is
+`orbit::GLOBAL_COLOR` (`#8b949e`). Every item carries its colour, so the page
+never recomputes it.
+
+System sparklines come from `GET /api/system/stats` (`docs/system.md`).
+
 ## Tests
 
 `cc.rs` (`coalesce_runs`, `watch_from_text`, tool pairing), `agents.rs` (`watch_includes`,
-`parse_lsof`), `frontend/src/agentWatch.test.ts`, and a section of
+`parse_lsof`), `orbit.rs` (colours, stage names, roles, and one store-backed
+scenario through `from_store`), `api.rs` (`/api/agents/orbit` pairing and
+Host refusal), `frontend/src/agentWatch.test.ts`, and a section of
 `scripts/agents-check.sh` (route, parent links, window clamp, foreign Host).

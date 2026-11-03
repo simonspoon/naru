@@ -45,9 +45,8 @@ Two smaller judgements worth knowing:
   only the last resort. VRAM is a human string ("1536 MB", "8 GB") under one
   of three keys, and is simply absent on Apple silicon, where the GPU shares
   system memory: `vram_bytes: null` there.
-- `gpu.usage_pct` is **always `null`** today. Real utilisation on macOS needs
-  privileged `powermetrics`; Naru reports nothing rather than a number it
-  cannot stand behind.
+- `gpu.usage_pct` is **always `null`** on `/api/system`. GPU utilisation is
+  read only by the stats feed below (`ioreg`, no privileges).
 - `disk_*` is the volume holding **Naru's own database** (`default_db_path()`),
   not the whole machine's storage — that is the one disk a Naru user can fill.
   The `sysinfo::Disks` entry chosen is the mount point that is the **longest**
@@ -65,6 +64,40 @@ one does. The global Host allowlist and Content-Type gate still apply.
 
 Always `200`. There is no error path, no cache in `AppState` (the GPU's cache
 is inside `core::system`), and nothing is written anywhere.
+
+## Stats feed (naru task 2540)
+
+`GET /api/system/stats` → `SystemStats { sample, history, intervalSecs,
+gpuAvailable }`, camelCase — the agent watcher's sparklines. A `SystemSample`
+is `at` (Unix s), `cpuPct`, `memUsedBytes`/`memTotalBytes`, `gpuPct`,
+`diskUsedBytes`/`diskTotalBytes` (the database's volume, as above;
+used = total − available).
+
+- **Poll-driven, no thread.** `core::system::stats` takes a new sample only
+  when the newest is at least `STATS_INTERVAL_SECS` (2) old, and keeps the
+  last `STATS_HISTORY` (60) in a process-global buffer, so any number of
+  pollers share one history and an unwatched server samples nothing.
+  `history` is oldest first and ends with `sample`.
+- **CPU** is the delta since the previous sample on the feed's own
+  `sysinfo::System` (so it averages the interval, as Activity Monitor does,
+  and `/api/system` refreshes do not shorten it). The first call, or one
+  after 10 s of quiet, primes it with `snapshot`'s two-refresh ~200 ms wait.
+- **GPU** is `ioreg -r -d 1 -c IOAccelerator`'s first `"Device Utilization
+  %"` — macOS, unprivileged, ~20 ms per sample (`MESA_IOREG_BIN` /
+  `NARU_IOREG_BIN` is the test seam). Off macOS, a failure or a value outside
+  0..100 is `gpuPct: null`, and `gpuAvailable` is false when no sample in the
+  history has one: the page says "unavailable", never 0.
+- **Memory used** is `sysinfo`'s used figure, which tracks Activity
+  Monitor's "Memory Used" (app + wired + compressed; 29.0 GB against
+  `vm_stat`'s 29.9 GB when checked), not `top`'s PhysMem "used", which
+  counts the file cache too.
+- **Disk used** is total − available as `sysinfo` reports available, which on
+  APFS includes purgeable space, so it reads a few percent under `df`'s Used.
+- The `ioreg` call has a 1 s deadline (`agents::capture`, its process group
+  killed past it), because it runs under the feed's lock. After 10 s with
+  no poll the history restarts, so a sparkline never joins old samples to new.
+
+Same standard-guard-only posture as `/api/system`; always 200.
 
 ## Voice models (naru-audio)
 

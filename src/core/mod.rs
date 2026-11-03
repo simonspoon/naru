@@ -28,6 +28,7 @@ pub mod look;
 pub mod memory_job;
 pub mod migrate;
 pub mod notify;
+pub mod orbit;
 pub mod proc;
 pub mod project_memory;
 pub mod receipt;
@@ -59,29 +60,30 @@ pub use store::{
     mark_skin_number, validate_live_client,
 };
 pub use types::{
-    ARTIFACT_CONTENT_TYPES, AgentQuestion, AgentSession, ArchiveOutcome, Artifact, ArtifactSummary,
-    Attachment, AudioTestResult, CcAgentStat, CcDashboard, CcDayPoint, CcErrors, CcInterval,
-    CcLiveSession, CcModelStat, CcOverview, CcProjectStat, CcScorecard, CcSessionBucket,
-    CcSessionDetail, CcSessionModelStat, CcSessionRow, CcSessionSkillStat, CcSessionThreadStat,
-    CcSessionToolStat, CcSkillStat, CcTokens, CcUsage, CcUsageExtra, CcUsageWindow, ConfigCommand,
-    ConfigPrice, ConfigServe, ContrastWarning, DEFAULT_ARTIFACT_CONTENT_TYPE, Dependency, DiffStat,
-    DirEntry, DirListing, FileContentView, FileTreeEntry, GitCommit, GitCommitFile, GitFileDiff,
-    GitRepo, GitRepoView, GitStatus, GitWorktree, GpuInfo, HookRun, InboxItem, InboxKind,
-    LibraryBundle, LibraryDiffKind, LibraryImportResult, LibraryItem, LibraryKind, LibraryScope,
-    LibrarySyncResult, LibrarySyncRow, LibrarySyncStatus, LibraryVersion, LiveAction, LiveBoard,
-    LiveBoardHistoryEntry, LiveBoardHistoryPage, LiveBoardInkEntry, LiveBoardKind,
-    LiveBoardSummary, LiveContext, LiveContextKind, LiveMemoryHit, LiveNotebookEntry, LiveNotice,
-    LiveOffer, LiveResult, LiveRole, LiveSession, LiveState, LiveStatus, LiveSummary,
-    LiveTranscript, LiveTurn, LiveWindow, MarkSkinRecord, ModelRates, NaruVersion, Priority,
-    Project, ProjectAgents, ProjectFileTree, ProjectGitLog, ProjectGitRepos, ProjectGitStatus,
-    ProjectGitView, ProjectVersion, RetroFinding, RetroRun, RetroStatus, Script, ScriptArg,
-    ScriptArgKind, ScriptRun, ScriptRunEvent, ScriptRunRecord, ScriptRunStatus, ScriptStream,
-    ServeBoolSetting, ServeHostsSetting, ServeNumberSetting, Status, SystemInfo, Task,
-    TaskDigestEntry, TaskNote, TaskReceipt, TaskSummary, Theme, ThemePreview, ThemeSlots, Workflow,
-    WorkflowBranch, WorkflowBuiltinAction, WorkflowBuiltinUpdate, WorkflowEdge, WorkflowEdgeKind,
-    WorkflowExport, WorkflowExportEdge, WorkflowExportMeta, WorkflowExportNode, WorkflowGate,
-    WorkflowGateStatus, WorkflowImportResult, WorkflowLogEntry, WorkflowMissingRef, WorkflowNode,
-    WorkflowNodeKind, WorkflowRevision, WorkflowRun, WorkflowRunStatus, WorkflowSnapshot,
-    WorkflowStep, WorkflowStepStatus, WorkflowTrigger, WorkflowType, WorkflowTypeField,
-    WorkflowView, is_valid_artifact_content_type, task_name,
+    ARTIFACT_CONTENT_TYPES, AgentOrbit, AgentQuestion, AgentSession, ArchiveOutcome, Artifact,
+    ArtifactSummary, Attachment, AudioTestResult, CcAgentStat, CcDashboard, CcDayPoint, CcErrors,
+    CcInterval, CcLiveSession, CcModelStat, CcOverview, CcProjectStat, CcScorecard,
+    CcSessionBucket, CcSessionDetail, CcSessionModelStat, CcSessionRow, CcSessionSkillStat,
+    CcSessionThreadStat, CcSessionToolStat, CcSkillStat, CcTokens, CcUsage, CcUsageExtra,
+    CcUsageWindow, ConfigCommand, ConfigPrice, ConfigServe, ContrastWarning,
+    DEFAULT_ARTIFACT_CONTENT_TYPE, Dependency, DiffStat, DirEntry, DirListing, FileContentView,
+    FileTreeEntry, GitCommit, GitCommitFile, GitFileDiff, GitRepo, GitRepoView, GitStatus,
+    GitWorktree, GpuInfo, HookRun, InboxItem, InboxKind, LibraryBundle, LibraryDiffKind,
+    LibraryImportResult, LibraryItem, LibraryKind, LibraryScope, LibrarySyncResult, LibrarySyncRow,
+    LibrarySyncStatus, LibraryVersion, LiveAction, LiveBoard, LiveBoardHistoryEntry,
+    LiveBoardHistoryPage, LiveBoardInkEntry, LiveBoardKind, LiveBoardSummary, LiveContext,
+    LiveContextKind, LiveMemoryHit, LiveNotebookEntry, LiveNotice, LiveOffer, LiveResult, LiveRole,
+    LiveSession, LiveState, LiveStatus, LiveSummary, LiveTranscript, LiveTurn, LiveWindow,
+    MarkSkinRecord, ModelRates, NaruVersion, Priority, Project, ProjectAgents, ProjectFileTree,
+    ProjectGitLog, ProjectGitRepos, ProjectGitStatus, ProjectGitView, ProjectVersion, RetroFinding,
+    RetroRun, RetroStatus, Script, ScriptArg, ScriptArgKind, ScriptRun, ScriptRunEvent,
+    ScriptRunRecord, ScriptRunStatus, ScriptStream, ServeBoolSetting, ServeHostsSetting,
+    ServeNumberSetting, Status, SystemInfo, SystemStats, Task, TaskDigestEntry, TaskNote,
+    TaskReceipt, TaskSummary, Theme, ThemePreview, ThemeSlots, Workflow, WorkflowBranch,
+    WorkflowBuiltinAction, WorkflowBuiltinUpdate, WorkflowEdge, WorkflowEdgeKind, WorkflowExport,
+    WorkflowExportEdge, WorkflowExportMeta, WorkflowExportNode, WorkflowGate, WorkflowGateStatus,
+    WorkflowImportResult, WorkflowLogEntry, WorkflowMissingRef, WorkflowNode, WorkflowNodeKind,
+    WorkflowRevision, WorkflowRun, WorkflowRunStatus, WorkflowSnapshot, WorkflowStep,
+    WorkflowStepStatus, WorkflowTrigger, WorkflowType, WorkflowTypeField, WorkflowView,
+    is_valid_artifact_content_type, task_name,
 };

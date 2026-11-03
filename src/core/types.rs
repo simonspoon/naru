@@ -381,6 +381,141 @@ pub struct AgentWatch {
     pub rows: Vec<AgentWatchRow>,
 }
 
+/// The agent watcher's whole-machine feed (naru task 2540,
+/// `docs/agent-watcher.md`): Naru's live voice at the centre, every running
+/// job (task or workflow run) with its sub-agents, and everything queued.
+/// A **view, never stored** — assembled per request by `core::orbit`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+#[serde(rename_all = "camelCase")]
+pub struct AgentOrbit {
+    /// The server's clock when the payload was built, Unix seconds.
+    #[ts(type = "number")]
+    pub now: i64,
+    pub naru: OrbitNaru,
+    /// False when the Claude Code session list could not be read (no
+    /// `claude` binary): jobs are then still listed, with no sub-agents and
+    /// state `idle`, rather than the whole feed failing.
+    pub agents_available: bool,
+    pub jobs: Vec<OrbitJob>,
+    pub queue: Vec<OrbitQueued>,
+    /// Every project a job or queued item names, with its colour, ordered by
+    /// the project list's `sort_order`.
+    pub projects: Vec<OrbitProject>,
+}
+
+/// The live voice at the centre of the orbit.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+#[serde(rename_all = "camelCase")]
+pub struct OrbitNaru {
+    /// A live session is running.
+    pub active: bool,
+    /// `off` (no session), `speaking` (a Naru turn younger than
+    /// `orbit::SPEAKING_SECS` has not been played yet), `working` (the agent
+    /// holds a turn: `working_since`), `resting` (`resting_since`), else
+    /// `listening` (waiting on the person).
+    pub state: String,
+    #[ts(type = "number | null")]
+    pub session_id: Option<i64>,
+    #[ts(type = "number | null")]
+    pub project_id: Option<i64>,
+}
+
+/// A project as the orbit colours it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+#[serde(rename_all = "camelCase")]
+pub struct OrbitProject {
+    #[ts(type = "number")]
+    pub id: i64,
+    pub name: String,
+    /// `#rrggbb`, `orbit::project_color`: stable per project id.
+    pub color: String,
+}
+
+/// One running job: a task being worked, or a running workflow run.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+#[serde(rename_all = "camelCase")]
+pub struct OrbitJob {
+    /// `task` or `workflow`.
+    pub kind: String,
+    /// The task id, or the workflow run id.
+    #[ts(type = "number")]
+    pub id: i64,
+    /// The workflow id, for a `workflow` job.
+    #[ts(type = "number | null")]
+    pub workflow_id: Option<i64>,
+    /// The task's derived name, or the workflow's name.
+    pub title: String,
+    #[ts(type = "number | null")]
+    pub project_id: Option<i64>,
+    pub project_name: Option<String>,
+    /// The project's colour, or `orbit::GLOBAL_COLOR` for a global workflow.
+    pub color: String,
+    /// A task: `plan` `recon` `build` `review` `verify` `working`. A
+    /// workflow: the running node's title (`working` between nodes).
+    pub stage: String,
+    /// 0..=1.
+    pub progress: f64,
+    /// True when `progress` is a guess from the stages seen so far rather
+    /// than a count (subtasks done, workflow nodes run).
+    pub progress_estimated: bool,
+    /// `working`, `waiting` (on the person: a blocked session or a pending
+    /// gate), `stalled` (the queue-watcher's watchdog) or `idle` (no live
+    /// session holds it).
+    pub state: String,
+    /// The Claude Code session working it, when one was matched.
+    pub session_id: Option<String>,
+    #[ts(type = "number | null")]
+    pub started_at: Option<i64>,
+    pub agents: Vec<OrbitAgent>,
+}
+
+/// One sub-agent of a job (a subagent transcript, or a workflow node).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+#[serde(rename_all = "camelCase")]
+pub struct OrbitAgent {
+    pub key: String,
+    /// `recon` `plan` `build` `review` `test` `check` or `agent` for a
+    /// subagent; the node kind for a workflow step.
+    pub role: String,
+    /// The subagent's `agentType`, or the node's title. Bounded.
+    pub label: String,
+    #[serde(default)]
+    pub detail: Option<String>,
+    /// `working`, `waiting` (unfinished but silent past
+    /// `orbit::QUIET_SECS`), or `done`.
+    pub state: String,
+    #[ts(type = "number | null")]
+    pub started_at: Option<i64>,
+    #[ts(type = "number | null")]
+    pub last_event_at: Option<i64>,
+}
+
+/// One queued item: a `todo` task or a timed workflow's next run.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+#[serde(rename_all = "camelCase")]
+pub struct OrbitQueued {
+    /// `task` or `workflow`.
+    pub kind: String,
+    /// The task id, or the workflow id.
+    #[ts(type = "number")]
+    pub id: i64,
+    pub title: String,
+    #[ts(type = "number | null")]
+    pub project_id: Option<i64>,
+    pub project_name: Option<String>,
+    pub color: String,
+    /// A task with an unfinished dependency. Always false for a workflow.
+    pub blocked: bool,
+    /// A workflow's `next_run_at` (stored `YYYY-MM-DD HH:MM:SS` UTC text).
+    pub next_run_at: Option<String>,
+}
+
 /// Which kind of thing an [`AgentWatchRow`] is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "kebab-case")]
@@ -1103,6 +1238,47 @@ pub struct GpuInfo {
     #[ts(type = "number | null")]
     pub vram_bytes: Option<u64>,
     pub usage_pct: Option<f64>,
+}
+
+/// One reading of the host for the agent watcher's sparklines (naru task
+/// 2540, `docs/system.md`). Every value the host may decline is `None`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+#[serde(rename_all = "camelCase")]
+pub struct SystemSample {
+    /// Unix seconds.
+    #[ts(type = "number")]
+    pub at: i64,
+    pub cpu_pct: f64,
+    #[ts(type = "number")]
+    pub mem_used_bytes: u64,
+    #[ts(type = "number")]
+    pub mem_total_bytes: u64,
+    /// GPU utilisation from `ioreg` (`IOAccelerator`'s `Device Utilization
+    /// %`, macOS, no privileges); `None` when it could not be read.
+    pub gpu_pct: Option<f64>,
+    /// The volume holding Naru's database, as `SystemInfo::disk_*`.
+    #[ts(type = "number | null")]
+    pub disk_used_bytes: Option<u64>,
+    #[ts(type = "number | null")]
+    pub disk_total_bytes: Option<u64>,
+}
+
+/// `GET /api/system/stats`: the newest sample plus a short history, oldest
+/// first (the newest is also the last entry of `history`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+#[serde(rename_all = "camelCase")]
+pub struct SystemStats {
+    pub sample: SystemSample,
+    pub history: Vec<SystemSample>,
+    /// The least spacing between samples, seconds: a poll sooner than this
+    /// gets the same newest sample back.
+    #[ts(type = "number")]
+    pub interval_secs: i64,
+    /// False when this host cannot report GPU utilisation at all (every
+    /// `gpu_pct` is then `None`) — the page says "unavailable", never 0.
+    pub gpu_available: bool,
 }
 
 /// One changed/untracked/conflicted path from `git status --porcelain=v2`

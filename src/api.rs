@@ -52,9 +52,9 @@ use crate::core::{
     Store, SystemInfo, Task, TaskNote, TaskPatch, TaskSummary, WorkflowEdgeKind,
     WorkflowGateStatus, WorkflowNodeKind, WorkflowNodeNew, WorkflowNodePatch, WorkflowPatch,
     WorkflowTrigger, WorkflowType, agents, attachments, audio, board, config, files, git, guard,
-    hooks, inbox_triage, kb, library, listen, live, memory_job, notify, project_memory, receipt,
-    runner, script_runs, scripts, speech, supervisor, system, validate_live_client, version,
-    workflow,
+    hooks, inbox_triage, kb, library, listen, live, memory_job, notify, orbit, project_memory,
+    receipt, runner, script_runs, scripts, speech, supervisor, system, validate_live_client,
+    version, workflow,
 };
 
 /// The Vite build output, embedded into the binary at compile time.
@@ -3706,6 +3706,7 @@ fn router(state: AppState) -> Router {
         // this has no `path`/empty-state wrapper: it is just the bare array).
         .route("/api/agents", get(list_all_agents))
         .route("/api/agents/watch", get(get_agent_watch))
+        .route("/api/agents/orbit", get(get_agent_orbit))
         .route("/api/agents/{id}/attach", get(attach_agent))
         // The other end of the spawn (mesa task 1289): `claude stop <id>`, so
         // a session the sidebar can no longer act on can leave the list.
@@ -3733,6 +3734,7 @@ fn router(state: AppState) -> Router {
         // local one does.
         .route("/api/system", get(get_system_info))
         .route("/api/system/audio-models", get(get_system_audio_models))
+        .route("/api/system/stats", get(get_system_stats))
         // Project git tab: working-tree view (branch + changed files) and a
         // per-file unified diff. Read-only external state like /api/git-status,
         // so the same standard guard only — no agent access gate.
@@ -9308,6 +9310,18 @@ async fn get_system_info() -> Json<SystemInfo> {
     )
 }
 
+/// `GET /api/system/stats` — the agent watcher's sparkline feed (naru task
+/// 2540, `docs/system.md`): the newest host sample and a short history,
+/// poll-driven in `core::system::stats`. Same standard-guard-only posture as
+/// `/api/system`; always 200.
+async fn get_system_stats() -> Json<crate::core::SystemStats> {
+    Json(
+        tokio::task::spawn_blocking(system::stats)
+            .await
+            .expect("core::system::stats does not panic"),
+    )
+}
+
 /// `GET /api/system/audio-models` — the models the naru-audio daemon has
 /// loaded and what they hold (naru task 1910, `docs/system.md`). Always 200;
 /// `models` is `null` when the daemon cannot be asked.
@@ -13226,6 +13240,37 @@ async fn get_agent_watch(
         .await
         .map_err(|e| agents_unavailable(format!("agent watch panicked: {e}")))?;
     Ok(Json(watch).into_response())
+}
+
+/// How far back the orbit reads subagent transcripts: the watcher's widest
+/// window, so a job's finished stages stay on its ring for an hour.
+const ORBIT_WATCH_MINUTES: i64 = 60;
+
+/// The agent watcher's whole-machine feed (naru task 2540,
+/// `docs/agent-watcher.md`): the live voice, running jobs with their
+/// sub-agents, the queue, project colours. Gated like every agents route,
+/// but an unreadable session list is `agentsAvailable: false`, never 502 —
+/// the store half is still worth drawing.
+async fn get_agent_orbit(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let sessions = panel_sessions(&state).await.ok();
+    let rows = match sessions.clone() {
+        Some(s) => tokio::task::spawn_blocking(move || agents::watch(s, ORBIT_WATCH_MINUTES))
+            .await
+            .map(|w| w.rows)
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let store = state.store.lock().unwrap_or_else(|e| e.into_inner());
+    Ok(Json(orbit::from_store(&store, now, sessions, rows)?).into_response())
 }
 
 /// Upgrades to a WebSocket bridged onto `claude attach <id>` in a PTY — the
@@ -22301,6 +22346,91 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         assert!(info.ram_total_bytes > 0);
         assert!(info.cpu_logical >= 1);
         assert_eq!(info.cpu_per_core_pct.len(), info.cpu_logical as usize);
+    }
+
+    // --- GET /api/system/stats (naru task 2540) ----------------------------
+
+    #[tokio::test]
+    async fn system_stats_route_is_a_history_ending_in_its_sample() {
+        let Json(stats) = get_system_stats().await;
+        assert_eq!(stats.history.last(), Some(&stats.sample));
+        assert!(stats.sample.mem_total_bytes > 0);
+        assert_eq!(stats.interval_secs, system::STATS_INTERVAL_SECS);
+        let v = serde_json::to_value(&stats).unwrap();
+        for key in [
+            "cpuPct",
+            "memUsedBytes",
+            "memTotalBytes",
+            "gpuPct",
+            "diskUsedBytes",
+        ] {
+            assert!(v["sample"].get(key).is_some(), "{key}");
+        }
+        assert!(v.get("gpuAvailable").is_some());
+    }
+
+    // --- GET /api/agents/orbit (naru task 2540) ----------------------------
+
+    /// The orbit reads the cached panel list (seeded here, so no `claude`
+    /// runs), pairs the owner's session with its task and refuses a foreign
+    /// Host like every agents route.
+    #[tokio::test]
+    async fn agent_orbit_route_pairs_sessions_and_refuses_a_foreign_host() {
+        let (_dir, state) = test_state();
+        let task = {
+            let mut st = state.store.lock().unwrap();
+            let p = st
+                .create_project("orbit-api", None, None, None, None)
+                .unwrap();
+            let t = st
+                .create_task(
+                    p.id,
+                    "Orbit job",
+                    Priority::Medium,
+                    &[],
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+            st.claim_task(t.id, "sess-orbit", false).unwrap()
+        };
+        let session: AgentSession = serde_json::from_value(json!({
+            "cwd": "/tmp", "kind": "background", "startedAt": 0, "sessionId": "sess-orbit",
+            "name": "task 1 · nothing", "state": "blocked", "taskId": task.id
+        }))
+        .unwrap();
+        state.agents_cache.lock().unwrap().insert(
+            ALL_AGENTS_CACHE_KEY.to_string(),
+            (Instant::now(), vec![session]),
+        );
+        let refused = get_agent_orbit(
+            State(state.clone()),
+            ConnectInfo(loopback()),
+            hdrs(Some("evil.example:0"), None),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(refused.status, StatusCode::FORBIDDEN);
+
+        let resp = get_agent_orbit(
+            State(state.clone()),
+            ConnectInfo(loopback()),
+            loopback_agent_headers(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let orbit: crate::core::AgentOrbit =
+            serde_json::from_slice(&body_bytes(resp).await).unwrap();
+        assert!(orbit.agents_available);
+        assert_eq!(orbit.naru.state, "off");
+        assert_eq!(orbit.jobs.len(), 1);
+        let job = &orbit.jobs[0];
+        assert_eq!((job.id, job.state.as_str()), (task.id, "waiting"));
+        assert_eq!(job.session_id.as_deref(), Some("sess-orbit"));
+        assert!(orbit.queue.is_empty());
     }
 
     // ---- /api/live/listen (mesa task 1394) ----
