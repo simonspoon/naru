@@ -167,14 +167,14 @@ while the panel is visible.
 - **No overlaps**: `agentOrbit.test.ts` lays out 1–8 jobs with full clusters
   and asserts no two painted boxes (estimated text widths) meet and all stay
   inside the viewBox.
+- **Stats** (side panel, above the queue): CPU, memory and GPU sparklines
+  over the stats history and a disk bar, each with its newest percent; GPU
+  says "unavailable" when the host cannot report it.
 - **Queue** (side panel, below the orbit when narrow): no numbers. Tasks
   under one heading per project in project-list order, heading tinted with the
   project colour, each item with a project-coloured left bar; a blocked task
   is dimmed. Every timed workflow under one grey "Workflows" heading, grey bar,
   dashed outline.
-- **Stats**: CPU, memory and GPU sparklines over the stats history and a disk
-  bar, each with its newest percent; GPU says "unavailable" when the host
-  cannot report it.
 - Project colours are the feed's (the agent palette, theme-independent);
   every text colour is a theme variable, so light and dark both read.
 - A job links to its task panel or workflow; a queued item likewise.

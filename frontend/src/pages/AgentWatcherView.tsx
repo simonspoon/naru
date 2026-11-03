@@ -145,6 +145,7 @@ export function AgentWatcherView({ active = true }: { active?: boolean } = {}) {
         </svg>
 
         <aside className="agent-watch-side">
+          {stats && <StatGraphs stats={stats} />}
           <section className="orbit-queue">
             <h2>Queue</h2>
             {groups.length === 0 ? (
@@ -168,7 +169,6 @@ export function AgentWatcherView({ active = true }: { active?: boolean } = {}) {
               ))
             )}
           </section>
-          {stats && <StatGraphs stats={stats} />}
         </aside>
       </div>
     </div>
