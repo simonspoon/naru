@@ -288,15 +288,26 @@ pub fn check_node(node: &WorkflowNode, types: &[WorkflowType]) -> std::result::R
 }
 
 /// Whether an edge `from.from_pin -> to.to_pin` type-checks; the Err names
-/// both types.
+/// both types. A failure exit (`branch` `failure`, naru task 2533) carries
+/// its source's error text, so it leaves no pin and its type is `string`.
 pub fn check_edge(
     from: &WorkflowNode,
     to: &WorkflowNode,
+    branch: Option<&str>,
     from_pin: Option<&str>,
     to_pin: Option<&str>,
     types: &[WorkflowType],
 ) -> std::result::Result<(), String> {
-    let a = pin_type(from, Side::Out, from_pin, types)?;
+    let a = if branch == Some(super::workflow::FAILURE_EXIT) {
+        if let Some(p) = from_pin {
+            return Err(format!(
+                "a failure exit carries the error text; it leaves no pin, got {p:?}"
+            ));
+        }
+        "string".to_string()
+    } else {
+        pin_type(from, Side::Out, from_pin, types)?
+    };
     let b = pin_type(to, Side::In, to_pin, types)?;
     if matches(&a, &b) {
         Ok(())

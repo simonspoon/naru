@@ -5569,10 +5569,17 @@ impl Store {
             ) else {
                 continue;
             };
-            super::wftypes::check_edge(a, b, e.from_pin.as_deref(), e.to_pin.as_deref(), types)
-                .map_err(|m| {
-                    Error::Conflict(format!("edge {} would no longer type-check: {m}", e.id))
-                })?;
+            super::wftypes::check_edge(
+                a,
+                b,
+                e.branch.as_deref(),
+                e.from_pin.as_deref(),
+                e.to_pin.as_deref(),
+                types,
+            )
+            .map_err(|m| {
+                Error::Conflict(format!("edge {} would no longer type-check: {m}", e.id))
+            })?;
         }
         Ok(())
     }
@@ -6310,8 +6317,11 @@ impl Store {
             let edges = read_workflow_edges(&self.conn, current.workflow_id)?;
             if let Some((e, label)) = edges.iter().find_map(|e| {
                 let label = e.branch.as_deref()?;
-                (e.from_node == id && label != "fallback" && !options.contains(&label))
-                    .then_some((e, label))
+                (e.from_node == id
+                    && label != "fallback"
+                    && label != super::workflow::FAILURE_EXIT
+                    && !options.contains(&label))
+                .then_some((e, label))
             }) {
                 return Err(Error::Validation(format!(
                     "edge {} leaves this decide node on {label:?}, which is not among the new \
@@ -6328,8 +6338,11 @@ impl Store {
             let edges = read_workflow_edges(&self.conn, current.workflow_id)?;
             if let Some((e, label)) = edges.iter().find_map(|e| {
                 let label = e.branch.as_deref()?;
-                (e.from_node == id && label != "default" && !labels.contains(&label))
-                    .then_some((e, label))
+                (e.from_node == id
+                    && label != "default"
+                    && label != super::workflow::FAILURE_EXIT
+                    && !labels.contains(&label))
+                .then_some((e, label))
             }) {
                 return Err(Error::Validation(format!(
                     "edge {} leaves this switch node on {label:?}, which is not among the new \
@@ -6391,6 +6404,7 @@ impl Store {
                 super::wftypes::check_edge(
                     a,
                     b,
+                    e.branch.as_deref(),
                     e.from_pin.as_deref(),
                     e.to_pin.as_deref(),
                     &types,
@@ -6502,6 +6516,8 @@ impl Store {
             )));
         }
         match (from.kind, branch.as_deref()) {
+            // Every node's failure exit (naru task 2533).
+            (_, Some(super::workflow::FAILURE_EXIT)) => {}
             (WorkflowNodeKind::Branch, None) => {
                 return Err(Error::Validation(format!(
                     "node {from_node} is a branch; its edges need --branch true|false"
@@ -6574,7 +6590,8 @@ impl Store {
             (_, Some(_)) => {
                 return Err(Error::Validation(format!(
                     "node {from_node} is not a branch, decide, switch, gate or trycatch node; only those nodes' edges \
-                     carry a branch"
+                     carry a branch (besides {:?}, every node's failure exit)",
+                    super::workflow::FAILURE_EXIT
                 )));
             }
             _ => {}
@@ -6583,7 +6600,7 @@ impl Store {
             from_pin.as_deref().map(str::trim).filter(|p| !p.is_empty()),
             to_pin.as_deref().map(str::trim).filter(|p| !p.is_empty()),
         );
-        super::wftypes::check_edge(&from, &to, from_pin, to_pin, &types)
+        super::wftypes::check_edge(&from, &to, branch.as_deref(), from_pin, to_pin, &types)
             .map_err(Error::Validation)?;
         let branch_text = branch.as_deref();
         let duplicate: Option<i64> = self

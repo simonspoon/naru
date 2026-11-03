@@ -2635,7 +2635,9 @@ enum WorkflowEdgeCmd {
     /// `decide` node needs `--branch <option>|fallback`, and one leaving a
     /// `switch` node needs `--branch <case label>|default`, and one leaving a
     /// `gate` node needs `--branch approved|rejected`; any other edge
-    /// refuses one.
+    /// refuses one. `--branch failure` is every node's failure exit: active
+    /// only when the source fails, carrying its error, and wiring one keeps
+    /// that failure from failing the run.
     #[command(after_help = "\
 EXAMPLES
   naru workflow edge create ambient 1 2
@@ -2661,7 +2663,7 @@ EXAMPLES
         to: Option<i64>,
         /// The label this edge leaves a branch node (true|false) or a decide
         /// node (one of its options, or fallback) or a switch node (a case
-        /// label, or default) on
+        /// label, or default) on; failure on any node is its failure exit
         #[arg(long, value_name = "LABEL")]
         branch: Option<String>,
         /// The output pin the edge leaves (default: the source's first;

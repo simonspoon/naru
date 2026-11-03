@@ -101,6 +101,9 @@ pub const DECIDE_FALLBACK: &str = "fallback";
 const SWITCH_OPS: [&str; 3] = ["equals", "contains", "regex"];
 /// The label of a switch node's catch-all edge.
 pub const SWITCH_DEFAULT: &str = "default";
+/// The label of any node's failure exit (naru task 2533): an edge carrying it
+/// is active only when its source failed, and wiring one handles the failure.
+pub const FAILURE_EXIT: &str = "failure";
 const OUTPUT_TARGETS: [&str; 4] = ["log", "task", "inbox", "board"];
 
 fn object<'a>(
@@ -1550,6 +1553,12 @@ pub fn validate_config(
                      that is the label of the catch-all edge"
                 ));
             }
+            if options.iter().any(|o| o == FAILURE_EXIT) {
+                return Err(format!(
+                    "decide config: an option may not be {FAILURE_EXIT:?}; \
+                     that is the label of the failure exit"
+                ));
+            }
             out.insert("options".into(), json!(options));
             let bad_threshold = "decide config: \"threshold\" must be a number from 0 to 1";
             let threshold = match obj.get("threshold") {
@@ -1607,6 +1616,12 @@ pub fn validate_config(
                     return Err(format!(
                         "switch config: a case label may not be {SWITCH_DEFAULT:?}; \
                          that is the label of the catch-all edge"
+                    ));
+                }
+                if label == FAILURE_EXIT {
+                    return Err(format!(
+                        "switch config: a case label may not be {FAILURE_EXIT:?}; \
+                         that is the label of the failure exit"
                     ));
                 }
                 if labels.contains(&label) {
@@ -2664,6 +2679,9 @@ struct Done {
     /// decide (an option, or `fallback`) node activates; `None` for every
     /// other node, whose edges are all active.
     route: Option<String>,
+    /// A failed node's error when the failure is handled by its wired
+    /// failure exit; what that exit's edges carry. `None` otherwise.
+    error: Option<String>,
 }
 
 /// Node ids in execution order: Kahn's algorithm over every node, the ready
@@ -2795,6 +2813,7 @@ pub fn execute_run<A: StoreAccess>(
                     status: WorkflowStepStatus::Skipped,
                     output: String::new(),
                     route: None,
+                    error: None,
                 },
             );
             continue;
@@ -2838,9 +2857,17 @@ pub fn execute_run<A: StoreAccess>(
         let (status, output, error, route) = match result {
             Ok((output, route)) => (WorkflowStepStatus::Ok, output, None, route),
             Err(message) => {
-                failure.get_or_insert_with(|| {
-                    format!("node {} ({}) failed: {message}", node.id, node.title)
-                });
+                // A wired failure exit handles the failure (naru task 2533):
+                // the step stays failed but the run goes on.
+                let handled = view
+                    .edges
+                    .iter()
+                    .any(|e| e.from_node == id && e.branch.as_deref() == Some(FAILURE_EXIT));
+                if !handled {
+                    failure.get_or_insert_with(|| {
+                        format!("node {} ({}) failed: {message}", node.id, node.title)
+                    });
+                }
                 (
                     WorkflowStepStatus::Failed,
                     String::new(),
@@ -2856,7 +2883,7 @@ pub fn execute_run<A: StoreAccess>(
             kind: node.kind,
             status,
             output: output.clone(),
-            error,
+            error: error.clone(),
             duration_ms,
             started_at,
             log,
@@ -2867,6 +2894,7 @@ pub fn execute_run<A: StoreAccess>(
                 status,
                 output,
                 route,
+                error: error.map(cap),
             },
         );
         let _ = access.with(|s| s.update_workflow_run_steps(run.id, &steps));
@@ -2880,7 +2908,8 @@ pub fn execute_run<A: StoreAccess>(
 /// The joined outputs of `node_id`'s active upstream nodes, or `None` when it
 /// has no active incoming edge (so it is skipped). An edge is active when its
 /// source ran `ok` and — for a branch or decide source — its `branch` label
-/// matches the label the source routed to. A node with no incoming edges that is not the trigger
+/// matches the label the source routed to; a `failure` edge is active only
+/// when its source failed (naru task 2533). A node with no incoming edges that is not the trigger
 /// is unreachable and is skipped too.
 fn active_input(view: &WorkflowView, done: &HashMap<i64, Done>, node_id: i64) -> Option<String> {
     let edges = active_edges(view, done, node_id);
@@ -2907,6 +2936,9 @@ fn active_edges<'a>(
             let Some(up) = done.get(&e.from_node) else {
                 return false;
             };
+            if e.branch.as_deref() == Some(FAILURE_EXIT) {
+                return up.status == WorkflowStepStatus::Failed;
+            }
             up.status == WorkflowStepStatus::Ok
                 && match &up.route {
                     Some(label) => e.branch.as_deref() == Some(label.as_str()),
@@ -2919,6 +2951,10 @@ fn active_edges<'a>(
 /// What one active edge carries: its source's output, or — leaving a
 /// `break` node's field pin — that field's value (naru task 1981).
 fn edge_text(view: &WorkflowView, done: &HashMap<i64, Done>, e: &WorkflowEdge) -> String {
+    if e.branch.as_deref() == Some(FAILURE_EXIT) {
+        // A failure exit carries its source's error text.
+        return done[&e.from_node].error.clone().unwrap_or_default();
+    }
     let out = &done[&e.from_node].output;
     let src = view.nodes.iter().find(|n| n.id == e.from_node);
     if let Some(src) = src
@@ -5638,6 +5674,155 @@ mod tests {
         assert_eq!(notice.output, "7\nrun_status=succeeded");
     }
 
+    /// trigger -> Work (cli) -> Ok (cli `cat`), plus Handler (cli `cat`) on
+    /// Work's failure exit when `wire_failure`.
+    fn failure_exit_graph(st: &Mutex<Store>, name: &str, wire_failure: bool) -> i64 {
+        st.with(|s| {
+            let wf = s.create_workflow(None, name, None).unwrap().id;
+            let t = node(
+                s,
+                wf,
+                WorkflowNodeKind::Trigger,
+                "T",
+                json!({"mode": "manual"}),
+            );
+            let work = node(
+                s,
+                wf,
+                WorkflowNodeKind::Cli,
+                "Work",
+                cli("echo boom >&2; false"),
+            );
+            let ok = node(s, wf, WorkflowNodeKind::Cli, "Ok", cli("cat"));
+            s.create_workflow_edge(wf, t, work, None).unwrap();
+            s.create_workflow_edge(wf, work, ok, None).unwrap();
+            if wire_failure {
+                let h = node(s, wf, WorkflowNodeKind::Cli, "Handler", cli("cat"));
+                s.create_workflow_edge(wf, work, h, Some(FAILURE_EXIT.into()))
+                    .unwrap();
+            }
+            wf
+        })
+    }
+
+    #[test]
+    fn a_wired_failure_exit_handles_the_failure_and_skips_the_success_exit() {
+        let (st, _d) = store();
+        let wf = failure_exit_graph(&st, "Handled", true);
+        let run = run_workflow(&st, wf, WorkflowTrigger::Manual, "x").unwrap();
+        assert_eq!(run.status, WorkflowRunStatus::Succeeded, "{run:?}");
+        assert_eq!(run.error, None);
+        let step = |t: &str| run.steps.iter().find(|s| s.title == t).unwrap();
+        let work = step("Work");
+        assert_eq!(work.status, WorkflowStepStatus::Failed, "{run:?}");
+        let err = work.error.clone().unwrap();
+        assert!(err.contains("boom"), "{err}");
+        let h = step("Handler");
+        assert_eq!(h.status, WorkflowStepStatus::Ok, "{run:?}");
+        assert_eq!(h.output.trim(), err.trim());
+        // The success exit of a failed node is inactive.
+        assert_eq!(step("Ok").status, WorkflowStepStatus::Skipped, "{run:?}");
+    }
+
+    #[test]
+    fn an_unwired_failure_still_fails_the_run_and_a_failure_exit_idles_on_success() {
+        let (st, _d) = store();
+        let wf = failure_exit_graph(&st, "Unhandled", false);
+        let run = run_workflow(&st, wf, WorkflowTrigger::Manual, "x").unwrap();
+        assert_eq!(run.status, WorkflowRunStatus::Failed, "{run:?}");
+        assert!(run.error.as_deref().unwrap().contains("Work"));
+        let ok = run.steps.iter().find(|s| s.title == "Ok").unwrap();
+        assert_eq!(ok.status, WorkflowStepStatus::Skipped, "{run:?}");
+        // On success the failure exit is inactive and the success exit runs.
+        let wf = st.with(|s| {
+            let v = s.get_workflow_view(wf).unwrap();
+            let work = v.nodes.iter().find(|n| n.title == "Work").unwrap().id;
+            let h = node(s, wf, WorkflowNodeKind::Cli, "Handler", cli("cat"));
+            s.create_workflow_edge(wf, work, h, Some(FAILURE_EXIT.into()))
+                .unwrap();
+            s.update_workflow_node(
+                work,
+                WorkflowNodePatch {
+                    config: Some(cli("echo fine")),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            wf
+        });
+        let run = run_workflow(&st, wf, WorkflowTrigger::Manual, "x").unwrap();
+        assert_eq!(run.status, WorkflowRunStatus::Succeeded, "{run:?}");
+        let step = |t: &str| run.steps.iter().find(|s| s.title == t).unwrap();
+        assert_eq!(step("Ok").output.trim(), "fine");
+        assert_eq!(step("Handler").status, WorkflowStepStatus::Skipped);
+    }
+
+    #[test]
+    fn failure_is_a_reserved_label_and_any_node_may_carry_it() {
+        use WorkflowNodeKind as K;
+        let bad = validate_config(
+            K::Decide,
+            &json!({"question": "q", "options": ["a", "failure"]}),
+        )
+        .unwrap_err();
+        assert!(bad.contains("failure"), "{bad}");
+        let bad = validate_config(
+            K::Switch,
+            &json!({"cases": [{"match": "a"}, {"match": "failure"}]}),
+        )
+        .unwrap_err();
+        assert!(bad.contains("failure"), "{bad}");
+        let (st, _d) = store();
+        let mut s = st.lock().unwrap();
+        let wf = s.create_workflow(None, "Labels", None).unwrap().id;
+        let b = node(
+            &mut s,
+            wf,
+            K::Branch,
+            "B",
+            json!({"op": "contains", "value": "x"}),
+        );
+        let d = node(
+            &mut s,
+            wf,
+            K::Decide,
+            "D",
+            json!({"question": "q", "options": ["a", "b"]}),
+        );
+        let c = node(&mut s, wf, K::Cli, "C", cli("cat"));
+        let e = node(&mut s, wf, K::Cli, "E", cli("cat"));
+        for from in [b, d, c] {
+            s.create_workflow_edge(wf, from, e, Some(FAILURE_EXIT.into()))
+                .unwrap();
+        }
+        // A failure exit carries the error text and leaves no pin.
+        let err = s
+            .create_workflow_edge_pins(
+                wf,
+                c,
+                e,
+                Some(FAILURE_EXIT.into()),
+                Some("out".into()),
+                None,
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("no pin"), "{err}");
+        // Other labels on a plain node are still refused.
+        assert!(
+            s.create_workflow_edge(wf, c, e, Some("nope".into()))
+                .is_err()
+        );
+        // A decide config change keeps its failure edge legal.
+        s.update_workflow_node(
+            d,
+            WorkflowNodePatch {
+                config: Some(json!({"question": "q", "options": ["c", "d"]})),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+
     #[test]
     fn always_is_a_cli_only_boolean() {
         let (st, _d) = store();
@@ -6804,6 +6989,7 @@ mod tests {
                 status: WorkflowStepStatus::Ok,
                 output: "{}".into(),
                 route,
+                error: None,
             },
         );
         view.nodes

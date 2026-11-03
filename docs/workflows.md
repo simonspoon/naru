@@ -461,13 +461,29 @@ Import (`Store::import_workflow`, one `BEGIN IMMEDIATE` transaction, an
 3. An **edge is active** when its source ran `ok` and — for an edge leaving a
    `branch` — its `branch` equals the source's verdict (`true`/`false`) — or
    `decide` — its `branch` equals the chosen option, or `fallback`.
+   **Failure exit** (naru task 2533): every node also has a failure exit, an
+   edge with `branch` `failure` (accepted from any node kind, so a decide
+   option or switch case may not be named `failure`). It is active only when
+   its source **failed**, and it carries the source's error text as its
+   input (so it leaves no pin and type-checks as `string`); it is inactive
+   when the source ran `ok`, and a failed node's other (success) edges are
+   inactive. A decide/switch saved before the label was reserved with an
+   option or case named `failure` now has those edges read as failure exits.
+   A failure edge into a `join` never satisfies it (a join needs every
+   incoming edge active), and an `always` node ignores its edges, so either
+   target handles the failure without anything running from it.
 4. A node with at least one incoming edge runs iff **at least one incoming
    edge is active**; its **input** is the outputs of its active upstream nodes
    joined by `"\n"` in **edge-id order**. A node whose incoming edges are all
    inactive is `skipped`. A node with no incoming edges that is not the trigger
    is unreachable, so it is `skipped` too.
-5. A **failed node fails the run**: nothing downstream runs and every node not
-   yet run is recorded `skipped`. `WorkflowRun.error` names the node.
+5. A **failed node fails the run** unless it has at least one `failure` edge:
+   then the failure is **handled** — the step is still recorded `failed` with
+   its error, its failure edges fire, and the run goes on (and can finish
+   `succeeded`). An unhandled failure is as before: nothing downstream runs,
+   every node not yet run is recorded `skipped`, and `WorkflowRun.error` names
+   the node. A run is `failed` iff an unhandled failure occurred. `trycatch`,
+   `retry` and `always` nodes behave as they always did.
 6. Each node leaves one `WorkflowStep`:
    `{node_id, title, kind, status: ok|skipped|failed, output, error, duration_ms, started_at, log}`,
    output capped at 64 KiB. `started_at` (naru task 1957) is unix seconds when
@@ -646,7 +662,7 @@ is named.
 | `workflow node create <WORKFLOW> <KIND> <TITLE> [--config JSON] [--x] [--y]` | the `WorkflowNode`; omitted coordinates place it in a row beside the others |
 | `workflow node update <id> [--title] [--config JSON] [--x] [--y]` | the node; `--config` **replaces** the whole config |
 | `workflow node delete <id>` | `{node, edges}` |
-| `workflow edge create <WORKFLOW> <FROM> <TO> [--branch true\|false\|<option>\|fallback]` | the `WorkflowEdge` |
+| `workflow edge create <WORKFLOW> <FROM> <TO> [--branch true\|false\|<option>\|fallback\|failure]` | the `WorkflowEdge` |
 | `workflow edge delete <id>` | the destroyed edge |
 
 **Editing nodes: cheat-sheet** (naru task 2067; checked against the CLI).
