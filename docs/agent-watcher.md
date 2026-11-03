@@ -1,9 +1,10 @@
-# Agent watcher (naru task 1909)
+# Agent watcher (naru tasks 1909, 2541)
 
-A live timeline of every running agent, a dock panel (`watcher`, starts closed; reopen from the header `⋯` menu) and, on the phone tier, a full page at `#/agent-watcher` (nav
-entry "Agent watcher", right after Terminal). One row per live session, then
-its subagents (`↳`), then its shells (`⌁`); children are always depth 1. A
-5m / 15m / 1h toggle picks the window; the page polls every 5s. It is a
+A live map of the whole machine, a dock panel (`watcher`, starts closed; reopen from the header `⋯` menu) and, on the phone tier, a full page at `#/agent-watcher` (nav
+entry "Agent watcher", right after Terminal). Since naru task 2541 the page
+draws the **orbit** (below, "Orbit page") from `GET /api/agents/orbit`; the
+per-session timeline it drew before is gone from the page, but its endpoint
+`GET /api/agents/watch` stays — the orbit feed is built on it. It is a
 **separate surface**: nothing of the Agents panel (`AgentSidebar`,
 `GET /api/agents`, `AgentSession`/`AgentChild`) changed.
 
@@ -50,39 +51,6 @@ finished row). A subagent launch (`Agent`/`Task`) and a `run_in_background`
 call are left out (they have their own row/segment); calls ending before the
 window are dropped and the newest 300 per transcript kept.
 
-The page draws each call as its own child row (`toolRows`, depth 1, glyph `⚙`,
-label = tool name, with the summary on a second line, ellipsised, full text in the hover) hanging under its owning session or subagent: after the
-session row, and after each subagent row, oldest call first. A row has one
-segment in the owner's model colour spanning start..end, clipped to the window,
-an open call running to now (or to a finished owner's last event); hover says
-`Read · 3s` or `Bash · running 12s`. Only the newest `TOOL_ROW_CAP` (20) calls per
-owner are shown. A finished call's row disappears `TOOL_TTL_SECS` (10) seconds after it ended; an open call always stays. The row links to the owner. There is no legend entry; the
-rows are not a state, `rowSegments` is unchanged.
-
-## Segment states (`frontend/src/agentWatch.ts`)
-
-- **active** — solid, the model colour (`modelColor`): inside a run. A run that
-  ended less than `QUIET_GAP_S` before the end of an unfinished row is extended
-  to now.
-- **waiting** — hatched model colour: a session's gap covered by a running
-  child (a subagent from its start to its last event/now, a shell from its
-  start to now).
-- **quiet** — amber: an uncovered gap.
-- **output** — green: a shell whose output file is being written.
-- **stalled** — red hatch: a shell whose output is older than `SHELL_STALL_S`.
-
-A row starts at the later of the window start, its own `startedAt` and
-`historyFrom` (set only when the tail read was cut, so unknown history is not
-painted as quiet); a finished subagent ends at its last event.
-
-Constants and why: `QUIET_GAP_S = 60` mirrors the server's idle gap;
-`SHELL_STALL_S = 60` the same scale for a shell; `ALL_QUIET_ALERT_S = 300`
-raises the on-page banner ("Nobody is working…") when every unfinished row has
-been quiet or waiting that long. A shell with no readable output signal never
-shows red and suppresses the banner (silence cannot be told from a long quiet
-build).
-The banner is page-only: no server-side alert, no inbox item.
-
 ## Shell output probe
 
 Claude Code writes a Bash call's stdout to
@@ -104,7 +72,7 @@ no config keys, no phone tab-bar entry.
 ## Orbit feed (naru task 2540)
 
 The data half of the watcher redesign (the orbit view; the page that draws it
-is the follow-up task — until then the timeline above is unchanged). It
+is naru task 2541, "Orbit page" below). It
 describes the whole machine as **jobs**, not tool-call rows.
 
 `GET /api/agents/orbit` — gated by `require_agent_access` like every agents
@@ -175,10 +143,47 @@ never recomputes it.
 
 System sparklines come from `GET /api/system/stats` (`docs/system.md`).
 
+## Orbit page (naru task 2541)
+
+`frontend/src/pages/AgentWatcherView.tsx` draws; `frontend/src/agentOrbit.ts`
+holds every position and grouping (pure, tested). Both feeds poll every 5 s
+while the panel is visible.
+
+- **Naru** at the centre of an SVG (viewBox 1000×1000) with five voice bars:
+  still and grey when no live session (`off`), a slow pulse while live, fast
+  while `speaking`. No "waiting on you" tag.
+- **Jobs** evenly on the ring from the top, clockwise (from seven jobs it
+  turns half a step so none sits level with Naru). Each node: a progress ring
+  in the job's colour with the percent inside, a glow while `working`, dimmed
+  when `idle`. Its title and `project · stage` sit on the **inner** side
+  (below the node in the top half, above it in the bottom half); the stage
+  line says `needs you` (amber) or `stalled` (red) instead when the state is
+  that. Titles clip by crowding (`titleChars`: 16, 14, then 11 characters).
+- **Sub-agent dots** cluster on the job's outer side, 14° apart, labelled by
+  role (a workflow step: its node title), `✓` when done. Glowing in the job's
+  colour = working, dashed grey = waiting, grey = done. `maxDots` caps a
+  cluster by the room on the ring (6 alone, 4 with five jobs, 2 with eight);
+  unfinished agents are kept first, then the newest done.
+- **No overlaps**: `agentOrbit.test.ts` lays out 1–8 jobs with full clusters
+  and asserts no two painted boxes (estimated text widths) meet and all stay
+  inside the viewBox.
+- **Queue** (side panel, below the orbit when narrow): no numbers. Tasks
+  under one heading per project in project-list order, heading tinted with the
+  project colour, each item with a project-coloured left bar; a blocked task
+  is dimmed. Every timed workflow under one grey "Workflows" heading, grey bar,
+  dashed outline.
+- **Stats**: CPU, memory and GPU sparklines over the stats history and a disk
+  bar, each with its newest percent; GPU says "unavailable" when the host
+  cannot report it.
+- Project colours are the feed's (the agent palette, theme-independent);
+  every text colour is a theme variable, so light and dark both read.
+- A job links to its task panel or workflow; a queued item likewise.
+
 ## Tests
 
 `cc.rs` (`coalesce_runs`, `watch_from_text`, tool pairing), `agents.rs` (`watch_includes`,
 `parse_lsof`), `orbit.rs` (colours, stage names, roles, and one store-backed
 scenario through `from_store`), `api.rs` (`/api/agents/orbit` pairing and
-Host refusal), `frontend/src/agentWatch.test.ts`, and a section of
+Host refusal), `frontend/src/agentOrbit.test.ts` (layout, overlap, queue
+grouping, sparklines), and a section of
 `scripts/agents-check.sh` (route, parent links, window clamp, foreign Host).

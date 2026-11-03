@@ -22,7 +22,7 @@ import type { Artifact } from './types/Artifact'
 import type { ArtifactSummary } from './types/ArtifactSummary'
 import type { Attachment } from './types/Attachment'
 import type { CcDashboard } from './types/CcDashboard'
-import type { AgentWatch } from './types/AgentWatch'
+import type { AgentOrbit } from './types/AgentOrbit'
 import type { CcLive } from './types/CcLive'
 import type { CcScorecard } from './types/CcScorecard'
 import type { CcNodeText } from './types/CcNodeText'
@@ -98,6 +98,7 @@ import type { ScriptRunEvent } from './types/ScriptRunEvent'
 import type { ScriptRunRecord } from './types/ScriptRunRecord'
 import type { Status } from './types/Status'
 import type { SystemInfo } from './types/SystemInfo'
+import type { SystemStats } from './types/SystemStats'
 import type { AudioModels } from './types/AudioModels'
 import type { Task } from './types/Task'
 import type { TaskNote } from './types/TaskNote'
@@ -437,6 +438,11 @@ export function getSystemInfo(): Promise<SystemInfo> {
   return request('/api/system')
 }
 
+/** The newest host sample plus a short history, for the watcher's sparklines. */
+export function getSystemStats(): Promise<SystemStats> {
+  return request('/api/system/stats')
+}
+
 /**
  * The models the naru-audio daemon has loaded (naru task 1910). `models` is
  * `null` when the engine is legacy or the daemon cannot be asked.
@@ -755,9 +761,9 @@ export function listAllAgents(): Promise<AgentSession[]> {
   return request('/api/agents')
 }
 
-/** The Agent watcher's timeline rows over the last `minutes` (naru task 1909). */
-export function getAgentWatch(minutes: number): Promise<AgentWatch> {
-  return request(`/api/agents/watch?minutes=${minutes}`)
+/** The Agent watcher's orbit: Naru, running jobs and their sub-agents, the queue (naru task 2541). */
+export function getAgentOrbit(): Promise<AgentOrbit> {
+  return request('/api/agents/orbit')
 }
 
 /** Stops a background session (`claude stop <id>`) — the other end of the

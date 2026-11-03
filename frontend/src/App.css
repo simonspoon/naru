@@ -13408,8 +13408,9 @@ body.dock-resizing .dock-body {
   outline: 1px solid rgba(var(--cyan-rgb), 0.6);
 }
 
-/* Agent watcher (naru task 1909, docs/agent-watcher.md). Bars are positioned
-   in percent of the window by agentWatch.ts; --seg is the row's model colour. */
+/* Agent watcher orbit (naru task 2541, docs/agent-watcher.md). Geometry is
+   agentOrbit.ts's; --proj is a project's colour from the feed (the agent
+   palette, theme-independent on purpose), text stays on theme colours. */
 .agent-watch {
   display: flex;
   flex-direction: column;
@@ -13421,175 +13422,285 @@ body.dock-resizing .dock-body {
 
 .agent-watch-head {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
+  align-items: baseline;
+  gap: 1rem;
   flex-wrap: wrap;
 }
 
 .agent-watch-head h1 {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
   margin: 0;
 }
 
-.agent-watch-meta {
+.agent-watch-count {
+  font-size: 1.3rem;
+  color: var(--muted);
+}
+
+.agent-watch-body {
   display: flex;
-  align-items: center;
-  gap: 0.9rem;
-  font-size: 0.8rem;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 1.5rem;
 }
 
-.agent-watch-banner {
-  margin: 0;
-  padding: 0.5rem 0.75rem;
-  border-radius: 6px;
-  color: var(--amber);
-  background: rgba(var(--amber-rgb), 0.12);
+.orbit {
+  flex: 1 1 30rem;
+  min-width: 18rem;
+  max-height: calc(100vh - 8rem);
 }
 
-.agent-watch-chart {
+.orbit text {
+  fill: var(--text);
+  paint-order: stroke;
+  stroke: var(--bg);
+  stroke-width: 6px;
+  stroke-linejoin: round;
+}
+
+.orbit-ring {
+  fill: none;
+  stroke: var(--border);
+  stroke-width: 2;
+  stroke-dasharray: 6 10;
+}
+
+.orbit-spoke {
+  stroke-width: 4;
+  stroke-opacity: 0.4;
+}
+
+.orbit-twig {
+  stroke-width: 3;
+  stroke-opacity: 0.35;
+}
+
+.orbit-twig.waiting {
+  stroke-dasharray: 6 8;
+}
+
+.orbit-naru-glow {
+  fill: var(--violet);
+  opacity: 0.5;
+}
+
+.orbit-naru-disc {
+  fill: var(--panel);
+  stroke: var(--violet);
+  stroke-width: 6;
+}
+
+.orbit-bar {
+  fill: var(--violet);
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: orbit-voice 1.6s ease-in-out infinite;
+}
+
+.orbit-naru.speaking .orbit-bar {
+  animation-duration: 0.55s;
+}
+
+.orbit-naru.off .orbit-bar {
+  fill: var(--muted);
+  animation: none;
+}
+
+.orbit-naru.off .orbit-naru-glow {
+  display: none;
+}
+
+.orbit .orbit-naru-name {
+  font-weight: 800;
+}
+
+@keyframes orbit-voice {
+  0%, 100% { transform: scaleY(1); }
+  50% { transform: scaleY(0.45); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .orbit-bar { animation: none; }
+}
+
+.orbit-node {
+  fill: var(--panel);
+  stroke: var(--border);
+  stroke-width: 8;
+}
+
+.orbit .orbit-pct {
+  fill: var(--text-h);
+  font-weight: 800;
+}
+
+.orbit .orbit-title {
+  font-weight: 800;
+}
+
+.orbit .orbit-sub {
+  fill: var(--muted);
+}
+
+.orbit-job.idle {
+  opacity: 0.6;
+}
+
+.orbit .orbit-job.waiting .orbit-sub {
+  fill: var(--amber);
+}
+
+.orbit .orbit-job.stalled .orbit-sub {
+  fill: var(--red);
+}
+
+.orbit-dot-disc {
+  fill: var(--panel);
+  stroke: currentColor;
+  stroke-width: 4;
+}
+
+.orbit .orbit-dot text {
+  fill: color-mix(in srgb, currentColor 60%, var(--text));
+  font-weight: 700;
+}
+
+.orbit-dot.done .orbit-dot-disc,
+.orbit-dot.waiting .orbit-dot-disc {
+  stroke: var(--muted);
+}
+
+.orbit-dot.waiting .orbit-dot-disc {
+  stroke-dasharray: 5 5;
+}
+
+.orbit .orbit-dot.done text,
+.orbit .orbit-dot.waiting text {
+  fill: var(--muted);
+}
+
+.agent-watch-side {
+  flex: 0 1 22rem;
+  min-width: 16rem;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1rem;
 }
 
-.agent-watch-row,
-.agent-watch-axis {
-  display: grid;
-  grid-template-columns: 14rem 1fr;
-  gap: 0.75rem;
-  align-items: center;
+.orbit-queue,
+.orbit-stats {
+  padding: 1rem;
+  border-radius: var(--r-md);
+  background: var(--surface);
 }
 
-/* Keep the time axis in view while the rows scroll beneath it. */
-.agent-watch-axis {
-  position: sticky;
-  top: -1rem;
-  z-index: 1;
-  padding-top: 1rem;
-  margin-top: -1rem;
-  background: var(--bg, inherit);
+.orbit-queue h2 {
+  margin: 0 0 0.5rem;
+  font-size: 1.4rem;
 }
 
-.agent-watch-row {
-  color: inherit;
+.orbit-group + .orbit-group {
+  margin-top: 0.9rem;
+}
+
+.orbit-group h3 {
+  margin: 0 0 0.35rem;
+  font-size: 1.05rem;
+  font-weight: 800;
+  color: color-mix(in srgb, var(--proj) 65%, var(--text));
+}
+
+.orbit-group.workflow h3 {
+  color: var(--muted);
+}
+
+.orbit-item {
+  display: block;
+  margin-top: 0.35rem;
+  padding: 0.45rem 0.7rem 0.45rem 1.1rem;
+  border-radius: var(--r-sm);
+  background: var(--surface-raised);
+  box-shadow: inset 6px 0 0 var(--proj), inset 0 0 0 2px color-mix(in srgb, var(--proj) 45%, transparent);
+  color: var(--text);
+  font-size: 1.15rem;
+  font-weight: 600;
   text-decoration: none;
-  padding: 3px 0;
-  border-radius: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.agent-watch-row:hover {
+.orbit-item:hover {
   background: var(--surface-hover);
 }
 
-.agent-watch-row.child .agent-watch-label {
-  padding-left: 1rem;
+.orbit-item.workflow {
+  box-shadow: inset 6px 0 0 var(--muted);
+  outline: 2px dashed rgba(var(--muted-rgb), 0.6);
+  outline-offset: -2px;
 }
 
-.agent-watch-label {
+.orbit-item.blocked {
+  opacity: 0.55;
+}
+
+.orbit-stats {
   display: flex;
   flex-direction: column;
-  min-width: 0;
+  gap: 0.6rem;
 }
 
-.agent-watch-name {
+.orbit-stat {
+  display: grid;
+  grid-template-columns: 3.5rem 1fr 3.5rem;
+  align-items: center;
+  gap: 0.6rem;
+  font-size: 1.1rem;
+}
+
+.orbit-stat.cpu { --stat: var(--green); }
+.orbit-stat.mem { --stat: var(--cyan); }
+.orbit-stat.gpu { --stat: var(--violet); }
+.orbit-stat.disk { --stat: var(--amber); }
+
+.orbit-stat-name {
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.orbit-spark {
+  width: 100%;
+  height: 1.8rem;
+}
+
+span.orbit-spark {
+  height: auto;
+  font-size: 0.95rem;
+}
+
+.orbit-spark polyline {
+  fill: none;
+  stroke: var(--stat);
+  stroke-width: 2.5;
+  vector-effect: non-scaling-stroke;
+}
+
+.orbit-stat-now {
+  text-align: right;
+  font-weight: 800;
+  color: var(--stat);
+}
+
+.orbit-meter {
+  height: 0.75rem;
+  border-radius: var(--r-pill);
+  background: rgba(var(--muted-rgb), 0.3);
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 0.85rem;
 }
 
-.agent-watch-model {
-  font-family: var(--font-mono);
-  font-size: 0.7rem;
-  color: var(--muted);
-}
-
-.agent-watch-track {
-  position: relative;
-  height: 18px;
-  background: var(--surface);
-  border-radius: 3px;
-}
-
-.agent-watch-axis .agent-watch-track {
-  height: 1.1rem;
-  background: none;
-}
-
-.agent-watch-tick {
-  position: absolute;
-  transform: translateX(-100%);
-  font-family: var(--font-mono);
-  font-size: 0.7rem;
-  color: var(--muted);
-}
-
-.agent-watch-tick:first-child {
-  transform: none;
-}
-
-.agent-watch-seg {
-  position: absolute;
-  top: 2px;
-  bottom: 2px;
-  border-radius: 2px;
-}
-
-.agent-watch-seg.active {
-  background: var(--seg);
-}
-
-.agent-watch-seg.waiting,
-.agent-watch-swatch.waiting {
-  background: repeating-linear-gradient(45deg, var(--seg, var(--muted)) 0 3px, transparent 3px 6px);
-}
-
-.agent-watch-seg.quiet,
-.agent-watch-swatch.quiet {
-  background: color-mix(in srgb, var(--amber) 35%, transparent);
-}
-
-.agent-watch-seg.output,
-.agent-watch-swatch.output {
-  background: var(--magenta);
-}
-
-.agent-watch-seg.stalled,
-.agent-watch-swatch.stalled {
-  background: repeating-linear-gradient(45deg, var(--red) 0 3px, transparent 3px 6px);
-}
-
-/* A tool-call row: a child row, a little quieter than a subagent's. */
-.agent-watch-row.tool .agent-watch-name {
-  color: var(--muted);
-}
-
-.agent-watch-now {
-  position: absolute;
-  top: -1px;
-  bottom: -1px;
-  right: 0;
-  width: 2px;
-  background: var(--red);
-}
-
-.agent-watch-legend {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 1rem;
-  margin-top: 0.5rem;
-  font-size: 0.75rem;
-}
-
-.agent-watch-swatch {
-  display: inline-block;
-  width: 0.8rem;
-  height: 0.6rem;
-  border-radius: 2px;
-  vertical-align: middle;
+.orbit-meter > span {
+  display: block;
+  height: 100%;
+  background: var(--stat);
 }
 
 /* Knowledge base page (naru task 1928, reworked in 1942) */
