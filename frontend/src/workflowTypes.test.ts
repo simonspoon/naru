@@ -23,7 +23,7 @@ const review: WorkflowType = {
 const types = [review]
 
 function node(id: number, kind: WorkflowNode['kind'], config: Record<string, unknown>, title = `n${id}`): WorkflowNode {
-  return { id, workflow_id: 1, kind, title, config, x: 0, y: 0, created_at: '', updated_at: '' }
+  return { id, workflow_id: 1, kind, title, config, x: 0, y: 0, created_at: '', updated_at: '', pins: { in: [], out: [] } }
 }
 
 describe('typesMatch', () => {

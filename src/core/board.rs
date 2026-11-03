@@ -968,6 +968,7 @@ mod tests {
             y,
             created_at: "2026-01-01 00:00:00".into(),
             updated_at: "2026-01-01 00:00:00".into(),
+            pins: Default::default(),
         }
     }
 

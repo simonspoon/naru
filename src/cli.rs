@@ -5334,8 +5334,8 @@ const QUIET_DROP_PROJECT: &[&str] = &["description"];
 /// Keys dropped from a `Workflow` under `--quiet`.
 const QUIET_DROP_WORKFLOW: &[&str] = &["description"];
 /// Keys dropped from a `WorkflowNode` under `--quiet`: the per-kind config,
-/// which can hold a whole prompt or shell command.
-const QUIET_DROP_WORKFLOW_NODE: &[&str] = &["config"];
+/// which can hold a whole prompt or shell command, and the derived pins.
+const QUIET_DROP_WORKFLOW_NODE: &[&str] = &["config", "pins"];
 /// A `WorkflowEdge` has no unbounded field: quiet output equals full output.
 const QUIET_DROP_WORKFLOW_EDGE: &[&str] = &[];
 /// Keys dropped from a `WorkflowGate` under `--quiet`: the node's free-text
@@ -10202,6 +10202,7 @@ mod tests {
             y: 40.0,
             created_at: "2026-01-01 00:00:00".into(),
             updated_at: "2026-01-02 00:00:00".into(),
+            pins: Default::default(),
         }
     }
 
@@ -10568,6 +10569,7 @@ mod tests {
                 "y",
                 "created_at",
                 "updated_at",
+                "pins",
             ]),
             "WorkflowNode gained/lost a field: decide whether it belongs in the \
              --quiet shape before updating this list",

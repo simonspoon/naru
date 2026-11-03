@@ -3020,7 +3020,9 @@ fn row_to_workflow_node(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowNod
         y: row.get(6)?,
         created_at: row.get(7)?,
         updated_at: row.get(8)?,
-    })
+        pins: Default::default(),
+    }
+    .with_pins())
 }
 
 /// A `data` edge (naru task 2534) names both pins and carries no branch;
@@ -6432,6 +6434,7 @@ impl Store {
             y: 0.0,
             created_at: String::new(),
             updated_at: String::new(),
+            pins: Default::default(),
         };
         super::wftypes::check_node(&probe, &types).map_err(Error::Validation)?;
         let Some(nid) = node_id else { return Ok(()) };
@@ -6591,6 +6594,12 @@ impl Store {
             )));
         }
         match (from.kind, branch.as_deref()) {
+            // A data edge carries a value, not a route, and never a branch
+            // (`data_edge_shape` already refused one, so `branch` is None
+            // here): a trycatch's `output` pin feeds one without naming
+            // ok/caught (naru task 2535). Branch/decide/switch/gate have no
+            // out pins, so a data edge from them still fails the pin check.
+            _ if kind == WorkflowEdgeKind::Data => {}
             // Every node's failure exit (naru task 2533).
             (_, Some(super::workflow::FAILURE_EXIT)) => {}
             (WorkflowNodeKind::Branch, None) => {
@@ -6682,7 +6691,8 @@ impl Store {
         {
             return Err(Error::Validation(format!(
                 "node {to_node} never reads input pin {pin:?}: a data edge may enter only \
-                 stdin (cli/script), the first declared input pin, or a make node's field"
+                 the kind's input pin (stdin on cli/script, input on prompt/agent, ...), the \
+                 first declared input pin, a prompt's model, or a make node's field"
             )));
         }
         let branch_text = branch.as_deref();

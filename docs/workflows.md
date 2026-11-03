@@ -645,17 +645,21 @@ text output, exactly as "Engine semantics" describes. A **data** edge carries
 one output pin's value into one input pin and nothing else:
 
 - It **requires** `from_pin` and `to_pin` and **never carries a branch**
-  (`validation`). Its two pin types are checked like any wire (`core::wftypes`).
+  (`validation`), even out of a `trycatch`, whose exec edges need `ok`/`caught`
+  (naru task 2535). Its two pin types are checked like any wire (`core::wftypes`).
 - It **never activates** its target: a node runs only when an incoming exec
   edge is active (or it is the trigger), so a node reached by data edges alone
   is `skipped`. A `join` counts only its exec edges.
 - It still counts for **cycle detection** and the **topological order**, so its
   source always runs first.
-- **Input resolution.** A data edge into a node's input pin — `stdin` on a
-  `cli`/`script` node, otherwise its first declared input pin — replaces the
+- **Input resolution.** A data edge into a node's input pin — its kind's
+  input pin from "Natural pins" below (`stdin` on a `cli`/`script` node,
+  `input` on a prompt, …) or its first declared input pin — replaces the
   node's `{input}` with the source pin's value; into a `make` node's field pin
-  it sets that field (over an exec edge's). Everything else is the joined
-  exec-edge text as before. The first data edge (by id) per pin wins. A
+  it sets that field (over an exec edge's); into a prompt's `model` pin it
+  replaces the node's configured model. Everything else is the joined
+  exec-edge text as before. The first data edge (by id) per pin wins (into
+  `{input}`, the first one into any of the node's input pins). A
   data edge into any other input pin is refused (`validation`): the engine
   reads no other pin. An import does not re-check pins (as for exec edges).
 - **A source that did not run `ok`** — skipped or failed, even with its
@@ -681,6 +685,58 @@ Example — feed A's stderr to B's stdin while B still runs after A:
 ```bash
 naru workflow edge create Flow 2 3                  # exec: A then B
 naru workflow edge create Flow 2 3 --data --from-pin stderr --to-pin stdin
+```
+
+## Natural pins (naru task 2535)
+
+Every node kind has **default pins**, declared by the server in one table
+(`core::wftypes::server_pins`) whatever the node's config says. A node's
+**effective pins** are its own `config.pins` first, then each default pin it
+does not name — a declared pin of the same name wins, type included. They are
+returned on every node read as `pins` (`{"in":[{"name","ty"}], "out":[…]}`,
+the shape of `config.pins`; ts-rs `WorkflowPins`) by the CLI (`--quiet` drops
+it with `config`) and the API, so the editor need not guess. `pins` is
+derived on read and never stored or imported. A wire may name any effective
+pin; an unnamed pin is still the first *declared* pin (else `any`), so
+nothing that worked before changes. Wiring only got more permissive: a node
+without `config.pins` (a prompt, gate, output, branch, …) now accepts wires
+and data edges naming its default pins.
+
+| Kind | In (first feeds `{input}`) | Out → value over an edge |
+| --- | --- | --- |
+| `trigger`, `schedule`, `file-watch` | — | `event` → the run input |
+| `task-event` | — | `task` → the run input (the change as JSON) |
+| `webhook` | — | `body` (typed by `config.type`) → the posted body |
+| `prompt` | `input`, `model` | `result` → the answer |
+| `agent` | `input` | `result` → the answer; `status` → `ok` |
+| `cli`, `script` | `stdin` | `stdout`, `stderr`, `exit_code` ("Exec and data") |
+| `branch`, `decide`, `switch` | `input` | — (flow handles only) |
+| `gate` | `in` | — (flow handles only) |
+| `output` | `result` | — |
+| `parse-json` | `text` | `value` → the parsed value |
+| `variable` | its config's (`value` on set, `trigger` on get) | `value` → the value |
+| `mapfilter` | `list` | `list` → the mapped/filtered list |
+| `foreach` | `list` | `results` → the results list |
+| `parallel`, `delay`, `subworkflow`, `task`, `http`, `notify`, `board` | `in` | `out` → the node's text output |
+| `join` | `in` | `out` (`list<string>`) → the joined list |
+| `retry`, `trycatch` | `input` | `output` → the node's text output |
+| `git` | `input` | `result`, `ok`, `status` → those fields of its output |
+| `file` | `input` | `result`, `path` → those fields |
+| `memory` | `input` | `result`, `id` → those fields |
+| `verify` | `input` | `pass`, `evidence`, `exit_code` → those fields |
+| `break`, `make` | from the struct ("Typed pins") | from the struct |
+| `comment` | — | — |
+
+The kinds whose config always carries pins (`validate_config` writes them)
+match this table, so for them nothing is added. A prompt's **`model` pin**
+takes a value like the `model` config (`haiku`, `sonnet`, `opus`,
+`local:<name>`; surrounding whitespace trimmed, so a `cli` stdout works);
+anything else fails the node as an unknown model. Example — let a script pick
+the model:
+
+```bash
+naru workflow edge create Flow 2 3                   # exec: cli then prompt
+naru workflow edge create Flow 2 3 --data --from-pin stdout --to-pin model
 ```
 
 ## CLI (`naru workflow`)

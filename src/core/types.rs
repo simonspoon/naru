@@ -5101,6 +5101,24 @@ pub struct WorkflowNode {
     pub y: f64,
     pub created_at: String,
     pub updated_at: String,
+    /// The node's effective data pins (naru task 2535): its `config.pins`,
+    /// then the server's default pins for its kind that it does not name
+    /// (`core::wftypes::server_pins`). Derived on every read, never stored;
+    /// empty on a `break`/`make` (their pins come from their struct) and a
+    /// `comment`.
+    #[serde(default)]
+    pub pins: WorkflowPins,
+}
+
+/// One side-by-side list of a node's data pins (naru task 2535), the same
+/// `{in, out}` shape as a node's `config.pins`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct WorkflowPins {
+    #[serde(rename = "in")]
+    #[ts(rename = "in")]
+    pub inputs: Vec<WorkflowTypeField>,
+    pub out: Vec<WorkflowTypeField>,
 }
 
 /// A directed edge between two nodes of one workflow. A workflow is a DAG:

@@ -2814,10 +2814,24 @@ pub fn execute_run<A: StoreAccess>(
             active_input(view, &done, id)
         };
         // Data edges (naru task 2534) fill the input pins they are wired to;
-        // they never make a node run.
-        let input = match input {
-            Some(i) if !always && id != trigger_id => data_input(view, &done, node, i),
-            other => other,
+        // they never make a node run. A prompt's wired `model` pin replaces
+        // its configured model for this run (naru task 2535).
+        let (input, model) = match input {
+            Some(i) if !always && id != trigger_id => match data_input(view, &done, node, i) {
+                Some((i, m)) => (Some(i), m),
+                None => (None, None),
+            },
+            other => (other, None),
+        };
+        let wired;
+        let node = match model {
+            Some(m) => {
+                let mut n = node.clone();
+                n.config[wftypes::MODEL_PIN] = Value::String(m.trim().to_string());
+                wired = n;
+                &wired
+            }
+            None => node,
         };
         let (Some(input), None) = (input, failure.as_ref().filter(|_| !always)) else {
             steps.push(skipped(node));
@@ -3019,24 +3033,26 @@ fn edge_text(view: &WorkflowView, done: &HashMap<i64, Done>, e: &WorkflowEdge) -
 }
 
 /// `node`'s input once its data edges (naru task 2534) are applied to the
-/// exec-edge `input`: `None` (skipped) when any data edge's source did not
+/// exec-edge `input`, with a prompt's wired `model` pin value beside it
+/// (naru task 2535): `None` (skipped) when any data edge's source did not
 /// run `ok` — a skipped or failed source feeds nothing, never an empty
-/// value. A data edge into the node's input pin (`stdin` on a cli/script
-/// node, else its first declared input pin) replaces the input; into a
-/// `make` node's field pin it sets that field. The first edge per pin wins.
+/// value. A data edge into the node's input pin (its kind's, e.g. `stdin`
+/// on a cli/script node, or its first declared input pin) replaces the
+/// input; into a `make` node's field pin it sets that field. The first edge
+/// per pin wins.
 fn data_input(
     view: &WorkflowView,
     done: &HashMap<i64, Done>,
     node: &WorkflowNode,
     input: String,
-) -> Option<String> {
+) -> Option<(String, Option<String>)> {
     let mut data: Vec<&WorkflowEdge> = view
         .edges
         .iter()
         .filter(|e| e.to_node == node.id && e.kind == WorkflowEdgeKind::Data)
         .collect();
     if data.is_empty() {
-        return Some(input);
+        return Some((input, None));
     }
     data.sort_by_key(|e| e.id);
     if data
@@ -3055,16 +3071,26 @@ fn data_input(
                 fields.insert(pin.to_string(), Value::String(edge_text(view, done, e)));
             }
         }
-        return Some(Value::Object(fields).to_string());
+        return Some((Value::Object(fields).to_string(), None));
     }
-    data.into_iter()
+    let is_model = |e: &WorkflowEdge| {
+        node.kind == WorkflowNodeKind::Prompt && e.to_pin.as_deref() == Some(wftypes::MODEL_PIN)
+    };
+    let model = data
+        .iter()
+        .find(|e| is_model(e))
+        .map(|e| edge_text(view, done, e));
+    let input = data
+        .into_iter()
+        .filter(|e| !is_model(e))
         .find(|e| {
             e.to_pin
                 .as_deref()
                 .is_some_and(|p| wftypes::data_feeds(node, p))
         })
         .map(|e| edge_text(view, done, e))
-        .or(Some(input))
+        .unwrap_or(input);
+    Some((input, model))
 }
 
 /// A `make` node's input: a JSON object of `{field pin: text}` over its
@@ -8288,6 +8314,7 @@ mod tests {
             y: 0.0,
             created_at: String::new(),
             updated_at: String::new(),
+            pins: Default::default(),
         };
         let mut calls = 0;
         let mut sleeps = Vec::new();
@@ -9734,5 +9761,541 @@ mod tests {
         }
         let r = st.with(|s| s.import_workflow(&bad, None));
         assert!(matches!(r, Err(Error::Validation(_))), "{r:?}");
+    }
+
+    // ---- natural pins for every kind (naru task 2535) ----
+
+    /// A stub `claude` answering one result object whose text names the
+    /// `--model` it was given.
+    fn stub_claude_model(dir: &Path) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("claude");
+        std::fs::write(
+            &path,
+            "#!/bin/sh\nm=\"\"\nwhile [ $# -gt 0 ]; do [ \"$1\" = \"--model\" ] && m=\"$2\"; shift; done\n\
+             printf '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"model=%s\"}' \"$m\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    /// Runs `f` with `MESA_CLAUDE_BIN` pointing at [`stub_claude_model`]
+    /// and `MESA_CONFIG_FILE` at a file that does not exist (the built-in
+    /// templates, never the person's), under `ENV_LOCK`. `$HOME` is left
+    /// alone: other workflow tests resolve their workspace cwd from it.
+    fn with_stub_claude(f: impl FnOnce(&Path)) {
+        let _env = crate::core::attachments::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let bin = stub_claude_model(dir.path());
+        unsafe { std::env::set_var("MESA_CLAUDE_BIN", &bin) };
+        unsafe { std::env::set_var("MESA_CONFIG_FILE", dir.path().join("none.json")) };
+        f(dir.path());
+        unsafe { std::env::remove_var("MESA_CLAUDE_BIN") };
+        unsafe { std::env::remove_var("MESA_CONFIG_FILE") };
+    }
+
+    #[test]
+    fn every_kind_exposes_its_server_pins_and_declared_pins_win() {
+        let (st, _d) = store();
+        st.with(|s| {
+            let wf = s.create_workflow(None, "Expose", None).unwrap().id;
+            let p = node(
+                s,
+                wf,
+                WorkflowNodeKind::Prompt,
+                "P",
+                json!({"model": "haiku", "prompt": "x"}),
+            );
+            let c = node(
+                s,
+                wf,
+                WorkflowNodeKind::Cli,
+                "C",
+                json!({"command": "cat", "pins": {"in": [{"name": "stdin", "ty": "any"}, {"name": "a", "ty": "number"}]}}),
+            );
+            let v = s.get_workflow_view(wf).unwrap();
+            let names = |n: &WorkflowNode, inp: bool| -> Vec<(String, String)> {
+                let side = if inp { &n.pins.inputs } else { &n.pins.out };
+                side.iter().map(|f| (f.name.clone(), f.ty.clone())).collect()
+            };
+            let pn = v.nodes.iter().find(|n| n.id == p).unwrap();
+            assert_eq!(
+                names(pn, true),
+                vec![("input".into(), "string".into()), ("model".into(), "string".into())]
+            );
+            assert_eq!(names(pn, false), vec![("result".into(), "string".into())]);
+            // config.pins first and winning a same-named default's type.
+            let cn = v.nodes.iter().find(|n| n.id == c).unwrap();
+            assert_eq!(
+                names(cn, true),
+                vec![("stdin".into(), "any".into()), ("a".into(), "number".into())]
+            );
+            assert_eq!(cn.pins.out.len(), 3);
+            // The API/CLI shape is `{in, out}`, like config.pins.
+            let j = serde_json::to_value(cn).unwrap();
+            assert_eq!(j["pins"]["in"][1]["name"], "a");
+            assert_eq!(j["pins"]["out"][2]["name"], "exit_code");
+        });
+        // Every kind whose config always carries pins agrees with the table
+        // (same names, in order), so the union adds nothing to it. The rest
+        // (gate, branch, decide, switch, output, prompt, cli, script) carry
+        // none of their own, and variable's input depends on its op.
+        use WorkflowNodeKind as K;
+        let cfgs: Vec<(K, Value)> = vec![
+            (K::ParseJson, json!({})),
+            (K::MapFilter, json!({"mode": "map", "expr": "{item}"})),
+            (K::Delay, json!({"seconds": 0})),
+            (K::Board, json!({})),
+            (K::Notify, json!({"mode": "speak"})),
+            (K::Subworkflow, json!({"workflow": "x"})),
+            (K::Task, json!({"action": "read", "task": 1})),
+            (K::Http, json!({"url": "http://h/x"})),
+            (K::Parallel, json!({})),
+            (K::Join, json!({})),
+            (
+                K::Trycatch,
+                json!({"wrap": {"kind": "cli", "config": {"command": "true"}}}),
+            ),
+            (
+                K::Retry,
+                json!({"wrap": {"kind": "cli", "config": {"command": "true"}}}),
+            ),
+            (K::ForEach, json!({"body": "echo $1"})),
+            (K::Webhook, json!({})),
+            (K::FileWatch, json!({"path": "a"})),
+            (K::TaskEvent, json!({"event": "created"})),
+            (K::Agent, json!({"agent": "a", "prompt": "x"})),
+            (K::Git, json!({"op": "diff"})),
+            (K::File, json!({"op": "read", "path": "a"})),
+            (K::Memory, json!({"op": "add"})),
+            (K::Verify, json!({"command": "true"})),
+        ];
+        for (kind, cfg) in cfgs {
+            let cfg = validate_config(kind, &cfg).unwrap_or_else(|e| panic!("{kind:?}: {e}"));
+            for (side, key) in [(wftypes::Side::In, "in"), (wftypes::Side::Out, "out")] {
+                let written: Vec<&str> = cfg["pins"][key]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|p| p["name"].as_str().unwrap())
+                    .collect();
+                let table: Vec<&str> = wftypes::server_pins(kind, side)
+                    .iter()
+                    .map(|p| p.0)
+                    .collect();
+                assert_eq!(written, table, "{kind:?} {key}");
+            }
+        }
+    }
+
+    /// How one declared out pin's value is checked.
+    enum Want {
+        /// The source step's text output.
+        Output,
+        /// That field of the source's JSON output.
+        Field(&'static str),
+        /// Exactly this text.
+        Lit(&'static str),
+    }
+
+    #[test]
+    fn every_declared_out_pin_delivers_its_value_over_a_data_edge() {
+        use WorkflowNodeKind as K;
+        // JSON, so parse-json, a webhook body, mapfilter and foreach read it.
+        const IN: &str = r#"["a","b"]"#;
+        with_stub_claude(|tmp| {
+            let (st, _d) = store();
+            let proj_dir = tmp.join("proj");
+            let repo = tmp.join("repo");
+            std::fs::create_dir_all(&proj_dir).unwrap();
+            std::fs::create_dir_all(&repo).unwrap();
+            // A repo with one tracked file changed since its commit: a diff.
+            let git = |args: &[&str]| {
+                assert!(
+                    Command::new("git")
+                        .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                        .args(args)
+                        .current_dir(&repo)
+                        .status()
+                        .unwrap()
+                        .success()
+                )
+            };
+            git(&["init", "-q"]);
+            std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+            git(&["add", "a.txt"]);
+            git(&["commit", "-qm", "one"]);
+            std::fs::write(repo.join("a.txt"), "two\n").unwrap();
+            let pid = st
+                .with(|s| {
+                    s.create_project("PinProj", None, None, proj_dir.to_str(), None)
+                        .map(|p| p.id)
+                })
+                .unwrap();
+            st.with(|s| {
+                s.create_script(
+                    Some(pid),
+                    "pinscript",
+                    None,
+                    "printf 'so'; printf 'se' >&2",
+                    &[],
+                )
+            })
+            .unwrap();
+            st.with(|s| {
+                let c = s.create_workflow(None, "PinChild", None).unwrap().id;
+                let t = node(s, c, K::Trigger, "T", json!({"mode": "manual"}));
+                let e = node(s, c, K::Cli, "E", cli("printf child"));
+                s.create_workflow_edge(c, t, e, None).unwrap();
+            });
+            let repo_s = repo.to_string_lossy().into_owned();
+            // (kind, config, pin, want). A trigger-kind source is the run's
+            // trigger; every other source runs after a manual trigger.
+            let cases: Vec<(K, Value, &str, Want)> = vec![
+                (
+                    K::Trigger,
+                    json!({"mode": "manual"}),
+                    "event",
+                    Want::Lit(IN),
+                ),
+                (
+                    K::Schedule,
+                    json!({"every_minutes": 60}),
+                    "event",
+                    Want::Lit(IN),
+                ),
+                (K::FileWatch, json!({"path": "a"}), "event", Want::Lit(IN)),
+                (
+                    K::TaskEvent,
+                    json!({"event": "created"}),
+                    "task",
+                    Want::Lit(IN),
+                ),
+                (K::Webhook, json!({}), "body", Want::Lit(IN)),
+                (
+                    K::Prompt,
+                    json!({"model": "haiku", "prompt": "x"}),
+                    "result",
+                    Want::Lit("model=haiku"),
+                ),
+                (
+                    K::Cli,
+                    cli("printf so; printf se >&2"),
+                    "stdout",
+                    Want::Lit("so"),
+                ),
+                (
+                    K::Cli,
+                    cli("printf so; printf se >&2"),
+                    "stderr",
+                    Want::Lit("se"),
+                ),
+                (K::Cli, cli("true"), "exit_code", Want::Lit("0")),
+                (
+                    K::Script,
+                    json!({"script": "pinscript"}),
+                    "stdout",
+                    Want::Lit("so"),
+                ),
+                (
+                    K::Script,
+                    json!({"script": "pinscript"}),
+                    "stderr",
+                    Want::Lit("se"),
+                ),
+                (
+                    K::Script,
+                    json!({"script": "pinscript"}),
+                    "exit_code",
+                    Want::Lit("0"),
+                ),
+                (K::ParseJson, json!({}), "value", Want::Lit(IN)),
+                (
+                    K::Variable,
+                    json!({"op": "set", "name": "v"}),
+                    "value",
+                    Want::Lit(IN),
+                ),
+                (
+                    K::MapFilter,
+                    json!({"mode": "map", "expr": "{item}"}),
+                    "list",
+                    Want::Output,
+                ),
+                (
+                    K::ForEach,
+                    json!({"body": "printf %s \"$1\""}),
+                    "results",
+                    Want::Output,
+                ),
+                (K::Join, json!({}), "out", Want::Output),
+                (K::Parallel, json!({}), "out", Want::Lit(IN)),
+                (K::Delay, json!({"seconds": 0}), "out", Want::Lit(IN)),
+                (
+                    K::Subworkflow,
+                    json!({"workflow": "PinChild"}),
+                    "out",
+                    Want::Output,
+                ),
+                (
+                    K::Task,
+                    json!({"action": "create", "project": "PinProj", "description": "do {input}"}),
+                    "out",
+                    Want::Output,
+                ),
+                (
+                    K::Retry,
+                    json!({"wrap": {"kind": "cli", "config": cli("printf r")}}),
+                    "output",
+                    Want::Lit("r"),
+                ),
+                (
+                    K::Trycatch,
+                    json!({"wrap": {"kind": "cli", "config": cli("printf c")}}),
+                    "output",
+                    Want::Lit("c"),
+                ),
+                (
+                    K::Git,
+                    json!({"op": "diff", "cwd": repo_s}),
+                    "result",
+                    Want::Field("result"),
+                ),
+                (
+                    K::Git,
+                    json!({"op": "diff", "cwd": repo_s}),
+                    "ok",
+                    Want::Lit("true"),
+                ),
+                (
+                    K::Git,
+                    json!({"op": "diff", "cwd": repo_s}),
+                    "status",
+                    Want::Field("status"),
+                ),
+                (
+                    K::File,
+                    json!({"op": "write", "path": "f.txt", "content": "{input}"}),
+                    "result",
+                    Want::Field("result"),
+                ),
+                (
+                    K::File,
+                    json!({"op": "write", "path": "f.txt", "content": "{input}"}),
+                    "path",
+                    Want::Field("path"),
+                ),
+                (
+                    K::Memory,
+                    json!({"op": "add", "text": "{input}", "project": "PinProj"}),
+                    "result",
+                    Want::Field("result"),
+                ),
+                (
+                    K::Memory,
+                    json!({"op": "add", "text": "{input}", "project": "PinProj"}),
+                    "id",
+                    Want::Field("id"),
+                ),
+                (
+                    K::Verify,
+                    json!({"command": "echo fine"}),
+                    "pass",
+                    Want::Lit("true"),
+                ),
+                (
+                    K::Verify,
+                    json!({"command": "echo fine"}),
+                    "evidence",
+                    Want::Field("evidence"),
+                ),
+                (
+                    K::Verify,
+                    json!({"command": "echo fine"}),
+                    "exit_code",
+                    Want::Lit("0"),
+                ),
+            ];
+            let mut covered: BTreeSet<(&str, &str)> = BTreeSet::new();
+            for (i, (kind, cfg, pin, want)) in cases.into_iter().enumerate() {
+                let wf = st.with(|s| {
+                    let wf = s
+                        .create_workflow(Some(pid), &format!("Pin{i}"), None)
+                        .unwrap()
+                        .id;
+                    let is_trigger = matches!(
+                        kind,
+                        K::Trigger | K::Schedule | K::FileWatch | K::TaskEvent | K::Webhook
+                    );
+                    let src = node(s, wf, kind, "S", cfg);
+                    let t = if is_trigger {
+                        src
+                    } else {
+                        let t = node(s, wf, K::Trigger, "T", json!({"mode": "manual"}));
+                        s.create_workflow_edge(wf, t, src, None).unwrap();
+                        t
+                    };
+                    // Reads anything: its first declared pin feeds its input.
+                    let r = node(
+                        s,
+                        wf,
+                        K::Cli,
+                        "R",
+                        json!({"command": "cat", "pins": {"in": [{"name": "v", "ty": "any"}]}}),
+                    );
+                    s.create_workflow_edge(wf, t, r, None).unwrap();
+                    data_edge(s, wf, src, r, pin, "v");
+                    wf
+                });
+                let run = run_workflow(&st, wf, WorkflowTrigger::Manual, IN).unwrap();
+                let src = step(&run, "S");
+                assert_eq!(
+                    src.status,
+                    WorkflowStepStatus::Ok,
+                    "{kind:?}.{pin}: {run:?}"
+                );
+                let got = &step(&run, "R").output;
+                let expected = match want {
+                    Want::Output => src.output.clone(),
+                    Want::Field(f) => serde_json::from_str::<Value>(&src.output)
+                        .ok()
+                        .and_then(|v| v.get(f).map(wftypes::value_text))
+                        .unwrap_or_else(|| panic!("{kind:?}: no {f} in {}", src.output)),
+                    Want::Lit(l) => l.to_string(),
+                };
+                assert!(!expected.is_empty(), "{kind:?}.{pin}: empty expectation");
+                assert_eq!(got, &expected, "{kind:?}.{pin}: {run:?}");
+                covered.insert((kind.as_str(), pin));
+            }
+            // Kinds that reach outside Naru (a model session, a phone, the
+            // live board, the network): their run output is synthesised and
+            // the resolver checked on it.
+            let synthetic: Vec<(K, Value, &str, &str, &str)> = vec![
+                (
+                    K::Agent,
+                    json!({"agent": "a", "prompt": "x"}),
+                    "result",
+                    "the answer",
+                    "the answer",
+                ),
+                (
+                    K::Agent,
+                    json!({"agent": "a", "prompt": "x"}),
+                    "status",
+                    "the answer",
+                    "ok",
+                ),
+                (K::Notify, json!({"mode": "speak"}), "out", "sent", "sent"),
+                (K::Board, json!({}), "out", "shown", "shown"),
+                (
+                    K::Http,
+                    json!({"url": "http://h/x"}),
+                    "out",
+                    "200 body",
+                    "200 body",
+                ),
+            ];
+            for (kind, cfg, pin, output, want) in synthetic {
+                let (view, e) = st.with(|s| {
+                    let wf = s
+                        .create_workflow(None, &format!("Syn{kind:?}{pin}"), None)
+                        .unwrap()
+                        .id;
+                    let a = node(s, wf, kind, "S", cfg);
+                    let r = node(
+                        s,
+                        wf,
+                        K::Cli,
+                        "R",
+                        json!({"command": "cat", "pins": {"in": [{"name": "v", "ty": "any"}]}}),
+                    );
+                    let e = data_edge(s, wf, a, r, pin, "v");
+                    (s.get_workflow_view(wf).unwrap(), e)
+                });
+                let mut done = HashMap::new();
+                done.insert(
+                    e.from_node,
+                    Done {
+                        status: WorkflowStepStatus::Ok,
+                        output: output.into(),
+                        route: None,
+                        error: None,
+                        pins: HashMap::new(),
+                    },
+                );
+                assert_eq!(edge_text(&view, &done, &e), want, "{kind:?}.{pin}");
+                covered.insert((kind.as_str(), pin));
+            }
+            let missing: Vec<String> = K::ALL
+                .iter()
+                .flat_map(|k| {
+                    wftypes::server_pins(*k, wftypes::Side::Out)
+                        .iter()
+                        .map(move |p| (*k, p.0))
+                })
+                .filter(|(k, p)| !covered.contains(&(k.as_str(), *p)))
+                .map(|(k, p)| format!("{}.{p}", k.as_str()))
+                .collect();
+            assert!(
+                missing.is_empty(),
+                "declared pins without a resolving test: {missing:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn a_prompt_model_pin_wired_from_cli_stdout_picks_the_model() {
+        with_stub_claude(|_| {
+            let (st, _d) = store();
+            let wf = st.with(|s| {
+                let wf = s.create_workflow(None, "Model", None).unwrap().id;
+                let t = node(
+                    s,
+                    wf,
+                    WorkflowNodeKind::Trigger,
+                    "T",
+                    json!({"mode": "manual"}),
+                );
+                let m = node(s, wf, WorkflowNodeKind::Cli, "M", cli("echo opus"));
+                let p = node(
+                    s,
+                    wf,
+                    WorkflowNodeKind::Prompt,
+                    "P",
+                    json!({"model": "haiku", "prompt": "hi"}),
+                );
+                let plain = node(
+                    s,
+                    wf,
+                    WorkflowNodeKind::Prompt,
+                    "Plain",
+                    json!({"model": "haiku", "prompt": "hi"}),
+                );
+                s.create_workflow_edge(wf, t, m, None).unwrap();
+                s.create_workflow_edge(wf, m, p, None).unwrap();
+                s.create_workflow_edge(wf, t, plain, None).unwrap();
+                data_edge(s, wf, m, p, "stdout", "model");
+                wf
+            });
+            let run = run_workflow(&st, wf, WorkflowTrigger::Manual, "x").unwrap();
+            assert_eq!(run.status, WorkflowRunStatus::Succeeded, "{run:?}");
+            // stdout "opus\n", trimmed, overrides the configured haiku.
+            assert_eq!(step(&run, "P").output, "model=opus");
+            // An unwired prompt keeps its configured model.
+            assert_eq!(step(&run, "Plain").output, "model=haiku");
+            // A data edge into the prompt's `input` pin feeds its {input}; the
+            // model pin does not.
+            st.with(|s| {
+                let v = s.get_workflow_view(wf).unwrap();
+                let p = v.nodes.iter().find(|n| n.title == "P").unwrap();
+                assert!(wftypes::data_feeds(p, "input"));
+                assert!(wftypes::data_feeds(p, "model"));
+                let m = v.nodes.iter().find(|n| n.title == "M").unwrap();
+                assert!(!wftypes::data_feeds(m, "model"));
+            });
+        });
     }
 }

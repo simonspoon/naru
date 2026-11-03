@@ -10,7 +10,9 @@
 
 use serde_json::Value;
 
-use crate::core::types::{WorkflowNode, WorkflowNodeKind, WorkflowType};
+use crate::core::types::{
+    WorkflowNode, WorkflowNodeKind, WorkflowPins, WorkflowType, WorkflowTypeField,
+};
 
 /// Type names a struct may not take.
 pub const RESERVED: [&str; 5] = ["string", "number", "bool", "any", "list"];
@@ -202,37 +204,123 @@ fn declared(node: &WorkflowNode, side: Side) -> Vec<(String, String)> {
 }
 
 /// The pins the server declares for a node kind whether or not its config
-/// does (naru task 2534): a `cli`/`script` node reads `stdin` and exposes
-/// `stdout`, `stderr` and `exit_code`. A node's own declared pins come
-/// first; an unnamed pin is still the first declared one (else `any`), so
-/// an exec edge carries the node's text exactly as before.
+/// does (naru tasks 2534, 2535): the one table of default pins. A node's
+/// effective pins ([`effective_pins`]) are its own `config.pins` first and
+/// then every pin here it does not name, so a declared pin of the same name
+/// wins (its type overrides). An unnamed pin is still the first *declared*
+/// one (else `any`), so an exec edge carries the node's text exactly as
+/// before. The names match the editor's old hand-written fallback
+/// (`pinsFor`) and, for the kinds whose config always carries pins, what
+/// [`crate::core::workflow::validate_config`] writes. A `break`/`make`'s pins
+/// come from its struct, a `comment` has none, and a `variable`'s input pin
+/// depends on its op (its config declares it). Every out pin resolves at run
+/// time through the engine's `edge_text`; every in pin listed first feeds
+/// the node's `{input}`, and a prompt's `model` overrides its config model.
 pub fn server_pins(kind: WorkflowNodeKind, side: Side) -> &'static [(&'static str, &'static str)] {
-    match (kind, side) {
-        (WorkflowNodeKind::Cli | WorkflowNodeKind::Script, Side::In) => &[(STDIN_PIN, "string")],
-        (WorkflowNodeKind::Cli | WorkflowNodeKind::Script, Side::Out) => &[
-            ("stdout", "string"),
-            ("stderr", "string"),
-            ("exit_code", "number"),
-        ],
-        _ => &[],
+    use WorkflowNodeKind as K;
+    const IN_ANY: &[(&str, &str)] = &[("in", "any")];
+    const OUT_ANY: &[(&str, &str)] = &[("out", "any")];
+    const INPUT_STRING: &[(&str, &str)] = &[("input", "string")];
+    const INPUT_ANY: &[(&str, &str)] = &[("input", "any")];
+    match side {
+        Side::In => match kind {
+            K::Trigger | K::Schedule | K::Webhook | K::TaskEvent | K::FileWatch => &[],
+            K::Prompt => &[("input", "string"), (MODEL_PIN, "string")],
+            K::Agent | K::Branch | K::Decide | K::Switch => INPUT_STRING,
+            K::Cli | K::Script => &[(STDIN_PIN, "string")],
+            K::Output => &[("result", "string")],
+            K::Break | K::Make | K::Comment | K::Variable => &[],
+            K::ParseJson => &[("text", "string")],
+            K::MapFilter | K::ForEach => &[("list", "any")],
+            K::Parallel | K::Join | K::Delay | K::Gate | K::Subworkflow => IN_ANY,
+            K::Task | K::Http | K::Notify | K::Board => IN_ANY,
+            K::Retry | K::Trycatch | K::Git | K::File | K::Memory | K::Verify => INPUT_ANY,
+        },
+        Side::Out => match kind {
+            K::Trigger | K::Schedule | K::FileWatch => &[("event", "string")],
+            K::TaskEvent => &[("task", "string")],
+            K::Webhook => &[("body", "any")],
+            K::Prompt => &[("result", "string")],
+            K::Agent => &[("result", "string"), ("status", "string")],
+            K::Cli | K::Script => &[
+                ("stdout", "string"),
+                ("stderr", "string"),
+                ("exit_code", "number"),
+            ],
+            K::Branch | K::Decide | K::Switch | K::Output | K::Gate => &[],
+            K::Break | K::Make | K::Comment => &[],
+            K::ParseJson | K::Variable => &[("value", "any")],
+            K::MapFilter => &[("list", "any")],
+            K::ForEach => &[("results", "list<string>")],
+            K::Join => &[("out", "list<string>")],
+            K::Parallel | K::Delay | K::Subworkflow => OUT_ANY,
+            K::Task | K::Http | K::Notify | K::Board => OUT_ANY,
+            K::Retry | K::Trycatch => &[("output", "any")],
+            K::Git => &[("result", "string"), ("ok", "bool"), ("status", "string")],
+            K::File => &[("result", "string"), ("path", "string")],
+            K::Memory => &[("result", "string"), ("id", "string")],
+            K::Verify => &[
+                ("pass", "bool"),
+                ("evidence", "string"),
+                ("exit_code", "number"),
+            ],
+        },
     }
 }
 
 /// A `cli`/`script` node's server-declared input pin: its `{input}`.
 pub const STDIN_PIN: &str = "stdin";
+/// A `prompt` node's second input pin (naru task 2535): a value wired into
+/// it replaces the node's configured model for that run.
+pub const MODEL_PIN: &str = "model";
 
-/// `kind`'s server-declared input pin, when it has one.
+/// `kind`'s server-declared input pin — the one that feeds `{input}` — when
+/// it has one.
 pub fn stdin_pin(kind: WorkflowNodeKind) -> Option<&'static str> {
     server_pins(kind, Side::In).first().map(|p| p.0)
 }
 
-/// Whether a data edge (naru task 2534) into `node`'s pin `pin` feeds
-/// anything at run time: a cli/script node's `stdin`, any node's first
-/// declared input pin, or a `make` node's field pin. The engine reads no
-/// other input pin, so the store refuses a data edge into one.
+/// A node's pins on one side (naru task 2535): its declared `config.pins`,
+/// then each [`server_pins`] entry it does not name. A `break`/`make`'s
+/// struct pins are not here (they need the workflow's types; see
+/// [`pin_type`]).
+pub fn effective_pins(node: &WorkflowNode, side: Side) -> Vec<(String, String)> {
+    let mut pins = declared(node, side);
+    for (n, t) in server_pins(node.kind, side) {
+        if !pins.iter().any(|p| p.0 == *n) {
+            pins.push((n.to_string(), t.to_string()));
+        }
+    }
+    pins
+}
+
+impl WorkflowNode {
+    /// The node with [`WorkflowNode::pins`] filled from [`effective_pins`]
+    /// (naru task 2535); the store calls it on every read.
+    pub fn with_pins(mut self) -> Self {
+        let side = |s| {
+            effective_pins(&self, s)
+                .into_iter()
+                .map(|(name, ty)| WorkflowTypeField { name, ty })
+                .collect()
+        };
+        self.pins = WorkflowPins {
+            inputs: side(Side::In),
+            out: side(Side::Out),
+        };
+        self
+    }
+}
+
+/// Whether a data edge (naru tasks 2534, 2535) into `node`'s pin `pin`
+/// feeds anything at run time: the kind's input pin ([`stdin_pin`]), the
+/// node's first declared input pin, a prompt's `model`, or a `make` node's
+/// field pin. The engine reads no other input pin, so the store refuses a
+/// data edge into one.
 pub fn data_feeds(node: &WorkflowNode, pin: &str) -> bool {
     node.kind == WorkflowNodeKind::Make
         || stdin_pin(node.kind) == Some(pin)
+        || (node.kind == WorkflowNodeKind::Prompt && pin == MODEL_PIN)
         || declared(node, Side::In).first().is_some_and(|p| p.0 == pin)
 }
 
