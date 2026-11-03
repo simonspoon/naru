@@ -87,7 +87,10 @@ import { PinsEditor, WorkflowTypesCard } from './components/WorkflowTypesCard'
 import {
   dataInputs,
   declaredPinsOf,
+  edgeHandles,
   effectivePin,
+  FLOW_IN,
+  FLOW_OUT,
   isList,
   pinColorVar,
   pinHandleId,
@@ -95,6 +98,7 @@ import {
   pinType,
   pinsConfig,
   pinsOf,
+  mixedWireReason,
   refusalReason,
   shapePlan,
   typesMatch,
@@ -235,6 +239,7 @@ function NodeCard({ data, selected }: NodeProps<CardNode>) {
     >
       {hasInput(node.kind) && !isShape && (
         <Handle
+          id={FLOW_IN}
           type="target"
           position={Position.Left}
           className="wf-flow-pin"
@@ -378,6 +383,7 @@ function NodeCard({ data, selected }: NodeProps<CardNode>) {
         hasOutput(node.kind) &&
         !isShape && (
           <Handle
+            id={FLOW_OUT}
             type="source"
             position={Position.Right}
             className="wf-flow-pin"
@@ -386,8 +392,6 @@ function NodeCard({ data, selected }: NodeProps<CardNode>) {
           />
         )
       )}
-      {/* After the success handle: an edge with no handle id lands on a
-          card's first source handle, which must stay the success one. */}
       {footFailure && (
         <div className="wf-fail-row">
           <Handle
@@ -2055,17 +2059,14 @@ export function WorkflowCanvas({
         const from = view.nodes.find((n) => n.id === e.from_node)
         const to = view.nodes.find((n) => n.id === e.to_node)
         const fromPin = from ? effectivePin(from, 'out', e.from_pin, types) : null
-        const toPin = to ? effectivePin(to, 'in', e.to_pin, types) : null
-        // A break/make has typed handles only; elsewhere a null pin is the
-        // node's flow handle.
-        const typedFrom = e.from_pin !== null || from?.kind === 'break' || from?.kind === 'make'
-        const typedTo = e.to_pin !== null || to?.kind === 'break' || to?.kind === 'make'
+        // Exec ends on exec arrows, data ends on pins (naru task 2539).
+        const { sourceHandle, targetHandle } = edgeHandles(e, from, to, types)
         return {
         id: String(e.id),
         source: String(e.from_node),
         target: String(e.to_node),
-        sourceHandle: typedFrom && fromPin ? pinHandleId('out', fromPin) : (e.branch ?? undefined),
-        targetHandle: typedTo && toPin ? pinHandleId('in', toPin) : undefined,
+        sourceHandle,
+        targetHandle,
         label: e.branch ?? undefined,
         // A data wire is thin and takes its source pin's type colour.
         ...(e.kind === 'data' && from && fromPin
@@ -2139,6 +2140,13 @@ export function WorkflowCanvas({
     // Typed pins only wire to a matching type; say why in words. A failure
     // exit carries the error text, so it is a `string` (as `check_edge`).
     const failure = c.sourceHandle === FAILURE_BRANCH
+    // Exec only connects to exec, data only to data (naru task 2539); a
+    // failure exit may still feed its error text into a pin.
+    const mixed = failure ? null : mixedWireReason(source, fromPin, target, toPin)
+    if (mixed !== null) {
+      setRefusal(mixed)
+      return
+    }
     const toTy = failure ? pinType(target, 'in', toPin, types) : null
     const why = failure
       ? toTy === null

@@ -170,6 +170,62 @@ describe('server pins, wire kind and data inputs (naru task 2537)', () => {
     expect(wireKind(node(4, 'make', { struct: 'Review' }), 'value', b, 'stdin')).toBe('exec')
   })
 
+  it('attaches exec edges to exec arrows and data edges to pins (task 2539)', async () => {
+    const { edgeHandles, FLOW_IN, FLOW_OUT } = await import('./workflowTypes')
+    const a = serverCli(1, 'A')
+    const b = serverCli(2, 'B')
+    // A declared output pin is the default pin, yet an exec edge never takes it.
+    const t = { ...node(3, 'trigger', { pins: { out: [{ name: 'event', ty: 'string' }] } }), pins: { in: [], out: [{ name: 'event', ty: 'string' }] } }
+    const flow = { sourceHandle: FLOW_OUT, targetHandle: FLOW_IN }
+    expect(edgeHandles(edge(1, 1, 2, 'exec', null, null), a, b, types)).toEqual(flow)
+    expect(edgeHandles(edge(1, 3, 1, 'exec', null, null), t, a, types)).toEqual(flow)
+    // Pins named on an exec edge between ordinary nodes are ignored.
+    expect(edgeHandles(edge(1, 1, 2, 'exec', 'stderr', 'stdin'), a, b, types)).toEqual(flow)
+    // A labelled exit (branch verdict, failure) is its own handle.
+    expect(edgeHandles({ ...edge(1, 1, 2, 'exec', null, null), branch: 'failure' }, a, b, types)).toEqual({
+      sourceHandle: 'failure',
+      targetHandle: FLOW_IN,
+    })
+    // A failure exit may feed its error text into a named pin (task 2536).
+    expect(edgeHandles({ ...edge(1, 1, 2, 'exec', null, 'stdin'), branch: 'failure' }, a, b, types)).toEqual({
+      sourceHandle: 'failure',
+      targetHandle: 'in:stdin',
+    })
+    // A labelled-exit card has no exec-out arrow: no branch keeps the old fallback.
+    expect(edgeHandles(edge(1, 5, 2, 'exec', null, null), node(5, 'branch', {}), b, types).sourceHandle).toBeNull()
+    // A data edge joins its pins.
+    expect(edgeHandles(edge(1, 1, 2, 'data', 'stderr', 'stdin'), a, b, types)).toEqual({
+      sourceHandle: 'out:stderr',
+      targetHandle: 'in:stdin',
+    })
+    // A break/make has only pins, and the wire into it keeps its named pin.
+    const br = node(4, 'break', { struct: 'Review' })
+    expect(edgeHandles(edge(1, 1, 4, 'exec', 'stdout', 'value'), a, br, types)).toEqual({
+      sourceHandle: 'out:stdout',
+      targetHandle: 'in:value',
+    })
+    expect(edgeHandles(edge(1, 1, 4, 'exec', null, null), a, br, types)).toEqual({
+      sourceHandle: FLOW_OUT,
+      targetHandle: 'in:value',
+    })
+    expect(edgeHandles(edge(1, 4, 2, 'exec', 'score', null), br, b, types)).toEqual({
+      sourceHandle: 'out:score',
+      targetHandle: FLOW_IN,
+    })
+  })
+
+  it('refuses a drag joining a data pin to an exec arrow', async () => {
+    const { mixedWireReason } = await import('./workflowTypes')
+    const a = serverCli(1, 'A')
+    const b = serverCli(2, 'B')
+    expect(mixedWireReason(a, 'stderr', b, null)).toMatch(/data pin to an exec arrow/)
+    expect(mixedWireReason(a, null, b, 'stdin')).toMatch(/exec arrow to a data pin/)
+    expect(mixedWireReason(a, null, b, null)).toBeNull()
+    expect(mixedWireReason(a, 'stderr', b, 'stdin')).toBeNull()
+    expect(mixedWireReason(a, 'stdout', node(4, 'break', { struct: 'Review' }), 'value')).toBeNull()
+    expect(mixedWireReason(node(4, 'make', { struct: 'Review' }), 'value', b, null)).toBeNull()
+  })
+
   it('lists the data wires into a node and what each one fills', async () => {
     const { dataInputs } = await import('./workflowTypes')
     const a = serverCli(1, 'A')

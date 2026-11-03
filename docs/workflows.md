@@ -1114,14 +1114,24 @@ context kind `workflows`, with the workflow's id and name once one is open.
   source handle — in a row at the card's foot, or as the last labelled row on
   a decide/switch/gate/trycatch — and an edge dragged from it carries `branch`
   `failure` (the engine's failure exit above); it is drawn dashed red. The
-  unlabelled success handle stays the card's first source handle, so an edge
-  with no `branch` keeps landing on it. **Data pins and wires** (naru task
+  unlabelled exec-in and success exec-out arrows carry explicit handle ids
+  (`FLOW_IN`/`FLOW_OUT`), and every saved edge names both its handles
+  (`workflowTypes.ts::edgeHandles`, naru task 2539): an exec edge joins the
+  source's exec-out arrow (or the labelled exit its `branch` names) to the
+  target's exec-in arrow whatever its `from_pin`/`to_pin` hold, a data edge
+  joins its two pins, and only a break/make (pins only), the named pin at the
+  other end of a wire on one, or a failure exit's named `to_pin` (its error
+  text into that pin) puts an exec wire on a pin. A wire with no
+  handle id would land on the card's first handle in DOM order, a data pin. **Data pins and wires** (naru task
   2537): every pin a node has — its effective `pins` from the server
   ("Natural pins"; `workflowTypes.ts::pinsOf`) — is a real handle coloured by
   type, so there are no decorative pins. Dragging an output pin onto an input
   pin makes a **data** edge (`kind: "data"`, both pins); a drag with a flow
-  handle at either end makes an exec edge as before, and so does any wire on a
+  handle at both ends makes an exec edge as before, and so does any wire on a
   break/make, whose pins are its only handles (`workflowTypes.ts::wireKind`).
+  A drag joining a data pin to an exec arrow (either way) is refused with the
+  reason (`workflowTypes.ts::mixedWireReason`); a failure exit onto a pin is
+  still allowed.
   Type mismatches are refused as for any typed wire. Data wires are thin and
   take their source pin's type colour; exec wires stay thick and white. The
   node inspector lists the input pins wired by data ("wired by data": pin ←

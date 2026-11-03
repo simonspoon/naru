@@ -7,6 +7,7 @@
 // canvas can refuse a wire with a reason before the round trip.
 
 import type { WorkflowEdge } from './types/WorkflowEdge'
+import { FAILURE_BRANCH } from './workflowConfig'
 import type { WorkflowNode } from './types/WorkflowNode'
 import type { WorkflowType } from './types/WorkflowType'
 import type { WorkflowTypeField } from './types/WorkflowTypeField'
@@ -284,8 +285,64 @@ export function wireKind(
   to: WorkflowNode,
   toPin: string | null,
 ): 'exec' | 'data' {
-  const shape = (n: WorkflowNode) => n.kind === 'break' || n.kind === 'make'
-  return fromPin !== null && toPin !== null && !shape(from) && !shape(to) ? 'data' : 'exec'
+  return fromPin !== null && toPin !== null && !isShape(from) && !isShape(to) ? 'data' : 'exec'
+}
+
+const isShape = (n: WorkflowNode) => n.kind === 'break' || n.kind === 'make'
+
+/** React Flow ids of a card's unlabelled exec-in and success exec-out
+ *  arrows. Explicit, because a wire with no handle id lands on the card's
+ *  first handle in DOM order, which is a data pin when the card has any. */
+export const FLOW_IN = 'flow-in'
+export const FLOW_OUT = 'flow-out'
+/** Kinds whose exits are all labelled handles (`WorkflowCanvas.tsx::NodeCard`). */
+const LABELLED_EXITS: readonly string[] = ['branch', 'decide', 'switch', 'gate', 'trycatch']
+
+/** Why a drag may not be made because it joins a data pin to an exec arrow
+ *  (naru task 2539) — or null when it does not. A break/make is exempt: its
+ *  pins are its only handles, so every wire on one is exec (`wireKind`). */
+export function mixedWireReason(
+  from: WorkflowNode,
+  fromPin: string | null,
+  to: WorkflowNode,
+  toPin: string | null,
+): string | null {
+  if (isShape(from) || isShape(to) || (fromPin === null) === (toPin === null)) return null
+  return fromPin === null
+    ? "Can't connect an exec arrow to a data pin: exec only connects to exec"
+    : "Can't connect a data pin to an exec arrow: data only connects to data"
+}
+
+/** The handles a saved edge's two ends attach to (naru task 2539). A data
+ *  edge joins its two pins. An exec edge joins the source's exec-out arrow
+ *  (or its labelled exit when `branch` is set) to the target's exec-in arrow,
+ *  whatever `from_pin`/`to_pin` hold, except on a break/make, whose pins are
+ *  its only handles: there, and at the other end of a wire into or out of
+ *  one when that end names a pin, it attaches to the pin. */
+export function edgeHandles(
+  edge: Pick<WorkflowEdge, 'kind' | 'branch' | 'from_pin' | 'to_pin'>,
+  from: WorkflowNode | undefined,
+  to: WorkflowNode | undefined,
+  types: readonly WorkflowType[],
+): { sourceHandle: string | null; targetHandle: string | null } {
+  const shape = (from !== undefined && isShape(from)) || (to !== undefined && isShape(to))
+  const onPin = (n: WorkflowNode | undefined, pin: string | null) =>
+    edge.kind === 'data' || (n !== undefined && isShape(n)) || (shape && pin !== null)
+  // A failure exit may feed its error text into a named input pin (task 2536).
+  const failureIntoPin = edge.branch === FAILURE_BRANCH && edge.to_pin !== null
+  // A card with labelled exits has no plain exec-out arrow; a legacy edge
+  // without a branch keeps xyflow's first-handle fallback, as before.
+  const labelled = from !== undefined && LABELLED_EXITS.includes(from.kind)
+  const pinHandle = (n: WorkflowNode | undefined, side: PinSide, pin: string | null) => {
+    const p = n ? effectivePin(n, side, pin, types) : null
+    return p === null ? null : pinHandleId(side, p)
+  }
+  return {
+    sourceHandle: onPin(from, edge.from_pin)
+      ? pinHandle(from, 'out', edge.from_pin)
+      : (edge.branch ?? (labelled ? null : FLOW_OUT)),
+    targetHandle: onPin(to, edge.to_pin) || failureIntoPin ? pinHandle(to, 'in', edge.to_pin) : FLOW_IN,
+  }
 }
 
 export interface DataInput {
