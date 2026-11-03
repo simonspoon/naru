@@ -1842,30 +1842,6 @@ main {
   flex: none;
 }
 
-.wf-pin-string {
-  --pin: var(--cyan);
-}
-
-.wf-pin-result {
-  --pin: var(--green);
-}
-
-.wf-pin-model {
-  --pin: var(--amber);
-}
-
-.wf-pin-bool {
-  --pin: var(--red);
-}
-
-.wf-pin-number {
-  --pin: var(--amber);
-}
-
-.wf-pin-any {
-  --pin: var(--muted);
-}
-
 /* Typed pins (naru task 1981): a pin that is a real React Flow handle,
    coloured by its type through --pin (set inline from workflowTypes.ts). */
 .wf-viewport .react-flow__handle.wf-pin-handle {
@@ -1918,6 +1894,14 @@ main {
 .wf-kind-break,
 .wf-kind-make {
   background: var(--wf-cli);
+}
+
+.wf-data-in {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 6px 0;
+  font-size: 12px;
 }
 
 .wf-pin-menu {
@@ -2198,6 +2182,13 @@ main {
 .wf-viewport .react-flow__edge.wf-edge-failure .react-flow__edge-path {
   stroke: var(--red);
   stroke-dasharray: 8 5;
+}
+
+/* A data wire (naru task 2537): thin, in its source pin's type colour
+   (--wire, set inline), so it reads apart from the white exec wires. */
+.wf-viewport .react-flow__edge.wf-edge-data .react-flow__edge-path {
+  stroke: var(--wire, var(--muted));
+  stroke-width: 1.5;
 }
 
 .wf-viewport .react-flow__edge.selected .react-flow__edge-path {

@@ -1115,7 +1115,19 @@ context kind `workflows`, with the workflow's id and name once one is open.
   a decide/switch/gate/trycatch — and an edge dragged from it carries `branch`
   `failure` (the engine's failure exit above); it is drawn dashed red. The
   unlabelled success handle stays the card's first source handle, so an edge
-  with no `branch` keeps landing on it. Click a node or an edge to select
+  with no `branch` keeps landing on it. **Data pins and wires** (naru task
+  2537): every pin a node has — its effective `pins` from the server
+  ("Natural pins"; `workflowTypes.ts::pinsOf`) — is a real handle coloured by
+  type, so there are no decorative pins. Dragging an output pin onto an input
+  pin makes a **data** edge (`kind: "data"`, both pins); a drag with a flow
+  handle at either end makes an exec edge as before, and so does any wire on a
+  break/make, whose pins are its only handles (`workflowTypes.ts::wireKind`).
+  Type mismatches are refused as for any typed wire. Data wires are thin and
+  take their source pin's type colour; exec wires stay thick and white. The
+  node inspector lists the input pins wired by data ("wired by data": pin ←
+  source · pin) and says when that wire supplies the node's `{input}`
+  (`workflowTypes.ts::dataInputs`); the edge inspector marks a data edge.
+  Click a node or an edge to select
   it: the **inspector** (bottom-right) edits a node's title and a real control
   per config key of its kind (trigger mode/every-minutes/phrase; prompt
   model, thinking, prompt, timeout, with `local:<name>`; cli command and

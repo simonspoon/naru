@@ -126,3 +126,71 @@ describe('handles and default pins', () => {
     expect(effectivePin(node(4, 'break', { struct: 'Review' }), 'in', null, types)).toBe('value')
   })
 })
+
+describe('server pins, wire kind and data inputs (naru task 2537)', () => {
+  const serverCli = (id: number, title: string): WorkflowNode => ({
+    ...node(id, 'cli', { command: 'x' }, title),
+    pins: {
+      in: [{ name: 'stdin', ty: 'string' }],
+      out: [
+        { name: 'stdout', ty: 'string' },
+        { name: 'stderr', ty: 'string' },
+        { name: 'exit_code', ty: 'number' },
+      ],
+    },
+  })
+  const edge = (id: number, from: number, to: number, kind: 'exec' | 'data', from_pin: string | null, to_pin: string | null) => ({
+    id, workflow_id: 1, from_node: from, to_node: to, branch: null, from_pin, to_pin, kind,
+  })
+
+  it('shows the server pins after the declared ones, but defaults stay declared-only', async () => {
+    const { pinsOf, pinType, effectivePin } = await import('./workflowTypes')
+    const a = serverCli(1, 'A')
+    expect(pinsOf(a, types).outputs.map((p) => p.name)).toEqual(['stdout', 'stderr', 'exit_code'])
+    expect(pinType(a, 'out', 'exit_code', types)).toBe('number')
+    expect(pinType(a, 'out', null, types)).toBe('any')
+    expect(effectivePin(a, 'out', null, types)).toBeNull()
+    // A declared pin of the same name wins, type included, and is listed once.
+    const d = { ...a, config: { command: 'x', pins: { out: [{ name: 'stderr', ty: 'Review' }] } } }
+    expect(pinsOf(d, types).outputs).toEqual([
+      { name: 'stderr', ty: 'Review' },
+      { name: 'stdout', ty: 'string' },
+      { name: 'exit_code', ty: 'number' },
+    ])
+  })
+
+  it('makes pin-to-pin a data wire, flow handles and break/make exec', async () => {
+    const { wireKind } = await import('./workflowTypes')
+    const a = serverCli(1, 'A')
+    const b = serverCli(2, 'B')
+    expect(wireKind(a, 'stderr', b, 'stdin')).toBe('data')
+    expect(wireKind(a, 'stderr', b, null)).toBe('exec')
+    expect(wireKind(a, null, b, 'stdin')).toBe('exec')
+    expect(wireKind(a, 'stdout', node(3, 'break', { struct: 'Review' }), 'value')).toBe('exec')
+    expect(wireKind(node(4, 'make', { struct: 'Review' }), 'value', b, 'stdin')).toBe('exec')
+  })
+
+  it('lists the data wires into a node and what each one fills', async () => {
+    const { dataInputs } = await import('./workflowTypes')
+    const a = serverCli(1, 'A')
+    const b = serverCli(2, 'B')
+    const p = node(3, 'prompt', { prompt: 'x' }, 'P')
+    const nodes = [a, b, p]
+    const edges = [
+      edge(10, 1, 2, 'exec', null, null),
+      edge(12, 1, 2, 'data', 'stdout', 'stdin'),
+      edge(11, 1, 2, 'data', 'stderr', 'stdin'),
+      edge(13, 1, 3, 'data', 'stdout', 'model'),
+      edge(14, 2, 3, 'data', 'stdout', 'input'),
+    ]
+    expect(dataInputs(b, edges, nodes)).toEqual([
+      { pin: 'stdin', from: 'A', fromPin: 'stderr', feedsInput: true, shadowed: false },
+      { pin: 'stdin', from: 'A', fromPin: 'stdout', feedsInput: true, shadowed: true },
+    ])
+    expect(dataInputs(p, edges, nodes).map((d) => [d.pin, d.feedsInput, d.shadowed])).toEqual([
+      ['model', false, false],
+      ['input', true, false],
+    ])
+    expect(dataInputs(a, edges, nodes)).toEqual([])
+  })
+})

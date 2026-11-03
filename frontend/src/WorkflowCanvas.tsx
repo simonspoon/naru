@@ -75,6 +75,7 @@ import { gateBadge, gateByNode, handledFailures, hasOutputPanel, stepClass, step
 import type { LibraryItem } from './types/LibraryItem'
 import type { Script } from './types/Script'
 import type { Workflow } from './types/Workflow'
+import type { WorkflowEdge } from './types/WorkflowEdge'
 import type { WorkflowGate } from './types/WorkflowGate'
 import type { WorkflowNode } from './types/WorkflowNode'
 import type { WorkflowNodeKind } from './types/WorkflowNodeKind'
@@ -84,6 +85,8 @@ import type { WorkflowType } from './types/WorkflowType'
 import type { WorkflowView } from './types/WorkflowView'
 import { PinsEditor, WorkflowTypesCard } from './components/WorkflowTypesCard'
 import {
+  dataInputs,
+  declaredPinsOf,
   effectivePin,
   isList,
   pinColorVar,
@@ -95,11 +98,12 @@ import {
   refusalReason,
   shapePlan,
   typesMatch,
+  wireKind,
   type NodePinSet,
   type PinSide,
 } from './workflowTypes'
 import { KindIcon, SpeakIcon } from './components/WorkflowIcon'
-import { PANEL_H, PANEL_W, kindColorVar, pinsFor, placePanel } from './workflowLayout'
+import { PANEL_H, PANEL_W, kindColorVar, placePanel } from './workflowLayout'
 
 /** A wire being dragged: which side it started on and its pin's type, so the
  *  other cards can dim the pins it cannot land on. */
@@ -134,8 +138,8 @@ const BRANCH_TRUE_TOP = `calc((100% - ${DECIDE_ROW + 8}px) * 0.5)`
 const BRANCH_FALSE_TOP = `calc((100% - ${DECIDE_ROW + 8}px) * 0.8)`
 
 /** One node as a Blueprint-style card: a header tinted by kind, a muted
- *  summary, round typed data pins (decorative: the graph carries no data
- *  types), and white triangle flow handles for the connections it may take.
+ *  summary, round data pins (the server's, each a real handle coloured by
+ *  type), and white triangle flow handles for the connections it may take.
  *  A branch offers two labelled flow handles so the edge's `true`/`false` is
  *  decided by where the line is dragged from, and a decide node one per option
  *  plus `fallback`. The last run's step state is a ring. */
@@ -153,8 +157,6 @@ function NodeCard({ data, selected }: NodeProps<CardNode>) {
       ? [...sourceHandles(node.kind, node.config), FAILURE_BRANCH]
       : []
   const footFailure = failureExit && decideHandles.length === 0
-  const pins = typedRows > 0 ? { inputs: [], outputs: [] } : pinsFor(node.kind)
-  const rows = Math.max(pins.inputs.length, pins.outputs.length)
   if (node.kind === 'comment') {
     // Editor-only group box (naru task 2008): no handles, drawn behind the nodes.
     const color = typeof node.config.color === 'string' && COMMENT_COLOR_VARS[node.config.color] ? node.config.color : 'accent'
@@ -257,38 +259,6 @@ function NodeCard({ data, selected }: NodeProps<CardNode>) {
                 <span className="wf-pin-cell">{typedPins.inputs[i] && typedPin('in', typedPins.inputs[i])}</span>
                 <span className="wf-pin-cell wf-pin-cell-out">
                   {typedPins.outputs[i] && typedPin('out', typedPins.outputs[i])}
-                </span>
-              </div>
-            ))}
-          </div>
-        )}
-        {rows > 0 && (
-          <div className="wf-pin-rows">
-            {Array.from({ length: rows }, (_, i) => (
-              <div key={i} className="wf-pin-row">
-                <span className="wf-pin-cell">
-                  {pins.inputs[i] && (
-                    <>
-                      <span
-                        className={`wf-pin wf-pin-${pins.inputs[i].type}`}
-                        role="img"
-                        aria-label={`${pins.inputs[i].label} in`}
-                      />
-                      {pins.inputs[i].label}
-                    </>
-                  )}
-                </span>
-                <span className="wf-pin-cell wf-pin-cell-out">
-                  {pins.outputs[i] && (
-                    <>
-                      {pins.outputs[i].label}
-                      <span
-                        className={`wf-pin wf-pin-${pins.outputs[i].type}`}
-                        role="img"
-                        aria-label={`${pins.outputs[i].label} out`}
-                      />
-                    </>
-                  )}
                 </span>
               </div>
             ))}
@@ -523,6 +493,8 @@ function WebhookFields({
 
 function NodeInspector({
   node,
+  edges,
+  nodes,
   types,
   scripts,
   workflows,
@@ -540,6 +512,9 @@ function NodeInspector({
   /** A built-in's node: inspect only (naru task 2103). */
   readOnly?: boolean
   node: WorkflowNode
+  /** The graph's edges and nodes, to show which input pins a data wire fills. */
+  edges: WorkflowEdge[]
+  nodes: WorkflowNode[]
   types: WorkflowType[]
   scripts: Script[]
   /** Every workflow, for a sub-workflow node's picker (the node's own is left out). */
@@ -560,7 +535,7 @@ function NodeInspector({
   const [formError, setFormError] = useState<string | null>(null)
   const isShape = node.kind === 'break' || node.kind === 'make'
   const [declaredPins, setDeclaredPins] = useState<NodePinSet>(() => {
-    const p = isShape ? { inputs: [], outputs: [] } : pinsOf(node, types)
+    const p = isShape ? { inputs: [], outputs: [] } : declaredPinsOf(node, types)
     return { inputs: p.inputs, outputs: p.outputs }
   })
   const set = <K extends keyof ConfigDraft>(key: K, value: ConfigDraft[K]) =>
@@ -608,14 +583,8 @@ function NodeInspector({
         : node.kind === 'decide'
           ? { key: 'question', label: 'question' }
           : null
-  const typedSet = pinsOf(node, types)
-  const typedMode = typedSet.inputs.length + typedSet.outputs.length > 0
-  const pins = typedMode
-      ? {
-          inputs: typedSet.inputs.map((p) => ({ label: p.name, type: p.ty })),
-          outputs: typedSet.outputs.map((p) => ({ label: p.name, type: p.ty })),
-        }
-      : pinsFor(node.kind)
+  const pins = pinsOf(node, types)
+  const wired = dataInputs(node, edges, nodes)
 
   const fields = (
     <>
@@ -1637,6 +1606,25 @@ function NodeInspector({
           from the type; edit the type in the Types card.
         </p>
       )}
+      {wired.length > 0 && (
+        <div className="wf-data-in">
+          <span className="wf-field-label">wired by data</span>
+          {wired.map((d, i) => (
+            <div key={i} className={`wf-data-in-row${d.shadowed ? ' muted' : ''}`}>
+              <b>{d.pin}</b> ← {d.from} · {d.fromPin}
+              <span className="wf-field-hint muted">
+                {d.shadowed
+                  ? ' — ignored: an earlier wire fills it'
+                  : d.feedsInput
+                    ? ' — {input} comes from this wire'
+                    : node.kind === 'prompt'
+                      ? ' — replaces the configured model'
+                      : ' — sets this field'}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
       {!isShape && node.kind !== 'agent' && node.kind !== 'parse-json' && node.kind !== 'webhook' && node.kind !== 'task-event' && node.kind !== 'file-watch' && node.kind !== 'variable' && node.kind !== 'mapfilter' && node.kind !== 'foreach' && node.kind !== 'parallel' && node.kind !== 'join' && node.kind !== 'retry' && node.kind !== 'delay' && node.kind !== 'gate' && node.kind !== 'notify' && node.kind !== 'board' && node.kind !== 'git' && node.kind !== 'file' && node.kind !== 'memory' && node.kind !== 'verify' && node.kind !== 'comment' && node.kind !== 'trycatch' && <PinsEditor pins={declaredPins} types={types} onChange={setDeclaredPins} />}
     </>
   )
@@ -1702,13 +1690,9 @@ function NodeInspector({
                 <span className="wf-field-label">pins</span>
                 {[...pins.inputs.map((p) => ({ p, dir: 'in' })), ...pins.outputs.map((p) => ({ p, dir: 'out' }))].map(
                   ({ p, dir }) => (
-                    <div key={`${dir}-${p.label}`} className="wf-pin-cell">
-                      <span
-                        className={`wf-pin wf-pin-${p.type}`}
-                        style={typedMode ? { ['--pin' as string]: `var(${pinColorVar(p.type)})` } : undefined}
-                        aria-hidden="true"
-                      />
-                      {p.label} <span className="muted">{dir} · {p.type}</span>
+                    <div key={`${dir}-${p.name}`} className="wf-pin-cell">
+                      <span className="wf-pin" style={{ ['--pin' as string]: `var(${pinColorVar(p.ty)})` }} aria-hidden="true" />
+                      {p.name} <span className="muted">{dir} · {p.ty}</span>
                     </div>
                   ),
                 )}
@@ -2083,7 +2067,11 @@ export function WorkflowCanvas({
         sourceHandle: typedFrom && fromPin ? pinHandleId('out', fromPin) : (e.branch ?? undefined),
         targetHandle: typedTo && toPin ? pinHandleId('in', toPin) : undefined,
         label: e.branch ?? undefined,
-        className: `${edgeLabelClass(e.branch)}${
+        // A data wire is thin and takes its source pin's type colour.
+        ...(e.kind === 'data' && from && fromPin
+          ? { style: { ['--wire' as string]: `var(${pinColorVar(pinType(from, 'out', fromPin, types) ?? 'any')})` } }
+          : {}),
+        className: `${e.kind === 'data' ? 'wf-edge-data ' : ''}${edgeLabelClass(e.branch)}${
           selection?.kind === 'edge' && selection.id === e.id ? ' selected' : ''
         }`,
         selected: selection?.kind === 'edge' && selection.id === e.id,
@@ -2163,9 +2151,12 @@ export function WorkflowCanvas({
       setRefusal(why)
       return
     }
+    // Pin to pin is a data wire; a flow handle at either end makes it exec.
+    const kind = wireKind(source, fromPin, target, toPin)
     createWorkflowEdge(workflowId, {
       from_node: Number(c.source),
       to_node: Number(c.target),
+      ...(kind === 'data' ? { kind } : {}),
       branch: fromPin ? undefined : branchForHandle(source.kind, c.sourceHandle),
       ...(fromPin ? { from_pin: fromPin } : {}),
       ...(toPin ? { to_pin: toPin } : {}),
@@ -2387,6 +2378,8 @@ export function WorkflowCanvas({
             <NodeFloat
               key={inspectorKey(selectedNode)}
               node={selectedNode}
+              edges={view.edges}
+              nodes={view.nodes}
               types={types}
               scripts={scripts ?? []}
               workflows={workflows ?? []}
@@ -2438,6 +2431,7 @@ export function WorkflowCanvas({
               {title(selectedEdge.to_node)}
               {selectedEdge.to_pin && <span className="muted"> · {selectedEdge.to_pin}</span>}
               {selectedEdge.branch && <span className="muted"> · when {selectedEdge.branch}</span>}
+              {selectedEdge.kind === 'data' && <span className="muted"> · data</span>}
             </p>
             <div className="wf-inspector-actions">
               <button

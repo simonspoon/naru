@@ -108,6 +108,7 @@ import type { VoiceExport } from './types/VoiceExport'
 import type { Workflow } from './types/Workflow'
 import type { WorkflowType } from './types/WorkflowType'
 import type { WorkflowEdge } from './types/WorkflowEdge'
+import type { WorkflowEdgeKind } from './types/WorkflowEdgeKind'
 import type { WorkflowLogEntry } from './types/WorkflowLogEntry'
 import type { WorkflowNode } from './types/WorkflowNode'
 import type { WorkflowNodeKind } from './types/WorkflowNodeKind'
@@ -920,6 +921,8 @@ export interface WorkflowEdgeCreate {
   /** The output / input pin the wire connects; absent = the default pin. */
   from_pin?: string
   to_pin?: string
+  /** `data` for a pin-to-pin wire (both pins required); absent = `exec`. */
+  kind?: WorkflowEdgeKind
 }
 
 export function createWorkflowEdge(

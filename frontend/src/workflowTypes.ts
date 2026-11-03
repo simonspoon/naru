@@ -6,6 +6,7 @@
 // The server (`core::wftypes`) stays the authority; these checks exist so the
 // canvas can refuse a wire with a reason before the round trip.
 
+import type { WorkflowEdge } from './types/WorkflowEdge'
 import type { WorkflowNode } from './types/WorkflowNode'
 import type { WorkflowType } from './types/WorkflowType'
 import type { WorkflowTypeField } from './types/WorkflowTypeField'
@@ -101,10 +102,11 @@ export function structOf(node: WorkflowNode): string {
   return typeof s === 'string' ? s : ''
 }
 
-/** The typed pins a node shows. A break has one struct input and an output
- *  per field; a make the reverse; any other node shows what its
- *  `config.pins` declares (none = it is untyped). */
-export function pinsOf(node: WorkflowNode, types: readonly WorkflowType[]): NodePinSet {
+/** The pins a node's own config makes: a break has one struct input and an
+ *  output per field, a make the reverse, any other node what its
+ *  `config.pins` declares (none = untyped). An unnamed wire end means the
+ *  first of these (else `any`), and these are what the inspector edits. */
+export function declaredPinsOf(node: WorkflowNode, types: readonly WorkflowType[]): NodePinSet {
   if (node.kind === 'break') {
     const s = structOf(node)
     return {
@@ -122,21 +124,34 @@ export function pinsOf(node: WorkflowNode, types: readonly WorkflowType[]): Node
   return { inputs: declared(node, 'in'), outputs: declared(node, 'out') }
 }
 
+/** The pins a node shows and a wire may name (naru task 2537): the declared
+ *  pins, then each of the server's default pins for the kind
+ *  (`WorkflowNode.pins`, docs/workflows.md "Natural pins") they do not name. */
+export function pinsOf(node: WorkflowNode, types: readonly WorkflowType[]): NodePinSet {
+  const own = declaredPinsOf(node, types)
+  const add = (mine: PinInfo[], server: readonly PinInfo[] | undefined) => [
+    ...mine,
+    ...(server ?? []).filter((p) => !mine.some((m) => m.name === p.name)),
+  ]
+  return { inputs: add(own.inputs, node.pins?.in), outputs: add(own.outputs, node.pins?.out) }
+}
+
 /** The type of one pin; a null `pin` is the node's default (first declared,
- *  else `any`). Null when the node has no such pin. */
+ *  else `any`), a named one any pin the node shows. Null when the node has no such pin. */
 export function pinType(
   node: WorkflowNode,
   side: PinSide,
   pin: string | null | undefined,
   types: readonly WorkflowType[],
 ): string | null {
-  const set = pinsOf(node, types)
-  const list = side === 'in' ? set.inputs : set.outputs
   if (!pin) {
+    const own = declaredPinsOf(node, types)
+    const list = side === 'in' ? own.inputs : own.outputs
     if (node.kind === 'break' || node.kind === 'make') return list.length === 1 ? list[0].ty : null
     return list[0]?.ty ?? 'any'
   }
-  return list.find((p) => p.name === pin)?.ty ?? null
+  const set = pinsOf(node, types)
+  return (side === 'in' ? set.inputs : set.outputs).find((p) => p.name === pin)?.ty ?? null
 }
 
 /** Why a wire `from.fromPin -> to.toPin` may not be made, in words naming
@@ -244,7 +259,7 @@ export function effectivePin(
   types: readonly WorkflowType[],
 ): string | null {
   if (pin) return pin
-  const set = pinsOf(node, types)
+  const set = declaredPinsOf(node, types)
   const list = side === 'in' ? set.inputs : set.outputs
   if (node.kind === 'break' || node.kind === 'make') return list.length === 1 ? list[0].name : null
   return list[0]?.name ?? null
@@ -257,4 +272,59 @@ export const pinHandleId = (side: PinSide, name: string) => `${side}:${name}`
  *  (a flow handle, a branch label). */
 export function pinOfHandle(side: PinSide, handle: string | null | undefined): string | null {
   return handle && handle.startsWith(`${side}:`) ? handle.slice(side.length + 1) : null
+}
+
+/** The kind of edge a drag makes (naru task 2537): pin to pin is a `data`
+ *  wire; anything touching a flow handle is `exec`, and so is every wire on a
+ *  break/make, whose pins are its only handles (it runs only when an exec
+ *  edge reaches it). */
+export function wireKind(
+  from: WorkflowNode,
+  fromPin: string | null,
+  to: WorkflowNode,
+  toPin: string | null,
+): 'exec' | 'data' {
+  const shape = (n: WorkflowNode) => n.kind === 'break' || n.kind === 'make'
+  return fromPin !== null && toPin !== null && !shape(from) && !shape(to) ? 'data' : 'exec'
+}
+
+export interface DataInput {
+  /** The input pin the wire fills. */
+  pin: string
+  /** The source node's title and pin. */
+  from: string
+  fromPin: string
+  /** Whether the wire replaces the node's `{input}` text: every data edge
+   *  but one into a prompt's `model` or a make's field (docs/workflows.md
+   *  "Exec and data"). */
+  feedsInput: boolean
+  /** A later wire into a pin already filled is ignored (first by id wins). */
+  shadowed: boolean
+}
+
+/** The data wires into a node, in id order. */
+export function dataInputs(
+  node: WorkflowNode,
+  edges: readonly WorkflowEdge[],
+  nodes: readonly WorkflowNode[],
+): DataInput[] {
+  const seen = new Set<string>()
+  let input = false
+  return edges
+    .filter((e) => e.kind === 'data' && e.to_node === node.id && e.to_pin)
+    .sort((a, b) => a.id - b.id)
+    .map((e) => {
+      const pin = e.to_pin as string
+      const feedsInput = node.kind !== 'make' && !(node.kind === 'prompt' && pin === 'model')
+      const shadowed = feedsInput ? input : seen.has(pin)
+      if (feedsInput) input = true
+      seen.add(pin)
+      return {
+        pin,
+        from: nodes.find((n) => n.id === e.from_node)?.title ?? `node ${e.from_node}`,
+        fromPin: e.from_pin ?? '',
+        feedsInput,
+        shadowed,
+      }
+    })
 }
