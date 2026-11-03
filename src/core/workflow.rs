@@ -21,7 +21,7 @@
 //! incoming edges none of which is active is `skipped`, and a failed node
 //! fails the run and skips everything not yet run.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::process::Command;
 use std::sync::Mutex;
@@ -31,9 +31,10 @@ use serde_json::{Map, Value, json};
 
 use crate::core::store::{Error, Result, Store, WorkflowNodeNew, WorkflowPatch};
 use crate::core::types::{
-    InboxKind, LibraryKind, LiveBoardKind, LiveRole, Priority, Status, WorkflowEdge, WorkflowGate,
-    WorkflowGateStatus, WorkflowNode, WorkflowNodeKind, WorkflowRun, WorkflowRunStatus,
-    WorkflowStep, WorkflowStepStatus, WorkflowTrigger, WorkflowType, WorkflowView,
+    InboxKind, LibraryKind, LiveBoardKind, LiveRole, Priority, Status, WorkflowEdge,
+    WorkflowEdgeKind, WorkflowGate, WorkflowGateStatus, WorkflowNode, WorkflowNodeKind,
+    WorkflowRun, WorkflowRunStatus, WorkflowStep, WorkflowStepStatus, WorkflowTrigger,
+    WorkflowType, WorkflowView,
 };
 use crate::core::{agents, config, decide, library, llm, runner, scripts, stage, wftypes};
 
@@ -2253,6 +2254,9 @@ pub fn snapshot_lines(snap: &crate::core::types::WorkflowSnapshot) -> Vec<String
             if let Some(b) = &e.branch {
                 l.push_str(&format!(" [{b}]"));
             }
+            if e.kind == WorkflowEdgeKind::Data {
+                l.push_str(" data");
+            }
             if e.from_pin.is_some() || e.to_pin.is_some() {
                 l.push_str(&format!(
                     " ({} -> {})",
@@ -2682,6 +2686,10 @@ struct Done {
     /// A failed node's error when the failure is handled by its wired
     /// failure exit; what that exit's edges carry. `None` otherwise.
     error: Option<String>,
+    /// Output pins the node exposes besides its text (naru task 2534): a
+    /// `cli`/`script` node's `stdout`, `stderr` and `exit_code`. Empty for
+    /// every other node.
+    pins: HashMap<String, String>,
 }
 
 /// Node ids in execution order: Kahn's algorithm over every node, the ready
@@ -2805,6 +2813,12 @@ pub fn execute_run<A: StoreAccess>(
         } else {
             active_input(view, &done, id)
         };
+        // Data edges (naru task 2534) fill the input pins they are wired to;
+        // they never make a node run.
+        let input = match input {
+            Some(i) if !always && id != trigger_id => data_input(view, &done, node, i),
+            other => other,
+        };
         let (Some(input), None) = (input, failure.as_ref().filter(|_| !always)) else {
             steps.push(skipped(node));
             done.insert(
@@ -2814,6 +2828,7 @@ pub fn execute_run<A: StoreAccess>(
                     output: String::new(),
                     route: None,
                     error: None,
+                    pins: HashMap::new(),
                 },
             );
             continue;
@@ -2835,6 +2850,7 @@ pub fn execute_run<A: StoreAccess>(
         // A cli or script node streams its output onto the running step, so
         // the run view can show it live (naru task 2531); best-effort too.
         let mut log: Option<String> = None;
+        let mut pins: HashMap<String, String> = HashMap::new();
         let result = run_node(
             access,
             view,
@@ -2844,6 +2860,7 @@ pub fn execute_run<A: StoreAccess>(
             run.id,
             id == trigger_id,
             &mut vars,
+            &mut pins,
             &mut |bytes| {
                 let text = String::from_utf8_lossy(bytes).into_owned();
                 running.log = Some(text.clone());
@@ -2895,6 +2912,7 @@ pub fn execute_run<A: StoreAccess>(
                 output,
                 route,
                 error: error.map(cap),
+                pins: pins.into_iter().map(|(k, v)| (k, cap(v))).collect(),
             },
         );
         let _ = access.with(|s| s.update_workflow_run_steps(run.id, &steps));
@@ -2927,8 +2945,11 @@ fn active_edges<'a>(
     done: &HashMap<i64, Done>,
     node_id: i64,
 ) -> Vec<&'a WorkflowEdge> {
-    let mut incoming: Vec<&WorkflowEdge> =
-        view.edges.iter().filter(|e| e.to_node == node_id).collect();
+    let mut incoming: Vec<&WorkflowEdge> = view
+        .edges
+        .iter()
+        .filter(|e| e.to_node == node_id && e.kind == WorkflowEdgeKind::Exec)
+        .collect();
     incoming.sort_by_key(|e| e.id);
     incoming
         .into_iter()
@@ -2954,6 +2975,14 @@ fn edge_text(view: &WorkflowView, done: &HashMap<i64, Done>, e: &WorkflowEdge) -
     if e.branch.as_deref() == Some(FAILURE_EXIT) {
         // A failure exit carries its source's error text.
         return done[&e.from_node].error.clone().unwrap_or_default();
+    }
+    // A cli/script node's server pins (naru task 2534).
+    if let Some(v) = e
+        .from_pin
+        .as_deref()
+        .and_then(|p| done[&e.from_node].pins.get(p))
+    {
+        return v.clone();
     }
     let out = &done[&e.from_node].output;
     let src = view.nodes.iter().find(|n| n.id == e.from_node);
@@ -2989,6 +3018,55 @@ fn edge_text(view: &WorkflowView, done: &HashMap<i64, Done>, e: &WorkflowEdge) -
     out.clone()
 }
 
+/// `node`'s input once its data edges (naru task 2534) are applied to the
+/// exec-edge `input`: `None` (skipped) when any data edge's source did not
+/// run `ok` — a skipped or failed source feeds nothing, never an empty
+/// value. A data edge into the node's input pin (`stdin` on a cli/script
+/// node, else its first declared input pin) replaces the input; into a
+/// `make` node's field pin it sets that field. The first edge per pin wins.
+fn data_input(
+    view: &WorkflowView,
+    done: &HashMap<i64, Done>,
+    node: &WorkflowNode,
+    input: String,
+) -> Option<String> {
+    let mut data: Vec<&WorkflowEdge> = view
+        .edges
+        .iter()
+        .filter(|e| e.to_node == node.id && e.kind == WorkflowEdgeKind::Data)
+        .collect();
+    if data.is_empty() {
+        return Some(input);
+    }
+    data.sort_by_key(|e| e.id);
+    if data
+        .iter()
+        .any(|e| done.get(&e.from_node).map(|d| d.status) != Some(WorkflowStepStatus::Ok))
+    {
+        return None;
+    }
+    if node.kind == WorkflowNodeKind::Make {
+        let mut fields: Map<String, Value> = serde_json::from_str(&input).unwrap_or_default();
+        let mut set = HashSet::new();
+        for e in data {
+            if let Some(pin) = e.to_pin.as_deref()
+                && set.insert(pin)
+            {
+                fields.insert(pin.to_string(), Value::String(edge_text(view, done, e)));
+            }
+        }
+        return Some(Value::Object(fields).to_string());
+    }
+    data.into_iter()
+        .find(|e| {
+            e.to_pin
+                .as_deref()
+                .is_some_and(|p| wftypes::data_feeds(node, p))
+        })
+        .map(|e| edge_text(view, done, e))
+        .or(Some(input))
+}
+
 /// A `make` node's input: a JSON object of `{field pin: text}` over its
 /// active incoming edges (the first edge per pin wins), or `None` when none
 /// is active.
@@ -3011,7 +3089,11 @@ fn make_input(view: &WorkflowView, done: &HashMap<i64, Done>, node_id: i64) -> O
 /// order, but only when *every* incoming edge is active (naru task 1989);
 /// `None` (skipped) when it has none or any branch did not reach it.
 fn join_input(view: &WorkflowView, done: &HashMap<i64, Done>, node_id: i64) -> Option<String> {
-    let total = view.edges.iter().filter(|e| e.to_node == node_id).count();
+    let total = view
+        .edges
+        .iter()
+        .filter(|e| e.to_node == node_id && e.kind == WorkflowEdgeKind::Exec)
+        .count();
     let edges = active_edges(view, done, node_id);
     if edges.is_empty() || edges.len() != total {
         return None;
@@ -3564,7 +3646,15 @@ fn run_file(cfg: &Value, input: &str, cwd: &str) -> std::result::Result<String, 
     Ok(json!({"result": result, "path": shown}).to_string())
 }
 
-/// One node's execution: `Ok((output, route))` or the failure message.
+/// A cli/script node's server output pins (naru task 2534).
+fn stream_pins(pins: &mut HashMap<String, String>, stdout: &str, stderr: &str, code: i32) {
+    pins.insert("stdout".into(), stdout.to_string());
+    pins.insert("stderr".into(), stderr.to_string());
+    pins.insert("exit_code".into(), code.to_string());
+}
+
+/// One node's execution: `Ok((output, route))` or the failure message;
+/// a cli/script node also fills `pins`.
 #[allow(clippy::too_many_arguments)]
 fn run_node<A: StoreAccess>(
     access: &A,
@@ -3575,6 +3665,7 @@ fn run_node<A: StoreAccess>(
     run_id: i64,
     is_trigger: bool,
     vars: &mut HashMap<String, String>,
+    pins: &mut HashMap<String, String>,
     on_log: &mut dyn FnMut(&[u8]),
 ) -> std::result::Result<(String, Option<String>), String> {
     if is_trigger {
@@ -3781,7 +3872,14 @@ fn run_node<A: StoreAccess>(
                     String::from_utf8_lossy(&out.stderr).trim()
                 ));
             }
-            Ok((String::from_utf8_lossy(&out.stdout).into_owned(), None))
+            let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+            stream_pins(
+                pins,
+                &stdout,
+                &String::from_utf8_lossy(&out.stderr),
+                out.code,
+            );
+            Ok((stdout, None))
         }
         WorkflowNodeKind::Script => {
             let which = str_of("script");
@@ -3831,6 +3929,7 @@ fn run_node<A: StoreAccess>(
             if run.exit_code != 0 {
                 return Err(format!("exited {}: {}", run.exit_code, run.stderr.trim()));
             }
+            stream_pins(pins, &run.stdout, &run.stderr, run.exit_code);
             Ok((run.stdout, None))
         }
         // parallel is the fan-out marker and join's input is already the
@@ -3927,6 +4026,7 @@ fn run_node<A: StoreAccess>(
                     run_id,
                     false,
                     vars,
+                    &mut HashMap::new(),
                     &mut |_| {},
                 )
             },
@@ -3944,6 +4044,7 @@ fn run_node<A: StoreAccess>(
                     run_id,
                     false,
                     vars,
+                    &mut HashMap::new(),
                     &mut |_| {},
                 )
             },
@@ -6990,6 +7091,7 @@ mod tests {
                 output: "{}".into(),
                 route,
                 error: None,
+                pins: HashMap::new(),
             },
         );
         view.nodes
@@ -9320,5 +9422,317 @@ mod tests {
             let e = s.create_workflow_edge(wf.id, a, b, None).unwrap();
             assert_eq!((e.from_pin, e.to_pin), (None, None));
         });
+    }
+
+    // ---- data edges (naru task 2534) ----
+
+    fn data_edge(s: &mut Store, wf: i64, from: i64, to: i64, fp: &str, tp: &str) -> WorkflowEdge {
+        s.create_workflow_edge_kind(
+            wf,
+            from,
+            to,
+            None,
+            Some(fp.into()),
+            Some(tp.into()),
+            WorkflowEdgeKind::Data,
+        )
+        .unwrap()
+    }
+
+    fn step<'a>(run: &'a WorkflowRun, title: &str) -> &'a WorkflowStep {
+        run.steps.iter().find(|s| s.title == title).unwrap()
+    }
+
+    /// trigger -exec-> A -exec-> B (cli `cat`), plus A.stderr -data-> B.stdin.
+    fn stderr_graph(s: &mut Store, name: &str) -> i64 {
+        let wf = s.create_workflow(None, name, None).unwrap().id;
+        let t = node(
+            s,
+            wf,
+            WorkflowNodeKind::Trigger,
+            "T",
+            json!({"mode": "manual"}),
+        );
+        let a = node(
+            s,
+            wf,
+            WorkflowNodeKind::Cli,
+            "A",
+            cli("echo hi; echo err >&2; exit 0"),
+        );
+        let b = node(s, wf, WorkflowNodeKind::Cli, "B", cli("cat"));
+        s.create_workflow_edge(wf, t, a, None).unwrap();
+        s.create_workflow_edge(wf, a, b, None).unwrap();
+        data_edge(s, wf, a, b, "stderr", "stdin");
+        wf
+    }
+
+    #[test]
+    fn a_data_edge_feeds_a_cli_pin_into_stdin() {
+        let (st, _d) = store();
+        let wf = st.with(|s| stderr_graph(s, "Pins"));
+        let run = run_workflow(&st, wf, WorkflowTrigger::Manual, "x").unwrap();
+        assert_eq!(run.status, WorkflowRunStatus::Succeeded, "{run:?}");
+        // A's text output (what exec edges carry) is still its stdout.
+        assert_eq!(step(&run, "A").output, "hi\n");
+        assert_eq!(step(&run, "B").output.trim(), "err");
+        // exit_code and stdout pins too.
+        let wf = st.with(|s| {
+            let wf = s.create_workflow(None, "Code", None).unwrap().id;
+            let t = node(
+                s,
+                wf,
+                WorkflowNodeKind::Trigger,
+                "T",
+                json!({"mode": "manual"}),
+            );
+            let a = node(s, wf, WorkflowNodeKind::Cli, "A", cli("echo out"));
+            let b = node(s, wf, WorkflowNodeKind::Cli, "B", cli("cat"));
+            let c = node(s, wf, WorkflowNodeKind::Cli, "C", cli("cat"));
+            s.create_workflow_edge(wf, t, a, None).unwrap();
+            s.create_workflow_edge(wf, t, b, None).unwrap();
+            s.create_workflow_edge(wf, t, c, None).unwrap();
+            data_edge(s, wf, a, b, "stdout", "stdin");
+            // Pin types are checked: exit_code (number) cannot feed stdin
+            // (string).
+            let refused = s.create_workflow_edge_kind(
+                wf,
+                a,
+                c,
+                None,
+                Some("exit_code".into()),
+                Some("stdin".into()),
+                WorkflowEdgeKind::Data,
+            );
+            assert!(
+                matches!(&refused, Err(Error::Validation(m)) if m.contains("number")),
+                "{refused:?}"
+            );
+            wf
+        });
+        let run = run_workflow(&st, wf, WorkflowTrigger::Manual, "x").unwrap();
+        assert_eq!(step(&run, "B").output, "out\n");
+        // C has no data edge: its input is the exec text, as before.
+        assert_eq!(step(&run, "C").output, "x");
+    }
+
+    #[test]
+    fn a_data_edge_alone_never_runs_its_target() {
+        let (st, _d) = store();
+        let wf = st.with(|s| {
+            let wf = s.create_workflow(None, "Alone", None).unwrap().id;
+            let t = node(
+                s,
+                wf,
+                WorkflowNodeKind::Trigger,
+                "T",
+                json!({"mode": "manual"}),
+            );
+            let a = node(s, wf, WorkflowNodeKind::Cli, "A", cli("echo hi"));
+            let b = node(s, wf, WorkflowNodeKind::Cli, "B", cli("cat"));
+            s.create_workflow_edge(wf, t, a, None).unwrap();
+            data_edge(s, wf, a, b, "stdout", "stdin");
+            wf
+        });
+        let run = run_workflow(&st, wf, WorkflowTrigger::Manual, "x").unwrap();
+        assert_eq!(run.status, WorkflowRunStatus::Succeeded, "{run:?}");
+        assert_eq!(step(&run, "A").status, WorkflowStepStatus::Ok);
+        assert_eq!(step(&run, "B").status, WorkflowStepStatus::Skipped);
+    }
+
+    #[test]
+    fn a_data_edge_needs_both_pins_and_no_branch() {
+        let (st, _d) = store();
+        st.with(|s| {
+            let wf = s.create_workflow(None, "Shape", None).unwrap().id;
+            let a = node(s, wf, WorkflowNodeKind::Cli, "A", cli("true"));
+            let b = node(s, wf, WorkflowNodeKind::Cli, "B", cli("cat"));
+            for (branch, fp, tp) in [
+                (Some("failure"), Some("stdout"), Some("stdin")),
+                (None, None, Some("stdin")),
+                (None, Some("stdout"), None),
+                (None, Some(" "), Some("stdin")),
+            ] {
+                let r = s.create_workflow_edge_kind(
+                    wf,
+                    a,
+                    b,
+                    branch.map(Into::into),
+                    fp.map(Into::into),
+                    tp.map(Into::into),
+                    WorkflowEdgeKind::Data,
+                );
+                assert!(matches!(r, Err(Error::Validation(_))), "{r:?}");
+            }
+            // A pin the node does not have is refused too.
+            let r = s.create_workflow_edge_kind(
+                wf,
+                a,
+                b,
+                None,
+                Some("nope".into()),
+                Some("stdin".into()),
+                WorkflowEdgeKind::Data,
+            );
+            assert!(matches!(r, Err(Error::Validation(_))), "{r:?}");
+            // A declared input pin the engine does not read (not the first).
+            let p = node(
+                s,
+                wf,
+                WorkflowNodeKind::Cli,
+                "P",
+                json!({"command": "cat", "pins": {"in": [{"name": "a"}, {"name": "b"}]}}),
+            );
+            let r = s.create_workflow_edge_kind(
+                wf,
+                a,
+                p,
+                None,
+                Some("stdout".into()),
+                Some("b".into()),
+                WorkflowEdgeKind::Data,
+            );
+            assert!(
+                matches!(&r, Err(Error::Validation(m)) if m.contains("reads")),
+                "{r:?}"
+            );
+            assert!(s.get_workflow_view(wf).unwrap().edges.is_empty());
+        });
+    }
+
+    #[test]
+    fn a_data_edge_counts_for_cycles() {
+        let (st, _d) = store();
+        st.with(|s| {
+            let wf = s.create_workflow(None, "Cyc", None).unwrap().id;
+            let a = node(s, wf, WorkflowNodeKind::Cli, "A", cli("true"));
+            let b = node(s, wf, WorkflowNodeKind::Cli, "B", cli("cat"));
+            s.create_workflow_edge(wf, a, b, None).unwrap();
+            let r = s.create_workflow_edge_kind(
+                wf,
+                b,
+                a,
+                None,
+                Some("stdout".into()),
+                Some("stdin".into()),
+                WorkflowEdgeKind::Data,
+            );
+            assert!(matches!(r, Err(Error::Cycle(_))), "{r:?}");
+        });
+    }
+
+    #[test]
+    fn a_data_edge_from_a_skipped_or_failed_source_skips_the_reader() {
+        let (st, _d) = store();
+        let wf = st.with(|s| {
+            let wf = s.create_workflow(None, "Gone", None).unwrap().id;
+            let t = node(
+                s,
+                wf,
+                WorkflowNodeKind::Trigger,
+                "T",
+                json!({"mode": "manual"}),
+            );
+            // Fails, with its failure exit wired so the run goes on.
+            let bad = node(
+                s,
+                wf,
+                WorkflowNodeKind::Cli,
+                "Bad",
+                cli("echo boom >&2; exit 3"),
+            );
+            let h = node(s, wf, WorkflowNodeKind::Cli, "Handler", cli("cat"));
+            // No incoming edge: skipped.
+            let orphan = node(s, wf, WorkflowNodeKind::Cli, "Orphan", cli("echo o"));
+            let r1 = node(s, wf, WorkflowNodeKind::Cli, "ReadsBad", cli("cat"));
+            let r2 = node(s, wf, WorkflowNodeKind::Cli, "ReadsOrphan", cli("cat"));
+            s.create_workflow_edge(wf, t, bad, None).unwrap();
+            s.create_workflow_edge(wf, bad, h, Some(FAILURE_EXIT.into()))
+                .unwrap();
+            s.create_workflow_edge(wf, t, r1, None).unwrap();
+            s.create_workflow_edge(wf, t, r2, None).unwrap();
+            data_edge(s, wf, bad, r1, "stderr", "stdin");
+            data_edge(s, wf, orphan, r2, "stdout", "stdin");
+            wf
+        });
+        let run = run_workflow(&st, wf, WorkflowTrigger::Manual, "x").unwrap();
+        assert_eq!(run.status, WorkflowRunStatus::Succeeded, "{run:?}");
+        assert_eq!(step(&run, "Bad").status, WorkflowStepStatus::Failed);
+        assert_eq!(step(&run, "Handler").status, WorkflowStepStatus::Ok);
+        assert_eq!(step(&run, "Orphan").status, WorkflowStepStatus::Skipped);
+        assert_eq!(step(&run, "ReadsBad").status, WorkflowStepStatus::Skipped);
+        assert_eq!(
+            step(&run, "ReadsOrphan").status,
+            WorkflowStepStatus::Skipped
+        );
+    }
+
+    #[test]
+    fn data_edges_survive_export_duplicate_and_revisions_and_old_files_import_as_exec() {
+        let (st, _d) = store();
+        let wf = st.with(|s| stderr_graph(s, "Carry"));
+        let kinds = |v: &WorkflowView| {
+            let mut k: Vec<_> = v.edges.iter().map(|e| e.kind).collect();
+            k.sort_by_key(|k| k.as_str());
+            k
+        };
+        let want = vec![
+            WorkflowEdgeKind::Data,
+            WorkflowEdgeKind::Exec,
+            WorkflowEdgeKind::Exec,
+        ];
+        // Duplicate and export/import keep the kind.
+        let dup = st.with(|s| s.duplicate_workflow(wf, None)).unwrap();
+        assert_eq!(kinds(&dup), want);
+        let doc = serde_json::to_value(st.with(|s| s.export_workflow(wf)).unwrap()).unwrap();
+        let r = st.with(|s| s.import_workflow(&doc, None)).unwrap();
+        let v = st.with(|s| s.get_workflow_view(r.workflow.id)).unwrap();
+        assert_eq!(kinds(&v), want);
+        // The snapshot (revisions) carries it, and its lines show it.
+        let snap = st.with(|s| s.workflow_snapshot(wf)).unwrap();
+        assert!(snap.edges.iter().any(|e| e.kind == WorkflowEdgeKind::Data));
+        assert!(
+            snapshot_lines(&snap)
+                .iter()
+                .any(|l| l.contains(" data (stderr -> stdin)")),
+            "{:?}",
+            snapshot_lines(&snap)
+        );
+        // An older file has no `kind`: every edge imports as exec and runs
+        // as it always did.
+        let wf_old = st.with(|s| {
+            let wf = s.create_workflow(None, "Old", None).unwrap().id;
+            let t = node(
+                s,
+                wf,
+                WorkflowNodeKind::Trigger,
+                "T",
+                json!({"mode": "manual"}),
+            );
+            let a = node(s, wf, WorkflowNodeKind::Cli, "A", cli("echo hi"));
+            let b = node(s, wf, WorkflowNodeKind::Cli, "B", cli("cat"));
+            s.create_workflow_edge(wf, t, a, None).unwrap();
+            s.create_workflow_edge(wf, a, b, None).unwrap();
+            wf
+        });
+        let mut doc =
+            serde_json::to_value(st.with(|s| s.export_workflow(wf_old)).unwrap()).unwrap();
+        for e in doc["edges"].as_array_mut().unwrap() {
+            e.as_object_mut().unwrap().remove("kind");
+        }
+        let r = st.with(|s| s.import_workflow(&doc, None)).unwrap();
+        assert!(r.edges.iter().all(|e| e.kind == WorkflowEdgeKind::Exec));
+        let run = run_workflow(&st, r.workflow.id, WorkflowTrigger::Manual, "x").unwrap();
+        assert_eq!(run.status, WorkflowRunStatus::Succeeded, "{run:?}");
+        assert_eq!(step(&run, "B").output, "hi\n");
+        // A data edge without pins in a file is refused.
+        let mut bad = serde_json::to_value(st.with(|s| s.export_workflow(wf)).unwrap()).unwrap();
+        for e in bad["edges"].as_array_mut().unwrap() {
+            if e["kind"] == "data" {
+                e["to_pin"] = Value::Null;
+            }
+        }
+        let r = st.with(|s| s.import_workflow(&bad, None));
+        assert!(matches!(r, Err(Error::Validation(_))), "{r:?}");
     }
 }

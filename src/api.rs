@@ -49,11 +49,12 @@ use crate::core::{
     ProjectFileTree, ProjectGitLog, ProjectGitRepos, ProjectGitStatus, ProjectGitView,
     ProjectPatch, ProjectVersion, ReceiptPatch, STALE_CLAIM_MINUTES, Script, ScriptArg,
     ScriptPatch, ScriptRunEvent, ServeBoolSetting, ServeHostsSetting, ServeNumberSetting, Status,
-    Store, SystemInfo, Task, TaskNote, TaskPatch, TaskSummary, WorkflowGateStatus,
-    WorkflowNodeKind, WorkflowNodeNew, WorkflowNodePatch, WorkflowPatch, WorkflowTrigger,
-    WorkflowType, agents, attachments, audio, board, config, files, git, guard, hooks,
-    inbox_triage, kb, library, listen, live, memory_job, notify, project_memory, receipt, runner,
-    script_runs, scripts, speech, supervisor, system, validate_live_client, version, workflow,
+    Store, SystemInfo, Task, TaskNote, TaskPatch, TaskSummary, WorkflowEdgeKind,
+    WorkflowGateStatus, WorkflowNodeKind, WorkflowNodeNew, WorkflowNodePatch, WorkflowPatch,
+    WorkflowTrigger, WorkflowType, agents, attachments, audio, board, config, files, git, guard,
+    hooks, inbox_triage, kb, library, listen, live, memory_job, notify, project_memory, receipt,
+    runner, script_runs, scripts, speech, supervisor, system, validate_live_client, version,
+    workflow,
 };
 
 /// The Vite build output, embedded into the binary at compile time.
@@ -4938,6 +4939,9 @@ struct WorkflowEdgeCreate {
     from_pin: Option<String>,
     #[serde(default)]
     to_pin: Option<String>,
+    /// `exec` (default) or `data` (naru task 2534).
+    #[serde(default)]
+    kind: WorkflowEdgeKind,
 }
 
 #[derive(Deserialize)]
@@ -5265,13 +5269,14 @@ async fn create_workflow_edge(
     require_agent_access(&state, &addr, &headers)?;
     let Json(body) = body?;
     let mut store = state.store.lock().unwrap();
-    let edge = store.create_workflow_edge_pins(
+    let edge = store.create_workflow_edge_kind(
         workflow_id,
         body.from_node,
         body.to_node,
         body.branch,
         body.from_pin,
         body.to_pin,
+        body.kind,
     )?;
     Ok((StatusCode::CREATED, Json(edge)).into_response())
 }

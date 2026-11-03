@@ -15,9 +15,10 @@ use super::types::{
     LiveRole, LiveSession, LiveStatus, LiveSummary, LiveTurn, LiveWindow, Priority, Project,
     RetroFinding, RetroRun, RetroStatus, Script, ScriptArg, ScriptArgKind, ScriptRunRecord,
     ScriptRunStatus, Status, Task, TaskDigestEntry, TaskEvent, TaskNote, TaskReceipt, Workflow,
-    WorkflowBranch, WorkflowEdge, WorkflowGate, WorkflowGateStatus, WorkflowLogEntry, WorkflowNode,
-    WorkflowNodeKind, WorkflowRun, WorkflowRunStatus, WorkflowStep, WorkflowStepStatus,
-    WorkflowTrigger, WorkflowType, WorkflowView, is_valid_artifact_content_type, task_name,
+    WorkflowBranch, WorkflowEdge, WorkflowEdgeKind, WorkflowGate, WorkflowGateStatus,
+    WorkflowLogEntry, WorkflowNode, WorkflowNodeKind, WorkflowRun, WorkflowRunStatus, WorkflowStep,
+    WorkflowStepStatus, WorkflowTrigger, WorkflowType, WorkflowView,
+    is_valid_artifact_content_type, task_name,
 };
 use super::types::{
     WorkflowBuiltinAction, WorkflowBuiltinUpdate, WorkflowRevision, WorkflowSnapEdge,
@@ -1574,6 +1575,9 @@ const MIGRATIONS: &[&str] = &[
      );
      DELETE FROM workflow_builtin_copies
         WHERE builtin_id IN ('task-loop', 'task-loop-child', 'task-loop-pilot', 'task-loop-pilot-child');",
+    // Naru task 2534: an edge is `exec` (run order + text, every edge before
+    // this) or `data` (one pin's value into one pin, never activates).
+    "ALTER TABLE workflow_edges ADD COLUMN kind TEXT NOT NULL DEFAULT 'exec';",
 ];
 
 /// Selects full task rows including the derived `blocked` flag.
@@ -2880,7 +2884,8 @@ const WORKFLOW_COLUMNS: &str = "w.id, w.project_id, w.name, w.description, \
                        WHERE r.workflow_id = b.workflow_id)))";
 const WORKFLOW_NODE_COLUMNS: &str =
     "id, workflow_id, kind, title, config, x, y, created_at, updated_at";
-const WORKFLOW_EDGE_COLUMNS: &str = "id, workflow_id, from_node, to_node, branch, from_pin, to_pin";
+const WORKFLOW_EDGE_COLUMNS: &str =
+    "id, workflow_id, from_node, to_node, branch, from_pin, to_pin, kind";
 const WORKFLOW_RUN_COLUMNS: &str =
     "id, workflow_id, trigger, input, status, steps, error, started_at, finished_at";
 const WORKFLOW_LOG_COLUMNS: &str = "id, log, text, workflow_id, run_id, created_at";
@@ -2984,6 +2989,7 @@ fn same_workflow_content(a: &WorkflowSnapshot, b: &WorkflowSnapshot) -> bool {
                     e.branch.clone(),
                     e.from_pin.clone(),
                     e.to_pin.clone(),
+                    e.kind.as_str(),
                 )
             })
             .collect();
@@ -3017,6 +3023,29 @@ fn row_to_workflow_node(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowNod
     })
 }
 
+/// A `data` edge (naru task 2534) names both pins and carries no branch;
+/// an `exec` edge is unconstrained here.
+fn data_edge_shape(
+    kind: WorkflowEdgeKind,
+    branch: Option<&str>,
+    from_pin: &Option<String>,
+    to_pin: &Option<String>,
+) -> std::result::Result<(), String> {
+    if kind != WorkflowEdgeKind::Data {
+        return Ok(());
+    }
+    if let Some(b) = branch {
+        return Err(format!(
+            "a data edge carries a pin's value, never a branch; got branch {b:?}"
+        ));
+    }
+    let named = |p: &Option<String>| p.as_deref().is_some_and(|p| !p.trim().is_empty());
+    if !named(from_pin) || !named(to_pin) {
+        return Err("a data edge needs both --from-pin and --to-pin".into());
+    }
+    Ok(())
+}
+
 fn row_to_workflow_edge(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowEdge> {
     let branch: Option<String> = row.get(4)?;
     Ok(WorkflowEdge {
@@ -3027,6 +3056,12 @@ fn row_to_workflow_edge(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowEdg
         branch,
         from_pin: row.get(5)?,
         to_pin: row.get(6)?,
+        // Lenient like a trigger mode: an unknown kind reads as `exec`.
+        kind: row
+            .get::<_, String>(7)
+            .ok()
+            .and_then(|k| WorkflowEdgeKind::parse(&k))
+            .unwrap_or_default(),
     })
 }
 
@@ -5646,8 +5681,8 @@ impl Store {
             }
             for e in &src.edges {
                 s.conn.execute(
-                    "INSERT INTO workflow_edges (workflow_id, from_node, to_node, branch, from_pin, to_pin) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    "INSERT INTO workflow_edges (workflow_id, from_node, to_node, branch, from_pin, to_pin, kind) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                     (
                         new_id,
                         map[&e.from_node],
@@ -5655,6 +5690,7 @@ impl Store {
                         &e.branch,
                         &e.from_pin,
                         &e.to_pin,
+                        e.kind.as_str(),
                     ),
                 )?;
             }
@@ -5716,6 +5752,7 @@ impl Store {
                     branch: e.branch,
                     from_pin: e.from_pin,
                     to_pin: e.to_pin,
+                    kind: e.kind,
                 })
                 .collect(),
         })
@@ -5784,6 +5821,8 @@ impl Store {
                     e.from
                 )));
             }
+            data_edge_shape(e.kind, e.branch.as_deref(), &e.from_pin, &e.to_pin)
+                .map_err(|m| bad(format!("edge {} -> {}: {m}", e.from, e.to)))?;
         }
         // Kahn: a cyclic file is refused before anything is written.
         let mut indeg: HashMap<i64, usize> = refs.iter().map(|r| (*r, 0)).collect();
@@ -5860,9 +5899,17 @@ impl Store {
             }
             for e in &file.edges {
                 s.conn.execute(
-                    "INSERT INTO workflow_edges (workflow_id, from_node, to_node, branch, from_pin, to_pin) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    (new_id, map[&e.from], map[&e.to], &e.branch, &e.from_pin, &e.to_pin),
+                    "INSERT INTO workflow_edges (workflow_id, from_node, to_node, branch, from_pin, to_pin, kind) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    (
+                        new_id,
+                        map[&e.from],
+                        map[&e.to],
+                        &e.branch,
+                        &e.from_pin,
+                        &e.to_pin,
+                        e.kind.as_str(),
+                    ),
                 )?;
             }
             let actor = s.actor.clone();
@@ -6468,6 +6515,30 @@ impl Store {
         from_pin: Option<String>,
         to_pin: Option<String>,
     ) -> Result<WorkflowEdge> {
+        self.create_workflow_edge_kind(
+            workflow_id,
+            from_node,
+            to_node,
+            branch,
+            from_pin,
+            to_pin,
+            WorkflowEdgeKind::Exec,
+        )
+    }
+
+    /// [`create_workflow_edge_pins`] for either edge kind (naru task 2534).
+    /// A `data` edge must name both pins and carry no branch (`validation`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_workflow_edge_kind(
+        &mut self,
+        workflow_id: i64,
+        from_node: i64,
+        to_node: i64,
+        branch: Option<String>,
+        from_pin: Option<String>,
+        to_pin: Option<String>,
+        kind: WorkflowEdgeKind,
+    ) -> Result<WorkflowEdge> {
         self.immediate(|s| {
             s.create_workflow_edge_checked(
                 workflow_id,
@@ -6476,10 +6547,12 @@ impl Store {
                 branch,
                 from_pin,
                 to_pin,
+                kind,
             )
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn create_workflow_edge_checked(
         &mut self,
         workflow_id: i64,
@@ -6488,8 +6561,10 @@ impl Store {
         branch: Option<String>,
         from_pin: Option<String>,
         to_pin: Option<String>,
+        kind: WorkflowEdgeKind,
     ) -> Result<WorkflowEdge> {
         self.ensure_not_builtin(workflow_id)?;
+        data_edge_shape(kind, branch.as_deref(), &from_pin, &to_pin).map_err(Error::Validation)?;
         let types = self.get_workflow(workflow_id)?.types;
         let from = self.workflow_edge_end("from", workflow_id, from_node)?;
         let to = self.workflow_edge_end("to", workflow_id, to_node)?;
@@ -6602,6 +6677,14 @@ impl Store {
         );
         super::wftypes::check_edge(&from, &to, branch.as_deref(), from_pin, to_pin, &types)
             .map_err(Error::Validation)?;
+        if let (WorkflowEdgeKind::Data, Some(pin)) = (kind, to_pin)
+            && !super::wftypes::data_feeds(&to, pin)
+        {
+            return Err(Error::Validation(format!(
+                "node {to_node} never reads input pin {pin:?}: a data edge may enter only \
+                 stdin (cli/script), the first declared input pin, or a make node's field"
+            )));
+        }
         let branch_text = branch.as_deref();
         let duplicate: Option<i64> = self
             .conn
@@ -6634,9 +6717,9 @@ impl Store {
             }
         }
         self.conn.execute(
-            "INSERT INTO workflow_edges (workflow_id, from_node, to_node, branch, from_pin, to_pin) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            (workflow_id, from_node, to_node, branch_text, from_pin, to_pin),
+            "INSERT INTO workflow_edges (workflow_id, from_node, to_node, branch, from_pin, to_pin, kind) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            (workflow_id, from_node, to_node, branch_text, from_pin, to_pin, kind.as_str()),
         )?;
         let new_id = self.conn.last_insert_rowid();
         self.touch_workflow(workflow_id)?;
@@ -6716,6 +6799,7 @@ impl Store {
                 branch: e.branch,
                 from_pin: e.from_pin,
                 to_pin: e.to_pin,
+                kind: e.kind,
             })
             .collect();
         Ok(WorkflowSnapshot {
@@ -6962,9 +7046,9 @@ impl Store {
                 ));
             };
             self.conn.execute(
-                "INSERT INTO workflow_edges (workflow_id, from_node, to_node, branch, from_pin, to_pin) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                (id, from, to, &e.branch, &e.from_pin, &e.to_pin),
+                "INSERT INTO workflow_edges (workflow_id, from_node, to_node, branch, from_pin, to_pin, kind) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                (id, from, to, &e.branch, &e.from_pin, &e.to_pin, e.kind.as_str()),
             )?;
         }
         self.conn.execute(
@@ -18708,15 +18792,15 @@ mod tests {
         );
         assert_eq!(
             MIGRATIONS.len(),
-            102,
-            "a fresh db should report user_version 102"
+            103,
+            "a fresh db should report user_version 103"
         );
         let (store, _dir) = temp_store();
         let version: i64 = store
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 102);
+        assert_eq!(version, 103);
     }
 
     /// Naru task 2264: the migration that deletes the managed Task loop
@@ -18774,7 +18858,10 @@ mod tests {
         }
         store
             .conn
-            .execute_batch(&format!("PRAGMA user_version = {DROP_LOOP}"))
+            // Undo what later migrations added, so they re-run cleanly.
+            .execute_batch(&format!(
+                "ALTER TABLE workflow_edges DROP COLUMN kind; PRAGMA user_version = {DROP_LOOP}"
+            ))
             .unwrap();
         drop(store);
         let store = Store::open(&path).unwrap();

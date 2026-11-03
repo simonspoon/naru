@@ -4939,6 +4939,25 @@ workflow_enum! {
 }
 
 workflow_enum! {
+    /// What a [`WorkflowEdge`] is (naru task 2534). An `exec` edge is run
+    /// order and carries its source's text output; a `data` edge only carries
+    /// one output pin's value into one input pin and never activates its
+    /// target.
+    WorkflowEdgeKind {
+        Exec => "exec",
+        Data => "data",
+    }
+}
+
+// `workflow_enum!` owns the derives, so `#[default]` is not available.
+#[allow(clippy::derivable_impls)]
+impl Default for WorkflowEdgeKind {
+    fn default() -> Self {
+        WorkflowEdgeKind::Exec
+    }
+}
+
+workflow_enum! {
     /// What started a [`WorkflowRun`].
     WorkflowTrigger {
         Manual => "manual",
@@ -5111,6 +5130,10 @@ pub struct WorkflowEdge {
     /// input pin. A `make` node's pins are its struct's fields.
     #[serde(default)]
     pub to_pin: Option<String>,
+    /// `exec` (run order + text) or `data` (one pin's value only; both pins
+    /// required, no branch) — naru task 2534.
+    #[serde(default)]
+    pub kind: WorkflowEdgeKind,
 }
 
 /// A workflow with all its nodes and edges: `show`'s payload and `delete`'s
@@ -5180,6 +5203,9 @@ pub struct WorkflowExportEdge {
     pub from_pin: Option<String>,
     #[serde(default)]
     pub to_pin: Option<String>,
+    /// Absent (an older file or snapshot) = `exec`.
+    #[serde(default)]
+    pub kind: WorkflowEdgeKind,
 }
 
 /// Something an imported node names that this instance does not have. The
@@ -5239,6 +5265,9 @@ pub struct WorkflowSnapEdge {
     pub from_pin: Option<String>,
     #[serde(default)]
     pub to_pin: Option<String>,
+    /// Absent (an older file or snapshot) = `exec`.
+    #[serde(default)]
+    pub kind: WorkflowEdgeKind,
 }
 
 /// What a customised copy of a built-in is offered (naru task 2052): the

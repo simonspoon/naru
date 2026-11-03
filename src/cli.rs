@@ -32,10 +32,10 @@ use crate::core::{
     LiveResult, LiveRole, LiveSession, LiveStatus, LiveSummary, LiveTurn, NextResult, Priority,
     Project, ProjectPatch, ReceiptPatch, Result, Script, ScriptArg, ScriptArgKind, ScriptPatch,
     Status, Store, Task, TaskNote, TaskPatch, TaskReceipt, Workflow, WorkflowEdge,
-    WorkflowGateStatus, WorkflowNode, WorkflowNodeKind, WorkflowNodeNew, WorkflowNodePatch,
-    WorkflowPatch, WorkflowRun, WorkflowTrigger, WorkflowType, WorkflowTypeField, WorkflowView,
-    audio, board, cc, config, files, git, library, live, look, memory_job, migrate, project_memory,
-    receipt, system,
+    WorkflowEdgeKind, WorkflowGateStatus, WorkflowNode, WorkflowNodeKind, WorkflowNodeNew,
+    WorkflowNodePatch, WorkflowPatch, WorkflowRun, WorkflowTrigger, WorkflowType,
+    WorkflowTypeField, WorkflowView, audio, board, cc, config, files, git, library, live, look,
+    memory_job, migrate, project_memory, receipt, system,
 };
 
 const TOP_AFTER_HELP: &str = "\
@@ -2674,6 +2674,11 @@ EXAMPLES
         /// make node's pins are its struct's fields)
         #[arg(long, value_name = "PIN")]
         to_pin: Option<String>,
+        /// A data edge: carries --from-pin's value into --to-pin (both
+        /// required) and never makes TO run; a cli/script node has pins
+        /// stdin, stdout, stderr and exit_code
+        #[arg(long)]
+        data: bool,
         /// Accepted for uniformity; an edge has no free text to drop
         #[arg(long)]
         quiet: bool,
@@ -9599,18 +9604,24 @@ fn run_workflow_cmd(cmd: WorkflowCmd) -> Result<()> {
                 branch,
                 from_pin,
                 to_pin,
+                data,
                 quiet,
             } => {
                 let workflow = workflow.or(workflow_pos).unwrap();
                 let id = resolve_workflow(&store, &workflow)?.id;
                 print_workflow_edge(
-                    &store.create_workflow_edge_pins(
+                    &store.create_workflow_edge_kind(
                         id,
                         from.or(from_pos).unwrap(),
                         to.or(to_pos).unwrap(),
                         branch,
                         from_pin,
                         to_pin,
+                        if data {
+                            WorkflowEdgeKind::Data
+                        } else {
+                            WorkflowEdgeKind::Exec
+                        },
                     )?,
                     quiet,
                 );
@@ -10203,6 +10214,7 @@ mod tests {
             branch: Some("true".into()),
             from_pin: None,
             to_pin: None,
+            kind: WorkflowEdgeKind::Exec,
         }
     }
 
@@ -10581,7 +10593,8 @@ mod tests {
                 "to_node",
                 "branch",
                 "from_pin",
-                "to_pin"
+                "to_pin",
+                "kind"
             ]),
             "WorkflowEdge gained/lost a field: it has no unbounded free text \
              today, so --quiet == full; revisit if that changes",

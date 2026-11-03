@@ -201,6 +201,41 @@ fn declared(node: &WorkflowNode, side: Side) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
+/// The pins the server declares for a node kind whether or not its config
+/// does (naru task 2534): a `cli`/`script` node reads `stdin` and exposes
+/// `stdout`, `stderr` and `exit_code`. A node's own declared pins come
+/// first; an unnamed pin is still the first declared one (else `any`), so
+/// an exec edge carries the node's text exactly as before.
+pub fn server_pins(kind: WorkflowNodeKind, side: Side) -> &'static [(&'static str, &'static str)] {
+    match (kind, side) {
+        (WorkflowNodeKind::Cli | WorkflowNodeKind::Script, Side::In) => &[(STDIN_PIN, "string")],
+        (WorkflowNodeKind::Cli | WorkflowNodeKind::Script, Side::Out) => &[
+            ("stdout", "string"),
+            ("stderr", "string"),
+            ("exit_code", "number"),
+        ],
+        _ => &[],
+    }
+}
+
+/// A `cli`/`script` node's server-declared input pin: its `{input}`.
+pub const STDIN_PIN: &str = "stdin";
+
+/// `kind`'s server-declared input pin, when it has one.
+pub fn stdin_pin(kind: WorkflowNodeKind) -> Option<&'static str> {
+    server_pins(kind, Side::In).first().map(|p| p.0)
+}
+
+/// Whether a data edge (naru task 2534) into `node`'s pin `pin` feeds
+/// anything at run time: a cli/script node's `stdin`, any node's first
+/// declared input pin, or a `make` node's field pin. The engine reads no
+/// other input pin, so the store refuses a data edge into one.
+pub fn data_feeds(node: &WorkflowNode, pin: &str) -> bool {
+    node.kind == WorkflowNodeKind::Make
+        || stdin_pin(node.kind) == Some(pin)
+        || declared(node, Side::In).first().is_some_and(|p| p.0 == pin)
+}
+
 /// The struct a `break`/`make` node is for.
 pub fn struct_of(node: &WorkflowNode) -> &str {
     node.config
@@ -255,6 +290,12 @@ pub fn pin_type(
                     .iter()
                     .find(|(n, _)| n == p)
                     .map(|(_, t)| t.clone())
+                    .or_else(|| {
+                        server_pins(node.kind, side)
+                            .iter()
+                            .find(|(n, _)| *n == p)
+                            .map(|(_, t)| t.to_string())
+                    })
                     .ok_or_else(|| format!("node {title:?} has no {side:?} pin {p:?}")),
             }
         }

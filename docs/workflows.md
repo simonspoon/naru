@@ -17,7 +17,7 @@ Source of truth: `src/core/workflow.rs` (validation and engine),
 | --- | --- | --- |
 | `workflows` | `id`, `project_id` (nullable, `ON DELETE CASCADE`), `name`, `description`, `enabled` (default 1, naru task 1633), timestamps | `name` is unique **case-insensitively across all workflows** (so the CLI and the voice agent can run one by name) and never a plain number (`<id\|name>` tries the integer first) |
 | `workflow_nodes` | `id`, `workflow_id` (cascade), `kind`, `title` (≤ 200), `config` (JSON), `x`, `y`, timestamps | `kind` is fixed at creation; `config` is validated per kind |
-| `workflow_edges` | `id`, `workflow_id` (cascade), `from_node`, `to_node` (both cascade), `branch` | a DAG: no self-edge, no cycle |
+| `workflow_edges` | `id`, `workflow_id` (cascade), `from_node`, `to_node` (both cascade), `branch`, `from_pin`, `to_pin`, `kind` (`exec`\|`data`, default `exec`) | a DAG: no self-edge, no cycle (data edges included) |
 | `workflow_runs` | `id`, `workflow_id` (cascade), `trigger`, `input`, `status`, `steps` (JSON), `error`, `started_at`, `finished_at`, plus a store-only `owner_pid` | the newest **50 finished** runs per workflow are kept (pruned on insert; a `running` row is never pruned — it is a live claim) |
 | `workflow_log` | `id`, `log`, `text`, `workflow_id` and `run_id` (both `ON DELETE SET NULL`), `created_at` | append-only; written by an `output` node with `target: log` |
 
@@ -473,7 +473,7 @@ Import (`Store::import_workflow`, one `BEGIN IMMEDIATE` transaction, an
    incoming edge active), and an `always` node ignores its edges, so either
    target handles the failure without anything running from it.
 4. A node with at least one incoming edge runs iff **at least one incoming
-   edge is active**; its **input** is the outputs of its active upstream nodes
+   exec edge is active** (a data edge never activates; see "Exec and data"); its **input** is the outputs of its active upstream nodes
    joined by `"\n"` in **edge-id order**. A node whose incoming edges are all
    inactive is `skipped`. A node with no incoming edges that is not the trigger
    is unreachable, so it is `skipped` too.
@@ -637,6 +637,52 @@ typed fields. Names are unique case-insensitively, may not be `string`,
   create the node beside it and wire it. The pure rules are in
   `frontend/src/workflowTypes.ts`, the server's in `core::wftypes`.
 
+## Exec and data (naru task 2534)
+
+An edge has a `kind`: `exec` (the default, and every edge saved before this
+existed) or `data`. An **exec** edge is run order and carries its source's
+text output, exactly as "Engine semantics" describes. A **data** edge carries
+one output pin's value into one input pin and nothing else:
+
+- It **requires** `from_pin` and `to_pin` and **never carries a branch**
+  (`validation`). Its two pin types are checked like any wire (`core::wftypes`).
+- It **never activates** its target: a node runs only when an incoming exec
+  edge is active (or it is the trigger), so a node reached by data edges alone
+  is `skipped`. A `join` counts only its exec edges.
+- It still counts for **cycle detection** and the **topological order**, so its
+  source always runs first.
+- **Input resolution.** A data edge into a node's input pin — `stdin` on a
+  `cli`/`script` node, otherwise its first declared input pin — replaces the
+  node's `{input}` with the source pin's value; into a `make` node's field pin
+  it sets that field (over an exec edge's). Everything else is the joined
+  exec-edge text as before. The first data edge (by id) per pin wins. A
+  data edge into any other input pin is refused (`validation`): the engine
+  reads no other pin. An import does not re-check pins (as for exec edges).
+- **A source that did not run `ok`** — skipped or failed, even with its
+  failure exit wired — feeds no value: the reading node is `skipped`, never
+  handed an empty string.
+- **Server pins on `cli` and `script`.** Whatever their config declares, both
+  kinds have input pin `stdin` (`string`) and output pins `stdout` (`string`),
+  `stderr` (`string`) and `exit_code` (`number`; always `0` on an `ok` node,
+  since a non-zero exit fails it). The runner keeps stdout and stderr apart
+  besides the interleaved `log`; the node's text output (what exec edges
+  carry) is still its stdout. Naming none of these pins changes nothing: an
+  unnamed pin is the node's first declared pin, else `any`, as before. An
+  exec edge naming one of them carries that pin too.
+- **CLI:** `naru workflow edge create <WF> <FROM> <TO> --data --from-pin P
+  --to-pin Q`. **API:** the edge-create body takes `kind: "data"`
+  (default `"exec"`). Export, import, duplicate and revisions carry `kind`; an
+  export file (or stored revision) without it reads as `exec`, and a data edge
+  in a file without both pins or with a branch is `validation`. Revision text
+  lines mark a data edge with ` data` after its branch.
+
+Example — feed A's stderr to B's stdin while B still runs after A:
+
+```bash
+naru workflow edge create Flow 2 3                  # exec: A then B
+naru workflow edge create Flow 2 3 --data --from-pin stderr --to-pin stdin
+```
+
 ## CLI (`naru workflow`)
 
 JSON only, positional-or-flag create shapes, `<id|name>` everywhere a workflow
@@ -662,7 +708,7 @@ is named.
 | `workflow node create <WORKFLOW> <KIND> <TITLE> [--config JSON] [--x] [--y]` | the `WorkflowNode`; omitted coordinates place it in a row beside the others |
 | `workflow node update <id> [--title] [--config JSON] [--x] [--y]` | the node; `--config` **replaces** the whole config |
 | `workflow node delete <id>` | `{node, edges}` |
-| `workflow edge create <WORKFLOW> <FROM> <TO> [--branch true\|false\|<option>\|fallback\|failure]` | the `WorkflowEdge` |
+| `workflow edge create <WORKFLOW> <FROM> <TO> [--branch true\|false\|<option>\|fallback\|failure] [--from-pin P] [--to-pin Q] [--data]` | the `WorkflowEdge` (`--data` needs both pins; see "Exec and data") |
 | `workflow edge delete <id>` | the destroyed edge |
 
 **Editing nodes: cheat-sheet** (naru task 2067; checked against the CLI).
@@ -713,7 +759,7 @@ applies as everywhere.
 | `POST /api/workflows/import` `{document, project_id?}` (201) | `document` is the export object (or its text as a string); answers the import result; unreadable file 422 |
 | `POST /api/workflows/{id}/nodes` `{kind, title, config?, x?, y?}` (201) | add a node |
 | `PATCH /api/workflow-nodes/{id}` `{title?, config?, x?, y?}` / `DELETE` | update / echo `{node, edges}` |
-| `POST /api/workflows/{id}/edges` `{from_node, to_node, branch?}` (201) / `DELETE /api/workflow-edges/{id}` | add / delete |
+| `POST /api/workflows/{id}/edges` `{from_node, to_node, branch?, from_pin?, to_pin?, kind?}` (201) / `DELETE /api/workflow-edges/{id}` | add / delete |
 | `POST /api/workflows/{id}/run` `{input?}` | run **synchronously** (on `spawn_blocking`) and answer the finished run |
 | `POST /api/workflows/events` `{event, speaker, text?}` | an ambient-engine event: validated synchronously (422), then the matching workflows run in the background in id order; **202** `{"workflow_ids":[…]}` at once |
 | `GET /api/workflows/{id}/runs` / `GET /api/workflow-runs/{id}` | runs newest first / one run, steps included |

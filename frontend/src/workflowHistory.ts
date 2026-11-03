@@ -51,6 +51,7 @@ export function snapshotLines(snap: WorkflowSnapshot): string[] {
   const edges = snap.edges.map((e) => {
     let l = `edge "${title(e.from_node)}" -> "${title(e.to_node)}"`
     if (e.branch !== null) l += ` [${e.branch}]`
+    if (e.kind === 'data') l += ' data'
     if (e.from_pin !== null || e.to_pin !== null) l += ` (${e.from_pin ?? ''} -> ${e.to_pin ?? ''})`
     return l
   })

@@ -980,6 +980,7 @@ mod tests {
             branch: branch.map(String::from),
             from_pin: None,
             to_pin: None,
+            kind: Default::default(),
         }
     }
 

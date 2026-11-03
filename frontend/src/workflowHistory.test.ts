@@ -18,7 +18,7 @@ function snap(titles: string[], ids = titles.map((_, i) => i + 1)): WorkflowSnap
       y: 0,
     })),
     edges: titles.length > 1
-      ? [{ from_node: ids[0], to_node: ids[1], branch: null, from_pin: null, to_pin: null }]
+      ? [{ from_node: ids[0], to_node: ids[1], branch: null, from_pin: null, to_pin: null, kind: 'exec' }]
       : [],
   }
 }
