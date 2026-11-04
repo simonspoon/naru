@@ -126,13 +126,34 @@ The script only pipes Claude Code's payload into `naru kb hook`, which:
   every word of the question: asked with whole task texts, generic words
   (`naru`, `audio`, `test`) picked the notes and 98 of 100 lookups came back
   empty (naru task 2409);
-- runs the ordinary `kb ask` (prefilter, one haiku call through the `kb`
-  template); the model call gets what is left of a **6 s** budget and is killed
-  at it. The steps before it (opening the db, reading the notes) are not under
+- runs the **lookup** (`kb::lookup_with`, naru task 2553), not the ordinary
+  `kb ask`: the strict ask prompt ("answer only what was asked") returned
+  empty for task titles, so 0 of 246 lookups injected anything. The lookup
+  differs from `kb ask` in three ways, and `naru kb ask` itself is unchanged:
+  - an **IDF-weighted prefilter**: each keyword scores
+    `ln((N+1)/(df+1)) x (3 x min(title/tags/path hits, 2) + min(body hits, 3))`,
+    `df` being how many of the `N` notes hold it as a (crudely stemmed) word,
+    hits counted as substrings like `kb ask`'s, top 8 kept — so words in
+    most notes (`agent`, `naru`, `panel`) stop picking the notes. A word in
+    every note scores 0, so a one- or two-note kb rarely injects anything;
+  - a **task-framed prompt** (`LOOKUP_PROMPT`, no index): the facts from the
+    notes that bear on starting this task, at most ~40 words, a note about
+    the same component, tool or problem counting;
+  - a **relevance gate**: the answer carries `fit` (`strong|weak`, schema
+    `LOOKUP_SCHEMA`), `strong` only when a note is about the very component,
+    feature, file or tool the task changes or names a pitfall it will hit.
+    A `weak` fit is answered empty. On the 90-title benchmark the gate cut
+    the ungated lookup's 58 injections to 46 and its 14 judged false
+    positives to about 6;
+
+  one haiku call through the `kb` template, handed what is left of a **15 s**
+  budget (a typical lookup takes 7-8 s; 6 s before task 2553) and killed at
+  it. The steps before it (opening the db, reading the notes) are not under
   the cap — about 0.25 s on a 1,000-note kb, though a locked db can add up to
   its 5 s busy timeout;
 - when the answer cites real notes, prints the hook's `additionalContext`: the
-  answer cut to 150 words, the note paths and titles, and how to read one —
+  answer cut to 150 words, the cited note paths and titles (however short
+  the answer), and how to read one —
   framed as data from earlier sessions, not instructions. No answer, no
   keyword hit, an error or the timeout inject nothing; it always exits 0, so a
   prompt is never blocked;
@@ -151,6 +172,22 @@ are skipped); for a session whose `cwd` is under Naru's workspace
 for a **`naru-live`** driver, whose one prompt is the `Drive naru live session
 …` boilerplate (its real turns arrive through `naru live listen`, never as
 prompts, so a lookup there would only ever be noise).
+
+### Replaying the automatic lookup
+
+`scripts/kb-lookup-replay.sh [label]` copies the real kb's notes into a
+throwaway kb (`NARU_KB_DIR`, plus a throwaway `NARU_DB`; the real kb is only
+read), replays the last `REPLAY_N` (default 90) distinct `lookups.jsonl`
+questions through the real `naru kb hook` (real haiku), then a strict blind
+judge (sonnet, one call per injection) scores each injection 0-3 and flags
+misleading ones. It prints `{questions, injected, injected_pct, failed,
+failed_pct, latency_ms_p50/p95/max, judged, misleading, relevant_all_pct,
+sample, relevant_sample_pct}` (`relevant` = score 2-3 and not misleading;
+the sample is a seeded 30) and writes every lookup and verdict to
+`<EVAL_OUT>/<label>.json`. Env: `NARU_BIN`, `KB_SRC`, `REPLAY_N`,
+`REPLAY_JOBS` (default 6), `EVAL_OUT`. Task 2553's targets: injected at least
+30 %, at least 70 % of the sample relevant, fewer misleading than the ungated
+14 of 90, p95 under the 15 s cap, under 3 % failed.
 
 ### `kb usage`
 

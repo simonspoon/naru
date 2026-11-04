@@ -3369,7 +3369,7 @@ EXAMPLES
     /// `<kb>/lookups.jsonl` and, when notes answer, prints the hook's
     /// `additionalContext` JSON. Skipped when `NARU_KB_SKIP` is set (Naru's own
     /// model calls and workflow nodes), in Naru's workspace and for a
-    /// `naru-live` driver. Capped at 6 s; always exits 0, printing nothing on
+    /// `naru-live` driver. Capped at 15 s; always exits 0, printing nothing on
     /// any failure.
     Hook,
     /// Report how useful the automatic lookups were
@@ -7905,7 +7905,7 @@ fn run_kb_hook(root: &std::path::Path) {
         .unwrap_or_default();
     let dir = workspace.to_string_lossy().into_owned();
     let out = kb_lookup::lookup(&req, store.as_ref(), &mut |q, left| {
-        kb::ask_with(root, q, &mut |prompt, schema| {
+        kb::lookup_with(root, q, &mut |prompt, schema| {
             crate::core::llm::complete_structured(
                 config::KB,
                 None,

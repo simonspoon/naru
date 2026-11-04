@@ -349,8 +349,8 @@ hook() { # hook <stdin> -> HOUT, HCODE
 }
 lookups() { if [ -f "$LOOKUPS" ]; then wc -l < "$LOOKUPS" | tr -d ' '; else echo 0; fi; }
 
-# (a) a matching note is injected, and logged
-stage ask '{"answer":"The cat is named Miso.","sources":["topics/pets/cat.md"]}'
+# (a) a matching note with a strong fit is injected, and logged
+stage ask '{"answer":"The cat is named Miso.","sources":["topics/pets/cat.md"],"fit":"strong"}'
 hook "$(payload s-match 'what is the cat named')"
 jq -e '.hookSpecificOutput.hookEventName == "UserPromptSubmit"
   and (.hookSpecificOutput.additionalContext | contains("The cat is named Miso.") and contains("topics/pets/cat.md"))' \
@@ -360,20 +360,25 @@ tail -1 "$LOOKUPS" | jq -e '.session_id == "s-match" and .outcome == "injected" 
   and .sources[0].path == "topics/pets/cat.md" and .question == "what is the cat named" and (.latency_ms | type) == "number"' \
   >/dev/null || fail "log row: $(tail -1 "$LOOKUPS")"
 [ "$(cat "$STUB_DIR/skip-ask")" = "1" ] || fail "the kb's own call must carry NARU_KB_SKIP (no recursion)"
+grep -q '"fit"' "$STUB_DIR/schema-ask" || fail "the hook must ask with the lookup schema (fit)"
 hook "$(payload s-match 'what is the cat named again')"
 [ -z "$HOUT" ] && [ "$(lookups)" = "1" ] || fail "a second prompt in the same session is not looked up: $HOUT"
 ok "hook (a): a match injects additionalContext with the answer and note path, logs one row; the kb call carries NARU_KB_SKIP; only the first prompt"
 
-# (b) no match: nothing injected
-stage ask '{"answer":"","sources":[]}'
+# (b) no match, or only a weak fit (the relevance gate): nothing injected
+stage ask '{"answer":"The cat is named Miso.","sources":["topics/pets/cat.md"],"fit":"weak"}'
+hook "$(payload s-weak 'what is the cat named')"
+[ -z "$HOUT" ] || fail "a weak fit must inject nothing: $HOUT"
+tail -1 "$LOOKUPS" | jq -e '.outcome == "empty" and .injected == false' >/dev/null || fail "weak row: $(tail -1 "$LOOKUPS")"
+stage ask '{"answer":"","sources":[],"fit":"weak"}'
 hook "$(payload s-empty 'what is the cat named')"
 [ -z "$HOUT" ] || fail "an empty answer must inject nothing: $HOUT"
 tail -1 "$LOOKUPS" | jq -e '.outcome == "empty" and .injected == false' >/dev/null || fail "empty row: $(tail -1 "$LOOKUPS")"
 hook "$(payload s-nohit 'tax return deadline')"
 [ -z "$HOUT" ] || fail "no keyword hit must inject nothing: $HOUT"
-ok "hook (b): no answer / no keyword hit inject nothing, logged as empty"
+ok "hook (b): a weak fit / no answer / no keyword hit inject nothing, logged as empty"
 
-# (c) fail open: a failing call, a hung call (6 s cap), no naru at all
+# (c) fail open: a failing call, a hung call (15 s cap), no naru at all
 touch "$STUB_DIR/fail"
 hook "$(payload s-fail 'what is the cat named')"
 [ -z "$HOUT" ] || fail "a failed call must inject nothing: $HOUT"
@@ -385,7 +390,7 @@ hook "$(payload s-slow 'what is the cat named')"
 T1=$(date +%s)
 rm -f "$STUB_DIR/slow"
 [ -z "$HOUT" ] || fail "a hung call must inject nothing: $HOUT"
-[ $((T1 - T0)) -le 9 ] || fail "a hung call must be cut off near 6 s, took $((T1 - T0)) s"
+[ $((T1 - T0)) -le 18 ] || fail "a hung call must be cut off near 15 s, took $((T1 - T0)) s"
 tail -1 "$LOOKUPS" | jq -e '.outcome == "failed" and .session_id == "s-slow"' >/dev/null || fail "slow row: $(tail -1 "$LOOKUPS")"
 set +e
 HOUT=$(payload s-nonaru 'what is the cat named' | PATH=/usr/bin:/bin "$HOOK")
@@ -414,8 +419,8 @@ hook "$(payload s-live 'Drive naru live session 3 (lease 1).')"
 ok "hook (d): NARU_KB_SKIP, the workspace and a naru-live driver are skipped and not logged"
 
 run 0 "$MESA" kb usage
-[ "$(jqs .lookups)" = "$(lookups)" ] && [ "$(jqs .empty)" = "2" ] && [ "$(jqs .failed)" = "2" ] &&
+[ "$(jqs .lookups)" = "$(lookups)" ] && [ "$(jqs .empty)" = "3" ] && [ "$(jqs .failed)" = "2" ] &&
   [ "$(jqs .unchecked)" = "1" ] && [ "$(jqs '.weeks | length')" = "1" ] || fail "kb usage: $STDOUT"
-ok "kb usage: $(jqs .lookups) lookups counted (1 injected, 2 empty, 2 failed) with a weekly row"
+ok "kb usage: $(jqs .lookups) lookups counted (1 injected, 3 empty, 2 failed) with a weekly row"
 
 echo "kb-check: $CHECKS checks passed"

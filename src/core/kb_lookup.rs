@@ -1,7 +1,8 @@
 //! The knowledge base's automatic lookup (naru task 2274, `docs/kb.md`
 //! "Automatic lookup"): a Claude Code `UserPromptSubmit` hook that, on the
-//! **first** prompt of a session, asks the kb about that prompt and adds a
-//! short answer plus the note paths to the session's context.
+//! **first** prompt of a session, asks the kb what bears on that prompt
+//! (`kb::lookup_with`, task-framed and relevance-gated) and adds a short answer
+//! plus the note paths to the session's context.
 //!
 //! The hook script ([`KB_LOOKUP_HOOK`], a library built-in) only hands its
 //! stdin to `naru kb hook`; everything else is here: which prompts are looked
@@ -34,8 +35,9 @@ pub const KB_LOOKUP_HOOK_NAME: &str = "kb-lookup.sh";
 /// workflow among them).
 pub const SKIP_ENV: &str = "NARU_KB_SKIP";
 
-/// The whole lookup's budget, the model call included.
-pub const TIMEOUT: Duration = Duration::from_secs(6);
+/// The whole lookup's budget, the model call included: a hard cap, about twice
+/// a typical lookup's 7-8 s (naru task 2553; 6 s before it).
+pub const TIMEOUT: Duration = Duration::from_secs(15);
 
 /// The most words of the answer the injected context carries.
 const CONTEXT_WORDS: usize = 150;
@@ -519,6 +521,7 @@ mod tests {
         let ctx = out.context.unwrap();
         assert!(ctx.contains("It rotates on the first of the month."));
         assert!(ctx.contains("topics/deploy/key-rotation.md"));
+        assert!(ctx.contains("Deploy key rotation schedule"));
         assert_eq!(out.row["outcome"], "injected");
         assert_eq!(out.row["injected"], true);
         assert_eq!(
