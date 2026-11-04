@@ -13414,39 +13414,55 @@ body.dock-resizing .dock-body {
 .agent-watch {
   display: flex;
   flex-direction: column;
-  gap: 0.75rem;
-  padding: 1rem;
+  gap: 0.5rem;
+  padding: 0.5rem;
+  height: 100%;
   min-height: 0;
+  /* Only when the host is shorter than the canvas floor plus the stats. */
   overflow-y: auto;
 }
 
-.agent-watch-head {
-  display: flex;
-  align-items: baseline;
-  gap: 1rem;
-  flex-wrap: wrap;
-}
-
-.agent-watch-head h1 {
-  margin: 0;
-}
-
-.agent-watch-count {
-  font-size: 1.3rem;
-  color: var(--muted);
-}
-
-.agent-watch-body {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-start;
-  gap: 1.5rem;
+/* The map (naru task 2564): fills what the stats strip leaves; the SVG is
+   the pan/zoom surface, the queue and zoom buttons float over its corners. */
+.agent-watch-canvas {
+  position: relative;
+  flex: 1 0 14rem;
+  overflow: hidden;
 }
 
 .orbit {
-  flex: 1 1 30rem;
-  min-width: 18rem;
-  max-height: calc(100vh - 8rem);
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+  cursor: grab;
+  user-select: none;
+}
+
+.orbit:active {
+  cursor: grabbing;
+}
+
+.orbit-zoom {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: flex;
+  gap: 0.25rem;
+}
+
+.orbit-zoom button {
+  min-width: 2rem;
+  padding: 0.2rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: linear-gradient(var(--surface), var(--surface)), var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.9rem;
+  cursor: pointer;
 }
 
 .orbit text {
@@ -13622,59 +13638,42 @@ body.dock-resizing .dock-body {
   color: var(--violet);
 }
 
-/* Stats bottom-left, queue bottom-right (naru task 2563). Sticky in flow, so
-   they stay in view while the container scrolls yet cover nothing once it is
-   scrolled to the end; the row itself lets the pointer through. */
-.agent-watch-pins {
-  position: sticky;
-  bottom: 0;
-  margin-top: auto;
+/* Queue over the canvas's top-right corner, stats in their own strip below
+   the canvas (naru task 2564), so the stats never cover a node. */
+.orbit-queue {
+  position: absolute;
+  top: 0;
+  right: 0;
   display: flex;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  gap: 0.75rem;
-  pointer-events: none;
-}
-
-/* The full page: `main` is the scroller, so the sticky pins must see it. */
-main > .agent-watch {
-  overflow: visible;
-  min-height: 100%;
-}
-
-.agent-watch-pins > * {
-  pointer-events: auto;
+  flex-direction: column;
+  max-height: 100%;
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.18);
+}
+
+.orbit-stats {
+  flex: none;
+  align-self: flex-start;
 }
 
 .orbit-queue,
 .orbit-stats {
   padding: 0.7rem 0.8rem;
   border-radius: var(--r-md);
-  /* --surface is translucent; laid over the page colour so the orbit
-     scrolling underneath the pins does not show through. */
+  /* --surface is translucent; laid over the page colour so the orbit under
+     the floating queue does not show through. */
   background: linear-gradient(var(--surface), var(--surface)), var(--bg);
 }
 
 .orbit-stats:not(.collapsed) {
-  flex: 1 1 12rem;
-  min-width: 0;
-  max-width: 22rem;
-}
-
-.orbit-queue {
-  margin-left: auto;
-  max-width: 100%;
+  width: min(22rem, 100%);
 }
 
 .orbit-queue:not(.collapsed) {
-  flex: 1 1 12rem;
-  min-width: 0;
-  max-width: 22rem;
+  width: min(18rem, 100%);
 }
 
 .orbit-queue-list {
-  max-height: min(40vh, 14rem);
+  min-height: 0;
   overflow-y: auto;
 }
 

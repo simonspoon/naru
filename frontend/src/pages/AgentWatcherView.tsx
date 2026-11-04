@@ -1,4 +1,4 @@
-import { useCallback, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { getAgentOrbit, getCcSessionChat, getCcSubagentChat, getSystemStats } from '../api'
 import {
   C,
@@ -10,12 +10,14 @@ import {
   RING,
   SUB_PX,
   TITLE_PX,
-  VIEW,
   chatTurns,
+  fitView,
   groupQueue,
   jobHref,
   layoutOrbit,
   loadCollapsed,
+  orbitBoxes,
+  panView,
   pct,
   placeHover,
   queuedHref,
@@ -23,8 +25,14 @@ import {
   sparkPoints,
   squash,
   subagentRef,
+  boostY,
+  safeBoost,
+  textBoost,
   voiceMotion,
+  zoomView,
   type HoverTurn,
+  type Pt,
+  type ViewBox,
   type WatchPanel,
 } from '../agentOrbit'
 import type { CcSessionChat } from '../types/CcSessionChat'
@@ -63,13 +71,34 @@ export function AgentWatcherView({ active = true }: { active?: boolean } = {}) {
   const [hover, setHover] = useState<Hover | null>(null)
   const [statsCollapsed, setStatsCollapsed] = usePanel('stats')
   const [queueCollapsed, setQueueCollapsed] = usePanel('queue')
+  // null = fitted to the content on every update; the first pan or zoom
+  // makes it the person's, held across live updates until Fit (naru task 2564).
+  const [view, setView] = useState<ViewBox | null>(null)
+  const [svg, setSvg] = useState<SVGSVGElement | null>(null)
+  const shown = useRef<ViewBox | null>(null)
+  const clearHover = useCallback(() => setHover(null), [])
+  const { dragged, pressed } = usePanZoom(svg, shown, setView, clearHover)
+  const px = useSize(svg)
+  const layout = data ? layoutOrbit(data.jobs, data.naru.agents, data.now) : null
+  // Labels grow when the whole map is squeezed into a narrow tab (meet
+  // scaling: the tighter axis wins), never into each other (safeBoost).
+  const boostFor = (v: ViewBox) => (layout ? safeBoost(layout, textBoost(px ? Math.min(px.w / v.w, px.h / v.h) : 1)) : 1)
+  // The auto-fit takes the grown labels in, so none is cut at the edge.
+  const fit0 = layout ? fitView(orbitBoxes(layout)) : null
+  const vb = view ?? (layout && fit0 ? fitView(orbitBoxes(layout, boostFor(fit0))) : null)
+  const b = vb ? boostFor(vb) : 1
+  useLayoutEffect(() => {
+    shown.current = vb
+  })
 
   if (error) return <div className="agent-watch"><p className="error">{error}</p></div>
   if (!data) return <div className="agent-watch"><p className="muted">Loading…</p></div>
 
-  const layout = layoutOrbit(data.jobs, data.naru.agents, data.now)
+  if (!layout || !vb) return null
   const point = (h: Omit<Hover, 'anchor'>) => ({
-    onMouseEnter: (e: React.MouseEvent<SVGElement>) => setHover({ ...h, anchor: e.currentTarget }),
+    onMouseEnter: (e: React.MouseEvent<SVGElement>) => {
+      if (!pressed.current) setHover({ ...h, anchor: e.currentTarget })
+    },
     onMouseLeave: () => setHover(null),
   })
   const groups = groupQueue(data.queue, data.projects)
@@ -77,15 +106,24 @@ export function AgentWatcherView({ active = true }: { active?: boolean } = {}) {
 
   return (
     <div className="agent-watch">
-      <div className="agent-watch-head">
-        <h1>Agent watcher</h1>
-        <span className="agent-watch-count">
-          {data.jobs.length} running · {data.queue.length} queued
-        </span>
-      </div>
       {!data.agentsAvailable && <p className="muted">Agent sessions unavailable: no sub-agents shown.</p>}
-      <div className="agent-watch-body">
-        <svg className="orbit" viewBox={`0 0 ${VIEW} ${VIEW}`} role="img" aria-label="Running jobs around Naru">
+      {/* The map is a pan/zoom canvas (naru task 2564); the queue floats in its
+          top-right corner, the stats strip sits below it so it covers no node. */}
+      <div className="agent-watch-canvas">
+        <svg
+          ref={setSvg}
+          className="orbit"
+          viewBox={`${vb.x} ${vb.y} ${vb.w} ${vb.h}`}
+          role="img"
+          aria-label="Running jobs around Naru"
+          onClickCapture={(e) => {
+            // A drag that ends over a job is a pan, not a click on its link.
+            if (dragged.current) {
+              e.preventDefault()
+              e.stopPropagation()
+            }
+          }}
+        >
           <defs>
             <filter id="orbit-glow" x="-50%" y="-50%" width="200%" height="200%">
               <feGaussianBlur stdDeviation="10" />
@@ -154,7 +192,7 @@ export function AgentWatcherView({ active = true }: { active?: boolean } = {}) {
                 <circle cx={d.at.x} cy={d.at.y} r={DOT_R + 8} fill="currentColor" filter="url(#orbit-glow)" opacity={0.6} />
               )}
               <circle className="orbit-dot-disc" cx={d.at.x} cy={d.at.y} r={DOT_R} />
-              <text x={d.at.x} y={d.textY} textAnchor="middle" fontSize={DOT_PX}>
+              <text x={d.at.x} y={boostY(d.at.y, d.textY, b)} textAnchor="middle" fontSize={DOT_PX * b}>
                 {d.text}
               </text>
             </g>
@@ -169,10 +207,10 @@ export function AgentWatcherView({ active = true }: { active?: boolean } = {}) {
                     <circle cx={l.at.x} cy={l.at.y} r={NODE_R + 10} fill={l.job.color} filter="url(#orbit-glow)" opacity={0.4} />
                   )}
                   <circle className="orbit-node" cx={l.at.x} cy={l.at.y} r={NODE_R} style={{ stroke: l.job.color }} />
-                  <text className="orbit-title" x={l.at.x} y={l.titleY} textAnchor="middle" fontSize={TITLE_PX}>
+                  <text className="orbit-title" x={l.at.x} y={boostY(l.at.y, l.titleY, b)} textAnchor="middle" fontSize={TITLE_PX * b}>
                     {l.title}
                   </text>
-                  <text className="orbit-sub" x={l.at.x} y={l.subY} textAnchor="middle" fontSize={SUB_PX}>
+                  <text className="orbit-sub" x={l.at.x} y={boostY(l.at.y, l.subY, b)} textAnchor="middle" fontSize={SUB_PX * b}>
                     {l.sub}
                   </text>
                 </g>
@@ -187,7 +225,7 @@ export function AgentWatcherView({ active = true }: { active?: boolean } = {}) {
                       <circle cx={d.at.x} cy={d.at.y} r={DOT_R + 8} fill="currentColor" filter="url(#orbit-glow)" opacity={0.6} />
                     )}
                     <circle className="orbit-dot-disc" cx={d.at.x} cy={d.at.y} r={DOT_R} />
-                    <text x={d.at.x} y={d.textY} textAnchor="middle" fontSize={DOT_PX}>
+                    <text x={d.at.x} y={boostY(d.at.y, d.textY, b)} textAnchor="middle" fontSize={DOT_PX * b}>
                       {d.text}
                     </text>
                   </g>
@@ -196,19 +234,16 @@ export function AgentWatcherView({ active = true }: { active?: boolean } = {}) {
             )
           })}
           {layout.jobs.length === 0 && (
-            <text className="orbit-sub" x={C} y={C + RING} textAnchor="middle" fontSize={SUB_PX}>
+            <text className="orbit-sub" x={C} y={C + RING} textAnchor="middle" fontSize={SUB_PX * b}>
               Nothing running
             </text>
           )}
         </svg>
-        {hover && <HoverBlock hover={hover} naru={data.naru} />}
-      </div>
-
-      {/* Pinned to the container's bottom corners (naru task 2563): in flow, so
-          at the end of a scroll they cover nothing; sticky, so they stay in
-          view while it scrolls. */}
-      <div className="agent-watch-pins">
-        {stats && <StatGraphs stats={stats} collapsed={statsCollapsed} onToggle={() => setStatsCollapsed(!statsCollapsed)} />}
+        <div className="orbit-zoom" role="group" aria-label="Zoom">
+          <button type="button" aria-label="Zoom in" title="Zoom in" onClick={() => setView(zoomView(vb, 1.25, centre(vb)))}>+</button>
+          <button type="button" aria-label="Zoom out" title="Zoom out" onClick={() => setView(zoomView(vb, 0.8, centre(vb)))}>−</button>
+          <button type="button" aria-label="Fit to content" title="Fit to content" onClick={() => setView(null)}>Fit</button>
+        </div>
         <section className={`orbit-queue${queueCollapsed ? ' collapsed' : ''}`}>
           <PanelToggle collapsed={queueCollapsed} onToggle={() => setQueueCollapsed(!queueCollapsed)}>
             <span className="orbit-panel-title">Queue ({data.queue.length})</span>
@@ -238,9 +273,122 @@ export function AgentWatcherView({ active = true }: { active?: boolean } = {}) {
             </div>
           )}
         </section>
+        {hover && <HoverBlock hover={hover} naru={data.naru} />}
       </div>
+      {stats && <StatGraphs stats={stats} collapsed={statsCollapsed} onToggle={() => setStatsCollapsed(!statsCollapsed)} />}
     </div>
   )
+}
+
+/** An element's size in CSS pixels, kept current as it resizes. */
+function useSize(el: Element | null): { w: number; h: number } | null {
+  const [size, setSize] = useState<{ w: number; h: number } | null>(null)
+  useEffect(() => {
+    if (!el) return
+    const ro = new ResizeObserver(([e]) => setSize({ w: e.contentRect.width, h: e.contentRect.height }))
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [el])
+  return size
+}
+
+const centre = (v: ViewBox): Pt => ({ x: v.x + v.w / 2, y: v.y + v.h / 2 })
+
+/**
+ * Drag to pan, wheel (or a trackpad pinch, which arrives as a ctrl-wheel) and
+ * a two-finger pinch to zoom about the pointer. Screen pixels are turned into
+ * viewBox units through the SVG's own screen matrix; `shown` is the view on
+ * screen, the start point while `view` is still the auto-fit. `dragged` says
+ * the press moved far enough to be a drag (its click is dropped), `pressed`
+ * that a press is down; `onDrag` fires as a drag begins.
+ */
+function usePanZoom(
+  svg: SVGSVGElement | null,
+  shown: React.RefObject<ViewBox | null>,
+  setView: React.Dispatch<React.SetStateAction<ViewBox | null>>,
+  onDrag: () => void,
+) {
+  const dragged = useRef(false)
+  const pressed = useRef(false)
+  useEffect(() => {
+    if (!svg) return
+    const toView = (cx: number, cy: number): Pt => {
+      const m = svg.getScreenCTM()
+      if (!m) return { x: 0, y: 0 }
+      const p = new DOMPoint(cx, cy).matrixTransform(m.inverse())
+      return { x: p.x, y: p.y }
+    }
+    const unit = () => svg.getScreenCTM()?.a || 1
+    const change = (f: (v: ViewBox) => ViewBox) =>
+      setView((v) => {
+        const from = v ?? shown.current
+        return from ? f(from) : v
+      })
+    const zoom = (factor: number, cx: number, cy: number) => {
+      const at = toView(cx, cy)
+      change((v) => zoomView(v, factor, at))
+    }
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault()
+      const px = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY
+      zoom(Math.exp(-px * (e.ctrlKey ? 0.01 : 0.002)), e.clientX, e.clientY)
+    }
+    const ptrs = new Map<number, { x: number; y: number }>()
+    let start = { x: 0, y: 0 }
+    const onDown = (e: PointerEvent) => {
+      if (e.button !== 0) return
+      if (e.pointerType === 'mouse') ptrs.clear()
+      if (ptrs.size === 0) {
+        dragged.current = false
+        start = { x: e.clientX, y: e.clientY }
+      }
+      ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY })
+      pressed.current = true
+    }
+    const onMove = (e: PointerEvent) => {
+      const last = ptrs.get(e.pointerId)
+      if (!last) return
+      // A release we never saw (a ctrl-click's context menu, say): no button held, no press.
+      if (e.pointerType === 'mouse' && e.buttons === 0) return onUp(e)
+      const now = { x: e.clientX, y: e.clientY }
+      if (!dragged.current && Math.hypot(now.x - start.x, now.y - start.y) > 4) {
+        dragged.current = true
+        onDrag()
+      }
+      if (ptrs.size === 1) {
+        if (dragged.current) {
+          const k = unit()
+          change((v) => panView(v, (now.x - last.x) / k, (now.y - last.y) / k))
+        }
+      } else if (ptrs.size === 2) {
+        const other = [...ptrs].find(([id]) => id !== e.pointerId)![1]
+        const before = Math.hypot(last.x - other.x, last.y - other.y)
+        const after = Math.hypot(now.x - other.x, now.y - other.y)
+        if (before > 0) zoom(after / before, (now.x + other.x) / 2, (now.y + other.y) / 2)
+      }
+      ptrs.set(e.pointerId, now)
+    }
+    const onUp = (e: PointerEvent) => {
+      if (!ptrs.delete(e.pointerId) || ptrs.size > 0) return
+      pressed.current = false
+      // The click a drag ends with fires right after this; later ones (a
+      // keyboard Enter on a job link) must go through.
+      setTimeout(() => (dragged.current = false))
+    }
+    svg.addEventListener('wheel', onWheel, { passive: false })
+    svg.addEventListener('pointerdown', onDown)
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+    window.addEventListener('pointercancel', onUp)
+    return () => {
+      svg.removeEventListener('wheel', onWheel)
+      svg.removeEventListener('pointerdown', onDown)
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+      window.removeEventListener('pointercancel', onUp)
+    }
+  }, [svg, shown, setView, onDrag])
+  return { dragged, pressed }
 }
 
 /** The newest few messages of whatever the pointer is on, beside it and never off screen. */

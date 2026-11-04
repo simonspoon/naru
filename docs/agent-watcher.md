@@ -1,4 +1,4 @@
-# Agent watcher (naru tasks 1909, 2541, 2551)
+# Agent watcher (naru tasks 1909, 2541, 2551, 2564)
 
 A live map of the whole machine, a dock panel (`watcher`, starts closed; reopen from the header `⋯` menu) and, on the phone tier, a full page at `#/agent-watcher` (nav
 entry "Agent watcher", right after Terminal). Since naru task 2541 the page
@@ -157,7 +157,7 @@ System sparklines come from `GET /api/system/stats` (`docs/system.md`).
 holds every position and grouping (pure, tested). Both feeds poll every 5 s
 while the panel is visible.
 
-- **Naru** at the centre of an SVG (viewBox 1000×1000) with five voice bars:
+- **Naru** at the centre of an SVG (a 1000×1000 map; the live viewBox is the canvas view, below) with five voice bars:
   still and grey when no live session (`off`), a slow pulse while live, fast
   while `speaking`. No "waiting on you" tag.
 - **Jobs** evenly spaced by angle from the top, clockwise (from seven jobs it
@@ -209,23 +209,41 @@ while the panel is visible.
   old, alternating and spread over the scale, and asserts no two painted
   boxes (estimated text widths; Naru as a disc) meet and all stay inside the
   viewBox. Nine slots and up are not covered, as nine jobs never were.
-- **Stats** (pinned bottom-left): CPU, memory and GPU sparklines
+- **Stats** (a strip below the canvas): CPU, memory and GPU sparklines
   over the stats history and a disk bar, each with its newest percent; GPU
   says "unavailable" when the host cannot report it.
-- **Queue** (pinned bottom-right, headed `Queue (n)`, the list capped at
-  `min(40vh, 14rem)` and scrolling): no numbers on items. Tasks
+- **Queue** (over the canvas's top-right corner, headed `Queue (n)`, the
+  list capped at the canvas height and scrolling): no numbers on items. Tasks
   under one heading per project in project-list order, heading tinted with the
   project colour, each item with a project-coloured left bar; a blocked task
   is dimmed. Every timed workflow under one grey "Workflows" heading, grey bar,
   dashed outline.
-- **Pinning and collapse** (naru task 2563): both panels sit in one
-  `position: sticky; bottom: 0` row after the orbit (`.agent-watch-pins`), so
-  they stay in view while the watcher scrolls — the dock panel's own
-  `.agent-watch`, or `main` on the phone page — yet cover nothing once it is
-  scrolled to the end. They share a row while each fits 12rem and wrap above
-  that. Each head is a button (`aria-expanded`) that collapses its panel: the
-  stats to one line of `CPU MEM GPU DISK` percents with no graphs, the queue
-  to a `Queue (n)` chip. The state is per browser, in `localStorage` keys
+- **Canvas** (naru task 2564): no heading and no running/queued count —
+  the dock tab or nav entry names the view. The orbit SVG fills
+  `.agent-watch-canvas`, everything the stats strip leaves, and is a pan/zoom
+  surface: the viewBox is the view (`ViewBox`; `fitView`, `zoomView`,
+  `panView` in `agentOrbit.ts`, tested). Drag pans (a drag ending on a job
+  does not follow its link); the wheel, a trackpad pinch (ctrl-wheel) and a
+  two-finger touch pinch zoom about the pointer; `+`, `−` and `Fit` buttons
+  sit in the top-left corner. Zoom is held to `VIEW_MIN`..`VIEW_MAX` (200 to
+  4000 units across). Until the person pans or zooms, every update fits the
+  view to everything painted (`orbitBoxes`: the ring plus every layout box,
+  at least `FIT_MIN` = 700 across), so new nodes come into view; the first
+  pan or zoom makes the view the person's, held across every live update,
+  and `Fit` hands it back to the auto-fit. Hover blocks do not open while a
+  press is down. Nothing is remembered across reloads.
+- **Small tabs**: when the map is drawn small (a narrow dock tab), every
+  label grows (`textBoost`: enough for the smallest, `DOT_PX`, to reach
+  `LABEL_MIN_PX` = 9 CSS px, at most `BOOST_MAX` = 1.6×), its baseline moved
+  out from its node in step (`boostY`), cut back to the largest boost at
+  which no grown label meets anything (`safeBoost`); the auto-fit takes the
+  grown labels in (`orbitBoxes(layout, b)`). Naru's own name stays its size.
+  Zooming in fades the boost.
+- **Collapse** (naru task 2563): each panel head is a button
+  (`aria-expanded`): the stats collapse to one line of `CPU MEM GPU DISK`
+  percents with no graphs, the queue to a `Queue (n)` chip. The stats strip
+  is in flow under the canvas, so neither form ever covers a node; the
+  queue floats over the canvas. The state is per browser, in `localStorage` keys
   `naru-watcher-stats-collapsed` / `naru-watcher-queue-collapsed` (`'1'` =
   collapsed, absent = expanded; `loadCollapsed`/`saveCollapsed` in
   `agentOrbit.ts`).

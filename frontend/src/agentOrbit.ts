@@ -228,20 +228,20 @@ function placeAll(jobs: OrbitJob[], naruAgents: OrbitAgent[], now: number, min: 
   return { jobs: placed, naru }
 }
 
-/** Every box a layout paints, tagged with the job it belongs to — for the overlap test. */
-export function layoutBoxes(layout: OrbitLayout): { owner: number; part: string; box: Box }[] {
+/** Every box a layout paints, tagged with the job it belongs to — for the overlap test; `b` is a label boost (`textBoost`). */
+export function layoutBoxes(layout: OrbitLayout, b = 1): { owner: number; part: string; box: Box }[] {
   const out: { owner: number; part: string; box: Box }[] = [{ owner: -1, part: 'naru', box: circleBox({ x: C, y: C }, NARU_R + 12) }]
   layout.naru.forEach((d, j) => {
     out.push({ owner: -1, part: `naru-dot${j}`, box: circleBox(d.at, DOT_R + 4) })
-    out.push({ owner: -1, part: `naru-dot${j}-text`, box: textBox(d.at.x, d.textY, d.text, DOT_PX) })
+    out.push({ owner: -1, part: `naru-dot${j}-text`, box: textBox(d.at.x, boostY(d.at.y, d.textY, b), d.text, DOT_PX * b) })
   })
   layout.jobs.forEach((l, i) => {
     out.push({ owner: i, part: 'node', box: circleBox(l.at, NODE_R + 4) })
-    out.push({ owner: i, part: 'title', box: textBox(l.at.x, l.titleY, l.title, TITLE_PX) })
-    out.push({ owner: i, part: 'sub', box: textBox(l.at.x, l.subY, l.sub, SUB_PX) })
+    out.push({ owner: i, part: 'title', box: textBox(l.at.x, boostY(l.at.y, l.titleY, b), l.title, TITLE_PX * b) })
+    out.push({ owner: i, part: 'sub', box: textBox(l.at.x, boostY(l.at.y, l.subY, b), l.sub, SUB_PX * b) })
     l.dots.forEach((d, j) => {
       out.push({ owner: i, part: `dot${j}`, box: circleBox(d.at, DOT_R + 4) })
-      out.push({ owner: i, part: `dot${j}-text`, box: textBox(d.at.x, d.textY, d.text, DOT_PX) })
+      out.push({ owner: i, part: `dot${j}-text`, box: textBox(d.at.x, boostY(d.at.y, d.textY, b), d.text, DOT_PX * b) })
     })
   })
   return out
@@ -390,4 +390,84 @@ export function saveCollapsed(panel: WatchPanel, collapsed: boolean): void {
   } catch {
     // Storage unavailable — the toggle just won't persist.
   }
+}
+
+/** The watcher canvas's visible region in viewBox units (naru task 2564): what pan and zoom change. */
+export type ViewBox = { x: number; y: number; w: number; h: number }
+
+/** Zoom limits, as the narrowest and widest view (viewBox units). */
+export const VIEW_MIN = 200
+export const VIEW_MAX = 4 * VIEW
+
+/** The smallest square a fit may show, so a near-empty map is not blown up. */
+export const FIT_MIN = 700
+
+/** A view showing every box with `pad` around it, centred, at least `FIT_MIN` across. */
+export function fitView(boxes: Box[], pad = 30): ViewBox {
+  if (boxes.length === 0) return { x: 0, y: 0, w: VIEW, h: VIEW }
+  const x0 = Math.min(...boxes.map((b) => b.x0)) - pad
+  const y0 = Math.min(...boxes.map((b) => b.y0)) - pad
+  const x1 = Math.max(...boxes.map((b) => b.x1)) + pad
+  const y1 = Math.max(...boxes.map((b) => b.y1)) + pad
+  const w = Math.max(x1 - x0, FIT_MIN)
+  const h = Math.max(y1 - y0, FIT_MIN)
+  return { x: (x0 + x1 - w) / 2, y: (y0 + y1 - h) / 2, w, h }
+}
+
+/** Everything the orbit paints — the ring and every layout box, labels at boost `b` — for a fit. */
+export function orbitBoxes(layout: OrbitLayout, b = 1): Box[] {
+  return [circleBox({ x: C, y: C }, RING), ...layoutBoxes(layout, b).map((x) => x.box)]
+}
+
+/**
+ * `v` zoomed by `factor` (>1 in) about `at`, which stays put on screen; the
+ * factor is cut so the view stays within `VIEW_MIN`..`VIEW_MAX` across.
+ */
+export function zoomView(v: ViewBox, factor: number, at: Pt): ViewBox {
+  const big = Math.max(v.w, v.h)
+  const small = Math.min(v.w, v.h)
+  const f = Math.min(Math.max(factor, big / VIEW_MAX), small / VIEW_MIN)
+  const w = v.w / f
+  const h = v.h / f
+  return { x: at.x - (at.x - v.x) / f, y: at.y - (at.y - v.y) / f, w, h }
+}
+
+/** `v` dragged by `dx`, `dy` viewBox units (the content moves with the pointer). */
+export function panView(v: ViewBox, dx: number, dy: number): ViewBox {
+  return { ...v, x: v.x - dx, y: v.y - dy }
+}
+
+/** The smallest a label may be drawn on screen, in CSS pixels, and the most text may grow to get there. */
+export const LABEL_MIN_PX = 9
+export const BOOST_MAX = 1.6
+
+/**
+ * How much to enlarge every label when the map is drawn at `pxPerUnit`
+ * screen pixels per viewBox unit (naru task 2564): enough that the smallest
+ * label (`DOT_PX`) reaches `LABEL_MIN_PX`, never below 1 or above `BOOST_MAX`.
+ * Zooming in raises `pxPerUnit`, so the boost fades as the person zooms.
+ */
+export function textBoost(pxPerUnit: number): number {
+  if (!(pxPerUnit > 0)) return 1
+  return Math.min(Math.max(LABEL_MIN_PX / (DOT_PX * pxPerUnit), 1), BOOST_MAX)
+}
+
+/** A label baseline `y` moved away from its anchor `from` in step with a boost, so stacked lines keep apart. */
+export const boostY = (from: number, y: number, b: number) => from + (y - from) * b
+
+/**
+ * The largest boost up to `want`, in 0.05 steps, at which no enlarged label
+ * meets anything else painted — so growing labels for a narrow tab never
+ * stacks them on each other (only labels change size, so only they are checked).
+ */
+export function safeBoost(layout: OrbitLayout, want: number): number {
+  for (let b = want; b > 1; b -= 0.05) {
+    const boxes = layoutBoxes(layout, b)
+    const text = (part: string) => part === 'title' || part === 'sub' || part.endsWith('-text')
+    const clash = boxes.some((p, i) =>
+      boxes.slice(i + 1).some((q) => (text(p.part) || text(q.part)) && (p.part === 'naru' ? discOverlaps({ x: C, y: C }, NARU_CLEAR, q.box) : overlaps(p.box, q.box))),
+    )
+    if (!clash) return b
+  }
+  return 1
 }

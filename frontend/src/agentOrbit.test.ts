@@ -3,8 +3,21 @@ import {
   AGE_FULL_S,
   RING,
   RING_MIN,
+  FIT_MIN,
   VIEW,
+  VIEW_MAX,
+  VIEW_MIN,
+  BOOST_MAX,
+  DOT_PX,
+  LABEL_MIN_PX,
   ageRadius,
+  boostY,
+  fitView,
+  safeBoost,
+  textBoost,
+  orbitBoxes,
+  panView,
+  zoomView,
   chatTurns,
   NARU_CLEAR,
   clip,
@@ -272,5 +285,85 @@ describe('watcher panel collapse state', () => {
     saveCollapsed('stats', false)
     expect(loadCollapsed('stats')).toBe(false)
     expect(localStorage.getItem(panelKey('stats'))).toBeNull()
+  })
+})
+
+describe('canvas view (pan / zoom / fit)', () => {
+  it('fits every painted box, centred, never smaller than FIT_MIN', () => {
+    const layout = layoutOrbit([job(1), job(2), job(3)], [], 0)
+    const boxes = orbitBoxes(layout)
+    const v = fitView(boxes)
+    for (const b of boxes) {
+      expect(b.x0).toBeGreaterThanOrEqual(v.x)
+      expect(b.y0).toBeGreaterThanOrEqual(v.y)
+      expect(b.x1).toBeLessThanOrEqual(v.x + v.w)
+      expect(b.y1).toBeLessThanOrEqual(v.y + v.h)
+    }
+    const tiny = fitView([{ x0: 490, y0: 490, x1: 510, y1: 510 }])
+    expect(tiny).toEqual({ x: 500 - FIT_MIN / 2, y: 500 - FIT_MIN / 2, w: FIT_MIN, h: FIT_MIN })
+    expect(fitView([])).toEqual({ x: 0, y: 0, w: VIEW, h: VIEW })
+  })
+
+  it('zooms about the given point, which stays put', () => {
+    const v = { x: 0, y: 0, w: 1000, h: 1000 }
+    const at = { x: 250, y: 750 }
+    const z = zoomView(v, 2, at)
+    expect(z.w).toBe(500)
+    expect(z.h).toBe(500)
+    // the point sits at the same fraction of the view before and after
+    expect((at.x - z.x) / z.w).toBeCloseTo((at.x - v.x) / v.w)
+    expect((at.y - z.y) / z.h).toBeCloseTo((at.y - v.y) / v.h)
+  })
+
+  it('clamps zoom to VIEW_MIN..VIEW_MAX', () => {
+    const v = { x: 0, y: 0, w: 1000, h: 800 }
+    expect(Math.min(...Object.values(zoomView(v, 1000, { x: 0, y: 0 })).slice(2))).toBeCloseTo(VIEW_MIN)
+    const out = zoomView(v, 0.0001, { x: 0, y: 0 })
+    expect(Math.max(out.w, out.h)).toBeCloseTo(VIEW_MAX)
+  })
+
+  it('pans with the pointer', () => {
+    expect(panView({ x: 10, y: 20, w: 100, h: 100 }, 5, -5)).toEqual({ x: 5, y: 25, w: 100, h: 100 })
+  })
+})
+
+describe('textBoost', () => {
+  it('grows labels only when drawn small, capped', () => {
+    expect(textBoost(1)).toBe(1)
+    expect(DOT_PX * 0.3 * textBoost(0.3)).toBeCloseTo(LABEL_MIN_PX)
+    expect(textBoost(0.05)).toBe(BOOST_MAX)
+    expect(textBoost(0)).toBe(1)
+    expect(boostY(100, 130, 1.5)).toBe(145)
+  })
+})
+
+describe('safeBoost', () => {
+  it('never grows labels into each other', () => {
+    let boosted = 0
+    for (const n of [1, 3, 5, 8]) {
+      const layout = layoutOrbit(Array.from({ length: n }, (_, i) => job(i + 1)), [agent('naru-a', 'working', 1)], NOW)
+      const b = safeBoost(layout, BOOST_MAX)
+      expect(b).toBeGreaterThanOrEqual(1)
+      expect(b).toBeLessThanOrEqual(BOOST_MAX)
+      if (b === 1) continue // unboosted: the layout's own overlap tests cover it
+      boosted++
+      const boxes = layoutBoxes(layout, b)
+      const text = (part: string) => part === 'title' || part === 'sub' || part.endsWith('-text')
+      for (const [i, p] of boxes.entries())
+        for (const q of boxes.slice(i + 1))
+          if ((text(p.part) || text(q.part)) && p.part !== 'naru') expect(overlaps(p.box, q.box), `${n}: ${p.part}/${q.part}`).toBe(false)
+    }
+    expect(boosted).toBeGreaterThan(0)
+    // a fit taken at a boost contains every grown label
+    const layout = layoutOrbit([job(1), job(2), job(3)], [], NOW)
+    const b = safeBoost(layout, BOOST_MAX)
+    const v = fitView(orbitBoxes(layout, b))
+    for (const { box } of layoutBoxes(layout, b)) {
+      expect(box.x0).toBeGreaterThanOrEqual(v.x)
+      expect(box.x1).toBeLessThanOrEqual(v.x + v.w)
+      expect(box.y0).toBeGreaterThanOrEqual(v.y)
+      expect(box.y1).toBeLessThanOrEqual(v.y + v.h)
+    }
+    expect(safeBoost(layoutOrbit([job(1)], [], NOW), 1)).toBe(1)
   })
 })
