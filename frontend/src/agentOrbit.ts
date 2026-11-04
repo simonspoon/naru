@@ -367,3 +367,27 @@ export function placeHover(anchor: Rect, w: number, h: number, vw: number, vh: n
   if (left < margin) left = anchor.left
   return { left: clamp(left, margin, vw - margin - w), top: clamp(anchor.top, margin, vh - margin - h) }
 }
+
+/** Which watcher side panel a collapse state belongs to (naru task 2563). */
+export type WatchPanel = 'stats' | 'queue'
+
+/** localStorage key holding a panel's collapsed state; absent = expanded. */
+export const panelKey = (panel: WatchPanel) => `naru-watcher-${panel}-collapsed`
+
+/** Whether `panel` was left collapsed in this browser; expanded when storage is unreadable. */
+export function loadCollapsed(panel: WatchPanel): boolean {
+  try {
+    return localStorage.getItem(panelKey(panel)) === '1'
+  } catch {
+    return false
+  }
+}
+
+export function saveCollapsed(panel: WatchPanel, collapsed: boolean): void {
+  try {
+    if (collapsed) localStorage.setItem(panelKey(panel), '1')
+    else localStorage.removeItem(panelKey(panel))
+  } catch {
+    // Storage unavailable — the toggle just won't persist.
+  }
+}

@@ -13622,24 +13622,113 @@ body.dock-resizing .dock-body {
   color: var(--violet);
 }
 
-.agent-watch-side {
-  flex: 0 1 22rem;
-  min-width: 16rem;
+/* Stats bottom-left, queue bottom-right (naru task 2563). Sticky in flow, so
+   they stay in view while the container scrolls yet cover nothing once it is
+   scrolled to the end; the row itself lets the pointer through. */
+.agent-watch-pins {
+  position: sticky;
+  bottom: 0;
+  margin-top: auto;
   display: flex;
-  flex-direction: column;
+  flex-wrap: wrap;
+  align-items: flex-end;
   gap: 0.75rem;
+  pointer-events: none;
+}
+
+/* The full page: `main` is the scroller, so the sticky pins must see it. */
+main > .agent-watch {
+  overflow: visible;
+  min-height: 100%;
+}
+
+.agent-watch-pins > * {
+  pointer-events: auto;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.18);
 }
 
 .orbit-queue,
 .orbit-stats {
   padding: 0.7rem 0.8rem;
   border-radius: var(--r-md);
-  background: var(--surface);
+  /* --surface is translucent; laid over the page colour so the orbit
+     scrolling underneath the pins does not show through. */
+  background: linear-gradient(var(--surface), var(--surface)), var(--bg);
 }
 
-.orbit-queue h2 {
-  margin: 0 0 0.35rem;
+.orbit-stats:not(.collapsed) {
+  flex: 1 1 12rem;
+  min-width: 0;
+  max-width: 22rem;
+}
+
+.orbit-queue {
+  margin-left: auto;
+  max-width: 100%;
+}
+
+.orbit-queue:not(.collapsed) {
+  flex: 1 1 12rem;
+  min-width: 0;
+  max-width: 22rem;
+}
+
+.orbit-queue-list {
+  max-height: min(40vh, 14rem);
+  overflow-y: auto;
+}
+
+.orbit-queue.collapsed,
+.orbit-stats.collapsed {
+  padding: 0.35rem 0.6rem;
+}
+
+.orbit-panel-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.orbit-panel-toggle:hover:not(:disabled) {
+  background: none;
+  box-shadow: none;
+}
+
+.orbit-panel-toggle:hover .orbit-panel-chevron {
+  color: var(--text);
+}
+
+.orbit-panel-title {
+  font-weight: 700;
   font-size: 1.1rem;
+  flex: 1;
+}
+
+.orbit-queue:not(.collapsed) .orbit-panel-toggle {
+  margin-bottom: 0.35rem;
+}
+
+.orbit-panel-chevron {
+  margin-left: auto;
+  color: var(--muted);
+}
+
+.orbit-stats.collapsed .orbit-panel-toggle {
+  flex-wrap: wrap;
+  gap: 0.35rem 0.75rem;
+}
+
+.orbit-stat-mini.orbit-stat {
+  display: inline-flex;
+  gap: 0.3rem;
 }
 
 .orbit-group + .orbit-group {

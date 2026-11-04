@@ -209,14 +209,26 @@ while the panel is visible.
   old, alternating and spread over the scale, and asserts no two painted
   boxes (estimated text widths; Naru as a disc) meet and all stay inside the
   viewBox. Nine slots and up are not covered, as nine jobs never were.
-- **Stats** (side panel, above the queue): CPU, memory and GPU sparklines
+- **Stats** (pinned bottom-left): CPU, memory and GPU sparklines
   over the stats history and a disk bar, each with its newest percent; GPU
   says "unavailable" when the host cannot report it.
-- **Queue** (side panel, below the orbit when narrow): no numbers. Tasks
+- **Queue** (pinned bottom-right, headed `Queue (n)`, the list capped at
+  `min(40vh, 14rem)` and scrolling): no numbers on items. Tasks
   under one heading per project in project-list order, heading tinted with the
   project colour, each item with a project-coloured left bar; a blocked task
   is dimmed. Every timed workflow under one grey "Workflows" heading, grey bar,
   dashed outline.
+- **Pinning and collapse** (naru task 2563): both panels sit in one
+  `position: sticky; bottom: 0` row after the orbit (`.agent-watch-pins`), so
+  they stay in view while the watcher scrolls — the dock panel's own
+  `.agent-watch`, or `main` on the phone page — yet cover nothing once it is
+  scrolled to the end. They share a row while each fits 12rem and wrap above
+  that. Each head is a button (`aria-expanded`) that collapses its panel: the
+  stats to one line of `CPU MEM GPU DISK` percents with no graphs, the queue
+  to a `Queue (n)` chip. The state is per browser, in `localStorage` keys
+  `naru-watcher-stats-collapsed` / `naru-watcher-queue-collapsed` (`'1'` =
+  collapsed, absent = expanded; `loadCollapsed`/`saveCollapsed` in
+  `agentOrbit.ts`).
 - Project colours are the feed's (the agent palette, theme-independent);
   every text colour is a theme variable, so light and dark both read.
 - A job links to its task panel or workflow; a queued item likewise.

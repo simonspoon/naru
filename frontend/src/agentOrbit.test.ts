@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import {
   AGE_FULL_S,
   RING,
@@ -14,6 +14,9 @@ import {
   jobHref,
   layoutBoxes,
   layoutOrbit,
+  loadCollapsed,
+  panelKey,
+  saveCollapsed,
   maxDots,
   overlaps,
   pct,
@@ -253,5 +256,21 @@ describe('voiceMotion / hrefs', () => {
     expect(jobHref(job(5, { kind: 'workflow', workflowId: 3, projectId: null }))).toBe('#/workflows/3')
     expect(queuedHref(queued(8, { kind: 'workflow' }))).toBe('#/projects/2/workflows/8')
     expect(jobHref(job(5, { kind: 'workflow', workflowId: null }))).toBe('#/projects/2/workflows')
+  })
+})
+
+describe('watcher panel collapse state', () => {
+  beforeEach(() => localStorage.clear())
+
+  it('defaults expanded and round-trips per panel', () => {
+    expect(loadCollapsed('stats')).toBe(false)
+    expect(loadCollapsed('queue')).toBe(false)
+    saveCollapsed('stats', true)
+    expect(loadCollapsed('stats')).toBe(true)
+    expect(loadCollapsed('queue')).toBe(false)
+    expect(localStorage.getItem(panelKey('stats'))).toBe('1')
+    saveCollapsed('stats', false)
+    expect(loadCollapsed('stats')).toBe(false)
+    expect(localStorage.getItem(panelKey('stats'))).toBeNull()
   })
 })

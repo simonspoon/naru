@@ -15,14 +15,17 @@ import {
   groupQueue,
   jobHref,
   layoutOrbit,
+  loadCollapsed,
   pct,
   placeHover,
   queuedHref,
+  saveCollapsed,
   sparkPoints,
   squash,
   subagentRef,
   voiceMotion,
   type HoverTurn,
+  type WatchPanel,
 } from '../agentOrbit'
 import type { CcSessionChat } from '../types/CcSessionChat'
 import type { OrbitAgent } from '../types/OrbitAgent'
@@ -58,6 +61,8 @@ export function AgentWatcherView({ active = true }: { active?: boolean } = {}) {
   const { data, error } = useFetch(getAgentOrbit, 'agent-orbit', { pollMs: poll })
   const { data: stats } = useFetch(getSystemStats, 'system-stats', { pollMs: poll })
   const [hover, setHover] = useState<Hover | null>(null)
+  const [statsCollapsed, setStatsCollapsed] = usePanel('stats')
+  const [queueCollapsed, setQueueCollapsed] = usePanel('queue')
 
   if (error) return <div className="agent-watch"><p className="error">{error}</p></div>
   if (!data) return <div className="agent-watch"><p className="muted">Loading…</p></div>
@@ -197,33 +202,42 @@ export function AgentWatcherView({ active = true }: { active?: boolean } = {}) {
           )}
         </svg>
         {hover && <HoverBlock hover={hover} naru={data.naru} />}
+      </div>
 
-        <aside className="agent-watch-side">
-          {stats && <StatGraphs stats={stats} />}
-          <section className="orbit-queue">
-            <h2>Queue</h2>
-            {groups.length === 0 ? (
-              <p className="muted">Nothing queued</p>
-            ) : (
-              groups.map((g) => (
-                <div key={g.key} className={`orbit-group${g.workflow ? ' workflow' : ''}`} style={g.workflow ? undefined : { '--proj': g.color } as React.CSSProperties}>
-                  <h3>{g.name}</h3>
-                  {g.items.map((q) => (
-                    <a
-                      key={`${q.kind}-${q.id}`}
-                      href={queuedHref(q)}
-                      className={`orbit-item${q.kind === 'workflow' ? ' workflow' : ''}${q.blocked ? ' blocked' : ''}`}
-                      style={q.kind === 'workflow' ? undefined : ({ '--proj': q.color } as React.CSSProperties)}
-                      title={q.title}
-                    >
-                      {q.title}
-                    </a>
-                  ))}
-                </div>
-              ))
-            )}
-          </section>
-        </aside>
+      {/* Pinned to the container's bottom corners (naru task 2563): in flow, so
+          at the end of a scroll they cover nothing; sticky, so they stay in
+          view while it scrolls. */}
+      <div className="agent-watch-pins">
+        {stats && <StatGraphs stats={stats} collapsed={statsCollapsed} onToggle={() => setStatsCollapsed(!statsCollapsed)} />}
+        <section className={`orbit-queue${queueCollapsed ? ' collapsed' : ''}`}>
+          <PanelToggle collapsed={queueCollapsed} onToggle={() => setQueueCollapsed(!queueCollapsed)}>
+            <span className="orbit-panel-title">Queue ({data.queue.length})</span>
+          </PanelToggle>
+          {!queueCollapsed && (
+            <div className="orbit-queue-list">
+              {groups.length === 0 ? (
+                <p className="muted">Nothing queued</p>
+              ) : (
+                groups.map((g) => (
+                  <div key={g.key} className={`orbit-group${g.workflow ? ' workflow' : ''}`} style={g.workflow ? undefined : { '--proj': g.color } as React.CSSProperties}>
+                    <h3>{g.name}</h3>
+                    {g.items.map((q) => (
+                      <a
+                        key={`${q.kind}-${q.id}`}
+                        href={queuedHref(q)}
+                        className={`orbit-item${q.kind === 'workflow' ? ' workflow' : ''}${q.blocked ? ' blocked' : ''}`}
+                        style={q.kind === 'workflow' ? undefined : ({ '--proj': q.color } as React.CSSProperties)}
+                        title={q.title}
+                      >
+                        {q.title}
+                      </a>
+                    ))}
+                  </div>
+                ))
+              )}
+            </div>
+          )}
+        </section>
       </div>
     </div>
   )
@@ -285,7 +299,27 @@ function HoverBlock({ hover, naru }: { hover: Hover; naru: OrbitNaru }) {
   )
 }
 
-function StatGraphs({ stats }: { stats: SystemStats }) {
+/** A side panel's collapsed state, remembered in this browser. */
+function usePanel(panel: WatchPanel): [boolean, (collapsed: boolean) => void] {
+  const [collapsed, setCollapsed] = useState(() => loadCollapsed(panel))
+  const set = (next: boolean) => {
+    setCollapsed(next)
+    saveCollapsed(panel, next)
+  }
+  return [collapsed, set]
+}
+
+/** A panel's head: one button that collapses or expands it. */
+function PanelToggle({ collapsed, onToggle, children }: { collapsed: boolean; onToggle: () => void; children: React.ReactNode }) {
+  return (
+    <button type="button" className="orbit-panel-toggle" aria-expanded={!collapsed} onClick={onToggle}>
+      {children}
+      <span className="orbit-panel-chevron" aria-hidden="true">{collapsed ? '▸' : '▾'}</span>
+    </button>
+  )
+}
+
+function StatGraphs({ stats, collapsed, onToggle }: { stats: SystemStats; collapsed: boolean; onToggle: () => void }) {
   const h = stats.history
   const mem = h.map((s) => pct(s.memUsedBytes, s.memTotalBytes) ?? 0)
   const gpu = h.flatMap((s) => (s.gpuPct == null ? [] : [s.gpuPct]))
@@ -295,8 +329,27 @@ function StatGraphs({ stats }: { stats: SystemStats }) {
     { name: 'MEM', cls: 'mem', values: mem, now: pct(stats.sample.memUsedBytes, stats.sample.memTotalBytes) },
     { name: 'GPU', cls: 'gpu', values: stats.gpuAvailable ? gpu : null, now: stats.gpuAvailable ? stats.sample.gpuPct : null },
   ]
+  const now = (v: number | null) => (v == null ? '—' : `${Math.round(v)}%`)
+  if (collapsed) {
+    return (
+      <section className="orbit-stats collapsed">
+        <PanelToggle collapsed onToggle={onToggle}>
+          <span className="sr-only">System stats</span>
+          {[...rows.map((r) => ({ name: r.name, cls: r.cls, now: r.now })), { name: 'DISK', cls: 'disk', now: disk }].map((r) => (
+            <span key={r.name} className={`orbit-stat-mini orbit-stat ${r.cls}`}>
+              <span className="orbit-stat-name">{r.name}</span>
+              <span className="orbit-stat-now">{now(r.now)}</span>
+            </span>
+          ))}
+        </PanelToggle>
+      </section>
+    )
+  }
   return (
     <section className="orbit-stats">
+      <PanelToggle collapsed={false} onToggle={onToggle}>
+        <span className="orbit-panel-title">System</span>
+      </PanelToggle>
       {rows.map((r) => (
         <div key={r.name} className={`orbit-stat ${r.cls}`}>
           <span className="orbit-stat-name">{r.name}</span>
@@ -307,7 +360,7 @@ function StatGraphs({ stats }: { stats: SystemStats }) {
           ) : (
             <span className="orbit-spark muted">unavailable</span>
           )}
-          <span className="orbit-stat-now">{r.now == null ? '—' : `${Math.round(r.now)}%`}</span>
+          <span className="orbit-stat-now">{now(r.now)}</span>
         </div>
       ))}
       <div className="orbit-stat disk">
@@ -315,7 +368,7 @@ function StatGraphs({ stats }: { stats: SystemStats }) {
         <span className="orbit-meter">
           <span style={{ width: `${disk ?? 0}%` }} />
         </span>
-        <span className="orbit-stat-now">{disk == null ? '—' : `${Math.round(disk)}%`}</span>
+        <span className="orbit-stat-now">{now(disk)}</span>
       </div>
     </section>
   )
