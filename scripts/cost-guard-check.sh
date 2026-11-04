@@ -27,6 +27,9 @@ cargo build --quiet
 MESA=target/debug/mesa
 
 TMP=$(mktemp -d)
+# A dispatch marks its project folder trusted in Claude Code's .claude.json
+# (naru task 2570); keep that edit out of the real one.
+export CLAUDE_CONFIG_DIR="$TMP/claude-config"
 trap 'rm -rf "$TMP"; [ -n "${SERVER_PID:-}" ] && kill "$SERVER_PID" 2>/dev/null; true' EXIT
 
 export MESA_DB="$TMP/mesa.db"

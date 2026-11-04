@@ -15,6 +15,9 @@ cargo build --quiet
 MESA=target/debug/mesa
 
 TMP=$(mktemp -d)
+# A dispatch marks its project folder trusted in Claude Code's .claude.json
+# (naru task 2570); keep that edit out of the real one.
+export CLAUDE_CONFIG_DIR="$TMP/claude-config"
 trap 'rm -rf "$TMP"; for p in "${SERVER_PID:-}" "${HOLDER_CHILD:-}" "${HOLDER:-}"; do [ -n "$p" ] && kill "$p" 2>/dev/null; done; true' EXIT
 export MESA_DB="$TMP/mesa.db"
 # Pin the user config away from the real ~/.mesa/config.json: this gate
@@ -920,12 +923,14 @@ wait_sf_lines() { # wait_sf_lines <file> <n> -> blocks until <file> has >= n lin
   fail "timed out waiting for $n line(s) in $file: $(cat "$file")"
 }
 
-wait_sf_lines "$SF_FAIL_LOG" 2
+# An untrusted-folder refusal is retried once in the same dispatch (naru task
+# 2570), so each failed attempt here is two spawns.
+wait_sf_lines "$SF_FAIL_LOG" 4
 # ~10 more ticks: a watcher still retrying would add attempts and alerts here.
 sleep 1.5
-[ "$(wc -l < "$SF_FAIL_LOG")" -eq 2 ] ||
-  fail "each failed task must be tried once, not every tick: $(cat "$SF_FAIL_LOG")"
-[ "$(sort "$SF_FAIL_LOG" | tr '\n' ' ')" = "$(printf '/execute-naru-task %s\n' "$SF_T1" "$SF_T2" | sort | tr '\n' ' ')" ] ||
+[ "$(wc -l < "$SF_FAIL_LOG")" -eq 4 ] ||
+  fail "each failed task must be tried once (plus its one trust retry), not every tick: $(cat "$SF_FAIL_LOG")"
+[ "$(sort "$SF_FAIL_LOG" | tr '\n' ' ')" = "$(printf '/execute-naru-task %s\n' "$SF_T1" "$SF_T1" "$SF_T2" "$SF_T2" | sort | tr '\n' ' ')" ] ||
   fail "a backed-off task must not wedge the project, the pick moves on: $(cat "$SF_FAIL_LOG")"
 [ "$("$MESA" task show "$SF_T1" | jq -r .status)" = "todo" ] || fail "a failed spawn leaves the task todo"
 [ "$("$MESA" task show "$SF_T2" | jq -r .status)" = "todo" ] || fail "a failed spawn leaves the task todo"
@@ -946,9 +951,9 @@ ok "each failed spawn files exactly one queue-watcher alert naming the task, the
 # revert's second.
 sleep 1.1
 run 0 "$MESA" task update "$SF_T1" --status todo
-wait_sf_lines "$SF_FAIL_LOG" 3
+wait_sf_lines "$SF_FAIL_LOG" 6
 sleep 0.5
-[ "$(wc -l < "$SF_FAIL_LOG")" -eq 3 ] || fail "a touched task must be tried again once: $(cat "$SF_FAIL_LOG")"
+[ "$(wc -l < "$SF_FAIL_LOG")" -eq 6 ] || fail "a touched task must be tried again once: $(cat "$SF_FAIL_LOG")"
 [ "$("$MESA" inbox list | jq 'length')" -eq 2 ] || fail "the same error text must not be filed twice"
 ok "a touched task is retried once, and the same failure files no second alert"
 
@@ -956,13 +961,13 @@ ok "a touched task is retried once, and the same failure files no second alert"
 echo "Rate limited, try again later" > "$STUB_DIR/spawnfail"
 sleep 1.1
 run 0 "$MESA" task update "$SF_T1" --status todo
-wait_sf_lines "$SF_FAIL_LOG" 4
+wait_sf_lines "$SF_FAIL_LOG" 7
 for _ in $(seq 1 50); do
   [ "$("$MESA" inbox list | jq 'length')" -ge 3 ] && break
   sleep 0.1
 done
 sleep 0.5
-[ "$(wc -l < "$SF_FAIL_LOG")" -eq 4 ] || fail "a touched task must be tried again once: $(cat "$SF_FAIL_LOG")"
+[ "$(wc -l < "$SF_FAIL_LOG")" -eq 7 ] || fail "a touched task must be tried again once, an error other than untrusted with no retry: $(cat "$SF_FAIL_LOG")"
 run 0 "$MESA" inbox list
 [ "$(jqs 'length')" -eq 3 ] || fail "a different error text is a second alert for the task: $STDOUT"
 [ "$(jq --argjson t "$SF_T1" '[.[] | select(.task_id == $t)] | length' <<<"$STDOUT")" -eq 2 ] ||

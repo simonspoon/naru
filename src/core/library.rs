@@ -3727,11 +3727,19 @@ pub(crate) mod test_home {
         let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let original = std::env::var("HOME").ok();
+        // Claude Code's config (`core::claude_trust`) prefers
+        // CLAUDE_CONFIG_DIR over HOME, so it is cleared too: a dispatch under
+        // test must edit the throwaway HOME's `.claude.json`, never the real one.
+        let config_dir = std::env::var_os("CLAUDE_CONFIG_DIR");
         unsafe { std::env::set_var("HOME", dir.path()) };
+        unsafe { std::env::remove_var("CLAUDE_CONFIG_DIR") };
         f(dir.path());
         match original {
             Some(v) => unsafe { std::env::set_var("HOME", v) },
             None => unsafe { std::env::remove_var("HOME") },
+        }
+        if let Some(v) = config_dir {
+            unsafe { std::env::set_var("CLAUDE_CONFIG_DIR", v) };
         }
     }
 }

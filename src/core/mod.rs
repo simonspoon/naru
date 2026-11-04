@@ -7,6 +7,7 @@ pub mod barge_in;
 pub mod board;
 pub mod cc;
 pub mod cc_ledger;
+pub mod claude_trust;
 pub mod config;
 pub mod decide;
 pub mod dev_guard;

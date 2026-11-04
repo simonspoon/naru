@@ -136,6 +136,28 @@ because someone ran `mesa serve`.
   task is reverted back to `todo` so the project isn't wedged — an
   unrecoverable spawn must not silently stop that project from ever being
   picked up again.
+- **The project folder is marked trusted before every spawn** (naru task
+  2570). Claude Code refuses a folder it has never been told to trust
+  ("Workspace not trusted"), which used to land every new or moved project in
+  the inbox until someone edited `~/.claude.json` by hand. So
+  `dispatch_task_session` first sets
+  `projects[<canonical local_path>].hasTrustDialogAccepted = true` in Claude
+  Code's config (`core::claude_trust`: `$CLAUDE_CONFIG_DIR/.claude.json`
+  when that is set, else `$HOME/.claude.json` — the file the spawned `claude`
+  reads, since it inherits the server's environment), creating the entry or
+  the file if missing. The edit carries every other key and value over as its
+  original text in its original order, writes a temp file and renames it over
+  the original only if a re-read shows nothing changed meanwhile (else it
+  starts over, up to five times), writes nothing when the flag is already
+  set, and never touches a file it cannot parse. The temp file is created
+  with the original's mode, and a symlinked config is edited where it points.
+  `/`, `$HOME` and any folder above `$HOME` are refused.
+  Each write is one `queue-watcher: task N: marked <path> trusted` line on
+  the server's stderr. A spawn refused as untrusted anyway is trusted again
+  and retried once; only a second refusal is a failed spawn (below). The
+  trust step is best effort: a failure is logged and the spawn goes ahead.
+  Regressions: `core::claude_trust::tests`,
+  `api::tests::queue_watcher_tick_trusts_the_project_folder_and_retries_an_untrusted_spawn`.
 - **A failed spawn is reported once and backed off** (mesa task 1338; the
   backoff became time-based in mesa task 1477). Seen
   live: every spawn for a task failed with "Workspace not trusted", and the

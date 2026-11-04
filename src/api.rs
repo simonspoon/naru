@@ -51,10 +51,10 @@ use crate::core::{
     ScriptPatch, ScriptRunEvent, ServeBoolSetting, ServeHostsSetting, ServeNumberSetting, Status,
     Store, SystemInfo, Task, TaskNote, TaskPatch, TaskSummary, WorkflowEdgeKind,
     WorkflowGateStatus, WorkflowNodeKind, WorkflowNodeNew, WorkflowNodePatch, WorkflowPatch,
-    WorkflowTrigger, WorkflowType, agents, attachments, audio, board, config, files, git, guard,
-    hooks, inbox_triage, kb, library, listen, live, memory_job, notify, orbit, project_memory,
-    receipt, runner, script_runs, scripts, speech, supervisor, system, validate_live_client,
-    version, workflow,
+    WorkflowTrigger, WorkflowType, agents, attachments, audio, board, claude_trust, config, files,
+    git, guard, hooks, inbox_triage, kb, library, listen, live, memory_job, notify, orbit,
+    project_memory, receipt, runner, script_runs, scripts, speech, supervisor, system,
+    validate_live_client, version, workflow,
 };
 
 /// The Vite build output, embedded into the binary at compile time.
@@ -1196,14 +1196,28 @@ fn dispatch_task_session(
         let store = state.store.lock().unwrap();
         library::prompts(&store).unwrap_or_default()
     };
-    let job = agents::spawn_bg(
-        config::TODO_WATCHER,
-        local_path,
-        Some(task_id),
-        Some(session_name),
-        None,
-        &prompts,
-    )?;
+    // A new or moved project folder is refused by Claude Code's folder-trust
+    // gate, so it is marked trusted first (naru task 2570), and a spawn that is
+    // refused anyway is trusted again and retried once.
+    trust_project_folder(task_id, local_path);
+    let spawn = || {
+        agents::spawn_bg(
+            config::TODO_WATCHER,
+            local_path,
+            Some(task_id),
+            Some(session_name),
+            None,
+            &prompts,
+        )
+    };
+    let job = match spawn() {
+        Err(e) if claude_trust::is_untrusted_error(&agents::strip_ansi(&e)) => {
+            eprintln!("queue-watcher: task {task_id} spawn refused as untrusted, retrying once");
+            trust_project_folder(task_id, local_path);
+            spawn()
+        }
+        other => other,
+    }?;
     // Whatever checkpoint the task already carries is what this session starts
     // from, so the cost guard's relay must not treat it as one the session
     // wrote: only a checkpoint rewritten after this point counts.
@@ -1224,6 +1238,18 @@ fn dispatch_task_session(
         None => seeded.remove(&task_id),
     };
     Ok(job)
+}
+
+/// Marks `local_path` trusted in Claude Code's `.claude.json`, logging a write
+/// or a failure; best effort, since the spawn itself reports a real refusal.
+fn trust_project_folder(task_id: i64, local_path: &str) {
+    match claude_trust::ensure_trusted(local_path) {
+        Ok(Some(key)) => {
+            eprintln!("queue-watcher: task {task_id}: marked {key} trusted in .claude.json")
+        }
+        Ok(None) => {}
+        Err(e) => eprintln!("queue-watcher: task {task_id}: could not trust {local_path}: {e}"),
+    }
 }
 
 /// Drops `cost_relay_seeded` entries for tasks no longer `in_progress`, so the
@@ -17246,6 +17272,96 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             );
             assert_eq!(status(first), Status::InProgress);
             assert!(!state.todo_spawn_failed.lock().unwrap().contains_key(&first));
+
+            unsafe { std::env::remove_var("MESA_CLAUDE_BIN") };
+        });
+    }
+
+    #[test]
+    fn queue_watcher_tick_trusts_the_project_folder_and_retries_an_untrusted_spawn() {
+        #[cfg(unix)]
+        use std::os::unix::fs::PermissionsExt;
+        // SAFETY: ENV_LOCK gives this test exclusive access to
+        // MESA_CLAUDE_BIN / MESA_CONFIG_FILE for its duration.
+        let _env = attachments::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::core::library::test_home::with_home_dir(|home| {
+            let stub_dir = tempfile::tempdir().unwrap();
+            let log_path = stub_dir.path().join("bg.log");
+            // Pins the default template and MESA_CONFIG_FILE; the binary it
+            // writes is replaced by one that, like the real `claude`, refuses
+            // a folder `.claude.json` does not trust.
+            stub_claude_bg(stub_dir.path(), &log_path);
+            let refuse_once = stub_dir.path().join("refuse-once");
+            let refuse_always = stub_dir.path().join("refuse-always");
+            let bin = stub_dir.path().join("trust-claude");
+            std::fs::write(
+                &bin,
+                format!(
+                    r#"#!/bin/sh
+[ "$1" = "--bg" ] || exit 1
+untrusted() {{ echo "Workspace not trusted. Run claude in $(pwd) once" >&2; exit 1; }}
+[ -e "{always}" ] && untrusted
+if [ -e "{once}" ]; then rm "{once}"; untrusted; fi
+grep -q "\"$(pwd -P)\": {{" "$HOME/.claude.json" 2>/dev/null || untrusted
+grep -q '"hasTrustDialogAccepted": true' "$HOME/.claude.json" || untrusted
+echo "$(pwd -P)|$*" >> "{log}"
+echo "backgrounded · deadbeef (idle — send a prompt to start)"
+"#,
+                    always = refuse_always.display(),
+                    once = refuse_once.display(),
+                    log = log_path.display()
+                ),
+            )
+            .unwrap();
+            #[cfg(unix)]
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+            unsafe { std::env::set_var("MESA_CLAUDE_BIN", &bin) };
+
+            let (_dir, state) = test_state();
+            let inbox = || state.store.lock().unwrap().list_inbox_items(None).unwrap();
+            let status = |id| state.store.lock().unwrap().get_task(id).unwrap().status;
+            let claude_json = home.join(".claude.json");
+            let trusted = |dir: &std::path::Path| {
+                let key = std::fs::canonicalize(dir).unwrap();
+                let v: serde_json::Value =
+                    serde_json::from_str(&std::fs::read_to_string(&claude_json).unwrap()).unwrap();
+                v["projects"][key.to_str().unwrap()]["hasTrustDialogAccepted"] == true
+            };
+
+            // A fresh, untrusted folder with no `.claude.json` at all: trusted
+            // before the spawn, which then works, and nothing is filed.
+            let a_dir = tempfile::tempdir().unwrap();
+            let a = new_project(&state, a_dir.path().to_str());
+            let a_task = new_task(&state, a);
+            queue_watcher_tick(&state);
+            assert_eq!(status(a_task), Status::InProgress);
+            assert!(trusted(a_dir.path()));
+            assert!(inbox().is_empty(), "{:?}", inbox());
+
+            // Refused once anyway: trusted again and retried, still no alert.
+            std::fs::write(&refuse_once, "").unwrap();
+            let b_dir = tempfile::tempdir().unwrap();
+            let b = new_project(&state, b_dir.path().to_str());
+            let b_task = new_task(&state, b);
+            queue_watcher_tick(&state);
+            assert!(!refuse_once.exists(), "the first spawn was refused");
+            assert_eq!(status(b_task), Status::InProgress);
+            assert!(inbox().is_empty(), "{:?}", inbox());
+            let log = std::fs::read_to_string(&log_path).unwrap();
+            assert_eq!(log.lines().count(), 2, "{log}");
+
+            // Refused on the retry too: reverted and alerted, once.
+            std::fs::write(&refuse_always, "").unwrap();
+            let c_dir = tempfile::tempdir().unwrap();
+            let c = new_project(&state, c_dir.path().to_str());
+            let c_task = new_task(&state, c);
+            queue_watcher_tick(&state);
+            assert_eq!(status(c_task), Status::Todo);
+            let items = inbox();
+            assert_eq!(items.len(), 1, "{items:?}");
+            assert!(items[0].body.contains("Workspace not trusted"));
 
             unsafe { std::env::remove_var("MESA_CLAUDE_BIN") };
         });
