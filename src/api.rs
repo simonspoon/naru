@@ -4008,11 +4008,16 @@ fn router(state: AppState) -> Router {
         )
         .route("/api/mark-skins/{id}/render", get(render_mark_skin))
         // Knowledge base viewer (naru task 1928): thin reads/ask over
-        // `core::kb`, no storage of its own. All three `require_agent_access`
+        // `core::kb`, no storage of its own. All of them `require_agent_access`
         // (ask spawns `claude`); the note path rides a query, not the path.
         .route("/api/kb/notes", get(list_kb_notes))
         .route("/api/kb/note", get(show_kb_note))
         .route("/api/kb/ask", post(ask_kb))
+        // The kb front page (naru task 2552): `kb usage`, `kb dupes` and
+        // `kb merge`, the same functions the CLI calls.
+        .route("/api/kb/usage", get(kb_usage))
+        .route("/api/kb/dupes", get(kb_dupes))
+        .route("/api/kb/merge", post(kb_merge))
         // The same file's `guard` section — the cost-guard's thresholds
         // (mesa task 1018). A seventh route for the same reason as the other
         // five.
@@ -5589,6 +5594,70 @@ async fn ask_kb(
     .await
     .map_err(|e| agents_unavailable(format!("kb ask panicked: {e}")))??;
     Ok(Json(answer).into_response())
+}
+
+#[derive(Deserialize)]
+struct KbUsageQuery {
+    #[serde(default)]
+    days: Option<u32>,
+}
+
+#[derive(Deserialize)]
+struct KbDupesQuery {
+    #[serde(default)]
+    threshold: Option<f64>,
+}
+
+#[derive(Deserialize)]
+struct KbMergeBody {
+    keep: String,
+    drop: Vec<String>,
+}
+
+/// `GET /api/kb/usage[?days=]`: as `naru kb usage` (default 28 days).
+async fn kb_usage(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Query(q): Query<KbUsageQuery>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let days = q.days.unwrap_or(28);
+    let usage =
+        tokio::task::spawn_blocking(move || crate::core::kb_lookup::usage(&kb::kb_dir(), days))
+            .await
+            .map_err(|e| agents_unavailable(format!("kb usage panicked: {e}")))?;
+    Ok(Json(usage).into_response())
+}
+
+/// `GET /api/kb/dupes[?threshold=]`: as `naru kb dupes` (read-only).
+async fn kb_dupes(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Query(q): Query<KbDupesQuery>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let threshold = q.threshold.unwrap_or(kb::DUPES_THRESHOLD);
+    let clusters = tokio::task::spawn_blocking(move || kb::dupes(&kb::kb_dir(), threshold))
+        .await
+        .map_err(|e| agents_unavailable(format!("kb dupes panicked: {e}")))??;
+    Ok(Json(clusters).into_response())
+}
+
+/// `POST /api/kb/merge {keep, drop}`: as `naru kb merge <keep> <drop>...`.
+async fn kb_merge(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Result<Json<KbMergeBody>, JsonRejection>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let Json(body) = body?;
+    let out = tokio::task::spawn_blocking(move || kb::merge(&kb::kb_dir(), &body.keep, &body.drop))
+        .await
+        .map_err(|e| agents_unavailable(format!("kb merge panicked: {e}")))??;
+    Ok(Json(out).into_response())
 }
 
 // ---- inbox (global update requests) ----

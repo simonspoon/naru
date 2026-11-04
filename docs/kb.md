@@ -195,18 +195,43 @@ the merged tags are capped at 8. `--threshold` must be above 0 and at most 1.
 
 ## Web page (`#/kb`, naru task 1928)
 
-A nav entry "Knowledge base" opens `#/kb`: a single Ask box over
+A nav entry "Knowledge base" opens `#/kb`: an Ask box over
 `POST /api/kb/ask` showing exactly what `naru kb ask` returns — the answer, the
 sources (path + title, each linked to `#/kb/<note path>`, which shows that
-note's markdown with a back-to-ask link), an empty-result state and the raw
-JSON in a collapsed block. No note list, filter or tags
+note's markdown with a back link), an empty-result state and the raw
+JSON in a collapsed block, plus the front page below
 (`frontend/src/kbFilter.ts` keeps only the route helpers). No new storage;
-three thin routes over `core::kb`, all `require_agent_access` (ask spawns
-`claude`; `GET /api/kb/notes` is no longer used by the page):
+thin routes over `core::kb`, all `require_agent_access` (ask spawns
+`claude`):
 
 - `GET /api/kb/notes[?topic=]` — as `kb list` (metadata only)
 - `GET /api/kb/note?path=topics/t/s.md` — as `kb show` (`not_found` outside the kb)
 - `POST /api/kb/ask {"question"}` — as `kb ask` (JSON Content-Type required)
+
+### Front page (naru task 2552)
+
+Around the Ask box `#/kb` shows, all derived in `frontend/src/kbFront.ts`
+(pure, unit-tested) from the routes below:
+
+- **Stats row**: total notes, notes whose `updated` is within the last 7 days,
+  and the automatic lookup's hit rate — `useful + unused + unchecked` over
+  `lookups` from `kb usage` (28 days); `—` with no lookups.
+- **Topic bubble map**: one SVG circle per topic, area proportional to its note
+  count (a floor radius keeps a one-note topic clickable), coloured by its
+  newest note's age (this week / month / 3 months / older, theme variables).
+  Labels show only where they fit; a chip row below names every topic. Picking
+  a bubble or chip lists that topic's notes (title, tags, updated, newest
+  first), each linking to `#/kb/<path>`.
+- **Recent notes**: the ten newest by `updated`.
+- **Duplicates to merge**: `kb dupes` clusters, a radio to pick the note to
+  keep (the first by default), and a Merge button that asks to confirm before
+  running `kb merge`; the clusters and notes are refetched after.
+
+Routes added for it, same `require_agent_access` boundary:
+
+- `GET /api/kb/usage[?days=]` — as `kb usage` (default 28)
+- `GET /api/kb/dupes[?threshold=]` — as `kb dupes` (default 0.3; out of range is `validation`)
+- `POST /api/kb/merge {"keep", "drop": [..]}` — as `kb merge` (JSON Content-Type required)
 
 ## Mining past sessions (a workflow, not a feature)
 

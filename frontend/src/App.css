@@ -13783,10 +13783,61 @@ span.orbit-spark {
   overflow-wrap: anywhere;
 }
 .kb-back { display: inline-block; margin-bottom: 0.5rem; }
+/* The front page (naru task 2552): stats, topic bubble map, recent notes,
+   duplicates. Text runs large on purpose (the person is dyslexic). */
+.kb-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); gap: 0.75rem; }
+.kb-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: 0.75rem 1rem;
+  background: var(--surface);
+  border-radius: var(--r-md);
+  box-shadow: var(--ring);
+}
+.kb-stat-value { font-size: 2rem; font-weight: 600; color: var(--text-h); line-height: 1.1; }
+.kb-stat-label { font-size: 1rem; color: var(--muted); }
+.kb-legend { display: flex; flex-wrap: wrap; gap: 0.4rem 1rem; margin-bottom: 0.5rem; font-size: 1rem; }
+.kb-legend-item { display: inline-flex; align-items: center; gap: 0.4rem; }
+.kb-swatch { display: inline-block; width: 0.9rem; height: 0.9rem; border-radius: 50%; flex: none; }
+.kb-swatch.kb-fresh-week, .kb-bubble.kb-fresh-week circle { background: rgba(var(--green-rgb), 0.45); fill: rgba(var(--green-rgb), 0.3); stroke: var(--green); }
+.kb-swatch.kb-fresh-month, .kb-bubble.kb-fresh-month circle { background: rgba(var(--cyan-rgb), 0.45); fill: rgba(var(--cyan-rgb), 0.25); stroke: var(--cyan); }
+.kb-swatch.kb-fresh-quarter, .kb-bubble.kb-fresh-quarter circle { background: rgba(var(--amber-rgb), 0.45); fill: rgba(var(--amber-rgb), 0.25); stroke: var(--amber); }
+.kb-swatch.kb-fresh-older, .kb-bubble.kb-fresh-older circle { background: rgba(var(--muted-rgb), 0.45); fill: rgba(var(--muted-rgb), 0.22); stroke: var(--muted); }
+.kb-map { display: block; width: 100%; max-height: min(70vh, 42rem); }
+.kb-bubble { cursor: pointer; outline: none; }
+.kb-bubble circle { stroke-width: 1.5; transition: fill-opacity 0.15s; }
+.kb-bubble:hover circle, .kb-bubble:focus-visible circle { stroke-width: 3; filter: brightness(1.15); }
+.kb-bubble.selected circle { stroke: var(--text-h); stroke-width: 4; }
+.kb-bubble text { fill: var(--text-h); text-anchor: middle; dominant-baseline: middle; pointer-events: none; font-family: var(--font-sans); }
+.kb-bubble-name { font-weight: 600; }
+.kb-topic-chips { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.75rem; }
+.kb-topic-chip { display: inline-flex; align-items: center; gap: 0.4rem; font-size: 1rem; padding: 0.3rem 0.7rem; border-radius: var(--r-pill); }
+.kb-topic-chip.active { box-shadow: 0 0 0 2px var(--cyan); }
+.kb-topic-notes { margin-top: 1rem; }
+.kb-topic-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
+.kb-topic-head h3 { margin: 0; font-size: 1.2rem; }
+.kb-columns { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 24rem), 1fr)); gap: 0.75rem; }
+.kb-note-list { list-style: none; margin: 0.5rem 0 0; padding: 0; display: flex; flex-direction: column; }
+.kb-note-list li { display: flex; flex-direction: column; gap: 0.2rem; padding: 0.55rem 0; border-bottom: 1px solid var(--hairline); }
+.kb-note-list li:last-child { border-bottom: none; }
+.kb-note-title { font-size: 1.05rem; color: var(--text-h); text-decoration: none; overflow-wrap: anywhere; }
+.kb-note-title:hover { color: var(--cyan); text-decoration: underline; }
+.kb-note-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem; font-size: 0.9rem; }
+.kb-note-topic { color: var(--cyan); }
+.kb-tag { background: var(--surface-raised); border-radius: var(--r-sm); padding: 0.05rem 0.45rem; color: var(--text); }
+.kb-dupes { display: flex; flex-direction: column; gap: 0.75rem; }
+.kb-dupe { padding: 0.75rem; background: var(--surface-raised); border-radius: var(--r-md); }
+.kb-dupe-score { margin: 0 0 0.35rem; }
+.kb-dupe-notes { list-style: none; margin: 0 0 0.5rem; padding: 0; display: flex; flex-direction: column; gap: 0.35rem; }
+.kb-dupe-notes li { display: flex; align-items: center; gap: 0.5rem; }
+.kb-dupe-notes label { display: inline-flex; align-items: center; gap: 0.3rem; flex: none; cursor: pointer; }
+.kb-dupe-keep { width: 2.5rem; font-size: 0.85rem; color: var(--green); }
 @media (max-width: 600px) {
   .kb-ask-btn, .kb-source { min-height: 44px; display: inline-flex; align-items: center; }
   .kb-ask input { min-height: 44px; }
   .kb-ask-btn { flex: 1 1 100%; justify-content: center; }
+  .kb-topic-chip { min-height: 44px; }
 }
 
 /* Board toolbar: the "Hide subtasks" toggle (naru task 1943). */

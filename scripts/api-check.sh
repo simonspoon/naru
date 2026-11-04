@@ -84,6 +84,10 @@ export NARU_AUDIO_URL="http://127.0.0.1:9"
 # kb fixture for the /api/kb routes (naru task 1928)
 mkdir -p "$TMP/kb/topics/demo"
 printf -- '---\ntitle: Demo note\ntags: a, b\nupdated: 2026-01-01\n---\nhello kb\n' > "$TMP/kb/topics/demo/note.md"
+# …and two near-duplicates for /api/kb/dupes and /api/kb/merge (naru task 2552)
+mkdir -p "$TMP/kb/topics/dup"
+printf -- '---\ntitle: Gate port clash\ntags: gate, port\nupdated: 2026-01-02\n---\nThe check scripts hardcode port 7791 so a stray server hijacks the gate.\n' > "$TMP/kb/topics/dup/one.md"
+printf -- '---\ntitle: Gate port clash again\ntags: gate, port\nupdated: 2026-01-03\n---\nThe check scripts hardcode port 7791 so a stray server hijacks the gate.\nCheck lsof first.\n' > "$TMP/kb/topics/dup/two.md"
 export MESA_KB_DIR="$TMP/kb"
 
 # ---- server ----
@@ -183,6 +187,31 @@ raw GET "/api/kb/notes" -H "Origin: http://evil.example"
 raw POST "/api/kb/ask" -d 'question=x'
 [ "$STATUS" = "415" ] || fail "kb ask without JSON Content-Type: expected 415, got $STATUS"
 ok "kb routes: list/show served; traversal 404; foreign Host and Origin 403; ask needs JSON"
+
+# The kb front page's routes (naru task 2552): usage, dupes, merge.
+raw GET "/api/kb/usage"
+[ "$STATUS" = "200" ] || fail "kb usage: expected 200, got $STATUS ($BODY)"
+[ "$(jqb '.lookups')" = "0" ] || fail "kb usage: lookups ($BODY)"
+raw GET "/api/kb/dupes"
+[ "$STATUS" = "200" ] || fail "kb dupes: expected 200, got $STATUS ($BODY)"
+[ "$(jqb '.[0].notes | length')" = "2" ] || fail "kb dupes: one 2-note cluster ($BODY)"
+raw GET "/api/kb/dupes?threshold=2"
+[ "$STATUS" = "422" ] || fail "kb dupes with threshold 2: expected 422, got $STATUS"
+raw GET "/api/kb/dupes" -H "Origin: http://evil.example"
+[ "$STATUS" = "403" ] || fail "kb dupes with a foreign Origin: expected 403, got $STATUS"
+raw POST "/api/kb/merge" -H "Host: evil.example" -H 'Content-Type: application/json' -d '{"keep":"topics/dup/one.md","drop":["topics/dup/two.md"]}'
+[ "$STATUS" = "403" ] || fail "kb merge with a foreign Host: expected 403, got $STATUS"
+raw POST "/api/kb/merge" -d 'keep=x'
+[ "$STATUS" = "415" ] || fail "kb merge without JSON Content-Type: expected 415, got $STATUS"
+[ -f "$TMP/kb/topics/dup/two.md" ] || fail "kb merge: a refused merge removed a note"
+raw POST "/api/kb/merge" -H 'Content-Type: application/json' -d '{"keep":"topics/dup/one.md","drop":["topics/dup/nope.md"]}'
+[ "$STATUS" = "404" ] || fail "kb merge of an unknown drop: expected 404, got $STATUS"
+raw POST "/api/kb/merge" -H 'Content-Type: application/json' -d '{"keep":"topics/dup/one.md","drop":["topics/dup/two.md"]}'
+[ "$STATUS" = "200" ] || fail "kb merge: expected 200, got $STATUS ($BODY)"
+[ "$(jqb '.kept')" = "topics/dup/one.md" ] || fail "kb merge: kept ($BODY)"
+[ ! -e "$TMP/kb/topics/dup/two.md" ] || fail "kb merge: the drop is still on disk"
+grep -q 'Check lsof first.' "$TMP/kb/topics/dup/one.md" || fail "kb merge: the drop's new line was not folded in"
+ok "kb usage/dupes/merge: served; bad threshold 422; foreign Host and Origin 403; merge needs JSON, checks first, folds and deletes"
 
 # ---- Content-Type gate (cross-site form posts) ----
 

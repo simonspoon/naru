@@ -13,6 +13,7 @@ import { parseWatchLine, type FilesWatchEvent } from './filesWatch'
 import { finishNdjson, parseEvent, splitNdjson } from './scriptRun'
 
 import type { ImportResolution } from './libraryImport'
+import type { KbNoteInfo, KbUsage } from './kbFront'
 
 import { downloadName } from './workflowImport'
 import type { WorkflowImportResult } from './types/WorkflowImportResult'
@@ -2468,6 +2469,31 @@ export function unregisterLibraryHook(
 /** One note's markdown (front matter included), as `naru kb show`. */
 export function getKbNote(path: string): Promise<{ path: string; body: string }> {
   return request(`/api/kb/note?path=${encodeURIComponent(path)}`)
+}
+
+/** Every note's metadata, as `naru kb list`. */
+export function listKbNotes(): Promise<KbNoteInfo[]> {
+  return request('/api/kb/notes')
+}
+
+/** The automatic lookup's counts over the last 28 days, as `naru kb usage`. */
+export function getKbUsage(): Promise<KbUsage> {
+  return request('/api/kb/usage')
+}
+
+/** Near-duplicate clusters, biggest first, as `naru kb dupes`. */
+export function getKbDupes(): Promise<
+  { score: number; notes: { path: string; title: string; tags: string[] }[] }[]
+> {
+  return request('/api/kb/dupes')
+}
+
+/** `naru kb merge <keep> <drop>...`: folds the drops into `keep`, deletes them. */
+export function mergeKbNotes(
+  keep: string,
+  drop: string[],
+): Promise<{ kept: string; removed: string[] }> {
+  return request('/api/kb/merge', jsonInit('POST', { keep, drop }))
 }
 
 /** `naru kb ask`: one model call; empty `answer` = the notes don't say. */
