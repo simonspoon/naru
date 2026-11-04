@@ -5057,12 +5057,13 @@ pub(crate) struct WatchThread {
     /// The model of the newest assistant message that names one.
     pub model: Option<String>,
     /// Other tool calls (not a subagent launch, not a background shell) as
-    /// `(start, end, tool name, summary)`, `tool_use` timestamp to its paired
-    /// `tool_result` timestamp. `end` is [`WATCH_TOOL_OPEN`] while no result
-    /// has arrived. Only calls overlapping the window; newest
+    /// `(start, end, tool name, summary, error)`, `tool_use` timestamp to its
+    /// paired `tool_result` timestamp. `end` is [`WATCH_TOOL_OPEN`] while no
+    /// result has arrived; `error` is the result's `is_error` (a failure or a
+    /// denial), `false` while open. Only calls overlapping the window; newest
     /// [`WATCH_MAX_TOOLS`] kept. `summary` is [`watch_tool_summary`] of the
     /// call's input, empty when there is none.
-    pub tools: Vec<(i64, i64, String, String)>,
+    pub tools: Vec<(i64, i64, String, String, bool)>,
 }
 
 /// `end` of a tool call whose result has not been seen yet.
@@ -5137,14 +5138,17 @@ fn watch_tool_uses(content: &serde_json::Value) -> Vec<(String, String, String)>
 }
 
 /// The `tool_use_id` of each `tool_result` block in `content`.
-fn watch_tool_results(content: &serde_json::Value) -> Vec<String> {
+fn watch_tool_results(content: &serde_json::Value) -> Vec<(String, bool)> {
     let Some(blocks) = content.as_array() else {
         return Vec::new();
     };
     blocks
         .iter()
         .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
-        .filter_map(|b| Some(b.get("tool_use_id")?.as_str()?.to_string()))
+        .filter_map(|b| {
+            let error = b.get("is_error").and_then(|e| e.as_bool()) == Some(true);
+            Some((b.get("tool_use_id")?.as_str()?.to_string(), error))
+        })
         .collect()
 }
 
@@ -5166,7 +5170,7 @@ fn watch_from_text(text: &str, since: i64, main_only: bool, truncated: bool) -> 
     let mut first: Option<i64> = None;
     // tool_use id -> index into out.tools, for pairing with its result.
     let mut open: HashMap<String, usize> = HashMap::new();
-    let mut tools: Vec<(i64, i64, String, String)> = Vec::new();
+    let mut tools: Vec<(i64, i64, String, String, bool)> = Vec::new();
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() {
@@ -5193,12 +5197,13 @@ fn watch_from_text(text: &str, since: i64, main_only: bool, truncated: bool) -> 
             if raw.kind.as_deref() == Some("assistant") {
                 for (id, name, summary) in watch_tool_uses(content) {
                     open.insert(id, tools.len());
-                    tools.push((t, WATCH_TOOL_OPEN, name, summary));
+                    tools.push((t, WATCH_TOOL_OPEN, name, summary, false));
                 }
             } else {
-                for id in watch_tool_results(content) {
+                for (id, error) in watch_tool_results(content) {
                     if let Some(i) = open.remove(&id) {
                         tools[i].1 = t.max(tools[i].0);
+                        tools[i].4 = error;
                     }
                 }
             }
@@ -5210,7 +5215,7 @@ fn watch_from_text(text: &str, since: i64, main_only: bool, truncated: bool) -> 
         }
     }
     out.runs = coalesce_runs(&events);
-    tools.retain(|(_, end, _, _)| *end == WATCH_TOOL_OPEN || *end >= since);
+    tools.retain(|(_, end, ..)| *end == WATCH_TOOL_OPEN || *end >= since);
     if tools.len() > WATCH_MAX_TOOLS {
         tools.drain(..tools.len() - WATCH_MAX_TOOLS);
     }
@@ -9546,6 +9551,8 @@ mod tests {
             ),
             user("2026-06-15T01:10:03Z", "a"),
             asst("2026-06-15T01:10:10Z", r#"{"type":"tool_use","id":"d","name":"Grep","input":{}}"#),
+            asst("2026-06-15T01:10:20Z", r#"{"type":"tool_use","id":"e","name":"Write","input":{"file_path":"/x/z.rs"}}"#),
+            r#"{"type":"user","timestamp":"2026-06-15T01:10:21Z","message":{"content":[{"type":"tool_result","tool_use_id":"e","is_error":true,"content":"denied"}]}}"#.to_string(),
             "not json".to_string(),
         ]
         .join("\n");
@@ -9557,9 +9564,24 @@ mod tests {
                     t0 + 600,
                     t0 + 603,
                     "Read".to_string(),
-                    "/x/y.rs".to_string()
+                    "/x/y.rs".to_string(),
+                    false
                 ),
-                (t0 + 610, WATCH_TOOL_OPEN, "Grep".to_string(), String::new()),
+                (
+                    t0 + 610,
+                    WATCH_TOOL_OPEN,
+                    "Grep".to_string(),
+                    String::new(),
+                    false
+                ),
+                // An `is_error` result (a failure or a denial) is flagged.
+                (
+                    t0 + 620,
+                    t0 + 621,
+                    "Write".to_string(),
+                    "/x/z.rs".to_string(),
+                    true
+                ),
             ]
         );
         // A bare-string user message and a missing message are harmless.

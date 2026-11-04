@@ -46,7 +46,7 @@ import type { OrbitJob } from './types/OrbitJob'
 import type { OrbitQueued } from './types/OrbitQueued'
 
 function agent(role: string, state: string, at = 0): OrbitAgent {
-  return { key: `${role}-${at}`, role, label: role, detail: null, state, startedAt: at, lastEventAt: at }
+  return { key: `${role}-${at}`, role, label: role, detail: null, state, startedAt: at, lastEventAt: at, tools: [] }
 }
 
 function job(id: number, over: Partial<OrbitJob> = {}): OrbitJob {
@@ -65,6 +65,7 @@ function job(id: number, over: Partial<OrbitJob> = {}): OrbitJob {
     sessionId: null,
     startedAt: null,
     agents: [agent('recon', 'done', 1), agent('build', 'done', 2), agent('review', 'done', 3), agent('test', 'working', 4), agent('check', 'waiting', 5), agent('build', 'done', 6)],
+    tools: [],
     ...over,
   }
 }
@@ -259,9 +260,9 @@ describe('sparkPoints / pct', () => {
 
 describe('voiceMotion / hrefs', () => {
   it('moves the bars only while live', () => {
-    expect(voiceMotion({ active: false, state: 'off', sessionId: null, projectId: null, agentSessionId: null, agents: [], recent: [] })).toBe('off')
-    expect(voiceMotion({ active: true, state: 'speaking', sessionId: 1, projectId: 2, agentSessionId: null, agents: [], recent: [] })).toBe('speaking')
-    expect(voiceMotion({ active: true, state: 'listening', sessionId: 1, projectId: 2, agentSessionId: null, agents: [], recent: [] })).toBe('idle')
+    expect(voiceMotion({ active: false, state: 'off', sessionId: null, projectId: null, agentSessionId: null, agents: [], tools: [], recent: [] })).toBe('off')
+    expect(voiceMotion({ active: true, state: 'speaking', sessionId: 1, projectId: 2, agentSessionId: null, agents: [], tools: [], recent: [] })).toBe('speaking')
+    expect(voiceMotion({ active: true, state: 'listening', sessionId: 1, projectId: 2, agentSessionId: null, agents: [], tools: [], recent: [] })).toBe('idle')
   })
 
   it('links tasks to their panel and workflows to their editor', () => {

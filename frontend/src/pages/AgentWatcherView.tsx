@@ -35,6 +35,8 @@ import {
   type ViewBox,
   type WatchPanel,
 } from '../agentOrbit'
+import { BURST_MAX, chipOffset, chipSide, chipText, newBursts, type Burst, type NodeTools } from '../toolBurst'
+import type { AgentOrbit } from '../types/AgentOrbit'
 import type { CcSessionChat } from '../types/CcSessionChat'
 import type { OrbitAgent } from '../types/OrbitAgent'
 import type { OrbitNaru } from '../types/OrbitNaru'
@@ -80,6 +82,7 @@ export function AgentWatcherView({ active = true }: { active?: boolean } = {}) {
   const { dragged, pressed } = usePanZoom(svg, shown, setView, clearHover)
   const px = useSize(svg)
   const layout = data ? layoutOrbit(data.jobs, data.naru.agents, data.now) : null
+  const bursts = useBursts(data)
   // Labels grow when the whole map is squeezed into a narrow tab (meet
   // scaling: the tighter axis wins), never into each other (safeBoost).
   const boostFor = (v: ViewBox) => (layout ? safeBoost(layout, textBoost(px ? Math.min(px.w / v.w, px.h / v.h) : 1)) : 1)
@@ -102,6 +105,7 @@ export function AgentWatcherView({ active = true }: { active?: boolean } = {}) {
     onMouseLeave: () => setHover(null),
   })
   const groups = groupQueue(data.queue, data.projects)
+  const nodeAt = anchors(layout)
   const motion = voiceMotion(data.naru)
 
   return (
@@ -233,6 +237,42 @@ export function AgentWatcherView({ active = true }: { active?: boolean } = {}) {
               </a>
             )
           })}
+          <g className="orbit-bursts" aria-hidden="true">
+            {bursts.map((bu) => {
+              const from = nodeAt.get(bu.node)
+              if (!from) return null
+              const fs = DOT_PX * b * CHIP_SCALE
+              const width = (text: string) => text.length * fs * 0.6 + fs
+              // The side away from the centre, unless the widest chip would
+              // leave the view there and fit on the other side.
+              const reach = from.r + 6 + CHIP_FLIGHT * b + Math.max(...bu.chips.map((c) => width(chipText(c))))
+              const fits = (sd: 1 | -1) => (sd > 0 ? from.at.x + reach <= vb.x + vb.w : from.at.x - reach >= vb.x)
+              const side = fits(from.side) || !fits(-from.side as 1 | -1) ? from.side : (-from.side as 1 | -1)
+              return (
+                <g key={bu.id} transform={`translate(${from.at.x + side * (from.r + 6)} ${from.at.y})`}>
+                  {bu.chips.map((c, i) => {
+                    const off = chipOffset(side, i, bu.chips.length, CHIP_FLIGHT * b, fs)
+                    const text = chipText(c)
+                    // The chip grows away from its node: its near edge is at the offset.
+                    const w = width(text)
+                    const x0 = side > 0 ? 0 : -w
+                    return (
+                      <g
+                        key={i}
+                        className={`orbit-chip ${c.kind}${c.error ? ' error' : ''}`}
+                        style={{ '--dx': `${off.x}px`, '--dy': `${off.y}px`, animationDelay: `${i * CHIP_STAGGER_S}s` } as React.CSSProperties}
+                      >
+                        <rect x={x0} y={-fs * 0.75} width={w} height={fs * 1.5} rx={fs * 0.45} />
+                        <text x={x0 + w / 2} y={fs * 0.33} textAnchor="middle" fontSize={fs}>
+                          {text}
+                        </text>
+                      </g>
+                    )
+                  })}
+                </g>
+              )
+            })}
+          </g>
           {layout.jobs.length === 0 && (
             <text className="orbit-sub" x={C} y={C + RING} textAnchor="middle" fontSize={SUB_PX * b}>
               Nothing running
@@ -278,6 +318,69 @@ export function AgentWatcherView({ active = true }: { active?: boolean } = {}) {
       {stats && <StatGraphs stats={stats} collapsed={statsCollapsed} onToggle={() => setStatsCollapsed(!statsCollapsed)} />}
     </div>
   )
+}
+
+/** How far a chip flies out sideways from its node's edge, in viewBox units (before label boost). */
+const CHIP_FLIGHT = 40
+/** A chip's text against a dot label's: a touch larger, as it is read in passing. */
+const CHIP_SCALE = 1.15
+/** Delay between the chips of one burst, and one chip's whole life (the CSS animation's length). */
+const CHIP_STAGGER_S = 0.2
+const CHIP_LIFE_MS = 2400
+
+/** Every node a burst can leave: where it is, its painted radius and which side its chips go. */
+function anchors(layout: ReturnType<typeof layoutOrbit>) {
+  const m = new Map<string, { at: Pt; r: number; side: 1 | -1 }>()
+  const centre: Pt = { x: C, y: C }
+  m.set('naru', { at: centre, r: NARU_R, side: 1 })
+  for (const d of layout.naru) m.set(d.agent.key, { at: d.at, r: DOT_R, side: chipSide(centre, d.at) })
+  for (const l of layout.jobs) {
+    const job = { at: l.at, r: NODE_R, side: chipSide(centre, l.at) }
+    m.set(`${l.job.kind}-${l.job.id}`, job)
+    // A sub-agent with no dot of its own (past the cluster cap) bursts from its job.
+    for (const a of l.job.agents) m.set(a.key, job)
+    for (const d of l.dots) m.set(d.agent.key, { at: d.at, r: DOT_R, side: chipSide(l.at, d.at) })
+  }
+  return m
+}
+
+/** The orbit's nodes and their tool calls, keyed as `anchors` keys them. */
+function feedNodes(o: AgentOrbit): NodeTools[] {
+  const nodes: NodeTools[] = [{ node: 'naru', tools: o.naru.tools, agents: o.naru.agents }]
+  for (const a of o.naru.agents) nodes.push({ node: a.key, tools: a.tools })
+  for (const j of o.jobs) {
+    nodes.push({ node: `${j.kind}-${j.id}`, tools: j.tools, agents: j.kind === 'task' ? j.agents : [] })
+    for (const a of j.agents) nodes.push({ node: a.key, tools: a.tools })
+  }
+  return nodes
+}
+
+/** The bursts in flight: each feed's new tool calls, dropped once their chips have faded. */
+function useBursts(data: AgentOrbit | null | undefined): (Burst & { id: number })[] {
+  const [live, setLive] = useState<(Burst & { id: number })[]>([])
+  const seen = useRef<Set<string> | null>(null)
+  const next = useRef(0)
+  // Each burst's own timer outlives the next feed; only unmounting clears them.
+  const timers = useRef(new Set<ReturnType<typeof setTimeout>>())
+  useEffect(() => {
+    const all = timers.current
+    return () => all.forEach(clearTimeout)
+  }, [])
+  useEffect(() => {
+    if (!data) return
+    const { bursts, seen: s } = newBursts(feedNodes(data), seen.current)
+    seen.current = s
+    if (bursts.length === 0) return
+    const added = bursts.map((bu) => ({ ...bu, id: next.current++ }))
+    const ids = new Set(added.map((a) => a.id))
+    setLive((l) => [...l, ...added])
+    const t = setTimeout(() => {
+      timers.current.delete(t)
+      setLive((l) => l.filter((x) => !ids.has(x.id)))
+    }, CHIP_LIFE_MS + (BURST_MAX - 1) * CHIP_STAGGER_S * 1000 + 200)
+    timers.current.add(t)
+  }, [data])
+  return live
 }
 
 /** An element's size in CSS pixels, kept current as it resizes. */

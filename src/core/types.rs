@@ -427,6 +427,10 @@ pub struct OrbitNaru {
     /// That session's sub-agents — its delegates, forks and background
     /// agents — read exactly as a task job's are.
     pub agents: Vec<OrbitAgent>,
+    /// That session's own tool calls started in the last `orbit::TOOL_SECS`,
+    /// oldest first.
+    #[serde(default)]
+    pub tools: Vec<OrbitTool>,
     /// The conversation's newest few turns with text, oldest first, each
     /// capped at `orbit::TURN_CHARS` characters.
     pub recent: Vec<OrbitTurn>,
@@ -491,6 +495,25 @@ pub struct OrbitJob {
     #[ts(type = "number | null")]
     pub started_at: Option<i64>,
     pub agents: Vec<OrbitAgent>,
+    /// Its sessions' own tool calls started in the last `orbit::TOOL_SECS`,
+    /// oldest first (its sub-agents' are on each agent).
+    #[serde(default)]
+    pub tools: Vec<OrbitTool>,
+}
+
+/// One recent tool call of an orbit node (naru task 2568): what the page
+/// bursts out of the node. `at` is the `tool_use` timestamp (Unix seconds).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+#[serde(rename_all = "camelCase")]
+pub struct OrbitTool {
+    #[ts(type = "number")]
+    pub at: i64,
+    pub name: String,
+    /// The call's one-line input digest (`cc::watch_tool_summary`), `""` if none.
+    pub summary: String,
+    /// The result came back `is_error` (a failure or a denial).
+    pub error: bool,
 }
 
 /// One sub-agent of a job (a subagent transcript, or a workflow node).
@@ -513,6 +536,9 @@ pub struct OrbitAgent {
     pub started_at: Option<i64>,
     #[ts(type = "number | null")]
     pub last_event_at: Option<i64>,
+    /// Its tool calls started in the last `orbit::TOOL_SECS`, oldest first.
+    #[serde(default)]
+    pub tools: Vec<OrbitTool>,
 }
 
 /// One queued item: a `todo` task or a timed workflow's next run.
@@ -588,12 +614,13 @@ pub struct AgentWatchRow {
     pub output_at: Option<i64>,
     pub finished: bool,
     /// Other tool calls inside the window as `[start, end, tool name,
-    /// summary]` (Unix seconds; `summary` is a bounded one-line digest of the
-    /// call's input, `""` if none); `end` is `-1` while no result yet. Subagent
+    /// summary, error]` (Unix seconds; `summary` is a bounded one-line digest
+    /// of the call's input, `""` if none); `end` is `-1` while no result yet;
+    /// `error` is the result's `is_error` (a failure or a denial). Subagent
     /// launches and background shells are not here (they have their own row).
-    #[ts(type = "Array<[number, number, string, string]>")]
+    #[ts(type = "Array<[number, number, string, string, boolean]>")]
     #[serde(default)]
-    pub tools: Vec<(i64, i64, String, String)>,
+    pub tools: Vec<(i64, i64, String, String, bool)>,
 }
 
 /// One configurable agent-spawn command as the Settings page sees it

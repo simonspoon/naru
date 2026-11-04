@@ -39,8 +39,9 @@ historyFrom: number | null,
 outputAt: number | null, finished: boolean, 
 /**
  * Other tool calls inside the window as `[start, end, tool name,
- * summary]` (Unix seconds; `summary` is a bounded one-line digest of the
- * call's input, `""` if none); `end` is `-1` while no result yet. Subagent
+ * summary, error]` (Unix seconds; `summary` is a bounded one-line digest
+ * of the call's input, `""` if none); `end` is `-1` while no result yet;
+ * `error` is the result's `is_error` (a failure or a denial). Subagent
  * launches and background shells are not here (they have their own row).
  */
-tools: Array<[number, number, string, string]>, };
+tools: Array<[number, number, string, string, boolean]>, };

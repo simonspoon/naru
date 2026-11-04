@@ -1,4 +1,4 @@
-# Agent watcher (naru tasks 1909, 2541, 2551, 2564)
+# Agent watcher (naru tasks 1909, 2541, 2551, 2564, 2568)
 
 A live map of the whole machine, a dock panel (`watcher`, starts closed; reopen from the header `⋯` menu) and, on the phone tier, a full page at `#/agent-watcher` (nav
 entry "Agent watcher", right after Terminal). Since naru task 2541 the page
@@ -23,7 +23,7 @@ Payload (`AgentWatch`, ts-exported, camelCase, **all times Unix seconds**):
 children), `label` (sanitized, bounded), `detail`, `model`, `startedAt`,
 `runs` (`[start, end]` working stretches inside the window, empty for a shell),
 `lastEventAt` (newest event, any age), `historyFrom`, `outputAt` (shells),
-`finished`, `tools` (`[start, end, name, summary]` other tool calls, below).
+`finished`, `tools` (`[start, end, name, summary, error]` other tool calls, below).
 
 ## What goes in
 
@@ -42,10 +42,11 @@ coalesced by `coalesce_runs` — the same arithmetic and gap
 ## Tool calls
 
 `cc::watch_from_text` also pairs each `tool_use` block with its `tool_result`
-(`tool_use_id`) into `tools`: `[start, end, name, summary]`, the two line timestamps; `summary` is a one-line
+(`tool_use_id`) into `tools`: `[start, end, name, summary, error]`, the two line timestamps; `summary` is a one-line
 digest of the call's `input` (`cc::watch_tool_summary`: the `tool_target` key list —
 `command`, `file_path`, `pattern`, `skill`, `url`, `query`… — `subagent_type: description`
-for `Agent`, else the first string value; sanitized, capped at 200 chars, empty if none). `end`
+for `Agent`, else the first string value; sanitized, capped at 200 chars, empty if none). `error` is the result's
+`is_error` (a failure or a denial; `false` while open). `end`
 is `-1` while no result has arrived (drawn to now, or to the last event of a
 finished row). A subagent launch (`Agent`/`Task`) and a `run_in_background`
 call are left out (they have their own row/segment); calls ending before the
@@ -140,6 +141,12 @@ said): `now`, `naru`, `agentsAvailable`, `jobs[]`, `queue[]`, `projects[]`.
   workflow not running now, with its `nextRunAt` (stored UTC text). It carries
   **no order numbers**: projects run concurrently, so a position would mean
   nothing; the order is the task list's, then workflows by name.
+- **`tools`** (`OrbitTool`, naru task 2568) on `naru`, on every job and on
+  every agent: that node's own tool calls (`at` = the `tool_use` time,
+  `name`, `summary`, `error`) started in the last `orbit::TOOL_SECS` = 30 s,
+  oldest first, the newest `orbit::TOOL_MAX` = 24 kept. A job's are its
+  matched sessions' main-thread calls, an agent's its subagent transcript's,
+  Naru's its `agentSessionId`'s; a workflow job and its steps carry none.
 - **`projects`** (`OrbitProject`): each project a job or queued item names,
   in project-list order, with its `color`.
 
@@ -247,6 +254,24 @@ while the panel is visible.
   `naru-watcher-stats-collapsed` / `naru-watcher-queue-collapsed` (`'1'` =
   collapsed, absent = expanded; `loadCollapsed`/`saveCollapsed` in
   `agentOrbit.ts`).
+- **Tool-call bursts** (naru task 2568; `frontend/src/toolBurst.ts`, pure and
+  tested): each poll, every call not seen in the previous poll leaves its
+  node — Naru, a job or a dot (a sub-agent past the dot cap: its job) — as a
+  chip with a kind icon and colour (`shell` `$` amber, `read` `▤` cyan,
+  `write` `✎` green, `search` `⌕` magenta, `web`/MCP `◎`, `naru` (a shell
+  call running `naru …`) `◆` and `agent` `✦` violet, else `•`), the tool
+  name and one word of detail (a file's base name, a command's name, a URL's
+  host; at most 14 characters). A new sub-agent under a node is an `Agent`
+  chip. Per node per poll the calls coalesce by tool name (`Read ×5`); past
+  `BURST_MAX` = 3 chips the oldest groups fold into one `+n`. An `error`
+  call tints its chip red; a call first seen open that later fails bursts
+  once more, red. Chips
+  leave sideways — horizontally away from Naru (a dot: from its job), flipped
+  when the widest would leave the view — since every label sits above or
+  below its node, stack in a column, fly 40 units and fade out over 2.4 s;
+  under `prefers-reduced-motion` they appear in place and only fade. They are
+  SVG in the map, so they pan, zoom and boost with it, and take no pointer.
+  The first feed after opening only records (no replay of the last 30 s).
 - Project colours are the feed's (the agent palette, theme-independent);
   every text colour is a theme variable, so light and dark both read.
 - A job links to its task panel or workflow; a queued item likewise.
@@ -255,7 +280,8 @@ while the panel is visible.
 
 `cc.rs` (`coalesce_runs`, `watch_from_text`, tool pairing), `agents.rs` (`watch_includes`,
 `parse_lsof`), `orbit.rs` (colours, stage names, roles, and one store-backed
-scenario through `from_store`), `api.rs` (`/api/agents/orbit` pairing and
+scenario through `from_store`, tool calls per node included), `api.rs` (`/api/agents/orbit` pairing and
 Host refusal), `frontend/src/agentOrbit.test.ts` (layout, overlap, queue
-grouping, sparklines), and a section of
+grouping, sparklines), `frontend/src/toolBurst.test.ts` (kinds, details,
+coalescing, new-call diffing, chip placement), and a section of
 `scripts/agents-check.sh` (route, parent links, window clamp, foreign Host).

@@ -14,8 +14,8 @@ use crate::core::cc;
 use crate::core::store::Store;
 use crate::core::types::{
     AgentOrbit, AgentSession, AgentWatchKind, AgentWatchRow, LiveRole, LiveSession, LiveTurn,
-    OrbitAgent, OrbitJob, OrbitNaru, OrbitProject, OrbitQueued, OrbitTurn, Project, Status, Task,
-    Workflow, WorkflowRun, WorkflowStepStatus,
+    OrbitAgent, OrbitJob, OrbitNaru, OrbitProject, OrbitQueued, OrbitTool, OrbitTurn, Project,
+    Status, Task, Workflow, WorkflowRun, WorkflowStepStatus,
 };
 
 /// One colour per project, chosen by `project id % len` — so a project keeps
@@ -32,6 +32,38 @@ pub const QUIET_SECS: i64 = 60;
 /// An unplayed Naru turn younger than this means the voice is `speaking`;
 /// an older one was never played (no browser held the conversation).
 pub const SPEAKING_SECS: i64 = 30;
+/// A node carries the tool calls it started this recently (naru task 2568):
+/// enough to span a few 5 s polls, so the page sees each call at least once.
+pub const TOOL_SECS: i64 = 30;
+/// At most this many of them per node, the newest kept.
+pub const TOOL_MAX: usize = 24;
+
+/// A watcher row's tool calls started in the last [`TOOL_SECS`], oldest
+/// first, the newest [`TOOL_MAX`] kept.
+fn recent_tools<'a>(rows: impl Iterator<Item = &'a AgentWatchRow>, now: i64) -> Vec<OrbitTool> {
+    let mut tools: Vec<OrbitTool> = rows
+        .flat_map(|r| &r.tools)
+        .filter(|(at, ..)| now - at <= TOOL_SECS)
+        .map(|(at, _, name, summary, error)| OrbitTool {
+            at: *at,
+            name: name.clone(),
+            summary: summary.clone(),
+            error: *error,
+        })
+        .collect();
+    tools.sort_by_key(|t| t.at);
+    tools.drain(..tools.len().saturating_sub(TOOL_MAX));
+    tools
+}
+
+/// The session's own watcher row (its main thread).
+fn session_row<'a>(
+    rows: &'a [AgentWatchRow],
+    session_id: &'a str,
+) -> impl Iterator<Item = &'a AgentWatchRow> + 'a {
+    rows.iter()
+        .filter(move |r| r.kind == AgentWatchKind::Session && r.session_id == session_id)
+}
 
 /// The project's colour (see [`PROJECT_COLORS`]).
 pub fn project_color(project_id: i64) -> &'static str {
@@ -294,6 +326,7 @@ fn session_agents<'a>(
             .into(),
             started_at: r.started_at,
             last_event_at: r.last_event_at,
+            tools: recent_tools(std::iter::once(r), now),
         })
 }
 
@@ -338,6 +371,12 @@ fn task_job(
         agents.extend(session_agents(rows, &s.session_id, now));
     }
     agents.sort_by_key(|a| (a.started_at.unwrap_or(i64::MAX), a.key.clone()));
+    let tools = recent_tools(
+        matched
+            .iter()
+            .flat_map(|(s, _)| session_row(rows, &s.session_id)),
+        now,
+    );
 
     // The newest stage-driver session's stage: an earlier stage's session
     // can still be listed after the next one starts.
@@ -407,6 +446,7 @@ fn task_job(
             .map(|s| s.started_at / 1000)
             .or_else(|| t.claimed_at.as_deref().and_then(cc::parse_ts)),
         agents,
+        tools,
     }
 }
 
@@ -461,8 +501,10 @@ fn workflow_job(
                 .into(),
                 started_at: s.started_at,
                 last_event_at: None,
+                tools: Vec::new(),
             })
             .collect(),
+        tools: Vec::new(),
     }
 }
 
@@ -491,6 +533,7 @@ fn naru_state(
             project_id: None,
             agent_session_id: None,
             agents: Vec::new(),
+            tools: Vec::new(),
             recent: Vec::new(),
         };
     };
@@ -502,6 +545,9 @@ fn naru_state(
         .map(|sid| session_agents(rows, sid, now).collect())
         .unwrap_or_default();
     agents.sort_by_key(|a| (a.started_at.unwrap_or(i64::MAX), a.key.clone()));
+    let tools = agent_session
+        .map(|sid| recent_tools(session_row(rows, sid), now))
+        .unwrap_or_default();
     let said: Vec<&LiveTurn> = turns.iter().filter(|t| !t.text.trim().is_empty()).collect();
     let recent = said[said.len().saturating_sub(TURNS_SHOWN)..]
         .iter()
@@ -534,6 +580,7 @@ fn naru_state(
         project_id: s.project_id,
         agent_session_id: agent_session.map(str::to_string),
         agents,
+        tools,
         recent,
     }
 }
@@ -649,6 +696,32 @@ mod tests {
             sub_row("other", "c", "verifier", false, now - 5),
             sub_row("naru-s", "d", "general-purpose", false, now - 5),
         ];
+        // Tool calls (naru task 2568): each node carries its own recent ones.
+        let mut rows = rows;
+        let tool = |at: i64, name: &str, error: bool| {
+            serde_json::json!([at, at + 1, name, format!("{name} input"), error])
+        };
+        rows[1].tools =
+            serde_json::from_value(serde_json::json!([tool(now - 2, "Read", false)])).unwrap();
+        let main = |sid: &str, tools: serde_json::Value| -> AgentWatchRow {
+            serde_json::from_value(serde_json::json!({
+                "key": sid, "kind": "session", "sessionId": sid, "label": "main",
+                "runs": [], "finished": false, "tools": tools
+            }))
+            .unwrap()
+        };
+        rows.push(main(
+            "s1",
+            serde_json::json!([
+                tool(now - TOOL_SECS - 1, "Grep", false),
+                tool(now - 3, "Bash", true),
+                tool(now - 4, "Edit", false)
+            ]),
+        ));
+        rows.push(main(
+            "naru-s",
+            serde_json::json!([tool(now - 1, "WebFetch", false)]),
+        ));
         let o = from_store(&st, now, Some(sessions), rows).unwrap();
 
         assert!(o.agents_available);
@@ -658,6 +731,10 @@ mod tests {
         assert_eq!(o.naru.agent_session_id.as_deref(), Some("naru-s"));
         let naru_agents: Vec<&str> = o.naru.agents.iter().map(|a| a.key.as_str()).collect();
         assert_eq!(naru_agents, vec!["naru-s/d"]);
+        let names = |t: &[OrbitTool]| -> Vec<(String, bool)> {
+            t.iter().map(|t| (t.name.clone(), t.error)).collect()
+        };
+        assert_eq!(names(&o.naru.tools), vec![("WebFetch".into(), false)]);
         let recent: Vec<(&str, &str)> = o
             .naru
             .recent
@@ -680,6 +757,15 @@ mod tests {
             .map(|a| (a.role.as_str(), a.state.as_str()))
             .collect();
         assert_eq!(agents, vec![("recon", "done"), ("build", "working")]);
+        // The job's main-thread calls, oldest first, the stale one dropped;
+        // a sub-agent's calls stay on the sub-agent.
+        assert_eq!(
+            names(&j.tools),
+            vec![("Edit".into(), false), ("Bash".into(), true)]
+        );
+        assert_eq!(j.tools[0].summary, "Edit input");
+        assert_eq!(names(&j.agents[1].tools), vec![("Read".into(), false)]);
+        assert!(j.agents[0].tools.is_empty());
         let w = &o.jobs[1];
         assert_eq!((w.stage.as_str(), w.progress), ("second", 0.5));
         assert_eq!(w.agents.len(), 2);

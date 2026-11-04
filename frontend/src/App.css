@@ -13538,6 +13538,53 @@ body.dock-resizing .dock-body {
   .orbit-bar { animation: none; }
 }
 
+/* Tool-call bursts (naru task 2568): each new call leaves its node as a chip
+   that flies out (--dx/--dy, set per chip) and fades. Kind is the colour,
+   red is an error or a denial; the fill is opaque so both themes read. */
+.orbit-bursts { pointer-events: none; }
+.orbit-chip {
+  --chip: var(--muted);
+  color: var(--chip);
+  opacity: 0;
+  transform: translate(var(--dx), var(--dy));
+  animation: orbit-chip-fly 2.4s ease-out both;
+}
+.orbit-chip rect {
+  fill: var(--panel-raised);
+  stroke: currentColor;
+  stroke-width: 2;
+}
+.orbit .orbit-chip text {
+  fill: var(--text-h);
+  stroke: none;
+  font-family: var(--font-mono);
+  font-weight: 700;
+}
+.orbit-chip.shell { --chip: var(--amber); }
+.orbit-chip.read { --chip: var(--cyan); }
+.orbit-chip.write { --chip: var(--green); }
+.orbit-chip.search { --chip: var(--magenta); }
+.orbit-chip.web { --chip: var(--text); }
+.orbit-chip.naru,
+.orbit-chip.agent { --chip: var(--violet); }
+.orbit-chip.error { --chip: var(--red); }
+.orbit .orbit-chip.error text { fill: var(--red); }
+@keyframes orbit-chip-fly {
+  0% { opacity: 0; transform: translate(0, 0) scale(0.5); }
+  15% { opacity: 1; }
+  45% { transform: translate(var(--dx), var(--dy)) scale(1); }
+  75% { opacity: 1; }
+  100% { opacity: 0; transform: translate(var(--dx), var(--dy)) scale(1); }
+}
+@keyframes orbit-chip-fade {
+  0% { opacity: 0; }
+  15%, 70% { opacity: 1; }
+  100% { opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .orbit-chip { animation-name: orbit-chip-fade; }
+}
+
 .orbit-node {
   fill: var(--panel);
   stroke: var(--border);
