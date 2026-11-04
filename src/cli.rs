@@ -2419,7 +2419,7 @@ EXAMPLES
         project: Option<String>,
         /// Install any missing managed built-in workflow and bring the others
         /// up to date: "KB: mine past sessions" and "KB: ongoing capture"
-        /// (created disabled). Never
+        /// (created disabled) and "KB: cleanup" (created enabled). Never
         /// changes whether an installed one is on or off
         #[arg(long)]
         builtins: bool,

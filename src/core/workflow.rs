@@ -2061,10 +2061,16 @@ const STAGE_MAX_SECS: i64 = 86400;
 /// The `builtin_id`s of the managed built-in workflows (naru task 2103).
 pub const BUILTIN_KB_MINE: &str = "kb-mine";
 pub const BUILTIN_KB_CAPTURE: &str = "kb-capture";
+pub const BUILTIN_KB_CLEANUP: &str = "kb-cleanup";
 
 /// The knowledge-base built-ins (naru task 2118).
 pub const KB_MINE_WORKFLOW: &str = "KB: mine past sessions";
 pub const KB_CAPTURE_WORKFLOW: &str = "KB: ongoing capture";
+pub const KB_CLEANUP_WORKFLOW: &str = "KB: cleanup";
+
+/// The "KB: cleanup" built-in's description and nodes in order (naru task
+/// 2571), embedded at compile time; consecutive nodes are wired in a chain.
+const KB_CLEANUP_DEF: &str = include_str!("kb_cleanup_workflow.json");
 
 /// The kb-mine helper, shipped inline in both KB built-ins' cli node so no
 /// built-in depends on a file outside the build (naru task 2118). It needs
@@ -2121,14 +2127,15 @@ ${text: -8000}"; fi
 done
 "##;
 
-/// Installs or updates the managed built-in workflows — the two KB
-/// workflows, global and **disabled** when created (naru task 2118). An
+/// Installs or updates the managed built-in workflows — the two KB mining
+/// workflows, global and **disabled** when created (naru task 2118), and
+/// "KB: cleanup" ([`install_kb_cleanup`], naru task 2571). An
 /// install never writes `enabled` on a built-in already there, so the
 /// person's on/off stands. Idempotent; run on every `serve` start, by `naru
 /// workflow defaults --builtins` and by the Workflows page's
 /// "Install built-ins" button.
 ///
-/// A same-named workflow that is not yet a built-in is a user's own: it is
+/// A same-named workflow that is not yet a mining built-in is a user's own: it is
 /// renamed `"<name> (custom)"` (id, graph and runs kept, never deleted).
 /// An installed built-in whose shipped graph changed is reseeded in place as
 /// a `seed` revision. Answers the workflows created or updated and the names
@@ -2149,7 +2156,74 @@ pub fn install_builtins(store: &mut Store) -> Result<(Vec<WorkflowView>, Vec<Str
             Err(e) => return Err(e),
         }
     }
-    build_kb_builtins(store)
+    let (mut created, mut skipped) = build_kb_builtins(store)?;
+    match install_kb_cleanup(store)? {
+        Some(v) => created.push(v),
+        None => skipped.push(KB_CLEANUP_WORKFLOW.to_string()),
+    }
+    Ok((created, skipped))
+}
+
+/// Creates or reseeds the "KB: cleanup" built-in (naru task 2571), a
+/// person's own workflow promoted, so unlike the other built-ins a
+/// same-named user workflow is never renamed: a global one whose graph is
+/// the shipped one is adopted as the built-in in place (id, runs and enabled
+/// kept), and any other is left untouched with no built-in installed beside
+/// it. Created enabled: its trigger is manual, so it spends nothing until run.
+fn install_kb_cleanup(store: &mut Store) -> Result<Option<WorkflowView>> {
+    let def: Value = serde_json::from_str(KB_CLEANUP_DEF).expect("kb_cleanup_workflow.json");
+    let description = def["description"].as_str().unwrap_or_default();
+    let nodes: Vec<_> = def["nodes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|n| {
+            (
+                n["kind"]
+                    .as_str()
+                    .and_then(WorkflowNodeKind::parse)
+                    .expect("kb_cleanup_workflow.json node kind"),
+                n["title"].as_str().unwrap_or_default(),
+                n["config"].clone(),
+                n["x"].as_f64().unwrap_or_default(),
+                n["y"].as_f64().unwrap_or_default(),
+            )
+        })
+        .collect();
+    let edges: Vec<_> = (1..nodes.len()).map(|i| (i - 1, i, None)).collect();
+    if store.builtin_workflow_id(BUILTIN_KB_CLEANUP)?.is_none() {
+        match store.find_workflow_by_name(KB_CLEANUP_WORKFLOW) {
+            Ok(w) => {
+                let scratch = store.create_workflow(
+                    None,
+                    &format!("{KB_CLEANUP_WORKFLOW} (seeding {})", std::process::id()),
+                    Some(description),
+                )?;
+                let built = add_loop_graph(store, scratch.id, nodes.clone(), edges.clone())
+                    .and_then(|_| store.workflow_snapshot(scratch.id));
+                store.delete_workflow(scratch.id)?;
+                let same = w.project_id.is_none()
+                    && snapshot_lines(&built?) == snapshot_lines(&store.workflow_snapshot(w.id)?);
+                if !same {
+                    return Ok(None);
+                }
+                store.mark_workflow_builtin(w.id, BUILTIN_KB_CLEANUP)?;
+            }
+            Err(Error::NotFound(_)) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    seed_loop_workflow(
+        store,
+        None,
+        BUILTIN_KB_CLEANUP,
+        KB_CLEANUP_WORKFLOW,
+        description,
+        Vec::new(),
+        nodes,
+        edges,
+        true,
+    )
 }
 
 /// Creates or reseeds the two KB built-ins (naru task 2118): a trigger, the
@@ -7273,7 +7347,7 @@ mod tests {
         let (st, _d) = store();
         let mut s = st.lock().unwrap();
         let (done, _) = install_builtins(&mut s).unwrap();
-        assert_eq!(done.len(), 2);
+        assert_eq!(done.len(), 3);
         for v in &done {
             assert!(v.workflow.builtin);
             assert_eq!(v.workflow.project_id, None);
@@ -7281,7 +7355,7 @@ mod tests {
         // Idempotent: nothing changed, nothing renamed.
         let (again, _) = install_builtins(&mut s).unwrap();
         assert!(again.is_empty());
-        assert_eq!(s.list_workflows(None).unwrap().len(), 2);
+        assert_eq!(s.list_workflows(None).unwrap().len(), 3);
         let parent = s.find_workflow_by_name(KB_MINE_WORKFLOW).unwrap();
         let node = s.get_workflow_view(parent.id).unwrap().nodes[0].clone();
         let refused = |e: Error| matches!(e, Error::Validation(m) if m.contains("duplicate it"));
@@ -7383,6 +7457,82 @@ mod tests {
     }
 
     #[test]
+    fn kb_cleanup_builtin_adopts_an_identical_user_copy_and_leaves_others_alone() {
+        let names = |s: &Store| -> Vec<String> {
+            let mut v: Vec<_> = s
+                .list_workflows(None)
+                .unwrap()
+                .into_iter()
+                .map(|w| w.name)
+                .collect();
+            v.sort();
+            v
+        };
+        // Fresh: installed on, global, a chain of the shipped nodes, and no
+        // command reads Naru's home or kb past NARU_HOME / NARU_KB_DIR.
+        let (st, _d) = store();
+        let mut s = st.lock().unwrap();
+        install_builtins(&mut s).unwrap();
+        let w = s.find_workflow_by_name(KB_CLEANUP_WORKFLOW).unwrap();
+        assert!(w.builtin && w.enabled && w.project_id.is_none());
+        let shipped = s.get_workflow_view(w.id).unwrap();
+        assert_eq!(shipped.nodes.len(), 18);
+        assert_eq!(shipped.edges.len(), 17);
+        for n in &shipped.nodes {
+            if let Some(c) = n.config["command"].as_str() {
+                assert!(!c.contains("$HOME/.naru/"), "{}", n.title);
+                assert!(
+                    c.contains("N=\"${NARU_HOME:-${MESA_HOME:-}}\""),
+                    "{}",
+                    n.title
+                );
+                let ok = Command::new("bash").args(["-n", "-c", c]).status().unwrap();
+                assert!(ok.success(), "{} is not valid bash", n.title);
+            }
+        }
+        // A person's identical copy (an export/import of it, say) is adopted
+        // as the built-in: same id, enabled kept, nothing renamed or added.
+        let (st2, _d2) = store();
+        let mut s2 = st2.lock().unwrap();
+        let own = s2
+            .create_workflow(
+                None,
+                KB_CLEANUP_WORKFLOW,
+                shipped.workflow.description.as_deref(),
+            )
+            .unwrap();
+        let graph: Vec<_> = shipped
+            .nodes
+            .iter()
+            .map(|n| (n.kind, n.title.as_str(), n.config.clone(), n.x, n.y))
+            .collect();
+        let chain: Vec<_> = (1..graph.len()).map(|i| (i - 1, i, None)).collect();
+        add_loop_graph(&mut s2, own.id, graph, chain).unwrap();
+        install_builtins(&mut s2).unwrap();
+        let adopted = s2.find_workflow_by_name(KB_CLEANUP_WORKFLOW).unwrap();
+        assert_eq!(adopted.id, own.id);
+        assert!(adopted.builtin && adopted.enabled);
+        assert_eq!(
+            names(&s2),
+            [KB_CLEANUP_WORKFLOW, KB_MINE_WORKFLOW, KB_CAPTURE_WORKFLOW]
+        );
+        install_builtins(&mut s2).unwrap();
+        assert_eq!(names(&s2).len(), 3);
+        // A copy the person changed is never renamed, rewritten or doubled.
+        let (st3, _d3) = store();
+        let mut s3 = st3.lock().unwrap();
+        let edited = s3.create_workflow(None, KB_CLEANUP_WORKFLOW, None).unwrap();
+        for _ in 0..2 {
+            install_builtins(&mut s3).unwrap();
+            let w = s3.find_workflow_by_name(KB_CLEANUP_WORKFLOW).unwrap();
+            assert_eq!(w.id, edited.id);
+            assert!(!w.builtin);
+            assert!(s3.get_workflow_view(w.id).unwrap().nodes.is_empty());
+            assert_eq!(names(&s3).len(), 3);
+        }
+    }
+
+    #[test]
     fn reseed_survives_a_leftover_seeding_workflow() {
         // Serve start-up and the CLI seed at once on a self-deploy; the
         // scratch name is per-process so the other's copy never conflicts.
@@ -7417,7 +7567,7 @@ mod tests {
         let (st, _d) = store();
         let mut s = st.lock().unwrap();
         let (done, _) = install_builtins(&mut s).unwrap();
-        assert_eq!(done.len(), 2);
+        assert_eq!(done.len(), 3);
         for v in &done {
             for n in &v.nodes {
                 let mut found = Vec::new();

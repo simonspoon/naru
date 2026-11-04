@@ -15174,7 +15174,7 @@ mod tests {
 
     #[tokio::test]
     async fn install_builtins_route_installs_them_off_and_refuses_a_foreign_host() {
-        use crate::core::workflow::{KB_CAPTURE_WORKFLOW, KB_MINE_WORKFLOW};
+        use crate::core::workflow::{KB_CAPTURE_WORKFLOW, KB_CLEANUP_WORKFLOW, KB_MINE_WORKFLOW};
         let (_dir, state) = test_state();
         let refused = install_builtin_workflows(
             State(state.clone()),
@@ -15202,7 +15202,7 @@ mod tests {
         .await
         .unwrap();
         let created = out["created"].as_array().unwrap();
-        assert_eq!(created.len(), 2);
+        assert_eq!(created.len(), 3);
         let enabled = |name: &str| {
             created
                 .iter()
@@ -15213,6 +15213,8 @@ mod tests {
         };
         assert!(!enabled(KB_MINE_WORKFLOW));
         assert!(!enabled(KB_CAPTURE_WORKFLOW));
+        // Manual-only, so it ships on.
+        assert!(enabled(KB_CLEANUP_WORKFLOW));
 
         // A second press installs nothing.
         let Json(again) = install_builtin_workflows(
@@ -15223,7 +15225,7 @@ mod tests {
         .await
         .unwrap();
         assert!(again["created"].as_array().unwrap().is_empty());
-        assert_eq!(again["skipped"].as_array().unwrap().len(), 2);
+        assert_eq!(again["skipped"].as_array().unwrap().len(), 3);
     }
 
     #[tokio::test]

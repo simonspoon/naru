@@ -2401,7 +2401,7 @@ run 0 "$NARU" workflow delete "KB: mine past sessions (custom)"
 PATH="/usr/bin:$PATH" sqlite3 "$MESA_DB" "UPDATE workflow_nodes SET title = 'Edited by hand' WHERE id = $TLN"
 run 0 "$NARU" workflow defaults --builtins
 [ "$(jq -r '[.created[].workflow.id] | index('"$TL"') != null' <<<"$STDOUT")" = "true" ] || fail "the reseed updated the built-in in place: $STDOUT"
-[ "$("$NARU" workflow list | jq '[.[] | select(.name | startswith("KB:"))] | length')" = "2" ] || fail "reseeding left a copy behind"
+[ "$("$NARU" workflow list | jq '[.[] | select(.name | startswith("KB:"))] | length')" = "3" ] || fail "reseeding left a copy behind"
 [ "$("$NARU" workflow revisions "$TL" | jq -r '.[0].reason')" = "seed" ] || fail "the reseed is a seed revision"
 [ "$("$NARU" workflow show "$TL" | jq -r '[.nodes[].title] | index("Mine sessions") != null and index("Edited by hand") == null')" = "true" ] || fail "the reseed restored the shipped graph"
 run 0 "$NARU" workflow defaults --builtins

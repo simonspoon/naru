@@ -1007,6 +1007,28 @@ missing one; state is `~/.naru/kb-mined.txt` (`NARU_KB_MINED` overrides).
   answer `{created, skipped}` — `created` holds the built-ins created *or*
   updated (a reseed counts), each with its `enabled`.
 
+### KB: cleanup (naru task 2571)
+
+**`KB: cleanup`** is a person's own workflow promoted to a managed built-in: a
+`manual` trigger, sixteen `cli` nodes in a chain (settings, backup, merge
+duplicates, simplify long notes with haiku, flag contradictions with one
+`naru ask --notice`, move notes out of overgrown topics, rebuild `INDEX.md`,
+report) and an `output` to the `kb-cleanup` log. Its definition is
+`src/core/kb_cleanup_workflow.json`, embedded at compile time. It needs `jq`,
+`bc` and `claude`. Every node resolves Naru's home the way `config::dot_dir_in`
+does (`NARU_HOME`/`MESA_HOME`, else `~/.naru`, else `~/.mesa`) and the kb as
+`NARU_KB_DIR`/`MESA_KB_DIR`, else `<home>/kb`, so under the dev env it touches
+only `~/.naru-dev`; backups go to `<home>/kb-backups/`, run files to
+`<home>/kb-cleanup/`.
+
+- **Installed on.** Its trigger is manual, so it spends nothing until run.
+- **No rename.** Unlike the KB mining built-ins, a same-named user workflow is
+  never renamed: a global one whose graph (description, nodes, edges) equals
+  the shipped one is adopted as the built-in in place — id, runs and
+  `enabled` kept — and any other is left untouched, with no built-in installed
+  beside it (the name is reported in `skipped`). Delete or rename yours to get
+  the built-in.
+
 **Why backlog.** The review's output must never be `todo`: `serve --watch-queue`
 dispatches an agent onto every unblocked `todo` leaf, and a digest of overheard
 ideas is something a person triages first. Hence the output node's `status` key.
