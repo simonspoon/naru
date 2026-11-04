@@ -92,6 +92,7 @@ import {
   writeInputChoice,
   type AudioInput,
 } from '../liveDevices'
+import { appendHeard, draftTurn, readAutoSend, writeAutoSend } from '../liveDraftMode'
 import { MIN_MAIN_WIDTH } from '../agentSidebarWidth'
 import { chordLabel, matchesShortcut } from '../keymap'
 import { useKeymap } from '../keymapStore'
@@ -118,6 +119,7 @@ import {
   LISTEN_CHORD,
   enterHoldsForRecording,
   heldFlush,
+  HELD_MAX,
   heldWith,
   listenPath,
   MESA_VOCABULARY,
@@ -958,6 +960,22 @@ export function LiveHub({
   // media stack that cannot play the stream.
   const [decodes, setDecodes] = useState(false)
   const [draft, setDraft] = useState('')
+  // Auto-send, or draft mode (naru task 2572, `liveDraftMode.ts`): read by
+  // `flushRecording` and the cap spill through a ref, since both run outside
+  // the render that set it.
+  const [autoSend, setAutoSend] = useState(readAutoSend)
+  const autoSendRef = useRef(autoSend)
+  useEffect(() => {
+    autoSendRef.current = autoSend
+  }, [autoSend])
+  const inputRef = useRef<HTMLTextAreaElement>(null)
+  // The box grows with what is in it, up to the CSS max-height, then scrolls.
+  useEffect(() => {
+    const box = inputRef.current
+    if (box === null) return
+    box.style.height = 'auto'
+    box.style.height = `${box.scrollHeight}px`
+  }, [draft])
   // Whether a press on this browser has unlocked audio. Not the same question
   // as "is the conversation live": a session started from `mesa live start`,
   // or a page reloaded mid-conversation, is live with no gesture behind it —
@@ -2393,6 +2411,33 @@ export function LiveHub({
    * leaves a box typed alone for Enter.
    */
   const flushRecording = useCallback(() => {
+    // Draft mode (naru task 2572): the turn lands in the box instead, and is
+    // sent — the whole draft — only when it ends with "send it".
+    if (!autoSendRef.current) {
+      const heard = heldFlush(recordingRef.current, interimRef.current).join(' ')
+      setRecordingNow('')
+      setInterimNow('')
+      if (!armed.current.live || heard === '') return
+      const turn = draftTurn(draftRef.current, heard)
+      if (!turn.send) {
+        updateDraft(turn.draft)
+        return
+      }
+      const text = turn.draft.trim()
+      updateDraft('')
+      if (text === '' && pastedImageRef.current === null) return
+      // Cut at the server's cap like any recording; the last piece carries
+      // the media.
+      const pieces: string[] = []
+      for (let i = 0; i < Math.max(text.length, 1); i += HELD_MAX) {
+        pieces.push(text.slice(i, i + HELD_MAX))
+      }
+      pieces.reduce<Promise<void>>(
+        (queue, piece, i) => queue.then(() => postRef.current(piece, i === pieces.length - 1)),
+        Promise.resolve(),
+      )
+      return
+    }
     const typed = draftRef.current
     const texts = heldFlush(recordingRef.current, interimRef.current, typed)
     setRecordingNow('')
@@ -2408,6 +2453,11 @@ export function LiveHub({
     )
   }, [setInterimNow, setRecordingNow, updateDraft])
   const flushRef = useRef(flushRecording)
+  /** A recording's over-the-cap head: posted, or in draft mode put in the box. */
+  const spillRef = useRef((text: string) => {
+    if (autoSendRef.current) void postRef.current(text, false)
+    else updateDraft(appendHeard(draftRef.current, text))
+  })
   useEffect(() => {
     flushRef.current = flushRecording
   }, [flushRecording])
@@ -2806,7 +2856,7 @@ export function LiveHub({
         // person's own switch is what ends it. `flush` is only the cap.
         const grown = heldWith(recordingRef.current, text)
         setRecordingNow(grown.held)
-        if (grown.flush !== null) void postRef.current(grown.flush, false)
+        if (grown.flush !== null) spillRef.current(grown.flush)
       }
     },
     [setInterimNow, setRecordingNow],
@@ -3745,7 +3795,7 @@ export function LiveHub({
           // person's own switch is what ends it. `flush` is only the cap.
           const grown = heldWith(recordingRef.current, text)
           setRecordingNow(grown.held)
-          if (grown.flush !== null) void postRef.current(grown.flush, false)
+          if (grown.flush !== null) spillRef.current(grown.flush)
         }
       }
       engine.onerror = (event) => {
@@ -4551,7 +4601,11 @@ export function LiveHub({
     // Speech held or on its way: Enter holds (mesa task 1351). The box stays
     // put to ride on the end of the recording at its own boundary, and the
     // silence wait restarts so a timer about to fire does not leave it behind.
+    // In draft mode the boundary only adds to the box, so there is nothing
+    // for Enter to wait for: the box goes now, and speech still pending lands
+    // in the emptied box after it.
     if (
+      autoSendRef.current &&
       enterHoldsForRecording({
         recording: recordingRef.current,
         interim: interimRef.current,
@@ -5499,6 +5553,7 @@ export function LiveHub({
               dictation is reachable with the chat pane hidden. */}
           <div className="live-input-row">
             <textarea
+              ref={inputRef}
               className="live-input"
               rows={2}
               value={draft}
@@ -5513,6 +5568,8 @@ export function LiveHub({
                     ? 'ambient — press Live to talk to Naru'
                     : paused
                     ? 'paused — press Resume to talk to Naru'
+                    : !autoSend
+                      ? 'draft — say "send it" or press Enter to send'
                     : recognizes
                       ? 'listening — or type here'
                       : 'dictate or type here…'
@@ -5581,6 +5638,27 @@ export function LiveHub({
                 </select>
               </label>
             )}
+            {/* Auto-send or draft mode (naru task 2572), beside the mic it
+                governs: off, heard turns collect in the box until sent. */}
+            <button
+              type="button"
+              className={`live-auto-send${autoSend ? ' live-on' : ''}`}
+              aria-pressed={autoSend}
+              aria-label="auto-send"
+              tabIndex={open ? undefined : -1}
+              title={
+                autoSend
+                  ? 'Auto-send on: each pause sends what you said. Click for draft mode.'
+                  : 'Draft mode: speech collects in the box until you send it. Click to auto-send.'
+              }
+              onClick={() => {
+                writeAutoSend(!autoSend)
+                autoSendRef.current = !autoSend
+                setAutoSend(!autoSend)
+              }}
+            >
+              {autoSend ? 'Auto' : 'Draft'}
+            </button>
             {live && unlocked && supported && !blocked && (
               <button
                 type="button"

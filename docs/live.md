@@ -3721,6 +3721,20 @@ conversation") working with no backend change.
   takes focus itself. One consequence: while focus is inside a framed board,
   its keystrokes go to that frame's own window, so the hub's window-level
   chords (listen, discard) do not see them until the person clicks back out.
+- **Auto-send can be switched off: draft mode** (naru task 2572). A small
+  **Auto**/**Draft** pill beside the composer's mic flips it; the choice is
+  this browser's own, kept in `localStorage` (`naru-live-auto-send`,
+  `liveDraftMode.ts`). **Auto** is everything below, unchanged. In **Draft**,
+  every boundary that would have posted a heard turn (`flushRecording`, and
+  the over-the-cap spill) appends it to the box instead, however short — the
+  person edits, types or pastes an image, and nothing reaches the agent until
+  Enter or the send button. Hands-free: an utterance that **ends** with
+  "send it" (case and punctuation ignored; not mid-sentence, not inside a
+  word — `stripSendIt`) has the phrase stripped and sends the whole draft as
+  one turn (cut at `HELD_MAX` like a recording). It is a suffix match, so "I
+  would not send it" sends too. Enter in draft mode never holds for pending
+  speech: the box goes, and the speech lands in the emptied box after it.
+  The box grows with its text up to `12rem`, then scrolls.
 - **The typed box is sent by Enter alone** (mesa task 977). It used to be
   sent on Naru's clock after `live.auto-send-ms` of idle, on the reasoning
   that dictation never presses Enter — but the box is the surface a person

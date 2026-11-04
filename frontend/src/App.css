@@ -10308,6 +10308,26 @@ body.live-panel-ratio-resizing .live-panel-divider {
   font-size: 14px;
   clip-path: none;
   resize: none;
+  max-height: 12rem;
+  overflow-y: auto;
+}
+
+/* The auto-send switch (naru task 2572): a small word pill, cyan while
+   heard turns send themselves, amber in draft mode. */
+.live-auto-send {
+  flex: none;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  clip-path: none;
+  color: var(--amber);
+  background: transparent;
+  border: 1px solid rgba(var(--amber-rgb), 0.5);
+}
+
+.live-auto-send.live-on {
+  color: var(--cyan);
+  border-color: rgba(var(--cyan-rgb), 0.5);
 }
 
 /* The chooser is the real <select>, laid invisibly over the icon. */
