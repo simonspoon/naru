@@ -14,8 +14,8 @@ use crate::core::cc;
 use crate::core::store::Store;
 use crate::core::types::{
     AgentOrbit, AgentSession, AgentWatchKind, AgentWatchRow, LiveRole, LiveSession, LiveTurn,
-    OrbitAgent, OrbitJob, OrbitNaru, OrbitProject, OrbitQueued, Project, Status, Task, Workflow,
-    WorkflowRun, WorkflowStepStatus,
+    OrbitAgent, OrbitJob, OrbitNaru, OrbitProject, OrbitQueued, OrbitTurn, Project, Status, Task,
+    Workflow, WorkflowRun, WorkflowStepStatus,
 };
 
 /// One colour per project, chosen by `project id % len` — so a project keeps
@@ -64,6 +64,9 @@ pub struct Inputs {
 /// How many of the live session's newest turns [`from_store`] reads to find
 /// the newest Naru turn.
 const LIVE_TURNS_READ: i64 = 8;
+/// How many of those turns the hover block shows, and how long each may be.
+const TURNS_SHOWN: usize = 5;
+pub const TURN_CHARS: usize = 400;
 
 /// Reads the store half of [`Inputs`] and builds the feed. `sessions` and
 /// `watch_rows` come from the agents surface (the API's 2 s-cached panel
@@ -198,7 +201,7 @@ pub fn build(i: Inputs) -> AgentOrbit {
 
     AgentOrbit {
         now: i.now,
-        naru: naru_state(i.live.as_ref(), i.now),
+        naru: naru_state(i.live.as_ref(), sessions, &i.watch_rows, i.now),
         agents_available: i.sessions.is_some(),
         jobs,
         queue,
@@ -268,6 +271,32 @@ pub fn role_of(agent_type: &str) -> &'static str {
     }
 }
 
+/// The watcher's subagent rows of one session as orbit agents.
+fn session_agents<'a>(
+    rows: &'a [AgentWatchRow],
+    session_id: &'a str,
+    now: i64,
+) -> impl Iterator<Item = OrbitAgent> + 'a {
+    rows.iter()
+        .filter(move |r| r.kind == AgentWatchKind::Subagent && r.session_id == session_id)
+        .map(move |r| OrbitAgent {
+            key: r.key.clone(),
+            role: role_of(&r.label).into(),
+            label: r.label.clone(),
+            detail: r.detail.clone(),
+            state: if r.finished {
+                "done"
+            } else if r.last_event_at.is_some_and(|at| now - at <= QUIET_SECS) {
+                "working"
+            } else {
+                "waiting"
+            }
+            .into(),
+            started_at: r.started_at,
+            last_event_at: r.last_event_at,
+        })
+}
+
 /// The job stage a role (or a stage driver's stage name) stands for.
 fn stage_of(role: &str) -> &'static str {
     match role_of(role) {
@@ -306,27 +335,7 @@ fn task_job(
 ) -> OrbitJob {
     let mut agents: Vec<OrbitAgent> = Vec::new();
     for (s, _) in matched {
-        for r in rows
-            .iter()
-            .filter(|r| r.kind == AgentWatchKind::Subagent && r.session_id == s.session_id)
-        {
-            agents.push(OrbitAgent {
-                key: r.key.clone(),
-                role: role_of(&r.label).into(),
-                label: r.label.clone(),
-                detail: r.detail.clone(),
-                state: if r.finished {
-                    "done"
-                } else if r.last_event_at.is_some_and(|at| now - at <= QUIET_SECS) {
-                    "working"
-                } else {
-                    "waiting"
-                }
-                .into(),
-                started_at: r.started_at,
-                last_event_at: r.last_event_at,
-            });
-        }
+        agents.extend(session_agents(rows, &s.session_id, now));
     }
     agents.sort_by_key(|a| (a.started_at.unwrap_or(i64::MAX), a.key.clone()));
 
@@ -457,15 +466,50 @@ fn workflow_job(
     }
 }
 
-fn naru_state(live: Option<&(LiveSession, Vec<LiveTurn>)>, now: i64) -> OrbitNaru {
+/// The Claude Code session a live session's spawn receipt names, looked up
+/// in the panel list: a `run:<job>` receipt is the runner row with that
+/// `run_id`, a legacy bare `--bg` id the row with that short `id`.
+fn naru_session<'a>(receipt: &str, sessions: &'a [AgentSession]) -> Option<&'a str> {
+    let hit = match receipt.strip_prefix(crate::core::live::RUN_RECEIPT) {
+        Some(job) => sessions.iter().find(|s| s.run_id.as_deref() == Some(job)),
+        None => sessions.iter().find(|s| s.id.as_deref() == Some(receipt)),
+    };
+    hit.map(|s| s.session_id.as_str())
+}
+
+fn naru_state(
+    live: Option<&(LiveSession, Vec<LiveTurn>)>,
+    sessions: &[AgentSession],
+    rows: &[AgentWatchRow],
+    now: i64,
+) -> OrbitNaru {
     let Some((s, turns)) = live else {
         return OrbitNaru {
             active: false,
             state: "off".into(),
             session_id: None,
             project_id: None,
+            agent_session_id: None,
+            agents: Vec::new(),
+            recent: Vec::new(),
         };
     };
+    let agent_session = s
+        .agent_id
+        .as_deref()
+        .and_then(|r| naru_session(r, sessions));
+    let mut agents: Vec<OrbitAgent> = agent_session
+        .map(|sid| session_agents(rows, sid, now).collect())
+        .unwrap_or_default();
+    agents.sort_by_key(|a| (a.started_at.unwrap_or(i64::MAX), a.key.clone()));
+    let said: Vec<&LiveTurn> = turns.iter().filter(|t| !t.text.trim().is_empty()).collect();
+    let recent = said[said.len().saturating_sub(TURNS_SHOWN)..]
+        .iter()
+        .map(|t| OrbitTurn {
+            role: t.role.as_str().into(),
+            text: t.text.trim().chars().take(TURN_CHARS).collect(),
+        })
+        .collect();
     let speaking = turns
         .iter()
         .rev()
@@ -488,6 +532,9 @@ fn naru_state(live: Option<&(LiveSession, Vec<LiveTurn>)>, now: i64) -> OrbitNar
         state: state.into(),
         session_id: Some(s.id),
         project_id: s.project_id,
+        agent_session_id: agent_session.map(str::to_string),
+        agents,
+        recent,
     }
 }
 
@@ -585,21 +632,39 @@ mod tests {
         .unwrap();
 
         let live = st.start_live_session(None).unwrap();
+        st.bind_live_agent(live.id, Some("run:j1")).unwrap();
+        st.add_live_turn(live.id, LiveRole::User, "hi there", None, None)
+            .unwrap();
         st.add_live_turn(live.id, LiveRole::Naru, "hello", None, None)
             .unwrap();
 
         let now = cc::parse_ts(&st.get_task(leaf.id).unwrap().updated_at).unwrap() + 5;
-        let sessions = vec![session(serde_json::json!({"taskId": leaf.id}))];
+        let sessions = vec![
+            session(serde_json::json!({"taskId": leaf.id})),
+            session(serde_json::json!({"sessionId": "naru-s", "kind": "runner", "runId": "j1"})),
+        ];
         let rows = vec![
             sub_row("s1", "a", "recon", true, now - 300),
             sub_row("s1", "b", "implementer", false, now - 5),
             sub_row("other", "c", "verifier", false, now - 5),
+            sub_row("naru-s", "d", "general-purpose", false, now - 5),
         ];
         let o = from_store(&st, now, Some(sessions), rows).unwrap();
 
         assert!(o.agents_available);
         assert_eq!(o.naru.state, "speaking");
         assert!(o.naru.active);
+        // Naru's own sub-agents come from its run's session, never a task's.
+        assert_eq!(o.naru.agent_session_id.as_deref(), Some("naru-s"));
+        let naru_agents: Vec<&str> = o.naru.agents.iter().map(|a| a.key.as_str()).collect();
+        assert_eq!(naru_agents, vec!["naru-s/d"]);
+        let recent: Vec<(&str, &str)> = o
+            .naru
+            .recent
+            .iter()
+            .map(|t| (t.role.as_str(), t.text.as_str()))
+            .collect();
+        assert_eq!(recent, vec![("user", "hi there"), ("naru", "hello")]);
         let ids: Vec<(String, i64)> = o.jobs.iter().map(|j| (j.kind.clone(), j.id)).collect();
         assert_eq!(
             ids,
@@ -666,7 +731,7 @@ mod tests {
 
     #[test]
     fn naru_states() {
-        assert_eq!(naru_state(None, 0).state, "off");
+        assert_eq!(naru_state(None, &[], &[], 0).state, "off");
     }
 
     #[test]

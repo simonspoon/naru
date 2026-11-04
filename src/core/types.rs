@@ -420,6 +420,26 @@ pub struct OrbitNaru {
     pub session_id: Option<i64>,
     #[ts(type = "number | null")]
     pub project_id: Option<i64>,
+    /// The Claude Code session driving the conversation (naru task 2551):
+    /// the panel row its spawn receipt names (`orbit::naru_session`), when
+    /// one is bound and listed.
+    pub agent_session_id: Option<String>,
+    /// That session's sub-agents — its delegates, forks and background
+    /// agents — read exactly as a task job's are.
+    pub agents: Vec<OrbitAgent>,
+    /// The conversation's newest few turns with text, oldest first, each
+    /// capped at `orbit::TURN_CHARS` characters.
+    pub recent: Vec<OrbitTurn>,
+}
+
+/// One turn of the live conversation as the orbit's hover block shows it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+#[serde(rename_all = "camelCase")]
+pub struct OrbitTurn {
+    /// `user` or `naru`.
+    pub role: String,
+    pub text: String,
 }
 
 /// A project as the orbit colours it.

@@ -1064,7 +1064,7 @@ pub fn ensure_agent_definition(store: &crate::core::Store) -> Result<std::path::
 /// 1885): `run:<8 hex>`. A receipt without it is a legacy `claude --bg` short
 /// job id, handled by `agents` exactly as before (dream's `pid:<n>` is the
 /// precedent for a typed receipt).
-const RUN_RECEIPT: &str = "run:";
+pub(crate) const RUN_RECEIPT: &str = "run:";
 
 /// What a live agent receipt names.
 #[derive(Debug, PartialEq, Eq)]

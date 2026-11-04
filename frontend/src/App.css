@@ -13528,11 +13528,6 @@ body.dock-resizing .dock-body {
   stroke-width: 8;
 }
 
-.orbit .orbit-pct {
-  fill: var(--text-h);
-  font-weight: 800;
-}
-
 .orbit .orbit-title {
   font-weight: 800;
 }
@@ -13576,6 +13571,55 @@ body.dock-resizing .dock-body {
 .orbit .orbit-dot.done text,
 .orbit .orbit-dot.waiting text {
   fill: var(--muted);
+}
+
+.orbit-hover {
+  position: fixed;
+  left: 0;
+  top: 0;
+  visibility: hidden;
+  z-index: 1000;
+  width: min(26rem, calc(100vw - 16px));
+  max-height: calc(100vh - 16px);
+  overflow: hidden;
+  padding: 0.7rem 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: 0 8px 24px rgba(var(--shadow-rgb), 0.25);
+  font-size: 0.9rem;
+  line-height: 1.4;
+  pointer-events: none;
+}
+
+.orbit-hover-head {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  margin-bottom: 0.4rem;
+}
+
+.orbit-hover-head span {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.orbit-hover p {
+  margin: 0.35rem 0 0;
+  overflow-wrap: anywhere;
+}
+
+.orbit-hover-who {
+  margin-right: 0.4rem;
+  font-size: 0.75rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.orbit-hover-turn.naru .orbit-hover-who {
+  color: var(--violet);
 }
 
 .agent-watch-side {

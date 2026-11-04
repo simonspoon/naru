@@ -3,6 +3,7 @@
 // running job sits on the ring, where its sub-agent dots cluster, how the
 // queue groups by project, and the sparkline points. The page only draws.
 
+import type { CcSessionChat } from './types/CcSessionChat'
 import type { OrbitAgent } from './types/OrbitAgent'
 import type { OrbitJob } from './types/OrbitJob'
 import type { OrbitNaru } from './types/OrbitNaru'
@@ -13,9 +14,14 @@ import type { OrbitQueued } from './types/OrbitQueued'
 export const VIEW = 1000
 export const C = VIEW / 2
 export const NARU_R = 80
+/** Jobs sit between RING_MIN (just started) and RING (hours old) from Naru. */
 export const RING = 280
+export const RING_MIN = 170
 export const NODE_R = 46
+/** Where a job's sub-agent dots sit, however close in the job is. */
 export const DOT_RING = 440
+/** A job nearer Naru than this carries its label on the outer side. */
+const LABEL_OUT_BELOW = 240
 export const DOT_R = 14
 /** Font sizes in viewBox units: a job's title, its project · stage line, a dot's label. */
 export const TITLE_PX = 26
@@ -23,6 +29,8 @@ export const SUB_PX = 21
 export const DOT_PX = 20
 /** Angle between neighbouring sub-agent dots, and the clear gap kept between two jobs' clusters. */
 const DOT_STEP = (14 * Math.PI) / 180
+/** Naru's own dots sit nearer the centre, where the same arc is shorter, so they spread wider. */
+const NARU_DOT_STEP = (22 * Math.PI) / 180
 const CLUSTER_GAP = (30 * Math.PI) / 180
 const MAX_DOTS = 6
 
@@ -43,10 +51,24 @@ export function jobAngle(i: number, n: number): number {
   return (2 * Math.PI * (i + (n >= 7 ? 0.5 : 0))) / Math.max(n, 1)
 }
 
-/** How many sub-agent dots one job can show with `n` jobs on the ring. */
-export function maxDots(n: number): number {
+/** How many sub-agent dots one cluster can show with `n` clusters on the ring. */
+export function maxDots(n: number, step = DOT_STEP): number {
   const room = (2 * Math.PI) / Math.max(n, 1) - CLUSTER_GAP
-  return Math.max(1, Math.min(MAX_DOTS, Math.floor(room / DOT_STEP) + 1))
+  return Math.max(1, Math.min(MAX_DOTS, Math.floor(room / step) + 1))
+}
+
+/** Age at which a session reaches the outer edge; anything older stays there. */
+export const AGE_FULL_S = 4 * 3600
+
+/**
+ * Distance from Naru for something `age` seconds old: log-scaled, so a
+ * minute-old session and an hours-old one both stay visible and distinct
+ * (1 min ≈ 13%, 5 min ≈ 33%, 30 min ≈ 63%, 1 h ≈ 75%, 4 h and up = 100%).
+ */
+export function ageRadius(age: number | null, min = RING_MIN, max = RING): number {
+  const a = Math.max(0, age ?? 0)
+  const t = Math.min(1, Math.log1p(a / 60) / Math.log1p(AGE_FULL_S / 60))
+  return min + t * (max - min)
 }
 
 /** Cut `s` to `max` characters with an ellipsis (SVG text cannot ellipsise). */
@@ -109,7 +131,18 @@ export function overlaps(a: Box, b: Box): boolean {
   return a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1
 }
 
+/** Whether the disc of radius `r` at `p` meets box `b` (Naru is a disc, not a square). */
+export function discOverlaps(p: Pt, r: number, b: Box): boolean {
+  const dx = p.x - Math.max(b.x0, Math.min(p.x, b.x1))
+  const dy = p.y - Math.max(b.y0, Math.min(p.y, b.y1))
+  return dx * dx + dy * dy < r * r
+}
+
+/** Naru's painted disc, glow included, as the overlap test keeps clear of it. */
+export const NARU_CLEAR = NARU_R + 12
+
 export type DotLayout = { agent: OrbitAgent; at: Pt; text: string; textY: number }
+export type OrbitLayout = { jobs: JobLayout[]; naru: DotLayout[] }
 export type JobLayout = {
   job: OrbitJob
   at: Pt
@@ -122,18 +155,57 @@ export type JobLayout = {
 }
 
 /**
- * Place every job. The label sits on the inner side of the node (below it in
- * the top half, above it in the bottom half) so it never meets the job's own
- * dots, which cluster on the outer side.
+ * Place every job, and Naru's own sub-agents. A job's distance from Naru is
+ * its age at `now` (`ageRadius`): new close in, old out on the ring. Its
+ * sub-agent dots stay on DOT_RING, on the job's outer side. Naru's agents,
+ * when it has any, take one more slot on the ring after the jobs, each dot at
+ * its own age.
+ *
+ * When the full age range would paint two things over each other (a crowded
+ * ring, or a label with no room beside Naru), the range is narrowed towards
+ * the ring step by step: who is older still sits farther out, only less far.
  */
-export function layoutJobs(jobs: OrbitJob[]): JobLayout[] {
-  const n = jobs.length
+export function layoutOrbit(jobs: OrbitJob[], naruAgents: OrbitAgent[] = [], now = 0): OrbitLayout {
+  let layout = placeAll(jobs, naruAgents, now, RING_MIN)
+  for (let min = RING_MIN; clashes(layout) && min < RING; ) {
+    min = Math.min(RING, min + RELAX_STEP)
+    layout = placeAll(jobs, naruAgents, now, min)
+  }
+  return layout
+}
+
+/** How far the inner edge moves out per relax step. */
+const RELAX_STEP = 15
+
+/**
+ * Whether anything that moves with age meets another painted box or leaves
+ * the viewBox. Naru's disc and the jobs' dots on DOT_RING never move, so a
+ * clash between two of them is one narrowing cannot fix, and is ignored.
+ */
+export function clashes(layout: OrbitLayout): boolean {
+  const boxes = layoutBoxes(layout)
+  const fixed = (part: string) => part === 'naru' || part.startsWith('dot')
+  return boxes.some((p, i) => {
+    const b = p.box
+    if (!fixed(p.part) && (b.x0 < 0 || b.y0 < 0 || b.x1 > VIEW || b.y1 > VIEW)) return true
+    return boxes
+      .slice(i + 1)
+      .some((q) => (fixed(p.part) && fixed(q.part) ? false : p.part === 'naru' ? discOverlaps({ x: C, y: C }, NARU_CLEAR, q.box) : overlaps(b, q.box)))
+  })
+}
+
+function placeAll(jobs: OrbitJob[], naruAgents: OrbitAgent[], now: number, min: number): OrbitLayout {
+  const n = jobs.length + (naruAgents.length > 0 ? 1 : 0)
   const k = maxDots(n)
   const chars = titleChars(n)
-  return jobs.map((job, i) => {
+  const placed = jobs.map((job, i) => {
     const a = jobAngle(i, n)
-    const at = polar(RING, a)
-    const below = at.y <= C + 1
+    const r = ageRadius(job.startedAt == null ? null : now - job.startedAt, min)
+    const at = polar(r, a)
+    // Inner side normally; a node close in has no room there, but the gap out
+    // to its dots (which stay on DOT_RING) has grown, so its label goes there.
+    const inner = r >= LABEL_OUT_BELOW
+    const below = (at.y <= C + 1) === inner
     const titleY = below ? at.y + NODE_R + 30 : at.y - NODE_R - 36
     const subY = titleY + 26
     const shown = visibleAgents(job.agents, k)
@@ -145,12 +217,25 @@ export function layoutJobs(jobs: OrbitJob[]): JobLayout[] {
     const sub = [job.projectName, stageText(job)].filter(Boolean).join(' · ')
     return { job, at, title: clip(job.title, chars), sub: clip(sub, chars + (n <= 5 ? 6 : 4)), titleY, subY, dots }
   })
+  const a = jobAngle(jobs.length, n)
+  const shown = visibleAgents(naruAgents, maxDots(n, NARU_DOT_STEP))
+  const naru = shown.map((agent, j) => {
+    const r = ageRadius(agent.startedAt == null ? null : now - agent.startedAt, min)
+    const p = polar(r, a + (j - (shown.length - 1) / 2) * NARU_DOT_STEP)
+    const text = agent.state === 'done' ? `${agent.role} ✓` : agent.role
+    return { agent, at: p, text, textY: p.y + DOT_R + 24 }
+  })
+  return { jobs: placed, naru }
 }
 
 /** Every box a layout paints, tagged with the job it belongs to — for the overlap test. */
-export function layoutBoxes(layout: JobLayout[]): { owner: number; part: string; box: Box }[] {
+export function layoutBoxes(layout: OrbitLayout): { owner: number; part: string; box: Box }[] {
   const out: { owner: number; part: string; box: Box }[] = [{ owner: -1, part: 'naru', box: circleBox({ x: C, y: C }, NARU_R + 12) }]
-  layout.forEach((l, i) => {
+  layout.naru.forEach((d, j) => {
+    out.push({ owner: -1, part: `naru-dot${j}`, box: circleBox(d.at, DOT_R + 4) })
+    out.push({ owner: -1, part: `naru-dot${j}-text`, box: textBox(d.at.x, d.textY, d.text, DOT_PX) })
+  })
+  layout.jobs.forEach((l, i) => {
     out.push({ owner: i, part: 'node', box: circleBox(l.at, NODE_R + 4) })
     out.push({ owner: i, part: 'title', box: textBox(l.at.x, l.titleY, l.title, TITLE_PX) })
     out.push({ owner: i, part: 'sub', box: textBox(l.at.x, l.subY, l.sub, SUB_PX) })
@@ -235,4 +320,50 @@ export function jobHref(job: OrbitJob): string {
 
 export function queuedHref(q: OrbitQueued): string {
   return q.kind === 'workflow' ? workflowHref(q.projectId, q.id) : taskHref(q.projectId, q.id)
+}
+
+/**
+ * One message of a hover block: who spoke, and what (trimmed to one
+ * paragraph's worth). A session's prompt is `asked` (its parent, a runner or a
+ * person); `you` and `naru` are the live conversation's two sides.
+ */
+export type HoverTurn = { who: 'asked' | 'agent' | 'you' | 'naru'; text: string }
+
+/** How many messages a hover block shows, and how long each may run. */
+export const HOVER_TURNS = 4
+const HOVER_CHARS = 280
+
+/** `text` on one line, cut to `max` characters. */
+export function squash(text: string, max = HOVER_CHARS): string {
+  return clip(text.replace(/\s+/g, ' '), max)
+}
+
+/** The newest prompts and replies of a transcript (tool calls left out), oldest first. */
+export function chatTurns(chat: CcSessionChat, n = HOVER_TURNS): HoverTurn[] {
+  return chat.turns
+    .filter((t) => t.kind !== 'tool' && t.text.trim() !== '')
+    .slice(-n)
+    .map((t) => ({ who: t.kind === 'prompt' ? 'asked' : 'agent', text: squash(t.text) }))
+}
+
+/** The session and transcript id a watcher sub-agent key (`<session>/<agent id>`) names. */
+export function subagentRef(key: string): { sessionId: string; agentId: string } | null {
+  const cut = key.indexOf('/')
+  if (cut <= 0 || cut === key.length - 1) return null
+  return { sessionId: key.slice(0, cut), agentId: key.slice(cut + 1) }
+}
+
+export type Rect = { left: number; top: number; right: number; bottom: number }
+
+/**
+ * Where a `w` × `h` hover block goes beside `anchor` inside a `vw` × `vh`
+ * window: to the right when it fits, else to the left, else over it; level
+ * with the anchor's top; always clamped `margin` inside the window.
+ */
+export function placeHover(anchor: Rect, w: number, h: number, vw: number, vh: number, gap = 12, margin = 8): { left: number; top: number } {
+  const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(v, Math.max(lo, hi)))
+  let left = anchor.right + gap
+  if (left + w > vw - margin) left = anchor.left - gap - w
+  if (left < margin) left = anchor.left
+  return { left: clamp(left, margin, vw - margin - w), top: clamp(anchor.top, margin, vh - margin - h) }
 }

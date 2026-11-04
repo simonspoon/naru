@@ -1,4 +1,4 @@
-# Agent watcher (naru tasks 1909, 2541)
+# Agent watcher (naru tasks 1909, 2541, 2551)
 
 A live map of the whole machine, a dock panel (`watcher`, starts closed; reopen from the header `⋯` menu) and, on the phone tier, a full page at `#/agent-watcher` (nav
 entry "Agent watcher", right after Terminal). Since naru task 2541 the page
@@ -90,7 +90,15 @@ said): `now`, `naru`, `agentsAvailable`, `jobs[]`, `queue[]`, `projects[]`.
   `off` (no live session), `speaking` (the newest Naru turn is unplayed and
   younger than `orbit::SPEAKING_SECS` = 30 s; an older unplayed one was never
   played, so it is not speech), `resting` (`resting_since`), `working`
-  (`working_since`: the agent holds a turn), else `listening`.
+  (`working_since`: the agent holds a turn), else `listening`. Since naru
+  task 2551 also `agentSessionId` — the Claude Code session driving the
+  conversation, the panel row its spawn receipt names (`run:<job>` → the
+  runner row with that `runId`, a legacy bare id → the row with that `id`;
+  `orbit::naru_session`, no extra read) — its `agents` (that session's
+  delegates, forks and background agents, the watcher's subagent rows read
+  exactly as a task job's are) and `recent`: the conversation's newest five
+  turns with text, oldest first, `{role: user|naru, text}`, each capped at
+  `orbit::TURN_CHARS` = 400 characters.
 - **`jobs`** (`OrbitJob`): `kind` `task` or `workflow`, `id` (task id or run
   id), `workflowId`, `title`, `projectId`/`projectName`, `color`, `stage`,
   `progress` (0..1), `progressEstimated`, `state`, `sessionId`, `startedAt`,
@@ -152,21 +160,55 @@ while the panel is visible.
 - **Naru** at the centre of an SVG (viewBox 1000×1000) with five voice bars:
   still and grey when no live session (`off`), a slow pulse while live, fast
   while `speaking`. No "waiting on you" tag.
-- **Jobs** evenly on the ring from the top, clockwise (from seven jobs it
-  turns half a step so none sits level with Naru). Each node: a progress ring
-  in the job's colour with the percent inside, a glow while `working`, dimmed
-  when `idle`. Its title and `project · stage` sit on the **inner** side
-  (below the node in the top half, above it in the bottom half); the stage
-  line says `needs you` (amber) or `stalled` (red) instead when the state is
-  that. Titles clip by crowding (`titleChars`: 16, 14, then 11 characters).
-- **Sub-agent dots** cluster on the job's outer side, 14° apart, labelled by
+- **Jobs** evenly spaced by angle from the top, clockwise (from seven jobs it
+  turns half a step so none sits level with Naru). **Distance from Naru is
+  the job's age** (naru task 2551; `startedAt` against the feed's `now`, so
+  it moves out on every 5 s poll): `ageRadius` maps age on a log scale from
+  `RING_MIN` (170, just started) to `RING` (280, `AGE_FULL_S` = 4 h and
+  older) — about 13% of the way at a minute, a third at five minutes, 63% at
+  half an hour, 75% at an hour. Each node is a plain disc ringed in the job's
+  colour (no percent and no progress arc since naru task 2551; the feed's
+  `progress` is no longer drawn), a glow while `working`, dimmed when `idle`.
+  Its title and `project · stage` sit on the **inner** side (below the node
+  in the top half, above it in the bottom half) — or on the outer side when
+  the node is nearer Naru than 240, where the inner side has no room but the
+  gap out to its dots has grown; the stage line says `needs you` (amber) or
+  `stalled` (red) instead when the state is that. Titles clip by crowding
+  (`titleChars`: 16, 14, then 11 characters).
+- **Relaxing**: when the full age range would paint two things over each
+  other (a crowded ring), `layoutOrbit` narrows it towards the ring 15 units
+  at a time until nothing that moves with age meets anything (`clashes`;
+  two of the fixed parts — Naru's disc, the dots on `DOT_RING` — meeting
+  each other is ignored, since narrowing cannot move them). Older still sits farther out,
+  only less far: one to four slots keep the whole range, seven or eight end
+  up nearly on the ring.
+- **Naru's own sub-agents** (naru task 2551, `naru.agents`) take one more
+  slot after the jobs: dots in Naru's violet, 22° apart, each at its own age
+  by the same scale, joined to Naru by a twig, styled and labelled like a
+  job's dots and capped the same way.
+- **Hover block**: pointing at Naru, a job or any dot shows a block with its
+  name, its detail line and its newest four messages, tool calls left out,
+  each squashed to one line of at most 280 characters, in a readable sans
+  font, placed beside the pointed-at thing (right, else left) and clamped
+  inside the window (`placeHover`). Naru's messages are the conversation's
+  `recent` turns (you / naru); a job's are its session's
+  `GET /api/cc/sessions/{sessionId}/chat`, a sub-agent's
+  `.../subagents/{agent id}/chat` (the id is its key after the `/`) — the
+  existing chat routes, no new endpoint; a workflow job or step has no
+  transcript and says so. It re-reads every 5 s while shown and never takes
+  the pointer itself. The SVG `<title>` tooltips are gone (the block
+  replaces them; a job link keeps an `aria-label`).
+- **Sub-agent dots** cluster on the job's outer side on `DOT_RING` (440, the
+  same however close in the job is), 14° apart, labelled by
   role (a workflow step: its node title), `✓` when done. Glowing in the job's
   colour = working, dashed grey = waiting, grey = done. `maxDots` caps a
   cluster by the room on the ring (6 alone, 4 with five jobs, 2 with eight);
   unfinished agents are kept first, then the newest done.
-- **No overlaps**: `agentOrbit.test.ts` lays out 1–8 jobs with full clusters
-  and asserts no two painted boxes (estimated text widths) meet and all stay
-  inside the viewBox.
+- **No overlaps**: `agentOrbit.test.ts` lays out up to eight slots (jobs,
+  plus Naru's cluster) with full clusters, every job new, every job hours
+  old, alternating and spread over the scale, and asserts no two painted
+  boxes (estimated text widths; Naru as a disc) meet and all stay inside the
+  viewBox. Nine slots and up are not covered, as nine jobs never were.
 - **Stats** (side panel, above the queue): CPU, memory and GPU sparklines
   over the stats history and a disk bar, each with its newest percent; GPU
   says "unavailable" when the host cannot report it.
