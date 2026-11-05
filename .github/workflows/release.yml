@@ -59,6 +59,14 @@ jobs:
       - name: Rename binary
         run: cp target/${{ matrix.target }}/release/naru ${{ matrix.name }}
 
+      # Same pinned ad-hoc identity as scripts/install.sh: a bare (cdhash) signature
+      # changes every release and drops the binary's macOS TCC grants on each update.
+      - name: Pin macOS signature
+        if: runner.os == 'macOS'
+        run: |
+          codesign --force --sign - -i com.naru.cli -r='designated => identifier "com.naru.cli"' ${{ matrix.name }}
+          codesign -d -r- ${{ matrix.name }} 2>&1 | grep -F 'designated => identifier "com.naru.cli"'
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:

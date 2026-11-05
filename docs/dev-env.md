@@ -30,7 +30,11 @@ So: no `scripts/install.sh`, no `cargo install`, no `launchctl` on a
 `serve --port 7771` with every watcher off, in the foreground. It refuses port
 7777. It takes no arguments: `-h`/`--help` prints usage and exits 0, anything
 else prints usage and exits 2 — neither starts a server (naru task 2275). The binary
-id of the CLI is `com.naru.cli`.
+id of the CLI is `com.naru.cli`: `scripts/install.sh`, `scripts/self-deploy.sh` and the
+release workflow's macOS builds (`.github/workflows/release.yml`, so GitHub and Homebrew
+binaries too) all re-sign it ad-hoc with that identifier and the designated requirement
+`identifier "com.naru.cli"`, so macOS TCC grants (e.g. ~/Documents access) survive
+updates. Homebrew installs the release file unchanged (naru task 2584).
 
 ## The guard hook (naru task 2094)
 
