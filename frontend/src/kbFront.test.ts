@@ -20,6 +20,7 @@ const note = (path: string, updated: string): KbNoteInfo => ({
   title: path,
   tags: [],
   updated,
+  sessions: [],
 })
 
 describe('kbFront', () => {

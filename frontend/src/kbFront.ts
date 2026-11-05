@@ -10,6 +10,8 @@ export interface KbNoteInfo {
   title: string
   tags: string[]
   updated: string
+  /** The Claude Code sessions the note was filed from, oldest first. */
+  sessions: string[]
 }
 
 /** How recently a topic's newest note was updated. */

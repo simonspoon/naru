@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
 import { askKb, getKbDupes, getKbNote, getKbUsage, listKbNotes, mergeKbNotes } from '../api'
+import { ccSessionHref } from '../ccOrigin'
 import { ConfirmDelete } from '../components/ConfirmDelete'
 import { Markdown } from '../components/Markdown'
 import { Callout } from '../components/templates'
@@ -71,7 +72,21 @@ export function KbView({ notePath }: { notePath: string | null }) {
           {noteError ? (
             <Callout tone="bad" text={`Could not load this note: ${noteError}`} />
           ) : note && note.path === notePath ? (
-            <Markdown text={note.body} />
+            <>
+              {note.sessions.length > 0 && (
+                <p className="kb-note-meta kb-note-sessions">
+                  <span className="muted">
+                    From {note.sessions.length === 1 ? 'session' : 'sessions'}
+                  </span>
+                  {note.sessions.map((id) => (
+                    <a key={id} className="kb-tag" href={ccSessionHref(id, null)} title={id}>
+                      {id.slice(0, 8)}
+                    </a>
+                  ))}
+                </p>
+              )}
+              <Markdown text={note.body} />
+            </>
           ) : (
             <p className="muted">Loading…</p>
           )}

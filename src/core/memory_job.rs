@@ -58,8 +58,13 @@ pub enum Job {
     /// is the `retro_runs` claim; the claude session names are derived from it.
     Retro { run_id: i64 },
     /// File one spooled `naru kb add` text into the knowledge base (naru task
-    /// 1919): haiku `-p` calls, applied by `core::kb`.
-    KbAdd { id: String, source: String },
+    /// 1919): haiku `-p` calls, applied by `core::kb`. `session` is the
+    /// source Claude Code session the notes record (naru task 2575).
+    KbAdd {
+        id: String,
+        source: String,
+        session: Option<String>,
+    },
     /// Execute one claimed workflow run (naru task 1958): the `running` row
     /// is the claim, written by the invoker; the job becomes its owner.
     WorkflowRun { run_id: i64 },
@@ -97,10 +102,17 @@ impl Job {
             Job::WorkflowRun { run_id } => {
                 a.extend(["workflow-run".into(), "--run".into(), run_id.to_string()]);
             }
-            Job::KbAdd { id, source } => {
+            Job::KbAdd {
+                id,
+                source,
+                session,
+            } => {
                 a.extend(["kb-add".into(), "--id".into(), id.clone()]);
                 // `=` form: a source label starting with `-` stays a value.
                 a.push(format!("--source={source}"));
+                if let Some(s) = session {
+                    a.push(format!("--session={s}"));
+                }
             }
         }
         a.extend(["--dir".into(), dir.to_string()]);
@@ -359,8 +371,16 @@ pub fn run_with(store: &mut Store, job: &Job, dir: &str, timeout: Duration) -> R
         Job::WorkflowRun { .. } => Err(Error::Validation(
             "a workflow-run job runs through memory_job::run".into(),
         )),
-        Job::KbAdd { id, source } => {
-            kb::run_add_job(&kb::kb_dir(), id, source, &mut |prompt, schema| {
+        Job::KbAdd {
+            id,
+            source,
+            session,
+        } => kb::run_add_job(
+            &kb::kb_dir(),
+            id,
+            source,
+            session.as_deref(),
+            &mut |prompt, schema| {
                 llm::complete_structured(
                     config::KB,
                     None,
@@ -372,8 +392,8 @@ pub fn run_with(store: &mut Store, job: &Job, dir: &str, timeout: Duration) -> R
                     dir,
                     timeout,
                 )
-            })
-        }
+            },
+        ),
         Job::Retro { run_id } => {
             let calls = std::cell::Cell::new(0u32);
             let report =

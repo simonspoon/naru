@@ -657,6 +657,9 @@ enum JobCmd {
         id: String,
         #[arg(long, default_value = "cli")]
         source: String,
+        /// The source Claude Code session the notes record
+        #[arg(long)]
+        session: Option<String>,
         #[arg(long)]
         dir: String,
     },
@@ -3280,8 +3283,10 @@ enum KbCmd {
     /// `--stdin` — exactly one. It must be non-empty and at most 32 KiB. The
     /// text is spooled and a detached `naru __job kb-add` files it (the add
     /// is asynchronous: the notes appear when the job finishes; its report is
-    /// in `logs/kb.log`). A job that cannot start is `unavailable`. Put
-    /// `--source` and `--quiet` BEFORE the words.
+    /// in `logs/kb.log`). A job that cannot start is `unavailable`. Every
+    /// note it writes records `--session` (default `CLAUDE_CODE_SESSION_ID`
+    /// when set) in its `sessions` list. Put `--source`, `--session` and
+    /// `--quiet` BEFORE the words.
     #[command(after_help = "\
 EXAMPLES
   mesa kb add --source standup the deploy key rotates on the first of the month
@@ -3300,6 +3305,10 @@ EXAMPLES
         /// Where the text came from, recorded in the kb log (default `cli`)
         #[arg(long)]
         source: Option<String>,
+        /// The Claude Code session the text came from, recorded on every note
+        /// it files (default `CLAUDE_CODE_SESSION_ID`, else none)
+        #[arg(long)]
+        session: Option<String>,
         /// Accepted for consistency; the output has no body to drop
         #[arg(long)]
         quiet: bool,
@@ -3320,13 +3329,16 @@ EXAMPLES
         #[arg(required = true, num_args = 1.., trailing_var_arg = true)]
         question: Vec<String>,
     },
-    /// List the notes: a bare array of `{path, topic, title, tags, updated}`
+    /// List the notes: a bare array of `{path, topic, title, tags, updated, sessions}`
     List {
         /// Only this topic's notes
         #[arg(long)]
         topic: Option<String>,
+        /// Only the notes filed from this Claude Code session
+        #[arg(long)]
+        session: Option<String>,
     },
-    /// Print one note as `{path, body}` (`--quiet`: without the body)
+    /// Print one note as `{path, body, sessions}` (`--quiet`: without the body)
     ///
     /// A path that is not a note in the kb is `not_found`.
     Show {
@@ -5843,7 +5855,19 @@ fn execute(command: Command) -> Result<()> {
                 JobCmd::WorkflowRun { run, dir } => {
                     (memory_job::Job::WorkflowRun { run_id: run }, dir)
                 }
-                JobCmd::KbAdd { id, source, dir } => (memory_job::Job::KbAdd { id, source }, dir),
+                JobCmd::KbAdd {
+                    id,
+                    source,
+                    session,
+                    dir,
+                } => (
+                    memory_job::Job::KbAdd {
+                        id,
+                        source,
+                        session,
+                    },
+                    dir,
+                ),
                 JobCmd::InboxTriage { item, name, dir } => (
                     memory_job::Job::InboxTriage {
                         item_id: item,
@@ -7776,6 +7800,7 @@ fn run_kb(cmd: KbCmd) -> Result<()> {
             file,
             stdin,
             source,
+            session,
             quiet: _,
         } => {
             let given =
@@ -7812,13 +7837,20 @@ fn run_kb(cmd: KbCmd) -> Result<()> {
                 text.join(" ")
             };
             let source = source.unwrap_or_else(|| "cli".into());
-            kb::check_add(&raw, &source)?;
+            // An unusable ambient id is not the caller's mistake: no session.
+            let session = session.or_else(|| {
+                std::env::var("CLAUDE_CODE_SESSION_ID")
+                    .ok()
+                    .filter(|s| kb::valid_session(s))
+            });
+            kb::check_add(&raw, &source, session.as_deref())?;
             let store = Store::open_default()?;
             let id = kb::spool(&root, &raw)?;
             let dir = config::workspace_dir().to_string_lossy().into_owned();
             let job = memory_job::Job::KbAdd {
                 id: id.clone(),
                 source,
+                session,
             };
             if let Err(e) = memory_job::spawn(&job, &dir, store.db_path().as_deref()) {
                 kb::unspool(&root, &id);
@@ -7847,7 +7879,9 @@ fn run_kb(cmd: KbCmd) -> Result<()> {
             })?;
             print_json(&answer);
         }
-        KbCmd::List { topic } => print_json(&kb::list(&root, topic.as_deref())?),
+        KbCmd::List { topic, session } => {
+            print_json(&kb::list(&root, topic.as_deref(), session.as_deref())?)
+        }
         KbCmd::Show { path, quiet } => {
             print_record(&kb::show(&root, &path)?, quiet, QUIET_DROP_KB_NOTE);
         }
@@ -11172,15 +11206,16 @@ mod tests {
         let note = crate::core::kb::Note {
             path: "topics/a/b.md".into(),
             body: "text".into(),
+            sessions: vec!["s1".into()],
         };
         assert_eq!(
             sorted_owned(keys(&note)),
-            sorted(&["path", "body"]),
+            sorted(&["path", "body", "sessions"]),
             "kb::Note gained/lost a field: decide whether --quiet should drop it"
         );
         assert_eq!(
             sorted_owned(value_keys(&quiet(&note, QUIET_DROP_KB_NOTE))),
-            sorted(&["path"]),
+            sorted(&["path", "sessions"]),
         );
     }
 

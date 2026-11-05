@@ -2119,7 +2119,7 @@ ${text: -8000}"; fi
 "; fi
   done <<< "$facts"
   if [ -n "$kept" ]; then
-    printf '%s' "$kept" | naru kb add --source "mined-session-$id" --stdin >/dev/null && echo "$id: filed $(printf '%s' "$kept" | grep -c '^- ') of $seen facts ($skipped already known)"
+    printf '%s' "$kept" | naru kb add --source "mined-session-$id" --session "$id" --stdin >/dev/null && echo "$id: filed $(printf '%s' "$kept" | grep -c '^- ') of $seen facts ($skipped already known)"
   else
     echo "$id: nothing new ($seen facts, $skipped already known)"
   fi

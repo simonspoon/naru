@@ -13,6 +13,8 @@
 set -euo pipefail
 # Drop inherited NARU_* vars: Naru reads them before MESA_*, so one would escape this script's isolation.
 unset $(env | sed -n 's/^\(NARU_[A-Za-z0-9_]*\)=.*/\1/p')
+# `kb add` records an ambient Claude Code session id; start with none.
+unset CLAUDE_CODE_SESSION_ID
 
 cd "$(dirname "$0")/.."
 command -v jq >/dev/null || { echo "jq is required" >&2; exit 1; }
@@ -163,7 +165,7 @@ wait_jobs 1
 [ "$(jq -r '.applied | length' "$JOBLOG")" = "1" ] || fail "job report: $(cat "$JOBLOG")"
 run 0 "$MESA" kb list
 [ "$(jqs length)" = "1" ] && [ "$(jqs '.[0].path')" = "topics/pets/cat.md" ] || fail "list: $STDOUT"
-[ "$(jqs '.[0] | keys | join(",")')" = "path,tags,title,topic,updated" ] || fail "list keys: $STDOUT"
+[ "$(jqs '.[0] | keys | join(",")')" = "path,sessions,tags,title,topic,updated" ] || fail "list keys: $STDOUT"
 [ "$(jqs '.[0].tags | join(",")')" = "pets,cat" ] || fail "tags: $STDOUT"
 [ "$(wc -l < "$KB/INDEX.md" | tr -d ' ')" = "1" ] || fail "INDEX.md: $(cat "$KB/INDEX.md")"
 grep -q '^topics/pets/cat.md | The cat | pets, cat | ' "$KB/INDEX.md" || fail "INDEX.md line: $(cat "$KB/INDEX.md")"
@@ -174,7 +176,7 @@ grep -q '^topics/pets/cat.md | The cat | pets, cat | ' "$KB/INDEX.md" || fail "I
 run 0 "$MESA" kb show topics/pets/cat.md
 [ "$(jqs .body)" = "The cat is named Miso." ] || fail "show: $STDOUT"
 run 0 "$MESA" kb show topics/pets/cat.md --quiet
-[ "$(jqs 'keys | join(",")')" = "path" ] || fail "show --quiet keys: $STDOUT"
+[ "$(jqs 'keys | join(",")')" = "path,sessions" ] || fail "show --quiet keys: $STDOUT"
 run 0 "$MESA" kb list --topic nope
 [ "$STDOUT" = "[]" ] || fail "list --topic nope: $STDOUT"
 run 0 "$MESA" kb list --topic pets --quiet
@@ -322,6 +324,34 @@ wait_jobs $((JOBS + 1))
 tail -1 "$JOBLOG" | jq -e '.error.code == "unavailable"' >/dev/null || fail "failed job report: $(tail -1 "$JOBLOG")"
 rm -f "$STUB_DIR/fail"
 ok "failed add: unavailable in the job log, spool kept"
+
+# ---- source sessions in front matter (naru task 2575) ----
+
+run 1 "$MESA" kb add --session "bad id" text
+[ "$(errcode)" = "validation" ] || fail "a malformed --session must be validation: $STDERR"
+stage add '{"ops":[{"op":"create","topic":"sess","slug":"dog","title":"The dog","tags":[],"body":"The dog is Rex."}]}'
+JOBS=$(job_count)
+run 0 "$MESA" kb add --session sess-A the dog is Rex
+wait_jobs $((JOBS + 1))
+grep -qx 'sessions: sess-A' "$KB/topics/sess/dog.md" || fail "front matter: $(cat "$KB/topics/sess/dog.md")"
+run 0 "$MESA" kb list --session sess-A
+[ "$(jqs 'map(.path) | join(",")')" = "topics/sess/dog.md" ] || fail "list --session sess-A: $STDOUT"
+run 0 "$MESA" kb list --session nobody
+[ "$STDOUT" = "[]" ] || fail "list --session nobody: $STDOUT"
+# no flag: the ambient CLAUDE_CODE_SESSION_ID is appended, earlier ids kept
+stage add '{"ops":[{"op":"append","topic":"sess","slug":"dog","title":"","tags":[],"body":"Rex is old."}]}'
+JOBS=$(job_count)
+run 0 env CLAUDE_CODE_SESSION_ID=sess-B "$MESA" kb add rex is old
+wait_jobs $((JOBS + 1))
+run 0 "$MESA" kb show topics/sess/dog.md
+[ "$(jqs '.sessions | join(",")')" = "sess-A,sess-B" ] || fail "append must keep earlier sessions: $STDOUT"
+run 0 "$MESA" kb list --topic sess --session sess-B
+[ "$(jqs length)" = "1" ] || fail "list --topic --session: $STDOUT"
+# a note with no session has no sessions line and an empty list
+grep -q '^sessions:' "$KB/topics/pets/cat.md" && fail "a note filed with no session must have no sessions line"
+run 0 "$MESA" kb show topics/pets/cat.md
+[ "$(jqs '.sessions | length')" = "0" ] || fail "no-session note: $STDOUT"
+ok "sessions: --session recorded in front matter, list --session filters, append keeps earlier ids, ambient id used, bad id refused"
 
 # ---- the automatic lookup hook (naru task 2274) ----
 #

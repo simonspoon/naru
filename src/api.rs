@@ -5551,6 +5551,8 @@ async fn list_workflow_log(
 struct KbListQuery {
     #[serde(default)]
     topic: Option<String>,
+    #[serde(default)]
+    session: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -5563,7 +5565,7 @@ struct KbAskBody {
     question: String,
 }
 
-/// `GET /api/kb/notes[?topic=]`: metadata only, as `naru kb list`.
+/// `GET /api/kb/notes[?topic=&session=]`: metadata only, as `naru kb list`.
 async fn list_kb_notes(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -5571,9 +5573,11 @@ async fn list_kb_notes(
     Query(q): Query<KbListQuery>,
 ) -> ApiResult<Response> {
     require_agent_access(&state, &addr, &headers)?;
-    let notes = tokio::task::spawn_blocking(move || kb::list(&kb::kb_dir(), q.topic.as_deref()))
-        .await
-        .map_err(|e| agents_unavailable(format!("kb list panicked: {e}")))??;
+    let notes = tokio::task::spawn_blocking(move || {
+        kb::list(&kb::kb_dir(), q.topic.as_deref(), q.session.as_deref())
+    })
+    .await
+    .map_err(|e| agents_unavailable(format!("kb list panicked: {e}")))??;
     Ok(Json(notes).into_response())
 }
 

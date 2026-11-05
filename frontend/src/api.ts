@@ -2466,8 +2466,10 @@ export function unregisterLibraryHook(
 
 // ---- knowledge base (naru task 1928) ----
 
-/** One note's markdown (front matter included), as `naru kb show`. */
-export function getKbNote(path: string): Promise<{ path: string; body: string }> {
+/** One note's markdown body and source sessions, as `naru kb show`. */
+export function getKbNote(
+  path: string,
+): Promise<{ path: string; body: string; sessions: string[] }> {
   return request(`/api/kb/note?path=${encodeURIComponent(path)}`)
 }
 

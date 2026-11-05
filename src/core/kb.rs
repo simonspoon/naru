@@ -61,6 +61,8 @@ const TITLE_MAX: usize = 120;
 const TAGS_MAX: usize = 8;
 /// A `--source` label, in chars.
 const SOURCE_MAX: usize = 200;
+/// Source session ids a note keeps, the most recent last (naru task 2575).
+pub const SESSIONS_MAX: usize = 20;
 
 pub const ASK_SCHEMA: &str = r#"{"type":"object","additionalProperties":false,"required":["answer","sources"],"properties":{"answer":{"type":"string"},"sources":{"type":"array","items":{"type":"string"}}}}"#;
 pub const ADD_SCHEMA: &str = r#"{"type":"object","additionalProperties":false,"required":["ops"],"properties":{"ops":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["op","topic","slug","title","tags","body"],"properties":{"op":{"type":"string","enum":["create","append"]},"topic":{"type":"string"},"slug":{"type":"string"},"title":{"type":"string"},"tags":{"type":"array","items":{"type":"string"}},"body":{"type":"string"}}}}}}"#;
@@ -126,6 +128,23 @@ pub fn valid_name(s: &str) -> bool {
         && matches!(b[0], b'a'..=b'z' | b'0'..=b'9')
         && b.iter()
             .all(|c| matches!(c, b'a'..=b'z' | b'0'..=b'9' | b'-'))
+}
+
+/// A Claude Code session id as a note records it: 1-64 of `[A-Za-z0-9_-]`,
+/// so it stays one word on the front matter's `sessions:` line.
+pub fn valid_session(s: &str) -> bool {
+    (1..=64).contains(&s.len())
+        && s.bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+}
+
+/// Records `id` as a note's most recent source session: an id already there
+/// moves to the end, and only the last [`SESSIONS_MAX`] are kept.
+fn add_session(sessions: &mut Vec<String>, id: &str) {
+    sessions.retain(|s| s != id);
+    sessions.push(id.to_string());
+    let over = sessions.len().saturating_sub(SESSIONS_MAX);
+    sessions.drain(..over);
 }
 
 fn rel_path(topic: &str, slug: &str) -> String {
@@ -225,6 +244,9 @@ pub struct NoteInfo {
     pub title: String,
     pub tags: Vec<String>,
     pub updated: String,
+    /// The Claude Code sessions the note was filed from, oldest first; empty
+    /// for a note filed with none (naru task 2575).
+    pub sessions: Vec<String>,
 }
 
 /// `kb show`'s answer.
@@ -232,6 +254,7 @@ pub struct NoteInfo {
 pub struct Note {
     pub path: String,
     pub body: String,
+    pub sessions: Vec<String>,
 }
 
 /// One cited note in an answer.
@@ -251,13 +274,21 @@ pub struct Answer {
 struct Parsed {
     title: String,
     tags: Vec<String>,
+    sessions: Vec<String>,
     updated: String,
     body: String,
 }
 
-fn render(title: &str, tags: &[String], updated: &str, body: &str) -> String {
+/// A note file. The `sessions:` line is written only when there are any, so
+/// a note filed with none looks as it did before naru task 2575.
+fn render(title: &str, tags: &[String], sessions: &[String], updated: &str, body: &str) -> String {
+    let sessions = if sessions.is_empty() {
+        String::new()
+    } else {
+        format!("sessions: {}\n", sessions.join(", "))
+    };
     format!(
-        "---\ntitle: {title}\ntags: {}\nupdated: {updated}\n---\n{}\n",
+        "---\ntitle: {title}\ntags: {}\n{sessions}updated: {updated}\n---\n{}\n",
         tags.join(", "),
         body.trim()
     )
@@ -273,6 +304,7 @@ fn parse_note(text: &str, slug: &str) -> Parsed {
         let mut p = Parsed {
             title: slug.to_string(),
             tags: Vec::new(),
+            sessions: Vec::new(),
             updated: String::new(),
             body: body.trim_end_matches('\n').to_string(),
         };
@@ -285,6 +317,10 @@ fn parse_note(text: &str, slug: &str) -> Parsed {
                     .map(|t| t.trim().to_string())
                     .filter(|t| !t.is_empty())
                     .collect();
+            } else if let Some(v) = line.strip_prefix("sessions:") {
+                for id in v.split(',').map(str::trim).filter(|s| valid_session(s)) {
+                    add_session(&mut p.sessions, id);
+                }
             } else if let Some(v) = line.strip_prefix("updated: ") {
                 p.updated = v.to_string();
             }
@@ -294,6 +330,7 @@ fn parse_note(text: &str, slug: &str) -> Parsed {
     Parsed {
         title: slug.to_string(),
         tags: Vec::new(),
+        sessions: Vec::new(),
         updated: String::new(),
         body: text.trim_end_matches('\n').to_string(),
     }
@@ -351,6 +388,7 @@ pub fn scan(root: &Path) -> Result<Vec<NoteInfo>> {
                 title: one_line(&p.title, TITLE_MAX),
                 tags: p.tags,
                 updated: p.updated,
+                sessions: p.sessions,
             });
         }
     }
@@ -395,11 +433,13 @@ fn index_for_prompt(notes: &[NoteInfo]) -> String {
     s
 }
 
-/// `kb list`: every note, optionally one topic's.
-pub fn list(root: &Path, topic: Option<&str>) -> Result<Vec<NoteInfo>> {
+/// `kb list`: every note, optionally only one topic's and/or only those
+/// filed from one session.
+pub fn list(root: &Path, topic: Option<&str>, session: Option<&str>) -> Result<Vec<NoteInfo>> {
     Ok(scan(root)?
         .into_iter()
         .filter(|n| topic.is_none_or(|t| n.topic == t))
+        .filter(|n| session.is_none_or(|s| n.sessions.iter().any(|x| x == s)))
         .collect())
 }
 
@@ -409,10 +449,11 @@ pub fn show(root: &Path, path: &str) -> Result<Note> {
     let missing = || Error::NotFound(format!("no note {path:?} in the knowledge base"));
     let (topic, slug) = parse_rel(path).ok_or_else(missing)?;
     let file = existing_note_file(root, &topic, &slug).ok_or_else(missing)?;
-    let text = fs::read_to_string(file)?;
+    let p = parse_note(&fs::read_to_string(file)?, &slug);
     Ok(Note {
         path: path.to_string(),
-        body: parse_note(&text, &slug).body,
+        body: p.body,
+        sessions: p.sessions,
     })
 }
 
@@ -495,8 +536,9 @@ fn topic_count(root: &Path) -> usize {
         .unwrap_or(0)
 }
 
-/// Applies one op under the held lock. `root` is canonical.
-fn apply_one(root: &Path, raw: &Value, source: &str) -> Result<Value> {
+/// Applies one op under the held lock. `root` is canonical. `session`, when
+/// given, is recorded as the note's most recent source session.
+fn apply_one(root: &Path, raw: &Value, source: &str, session: Option<&str>) -> Result<Value> {
     let op: RawOp = serde_json::from_value(raw.clone())
         .map_err(|e| Error::Validation(format!("not a valid op: {e}")))?;
     if !valid_name(&op.topic) || !valid_name(&op.slug) {
@@ -538,7 +580,8 @@ fn apply_one(root: &Path, raw: &Value, source: &str) -> Result<Value> {
             };
             let mut tags = Vec::new();
             clean_tags(&op.tags, &mut tags);
-            render(&title, &tags, &now_iso(), body)
+            let sessions: Vec<String> = session.into_iter().map(String::from).collect();
+            render(&title, &tags, &sessions, &now_iso(), body)
         }
         "append" => {
             let existing = existing_note_file(root, &op.topic, &op.slug)
@@ -552,7 +595,16 @@ fn apply_one(root: &Path, raw: &Value, source: &str) -> Result<Value> {
                 )));
             }
             clean_tags(&op.tags, &mut p.tags);
-            render(&one_line(&p.title, TITLE_MAX), &p.tags, &now_iso(), &joined)
+            if let Some(id) = session {
+                add_session(&mut p.sessions, id);
+            }
+            render(
+                &one_line(&p.title, TITLE_MAX),
+                &p.tags,
+                &p.sessions,
+                &now_iso(),
+                &joined,
+            )
         }
         other => {
             return Err(Error::Validation(format!(
@@ -575,7 +627,7 @@ fn apply_one(root: &Path, raw: &Value, source: &str) -> Result<Value> {
 /// its own (a refused one is recorded, the rest still land), at most
 /// [`OPS_MAX`] of them, and `INDEX.md` is rebuilt at the end. The report is
 /// `{applied, failed, dropped}`.
-pub fn apply_ops(root: &Path, out: &Value, source: &str) -> Result<Value> {
+pub fn apply_ops(root: &Path, out: &Value, source: &str, session: Option<&str>) -> Result<Value> {
     let ops = out["ops"]
         .as_array()
         .ok_or_else(|| Error::Validation("the model's answer holds no ops array".into()))?;
@@ -589,7 +641,7 @@ pub fn apply_ops(root: &Path, out: &Value, source: &str) -> Result<Value> {
             dropped += 1;
             continue;
         }
-        match apply_one(&root, raw, source) {
+        match apply_one(&root, raw, source, session) {
             Ok(done) => applied.push(done),
             Err(e) => failed.push(json!({
                 "op": raw["op"], "topic": raw["topic"], "slug": raw["slug"],
@@ -614,8 +666,8 @@ fn valid_spool_id(id: &str) -> bool {
             .all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f' | b'-'))
 }
 
-/// Checks a `kb add` text and `--source` label.
-pub fn check_add(text: &str, source: &str) -> Result<()> {
+/// Checks a `kb add` text, `--source` label and `--session` id.
+pub fn check_add(text: &str, source: &str, session: Option<&str>) -> Result<()> {
     if text.trim().is_empty() {
         return Err(Error::Validation(
             "there is nothing to add: the text is empty".into(),
@@ -630,6 +682,11 @@ pub fn check_add(text: &str, source: &str) -> Result<()> {
     if source.chars().count() > SOURCE_MAX {
         return Err(Error::Validation(format!(
             "--source is over {SOURCE_MAX} characters"
+        )));
+    }
+    if let Some(id) = session.filter(|s| !valid_session(s)) {
+        return Err(Error::Validation(format!(
+            "--session {id:?} is not a session id (1-64 of A-Z a-z 0-9 - _)"
         )));
     }
     Ok(())
@@ -705,8 +762,15 @@ fn add_prompt(index: &str, piece: &str, source: &str, part: usize, parts: usize)
 pub type Call<'a> = dyn FnMut(&str, &str) -> std::result::Result<Value, String> + 'a;
 
 /// Files `text` into the kb: one call per chunk, each answer applied before the
-/// next chunk is sent. The report sums the applies.
-pub fn add_with(root: &Path, text: &str, source: &str, call: &mut Call) -> Result<Value> {
+/// next chunk is sent. The report sums the applies. Every note written is
+/// tagged with `session` when given.
+pub fn add_with(
+    root: &Path,
+    text: &str,
+    source: &str,
+    session: Option<&str>,
+    call: &mut Call,
+) -> Result<Value> {
     let pieces = chunks(text, CHUNK);
     let mut applied = Vec::new();
     let mut failed = Vec::new();
@@ -715,7 +779,7 @@ pub fn add_with(root: &Path, text: &str, source: &str, call: &mut Call) -> Resul
         let index = index_for_prompt(&scan(root)?);
         let prompt = add_prompt(&index, piece, source, i + 1, pieces.len());
         let out = call(&prompt, ADD_SCHEMA).map_err(Error::Unavailable)?;
-        let report = apply_ops(root, &out, source)?;
+        let report = apply_ops(root, &out, source, session)?;
         applied.extend(report["applied"].as_array().cloned().unwrap_or_default());
         failed.extend(report["failed"].as_array().cloned().unwrap_or_default());
         dropped += report["dropped"].as_i64().unwrap_or(0);
@@ -726,14 +790,23 @@ pub fn add_with(root: &Path, text: &str, source: &str, call: &mut Call) -> Resul
 /// The body of `naru __job kb-add`: reads the spooled text, files it, and
 /// removes the spool file once the whole add went through (a failed one keeps
 /// it, so nothing is lost).
-pub fn run_add_job(root: &Path, id: &str, source: &str, call: &mut Call) -> Result<Value> {
+pub fn run_add_job(
+    root: &Path,
+    id: &str,
+    source: &str,
+    session: Option<&str>,
+    call: &mut Call,
+) -> Result<Value> {
     if !valid_spool_id(id) {
         return Err(Error::Validation(format!("{id:?} is not a spool id")));
     }
     let spooled = root.join("spool").join(format!("{id}.md"));
     let text = fs::read_to_string(&spooled)
         .map_err(|e| Error::NotFound(format!("no spooled text {id}: {e}")))?;
-    let mut report = add_with(root, &text, source, call)?;
+    if let Some(s) = session.filter(|s| !valid_session(s)) {
+        return Err(Error::Validation(format!("{s:?} is not a session id")));
+    }
+    let mut report = add_with(root, &text, source, session, call)?;
     // Only a clean add removes the spool: a refused op keeps the text so it
     // can be re-filed, and the report says where it is.
     if report["failed"].as_array().is_none_or(|f| f.is_empty()) {
@@ -1217,6 +1290,11 @@ pub fn merge(root: &Path, keep: &str, drops: &[String]) -> Result<Value> {
             last_bullet = bullet;
         }
         clean_tags(&p.tags, &mut kept.tags);
+        for id in &p.sessions {
+            if !kept.sessions.contains(id) {
+                add_session(&mut kept.sessions, id);
+            }
+        }
     }
     let body = body.trim();
     if body.len() > NOTE_MAX {
@@ -1228,6 +1306,7 @@ pub fn merge(root: &Path, keep: &str, drops: &[String]) -> Result<Value> {
     let text = render(
         &one_line(&kept.title, TITLE_MAX),
         &kept.tags,
+        &kept.sessions,
         &now_iso(),
         body,
     );
@@ -1298,20 +1377,21 @@ mod tests {
             &root,
             &ops(json!([create("rust", "lifetimes", "Body one.")])),
             "t",
+            None,
         )
         .unwrap();
         assert_eq!(r["applied"].as_array().unwrap().len(), 1, "{r}");
-        let all = list(&root, None).unwrap();
+        let all = list(&root, None, None).unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].title, "T / x");
         assert_eq!(all[0].tags, ["a", "b"]);
         // append keeps the title, merges tags, and joins the body
         let app = json!({"op":"append","topic":"rust","slug":"lifetimes","title":"ignored","tags":["c"],"body":"More."});
-        let r = apply_ops(&root, &ops(json!([app])), "t").unwrap();
+        let r = apply_ops(&root, &ops(json!([app])), "t", None).unwrap();
         assert_eq!(r["applied"].as_array().unwrap().len(), 1, "{r}");
         let n = show(&root, "topics/rust/lifetimes.md").unwrap();
         assert_eq!(n.body, "Body one.\n\nMore.");
-        let l = &list(&root, Some("rust")).unwrap()[0];
+        let l = &list(&root, Some("rust"), None).unwrap()[0];
         assert_eq!((l.title.as_str(), l.tags.len()), ("T / x", 3));
         // the index matches the files; the log has one line per write
         let index = fs::read_to_string(root.join("INDEX.md")).unwrap();
@@ -1329,9 +1409,78 @@ mod tests {
     }
 
     #[test]
+    fn sessions_round_trip_append_dedupe_and_absence() {
+        let (_d, root) = kb();
+        // a note filed with no session has no `sessions:` line and reads empty
+        apply_ops(&root, &ops(json!([create("a", "none", "x")])), "t", None).unwrap();
+        let text = fs::read_to_string(root.join("topics/a/none.md")).unwrap();
+        assert!(!text.contains("sessions:"), "{text}");
+        assert!(show(&root, "topics/a/none.md").unwrap().sessions.is_empty());
+        // create records the session; the front matter round-trips
+        apply_ops(&root, &ops(json!([create("a", "b", "x")])), "t", Some("s1")).unwrap();
+        let text = fs::read_to_string(root.join("topics/a/b.md")).unwrap();
+        assert!(text.contains("\nsessions: s1\nupdated: "), "{text}");
+        assert_eq!(show(&root, "topics/a/b.md").unwrap().sessions, ["s1"]);
+        // an append keeps the earlier ids and adds its own; a repeat moves to the end
+        let app = |s: &str| {
+            let op =
+                json!({"op":"append","topic":"a","slug":"b","title":"","tags":[],"body":"more"});
+            apply_ops(&root, &ops(json!([op])), "t", Some(s)).unwrap();
+        };
+        app("s2");
+        app("s1");
+        app("s2");
+        assert_eq!(show(&root, "topics/a/b.md").unwrap().sessions, ["s1", "s2"]);
+        // an append without a session keeps the list as it was
+        let op = json!({"op":"append","topic":"a","slug":"b","title":"","tags":[],"body":"x"});
+        apply_ops(&root, &ops(json!([op])), "t", None).unwrap();
+        assert_eq!(list(&root, None, None).unwrap()[0].sessions, ["s1", "s2"]);
+        // capped at the most recent SESSIONS_MAX
+        for i in 0..SESSIONS_MAX + 3 {
+            app(&format!("n{i}"));
+        }
+        let got = show(&root, "topics/a/b.md").unwrap().sessions;
+        assert_eq!(got.len(), SESSIONS_MAX);
+        assert_eq!(got.first().unwrap(), "n3");
+        assert_eq!(got.last().unwrap(), &format!("n{}", SESSIONS_MAX + 2));
+        // list --session finds only that session's notes
+        let paths = |s: &str| -> Vec<String> {
+            list(&root, None, Some(s))
+                .unwrap()
+                .into_iter()
+                .map(|n| n.path)
+                .collect()
+        };
+        assert_eq!(paths("n5"), ["topics/a/b.md"]);
+        assert!(paths("s1").is_empty());
+        // a hand-written duplicate or junk id in the file is tolerated
+        fs::write(
+            root.join("topics/a/hand.md"),
+            "---\ntitle: H\ntags:\nsessions: x, x, bad id, ,y\nupdated: u\n---\nbody\n",
+        )
+        .unwrap();
+        assert_eq!(
+            show(&root, "topics/a/hand.md").unwrap().sessions,
+            ["x", "y"]
+        );
+        // merge unions the sessions of the drops into the kept note
+        apply_ops(&root, &ops(json!([create("a", "c", "y")])), "t", Some("m1")).unwrap();
+        merge(&root, "topics/a/c.md", &["topics/a/hand.md".into()]).unwrap();
+        assert_eq!(
+            show(&root, "topics/a/c.md").unwrap().sessions,
+            ["m1", "x", "y"]
+        );
+        // a bad --session is refused before anything is queued
+        assert!(check_add("t", "cli", Some("s1")).is_ok());
+        for bad in ["", "a b", "a,b", "a\nb", &"x".repeat(65)] {
+            assert!(check_add("t", "cli", Some(bad)).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
     fn bad_ops_are_refused_one_by_one() {
         let (_d, root) = kb();
-        apply_ops(&root, &ops(json!([create("a", "b", "x")])), "t").unwrap();
+        apply_ops(&root, &ops(json!([create("a", "b", "x")])), "t", None).unwrap();
         let over = "x".repeat(NOTE_MAX + 1);
         let bad = [
             create("../etc", "passwd", "x"),
@@ -1345,7 +1494,7 @@ mod tests {
             json!({"nonsense": true}),
         ];
         for op in bad {
-            let r = apply_ops(&root, &ops(json!([op])), "t").unwrap();
+            let r = apply_ops(&root, &ops(json!([op])), "t", None).unwrap();
             assert_eq!(r["failed"].as_array().unwrap().len(), 1, "{r}");
             assert_eq!(r["applied"].as_array().unwrap().len(), 0, "{r}");
         }
@@ -1355,11 +1504,11 @@ mod tests {
         let mixed: Vec<Value> = std::iter::once(create("a", "b", "dup"))
             .chain((0..OPS_MAX + 1).map(|i| create("a", &format!("ok{i}"), "fine")))
             .collect();
-        let r = apply_ops(&root, &ops(json!(mixed)), "t").unwrap();
+        let r = apply_ops(&root, &ops(json!(mixed)), "t", None).unwrap();
         assert_eq!(r["failed"].as_array().unwrap().len(), 1, "{r}");
         assert_eq!(r["applied"].as_array().unwrap().len(), OPS_MAX - 1, "{r}");
         assert_eq!(r["dropped"], 2);
-        assert!(apply_ops(&root, &json!({}), "t").is_err());
+        assert!(apply_ops(&root, &json!({}), "t", None).is_err());
     }
 
     #[test]
@@ -1374,13 +1523,19 @@ mod tests {
                 .enumerate()
                 .map(|(i, _)| create(&format!("t{}", chunk * OPS_MAX + i), "n", "x"))
                 .collect();
-            apply_ops(&root, &ops(json!(v)), "t").unwrap();
+            apply_ops(&root, &ops(json!(v)), "t", None).unwrap();
         }
         assert_eq!(topic_count(&root), TOPICS_MAX);
-        let r = apply_ops(&root, &ops(json!([create("one-more", "n", "x")])), "t").unwrap();
+        let r = apply_ops(
+            &root,
+            &ops(json!([create("one-more", "n", "x")])),
+            "t",
+            None,
+        )
+        .unwrap();
         assert_eq!(r["failed"].as_array().unwrap().len(), 1, "{r}");
         // an existing topic still takes notes
-        let r = apply_ops(&root, &ops(json!([create("t0", "second", "x")])), "t").unwrap();
+        let r = apply_ops(&root, &ops(json!([create("t0", "second", "x")])), "t", None).unwrap();
         assert_eq!(r["applied"].as_array().unwrap().len(), 1, "{r}");
 
         // a symlinked topic folder and a symlinked note are refused and unreadable
@@ -1391,10 +1546,16 @@ mod tests {
             std::os::unix::fs::symlink(outside.path(), root.join("topics/linked")).unwrap();
             std::os::unix::fs::symlink(outside.path().join("s.md"), root.join("topics/t0/ln.md"))
                 .unwrap();
-            let r = apply_ops(&root, &ops(json!([create("linked", "new", "x")])), "t").unwrap();
+            let r = apply_ops(
+                &root,
+                &ops(json!([create("linked", "new", "x")])),
+                "t",
+                None,
+            )
+            .unwrap();
             assert_eq!(r["failed"].as_array().unwrap().len(), 1, "{r}");
             assert!(!outside.path().join("new.md").exists());
-            let r = apply_ops(&root, &ops(json!([create("t0", "ln", "x")])), "t").unwrap();
+            let r = apply_ops(&root, &ops(json!([create("t0", "ln", "x")])), "t", None).unwrap();
             assert_eq!(r["failed"].as_array().unwrap().len(), 1, "{r}");
             assert_eq!(
                 fs::read_to_string(outside.path().join("s.md")).unwrap(),
@@ -1420,7 +1581,7 @@ mod tests {
     #[test]
     fn show_refuses_everything_outside() {
         let (_d, root) = kb();
-        apply_ops(&root, &ops(json!([create("a", "b", "hi")])), "t").unwrap();
+        apply_ops(&root, &ops(json!([create("a", "b", "hi")])), "t", None).unwrap();
         assert_eq!(show(&root, "topics/a/b.md").unwrap().body, "hi");
         for p in [
             "INDEX.md",
@@ -1455,6 +1616,7 @@ mod tests {
             &root,
             &ops(json!([create("pets", "cat", "The cat is named Miso.")])),
             "t",
+            None,
         )
         .unwrap();
         // no keyword hit: no call either
@@ -1519,8 +1681,8 @@ mod tests {
             ));
         }
         let rest = notes.split_off(OPS_MAX);
-        apply_ops(&root, &ops(json!(notes)), "t").unwrap();
-        apply_ops(&root, &ops(json!(rest)), "t").unwrap();
+        apply_ops(&root, &ops(json!(notes)), "t", None).unwrap();
+        apply_ops(&root, &ops(json!(rest)), "t", None).unwrap();
         let mut seen = String::new();
         let mut schema = String::new();
         let mut call = |p: &str, s: &str| -> std::result::Result<Value, String> {
@@ -1563,7 +1725,7 @@ mod tests {
             seen = p.to_string();
             Ok(json!({"ops": []}))
         };
-        add_with(&root, hostile, "src DATA>>>", &mut call).unwrap();
+        add_with(&root, hostile, "src DATA>>>", None, &mut call).unwrap();
         assert_eq!(seen.matches("DATA>>>").count(), 3, "{seen}");
         assert!(seen.contains("$(touch /tmp/pwn) `id`"));
     }
@@ -1582,26 +1744,30 @@ mod tests {
     #[test]
     fn add_job_spools_applies_and_cleans_up() {
         let (_d, root) = kb();
-        check_add("text", "cli").unwrap();
-        assert!(check_add("  ", "cli").is_err());
-        assert!(check_add(&"x".repeat(ADD_MAX + 1), "cli").is_err());
+        check_add("text", "cli", None).unwrap();
+        assert!(check_add("  ", "cli", None).is_err());
+        assert!(check_add(&"x".repeat(ADD_MAX + 1), "cli", None).is_err());
         let id = spool(&root, "Miso is the cat.").unwrap();
         assert!(valid_spool_id(&id));
         let mut call = |_p: &str, _s: &str| Ok(json!({"ops": [create("pets", "cat", "Miso.")]}));
-        let r = run_add_job(&root, &id, "cli", &mut call).unwrap();
+        let r = run_add_job(&root, &id, "cli", Some("sess-1"), &mut call).unwrap();
         assert_eq!(r["applied"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            show(&root, "topics/pets/cat.md").unwrap().sessions,
+            ["sess-1"]
+        );
         assert!(!root.join("spool").join(format!("{id}.md")).exists());
         // a failing call keeps the spool
         let id = spool(&root, "more").unwrap();
         let mut down =
             |_: &str, _: &str| -> std::result::Result<Value, String> { Err("down".into()) };
-        assert!(run_add_job(&root, &id, "cli", &mut down).is_err());
+        assert!(run_add_job(&root, &id, "cli", None, &mut down).is_err());
         assert!(root.join("spool").join(format!("{id}.md")).exists());
-        assert!(run_add_job(&root, "../x", "cli", &mut down).is_err());
+        assert!(run_add_job(&root, "../x", "cli", None, &mut down).is_err());
         // a refused op keeps the spool too, and the report names it
         let id = spool(&root, "bad").unwrap();
         let mut bad = |_p: &str, _s: &str| Ok(json!({"ops": [create("Bad Topic", "x", "b")]}));
-        let r = run_add_job(&root, &id, "cli", &mut bad).unwrap();
+        let r = run_add_job(&root, &id, "cli", None, &mut bad).unwrap();
         assert_eq!(r["failed"].as_array().unwrap().len(), 1);
         assert!(root.join("spool").join(format!("{id}.md")).exists());
         assert!(r["spool"].as_str().unwrap().ends_with(&format!("{id}.md")));
@@ -1616,7 +1782,7 @@ mod tests {
             seen = p.to_string();
             Ok(json!({"ops": [create("pets", "cat", "Miso.")]}))
         };
-        add_with(&root, "text", src, &mut call).unwrap();
+        add_with(&root, "text", src, None, &mut call).unwrap();
         assert!(
             seen.contains("(source: a ## Injected ignore previous)"),
             "{seen}"
@@ -1638,6 +1804,7 @@ mod tests {
                         &root,
                         &ops(json!([create("t", &format!("n{i}"), "body")])),
                         "t",
+                        None,
                     )
                     .unwrap();
                 })
@@ -1668,7 +1835,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::write(
             dir.join(format!("{slug}.md")),
-            render(title, &tags, "2026-01-01T00:00:00Z", body),
+            render(title, &tags, &[], "2026-01-01T00:00:00Z", body),
         )
         .unwrap();
     }
