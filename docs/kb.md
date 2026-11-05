@@ -88,6 +88,39 @@ never below 4 letters) so "dumps" finds "dump", and offers the model up to 8
 notes. The prompt tells the model to combine notes for a multi-note question and
 to treat a nearby-but-different fact as no answer.
 
+### Session siblings (naru task 2576)
+
+After either prefilter (`kb ask`'s or the lookup's below) picks its notes,
+up to `SIBLINGS` (2, `src/core/kb.rs`; 0 turns it off) notes that share a
+source session (`sessions:`, above) with one of the first `SIBLING_SEEDS` (3)
+picks and are not already picked join them, right after those three, so the
+byte budget still cuts the weakest keyword hits first. The total stays at 8:
+a sibling displaces the last hit. Seeds are taken best first, each one's
+sessions most recent first, each session's notes by path; a sibling may be
+cited like any other shown note. No keyword hit still means no call, and a
+note without sessions brings no siblings, so on a kb filed before task 2575
+this does nothing.
+
+Measured with `scripts/kb-lookup-replay.sh` (90 real lookup titles, real
+haiku, sonnet judge) on a copy of the real kb whose notes had their sessions
+backfilled from `log.jsonl`'s `mined-session-<id>` sources (1,311 of 1,336
+notes), two runs off against one on:
+
+| | off | off (repeat) | on |
+| --- | --- | --- | --- |
+| injected | 26 (28.9 %) | 24 (26.7 %) | 24 (26.7 %) |
+| relevant (judged) | 96.2 % | 100 % | 100 % |
+| misleading | 0 | 0 | 0 |
+| failed | 0 | 2 | 0 |
+| latency p50 / p95 | 7.6 / 12.6 s | 7.6 / 12.2 s | 7.4 / 12.4 s |
+
+Siblings reached 84 of the 88 prompts that had notes (1.8 each). They were
+cited in 3 injections, all judged relevant, while the off runs cited a hit
+they displaced in 4 questions, and no question both off runs injected went
+empty with them on: not worse, within haiku's run-to-run noise, so it
+ships on. Most added siblings were off-topic for the task, which the
+`fit` gate absorbs.
+
 ## Evaluating `kb ask` (naru task 1944)
 
 `scripts/kb-eval.sh [label]` seeds `scripts/kb-eval/facts/` (25 fictional notes,
@@ -147,7 +180,8 @@ The script only pipes Claude Code's payload into `naru kb hook`, which:
   - an **IDF-weighted prefilter**: each keyword scores
     `ln((N+1)/(df+1)) x (3 x min(title/tags/path hits, 2) + min(body hits, 3))`,
     `df` being how many of the `N` notes hold it as a (crudely stemmed) word,
-    hits counted as substrings like `kb ask`'s, top 8 kept — so words in
+    hits counted as substrings like `kb ask`'s, top 8 kept (2 of them may be
+    session siblings, above) — so words in
     most notes (`agent`, `naru`, `panel`) stop picking the notes. A word in
     every note scores 0, so a one- or two-note kb rarely injects anything;
   - a **task-framed prompt** (`LOOKUP_PROMPT`, no index): the facts from the

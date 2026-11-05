@@ -56,6 +56,11 @@ const INDEX_PROMPT_MAX: usize = 6 * 1024;
 const ASK_NOTES: usize = 8;
 const ASK_NOTE_BYTES: usize = 3 * 1024;
 const ASK_NOTES_TOTAL: usize = 12 * 1024;
+/// Notes filed from the same session as one of the top [`SIBLING_SEEDS`]
+/// prefilter hits that join them, within [`ASK_NOTES`] (naru task 2576).
+/// 0 turns it off.
+const SIBLINGS: usize = 2;
+const SIBLING_SEEDS: usize = 3;
 /// A title, in chars; tags kept per note.
 const TITLE_MAX: usize = 120;
 const TAGS_MAX: usize = 8;
@@ -927,6 +932,42 @@ fn prefilter_idf(root: &Path, notes: &[NoteInfo], task: &str) -> Vec<(NoteInfo, 
         .collect()
 }
 
+/// `chosen` with up to [`SIBLINGS`] notes that share a source session with
+/// its first [`SIBLING_SEEDS`] notes and are not already in it, placed right
+/// after those seeds (so the byte budget in [`ask_prompt`] cuts the weakest
+/// hits first) and making room by dropping the last hits past [`ASK_NOTES`].
+/// Seeds are taken best first, each one's sessions most recent first, each
+/// session's notes by path (naru task 2576).
+fn with_siblings(
+    root: &Path,
+    notes: &[NoteInfo],
+    mut chosen: Vec<(NoteInfo, String)>,
+) -> Vec<(NoteInfo, String)> {
+    let seeds = chosen.len().min(SIBLING_SEEDS);
+    let mut picked: Vec<(NoteInfo, String)> = Vec::new();
+    'seeds: for (seed, _) in &chosen[..seeds] {
+        for s in seed.sessions.iter().rev() {
+            for n in notes.iter().filter(|n| n.sessions.contains(s)) {
+                if picked.len() == SIBLINGS {
+                    break 'seeds;
+                }
+                let have = |c: &[(NoteInfo, String)]| c.iter().any(|(m, _)| m.path == n.path);
+                if have(&chosen) || have(&picked) {
+                    continue;
+                }
+                if let Ok(note) = show(root, &n.path) {
+                    picked.push((n.clone(), note.body));
+                }
+            }
+        }
+    }
+    chosen.truncate(ASK_NOTES - picked.len());
+    let tail = chosen.split_off(seeds.min(chosen.len()));
+    chosen.extend(picked);
+    chosen.extend(tail);
+    chosen
+}
+
 /// `kb ask`'s prompt carries the index; the lookup's (`index` `None`) does not.
 fn ask_prompt(
     instructions: &str,
@@ -998,6 +1039,7 @@ fn answer_with(root: &Path, question: &str, lookup: bool, call: &mut Call) -> Re
     } else {
         prefilter(root, &notes, question)
     };
+    let chosen = with_siblings(root, &notes, chosen);
     if chosen.is_empty() {
         return Ok(empty());
     }
@@ -1661,6 +1703,44 @@ mod tests {
             ask_with(&root, "  ", &mut down),
             Err(Error::Validation(_))
         ));
+    }
+
+    #[test]
+    fn ask_adds_same_session_siblings_within_the_cap() {
+        let (_d, root) = kb();
+        let file = |slug: &str, body: &str, session: &str| {
+            apply_ops(
+                &root,
+                &ops(json!([create("t", slug, body)])),
+                "t",
+                Some(session),
+            )
+            .unwrap();
+        };
+        file("cat", "The cat is named Miso.", "s1");
+        file("vet", "Appointments are on Tuesdays.", "s1");
+        file("fish", "Goldfish live in the pond.", "s2");
+        for i in 0..8 {
+            file(&format!("hit{i}"), "kitten kitten", "s3");
+        }
+        let mut prompt = String::new();
+        let mut call = |p: &str, _: &str| -> std::result::Result<Value, String> {
+            prompt = p.to_string();
+            Ok(json!({"answer": "Tuesdays.", "sources": ["topics/t/vet.md"]}))
+        };
+        let a = ask_with(&root, "cat kitten", &mut call).unwrap();
+        // a sibling is a real source the model may cite
+        assert_eq!(a.sources[0].path, "topics/t/vet.md");
+        let shown: Vec<&str> = prompt
+            .lines()
+            .filter_map(|l| l.strip_prefix("### "))
+            .collect();
+        assert_eq!(shown.len(), ASK_NOTES, "{shown:?}");
+        // the cat note leads; vet (same session) follows the seeds, fish does not come
+        let cat = shown.iter().position(|p| *p == "topics/t/cat.md").unwrap();
+        let vet = shown.iter().position(|p| *p == "topics/t/vet.md").unwrap();
+        assert!(cat < SIBLING_SEEDS && vet == SIBLING_SEEDS, "{shown:?}");
+        assert!(!shown.contains(&"topics/t/fish.md"));
     }
 
     #[test]
