@@ -66,6 +66,34 @@ drops' sessions after the kept note's (kept first, then each drop's in order). A
 `sessions:` line, and a note written before the field reads as an empty
 list. `INDEX.md` and the prompts do not carry it.
 
+### Backfilling sessions from the log (naru task 2577)
+
+`naru kb backfill-sessions` gives notes filed before the field the sessions
+`log.jsonl` records for them. It is a dry run unless `--apply`, and prints
+`{applied, notes, notes_updated, notes_without_sessions, rows_mined,
+rows_skipped_missing_path, rows_skipped_unresolved_merge,
+rows_skipped_no_front_matter}` (row counts are `mined-session-<id>` rows).
+
+- Rows are read in `ts` order (ties keep file order). Each `create`/`append`
+  whose source is `mined-session-<id>` adds `<id>` to the note at `path`,
+  with the same dedupe and last-20 cap as above.
+- A `kb merge` writes a `merge` row for the kept note, then a `delete` row
+  per drop. Each such `delete` moves the dropped note's sessions to that
+  kept note, the way `kb merge` unions them. Any other delete loses them
+  (`rows_skipped_unresolved_merge`). The log has no rename op, so a note
+  moved by hand is not followed: its rows count as
+  `rows_skipped_missing_path`, like rows for any note that no longer exists.
+- Sessions a note already records go after the backfilled ones. Only the
+  `sessions:` line is rewritten (placed before `updated:`); body, title,
+  tags and `updated` stay byte for byte, and a file without Naru's front
+  matter is skipped (`rows_skipped_no_front_matter`). `INDEX.md` holds no
+  sessions, so it is never rebuilt. A second run changes nothing.
+
+On a copy of the real kb (2026-11-04: 1336 notes, 2020 log rows) it updated
+1311 notes. 25 notes stayed without sessions: the 10 filed with no mined
+session, plus 15 whose 25 rows point at paths moved to another topic outside
+the log.
+
 Each op is judged alone: a refused one is listed under `failed` in the report
 and the rest still land. Any refused op keeps the spool file (its path is in
 the report's `spool` key in `logs/kb.log`), so the text can be re-filed.

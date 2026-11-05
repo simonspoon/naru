@@ -3373,6 +3373,17 @@ EXAMPLES
         #[arg(required = true, num_args = 1..)]
         drop: Vec<String>,
     },
+    /// Give older notes the source sessions `log.jsonl` records for them
+    ///
+    /// Each `mined-session-<id>` create/append row adds `<id>` to its note's
+    /// `sessions:` line (in `ts` order, deduped, last 20); a `kb merge` carries
+    /// a dropped note's sessions to the kept note. Only that line changes.
+    /// Dry run unless `--apply`; prints counts. Idempotent.
+    BackfillSessions {
+        /// Write the notes (default: only report what would change)
+        #[arg(long)]
+        apply: bool,
+    },
     /// Run the automatic lookup for a Claude Code `UserPromptSubmit` payload on stdin
     ///
     /// What the `kb-lookup.sh` library hook runs (`docs/kb.md` "Automatic
@@ -7903,6 +7914,7 @@ fn run_kb(cmd: KbCmd) -> Result<()> {
             }
         }
         KbCmd::Merge { keep, drop } => print_json(&kb::merge(&root, &keep, &drop)?),
+        KbCmd::BackfillSessions { apply } => print_json(&kb::backfill_sessions(&root, apply)?),
         KbCmd::Hook => run_kb_hook(&root),
         KbCmd::Usage { days } => print_json(&crate::core::kb_lookup::usage(&root, days)),
     }

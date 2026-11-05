@@ -1372,6 +1372,152 @@ pub fn merge(root: &Path, keep: &str, drops: &[String]) -> Result<Value> {
     Ok(json!({"kept": keep, "removed": removed}))
 }
 
+// ---- backfilling sessions from the log (naru task 2577) -----------------
+
+/// One `log.jsonl` row as [`backfill_sessions`] reads it.
+#[derive(Deserialize)]
+struct LogRow {
+    #[serde(default)]
+    ts: String,
+    #[serde(default)]
+    op: String,
+    #[serde(default)]
+    path: String,
+    #[serde(default)]
+    source: String,
+}
+
+/// A note file's text with `backfill` recorded as its earliest sessions: the
+/// ids already on its `sessions:` line follow them (an id in both keeps its
+/// later place), capped like [`add_session`]. Only the `sessions:` line is
+/// written (before `updated:`); everything else is kept byte for byte. `None`
+/// for a file without Naru's front matter.
+fn with_sessions(text: &str, backfill: &[String]) -> Option<String> {
+    let (head, body) = text.strip_prefix("---\n")?.split_once("\n---\n")?;
+    let mut sessions = backfill.to_vec();
+    for line in head.lines() {
+        if let Some(v) = line.strip_prefix("sessions:") {
+            for id in v.split(',').map(str::trim).filter(|s| valid_session(s)) {
+                add_session(&mut sessions, id);
+            }
+        }
+    }
+    let mut lines: Vec<String> = head
+        .lines()
+        .filter(|l| !l.starts_with("sessions:"))
+        .map(String::from)
+        .collect();
+    let at = lines
+        .iter()
+        .position(|l| l.starts_with("updated: "))
+        .unwrap_or(lines.len());
+    lines.insert(at, format!("sessions: {}", sessions.join(", ")));
+    Some(format!("---\n{}\n---\n{body}", lines.join("\n")))
+}
+
+/// `kb backfill-sessions`: gives notes filed before naru task 2575 the
+/// sessions `log.jsonl` says they came from. Each `create`/`append` row whose
+/// source is `mined-session-<id>` adds `<id>` to its note, rows in `ts` order;
+/// a `kb merge` `delete` row carries the dropped note's sessions to the note
+/// of the `merge` row just before it (any other delete loses them, counted as
+/// unresolved). Rows ending on a note that no longer exists are counted and
+/// skipped. Only the `sessions:` line changes, so `INDEX.md` (which has no
+/// sessions) never needs rebuilding. Writes only with `apply`; idempotent.
+pub fn backfill_sessions(root: &Path, apply: bool) -> Result<Value> {
+    let _lock = if apply { Some(lock(root)?) } else { None };
+    let log = match fs::read_to_string(root.join("log.jsonl")) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e.into()),
+    };
+    let mut rows: Vec<LogRow> = log
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    rows.sort_by(|a, b| a.ts.cmp(&b.ts));
+    // path → (sessions oldest first, mined rows behind them)
+    let mut acc: std::collections::HashMap<String, (Vec<String>, usize)> = Default::default();
+    let mut keep: Option<String> = None;
+    let (mut mined, mut unresolved) = (0, 0);
+    for r in rows {
+        let merging = r.source == "kb merge";
+        match r.op.as_str() {
+            "merge" if merging => {
+                keep = Some(r.path);
+                continue;
+            }
+            "delete" => {
+                let target = keep.clone().filter(|_| merging);
+                match (acc.remove(&r.path), target) {
+                    (Some((ids, n)), Some(k)) => {
+                        let e = acc.entry(k).or_default();
+                        for id in ids {
+                            if !e.0.contains(&id) {
+                                add_session(&mut e.0, &id);
+                            }
+                        }
+                        e.1 += n;
+                    }
+                    (Some((_, n)), None) => unresolved += n,
+                    (None, _) => {}
+                }
+                if merging {
+                    continue;
+                }
+            }
+            "create" | "append" => {
+                let id = r.source.strip_prefix("mined-session-");
+                if let Some(id) = id.filter(|s| valid_session(s)) {
+                    let e = acc.entry(r.path).or_default();
+                    add_session(&mut e.0, id);
+                    e.1 += 1;
+                    mined += 1;
+                }
+            }
+            _ => {}
+        }
+        keep = None;
+    }
+    let notes = scan(root)?;
+    let mut with: HashSet<String> = notes
+        .iter()
+        .filter(|n| !n.sessions.is_empty())
+        .map(|n| n.path.clone())
+        .collect();
+    let mut acc: Vec<_> = acc.into_iter().collect();
+    acc.sort();
+    let (mut updated, mut missing, mut no_front) = (0, 0, 0);
+    for (path, (ids, n)) in acc {
+        let Some(file) = parse_rel(&path).and_then(|(t, s)| existing_note_file(root, &t, &s))
+        else {
+            missing += n;
+            continue;
+        };
+        let text = fs::read_to_string(&file)?;
+        let Some(new) = with_sessions(&text, &ids) else {
+            no_front += n;
+            continue;
+        };
+        with.insert(path);
+        if new != text {
+            updated += 1;
+            if apply {
+                write_atomic(&file, &new)?;
+            }
+        }
+    }
+    Ok(json!({
+        "applied": apply,
+        "notes": notes.len(),
+        "notes_updated": updated,
+        "notes_without_sessions": notes.len() - notes.iter().filter(|n| with.contains(&n.path)).count(),
+        "rows_mined": mined,
+        "rows_skipped_missing_path": missing,
+        "rows_skipped_unresolved_merge": unresolved,
+        "rows_skipped_no_front_matter": no_front,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2069,5 +2215,175 @@ mod tests {
         assert!(r.is_err());
         let index = fs::read_to_string(root.join("INDEX.md")).unwrap();
         assert!(!index.contains("topics/t/d1.md") && index.contains("topics/ro/d2.md"));
+    }
+
+    #[test]
+    fn backfill_sessions_follows_the_log() {
+        let (_d, root) = kb();
+        put(
+            &root,
+            "a",
+            "one",
+            "One",
+            &["x", "y"],
+            "body one\n\n  indented",
+        );
+        put(&root, "a", "kept", "Kept", &[], "kept body");
+        put(&root, "a", "bare", "Bare", &[], "never mined");
+        put(&root, "a", "capped", "Capped", &[], "many");
+        // a note that already records a session keeps it, after the backfill
+        let live = render(
+            "Live",
+            &[],
+            &["live1".into()],
+            "2026-02-02T00:00:00Z",
+            "live",
+        );
+        fs::write(root.join("topics/a/live.md"), live).unwrap();
+        fs::write(root.join("topics/a/hand.md"), "no front matter\n").unwrap();
+        let row = |ts: &str, op: &str, path: &str, source: &str| {
+            json!({"ts": ts, "op": op, "path": path, "bytes": 1, "source": source}).to_string()
+        };
+        let m = |id: &str| format!("mined-session-{id}");
+        let mut log = vec![
+            // out of file order: ts decides, so s2 comes after s1
+            row(
+                "2026-01-02T00:00:00Z",
+                "append",
+                "topics/a/one.md",
+                &m("s2"),
+            ),
+            row(
+                "2026-01-01T00:00:00Z",
+                "create",
+                "topics/a/one.md",
+                &m("s1"),
+            ),
+            // a repeat moves to the end
+            row(
+                "2026-01-03T00:00:00Z",
+                "append",
+                "topics/a/one.md",
+                &m("s1"),
+            ),
+            row("2026-01-03T00:00:00Z", "append", "topics/a/one.md", "cli"),
+            row(
+                "2026-01-01T00:00:00Z",
+                "create",
+                "topics/a/kept.md",
+                &m("k1"),
+            ),
+            row(
+                "2026-01-01T00:00:00Z",
+                "create",
+                "topics/a/gone.md",
+                &m("g1"),
+            ),
+            row(
+                "2026-01-01T00:00:00Z",
+                "create",
+                "topics/a/lost.md",
+                &m("l1"),
+            ),
+            row(
+                "2026-01-01T00:00:00Z",
+                "create",
+                "topics/a/missing.md",
+                &m("x1"),
+            ),
+            row(
+                "2026-01-01T00:00:00Z",
+                "create",
+                "topics/a/live.md",
+                &m("old"),
+            ),
+            row(
+                "2026-01-01T00:00:00Z",
+                "create",
+                "topics/a/hand.md",
+                &m("h1"),
+            ),
+            // gone.md was merged into kept.md; lost.md deleted with no merge row
+            row(
+                "2026-01-05T00:00:00Z",
+                "merge",
+                "topics/a/kept.md",
+                "kb merge",
+            ),
+            row(
+                "2026-01-05T00:00:00Z",
+                "delete",
+                "topics/a/gone.md",
+                "kb merge",
+            ),
+            row("2026-01-05T00:00:00Z", "append", "topics/a/one.md", "cli"),
+            row(
+                "2026-01-05T00:00:00Z",
+                "delete",
+                "topics/a/lost.md",
+                "kb merge",
+            ),
+            "not json".into(),
+        ];
+        for i in 0..SESSIONS_MAX + 2 {
+            log.push(row(
+                "2026-01-09T00:00:00Z",
+                "append",
+                "topics/a/capped.md",
+                &m(&format!("c{i}")),
+            ));
+        }
+        fs::write(root.join("log.jsonl"), log.join("\n") + "\n").unwrap();
+        fs::write(root.join("INDEX.md"), "idx\n").unwrap();
+        let before = |p: &str| fs::read_to_string(root.join(p)).unwrap();
+        let one_before = before("topics/a/one.md");
+        let index_before = before("INDEX.md");
+
+        let dry = backfill_sessions(&root, false).unwrap();
+        assert_eq!(
+            before("topics/a/one.md"),
+            one_before,
+            "a dry run writes nothing"
+        );
+        let got = backfill_sessions(&root, true).unwrap();
+        assert_eq!(dry["notes_updated"], got["notes_updated"]);
+        assert_eq!(got["applied"], true);
+        assert_eq!(got["notes_updated"], 4, "{got}");
+        assert_eq!(got["notes"], 6, "{got}");
+        assert_eq!(got["notes_without_sessions"], 2, "{got}");
+        assert_eq!(got["rows_skipped_missing_path"], 1, "{got}");
+        assert_eq!(got["rows_skipped_unresolved_merge"], 1, "{got}");
+        assert_eq!(got["rows_skipped_no_front_matter"], 1, "{got}");
+
+        let sessions = |p: &str| show(&root, p).unwrap().sessions;
+        assert_eq!(sessions("topics/a/one.md"), ["s2", "s1"]);
+        assert_eq!(sessions("topics/a/kept.md"), ["k1", "g1"]);
+        assert_eq!(sessions("topics/a/live.md"), ["old", "live1"]);
+        assert!(sessions("topics/a/bare.md").is_empty());
+        let capped = sessions("topics/a/capped.md");
+        assert_eq!(capped.len(), SESSIONS_MAX);
+        assert_eq!(capped[0], "c2");
+        // only the sessions line changed: body, title, tags, updated are intact
+        let one = before("topics/a/one.md");
+        assert_eq!(
+            one,
+            one_before.replace("\nupdated: ", "\nsessions: s2, s1\nupdated: ")
+        );
+        assert_eq!(before("topics/a/hand.md"), "no front matter\n");
+        assert_eq!(before("INDEX.md"), index_before);
+
+        // idempotent: a second run changes nothing
+        let snapshot: Vec<String> = ["one", "kept", "live", "capped", "bare"]
+            .iter()
+            .map(|s| before(&format!("topics/a/{s}.md")))
+            .collect();
+        let again = backfill_sessions(&root, true).unwrap();
+        assert_eq!(again["notes_updated"], 0, "{again}");
+        assert_eq!(again["notes_without_sessions"], 2, "{again}");
+        let after: Vec<String> = ["one", "kept", "live", "capped", "bare"]
+            .iter()
+            .map(|s| before(&format!("topics/a/{s}.md")))
+            .collect();
+        assert_eq!(snapshot, after);
     }
 }
