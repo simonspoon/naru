@@ -1129,6 +1129,9 @@ pub struct ConfigAppearance {
     pub mark_skin: Option<String>,
     /// The built-in skin (`"waveform"`).
     pub mark_skin_default: String,
+    /// Whether the expanded nav shows its corner mark (naru task 2607):
+    /// `false` only when the config says `"nav-mark": "off"`.
+    pub nav_mark: bool,
 }
 
 /// A user-made live mark skin (naru task 2122, `docs/mark-skins.md`): one

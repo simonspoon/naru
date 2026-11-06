@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
 import './App.css'
 import { getCcUsage, getNaruVersion, getTask, listInbox } from './api'
@@ -10,6 +10,7 @@ import { useDockStore } from './useDockStore'
 import { agentPanels, isVisible, openAgentPanel, revealNeedsNav, type AgentPanelId, type PanelId } from './dockLayout'
 import { NavOrb, NavRail, NavZone } from './components/NavDock'
 import { hostFor } from './lib/dockHosts'
+import { currentNavMark, subscribeNavMark } from './navMark'
 import { DoneToasts } from './components/DoneToasts'
 import { PhoneTabBar } from './components/PhoneTabBar'
 import { PtyPool } from './components/PtyPool'
@@ -243,8 +244,10 @@ function App() {
     [dock.state, navCollapsed],
   )
   // The nav's permanent orb (naru task 1798) shows in an expanded nav on the
-  // dock tiers only; the phone tier keeps its floating orb.
-  const orbPanelShown = docked && !navCollapsed
+  // dock tiers only; the phone tier keeps its floating orb. The Appearance
+  // setting (naru task 2607) removes it — slot, mark and animation loop.
+  const navMark = useSyncExternalStore(subscribeNavMark, currentNavMark)
+  const orbPanelShown = docked && !navCollapsed && navMark
   // Revealing a panel that would stay hidden in a collapsed nav expands it —
   // and only then (`revealNeedsNav`), so a board push or a route change never
   // re-expands a nav the person collapsed. The refs are the latest dock state
@@ -878,7 +881,7 @@ function App() {
           unread={unread}
           collapsed={navCollapsed}
           onCollapsedChange={setNavCollapsed}
-          orb={docked ? <NavOrb /> : undefined}
+          orb={docked && navMark ? <NavOrb /> : undefined}
           dockZone={
             docked ? <NavZone state={dock.state} update={dock.update} locked={locked} /> : undefined
           }

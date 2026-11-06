@@ -1612,6 +1612,15 @@ A twelfth, independent section holds the web UI's colour theme (naru task
   verbatim and the page draws the waveform. The allowed ids live in
   `config::MARK_SKINS` and `markSkin.ts::MARK_SKIN_IDS` — keep them in step.
   The skin contract is in `docs/mark-skins.md`.
+- **`nav-mark`** (naru task 2607): `"off"` removes the mark at the top of the
+  expanded nav — no slot, no mark, no animation loop; the nav's items move up
+  into its place. `"on"` or absent (the default) shows it. Any other value is
+  **422 `validation`**; the API takes it as a boolean (`PUT` `{"nav_mark":
+  false}`, on removes the key) and `GET` answers `nav_mark: true|false`. Only
+  the nav corner: the conversation head and the phone tier's floating orb are
+  untouched. Toggled in Settings → Appearance → **Mark**; the page mirrors it
+  in `localStorage` (`naru-nav-mark`) so a reload with it off never mounts the
+  mark before the config answers.
 - **Nothing in Rust reads it** beyond the getter and saver: the theme is the
   page's. `frontend/src/theme.ts` resolves the setting to one concrete theme
   and sets `data-theme` on `<html>`; the palettes are `:root[data-theme=…]`

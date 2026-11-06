@@ -56,6 +56,11 @@ nav unmounts the orb's view (only the host stays stable) and expanding mounts
 it afresh; the state is LiveHub's, so nothing of the conversation restarts. The phone tier has no dock, no nav
 orb, and keeps its floating orb.
 
+Settings → Appearance → **Mark** can turn it off (naru task 2607, the
+`nav-mark` appearance key, `docs/config.md`): then neither `NavOrb` nor the
+portal is rendered, exactly as in a collapsed nav, so the mark's rAF loop is
+not running and the nav links sit directly under the collapse arrow.
+
 ## Agent tabs (naru task 2313)
 
 Docked, the Agents panel is only its card list, always expanded: no auto-tile

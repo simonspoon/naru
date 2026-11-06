@@ -1486,6 +1486,21 @@ api PUT /api/config/appearance '{"theme": null, "mark_skin": null}'
 [ "$(jq -c '.appearance' < "$CONFIG")" = '{}' ] || fail "null must remove the mark skin: $(cat "$CONFIG")"
 ok "PUT /api/config/appearance mark_skin: waveform and blob written beside the theme, an unknown skin 422 writing nothing, null restores the default"
 
+# The nav corner mark (naru task 2607): on by default, false writes "off",
+# true removes the key again.
+api GET /api/config/appearance
+[ "$(jq -r .nav_mark <<<"$STDOUT")" = "true" ] || fail "nav_mark must default to true: $STDOUT"
+api PUT /api/config/appearance '{"nav_mark": false}'
+[ "$CODE" = "200" ] && [ "$(jq -r .nav_mark <<<"$STDOUT")" = "false" ] ||
+  fail "PUT nav_mark false: expected 200 echo, got $CODE: $STDOUT"
+[ "$(jq -c '.appearance' < "$CONFIG")" = '{"nav-mark":"off"}' ] ||
+  fail "PUT nav_mark false must write nav-mark off: $(cat "$CONFIG")"
+api PUT /api/config/appearance '{"nav_mark": true}'
+[ "$CODE" = "200" ] && [ "$(jq -r .nav_mark <<<"$STDOUT")" = "true" ] ||
+  fail "PUT nav_mark true: expected 200 echo, got $CODE: $STDOUT"
+[ "$(jq -c '.appearance' < "$CONFIG")" = '{}' ] || fail "PUT nav_mark true must remove the key: $(cat "$CONFIG")"
+ok "PUT /api/config/appearance nav_mark: false writes nav-mark off, true removes it"
+
 CODE=$(curl -s -o "$TMP/body" -w '%{http_code}' -H 'Host: evil.example' \
   "http://127.0.0.1:$PORT/api/config/appearance")
 [ "$CODE" = "403" ] || fail "GET appearance with a foreign Host: expected 403, got $CODE: $(cat "$TMP/body")"

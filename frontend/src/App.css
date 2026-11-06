@@ -13340,6 +13340,12 @@ body.dock-resizing .dock-body {
   gap: 0.25rem;
 }
 
+/* The nav corner mark on/off (naru task 2607), above the skin picker. */
+.nav-mark-toggle {
+  display: block;
+  margin: 0 0 0.75rem;
+}
+
 .mark-skin-import {
   margin-top: 0.75rem;
 }
@@ -13400,8 +13406,10 @@ body.dock-resizing .dock-body {
    coincides with the sidebar's: margin -1rem cancels the sidebar padding), so
    the head is opaque yet shows no seam. Fixed px radii centred on the mark
    (naru task 1869); wide soft ellipses (width a % of the nav, so identical
-   on both boxes; height px) fading out well below the mark (naru task 1870). */
-.shell-body.docked .sidebar:not(.collapsed) {
+   on both boxes; height px) fading out well below the mark (naru task 1870).
+   Only while the mark is there: turned off in Settings (naru task 2607) the
+   nav has no `.nav-orb`, and no glow left where it was. */
+.shell-body.docked .sidebar:not(.collapsed):has(.nav-orb) {
   --nav-wash:
     radial-gradient(ellipse 80% 190px at 50% 41px, rgba(var(--cyan-rgb), 0.28), transparent 70%),
     radial-gradient(ellipse 110% 250px at 25% 56px, rgba(var(--violet-rgb), 0.28), transparent 70%),

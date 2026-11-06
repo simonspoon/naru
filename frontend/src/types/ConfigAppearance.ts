@@ -29,4 +29,9 @@ mark_skin: string | null,
 /**
  * The built-in skin (`"waveform"`).
  */
-mark_skin_default: string, };
+mark_skin_default: string, 
+/**
+ * Whether the expanded nav shows its corner mark (naru task 2607):
+ * `false` only when the config says `"nav-mark": "off"`.
+ */
+nav_mark: boolean, };

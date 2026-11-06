@@ -9,9 +9,11 @@ import {
   listThemes,
   updateAppearance,
   updateMarkSkin,
+  updateNavMark,
 } from '../api'
 import { currentMarkSkin, MARK_SKIN_IDS, MARK_SKIN_LABELS, setMarkSkin, subscribeMarkSkin } from '../markSkin'
 import { exportFilename, importName } from '../markSkinCustom'
+import { currentNavMark, setNavMark, subscribeNavMark } from '../navMark'
 import type { SkinLoadState } from '../markSkinCustom'
 import type { MarkSkinSummary } from '../types/MarkSkinSummary'
 import { previewMicRms, previewState } from '../markSkinFrames'
@@ -47,6 +49,11 @@ export function AppearanceSection() {
   const [skinLoad, setSkinLoad] = useState<Record<string, SkinLoadState>>({})
   const [importing, setImporting] = useState(false)
   const skinFile = useRef<HTMLInputElement>(null)
+  // The nav's corner mark on or off (naru task 2607): applied at once like a
+  // skin pick, put back if the save is refused.
+  const navMark = useSyncExternalStore(subscribeNavMark, currentNavMark)
+  const [navMarkError, setNavMarkError] = useState<string | null>(null)
+  const latestNavMark = useRef(0)
 
   const failure = error ?? themes.error
   if (failure) {
@@ -113,6 +120,17 @@ export function AppearanceSection() {
       if (id !== latestSkin.current) return
       setMarkSkin(previous)
       setSkinError(e instanceof Error ? e.message : String(e))
+    })
+  }
+
+  function toggleNavMark(on: boolean) {
+    const id = ++latestNavMark.current
+    setNavMarkError(null)
+    setNavMark(on)
+    updateNavMark(on).catch((e: unknown) => {
+      if (id !== latestNavMark.current) return
+      setNavMark(!on)
+      setNavMarkError(e instanceof Error ? e.message : String(e))
     })
   }
 
@@ -223,6 +241,11 @@ export function AppearanceSection() {
       )}
       <h2>Mark</h2>
       <p className="muted">The live mark in the nav and conversation panel. Applies immediately.</p>
+      <label className="nav-mark-toggle">
+        <input type="checkbox" checked={navMark} onChange={(e) => toggleNavMark(e.target.checked)} /> Show the
+        mark at the top of the nav
+      </label>
+      {navMarkError && <p className="error">{navMarkError}</p>}
       <div className="theme-picker mark-skin-picker" role="radiogroup" aria-label="Live mark">
         <MarkPreviews>
           {(state, level) =>

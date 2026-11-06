@@ -3468,6 +3468,13 @@ pub const MARK_SKINS: &[&str] = &["waveform", "face", "blob"];
 /// The mark skin when the config says nothing.
 pub const DEFAULT_MARK_SKIN: &str = "waveform";
 
+/// The config key switching the expanded nav's corner mark on or off (naru
+/// task 2607). Anything but `"off"` (or nothing) is on.
+pub const NAV_MARK: &str = "nav-mark";
+
+/// The values the `nav-mark` key accepts.
+pub const NAV_MARK_VALUES: &[&str] = &["on", "off"];
+
 #[derive(Debug, Default, Deserialize)]
 struct AppearanceConfig {
     #[serde(default)]
@@ -3482,6 +3489,8 @@ struct AppearanceSection {
     theme: Option<String>,
     #[serde(default, rename = "mark-skin")]
     mark_skin: Option<String>,
+    #[serde(default, rename = "nav-mark")]
+    nav_mark: Option<String>,
 }
 
 /// The appearance settings (`GET /api/config/appearance`).
@@ -3516,6 +3525,7 @@ pub(crate) fn appearance_in(path: &Path) -> Result<ConfigAppearance, String> {
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty()),
         mark_skin_default: DEFAULT_MARK_SKIN.to_string(),
+        nav_mark: section.nav_mark.as_deref().map(str::trim) != Some("off"),
     })
 }
 
@@ -3537,10 +3547,18 @@ pub(crate) fn save_appearance_in(
     let mut keys: Vec<&String> = updates.keys().collect();
     keys.sort();
     for key in &keys {
-        if key.as_str() != THEME && key.as_str() != MARK_SKIN {
+        if key.as_str() != THEME && key.as_str() != MARK_SKIN && key.as_str() != NAV_MARK {
             return Err(SaveError::Validation(format!(
-                "unknown appearance setting {key:?}; mesa configures {THEME} and {MARK_SKIN}"
+                "unknown appearance setting {key:?}; mesa configures {THEME}, {MARK_SKIN} and {NAV_MARK}"
             )));
+        }
+        if key.as_str() == NAV_MARK {
+            if let Some(value) = updates[*key].as_deref().map(str::trim)
+                && !value.is_empty()
+            {
+                validate_word(key, value, NAV_MARK_VALUES).map_err(SaveError::Validation)?;
+            }
+            continue;
         }
         if key.as_str() == MARK_SKIN {
             if let Some(value) = updates[*key].as_deref().map(str::trim)
@@ -8160,6 +8178,29 @@ mod tests {
         // null restores the default.
         save_appearance_in(&path, &audio_update(&[(THEME, None)])).unwrap();
         assert_eq!(appearance_in(&path).unwrap().theme, None);
+    }
+
+    #[test]
+    fn appearance_nav_mark_defaults_on_saves_off_and_validates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(dir.path(), r#"{"appearance": {"theme": "dark"}}"#);
+        assert!(appearance_in(&path).unwrap().nav_mark);
+        save_appearance_in(&path, &audio_update(&[(NAV_MARK, Some("off"))])).unwrap();
+        let got = appearance_in(&path).unwrap();
+        assert!(!got.nav_mark);
+        assert_eq!(got.theme.as_deref(), Some("dark"));
+        // An unknown value is a validation error writing nothing.
+        let before = std::fs::read(&path).unwrap();
+        let err =
+            save_appearance_in(&path, &audio_update(&[(NAV_MARK, Some("hide"))])).unwrap_err();
+        assert!(matches!(err, SaveError::Validation(_)), "{err:?}");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        // null removes the key: back on.
+        save_appearance_in(&path, &audio_update(&[(NAV_MARK, None)])).unwrap();
+        assert!(appearance_in(&path).unwrap().nav_mark);
+        let root: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(root["appearance"].get("nav-mark").is_none());
     }
 
     #[test]

@@ -1828,6 +1828,14 @@ export function updateMarkSkin(skin: string): Promise<ConfigAppearance> {
   return request('/api/config/appearance', jsonInit('PUT', { mark_skin: skin }))
 }
 
+/**
+ * Turns the expanded nav's corner mark on or off alone (naru task 2607) —
+ * the body carries nothing else, so the theme and skin are left as they are.
+ */
+export function updateNavMark(on: boolean): Promise<ConfigAppearance> {
+  return request('/api/config/appearance', jsonInit('PUT', { nav_mark: on }))
+}
+
 /** Every custom mark skin, oldest first, without bodies (naru task 2122). */
 export function listMarkSkins(): Promise<MarkSkinSummary[]> {
   return request('/api/mark-skins')
