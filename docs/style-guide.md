@@ -181,6 +181,14 @@ never drift; only the few component rules it demonstrates (card, panel, table,
 empty, inbox preview, chip, badge) are copied from `App.css` into its own
 `<style>`, so re-check those after changing them.
 
+## Motion
+
+No animation repaints more than ~30 times a second (naru task 2606). A JS loop
+sleeps between frames (the mark: `liveMark.ts::markFrameDelay`); a looping CSS
+animation keeps its ease-in-out curve as eased keyframes every 1/8 of the
+cycle and steps between them with `steps(n)`, n = 30 x cycle / 8 rounded down
+(the pattern is commented at `@keyframes wf-step-pulse` in `App.css`).
+
 ## Exceptions
 
 - The `.frame-*` shape silhouettes, their `::before`/`::after` layers and

@@ -172,9 +172,14 @@ export function isSettled(prev: readonly number[] | null, next: readonly number[
   return next.every((v, i) => Math.abs(v - prev[i]) < eps)
 }
 
-/** How long a mark keeps the full frame rate after its mode changes, so the
+/** How long a mark keeps the active frame rate after its mode changes, so the
  *  glide into a resting look (colour eases at 5/s, ~1s) stays smooth. */
 export const MARK_GLIDE_MS = 1500
+
+/** The active looks' frame interval (naru task 2606): at most 30fps in every
+ *  mode. Painters are `dt`-driven, so the motion keeps its speed; only the
+ *  number of repaints drops (the display's 120Hz kept the GPU busy). */
+export const MARK_FRAME_MS = 1000 / 30
 
 /** The resting looks' frame interval (naru task 2605): ~10fps. Idle's only
  *  motion is a ±5% breathe over ~4s, about a pixel a step on the 132px nav
@@ -182,10 +187,31 @@ export const MARK_GLIDE_MS = 1500
  *  GPU and WindowServer busy with nothing happening. */
 export const MARK_REST_FRAME_MS = 100
 
-/** The wait before a mark's next frame: 0 (the next display frame) while it
- *  is active or still gliding into a new mode, `MARK_REST_FRAME_MS` once it
- *  has settled into idle or paused. */
+/** The shortest gap between two frames' timestamps: `MARK_FRAME_MS` while the
+ *  mark is active or still gliding into a new mode, `MARK_REST_FRAME_MS` once
+ *  it has settled into idle or paused. */
 export function markFrameDelay(mode: MarkMode, msSinceModeChange: number): number {
-  if (mode !== 'idle' && mode !== 'paused') return 0
-  return msSinceModeChange < MARK_GLIDE_MS ? 0 : MARK_REST_FRAME_MS
+  if (mode !== 'idle' && mode !== 'paused') return MARK_FRAME_MS
+  return msSinceModeChange < MARK_GLIDE_MS ? MARK_FRAME_MS : MARK_REST_FRAME_MS
+}
+
+/** How early the sleep before a frame ends: the frame itself waits for the
+ *  next display frame after the timer, and `markFrameDue` turns away one that
+ *  still comes too soon, so ending early only costs a skipped vsync, while
+ *  ending late would cost a whole one. */
+export const MARK_FRAME_SLACK_MS = 8
+
+/** How long to sleep before asking for the next display frame after the one
+ *  painted at `frameAt` (both `performance.now()` ms; `now` is when the sleep
+ *  starts). */
+export function markFrameWait(frameAt: number, now: number, delay: number): number {
+  return Math.max(0, frameAt + delay - MARK_FRAME_SLACK_MS - now)
+}
+
+/** Whether a display frame at `now` may paint, `delay` after the frame painted
+ *  at `frameAt`: the cap itself. 1ms of give absorbs the jitter in the
+ *  display's frame timestamps, so a 30fps cap on a 60Hz or 120Hz display paints
+ *  every 2nd or 4th vsync rather than one late. */
+export function markFrameDue(frameAt: number, now: number, delay: number): boolean {
+  return now - frameAt >= delay - 1
 }

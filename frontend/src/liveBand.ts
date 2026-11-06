@@ -13,8 +13,12 @@
  * tuning — ported rather than re-derived, since it is the number that made
  * the reference read as continuous motion rather than a series of steps.
  */
-export function smoothLevel(prev: number, raw: number): number {
-  return prev + (raw - prev) * (raw > prev ? 0.55 : 0.14)
+export function smoothLevel(prev: number, raw: number, frames = 1): number {
+  // `frames` is the step in 60Hz frames (naru task 2606): the tuning is per
+  // 60Hz frame, so a 30fps mark applies it twice and attack and release keep
+  // their speed in real time.
+  const k = raw > prev ? 0.55 : 0.14
+  return prev + (raw - prev) * (1 - Math.pow(1 - k, frames))
 }
 
 /**

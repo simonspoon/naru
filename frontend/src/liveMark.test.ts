@@ -6,10 +6,13 @@ import {
   hexToRgb,
   isSettled,
   levelFromRms,
+  MARK_FRAME_MS,
   MARK_GLIDE_MS,
   MARK_REST_FRAME_MS,
   markFrame,
   markFrameDelay,
+  markFrameDue,
+  markFrameWait,
   markMode,
   paletteFor,
   PALETTES,
@@ -133,18 +136,68 @@ describe('isSettled', () => {
 })
 
 describe('markFrameDelay', () => {
-  it('runs every display frame while active, whatever the time since the change', () => {
+  it('caps every active mode at 30fps, whatever the time since the change', () => {
     for (const mode of ['hear', 'speak', 'think', 'offer'] as const) {
-      expect(markFrameDelay(mode, 0)).toBe(0)
-      expect(markFrameDelay(mode, 60_000)).toBe(0)
+      expect(markFrameDelay(mode, 0)).toBe(MARK_FRAME_MS)
+      expect(markFrameDelay(mode, 60_000)).toBe(MARK_FRAME_MS)
     }
+    expect(MARK_FRAME_MS).toBeCloseTo(33.33, 1)
   })
-  it('keeps full rate through the glide into a resting look, then caps it', () => {
+  it('keeps 30fps through the glide into a resting look, then rests', () => {
     for (const mode of ['idle', 'paused'] as const) {
-      expect(markFrameDelay(mode, 0)).toBe(0)
-      expect(markFrameDelay(mode, MARK_GLIDE_MS - 1)).toBe(0)
+      expect(markFrameDelay(mode, 0)).toBe(MARK_FRAME_MS)
+      expect(markFrameDelay(mode, MARK_GLIDE_MS - 1)).toBe(MARK_FRAME_MS)
       expect(markFrameDelay(mode, MARK_GLIDE_MS)).toBe(MARK_REST_FRAME_MS)
       expect(markFrameDelay(mode, 60_000)).toBe(MARK_REST_FRAME_MS)
     }
   })
+})
+
+/**
+ * NaruMark's loop against a simulated display (naru task 2606): sleep
+ * `markFrameWait`, then the first vsync after the timer (plus `lateMs` of timer
+ * lateness), turned away by `markFrameDue` until it is due. Answers the gaps
+ * between painted frames.
+ */
+function paintedGaps(mode: 'idle' | 'hear' | 'speak' | 'think' | 'paused' | 'offer', hz: number, lateMs: number, workMs: number): number[] {
+  const vsync = 1000 / hz
+  // Timestamps jitter by a little, as real ones do.
+  const at = (n: number): number => n * vsync + (n % 3 === 0 ? 0.2 : -0.2)
+  let n = 1
+  let last = at(n)
+  let delay = 0
+  const gaps: number[] = []
+  for (let i = 0; i < 400; i++) {
+    const now = at(n)
+    if (!markFrameDue(last, now, delay)) {
+      n++
+      continue
+    }
+    if (i > 0) gaps.push(now - last)
+    last = now
+    delay = markFrameDelay(mode, now)
+    const wake = now + workMs + markFrameWait(now, now + workMs, delay) + lateMs
+    while (at(n) < wake) n++
+  }
+  return gaps
+}
+
+describe('the frame cap against real display rates', () => {
+  for (const hz of [60, 75, 90, 120, 144, 165, 240]) {
+    for (const mode of ['idle', 'hear', 'speak', 'think', 'paused', 'offer'] as const) {
+      it(`${mode} at ${hz}Hz never paints closer than ~33ms, nor much later`, () => {
+        for (const late of [0, 3, 7]) {
+          for (const work of [0.5, 4]) {
+            const gaps = paintedGaps(mode, hz, late, work)
+            expect(gaps.length).toBeGreaterThan(50)
+            expect(Math.min(...gaps)).toBeGreaterThanOrEqual(MARK_FRAME_MS - 1)
+            // On time: never more than a vsync (plus the timer's lateness) past the cap.
+            const floor = markFrameDelay(mode, 60_000) === MARK_REST_FRAME_MS ? MARK_REST_FRAME_MS : MARK_FRAME_MS
+            const settled = gaps.slice(60)
+            expect(Math.max(...settled)).toBeLessThanOrEqual(floor + 1000 / hz + Math.max(0, late - 8) + 1)
+          }
+        }
+      })
+    }
+  }
 })

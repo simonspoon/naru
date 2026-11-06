@@ -35,3 +35,11 @@ describe('simEnvelope', () => {
     expect(values.size).toBeGreaterThan(1)
   })
 })
+
+describe('smoothLevel per frame step', () => {
+  it('lands where two 60Hz steps would from one 30fps step (naru task 2606)', () => {
+    expect(smoothLevel(0, 1, 2)).toBeCloseTo(smoothLevel(smoothLevel(0, 1), 1), 10)
+    expect(smoothLevel(1, 0, 2)).toBeCloseTo(smoothLevel(smoothLevel(1, 0), 0), 10)
+    expect(smoothLevel(0.3, 0.9, 1)).toBe(smoothLevel(0.3, 0.9))
+  })
+})

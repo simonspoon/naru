@@ -1730,10 +1730,29 @@ main {
 
 .wf-node.step-running {
   box-shadow: 0 0 0 2px var(--amber);
-  animation: wf-step-pulse 1.2s ease-in-out infinite;
+  animation: wf-step-pulse 1.2s steps(4) infinite;
 }
 
+/* Every infinite animation here runs at most ~30 updates a second (naru task
+   2606): a CSS animation repaints at the display rate (120Hz) for as long as
+   it runs, and an always-on one (an active agent card's glow) was most of the
+   page's GPU cost. So each holds its ease-in-out curve in keyframes every
+   1/8 of the cycle (the eased value at that point) and steps between them:
+   `steps(n)` with n = 30 x the cycle / 8, rounded down. A new looping
+   animation follows the same pattern. */
 @keyframes wf-step-pulse {
+  12.5%,
+  87.5% {
+    box-shadow: 0 0 0 2.26px var(--amber);
+  }
+  25%,
+  75% {
+    box-shadow: 0 0 0 3px var(--amber);
+  }
+  37.5%,
+  62.5% {
+    box-shadow: 0 0 0 3.74px var(--amber);
+  }
   50% {
     box-shadow: 0 0 0 4px var(--amber);
   }
@@ -2913,7 +2932,7 @@ main {
 .live-dot.idle.on {
   background: var(--green);
   box-shadow: 0 0 8px var(--green);
-  animation: live-pulse 1.6s ease-in-out infinite;
+  animation: live-pulse 1.6s steps(6) infinite;
 }
 
 .live-dot.idle {
@@ -2925,10 +2944,23 @@ main {
   background: var(--border-bright);
 }
 
+/* Stepped to ~30 updates/s, see wf-step-pulse (naru task 2606). */
 @keyframes live-pulse {
   0%,
   100% {
     opacity: 1;
+  }
+  12.5%,
+  87.5% {
+    opacity: 0.92;
+  }
+  25%,
+  75% {
+    opacity: 0.68;
+  }
+  37.5%,
+  62.5% {
+    opacity: 0.43;
   }
   50% {
     opacity: 0.35;
@@ -11475,13 +11507,26 @@ select.library-model-badge {
   height: 0.5rem;
   border-radius: 50%;
   background: var(--amber);
-  animation: agent-activity-pulse 1.2s ease-in-out infinite;
+  animation: agent-activity-pulse 1.2s steps(4) infinite;
 }
 
+/* Stepped to ~30 updates/s, see wf-step-pulse (naru task 2606). */
 @keyframes agent-activity-pulse {
   0%,
   100% {
     opacity: 0.35;
+  }
+  12.5%,
+  87.5% {
+    opacity: 0.43;
+  }
+  25%,
+  75% {
+    opacity: 0.68;
+  }
+  37.5%,
+  62.5% {
+    opacity: 0.92;
   }
   50% {
     opacity: 1;
@@ -11554,12 +11599,12 @@ select.library-model-badge {
   opacity: 1;
   cursor: pointer;
   border: 2px solid #ffc23d;
-  animation: can-help-pulse 1.6s ease-in-out infinite;
+  animation: can-help-pulse 1.6s steps(6) infinite;
 }
 .orb-panel.can-help {
   border: 2px solid #ffc23d;
   border-radius: 12px;
-  animation: can-help-pulse 1.6s ease-in-out infinite;
+  animation: can-help-pulse 1.6s steps(6) infinite;
 }
 .orb-panel-caption {
   position: absolute;
@@ -11571,10 +11616,23 @@ select.library-model-badge {
   color: #ffc23d;
   pointer-events: none;
 }
+/* Stepped to ~30 updates/s, see wf-step-pulse (naru task 2606). */
 @keyframes can-help-pulse {
   0%,
   100% {
     box-shadow: 0 0 22px 4px rgba(245, 190, 80, 0.5);
+  }
+  12.5%,
+  87.5% {
+    box-shadow: 0 0 23.55px 4.77px rgba(247, 193, 82, 0.55);
+  }
+  25%,
+  75% {
+    box-shadow: 0 0 28px 7px rgba(251, 199, 86, 0.68);
+  }
+  37.5%,
+  62.5% {
+    box-shadow: 0 0 32.45px 9.23px rgba(254, 204, 89, 0.8);
   }
   50% {
     box-shadow: 0 0 34px 10px rgba(255, 205, 90, 0.85);
@@ -11715,13 +11773,13 @@ select.library-model-badge {
 }
 
 .agent-list .agent-card-active {
-  animation: agent-glow 2.4s ease-in-out infinite;
+  animation: agent-glow 2.4s steps(9) infinite;
 }
 
 .agent-list .agent-card-active.agent-card-enter {
   animation:
     agent-fly-in 0.6s ease-out both,
-    agent-glow 2.4s ease-in-out 0.6s infinite;
+    agent-glow 2.4s steps(9) 0.6s infinite;
 }
 
 .agent-list .agent-card-finished {
@@ -12020,10 +12078,23 @@ select.library-model-badge {
   }
 }
 
+/* Stepped to ~30 updates/s, see wf-step-pulse (naru task 2606). */
 @keyframes agent-glow {
   0%,
   100% {
     box-shadow: 0 0 0 0 transparent;
+  }
+  12.5%,
+  87.5% {
+    box-shadow: 0 0 1.81px -0.52px color-mix(in srgb, var(--k) 12.9%, transparent);
+  }
+  25%,
+  75% {
+    box-shadow: 0 0 7px -2px color-mix(in srgb, var(--k) 50%, transparent);
+  }
+  37.5%,
+  62.5% {
+    box-shadow: 0 0 12.19px -3.48px color-mix(in srgb, var(--k) 87.1%, transparent);
   }
   50% {
     box-shadow: 0 0 14px -4px var(--k);
@@ -12218,12 +12289,25 @@ select.library-model-badge {
 }
 .live-glow-on {
   opacity: 0.22;
-  animation: live-glow-breathe 5s ease-in-out infinite;
+  animation: live-glow-breathe 5s steps(18) infinite;
 }
+/* Stepped to ~30 updates/s, see wf-step-pulse (naru task 2606). */
 @keyframes live-glow-breathe {
   0%,
   100% {
     opacity: 0.14;
+  }
+  12.5%,
+  87.5% {
+    opacity: 0.16;
+  }
+  25%,
+  75% {
+    opacity: 0.2;
+  }
+  37.5%,
+  62.5% {
+    opacity: 0.24;
   }
   50% {
     opacity: 0.26;
@@ -13529,11 +13613,12 @@ body.dock-resizing .dock-body {
   fill: var(--violet);
   transform-box: fill-box;
   transform-origin: center;
-  animation: orbit-voice 1.6s ease-in-out infinite;
+  animation: orbit-voice 1.6s steps(6) infinite;
 }
 
 .orbit-naru.speaking .orbit-bar {
   animation-duration: 0.55s;
+  animation-timing-function: steps(2);
 }
 
 .orbit-naru.off .orbit-bar {
@@ -13549,8 +13634,12 @@ body.dock-resizing .dock-body {
   font-weight: 800;
 }
 
+/* Stepped to ~30 updates/s, see wf-step-pulse (naru task 2606). */
 @keyframes orbit-voice {
   0%, 100% { transform: scaleY(1); }
+  12.5%, 87.5% { transform: scaleY(0.93); }
+  25%, 75% { transform: scaleY(0.72); }
+  37.5%, 62.5% { transform: scaleY(0.52); }
   50% { transform: scaleY(0.45); }
 }
 

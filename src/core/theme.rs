@@ -749,16 +749,17 @@ setTimeout(function(){if(!F)err('no onFrame call within 2 s')},2000);
 function env(t){var ph=Math.max(0,Math.sin(t*0.34)*0.5+0.42),a=0.5+0.5*Math.sin(t*11.3),b=0.5+0.5*Math.sin(t*7.1+1.4);
 return Math.min(1,ph*(0.35+0.5*a*b+0.15*Math.sin(t*23)))}
 function tick(now){if(E)return;if(start===null){start=now;last=now}
+else if(now-last<1000/30-1){requestAnimationFrame(tick);return}
 var dt=Math.min(0.05,(now-last)/1000);last=now;var t=(now-start)/1000,red=mq.matches;
 var mode=MODES[Math.floor(t/2)%MODES.length],raw=0;
 if(mode==='hear'){var rms=0.01+0.11*(0.5+0.5*Math.sin(t*6.3)*Math.sin(t*1.7+0.6));raw=Math.min(1,Math.sqrt(rms)*2)}
 else if(mode==='speak')raw=0.35+0.65*env(t*(red?0.5:1)*1.7);
-lv=lv+(raw-lv)*(raw>lv?0.55:0.14);
+lv=lv+(raw-lv)*(1-Math.pow(1-(raw>lv?0.55:0.14),dt*60));
 if(mode!==shown){shown=mode;paint()}
 var p=P[mode==='paused'?'idle':mode];
 if(F){try{F({naru:'mark-frame',mode:mode,level:lv,palette:{bars:p.bars.slice(),glow:p.glow},reduced:red,t:t,dt:dt})}
 catch(x){err(x&&x.message||x);return}}
-requestAnimationFrame(tick)}
+setTimeout(function(){requestAnimationFrame(tick)},Math.max(0,last+1000/30-8-performance.now()))}
 requestAnimationFrame(tick)})();</script>
 "#;
 

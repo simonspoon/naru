@@ -30,14 +30,17 @@ and filter on every painted frame, since a skin swap keeps the same `<svg>`.
   playback analyser or `simEnvelope` when speaking, smoothed by
   `smoothLevel`) and the palette (`paletteFor(mode, brandIdle)`), and hands
   them to the skin's painter. Props, refs and the no-rerender property are
-  unchanged: state and level reach the loop through refs. The loop runs
-  every display frame while the mark is active, but once it has sat in
-  `idle` or `paused` for `MARK_GLIDE_MS` (1.5s) it drops to one frame every
-  `MARK_REST_FRAME_MS` (~10fps, `liveMark.ts::markFrameDelay`, naru task
-  2605): a 120Hz repaint of the idle breathe was the page's whole idle GPU
-  cost. `dt` stays real time at rest (capped at 0.05s plus the wait, so up
-  to 0.15s), so `dt`-driven motion keeps its speed; a painter (and a custom
-  skin) must cope with steps that size.
+  unchanged: state and level reach the loop through refs. The loop paints
+  at most 30fps in every mode (`MARK_FRAME_MS`, naru task 2606), and once
+  the mark has sat in `idle` or `paused` for `MARK_GLIDE_MS` (1.5s) it drops
+  to one frame every `MARK_REST_FRAME_MS` (~10fps, naru task 2605): a 120Hz
+  repaint was the page's whole GPU cost. Between frames it sleeps on a timer
+  (`liveMark.ts::markFrameDelay`/`markFrameWait`), then paints on the next
+  display frame that `markFrameDue` allows. `dt` stays real time (capped at
+  0.05s plus the wait, so up to 0.15s at rest), so `dt`-driven motion keeps
+  its speed; a painter (and a custom skin) must cope with steps that size.
+  The level smoothing is per 60Hz frame scaled by `dt`
+  (`liveBand.ts::smoothLevel`), so it too is frame-rate independent.
 - **Skin** — `frontend/src/components/markSkins/<id>.tsx`, registered in
   `markSkins/index.ts`. A `MarkSkin` (`frontend/src/markSkin.ts`):
   - `id`;
@@ -115,7 +118,7 @@ active custom theme's `vars` on `use`.
 **Preview.** A board has no host posting frames, so `preview` puts a driver
 first in the document (`theme::mark_skin_preview_body`, after a leading
 `<!doctype>` like the render route's bootstrap) that defines the same
-`window.naruMark` and calls the skin itself every animation frame: idle,
+`window.naruMark` and calls the skin itself at the host's 30fps cap: idle,
 hear, speak, think, paused and offer two seconds each, with the host's level
 rules and `liveMark.ts::PALETTES` (a unit test pins the copy against that
 file). It paints the stage the dark `--naru-bg` the mark really sits on, shows

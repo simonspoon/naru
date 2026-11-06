@@ -4,7 +4,7 @@ import { markSkinRenderUrl } from '../api'
 import { simEnvelope, smoothLevel } from '../liveBand'
 import type { LiveIndicator } from '../liveIndicator'
 import { indicatorLabel } from '../liveIndicator'
-import { levelFromRms, markFrameDelay, markMode, paletteFor } from '../liveMark'
+import { levelFromRms, markFrameDelay, markFrameDue, markFrameWait, markMode, paletteFor } from '../liveMark'
 import { currentMarkSkin, isCustomMarkSkin, subscribeMarkSkin } from '../markSkin'
 import type { MarkInput, MarkSkin } from '../markSkin'
 import { frameMessage, MARK_SKIN_READY_MS, nextSkinState, themeMessage } from '../markSkinCustom'
@@ -106,11 +106,20 @@ function runMarkLoop(live: RefObject<MarkLive>, paint: (input: MarkInput) => voi
   let timer = 0
   let shownMode: ReturnType<typeof markMode> | null = null
   let modeAt = start
-  // The longest step a frame may integrate: a display frame's, or a rest
-  // tick's when the last frame asked for one, so `dt`-driven motion (the
-  // blob's spin) keeps its speed at rest.
+  // The longest step a frame may integrate: a display frame's plus the
+  // capped gap the last frame asked for, so `dt`-driven motion (the blob's
+  // spin) keeps its speed at 30fps and at rest.
   let maxDt = 0.05
+  // The shortest gap the next frame may follow the last painted one by; 0
+  // until the first frame has painted.
+  let delay = 0
   const frame = (now: number): void => {
+    // A display frame that comes before the cap allows paints nothing and
+    // waits for the next one (naru task 2606).
+    if (!markFrameDue(last, now, delay)) {
+      raf = requestAnimationFrame(frame)
+      return
+    }
     const dt = Math.min(maxDt, (now - last) / 1000)
     last = now
     const t = (now - start) / 1000
@@ -128,15 +137,15 @@ function runMarkLoop(live: RefObject<MarkLive>, paint: (input: MarkInput) => voi
       const rms = cur.speechRms()
       raw = rms === null ? 0.35 + 0.65 * simEnvelope(t * (reduced ? 0.5 : 1) * 1.7) : levelFromRms(rms)
     }
-    lv = smoothLevel(lv, raw)
+    lv = smoothLevel(lv, raw, dt * 60)
 
     paint({ mode, level: lv, palette: paletteFor(mode, cur.brandIdle), reduced, t, dt })
-    // A settled resting mark asks for far fewer frames (naru task 2605):
-    // the wait is a timer, so no display frame is spent in between.
-    const wait = markFrameDelay(mode, now - modeAt)
-    maxDt = 0.05 + wait / 1000
-    if (wait === 0) raf = requestAnimationFrame(frame)
-    else timer = window.setTimeout(() => (raf = requestAnimationFrame(frame)), wait)
+    // At most 30fps, and far fewer frames for a settled resting mark (naru
+    // tasks 2605, 2606): the wait is a timer, so no display frame is spent in
+    // between.
+    delay = markFrameDelay(mode, now - modeAt)
+    maxDt = 0.05 + delay / 1000
+    timer = window.setTimeout(() => (raf = requestAnimationFrame(frame)), markFrameWait(now, performance.now(), delay))
   }
   raf = requestAnimationFrame(frame)
   return () => {
