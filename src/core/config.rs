@@ -1795,46 +1795,85 @@ fn offered_list(action: &str) -> String {
 
 // ---- pricing (mesa task 692) -------------------------------------------
 
-/// The shipped price table: model-family prefix → USD per 1M tokens, in the
-/// order the Settings page lists them. These are the exact numbers `cc.rs`
-/// hardcoded before the config could override them.
+/// The shipped price table: model-id prefix → USD per 1M tokens, in the order
+/// the Settings page lists them. The official Anthropic API rates
+/// (platform.claude.com/docs/en/about-claude/pricing, checked 2026-11-06 for
+/// naru task 2603), one row per model so a new version is never silently
+/// priced at an older one's rate: an unmatched model counts $0 and is named
+/// in `CcOverview::unpriced_models`. Retired models stay so old transcripts
+/// still price; the Claude 3.x rows are their last published rates (no longer
+/// on the pricing page).
 ///
-/// `cache_read` ≈ 0.1× input and `cache_write` (5-minute TTL) ≈ 1.25× input,
-/// but both are written out rather than derived — a pricing convention is not
-/// arithmetic mesa gets to assume on a family it has never seen.
+/// Every rate is written out rather than derived — a pricing convention is
+/// not arithmetic Naru gets to assume on a model it has never seen.
 pub fn default_prices() -> Vec<(&'static str, ModelRates)> {
+    // input, output, cache read, 5-minute cache write, 1-hour cache write.
+    let fable = rates(10.0, 50.0, 0.25, 12.5, 20.0);
+    let fable_5 = rates(10.0, 50.0, 1.0, 12.5, 20.0);
+    let opus_5 = rates(5.0, 25.0, 0.5, 6.25, 10.0);
+    let opus_4 = rates(15.0, 75.0, 1.5, 18.75, 30.0);
+    let sonnet_4 = rates(3.0, 15.0, 0.3, 3.75, 6.0);
     vec![
-        ("claude-fable", rates(10.0, 50.0, 1.0, 12.5)),
-        ("claude-mythos", rates(10.0, 50.0, 1.0, 12.5)),
-        ("claude-opus", rates(5.0, 25.0, 0.5, 6.25)),
-        ("claude-sonnet", rates(3.0, 15.0, 0.3, 3.75)),
-        ("claude-haiku", rates(1.0, 5.0, 0.1, 1.25)),
+        ("claude-fable-5-1", fable.clone()),
+        ("claude-fable-5", fable_5.clone()),
+        ("claude-mythos-5-1", fable),
+        ("claude-mythos-5", fable_5),
+        ("claude-opus-5-5", rates(4.0, 20.0, 0.2, 5.0, 8.0)),
+        ("claude-opus-5", opus_5.clone()),
+        ("claude-opus-4-8", opus_5.clone()),
+        ("claude-opus-4-7", opus_5.clone()),
+        ("claude-opus-4-6", opus_5.clone()),
+        ("claude-opus-4-5", opus_5),
+        ("claude-opus-4-1", opus_4.clone()),
+        // Opus 4 and Sonnet 4 by their dated id (`claude-opus-4-20250514`)
+        // and `-0` alias, so a bare `claude-opus-4` prefix can't catch a
+        // future 4.x.
+        ("claude-opus-4-0", opus_4.clone()),
+        ("claude-opus-4-2025", opus_4.clone()),
+        ("claude-sonnet-5-5", rates(2.0, 10.0, 0.1, 2.5, 4.0)),
+        ("claude-sonnet-5", rates(2.0, 10.0, 0.2, 2.5, 4.0)),
+        ("claude-sonnet-4-6", sonnet_4.clone()),
+        ("claude-sonnet-4-5", sonnet_4.clone()),
+        ("claude-sonnet-4-0", sonnet_4.clone()),
+        ("claude-sonnet-4-2025", sonnet_4.clone()),
         // Haiku 5.5 is priced by prompt length: over 100k tokens pays the tier.
         (
             "claude-haiku-5-5",
             ModelRates {
-                input: 0.10,
-                output: 0.50,
-                cache_read: 0.01,
-                cache_write: 0.125,
                 tiers: vec![ContextTier {
                     above_tokens: 100_000,
                     input: 0.50,
                     output: 2.50,
                     cache_read: 0.05,
                     cache_write: 0.625,
+                    cache_write_1h: 1.0,
                 }],
+                ..rates(0.10, 0.50, 0.01, 0.125, 0.20)
             },
         ),
+        ("claude-haiku-4-5", rates(1.0, 5.0, 0.1, 1.25, 2.0)),
+        ("claude-3-7-sonnet", sonnet_4.clone()),
+        ("claude-3-5-sonnet", sonnet_4.clone()),
+        ("claude-3-5-haiku", rates(0.8, 4.0, 0.08, 1.0, 1.6)),
+        ("claude-3-opus", opus_4),
+        ("claude-3-sonnet", sonnet_4),
+        ("claude-3-haiku", rates(0.25, 1.25, 0.03, 0.3, 0.5)),
     ]
 }
 
-const fn rates(input: f64, output: f64, cache_read: f64, cache_write: f64) -> ModelRates {
+const fn rates(
+    input: f64,
+    output: f64,
+    cache_read: f64,
+    cache_write: f64,
+    cache_write_1h: f64,
+) -> ModelRates {
     ModelRates {
         input,
         output,
         cache_read,
         cache_write,
+        cache_write_1h,
         tiers: Vec::new(),
     }
 }
@@ -1862,19 +1901,26 @@ struct PricingConfig {
 /// `pricing` section. Built **once per request** and passed down — `cc.rs`
 /// prices every message through it, so re-reading the file per message would
 /// be a per-row `stat`+parse in a hot loop.
+///
+/// A configured row wins over every built-in one, whatever their lengths: the
+/// built-ins are one row per model, so under a plain longest-prefix rule an
+/// override on a family prefix (`claude-opus`) would be shadowed by
+/// `claude-opus-4-8` and silently stop applying (naru task 2603).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PriceTable {
-    entries: HashMap<String, ModelRates>,
+    builtin: HashMap<String, ModelRates>,
+    configured: HashMap<String, ModelRates>,
 }
 
 impl PriceTable {
     /// Just the shipped rates — what mesa costs with no config file.
     pub fn builtin() -> PriceTable {
         PriceTable {
-            entries: default_prices()
+            builtin: default_prices()
                 .into_iter()
                 .map(|(p, r)| (p.to_string(), r))
                 .collect(),
+            configured: HashMap::new(),
         }
     }
 
@@ -1886,25 +1932,36 @@ impl PriceTable {
     }
 
     fn load_from(path: &Path) -> Result<PriceTable, String> {
-        let mut table = Self::builtin();
-        for (prefix, rates) in read_pricing(path)? {
-            table.entries.insert(prefix, rates);
-        }
-        Ok(table)
+        Ok(PriceTable {
+            configured: read_pricing(path)?,
+            ..Self::builtin()
+        })
     }
 
-    /// The rates for a model id: **longest matching prefix wins**, so
-    /// `claude-opus-5-mini` can be priced separately from `claude-opus`. No
-    /// match is all-zeros — a synthetic or unknown model gets no estimate
-    /// rather than a wrong one.
+    /// The rates for a model id: the **longest matching configured prefix**,
+    /// else the longest matching built-in one, so `claude-opus-5-mini` can be
+    /// priced separately from `claude-opus`. No match is all-zeros — a
+    /// synthetic or unknown model gets no estimate rather than a wrong one
+    /// (and [`is_priced`](Self::is_priced) says so).
     pub fn for_model(&self, model: &str) -> ModelRates {
-        self.entries
-            .iter()
-            .filter(|(prefix, _)| model.starts_with(prefix.as_str()))
-            .max_by_key(|(prefix, _)| prefix.len())
-            .map(|(_, r)| r.clone())
-            .unwrap_or(rates(0.0, 0.0, 0.0, 0.0))
+        longest(&self.configured, model)
+            .or_else(|| longest(&self.builtin, model))
+            .cloned()
+            .unwrap_or(rates(0.0, 0.0, 0.0, 0.0, 0.0))
     }
+
+    /// Whether any row's prefix matches `model` — false is the $0 case
+    /// [`for_model`](Self::for_model) falls back to, which a report flags.
+    pub fn is_priced(&self, model: &str) -> bool {
+        longest(&self.configured, model).is_some() || longest(&self.builtin, model).is_some()
+    }
+}
+
+fn longest<'a>(rows: &'a HashMap<String, ModelRates>, model: &str) -> Option<&'a ModelRates> {
+    rows.iter()
+        .filter(|(prefix, _)| model.starts_with(prefix.as_str()))
+        .max_by_key(|(prefix, _)| prefix.len())
+        .map(|(_, r)| r)
 }
 
 fn read_pricing(path: &Path) -> Result<HashMap<String, ModelRates>, String> {
@@ -2056,6 +2113,7 @@ fn validate_rates(prefix: &str, rates: &ModelRates) -> Result<(), String> {
         ("output", rates.output),
         ("cache_read", rates.cache_read),
         ("cache_write", rates.cache_write),
+        ("cache_write_1h", rates.cache_write_1h),
     ] {
         if !value.is_finite() || value < 0.0 {
             return Err(format!(
@@ -2085,6 +2143,7 @@ fn validate_rates(prefix: &str, rates: &ModelRates) -> Result<(), String> {
             ("output", t.output),
             ("cache_read", t.cache_read),
             ("cache_write", t.cache_write),
+            ("cache_write_1h", t.cache_write_1h),
         ] {
             if !value.is_finite() || value < 0.0 {
                 return Err(format!(
@@ -6569,6 +6628,12 @@ mod tests {
     }
     // ---- pricing (mesa task 692) ----------------------------------------
 
+    /// A four-rate row as a pre-2603 config reads: the 1-hour write rate is
+    /// the 5-minute one.
+    fn rates4(input: f64, output: f64, cache_read: f64, cache_write: f64) -> ModelRates {
+        rates(input, output, cache_read, cache_write, cache_write)
+    }
+
     fn price(pairs: &[(&str, Option<ModelRates>)]) -> HashMap<String, Option<ModelRates>> {
         pairs
             .iter()
@@ -6576,19 +6641,107 @@ mod tests {
             .collect()
     }
 
+    /// Naru task 2603: every model id on the official pricing page (plus the
+    /// retired ones old transcripts carry) prices one sample request — 1M
+    /// each of input, output and cache read, and 2M cache writes of which 1M
+    /// had the 1-hour TTL — at exactly input + output + read + 5m + 1h.
     #[test]
-    fn price_table_falls_back_to_the_built_ins_and_zeros_the_unknown() {
+    fn every_shipped_model_prices_a_sample_request() {
         let table = PriceTable::builtin();
-        assert_eq!(
-            table.for_model("claude-opus-4-8"),
-            rates(5.0, 25.0, 0.5, 6.25)
+        // model id: input, output, cache read, 5-minute write, 1-hour write
+        let cases: &[(&str, [f64; 5])] = &[
+            ("claude-fable-5-1", [10.0, 50.0, 0.25, 12.5, 20.0]),
+            ("claude-mythos-5-1", [10.0, 50.0, 0.25, 12.5, 20.0]),
+            ("claude-fable-5", [10.0, 50.0, 1.0, 12.5, 20.0]),
+            ("claude-mythos-5", [10.0, 50.0, 1.0, 12.5, 20.0]),
+            ("claude-opus-5-5", [4.0, 20.0, 0.2, 5.0, 8.0]),
+            ("claude-opus-5", [5.0, 25.0, 0.5, 6.25, 10.0]),
+            ("claude-opus-4-8", [5.0, 25.0, 0.5, 6.25, 10.0]),
+            ("claude-opus-4-7", [5.0, 25.0, 0.5, 6.25, 10.0]),
+            ("claude-opus-4-6", [5.0, 25.0, 0.5, 6.25, 10.0]),
+            ("claude-opus-4-5-20251101", [5.0, 25.0, 0.5, 6.25, 10.0]),
+            ("claude-opus-4-1-20250805", [15.0, 75.0, 1.5, 18.75, 30.0]),
+            ("claude-opus-4-20250514", [15.0, 75.0, 1.5, 18.75, 30.0]),
+            ("claude-opus-4-0", [15.0, 75.0, 1.5, 18.75, 30.0]),
+            ("claude-sonnet-5-5", [2.0, 10.0, 0.1, 2.5, 4.0]),
+            ("claude-sonnet-5", [2.0, 10.0, 0.2, 2.5, 4.0]),
+            ("claude-sonnet-4-6", [3.0, 15.0, 0.3, 3.75, 6.0]),
+            ("claude-sonnet-4-5-20250929", [3.0, 15.0, 0.3, 3.75, 6.0]),
+            ("claude-sonnet-4-20250514", [3.0, 15.0, 0.3, 3.75, 6.0]),
+            ("claude-sonnet-4-0", [3.0, 15.0, 0.3, 3.75, 6.0]),
+            ("claude-haiku-4-5-20251001", [1.0, 5.0, 0.1, 1.25, 2.0]),
+            ("claude-3-7-sonnet-20250219", [3.0, 15.0, 0.3, 3.75, 6.0]),
+            ("claude-3-5-sonnet-20241022", [3.0, 15.0, 0.3, 3.75, 6.0]),
+            ("claude-3-5-haiku-20241022", [0.8, 4.0, 0.08, 1.0, 1.6]),
+            ("claude-3-opus-20240229", [15.0, 75.0, 1.5, 18.75, 30.0]),
+            ("claude-3-sonnet-20240229", [3.0, 15.0, 0.3, 3.75, 6.0]),
+            ("claude-3-haiku-20240307", [0.25, 1.25, 0.03, 0.3, 0.5]),
+            // Haiku 5.5's 4M-token prompt is over 100k: the tier.
+            ("claude-haiku-5-5", [0.5, 2.5, 0.05, 0.625, 1.0]),
+        ];
+        const M: i64 = 1_000_000;
+        for (model, [i, o, r, w5, w1]) in cases {
+            assert!(table.is_priced(model), "{model}");
+            let cost = table.for_model(model).cost(M, M, M, 2 * M, Some(M));
+            let want = i + o + r + w5 + w1;
+            assert!((cost - want).abs() < 1e-9, "{model}: {cost} != {want}");
+        }
+        // No TTL split: every write at the 5-minute rate.
+        let opus = table.for_model("claude-opus-5-5");
+        assert!((opus.cost(0, 0, 0, M, None) - 5.0).abs() < 1e-9);
+        // A model no prefix matches gets no estimate rather than a wrong one,
+        // and says so — including a new version of a known family.
+        for unknown in ["<synthetic>", "claude-opus-6", "claude-sonnet-4-7"] {
+            assert!(!table.is_priced(unknown), "{unknown}");
+            assert_eq!(table.for_model(unknown), rates4(0.0, 0.0, 0.0, 0.0));
+        }
+    }
+
+    #[test]
+    fn haiku_5_5_long_context_tier_covers_one_hour_writes() {
+        let r = PriceTable::builtin().for_model("claude-haiku-5-5");
+        // 100000-token prompt: base. 1000 in + 1000 out + 50000 read +
+        // 49000 written (40000 of them 1-hour).
+        let base = r.cost(1_000, 1_000, 50_000, 49_000, Some(40_000));
+        let want =
+            (1_000.0 * 0.10 + 1_000.0 * 0.50 + 50_000.0 * 0.01 + 9_000.0 * 0.125 + 40_000.0 * 0.20)
+                / 1e6;
+        assert!((base - want).abs() < 1e-12, "{base} != {want}");
+        // One more input token tips the whole request, output included, over.
+        let over = r.cost(1_001, 1_000, 50_000, 49_000, Some(40_000));
+        let want =
+            (1_001.0 * 0.50 + 1_000.0 * 2.50 + 50_000.0 * 0.05 + 9_000.0 * 0.625 + 40_000.0 * 1.0)
+                / 1e6;
+        assert!((over - want).abs() < 1e-12, "{over} != {want}");
+    }
+
+    #[test]
+    fn a_configured_family_prefix_beats_a_longer_built_in() {
+        let dir = tempfile::tempdir().unwrap();
+        // A pre-2603 four-field row: its 1-hour rate reads as its 5-minute one.
+        let path = write_config(
+            dir.path(),
+            r#"{"pricing": {"claude-sonnet": {"input": 2, "output": 10, "cache_read": 0.2, "cache_write": 4}}}"#,
         );
+        let table = PriceTable::load_from(&path).unwrap();
         assert_eq!(
-            table.for_model("claude-haiku-4-5"),
-            rates(1.0, 5.0, 0.1, 1.25)
+            table.for_model("claude-sonnet-4-6"),
+            rates4(2.0, 10.0, 0.2, 4.0)
         );
-        // A model no prefix matches gets no estimate rather than a wrong one.
-        assert_eq!(table.for_model("<synthetic>"), rates(0.0, 0.0, 0.0, 0.0));
+        // Families the config doesn't name keep the built-ins.
+        assert_eq!(
+            table.for_model("claude-opus-5-5"),
+            rates(4.0, 20.0, 0.2, 5.0, 8.0)
+        );
+        // A configured 1-hour rate is used and round-trips.
+        let five = rates(1.0, 2.0, 3.0, 4.0, 5.0);
+        save_pricing_in(&path, &price(&[("claude-sonnet", Some(five.clone()))])).unwrap();
+        assert_eq!(
+            PriceTable::load_from(&path)
+                .unwrap()
+                .for_model("claude-sonnet-5"),
+            five
+        );
     }
 
     #[test]
@@ -6603,14 +6756,11 @@ mod tests {
         let over = r.for_prompt(100_001);
         assert_eq!((over.input, over.output), (0.50, 2.50));
         assert_eq!((over.cache_read, over.cache_write), (0.05, 0.625));
-        // The shorter family prefix is untouched and has no tier.
-        assert_eq!(
-            table.for_model("claude-haiku-4-5"),
-            rates(1.0, 5.0, 0.1, 1.25)
-        );
+        assert_eq!(over.cache_write_1h, 1.0);
+        // Haiku 4.5 has no tier.
         assert_eq!(
             table.for_model("claude-haiku-4-5").for_prompt(10_000_000),
-            rates(1.0, 5.0, 0.1, 1.25)
+            rates(1.0, 5.0, 0.1, 1.25, 2.0)
         );
     }
 
@@ -6623,7 +6773,7 @@ mod tests {
         );
         assert_eq!(
             PriceTable::load_from(&path).unwrap().for_model("old-1"),
-            rates(1.0, 2.0, 3.0, 4.0)
+            rates4(1.0, 2.0, 3.0, 4.0)
         );
         let t = |above_tokens: u64, x: f64| ContextTier {
             above_tokens,
@@ -6631,17 +6781,18 @@ mod tests {
             output: x + 1.0,
             cache_read: x + 2.0,
             cache_write: x + 3.0,
+            cache_write_1h: x + 3.0,
         };
         // Given out of order, stored ascending.
         let tiered = ModelRates {
             tiers: vec![t(500, 7.0), t(100, 5.0)],
-            ..rates(1.0, 2.0, 3.0, 4.0)
+            ..rates4(1.0, 2.0, 3.0, 4.0)
         };
         save_pricing_in(&path, &price(&[("old", Some(tiered))])).unwrap();
         let stored = read_pricing(&path).unwrap()["old"].tiers.clone();
         assert_eq!(stored, vec![t(100, 5.0), t(500, 7.0)]);
         // A flat row serializes without the key.
-        save_pricing_in(&path, &price(&[("old", Some(rates(1.0, 2.0, 3.0, 4.0)))])).unwrap();
+        save_pricing_in(&path, &price(&[("old", Some(rates4(1.0, 2.0, 3.0, 4.0)))])).unwrap();
         assert!(!std::fs::read_to_string(&path).unwrap().contains("tiers"));
     }
 
@@ -6653,16 +6804,17 @@ mod tests {
             output: x,
             cache_read: x,
             cache_write: x,
+            cache_write_1h: x,
         };
         // Deliberately unsorted: selection must not depend on order.
         let r = ModelRates {
             tiers: vec![t(500_000, 3.0), t(100_000, 2.0)],
-            ..rates(1.0, 1.0, 1.0, 1.0)
+            ..rates4(1.0, 1.0, 1.0, 1.0)
         };
-        assert_eq!(r.for_prompt(100_000), rates(1.0, 1.0, 1.0, 1.0));
-        assert_eq!(r.for_prompt(100_001), rates(2.0, 2.0, 2.0, 2.0));
-        assert_eq!(r.for_prompt(500_000), rates(2.0, 2.0, 2.0, 2.0));
-        assert_eq!(r.for_prompt(500_001), rates(3.0, 3.0, 3.0, 3.0));
+        assert_eq!(r.for_prompt(100_000), rates4(1.0, 1.0, 1.0, 1.0));
+        assert_eq!(r.for_prompt(100_001), rates4(2.0, 2.0, 2.0, 2.0));
+        assert_eq!(r.for_prompt(500_000), rates4(2.0, 2.0, 2.0, 2.0));
+        assert_eq!(r.for_prompt(500_001), rates4(3.0, 3.0, 3.0, 3.0));
     }
 
     #[test]
@@ -6676,10 +6828,11 @@ mod tests {
             output: 1.0,
             cache_read: 1.0,
             cache_write: 1.0,
+            cache_write_1h: 1.0,
         };
         let tier = |tiers| ModelRates {
             tiers,
-            ..rates(1.0, 1.0, 1.0, 1.0)
+            ..rates4(1.0, 1.0, 1.0, 1.0)
         };
         for (label, r) in [
             ("zero threshold", tier(vec![one(0, 1.0)])),
@@ -6713,17 +6866,17 @@ mod tests {
         // The overlay beats the built-in…
         assert_eq!(
             table.for_model("claude-opus-4-8"),
-            rates(9.0, 9.0, 9.0, 9.0)
+            rates4(9.0, 9.0, 9.0, 9.0)
         );
         // …and a longer prefix beats a shorter one that also matches.
         assert_eq!(
             table.for_model("claude-opus-5-mini-20260101"),
-            rates(1.0, 2.0, 3.0, 4.0)
+            rates4(1.0, 2.0, 3.0, 4.0)
         );
         // An untouched family keeps its shipped rates.
         assert_eq!(
             table.for_model("claude-sonnet-5"),
-            rates(3.0, 15.0, 0.3, 3.75)
+            rates(2.0, 10.0, 0.2, 2.5, 4.0)
         );
         // A prefix the binary never heard of prices anyway — the whole point.
         let path = write_config(
@@ -6731,7 +6884,7 @@ mod tests {
             r#"{"pricing": {"newco-x": {"input": 2, "output": 4, "cache_read": 0, "cache_write": 0}}}"#,
         );
         let table = PriceTable::load_from(&path).unwrap();
-        assert_eq!(table.for_model("newco-x-1"), rates(2.0, 4.0, 0.0, 0.0));
+        assert_eq!(table.for_model("newco-x-1"), rates4(2.0, 4.0, 0.0, 0.0));
     }
 
     #[test]
@@ -6759,31 +6912,31 @@ mod tests {
             r#"{"pricing": {
                  "zeta": {"input": 1, "output": 1, "cache_read": 1, "cache_write": 1},
                  "alpha": {"input": 1, "output": 1, "cache_read": 1, "cache_write": 1},
-                 "claude-opus": {"input": 7, "output": 7, "cache_read": 7, "cache_write": 7}
+                 "claude-opus-4-8": {"input": 7, "output": 7, "cache_read": 7, "cache_write": 7}
                }}"#,
         );
         let rows = pricing_in(&path).unwrap();
+        let mut want: Vec<&str> = default_prices().iter().map(|(p, _)| *p).collect();
+        want.extend(["alpha", "zeta"]);
         assert_eq!(
             rows.iter().map(|r| r.prefix.as_str()).collect::<Vec<_>>(),
-            [
-                "claude-fable",
-                "claude-mythos",
-                "claude-opus",
-                "claude-sonnet",
-                "claude-haiku",
-                "claude-haiku-5-5",
-                "alpha",
-                "zeta"
-            ]
+            want
         );
+        let row = |p: &str| rows.iter().find(|r| r.prefix == p).unwrap();
         // A configured built-in carries both, so the editor can offer "reset".
-        assert_eq!(rows[2].value, Some(rates(7.0, 7.0, 7.0, 7.0)));
-        assert_eq!(rows[2].default, Some(rates(5.0, 25.0, 0.5, 6.25)));
+        assert_eq!(
+            row("claude-opus-4-8").value,
+            Some(rates4(7.0, 7.0, 7.0, 7.0))
+        );
+        assert_eq!(
+            row("claude-opus-4-8").default,
+            Some(rates(5.0, 25.0, 0.5, 6.25, 10.0))
+        );
         // An unconfigured one is "falling back", not "empty".
-        assert_eq!(rows[3].value, None);
+        assert_eq!(row("claude-opus-4-7").value, None);
         // A user-added prefix has nothing behind it — clearing it deletes it.
-        assert_eq!(rows[6].default, None);
-        assert_eq!(rows[6].value, Some(rates(1.0, 1.0, 1.0, 1.0)));
+        assert_eq!(row("alpha").default, None);
+        assert_eq!(row("alpha").value, Some(rates4(1.0, 1.0, 1.0, 1.0)));
     }
 
     #[test]
@@ -6795,7 +6948,7 @@ mod tests {
         );
         save_pricing_in(
             &path,
-            &price(&[("claude-opus", Some(rates(1.0, 2.0, 3.0, 4.0)))]),
+            &price(&[("claude-opus", Some(rates4(1.0, 2.0, 3.0, 4.0)))]),
         )
         .unwrap();
         let written: serde_json::Value =
@@ -6814,7 +6967,7 @@ mod tests {
             PriceTable::load_from(&path)
                 .unwrap()
                 .for_model("claude-opus-9"),
-            rates(1.0, 2.0, 3.0, 4.0)
+            rates4(1.0, 2.0, 3.0, 4.0)
         );
         assert_eq!(
             command_in(&path, INBOX_WATCHER).unwrap().as_deref(),
@@ -6841,9 +6994,9 @@ mod tests {
         let table = PriceTable::load_from(&path).unwrap();
         assert_eq!(
             table.for_model("claude-opus-4-8"),
-            rates(5.0, 25.0, 0.5, 6.25)
+            rates(5.0, 25.0, 0.5, 6.25, 10.0)
         );
-        assert_eq!(table.for_model("newco-1"), rates(0.0, 0.0, 0.0, 0.0));
+        assert_eq!(table.for_model("newco-1"), rates4(0.0, 0.0, 0.0, 0.0));
         // And the row disappears from the Settings view entirely.
         assert!(
             pricing_in(&path)
@@ -6858,18 +7011,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let before = r#"{"pricing": {"claude-opus": {"input": 9, "output": 9, "cache_read": 9, "cache_write": 9}}}"#;
         let path = write_config(dir.path(), before);
-        let good = Some(rates(1.0, 1.0, 1.0, 1.0));
+        let good = Some(rates4(1.0, 1.0, 1.0, 1.0));
         for (label, updates) in [
             ("empty prefix", price(&[("  ", good.clone())])),
             ("whitespace", price(&[("claude opus", good.clone())])),
             ("too long", price(&[(&"x".repeat(65), good.clone())])),
             (
                 "negative rate",
-                price(&[("claude-opus", Some(rates(1.0, -1.0, 1.0, 1.0)))]),
+                price(&[("claude-opus", Some(rates4(1.0, -1.0, 1.0, 1.0)))]),
             ),
             (
                 "non-finite rate",
-                price(&[("claude-opus", Some(rates(f64::NAN, 1.0, 1.0, 1.0)))]),
+                price(&[("claude-opus", Some(rates4(f64::NAN, 1.0, 1.0, 1.0)))]),
             ),
         ] {
             let err = save_pricing_in(&path, &updates).unwrap_err();
@@ -6880,7 +7033,7 @@ mod tests {
             &path,
             &price(&[
                 ("claude-sonnet", good),
-                ("claude-haiku", Some(rates(0.0, 0.0, 0.0, -0.5))),
+                ("claude-haiku", Some(rates4(0.0, 0.0, 0.0, -0.5))),
             ]),
         )
         .unwrap_err();
@@ -6894,7 +7047,7 @@ mod tests {
         let path = write_config(dir.path(), "not json");
         let err = save_pricing_in(
             &path,
-            &price(&[("claude-opus", Some(rates(1.0, 1.0, 1.0, 1.0)))]),
+            &price(&[("claude-opus", Some(rates4(1.0, 1.0, 1.0, 1.0)))]),
         )
         .unwrap_err();
         assert!(
@@ -7225,7 +7378,7 @@ mod tests {
         assert_eq!(survives("commands")["watchers"][TODO_CONCURRENCY], 7);
         save_pricing_in(
             &path,
-            &price(&[("claude-sonnet", Some(rates(1.0, 1.0, 1.0, 1.0)))]),
+            &price(&[("claude-sonnet", Some(rates4(1.0, 1.0, 1.0, 1.0)))]),
         )
         .unwrap();
         assert_eq!(survives("pricing")["watchers"][TODO_CONCURRENCY], 7);

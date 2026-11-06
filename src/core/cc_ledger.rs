@@ -229,6 +229,8 @@ fn parse_batch(bytes: &[u8]) -> (CcFileBatch, usize) {
             output_tokens: e.output_tokens,
             cache_read_tokens: e.cache_read_tokens,
             cache_creation_tokens: e.cache_creation_tokens,
+            // The ledger records no TTL split; its reported cost is used anyway.
+            cache_creation_1h_tokens: None,
             skill: None,
             agent: None,
             preview: None,

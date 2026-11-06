@@ -8434,7 +8434,7 @@ button:focus-visible,
    their columns — the header is the only thing naming what the boxes are. */
 .settings-prices {
   display: grid;
-  grid-template-columns: minmax(9rem, 1.4fr) repeat(4, minmax(4.5rem, 1fr)) auto;
+  grid-template-columns: minmax(9rem, 1.4fr) repeat(5, minmax(4.5rem, 1fr)) auto;
   gap: 0.35rem 0.5rem;
   align-items: center;
   margin-top: 0.75rem;

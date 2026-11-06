@@ -647,13 +647,18 @@ pub struct ConfigCommand {
 /// One model family's rates, USD per **1M tokens**. All four are explicit —
 /// mesa never derives a cache rate from the input rate, because the
 /// relationship is a pricing convention, not arithmetic mesa gets to assume.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Serialize, TS)]
 #[ts(export, export_to = "../frontend/src/types/")]
 pub struct ModelRates {
     pub input: f64,
     pub output: f64,
     pub cache_read: f64,
+    /// A cache write with the default 5-minute TTL.
     pub cache_write: f64,
+    /// A cache write with the 1-hour TTL (naru task 2603). Optional on input:
+    /// a row written before the field existed reads it as `cache_write`, so
+    /// an existing config prices exactly as it did.
+    pub cache_write_1h: f64,
     /// Optional context-size tiers: a request whose prompt is strictly over a
     /// tier's `above_tokens` is priced wholly at that tier's rates (the
     /// tier with the largest threshold below the prompt wins). Stored
@@ -667,7 +672,7 @@ pub struct ModelRates {
 /// The rates a request pays when its prompt (input + cache read + cache
 /// creation tokens) is strictly over `above_tokens`; every token kind of that
 /// request, output included, is priced at these. USD per **1M tokens**.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, TS)]
 #[ts(export, export_to = "../frontend/src/types/")]
 pub struct ContextTier {
     #[ts(type = "number")]
@@ -676,6 +681,72 @@ pub struct ContextTier {
     pub output: f64,
     pub cache_read: f64,
     pub cache_write: f64,
+    /// As [`ModelRates::cache_write_1h`]: absent on input reads as `cache_write`.
+    pub cache_write_1h: f64,
+}
+
+/// What a [`ModelRates`] is read from: the same fields with
+/// `cache_write_1h` optional, defaulting to the 5-minute rate.
+#[derive(Deserialize)]
+struct ModelRatesIn {
+    input: f64,
+    output: f64,
+    cache_read: f64,
+    cache_write: f64,
+    #[serde(default)]
+    cache_write_1h: Option<f64>,
+    #[serde(default)]
+    tiers: Vec<ContextTier>,
+}
+
+impl<'de> Deserialize<'de> for ModelRates {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        ModelRatesIn::deserialize(d).map(Into::into)
+    }
+}
+
+impl From<ModelRatesIn> for ModelRates {
+    fn from(r: ModelRatesIn) -> Self {
+        ModelRates {
+            input: r.input,
+            output: r.output,
+            cache_read: r.cache_read,
+            cache_write: r.cache_write,
+            cache_write_1h: r.cache_write_1h.unwrap_or(r.cache_write),
+            tiers: r.tiers,
+        }
+    }
+}
+
+/// [`ContextTier`]'s twin of [`ModelRatesIn`].
+#[derive(Deserialize)]
+struct ContextTierIn {
+    above_tokens: u64,
+    input: f64,
+    output: f64,
+    cache_read: f64,
+    cache_write: f64,
+    #[serde(default)]
+    cache_write_1h: Option<f64>,
+}
+
+impl<'de> Deserialize<'de> for ContextTier {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        ContextTierIn::deserialize(d).map(Into::into)
+    }
+}
+
+impl From<ContextTierIn> for ContextTier {
+    fn from(t: ContextTierIn) -> Self {
+        ContextTier {
+            above_tokens: t.above_tokens,
+            input: t.input,
+            output: t.output,
+            cache_read: t.cache_read,
+            cache_write: t.cache_write,
+            cache_write_1h: t.cache_write_1h.unwrap_or(t.cache_write),
+        }
+    }
 }
 
 impl ModelRates {
@@ -696,6 +767,7 @@ impl ModelRates {
                 output: t.output,
                 cache_read: t.cache_read,
                 cache_write: t.cache_write,
+                cache_write_1h: t.cache_write_1h,
                 tiers: Vec::new(),
             },
             None => ModelRates {
@@ -703,9 +775,34 @@ impl ModelRates {
                 output: self.output,
                 cache_read: self.cache_read,
                 cache_write: self.cache_write,
+                cache_write_1h: self.cache_write_1h,
                 tiers: Vec::new(),
             },
         }
+    }
+
+    /// USD for one request — the one cost formula. `cache_creation` is every
+    /// cache-write token; `cache_creation_1h` is the part written with the
+    /// 1-hour TTL, `None` when the usage carried no TTL split, in which case
+    /// every write pays the 5-minute rate (the API's default TTL).
+    pub fn cost(
+        &self,
+        input: i64,
+        output: i64,
+        cache_read: i64,
+        cache_creation: i64,
+        cache_creation_1h: Option<i64>,
+    ) -> f64 {
+        let r = self.for_prompt(input + cache_read + cache_creation);
+        let one_hour = cache_creation_1h
+            .unwrap_or(0)
+            .clamp(0, cache_creation.max(0));
+        (input as f64 * r.input
+            + output as f64 * r.output
+            + cache_read as f64 * r.cache_read
+            + (cache_creation - one_hour) as f64 * r.cache_write
+            + one_hour as f64 * r.cache_write_1h)
+            / 1_000_000.0
     }
 }
 
@@ -2988,6 +3085,10 @@ pub struct CcOverview {
     pub cache_hit_ratio: f64,
     pub first_activity: Option<String>,
     pub last_activity: Option<String>,
+    /// Models in the window with token usage that no price row matches, so
+    /// they count $0 toward `est_cost_usd` (naru task 2603). Sorted; empty
+    /// when every model is priced. Add a `pricing` row to price one.
+    pub unpriced_models: Vec<String>,
 }
 
 /// One day's totals (the daily activity series).

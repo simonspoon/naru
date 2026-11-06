@@ -29,4 +29,10 @@ headless_cost_usd: number, avg_session_minutes: number, median_session_minutes: 
 /**
  * cache_read / (cache_read + input): how much input was served from cache.
  */
-cache_hit_ratio: number, first_activity: string | null, last_activity: string | null, };
+cache_hit_ratio: number, first_activity: string | null, last_activity: string | null, 
+/**
+ * Models in the window with token usage that no price row matches, so
+ * they count $0 toward `est_cost_usd` (naru task 2603). Sorted; empty
+ * when every model is priced. Add a `pricing` row to price one.
+ */
+unpriced_models: Array<string>, };

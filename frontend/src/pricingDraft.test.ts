@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  RATE_FIELDS,
   addTier,
   addedPricing,
   blankRates,
@@ -30,7 +31,8 @@ const rates = (
   output: number,
   cache_read: number,
   cache_write: number,
-): ModelRates => ({ input, output, cache_read, cache_write })
+  cache_write_1h: number = cache_write,
+): ModelRates => ({ input, output, cache_read, cache_write, cache_write_1h })
 
 const OPUS: ConfigPrice = {
   prefix: 'claude-opus',
@@ -49,6 +51,7 @@ function text(r: ModelRates) {
     output: String(r.output),
     cache_read: String(r.cache_read),
     cache_write: String(r.cache_write),
+    cache_write_1h: String(r.cache_write_1h),
   }
 }
 
@@ -134,7 +137,13 @@ describe('changedPricing', () => {
     expect(changedPricing(prices, { newco: text(rates(1, 2, 3, 4)) })).toEqual({})
     expect(
       changedPricing(prices, {
-        newco: { input: '1.0', output: '2', cache_read: '3', cache_write: '4' },
+        newco: {
+          input: '1.0',
+          output: '2',
+          cache_read: '3',
+          cache_write: '4',
+          cache_write_1h: '4',
+        },
       }),
     ).toEqual({})
   })
@@ -166,6 +175,7 @@ describe('isSavable', () => {
       'output: required',
       'cache_read: required',
       'cache_write: required',
+      'cache_write_1h: required',
     ])
     expect(isSavable([ADDED], draft)).toBe(false)
   })
@@ -250,6 +260,7 @@ describe('context tiers', () => {
     output: x,
     cache_read: x,
     cache_write: x,
+    cache_write_1h: x,
   })
   const text = (above_tokens: string, x: string) => ({
     above_tokens,
@@ -257,6 +268,7 @@ describe('context tiers', () => {
     output: x,
     cache_read: x,
     cache_write: x,
+    cache_write_1h: x,
   })
   const HAIKU: ConfigPrice = {
     prefix: 'claude-haiku-5-5',
@@ -290,7 +302,7 @@ describe('context tiers', () => {
     let row = addTier(blankRates(), HAIKU.default)
     expect(row.tiers).toHaveLength(2)
     row = editTier(row, 1, 'above_tokens', '50000', HAIKU.default)
-    for (const f of ['input', 'output', 'cache_read', 'cache_write'] as const) {
+    for (const f of RATE_FIELDS) {
       row = editTier(row, 1, f, '0.3', HAIKU.default)
     }
     const sent = changedPricing([HAIKU], { [HAIKU.prefix]: row })
@@ -358,6 +370,12 @@ describe('context tiers', () => {
   })
 
   function text0() {
-    return { input: '1', output: '2', cache_read: '3', cache_write: '4' }
+    return {
+      input: '1',
+      output: '2',
+      cache_read: '3',
+      cache_write: '4',
+      cache_write_1h: '5',
+    }
   }
 })

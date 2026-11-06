@@ -1239,6 +1239,10 @@ struct RawUsage {
     cache_read_input_tokens: i64,
     #[serde(default)]
     cache_creation_input_tokens: i64,
+    /// The TTL split of `cache_creation_input_tokens`; absent on older
+    /// transcripts, which then price every write at the 5-minute rate.
+    #[serde(default)]
+    cache_creation: Option<RawCacheCreation>,
     /// A `server_tool_use` call to a tool that itself runs its own model turn
     /// (currently only `advisor`) records that turn's real usage here rather
     /// than in the top-level fields above, which stay small (wrapper
@@ -1262,6 +1266,30 @@ struct RawIteration {
     cache_read_input_tokens: i64,
     #[serde(default)]
     cache_creation_input_tokens: i64,
+    #[serde(default)]
+    cache_creation: Option<RawCacheCreation>,
+}
+
+/// `usage.cache_creation`: the cache-write tokens by TTL. Only the 1-hour
+/// count is read; the rest of the total is the 5-minute writes.
+#[derive(Deserialize, Default, Clone, Copy)]
+struct RawCacheCreation {
+    #[serde(default)]
+    ephemeral_1h_input_tokens: i64,
+}
+
+impl RawUsage {
+    /// The 1-hour part of the cache writes, `None` when the split is absent.
+    fn cache_creation_1h(&self) -> Option<i64> {
+        self.cache_creation.map(|c| c.ephemeral_1h_input_tokens)
+    }
+}
+
+impl RawIteration {
+    /// As [`RawUsage::cache_creation_1h`], for an advisor turn.
+    fn cache_creation_1h(&self) -> Option<i64> {
+        self.cache_creation.map(|c| c.ephemeral_1h_input_tokens)
+    }
 }
 
 // ---- pricing (USD per 1M tokens) ----
@@ -1544,14 +1572,13 @@ fn load_prices() -> Result<PriceTable> {
 }
 
 fn estimate_cost(prices: &PriceTable, model: &str, u: &RawUsage) -> f64 {
-    let r = prices
-        .for_model(model)
-        .for_prompt(u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens);
-    (u.input_tokens as f64 * r.input
-        + u.output_tokens as f64 * r.output
-        + u.cache_read_input_tokens as f64 * r.cache_read
-        + u.cache_creation_input_tokens as f64 * r.cache_write)
-        / 1_000_000.0
+    prices.for_model(model).cost(
+        u.input_tokens,
+        u.output_tokens,
+        u.cache_read_input_tokens,
+        u.cache_creation_input_tokens,
+        u.cache_creation_1h(),
+    )
 }
 
 /// The cost of one stored message row — the db-side twin of [`estimate_cost`],
@@ -1561,14 +1588,13 @@ fn row_cost(prices: &PriceTable, m: &CcMessageRow) -> f64 {
     if let Some(c) = m.cost_micro_usd {
         return c as f64 / 1e6;
     }
-    let r = prices
-        .for_model(&m.model)
-        .for_prompt(m.input_tokens + m.cache_read_tokens + m.cache_creation_tokens);
-    (m.input_tokens as f64 * r.input
-        + m.output_tokens as f64 * r.output
-        + m.cache_read_tokens as f64 * r.cache_read
-        + m.cache_creation_tokens as f64 * r.cache_write)
-        / 1_000_000.0
+    prices.for_model(&m.model).cost(
+        m.input_tokens,
+        m.output_tokens,
+        m.cache_read_tokens,
+        m.cache_creation_tokens,
+        m.cache_creation_1h_tokens,
+    )
 }
 
 // ---- accumulators ----
@@ -1861,6 +1887,7 @@ fn collect_inner(
     // first line of a response contributes everything and its repeats nothing
     // — including the `messages` counts, which count responses, not lines.
     let mut seen: HashSet<String> = HashSet::new();
+    let mut unpriced: BTreeSet<String> = BTreeSet::new();
     for m in messages {
         if m.uuid.starts_with("headless:") && transcript_sessions.contains(&m.session_id) {
             continue;
@@ -1887,6 +1914,13 @@ fn collect_inner(
         let Some(s) = agg.sessions.get_mut(&m.session_id) else {
             continue;
         };
+        // A row with tokens but no price row and no reported cost counted
+        // $0: name its model rather than under-report silently.
+        let tokens =
+            m.input_tokens + m.output_tokens + m.cache_read_tokens + m.cache_creation_tokens;
+        if m.cost_micro_usd.is_none() && tokens > 0 && !prices.is_priced(&m.model) {
+            unpriced.insert(m.model.clone());
+        }
         s.models.insert(m.model.clone());
         s.messages += 1;
         s.tokens.add(&usage);
@@ -1945,6 +1979,7 @@ fn collect_inner(
     agg.agent_runs = store.cc_agent_run_counts()?;
 
     let mut dashboard = agg.finish(window, cutoff, now);
+    dashboard.overview.unpriced_models = unpriced.into_iter().collect();
     apply_live_links(store, &mut dashboard.sessions)?;
     Ok(dashboard)
 }
@@ -2369,6 +2404,7 @@ fn fold_line(
             output_tokens: usage.output_tokens,
             cache_read_tokens: usage.cache_read_input_tokens,
             cache_creation_tokens: usage.cache_creation_input_tokens,
+            cache_creation_1h_tokens: usage.cache_creation_1h(),
             skill: raw.attribution_skill.clone(),
             agent: raw.attribution_agent.clone(),
             // The prose this assistant turn emitted, already sanitized and
@@ -2414,6 +2450,7 @@ fn fold_line(
                 output_tokens: it.output_tokens,
                 cache_read_tokens: it.cache_read_input_tokens,
                 cache_creation_tokens: it.cache_creation_input_tokens,
+                cache_creation_1h_tokens: it.cache_creation_1h(),
                 skill: raw.attribution_skill.clone(),
                 agent: Some("advisor".to_string()),
                 // A synthesized row for a nested advisor turn — it has no
@@ -2895,6 +2932,7 @@ impl Agg {
             tokens: tok.to_cc(),
             first_activity: first,
             last_activity: last,
+            unpriced_models: Vec::new(),
         };
 
         // ---- daily series (chronological) ----
@@ -5637,6 +5675,75 @@ mod tests {
         assert!((estimate_cost(&configured, "claude-opus-4-8", &u) - 3.0).abs() < 1e-9);
     }
 
+    /// Naru task 2603: the transcript's TTL split prices 1-hour writes at
+    /// their own rate; without it every write pays the 5-minute rate.
+    #[test]
+    fn one_hour_cache_writes_price_from_the_usage_split() {
+        let builtin = PriceTable::builtin();
+        let split: RawUsage = serde_json::from_str(
+            r#"{"cache_creation_input_tokens":3000000,
+                "cache_creation":{"ephemeral_5m_input_tokens":2000000,"ephemeral_1h_input_tokens":1000000}}"#,
+        )
+        .unwrap();
+        assert_eq!(split.cache_creation_1h(), Some(1_000_000));
+        // Opus 5.5: 2M x $5 + 1M x $8.
+        assert!((estimate_cost(&builtin, "claude-opus-5-5", &split) - 18.0).abs() < 1e-9);
+        let flat: RawUsage =
+            serde_json::from_str(r#"{"cache_creation_input_tokens":3000000}"#).unwrap();
+        assert_eq!(flat.cache_creation_1h(), None);
+        assert!((estimate_cost(&builtin, "claude-opus-5-5", &flat) - 15.0).abs() < 1e-9);
+    }
+
+    /// Naru task 2603, end to end: the split survives ingest into the db and
+    /// prices the dashboard, and a model with tokens but no price row is
+    /// named in `unpriced_models` (a zero-token `<synthetic>` line is not).
+    #[test]
+    fn dashboard_prices_one_hour_writes_and_names_unpriced_models() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("projects").join("-some-project");
+        fs::create_dir_all(&proj).unwrap();
+        write_jsonl(
+            &proj,
+            "sess.jsonl",
+            &[
+                r#"{"type":"assistant","uuid":"u1","sessionId":"s1","timestamp":"2026-06-15T01:05:00.000Z","cwd":"/w","message":{"id":"m1","model":"claude-opus-5-5","usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":3000000,"cache_creation":{"ephemeral_5m_input_tokens":2000000,"ephemeral_1h_input_tokens":1000000}}}}"#,
+                r#"{"type":"assistant","uuid":"u2","sessionId":"s1","timestamp":"2026-06-15T01:06:00.000Z","cwd":"/w","message":{"id":"m2","model":"claude-opus-9","usage":{"input_tokens":10,"output_tokens":20}}}"#,
+                r#"{"type":"assistant","uuid":"u3","sessionId":"s1","timestamp":"2026-06-15T01:07:00.000Z","cwd":"/w","message":{"id":"m3","model":"<synthetic>","usage":{"input_tokens":0,"output_tokens":0}}}"#,
+            ],
+        );
+        let mut store = Store::open(&tmp.path().join("mesa.db")).unwrap();
+        unsafe {
+            std::env::set_var("MESA_CC_PROJECTS_DIR", tmp.path().join("projects"));
+            std::env::set_var("MESA_CC_LEDGER", "/nonexistent/headless.jsonl");
+        }
+        sync(&mut store, false).unwrap();
+        unsafe {
+            std::env::remove_var("MESA_CC_PROJECTS_DIR");
+            std::env::remove_var("MESA_CC_LEDGER");
+        }
+        let rows = store.cc_session_messages("s1").unwrap();
+        let opus = rows.iter().find(|m| m.uuid == "u1").unwrap();
+        assert_eq!(opus.cache_creation_1h_tokens, Some(1_000_000));
+        assert_eq!(
+            rows.iter()
+                .find(|m| m.uuid == "u2")
+                .unwrap()
+                .cache_creation_1h_tokens,
+            None
+        );
+        let d = collect(&store, "all").unwrap();
+        assert!(
+            (d.overview.est_cost_usd - 18.0).abs() < 1e-9,
+            "{}",
+            d.overview.est_cost_usd
+        );
+        assert_eq!(
+            d.overview.unpriced_models,
+            vec!["claude-opus-9".to_string()]
+        );
+    }
+
     #[test]
     fn folds_ingested_rows_into_dashboard() {
         let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -7764,6 +7871,7 @@ mod tests {
             output_tokens: out,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
+            cache_creation_1h_tokens: None,
             skill: None,
             agent: None,
             preview: None,
@@ -7826,6 +7934,7 @@ mod tests {
             output_tokens: 500,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
+            cache_creation_1h_tokens: None,
             skill: None,
             agent: None,
             preview: None,
@@ -8020,6 +8129,7 @@ mod tests {
                                 output_tokens: 1,
                                 cache_read_tokens: 0,
                                 cache_creation_tokens: 0,
+                                cache_creation_1h_tokens: None,
                                 skill: None,
                                 agent: None,
                                 preview: None,
@@ -8370,6 +8480,7 @@ mod tests {
                         output_tokens: 2,
                         cache_read_tokens: 0,
                         cache_creation_tokens: 0,
+                        cache_creation_1h_tokens: None,
                         skill: None,
                         agent: None,
                         preview: None,
@@ -8414,6 +8525,7 @@ mod tests {
             output_tokens: 1,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
+            cache_creation_1h_tokens: None,
             skill: None,
             agent: None,
             preview: None,

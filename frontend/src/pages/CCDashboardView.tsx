@@ -468,7 +468,15 @@ function Overview({ data }: { data: CcDashboard }) {
         <Kpi label="Sessions" value={fmtInt(o.sessions)} sub={`${o.active_days} active days`} />
         <Kpi label="Messages" value={fmtInt(o.messages)} sub={`${fmtInt(Math.round(o.avg_tokens_per_session))} tok/session`} />
         <Kpi label="Tokens" value={fmtTok(o.total_tokens)} sub={`${fmtTok(o.tokens.input)} in · ${fmtTok(o.tokens.output)} out`} />
-        <Kpi label="Est. cost" value={fmtUsd(o.est_cost_usd)} sub={o.headless_cost_usd > 0 ? `incl. ${fmtUsd(o.headless_cost_usd)} headless` : 'estimated'} />
+        <Kpi
+          label="Est. cost"
+          value={fmtUsd(o.est_cost_usd)}
+          sub={[
+            o.headless_cost_usd > 0 ? `incl. ${fmtUsd(o.headless_cost_usd)} headless` : 'estimated',
+            // Models no price row matches count $0 (naru task 2603): say so.
+            o.unpriced_models.length > 0 ? `unpriced ($0): ${o.unpriced_models.join(', ')}` : '',
+          ].filter(Boolean).join(' · ')}
+        />
         <Kpi label="Cache hit" value={fmtPct(o.cache_hit_ratio)} sub={`${fmtTok(o.tokens.cache_read)} cached`} />
         <Kpi label="Avg session" value={fmtMin(o.avg_session_minutes)} sub={`median ${fmtMin(o.median_session_minutes)}`} />
       </div>

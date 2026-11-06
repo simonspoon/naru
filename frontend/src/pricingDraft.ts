@@ -10,7 +10,7 @@ import type { ModelRates } from './types/ModelRates'
  * Two things it models, both of which the server also draws:
  *
  * - **Blank means "use the built-in rate"**, exactly as a blank command box
- *   means "use the built-in template". A row whose four boxes are all blank is
+ *   means "use the built-in template". A row whose five boxes are all blank is
  *   PUT as `null`, which restores the shipped rate for a family mesa knows and
  *   deletes the row for a prefix the user added.
  * - **A rate is edited as text, not as a number.** Half-typed input (`"0."`,
@@ -18,17 +18,21 @@ import type { ModelRates } from './types/ModelRates'
  *   only `changedPricing` converts — parsing per render would clobber typing.
  */
 
-/** The four rate fields, in the order the editor lays them out. */
+/**
+ * The five rate fields, in the order the editor lays them out: `cache_write`
+ * is the 5-minute-TTL write, `cache_write_1h` the 1-hour one (naru task 2603).
+ */
 export const RATE_FIELDS = [
   'input',
   'output',
   'cache_read',
   'cache_write',
+  'cache_write_1h',
 ] as const
 
 export type RateField = (typeof RATE_FIELDS)[number]
 
-/** A context tier's boxes: a token threshold plus the four rates. */
+/** A context tier's boxes: a token threshold plus the five rates. */
 export const TIER_FIELDS = ['above_tokens', ...RATE_FIELDS] as const
 
 export type TierField = (typeof TIER_FIELDS)[number]
@@ -36,7 +40,7 @@ export type TierField = (typeof TIER_FIELDS)[number]
 export type TierDraft = Record<TierField, string>
 
 /**
- * One row's four boxes as typed, plus its optional context-size tiers
+ * One row's five boxes as typed, plus its optional context-size tiers
  * (`tiers`, the rates a request pays once its prompt is over a threshold).
  * `tiers` has two states, and the difference matters: `undefined` = not
  * touched (inherits the built-in's tiers, if any); an array = the tiers as
@@ -55,6 +59,7 @@ const BLANK: RateDraft = {
   output: '',
   cache_read: '',
   cache_write: '',
+  cache_write_1h: '',
 }
 
 /** A blank row — what "add model prefix" appends and what a reset restores. */
@@ -69,6 +74,7 @@ function tierText(t: ContextTier): TierDraft {
     output: String(t.output),
     cache_read: String(t.cache_read),
     cache_write: String(t.cache_write),
+    cache_write_1h: String(t.cache_write_1h),
   }
 }
 
@@ -80,6 +86,7 @@ function textFor(value: ModelRates | null): RateDraft {
     output: String(value.output),
     cache_read: String(value.cache_read),
     cache_write: String(value.cache_write),
+    cache_write_1h: String(value.cache_write_1h),
   }
 }
 
@@ -113,6 +120,7 @@ const BLANK_TIER: TierDraft = {
   output: '',
   cache_read: '',
   cache_write: '',
+  cache_write_1h: '',
 }
 
 /** Appends a blank tier (after the built-in's, which a first edit adopts). */
@@ -178,7 +186,7 @@ export function tierErrors(tiers: TierDraft[] | undefined): string[] {
 /**
  * The complaint about one rate box, or `null` if it is fine. Blank is only an
  * error when the *rest* of the row isn't — a wholly blank row is the reset,
- * not four mistakes — and, on a row mesa ships a rate for, not even then: the
+ * not five mistakes — and, on a row mesa ships a rate for, not even then: the
  * box shows that rate as its placeholder, so a blank box means "keep it".
  */
 export function rateError(text: string): string | null {
@@ -204,7 +212,7 @@ export function prefixError(text: string): string | null {
  * row is entirely blank (which is the legitimate "remove this override").
  *
  * `defaults` is the built-in rate the row's boxes show as placeholders, and it
- * is what a *blank* box in a part-filled row means: the server needs all four
+ * is what a *blank* box in a part-filled row means: the server needs all five
  * numbers, so mesa fills the untouched ones from the rate the user was looking
  * at rather than calling the row unsavable (mesa task 1020). A prefix the user
  * added has no default, so there a blank box is still `required`.
@@ -229,7 +237,7 @@ export function rowErrors(
 }
 
 /**
- * The four numbers a part-filled row resolves to: each box as typed, each
+ * The five numbers a part-filled row resolves to: each box as typed, each
  * blank one from the built-in rate. Only meaningful once [`rowErrors`] is
  * empty, which is what guarantees a blank box has a default to fall back on.
  */
@@ -247,6 +255,7 @@ export function resolveRates(
     output: at('output'),
     cache_read: at('cache_read'),
     cache_write: at('cache_write'),
+    cache_write_1h: at('cache_write_1h'),
   }
   const tiers: ContextTier[] =
     row.tiers === undefined
@@ -257,6 +266,7 @@ export function resolveRates(
           output: Number(t.output.trim()),
           cache_read: Number(t.cache_read.trim()),
           cache_write: Number(t.cache_write.trim()),
+          cache_write_1h: Number(t.cache_write_1h.trim()),
         }))
   // Ascending, the order the server stores; an empty list is left off.
   if (tiers.length > 0) {

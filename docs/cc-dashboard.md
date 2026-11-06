@@ -500,13 +500,20 @@ comments — several entries are the bare `DELETE FROM cc_files;` cursor clear.
   `config::PriceTable`: the rates Naru ships, overlaid by the `pricing` section
   of `~/.mesa/config.json` and editable from the Settings page
   (`docs/config.md`), so a price change or a new model family needs no rebuild.
-  Matched on a model-family prefix, longest match winning, so point releases
-  price correctly and a variant can be priced beside its family; an unmatched
-  model estimates $0. A row may carry context-size tiers (Claude Haiku 5.5
+  Matched on a model-id prefix, longest match winning (a configured row before
+  any built-in one); the built-ins are one row per model, so an unmatched
+  model — a new release included — estimates $0 and is named in
+  `overview.unpriced_models` (the Est. cost tile's subtitle) instead of
+  borrowing an older model's rate (naru task 2603). A row may carry context-size tiers (Claude Haiku 5.5
   ships one): a message whose prompt — input + cache read + cache creation
   tokens — is strictly over a threshold is priced wholly at the rates of the
-  tier with the largest such threshold, output included (`ModelRates::for_prompt`, the one selector both
-  `estimate_cost` and `row_cost` call; `docs/config.md` "Pricing"). Because
+  tier with the largest such threshold, output included. Cache writes are
+  split by TTL: `usage.cache_creation.ephemeral_1h_input_tokens` is stored as
+  `cc_messages.cache_creation_1h_tokens` and priced at `cache_write_1h`, the
+  rest at `cache_write`; a row with no split (`NULL` — an older transcript, a
+  ledger row) prices every write at the 5-minute rate. `ModelRates::cost` is
+  the one formula both `estimate_cost` and `row_cost` call
+  (`docs/config.md` "Pricing"). Because
   cost is derived on every read, an edit
   retroactively restates every historical figure — intended. The table is
   loaded **once per request**, never per message. Labelled "estimated" in the

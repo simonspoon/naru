@@ -6,7 +6,17 @@ import type { ContextTier } from "./ContextTier";
  * mesa never derives a cache rate from the input rate, because the
  * relationship is a pricing convention, not arithmetic mesa gets to assume.
  */
-export type ModelRates = { input: number, output: number, cache_read: number, cache_write: number, 
+export type ModelRates = { input: number, output: number, cache_read: number, 
+/**
+ * A cache write with the default 5-minute TTL.
+ */
+cache_write: number, 
+/**
+ * A cache write with the 1-hour TTL (naru task 2603). Optional on input:
+ * a row written before the field existed reads it as `cache_write`, so
+ * an existing config prices exactly as it did.
+ */
+cache_write_1h: number, 
 /**
  * Optional context-size tiers: a request whose prompt is strictly over a
  * tier's `above_tokens` is priced wholly at that tier's rates (the

@@ -1578,6 +1578,14 @@ const MIGRATIONS: &[&str] = &[
     // Naru task 2534: an edge is `exec` (run order + text, every edge before
     // this) or `data` (one pin's value into one pin, never activates).
     "ALTER TABLE workflow_edges ADD COLUMN kind TEXT NOT NULL DEFAULT 'exec';",
+    // Naru task 2603: the 1-hour-TTL part of `cache_creation_tokens`
+    // (`usage.cache_creation.ephemeral_1h_input_tokens`), priced at its own
+    // rate. NULL = no split known: every write pays the 5-minute rate. The
+    // cursor clear makes the next `cc::sync` re-walk once and backfill it on
+    // rows whose transcript still exists (a guarded UPDATE, as for
+    // `message_id`); it ships in the binary that reads the split.
+    "ALTER TABLE cc_messages ADD COLUMN cache_creation_1h_tokens INTEGER;
+     DELETE FROM cc_files;",
 ];
 
 /// Selects full task rows including the derived `blocked` flag.
@@ -3548,6 +3556,9 @@ pub struct CcMessageRow {
     pub output_tokens: i64,
     pub cache_read_tokens: i64,
     pub cache_creation_tokens: i64,
+    /// The part of `cache_creation_tokens` written with the 1-hour TTL;
+    /// `None` = the usage carried no split (priced at the 5-minute rate).
+    pub cache_creation_1h_tokens: Option<i64>,
     pub skill: Option<String>,
     pub agent: Option<String>,
     /// A bounded preview of the prose this message emitted, already sanitized
@@ -12247,8 +12258,8 @@ impl Store {
                 "INSERT INTO cc_messages \
                      (uuid, session_id, agent_id, ts, model, input_tokens, output_tokens, \
                       cache_read_tokens, cache_creation_tokens, skill, agent, preview, \
-                      message_id, cost_micro_usd) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
+                      message_id, cost_micro_usd, cache_creation_1h_tokens) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15) \
                  ON CONFLICT(uuid) DO NOTHING",
             )?;
             // `preview` arrived after these rows did (migration 24), so it needs
@@ -12271,6 +12282,11 @@ impl Store {
                 "UPDATE cc_messages SET message_id = ?2 \
                  WHERE uuid = ?1 AND message_id IS NULL",
             )?;
+            // And for `cache_creation_1h_tokens` (migration 104's re-walk).
+            let mut msg_1h_backfill = tx.prepare(
+                "UPDATE cc_messages SET cache_creation_1h_tokens = ?2 \
+                 WHERE uuid = ?1 AND cache_creation_1h_tokens IS NULL",
+            )?;
             for m in &batch.messages {
                 let added = msg.execute((
                     &m.uuid,
@@ -12287,6 +12303,7 @@ impl Store {
                     &m.preview,
                     &m.message_id,
                     m.cost_micro_usd,
+                    m.cache_creation_1h_tokens,
                 ))? as i64;
                 counts.messages_added += added;
                 if added == 0 && m.preview.is_some() {
@@ -12294,6 +12311,9 @@ impl Store {
                 }
                 if added == 0 && m.message_id.is_some() {
                     msg_id_backfill.execute((&m.uuid, &m.message_id))?;
+                }
+                if added == 0 && m.cache_creation_1h_tokens.is_some() {
+                    msg_1h_backfill.execute((&m.uuid, m.cache_creation_1h_tokens))?;
                 }
             }
 
@@ -12447,7 +12467,7 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT uuid, session_id, agent_id, ts, model, input_tokens, output_tokens, \
                     cache_read_tokens, cache_creation_tokens, skill, agent, preview, \
-                    message_id, cost_micro_usd \
+                    message_id, cost_micro_usd, cache_creation_1h_tokens \
              FROM cc_messages WHERE ?1 IS NULL OR ts >= ?1 ORDER BY ts, uuid",
         )?;
         let rows = stmt.query_map([cutoff], |r| {
@@ -12466,6 +12486,7 @@ impl Store {
                 preview: r.get(11)?,
                 message_id: r.get(12)?,
                 cost_micro_usd: r.get(13)?,
+                cache_creation_1h_tokens: r.get(14)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -12501,7 +12522,7 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT m.uuid, m.session_id, m.agent_id, m.ts, m.model, m.input_tokens, \
                     m.output_tokens, m.cache_read_tokens, m.cache_creation_tokens, \
-                    m.message_id \
+                    m.message_id, m.cache_creation_1h_tokens \
              FROM cc_messages m \
              WHERE m.agent_id IS NOT NULL AND EXISTS ( \
                  SELECT 1 FROM cc_agent_runs r \
@@ -12525,6 +12546,7 @@ impl Store {
                 preview: None,
                 message_id: r.get(9)?,
                 cost_micro_usd: None,
+                cache_creation_1h_tokens: r.get(10)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -12567,7 +12589,7 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT m.uuid, m.session_id, m.agent_id, m.ts, m.model, m.input_tokens, \
                     m.output_tokens, m.cache_read_tokens, m.cache_creation_tokens, \
-                    m.message_id \
+                    m.message_id, m.cache_creation_1h_tokens \
              FROM cc_messages m JOIN cc_sessions s ON s.session_id = m.session_id \
              WHERE m.agent_id IS NULL AND s.main_agent IS NOT NULL \
                AND (?1 IS NULL OR s.main_agent = ?1) \
@@ -12589,6 +12611,7 @@ impl Store {
                 preview: None,
                 message_id: r.get(9)?,
                 cost_micro_usd: None,
+                cache_creation_1h_tokens: r.get(10)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -12701,7 +12724,7 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT uuid, session_id, agent_id, ts, model, input_tokens, output_tokens, \
                     cache_read_tokens, cache_creation_tokens, skill, agent, preview, \
-                    message_id, cost_micro_usd \
+                    message_id, cost_micro_usd, cache_creation_1h_tokens \
              FROM cc_messages WHERE session_id = ?1 ORDER BY ts, uuid",
         )?;
         let rows = stmt.query_map([session_id], |r| {
@@ -12720,6 +12743,7 @@ impl Store {
                 preview: r.get(11)?,
                 message_id: r.get(12)?,
                 cost_micro_usd: r.get(13)?,
+                cache_creation_1h_tokens: r.get(14)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -18815,15 +18839,15 @@ mod tests {
         );
         assert_eq!(
             MIGRATIONS.len(),
-            103,
-            "a fresh db should report user_version 103"
+            104,
+            "a fresh db should report user_version 104"
         );
         let (store, _dir) = temp_store();
         let version: i64 = store
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 103);
+        assert_eq!(version, 104);
     }
 
     /// Naru task 2264: the migration that deletes the managed Task loop
@@ -18883,7 +18907,7 @@ mod tests {
             .conn
             // Undo what later migrations added, so they re-run cleanly.
             .execute_batch(&format!(
-                "ALTER TABLE workflow_edges DROP COLUMN kind; PRAGMA user_version = {DROP_LOOP}"
+                "ALTER TABLE workflow_edges DROP COLUMN kind; ALTER TABLE cc_messages DROP COLUMN cache_creation_1h_tokens; PRAGMA user_version = {DROP_LOOP}"
             ))
             .unwrap();
         drop(store);
@@ -18940,7 +18964,7 @@ mod tests {
         store
             .conn
             .execute_batch(
-                "DROP TABLE workflow_builtin_copies; DROP TABLE mark_skins; ALTER TABLE live_sessions DROP COLUMN listen_gen; DROP TABLE agent_questions; DROP TABLE custom_themes; DROP TABLE task_notes; ALTER TABLE live_sessions DROP COLUMN ambient_request_seq; ALTER TABLE live_sessions DROP COLUMN ambient_request; ALTER TABLE live_sessions DROP COLUMN host_seen_at; ALTER TABLE live_sessions DROP COLUMN host_ambient; ALTER TABLE live_notebook DROP COLUMN category; ALTER TABLE cc_messages DROP COLUMN cost_micro_usd; ALTER TABLE cc_sessions DROP COLUMN main_agent; ALTER TABLE live_boards DROP COLUMN pinned_at; DROP TABLE workflow_builtins; DROP TABLE workflow_revisions; DROP TABLE workflow_log; DROP TABLE workflow_gates; DROP TABLE workflow_runs; DROP TABLE workflow_edges; \
+                "ALTER TABLE cc_messages DROP COLUMN cache_creation_1h_tokens; DROP TABLE workflow_builtin_copies; DROP TABLE mark_skins; ALTER TABLE live_sessions DROP COLUMN listen_gen; DROP TABLE agent_questions; DROP TABLE custom_themes; DROP TABLE task_notes; ALTER TABLE live_sessions DROP COLUMN ambient_request_seq; ALTER TABLE live_sessions DROP COLUMN ambient_request; ALTER TABLE live_sessions DROP COLUMN host_seen_at; ALTER TABLE live_sessions DROP COLUMN host_ambient; ALTER TABLE live_notebook DROP COLUMN category; ALTER TABLE cc_messages DROP COLUMN cost_micro_usd; ALTER TABLE cc_sessions DROP COLUMN main_agent; ALTER TABLE live_boards DROP COLUMN pinned_at; DROP TABLE workflow_builtins; DROP TABLE workflow_revisions; DROP TABLE workflow_log; DROP TABLE workflow_gates; DROP TABLE workflow_runs; DROP TABLE workflow_edges; \
                  DROP TABLE workflow_nodes; DROP TABLE workflows; \
                  CREATE TABLE diagrams (id INTEGER PRIMARY KEY, title TEXT); \
                  INSERT INTO diagrams (title) VALUES ('stale'); \
@@ -24051,6 +24075,7 @@ mod tests {
                     output_tokens: 20,
                     cache_read_tokens: 30,
                     cache_creation_tokens: 40,
+                    cache_creation_1h_tokens: None,
                     skill: Some("orchestrate".into()),
                     agent: None,
                     preview: Some("Reading the store.".into()),
@@ -24067,6 +24092,7 @@ mod tests {
                     output_tokens: 2,
                     cache_read_tokens: 3,
                     cache_creation_tokens: 4,
+                    cache_creation_1h_tokens: None,
                     skill: None,
                     agent: Some("Explore".into()),
                     // A tool-use-only message: no prose, so no preview.
@@ -24608,6 +24634,54 @@ mod tests {
         assert_eq!(target(&store).as_deref(), Some("cargo test"));
     }
 
+    /// Naru task 2603: the re-walk migration 104 forces fills the 1-hour
+    /// split on a stored row without counting it as added, keep-first.
+    #[test]
+    fn cc_message_one_hour_split_backfills_without_inflating_the_add_count() {
+        let (mut store, _dir) = temp_store();
+        let cursor = CcFileCursor {
+            mtime: 1,
+            size: 1,
+            byte_offset: 1,
+        };
+        let row = |one_hour: Option<i64>| CcFileBatch {
+            messages: vec![CcMessageRow {
+                uuid: "u1".into(),
+                message_id: None,
+                cost_micro_usd: None,
+                session_id: "s".into(),
+                agent_id: None,
+                ts: 10,
+                model: "claude-opus-5-5".into(),
+                input_tokens: 1,
+                output_tokens: 2,
+                cache_read_tokens: 3,
+                cache_creation_tokens: 40,
+                cache_creation_1h_tokens: one_hour,
+                skill: None,
+                agent: None,
+                preview: None,
+            }],
+            ..Default::default()
+        };
+        let split = |s: &Store| s.cc_session_messages("s").unwrap()[0].cache_creation_1h_tokens;
+        let first = store
+            .cc_ingest_file("/t/a.jsonl", &cursor, &row(None))
+            .unwrap();
+        assert_eq!(first.messages_added, 1);
+        assert_eq!(split(&store), None);
+        let second = store
+            .cc_ingest_file("/t/a.jsonl", &cursor, &row(Some(30)))
+            .unwrap();
+        assert_eq!(second.messages_added, 0);
+        assert_eq!(split(&store), Some(30));
+        store
+            .cc_ingest_file("/t/a.jsonl", &cursor, &row(Some(7)))
+            .unwrap();
+        assert_eq!(split(&store), Some(30));
+        assert_eq!(cc_count(&store, "cc_messages"), 1);
+    }
+
     // Same contract as the `target` test above, for the `preview` column added
     // by migration 24. Kept as its own test rather than folded in: they cover
     // two independent statements in `cc_ingest_file`, and a regression in one
@@ -24633,6 +24707,7 @@ mod tests {
                 output_tokens: 2,
                 cache_read_tokens: 3,
                 cache_creation_tokens: 4,
+                cache_creation_1h_tokens: None,
                 skill: None,
                 agent: None,
                 preview: preview.map(str::to_string),

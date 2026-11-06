@@ -430,19 +430,19 @@ write_config <<EOF
 EOF
 api GET /api/config/pricing
 [ "$CODE" = "200" ] || fail "GET pricing: expected 200, got $CODE: $STDOUT"
-[ "$(jq -r 'map(.prefix) | join(",")' <<<"$STDOUT")" = "claude-fable,claude-mythos,claude-opus,claude-sonnet,claude-haiku,claude-haiku-5-5" ] ||
-  fail "GET pricing must list the built-in families in order: $STDOUT"
-[ "$(jq -r '.[] | select(.prefix=="claude-opus") | .value' <<<"$STDOUT")" = "null" ] ||
+[ "$(jq -r 'map(.prefix) | join(",")' <<<"$STDOUT")" = "claude-fable-5-1,claude-fable-5,claude-mythos-5-1,claude-mythos-5,claude-opus-5-5,claude-opus-5,claude-opus-4-8,claude-opus-4-7,claude-opus-4-6,claude-opus-4-5,claude-opus-4-1,claude-opus-4-0,claude-opus-4-2025,claude-sonnet-5-5,claude-sonnet-5,claude-sonnet-4-6,claude-sonnet-4-5,claude-sonnet-4-0,claude-sonnet-4-2025,claude-haiku-5-5,claude-haiku-4-5,claude-3-7-sonnet,claude-3-5-sonnet,claude-3-5-haiku,claude-3-opus,claude-3-sonnet,claude-3-haiku" ] ||
+  fail "GET pricing must list the built-in models in order (naru task 2603): $STDOUT"
+[ "$(jq -r '.[] | select(.prefix=="claude-opus-4-8") | .value' <<<"$STDOUT")" = "null" ] ||
   fail "an unconfigured prefix must report value: null, got $STDOUT"
-[ "$(jq '.[] | select(.prefix=="claude-opus") | .default.output == 25' <<<"$STDOUT")" = "true" ] ||
+[ "$(jq '.[] | select(.prefix=="claude-opus-4-8") | .default.output == 25' <<<"$STDOUT")" = "true" ] ||
   fail "GET pricing: built-in opus rate wrong: $STDOUT"
 ok "GET /api/config/pricing lists the built-in model families with value: null (no override) and the shipped rates as default"
 
-api PUT /api/config/pricing '{"pricing": {"claude-opus": {"input": 1, "output": 2, "cache_read": 3, "cache_write": 4}, "newco-x": {"input": 7, "output": 8, "cache_read": 0, "cache_write": 0}}}'
+api PUT /api/config/pricing '{"pricing": {"claude-opus-4-8": {"input": 1, "output": 2, "cache_read": 3, "cache_write": 4}, "newco-x": {"input": 7, "output": 8, "cache_read": 0, "cache_write": 0}}}'
 [ "$CODE" = "200" ] || fail "PUT pricing: expected 200, got $CODE: $STDOUT"
-[ "$(jq '.[] | select(.prefix=="claude-opus") | .value.output == 2' <<<"$STDOUT")" = "true" ] ||
+[ "$(jq '.[] | select(.prefix=="claude-opus-4-8") | .value.output == 2' <<<"$STDOUT")" = "true" ] ||
   fail "PUT must echo the stored override: $STDOUT"
-[ "$(jq '.[] | select(.prefix=="claude-opus") | .default.output == 25' <<<"$STDOUT")" = "true" ] ||
+[ "$(jq '.[] | select(.prefix=="claude-opus-4-8") | .default.output == 25' <<<"$STDOUT")" = "true" ] ||
   fail "the built-in must still be reported behind an override: $STDOUT"
 # A prefix the binary never heard of is the point: a new family, no rebuild.
 [ "$(jq -r '.[] | select(.prefix=="newco-x") | .default' <<<"$STDOUT")" = "null" ] ||
@@ -458,17 +458,17 @@ ok "PUT /api/config/pricing overrides a built-in family and adds a wholly new pr
 # The commands saver has to be just as careful in the other direction.
 api PUT /api/config '{"commands": {"inbox-watcher": "mytool triage {id}"}}'
 [ "$CODE" = "200" ] || fail "PUT commands after pricing: expected 200, got $CODE: $STDOUT"
-[ "$(jq '.pricing["claude-opus"].output == 2' < "$CONFIG")" = "true" ] ||
+[ "$(jq '.pricing["claude-opus-4-8"].output == 2' < "$CONFIG")" = "true" ] ||
   fail "a commands write clobbered the pricing section: $(cat "$CONFIG")"
 ok "a commands write preserves the pricing section, exactly as a pricing write preserves commands"
 
-api PUT /api/config/pricing '{"pricing": {"claude-opus": null, "newco-x": null}}'
+api PUT /api/config/pricing '{"pricing": {"claude-opus-4-8": null, "newco-x": null}}'
 [ "$CODE" = "200" ] || fail "PUT pricing null: expected 200, got $CODE: $STDOUT"
-[ "$(jq -r '.[] | select(.prefix=="claude-opus") | .value' <<<"$STDOUT")" = "null" ] ||
+[ "$(jq -r '.[] | select(.prefix=="claude-opus-4-8") | .value' <<<"$STDOUT")" = "null" ] ||
   fail "null must restore the built-in for a shipped family: $STDOUT"
 [ "$(jq -r 'map(select(.prefix=="newco-x")) | length' <<<"$STDOUT")" = "0" ] ||
   fail "null must delete a user-added prefix outright: $STDOUT"
-[ "$(jq -r '.pricing | has("claude-opus")' < "$CONFIG")" = "false" ] ||
+[ "$(jq -r '.pricing | has("claude-opus-4-8")' < "$CONFIG")" = "false" ] ||
   fail "null must remove the key, never store it zeroed: $(cat "$CONFIG")"
 ok "PUT null restores the built-in rate for a shipped family and deletes a user-added prefix"
 
@@ -477,7 +477,7 @@ ok "PUT null restores the built-in rate for a shipped family and deletes a user-
 api GET /api/config/pricing
 [ "$(jq -r '.[] | select(.prefix=="claude-haiku-5-5") | .default.tiers[0].above_tokens' <<<"$STDOUT")" = "100000" ] ||
   fail "claude-haiku-5-5 must ship a 100000-token tier: $STDOUT"
-[ "$(jq -r '.[] | select(.prefix=="claude-opus") | .default | has("tiers")' <<<"$STDOUT")" = "false" ] ||
+[ "$(jq -r '.[] | select(.prefix=="claude-opus-4-8") | .default | has("tiers")' <<<"$STDOUT")" = "false" ] ||
   fail "a flat family must carry no tiers key: $STDOUT"
 api PUT /api/config/pricing '{"pricing": {"tiered-x": {"input": 1, "output": 2, "cache_read": 3, "cache_write": 4, "tiers": [{"above_tokens": 500000, "input": 9, "output": 10, "cache_read": 11, "cache_write": 12}, {"above_tokens": 50000, "input": 5, "output": 6, "cache_read": 7, "cache_write": 8}]}, "flat-x": {"input": 1, "output": 2, "cache_read": 3, "cache_write": 4}}}'
 [ "$CODE" = "200" ] || fail "PUT tiered pricing: expected 200, got $CODE: $STDOUT"

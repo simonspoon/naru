@@ -592,7 +592,7 @@ estimated $0.
 ```json
 {
   "pricing": {
-    "claude-opus":        {"input": 5.0, "output": 25.0, "cache_read": 0.5, "cache_write": 6.25},
+    "claude-opus":        {"input": 5.0, "output": 25.0, "cache_read": 0.5, "cache_write": 6.25, "cache_write_1h": 10.0},
     "claude-opus-5-mini": {"input": 1.0, "output": 5.0,  "cache_read": 0.1, "cache_write": 1.25}
   }
 }
@@ -600,11 +600,15 @@ estimated $0.
 
 - Keys are model-family **prefixes**, matched against a transcript's model id
   with `starts_with` — the same rule the hardcoded table used, so a point
-  release prices correctly with no edit. All four rates are USD per **1M
-  tokens** and all four are required; Naru never derives a cache rate from the
-  input rate.
+  release prices correctly with no edit. Rates are USD per **1M tokens**:
+  `input`, `output`, `cache_read` and `cache_write` (a 5-minute-TTL cache
+  write) are required; `cache_write_1h` (a 1-hour-TTL write, naru task 2603)
+  is optional and reads as `cache_write` when absent, so a four-field row
+  prices exactly as before. Naru never derives a cache rate from the input
+  rate. The Settings editor shows and saves all five.
 - A row may add optional **context-size tiers**, `tiers` — a list of
-  `{"above_tokens", "input", "output", "cache_read", "cache_write"}` (naru
+  `{"above_tokens", "input", "output", "cache_read", "cache_write"}`, plus the
+  same optional `cache_write_1h` (naru
   task 1713). A request's prompt is its input + cache read + cache creation
   tokens; the tier with the **largest** `above_tokens` strictly below the
   prompt prices the whole request — all four token kinds, output included —
@@ -615,17 +619,31 @@ estimated $0.
   existing files and four-field PUT bodies are unchanged. The Settings editor
   lists a row's tiers, adds and removes them, and a row saved without
   touching its tiers keeps them. Example: `claude-haiku-5-5` ships base
-  0.10 / 0.50 / 0.01 / 0.125 with one tier above 100000 tokens of
-  0.50 / 2.50 / 0.05 / 0.625.
-- Naru ships defaults for `claude-fable`, `claude-mythos`, `claude-opus`,
-  `claude-sonnet`, `claude-haiku` and `claude-haiku-5-5`
-  (`config::DEFAULT_PRICES`). An **absent
-  key uses the built-in**; the config only ever overlays. An override replaces
-  the whole entry, so overriding a tiered built-in without `tiers` makes it
-  flat.
-- **Longest matching prefix wins** over the merged table, so a variant can be
-  priced beside its family. A model no prefix matches estimates **$0** — no
-  cost rather than a wrong one.
+  0.10 / 0.50 / 0.01 / 0.125 / 0.20 with one tier above 100000 tokens of
+  0.50 / 2.50 / 0.05 / 0.625 / 1.00.
+- Naru ships one row **per model** (`config::default_prices`): the official
+  API rates for Fable/Mythos 5.1 and 5, Opus 5.5, 5, 4.8–4.5, 4.1 and 4,
+  Sonnet 5.5, 5, 4.6, 4.5 and 4, Haiku 5.5 and 4.5, plus the last published
+  rates of the retired Claude 3.x models so old transcripts still price
+  (naru task 2603). Opus 4 and Sonnet 4 are keyed by their dated id
+  (`claude-opus-4-2025…`) and `-0` alias, so no bare `claude-opus-4` row
+  catches a future 4.x. An **absent key uses the built-in**; the config only
+  ever overlays. An override replaces the whole entry, so overriding a tiered
+  built-in without `tiers` makes it flat.
+- **A configured prefix beats every built-in one**, then the **longest
+  matching prefix wins** within each, so a variant can be priced beside its
+  family and a family override (`claude-opus`) still covers every Opus model
+  despite the longer built-in rows. A model no prefix matches estimates
+  **$0** — no cost rather than a wrong one — and the CC Dashboard names it
+  (`overview.unpriced_models`).
+- Upgrade note (naru task 2603): a family override written against the old
+  family-level built-ins (`claude-opus`, `claude-sonnet`, …) now prices
+  *every* model of that family, newer ones included, ahead of the per-model
+  built-ins — exactly what it did before. Remove it to get the per-model
+  rates.
+- Fast mode (Opus 5.5 at 8 / 40, Opus 5 and 4.8 at 10 / 50) is **not**
+  expressed: the table has no speed dimension, so a fast-mode message is
+  estimated at the standard rate.
 - A prefix Naru has never heard of is allowed. That is the point.
 - Removing a key (`PUT` value `null`) restores the built-in for a shipped
   family and deletes a user-added prefix outright.
@@ -644,12 +662,12 @@ cached — the table is loaded **once per dashboard request** and a save applies
 to the next read, past sessions included, with no restart. Cost is derived on
 every read, so there is no stored figure to migrate.
 
-In the Settings editor a row's four boxes show the built-in rate as their
+In the Settings editor a row's five boxes show the built-in rate as their
 **placeholder**, so a box left blank on a part-filled row means "keep that
 rate": Naru fills the untouched boxes from the default before the PUT, which
-sends all four numbers as the server requires (mesa task 1020). A blank box is
+sends all five numbers (mesa task 1020). A blank box is
 only an error on a prefix the user added, which has no default to fall back on;
-a row whose boxes are *all* blank is still the reset, not four copies of the
+a row whose boxes are *all* blank is still the reset, not five copies of the
 built-in.
 
 The Settings page renders the pricing rows in a **Model pricing** section, and

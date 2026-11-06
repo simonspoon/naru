@@ -2912,11 +2912,11 @@ function PricingSection() {
       <h2>Model pricing</h2>
       <p className="muted">
         USD per 1M tokens, used for the CC Dashboard's estimated cost. Models are
-        matched by <strong>prefix</strong> — <code>claude-opus</code> prices every
-        Opus release — and the longest matching prefix wins, so{' '}
-        <code>claude-opus-5-mini</code> can be priced separately. Leave a row
-        blank to use the built-in rate shown in the boxes; a model no prefix
-        matches is estimated at $0. A change applies on the next dashboard read,
+        matched by <strong>prefix</strong> and the longest matching prefix wins;
+        a prefix you add beats every built-in row, so <code>claude-opus</code>{' '}
+        prices every Opus release. Leave a row blank to use the built-in rate
+        shown in the boxes; a model no prefix matches is estimated at $0 and
+        named on the dashboard. A change applies on the next dashboard read,
         past sessions included, with no restart.
       </p>
 
@@ -2926,7 +2926,8 @@ function PricingSection() {
           <span>input</span>
           <span>output</span>
           <span>cache read</span>
-          <span>cache write</span>
+          <span>cache write 5m</span>
+          <span>cache write 1h</span>
           <span />
         </div>
         {prices.map((p) => (
@@ -3020,7 +3021,7 @@ function ResetCcIndex() {
   )
 }
 
-/** One priced family: four boxes over the built-in rate as placeholder. */
+/** One priced family: five boxes over the built-in rate as placeholder. */
 function PriceRow({
   price,
   draft,
@@ -3088,7 +3089,7 @@ function PriceRow({
 
 /**
  * A row's optional context-size tiers: for each, the prompt-token threshold
- * and the four rates a request over it pays. All logic lives in
+ * and the five rates a request over it pays. All logic lives in
  * `pricingDraft.ts`.
  */
 function TierRows({
