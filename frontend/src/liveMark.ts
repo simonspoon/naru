@@ -171,3 +171,21 @@ export function isSettled(prev: readonly number[] | null, next: readonly number[
   if (prev === null || prev.length !== next.length) return false
   return next.every((v, i) => Math.abs(v - prev[i]) < eps)
 }
+
+/** How long a mark keeps the full frame rate after its mode changes, so the
+ *  glide into a resting look (colour eases at 5/s, ~1s) stays smooth. */
+export const MARK_GLIDE_MS = 1500
+
+/** The resting looks' frame interval (naru task 2605): ~10fps. Idle's only
+ *  motion is a ±5% breathe over ~4s, about a pixel a step on the 132px nav
+ *  mark at this rate, so it looks the same — but a mark repainted at the display's 120Hz kept the
+ *  GPU and WindowServer busy with nothing happening. */
+export const MARK_REST_FRAME_MS = 100
+
+/** The wait before a mark's next frame: 0 (the next display frame) while it
+ *  is active or still gliding into a new mode, `MARK_REST_FRAME_MS` once it
+ *  has settled into idle or paused. */
+export function markFrameDelay(mode: MarkMode, msSinceModeChange: number): number {
+  if (mode !== 'idle' && mode !== 'paused') return 0
+  return msSinceModeChange < MARK_GLIDE_MS ? 0 : MARK_REST_FRAME_MS
+}

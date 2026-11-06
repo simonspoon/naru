@@ -4,7 +4,7 @@ import { markSkinRenderUrl } from '../api'
 import { simEnvelope, smoothLevel } from '../liveBand'
 import type { LiveIndicator } from '../liveIndicator'
 import { indicatorLabel } from '../liveIndicator'
-import { levelFromRms, markMode, paletteFor } from '../liveMark'
+import { levelFromRms, markFrameDelay, markMode, paletteFor } from '../liveMark'
 import { currentMarkSkin, isCustomMarkSkin, subscribeMarkSkin } from '../markSkin'
 import type { MarkInput, MarkSkin } from '../markSkin'
 import { frameMessage, MARK_SKIN_READY_MS, nextSkinState, themeMessage } from '../markSkinCustom'
@@ -103,12 +103,23 @@ function runMarkLoop(live: RefObject<MarkLive>, paint: (input: MarkInput) => voi
   let last = performance.now()
   const start = last
   let raf = 0
+  let timer = 0
+  let shownMode: ReturnType<typeof markMode> | null = null
+  let modeAt = start
+  // The longest step a frame may integrate: a display frame's, or a rest
+  // tick's when the last frame asked for one, so `dt`-driven motion (the
+  // blob's spin) keeps its speed at rest.
+  let maxDt = 0.05
   const frame = (now: number): void => {
-    const dt = Math.min(0.05, (now - last) / 1000)
+    const dt = Math.min(maxDt, (now - last) / 1000)
     last = now
     const t = (now - start) / 1000
     const cur = live.current
     const mode = markMode(cur.state, cur.offer)
+    if (mode !== shownMode) {
+      shownMode = mode
+      modeAt = now
+    }
 
     // The real level of this mode's side of the conversation.
     let raw = 0
@@ -120,11 +131,17 @@ function runMarkLoop(live: RefObject<MarkLive>, paint: (input: MarkInput) => voi
     lv = smoothLevel(lv, raw)
 
     paint({ mode, level: lv, palette: paletteFor(mode, cur.brandIdle), reduced, t, dt })
-    raf = requestAnimationFrame(frame)
+    // A settled resting mark asks for far fewer frames (naru task 2605):
+    // the wait is a timer, so no display frame is spent in between.
+    const wait = markFrameDelay(mode, now - modeAt)
+    maxDt = 0.05 + wait / 1000
+    if (wait === 0) raf = requestAnimationFrame(frame)
+    else timer = window.setTimeout(() => (raf = requestAnimationFrame(frame)), wait)
   }
   raf = requestAnimationFrame(frame)
   return () => {
     cancelAnimationFrame(raf)
+    window.clearTimeout(timer)
     media.removeEventListener('change', onChange)
   }
 }

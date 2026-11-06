@@ -6,7 +6,10 @@ import {
   hexToRgb,
   isSettled,
   levelFromRms,
+  MARK_GLIDE_MS,
+  MARK_REST_FRAME_MS,
   markFrame,
+  markFrameDelay,
   markMode,
   paletteFor,
   PALETTES,
@@ -126,5 +129,22 @@ describe('isSettled', () => {
   it('is true only when every value moved less than eps', () => {
     expect(isSettled([1, 2], [1.0005, 2], 0.001)).toBe(true)
     expect(isSettled([1, 2], [1, 2.01], 0.001)).toBe(false)
+  })
+})
+
+describe('markFrameDelay', () => {
+  it('runs every display frame while active, whatever the time since the change', () => {
+    for (const mode of ['hear', 'speak', 'think', 'offer'] as const) {
+      expect(markFrameDelay(mode, 0)).toBe(0)
+      expect(markFrameDelay(mode, 60_000)).toBe(0)
+    }
+  })
+  it('keeps full rate through the glide into a resting look, then caps it', () => {
+    for (const mode of ['idle', 'paused'] as const) {
+      expect(markFrameDelay(mode, 0)).toBe(0)
+      expect(markFrameDelay(mode, MARK_GLIDE_MS - 1)).toBe(0)
+      expect(markFrameDelay(mode, MARK_GLIDE_MS)).toBe(MARK_REST_FRAME_MS)
+      expect(markFrameDelay(mode, 60_000)).toBe(MARK_REST_FRAME_MS)
+    }
   })
 })

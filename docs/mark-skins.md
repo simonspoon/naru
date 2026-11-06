@@ -30,7 +30,14 @@ and filter on every painted frame, since a skin swap keeps the same `<svg>`.
   playback analyser or `simEnvelope` when speaking, smoothed by
   `smoothLevel`) and the palette (`paletteFor(mode, brandIdle)`), and hands
   them to the skin's painter. Props, refs and the no-rerender property are
-  unchanged: state and level reach the loop through refs.
+  unchanged: state and level reach the loop through refs. The loop runs
+  every display frame while the mark is active, but once it has sat in
+  `idle` or `paused` for `MARK_GLIDE_MS` (1.5s) it drops to one frame every
+  `MARK_REST_FRAME_MS` (~10fps, `liveMark.ts::markFrameDelay`, naru task
+  2605): a 120Hz repaint of the idle breathe was the page's whole idle GPU
+  cost. `dt` stays real time at rest (capped at 0.05s plus the wait, so up
+  to 0.15s), so `dt`-driven motion keeps its speed; a painter (and a custom
+  skin) must cope with steps that size.
 - **Skin** — `frontend/src/components/markSkins/<id>.tsx`, registered in
   `markSkins/index.ts`. A `MarkSkin` (`frontend/src/markSkin.ts`):
   - `id`;
