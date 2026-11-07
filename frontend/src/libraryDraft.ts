@@ -26,8 +26,8 @@ import { filesDiffer, type SkillFiles } from './librarySkillFiles'
  * to `false` elsewhere rather than trusting a stale checkbox.
  */
 
-/** The six kinds, in the order the authoring form offers them. */
-export const LIBRARY_KINDS: LibraryKind[] = ['agent', 'skill', 'hook', 'prompt', 'claude-md', 'tool']
+/** The seven kinds, in the order the authoring form offers them. */
+export const LIBRARY_KINDS: LibraryKind[] = ['agent', 'skill', 'hook', 'prompt', 'claude-md', 'tool', 'panel']
 
 /** The two scopes, in the order the authoring form offers them. */
 export const LIBRARY_SCOPES: LibraryScope[] = ['user', 'project']
@@ -107,6 +107,8 @@ export function kindLabel(kind: LibraryKind): string {
       return 'CLAUDE.md'
     case 'tool':
       return 'Tool'
+    case 'panel':
+      return 'Panel'
   }
 }
 

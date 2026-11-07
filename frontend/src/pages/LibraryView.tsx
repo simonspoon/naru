@@ -55,6 +55,7 @@ import {
 } from '../libraryHooks'
 import { modelChoices, modelFromSelect, modelPill, modelSelectValue } from '../libraryModel'
 import { diffLines, foldOverrides, hunksOnly, itemKey } from '../libraryOverride'
+import { loadGrants, parseManifest, revoke } from '../panelSdk'
 import {
   LIBRARY_KINDS,
   LIBRARY_SCOPES,
@@ -119,11 +120,20 @@ import {
 import { ScriptsView } from './ScriptsView'
 import { WorkflowsOverview } from './WorkflowsOverview'
 
-/** Prism grammar for the body editor: a hook or a tool is shell, everything
- * else on this surface — agent/skill/prompt bodies and a CLAUDE.md — is
- * markdown. */
+/** Prism grammar for the body editor: a hook or a tool is shell, a panel is
+ * HTML, everything else on this surface — agent/skill/prompt bodies and a
+ * CLAUDE.md — is markdown. */
 function bodyLanguage(kind: LibraryItem['kind']): string {
+  if (kind === 'panel') return 'html'
   return kind === 'hook' || kind === 'tool' ? 'sh' : 'md'
+}
+
+/** The tab label for a panel opened from its row: the manifest's title, else
+ * the item's name, cut to 24 characters. */
+function panelTabLabel(item: LibraryItem): string {
+  const m = parseManifest(item.body)
+  const title = 'error' in m ? undefined : m.title
+  return (title ?? item.name).slice(0, 24)
 }
 
 /** The create/edit form. Mounted fresh per item (a `key` on the caller), so
@@ -1358,7 +1368,9 @@ function LibraryImportModal({
  * 919). A project-scoped item binds a project, but the page itself lives above
  * projects.
  */
-function LibraryItemsTab() {
+function LibraryItemsTab({ onOpenPanel }: { onOpenPanel?: (itemKey: string, label: string) => void }) {
+  // Bumped after a revoke so the row re-reads the browser's grant store.
+  const [, setGrantTick] = useState(0)
   const { data: items, error, refetch } = useFetch(() => listLibrary(), 'library')
   const { data: projects } = useFetch(() => listProjects(), 'library-projects')
 
@@ -1704,6 +1716,26 @@ function LibraryItemsTab() {
                         >
                           {editing === key ? 'close' : 'edit'}
                         </button>
+                        {item.kind === 'panel' && onOpenPanel && (
+                          <button
+                            type="button"
+                            onClick={() => onOpenPanel(key, panelTabLabel(item))}
+                          >
+                            open as panel
+                          </button>
+                        )}
+                        {item.kind === 'panel' && loadGrants()[key] !== undefined && (
+                          <button
+                            type="button"
+                            title="Forget this browser's permission grant; the panel asks again next time"
+                            onClick={() => {
+                              revoke(key)
+                              setGrantTick((n) => n + 1)
+                            }}
+                          >
+                            revoke
+                          </button>
+                        )}
                         {offersHooks(item) && (
                           <button
                             type="button"
@@ -1857,7 +1889,17 @@ function LibraryItemsTab() {
  * is the read-only cross-project list — editing a workflow stays in its
  * project. Only the active tab is mounted.
  */
-export function LibraryView({ tab, runId }: { tab: LibraryTab; runId: number | null }) {
+export function LibraryView({
+  tab,
+  runId,
+  onOpenPanel,
+}: {
+  tab: LibraryTab
+  runId: number | null
+  /** Opens a custom panel as a dock tab; absent when the dock is not showing
+   * (the phone tier), which hides the "open as panel" button. */
+  onOpenPanel?: (itemKey: string, label: string) => void
+}) {
   return (
     <div className="library-tabs-page">
       <h1>Library</h1>
@@ -1875,7 +1917,7 @@ export function LibraryView({ tab, runId }: { tab: LibraryTab; runId: number | n
         ))}
       </div>
       {tab === 'claude-code' ? (
-        <LibraryItemsTab />
+        <LibraryItemsTab onOpenPanel={onOpenPanel} />
       ) : tab === 'scripts' ? (
         <ScriptsView runId={runId} />
       ) : (

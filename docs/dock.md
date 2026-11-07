@@ -81,6 +81,20 @@ pane tree did). A tab leaving the dock, by its × or a layout switch, releases
 its pooled terminal. Auto tile is gone from the docked panel (each agent is
 one click away as a tab); the phone tier's drawer keeps it and its pane tree.
 
+## Custom panel tabs (naru task 2613)
+
+A Library row of kind `panel` opens from its row ("open as panel", docked tiers
+only) as a tab `panel:<itemKey>` (`panel:id:7`, `panel:builtin:project-stats`),
+on the root's right and in front (`openCustomPanel`; opening again only brings
+it forward). Its title is the manifest's `title`, else the item name, cut to 24
+characters, fixed when it opens. Like an agent tab it is transient: never in
+`PANEL_IDS` (not in the `⋯` menu or the rail), a close records no spot, and
+`parseState` drops it, so a reload starts without it. It drags and docks like
+any panel; the host is `dock-host-panel`. The body is `CustomPanel`
+(`components/CustomPanel.tsx`): a permission prompt, then a sandboxed iframe —
+see [`custom-panels.md`](custom-panels.md). Moving the tab between groups
+reparents the iframe, which reloads it.
+
 ## Gestures
 
 - **Drag by the tab** (or, for any panel, by a nav item or a row of the `⋯` menu; the

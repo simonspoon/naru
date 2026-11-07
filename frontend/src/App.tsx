@@ -3,11 +3,22 @@ import { createPortal } from 'react-dom'
 import './App.css'
 import { getCcUsage, getNaruVersion, getTask, listInbox } from './api'
 import { AgentSidebar } from './components/AgentSidebar'
+import { CustomPanel } from './components/CustomPanel'
 import { CommandPalette } from './components/CommandPalette'
 import { WorkflowsPanel } from './components/WorkflowsPanel'
 import { DockBar, DockLayout } from './components/DockLayout'
 import { useDockStore } from './useDockStore'
-import { agentPanels, isVisible, openAgentPanel, revealNeedsNav, type AgentPanelId, type PanelId } from './dockLayout'
+import {
+  agentPanels,
+  customPanelId,
+  customPanels,
+  isVisible,
+  openAgentPanel,
+  openCustomPanel,
+  revealNeedsNav,
+  type AgentPanelId,
+  type PanelId,
+} from './dockLayout'
 import { NavOrb, NavRail, NavZone } from './components/NavDock'
 import { hostFor } from './lib/dockHosts'
 import { currentNavMark, subscribeNavMark } from './navMark'
@@ -207,6 +218,11 @@ function App() {
   // (naru task 2313).
   const openAgentTab = useCallback(
     (p: AgentPanelId, label: string) => dockUpdate((s) => openAgentPanel(s, p, label)),
+    [dockUpdate],
+  )
+  // The Library's "open as panel" opens a custom panel tab (naru task 2613).
+  const openCustomTab = useCallback(
+    (itemKey: string, label: string) => dockUpdate((s) => openCustomPanel(s, customPanelId(itemKey), label)),
     [dockUpdate],
   )
 
@@ -525,7 +541,11 @@ function App() {
   } else if (libraryRoute) {
     // Three tabs: Claude Code items (synced against .claude), Scripts and a
     // read-only workflow list. Global: no project frame.
-    page = <LibraryView tab={libraryRoute.tab} runId={libraryRoute.runId} />
+    page = <LibraryView
+        tab={libraryRoute.tab}
+        runId={libraryRoute.runId}
+        onOpenPanel={docked ? openCustomTab : undefined}
+      />
   } else if (kbMatch) {
     page = <KbView notePath={kbPathFromRoute(path)} />
   } else if (ambientMatch) {
@@ -958,6 +978,10 @@ function App() {
               onCloseAgentTab={hide}
             />,
             hostFor('agents'),
+          )}
+        {docked &&
+          customPanels(dock.state).map((id) =>
+            createPortal(<CustomPanel panelKey={id.slice('panel:'.length)} onClose={() => hide(id)} />, hostFor(id), id),
           )}
         {docked &&
           createPortal(<WorkflowsPanel projectId={activeProjectId} />, hostFor('workflows'))}

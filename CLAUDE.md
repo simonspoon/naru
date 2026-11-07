@@ -203,6 +203,7 @@ Each doc is authoritative. The longer summaries that used to sit here are in
 | Dev env | `docs/dev-env.md` |
 | Style guide | `docs/style-guide.md` |
 | Artifacts | `docs/artifacts.md` |
+| Custom panels | `docs/custom-panels.md` |
 
 ## Untrusted input
 

@@ -1,0 +1,59 @@
+<meta name="naru-panel" content='{"title":"Project stats","permissions":["stats:read"]}'>
+<style>
+  body { margin: 0; padding: 12px; font: 13px/1.4 system-ui, sans-serif; background: var(--naru-bg, #0a0e14); color: var(--naru-fg, #dfe6ee); color-scheme: var(--naru-color-scheme, dark); }
+  h1 { margin: 0 0 10px; font-size: 14px; font-weight: 600; }
+  .card { background: var(--naru-surface, #121820); border: 1px solid var(--naru-ring, rgba(120, 140, 160, 0.35)); border-radius: 6px; padding: 8px 10px; margin-bottom: 8px; }
+  .head { display: flex; justify-content: space-between; gap: 8px; }
+  .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .total { color: var(--naru-muted, #8a96a3); white-space: nowrap; }
+  .counts { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 4px; color: var(--naru-muted, #8a96a3); font-size: 12px; }
+  .counts b { color: var(--naru-fg, #dfe6ee); font-weight: 600; }
+  .blocked b { color: var(--naru-warn, #e5a63c); }
+  .done b { color: var(--naru-good, #4cc38a); }
+  .empty, .err { color: var(--naru-muted, #8a96a3); }
+  .err { color: var(--naru-bad, #e5534b); }
+</style>
+<h1>Project stats</h1>
+<div id="out" class="empty">Loading...</div>
+<script>
+  var STATUSES = ['backlog', 'todo', 'in_progress', 'done', 'cancelled'];
+  var out = document.getElementById('out');
+  function el(tag, cls, text) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text !== undefined) e.textContent = text;
+    return e;
+  }
+  naru.call('stats').then(function (r) {
+    out.textContent = '';
+    out.className = '';
+    if (!r.projects.length) {
+      out.className = 'empty';
+      out.textContent = 'No projects.';
+      return;
+    }
+    r.projects.forEach(function (p) {
+      var card = el('div', 'card');
+      var head = el('div', 'head');
+      head.appendChild(el('span', 'name', p.name));
+      head.appendChild(el('span', 'total', p.total + (p.total === 1 ? ' task' : ' tasks')));
+      card.appendChild(head);
+      var counts = el('div', 'counts');
+      STATUSES.forEach(function (s) {
+        var c = el('span', s);
+        c.appendChild(el('b', '', String(p.by_status[s] || 0)));
+        c.appendChild(document.createTextNode(' ' + s.replace('_', ' ')));
+        counts.appendChild(c);
+      });
+      var b = el('span', 'blocked');
+      b.appendChild(el('b', '', String(p.blocked)));
+      b.appendChild(document.createTextNode(' blocked'));
+      counts.appendChild(b);
+      card.appendChild(counts);
+      out.appendChild(card);
+    });
+  }).catch(function (e) {
+    out.className = 'err';
+    out.textContent = (e && e.message) || 'Could not load stats.';
+  });
+</script>

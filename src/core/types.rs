@@ -2431,7 +2431,7 @@ impl From<&Artifact> for ArtifactSummary {
 // `.claude/commands/`. The separate `command` kind that used to own that
 // directory is gone: every such row is now a prompt with the flag on.
 
-/// What a [`LibraryItem`] is. Six kinds, and the wire value is the exact word
+/// What a [`LibraryItem`] is. Seven kinds, and the wire value is the exact word
 /// Claude Code (or mesa, for `prompt`) uses for the thing — `kebab-case`
 /// keeps `claude-md` readable rather than `claude_md`. The `command` kind
 /// mesa task 919 shipped was folded into `prompt` by mesa task 1139; the one
@@ -2450,6 +2450,8 @@ pub enum LibraryKind {
     /// An executable helper script kept at `.claude/bin/<name>` and linked
     /// onto `PATH` (mesa task 2424, `core::library::link_tool`).
     Tool,
+    /// A sandboxed HTML panel, no file on disk (naru task 2613).
+    Panel,
 }
 
 impl LibraryKind {
@@ -2461,6 +2463,7 @@ impl LibraryKind {
             LibraryKind::Prompt => "prompt",
             LibraryKind::ClaudeMd => "claude-md",
             LibraryKind::Tool => "tool",
+            LibraryKind::Panel => "panel",
         }
     }
 
@@ -2472,6 +2475,7 @@ impl LibraryKind {
             "prompt" => Some(LibraryKind::Prompt),
             "claude-md" => Some(LibraryKind::ClaudeMd),
             "tool" => Some(LibraryKind::Tool),
+            "panel" => Some(LibraryKind::Panel),
             _ => None,
         }
     }
@@ -2887,7 +2891,16 @@ impl<'de> Deserialize<'de> for LibraryBundleItem {
                 LibraryKind::parse(other).ok_or_else(|| {
                     serde::de::Error::unknown_variant(
                         other,
-                        &["agent", "skill", "hook", "prompt", "claude-md", "command"],
+                        &[
+                            "agent",
+                            "skill",
+                            "hook",
+                            "prompt",
+                            "claude-md",
+                            "tool",
+                            "panel",
+                            "command",
+                        ],
                     )
                 })?,
                 wire.export_command,

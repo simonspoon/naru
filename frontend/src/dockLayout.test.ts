@@ -4,7 +4,11 @@ import {
   activateTab,
   agentPanelId,
   agentPanels,
+  customPanelId,
+  customPanels,
+  isCustomPanelId,
   isDockPanelId,
+  openCustomPanel,
   openAgentPanel,
   panelLabel,
   closePanel,
@@ -531,6 +535,47 @@ describe('agent tabs (naru task 2313)', () => {
     const back = parseState(JSON.parse(JSON.stringify(s)))!
     consistent(back)
     expect(agentPanels(back)).toEqual([])
+    expect(isVisible(back, 'agents')).toBe(true)
+  })
+})
+
+describe('custom panel tabs (naru task 2613)', () => {
+  const p = customPanelId('builtin:project-stats')
+  it('opens on the right, in front, labelled; opening again is idempotent', () => {
+    const s = openCustomPanel(talk(), p, 'Project stats')
+    consistent(s)
+    expect(isVisible(s, p)).toBe(true)
+    expect(panelLabel(p, s)).toBe('Project stats')
+    expect(customPanels(s)).toEqual([p])
+    const again = openCustomPanel(s, p, 'Other')
+    consistent(again)
+    expect(customPanels(again)).toEqual([p])
+    expect(panelLabel(p, again)).toBe('Project stats')
+  })
+  it('falls back to a generic label and is a dock id only with a key', () => {
+    expect(panelLabel(p)).toBe('Panel')
+    expect(isCustomPanelId(p)).toBe(true)
+    expect(isDockPanelId(p)).toBe(true)
+    expect(isCustomPanelId('panel:')).toBe(false)
+    expect(isDockPanelId('panel:')).toBe(false)
+  })
+  it('closing forgets it: no last spot, no label, never in the reopen menu', () => {
+    let s = openCustomPanel(talk(), p, 'Project stats')
+    s = dockToNav(s, p)
+    expect(s.lastSpot[p]).toBeDefined()
+    s = closePanel(s, p)
+    consistent(s)
+    expect(customPanels(s)).toEqual([])
+    expect(s.lastSpot[p]).toBeUndefined()
+    expect(s.labels?.[p]).toBeUndefined()
+    expect(closedPanels(s)).not.toContain(p)
+    expect(closedPanels(openCustomPanel(talk(), p, 'x'))).not.toContain(p)
+  })
+  it('never survives a reload, and the rest of the layout does', () => {
+    const s = openCustomPanel(talk(), p, 'Project stats')
+    const back = parseState(JSON.parse(JSON.stringify(s)))!
+    consistent(back)
+    expect(customPanels(back)).toEqual([])
     expect(isVisible(back, 'agents')).toBe(true)
   })
 })

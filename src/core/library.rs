@@ -382,6 +382,17 @@ echo \"Claude Code stopped in $(pwd)\"
         export_command: false,
         files: &[],
     },
+    // The example custom panel (naru task 2613): per-project task counts,
+    // read through the `stats:read` permission. Stored-only, like a prompt.
+    Builtin {
+        id: "project-stats",
+        name: "project-stats",
+        kind: LibraryKind::Panel,
+        scope: LibraryScope::User,
+        body: include_str!("builtins/project-stats.html"),
+        export_command: false,
+        files: &[],
+    },
 ];
 
 /// The task-execution skill built-in, and the slash command
@@ -600,7 +611,9 @@ pub fn relative_path(
         LibraryKind::Prompt if export_command => {
             Some(PathBuf::from(format!(".claude/commands/{name}.md")))
         }
-        LibraryKind::Prompt => None,
+        // A panel lives only in the database (naru task 2613): no file, so
+        // sync never sees it.
+        LibraryKind::Prompt | LibraryKind::Panel => None,
     }
 }
 
@@ -3950,6 +3963,15 @@ mod tests {
             ),
             Some(PathBuf::from("CLAUDE.md"))
         );
+        // A panel is stored only (naru task 2613): no file in either scope.
+        assert_eq!(
+            relative_path(LibraryKind::Panel, LibraryScope::User, "stats", false),
+            None
+        );
+        assert_eq!(
+            relative_path(LibraryKind::Panel, LibraryScope::Project, "stats", false),
+            None
+        );
         // A prompt that does not export has no file at all.
         assert_eq!(
             relative_path(
@@ -4609,6 +4631,78 @@ mod tests {
         assert_eq!(matches.len(), 1, "a fork must shadow, not duplicate");
         assert!(!matches[0].builtin);
         assert_eq!(matches[0].body, "a custom definition");
+    }
+
+    #[test]
+    fn the_project_stats_builtin_is_a_pathless_panel() {
+        let (store, _dir) = temp_store();
+        let items = effective_items(&store, None).unwrap();
+        let found = items
+            .iter()
+            .find(|i| i.builtin_id.as_deref() == Some("project-stats"))
+            .expect("project-stats must be listed");
+        assert_eq!(found.kind, LibraryKind::Panel);
+        assert_eq!(found.path, None);
+        assert!(found.builtin);
+    }
+
+    #[test]
+    fn a_panel_never_reaches_sync_status() {
+        with_home_dir(|home| {
+            fs::create_dir_all(home.join(".claude")).unwrap();
+            let (mut store, _dir) = temp_store();
+            store
+                .create_library_item(
+                    LibraryKind::Panel,
+                    LibraryScope::User,
+                    None,
+                    "p1",
+                    "<meta name=\"naru-panel\" content='{}'>",
+                    None,
+                    false,
+                )
+                .unwrap();
+            let rows = sync_status(&store, None).unwrap();
+            assert!(
+                rows.iter().all(|r| r.kind != LibraryKind::Panel),
+                "{rows:?}"
+            );
+            assert!(
+                rows.iter()
+                    .all(|r| r.name != "p1" && r.name != "project-stats")
+            );
+        });
+    }
+
+    #[test]
+    fn a_stored_panel_exports_and_imports_into_a_fresh_store() {
+        let (mut store, _dir) = temp_store();
+        store
+            .create_library_item(
+                LibraryKind::Panel,
+                LibraryScope::User,
+                None,
+                "p1",
+                "<p>hi</p>",
+                None,
+                false,
+            )
+            .unwrap();
+        let bundle = export(&store, None).unwrap();
+        let item = bundle.items.iter().find(|i| i.name == "p1").unwrap();
+        assert_eq!(item.kind, LibraryKind::Panel);
+        let json = serde_json::to_string(&bundle).unwrap();
+        assert!(json.contains("\"kind\":\"panel\""), "{json}");
+
+        let (mut fresh, _dir2) = temp_store();
+        let bundle: LibraryBundle = serde_json::from_str(&json).unwrap();
+        let results = import(&mut fresh, &bundle, "skip", &[]).unwrap();
+        let r = results.iter().find(|r| r.name == "p1").unwrap();
+        assert_eq!(r.status, "created", "{results:?}");
+        let made = fresh.get_library_item(r.item_id.unwrap()).unwrap();
+        assert_eq!(made.kind, LibraryKind::Panel);
+        assert_eq!(made.path, None);
+        assert_eq!(made.body, "<p>hi</p>");
     }
 
     #[test]

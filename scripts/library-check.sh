@@ -2280,5 +2280,32 @@ ok "PATCH a skill's files: absent keeps, present replaces, bad paths 422 writing
 
 echo "== library-check: section 16 (editing a skill's siblings) passed ($CHECKS checks so far) =="
 
+# ---- a custom panel is stored only (naru task 2613) ----
+# Kind `panel` has no file on disk: path null, never in `sync status`, but it
+# travels in a bundle like any other row. The shipped `project-stats` example
+# lists as a user-scope panel with no path.
+PANEL_BODY='<meta name="naru-panel" content='"'"'{"title":"P1","permissions":["stats:read"]}'"'"'><p>hi</p>'
+run 0 "$MESA" library create panel p1 --body "$PANEL_BODY"
+[ "$(jqs '.kind')" = "panel" ] || fail "panel: kind must be panel, got $STDOUT"
+[ "$(jqs '.path')" = "null" ] || fail "panel: path must be null, got $STDOUT"
+run 0 "$MESA" library sync status
+[ "$(jqs '[.[] | select(.kind=="panel")] | length')" = "0" ] ||
+  fail "panel: sync status must carry no panel row, got $STDOUT"
+run 0 "$MESA" library export --output "$TMP/panel-bundle.json"
+[ "$(jq -r '.items[] | select(.name=="p1") | .kind' "$TMP/panel-bundle.json")" = "panel" ] ||
+  fail "panel: the bundle must carry p1 as kind panel"
+run 0 env MESA_DB="$TMP/panel-b.db" "$MESA" library import "$TMP/panel-bundle.json"
+[ "$(jqs '.[] | select(.name=="p1") | .status')" = "created" ] ||
+  fail "panel: import into a fresh db must create p1, got $STDOUT"
+run 0 env MESA_DB="$TMP/panel-b.db" "$MESA" library show p1
+[ "$(jqs '.kind')" = "panel" ] && [ "$(jqs '.body')" = "$PANEL_BODY" ] ||
+  fail "panel: the imported p1 must keep its kind and body, got $STDOUT"
+run 0 "$MESA" library list
+[ "$(jqs '[.[] | select(.name=="project-stats")] | map(select(.kind=="panel" and .path==null and .builtin==true)) | length')" = "1" ] ||
+  fail "panel: the project-stats built-in must list as a pathless panel, got $STDOUT"
+ok "a panel is stored only: path null, absent from sync status, round-trips through a bundle, and the project-stats built-in lists as a pathless panel"
+
+echo "== library-check: section 17 (custom panels) passed ($CHECKS checks so far) =="
+
 echo
 echo "library-check: $CHECKS checks passed"

@@ -40,7 +40,13 @@ export type BasePanelId = 'main' | 'chat' | 'board' | 'agents' | 'terminal' | 'w
  *  it — the old in-panel pane tree was component state too. */
 export type AgentPanelId = `agent:${string}`
 
-export type PanelId = BasePanelId | AgentPanelId
+/** A user-made custom panel (naru task 2613, docs/custom-panels.md):
+ *  `panel:<library itemKey>` (`panel:id:7`, `panel:builtin:project-stats`).
+ *  Transient exactly like an agent tab: never in `PANEL_IDS`, a close remembers
+ *  no spot, and `parseState` drops it, so a reload starts without it. */
+export type CustomPanelId = `panel:${string}`
+
+export type PanelId = BasePanelId | AgentPanelId | CustomPanelId
 
 export const PANEL_IDS: readonly BasePanelId[] = ['main', 'chat', 'board', 'agents', 'terminal', 'workflows', 'watcher']
 
@@ -57,6 +63,7 @@ const LABELS: Record<BasePanelId, string> = {
 /** An agent tab's label is the one it was opened with (`DockState.labels`). */
 export function panelLabel(id: PanelId, state?: DockState): string {
   if (isAgentPanelId(id)) return state?.labels?.[id] ?? 'Agent'
+  if (isCustomPanelId(id)) return state?.labels?.[id] ?? 'Panel'
   return LABELS[id]
 }
 
@@ -69,9 +76,22 @@ export function isAgentPanelId(value: unknown): value is AgentPanelId {
   return typeof value === 'string' && value.startsWith('agent:') && value.length > 'agent:'.length
 }
 
-/** Anything a tab may be dragged as: a fixed panel or an agent tab. */
+export function isCustomPanelId(value: unknown): value is CustomPanelId {
+  return typeof value === 'string' && value.startsWith('panel:') && value.length > 'panel:'.length
+}
+
+/** A tab that exists only while open: an agent tab or a custom panel. */
+export function isTransientPanelId(value: unknown): value is AgentPanelId | CustomPanelId {
+  return isAgentPanelId(value) || isCustomPanelId(value)
+}
+
+/** Anything a tab may be dragged as: a fixed panel, an agent tab or a custom panel. */
 export function isDockPanelId(value: unknown): value is PanelId {
-  return isPanelId(value) || isAgentPanelId(value)
+  return isPanelId(value) || isAgentPanelId(value) || isCustomPanelId(value)
+}
+
+export function customPanelId(itemKey: string): CustomPanelId {
+  return `panel:${itemKey}`
 }
 
 export function agentPanelId(paneId: string): AgentPanelId {
@@ -97,7 +117,7 @@ export type DockState = {
   nav: PanelId[]
   lastSpot: Partial<Record<PanelId, LastSpot>>
   /** Each open agent tab's label, set when it was opened (naru task 2313). */
-  labels?: Partial<Record<AgentPanelId, string>>
+  labels?: Partial<Record<AgentPanelId | CustomPanelId, string>>
 }
 
 // --- Building blocks ---------------------------------------------------
@@ -277,7 +297,7 @@ export function dockToNav(state: DockState, panel: PanelId, index?: number): Doc
 }
 
 export function closePanel(state: DockState, panel: PanelId): DockState {
-  if (isAgentPanelId(panel)) {
+  if (isTransientPanelId(panel)) {
     if (groupOf(state, panel) === null && !inNav(state, panel)) return state
     const gid = groupOf(state, panel)
     let next = withoutPanel(state, panel)
@@ -343,6 +363,24 @@ export function openAgentPanel(state: DockState, panel: AgentPanelId, label: str
   while (at < g.tabs.length && isAgentPanelId(g.tabs[at])) at += 1
   const tabs = [...g.tabs.slice(0, at), panel, ...g.tabs.slice(at)]
   return { ...state, labels, groups: { ...state.groups, [gid]: { tabs, active: panel } } }
+}
+
+/**
+ * Opens a custom panel tab (naru task 2613), or brings it to the front when it
+ * is already docked. A new one goes on the root's right, like an agent tab
+ * whose anchor is closed.
+ */
+export function openCustomPanel(state: DockState, panel: CustomPanelId, label: string): DockState {
+  if (inNav(state, panel) || groupOf(state, panel) !== null) return revealPanel(state, panel)
+  return { ...appendAtRight(state, panel), labels: { ...state.labels, [panel]: label } }
+}
+
+/** The custom panel tabs docked anywhere, in no particular order. */
+export function customPanels(state: DockState): CustomPanelId[] {
+  const out: CustomPanelId[] = []
+  for (const g of Object.values(state.groups)) for (const t of g.tabs) if (isCustomPanelId(t)) out.push(t)
+  for (const p of state.nav) if (isCustomPanelId(p)) out.push(p)
+  return out
 }
 
 /** The agent tabs docked anywhere, in no particular order. */

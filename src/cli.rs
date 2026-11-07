@@ -2829,7 +2829,7 @@ EXAMPLES
   mesa library create prompt my-note --body 'remember this'
   mesa library create agent reviewer --body-file reviewer.md --scope project --project mesa")]
     Create {
-        /// agent|skill|hook|prompt|claude-md|tool
+        /// agent|skill|hook|prompt|claude-md|tool|panel
         #[arg(value_name = "KIND", required_unless_present = "kind")]
         kind_pos: Option<String>,
         /// Kind (flag form of KIND)
@@ -5000,7 +5000,7 @@ fn parse_archive_outcome(s: &str) -> std::result::Result<ArchiveOutcome, String>
 
 fn parse_library_kind(s: &str) -> std::result::Result<LibraryKind, String> {
     LibraryKind::parse(s)
-        .ok_or_else(|| format!("'{s}' is not one of agent|skill|hook|prompt|claude-md|tool"))
+        .ok_or_else(|| format!("'{s}' is not one of agent|skill|hook|prompt|claude-md|tool|panel"))
 }
 
 fn parse_library_scope(s: &str) -> std::result::Result<LibraryScope, String> {

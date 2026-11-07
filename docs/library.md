@@ -1,4 +1,4 @@
-# Library (agents, skills, hooks, prompts, CLAUDE.md, tools)
+# Library (agents, skills, hooks, prompts, CLAUDE.md, tools, panels)
 
 The web page is three tabs (mesa task 1676, `libraryTab.ts`): **Claude Code**
 (`#/library`, everything below, Sync included), **Scripts** (`#/library/scripts`,
@@ -21,7 +21,9 @@ instructions are the `naru-live` **agent definition** (mesa task 1068) — see
 **tools**, carries the person's helper scripts — `~/.claude/bin/<name>`, put
 on `PATH` — so a hook, agent or CLAUDE.md that names one still finds it on
 another machine (mesa task 2424, see [Tools are scripts on
-`PATH`](#tools-are-scripts-on-path)).
+`PATH`](#tools-are-scripts-on-path)). A seventh kind, **panels**, carries a
+user-made HTML panel that runs sandboxed in a dock tab (naru task 2613): it is
+stored only, with no file on disk — see [`custom-panels.md`](custom-panels.md).
 
 ## The record
 
@@ -31,7 +33,7 @@ Table `library_items` (migration index 47, resulting `user_version` 48):
 | --- | --- | --- |
 | `id` | INTEGER PK | |
 | `name` | TEXT NOT NULL | `^[A-Za-z0-9][A-Za-z0-9._-]*$`, no `/`, `\` or `..` — it is half a filename |
-| `kind` | TEXT NOT NULL | `agent \| skill \| hook \| prompt \| claude-md \| tool` — `command` until migration index 54 folded it into `prompt` |
+| `kind` | TEXT NOT NULL | `agent \| skill \| hook \| prompt \| claude-md \| tool \| panel` — `command` until migration index 54 folded it into `prompt` |
 | `scope` | TEXT NOT NULL | `user \| project` |
 | `project_id` | INTEGER NULL | FK `ON DELETE CASCADE`; required iff `scope = project`, must be NULL iff `scope = user` |
 | `body` | TEXT NOT NULL | the file's contents; may be empty |
@@ -206,7 +208,7 @@ That split is the whole point:
   `Store::create_library_item`/the fork route both check
   `Store::find_library_fork` first and answer `conflict` on a second attempt.
 
-The starter set — twenty-five rows:
+The starter set — twenty-six rows:
 
 | `id` | kind | scope | what it is |
 | --- | --- | --- | --- |
@@ -235,6 +237,7 @@ The starter set — twenty-five rows:
 | `supervising-agent-teams` | `skill` | `user` | The supervisor's procedures — waiting, verifying, briefs, resources, intervening — as `SKILL.md` plus five sibling files (`briefs.md`, `intervening.md`, `resources.md`, `verifying.md`, `waiting.md`); the `supervisor` agent loads it with the `Skill` tool |
 | `execute-naru-task` | `skill` | `user` | The task lifecycle a queue-watcher task agent runs as `/execute-naru-task <id>` (naru task 2394, replacing the retired `execute-todo` prompt): claim, the six-step work loop, notes, `naru ask`, end done or parked. Seeded to `~/.claude/skills/execute-naru-task/SKILL.md` before every dispatch (`library::ensure_user_file`, never overwriting) |
 | `merge-to-main` | `tool` | `user` | The worktree-landing script agents are told to run — `src/core/builtins/merge-to-main` (naru task 2464). A sync toward naru writes it to `~/.claude/bin/merge-to-main` and links `~/.local/bin/merge-to-main` (see [Tools are scripts on `PATH`](#tools-are-scripts-on-path)) |
+| `project-stats` | `panel` | `user` | The example custom panel (naru task 2613): per-project task counts from the `stats:read` permission — `src/core/builtins/project-stats.html`. Stored only, no path; open it from its Library row (`docs/custom-panels.md`) |
 
 `naru-live`'s body being the literal `AGENT_DEFINITION` constant (and
 `live-summary-prompt`'s the literal `SUMMARY_PROMPT`) is what lets
@@ -398,6 +401,7 @@ to the **scope base** — the home directory for `user`, a project's
 | `claude-md` | `.claude/CLAUDE.md` | `CLAUDE.md` (the repo root — where Claude Code actually reads it) |
 | `prompt`, `export_command` on | `.claude/commands/<name>.md` | `.claude/commands/<name>.md` |
 | `prompt`, `export_command` off | **none** | **none** |
+| `panel` | **none** | **none** |
 
 `hook` is the one kind that appends nothing (mesa task 1114): a hook is
 whatever script the user drops in — `poll-guard.py` as readily as

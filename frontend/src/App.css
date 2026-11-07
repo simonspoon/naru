@@ -14437,3 +14437,36 @@ span.orbit-spark {
   justify-content: center;
   padding: 0.5rem 0;
 }
+
+/* A custom panel (naru task 2613, docs/custom-panels.md): the sandboxed frame
+   fills its dock host; the permission prompt is a quiet card before any frame
+   exists. */
+.dock-host-panel iframe {
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+
+.custom-panel-prompt {
+  margin: auto;
+  max-width: 28rem;
+  padding: 1rem 1.25rem;
+  background: var(--surface-raised);
+  border: 1px solid transparent;
+  border-radius: var(--r-md);
+  box-shadow: var(--ring);
+}
+
+.custom-panel-prompt h2 {
+  margin: 0 0 0.5rem;
+}
+
+.custom-panel-prompt ul {
+  margin: 0.5rem 0 1rem;
+  padding-left: 1.2rem;
+}
+
+.custom-panel-actions {
+  display: flex;
+  gap: 0.5rem;
+}
