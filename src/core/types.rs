@@ -5312,6 +5312,7 @@ workflow_enum! {
         Webhook => "webhook",
         TaskEvent => "task-event",
         FileWatch => "file-watch",
+        Hook => "hook",
     }
 }
 

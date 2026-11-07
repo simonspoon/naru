@@ -22,7 +22,7 @@ Source of truth: `src/core/workflow.rs` (validation and engine),
 | `workflow_log` | `id`, `log`, `text`, `workflow_id` and `run_id` (both `ON DELETE SET NULL`), `created_at` | append-only; written by an `output` node with `target: log` |
 
 All writes go through `Store`. `Workflow` carries two **derived, never stored**
-fields read off its trigger node on every read — `trigger` (`manual|time|voice|ambient`
+fields read off its trigger node on every read — `trigger` (`manual|time|voice|ambient|hook`
 or `null`), `trigger_phrase` and `trigger_events` (an ambient trigger's `events`, else `[]`) — so `naru workflow list` can say which workflow
 a spoken request could mean without loading every graph. Four more are derived
 from `workflow_runs` the same way (mesa task 1632), so `workflow list` and
@@ -73,7 +73,7 @@ Stored config is the validated, normalized form.
 
 | Kind | Config | What it does |
 | --- | --- | --- |
-| `trigger` | `{"mode": "manual"\|"time"\|"voice"\|"ambient", "every_minutes": 1..=10080 (required iff time), "events": ["idea"\|"can-help"\|"wake", …] (required iff ambient: non-empty, no duplicates, refused on any other mode), "phrase": "…" (optional, for voice)}` | the run's source; its output **is** the run input. Without `--config`, `{"mode":"manual"}` |
+| `trigger` | `{"mode": "manual"\|"time"\|"voice"\|"ambient"\|"hook", "every_minutes": 1..=10080 (required iff time), "events": ["idea"\|"can-help"\|"wake", …] (required iff ambient: non-empty, no duplicates, refused on any other mode), "phrase": "…" (optional, for voice)}` (`hook` takes nothing else: it is run by `workflow run --hook`, below) | the run's source; its output **is** the run input. Without `--config`, `{"mode":"manual"}` |
 | `prompt` | `{"model": "haiku"\|"sonnet"\|"opus"\|"local:<name>" (a name never starts with `-`), "thinking": bool (default false), "prompt": "…" (non-empty), "timeout_secs": 1..=3600 (default 600)}` | one synchronous model call; the node's output is the model's text answer, trimmed |
 | `agent` | `{"agent": "<name>", "prompt": "…", "model"?, "timeout_secs"?: 1..=3600, "result_type"?, "retry"?}` | one model call acting as a library agent definition; output is text or canonical typed JSON |
 | `cli` | `{"command": "…" (non-empty), "timeout_secs": 1..=86400 (default 600), "always"?: bool}` | `bash -c <command>` **verbatim** (the author wrote it, as with scripts); output is stdout. `"always": true` (naru task 2033) makes it a closing node: it ignores its edges, runs after every other node whatever happened (a failed run included) and gets the run input plus a `run_status=succeeded` / `run_status=failed error=<message>` line; its own failure never replaces the run's earlier error |
@@ -89,7 +89,7 @@ Stored config is the validated, normalized form.
 | `notify` | `{"mode": "phone"\|"speak" (default phone), "message": "…", "title": "…", "open": "<route>"}` | tells a person (naru task 1998). `phone` sends through `vox` exactly as `naru notify` does (`title`, and an Open Naru button to `open`); `speak` appends a `naru` turn to the live conversation so the page speaks it (`unavailable` and a failed node when none is live). `message` has `{input}` replaced and defaults to the input; ≤ 4096 bytes. The input passes through unchanged; a failed send fails the node. Pins `any` in, `any` out. |
 | `trycatch` | `{"wrap":{"kind":"cli\|script\|prompt\|agent","config":{...}},"timeout_secs":N}` | runs the wrapped node once (naru task 1995). Success routes `ok` with the wrapped output; a failure is caught: the node and the run still succeed, the output is the error text, and the `caught` edges run. Edges need `--branch ok\|caught`; an unwired branch skips everything behind it |
 | `retry` | `{"wrap": {"kind": "cli"\|"script"\|"prompt"\|"agent", "config": {…the wrapped kind's config…}}, "attempts": 1..=10 (default 3), "backoff_ms": 0..=60000 (default 0), "backoff_factor": 1..=10 (default 1), "timeout_secs": 1..=3600}` | runs the wrapped node, retrying on failure (naru task 1991); output is the wrapped node's |
-| `output` | `{"target": "log", "log": "<name>" (default `default`)}`, `{"target": "task", "project": "<id\|name>", "status": "backlog"\|"todo" (default todo)}`, `{"target": "inbox", "task_id": N, "kind": "task-summary"\|"change-request" (default task-summary)}`, `{"target": "board", "title": "…"}` | delivers its input; output is a short receipt. A key that does not apply to the target is refused |
+| `output` | `{"target": "log", "log": "<name>" (default `default`)}`, `{"target": "task", "project": "<id\|name>", "status": "backlog"\|"todo" (default todo)}`, `{"target": "inbox", "task_id": N, "kind": "task-summary"\|"change-request" (default task-summary)}`, `{"target": "board", "title": "…"}`, `{"target": "reply", "decision": "block"\|"allow"\|"context" (required), "message": "…" (`{input}` replaced; defaults to the input)}` | delivers its input; output is a short receipt. `reply` (naru task 1639) writes nothing anywhere: its output is the compact JSON `{"reply":"<decision>","message":"<message>"}`, which `workflow run --hook` reads (an `allow` with an empty input is normal, so it is handled before the "nothing to deliver" early return). A key that does not apply to the target is refused |
 
 **`agent`** (naru task 1982). A `prompt`-style call that acts as a **defined agent**:
 config `{"agent": "<library agent name>", "prompt": "…" (`{input}` is replaced by the
@@ -534,6 +534,44 @@ stays `running` until the next `serve` start reconciles it to `failed` as
 above. A job that cannot start fails the row and answers `unavailable`.
 Without `--detach` nothing changes.
 
+## Claude Code hooks (naru task 1639)
+
+A workflow whose trigger is `{"mode":"hook"}` can answer a Claude Code hook.
+`naru workflow run "<name>" --hook` reads all of stdin as the run input (Claude
+Code pipes the hook event JSON), runs the workflow synchronously with run
+trigger `hook`, and answers by exit code and stdout instead of printing the run
+record. `--hook` conflicts with `--input`, `--input-file`, `--trigger` and
+`--detach`, and refuses a workflow whose trigger is not `hook` (`validation`,
+exit 1). The answer comes from `output` nodes with target `reply`.
+
+```json
+{"hooks": {"PreToolUse": [{"matcher": "Bash",
+  "hooks": [{"type": "command", "command": "naru workflow run \"Guard\" --hook"}]}]}}
+```
+
+Every step with status `ok`, kind `output` and a reply as its output votes:
+
+| Outcome | Exit | stdout | stderr |
+| --- | --- | --- | --- |
+| any `block` | 2 | empty | the block messages, joined by `\n` (`blocked by a naru workflow` when they are empty) |
+| else any `context` | 0 | `{"hookSpecificOutput":{"hookEventName":<input's hook_event_name>,"additionalContext":<messages joined by \n>}}`; plain message text when the input is not JSON or has no string `hook_event_name` | empty |
+| `allow`, or no reply reached | 0 | empty (plain stdout would be injected as context for `UserPromptSubmit`/`SessionStart`) | empty |
+| run `failed` | 1 | empty | `naru: workflow run <id> failed: <error>` (a non-blocking error for Claude Code: fail open) |
+
+Precedence is block, then context, then allow. Only replies in the run itself vote:
+a `reply` inside a `subworkflow`'s child run does not reach the parent's
+answer. Claude Code reads `additionalContext` only on the events that take it
+(`UserPromptSubmit`, `SessionStart`, `PreToolUse`, `PostToolUse` and a few
+more); elsewhere a `context` reply is ignored. Errors before the run
+(`not_found`, `validation`) print the usual error JSON on stderr and exit 1.
+The decision mapping is `workflow::hook_reply`, a pure function of the finished
+run.
+
+A clap usage error also exits 2, which Claude Code reads as a block: a typo'd
+flag in `settings.json` blocks every call. Test the command by hand first;
+`naru workflow run X --input '{...}'` prints the record instead, which shows
+what each reply node produced.
+
 ## Version history (naru task 2053)
 
 Every workflow keeps its history, like a library item: each saved version is a
@@ -754,7 +792,7 @@ is named.
 | `workflow export <id\|name> [--out FILE]` | the portable export file (see "Export and import"), or with `--out` a `{path, name, version, nodes, edges}` receipt; `--quiet` ignored |
 | `workflow import FILE [--project ID\|NAME]` | `{workflow, nodes, edges, renamed_from, missing, warnings}`; the workflow is created disabled; `--quiet` ignored |
 | `workflow delete <id\|name>` | the destroyed `{workflow, nodes, edges}` |
-| `workflow run <id\|name> [--input TEXT \| --input-file PATH\|-] [--trigger manual\|voice]` | the finished `WorkflowRun` |
+| `workflow run <id\|name> [--input TEXT \| --input-file PATH\|-] [--trigger manual\|voice] [--detach] \| --hook` | the finished `WorkflowRun`; with `--hook` no record, the answer to Claude Code (see "Claude Code hooks") |
 | `workflow emit <idea\|can-help\|wake> --speaker S [--text TEXT \| --text-file PATH\|-]` | runs every matching `ambient` workflow synchronously, id order; a bare array of the finished `WorkflowRun`s (`[]` when none match, exit 0); `--quiet` accepted and ignored |
 | `workflow defaults --project <id\|name>` | `{created: [{workflow, nodes, edges}], skipped: [name]}` — creates the two default ambient workflows (below), skipping any whose name exists; `--quiet` accepted and ignored |
 | `workflow runs <id\|name>` | a bare array of runs, newest first, **without `steps` and `input`** |

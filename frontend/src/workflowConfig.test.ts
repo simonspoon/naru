@@ -813,3 +813,24 @@ describe('palette groups', () => {
     expect(loadPaletteCollapsed()).toEqual([])
   })
 })
+
+describe('hook trigger and reply output (naru task 1639)', () => {
+  it('summarises and round-trips the hook trigger', () => {
+    expect(summarize('trigger', { mode: 'hook' })).toBe('hook')
+    const d = draftFromConfig('trigger', { mode: 'hook' })
+    expect(buildConfig('trigger', d).config).toEqual({ mode: 'hook' })
+  })
+  it('summarises and round-trips a reply output', () => {
+    expect(summarize('output', { target: 'reply', decision: 'block' })).toBe('reply · block')
+    const cfg = { target: 'reply', decision: 'context', message: 'saw {input}' }
+    expect(buildConfig('output', draftFromConfig('output', cfg)).config).toEqual(cfg)
+    expect(buildConfig('output', draftFromConfig('output', { target: 'reply', decision: 'allow' })).config).toEqual({
+      target: 'reply',
+      decision: 'allow',
+    })
+  })
+  it('refuses an unknown decision', () => {
+    const d = { ...draftFromConfig('output', { target: 'reply' }), reply_decision: 'deny' }
+    expect(buildConfig('output', d).error).toBeTruthy()
+  })
+})

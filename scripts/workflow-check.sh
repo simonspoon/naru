@@ -2527,6 +2527,60 @@ api 422 POST /api/workflows/import '{"document":{"format":"x","version":1}}'
 kill "$SERVER_PID" 2>/dev/null; wait "$SERVER_PID" 2>/dev/null || true; SERVER_PID=
 ok "export/import: round trip disabled + suffixed + missing listed, bad files validation, both routes"
 
+# ================= Claude Code hook (naru task 1639) =================
+
+run 0 "$NARU" workflow create Guard --description "hook guard"
+run 0 "$NARU" workflow node create Guard trigger Start --config '{"mode":"hook"}'
+HT=$(jqs .id)
+[ "$(jqs .config.mode)" = "hook" ] || fail "a hook trigger is accepted: $STDOUT"
+run 0 "$NARU" workflow node create Guard branch Danger --config '{"op":"contains","value":"danger"}'
+HB1=$(jqs .id)
+run 0 "$NARU" workflow node create Guard branch Prompt --config '{"op":"contains","value":"UserPromptSubmit"}'
+HB2=$(jqs .id)
+run 0 "$NARU" workflow node create Guard output Block --config '{"target":"reply","decision":"block","message":"refused: {input}"}'
+HBLK=$(jqs .id)
+run 0 "$NARU" workflow node create Guard output Ctx --config '{"target":"reply","decision":"context","message":"remember the rules"}'
+HCTX=$(jqs .id)
+run 0 "$NARU" workflow node create Guard output Allow --config '{"target":"reply","decision":"allow"}'
+HALW=$(jqs .id)
+run 1 "$NARU" workflow node create Guard output Bad --config '{"target":"reply","decision":"deny"}'
+[ "$(jqe .error.code)" = "validation" ] || fail "a bad reply decision is validation: $STDERR"
+run 0 "$NARU" workflow edge create Guard "$HT" "$HB1"
+run 0 "$NARU" workflow edge create Guard "$HB1" "$HBLK" --branch true
+run 0 "$NARU" workflow edge create Guard "$HB1" "$HB2" --branch false
+run 0 "$NARU" workflow edge create Guard "$HB2" "$HCTX" --branch true
+run 0 "$NARU" workflow edge create Guard "$HB2" "$HALW" --branch false
+run 0 "$NARU" workflow show Guard
+[ "$(jqs .workflow.trigger)" = "hook" ] || fail "the derived trigger is hook: $STDOUT"
+
+run 2 "$NARU" workflow run Guard --hook <<<'{"hook_event_name":"PreToolUse","tool_input":{"command":"danger"}}'
+[ -z "$STDOUT" ] || fail "a block prints nothing on stdout: $STDOUT"
+case "$STDERR" in "refused: "*danger*) ;; *) fail "a block's message is on stderr: $STDERR" ;; esac
+run 0 "$NARU" workflow run Guard --hook <<<'{"hook_event_name":"UserPromptSubmit","prompt":"hi"}'
+[ "$(jqs .hookSpecificOutput.hookEventName)" = "UserPromptSubmit" ] &&
+  [ "$(jqs .hookSpecificOutput.additionalContext)" = "remember the rules" ] || fail "context JSON: $STDOUT"
+run 0 "$NARU" workflow run Guard --hook <<<'{"hook_event_name":"PreToolUse","tool_input":{"command":"ls"}}'
+[ -z "$STDOUT" ] || fail "an allow prints nothing: $STDOUT"
+run 0 "$NARU" workflow run Guard --hook <<<''
+[ -z "$STDOUT" ] || fail "an allow on empty stdin prints nothing: $STDOUT"
+run 0 "$NARU" workflow runs Guard
+[ "$(jqs '.[0].trigger')" = "hook" ] || fail "a hook run records trigger hook: $STDOUT"
+
+run 0 "$NARU" workflow create HookFail --description "failing hook"
+run 0 "$NARU" workflow node create HookFail trigger Start --config '{"mode":"hook"}'
+FT=$(jqs .id)
+run 0 "$NARU" workflow node create HookFail cli Boom --config '{"command":"exit 3"}'
+FC=$(jqs .id)
+run 0 "$NARU" workflow edge create HookFail "$FT" "$FC"
+run 1 "$NARU" workflow run HookFail --hook <<<'{}'
+case "$STDERR" in "naru: workflow run "*" failed: "*) ;; *) fail "a failed hook run says so on stderr: $STDERR" ;; esac
+[ -z "$STDOUT" ] || fail "a failed hook run prints nothing on stdout: $STDOUT"
+
+run 1 "$NARU" workflow run Portable --hook <<<'{}'
+[ "$(jqe .error.code)" = "validation" ] || fail "--hook on a non-hook workflow is validation: $STDERR"
+run 2 "$NARU" workflow run Guard --hook --input x
+ok "workflow run --hook: block exits 2 on stderr, context prints hookSpecificOutput, allow is silent, a failed run exits 1, a non-hook workflow is validation"
+
 [ ! -e "$STUB_DIR/bg.calls" ] || fail "a workflow spawned a background agent (--bg): $(cat "$STUB_DIR/bg.calls")"
 ok "no --bg agent was spawned anywhere in this gate"
 

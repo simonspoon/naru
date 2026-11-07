@@ -42,6 +42,7 @@ import {
   INBOX_KINDS,
   NODE_DRAG_MIME,
   OUTPUT_TARGETS,
+  REPLY_DECISIONS,
   PALETTE_GROUPS,
   PROMPT_MODELS,
   RETRY_WRAPPABLE,
@@ -630,6 +631,11 @@ function NodeInspector({
                 </label>
               ))}
             </Field>
+          )}
+          {draft.mode === 'hook' && (
+            <p className="wf-field-hint muted">
+              Claude Code hook: put <code>{`naru workflow run ${node.workflow_id} --hook`}</code> in its settings.
+            </p>
           )}
           <Field label="phrase" hint="what a spoken request says to run it (optional)">
             <input type="text" value={draft.phrase} onChange={(e) => set('phrase', e.target.value)} />
@@ -1593,6 +1599,20 @@ function NodeInspector({
                     <option key={k}>{k}</option>
                   ))}
                 </select>
+              </Field>
+            </>
+          )}
+          {draft.target === 'reply' && (
+            <>
+              <Field label="decision" hint="answers Claude Code when the workflow runs with --hook">
+                <select value={draft.reply_decision} onChange={(e) => set('reply_decision', e.target.value)}>
+                  {REPLY_DECISIONS.map((k) => (
+                    <option key={k}>{k}</option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="message" hint="optional; {input} is the node's input, which is the default">
+                <input type="text" value={draft.reply_message} onChange={(e) => set('reply_message', e.target.value)} />
               </Field>
             </>
           )}

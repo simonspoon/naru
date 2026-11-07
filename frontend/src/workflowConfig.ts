@@ -134,8 +134,10 @@ export function isNodeKind(value: unknown): value is WorkflowNodeKind {
 
 export const PROMPT_MODELS = ['haiku', 'sonnet', 'opus'] as const
 export const BRANCH_OPS = ['contains', 'regex', 'score_above', 'score_below', 'equals'] as const
-export const OUTPUT_TARGETS = ['log', 'task', 'inbox', 'board'] as const
-export const TRIGGER_MODES: readonly WorkflowTrigger[] = ['manual', 'time', 'voice', 'ambient']
+export const OUTPUT_TARGETS = ['log', 'task', 'inbox', 'board', 'reply'] as const
+/** What a `reply` output node decides for `naru workflow run --hook`. */
+export const REPLY_DECISIONS = ['block', 'allow', 'context'] as const
+export const TRIGGER_MODES: readonly WorkflowTrigger[] = ['manual', 'time', 'voice', 'ambient', 'hook']
 /** The label of a decide node's catch-all edge; no option may be it. */
 export const DECIDE_FALLBACK = 'fallback'
 /** The label of a switch node's catch-all edge; no case may be labelled it. */
@@ -309,6 +311,7 @@ export function summarize(kind: WorkflowNodeKind, config: NodeConfig): string {
       if (target === 'log') return `log · ${str(config, 'log') || 'default'}`
       if (target === 'task') return `task · ${str(config, 'project') || '?'}`
       if (target === 'inbox') return `inbox · task ${str(config, 'task_id') || '?'}`
+      if (target === 'reply') return `reply · ${str(config, 'decision') || '?'}`
       return `board${str(config, 'title') ? ` · ${clip(str(config, 'title'), 24)}` : ''}`
     }
     case 'break':
@@ -512,6 +515,8 @@ export interface ConfigDraft {
   project: string
   task_id: string
   kind: string
+  reply_decision: string
+  reply_message: string
   title: string
   json_type: string
   te_event: string
@@ -708,6 +713,8 @@ export function draftFromConfig(kind: WorkflowNodeKind, config: NodeConfig): Con
     project: str(config, 'project'),
     task_id: str(config, 'task_id'),
     kind: str(config, 'kind') || 'task-summary',
+    reply_decision: str(config, 'decision') || 'block',
+    reply_message: str(config, 'message'),
     title: str(config, 'title'),
     json_type: str(config, 'type') || 'any',
     te_event: str(config, 'event') || 'created',
@@ -836,7 +843,7 @@ const LOCAL_MODEL = /^local:[A-Za-z0-9._:/-]+$/
 export function buildConfig(kind: WorkflowNodeKind, d: ConfigDraft): BuildResult {
   switch (kind) {
     case 'trigger': {
-      if (!TRIGGER_MODES.includes(d.mode as WorkflowTrigger)) return bad('mode must be manual, time, voice or ambient')
+      if (!TRIGGER_MODES.includes(d.mode as WorkflowTrigger)) return bad('mode must be manual, time, voice, ambient or hook')
       const config: NodeConfig = { mode: d.mode }
       if (d.mode === 'time') {
         const n = intIn(d.every_minutes, 1, 10080)
@@ -965,8 +972,14 @@ export function buildConfig(kind: WorkflowNodeKind, d: ConfigDraft): BuildResult
         }
         case 'board':
           return ok(d.title.trim() === '' ? { target: 'board' } : { target: 'board', title: d.title.trim() })
+        case 'reply': {
+          if (!(REPLY_DECISIONS as readonly string[]).includes(d.reply_decision)) return bad('decision must be block, allow or context')
+          const config: NodeConfig = { target: 'reply', decision: d.reply_decision }
+          if (d.reply_message.trim() !== '') config.message = d.reply_message
+          return ok(config)
+        }
         default:
-          return bad('target must be log, task, inbox or board')
+          return bad('target must be log, task, inbox, board or reply')
       }
     }
     case 'file-watch': {

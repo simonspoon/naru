@@ -105,7 +105,9 @@ pub const SWITCH_DEFAULT: &str = "default";
 /// The label of any node's failure exit (naru task 2533): an edge carrying it
 /// is active only when its source failed, and wiring one handles the failure.
 pub const FAILURE_EXIT: &str = "failure";
-const OUTPUT_TARGETS: [&str; 4] = ["log", "task", "inbox", "board"];
+const OUTPUT_TARGETS: [&str; 5] = ["log", "task", "inbox", "board", "reply"];
+/// What a `reply` output node may decide (naru task 1639).
+const REPLY_DECISIONS: [&str; 3] = ["block", "allow", "context"];
 
 fn object<'a>(
     kind: &str,
@@ -835,9 +837,9 @@ pub fn validate_config(
         WorkflowNodeKind::Trigger => {
             only_keys(name, obj, &["mode", "every_minutes", "phrase", "events"])?;
             let mode = required_str(name, obj, "mode")?;
-            if !["manual", "time", "voice", "ambient"].contains(&mode) {
+            if !["manual", "time", "voice", "ambient", "hook"].contains(&mode) {
                 return Err(format!(
-                    "trigger config: \"mode\" must be manual, time, voice or ambient, got {mode:?}"
+                    "trigger config: \"mode\" must be manual, time, voice, ambient or hook, got {mode:?}"
                 ));
             }
             out.insert("mode".into(), json!(mode));
@@ -1641,7 +1643,8 @@ pub fn validate_config(
                 name,
                 obj,
                 &[
-                    "target", "log", "project", "task_id", "kind", "title", "status",
+                    "target", "log", "project", "task_id", "kind", "title", "status", "decision",
+                    "message",
                 ],
             )?;
             let target = required_str(name, obj, "target")?;
@@ -1656,6 +1659,7 @@ pub fn validate_config(
                 "log" => &["log"],
                 "task" => &["project", "status"],
                 "inbox" => &["task_id", "kind"],
+                "reply" => &["decision", "message"],
                 _ => &["title"],
             };
             for key in obj.keys() {
@@ -1713,6 +1717,19 @@ pub fn validate_config(
                         ));
                     }
                     out.insert("kind".into(), json!(kind));
+                }
+                "reply" => {
+                    let decision = required_str(name, obj, "decision")?;
+                    if !REPLY_DECISIONS.contains(&decision) {
+                        return Err(format!(
+                            "output config: \"decision\" must be one of {}, got {decision:?}",
+                            REPLY_DECISIONS.join(", ")
+                        ));
+                    }
+                    out.insert("decision".into(), json!(decision));
+                    if let Some(m) = optional_str(name, obj, "message")? {
+                        out.insert("message".into(), json!(m));
+                    }
                 }
                 _ => {
                     if let Some(t) = optional_str(name, obj, "title")? {
@@ -2513,6 +2530,90 @@ pub fn run_workflow<A: StoreAccess>(
 ) -> Result<WorkflowRun> {
     let (view, run) = access.with(|s| claim_run(s, workflow_id, trigger, input))?;
     execute_run(access, &view, run)
+}
+
+/// How `naru workflow run --hook` answers Claude Code (naru task 1639):
+/// the process exit code and what goes on stdout and stderr.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookReply {
+    pub exit: i32,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// Maps a finished hook run to its answer. Every ok `output` step whose
+/// output is a reply (`{"reply","message"}`) votes: any `block` wins (exit 2,
+/// the messages on stderr), else any `context` (exit 0, `additionalContext`
+/// on stdout), else allow, or no reply reached: exit 0 and nothing printed,
+/// since plain stdout is injected as context for some events. A failed run
+/// exits 1, which Claude Code treats as a non-blocking error (fail open).
+pub fn hook_reply(run: &WorkflowRun) -> HookReply {
+    if run.status == WorkflowRunStatus::Failed {
+        return HookReply {
+            exit: 1,
+            stdout: String::new(),
+            stderr: format!(
+                "naru: workflow run {} failed: {}",
+                run.id,
+                run.error.as_deref().unwrap_or("unknown error")
+            ),
+        };
+    }
+    let (mut block, mut context): (Vec<String>, Vec<String>) = (Vec::new(), Vec::new());
+    for step in &run.steps {
+        if step.status != WorkflowStepStatus::Ok || step.kind != WorkflowNodeKind::Output {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(&step.output) else {
+            continue;
+        };
+        let (Some(decision), Some(message)) = (
+            v.get("reply").and_then(Value::as_str),
+            v.get("message").and_then(Value::as_str),
+        ) else {
+            continue;
+        };
+        match decision {
+            "block" => block.push(message.to_string()),
+            "context" => context.push(message.to_string()),
+            _ => {}
+        }
+    }
+    let quiet = |exit, stdout, stderr| HookReply {
+        exit,
+        stdout,
+        stderr,
+    };
+    if !block.is_empty() {
+        let message = block.join("\n");
+        // Claude Code shows stderr as the reason; never block without one.
+        let message = if message.trim().is_empty() {
+            "blocked by a naru workflow".to_string()
+        } else {
+            message
+        };
+        return quiet(2, String::new(), message);
+    }
+    if context.is_empty() {
+        return quiet(0, String::new(), String::new());
+    }
+    let message = context.join("\n");
+    let event = serde_json::from_str::<Value>(&run.input)
+        .ok()
+        .and_then(|v| {
+            v.get("hook_event_name")
+                .and_then(Value::as_str)
+                .map(String::from)
+        });
+    let stdout = match event {
+        Some(name) => json!({"hookSpecificOutput": {
+            "hookEventName": name,
+            "additionalContext": message,
+        }})
+        .to_string(),
+        None => message,
+    };
+    quiet(0, stdout, String::new())
 }
 
 /// Validates one ambient-engine event and answers the workflows it fires
@@ -4152,6 +4253,16 @@ fn run_node<A: StoreAccess>(
             node,
         ),
         WorkflowNodeKind::Output => {
+            // A reply writes nothing anywhere: it only records its decision
+            // for `naru workflow run --hook` (an allow with no input is normal).
+            if str_of("target") == "reply" {
+                let message = match cfg.get("message").and_then(Value::as_str) {
+                    Some(m) => m.replace("{input}", input),
+                    None => input.to_string(),
+                };
+                let out = json!({"reply": str_of("decision"), "message": message});
+                return Ok((out.to_string(), None));
+            }
             // A silent run (an empty transcript, a filter that let nothing
             // through) has nothing to deliver, and that is not a failure: the
             // node succeeds, says so, and writes no record.
@@ -5303,9 +5414,43 @@ mod tests {
             bad(K::Trigger, json!({"mode": "time", "every_minutes": 0})).contains("1 to 10080")
         );
         assert!(
-            bad(K::Trigger, json!({"mode": "weekly"})).contains("manual, time, voice or ambient")
+            bad(K::Trigger, json!({"mode": "weekly"}))
+                .contains("manual, time, voice, ambient or hook")
         );
         assert!(bad(K::Trigger, json!({"mode": "manual", "extra": 1})).contains("unknown key"));
+        assert_eq!(
+            ok(K::Trigger, json!({"mode": "hook"})),
+            json!({"mode": "hook"})
+        );
+        assert!(bad(K::Trigger, json!({"mode": "hook", "every_minutes": 5})).contains("time"));
+        assert!(bad(K::Trigger, json!({"mode": "hook", "events": ["wake"]})).contains("ambient"));
+        assert_eq!(
+            ok(
+                K::Output,
+                json!({"target": "reply", "decision": "block", "message": "no {input}"})
+            ),
+            json!({"target": "reply", "decision": "block", "message": "no {input}"})
+        );
+        assert_eq!(
+            ok(K::Output, json!({"target": "reply", "decision": "allow"})),
+            json!({"target": "reply", "decision": "allow"})
+        );
+        assert!(bad(K::Output, json!({"target": "reply"})).contains("decision"));
+        assert!(
+            bad(K::Output, json!({"target": "reply", "decision": "deny"}))
+                .contains("block, allow, context")
+        );
+        assert!(
+            bad(
+                K::Output,
+                json!({"target": "reply", "decision": "allow", "log": "x"})
+            )
+            .contains("does not apply")
+        );
+        assert!(
+            bad(K::Output, json!({"target": "log", "decision": "allow"}))
+                .contains("does not apply")
+        );
         assert_eq!(
             ok(
                 K::Prompt,
@@ -10447,5 +10592,183 @@ mod tests {
                 assert!(!wftypes::data_feeds(m, "model"));
             });
         });
+    }
+    fn hook_step(kind: WorkflowNodeKind, status: WorkflowStepStatus, output: &str) -> WorkflowStep {
+        WorkflowStep {
+            node_id: 1,
+            title: "S".into(),
+            kind,
+            status,
+            output: output.into(),
+            error: None,
+            duration_ms: 0,
+            started_at: None,
+            log: None,
+        }
+    }
+
+    fn hook_run(status: WorkflowRunStatus, input: &str, steps: Vec<WorkflowStep>) -> WorkflowRun {
+        WorkflowRun {
+            id: 7,
+            workflow_id: 1,
+            trigger: WorkflowTrigger::Hook,
+            input: input.into(),
+            status,
+            steps,
+            error: (status == WorkflowRunStatus::Failed).then(|| "boom".to_string()),
+            started_at: String::new(),
+            finished_at: None,
+        }
+    }
+
+    fn reply_step(decision: &str, message: &str) -> WorkflowStep {
+        hook_step(
+            WorkflowNodeKind::Output,
+            WorkflowStepStatus::Ok,
+            &json!({"reply": decision, "message": message}).to_string(),
+        )
+    }
+
+    #[test]
+    fn hook_reply_maps_decisions_with_block_first() {
+        use WorkflowRunStatus::Succeeded;
+        let ev = r#"{"hook_event_name":"UserPromptSubmit"}"#;
+        // No reply reached: silent allow.
+        let r = hook_reply(&hook_run(Succeeded, ev, vec![]));
+        assert_eq!((r.exit, r.stdout.as_str(), r.stderr.as_str()), (0, "", ""));
+        // An explicit allow is silent too.
+        let r = hook_reply(&hook_run(Succeeded, ev, vec![reply_step("allow", "")]));
+        assert_eq!((r.exit, r.stdout.as_str(), r.stderr.as_str()), (0, "", ""));
+        // Context beats allow; the JSON names the input's event.
+        let r = hook_reply(&hook_run(
+            Succeeded,
+            ev,
+            vec![
+                reply_step("allow", ""),
+                reply_step("context", "a"),
+                reply_step("context", "b"),
+            ],
+        ));
+        assert_eq!(r.exit, 0);
+        assert!(r.stderr.is_empty());
+        assert_eq!(
+            serde_json::from_str::<Value>(&r.stdout).unwrap(),
+            json!({"hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit", "additionalContext": "a\nb"}})
+        );
+        // No event name in the input: plain text.
+        let r = hook_reply(&hook_run(
+            Succeeded,
+            "not json",
+            vec![reply_step("context", "hi")],
+        ));
+        assert_eq!((r.exit, r.stdout.as_str()), (0, "hi"));
+        // Block beats context; all block messages join; stdout stays empty.
+        let r = hook_reply(&hook_run(
+            Succeeded,
+            ev,
+            vec![
+                reply_step("block", "x"),
+                reply_step("context", "c"),
+                reply_step("block", "y"),
+            ],
+        ));
+        assert_eq!(
+            (r.exit, r.stdout.as_str(), r.stderr.as_str()),
+            (2, "", "x\ny")
+        );
+        // An empty block message still gives Claude Code a reason.
+        let r = hook_reply(&hook_run(Succeeded, ev, vec![reply_step("block", " ")]));
+        assert_eq!(
+            (r.exit, r.stderr.as_str()),
+            (2, "blocked by a naru workflow")
+        );
+        // Only ok output steps count: a skipped or non-output step is ignored.
+        let json_out = json!({"reply": "block", "message": "m"}).to_string();
+        let r = hook_reply(&hook_run(
+            Succeeded,
+            ev,
+            vec![
+                hook_step(
+                    WorkflowNodeKind::Output,
+                    WorkflowStepStatus::Skipped,
+                    &json_out,
+                ),
+                hook_step(WorkflowNodeKind::Cli, WorkflowStepStatus::Ok, &json_out),
+            ],
+        ));
+        assert_eq!(r.exit, 0);
+        // A failed run fails open with exit 1.
+        let r = hook_reply(&hook_run(
+            WorkflowRunStatus::Failed,
+            ev,
+            vec![reply_step("block", "x")],
+        ));
+        assert_eq!((r.exit, r.stdout.as_str()), (1, ""));
+        assert_eq!(r.stderr, "naru: workflow run 7 failed: boom");
+    }
+
+    #[test]
+    fn hook_trigger_branches_to_reply_nodes() {
+        let (st, _d) = store();
+        let wf = st.with(|s| {
+            let wf = s.create_workflow(None, "Guard", None).unwrap().id;
+            let t = node(
+                s,
+                wf,
+                WorkflowNodeKind::Trigger,
+                "T",
+                json!({"mode": "hook"}),
+            );
+            let b = node(
+                s,
+                wf,
+                WorkflowNodeKind::Branch,
+                "Bad?",
+                json!({"op": "contains", "value": "rm -rf"}),
+            );
+            let blk = node(
+                s,
+                wf,
+                WorkflowNodeKind::Output,
+                "Block",
+                json!({"target": "reply", "decision": "block", "message": "refused: {input}"}),
+            );
+            let ok = node(
+                s,
+                wf,
+                WorkflowNodeKind::Output,
+                "Allow",
+                json!({"target": "reply", "decision": "allow"}),
+            );
+            s.create_workflow_edge(wf, t, b, None).unwrap();
+            s.create_workflow_edge(wf, b, blk, Some("true".into()))
+                .unwrap();
+            s.create_workflow_edge(wf, b, ok, Some("false".into()))
+                .unwrap();
+            wf
+        });
+        assert_eq!(
+            st.with(|s| s.get_workflow(wf)).unwrap().trigger,
+            Some(WorkflowTrigger::Hook)
+        );
+        let run = run_workflow(&st, wf, WorkflowTrigger::Hook, "rm -rf /").unwrap();
+        assert_eq!(run.status, WorkflowRunStatus::Succeeded, "{run:?}");
+        assert_eq!(run.trigger, WorkflowTrigger::Hook);
+        let r = hook_reply(&run);
+        assert_eq!((r.exit, r.stderr.as_str()), (2, "refused: rm -rf /"));
+        let run = run_workflow(&st, wf, WorkflowTrigger::Hook, "ls").unwrap();
+        assert_eq!(run.steps[3].status, WorkflowStepStatus::Ok);
+        assert_eq!(run.steps[3].output, r#"{"message":"ls","reply":"allow"}"#);
+        let r = hook_reply(&run);
+        assert_eq!((r.exit, r.stdout.as_str(), r.stderr.as_str()), (0, "", ""));
+        // An allow with an empty input is still a reply, not "nothing to deliver".
+        let run = run_workflow(&st, wf, WorkflowTrigger::Hook, "").unwrap();
+        assert!(
+            run.steps
+                .iter()
+                .any(|s| s.output.contains(r#""reply":"allow""#)),
+            "{run:?}"
+        );
     }
 }

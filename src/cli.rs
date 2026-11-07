@@ -2172,7 +2172,7 @@ EXAMPLES
     },
     /// List workflows as a bare JSON array, by name
     ///
-    /// Each row carries its trigger mode (`trigger`: manual|time|voice|ambient, or
+    /// Each row carries its trigger mode (`trigger`: manual|time|voice|ambient|hook, or
     /// null) and a voice trigger's `trigger_phrase`, so a caller can match a
     /// request to a workflow without loading every graph.
     List {
@@ -2313,9 +2313,22 @@ EXAMPLES
     /// its terminal, and owns the row), and the command prints
     /// `{"run_id","status":"running"}` at once; read the outcome with
     /// `workflow run-show <id>`. A job that cannot start is `unavailable`.
+    ///
+    /// With `--hook` the command answers Claude Code instead of printing the
+    /// record (naru task 1639): all of stdin is the run input, the workflow's
+    /// trigger must be `hook` (else `validation`, exit 1), and the run's
+    /// `reply` output nodes decide. Any `block` wins: its message on stderr,
+    /// exit 2, stdout empty. Else any `context`: exit 0 and stdout
+    /// `{"hookSpecificOutput":{"hookEventName":…,"additionalContext":…}}`
+    /// (the message as plain text when the input has no `hook_event_name`).
+    /// Else allow, or no reply reached: exit 0, nothing printed. A failed
+    /// run prints `naru: workflow run <id> failed: <error>` on stderr and
+    /// exits 1 (a non-blocking error for Claude Code). Conflicts with
+    /// --input, --input-file, --trigger and --detach.
     #[command(after_help = "\
 EXAMPLES
   naru workflow run ambient
+  naru workflow run \"Guard\" --hook < event.json
   naru workflow run \"Label idea\" --input \"buy milk\" --trigger voice
   naru workflow run ambient --input-file notes.txt
   naru workflow run \"Nightly\" --detach")]
@@ -2334,6 +2347,10 @@ EXAMPLES
         /// Start the run in a detached job and print its id at once
         #[arg(long)]
         detach: bool,
+        /// Act as a Claude Code hook: stdin is the input, the exit code and
+        /// stdout answer Claude Code (the workflow's trigger must be `hook`)
+        #[arg(long, conflicts_with_all = ["input", "input_file", "trigger", "detach"])]
+        hook: bool,
         /// Print the run without `steps` and `input` instead of in full
         #[arg(long)]
         quiet: bool,
@@ -2500,7 +2517,7 @@ enum WorkflowNodeCmd {
     /// right of those already there.
     #[command(after_help = "\
 CONFIG BY KIND
-  trigger  {\"mode\":\"manual|time|voice|ambient\",\"every_minutes\":N (time),\"events\":[idea|can-help|wake] (ambient),\"phrase\":\"...\"}
+  trigger  {\"mode\":\"manual|time|voice|ambient|hook\",\"every_minutes\":N (time),\"events\":[idea|can-help|wake] (ambient),\"phrase\":\"...\"}
   schedule {\"every_minutes\":N (1-10080) | \"cron\":\"m h dom mon dow\" (UTC); exactly one} (a second entry node is refused)
   webhook  {\"type\":\"<pin type>\"} (optional, default any; the body POSTed to /api/workflows/<id>/webhook must fit it; a second entry node is refused)
   task-event {\"event\":\"created|status|any\" (default created),\"status\":\"todo|done|…\" (event status/any),\"project\":\"<id or name>\"} (fires on a task create / status change; the run input is JSON {event,task_id,project_id,status,old_status,name}; an entry node, so a second one is refused)
@@ -2516,7 +2533,8 @@ CONFIG BY KIND
   subworkflow {\"workflow\":\"<id or name>\"} (runs that workflow with this node's input; its last step's output comes out; a loop or a chain over 8 workflows is `validation`)
   task     {\"action\":\"create|update|read\",\"project\":\"<id or name>\" (create),\"task\":N (update, read),\"description\",\"status\",\"priority\",\"result\" (any may hold {input}); output is the task JSON}
   output   {\"target\":\"log\",\"log\":\"name\"} | {\"target\":\"task\",\"project\":\"...\"} |
-           {\"target\":\"inbox\",\"task_id\":N,\"kind\":\"task-summary\"} | {\"target\":\"board\"}
+           {\"target\":\"inbox\",\"task_id\":N,\"kind\":\"task-summary\"} | {\"target\":\"board\"} |
+           {\"target\":\"reply\",\"decision\":\"block|allow|context\",\"message\":\"... {input}\"} (a hook workflow's answer; see run --hook)
 
 EXAMPLES
   naru workflow node create ambient trigger Start
@@ -9355,9 +9373,35 @@ fn run_workflow_cmd(cmd: WorkflowCmd) -> Result<()> {
             input_file,
             trigger,
             detach,
+            hook,
             quiet,
         } => {
-            let id = resolve_workflow(&store, &workflow)?.id;
+            let wf = resolve_workflow(&store, &workflow)?;
+            let id = wf.id;
+            if hook {
+                if wf.trigger != Some(WorkflowTrigger::Hook) {
+                    return Err(Error::Validation(format!(
+                        "workflow {:?} does not have a hook trigger; --hook needs a trigger \
+                         node with mode \"hook\"",
+                        wf.name
+                    )));
+                }
+                let mut input = String::new();
+                std::io::Read::read_to_string(&mut std::io::stdin(), &mut input)?;
+                let access = std::sync::Mutex::new(store);
+                let run = workflow::run_workflow(&access, id, WorkflowTrigger::Hook, &input)?;
+                let reply = workflow::hook_reply(&run);
+                if !reply.stdout.is_empty() {
+                    println!("{}", reply.stdout);
+                }
+                if !reply.stderr.is_empty() {
+                    eprintln!("{}", reply.stderr);
+                }
+                if reply.exit != 0 {
+                    std::process::exit(reply.exit);
+                }
+                return Ok(());
+            }
             let mut stdin_used = false;
             let input = resolve_field(input, input_file, &mut stdin_used)?.unwrap_or_default();
             if detach {
