@@ -12276,47 +12276,18 @@ select.library-model-badge {
   }
 }
 
-/* The mood light (mesa task 1557): a faint inset glow round the whole window,
-   never in the way of a click. Off = opacity 0, so it fades both ways. */
-.live-glow {
-  position: fixed;
-  inset: 0;
-  z-index: 9000;
+/* The header equalizer (naru task 2610, `components/LiveEq.tsx`): a canvas
+   along the page header's bottom border, its bars inside the header's bottom
+   padding, never in the way of a click and taking no room in the row. */
+.live-eq {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  width: 100%;
+  height: 14px;
   pointer-events: none;
-  opacity: 0;
-  box-shadow: inset 0 0 90px 12px var(--glow, var(--violet));
-  transition: opacity 0.8s ease;
-}
-.live-glow-on {
-  opacity: 0.22;
-  animation: live-glow-breathe 5s steps(18) infinite;
-}
-/* Stepped to ~30 updates/s, see wf-step-pulse (naru task 2606). */
-@keyframes live-glow-breathe {
-  0%,
-  100% {
-    opacity: 0.14;
-  }
-  12.5%,
-  87.5% {
-    opacity: 0.16;
-  }
-  25%,
-  75% {
-    opacity: 0.2;
-  }
-  37.5%,
-  62.5% {
-    opacity: 0.24;
-  }
-  50% {
-    opacity: 0.26;
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  .live-glow-on {
-    animation: none;
-  }
+  opacity: 0.55;
 }
 
 /* --- Dock (mesa task 1567, docs/dock.md) ----------------------------------

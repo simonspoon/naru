@@ -2478,17 +2478,26 @@ captions. The transcript follows the growing caption (`captionChars` is an
 effect dependency), still only while the reader is near the bottom
 (`liveScroll`).
 
-## The mood light (mesa task 1557)
+## The header equalizer (naru task 2610)
 
-While a conversation is live and this browser is in it, a faint glow rings the
-whole window on every route: a fixed, `pointer-events: none` inset `box-shadow`
-overlay (`components/LiveGlow.tsx`, rendered by `LiveHub`, which is mounted for
-the life of the app) tinted by the **same ranked indicator state** the mark
-wears, never re-derived — speaking amber, hearing cyan, working and resting
-violet, in `liveMark.ts`'s palette (`liveGlow.ts::glowColor`). Listening (the
-resting state), paused and no conversation are no glow; the opacity fades
-(0.8s) rather than snaps. It breathes slowly (5s, opacity 0.14-0.26); under
-`prefers-reduced-motion` the animation is off and the glow is static.
+While a conversation is live and this browser is in it, a thin row of bars
+runs along the page header's bottom border on every route, replacing the
+window-edge glow of mesa task 1557. It is a `pointer-events: none` canvas
+(`components/LiveEq.tsx`, rendered by `LiveHub`), absolutely positioned in the
+header so it takes no room and covers no control; the bars (at most 8px, 3px
+wide with 3px gaps, opacity 0.55, a canvas `shadowBlur` glow) grow upward
+inside the header's bottom padding. It wears the **same ranked indicator
+state** the mark does, never re-derived (`liveEq.ts::eqMode`): hearing (the
+person) `--cyan`, speaking (Naru) `--violet`, working and resting `--amber`.
+Heights come from the mark's own signals — the microphone RMS for the person,
+the playback tap (or the simulated envelope when untapped) for Naru, smoothed
+with `smoothLevel` — and thinking is a slow synthetic pulse (2.6s, 0.12-0.5 of
+full height). Listening, paused and no conversation draw nothing: after a
+sub-second fade (gain eases with a 0.15s time constant) the canvas unmounts
+and its loop stops, so an idle header has no element and no work. The loop is
+one timer-paced rAF at most 30fps, using the mark's
+`markFrameDue`/`markFrameWait` (naru task 2606). The header mark itself is
+unchanged.
 
 ## The thinking cue (mesa task 1620)
 

@@ -3,7 +3,7 @@ import { mainFloor, mainIsCollapsed } from '../mainCollapse'
 import { createPortal } from 'react-dom'
 import * as dockHosts from '../lib/dockHosts'
 import { NaruMark } from './NaruMark'
-import { LiveGlow } from './LiveGlow'
+import { LiveEq } from './LiveEq'
 import { LiveOrb, OrbHeaderControls, OrbPanel } from './LiveOrb'
 import { LiveBoardPanel, type InkFlatten } from './LiveBoardPanel'
 import {
@@ -5753,9 +5753,10 @@ export function LiveHub({
           is not currently showing it — hidden, or the whole panel closed.
           Shows the section *and* opens the panel, since a hidden section
           inside a closed panel is still nothing on screen. */}
-      {/* The mood light (mesa task 1557): the same ranked state, as a faint
-          glow round the whole window on every route. */}
-      <LiveGlow state={live && unlocked ? indicator : null} />
+      {/* The header equalizer (naru task 2610, replacing mesa task 1557's
+          window-edge glow): the same ranked state, as a thin row of bars on
+          the page header's bottom border, on every route. */}
+      <LiveEq state={live && unlocked ? indicator : null} level={level} speechRms={speechRms} />
       {/* The floating orb (mesa task 1553): the mark above every page while a
           conversation is live and this browser is in it — the same terms the
           head's Pause and mute buttons are offered on — wired to the very
