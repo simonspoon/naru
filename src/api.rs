@@ -2032,8 +2032,9 @@ enum ReapVerdict {
 /// which parks that project's whole loop, and one sitting idle with nothing
 /// running for [`REAP_STALL_AFTER`] is probably waiting on something nobody
 /// will answer. A gone session's task is put back to `todo` by
-/// [`todo_reaper_tick`] (naru task 1697, capped), a stalled one is only
-/// reported: the reaper stops only what has finished.
+/// [`todo_reaper_tick`] (naru task 1697, capped), a stalled one's task is
+/// parked in `backlog` there (naru task 2400), and the session is stopped on
+/// a later pass, as for any task that left `in_progress`.
 ///
 /// A **busy** session is left for the next pass rather than stopped: an agent
 /// that has just closed its task is usually still writing its report or its
@@ -2285,7 +2286,48 @@ fn requeue_abandoned(state: &AppState, task_id: i64, job_id: &str) -> Abandoned 
     }
 }
 
-/// The alert for an `in_progress` task whose session has sat idle for an hour.
+/// Parks an `in_progress` task whose session has sat idle for an hour in
+/// `backlog` (naru task 2400): an agent that finished its work and waits on
+/// the person — a release tag, an answer — would otherwise hold the project's
+/// queue slot until someone moved it by hand. The move drops the claim
+/// (`update_task`) and a note says why. Re-checked under the store lock; `false` (the task moved
+/// meanwhile, or a write failed) leaves the plain stalled alert to be filed.
+fn park_stalled(state: &AppState, task_id: i64, job_id: &str) -> bool {
+    let mut store = match state.store.lock() {
+        Ok(s) => s,
+        Err(e) => e.into_inner(),
+    };
+    if !store
+        .get_task(task_id)
+        .is_ok_and(|t| t.status == Status::InProgress)
+    {
+        return false;
+    }
+    let patch = TaskPatch {
+        status: Some(Status::Backlog),
+        ..Default::default()
+    };
+    if store.update_task(task_id, &patch).is_err() {
+        return false;
+    }
+    let _ = store.add_task_note(task_id, &reaper_parked_idle_body(job_id, task_id), None);
+    true
+}
+
+/// The note and alert for a task [`park_stalled`] moved to `backlog`.
+fn reaper_parked_idle_body(job_id: &str, task_id: i64) -> String {
+    format!(
+        "Agent session {job_id} on task {task_id} sat idle with nothing running for {} minutes \
+         while the task was in_progress, so it is probably waiting on a person. The task was \
+         moved to backlog (claim dropped) to free the project queue, and the idle session is \
+         stopped. Read its notes, then `naru task update {task_id} --status todo` to queue it \
+         again, or `--status done` if the work landed.",
+        REAP_STALL_AFTER.as_secs() / 60
+    )
+}
+
+/// The alert for an `in_progress` task whose session has sat idle for an hour
+/// and that [`park_stalled`] could not move.
 fn reaper_stalled_body(job_id: &str, task_id: i64) -> String {
     format!(
         "Agent session {job_id} on task {task_id} looks stalled: the task is still \
@@ -2346,6 +2388,7 @@ fn file_reaper_alert(
 /// transient failure retries.
 fn todo_reaper_tick(state: &AppState) {
     stale_claim_sweep(state);
+    archive_stall_alerts(state);
     let dispatched: Vec<(String, DispatchedSession)> = {
         let map = match state.todo_dispatched.lock() {
             Ok(d) => d,
@@ -2564,7 +2607,15 @@ fn todo_reaper_tick(state: &AppState) {
                 }
             }
             ReapVerdict::AlertStalled => {
-                let body = reaper_stalled_body(&job_id, task_id);
+                let body = if park_stalled(state, task_id, &job_id) {
+                    eprintln!(
+                        "queue-watcher: session {job_id} idle for an hour on task {task_id}; \
+                         parked it in backlog"
+                    );
+                    reaper_parked_idle_body(&job_id, task_id)
+                } else {
+                    reaper_stalled_body(&job_id, task_id)
+                };
                 match file_reaper_alert(state, task_exists, task_id, &job_id, &body) {
                     Ok(()) => memory.stalled_alerted = true,
                     Err(e) => eprintln!(
@@ -2695,6 +2746,19 @@ fn stale_claim_sweep(state: &AppState) {
         // A report, not a question: queued as a notice, raising no live notice.
         let _ = store.add_question(&notice, Some(task_id), None, "notice");
         eprintln!("queue-watcher: swept the stale claim on task {task_id}; back to todo");
+    }
+}
+
+/// Archives the reaper's stall alerts whose task has left `in_progress`
+/// (naru task 2400, `Store::archive_stall_alerts`); a failure is one stderr
+/// line and the next pass tries again.
+fn archive_stall_alerts(state: &AppState) {
+    let mut store = match state.store.lock() {
+        Ok(s) => s,
+        Err(e) => e.into_inner(),
+    };
+    if let Err(e) = store.archive_stall_alerts() {
+        eprintln!("queue-watcher: archiving stall alerts failed: {e}");
     }
 }
 
@@ -18516,7 +18580,7 @@ exit 2
     }
 
     #[test]
-    fn todo_reaper_tick_reports_an_in_progress_session_idle_for_an_hour() {
+    fn todo_reaper_tick_parks_an_in_progress_task_whose_session_idles_an_hour() {
         // SAFETY: ENV_LOCK, as above.
         let _env = attachments::ENV_LOCK
             .lock()
@@ -18535,6 +18599,12 @@ exit 2
             let project = new_project(&state, None);
             let task = new_task(&state, project);
             set_status(&state, task, Status::InProgress);
+            state
+                .store
+                .lock()
+                .unwrap()
+                .claim_task(task, "agent-1", false)
+                .unwrap();
             seed_dispatch(&state, "job0001", task);
             std::fs::write(
                 &agents_file,
@@ -18558,15 +18628,29 @@ exit 2
             let body = state.store.lock().unwrap().list_inbox_items(None).unwrap()[0]
                 .body
                 .clone();
-            assert!(body.contains("claude attach job0001"), "{body}");
-            // Kept, not stopped, and not reported twice.
-            assert_eq!(dispatched_task(&state, "job0001"), Some(task));
+            assert!(body.contains("session job0001"), "{body}");
+            assert!(body.contains("moved to backlog"), "{body}");
+            // Parked (naru task 2400): backlog, claim dropped, a note saying why,
+            // so the project's queue slot is free.
+            let parked = state.store.lock().unwrap().get_task(task).unwrap();
+            assert_eq!(parked.status, Status::Backlog);
+            assert_eq!(parked.owner, None);
+            let notes = state.store.lock().unwrap().list_task_notes(task).unwrap();
+            assert!(
+                notes.iter().any(|n| n.body.contains("moved to backlog")),
+                "{notes:?}"
+            );
+            // Not stopped on the pass that parked it, nor reported twice; the
+            // next pass stops the idle session of a task that left in_progress.
             assert!(stops(&stop_log).is_empty());
             todo_reaper_tick(&state);
             assert_eq!(inbox_rows(&state), expected, "the alert is filed once");
+            assert_eq!(stops(&stop_log), vec!["job0001".to_string()]);
+            assert_eq!(dispatched_task(&state, "job0001"), None);
+            let item = &state.store.lock().unwrap().list_inbox_items(None).unwrap()[0];
             assert_eq!(
-                state.store.lock().unwrap().get_task(task).unwrap().status,
-                Status::InProgress
+                item.archived_at, None,
+                "the park alert is not a stall alert"
             );
 
             unsafe { std::env::remove_var("MESA_WATCH_TODO_STALL_MS") };

@@ -8017,6 +8017,32 @@ impl Store {
         self.get_inbox_item(id)
     }
 
+    /// Archives every live stall alert the queue reaper filed whose task is no
+    /// longer `in_progress` (naru task 2400): once the task has moved, closed
+    /// or gone, an alert saying it is stalled is noise. A stall alert is a
+    /// `task-summary` by the reaper (`queue-reaper`, or `todo-reaper` before
+    /// its rename) whose body is one of its three stall texts — silent, looks
+    /// stalled, or ended without closing; its other alerts (a park, a
+    /// force-stop) stay. Outcome `report`, a fixed reason. Returns how many.
+    pub fn archive_stall_alerts(&mut self) -> Result<usize> {
+        Ok(self.conn.execute(
+            "UPDATE inbox SET archived_at = datetime('now'), \
+                    archive_reason = 'its task left in_progress', archive_outcome = ?1, \
+                    updated_at = datetime('now') \
+             WHERE archived_at IS NULL AND kind = ?2 \
+               AND author IN ('queue-reaper', 'todo-reaper') \
+               AND (body LIKE '%has been silent for % minutes while the task is still in_progress%' \
+                    OR body LIKE '%looks stalled: the task is still in_progress%' \
+                    OR body LIKE '%ended without closing task %, which is still in_progress%') \
+               AND task_id NOT IN (SELECT id FROM tasks WHERE status = ?3)",
+            (
+                ArchiveOutcome::Report.as_str(),
+                InboxKind::TaskSummary.as_str(),
+                Status::InProgress.as_str(),
+            ),
+        )?)
+    }
+
     /// Deletes an inbox item; returns the destroyed record (the recoverable
     /// echo — there is no history table for the inbox).
     pub fn delete_inbox_item(&mut self, id: i64) -> Result<InboxItem> {
@@ -17177,6 +17203,63 @@ mod tests {
             .get_inbox_item(store.conn.last_insert_rowid())
             .unwrap();
         assert_eq!(legacy.kind, InboxKind::TaskSummary);
+    }
+
+    /// Naru task 2400: the reaper's stall alerts are archived once their task
+    /// leaves `in_progress`; its other alerts, other authors' items and alerts
+    /// on a still-`in_progress` task stay live.
+    #[test]
+    fn archive_stall_alerts_archives_only_stall_alerts_of_tasks_that_moved() {
+        let (mut store, _dir) = temp_store();
+        let moved = origin_task(&mut store);
+        let running = origin_task(&mut store);
+        let set = |store: &mut Store, id, status| {
+            let patch = TaskPatch {
+                status: Some(status),
+                ..Default::default()
+            };
+            store.update_task(id, &patch).unwrap();
+        };
+        set(&mut store, moved, Status::InProgress);
+        set(&mut store, running, Status::InProgress);
+        let silent = "Agent session a on task 1 (x) has been silent for 21 minutes while the task \
+                      is still in_progress. See what it is waiting on.";
+        let stalled = "Agent session b on task 1 looks stalled: the task is still in_progress, \
+                       but the session has been idle.";
+        let ended = "Agent session c ended without closing task 1, which is still in_progress. \
+                     The project queue is stalled until the task is moved.";
+        let mut add = |author, body, task| {
+            store
+                .create_inbox_item(Some(author), body, InboxKind::TaskSummary, task)
+                .unwrap()
+                .id
+        };
+        let a = add("queue-reaper", silent, moved);
+        let b = add("todo-reaper", stalled, moved);
+        let c = add("queue-reaper", ended, moved);
+        let park = add(
+            "queue-reaper",
+            "Agent session d died without closing it.",
+            moved,
+        );
+        let other = add("someone", silent, moved);
+        let live = add("queue-reaper", silent, running);
+        assert_eq!(
+            store.archive_stall_alerts().unwrap(),
+            0,
+            "both still in_progress"
+        );
+        set(&mut store, moved, Status::Backlog);
+        assert_eq!(store.archive_stall_alerts().unwrap(), 3);
+        for id in [a, b, c] {
+            let item = store.get_inbox_item(id).unwrap();
+            assert!(item.archived_at.is_some(), "{id}");
+            assert_eq!(item.archive_outcome, Some(ArchiveOutcome::Report));
+        }
+        for id in [park, other, live] {
+            assert_eq!(store.get_inbox_item(id).unwrap().archived_at, None, "{id}");
+        }
+        assert_eq!(store.archive_stall_alerts().unwrap(), 0, "idempotent");
     }
 
     /// Task 847: the origin task is required and must exist — an unknown one is

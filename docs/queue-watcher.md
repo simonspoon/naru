@@ -320,8 +320,14 @@ because someone ran `mesa serve`.
       been so **continuously** for `REAP_STALL_AFTER` — the same
       `STALE_CLAIM_MINUTES` (60) hour `task next`'s stale-claim diagnostic
       uses; the clock resets whenever it is seen busy or with live work —
-      files one alert per job id saying the agent looks stalled and naming
-      `claude attach <id>`, and keeps the entry.
+      **parks** the task (naru task 2400): an agent idle that long has
+      usually finished and is waiting on the person (a release tag, an
+      answer), and its `in_progress` would otherwise hold the project's queue
+      slot. The task goes to `backlog` with its claim dropped and a task note
+      saying why, one alert per job id says the same, and the next pass stops
+      the idle session as for any task that left `in_progress`. If the task
+      moved meanwhile or the write fails, the old alert (the agent looks
+      stalled, `claude attach <id>`) is filed instead and the entry kept.
     - **Stall watchdog** (naru task 1953). The same silence clock, but at
       `watchers.stall-minutes` (default 20, `MESA_WATCH_TODO_STALL_MS` for
       gates) and acting only while the task is still `in_progress`. Stage 1:
@@ -336,6 +342,13 @@ because someone ran `mesa serve`.
     Each alert is fire-once through flags on the dispatch's own in-memory
     entry, set only once the filing succeeded, so a failed filing is retried
     on the next pass.
+    - **Stall alerts expire** (naru task 2400). Every reaper pass archives
+      (outcome `report`, reason "its task left in_progress") each live
+      `task-summary` by `queue-reaper` (or the older `todo-reaper`) whose body
+      is a stall text — the watchdog's "has been silent for", the hour rule's
+      "looks stalled", or "ended without closing task" — once its task is no
+      longer `in_progress` (`Store::archive_stall_alerts`). Park, force-stop
+      and other authors' items stay.
   - **Re-dispatching a task stops the session it supersedes**, at the moment
     of the spawn rather than on a reaper pass: Naru starting a second agent on
     a task says the first is finished with it, whatever the task's status
