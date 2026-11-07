@@ -944,7 +944,10 @@ ok "live board push --workflow: an SVG snapshot (kind diagram) with nodes and br
 run 0 "$NARU" workflow create ambient --description "Capture a spoken thought"
 run 0 "$NARU" workflow node create ambient trigger Start --config '{"mode":"manual","phrase":"capture a thought"}'
 A1=$(jqs .id)
-CMD='f=$(mktemp -t naru-ambient); sox -d -q -t wav "$f" trim 0 10; auris -q --format json < "$f" | jq -rs "map(select(.type==\"transcript\")) | last | .text // \"\""; rm -f "$f"'
+# proc::bash puts the toolchain dirs (/opt/homebrew/bin, ~/.local/bin) ahead of
+# the inherited PATH, so the stubs go first inside the command itself, or a
+# real sox/auris on this machine would record from the mic.
+CMD="PATH=\"$STUB_DIR:\$PATH\"; "'f=$(mktemp -t naru-ambient); sox -d -q -t wav "$f" trim 0 10; auris -q --format json < "$f" | jq -rs "map(select(.type==\"transcript\")) | last | .text // \"\""; rm -f "$f"'
 run 0 "$NARU" workflow node create ambient cli Transcribe --config "$(jq -nc --arg c "$CMD" '{command: $c, timeout_secs: 30}')"
 A2=$(jqs .id)
 run 0 "$NARU" workflow node create ambient branch Gate --config '{"op":"regex","value":"[[:alpha:]]"}'
@@ -962,7 +965,7 @@ run 0 "$NARU" workflow list
 [ "$(jq -r '.[] | select(.name == "ambient") | .trigger_phrase' <<<"$STDOUT")" = "capture a thought" ] || fail "the voice phrase is listed"
 
 printf 'buy milk on the way home' > "$STUB_DIR/heard"
-PATH="$STUB_DIR:$PATH" run 0 "$NARU" workflow run ambient --trigger voice
+run 0 "$NARU" workflow run ambient --trigger voice
 [ "$(jqs .status)" = "succeeded" ] || fail "ambient run: $STDOUT"
 [ "$(jqs '.steps[1].output')" = "buy milk on the way home" ] || fail "Transcribe printed the transcript: $(jqs '.steps[1].output')"
 [ "$(jqs '.steps | map(.status) | join(",")')" = "ok,ok,ok,ok,ok" ] || fail "every step ran: $STDOUT"
@@ -971,7 +974,7 @@ run 0 "$NARU" workflow log ambient
 ok "ambient capture: record -> transcribe -> gate -> label -> log, end to end over stubs"
 
 : > "$STUB_DIR/heard"   # silence
-PATH="$STUB_DIR:$PATH" run 0 "$NARU" workflow run ambient
+run 0 "$NARU" workflow run ambient
 [ "$(jqs '.steps | map(.status) | join(",")')" = "ok,ok,ok,skipped,skipped" ] || fail "silence stops at the gate: $STDOUT"
 run 0 "$NARU" workflow log ambient
 [ "$(jqs length)" = "1" ] || fail "silence logged nothing"
