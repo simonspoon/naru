@@ -2504,25 +2504,26 @@ unchanged.
 The violet "working" mark has an audible twin. When the page posts a `user`
 turn (the held-recording flush, Enter on the typed box, a pasted-image turn —
 all through `postNow`) it plays one soft two-note chime (880 Hz then 1318.5 Hz,
-sine, exponential decay, peak 0.05), then a slow 330 Hz sine pulse (swell 0.6 s,
-fade 0.8 s, every 2 s, peak 0.03) until Naru's speech plays; the pulse ramps to
-silence in 30 ms.
+sine, exponential decay, peak 0.05). That chime is the only sound: the slow
+330 Hz pulse that used to follow it until Naru's speech played was removed
+(naru task 2611), so the wait itself is silent.
 
 It chimes **once per utterance** (a recording flushed as several posts arms on
 its carrier piece, or on any piece while not yet armed) and not at all — and
-does not arm — if Naru is speaking or the page is paused at that moment. It
-ends on speech playing, pause, the conversation ending or the page leaving it,
-a 3-minute cap, and once the **reply** has come with nothing for *this page* to
-say: a Naru turn (role `naru` or legacy `mesa`) newer than the newest turn held
-when the cue armed, or the session having been seen `working` and no longer.
+does not arm — if Naru is speaking or the page is paused at that moment. The
+armed state, which is what holds a second chime back, ends on speech playing,
+pause, the conversation ending or the page leaving it, a 3-minute cap, and
+once the **reply** has come with nothing for *this page* to say: a Naru turn
+(role `naru` or legacy `mesa`) newer than the newest turn held when the cue
+armed, or the session having been seen `working` and no longer.
 The reply rule is what ends it for a fast action-only reply whose
 `working_since` the 2s poll never caught, and for a page that is not the
 session's speaker (its pending speech is not ours, `spokenTurnVerdict` not
-`speak`). Until one of those the cue holds. The decisions and envelope numbers
+`speak`). Until one of those it stays armed. The decisions and envelope numbers
 are pure (`liveThinkingCue.ts`); the cue plays on the hub's already-unlocked
 `clock` context straight to `destination`, never through the speech tap, so it
 does not move the mark's level. No setting. The microphone is open while it
-plays, so it is kept quiet and relies on the browser's default echo
+rings, so it is kept quiet and relies on the browser's default echo
 cancellation on the capture stream; a cue sounding through speakers into a
 sensitive mic may produce an empty transcription, which is dropped.
 

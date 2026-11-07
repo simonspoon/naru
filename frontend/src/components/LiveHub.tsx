@@ -1900,8 +1900,8 @@ export function LiveHub({
   // unlocked.
   const player = useRef<HTMLAudioElement | null>(null)
   const clock = useRef<AudioContext | null>(null)
-  // The audible "thinking" cue (mesa task 1620): a chime when a user turn is
-  // posted, then a quiet pulse until Naru's speech plays. Decisions in
+  // The audible "sent" cue (mesa task 1620): a chime when a user turn is
+  // posted (the pulse that followed it was removed, naru task 2611). Decisions in
   // `liveThinkingCue.ts`; this is only its context and its state.
   const thinkingCue = useRef<ThinkingCue | null>(null)
   const [thinking, setThinking] = useState<ThinkingState>(IDLE)
@@ -4796,8 +4796,9 @@ export function LiveHub({
   })
 
   // The thinking cue (mesa task 1620): `nextThinking` decides when it is
-  // over (speech, pause, end, leaving, or work finished with nothing to say);
-  // the pulse follows `armed`, with a cap for a session nothing answers.
+  // over (speech, pause, end, leaving, or work finished with nothing to say),
+  // with a cap for a session nothing answers. Armed, it only keeps the chime
+  // to once per utterance; the pulse that followed it is gone (naru task 2611).
   const working = session?.working_since != null
   const thinkingNext = nextThinking(thinking, {
     live,
@@ -4814,12 +4815,8 @@ export function LiveHub({
   if (thinkingNext !== thinking) setThinking(thinkingNext)
   useEffect(() => {
     if (!thinking.armed) return undefined
-    thinkingCue.current?.startPulse()
     const cap = window.setTimeout(() => setThinking(IDLE), MAX_ARMED_MS)
-    return () => {
-      window.clearTimeout(cap)
-      thinkingCue.current?.stop()
-    }
+    return () => window.clearTimeout(cap)
   }, [thinking.armed])
 
   const groups = turnGroups(turns)

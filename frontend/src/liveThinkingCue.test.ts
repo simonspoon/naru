@@ -3,10 +3,8 @@ import {
   armedState,
   CHIME,
   IDLE,
-  PULSE_PEAK,
   nextThinking,
   pendingSpeech,
-  pulseBeat,
 } from './liveThinkingCue'
 import type { LiveTurn } from './types/LiveTurn'
 
@@ -19,13 +17,6 @@ describe('envelope', () => {
       expect(n.dur).toBeGreaterThanOrEqual(0.15)
       expect(n.dur).toBeLessThanOrEqual(0.25)
     }
-  })
-  it('pulse swells over 0.6s and fades over 0.8s from and to silence', () => {
-    expect(pulseBeat()).toEqual([
-      [0, 0],
-      [0.6, PULSE_PEAK],
-      [0.6 + 0.8, 0],
-    ])
   })
 })
 
@@ -63,7 +54,7 @@ describe('nextThinking', () => {
     expect(seen.sawWorking).toBe(true)
     expect(nextThinking(seen, base)).toBe(IDLE)
   })
-  it('keeps pulsing when work ended but speech is pending for this page', () => {
+  it('stays armed when work ended but speech is pending for this page', () => {
     const seen = { ...ARMED, sawWorking: true }
     const turns = [user, T(2, 'naru', 'hello')]
     expect(nextThinking(seen, { ...base, turns })).toBe(seen)

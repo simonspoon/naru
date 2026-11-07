@@ -1,15 +1,15 @@
 /**
- * The audible half of the violet "working" state (mesa task 1620): when the
- * page posts a `user` turn it plays one soft two-note chime, then a slow quiet
- * pulse until Naru's speech starts. Pure decisions and envelope numbers live
- * here; `LiveHub` owns the one `AudioContext` and calls `playChime` /
- * `startPulse` on it.
+ * The audible "sent" cue (mesa task 1620): when the page posts a `user` turn
+ * it plays one soft two-note chime. The slow pulse that used to follow it
+ * until Naru spoke was removed (naru task 2611). The armed state still tracks
+ * the turn until the reply so the chime rings once per utterance. Pure
+ * decisions and envelope numbers live here; `LiveHub` owns the one
+ * `AudioContext` and calls `chime` on it.
  *
- * Quiet on purpose. The capture stream is open while the pulse plays (the
- * microphone only shuts while Naru *speaks*), so the cue must not be heard as
- * speech: peak gains are 0.03-0.05, a pure sine, and the cue goes straight to
- * `ctx.destination` — never through the speech tap, so it cannot move the
- * mark's level either.
+ * Quiet on purpose. The capture stream is open (the microphone only shuts
+ * while Naru *speaks*), so the cue must not be heard as speech: peak gain
+ * 0.05, a pure sine, and the cue goes straight to `ctx.destination` — never
+ * through the speech tap, so it cannot move the mark's level either.
  */
 import type { LiveTurn } from './types/LiveTurn'
 import { isNaruRole } from './liveTurns'
@@ -29,26 +29,8 @@ export const CHIME: readonly Note[] = [
   { freq: 1318.5, start: 0.12, dur: 0.22, peak: 0.05 },
 ]
 
-export const PULSE_HZ = 330
-export const PULSE_PEAK = 0.03
-export const PULSE_SWELL_S = 0.6
-export const PULSE_FADE_S = 0.8
-export const PULSE_PERIOD_S = 2
-/** The pulse begins once the chime has rung out. */
-export const PULSE_DELAY_S = 0.5
 /** Safety cap: a cue still armed this long is a session nothing is answering. */
 export const MAX_ARMED_MS = 3 * 60 * 1000
-/** The ramp that silences the pulse the moment speech plays. */
-export const STOP_RAMP_S = 0.03
-
-/** Gain breakpoints of one pulse beat: [seconds after beat start, gain]. */
-export function pulseBeat(): [number, number][] {
-  return [
-    [0, 0],
-    [PULSE_SWELL_S, PULSE_PEAK],
-    [PULSE_SWELL_S + PULSE_FADE_S, 0],
-  ]
-}
 
 export interface ThinkingState {
   armed: boolean
@@ -114,15 +96,10 @@ export function nextThinking(
 export interface ThinkingCue {
   /** The two-note chime, once. */
   chime(): void
-  /** Begin the slow pulse after the chime's delay; a no-op while running. */
-  startPulse(): void
-  /** Ramp the pulse to silence in `STOP_RAMP_S` and stop its oscillator. */
-  stop(): void
 }
 
 /** The cue on `ctx`, wired straight to its destination (never the speech tap). */
 export function createThinkingCue(ctx: AudioContext): ThinkingCue {
-  let pulse: { osc: OscillatorNode; gain: GainNode; timer: number } | null = null
   return {
     chime() {
       const t0 = ctx.currentTime
@@ -138,43 +115,6 @@ export function createThinkingCue(ctx: AudioContext): ThinkingCue {
         osc.start(t0 + n.start)
         osc.stop(t0 + n.start + n.dur + 0.05)
       }
-    },
-    startPulse() {
-      if (pulse !== null) return
-      const osc = ctx.createOscillator()
-      const gain = ctx.createGain()
-      osc.type = 'sine'
-      osc.frequency.value = PULSE_HZ
-      gain.gain.value = 0
-      osc.connect(gain).connect(ctx.destination)
-      osc.start()
-      const beat = (at: number) => {
-        gain.gain.setValueAtTime(0, at)
-        for (const [dt, g] of pulseBeat().slice(1)) gain.gain.linearRampToValueAtTime(g, at + dt)
-      }
-      let next = ctx.currentTime + PULSE_DELAY_S
-      beat(next)
-      // Two beats are always scheduled ahead, so a timer that fires late never
-      // leaves a gap.
-      next += PULSE_PERIOD_S
-      beat(next)
-      const timer = window.setInterval(() => {
-        next += PULSE_PERIOD_S
-        beat(next)
-      }, PULSE_PERIOD_S * 1000)
-      pulse = { osc, gain, timer }
-    },
-    stop() {
-      if (pulse === null) return
-      const { osc, gain, timer } = pulse
-      pulse = null
-      window.clearInterval(timer)
-      const now = ctx.currentTime
-      gain.gain.cancelScheduledValues(now)
-      gain.gain.setValueAtTime(gain.gain.value, now)
-      gain.gain.linearRampToValueAtTime(0, now + STOP_RAMP_S)
-      osc.stop(now + STOP_RAMP_S + 0.01)
-      osc.onended = () => gain.disconnect()
     },
   }
 }
