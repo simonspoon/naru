@@ -413,6 +413,123 @@ fn live_warm_tick(state: &AppState) {
     }
 }
 
+/// How often the live recycle check runs (naru task 2402). Always on, no flag:
+/// it does nothing without a live session whose idle agent has outgrown its
+/// context. `NARU_WATCH_LIVE_RECYCLE_TICK_MS` is the test seam.
+fn watch_live_recycle_tick() -> Duration {
+    crate::core::env::var("WATCH_LIVE_RECYCLE_TICK_MS")
+        .and_then(|s| s.parse().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(Duration::from_secs(60))
+}
+
+/// One recycle pass (naru task 2402, `docs/live.md`): the agent driving the
+/// live session is handed off by Naru itself once its run is idle between
+/// turns, nothing is waiting for it, no delegate runs inside it, and its
+/// context has reached `live::recycle_tokens` — the agent told to hand off at
+/// `live.handoff-tokens` often does not, and every turn re-reads the whole
+/// context. The successor's note is the crash-recovery summary of the last
+/// turns, written with no store lock held; the conditions are checked again
+/// under the lock right before `live::handoff_session`, which stops the idle
+/// predecessor and reclaims anything pushed to it meanwhile.
+fn live_recycle_tick(state: &AppState) {
+    fn lock(m: &Mutex<Store>) -> std::sync::MutexGuard<'_, Store> {
+        m.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    let runs = crate::core::runner::runs_dir();
+    let ceiling = live::recycle_tokens(crate::core::config::live_handoff_tokens());
+    // Everything the decision reads, for the session as it is now; `None`
+    // when there is nothing to recycle.
+    let due = |store: &Store| -> Option<(crate::core::LiveSession, i64)> {
+        let session = store.current_live_session().ok()??;
+        let receipt = session.agent_id.clone()?;
+        let job = live::run_job_of(Some(&receipt))?;
+        let job = crate::core::runner::job_in(&runs, job).ok()?;
+        let (results, turns) = store.unacked_live_items(session.id).ok()?;
+        let pending = !results.is_empty()
+            || !turns.is_empty()
+            || session.working_since.is_some()
+            || session.resting_since.is_some()
+            || crate::core::runner::busy_in(&runs, &job.job_id);
+        let context = crate::core::cc::session_pulse(&job.session_id).context_tokens;
+        if !live::recycle_due(job.status, context, ceiling, pending) {
+            return None;
+        }
+        // The delegate probe reads transcripts, so it runs only once the
+        // cheap checks have passed.
+        if !live::running_delegates(&receipt).is_empty() {
+            return None;
+        }
+        Some((session, context.unwrap_or_default()))
+    };
+    // A failed handoff is retried only after a pause, since each try pays for
+    // a note call: (session, lease, when) of the last failure.
+    static FAILED: Mutex<Option<(i64, i64, Instant)>> = Mutex::new(None);
+    let newest_turn = |store: &Store, id: i64| {
+        store
+            .last_live_turns(id, 1)
+            .ok()
+            .and_then(|t| t.last().map(|t| t.id))
+    };
+    let (session, context, turns, prompts, dir, name) = {
+        let store = lock(&state.store);
+        let Some((session, context)) = due(&store) else {
+            return;
+        };
+        if let Some((id, lease, at)) = *FAILED.lock().unwrap_or_else(|e| e.into_inner())
+            && (id, lease) == (session.id, session.lease)
+            && at.elapsed() < Duration::from_secs(10 * 60)
+        {
+            return;
+        }
+        let Ok(turns) = store.last_live_turns(session.id, 200) else {
+            return;
+        };
+        let prompts = crate::core::library::prompts(&store).map_err(|e| e.to_string());
+        let Ok((dir, name)) = live_agent_dir(&store, session.project_id, session.id) else {
+            return;
+        };
+        (session, context, turns, prompts, dir, name)
+    };
+    let prompt = live::recovery_note_prompt(&turns, live::RECYCLE_WHAT);
+    let note = prompts
+        .and_then(|prompts| live::recovery_note(session.id, &prompt, &prompts, &dir))
+        .unwrap_or_else(|e| {
+            eprintln!(
+                "live-recycle: session {}: no handoff note ({e}), using the fallback",
+                session.id
+            );
+            live::RECYCLE_NOTE_FALLBACK.to_string()
+        });
+    let mut store = lock(&state.store);
+    // The note took a while: hand off only the same agent, still due, with
+    // no turn the note has not read.
+    let Some((now, _)) = due(&store) else {
+        return;
+    };
+    if now.agent_id != session.agent_id
+        || now.lease != session.lease
+        || newest_turn(&store, now.id) != turns.last().map(|t| t.id)
+    {
+        return;
+    }
+    match live::handoff_session(&mut store, &now, &note, &dir, &name) {
+        Ok(rebound) => {
+            eprintln!(
+                "live-recycle: session {} handed off at {context} context tokens (ceiling \
+                 {ceiling}), lease {} -> {}",
+                rebound.id, now.lease, rebound.lease
+            );
+            state.agents_gen.fetch_add(1, Ordering::SeqCst);
+        }
+        Err(e) => {
+            eprintln!("live-recycle: session {}: {e}", now.id);
+            *FAILED.lock().unwrap_or_else(|e| e.into_inner()) =
+                Some((now.id, now.lease, Instant::now()));
+        }
+    }
+}
+
 /// How often the live push loop looks for undelivered turns (naru task 2051);
 /// `NARU_WATCH_LIVE_PUSH_TICK_MS` is the test seam. `NARU_LIVE_PUSH=off`
 /// turns the loop off, leaving `listen` as the only way in.
@@ -3298,6 +3415,17 @@ pub fn serve(flags: ServeFlags) -> crate::core::Result<()> {
                     ticker.tick().await;
                     let state = watch_state.clone();
                     let _ = tokio::task::spawn_blocking(move || live_warm_tick(&state)).await;
+                }
+            });
+        }
+        {
+            let watch_state = state.clone();
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(watch_live_recycle_tick());
+                loop {
+                    ticker.tick().await;
+                    let state = watch_state.clone();
+                    let _ = tokio::task::spawn_blocking(move || live_recycle_tick(&state)).await;
                 }
             });
         }

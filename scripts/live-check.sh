@@ -5118,6 +5118,58 @@ if command -v sqlite3 >/dev/null; then
   ok "keep-warm: an idle unattended session gets one cache-warm turn, handed to listen once"
 fi
 
+# Recycle (naru task 2402): an always-on serve tick hands the conversation off
+# itself once the idle agent's context reaches live::recycle_tokens (a fifth
+# over live.handoff-tokens, 180000 by default), with a recovery-style note.
+# The run's context is read from a synthetic transcript under its session uuid.
+"$MESA" live stop >/dev/null 2>&1 || true
+run 0 "$MESA" live start "live gate project"
+RY_OLD=$(jqs .agent_id)
+RY_LEASE=$(jqs .lease)
+use_agent "$RY_OLD"
+wait_for "the recycled run to go idle" bash -c "[ \"\$(jq -r .status '$RUNS/$(run_id "$RY_OLD")/job.json')\" = idle ]"
+RY_TX="$HOME/.claude/projects/-live-gate/$(run_session "$RY_OLD").jsonl"
+mkdir -p "$(dirname "$RY_TX")"
+ry_context() { # <tokens> — the run's newest main-thread turn occupies that much
+  printf '{"type":"assistant","timestamp":"2026-11-07T00:00:00Z","message":{"id":"m1","role":"assistant","model":"claude-opus-5-5","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":1,"cache_read_input_tokens":%s,"cache_creation_input_tokens":0,"output_tokens":5}}}\n' "$(($1 - 1))" >"$RY_TX"
+}
+ry_context 179999
+printf '%s' '{"note":"RECYCLE-NOTE-MARKER: still on item 3."}' > "$STUB_DIR/recovery-out.json"
+RY_RC=$(p_base recovery)
+PORT=$(free_port)
+MESA_WATCH_LIVE_RECYCLE_TICK_MS=300 "$MESA" serve --port "$PORT" >"$TMP/serve-recycle.log" 2>&1 &
+SERVER_PID=$!
+for _ in $(seq 1 50); do
+  curl -fs "http://127.0.0.1:$PORT/api/version" >/dev/null 2>&1 && break
+  sleep 0.1
+done
+sleep 1.5
+run 0 "$MESA" live status
+[ "$(jqs .agent_id)" = "$RY_OLD" ] || fail "recycle: one token under the ceiling must not hand off (got $(jqs .agent_id))"
+[ "$(pc recovery)" = "$RY_RC" ] || fail "recycle: under the ceiling writes no note"
+ry_context 180000
+wait_for "the recycle handoff" bash -c "[ \"\$('$MESA' live status | jq -r .agent_id)\" != '$RY_OLD' ]"
+run 0 "$MESA" live status
+RY_NEW=$(jqs .agent_id)
+[ "$(jqs .status)" = "live" ] || fail "recycle: the session stays live"
+[ "$(jqs .lease)" = "$((RY_LEASE + 1))" ] || fail "recycle: the lease is bumped (got $(jqs .lease))"
+[ "$(pc recovery)" = "$((RY_RC + 1))" ] || fail "recycle: exactly one note call"
+grep -q 'context grew too large' "$STUB_DIR/p-recovery-prompt" || fail "recycle: the note prompt says why"
+use_agent "$RY_NEW"
+grep -q 'RECYCLE-NOTE-MARKER' "$STUB_DIR/last-prompt" || fail "recycle: the successor's prompt carries the note"
+wait_run_stopped "$RY_OLD"
+grep -q "live-recycle: session .* handed off at 180000 context tokens" "$TMP/serve-recycle.log" ||
+  fail "recycle: the serve log names the handoff ($(cat "$TMP/serve-recycle.log"))"
+sleep 1.5
+run 0 "$MESA" live status
+[ "$(jqs .agent_id)" = "$RY_NEW" ] || fail "recycle: the fresh successor is not recycled again"
+kill "$SERVER_PID" 2>/dev/null || true
+wait "$SERVER_PID" 2>/dev/null || true
+SERVER_PID=
+"$MESA" live stop >/dev/null 2>&1 || true
+rm -rf "$HOME/.claude/projects/-live-gate" "$STUB_DIR/recovery-out.json"
+ok "recycle: an idle agent at the ceiling is handed off once with a note (lease bumped, old run stopped); one token under is left alone"
+
 # One listener per lease (naru task 2072): a second lease-carrying listen
 # supersedes the first, which delivers nothing; the newest gets the result.
 SUP_DB="$TMP/supersede.db"

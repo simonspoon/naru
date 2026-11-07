@@ -1364,7 +1364,9 @@ live agent hands the conversation off. Absent or `null` ⇒
 every spawn (`config::live_handoff_tokens`, both spawn sites and the handoff
 successor) and stated in the spawn prompt; a hand-edited out-of-range value is
 clamped there, and an unreadable file is the default. `naru live context`
-reports it as `handoff_tokens` beside `over_handoff`.
+reports it as `handoff_tokens` beside `over_handoff`. A fifth above it
+(`live::recycle_tokens`, 180000 by default) is where `serve` hands off an idle
+agent that never did (naru task 2402, `docs/live.md`).
 
 ### Routes
 

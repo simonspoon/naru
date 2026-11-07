@@ -7646,7 +7646,7 @@ fn run_live(cmd: LiveCmd) -> Result<()> {
                 // turns still ride along in the prompt.
                 let (dir, _) = live_agent_dir(&store, session.project_id, session.id)?;
                 let turns = store.last_live_turns(session.id, 200)?;
-                let prompt = live::recovery_note_prompt(&turns);
+                let prompt = live::recovery_note_prompt(&turns, "crashed");
                 let prompts = crate::core::library::prompts(&store)?;
                 note =
                     live::recovery_note(session.id, &prompt, &prompts, &dir).unwrap_or_else(|e| {

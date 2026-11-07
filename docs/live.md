@@ -665,6 +665,47 @@ agent, an unlisted job or an unreadable transcript, and the head's toolbar
 (`38.5k ctx 12:04`, `liveHead.ts::contextLabel`, in violet just left of the
 clock) then shows only the elapsed time.
 
+### Naru recycles an agent that does not hand off (naru task 2402)
+
+Rule 11 is advice, and the agent often ignores it. Three long sessions
+measured for this task ran to 267k, 210k and 160k context tokens over 17.5,
+7.4 and 15.4 hours, each turn re-reading everything before it. So the
+handoff has a backstop that runs whether or not the agent wants it.
+
+`live_recycle_tick` in `src/api.rs` runs every minute in every `serve`, with
+no flag, like the keep-warm tick (`NARU_WATCH_LIVE_RECYCLE_TICK_MS` is the
+test seam). It does nothing unless **all** of these hold for the current
+session (`live::recycle_due`, pure, plus a delegate probe):
+
+- the agent is a `run:<job>` receipt whose run is `idle` with nothing queued
+  in its inbox (`runner::busy_in`): between turns, not in the middle of one;
+- nothing is waiting for it: no undelivered turns or results, no
+  `working_since`, and no `resting_since`;
+- no delegate is running inside it (`live::running_delegates`);
+- its occupied context (`cc::session_pulse`, the figure `live context`
+  reports) has reached **`live::recycle_tokens`**, a fifth above
+  `live.handoff-tokens`: 180000 by default. The margin gives the agent's own
+  handoff, which has a better note, the first chance.
+
+When they all hold, Naru writes the note the agent did not write. It uses the
+crash-recovery summariser (`live::recovery_note_prompt` with
+`live::RECYCLE_WHAT`, one tool-less haiku `-p` call over the last 200 turns,
+fenced as data) and holds no store lock while it does. If that call fails,
+the note is `live::RECYCLE_NOTE_FALLBACK`. Then, under the lock, it checks
+the same conditions again on the same agent and lease, and runs
+`live::handoff_session`, the same function `naru live handoff` uses. The
+idle predecessor is stopped at once, anything the push loop gave it in the
+meantime is reclaimed, the lease goes up, and a dream is spawned when the
+notebook wants one. Each handoff writes one `live-recycle:` line to the serve
+log, and a failure writes one line as well. A turn that arrives while the
+note is being written stops this round, and the next tick starts again. A
+failed spawn changes nothing; the same agent is tried again after ten minutes
+rather than every tick, because each try pays for a note. The conversation keeps its session, its
+turns and its page, so the person loses nothing. The successor starts small,
+so it is not recycled again until it has grown past the ceiling too. There is
+no inbox item: a live conversation has no task to file one against, and the
+person is the one talking to it.
+
 ### What the person sees
 
 Nothing, for a plain handoff. The session id, the transcript and the page
