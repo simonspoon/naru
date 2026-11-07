@@ -178,7 +178,9 @@ TP=$(MESA_DB="$TASKDB" "$BIN" project create tscore --no-git | python3 -c 'impor
 TID=$(MESA_DB="$TASKDB" "$BIN" task create "$TP" "outcome probe" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
 for st in in_progress todo done; do
   # The close guard reads the caller's own session; this is a throwaway db.
-  env -u CLAUDE_CODE_SESSION_ID MESA_DB="$TASKDB" "$BIN" task update "$TID" --status "$st" >/dev/null
+  # A done close needs --artifact or --no-artifact (task 2401).
+  if [ "$st" = done ]; then set -- --no-artifact gate; else set --; fi
+  env -u CLAUDE_CODE_SESSION_ID MESA_DB="$TASKDB" "$BIN" task update "$TID" --status "$st" "$@" >/dev/null
 done
 for s in t1 t2; do
   if [ "$s" = t1 ]; then PROMPT="Execte this task: $TID"; else PROMPT="poke around the repo, task $TID is unrelated"; fi
