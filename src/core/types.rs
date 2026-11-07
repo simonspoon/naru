@@ -3895,6 +3895,11 @@ pub struct CcErrorCommandStat {
     /// which the counts alone never say. The counts count every session
     /// regardless.
     pub sessions: Vec<String>,
+    /// What these failures said: their distinct stderr signatures
+    /// (`core::cc::failure_signature`, already truncated), most frequent
+    /// first and capped (`core::cc::COMMAND_SAID_LIMIT`), so a failing
+    /// command carries its cause rather than only a count.
+    pub said: Vec<String>,
 }
 
 /// Which mechanism refused a call. Two of them, deliberately never merged:

@@ -102,6 +102,12 @@ comments — several entries are the bare `DELETE FROM cc_files;` cursor clear.
   no separator left to split on, and answering nothing would silently lose ~3%
   of real Bash failures.
 
+  Each `by_command` row also carries `said` (task 2340): the distinct
+  `failure_signature`s of that command's own failures, most frequent first,
+  capped at `COMMAND_SAID_LIMIT` (3). `by_message` ranks causes across every
+  command and so cannot say which command produced which; `said` is that
+  link, and what lets the retro digest put a cause next to a failing command.
+
   `by_message` is the grouping that answers **why** rather than what, and the
   reason a failure message is stored at all. `cc::failure_signature` takes the
   **first meaningful line** of the output — skipping the bare `Exit code <n>`

@@ -866,6 +866,10 @@ const DENIAL_PREFIX_LIMIT: usize = 8;
 /// this is a recurring class whose `errors` count already says so.
 const ERROR_SESSION_LIMIT: usize = 8;
 
+/// How many distinct failure signatures one `by_command` row reports in
+/// `said` — enough to name a command's causes without repeating `by_message`.
+const COMMAND_SAID_LIMIT: usize = 3;
+
 /// Records one row's session against a group, deduped by the set and bounded
 /// by [`ERROR_SESSION_LIMIT`] — the cap the denial accumulator applies to its
 /// own collected-alongside sets.
@@ -1402,6 +1406,8 @@ fn errors_inner(
     type GroupAcc = (i64, i64, BTreeSet<String>);
     let mut by_tool: HashMap<String, GroupAcc> = HashMap::new();
     let mut by_command: HashMap<String, GroupAcc> = HashMap::new();
+    // Per command, how often each signature came back — `said`'s ranking.
+    let mut command_said: HashMap<String, HashMap<String, i64>> = HashMap::new();
     let mut by_message: HashMap<String, GroupAcc> = HashMap::new();
     // Keyed on `(kind, reason)` and on neither the command nor the tool: one
     // rule refusing the same thing repeatedly is the news this view exists to
@@ -1440,6 +1446,13 @@ fn errors_inner(
             None
         };
         if let Some(prefix) = prefix.clone() {
+            if let Some(signature) = r.signature.clone() {
+                *command_said
+                    .entry(prefix.clone())
+                    .or_default()
+                    .entry(signature)
+                    .or_default() += 1;
+            }
             let e = by_command.entry(prefix).or_default();
             e.0 += 1;
             e.1 += i64::from(r.sidechain);
@@ -1493,15 +1506,23 @@ fn errors_inner(
 
     let mut by_command: Vec<CcErrorCommandStat> = by_command
         .into_iter()
-        .map(
-            |(prefix, (errors, sidechain, sessions))| CcErrorCommandStat {
+        .map(|(prefix, (errors, sidechain, sessions))| {
+            let mut said: Vec<(String, i64)> = command_said
+                .remove(&prefix)
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+            said.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            said.truncate(COMMAND_SAID_LIMIT);
+            CcErrorCommandStat {
                 prefix,
                 errors,
                 sidechain,
                 top_level: errors - sidechain,
                 sessions: sessions.into_iter().collect(),
-            },
-        )
+                said: said.into_iter().map(|(s, _)| s).collect(),
+            }
+        })
         .collect();
     by_command.sort_by(|a, b| {
         b.errors
@@ -9989,6 +10010,30 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![("sed", 2, 1), ("git push", 1, 0)],
             "the leading `cd` is dropped and `git` keeps its second word"
+        );
+        // Each command carries what its own failures said, so a retro digest
+        // names a cause next to the count (task 2340).
+        assert_eq!(
+            e.by_command
+                .iter()
+                .map(|c| (c.prefix.as_str(), c.said.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "sed",
+                    vec![
+                        "sed: -e expression #N".to_string(),
+                        "sed: missing: No such file".to_string()
+                    ]
+                ),
+                (
+                    "git push",
+                    vec![
+                        "PreToolUse:Bash hook error: Blocked `git push origin main`: pushes are manual"
+                            .to_string()
+                    ]
+                ),
+            ]
         );
         // Every failure carries a signature: the `Exit code` header is gone,
         // the digit in `#1` is masked, and the sidechain flag rides along.

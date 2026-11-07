@@ -10,4 +10,11 @@ export type CcErrorCommandStat = { prefix: string, errors: number, sidechain: nu
  * which the counts alone never say. The counts count every session
  * regardless.
  */
-sessions: Array<string>, };
+sessions: Array<string>, 
+/**
+ * What these failures said: their distinct stderr signatures
+ * (`core::cc::failure_signature`, already truncated), most frequent
+ * first and capped (`core::cc::COMMAND_SAID_LIMIT`), so a failing
+ * command carries its cause rather than only a count.
+ */
+said: Array<string>, };

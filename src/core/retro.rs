@@ -165,7 +165,12 @@ fn errors_digest(e: &CcErrors) -> String {
     if !e.by_command.is_empty() {
         s.push_str("failing Bash commands:\n");
         for c in e.by_command.iter().take(DIGEST_MAX) {
-            let _ = writeln!(s, "- {} x{}", line(&c.prefix, LINE_MAX), c.errors);
+            let _ = write!(s, "- {} x{}", line(&c.prefix, LINE_MAX), c.errors);
+            if !c.said.is_empty() {
+                let said: Vec<String> = c.said.iter().map(|m| line(m, LINE_MAX)).collect();
+                let _ = write!(s, ": {}", said.join(" | "));
+            }
+            s.push('\n');
         }
     }
     if !e.by_message.is_empty() {
@@ -711,6 +716,49 @@ mod tests {
             ensure_agent_definition(&store).unwrap();
             assert_eq!(std::fs::read_to_string(&path).unwrap(), "hand-edited");
         });
+    }
+
+    #[test]
+    fn a_failing_bash_command_carries_what_it_said_in_the_digest() {
+        use crate::core::types::{CcErrorCommandStat, CcErrorTotals};
+        let cmd = |prefix: &str, said: Vec<String>| CcErrorCommandStat {
+            prefix: prefix.to_string(),
+            errors: 2,
+            sidechain: 0,
+            top_level: 2,
+            sessions: vec![],
+            said,
+        };
+        let e = CcErrors {
+            generated_at_unix: 0,
+            window: "all".to_string(),
+            since: None,
+            session: None,
+            total: CcErrorTotals {
+                errors: 4,
+                sidechain: 0,
+                top_level: 4,
+                denials: 0,
+            },
+            by_tool: vec![],
+            by_command: vec![
+                cmd(
+                    "date",
+                    vec!["date: illegal option -- d".to_string(), "x".repeat(300)],
+                ),
+                cmd("sed", vec![]),
+            ],
+            by_message: vec![],
+            denials: vec![],
+        };
+        let d = errors_digest(&e);
+        let date = d.lines().find(|l| l.starts_with("- date")).unwrap();
+        assert!(
+            date.starts_with("- date x2: date: illegal option -- d | xxx"),
+            "{d}"
+        );
+        assert!(date.chars().count() < 2 * LINE_MAX, "each one is cut: {d}");
+        assert!(d.lines().any(|l| l == "- sed x2"), "{d}");
     }
 
     #[test]

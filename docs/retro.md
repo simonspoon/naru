@@ -61,7 +61,8 @@ job) runs `retro::run_with`:
    and costs no call. The rest — at most 15, most failures first, the others
    counted as `omitted` — each get a **failure digest** from
    `cc::errors_since` (failure count, refused calls, failures by tool, failing
-   Bash command heads, what the failures said), every line cut and folded.
+   Bash command heads — each with the stderr signatures its own failures
+   produced (`said`) — and what the failures said), every line cut and folded.
 2. **Skim** — one `haiku` call per session (`SKIM_MODEL`, `SKIM_SCHEMA`:
    `{friction: [{subject, kind, evidence}]}`), whose prompt is the rules, the
    session's task and project, and the digest. A failed or malformed skim

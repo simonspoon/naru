@@ -101,9 +101,17 @@ committed tree, after you report.
   the branch the worktree was created from. Never push, and never open a pull
   request. Load skills with the Skill tool, never by reading skill files by
   path.
-- Edit files with Read/Edit, not sed. If sed is needed, macOS has BSD sed: use
-  `sed -i '' ...` on a named file (never bare `-i`, never `-i` with stdin), or
-  `perl -pi -e ...`.
+- **macOS shell cheat-sheet** (BSD tools, zsh):
+  - Edit files with Read/Edit, not sed. If sed is needed, macOS has BSD sed:
+    use `sed -i '' ...` on a named file (never bare `-i`, never `-i` with
+    stdin), or `perl -pi -e ...`.
+  - `date` is BSD: shift with `date -v-1d` / `date -v+2H`, never GNU
+    `date -d '1 day ago'` or `--date`.
+  - Escape `&` in a `s///` replacement as `\&` (in sed it means the whole
+    match, and a Bash guard may refuse a bare one in perl), or use Edit.
+  - Never put `$(( ))` arithmetic or chained path-setup variables
+    (`A=...; B=$A/x; cd $B`) inline; write the steps to a script file in your
+    scratch directory and run it.
 - **Never search above the repo you were given.** Your search root is the
   repo root — never `/`, never `$HOME`. If the brief names a file you
   cannot find in this repo, it is in another repo: stop and ask the
