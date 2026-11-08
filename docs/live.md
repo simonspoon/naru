@@ -229,7 +229,12 @@ opened is ended again.
 
 What `live::agent_prompt(store, id)` injects is therefore only what the
 definition cannot know: `Drive naru live session <id>.`, plus the recall block
-below when there are earlier summaries. Editing the built-in forks it into a db
+below when there are earlier summaries. When the install's assistant name
+(`config::assistant_name()`, the first wake word, `docs/config.md`) is not
+"Naru" (case-insensitive), the first paragraph also gains `Your name in this
+install is "X": the person calls you X, so introduce and refer to yourself as
+X, never as Naru (Naru is only the app's name).` — in `agent_prompt` and
+`handoff_prompt` alike (naru task 2622); nothing is added for Naru. Editing the built-in forks it into a db
 row and a fork replaces the built-in, as everywhere else in the library; before
 mesa task 919 this block was `~/.mesa/config.json`'s `live.prompt`, and before
 mesa task 1068 it was the `live-agent-prompt` *prompt* built-in glued into the
@@ -2948,6 +2953,7 @@ takes exactly one value.
 | `POST /api/live/notice` `{kind}` | the notice turn, **200** created or existing (deduped per working span, mesa task 1157); an unknown `kind` is 422 | standard write |
 | `POST /api/live/route` `{route?, context?, window?, ambient?}` | the session, route, context **and window box** recorded — an omitted `context`/`window` leaves the stored one alone, an explicit `null` clears it; `ambient` (a host's report, naru task 1813) is stored, stamps the report time and clears a matching `ambient_request`; a report with no `route` (naru-audio's headless check-in, naru task 2412) applies only `ambient` and `client` | standard write |
 | `POST /api/live/ambient` `{on}` | the session carrying the pending `ambient_request` (naru task 2374, `naru live ambient` with no `--say` or lease); 503 `unavailable` with no host reporting, 404 with no live session | `require_agent_access` |
+| `POST /api/live/ambient/wake-check` | body `{text, wake_words?}` relayed to naru-audio's stateless `POST /ambient/wake-check`; its `{wake, match, word, distance, reason, nearest}` comes back as is, nothing stored (naru task 2622); a blank text is 422 `validation`, a down daemon 503 `unavailable` | `require_agent_access` + `require_same_site_fetch` |
 | `GET /api/live/ambient/log` | naru-audio's `GET /ambient/log` body (`{events}`, oldest first) relayed as is, nothing stored (naru task 2375); 503 `unavailable` when the daemon is down, 502 when it has no microphone | `require_agent_access` |
 | `POST /api/live/speaker` `{client}` | the session, this client now its **speaker** (mesa task 1267) | `require_agent_access` |
 | `POST /api/live/leave` `{client}` | **204**, always — releases this client's claim on the voice if it holds it, so it is free at once; never ends the session or touches the agent (mesa task 1622) | `require_agent_access` |

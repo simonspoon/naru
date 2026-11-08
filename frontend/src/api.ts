@@ -1232,6 +1232,24 @@ export function sendLiveNotice(kind: LiveNotice): Promise<LiveTurn> {
 }
 
 /**
+ * naru-audio's answer to "would this text wake the listener" (naru task 2622):
+ * `POST /api/live/ambient/wake-check`, relayed, nothing stored. `match` and `word`
+ * are null when it would not wake; `nearest` is the closest listed word either way.
+ */
+export interface WakeCheck {
+  wake: boolean
+  match: 'exact' | 'sound_alike' | null
+  word: string | null
+  distance: number | null
+  reason: string
+  nearest: { word: string; distance: number } | null
+}
+
+export function checkWake(text: string, wakeWords: string[]): Promise<WakeCheck> {
+  return request('/api/live/ambient/wake-check', jsonInit('POST', { text, wake_words: wakeWords }))
+}
+
+/**
  * The input-direction mirror of the speak routes (mesa task 956): audio in,
  * text out, nothing retained on either side. `POST /api/live/transcribe`
  * hands the recording to the external `auris` binary and answers with
@@ -1709,14 +1727,14 @@ export function getListen(): Promise<ConfigListen> {
   return request('/api/config/listen')
 }
 
-/** The custom ambient wake words (naru task 1769); `wake_words` is `[]` when none are configured. */
+/** The ambient wake words (naru tasks 1769, 2622); `["Naru"]` when never configured, `[]` when voice wake is off. */
 export function getAmbient(): Promise<ConfigAmbient> {
   return request('/api/config/ambient')
 }
 
 /**
- * Replaces the custom wake words and echoes them as stored (trimmed, case-insensitive
- * duplicates dropped); `[]` removes them. 422 `validation` is an entry with no letter
+ * Replaces the wake words and echoes them as stored (trimmed, case-insensitive
+ * duplicates dropped); `[]` is kept as "voice wake off". 422 `validation` is an entry with no letter
  * or digit, and nothing is written in that case.
  */
 export function updateAmbient(wakeWords: string[]): Promise<ConfigAmbient> {

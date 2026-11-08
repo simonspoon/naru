@@ -1036,14 +1036,15 @@ pub struct VoiceDesign {
     pub reference: String,
 }
 
-/// The ambient listener's custom wake words (`core::config`, `docs/config.md`,
-/// naru task 1769): the phrases the Mac app wakes on besides the built-in
-/// "Naru". Stored in `~/.mesa/config.json` as `"ambient": {"wake_words": [..]}`.
+/// The ambient listener's wake words (`core::config`, `docs/config.md`, naru
+/// tasks 1769 and 2622): the whole list naru-audio wakes on. Stored in
+/// `~/.mesa/config.json` as `"ambient": {"wake_words": [..]}`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../frontend/src/types/")]
 pub struct ConfigAmbient {
-    /// The custom wake words as stored, trimmed and free of case-insensitive
-    /// duplicates; empty when none are configured.
+    /// The wake words as stored, trimmed and free of case-insensitive
+    /// duplicates; `["Naru"]` when never configured, `[]` for "voice wake off".
+    /// The first is the primary one, the assistant's name.
     pub wake_words: Vec<String>,
 }
 

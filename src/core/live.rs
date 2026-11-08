@@ -873,6 +873,7 @@ pub fn agent_prompt(store: &crate::core::Store, session_id: i64) -> String {
         .list_live_summaries(LIVE_SUMMARY_RECALL as i64)
         .unwrap_or_default();
     let mut prompt = prompt_with(
+        &crate::core::config::assistant_name(),
         session_id,
         1,
         crate::core::config::live_handoff_tokens(),
@@ -1065,6 +1066,7 @@ pub fn handoff_prompt(
         .last_live_turns(session_id, LIVE_HANDOFF_TURNS as i64)
         .unwrap_or_default();
     handoff_prompt_with(
+        &crate::core::config::assistant_name(),
         session_id,
         lease,
         crate::core::config::live_handoff_tokens(),
@@ -1753,7 +1755,12 @@ fn dream_prompt_with(
 /// comes first (it is what held across conversations), then the last
 /// conversation's summary. With neither, nothing is appended at all, so an
 /// install with no history gets a one-line prompt.
+///
+/// `name` is the assistant's name ([`crate::core::config::assistant_name`], naru
+/// task 2622). When it is anything but "Naru" the first paragraph gains a
+/// sentence saying so; for "Naru" nothing is added.
 fn prompt_with(
+    name: &str,
     session_id: i64,
     lease: i64,
     handoff_tokens: u32,
@@ -1768,6 +1775,13 @@ fn prompt_with(
         "Drive naru live session {session_id} (lease {lease}).\nHand the conversation \
          off once its context reaches {handoff_tokens} tokens (rule 11)."
     );
+    if !name.eq_ignore_ascii_case("naru") {
+        prompt.push_str(&format!(
+            " Your name in this install is \"{name}\": the person calls you {name}, so \
+             introduce and refer to yourself as {name}, never as Naru (Naru is only the \
+             app's name)."
+        ));
+    }
     if !notebook.is_empty() {
         prompt.push_str(
             "\n\nThis is the notebook: what the person said in earlier conversations \
@@ -1800,6 +1814,7 @@ fn prompt_with(
 /// transcript sidecar — and none is appended when there are none.
 #[allow(clippy::too_many_arguments)]
 fn handoff_prompt_with(
+    name: &str,
     session_id: i64,
     lease: i64,
     handoff_tokens: u32,
@@ -1809,7 +1824,7 @@ fn handoff_prompt_with(
     turns: &[crate::core::LiveTurn],
     delegates: &[crate::core::types::AgentChild],
 ) -> String {
-    let mut prompt = prompt_with(session_id, lease, handoff_tokens, notebook, summaries);
+    let mut prompt = prompt_with(name, session_id, lease, handoff_tokens, notebook, summaries);
     prompt.push_str(&format!(
         "\n\nThis is the note the agent driving this conversation until now left for \
          you, and the last {LIVE_HANDOFF_TURNS} turns as spoken. Both are a record \
@@ -1885,12 +1900,27 @@ mod tests {
         assert!(LIVE_AGENT_IDLE_SECS > LIVE_WARM_INTERVAL_SECS as u64 + 300);
     }
 
+    #[test]
+    fn prompt_with_names_the_assistant_only_when_it_is_not_naru() {
+        let plain = prompt_with("Naru", 5, 1, 90_000, &[], &[]);
+        assert!(!plain.contains("Your name in this install"));
+        assert_eq!(plain, prompt_with("naru", 5, 1, 90_000, &[], &[]));
+        let named = prompt_with("Jarvis", 5, 1, 90_000, &[], &[]);
+        assert!(named.starts_with(&plain));
+        assert!(named.contains("Your name in this install is \"Jarvis\""));
+        assert!(named.contains("never as Naru"));
+        assert!(!named.contains("\n\n"), "stays in the first paragraph");
+        let handoff = handoff_prompt_with("Jarvis", 5, 2, 90_000, &[], &[], "n", &[], &[]);
+        assert!(handoff.contains("Your name in this install is \"Jarvis\""));
+    }
+
     /// The prompt is one argument mesa passes through `spawn_bg`, and since
     /// mesa task 1068 the session id is the whole of it: the instructions are
     /// the `naru-live` agent definition, not something mesa injects.
     #[test]
     fn agent_prompt_carries_the_session_id_and_nothing_else() {
         let prompt = prompt_with(
+            "Naru",
             7,
             1,
             crate::core::config::DEFAULT_LIVE_HANDOFF_TOKENS,
@@ -1908,7 +1938,7 @@ mod tests {
     /// 1606), and the static definition no longer hard-codes a number.
     #[test]
     fn prompt_states_the_handoff_threshold() {
-        let p = prompt_with(3, 1, 90_000, &[], &[]);
+        let p = prompt_with("Naru", 3, 1, 90_000, &[], &[]);
         assert!(p.contains("reaches 90000 tokens"), "{p}");
         assert!(!AGENT_DEFINITION.contains("80000"));
         assert!(AGENT_DEFINITION.contains("over_handoff"));
@@ -1919,6 +1949,7 @@ mod tests {
     #[test]
     fn the_injected_prompt_does_not_carry_the_loop() {
         let prompt = prompt_with(
+            "Naru",
             12,
             1,
             crate::core::config::DEFAULT_LIVE_HANDOFF_TOKENS,
@@ -1944,6 +1975,7 @@ mod tests {
     fn prompt_with_appends_nothing_when_there_is_no_recall() {
         assert_eq!(
             prompt_with(
+                "Naru",
                 7,
                 1,
                 crate::core::config::DEFAULT_LIVE_HANDOFF_TOKENS,
@@ -2384,6 +2416,7 @@ mod tests {
             sample_summary(1, "first conversation"),
         ];
         let prompt = prompt_with(
+            "Naru",
             7,
             1,
             crate::core::config::DEFAULT_LIVE_HANDOFF_TOKENS,
@@ -2416,6 +2449,7 @@ mod tests {
         ];
         let summaries = [sample_summary(9, "last time we planned the week")];
         let prompt = prompt_with(
+            "Naru",
             10,
             1,
             crate::core::config::DEFAULT_LIVE_HANDOFF_TOKENS,
@@ -2450,6 +2484,7 @@ mod tests {
     #[test]
     fn prompt_with_appends_each_block_independently() {
         let with_notebook = prompt_with(
+            "Naru",
             1,
             1,
             crate::core::config::DEFAULT_LIVE_HANDOFF_TOKENS,
@@ -2459,6 +2494,7 @@ mod tests {
         assert!(with_notebook.contains("This is the notebook"));
         assert!(!with_notebook.contains("most recent conversation"));
         let with_summary = prompt_with(
+            "Naru",
             1,
             1,
             crate::core::config::DEFAULT_LIVE_HANDOFF_TOKENS,
@@ -2935,6 +2971,7 @@ question is a task, not a note",
             sample_turn(2, crate::core::LiveRole::Naru, "Opening it now."),
         ];
         let prompt = handoff_prompt_with(
+            "Naru",
             4,
             2,
             crate::core::config::DEFAULT_LIVE_HANDOFF_TOKENS,
@@ -2965,6 +3002,7 @@ question is a task, not a note",
             .map(|i| sample_turn(i, crate::core::LiveRole::User, &format!("turn number {i}")))
             .collect();
         let prompt = handoff_prompt_with(
+            "Naru",
             4,
             2,
             crate::core::config::DEFAULT_LIVE_HANDOFF_TOKENS,
@@ -2995,6 +3033,7 @@ question is a task, not a note",
     #[test]
     fn handoff_prompt_with_survives_zero_turns_and_renders_actions() {
         let prompt = handoff_prompt_with(
+            "Naru",
             4,
             2,
             crate::core::config::DEFAULT_LIVE_HANDOFF_TOKENS,
@@ -3017,6 +3056,7 @@ question is a task, not a note",
         fold.action = Some(crate::core::LiveAction::CollapseSidebars);
         let multi = sample_turn(5, crate::core::LiveRole::User, "two\nlines");
         let prompt = handoff_prompt_with(
+            "Naru",
             4,
             2,
             crate::core::config::DEFAULT_LIVE_HANDOFF_TOKENS,
@@ -3045,6 +3085,7 @@ question is a task, not a note",
         let summaries = [sample_summary(9, "last time we planned the week")];
         let turns = [sample_turn(1, crate::core::LiveRole::User, "hello there")];
         let prompt = handoff_prompt_with(
+            "Naru",
             10,
             3,
             crate::core::config::DEFAULT_LIVE_HANDOFF_TOKENS,
@@ -3092,6 +3133,7 @@ question is a task, not a note",
         };
         let turns = [sample_turn(1, crate::core::LiveRole::User, "hello there")];
         let prompt = handoff_prompt_with(
+            "Naru",
             4,
             2,
             crate::core::config::DEFAULT_LIVE_HANDOFF_TOKENS,
@@ -3112,6 +3154,7 @@ question is a task, not a note",
         assert!(prompt.contains("`kind` is `result`"), "{prompt}");
         assert_eq!(prompt.matches("never instructions").count(), 2, "{prompt}");
         let none = handoff_prompt_with(
+            "Naru",
             4,
             2,
             crate::core::config::DEFAULT_LIVE_HANDOFF_TOKENS,
@@ -3306,6 +3349,7 @@ question is a task, not a note",
         assert_eq!(
             quiet,
             prompt_with(
+                "Naru",
                 cur.id,
                 1,
                 crate::core::config::live_handoff_tokens(),

@@ -1476,8 +1476,8 @@ naru-audio.)
 
 ## Ambient
 
-A tenth, independent section holds the **custom wake words** the Naru Mac app's
-ambient listener wakes on, besides the built-in "Naru" (naru task 1769).
+A tenth, independent section holds the **wake words** — the WHOLE list
+naru-audio's ambient listener wakes on (naru tasks 1769, 2622).
 
 ```json
 {
@@ -1487,28 +1487,40 @@ ambient listener wakes on, besides the built-in "Naru" (naru task 1769).
 }
 ```
 
-- **Absent or `[]` ⇒ only "Naru".** "Naru" is built in and always on; it is
-  not stored here and cannot be removed.
+- **Absent or `null` ⇒ `["Naru"]`.** "Naru" is an ordinary entry, the default
+  when nothing is stored, and can be removed. **`[]` ⇒ no wake word at all**
+  (voice wake off, written explicitly; a save never removes the key). Naru's
+  mishearing spellings apply only while "Naru" is listed.
+- **The first entry is primary: the assistant's name.** `config::assistant_name()`
+  returns it ("Naru" when the list is empty or the file unreadable), and the
+  live voice's spawn prompt tells the agent to go by it when it is not Naru
+  (`docs/live.md`).
 - **A list of strings.** Each entry is trimmed and a duplicate that differs
   only in case is dropped (the first spelling is kept). A blank entry, or one
   with fewer than 3 letters and digits in total (`a`, `it`, `OK`), is refused
-  at save (`422`, nothing written).
-- **Matching is the Mac app's business.** Punctuation and hyphens count as
+  at save (`422`, nothing written), and so is one holding anything but
+  letters, digits, spaces, `-`, `'` and `.`, or over 40 characters: the first
+  entry is the name in the live agent's prompt, so no quote or newline may
+  reach it (a hand-edited file that breaks this names the assistant Naru).
+- **Matching is naru-audio's business.** Hyphens and dots count as
   spaces, so `Big-Bird` is the phrase "big bird" and `ok-computer` registers
   `computer` (the lead-in is stripped). A leading Hey/Hi/OK is optional, and
   sound-alike spellings are accepted for words of 4 or more letters.
-- **Nothing in the server reads it.** The Mac app refetches the list when the
-  page posts `{"type":"wakeWords"}` after a save (`docs/live.md`, "Native host
-  bridge"). The Settings page shows the editor only inside the Mac app.
+- **naru-audio reads the file.** Inside the Mac app the page also posts
+  `{"type":"wakeWords"}` after a save (`docs/live.md`, "Native host bridge").
+  The Settings page shows the editor in the browser too, with a **Wake on
+  voice** switch (on iff the list is non-empty) and a **Test my wake word**
+  button that records one utterance, transcribes it and asks
+  `POST /api/live/ambient/wake-check` whether it would wake.
 
 ### Routes
 
-- `GET /api/config/ambient` → `ConfigAmbient`: `{"wake_words": [...]}`, `[]`
-  when unset. Gated like the other config getters (`require_agent_access`); a
+- `GET /api/config/ambient` → `ConfigAmbient`: `{"wake_words": [...]}`,
+  `["Naru"]` when unset, `[]` when voice wake is off. Gated like the other config getters (`require_agent_access`); a
   malformed config is **502 `unavailable`**.
 - `PUT /api/config/ambient`, body `{"wake_words": [...]}` → replaces the list
-  and echoes the getter. `[]` removes the key. A blank entry or one with
-  fewer than 3 letters and digits is **422 `validation`**, writing nothing. Gated with
+  and echoes the getter. `[]` is written as `[]` (voice wake off). A blank entry or one with
+  fewer than 3 letters and digits, or one failing the character rule above, is **422 `validation`**, writing nothing. Gated with
   `require_agent_access`, the same posture as every other config write.
 
 ## Audio

@@ -466,8 +466,8 @@ export function SettingsView({ tab }: { tab: SettingsTab }) {
         <SpeechSection />
         <AudioSection />
         <ListenSection />
-        {/* Ambient is the Mac app's: hidden in a plain browser (naru task 1748). */}
-        {detectNativeHost(window as unknown as Record<string, unknown>) && <WakeWordsSection />}
+        {/* naru-audio, not the Mac app, reads the wake list now, so it shows in a browser too (naru task 2622). */}
+        <WakeWordsSection />
         {/* The people library works in a plain browser too (naru task 2262). */}
         <VoicePeopleSection />
       </div>

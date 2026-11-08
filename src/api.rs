@@ -3744,6 +3744,12 @@ fn router(state: AppState) -> Router {
         // What the audio server's ambient listener heard (naru task 2375):
         // naru-audio's in-memory `GET /ambient/log`, relayed, never stored.
         .route("/api/live/ambient/log", get(live_ambient_log))
+        // Would this text wake the listener (naru task 2622): naru-audio's
+        // stateless `POST /ambient/wake-check`, relayed.
+        .route(
+            "/api/live/ambient/wake-check",
+            post(live_ambient_wake_check),
+        )
         .route("/api/live/interrupt", post(interrupt_live_agent))
         .route("/api/live/restart", post(restart_live_agent))
         .route("/api/live/turns/{id}/played", post(live_turn_played))
@@ -11980,8 +11986,9 @@ async fn update_config_keymap(
     get_config_keymap(State(state), ConnectInfo(addr), headers).await
 }
 
-/// `GET /api/config/ambient` — the custom wake words the ambient listener
-/// wakes on besides the built-in "Naru" (`docs/config.md`, naru task 1769).
+/// `GET /api/config/ambient` — the wake words the ambient listener wakes on:
+/// the whole list, `["Naru"]` when never configured, `[]` for "voice wake off"
+/// (`docs/config.md`, naru tasks 1769 and 2622).
 ///
 /// Gated like `get_config_keymap` — same file, same class of secret — and a
 /// malformed config is the same 502 `unavailable`.
@@ -12008,7 +12015,8 @@ struct AmbientUpdate {
 
 /// `PUT /api/config/ambient` — replaces the wake-word list and echoes it.
 /// Entries are trimmed and case-insensitive duplicates dropped; a blank entry
-/// or one with fewer than 3 letters and digits is a 422 `validation`; `[]` removes the key.
+/// or one with fewer than 3 letters and digits is a 422 `validation`; `[]` is
+/// kept (explicit "voice wake off").
 ///
 /// `require_agent_access`, like every other config write (mesa task 1021).
 async fn update_config_ambient(
@@ -12328,7 +12336,7 @@ async fn voice_proxy(
         .and_then(|v| v["error"]["message"].as_str().map(str::to_string))
         .unwrap_or_else(|| format!("answered HTTP {}", answer.status));
     let (status, code) = match answer.status {
-        400 | 413 | 415 => (StatusCode::UNPROCESSABLE_ENTITY, "validation"),
+        400 | 413 | 415 | 422 => (StatusCode::UNPROCESSABLE_ENTITY, "validation"),
         404 => (StatusCode::NOT_FOUND, "not_found"),
         409 => (StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
         _ => (StatusCode::BAD_GATEWAY, "unavailable"),
@@ -12368,6 +12376,44 @@ async fn live_ambient_log(
 ) -> ApiResult<Response> {
     let path = "/ambient/log".to_string();
     voice_proxy(&state, &addr, &headers, false, "GET", path, None).await
+}
+
+#[derive(Deserialize)]
+struct WakeCheckBody {
+    text: String,
+    #[serde(default)]
+    wake_words: Option<Vec<String>>,
+}
+
+/// `POST /api/live/ambient/wake-check` (naru task 2622) — `{text, wake_words?}`
+/// relayed to naru-audio's stateless `POST /ambient/wake-check`, which answers
+/// whether that text would wake the listener (`{wake, match, word, distance,
+/// reason, nearest}`); a blank text is its 422. Naru keeps nothing. Gated like
+/// the voice library (agent access + same-site fetch).
+async fn live_ambient_wake_check(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Result<Json<WakeCheckBody>, JsonRejection>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    require_same_site_fetch(&headers)?;
+    let Json(body) = body?;
+    let mut sent = json!({ "text": body.text });
+    if let Some(words) = body.wake_words {
+        sent["wake_words"] = json!(words);
+    }
+    let path = "/ambient/wake-check".to_string();
+    voice_proxy(
+        &state,
+        &addr,
+        &headers,
+        false,
+        "POST",
+        path,
+        json_form(sent),
+    )
+    .await
 }
 
 /// `POST /api/voice/people` — `{name, owner?}` makes a person.
@@ -23554,7 +23600,8 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             .unwrap_or_else(|e| e.into_inner());
         let (_dir, state) = test_state();
         let cfg = tempfile::tempdir().unwrap();
-        let daemon = audio::stub::Stub::serve(0, |method, path| match (method, path) {
+        let daemon = audio::stub::Stub::serve(0, |method, path| {
+            match (method, path) {
             ("GET", "/v1/audio/speaker/people") => audio::stub::Reply::Json(
                 200,
                 r#"{"model":"m","live_guard":false,"people":[]}"#.to_string(),
@@ -23580,7 +23627,13 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                 200,
                 r#"{"events":[{"type":"ambient_flag","text":"hi"}]}"#.to_string(),
             ),
+            ("POST", "/ambient/wake-check") => audio::stub::Reply::Json(
+                200,
+                r#"{"wake":true,"match":"exact","word":"Jarvis","distance":0,"reason":"ok","nearest":null}"#
+                    .to_string(),
+            ),
             _ => audio::stub::Reply::Json(404, "{}".to_string()),
+        }
         });
         let _config = listen_config(cfg.path(), Some(json!({ "url": daemon.url() })));
         let ok = || (State(state.clone()), ConnectInfo(loopback()));
@@ -23641,6 +23694,33 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             json_body(resp).await,
             json!({"events": [{"type": "ambient_flag", "text": "hi"}]})
         );
+
+        // The wake-word check (naru task 2622) is a gated POST relay.
+        let check = || {
+            Ok(Json(WakeCheckBody {
+                text: "hey jarvis".to_string(),
+                wake_words: Some(vec!["Jarvis".to_string()]),
+            }))
+        };
+        let (s, c) = ok();
+        assert!(
+            live_ambient_wake_check(s, c, hdrs(Some("evil.example:0"), None), check())
+                .await
+                .is_err()
+        );
+        let (s, c) = ok();
+        let resp = live_ambient_wake_check(s, c, loopback_agent_headers(), check())
+            .await
+            .unwrap();
+        let said = json_body(resp).await;
+        assert_eq!(said["wake"], true);
+        assert_eq!(said["word"], "Jarvis");
+        let sent = daemon.requests.lock().unwrap().clone();
+        let relayed = sent
+            .iter()
+            .find(|r| r.starts_with("POST /ambient/wake-check"))
+            .unwrap();
+        assert!(relayed.contains("hey jarvis") && relayed.contains("\"wake_words\""));
 
         let resp = clip(4).await.unwrap();
         assert_eq!(json_body(resp).await["id"], 9);
@@ -23703,7 +23783,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
 
     /// naru task 1769: `/api/config/ambient` stores trimmed, case-deduped wake
     /// words and echoes them, refuses a blank / symbol-only entry with 422
-    /// without writing, clears with `[]`, and refuses a foreign Host.
+    /// without writing, keeps `[]` as "wake off", and refuses a foreign Host.
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn ambient_routes_save_echo_and_clear() {
@@ -23738,7 +23818,11 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         )
         .await
         .unwrap();
-        assert_eq!(body(resp).await, serde_json::json!({"wake_words": []}));
+        // Never configured: the default entry (naru task 2622).
+        assert_eq!(
+            body(resp).await,
+            serde_json::json!({"wake_words": ["Naru"]})
+        );
 
         let resp = put(&[" Computer ", "computer", "Jarvis"]).await.unwrap();
         assert_eq!(
