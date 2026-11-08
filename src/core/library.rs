@@ -346,6 +346,186 @@ echo \"Claude Code stopped in $(pwd)\"
             ),
         ],
     },
+    // How an agent builds a workflow from the purpose-built node kinds: an
+    // overview, one reference file per node kind and the flow patterns.
+    Builtin {
+        id: "building-naru-workflows",
+        name: "building-naru-workflows",
+        kind: LibraryKind::Skill,
+        scope: LibraryScope::User,
+        body: include_str!("builtins/building-naru-workflows/SKILL.md"),
+        export_command: false,
+        files: &[
+            (
+                "nodes/agent.md",
+                include_str!("builtins/building-naru-workflows/nodes/agent.md"),
+            ),
+            (
+                "nodes/board.md",
+                include_str!("builtins/building-naru-workflows/nodes/board.md"),
+            ),
+            (
+                "nodes/branch.md",
+                include_str!("builtins/building-naru-workflows/nodes/branch.md"),
+            ),
+            (
+                "nodes/break.md",
+                include_str!("builtins/building-naru-workflows/nodes/break.md"),
+            ),
+            (
+                "nodes/cli.md",
+                include_str!("builtins/building-naru-workflows/nodes/cli.md"),
+            ),
+            (
+                "nodes/comment.md",
+                include_str!("builtins/building-naru-workflows/nodes/comment.md"),
+            ),
+            (
+                "nodes/decide.md",
+                include_str!("builtins/building-naru-workflows/nodes/decide.md"),
+            ),
+            (
+                "nodes/delay.md",
+                include_str!("builtins/building-naru-workflows/nodes/delay.md"),
+            ),
+            (
+                "nodes/file-watch.md",
+                include_str!("builtins/building-naru-workflows/nodes/file-watch.md"),
+            ),
+            (
+                "nodes/file.md",
+                include_str!("builtins/building-naru-workflows/nodes/file.md"),
+            ),
+            (
+                "nodes/foreach.md",
+                include_str!("builtins/building-naru-workflows/nodes/foreach.md"),
+            ),
+            (
+                "nodes/gate.md",
+                include_str!("builtins/building-naru-workflows/nodes/gate.md"),
+            ),
+            (
+                "nodes/git.md",
+                include_str!("builtins/building-naru-workflows/nodes/git.md"),
+            ),
+            (
+                "nodes/http.md",
+                include_str!("builtins/building-naru-workflows/nodes/http.md"),
+            ),
+            (
+                "nodes/join.md",
+                include_str!("builtins/building-naru-workflows/nodes/join.md"),
+            ),
+            (
+                "nodes/make.md",
+                include_str!("builtins/building-naru-workflows/nodes/make.md"),
+            ),
+            (
+                "nodes/mapfilter.md",
+                include_str!("builtins/building-naru-workflows/nodes/mapfilter.md"),
+            ),
+            (
+                "nodes/memory.md",
+                include_str!("builtins/building-naru-workflows/nodes/memory.md"),
+            ),
+            (
+                "nodes/notify.md",
+                include_str!("builtins/building-naru-workflows/nodes/notify.md"),
+            ),
+            (
+                "nodes/output.md",
+                include_str!("builtins/building-naru-workflows/nodes/output.md"),
+            ),
+            (
+                "nodes/parallel.md",
+                include_str!("builtins/building-naru-workflows/nodes/parallel.md"),
+            ),
+            (
+                "nodes/parse-json.md",
+                include_str!("builtins/building-naru-workflows/nodes/parse-json.md"),
+            ),
+            (
+                "nodes/prompt.md",
+                include_str!("builtins/building-naru-workflows/nodes/prompt.md"),
+            ),
+            (
+                "nodes/retry.md",
+                include_str!("builtins/building-naru-workflows/nodes/retry.md"),
+            ),
+            (
+                "nodes/schedule.md",
+                include_str!("builtins/building-naru-workflows/nodes/schedule.md"),
+            ),
+            (
+                "nodes/script.md",
+                include_str!("builtins/building-naru-workflows/nodes/script.md"),
+            ),
+            (
+                "nodes/subworkflow.md",
+                include_str!("builtins/building-naru-workflows/nodes/subworkflow.md"),
+            ),
+            (
+                "nodes/switch.md",
+                include_str!("builtins/building-naru-workflows/nodes/switch.md"),
+            ),
+            (
+                "nodes/task-event.md",
+                include_str!("builtins/building-naru-workflows/nodes/task-event.md"),
+            ),
+            (
+                "nodes/task.md",
+                include_str!("builtins/building-naru-workflows/nodes/task.md"),
+            ),
+            (
+                "nodes/trigger.md",
+                include_str!("builtins/building-naru-workflows/nodes/trigger.md"),
+            ),
+            (
+                "nodes/trycatch.md",
+                include_str!("builtins/building-naru-workflows/nodes/trycatch.md"),
+            ),
+            (
+                "nodes/variable.md",
+                include_str!("builtins/building-naru-workflows/nodes/variable.md"),
+            ),
+            (
+                "nodes/verify.md",
+                include_str!("builtins/building-naru-workflows/nodes/verify.md"),
+            ),
+            (
+                "nodes/webhook.md",
+                include_str!("builtins/building-naru-workflows/nodes/webhook.md"),
+            ),
+            (
+                "patterns/branching.md",
+                include_str!("builtins/building-naru-workflows/patterns/branching.md"),
+            ),
+            (
+                "patterns/cli.md",
+                include_str!("builtins/building-naru-workflows/patterns/cli.md"),
+            ),
+            (
+                "patterns/errors-and-waits.md",
+                include_str!("builtins/building-naru-workflows/patterns/errors-and-waits.md"),
+            ),
+            (
+                "patterns/inputs-and-pins.md",
+                include_str!("builtins/building-naru-workflows/patterns/inputs-and-pins.md"),
+            ),
+            (
+                "patterns/loops.md",
+                include_str!("builtins/building-naru-workflows/patterns/loops.md"),
+            ),
+            (
+                "patterns/parallel.md",
+                include_str!("builtins/building-naru-workflows/patterns/parallel.md"),
+            ),
+            (
+                "patterns/triggers.md",
+                include_str!("builtins/building-naru-workflows/patterns/triggers.md"),
+            ),
+        ],
+    },
     // How the live agent designs a custom mark skin (naru task 2123,
     // `docs/mark-skins.md`): the skin contract, a sample and the `naru mark`
     // preview/install loop.
@@ -4434,6 +4614,155 @@ mod tests {
                 "resources.md",
                 "verifying.md",
                 "waiting.md",
+            ] {
+                assert!(dir.join(name).is_file(), "{name} was not written");
+            }
+        });
+    }
+
+    #[test]
+    fn the_workflow_skill_builtin_carries_its_node_and_pattern_files() {
+        let (store, _dir) = temp_store();
+        let items = effective_items(&store, None).unwrap();
+        let skill = items
+            .iter()
+            .find(|i| i.builtin_id.as_deref() == Some("building-naru-workflows"))
+            .expect("the skill is offered");
+        assert_eq!(skill.kind, LibraryKind::Skill);
+        assert_eq!(
+            skill.path.as_deref(),
+            Some(".claude/skills/building-naru-workflows/SKILL.md")
+        );
+        let names: Vec<&str> = skill.files.keys().map(String::as_str).collect();
+        assert_eq!(
+            names,
+            [
+                "nodes/agent.md",
+                "nodes/board.md",
+                "nodes/branch.md",
+                "nodes/break.md",
+                "nodes/cli.md",
+                "nodes/comment.md",
+                "nodes/decide.md",
+                "nodes/delay.md",
+                "nodes/file-watch.md",
+                "nodes/file.md",
+                "nodes/foreach.md",
+                "nodes/gate.md",
+                "nodes/git.md",
+                "nodes/http.md",
+                "nodes/join.md",
+                "nodes/make.md",
+                "nodes/mapfilter.md",
+                "nodes/memory.md",
+                "nodes/notify.md",
+                "nodes/output.md",
+                "nodes/parallel.md",
+                "nodes/parse-json.md",
+                "nodes/prompt.md",
+                "nodes/retry.md",
+                "nodes/schedule.md",
+                "nodes/script.md",
+                "nodes/subworkflow.md",
+                "nodes/switch.md",
+                "nodes/task-event.md",
+                "nodes/task.md",
+                "nodes/trigger.md",
+                "nodes/trycatch.md",
+                "nodes/variable.md",
+                "nodes/verify.md",
+                "nodes/webhook.md",
+                "patterns/branching.md",
+                "patterns/cli.md",
+                "patterns/errors-and-waits.md",
+                "patterns/inputs-and-pins.md",
+                "patterns/loops.md",
+                "patterns/parallel.md",
+                "patterns/triggers.md",
+            ]
+        );
+        assert!(skill.files.values().all(|body| !body.trim().is_empty()));
+    }
+
+    #[test]
+    fn every_workflow_node_kind_has_a_reference_file_in_the_workflow_skill() {
+        let skill = BUILTINS
+            .iter()
+            .find(|b| b.id == "building-naru-workflows")
+            .expect("the skill is shipped");
+        let missing: Vec<&str> = crate::core::types::WorkflowNodeKind::ALL
+            .iter()
+            .map(|k| k.as_str())
+            .filter(|kind| {
+                let path = format!("nodes/{kind}.md");
+                !skill
+                    .files
+                    .iter()
+                    .any(|(p, body)| *p == path && !body.trim().is_empty())
+            })
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "workflow node kinds without a nodes/<kind>.md reference: {missing:?}"
+        );
+    }
+
+    #[test]
+    fn a_fresh_install_sync_writes_the_workflow_skill_with_its_siblings() {
+        let (mut store, _dir) = temp_store();
+        with_home_dir(|home| {
+            let rows = sync_status(&store, None).unwrap();
+            let row = rows
+                .iter()
+                .find(|r| r.builtin_id.as_deref() == Some("building-naru-workflows"))
+                .expect("the skill has a sync row");
+            assert_eq!(row.status, LibrarySyncStatus::MesaNew);
+            apply_naru(&mut store, None, row).unwrap();
+            let dir = home.join(".claude/skills/building-naru-workflows");
+            assert!(dir.join("SKILL.md").is_file());
+            for name in [
+                "nodes/agent.md",
+                "nodes/board.md",
+                "nodes/branch.md",
+                "nodes/break.md",
+                "nodes/cli.md",
+                "nodes/comment.md",
+                "nodes/decide.md",
+                "nodes/delay.md",
+                "nodes/file-watch.md",
+                "nodes/file.md",
+                "nodes/foreach.md",
+                "nodes/gate.md",
+                "nodes/git.md",
+                "nodes/http.md",
+                "nodes/join.md",
+                "nodes/make.md",
+                "nodes/mapfilter.md",
+                "nodes/memory.md",
+                "nodes/notify.md",
+                "nodes/output.md",
+                "nodes/parallel.md",
+                "nodes/parse-json.md",
+                "nodes/prompt.md",
+                "nodes/retry.md",
+                "nodes/schedule.md",
+                "nodes/script.md",
+                "nodes/subworkflow.md",
+                "nodes/switch.md",
+                "nodes/task-event.md",
+                "nodes/task.md",
+                "nodes/trigger.md",
+                "nodes/trycatch.md",
+                "nodes/variable.md",
+                "nodes/verify.md",
+                "nodes/webhook.md",
+                "patterns/branching.md",
+                "patterns/cli.md",
+                "patterns/errors-and-waits.md",
+                "patterns/inputs-and-pins.md",
+                "patterns/loops.md",
+                "patterns/parallel.md",
+                "patterns/triggers.md",
             ] {
                 assert!(dir.join(name).is_file(), "{name} was not written");
             }

@@ -168,9 +168,11 @@ away from `skill` is `validation` while the row holds siblings.
   Create shows no file list, since a new skill has no siblings yet; a fork of
   a built-in skill starts with the built-in's.
 
-The one built-in skill, `supervising-agent-teams`, carries its folder too:
-`Builtin.files` is a static slice of `(path relative to the skill folder,
-body)` pairs, and `effective_items` reports them as the unshadowed built-in's
+The built-in skills that carry a folder, `supervising-agent-teams` and
+`building-naru-workflows` (an overview, `nodes/<kind>.md` for every workflow
+node kind, and `patterns/`; a test fails when a kind has no file) hold their
+siblings in `Builtin.files`, a static slice of `(path relative to the skill
+folder, body)` pairs, and `effective_items` reports them as the unshadowed built-in's
 `files`. A fresh-install sync therefore reads `mesa-new` and applying it
 writes `SKILL.md` and every sibling (`apply_naru` writes `mesa_files`), and
 `Store::create_library_item` copies them onto a fork. A built-in's text lives
