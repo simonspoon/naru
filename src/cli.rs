@@ -2509,7 +2509,7 @@ enum WorkflowNodeCmd {
     /// Add a node to a workflow; prints the created node (`--quiet`: without
     /// its `config`)
     ///
-    /// KIND is trigger|schedule|webhook|task-event|file-watch|prompt|agent|cli|script|branch|decide|switch|output|mapfilter|foreach|parallel|join|retry|delay|gate|trycatch|subworkflow|task|http|notify|git|file|verify|board|comment and decides what
+    /// KIND is trigger|schedule|webhook|task-event|file-watch|prompt|agent|cli|script|branch|decide|switch|output|break|make|parse-json|variable|mapfilter|foreach|parallel|join|retry|delay|gate|subworkflow|trycatch|task|http|notify|board|git|file|memory|verify|comment and decides what
     /// `--config` (a JSON object) may hold — unknown keys and bad values are
     /// `validation`, and a workflow has at most one trigger. Without
     /// `--config` a trigger is `{"mode":"manual"}`; every other kind needs
@@ -2523,15 +2523,33 @@ CONFIG BY KIND
   task-event {\"event\":\"created|status|any\" (default created),\"status\":\"todo|done|…\" (event status/any),\"project\":\"<id or name>\"} (fires on a task create / status change; the run input is JSON {event,task_id,project_id,status,old_status,name}; an entry node, so a second one is refused)
   file-watch {\"path\":\"<file or folder>\" (required),\"event\":\"any|created|modified|deleted\" (default any)} (polled each watcher tick, new run per change; the run input is JSON {path,event,mtime,size}; an entry node, so a second one is refused)
   prompt   {\"model\":\"haiku|sonnet|opus|local:<name>\",\"thinking\":false,\"prompt\":\"...\",\"timeout_secs\":N}
-  cli      {\"command\":\"...\",\"timeout_secs\":N}
-  script   {\"script\":\"<id or name>\",\"values\":{\"name\":\"... {input} ...\"}}
+  agent    {\"agent\":\"<library agent>\",\"prompt\":\"...\",\"model\":\"haiku|sonnet|opus\",\"timeout_secs\":N (1-3600),\"input_type\":\"<type>\",\"result_type\":\"text|<type>\",\"retry\":bool}
+           stage mode (any of these keys): \"deadline\":secs (required),\"ceiling\",\"silence\",\"grace\" (secs, 1-86400),\"max_restarts\":0-5,\"cwd\",\"also\":{\"agent\",\"prompt\"} (ceiling >= deadline; timeout_secs is derived); \"result_prompt\" (stage mode only)
+  cli      {\"command\":\"...\",\"timeout_secs\":N (1-86400),\"always\":bool (a closing node: runs after everything, failed runs included)}
+  script   {\"script\":\"<id or name>\",\"values\":{\"name\":\"... {input} ...\"},\"timeout_secs\":N (1-86400)}
   branch   {\"op\":\"contains|regex|score_above|score_below|equals\",\"value\":\"...\"}
   decide   {\"question\":\"... {input} ...\",\"options\":[\"a\",\"b\"],\"threshold\":0.5}
   switch   {\"op\":\"equals|contains|regex\",\"cases\":[{\"match\":\"x\",\"label\":\"opt\"},…]} (2+ cases; edges use --branch <label>|default)
-  trycatch {\"wrap\":{\"kind\":\"cli|script|prompt|agent\",\"config\":{...}},\"timeout_secs\":N} (a failure is caught, not fatal; edges use --branch ok|caught)
+  break|make {\"struct\":\"<struct type>\"} (pins come from the struct)
+  parse-json {\"type\":\"<type>\"} (optional, default any)
+  variable {\"op\":\"get|set\",\"name\":\"<identifier>\",\"type\":\"<type>\"}
+  mapfilter {\"mode\":\"map|filter\",\"expr\":\"...\"}
+  foreach  {\"body\":\"<bash script; item is $1>\",\"timeout_secs\":N (1-3600 per item)} (a failed item stops the rest)
+  parallel|join {} (no keys)
+  retry    {\"wrap\":{\"kind\":\"cli|script|prompt|agent\",\"config\":{...}},\"attempts\":1-10 (3),\"backoff_ms\":0-60000 (0),\"backoff_factor\":1-10 (1),\"timeout_secs\":N}
+  delay    {\"seconds\":0-3600} | {\"until\":\"HH:MM\" or \"YYYY-MM-DDTHH:MM:SSZ\" (UTC)}; exactly one
+  trycatch {\"wrap\":{\"kind\":\"cli|script|prompt|agent|notify\",\"config\":{...}},\"timeout_secs\":N} (a failure is caught, not fatal; edges use --branch ok|caught)
   gate     {\"message\":\"...\",\"timeout_secs\":N (1-86400, default 3600; a timeout rejects)} (edges use --branch approved|rejected; decide with `workflow gate approve|reject <id>`)
   subworkflow {\"workflow\":\"<id or name>\"} (runs that workflow with this node's input; its last step's output comes out; a loop or a chain over 8 workflows is `validation`)
-  task     {\"action\":\"create|update|read\",\"project\":\"<id or name>\" (create),\"task\":N (update, read),\"description\",\"status\",\"priority\",\"result\" (any may hold {input}); output is the task JSON}
+  task     {\"action\":\"create|update|read\",\"project\":\"<id or name>\" (create),\"task\":N (update, read),\"description\",\"status\",\"priority\",\"result\" (update only; any may hold {input}); output is the task JSON}
+  http     {\"method\":\"GET|POST|PUT|PATCH|DELETE\",\"url\":\"http://... (no https)\",\"headers\":{\"Name\":\"value\"},\"body\":\"...\" (POST|PUT|PATCH),\"timeout_secs\":N (1-600)}
+  notify   {\"mode\":\"phone|speak\" (default phone),\"message\":\"...\",\"title\":\"...\",\"open\":\"<route>\"} (title and open: phone only)
+  board    {\"kind\":\"markdown|html\",\"title\":\"...\",\"body\":\"...\"} (pushes to the live whiteboard)
+  git      {\"op\":\"commit|branch|diff\",\"cwd\":\"...\",\"message\",\"paths\":[...] (commit),\"name\" (branch),\"base\",\"stat\":bool (diff),\"timeout_secs\":N (1-3600)} (commit needs message, branch needs name)
+  file     {\"op\":\"read|write\",\"path\":\"...\",\"content\":\"...\",\"append\":bool (both write only)}
+  memory   {\"op\":\"add|search\",\"text\" (add),\"query\",\"limit\":1-50 (both search only),\"project\":\"<id or name>\"}
+  verify   {\"mode\":\"test|browser\",\"command\":\"...\",\"url\" (browser),\"expect\":\"...\",\"timeout_secs\":N}
+  comment  {\"text\":\"...\",\"color\":\"accent|accent2|good|warn|bad|muted\"} (editor-only, never runs)
   output   {\"target\":\"log\",\"log\":\"name\"} | {\"target\":\"task\",\"project\":\"...\"} |
            {\"target\":\"inbox\",\"task_id\":N,\"kind\":\"task-summary\"} | {\"target\":\"board\"} |
            {\"target\":\"reply\",\"decision\":\"block|allow|context\",\"message\":\"... {input}\"} (a hook workflow's answer; see run --hook)
@@ -2544,7 +2562,7 @@ EXAMPLES
         /// Workflow id or name
         #[arg(value_name = "WORKFLOW", required_unless_present = "workflow")]
         workflow_pos: Option<String>,
-        /// trigger|prompt|agent|cli|script|branch|decide|switch|output|mapfilter|foreach|parallel|join|retry|delay|gate|trycatch|subworkflow|task|http|notify|git|file|verify|board|comment
+        /// trigger|schedule|webhook|task-event|file-watch|prompt|agent|cli|script|branch|decide|switch|output|break|make|parse-json|variable|mapfilter|foreach|parallel|join|retry|delay|gate|subworkflow|trycatch|task|http|notify|board|git|file|memory|verify|comment
         #[arg(value_name = "KIND", required_unless_present = "kind", value_parser = parse_workflow_node_kind)]
         kind_pos: Option<WorkflowNodeKind>,
         /// Node title (≤ 200 characters)

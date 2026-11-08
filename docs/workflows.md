@@ -73,7 +73,7 @@ Stored config is the validated, normalized form.
 
 | Kind | Config | What it does |
 | --- | --- | --- |
-| `trigger` | `{"mode": "manual"\|"time"\|"voice"\|"ambient"\|"hook", "every_minutes": 1..=10080 (required iff time), "events": ["idea"\|"can-help"\|"wake", …] (required iff ambient: non-empty, no duplicates, refused on any other mode), "phrase": "…" (optional, for voice)}` (`hook` takes nothing else: it is run by `workflow run --hook`, below) | the run's source; its output **is** the run input. Without `--config`, `{"mode":"manual"}` |
+| `trigger` | `{"mode": "manual"\|"time"\|"voice"\|"ambient"\|"hook", "every_minutes": 1..=10080 (required iff time), "events": ["idea"\|"can-help"\|"wake", …] (required iff ambient: non-empty, no duplicates, refused on any other mode), "phrase": "…" (optional, meant for voice but accepted on any mode)}` (`hook` needs no other key: it is run by `workflow run --hook`, below) | the run's source; its output **is** the run input. Without `--config`, `{"mode":"manual"}` |
 | `prompt` | `{"model": "haiku"\|"sonnet"\|"opus"\|"local:<name>" (a name never starts with `-`), "thinking": bool (default false), "prompt": "…" (non-empty), "timeout_secs": 1..=3600 (default 600)}` | one synchronous model call; the node's output is the model's text answer, trimmed |
 | `agent` | `{"agent": "<name>", "prompt": "…", "model"?, "timeout_secs"?: 1..=3600, "result_type"?, "retry"?}` | one model call acting as a library agent definition; output is text or canonical typed JSON |
 | `cli` | `{"command": "…" (non-empty), "timeout_secs": 1..=86400 (default 600), "always"?: bool}` | `bash -c <command>` **verbatim** (the author wrote it, as with scripts); output is stdout. `"always": true` (naru task 2033) makes it a closing node: it ignores its edges, runs after every other node whatever happened (a failed run included) and gets the run input plus a `run_status=succeeded` / `run_status=failed error=<message>` line; its own failure never replaces the run's earlier error |
@@ -87,7 +87,7 @@ Stored config is the validated, normalized form.
 | `http` | `{"method": "GET"\|"POST"\|"PUT"\|"PATCH"\|"DELETE" (default GET), "url": "http://…", "headers": {"Name": "value"}, "body": "…" (POST, PUT, PATCH), "timeout_secs": 1..=600 (default 30)}` | one HTTP request (naru task 1997); `{input}` is replaced in `url` (percent-encoded, unless the url starts with `{input}`, which is then the whole url), header values and `body`. Output is JSON `{status, ok, body, json}` (`json` the body parsed, else `null`; the body is capped at 32 KiB and `truncated: true` is added when cut). A non-2xx status is data (`ok: false`); a refused connection or a timeout fails the node. Pins `any` in, `any` out. |
 | `board` | `{"kind": "markdown"\|"html" (default markdown), "title": "…", "body": "…"}` | pushes a board to the live whiteboard (naru task 2001), the way `naru live board push` does. `body` has `{input}` replaced and defaults to the input; ≤ 2 MiB, `title` ≤ 200 characters. No live conversation fails the node (`naru live start` first). The input passes through unchanged. Pins `any` in, `any` out. |
 | `notify` | `{"mode": "phone"\|"speak" (default phone), "message": "…", "title": "…", "open": "<route>"}` | tells a person (naru task 1998). `phone` sends through `vox` exactly as `naru notify` does (`title`, and an Open Naru button to `open`); `speak` appends a `naru` turn to the live conversation so the page speaks it (`unavailable` and a failed node when none is live). `message` has `{input}` replaced and defaults to the input; ≤ 4096 bytes. The input passes through unchanged; a failed send fails the node. Pins `any` in, `any` out. |
-| `trycatch` | `{"wrap":{"kind":"cli\|script\|prompt\|agent","config":{...}},"timeout_secs":N}` | runs the wrapped node once (naru task 1995). Success routes `ok` with the wrapped output; a failure is caught: the node and the run still succeed, the output is the error text, and the `caught` edges run. Edges need `--branch ok\|caught`; an unwired branch skips everything behind it |
+| `trycatch` | `{"wrap":{"kind":"cli\|script\|prompt\|agent\|notify","config":{...}},"timeout_secs":N}` | runs the wrapped node once (naru task 1995). Success routes `ok` with the wrapped output; a failure is caught: the node and the run still succeed, the output is the error text, and the `caught` edges run. Edges need `--branch ok\|caught`; an unwired branch skips everything behind it |
 | `retry` | `{"wrap": {"kind": "cli"\|"script"\|"prompt"\|"agent", "config": {…the wrapped kind's config…}}, "attempts": 1..=10 (default 3), "backoff_ms": 0..=60000 (default 0), "backoff_factor": 1..=10 (default 1), "timeout_secs": 1..=3600}` | runs the wrapped node, retrying on failure (naru task 1991); output is the wrapped node's |
 | `output` | `{"target": "log", "log": "<name>" (default `default`)}`, `{"target": "task", "project": "<id\|name>", "status": "backlog"\|"todo" (default todo)}`, `{"target": "inbox", "task_id": N, "kind": "task-summary"\|"change-request" (default task-summary)}`, `{"target": "board", "title": "…"}`, `{"target": "reply", "decision": "block"\|"allow"\|"context" (required), "message": "…" (`{input}` replaced; defaults to the input)}` | delivers its input; output is a short receipt. `reply` (naru task 1639) writes nothing anywhere: its output is the compact JSON `{"reply":"<decision>","message":"<message>"}`, which `workflow run --hook` reads (an `allow` with an empty input is normal, so it is handled before the "nothing to deliver" early return). A key that does not apply to the target is refused |
 
@@ -287,7 +287,8 @@ body runs under `bash -c` once per item, in order, in the run's cwd; the item
 arrives as `$1`, `$NARU_INPUT` and on stdin and is **never spliced into the
 script text** (so a hostile item stays literal; `{input}` is not substituted).
 The output is a JSON array of each run's trimmed stdout. A nonzero exit or a
-timeout on any item fails the node with `item <index> exited <code>: …`. The
+timeout on any item fails the node with `item <index> exited <code>: …`, and
+the items after it do not run. The
 body is one inline step, not a downstream subgraph. Drawn in the amber data
 group colour (`--amber`; board export `#ffb444`); the editor offers a body
 textarea and a per-item timeout field.
@@ -319,7 +320,8 @@ export `#fb923c`). The editor takes the wrapped config as JSON.
 (pins: `in: any` → `out: any`). Config is exactly one of `{"seconds": 0..=3600}`
 or `{"until": "HH:MM" | "YYYY-MM-DDTHH:MM:SSZ"}` (both UTC; `HH:MM` is the next
 such time of day). An `until` more than 3600 s ahead fails the node at run time
-(an instant already past waits 0); anything else is `validation` at create. The
+(an instant already past waits 0); anything else, including `seconds` over
+3600, is `validation` at create. The
 wait runs with no store lock held. There is no cancel flag in the engine yet, so
 a run cannot be stopped mid-wait. Flow group colour (`--wf-flow`; board export
 `#fb923c`); the editor offers a Duration / Until choice.
@@ -351,8 +353,8 @@ run a waiting gate's card carries an amber "waiting" badge, its message and
 one reads "approved" or "rejected — timed out".
 
 **`trycatch`** (naru task 1995) handles a failure path without failing the run.
-It wraps one `cli`, `script`, `prompt` or `agent` node (the same `wrap` shape
-as `retry`, plus an optional `timeout_secs`, 1-3600) and runs it once. Its
+It wraps one `cli`, `script`, `prompt`, `agent` or `notify` node (the same `wrap`
+shape as `retry`, which itself does not take `notify`, plus an optional `timeout_secs`, 1-3600) and runs it once. Its
 edges carry `ok` or `caught` in `branch`: a passing wrap activates the `ok`
 edges, a failing one activates the `caught` edges while the node itself is
 `ok` and the run keeps its `succeeded` status. If the branch taken has no edge,
@@ -752,7 +754,7 @@ and data edges naming its default pins.
 | `gate` | `in` | — (flow handles only) |
 | `output` | `result` | — |
 | `parse-json` | `text` | `value` → the parsed value |
-| `variable` | its config's (`value` on set, `trigger` on get) | `value` → the value |
+| `variable` | set: `value`; get: `trigger` | `value` → the value |
 | `mapfilter` | `list` | `list` → the mapped/filtered list |
 | `foreach` | `list` | `results` → the results list |
 | `parallel`, `delay`, `subworkflow`, `task`, `http`, `notify`, `board` | `in` | `out` → the node's text output |
