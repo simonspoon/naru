@@ -39,7 +39,10 @@ import {
   stageText,
   subagentRef,
   visibleAgents,
-  voiceMotion,
+  orbitIndicator,
+  orbitPalettes,
+  rgbHex,
+  screenBox,
 } from './agentOrbit'
 import type { OrbitAgent } from './types/OrbitAgent'
 import type { OrbitJob } from './types/OrbitJob'
@@ -258,11 +261,31 @@ describe('sparkPoints / pct', () => {
   })
 })
 
-describe('voiceMotion / hrefs', () => {
-  it('moves the bars only while live', () => {
-    expect(voiceMotion({ active: false, state: 'off', sessionId: null, projectId: null, agentSessionId: null, agents: [], tools: [], recent: [] })).toBe('off')
-    expect(voiceMotion({ active: true, state: 'speaking', sessionId: 1, projectId: 2, agentSessionId: null, agents: [], tools: [], recent: [] })).toBe('speaking')
-    expect(voiceMotion({ active: true, state: 'listening', sessionId: 1, projectId: 2, agentSessionId: null, agents: [], tools: [], recent: [] })).toBe('idle')
+describe('orbitIndicator / orbitPalettes / hrefs', () => {
+  const naru = (active: boolean, state: string) => ({ ...{ active: true, state: 'x', sessionId: 1, projectId: 2, agentSessionId: null, agents: [], tools: [], recent: [] }, active, state })
+  it('maps the server state to the indicator the centre mark wears', () => {
+    expect(orbitIndicator(naru(false, 'speaking'))).toBeNull()
+    expect(orbitIndicator(naru(true, 'off'))).toBeNull()
+    for (const s of ['speaking', 'working', 'resting', 'listening'] as const) expect(orbitIndicator(naru(true, s))).toBe(s)
+    expect(orbitIndicator(naru(true, 'nonsense'))).toBeNull()
+  })
+
+  it('wears the old strip colours, one theme colour per look', () => {
+    const vars: Record<string, string> = { '--cyan-rgb': '0, 229, 255', '--violet-rgb': '176,107,255', '--amber-rgb': '' }
+    const p = orbitPalettes((n) => vars[n] ?? '')
+    expect(p.hear).toEqual({ bars: ['#00e5ff', '#00e5ff', '#00e5ff', '#00e5ff'], glow: '#00e5ff' })
+    expect(p.speak?.glow).toBe('#b06bff')
+    expect(p.think?.glow).toBe('#ffb444')
+    expect(p.idle).toBeUndefined()
+    expect(rgbHex('1, 2', '#000000')).toBe('#000000')
+    expect(rgbHex('256, 0, 0', '#000000')).toBe('#000000')
+  })
+
+  it('places a viewBox square in screen pixels, letterboxed like xMidYMid meet', () => {
+    // 1000x1000 view in a 400x200 element: scale 0.2, 100px bars either side.
+    expect(screenBox({ x: 0, y: 0, w: 1000, h: 1000 }, { w: 400, h: 200 }, { x: 500, y: 500 }, 100)).toEqual({ left: 190, top: 90, size: 20 })
+    // Panned by (100, 50): the box moves the other way.
+    expect(screenBox({ x: 100, y: 50, w: 1000, h: 1000 }, { w: 1000, h: 1000 }, { x: 500, y: 500 }, 100)).toEqual({ left: 350, top: 400, size: 100 })
   })
 
   it('links tasks to their panel and workflows to their editor', () => {

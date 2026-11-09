@@ -3,6 +3,8 @@
 // running job sits on the ring, where its sub-agent dots cluster, how the
 // queue groups by project, and the sparkline points. The page only draws.
 
+import type { LiveIndicator } from './liveIndicator'
+import type { MarkPalettes } from './liveMark'
 import type { CcSessionChat } from './types/CcSessionChat'
 import type { OrbitAgent } from './types/OrbitAgent'
 import type { OrbitJob } from './types/OrbitJob'
@@ -298,10 +300,38 @@ export function pct(used: number | null, total: number | null): number | null {
   return (used / total) * 100
 }
 
-/** How Naru's voice bars move: `speaking` lively, `idle` gently (live but quiet), `off` still. */
-export function voiceMotion(naru: OrbitNaru): 'speaking' | 'idle' | 'off' {
-  if (!naru.active || naru.state === 'off') return 'off'
-  return naru.state === 'speaking' ? 'speaking' : 'idle'
+/**
+ * The centre orb's state from the server poll, for a browser that is not in
+ * the conversation (naru task 2632): its own speaking/working/resting/listening
+ * as the indicator the mark wears, no session (or `off`) as null. Hearing and
+ * paused exist only in a joined browser, so they never come from here.
+ */
+export function orbitIndicator(naru: OrbitNaru): LiveIndicator | null {
+  if (!naru.active) return null
+  const s = naru.state
+  return s === 'speaking' || s === 'working' || s === 'resting' || s === 'listening' ? s : null
+}
+
+/** A theme's `--<name>-rgb` triplet ("176, 107, 255") as `#rrggbb`, or `fallback`. */
+export function rgbHex(triplet: string, fallback: string): string {
+  const parts = triplet.split(',').map((p) => Number(p.trim()))
+  if (parts.length !== 3 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return fallback
+  return `#${parts.map((n) => n.toString(16).padStart(2, '0')).join('')}`
+}
+
+/**
+ * The centre orb's colours (naru task 2632): the removed header strip's — the
+ * person heard `--cyan`, Naru speaking `--violet`, working or resting
+ * `--amber` — one theme colour per look, every bar and the glow. Idle, paused
+ * and the offer keep the mark's own. `read` answers a CSS variable's value.
+ */
+export function orbitPalettes(read: (name: string) => string): MarkPalettes {
+  const one = (hex: string) => ({ bars: [hex, hex, hex, hex], glow: hex })
+  return {
+    hear: one(rgbHex(read('--cyan-rgb'), '#00e5ff')),
+    speak: one(rgbHex(read('--violet-rgb'), '#b06bff')),
+    think: one(rgbHex(read('--amber-rgb'), '#ffb444')),
+  }
 }
 
 function workflowHref(projectId: number | null, workflowId: number | null): string {
@@ -430,6 +460,19 @@ export function zoomView(v: ViewBox, factor: number, at: Pt): ViewBox {
   const w = v.w / f
   const h = v.h / f
   return { x: at.x - (at.x - v.x) / f, y: at.y - (at.y - v.y) / f, w, h }
+}
+
+/**
+ * The CSS-pixel box, inside an element `px` big, that the viewBox square of
+ * side `size` centred on `at` is drawn in (the svg's default
+ * `xMidYMid meet`): where the centre orb's HTML overlay goes (naru task 2632;
+ * WebKit does not paint the mark inside a `<foreignObject>`).
+ */
+export function screenBox(v: ViewBox, px: { w: number; h: number }, at: Pt, size: number): { left: number; top: number; size: number } {
+  const k = Math.min(px.w / v.w, px.h / v.h)
+  const ox = (px.w - v.w * k) / 2
+  const oy = (px.h - v.h * k) / 2
+  return { left: ox + (at.x - size / 2 - v.x) * k, top: oy + (at.y - size / 2 - v.y) * k, size: size * k }
 }
 
 /** `v` dragged by `dx`, `dy` viewBox units (the content moves with the pointer). */

@@ -45,6 +45,10 @@ export const PALETTES: Record<'idle' | 'hear' | 'speak' | 'think' | 'offer', { b
   offer: { bars: ['#d98a14', '#f0a820', '#ffc23d', '#fff0c2'], glow: '#ffc23d' },
 }
 
+/** Per-look colours that replace `PALETTES` for the looks they name (the agent
+ *  watcher's centre orb, naru task 2632). */
+export type MarkPalettes = Partial<Record<MarkMode, { bars: string[]; glow: string }>>
+
 /** The favicon's own colours (frontend/public/favicon.svg), by `BAR_SLOT`: the
  *  nav's resting mark wears these instead of idle's dim slate (naru task 1869). */
 export const BRAND_IDLE = { bars: ['#8a2bff', '#ff2bd6', '#2b8aff', '#29e6ff'], glow: '#29e6ff' }

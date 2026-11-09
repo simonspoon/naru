@@ -3,7 +3,6 @@ import { mainFloor, mainIsCollapsed } from '../mainCollapse'
 import { createPortal } from 'react-dom'
 import * as dockHosts from '../lib/dockHosts'
 import { NaruMark } from './NaruMark'
-import { LiveEq } from './LiveEq'
 import { LiveOrb, OrbHeaderControls, OrbPanel } from './LiveOrb'
 import { LiveBoardPanel, type InkFlatten } from './LiveBoardPanel'
 import {
@@ -100,6 +99,7 @@ import { parseBoardKey } from '../liveBoardKeys'
 import { elapsedLabel, endsInHead } from '../liveHead'
 import { headMeta, quietHint, taskHash, taskSegments, turnSegments } from '../liveChat'
 import { headerIndicator } from '../liveIndicator'
+import { setLiveMarkFeed } from '../liveMarkFeed'
 import { COMPOSER_HIDE_DELAY_MS, composerShown, inRevealZone } from '../liveComposerReveal'
 import { offerGlows, offerTitle } from '../liveOffer'
 import {
@@ -4795,6 +4795,17 @@ export function LiveHub({
     resting: session?.resting_since != null,
   })
 
+  // The agent watcher's centre orb wears what the floating orb does (naru
+  // task 2632, `liveMarkFeed.ts`); null when this browser is not in it, so the
+  // watcher falls back to the server's poll.
+  const feedOn = (live && unlocked) || glowing
+  const feedState = live && unlocked ? indicator : null
+  const feedOffer = glowing && offer !== null
+  useEffect(() => {
+    setLiveMarkFeed(feedOn ? { state: feedState, level, speechRms, offer: feedOffer } : null)
+  }, [feedOn, feedState, level, feedOffer])
+  useEffect(() => () => setLiveMarkFeed(null), [])
+
   // The thinking cue (mesa task 1620): `nextThinking` decides when it is
   // over (speech, pause, end, leaving, or work finished with nothing to say),
   // with a cap for a session nothing answers. Armed, it only keeps the chime
@@ -5750,10 +5761,6 @@ export function LiveHub({
           is not currently showing it — hidden, or the whole panel closed.
           Shows the section *and* opens the panel, since a hidden section
           inside a closed panel is still nothing on screen. */}
-      {/* The header equalizer (naru task 2610, replacing mesa task 1557's
-          window-edge glow): the same ranked state, as a thin row of bars on
-          the page header's bottom border, on every route. */}
-      <LiveEq state={live && unlocked ? indicator : null} level={level} speechRms={speechRms} />
       {/* The floating orb (mesa task 1553): the mark above every page while a
           conversation is live and this browser is in it — the same terms the
           head's Pause and mute buttons are offered on — wired to the very

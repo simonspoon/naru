@@ -164,9 +164,24 @@ System sparklines come from `GET /api/system/stats` (`docs/system.md`).
 holds every position and grouping (pure, tested). Both feeds poll every 5 s
 while the panel is visible.
 
-- **Naru** at the centre of an SVG (a 1000×1000 map; the live viewBox is the canvas view, below) with five voice bars:
-  still and grey when no live session (`off`), a slow pulse while live, fast
-  while `speaking`. No "waiting on you" tag.
+- **Naru** at the centre of an SVG (a 1000×1000 map; the live viewBox is the canvas view, below):
+  a decorative `NaruMark` (naru task 2632) in an HTML box laid over the
+  map at the upper part of the opaque Naru disc (`agentOrbit.ts::screenBox`
+  maps it from the viewBox; WebKit, so the Mac app, does not paint the mark
+  inside an SVG `<foreignObject>`) (which hides the spokes starting at the
+  centre), in the current mark skin, with the "Naru" label inside the disc
+  below it. In
+  a browser that is in the conversation it wears exactly what the floating
+  orb does — speaking, hearing, working/resting, paused, listening, offer, with
+  the real mic and playback levels — read from `liveMarkFeed.ts` (LiveHub
+  publishes it); otherwise the poll's `naru.state` through
+  `agentOrbit.ts::orbitIndicator` (speaking/working/resting/listening; no
+  session or `off` is idle), without level. Its colours are the removed
+  header strip's (`orbitPalettes`: hearing `--cyan`, speaking `--violet`,
+  thinking `--amber`, from the theme's `--*-rgb`); idle, paused and offer keep
+  the mark's own. The mark is not mounted while the panel is hidden
+  (`active`); the disc behind it is the hover target. No
+  "waiting on you" tag.
 - **Jobs** evenly spaced by angle from the top, clockwise (from seven jobs it
   turns half a step so none sits level with Naru). **Distance from Naru is
   the job's age** (naru task 2551; `startedAt` against the feed's `now`, so

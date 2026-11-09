@@ -12276,20 +12276,6 @@ select.library-model-badge {
   }
 }
 
-/* The header equalizer (naru task 2610, `components/LiveEq.tsx`): a canvas
-   along the page header's bottom border, its bars inside the header's bottom
-   padding, never in the way of a click and taking no room in the row. */
-.live-eq {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  width: 100%;
-  height: 14px;
-  pointer-events: none;
-  opacity: 0.55;
-}
-
 /* --- Dock (mesa task 1567, docs/dock.md) ----------------------------------
    The desktop tiers' panel layout: a split tree of tab groups beside the
    pinned nav. Surfaces, rings and radii are the style guide's tokens; nothing
@@ -13582,53 +13568,21 @@ body.dock-resizing .dock-body {
   stroke-dasharray: 6 8;
 }
 
-.orbit-naru-glow {
-  fill: var(--violet);
-  opacity: 0.5;
-}
-
 .orbit-naru-disc {
   fill: var(--panel);
-  stroke: var(--violet);
-  stroke-width: 6;
 }
 
-.orbit-bar {
-  fill: var(--violet);
-  transform-box: fill-box;
-  transform-origin: center;
-  animation: orbit-voice 1.6s steps(6) infinite;
-}
-
-.orbit-naru.speaking .orbit-bar {
-  animation-duration: 0.55s;
-  animation-timing-function: steps(2);
-}
-
-.orbit-naru.off .orbit-bar {
-  fill: var(--muted);
-  animation: none;
-}
-
-.orbit-naru.off .orbit-naru-glow {
-  display: none;
+/* The centre orb is a NaruMark (naru task 2632) in an HTML box laid over the
+   map (`screenBox`; WebKit does not paint it inside a foreignObject). It takes
+   no pointer, so hover reaches the disc under it, whose opaque fill hides the
+   spokes and twigs that start at the centre. */
+.orbit-naru-mark {
+  position: absolute;
+  pointer-events: none;
 }
 
 .orbit .orbit-naru-name {
   font-weight: 800;
-}
-
-/* Stepped to ~30 updates/s, see wf-step-pulse (naru task 2606). */
-@keyframes orbit-voice {
-  0%, 100% { transform: scaleY(1); }
-  12.5%, 87.5% { transform: scaleY(0.93); }
-  25%, 75% { transform: scaleY(0.72); }
-  37.5%, 62.5% { transform: scaleY(0.52); }
-  50% { transform: scaleY(0.45); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .orbit-bar { animation: none; }
 }
 
 /* Tool-call bursts (naru task 2568): each new call leaves its node as a chip

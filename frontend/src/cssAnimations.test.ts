@@ -48,7 +48,7 @@ function loops(): { text: string; name: string; duration: number; steps: number 
 
 describe('looping CSS animations', () => {
   it('finds the loops and their stops (so the guard below is not vacuous)', () => {
-    expect(loops().length).toBeGreaterThanOrEqual(8)
+    expect(loops().length).toBeGreaterThanOrEqual(7)
     for (const loop of loops()) expect(segments(loop.name), loop.name).toBe(8)
   })
   for (const loop of loops()) {

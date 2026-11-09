@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { getAgentOrbit, getCcSessionChat, getCcSubagentChat, getSystemStats } from '../api'
 import {
   C,
@@ -27,14 +27,19 @@ import {
   subagentRef,
   boostY,
   safeBoost,
+  screenBox,
   textBoost,
-  voiceMotion,
+  orbitIndicator,
+  orbitPalettes,
   zoomView,
   type HoverTurn,
   type Pt,
   type ViewBox,
   type WatchPanel,
 } from '../agentOrbit'
+import { NaruMark } from '../components/NaruMark'
+import { currentLiveMarkFeed, subscribeLiveMarkFeed } from '../liveMarkFeed'
+import { cssVar, onThemeChange } from '../theme'
 import { BURST_MAX, chipOffset, chipSide, chipText, newBursts, type Burst, type NodeTools } from '../toolBurst'
 import type { AgentOrbit } from '../types/AgentOrbit'
 import type { CcSessionChat } from '../types/CcSessionChat'
@@ -49,8 +54,6 @@ import { useFetch } from '../useFetch'
 // of whatever is under the pointer, the queue grouped by project, and host
 // sparklines. Drawing only — where things go lives in agentOrbit.ts.
 
-const BARS = [0.35, 0.7, 1, 0.65, 0.3]
-
 /** Where a hover block's messages come from. */
 type HoverSrc =
   | { kind: 'session'; sessionId: string }
@@ -59,6 +62,36 @@ type HoverSrc =
   | { kind: 'none' }
 /** `anchor` is the pointed-at element, measured on every render so the block follows it as it ages outward. */
 type Hover = { key: string; title: string; detail: string | null; src: HoverSrc; anchor: Element }
+
+/**
+ * The centre orb (naru task 2632): the live mark, wearing what this browser's
+ * conversation wears (`liveMarkFeed.ts`, published by LiveHub) — or, when it
+ * is not in one, the server poll's state, without level. Decorative: the
+ * conversation head's mark is the one that announces state. Colours are the
+ * removed header strip's (`orbitPalettes`), re-read on a theme change.
+ */
+function CentreMark({ naru, box }: { naru: OrbitNaru; box: { left: number; top: number; size: number } }) {
+  const feed = useSyncExternalStore(subscribeLiveMarkFeed, currentLiveMarkFeed)
+  const [palettes, setPalettes] = useState(() => orbitPalettes((n) => cssVar(n, '')))
+  useEffect(() => onThemeChange(() => setPalettes(orbitPalettes((n) => cssVar(n, '')))), [])
+  return (
+    <div className="orbit-naru-mark" style={{ left: box.left, top: box.top, width: box.size, height: box.size }}>
+      <NaruMark
+        decorative
+        state={feed ? feed.state : orbitIndicator(naru)}
+        level={feed?.level ?? 0}
+        speechRms={feed?.speechRms ?? noSpeech}
+        offer={feed?.offer ?? false}
+        palettes={palettes}
+      />
+    </div>
+  )
+}
+
+/** The centre mark's box, in map units. */
+const MARK_PX = 116
+
+const noSpeech = (): number | null => null
 
 /** A sub-agent's hover source: its transcript when the key names one (a workflow step's does not). */
 function agentSrc(agent: OrbitAgent, transcript: boolean): HoverSrc {
@@ -106,7 +139,6 @@ export function AgentWatcherView({ active = true }: { active?: boolean } = {}) {
   })
   const groups = groupQueue(data.queue, data.projects)
   const nodeAt = anchors(layout)
-  const motion = voiceMotion(data.naru)
 
   return (
     <div className="agent-watch">
@@ -163,24 +195,11 @@ export function AgentWatcherView({ active = true }: { active?: boolean } = {}) {
           ))}
 
           <g
-            className={`orbit-naru ${motion}`}
+            className="orbit-naru"
             {...point({ key: 'naru', title: 'Naru', detail: data.naru.active ? data.naru.state : 'not live', src: { kind: 'naru' } })}
           >
-            <circle cx={C} cy={C} r={NARU_R + 14} className="orbit-naru-glow" filter="url(#orbit-glow)" />
             <circle cx={C} cy={C} r={NARU_R} className="orbit-naru-disc" />
-            {BARS.map((h, i) => (
-              <rect
-                key={i}
-                className="orbit-bar"
-                x={C - 36 + i * 15}
-                y={C - 18 - h * 32}
-                width={9}
-                height={h * 64}
-                rx={4.5}
-                style={{ animationDelay: `${i * 0.13}s` }}
-              />
-            ))}
-            <text className="orbit-naru-name" x={C} y={C + 50} textAnchor="middle" fontSize={TITLE_PX}>
+            <text className="orbit-naru-name" x={C} y={C + NARU_R - 18} textAnchor="middle" fontSize={TITLE_PX}>
               Naru
             </text>
           </g>
@@ -279,6 +298,10 @@ export function AgentWatcherView({ active = true }: { active?: boolean } = {}) {
             </text>
           )}
         </svg>
+        {active && px && (
+          // The disc's upper part, so the "Naru" label inside it stays clear.
+          <CentreMark naru={data.naru} box={screenBox(vb, px, { x: C, y: C - NARU_R + 4 + MARK_PX / 2 }, MARK_PX)} />
+        )}
         <div className="orbit-zoom" role="group" aria-label="Zoom">
           <button type="button" aria-label="Zoom in" title="Zoom in" onClick={() => setView(zoomView(vb, 1.25, centre(vb)))}>+</button>
           <button type="button" aria-label="Zoom out" title="Zoom out" onClick={() => setView(zoomView(vb, 0.8, centre(vb)))}>−</button>

@@ -5,6 +5,7 @@ import { simEnvelope, smoothLevel } from '../liveBand'
 import type { LiveIndicator } from '../liveIndicator'
 import { indicatorLabel } from '../liveIndicator'
 import { levelFromRms, markFrameDelay, markFrameDue, markFrameWait, markMode, paletteFor } from '../liveMark'
+import type { MarkPalettes } from '../liveMark'
 import { currentMarkSkin, isCustomMarkSkin, subscribeMarkSkin } from '../markSkin'
 import type { MarkInput, MarkSkin } from '../markSkin'
 import { frameMessage, MARK_SKIN_READY_MS, nextSkinState, themeMessage } from '../markSkinCustom'
@@ -19,6 +20,7 @@ interface MarkLive {
   speechRms: () => number | null
   offer: boolean
   brandIdle: boolean
+  palettes?: MarkPalettes
 }
 
 type MarkAria = { 'aria-hidden': true } | { role: 'status'; 'aria-label': string }
@@ -49,6 +51,7 @@ export function NaruMark({
   brandIdle = false,
   skin: skinOverride,
   onSkinState,
+  palettes,
 }: {
   state: LiveIndicator | null
   level: number
@@ -65,11 +68,14 @@ export function NaruMark({
   skin?: string
   /** A custom skin's load state as it changes (the Settings picker). */
   onSkinState?: (state: SkinLoadState) => void
+  /** Wear these colours for the looks they name (the agent watcher's centre
+   *  orb wears the old header strip's, naru task 2632). */
+  palettes?: MarkPalettes
 }) {
-  const live = useRef<MarkLive>({ state, level, speechRms, offer, brandIdle })
+  const live = useRef<MarkLive>({ state, level, speechRms, offer, brandIdle, palettes })
   useEffect(() => {
-    live.current = { state, level, speechRms, offer, brandIdle }
-  }, [state, level, speechRms, offer, brandIdle])
+    live.current = { state, level, speechRms, offer, brandIdle, palettes }
+  }, [state, level, speechRms, offer, brandIdle, palettes])
 
   const chosen = useSyncExternalStore(subscribeMarkSkin, currentMarkSkin)
   const id = skinOverride ?? chosen
@@ -139,7 +145,7 @@ function runMarkLoop(live: RefObject<MarkLive>, paint: (input: MarkInput) => voi
     }
     lv = smoothLevel(lv, raw, dt * 60)
 
-    paint({ mode, level: lv, palette: paletteFor(mode, cur.brandIdle), reduced, t, dt })
+    paint({ mode, level: lv, palette: cur.palettes?.[mode] ?? paletteFor(mode, cur.brandIdle), reduced, t, dt })
     // At most 30fps, and far fewer frames for a settled resting mark (naru
     // tasks 2605, 2606): the wait is a timer, so no display frame is spent in
     // between.

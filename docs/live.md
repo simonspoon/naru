@@ -2524,26 +2524,15 @@ captions. The transcript follows the growing caption (`captionChars` is an
 effect dependency), still only while the reader is near the bottom
 (`liveScroll`).
 
-## The header equalizer (naru task 2610)
+## The header equalizer (naru task 2610) — removed
 
-While a conversation is live and this browser is in it, a thin row of bars
-runs along the page header's bottom border on every route, replacing the
-window-edge glow of mesa task 1557. It is a `pointer-events: none` canvas
-(`components/LiveEq.tsx`, rendered by `LiveHub`), absolutely positioned in the
-header so it takes no room and covers no control; the bars (at most 8px, 3px
-wide with 3px gaps, opacity 0.55, a canvas `shadowBlur` glow) grow upward
-inside the header's bottom padding. It wears the **same ranked indicator
-state** the mark does, never re-derived (`liveEq.ts::eqMode`): hearing (the
-person) `--cyan`, speaking (Naru) `--violet`, working and resting `--amber`.
-Heights come from the mark's own signals — the microphone RMS for the person,
-the playback tap (or the simulated envelope when untapped) for Naru, smoothed
-with `smoothLevel` — and thinking is a slow synthetic pulse (2.6s, 0.12-0.5 of
-full height). Listening, paused and no conversation draw nothing: after a
-sub-second fade (gain eases with a 0.15s time constant) the canvas unmounts
-and its loop stops, so an idle header has no element and no work. The loop is
-one timer-paced rAF at most 30fps, using the mark's
-`markFrameDue`/`markFrameWait` (naru task 2606). The header mark itself is
-unchanged.
+The thin row of bars along the page header's bottom border (`LiveEq.tsx`,
+`liveEq.ts`) was removed by naru task 2632 in favour of the agent watcher's
+centre orb (`docs/agent-watcher.md`), which now wears the same ranked
+indicator state in the strip's colours: hearing `--cyan`, speaking `--violet`,
+working and resting `--amber`. `LiveHub` publishes the mark inputs it gives
+the floating orb (state, mic level, playback tap, offer) to
+`liveMarkFeed.ts` while this browser is in the conversation; null otherwise.
 
 ## The thinking cue (mesa task 1620)
 
