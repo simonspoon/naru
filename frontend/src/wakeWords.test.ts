@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest'
-import { makePrimary, toggleWake, wakeOn, wakeVerdictText, wakeWordsError, wakeWordsToSave } from './wakeWords'
+import {
+  makePrimary,
+  peakLevel,
+  silenceVerdictText,
+  SILENT_PEAK,
+  toggleWake,
+  wakeOn,
+  wakeVerdictText,
+  wakeWordsError,
+  wakeWordsToSave,
+} from './wakeWords'
 
 describe('wakeWordsToSave', () => {
   it('trims, drops blanks and dedupes ignoring case, keeping the first', () => {
@@ -87,5 +97,26 @@ describe('wakeVerdictText', () => {
     expect(wakeVerdictText({ wake: false, match: null, word: null, reason: 'no wake word heard' })).toBe(
       'no (no wake word heard)',
     )
+  })
+})
+
+describe('peakLevel', () => {
+  it('is the loudest absolute sample, 0 for none', () => {
+    expect(peakLevel(new Float32Array([0.1, -0.4, 0.3]))).toBeCloseTo(0.4)
+    expect(peakLevel(new Float32Array([]))).toBe(0)
+  })
+
+  it('reads a lid-closed built-in mic (denormal zeros) as silence, room noise as not', () => {
+    expect(peakLevel(new Float32Array(1000).fill(2e-34))).toBeLessThan(SILENT_PEAK)
+    expect(peakLevel(new Float32Array([0.002, -0.01, 0.004]))).toBeGreaterThanOrEqual(SILENT_PEAK)
+  })
+})
+
+describe('silenceVerdictText', () => {
+  it('names the device when there is one', () => {
+    expect(silenceVerdictText(' MacBook Pro Microphone (Built-in) ')).toBe(
+      'no (mic captured silence from "MacBook Pro Microphone (Built-in)"; check the browser\'s input device and permission)',
+    )
+    expect(silenceVerdictText('')).toBe("no (mic captured silence; check the browser's input device and permission)")
   })
 })

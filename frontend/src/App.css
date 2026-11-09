@@ -13123,6 +13123,11 @@ body.dock-resizing .dock-body {
   transition: width 80ms linear;
 }
 
+/* "Test my wake word" (naru task 2631): the meter sits in the button row. */
+.settings-actions .voice-enroll-meter {
+  width: 8rem;
+}
+
 .voice-enroll-clock {
   font-family: var(--font-mono);
   margin: 0.5rem 0;

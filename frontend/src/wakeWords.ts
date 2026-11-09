@@ -71,3 +71,24 @@ export function wakeVerdictText(v: {
   const how = v.match === 'sound_alike' ? 'sound-alike' : 'exact'
   return v.word === null ? `yes (${how})` : `yes (${how} "${v.word}")`
 }
+
+/**
+ * Below this peak (of `-1..1` samples) a test clip is silence: a dead or muted
+ * input, such as a MacBook's built-in mic with the lid closed, which still
+ * opens but delivers digital zeros (naru task 2631). Room noise on a live mic
+ * sits well above it.
+ */
+export const SILENT_PEAK = 0.005
+
+/** The loudest absolute sample. */
+export function peakLevel(samples: Float32Array): number {
+  let peak = 0
+  for (let i = 0; i < samples.length; i++) peak = Math.max(peak, Math.abs(samples[i]))
+  return peak
+}
+
+/** The verdict when the clip was silence, naming the device it came from when the browser told us. */
+export function silenceVerdictText(device: string): string {
+  const from = device.trim() === '' ? '' : ` from "${device.trim()}"`
+  return `no (mic captured silence${from}; check the browser's input device and permission)`
+}
