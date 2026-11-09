@@ -381,18 +381,39 @@ Routes added for it, same `require_agent_access` boundary:
 
 ## Mining past sessions (a workflow, not a feature)
 
-The saved workflow `KB: mine past sessions` (voice trigger "mine sessions into
+The built-in workflow `KB: mine past sessions` (voice trigger "mine sessions into
 the knowledge base"; `workflow run <id> --input N` reads N sessions, default 2,
-max 5) is a trigger, a `cli` node running `~/.naru/bin/kb-mine.sh` and a log
-node. The script, which lives outside the repo, picks the newest unprocessed
-sessions from `cc sessions` (8+ messages, ended 20+ minutes ago, not Naru's own
-workspace jobs), has haiku extract only gotchas and new facts from `cc chat`
+max 5) is a trigger, a `cli` node carrying the kb-mine script inline
+(`KB_MINE_SCRIPT` in `src/core/workflow.rs`) and a log node. The script picks
+the newest unprocessed sessions from `cc sessions` (8+ messages, ended 20+
+minutes ago), has haiku extract only gotchas and new facts from `cc chat`
 (transcript fenced as data), drops each fact `kb ask` already answers, files the
 rest with one `kb add --session <that session id>`, and appends the session id to `~/.naru/kb-mined.txt` so
 it is never read twice.
 
+**Which sessions** (naru task 2681): real work, plus **`naru-live` voice
+sessions** (`main_agent` `naru-live`). Every other session whose `cwd` is under
+Naru's workspace (`~/.naru/workspace`) stays out: those are Naru's own
+`claude -p` jobs (kb ask/add, triage, retro…), thousands of them, and mining
+them would feed the miner its own output. Also out: the newest driver session
+of a conversation still going (`live status`), which is not finished however
+long it has been quiet. An input containing the word `voice` (`--input "voice
+5"`) reads voice sessions only — the way to work through a backlog of them.
+
+A voice transcript is cleaned before the model sees it: the person's turns
+(`PERSON:`) and delegates' reports (`RESULT:`) are unwrapped from their JSON, a
+`live say` becomes `SAID:`, and the driver's boilerplate prompt, Naru's own
+notices (cache warm-ups) and the `live listen` calls are dropped; the prompt
+says where the knowledge sits (reports, the person's decisions) and that task
+status is not knowledge. (An older conversation's turns
+arrived as `live listen` results, which `cc chat` does not carry: there the
+model reads only what the agent said and did.) It is read through its last 600 turns in pieces of 24,000
+characters, one model call each, at most the last 3 pieces — so a long
+conversation neither loses its middle nor outgrows the model's context. A work
+session is unchanged: one call, cut to 20,000 characters.
+
 **Ongoing capture** (naru task 1951): the saved workflow `KB: ongoing capture` is the
-same trigger → `kb-mine.sh` → log chain on a `time` trigger (every 60 minutes, so
+same trigger → script → log chain on a `time` trigger (every 60 minutes, so
 `serve --watch-workflows` runs it unattended, 2 sessions per run). It shares the
 `~/.naru/kb-mined.txt` ledger, so a session is never mined twice by either
 workflow. Disable it with `naru workflow update "KB: ongoing capture" --enabled false`.

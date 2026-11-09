@@ -1025,7 +1025,7 @@ graph with the built-in's as one `take built-in rev N` revision (undo with
 Two more managed built-ins mine past Claude Code sessions into the knowledge
 base (`docs/kb.md`): **`KB: mine past sessions`** (a `voice` trigger, phrase
 "mine sessions into the knowledge base"; input = how many sessions, default 2,
-max 5) and **`KB: ongoing capture`** (a `time` trigger, every 60 minutes). Each
+max 5, plus the word `voice` for `naru-live` voice sessions only) and **`KB: ongoing capture`** (a `time` trigger, every 60 minutes). Each
 is trigger → one `cli` node → an `output` to the `kb-mine` log, and the cli
 node carries the whole kb-mine script inline (`KB_MINE_SCRIPT` in
 `src/core/workflow.rs`): it needs `jq` and `claude` and exits 1 naming the
