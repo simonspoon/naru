@@ -38,17 +38,20 @@ rename still imports.
 | `.claude/plugins/installed_plugins.json`, `known_marketplaces.json` | the lists only — plugin caches are re-downloaded |
 | `.claude/projects/*/memory/` | per-project memories only |
 | `.claude/projects/` (all) + `.claude/history.jsonl` | only with `--with-sessions` — session transcripts are most of the size |
-| `data/attachments/`, `data/live-ink/` | the data dirs beside the db (mesa task 1387) — task attachments' bytes and the person's annotated boards; see below |
+| `data/attachments/`, `data/live-ink/`, `data/live-reports/` | the data dirs beside the db (mesa task 1387; naru task 2650) — task attachments' bytes, the person's annotated boards and delegates' kept report files; see below |
 
 A missing item is skipped and listed under `skipped` in export's output,
 never an error.
 
 ### The data dirs (mesa task 1387)
 
-Two dirs hold bytes the db's rows name but do not contain: `attachments/`
+Three dirs hold bytes the db's rows name but do not contain: `attachments/`
 (`attachments::attachments_dir`, `NARU_ATTACHMENTS_DIR`/`MESA_ATTACHMENTS_DIR`,
-else beside the db) and `live-ink/` (`board::live_ink_dir`,
-`NARU_LIVE_INK_DIR`/`MESA_LIVE_INK_DIR`, else beside the db). Both are
+else beside the db), `live-ink/` (`board::live_ink_dir`,
+`NARU_LIVE_INK_DIR`/`MESA_LIVE_INK_DIR`, else beside the db) and
+`live-reports/` (`board::live_reports_dir`, `NARU_LIVE_REPORTS_DIR`/
+`MESA_LIVE_REPORTS_DIR`, else beside the db; naru task 2650, whose paths are
+derived from the row exactly like an attachment's). All are
 resolved by those same functions (`migrate::data_dirs`), never re-derived, on
 each side: export reads this machine's, import restores into **this**
 machine's — beside the db it just imported, or wherever the env var points.

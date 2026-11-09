@@ -7,7 +7,8 @@
 //! accepted), every bundled file at its path relative to `$HOME`
 //! (`.naru/config.json` or `.mesa/config.json`, `.claude/...`), and the
 //! data dirs that live beside the db rather than in it under `data/`
-//! (`data/attachments/...`, `data/live-ink/...`, mesa task 1387). Import
+//! (`data/attachments/...`, `data/live-ink/...`, mesa task 1387;
+//! `data/live-reports/...`, naru task 2650). Import
 //! restores all of it under the
 //! current `$HOME` (the data dirs into this machine's own, [`data_dirs`]), rewriting absolute paths through a list of prefix
 //! mappings (the old home onto the new one, and optionally the manifest's
@@ -95,6 +96,10 @@ pub fn data_dirs() -> Vec<DataDir> {
         DataDir {
             name: "live-ink",
             path: super::board::live_ink_dir(),
+        },
+        DataDir {
+            name: "live-reports",
+            path: super::board::live_reports_dir(),
         },
     ]
 }
@@ -1854,7 +1859,11 @@ mod tests {
 
     /// The `NARU_*` spellings of both data-dir env vars — read before the
     /// `MESA_*` ones, so a developer's shell cannot outrank the test's.
-    const DATA_ENV: [&str; 2] = ["NARU_ATTACHMENTS_DIR", "NARU_LIVE_INK_DIR"];
+    const DATA_ENV: [&str; 3] = [
+        "NARU_ATTACHMENTS_DIR",
+        "NARU_LIVE_INK_DIR",
+        "NARU_LIVE_REPORTS_DIR",
+    ];
 
     /// Removes [`DATA_ENV`] on drop, so a panicking test cannot leak them.
     /// Declared after the `ENV_LOCK` guard, so it drops first.
@@ -1877,6 +1886,7 @@ mod tests {
         unsafe {
             std::env::set_var(DATA_ENV[0], base.join("attachments"));
             std::env::set_var(DATA_ENV[1], base.join("live-ink"));
+            std::env::set_var(DATA_ENV[2], base.join("live-reports"));
         }
         data_dirs()
     }
@@ -1922,6 +1932,9 @@ mod tests {
         let png = b"\x89PNG\r\n\x1a\nink".to_vec();
         let turn = store
             .add_live_ink_turn(session.id, "look", board.id, &png, None)
+            .unwrap();
+        let report = store
+            .add_live_result_with_report("found it", "/tmp/r.md", "# report", None)
             .unwrap();
         let home = tmp.path().join("Users/old");
         fs::create_dir_all(&home).unwrap();
@@ -1972,8 +1985,8 @@ mod tests {
         let db = tmp.path().join("new.db");
         let new_home = tmp.path().join("Users/new");
         let out = import(&archive, &new_home, &db, &dst, &ImportOptions::default()).unwrap();
-        assert_eq!(out["restored"], 2, "{out}");
-        let store = Store::open(&db).unwrap();
+        assert_eq!(out["restored"], 3, "{out}");
+        let mut store = Store::open(&db).unwrap();
         assert_eq!(store.attachment_bytes(att.id).unwrap().1, bytes);
         let ink = store.get_live_turn(turn.id).unwrap().image_path.unwrap();
         assert!(
@@ -1981,6 +1994,21 @@ mod tests {
             "{ink}"
         );
         assert_eq!(fs::read(&ink).unwrap(), png);
+        let kept = store
+            .next_live_result(session.id)
+            .unwrap()
+            .and_then(|r| r.report_path)
+            .unwrap();
+        assert_eq!(
+            kept,
+            format!(
+                "{}/{}/{}-r.md",
+                tmp.path().join("dst/live-reports").display(),
+                session.id,
+                report.id
+            )
+        );
+        assert_eq!(fs::read_to_string(&kept).unwrap(), "# report");
     }
 
     /// A data dir that is not there — or is not a dir — is skipped and

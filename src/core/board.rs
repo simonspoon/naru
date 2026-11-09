@@ -166,6 +166,29 @@ pub fn live_ink_path(session_id: i64, turn_id: i64) -> PathBuf {
     live_ink_dir().join(live_ink_relative(session_id, turn_id))
 }
 
+/// Where delegates' report files are kept (naru task 2650):
+/// `NARU_LIVE_REPORTS_DIR`/`MESA_LIVE_REPORTS_DIR` if set and non-empty, else
+/// `live-reports/` beside the resolved database — [`live_ink_dir`]'s rule.
+pub fn live_reports_dir() -> PathBuf {
+    if let Some(p) = crate::core::env::var("LIVE_REPORTS_DIR")
+        && !p.is_empty()
+    {
+        return PathBuf::from(p);
+    }
+    let mut path = crate::core::default_db_path();
+    path.set_file_name("live-reports");
+    path
+}
+
+/// Where one result's report copy lives: `<dir>/<session>/<result>-<file>`.
+/// Derived from the row, never stored; `file` is already a bare base name
+/// (`Store::add_live_result_with_report` keeps only `Path::file_name`).
+pub fn live_report_path(session_id: i64, result_id: i64, file: &str) -> PathBuf {
+    live_reports_dir()
+        .join(session_id.to_string())
+        .join(format!("{result_id}-{file}"))
+}
+
 /// The absolute path a stored `image_path` names (mesa task 1355) — the one
 /// place a turn's column becomes the path `LiveTurn.image_path` hands the
 /// agent. A relative value is joined to [`live_ink_dir`]. An absolute one is

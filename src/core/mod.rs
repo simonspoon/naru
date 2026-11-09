@@ -53,8 +53,8 @@ pub mod wftypes;
 pub mod workflow;
 
 pub use store::{
-    ArtifactPatch, CustomThemeSlotsPatch, Error, INBOX_ARCHIVE_REASON_MAX, ImportDoc,
-    LIVE_AUDIO_MAX, LIVE_BOARD_BODY_MAX, LIVE_BOARD_CLIP_MAX, LIVE_BOARD_CLIPS_MAX,
+    ARTIFACT_BODY_MAX, ArtifactPatch, CustomThemeSlotsPatch, Error, INBOX_ARCHIVE_REASON_MAX,
+    ImportDoc, LIVE_AUDIO_MAX, LIVE_BOARD_BODY_MAX, LIVE_BOARD_CLIP_MAX, LIVE_BOARD_CLIPS_MAX,
     LIVE_BOARD_INK_STATE_MAX, LIVE_BOARD_KEEP, LIVE_INK_MAX, LIVE_RESULT_MAX, LIVE_TEXT_MAX,
     LIVE_TURNS_MAX, LibraryBuiltinAction, LibraryPatch, NextResult, ProjectPatch,
     RETRO_EVIDENCE_LINE_MAX, RETRO_FINDINGS_LIST_MAX, RETRO_SUMMARY_MAX, ReceiptPatch, Result,

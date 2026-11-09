@@ -1602,6 +1602,13 @@ const MIGRATIONS: &[&str] = &[
         data         BLOB NOT NULL,
         PRIMARY KEY (board_id, position)
     );",
+    // Naru task 2650: a delegate's report file kept with its result. The
+    // copy's base name (its path is derived, like an attachment's) and the
+    // project artifact it was also filed as, if any — a plain id, no foreign
+    // key (SQLite cannot drop a column that is one), so it outlives a deleted
+    // artifact as a pointer that no longer resolves.
+    "ALTER TABLE live_results ADD COLUMN report_file TEXT;
+     ALTER TABLE live_results ADD COLUMN artifact_id INTEGER;",
 ];
 
 /// Selects full task rows including the derived `blocked` flag.
@@ -1906,16 +1913,26 @@ pub const LIVE_TEXT_MAX: usize = 8192;
 /// context, so a runaway report is refused rather than stored.
 pub const LIVE_RESULT_MAX: usize = 16384;
 
-const LIVE_RESULT_COLUMNS: &str = "id, session_id, text, created_at, delivered_at";
+const LIVE_RESULT_COLUMNS: &str =
+    "id, session_id, text, created_at, delivered_at, report_file, artifact_id";
 
 fn row_to_live_result(row: &rusqlite::Row<'_>) -> rusqlite::Result<LiveResult> {
+    let id: i64 = row.get(0)?;
+    let session_id: i64 = row.get(1)?;
+    let report_file: Option<String> = row.get(5)?;
     Ok(LiveResult {
-        id: row.get(0)?,
-        session_id: row.get(1)?,
+        id,
+        session_id,
         kind: "result",
         text: row.get(2)?,
         created_at: row.get(3)?,
         delivered_at: row.get(4)?,
+        report_path: report_file.map(|f| {
+            board::live_report_path(session_id, id, &f)
+                .to_string_lossy()
+                .into_owned()
+        }),
+        artifact_id: row.get(6)?,
     })
 }
 
@@ -2607,7 +2624,7 @@ const ARTIFACT_NAME_MAX: usize = 200;
 /// is a small, agent-written text document, not the attachment case (an
 /// arbitrary binary on disk, capped at 25 MiB). 2 MiB is generous for a
 /// hand-written page while still a hard back-stop.
-const ARTIFACT_BODY_MAX: usize = 2 * 1024 * 1024;
+pub const ARTIFACT_BODY_MAX: usize = 2 * 1024 * 1024;
 
 fn validate_artifact_name(name: &str) -> Result<String> {
     let trimmed = name.trim();
@@ -9494,6 +9511,103 @@ impl Store {
             [id],
             row_to_live_result,
         )?)
+    }
+
+    /// [`Store::add_live_result`] with the delegate's report file kept
+    /// alongside it (naru task 2650): `body` is copied to
+    /// [`board::live_report_path`] — out of `/tmp`, which macOS clears — and,
+    /// with a `project_id`, also filed as that project's artifact, named
+    /// after the file (`<name> (result <id>)` when the name is taken). The
+    /// row, the artifact and the file land together or not at all. `body`
+    /// takes the artifact rules (non-empty, at most [`ARTIFACT_BODY_MAX`]
+    /// bytes) either way.
+    pub fn add_live_result_with_report(
+        &mut self,
+        text: &str,
+        file_name: &str,
+        body: &str,
+        project_id: Option<i64>,
+    ) -> Result<LiveResult> {
+        let file = Path::new(file_name)
+            .file_name()
+            .map(|f| f.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "report".to_string());
+        validate_artifact_body(body)?;
+        self.conn.execute_batch("SAVEPOINT live_report")?;
+        let written = self
+            .write_live_report(text, &file, body, project_id)
+            .and_then(
+                |(session_id, id)| match self.conn.execute_batch("RELEASE live_report") {
+                    Ok(()) => Ok(id),
+                    Err(e) => {
+                        let _ =
+                            std::fs::remove_file(board::live_report_path(session_id, id, &file));
+                        Err(e.into())
+                    }
+                },
+            );
+        match written {
+            Ok(id) => Ok(self.conn.query_row(
+                &format!("SELECT {LIVE_RESULT_COLUMNS} FROM live_results WHERE id = ?1"),
+                [id],
+                row_to_live_result,
+            )?),
+            Err(e) => {
+                let _ = self
+                    .conn
+                    .execute_batch("ROLLBACK TO live_report; RELEASE live_report");
+                Err(e)
+            }
+        }
+    }
+
+    /// The steps [`Store::add_live_result_with_report`] runs inside its
+    /// savepoint; the file is written last, so any failure leaves none.
+    fn write_live_report(
+        &mut self,
+        text: &str,
+        file: &str,
+        body: &str,
+        project_id: Option<i64>,
+    ) -> Result<(i64, i64)> {
+        let result = self.add_live_result(text)?;
+        let artifact_id = match project_id {
+            Some(project_id) => {
+                let mut name: String = file.chars().take(180).collect();
+                if self
+                    .ensure_artifact_name_free(project_id, &name, None)
+                    .is_err()
+                {
+                    name = format!("{name} (result {})", result.id);
+                }
+                let ext = Path::new(file)
+                    .extension()
+                    .map(|e| e.to_string_lossy().to_lowercase());
+                let content_type = match ext.as_deref() {
+                    Some("html" | "htm") => "text/html",
+                    Some("svg") => "image/svg+xml",
+                    _ => "text/markdown",
+                };
+                Some(
+                    self.create_artifact(project_id, None, &name, Some(content_type), body)?
+                        .id,
+                )
+            }
+            None => None,
+        };
+        self.conn.execute(
+            "UPDATE live_results SET report_file = ?1, artifact_id = ?2 WHERE id = ?3",
+            (file, artifact_id, result.id),
+        )?;
+        let path = board::live_report_path(result.session_id, result.id, file);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        if let Err(e) = std::fs::write(&path, body) {
+            let _ = std::fs::remove_file(&path);
+            return Err(e.into());
+        }
+        Ok((result.session_id, result.id))
     }
 
     /// Hands the driving agent the oldest undelivered delegate result,
@@ -19113,15 +19227,15 @@ mod tests {
         );
         assert_eq!(
             MIGRATIONS.len(),
-            106,
-            "a fresh db should report user_version 106"
+            107,
+            "a fresh db should report user_version 107"
         );
         let (store, _dir) = temp_store();
         let version: i64 = store
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 106);
+        assert_eq!(version, 107);
     }
 
     /// Naru task 2264: the migration that deletes the managed Task loop
@@ -19181,7 +19295,7 @@ mod tests {
             .conn
             // Undo what later migrations added, so they re-run cleanly.
             .execute_batch(&format!(
-                "ALTER TABLE workflow_edges DROP COLUMN kind; ALTER TABLE cc_messages DROP COLUMN cache_creation_1h_tokens; ALTER TABLE projects DROP COLUMN run_restart; ALTER TABLE projects DROP COLUMN run_dir; ALTER TABLE projects DROP COLUMN run_health; DROP TABLE live_board_clips; PRAGMA user_version = {DROP_LOOP}"
+                "ALTER TABLE live_results DROP COLUMN report_file; ALTER TABLE live_results DROP COLUMN artifact_id; ALTER TABLE workflow_edges DROP COLUMN kind; ALTER TABLE cc_messages DROP COLUMN cache_creation_1h_tokens; ALTER TABLE projects DROP COLUMN run_restart; ALTER TABLE projects DROP COLUMN run_dir; ALTER TABLE projects DROP COLUMN run_health; DROP TABLE live_board_clips; PRAGMA user_version = {DROP_LOOP}"
             ))
             .unwrap();
         drop(store);
@@ -19238,7 +19352,7 @@ mod tests {
         store
             .conn
             .execute_batch(
-                "DROP TABLE live_board_clips; ALTER TABLE projects DROP COLUMN run_restart; ALTER TABLE projects DROP COLUMN run_dir; ALTER TABLE projects DROP COLUMN run_health; ALTER TABLE cc_messages DROP COLUMN cache_creation_1h_tokens; DROP TABLE workflow_builtin_copies; DROP TABLE mark_skins; ALTER TABLE live_sessions DROP COLUMN listen_gen; DROP TABLE agent_questions; DROP TABLE custom_themes; DROP TABLE task_notes; ALTER TABLE live_sessions DROP COLUMN ambient_request_seq; ALTER TABLE live_sessions DROP COLUMN ambient_request; ALTER TABLE live_sessions DROP COLUMN host_seen_at; ALTER TABLE live_sessions DROP COLUMN host_ambient; ALTER TABLE live_notebook DROP COLUMN category; ALTER TABLE cc_messages DROP COLUMN cost_micro_usd; ALTER TABLE cc_sessions DROP COLUMN main_agent; ALTER TABLE live_boards DROP COLUMN pinned_at; DROP TABLE workflow_builtins; DROP TABLE workflow_revisions; DROP TABLE workflow_log; DROP TABLE workflow_gates; DROP TABLE workflow_runs; DROP TABLE workflow_edges; \
+                "ALTER TABLE live_results DROP COLUMN report_file; ALTER TABLE live_results DROP COLUMN artifact_id; DROP TABLE live_board_clips; ALTER TABLE projects DROP COLUMN run_restart; ALTER TABLE projects DROP COLUMN run_dir; ALTER TABLE projects DROP COLUMN run_health; ALTER TABLE cc_messages DROP COLUMN cache_creation_1h_tokens; DROP TABLE workflow_builtin_copies; DROP TABLE mark_skins; ALTER TABLE live_sessions DROP COLUMN listen_gen; DROP TABLE agent_questions; DROP TABLE custom_themes; DROP TABLE task_notes; ALTER TABLE live_sessions DROP COLUMN ambient_request_seq; ALTER TABLE live_sessions DROP COLUMN ambient_request; ALTER TABLE live_sessions DROP COLUMN host_seen_at; ALTER TABLE live_sessions DROP COLUMN host_ambient; ALTER TABLE live_notebook DROP COLUMN category; ALTER TABLE cc_messages DROP COLUMN cost_micro_usd; ALTER TABLE cc_sessions DROP COLUMN main_agent; ALTER TABLE live_boards DROP COLUMN pinned_at; DROP TABLE workflow_builtins; DROP TABLE workflow_revisions; DROP TABLE workflow_log; DROP TABLE workflow_gates; DROP TABLE workflow_runs; DROP TABLE workflow_edges; \
                  DROP TABLE workflow_nodes; DROP TABLE workflows; \
                  CREATE TABLE diagrams (id INTEGER PRIMARY KEY, title TEXT); \
                  INSERT INTO diagrams (title) VALUES ('stale'); \
@@ -21206,6 +21320,90 @@ mod tests {
             store.get_live_board(board.id),
             Err(Error::NotFound(_))
         ));
+    }
+
+    /// A delegate's report file (naru task 2650): copied beside the db under
+    /// `<session>/<result>-<file>`, surviving the source's delete; with a
+    /// project also filed as its artifact (renamed on a clash, typed by
+    /// extension); and a failing step — a bad body, an unknown project —
+    /// leaves no row, no artifact and no file.
+    #[test]
+    fn a_live_result_keeps_its_report_file_and_artifact() {
+        let (mut store, dir, _lock) = attachment_test_store();
+        let reports = dir.path().join("live-reports");
+        // SAFETY: the guard gives this test exclusive access to the env vars.
+        // NARU_ is read first, so a developer's MESA_ cannot outrank it.
+        unsafe { std::env::set_var("NARU_LIVE_REPORTS_DIR", &reports) };
+        let session = store.start_live_session(None).unwrap();
+        let p = store.create_project("p", None, None, None, None).unwrap();
+        let src = dir.path().join("research.md");
+        std::fs::write(&src, "# findings").unwrap();
+
+        let r = store
+            .add_live_result_with_report("done", src.to_str().unwrap(), "# findings", Some(p.id))
+            .unwrap();
+        std::fs::remove_file(&src).unwrap();
+        let kept = reports.join(format!("{}/{}-research.md", session.id, r.id));
+        assert_eq!(r.report_path.as_deref(), Some(kept.to_str().unwrap()));
+        assert_eq!(std::fs::read_to_string(&kept).unwrap(), "# findings");
+        let a = store.get_artifact(r.artifact_id.unwrap()).unwrap();
+        assert_eq!((a.project_id, a.name.as_str()), (p.id, "research.md"));
+        assert_eq!(a.content_type, "text/markdown");
+        assert_eq!(a.body, "# findings");
+
+        // The same name again is filed under a suffixed one; html keeps its type.
+        let again = store
+            .add_live_result_with_report("again", "research.md", "<p>x</p>", Some(p.id))
+            .unwrap();
+        let b = store.get_artifact(again.artifact_id.unwrap()).unwrap();
+        assert_eq!(b.name, format!("research.md (result {})", again.id));
+        let html = store
+            .add_live_result_with_report("page", "../../x/page.html", "<p>x</p>", Some(p.id))
+            .unwrap();
+        assert!(
+            html.report_path
+                .unwrap()
+                .ends_with(&format!("{}-page.html", html.id))
+        );
+        assert_eq!(
+            store
+                .get_artifact(html.artifact_id.unwrap())
+                .unwrap()
+                .content_type,
+            "text/html"
+        );
+
+        // No project: the file only.
+        let bare = store
+            .add_live_result_with_report("bare", "notes.txt", "plain", None)
+            .unwrap();
+        assert_eq!(bare.artifact_id, None);
+        assert!(PathBuf::from(bare.report_path.unwrap()).exists());
+
+        // Failures write nothing.
+        let before: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM live_results", [], |r| r.get(0))
+            .unwrap();
+        let arts = store.list_artifacts(None).unwrap().len();
+        for (body, project) in [("   ", Some(p.id)), ("body", Some(9999))] {
+            assert!(matches!(
+                store.add_live_result_with_report("x", "fail.md", body, project),
+                Err(Error::Validation(_))
+            ));
+        }
+        let after: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM live_results", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(after, before);
+        assert_eq!(store.list_artifacts(None).unwrap().len(), arts);
+        let files = std::fs::read_dir(reports.join(session.id.to_string()))
+            .unwrap()
+            .count();
+        assert_eq!(files, 4);
+        unsafe { std::env::remove_var("NARU_LIVE_REPORTS_DIR") };
+        unsafe { std::env::remove_var("MESA_ATTACHMENTS_DIR") };
     }
 
     /// `attachment_test_store`, plus `MESA_LIVE_INK_DIR` pointed into the same

@@ -4889,6 +4889,12 @@ pub struct LiveResult {
     pub created_at: String,
     /// When `listen` handed it out; null while it waits.
     pub delivered_at: Option<String>,
+    /// Where the delegate's report file was kept (`live result --file`,
+    /// naru task 2650) — a durable copy beside the db, the path to cite
+    /// instead of the delegate's own `/tmp` one. Null with no file.
+    pub report_path: Option<String>,
+    /// The project artifact the report was also filed as (`--project`).
+    pub artifact_id: Option<i64>,
 }
 
 /// One run of the session retrospective (mesa task 1158, `docs/retro.md`):

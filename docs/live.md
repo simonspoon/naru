@@ -856,12 +856,32 @@ Three pieces close it:
   belongs to the conversation, not to the generation of driver that asked
   for it — it goes to whichever session is live at the moment it is posted.
   Put `--quiet` before the text, as with `say`.
+- **A report file goes with it (naru task 2650).** `naru live result --file
+  <path> [--project <p>] "<text>"` (flags before the text; `--project`
+  requires `--file`) reads the file — UTF-8 text, the artifact body rules
+  (non-empty, at most `ARTIFACT_BODY_MAX`, 2 MiB) — and
+  `Store::add_live_result_with_report` keeps a copy at
+  `live-reports/<session>/<result id>-<base name>` beside the db
+  (`board::live_reports_dir`, `NARU_LIVE_REPORTS_DIR`/`MESA_LIVE_REPORTS_DIR`
+  overriding), out of `/tmp`, which macOS clears. The row stores only the
+  base name (`report_file`, migration index 106); the record's
+  `report_path` is derived, like an attachment's. With `--project` the body
+  is also that project's artifact (`artifact_id`, a plain id with no
+  foreign key): named after the file, `<name> (result <id>)` on a clash,
+  `text/html`/`image/svg+xml` by extension and `text/markdown` otherwise.
+  Row, artifact and file land together in one savepoint or not at all. The
+  copy is kept on purpose past its session (the row cascades away with the
+  session; the file and the artifact do not — outliving things is the
+  point), so nothing prunes `live-reports/`. The
+  dir travels with `naru migrate` as `data/live-reports`. Rule 12 tells
+  delegates to attach a file report this way, and the driver to cite
+  `report_path` in tasks rather than the delegate's own path.
 - **`listen` delivers it.** Each poll first asks `Store::next_live_result`
   — one `UPDATE … RETURNING` stamping `delivered_at`, so a result is handed
   out exactly once — and only then `next_user_turn`, so a finished job is
   heard before a waiting utterance. A result prints as
   `{"id", "session_id", "kind": "result", "text", "created_at",
-  "delivered_at"}`; a turn never has a `kind` key, so that is how the agent
+  "delivered_at", "report_path", "artifact_id"}`; a turn never has a `kind` key, so that is how the agent
   tells them apart (`--quiet` drops `text` and keeps `kind`). Handing one
   out opens `working_since` exactly as handing out a turn does — the agent
   now has something to retell — and leaves the close to `next_user_turn`.

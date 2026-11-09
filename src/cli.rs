@@ -3702,14 +3702,26 @@ EXAMPLES
     /// spoken and never shown on the page. Takes no --lease: it belongs to
     /// the conversation, not to one generation of its driver. Text is
     /// required and at most 16384 characters. Put --quiet BEFORE the text.
+    ///
+    /// A delegate that wrote a report file attaches it with --file: the file
+    /// is copied beside the db (the result's `report_path`, which outlives
+    /// `/tmp`) and, with --project, also filed as that project's artifact
+    /// (`artifact_id`, listed in its Artifacts tab). Flags go before the text.
     #[command(after_help = "\
 EXAMPLES
   mesa live result \"The crash is a nil deref in parse_row; task 812 filed.\"
-  mesa live result --quiet Nothing found in the last week of logs.")]
+  mesa live result --quiet Nothing found in the last week of logs.
+  mesa live result --file /tmp/acestep-research.md --project naru \"ACE-Step: runs locally; report attached.\"")]
     Result {
         /// What the delegate found (everything after `result`); quoting is optional
         #[arg(required = true, num_args = 1.., trailing_var_arg = true)]
         text: Vec<String>,
+        /// A report file to keep with the result: UTF-8 text, at most 2 MiB
+        #[arg(long)]
+        file: Option<String>,
+        /// Also file the report as this project's artifact (id or name)
+        #[arg(long, requires = "file")]
+        project: Option<String>,
         /// Print the result without its `text` instead of in full
         ///
         /// Must come BEFORE the text: everything after `result` that is not
@@ -7614,8 +7626,32 @@ fn run_live(cmd: LiveCmd) -> Result<()> {
             print_json(&serde_json::Value::Null);
         }
         LiveCmd::Hook => unreachable!("handled before the store opens"),
-        LiveCmd::Result { text, quiet } => {
-            let result = store.add_live_result(&text.join(" "))?;
+        LiveCmd::Result {
+            text,
+            file,
+            project,
+            quiet,
+        } => {
+            let text = text.join(" ");
+            let result = match file {
+                Some(path) => {
+                    // Refuse an oversized file before reading it all in;
+                    // `Store` enforces the same bound on the body.
+                    if std::fs::metadata(&path)
+                        .is_ok_and(|m| m.len() > crate::core::ARTIFACT_BODY_MAX as u64)
+                    {
+                        return Err(Error::Validation(format!(
+                            "{path} is over the {} byte report limit",
+                            crate::core::ARTIFACT_BODY_MAX
+                        )));
+                    }
+                    let body = std::fs::read_to_string(&path)
+                        .map_err(|e| Error::Validation(format!("cannot read {path}: {e}")))?;
+                    let project_id = project.map(|p| resolve_project(&store, &p)).transpose()?;
+                    store.add_live_result_with_report(&text, &path, &body, project_id)?
+                }
+                None => store.add_live_result(&text)?,
+            };
             print_live_result(&result, quiet);
         }
         LiveCmd::Say { text, lease, quiet } => {
@@ -11260,6 +11296,8 @@ mod tests {
             text: "The crash is a nil deref in parse_row.".into(),
             created_at: "2026-01-01 00:00:00".into(),
             delivered_at: None,
+            report_path: Some("/data/live-reports/2/4-report.md".into()),
+            artifact_id: Some(9),
         }
     }
 
@@ -11280,6 +11318,10 @@ mod tests {
                 "created_at",
                 // Bounded, and the field `listen` exists to write.
                 "delivered_at",
+                // A path and an id, both bounded: the pointers to the
+                // report a delegate attached. Kept.
+                "report_path",
+                "artifact_id",
             ]),
             "LiveResult gained/lost a field: decide whether it belongs in the \
              --quiet shape before updating this list",

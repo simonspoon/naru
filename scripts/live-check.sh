@@ -266,6 +266,7 @@ export MESA_DB="$TMP/mesa.db"
 # Where a user turn's annotated board is written (mesa task 1353, section 13):
 # never beside the developer's own db.
 export MESA_LIVE_INK_DIR="$TMP/live-ink"
+export MESA_LIVE_REPORTS_DIR="$TMP/live-reports"
 # This gate asserts the BUILT-IN `live-agent` template, so the developer's own
 # ~/.mesa/config.json must not leak in (config-check.sh owns the configured
 # half, under a throwaway HOME).
@@ -4275,8 +4276,10 @@ RS=$(jqs .id)
 RA1=$(jqs .agent_id)
 api 201 POST "/api/live/utterance" '{"text":"waiting behind a result"}'
 run 0 "$MESA" live result "RESULT-ONE: the crash is in parse_row"
-[ "$(jq -c 'keys' <<<"$STDOUT")" = '["created_at","delivered_at","id","kind","session_id","text"]' ] ||
+[ "$(jq -c 'keys' <<<"$STDOUT")" = '["artifact_id","created_at","delivered_at","id","kind","report_path","session_id","text"]' ] ||
   fail "live result: key set (got $STDOUT)"
+[ "$(jqs .report_path)" = "null" ] && [ "$(jqs .artifact_id)" = "null" ] ||
+  fail "live result with no --file: no report_path, no artifact (got $STDOUT)"
 [ "$(jqs .kind)" = "result" ] && [ "$(jqs .session_id)" = "$RS" ] && [ "$(jqs .delivered_at)" = "null" ] ||
   fail "live result: kind result, the live session, undelivered (got $STDOUT)"
 run 0 "$MESA" live listen --lease 1 --wait 0
@@ -4329,7 +4332,7 @@ run 1 "$MESA" live result "$(head -c 16385 /dev/zero | tr '\0' x)"
 run 0 "$MESA" live listen --lease 1 --wait 0
 [ "$STDOUT" = "null" ] || fail "a refused result stores nothing (got $STDOUT)"
 run 0 "$MESA" live result --quiet "a quiet finding"
-[ "$(jq -c 'keys' <<<"$STDOUT")" = '["created_at","delivered_at","id","kind","session_id"]' ] ||
+[ "$(jq -c 'keys' <<<"$STDOUT")" = '["artifact_id","created_at","delivered_at","id","kind","report_path","session_id"]' ] ||
   fail "live result --quiet drops text alone (got $STDOUT)"
 run 0 "$MESA" live listen --quiet --lease 1 --wait 0
 [ "$(jqs .kind)" = "result" ] && [ "$(jqs 'has("text")')" = "false" ] ||
@@ -4338,6 +4341,33 @@ run 0 "$MESA" live result A finding that mentions --quiet in passing.
 [ "$(jqs .text)" = "A finding that mentions --quiet in passing." ] || fail "--quiet after the text is text"
 run 0 "$MESA" live listen --lease 1 --wait 0
 ok "live result: blank or over 16384 chars is validation storing nothing; --quiet drops text and keeps kind, and must come before the text"
+
+# Report files (naru task 2650): --file keeps a copy beside the db that
+# outlives /tmp, and --project also files it as that project's artifact.
+RPROJ=$("$MESA" project create "live report project" --no-git | jq -r .id)
+printf '# ACE-Step research\nruns locally\n' >"$TMP/acestep-research.md"
+run 0 "$MESA" live result --file "$TMP/acestep-research.md" --project "live report project" "ACE-Step: report attached"
+RRID=$(jqs .id)
+RPATH=$(jqs .report_path)
+RART=$(jqs .artifact_id)
+[ "$RPATH" = "$TMP/live-reports/$RS/$RRID-acestep-research.md" ] || fail "live result --file: report_path beside the db (got $STDOUT)"
+rm "$TMP/acestep-research.md"
+[ "$(cat "$RPATH")" = "$(printf '# ACE-Step research\nruns locally')" ] || fail "the kept report outlives the source file"
+run 0 "$MESA" artifact list "$RPROJ"
+[ "$(jq -r --argjson a "$RART" '.[] | select(.id==$a) | .name' <<<"$STDOUT")" = "acestep-research.md" ] ||
+  fail "live result --project: the report is an artifact of that project (got $STDOUT)"
+api 200 GET "/api/projects/$RPROJ/artifacts"
+[ "$(jq -r --argjson a "$RART" '.[] | select(.id==$a) | .content_type' <<<"$BODY")" = "text/markdown" ] ||
+  fail "the Artifacts tab's route lists the report as markdown (got $BODY)"
+run 0 "$MESA" live listen --lease 1 --wait 0
+[ "$(jqs .report_path)" = "$RPATH" ] && [ "$(jqs .artifact_id)" = "$RART" ] ||
+  fail "listen hands the driver the report_path and artifact_id (got $STDOUT)"
+run 2 "$MESA" live result --project "live report project" "no file"
+run 1 "$MESA" live result --file "$TMP/nope.md" "missing"
+[ "$(jqe .error.code)" = "validation" ] || fail "an unreadable --file: validation"
+run 0 "$MESA" live listen --lease 1 --wait 0
+[ "$STDOUT" = "null" ] || fail "a refused report stores nothing (got $STDOUT)"
+ok "live result --file: copied beside the db, outlives the source, filed as the --project artifact, handed out by listen; --project needs --file"
 
 # The handoff names the outgoing agent's running delegates, and the
 # successor's listen leaves it running until they are done. A subagent
