@@ -830,14 +830,21 @@ const STOP_WORDS: &[&str] = &[
     "the", "and", "what", "how", "does", "for", "with", "are", "was", "this", "that", "from",
     "have", "has", "you", "about", "who", "when", "where", "why", "which", "can", "will", "there",
     "their", "into", "our", "your", "not", "but", "all", "any", "did", "were", "been", "its",
+    // two-letter words (naru task 2662: two-letter words are kept, so `rm`,
+    // `cp` and `ls` count, but these must not)
+    "am", "an", "as", "at", "be", "by", "do", "he", "if", "in", "is", "it", "me", "my", "no", "of",
+    "on", "or", "so", "to", "up", "us", "we",
 ];
 
+/// A question's distinct keywords, crudely stemmed. Words of two letters are
+/// kept (naru task 2662): commands like `rm`, `cp` and `ls` are often the
+/// most specific word a question has.
 fn keywords(question: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for w in question
         .to_lowercase()
         .split(|c: char| !c.is_alphanumeric())
-        .filter(|w| w.chars().count() >= 3 && !STOP_WORDS.contains(w))
+        .filter(|w| w.chars().count() >= 2 && !STOP_WORDS.contains(w))
     {
         let w = stem(w);
         if !out.contains(&w) {
@@ -858,43 +865,35 @@ fn stem(w: &str) -> String {
     w.to_string()
 }
 
-/// The notes most likely to answer `question`, best first: a keyword hit in the
-/// title, tags or path counts triple one in the body. Notes with no hit are not
-/// chosen at all.
-fn prefilter(root: &Path, notes: &[NoteInfo], question: &str) -> Vec<(NoteInfo, String)> {
-    let words = keywords(question);
-    let mut scored: Vec<(usize, NoteInfo, String)> = Vec::new();
-    for n in notes {
-        let Ok(note) = show(root, &n.path) else {
-            continue;
-        };
-        let head = format!("{} {} {}", n.title, n.tags.join(" "), n.path).to_lowercase();
-        let body = note.body.to_lowercase();
-        let score: usize = words
-            .iter()
-            .map(|w| {
-                3 * head.matches(w.as_str()).count() + body.matches(w.as_str()).count().min(10)
-            })
-            .sum();
-        if score > 0 {
-            scored.push((score, n.clone(), note.body));
-        }
+/// How often keyword `w` occurs in lowercased `text`: as a substring when it
+/// has 3+ letters (so "dump" finds "dumps", `git` finds "github"), as a whole
+/// word when it has two, so `rm` does not hit every "form" or "permission"
+/// (naru task 2662).
+fn hits(text: &str, w: &str) -> usize {
+    if w.chars().count() >= 3 {
+        text.matches(w).count()
+    } else {
+        text.split(|c: char| !c.is_alphanumeric())
+            .filter(|t| *t == w)
+            .count()
     }
-    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.path.cmp(&b.1.path)));
-    scored
-        .into_iter()
-        .take(ASK_NOTES)
-        .map(|(_, n, b)| (n, b))
-        .collect()
 }
 
-/// The automatic lookup's prefilter ([`lookup_with`]): like [`prefilter`], but
-/// each keyword is weighted by its inverse document frequency over the kb, and
-/// a note's hits are capped (2 in the title/tags/path, 3 in the body), so a
-/// word in most notes (`agent`, `naru`, `panel`) cannot pick the notes on its
-/// own (naru task 2553).
-fn prefilter_idf(root: &Path, notes: &[NoteInfo], task: &str) -> Vec<(NoteInfo, String)> {
-    let words = keywords(task);
+/// The notes most likely to answer `question`, best first, for both `kb ask`
+/// and the automatic lookup ([`lookup_with`]). Each keyword is weighted by
+/// `floor + ln((N+1)/(df+1))`, `df` being how many of the `N` notes hold it,
+/// and a note's hits are capped (2 in the title/tags/path, counting triple, 3
+/// in the body), so a word in most notes (`agent`, `naru`, `shell`) cannot
+/// pick the notes on its own (naru task 2553). The lookup passes `floor` 0;
+/// `kb ask` passes 1 (naru task 2662), so a word in every note of a tiny kb
+/// still finds it. Notes with no hit are not chosen at all.
+fn prefilter_idf(
+    root: &Path,
+    notes: &[NoteInfo],
+    question: &str,
+    floor: f64,
+) -> Vec<(NoteInfo, String)> {
+    let words = keywords(question);
     let mut docs: Vec<(&NoteInfo, String, String, String)> = Vec::new();
     let mut df: std::collections::HashMap<String, usize> = Default::default();
     for n in notes {
@@ -909,14 +908,14 @@ fn prefilter_idf(root: &Path, notes: &[NoteInfo], task: &str) -> Vec<(NoteInfo, 
         docs.push((n, head.to_lowercase(), body, note.body));
     }
     let n_docs = docs.len() as f64;
-    let idf = |w: &str| ((n_docs + 1.0) / (df.get(w).copied().unwrap_or(0) as f64 + 1.0)).ln();
+    let idf =
+        |w: &str| floor + ((n_docs + 1.0) / (df.get(w).copied().unwrap_or(0) as f64 + 1.0)).ln();
     let mut scored: Vec<(f64, &NoteInfo, String)> = Vec::new();
     for (n, head, body, raw) in docs {
         let score: f64 = words
             .iter()
             .map(|w| {
-                let hits = 3 * head.matches(w.as_str()).count().min(2)
-                    + body.matches(w.as_str()).count().min(3);
+                let hits = 3 * hits(&head, w).min(2) + hits(&body, w).min(3);
                 idf(w) * hits as f64
             })
             .sum();
@@ -1034,11 +1033,7 @@ fn answer_with(root: &Path, question: &str, lookup: bool, call: &mut Call) -> Re
         sources: Vec::new(),
     };
     let notes = scan(root)?;
-    let chosen = if lookup {
-        prefilter_idf(root, &notes, question)
-    } else {
-        prefilter(root, &notes, question)
-    };
+    let chosen = prefilter_idf(root, &notes, question, if lookup { 0.0 } else { 1.0 });
     let chosen = with_siblings(root, &notes, chosen);
     if chosen.is_empty() {
         return Ok(empty());
@@ -1940,6 +1935,50 @@ mod tests {
             Ok(json!({"answer": "", "sources": []}))
         };
         assert_eq!(ask_with(&root, "orbit panel", &mut ask).unwrap().answer, "");
+    }
+
+    #[test]
+    fn short_words_count_whole_and_rare_words_outrank_common_ones() {
+        let (_d, root) = kb();
+        // `rm` is in one note; "shell" and "directory" fill four others, and
+        // "form"/"permission" hold `rm` only as a substring (naru task 2662).
+        let mut notes = vec![create(
+            "agents",
+            "rm-hook",
+            "A hook blocks a compound command that contains rm.",
+        )];
+        for i in 0..4 {
+            notes.push(create(
+                "shell",
+                &format!("dir-{i}"),
+                "shell directory shell directory: form permission terms.",
+            ));
+        }
+        apply_ops(&root, &ops(json!(notes)), "t", None).unwrap();
+        let shown = |q: &str| {
+            let mut seen = String::new();
+            let mut call = |p: &str, _: &str| -> std::result::Result<Value, String> {
+                seen = p.to_string();
+                Ok(json!({"answer": "", "sources": []}))
+            };
+            ask_with(&root, q, &mut call).unwrap();
+            seen
+        };
+        let seen = shown("How do I rm -rf a shell directory?");
+        let first = seen.find("### topics/").unwrap();
+        assert!(
+            seen[first..].starts_with("### topics/agents/rm-hook.md"),
+            "{seen}"
+        );
+        // a two-letter question still reaches the model, but a stop word alone
+        // and a substring-only hit do not
+        let seen = shown("rm");
+        assert!(seen.contains("### topics/agents/rm-hook.md"));
+        assert!(!seen.contains("### topics/shell/"), "{seen}");
+        let mut never =
+            |_: &str, _: &str| -> std::result::Result<Value, String> { panic!("called") };
+        assert_eq!(ask_with(&root, "is it", &mut never).unwrap().answer, "");
+        assert_eq!(ask_with(&root, "fo", &mut never).unwrap().answer, "");
     }
 
     #[test]

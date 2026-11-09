@@ -100,10 +100,10 @@ the report's `spool` key in `logs/kb.log`), so the text can be re-filed.
 
 ## `kb ask`
 
-Synchronous. A keyword prefilter (title/tag/path hits count triple a body hit)
-picks up to 6 notes; one haiku call gets the question, the index and those
-notes and must answer **from them only**. Naru then drops every cited source
-that is not one of the notes actually shown to the model. Outcomes:
+Synchronous. A keyword prefilter (below) picks up to 8 notes; one haiku call
+gets the question, the index and those notes and must answer **from them
+only**. Naru then drops every cited source that is not one of the notes
+actually shown to the model. Outcomes:
 
 - an empty kb, no keyword hit, or a model that says the notes do not answer:
   `{"answer": "", "sources": []}`, exit 0 (the first two make no model call);
@@ -113,8 +113,37 @@ that is not one of the notes actually shown to the model. Outcomes:
 
 The prefilter stems each question word crudely (one of `ing`/`ed`/`es`/`s` off,
 never below 4 letters) so "dumps" finds "dump", and offers the model up to 8
-notes. The prompt tells the model to combine notes for a multi-note question and
-to treat a nearby-but-different fact as no answer.
+notes. It is the lookup's IDF-weighted prefilter (below), each word's weight
+raised by 1 so a word in every note of a tiny kb still finds it. Since naru
+task 2662 it keeps two-letter words (`rm`, `cp`, `ls`; a short stop list drops
+`do`, `in`, `is` and the like) and matches them as whole words, so `rm` does
+not hit "form" or "permission"; before, such words were dropped and a question
+like "rm -rf" asked nothing. Hits are capped as below (the old `kb ask` capped
+only the body, at 10). The prompt tells the model to combine notes for a
+multi-note question and to treat a nearby-but-different fact as no answer.
+
+Measured for naru task 2662 on a copy of the real kb (1,371 notes, real
+haiku), with 26 questions whose answering notes are known (short and
+symbol-heavy ones such as `rm -rf`, `exit 137`, `ls eza`, `jq regex s flag`,
+plus folder trust, BlackHole testing and naru-audio rm-before-cp):
+
+| | before | after |
+| --- | --- | --- |
+| `kb ask`, right note cited | 23 / 26 | 24 / 26 |
+| lookup (`kb hook`), right note cited | 24 / 26 | 26 / 26 |
+| `kb ask` latency avg / max | 3.9 / 6.4 s | 4.4 / 8.9 s |
+| lookup latency avg / max | 4.7 / 6.7 s | 5.3 / 8.4 s |
+| lookup replay (90 real titles): injected | 36 (40 %) | 41 (45.6 %) |
+| replay: relevant / misleading / failed | 94.4 % / 2 / 1 | 92.7 % / 3 / 0 |
+| replay latency p50 / p95 | 6.2 / 11.8 s | 6.2 / 9.2 s |
+| `scripts/kb-eval.sh` (fictional, 41) | 41 | 41 |
+
+No question answered before went unanswered after, in either set. The two
+`kb ask` misses left are `rm -rf` and "how do I safely rm -rf a directory held
+in a shell variable?". Before, the first made no model call, and the second
+showed the model eight notes without the rm one. Both now show the rm-hook note
+first, and the strict prompt judges it nearby-but-different. The lookup
+answers both.
 
 ### Session siblings (naru task 2576)
 
@@ -204,12 +233,13 @@ The script only pipes Claude Code's payload into `naru kb hook`, which:
 - runs the **lookup** (`kb::lookup_with`, naru task 2553), not the ordinary
   `kb ask`: the strict ask prompt ("answer only what was asked") returned
   empty for task titles, so 0 of 246 lookups injected anything. The lookup
-  differs from `kb ask` in three ways, and `naru kb ask` itself is unchanged:
+  differs from `kb ask` in three ways (naru task 2662 gave `kb ask` the same
+  prefilter, each weight raised by 1, so there only the weights differ):
   - an **IDF-weighted prefilter**: each keyword scores
     `ln((N+1)/(df+1)) x (3 x min(title/tags/path hits, 2) + min(body hits, 3))`,
     `df` being how many of the `N` notes hold it as a (crudely stemmed) word,
-    hits counted as substrings like `kb ask`'s, top 8 kept (2 of them may be
-    session siblings, above) — so words in
+    hits counted as substrings (a two-letter word's as whole words), top 8
+    kept (2 of them may be session siblings, above) — so words in
     most notes (`agent`, `naru`, `panel`) stop picking the notes. A word in
     every note scores 0, so a one- or two-note kb rarely injects anything;
   - a **task-framed prompt** (`LOOKUP_PROMPT`, no index): the facts from the
