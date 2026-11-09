@@ -261,6 +261,11 @@ mod path_tests {
 
     #[test]
     fn bash_command_gets_toolchain_path() {
+        // Both sides read the process-global $HOME; hold the lock that
+        // `with_home_dir` swaps it under, or the two reads can disagree.
+        let _home = crate::core::library::test_home::HOME_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let mut expected = Command::new("bash");
         augment_path(&mut expected);
         let path_of = |c: &Command| {

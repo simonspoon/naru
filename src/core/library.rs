@@ -3914,7 +3914,9 @@ pub(crate) mod test_home {
     /// `$HOME`. Tests that stay on `project` scope never take this lock and
     /// are unaffected either way, since a passing `$HOME` value they never
     /// asked for and don't inspect is harmless to them.
-    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// A test that compares two reads of `$HOME` takes this lock directly
+    /// (`proc::tests::bash_command_gets_toolchain_path`).
+    pub(crate) static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     pub(crate) fn with_home_dir<F: FnOnce(&Path)>(f: F) {
         let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
