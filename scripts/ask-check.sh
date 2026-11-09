@@ -82,6 +82,10 @@ run 0 "$NARU" ask --notice "another update"
 run 0 "$NARU" live turns
 N2=$(echo "$OUT" | jq '[.[]|select(.notice=="question")]|length')
 [ "$N2" = "$N" ] || fail "notice rows raised a question notice turn ($N -> $N2)"
+run 0 "$NARU" ask list --status open
+echo "$OUT" | jq -e 'all(.[]; .kind=="question")' >/dev/null || fail "list --status open listed a notice"
+run 0 "$NARU" ask list --status open --kind notice
+[ "$(echo "$OUT" | jq length)" = 2 ] || fail "list --status open --kind notice"
 run 0 "$NARU" ask list --kind notice --unread --mark-read
 [ "$(echo "$OUT" | jq length)" = 2 ] || fail "wanted 2 unread notices"
 run 0 "$NARU" ask list --kind notice --unread

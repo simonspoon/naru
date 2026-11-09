@@ -707,7 +707,8 @@ struct AskArgs {
 enum AskCmd {
     /// List queued questions and notices, oldest first
     List {
-        /// Only `open` or `answered` ones
+        /// Only `open` or `answered` ones (`open` alone means open
+        /// questions; add `--kind notice` for notices)
         #[arg(long)]
         status: Option<String>,
         /// Only `question` or `notice` rows

@@ -17,7 +17,11 @@ queues a question instead of guessing or stalling.
   and cannot be answered (`conflict`). `read_at` is when the live agent first
   saw it; existing rows are unread questions.
 - `naru ask list [--status open|answered] [--kind question|notice] [--unread]
-  [--mark-read]` / `ask show <id>` read the queue. `--mark-read` stamps the
+  [--mark-read]` / `ask show <id>` read the queue. `--status open` with no
+  `--kind` lists open **questions** only — a notice is never answered, so it
+  would stay open forever; add `--kind notice` to see those (naru task 2651,
+  whose migration also reclassified the pre-`--notice` loop reports stored as
+  questions and marked every notice over a day old read). `--mark-read` stamps the
   listed rows, so rule 16's `ask list --kind notice --unread --mark-read` is a
   one-call batch the live agent summarises in a line.
 - `naru ask answer <id> <text…>` answers once (`conflict` the second time).

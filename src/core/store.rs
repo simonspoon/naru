@@ -1609,6 +1609,16 @@ const MIGRATIONS: &[&str] = &[
     // artifact as a pointer that no longer resolves.
     "ALTER TABLE live_results ADD COLUMN report_file TEXT;
      ALTER TABLE live_results ADD COLUMN artifact_id INTEGER;",
+    // Naru task 2651: retire the stale task-loop notices. Reports queued
+    // before `naru ask --notice` existed were stored as open questions;
+    // they become notices, and every notice over a day old is marked read
+    // so the live agent's unread batch does not replay weeks of them.
+    "UPDATE agent_questions SET kind = 'notice' \
+     WHERE kind = 'question' AND status = 'open' \
+     AND body LIKE '%notice (no answer needed)%'; \
+     UPDATE agent_questions SET read_at = datetime('now') \
+     WHERE kind = 'notice' AND read_at IS NULL \
+     AND created_at < datetime('now', '-1 day');",
 ];
 
 /// Selects full task rows including the derived `blocked` flag.
@@ -5195,6 +5205,8 @@ impl Store {
 
     /// Rows oldest first, optionally only `open` or `answered`, only a
     /// `kind` (`question`|`notice`), and/or only those not yet read.
+    /// `open` with no `kind` means open questions: a notice is never
+    /// answered, so it would stay "open" forever (naru task 2651).
     pub fn list_questions(
         &self,
         status: Option<&str>,
@@ -5217,6 +5229,7 @@ impl Store {
                 "'{k}' is not one of question|notice"
             )));
         }
+        let kind = kind.or((status == Some("open")).then_some("question"));
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {} FROM agent_questions WHERE (?1 IS NULL OR status = ?1) \
              AND (?2 IS NULL OR kind = ?2) AND (?3 = 0 OR read_at IS NULL) ORDER BY id",
@@ -15788,6 +15801,24 @@ mod tests {
             Err(Error::Conflict(_))
         ));
         assert!(matches!(store.get_question(99), Err(Error::NotFound(_))));
+        // Naru task 2651: an open notice is not an open question.
+        store
+            .add_question("loop report", Some(t.id), None, "notice")
+            .unwrap();
+        assert!(
+            store
+                .list_questions(Some("open"), None, false)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .list_questions(Some("open"), Some("notice"), false)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(store.list_questions(None, None, false).unwrap().len(), 2);
         store.delete_task(t.id).unwrap();
         assert_eq!(store.get_question(q.id).unwrap().task_id, None);
     }
@@ -19227,15 +19258,63 @@ mod tests {
         );
         assert_eq!(
             MIGRATIONS.len(),
-            107,
-            "a fresh db should report user_version 107"
+            108,
+            "a fresh db should report user_version 108"
         );
         let (store, _dir) = temp_store();
         let version: i64 = store
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 107);
+        assert_eq!(version, 108);
+    }
+
+    /// Naru task 2651: legacy loop reports stored as questions become
+    /// notices, notices over a day old are marked read, and a real question
+    /// or a fresh notice is left alone. Pinned by index, NOT `MIGRATIONS.len() - 1`.
+    #[test]
+    fn stale_loop_notices_are_retired_by_migration() {
+        const RETIRE: usize = 107;
+        assert!(
+            MIGRATIONS[RETIRE].contains("notice (no answer needed)"),
+            "migration {RETIRE} is no longer the notice retirement — a shipped \
+             migration was edited or reordered, which is never allowed"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("upgrade.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            for sql in &MIGRATIONS[..RETIRE] {
+                conn.execute_batch(sql).unwrap();
+            }
+            conn.pragma_update(None, "user_version", RETIRE as i64)
+                .unwrap();
+            conn.execute_batch(
+                "INSERT INTO agent_questions (id, body, kind, created_at) VALUES \
+                 (1, 'Task loop notice (no answer needed) - task 1: done.', 'question', datetime('now', '-3 days')), \
+                 (2, 'Which way?', 'question', datetime('now', '-3 days')), \
+                 (3, 'KB cleanup found 7 groups', 'notice', datetime('now', '-3 days')), \
+                 (4, 'Task loop notice (no answer needed) - task 2: done.', 'notice', datetime('now'));",
+            )
+            .unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        let open: Vec<i64> = store
+            .list_questions(Some("open"), None, false)
+            .unwrap()
+            .iter()
+            .map(|q| q.id)
+            .collect();
+        assert_eq!(open, vec![2]);
+        let unread: Vec<i64> = store
+            .list_questions(None, Some("notice"), true)
+            .unwrap()
+            .iter()
+            .map(|q| q.id)
+            .collect();
+        assert_eq!(unread, vec![4]);
+        assert_eq!(store.get_question(1).unwrap().kind, "notice");
+        assert!(store.get_question(2).unwrap().read_at.is_none());
     }
 
     /// Naru task 2264: the migration that deletes the managed Task loop
