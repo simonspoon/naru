@@ -33,6 +33,13 @@ queues a question instead of guessing or stalling.
   Answering one is `conflict`; reopening the task does not revive it, and
   notices are left alone. Its migration expired the questions already
   stranded on closed tasks.
+- Nothing times out or re-raises an open question in code (naru task 2679);
+  the `execute-naru-task` skill and the `supervisor` built-in carry the rule
+  instead. An agent whose question goes unanswered parks its task in `backlog`
+  with a note starting `FIRST: get an answer to ask <id>: <question>`. The
+  next agent on that task checks `ask list` for the task's rows before any
+  other work: it acts on an `answered` one first, and puts an `open` one to
+  the person again with `naru notify`, never a second `ask`.
 - `--quiet` drops `body` (and `answer` on show/answer).
 - Body and answer are non-blank, at most 8 KiB. CLI only, no HTTP route, no
   frontend; `AgentQuestion` is not ts-exported.
