@@ -73,7 +73,9 @@ export function WakeWordsSection() {
   const problem = wakeWordsError(words)
   // The test checks the list on screen when it finishes, not the one when it started.
   const wordsRef = useRef(words)
-  wordsRef.current = words
+  useEffect(() => {
+    wordsRef.current = words
+  })
 
   function change(next: string[]) {
     setEdited(next)
